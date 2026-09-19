@@ -717,11 +717,17 @@ __global__ __launch_bounds__(Threads) void bus_allreduce_graph_kernel(
   __shared__ uint64_t s_hash_want;   // the claimed door's placement-gate hash
   __shared__ int s_gate_matched;     // 1 once the payload folds to s_hash_want
   __shared__ int s_round;            // claim records filled so far
-  __shared__ int s_go;    // 0 none, >0 = flat cell index + 1
+  // One election per PEER per round (2026-09-19; the eager kernel elects
+  // one cell per round): 0 none, >0 = flat cell index + 1. The decode
+  // timeline's claim gaps were pinned at one round's length — 7-10 us, none
+  // under 5 — with the doorbells already co-resident: a round is a scan of
+  // system loads, a gate pass and an ack, and three peers paid three of
+  // them back to back, two inside `skew`. Every ready peer is claimed by
+  // the round that finds it, and gated in peer order behind one scan.
+  __shared__ int s_go[kBusMaxPeers];
   __shared__ int s_stop;  // any exit condition
   __shared__ int s_failed;
 
-  BlockRef go_ref(s_go);
   BlockRef stop_ref(s_stop);
 
   for (int p = 0; p < kBusMaxPeers; ++p) s_got[p] = 0;
@@ -760,7 +766,7 @@ __global__ __launch_bounds__(Threads) void bus_allreduce_graph_kernel(
   SysRef done_ref(ctl->done_seq);
   for (;;) {
     if (threadIdx.x == 0) {
-      go_ref.store(0, cuda::memory_order_relaxed);
+      for (int p = 0; p < kBusMaxPeers; ++p) s_go[p] = 0;
       if (done_ref.load(cuda::memory_order_acquire) == gen ||
           clock64() - start > deadline_cycles) {
         stop_ref.store(1, cuda::memory_order_relaxed);
@@ -774,8 +780,7 @@ __global__ __launch_bounds__(Threads) void bus_allreduce_graph_kernel(
     if (missing == 0 || stop_ref.load(cuda::memory_order_relaxed)) break;
 
     for (int cell = threadIdx.x;
-         cell < total_cells && go_ref.load(cuda::memory_order_relaxed) == 0 &&
-         stop_ref.load(cuda::memory_order_relaxed) == 0;
+         cell < total_cells && stop_ref.load(cuda::memory_order_relaxed) == 0;
          cell += blockDim.x) {
       const int view_idx = cell / lat_slots_per_view;
       const int slot = cell % lat_slots_per_view;
@@ -790,91 +795,103 @@ __global__ __launch_bounds__(Threads) void bus_allreduce_graph_kernel(
       if (sys_load_u32(&door->ctl) != gen) continue;
       const FlagAck* ack = &v.recv[view_idx].ack_lat[slot];
       if (seq == ack->seq) continue;  // already consumed
+      // The peer's election: one doorbell per peer carries this generation
+      // (the gate above), so the CAS only settles two threads' views of it.
       int expected = 0;
-      if (go_ref.compare_exchange_strong(expected, cell + 1,
-                                         cuda::memory_order_relaxed,
-                                         cuda::memory_order_relaxed)) {
+      BlockRef peer_go(s_go[peer]);
+      if (peer_go.compare_exchange_strong(expected, cell + 1,
+                                          cuda::memory_order_relaxed,
+                                          cuda::memory_order_relaxed)) {
         s_seq[peer] = seq;
         s_words[peer] = sys_load_u32(&door->len) / 8;
       }
     }
     __syncthreads();
 
-    const int go = go_ref.load(cuda::memory_order_relaxed);
-    if (go == 0) {
+    // The round's claims, gated in peer order (s_go is settled behind the
+    // barrier: every thread walks the same peers).
+    int claimed = 0;
+    for (int p = 0; p < v.send_peers; ++p) claimed += (s_go[p] != 0);
+    if (claimed == 0) {
       flag_poll_pause();
       continue;
     }
-
-    const int cell = go - 1;
-    const int view_idx = cell / lat_slots_per_view;
-    const int slot = cell % lat_slots_per_view;
-    const int peer = view_idx / v.lanes_per_peer;
-    const BusRecvView& rv = v.recv[view_idx];
-    const uint64_t* base = rv.payload_lat +
-                           static_cast<size_t>(slot) * (rv.lat_slot_bytes / 8);
-    // PLACEMENT gate (identical to the eager kernel's — see there).
-    const StartSlot* door = &v.recv[view_idx].doorbell_lat[slot];
-    if (threadIdx.x == 0) {
-      s_hash_want = sys_load_u64(&door->hash);
-      s_gate_matched = 0;
-      // The claim record for this round (the hunt's stall dump reads it):
-      // the kernel's ACTUAL cell + its door's triple.
-      const int rn = s_round < 3 ? s_round : 2;
-      ctl->dbg_cl_cell[rn] = static_cast<uint32_t>(cell + 1);
-      ctl->dbg_cl_len[rn] = sys_load_u32(&door->len);
-      ctl->dbg_cl_seq[rn] = s_seq[peer];
-      ctl->dbg_cl_hash[rn] = static_cast<uint32_t>(
-          sys_load_u64(&door->hash) & 0xFFFFFFFFu);
-      s_round = rn + 1;
-    }
-    __syncthreads();
-    uint64_t total_hash = 0;
-    uint64_t* stage = (stage_words != 0 && (stage_words & 1) == 0 &&
-                       s_words[peer] <= stage_words)
-                          ? stage_smem + static_cast<size_t>(peer) * stage_words
-                          : nullptr;
-    for (int spin = 0;; ++spin) {
-      total_hash = block_fold_payload<Threads>(base, s_words[peer], s_hash, stage);
+    bool gate_failed = false;
+    for (int cp = 0; cp < v.send_peers && !gate_failed; ++cp) {
+      if (s_go[cp] == 0) continue;
+      const int cell = s_go[cp] - 1;
+      const int view_idx = cell / lat_slots_per_view;
+      const int slot = cell % lat_slots_per_view;
+      const int peer = view_idx / v.lanes_per_peer;
+      const BusRecvView& rv = v.recv[view_idx];
+      const uint64_t* base = rv.payload_lat +
+                             static_cast<size_t>(slot) * (rv.lat_slot_bytes / 8);
+      // PLACEMENT gate (identical to the eager kernel's — see there).
+      const StartSlot* door = &v.recv[view_idx].doorbell_lat[slot];
       if (threadIdx.x == 0) {
-        if (total_hash == s_hash_want) {
-          s_gate_matched = 1;
-        } else {
-          // thread 0 is the gate's only writer; the engine reads after the
-          // done stamp (release) — plain increments are ordered and cheap.
-          if (spin == 0) ctl->dbg_gate_waits += 1;
-          ctl->dbg_gate_spins += 1;
-        }
+        s_hash_want = sys_load_u64(&door->hash);
+        s_gate_matched = 0;
+        // The claim record for this round (the hunt's stall dump reads it):
+        // the kernel's ACTUAL cell + its door's triple.
+        const int rn = s_round < 3 ? s_round : 2;
+        ctl->dbg_cl_cell[rn] = static_cast<uint32_t>(cell + 1);
+        ctl->dbg_cl_len[rn] = sys_load_u32(&door->len);
+        ctl->dbg_cl_seq[rn] = s_seq[peer];
+        ctl->dbg_cl_hash[rn] = static_cast<uint32_t>(
+            sys_load_u64(&door->hash) & 0xFFFFFFFFu);
+        s_round = rn + 1;
       }
       __syncthreads();
-      if (s_gate_matched != 0) break;
-      if (stop_ref.load(cuda::memory_order_relaxed) != 0 ||
-          clock64() - start > deadline_cycles) {
-        s_failed = 1;
-        stop_ref.store(1, cuda::memory_order_relaxed);
-        break;
+      uint64_t total_hash = 0;
+      uint64_t* stage = (stage_words != 0 && (stage_words & 1) == 0 &&
+                         s_words[peer] <= stage_words)
+                            ? stage_smem + static_cast<size_t>(peer) * stage_words
+                            : nullptr;
+      for (int spin = 0;; ++spin) {
+        total_hash = block_fold_payload<Threads>(base, s_words[peer], s_hash, stage);
+        if (threadIdx.x == 0) {
+          if (total_hash == s_hash_want) {
+            s_gate_matched = 1;
+          } else {
+            // thread 0 is the gate's only writer; the engine reads after the
+            // done stamp (release) — plain increments are ordered and cheap.
+            if (spin == 0) ctl->dbg_gate_waits += 1;
+            ctl->dbg_gate_spins += 1;
+          }
+        }
+        __syncthreads();
+        if (s_gate_matched != 0) break;
+        if (stop_ref.load(cuda::memory_order_relaxed) != 0 ||
+            clock64() - start > deadline_cycles) {
+          s_failed = 1;
+          stop_ref.store(1, cuda::memory_order_relaxed);
+          break;
+        }
+        flag_poll_pause();
       }
-      flag_poll_pause();
-    }
-    if (s_gate_matched == 0) continue;
-    __syncthreads();
-    if (threadIdx.x == 0) {
-      FlagAck* ack = &rv.ack_lat[slot];
-      ack->cycles = clock64();
-      ack->hash = total_hash;
-      flag_store_release(&ack->seq, s_seq[peer]);
-      s_payload[peer] = reinterpret_cast<const uint16_t*>(base);
-      s_staged[peer] = stage != nullptr ? 1 : 0;
-      s_got[peer] = 1;
-      const uint64_t now = globaltimer_ns();
-      ctl->gt_claim[peer] = now;
-      if (ctl->stamp_first_claim == 0) {
-        ctl->stamp_first_claim = clock64();
-        ctl->gt_first = now;
+      if (s_gate_matched == 0) {
+        gate_failed = true;  // stopped or past the deadline: the outer loop exits on s_stop
+        continue;
       }
-      ctl->gt_last = now;
-    }
-    __syncthreads();
+      __syncthreads();
+      if (threadIdx.x == 0) {
+        FlagAck* ack = &rv.ack_lat[slot];
+        ack->cycles = clock64();
+        ack->hash = total_hash;
+        flag_store_release(&ack->seq, s_seq[peer]);
+        s_payload[peer] = reinterpret_cast<const uint16_t*>(base);
+        s_staged[peer] = stage != nullptr ? 1 : 0;
+        s_got[peer] = 1;
+        const uint64_t now = globaltimer_ns();
+        ctl->gt_claim[peer] = now;
+        if (ctl->stamp_first_claim == 0) {
+          ctl->stamp_first_claim = clock64();
+          ctl->gt_first = now;
+        }
+        ctl->gt_last = now;
+      }
+      __syncthreads();
+    }  // the round's claimed peers
   }
 
   // Common exit + fold (identical to eager; the canonical chain).

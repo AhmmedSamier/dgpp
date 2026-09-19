@@ -9,6 +9,7 @@
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
 #include "common/log.hpp"
+#include "kernels/bf12_companions.hpp"
 #include "kernels/glm_mhc_launch.hpp"
 #include "kernels/glm_moe_launch.hpp"
 #include "kernels/glm_norm.hpp"
@@ -396,6 +397,7 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
   // can spin while a peer is still inside allocation-phase device syncs.
   const auto t_layers = std::chrono::steady_clock::now();
   preconstruct_layers();
+  if (Bf12Companions::enabled()) build_bf12_companions();
   if (cfg_.vision) {
     vision_ = std::make_unique<GlmVisionEncoder>(*cfg_.vision, checkpoint_dir, stream_);
     boot_digest_.globals ^= vision_->digest();
@@ -411,6 +413,32 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
                     (1024.0 * 1024.0 * 1024.0),
                 boot_globals_ms_ / 1000.0,
                 ms_between(t_layers, std::chrono::steady_clock::now()) / 1000.0);
+}
+
+// The lossless 12-bit companions of the decode GEMV's bf16 weights
+// (kernels/bf12_gemv.hpp): every resident KDA in/out projection, the lm
+// head slice and the draft block's eh_proj are packed once here — read back
+// through the model's stream, encoded on the host, uploaded, registered
+// with the GEMM — so the decode launches of up to four rows stream 0.75 of
+// the bytes and produce the same bits. Wider calls and prefill keep the
+// bf16 bytes. A matrix outside the contract (shape, or a row with a
+// pathological escape count) simply keeps its bf16 form.
+void GlmDiagnosticModel::build_bf12_companions() {
+  if (loader_.residency() != GlmResidency::Resident) return;
+  const auto t0 = std::chrono::steady_clock::now();
+  const int H = cfg_.hidden_size;
+  for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
+    const GlmLayerResident& r = loader_.load_layer(layer);
+    if (r.kind != GlmLayerKind::Kda) continue;
+    bf12_.pack(static_cast<const uint16_t*>(r.kda.in_proj), kda_geo_.in_proj_cols, H, gemm_, stream_);
+    bf12_.pack(static_cast<const uint16_t*>(r.kda.o_proj), H, kda_geo_.local_proj, gemm_, stream_);
+  }
+  bf12_.pack(static_cast<const uint16_t*>(globals_.lm_head), lm_vocab_count_, H, gemm_, stream_);
+  if (mtp_) {
+    const GlmLayerResident& r = loader_.load_layer(cfg_.mtp_layer());
+    bf12_.pack(r.eh_proj, H, 2 * H, gemm_, stream_);
+  }
+  bf12_.log_summary(loader_.rank(), ms_between(t0, std::chrono::steady_clock::now()) / 1000.0);
 }
 
 GlmDiagnosticModel::MemoryPlan GlmDiagnosticModel::plan_memory(
@@ -474,6 +502,14 @@ GlmDiagnosticModel::MemoryPlan GlmDiagnosticModel::plan_memory(
     plan.add("tensor-parallel slice views",
              GlmTpViews::slice_bytes(cfg, tp_world) +
                  GlmTpViews::expert_pack_bytes(cfg, tp_world));
+  if (Bf12Companions::enabled() && residency == GlmResidency::Resident) {
+    size_t packed = Bf12Companions::planned_bytes(static_cast<int64_t>(V), cfg.hidden_size);
+    const size_t per_kda = Bf12Companions::planned_bytes(kda_geo.in_proj_cols, cfg.hidden_size) +
+                           Bf12Companions::planned_bytes(cfg.hidden_size, kda_geo.local_proj);
+    packed += static_cast<size_t>(kda_cfg.num_kda_layers) * per_kda;
+    if (mtp) packed += Bf12Companions::planned_bytes(cfg.hidden_size, 2 * cfg.hidden_size);
+    plan.add("bf16 decode packing (12-bit companions)", packed);
+  }
   plan.add("gemm workspace (at least)", kGemmWsBase);
   plan.add("kda scratch", KdaLayer::persistent_hot_bytes(kda_cfg, max_tokens));
   if (dsa_cfg.num_dsa_layers > 0) {

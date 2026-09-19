@@ -1,5 +1,6 @@
 #include "models/glm4/forward.hpp"
 
+#include <chrono>
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -8,6 +9,7 @@
 #include <string>
 
 #include "common/cuda_check.hpp"
+#include "kernels/bf12_companions.hpp"
 #include "kernels/glm4_attn.hpp"
 #include "kernels/glm_norm.hpp"
 #include "kernels/kernels.hpp"
@@ -169,6 +171,19 @@ Glm4Model::MemoryPlan Glm4Model::plan_memory(const Glm4TextConfig& cfg, int max_
     plan.add("model weights (one streamed layer + globals)",
              largest + Glm4LayerStream::globals_bytes(cfg, tp_rank, tp_world, head));
   }
+  if (Bf12Companions::enabled() && residency == Glm4Residency::Resident) {
+    // The lossless 12-bit companions of the bf16 attention projections, the
+    // head and the draft's eh_proj (kernels/bf12_companions.hpp).
+    const int64_t Q = static_cast<int64_t>(geo.local_heads) * cfg.head_dim;
+    const int64_t KV = static_cast<int64_t>(geo.local_kv_heads) * cfg.head_dim;
+    const int64_t Hh = cfg.hidden_size;
+    const size_t per_layer = Bf12Companions::planned_bytes(Q, Hh) + 2 * Bf12Companions::planned_bytes(KV, Hh) +
+                             Bf12Companions::planned_bytes(Hh, Q);
+    size_t packed = static_cast<size_t>(pool_layers) * per_layer +
+                    Bf12Companions::planned_bytes(static_cast<int64_t>(V), Hh);
+    if (mtp) packed += Bf12Companions::planned_bytes(Hh, 2 * Hh);
+    plan.add("bf16 decode packing (12-bit companions)", packed);
+  }
   plan.add("gemm workspace (at least)", size_t{64} << 20);
   {
     Glm4KvPoolShape shape;
@@ -264,9 +279,18 @@ void Glm4Model::prefetch_attn(const Glm4AttnResident& a) {
   const size_t H = static_cast<size_t>(cfg_.hidden_size);
   const size_t Q = static_cast<size_t>(a.local_heads) * cfg_.head_dim;
   const size_t KV = static_cast<size_t>(a.local_kv_heads) * cfg_.head_dim;
-  if (a.q_proj) prefetch_.add(a.q_proj, Q * H * 2);
-  if (a.k_proj) prefetch_.add(a.k_proj, KV * H * 2);
-  if (a.v_proj) prefetch_.add(a.v_proj, KV * H * 2);
+  // The bytes the rows' launches stream: a packed companion's when the
+  // GEMM holds one (kernels/bf12_gemv.hpp).
+  const auto add = [&](const uint16_t* w, size_t bytes) {
+    if (w == nullptr) return;
+    const void* view = nullptr;
+    size_t view_bytes = 0;
+    gemm_.resident_view(w, bytes, walk_rows_, &view, &view_bytes);
+    prefetch_.add(view, view_bytes);
+  };
+  add(a.q_proj, Q * H * 2);
+  add(a.k_proj, KV * H * 2);
+  add(a.v_proj, KV * H * 2);
 }
 
 // Before the attention fold: this layer's post norm, the router (and its
@@ -308,7 +332,13 @@ void Glm4Model::prefetch_head() {
   const size_t H = static_cast<size_t>(cfg_.hidden_size);
   prefetch_.open_window(stream_, prefetch_window_bytes_, prefetch_.boundary_rate());
   if (globals_.final_norm) prefetch_.add(globals_.final_norm, H * 2);
-  if (globals_.lm_head) prefetch_.add(globals_.lm_head, static_cast<size_t>(lm_vocab_count_) * H * 2);
+  if (globals_.lm_head) {
+    const void* view = nullptr;
+    size_t view_bytes = 0;
+    gemm_.resident_view(globals_.lm_head, static_cast<size_t>(lm_vocab_count_) * H * 2, walk_rows_, &view,
+                        &view_bytes);
+    prefetch_.add(view, view_bytes);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -373,6 +403,10 @@ Glm4Model::Outputs Glm4Model::run_rows(const RowRun& run) {
   if (run.capture && loader_.residency() != Glm4Residency::Resident)
     throw std::logic_error("run_rows: a capture needs a resident stack");
   const int H = cfg_.hidden_size;
+  // The packed companions' wide launches are the decode batch's alone (a
+  // short prefill chunk keeps its Lt algorithm: kernels/gemm.hpp).
+  gemm_.set_bf12_wide(run.decode);
+  walk_rows_ = T;
   const RowInputs in = begin_run(run);
   embed_gather_bf16(globals_.embed, in.tokens, resid_, T, H, stream_);
   Outputs out;
@@ -482,6 +516,36 @@ void Glm4Model::graph_prepare() {
     build_layer_objects(r);
     moe_->prepare_graph_table(cfg_.num_moe_layers(), stream_);
   }
+  build_bf12_companions();
+}
+
+// The lossless 12-bit companions of the decode GEMV's bf16 weights
+// (engine.bf16_weights = "bf12"): the attention projections of every layer
+// — 6.3 of the 9.7 GB a decode step reads per rank at world 4 — the head
+// and the draft's eh_proj, once the stack is resident and before any
+// capture. Prefill and the batches past eight rows keep the bf16 bytes.
+void Glm4Model::build_bf12_companions() {
+  if (!Bf12Companions::enabled() || bf12_built_ || loader_.residency() != Glm4Residency::Resident) return;
+  bf12_built_ = true;
+  const auto t0 = std::chrono::steady_clock::now();
+  const int64_t H = cfg_.hidden_size;
+  const auto pack_attn = [&](const Glm4AttnResident& a) {
+    const int64_t Q = static_cast<int64_t>(a.local_heads) * cfg_.head_dim;
+    const int64_t KV = static_cast<int64_t>(a.local_kv_heads) * cfg_.head_dim;
+    bf12_.pack(a.q_proj, Q, H, gemm_, stream_);
+    bf12_.pack(a.k_proj, KV, H, gemm_, stream_);
+    bf12_.pack(a.v_proj, KV, H, gemm_, stream_);
+    bf12_.pack(a.o_proj, H, Q, gemm_, stream_);
+  };
+  for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) pack_attn(loader_.load_layer(layer).attn);
+  if (mtp_) {
+    const Glm4LayerResident& r = loader_.load_layer(cfg_.mtp_layer());
+    pack_attn(r.attn);
+    bf12_.pack(r.eh_proj, H, 2 * H, gemm_, stream_);
+  }
+  bf12_.pack(globals_.lm_head, lm_vocab_count_, H, gemm_, stream_);
+  bf12_.log_summary(loader_.rank(),
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 }
 
 // ---------------------------------------------------------------------------
@@ -492,6 +556,8 @@ void Glm4Model::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, 
                              bool capture, int head_rows, int batch_requests) {
   if (!mtp_) throw std::logic_error("mtp_run_rows: MTP is not enabled");
   if (T <= 0 || T > max_tokens_) throw std::invalid_argument("mtp_run_rows: rows");
+  gemm_.set_bf12_wide(decode_row);  // the decode batch's alone (kernels/gemm.hpp)
+  walk_rows_ = T;
   if (head_rows < 0 || head_rows > T) throw std::invalid_argument("mtp_run_rows: head_rows");
   const int H = cfg_.hidden_size;
   const float eps = cfg_.rms_norm_eps;

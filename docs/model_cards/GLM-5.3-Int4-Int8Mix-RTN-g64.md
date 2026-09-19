@@ -88,7 +88,12 @@ GiB per rank, bitwise the replicated lookup) — the ceilings under the
 engine's 4 GiB headroom on a 121.6 GiB node, after the loader's 2.2 GiB
 staging mirror was measured, made a plan item and freed before the caches
 are allocated and a one-hour soak at the 120K shape showed flat memory and
-no reclaim on any node (2026-09-12/13, `docs/measurements.md`).
+no reclaim on any node (2026-09-12/13, `docs/measurements.md`). Since
+2026-09-19 the shipped template also holds the lossless 12-bit companions of
+the BF16 matrices decode streams (`engine.bf16_weights: "bf12"`, 1.27 GiB per
+rank: +5–6.5 % single-stream decode, transcripts identical) and carries 100K
+of bf16 context for them; `--bf16-weights checkpoint --kv-capacity 122880`
+is the 120K shape above.
 
 **What the engine multiplies:** the packed codes times the bf16 group
 scale, exactly (fp32), in the GEMV core the decode and the grouped prefill

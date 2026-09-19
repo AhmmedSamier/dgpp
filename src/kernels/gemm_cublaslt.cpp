@@ -11,8 +11,10 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <tuple>
+#include <unordered_map>
 
 #include "common/cuda_check.hpp"
+#include "kernels/bf12_gemv.hpp"
 #include "kernels/bf16_gemv.hpp"
 #include "kernels/mma_gemv.hpp"
 
@@ -49,8 +51,31 @@ struct CublasLtGemm::Impl {
   int decode_rows = kGemmDecodeRowsDefault;  // the decode lowering bound (set_decode_rows)
   bool decode_mma = false;                   // the lowering's tensor-core form (set_decode_mma)
   int decode_mma_max_rows = 0;               // its bound (0: every row count)
+  int plan_rows = 0;                         // the Lt algorithm's row count (set_plan_rows)
+  bool bf12_wide = false;                    // companions take 5..8-row calls too (set_bf12_wide)
   cublasLtHandle_t lt{};
   float* dev_unit_scale{};  // fp8 tensor-wise scale == 1.0f
+  // bf16 weight -> its packed companion (register_bf12).
+  std::unordered_map<const void*, Bf12Matrix> bf12;
+
+  // The companion of an [n, k] weight, or null.
+  const Bf12Matrix* bf12_for(const void* weight, int n, int k) const {
+    if (bf12.empty()) return nullptr;
+    const auto it = bf12.find(weight);
+    if (it == bf12.end() || it->second.n != n || it->second.k != k ||
+        !bf12_gemv_accepts(it->second, 1))
+      return nullptr;
+    return &it->second;
+  }
+  // The widest bf16 call the GEMV lowering takes: the decode rows — and,
+  // for a companion while the caller says its rows are a decode batch
+  // (set_bf12_wide), at least one packed launch's rows: bf12_gemv.hpp's
+  // wide form reads 0.75 of the bytes once where an Lt algorithm reads them
+  // all. A short PREFILL chunk of five to eight rows keeps its Lt algorithm
+  // (and the transcripts that went through it).
+  int gemv_rows(const Bf12Matrix* packed) const {
+    return packed != nullptr && bf12_wide ? std::max(decode_rows, kBf12MaxRows) : decode_rows;
+  }
 
   struct Plan {
     cublasLtMatmulDesc_t desc{};
@@ -231,6 +256,45 @@ void CublasLtGemm::set_decode_mma(bool on, int max_rows) {
 bool CublasLtGemm::decode_mma() const { return impl_->decode_mma; }
 int CublasLtGemm::decode_mma_max_rows() const { return impl_->decode_mma_max_rows; }
 
+namespace {
+// The rows the next GEMV chunk of a `left`-row call takes (at most four,
+// fewer when k's staged rows would pass the smem bound).
+int gemv_chunk_rows(const void* weight, int left, int k) {
+  int rows = std::min(4, left);
+  while (!bf16_gemv_accepts(weight, rows, k)) --rows;
+  return rows;
+}
+}  // namespace
+
+void CublasLtGemm::set_plan_rows(int rows) {
+  if (rows < 0) throw std::invalid_argument("CublasLtGemm::set_plan_rows: negative rows");
+  impl_->plan_rows = rows;
+}
+
+void CublasLtGemm::set_bf12_wide(bool on) { impl_->bf12_wide = on; }
+
+void CublasLtGemm::register_bf12(const void* weight, const Bf12Matrix& packed) {
+  if (weight == nullptr || !bf12_gemv_accepts(packed, 1))
+    throw std::invalid_argument("CublasLtGemm::register_bf12: not a packed decode matrix");
+  impl_->bf12[weight] = packed;
+}
+size_t CublasLtGemm::bf12_registered() const { return impl_->bf12.size(); }
+
+void CublasLtGemm::resident_view(const void* weight, size_t bytes, int m, const void** ptr,
+                                 size_t* view_bytes) const {
+  *ptr = weight;
+  *view_bytes = bytes;
+  const auto it = impl_->bf12.find(weight);
+  if (it == impl_->bf12.end()) return;
+  const Bf12Matrix& p = it->second;
+  // The dispatch rule of matmul: the GEMV lowering's rows.
+  if (m < 1 || m > impl_->gemv_rows(&p) || impl_->decode_mma ||
+      !bf16_gemv_accepts(weight, 1, p.k) || !bf12_gemv_accepts(p, 1))
+    return;
+  *ptr = p.packed;
+  *view_bytes = bf12_packed_bytes(p.n, p.k);
+}
+
 void CublasLtGemm::matmul(const void* act, const void* weight, void* out,
                           int m, int n, int k, DType io_dtype, GemmOut out_dtype,
                           size_t act_row_stride, void* workspace,
@@ -266,7 +330,14 @@ void CublasLtGemm::matmul(const void* act, const void* weight, void* out,
                                 static_cast<size_t>(n), stream);
     return;
   }
-  if (io_dtype == DType::BF16 && m >= 1 && m <= impl_->decode_rows &&
+  // A registered companion (bf12_gemv.hpp) takes the lowering's launches —
+  // bitwise the bf16 GEMV's rows, 0.75 of the bytes — eight rows a launch,
+  // so a five-to-eight-row batch reads the packed bytes once instead of
+  // falling to an Lt algorithm over the bf16 ones (its rows then carry the
+  // scalar chain too).
+  const Bf12Matrix* packed =
+      io_dtype == DType::BF16 && m >= 1 ? impl_->bf12_for(weight, n, k) : nullptr;
+  if (io_dtype == DType::BF16 && m >= 1 && m <= impl_->gemv_rows(packed) &&
       bf16_gemv_accepts(weight, /*m=*/1, k)) {
     const auto* x = static_cast<const uint16_t*>(act);
     const auto* w = static_cast<const uint16_t*>(weight);
@@ -274,24 +345,36 @@ void CublasLtGemm::matmul(const void* act, const void* weight, void* out,
                                                        : sizeof(uint16_t);
     auto* y = static_cast<uint8_t*>(out);
     for (int row0 = 0; row0 < m;) {
-      int rows = std::min(4, m - row0);
-      while (!bf16_gemv_accepts(weight, rows, k)) --rows;
-      launch_bf16_gemv(x + static_cast<size_t>(row0) * act_row_stride,
-                       act_row_stride, w,
-                       y + static_cast<size_t>(row0) * n * out_elem,
-                       out_dtype == GemmOut::F32, rows, n, k, stream);
+      const int rows = packed != nullptr ? std::min(kBf12MaxRows, m - row0)
+                                         : gemv_chunk_rows(weight, m - row0, k);
+      const uint16_t* xr = x + static_cast<size_t>(row0) * act_row_stride;
+      uint8_t* yr = y + static_cast<size_t>(row0) * n * out_elem;
+      if (packed != nullptr)
+        launch_bf12_gemv(xr, act_row_stride, *packed, yr, out_dtype == GemmOut::F32, rows,
+                         stream);
+      else
+        launch_bf16_gemv(xr, act_row_stride, w, yr, out_dtype == GemmOut::F32, rows, n, k,
+                         stream);
       row0 += rows;
     }
     return;
   }
   Impl::Plan& p = impl_->get_plan(m, n, k, io_dtype, out_dtype,
                                   act_row_stride, workspace, ws_bytes);
+  // A row block of a wider chunk takes the chunk's algorithm (set_plan_rows).
+  // bf16 calls only: the fp8 dot GEMMs already run in context-sized tiles
+  // and keep their own algorithm either way.
+  const Impl::Plan& chosen =
+      impl_->plan_rows > m && io_dtype == DType::BF16
+          ? impl_->get_plan(impl_->plan_rows, n, k, io_dtype, out_dtype, act_row_stride,
+                            workspace, ws_bytes)
+          : p;
   float alpha = 1.f, beta = 0.f;
   // Heuristic-selected algo + fixed layouts keep replays bitwise-stable in
   // process (graph-capture determinism requirement, DESIGN §11).
   DGPP_CUBLAS_OK(
       cublasLtMatmul(impl_->lt, p.desc, &alpha, weight, p.la, act, p.lb, &beta,
-                     out, p.ld, out, p.ld, &p.algo, workspace, ws_bytes,
+                     out, p.ld, out, p.ld, &chosen.algo, workspace, ws_bytes,
                      stream),
       std::format("matmul m={} n={} k={} lda={} dtype={}", m, n, k,
                   act_row_stride, dtype_name(io_dtype)));

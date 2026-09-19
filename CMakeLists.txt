@@ -152,6 +152,8 @@ add_library(dgpp_kernels STATIC
   src/kernels/packq_gemm.cu
   src/kernels/scale_gemm.cu
   src/kernels/bf16_gemv.cu
+  src/kernels/bf12_gemv.cu
+  src/kernels/bf12_companions.cpp
   src/kernels/mma_gemv.cu
   src/kernels/l2_prefetch.cu
   src/kernels/glm_mhc.cu
@@ -1124,6 +1126,12 @@ target_link_libraries(bf16_gemv_test PRIVATE dgpp_kernels CUDA::cudart)
 dgpp_set_common(bf16_gemv_test)
 add_test(NAME bf16_gemv_test COMMAND bf16_gemv_test)
 set_tests_properties(bf16_gemv_test PROPERTIES SKIP_RETURN_CODE 2)
+add_executable(bf12_gemv_test tests/cuda/bf12_gemv_test.cu)
+target_include_directories(bf12_gemv_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(bf12_gemv_test PRIVATE dgpp_kernels CUDA::cudart)
+dgpp_set_common(bf12_gemv_test)
+add_test(NAME bf12_gemv_test COMMAND bf12_gemv_test)
+set_tests_properties(bf12_gemv_test PROPERTIES SKIP_RETURN_CODE 2)
 
 add_executable(mma_gemv_test tests/cuda/mma_gemv_test.cu)
 target_include_directories(mma_gemv_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -1332,6 +1340,16 @@ if(DGPP_ENABLE_IBV)
   dgpp_set_common(micro_gdr_probe)
   target_link_libraries(micro_gdr_probe PRIVATE ${IBVERBS_LIBRARY})
   target_include_directories(micro_gdr_probe PRIVATE ${IBVERBS_INCLUDE_DIR})
+
+  # The send-doorbell mapping probe (2026-09-19): mlx5 direct verbs, only
+  # where libmlx5 is installed.
+  find_library(MLX5_LIBRARY NAMES mlx5)
+  if(MLX5_LIBRARY)
+    add_executable(micro_uar_probe benchmarks/micro/uar_probe.cpp)
+    dgpp_set_common(micro_uar_probe)
+    target_link_libraries(micro_uar_probe PRIVATE ${MLX5_LIBRARY} ${IBVERBS_LIBRARY} CUDA::cudart)
+    target_include_directories(micro_uar_probe PRIVATE ${IBVERBS_INCLUDE_DIR})
+  endif()
 
   add_executable(micro_ibv_smoke
     benchmarks/micro/ibv_smoke.cpp

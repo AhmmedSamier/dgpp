@@ -9,6 +9,7 @@
 #include <cuda_runtime.h>
 
 #include "common/dtypes.hpp"
+#include "kernels/bf12_gemv.hpp"
 
 namespace dgpp {
 
@@ -45,6 +46,16 @@ class IGemm {
   // row count the form takes; a fake instance says no.
   virtual bool decode_mma() const { return false; }
   virtual int decode_mma_max_rows() const { return 0; }
+
+  // The bytes a matmul of m rows against `weight` will stream — what an L2
+  // prefetch ahead of it must touch. The weight's own [weight, weight +
+  // bytes) unless the instance holds a packed companion for it that the
+  // m-row launch takes (CublasLtGemm::register_bf12).
+  virtual void resident_view(const void* weight, size_t bytes, int /*m*/, const void** ptr,
+                             size_t* view_bytes) const {
+    *ptr = weight;
+    *view_bytes = bytes;
+  }
 };
 
 // The decode shapes the interface lowers to the row-independent GEMV core: m up
@@ -136,6 +147,32 @@ class CublasLtGemm : public IGemm {
   void set_decode_mma(bool on, int max_rows = 0);
   bool decode_mma() const override;
   int decode_mma_max_rows() const override;
+
+  // A lossless 12-bit companion of a bf16 weight (bf12_gemv.hpp): the GEMV
+  // lowering's launches against `weight` stream the companion instead —
+  // bitwise the bf16 GEMV's rows, 0.75 of its bytes — and under
+  // set_bf12_wide the lowering widens to kBf12MaxRows rows for it (a
+  // five-to-eight-row decode batch no longer takes an Lt algorithm over the
+  // bf16 bytes). Wider calls (prefill, the batches past eight rows) keep
+  // the weight's own bytes, so both forms stay resident. The caller owns the companion's memory and registers
+  // before any capture; n and k must be the matmul's.
+  // bf16 Lt calls of fewer rows than `rows` take the algorithm the heuristic
+  // picks for `rows` (0: each call's own). A walk that runs a chunk's site
+  // in row blocks (the prefill's fold overlap) sets the chunk's rows so a
+  // row's reduction does not depend on the block it rode in: the blocks are
+  // then bitwise the chunk (gemm_split_test). The caller resets it.
+  void set_plan_rows(int rows);
+  void register_bf12(const void* weight, const Bf12Matrix& packed);
+  // The companions' five-to-eight-row launches: on only while the caller's
+  // rows are a DECODE batch. The interface cannot tell a decode call from a
+  // short prefill chunk, and a 5..8-row prefill chunk (a prefix-cache cut
+  // leaves them) must keep the Lt algorithm its transcripts went through;
+  // a decode batch of that width has no such history to keep — its rows
+  // take the scalar chain instead, which is what the rows alone compute.
+  void set_bf12_wide(bool on);
+  size_t bf12_registered() const;
+  void resident_view(const void* weight, size_t bytes, int m, const void** ptr,
+                     size_t* view_bytes) const override;
 
  private:
   struct Impl;

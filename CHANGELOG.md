@@ -6,6 +6,42 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Lossless 12-bit BF16 decode weights, `engine.bf16_weights: "bf12"`**
+  (2026-09-19; `benchmarks/results/2026-09-19-glm-flash-line-rate/`): a second
+  resident form of the BF16 matrices the decode GEMV streams — the
+  sign+mantissa byte plus a 4-bit exponent code against a per-row window,
+  exact side tables for the 1.5e-4 of weights outside it, outlier rows kept
+  BF16 (`src/kernels/bf12_gemv.*`, `bf12_companions.*`). Bitwise the BF16 GEMV
+  at one to eight rows, 0.75 of the bytes: served transcripts are identical.
+  Same-binary fabric A/B: GLM-5.3-Flash decode +6.0 / +4.3 / +6.4 / +6.1 % at
+  one to four live requests (+8.5 % without MTP), GLM-4.7 +11–12 % single
+  stream and +5–7 % at four, the full GLM-5.3 +5–6.5 % and +3–7 %. Off by
+  default in the binary; every deployment template enables it. The companions
+  sit beside the BF16 bytes (prefill and wider batches keep those): +1.9 GiB
+  per rank on the four-node Flash recipe, +4.8 on GLM-4.7; the two templates
+  sized to their nodes' ceiling pay from the context pool (two-node Flash
+  160K → 132K, full GLM-5.3 120K → 100K; `--bf16-weights checkpoint
+  --kv-capacity …` restores either). Qwen and DeepSeek accept the key and
+  pack nothing yet. Peers now also apply the head's `embed_sharding`.
+- **GLM-5.3-Flash prefill −10 to −12 %** (2026-09-19): the draft block's
+  prefill rows stop once their DSA cache state is written (nothing read
+  their output; the MoE there ran the host-segmented path: −6.0 / −7.3 /
+  −7.6 % at ~2K / ~8K / ~32K, transcripts, passes and acceptance identical;
+  `DGPP_MTP_PREFILL_FULL=1` restores), and chunks of 1024 rows or more run
+  each KDA attention site in two row blocks so block A's bulk fold flies
+  beside block B's compute and the FFN fold's second half beside the next
+  layer's first (`BoundaryReducer::begin_async`, `CublasLtGemm::set_plan_rows`:
+  bitwise the unsplit walk, a further −5.2 / −4.7 / −3.9 %;
+  `DGPP_PREFILL_OVERLAP=off` restores). Cold service prefill now 1.30 / 5.26 /
+  24.5 s.
+- **Decode collectives claim every ready peer per round** (2026-09-19): the
+  timeline's new `graph window claims:` line showed the gaps between a
+  generation's consecutive claims pinned at 7–10 us — the graph kernel gated
+  co-resident peers one scan round at a time, and two of the three rounds
+  were being read as peer skew. One election per peer per round: 43.8 → 41.6
+  us per collective, results bitwise. `scripts/bus_window_skew.py` reports the
+  gaps; `benchmarks/micro/uar_probe.cpp` records that the GB10 maps an mlx5
+  doorbell page for device access.
 - **Streaming images and GLM prefill scheduling** (2026-09-19): remove
   history-wide image count/token caps. Stage visual embeddings through fixed
   single-image and chunk buffers, including MTP lookahead and cached suffixes.

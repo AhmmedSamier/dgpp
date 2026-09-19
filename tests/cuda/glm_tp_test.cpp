@@ -5183,6 +5183,47 @@ DGPP_TEST(glm_tp_first_run_is_bitwise_the_second_run) {
   }
 }
 
+DGPP_TEST(glm_tp_prefill_fold_overlap_row_blocks_are_bitwise_the_chunk) {
+  // The fold overlap runs a chunk's attention site in two row blocks and
+  // defers block B's FFN stream update past the next layer's block A. The
+  // blocks must be bitwise the chunk: main logits, the draft block's state,
+  // and the decode that continues from it — dense and sparse regimes, a
+  // cut prompt, a ragged chunk (the blocks are 16-row aligned, not halves).
+  // (max_tokens below the production chunk: one chunk per uncut prompt.)
+  const auto cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  GlmDiagnosticModel whole(cfg, dir, 128, 1024, nullptr, 0, 1, GlmResidency::Resident,
+                           GlmHeadSharding::Full, 2, true);
+  GlmDiagnosticModel blocks(cfg, dir, 128, 1024, nullptr, 0, 1, GlmResidency::Resident,
+                            GlmHeadSharding::Full, 2, true);
+  whole.set_prefill_fold_overlap(false);
+  blocks.set_prefill_fold_overlap(true, /*min_rows=*/32, /*without_reducer=*/true);
+  const auto pick = [](const GlmDiagnosticModel::Outputs& out) {
+    return local_max(out.logits.data(), out.lm_vocab_count, out.lm_vocab_begin).id;
+  };
+  for (const int T : {32, 47, 96, 128}) {
+    const auto prompt = make_tokens(T, cfg.vocab_size);
+    // A cut prompt too: an overlapped 64-row chunk, then a short tail.
+    const std::vector<int64_t> cuts = T == 96 ? std::vector<int64_t>{64} : std::vector<int64_t>{};
+    const auto want = whole.session_prefill(0, prompt, cuts);
+    const auto got = blocks.session_prefill(0, prompt, cuts);
+    require(want.logits == got.logits,
+            "fold overlap, T=" + std::to_string(T) + ": the row blocks' logits are bitwise the chunk's");
+    int64_t token = pick(want);
+    for (int step = 0; step < 3; ++step) {
+      require(whole.session_draft(0, {token}).logits == blocks.session_draft(0, {token}).logits,
+              "fold overlap: the draft block's state is bitwise the chunk's");
+      const auto a = whole.session_step(0, token);
+      const auto b = blocks.session_step(0, token);
+      require(a.logits == b.logits, "fold overlap: decode continues bitwise");
+      token = pick(a);
+    }
+    whole.session_close(0);
+    blocks.session_close(0);
+  }
+}
+
 DGPP_TEST(glm_tp_resumable_prefill_matches_main_draft_and_interleaved_decode) {
   const auto cfg = glm_tp_test_config();
   const std::string dir = "glm_tp_fixture";

@@ -179,6 +179,11 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           if (e.dense_weights != "checkpoint" && e.dense_weights != "fp8")
             fail(what, "'" + ek + "' must be \"checkpoint\" or \"fp8\"");
         }
+        else if (p.key == "bf16_weights") {
+          e.bf16_weights = text(x, ek, what);
+          if (e.bf16_weights != "checkpoint" && e.bf16_weights != "bf12")
+            fail(what, "'" + ek + "' must be \"checkpoint\" or \"bf12\"");
+        }
         else if (p.key == "prefill") {
           e.prefill = text(x, ek, what);
           if (e.prefill != "bounded" && e.prefill != "exact")

@@ -1,6 +1,7 @@
 #include "models/glm_dsa/model.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -9,6 +10,7 @@
 #include <string>
 
 #include "common/cuda_check.hpp"
+#include "kernels/bf12_companions.hpp"
 #include "kernels/dsa.hpp"
 #include "kernels/glm_norm.hpp"
 #include "kernels/kernels.hpp"
@@ -213,6 +215,72 @@ GlmDsaModel::GlmDsaModel(const GlmDsaTextConfig& cfg, const std::string& checkpo
     mtp_r_ = dev_alloc<uint16_t>(M * H);
   }
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  build_bf12_companions();
+}
+
+// The lossless 12-bit companions of the decode GEMV's bf16 weights
+// (engine.bf16_weights = "bf12"; kernels/bf12_companions.hpp): what this
+// checkpoint leaves bf16 on the matmul seam — the dense layers' and the
+// draft's attention projections and MLPs, every indexer, the head and
+// eh_proj (2.25 of the 3.65 GB of bf16 a step reads per rank at world 4;
+// kv_b and the routers ride their own kernels). Prefill and the batches
+// past eight rows keep the bf16 bytes.
+void GlmDsaModel::build_bf12_companions() {
+  if (!Bf12Companions::enabled() || loader_.residency() != GlmDsaResidency::Resident) return;
+  const auto t0 = std::chrono::steady_clock::now();
+  const int64_t H = cfg_.hidden_size;
+  const int layers = cfg_.num_hidden_layers + (mtp_ && cfg_.mtp_layer() >= 0 ? 1 : 0);
+  for (int l = 0; l < layers; ++l) {
+    const GlmDsaLayerResident& r = loader_.load_layer(l);
+    const GlmDsaAttnResident& a = r.attn;
+    const int64_t lh = a.local_heads;
+    if (!a.packed()) {
+      bf12_.pack(a.qkv_a, cfg_.q_lora_rank + cfg_.kv_lora_rank + cfg_.qk_rope_head_dim, H, gemm_, stream_);
+      bf12_.pack(a.q_b, lh * cfg_.qk_head_dim(), cfg_.q_lora_rank, gemm_, stream_);
+    }
+    if (a.o_proj != nullptr && a.o_proj_packed.packed == nullptr)
+      bf12_.pack(a.o_proj, H, lh * cfg_.v_head_dim, gemm_, stream_);
+    if (a.owns_indexer()) {
+      bf12_.pack(a.wq_b, static_cast<int64_t>(cfg_.index_n_heads) * cfg_.index_head_dim, cfg_.q_lora_rank, gemm_,
+                 stream_);
+      bf12_.pack(a.wk, cfg_.index_head_dim, H, gemm_, stream_);
+      bf12_.pack(a.wp, cfg_.index_n_heads, H, gemm_, stream_);
+    }
+    if (!r.moe && r.dense.gate != nullptr) {
+      bf12_.pack(r.dense.gate, r.dense.local_inter, H, gemm_, stream_);
+      bf12_.pack(r.dense.up, r.dense.local_inter, H, gemm_, stream_);
+      bf12_.pack(r.dense.down, H, r.dense.local_inter, gemm_, stream_);
+    }
+    if (r.eh_proj != nullptr) bf12_.pack(r.eh_proj, H, 2 * H, gemm_, stream_);
+  }
+  bf12_.pack(globals_.lm_head, lm_vocab_count_, H, gemm_, stream_);
+  bf12_.log_summary(loader_.rank(),
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+}
+
+// The companions' planned bytes: build_bf12_companions' matrices by formula.
+size_t GlmDsaModel::bf12_plan_bytes(const GlmDsaTextConfig& cfg, int tp_rank, int tp_world,
+                                    GlmDsaHeadSharding head, bool mtp) {
+  const GlmDsaLocalGeometry geo = GlmDsaLocalGeometry::from_config(cfg, tp_rank, tp_world, head);
+  const int64_t H = cfg.hidden_size, lh = geo.local_heads;
+  const size_t attn = Bf12Companions::planned_bytes(cfg.q_lora_rank + cfg.kv_lora_rank + cfg.qk_rope_head_dim, H) +
+                      Bf12Companions::planned_bytes(lh * cfg.qk_head_dim(), cfg.q_lora_rank) +
+                      Bf12Companions::planned_bytes(H, lh * cfg.v_head_dim);
+  const size_t indexer =
+      Bf12Companions::planned_bytes(static_cast<int64_t>(cfg.index_n_heads) * cfg.index_head_dim, cfg.q_lora_rank) +
+      Bf12Companions::planned_bytes(cfg.index_head_dim, H) + Bf12Companions::planned_bytes(cfg.index_n_heads, H);
+  const size_t dense = 2 * Bf12Companions::planned_bytes(geo.local_dense_inter, H) +
+                       Bf12Companions::planned_bytes(H, geo.local_dense_inter);
+  size_t bytes = Bf12Companions::planned_bytes(geo.lm_vocab_count, H);
+  const int layers = cfg.num_hidden_layers + (mtp && cfg.mtp_layer() >= 0 ? 1 : 0);
+  for (int l = 0; l < layers; ++l) {
+    const bool draft = l == cfg.mtp_layer();
+    if (draft || !cfg.packed_layer(l)) bytes += attn;
+    if (cfg.owns_indexer(l)) bytes += indexer;
+    if (!draft && !cfg.is_moe_layer(l)) bytes += dense;
+    if (draft) bytes += Bf12Companions::planned_bytes(H, 2 * H);
+  }
+  return bytes;
 }
 
 GlmDsaModel::~GlmDsaModel() {
@@ -274,6 +342,8 @@ GlmDsaModel::MemoryPlan GlmDsaModel::plan_memory(const GlmDsaTextConfig& cfg, in
              largest + GlmDsaLayerStream::globals_bytes(cfg, tp_rank, tp_world, head));
   }
   const size_t after_weights = plan.total_bytes();
+  if (Bf12Companions::enabled() && residency == GlmDsaResidency::Resident)
+    plan.add("bf16 decode packing (12-bit companions)", bf12_plan_bytes(cfg, tp_rank, tp_world, head, mtp));
   plan.add("gemm workspace (at least)", size_t{64} << 20);
   plan.add(std::string("dsa cache pool (latent ") + latent_format_name(latent_format) +
                " + rope keys on every layer, fp8 index caches on the indexed layers)",
@@ -438,17 +508,26 @@ void GlmDsaModel::prefetch_attention_side(int layer) {
     prefetch_packed(a.qkv_a_packed);
     prefetch_packed(a.q_b_packed);
   } else {
-    if (a.qkv_a) prefetch_.add(a.qkv_a, qkv_rows * H * 2);
+    if (a.qkv_a) prefetch_bf16(a.qkv_a, qkv_rows * H * 2);
     if (a.q_b)
-      prefetch_.add(a.q_b, static_cast<size_t>(a.local_heads) * static_cast<size_t>(cfg_.qk_head_dim()) *
+      prefetch_bf16(a.q_b, static_cast<size_t>(a.local_heads) * static_cast<size_t>(cfg_.qk_head_dim()) *
                                static_cast<size_t>(cfg_.q_lora_rank) * 2);
   }
   if (a.owns_indexer()) {
-    prefetch_.add(a.wq_b, static_cast<size_t>(cfg_.index_n_heads) * cfg_.index_head_dim *
+    prefetch_bf16(a.wq_b, static_cast<size_t>(cfg_.index_n_heads) * cfg_.index_head_dim *
                               static_cast<size_t>(cfg_.q_lora_rank) * 2);
-    prefetch_.add(a.wk, static_cast<size_t>(cfg_.index_head_dim) * H * 2);
-    prefetch_.add(a.wp, static_cast<size_t>(cfg_.index_n_heads) * H * 2);
+    prefetch_bf16(a.wk, static_cast<size_t>(cfg_.index_head_dim) * H * 2);
+    prefetch_bf16(a.wp, static_cast<size_t>(cfg_.index_n_heads) * H * 2);
   }
+}
+
+// A bf16 matmul weight into the open window: the bytes the walk's launch
+// streams — its packed companion's when the GEMM holds one.
+void GlmDsaModel::prefetch_bf16(const uint16_t* w, size_t bytes) {
+  const void* view = nullptr;
+  size_t view_bytes = 0;
+  gemm_.resident_view(w, bytes, walk_rows_, &view, &view_bytes);
+  prefetch_.add(view, view_bytes);
 }
 
 void GlmDsaModel::prefetch_head() {
@@ -456,7 +535,7 @@ void GlmDsaModel::prefetch_head() {
   const size_t H = static_cast<size_t>(cfg_.hidden_size);
   prefetch_.open_window(stream_, prefetch_window_bytes_, prefetch_.boundary_rate());
   if (globals_.final_norm) prefetch_.add(globals_.final_norm, H * 2);
-  if (globals_.lm_head) prefetch_.add(globals_.lm_head, static_cast<size_t>(lm_vocab_count_) * H * 2);
+  if (globals_.lm_head) prefetch_bf16(globals_.lm_head, static_cast<size_t>(lm_vocab_count_) * H * 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -560,6 +639,10 @@ void GlmDsaModel::enqueue_layer(const GlmDsaLayerResident& r, int pool_layer, ui
 
 GlmDsaModel::Outputs GlmDsaModel::run_rows(const RowRun& run) {
   const int T = run.T, req = run.req;
+  // The packed companions' wide launches are the decode batch's alone (a
+  // short prefill chunk keeps its Lt algorithm: kernels/gemm.hpp).
+  gemm_.set_bf12_wide(run.decode);
+  walk_rows_ = T;
   if (run.capture && loader_.residency() != GlmDsaResidency::Resident)
     throw std::logic_error("run_rows: a capture needs a resident stack");
   const int H = cfg_.hidden_size;
@@ -701,6 +784,8 @@ void GlmDsaModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos
   if (!mtp_) throw std::logic_error("mtp_run_rows: MTP is not enabled");
   if (T <= 0 || T > max_tokens_) throw std::invalid_argument("mtp_run_rows: rows");
   if (head_rows < 0 || head_rows > T) throw std::invalid_argument("mtp_run_rows: head_rows");
+  gemm_.set_bf12_wide(decode_row);  // the decode batch's alone (kernels/gemm.hpp)
+  walk_rows_ = T;
   const int H = cfg_.hidden_size;
   const float eps = cfg_.rms_norm_eps;
   const int64_t* d_pos = decode_row ? d_step_pos_ : d_prefill_pos_;

@@ -55,6 +55,15 @@ struct ClusterConfig {
     // encoded to block FP8 at load — the same recipe as the FP8 releases;
     // docs/qwen38_single_spark.md).
     std::string dense_weights = "checkpoint";
+    // The resident form of the bf16 weights the decode GEMV reads (the
+    // attention / linear-attention projections, the lm head):
+    // "checkpoint" (the default: the bf16 bytes alone) or "bf12" — a
+    // lossless 12-bit companion beside each matrix (kernels/bf12_gemv.hpp:
+    // the sign+mantissa byte and a 4-bit exponent code, bitwise the bf16
+    // GEMV, 0.75 of the bytes a decode step streams). Prefill and the
+    // batches past eight rows keep the bf16 bytes, so the companions cost
+    // 0.75 of those matrices again; the memory plan carries them.
+    std::string bf16_weights = "checkpoint";
     // The DeepSeek-V4.1 prefill mode (docs/deepseek_v41_flash_plan.md
     // §1.8): "bounded" (the default: the encoder over every prompt row,
     // the decoder over the last window rows — the model's own serving
