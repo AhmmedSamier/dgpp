@@ -6,6 +6,12 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Reject duplicate GLM tool arguments** (2026-09-20,
+  [#22](https://github.com/HawkBearPig/dgpp/issues/22)): a repeated argument
+  name makes the tool block literal content instead of a structured call
+  with duplicate JSON keys. Valid calls retain their argument types and
+  can reuse the same names in later calls. See the
+  [validation record](benchmarks/results/2026-09-20-glm-tool-duplicate-keys.md).
 - **Opt-in 512K YaRN context for Qwen3.8-Flash-Next** (2026-09-20,
   [#3](https://github.com/HawkBearPig/dgpp/pull/3)): `engine.rope_scaling`
   with YaRN factor 2 extends the ceiling to 524288 tokens; omitting it preserves the

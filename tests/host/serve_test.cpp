@@ -1907,6 +1907,29 @@ DGPP_TEST(serve_toolCalls_streamDeltasInOrder) {
   require(resp.substr(id0, 27) != resp.substr(id1, 27), "distinct call ids");
 }
 
+DGPP_TEST(serve_toolCalls_duplicateGlmKeysBecomeContent) {
+  const std::string block =
+      "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Rome</arg_value>"
+      "<arg_key>city</arg_key><arg_value>Oslo</arg_value></tool_call>";
+  for (const bool stream : {false, true}) {
+    ServiceRig rig(/*queue_limit=*/8, dgpp::sample::greedy_params(),
+                   /*can_sample=*/false, std::nullopt, /*with_markers=*/true);
+    rig.engine.script(5, script_of(rig, "Think</think>Before" + block + "After"));
+    const std::string response =
+        post_chat(rig, chat_body("abcd", 128, kWeatherTools + (stream ? ",\"stream\":true" : "")),
+                  stream ? "[DONE]" : "usage", 5000);
+    require(response.find("200 OK") != std::string::npos, "request completes: " + response);
+    require(response.find("\"tool_calls\"") == std::string::npos,
+            "a duplicate-key block never becomes a structured tool call: " + response);
+    require(concat_field(response, "content") == "Before" + block + "After",
+            "literal fallback is identical in streaming and one-shot responses");
+    require(concat_field(response, "reasoning_content") == "Think",
+            "reasoning remains separate from malformed tool content");
+    require(response.find("\"finish_reason\":\"stop\"") != std::string::npos,
+            "malformed tool content finishes as text");
+  }
+}
+
 DGPP_TEST(serve_toolChoice_armsTheGrammarNotThePrompt) {
   // tool_choice required / named / none and parallel_tool_calls false ride
   // the request as a grammar (M6 6g): the prompt is untouched (the model

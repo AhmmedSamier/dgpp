@@ -28,8 +28,9 @@
 // (`{"city": "Paris", "days": 3}`), the template's own tojson dialect.
 //
 // MALFORMED BLOCKS. A block is a call only when </tool_call> closes a
-// consistent name / (key, value)* sequence. Anything else — a value
-// without a key, a stray marker, a second <tool_call> before the first
+// consistent name / (key, value)* sequence with distinct argument keys.
+// Anything else — a repeated key, a value without a key, a stray marker,
+// a second <tool_call> before the first
 // closed, the stream ending inside a block — flushes the block's literal
 // text (the decode of its ids, markers included) as CONTENT, so nothing
 // the model produced is silently lost and no half-parsed call reaches a

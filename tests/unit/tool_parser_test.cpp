@@ -542,6 +542,40 @@ DGPP_TEST(tool_parser_malformedBlocksFallBackToLiteralContent) {
   }
 }
 
+DGPP_TEST(tool_parser_glm_duplicateKeysFallBackToContent) {
+  for (const std::string key : {"city", "extra", "café"}) {
+    for (const std::string middle : {"", "<arg_key>days</arg_key><arg_value>3</arg_value>"}) {
+      for (const std::string value : {"Rome", "Oslo"}) {
+        const std::string block = "<tool_call>get_weather<arg_key>" + key +
+                                  "</arg_key><arg_value>Rome</arg_value>" + middle + "<arg_key>" +
+                                  key + "</arg_key><arg_value>" + value +
+                                  "</arg_value></tool_call>";
+        const Run run = drive(ids_of("Think</think>Before" + block + "After"));
+        require(run.calls.empty(), "a repeated GLM argument key must not emit a call: " + key);
+        require(run.reasoning == "Think", "reasoning survives duplicate-key rejection");
+        require(run.content == "Before" + block + "After",
+                "the complete malformed block and surrounding content are preserved");
+      }
+    }
+  }
+}
+
+DGPP_TEST(tool_parser_glm_duplicateKeysDoNotLeakAcrossCalls) {
+  const std::string valid =
+      "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Rome</arg_value>"
+      "<arg_key>days</arg_key><arg_value>3</arg_value></tool_call>";
+  const std::string duplicate =
+      "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Rome</arg_value>"
+      "<arg_key>city</arg_key><arg_value>Oslo</arg_value></tool_call>";
+  const Run run = drive(ids_of("</think>" + valid + duplicate + valid + valid));
+  require(run.content == duplicate, "only the duplicate-key call becomes content");
+  require(run.calls.size() == 3, "valid calls before and after rejection still parse");
+  for (const auto& call : run.calls) {
+    require(call.name == "get_weather" && call.arguments == "{\"city\": \"Rome\", \"days\": 3}",
+            "distinct keys retain their types and may recur in a separate call");
+  }
+}
+
 DGPP_TEST(tool_parser_forcedPrefixSeedsTheBlock) {
   // tool_choice required: the prompt ends in "</think><tool_call>", so the
   // first ids are the name.
