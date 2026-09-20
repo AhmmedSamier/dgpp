@@ -271,6 +271,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       throw std::invalid_argument("graph engine: null model/bus/pick scratch");
     if constexpr (requires { model_->set_prefill_monitor(prefill_monitor()); })
       model_->set_prefill_monitor(prefill_monitor());
+    static_assert(kPickMaxRequests <= sched::SchedulerEngine::DecodeBatchStats::kMaxSlots);
     slots_ = model_->max_session_requests();
     // The verify's rows: the pending token plus `mtp_depth` drafts
     // (2026-09-06; depth 1 is the two-row step as built).
@@ -597,6 +598,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       a.accepts[p] = slot_mtp_accepts_[static_cast<size_t>(req)][static_cast<size_t>(p)];
     }
     return a;
+  }
+  sched::SchedulerEngine::DecodeBatchStats decode_batch_stats() const override {
+    return decode_batch_stats_;
   }
   int batch_min_live() const { return batch_min_live_; }
   // The batch families' slot counts, ascending (empty: scalar only), and
@@ -2156,6 +2160,15 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
                     "(inflight {})",
                     rank_, r.req, r.parity, variant, inflight_.size());
     DGPP_CUDA_OK(cudaGraphLaunch(exec, model_->stream()));
+    const int slots = r.batched ? families_.at(static_cast<size_t>(r.family)).requests : 1;
+    decode_batch_stats_.slots = slots;
+    decode_batch_stats_.active = static_cast<int>(r.reqs.size());
+    decode_batch_stats_.rows_per_request = r.rows;
+    ++decode_batch_stats_.replays;
+    ++decode_batch_stats_.replays_by_slots[slots];
+    decode_batch_stats_.rows += slots * r.rows;
+    decode_batch_stats_.padded_rows += (slots - static_cast<int>(r.reqs.size())) * r.rows;
+
     DGPP_CUDA_OK(cudaEventRecord(end_event(r), model_->stream()));
     if (trace_)
       DGPP_LOG_INFO("rank {}: pipeline launched slot {} parity {}", rank_,
@@ -2979,6 +2992,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     std::vector<std::array<cudaGraphExec_t, 2>> sched_execs;
     std::vector<uint64_t> sched_hist;
   };
+  sched::SchedulerEngine::DecodeBatchStats decode_batch_stats_;
   std::vector<BatchFamily> families_;
   std::vector<uint64_t> family_steps_;
   // The verdict's publication: per slot (and per batch family, at index

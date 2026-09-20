@@ -1249,6 +1249,7 @@ Scheduler::Meters Scheduler::meters() const {
   m.prefill_request_ms = prefill_request_ms_;
   m.step_ms = step_ms_;
   m.mtp = engine_->mtp_acceptance();
+  m.decode_batch = engine_->decode_batch_stats();
   m.prefix_slots = cache_.slots();
   m.prefix_entries = cache_.live_entries();
   m.prefix_hits = cache_.stats().hits;

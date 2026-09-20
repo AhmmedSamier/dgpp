@@ -2152,6 +2152,11 @@ iteration must not influence collective order.
 | `GET /health` | Liveness probe |
 | `GET /metrics`, `GET /v1/metrics` | JSON scheduler and service counters; both paths return the same format |
 
+The scheduler snapshot includes `decode_batch`: engine-local graph launch totals,
+verification and padded row totals, a capacity histogram, and the last launched
+batch shape retained while idle. Accounting occurs after successful graph launch
+and adds no device work or journal operations; see [operations](docs/operations.md#decode-graph-batch-counters).
+
 Chat messages support system, user, assistant and tool roles. The text
 frontend handles the checkpoint's template, reasoning markers and tool
 format. Unsupported input modalities and request fields are rejected

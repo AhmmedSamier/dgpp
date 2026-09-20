@@ -676,6 +676,29 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
   `scripts/serve_api_check.py HOST PORT` (the request fields — `stop`,
   `n`, `logit_bias`, the usage details — against a running world).
 
+### Decode graph batch counters
+
+`GET /metrics` and `/v1/metrics` expose `scheduler.decode_batch` in the
+scheduler's published snapshot. `last_slots` is the capacity of the last
+launched graph, `last_active` is the number of requests in that launch, and
+`last_rows_per_request` is its verification width. These fields start at zero
+and retain the last launch while idle or prefilling; use `scheduler.active`
+and `scheduler.queued` for current occupancy.
+
+`replays`, `rows` and `padded_rows` accumulate successful graph launches since
+engine construction. A six-slot graph with five requests and two verification
+rows per request adds one replay, twelve rows and two padded rows. Speculative
+draft-chain work is excluded; rejected draft tokens are not padding.
+`replays_by_slots` counts launches by graph capacity, with keys `"1"` through
+`"16"`; bucket `"1"` includes scalar fallback. Zero buckets do not establish
+which graph families an engine supports. Non-graph engines report zeros.
+
+For an interval, divide the increase in `padded_rows` by the increase in `rows`
+when that denominator is positive. This measures verification-row padding,
+not GPU time or utilization. Read the serving rank's counters once rather
+than summing identical work across ranks. Launch counters do not assert GPU
+completion; `snapshot_age_ms` describes the publication delay.
+
 ## Ports and processes
 
 | what | where |

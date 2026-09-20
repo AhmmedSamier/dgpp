@@ -2228,6 +2228,27 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {
   append_json_int(&out, m.decode_steps);
   out.append(",\"decode_rows\":");
   append_json_int(&out, m.decode_rows);
+  out.append(",\"decode_batch\":{\"last_slots\":");
+  append_json_int(&out, m.decode_batch.slots);
+  out.append(",\"last_active\":");
+  append_json_int(&out, m.decode_batch.active);
+  out.append(",\"last_rows_per_request\":");
+  append_json_int(&out, m.decode_batch.rows_per_request);
+  out.append(",\"replays\":");
+  append_json_int(&out, m.decode_batch.replays);
+  out.append(",\"rows\":");
+  append_json_int(&out, m.decode_batch.rows);
+  out.append(",\"padded_rows\":");
+  append_json_int(&out, m.decode_batch.padded_rows);
+  out.append(",\"replays_by_slots\":{");
+  for (int slots = 1; slots <= sched::SchedulerEngine::DecodeBatchStats::kMaxSlots; ++slots) {
+    if (slots > 1) out.push_back(',');
+    out.push_back('"');
+    append_json_int(&out, slots);
+    out.append("\":");
+    append_json_int(&out, m.decode_batch.replays_by_slots[slots]);
+  }
+  out.append("}}");
   {
     char tbuf[192];
     std::snprintf(tbuf, sizeof(tbuf), ",\"prefill_ms\":%.1f,\"prefill_request_ms\":%.1f,\"step_ms\":%.1f",
