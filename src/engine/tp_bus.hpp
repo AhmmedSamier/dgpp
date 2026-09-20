@@ -1179,6 +1179,7 @@ class DevicePicker {
     // the vocabulary size. Rows per request is 1 (T=1) or 2 (the MTP
     // verify); the logits are penalized IN PLACE for sampled requests.
     SampleSpec* specs = nullptr;
+    const int32_t* request_map = nullptr;  // compact group -> physical sampling slot (-1: padding)
     int32_t* counts = nullptr;
     int vocab_size = 0;
     // Constrained decoding (M6 6g): the rows' token masks on the device,
@@ -1408,7 +1409,7 @@ class DevicePicker {
                      in.masks, in.mask_stride, carry_, table_,
                      locals_ + in.slot * kPickMaxRows, sample_scratch_,
                      stream, in.row_select,
-                     in.row_select != nullptr ? source_stride(in) : 0);
+                     in.row_select != nullptr ? source_stride(in) : 0, in.request_map);
   }
   void sample_verdict(cudaStream_t stream, const Inputs& in) {
     device_sample_verdict(table_, in.rows, world_, rank_, candidates_,
@@ -1419,7 +1420,7 @@ class DevicePicker {
                        device_verdict_slot(in.slot),
                        outcomes_ + in.slot * kPickMaxRequests, carry_,
                        stream, in.proposals_in, in.proposals_out,
-                       in.proposals_out_host, in.draft_index);
+                       in.proposals_out_host, in.draft_index, in.request_map);
   }
 
   net::CollectiveBus& bus_;

@@ -121,6 +121,7 @@ class QwenModel : public SessionModel<QwenModel> {
   static constexpr int prefill_chunk_tokens() { return kPrefillChunkTokens; }
   static constexpr int decode_rows_cap() { return 16; }
   static constexpr bool kResumablePrefill = true;
+  static constexpr bool kCompactBatches = true;
   static constexpr int kv_block_tokens_static() { return kBlockTokens; }
   // The same number for a shape that is not built yet (the memory plan).
   static size_t session_snapshot_bytes(const QwenTextConfig& cfg, int tp_world, bool mtp);

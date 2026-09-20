@@ -778,7 +778,8 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
                                 int candidates, uint64_t carry,
                                 int rows_per_request = 1,
                                 const std::vector<uint32_t>& masks = {},
-                                const std::vector<dgpp::DraftProposal>& proposals = {}) {
+                                const std::vector<dgpp::DraftProposal>& proposals = {},
+                                const std::vector<int32_t>& request_map = {}) {
   const int vocab = world * count;
   const int rows = requests * rows_per_request;
   const int mask_stride = dgpp::device_sample_mask_words(vocab);
@@ -806,7 +807,7 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
     uint16_t* d_table = device_alloc<uint16_t>(table_elems);
     uint64_t* d_carry = device_alloc<uint64_t>(1);
     PickLocal* d_locals = device_alloc<PickLocal>(rows);
-    dgpp::SampleSpec* d_specs = device_alloc<dgpp::SampleSpec>(requests);
+    dgpp::SampleSpec* d_specs = device_alloc<dgpp::SampleSpec>(specs.size());
     int32_t* d_counts = device_alloc<int32_t>(counts_in.size());
     int64_t* d_fed = device_alloc<int64_t>(fed.size());
     int64_t* d_pos = device_alloc<int64_t>(row_positions.size());
@@ -825,6 +826,12 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
     DGPP_CUDA_OK(cudaMemcpy(d_pos, row_positions.data(), row_positions.size() * 8,
                             cudaMemcpyHostToDevice));
     DGPP_CUDA_OK(cudaMemset(d_table, 0xff, table_elems * 2));  // poison
+    int32_t* d_map = nullptr;
+    if (!request_map.empty()) {
+      require(request_map.size() == static_cast<size_t>(requests), "request map shape");
+      d_map = device_alloc<int32_t>(requests);
+      DGPP_CUDA_OK(cudaMemcpy(d_map, request_map.data(), requests * sizeof(int32_t), cudaMemcpyHostToDevice));
+    }
     uint32_t* d_masks = nullptr;
     if (!masks.empty()) {
       d_masks = device_alloc<uint32_t>(masks.size());
@@ -836,9 +843,10 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
                            d_fed, d_pos, /*position_stride=*/rows_per_request,
                            d_counts, /*bias=*/nullptr, d_masks,
                            d_masks ? mask_stride : 0, d_carry, d_table,
-                           d_locals, d_scratch, nullptr);
+                           d_locals, d_scratch, nullptr, nullptr, 0, d_map);
     DGPP_CUDA_OK(cudaDeviceSynchronize());
     if (d_masks) cudaFree(d_masks);
+    if (d_map) cudaFree(d_map);
     std::vector<uint16_t> table(table_elems);
     DGPP_CUDA_OK(cudaMemcpy(table.data(), d_table, table_elems * 2,
                             cudaMemcpyDeviceToHost));
@@ -876,7 +884,7 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
   for (int k = 0; k < world; ++k) {
     uint16_t* d_table = device_alloc<uint16_t>(table_elems);
     uint64_t* d_carry = device_alloc<uint64_t>(1);
-    dgpp::SampleSpec* d_specs = device_alloc<dgpp::SampleSpec>(requests);
+    dgpp::SampleSpec* d_specs = device_alloc<dgpp::SampleSpec>(specs.size());
     int64_t* d_pos = device_alloc<int64_t>(row_positions.size());
     int64_t* d_fed = device_alloc<int64_t>(fed.size());
     int32_t* d_counts = device_alloc<int32_t>(counts_in.size());
@@ -893,6 +901,12 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
                             cudaMemcpyHostToDevice));
     DGPP_CUDA_OK(cudaMemcpy(d_counts, out.counts[0].data(),
                             counts_in.size() * 4, cudaMemcpyHostToDevice));
+    int32_t* d_map = nullptr;
+    if (!request_map.empty()) {
+      require(request_map.size() == static_cast<size_t>(requests), "request map shape");
+      d_map = device_alloc<int32_t>(requests);
+      DGPP_CUDA_OK(cudaMemcpy(d_map, request_map.data(), requests * sizeof(int32_t), cudaMemcpyHostToDevice));
+    }
     uint32_t* d_masks = nullptr;
     if (!masks.empty()) {
       d_masks = device_alloc<uint32_t>(masks.size());
@@ -914,9 +928,10 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
                              /*position_stride=*/rows_per_request, d_counts,
                              d_masks, d_masks ? mask_stride : 0, d_verdicts,
                              /*device_verdicts=*/nullptr, d_out, d_carry,
-                             nullptr, d_props);
+                             nullptr, d_props, nullptr, nullptr, 0, d_map);
     DGPP_CUDA_OK(cudaDeviceSynchronize());
     if (d_masks) cudaFree(d_masks);
+    if (d_map) cudaFree(d_map);
     if (d_props) cudaFree(d_props);
     std::vector<int32_t> counts_after(counts_in.size());
     DGPP_CUDA_OK(cudaMemcpy(counts_after.data(), d_counts,
@@ -924,7 +939,7 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
     out.counts_after.push_back(std::move(counts_after));
     std::vector<PickVerdict> verdicts(requests);
     std::vector<dgpp::SampleOutcome> outcomes(requests);
-    std::vector<dgpp::SampleSpec> specs_after(requests);
+    std::vector<dgpp::SampleSpec> specs_after(specs.size());
     uint64_t carry_out = 0;
     DGPP_CUDA_OK(cudaMemcpy(verdicts.data(), d_verdicts,
                             sizeof(PickVerdict) * requests,
@@ -933,7 +948,7 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
                             sizeof(dgpp::SampleOutcome) * requests,
                             cudaMemcpyDeviceToHost));
     DGPP_CUDA_OK(cudaMemcpy(specs_after.data(), d_specs,
-                            sizeof(dgpp::SampleSpec) * requests,
+                            sizeof(dgpp::SampleSpec) * specs.size(),
                             cudaMemcpyDeviceToHost));
     DGPP_CUDA_OK(cudaMemcpy(&carry_out, d_carry, 8, cudaMemcpyDeviceToHost));
     out.verdicts.push_back(std::move(verdicts));
@@ -2528,4 +2543,52 @@ DGPP_TEST(sample_pick_t2_with_a_proposal_matches_the_ratio_oracle) {
           "the sweep must accept, reject and ignore a mismatched proposal "
           "(accepts " + std::to_string(accepts) + ", rejects " +
           std::to_string(rejects) + ", ignored " + std::to_string(ignored) + ")");
+}
+
+DGPP_TEST(sample_pick_compact_mapping_preserves_physical_sampling_state) {
+  constexpr int requests = 3, rpr = 4, world = 2, count = 96, vocab = world * count;
+  std::vector<float> logits(requests * rpr * vocab);
+  Rng rng(123456);
+  for (auto& x : logits) x = static_cast<float>(rng.next() % 100) * .1f;
+  std::vector<dgpp::SampleSpec> specs(requests);
+  for (int q = 0; q < requests; ++q) {
+    specs[q].temperature = .7f + q * .1f;
+    specs[q].seed = 100 + q;
+    specs[q].counter = 17 + q;
+    specs[q].presence_penalty = .3f;
+  }
+  std::vector<int32_t> counts(requests * vocab, 0);
+  counts[7] = 3; counts[vocab + 9] = 5;
+  std::vector<int64_t> fed(requests * rpr, 7), pos{50, 70, -1};
+  const auto baseline = run_sample_world(logits, requests, world, count, specs, counts, fed, pos, 32, 123, rpr);
+  const std::vector<int32_t> map{15, 3, -1};
+  std::vector<dgpp::SampleSpec> physical_specs(16);
+  std::vector<int32_t> physical_counts(16 * vocab, 0);
+  for (int q = 0; q < 2; ++q) {
+    physical_specs[map[q]] = specs[q];
+    std::copy_n(counts.data() + q * vocab, vocab, physical_counts.data() + map[q] * vocab);
+  }
+  // The map sentinel alone must disable the last group, even with a real position.
+  pos[2] = 99;
+  const auto mapped = run_sample_world(logits, requests, world, count, physical_specs, physical_counts,
+                                       fed, pos, 32, 123, rpr, {}, {}, map);
+  for (int rank = 0; rank < world; ++rank) {
+    require(mapped.carry_out[rank] == baseline.carry_out[rank], "mapped verdict digest matches identity");
+    for (int q = 0; q < 2; ++q) {
+      const auto& x = mapped.verdicts[rank][q]; const auto& y = baseline.verdicts[rank][q];
+      require(x.accepted == y.accepted && x.next == y.next &&
+                  mapped.outcomes[rank][q].counter == baseline.outcomes[rank][q].counter,
+              "mapped sample and RNG match identity");
+      require(std::equal(mapped.counts_after[rank].begin() + map[q] * vocab,
+                         mapped.counts_after[rank].begin() + (map[q]+1) * vocab,
+                         baseline.counts_after[rank].begin() + q * vocab), "mapped count updates");
+    }
+    require(mapped.verdicts[rank][2].accepted == 0, "map sentinel is inactive");
+    for (int req = 0; req < 16; ++req) if (req != 3 && req != 15) {
+      require(mapped.specs_after[rank][req].counter == 0, "unmapped RNG unchanged");
+      require(std::all_of(mapped.counts_after[rank].begin() + req * vocab,
+                          mapped.counts_after[rank].begin() + (req+1) * vocab,
+                          [](int32_t x) { return x == 0; }), "unmapped counts unchanged");
+    }
+  }
 }

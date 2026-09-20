@@ -682,3 +682,17 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
 | peer binary, config and logs | `<stage_dir>/dgpp-serve`, `<stage_dir>/cluster.json`, `<stage_dir>/serve_r<rank>.log`, `<stage_dir>/serve_rank<rank>.ops` (fetched into the log dir by `down`) |
 | rank 0 log, pid and op stream | `<log_dir>/serve_r0.log`, `<log_dir>/r0.pid`, `<log_dir>/serve_rank0.ops`, written as the run records it (flushed at every retire) |
 | exit statuses | 0 orderly stop; 1 a startup or contract error (a configuration that differs from rank 0's included); 2 rank 0 after an engine failure; 3 a peer released by its in-tick watch |
+
+### Compact Qwen batch mappings
+
+Fixed-depth Qwen graph serving compacts active requests into the smallest
+available bucket by count. Persistent KV, recurrent/conv and prefix-cache
+state stays in the physical request slots; only row mappings and token feeds
+are staged. Sampling RNG/counts/bias/proposals remain indexed by physical
+request ID. Graph masks and verdicts are indexed by compact batch group.
+The mapping is double-buffered per graph family for pipelined replays.
+
+Set `DGPP_COMPACT_BATCH=0` consistently on all ranks before startup to retain
+the previous physical-prefix policy for comparison. Confidence-scheduled
+verify depth and other model families currently use the previous policy.
+This changes neither model capacity nor the set of graph bucket sizes.

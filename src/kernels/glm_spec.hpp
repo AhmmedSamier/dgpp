@@ -29,6 +29,7 @@ struct GlmSpecSegment {
   const void* snapshots = nullptr;
   size_t row_stride_bytes = 0;
   size_t bytes = 0;
+  size_t request_stride_bytes = 0;  // mapped commits: distance between physical destinations
 };
 
 constexpr int kSpecMaxSegments = 32;  // KDA rec + KDA conv + DSA layers
@@ -45,7 +46,7 @@ struct GlmSpecSegments {
 // verdict->rows for the copy bound.
 void glm_spec_commit(const PickVerdict* verdict, int rows,
                      const GlmSpecSegments& segments, int64_t* session_pos,
-                     cudaStream_t stream);
+                     cudaStream_t stream, const int32_t* request_map = nullptr, int batch_index = 0);
 
 // The pipelined replay's stage handshake: the graph of a
 // slot is launched BEFORE the host has decided what its pick needs (the
@@ -87,7 +88,7 @@ void glm_publish_f32(const float* src, float* pinned_dst, int count,
 // so the walk's rows stay contiguous per request.
 void glm_spec_gather_feed(const int64_t* feeds, int requests, int feed_rows,
                           int rows_per_request, int64_t* out,
-                          cudaStream_t stream);
+                          cudaStream_t stream, const int32_t* request_map = nullptr);
 
 // Uploads `count` uint32 words from PINNED, device-mapped host memory with
 // a kernel (system-scope loads: the host wrote them before the handshake
@@ -138,11 +139,11 @@ void glm_spec_draft_rows(const PickVerdict* verdict, int rows,
 // One independent draft group per fixed request slot. `verdicts[q]` drives
 // rows [q * rows_per_request, ...); inactive verdicts (accepted == 0) emit
 // only padding and leave block_pos[q] unchanged. The group index is the
-// request slot by construction of the Phase-2 fixed layout.
+// request slot unless request_map selects another physical slot (-1: padding).
 void glm_spec_draft_rows_batched(
     const PickVerdict* verdicts, int requests, int rows_per_request,
     int64_t* block_pos, int64_t* step_pos, int64_t* tokens,
-    int64_t* next_out, cudaStream_t stream);
+    int64_t* next_out, cudaStream_t stream, const int32_t* request_map = nullptr);
 
 // A plain device-to-device copy as a KERNEL (a memcpy node may not enter
 // the captured decode graph): `bytes` a multiple of 16, both pointers
@@ -206,7 +207,7 @@ void glm_spec_chain_rows_batched(const PickVerdict* verify_verdicts,
                                  const int64_t* block_pos, int chain_index,
                                  int64_t max_context, int64_t* step_pos,
                                  int64_t* tokens, int32_t* req_ids,
-                                 int32_t* req_spans, cudaStream_t stream);
+                                 int32_t* req_spans, cudaStream_t stream, const int32_t* request_map = nullptr);
 
 // The next replay's fed tokens, written at the end of this one (phase D):
 // tokens[0] = *next (the verify's), tokens[1 + c] = drafts.v[c]->next (the
@@ -236,11 +237,11 @@ inline void glm_spec_next_tokens(const int64_t* next,
 void glm_spec_verify_next_tokens_batched(const PickVerdict* verify_verdicts,
                                          int requests, int rows_per_request,
                                          int64_t* tokens,
-                                         cudaStream_t stream);
+                                         cudaStream_t stream, const int32_t* request_map = nullptr);
 void glm_spec_next_tokens_batched(const int64_t* next,
                                   const GlmSpecDrafts& drafts, int requests,
                                   int rows_per_request, int64_t* tokens,
-                                  cudaStream_t stream);
+                                  cudaStream_t stream, const int32_t* request_map = nullptr);
 inline void glm_spec_next_tokens_batched(const int64_t* next,
                                          const PickVerdict* draft_verdicts,
                                          int requests, int rows_per_request,
@@ -254,3 +255,9 @@ inline void glm_spec_next_tokens_batched(const int64_t* next,
 }
 
 }  // namespace dgpp
+
+namespace dgpp {
+// Expand compact batch groups to physical request IDs; -1 is padding.
+void glm_batch_rows(const int32_t* map, int requests, int rows_per_request,
+                    int32_t* ids, int32_t* spans, cudaStream_t stream);
+}

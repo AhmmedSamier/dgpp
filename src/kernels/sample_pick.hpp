@@ -229,7 +229,7 @@ void device_sample_local(float* logits, int rows, int vocab_count,
                       int mask_stride, const uint64_t* carry_digest,
                       uint16_t* table, PickLocal* locals, double* scratch,
                       cudaStream_t stream, const PickVerdict* row_select = nullptr,
-                      int source_row_stride = 0);
+                      int source_row_stride = 0, const int32_t* request_map = nullptr);
 
 // Kernel 2 (after the fold), one block per request plus the digest pass:
 // decodes every rank's group, merges the k-way prefix in canonical order
@@ -267,7 +267,7 @@ void device_sample_verdict(const uint16_t* table, int rows, int world, int rank,
                         const DraftProposal* proposals_in = nullptr,
                         DraftProposal* proposals_out = nullptr,
                         DraftProposal* proposals_out_host = nullptr,
-                        int draft_index = 0);
+                        int draft_index = 0, const int32_t* request_map = nullptr);
 
 // counts[token] += delta (the host's correction of a request's context after
 // a fallback it decided: a provisionally rejected draft joins the table

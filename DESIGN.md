@@ -2230,8 +2230,15 @@ digest exits with an error. The stop record is handled between ticks.
 and a family of batched variants. The graph engine uses the smallest
 available batch covering the active slot IDs once the live-request count
 reaches `graph_batch_min_live`; the default threshold is
-`min(2, max_concurrency)`. Sparse occupancy can require a wider batch
-than the live count alone suggests. Closed slots use inactive positions.
+`min(2, max_concurrency)`. For Qwen at fixed MTP depth, a compact group-to-request map selects by
+live count and keeps KV/recurrent state in its original physical slots.
+Each captured parity has a separate pinned map, uploaded by a kernel at
+replay entry; tokens are gathered to compact rows and the verdict, draft
+feeds, sampling state and cache-hop snapshots map back to physical slots.
+The host can stage the next map while the previous replay finishes. Other
+models and confidence-scheduled depth retain physical-prefix selection,
+where sparse occupancy can require a wider batch. Closed/padded groups
+use inactive positions; compact padding also has request ID -1.
 
 The application allows eight request slots. GLM-5.3 and Qwen support eight
 batched decode rows, while GLM-4.7 supports up to 32. MTP uses
