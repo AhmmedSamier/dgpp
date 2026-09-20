@@ -2152,6 +2152,11 @@ iteration must not influence collective order.
 | `GET /health` | Liveness probe |
 | `GET /metrics`, `GET /v1/metrics` | JSON scheduler and service counters, including cumulative MTP verification counters under `scheduler.spec_decode` (after exact fallback resolution); both paths return the same format |
 
+The scheduler snapshot includes `decode_batch`: engine-local graph launch totals,
+verification and padded row totals, a capacity histogram, and the last launched
+batch shape retained while idle. Accounting occurs after successful graph launch
+and adds no device work or journal operations; see [operations](docs/operations.md#decode-graph-batch-counters).
+
 Chat messages support system, user, assistant and tool roles. The text
 frontend handles the checkpoint's template, reasoning markers and tool
 format. Unsupported input modalities and request fields are rejected
@@ -2414,7 +2419,12 @@ disagree by hours; `scripts/fabric_xrank.py`).
 | `tests/` | Unit, host, CUDA and Python tests |
 | `tools/`, `scripts/` | Reference generators, checkpoint tools, deployment and measurement commands |
 | `deploy/` | Example cluster configurations |
+| `cmake/`, `dev/` | Build configuration and the x86-to-ARM64 Spark cross-build container |
 | `benchmarks/`, `docs/` | Workloads, probes, dated measurements and documentation |
+
+The [Spark cross-build](docs/cross-compiling.md) uses native x86 build tools
+with an AArch64 host compiler and CUDA SBSA target libraries. It inherits the
+release configuration; target execution and deployment remain separate steps.
 
 ## 14. Validation scope
 

@@ -103,7 +103,8 @@ record the modes measured for each deployment.
 - **Deployment and monitoring**: a shared cluster config, versioned
   releases, periodic throughput logs and JSON counters at `/metrics`
   (also available at `/v1/metrics`), including
-  [MTP acceptance counters](docs/openai-compatibility.md#speculative-decoding-counters).
+  [decode graph batch and padding counters](docs/operations.md#decode-graph-batch-counters)
+  and [MTP acceptance counters](docs/openai-compatibility.md#speculative-decoding-counters).
   Startup checks the memory plan before allocation. Cache capacity is configurable,
   with BF16, FP8 or FP4 latent storage for GLM-5.3.
 
@@ -167,6 +168,9 @@ Use an internet-connected Spark as rank 0. First get the source:
 git clone https://github.com/HawkBearPig/dgpp.git
 cd dgpp
 ```
+
+For an x86 Linux build workstation, use the Docker-based
+[Spark cross-build](docs/cross-compiling.md); run the resulting binaries on a Spark.
 
 Run the guided setup on rank 0:
 

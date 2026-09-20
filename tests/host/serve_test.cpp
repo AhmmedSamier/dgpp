@@ -83,6 +83,22 @@ bool fake_eos_prefill(size_t prompt_len) { return prompt_len % 4 == 2; }
 
 class FakeEngine : public SchedulerEngine {
  public:
+  std::atomic<bool> report_decode_batch{false};
+  DecodeBatchStats decode_batch_stats() const override {
+    if (!report_decode_batch) return {};
+    DecodeBatchStats stats;
+    stats.slots = 6;
+    stats.active = 5;
+    stats.rows_per_request = 2;
+    stats.replays = 3;
+    stats.rows = 29;
+    stats.padded_rows = 2;
+    stats.replays_by_slots[1] = 1;
+    stats.replays_by_slots[6] = 1;
+    stats.replays_by_slots[16] = 1;
+    return stats;
+  }
+
   std::atomic<int> mtp_fixture{0};
   static MtpAcceptance mtp_counters(int fixture) {
     if (fixture == 3) return MtpAcceptance{3, {10, 8, 6}, {7, 4, 2}};
@@ -620,7 +636,11 @@ struct ServiceRig {
                       bool reasoning_in_content = false,
                       dgpp::sched::AdmissionPolicy admission = {},
                       int prefix_slots = 0,
-                      dgpp::serve::FileInputConfig file_inputs = {})
+                      dgpp::serve::FileInputConfig file_inputs = {},
+                      // The request-context surface (review item 7): the rig's
+                      // rope ramp and its two bounds, advertised on /v1/models.
+                      std::optional<dgpp::RopeScaling> rope_scaling = std::nullopt,
+                      int64_t position_ceiling = 0, int64_t kv_pool_tokens = 0)
       : engine(kSlots, /*total_blocks=*/100, /*block_tokens=*/4, can_sample),
         frontend(with_markers),
         cfg([&] {
@@ -633,6 +653,9 @@ struct ServiceRig {
           c.reasoning_in_content = reasoning_in_content;
           c.admission = admission;
           c.vocab_size = 512;  // the fake's ids are bytes and markers
+          c.rope_scaling = rope_scaling;
+          c.position_ceiling = position_ceiling;
+          c.kv_pool_tokens = kv_pool_tokens;
           c.file_inputs = std::move(file_inputs);
           return c;
         }()),
@@ -1008,6 +1031,44 @@ DGPP_TEST(serve_modelsHealthMetrics_theOpsSurface) {
   for (const auto& m : first.root.at("scheduler").members())
     if (m.key != "snapshot_age_ms")
       require(json_of(m.value) == json_of(second.root.at("scheduler").at(m.key)), "scheduler gauges agree");
+}
+
+DGPP_TEST(serve_decodeBatchMetrics_retainsLastLaunchWhileIdle) {
+  ServiceRig rig;
+  for (const bool reported : {false, true}) {
+    rig.engine.report_decode_batch = reported;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (rig.service.meters().decode_batch.replays != (reported ? 3 : 0) &&
+           std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    require(rig.service.meters().decode_batch.replays == (reported ? 3 : 0),
+            "engine telemetry reaches the published snapshot");
+    for (const char* path : {"/metrics", "/v1/metrics"}) {
+      Client client(rig.port());
+      client.send_all(std::string("GET ") + path + " HTTP/1.1\r\nHost: t\r\n\r\n");
+      const auto response = client.read_available(800);
+      const auto parsed =
+          dgpp::minijson::parse(std::string_view(response).substr(response.find("\r\n\r\n") + 4));
+      const auto& scheduler = parsed.root.at("scheduler");
+      require(scheduler.at("active").as_int() == 0 && scheduler.at("queued").as_int() == 0,
+              "last launch does not imply current occupancy");
+      const auto& batch = scheduler.at("decode_batch");
+      for (const auto& [key, value] :
+           std::vector<std::pair<std::string, int>>{{"last_slots", 6},
+                                                    {"last_active", 5},
+                                                    {"last_rows_per_request", 2},
+                                                    {"replays", 3},
+                                                    {"rows", 29},
+                                                    {"padded_rows", 2}})
+        require(batch.at(key).as_int() == (reported ? value : 0), "decode batch " + key);
+      const auto& histogram = batch.at("replays_by_slots");
+      require(histogram.members().size() == 16, "all slot buckets are exposed");
+      for (int slots = 1; slots <= 16; ++slots)
+        require(histogram.at(std::to_string(slots)).as_int() ==
+                    (reported && (slots == 1 || slots == 6 || slots == 16) ? 1 : 0),
+                "scalar, batched and zero histogram buckets");
+    }
+  }
 }
 
 DGPP_TEST(serve_specDecodeMetrics_countVariableDepthAndReset) {
@@ -3366,6 +3427,56 @@ DGPP_TEST(serve_images_capability_validation_and_streaming) {
           "invalid image names the precise field");
 }
 
+DGPP_TEST(serve_models_reports_the_active_rope_and_the_effective_limit) {
+  // The request-context surface (review item 7, 2026-09-18): what ramp is in
+  // force, and what one request may actually reach. Both fields are additive —
+  // a build with the knob off, or a rig that names neither bound, sends
+  // exactly the model object it sent before.
+  {
+    ServiceRig rig;
+    Client models(rig.port());
+    models.send_all("GET /v1/models HTTP/1.1\r\nHost: t\r\n\r\n");
+    const std::string ml = models.read_available(800);
+    require(ml.find("\"rope_scaling\"") == std::string::npos &&
+                ml.find("\"context\"") == std::string::npos,
+            "nothing advertised when nothing is set: " + ml.substr(0, 600));
+  }
+  // The 512K recipe: YaRN x2 over 262 144 positions, in a 1 048 576-token
+  // pool. The ramp rides the deployment's own field names with the values it
+  // derives, and the limit is the MINIMUM of the two bounds — the ceiling
+  // here, because the pool clears it.
+  {
+    ServiceRig rig(8, dgpp::sample::greedy_params(), false, std::nullopt, false, false, {}, 0, {},
+                   dgpp::RopeScaling{2.0, 262144, 32.0, 1.0, 1.0, 4.0}, 524288, 1048576);
+    Client models(rig.port());
+    models.send_all("GET /v1/models HTTP/1.1\r\nHost: t\r\n\r\n");
+    const std::string ml = models.read_available(800);
+    require(ml.find("\"rope_scaling\":{\"rope_type\":\"yarn\",\"factor\":2") != std::string::npos &&
+                ml.find("\"original_max_position_embeddings\":262144") != std::string::npos &&
+                ml.find("\"scaled_max_position_embeddings\":524288") != std::string::npos,
+            "the active ramp: " + ml);
+    require(ml.find("\"context\":{\"request_limit_tokens\":524288,"
+                    "\"position_ceiling_tokens\":524288,\"kv_pool_tokens\":1048576,"
+                    "\"limited_by\":\"position-ceiling\"}") != std::string::npos,
+            "the ceiling is the smaller bound: " + ml);
+  }
+  // The other half of the sentence: a pool SHORTER than the ceiling (an
+  // engine.kv_capacity below the YaRN limit) is what bounds the request, and
+  // the response says so — and with the knob unset the ramp stays off the
+  // wire, so a client can never read a YaRN it is not getting.
+  {
+    ServiceRig rig(8, dgpp::sample::greedy_params(), false, std::nullopt, false, false, {}, 0, {},
+                   std::nullopt, 524288, 262144);
+    Client models(rig.port());
+    models.send_all("GET /v1/models HTTP/1.1\r\nHost: t\r\n\r\n");
+    const std::string ml = models.read_available(800);
+    require(ml.find("\"rope_scaling\"") == std::string::npos, "plain rope: " + ml);
+    require(ml.find("\"request_limit_tokens\":262144") != std::string::npos &&
+                ml.find("\"limited_by\":\"kv-pool\"") != std::string::npos,
+            "the pool is the smaller bound: " + ml);
+  }
+}
+
 DGPP_TEST(serve_images_prefix_cache_defaults_on_and_respects_opt_out) {
   ServiceRig rig(8, dgpp::sample::greedy_params(), false, std::nullopt, false, false, {}, 4);
   rig.frontend.images_available = true;
@@ -3384,4 +3495,5 @@ DGPP_TEST(serve_images_prefix_cache_defaults_on_and_respects_opt_out) {
   require(uncached.find("\"cached_tokens\":0") != std::string::npos &&
               rig.engine.prefix_ops() == operations && rig.engine.image_prefills == 3,
           "explicit opt-out still performs image prefill without cache operations");
+
 }

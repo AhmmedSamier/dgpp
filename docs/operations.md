@@ -111,6 +111,10 @@ and `--knobs "FLAGS"` appends server flags after the file settings.
 The compatibility wrapper `scripts/serve_run.sh` maps
 `DGPP_SERVE_KNOBS` and `DGPP_SERVE_LOG` to those options.
 
+For builds made on x86 Linux, follow [cross-compiling](cross-compiling.md)
+to stage the ARM64 server and its CUDA libraries before transferring them to
+the Spark. Cross-compilation does not launch or update a deployment.
+
 Rank 0 reads the shared engine settings, applies flag overrides and sends
 the result to peers before model construction. Peers use their files for
 bootstrap addresses and local paths; they log differences from the
@@ -674,6 +678,29 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
   `scripts/serve_failure_drill.sh VICTIM` (the kill −9 drill), and
   `scripts/serve_api_check.py HOST PORT` (the request fields — `stop`,
   `n`, `logit_bias`, the usage details — against a running world).
+
+### Decode graph batch counters
+
+`GET /metrics` and `/v1/metrics` expose `scheduler.decode_batch` in the
+scheduler's published snapshot. `last_slots` is the capacity of the last
+launched graph, `last_active` is the number of requests in that launch, and
+`last_rows_per_request` is its verification width. These fields start at zero
+and retain the last launch while idle or prefilling; use `scheduler.active`
+and `scheduler.queued` for current occupancy.
+
+`replays`, `rows` and `padded_rows` accumulate successful graph launches since
+engine construction. A six-slot graph with five requests and two verification
+rows per request adds one replay, twelve rows and two padded rows. Speculative
+draft-chain work is excluded; rejected draft tokens are not padding.
+`replays_by_slots` counts launches by graph capacity, with keys `"1"` through
+`"16"`; bucket `"1"` includes scalar fallback. Zero buckets do not establish
+which graph families an engine supports. Non-graph engines report zeros.
+
+For an interval, divide the increase in `padded_rows` by the increase in `rows`
+when that denominator is positive. This measures verification-row padding,
+not GPU time or utilization. Read the serving rank's counters once rather
+than summing identical work across ranks. Launch counters do not assert GPU
+completion; `snapshot_age_ms` describes the publication delay.
 
 ## Ports and processes
 

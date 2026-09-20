@@ -129,6 +129,14 @@ class SchedulerEngine {
     uint64_t attempts[8] = {};
     uint64_t accepts[8] = {};
   };
+  // Last launched decode graph, retained while idle; counters since startup.
+  struct DecodeBatchStats {
+    static constexpr int kMaxSlots = 16;
+    int slots = 0, active = 0, rows_per_request = 0;
+    uint64_t replays = 0, rows = 0, padded_rows = 0;
+    uint64_t replays_by_slots[kMaxSlots + 1] = {};
+  };
+  virtual DecodeBatchStats decode_batch_stats() const { return {}; }
   virtual MtpAcceptance mtp_acceptance() const { return {}; }
   virtual MtpAcceptance mtp_acceptance(int req) const {
     (void)req;
@@ -413,6 +421,7 @@ class Scheduler {
     double step_ms = 0.0;
     // Draft acceptance by position, engine-wide cumulative.
     SchedulerEngine::MtpAcceptance mtp;
+    SchedulerEngine::DecodeBatchStats decode_batch;
     // The prefix cache (M7): its slots and live entries, the attach and
     // miss counts, the prompt tokens attaches skipped, the entries taken
     // (at prefill cuts / from rolling snapshots at close), rolling
