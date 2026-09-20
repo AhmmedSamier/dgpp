@@ -1293,19 +1293,25 @@ int main(int argc, char** argv) {
   std::optional<dgpp::serve::JournalWriter> journal;
   std::optional<dgpp::serve::JournalReader> reader;
   const auto canonical = [&] {
+    // Compare effective values: peers may still have the automatic sentinel
+    // while rank 0 has already resolved it for the settings record.
+    const int effective_batch_min_live =
+        graph_batch_min_live == 0 ? std::min(2, max_concurrency) : graph_batch_min_live;
     return std::format(
-        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} ngt={} dw={} bfw={} pf={} emsh={} maxtok={} queue={} "
-        "eos={} graph={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} msad={} batchmin={} cand={} "
-        "pcgib={} adm={} win={} pfbudget={} pfidle={} pace={} inflight={} reasoning_in_content={} rs={}",
-        model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port,
-        max_concurrency, kv_capacity, kv_dtype, ngram_table, dense_weights, bf16_weights, prefill, embed_sharding,
-        default_max_tokens,
-        queue_limit,
-        no_eos ? 0 : 1, decode_graph ? 1 : 0, mtp ? 1 : 0, mtp_depth, mtp_schedule ? 1 : 0, mtp_schedule_row_ms,
-        mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth, mtp_schedule_adapt ? 1 : 0,
-        graph_batch_min_live,
-        sampling_candidates, prefix_cache_gib, admission_mode, admission_window, prefill_budget_tokens, prefill_idle_budget_tokens,
-        bulk_pace_gbps, bulk_inflight, reasoning_in_content ? 1 : 0,
+        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} ngt={} dw={} bfw={} pf={} "
+        "emsh={} maxtok={} queue={} "
+        "eos={} graph={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} msad={} "
+        "batchmin={} cand={} "
+        "pcgib={} adm={} win={} pfbudget={} pfidle={} pace={} inflight={} reasoning_in_content={} "
+        "rs={}",
+        model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port, max_concurrency,
+        kv_capacity, kv_dtype, ngram_table, dense_weights, bf16_weights, prefill, embed_sharding,
+        default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0, mtp ? 1 : 0,
+        mtp_depth, mtp_schedule ? 1 : 0, mtp_schedule_row_ms, mtp_schedule_base_ms,
+        mtp_schedule_lambda, mtp_schedule_min_depth, mtp_schedule_adapt ? 1 : 0,
+        effective_batch_min_live, sampling_candidates, prefix_cache_gib, admission_mode,
+        admission_window, prefill_budget_tokens, prefill_idle_budget_tokens, bulk_pace_gbps,
+        bulk_inflight, reasoning_in_content ? 1 : 0,
         rope_scaling ? std::format("yarn:{}:{}:{}:{}:{}:{}", rope_scaling->factor,
                                    rope_scaling->original_max_position_embeddings,
                                    rope_scaling->beta_fast, rope_scaling->beta_slow,

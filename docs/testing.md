@@ -20,10 +20,15 @@ checks do not need model weights or GPU execution:
 
 ```bash
 cmake --preset ci
-cmake --build build-ci -j 4 --target unit_tests http_server_test serve_test fabric_serve_test scheduler_test roster_check
+cmake --build build-ci -j 4 --target unit_tests http_server_test serve_test fabric_serve_test scheduler_test roster_check dgpp_serve_app
 ctest --test-dir build-ci -L host -LE checkpoint --output-on-failure
 ctest --test-dir build-ci -L python --output-on-failure
 ```
+
+`serve_startup_test` uses the built server for two- and four-process settings
+handshakes over loopback. It deliberately fails a local HTTP capacity check
+after settings adoption, before model loading, CUDA initialization or RDMA
+setup. It is registered when the server target is enabled (libibverbs required).
 
 `DGPP_TEST_FILTER=<substring>` runs a subset of a binary's cases; the
 loopback tests use fixed ports in the 299xx range. Run GPU/RDMA tests only

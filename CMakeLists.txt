@@ -801,6 +801,11 @@ add_test(NAME bootstrap_test
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/bootstrap_test.py)
 add_test(NAME launcher_test
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/launcher_test.py)
+if(TARGET dgpp_serve_app)
+  add_test(NAME serve_startup_test
+    COMMAND ${CMAKE_COMMAND} -E env "DGPP_SERVE_TEST_BINARY=$<TARGET_FILE:dgpp_serve_app>"
+            ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/serve_startup_test.py)
+endif()
 
 # KDA operator tests (CUDA); skip without a device as above. The dump-parity
 # runner is a host-only TU (minijson + nvcc don't mix).
@@ -1430,6 +1435,9 @@ set_tests_properties(unit unit_tests http_server_test serve_test fabric_serve_te
   qwen_yarn_fixture_test PROPERTIES LABELS "host")
 set_tests_properties(checkpoint_audit_test route_trace_test sampling_profile_test
   site_env_test script_reports_test portability_test spark_cross_test setup_tools_test bootstrap_test launcher_test PROPERTIES LABELS "host;python")
+if(TARGET dgpp_serve_app)
+  set_tests_properties(serve_startup_test PROPERTIES LABELS "host;python" TIMEOUT 180)
+endif()
 set_tests_properties(tokenizer_test qwen_tokenizer_test glm4_tokenizer_test dsv41_tokenizer_test
   chat_template_test qwen_chat_template_test glm4_chat_template_test dsv41_prompt_test
   PROPERTIES LABELS "host;checkpoint")

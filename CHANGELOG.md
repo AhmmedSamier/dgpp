@@ -6,6 +6,12 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Compare effective settings across ranks** (2026-09-20,
+  [#18](https://github.com/HawkBearPig/dgpp/issues/18)): automatic graph
+  batch thresholds no longer cause false settings-override warnings on
+  peers. Genuine threshold and concurrency differences still warn; the
+  engine settings remain unchanged. See the
+  [validation record](benchmarks/results/2026-09-20-rank-settings-default.md).
 - **Reject duplicate GLM tool arguments** (2026-09-20,
   [#22](https://github.com/HawkBearPig/dgpp/issues/22)): a repeated argument
   name makes the tool block literal content instead of a structured call
