@@ -51,6 +51,7 @@ Some older scripts start work immediately and do not implement `--help`.
 | File | What it does | When to use it |
 | --- | --- | --- |
 | [README.md](README.md) | This directory's file index and operating notes. | Start here to choose a launcher, client, or report. |
+| [spark-cross](spark-cross) | Builds an x86 Docker toolchain and cross-compiles the ARM64/GB10 server. | Build on an x86 Linux workstation; see [cross-compiling](../docs/cross-compiling.md) for staging and target validation. |
 | [setup.sh](setup.sh) | Finds `python3` and launches guided setup from any working directory (setup.py itself turns away interpreters older than 3.10). | Start here after cloning; `--help` lists unattended and read-only options. |
 | [setup.py](setup.py) | Guides deployment/site and RoCE choices, checks prerequisites locally and on peers, optionally installs system packages, builds, downloads/syncs and runs final preflight. | Implementation of `setup.sh`; `--check` checks prerequisites without writes, `--configure-only` saves settings, and `--start` launches after success. |
 | [ci-local.sh](ci-local.sh) | Configures CMake, builds, and runs CTest; defaults to the `ci` preset and `build-ci/`. | Validate a local code change. `DGPP_PRESET` selects `build-<preset>/`; `DGPP_BUILD_DIR` explicitly overrides the directory. |

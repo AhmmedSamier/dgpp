@@ -167,6 +167,9 @@ git clone https://github.com/HawkBearPig/dgpp.git
 cd dgpp
 ```
 
+For an x86 Linux build workstation, use the Docker-based
+[Spark cross-build](docs/cross-compiling.md); run the resulting binaries on a Spark.
+
 Run the guided setup on rank 0:
 
 ```bash
