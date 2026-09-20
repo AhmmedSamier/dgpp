@@ -146,7 +146,7 @@ OpenAI-compatible service. Current quantized paths cover FP8, NVFP4, MXFP4 and
 full GLM-5.3's packed int4/int8 format. Qwen NVFP4 runs on one or two Sparks by
 mapping its n-gram table from NVMe and encoding the dense stack to FP8 at load.
 
-The Qwen eight-slot decode graphs and prefill continuation are implemented as
+The Qwen sixteen-slot decode graphs and prefill continuation are implemented as
 opt-in controls; the shipped Qwen templates retain four slots and monolithic
 admission. DeepSeek ships at six slots with DSpark depth 4, confidence
 scheduling, bounded grouped prefill and the stream-ordered eager collective.
@@ -340,7 +340,7 @@ Startup checks the combined memory plan before loading.
 
 | Key | Required | Purpose and when to change it | Default |
 |---|---|---|---|
-| `engine.max_concurrency` | no | Maximum actively executing requests, not TCP connections or queued requests. More slots can improve aggregate throughput but use more state/scratch memory and may increase per-request latency. Allowed range is 1–8, subject to model/MTP row limits below. | 8 |
+| `engine.max_concurrency` | no | Maximum actively executing requests, not TCP connections or queued requests. More slots can improve aggregate throughput but use more state/scratch memory and may increase per-request latency. Allowed range is 1–16, subject to model/MTP row limits below. | 8 |
 | `engine.kv_capacity` | no | Shared context-token pool on each rank, across active requests—not a separate allowance for every request. A prompt and its generated answer must fit. Increase for longer contexts or more simultaneous context; memory use increases and allocation is rounded to model block boundaries. | 8192 tokens |
 | `engine.kv_dtype` | no | GLM-5.3 latent-cache precision: `bf16`, `fp8`, or `fp4`. Lower precision reduces latent storage at a numerical-accuracy cost; it does not quantize model weights. The index cache stays FP8. Qwen, GLM-4.7 and DeepSeek K/V caches remain BF16. | `bf16` |
 | `engine.embed_sharding` | no | Full GLM-5.3 and DeepSeek embedding/head placement: `replicated` keeps the full table on every rank; `vocab` keeps each rank's vocabulary slice and folds token lookups. The full-GLM template uses `vocab` to save 1.33 GiB/rank; the DeepSeek template retains `replicated`. Other families ignore it. | `replicated` |
@@ -363,7 +363,7 @@ first; change one setting at a time and measure the effect on your workload.
 | `engine.decode_graph` | no | Use CUDA graph replay for decode to reduce CPU launch overhead. On one node, this selects resident graph serving instead of the eager streaming path. Required for MTP and the single-Spark Qwen templates; leave enabled for the documented serving configurations. | false |
 | `engine.mtp` | no | Enable multi-token prediction: draft candidate tokens, then verify them with the main model. Can reduce decode time when drafts are accepted, but adds draft state and verification work. Requires `decode_graph`; not a larger request batch. | false |
 | `engine.mtp_depth` | no | How many tokens to draft per speculative step, 1–5. Greater depth can accept more tokens per pass, but uses more verification rows and can waste work when drafts are rejected. Values above 1 require MTP; supported batching varies by model. DeepSeek's shipped template uses depth 4. | 1 |
-| `engine.mtp_schedule` | no | Enable confidence-scheduled verify depth for a model with a confidence head. Greedy DeepSeek requests verify only the leading drafts whose survival probability justifies another row; sampled requests keep the configured depth. | false |
+| `engine.mtp_schedule` | no | Enable confidence-scheduled verify depth for a model with a confidence head. Greedy DeepSeek requests verify only the leading drafts whose survival probability justifies another row; sampled requests keep the configured depth. Unsupported for Qwen C16/MTP3: leave this false at sixteen slots and depth 3 because additional verification depths exceed the graph-variant limit. | false |
 | `engine.mtp_schedule_row_ms`, `engine.mtp_schedule_base_ms` | no | Cost model for scheduled verification: milliseconds for another verify row and fixed work per pass. These values are deployment measurements; retain the DeepSeek template values unless re-profiling that world. | 8.0 / 28.0 |
 | `engine.mtp_schedule_lambda`, `engine.mtp_schedule_min_depth`, `engine.mtp_schedule_adapt` | no | Floor for the value of decode time in tokens/ms, minimum verified draft depth, and whether the value adapts from committed tokens and modeled time. Lambda 0 derives the reservation rate. | 0 / 1 / true |
 | `engine.prefill` | no | DeepSeek prefill mode: `bounded` runs every prompt row through the encoder and only the final window through the decoder; `exact` runs every layer over every row for parity work. Other families ignore it. | `bounded` |
@@ -379,10 +379,10 @@ first; change one setting at a time and measure the effect on your workload.
 | `engine.reasoning_in_content` | no | Put reasoning text in the response's `content`, separated by the model's `</think>` marker, instead of a separate `reasoning_content` field. Use only for clients that need that combined format; it does not disable reasoning. | false |
 | `engine.no_eos` | no | Ignore the model's end-of-sequence token so measurement runs continue to their token budget. Leave false for normal serving, where a model should be allowed to finish its answer. | false |
 
-The application allows up to eight request slots. A speculative request uses
+The application allows up to sixteen request slots. A speculative request uses
 `1 + mtp_depth` physical decode rows. GLM-5.3-Flash supports eight batched
-rows; Qwen and full GLM-5.3 support sixteen; GLM-4.7 and DeepSeek support
-thirty-two. Graph families capture the slot prefixes that fit, with scalar
+rows; full GLM-5.3 supports sixteen; GLM-4.7 and DeepSeek support
+thirty-two; Qwen supports sixty-four (sixteen requests at MTP depth 3). Graph families capture the slot prefixes that fit, with scalar
 fallback for an unsupported active shape. The startup log reports the selected
 capacity and rejects a configuration that cannot fit its required rows.
 

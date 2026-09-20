@@ -1,5 +1,7 @@
 # Operating DGPP
 
+Qwen graph serving supports `engine.max_concurrency: 16` with MTP enabled and `engine.mtp_depth: 3`, using up to 64 verification rows. Reserve sufficient KV and graph memory; the shipped recipes remain unchanged. Validate on idle hardware before deploying a new build to all ranks. Keep `engine.mtp_schedule: false` for C16/MTP3. Its sixteen slots and seven batch families use 46 graph variants per verification depth; scheduling needs at least two depths (92 variants), exceeding the limit of 64. Enabling it fails startup with the conflicting settings and a remedy: disable scheduling to retain C16/MTP3, or reduce concurrency.
+
 DGPP runs one `dgpp-serve` process per node. Rank 0 serves HTTP and
 coordinates requests through the admission journal; peers follow the same
 scheduler operations. The examples below use GLM-5.3 on four Sparks.

@@ -429,6 +429,45 @@ DGPP_TEST(pick_batch_draft_selects_last_accepted_row_per_request) {
   cudaFree(d_select);
 }
 
+DGPP_TEST(spec_positions_rows64_fills_upper_half_and_rejects_overflow) {
+  const int64_t start = 1234;
+  auto* pos = device_alloc<int64_t>(1);
+  auto* out = device_alloc<int64_t>(64);
+  DGPP_CUDA_OK(cudaMemcpy(pos, &start, sizeof(start), cudaMemcpyHostToDevice));
+  DGPP_CUDA_OK(cudaMemset(out, 0xff, 64 * sizeof(int64_t)));
+  dgpp::glm_spec_positions(pos, 64, out, nullptr);
+  std::vector<int64_t> got(64);
+  DGPP_CUDA_OK(cudaMemcpy(got.data(), out, 64 * sizeof(int64_t), cudaMemcpyDeviceToHost));
+  for (int r = 0; r < 64; ++r) require(got[r] == start + r, "64-row position coverage");
+  bool rejected = false;
+  try {
+    dgpp::glm_spec_positions(pos, 65, out, nullptr);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  require(rejected, "positions reject a row beyond capacity");
+  PickVerdict verdict;
+  for (int r = 0; r < 64; ++r) require(verdict.winners[r] == -1, "winner sentinel in every row");
+  std::vector<int64_t> positions(16);
+  std::vector<int32_t> ids(64);
+  for (int q = 0; q < 16; ++q) positions[q] = q == 11 ? 0 : 100 + q * 10;
+  for (int r = 0; r < 64; ++r) ids[r] = r / 4;
+  auto* dp = device_alloc<int64_t>(16);
+  auto* di = device_alloc<int32_t>(64);
+  DGPP_CUDA_OK(cudaMemcpy(dp, positions.data(), 16 * sizeof(int64_t), cudaMemcpyHostToDevice));
+  DGPP_CUDA_OK(cudaMemcpy(di, ids.data(), 64 * sizeof(int32_t), cudaMemcpyHostToDevice));
+  DGPP_CUDA_OK(cudaMemset(out, 0, 64 * sizeof(int64_t)));
+  dgpp::glm_spec_positions_batched(dp, di, 64, 4, out, nullptr);
+  DGPP_CUDA_OK(cudaMemcpy(got.data(), out, 64 * sizeof(int64_t), cudaMemcpyDeviceToHost));
+  for (int r = 0; r < 64; ++r)
+    require(got[r] == (positions[r / 4] ? positions[r / 4] + r % 4 : -1),
+            "batched position coverage, including padding above row 32");
+  cudaFree(dp);
+  cudaFree(di);
+  cudaFree(out);
+  cudaFree(pos);
+}
+
 // The commit: with rows = 3 and a verdict accepting a rows, every segment's
 // live state must become snapshot row a-1 when a < 3 and stay untouched
 // when a == 3; the position advances by a either way; the positions kernel
@@ -2084,14 +2123,13 @@ DGPP_TEST(sample_pick_t3_matches_spec_oracle_over_simulated_world) {
 // accept test in turn, the last row sampled plainly — with the greedy
 // judge, every reject row, the fallbacks and the accept-all outcome
 // exercised over the sweep; bitwise on every rank.
-DGPP_TEST(sample_pick_full_block_matches_spec_oracle_over_simulated_world) {
+template <int requests, int rpr>
+void check_sample_full_block() {
   Rng rng(0x51d6);
   constexpr int kWorld = 4;
   constexpr int count = 96;
   constexpr int vocab = kWorld * count;
   constexpr int candidates = 32;
-  constexpr int requests = 2;
-  constexpr int rpr = dgpp::kSampleVerdictRows;  // 6: the fed row + five drafts
   static_assert(requests * rpr <= dgpp::kPickMaxRows, "the block fits the pick's row bound");
   int accepts_all = 0, fallbacks = 0, greedy = 0;
   int rejects[rpr] = {};
@@ -2288,6 +2326,13 @@ DGPP_TEST(sample_pick_full_block_matches_spec_oracle_over_simulated_world) {
           "the sweep must exercise every outcome (greedy " + std::to_string(greedy) +
               ", accept-all " + std::to_string(accepts_all) + ", rejects per row " + reject_text +
               ", fallbacks " + std::to_string(fallbacks) + ")");
+}
+
+DGPP_TEST(sample_pick_full_block_matches_spec_oracle_over_simulated_world) {
+  check_sample_full_block<2, dgpp::kSampleVerdictRows>();
+}
+DGPP_TEST(sample_pick_rows64_mtp3_matches_spec_oracle_over_simulated_world) {
+  check_sample_full_block<16, 4>();
 }
 
 // Logprobs on the device: a greedy request that reports takes the full path

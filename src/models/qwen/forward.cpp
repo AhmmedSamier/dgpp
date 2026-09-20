@@ -1101,8 +1101,10 @@ void QwenModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, 
   qwen_mtp_hidden_projection(gw_, mtp_hn_, globals_.mtp_fc_hidden, mtp_enc_, T, hc, H, decode_row, stream_);
   qwen_mtp_embed_gather_bf16(globals_.embed, tokens, mtp_e_, T, H, stream_);
   qwen_rmsnorm_bf16(mtp_e_, globals_.mtp_pre_fc_norm_embedding, mtp_en_, T, H, eps, stream_);
-  gemm_.matmul(mtp_en_, globals_.mtp_fc_embedding, mtp_ein_, T, H, H, DType::BF16, GemmOut::BF16,
-               static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
+  // Wide embedding projections can capture an Lt memset node, which is
+  // unsafe for collective graph replay. Keep those decode shapes kernel-only.
+  qwen_mtp_hidden_projection(gw_, mtp_en_, globals_.mtp_fc_embedding, mtp_ein_, T, 1, H,
+                             decode_row && T > 32, stream_);
   qwen_mtp_fuse_bf16(mtp_ein_, mtp_enc_, mtp_r_, T, hc, H, stream_);
 
   // ---- the draft layer (the stack's objects rebound to its weights) ------
