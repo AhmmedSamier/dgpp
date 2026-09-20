@@ -6,6 +6,13 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Reconcile timed benchmark counters** (2026-09-20,
+  [#24](https://github.com/HawkBearPig/dgpp/issues/24)): `scripts/timed_load.py`
+  waits for published counters to match completed requests under a deadline,
+  including warmup and isolation, so late snapshots no longer cause false
+  unexpected-traffic failures. Genuine mismatches still fail with expected
+  and observed counts. The dated script path remains compatible. See the
+  [validation record](benchmarks/results/2026-09-20-timed-load-counters.md).
 - **Compare effective settings across ranks** (2026-09-20,
   [#18](https://github.com/HawkBearPig/dgpp/issues/18)): automatic graph
   batch thresholds no longer cause false settings-override warnings on
