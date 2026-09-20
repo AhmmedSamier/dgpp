@@ -1,0 +1,17 @@
+epoch,sample,rank,temperature_c,sm_clock_mhz,power_w
+A1,before,0,54,2398,11.94
+A1,before,1,54,2411,11.65
+A1,after,0,74,2483,57.58
+A1,after,1,69,2392,32.64
+B1,before,0,64,2457,20.27
+B1,before,1,63,2392,18.52
+B1,after,0,75,2457,59.89
+B1,after,1,71,2392,31.39
+B2,before,0,65,2411,14.36
+B2,before,1,63,2392,13.16
+B2,after,0,77,2476,58.45
+B2,after,1,70,2392,30.81
+A2,before,0,66,2411,14.58
+A2,before,1,63,2392,13.15
+A2,after,0,78,2470,60.55
+A2,after,1,71,2392,30.87

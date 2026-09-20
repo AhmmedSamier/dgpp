@@ -1,0 +1,14 @@
+{
+  "candidate_head": "8d37f87ba5910814891c020792de9fc0561d652b",
+  "parent": "444441feed0c4d7c256ff7ff7868b587823b737f",
+  "build": "Release",
+  "delta": "Only Qwen lm_head_logits dispatch; other production source unchanged.",
+  "candidate": {
+    "sha256": "15ef71781b8079dc022cd26be919b824be73d8fcd329b3de483cde905192fe76",
+    "version": "dgpp-serve 0.1.0+g8d37f87ba591 (git 8d37f87ba591, cuda 13.0)"
+  },
+  "baseline": {
+    "sha256": "eed7c982f7b90fd4c0a29f958b94eb4a086fc4a3256c1a7e2d778216b18b3d59",
+    "version": "dgpp-serve 0.1.0+g8d37f87ba591.dirty (git 8d37f87ba591, cuda 13.0)"
+  }
+}

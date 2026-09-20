@@ -139,9 +139,12 @@ Full local operational logs remain under `artifacts/fp8-head/server-validation/`
 
 Native execution, the complete available suite, the negative control,
 production-size kernel timing and two-node API/op-stream checks are complete.
+The subsequent [Release-build end-to-end comparison](2026-09-20-qwen-fp8-head-e2e.md)
+measured 11.26% higher C4/MTP3 request-wall throughput on the fixed five-class
+workload, with C1 effectively unchanged. Greedy transcripts varied within
+the baseline as well as across builds; the record retains that limitation.
 Matched real-checkpoint teacher-forced comparisons covering wide verification
-rows and short prefill, and matched end-to-end concurrency/MTP performance
-runs against the parent, remain outstanding. Fixture NLL and the serving API
-smoke are not substitutes for that real-model numerical comparison.
+rows and short prefill remain outstanding. Fixture NLL, throughput and the
+serving API smoke are not substitutes for that numerical comparison.
 
 PR creation remains intentionally on hold. No production release was updated.

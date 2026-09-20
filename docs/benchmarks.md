@@ -566,6 +566,22 @@ The current mmap placement is within 0.8–1.5% of the resident baseline at C1,
 0.4–1.6% at C2 and 0.2–3.6% at C4. All five C1 transcripts match byte for
 byte. Mmap saves 23.84 GiB per rank and is the deployment default.
 
+### Qwen FP8 vocabulary-head A/B, world 2, MTP3 (2026-09-20)
+
+A Release-build ABBA comparison of the previous head dispatch and streaming
+MMA measured **129.28 → 143.84 request-wall tokens/s (+11.26%) at C4**.
+C1 was effectively unchanged (74.94 → 75.06, +0.16%). This uses the five
+fixed prompt classes, greedy output capped at 256 tokens, FP8 dense weights,
+mmap n-gram tables, and prefix caching disabled. Three repetitions in each
+of two process epochs per build give six measurements per class/concurrency.
+Both block comparisons improved C4 throughput (+11.83% and +10.69%).
+
+All 300 measured requests completed with 256 output tokens. C4 greedy text
+varied within the unchanged baseline as well as across builds, so this is
+fixed-prompt/output-budget throughput evidence, not identical-token-path or
+quality-equivalence evidence. The [record and raw results](results/2026-09-20-qwen-fp8-head-e2e.md)
+include per-class results, calibration, transcript comparisons and restoration.
+
 ### Qwen3.8-Flash-Next-NVFP4, world 1, FP8 dense
 
 | class | c=1 | c=2 | c=4 | c=1 greedy, ms/token |
