@@ -50,53 +50,98 @@ change the BF16 head, or add telemetry or deployment settings.
 The FP8 loader setting is scoped to each test's model construction and
 restored afterwards. No new public configuration or request fields are added.
 
-## Validation status
+## Validation on 2026-09-20
 
-The contribution guide and numerical policy were re-read. CMake configured
-successfully with CUDA 13 and the external Spark cross toolchain. The four
-affected C++/CUDA translation units cross-compiled for AArch64/SM121a.
-Touched ranges were formatted with clang-format 18 using the repository
-style. `git diff --check` passed. These are compile checks, not linked-binary
-or target-execution results.
+The contribution guide and numerical policy were re-read. Preparation on
+x86 cross-compiled all affected translation units for AArch64/SM121a.
+The reserved two-Spark window then ran a fresh native `ci` configure and
+full build on GB10 with CUDA 13. GPU/RDMA checks ran serially after both
+production ranks stopped, never alongside production serving.
 
-An isolated review of `5ed96cf` found no demonstrated correctness defect,
-but identified missing asserted coverage for the eight-warp kernel and
-short-prefill outputs. The follow-up adds the cases above without changing
-production code. Both changed test translation units cross-compiled again;
-the new assertions still await execution on idle target hardware.
+The tested source was `ec829b24f317ca430d01233524a15de911f0440e` plus the
+runtime graph-inspection fix in this record. The tested `qwen_decode_test.cpp`
+SHA256 is `7f7b29813d82b8a50c733d5eba37b9aa0bf2ef3d6952dd1c196d2fd07c22e2c8`.
+The optimization itself was unchanged during validation.
 
-Both production inference ranks were running during preparation. No service
-was stopped, deployed or reconfigured. GPU/RDMA tests were not run alongside
-production. Local disk headroom also precluded a full fresh build.
+An isolated review of `5ed96cf` found missing assertions for the eight-warp
+kernel and short-prefill logits; the follow-up tests now run successfully.
+The first focused hardware run exposed an inspection issue: a driver-loaded
+kernel in the captured graph returned `cudaErrorInvalidDeviceFunction` from
+`cudaGraphKernelNodeGetParams`. The test now skips that unsupported runtime
+query, clears its error, and still requires the statically linked FP8 head
+kernel. Other errors remain fatal. A full native rebuild preceded rerunning.
 
-On idle native hardware, the focused selection after a full build is:
+- [Focused gates](2026-09-19-qwen-fp8-head/raw/focused-ctest.txt): all six
+  selected tests passed, including the fixture generator, both decode lanes,
+  both FP8 MTP loopback lanes, and `scale_gemm_test`.
+- [Full suite](2026-09-19-qwen-fp8-head/raw/full-ctest.txt): 105 passed,
+  zero failed, ten checkpoint-dependent skips; 653.52 seconds. The skip list
+  is retained in the log and is not counted as model validation.
+- [Negative control](2026-09-19-qwen-fp8-head/raw/negative-ctest.txt): replace
+  only `src/models/qwen/forward.cpp` with upstream parent `444441f`, rebuild,
+  and run the new test. It fails on the expected head-dispatch assertion.
+  Restore the candidate source and rebuild: the
+  [same test passes](2026-09-19-qwen-fp8-head/raw/candidate-recheck.txt).
+- FP8 teacher-forced fixture: 368 rows, worst relative logit L2 `0.0023704`,
+  zero top-1 near-ties, mean NLL delta `5.4114e-05` nat. Row-independent
+  control: zero L2 and zero NLL delta.
+- Short-prefill comparisons: mean NLL delta `2.52229e-08` nat at length 16,
+  zero at lengths 1/4/5/8/17. Finite-logit, hidden-state equality, top-1,
+  bitwise repeatability and unchanged-boundary assertions all passed.
 
-```bash
-cmake --preset ci
-cmake --build --preset ci -j 4
-ctest --test-dir build-ci --output-on-failure -j 1 \
-  -R '^(qwen_forward_fixture|qwen_decode_fp8_head.*|qwen_engine_fp8_head_.*|scale_gemm_test)$'
-```
+### Production-size kernel measurement
 
-Before presenting this as validated for merge:
+The [standalone probe](2026-09-19-qwen-fp8-head/raw/head-bench.cpp) links the
+native CI kernel library. It uses synthetic weights and activations at the
+real TP2 vocabulary-head dimensions, N=124160 and K=2560. Five alternating
+pairs of twenty products report median CUDA-event time after warming both
+paths. The matrix exceeds L2. This measures the head, not end-to-end serving,
+and is not a Release-build throughput claim.
 
-1. On reserved idle GB10 hardware, configure `ci`, build all targets, and run
-   the complete suite serially, retaining failures and checkpoint skips.
-   To select the added gates during investigation, also include
-   `qwen_forward_fixture` in the CTest selection: `DEPENDS` orders selected
-   tests but does not automatically select that fixture.
-2. Execute the new graph-dispatch test against both this branch and the
-   parent; confirm it passes here and fails on the parent dispatch.
-3. Run matched real-model teacher-forced comparisons under `docs/numerics.md`,
-   including repeated same-binary runs. Exercise wide verification rows;
-   scalar-only scoring would miss this optimization. Include short prefill.
-4. Measure the vocabulary head at the real TP vocabulary widths and K=2560,
-   then matched end-to-end concurrency/MTP runs against this exact parent.
-   No speedup for this branch is claimed yet. Historical measurements of
-   the bundled optimization are not evidence for this upstream revision.
-5. Launch the participating ranks with an explicit supported deployment
-   config, run the relevant API checks, shut down with the same config and
-   compare all rank op-stream MD5s. Restore and verify production afterwards.
+| Rows | GEMV chunks, ms | Candidate dispatch, ms | Ratio |
+| ---: | ---: | ---: | ---: |
+| 1 | 1.936709 | 1.952592 | 0.9919 |
+| 4 | 1.939854 | 1.936296 | 1.0018 |
+| 5 | 3.885965 | 1.824350 | 2.1301 |
+| 8 | 3.919661 | 1.913115 | 2.0488 |
+| 12 | 5.878384 | 1.960000 | 2.9992 |
+| 16 | 7.857568 | 1.994789 | 3.9390 |
 
-PR creation is intentionally on hold. Hardware and fabric gates above are
-pending, not waived or counted as passes.
+[Raw output](2026-09-19-qwen-fp8-head/raw/head-bench.txt). All output logits
+were finite and equal to the GEMV control for these synthetic inputs;
+sampled columns across every row, scale/block boundaries and the shard tail
+also agreed exactly with FP64. The randomized exhaustive FP64 fixture is
+separate; exact agreement on this synthetic probe is not a claim of general
+bitwise equivalence between GEMV and MMA.
+
+### Two-node serving and restoration
+
+A separate explicit deployment configuration ran the candidate native CI
+binary with `nvidia/Qwen3.8-Flash-Next-NVFP4`, FP8 dense weights, concurrency
+4, MTP depth 3, decode graphs, BF16 KV and a 1-GiB prefix cache.
+[All nine API checks passed](2026-09-19-qwen-fp8-head/raw/candidate-serving-api.txt).
+Shutdown used the same configuration; both participating ranks produced
+op-stream MD5 `095726af690de19ef6cc93c953a00c16`.
+
+Both production ranks were restored to their original release and unchanged
+configuration. Their binary SHA256 remained
+`ab1b88a00de32dedb0de63d285e584651d69c99185c106c4e6d7e549b9585fae`.
+The service reported no engine failure and an empty queue. Both smoke
+requests returned `READY`; the repeated 1137-token prompt reused 1128 tokens,
+and the cache retained its configured 148 slots.
+
+The maintenance wrapper restored production on both preliminary failures:
+a self-SSH host-key check was replaced with a local process check, and the
+runtime graph-inspection issue above was fixed before the successful run.
+Full local operational logs remain under `artifacts/fp8-head/server-validation/`.
+
+## Remaining evidence
+
+Native execution, the complete available suite, the negative control,
+production-size kernel timing and two-node API/op-stream checks are complete.
+Matched real-checkpoint teacher-forced comparisons covering wide verification
+rows and short prefill, and matched end-to-end concurrency/MTP performance
+runs against the parent, remain outstanding. Fixture NLL and the serving API
+smoke are not substitutes for that real-model numerical comparison.
+
+PR creation remains intentionally on hold. No production release was updated.

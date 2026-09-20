@@ -518,7 +518,15 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
             DGPP_CUDA_OK(cudaGraphNodeGetType(node, &type));
             if (type != cudaGraphNodeTypeKernel) continue;
             cudaKernelNodeParams params{};
-            DGPP_CUDA_OK(cudaGraphKernelNodeGetParams(node, &params));
+            // cuBLAS may capture driver-loaded kernels without a registered
+            // runtime function. They cannot be inspected through this API;
+            // our statically linked head kernel must still be found below.
+            const auto status = cudaGraphKernelNodeGetParams(node, &params);
+            if (status == cudaErrorInvalidDeviceFunction) {
+              (void)cudaGetLastError();
+              continue;
+            }
+            DGPP_CUDA_OK(status);
             const char* name = nullptr;
             DGPP_CUDA_OK(cudaFuncGetName(&name, params.func));
             if (std::string(name).find("mma_gemv_kernel") == std::string::npos) continue;
