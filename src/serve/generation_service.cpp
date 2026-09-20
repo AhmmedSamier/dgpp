@@ -2249,6 +2249,32 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {
     append_json_int(&out, m.decode_batch.replays_by_slots[slots]);
   }
   out.append("}}");
+  // Engine-lifetime verification counters, published by the scheduler.
+  // Sum position attempts: scheduled verification depth can vary between rounds.
+  out.append(",\"spec_decode\":{\"depth\":");
+  append_json_int(&out, m.mtp.depth);
+  out.append(",\"num_drafts_total\":");
+  append_json_int(&out, m.mtp.attempts[0]);
+  uint64_t drafted = 0, accepted = 0;
+  for (int p = 0; p < m.mtp.depth && p < 8; ++p) {
+    drafted += m.mtp.attempts[p];
+    accepted += m.mtp.accepts[p];
+  }
+  out.append(",\"num_draft_tokens_total\":");
+  append_json_int(&out, drafted);
+  out.append(",\"num_accepted_tokens_total\":");
+  append_json_int(&out, accepted);
+  out.append(",\"num_draft_tokens_per_pos_total\":[");
+  for (int p = 0; p < m.mtp.depth && p < 8; ++p) {
+    if (p) out.push_back(',');
+    append_json_int(&out, m.mtp.attempts[p]);
+  }
+  out.append("],\"num_accepted_tokens_per_pos_total\":[");
+  for (int p = 0; p < m.mtp.depth && p < 8; ++p) {
+    if (p) out.push_back(',');
+    append_json_int(&out, m.mtp.accepts[p]);
+  }
+  out.append("]}");
   {
     char tbuf[192];
     std::snprintf(tbuf, sizeof(tbuf), ",\"prefill_ms\":%.1f,\"prefill_request_ms\":%.1f,\"step_ms\":%.1f",

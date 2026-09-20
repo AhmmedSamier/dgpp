@@ -2347,18 +2347,6 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       decided.push_back(token);
     }
     int32_t next = verify.next;
-    // Per-position acceptance: draft p (1-based) stood when
-    // the verdict accepted more than p rows. A scheduled replay attempts
-    // only the positions it verified.
-    for (int p = 0; p + 1 < rows; ++p) {
-      const size_t pi = static_cast<size_t>(p);
-      ++mtp_attempts_[pi];
-      ++slot_mtp_attempts_[static_cast<size_t>(req)][pi];
-      if (verify.accepted > p + 1) {
-        ++mtp_accepts_[pi];
-        ++slot_mtp_accepts_[static_cast<size_t>(req)][pi];
-      }
-    }
     // The drafts this step fed (the verify's rows after the first); the
     // slot's drafts are replaced below by the block's new ones.
     const std::vector<int32_t> fed_drafts = drafts_[static_cast<size_t>(req)];
@@ -2465,6 +2453,19 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
           report.push_back(device_result(o, 0, next));
       }
       context_[static_cast<size_t>(req)].push_back(next);
+    }
+    // Count the final verdict: a sampled fallback can accept drafts that
+    // the device provisionally rejected. The decided block contains one
+    // non-speculative token plus its accepted draft prefix. Attempts still
+    // cover only the positions verified by this scheduled replay.
+    for (int p = 0; p + 1 < rows; ++p) {
+      const size_t pi = static_cast<size_t>(p);
+      ++mtp_attempts_[pi];
+      ++slot_mtp_attempts_[static_cast<size_t>(req)][pi];
+      if (decided.size() > static_cast<size_t>(p + 1)) {
+        ++mtp_accepts_[pi];
+        ++slot_mtp_accepts_[static_cast<size_t>(req)][pi];
+      }
     }
     pending_[static_cast<size_t>(req)] = next;
     if (std::unique_ptr<text::GrammarState>& grammar =

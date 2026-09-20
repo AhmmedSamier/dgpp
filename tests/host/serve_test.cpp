@@ -98,6 +98,16 @@ class FakeEngine : public SchedulerEngine {
     stats.replays_by_slots[16] = 1;
     return stats;
   }
+
+  std::atomic<int> mtp_fixture{0};
+  static MtpAcceptance mtp_counters(int fixture) {
+    if (fixture == 3) return MtpAcceptance{3, {10, 8, 6}, {7, 4, 2}};
+    if (fixture == 1) return MtpAcceptance{1, {1ULL << 33}, {1ULL << 32}};
+    if (fixture == 8) return MtpAcceptance{8, {8, 7, 6, 5, 4, 3, 2, 1}, {7, 6, 5, 4, 3, 2, 1, 0}};
+    return {};
+  }
+  MtpAcceptance mtp_acceptance() const override { return mtp_counters(mtp_fixture.load()); }
+
   std::atomic<bool> images_available{false};
   std::atomic<int> image_prefills{0};
   bool supports_images() const override { return images_available; }
@@ -1057,6 +1067,56 @@ DGPP_TEST(serve_decodeBatchMetrics_retainsLastLaunchWhileIdle) {
         require(histogram.at(std::to_string(slots)).as_int() ==
                     (reported && (slots == 1 || slots == 6 || slots == 16) ? 1 : 0),
                 "scalar, batched and zero histogram buckets");
+    }
+  }
+}
+
+DGPP_TEST(serve_specDecodeMetrics_countVariableDepthAndReset) {
+  ServiceRig rig;
+  struct Case {
+    int fixture;
+    int64_t rounds, drafted, accepted;
+  };
+  const Case cases[] = {{0, 0, 0, 0},
+                        {3, 10, 24, 13},
+                        {1, 1LL << 33, 1LL << 33, 1LL << 32},
+                        {8, 8, 36, 28},
+                        {0, 0, 0, 0}};
+  for (const auto& test : cases) {
+    const int fixture = test.fixture;
+    rig.engine.mtp_fixture.store(fixture);
+    const auto expected = FakeEngine::mtp_counters(fixture);
+    for (int i = 0; i < 200 && rig.service.meters().mtp.depth != expected.depth; ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    require(rig.service.meters().mtp.depth == expected.depth, "MTP snapshot published");
+
+    // Both routes expose the same contract, including engines without MTP.
+    for (const char* path : {"/metrics", "/v1/metrics"}) {
+      Client c(rig.port());
+      c.send_all(std::string("GET ") + path + " HTTP/1.1\r\nHost: t\r\n\r\n");
+      const auto response = c.read_available(800);
+      require(response.find("HTTP/1.1 200 OK\r\n") == 0, "metrics HTTP status");
+      const auto body = response.find("\r\n\r\n");
+      require(body != std::string::npos, "metrics body present");
+      const auto parsed = dgpp::minijson::parse(std::string_view(response).substr(body + 4));
+      const auto& spec = parsed.root.at("scheduler").at("spec_decode");
+      require(spec.at("depth").as_int() == expected.depth, "configured MTP depth");
+      const auto& attempts = spec.at("num_draft_tokens_per_pos_total").items();
+      const auto& accepts = spec.at("num_accepted_tokens_per_pos_total").items();
+      require(attempts.size() == static_cast<size_t>(expected.depth) &&
+                  accepts.size() == attempts.size(),
+              "one counter per speculative position");
+      for (int p = 0; p < expected.depth; ++p) {
+        require(attempts[p].as_int() == static_cast<int64_t>(expected.attempts[p]),
+                "per-position attempts");
+        require(accepts[p].as_int() == static_cast<int64_t>(expected.accepts[p]),
+                "per-position accepts");
+      }
+      require(spec.at("num_drafts_total").as_int() == test.rounds, "verification rounds");
+      require(spec.at("num_draft_tokens_total").as_int() == test.drafted,
+              "draft tokens count actual attempts, not rounds times maximum depth");
+      require(spec.at("num_accepted_tokens_total").as_int() == test.accepted,
+              "accepted draft tokens");
     }
   }
 }

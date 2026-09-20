@@ -193,6 +193,42 @@ After rebuilding and redeploying this version, monitor rank 0:
 watch -n 2 'curl -fsS http://192.168.50.221:18080/metrics | jq "{prefill, scheduler: (.scheduler | {active, queued, prefilling, snapshot_age_ms})}"'
 ```
 
+### Speculative decoding counters
+
+`scheduler.spec_decode` exposes the engine's cumulative MTP verification
+counters on both metrics routes:
+
+| Field | Meaning |
+| --- | --- |
+| `depth` | Configured maximum speculative depth (0 for engines without MTP). |
+| `num_drafts_total` | Request verification rounds that attempted at least one draft position. |
+| `num_draft_tokens_total` | Sum of attempts across all speculative positions. |
+| `num_accepted_tokens_total` | Sum of accepted draft tokens across all positions. |
+| `num_draft_tokens_per_pos_total` | Attempt counts, starting with the first speculative position. |
+| `num_accepted_tokens_per_pos_total` | Accepted counts in the same position order. |
+
+The arrays contain `depth` entries, up to eight. Non-MTP engines report zero
+totals and empty arrays. Counts exclude graph padding and the non-speculative
+row. An attempt at a later position still counts when an earlier rejection
+prevents accepting it. Counts include drafts accepted by the exact host fallback during sampled
+decoding. These are final verification decisions before response stop and
+length trimming, so accepted drafts need not all appear in the response.
+
+Counters accumulate for the engine lifetime and reset when it is recreated.
+They come from the existing completed-pass scheduler snapshot; use
+`scheduler.snapshot_age_ms` to assess freshness. Read rank 0 once rather than
+summing counters across tensor-parallel ranks.
+
+For a measurement interval, subtract consecutive snapshots from the same
+engine lifetime. Divide accepted tokens by attempted draft tokens for the
+acceptance fraction, or by draft rounds for accepted drafts per round. Treat
+a zero denominator as unavailable. For example, position attempts `[10, 8, 6]`
+and accepts `[7, 4, 2]` mean 10 rounds, 24 attempted draft tokens and 13 accepted
+drafts. Variable verification depth means attempted tokens are not necessarily
+rounds multiplied by maximum depth.
+
+### Prefill progress
+
 `prefill.requests` contains one entry per currently prefilling scheduler choice:
 
 ```json

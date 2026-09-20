@@ -103,7 +103,8 @@ record the modes measured for each deployment.
 - **Deployment and monitoring**: a shared cluster config, versioned
   releases, periodic throughput logs and JSON counters at `/metrics`
   (also available at `/v1/metrics`), including
-  [decode graph batch and padding counters](docs/operations.md#decode-graph-batch-counters).
+  [decode graph batch and padding counters](docs/operations.md#decode-graph-batch-counters)
+  and [MTP acceptance counters](docs/openai-compatibility.md#speculative-decoding-counters).
   Startup checks the memory plan before allocation. Cache capacity is configurable,
   with BF16, FP8 or FP4 latent storage for GLM-5.3.
 
