@@ -81,6 +81,11 @@ record the modes measured for each deployment.
   full GLM-5.3, tiled QSA prefill for Qwen, and bounded grouped prefill for
   DeepSeek-V4.1-Flash. Qwen can optionally yield between prefill chunks so
   active decodes continue making progress.
+- **Opt-in 512K context for Qwen3.8-Flash-Next** with `engine.rope_scaling`
+  (YaRN): the [two-Spark NVFP4 template](deploy/cluster_qwen-3.8-flash-next_nvfp4_w2_yarn512k.example.json)
+  supports a 524288-token request ceiling, with 5/5 retrieval probes passing
+  at both 261K and 522K prompt tokens. See the [validation record](benchmarks/results/2026-09-20-qwen-yarn512k.md)
+  and [release-check procedure](docs/qwen_yarn_release_check.md).
 - **Adaptive DSpark verification**: DeepSeek uses confidence-scheduled draft
   depth, including a batch-aware rule and an adaptive value of decode time.
 - **Exact prefix caching**: matching token prefixes can reuse a stored
