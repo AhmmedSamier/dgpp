@@ -3,6 +3,17 @@
 // Modes:
 //   --write-fixture DIR          the tiny synthetic checkpoint (tests/cuda/qwen_fixture.hpp)
 //   --smoke DIR                  QwenModel over the fixture: finite outputs, bitwise repeat
+//   --rope-scaling F:O[:BF:BS:AF:MF]  run --smoke with the engine's YaRN knob
+//                                (factor, original_max_position_embeddings,
+//                                 beta_fast, beta_slow, attn_factor,
+//                                 mrope_cache_factor — defaults 32/1/1/4)
+//   --cross-limit DIR            the YaRN ceiling actually crossed (2026-09-18
+//                                review): a synthetic native limit of 8 under the
+//                                factor-2 knob (the extended 16), both forward
+//                                modes over the final valid position, the
+//                                session's refusal of work past it, and a pool
+//                                below the ceiling
+//   --plan-check                 the memory plan's context line under the rope knob
 //   --checkpoint-dir DIR
 //   --dump-file FILE             QwenModel against tools/qwen_reference_dump.py's pure
 //                                double reference: every layer's hyper state, the final
@@ -17,6 +28,9 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <optional>
+#include <sstream>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -143,8 +157,149 @@ Stats compare_bf16(const uint16_t* got, const uint16_t* want, size_t n, int soft
   return s;
 }
 
-int run_smoke(const std::string& dir) {
-  const QwenTextConfig cfg = QwenTextConfig::from_json_file((fs::path(dir) / "config.json").string());
+int run_plan_check() {  // The memory plan's context line under the rope knob (engine.rope_scaling,
+  // 2026-09-18): the plan must be computed at the YaRN-scaled ceiling, so a
+  // 512K pool is validated against the pool it really allocates — and a pool
+  // past the ceiling is what the launcher warns about.
+  QwenTextConfig cfg = qwenfx::tiny_config();
+  const int64_t native = cfg.max_position_embeddings;  // the fixture's 4096
+  const int64_t pool = native * 128;                    // a pool far past the ceiling
+  QwenTextConfig yarn = cfg;
+  yarn.rope_scaling = dgpp::RopeScaling{2.0, native * 64, 32.0, 1.0, 1.0, 4.0};
+  const int64_t want_off = native, want_on = native * 64 * 2;
+  const auto plan_of = [&](const QwenTextConfig& c) {
+    return QwenModel::plan_memory(c, /*max_tokens=*/64, /*max_cache_tokens=*/pool, /*tp_rank=*/0,
+                                  /*tp_world=*/2, dgpp::QwenResidency::Resident,
+                                  /*max_requests=*/4, /*mtp=*/false, /*decode_rows=*/8);
+  };
+  const int64_t off = plan_of(cfg).context_tokens;
+  const int64_t on = plan_of(yarn).context_tokens;
+  std::printf("[ .. ] plan context: plain %lld, YaRN %lld (pool %lld, native %lld)\n",
+              static_cast<long long>(off), static_cast<long long>(on),
+              static_cast<long long>(pool), static_cast<long long>(native));
+  require(off == want_off, "the plain plan keeps the checkpoint's ceiling");
+  require(on == want_on, "the YaRN plan takes original x factor");
+  require(cfg.context_limit() == want_off && yarn.context_limit() == want_on,
+          "the config's ceiling is what the plan reads");
+  // The pool is sized by the cache capacity, not by the positional ceiling,
+  // so the knob lifts what a request may reach without moving a byte: the
+  // plan validates the same pool either way (a pool past the ceiling is
+  // concurrency headroom, which the launcher names out loud).
+  require(plan_of(yarn).total_bytes() == plan_of(cfg).total_bytes(),
+          "the knob allocates nothing");
+  // A pool of exactly the scaled ceiling is accepted by the same arithmetic.
+  require(QwenModel::plan_memory(yarn, 64, native * 64 * 2, 0, 2, dgpp::QwenResidency::Resident, 4,
+                                 false, 8)
+                  .context_tokens == want_on,
+          "a pool at the ceiling");
+  std::printf("[ OK ] qwen_plan_check\n");
+  return 0;
+}
+
+int run_cross_limit(const std::string& dir) {
+  // The reviewer's cross-limit gate (2026-09-18): the smoke above never
+  // crosses the fixture's 4096 native ceiling (72 tokens, a 256-token
+  // pool), so the lifted ceiling is exercised against a synthetic native
+  // limit of 8 — the factor-2 knob extends it to 16 (the correction band
+  // from the 4 x mrope cache: 32) and a 32-token pool (64-token blocks)
+  // sits far above it. Both forward modes must cross the native 8 and
+  // land at the final valid extended position (15), work past the
+  // extended 16 is refused by the session's boundary, and a KV pool
+  // smaller than the configured context is accepted (the context clamps
+  // to the pool, the plan's context line follows it).
+  QwenTextConfig cfg = QwenTextConfig::from_json_file((fs::path(dir) / "config.json").string());
+  cfg.max_position_embeddings = 8;  // the synthetic native limit (the fixture's 4096)
+  cfg.rope_scaling = dgpp::RopeScaling{2.0, 8, 32.0, 1.0, 1.0, 4.0};  // factor 2 over 8
+  cfg.rope_scaling->validate("qwen_forward_test: cross-limit");
+  require(cfg.context_limit() == 16, "the extended limit is original x factor");
+  require(cfg.rope_scaling->correction_max_position() == 32, "the band is 4 x original");
+
+  const int T = 16;  // positions 0..15: the final valid extended position, past the native 8
+  const std::vector<int64_t> tokens = smoke_tokens(cfg, T);
+  QwenModel model(cfg, dir, T, 32, dgpp::QwenResidency::Resident, nullptr, 0, 1, /*max_requests=*/2);
+  require(model.max_context() == T, "the session's context bound is the extended limit, not the pool");
+
+  // 1. The cold forward over the whole extended limit: finite logits and
+  //    deterministic across calls (the table, the mscale and the
+  //    positions past the native 8 all land).
+  const QwenModel::Outputs out = model.forward(tokens, true);
+  for (float v : out.logits) require(std::isfinite(v), "cross-limit: a non-finite logit");
+  const QwenModel::Outputs again = model.forward(tokens, false);
+  require(again.final_hidden_bits == out.final_hidden_bits && again.logits == out.logits,
+          "cross-limit: the forward is not deterministic across calls");
+
+  // 2. A full prefill crossing the native 8: positions 0..15 in one walk.
+  {
+    const QwenModel::Outputs p = model.session_prefill(0, tokens);
+    for (float v : p.logits) require(std::isfinite(v), "cross-limit: a non-finite prefill logit");
+    require(model.session_position(0) == T, "the prefill reached the final extended position");
+    model.session_close(0);
+  }
+
+  // 3. Incremental decode crossing the native 8: the prefill stops at 15,
+  //    the step lands the last row at position 15.
+  {
+    const QwenModel::Outputs p =
+        model.session_prefill(1, std::vector<int64_t>(tokens.begin(), tokens.begin() + (T - 1)));
+    require(model.session_position(1) == T - 1, "the decode's prefill position");
+    const QwenModel::Outputs d = model.session_step(1, tokens[static_cast<size_t>(T - 1)]);
+    for (float v : d.logits) require(std::isfinite(v), "cross-limit: a non-finite decode logit");
+    require(model.session_position(1) == T, "the decode crossed the native limit at its final position");
+    model.session_close(1);
+  }
+
+  // 4. The session's boundary: work beyond the extended limit (position
+  //    16) is refused — a 17-token prompt (prompt past the limit) and a
+  //    decode step off position 16 (generated tokens past it).
+  const auto refused_at_bound = [](const std::function<void()>& attempt) {
+    try {
+      attempt();
+    } catch (const std::invalid_argument& e) {
+      return std::string(e.what()).find("context bound") != std::string::npos;
+    }
+    return false;
+  };
+  {
+    std::vector<int64_t> over(tokens);
+    over.push_back(tokens[0]);  // 17 rows: position 16 is past the extended limit
+    require(refused_at_bound([&] { (void)model.session_prefill(0, over); }),
+            "a 17-token prompt (position 16) is refused by the session's context bound");
+    const QwenModel::Outputs p = model.session_prefill(1, tokens);  // position 16, the limit itself
+    for (float v : p.logits) require(std::isfinite(v), "cross-limit: a non-finite limit prefill logit");
+    require(refused_at_bound([&] { (void)model.session_step(1, tokens[0]); }),
+            "a decode step past the extended limit (position 16) is refused by the session's context bound");
+    model.session_close(1);
+  }
+
+  // 5. The serving boundary's pool side: a KV pool smaller than the
+  //    configured context is accepted — the session's context clamps to
+  //    the pool and the plan's context line follows it (a pool at the
+  //    ceiling takes the ceiling, as the plan check shows).
+  {
+    QwenTextConfig wide = cfg;
+    wide.rope_scaling = dgpp::RopeScaling{16.0, 8, 32.0, 1.0, 1.0, 4.0};  // a 128 ceiling over the same 8
+    wide.rope_scaling->validate("qwen_forward_test: cross-limit pool");
+    require(wide.context_limit() == 128, "the ceiling is original x factor (16 x 8)");
+    const auto below = QwenModel::plan_memory(wide, 64, 64, 0, 2, dgpp::QwenResidency::Resident, 4, false, 8);
+    require(below.context_tokens == 64, "the plan's context line is the pool, below the ceiling");
+    const auto at = QwenModel::plan_memory(wide, 64, 128, 0, 2, dgpp::QwenResidency::Resident, 4, false, 8);
+    require(at.context_tokens == 128, "a pool at the ceiling takes the ceiling");
+    QwenModel small(wide, dir, 64, 64, dgpp::QwenResidency::Resident, nullptr, 0, 1, /*max_requests=*/2);
+    require(small.max_context() == 64, "the session's context clamps to the pool below the ceiling");
+    const QwenModel::Outputs p = small.session_prefill(0, smoke_tokens(wide, 64));
+    for (float v : p.logits) require(std::isfinite(v), "pool below the ceiling: a non-finite prefill logit");
+    require(refused_at_bound([&] { (void)small.session_prefill(1, smoke_tokens(wide, 65)); }),
+            "a 65-token prompt is refused when the pool (64) clamps the context below the ceiling");
+    small.session_close(0);
+    small.session_close(1);
+  }
+  std::printf("[ OK ] qwen_forward_cross_limit\n");
+  return 0;
+}
+
+int run_smoke(const std::string& dir, const std::optional<dgpp::RopeScaling>& rope_scaling) {
+  QwenTextConfig cfg = QwenTextConfig::from_json_file((fs::path(dir) / "config.json").string());
+  if (rope_scaling.has_value()) cfg.rope_scaling = *rope_scaling;
   const int T = 72;
   const std::vector<int64_t> tokens = smoke_tokens(cfg, T);
   QwenModel model(cfg, dir, T, 256);
@@ -166,8 +321,23 @@ int run_smoke(const std::string& dir) {
   require(again.final_hidden_bits == out.final_hidden_bits && again.logits == out.logits,
           "smoke: forward is not deterministic across calls");
   const auto top = QwenModel::topk(out.logits, T, cfg.vocab_size, 4);
-  std::printf("[ .. ] smoke: %d tokens, %d layers, top-1 of the last row %d (%.4g); deterministic\n", T,
-              cfg.num_hidden_layers, top.back()[0].first, top.back()[0].second);
+  std::printf("[ .. ] smoke: %d tokens, %d layers, top-1 of the last row %d (%.4g); deterministic%s\n", T,
+              cfg.num_hidden_layers, top.back()[0].first, top.back()[0].second,
+              rope_scaling.has_value() ? " (YaRN rope)" : "");
+  if (rope_scaling.has_value()) {
+    // The knob is live: with the same weights, the YaRN frequencies must
+    // move the logits away from the plain rope's (the table and the mscale
+    // are the only difference).
+    QwenTextConfig plain_cfg = cfg;
+    plain_cfg.rope_scaling.reset();
+    QwenModel plain(plain_cfg, dir, T, 256);
+    const QwenModel::Outputs p = plain.forward(tokens, false);
+    require(p.logits != out.logits, "the YaRN rope must change the forward");
+    double worst = 0;
+    for (size_t i = 0; i < p.logits.size(); ++i)
+      worst = std::max(worst, std::fabs(static_cast<double>(p.logits[i]) - out.logits[i]));
+    std::printf("[ .. ] smoke: YaRN vs plain logits differ by at most %.4g\n", worst);
+  }
   std::printf("[ OK ] qwen_forward_smoke\n");
   return 0;
 }
@@ -300,24 +470,52 @@ int run_dump_parity(const std::string& dir, const std::string& dump_path) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  std::string fixture, smoke, checkpoint, dump;
+  std::string fixture, smoke, checkpoint, dump, cross_limit;
+  std::string rope_scaling_arg;
+  bool plan_check = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--write-fixture" && i + 1 < argc) fixture = argv[++i];
     else if (a == "--smoke" && i + 1 < argc) smoke = argv[++i];
+    else if (a == "--rope-scaling" && i + 1 < argc) rope_scaling_arg = argv[++i];
+    else if (a == "--cross-limit" && i + 1 < argc) cross_limit = argv[++i];
+    else if (a == "--plan-check") plan_check = true;
     else if (a == "--checkpoint-dir" && i + 1 < argc) checkpoint = argv[++i];
     else if (a == "--dump-file" && i + 1 < argc) dump = argv[++i];
     else { std::fprintf(stderr, "unknown argument %s\n", a.c_str()); return 2; }
   }
   try {
+    // The engine's YaRN knob (engine.rope_scaling) as the smoke's config:
+    // factor:original[:beta_fast:beta_slow:attn_factor:mrope_cache_factor].
+    std::optional<dgpp::RopeScaling> rope_scaling;
+    if (!rope_scaling_arg.empty()) {
+      std::vector<double> f;
+      std::string field;
+      std::stringstream ss(rope_scaling_arg);
+      while (std::getline(ss, field, ':')) f.push_back(std::stod(field));
+      require(f.size() >= 2 && f.size() <= 6, "--rope-scaling wants factor:original[:4 more]");
+      dgpp::RopeScaling rs;
+      rs.factor = f[0];
+      rs.original_max_position_embeddings = static_cast<int64_t>(f[1]);
+      if (f.size() > 2) rs.beta_fast = f[2];
+      if (f.size() > 3) rs.beta_slow = f[3];
+      if (f.size() > 4) rs.attn_factor = f[4];
+      if (f.size() > 5) rs.mrope_cache_factor = f[5];
+      rs.validate("--rope-scaling");
+      rope_scaling = rs;
+    }
     if (!fixture.empty()) {
       qwenfx::write_fixture(qwenfx::tiny_config(), fixture);
       std::printf("[ OK ] wrote the fixture to %s\n", fixture.c_str());
       return 0;
     }
-    if (!smoke.empty()) return run_smoke(smoke);
+    if (plan_check) return run_plan_check();
+    if (!cross_limit.empty()) return run_cross_limit(cross_limit);
+    if (!smoke.empty()) return run_smoke(smoke, rope_scaling);
     if (!checkpoint.empty() && !dump.empty()) return run_dump_parity(checkpoint, dump);
-    std::fprintf(stderr, "usage: --write-fixture DIR | --smoke DIR | --checkpoint-dir DIR --dump-file FILE\n");
+    std::fprintf(stderr,
+                 "usage: --write-fixture DIR | --smoke DIR | --cross-limit DIR | --plan-check | "
+                 "--checkpoint-dir DIR --dump-file FILE\n");
     return 2;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "[FAIL] %s\n", e.what());
