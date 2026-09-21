@@ -201,3 +201,74 @@ are retained under `artifacts/c16-merge/`.
 Production was left running and unchanged. GPU/RDMA tests were not rerun on
 this merged tree; the earlier GPU and two-rank serving results above apply
 to the pre-merge review fix, not this integration.
+
+## Maintainer integration and four-node validation, 2026-09-21
+
+The final review found one remaining small-batch regression: enabling the
+17–64-row guard for every decode also changed existing MTP hidden projections.
+Six or eight token rows expand to 24 or 32 matrix rows through the four
+hyper-state branches, replacing their previous Lt dispatch with GEMV chunks.
+The follow-up selects the guard from the token count before that expansion.
+Walks of at most sixteen tokens and prefill retain their previous dispatch;
+wide decode retains the kernel-only protection.
+
+A real-width regression captures the existing hidden projection at
+2/4/6/8/12/16 tokens in both prefill and decode. It checks graph node types,
+inspectable kernel functions and launch shapes, and bitwise output equality,
+including a small walk following wide configuration on the same GEMM object.
+Driver-loaded cuBLAS kernels are counted as opaque kernel nodes. Temporarily
+restoring the unconditional guard makes this regression fail on its dispatch
+assertion; the corrected implementation passes.
+
+Validation started on a local merge of `b62ba54` and upstream `c5a6913`.
+The author independently pushed merge `5329349` during the maintenance window,
+including the same depth-aware telemetry assertions and FP8-head fixture
+integration. The follow-up was moved onto that merge. All tested source files
+are byte-identical after integration; the additional author changes are
+documentation. The native CUDA 13/GCC 13 `ci` build completed with warnings
+as errors. The server SHA256, checked on all four ranks for each mode, is
+`a75fd06e2a7b321327aa4544fde8c548add4fb31c8411158032728f6bc243198`
+(build stamp `0.1.0+gf11922583351.dirty`).
+
+- Host gates: 22/22 passed.
+- Full serial CTest: 127/131 passed initially; four wide MTP3 fixture checks
+  exposed inherited telemetry assertions that assumed depth one. Updating
+  them to use `1 + mtp_depth` and rebuilding made all four targeted reruns
+  pass. All 131 entries are now clear, with no skips or remaining failures.
+- Four GB10 nodes with the real `Qwen/Qwen3.8-Flash-Next-FP8` checkpoint:
+  C16/MTP3, scheduling off, 65,536 BF16 KV tokens, 1 GiB prefix cache, and
+  default dense GEMV lowering. Each storage mode passed all nine API checks
+  and a prose sweep at C1/C2/C3/C4/C8/C12/C16, one repetition with a 96-token
+  output budget. All 46 load requests per mode returned nonempty responses,
+  sampled occupancy reached sixteen, and service metrics reported no failed
+  requests or engine failure.
+- Each mode captured 46 graph variants on every rank with zero memcpy or
+  memset nodes. Shutdown was clean, no rank logged an error, and operation
+  streams agreed across all four ranks:
+
+| Dense storage / BF16 residency / vocabulary head | Four-rank operation-stream MD5 |
+| --- | --- |
+| Checkpoint BF16 / checkpoint / GEMV | `5061b03d40695ddae8b5c66c2fa45271` |
+| FP8 dense / checkpoint / MMA | `0d064cf21927fcc9bbf1d6b5064b5746` |
+| Checkpoint / BF12-only / GEMV | `2663a073e5b204df7a0b2f66f938d870` |
+
+One preliminary serving attempt used an invalid `bf16_weights: "bf16"`
+value in the temporary harness configuration. Startup rejected it before
+serving; the harness restored production, corrected the value to
+`"checkpoint"`, and restarted the serving phase. This was a harness error.
+These are functional checks of the final integration, not a matched
+throughput comparison or a long-context/quality evaluation. The earlier
+two-node evidence above remains separate from this four-node result.
+
+Production was restored after every maintenance phase. All four running
+processes again use the original `0.1.0+g16217c3f2384` binary, SHA256
+`460f5ed1c4b4e99d9be99768a4f636ab2aa40e21dcb43ab25d2360c5dc644bdd`.
+The deployment file and resolved configuration are unchanged, including the
+256/2048 prefill budgets and 8 GiB prefix cache. Health and completion checks
+passed; a repeat prompt reused 176 of 181 tokens, with no failed requests or
+engine failure in the restoration sample.
+
+The [checked summaries, temporary configurations and test logs](2026-09-21-qwen-c16-followup/)
+are committed alongside this record. Complete build logs, per-rank logs,
+request outputs, occupancy samples and maintenance scripts remain in
+`artifacts/pr13-followup/` in the validation checkout.

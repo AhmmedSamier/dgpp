@@ -618,8 +618,7 @@ void QwenModel::prefetch_ple_value_side(const QwenLayerResident& r) {
 QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
   const int T = run.T, req = run.req;
   walk_rows_ = T;
-  gemm_.set_kernel_only_rows(run.decode ? 17 : 0, run.decode ? kDecodeRowsMax : 0);
-  gemm_.set_bf12_wide(run.decode);  // the decode batch's alone (kernels/gemm.hpp)
+  qwen_configure_gemm_rows(gemm_, T, run.decode);
   if (run.capture && loader_.residency() != QwenResidency::Resident)
     throw std::logic_error("run_rows: a capture needs a resident stack");
   const int H = cfg_.hidden_size, W = cfg_.hc_count * H;
@@ -1087,8 +1086,9 @@ size_t QwenModel::bf12_plan_bytes(const QwenTextConfig& cfg, const QwenLocalGeom
 void QwenModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode_row,
                              bool capture, int head_rows, int batch_requests) {
   walk_rows_ = T;
-  gemm_.set_kernel_only_rows(decode_row ? 17 : 0, decode_row ? kDecodeRowsMax : 0);
-  gemm_.set_bf12_wide(decode_row);  // the decode batch's alone (kernels/gemm.hpp)
+  // The hidden projection has T * hc matrix rows: a shipped 6/8-token
+  // walk must not enter the wide guard just because hc expands it to 24/32.
+  qwen_configure_gemm_rows(gemm_, T, decode_row);
   if (!mtp_) throw std::logic_error("mtp_run_rows: MTP is not enabled");
   if (T <= 0 || T > max_tokens_) throw std::invalid_argument("mtp_run_rows: rows");
   if (head_rows < 0 || head_rows > T) throw std::invalid_argument("mtp_run_rows: head_rows");

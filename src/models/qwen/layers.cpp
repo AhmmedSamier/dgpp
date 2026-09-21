@@ -71,6 +71,12 @@ void gemm_dense(const QwenGemmWorkspace& g, const uint16_t* act, int64_t act_str
 
 }  // namespace
 
+void qwen_configure_gemm_rows(CublasLtGemm& gemm, int tokens, bool decode) {
+  const bool wide_decode = decode && tokens > 16;
+  gemm.set_kernel_only_rows(wide_decode ? 17 : 0, wide_decode ? kGemmDecodeLoweringRows : 0);
+  gemm.set_bf12_wide(decode);
+}
+
 void qwen_mtp_hidden_projection(const QwenGemmWorkspace& g, const uint16_t* act,
     const uint16_t* weight, uint16_t* out, int tokens, int hc, int hidden,
     bool decode, cudaStream_t stream) {

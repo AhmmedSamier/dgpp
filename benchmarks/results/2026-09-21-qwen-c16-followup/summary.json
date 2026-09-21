@@ -1,0 +1,280 @@
+{
+  "model": "Qwen/Qwen3.8-Flash-Next-FP8",
+  "world_size": 4,
+  "build_preset": "ci",
+  "validation_base": "f11922583351",
+  "integrated_author_head": "5329349989b8d206e4a67ebd72a55f5b0814f48d",
+  "binary": {
+    "production_sha256": "460f5ed1c4b4e99d9be99768a4f636ab2aa40e21dcb43ab25d2360c5dc644bdd",
+    "candidate_sha256": "a75fd06e2a7b321327aa4544fde8c548add4fb31c8411158032728f6bc243198",
+    "candidate_version": "dgpp-serve 0.1.0+gf11922583351.dirty (git f11922583351, cuda 13.0)"
+  },
+  "tested_sources": {
+    "src/models/qwen/forward.cpp": "07c0e7d51beb5a1fefcb3c4da4e68fafe188f8b96a78669d4e97d5c1afae7405",
+    "src/models/qwen/layers.cpp": "bcfd01f23e45615b21e3a2eea43e9f45acce49e074b09998cb6033871759592d",
+    "src/models/qwen/layers.hpp": "d5db6d56dae189261a171660a3aa1efcb6357f06a9420d93d0e9a324f89669cf",
+    "tests/cuda/qwen_engine_test.cpp": "e66a05923b93b539d1e982bff5aca6a4e449a2354fd4667fa73de7d0f785a73a"
+  },
+  "ctest": {
+    "total": 131,
+    "initial_passed": 127,
+    "initial_failed": 4,
+    "rerun_passed": 4,
+    "skipped": 0,
+    "final_failed": 0,
+    "rerun_tests": [
+      "qwen_engine_fp8_mtp3_rows32",
+      "qwen_engine_fp8_mtp3_rows64",
+      "qwen_engine_mtp3_rows32_row_independent",
+      "qwen_engine_mtp3_rows64_row_independent"
+    ]
+  },
+  "modes": {
+    "w4-bf16": {
+      "api_checks_passed": 9,
+      "load": [
+        {
+          "concurrency": 1,
+          "requests_passed": 1
+        },
+        {
+          "concurrency": 2,
+          "requests_passed": 2
+        },
+        {
+          "concurrency": 3,
+          "requests_passed": 3
+        },
+        {
+          "concurrency": 4,
+          "requests_passed": 4
+        },
+        {
+          "concurrency": 8,
+          "requests_passed": 8
+        },
+        {
+          "concurrency": 12,
+          "requests_passed": 12
+        },
+        {
+          "concurrency": 16,
+          "requests_passed": 16
+        }
+      ],
+      "max_active": 16,
+      "graph_variants_per_rank": [
+        46,
+        46,
+        46,
+        46
+      ],
+      "graph_memcpy_nodes": 0,
+      "graph_memset_nodes": 0,
+      "requests_failed": 0,
+      "engine_failed": false,
+      "operation_md5": [
+        "5061b03d40695ddae8b5c66c2fa45271",
+        "5061b03d40695ddae8b5c66c2fa45271",
+        "5061b03d40695ddae8b5c66c2fa45271",
+        "5061b03d40695ddae8b5c66c2fa45271"
+      ],
+      "decode_batch": {
+        "last_slots": 1,
+        "last_active": 1,
+        "last_rows_per_request": 4,
+        "replays": 535,
+        "rows": 9772,
+        "padded_rows": 1180,
+        "replays_by_slots": {
+          "1": 223,
+          "2": 75,
+          "3": 42,
+          "4": 44,
+          "5": 0,
+          "6": 8,
+          "7": 0,
+          "8": 46,
+          "9": 0,
+          "10": 0,
+          "11": 0,
+          "12": 50,
+          "13": 0,
+          "14": 0,
+          "15": 0,
+          "16": 47
+        }
+      },
+      "rank_binary_sha256": [
+        "a75fd06e2a7b321327aa4544fde8c548add4fb31c8411158032728f6bc243198",
+        "a75fd06e2a7b321327aa4544fde8c548add4fb31c8411158032728f6bc243198",
+        "a75fd06e2a7b321327aa4544fde8c548add4fb31c8411158032728f6bc243198",
+        "a75fd06e2a7b321327aa4544fde8c548add4fb31c8411158032728f6bc243198"
+      ]
+    },
+    "w4-fp8": {
+      "api_checks_passed": 9,
+      "load": [
+        {
+          "concurrency": 1,
+          "requests_passed": 1
+        },
+        {
+          "concurrency": 2,
+          "requests_passed": 2
+        },
+        {
+          "concurrency": 3,
+          "requests_passed": 3
+        },
+        {
+          "concurrency": 4,
+          "requests_passed": 4
+        },
+        {
+          "concurrency": 8,
+          "requests_passed": 8
+        },
+        {
+          "concurrency": 12,
+          "requests_passed": 12
+        },
+        {
+          "concurrency": 16,
+          "requests_passed": 16
+        }
+      ],
+      "max_active": 16,
+      "graph_variants_per_rank": [
+        46,
+        46,
+        46,
+        46
+      ],
+      "graph_memcpy_nodes": 0,
+      "graph_memset_nodes": 0,
+      "requests_failed": 0,
+      "engine_failed": false,
+      "operation_md5": [
+        "0d064cf21927fcc9bbf1d6b5064b5746",
+        "0d064cf21927fcc9bbf1d6b5064b5746",
+        "0d064cf21927fcc9bbf1d6b5064b5746",
+        "0d064cf21927fcc9bbf1d6b5064b5746"
+      ],
+      "decode_batch": {
+        "last_slots": 1,
+        "last_active": 1,
+        "last_rows_per_request": 4,
+        "replays": 514,
+        "rows": 9540,
+        "padded_rows": 1076,
+        "replays_by_slots": {
+          "1": 207,
+          "2": 70,
+          "3": 46,
+          "4": 44,
+          "5": 0,
+          "6": 6,
+          "7": 0,
+          "8": 46,
+          "9": 0,
+          "10": 0,
+          "11": 0,
+          "12": 50,
+          "13": 0,
+          "14": 0,
+          "15": 0,
+          "16": 45
+        }
+      },
+      "rank_binary_sha256": [
+        "a75fd06e2a7b321327aa4544fde8c548add4fb31c8411158032728f6bc243198",
+        "a75fd06e2a7b321327aa4544fde8c548add4fb31c8411158032728f6bc243198",
+        "a75fd06e2a7b321327aa4544fde8c548add4fb31c8411158032728f6bc243198",
+        "a75fd06e2a7b321327aa4544fde8c548add4fb31c8411158032728f6bc243198"
+      ]
+    },
+    "w4-bf12": {
+      "api_checks_passed": 9,
+      "load": [
+        {
+          "concurrency": 1,
+          "requests_passed": 1
+        },
+        {
+          "concurrency": 2,
+          "requests_passed": 2
+        },
+        {
+          "concurrency": 3,
+          "requests_passed": 3
+        },
+        {
+          "concurrency": 4,
+          "requests_passed": 4
+        },
+        {
+          "concurrency": 8,
+          "requests_passed": 8
+        },
+        {
+          "concurrency": 12,
+          "requests_passed": 12
+        },
+        {
+          "concurrency": 16,
+          "requests_passed": 16
+        }
+      ],
+      "max_active": 16,
+      "graph_variants_per_rank": [
+        46,
+        46,
+        46,
+        46
+      ],
+      "graph_memcpy_nodes": 0,
+      "graph_memset_nodes": 0,
+      "requests_failed": 0,
+      "engine_failed": false,
+      "operation_md5": [
+        "2663a073e5b204df7a0b2f66f938d870",
+        "2663a073e5b204df7a0b2f66f938d870",
+        "2663a073e5b204df7a0b2f66f938d870",
+        "2663a073e5b204df7a0b2f66f938d870"
+      ],
+      "decode_batch": {
+        "last_slots": 1,
+        "last_active": 1,
+        "last_rows_per_request": 4,
+        "replays": 558,
+        "rows": 10032,
+        "padded_rows": 1232,
+        "replays_by_slots": {
+          "1": 224,
+          "2": 96,
+          "3": 40,
+          "4": 45,
+          "5": 0,
+          "6": 6,
+          "7": 0,
+          "8": 49,
+          "9": 0,
+          "10": 0,
+          "11": 0,
+          "12": 51,
+          "13": 0,
+          "14": 0,
+          "15": 0,
+          "16": 47
+        }
+      },
+      "rank_binary_sha256": [
+        "a75fd06e2a7b321327aa4544fde8c548add4fb31c8411158032728f6bc243198",
+        "a75fd06e2a7b321327aa4544fde8c548add4fb31c8411158032728f6bc243198",
+        "a75fd06e2a7b321327aa4544fde8c548add4fb31c8411158032728f6bc243198",
+        "a75fd06e2a7b321327aa4544fde8c548add4fb31c8411158032728f6bc243198"
+      ]
+    }
+  }
+}

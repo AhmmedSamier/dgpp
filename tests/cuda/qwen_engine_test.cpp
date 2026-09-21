@@ -12,6 +12,7 @@
 // world-1 ones (reported; the folds reassociate, so a near tie may flip a
 // late token — the first tokens must agree).
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
@@ -25,21 +26,22 @@
 #include <string>
 #include <thread>
 #include <vector>
+
 #include <cuda_runtime.h>
+
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
 #include "common/log.hpp"
 #include "common/test.hpp"
+#include "engine/eager_engine.hpp"
+#include "engine/graph_engine.hpp"
 #include "engine/tp_bus.hpp"
+#include "kda_test_helpers.hpp"
 #include "models/qwen/config.hpp"
 #include "models/qwen/forward.hpp"
 #include "models/qwen/loader.hpp"
 #include "net/collective_bus.hpp"
 #include "qwen_fixture.hpp"
-#include "kda_test_helpers.hpp"
-#include "engine/eager_engine.hpp"
-#include "engine/graph_engine.hpp"
-#include "engine/tp_bus.hpp"
 
 namespace fs = std::filesystem;
 using dgpp::BusBoundaryReducer;
@@ -500,11 +502,9 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
       auto* bus = buses[rank].get();
       BusBoundaryReducer reducer(*bus, wait_timeout_ms());
       QwenModel eager(cfg, dir, kMaxTokens, 2048, QwenResidency::Resident, &reducer, rank, kWorld,
-                      slots,
-                      /*mtp=*/false, decode_rows, dgpp::QwenLayerStream::dense_weights_fp8());
+                      slots, /*mtp=*/false, decode_rows, dgpp::QwenLayerStream::dense_weights_fp8());
       QwenModel model(cfg, dir, kMaxTokens, 2048, QwenResidency::Resident, &reducer, rank, kWorld,
-                      slots,
-                      /*mtp=*/true, decode_rows, dgpp::QwenLayerStream::dense_weights_fp8());
+                      slots, /*mtp=*/true, decode_rows, dgpp::QwenLayerStream::dense_weights_fp8());
       require(eager.max_decode_rows() == model.max_decode_rows() &&
                   eager.fp8_head_mma() == model.fp8_head_mma(),
               "eager/graph parity requires matching decode capacity and head mode");
@@ -717,6 +717,87 @@ DGPP_TEST(qwen_engines_loopback_world_2_graph_matches_eager) {
   require(o.bb.size() == 10 && o.bc.size() == 8, "the batched transcripts' lengths");
 }
 
+DGPP_TEST(qwen_mtp_existing_hidden_projection_keeps_dispatch) {
+  using namespace dgpp::kda_test;
+  constexpr int H = 2560, hc = 4, max_tokens = 16;
+  const auto act = random_bf16_normal(8301, max_tokens * hc * H, 0.3f);
+  const auto weight = random_bf16_normal(8302, H * H, 0.02f);
+  DevBuf da(act.size() * 2), dw(weight.size() * 2), out(act.size() * 2), ws(64u << 20);
+  da.upload(act.data(), act.size() * 2);
+  dw.upload(weight.data(), weight.size() * 2);
+  dgpp::CublasLtGemm gemm;
+  gemm.set_decode_rows(4);
+  dgpp::QwenGemmWorkspace g{&gemm, ws.p, 64u << 20};
+  const auto stream = test_stream();
+  struct Result {
+    std::vector<uint16_t> values;
+    std::vector<cudaGraphNodeType> node_types;
+    std::vector<std::array<uintptr_t, 8>> kernels;
+  };
+  const auto capture = [&](int tokens, bool decode, bool configured) {
+    if (configured) {
+      // A smaller walk can follow a wide graph capture on the same model.
+      dgpp::qwen_configure_gemm_rows(gemm, 64, true);
+      dgpp::qwen_configure_gemm_rows(gemm, tokens, decode);
+    } else {
+      gemm.set_kernel_only_rows(0, 0);
+      gemm.set_bf12_wide(decode);
+    }
+    cudaGraph_t graph = nullptr;
+    cudaGraphExec_t executable = nullptr;
+    DGPP_CUDA_OK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+    dgpp::qwen_mtp_hidden_projection(g, static_cast<const uint16_t*>(da.p),
+                                     static_cast<const uint16_t*>(dw.p),
+                                     static_cast<uint16_t*>(out.p), tokens, hc, H, decode, stream);
+    DGPP_CUDA_OK(cudaStreamEndCapture(stream, &graph));
+    Result result;
+    size_t count = 0;
+    DGPP_CUDA_OK(cudaGraphGetNodes(graph, nullptr, &count));
+    std::vector<cudaGraphNode_t> nodes(count);
+    DGPP_CUDA_OK(cudaGraphGetNodes(graph, nodes.data(), &count));
+    for (const auto node : nodes) {
+      cudaGraphNodeType type;
+      DGPP_CUDA_OK(cudaGraphNodeGetType(node, &type));
+      result.node_types.push_back(type);
+      if (type != cudaGraphNodeTypeKernel) continue;
+      cudaKernelNodeParams params{};
+      // Driver-loaded cuBLAS kernels have no runtime function to inspect.
+      // Count them too; replacing one with GEMV chunks must fail this check.
+      const auto status = cudaGraphKernelNodeGetParams(node, &params);
+      if (status == cudaErrorInvalidDeviceFunction) {
+        (void)cudaGetLastError();
+        result.kernels.push_back({});
+        continue;
+      }
+      DGPP_CUDA_OK(status);
+      result.kernels.push_back({reinterpret_cast<uintptr_t>(params.func), params.gridDim.x,
+                                params.gridDim.y, params.gridDim.z, params.blockDim.x,
+                                params.blockDim.y, params.blockDim.z, params.sharedMemBytes});
+    }
+    std::sort(result.node_types.begin(), result.node_types.end());
+    std::sort(result.kernels.begin(), result.kernels.end());
+    DGPP_CUDA_OK(cudaGraphInstantiate(&executable, graph, 0));
+    DGPP_CUDA_OK(cudaGraphLaunch(executable, stream));
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+    result.values.resize(static_cast<size_t>(tokens) * hc * H);
+    out.download(result.values.data(), result.values.size() * 2);
+    DGPP_CUDA_OK(cudaGraphExecDestroy(executable));
+    DGPP_CUDA_OK(cudaGraphDestroy(graph));
+    return result;
+  };
+  for (const bool decode : {false, true}) {
+    for (const int tokens : {2, 4, 6, 8, 12, 16}) {
+      const auto baseline = capture(tokens, decode, false);
+      const auto configured = capture(tokens, decode, true);
+      require(
+          baseline.node_types == configured.node_types && baseline.kernels == configured.kernels,
+          "existing MTP projection retains its kernel functions and launch shapes");
+      require_bitwise("existing MTP projection", baseline.values.data(), configured.values.data(),
+                      baseline.values.size() * 2);
+    }
+  }
+}
+
 DGPP_TEST(qwen_mtp_wide_hidden_projection_real_shape_is_kernel_only) {
   using namespace dgpp::kda_test;
   const auto download = [](const DevBuf& buffer, size_t n) {
@@ -737,6 +818,7 @@ DGPP_TEST(qwen_mtp_wide_hidden_projection_real_shape_is_kernel_only) {
   const auto stream = test_stream();
   for (const int hc : {1, 4})
     for (const int tokens : {12, 16, 32, 48, 64}) {
+      dgpp::qwen_configure_gemm_rows(gemm, tokens, true);
       cudaGraph_t graph = nullptr;
       cudaGraphExec_t executable = nullptr;
       DGPP_CUDA_OK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));

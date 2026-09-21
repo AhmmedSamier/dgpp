@@ -398,10 +398,11 @@ a host fallback continues the chain exactly as the device would have.
 
 Qwen graph serving supports `engine.max_concurrency: 16` with MTP enabled and `engine.mtp_depth: 3`, using up to 64 verification rows. Reserve sufficient KV and graph memory; the shipped recipes remain unchanged. Validate on idle hardware before deploying a new build to all ranks. Keep `engine.mtp_schedule: false` for C16/MTP3. Its sixteen slots and seven batch families use 46 graph variants per verification depth; scheduling needs at least two depths (92 variants), exceeding the limit of 64. Enabling it fails startup with the conflicting settings and a remedy: disable scheduling to retain C16/MTP3, or reduce concurrency.
 
-Qwen's BF16 matrix products at 17-64 decode rows use kernel-only lowering,
+Qwen's 17-64-token decode walks use kernel-only BF16 lowering,
 including the BF16 sites retained by `dense_weights: "fp8"`. This avoids
-cuBLASLt memset nodes at real tensor-parallel shard shapes. Decode products
-of at most 16 rows and prefill retain their existing dispatch.
+cuBLASLt memset nodes at real tensor-parallel shard shapes. Decode walks
+of at most 16 tokens and prefill retain their existing dispatch, including
+MTP hidden projections with multiple matrix rows per token.
 
 The 8- and 12-slot graph families are shared across models. Configurations
 above eight slots may capture more variants and choose smaller padded batches.
@@ -660,7 +661,8 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
   since 2026-09-14, forwarded to every rank) is the other families' dense
   lowering bound — rows up to n take the GEMV chunks, bf16 rows above
   cuBLASLt's algorithm, fp8 rows above the streaming tensor-core GEMM to 256
-  rows; 256 restores the pre-2026-09-14 lowering (every decode row count
+  rows. Qwen's 17-64-token decode walks keep BF16 products kernel-only regardless
+  of this bound. A value of 256 restores the pre-2026-09-14 lowering (every decode row count
   through the chunks) for an A/B, and `DGPP_SYNC_EAGER=1` makes an eager row — a prefill chunk,
   the sampled fallback's verify and re-draft — synchronize after every
   stage and validate its selection list before the attention, naming the
