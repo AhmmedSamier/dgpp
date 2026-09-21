@@ -1650,6 +1650,22 @@ sequence as a cold prefill, preserving its arithmetic. Merely matching
 token IDs at an arbitrary position would not establish that property.
 
 **Snapshot lifecycle.** A cold prefill saves its deepest reusable cut.
+Prompts of at least four regular chunks also save one earlier chunk cut,
+`(floor(prompt_tokens / chunk_tokens) - 1) * chunk_tokens`, when it lies
+past the attached prefix and before the deepest cut. For 2048-token chunks,
+this leaves 2048–4095 tokens for a changed question after the shared document.
+Both snapshots use existing cuts; the final snapshot gets an arena slot
+first. Short prompts and one-slot arenas retain the original policy.
+DeepSeek's bounded prefill retains the original policy too: saving an extra
+state would run another decoder span and change its computation.
+
+MTP prefill snapshots also depend on the token immediately after their cut,
+because the shifted draft input has already consumed it. The index checks
+that token before attaching or deduplicating a prefill entry. Decode snapshots
+have no such constraint: their lagging draft state catches up on resume.
+Both synchronous and resumable prefill retain ownership of an earlier
+snapshot if later work fails, so cancellation/unwinding can release its blocks.
+
 During decode, a request maintains a rolling snapshot at aligned committed
 positions. At retirement, that snapshot can become a close-time entry for
 the next conversation turn. Reuse requires the next prompt to contain
@@ -1665,6 +1681,10 @@ engine checks the expected position when saving the snapshot.
 **Ownership and eviction.** `engine.prefix_cache_gib` sets the snapshot
 arena budget per rank; zero disables the cache. The slot count is derived
 from the model's snapshot size, not a fixed bytes-per-token estimate.
+Startup memory planning reports bytes per snapshot, slot count, actual arena
+allocation and the separate KV token capacity. Snapshot size is independent
+of context length for the current families. See [cache sizing](docs/prefix-cache.md)
+for the recipe audit and working-set estimates.
 Entries hold references to their cache blocks, which count against pool
 usage. Admission can evict the least-recently-used eligible entry when it
 needs blocks or an arena slot. Entries attached to live requests are

@@ -6,6 +6,13 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Reuse long documents when their question changes** (2026-09-21,
+  [#17](https://github.com/HawkBearPig/dgpp/issues/17)): save one earlier
+  prefill snapshot alongside the final cut, preserve both through resumable
+  prefill, and check MTP's lookahead token before reuse. Report snapshot
+  capacity in memory plans and distinguish arena pressure from KV-pool
+  pressure. See the [validation record](benchmarks/results/2026-09-21-prefix-document-reuse.md)
+  and [sizing guide](docs/prefix-cache.md).
 - **Keep batched MTP fallback decisions isolated** (2026-09-21,
   [#15](https://github.com/HawkBearPig/dgpp/issues/15)): preserve each request's
   verified drafts before another request's fallback publishes new drafts.

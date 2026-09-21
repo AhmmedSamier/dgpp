@@ -1020,6 +1020,11 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
           task->snap = arena_.request(plan.snap_slot, plan.snap_position);
           snap = &task->snap;
         }
+        if (plan.body_snap_slot >= 0) {
+          task->body_snap = arena_.request(plan.body_snap_slot, plan.body_snap_position);
+          task->body_snap.next = snap;
+          snap = &task->body_snap;
+        }
         if (plan.attach_slot >= 0) {
           if (arena_.position(plan.attach_slot) != plan.attach_position)
             throw std::logic_error("graph engine: attached prefix differs from the plan");
@@ -1044,7 +1049,12 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
             arena_.commit(task->plan.snap_slot, task->snap);
             task->plan.snap_taken = true;
           }
+          if (task->body_snap.taken && !task->plan.body_snap_taken) {
+            arena_.commit(task->plan.body_snap_slot, task->body_snap);
+            task->plan.body_snap_taken = true;
+          }
           sched::SchedulerEngine::PrefillProgress progress;
+          progress.body_snap_taken = task->plan.body_snap_taken;
           progress.computed_tokens = cursor->next - start;
           progress.snap_taken = task->plan.snap_taken;
           if (done) progress.first_token = open_slot_finish(req, task->prompt, cursor->output);
@@ -1071,6 +1081,8 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       return progress;
     } catch (...) {
       if (task->snap.taken && !task->plan.snap_taken) arena_.commit(task->plan.snap_slot, task->snap);
+      if (task->body_snap.taken && !task->plan.body_snap_taken)
+        arena_.commit(task->plan.body_snap_slot, task->body_snap);
       task.reset();
       close_failed_slot(req);
       reseed_live_feeds();
@@ -1135,6 +1147,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     info.align = model_->session_snapshot_align();
     info.block_tokens = model_->kv_block_tokens();
     info.chunk_tokens = Model::prefill_chunk_tokens();
+    info.prefill_lookahead = model_->mtp_enabled();
+    if constexpr (requires { model_->prefill_bounded(); })
+      info.body_snapshots = !model_->prefill_bounded();
     return info;
   }
   int32_t prefill_cached(int req, const std::vector<int64_t>& prompt,
@@ -1142,30 +1157,46 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     if (plan == nullptr || plan->boundaries == nullptr)
       throw std::invalid_argument("graph engine: prefill_cached without a plan");
     return open_slot(req, prompt, [&] {
-      typename Model::SnapshotRequest snap;
+      typename Model::SnapshotRequest snap, body_snap;
       typename Model::SnapshotRequest* snap_ptr = nullptr;
       if (plan->snap_slot >= 0) {
         snap = arena_.request(plan->snap_slot, plan->snap_position);
         snap_ptr = &snap;
       }
+      if (plan->body_snap_slot >= 0) {
+        body_snap = arena_.request(plan->body_snap_slot, plan->body_snap_position);
+        body_snap.next = snap_ptr;
+        snap_ptr = &body_snap;
+      }
+      const auto commit = [&] {
+        if (plan->snap_slot >= 0) {
+          arena_.commit(plan->snap_slot, snap);
+          plan->snap_taken = snap.taken;
+        }
+        if (plan->body_snap_slot >= 0) {
+          arena_.commit(plan->body_snap_slot, body_snap);
+          plan->body_snap_taken = body_snap.taken;
+        }
+      };
       typename Model::Outputs out;
-      if (plan->attach_slot >= 0) {
-        if (arena_.position(plan->attach_slot) != plan->attach_position)
-          throw std::logic_error(
-              "graph engine: the attach slot's position differs from the plan");
-        arena_.attach(req, plan->attach_slot);
-        const std::vector<int64_t> suffix(prompt.begin() + plan->attach_position,
-                                          prompt.end());
-        out = cached_model_prefill(model_, req, suffix, *plan->boundaries,
-                                   snap_ptr, plan->images, true);
-      } else {
-        out = cached_model_prefill(model_, req, prompt, *plan->boundaries,
-                                   snap_ptr, plan->images, false);
+      try {
+        if (plan->attach_slot >= 0) {
+          if (arena_.position(plan->attach_slot) != plan->attach_position)
+            throw std::logic_error(
+                "graph engine: the attach slot's position differs from the plan");
+          arena_.attach(req, plan->attach_slot);
+          const std::vector<int64_t> suffix(prompt.begin() + plan->attach_position, prompt.end());
+          out = cached_model_prefill(model_, req, suffix, *plan->boundaries, snap_ptr, plan->images,
+                                     true);
+        } else {
+          out = cached_model_prefill(model_, req, prompt, *plan->boundaries, snap_ptr, plan->images,
+                                     false);
+        }
+      } catch (...) {
+        commit();  // a completed earlier snapshot still owns its pinned blocks
+        throw;
       }
-      if (snap_ptr != nullptr) {
-        arena_.commit(plan->snap_slot, snap);
-        plan->snap_taken = snap.taken;
-      }
+      commit();
       return out;
     });
   }
@@ -1453,7 +1484,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     std::vector<int64_t> prompt, boundaries;
     std::vector<ImageInput> images;
     sched::SchedulerEngine::PrefixPrefill plan;
-    typename Model::SnapshotRequest snap;
+    typename Model::SnapshotRequest snap, body_snap;
     std::function<sched::SchedulerEngine::PrefillProgress(int64_t)> advance;
   };
   std::vector<std::unique_ptr<PendingPrefill>> prefills_;

@@ -1,7 +1,7 @@
 # DGPP implementation status
 
 This page summarizes the implemented features and remaining work as of
-2026-09-18. [DESIGN.md](DESIGN.md) describes the architecture;
+2026-09-21. [DESIGN.md](DESIGN.md) describes the architecture;
 [CHANGELOG.md](CHANGELOG.md) and the dated records in
 [benchmarks/results](benchmarks/results/) contain implementation history
 and measurements. Performance figures apply to the configurations and
@@ -53,7 +53,7 @@ limitations, including the one-hour soak used for that release.
 | M4 — assembled GLM | Config/binding validation, layer loading, full forward and reference tools | Synthetic and real-checkpoint layer/forward comparisons |
 | M5 — tensor parallelism | Roster, CollectiveBus, sliced loading, resident images and transport regression tools | Loopback protocol tests, shard parity and four-node forward checks |
 | M6 — generation and API | Decode sessions, tokenizer, templates, scheduler, journal, HTTP/SSE, sampling and constrained output | Host service tests, tokenizer/template goldens and fabric API checks |
-| M7 — prefix cache | Pool-aligned snapshots, shared cache blocks, deterministic lookup and LRU eviction | Cached/cold prefill comparisons, MTP boundary tests and capacity sweeps |
+| M7 — prefix cache | Pool-aligned snapshots, an earlier long-document cut for changed tails, shared cache blocks, deterministic lookup and LRU eviction; MTP lookahead identity | Cached/cold target and draft parity, continuation cleanup, small-arena retention and [recipe sizing](docs/prefix-cache.md) |
 | M8 — MTP | Transactional verification, rollback and on-device speculative steps | Greedy equality with plain decode, sampled-oracle comparisons and forced rejections |
 | M9 — optimization and hardening | Kernel and collective optimizations, memory planning, failure handling and drift detection | Numerical regression checks, failure drills, fuzzing and the mixed-workload soak |
 

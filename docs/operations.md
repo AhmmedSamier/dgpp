@@ -284,6 +284,12 @@ exits before its first tick rather than form a mixed world.
 
 ### Memory on a serving node
 
+For prefix caching, size the snapshot arena and KV pool separately. Startup
+and `--memory-plan` report snapshot slots, bytes per slot and actual arena
+allocation. The [prefix-cache guide](prefix-cache.md) lists the current recipe
+capacities and explains when a larger `prefix_cache_gib` helps. The cache is
+memory-resident; it does not spill evicted prefixes to NVMe.
+
 Reserve enough node memory for weights, model state and runtime buffers.
 The GLM-5.3-FP8 main stack alone uses about 82 GiB per rank at TP=4;
 other checkpoints have different footprints. The serving applications

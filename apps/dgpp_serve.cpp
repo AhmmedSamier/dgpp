@@ -1780,15 +1780,15 @@ int main(int argc, char** argv) {
     // The pre-flight memory check's inputs (see check_memory_plan): the
     // prefix arena at this shape, and the engine's own buffers (the sampler
     // tables per slot, the prompt id buffers per context token, a margin).
-    const size_t snapshot_bytes = family->snapshot_bytes(world, mtp && world > 1);
-    const size_t prefix_arena_bytes =
-        snapshot_bytes == 0 || prefix_cache_gib <= 0.0
-            ? 0
-            : static_cast<size_t>(std::min(
-                  std::floor(prefix_cache_gib * 1024.0 * 1024.0 * 1024.0 /
-                             static_cast<double>(snapshot_bytes)),
-                  4096.0)) *
-                  snapshot_bytes;
+    const size_t snapshot_bytes = family->snapshot_bytes(world, mtp && graph_world);
+    const int arena_slots = prefix_arena_slots(snapshot_bytes, prefix_cache_gib);
+    const size_t prefix_arena_bytes = static_cast<size_t>(arena_slots) * snapshot_bytes;
+    DGPP_LOG_INFO(
+        "rank {}: prefix cache plan — {} GiB budget, {} slots of {:.3f} MiB, {:.3f} GiB allocated; "
+        "cached K/V blocks share the {}-token pool",
+        rank, prefix_cache_gib, arena_slots,
+        static_cast<double>(snapshot_bytes) / (1024.0 * 1024.0),
+        static_cast<double>(prefix_arena_bytes) / (1024.0 * 1024.0 * 1024.0), pool_tokens);
     const size_t engine_bytes =
         static_cast<size_t>(max_concurrency) * static_cast<size_t>(family->vocab_size()) * 8 +
         static_cast<size_t>(pool_tokens) * 16 + (size_t{64} << 20);

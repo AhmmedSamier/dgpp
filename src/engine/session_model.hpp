@@ -107,6 +107,7 @@ class SessionModel : public PrefillReporting {
     void* dst = nullptr;
     SessionSnapshotMeta* meta = nullptr;
     bool taken = false;
+    SnapshotRequest* next = nullptr;  // additional cuts, owned by the caller
   };
   // One walk over T rows.
   struct RowRun {
@@ -759,11 +760,11 @@ typename SessionModel<D>::PrefillCursor SessionModel<D>::prefill_cursor(
   cursor.end = start + count;
   cursor.cuts = prefill_cuts(start, cursor.end, boundaries);
   cursor.snap = snap;
-  if (snap != nullptr) {
-    if (snap->dst == nullptr || snap->meta == nullptr)
+  for (auto* at = snap; at != nullptr; at = at->next) {
+    if (at->dst == nullptr || at->meta == nullptr)
       throw std::invalid_argument("session_prefill: snapshot request without a buffer");
-    const bool at_cut = std::binary_search(cursor.cuts.begin(), cursor.cuts.end(), snap->position) ||
-                        snap->position == cursor.end;
+    const bool at_cut = std::binary_search(cursor.cuts.begin(), cursor.cuts.end(), at->position) ||
+                        at->position == cursor.end;
     if (!at_cut) throw std::invalid_argument("session_prefill: the snapshot position is not a chunk end");
   }
   return cursor;
@@ -796,7 +797,9 @@ void SessionModel<D>::prefill_chunk(PrefillCursor& cursor, int64_t budget) {
   // bounded DeepSeek decoder runs only at a span's last chunk, and a
   // snapshot must close the span before its state can be published.
   run.first_chunk = cursor.span_start;
-  run.last_chunk = c1 == end || (snap != nullptr && !snap->taken && snap->position == c1);
+  run.last_chunk = c1 == end;
+  for (auto* at = snap; at != nullptr; at = at->next)
+    run.last_chunk |= !at->taken && at->position == c1;
   cursor.span_start = run.last_chunk;
   Outputs chunk = derived().run_rows(run);
   out.logits = std::move(chunk.logits);
@@ -836,9 +839,11 @@ void SessionModel<D>::prefill_chunk(PrefillCursor& cursor, int64_t budget) {
     mtp_pos_[static_cast<size_t>(req)] = std::max<int64_t>(mtp_pos_[static_cast<size_t>(req)], r1);
     push_mtp_position(req);
   }
-  if (snap != nullptr && !snap->taken && snap->position == c1) {
-    *snap->meta = session_snapshot(req, snap->dst);
-    snap->taken = true;
+  for (auto* at = snap; at != nullptr; at = at->next) {
+    if (!at->taken && at->position == c1) {
+      *at->meta = session_snapshot(req, at->dst);
+      at->taken = true;
+    }
   }
   cursor.next = c1;
   report_prefill_progress(req, c1);
@@ -873,8 +878,9 @@ typename SessionModel<D>::PrefillCursor SessionModel<D>::session_prefill_begin(
   std::vector<int64_t> cuts = boundaries;
   // A snapshot accepted on the initial budget grid remains a mandatory cut
   // even if later advances increase the budget.
-  if (snap != nullptr && snap->position > attach_position && snap->position < end &&
-      snap->position % chunk_tokens == 0) cuts.push_back(snap->position);
+  for (auto* at = snap; at != nullptr; at = at->next)
+    if (at->position > attach_position && at->position < end && at->position % chunk_tokens == 0)
+      cuts.push_back(at->position);
   auto cursor = prefill_cursor(req, prompt.data() + attach_position, attach_position,
                                end - attach_position, cuts, snap);
   cursor.budget_tokens = chunk_tokens;

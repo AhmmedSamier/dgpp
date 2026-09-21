@@ -128,6 +128,13 @@ the first allocation if the node cannot cover it). The 1 048 576-token variant
 is ~58.1 GiB plus headroom per rank. Nothing about the rope ramp changes those
 numbers: they move with `kv_capacity`, `max_concurrency` and `prefix_cache_gib`.
 
+The current 1.5 GiB prefix arena holds 27 snapshots per rank at TP=2.
+Long prompts also retain an earlier chunk snapshot so changed questions can
+share the document's KV blocks. Snapshot size does not grow with context;
+KV-pool capacity limits how many independent long documents remain cached.
+See [prefix-cache sizing](../docs/prefix-cache.md) for all recipes and retention
+estimates before increasing the arena budget.
+
 Two things to check on the boot log, both added with this knob:
 
 - `serve: request context limit 524288 tokens — the lesser of the 524288-token

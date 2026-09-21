@@ -5473,6 +5473,53 @@ DGPP_TEST(glm_tp_resumable_prefill_snapshots_and_close_catchup) {
   DGPP_CUDA_OK(cudaFree(buffer));
 }
 
+DGPP_TEST(glm_tp_two_prefill_snapshots_preserve_changed_tail_and_mtp_state) {
+  const auto cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  GlmDiagnosticModel model(cfg, dir, 64, 1024, nullptr, 0, 1, GlmResidency::Resident,
+                           GlmHeadSharding::Full, 2, true);
+  const auto original = make_tokens(43, cfg.vocab_size);
+  const std::vector<int64_t> cuts{8, 16, 24, 32, 40};
+  void *body_buffer = nullptr, *final_buffer = nullptr;
+  DGPP_CUDA_OK(cudaMalloc(&body_buffer, model.session_snapshot_bytes()));
+  DGPP_CUDA_OK(cudaMalloc(&final_buffer, model.session_snapshot_bytes()));
+  GlmDiagnosticModel::SessionSnapshotMeta body_meta, final_meta;
+  GlmDiagnosticModel::SnapshotRequest final{40, final_buffer, &final_meta, false};
+  GlmDiagnosticModel::SnapshotRequest body{24, body_buffer, &body_meta, false, &final};
+  auto cursor = model.session_prefill_begin(0, original, 64, 8, cuts, &body);
+  while (!model.session_prefill_advance(cursor, 32)) {
+  }
+  require(body.taken && final.taken, "coalescing preserves both snapshot cuts");
+  model.session_close(0);
+  for (int cut : {24, 40}) {
+    auto prompt = original;
+    if (cut == 24)
+      for (size_t i = 25; i < prompt.size(); ++i) prompt[i] = (prompt[i] + 17) % cfg.vocab_size;
+    const auto cold = model.session_prefill(0, prompt, cuts);
+    if (cut == 40)
+      require(cold.logits == cursor.output.logits, "two snapshots preserve the cold walk");
+    model.session_attach(1, cut == 24 ? body_buffer : final_buffer,
+                         cut == 24 ? body_meta : final_meta);
+    auto hot = model.session_prefill_begin(1, prompt, 64, 8, cuts, nullptr, cut);
+    while (!model.session_prefill_advance(hot)) {
+    }
+    require(hot.output.logits == cold.logits, "changed-tail/identical target logits match bitwise");
+    const auto token = local_max(cold.logits.data(), cfg.vocab_size, 0).id;
+    require(model.session_draft(0, {token}).logits == model.session_draft(1, {token}).logits,
+            "changed-tail/identical draft state matches bitwise");
+    require(model.session_step(0, token).logits == model.session_step(1, token).logits,
+            "decode continues bitwise after either snapshot");
+    model.session_close(0);
+    model.session_close(1);
+  }
+  model.session_release_snapshot(body_meta);
+  model.session_release_snapshot(final_meta);
+  require(model.kv_blocks_in_use() == 0, "both snapshots release all references");
+  DGPP_CUDA_OK(cudaFree(body_buffer));
+  DGPP_CUDA_OK(cudaFree(final_buffer));
+}
+
 DGPP_TEST(glm_tp_prefix_snapshot_hot_matches_cold_bitwise) {
   const GlmTextConfig cfg = glm_tp_test_config();
   const std::string dir = "glm_tp_fixture";

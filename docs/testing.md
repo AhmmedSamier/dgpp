@@ -1,5 +1,11 @@
 # Tests
 
+The long-document prefix-cache regression is covered by `scheduler_test`
+(changed tails, lookahead identity, small arenas and cleanup), `qwen_decode_test`
+and `glm_tp_test` (two snapshots, resumed target/draft logits and budget changes).
+The [fabric record](../benchmarks/results/2026-09-21-prefix-document-reuse.md)
+covers real 32K/260K prompts, KV sharing and the recipe memory-plan audit.
+
 Release and testing builds use separate CMake presets and directories:
 
 | Preset | Directory | Purpose |
