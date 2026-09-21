@@ -1,12 +1,14 @@
 """The cluster launcher's recorded-deployment scan: `down` and `status`
 without --config (or with --all) act on every deployment staged under
 DGPP_LOG_DIR/deployments, not on the default deployment file. Single-node
-namespaces only (no SSH); the "ranks" are recorded `sleep` processes."""
+namespaces use recorded `sleep` processes. Peer staging commands run in
+local shells with file transfer stubbed out; no SSH is needed."""
 import json
 import io
 import os
 from pathlib import Path
 import runpy
+import shutil
 import signal
 import subprocess
 import sys
@@ -311,6 +313,48 @@ class LauncherScanTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("another launcher", result.stdout + result.stderr)
         self.assertIsNone(proc.poll())
+
+    def check_peer_staging(self, shell):
+        cluster = self.cluster(self.namespace("staging", "org/peer"), peers=1)
+        run = subprocess.run
+
+        def local_remote(command, **kwargs):
+            return run([*shell, "-c", command[-1]], **kwargs)
+
+        for state in ("missing", "empty", "populated"):
+            with self.subTest(state=state):
+                stage = self.root / state
+                cluster.stage_dir = str(stage)
+                if state != "missing":
+                    stage.mkdir()
+                stale, preserved = [], []
+                if state == "populated":
+                    stale = [stage / "serve_rank1.ops", stage / "serve_rank3.ops"]
+                    (stage / "nested").mkdir()
+                    preserved = [stage / "serve_r1.log", stage / "other.ops",
+                                 stage / "nested/serve_rank1.ops"]
+                    for path in stale + preserved:
+                        path.write_text("previous run\n")
+                with patch.object(subprocess, "run", side_effect=local_remote), \
+                        patch.object(cluster, "scp_to", return_value=True), \
+                        redirect_stdout(io.StringIO()) as output:
+                    self.assertTrue(cluster.stage(), output.getvalue())
+                self.assertTrue(stage.is_dir())
+                for path in stale:
+                    self.assertFalse(path.exists(), f"stale operation stream survived: {path}")
+                for path in preserved:
+                    self.assertEqual(path.read_text(), "previous run\n")
+
+    def test_peer_staging_cleans_stale_streams_in_bash(self):
+        self.check_peer_staging(["bash"])
+
+    def test_peer_staging_cleans_stale_streams_with_failglob(self):
+        # Exercise unmatched-glob errors even on hosts without zsh installed.
+        self.check_peer_staging(["bash", "-O", "failglob"])
+
+    @unittest.skipUnless(shutil.which("zsh"), "zsh is not installed")
+    def test_peer_staging_cleans_stale_streams_in_zsh(self):
+        self.check_peer_staging(["zsh", "-f"])
 
     def test_missing_peer_helper_and_invalid_status_are_not_reported_down(self):
         cluster = self.cluster(self.namespace("aaaa", "org/peer"), peers=1)
