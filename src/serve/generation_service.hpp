@@ -448,6 +448,8 @@ class GenerationService : public HttpHandler,
   void route_metrics(HttpResponseWriter& w);
   bool validate_chat_parameters(const minijson::Value& body, HttpResponseWriter& w);
   bool parse_max_tokens(const minijson::Value& body, HttpResponseWriter& w, int* steps, bool chat);
+  // OpenAI's ignore_eos: generate to the token limit whatever is drawn.
+  bool parse_ignore_eos(const minijson::Value& body, HttpResponseWriter& w, bool* ignore);
   bool parse_stream_options(const minijson::Value& body, HttpResponseWriter& w,
                             bool stream, bool* usage, bool* obfuscation);
   void write_stream_event(StreamRecord& r, std::string event, bool usage = false);

@@ -147,6 +147,9 @@ std::string encode_journal_tick(const GenerationService::PassEvents& events) {
         out += ",\"ca\":";
         append_json_int(&out, r.cancel_after);
       }
+      // Omitted when false, so every record that predates ignore_eos is
+      // byte-identical to what it was.
+      if (r.ignore_eos) out += ",\"ie\":true";
       // The prefix cache's inputs (M7): a request without boundaries that
       // has not opted out writes neither — the pre-cache record, byte for
       // byte.
@@ -648,6 +651,11 @@ JournalRecord decode_journal_line(std::string_view line) {
         throw std::runtime_error("journal: submit '" + r.id +
                                  "' has bad max_steps");
       r.max_steps = static_cast<int>(m.as_int());
+      if (const dgpp::minijson::Value* ie = item.find("ie")) {
+        if (!ie->is_bool())
+          throw std::runtime_error("journal: submit '" + r.id + "' has bad ignore_eos");
+        r.ignore_eos = ie->as_bool();
+      }
       if (const dgpp::minijson::Value* ca = item.find("ca")) {
         if (!ca->is_number() || ca->as_int() < 0)
           throw std::runtime_error("journal: submit '" + r.id +
