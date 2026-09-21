@@ -6,6 +6,19 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Support sixteen Qwen requests at MTP depth 3** (2026-09-21): widen decode
+  graphs to 64 rows and keep wide BF16 projections kernel-only. Preserve
+  existing small MTP projection dispatch, including expanded hyper-state
+  rows, and reject scheduled verification when graph capacity is insufficient.
+  See the [validation record](benchmarks/results/2026-09-19-qwen-c16-mtp3-upstream.md).
+
+- **Enable streaming MMA in the Qwen NVFP4 recipes** (2026-09-21): matched
+  teacher-forced head checks pass on one and two Sparks, including the YaRN
+  template, with exact unchanged-mode repeats and no global top-1 changes.
+  Add a real-checkpoint scoring tool and strict comparison gate. Recipes
+  select `fp8_head: "mma"`; `--fp8-head gemv` restores the previous path.
+  See the [numerical validation record](benchmarks/results/2026-09-21-qwen-fp8-head-numerics.md).
+
 - **Reduce DeepSeek-V4.1-Flash decode latency** (2026-09-21,
   [#28](https://github.com/HawkBearPig/dgpp/issues/28)): parallelize decoder
   candidate and restricted-entry scoring, replace streaming selection sorts

@@ -101,7 +101,7 @@ template, which is what "supported" means on this page:
 | `HawkBearPig/GLM-5.3-Flash-NVFP4-FP8` | 2 | `cluster_glm-5.3-flash_nvfp4-fp8_w2.example.json` (the 256K-context two-slot shape: `--knobs "--max-concurrency 2 --kv-capacity 262144 --prefix-cache-gib 2"`) | T=1, MTP depth 1 |
 | `Qwen/Qwen3.8-Flash-Next-FP8` | 4 | `cluster_qwen-3.8-flash-next_fp8_w4.example.json` | T=1 (`--no-mtp`), MTP depth 1, depth 2 (`--mtp-depth 2`) |
 | `Qwen/Qwen3.8-Flash-Next-FP8` | 2 | `cluster_qwen-3.8-flash-next_fp8_w2.example.json` | T=1, MTP depth 1, depth 2 |
-| `nvidia/Qwen3.8-Flash-Next-NVFP4` | 1 | `cluster_qwen-3.8-flash-next_nvfp4_w1.example.json` (the FP8 dense stack; `--dense-weights checkpoint` for BF16) | T=1, MTP depth 1, depth 2; BF16 or FP8 dense stack |
+| `nvidia/Qwen3.8-Flash-Next-NVFP4` | 1 | `cluster_qwen-3.8-flash-next_nvfp4_w1.example.json` (the FP8 dense stack; `--dense-weights checkpoint --fp8-head gemv` for BF16) | T=1, MTP depth 1, depth 2; BF16 or FP8 dense stack |
 | `nvidia/Qwen3.8-Flash-Next-NVFP4` | 2 | `cluster_qwen-3.8-flash-next_nvfp4_w2.example.json` (FP8 dense stack, mmap n-gram table, 262K context) | MTP depth 1; mmap is shipped, resident is the measured placement baseline |
 | `nvidia/GLM-4.7-NVFP4` | 4 | `cluster_glm-4.7_nvfp4_w4.example.json` | T=1, MTP depth 1, depth 2 |
 | `HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64` (the full GLM-5.3) | 4 | `cluster_glm-5.3_int4-int8_w4.example.json` (eight slots; the fp8 latent cache at 208K: `--knobs "--kv-dtype fp8 --kv-capacity 212992 --prefix-cache-gib 1.5"`) | T=1, MTP depth 1, depth 2 (two slots); bf16 or fp8 latent cache |
@@ -602,10 +602,11 @@ varied within the unchanged baseline as well as across builds, so this is
 fixed-prompt/output-budget throughput evidence, not identical-token-path or
 quality-equivalence evidence. The [record and raw results](../benchmarks/results/2026-09-20-qwen-fp8-head-e2e.md)
 include per-class results, calibration, transcript comparisons and restoration.
-These measurements predate the deployment switch: the optimized path now
-requires `engine.fp8_head: "mma"`. The shipped default remains `"gemv"`;
-this is historical evidence for the kernel change, not a rerun of the
-subsequent configuration plumbing or current upstream integration.
+These measurements predate the deployment setting. The Qwen NVFP4 templates
+now select `engine.fp8_head: "mma"` after
+[matched real-checkpoint numerical validation](../benchmarks/results/2026-09-21-qwen-fp8-head-numerics.md).
+This remains historical throughput evidence; the numerical campaign does not
+rerun the performance measurement on the current integration.
 
 ### Qwen3.8-Flash-Next-NVFP4, world 1, FP8 dense
 

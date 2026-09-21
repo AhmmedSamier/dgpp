@@ -71,6 +71,12 @@ void gemm_dense(const QwenGemmWorkspace& g, const uint16_t* act, int64_t act_str
 
 }  // namespace
 
+void qwen_configure_gemm_rows(CublasLtGemm& gemm, int tokens, bool decode) {
+  const bool wide_decode = decode && tokens > 16;
+  gemm.set_kernel_only_rows(wide_decode ? 17 : 0, wide_decode ? kGemmDecodeLoweringRows : 0);
+  gemm.set_bf12_wide(decode);
+}
+
 void qwen_mtp_hidden_projection(const QwenGemmWorkspace& g, const uint16_t* act,
     const uint16_t* weight, uint16_t* out, int tokens, int hc, int hidden,
     bool decode, cudaStream_t stream) {
@@ -80,8 +86,11 @@ void qwen_mtp_hidden_projection(const QwenGemmWorkspace& g, const uint16_t* act,
   // Only the newly widened decode takes MMA; preserve prefill and all
   // existing <=8-row walks. This draft projection uses the same MMA row
   // chain at every wide shape, including the diagnostic lowering mode.
-  if (decode && tokens > 8 &&
-      mma_gemv_shape_ok(weight, act, static_cast<size_t>(hidden), rows, hidden)) {
+  if (decode && tokens > 8) {
+    if (!mma_gemv_shape_ok(weight, act, static_cast<size_t>(hidden), rows, hidden))
+      throw std::invalid_argument(
+          "qwen_mtp_hidden_projection: wide decode requires an aligned MMA-supported shape; "
+          "refusing cuBLASLt fallback");
     launch_mma_gemv_bf16_bf16(act, static_cast<size_t>(hidden), weight, out,
                               rows, hidden, hidden, static_cast<size_t>(hidden), stream);
   } else {

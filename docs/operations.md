@@ -42,7 +42,7 @@ its node.
 One template per model, quant and world (2026-09-14): the modes a template
 does not name are knobs — `--no-mtp` for the plain T=1 world, `--mtp-depth N`,
 `--max-concurrency N`, `--kv-capacity N`, `--kv-dtype fp8`,
-`--prefix-cache-gib X`, `--dense-weights checkpoint`,
+`--prefix-cache-gib X`, `--dense-weights checkpoint --fp8-head gemv`,
 `--bf16-weights checkpoint` — appended with
 `dgpp-cluster up --knobs "..."` (deploy/README.md lists the retired variants
 and the knobs that reproduce them).
@@ -67,15 +67,20 @@ three values: switching never rebuilds them.
 `kv_dtype` affects only GLM-5.3's latent cache. Qwen and GLM-4.7 K/V
 caches stay BF16. Qwen's `ngram_table` and `dense_weights` settings
 control table residency and optional FP8 encoding of dense projections.
-`engine.fp8_head` defaults to `"gemv"`. With Qwen and `dense_weights: "fp8"`,
-set it to `"mma"` (or pass `--fp8-head mma`) to opt in to streaming MMA above
-the dense GEMV threshold and within the configured decode capacity. Other
-values are rejected; MMA with another model family or non-FP8 dense weights
-is also rejected. The setting is distributed by rank 0 and included in the
-configuration digest, so peers use the same dispatch. It changes floating-point
-accumulation order, including for short prefill chunks within that capacity;
-real-checkpoint teacher-forced numerical validation remains pending. Shipped
-recipes retain GEMV. See the [measurement and limits](../benchmarks/results/2026-09-20-qwen-fp8-head-e2e.md).
+The Qwen NVFP4 templates, including YaRN, set `engine.fp8_head: "mma"`.
+With `dense_weights: "fp8"`, this uses streaming MMA above the dense GEMV
+threshold and within the configured decode capacity, including short prefills
+in that interval. Matched one- and two-Spark teacher-forced checks passed;
+see the [numerical results and scope](../benchmarks/results/2026-09-21-qwen-fp8-head-numerics.md).
+The interface default remains `"gemv"` for configurations that omit the key.
+The service rejects unsupported `fp8_head` values. MMA requires Qwen and FP8
+dense weights.
+The setting is distributed by rank 0 and included in the configuration digest,
+so peers use the same dispatch. It changes floating-point accumulation order.
+Use `--fp8-head gemv` to restore the previous head path. When restoring BF16
+dense weights, pass `--dense-weights checkpoint --fp8-head gemv` together.
+The earlier [throughput measurement and limits](../benchmarks/results/2026-09-20-qwen-fp8-head-e2e.md)
+remain historical evidence.
 The [single-node guide](qwen38_single_spark.md) covers the one-Spark memory
 plan, and the [two-node benchmark](../benchmarks/results/2026-09-16-qwen-nvfp4-w2.md)
 records the resident-versus-mapped placement decision.
@@ -391,6 +396,21 @@ the drafts in order (a stand moves to the next row, a reject ends the
 step on the residual token, the last row reached is sampled plainly) and
 a host fallback continues the chain exactly as the device would have.
 
+Qwen graph serving supports `engine.max_concurrency: 16` with MTP enabled and `engine.mtp_depth: 3`, using up to 64 verification rows. Reserve sufficient KV and graph memory; the shipped recipes remain unchanged. Validate on idle hardware before deploying a new build to all ranks. Keep `engine.mtp_schedule: false` for C16/MTP3. Its sixteen slots and seven batch families use 46 graph variants per verification depth; scheduling needs at least two depths (92 variants), exceeding the limit of 64. Enabling it fails startup with the conflicting settings and a remedy: disable scheduling to retain C16/MTP3, or reduce concurrency.
+
+Qwen's 17-64-token decode walks use kernel-only BF16 lowering,
+including the BF16 sites retained by `dense_weights: "fp8"`. This avoids
+cuBLASLt memset nodes at real tensor-parallel shard shapes. Decode walks
+of at most 16 tokens and prefill retain their existing dispatch, including
+MTP hidden projections with multiple matrix rows per token.
+
+The 8- and 12-slot graph families are shared across models. Configurations
+above eight slots may capture more variants and choose smaller padded batches.
+Those variants also reduce the scheduling budget: DeepSeek at 11 slots and
+depth 2 now needs 34 variants per depth, so two depths no longer fit the
+64-variant limit. The shipped recipes stay at or below eight slots and retain
+their existing families.
+
 **The scheduled verify depth** (`engine.mtp_schedule`, `--mtp-schedule`;
 needs `decode_graph`, `mtp` and a depth of at least 2 to matter) lets a
 greedy request verify fewer rows than the whole draft block on a step
@@ -406,7 +426,7 @@ falls below (the survival is monotone, so the verified drafts are a
 prefix). A draft not verified is decoded plainly next step, so the
 committed transcript is the plain greedy one at every depth — the change
 is the step's cost only. Each depth replays its own captured variant (the
-bus's 32 graph variants bound them: two per slot per depth plus two per
+bus's 64 graph variants bound them: two per slot per depth plus two per
 batch family; a spread of depths that always keeps the full block is used
 when the budget is short, and a policy depth rounds up to the next
 variant). The batched replay takes one depth for its slots, the deepest
@@ -641,7 +661,8 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
   since 2026-09-14, forwarded to every rank) is the other families' dense
   lowering bound — rows up to n take the GEMV chunks, bf16 rows above
   cuBLASLt's algorithm, fp8 rows above the streaming tensor-core GEMM to 256
-  rows; 256 restores the pre-2026-09-14 lowering (every decode row count
+  rows. Qwen's 17-64-token decode walks keep BF16 products kernel-only regardless
+  of this bound. A value of 256 restores the pre-2026-09-14 lowering (every decode row count
   through the chunks) for an A/B, and `DGPP_SYNC_EAGER=1` makes an eager row — a prefill chunk,
   the sampled fallback's verify and re-draft — synchronize after every
   stage and validate its selection list before the attention, naming the

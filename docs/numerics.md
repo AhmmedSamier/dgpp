@@ -1,5 +1,78 @@
 # Judging a numerics change
 
+For the Qwen FP8 vocabulary head, `qwen_head_check` scores fixed teacher
+tokens through the production GEMV or MMA dispatch. Its JSON manifest is an
+array of `{"name": "hard", "text": "..."}` objects; explicit `ids` arrays
+are also accepted for fixtures. Build the target, then use the same manifest,
+checkpoint, rank count and decode capacity for both modes:
+
+```bash
+python3 - <<'PY'
+import json
+from pathlib import Path
+texts = [("quick", "teacher_text.txt"), ("hard", "teacher_text_hard.txt"),
+         ("memorized", "teacher_text_memorized.txt")]
+Path("/tmp/corpora.json").write_text(json.dumps([
+    {"name": name, "text": (Path("benchmarks") / filename).read_text()}
+    for name, filename in texts]) + "\n")
+PY
+scripts/fabric_run.sh --app build-ci/qwen_head_check --fetch-logs \
+    --stage-file /tmp/corpora.json --log-dir /tmp/head-gemv -- \
+    --model nvidia/Qwen3.8-Flash-Next-NVFP4 --requests /tmp/corpora.json \
+    --image-dir /path/to/resident-cache --fp8-head gemv
+# Repeat with --log-dir /tmp/head-mma and --fp8-head mma.
+python3 scripts/qwen_head_compare.py /tmp/head-gemv /tmp/head-mma \
+    --output /tmp/head-comparison.json
+```
+
+Select the deployment with `DGPP_CLUSTER_CONFIG`, as for other fabric runs.
+On one Spark, run the binary directly and retain its output as `r0.log` in
+each run directory. Each mode repeats the entire protocol twice. The default
+decode capacity is 16: captured verification covers 4/6/8/12/16 rows, with
+the complete text at 16 and the first 1024 tokens at the other widths. Capacity
+8 (`--decode-capacity 8`) covers 4/6/8 rows, with the complete text at 8.
+The text is partitioned into equal contiguous request streams; each has a
+16-token prefill, and incomplete final verification groups are excluded.
+Cold short-prefill forwards sample 32 evenly spaced excerpts per text at
+lengths 1/4/5/8/9/16/17, scoring every row. `--yarn` uses the shipped
+factor-2 Qwen YaRN configuration. These are head checks, not long-context
+retrieval or speculative-decoder quality checks.
+
+The analyzer requires complete vocabulary shards and case counts, matching
+tokens and hidden states across modes, and exact logit-hash repeatability
+within each mode. It also requires unchanged logits outside the optimized
+interval. It joins the vocabulary slices before evaluating the 0.02-nat
+mean-NLL budget, the 1% limit on token changes exceeding 1 nat, and top-1
+changes within two BF16 ulps. A failed or incomplete run exits nonzero.
+
+The same checker accepts `--compaction off` and `--compaction on` for
+fixed-token comparisons of physical and compact Qwen graph layouts. Use the
+same manifest and checkpoint for both, then pass the off/on directories to
+`qwen_head_compare.py`. This protocol holds the default FP8 head and RoPE
+settings fixed, allocates sixteen physical slots and captures up to 64 rows:
+
+```bash
+scripts/fabric_run.sh --app build-ci/qwen_head_check --fetch-logs \
+    --stage-file /tmp/corpora.json --log-dir /tmp/compact-off -- \
+    --model Qwen/Qwen3.8-Flash-Next-FP8 --requests /tmp/corpora.json \
+    --image-dir /path/to/resident-cache --compaction off
+# Repeat with --log-dir /tmp/compact-on and --compaction on.
+python3 scripts/qwen_head_compare.py /tmp/compact-off /tmp/compact-on \
+    --output /tmp/compact-comparison.json
+```
+
+The sparse cases place two requests in slots 15 and 0 at one, two and four
+rows per request, and five requests in slots 15/0/7/3/12 at four rows each.
+Compaction selects two or six groups, including an inactive padding group
+in the latter case; the physical policy uses sixteen. Four- and sixteen-slot
+dense cases require identical hidden states and logits across modes. All
+cases require exact repeats and rank agreement. Sparse cases allow hidden
+states to change with the graph shape and use the same NLL and top-1 gates
+above. Four-row cases score the complete corpus; other cases use its first
+1024 tokens. This checks the teacher-forced verification backbone; sampled
+fallback and draft-state transitions are exercised separately by the graph
+engine tests.
+
 Kernel work is allowed to change floating-point reduction order when it buys
 latency, so two builds can legitimately produce different bits. These evidence
 tools judge numerical changes and size sampling; all read run directories through

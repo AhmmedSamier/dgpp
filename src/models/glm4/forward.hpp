@@ -108,6 +108,7 @@ class Glm4Model : public SessionModel<Glm4Model> {
   // final hidden [T-1, hidden].
   Outputs mtp_forward(const std::vector<int64_t>& token_ids);
 
+  static constexpr int decode_rows_cap() { return 32; }
   static constexpr int prefill_chunk_tokens() { return kPrefillChunkTokens; }
   static constexpr int kv_block_tokens_static() { return kBlockTokens; }
   // The same number for a shape that is not built yet (the memory plan).

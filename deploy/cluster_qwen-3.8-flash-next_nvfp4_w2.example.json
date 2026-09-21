@@ -18,7 +18,8 @@
     "admission_window": 256,
     "sampling_candidates": 128,
     "stats_interval_s": 10,
-    "dense_weights": "fp8"
+    "dense_weights": "fp8",
+    "fp8_head": "mma"
   },
   "paths": {
     "resident_cache": ""

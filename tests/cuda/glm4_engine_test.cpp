@@ -542,6 +542,32 @@ void rank_work_sched(int r, const Glm4TextConfig& cfg, const std::string& dir, c
   }
 }
 
+DGPP_TEST(glm4_model_rejects_decode_rows_above_family_cap) {
+  const auto cfg = glm4fx::tiny_config();
+  const std::string dir = "glm4_engine_cap_fixture";
+  glm4fx::write_fixture(cfg, dir);
+  require(Glm4Model::decode_rows_cap() == 32, "GLM-4.7 retains its family cap");
+  for (const int rows : {33, 64}) {
+    for (const bool construct : {false, true}) {
+      bool rejected = false;
+      try {
+        if (construct) {
+          Glm4Model model(cfg, dir, 128, 2048, Glm4Residency::Resident, nullptr, 0, 1, 16, false,
+                          rows);
+        } else {
+          (void)Glm4Model::plan_memory(cfg, 128, 2048, 0, 1, Glm4Residency::Resident, 16, false,
+                                       rows);
+        }
+      } catch (const std::invalid_argument& e) {
+        const std::string message = e.what();
+        rejected = message.find("decode_rows") != std::string::npos &&
+                   message.find("32") != std::string::npos;
+      }
+      require(rejected, "GLM-4.7 rejects oversized decode_rows at its model boundary");
+    }
+  }
+}
+
 DGPP_TEST(glm4_engines_loopback_world_2_scheduled_verify_depth_from_draft_probabilities_is_exact) {
   const Glm4TextConfig cfg = glm4fx::tiny_config();
   const std::string dir = "glm4_engine_fixture";

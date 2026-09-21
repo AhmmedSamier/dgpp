@@ -1,0 +1,7 @@
+2026-09-21 17:41:45.405 === SIGINT rank 0 (1856545) — the stop record releases the peers
+2026-09-21 17:41:47.406 === waiting for the peers to drain
+2026-09-21 17:41:48.693 === op-stream identity (every rank)
+2026-09-21 17:41:48.693 bb64055b2616ff6aaec64b5667bb7ac3  /tmp/dgpp-fp8-head-validation/api/serve_rank0.ops
+2026-09-21 17:41:48.693 bb64055b2616ff6aaec64b5667bb7ac3  /tmp/dgpp-fp8-head-validation/api/serve_rank1.ops
+2026-09-21 17:41:48.693 op streams: identical across 2 ranks
+2026-09-21 17:41:48.693 === logs in /tmp/dgpp-fp8-head-validation/api

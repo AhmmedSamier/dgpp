@@ -122,7 +122,7 @@ class QwenModel : public SessionModel<QwenModel> {
 
   int64_t kv_block_tokens() const { return num_qsa_ > 0 ? kBlockTokens : 0; }
   static constexpr int prefill_chunk_tokens() { return kPrefillChunkTokens; }
-  static constexpr int decode_rows_cap() { return 16; }
+  static constexpr int decode_rows_cap() { return kDecodeRowsMax; }
   static constexpr bool kResumablePrefill = true;
   static constexpr bool kCompactBatches = true;
   static constexpr int kv_block_tokens_static() { return kBlockTokens; }

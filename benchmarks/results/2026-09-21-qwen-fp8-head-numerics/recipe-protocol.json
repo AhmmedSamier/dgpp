@@ -1,0 +1,20 @@
+{
+  "purpose": "Direct native eight-row recipe checks supplement full-corpus sixteen-row checks",
+  "campaigns": [
+    {
+      "name": "recipe_w1",
+      "world": 1
+    },
+    {
+      "name": "recipe_w2",
+      "world": 2
+    }
+  ],
+  "decode_capacity": 8,
+  "yarn": false,
+  "repeats_per_mode": 2,
+  "manifest": "first 2048 Unicode characters of each full-protocol text",
+  "boundary_tokens": 1024,
+  "prefill_trials": 8,
+  "gate": "same complete-data, exact-control, NLL and top-1 gates as protocol.json"
+}

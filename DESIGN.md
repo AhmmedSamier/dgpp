@@ -1572,7 +1572,8 @@ the draft block's and its two fc matrices, the head — 1.7 of a world-4 rank's
 `dense_weights = "fp8"` the projections and the head are already block-FP8:
 nothing is packed. DeepSeek (tensor-core lowering) still packs nothing.
 
-Qwen's FP8 vocabulary head defaults to GEMV. With `engine.fp8_head: "mma"`,
+Qwen's FP8 vocabulary-head interface defaults to GEMV; the NVFP4 deployment
+templates select `engine.fp8_head: "mma"`. With MMA enabled,
 it uses streaming MMA when its row count exceeds
 `dense_gemv_rows()` and fits the model's configured decode-row ceiling.
 This reuses each weight tile across verification rows instead of rereading
@@ -1585,8 +1586,10 @@ shapes covered by its gates. Consequently short-prefill logits can depend on
 deployment capacity; bitwise eager/graph gates must use matching decode
 capacities and head settings. The setting rides the rank-0 settings record
 and effective configuration digest. `engine.fp8_head: "gemv"` retains the
-previous dispatch, and the BF16 head is unaffected. Validation status
-is recorded in [the FP8 head record](benchmarks/results/2026-09-19-qwen-fp8-head.md).
+previous dispatch, and the BF16 head is unaffected. The
+[real-checkpoint numerical record](benchmarks/results/2026-09-21-qwen-fp8-head-numerics.md)
+covers native one- and two-Spark deployments, the YaRN recipe, dispatch
+boundaries, repeated teacher-forced scoring and short prefills.
 
 *Companions and the prefetch windows.* `WeightPrefetcher::add` coalesces a
 window's adds and bridges holes of up to 2 MB between them — a read of
@@ -2316,10 +2319,19 @@ models and confidence-scheduled depth retain physical-prefix selection,
 where sparse occupancy can require a wider batch. Closed/padded groups
 use inactive positions; compact padding also has request ID -1.
 
-The application allows eight request slots. GLM-5.3 and Qwen support eight
-batched decode rows, while GLM-4.7 supports up to 32. MTP uses
-`1 + depth` rows per request. GLM-5.3 and Qwen replay scalar graphs
-past depth 1; GLM-4.7 can capture deeper batched draft chains. Each graph
+The application allows sixteen request slots. Qwen supports up to 64 batched
+decode rows, including sixteen requests at MTP depth 3. Its batch families
+cover 2/3/4/6/8/12/16 slot prefixes when the row budget permits. MTP uses
+`1 + depth` rows per request. Other model families retain their own row caps.
+Qwen's 17-64-token decode walks use kernel-only GEMV chunks for BF16 products,
+including BF16 sites retained with FP8 dense weights. Its wide MTP embedding
+projection uses MMA above 32 rows. Unsupported kernel shapes fail explicitly;
+none of these paths silently falls back to cuBLASLt. Walks of at most 16
+tokens and prefill retain their existing dispatch, including MTP hidden
+projections that expand each token into multiple matrix rows. C16/MTP3 does not
+support scheduled verification: two depth options would need 92 graph variants,
+exceeding the bus limit of 64. Capacity validation rejects `engine.mtp_schedule`
+before allocating its confidence state. Each graph
 variant owns its bus generation cells and parity-specific buffers so a
 shape switch preserves collective ordering.
 

@@ -12,6 +12,7 @@
 // world-1 ones (reported; the folds reassociate, so a near tie may flip a
 // late token — the first tokens must agree).
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
@@ -25,21 +26,22 @@
 #include <string>
 #include <thread>
 #include <vector>
+
 #include <cuda_runtime.h>
+
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
 #include "common/log.hpp"
 #include "common/test.hpp"
+#include "engine/eager_engine.hpp"
+#include "engine/graph_engine.hpp"
 #include "engine/tp_bus.hpp"
+#include "kda_test_helpers.hpp"
 #include "models/qwen/config.hpp"
 #include "models/qwen/forward.hpp"
 #include "models/qwen/loader.hpp"
 #include "net/collective_bus.hpp"
 #include "qwen_fixture.hpp"
-#include "kda_test_helpers.hpp"
-#include "engine/eager_engine.hpp"
-#include "engine/graph_engine.hpp"
-#include "engine/tp_bus.hpp"
 
 namespace fs = std::filesystem;
 using dgpp::BusBoundaryReducer;
@@ -480,8 +482,19 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
   const int sample_cap = std::getenv("DGPP_TEST_COMPACT_SAMPLING")
                              ? std::atoi(std::getenv("DGPP_TEST_COMPACT_SAMPLING"))
                              : 0;
-  constexpr int slots = 8;
-  constexpr int mtp_depth = 1;
+  const bool force_fallback = std::getenv("DGPP_TEST_COMPACT_FALLBACK") != nullptr;
+  const bool rows32 = [] {
+    const char* value = std::getenv("DGPP_TEST_QWEN_ROWS32");
+    return value && std::string(value) == "1";
+  }();
+  const bool rows64 = [] {
+    const char* value = std::getenv("DGPP_TEST_QWEN_ROWS64");
+    return value && std::string(value) == "1";
+  }();
+  const int slots = rows64 ? 16 : 8;
+  const int decode_rows = rows64 ? 64 : rows32 ? 32 : 16;
+  const int mtp_depth = (rows32 || rows64) ? 3 : 1;
+  require(QwenModel::decode_rows_cap() >= decode_rows, "Qwen advertises the tested decode width");
   const bool old_fp8 = dgpp::QwenLayerStream::dense_weights_fp8();
   struct RestoreDenseWeights {
     bool fp8;
@@ -505,12 +518,10 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
     try {
       auto* bus = buses[rank].get();
       BusBoundaryReducer reducer(*bus, wait_timeout_ms());
-      QwenModel eager(
-          cfg, dir, kMaxTokens, 2048, QwenResidency::Resident, &reducer, rank, kWorld, 8,
-          /*mtp=*/false, /*decode_rows=*/16, dgpp::QwenLayerStream::dense_weights_fp8());
+      QwenModel eager(cfg, dir, kMaxTokens, 2048, QwenResidency::Resident, &reducer, rank, kWorld,
+                      slots, /*mtp=*/false, decode_rows, dgpp::QwenLayerStream::dense_weights_fp8());
       QwenModel model(cfg, dir, kMaxTokens, 2048, QwenResidency::Resident, &reducer, rank, kWorld,
-                      8,
-                      /*mtp=*/true, /*decode_rows=*/16, dgpp::QwenLayerStream::dense_weights_fp8());
+                      slots, /*mtp=*/true, decode_rows, dgpp::QwenLayerStream::dense_weights_fp8());
       require(eager.max_decode_rows() == model.max_decode_rows() &&
                   eager.fp8_head_mma() == model.fp8_head_mma(),
               "eager/graph parity requires matching decode capacity and head mode");
@@ -526,7 +537,8 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
       }
       arrived = true;
       barrier.arrive_and_wait();
-      EagerEngineAdapter<QwenModel> plain(&eager, 8,
+      EagerEngineAdapter<QwenModel> plain(
+          &eager, slots,
           dgpp::make_fabric_pick(bus, rank, kWorld, scratch, cfg.vocab_size, wait_timeout_ms()));
       GraphEngineAdapter<QwenModel> graph(&model, bus, rank, kWorld, scratch, cfg.vocab_size,
                                           wait_timeout_ms(), /*batch_min_live=*/2, prefix_scratch,
@@ -535,14 +547,33 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
       if (sample_cap)
         for (int req = 0; req < slots; ++req)
           graph.configure_sampling(req, dgpp::sample::greedy_params(), 0);
-      require(graph.batch_families() == std::vector<int>({2, 3, 4, 6, 8}), "wide batch families");
+      require(graph.batch_families() == (rows64 ? std::vector<int>{2, 3, 4, 6, 8, 12, 16}
+                                                : std::vector<int>{2, 3, 4, 6, 8}),
+              "wide batch families");
+      if (rows64) {
+        bool rejected = false;
+        try {
+          graph.configure_verify_schedule(true, 8.f, 1.f / 36.f);
+        } catch (const std::invalid_argument& error) {
+          const std::string message = error.what();
+          require(message.find("engine.mtp_schedule=true") != std::string::npos &&
+                      message.find("engine.max_concurrency=16") != std::string::npos &&
+                      message.find("engine.mtp_depth=3") != std::string::npos &&
+                      message.find("92 graph variants") != std::string::npos &&
+                      message.find("limit of 64") != std::string::npos &&
+                      message.find("engine.mtp_schedule=false") != std::string::npos,
+                  "C16 scheduled verification error names the settings, limit and remedy");
+          rejected = true;
+        }
+        require(rejected, "C16/MTP3 rejects scheduled verification before capture");
+      }
       // Exact MTP/plain equivalence is checked in the row-independent CTest
       // lane. The production lowering changes reduction order at m > 4;
       // qwen_decode_test separately bounds its teacher-forced logits/loss.
-      const bool row_independent = dgpp::dense_gemv_rows() >= 16;
+      const bool row_independent = dgpp::dense_gemv_rows() >= decode_rows;
       // Reuse every slot at both widths, then retire interior slots while
       // the highest slot remains live. Each surviving stream stays isolated.
-      for (const int count : {6, 8}) {
+      for (const int count : {slots * 3 / 4, slots}) {
         std::vector<std::vector<int64_t>> prompts;
         std::vector<std::vector<int32_t>> expected, uninterrupted;
         for (int req = 0; req < count; ++req) {
@@ -554,21 +585,28 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
           std::vector<int> live;
           for (int req = 0; req < count; ++req) {
             got.push_back({graph.prefill(req, prompts[req])});
-            graph.reserve(req, static_cast<int64_t>(prompts[req].size()) + 2 * kSteps + 8);
+            graph.reserve(req,
+                          static_cast<int64_t>(prompts[req].size()) + (1 + mtp_depth) * kSteps + 8);
             live.push_back(req);
           }
           for (int step = 0; step < kSteps; ++step) {
             const auto before = graph.decode_batch_stats();
             const auto tokens = graph.step_batch(live);
             const auto after = graph.decode_batch_stats();
-            require(after.slots == count && after.active == static_cast<int>(live.size()) &&
-                        after.rows_per_request == 2,
+            int bucket = count;
+            if (test_compaction()) {
+              const auto families = graph.batch_families();
+              bucket = *std::lower_bound(families.begin(), families.end(), live.size());
+            }
+            require(after.slots == bucket && after.active == static_cast<int>(live.size()) &&
+                        after.rows_per_request == 1 + mtp_depth,
                     "last launched batch shape");
             require(after.replays == before.replays + 1 &&
-                        after.replays_by_slots[count] == before.replays_by_slots[count] + 1,
+                        after.replays_by_slots[bucket] == before.replays_by_slots[bucket] + 1,
                     "one graph launch in its capacity bucket");
-            require(after.rows - before.rows == static_cast<uint64_t>(count * 2) &&
-                        after.padded_rows - before.padded_rows == (count - live.size()) * 2,
+            require(after.rows - before.rows == static_cast<uint64_t>(bucket * (1 + mtp_depth)) &&
+                        after.padded_rows - before.padded_rows ==
+                            (bucket - live.size()) * (1 + mtp_depth),
                     "interior retired slots count as padding");
             for (size_t i = 0; i < live.size(); ++i) {
               auto& out = got[live[i]];
@@ -592,8 +630,11 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
           for (const int req : live) graph.close(req);
         }
       }
-      require(graph.batch_family_steps(3) > 0 && graph.batch_family_steps(4) > 0,
-              "both twelve- and sixteen-row graphs replayed");
+      require(graph.batch_family_steps(rows64 ? 5 : 3) > 0 &&
+                  graph.batch_family_steps(rows64 ? 6 : 4) > 0,
+              rows64   ? "both 48- and 64-row MTP3 graphs replayed"
+              : rows32 ? "both 24- and 32-row MTP3 graphs replayed"
+                       : "both twelve- and sixteen-row graphs replayed");
       {
         const auto long_prompt = smoke_tokens(cfg, 63, 20260915);
         const std::vector<int64_t> cuts{8, 16, 24, 32, 40, 48, 56};
@@ -604,14 +645,14 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
         for (int i = 0; i < kSteps; ++i) scalar.push_back(plain.step(1)[0]);
         plain.close(1);
         const auto short_prompt = smoke_tokens(cfg, 11, 1234);
-        for (const int req : {0, 7}) {
+        for (const int req : {0, slots - 1}) {
           (void)graph.prefill(req, short_prompt);
           graph.reserve(req, 256);
         }
         std::vector<int32_t> expected{graph.prefill_cached(1, long_prompt, &plan)};
         graph.reserve(1, 128);
         while (expected.size() <= kSteps) {
-          const auto tokens = graph.step_batch({0, 1, 7});
+          const auto tokens = graph.step_batch({0, 1, slots - 1});
           expected.insert(expected.end(), tokens[1].begin(), tokens[1].end());
         }
         expected.resize(kSteps + 1);
@@ -644,11 +685,12 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
             const auto progress = graph.advance_prefill(1);
             require(progress.computed_tokens > 0 && progress.computed_tokens <= 8, "prefill quantum size");
             if (progress.first_token >= 0) got.push_back(progress.first_token);
-            else (void)graph.step_batch({0, 7});
+            else
+              (void)graph.step_batch({0, slots - 1});
           }
           graph.reserve(1, 128);
           while (got.size() <= kSteps) {
-            const auto tokens = graph.step_batch({0, 1, 7});
+            const auto tokens = graph.step_batch({0, 1, slots - 1});
             got.insert(got.end(), tokens[1].begin(), tokens[1].end());
           }
           got.resize(kSteps + 1);
@@ -656,19 +698,20 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
           graph.close(1);
         }
         graph.close(0);
-        graph.close(7);
+        graph.close(slots - 1);
         graph.prefix_release(0);
       }
       if (sample_cap) {
         std::vector<std::vector<int32_t>> reference;
         const std::vector<std::vector<int>> maps{{0, 1}, {slots - 1, 3}, {1, 0}};
         for (const auto& ids : maps) {
+          const auto fallbacks_before = graph.fallbacks();
           std::vector<std::vector<int32_t>> generated(2);
           for (int q = 0; q < 2; ++q) {
             dgpp::sample::Params params;
-            params.temperature = q == 0 ? .7f : 1.1f;
-            params.top_k = 7;
-            params.top_p = .9f;
+            params.temperature = force_fallback ? 100.f : (q == 0 ? .7f : 1.1f);
+            params.top_k = force_fallback ? 0 : 7;
+            params.top_p = force_fallback ? 1.f : .9f;
             params.presence_penalty = .2f;
             graph.configure_sampling(ids[q], params, 4567 + q);
             generated[q].push_back(graph.prefill(ids[q], smoke_tokens(cfg, 13 + q, 789 + q)));
@@ -684,8 +727,9 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
               const auto& tokens = next[reverse ? 1 - q : q];
               generated[q].insert(generated[q].end(), tokens.begin(), tokens.end());
             }
-            require(graph.batch_family_steps(0) == compact_steps + 1,
-                    "sampled sparse requests use compact bucket");
+            if (test_compaction())
+              require(graph.batch_family_steps(0) == compact_steps + 1,
+                      "sampled sparse requests use compact bucket");
           }
           for (auto& g : generated) g.resize(24);
           if (reference.empty())
@@ -693,6 +737,9 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
           else
             require(generated == reference,
                     "sampled transcripts survive physical remapping and slot reuse");
+          if (force_fallback)
+            require(graph.fallbacks() > fallbacks_before,
+                    "each physical mapping must exercise sampled fallback");
           for (int req : ids) graph.close(req);
         }
       }
@@ -752,6 +799,87 @@ DGPP_TEST(qwen_engines_loopback_world_2_graph_matches_eager) {
   require(o.bb.size() == 10 && o.bc.size() == 8, "the batched transcripts' lengths");
 }
 
+DGPP_TEST(qwen_mtp_existing_hidden_projection_keeps_dispatch) {
+  using namespace dgpp::kda_test;
+  constexpr int H = 2560, hc = 4, max_tokens = 16;
+  const auto act = random_bf16_normal(8301, max_tokens * hc * H, 0.3f);
+  const auto weight = random_bf16_normal(8302, H * H, 0.02f);
+  DevBuf da(act.size() * 2), dw(weight.size() * 2), out(act.size() * 2), ws(64u << 20);
+  da.upload(act.data(), act.size() * 2);
+  dw.upload(weight.data(), weight.size() * 2);
+  dgpp::CublasLtGemm gemm;
+  gemm.set_decode_rows(4);
+  dgpp::QwenGemmWorkspace g{&gemm, ws.p, 64u << 20};
+  const auto stream = test_stream();
+  struct Result {
+    std::vector<uint16_t> values;
+    std::vector<cudaGraphNodeType> node_types;
+    std::vector<std::array<uintptr_t, 8>> kernels;
+  };
+  const auto capture = [&](int tokens, bool decode, bool configured) {
+    if (configured) {
+      // A smaller walk can follow a wide graph capture on the same model.
+      dgpp::qwen_configure_gemm_rows(gemm, 64, true);
+      dgpp::qwen_configure_gemm_rows(gemm, tokens, decode);
+    } else {
+      gemm.set_kernel_only_rows(0, 0);
+      gemm.set_bf12_wide(decode);
+    }
+    cudaGraph_t graph = nullptr;
+    cudaGraphExec_t executable = nullptr;
+    DGPP_CUDA_OK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+    dgpp::qwen_mtp_hidden_projection(g, static_cast<const uint16_t*>(da.p),
+                                     static_cast<const uint16_t*>(dw.p),
+                                     static_cast<uint16_t*>(out.p), tokens, hc, H, decode, stream);
+    DGPP_CUDA_OK(cudaStreamEndCapture(stream, &graph));
+    Result result;
+    size_t count = 0;
+    DGPP_CUDA_OK(cudaGraphGetNodes(graph, nullptr, &count));
+    std::vector<cudaGraphNode_t> nodes(count);
+    DGPP_CUDA_OK(cudaGraphGetNodes(graph, nodes.data(), &count));
+    for (const auto node : nodes) {
+      cudaGraphNodeType type;
+      DGPP_CUDA_OK(cudaGraphNodeGetType(node, &type));
+      result.node_types.push_back(type);
+      if (type != cudaGraphNodeTypeKernel) continue;
+      cudaKernelNodeParams params{};
+      // Driver-loaded cuBLAS kernels have no runtime function to inspect.
+      // Count them too; replacing one with GEMV chunks must fail this check.
+      const auto status = cudaGraphKernelNodeGetParams(node, &params);
+      if (status == cudaErrorInvalidDeviceFunction) {
+        (void)cudaGetLastError();
+        result.kernels.push_back({});
+        continue;
+      }
+      DGPP_CUDA_OK(status);
+      result.kernels.push_back({reinterpret_cast<uintptr_t>(params.func), params.gridDim.x,
+                                params.gridDim.y, params.gridDim.z, params.blockDim.x,
+                                params.blockDim.y, params.blockDim.z, params.sharedMemBytes});
+    }
+    std::sort(result.node_types.begin(), result.node_types.end());
+    std::sort(result.kernels.begin(), result.kernels.end());
+    DGPP_CUDA_OK(cudaGraphInstantiate(&executable, graph, 0));
+    DGPP_CUDA_OK(cudaGraphLaunch(executable, stream));
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+    result.values.resize(static_cast<size_t>(tokens) * hc * H);
+    out.download(result.values.data(), result.values.size() * 2);
+    DGPP_CUDA_OK(cudaGraphExecDestroy(executable));
+    DGPP_CUDA_OK(cudaGraphDestroy(graph));
+    return result;
+  };
+  for (const bool decode : {false, true}) {
+    for (const int tokens : {2, 4, 6, 8, 12, 16}) {
+      const auto baseline = capture(tokens, decode, false);
+      const auto configured = capture(tokens, decode, true);
+      require(
+          baseline.node_types == configured.node_types && baseline.kernels == configured.kernels,
+          "existing MTP projection retains its kernel functions and launch shapes");
+      require_bitwise("existing MTP projection", baseline.values.data(), configured.values.data(),
+                      baseline.values.size() * 2);
+    }
+  }
+}
+
 DGPP_TEST(qwen_mtp_wide_hidden_projection_real_shape_is_kernel_only) {
   using namespace dgpp::kda_test;
   const auto download = [](const DevBuf& buffer, size_t n) {
@@ -759,7 +887,7 @@ DGPP_TEST(qwen_mtp_wide_hidden_projection_real_shape_is_kernel_only) {
     buffer.download(values.data(), n * 2);
     return values;
   };
-  constexpr int H = 2560, hc = 4, max_rows = 16 * hc;
+  constexpr int H = 2560, max_rows = 64 * 4;
   const auto act = random_bf16_normal(8101, static_cast<int64_t>(max_rows) * H, 0.3f);
   const auto weight = random_bf16_normal(8102, static_cast<int64_t>(H) * H, 0.02f);
   DevBuf da(act.size() * 2), dw(weight.size() * 2), dout(act.size() * 2), ws(64u << 20);
@@ -770,37 +898,125 @@ DGPP_TEST(qwen_mtp_wide_hidden_projection_real_shape_is_kernel_only) {
   dgpp::QwenGemmWorkspace g{&gemm, ws.p, 64u << 20};
   g.gemv_rows = 4;
   const auto stream = test_stream();
-  for (const int tokens : {12, 16}) {
+  for (const int hc : {1, 4})
+    for (const int tokens : {12, 16, 32, 48, 64}) {
+      dgpp::qwen_configure_gemm_rows(gemm, tokens, true);
+      cudaGraph_t graph = nullptr;
+      cudaGraphExec_t executable = nullptr;
+      DGPP_CUDA_OK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+      dgpp::qwen_mtp_hidden_projection(g, static_cast<const uint16_t*>(da.p),
+                                       static_cast<const uint16_t*>(dw.p),
+                                       static_cast<uint16_t*>(dout.p), tokens, hc, H, true, stream);
+      DGPP_CUDA_OK(cudaStreamEndCapture(stream, &graph));
+      dgpp::check_decode_graph(graph, 0, "Qwen wide MTP hidden projection");
+      DGPP_CUDA_OK(cudaGraphInstantiate(&executable, graph, 0));
+      DGPP_CUDA_OK(cudaGraphLaunch(executable, stream));
+      DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+      const auto got = download(dout, static_cast<size_t>(tokens * hc) * H);
+      // Independent fp64 dots across every row and representative columns.
+      for (int row = 0; row < tokens * hc; ++row) {
+        for (const int col : {0, 1, 63, 127, 319, 640, 1280, 2559}) {
+          double expected = 0;
+          for (int k = 0; k < H; ++k)
+            expected += static_cast<double>(
+                            dgpp::bf16_bits_to_float(act[static_cast<size_t>(row) * H + k])) *
+                        dgpp::bf16_bits_to_float(weight[static_cast<size_t>(col) * H + k]);
+          const float actual = dgpp::bf16_bits_to_float(got[static_cast<size_t>(row) * H + col]);
+          if (std::abs(actual - expected) > 0.008 * std::abs(expected) + 1e-5)
+            throw std::runtime_error("wide MTP projection exceeds the BF16 oracle budget");
+        }
+      }
+      DGPP_CUDA_OK(cudaGraphLaunch(executable, stream));
+      DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+      const auto replay = download(dout, got.size());
+      require_bitwise("wide MTP projection replay", got.data(), replay.data(), got.size() * 2);
+      DGPP_CUDA_OK(cudaGraphExecDestroy(executable));
+      DGPP_CUDA_OK(cudaGraphDestroy(graph));
+    }
+}
+
+DGPP_TEST(qwen_wide_bf16_dense_real_shards_are_kernel_only) {
+  using namespace dgpp::kda_test;
+  constexpr int H = 2560, max_rows = 64;
+  const auto act = random_bf16_normal(8201, max_rows * H, 0.3f);
+  const auto weight = random_bf16_normal(8202, H * H, 0.02f);
+  DevBuf da(act.size() * 2), dw(weight.size() * 2), out(max_rows * H * 2), ws(64u << 20);
+  da.upload(act.data(), act.size() * 2);
+  dw.upload(weight.data(), weight.size() * 2);
+  dgpp::CublasLtGemm gemm;
+  gemm.set_decode_rows(4);
+  const auto stream = test_stream();
+  const auto capture = [&](int rows, int cols, bool guarded, bool check_nodes) {
+    gemm.set_kernel_only_rows(guarded ? 17 : 0, guarded ? 64 : 0);
     cudaGraph_t graph = nullptr;
     cudaGraphExec_t executable = nullptr;
     DGPP_CUDA_OK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
-    dgpp::qwen_mtp_hidden_projection(g, static_cast<const uint16_t*>(da.p),
-        static_cast<const uint16_t*>(dw.p), static_cast<uint16_t*>(dout.p), tokens, hc, H, true, stream);
+    gemm.matmul(da.p, dw.p, out.p, rows, cols, H, dgpp::DType::BF16, dgpp::GemmOut::BF16, H, ws.p,
+                64u << 20, stream);
     DGPP_CUDA_OK(cudaStreamEndCapture(stream, &graph));
-    dgpp::check_decode_graph(graph, 0, "Qwen wide MTP hidden projection");
+    if (check_nodes) dgpp::check_decode_graph(graph, 0, "Qwen wide BF16 dense shard");
     DGPP_CUDA_OK(cudaGraphInstantiate(&executable, graph, 0));
     DGPP_CUDA_OK(cudaGraphLaunch(executable, stream));
     DGPP_CUDA_OK(cudaStreamSynchronize(stream));
-    const auto got = download(dout, static_cast<size_t>(tokens * hc) * H);
-    // Independent fp64 dots across every row and representative columns.
-    for (int row = 0; row < tokens * hc; ++row) {
-      for (const int col : {0, 1, 63, 127, 319, 640, 1280, 2559}) {
-        double expected = 0;
-        for (int k = 0; k < H; ++k)
-          expected += static_cast<double>(dgpp::bf16_bits_to_float(act[static_cast<size_t>(row) * H + k])) *
-                      dgpp::bf16_bits_to_float(weight[static_cast<size_t>(col) * H + k]);
-        const float actual = dgpp::bf16_bits_to_float(got[static_cast<size_t>(row) * H + col]);
-        if (std::abs(actual - expected) > 0.008 * std::abs(expected) + 1e-5)
-          throw std::runtime_error("wide MTP projection exceeds the BF16 oracle budget");
-      }
-    }
+    std::vector<uint16_t> values(static_cast<size_t>(rows) * cols);
+    out.download(values.data(), values.size() * 2);
     DGPP_CUDA_OK(cudaGraphLaunch(executable, stream));
     DGPP_CUDA_OK(cudaStreamSynchronize(stream));
-    const auto replay = download(dout, got.size());
-    require_bitwise("wide MTP projection replay", got.data(), replay.data(), got.size() * 2);
+    std::vector<uint16_t> replay(values.size());
+    out.download(replay.data(), replay.size() * 2);
+    require_bitwise("wide BF16 dense replay", values.data(), replay.data(), values.size() * 2);
     DGPP_CUDA_OK(cudaGraphExecDestroy(executable));
     DGPP_CUDA_OK(cudaGraphDestroy(graph));
+    return values;
+  };
+  // GDN a/b have 48 value heads sharded over TP=4 or TP=2. The larger
+  // widths cover a TP=4 value projection and a full hidden projection.
+  for (const int cols : {12, 24, 1536, H}) {
+    for (const int rows : {24, 48, 64}) {
+      const auto values = capture(rows, cols, true, true);
+      for (int row = 0; row < rows; ++row)
+        for (const int col : {0, cols / 2, cols - 1}) {
+          double expected = 0;
+          for (int k = 0; k < H; ++k)
+            expected += static_cast<double>(dgpp::bf16_bits_to_float(act[row * H + k])) *
+                        dgpp::bf16_bits_to_float(weight[col * H + k]);
+          const float actual = dgpp::bf16_bits_to_float(values[row * cols + col]);
+          require(std::abs(actual - expected) <= 0.008 * std::abs(expected) + 1e-5,
+                  "wide BF16 dense shard matches the fp64 oracle");
+        }
+    }
+    for (const int rows : {1, 4, 8, 16}) {
+      const auto baseline = capture(rows, cols, false, false);
+      const auto guarded = capture(rows, cols, true, false);
+      require_bitwise("existing decode dispatch", baseline.data(), guarded.data(),
+                      baseline.size() * 2);
+    }
+    // Leaving decode must restore the old short-prefill dispatch.
+    const auto prefill = capture(24, cols, false, false);
+    (void)capture(24, cols, true, true);
+    const auto resumed = capture(24, cols, false, false);
+    require_bitwise("prefill after wide decode", prefill.data(), resumed.data(),
+                    prefill.size() * 2);
   }
+  gemm.set_kernel_only_rows(17, 64);
+  bool rejected = false;
+  try {
+    gemm.matmul(da.p, static_cast<uint16_t*>(dw.p) + 1, out.p, 24, 12, H, dgpp::DType::BF16,
+                dgpp::GemmOut::BF16, H, ws.p, 64u << 20, stream);
+  } catch (const std::invalid_argument& e) {
+    rejected = std::string(e.what()).find("refusing cuBLASLt fallback") != std::string::npos;
+  }
+  require(rejected, "unaligned wide dense weights fail before an Lt fallback");
+  rejected = false;
+  try {
+    dgpp::QwenGemmWorkspace g{&gemm, ws.p, 64u << 20};
+    dgpp::qwen_mtp_hidden_projection(g, static_cast<uint16_t*>(da.p),
+                                     static_cast<uint16_t*>(dw.p) + 1,
+                                     static_cast<uint16_t*>(out.p), 64, 1, H, true, stream);
+  } catch (const std::invalid_argument& e) {
+    rejected = std::string(e.what()).find("refusing cuBLASLt fallback") != std::string::npos;
+  }
+  require(rejected, "unaligned wide MTP weights fail before an Lt fallback");
 }
 
 int main() { return dgpp::test::run_all(); }

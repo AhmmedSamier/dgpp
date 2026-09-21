@@ -300,7 +300,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       // against the four-slot template's 38–43 — until the 4-slot family
       // covered them), then every slot. The bus bounds the variants:
       // 2 x slots + 2 x families (x the scheduled depth options) <= kBusMaxGraphVariants (64).
-      for (const int k : {2, 3, 4, 6})
+      for (const int k : {2, 3, 4, 6, 8, 12})
         if (k < batch_slots) {
           BatchFamily f;
           f.requests = k;
@@ -667,6 +667,26 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
         throw std::invalid_argument(
             "graph engine: the scheduled verify depth's min_depth must be in "
             "[1, depth]");
+      // Validate capacity before allocating confidence buffers or changing
+      // draft reporting: a rejected schedule leaves ordinary MTP usable.
+      const int variants_per_depth = 2 * (slots_ + static_cast<int>(families_.size()));
+      const int fit = net::kBusMaxGraphVariants / variants_per_depth;
+      const int span = depth_ - min_depth + 1;
+      if (fit < 2)
+        throw std::invalid_argument(
+            "engine.mtp_schedule=true is unsupported with engine.max_concurrency=" +
+            std::to_string(slots_) + " and engine.mtp_depth=" + std::to_string(depth_) + ": " +
+            std::to_string(families_.size()) + " batch families require " +
+            std::to_string(2 * variants_per_depth) +
+            " graph variants for two verify depths, exceeding the limit of " +
+            std::to_string(net::kBusMaxGraphVariants) +
+            ". Set engine.mtp_schedule=false to keep this concurrency and MTP depth, "
+            "or reduce engine.max_concurrency.");
+      if (span < 2)
+        throw std::invalid_argument(
+            "engine.mtp_schedule=true requires engine.mtp_schedule_min_depth < engine.mtp_depth; "
+            "set engine.mtp_schedule=false to use a fixed verify depth.");
+      const int options = std::min(span, fit);
       if constexpr (Model::kVerifyConfidence) {
         conf_rows_ = model_->confidence_rows();
         draft_full_path_ = false;
@@ -691,18 +711,6 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
             "graph engine: the confidence covers " +
             std::to_string(conf_rows_) + " positions, the verify depth is " +
             std::to_string(depth_));
-      // The options that fit the bus: two variants per slot per option
-      // and, with the batch, two per family per option.
-      const int fit = net::kBusMaxGraphVariants /
-                      (2 * (slots_ + static_cast<int>(families_.size())));
-      const int span = depth_ - min_depth + 1;
-      const int options = std::min(span, fit);
-      if (options < 2)
-        throw std::invalid_argument(
-            "graph engine: the bus's " + std::to_string(net::kBusMaxGraphVariants) +
-            " graph variants leave no room for a second verify depth at " +
-            std::to_string(slots_) + " slots and " +
-            std::to_string(families_.size()) + " batch families");
       depth_options_.clear();
       for (int i = 0; i < options; ++i) {
         const int d = options == 1

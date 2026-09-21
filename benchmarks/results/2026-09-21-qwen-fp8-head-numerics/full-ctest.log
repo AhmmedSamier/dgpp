@@ -1,0 +1,320 @@
+Internal ctest changing into directory: /tmp/dgpp-pr10-review/build-ci
+Test project /tmp/dgpp-pr10-review/build-ci
+        Start   1: qwen_forward_fixture
+  1/126 Test   #1: qwen_forward_fixture .....................   Passed    0.17 sec
+        Start   2: qwen_plan_check
+  2/126 Test   #2: qwen_plan_check ..........................   Passed    0.07 sec
+        Start   3: qwen_forward_smoke
+  3/126 Test   #3: qwen_forward_smoke .......................   Passed    1.93 sec
+        Start   4: qwen_forward_smoke_yarn
+  4/126 Test   #4: qwen_forward_smoke_yarn ..................   Passed    2.05 sec
+        Start   5: qwen_forward_cross_limit
+  5/126 Test   #5: qwen_forward_cross_limit .................   Passed    2.15 sec
+        Start   6: qwen_forward_generate
+  6/126 Test   #6: qwen_forward_generate ....................   Passed   18.68 sec
+        Start   7: qwen_forward_test
+  7/126 Test   #7: qwen_forward_test ........................   Passed    2.12 sec
+        Start   8: qwen_decode_test
+  8/126 Test   #8: qwen_decode_test .........................   Passed    5.35 sec
+        Start   9: qwen_decode_fp8_head
+  9/126 Test   #9: qwen_decode_fp8_head .....................   Passed    6.35 sec
+        Start  10: qwen_decode_fp8_head_row_independent
+ 10/126 Test  #10: qwen_decode_fp8_head_row_independent .....   Passed    5.40 sec
+        Start  11: nic_regress_selftest
+ 11/126 Test  #11: nic_regress_selftest .....................   Passed    1.27 sec
+        Start  12: glm_tp_test
+ 12/126 Test  #12: glm_tp_test ..............................   Passed   36.49 sec
+        Start  13: glm_mtp_sampling_no_pipeline
+ 13/126 Test  #13: glm_mtp_sampling_no_pipeline .............   Passed    3.03 sec
+        Start  14: unit_tests
+ 14/126 Test  #14: unit_tests ...............................   Passed    9.86 sec
+        Start  15: qwen_yarn_fixture_test
+ 15/126 Test  #15: qwen_yarn_fixture_test ...................   Passed    0.01 sec
+        Start  16: tokenizer_test
+ 16/126 Test  #16: tokenizer_test ...........................   Passed    0.23 sec
+        Start  17: qwen_tokenizer_test
+ 17/126 Test  #17: qwen_tokenizer_test ......................   Passed    0.15 sec
+        Start  18: dsv41_tokenizer_test
+ 18/126 Test  #18: dsv41_tokenizer_test .....................   Passed    0.09 sec
+        Start  19: dsv41_prompt_test
+ 19/126 Test  #19: dsv41_prompt_test ........................   Passed    0.09 sec
+        Start  20: glm4_tokenizer_test
+ 20/126 Test  #20: glm4_tokenizer_test ......................   Passed    0.23 sec
+        Start  21: glm_dsa_tokenizer_test
+ 21/126 Test  #21: glm_dsa_tokenizer_test ...................   Passed    0.22 sec
+        Start  22: chat_template_test
+ 22/126 Test  #22: chat_template_test .......................   Passed    1.80 sec
+        Start  23: qwen_chat_template_test
+ 23/126 Test  #23: qwen_chat_template_test ..................   Passed    1.58 sec
+        Start  24: glm4_chat_template_test
+ 24/126 Test  #24: glm4_chat_template_test ..................   Passed    1.75 sec
+        Start  25: glm_dsa_chat_template_test
+ 25/126 Test  #25: glm_dsa_chat_template_test ...............   Passed    1.97 sec
+        Start  26: http_server_test
+ 26/126 Test  #26: http_server_test .........................   Passed    6.31 sec
+        Start  27: serve_test
+ 27/126 Test  #27: serve_test ...............................   Passed  118.97 sec
+        Start  28: fabric_serve_test
+ 28/126 Test  #28: fabric_serve_test ........................   Passed    3.17 sec
+        Start  29: scheduler_test
+ 29/126 Test  #29: scheduler_test ...........................   Passed    0.00 sec
+        Start  30: unit
+ 30/126 Test  #30: unit .....................................   Passed    9.82 sec
+        Start  31: checkpoint_audit_test
+ 31/126 Test  #31: checkpoint_audit_test ....................   Passed    0.08 sec
+        Start  32: route_trace_test
+ 32/126 Test  #32: route_trace_test .........................   Passed    0.11 sec
+        Start  33: sampling_profile_test
+ 33/126 Test  #33: sampling_profile_test ....................   Passed    0.04 sec
+        Start  34: site_env_test
+ 34/126 Test  #34: site_env_test ............................   Passed    1.68 sec
+        Start  35: script_reports_test
+ 35/126 Test  #35: script_reports_test ......................   Passed    0.63 sec
+        Start  36: portability_test
+ 36/126 Test  #36: portability_test .........................***Failed    0.30 sec
+.............F.....
+======================================================================
+FAIL: test_scripts_index_and_setup_document_links (__main__.PortabilityTest.test_scripts_index_and_setup_document_links)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/dgpp-pr10-review/tests/python/portability_test.py", line 177, in test_scripts_index_and_setup_document_links
+    self.assertIn(f"[{path.name}]({path.name})", index)
+AssertionError: '[qwen_head_compare.py](qwen_head_compare.py)' not found in "# Scripts\n\nThis directory contains the cluster launchers, test clients, fabric diagnostics,\nand reports used to build and measure dgpp. Bash handles process orchestration\nand log collection; Python handles HTTP clients, configuration, and analysis.\nThe tables below cover every source file in the directory, grouped by use.\n\nA *world* is the set of ranks serving one deployment, usually one rank per node.\nMTP means multi-token prediction; SSE is the streamed HTTP event format used by\nthe chat API.\n\n## Before running a script\n\nRun commands from the repository root unless a script says otherwise. Cluster\nlaunchers run rank 0 locally, so invoke them on the head node: the first entry\nin `DGPP_NODES`. Fabric runs need the relevant binaries built, passwordless SSH\nto the peers, and the checkpoint available in each participating node's local\ncache. Serving defaults to `build-release/dgpp-serve`; test and diagnostic\nwrappers use binaries from `build-ci/`.\n\nShared node addresses, SSH user, ports, and staging/log/release paths belong in\nthe repository's `.env`; [`.env.example`](../.env.example) lists the settings.\nExported settings take precedence, and `DGPP_ENV_FILE` selects a different site\nfile. Deployment JSONs select the model, world size, and engine settings.\nSelect the deployment explicitly with `--config FILE`, or the positional\n`CONFIG` argument for wrappers that use one. The world uses the first\nN configured nodes. `.env` is parsed as data, not sourced as Bash, and unrelated\nentries such as access tokens are not loaded by the site helper.\n\nHTTP clients either take their endpoint as arguments or use the selected\ndeployment's HTTP settings. Shared defaults bind to localhost. Request model\nIDs are discovered from `/v1/models` unless explicitly supplied. Family-specific\nnative checks still require an appropriate model. The failure, stop, and serving\nsoak procedures require four ranks and reject other worlds before starting.\n\nUse an idle test cluster for launch-and-stop procedures. Cleanup targets\nrecorded process identities; the failure drill deliberately sends `SIGKILL`\nto a recorded rank. `up --replace` explicitly stops the selected deployment;\n`down` without `--config` stops every recorded deployment that is running.\nChoose a fresh output directory to avoid overwriting previous results. The\nHumanEval task in `serve_eval.py` executes generated Python locally with a\ntimeout, not a security sandbox; run it in an isolated evaluation environment\nand pass `--allow-code-execution`. See [Getting started](../docs/getting-started.md)\nand [test/data preparation](../docs/testing.md).\n\nFor exact arguments, read the usage header or use `--help` where supported.\nSome older scripts start work immediately and do not implement `--help`.\n\n## Build, configuration, and deployment\n\n| File | What it does | When to use it |\n| --- | --- | --- |\n| [README.md](README.md) | This directory's file index and operating notes. | Start here to choose a launcher, client, or report. |\n| [spark-cross](spark-cross) | Builds an x86 Docker toolchain and cross-compiles the ARM64/GB10 server. | Build on an x86 Linux workstation; see [cross-compiling](../docs/cross-compiling.md) for staging and target validation. |\n| [setup.sh](setup.sh) | Finds `python3` and launches guided setup from any working directory (setup.py itself turns away interpreters older than 3.10). | Start here after cloning; `--help` lists unattended and read-only options. |\n| [setup.py](setup.py) | Guides deployment/site and RoCE choices, checks prerequisites locally and on peers, optionally installs system packages, builds, downloads/syncs and runs final preflight. | Implementation of `setup.sh`; `--check` checks prerequisites without writes, `--configure-only` saves settings, and `--start` launches after success. |\n| [ci-local.sh](ci-local.sh) | Configures CMake, builds, and runs CTest; defaults to the `ci` preset and `build-ci/`. | Validate a local code change. `DGPP_PRESET` selects `build-<preset>/`; `DGPP_BUILD_DIR` explicitly overrides the directory. |\n| [release.sh](release.sh) | Builds or reuses the release build, stages the install layout, and packages a versioned tarball with checksums under `dist/`. Rejects testing build directories and binaries with debug information or sanitizer instrumentation. | Prepare an artifact for installation; `--no-build` repackages an existing release build. Uses `DGPP_BUILD_DIR` or `build-release/`. |\n| [dgpp-cluster](dgpp-cluster) | Combines site settings with a deployment JSON; starts, stops, and inspects ranks, installs releases, and lists installed versions. | Manage a serving deployment. `resolve` prints the merged runtime JSON without SSH or startup. |\n| [serve_run.sh](serve_run.sh) | Wraps `dgpp-cluster`, passing `DGPP_SERVE_KNOBS` as engine flags and `DGPP_SERVE_LOG` as the log directory. | Run `up`, `down`, or `status` through the environment-based interface used by the test procedures. |\n| [cluster_env.sh](cluster_env.sh) | Loads site settings through `site_env.py` and defines Bash helpers for nodes, peers, user, ports, and config resolution. | Source it from an orchestration script that needs shared site information. |\n| [site_env.py](site_env.py) | Parses allowlisted `.env` settings, applies exported overrides, and resolves deployment configuration. Exposes both Python functions and a CLI. | Reuse site parsing in Python or inspect the selected nodes and resolved configuration. |\n| [cluster_doctor.py](cluster_doctor.py) | Read-only local/SSH probes for platform, GPU, cache completeness, libraries, ports, paths and RoCE selection. | Run through `dgpp-cluster doctor`, automatically invoked before `up`; `--local-only` omits SSH. |\n| [cluster_process.py](cluster_process.py) | Starts isolated process sessions and records PID, owner, start time and boot identity. | Internal helper for launch/status/signals; prevents stale PID records from authorizing unrelated cleanup. |\n| [download_model.py](download_model.py) | Downloads a complete checkpoint once on rank 0 into the HF cache, then syncs the selected snapshot and blobs to peers sequentially. | Run with `--config FILE`; `--sync-only` reuses an existing download, `--verify-only` checks every node without writes, and `--local-only` skips peers. `--model ORG/NAME` downloads locally without deployment settings. |\n| [cache_sync.py](cache_sync.py) | Builds a snapshot/blob file list, transfers it with rsync content checksums, and validates the peer copy before updating `refs/main`. | Internal downloader helper; does not copy credentials or unrelated cached revisions. Peers need Python, SSH and rsync, not the HF Python package. |\n| [discover_roce.py](discover_roce.py) | Lists local RoCE candidates and the deployment's configured/automatic lane order; retains reachable nodes' results when a peer fails. | Run locally without arguments or inspect deployment nodes with `--config FILE`; no network changes or RDMA traffic. `--json` returns `inventories`, `selections` and `errors` keyed by host; any probe error causes a nonzero exit. |\n| [prepare_data.py](prepare_data.py) | Fetches pinned GSM8K/HumanEval data with provenance manifests or tokenizes a supplied text into CSV. | Prepare benchmark inputs explicitly before running evaluation or prefill checks. |\n| [data_paths.py](data_paths.py) | Resolves `DGPP_DATA_DIR` and reports missing datasets with preparation instructions. | Shared by data-dependent clients and preparation tools. |\n| [serve_client.py](serve_client.py) | Resolves the selected HTTP endpoint/log path and discovers the served model ID. | Shared by clients; its CLI prints `url`, `log`, or `model` for shell callers. |\n\nFor a configuration-only check from the repository root:\n\n```bash\npython3 scripts/dgpp-cluster resolve --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json\n```\n\n## Fabric runs and model checks\n\nThese scripts launch work on the nodes. The direct loader and forward checks\ntake a `WORLD` argument; the serving wrappers take a deployment `CONFIG`.\n\n| File | What it does | When to use it |\n| --- | --- | --- |\n| [fabric_run.sh](fabric_run.sh) | Stages and launches a fabric application, starts the head before peers, monitors completion, and collects rank-consistency results. Defaults to `glm_gen_check`; supports `--app`, `--fetch-logs`, and `--node-probe`. | Run engine-level generation or another compatible fabric application without HTTP. `--force` stops only jobs recorded for the same output directory. |\n| [fabric_bus_probe.sh](fabric_bus_probe.sh) | Runs `bus_check allreduce` across a chosen world size and collects eager and graph-replay collective timings. | Measure collective overhead independently of model execution. |\n| [fabric_gr_probe.sh](fabric_gr_probe.sh) | Compares plain and MTP generation with and without extra all-reduces injected through `--gr-probe`. | Measure how additional collectives affect a real decode step. |\n| [fabric_qwen_load.sh](fabric_qwen_load.sh) | Runs `qwen_load_check` independently on each rank and prints memory totals and digests; no collective bus is needed. | Check Qwen checkpoint loading and rank slicing before testing forward execution. |\n| [fabric_qwen_forward.sh](fabric_qwen_forward.sh) | Runs the Qwen forward check on identical token IDs across ranks, checks digests, and prints the merged argmax IDs. | Validate tensor-parallel forward consistency; compare the printed argmax with a separate world-1 run. |\n| [fabric_glm4_forward.sh](fabric_glm4_forward.sh) | Runs the equivalent cross-rank forward check for GLM-4.7 through `glm4_forward_check`. | Validate GLM-4.7 tensor-parallel digests and compare argmax IDs across world sizes. |\n| [fabric_qwen_serve.sh](fabric_qwen_serve.sh) | Starts a Qwen deployment, runs greedy transcripts, client timing, and API checks, optionally evaluates tasks, then stops the world. | Validate a Qwen serving configuration; supply `--compare` to check a saved transcript baseline. |\n| [fabric_glm4_serve.sh](fabric_glm4_serve.sh) | Runs the corresponding serving checks for GLM-4.7, with thinking disabled for optional task evaluations. | Validate a GLM-4.7 serving configuration or compare it with saved transcripts. |\n| [fabric_glm_dsa_serve.sh](fabric_glm_dsa_serve.sh) | Runs the serving checks for the full GLM-5.3 (`glm_moe_dsa`): transcripts, pace, API check, MTP acceptance per prompt class, prefill by length, optional task evaluations (thinking stays on: the template has no switch). | Validate a full GLM-5.3 serving configuration or compare it with saved transcripts. |\n| [fabric_v41bench.sh](fabric_v41bench.sh) | Boots a world and runs the vLLM DGX Spark recipe's own DeepSeek-V4.1-Flash benchmark client (its prompt set v1, thinking off, decode tok/s after the first token) against it at the given concurrency levels and prefill targets. | Compare a served DeepSeek-V4.1-Flash configuration like for like with the numbers that recipe reports on the developer forums. |\n| [fabric_profile.sh](fabric_profile.sh) | Boots any family's world with rank 0 under nsys, runs a warm request and a profiled client (a single 400-token stream by default, or any client command such as a `serve_load` sweep at a concurrency), takes the world down and prints the per-step kernel breakdown between instances of a once-per-replay marker kernel. | Attribute a decode step's time to kernels for a served configuration, single-stream or batched. |\n| [fabric_serve_load.sh](fabric_serve_load.sh) | Boots any family's world from a cluster config (with `--knobs` for the engine flags under test) and runs the greedy transcripts, the MTP acceptance per prompt class, and the concurrency probe, then takes the world down and prints the scheduled-depth summary. | Measure a served configuration's decode at one and two live requests, or A/B an engine flag such as `--mtp-schedule` against a reference run. |\n| [fabric_dsv41_serve.sh](fabric_dsv41_serve.sh) | Runs the serving checks for DeepSeek-V4.1-Flash (`deepseek_v41`): transcripts, pace, API check, DSpark acceptance per prompt class, bounded prefill by length, optional task evaluations. | Validate a DeepSeek-V4.1-Flash serving configuration or compare it with saved transcripts. |\n| [fabric_qwen_pace.sh](fabric_qwen_pace.sh) | Starts a deployment, warms it up, takes two single-stream timing readings, collects server stats, and stops it. | Quickly compare decode pace between configurations or engine settings. |\n| [fabric_qwen_prefill.sh](fabric_qwen_prefill.sh) | Starts a deployment, measures prefill at selected prompt lengths through `serve_prefill_probe.py`, and stops it. | Compare Qwen prefill settings or implementations at several context lengths. |\n| [fabric_qwen_profile.sh](fabric_qwen_profile.sh) | Runs rank 0 under Nsight Systems, sends a decode or prefill workload, stops the world, and produces a kernel breakdown. | Capture a detailed GPU profile; requires `nsys`. |\n| [fabric_glm4_load.sh](fabric_glm4_load.sh) | Starts a deployment with periodic stats, runs fixed-concurrency request phases, stops it, and matches server stats to those phases. | Measure GLM-4.7 throughput and MTP acceptance as concurrency changes. |\n| [fabric_prefill_check.sh](fabric_prefill_check.sh) | Truncates a supplied token-ID file to exact lengths and runs short GLM generation jobs to report prefill time. | Measure prefill without HTTP or tokenizer-length estimation, using the selected deployment's model. |\n| [fabric_prefill_repeat.sh](fabric_prefill_repeat.sh) | Reads `DGPP_DATA_DIR/hard_ids.csv` or `--ids-file FILE` and runs each prompt with three prefill passes. | Measure warmed-up prefill at selected lengths; prepare tokens with `prepare_data.py tokens` first. |\n| [fabric_mtp_classes.sh](fabric_mtp_classes.sh) | Runs greedy graph-mode MTP generation for selected chat, code, prose, JSON, or math prompts and reports acceptance and rank consistency. | Compare MTP behavior across prompt types. |\n| [fabric_glm_regression.sh](fabric_glm_regression.sh) | Combines a GLM MTP chat run, plain decode timing, and repeated prefill measurements. | Gather a consistent set of GLM regression measurements for comparison with a saved baseline. |\n\n## Clients for an already-running service\n\nThese clients send requests but do not start or stop the world. Use a quiet\nendpoint for timing and metric-delta measurements so unrelated requests do not\naffect the results.\n\n| File | What it does | When to use it |\n| --- | --- | --- |\n| [serve_api_check.py](serve_api_check.py) | Checks stop strings, multiple choices, logit bias, and usage details in streamed and non-streamed responses; fails if a check fails. | Verify request-field behavior after a server change. |\n| [vision_api_check.py](vision_api_check.py) | Generates PNG inputs and checks colors, multiple images, streaming, choices, chunk boundaries and concurrent requests. | Verify a GLM-5.3-Flash image deployment on idle test hardware. |\n| [serve_bench.py](serve_bench.py) | Times a streaming chat request and reports time to first token, decode pace, wall time, and usage. Can obtain its default endpoint from site settings. | Take a quick client-side latency reading. |\n| [serve_load.py](serve_load.py) | Sends fixed-concurrency streaming request phases and reports per-request timing and aggregate throughput. Supports prompt-class sweeps. | Measure serving throughput as concurrency or workload changes. |\n| [timed_load.py](timed_load.py) | Adds engine decode rates to `serve_load.py`, reconciling published counters with completed requests under a deadline. | Measure engine-call time on an otherwise idle server; uses the same CLI and also accounts for warmup and isolation requests. |\n| [serve_mtp_classes.py](serve_mtp_classes.py) | Sends the five class prompts greedily and reads each request's retired line from rank 0's log: pass time, tokens per pass and draft acceptance as the engine counted them. | Compare MTP acceptance per prompt type through the service. |\n| [serve_greedy_transcript.py](serve_greedy_transcript.py) | Saves fixed greedy prompts and replies to JSON, with optional exact comparison against a reference file. | Check whether plain/MTP modes or deployment changes preserve API-level output. |\n| [mtp_depth_check.py](mtp_depth_check.py) | Writes separate prose, code, and JSON completions and prints acceptance information from a rank-0 log. | Collect outputs from separate MTP-depth launches for a directory diff. |\n| [serve_eval.py](serve_eval.py) | Scores HumanEval, GSM8K, and synthetic structured extraction, saving per-item results and summaries. | Compare task accuracy between deployments. HumanEval executes generated code; GSM8K and HumanEval require local datasets. |\n| [serve_prefill_probe.py](serve_prefill_probe.py) | Calibrates approximate prompt lengths, defeats prefix reuse with unique prefixes, and measures prefill metric deltas and first-token latency. | Isolate prefill cost through HTTP; requires `DGPP_DATA_DIR/gsm8k_test.jsonl`, or `--data FILE`. |\n| [serve_prefill_interference.py](serve_prefill_interference.py) | Runs a long prefill beside an active decode stream and reports the decode client's update-gap distribution. | Measure how budgeted prefill affects an overlapping request on an otherwise idle server. |\n| [serve_prefix_curve.py](serve_prefix_curve.py) | Interleaves three-turn conversations and reports cache hits, misses, evictions, saved tokens, and per-turn latency. | Measure prefix-cache capacity at a chosen conversation count. |\n| [serve_agentic_streams.py](serve_agentic_streams.py) | Runs concurrent multi-turn tool or essay conversations, optional side requests, and system-prompt mutations; records cache reuse and timing. | Check prefix reuse under agent-style traffic and detect unexpected cache misses. Tool results are synthetic. |\n| [serve_soak.py](serve_soak.py) | Runs timed mixed traffic: short conversations, long answers, disconnected streams, and admission bursts; saves requests, metrics, and latency summaries. | Test sustained serving behavior and tail-latency stability. |\n| [qwen_yarn_release_check.py](qwen_yarn_release_check.py) | The opt-in YaRN release check: deterministic needle probes in 262 144- and 524 288-token documents, with cold prefill, prefix-cache reuse, incremental decode, concurrent streams, sampled peak memory and a short-context control, optionally replayed against a reference endpoint so retrieval misses are attributed. Refuses to run without `--run` and is never part of CI. | Accept a `engine.rope_scaling` build on real hardware before release; see [docs/qwen_yarn_release_check.md](../docs/qwen_yarn_release_check.md). |\n| [step_probe.py](step_probe.py) | Sends streamed requests at selected context sizes, optionally with tool schemas, and joins their timing with rank-0 decode-step counts. | Separate token pace from engine step cost on an idle service; requires access to its rank-0 log. |\n| [serve_c1_probe.py](serve_c1_probe.py) | Brackets each single-request run with scheduler counters and separates engine-call time from client-visible stream timing. | Measure repeated C1 engine throughput by prompt class on an idle server. |\n\n## Serving lifecycle, stress, and sweep procedures\n\nThese procedures own the service lifecycle and change its engine settings for\nthe test. They are not passive checks against an existing production service.\n\n| File | What it does | When to use it |\n| --- | --- | --- |\n| [serve_admission_check.sh](serve_admission_check.sh) | Runs the same request batch under full-reservation and grow-on-demand admission with a tight KV pool, then prints outcomes, counters, and op-stream hashes. | Compare admission policies and inspect their cross-rank decisions. |\n| [serve_tools_check.sh](serve_tools_check.sh) | Starts the service, exercises tool choices, follow-up turns, reasoning, streaming, and structured JSON responses, then stops and summarizes it. | Inspect tool-calling and structured-output behavior end to end. |\n| [vision_prefix_cache_check.py](vision_prefix_cache_check.py) | Checks image prefix reuse, continuation, streaming and pixel isolation against an idle GLM server. | Validate image-aware prefix caching through HTTP. |\n| [prefill_fairness_check.py](prefill_fairness_check.py) | Checks that a long cold prefill yields to active streamed decodes, optionally including images. | Validate prefill continuation against an idle server. |\n| [serve_stop_check.sh](serve_stop_check.sh) | Stops a four-rank world while streamed and non-streamed requests are active, then reports responses, drain logs, exits, and op-stream hashes. | Check graceful shutdown with in-flight work. |\n| [serve_failure_drill.sh](serve_failure_drill.sh) | Kills a selected rank during streaming, checks failure propagation, restarts the service, and compares received text with replayed answers. | Exercise crash recovery on a dedicated four-rank test world. This deliberately uses `kill -9`. |\n| [serve_soak_run.sh](serve_soak_run.sh) | Starts a four-rank serving world and per-node probes, runs `serve_soak.py`, then stops and collects logs, counters, and op-stream hashes. A preset `DGPP_SERVE_KNOBS` replaces the default 8K-token knobs, for a soak at a deployment's real shape. | Run a complete serving soak with host-level diagnostics. |\n| [serve_prefix_curve_sweep.sh](serve_prefix_curve_sweep.sh) | Restarts the service for combinations of prefix-cache budget and conversation count, collecting a cache-capacity curve. | Choose a cache budget or compare eviction behavior. |\n| [serve_width_sweep.sh](serve_width_sweep.sh) | Restarts for each sampling-candidate width and plain/MTP mode, sends seeded requests, and writes fallback counts, pace, and output hashes to `sweep.tsv`. | Measure sampling-width cost while checking that width changes preserve output. |\n\n## Node and network diagnostics\n\n| File | What it does | When to use it |\n| --- | --- | --- |\n| [node_probe.sh](node_probe.sh) | Samples local memory-pressure counters, GPU clocks/power/throttling, CPU utilization, and busy processes once per second. | Record host conditions alongside a latency or soak run; it runs until stopped. |\n| [roce_counters.sh](roce_counters.sh) | Takes hardware-counter snapshots over SSH for the selected nodes, or delegates comparison of saved snapshots to `roce_report.py`. | Measure network traffic, retransmissions, congestion notifications, and discards around a run. |\n| [soak.sh](soak.sh) | Repeatedly starts two-node `bus_check` sessions with concurrent bulk traffic and latency probes at rotating transfer sizes. | Stress collective transport independently of serving. Uses the first two site nodes; the peer binary must already be staged. |\n\n## Offline analysis and shared helpers\n\nThese files work on saved artifacts or provide small functions to the other\nscripts. They do not launch a cluster. `nsys_step_breakdown.py` may create or\nrefresh a SQLite export, and `width_sweep_collect.py` appends to its output TSV.\n\n| File | What it does | When to use it |\n| --- | --- | --- |\n| [fabric_logs.py](fabric_logs.py) | Shared parsers for generation, teacher-forcing, and sampling-mass records in `rN.log`, plus a bf16 rounding helper. | Import it when adding fabric-log analysis; it is a library, not a report command. |\n| [bench_stream.py](bench_stream.py) | Parses benchmark SSE streams and computes shared request-wall and output-span metrics. | Import it from serving benchmark clients that need consistent streaming measurements. |\n| [fabric_xcript.py](fabric_xcript.py) | Compares two fabric transcripts and reports the first divergence with the global top-two logit margin. | Investigate whether changed greedy output occurs at a near-tied pick. |\n| [fabric_logprob.py](fabric_logprob.py) | Joins teacher-forced rank logs to compute negative log-likelihood, perplexity, and top-1 accuracy, with optional reference thresholds. | Evaluate numerical changes on the same teacher text and prompt. |\n| [fabric_sampling_profile.py](fabric_sampling_profile.py) | Validates cross-rank sampling-mass records and selects the smallest measured top-k width meeting a fallback-rate bound. | Size distributed sampling from complete `--sampling-profile` teacher runs. |\n| [fabric_step_times.py](fabric_step_times.py) | Reads rank-0 generation timestamps, skips warmup, and reports mean and tail step times with any MTP summary. | Compare steady-state engine timing across saved fabric runs. |\n| [bench_compare.py](bench_compare.py) | Compares matched `serve_load.py` JSON reports, checks exact C1 greedy transcripts, and reports median rate changes. | Gate a repeated baseline/candidate benchmark with an explicit slowdown tolerance. |\n| [fabric_xrank.py](fabric_xrank.py) | Aligns rank logs by collective generation and reports step timing, host gaps, stalls, and lagging ranks; can correlate node probes. | Diagnose cross-rank latency imbalance. Record the run with `DGPP_LOG_LEVEL=debug`. |\n| [bus_window_skew.py](bus_window_skew.py) | Summarizes per-rank collective copy, handshake, skew, and fold timings, wait histograms, and peer lag. | Analyze collected bus timelines; `DGPP_BUS_TIMELINE=1` records them at INFO level without full debug logging. |\n| [nsys_step_breakdown.py](nsys_step_breakdown.py) | Exports a Nsight Systems report to SQLite and groups GPU kernel time by decode step or by the final kernel burst. | Find expensive kernels in a saved profile; use `--burst` for a prefill-oriented view. |\n| [serve_pace.py](serve_pace.py) | Reads scheduler token timestamps to report per-request pace and estimated replays; `--waves` adds peak-occupancy measurements. Also exposes unformatted measurements. | Analyze a rank-0 serving log recorded at debug level, or reuse the measurements in another report. |\n| [width_sweep_collect.py](width_sweep_collect.py) | Joins one sweep run's responses, slot-close fallback counts, and pace measurements into TSV rows. | Collect or rebuild results from a saved width/mode run; called by `serve_width_sweep.sh`. |\n| [width_sweep_report.py](width_sweep_report.py) | Reads `sweep.tsv`, compares output hashes across widths, aggregates fallback rates and pace, and fits per-fallback cost. | Interpret a completed sampling-width sweep. |\n| [forward_check_report.py](forward_check_report.py) | Checks digest agreement in `wWORLD_rR.log` files and merges rank-local argmax results, breaking ties by smallest token ID. | Re-read Qwen or GLM forward-check output; shared by both launchers. |\n| [admission_report.py](admission_report.py) | Summarizes saved request outcomes, pool and admission metrics, and supplied batch start/end times. | Re-read one policy run from `serve_admission_check.sh`. |\n| [load_phase_report.py](load_phase_report.py) | Matches timestamped concurrency phases in `load.log` to rank-0 stats in `world/serve_r0.log`. | Compare client load phases with server throughput measurements. |\n| [node_probe_report.py](node_probe_report.py) | Totals memory-pressure counter deltas and lists observed throttle masks from one node-probe log. | Summarize host pressure after a soak or diagnostic run. |\n| [prefill_report.py](prefill_report.py) | Builds repeated token-ID prompts or prints the first prefill timing found in a log. | Support the prefill wrappers or inspect saved prefill measurements. |\n| [roce_report.py](roce_report.py) | Subtracts two counter snapshots and converts transmitted four-byte words to MiB. | Compare saved RoCE snapshots without loading site settings or contacting nodes. |\n| [serve_streams.py](serve_streams.py) | Shared saved-SSE reader with commands for committed text, tool-call reconstruction, shutdown summaries, and post-error token checks. | Inspect captured streams; interrupted-text recovery tolerates truncated events while normal reports parse strictly. |\n| [serve_response_report.py](serve_response_report.py) | Prints saved non-streamed replies, reasoning, tool calls, and the JSON/schema checks used by the tools procedure. | Inspect response artifacts from `serve_tools_check.sh`; schema verdicts are informational. |\n| [failure_report.py](failure_report.py) | Builds drill request bodies, checks nonempty committed-text prefixes against replay, and compares surviving operation streams. | Reuse the failure drill's local checks without running the destructive procedure. |\n| [run_helpers.py](run_helpers.py) | Provides localhost port checks, randomized short delays, and elapsed-time calculations. | Use the small CLI helpers called by fabric startup and failure-drill orchestration. |\n\nThe shared report modules can be imported without running their CLI. Several\nolder standalone clients and analysis scripts execute at module scope, so treat\nthose as commands rather than libraries.\n\nFor example, to re-read a saved stream without contacting the service:\n\n```bash\npython3 scripts/serve_streams.py summary /path/to/run/stream.sse\n```\n\nSee [operations](../docs/operations.md) for deployment procedures,\n[tools](../docs/tools.md) for the compiled binaries, and\n[benchmarks](../docs/benchmarks.md) for recorded measurements and their workloads.\nOffline regression tests for site configuration and the report helpers are in\n[`tests/python/site_env_test.py`](../tests/python/site_env_test.py) and\n[`tests/python/script_reports_test.py`](../tests/python/script_reports_test.py).\n"
+
+----------------------------------------------------------------------
+Ran 19 tests in 0.251s
+
+FAILED (failures=1)
+
+        Start  37: timed_load_test
+ 37/126 Test  #37: timed_load_test ..........................   Passed    0.83 sec
+        Start  38: qwen_yarn_release_check_test
+ 38/126 Test  #38: qwen_yarn_release_check_test .............   Passed    0.13 sec
+        Start  39: qwen_head_compare_test
+ 39/126 Test  #39: qwen_head_compare_test ...................   Passed    0.38 sec
+        Start  40: spark_cross_test
+ 40/126 Test  #40: spark_cross_test .........................   Passed    0.76 sec
+        Start  41: setup_tools_test
+ 41/126 Test  #41: setup_tools_test .........................   Passed    1.75 sec
+        Start  42: bootstrap_test
+ 42/126 Test  #42: bootstrap_test ...........................   Passed    0.15 sec
+        Start  43: launcher_test
+ 43/126 Test  #43: launcher_test ............................   Passed    9.65 sec
+        Start  44: serve_startup_test
+ 44/126 Test  #44: serve_startup_test .......................   Passed    2.26 sec
+        Start  45: kda_test
+ 45/126 Test  #45: kda_test .................................   Passed    3.75 sec
+        Start  46: dsa_test
+ 46/126 Test  #46: dsa_test .................................   Passed   16.13 sec
+        Start  47: qwen_gr_test
+ 47/126 Test  #47: qwen_gr_test .............................   Passed    1.18 sec
+        Start  48: qwen_norm_test
+ 48/126 Test  #48: qwen_norm_test ...........................   Passed    1.17 sec
+        Start  49: gdn_test
+ 49/126 Test  #49: gdn_test .................................   Passed    1.22 sec
+        Start  50: qsa_test
+ 50/126 Test  #50: qsa_test .................................   Passed    2.54 sec
+        Start  51: qwen_ple_test
+ 51/126 Test  #51: qwen_ple_test ............................   Passed    1.52 sec
+        Start  52: csa2_test
+ 52/126 Test  #52: csa2_test ................................   Passed    1.48 sec
+        Start  53: csa2_layer_test
+ 53/126 Test  #53: csa2_layer_test ..........................   Passed    4.60 sec
+        Start  54: dsv41_engram_layer_test
+ 54/126 Test  #54: dsv41_engram_layer_test ..................   Passed    1.87 sec
+        Start  55: dsv41_model_test
+ 55/126 Test  #55: dsv41_model_test .........................   Passed    4.40 sec
+        Start  56: dsv41_forward_fixture
+ 56/126 Test  #56: dsv41_forward_fixture ....................   Passed    0.61 sec
+        Start  57: dsv41_forward_smoke
+ 57/126 Test  #57: dsv41_forward_smoke ......................   Passed    1.74 sec
+        Start  58: dsv41_forward_generate
+ 58/126 Test  #58: dsv41_forward_generate ...................***Failed    0.13 sec
+Traceback (most recent call last):
+  File "/tmp/dgpp-pr10-review/tools/dsv41_reference_dump.py", line 37, in <module>
+    import numpy as np
+ModuleNotFoundError: No module named 'numpy'
+
+        Start  59: dsv41_forward_test_e2e
+ 59/126 Test  #59: dsv41_forward_test_e2e ...................***Failed    0.08 sec
+[FAIL] dump: cannot open /tmp/dgpp-pr10-review/build-ci/dsv41_pure_ref.dump
+
+        Start  60: dsv41_forward_generate_teacher
+ 60/126 Test  #60: dsv41_forward_generate_teacher ...........***Failed    0.07 sec
+Traceback (most recent call last):
+  File "/tmp/dgpp-pr10-review/tools/dsv41_reference_dump.py", line 37, in <module>
+    import numpy as np
+ModuleNotFoundError: No module named 'numpy'
+
+        Start  61: dsv41_forward_test
+ 61/126 Test  #61: dsv41_forward_test .......................***Failed    0.07 sec
+[FAIL] dump: cannot open /tmp/dgpp-pr10-review/build-ci/dsv41_teacher_ref.dump
+
+        Start  62: dsv41_forward_generate_bounded
+ 62/126 Test  #62: dsv41_forward_generate_bounded ...........***Failed    0.07 sec
+Traceback (most recent call last):
+  File "/tmp/dgpp-pr10-review/tools/dsv41_reference_dump.py", line 37, in <module>
+    import numpy as np
+ModuleNotFoundError: No module named 'numpy'
+
+        Start  63: dsv41_forward_test_bounded_e2e
+ 63/126 Test  #63: dsv41_forward_test_bounded_e2e ...........***Failed    0.07 sec
+[FAIL] dump: cannot open /tmp/dgpp-pr10-review/build-ci/dsv41_bounded_ref.dump
+
+        Start  64: dsv41_forward_generate_teacher_bounded
+ 64/126 Test  #64: dsv41_forward_generate_teacher_bounded ...***Failed    0.06 sec
+Traceback (most recent call last):
+  File "/tmp/dgpp-pr10-review/tools/dsv41_reference_dump.py", line 37, in <module>
+    import numpy as np
+ModuleNotFoundError: No module named 'numpy'
+
+        Start  65: dsv41_forward_test_bounded
+ 65/126 Test  #65: dsv41_forward_test_bounded ...............***Failed    0.07 sec
+[FAIL] dump: cannot open /tmp/dgpp-pr10-review/build-ci/dsv41_teacher_bounded_ref.dump
+
+        Start  66: dsv41_decode_test
+ 66/126 Test  #66: dsv41_decode_test ........................   Passed    4.12 sec
+        Start  67: dsv41_engram_test
+ 67/126 Test  #67: dsv41_engram_test ........................   Passed    1.17 sec
+        Start  68: qwen_moe_test
+ 68/126 Test  #68: qwen_moe_test ............................   Passed    3.47 sec
+        Start  69: qwen_loader_test
+ 69/126 Test  #69: qwen_loader_test .........................   Passed    6.86 sec
+        Start  70: glm4_attn_test
+ 70/126 Test  #70: glm4_attn_test ...........................   Passed    1.19 sec
+        Start  71: glm4_loader_test
+ 71/126 Test  #71: glm4_loader_test .........................   Passed    1.72 sec
+        Start  72: glm4_forward_fixture
+ 72/126 Test  #72: glm4_forward_fixture .....................   Passed    0.09 sec
+        Start  73: glm4_forward_smoke
+ 73/126 Test  #73: glm4_forward_smoke .......................   Passed    1.64 sec
+        Start  74: glm4_forward_generate
+ 74/126 Test  #74: glm4_forward_generate ....................   Passed    6.99 sec
+        Start  75: glm4_forward_test
+ 75/126 Test  #75: glm4_forward_test ........................   Passed    1.73 sec
+        Start  76: glm_dsa_forward_fixture
+ 76/126 Test  #76: glm_dsa_forward_fixture ..................   Passed    0.12 sec
+        Start  77: glm_dsa_forward_smoke
+ 77/126 Test  #77: glm_dsa_forward_smoke ....................   Passed    1.69 sec
+        Start  78: glm_dsa_forward_generate
+ 78/126 Test  #78: glm_dsa_forward_generate .................   Passed   13.42 sec
+        Start  79: glm_dsa_forward_test
+ 79/126 Test  #79: glm_dsa_forward_test .....................   Passed    1.76 sec
+        Start  80: glm_dsa_prefill_fixture
+ 80/126 Test  #80: glm_dsa_prefill_fixture ..................   Passed    0.12 sec
+        Start  81: glm_dsa_prefill_generate
+ 81/126 Test  #81: glm_dsa_prefill_generate .................   Passed  103.44 sec
+        Start  82: glm_dsa_prefill_test
+ 82/126 Test  #82: glm_dsa_prefill_test .....................   Passed    1.76 sec
+        Start  83: glm_dsa_decode_test
+ 83/126 Test  #83: glm_dsa_decode_test ......................   Passed    2.17 sec
+        Start  84: glm_dsa_tp_test
+ 84/126 Test  #84: glm_dsa_tp_test ..........................   Passed    3.55 sec
+        Start  85: glm_dsa_engine_test
+ 85/126 Test  #85: glm_dsa_engine_test ......................   Passed    7.75 sec
+        Start  86: glm4_decode_test
+ 86/126 Test  #86: glm4_decode_test .........................   Passed    1.83 sec
+        Start  87: glm4_tp_test
+ 87/126 Test  #87: glm4_tp_test .............................   Passed    3.28 sec
+        Start  88: glm4_engine_test
+ 88/126 Test  #88: glm4_engine_test .........................   Passed    4.09 sec
+        Start  89: glm_dsa_loader_test
+ 89/126 Test  #89: glm_dsa_loader_test ......................   Passed    1.84 sec
+        Start  90: dsv41_loader_test
+ 90/126 Test  #90: dsv41_loader_test ........................   Passed    9.30 sec
+        Start  91: dsv41_tp_test
+ 91/126 Test  #91: dsv41_tp_test ............................   Passed    7.16 sec
+        Start  92: dsv41_engine_test
+ 92/126 Test  #92: dsv41_engine_test ........................   Passed    8.77 sec
+        Start  93: qwen_tp_test
+ 93/126 Test  #93: qwen_tp_test .............................   Passed    4.86 sec
+        Start  94: qwen_engine_test
+ 94/126 Test  #94: qwen_engine_test .........................   Passed    9.76 sec
+        Start  95: qwen_engine_row_independent
+ 95/126 Test  #95: qwen_engine_row_independent ..............   Passed    3.52 sec
+        Start  96: qwen_engine_bf12
+ 96/126 Test  #96: qwen_engine_bf12 .........................   Passed    9.63 sec
+        Start  97: qwen_engine_fp8_head_4
+ 97/126 Test  #97: qwen_engine_fp8_head_4 ...................   Passed    3.36 sec
+        Start  98: qwen_engine_fp8_head_256
+ 98/126 Test  #98: qwen_engine_fp8_head_256 .................   Passed    3.36 sec
+        Start  99: qwen_head_check_fixture
+ 99/126 Test  #99: qwen_head_check_fixture ..................   Passed    4.17 sec
+        Start 100: glm_loader_test
+100/126 Test #100: glm_loader_test ..........................   Passed    3.88 sec
+        Start 101: bf16_gemv_test
+101/126 Test #101: bf16_gemv_test ...........................   Passed   16.87 sec
+        Start 102: bf12_gemv_test
+102/126 Test #102: bf12_gemv_test ...........................   Passed    2.31 sec
+        Start 103: mma_gemv_test
+103/126 Test #103: mma_gemv_test ............................   Passed    3.87 sec
+        Start 104: fp4_gemv_test
+104/126 Test #104: fp4_gemv_test ............................   Passed    1.29 sec
+        Start 105: packq_gemv_test
+105/126 Test #105: packq_gemv_test ..........................   Passed    1.36 sec
+        Start 106: packq_gemm_test
+106/126 Test #106: packq_gemm_test ..........................   Passed    1.26 sec
+        Start 107: scale_gemm_test
+107/126 Test #107: scale_gemm_test ..........................   Passed    3.64 sec
+        Start 108: glm_mhc_test
+108/126 Test #108: glm_mhc_test .............................   Passed    3.39 sec
+        Start 109: det_math_test
+109/126 Test #109: det_math_test ............................   Passed    5.27 sec
+        Start 110: glm_pick_test
+110/126 Test #110: glm_pick_test ............................   Passed    1.88 sec
+        Start 111: glm_moe_test
+111/126 Test #111: glm_moe_test .............................   Passed   26.27 sec
+        Start 112: glm_forward_fixture
+112/126 Test #112: glm_forward_fixture ......................   Passed    0.09 sec
+        Start 113: glm_forward_generate
+113/126 Test #113: glm_forward_generate .....................   Passed    2.20 sec
+        Start 114: glm_forward_test
+114/126 Test #114: glm_forward_test .........................   Passed    1.71 sec
+        Start 115: dsa_dump_generate
+115/126 Test #115: dsa_dump_generate ........................   Passed    0.52 sec
+        Start 116: dsa_dump_test
+116/126 Test #116: dsa_dump_test ............................   Passed    1.61 sec
+        Start 117: kda_dump_generate
+117/126 Test #117: kda_dump_generate ........................   Passed    0.06 sec
+        Start 118: kda_dump_test
+118/126 Test #118: kda_dump_test ............................   Passed    3.80 sec
+        Start 119: doll_selftest
+119/126 Test #119: doll_selftest ............................   Passed    1.61 sec
+        Start 120: flag_protocol_test
+120/126 Test #120: flag_protocol_test .......................   Passed    2.05 sec
+        Start 121: roster_selftest
+121/126 Test #121: roster_selftest ..........................   Passed    0.04 sec
+        Start 122: bus_test
+122/126 Test #122: bus_test .................................   Passed   37.71 sec
+        Start 123: bus_selftest
+123/126 Test #123: bus_selftest .............................   Passed    3.10 sec
+        Start 124: glm_vision_test
+124/126 Test #124: glm_vision_test ..........................   Passed    1.64 sec
+        Start 125: glm_vision_stream_test
+125/126 Test #125: glm_vision_stream_test ...................   Passed   24.08 sec
+        Start 126: glm_vision_frontend_test
+126/126 Test #126: glm_vision_frontend_test .................   Passed    0.27 sec
+
+93% tests passed, 9 tests failed out of 126
+
+Label Time Summary:
+checkpoint    =  30.27 sec*proc (10 tests)
+fixture       =  28.79 sec*proc (8 tests)
+gpu           = 492.46 sec*proc (87 tests)
+host          = 173.13 sec*proc (31 tests)
+python        =  18.75 sec*proc (14 tests)
+rdma          = 123.19 sec*proc (12 tests)
+
+Total Test time (real) = 694.46 sec
+
+The following tests FAILED:
+	 36 - portability_test (Failed)
+	 58 - dsv41_forward_generate (Failed)
+	 59 - dsv41_forward_test_e2e (Failed)
+	 60 - dsv41_forward_generate_teacher (Failed)
+	 61 - dsv41_forward_test (Failed)
+	 62 - dsv41_forward_generate_bounded (Failed)
+	 63 - dsv41_forward_test_bounded_e2e (Failed)
+	 64 - dsv41_forward_generate_teacher_bounded (Failed)
+	 65 - dsv41_forward_test_bounded (Failed)
+Errors while running CTest

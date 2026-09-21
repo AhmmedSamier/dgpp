@@ -1,0 +1,2 @@
+[FAIL] qwen_mtp_existing_hidden_projection_keeps_dispatch: existing MTP projection retains its kernel functions and launch shapes
+1 tests, 1 failed
