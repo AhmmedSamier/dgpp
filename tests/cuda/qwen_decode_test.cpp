@@ -495,14 +495,15 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
     };
     if (fp8_head && dgpp::dense_gemv_rows() == 4) {
       // The default head must retain GEMV even with a wide decode capacity.
-      // A narrow model opted into MMA also retains GEMV above its ceiling.
+      // The minimum-capacity MMA model retains GEMV above its effective
+      // ceiling (the session core floors requested capacities at eight).
       // Both controls share the same dense lowering threshold; compare hidden
       // states to establish that these comparisons isolate the head.
       QwenModel old_head(cfg, dir, 64, 2048, QwenResidency::Resident, nullptr, 0, 1, 8, false, 16);
       QwenModel narrow(cfg, dir, 64, 2048, QwenResidency::Resident, nullptr, 0, 1, 1, false, 4,
                        true);
       require(!old_head.fp8_head_mma(), "the default head must remain GEMV");
-      for (const int length : {1, 4, 5, 8, 16, 17}) {
+      for (const int length : {1, 4, 5, 8, 9, 16, 17}) {
         double prefill_loss_delta = 0;
         for (int trial = 0; trial < 8; ++trial) {
           auto prompt = smoke_tokens(cfg, length + 1, 9000 + 100 * length + trial);
@@ -511,9 +512,12 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
           const auto expected = old_head.session_prefill(0, prompt);
           const auto actual = wide.session_prefill(0, prompt);
           const auto narrow_output = narrow.session_prefill(0, prompt);
-          require(narrow_output.final_hidden_bits == expected.final_hidden_bits &&
-                      bitwise(narrow_output.logits, expected.logits),
-                  "opt-in MMA outside the decode ceiling must retain default GEMV");
+          require(narrow.max_decode_rows() == dgpp::kDecodeRows,
+                  "minimum-capacity control must expose the session-core floor");
+          const auto& narrow_expected = length <= narrow.max_decode_rows() ? actual : expected;
+          require(narrow_output.final_hidden_bits == narrow_expected.final_hidden_bits &&
+                      bitwise(narrow_output.logits, narrow_expected.logits),
+                  "MMA must respect the effective decode ceiling, including its floor");
           narrow.session_close(0);
           require(actual.logits.size() == static_cast<size_t>(V) &&
                       expected.logits.size() == static_cast<size_t>(V),
