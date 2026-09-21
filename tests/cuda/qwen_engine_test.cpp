@@ -359,11 +359,8 @@ void rank_work_mtp(int r, const QwenTextConfig& cfg, const std::string& dir, con
       mtp_engine.close(2);
       mtp_engine.drain();
       if (depth == 2) {
-        const bool compact = test_compaction();
-        require(compact ? mtp_engine.batch_family_steps(0) > fitting_steps
-                        : mtp_engine.batch_family_steps(0) == fitting_steps,
-                "sparse slots compact into the fitting family, or preserve scalar fallback when "
-                "disabled");
+        require(mtp_engine.batch_family_steps(0) == fitting_steps,
+                "slots beyond the physical family preserve scalar fallback");
       }
     }
     cudaFreeHost(scratch);
@@ -478,6 +475,21 @@ DGPP_TEST(qwen_engines_loopback_world_2_mtp_depth2_graph_matches_plain_decode) {
   DGPP_LOG_INFO("world 2 MTP depth 2: A took {} steps for {} tokens", o.mtp_steps_a, kSteps);
 }
 
+DGPP_TEST(qwen_wide_compaction_keeps_numerical_dispatch_range) {
+  for (int rows : {2, 4, 8, 16, 24, 32, 64})
+    require(QwenModel::compact_batch_compatible(rows, rows), "unchanged width is compatible");
+  for (int rows : {2, 4, 8, 16}) {
+    require(!QwenModel::compact_batch_compatible(16, rows / 2),
+            "small verification must retain its physical width");
+    require(!QwenModel::compact_batch_compatible(64, rows),
+            "wide verification must not enter the small-graph lowering");
+  }
+  require(
+      QwenModel::compact_batch_compatible(32, 24) && QwenModel::compact_batch_compatible(64, 24),
+      "wide sparse batches can use the six-request MTP3 family");
+  require(!QwenModel::compact_batch_compatible(24, 32), "compaction never grows a graph");
+}
+
 DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
   const int sample_cap = std::getenv("DGPP_TEST_COMPACT_SAMPLING")
                              ? std::atoi(std::getenv("DGPP_TEST_COMPACT_SAMPLING"))
@@ -494,6 +506,7 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
   const int slots = rows64 ? 16 : 8;
   const int decode_rows = rows64 ? 64 : rows32 ? 32 : 16;
   const int mtp_depth = (rows32 || rows64) ? 3 : 1;
+  const int sparse_bucket = test_compaction() && (rows32 || rows64) ? 6 : slots;
   require(QwenModel::decode_rows_cap() >= decode_rows, "Qwen advertises the tested decode width");
   const bool old_fp8 = dgpp::QwenLayerStream::dense_weights_fp8();
   struct RestoreDenseWeights {
@@ -663,12 +676,13 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
         // snapshot. Every graph between chunks must treat slot 1 as padding.
         graph.begin_prefill(1, long_prompt, 128, 8, plan);
         require(graph.advance_prefill(1).first_token < 0, "the long prefill yields");
-        const auto compact_steps = graph.batch_family_steps(0);
+        const auto families = graph.batch_families();
+        const int sparse_family = static_cast<int>(
+            std::find(families.begin(), families.end(), sparse_bucket) - families.begin());
+        const auto compact_steps = graph.batch_family_steps(sparse_family);
         (void)graph.step_batch({0, slots - 1});
-        if (test_compaction()) {
-          require(graph.batch_family_steps(0) == compact_steps + 1,
-                  "sparse physical slots use the two-request graph");
-        }
+        require(graph.batch_family_steps(sparse_family) == compact_steps + 1,
+                "sparse physical slots preserve the numerical dispatch range");
         graph.close(1);
         for (int round = 0; round < 2; ++round) {
           if (round == 0) {
@@ -706,6 +720,10 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
         const std::vector<std::vector<int>> maps{{0, 1}, {slots - 1, 3}, {1, 0}};
         for (const auto& ids : maps) {
           const auto fallbacks_before = graph.fallbacks();
+          const int bucket = ids[0] == slots - 1 ? sparse_bucket : 2;
+          const auto families = graph.batch_families();
+          const int family = static_cast<int>(std::find(families.begin(), families.end(), bucket) -
+                                              families.begin());
           std::vector<std::vector<int32_t>> generated(2);
           for (int q = 0; q < 2; ++q) {
             dgpp::sample::Params params;
@@ -721,15 +739,14 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
           while (generated[0].size() < 24 || generated[1].size() < 24) {
             const bool reverse = ids[0] == slots - 1 && (++iteration % 2 == 0);
             const std::vector<int> order = reverse ? std::vector<int>{ids[1], ids[0]} : ids;
-            const auto compact_steps = graph.batch_family_steps(0);
+            const auto compact_steps = graph.batch_family_steps(family);
             auto next = graph.step_batch(order);
             for (int q = 0; q < 2; ++q) {
               const auto& tokens = next[reverse ? 1 - q : q];
               generated[q].insert(generated[q].end(), tokens.begin(), tokens.end());
             }
-            if (test_compaction())
-              require(graph.batch_family_steps(0) == compact_steps + 1,
-                      "sampled sparse requests use compact bucket");
+            require(graph.batch_family_steps(family) == compact_steps + 1,
+                    "sampled requests use the compatible bucket");
           }
           for (auto& g : generated) g.resize(24);
           if (reference.empty())

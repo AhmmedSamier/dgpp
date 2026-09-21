@@ -768,15 +768,20 @@ drafts and padded rows measure different work.
 
 ### Compact Qwen batch mappings
 
-With `engine.compact_batches: true`, fixed-depth Qwen graph serving compacts active
-requests into the smallest available bucket by count. Persistent KV, recurrent/conv and prefix-cache
+With `engine.compact_batches: true`, fixed-depth Qwen graph serving places active
+requests in the smallest bucket that preserves the physical graph's numerical
+dispatch range. Graphs of at most sixteen verification rows retain their width.
+Wider graphs can shrink to a bucket above sixteen rows: for example, two live
+requests in slots 0 and 15 at MTP depth 3 use six groups (24 rows) instead of
+sixteen groups (64 rows). Slots outside every physical family retain scalar
+fallback. This conservative policy avoids the numerical changes found when
+contracting into the small-graph kernels. Persistent KV, recurrent/conv and prefix-cache
 state stays in the physical request slots; only row mappings and token feeds
 are staged. Sampling RNG/counts/bias/proposals remain indexed by physical
 request ID. Graph masks and verdicts are indexed by compact batch group.
 The mapping is double-buffered per graph family for pipelined replays.
 
-The setting defaults to false, retaining the physical-prefix policy until
-full-model numerical comparisons are complete. Rank 0 journals the setting
+The setting defaults to false, retaining the physical-prefix policy. Rank 0 journals the setting
 and peers adopt it before graph construction; it is not read from the
 environment. Confidence-scheduled verify depth and other model families currently use the previous policy.
 This changes neither model capacity nor the set of graph bucket sizes.

@@ -81,6 +81,14 @@ class QwenModel : public SessionModel<QwenModel> {
   int64_t prefill_group_span_limit() const { return max_tokens_; }
   using RowRun = Base::RowRun;
 
+  // Small graph widths can select different Lt/GEMV reductions. Preserve
+  // their physical-prefix width; wider verification stays in the common
+  // kernel-only lowering range and can contract without crossing it.
+  static bool compact_batch_compatible(int physical_rows, int compact_rows) {
+    return compact_rows > 0 && compact_rows <= physical_rows &&
+           (physical_rows == compact_rows || (physical_rows > 16 && compact_rows > 16));
+  }
+
   // max_tokens bounds a walk's rows (a prefill chunk, the diagnostic
   // forward); max_cache_tokens the paged pool's capacity in tokens (rounded
   // up to a block) — shared by every slot, so one request may take it all

@@ -1,0 +1,5 @@
+negative-fallback.log (expected exit 1):
+[FAIL] qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation: graph engine: the gathered fallback row 0 is not the row the device decided over (covered mass 0.00200359049 vs the device's 0.00200202367) — the verify snapshot and the pick disagree
+
+negative-cache-budget.log (expected exit 1):
+qwen_head_check: session_prefill: the cache pool cannot cover the prompt (admission budget)

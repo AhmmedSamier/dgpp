@@ -175,9 +175,17 @@ void compaction_scores(dgpp::QwenModel& model, dgpp::net::CollectiveBus* bus,
         const auto& shape = shapes[si];
         const int live = static_cast<int>(shape.physical.size()), rows = shape.rows;
         const int width = live * rows;
-        const int requests =
-            compact ? (live == 5 ? 6 : live)
-                    : *std::max_element(shape.physical.begin(), shape.physical.end()) + 1;
+        const int physical = *std::max_element(shape.physical.begin(), shape.physical.end()) + 1;
+        int requests = physical;
+        if (compact) {
+          for (int bucket : {2, 3, 4, 6, 8, 12, 16}) {
+            if (bucket >= live &&
+                dgpp::QwenModel::compact_batch_compatible(physical * rows, bucket * rows)) {
+              requests = bucket;
+              break;
+            }
+          }
+        }
         const size_t n = rows == 4 ? c.ids.size() : std::min(c.ids.size(), size_t(boundary_tokens));
         const int length = static_cast<int>(n / live), steps = (length - 17) / rows;
         require(steps > 0, "compaction corpus is too short for its physical layout");

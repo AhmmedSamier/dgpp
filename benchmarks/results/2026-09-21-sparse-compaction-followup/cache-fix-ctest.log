@@ -1,0 +1,17 @@
+Internal ctest changing into directory: <checkout>/build-ci
+Test project <checkout>/build-ci
+    Start  39: qwen_head_compare_test
+1/3 Test  #39: qwen_head_compare_test ...........   Passed    1.54 sec
+    Start 110: qwen_head_check_fixture
+2/3 Test #110: qwen_head_check_fixture ..........   Passed    4.13 sec
+    Start 111: qwen_compact_check_fixture
+3/3 Test #111: qwen_compact_check_fixture .......   Passed    5.49 sec
+
+100% tests passed, 0 tests failed out of 3
+
+Label Time Summary:
+gpu       =   9.61 sec*proc (2 tests)
+host      =   1.54 sec*proc (1 test)
+python    =   1.54 sec*proc (1 test)
+
+Total Test time (real) =  11.16 sec

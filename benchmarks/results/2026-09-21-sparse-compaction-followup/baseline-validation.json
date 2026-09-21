@@ -1,0 +1,19 @@
+{
+  "configuration": {
+    "world": 4,
+    "mode": "gemv",
+    "repeats": 2,
+    "capacity": 64,
+    "boundary_tokens": 1024,
+    "prefill_trials": 0,
+    "yarn": 0,
+    "corpora": 3,
+    "compaction": "off",
+    "manifest": "7f30edb7f533d9b9",
+    "vocab": 248320
+  },
+  "completed_cases_per_rank": 36,
+  "unique_positions": 50890,
+  "repeatability": "bitwise on every rank",
+  "hidden_states": "identical across ranks"
+}

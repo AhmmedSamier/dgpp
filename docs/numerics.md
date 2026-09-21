@@ -63,8 +63,12 @@ python3 scripts/qwen_head_compare.py /tmp/compact-off /tmp/compact-on \
 
 The sparse cases place two requests in slots 15 and 0 at one, two and four
 rows per request, and five requests in slots 15/0/7/3/12 at four rows each.
-Compaction selects two or six groups, including an inactive padding group
-in the latter case; the physical policy uses sixteen. Four- and sixteen-slot
+The checker uses the engine's numerical compatibility rule. The compact
+policy selects sixteen, twelve and six groups for the two-request cases,
+respectively, and six groups for the five-request case; unused groups carry
+inactive padding. The physical policy uses sixteen groups. Small physical
+graphs retain their width, and wider graphs shrink only within the lowering
+range above sixteen verification rows. Four- and sixteen-slot
 dense cases require identical hidden states and logits across modes. All
 cases require exact repeats and rank agreement. Sparse cases allow hidden
 states to change with the graph shape and use the same NLL and top-1 gates

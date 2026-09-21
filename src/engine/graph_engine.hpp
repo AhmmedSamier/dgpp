@@ -1807,10 +1807,24 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   int family_for(const std::vector<int>& reqs) const {
     int top = 0;
     for (const int req : reqs) top = std::max(top, req);
-    if (compact_batches()) top = static_cast<int>(reqs.size()) - 1;
+    int physical = -1;
     for (size_t f = 0; f < families_.size(); ++f)
-      if (families_[f].requests > top) return static_cast<int>(f);
-    return -1;
+      if (families_[f].requests > top) {
+        physical = static_cast<int>(f);
+        break;
+      }
+    if (!compact_batches()) return physical;
+    for (size_t f = 0; f < families_.size(); ++f) {
+      if (families_[f].requests < static_cast<int>(reqs.size())) continue;
+      if constexpr (requires { Model::compact_batch_compatible(0, 0); }) {
+        if (physical < 0 ||
+            !Model::compact_batch_compatible(families_[physical].requests * rows_per_request_,
+                                             families_[f].requests * rows_per_request_))
+          continue;
+      }
+      return static_cast<int>(f);
+    }
+    return physical;
   }
 
   // The stage handshake and the masks' upload, recorded ahead of the

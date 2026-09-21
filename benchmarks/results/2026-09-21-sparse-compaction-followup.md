@@ -53,5 +53,27 @@ allocation to a full block. The scorer now budgets that slack per request.
 The synthetic compaction corpus uses 1040 tokens, making each C16 stream
 65 tokens long so this rounding boundary is exercised.
 
-Real-model numerical and four-node service results are pending. The feature
-remains default off.
+The unrestricted policy failed the four-node numerical gate at `c1ea0a1`.
+Both modes completed all 36 cases per rank (50,890 positions, repeated twice),
+with exact repeats and rank agreement. Dense controls and the five-request
+padded case were bitwise identical across policies. Sparse two-request graphs
+failed: the hard corpus's rates of changes above 1 nat were 3.03%, 3.95% and
+2.30% at one, two and four rows per request, exceeding the 1% limit. Mean NLL
+deltas stayed inside 0.02 nat, but top-1 changes also exceeded the tie bound.
+See `2026-09-21-sparse-compaction-followup/numerical-initial-summary.json`.
+
+The follow-up therefore restricts selection to the physical graph's numerical
+dispatch range. Small graphs retain their width; graphs above sixteen rows
+can contract only to another family above sixteen rows. At C16/MTP3 the
+sparse two-request case uses six groups (24 rows) rather than two groups
+(8 rows), while the physical policy uses sixteen groups (64 rows). This
+retains useful wide-batch compaction without the failed small-graph transition.
+The engine and scorer share the compatibility rule; numerical bounds remain
+unchanged. Final validation of this restricted policy is pending.
+
+Peer launcher logs appended the first aborted baseline when its output
+directory was reused. The raw logs are retained locally; analysis selects the
+final complete run at its last `head_begin` record. The extraction manifest
+records raw and analyzed hashes and the removed prefix lengths.
+
+The feature remains default off.

@@ -1,0 +1,25 @@
+Internal ctest changing into directory: <checkout>/build-ci
+Test project <checkout>/build-ci
+    Start 58: dsv41_forward_generate
+1/8 Test #58: dsv41_forward_generate ...................   Passed    0.88 sec
+    Start 59: dsv41_forward_test_e2e
+2/8 Test #59: dsv41_forward_test_e2e ...................   Passed    1.82 sec
+    Start 60: dsv41_forward_generate_teacher
+3/8 Test #60: dsv41_forward_generate_teacher ...........   Passed    0.62 sec
+    Start 61: dsv41_forward_test
+4/8 Test #61: dsv41_forward_test .......................   Passed    1.75 sec
+    Start 62: dsv41_forward_generate_bounded
+5/8 Test #62: dsv41_forward_generate_bounded ...........   Passed    0.58 sec
+    Start 63: dsv41_forward_test_bounded_e2e
+6/8 Test #63: dsv41_forward_test_bounded_e2e ...........   Passed    1.75 sec
+    Start 64: dsv41_forward_generate_teacher_bounded
+7/8 Test #64: dsv41_forward_generate_teacher_bounded ...   Passed    0.57 sec
+    Start 65: dsv41_forward_test_bounded
+8/8 Test #65: dsv41_forward_test_bounded ...............   Passed    1.72 sec
+
+100% tests passed, 0 tests failed out of 8
+
+Label Time Summary:
+gpu    =   9.69 sec*proc (8 tests)
+
+Total Test time (real) =   9.73 sec
