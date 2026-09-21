@@ -129,6 +129,14 @@ class SchedulerEngine {
     uint64_t attempts[8] = {};
     uint64_t accepts[8] = {};
   };
+  // Last launched decode graph, retained while idle; counters since startup.
+  struct DecodeBatchStats {
+    static constexpr int kMaxSlots = 16;
+    int slots = 0, active = 0, rows_per_request = 0;
+    uint64_t replays = 0, rows = 0, padded_rows = 0;
+    uint64_t replays_by_slots[kMaxSlots + 1] = {};
+  };
+  virtual DecodeBatchStats decode_batch_stats() const { return {}; }
   virtual MtpAcceptance mtp_acceptance() const { return {}; }
   virtual MtpAcceptance mtp_acceptance(int req) const {
     (void)req;
@@ -211,6 +219,8 @@ class SchedulerEngine {
     int64_t block_tokens = 0;  // the DSA block; 0 = no pool (nothing pinned)
     int64_t chunk_tokens = 2048;  // the prefill's chunk (the cold cuts)
     int step_tokens_max = 1;   // tokens one step may commit (2: the MTP step)
+    bool prefill_lookahead = false;  // MTP prefill snapshots also depend on prompt[position]
+    bool body_snapshots = true;      // extra snapshots must preserve the prefill's computation
   };
   virtual PrefixInfo prefix_info() const { return {}; }
   // The hop (M7 under a multi-token step): the request's next step may
@@ -232,7 +242,9 @@ class SchedulerEngine {
   // of the prompt's cuts) and prefills prompt[attach_position..] only;
   // snap_slot >= 0 asks for a snapshot into that arena slot when a chunk
   // ends at snap_position (a cut, > attach_position), reported in
-  // snap_taken. Returns the first token, exactly as prefill() does.
+  // snap_taken. body_snap_slot names an optional earlier document cut in
+  // the same walk, reported independently in body_snap_taken. Returns the
+  // first token, exactly as prefill() does.
   struct PrefixPrefill {
     const std::vector<int64_t>* boundaries = nullptr;
     const std::vector<ImageInput>* images = nullptr;  // absolute prompt offsets
@@ -241,11 +253,15 @@ class SchedulerEngine {
     int snap_slot = -1;
     int64_t snap_position = 0;
     bool snap_taken = false;  // out
+    int body_snap_slot = -1;
+    int64_t body_snap_position = 0;
+    bool body_snap_taken = false;
   };
   struct PrefillProgress {
     int64_t computed_tokens = 0;
     int32_t first_token = -1;  // -1: more chunks remain
     bool snap_taken = false;
+    bool body_snap_taken = false;
   };
   virtual void begin_prefill(int, const std::vector<int64_t>&, int64_t, int64_t,
                              const PrefixPrefill&) {
@@ -413,6 +429,7 @@ class Scheduler {
     double step_ms = 0.0;
     // Draft acceptance by position, engine-wide cumulative.
     SchedulerEngine::MtpAcceptance mtp;
+    SchedulerEngine::DecodeBatchStats decode_batch;
     // The prefix cache (M7): its slots and live entries, the attach and
     // miss counts, the prompt tokens attaches skipped, the entries taken
     // (at prefill cuts / from rolling snapshots at close), rolling
@@ -566,6 +583,8 @@ class Scheduler {
     double prefill_ms = 0.0;
     int prefill_snap_slot = -1;
     int64_t prefill_snap_position = 0;
+    int prefill_body_slot = -1;
+    int64_t prefill_body_position = 0;
     int64_t prefill_computed = 0;
     int64_t attached_tokens = 0;
     int decode_passes = 0;
@@ -577,12 +596,14 @@ class Scheduler {
     int attach_entry = -1;
     int64_t attach_position = 0;
     int64_t snap_position = 0;
+    int64_t body_snap_position = 0;
   };
   bool cache_on(const Request& r) const {
     return cache_.enabled() && !r.spec.no_cache && !r.cache_off &&
            (r.spec.images.empty() || engine_->supports_image_prefix_cache());
   }
   PrefixPlan plan_prefix(const Request& r) const;
+  void finish_prefill_snapshot(Request& r, int slot, int64_t position, bool taken);
   // The pool block a snapshot's private partial-block copy takes: one when
   // the position is not block-aligned, none otherwise (or without a pool).
   int64_t snapshot_blocks(int64_t position) const;

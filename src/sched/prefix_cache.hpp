@@ -40,6 +40,7 @@ class PrefixCache {
     std::vector<int64_t> ids;   // the first `position` ids of the sequence
     Images images;             // immutable pixels shared across matching entries
     int64_t position = 0;
+    int64_t next_token = -1;    // MTP prefill consumed ids[position]; -1: no lookahead constraint
     int slot = -1;              // the arena slot; -1 once evicted
     uint64_t hash = 0;
     uint64_t last_use = 0;      // the tick of the last attach / insert
@@ -95,12 +96,16 @@ class PrefixCache {
 
   // The deepest live entry whose position is one of `cuts` (all < the
   // prompt's length) and whose ids equal the prompt's first `position`
-  // ids. `cut_hashes[i]` is hash_prefix(prompt, cuts[i]). -1: none.
+  // ids, with a matching lookahead token when the entry has one.
+  // `cut_hashes[i]` is hash_prefix(prompt, cuts[i]). -1: none.
   int lookup(const std::vector<int64_t>& prompt,
              const std::vector<int64_t>& cuts,
              const std::vector<uint64_t>& cut_hashes, const Images& images = {}) const;
-  // Whether a live entry with exactly these ids exists (the dedupe check).
-  int find_exact(const int64_t* ids, int64_t n, uint64_t hash, const Images& images = {}) const;
+  // Whether compatible state exists for these ids (the dedupe check).
+  // next_token == -1 asks for an unconstrained entry; constrained prefill
+  // state must not replace a rolling snapshot that can resume with any token.
+  int find_exact(const int64_t* ids, int64_t n, uint64_t hash, const Images& images = {},
+                 int64_t next_token = -1) const;
   // The miss diagnostic: the live entry sharing the longest
   // prefix with the prompt, and that length — where a prompt that should
   // have attached first differs from what the cache holds (an agent
@@ -143,7 +148,8 @@ class PrefixCache {
   // Inserts an entry over ids[0..position) in `slot`. Returns its index,
   // or -1 when an identical entry is live or pixel storage is full (the caller keeps the slot out
   // of the entry and gives it back).
-  int insert(const int64_t* ids, int64_t position, int slot, uint64_t now, const Images& images = {});
+  int insert(const int64_t* ids, int64_t position, int slot, uint64_t now,
+             const Images& images = {}, int64_t next_token = -1);
   const Entry& entry(int index) const { return entries_.at(static_cast<size_t>(index)); }
   void attach(int index, uint64_t now);
   void detach(int index);

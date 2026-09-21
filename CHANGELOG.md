@@ -6,6 +6,97 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Reuse long documents when their question changes** (2026-09-21,
+  [#17](https://github.com/HawkBearPig/dgpp/issues/17)): save one earlier
+  prefill snapshot alongside the final cut, preserve both through resumable
+  prefill, and check MTP's lookahead token before reuse. Report snapshot
+  capacity in memory plans and distinguish arena pressure from KV-pool
+  pressure. See the [validation record](benchmarks/results/2026-09-21-prefix-document-reuse.md)
+  and [sizing guide](docs/prefix-cache.md).
+- **Keep batched MTP fallback decisions isolated** (2026-09-21,
+  [#15](https://github.com/HawkBearPig/dgpp/issues/15)): preserve each request's
+  verified drafts before another request's fallback publishes new drafts.
+  Repair the live sampling oracle, cover grouped and staggered admission,
+  slot reuse and disabled pipelining, and test batched fallback counters.
+  See the [validation record](benchmarks/results/2026-09-21-mtp-fallback-isolation.md).
+- **Reduce QSA selection cost at long context** (2026-09-21,
+  [#19](https://github.com/HawkBearPig/dgpp/issues/19)): use exact radix
+  selection above 2048 compressed pools, preserving score arithmetic,
+  ties, token order and graph workspace. Add a cold/warm indexer benchmark
+  and permanent large-pool, partial-tile and graph-replay correctness gates.
+  See the [performance and parity record](benchmarks/results/2026-09-21-qwen-qsa-select.md).
+- **Make the YaRN release check accurate and resumable** (2026-09-21,
+  [#16](https://github.com/HawkBearPig/dgpp/issues/16)): allow reasoning in
+  retrieval probes, correct decode timing units, repeat the latest cached
+  probe, and budget concurrent streams for serialized long prefills.
+  Save incremental reports with `--resume`; explain pool headroom when YaRN
+  is already enabled. Reject invalid correction-band theta and compare
+  final-position decode logits with the full forward. See the
+  [validation record](benchmarks/results/2026-09-21-yarn-release-check.md).
+- **Tighten decode metrics bookkeeping and documentation** (2026-09-21,
+  [#20](https://github.com/HawkBearPig/dgpp/issues/20)): record each replay's
+  end event immediately after its graph launch, before host counter updates.
+  Cross-link the batch and speculative-counter references, retain the fixed
+  sixteen-bucket histogram contract, and give the depth-one sampled-MTP
+  gate its own port. See the
+  [validation record](benchmarks/results/2026-09-21-metrics-follow-ups.md).
+- **Constrain declared tool argument names by default** (2026-09-21,
+  [#11](https://github.com/HawkBearPig/dgpp/issues/11),
+  [#12](https://github.com/HawkBearPig/dgpp/pull/12)): top-level argument
+  names close to declared `properties` unless `additionalProperties: true`
+  explicitly opts out. Repeated Qwen XML parameters become literal content.
+  The checkpoint grammar gates cover both the closed default and the opt-out
+  without altering reference renders. See the
+  [validation record](benchmarks/results/2026-09-21-tool-key-closure.md).
+- **Reconcile timed benchmark counters** (2026-09-20,
+  [#24](https://github.com/HawkBearPig/dgpp/issues/24)): `scripts/timed_load.py`
+  waits for published counters to match completed requests under a deadline,
+  including warmup and isolation, so late snapshots no longer cause false
+  unexpected-traffic failures. Genuine mismatches still fail with expected
+  and observed counts. The dated script path remains compatible. See the
+  [validation record](benchmarks/results/2026-09-20-timed-load-counters.md).
+- **Compare effective settings across ranks** (2026-09-20,
+  [#18](https://github.com/HawkBearPig/dgpp/issues/18)): automatic graph
+  batch thresholds no longer cause false settings-override warnings on
+  peers. Genuine threshold and concurrency differences still warn; the
+  engine settings remain unchanged. See the
+  [validation record](benchmarks/results/2026-09-20-rank-settings-default.md).
+- **Reject duplicate GLM tool arguments** (2026-09-20,
+  [#22](https://github.com/HawkBearPig/dgpp/issues/22)): a repeated argument
+  name makes the tool block literal content instead of a structured call
+  with duplicate JSON keys. Valid calls retain their argument types and
+  can reuse the same names in later calls. See the
+  [validation record](benchmarks/results/2026-09-20-glm-tool-duplicate-keys.md).
+- **Opt-in 512K YaRN context for Qwen3.8-Flash-Next** (2026-09-20,
+  [#3](https://github.com/HawkBearPig/dgpp/pull/3)): `engine.rope_scaling`
+  with YaRN factor 2 extends the ceiling to 524288 tokens; omitting it preserves the
+  plain RoPE path bit for bit. Includes the two-node NVFP4 `_w2_yarn512k`
+  deployment template and `scripts/qwen_yarn_release_check.py`. Two-Spark
+  validation retrieved 5/5 needles at both 261K and 522K prompt tokens:
+  cold prefill 0.909 / 1.397 ms per token, decode about 60.7 / 96.0 ms per
+  pass. See the [validation record](benchmarks/results/2026-09-20-qwen-yarn512k.md)
+  for the recipe, measured scope and release-check limitations.
+- **Cross-compile for DGX Spark from x86 Linux** (2026-09-20,
+  [#5](https://github.com/HawkBearPig/dgpp/pull/5)): `scripts/spark-cross`
+  and the `spark-cross` CMake preset build the ARM64/GB10 server in Docker
+  using the release settings. The host needs no GPU or NVIDIA driver;
+  execution checks run on the Spark. See the [cross-compiling guide](docs/cross-compiling.md)
+  and [build and target validation record](benchmarks/results/2026-09-19-spark-cross-build.md).
+- **Decode graph batch counters on `/metrics` and `/v1/metrics`**
+  (2026-09-20, [#8](https://github.com/HawkBearPig/dgpp/pull/8)):
+  `scheduler.decode_batch` reports cumulative graph launches, verification
+  rows, padded rows and a launch histogram by graph capacity, plus the
+  last launch's capacity, active requests and verification width. See the
+  [counter contract](docs/operations.md#decode-graph-batch-counters) and
+  [validation record](benchmarks/results/2026-09-19-decode-batch-telemetry.md).
+- **MTP acceptance counters on `/metrics` and `/v1/metrics`**
+  (2026-09-20, [#9](https://github.com/HawkBearPig/dgpp/pull/9)):
+  `scheduler.spec_decode` reports verification rounds and total and
+  per-position attempted/accepted drafts. Acceptance is counted after
+  exact host fallback resolves, including drafts a sampled fallback
+  accepts after provisional device rejection; counts precede response
+  stop/length trimming. See the [counter contract](docs/openai-compatibility.md#speculative-decoding-counters)
+  and [validation record](benchmarks/results/2026-09-19-mtp-acceptance-metrics.md).
 - **Lossless 12-bit weights on Qwen3.8-Flash-Next; format v2** (2026-09-19;
   round four of `benchmarks/results/2026-09-19-glm-flash-line-rate/`). The
   format no longer needs rows of whole 1024-column super-blocks: the columns

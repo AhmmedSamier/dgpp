@@ -271,6 +271,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       throw std::invalid_argument("graph engine: null model/bus/pick scratch");
     if constexpr (requires { model_->set_prefill_monitor(prefill_monitor()); })
       model_->set_prefill_monitor(prefill_monitor());
+    static_assert(kPickMaxRequests <= sched::SchedulerEngine::DecodeBatchStats::kMaxSlots);
     slots_ = model_->max_session_requests();
     // The verify's rows: the pending token plus `mtp_depth` drafts
     // (2026-09-06; depth 1 is the two-row step as built).
@@ -425,6 +426,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     pending_.assign(static_cast<size_t>(slots_), -1);
     drafts_.assign(static_cast<size_t>(slots_),
                    std::vector<int32_t>(static_cast<size_t>(depth_), -1));
+    fed_drafts_ = drafts_;
     hop_slot_.assign(static_cast<size_t>(slots_), -1);
     hop_position_.assign(static_cast<size_t>(slots_), 0);
     live_.assign(static_cast<size_t>(slots_), false);
@@ -597,6 +599,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       a.accepts[p] = slot_mtp_accepts_[static_cast<size_t>(req)][static_cast<size_t>(p)];
     }
     return a;
+  }
+  sched::SchedulerEngine::DecodeBatchStats decode_batch_stats() const override {
+    return decode_batch_stats_;
   }
   int batch_min_live() const { return batch_min_live_; }
   // The batch families' slot counts, ascending (empty: scalar only), and
@@ -1015,6 +1020,11 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
           task->snap = arena_.request(plan.snap_slot, plan.snap_position);
           snap = &task->snap;
         }
+        if (plan.body_snap_slot >= 0) {
+          task->body_snap = arena_.request(plan.body_snap_slot, plan.body_snap_position);
+          task->body_snap.next = snap;
+          snap = &task->body_snap;
+        }
         if (plan.attach_slot >= 0) {
           if (arena_.position(plan.attach_slot) != plan.attach_position)
             throw std::logic_error("graph engine: attached prefix differs from the plan");
@@ -1039,7 +1049,12 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
             arena_.commit(task->plan.snap_slot, task->snap);
             task->plan.snap_taken = true;
           }
+          if (task->body_snap.taken && !task->plan.body_snap_taken) {
+            arena_.commit(task->plan.body_snap_slot, task->body_snap);
+            task->plan.body_snap_taken = true;
+          }
           sched::SchedulerEngine::PrefillProgress progress;
+          progress.body_snap_taken = task->plan.body_snap_taken;
           progress.computed_tokens = cursor->next - start;
           progress.snap_taken = task->plan.snap_taken;
           if (done) progress.first_token = open_slot_finish(req, task->prompt, cursor->output);
@@ -1066,6 +1081,8 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       return progress;
     } catch (...) {
       if (task->snap.taken && !task->plan.snap_taken) arena_.commit(task->plan.snap_slot, task->snap);
+      if (task->body_snap.taken && !task->plan.body_snap_taken)
+        arena_.commit(task->plan.body_snap_slot, task->body_snap);
       task.reset();
       close_failed_slot(req);
       reseed_live_feeds();
@@ -1130,6 +1147,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     info.align = model_->session_snapshot_align();
     info.block_tokens = model_->kv_block_tokens();
     info.chunk_tokens = Model::prefill_chunk_tokens();
+    info.prefill_lookahead = model_->mtp_enabled();
+    if constexpr (requires { model_->prefill_bounded(); })
+      info.body_snapshots = !model_->prefill_bounded();
     return info;
   }
   int32_t prefill_cached(int req, const std::vector<int64_t>& prompt,
@@ -1137,30 +1157,46 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     if (plan == nullptr || plan->boundaries == nullptr)
       throw std::invalid_argument("graph engine: prefill_cached without a plan");
     return open_slot(req, prompt, [&] {
-      typename Model::SnapshotRequest snap;
+      typename Model::SnapshotRequest snap, body_snap;
       typename Model::SnapshotRequest* snap_ptr = nullptr;
       if (plan->snap_slot >= 0) {
         snap = arena_.request(plan->snap_slot, plan->snap_position);
         snap_ptr = &snap;
       }
+      if (plan->body_snap_slot >= 0) {
+        body_snap = arena_.request(plan->body_snap_slot, plan->body_snap_position);
+        body_snap.next = snap_ptr;
+        snap_ptr = &body_snap;
+      }
+      const auto commit = [&] {
+        if (plan->snap_slot >= 0) {
+          arena_.commit(plan->snap_slot, snap);
+          plan->snap_taken = snap.taken;
+        }
+        if (plan->body_snap_slot >= 0) {
+          arena_.commit(plan->body_snap_slot, body_snap);
+          plan->body_snap_taken = body_snap.taken;
+        }
+      };
       typename Model::Outputs out;
-      if (plan->attach_slot >= 0) {
-        if (arena_.position(plan->attach_slot) != plan->attach_position)
-          throw std::logic_error(
-              "graph engine: the attach slot's position differs from the plan");
-        arena_.attach(req, plan->attach_slot);
-        const std::vector<int64_t> suffix(prompt.begin() + plan->attach_position,
-                                          prompt.end());
-        out = cached_model_prefill(model_, req, suffix, *plan->boundaries,
-                                   snap_ptr, plan->images, true);
-      } else {
-        out = cached_model_prefill(model_, req, prompt, *plan->boundaries,
-                                   snap_ptr, plan->images, false);
+      try {
+        if (plan->attach_slot >= 0) {
+          if (arena_.position(plan->attach_slot) != plan->attach_position)
+            throw std::logic_error(
+                "graph engine: the attach slot's position differs from the plan");
+          arena_.attach(req, plan->attach_slot);
+          const std::vector<int64_t> suffix(prompt.begin() + plan->attach_position, prompt.end());
+          out = cached_model_prefill(model_, req, suffix, *plan->boundaries, snap_ptr, plan->images,
+                                     true);
+        } else {
+          out = cached_model_prefill(model_, req, prompt, *plan->boundaries, snap_ptr, plan->images,
+                                     false);
+        }
+      } catch (...) {
+        commit();  // a completed earlier snapshot still owns its pinned blocks
+        throw;
       }
-      if (snap_ptr != nullptr) {
-        arena_.commit(plan->snap_slot, snap);
-        plan->snap_taken = snap.taken;
-      }
+      commit();
       return out;
     });
   }
@@ -1365,13 +1401,17 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     r.rows = rows;
     launch(std::move(r));
     settle_older();
+    // A fallback drains the whole batch and publishes its new drafts.
+    // Preserve every slot's verified drafts before collecting any verdict.
+    for (const int req : reqs)
+      fed_drafts_[static_cast<size_t>(req)] = drafts_[static_cast<size_t>(req)];
     if (rows < rows_per_request_)
       stage_masks_compact(fam.requests, rows);
     else
       for (const int req : reqs) stage_masks(req);
     publish_stage(batch_index(family));
-    if (!pipeline_) drain();  // after the publish: the replay's gate waits on it
     wait_verdict(inflight_.back());
+    if (!pipeline_) drain();  // after the publish: the replay's gate waits on it
 
     std::vector<std::vector<int32_t>> batches;
     batches.reserve(reqs.size());
@@ -1444,7 +1484,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     std::vector<int64_t> prompt, boundaries;
     std::vector<ImageInput> images;
     sched::SchedulerEngine::PrefixPrefill plan;
-    typename Model::SnapshotRequest snap;
+    typename Model::SnapshotRequest snap, body_snap;
     std::function<sched::SchedulerEngine::PrefillProgress(int64_t)> advance;
   };
   std::vector<std::unique_ptr<PendingPrefill>> prefills_;
@@ -2157,6 +2197,15 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
                     rank_, r.req, r.parity, variant, inflight_.size());
     DGPP_CUDA_OK(cudaGraphLaunch(exec, model_->stream()));
     DGPP_CUDA_OK(cudaEventRecord(end_event(r), model_->stream()));
+    const int slots = r.batched ? families_.at(static_cast<size_t>(r.family)).requests : 1;
+    decode_batch_stats_.slots = slots;
+    decode_batch_stats_.active = static_cast<int>(r.reqs.size());
+    decode_batch_stats_.rows_per_request = r.rows;
+    ++decode_batch_stats_.replays;
+    ++decode_batch_stats_.replays_by_slots[slots];
+    decode_batch_stats_.rows += slots * r.rows;
+    decode_batch_stats_.padded_rows += (slots - static_cast<int>(r.reqs.size())) * r.rows;
+
     if (trace_)
       DGPP_LOG_INFO("rank {}: pipeline launched slot {} parity {}", rank_,
                     r.req, r.parity);
@@ -2334,21 +2383,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       decided.push_back(token);
     }
     int32_t next = verify.next;
-    // Per-position acceptance: draft p (1-based) stood when
-    // the verdict accepted more than p rows. A scheduled replay attempts
-    // only the positions it verified.
-    for (int p = 0; p + 1 < rows; ++p) {
-      const size_t pi = static_cast<size_t>(p);
-      ++mtp_attempts_[pi];
-      ++slot_mtp_attempts_[static_cast<size_t>(req)][pi];
-      if (verify.accepted > p + 1) {
-        ++mtp_accepts_[pi];
-        ++slot_mtp_accepts_[static_cast<size_t>(req)][pi];
-      }
-    }
     // The drafts this step fed (the verify's rows after the first); the
     // slot's drafts are replaced below by the block's new ones.
-    const std::vector<int32_t> fed_drafts = drafts_[static_cast<size_t>(req)];
+    const std::vector<int32_t>& fed_drafts = fed_drafts_[static_cast<size_t>(req)];
     const bool stochastic = sampled_slot(req);
     const bool full_path = full_path_slot(req);
     if (stochastic) {
@@ -2452,6 +2489,19 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
           report.push_back(device_result(o, 0, next));
       }
       context_[static_cast<size_t>(req)].push_back(next);
+    }
+    // Count the final verdict: a sampled fallback can accept drafts that
+    // the device provisionally rejected. The decided block contains one
+    // non-speculative token plus its accepted draft prefix. Attempts still
+    // cover only the positions verified by this scheduled replay.
+    for (int p = 0; p + 1 < rows; ++p) {
+      const size_t pi = static_cast<size_t>(p);
+      ++mtp_attempts_[pi];
+      ++slot_mtp_attempts_[static_cast<size_t>(req)][pi];
+      if (decided.size() > static_cast<size_t>(p + 1)) {
+        ++mtp_accepts_[pi];
+        ++slot_mtp_accepts_[static_cast<size_t>(req)][pi];
+      }
     }
     pending_[static_cast<size_t>(req)] = next;
     if (std::unique_ptr<text::GrammarState>& grammar =
@@ -2674,10 +2724,11 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     r.rows = rows;
     launch(std::move(r));
     settle_older();
+    fed_drafts_[static_cast<size_t>(req)] = drafts_[static_cast<size_t>(req)];
     stage_masks(req);
     publish_stage(req);
-    if (!pipeline_) drain();  // after the publish: the replay's gate waits on it
     wait_verdict(inflight_.back());
+    if (!pipeline_) drain();  // after the publish: the replay's gate waits on it
     std::vector<int32_t> out = collect_verdict(req, /*verdict_request=*/0, /*batched=*/false, rows);
     if (schedule_ && model_->mtp_enabled()) note_step_for_lambda(static_cast<int>(out.size()), rows);
     return out;
@@ -2979,6 +3030,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     std::vector<std::array<cudaGraphExec_t, 2>> sched_execs;
     std::vector<uint64_t> sched_hist;
   };
+  sched::SchedulerEngine::DecodeBatchStats decode_batch_stats_;
   std::vector<BatchFamily> families_;
   std::vector<uint64_t> family_steps_;
   // The verdict's publication: per slot (and per batch family, at index
@@ -3009,6 +3061,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   // Per slot: the drafts fed with the pending token, one per position
   // (depth_ of them; depth 1 is the two-row step as built).
   std::vector<std::vector<int32_t>> drafts_;
+  // The current verify's inputs, frozen after the older replay settles and
+  // before this replay can publish new drafts (including another slot's fallback).
+  std::vector<std::vector<int32_t>> fed_drafts_;
   int depth_ = 0;
   // ---- the confidence-scheduled verify depth (configure_verify_schedule) ----
   bool schedule_ = false;

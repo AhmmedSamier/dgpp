@@ -264,6 +264,11 @@ void rank_work(int r, const Dsv41TextConfig& cfg, const std::string& dir, const 
     arrive_once();
     EagerEngineAdapter<Dsv41Model> eager_engine(
         &eager, kSlots, dgpp::make_fabric_pick(bus, r, kWorld, scratch, cfg.vocab_size, wait_timeout_ms()));
+    eager.set_prefill_bounded(true);
+    require(!eager_engine.prefix_info().body_snapshots,
+            "bounded prefill must not gain extra decoder spans");
+    eager.set_prefill_bounded(false);
+    require(eager_engine.prefix_info().body_snapshots, "exact prefill can snapshot existing cuts");
     GraphEngineAdapter<Dsv41Model> graph_engine(&graph, bus, r, kWorld, scratch, cfg.vocab_size,
                                                 wait_timeout_ms(), /*batch_min_live=*/2);
 
@@ -383,6 +388,10 @@ void rank_work_mtp(int r, const Dsv41TextConfig& cfg, const std::string& dir, co
                                                 /*batch_min_live=*/2, /*prefix_scratch=*/nullptr,
                                                 /*gather_scratch=*/nullptr, /*candidates=*/0, /*grammar=*/nullptr,
                                                 /*prefix_slots=*/0, /*mtp_depth=*/depth);
+      mtp.set_prefill_bounded(true);
+      require(!mtp_engine.prefix_info().body_snapshots,
+              "bounded graph prefill keeps its decoder spans");
+      mtp.set_prefill_bounded(false);
       out->ma.push_back(mtp_engine.prefill(0, A));
       mtp_engine.reserve(0, static_cast<int64_t>(A.size()) + kSteps + 2 + depth);
       while (out->ma.size() < static_cast<size_t>(kSteps) + 1) {

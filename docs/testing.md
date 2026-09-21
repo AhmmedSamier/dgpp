@@ -1,5 +1,11 @@
 # Tests
 
+The long-document prefix-cache regression is covered by `scheduler_test`
+(changed tails, lookahead identity, small arenas and cleanup), `qwen_decode_test`
+and `glm_tp_test` (two snapshots, resumed target/draft logits and budget changes).
+The [fabric record](../benchmarks/results/2026-09-21-prefix-document-reuse.md)
+covers real 32K/260K prompts, KV sharing and the recipe memory-plan audit.
+
 Release and testing builds use separate CMake presets and directories:
 
 | Preset | Directory | Purpose |
@@ -20,10 +26,15 @@ checks do not need model weights or GPU execution:
 
 ```bash
 cmake --preset ci
-cmake --build build-ci -j 4 --target unit_tests http_server_test serve_test fabric_serve_test scheduler_test roster_check
+cmake --build build-ci -j 4 --target unit_tests http_server_test serve_test fabric_serve_test scheduler_test roster_check dgpp_serve_app
 ctest --test-dir build-ci -L host -LE checkpoint --output-on-failure
 ctest --test-dir build-ci -L python --output-on-failure
 ```
+
+`serve_startup_test` uses the built server for two- and four-process settings
+handshakes over loopback. It deliberately fails a local HTTP capacity check
+after settings adoption, before model loading, CUDA initialization or RDMA
+setup. It is registered when the server target is enabled (libibverbs required).
 
 `DGPP_TEST_FILTER=<substring>` runs a subset of a binary's cases; the
 loopback tests use fixed ports in the 299xx range. Run GPU/RDMA tests only
@@ -253,7 +264,10 @@ build. The suites cover:
   checked against the eager speculator after every replay, the MTP depth-2
   and depth-3 greedy gates — plain transcript, device feed equal to the
   eager chain's — and the sampled depth-2 gate against the eager
-  speculator through its fallbacks; every gate's eager oracle drains the
+  speculator through its fallbacks; observer events keep the live transcript
+  checks active through retirement, including grouped/staggered admissions
+  and slot reuse. `glm_mtp_sampling_no_pipeline` repeats the sampled gate
+  with `DGPP_PIPELINE=0`. Every gate's eager oracle drains the
   pipelined engine before it steps); the pick/spec kernels against their
   host oracles, the T=2 and T=3 sampled verdict chains included
   (`glm_pick_test`); the bus's graph era including two replay windows
@@ -285,7 +299,11 @@ that pass by scheduling luck, undersized test buffers that made a graph test
 pass vacuously) are pinned in `DESIGN.md` §12.
 
 Cross-node RoCE and NIC→GPU checks are intentionally manual/deployment tests;
-they require a peer and are documented under `benchmarks/README.md`.
+they require a peer and are documented under `benchmarks/README.md`. The same
+holds for the release checks: long, real-checkpoint cluster runs that no CI job
+starts, each behind an explicit acknowledgement — today
+`scripts/qwen_yarn_release_check.py` (`docs/qwen_yarn_release_check.md`), the
+YaRN acceptance run near 256K and 512K.
 
 ## Vision arithmetic
 

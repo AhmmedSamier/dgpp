@@ -161,6 +161,7 @@ class FakeEngine : public SchedulerEngine {
     info.block_tokens = block_tokens_;
     info.chunk_tokens = arena_chunk_;
     info.step_tokens_max = step_tokens_max_;
+    info.prefill_lookahead = prefill_lookahead_;
     return info;
   }
   // The two-token step's hop (M7): the fake commits whatever its script
@@ -173,6 +174,7 @@ class FakeEngine : public SchedulerEngine {
     hop_armed_[req] = {slot, position};
   }
   int step_tokens_max_ = 1;
+  bool prefill_lookahead_ = false;
   std::map<int, std::pair<int, int64_t>> hop_armed_;
   int32_t prefill_cached(int req, const std::vector<int64_t>& prompt,
                          dgpp::sched::SchedulerEngine::PrefixPrefill* plan) override {
@@ -194,6 +196,13 @@ class FakeEngine : public SchedulerEngine {
                      std::to_string(plan->snap_position) + "@" +
                      std::to_string(plan->snap_slot));
     }
+    if (plan->body_snap_slot >= 0) {
+      require(pinned_.count(plan->body_snap_slot) == 0, "fake: body snapshot slot occupied");
+      pin(plan->body_snap_slot, plan->body_snap_position);
+      plan->body_snap_taken = true;
+      ops_.push_back("N:" + std::to_string(req) + ":" + std::to_string(plan->body_snap_position) +
+                     "@" + std::to_string(plan->body_snap_slot));
+    }
     return token;
   }
   void prefix_snapshot(int req, int slot, int64_t position) override {
@@ -211,8 +220,8 @@ class FakeEngine : public SchedulerEngine {
                    "@" + std::to_string(slot));
   }
   void prefix_release(int slot) override {
-    require(pinned_.count(slot) != 0, "fake: release of an empty arena slot " +
-                                          std::to_string(slot));
+    // Like PrefixArena, releasing an armed but not yet taken snapshot is a no-op.
+    if (pinned_.count(slot) == 0) return;
     pinned_.erase(slot);
     pinned_positions_.erase(slot);
     ops_.push_back("F:" + std::to_string(slot));
@@ -426,17 +435,20 @@ class ChunkFakeEngine : public FakeEngine {
   void begin_prefill(int req, const std::vector<int64_t>& prompt, int64_t reserved,
                      int64_t budget, const PrefixPrefill& plan) override {
     auto copy = plan;
-    const int32_t first = plan.attach_slot >= 0 || plan.snap_slot >= 0
-        ? FakeEngine::prefill_cached(req, prompt, &copy) : FakeEngine::prefill(req, prompt);
+    const int32_t first = plan.attach_slot >= 0 || plan.snap_slot >= 0 || plan.body_snap_slot >= 0
+                              ? FakeEngine::prefill_cached(req, prompt, &copy)
+                              : FakeEngine::prefill(req, prompt);
     FakeEngine::reserve(req, reserved);
-    pending_[req] = {static_cast<int64_t>(prompt.size()) - plan.attach_position, budget, first, copy.snap_taken};
+    pending_[req] = {static_cast<int64_t>(prompt.size()) - plan.attach_position, budget, first,
+                     copy.snap_taken, copy.body_snap_taken};
   }
   PrefillProgress advance_prefill(int req, int64_t budget = 0) override {
     auto& pending = pending_.at(req);
     const int64_t count = std::min(pending.remaining, budget > 0 ? budget : pending.budget);
     pending.remaining -= count;
     ops_.push_back("PF:" + std::to_string(req) + ":" + std::to_string(count));
-    PrefillProgress out{count, pending.remaining == 0 ? pending.first : -1, pending.snap};
+    PrefillProgress out{count, pending.remaining == 0 ? pending.first : -1, pending.snap,
+                        pending.body};
     if (pending.remaining == 0) pending_.erase(req);
     return out;
   }
@@ -449,7 +461,11 @@ class ChunkFakeEngine : public FakeEngine {
     FakeEngine::close(req);
   }
  private:
-  struct Pending { int64_t remaining, budget; int32_t first; bool snap; };
+  struct Pending {
+    int64_t remaining, budget;
+    int32_t first;
+    bool snap, body;
+  };
   std::map<int, Pending> pending_;
 };
 
@@ -1820,6 +1836,211 @@ DGPP_TEST(scheduler_prefixCache_secondIdenticalPromptAttachesAtTheDeepestCut) {
               m.prefix_blocks_pinned == 3,
           "prefix meters: one miss, one hit of 12 tokens, one entry pinning 3 blocks");
   require(ids_joined(sched.results()[1].generated) == "1,2,3", "b's ids");
+}
+
+DGPP_TEST(scheduler_prefixCache_reusesLongDocumentWithChangedTail) {
+  FakeEngine engine(1, 10000, 64);
+  engine.set_prefix_arena(6, 4);
+  Scheduler sched(&engine, {});
+  const auto original = counted_prompt(8221);
+  auto changed = original;
+  for (size_t i = 8192; i < changed.size(); ++i) changed[i] += 100000;
+  for (int i = 0; i < 3; ++i) {
+    engine.arm(0, {10}, 1);
+    sched.submit(make_cached_request(std::to_string(i), i == 0 ? original : changed, {8220}, 1));
+    sched.run_to_completion();
+    if (i == 1)
+      require(sched.meters().prefix_tokens_saved == 6144,
+              "a changed question must reuse the earlier shared-document snapshot");
+  }
+  require(sched.meters().prefix_hits == 2 && sched.meters().prefix_misses == 1,
+          "changed tail and identical repeat both hit");
+  require(sched.meters().prefix_tokens_saved == 6144 + 8220,
+          "identical repeats still use the deepest cut");
+}
+
+DGPP_TEST(scheduler_prefixCache_documentPolicyUnderArenaPressure) {
+  for (int slots : {1, 2, 6, 27}) {
+    FakeEngine engine(1, 10000, 4);
+    engine.set_prefix_arena(slots, 4, 8);
+    Scheduler sched(&engine, {});
+    for (int i = 0; i < 7; ++i) {
+      auto prompt = counted_prompt(39);
+      prompt[35] += 100 * i;
+      engine.arm(0, {10}, 1);
+      sched.submit(make_cached_request(std::to_string(i), prompt, {36}, 1));
+      sched.run_to_completion();
+    }
+    const auto meters = sched.meters();
+    require(meters.prefix_entries <= slots, "document policy obeys arena capacity");
+    if (slots >= 2)
+      require(meters.prefix_hits == 6 && meters.prefix_tokens_saved == 6 * 24,
+              "one shared body survives seven question variants under LRU pressure");
+    else
+      require(meters.prefix_hits == 0 && meters.prefix_snapshots == 7,
+              "one-slot arena keeps the original deepest-snapshot behavior");
+    auto edited = counted_prompt(39);
+    edited[23] += 1000;
+    engine.arm(0, {10}, 1);
+    sched.submit(make_cached_request("body-edit", edited, {36}, 1));
+    sched.run_to_completion();
+    require(sched.meters().prefix_misses == meters.prefix_misses + 1,
+            "editing before the body cut must miss");
+  }
+}
+
+DGPP_TEST(scheduler_prefixCache_documentPolicyLeavesShortAndOptedOutPromptsAlone) {
+  FakeEngine engine(1, 1000, 4);
+  engine.set_prefix_arena(6, 4, 8);
+  Scheduler sched(&engine, {});
+  engine.arm(0, {10}, 1);
+  sched.submit(make_cached_request("short", counted_prompt(31), {28}, 1));
+  sched.run_to_completion();
+  require(sched.meters().prefix_snapshots == 1, "fewer than four chunks: only the deepest cut");
+  auto uncached = make_cached_request("off", counted_prompt(39), {36}, 1);
+  uncached.no_cache = true;
+  engine.arm(0, {10}, 1);
+  sched.submit(uncached);
+  sched.run_to_completion();
+  require(sched.meters().prefix_snapshots == 1 && sched.meters().prefix_misses == 1,
+          "opted-out long prompt never uses the arena");
+}
+
+DGPP_TEST(scheduler_prefixCache_documentContinuationPublishesBothSnapshots) {
+  ChunkFakeEngine engine(1000);
+  engine.set_prefix_arena(6, 2, 8);
+  dgpp::sched::AdmissionPolicy policy;
+  policy.prefill_budget_tokens = 8;
+  Scheduler sched(&engine, {}, 0, policy);
+  auto prompt = counted_prompt(39);
+  for (int i = 0; i < 3; ++i) {
+    engine.arm(0, {10}, 1);
+    if (i == 1) prompt[36] += 1000;
+    sched.submit(make_cached_request(std::to_string(i), prompt, {38}, 1));
+    sched.run_to_completion();
+  }
+  require(sched.meters().prefix_hits == 2 && sched.meters().prefix_tokens_saved == 24 + 38,
+          "continuations publish the body and final cuts for later requests");
+}
+
+DGPP_TEST(scheduler_prefixCache_mtpLookaheadRejectsAnEditExactlyAtTheCut) {
+  FakeEngine engine(1, 1000, 4);
+  engine.set_prefix_arena(8, 4, 8);
+  engine.prefill_lookahead_ = true;
+  Scheduler sched(&engine, {});
+  for (int i = 0; i < 3; ++i) {
+    auto prompt = counted_prompt(39);
+    if (i == 1) prompt[24] += 1000;
+    if (i == 2) prompt[25] += 2000;
+    engine.arm(0, {10}, 1);
+    sched.submit(make_cached_request(std::to_string(i), prompt, {36}, 1));
+    sched.run_to_completion();
+    if (i == 1)
+      require(sched.meters().prefix_hits == 0, "changed lookahead must not attach stale MTP state");
+  }
+  require(sched.meters().prefix_hits == 1 && sched.meters().prefix_tokens_saved == 24,
+          "entries with distinct lookahead tokens coexist; a later tail edit reuses the right one");
+}
+
+DGPP_TEST(prefixCache_lookaheadAndRollingEntriesDedupeSafely) {
+  using dgpp::sched::PrefixCache;
+  PrefixCache cache({4, 4, 8});
+  auto ids = counted_prompt(17);
+  const auto h = PrefixCache::hash_prefix(ids.data(), 8);
+  require(cache.insert(ids.data(), 8, cache.take_free_slot(), 1, {}, ids[8]) >= 0, "prefill entry");
+  require(cache.lookup(ids, {8}, {h}) >= 0, "unchanged lookahead hits");
+  ids[8] += 1;
+  require(cache.lookup(ids, {8}, {h}) < 0, "changed lookahead misses");
+  const int rolling = cache.insert(ids.data(), 8, cache.take_free_slot(), 2);
+  require(rolling >= 0,
+          "unconstrained rolling entry is not discarded for constrained prefill state");
+  require(cache.lookup(ids, {8}, {h}) == rolling,
+          "rolling state can catch up to a different next token");
+  const int duplicate_slot = cache.take_free_slot();
+  require(cache.insert(ids.data(), 8, duplicate_slot, 3, {}, ids[8]) < 0,
+          "unconstrained state safely supersedes a new constrained duplicate");
+  cache.give_back_slot(duplicate_slot);
+}
+
+DGPP_TEST(scheduler_prefixCache_documentContinuationCancelAndFailureReleaseBothSlots) {
+  class FailingEngine : public ChunkFakeEngine {
+   public:
+    FailingEngine() : ChunkFakeEngine(1000) {}
+    bool fail = false;
+    PrefillProgress advance_prefill(int req, int64_t budget = 0) override {
+      if (fail) {
+        fail = false;
+        throw std::runtime_error("injected continuation failure");
+      }
+      return ChunkFakeEngine::advance_prefill(req, budget);
+    }
+  };
+  for (bool fail : {false, true}) {
+    FailingEngine engine;
+    engine.set_prefix_arena(2, 2, 8);
+    engine.arm(0, {10}, 1);
+    engine.arm(0, {20}, 1);
+    dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_budget_tokens = 8;
+    Scheduler sched(&engine, {}, 0, policy);
+    sched.submit(make_cached_request("unfinished", counted_prompt(39), {38}, 1));
+    sched.tick();
+    require(sched.meters().prefix_entries == 0, "unfinished prefill cannot publish snapshots");
+    if (fail) {
+      engine.fail = true;
+      bool threw = false;
+      try {
+        sched.tick();
+      } catch (const std::runtime_error&) {
+        threw = true;
+      }
+      require(threw, "engine failures propagate to the serving loop");
+    }
+    require(sched.cancel("unfinished"), "cancel pending/failed prefill");
+    sched.run_to_completion();
+    require(engine.pinned_blocks() == 0 && sched.meters().pool_blocks_in_use == 0,
+            "failed/cancelled prefill releases both snapshots and its live reservation");
+    sched.submit(make_cached_request("reuse", counted_prompt(39), {38}, 1));
+    sched.run_to_completion();
+    require(sched.meters().prefix_snapshots == 2, "both arena slots are available after cleanup");
+  }
+}
+
+DGPP_TEST(scheduler_prefixCache_syncFailureAfterBodySnapshotReleasesItsBlocks) {
+  class FailingEngine : public FakeEngine {
+   public:
+    FailingEngine() : FakeEngine(1, 1000, 4) {}
+    bool fail = true;
+    int32_t prefill_cached(int req, const std::vector<int64_t>& prompt,
+                           PrefixPrefill* plan) override {
+      if (!fail) return FakeEngine::prefill_cached(req, prompt, plan);
+      fail = false;
+      auto partial = *plan;
+      partial.snap_slot = -1;
+      FakeEngine::prefill_cached(req, prompt, &partial);
+      live_.erase(req);  // the real adapter unwinds an unreserved failed prefill
+      throw std::runtime_error("injected failure after earlier snapshot");
+    }
+  } engine;
+  engine.set_prefix_arena(2, 4, 8);
+  engine.arm(0, {10}, 1);
+  engine.arm(0, {20}, 1);
+  Scheduler sched(&engine, {});
+  sched.submit(make_cached_request("failed", counted_prompt(39), {36}, 1));
+  bool threw = false;
+  try {
+    sched.tick();
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  require(threw, "prefill failure propagates");
+  require(sched.cancel("failed"), "discard the failed admission");
+  sched.run_to_completion();
+  require(engine.pinned_blocks() == 0 && sched.meters().pool_blocks_in_use == 0,
+          "early snapshot is released even when final snapshot never ran");
+  sched.submit(make_cached_request("reuse", counted_prompt(39), {36}, 1));
+  sched.run_to_completion();
+  require(sched.meters().prefix_snapshots == 2, "both slots returned after sync failure");
 }
 
 DGPP_TEST(prefixCache_nearestNamesWhereAMissedPromptDiverges) {

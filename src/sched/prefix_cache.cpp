@@ -108,12 +108,14 @@ uint64_t PrefixCache::hash_prefix(const int64_t* ids, int64_t n, uint64_t seed) 
   return h;
 }
 
-int PrefixCache::find_exact(const int64_t* ids, int64_t n, uint64_t hash, const Images& images) const {
+int PrefixCache::find_exact(const int64_t* ids, int64_t n, uint64_t hash, const Images& images,
+                            int64_t next_token) const {
   const auto range = by_hash_.equal_range(hash);
   int best = -1;
   for (auto it = range.first; it != range.second; ++it) {
     const Entry& e = entries_[static_cast<size_t>(it->second)];
     if (!e.live || e.position != n) continue;
+    if (e.next_token >= 0 && e.next_token != next_token) continue;
     if (!std::equal(e.ids.begin(), e.ids.end(), ids)) continue;
     const size_t count = image_count(images, n);
     if (e.images.size() != count ||
@@ -166,7 +168,8 @@ int PrefixCache::lookup(const std::vector<int64_t>& prompt,
   for (size_t i = cuts.size(); i-- > 0;) {
     const int64_t c = cuts[i];
     if (c <= 0 || c >= static_cast<int64_t>(prompt.size())) continue;
-    const int e = find_exact(prompt.data(), c, cut_hashes[i], images);
+    const int e =
+        find_exact(prompt.data(), c, cut_hashes[i], images, prompt[static_cast<size_t>(c)]);
     if (e >= 0) return e;
   }
   return -1;
@@ -227,13 +230,13 @@ int PrefixCache::acquire_slot() {
   return evict_lru();
 }
 
-int PrefixCache::insert(const int64_t* ids, int64_t position, int slot,
-                        uint64_t now, const Images& images) {
+int PrefixCache::insert(const int64_t* ids, int64_t position, int slot, uint64_t now,
+                        const Images& images, int64_t next_token) {
   if (position <= 0) throw std::invalid_argument("PrefixCache: empty entry");
   if (slot < 0 || slot >= cfg_.slots)
     throw std::out_of_range("PrefixCache: slot out of range");
   const uint64_t h = with_images(hash_prefix(ids, position), position, images);
-  if (find_exact(ids, position, h, images) >= 0) {
+  if (find_exact(ids, position, h, images, next_token) >= 0) {
     ++stats_.duplicates;
     return -1;
   }
@@ -258,6 +261,7 @@ int PrefixCache::insert(const int64_t* ids, int64_t position, int slot,
   e.ids.assign(ids, ids + position);
   e.images.assign(images.begin(), images.begin() + image_count(images, position));
   e.position = position;
+  e.next_token = next_token;
   e.slot = slot;
   e.hash = h;
   e.last_use = now;
@@ -286,6 +290,7 @@ int PrefixCache::insert(const int64_t* ids, int64_t position, int slot,
   }
   by_hash_.emplace(h, index);
   note(2, static_cast<uint64_t>(position), static_cast<uint64_t>(slot));
+  if (next_token >= 0) note(6, static_cast<uint64_t>(slot), static_cast<uint64_t>(next_token));
   return index;
 }
 

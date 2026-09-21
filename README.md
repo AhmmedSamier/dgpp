@@ -81,6 +81,11 @@ record the modes measured for each deployment.
   full GLM-5.3, tiled QSA prefill for Qwen, and bounded grouped prefill for
   DeepSeek-V4.1-Flash. Qwen can optionally yield between prefill chunks so
   active decodes continue making progress.
+- **Opt-in 512K context for Qwen3.8-Flash-Next** with `engine.rope_scaling`
+  (YaRN): the [two-Spark NVFP4 template](deploy/cluster_qwen-3.8-flash-next_nvfp4_w2_yarn512k.example.json)
+  supports a 524288-token request ceiling, with 5/5 retrieval probes passing
+  at both 261K and 522K prompt tokens. See the [validation record](benchmarks/results/2026-09-20-qwen-yarn512k.md)
+  and [release-check procedure](docs/qwen_yarn_release_check.md).
 - **Adaptive DSpark verification**: DeepSeek uses confidence-scheduled draft
   depth, including a batch-aware rule and an adaptive value of decode time.
 - **Exact prefix caching**: matching token prefixes can reuse a stored
@@ -102,8 +107,10 @@ record the modes measured for each deployment.
   within seconds. Silent node loss is detected by the bus watchdog.
 - **Deployment and monitoring**: a shared cluster config, versioned
   releases, periodic throughput logs and JSON counters at `/metrics`
-  (also available at `/v1/metrics`). Startup checks the memory plan before
-  allocation. Cache capacity is configurable,
+  (also available at `/v1/metrics`), including
+  [decode graph batch and padding counters](docs/operations.md#decode-graph-batch-counters)
+  and [MTP acceptance counters](docs/openai-compatibility.md#speculative-decoding-counters).
+  Startup checks the memory plan before allocation. Cache capacity is configurable,
   with BF16, FP8 or FP4 latent storage for GLM-5.3.
 
 ## Performance
@@ -166,6 +173,9 @@ Use an internet-connected Spark as rank 0. First get the source:
 git clone https://github.com/HawkBearPig/dgpp.git
 cd dgpp
 ```
+
+For an x86 Linux build workstation, use the Docker-based
+[Spark cross-build](docs/cross-compiling.md); run the resulting binaries on a Spark.
 
 Run the guided setup on rank 0:
 
@@ -347,7 +357,7 @@ Startup checks the combined memory plan before loading.
 | `engine.default_max_tokens` | no | Answer-token budget for requests that omit `max_tokens`. Clients may supply their own value; this is not a global hard limit. A larger default also reserves more context space under full admission. | 256 |
 | `engine.queue_limit` | no | Maximum requests waiting for an execution slot or memory budget. Additional arrivals receive HTTP 503 `overloaded`. Increase to tolerate bursts, at the cost of longer waits—not higher execution capacity. | 64 |
 | `engine.max_connections` | no | Maximum simultaneously open HTTP connections on rank 0, including idle keep-alive connections and streams. Excess connections receive 503. Size this separately from active request slots. | 64 |
-| `engine.prefix_cache_gib` | no | Memory budget per rank for reusable prefix-state snapshots. Repeated conversation prefixes can skip prefill work; larger budgets retain more snapshots but leave less memory for other state. Set 0 to disable. This is not the on-disk resident weight cache. | 1.5 GiB |
+| `engine.prefix_cache_gib` | no | Memory budget per rank for reusable prefix-state snapshots. Long documents can reuse an earlier snapshot when their question changes. Snapshot slots and the KV token pool are separate limits; see [sizing and recipe capacities](docs/prefix-cache.md). Set 0 to disable. | 1.5 GiB |
 | `engine.admission` | no | When to reserve context space. `full` reserves prompt plus the requested answer budget before admitting a request. `grow` starts with a smaller reservation and extends it during generation; if space runs out, the youngest request is shed. Use `full` for predictable reservations, `grow` to trade that guarantee for denser occupancy. | `full` |
 | `engine.admission_window` | no | Answer-token reservation increment used by `grow` admission. Larger increments reduce growth frequency but reserve more space ahead of use. Has no effect under `full`. Must be positive. | 256 tokens |
 | `engine.prefill_budget_tokens` | no | Qwen and GLM-5.3-Flash graph engines: maximum prefill tokens per scheduler tick, with a decode pass between chunks. Use an aligned budget no larger than the model's prefill chunk limit. 0 keeps full-prompt admission. | 0 (disabled) |
