@@ -12,11 +12,13 @@ Touched C++/CUDA ranges were formatted with clang-format 19 using the repository
 
 ## Validation and limits
 
-- Five configuration tests passed in a standalone native host build, including opt-in/default-off and invalid-type rejection.
+- Seven configuration tests passed after merging upstream (five passed before the merge) in a standalone native host build, including opt-in/default-off and invalid-type rejection.
 - `fabric_serve_test` passed on the workstation: journal settings round-trip, old-record default, invalid-flag rejection, real TCP/HTTP lifecycle, cancellation, shutdown and failure propagation with fake engines.
 - ARM64 C++20 syntax checks of the serving application and Qwen/sampler CUDA test sources passed with warnings as errors using CUDA 13 headers.
 - The modified speculative CUDA kernel translation unit compiled for SM 12.1 with the ARM64 cross toolchain.
 - Production was not stopped or changed. Updated GPU tests, debug capture assertions, and memcheck have not yet run. Earlier GPU evidence applies to `0425604`, not this follow-up.
+
+Upstream `5631fa1` was merged without rewriting PR history. Conflict resolution preserves upstream's verified-draft snapshot before compact mask staging, effective batch-minimum comparison, and rope settings coverage. ARM64 syntax checks and both host test groups passed again on the merged code.
 
 The maintainer reports a full 113/113 suite with no skipped cases at `0425604`, no measurable dense-occupancy regression at the tested C1-C4 shapes, a 26 percent sparse step-time improvement, and matching rank operation streams. See the PR review for the exact protocols. These are maintainer-reported results and do not validate the later edits.
 
