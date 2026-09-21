@@ -1735,13 +1735,21 @@ int main(int argc, char** argv) {
     // knob lifts it). A pool past it is allowed — it seats concurrent
     // requests — but one request can never exceed the ceiling, so say so
     // rather than let an operator take the pool for the context.
-    if (const int64_t limit = family->position_limit(); limit > 0 && pool_tokens > limit)
-      DGPP_LOG_WARN(
-          "--kv-capacity {} (a {}-token pool) exceeds the {} family's {}-token positional "
-          "ceiling: no single request can pass {} tokens. Enable engine.rope_scaling "
-          "(original_max_position_embeddings x factor) to lift the ceiling, or accept the "
-          "pool as concurrency headroom.",
-          kv_capacity, pool_tokens, family->name(), limit, limit);
+    if (const int64_t limit = family->position_limit(); limit > 0 && pool_tokens > limit) {
+      if (rope_scaling)
+        DGPP_LOG_INFO(
+            "--kv-capacity {} (a {}-token pool) exceeds the {} family's {}-token positional "
+            "ceiling with engine.rope_scaling enabled: the excess pool is concurrency headroom; "
+            "no single request can pass {} tokens.",
+            kv_capacity, pool_tokens, family->name(), limit, limit);
+      else
+        DGPP_LOG_WARN(
+            "--kv-capacity {} (a {}-token pool) exceeds the {} family's {}-token positional "
+            "ceiling: no single request can pass {} tokens. Enable engine.rope_scaling "
+            "(original_max_position_embeddings x factor) to lift the ceiling, or accept the "
+            "pool as concurrency headroom.",
+            kv_capacity, pool_tokens, family->name(), limit, limit);
+    }
     // The effective request context limit (review item 7, 2026-09-18), stated
     // at startup and reported by /v1/models: the lesser of the family's
     // positional ceiling and the pool a request seats in. The two are

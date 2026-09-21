@@ -365,20 +365,25 @@ DGPP_TEST(yarn_inv_freq_builder_refuses_degenerate_theta) {
   // arithmetic — theta == 1.0 zeroes the correction band's log(theta)
   // division (±inf/NaN into the int casts), and a subnormal theta underflows
   // the plain table's pow to 0 (1/0 = inf).
-  const auto throws = [](double theta) {
+  const auto throws = [](double theta, int64_t correction_max_position = 262144 * 4) {
     std::vector<float> out(32);
     try {
-      dgpp::yarn_rope_inv_freq_host(64, theta, 262144 * 4, 2.0, 32.0, 1.0, out.data());
+      dgpp::yarn_rope_inv_freq_host(64, theta, correction_max_position, 2.0, 32.0, 1.0, out.data());
     } catch (const std::invalid_argument&) {
       return true;
     }
     return false;
   };
   require(throws(1.0), "theta == 1.0 zeroes the band's log(theta) division");
-  require(throws(1e-308), "a subnormal theta underflows the table's pow");
+  require(throws(0.5), "theta below 1.0 reverses the correction band");
+  require(throws(0.99), "theta just below 1.0 is not a valid correction band");
+  require(throws(1e-308, 0), "a subnormal theta underflows the plain table's pow");
   // The recipe's theta still builds a finite table (the frozen values pin it).
   std::vector<float> out(32);
   dgpp::yarn_rope_inv_freq_host(64, 1e7, 262144 * 4, 2.0, 32.0, 1.0, out.data());
   require(std::all_of(out.begin(), out.end(), [](float v) { return std::isfinite(v) && v > 0; }),
           "the recipe's theta builds a finite table");
+  dgpp::yarn_rope_inv_freq_host(64, 0.5, 0, 2.0, 32.0, 1.0, out.data());
+  require(out.front() == 1.0f && out.back() > 1.0f && std::isfinite(out.back()),
+          "the plain table still accepts a positive theta below 1.0");
 }

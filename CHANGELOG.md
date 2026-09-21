@@ -6,6 +6,14 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Make the YaRN release check accurate and resumable** (2026-09-21,
+  [#16](https://github.com/HawkBearPig/dgpp/issues/16)): allow reasoning in
+  retrieval probes, correct decode timing units, repeat the latest cached
+  probe, and budget concurrent streams for serialized long prefills.
+  Save incremental reports with `--resume`; explain pool headroom when YaRN
+  is already enabled. Reject invalid correction-band theta and compare
+  final-position decode logits with the full forward. See the
+  [validation record](benchmarks/results/2026-09-21-yarn-release-check.md).
 - **Tighten decode metrics bookkeeping and documentation** (2026-09-21,
   [#20](https://github.com/HawkBearPig/dgpp/issues/20)): record each replay's
   end event immediately after its graph launch, before host counter updates.

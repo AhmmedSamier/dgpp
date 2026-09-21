@@ -6,7 +6,7 @@ Date: 2026-09-18
 run for `engine.rope_scaling` (the Qwen3.8-Flash-Next YaRN recipe,
 [qwen38_flash_next_plan.md](qwen38_flash_next_plan.md) §1.9.1). It is a **release
 check, not a test**: it never runs in CI, it needs an idle two-node cluster and
-about an hour, and it refuses to start without `--run` (or
+hours for the full default matrix, and it refuses to start without `--run` (or
 `DGPP_YARN_RELEASE_CHECK=1`). This page is the procedure: what has to be true
 before it, how to run it, and how to read what it prints.
 
@@ -20,7 +20,7 @@ checks the tables the kernels build, and the plan check in
 the knob on and off. None of those says that the engine, on a real checkpoint,
 *serves* a 524 288-token request: that the long prefill finishes, that decode
 keeps its pace, that the prefix cache is reused across requests that share the
-document, that four streams at once still answer, and that the model still finds
+document, that concurrent streams still answer, and that the model still finds
 a needle it was told at 5 % or 95 % of a 512K context. That is a measurement on
 hardware, and it belongs next to the deployment, not in a CI job.
 
@@ -65,7 +65,7 @@ python3 scripts/dgpp-cluster up --config "$CONFIG"
 
 # 3. The check. --run is the acknowledgement; without it nothing happens.
 python3 scripts/qwen_yarn_release_check.py --run \
-    --lengths 262144 524288 --concurrency 4 \
+    --lengths 262144 524288 --concurrency 2 \
     --json-out /tmp/yarn512k-$(git rev-parse --short HEAD).json
     # add: --reference-url http://LANE_Q_HOST:PORT
 
@@ -85,6 +85,31 @@ needles sit and what their codes are. Two runs at the same seed ask the same
 questions of the same positions, which is what makes a diff between a DGPP build
 and lane Q, or between this build and last week's, readable.
 
+The default `--probe-tokens 768` includes the checkpoint's reasoning before its
+answer. A tiny answer budget can expire before the requested digits appear:
+24 tokens failed even the short-context control in the original validation,
+while 768 allowed all five answers to finish. Keep room for reasoning and
+inspect each probe's `finish` when interpreting misses.
+
+The default `--concurrency 2` matches the shipped template's two request slots.
+At 512K, the pool can hold only one such request at a time; streams may queue
+even with two slots. Each concurrent stream's read timeout allows the entire
+group to run serially: stream count times the largest prompt's single-request
+budget (`900 + prompt_characters // 2000` seconds). Set concurrency explicitly
+when testing a different deployment, including its queue capacity.
+
+With `--json-out`, schema-version-2 records are replaced atomically after
+calibration, every retrieval probe and each later phase. `status` distinguishes
+`running`, `interrupted`, `error` and `completed`; a completed run can still have
+a failed verdict. An interruption preserves completed work. Re-run the same
+command with `--resume` to continue that JSON record; the arguments, endpoints,
+models and advertised context settings must agree. Completed probes and phases
+are skipped, failed concurrency groups are retried, and a cache-reuse phase
+resumed after retrieval primes its last probe again before measuring reuse.
+In-flight requests cannot be recovered. Each attempt records its own memory
+peak; top-level `peak_memory` describes the latest attempt. Start a fresh run
+without `--resume` to remeasure completed phases or compare a different build.
+
 ## What one length does
 
 For each of `--lengths` (262 144 and 524 288 by default), on each lane:
@@ -92,9 +117,9 @@ For each of `--lengths` (262 144 and 524 288 by default), on each lane:
 | phase | what it is | what it records |
 | --- | --- | --- |
 | `retrieval` | one deterministic document of the target size, then one greedy question per needle depth (0.05 … 0.95). The first probe is the **cold prefill**: the engine's own `prefill_ms` and computed-token counters, and the client's TTFT. | `hits/requests`, `hit_rate`, `cold_prefill_ms`, `cold_prefill_ms_per_token`, per-probe `prompt_tokens`, `cached_tokens`, `answer` |
-| `cache_reuse` | the first probe again, byte for byte, so the shared prefix has to come from the arena | `cached_ratio`, the second `prefill_ms` |
+| `cache_reuse` | the last probe again, byte for byte, immediately after retrieval so intervening probes cannot evict it | `cached_ratio`, the repeated probe's `prefill_ms`; `cache_prime` when resuming needs a fresh warmup |
 | `decode` | an incremental decode: one long generation on an 8 192-token document | `ttft_ms`, `ms_per_token`, `completion_tokens`, `finish` |
-| `concurrent` | four streams over the same document at once | per-stream `ttft_ms`, the median, `aggregate_tokens_per_s`, `errors` |
+| `concurrent` | `--concurrency` streams over the same document at once (default two) | per-stream `ttft_ms`, the median, `per_token_ms`, `aggregate_tokens_per_s`, `errors` |
 | `short_context` | once per lane, the same probes at `--control-length` (4 096) | the same retrieval columns |
 
 Peak memory is sampled from `nvidia-smi` on the node the script runs on, every
@@ -106,6 +131,8 @@ beside the plan's total; the check does not guess it.
 
 The JSON's `verdict.checks` is the pass/fail summary; the printed block repeats
 it. Exit status 0 is a pass, 1 a failed criterion, 2 the missing `--run`.
+Every requested concurrent stream must finish without a transport or protocol
+error; a failed group fails the verdict even when retrieval passed.
 
 With a reference lane, retrieval is attributed, not judged:
 
@@ -120,9 +147,11 @@ The timing columns are reported, not gated — a release check that guesses its 
 latency thresholds has no business printing PASS. Compare them against the
 previous record for the same kit: cold `ms_per_token` should track the plain
 262 144 run's (the ramp changes the rope table and nothing else), `decode
-ms_per_token` should be the build's ordinary T=1/T=2 pace, and `cache_reuse
-cached_ratio` near zero means `engine.prefix_cache_gib` is 0 on one of the two
-lanes.
+ms_per_token` should be the build's ordinary T=1/T=2 pace. Decode timing uses
+the first-to-last stream arrival interval, already in milliseconds, divided
+by the intervening token count. A `cache_reuse cached_ratio` near zero can
+mean the cache is disabled, too small, or its entries were evicted; check the
+cache configuration and capacity before attributing it to a disabled cache.
 
 For the plan, quote the memory-plan total next to the peak: the 512K shape is
 51.73 GiB per rank with 2 slots at `kv_capacity` 532 480, plus the 4 GiB the

@@ -16,6 +16,9 @@ void yarn_rope_inv_freq_host(int rope_dim, double theta, int64_t correction_max_
   if (rope_dim <= 0 || rope_dim % 2 != 0)
     throw std::invalid_argument("yarn_rope_inv_freq_host: rope_dim must be positive and even");
   if (!(theta > 0)) throw std::invalid_argument("yarn_rope_inv_freq_host: theta must be positive");
+  if (correction_max_position > 0 && !(theta > 1.0))
+    throw std::invalid_argument(
+        "yarn_rope_inv_freq_host: theta must exceed 1.0 for the correction band");
   if (out == nullptr) throw std::invalid_argument("yarn_rope_inv_freq_host: null out");
   const int half = rope_dim / 2;
   std::vector<float> freqs(static_cast<size_t>(half));

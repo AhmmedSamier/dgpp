@@ -244,6 +244,30 @@ int run_cross_limit(const std::string& dir) {
     require(model.session_position(1) == T - 1, "the decode's prefill position");
     const QwenModel::Outputs d = model.session_step(1, tokens[static_cast<size_t>(T - 1)]);
     for (float v : d.logits) require(std::isfinite(v), "cross-limit: a non-finite decode logit");
+    // Use the same 2% relative-L2 and top-1 near-tie budgets as the
+    // chunked-prefill/decode comparisons in qwen_decode_test.
+    const int vocab = out.lm_vocab_count;
+    require(d.logits.size() == static_cast<size_t>(vocab) &&
+                out.logits.size() == static_cast<size_t>(T) * vocab,
+            "cross-limit: unexpected logits shape");
+    const float* want = out.logits.data() + static_cast<size_t>(T - 1) * vocab;
+    double delta2 = 0, norm2 = 0;
+    int expected_top = 0, decoded_top = 0;
+    for (int i = 0; i < vocab; ++i) {
+      const double delta = static_cast<double>(d.logits[i]) - want[i];
+      delta2 += delta * delta;
+      norm2 += static_cast<double>(want[i]) * want[i];
+      if (want[i] > want[expected_top]) expected_top = i;
+      if (d.logits[i] > d.logits[decoded_top]) decoded_top = i;
+    }
+    const double l2 = std::sqrt(delta2 / (norm2 + 1e-30));
+    const double margin = std::fabs(static_cast<double>(want[expected_top]) - want[decoded_top]) /
+                          (std::fabs(static_cast<double>(want[expected_top])) + 1e-30);
+    std::printf("cross-limit: final-position decode/forward relative l2 %.6g, top-1 %s\n", l2,
+                expected_top == decoded_top ? "equal" : (margin < 0.02 ? "near tie" : "MISMATCH"));
+    require(l2 < 2e-2, "cross-limit: final-position decode/forward relative l2 over budget");
+    require(expected_top == decoded_top || margin < 0.02,
+            "cross-limit: final-position decode/forward top-1 mismatch");
     require(model.session_position(1) == T, "the decode crossed the native limit at its final position");
     model.session_close(1);
   }
