@@ -130,6 +130,7 @@ struct WorldSettings {
   int default_max_tokens = 0;
   int queue_limit = 0;
   bool no_eos = false;
+  bool compact_batches = false;
   bool decode_graph = false;
   bool mtp = false;
   int mtp_depth = 1;  // draft tokens per step

@@ -277,7 +277,8 @@ struct ServeFamily {
   virtual std::unique_ptr<ServeGraphEngine> make_graph_engine(
       dgpp::net::CollectiveBus* bus, int rank, int world, uint16_t* pick_scratch,
       int batch_min_live, uint16_t* prefix_scratch, uint16_t* gather_scratch, int candidates,
-      const dgpp::text::GrammarVocab* grammar, int prefix_slots, int mtp_depth) = 0;
+      const dgpp::text::GrammarVocab* grammar, int prefix_slots, int mtp_depth,
+      bool compact_batches) = 0;
   virtual std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
       int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample,
       const dgpp::text::GrammarVocab* grammar, int prefix_slots) = 0;
@@ -338,13 +339,17 @@ struct GlmFamily final : ServeFamily {
   }
   void destroy_model() override { model.reset(); }
   size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
-  std::unique_ptr<ServeGraphEngine> make_graph_engine(
-      dgpp::net::CollectiveBus* bus, int rank, int world_, uint16_t* pick_scratch, int batch_min_live,
-      uint16_t* prefix_scratch, uint16_t* gather_scratch, int candidates,
-      const dgpp::text::GrammarVocab* grammar, int prefix_slots, int mtp_depth) override {
+  std::unique_ptr<ServeGraphEngine> make_graph_engine(dgpp::net::CollectiveBus* bus, int rank,
+                                                      int world_, uint16_t* pick_scratch,
+                                                      int batch_min_live, uint16_t* prefix_scratch,
+                                                      uint16_t* gather_scratch, int candidates,
+                                                      const dgpp::text::GrammarVocab* grammar,
+                                                      int prefix_slots, int mtp_depth,
+                                                      bool compact_batches) override {
     return std::make_unique<ServeGraphEngineOf<dgpp::GlmDiagnosticModel>>(
         model.get(), bus, rank, world_, pick_scratch, cfg.vocab_size, /*pick_timeout_ms=*/60000,
-        batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots, mtp_depth);
+        batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots,
+        mtp_depth, compact_batches);
   }
   std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
       int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
@@ -431,13 +436,17 @@ struct QwenFamily final : ServeFamily {
   }
   void destroy_model() override { model.reset(); }
   size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
-  std::unique_ptr<ServeGraphEngine> make_graph_engine(
-      dgpp::net::CollectiveBus* bus, int rank, int world_, uint16_t* pick_scratch, int batch_min_live,
-      uint16_t* prefix_scratch, uint16_t* gather_scratch, int candidates,
-      const dgpp::text::GrammarVocab* grammar, int prefix_slots, int mtp_depth) override {
+  std::unique_ptr<ServeGraphEngine> make_graph_engine(dgpp::net::CollectiveBus* bus, int rank,
+                                                      int world_, uint16_t* pick_scratch,
+                                                      int batch_min_live, uint16_t* prefix_scratch,
+                                                      uint16_t* gather_scratch, int candidates,
+                                                      const dgpp::text::GrammarVocab* grammar,
+                                                      int prefix_slots, int mtp_depth,
+                                                      bool compact_batches) override {
     return std::make_unique<ServeGraphEngineOf<dgpp::QwenModel>>(
         model.get(), bus, rank, world_, pick_scratch, cfg.vocab_size, /*pick_timeout_ms=*/60000,
-        batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots, mtp_depth);
+        batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots,
+        mtp_depth, compact_batches);
   }
   std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
       int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
@@ -491,13 +500,17 @@ struct Glm4Family final : ServeFamily {
   }
   void destroy_model() override { model.reset(); }
   size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
-  std::unique_ptr<ServeGraphEngine> make_graph_engine(
-      dgpp::net::CollectiveBus* bus, int rank, int world_, uint16_t* pick_scratch, int batch_min_live,
-      uint16_t* prefix_scratch, uint16_t* gather_scratch, int candidates,
-      const dgpp::text::GrammarVocab* grammar, int prefix_slots, int mtp_depth) override {
+  std::unique_ptr<ServeGraphEngine> make_graph_engine(dgpp::net::CollectiveBus* bus, int rank,
+                                                      int world_, uint16_t* pick_scratch,
+                                                      int batch_min_live, uint16_t* prefix_scratch,
+                                                      uint16_t* gather_scratch, int candidates,
+                                                      const dgpp::text::GrammarVocab* grammar,
+                                                      int prefix_slots, int mtp_depth,
+                                                      bool compact_batches) override {
     return std::make_unique<ServeGraphEngineOf<dgpp::Glm4Model>>(
         model.get(), bus, rank, world_, pick_scratch, cfg.vocab_size, /*pick_timeout_ms=*/60000,
-        batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots, mtp_depth);
+        batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots,
+        mtp_depth, compact_batches);
   }
   std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
       int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
@@ -557,13 +570,17 @@ struct GlmDsaFamily final : ServeFamily {
   }
   void destroy_model() override { model.reset(); }
   size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
-  std::unique_ptr<ServeGraphEngine> make_graph_engine(
-      dgpp::net::CollectiveBus* bus, int rank, int world_, uint16_t* pick_scratch, int batch_min_live,
-      uint16_t* prefix_scratch, uint16_t* gather_scratch, int candidates,
-      const dgpp::text::GrammarVocab* grammar, int prefix_slots, int mtp_depth) override {
+  std::unique_ptr<ServeGraphEngine> make_graph_engine(dgpp::net::CollectiveBus* bus, int rank,
+                                                      int world_, uint16_t* pick_scratch,
+                                                      int batch_min_live, uint16_t* prefix_scratch,
+                                                      uint16_t* gather_scratch, int candidates,
+                                                      const dgpp::text::GrammarVocab* grammar,
+                                                      int prefix_slots, int mtp_depth,
+                                                      bool compact_batches) override {
     return std::make_unique<ServeGraphEngineOf<dgpp::GlmDsaModel>>(
         model.get(), bus, rank, world_, pick_scratch, cfg.vocab_size, /*pick_timeout_ms=*/60000,
-        batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots, mtp_depth);
+        batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots,
+        mtp_depth, compact_batches);
   }
   std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
       int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
@@ -628,13 +645,17 @@ struct Dsv41Family final : ServeFamily {
   }
   void destroy_model() override { model.reset(); }
   size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
-  std::unique_ptr<ServeGraphEngine> make_graph_engine(
-      dgpp::net::CollectiveBus* bus, int rank, int world_, uint16_t* pick_scratch, int batch_min_live,
-      uint16_t* prefix_scratch, uint16_t* gather_scratch, int candidates,
-      const dgpp::text::GrammarVocab* grammar, int prefix_slots, int mtp_depth) override {
+  std::unique_ptr<ServeGraphEngine> make_graph_engine(dgpp::net::CollectiveBus* bus, int rank,
+                                                      int world_, uint16_t* pick_scratch,
+                                                      int batch_min_live, uint16_t* prefix_scratch,
+                                                      uint16_t* gather_scratch, int candidates,
+                                                      const dgpp::text::GrammarVocab* grammar,
+                                                      int prefix_slots, int mtp_depth,
+                                                      bool compact_batches) override {
     return std::make_unique<ServeGraphEngineOf<dgpp::Dsv41Model>>(
         model.get(), bus, rank, world_, pick_scratch, cfg.vocab_size, /*pick_timeout_ms=*/60000,
-        batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots, mtp_depth);
+        batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots,
+        mtp_depth, compact_batches);
   }
   std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
       int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
@@ -1075,6 +1096,7 @@ int main(int argc, char** argv) {
   std::string embed_sharding = "replicated";  // the full GLM-5.3's embedding: replicated | vocab
   int max_concurrency = 8, queue_limit = 64, default_max_tokens = 256;
   dgpp::serve::FileInputConfig file_inputs;
+  bool compact_batches = false;
   int graph_batch_min_live = 0;  // 0 = min(2, max_concurrency) (the batch family, 2026-09-07)
   // The sampled pick's candidate width per rank on the graph engines (the
   // planned 128; narrower forces the exact gather fallback more often —
@@ -1166,6 +1188,7 @@ int main(int argc, char** argv) {
     mtp_schedule_lambda = e.mtp_schedule_lambda;
     mtp_schedule_min_depth = e.mtp_schedule_min_depth;
     mtp_schedule_adapt = e.mtp_schedule_adapt;
+    compact_batches = e.compact_batches;
     graph_batch_min_live = e.graph_batch_min_live;
     sampling_candidates = e.sampling_candidates;
     prefix_cache_gib = e.prefix_cache_gib;
@@ -1314,18 +1337,19 @@ int main(int argc, char** argv) {
         "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} ngt={} dw={} bfw={} "
         "fp8head={} pf={} "
         "emsh={} maxtok={} queue={} "
-        "eos={} graph={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} msad={} "
+        "eos={} graph={} compact={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} "
+        "msad={} "
         "batchmin={} cand={} "
         "pcgib={} adm={} win={} pfbudget={} pfidle={} pace={} inflight={} reasoning_in_content={} "
         "rs={}",
         model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port, max_concurrency,
         kv_capacity, kv_dtype, ngram_table, dense_weights, bf16_weights, fp8_head, prefill,
         embed_sharding, default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0,
-        mtp ? 1 : 0, mtp_depth, mtp_schedule ? 1 : 0, mtp_schedule_row_ms, mtp_schedule_base_ms,
-        mtp_schedule_lambda, mtp_schedule_min_depth, mtp_schedule_adapt ? 1 : 0,
-        effective_batch_min_live, sampling_candidates, prefix_cache_gib, admission_mode,
-        admission_window, prefill_budget_tokens, prefill_idle_budget_tokens, bulk_pace_gbps,
-        bulk_inflight, reasoning_in_content ? 1 : 0,
+        compact_batches ? 1 : 0, mtp ? 1 : 0, mtp_depth, mtp_schedule ? 1 : 0, mtp_schedule_row_ms,
+        mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth,
+        mtp_schedule_adapt ? 1 : 0, effective_batch_min_live, sampling_candidates, prefix_cache_gib,
+        admission_mode, admission_window, prefill_budget_tokens, prefill_idle_budget_tokens,
+        bulk_pace_gbps, bulk_inflight, reasoning_in_content ? 1 : 0,
         rope_scaling ? std::format("yarn:{}:{}:{}:{}:{}:{}", rope_scaling->factor,
                                    rope_scaling->original_max_position_embeddings,
                                    rope_scaling->beta_fast, rope_scaling->beta_slow,
@@ -1336,8 +1360,7 @@ int main(int argc, char** argv) {
     try {
       if (rank == 0) {
         require(world > 1, "--world must be > 1 for a fabric head");
-        require(journal_port != fabric_port,
-                "--journal-port must differ from --fabric-port");
+        require(journal_port != fabric_port, "--journal-port must differ from --fabric-port");
         journal.emplace(journal_port);
         DGPP_LOG_INFO("journal: listening on :{} for {} peer(s)",
                       journal->port(), world - 1);
@@ -1375,6 +1398,7 @@ int main(int argc, char** argv) {
         ws.mtp_schedule_lambda = mtp_schedule_lambda;
         ws.mtp_schedule_min_depth = mtp_schedule_min_depth;
         ws.mtp_schedule_adapt = mtp_schedule_adapt;
+        ws.compact_batches = compact_batches;
         ws.graph_batch_min_live = graph_batch_min_live;
         ws.sampling_candidates = sampling_candidates;
         ws.prefix_cache_gib = prefix_cache_gib;
@@ -1427,6 +1451,7 @@ int main(int argc, char** argv) {
         mtp_schedule_lambda = ws.mtp_schedule_lambda;
         mtp_schedule_min_depth = ws.mtp_schedule_min_depth;
         mtp_schedule_adapt = ws.mtp_schedule_adapt;
+        compact_batches = ws.compact_batches;
         graph_batch_min_live = ws.graph_batch_min_live;
         sampling_candidates = ws.sampling_candidates;
         prefix_cache_gib = ws.prefix_cache_gib;
@@ -2002,9 +2027,10 @@ int main(int argc, char** argv) {
           family->destroy_model();
         };
         if (decode_graph) {
-          std::unique_ptr<ServeGraphEngine> graph_engine = family->make_graph_engine(
-              bus.get(), rank, world, pick_scratch, graph_batch_min_live, sample_prefix.data,
-              sample_gather.data, sampling_candidates, &grammar_vocab, prefix_slots, mtp_depth);
+          std::unique_ptr<ServeGraphEngine> graph_engine =
+              family->make_graph_engine(bus.get(), rank, world, pick_scratch, graph_batch_min_live,
+                                        sample_prefix.data, sample_gather.data, sampling_candidates,
+                                        &grammar_vocab, prefix_slots, mtp_depth, compact_batches);
           if (mtp_schedule) {
             // The value of decode time: the configured throughput, or the
             // reservation rate of the configured curve (a plain step's).

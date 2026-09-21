@@ -45,6 +45,38 @@ interval. It joins the vocabulary slices before evaluating the 0.02-nat
 mean-NLL budget, the 1% limit on token changes exceeding 1 nat, and top-1
 changes within two BF16 ulps. A failed or incomplete run exits nonzero.
 
+The same checker accepts `--compaction off` and `--compaction on` for
+fixed-token comparisons of physical and compact Qwen graph layouts. Use the
+same manifest and checkpoint for both, then pass the off/on directories to
+`qwen_head_compare.py`. This protocol holds the default FP8 head and RoPE
+settings fixed, allocates sixteen physical slots and captures up to 64 rows:
+
+```bash
+scripts/fabric_run.sh --app build-ci/qwen_head_check --fetch-logs \
+    --stage-file /tmp/corpora.json --log-dir /tmp/compact-off -- \
+    --model Qwen/Qwen3.8-Flash-Next-FP8 --requests /tmp/corpora.json \
+    --image-dir /path/to/resident-cache --compaction off
+# Repeat with --log-dir /tmp/compact-on and --compaction on.
+python3 scripts/qwen_head_compare.py /tmp/compact-off /tmp/compact-on \
+    --output /tmp/compact-comparison.json
+```
+
+The sparse cases place two requests in slots 15 and 0 at one, two and four
+rows per request, and five requests in slots 15/0/7/3/12 at four rows each.
+The checker uses the engine's numerical compatibility rule. The compact
+policy selects sixteen, twelve and six groups for the two-request cases,
+respectively, and six groups for the five-request case; unused groups carry
+inactive padding. The physical policy uses sixteen groups. Small physical
+graphs retain their width, and wider graphs shrink only within the lowering
+range above sixteen verification rows. Four- and sixteen-slot
+dense cases require identical hidden states and logits across modes. All
+cases require exact repeats and rank agreement. Sparse cases allow hidden
+states to change with the graph shape and use the same NLL and top-1 gates
+above. Four-row cases score the complete corpus; other cases use its first
+1024 tokens. This checks the teacher-forced verification backbone; sampled
+fallback and draft-state transitions are exercised separately by the graph
+engine tests.
+
 Kernel work is allowed to change floating-point reduction order when it buys
 latency, so two builds can legitimately produce different bits. These evidence
 tools judge numerical changes and size sampling; all read run directories through

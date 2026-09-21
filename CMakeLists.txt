@@ -1217,6 +1217,35 @@ add_test(NAME qwen_engine_mtp3_rows64_row_independent
 set_tests_properties(qwen_engine_fp8_mtp3_rows64 qwen_engine_mtp3_rows64_row_independent
   PROPERTIES RESOURCE_LOCK qwen_engine_world LABELS "gpu;rdma" RUN_SERIAL TRUE)
 
+add_test(NAME qwen_engine_compaction_disabled
+  COMMAND ${CMAKE_COMMAND} -E env DGPP_TEST_COMPACT_BATCH=0 $<TARGET_FILE:qwen_engine_test>)
+set_tests_properties(qwen_engine_compaction_disabled
+  PROPERTIES RESOURCE_LOCK qwen_engine_world LABELS "gpu;rdma" RUN_SERIAL TRUE)
+
+foreach(compact_candidates IN ITEMS 1 32)
+  add_test(NAME qwen_engine_compact_sampling_${compact_candidates}
+    COMMAND ${CMAKE_COMMAND} -E env DGPP_DENSE_GEMV_ROWS=256 DGPP_TEST_COMPACT_BATCH=1
+            DGPP_TEST_FILTER=wide DGPP_TEST_COMPACT_SAMPLING=${compact_candidates}
+            $<TARGET_FILE:qwen_engine_test>)
+  set_tests_properties(qwen_engine_compact_sampling_${compact_candidates}
+    PROPERTIES RESOURCE_LOCK qwen_engine_world LABELS "gpu;rdma" RUN_SERIAL TRUE)
+endforeach()
+
+foreach(compact_policy IN ITEMS 0 1)
+  add_test(NAME qwen_engine_compact_fallback_${compact_policy}
+    COMMAND ${CMAKE_COMMAND} -E env DGPP_DENSE_GEMV_ROWS=256
+            DGPP_TEST_COMPACT_BATCH=${compact_policy} DGPP_TEST_COMPACT_FALLBACK=1
+            DGPP_TEST_COMPACT_SAMPLING=1 DGPP_TEST_FILTER=wide $<TARGET_FILE:qwen_engine_test>)
+  set_tests_properties(qwen_engine_compact_fallback_${compact_policy}
+    PROPERTIES RESOURCE_LOCK qwen_engine_world LABELS "gpu;rdma" RUN_SERIAL TRUE)
+endforeach()
+add_test(NAME qwen_engine_compact_fallback_mtp3_rows64
+  COMMAND ${CMAKE_COMMAND} -E env DGPP_DENSE_GEMV_ROWS=256 DGPP_TEST_COMPACT_BATCH=1
+          DGPP_TEST_COMPACT_FALLBACK=1 DGPP_TEST_COMPACT_SAMPLING=1
+          DGPP_TEST_QWEN_ROWS64=1 DGPP_TEST_FILTER=wide $<TARGET_FILE:qwen_engine_test>)
+set_tests_properties(qwen_engine_compact_fallback_mtp3_rows64
+  PROPERTIES RESOURCE_LOCK qwen_engine_world LABELS "gpu;rdma" RUN_SERIAL TRUE)
+
 add_executable(qwen_forward_check apps/qwen_forward_check.cpp)
 target_link_libraries(qwen_forward_check PRIVATE dgpp_models_qwen_layers dgpp_bus dgpp_loaders CUDA::cudart Threads::Threads)
 dgpp_set_common(qwen_forward_check)
@@ -1228,6 +1257,10 @@ add_test(NAME qwen_head_check_fixture
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/qwen_head_check_test.py
           $<TARGET_FILE:qwen_head_check> ${QWEN_FORWARD_FIXTURE})
 set_tests_properties(qwen_head_check_fixture PROPERTIES DEPENDS qwen_forward_fixture LABELS "gpu" RUN_SERIAL TRUE)
+add_test(NAME qwen_compact_check_fixture
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/qwen_head_check_test.py
+          $<TARGET_FILE:qwen_head_check> ${QWEN_FORWARD_FIXTURE} --compaction)
+set_tests_properties(qwen_compact_check_fixture PROPERTIES DEPENDS qwen_forward_fixture LABELS "gpu" RUN_SERIAL TRUE)
 
 add_executable(glm_loader_test tests/cuda/glm_loader_test.cpp)
 target_include_directories(glm_loader_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

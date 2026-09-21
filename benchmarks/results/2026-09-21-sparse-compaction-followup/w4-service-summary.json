@@ -1,0 +1,90 @@
+{
+  "model": "Qwen/Qwen3.8-Flash-Next-FP8",
+  "checkpoint_revision": "236dfdf285828023ca3bcd3f37366c58a3469b13",
+  "max_tokens": 96,
+  "temperature": 0.0,
+  "max_active_observed": 16,
+  "phases": [
+    {
+      "concurrency": 1,
+      "requests": 1,
+      "http_200": 1,
+      "completion_tokens": 96,
+      "finish_reasons": [
+        "length"
+      ]
+    },
+    {
+      "concurrency": 2,
+      "requests": 2,
+      "http_200": 2,
+      "completion_tokens": 192,
+      "finish_reasons": [
+        "length"
+      ]
+    },
+    {
+      "concurrency": 4,
+      "requests": 4,
+      "http_200": 4,
+      "completion_tokens": 384,
+      "finish_reasons": [
+        "length"
+      ]
+    },
+    {
+      "concurrency": 8,
+      "requests": 8,
+      "http_200": 8,
+      "completion_tokens": 768,
+      "finish_reasons": [
+        "length"
+      ]
+    },
+    {
+      "concurrency": 16,
+      "requests": 16,
+      "http_200": 16,
+      "completion_tokens": 1536,
+      "finish_reasons": [
+        "length"
+      ]
+    }
+  ],
+  "requests_failed": 0,
+  "engine_failed": false,
+  "decode_batch": {
+    "last_slots": 1,
+    "last_active": 1,
+    "last_rows_per_request": 4,
+    "replays": 418,
+    "rows": 6292,
+    "padded_rows": 292,
+    "replays_by_slots": {
+      "1": 204,
+      "2": 68,
+      "3": 3,
+      "4": 43,
+      "5": 0,
+      "6": 14,
+      "7": 0,
+      "8": 47,
+      "9": 0,
+      "10": 0,
+      "11": 0,
+      "12": 8,
+      "13": 0,
+      "14": 0,
+      "15": 0,
+      "16": 31
+    }
+  },
+  "operation_md5": [
+    "b84bf2e9b3e684b029ab8da662051dd1",
+    "b84bf2e9b3e684b029ab8da662051dd1",
+    "b84bf2e9b3e684b029ab8da662051dd1",
+    "b84bf2e9b3e684b029ab8da662051dd1"
+  ],
+  "all_ranks_received_compact_1": true,
+  "error_log_lines": 0
+}

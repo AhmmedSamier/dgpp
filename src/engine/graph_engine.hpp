@@ -248,16 +248,15 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   // it and the device sampler the adapter constrains the pick per slot
   // (configure_constraint) — the masks live in a device table the captures
   // bake in, staged before every replay.
-  GraphEngineAdapter(Model* model, net::CollectiveBus* bus,
-                        int rank, int world, uint16_t* pick_scratch,
-                        int64_t vocab, int pick_timeout_ms = 60000,
-                        int batch_min_live = 4,
-                        uint16_t* sample_prefix_scratch = nullptr,
-                        uint16_t* sample_gather_scratch = nullptr,
-                        int sampling_candidates_cap = kSamplingCandidates,
-                        const text::GrammarVocab* grammar_vocab = nullptr,
-                        int prefix_slots = 0, int mtp_depth = 1)
-      : model_(model),
+  GraphEngineAdapter(Model* model, net::CollectiveBus* bus, int rank, int world,
+                     uint16_t* pick_scratch, int64_t vocab, int pick_timeout_ms = 60000,
+                     int batch_min_live = 4, uint16_t* sample_prefix_scratch = nullptr,
+                     uint16_t* sample_gather_scratch = nullptr,
+                     int sampling_candidates_cap = kSamplingCandidates,
+                     const text::GrammarVocab* grammar_vocab = nullptr, int prefix_slots = 0,
+                     int mtp_depth = 1, bool compact_batches = false)
+      : compact_batches_(compact_batches),
+        model_(model),
         bus_(bus),
         rank_(rank),
         world_(world),
@@ -550,6 +549,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     for (BatchFamily& f : families_)
       for (cudaEvent_t ev : f.end_events)
         if (ev != nullptr) cudaEventDestroy(ev);
+    for (auto& f : families_)
+      for (auto* map : f.request_maps)
+        if (map) cudaFreeHost(map);
     if (h_verdict_seq_) cudaFreeHost(h_verdict_seq_);
     if (d_verdict_seq_) cudaFree(d_verdict_seq_);
     if (h_stage_seq_) cudaFreeHost(h_stage_seq_);
@@ -1394,6 +1396,11 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       if (di < full_depth_option()) ensure_sched_batch_graph(family, di);
       ++fam.sched_hist[static_cast<size_t>(di)];
     }
+    if (compact_batches()) {
+      auto* map = fam.request_maps[static_cast<size_t>(fam.parity)];
+      for (int q = 0; q < fam.requests; ++q)
+        map[q] = q < static_cast<int>(reqs.size()) ? reqs[static_cast<size_t>(q)] : -1;
+    }
     model_->session_graph_use_batch_contract(rows, fam.requests);
     model_->session_graph_stage_batch();
     // Launch first (the window armed behind whatever runs), settle the
@@ -1413,8 +1420,8 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     // Preserve every slot's verified drafts before collecting any verdict.
     for (const int req : reqs)
       fed_drafts_[static_cast<size_t>(req)] = drafts_[static_cast<size_t>(req)];
-    if (rows < rows_per_request_)
-      stage_masks_compact(fam.requests, rows);
+    if (rows < rows_per_request_ || compact_batches())
+      stage_masks_compact(fam.requests, rows, compact_batches() ? &reqs : nullptr);
     else
       for (const int req : reqs) stage_masks(req);
     publish_stage(batch_index(family));
@@ -1424,9 +1431,10 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     std::vector<std::vector<int32_t>> batches;
     batches.reserve(reqs.size());
     int committed = 0;
-    for (const int req : reqs) {
-      batches.push_back(
-          collect_verdict(req, /*verdict_request=*/req, /*batched=*/true, rows));
+    for (size_t q = 0; q < reqs.size(); ++q) {
+      const int req = reqs[q];
+      batches.push_back(collect_verdict(req, compact_batches() ? static_cast<int>(q) : req,
+                                        /*batched=*/true, rows));
       committed += static_cast<int>(batches.back().size());
     }
     if (schedule_ && model_->mtp_enabled())
@@ -1550,8 +1558,10 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     in.rows = requests * rows;
     in.requests = requests;
     in.rows_per_request = rows;
-    in.fed = rows == rows_per_request_ ? model_->device_feed(0, rows_per_request_)
-                                       : model_->device_tokens();
+    if (compact_batches()) in.request_map = batch_request_map();
+    in.fed = rows == rows_per_request_ && !compact_batches()
+                 ? model_->device_feed(0, rows_per_request_)
+                 : model_->device_tokens();
     in.positions = model_->device_positions();
     in.position_stride = rows;
     if (sampling_) {
@@ -1608,6 +1618,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     in.draft_index = draft_index;
   }
   void arm_draft_sampling_batch(DevicePicker::Inputs& in, int draft_index) const {
+    if (compact_batches()) in.request_map = batch_request_map();
     if (!sampling_ || d_proposals_ == nullptr || !proposal_drafts_enabled())
       return;
     in.specs = draft_full_path_ ? d_draft_specs_ : d_specs_;
@@ -1779,12 +1790,41 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     return false;
   }
   // The smallest family whose slots [0, requests) cover every live slot.
+  const int32_t* batch_request_map() const {
+    if constexpr (requires { model_->device_batch_map(); }) return model_->device_batch_map();
+    return nullptr;
+  }
+  void set_batch_map_source(const int32_t* map) {
+    if constexpr (requires { model_->session_graph_batch_map_source(map); })
+      model_->session_graph_batch_map_source(map);
+  }
+  bool compact_batches() const {
+    if constexpr (requires { Model::kCompactBatches; }) {
+      return Model::kCompactBatches && compact_batches_ && !schedule_;
+    }
+    return false;
+  }
   int family_for(const std::vector<int>& reqs) const {
     int top = 0;
     for (const int req : reqs) top = std::max(top, req);
+    int physical = -1;
     for (size_t f = 0; f < families_.size(); ++f)
-      if (families_[f].requests > top) return static_cast<int>(f);
-    return -1;
+      if (families_[f].requests > top) {
+        physical = static_cast<int>(f);
+        break;
+      }
+    if (!compact_batches()) return physical;
+    for (size_t f = 0; f < families_.size(); ++f) {
+      if (families_[f].requests < static_cast<int>(reqs.size())) continue;
+      if constexpr (requires { Model::compact_batch_compatible(0, 0); }) {
+        if (physical < 0 ||
+            !Model::compact_batch_compatible(families_[physical].requests * rows_per_request_,
+                                             families_[f].requests * rows_per_request_))
+          continue;
+      }
+      return static_cast<int>(f);
+    }
+    return physical;
   }
 
   // The stage handshake and the masks' upload, recorded ahead of the
@@ -2104,8 +2144,16 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     const int k = fam.requests;
     const int rows = k * rows_per_request_;
     const int index = batch_index(family);
+    if (compact_batches()) {
+      for (auto*& map : fam.request_maps) {
+        DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&map), k * sizeof(int32_t),
+                                   cudaHostAllocDefault));
+        for (int q = 0; q < k; ++q) map[q] = q;
+      }
+    }
     const auto build = [&](int parity) {
-      (void)parity;
+      set_batch_map_source(compact_batches() ? fam.request_maps[static_cast<size_t>(parity)]
+                                             : nullptr);
       if (mtp) {
         record_batch_mtp(family, rows_per_request_);
         return;
@@ -2252,7 +2300,8 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
             "pick ran before the host staged its masks");
     }
     if (model_->mtp_enabled()) {
-      for (const int req : r.reqs) {
+      for (size_t q = 0; q < r.reqs.size(); ++q) {
+        const int req = r.reqs[q];
         // A slot the host re-drafted (its sampled fallback) carries the
         // true drafts already; the replay's provisional picks are its
         // alone — the other slots' picks stand (2026-09-10: one slot's
@@ -2262,8 +2311,8 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
           continue;
         std::vector<int32_t>& drafts = drafts_[static_cast<size_t>(req)];
         for (int c = 0; c < depth_; ++c) {
-          const PickVerdict draft =
-              picker_->verdict(1 + c, r.batched ? req : 0);
+          const PickVerdict draft = picker_->verdict(
+              1 + c, r.batched ? (compact_batches() ? static_cast<int>(q) : req) : 0);
           if (draft.rows != 1 || draft.accepted != 1 || draft.next < 0 ||
               draft.next >= vocab_)
             throw std::runtime_error(
@@ -2374,9 +2423,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
               std::to_string(model_->session_position(req)) + " after a " +
               std::to_string(verify.accepted) + "-row step, the armed hop expects " +
               std::to_string(hop + rows_after));
-        arena_.snapshot_post_row0(req, slot, hop,
-                                  batched ? req * rows : 0,
-                                  rows_after);
+        arena_.snapshot_post_row0(req, slot, hop, batched ? verdict_request * rows : 0, rows_after);
       }
     }
 
@@ -2557,7 +2604,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     const int begin = model_->lm_vocab_begin();
     const int T = rows_per_request_;
     const int t0 = o.fallback_row;
-    (void)verdict_request;
+
     // The device's draws: one per draft that stood before row t0 (the
     // fallback row's own draw is the host's).
     if (t0 < 0 || t0 >= T || verify.accepted != t0 + 1 ||
@@ -2583,8 +2630,12 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     // (the logits buffer itself holds the draft head's rows now); the
     // snapshot is indexed [slot][row], the scalar and the batch alike.
     const auto gather_row = [&](size_t t) {
-      const float* src = d_verify_logits_ +
-                         (static_cast<size_t>(req) * rows_per_request_ + t) * count;
+      const float* src =
+          d_verify_logits_ +
+          (static_cast<size_t>(batched && compact_batches() ? verdict_request : req) *
+               rows_per_request_ +
+           t) *
+              count;
       DGPP_CUDA_OK(cudaMemcpyAsync(h_fallback_row_, src, sizeof(float) * count,
                                    cudaMemcpyDeviceToHost, model_->stream()));
       DGPP_CUDA_OK(cudaStreamSynchronize(model_->stream()));
@@ -2790,12 +2841,13 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   // The reduced-depth batch's masks: the k slots' rows compacted at
   // `rows` per slot (the pick's row r is mask row r), every header
   // written (zero for an unconstrained or closed slot).
-  void stage_masks_compact(int k, int rows) {
+  void stage_masks_compact(int k, int rows, const std::vector<int>* map = nullptr) {
     if (!sampling_) return;
     for (int q = 0; q < k; ++q) {
+      const int req = map ? (q < static_cast<int>(map->size()) ? (*map)[q] : -1) : q;
       uint32_t* h = h_masks_ + static_cast<size_t>(q) * rows * mask_stride_;
-      if (live_[static_cast<size_t>(q)] && grammar_[static_cast<size_t>(q)]) {
-        stage_mask_rows(q, rows, h);
+      if (req >= 0 && live_[static_cast<size_t>(req)] && grammar_[static_cast<size_t>(req)]) {
+        stage_mask_rows(req, rows, h);
       } else {
         for (int t = 0; t < rows; ++t) h[static_cast<size_t>(t) * mask_stride_] = 0u;
       }
@@ -2955,6 +3007,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
         live == 1 ? "" : "s", batch_min_live_);
   }
 
+  const bool compact_batches_;
   Model* model_ = nullptr;
   net::CollectiveBus* bus_ = nullptr;
   int rank_ = 0;
@@ -3032,6 +3085,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     int requests = 0;
     std::array<cudaGraphExec_t, 2> execs{{nullptr, nullptr}};
     std::array<cudaEvent_t, 2> end_events{{nullptr, nullptr}};
+    std::array<int32_t*, 2> request_maps{};
     int parity = 0;
     // The scheduled verify depth: the family's reduced-depth variants
     // [option] (the last option is `execs`) and its replays per option.

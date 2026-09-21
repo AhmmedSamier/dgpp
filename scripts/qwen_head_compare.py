@@ -26,6 +26,11 @@ def case_key(record):
     return tuple(record[k] for k in ("repeat", "corpus", "lane", "width"))
 
 
+COMPACT_SHAPES = {("dense4", 8): (4, 2), ("sparse2", 2): (2, 1),
+                  ("sparse2", 4): (2, 2), ("sparse2", 8): (2, 4),
+                  ("padded5", 20): (5, 4), ("dense16", 64): (16, 4)}
+
+
 def read_run(directory):
     headers, rows, cases = {}, {}, {}
     paths = rank_logs(directory)
@@ -57,19 +62,31 @@ def read_run(directory):
         require(len(begins) == len(ends) == 1, f"rank {rank}: missing/duplicate begin or end")
         h = begins[0]
         require(h["repeats"] >= 2, "at least two unchanged-mode repeats required")
-        require(h["capacity"] in (8, 16), "unsupported capacity")
+        compact = "compaction" in h
+        require(h["capacity"] == 64 if compact else h["capacity"] in (8, 16),
+                "unsupported capacity")
+        if compact:
+            require(h["compaction"] in ("off", "on") and h["mode"] == "gemv" and
+                    h["yarn"] == h["prefill_trials"] == 0, "invalid compaction protocol")
         require(ends[0]["count"] == len(scores) > 0, "incomplete score count")
         names = {key[1] for key in completed}
         require(len(names) == h["corpora"] > 0, "missing corpus")
-        widths = [("verify", w) for w in (4, 6, 8, 12, 16) if w <= h["capacity"]]
-        widths += [("prefill", w) for w in (1, 4, 5, 8, 9, 16, 17)]
+        if compact:
+            widths = list(COMPACT_SHAPES)
+        else:
+            widths = [("verify", w) for w in (4, 6, 8, 12, 16) if w <= h["capacity"]]
+            widths += [("prefill", w) for w in (1, 4, 5, 8, 9, 16, 17)]
         expected = {(rep, name, lane, w) for rep in range(h["repeats"])
                     for name in names for lane, w in widths}
         require(set(completed) == expected, "missing or unexpected case")
         expected_rows = set()
         for key, c in completed.items():
             _, _, lane, width = key
-            if lane == "prefill":
+            if compact:
+                requests, per_request = COMPACT_SHAPES[lane, width]
+                n = c["tokens"] if per_request == 4 else min(c["tokens"], h["boundary_tokens"])
+                count = ((n // requests - 17) // per_request) * width
+            elif lane == "prefill":
                 count = h["prefill_trials"] * width
             else:
                 requests, per_request = {4: (2, 2), 6: (3, 2), 8: (4, 2),
@@ -129,20 +146,30 @@ def read_run(directory):
 def compare(reference, candidate):
     rh, rc, ref = read_run(reference)
     ch, cc, new = read_run(candidate)
-    require(rh["mode"] == "gemv" and ch["mode"] == "mma", "expected GEMV reference and MMA candidate")
-    require({k: v for k, v in rh.items() if k != "mode"} ==
-            {k: v for k, v in ch.items() if k != "mode"}, "run configuration mismatch")
+    compact = "compaction" in rh or "compaction" in ch
+    if compact:
+        require(rh.get("compaction") == "off" and ch.get("compaction") == "on",
+                "expected physical reference and compact candidate")
+    else:
+        require(rh["mode"] == "gemv" and ch["mode"] == "mma", "expected GEMV reference and MMA candidate")
+    setting = "compaction" if compact else "mode"
+    require({k: v for k, v in rh.items() if k != setting} ==
+            {k: v for k, v in ch.items() if k != setting}, "run configuration mismatch")
     require(rc == cc and ref.keys() == new.keys(), "run corpus or case mismatch")
     groups = collections.defaultdict(list)
     flips = collections.Counter()
     for key, a in ref.items():
         b = new[key]
-        require(a["target"] == b["target"] and a["hidden"] == b["hidden"],
-                f"head comparisons require identical targets and hidden states: {key}")
+        require(a["target"] == b["target"], f"target mismatch: {key}")
+        if not compact:
+            require(a["hidden"] == b["hidden"],
+                    f"head comparisons require identical targets and hidden states: {key}")
         group = key[:3]
         _, _, width, _ = key
-        if width <= 4 or width > rh["capacity"]:
-            require(a["hashes"] == b["hashes"], f"dispatch control changed: {key}")
+        control = key[1].startswith("dense") if compact else width <= 4 or width > rh["capacity"]
+        if control:
+            require(a["hashes"] == b["hashes"] and a["hidden"] == b["hidden"],
+                    f"dispatch control changed: {key}")
         if a["top"][0][0] != b["top"][0][0]:
             # Both winners must be the other's runner-up; otherwise the
             # retained top-2 cannot establish a near-tie for the actual flip.
@@ -164,14 +191,15 @@ def compare(reference, candidate):
         ok = abs(mean) <= 0.02 and big_rate <= 0.01
         passed &= ok
         summaries.append({"corpus": group[0], "lane": group[1], "width": group[2], "positions": len(pairs),
-                          "gemv_mean_nll": statistics.mean(a for a, _ in pairs),
-                          "mma_mean_nll": statistics.mean(b for _, b in pairs),
+                          "physical_mean_nll" if compact else "gemv_mean_nll": statistics.mean(a for a, _ in pairs),
+                          "compact_mean_nll" if compact else "mma_mean_nll": statistics.mean(b for _, b in pairs),
                           "mean_nll_delta": mean,
                           "standard_error": statistics.stdev(deltas) / math.sqrt(len(deltas)) if len(deltas) > 1 else 0.0,
                           "max_abs_token_delta": max(map(abs, deltas)), "big_delta_rate": big_rate,
                           "top1_changes": flips[group], "passed": ok})
     return {"passed": passed, "configuration": rh, "repeatability": "bitwise on every rank in both modes",
-            "hidden_states": "identical across modes and ranks", "cases": summaries}
+            "hidden_states": ("identical across ranks; dense controls identical across modes" if compact
+                              else "identical across modes and ranks"), "cases": summaries}
 
 
 def main():

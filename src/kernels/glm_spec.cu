@@ -43,13 +43,14 @@ constexpr size_t kUnit = 16;  // one uint4 per thread per iteration
 // grid.y = segment, grid.x = chunks of the LARGEST segment; blocks past a
 // smaller segment's end exit. Block (0,0)'s thread 0 owns the position
 // advance so it happens exactly once whether or not anything copies.
-__global__ void spec_commit_kernel(const PickVerdict* __restrict__ verdict,
-                                   int rows, GlmSpecSegments segments,
-                                   int64_t* __restrict__ session_pos) {
+__global__ void spec_commit_kernel(const PickVerdict* __restrict__ verdict, int rows,
+                                   GlmSpecSegments segments, int64_t* __restrict__ session_pos,
+                                   const int32_t* request_map, int batch_index) {
+  const int req = request_map ? request_map[batch_index] : 0;
+  if (req < 0) return;
   const int accepted = verdict->accepted;
   if (accepted <= 0) return;  // fixed-batch padding slot
-  if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0)
-    *session_pos += accepted;
+  if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0) session_pos[req] += accepted;
   if (accepted >= rows) return;  // every row stood: nothing to retract
   if (blockIdx.y >= segments.count) return;  // position-only configuration
 
@@ -58,7 +59,7 @@ __global__ void spec_commit_kernel(const PickVerdict* __restrict__ verdict,
   const uint4* src = reinterpret_cast<const uint4*>(
       static_cast<const char*>(s.snapshots) +
       static_cast<size_t>(accepted - 1) * s.row_stride_bytes);
-  uint4* dst = static_cast<uint4*>(s.dst);
+  uint4* dst = reinterpret_cast<uint4*>(static_cast<char*>(s.dst) + req * s.request_stride_bytes);
   for (size_t i = static_cast<size_t>(blockIdx.x) * kCopyThreads + threadIdx.x;
        i < units; i += static_cast<size_t>(gridDim.x) * kCopyThreads)
     dst[i] = src[i];
@@ -77,7 +78,7 @@ __global__ void spec_positions_batched_kernel(
   const int r = threadIdx.x + blockIdx.x * blockDim.x;
   if (r >= rows) return;
   const int req = request_ids[r];
-  const int64_t base = session_pos[req];
+  const int64_t base = req >= 0 ? session_pos[req] : 0;
   step_pos[r] = base > 0 ? base + (r % rows_per_request) : -1;
 }
 
@@ -170,50 +171,55 @@ __global__ void spec_chain_row_window_kernel(
 }
 
 __global__ void spec_draft_rows_batched_kernel(
-    const PickVerdict* __restrict__ verdicts, int rows_per_request,
-    int64_t* __restrict__ block_pos, int64_t* __restrict__ step_pos,
-    int64_t* __restrict__ tokens, int64_t* __restrict__ next_out) {
+    const PickVerdict* __restrict__ verdicts, int rows_per_request, int64_t* __restrict__ block_pos,
+    int64_t* __restrict__ step_pos, int64_t* __restrict__ tokens, int64_t* __restrict__ next_out,
+    const int32_t* request_map) {
   const int q = blockIdx.x;
+  const int req = request_map ? request_map[q] : q;
   const PickVerdict& verdict = verdicts[q];
   const int accepted = verdict.accepted;
-  const bool active = accepted > 0;
+  const bool active = req >= 0 && accepted > 0;
   const int r = threadIdx.x;
   const int row = q * rows_per_request + r;
   if (r < rows_per_request) {
     const bool real = active && r < accepted;
-    step_pos[row] = real ? block_pos[q] + r : -1;
+    step_pos[row] = real ? block_pos[req] + r : -1;
     tokens[row] = active ? verdict.winners[real ? r : 0] : 0;
   }
   __syncthreads();
   if (r == 0 && active) {
-    block_pos[q] += accepted;
-    next_out[q] = verdict.next;
+    block_pos[req] += accepted;
+    next_out[req] = verdict.next;
   }
 }
 
-__global__ void spec_verify_next_tokens_batched_kernel(
-    const PickVerdict* __restrict__ verify, int rows_per_request,
-    int64_t* __restrict__ tokens) {
+__global__ void spec_verify_next_tokens_batched_kernel(const PickVerdict* __restrict__ verify,
+                                                       int rows_per_request,
+                                                       int64_t* __restrict__ tokens,
+                                                       const int32_t* request_map) {
   const int q = blockIdx.x;
-  const bool active = verify[q].accepted > 0;
+  const int req = request_map ? request_map[q] : q;
+  const bool active = req >= 0 && verify[q].accepted > 0;
+  if (req < 0) return;
   for (int r = threadIdx.x; r < rows_per_request; r += blockDim.x)
-    tokens[q * rows_per_request + r] =
-        active && r == 0 ? verify[q].next : 0;
+    tokens[req * rows_per_request + r] = active && r == 0 ? verify[q].next : 0;
 }
 
-__global__ void spec_next_tokens_batched_kernel(
-    const int64_t* __restrict__ next, GlmSpecDrafts drafts,
-    int rows_per_request, int64_t* __restrict__ tokens) {
+__global__ void spec_next_tokens_batched_kernel(const int64_t* __restrict__ next,
+                                                GlmSpecDrafts drafts, int rows_per_request,
+                                                int64_t* __restrict__ tokens,
+                                                const int32_t* request_map) {
   const int q = blockIdx.x;
-  const bool active = drafts.v[0][q].accepted > 0;
+  const int req = request_map ? request_map[q] : q;
+  const bool active = req >= 0 && drafts.v[0][q].accepted > 0;
   for (int r = threadIdx.x; r < rows_per_request; r += blockDim.x) {
     int64_t token = 0;
-    if (active && r == 0) token = next[q];
+    if (active && r == 0) token = next[req];
     if (active && r >= 1 && r - 1 < drafts.count) {
       const int32_t id = drafts.v[r - 1][q].next;
       token = id >= 0 ? id : 0;  // any valid id; a bad draft never stands
     }
-    tokens[q * rows_per_request + r] = token;
+    if (req >= 0) tokens[req * rows_per_request + r] = token;
   }
 }
 
@@ -221,26 +227,25 @@ __global__ void spec_next_tokens_batched_kernel(
 // row and copies its hidden into the slot's window (the window form of
 // spec_chain_row_window_kernel, one block per request).
 __global__ void spec_chain_rows_batched_kernel(
-    const PickVerdict* __restrict__ verify,
-    const PickVerdict* __restrict__ draft, int rows_per_request,
-    const uint16_t* __restrict__ block_x, int hidden,
+    const PickVerdict* __restrict__ verify, const PickVerdict* __restrict__ draft,
+    int rows_per_request, const uint16_t* __restrict__ block_x, int hidden,
     uint16_t* __restrict__ window, int window_rows, size_t window_stride,
     const int64_t* __restrict__ block_pos, int chain_index, int64_t max_context,
-    int64_t* __restrict__ step_pos, int64_t* __restrict__ tokens,
-    int32_t* __restrict__ req_ids, int32_t* __restrict__ req_spans) {
+    int64_t* __restrict__ step_pos, int64_t* __restrict__ tokens, int32_t* __restrict__ req_ids,
+    int32_t* __restrict__ req_spans, const int32_t* request_map) {
   const int q = blockIdx.x;
-  const bool active = verify[q].accepted > 0;
+  const int req = request_map ? request_map[q] : q;
+  const bool active = req >= 0 && verify[q].accepted > 0;
   const int row = chain_index == 0
                       ? q * rows_per_request + max(verify[q].accepted - 1, 0)
                       : q;
-  const int64_t pos = active ? block_pos[q] + chain_index : -1;
+  const int64_t pos = active ? block_pos[req] + chain_index : -1;
   const bool fits = active && pos >= 0 && pos < max_context;
   if (fits) {
     const uint4* src = reinterpret_cast<const uint4*>(
         block_x + static_cast<size_t>(row) * hidden);
-    uint4* dst = reinterpret_cast<uint4*>(
-        window + static_cast<size_t>(q) * window_stride +
-        static_cast<size_t>(pos % window_rows) * hidden);
+    uint4* dst = reinterpret_cast<uint4*>(window + static_cast<size_t>(req) * window_stride +
+                                          static_cast<size_t>(pos % window_rows) * hidden);
     const int units = hidden / 8;
     for (int i = threadIdx.x; i < units; i += blockDim.x) dst[i] = src[i];
   }
@@ -248,7 +253,7 @@ __global__ void spec_chain_rows_batched_kernel(
     step_pos[q] = fits ? pos : -1;
     const int32_t id = active ? draft[q].next : -1;
     tokens[q] = id >= 0 ? id : 0;
-    req_ids[q] = q;
+    req_ids[q] = req;
     req_spans[2 * q] = q;
     req_spans[2 * q + 1] = 1;
   }
@@ -310,15 +315,15 @@ __global__ void publish_f32_kernel(const float* __restrict__ src,
   }
 }
 
-__global__ void gather_feed_kernel(const int64_t* __restrict__ feeds,
-                                   int requests, int feed_rows,
-                                   int rows_per_request,
-                                   int64_t* __restrict__ out) {
+__global__ void gather_feed_kernel(const int64_t* __restrict__ feeds, int requests, int feed_rows,
+                                   int rows_per_request, int64_t* __restrict__ out,
+                                   const int32_t* request_map) {
   const int n = requests * rows_per_request;
   for (int i = static_cast<int>(threadIdx.x); i < n; i += static_cast<int>(blockDim.x)) {
     const int q = i / rows_per_request;
     const int t = i - q * rows_per_request;
-    out[i] = feeds[q * feed_rows + t];
+    const int req = request_map ? request_map[q] : q;
+    out[i] = req >= 0 ? feeds[req * feed_rows + t] : 0;
   }
 }
 
@@ -364,14 +369,13 @@ void glm_publish_f32(const float* src, float* pinned_dst, int count,
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
-void glm_spec_gather_feed(const int64_t* feeds, int requests, int feed_rows,
-                          int rows_per_request, int64_t* out,
-                          cudaStream_t stream) {
+void glm_spec_gather_feed(const int64_t* feeds, int requests, int feed_rows, int rows_per_request,
+                          int64_t* out, cudaStream_t stream, const int32_t* request_map) {
   if (feeds == nullptr || out == nullptr || requests < 1 || rows_per_request < 1 ||
       feed_rows < rows_per_request || requests * rows_per_request > 1024)
     throw std::invalid_argument("glm_spec_gather_feed: null argument/shape");
-  gather_feed_kernel<<<1, 256, 0, stream>>>(feeds, requests, feed_rows,
-                                            rows_per_request, out);
+  gather_feed_kernel<<<1, 256, 0, stream>>>(feeds, requests, feed_rows, rows_per_request, out,
+                                            request_map);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
@@ -385,9 +389,9 @@ void glm_upload_words(const uint32_t* pinned_src, uint32_t* dst, size_t count,
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
-void glm_spec_commit(const PickVerdict* verdict, int rows,
-                     const GlmSpecSegments& segments, int64_t* session_pos,
-                     cudaStream_t stream) {
+void glm_spec_commit(const PickVerdict* verdict, int rows, const GlmSpecSegments& segments,
+                     int64_t* session_pos, cudaStream_t stream, const int32_t* request_map,
+                     int batch_index) {
   if (verdict == nullptr || session_pos == nullptr)
     throw std::invalid_argument("glm_spec_commit: null verdict/position");
   if (rows < 1 || rows > kPickMaxRows)
@@ -411,8 +415,8 @@ void glm_spec_commit(const PickVerdict* verdict, int rows,
       std::min<size_t>(1024, (max_units + kCopyThreads - 1) / kCopyThreads));
   const dim3 grid(std::max(1u, chunks),
                   static_cast<unsigned>(std::max(1, segments.count)));
-  spec_commit_kernel<<<grid, kCopyThreads, 0, stream>>>(verdict, rows,
-                                                        segments, session_pos);
+  spec_commit_kernel<<<grid, kCopyThreads, 0, stream>>>(verdict, rows, segments, session_pos,
+                                                        request_map, batch_index);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
@@ -485,10 +489,10 @@ void glm_spec_draft_rows(const PickVerdict* verdict, int rows,
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
-void glm_spec_draft_rows_batched(
-    const PickVerdict* verdicts, int requests, int rows_per_request,
-    int64_t* block_pos, int64_t* step_pos, int64_t* tokens,
-    int64_t* next_out, cudaStream_t stream) {
+void glm_spec_draft_rows_batched(const PickVerdict* verdicts, int requests, int rows_per_request,
+                                 int64_t* block_pos, int64_t* step_pos, int64_t* tokens,
+                                 int64_t* next_out, cudaStream_t stream,
+                                 const int32_t* request_map) {
   if (verdicts == nullptr || block_pos == nullptr || step_pos == nullptr ||
       tokens == nullptr || next_out == nullptr)
     throw std::invalid_argument("glm_spec_draft_rows_batched: null argument");
@@ -496,7 +500,7 @@ void glm_spec_draft_rows_batched(
       rows_per_request < 1 || requests * rows_per_request > kPickMaxRows)
     throw std::invalid_argument("glm_spec_draft_rows_batched: request shape");
   spec_draft_rows_batched_kernel<<<requests, 32, 0, stream>>>(
-      verdicts, rows_per_request, block_pos, step_pos, tokens, next_out);
+      verdicts, rows_per_request, block_pos, step_pos, tokens, next_out, request_map);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
@@ -563,10 +567,9 @@ void glm_spec_chain_row_window(const PickVerdict* verify_verdict, int src_row,
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
-void glm_spec_verify_next_tokens_batched(const PickVerdict* verify_verdicts,
-                                         int requests, int rows_per_request,
-                                         int64_t* tokens,
-                                         cudaStream_t stream) {
+void glm_spec_verify_next_tokens_batched(const PickVerdict* verify_verdicts, int requests,
+                                         int rows_per_request, int64_t* tokens, cudaStream_t stream,
+                                         const int32_t* request_map) {
   if (verify_verdicts == nullptr || tokens == nullptr)
     throw std::invalid_argument(
         "glm_spec_verify_next_tokens_batched: null argument");
@@ -575,14 +578,13 @@ void glm_spec_verify_next_tokens_batched(const PickVerdict* verify_verdicts,
     throw std::invalid_argument(
         "glm_spec_verify_next_tokens_batched: request shape");
   spec_verify_next_tokens_batched_kernel<<<requests, 32, 0, stream>>>(
-      verify_verdicts, rows_per_request, tokens);
+      verify_verdicts, rows_per_request, tokens, request_map);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
-void glm_spec_next_tokens_batched(const int64_t* next,
-                                  const GlmSpecDrafts& drafts, int requests,
-                                  int rows_per_request, int64_t* tokens,
-                                  cudaStream_t stream) {
+void glm_spec_next_tokens_batched(const int64_t* next, const GlmSpecDrafts& drafts, int requests,
+                                  int rows_per_request, int64_t* tokens, cudaStream_t stream,
+                                  const int32_t* request_map) {
   if (next == nullptr || tokens == nullptr)
     throw std::invalid_argument("glm_spec_next_tokens_batched: null argument");
   if (drafts.count < 1 || drafts.count > kSpecMaxDrafts)
@@ -597,21 +599,19 @@ void glm_spec_next_tokens_batched(const int64_t* next,
     throw std::invalid_argument(
         "glm_spec_next_tokens_batched: the feed is [next, draft_1 .. "
         "draft_n] per request (rows_per_request = 1 + drafts)");
-  spec_next_tokens_batched_kernel<<<requests, 32, 0, stream>>>(
-      next, drafts, rows_per_request, tokens);
+  spec_next_tokens_batched_kernel<<<requests, 32, 0, stream>>>(next, drafts, rows_per_request,
+                                                               tokens, request_map);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
 void glm_spec_chain_rows_batched(const PickVerdict* verify_verdicts,
-                                 const PickVerdict* draft_verdicts,
-                                 int requests, int rows_per_request,
-                                 const uint16_t* block_x, int hidden,
-                                 uint16_t* window, int window_rows,
-                                 size_t window_stride_elems,
-                                 const int64_t* block_pos, int chain_index,
-                                 int64_t max_context, int64_t* step_pos,
-                                 int64_t* tokens, int32_t* req_ids,
-                                 int32_t* req_spans, cudaStream_t stream) {
+                                 const PickVerdict* draft_verdicts, int requests,
+                                 int rows_per_request, const uint16_t* block_x, int hidden,
+                                 uint16_t* window, int window_rows, size_t window_stride_elems,
+                                 const int64_t* block_pos, int chain_index, int64_t max_context,
+                                 int64_t* step_pos, int64_t* tokens, int32_t* req_ids,
+                                 int32_t* req_spans, cudaStream_t stream,
+                                 const int32_t* request_map) {
   if (verify_verdicts == nullptr || draft_verdicts == nullptr ||
       block_x == nullptr || window == nullptr || block_pos == nullptr ||
       step_pos == nullptr || tokens == nullptr || req_ids == nullptr ||
@@ -629,10 +629,27 @@ void glm_spec_chain_rows_batched(const PickVerdict* verify_verdicts,
   if (chain_index < 0 || chain_index >= kSpecMaxDrafts || max_context < 1)
     throw std::invalid_argument("glm_spec_chain_rows_batched: chain index/context");
   spec_chain_rows_batched_kernel<<<requests, 256, 0, stream>>>(
-      verify_verdicts, draft_verdicts, rows_per_request, block_x, hidden,
-      window, window_rows, window_stride_elems, block_pos, chain_index,
-      max_context, step_pos, tokens, req_ids, req_spans);
+      verify_verdicts, draft_verdicts, rows_per_request, block_x, hidden, window, window_rows,
+      window_stride_elems, block_pos, chain_index, max_context, step_pos, tokens, req_ids,
+      req_spans, request_map);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
+__global__ void batch_rows_kernel(const int32_t* map, int requests, int rows, int32_t* ids,
+                                  int32_t* spans) {
+  const int i = threadIdx.x;
+  if (i < requests * rows) ids[i] = map[i / rows];
+  if (i < requests) {
+    spans[2 * i] = i * rows;
+    spans[2 * i + 1] = rows;
+  }
+}
+void glm_batch_rows(const int32_t* map, int requests, int rows, int32_t* ids, int32_t* spans,
+                    cudaStream_t stream) {
+  if (!map || !ids || !spans || requests < 1 || requests > kPickMaxRequests || rows < 1 ||
+      requests * rows > kPickMaxRows)
+    throw std::invalid_argument("glm_batch_rows: invalid map/shape");
+  batch_rows_kernel<<<1, kPickMaxRows, 0, stream>>>(map, requests, rows, ids, spans);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
 }  // namespace dgpp

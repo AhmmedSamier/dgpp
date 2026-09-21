@@ -1,0 +1,5 @@
+{
+  "production_sha256": "460f5ed1c4b4e99d9be99768a4f636ab2aa40e21dcb43ab25d2360c5dc644bdd",
+  "candidate_sha256": "758850ada2126fc42ab766d5f77a0eae8ed036d3733754c820fef1a91e0f45fd",
+  "candidate_version": "dgpp-serve 0.1.0+ge342d54906eb (git e342d54906eb, cuda 13.0)"
+}

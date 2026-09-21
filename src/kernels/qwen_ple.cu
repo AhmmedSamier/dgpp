@@ -88,6 +88,10 @@ __global__ void hash_ids_rows_kernel(const int64_t* __restrict__ tokens, int row
   const int h = static_cast<int>(i - static_cast<int64_t>(t) * heads);
   const int s = span_start_of(t, spans, num_requests);
   const int p = t - s;
+  if (req_ids[t] < 0) {
+    ids[i] = hash_one(0, eos, eos, h, heads_per_ngram, multipliers, head_vocab, head_offset);
+    return;
+  }
   const int32_t* c = ctx + static_cast<int64_t>(req_ids[t]) * 4;
   const int64_t y0 = tokens[t];
   const int64_t prev1 = p >= 1 ? tokens[t - 1] : c[0];
@@ -109,6 +113,11 @@ __global__ void context_rows_kernel(const int64_t* __restrict__ tokens,
   if (q >= num_requests) return;
   const int s = spans[2 * q], len = spans[2 * q + 1];
   if (len <= 0) return;
+  if (req_ids[s] < 0) {
+    for (int t = s; t < s + len; ++t)
+      for (int j = 0; j < 4; ++j) ctx_rows[static_cast<int64_t>(t) * 4 + j] = 0;
+    return;
+  }
   int32_t* c = ctx + static_cast<int64_t>(req_ids[s]) * 4;
   int32_t c0 = c[0], c1 = c[1];
   bool touched = false;
@@ -250,6 +259,15 @@ __global__ void conv_rows_kernel(const uint16_t* __restrict__ un, const uint16_t
   const int q = blockIdx.y;
   const int s = spans[2 * q], len = spans[2 * q + 1];
   if (len <= 0) return;
+  if (req_ids[s] < 0) {
+    for (int t = s; t < s + len; ++t) {
+      const int64_t at = static_cast<int64_t>(t) * channels + c;
+      out[at] = residual ? residual[at] : static_cast<uint16_t>(0);
+      if (snapshots)
+        for (int j = 0; j < S; ++j) snapshots[at * S + j] = 0;
+    }
+    return;
+  }
   uint16_t* state = states + static_cast<int64_t>(req_ids[s]) * state_stride;
   float hist[S];
 #pragma unroll

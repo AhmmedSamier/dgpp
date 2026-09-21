@@ -76,16 +76,30 @@ void score(const dgpp::QwenModel::Outputs& out, int row, int hidden, int64_t tar
 struct Graph {
   cudaGraphExec_t exec = nullptr;
   dgpp::PickVerdict* verdicts = nullptr;
+  int32_t* request_map = nullptr;
   ~Graph() {
     if (exec) cudaGraphExecDestroy(exec);
     if (verdicts) cudaFree(verdicts);
+    if (request_map) cudaFreeHost(request_map);
   }
 };
 
 void capture(Graph& graph, dgpp::QwenModel& model, dgpp::net::CollectiveBus* bus,
-             dgpp::GraphRecordReducer* recorder, int variant, int requests, int rows) {
+             dgpp::GraphRecordReducer* recorder, int variant, int requests, int rows,
+             const std::vector<int32_t>& mapping = {}, const std::vector<int>& active = {}) {
   std::vector<dgpp::PickVerdict> verdicts(static_cast<size_t>(requests));
-  for (auto& v : verdicts) v.rows = v.accepted = rows;
+  for (int q = 0; q < requests; ++q) {
+    verdicts[q].rows = rows;
+    verdicts[q].accepted =
+        active.empty() || std::find(active.begin(), active.end(), q) != active.end() ? rows : 0;
+  }
+  if (!mapping.empty()) {
+    require(mapping.size() == static_cast<size_t>(requests), "map shape");
+    DGPP_CUDA_OK(
+        cudaHostAlloc(&graph.request_map, requests * sizeof(int32_t), cudaHostAllocDefault));
+    std::copy(mapping.begin(), mapping.end(), graph.request_map);
+  }
+  model.session_graph_batch_map_source(graph.request_map);
   DGPP_CUDA_OK(cudaMalloc(&graph.verdicts, verdicts.size() * sizeof(verdicts[0])));
   DGPP_CUDA_OK(cudaMemcpy(graph.verdicts, verdicts.data(), verdicts.size() * sizeof(verdicts[0]),
                           cudaMemcpyHostToDevice));
@@ -123,12 +137,115 @@ void capture(Graph& graph, dgpp::QwenModel& model, dgpp::net::CollectiveBus* bus
   require(heads == int(mma), "captured vocabulary head does not match requested dispatch");
   DGPP_CUDA_OK(cudaGraphInstantiate(&graph.exec, recorded, nullptr, nullptr, 0));
   DGPP_CUDA_OK(cudaGraphDestroy(recorded));
+  model.session_graph_batch_map_source(nullptr);
+}
+
+// Keep the teacher tokens and physical slots identical while changing the
+// recorded family. Full-depth cases score each entire corpus; the T=1/T=2
+// boundaries use its configured prefix. Dense cases are exact controls.
+void compaction_scores(dgpp::QwenModel& model, dgpp::net::CollectiveBus* bus,
+                       dgpp::GraphRecordReducer* recorder, const std::vector<Corpus>& corpora,
+                       const std::string& contents, bool compact, int rank, int world, int repeats,
+                       int boundary_tokens, int hidden, int vocab) {
+  struct Shape {
+    const char* lane;
+    int rows;
+    std::vector<int> physical;
+  };
+  const std::vector<Shape> shapes{
+      {"dense4", 2, {0, 1, 2, 3}},
+      {"sparse2", 1, {15, 0}},
+      {"sparse2", 2, {15, 0}},
+      {"sparse2", 4, {15, 0}},
+      {"padded5", 4, {15, 0, 7, 3, 12}},
+      {"dense16", 4, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}}};
+  std::vector<std::unique_ptr<Graph>> graphs(shapes.size());
+  std::printf(
+      "[head_begin] {\"rank\":%d,\"world\":%d,\"mode\":\"gemv\",\"repeats\":%d,"
+      "\"capacity\":64,\"boundary_tokens\":%d,\"prefill_trials\":0,\"yarn\":0,\"corpora\":%zu,"
+      "\"compaction\":\"%s\",\"manifest\":\"%016llx\",\"vocab_begin\":%d,"
+      "\"vocab_count\":%d,\"vocab\":%d}\n",
+      rank, world, repeats, boundary_tokens, corpora.size(), compact ? "on" : "off",
+      static_cast<unsigned long long>(digest(contents.data(), contents.size())),
+      model.lm_vocab_begin(), model.lm_vocab_count(), vocab);
+  size_t total = 0;
+  for (int repeat = 0; repeat < repeats; ++repeat)
+    for (const auto& c : corpora) {
+      for (size_t si = 0; si < shapes.size(); ++si) {
+        const auto& shape = shapes[si];
+        const int live = static_cast<int>(shape.physical.size()), rows = shape.rows;
+        const int width = live * rows;
+        const int physical = *std::max_element(shape.physical.begin(), shape.physical.end()) + 1;
+        int requests = physical;
+        if (compact) {
+          for (int bucket : {2, 3, 4, 6, 8, 12, 16}) {
+            if (bucket >= live &&
+                dgpp::QwenModel::compact_batch_compatible(physical * rows, bucket * rows)) {
+              requests = bucket;
+              break;
+            }
+          }
+        }
+        const size_t n = rows == 4 ? c.ids.size() : std::min(c.ids.size(), size_t(boundary_tokens));
+        const int length = static_cast<int>(n / live), steps = (length - 17) / rows;
+        require(steps > 0, "compaction corpus is too short for its physical layout");
+        for (int q = 0; q < live; ++q) {
+          const auto begin = c.ids.begin() + q * length;
+          (void)model.session_prefill(shape.physical[q], std::vector<int64_t>(begin, begin + 16));
+          model.session_reserve_blocks(shape.physical[q], length + 64);
+        }
+        for (int step = 0; step < steps; ++step) {
+          for (int q = 0; q < live; ++q) {
+            const auto begin = c.ids.begin() + q * length + 16 + step * rows;
+            model.session_graph_seed_feed(shape.physical[q],
+                                          std::vector<int64_t>(begin, begin + rows));
+          }
+          if (!graphs[si]) {
+            graphs[si] = std::make_unique<Graph>();
+            std::vector<int32_t> mapping;
+            std::vector<int> active = shape.physical;
+            if (compact) {
+              mapping.assign(requests, -1);
+              std::copy(shape.physical.begin(), shape.physical.end(), mapping.begin());
+              for (int q = 0; q < live; ++q) active[q] = q;
+            }
+            capture(*graphs[si], model, bus, recorder, static_cast<int>(si), requests, rows,
+                    mapping, active);
+          }
+          model.session_graph_use_batch_contract(rows, requests);
+          model.session_graph_stage_batch();
+          std::string error;
+          if (bus) require(bus->graph_replay_arm(&error, static_cast<int>(si)), error);
+          DGPP_CUDA_OK(cudaGraphLaunch(graphs[si]->exec, model.stream()));
+          DGPP_CUDA_OK(cudaStreamSynchronize(model.stream()));
+          if (bus) require(bus->graph_replay_finish(120000, &error), error);
+          const auto out = model.session_graph_outputs(shape.physical[0]);
+          for (int q = 0; q < live; ++q) {
+            for (int row = 0; row < rows; ++row) {
+              const int pos = q * length + 16 + step * rows + row + 1;
+              score(out, (compact ? q : shape.physical[q]) * rows + row, hidden, c.ids[pos], rank,
+                    repeat, c.name, shape.lane, width, step * width + q * rows + row);
+              ++total;
+            }
+            model.session_graph_settle(shape.physical[q], rows);
+          }
+        }
+        for (int req : shape.physical) model.session_close(req);
+        std::printf(
+            "[head_case] {\"rank\":%d,\"repeat\":%d,\"corpus\":\"%s\",\"lane\":\"%s\","
+            "\"width\":%d,\"count\":%d,\"tokens\":%zu,\"token_hash\":\"%016llx\"}\n",
+            rank, repeat, c.name.c_str(), shape.lane, width, steps * width, c.ids.size(),
+            static_cast<unsigned long long>(digest(c.ids.data(), c.ids.size())));
+        std::fflush(stdout);
+      }
+    }
+  std::printf("[head_end] {\"rank\":%d,\"count\":%zu}\n", rank, total);
 }
 }  // namespace
 
 int main(int argc, char** argv) {
   try {
-    std::string checkpoint, model_id, manifest, peer, image_dir, mode = "gemv";
+    std::string checkpoint, model_id, manifest, peer, image_dir, mode = "gemv", compaction;
     int rank = 0, world = 1, port = 29950, repeats = 2, boundary_tokens = 1024;
     int prefill_trials = 32, capacity = 16;
     bool yarn = false;
@@ -151,6 +268,8 @@ int main(int argc, char** argv) {
       else if (a == "--boundary-tokens") boundary_tokens = std::stoi(next(i));
       else if (a == "--prefill-trials") prefill_trials = std::stoi(next(i));
       else if (a == "--decode-capacity") capacity = std::stoi(next(i));
+      else if (a == "--compaction")
+        compaction = next(i);
       else if (a == "--yarn") yarn = true;
       else throw std::runtime_error("unknown argument: " + a);
     }
@@ -158,6 +277,11 @@ int main(int argc, char** argv) {
     require(repeats >= 2 && boundary_tokens >= 64 && prefill_trials > 0,
             "need >=2 repeats, >=64 boundary tokens and positive prefill trials");
     require(capacity == 8 || capacity == 16, "--decode-capacity must be 8 or 16");
+    require(compaction.empty() || compaction == "off" || compaction == "on",
+            "--compaction must be off or on");
+    require(compaction.empty() || (mode == "gemv" && !yarn),
+            "compaction comparison holds the default head and rope settings fixed");
+    if (!compaction.empty()) capacity = 64;
     require(world >= 1 && rank >= 0 && rank < world, "invalid rank/world");
     require(dgpp::dense_gemv_rows() == 4, "this gate requires DGPP_DENSE_GEMV_ROWS=4");
     if (checkpoint.empty()) {
@@ -218,14 +342,24 @@ int main(int argc, char** argv) {
       require(bus->start(&error), error);
       reducer = std::make_unique<dgpp::BusBoundaryReducer>(*bus, 120000);
     }
-    dgpp::QwenModel model(cfg, checkpoint, 64, static_cast<int64_t>(max_tokens + 1024),
-                          dgpp::QwenResidency::Resident, reducer.get(), rank, world, 4,
+    const int request_slots = compaction.empty() ? 4 : 16;
+    // Each request reserves 64 extra tokens and rounds up to a complete KV
+    // block. Account for that slack per request, including the dense C16 case.
+    const int64_t cache_slack = std::max<int64_t>(
+        1024, request_slots * (64 + dgpp::QwenModel::kv_block_tokens_static() - 1));
+    dgpp::QwenModel model(cfg, checkpoint, 64, static_cast<int64_t>(max_tokens) + cache_slack,
+                          dgpp::QwenResidency::Resident, reducer.get(), rank, world, request_slots,
                           false, capacity, mode == "mma");
     model.set_decode_route_traces(false);
     model.set_decode_tail_mirrors(false);
     model.session_graph_prepare();
     std::unique_ptr<dgpp::GraphRecordReducer> recorder;
     if (bus) recorder = std::make_unique<dgpp::GraphRecordReducer>(*bus, model.stream());
+    if (!compaction.empty()) {
+      compaction_scores(model, bus.get(), recorder.get(), corpora, contents, compaction == "on",
+                        rank, world, repeats, boundary_tokens, cfg.hidden_size, cfg.vocab_size);
+      return 0;
+    }
     const std::vector<std::pair<int, int>> shapes{{2, 2}, {3, 2}, {4, 2}, {4, 3}, {4, 4}};
     std::vector<std::unique_ptr<Graph>> graphs(shapes.size());
     std::printf("[head_begin] {\"rank\":%d,\"world\":%d,\"mode\":\"%s\",\"repeats\":%d,"

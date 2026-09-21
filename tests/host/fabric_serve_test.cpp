@@ -462,6 +462,7 @@ void test_journal_codec() {
     ws.reasoning_in_content = true;
     ws.kv_dtype = "fp8";
     ws.bf16_weights = "bf12";
+    ws.compact_batches = true;
     ws.fp8_head = "mma";
     // The opt-in rope knob rides the record: a peer that ran without it
     // would rope at different frequencies from rank 0 — silently
@@ -527,6 +528,25 @@ void test_journal_codec() {
       }
       require(refused_rope, "codec: a settings record with an impossible rope scaling is refused");
     }
+    {
+      auto encoded = dgpp::serve::encode_journal_settings(ws);
+      const std::string compact_field = ",\"compact\":1";
+      const auto at = encoded.find(compact_field);
+      require(at != std::string::npos, "settings carry compact_batches");
+      auto legacy = encoded;
+      legacy.erase(at, compact_field.size());
+      require(!dgpp::serve::decode_journal_line(legacy).world_settings.compact_batches,
+              "older settings default compaction off");
+      encoded.replace(at, compact_field.size(), ",\"compact\":2");
+      bool refused = false;
+      try {
+        (void)dgpp::serve::decode_journal_line(encoded);
+      } catch (const std::runtime_error& error) {
+        refused = std::string(error.what()).find("compact") != std::string::npos;
+      }
+      require(refused, "invalid compaction flag is refused by name");
+    }
+
     {
       // The KV dtype rides by name; an unknown one is refused.
       dgpp::serve::WorldSettings bad = ws;

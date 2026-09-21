@@ -59,6 +59,11 @@ void require(bool cond, const std::string& what) {
   if (!cond) throw std::runtime_error(what);
 }
 
+bool test_compaction() {
+  const char* value = std::getenv("DGPP_TEST_COMPACT_BATCH");
+  return !value || std::string(value) != "0";
+}
+
 int wait_timeout_ms() {
   const char* v = std::getenv("DGPP_TEST_WAIT_TIMEOUT_MS");
   return v ? std::atoi(v) : 60000;
@@ -208,8 +213,9 @@ void rank_work(int r, const QwenTextConfig& cfg, const std::string& dir, const s
     arrive_once();
     EagerEngineAdapter<QwenModel> eager_engine(
         &eager, kSlots, dgpp::make_fabric_pick(bus, r, kWorld, scratch, cfg.vocab_size, wait_timeout_ms()));
-    GraphEngineAdapter<QwenModel> graph_engine(&graph, bus, r, kWorld, scratch, cfg.vocab_size,
-                                               wait_timeout_ms(), /*batch_min_live=*/2);
+    GraphEngineAdapter<QwenModel> graph_engine(
+        &graph, bus, r, kWorld, scratch, cfg.vocab_size, wait_timeout_ms(), /*batch_min_live=*/2,
+        nullptr, nullptr, dgpp::kSamplingCandidates, nullptr, 0, 1, test_compaction());
 
     // 1. The eager engine at world 2.
     out->ea = solo(eager_engine, 0, A, kSteps);
@@ -287,10 +293,11 @@ void rank_work_mtp(int r, const QwenTextConfig& cfg, const std::string& dir, con
     out->eb = solo(eager_engine, 1, B, kSteps);
     out->ec = solo(eager_engine, 2, C, kSteps);
     {
-      GraphEngineAdapter<QwenModel> mtp_engine(&mtp, bus, r, kWorld, scratch, cfg.vocab_size, wait_timeout_ms(),
-                                               /*batch_min_live=*/2, /*prefix_scratch=*/nullptr,
-                                               /*gather_scratch=*/nullptr, /*candidates=*/0, /*grammar=*/nullptr,
-                                               /*prefix_slots=*/0, /*mtp_depth=*/depth);
+      GraphEngineAdapter<QwenModel> mtp_engine(
+          &mtp, bus, r, kWorld, scratch, cfg.vocab_size, wait_timeout_ms(),
+          /*batch_min_live=*/2, /*prefix_scratch=*/nullptr,
+          /*gather_scratch=*/nullptr, /*candidates=*/0, /*grammar=*/nullptr,
+          /*prefix_slots=*/0, /*mtp_depth=*/depth, test_compaction());
       out->ma.push_back(mtp_engine.prefill(0, A));
       mtp_engine.reserve(0, static_cast<int64_t>(A.size()) + kSteps + 2 + depth);
       while (out->ma.size() < static_cast<size_t>(kSteps) + 1) {
@@ -351,9 +358,10 @@ void rank_work_mtp(int r, const QwenTextConfig& cfg, const std::string& dir, con
       mtp_engine.close(1);
       mtp_engine.close(2);
       mtp_engine.drain();
-      if (depth == 2)
+      if (depth == 2) {
         require(mtp_engine.batch_family_steps(0) == fitting_steps,
-                "a live slot outside the fitting prefix safely uses scalar graphs");
+                "slots beyond the physical family preserve scalar fallback");
+      }
     }
     cudaFreeHost(scratch);
   } catch (const std::exception& e) {
@@ -467,7 +475,26 @@ DGPP_TEST(qwen_engines_loopback_world_2_mtp_depth2_graph_matches_plain_decode) {
   DGPP_LOG_INFO("world 2 MTP depth 2: A took {} steps for {} tokens", o.mtp_steps_a, kSteps);
 }
 
+DGPP_TEST(qwen_wide_compaction_keeps_numerical_dispatch_range) {
+  for (int rows : {2, 4, 8, 16, 24, 32, 64})
+    require(QwenModel::compact_batch_compatible(rows, rows), "unchanged width is compatible");
+  for (int rows : {2, 4, 8, 16}) {
+    require(!QwenModel::compact_batch_compatible(16, rows / 2),
+            "small verification must retain its physical width");
+    require(!QwenModel::compact_batch_compatible(64, rows),
+            "wide verification must not enter the small-graph lowering");
+  }
+  require(
+      QwenModel::compact_batch_compatible(32, 24) && QwenModel::compact_batch_compatible(64, 24),
+      "wide sparse batches can use the six-request MTP3 family");
+  require(!QwenModel::compact_batch_compatible(24, 32), "compaction never grows a graph");
+}
+
 DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
+  const int sample_cap = std::getenv("DGPP_TEST_COMPACT_SAMPLING")
+                             ? std::atoi(std::getenv("DGPP_TEST_COMPACT_SAMPLING"))
+                             : 0;
+  const bool force_fallback = std::getenv("DGPP_TEST_COMPACT_FALLBACK") != nullptr;
   const bool rows32 = [] {
     const char* value = std::getenv("DGPP_TEST_QWEN_ROWS32");
     return value && std::string(value) == "1";
@@ -479,6 +506,7 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
   const int slots = rows64 ? 16 : 8;
   const int decode_rows = rows64 ? 64 : rows32 ? 32 : 16;
   const int mtp_depth = (rows32 || rows64) ? 3 : 1;
+  const int sparse_bucket = test_compaction() && (rows32 || rows64) ? 6 : slots;
   require(QwenModel::decode_rows_cap() >= decode_rows, "Qwen advertises the tested decode width");
   const bool old_fp8 = dgpp::QwenLayerStream::dense_weights_fp8();
   struct RestoreDenseWeights {
@@ -497,6 +525,8 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
   std::vector<std::thread> workers;
   for (int rank = 0; rank < kWorld; ++rank) workers.emplace_back([&, rank] {
     uint16_t* scratch = nullptr;
+    uint16_t* prefix_scratch = nullptr;
+    uint16_t* gather_scratch = nullptr;
     bool arrived = false;
     try {
       auto* bus = buses[rank].get();
@@ -510,15 +540,26 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
               "eager/graph parity requires matching decode capacity and head mode");
       DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&scratch),
                                  sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld), cudaHostAllocDefault));
+      if (sample_cap) {
+        DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&prefix_scratch),
+                                   2 * dgpp::fabric_sampling_prefix_scratch_elems(kWorld),
+                                   cudaHostAllocDefault));
+        DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&gather_scratch),
+                                   2 * dgpp::sampling_gather_scratch_elems(cfg.vocab_size),
+                                   cudaHostAllocDefault));
+      }
       arrived = true;
       barrier.arrive_and_wait();
       EagerEngineAdapter<QwenModel> plain(
           &eager, slots,
           dgpp::make_fabric_pick(bus, rank, kWorld, scratch, cfg.vocab_size, wait_timeout_ms()));
       GraphEngineAdapter<QwenModel> graph(&model, bus, rank, kWorld, scratch, cfg.vocab_size,
-                                          wait_timeout_ms(), /*batch_min_live=*/2, nullptr, nullptr,
-                                          0, nullptr,
-                                          /*prefix_slots=*/2, mtp_depth);
+                                          wait_timeout_ms(), /*batch_min_live=*/2, prefix_scratch,
+                                          gather_scratch, sample_cap, nullptr,
+                                          /*prefix_slots=*/2, mtp_depth, test_compaction());
+      if (sample_cap)
+        for (int req = 0; req < slots; ++req)
+          graph.configure_sampling(req, dgpp::sample::greedy_params(), 0);
       require(graph.batch_families() == (rows64 ? std::vector<int>{2, 3, 4, 6, 8, 12, 16}
                                                 : std::vector<int>{2, 3, 4, 6, 8}),
               "wide batch families");
@@ -565,15 +606,20 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
             const auto before = graph.decode_batch_stats();
             const auto tokens = graph.step_batch(live);
             const auto after = graph.decode_batch_stats();
-            require(after.slots == count && after.active == static_cast<int>(live.size()) &&
+            int bucket = count;
+            if (test_compaction()) {
+              const auto families = graph.batch_families();
+              bucket = *std::lower_bound(families.begin(), families.end(), live.size());
+            }
+            require(after.slots == bucket && after.active == static_cast<int>(live.size()) &&
                         after.rows_per_request == 1 + mtp_depth,
                     "last launched batch shape");
             require(after.replays == before.replays + 1 &&
-                        after.replays_by_slots[count] == before.replays_by_slots[count] + 1,
+                        after.replays_by_slots[bucket] == before.replays_by_slots[bucket] + 1,
                     "one graph launch in its capacity bucket");
-            require(after.rows - before.rows == static_cast<uint64_t>(count * (1 + mtp_depth)) &&
+            require(after.rows - before.rows == static_cast<uint64_t>(bucket * (1 + mtp_depth)) &&
                         after.padded_rows - before.padded_rows ==
-                            (count - live.size()) * (1 + mtp_depth),
+                            (bucket - live.size()) * (1 + mtp_depth),
                     "interior retired slots count as padding");
             for (size_t i = 0; i < live.size(); ++i) {
               auto& out = got[live[i]];
@@ -630,7 +676,13 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
         // snapshot. Every graph between chunks must treat slot 1 as padding.
         graph.begin_prefill(1, long_prompt, 128, 8, plan);
         require(graph.advance_prefill(1).first_token < 0, "the long prefill yields");
+        const auto families = graph.batch_families();
+        const int sparse_family = static_cast<int>(
+            std::find(families.begin(), families.end(), sparse_bucket) - families.begin());
+        const auto compact_steps = graph.batch_family_steps(sparse_family);
         (void)graph.step_batch({0, slots - 1});
+        require(graph.batch_family_steps(sparse_family) == compact_steps + 1,
+                "sparse physical slots preserve the numerical dispatch range");
         graph.close(1);
         for (int round = 0; round < 2; ++round) {
           if (round == 0) {
@@ -663,12 +715,59 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
         graph.close(slots - 1);
         graph.prefix_release(0);
       }
+      if (sample_cap) {
+        std::vector<std::vector<int32_t>> reference;
+        const std::vector<std::vector<int>> maps{{0, 1}, {slots - 1, 3}, {1, 0}};
+        for (const auto& ids : maps) {
+          const auto fallbacks_before = graph.fallbacks();
+          const int bucket = ids[0] == slots - 1 ? sparse_bucket : 2;
+          const auto families = graph.batch_families();
+          const int family = static_cast<int>(std::find(families.begin(), families.end(), bucket) -
+                                              families.begin());
+          std::vector<std::vector<int32_t>> generated(2);
+          for (int q = 0; q < 2; ++q) {
+            dgpp::sample::Params params;
+            params.temperature = force_fallback ? 100.f : (q == 0 ? .7f : 1.1f);
+            params.top_k = force_fallback ? 0 : 7;
+            params.top_p = force_fallback ? 1.f : .9f;
+            params.presence_penalty = .2f;
+            graph.configure_sampling(ids[q], params, 4567 + q);
+            generated[q].push_back(graph.prefill(ids[q], smoke_tokens(cfg, 13 + q, 789 + q)));
+            graph.reserve(ids[q], 128);
+          }
+          int iteration = 0;
+          while (generated[0].size() < 24 || generated[1].size() < 24) {
+            const bool reverse = ids[0] == slots - 1 && (++iteration % 2 == 0);
+            const std::vector<int> order = reverse ? std::vector<int>{ids[1], ids[0]} : ids;
+            const auto compact_steps = graph.batch_family_steps(family);
+            auto next = graph.step_batch(order);
+            for (int q = 0; q < 2; ++q) {
+              const auto& tokens = next[reverse ? 1 - q : q];
+              generated[q].insert(generated[q].end(), tokens.begin(), tokens.end());
+            }
+            require(graph.batch_family_steps(family) == compact_steps + 1,
+                    "sampled requests use the compatible bucket");
+          }
+          for (auto& g : generated) g.resize(24);
+          if (reference.empty())
+            reference = generated;
+          else
+            require(generated == reference,
+                    "sampled transcripts survive physical remapping and slot reuse");
+          if (force_fallback)
+            require(graph.fallbacks() > fallbacks_before,
+                    "each physical mapping must exercise sampled fallback");
+          for (int req : ids) graph.close(req);
+        }
+      }
       graph.drain();
     } catch (const std::exception& e) {
       errors[rank] = e.what();
       if (!arrived) barrier.arrive_and_wait();
     }
     if (scratch) cudaFreeHost(scratch);
+    if (prefix_scratch) cudaFreeHost(prefix_scratch);
+    if (gather_scratch) cudaFreeHost(gather_scratch);
   });
   for (auto& worker : workers) worker.join();
   for (const auto& error : errors) require(error.empty(), error);

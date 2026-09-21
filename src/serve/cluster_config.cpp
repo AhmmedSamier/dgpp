@@ -256,7 +256,8 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
         else if (p.key == "mtp_depth") {
           e.mtp_depth = static_cast<int>(integer(x, ek, what, 1, 5));  // kSpecRows - 1
           e.mtp_depth_set = true;
-        }
+        } else if (p.key == "compact_batches")
+          e.compact_batches = boolean(x, ek, what);
         else if (p.key == "graph_batch_min_live") e.graph_batch_min_live = static_cast<int>(integer(x, ek, what, 0, 1 << 20));
         else if (p.key == "mtp_schedule") e.mtp_schedule = boolean(x, ek, what);
         else if (p.key == "mtp_schedule_row_ms") {

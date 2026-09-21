@@ -1,0 +1,44 @@
+{
+  "implementation_head": "e342d54906ebf533ac5f906c33ab0fcb76b7d793",
+  "physical_reference_head": "c1ea0a1",
+  "platform": {
+    "gpu": "NVIDIA GB10",
+    "nodes": 4,
+    "cuda": "13.0",
+    "driver": "580.173.02"
+  },
+  "numerical_environment": {
+    "DGPP_DENSE_GEMV_ROWS": "4",
+    "CUDA_DEVICE_MAX_CONNECTIONS": "32"
+  },
+  "native_build": "passed; warnings as errors",
+  "ctest": {
+    "passed": 138,
+    "failed": 0,
+    "skipped": 0,
+    "seconds": 766.41
+  },
+  "assertion_tests": 4,
+  "mapped_memcheck": {
+    "passed": 2,
+    "errors": 0
+  },
+  "teacher": {
+    "cases": 18,
+    "repeats": 2,
+    "world": 4,
+    "positions": 50890,
+    "passed": true,
+    "max_abs_nll_delta": 0,
+    "top1_changes": 0
+  },
+  "service": {
+    "api": "passed",
+    "load_requests": 31,
+    "max_active_observed": 16,
+    "requests_failed": 0,
+    "rank_operation_agreement": true
+  },
+  "restored_production": true,
+  "limitations": "Compaction remains default off. Small physical graphs keep their width. This is correctness/fabric evidence, not a throughput benchmark."
+}

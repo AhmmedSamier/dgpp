@@ -10,21 +10,27 @@ from qwen_head_compare import compare
 
 
 def main():
-    binary, checkpoint = map(lambda x: str(Path(x).resolve()), sys.argv[1:])
+    binary, checkpoint = map(lambda x: str(Path(x).resolve()), sys.argv[1:3])
+    compact = "--compaction" in sys.argv[3:]
+    modes = ("off", "on") if compact else ("gemv", "mma")
     with tempfile.TemporaryDirectory(prefix="qwen-head-fixture-") as directory:
         root = Path(directory)
         manifest = root / "corpora.json"
-        manifest.write_text(json.dumps([{"name": "fixture", "ids": [5 + i % 100 for i in range(256)]}]))
-        for mode in ("gemv", "mma"):
+        # C16 streams of 65 tokens cross a KV-block boundary after reserving
+        # decode slack; an aligned 64-token stream would hide under-allocation.
+        count = 1040 if compact else 256
+        manifest.write_text(json.dumps([{"name": "fixture", "ids": [5 + i % 100 for i in range(count)]}]))
+        for mode in modes:
             (root / mode).mkdir()
             with (root / mode / "r0.log").open("w") as log:
                 subprocess.run([binary, "--checkpoint-dir", checkpoint, "--requests", str(manifest),
-                                "--fp8-head", mode, "--boundary-tokens", "128", "--prefill-trials", "2"],
+                                "--compaction" if compact else "--fp8-head", mode,
+                                "--boundary-tokens", "128", "--prefill-trials", "2"],
                                stdout=log, stderr=subprocess.STDOUT, check=True, timeout=180)
         try:
-            result = compare(str(root / "gemv"), str(root / "mma"))
+            result = compare(str(root / modes[0]), str(root / modes[1]))
         except Exception:
-            for mode in ("gemv", "mma"):
+            for mode in modes:
                 retained = Path(tempfile.mkdtemp(prefix=f"qwen-head-failed-{mode}-"))
                 (retained / "r0.log").write_bytes((root / mode / "r0.log").read_bytes())
                 print(f"Retained {mode} diagnostic log at {retained}", flush=True)

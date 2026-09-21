@@ -1,0 +1,5 @@
+========= COMPUTE-SANITIZER
+[ OK ] sample_pick_compact_mapping_preserves_physical_sampling_state
+[ OK ] compact_mapping_commit_draft_chain_and_ple_padding
+2 tests, 0 failed
+========= ERROR SUMMARY: 0 errors

@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-from qwen_head_compare import compare
+from qwen_head_compare import COMPACT_SHAPES, compare
 
 
 def records(rank, mode):
@@ -162,6 +162,83 @@ class HeadCompareTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing rank"):
             self.run_gate()
 
+
+
+class CompactCompareTest(unittest.TestCase):
+    run_gate = HeadCompareTest.run_gate
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.runs = {}
+        for mode, policy in (("gemv", "off"), ("mma", "on")):
+            self.runs[mode] = {}
+            for rank in range(2):
+                header = records(rank, "gemv")[0]
+                header[1].update(compaction=policy, capacity=64, prefill_trials=0)
+                entries = [header]
+                count = 0
+                for repeat in range(2):
+                    for (lane, width), (requests, per) in COMPACT_SHAPES.items():
+                        n = 1024 if per == 4 else 128
+                        positions = ((n // requests - 17) // per) * width
+                        for index in range(positions):
+                            changed = policy == "on" and not lane.startswith("dense")
+                            entries.append(("score", dict(
+                                rank=rank, repeat=repeat, corpus="fixture", lane=lane, width=width,
+                                index=index, target=0, lse=math.log(math.exp(1 - 2 * rank) + math.exp(-2 * rank)),
+                                target_logit=(1.001 if changed else 1.0) if rank == 0 else None,
+                                top=[[2 * rank, 1 - 2 * rank], [2 * rank + 1, -2 * rank]],
+                                hidden="changed" if changed else "same", logits="changed" if changed else "same")))
+                            count += 1
+                        entries.append(("case", dict(rank=rank, repeat=repeat, corpus="fixture", lane=lane,
+                                                     width=width, count=positions, tokens=1024, token_hash="tokens")))
+                entries.append(("end", dict(rank=rank, count=count)))
+                self.runs[mode][rank] = entries
+
+    def test_compaction_allows_shape_rounding_and_checks_dense_controls(self):
+        result = self.run_gate()
+        self.assertTrue(result["passed"])
+        self.assertEqual(len(result["cases"]), 6)
+        for case in result["cases"]:
+            self.assertAlmostEqual(case["mean_nll_delta"], 0 if case["lane"].startswith("dense") else -0.001)
+
+    def test_truncated_compact_run(self):
+        self.runs["mma"][1].pop()
+        with self.assertRaisesRegex(ValueError, "begin or end"):
+            self.run_gate()
+
+    def test_compaction_repeat_drift(self):
+        for kind, record in self.runs["mma"][0]:
+            if kind == "score" and record["repeat"] == 1:
+                record["logits"] = "drift"
+                break
+        with self.assertRaisesRegex(ValueError, "repeat differs"):
+            self.run_gate()
+
+    def test_dense_mapping_control_drift(self):
+        for entries in self.runs["mma"].values():
+            for kind, record in entries:
+                if kind == "score" and record["lane"] == "dense16":
+                    record["hidden"] = "drift"
+        with self.assertRaisesRegex(ValueError, "dispatch control changed"):
+            self.run_gate()
+
+    def test_sparse_numerical_regression(self):
+        for kind, record in self.runs["mma"][0]:
+            if kind == "score" and record["lane"] == "sparse2":
+                record["target_logit"] -= .1
+        self.assertFalse(self.run_gate()["passed"])
+
+    def test_missing_sparse_case(self):
+        for ranks in self.runs.values():
+            for rank, entries in ranks.items():
+                removed = sum(kind == "score" and record["lane"] == "sparse2" for kind, record in entries)
+                ranks[rank] = [(kind, record) for kind, record in entries
+                               if not (kind in ("score", "case") and record["lane"] == "sparse2")]
+                ranks[rank][-1][1]["count"] -= removed
+        with self.assertRaisesRegex(ValueError, "missing or unexpected case"):
+            self.run_gate()
 
 if __name__ == "__main__":
     unittest.main()

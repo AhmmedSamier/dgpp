@@ -383,6 +383,7 @@ std::string encode_journal_settings(const WorldSettings& s) {
   append_json_string(&out, s.fp8_head);
   out += ",\"bfw\":";
   append_json_string(&out, s.bf16_weights);
+  out += std::format(",\"compact\":{}", s.compact_batches ? 1 : 0);
   out += ",\"pf\":";
   append_json_string(&out, s.prefill);
   // The opt-in YaRN ramp: absent when off, so a record from a plain run
@@ -516,6 +517,7 @@ JournalRecord decode_journal_line(std::string_view line) {
     s.queue_limit = static_cast<int>(num("queue").as_int());
     s.no_eos = flag("eos");
     s.decode_graph = flag("graph");
+    if (v.find("compact")) s.compact_batches = flag("compact");
     s.mtp = flag("mtp");
     s.mtp_depth = static_cast<int>(num("mtpd").as_int());
     s.graph_batch_min_live = static_cast<int>(num("batchmin").as_int());

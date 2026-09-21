@@ -1,0 +1,14 @@
+{
+  "apps/qwen_head_check.cpp": "be5f083dc8b112d16d78597eb2f02106bac702663da441333865abc96e782142",
+  "src/engine/graph_engine.hpp": "46a9b7fd1561005a0ccc6a06839409c601e9397dcbbaa60dee6a4835f5419e4a",
+  "src/engine/session_model.hpp": "f966c8234a977141a1b7adb3afd01ca49ad29df5ac617916db966c83a989fc0c",
+  "src/kernels/glm_spec.cu": "085a593532c43ebb95be3ae4060a0f8d060647a8f66e40702639a3201b71e993",
+  "src/kernels/sample_pick.cu": "eb6b57536896a2566bbe3cb68f4bcb2580b82dc58eec1f98fbc4ffa66ae36b83",
+  "tests/cuda/qwen_engine_test.cpp": "4fc346e68bcf2f4248ac378607f280b0ff365bc50ec2c0c2954342241a9d4092",
+  "scripts/qwen_head_compare.py": "b967892cb6a0b9346a6f683d515136cc3695a843d4dfa546cb69aeb54afefd0e",
+  "build-ci/qwen_head_check": "0bc0e6a84135894bf4a67598445f4120827a97dab8f2e7b43ecf31c7943cd49c",
+  "build-ci/qwen_engine_test": "78e20b8ad7836f030b8637dc7e9d8f186ae922cbf3da295cea9d544de8aab113",
+  "build-ci/dgpp-serve": "758850ada2126fc42ab766d5f77a0eae8ed036d3733754c820fef1a91e0f45fd",
+  "tests/python/qwen_head_check_test.py": "d89bc15f8abae2a881c53e76825704e88402edecdc58681ad8266192820835ec",
+  "src/models/qwen/forward.hpp": "60224988f40dbd90ea0259ff4c904dda4823f40b5214e5d1b8a5179ee4ce409c"
+}

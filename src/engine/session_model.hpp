@@ -284,6 +284,10 @@ class SessionModel : public PrefillReporting {
   // rows_per_request rows, as every capture before.
   void session_graph_capture_batch(int rows_per_request, int requests = 0, int feed_rows = 0);
   void session_graph_stage_batch();
+  // Capture-time source: a pinned map owned by the graph family/parity.
+  void session_graph_batch_map_source(const int32_t* source) { graph_batch_map_source_ = source; }
+  const int32_t* device_batch_map() const { return d_batch_map_; }
+
   void session_graph_use_batch_contract(int rows_per_request, int requests = 0);
   void session_graph_capture_commit_batch(const PickVerdict* device_verdicts);
   void session_graph_capture_verify_next_tokens_batch(const PickVerdict* verify_verdicts);
@@ -426,6 +430,8 @@ class SessionModel : public PrefillReporting {
   int64_t* h_step_pos_ = nullptr;
   int32_t* h_req_spans_ = nullptr;  // pinned [rows, 2]
   int32_t* d_req_ids_ = nullptr;
+  int32_t* d_batch_map_ = nullptr;
+  const int32_t* graph_batch_map_source_ = nullptr;
   int64_t* d_step_pos_ = nullptr;
   int32_t* d_req_spans_ = nullptr;
   int decode_rows_ = 0;              // the current decode run's rows
@@ -539,6 +545,7 @@ void SessionModel<D>::init_session(const SessionParams& p) {
   h_step_pos_ = pinned_alloc<int64_t>(rows);
   h_req_spans_ = pinned_alloc<int32_t>(2 * rows);
   d_req_ids_ = dev_alloc<int32_t>(rows);
+  d_batch_map_ = dev_alloc<int32_t>(max_requests_);
   d_step_pos_ = dev_alloc<int64_t>(rows);
   d_req_spans_ = dev_alloc<int32_t>(2 * rows);
   logits_ = dev_alloc<float>(M * static_cast<size_t>(lm_vocab_count_));
@@ -590,6 +597,7 @@ SessionModel<D>::~SessionModel() {
   cudaFreeHost(h_step_pos_);
   cudaFreeHost(h_req_spans_);
   cudaFree(d_req_ids_);
+  cudaFree(d_batch_map_);
   cudaFree(d_step_pos_);
   cudaFree(d_req_spans_);
   cudaFree(logits_);
@@ -1446,13 +1454,17 @@ void SessionModel<D>::session_graph_capture_batch(int rows_per_request, int requ
   graph_rows_per_request_ = rows_per_request;
   graph_feed_rows_ = feed_rows > rows_per_request ? feed_rows : 0;
   step_tokens_ = d_tokens_ + static_cast<size_t>(max_decode_rows_);  // the fixed batch: every slot's feed rows
-  if (graph_feed_rows_ > 0) {
+  if (graph_batch_map_source_)
+    glm_upload_i32(graph_batch_map_source_, d_batch_map_, requests, stream_);
+  if (graph_feed_rows_ > 0 || graph_batch_map_source_) {
     // The reduced-depth batch: the first rows_per_request rows of every
     // slot's feed, compacted into the front scratch (free during a replay),
     // so the walk's rows stay contiguous per request; the next-tokens write
     // at the end of the replay lands in the feeds themselves.
-    glm_spec_gather_feed(d_tokens_ + static_cast<size_t>(max_decode_rows_), requests, graph_feed_rows_,
-                         rows_per_request, d_tokens_, stream_);
+    glm_spec_gather_feed(d_tokens_ + static_cast<size_t>(max_decode_rows_), requests,
+                         graph_feed_rows_ > 0 ? graph_feed_rows_ : rows_per_request,
+                         rows_per_request, d_tokens_, stream_,
+                         graph_batch_map_source_ ? d_batch_map_ : nullptr);
     step_tokens_ = d_tokens_;
   }
   decode_rows_ = rows;
@@ -1461,8 +1473,12 @@ void SessionModel<D>::session_graph_capture_batch(int rows_per_request, int requ
     h_req_spans_[2 * q + 1] = rows_per_request;
     for (int r = 0; r < rows_per_request; ++r) h_req_ids_[q * rows_per_request + r] = q;
   }
-  glm_upload_i32(h_req_ids_, d_req_ids_, rows, stream_);
-  glm_upload_i32(h_req_spans_, d_req_spans_, 2 * requests, stream_);
+  if (graph_batch_map_source_)
+    glm_batch_rows(d_batch_map_, requests, rows_per_request, d_req_ids_, d_req_spans_, stream_);
+  else {
+    glm_upload_i32(h_req_ids_, d_req_ids_, rows, stream_);
+    glm_upload_i32(h_req_spans_, d_req_spans_, 2 * requests, stream_);
+  }
   glm_spec_positions_batched(d_session_pos_, d_req_ids_, rows, rows_per_request, d_step_pos_, stream_);
   const std::vector<int64_t> shape(static_cast<size_t>(rows), 0);
   RowRun run;
@@ -1511,8 +1527,34 @@ void SessionModel<D>::session_graph_capture_commit_batch(const PickVerdict* devi
   if (device_verdicts == nullptr) throw std::invalid_argument("session_graph_capture_commit_batch: null verdicts");
   for (int req = 0; req < graph_batch_requests_; ++req) {
     const int row0 = req * graph_rows_per_request_;
-    glm_spec_commit(device_verdicts + req, graph_rows_per_request_, derived().spec_segments(req, row0),
-                    d_session_pos_ + req, stream_);
+    if (graph_batch_map_source_) {
+      if (max_requests_ < 2)
+        throw std::logic_error("compact commit: stride requires at least two request slots");
+      auto segments = derived().spec_segments(0, row0);
+      const auto next = derived().spec_segments(1, row0);
+      for (int i = 0; i < segments.count; ++i)
+        segments.seg[i].request_stride_bytes = reinterpret_cast<uintptr_t>(next.seg[i].dst) -
+                                               reinterpret_cast<uintptr_t>(segments.seg[i].dst);
+#ifndef NDEBUG
+      // Mapped commits require each destination to be affine in the physical request ID.
+      for (int q = 0; q < max_requests_; ++q) {
+        const auto actual = derived().spec_segments(q, row0);
+        if (actual.count != segments.count)
+          throw std::logic_error("compact commit: segment count differs by request");
+        for (int i = 0; i < segments.count; ++i) {
+          const auto expected = reinterpret_cast<uintptr_t>(segments.seg[i].dst) +
+                                q * segments.seg[i].request_stride_bytes;
+          if (reinterpret_cast<uintptr_t>(actual.seg[i].dst) != expected)
+            throw std::logic_error("compact commit: nonuniform request destination stride");
+        }
+      }
+#endif
+      glm_spec_commit(device_verdicts + req, graph_rows_per_request_, segments, d_session_pos_,
+                      stream_, d_batch_map_, req);
+    } else {
+      glm_spec_commit(device_verdicts + req, graph_rows_per_request_,
+                      derived().spec_segments(req, row0), d_session_pos_ + req, stream_);
+    }
   }
 }
 
@@ -1520,8 +1562,10 @@ template <class D>
 void SessionModel<D>::session_graph_capture_verify_next_tokens_batch(const PickVerdict* verify_verdicts) {
   if (graph_batch_requests_ <= 0 || graph_rows_per_request_ != 1 || mtp_)
     throw std::logic_error("session_graph_capture_verify_next_tokens_batch: requires the plain T=1 fixed graph");
-  glm_spec_verify_next_tokens_batched(verify_verdicts, graph_batch_requests_, graph_rows_per_request_, step_tokens_,
-                                      stream_);
+  glm_spec_verify_next_tokens_batched(
+      verify_verdicts, graph_batch_requests_, graph_rows_per_request_,
+      graph_batch_map_source_ ? d_tokens_ + max_decode_rows_ : step_tokens_, stream_,
+      graph_batch_map_source_ ? d_batch_map_ : nullptr);
 }
 
 // ---- the MTP draft block ------------------------------------------------------
@@ -1718,9 +1762,11 @@ void SessionModel<D>::session_graph_capture_draft_batch(const PickVerdict* verif
     throw std::logic_error(
         "session_graph_capture_draft_batch: requires a device-driven fixed batch of 1 + depth rows per request");
   if (verify_verdicts == nullptr) throw std::invalid_argument("session_graph_capture_draft_batch: null verdicts");
-  for (int req = 0; req < graph_batch_requests_; ++req) derived().snapshot_draft_state(req);
-  glm_spec_draft_rows_batched(verify_verdicts, graph_batch_requests_, graph_rows_per_request_, d_mtp_pos_, d_step_pos_,
-                              step_tokens_, d_next_, stream_);
+  for (int req = 0; req < (graph_batch_map_source_ ? max_requests_ : graph_batch_requests_); ++req)
+    derived().snapshot_draft_state(req);
+  glm_spec_draft_rows_batched(verify_verdicts, graph_batch_requests_, graph_rows_per_request_,
+                              d_mtp_pos_, d_step_pos_, step_tokens_, d_next_, stream_,
+                              graph_batch_map_source_ ? d_batch_map_ : nullptr);
   draft_rows_ = decode_rows_;
   derived().mtp_run_rows(/*req=*/0, step_tokens_, 0, decode_rows_, /*decode_row=*/true, /*capture=*/true,
                          /*head_rows=*/decode_rows_, graph_batch_requests_);
@@ -1743,17 +1789,21 @@ void SessionModel<D>::session_graph_capture_draft_chain_batch(const PickVerdict*
     throw std::invalid_argument("session_graph_capture_draft_chain_batch: chain index");
   const int k = graph_batch_requests_;
   if (first)
-    for (int q = 0; q < k; ++q) derived().snapshot_chain_state(q);
+    for (int q = 0; q < (graph_batch_map_source_ ? max_requests_ : k); ++q)
+      derived().snapshot_chain_state(q);
   // Every slot's chain row (its position, token and hidden) into the
   // compact one-row-per-request layout, then the block over the k rows
   // with the head on each; the picks read rows 0 .. k-1.
-  glm_spec_chain_rows_batched(verify_verdicts, draft_verdicts, k, graph_rows_per_request_, derived().draft_hidden_rows(),
-                              draft_width_, mtp_window_, max_decode_rows_,
-                              static_cast<size_t>(max_decode_rows_) * static_cast<size_t>(draft_width_), d_mtp_pos_,
-                              index, max_context_, d_step_pos_, step_tokens_, d_req_ids_, d_req_spans_, stream_);
+  glm_spec_chain_rows_batched(
+      verify_verdicts, draft_verdicts, k, graph_rows_per_request_, derived().draft_hidden_rows(),
+      draft_width_, mtp_window_, max_decode_rows_,
+      static_cast<size_t>(max_decode_rows_) * static_cast<size_t>(draft_width_), d_mtp_pos_, index,
+      max_context_, d_step_pos_, step_tokens_, d_req_ids_, d_req_spans_, stream_,
+      graph_batch_map_source_ ? d_batch_map_ : nullptr);
   derived().mtp_run_rows(/*req=*/0, step_tokens_, 0, /*T=*/k, /*decode_row=*/true, /*capture=*/true, /*head_rows=*/k, k);
   if (last)
-    for (int q = 0; q < k; ++q) derived().restore_chain_state(q);
+    for (int q = 0; q < (graph_batch_map_source_ ? max_requests_ : k); ++q)
+      derived().restore_chain_state(q);
 }
 
 template <class D>
@@ -1791,8 +1841,11 @@ void SessionModel<D>::session_graph_capture_next_tokens_batch(const std::vector<
     d.v[i] = draft_verdicts[i];
   }
   d.count = static_cast<int>(draft_verdicts.size());
-  int64_t* feeds = graph_feed_rows_ > 0 ? d_tokens_ + static_cast<size_t>(max_decode_rows_) : step_tokens_;
-  glm_spec_next_tokens_batched(d_next_, d, graph_batch_requests_, feed_rows, feeds, stream_);
+  int64_t* feeds = (graph_feed_rows_ > 0 || graph_batch_map_source_)
+                       ? d_tokens_ + static_cast<size_t>(max_decode_rows_)
+                       : step_tokens_;
+  glm_spec_next_tokens_batched(d_next_, d, graph_batch_requests_, feed_rows, feeds, stream_,
+                               graph_batch_map_source_ ? d_batch_map_ : nullptr);
 }
 
 template <class D>

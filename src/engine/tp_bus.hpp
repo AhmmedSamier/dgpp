@@ -1179,6 +1179,7 @@ class DevicePicker {
     // the vocabulary size. Rows per request is 1 (T=1) or 2 (the MTP
     // verify); the logits are penalized IN PLACE for sampled requests.
     SampleSpec* specs = nullptr;
+    const int32_t* request_map = nullptr;  // compact group -> physical sampling slot (-1: padding)
     int32_t* counts = nullptr;
     int vocab_size = 0;
     // Constrained decoding (M6 6g): the rows' token masks on the device,
@@ -1401,25 +1402,20 @@ class DevicePicker {
           "latency slot (glm_sample_candidates_that_fit sizes k)");
   }
   void sample_local(cudaStream_t stream, const Inputs& in) {
-    device_sample_local(const_cast<float*>(in.logits), in.rows, in.vocab_count,
-                     in.vocab_begin, in.vocab_size, rank_, world_,
-                     candidates_, in.specs, rows_per_request(in), in.fed,
-                     in.positions, position_stride(in), in.counts, in.bias,
-                     in.masks, in.mask_stride, carry_, table_,
-                     locals_ + in.slot * kPickMaxRows, sample_scratch_,
-                     stream, in.row_select,
-                     in.row_select != nullptr ? source_stride(in) : 0);
+    device_sample_local(const_cast<float*>(in.logits), in.rows, in.vocab_count, in.vocab_begin,
+                        in.vocab_size, rank_, world_, candidates_, in.specs, rows_per_request(in),
+                        in.fed, in.positions, position_stride(in), in.counts, in.bias, in.masks,
+                        in.mask_stride, carry_, table_, locals_ + in.slot * kPickMaxRows,
+                        sample_scratch_, stream, in.row_select,
+                        in.row_select != nullptr ? source_stride(in) : 0, in.request_map);
   }
   void sample_verdict(cudaStream_t stream, const Inputs& in) {
-    device_sample_verdict(table_, in.rows, world_, rank_, candidates_,
-                       in.vocab_size, in.specs, in.requests,
-                       rows_per_request(in), in.fed, in.positions,
-                       position_stride(in), in.counts, in.masks,
-                       in.mask_stride, verdict_slot(in.slot),
-                       device_verdict_slot(in.slot),
-                       outcomes_ + in.slot * kPickMaxRequests, carry_,
-                       stream, in.proposals_in, in.proposals_out,
-                       in.proposals_out_host, in.draft_index);
+    device_sample_verdict(table_, in.rows, world_, rank_, candidates_, in.vocab_size, in.specs,
+                          in.requests, rows_per_request(in), in.fed, in.positions,
+                          position_stride(in), in.counts, in.masks, in.mask_stride,
+                          verdict_slot(in.slot), device_verdict_slot(in.slot),
+                          outcomes_ + in.slot * kPickMaxRequests, carry_, stream, in.proposals_in,
+                          in.proposals_out, in.proposals_out_host, in.draft_index, in.request_map);
   }
 
   net::CollectiveBus& bus_;
