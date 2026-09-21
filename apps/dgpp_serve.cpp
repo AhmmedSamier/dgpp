@@ -376,6 +376,10 @@ struct QwenFamily final : ServeFamily {
       : cfg(dgpp::QwenTextConfig::from_json_file((fs::path(checkpoint) / "config.json").string())),
         ckpt(checkpoint),
         fp8_head_mma(head_mma) {
+    // The fused BF16 MTP expert format is a process-wide flag (set from the
+    // engine config or CLI before the family is built); it must be on the
+    // config before the binding table and the loader see it.
+    cfg.mtp_experts_bf16_fused = dgpp::QwenLayerStream::mtp_experts_bf16_fused();
     // The engine's opt-in YaRN ramp (engine.rope_scaling): it rides the
     // parsed config, so the layer's table, the session's max_context()
     // and the memory plan's context line all take it from one place.
@@ -1180,6 +1184,7 @@ int main(int argc, char** argv) {
   std::string ngram_table = "resident";  // the Qwen n-gram table: resident | mmap
   std::string fp8_head = "gemv";
   std::string dense_weights = "checkpoint";  // the Qwen dense stack: checkpoint | fp8
+  std::string mtp_expert_format = "fp8";    // the Qwen MTP draft experts: fp8 | bf16_fused
   std::string bf16_weights = "checkpoint";  // the bf16 decode weights' resident form: checkpoint | bf12 | bf12+bf16
   std::string prefill = "bounded";  // the DeepSeek-V4.1 prefill: bounded | exact
   // The opt-in YaRN rope ramp (engine.rope_scaling): absent = the plain
@@ -1262,6 +1267,7 @@ int main(int argc, char** argv) {
     ngram_table = e.ngram_table;
     dense_weights = e.dense_weights;
     fp8_head = e.fp8_head;
+    mtp_expert_format = e.mtp_expert_format;
     bf16_weights = e.bf16_weights;
     prefill = e.prefill;
     rope_scaling = e.rope_scaling;
@@ -1325,6 +1331,7 @@ int main(int argc, char** argv) {
     else if (a == "--dense-weights") dense_weights = next();
     else if (a == "--fp8-head")
       fp8_head = next();
+    else if (a == "--mtp-expert-format") mtp_expert_format = next();
     else if (a == "--bf16-weights") bf16_weights = next();
     else if (a == "--prefill") prefill = next();
     else if (a == "--embed-sharding") embed_sharding = next();
@@ -1427,7 +1434,7 @@ int main(int argc, char** argv) {
     const int effective_batch_min_live =
         graph_batch_min_live == 0 ? std::min(2, max_concurrency) : graph_batch_min_live;
     return std::format(
-        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} ngt={} dw={} bfw={} "
+        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} ngt={} dw={} mtpef={} bfw={} "
         "fp8head={} pf={} "
         "emsh={} maxtok={} queue={} "
         "eos={} graph={} compact={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} "
@@ -1436,7 +1443,7 @@ int main(int argc, char** argv) {
         "pcgib={} adm={} win={} pfbudget={} pfidle={} pace={} inflight={} reasoning_in_content={} "
         "rs={}",
         model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port, max_concurrency,
-        kv_capacity, kv_dtype, ngram_table, dense_weights, bf16_weights, fp8_head, prefill,
+        kv_capacity, kv_dtype, ngram_table, dense_weights, mtp_expert_format, bf16_weights, fp8_head, prefill,
         embed_sharding, default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0,
         compact_batches ? 1 : 0, mtp ? 1 : 0, mtp_depth, mtp_schedule ? 1 : 0, mtp_schedule_row_ms,
         mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth,
@@ -1475,6 +1482,7 @@ int main(int argc, char** argv) {
         ws.ngram_table = ngram_table;
         ws.dense_weights = dense_weights;
         ws.fp8_head = fp8_head;
+        ws.mtp_expert_format = mtp_expert_format;
         ws.bf16_weights = bf16_weights;
         ws.prefill = prefill;
         ws.rope_scaling = rope_scaling;
@@ -1528,6 +1536,7 @@ int main(int argc, char** argv) {
         ngram_table = ws.ngram_table;
         dense_weights = ws.dense_weights;
         fp8_head = ws.fp8_head;
+        mtp_expert_format = ws.mtp_expert_format;
         bf16_weights = ws.bf16_weights;
         prefill = ws.prefill;
         rope_scaling = ws.rope_scaling;
@@ -1624,6 +1633,13 @@ int main(int argc, char** argv) {
   // The DeepSeek-V4.1 prefill mode: every model built from here on takes it.
   dgpp::Dsv41Model::set_default_prefill_bounded(prefill == "bounded");
   dgpp::QwenLayerStream::set_dense_weights_fp8(dense_weights == "fp8");
+  if (mtp_expert_format != "fp8" && mtp_expert_format != "bf16_fused") {
+    DGPP_LOG_ERROR("--mtp-expert-format must be fp8 or bf16_fused, got '{}'", mtp_expert_format);
+    return 2;
+  }
+  // The RadixArk fusion flag: set before the plan and the load (both read it
+  // through QwenLayerStream::mtp_experts_bf16_fused and loader_format()).
+  dgpp::QwenLayerStream::set_mtp_expert_format(mtp_expert_format == "bf16_fused");
   if (embed_sharding != "replicated" && embed_sharding != "vocab") {
     DGPP_LOG_ERROR("--embed-sharding must be replicated or vocab, got '{}'", embed_sharding);
     return 2;
@@ -1823,6 +1839,9 @@ int main(int argc, char** argv) {
     if (std::string(family->name()) != "qwen4_exp" && dense_weights != "checkpoint")
       DGPP_LOG_WARN("serve: --dense-weights {} applies to the Qwen dense stack only; the {} family loads as shipped",
                     dense_weights, family->name());
+    if (std::string(family->name()) != "qwen4_exp" && mtp_expert_format != "fp8")
+      DGPP_LOG_WARN("serve: --mtp-expert-format {} applies to the Qwen draft experts only; the {} family loads as shipped",
+                    mtp_expert_format, family->name());
     if (bf16_weights != "checkpoint" && std::string(family->name()) == "deepseek_v41")
       DGPP_LOG_INFO("serve: --bf16-weights {} packs nothing on the {} family yet (its bf16 sites ride the "
                     "tensor-core kernels): the bf16 bytes serve as shipped",

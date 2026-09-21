@@ -58,6 +58,12 @@ struct ClusterConfig {
     // docs/qwen38_single_spark.md).
     std::string dense_weights = "checkpoint";
     std::string fp8_head = "gemv";  // Qwen head: gemv | mma (opt-in)
+    // The MTP draft layer's routed-expert layout: "fp8" (the default:
+    // per-expert FP8 tensors as the NVIDIA release ships) or "bf16_fused"
+    // (the RadixArk release: all 512 experts stacked as fused BF16
+    // gate_up_proj and down_proj, encoded to FP8 at load). Applies to the
+    // Qwen family only.
+    std::string mtp_expert_format = "fp8";
     // The resident form of the bf16 weights the decode GEMV reads (the
     // attention / linear-attention projections, the lm head):
     // "checkpoint" (the default: the bf16 bytes alone), "bf12" — a lossless

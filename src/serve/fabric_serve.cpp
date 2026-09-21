@@ -383,6 +383,8 @@ std::string encode_journal_settings(const WorldSettings& s) {
   append_json_string(&out, s.dense_weights);
   out += ",\"fp8_head\":";
   append_json_string(&out, s.fp8_head);
+  out += ",\"mtpef\":";
+  append_json_string(&out, s.mtp_expert_format);
   out += ",\"bfw\":";
   append_json_string(&out, s.bf16_weights);
   out += std::format(",\"compact\":{}", s.compact_batches ? 1 : 0);
@@ -551,6 +553,7 @@ JournalRecord decode_journal_line(std::string_view line) {
       s.fp8_head = std::string(head->as_string());
     }
     if (const dgpp::minijson::Value* dw = v.find("dw")) s.dense_weights = std::string(dw->as_string());
+    if (const dgpp::minijson::Value* mtpef = v.find("mtpef")) s.mtp_expert_format = std::string(mtpef->as_string());
     // The bf16 weights' form (2026-09-19): records before it carry none.
     if (const dgpp::minijson::Value* bfw = v.find("bfw")) s.bf16_weights = std::string(bfw->as_string());
     // Records before 2026-09-14 carry no prefill mode: bounded.
