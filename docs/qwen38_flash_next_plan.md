@@ -169,6 +169,15 @@ the last ≤ 3 raw indexer keys per request. Torch's `topk` does not define its
 tie order; the engine pins "higher score first, ties to the lower block
 index" as it does for DSA, and the host oracle uses the same rule.
 
+The scorer keeps a fixed FP32 reduction order and writes composite score/pool
+keys. Above 2048 visible pools, selection finds the exact top-512 boundary
+with radix histograms, refining only its boundary bin until at most 256
+keys need ordering. It then sorts the selected pool ids before expanding
+them to tokens. Short rows retain streaming top-k. Both paths use the same
+workspace and graph nodes; ties, incomplete pools and inactive rows preserve
+the selection contract. The [long-context selection record](../benchmarks/results/2026-09-21-qwen-qsa-select.md)
+contains cold/warm measurements and exact host-oracle coverage through 131K pools.
+
 ### 1.5 Gated Residual (GR)
 
 Per site (`attn_hyper_connection`, `mlp_hyper_connection`, and the final
@@ -260,6 +269,114 @@ pin with the first acceptance-rate measurement. The MTP model ends in its own
 untied. `R_0 = embed(x)` on every branch. RoPE: `inv_freq_i = 1e7^(−2i/64)`,
 i < 32, applied to the first 64 of 256 dims (attention) and the first 64 of
 128 dims (indexer) in neox halves.
+
+### 1.9.1 YaRN at 512 K (`engine.rope_scaling`, 2026-09-18)
+
+The engine's opt-in YaRN mode, verified against the vLLM stack the user's
+recipe runs (`vllm/vllm-openai:qwen38-flash-next`, start.sh with
+`YARN_ENABLE=true YARN_FACTOR=2.0 MAX_MODEL_LEN=524288`). Off by default:
+with no `engine.rope_scaling` the table is `qsa_rope_inv_freq`'s, every
+kernel argument is 1.0f and the ceiling is the checkpoint's 262144 — the
+bits the 2026-09-17 build produced (pinned by
+`tests/unit/qwen_rope_scaling_test.cpp` and `tests/cuda/qsa_test.cu`).
+
+```json
+"engine": {"rope_scaling": {"factor": 2.0,
+                          "original_max_position_embeddings": 262144}}
+```
+
+| field | default | meaning |
+| --- | --- | --- |
+| `factor` | required, >= 1 | YaRN's scale; `original x factor` is the new ceiling (524 288) |
+| `original_max_position_embeddings` | required | the native context the ramp is measured from |
+| `beta_fast` / `beta_slow` | 32 / 1 | the rotation band's edges (vLLM's names) |
+| `attn_factor` | 1 | vLLM's `attn_factor`; the effective scale is `yarn_get_mscale(factor) * attn_factor` |
+| `mrope_cache_factor` | 4 | vLLM's MRotaryEmbedding enlarges its cache 4x and YaRN's correction band is computed from **that** value: 4 reproduces the recipe, 1 uses the native context |
+
+Three findings the implementation turns on, each read off the image's own
+source and checked bit for bit in a container:
+
+1. **The recipe merges, it does not replace.** `ModelConfig._update_nested`
+   recurses into `text_config.rope_parameters`, so the checkpoint's
+   `mrope_section: [11, 11, 10]` survives `--hf-overrides` and `get_rope`
+   builds an `MRotaryEmbedding`, whose `cache_max_position_num =
+   max_position_embeddings * 4` feeds `yarn_find_correction_range`. The
+   band is therefore low/high = **16/24**, not 14/22; the two tables differ
+   from lane 15 on. `mrope_cache_factor` is exactly this knob.
+2. **The attention factor rides the rotation, not the softmax scale.**
+   vLLM keeps `self.scaling = head_dim**-0.5` (nvidia/qsa.py) and bakes
+   `mscale` into the bf16 cos/sin cache (`freqs.cos() * mscale`, then the
+   query dtype), which scales only the 64 rotated lanes of q·k (by
+   mscale²) and leaves the other 192 untouched. The kernels here do the
+   same: `round_bf16(cosf(ang) * mscale)`, in `norm_rope_thread` and the
+   two indexer rotations. `mscale` = 1.0693147182 (f32 `0x3f88df4e`).
+3. **Text positions make the MRoPE layout the identity.** The three
+   position rows are equal for text, so `apply_interleaved_rope`'s
+   per-lane section pick selects the text row everywhere and the YaRN
+   table's lane i is the lane the neox pairs use — no per-lane remapping
+   (`mrope_interleaved_is_the_identity_for_text_positions`).
+
+What the mode does not touch: the QSA softmax scale, the pool's size (a
+pool is sized by `engine.kv_capacity`, so the knob lifts what a request may
+reach without moving a byte — `qwen_plan_check` asserts that), and every
+other family — a world that sets `engine.rope_scaling` for a family other than
+`qwen4_exp` refuses to start and names the family, rather than serving with the
+operator's setting quietly unapplied. The knob rides the settings record (`"rs"`)
+so a peer can never rope at different frequencies from rank 0, and the canonical
+config digest.
+
+**Plain checkpoints only (and deliberately so).** The loader
+(`src/models/qwen/config.cpp`) rejects a checkpoint whose
+`text_config.rope_parameters.rope_type` is anything but `"default"`, so the
+ramp has exactly one author. Both shipped releases are plain; a checkpoint that
+already declares YaRN — the usual shape from a `--hf-overrides` merge baked and
+saved, or a release that adopts the recipe upstream — is turned away at load
+even though nothing else about it is wrong. The reason is double-scaling: that
+checkpoint's own table is YaRN's, and applying `engine.rope_scaling` on top
+would divide the frequencies by `factor` twice and put the correction band past
+the end of the table. It fails loudly at the config, which is the cheap place,
+instead of quietly at 300 K tokens, which is not.
+
+The follow-up (not this change) is to accept those checkpoints and say what
+wins: read the checkpoint's `rope_parameters` as the default, let an explicit
+`engine.rope_scaling` override it field by field, and log the merged ramp the
+same way the plain case logs the knob — with the two rules the current
+rejection protects: never scale a table that is already scaled, and never let a
+rank and its peer disagree about which one did.
+
+Where the setting shows up, for the operator:
+
+- `deploy/cluster_qwen-3.8-flash-next_nvfp4_w2_yarn512k.example.json`: the
+  recipe as a ready-to-run template — the ramp spelled out field by field, two
+  request slots and a 532 480-token pool (the ceiling plus room for an answer),
+  ~51.73 GiB per rank at TP=2 under the 4 GiB headroom. The KV-pool and
+  headroom notes, and the ceiling-versus-pool point, are in `deploy/README.md`.
+- the startup log: `serve: request context limit N tokens — the lesser of the
+  positional ceiling (…) and the K/V pool …`, next to the YaRN line the
+  `QwenFamily` constructor already prints.
+- `GET /v1/models`: additively, `rope_scaling` (the active settings, in the
+  deployment's own field names, with `mscale`, the correction band and the
+  scaled ceiling) and `context` (`request_limit_tokens` — the same minimum the
+  log prints — with `position_ceiling_tokens`, `kv_pool_tokens` and
+  `limited_by` beside it). A build with the knob off sends neither field.
+- `scripts/qwen_yarn_release_check.py` (`docs/qwen_yarn_release_check.md`): the
+  opt-in release check — a real-checkpoint run at 262 144 and 524 288 tokens
+  that exercises long prefill, incremental decode, prefix-cache reuse and
+  concurrent streams, records peak memory, latency and needle-retrieval rate,
+  and can replay the same prompts against the vLLM lane so a retrieval miss is
+  attributed to the model/recipe or to DGPP rather than guessed at.
+
+The oracle is offline-checkable. `tests/python/qwen_yarn_oracle.py --emit`
+runs inside the recipe's container and records vLLM's own numbers — the
+YaRN table, the mscale, the bf16 cos/sin cache rows and rotated Q/K (with
+one attention logit) at several positions — for five parameter
+combinations (the recipe, factor 4, a 16/2 band, an `attn_factor` of 1.2,
+the 1x mrope cache), under the digest of the image that produced them, in
+`tests/data/qwen_yarn_oracle.json`. `tests/unit/qwen_yarn_fixture_test.cpp`
+then compares the engine's builder and rotation against that file with no
+vLLM, no container and no GPU: 160 table lanes, 21 cos/sin rows and 42
+rotated rows, every one of them bit-for-bit. Re-run `--emit` and `--check`
+in the container when the recipe or vLLM's yarn code moves.
 
 ### 1.10 Tokenizer, template, tool format
 
@@ -510,12 +627,15 @@ also what makes the MTP draft rows' ids available before the replay.
 K/V bf16 for the rank's kv head (the DSA block-table design), a compressed
 key cache written once per completed 4-token block, and a per-request
 pending ring of ≤ 3 raw indexer keys. Decode scores `tokens/4` compressed
-keys (at 262 K context: 16.8 MB per layer, 200 MB per step, ~0.85 ms), then
+keys (at 262 K context: 16.8 MB per layer, 200 MB per backbone pass), then
 top-512 with the pinned tie rule, then the listed GQA attention over ≤ 2051
 positions (split across blocks and combined, as `dsa_attn_partial/combine`
 do). Prompts of ≤ 2051 tokens take the dense kernel, which computes the same
 softmax set. The indexer is replicated so every rank selects identically;
 its kernels must be deterministic (fixed reduction order).
+These byte counts exclude selection work and are not a latency prediction:
+the old streaming top-k dominated long-context decode. The exact radix
+selector described in §1.4 reduces that cost without changing score arithmetic.
 
 **D6 — GDN as a KDA variant, not a new operator family.** The recurrent form
 (state row per warp, token-sequential, fp32) serves decode and prefill as it

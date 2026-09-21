@@ -29,7 +29,7 @@ For a first checkout, configure and build the host test targets:
 
 ```bash
 cmake --preset ci
-cmake --build build-ci -j 4 --target unit_tests http_server_test serve_test fabric_serve_test scheduler_test roster_check
+cmake --build build-ci -j 4 --target unit_tests http_server_test serve_test fabric_serve_test scheduler_test roster_check dgpp_serve_app
 ctest --test-dir build-ci -L host -LE checkpoint --output-on-failure
 ```
 

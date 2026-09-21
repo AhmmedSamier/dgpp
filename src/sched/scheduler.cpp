@@ -208,6 +208,16 @@ Scheduler::PrefixPlan Scheduler::plan_prefix(const Request& r) const {
   // A new entry at the deepest cut past the attach — the next turn's cut.
   if (!r.cuts.empty() && r.cuts.back() > plan.attach_position)
     plan.snap_position = r.cuts.back();
+  // Keep the deepest cut for identical repeats and one regular chunk cut
+  // at least a chunk before the end for a shared document with a new tail.
+  const int64_t n = static_cast<int64_t>(r.spec.prompt.size());
+  const int64_t chunk = cache_.config().chunk_tokens;
+  if (prefix_info_.body_snapshots && n / chunk >= 4) {
+    const int64_t body = (n / chunk - 1) * chunk;
+    if (body > plan.attach_position && body < plan.snap_position &&
+        body % cache_.config().align == 0)
+      plan.body_snap_position = body;
+  }
   return plan;
 }
 
@@ -246,6 +256,7 @@ int64_t Scheduler::new_blocks(const Request& r, const PrefixPlan& plan) const {
   // to kpool but not to the block, which exists only when the block is
   // wider than the alignment.
   if (plan.snap_position > 0) blocks += snapshot_blocks(plan.snap_position);
+  if (plan.body_snap_position > 0) blocks += snapshot_blocks(plan.body_snap_position);
   if (cache_on(r) && bt > std::max<int64_t>(1, prefix_info_.align)) blocks += 1;
   return std::max<int64_t>(blocks, 0);
 }
@@ -548,10 +559,9 @@ void Scheduler::admit(int arrival) {
     }
   } else {
     // The prefix cache's plan (M7): attach to the deepest matching entry at
-    // one of the prompt's cuts, and take a new entry at the deepest cut
-    // past it — the position the next turn's cold prefill cuts at. A slot
-    // for the new entry comes from the free list or the LRU unattached
-    // entry; none at all skips the snapshot (a counter says so).
+    // one of the prompt's cuts, and save the deepest cut plus an earlier
+    // document cut for long prompts. The deepest cut gets an arena slot
+    // first; a full arena may skip the extra snapshot.
     const PrefixPlan plan = plan_prefix(r);
     SchedulerEngine::PrefixPrefill pp;
     pp.boundaries = &r.spec.boundaries;
@@ -576,6 +586,13 @@ void Scheduler::admit(int arrival) {
         ++cache_.stats().skipped_no_slot;
       }
     }
+    if (plan.body_snap_position > 0) {
+      pp.body_snap_slot = acquire_arena_slot(r.spec.id);
+      if (pp.body_snap_slot >= 0)
+        pp.body_snap_position = plan.body_snap_position;
+      else
+        ++cache_.stats().skipped_no_slot;
+    }
     try {
       engine_->prefill_monitor()->begin(slot, r.spec.id, static_cast<int64_t>(r.spec.prompt.size()),
                                        pp.attach_position);
@@ -584,7 +601,8 @@ void Scheduler::admit(int arrival) {
       engine_->prefill_monitor()->finish(slot);
       slots_[static_cast<size_t>(slot)] = -1;
       if (plan.attach_entry >= 0) cache_.detach(plan.attach_entry);
-      if (snap_slot >= 0) cache_.give_back_slot(snap_slot);
+      if (snap_slot >= 0) free_arena_slot(snap_slot);
+      if (pp.body_snap_slot >= 0) free_arena_slot(pp.body_snap_slot);
       throw;
     }
     if (plan.attach_entry >= 0) {
@@ -596,20 +614,8 @@ void Scheduler::admit(int arrival) {
       ++cache_.stats().misses;
       log_prefix_miss(r);
     }
-    if (snap_slot >= 0) {
-      if (!pp.snap_taken) {
-        cache_.give_back_slot(snap_slot);
-      } else {
-        const int e = cache_.insert(r.spec.prompt.data(), plan.snap_position,
-                                    snap_slot, ticks_, r.cache_images);
-        if (e < 0) {
-          free_arena_slot(snap_slot);
-        } else {
-          ++cache_.stats().snapshots;
-          emit_prefix(r.spec.id, "snapshot", plan.snap_position, snap_slot);
-        }
-      }
-    }
+    finish_prefill_snapshot(r, snap_slot, plan.snap_position, pp.snap_taken);
+    finish_prefill_snapshot(r, pp.body_snap_slot, pp.body_snap_position, pp.body_snap_taken);
   }
   const double prefill_ms = std::chrono::duration<double, std::milli>(
                                 std::chrono::steady_clock::now() - t_prefill)
@@ -647,6 +653,15 @@ void Scheduler::begin_prefill(int arrival, int64_t budget) {
           pp.snap_position = plan.snap_position;
         } else ++cache_.stats().skipped_no_slot;
       }
+      if (plan.body_snap_position > 0) {
+        r.prefill_body_slot = acquire_arena_slot(r.spec.id);
+        r.prefill_body_position = plan.body_snap_position;
+        if (r.prefill_body_slot >= 0) {
+          pp.body_snap_slot = r.prefill_body_slot;
+          pp.body_snap_position = plan.body_snap_position;
+        } else
+          ++cache_.stats().skipped_no_slot;
+      }
     }
     const int64_t reserved = initial_reserve_tokens(r.spec);
     engine_->prefill_monitor()->begin(slot, r.spec.id, static_cast<int64_t>(r.spec.prompt.size()),
@@ -663,6 +678,10 @@ void Scheduler::begin_prefill(int arrival, int64_t budget) {
     if (r.prefill_snap_slot >= 0) {
       free_arena_slot(r.prefill_snap_slot);
       r.prefill_snap_slot = -1;
+    }
+    if (r.prefill_body_slot >= 0) {
+      free_arena_slot(r.prefill_body_slot);
+      r.prefill_body_slot = -1;
     }
     throw;
   }
@@ -700,19 +719,30 @@ void Scheduler::advance_prefill(int arrival, int64_t budget) {
   if (progress.first_token < 0) return;
   if (r.prefill_computed + r.attached_tokens != static_cast<int64_t>(r.spec.prompt.size()))
     throw std::runtime_error("Scheduler: prefill completed at the wrong prompt position");
-  if (r.prefill_snap_slot >= 0) {
-    const int slot = r.prefill_snap_slot;
-    r.prefill_snap_slot = -1;
-    if (progress.snap_taken) {
-      const int entry = cache_.insert(r.spec.prompt.data(), r.prefill_snap_position, slot, ticks_, r.cache_images);
-      if (entry < 0) free_arena_slot(slot);
-      else {
-        ++cache_.stats().snapshots;
-        emit_prefix(r.spec.id, "snapshot", r.prefill_snap_position, slot);
-      }
-    } else cache_.give_back_slot(slot);
-  }
+  finish_prefill_snapshot(r, r.prefill_snap_slot, r.prefill_snap_position, progress.snap_taken);
+  r.prefill_snap_slot = -1;
+  finish_prefill_snapshot(r, r.prefill_body_slot, r.prefill_body_position,
+                          progress.body_snap_taken);
+  r.prefill_body_slot = -1;
   admit_finish(arrival, r.slot, progress.first_token, r.prefill_ms, r.attached_tokens, true);
+}
+
+void Scheduler::finish_prefill_snapshot(Request& r, int slot, int64_t position, bool taken) {
+  if (slot < 0) return;
+  if (!taken) {
+    cache_.give_back_slot(slot);
+    return;
+  }
+  const int64_t next_token =
+      prefix_info_.prefill_lookahead ? r.spec.prompt.at(static_cast<size_t>(position)) : -1;
+  const int entry =
+      cache_.insert(r.spec.prompt.data(), position, slot, ticks_, r.cache_images, next_token);
+  if (entry < 0)
+    free_arena_slot(slot);
+  else {
+    ++cache_.stats().snapshots;
+    emit_prefix(r.spec.id, "snapshot", position, slot);
+  }
 }
 
 void Scheduler::admit_finish(int arrival, int slot, int32_t token, double prefill_ms, int64_t attached,
@@ -908,6 +938,10 @@ void Scheduler::retire(int arrival, Result::Status status,
   if (r.prefill_snap_slot >= 0) {
     free_arena_slot(r.prefill_snap_slot);
     r.prefill_snap_slot = -1;
+  }
+  if (r.prefill_body_slot >= 0) {
+    free_arena_slot(r.prefill_body_slot);
+    r.prefill_body_slot = -1;
   }
   // The prefix cache's retire-time snapshot (M7): when the answer completed
   // with its committed position aligned — the exact position the close
@@ -1249,6 +1283,7 @@ Scheduler::Meters Scheduler::meters() const {
   m.prefill_request_ms = prefill_request_ms_;
   m.step_ms = step_ms_;
   m.mtp = engine_->mtp_acceptance();
+  m.decode_batch = engine_->decode_batch_stats();
   m.prefix_slots = cache_.slots();
   m.prefix_entries = cache_.live_entries();
   m.prefix_hits = cache_.stats().hits;
@@ -1381,12 +1416,13 @@ void Scheduler::log_prefix_miss(const Request& r) const {
   const int64_t n = static_cast<int64_t>(r.spec.prompt.size());
   const char* reading =
       near.common == 0 ? "nothing in common: a different prompt from its first token"
-      : near.common >= e.position
-          ? "the whole entry, which sits at no cut of this prompt"
-      : near.common >= n
-          ? "the whole prompt, a prefix of that entry: no entry at this "
-            "prompt's own cuts (evicted, or never taken)"
-          : "the prompt differs from it from that token on";
+      : near.common == e.position && e.next_token >= 0 && e.position < n &&
+              e.next_token != r.spec.prompt[static_cast<size_t>(e.position)]
+          ? "the prefix matches, but the MTP lookahead token at the cut changed"
+      : near.common >= e.position ? "the whole entry, which sits at no cut of this prompt"
+      : near.common >= n          ? "the whole prompt, a prefix of that entry: no entry at this "
+                                    "prompt's own cuts (evicted, or never taken)"
+                                  : "the prompt differs from it from that token on";
   DGPP_LOG_INFO(
       "sched: request '{}' prefix cache miss — {} cut(s) probed against {} "
       "entries; the nearest entry (position {}) shares the first {} of the "

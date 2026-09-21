@@ -227,6 +227,27 @@ most 3.6% and prefill time by at most 2.9%. The
 [two-Spark result](../benchmarks/results/2026-09-16-qwen-nvfp4-w2.md) contains
 the repeated decode, prefill, memory and quality measurements.
 
+### Qwen3.8-Flash-Next-NVFP4, world 2, long-context selection (2026-09-21)
+
+The YaRN factor-two template, FP8 dense weights, mapped n-gram table and
+depth-one MTP, with one active request and 256 generated tokens per sample.
+Decode is the median of one cold and two cached requests. The old baseline
+is `9fa8e0f`; the new path uses exact radix selection above 2048 pools.
+
+| Actual prompt tokens | Old decode ms/pass | New decode ms/pass | Latency reduction | Cold prefill seconds, old / new |
+| ---: | ---: | ---: | ---: | ---: |
+| 3,139 | 28.54 | 28.12 | 1.5% | 2.11 / 2.07 |
+| 31,670 | 31.31 | 28.04 | 10.4% | 20.74 / 20.32 |
+| 129,560 | 43.39 | 29.55 | 31.9% | 98.62 / 93.16 |
+| 260,062 | 59.38 | 31.36 | 47.2% | 235.97 / 215.07 |
+| 520,742 | 93.52 | 37.06 | 60.4% | 732.40 / 655.18 |
+
+All 15 old/new response comparisons match exactly, including reasoning and
+usage. Acceptance stays at 1.85–1.92 tokens per pass. Cold prefill has one
+sample per build at each length. These are parity/performance measurements,
+not a retrieval-quality score. The [record](../benchmarks/results/2026-09-21-qwen-qsa-select.md)
+contains the deterministic prompt recipe, microbenchmarks and validation.
+
 ### GLM-4.7-NVFP4, world 4
 
 | mode | ms/pass | tok/pass | ms/token | date |
@@ -718,9 +739,10 @@ DeepSeek's 4,096-token chunk reduced matched ~8,400-token prefill time by 3.7%
 [study](../benchmarks/results/2026-09-16-dsv41-perf/README.md) includes the
 repeated chunk sweep and exact long-prompt output comparisons.
 
-Qwen's current QSA kernel runs at 0.637, 0.634 and 0.656 ms per actual prompt
-token at the three sizes. It starts at 128 prefill rows; decode, speculative
-verification and short prefill keep the existing path. Across the matched
+Qwen's September 15 QSA listed-attention change measured 0.637, 0.634 and
+0.656 ms per actual prompt token at the three sizes. It starts at 128 prefill
+rows; decode, speculative verification and short prefill keep the existing
+listed-attention path. Across the matched
 campaign it reduced cold service prefill by 7.75%, 13.73% and 14.43%, while
 all paired outputs and usage remained identical. See the
 [QSA record](../benchmarks/results/2026-09-15-qwen-qsa-prefill.md) for the A/B
@@ -798,8 +820,10 @@ The current snapshot still has these gaps:
    dense stack has only its older four-live point. Fill the common C1/C2/C4
    matrix with
    `scripts/serve_load.py HOST PORT --concurrency 1,2,4 --classes all`.
-2. **Long-context service prefill remains incomplete.** Qwen FP8 world 2,
-   Qwen NVFP4 world 2 and the four-node Flash hybrid have current 32K points.
+2. **Long-context service prefill remains incomplete across configurations.**
+   Qwen NVFP4 world 2 now has matched old/new cold measurements through
+   520,742 prompt tokens with YaRN. Qwen FP8 world 2 and the four-node
+   Flash hybrid have 32K points.
    Flash FP8, the two-node Flash hybrid and full GLM need remeasurement after
    context-aware DSA query tiling. Qwen world 4, Qwen NVFP4 world 1 and
    GLM-4.7 still lack current 32K service measurements.
@@ -820,8 +844,9 @@ The current snapshot still has these gaps:
    C1/MTP behavior; lowering it requires service and numerical evidence.
    This campaign does not add a soak, failure drill or sampled sweep.
 
-The current tables include two-Spark Qwen and four-Spark Flash hybrid service
-prefill through 32K, and DeepSeek at six live requests. The
+The current tables include two-Spark Qwen NVFP4 service prefill through
+520,742 tokens, Qwen FP8 and four-Spark Flash hybrid through 32K, and
+DeepSeek at six live requests. The
 dated records provide the exact workloads and reproduction commands.
 
 ## 9. Reproducing all of it
@@ -906,6 +931,30 @@ byte-identical to its answer beside three others.
 `scripts/fabric_glm4_load.sh CONFIG OUT` wraps the mixed form for the GLM-4.7
 worlds.
 
+For engine-call rates alongside the client timings, use the same arguments with
+`scripts/timed_load.py`, on an otherwise idle server:
+
+```bash
+scripts/timed_load.py HOST PORT --concurrency 1,2,4 --classes all --repeat 2 --json-out load.json
+```
+
+The wrapper checks counters immediately after each completed request group,
+including warmup and isolation. It accepts a snapshot only when the server is
+idle and its prompt/token deltas exactly match the completed requests. Behind
+counters are polled under a five-second deadline; excess or reset counters
+fail immediately. Errors include expected and observed counts. Consecutive
+identical snapshots alone do not establish readiness. The verified snapshot
+carries into the next phase, so unrelated intervening work cannot silently
+become its baseline.
+
+Polling occurs outside measured client intervals. The `engine` report fields
+retain the scheduler deltas and compute decode tokens/s as
+`1000 * (tokens_generated - prompts_prefilled) / step_ms`, excluding the first
+token produced by each prefill. The dated
+`benchmarks/results/2026-09-16-dsv41-perf/timed_load.py` path remains a compatible
+entry point. Neither entry point requires the repository to be the working
+directory.
+
 ### 9.4 Prefill
 
 Through the endpoint, with the prefix cache defeated by a unique nonce per
@@ -971,3 +1020,30 @@ its own method statement, `docs/measurements.md` the platform and GLM-4.7
 readings, `docs/qwen38_single_spark.md` the single-Spark campaign, and
 `docs/qwen38_optimization_plan.md` and `docs/nvfp4_plan.md` the optimization
 rounds with their A/B pairs.
+
+### 9.8 QSA score and selection microbenchmark
+
+On idle Spark hardware, build the release benchmark and measure the indexer
+separately from the model:
+
+```bash
+cmake --preset release
+cmake --build build-release --target qsa_index_bench -j 4
+CUDA_DEVICE_MAX_CONNECTIONS=32 build-release/qsa_index_bench --graph \
+  --pools 16384,65322,131072 --rows 2 --iters 30 --warmup 5
+```
+
+Omit `--graph` for eager launches. JSONL reports empty-launch, score, select
+and combined CUDA-event timings, each with warm inputs and with L2 evicted
+before the measured interval. The default has two adjacent query positions,
+four 128-dimensional indexer heads, 64-token pages and a permuted block table.
+Every score key and selected token is checked against the host oracle before
+timing, and selection is checked after repeated launches. `--rows 16` covers
+wide decode; larger row counts exercise prefill shapes.
+
+The reported input GB/s counts logical reads, including repeated reads of
+shared cache rows. It is not a DRAM-bandwidth counter. Warm means repeated
+inputs; the 131K-pool cache exceeds the Spark's L2. Use profiler counters
+to distinguish memory saturation from instruction or launch costs. See the
+[September 21 comparison](../benchmarks/results/2026-09-21-qwen-qsa-select.md)
+for the baseline, exactness gates and full-model measurements.

@@ -171,11 +171,16 @@ GrammarTool grammar_tool_from_function(const minijson::Value& def,
   }
   const minijson::Value* props = params->find("properties");
   const minijson::Value* extra = params->find("additionalProperties");
-  const bool closed = extra != nullptr && extra->is_bool() && !extra->as_bool(true);
   if (props == nullptr || !props->is_object()) return tool;
-  // Keys close only when the schema says so (additionalProperties false —
-  // JSON Schema's default is open) and declares properties.
-  if (closed) {
+  // Constrained generation defaults to the declared top-level names. Only
+  // explicit true opts out; a subschema cannot type an unknown name here.
+  // Nested objects still use the JSON machine's schema semantics.
+  const bool open_keys = extra != nullptr && extra->is_bool() && extra->as_bool();
+  if (open_keys) {
+    if (notes != nullptr)
+      notes->push_back("additionalProperties: true on '" + tool.name +
+                       "': the keys are free text, not the declared properties");
+  } else {
     tool.constrain_keys = true;
     for (const minijson::Member& pm : props->members()) tool.keys.push_back(pm.key);
   }

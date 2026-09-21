@@ -111,6 +111,10 @@ and `--knobs "FLAGS"` appends server flags after the file settings.
 The compatibility wrapper `scripts/serve_run.sh` maps
 `DGPP_SERVE_KNOBS` and `DGPP_SERVE_LOG` to those options.
 
+For builds made on x86 Linux, follow [cross-compiling](cross-compiling.md)
+to stage the ARM64 server and its CUDA libraries before transferring them to
+the Spark. Cross-compilation does not launch or update a deployment.
+
 Rank 0 reads the shared engine settings, applies flag overrides and sends
 the result to peers before model construction. Peers use their files for
 bootstrap addresses and local paths; they log differences from the
@@ -279,6 +283,12 @@ exits before its first tick rather than form a mixed world.
   the head, then the peers as soon as the journal listens.
 
 ### Memory on a serving node
+
+For prefix caching, size the snapshot arena and KV pool separately. Startup
+and `--memory-plan` report snapshot slots, bytes per slot and actual arena
+allocation. The [prefix-cache guide](prefix-cache.md) lists the current recipe
+capacities and explains when a larger `prefix_cache_gib` helps. The cache is
+memory-resident; it does not spill evicted prefixes to NVMe.
 
 Reserve enough node memory for weights, model state and runtime buffers.
 The GLM-5.3-FP8 main stack alone uses about 82 GiB per rank at TP=4;
@@ -644,8 +654,11 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
   for backward compatibility) — JSON counters for requests, sheds, cancellations,
   failures, the admission policy, the prefix cache (entries, hits, tokens
   saved, hop snapshots, the TTFT split by hit and miss), sampling
-  fallbacks. `prefill.requests` reports each active prefill's prompt, processed,
-  cached, computed and remaining tokens, updated at chunk boundaries even
+  fallbacks. `scheduler.spec_decode` reports cumulative MTP draft rounds,
+  attempted and accepted draft tokens, and per-position counters; see the
+  [counter definitions](openai-compatibility.md#speculative-decoding-counters)
+  before calculating acceptance rates. `prefill.requests` reports each active
+  prefill's prompt, processed, cached, computed and remaining tokens, updated at chunk boundaries even
   during a synchronous prefill. `scheduler.snapshot_age_ms` reports the age of
   the remaining scheduler/pool counters. See the
   [metrics contract and monitoring command](openai-compatibility.md#metrics-and-prefill-progress).
@@ -671,6 +684,46 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
   `scripts/serve_failure_drill.sh VICTIM` (the kill −9 drill), and
   `scripts/serve_api_check.py HOST PORT` (the request fields — `stop`,
   `n`, `logit_bias`, the usage details — against a running world).
+
+### Decode graph batch counters
+
+`GET /metrics` and `/v1/metrics` expose `scheduler.decode_batch` in the
+scheduler's published snapshot. `last_slots` is the capacity of the last
+launched graph, `last_active` is the number of requests in that launch, and
+`last_rows_per_request` is its verification width. These fields start at zero
+and retain the last launch while idle or prefilling; use `scheduler.active`
+and `scheduler.queued` for current occupancy.
+
+`replays`, `rows` and `padded_rows` accumulate successful graph launches since
+engine construction. A six-slot graph with five requests and two verification
+rows per request adds one replay, twelve rows and two padded rows. Speculative
+draft-chain work is excluded; rejected draft tokens are not padding.
+`replays_by_slots` counts launches by graph capacity, with keys `"1"` through
+`"16"`; bucket `"1"` includes scalar fallback. All sixteen buckets are always
+present, even for engines with fewer slots, to keep the shape stable for
+scrapers across deployments. Zero buckets do not establish which graph
+families an engine supports. Non-graph engines report zeros.
+
+For an interval, divide the increase in `padded_rows` by the increase in `rows`
+when that denominator is positive. This measures verification-row padding,
+not GPU time or utilization. Read the serving rank's counters once rather
+than summing identical work across ranks. Launch counters do not assert GPU
+completion; `snapshot_age_ms` describes the publication delay.
+
+Graph capacity depends on the highest live slot as well as the number of
+requests. With the default batching threshold, live slots 0 and 3 in a
+four-slot engine require the four-slot graph even though only two requests
+are active. The histogram records that capacity; it does not distinguish a
+full graph from a sparse one. Use the row deltas to measure padding over a
+representative traffic interval. The retained last-launch fields alone cannot
+establish how often sparse launches occur, and an idle interval with no new
+rows has no padding fraction. A server without `scheduler.decode_batch` needs
+a newer binary; missing counters do not mean zero padding.
+
+For draft attempts and acceptance, see the
+[speculative decoding counters](openai-compatibility.md#speculative-decoding-counters).
+Those count request verification decisions, excluding graph padding; rejected
+drafts and padded rows measure different work.
 
 ## Ports and processes
 

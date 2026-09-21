@@ -371,6 +371,61 @@ int run_fixture(const std::string& dir) {
     for (uint8_t* p : arena) cudaFree(p);
     std::printf("[ OK ] prefix snapshots: hot == cold bitwise at a cut and mid-decode\n");
   }
+  // Two cuts in one prefill: an earlier document state for changed tails,
+  // and the deepest state for identical repeats. Both include MTP state.
+  {
+    QwenModel cached(cfg, dir, 64, 512, QwenResidency::Resident, nullptr, 0, 1, 2, true);
+    std::vector<void*> arena(2, nullptr);
+    for (auto& p : arena) DGPP_CUDA_OK(cudaMalloc(&p, cached.session_snapshot_bytes()));
+    QwenModel::SessionSnapshotMeta body_meta, final_meta;
+    QwenModel::SnapshotRequest final{20, arena[1], &final_meta, false};
+    QwenModel::SnapshotRequest body{8, arena[0], &body_meta, false, &final};
+    const std::vector<int64_t> cuts{8, 16, 20};
+    const auto original = cached.session_prefill(0, A, cuts, &body);
+    require(body.taken && final.taken, "both prefill snapshots were taken");
+    cached.session_close(0);
+    for (int cut : {8, 20}) {
+      auto prompt = A;
+      if (cut == 8)
+        for (size_t i = 9; i < prompt.size(); ++i) prompt[i] = (prompt[i] + 17) % cfg.vocab_size;
+      const auto cold = cached.session_prefill(0, prompt, cuts);
+      if (cut == 20)
+        require(bitwise(cold.logits, original.logits), "taking two snapshots is invisible");
+      cached.session_attach(1, arena[cut == 8 ? 0 : 1], cut == 8 ? body_meta : final_meta);
+      const auto hot = cached.session_prefill_resume(
+          1, std::vector<int64_t>(prompt.begin() + cut, prompt.end()), cuts);
+      require(bitwise(hot.logits, cold.logits),
+              "two snapshots: changed-tail and identical target parity");
+      const auto token = argmax(cold.logits.data(), V);
+      require(
+          bitwise(cached.session_draft(0, {token}).logits, cached.session_draft(1, {token}).logits),
+          "two snapshots: changed-tail and identical MTP parity");
+      require(bitwise(cached.session_step(0, token).logits, cached.session_step(1, token).logits),
+              "two snapshots: subsequent decode parity");
+      cached.session_close(0);
+      cached.session_close(1);
+    }
+    cached.session_release_snapshot(body_meta);
+    cached.session_release_snapshot(final_meta);
+    body.taken = final.taken = false;
+    auto cursor = cached.session_prefill_begin(0, A, 64, 4, {}, &body);
+    for (const auto& [budget, position] :
+         std::vector<std::pair<int64_t, int64_t>>{{64, 8}, {8, 16}, {64, 20}, {64, 23}}) {
+      const bool done = cached.session_prefill_advance(cursor, budget);
+      require(cursor.next == position && done == (position == 23),
+              "coalescing preserves both requested cuts");
+    }
+    require(body.taken && final.taken && bitwise(cursor.output.logits, original.logits),
+            "resizing a continuation takes both snapshots without changing its state");
+    cached.session_close(0);
+    cached.session_release_snapshot(body_meta);
+    cached.session_release_snapshot(final_meta);
+    require(cached.kv_blocks_in_use() == 0, "two snapshots release every KV reference");
+    for (auto p : arena) DGPP_CUDA_OK(cudaFree(p));
+    std::printf(
+        "[ OK ] two prefill snapshots: changed tails and identical repeats, target/draft "
+        "bitwise\n");
+  }
   // 7. The MTP draft block, eagerly (the greedy speculator): the committed
   //    transcript is the plain greedy one exactly (a verify's rows are the
   //    steps' rows; a rejected draft's rows roll back), the draft rate

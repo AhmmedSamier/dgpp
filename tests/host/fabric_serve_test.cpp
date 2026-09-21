@@ -461,10 +461,42 @@ void test_journal_codec() {
     ws.kv_dtype = "fp8";
     ws.bf16_weights = "bf12";
     ws.compact_batches = true;
+    // The opt-in rope knob rides the record: a peer that ran without it
+    // would rope at different frequencies from rank 0 — silently
+    // divergent text, the reason the settings record exists at all.
+    dgpp::RopeScaling rs;
+    rs.factor = 2.0;
+    rs.original_max_position_embeddings = 262144;
+    ws.rope_scaling = rs;
     const dgpp::serve::JournalRecord sr = dgpp::serve::decode_journal_line(
         dgpp::serve::encode_journal_settings(ws));
     require(sr.settings && !sr.warm && !sr.stop && sr.world_settings == ws,
             "codec: the settings record round-trips");
+    require(sr.world_settings.rope_scaling.has_value() &&
+                sr.world_settings.rope_scaling->context_limit() == 524288,
+            "codec: the rope scaling rides the settings record");
+    {
+      // A plain run carries no key at all: a peer decoding it gets the
+      // plain table, which is what it would have run anyway.
+      dgpp::serve::WorldSettings plain = ws;
+      plain.rope_scaling.reset();
+      const std::string line = dgpp::serve::encode_journal_settings(plain);
+      require(line.find("\"rs\"") == std::string::npos, "codec: no rope key when off");
+      const dgpp::serve::JournalRecord got = dgpp::serve::decode_journal_line(line);
+      require(!got.world_settings.rope_scaling.has_value(), "codec: absent decodes to off");
+    }
+    {
+      // An impossible ramp (a sub-unity factor) is refused, not applied.
+      dgpp::serve::WorldSettings bad = ws;
+      bad.rope_scaling->factor = 0.5;
+      bool refused_rope = false;
+      try {
+        (void)dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_settings(bad));
+      } catch (const std::runtime_error&) {
+        refused_rope = true;
+      }
+      require(refused_rope, "codec: a settings record with an impossible rope scaling is refused");
+    }
     {
       auto encoded = dgpp::serve::encode_journal_settings(ws);
       const std::string compact_field = ",\"compact\":1";

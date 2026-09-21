@@ -12,6 +12,12 @@ operators are documented in [its architecture study](docs/qwen38_flash_next_plan
 and GLM-4.7's GQA and NVFP4 layout in [its implementation notes](docs/glm47_plan.md).
 Shared session and engine interfaces live in `src/engine/`.
 
+Qwen's QSA indexer preserves its FP32 scoring order and deterministic
+score/pool tie rule. Long rows use exact radix selection; short rows use
+streaming top-k. Both expand the same sorted pool ids with the existing
+workspace and captured graph shape. See the
+[selection measurements](benchmarks/results/2026-09-21-qwen-qsa-select.md).
+
 Use [PLAN.md](PLAN.md) for implementation status and
 [operations](docs/operations.md) for deployment. Dated measurements here
 explain design choices; current benchmark tables and reproduction commands
@@ -1644,6 +1650,22 @@ sequence as a cold prefill, preserving its arithmetic. Merely matching
 token IDs at an arbitrary position would not establish that property.
 
 **Snapshot lifecycle.** A cold prefill saves its deepest reusable cut.
+Prompts of at least four regular chunks also save one earlier chunk cut,
+`(floor(prompt_tokens / chunk_tokens) - 1) * chunk_tokens`, when it lies
+past the attached prefix and before the deepest cut. For 2048-token chunks,
+this leaves 2048–4095 tokens for a changed question after the shared document.
+Both snapshots use existing cuts; the final snapshot gets an arena slot
+first. Short prompts and one-slot arenas retain the original policy.
+DeepSeek's bounded prefill retains the original policy too: saving an extra
+state would run another decoder span and change its computation.
+
+MTP prefill snapshots also depend on the token immediately after their cut,
+because the shifted draft input has already consumed it. The index checks
+that token before attaching or deduplicating a prefill entry. Decode snapshots
+have no such constraint: their lagging draft state catches up on resume.
+Both synchronous and resumable prefill retain ownership of an earlier
+snapshot if later work fails, so cancellation/unwinding can release its blocks.
+
 During decode, a request maintains a rolling snapshot at aligned committed
 positions. At retirement, that snapshot can become a close-time entry for
 the next conversation turn. Reuse requires the next prompt to contain
@@ -1659,6 +1681,10 @@ engine checks the expected position when saving the snapshot.
 **Ownership and eviction.** `engine.prefix_cache_gib` sets the snapshot
 arena budget per rank; zero disables the cache. The slot count is derived
 from the model's snapshot size, not a fixed bytes-per-token estimate.
+Startup memory planning reports bytes per snapshot, slot count, actual arena
+allocation and the separate KV token capacity. Snapshot size is independent
+of context length for the current families. See [cache sizing](docs/prefix-cache.md)
+for the recipe audit and working-set estimates.
 Entries hold references to their cache blocks, which count against pool
 usage. Admission can evict the least-recently-used eligible entry when it
 needs blocks or an arena slot. Entries attached to live requests are
@@ -1836,6 +1862,12 @@ shape alternates between two graph variants so cells are not reset while
 their previous window is in flight. Prefill, graph capture and sampling
 fallbacks drain live windows before issuing eager collectives. A fallback
 also marks its provisional draft state for replacement before draining.
+After the older replay settles, the engine freezes every live slot's
+verified drafts before collecting any current verdict. Draining for one
+slot's fallback can publish new drafts for the entire batch; those new
+drafts must never replace the inputs used to resolve another slot's
+current accept/residual decision or update its context. The same snapshot
+precedes the drain when pipelining is disabled.
 
 `DGPP_PIPELINE=0` settles each replay immediately after launch;
 `DGPP_PIPELINE_TRACE=1` logs launches and settlements. The stats
@@ -1977,6 +2009,11 @@ appropriate fed tokens. The commit updates counts for accepted rows.
 On fallback, the adapter gathers the saved verifier logits, completes
 sampling on the host and replaces the provisional feed and draft state.
 Verifier logits are saved before the draft head reuses their buffer.
+The sampled-MTP oracle gates follow scheduler token and retirement events,
+compare every live transcript through its final token, and cover grouped
+admission, staggered arrival and reused slots. Stored request results are
+populated at retirement and cannot be used as live transcripts. See the
+[fallback isolation record](benchmarks/results/2026-09-21-mtp-fallback-isolation.md).
 
 ### Logprobs and validation
 
@@ -2008,8 +2045,24 @@ optional, required, forbidden or restricted to a named function;
 also applies in auto mode to validate calls the model chooses to make.
 
 Names and keys are matched through token text, allowing different BPE
-segmentations of the same valid string. Schemas determine argument types
-and whether undeclared keys are allowed. `grammar_tool_from_function`
+segmentations of the same valid string. Schemas determine argument types,
+and the keys close to the properties a schema declares: JSON Schema's
+`additionalProperties` default is open, but that is a validation semantic,
+and as a decoding grammar an open key slot is free text the model fills
+from its own prior — an undeclared name, or the same one twice, which a
+client cannot tell from a model fault. A schema that declares no
+`properties` at all has nothing to close to and keeps the free key; an
+explicit `additionalProperties: true` keeps it as well, and is noted once
+naming the tool ([record](benchmarks/results/2026-09-19-tool-key-closure.md)).
+An explicitly empty `properties: {}` closes to the empty key set. A
+schema-valued `additionalProperties` also closes the declared top-level set
+in non-strict mode; it cannot type arbitrary argument names on this path.
+Strict schemas still reject unsupported forms. This policy applies only
+to top-level tool arguments: nested objects and `response_format: json_schema`
+retain the JSON machine's ordinary open default. With free argument keys,
+the model can repeat a name; the parser rejects that block as literal
+content, so `required` and named tool choices are best-effort on that path.
+`grammar_tool_from_function`
 builds the constraint. With `function.strict: true`, unsupported
 schema keywords are rejected by path. In non-strict tools, supported
 types remain enforced while unsupported value restrictions are logged
@@ -2150,7 +2203,12 @@ iteration must not influence collective order.
 | `POST /v1/completions` | Legacy string-prompt completion; its accepted fields are a subset of the chat route |
 | `GET /v1/models`, `GET /v1/models/{id}` | Served model information |
 | `GET /health` | Liveness probe |
-| `GET /metrics`, `GET /v1/metrics` | JSON scheduler and service counters; both paths return the same format |
+| `GET /metrics`, `GET /v1/metrics` | JSON scheduler and service counters, including cumulative MTP verification counters under `scheduler.spec_decode` (after exact fallback resolution); both paths return the same format |
+
+The scheduler snapshot includes `decode_batch`: engine-local graph launch totals,
+verification and padded row totals, a capacity histogram, and the last launched
+batch shape retained while idle. Accounting occurs after successful graph launch
+and adds no device work or journal operations; see [operations](docs/operations.md#decode-graph-batch-counters).
 
 Chat messages support system, user, assistant and tool roles. The text
 frontend handles the checkpoint's template, reasoning markers and tool
@@ -2423,7 +2481,12 @@ disagree by hours; `scripts/fabric_xrank.py`).
 | `tests/` | Unit, host, CUDA and Python tests |
 | `tools/`, `scripts/` | Reference generators, checkpoint tools, deployment and measurement commands |
 | `deploy/` | Example cluster configurations |
+| `cmake/`, `dev/` | Build configuration and the x86-to-ARM64 Spark cross-build container |
 | `benchmarks/`, `docs/` | Workloads, probes, dated measurements and documentation |
+
+The [Spark cross-build](docs/cross-compiling.md) uses native x86 build tools
+with an AArch64 host compiler and CUDA SBSA target libraries. It inherits the
+release configuration; target execution and deployment remain separate steps.
 
 ## 14. Validation scope
 

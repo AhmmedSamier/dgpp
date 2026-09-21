@@ -141,6 +141,14 @@ add_library(dgpp_loaders STATIC
 target_link_libraries(dgpp_loaders PUBLIC dgpp_core)
 dgpp_set_common(dgpp_loaders)
 
+# The host-side rope tables (kernels/rope_scaling.hpp): the YaRN builder the
+# DeepSeek-V4.1 CSA2 layers and the Qwen QSA rope share. Host-only, so the
+# unit gate links it without dragging the CUDA kernels in.
+add_library(dgpp_rope_scaling STATIC src/kernels/rope_scaling.cpp)
+target_include_directories(dgpp_rope_scaling PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_rope_scaling PUBLIC dgpp_common)
+dgpp_set_common(dgpp_rope_scaling)
+
 # Device ranges whose memory can be returned while the address stays reserved
 # (the CUDA virtual-memory API: the driver library, beside the runtime). The
 # weight loaders' side grants — bf12-only residency — are built on it.
@@ -182,7 +190,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/qsa.cu
   src/kernels/qsa_prefill.cu
   src/kernels/glm4_attn.cu)
-target_link_libraries(dgpp_kernels PUBLIC CUDA::cudart CUDA::cublasLt dgpp_core)
+target_link_libraries(dgpp_kernels PUBLIC CUDA::cudart CUDA::cublasLt dgpp_core dgpp_rope_scaling)
 dgpp_set_common(dgpp_kernels)
 # The device sampler mirrors the host oracle bit for bit: no contraction of
 # its multiplies and adds (the host builds with -ffp-contract=off).
@@ -344,7 +352,7 @@ add_library(dgpp_models_qwen STATIC
   src/models/qwen/ple_reference.cpp
   src/models/qwen/qsa_reference.cpp)
 target_include_directories(dgpp_models_qwen PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(dgpp_models_qwen PUBLIC dgpp_loaders dgpp_common)
+target_link_libraries(dgpp_models_qwen PUBLIC dgpp_loaders dgpp_common dgpp_rope_scaling)
 dgpp_set_common(dgpp_models_qwen)
 
 # The Qwen resident loader (Q2): the shared weight builder at the family's
@@ -374,8 +382,23 @@ target_link_libraries(qwen_forward_test PRIVATE dgpp_models_qwen_layers dgpp_mod
 dgpp_set_common(qwen_forward_test)
 set(QWEN_FORWARD_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/qwen_forward_fixture)
 add_test(NAME qwen_forward_fixture COMMAND qwen_forward_test --write-fixture ${QWEN_FORWARD_FIXTURE})
+add_test(NAME qwen_plan_check COMMAND qwen_forward_test --plan-check)
 add_test(NAME qwen_forward_smoke COMMAND qwen_forward_test --smoke ${QWEN_FORWARD_FIXTURE})
 set_tests_properties(qwen_forward_smoke PROPERTIES DEPENDS qwen_forward_fixture)
+# The same model under the engine's YaRN knob (engine.rope_scaling, factor 2
+# over the fixture's 4096 native positions): the table, the mscale and the
+# lifted ceiling through a whole forward, and logits that differ from the
+# plain rope's.
+add_test(NAME qwen_forward_smoke_yarn
+  COMMAND qwen_forward_test --smoke ${QWEN_FORWARD_FIXTURE} --rope-scaling 2.0:4096)
+set_tests_properties(qwen_forward_smoke_yarn PROPERTIES DEPENDS qwen_forward_fixture)
+# The YaRN ceiling actually crossed (the 2026-09-18 review): a synthetic
+# native limit of 8 under the factor-2 knob (the extended 16) — both
+# forward modes over the final valid position, the session's refusal of
+# work past the extended limit, and a pool below the ceiling.
+add_test(NAME qwen_forward_cross_limit
+  COMMAND qwen_forward_test --cross-limit ${QWEN_FORWARD_FIXTURE})
+set_tests_properties(qwen_forward_cross_limit PROPERTIES DEPENDS qwen_forward_fixture)
 add_test(NAME qwen_forward_generate
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/qwen_reference_dump.py
           gen-pure --checkpoint-dir ${QWEN_FORWARD_FIXTURE}
@@ -518,6 +541,10 @@ if(DGPP_ENABLE_IBV)
   # sharing queues for the eager collectives' sake.
   set_tests_properties(glm_tp_test PROPERTIES SKIP_RETURN_CODE 2
                        ENVIRONMENT "CUDA_DEVICE_MAX_CONNECTIONS=32")
+  add_test(NAME glm_mtp_sampling_no_pipeline COMMAND glm_tp_test)
+  set_tests_properties(glm_mtp_sampling_no_pipeline PROPERTIES
+      SKIP_RETURN_CODE 2 LABELS "gpu;rdma" RUN_SERIAL TRUE
+      ENVIRONMENT "CUDA_DEVICE_MAX_CONNECTIONS=32;DGPP_PIPELINE=0;DGPP_TEST_FILTER=glm_tp_serving_mtp_graph_sampling_matches_eager_speculator")
 
   # M5 deliverable 3 fabric runner: TP forward on real nodes.
   add_executable(glm_tp_check apps/glm_tp_check.cpp)
@@ -611,6 +638,7 @@ add_executable(unit_tests
   tests/unit/cluster_config_test.cpp
   tests/unit/qwen_config_test.cpp
   tests/unit/qwen_binding_test.cpp
+  tests/unit/qwen_rope_scaling_test.cpp
   tests/unit/glm4_config_test.cpp
   tests/unit/glm4_binding_test.cpp
   tests/unit/glm_dsa_config_test.cpp
@@ -624,11 +652,29 @@ target_include_directories(unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(unit_tests PRIVATE CUDA::cudart dgpp_loaders
                                         dgpp_models_glm dgpp_models_qwen dgpp_models_glm4
                                         dgpp_models_glm_dsa dgpp_models_dsv41
+                                        dgpp_rope_scaling
                                         dgpp_net dgpp_serve Threads::Threads)
 target_compile_definitions(unit_tests PRIVATE DGPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 dgpp_set_common(unit_tests)
 add_test(NAME unit_tests COMMAND unit_tests)
 target_sources(unit_tests PRIVATE tests/unit/site_options_test.cpp)
+
+# The vLLM YaRN oracle, offline (2026-09-19): tests/python/qwen_yarn_oracle.py
+# --emit records the recipe's rope goldens — the YaRN table, the attention
+# mscale, the bf16 cos/sin cache rows and rotated Q/K at several positions,
+# for the recipe and four non-default parameter combinations — under the
+# digest of the container that produced them, and this gate compares the
+# engine's own table builder, mscale and rotation against that file. No vLLM,
+# no container, no GPU; refresh the fixture in the container when vLLM's yarn
+# code or the recipe changes (tests/unit/qwen_yarn_fixture_test.cpp).
+add_executable(qwen_yarn_fixture_test tests/unit/qwen_yarn_fixture_test.cpp)
+target_include_directories(qwen_yarn_fixture_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(qwen_yarn_fixture_test PRIVATE dgpp_loaders dgpp_models_qwen
+                                        dgpp_rope_scaling Threads::Threads)
+target_compile_definitions(qwen_yarn_fixture_test PRIVATE DGPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+dgpp_set_common(qwen_yarn_fixture_test)
+add_test(NAME qwen_yarn_fixture_test
+  COMMAND qwen_yarn_fixture_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/qwen_yarn_oracle.json)
 
 # M6 Stage 3: the tokenizer differential gate (host). Skips with rc 2 when
 # the model cache is absent (same discipline as the real-checkpoint gates).
@@ -751,12 +797,23 @@ add_test(NAME script_reports_test
           ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/script_reports_test.py)
 add_test(NAME portability_test
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/portability_test.py)
+add_test(NAME timed_load_test
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/timed_load_test.py)
+add_test(NAME qwen_yarn_release_check_test
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/qwen_yarn_release_check_test.py)
+add_test(NAME spark_cross_test
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/spark_cross_test.py)
 add_test(NAME setup_tools_test
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/setup_tools_test.py)
 add_test(NAME bootstrap_test
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/bootstrap_test.py)
 add_test(NAME launcher_test
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/launcher_test.py)
+if(TARGET dgpp_serve_app)
+  add_test(NAME serve_startup_test
+    COMMAND ${CMAKE_COMMAND} -E env "DGPP_SERVE_TEST_BINARY=$<TARGET_FILE:dgpp_serve_app>"
+            ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/serve_startup_test.py)
+endif()
 
 # KDA operator tests (CUDA); skip without a device as above. The dump-parity
 # runner is a host-only TU (minijson + nvcc don't mix).
@@ -1360,6 +1417,10 @@ add_executable(qsa_prefill_bench benchmarks/micro/qsa_prefill_bench.cu)
 target_link_libraries(qsa_prefill_bench PRIVATE dgpp_kernels CUDA::cudart)
 dgpp_set_common(qsa_prefill_bench)
 
+add_executable(qsa_index_bench benchmarks/micro/qsa_index_bench.cu)
+target_link_libraries(qsa_index_bench PRIVATE dgpp_models_qwen dgpp_kernels CUDA::cudart)
+dgpp_set_common(qsa_index_bench)
+
 add_executable(dsa_bench benchmarks/micro/dsa_bench.cu src/common/log.cpp)
 target_link_libraries(dsa_bench PRIVATE dgpp_models_dsa CUDA::cudart CUDA::cublasLt)
 dgpp_set_common(dsa_bench)
@@ -1397,9 +1458,12 @@ foreach(_test IN LISTS DGPP_ALL_TESTS)
   set_tests_properties(${_test} PROPERTIES LABELS "gpu")
 endforeach()
 set_tests_properties(unit unit_tests http_server_test serve_test fabric_serve_test scheduler_test
-  PROPERTIES LABELS "host")
+  qwen_yarn_fixture_test PROPERTIES LABELS "host")
 set_tests_properties(checkpoint_audit_test route_trace_test sampling_profile_test
-  site_env_test script_reports_test portability_test setup_tools_test bootstrap_test launcher_test PROPERTIES LABELS "host;python")
+  site_env_test script_reports_test timed_load_test qwen_yarn_release_check_test portability_test spark_cross_test setup_tools_test bootstrap_test launcher_test PROPERTIES LABELS "host;python")
+if(TARGET dgpp_serve_app)
+  set_tests_properties(serve_startup_test PROPERTIES LABELS "host;python" TIMEOUT 180)
+endif()
 set_tests_properties(tokenizer_test qwen_tokenizer_test glm4_tokenizer_test dsv41_tokenizer_test
   chat_template_test qwen_chat_template_test glm4_chat_template_test dsv41_prompt_test
   PROPERTIES LABELS "host;checkpoint")
