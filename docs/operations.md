@@ -42,7 +42,7 @@ its node.
 One template per model, quant and world (2026-09-14): the modes a template
 does not name are knobs — `--no-mtp` for the plain T=1 world, `--mtp-depth N`,
 `--max-concurrency N`, `--kv-capacity N`, `--kv-dtype fp8`,
-`--prefix-cache-gib X`, `--dense-weights checkpoint`,
+`--prefix-cache-gib X`, `--dense-weights checkpoint --fp8-head gemv`,
 `--bf16-weights checkpoint` — appended with
 `dgpp-cluster up --knobs "..."` (deploy/README.md lists the retired variants
 and the knobs that reproduce them).
@@ -67,15 +67,20 @@ three values: switching never rebuilds them.
 `kv_dtype` affects only GLM-5.3's latent cache. Qwen and GLM-4.7 K/V
 caches stay BF16. Qwen's `ngram_table` and `dense_weights` settings
 control table residency and optional FP8 encoding of dense projections.
-`engine.fp8_head` defaults to `"gemv"`. With Qwen and `dense_weights: "fp8"`,
-set it to `"mma"` (or pass `--fp8-head mma`) to opt in to streaming MMA above
-the dense GEMV threshold and within the configured decode capacity. Other
-values are rejected; MMA with another model family or non-FP8 dense weights
-is also rejected. The setting is distributed by rank 0 and included in the
-configuration digest, so peers use the same dispatch. It changes floating-point
-accumulation order, including for short prefill chunks within that capacity;
-real-checkpoint teacher-forced numerical validation remains pending. Shipped
-recipes retain GEMV. See the [measurement and limits](../benchmarks/results/2026-09-20-qwen-fp8-head-e2e.md).
+The Qwen NVFP4 templates, including YaRN, set `engine.fp8_head: "mma"`.
+With `dense_weights: "fp8"`, this uses streaming MMA above the dense GEMV
+threshold and within the configured decode capacity, including short prefills
+in that interval. Matched one- and two-Spark teacher-forced checks passed;
+see the [numerical results and scope](../benchmarks/results/2026-09-21-qwen-fp8-head-numerics.md).
+The interface default remains `"gemv"` for configurations that omit the key.
+The service rejects unsupported `fp8_head` values. MMA requires Qwen and FP8
+dense weights.
+The setting is distributed by rank 0 and included in the configuration digest,
+so peers use the same dispatch. It changes floating-point accumulation order.
+Use `--fp8-head gemv` to restore the previous head path. When restoring BF16
+dense weights, pass `--dense-weights checkpoint --fp8-head gemv` together.
+The earlier [throughput measurement and limits](../benchmarks/results/2026-09-20-qwen-fp8-head-e2e.md)
+remain historical evidence.
 The [single-node guide](qwen38_single_spark.md) covers the one-Spark memory
 plan, and the [two-node benchmark](../benchmarks/results/2026-09-16-qwen-nvfp4-w2.md)
 records the resident-versus-mapped placement decision.

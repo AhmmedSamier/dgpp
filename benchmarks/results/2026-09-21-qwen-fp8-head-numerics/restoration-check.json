@@ -1,0 +1,25 @@
+{
+  "restored": true,
+  "checked_at": "2026-09-21T17:58:35.348901+00:00",
+  "health": {
+    "status": "ok",
+    "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8"
+  },
+  "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+  "original_file_sha256": {
+    "/home/stephen/workspace/dgpp/build-release/dgpp-serve": "460f5ed1c4b4e99d9be99768a4f636ab2aa40e21dcb43ab25d2360c5dc644bdd",
+    "/home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json": "7895ac99341518e651be77866e1b51a44670f5fb9d90b0ccdc7a60e1867a867a"
+  },
+  "resolved_configuration_unchanged": true,
+  "smoke_requests_passed": 2,
+  "cached_tokens": [
+    0,
+    276
+  ],
+  "completion_tokens": [
+    22,
+    22
+  ],
+  "active": 0,
+  "queued": 0
+}

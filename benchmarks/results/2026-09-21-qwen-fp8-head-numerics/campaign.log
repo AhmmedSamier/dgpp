@@ -1,0 +1,46 @@
+START w2 gemv 2026-09-21T16:37:19Z
+END w2 gemv 2026-09-21T16:44:57Z
+START w2 mma 2026-09-21T16:44:57Z
+END w2 mma 2026-09-21T16:52:14Z
+PASS w2
+START w1 gemv 2026-09-21T16:52:17Z
+END w1 gemv 2026-09-21T17:04:06Z
+START w1 mma 2026-09-21T17:04:06Z
+END w1 mma 2026-09-21T17:15:18Z
+PASS w1
+START yarn_w2 gemv 2026-09-21T17:15:19Z
+END yarn_w2 gemv 2026-09-21T17:22:37Z
+START yarn_w2 mma 2026-09-21T17:22:37Z
+END yarn_w2 mma 2026-09-21T17:29:44Z
+PASS yarn_w2
+START recipe_w1 gemv 2026-09-21T17:29:46Z
+END recipe_w1 gemv 2026-09-21T17:32:29Z
+START recipe_w1 mma 2026-09-21T17:32:29Z
+END recipe_w1 mma 2026-09-21T17:35:13Z
+PASS recipe_w1
+START recipe_w2 gemv 2026-09-21T17:35:13Z
+END recipe_w2 gemv 2026-09-21T17:37:09Z
+START recipe_w2 mma 2026-09-21T17:37:09Z
+END recipe_w2 mma 2026-09-21T17:39:04Z
+PASS recipe_w2
+Restoring original production service; campaign status 91
+/home/stephen/workspace/dgpp/build-release/dgpp-serve: OK
+/home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json: OK
+Traceback (most recent call last):
+  File "<stdin>", line 4, in <module>
+AssertionError: production resolved configuration changed
+START corrected API smoke 2026-09-21T17:41:14Z
+PASS API smoke 2026-09-21T17:41:48Z
+START full CTest 2026-09-21T17:41:48Z
+Restoring original production service; campaign status 8
+/home/stephen/workspace/dgpp/build-release/dgpp-serve: OK
+/home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json: OK
+PRODUCTION RESOLVED CONFIGURATION UNCHANGED
+PRODUCTION RESTORED
+START nine failed CTest entries after harness fixes 2026-09-21T17:56:34Z
+PASS nine CTest reruns 2026-09-21T17:56:44Z
+Restoring original production service; campaign status 0
+/home/stephen/workspace/dgpp/build-release/dgpp-serve: OK
+/home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json: OK
+PRODUCTION RESOLVED CONFIGURATION UNCHANGED
+PRODUCTION RESTORED

@@ -74,7 +74,7 @@ The bus test `scenario_world_of_one` covers this behavior.
 Without `decode_graph`, a single-node run uses the eager streaming path.
 
 `deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.example.json` (MTP depth 1, the dense stack
-FP8 at load; `--knobs "--no-mtp"` for T=1, `--dense-weights checkpoint` for the BF16 dense
+FP8 at load; `--knobs "--no-mtp"` for T=1, `--dense-weights checkpoint --fp8-head gemv` for the BF16 dense
 stack — one template since 2026-09-14) is the single-node
 configs: one node, `ngram_table: "mmap"`, `decode_graph`, 4 slots,
 kv_capacity 65536.

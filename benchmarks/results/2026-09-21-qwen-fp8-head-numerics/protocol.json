@@ -1,0 +1,56 @@
+{
+  "base_commit": "6c5d086e8459137687ad5c2be474fea76e079c34",
+  "checkpoint": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+  "snapshot": "fc694b54fb0174e0913e6adf86691ef85a4ead47",
+  "modes": [
+    "gemv",
+    "mma"
+  ],
+  "repeats_per_mode": 2,
+  "campaigns": [
+    {
+      "name": "w2",
+      "world": 2,
+      "decode_capacity": 16,
+      "yarn": false
+    },
+    {
+      "name": "w1",
+      "world": 1,
+      "decode_capacity": 16,
+      "yarn": false
+    },
+    {
+      "name": "yarn_w2",
+      "world": 2,
+      "decode_capacity": 8,
+      "yarn": true
+    }
+  ],
+  "boundary_tokens": 1024,
+  "prefill_trials": 32,
+  "prefill_lengths": [
+    1,
+    4,
+    5,
+    8,
+    9,
+    16,
+    17
+  ],
+  "maximum_mean_nll_delta": 0.02,
+  "large_token_delta": 1.0,
+  "maximum_large_delta_rate": 0.01,
+  "maximum_top1_flip_margin_bf16_ulps": 2,
+  "exact_controls": [
+    "same-mode logit and hidden hashes",
+    "cross-mode hidden hashes",
+    "cross-rank hidden hashes",
+    "logit hashes outside optimized interval"
+  ],
+  "teacher_sha256": {
+    "teacher_text.txt": "c2017ed5755b88a97ce3793c9aa619673863ea15644fcd648378523a26270910",
+    "teacher_text_hard.txt": "8aa2c38ab1c52e7e86f1c2195fd3473d028924dddee275319b16896c5da2d5d4",
+    "teacher_text_memorized.txt": "6ff9f1d7b7cf21eaccf9e85d9110c16dc24fa98f26edde8e4f3acf7857e6ff2b"
+  }
+}

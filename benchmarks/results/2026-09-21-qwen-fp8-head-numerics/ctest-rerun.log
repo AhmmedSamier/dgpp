@@ -1,0 +1,29 @@
+Internal ctest changing into directory: /tmp/dgpp-pr10-review/build-ci
+Test project /tmp/dgpp-pr10-review/build-ci
+    Start 36: portability_test
+1/9 Test #36: portability_test .........................   Passed    0.35 sec
+    Start 58: dsv41_forward_generate
+2/9 Test #58: dsv41_forward_generate ...................   Passed    0.79 sec
+    Start 59: dsv41_forward_test_e2e
+3/9 Test #59: dsv41_forward_test_e2e ...................   Passed    1.83 sec
+    Start 60: dsv41_forward_generate_teacher
+4/9 Test #60: dsv41_forward_generate_teacher ...........   Passed    0.64 sec
+    Start 61: dsv41_forward_test
+5/9 Test #61: dsv41_forward_test .......................   Passed    1.76 sec
+    Start 62: dsv41_forward_generate_bounded
+6/9 Test #62: dsv41_forward_generate_bounded ...........   Passed    0.67 sec
+    Start 63: dsv41_forward_test_bounded_e2e
+7/9 Test #63: dsv41_forward_test_bounded_e2e ...........   Passed    1.74 sec
+    Start 64: dsv41_forward_generate_teacher_bounded
+8/9 Test #64: dsv41_forward_generate_teacher_bounded ...   Passed    0.59 sec
+    Start 65: dsv41_forward_test_bounded
+9/9 Test #65: dsv41_forward_test_bounded ...............   Passed    1.74 sec
+
+100% tests passed, 0 tests failed out of 9
+
+Label Time Summary:
+gpu       =   9.76 sec*proc (8 tests)
+host      =   0.35 sec*proc (1 test)
+python    =   0.35 sec*proc (1 test)
+
+Total Test time (real) =  10.14 sec

@@ -809,6 +809,8 @@ add_test(NAME timed_load_test
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/timed_load_test.py)
 add_test(NAME qwen_yarn_release_check_test
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/qwen_yarn_release_check_test.py)
+add_test(NAME qwen_head_compare_test
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/qwen_head_compare_test.py)
 add_test(NAME spark_cross_test
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/spark_cross_test.py)
 add_test(NAME setup_tools_test
@@ -1198,6 +1200,14 @@ add_executable(qwen_forward_check apps/qwen_forward_check.cpp)
 target_link_libraries(qwen_forward_check PRIVATE dgpp_models_qwen_layers dgpp_bus dgpp_loaders CUDA::cudart Threads::Threads)
 dgpp_set_common(qwen_forward_check)
 
+add_executable(qwen_head_check apps/qwen_head_check.cpp)
+target_link_libraries(qwen_head_check PRIVATE dgpp_models_qwen_layers dgpp_bus dgpp_loaders dgpp_text CUDA::cudart Threads::Threads)
+dgpp_set_common(qwen_head_check)
+add_test(NAME qwen_head_check_fixture
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/qwen_head_check_test.py
+          $<TARGET_FILE:qwen_head_check> ${QWEN_FORWARD_FIXTURE})
+set_tests_properties(qwen_head_check_fixture PROPERTIES DEPENDS qwen_forward_fixture LABELS "gpu" RUN_SERIAL TRUE)
+
 add_executable(glm_loader_test tests/cuda/glm_loader_test.cpp)
 target_include_directories(glm_loader_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(glm_loader_test PRIVATE dgpp_models_glm_loader CUDA::cudart)
@@ -1465,7 +1475,7 @@ endforeach()
 set_tests_properties(unit unit_tests http_server_test serve_test fabric_serve_test scheduler_test
   qwen_yarn_fixture_test PROPERTIES LABELS "host")
 set_tests_properties(checkpoint_audit_test route_trace_test sampling_profile_test
-  site_env_test script_reports_test timed_load_test qwen_yarn_release_check_test portability_test spark_cross_test setup_tools_test bootstrap_test launcher_test PROPERTIES LABELS "host;python")
+  site_env_test script_reports_test timed_load_test qwen_yarn_release_check_test qwen_head_compare_test portability_test spark_cross_test setup_tools_test bootstrap_test launcher_test PROPERTIES LABELS "host;python")
 if(TARGET dgpp_serve_app)
   set_tests_properties(serve_startup_test PROPERTIES LABELS "host;python" TIMEOUT 180)
 endif()

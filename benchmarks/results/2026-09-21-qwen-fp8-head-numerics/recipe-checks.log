@@ -1,0 +1,15 @@
+Internal ctest changing into directory: /tmp/dgpp-pr10-review/build-ci
+Test project /tmp/dgpp-pr10-review/build-ci
+    Start 34: site_env_test
+1/2 Test #34: site_env_test ....................   Passed    1.73 sec
+    Start 36: portability_test
+2/2 Test #36: portability_test .................   Passed    0.31 sec
+
+100% tests passed, 0 tests failed out of 2
+
+Label Time Summary:
+host      =   2.03 sec*proc (2 tests)
+python    =   2.03 sec*proc (2 tests)
+
+Total Test time (real) =   2.04 sec
+Only the three Qwen NVFP4 templates select MMA; all require FP8 dense weights

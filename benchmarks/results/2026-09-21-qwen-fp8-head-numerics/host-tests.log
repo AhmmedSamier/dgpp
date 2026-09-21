@@ -1,0 +1,18 @@
+Internal ctest changing into directory: /tmp/dgpp-pr10-review/build-ci
+Test project /tmp/dgpp-pr10-review/build-ci
+    Start 14: unit_tests
+1/4 Test #14: unit_tests .......................   Passed    9.57 sec
+    Start 28: fabric_serve_test
+2/4 Test #28: fabric_serve_test ................   Passed    3.11 sec
+    Start 39: qwen_head_compare_test
+3/4 Test #39: qwen_head_compare_test ...........   Passed    0.27 sec
+    Start 44: serve_startup_test
+4/4 Test #44: serve_startup_test ...............   Passed    2.68 sec
+
+100% tests passed, 0 tests failed out of 4
+
+Label Time Summary:
+host      =  15.63 sec*proc (4 tests)
+python    =   2.95 sec*proc (2 tests)
+
+Total Test time (real) =  15.64 sec

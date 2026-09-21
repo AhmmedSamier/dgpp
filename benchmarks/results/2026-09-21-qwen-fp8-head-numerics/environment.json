@@ -1,0 +1,12 @@
+{
+  "gpu": "NVIDIA GB10",
+  "driver": "580.173.02",
+  "cuda": "13.0.88",
+  "compiler": "GCC 13.3.0",
+  "preset": "ci",
+  "build_type": "RelWithDebInfo",
+  "warnings_as_errors": true,
+  "CUDA_DEVICE_MAX_CONNECTIONS": "32",
+  "DGPP_DENSE_GEMV_ROWS": "4",
+  "clang_format": "unavailable"
+}

@@ -27,6 +27,7 @@
     "sampling_candidates": 128,
     "stats_interval_s": 10,
     "dense_weights": "fp8",
+    "fp8_head": "mma",
     "bf16_weights": "bf12+bf16"
   },
   "paths": {
