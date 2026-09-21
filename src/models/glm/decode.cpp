@@ -343,7 +343,7 @@ GlmDiagnosticModel::PrefillCursor GlmDiagnosticModel::session_prefill_begin(
     validate_image_inputs(*images, prompt.size());
     for (const auto& im : *images)
       for (int64_t pos = im.offset; pos < im.offset + im.tokens; ++pos)
-        if (prompt[static_cast<size_t>(pos)] != 154854)
+        if (prompt[static_cast<size_t>(pos)] != image_pad_id())
           throw std::invalid_argument("GLM: image span does not contain image tokens");
   }
   auto cuts = boundaries;
@@ -1939,7 +1939,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill_with_images(
   validate_image_inputs(images, start + ids.size());
   for (const auto& im : images)
     for (int64_t pos = std::max(start, im.offset); pos < im.offset + im.tokens; ++pos)
-      if (ids[static_cast<size_t>(pos - start)] != 154854)
+      if (ids[static_cast<size_t>(pos - start)] != image_pad_id())
         throw std::invalid_argument("GLM: image span does not contain image tokens");
   prefill_images_ = &images;
   try {

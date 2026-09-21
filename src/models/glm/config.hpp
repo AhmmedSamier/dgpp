@@ -93,6 +93,8 @@ struct GlmGenerationDefaults {
 
 struct GlmTextConfig {
   std::optional<GlmVisionConfig> vision;
+  // The prompt's image delimiters; an unset triple for a text-only export.
+  ImageTokens image_tokens() const { return vision ? vision->tokens : ImageTokens{}; }
   // --- model shape -------------------------------------------------------
   int hidden_size = 4096;
   int vocab_size = 154880;

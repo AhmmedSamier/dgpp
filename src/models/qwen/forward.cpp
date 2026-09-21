@@ -16,6 +16,8 @@
 #include "kernels/qwen_mtp.hpp"
 #include "kernels/qwen_norm.hpp"
 #include "kernels/qwen_ple.hpp"
+#include "kernels/qwen_vision.hpp"
+#include "models/qwen/vision.hpp"
 
 namespace dgpp {
 namespace {
@@ -193,6 +195,10 @@ QwenModel::QwenModel(const QwenTextConfig& cfg, const std::string& checkpoint_di
                                               max_tokens_, cfg_.rms_norm_eps);
   }
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  // The tower is replicated (it runs only on image prefills, never inside a
+  // captured graph), so its weights are this rank's own copy and its digest
+  // belongs to the boot identity like any other global.
+  if (cfg_.vision) vision_ = std::make_unique<QwenVisionEncoder>(*cfg_.vision, checkpoint_dir, stream_);
 }
 
 QwenModel::MemoryPlan QwenModel::plan_memory(const QwenTextConfig& cfg, int max_tokens,
@@ -301,6 +307,11 @@ QwenModel::MemoryPlan QwenModel::plan_memory(const QwenTextConfig& cfg, int max_
              R * rows * W * 2 + R * ring_elems * 2 + 4 * M * W * 2 + 3 * M * H * 2 + R * 24 +
                  QwenGrSite::scratch_bytes(cfg.hc_count, cfg.hidden_size, cfg.hc_lowrank, max_tokens),
              R * 8);
+  }
+  if (cfg.vision) {
+    plan.add("vision tower weights (bf16, replicated)", cfg.vision->weight_bytes());
+    plan.add("vision workspace (patches, attention tiles, staged image rows)",
+             cfg.vision->workspace_bytes());
   }
   return plan;
 }
@@ -626,6 +637,14 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
     ple_->stage(tokens, T, d_req, d_pos, d_spans, num_requests, d_ctx_, stream_);
   }
   glm_embed_bcast_streams(globals_.embed, tokens, r_, T, H, stream_);
+  // Image rows replace the embedding at their prompt positions; the tower
+  // already projected them (see apply_image_embeddings). Only a single
+  // request's prefill walk carries images.
+  if (prefill_images_) {
+    if (run.decode || run.batch_requests || run.num_spans)
+      throw std::logic_error("Qwen: image prefill reached a non-prefill walk");
+    apply_image_embeddings(r_, run.pos0, T, 0, cfg_.hc_count);
+  }
 
   // The state families' per-row snapshots (the rollback's source).
   const bool snapshots = run.decode && run.snapshots;
@@ -1100,6 +1119,10 @@ void QwenModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, 
   qwen_rmsnorm_bf16(hin, globals_.mtp_pre_fc_norm_hidden, mtp_hn_, T, W, eps, stream_);
   qwen_mtp_hidden_projection(gw_, mtp_hn_, globals_.mtp_fc_hidden, mtp_enc_, T, hc, H, decode_row, stream_);
   qwen_mtp_embed_gather_bf16(globals_.embed, tokens, mtp_e_, T, H, stream_);
+  // The draft's row at position p embeds token p + 1, so its image window is
+  // the main walk's shifted by one (and one row past a chunk's end, which is
+  // why staging covers chunk + 1).
+  if (prefill_images_) apply_image_embeddings(mtp_e_, first_pos, T, 1, 1);
   qwen_rmsnorm_bf16(mtp_e_, globals_.mtp_pre_fc_norm_embedding, mtp_en_, T, H, eps, stream_);
   gemm_.matmul(mtp_en_, globals_.mtp_fc_embedding, mtp_ein_, T, H, H, DType::BF16, GemmOut::BF16,
                static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
@@ -1220,6 +1243,89 @@ void QwenModel::snapshot_chain_state(int req) {
 void QwenModel::restore_chain_state(int req) {
   glm_device_copy(pool_.ring(num_qsa_, req), mtp_chain_ring_ + static_cast<size_t>(req) * ring_elems(),
                   ring_elems() * 2, stream_);
+}
+
+uint64_t QwenModel::vision_digest() const { return vision_ ? vision_->digest() : 0; }
+
+QwenModel::Outputs QwenModel::session_prefill_images(
+    int req, const std::vector<int64_t>& prompt, const std::vector<ImageInput>& images) {
+  return session_prefill_images(req, prompt, images, {}, nullptr);
+}
+
+QwenModel::Outputs QwenModel::session_prefill_images(
+    int req, const std::vector<int64_t>& prompt, const std::vector<ImageInput>& images,
+    const std::vector<int64_t>& boundaries, SnapshotRequest* snap) {
+  return session_prefill_with_images(req, prompt, images, boundaries, snap, false);
+}
+
+QwenModel::Outputs QwenModel::session_prefill_resume_images(
+    int req, const std::vector<int64_t>& suffix, const std::vector<ImageInput>& images,
+    const std::vector<int64_t>& boundaries, SnapshotRequest* snap) {
+  return session_prefill_with_images(req, suffix, images, boundaries, snap, true);
+}
+
+QwenModel::Outputs QwenModel::session_prefill_with_images(
+    int req, const std::vector<int64_t>& ids, const std::vector<ImageInput>& images,
+    const std::vector<int64_t>& boundaries, SnapshotRequest* snap, bool resume) {
+  if (!vision_) throw std::invalid_argument("Qwen: checkpoint has no vision tower");
+  if (req < 0 || req >= max_requests_) throw std::out_of_range("Qwen image prefill: request slot");
+  const int64_t start = resume ? session_pos_[static_cast<size_t>(req)] : 0;
+  if (start < 0) throw std::invalid_argument("Qwen image prefill: closed session");
+  validate_image_inputs(images, start + static_cast<size_t>(ids.size()));
+  if (images.empty())
+    return resume ? session_prefill_resume(req, ids, boundaries, snap)
+                  : session_prefill(req, ids, boundaries, snap);
+  // The frontend rendered one pad id per visual token; a prompt that names
+  // a different span (or none) cannot be given the tower's rows.
+  for (const auto& im : images)
+    for (int64_t pos = std::max(start, im.offset); pos < im.offset + im.tokens; ++pos) {
+      if (ids[static_cast<size_t>(pos - start)] != image_pad_id())
+        throw std::invalid_argument("Qwen: image span does not contain image tokens");
+    }
+  prefill_images_ = &images;
+  image_embeddings_ = nullptr;
+  image_window_first_ = image_window_end_ = 0;
+  try {
+    auto out = resume ? session_prefill_resume(req, ids, boundaries, snap)
+                      : session_prefill(req, ids, boundaries, snap);
+    prefill_images_ = nullptr;
+    image_embeddings_ = nullptr;
+    return out;
+  } catch (...) {
+    prefill_images_ = nullptr;
+    image_embeddings_ = nullptr;
+    throw;
+  }
+}
+
+void QwenModel::stage_image_embeddings(int64_t first, int64_t end) {
+  image_window_first_ = first;
+  image_window_end_ = end;
+  image_embeddings_ = prefill_images_ && !prefill_images_->empty() && end > first
+                          ? vision_->stage(*prefill_images_, first, end)
+                          : nullptr;
+}
+
+void QwenModel::apply_image_embeddings(uint16_t* dst, int64_t first, int rows, int shift,
+                                       int branches) {
+  if (!prefill_images_ || prefill_images_->empty() || rows <= 0) return;
+  const int64_t begin_all = first + shift, end_all = begin_all + rows;
+  if (begin_all < image_window_first_ || end_all > image_window_end_)
+    stage_image_embeddings(begin_all, end_all);
+  const int h = cfg_.hidden_size;
+  for (const auto& im : *prefill_images_) {
+    const int64_t begin = std::max(begin_all, im.offset),
+                  end = std::min(end_all, im.offset + im.tokens);
+    if (end <= begin) continue;
+    if (!image_embeddings_ || begin < image_window_first_ || end > image_window_end_)
+      throw std::logic_error("Qwen: image consumer escaped its staged window");
+    const uint16_t* source = image_embeddings_ + (begin - image_window_first_) * h;
+    const int n = static_cast<int>(end - begin);
+    if (branches == 1)
+      qwen_image_copy(source, dst + (begin - begin_all) * h, n, h, stream_);
+    else
+      qwen_image_broadcast(source, dst + (begin - begin_all) * branches * h, n, h, stream_);
+  }
 }
 
 }  // namespace dgpp

@@ -1,10 +1,11 @@
 # Image inputs
 
-GLM-5.3-Flash accepts images through `POST /v1/chat/completions`. The engine
-loads the checkpoint's BF16 vision encoder and projects image features into
-the language model's prompt. It supports the FP8 and hybrid NVFP4/FP8
-checkpoints, streaming, multiple choices and MTP. Other model frontends reject
-image inputs until they have their own encoder integration.
+GLM-5.3-Flash and Qwen3.8-Flash-Next accept images through
+`POST /v1/chat/completions`. The engine loads the checkpoint's BF16 vision
+encoder and projects image features into the language model's prompt. It
+supports the FP8 and hybrid NVFP4/FP8 checkpoints, streaming, multiple choices
+and MTP. Other model frontends reject image inputs until they have their own
+encoder integration.
 
 Check `GET /v1/models`: a capable model reports
 `"input_modalities": ["text", "image"]`. Loading a compatible checkpoint with
@@ -51,10 +52,39 @@ print(json.load(urlopen(request))["choices"][0]["message"])
 | History | Image tokens use the ordinary context budget; no separate image-count or aggregate visual-token cap |
 | Decoded data | Up to 256 MiB of resized RGB pixels per request, independently of compressed upload size |
 | Detail | `auto` and `high` allow up to 1,024 visual tokens per image; `low` allows 256 |
-| Preprocessing | RGB conversion, aspect-preserving antialiased bicubic resize, black right/bottom padding to a 28-pixel grid, CLIP normalization and temporal patch duplication |
-| Usage | Each merged 28×28 patch contributes one prompt token; image delimiters also count. Normal context and admission limits still apply |
+| Preprocessing | RGB conversion and an aspect-preserving antialiased bicubic resize onto the family's visual-token grid, then the checkpoint's own normalization — see [per-family preprocessing](#per-family-preprocessing) |
+| Usage | Each merged patch block contributes one prompt token; image delimiters also count. Normal context and admission limits still apply |
 | Prefix cache | Identical image content, geometry and token positions can reuse prompt and generated-continuation snapshots; `cached_tokens` reports reuse |
 | Scheduling | GLM graph prefill can yield between bounded chunks for both image and text requests; active decodes run after each chunk |
+
+## Per-family preprocessing
+
+The two served towers disagree about geometry, so the resize policy and the
+delimiters are per-family data (`serve/image_inputs.hpp`,
+`models/<family>/vision_config.hpp`), not constants in the shared path.
+
+| | GLM-5.3-Flash | Qwen3.8-Flash-Next |
+| --- | --- | --- |
+| Visual token | 28 pixels on a side (patch 14 × merge 2) | 32 pixels on a side (patch 16 × merge 2) |
+| Canvas | rounded **up** to the grid, the remainder painted black | rounded to the **nearest** multiple of the grid (ties to even), never padded |
+| Pixel budget | at least 16 tokens, at most 1,024 | at least 64 tokens, at most 1,024 (`min_pixels`/`max_pixels` growth and shrink, so a small image is scaled up rather than refused) |
+| Normalization | CLIP mean/std, temporal patch duplication | mean = std = 0.5, both temporal frames identical |
+| Delimiters | `image_start_token_id` 154830, `image_token_id` 154854, `image_end_token_id` 154831 | `vision_start_token_id`, `image_token_id`, `vision_end_token_id` (248053, 248056, 248054), rendered from the tokenizer's own vocabulary |
+| Tower | 24 blocks, RMSNorm, SwiGLU, windowed attention, deepstack injections | 27 blocks, LayerNorm ε 1e-6, gated-GELU MLP, full attention, 2-D axial RoPE with θ 10000, a learned 48×48 position table resampled bilinearly, `deepstack_visual_indexes: []` |
+| Where the rows enter | the embedding and the deepstack layers | the embedding only (no deepstack) |
+
+Qwen3.8-Flash-Next deviations, both recorded here rather than hidden in a
+comment: images are single frames (`video_token_id` is refused, never
+decoded), and the tower's rows are spliced into a prompt whose positions are
+still one-dimensional. The checkpoint's language model expects interleaved
+mRoPE, where an image span advances the height and width axes independently;
+DGPP's position array is also its cache-slot index, so the three-axis
+positions land with that split, not before it. Spatially demanding prompts
+(fine-grained layout, dense tables, OCR of long rows) are the ones to
+re-measure when it does. Until then the served behaviour is a usable but
+degraded reading of the reference. Image prompts also keep prefix-cache
+snapshots off mid-prompt: they are prefilled in the model's own chunks, which
+are not scheduler-visible cuts.
 
 The processor targets at least 16 visual tokens for small images. Aspect
 ratio and grid alignment determine the actual count. DGPP's 1,024-token
@@ -111,7 +141,9 @@ operation-stream hashes as described in [operations](operations.md).
 
 For encoder arithmetic, build `glm_vision_check` and set `CKPT` to the
 GLM-5.3-Flash snapshot directory. The optional oracle requires NumPy and
-PyTorch; serving does not.
+PyTorch; serving does not. `qwen_vision_check` is the same harness for
+Qwen3.8-Flash-Next, with `tools/qwen_vision_reference.py` as its oracle and a
+32-pixel canvas (`64 64` is 2×2 visual tokens).
 
 `glm_vision_stream_test` compares staged rows bitwise with whole-image
 encoder outputs across 12 full-size images, 256/2,048-token windows, MTP

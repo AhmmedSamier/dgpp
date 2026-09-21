@@ -382,7 +382,12 @@ QwenTextConfig QwenTextConfig::from_json_file(const std::string& path) {
   const auto parsed = minijson::parse(json);
   const minijson::Value* tc = parsed.root.find("text_config");
   if (!tc) throw std::runtime_error("config " + path + ": missing text_config object");
-  return parse(*tc, parsed.root.find("quantization_config"));
+  QwenTextConfig c = parse(*tc, parsed.root.find("quantization_config"));
+  // A checkpoint that ships a vision tower serves images with it; the root
+  // object holds both the tower's config and the image token ids.
+  if (const auto* vision = parsed.root.find("vision_config"); vision && !vision->is_null())
+    c.vision = QwenVisionConfig::parse(parsed.root, c.hidden_size);
+  return c;
 }
 
 int QwenTextConfig::num_gdn_layers() const {

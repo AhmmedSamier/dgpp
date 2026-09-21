@@ -175,6 +175,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/glm_mhc.cu
   src/kernels/glm_moe.cu
   src/kernels/glm_vision.cu
+  src/kernels/qwen_vision.cu
   src/kernels/glm_norm.cu
   src/kernels/pick.cu
   src/kernels/sample_pick.cu
@@ -358,9 +359,10 @@ dgpp_set_common(dgpp_models_qwen)
 # The Qwen resident loader (Q2): the shared weight builder at the family's
 # TP geometry, plus the n-gram table's own residency.
 add_library(dgpp_models_qwen_loader STATIC
+  src/models/qwen/vision.cpp
   src/models/qwen/loader.cpp)
 target_include_directories(dgpp_models_qwen_loader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(dgpp_models_qwen_loader PUBLIC dgpp_models_qwen dgpp_loaders CUDA::cudart dgpp_device_ranges)
+target_link_libraries(dgpp_models_qwen_loader PUBLIC dgpp_models_qwen dgpp_loaders dgpp_kernels CUDA::cudart dgpp_device_ranges)
 dgpp_set_common(dgpp_models_qwen_loader)
 
 # The Qwen layers (Q3): the MoE on the shared MoE layer, with its oracle.
@@ -734,7 +736,9 @@ set_tests_properties(glm_dsa_chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
 # journal (fabric_serve.cpp over the host-only dgpp_net TCP primitives).
 add_library(dgpp_serve STATIC
   src/serve/image_inputs.cpp
+  src/serve/vision_frontend.cpp
   src/serve/glm_vision_frontend.cpp
+  src/serve/qwen_vision_frontend.cpp
   src/serve/file_inputs.cpp
   src/serve/cluster_config.cpp
   src/serve/http_server.cpp
@@ -1468,6 +1472,10 @@ set_tests_properties(roster_selftest PROPERTIES LABELS "host")
 add_executable(glm_vision_check apps/glm_vision_check.cpp)
 target_link_libraries(glm_vision_check PRIVATE dgpp_models_glm_loader CUDA::cudart)
 dgpp_set_common(glm_vision_check)
+
+add_executable(qwen_vision_check apps/qwen_vision_check.cpp)
+target_link_libraries(qwen_vision_check PRIVATE dgpp_models_qwen_loader CUDA::cudart)
+dgpp_set_common(qwen_vision_check)
 
 add_executable(glm_vision_test tests/cuda/glm_vision_test.cpp)
 target_link_libraries(glm_vision_test PRIVATE dgpp_kernels CUDA::cudart)

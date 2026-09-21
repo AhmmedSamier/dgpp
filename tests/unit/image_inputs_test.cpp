@@ -1,5 +1,10 @@
 #include "serve/image_inputs.hpp"
 
+#include "models/qwen/vision_config.hpp"
+
+#include <algorithm>
+#include <cmath>
+
 #include "common/base64.hpp"
 #include "common/test.hpp"
 #include "models/glm/vision_config.hpp"
@@ -115,6 +120,104 @@ DGPP_TEST(image_png_decode_and_detail_validation) {
   }
 }
 
+DGPP_TEST(image_qwen_smart_resize_rounds_without_padding) {
+  // factor 32 (patch 16 x merge 2): the nearest multiple, ties to even, and
+  // never a padded canvas. A 100x100 image is under the 64-token pixel floor,
+  // so it grows to 256x256 the way the processor's min_pixels does.
+  std::vector<uint8_t> rgb(100 * 100 * 3, 77);
+  dgpp::serve::ImagePreprocess pp{dgpp::kQwenImageGrid, 64, dgpp::kMaxImageTokens, false, 256};
+  auto im = dgpp::serve::resize_image(rgb.data(), 100, 100, pp);
+  require(im.width == 256 && im.height == 256 && im.tokens == 64 && im.grid == 32,
+          "the min_pixels budget grows a small image");
+  require(im.rgb.size() == 256 * 256 * 3 && im.rgb[(255 * 256 + 255) * 3] == 77,
+          "no padding canvas");
+  // 272/32 = 8.5 rounds down to the even 8, 304/32 = 9.5 rounds up to the even 10.
+  std::vector<uint8_t> even(272 * 272 * 3, 61);
+  im = dgpp::serve::resize_image(even.data(), 272, 272, pp);
+  require(im.width == 256 && im.height == 256 && im.tokens == 64, "a tie rounds to even");
+  std::vector<uint8_t> odd(304 * 304 * 3, 61);
+  im = dgpp::serve::resize_image(odd.data(), 304, 304, pp);
+  require(im.width == 320 && im.height == 320 && im.tokens == 100, "the other tie");
+  // The 1024-token ceiling caps a large image, on the 32-pixel grid.
+  std::vector<uint8_t> big(4000 * 4000 * 3, 200);
+  im = dgpp::serve::resize_image(big.data(), 4000, 4000, pp);
+  require(im.tokens <= 1024 && im.width % 32 == 0 && im.height % 32 == 0 && im.width == im.height,
+          "the token ceiling");
+  require(im.tokens > 900, "the ceiling is not wasteful");
+  // A side below the grid grows to the pixel floor; an extreme aspect ratio
+  // is refused, as the reference processor does.
+  std::vector<uint8_t> thin(16 * 16 * 3, 3);
+  im = dgpp::serve::resize_image(thin.data(), 16, 1024, pp);
+  require(im.tokens >= 64 && im.width % 32 == 0 && im.height % 32 == 0, "a short side grows");
+  std::vector<uint8_t> sliver(6600 * 32 * 3, 3);
+  rejects([&] { dgpp::serve::resize_image(sliver.data(), 6600, 32, pp); });
+}
+
+DGPP_TEST(image_resize_taps_are_centered_on_the_source) {
+  // A hard edge must land where the geometry says it does: the filter's taps
+  // have to be read from the positions they were computed for. Reading them
+  // from the window's first index instead shifts the picture by that many
+  // pixels and, at the last row, reads past the buffer.
+  const int sw = 272, sh = 272, half = 136;
+  std::vector<uint8_t> rgb(static_cast<size_t>(sw) * sh * 3);
+  for (int y = 0; y < sh; ++y)
+    for (int x = 0; x < sw; ++x)
+      for (int c = 0; c < 3; ++c) rgb[(static_cast<size_t>(y) * sw + x) * 3 + c] =
+          static_cast<uint8_t>(x < half ? 0 : 255);
+  const dgpp::serve::ImagePreprocess pp{dgpp::kQwenImageGrid, 64, dgpp::kMaxImageTokens, false, 256};
+  const auto im = dgpp::serve::resize_image(rgb.data(), sw, sh, pp);
+  require(im.width == 256 && im.height == 256, "272 -> 256");
+  const int row = 128 * im.width;
+  require(im.rgb[row * 3] < 8 && im.rgb[(row + 255) * 3] > 247, "both halves kept their value");
+  int crossing = -1;
+  for (int x = 0; x < im.width; ++x)
+    if (im.rgb[(row + x) * 3] > 128) { crossing = x; break; }
+  require(crossing >= 126 && crossing <= 130, "the edge did not move");
+}
+
+DGPP_TEST(image_grid_is_part_of_the_geometry_and_the_identity) {
+  dgpp::ImageInput qwen{0, 1, 32, 32, std::vector<uint8_t>(32 * 32 * 3), dgpp::kQwenImageGrid};
+  dgpp::validate_image_inputs({qwen}, 2);
+  // A 28-grid canvas cannot describe a 32-grid image, in either direction.
+  auto wrong_count = qwen;
+  wrong_count.tokens = 2;
+  rejects([&] { dgpp::validate_image_inputs({wrong_count}, 3); });
+  auto wrong_grid = qwen;
+  wrong_grid.width = wrong_grid.height = 28;
+  rejects([&] { dgpp::validate_image_inputs({wrong_grid}, 2); });
+  auto unknown_grid = qwen;
+  unknown_grid.grid = 24;
+  unknown_grid.width = unknown_grid.height = 24;
+  unknown_grid.rgb.resize(24 * 24 * 3);
+  rejects([&] { dgpp::validate_image_inputs({unknown_grid}, 2); });
+  // The two families' pixels-per-token ceilings differ, so a 1024-token Qwen
+  // image is larger than the GLM workspace bound for the same token count.
+  require(dgpp::pixels_for(dgpp::kQwenImageGrid) > dgpp::kMaxImagePixels, "per-family pixel cap");
+  require(dgpp::pixels_for(dgpp::kGlmImageGrid) == dgpp::kMaxImagePixels, "GLM cap unchanged");
+}
+
+DGPP_TEST(image_prepare_uses_the_family_preprocess) {
+  using V = dgpp::minijson::Value;
+  using namespace std::string_literals;
+  // The 1x1 PNG the GLM frontend test uses: 16 tokens on the 28 grid, 64
+  // (the min_pixels floor) on the Qwen one.
+  const std::string png =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/"
+      "x8AAwMCAO+a0ioAAAAASUVORK5CYII=";
+  const auto url = V::make_owned_string("data:image/png;base64,"s +
+                                        png.substr(png.find(',') + 1));
+  const dgpp::serve::ImagePreprocess qwen{dgpp::kQwenImageGrid, 64, dgpp::kMaxImageTokens, false, 256};
+  const auto glm_image = dgpp::serve::prepare_glm_image(V::make_object({{"url", url}}), "i");
+  const auto qwen_image = dgpp::serve::prepare_image(V::make_object({{"url", url}}), "i", qwen);
+  require(glm_image.tokens == 16 && glm_image.grid == 28, "GLM geometry");
+  require(qwen_image.tokens >= 64 && qwen_image.grid == 32, "Qwen geometry");
+  auto low = dgpp::serve::prepare_image(V::make_object({{"url", url}, {"detail", V::make_string("low")}}),
+                                       "i", qwen);
+  require(low.tokens <= 256, "detail low honors the family budget");
+  rejects([&] { dgpp::serve::prepare_image(V::make_object({{"url", V::make_string("http://x/y.png")}}),
+                                          "i", qwen); });
+}
+
 DGPP_TEST(image_vision_config_shapes_and_numeric_bounds) {
   const std::string config =
       R"({"image_token_id":154854,"image_start_token_id":154830,"image_end_token_id":154831,"vision_config":{"depth":24,"hidden_size":1024,"num_heads":16,"intermediate_size":4096,"out_hidden_size":4096,"projection_intermediate_size":10240,"patch_size":14,"temporal_patch_size":2,"spatial_merge_size":2,"in_channels":3,"rms_norm_eps":0.00001,"swiglu_limit":10,"hidden_act":"silu","attention_bias":true}})";
@@ -134,4 +237,62 @@ DGPP_TEST(image_vision_config_shapes_and_numeric_bounds) {
     bad.replace(bad.find(change.first), std::string_view(change.first).size(), change.second);
     rejects([&] { parse(bad); });
   }
+}
+
+DGPP_TEST(qwen_vision_config_geometry_ids_and_refusals) {
+  // The checkpoint's own numbers (Qwen/Qwen3.8-Flash-Next-FP8 config.json).
+  const std::string config =
+      R"({"image_token_id":248056,"vision_start_token_id":248053,"vision_end_token_id":248054,"video_token_id":248057,"vision_config":{"deepstack_visual_indexes":[],"depth":27,"hidden_act":"gelu_pytorch_tanh","hidden_size":1152,"in_channels":3,"intermediate_size":4304,"num_heads":16,"num_position_embeddings":2304,"out_hidden_size":2560,"patch_size":16,"spatial_merge_size":2,"temporal_patch_size":2}})";
+  const auto parse = [](const std::string& s) {
+    return dgpp::QwenVisionConfig::parse(dgpp::minijson::parse(s).root, 2560);
+  };
+  const auto c = parse(config);
+  require(c.depth == 27 && c.hidden == 1152 && c.heads == 16 && c.intermediate == 4304, "the tower");
+  require(c.head_dim() == 72 && c.merged() == 4608 && c.patch_in() == 1536, "derived geometry");
+  require(c.tokens.start == 248053 && c.tokens.pad == 248056 && c.tokens.end == 248054,
+          "the image delimiters");
+  require(c.eps == dgpp::QwenVisionConfig::kLayerNormEps &&
+              c.rope_theta == dgpp::QwenVisionConfig::kRopeTheta,
+          "an absent eps and theta take the library defaults");
+  require(c.weight_bytes() == 897880544, "the vision weight budget");
+  require(c.workspace_bytes() > c.weight_bytes() / 32 && c.workspace_bytes() < c.weight_bytes(),
+          "the workspace is a fraction of the tower");
+  require(dgpp::QwenVisionConfig::kGrid == dgpp::kQwenImageGrid &&
+              dgpp::QwenVisionConfig::kGrid == c.kPatch * c.kMerge,
+          "one grid constant for the processor and the tower");
+  for (auto change : {
+          std::pair{"\"patch_size\":16", "\"patch_size\":14"},
+          {"\"spatial_merge_size\":2", "\"spatial_merge_size\":4"},
+          {"\"temporal_patch_size\":2", "\"temporal_patch_size\":1"},
+          {"\"num_position_embeddings\":2304", "\"num_position_embeddings\":256"},
+          {"\"out_hidden_size\":2560", "\"out_hidden_size\":4096"},
+          {"\"hidden_size\":1152", "\"hidden_size\":1155"},
+          {"\"num_heads\":16", "\"num_heads\":5"},
+          {"\"hidden_act\":\"gelu_pytorch_tanh\"", "\"hidden_act\":\"silu\""},
+          {"\"deepstack_visual_indexes\":[]", "\"deepstack_visual_indexes\":[8,16,24]"},
+          {"\"depth\":27", "\"depth\":27.5"},
+          {"\"image_token_id\":248056", "\"image_token_id\":-1"},
+          {"\"image_token_id\":248056", "\"video_token_id\":248056,\"image_token_id\":248056"},
+      }) {
+    auto bad = config;
+    if (bad.find(change.first) == std::string::npos) {
+      require(false, "the fixture no longer holds the field under test");
+      break;
+    }
+    bad.replace(bad.find(change.first), std::string_view(change.first).size(), change.second);
+    rejects([&] { parse(bad); });
+  }
+  // A text-only export (language_model_only) carries no vision_config, and
+  // parse() refuses to invent one.
+  const std::string text_only =
+      R"({"image_token_id":248056,"vision_start_token_id":248053,"vision_end_token_id":248054})";
+  rejects([&] { parse(text_only); });
+  // An explicit eps is honoured, and a nonsense one refused.
+  auto eps = config;
+  const std::string_view depth{"\"depth\":27"};
+  eps.insert(eps.find(depth) + depth.size(), ",\"layer_norm_eps\":1e-5");
+  require(parse(eps).eps == 1e-5f, "an explicit layer_norm_eps");
+  const std::string_view eps_key{"\"layer_norm_eps\":1e-5"};
+  eps.replace(eps.find(eps_key), eps_key.size(), "\"layer_norm_eps\":0");
+  rejects([&] { parse(eps); });
 }
