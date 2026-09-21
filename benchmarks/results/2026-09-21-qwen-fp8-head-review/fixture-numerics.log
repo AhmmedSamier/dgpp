@@ -1,0 +1,9 @@
+[ .. ] FP8 prefill length 1: mean NLL delta 0
+[ .. ] FP8 prefill length 4: mean NLL delta 0
+[ .. ] FP8 prefill length 5: mean NLL delta -9.02057e-08
+[ .. ] FP8 prefill length 8: mean NLL delta -6.37356e-08
+[ .. ] FP8 prefill length 9: mean NLL delta -7.2795e-08
+[ .. ] FP8 prefill length 16: mean NLL delta 2.52229e-08
+[ .. ] FP8 prefill length 17: mean NLL delta 0
+[ .. ] wide teacher-forced target: 368 rows, worst l2 0.0023704, 0 near ties, mean NLL delta 5.4114e-05
+[ .. ] wide teacher-forced target: 368 rows, worst l2 0, 0 near ties, mean NLL delta 0

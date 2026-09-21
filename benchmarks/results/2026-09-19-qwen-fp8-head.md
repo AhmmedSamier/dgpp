@@ -155,3 +155,12 @@ opt-in with `engine.fp8_head: "mma"` and retains GEMV by default. Results
 above apply to the earlier unconditional implementation. `raw/head-bench.cpp`
 is an archived, one-off reproducer for those measurements, not a maintained
 benchmark target.
+
+
+Review follow-up correction: the original short-prefill control requested a
+four-row decode capacity, but `SessionModel` floors it at eight. Therefore
+the 5/8-row cases in that original run compared the same MMA head dispatch;
+they did not establish GEMV-versus-MMA numerical agreement. The explicit
+`fp8_head_mma = false` control added during review provides that comparison,
+and the minimum-capacity control now checks the effective 8/9 boundary.
+See the follow-up record for its native results.
