@@ -90,10 +90,13 @@ class QwenModel : public SessionModel<QwenModel> {
   // state window per slot; enables session_draft and the in-graph draft.
   // decode_rows: the fixed decode batch's row ceiling (the slots times the
   // verify rows per request; engine/decode_outputs.hpp); 0 = kDecodeRows.
+  // fp8_head_mma: opt in to streaming MMA within that decode envelope,
+  // including short prefill. Bitwise parity needs matching settings/capacity.
   QwenModel(const QwenTextConfig& cfg, const std::string& checkpoint_dir, int max_tokens,
             int64_t max_cache_tokens, QwenResidency residency = QwenResidency::Streaming,
             BoundaryReducer* boundary = nullptr, int tp_rank = 0, int tp_world = 1,
-            int max_requests = 1, bool mtp = false, int decode_rows = 0);
+            int max_requests = 1, bool mtp = false, int decode_rows = 0, bool fp8_head_mma = false);
+  bool fp8_head_mma() const { return fp8_head_mma_; }
   ~QwenModel();
   QwenModel(const QwenModel&) = delete;
   QwenModel& operator=(const QwenModel&) = delete;
@@ -166,6 +169,7 @@ class QwenModel : public SessionModel<QwenModel> {
   void restore_chain_state(int req);
 
  private:
+  const bool fp8_head_mma_;
   static constexpr int kBlockTokens = 64;
   static constexpr int kPrefillChunkTokens = 2048;
 

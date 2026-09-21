@@ -1,0 +1,23 @@
+Internal ctest changing into directory: /home/jon/dgpp-fp8-review-20260921/build-ci
+Test project /home/jon/dgpp-fp8-review-20260921/build-ci
+    Start   1: qwen_forward_fixture
+1/6 Test   #1: qwen_forward_fixture ...................   Passed    0.16 sec
+    Start   9: qwen_decode_fp8_head
+2/6 Test   #9: qwen_decode_fp8_head ...................   Passed    6.07 sec
+    Start  10: qwen_decode_fp8_head_row_independent
+3/6 Test  #10: qwen_decode_fp8_head_row_independent ...   Passed    5.50 sec
+    Start  96: qwen_engine_fp8_head_4
+4/6 Test  #96: qwen_engine_fp8_head_4 .................   Passed    3.80 sec
+    Start  97: qwen_engine_fp8_head_256
+5/6 Test  #97: qwen_engine_fp8_head_256 ...............   Passed    3.82 sec
+    Start 105: scale_gemm_test
+6/6 Test #105: scale_gemm_test ........................   Passed    3.62 sec
+
+100% tests passed, 0 tests failed out of 6
+
+Label Time Summary:
+fixture    =   0.16 sec*proc (1 test)
+gpu        =  22.81 sec*proc (5 tests)
+rdma       =   7.62 sec*proc (2 tests)
+
+Total Test time (real) =  22.98 sec

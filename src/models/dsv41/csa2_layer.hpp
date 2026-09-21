@@ -176,7 +176,6 @@ class Csa2Layer {
   // the forward inside the decode audit's certified-flip budget while giving
   // ~8x the occupancy of a single block; prefill stays unsplit.
   static constexpr int kWinDecodeSplit = 8;
-  static constexpr int kCandidateParts = 8;
   static constexpr int kEntryPad = 256;
 
  private:
@@ -184,7 +183,7 @@ class Csa2Layer {
     size_t total = 0;
     size_t qr, kv, q, o, oa, idx_q, q_fp8, q_scale, w, w_folded, comp_kv, comp_score, latent, ik;
     size_t pos, req_ids, req_zero, slots, pos_sel, entries, ent_pos, scratch_pos, iota, one_block;
-    size_t wlist, wcounts, wscratch, dlist, dcounts, topk, counts, cand, cand_counts, part_ws;
+    size_t wlist, wcounts, wscratch, dlist, dcounts, topk, counts, cand, cand_counts;
     size_t m_main, l_main, c_main, m_win, l_win, c_win;
     size_t gather_k, gather_scale, dot, logits, select_ws, counter, violations;
     int tile_cap = 0;
@@ -287,7 +286,6 @@ class Csa2Layer {
   int32_t* counts_ = nullptr;     // [T]
   int32_t* cand_ = nullptr;       // [T, candidate_blocks]
   int32_t* cand_counts_ = nullptr;  // [T]
-  uint64_t* part_ws_ = nullptr;   // [D, parts, candidate_blocks]
   float* m_main_ = nullptr;       // [ws_slots, lh]
   float* l_main_ = nullptr;
   float* c_main_ = nullptr;       // [ws_slots, lh, 512]

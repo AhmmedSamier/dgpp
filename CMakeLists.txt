@@ -416,6 +416,14 @@ target_link_libraries(qwen_decode_test PRIVATE dgpp_models_qwen_layers dgpp_mode
 dgpp_set_common(qwen_decode_test)
 add_test(NAME qwen_decode_test COMMAND qwen_decode_test --fixture ${QWEN_FORWARD_FIXTURE})
 set_tests_properties(qwen_decode_test PROPERTIES DEPENDS qwen_forward_fixture)
+add_test(NAME qwen_decode_fp8_head
+  COMMAND ${CMAKE_COMMAND} -E env DGPP_DENSE_GEMV_ROWS=4
+          $<TARGET_FILE:qwen_decode_test> --fixture ${QWEN_FORWARD_FIXTURE} --fp8-head)
+add_test(NAME qwen_decode_fp8_head_row_independent
+  COMMAND ${CMAKE_COMMAND} -E env DGPP_DENSE_GEMV_ROWS=256
+          $<TARGET_FILE:qwen_decode_test> --fixture ${QWEN_FORWARD_FIXTURE} --fp8-head)
+set_tests_properties(qwen_decode_fp8_head qwen_decode_fp8_head_row_independent
+  PROPERTIES DEPENDS qwen_forward_fixture RUN_SERIAL TRUE)
 
 # The MoE layer both families run: GLM's sigmoid+bias router
 # with the FP8 shared expert in the chain, Qwen's softmax router without
@@ -1176,6 +1184,13 @@ add_test(NAME qwen_engine_row_independent
 # same references — the form is bitwise, so every gate holds unchanged.
 add_test(NAME qwen_engine_bf12
   COMMAND ${CMAKE_COMMAND} -E env DGPP_BF12=both $<TARGET_FILE:qwen_engine_test>)
+foreach(_rows 4 256)
+  add_test(NAME qwen_engine_fp8_head_${_rows}
+    COMMAND ${CMAKE_COMMAND} -E env DGPP_DENSE_GEMV_ROWS=${_rows}
+            DGPP_TEST_DENSE_FP8=1 DGPP_TEST_FILTER=wide $<TARGET_FILE:qwen_engine_test>)
+  set_tests_properties(qwen_engine_fp8_head_${_rows}
+    PROPERTIES RESOURCE_LOCK qwen_engine_world RUN_SERIAL TRUE)
+endforeach()
 set_tests_properties(qwen_engine_test qwen_engine_row_independent qwen_engine_bf12 PROPERTIES RESOURCE_LOCK qwen_engine_world)
 set_tests_properties(qwen_engine_row_independent qwen_engine_bf12 PROPERTIES LABELS "gpu;rdma" RUN_SERIAL TRUE)
 
@@ -1421,6 +1436,10 @@ add_executable(qsa_index_bench benchmarks/micro/qsa_index_bench.cu)
 target_link_libraries(qsa_index_bench PRIVATE dgpp_models_qwen dgpp_kernels CUDA::cudart)
 dgpp_set_common(qsa_index_bench)
 
+add_executable(csa2_select_bench benchmarks/micro/csa2_select_bench.cu)
+target_link_libraries(csa2_select_bench PRIVATE dgpp_kernels CUDA::cudart)
+dgpp_set_common(csa2_select_bench)
+
 add_executable(dsa_bench benchmarks/micro/dsa_bench.cu src/common/log.cpp)
 target_link_libraries(dsa_bench PRIVATE dgpp_models_dsa CUDA::cudart CUDA::cublasLt)
 dgpp_set_common(dsa_bench)
@@ -1473,7 +1492,7 @@ foreach(_test qwen_forward_fixture qwen_forward_generate glm4_forward_fixture
 endforeach()
 if(DGPP_ENABLE_IBV)
   set_tests_properties(bus_test bus_selftest glm_tp_test glm4_tp_test glm4_engine_test
-    qwen_tp_test qwen_engine_test dsv41_tp_test dsv41_engine_test PROPERTIES LABELS "gpu;rdma" RUN_SERIAL TRUE)
+    qwen_tp_test qwen_engine_test qwen_engine_fp8_head_4 qwen_engine_fp8_head_256 dsv41_tp_test dsv41_engine_test PROPERTIES LABELS "gpu;rdma" RUN_SERIAL TRUE)
   set_tests_properties(nic_regress_selftest PROPERTIES LABELS "gpu;rdma" RUN_SERIAL TRUE)
 endif()
 set_tests_properties(roster_selftest PROPERTIES LABELS "host")

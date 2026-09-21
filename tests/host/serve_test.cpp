@@ -867,6 +867,61 @@ DGPP_TEST(serve_eosMidAnswer_finishReasonStop) {
           "one text token, then EOS (decoded to nothing)");
 }
 
+DGPP_TEST(serve_ignoreEos_runsPastTheStopToTheTokenLimit) {
+  // GIVEN the same 3-byte prompt, whose second token is EOS,
+  ServiceRig rig;
+  Client c(rig.port());
+
+  // WHEN the request asks to ignore it,
+  const std::string body = chat_body("abc", 8, ",\"ignore_eos\":true");
+  c.send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\n"
+             "Content-Type: application/json\r\nContent-Length: " +
+             std::to_string(body.size()) + "\r\n\r\n" + body);
+  const std::string resp = c.read_until("usage", 5000);
+
+  // THEN it runs to the cap instead: finish_reason "length", all 8
+  // completion tokens counted. The EOS is still drawn and still counted —
+  // ignoring it changes when the request retires, not what it samples.
+  require(resp.find("\"finish_reason\":\"length\"") != std::string::npos,
+          "ignore_eos → the cap, not the stop: " + resp);
+  require(resp.find("\"prompt_tokens\":3,\"completion_tokens\":8,"
+                    "\"total_tokens\":11") != std::string::npos,
+          "every token to the cap is counted: " + resp);
+}
+
+DGPP_TEST(serve_ignoreEos_defaultsOffAndRefusesNonBooleans) {
+  ServiceRig rig;
+  for (const std::string extra : {"", ",\"ignore_eos\":false"}) {
+    // Omitted or explicitly false: EOS still retires the request.
+    Client c(rig.port());
+    const std::string body = chat_body("abc", 8, extra);
+    c.send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\n"
+               "Content-Type: application/json\r\nContent-Length: " +
+               std::to_string(body.size()) + "\r\n\r\n" + body);
+    const std::string resp = c.read_until("usage", 5000);
+    require(resp.find("\"finish_reason\":\"stop\"") != std::string::npos,
+            "the default is unchanged: " + resp);
+  }
+  for (const std::string path : {"/v1/chat/completions", "/v1/completions"}) {
+    for (const std::string value : {"null", "\"yes\"", "1", "[]", "{}"}) {
+      // Every non-boolean, including explicit null, is refused by name.
+      Client c(rig.port());
+      const std::string extra = ",\"ignore_eos\":" + value;
+      const std::string body = path == "/v1/chat/completions"
+          ? chat_body("abcd", 2, extra)
+          : "{\"model\":\"" + kModel +
+                "\",\"prompt\":\"abcd\",\"max_tokens\":2" + extra + "}";
+      c.send_all("POST " + path + " HTTP/1.1\r\nHost: t\r\n"
+                 "Content-Type: application/json\r\nContent-Length: " +
+                 std::to_string(body.size()) + "\r\n\r\n" + body);
+      const std::string resp = c.read_until("}", 5000);
+      require(resp.find("400 Bad Request\r\n") != std::string::npos &&
+                  resp.find("\"param\":\"ignore_eos\"") != std::string::npos,
+              path + " must reject ignore_eos=" + value + ": " + resp);
+    }
+  }
+}
+
 DGPP_TEST(serve_refusalLadder_openAIErrorObjects) {
   // GIVEN the service,
   ServiceRig rig;

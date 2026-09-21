@@ -67,6 +67,15 @@ three values: switching never rebuilds them.
 `kv_dtype` affects only GLM-5.3's latent cache. Qwen and GLM-4.7 K/V
 caches stay BF16. Qwen's `ngram_table` and `dense_weights` settings
 control table residency and optional FP8 encoding of dense projections.
+`engine.fp8_head` defaults to `"gemv"`. With Qwen and `dense_weights: "fp8"`,
+set it to `"mma"` (or pass `--fp8-head mma`) to opt in to streaming MMA above
+the dense GEMV threshold and within the configured decode capacity. Other
+values are rejected; MMA with another model family or non-FP8 dense weights
+is also rejected. The setting is distributed by rank 0 and included in the
+configuration digest, so peers use the same dispatch. It changes floating-point
+accumulation order, including for short prefill chunks within that capacity;
+real-checkpoint teacher-forced numerical validation remains pending. Shipped
+recipes retain GEMV. See the [measurement and limits](../benchmarks/results/2026-09-20-qwen-fp8-head-e2e.md).
 The [single-node guide](qwen38_single_spark.md) covers the one-Spark memory
 plan, and the [two-node benchmark](../benchmarks/results/2026-09-16-qwen-nvfp4-w2.md)
 records the resident-versus-mapped placement decision.

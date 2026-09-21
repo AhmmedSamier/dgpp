@@ -906,7 +906,7 @@ bool Scheduler::append_token(int arrival, int32_t token,
   // reads it under DGPP_LOG_LEVEL=debug.
   DGPP_LOG_DEBUG("sched: request '{}' step {}: token {}", r.spec.id,
                  r.steps_done, token);
-  if (is_eos(token)) {
+  if (is_eos(token) && !r.spec.ignore_eos) {
     retire(arrival, Result::Status::kDone, Result::Reason::kEos);
   } else if (r.spec.cancel_after > 0 &&
              r.steps_done >= r.spec.cancel_after) {

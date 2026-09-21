@@ -366,9 +366,12 @@ struct QwenFamily final : ServeFamily {
   dgpp::QwenTextConfig cfg;
   std::string ckpt;
   std::unique_ptr<dgpp::QwenModel> model;
-  QwenFamily(const std::string& checkpoint, const std::optional<dgpp::RopeScaling>& rope_scaling)
+  bool fp8_head_mma;
+  QwenFamily(const std::string& checkpoint, const std::optional<dgpp::RopeScaling>& rope_scaling,
+             bool head_mma)
       : cfg(dgpp::QwenTextConfig::from_json_file((fs::path(checkpoint) / "config.json").string())),
-        ckpt(checkpoint) {
+        ckpt(checkpoint),
+        fp8_head_mma(head_mma) {
     // The engine's opt-in YaRN ramp (engine.rope_scaling): it rides the
     // parsed config, so the layer's table, the session's max_context()
     // and the memory plan's context line all take it from one place.
@@ -428,8 +431,8 @@ struct QwenFamily final : ServeFamily {
     dgpp::QwenLayerStream::set_resident_image_dir(dgpp::GlmLayerStream::resident_image_dir());
     model = std::make_unique<dgpp::QwenModel>(
         cfg, ckpt, forward_rows, pool_tokens,
-        fabric ? dgpp::QwenResidency::Resident : dgpp::QwenResidency::Streaming, reducer, fabric ? rank : 0,
-        fabric ? world_ : 1, slots, fabric && mtp, decode_rows);
+        fabric ? dgpp::QwenResidency::Resident : dgpp::QwenResidency::Streaming, reducer,
+        fabric ? rank : 0, fabric ? world_ : 1, slots, fabric && mtp, decode_rows, fp8_head_mma);
   }
   void destroy_model() override { model.reset(); }
   size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
@@ -662,12 +665,15 @@ struct Dsv41Family final : ServeFamily {
   }
 };
 
-std::unique_ptr<ServeFamily> make_family(const std::string& ckpt, int world, dgpp::LatentFormat kv_format,
-                                         const std::optional<dgpp::RopeScaling>& rope_scaling) {
+std::unique_ptr<ServeFamily> make_family(const std::string& ckpt, int world,
+                                         dgpp::LatentFormat kv_format,
+                                         const std::optional<dgpp::RopeScaling>& rope_scaling,
+                                         bool fp8_head_mma) {
   const dgpp::ModelArchitecture arch =
       dgpp::detect_architecture_file((fs::path(ckpt) / "config.json").string());
   if (arch == dgpp::ModelArchitecture::DeepseekV41) return std::make_unique<Dsv41Family>(ckpt);
-  if (arch == dgpp::ModelArchitecture::Qwen4Exp) return std::make_unique<QwenFamily>(ckpt, rope_scaling);
+  if (arch == dgpp::ModelArchitecture::Qwen4Exp)
+    return std::make_unique<QwenFamily>(ckpt, rope_scaling, fp8_head_mma);
   if (arch == dgpp::ModelArchitecture::Glm4Moe) return std::make_unique<Glm4Family>(ckpt);
   if (arch == dgpp::ModelArchitecture::GlmMoeDsa) return std::make_unique<GlmDsaFamily>(ckpt, world, kv_format);
   return std::make_unique<GlmFamily>(ckpt, world, kv_format);
@@ -1004,6 +1010,7 @@ int main(int argc, char** argv) {
       "    plan (the model, the pool, the activations, the prefix cache) is\n"
       "    checked against the node's free memory and refused with the plan\n"
       "    itemized when it does not fit\n"
+      "  [--fp8-head gemv|mma (default gemv)]: opt in to Qwen FP8 head streaming MMA.\n"
       "  [--bf16-weights checkpoint|bf12|bf12+bf16 (default checkpoint)]: the resident\n"
       "    form of the bf16 weights the decode GEMV reads. bf12: a lossless 12-bit\n"
       "    form ALONE (bitwise the bf16 GEMV, 0.75 of the bytes per step and of the\n"
@@ -1054,8 +1061,10 @@ int main(int argc, char** argv) {
       "    tokens, grows at tick top, and sheds the youngest request\n"
       "    (finish_reason length) when the pool runs out; every rank takes\n"
       "    rank 0's policy from the warm record\n"
-      "  [--prefill-budget-tokens N (default 0)]: Qwen/GLM-5.3-Flash graph prefill tokens/tick, 0 disables\n"
-      "  [--prefill-idle-budget-tokens N (default 0)]: larger budget without active decode; 0 uses the busy budget\n"
+      "  [--prefill-budget-tokens N (default 0)]: Qwen/GLM-5.3-Flash graph prefill tokens/tick, 0 "
+      "disables\n"
+      "  [--prefill-idle-budget-tokens N (default 0)]: larger budget without active decode; 0 uses "
+      "the busy budget\n"
       "  bus (the prefill's bulk all-reduce): [--bulk-pace-gbps X]: sender\n"
       "    pacing per (peer, lane) queue pair (default: derived from the\n"
       "    port rate, port / ((world-1) x lanes) x 0.85; 0 = unpaced)\n"
@@ -1077,6 +1086,7 @@ int main(int argc, char** argv) {
   int64_t http_max_body_bytes = dgpp::serve::kDefaultHttpMaxBodyBytes;
   std::string kv_dtype = "bf16";  // the latent cache's format
   std::string ngram_table = "resident";  // the Qwen n-gram table: resident | mmap
+  std::string fp8_head = "gemv";
   std::string dense_weights = "checkpoint";  // the Qwen dense stack: checkpoint | fp8
   std::string bf16_weights = "checkpoint";  // the bf16 decode weights' resident form: checkpoint | bf12 | bf12+bf16
   std::string prefill = "bounded";  // the DeepSeek-V4.1 prefill: bounded | exact
@@ -1158,6 +1168,7 @@ int main(int argc, char** argv) {
     kv_dtype = e.kv_dtype;
     ngram_table = e.ngram_table;
     dense_weights = e.dense_weights;
+    fp8_head = e.fp8_head;
     bf16_weights = e.bf16_weights;
     prefill = e.prefill;
     rope_scaling = e.rope_scaling;
@@ -1219,6 +1230,8 @@ int main(int argc, char** argv) {
     else if (a == "--kv-dtype") kv_dtype = next();
     else if (a == "--ngram-table") ngram_table = next();
     else if (a == "--dense-weights") dense_weights = next();
+    else if (a == "--fp8-head")
+      fp8_head = next();
     else if (a == "--bf16-weights") bf16_weights = next();
     else if (a == "--prefill") prefill = next();
     else if (a == "--embed-sharding") embed_sharding = next();
@@ -1321,7 +1334,8 @@ int main(int argc, char** argv) {
     const int effective_batch_min_live =
         graph_batch_min_live == 0 ? std::min(2, max_concurrency) : graph_batch_min_live;
     return std::format(
-        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} ngt={} dw={} bfw={} pf={} "
+        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} ngt={} dw={} bfw={} "
+        "fp8head={} pf={} "
         "emsh={} maxtok={} queue={} "
         "eos={} graph={} compact={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} "
         "msad={} "
@@ -1329,8 +1343,8 @@ int main(int argc, char** argv) {
         "pcgib={} adm={} win={} pfbudget={} pfidle={} pace={} inflight={} reasoning_in_content={} "
         "rs={}",
         model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port, max_concurrency,
-        kv_capacity, kv_dtype, ngram_table, dense_weights, bf16_weights, prefill, embed_sharding,
-        default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0,
+        kv_capacity, kv_dtype, ngram_table, dense_weights, bf16_weights, fp8_head, prefill,
+        embed_sharding, default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0,
         compact_batches ? 1 : 0, mtp ? 1 : 0, mtp_depth, mtp_schedule ? 1 : 0, mtp_schedule_row_ms,
         mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth,
         mtp_schedule_adapt ? 1 : 0, effective_batch_min_live, sampling_candidates, prefix_cache_gib,
@@ -1367,6 +1381,7 @@ int main(int argc, char** argv) {
         ws.kv_dtype = kv_dtype;
         ws.ngram_table = ngram_table;
         ws.dense_weights = dense_weights;
+        ws.fp8_head = fp8_head;
         ws.bf16_weights = bf16_weights;
         ws.prefill = prefill;
         ws.rope_scaling = rope_scaling;
@@ -1419,6 +1434,7 @@ int main(int argc, char** argv) {
         kv_dtype = ws.kv_dtype;
         ngram_table = ws.ngram_table;
         dense_weights = ws.dense_weights;
+        fp8_head = ws.fp8_head;
         bf16_weights = ws.bf16_weights;
         prefill = ws.prefill;
         rope_scaling = ws.rope_scaling;
@@ -1487,9 +1503,17 @@ int main(int argc, char** argv) {
   // The Qwen n-gram table's residency: set before the plan and the load
   // (both read it; the table's bytes leave the plan under mmap).
   dgpp::QwenLayerStream::set_ngram_table_mmap(ngram_table == "mmap");
+  if (fp8_head != "gemv" && fp8_head != "mma") {
+    DGPP_LOG_ERROR("engine.fp8_head (--fp8-head) must be gemv or mma, got '{}'", fp8_head);
+    return 1;
+  }
   if (dense_weights != "checkpoint" && dense_weights != "fp8") {
     DGPP_LOG_ERROR("--dense-weights must be checkpoint or fp8, got '{}'", dense_weights);
     return 2;
+  }
+  if (fp8_head == "mma" && dense_weights != "fp8") {
+    DGPP_LOG_ERROR("engine.fp8_head mma requires engine.dense_weights fp8");
+    return 1;
   }
   dgpp::Bf16Residency bf16_mode = dgpp::Bf16Residency::Checkpoint;
   if (!dgpp::parse_bf16_residency(bf16_weights, &bf16_mode)) {
@@ -1626,7 +1650,12 @@ int main(int argc, char** argv) {
     const auto t_boot = std::chrono::steady_clock::now();
     // The family from config.json's architecture (loaders/architecture.hpp):
     // everything below the engine interface comes from it.
-    std::unique_ptr<ServeFamily> family = make_family(ckpt, world, kv_format, rope_scaling);
+    std::unique_ptr<ServeFamily> family =
+        make_family(ckpt, world, kv_format, rope_scaling, fp8_head == "mma");
+    if (fp8_head == "mma" && std::string(family->name()) != "qwen4_exp") {
+      DGPP_LOG_ERROR("engine.fp8_head mma requires the Qwen family and engine.dense_weights fp8");
+      return 1;
+    }
     if (rope_scaling.has_value() && std::string(family->name()) != "qwen4_exp") {
       // A refused start, not a warning (review item 8, 2026-09-18): a WARN
       // scrolls past in a boot log and the world then serves with a knob the

@@ -1720,6 +1720,19 @@ bool GenerationService::parse_max_tokens(const minijson::Value& body, HttpRespon
   return true;
 }
 
+bool GenerationService::parse_ignore_eos(const minijson::Value& body, HttpResponseWriter& w,
+                                         bool* ignore) {
+  *ignore = false;
+  const auto* v = body.find("ignore_eos");
+  if (!v) return true;
+  if (!v->is_bool()) {
+    respond_error(w, 400, "ignore_eos must be a boolean", "invalid_request_error", "ignore_eos");
+    return false;
+  }
+  *ignore = v->as_bool();
+  return true;
+}
+
 bool GenerationService::parse_stream_options(const minijson::Value& body, HttpResponseWriter& w,
                                               bool stream, bool* usage, bool* obfuscation) {
   *usage = false;
@@ -1781,6 +1794,8 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
   if (!validate_chat_parameters(body, w)) return;
   int steps = 0;
   if (!parse_max_tokens(body, w, &steps, true)) return;
+  bool ignore_eos = false;
+  if (!parse_ignore_eos(body, w, &ignore_eos)) return;
   bool stream = false;
   if (const auto* sv = optional_field(body, "stream")) {
     if (!sv->is_bool()) {
@@ -1960,6 +1975,7 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
     sr.images = images;
     sr.prompt = prompt;
     sr.max_steps = steps;
+    sr.ignore_eos = ignore_eos;
     sr.sampling = sampling;
     sr.seed = seed + static_cast<uint64_t>(choice);
     sr.logprobs = logprobs;
@@ -2015,6 +2031,8 @@ void GenerationService::route_completions(const HttpRequest& req,
 
   int steps = 0;
   if (!parse_max_tokens(body, w, &steps, false)) return;
+  bool ignore_eos = false;
+  if (!parse_ignore_eos(body, w, &ignore_eos)) return;
   bool stream = false;
   if (const auto* sv = optional_field(body, "stream")) {
     if (!sv->is_bool()) {
@@ -2120,6 +2138,7 @@ void GenerationService::route_completions(const HttpRequest& req,
   sr.no_cache = !prefix_cache;
   sr.prompt = std::move(ids);
   sr.max_steps = steps;
+  sr.ignore_eos = ignore_eos;
   sr.sampling = sampling;
   sr.seed = seed;
   sr.logprobs = logprobs;

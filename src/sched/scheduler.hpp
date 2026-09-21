@@ -312,6 +312,12 @@ struct SchedulerRequest {
   int max_steps = 1;      // tokens to generate (prefill pick included)
   int cancel_after = 0;    // 0 = never; N = retire (Cancelled) once N
                            // tokens have been generated. N in [1, max_steps].
+  // Generate past the end-of-sequence set: the request runs to max_steps
+  // whatever it draws (OpenAI's ignore_eos). A benchmark wants a fixed
+  // number of decode steps rather than a reply that stops when the model
+  // decides it is done. The EOS set itself is unchanged — an ignored EOS
+  // is still sampled, still streamed, and still counts as a token.
+  bool ignore_eos = false;
   // The sampling spec (glm_sampler.hpp's warper contract). The default is
   // GREEDY — temperature 0, no draw, no seed consumed — so every manifest
   // and gate that predates sampling keeps its exact op stream.

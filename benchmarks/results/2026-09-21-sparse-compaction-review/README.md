@@ -27,3 +27,7 @@ Snapshotting all physical slots remains unchanged. Measure its C16 cost before o
 ## Subsequent idle-hardware validation
 
 The reviewed head `ec2ac41` subsequently passed the full native build, 113 CTest cases (10 checkpoint skips, zero failures), assertion-enabled capture checks, both mapped-state memcheck cases, and two-node API/concurrency checks. An isolated sixteen-slot snapshot probe measured the extra copy cost. See the [GPU validation record](../2026-09-21-sparse-compaction-gpu/README.md) for commands, scope, results and restoration evidence.
+
+## Upstream FP8 head merge
+
+Upstream `6c5d086` was merged while preserving both the independent FP8 head selection and default-off sparse compaction settings, including their configuration and journal tests. The merged code passed all seven standalone configuration tests, the rebuilt `fabric_serve_test`, and ARM64 C++20 syntax checks with warnings as errors for the serving application and Qwen engine test. Touched conflict ranges were formatted and the staged diff passed whitespace checks. These are workstation checks; GPU and fabric execution evidence above applies to the earlier implementation head. Production was untouched during this merge.

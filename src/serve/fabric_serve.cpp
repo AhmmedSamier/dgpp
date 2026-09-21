@@ -147,6 +147,9 @@ std::string encode_journal_tick(const GenerationService::PassEvents& events) {
         out += ",\"ca\":";
         append_json_int(&out, r.cancel_after);
       }
+      // Omitted when false, so every record that predates ignore_eos is
+      // byte-identical to what it was.
+      if (r.ignore_eos) out += ",\"ie\":true";
       // The prefix cache's inputs (M7): a request without boundaries that
       // has not opted out writes neither — the pre-cache record, byte for
       // byte.
@@ -376,6 +379,8 @@ std::string encode_journal_settings(const WorldSettings& s) {
   append_json_string(&out, s.ngram_table);
   out += ",\"dw\":";
   append_json_string(&out, s.dense_weights);
+  out += ",\"fp8_head\":";
+  append_json_string(&out, s.fp8_head);
   out += ",\"bfw\":";
   append_json_string(&out, s.bf16_weights);
   out += std::format(",\"compact\":{}", s.compact_batches ? 1 : 0);
@@ -538,6 +543,11 @@ JournalRecord decode_journal_line(std::string_view line) {
     s.kv_dtype = std::string(field(v, "kvdt", "settings").as_string());
     // Records before 2026-09-10 carry no table residency: resident.
     if (const dgpp::minijson::Value* ngt = v.find("ngt")) s.ngram_table = std::string(ngt->as_string());
+    if (const auto* head = v.find("fp8_head")) {
+      if (!head->is_string() || (head->as_string() != "gemv" && head->as_string() != "mma"))
+        throw std::runtime_error("journal: engine.fp8_head must be gemv or mma");
+      s.fp8_head = std::string(head->as_string());
+    }
     if (const dgpp::minijson::Value* dw = v.find("dw")) s.dense_weights = std::string(dw->as_string());
     // The bf16 weights' form (2026-09-19): records before it carry none.
     if (const dgpp::minijson::Value* bfw = v.find("bfw")) s.bf16_weights = std::string(bfw->as_string());
@@ -650,6 +660,11 @@ JournalRecord decode_journal_line(std::string_view line) {
         throw std::runtime_error("journal: submit '" + r.id +
                                  "' has bad max_steps");
       r.max_steps = static_cast<int>(m.as_int());
+      if (const dgpp::minijson::Value* ie = item.find("ie")) {
+        if (!ie->is_bool())
+          throw std::runtime_error("journal: submit '" + r.id + "' has bad ignore_eos");
+        r.ignore_eos = ie->as_bool();
+      }
       if (const dgpp::minijson::Value* ca = item.find("ca")) {
         if (!ca->is_number() || ca->as_int() < 0)
           throw std::runtime_error("journal: submit '" + r.id +

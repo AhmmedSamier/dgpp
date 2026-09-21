@@ -83,6 +83,19 @@ Their implementation and evaluation records are maintained separately:
 
 ## Remaining work
 
+The Qwen FP8 vocabulary-head streaming MMA dispatch is opt-in through
+`engine.fp8_head: "mma"`; GEMV remains the default. It is implemented with
+numerical, graph-dispatch and two-rank MTP test coverage, including the
+eight-warp specialization and short-prefill output comparisons. Native tests,
+the dispatch negative control, production-size kernel timing, and two-node
+API/op-stream validation passed. A Release-build ABBA workload measured
+11.26% higher end-to-end C4/MTP3 throughput with C1 effectively unchanged;
+[results and transcript limits](benchmarks/results/2026-09-20-qwen-fp8-head-e2e.md).
+Matched real-model teacher-forced numerical comparisons remain pending; see
+the [FP8 head record](benchmarks/results/2026-09-19-qwen-fp8-head.md).
+The [review follow-up](benchmarks/results/2026-09-21-qwen-fp8-head-review.md)
+tracks validation of the deployment setting after merging upstream.
+
 The [Docker cross-build](docs/cross-compiling.md) provides x86-to-ARM64/GB10
 compilation and install staging. Its [validation record](benchmarks/results/2026-09-19-spark-cross-build.md)
 tracks host checks separately from target execution on idle Spark hardware.

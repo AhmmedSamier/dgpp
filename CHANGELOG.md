@@ -6,6 +6,14 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Reduce DeepSeek-V4.1-Flash decode latency** (2026-09-21,
+  [#28](https://github.com/HawkBearPig/dgpp/issues/28)): parallelize decoder
+  candidate and restricted-entry scoring, replace streaming selection sorts
+  with exact radix selection, and skip scoring when all entries fit. Preserve
+  score arithmetic, original-ID ties, newest-block handling and output order.
+  Reuse the existing workspace and remove the partial-list buffer, saving
+  3.75 MiB per rank with six slots and depth-four MTP. See the
+  [performance and parity record](benchmarks/results/2026-09-21-deepseek-selection/README.md).
 - **Reuse long documents when their question changes** (2026-09-21,
   [#17](https://github.com/HawkBearPig/dgpp/issues/17)): save one earlier
   prefill snapshot alongside the final cut, preserve both through resumable

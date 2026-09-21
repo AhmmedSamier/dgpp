@@ -117,11 +117,17 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
               c.engine.sampling_candidates == 128 && c.engine.admission_window == 256 &&
               c.engine.bulk_pace_gbps == -1.0 && c.engine.bulk_inflight == -1 &&
               c.engine.rendezvous_timeout_ms == 120000 && !c.engine.reasoning_in_content &&
-              c.engine.kv_dtype == "bf16" && c.engine.bf16_weights == "checkpoint",
+              c.engine.kv_dtype == "bf16" && c.engine.bf16_weights == "checkpoint" &&
+              c.engine.fp8_head == "gemv",
           "the engine defaults");
   const auto compact = dgpp::serve::parse_cluster_config(
       R"({"model":"m","nodes":["h"],"engine":{"compact_batches":true}})", "t");
   require(compact.engine.compact_batches, "compact_batches opt-in");
+  for (const std::string mode : {"gemv", "mma"}) {
+    const auto head = dgpp::serve::parse_cluster_config(
+        R"({"model":"m","nodes":["h"],"engine":{"fp8_head":")" + mode + R"("}})", "t");
+    require(head.engine.fp8_head == mode, "fp8_head accepts " + mode);
+  }
   // The KV dtype: named by the config, checked by name.
   const dgpp::serve::ClusterConfig fp8 = dgpp::serve::parse_cluster_config(
       R"({"model":"m","nodes":["h"],"engine":{"kv_dtype":"fp8"}})", "t");
@@ -207,6 +213,10 @@ DGPP_TEST(cluster_config_refusesUnknownKeysAndBadValuesByName) {
        "'engine.prefill' must be \"bounded\" or \"exact\""},
       {R"({"model":"m","nodes":["h"],"engine":{"compact_batches":"true"}})",
        "'engine.compact_batches' must be true or false"},
+      {R"({"model":"m","nodes":["h"],"engine":{"fp8_head":"auto"}})",
+       "'engine.fp8_head' must be \"gemv\" or \"mma\""},
+      {R"({"model":"m","nodes":["h"],"engine":{"fp8_head":true}})",
+       "'engine.fp8_head' must be a string"},
       {R"({"model":"m","nodes":["h"],"engine":{"bf16_weights":"fp8"}})",
        "'engine.bf16_weights' must be \"checkpoint\", \"bf12\" or \"bf12+bf16\""},
       {R"({"model":"m","nodes":["h"],"engine":{"bf16_weights":true}})",

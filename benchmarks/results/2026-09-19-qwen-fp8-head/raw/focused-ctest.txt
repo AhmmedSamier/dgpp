@@ -1,0 +1,23 @@
+Internal ctest changing into directory: <checkout>/build-ci
+Test project <checkout>/build-ci
+    Start  1: qwen_forward_fixture
+1/6 Test  #1: qwen_forward_fixture ...................   Passed    0.14 sec
+    Start  6: qwen_decode_fp8_head
+2/6 Test  #6: qwen_decode_fp8_head ...................   Passed    5.85 sec
+    Start  7: qwen_decode_fp8_head_row_independent
+3/6 Test  #7: qwen_decode_fp8_head_row_independent ...   Passed    5.47 sec
+    Start 87: qwen_engine_fp8_head_4
+4/6 Test #87: qwen_engine_fp8_head_4 .................   Passed    3.88 sec
+    Start 88: qwen_engine_fp8_head_256
+5/6 Test #88: qwen_engine_fp8_head_256 ...............   Passed    3.92 sec
+    Start 96: scale_gemm_test
+6/6 Test #96: scale_gemm_test ........................   Passed    3.63 sec
+
+100% tests passed, 0 tests failed out of 6
+
+Label Time Summary:
+fixture    =   0.14 sec*proc (1 test)
+gpu        =  22.77 sec*proc (5 tests)
+rdma       =   7.81 sec*proc (2 tests)
+
+Total Test time (real) =  22.91 sec

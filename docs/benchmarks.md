@@ -587,6 +587,26 @@ The current mmap placement is within 0.8–1.5% of the resident baseline at C1,
 0.4–1.6% at C2 and 0.2–3.6% at C4. All five C1 transcripts match byte for
 byte. Mmap saves 23.84 GiB per rank and is the deployment default.
 
+### Qwen FP8 vocabulary-head A/B, world 2, MTP3 (2026-09-20)
+
+A Release-build ABBA comparison of the previous head dispatch and streaming
+MMA measured **129.28 → 143.84 request-wall tokens/s (+11.26%) at C4**.
+C1 was effectively unchanged (74.94 → 75.06, +0.16%). This uses the five
+fixed prompt classes, greedy output capped at 256 tokens, FP8 dense weights,
+mmap n-gram tables, and prefix caching disabled. Three repetitions in each
+of two process epochs per build give six measurements per class/concurrency.
+Both block comparisons improved C4 throughput (+11.83% and +10.69%).
+
+All 300 measured requests completed with 256 output tokens. C4 greedy text
+varied within the unchanged baseline as well as across builds, so this is
+fixed-prompt/output-budget throughput evidence, not identical-token-path or
+quality-equivalence evidence. The [record and raw results](../benchmarks/results/2026-09-20-qwen-fp8-head-e2e.md)
+include per-class results, calibration, transcript comparisons and restoration.
+These measurements predate the deployment switch: the optimized path now
+requires `engine.fp8_head: "mma"`. The shipped default remains `"gemv"`;
+this is historical evidence for the kernel change, not a rerun of the
+subsequent configuration plumbing or current upstream integration.
+
 ### Qwen3.8-Flash-Next-NVFP4, world 1, FP8 dense
 
 | class | c=1 | c=2 | c=4 | c=1 greedy, ms/token |
@@ -1047,3 +1067,36 @@ inputs; the 131K-pool cache exceeds the Spark's L2. Use profiler counters
 to distinguish memory saturation from instruction or launch costs. See the
 [September 21 comparison](../benchmarks/results/2026-09-21-qwen-qsa-select.md)
 for the baseline, exactness gates and full-model measurements.
+
+### 9.9 DeepSeek CSA2 score and selection microbenchmark
+
+Run on an idle GPU:
+
+```bash
+cmake --preset release
+cmake --build build-release --target csa2_select_bench -j 4
+CUDA_DEVICE_MAX_CONNECTIONS=32 build-release/csa2_select_bench \
+  --ctx 131072 --rows 5 --iters 30 --warmup 5
+```
+
+The default measures DeepSeek's candidate selector, restricted selector,
+and their combined cost using captured CUDA graphs. `combined` contains
+one candidate and **one** restricted call; a full model pass has five
+restricted calls. `restricted_select_only` is a diagnostic of the unchanged
+prefill selector over precomputed logits, not a stage of the new decoder.
+Use `--stage candidate`, `--stage restricted` or `--stage combined` to narrow
+the run, and `--eager` for ordinary launches. `--rows 1`, `5` and `30` cover
+plain decode, one depth-four verification batch and six such requests.
+
+JSONL reports median/min/max CUDA-event latency with repeated inputs and
+with L2 eviction outside each timed interval. The physical block table is
+permuted. Candidate and entry IDs, causal visibility, ties and padding are
+checked against a CPU sort of the unchanged DSA scorer's keys before and
+after timing. This validates selection; the independent score arithmetic
+oracle lives in `csa2_test`. The optional `--family flash`, `full` and
+`deepseek-encoder` modes exercise the existing DSA path as controls.
+
+See the [DeepSeek comparison](../benchmarks/results/2026-09-21-deepseek-selection/README.md)
+for matched old/new binaries, the short/long-context matrix and full-model
+checks, and the [cross-model investigation](../benchmarks/results/2026-09-21-attention-selection-audit/README.md)
+for why this change is specific to DeepSeek's decoder.
