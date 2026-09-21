@@ -102,8 +102,9 @@ establish broad model-quality equivalence or long-context retrieval quality.
 The [Docker cross-build](docs/cross-compiling.md) provides x86-to-ARM64/GB10
 compilation and install staging. Its [validation record](benchmarks/results/2026-09-19-spark-cross-build.md)
 tracks host checks separately from target execution on idle Spark hardware.
-Compiler versions are printed at build time. Target validation of the current
-upstream revision remains pending an idle-hardware maintenance window.
+Compiler versions are printed at build time. The follow-up based on upstream
+`c5a6913` passed the two-Spark API and operation-stream checks recorded there;
+four-node and full-suite hardware coverage remain separate gates.
 
 Qwen graph serving can interleave prefill chunks with decode using
 `engine.prefill_budget_tokens`; zero preserves monolithic admission.

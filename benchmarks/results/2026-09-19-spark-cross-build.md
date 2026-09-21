@@ -203,9 +203,45 @@ an ignored local `docker` shim injects that flag when checking the actual
 wrapper. The repository wrapper's networking behavior is unchanged. Logs are retained
 under `artifacts/issue-21/`.
 
-Target validation remains pending an authorized idle-hardware window. No Spark
-was contacted or restarted for these local checks. The earlier hardware results
-in this record do not validate this upstream revision. Before marking issue #21
-complete, stage the current cross-built server on both idle Sparks, run
-`serve_api_check.py`, stop the test world, compare both ranks' operation-stream
-digests, and restore and verify the exact production release and configuration.
+### Follow-up target validation
+
+After the local checks, an authorized idle-hardware window validated the
+cross-built server from `196d0d5c33b7` (upstream `c5a6913` plus the tooling,
+tests and documentation changes above). Both ranks ran
+`0.1.0+g196d0d5c33b7` with server SHA256
+`0f47f6600fb857a78e212eb3399ddf9985c4d6cea705e741ee5369dec71bfe86`.
+This closes the two-Spark target-validation gap identified in issue #21.
+
+The temporary deployment used the upstream Qwen NVFP4 two-rank recipe at
+C4/MTP1, with 65,536 KV tokens, 1.5 GiB prefix snapshots, FP8 dense weights,
+`bf12+bf16` BF16 weights and the MMA vocabulary head. HTTP port 30002,
+fabric/journal ports 29870/29871, release staging and logs were isolated from
+production. Both rank logs reported configuration digest `84a458bdfefa48c0`.
+Preflight verified both staged versions, checkpoints, RoCE devices and runtime
+library resolution before startup.
+
+`python3 scripts/serve_api_check.py 127.0.0.1 30002` passed all nine checks:
+streamed and non-streamed stops and multiple choices, logit-bias forcing,
+banning and validation, cached-token usage, and reasoning-token usage. The
+test world shut down cleanly, with both operation streams reporting MD5
+`0b55ebf21c5fc22f83127cf219e253f7`. Both logs were inspected; neither reported
+an ERROR or FATAL. Both reported the checkpoint's missing `min_p` and
+`repetition_penalty` generation defaults and their documented fallback.
+
+Production was restored to `0.1.0+g116d3c375d87`, retaining the original C16/MTP3
+configuration, 256/512 prefill budgets and 148 prefix slots. The deployment and
+site-file hashes were unchanged, and the resolved configuration matched its
+pre-maintenance snapshot. Both ranks again ran the original binary SHA256
+`126c060ca0eff544dba2379f9a38b91c43663557e698b5803a936d4c2224e57b`;
+their resolved configuration files had identical SHA256
+`4acb2a06d9c37a059e4c85afbd48c43bb8950b88a3a7ec792b9dab187041c969`.
+Two smoke requests returned `READY`; the second reused 808 prompt tokens.
+Service metrics reported no engine failure. The maintenance locks were released
+after verification.
+
+The commands, both-rank logs, API output, digests and restoration snapshots
+are under `artifacts/issue-21/server-validation/`. This run validates the
+current cross-built server's two-node request path. It does not rerun the full
+native or GPU/RDMA CTest suites, establish numerical equivalence or throughput,
+or provide four-node coverage. The subsequent record/status update changes
+only Markdown; the executed server revision remains `196d0d5c33b7`.
