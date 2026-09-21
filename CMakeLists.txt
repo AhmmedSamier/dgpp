@@ -1407,6 +1407,10 @@ add_executable(qsa_index_bench benchmarks/micro/qsa_index_bench.cu)
 target_link_libraries(qsa_index_bench PRIVATE dgpp_models_qwen dgpp_kernels CUDA::cudart)
 dgpp_set_common(qsa_index_bench)
 
+add_executable(csa2_select_bench benchmarks/micro/csa2_select_bench.cu)
+target_link_libraries(csa2_select_bench PRIVATE dgpp_kernels CUDA::cudart)
+dgpp_set_common(csa2_select_bench)
+
 add_executable(dsa_bench benchmarks/micro/dsa_bench.cu src/common/log.cpp)
 target_link_libraries(dsa_bench PRIVATE dgpp_models_dsa CUDA::cudart CUDA::cublasLt)
 dgpp_set_common(dsa_bench)

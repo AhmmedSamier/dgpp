@@ -66,6 +66,11 @@ record the modes measured for each deployment.
   decoding, with scalar or batched graphs selected for the active requests.
   Greedy MTP produces the same tokens as plain decode; sampled MTP
   preserves the target distribution.
+- **Faster DeepSeek decoder selection**: parallel scoring and exact radix
+  selection reduce the time spent choosing attention entries, especially at
+  long context. Scores, tie rules and selected entries are preserved; existing
+  recipes use the improvement automatically. See the
+  [comparison and validation](benchmarks/results/2026-09-21-deepseek-selection/README.md).
 - **Row-aware tensor-core execution and grouped prefill**: dense kernels select
   their lowering from the active row count, and queued cold prompts can share a
   forward pass while retaining request-local attention and state.

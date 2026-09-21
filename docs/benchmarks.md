@@ -1047,3 +1047,36 @@ inputs; the 131K-pool cache exceeds the Spark's L2. Use profiler counters
 to distinguish memory saturation from instruction or launch costs. See the
 [September 21 comparison](../benchmarks/results/2026-09-21-qwen-qsa-select.md)
 for the baseline, exactness gates and full-model measurements.
+
+### 9.9 DeepSeek CSA2 score and selection microbenchmark
+
+Run on an idle GPU:
+
+```bash
+cmake --preset release
+cmake --build build-release --target csa2_select_bench -j 4
+CUDA_DEVICE_MAX_CONNECTIONS=32 build-release/csa2_select_bench \
+  --ctx 131072 --rows 5 --iters 30 --warmup 5
+```
+
+The default measures DeepSeek's candidate selector, restricted selector,
+and their combined cost using captured CUDA graphs. `combined` contains
+one candidate and **one** restricted call; a full model pass has five
+restricted calls. `restricted_select_only` is a diagnostic of the unchanged
+prefill selector over precomputed logits, not a stage of the new decoder.
+Use `--stage candidate`, `--stage restricted` or `--stage combined` to narrow
+the run, and `--eager` for ordinary launches. `--rows 1`, `5` and `30` cover
+plain decode, one depth-four verification batch and six such requests.
+
+JSONL reports median/min/max CUDA-event latency with repeated inputs and
+with L2 eviction outside each timed interval. The physical block table is
+permuted. Candidate and entry IDs, causal visibility, ties and padding are
+checked against a CPU sort of the unchanged DSA scorer's keys before and
+after timing. This validates selection; the independent score arithmetic
+oracle lives in `csa2_test`. The optional `--family flash`, `full` and
+`deepseek-encoder` modes exercise the existing DSA path as controls.
+
+See the [DeepSeek comparison](../benchmarks/results/2026-09-21-deepseek-selection/README.md)
+for matched old/new binaries, the short/long-context matrix and full-model
+checks, and the [cross-model investigation](../benchmarks/results/2026-09-21-attention-selection-audit/README.md)
+for why this change is specific to DeepSeek's decoder.

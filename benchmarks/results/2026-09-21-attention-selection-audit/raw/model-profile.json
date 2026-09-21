@@ -1,0 +1,130 @@
+{
+  "source_commit": "5631fa1a335a7ecb86b257be358c09677ed08582",
+  "binary_sha256": "1e6598991a71c96308b0e4b8ddbe841d183dd222cc6144dbfdd2014f208c548d",
+  "operation_streams": {
+    "0": "c180065c1df30f843b785e87f630f3dd0d7d6c64abb1b5466748115c1aa82a64",
+    "1": "c180065c1df30f843b785e87f630f3dd0d7d6c64abb1b5466748115c1aa82a64",
+    "2": "c180065c1df30f843b785e87f630f3dd0d7d6c64abb1b5466748115c1aa82a64",
+    "3": "c180065c1df30f843b785e87f630f3dd0d7d6c64abb1b5466748115c1aa82a64"
+  },
+  "configuration": {
+    "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+    "world_size": 4,
+    "release": "",
+    "engine": {
+      "max_concurrency": 6,
+      "kv_capacity": 131072,
+      "bf16_weights": "bf12",
+      "prefill": "bounded",
+      "default_max_tokens": 256,
+      "queue_limit": 8,
+      "max_connections": 64,
+      "decode_graph": true,
+      "mtp": true,
+      "mtp_depth": 4,
+      "prefix_cache_gib": 1.5,
+      "admission": "full",
+      "admission_window": 256,
+      "sampling_candidates": 128,
+      "stats_interval_s": 10,
+      "mtp_schedule": true,
+      "mtp_schedule_lambda": 0.045
+    },
+    "paths": {
+      "resident_cache": ""
+    },
+    "http": {
+      "bind_host": "127.0.0.1",
+      "port": 30027
+    }
+  },
+  "samples": [
+    {
+      "prompt_tokens": 31631,
+      "generated_tokens": 192,
+      "decode_passes": 60,
+      "verification_rows_histogram": {
+        "5": 21,
+        "2": 16,
+        "4": 23
+      },
+      "mean_graph_span_ms": 77.20694506666666,
+      "engine_ms_per_pass": 76.86333333333333,
+      "decoder_selection_ms_per_pass": 19.162459199999997,
+      "decoder_selection_fraction_of_graph_span": 0.24819605520531338,
+      "stages": {
+        "other": {
+          "ms_per_pass": 56.40457546666667,
+          "calls_per_pass": 1542.0,
+          "ms_per_call": 0.03657884271508863
+        },
+        "encoder_dsa": {
+          "ms_per_pass": 0.5079248,
+          "calls_per_pass": 3.0,
+          "ms_per_call": 0.16930826666666665
+        },
+        "candidate_parts": {
+          "ms_per_pass": 0.7611290666666667,
+          "calls_per_pass": 1.0,
+          "ms_per_call": 0.7611290666666667
+        },
+        "candidate_merge": {
+          "ms_per_pass": 0.5769349333333333,
+          "calls_per_pass": 1.0,
+          "ms_per_call": 0.5769349333333333
+        },
+        "restricted": {
+          "ms_per_pass": 17.824395199999998,
+          "calls_per_pass": 5.0,
+          "ms_per_call": 3.56487904
+        }
+      },
+      "finish_reason": "length",
+      "reasoning_tokens": 192
+    },
+    {
+      "prompt_tokens": 121384,
+      "generated_tokens": 192,
+      "decode_passes": 60,
+      "verification_rows_histogram": {
+        "5": 20,
+        "2": 15,
+        "4": 25
+      },
+      "mean_graph_span_ms": 82.2582176,
+      "engine_ms_per_pass": 81.94999999999999,
+      "decoder_selection_ms_per_pass": 21.8604928,
+      "decoder_selection_fraction_of_graph_span": 0.2657545159354389,
+      "stages": {
+        "other": {
+          "ms_per_pass": 57.51921706666667,
+          "calls_per_pass": 1542.0,
+          "ms_per_call": 0.037301697189796805
+        },
+        "encoder_dsa": {
+          "ms_per_pass": 1.7028234666666666,
+          "calls_per_pass": 3.0,
+          "ms_per_call": 0.5676078222222223
+        },
+        "candidate_parts": {
+          "ms_per_pass": 2.7310901333333333,
+          "calls_per_pass": 1.0,
+          "ms_per_call": 2.7310901333333333
+        },
+        "candidate_merge": {
+          "ms_per_pass": 0.6304442666666668,
+          "calls_per_pass": 1.0,
+          "ms_per_call": 0.6304442666666668
+        },
+        "restricted": {
+          "ms_per_pass": 18.4989584,
+          "calls_per_pass": 5.0,
+          "ms_per_call": 3.69979168
+        }
+      },
+      "finish_reason": "length",
+      "reasoning_tokens": 192
+    }
+  ],
+  "method": "Kernel sums grouped by CUDA graph-launch correlation IDs, assigned to client request wall-clock windows using Nsight session UTC epoch. Exactly one candidate construction, five restricted calls and three encoder DSA calls per pass. Profiler timings describe this trace; no optimized-build comparison."
+}

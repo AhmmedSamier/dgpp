@@ -291,6 +291,25 @@ exact in e4m3 whenever the row's four block exponents span ≤ 17 binades —
 the append kernel checks and counts violations; D6), which keeps the fused
 decode select's streaming layout and Hadamard-free dots.
 
+**Decoder implementation update (2026-09-21, issue #28).** Layer 20's
+candidate selector and the restricted selectors at layers 20/24/28/32/36
+now score in parallel stripes, then select by exact radix refinement of
+the score/original-entry-ID keys. Each stripe prefetches four index rows
+before evaluating the existing per-head FP32 arithmetic. The selectors
+retain the newest complete block's pin, append every visible entry of an
+incomplete block, and return ascending IDs with the same padding. When
+every candidate fits, IDs are written directly without scoring or sorting.
+The encoder's three DSA selectors and the prefill path retain their existing
+implementations.
+
+Both decoder stages use the key region of the existing DSA workspace,
+with a fixed `max_entries` row stride across graph replays and batch sizes.
+The old eight-part candidate buffer is gone: six slots with depth-four MTP
+save 3.75 MiB per rank. No per-step allocation or additional global histogram
+is needed. The September 13 records below describe the original implementation;
+the [September 21 record](../benchmarks/results/2026-09-21-deepseek-selection/README.md)
+documents the replacement and its exactness and performance checks.
+
 ### 1.4 The window ring and rollback
 
 Every layer keeps `[max_requests, 128, 512 fp8 + 16 scale bytes]`. The
