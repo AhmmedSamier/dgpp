@@ -75,6 +75,15 @@ struct PickVerdict {
   uint64_t peer_digests[kPickMaxWorld] = {};
 };
 
+static_assert(
+    [] {
+      constexpr PickVerdict verdict{};
+      for (const auto winner : verdict.winners)
+        if (winner != -1) return false;
+      return true;
+    }(),
+    "Every picker row must initialize to the invalid token sentinel");
+
 // Kernel 1 (before the fold): for each of `rows` rows of logits[rows,
 // vocab_count] (fp32, this rank's slice starting at vocab id
 // `vocab_begin`), the top-2 under the canonical order -> locals[row], and
