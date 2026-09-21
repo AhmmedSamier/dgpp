@@ -1,0 +1,14 @@
+{
+  "binary_sha256": "460f5ed1c4b4e99d9be99768a4f636ab2aa40e21dcb43ab25d2360c5dc644bdd",
+  "original_config_bytes_unchanged": true,
+  "resolved_config_unchanged": true,
+  "health": {
+    "status": "ok",
+    "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8"
+  },
+  "engine_failed": false,
+  "active": 0,
+  "queued": 0,
+  "first_cached_tokens": 0,
+  "second_cached_tokens": 176
+}

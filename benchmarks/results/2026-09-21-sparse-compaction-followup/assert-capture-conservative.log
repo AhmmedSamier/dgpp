@@ -1,0 +1,5 @@
+[ OK ] qwen_wide_compaction_keeps_numerical_dispatch_range
+[ OK ] qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation
+[ OK ] qwen_mtp_wide_hidden_projection_real_shape_is_kernel_only
+[ OK ] qwen_wide_bf16_dense_real_shards_are_kernel_only
+4 tests, 0 failed
