@@ -608,6 +608,7 @@ void QwenModel::prefetch_ple_value_side(const QwenLayerResident& r) {
 QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
   const int T = run.T, req = run.req;
   walk_rows_ = T;
+  gemm_.set_kernel_only_rows(run.decode ? 17 : 0, run.decode ? kDecodeRowsMax : 0);
   gemm_.set_bf12_wide(run.decode);  // the decode batch's alone (kernels/gemm.hpp)
   if (run.capture && loader_.residency() != QwenResidency::Resident)
     throw std::logic_error("run_rows: a capture needs a resident stack");
@@ -1076,6 +1077,7 @@ size_t QwenModel::bf12_plan_bytes(const QwenTextConfig& cfg, const QwenLocalGeom
 void QwenModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode_row,
                              bool capture, int head_rows, int batch_requests) {
   walk_rows_ = T;
+  gemm_.set_kernel_only_rows(decode_row ? 17 : 0, decode_row ? kDecodeRowsMax : 0);
   gemm_.set_bf12_wide(decode_row);  // the decode batch's alone (kernels/gemm.hpp)
   if (!mtp_) throw std::logic_error("mtp_run_rows: MTP is not enabled");
   if (T <= 0 || T > max_tokens_) throw std::invalid_argument("mtp_run_rows: rows");
@@ -1102,7 +1104,9 @@ void QwenModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, 
   qwen_mtp_embed_gather_bf16(globals_.embed, tokens, mtp_e_, T, H, stream_);
   qwen_rmsnorm_bf16(mtp_e_, globals_.mtp_pre_fc_norm_embedding, mtp_en_, T, H, eps, stream_);
   // Wide embedding projections can capture an Lt memset node, which is
-  // unsafe for collective graph replay. Keep those decode shapes kernel-only.
+  // unsafe for collective graph replay. Use MMA above 32 tokens; smaller
+  // shapes retain this helper's existing dispatch, with the shared GEMM
+  // guard keeping 17-32 decode rows kernel-only too.
   qwen_mtp_hidden_projection(gw_, mtp_en_, globals_.mtp_fc_embedding, mtp_ein_, T, 1, H,
                              decode_row && T > 32, stream_);
   qwen_mtp_fuse_bf16(mtp_ein_, mtp_enc_, mtp_r_, T, hc, H, stream_);

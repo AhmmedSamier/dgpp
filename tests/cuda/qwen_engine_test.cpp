@@ -741,4 +741,88 @@ DGPP_TEST(qwen_mtp_wide_hidden_projection_real_shape_is_kernel_only) {
     }
 }
 
+DGPP_TEST(qwen_wide_bf16_dense_real_shards_are_kernel_only) {
+  using namespace dgpp::kda_test;
+  constexpr int H = 2560, max_rows = 64;
+  const auto act = random_bf16_normal(8201, max_rows * H, 0.3f);
+  const auto weight = random_bf16_normal(8202, H * H, 0.02f);
+  DevBuf da(act.size() * 2), dw(weight.size() * 2), out(max_rows * H * 2), ws(64u << 20);
+  da.upload(act.data(), act.size() * 2);
+  dw.upload(weight.data(), weight.size() * 2);
+  dgpp::CublasLtGemm gemm;
+  gemm.set_decode_rows(4);
+  const auto stream = test_stream();
+  const auto capture = [&](int rows, int cols, bool guarded, bool check_nodes) {
+    gemm.set_kernel_only_rows(guarded ? 17 : 0, guarded ? 64 : 0);
+    cudaGraph_t graph = nullptr;
+    cudaGraphExec_t executable = nullptr;
+    DGPP_CUDA_OK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+    gemm.matmul(da.p, dw.p, out.p, rows, cols, H, dgpp::DType::BF16, dgpp::GemmOut::BF16, H, ws.p,
+                64u << 20, stream);
+    DGPP_CUDA_OK(cudaStreamEndCapture(stream, &graph));
+    if (check_nodes) dgpp::check_decode_graph(graph, 0, "Qwen wide BF16 dense shard");
+    DGPP_CUDA_OK(cudaGraphInstantiate(&executable, graph, 0));
+    DGPP_CUDA_OK(cudaGraphLaunch(executable, stream));
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+    std::vector<uint16_t> values(static_cast<size_t>(rows) * cols);
+    out.download(values.data(), values.size() * 2);
+    DGPP_CUDA_OK(cudaGraphLaunch(executable, stream));
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+    std::vector<uint16_t> replay(values.size());
+    out.download(replay.data(), replay.size() * 2);
+    require_bitwise("wide BF16 dense replay", values.data(), replay.data(), values.size() * 2);
+    DGPP_CUDA_OK(cudaGraphExecDestroy(executable));
+    DGPP_CUDA_OK(cudaGraphDestroy(graph));
+    return values;
+  };
+  // GDN a/b have 48 value heads sharded over TP=4 or TP=2. The larger
+  // widths cover a TP=4 value projection and a full hidden projection.
+  for (const int cols : {12, 24, 1536, H}) {
+    for (const int rows : {24, 48, 64}) {
+      const auto values = capture(rows, cols, true, true);
+      for (int row = 0; row < rows; ++row)
+        for (const int col : {0, cols / 2, cols - 1}) {
+          double expected = 0;
+          for (int k = 0; k < H; ++k)
+            expected += static_cast<double>(dgpp::bf16_bits_to_float(act[row * H + k])) *
+                        dgpp::bf16_bits_to_float(weight[col * H + k]);
+          const float actual = dgpp::bf16_bits_to_float(values[row * cols + col]);
+          require(std::abs(actual - expected) <= 0.008 * std::abs(expected) + 1e-5,
+                  "wide BF16 dense shard matches the fp64 oracle");
+        }
+    }
+    for (const int rows : {1, 4, 8, 16}) {
+      const auto baseline = capture(rows, cols, false, false);
+      const auto guarded = capture(rows, cols, true, false);
+      require_bitwise("existing decode dispatch", baseline.data(), guarded.data(),
+                      baseline.size() * 2);
+    }
+    // Leaving decode must restore the old short-prefill dispatch.
+    const auto prefill = capture(24, cols, false, false);
+    (void)capture(24, cols, true, true);
+    const auto resumed = capture(24, cols, false, false);
+    require_bitwise("prefill after wide decode", prefill.data(), resumed.data(),
+                    prefill.size() * 2);
+  }
+  gemm.set_kernel_only_rows(17, 64);
+  bool rejected = false;
+  try {
+    gemm.matmul(da.p, static_cast<uint16_t*>(dw.p) + 1, out.p, 24, 12, H, dgpp::DType::BF16,
+                dgpp::GemmOut::BF16, H, ws.p, 64u << 20, stream);
+  } catch (const std::invalid_argument& e) {
+    rejected = std::string(e.what()).find("refusing cuBLASLt fallback") != std::string::npos;
+  }
+  require(rejected, "unaligned wide dense weights fail before an Lt fallback");
+  rejected = false;
+  try {
+    dgpp::QwenGemmWorkspace g{&gemm, ws.p, 64u << 20};
+    dgpp::qwen_mtp_hidden_projection(g, static_cast<uint16_t*>(da.p),
+                                     static_cast<uint16_t*>(dw.p) + 1,
+                                     static_cast<uint16_t*>(out.p), 64, 1, H, true, stream);
+  } catch (const std::invalid_argument& e) {
+    rejected = std::string(e.what()).find("refusing cuBLASLt fallback") != std::string::npos;
+  }
+  require(rejected, "unaligned wide MTP weights fail before an Lt fallback");
+}
+
 int main() { return dgpp::test::run_all(); }

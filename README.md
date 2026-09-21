@@ -385,6 +385,10 @@ rows; full GLM-5.3 supports sixteen; GLM-4.7 and DeepSeek support
 thirty-two; Qwen supports sixty-four (sixteen requests at MTP depth 3). Graph families capture the slot prefixes that fit, with scalar
 fallback for an unsupported active shape. The startup log reports the selected
 capacity and rejects a configuration that cannot fit its required rows.
+Qwen BF16 products at 17-64 decode rows use kernel-only lowering, including
+BF16 projections retained by FP8-dense storage. The shared 8/12-slot graph
+families also affect other models above eight slots and can reduce the number
+of scheduled verification depths that fit; see [operations](docs/operations.md).
 
 Sampling defaults come from the checkpoint's `generation_config.json`
 and per-request fields. Flags such as `--temperature` override them for

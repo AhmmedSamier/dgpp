@@ -138,6 +138,11 @@ class CublasLtGemm : public IGemm {
   // calls up to it take the GEMV core. [1, kGemmDecodeLoweringRows].
   void set_decode_rows(int rows);
   int decode_rows() const;
+  // Force BF16 matmul in this inclusive row range through kernel-only
+  // lowering. Other row counts retain their existing dispatch. The model
+  // enables this for decode and clears it for prefill; (0, 0) disables it.
+  // Unsupported shapes fail explicitly instead of falling back to cuBLASLt.
+  void set_kernel_only_rows(int min_rows, int max_rows);
   // Decode-shaped bf16 calls take the streaming tensor-core GEMM
   // (mma_gemv.hpp) instead of the 4-row GEMV chunks: the weights read once
   // for every row of the launch, each row's chain the same whatever m. The

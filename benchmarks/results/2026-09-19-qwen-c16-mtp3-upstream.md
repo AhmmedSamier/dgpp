@@ -50,7 +50,7 @@ The new CUDA regression was subsequently built and passed in the 2026-09-20 vali
 ## Native GB10 and two-Spark validation (2026-09-20)
 
 The exact working-tree patch over the base above was transferred to a separate
-`/home/jon/dgpp-c16-pr` checkout on Spark 1. Its SHA256 was
+`<checkout>` checkout on Spark 1. Its SHA256 was
 `e4a752d6c349175d0302064928c83072fa02985be58e3dc0cb42cded7e689fee`.
 No other contribution's source or build tree was modified.
 
@@ -105,3 +105,78 @@ Touched C++/CUDA lines were formatted with the repository style before
 submission. A token-stream comparison confirmed formatting and comment
 relocation did not change the tested code; subsequent changes were documentation
 only. The raw patch hash above identifies the pre-formatting tested source.
+
+## Four-node review follow-up
+
+The maintainer reported that the tested PR head passes the full 116-case suite
+with all checkpoints available and preserves shipped C1-C4 behavior. At C16,
+however, the four-node FP8 checkpoint captures memset nodes at 24 rows even
+with FP8 dense weights: GDN a/b projections remain BF16. The maintainer's
+`DGPP_DENSE_GEMV_ROWS=64` diagnostic boots and serves C16 on four ranks with
+matching operation streams. These results are maintainer-reported, not local
+reproductions: see PR #13's review and its correction dated 2026-09-20.
+
+The follow-up enables a bounded kernel-only BF16 matmul range during Qwen
+decode (17-64 rows), clearing it during prefill. It uses the existing GEMV
+chunks and BF12 companions, preserving <=16-row dispatch. Unsupported shapes
+throw instead of returning to Lt. New regressions cover GDN TP=4/TP=2 shard
+widths and larger projections at 24/48/64 rows, graph node types, fp64 numerical
+references, small-row/prefill equivalence, and unaligned-weight rejection.
+GLM-4.7 now owns and enforces its 32-row cap, and a compile-time check verifies
+every picker sentinel. Validation of this follow-up is pending; the earlier
+build and serving results above apply to the original PR head only.
+
+The follow-up's `qwen_engine_test`, `glm4_engine_test`, `glm_pick_test`, and
+`dgpp_serve_app` targets build successfully in the native CUDA 13 `ci` tree
+with warnings as errors (`cmake --build build-ci -j 2 --target ...`). Touched
+code passes clang-format and `git diff --check`. No GPU test or serving run
+has executed the follow-up yet; production was not stopped or deployed during
+this build. The build log is retained in `artifacts/c16-review/build.log`.
+
+## Review follow-up validation (2026-09-21)
+
+The full native `ci` build passed. A token-stream comparison of every tracked
+C++/CUDA source and header confirmed that the tested checkout matches the
+submission, allowing for comments and formatting. The test server SHA256 was
+`27e99e6fdfb866c65afb246df0c981313fba402d5c9886bd709f84ab98f7e7b7`,
+verified on both ranks. Production was stopped for all GPU/RDMA tests.
+
+- Focused serial CTest selection (`qwen_engine.*`, `glm4_engine_test`,
+  `glm_pick_test`): 10 passed. This includes the new real-shard numerical,
+  graph-node, small-row/prefill equivalence, alignment-rejection and GLM-4.7
+  model-bound regressions.
+- Three extra 64-row synthetic runs with `DGPP_DENSE_GEMV_ROWS=4` and
+  `DGPP_BF12=off/on/both`: all passed. The 64-row diagnostic override was
+  not used.
+- Full serial CTest after building all targets: 106 passed, 10 skipped,
+  zero failures in 632.74 seconds. Skips still require absent checkpoints.
+- Real Qwen NVFP4 checkpoint, two ranks, C16/MTP3, 65,536 KV tokens and
+  1 GiB prefix cache: FP8 dense storage, checkpoint BF16 storage, and
+  BF12-only storage each passed all nine API checks and sixteen concurrent
+  requests. Every mode reached 16 active requests, with no failed requests
+  or engine failure. Checkpoint BF16 and BF12-only also completed C1/C2/C4
+  functional checks. These are not matched performance comparisons.
+- Both rank logs in all three modes recorded 46 graph variants per rank,
+  with no memcpy or memset nodes, including 48/64-row families. Shutdown
+  was clean and each mode's operation streams matched across both ranks:
+
+| Dense storage / BF16 residency | Two-rank operation-stream MD5 |
+| --- | --- |
+| FP8 dense | `7ff4305561adcc44063d4d598dfa96a1` |
+| Checkpoint BF16 | `8fe830ab8281718831fdc951314a1776` |
+| Checkpoint BF16 with BF12-only residency | `73ac6c6029ee28e72eac0ed19ecc64a8` |
+
+The recorded production release for this window was `0.1.0+g5d98ea6b7b13`,
+not the older release used in the initial validation. After every phase,
+both ranks were restored to its original SHA256
+`3563cebf2c3821e4990d69641827d4acb4376c0c0090d090873c04f97b67967d`
+and the original deployment file hash. The 256/512 prefill budgets and
+148-slot prefix cache were retained. The restored service returned `READY`
+twice; the repeat reused 1,128 of 1,137 prompt tokens, with no engine failure
+or failed requests in the post-restoration sample.
+
+Logs, configurations, responses, sampled metrics, source comparison and
+restoration evidence are retained under `artifacts/c16-review/`. This validates
+the follow-up on the available two-node fabric and synthetic TP=4 shard
+shapes. A real four-node run of the follow-up still needs the maintainer's
+hardware; no four-node success or performance improvement is claimed here.

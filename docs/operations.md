@@ -1,7 +1,5 @@
 # Operating DGPP
 
-Qwen graph serving supports `engine.max_concurrency: 16` with MTP enabled and `engine.mtp_depth: 3`, using up to 64 verification rows. Reserve sufficient KV and graph memory; the shipped recipes remain unchanged. Validate on idle hardware before deploying a new build to all ranks. Keep `engine.mtp_schedule: false` for C16/MTP3. Its sixteen slots and seven batch families use 46 graph variants per verification depth; scheduling needs at least two depths (92 variants), exceeding the limit of 64. Enabling it fails startup with the conflicting settings and a remedy: disable scheduling to retain C16/MTP3, or reduce concurrency.
-
 DGPP runs one `dgpp-serve` process per node. Rank 0 serves HTTP and
 coordinates requests through the admission journal; peers follow the same
 scheduler operations. The examples below use GLM-5.3 on four Sparks.
@@ -374,6 +372,20 @@ the drafts in order (a stand moves to the next row, a reject ends the
 step on the residual token, the last row reached is sampled plainly) and
 a host fallback continues the chain exactly as the device would have.
 
+Qwen graph serving supports `engine.max_concurrency: 16` with MTP enabled and `engine.mtp_depth: 3`, using up to 64 verification rows. Reserve sufficient KV and graph memory; the shipped recipes remain unchanged. Validate on idle hardware before deploying a new build to all ranks. Keep `engine.mtp_schedule: false` for C16/MTP3. Its sixteen slots and seven batch families use 46 graph variants per verification depth; scheduling needs at least two depths (92 variants), exceeding the limit of 64. Enabling it fails startup with the conflicting settings and a remedy: disable scheduling to retain C16/MTP3, or reduce concurrency.
+
+Qwen's BF16 matrix products at 17-64 decode rows use kernel-only lowering,
+including the BF16 sites retained by `dense_weights: "fp8"`. This avoids
+cuBLASLt memset nodes at real tensor-parallel shard shapes. Decode products
+of at most 16 rows and prefill retain their existing dispatch.
+
+The 8- and 12-slot graph families are shared across models. Configurations
+above eight slots may capture more variants and choose smaller padded batches.
+Those variants also reduce the scheduling budget: DeepSeek at 11 slots and
+depth 2 now needs 34 variants per depth, so two depths no longer fit the
+64-variant limit. The shipped recipes stay at or below eight slots and retain
+their existing families.
+
 **The scheduled verify depth** (`engine.mtp_schedule`, `--mtp-schedule`;
 needs `decode_graph`, `mtp` and a depth of at least 2 to matter) lets a
 greedy request verify fewer rows than the whole draft block on a step
@@ -389,7 +401,7 @@ falls below (the survival is monotone, so the verified drafts are a
 prefix). A draft not verified is decoded plainly next step, so the
 committed transcript is the plain greedy one at every depth — the change
 is the step's cost only. Each depth replays its own captured variant (the
-bus's 32 graph variants bound them: two per slot per depth plus two per
+bus's 64 graph variants bound them: two per slot per depth plus two per
 batch family; a spread of depths that always keeps the full block is used
 when the budget is short, and a policy depth rounds up to the next
 variant). The batched replay takes one depth for its slots, the deepest

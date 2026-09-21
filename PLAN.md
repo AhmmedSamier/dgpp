@@ -1,6 +1,6 @@
 # DGPP implementation status
 
-Qwen C16/MTP3 supports 64 decode rows with scheduled verification disabled. Native GB10 tests and two-Spark serving validation passed; four-node validation remains pending. See the [engineering record](benchmarks/results/2026-09-19-qwen-c16-mtp3-upstream.md).
+Qwen C16/MTP3 supports 64 decode rows with scheduled verification disabled. The initial implementation passed native GB10 tests and two-Spark serving validation. Four-node review identified additional BF16 sites requiring kernel-only lowering; the follow-up passed native tests and two-Spark FP8/BF16/BF12 serving checks. A real four-node rerun remains pending. See the [engineering record](benchmarks/results/2026-09-19-qwen-c16-mtp3-upstream.md).
 
 This page summarizes the implemented features and remaining work as of
 2026-09-18. [DESIGN.md](DESIGN.md) describes the architecture;

@@ -2237,8 +2237,11 @@ The application allows sixteen request slots. Qwen supports up to 64 batched
 decode rows, including sixteen requests at MTP depth 3. Its batch families
 cover 2/3/4/6/8/12/16 slot prefixes when the row budget permits. MTP uses
 `1 + depth` rows per request. Other model families retain their own row caps.
-Qwen's wide MTP embedding projection uses a kernel-only path above 32 rows
-to avoid cuBLASLt memset nodes in collective graph replay. C16/MTP3 does not
+Qwen's BF16 matrix products at 17-64 decode rows use kernel-only GEMV chunks,
+including BF16 sites retained with FP8 dense weights. Its wide MTP embedding
+projection uses MMA above 32 rows. Unsupported kernel shapes fail explicitly;
+none of these paths silently falls back to cuBLASLt. Products at at most 16
+rows and prefill retain their existing dispatch. C16/MTP3 does not
 support scheduled verification: two depth options would need 92 graph variants,
 exceeding the bus limit of 64. Capacity validation rejects `engine.mtp_schedule`
 before allocating its confidence state. Each graph

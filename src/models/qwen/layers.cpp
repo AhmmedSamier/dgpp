@@ -79,8 +79,11 @@ void qwen_mtp_hidden_projection(const QwenGemmWorkspace& g, const uint16_t* act,
   // Only the newly widened decode takes MMA; preserve prefill and all
   // existing <=8-row walks. This draft projection uses the same MMA row
   // chain at every wide shape, including the diagnostic lowering mode.
-  if (decode && tokens > 8 &&
-      mma_gemv_shape_ok(weight, act, static_cast<size_t>(hidden), rows, hidden)) {
+  if (decode && tokens > 8) {
+    if (!mma_gemv_shape_ok(weight, act, static_cast<size_t>(hidden), rows, hidden))
+      throw std::invalid_argument(
+          "qwen_mtp_hidden_projection: wide decode requires an aligned MMA-supported shape; "
+          "refusing cuBLASLt fallback");
     launch_mma_gemv_bf16_bf16(act, static_cast<size_t>(hidden), weight, out,
                               rows, hidden, hidden, static_cast<size_t>(hidden), stream);
   } else {
