@@ -677,6 +677,111 @@ DGPP_TEST(qwen_tool_call_render_encode_parse_roundTrip) {
 // (the literals and names over BPE token texts, the typed values); the
 // single-call spec refuses a second call; EOS refused while a call is
 // owed; a name outside the tools refused at its first token.
+const dgpp::minijson::Value& function_of(const dgpp::minijson::Value& value) {
+  const auto* fn = value.find("function");
+  return fn ? *fn : value;
+}
+
+// The reference renders intentionally include undeclared arguments. Keep the
+// corpus unchanged; only the grammar's copied schema opts into those keys.
+std::vector<std::string> undeclared_golden_keys(const dgpp::minijson::Value& def,
+                                                const dgpp::minijson::Value& calls) {
+  const auto* params = def.find("parameters");
+  const auto* props = params ? params->find("properties") : nullptr;
+  const auto* extra = params ? params->find("additionalProperties") : nullptr;
+  if (!props || !props->is_object() || (extra && extra->is_bool() && extra->as_bool())) return {};
+  std::vector<std::string> keys;
+  for (const auto& call : calls.items()) {
+    const auto& fn = function_of(call);
+    if (fn.at("name").as_string() != def.at("name").as_string()) continue;
+    const auto& encoded_args = fn.at("arguments");
+    const auto args = encoded_args.is_string()
+                          ? dgpp::minijson::parse(encoded_args.as_string()).root
+                          : encoded_args;
+    for (const auto& arg : args.members())
+      if (!props->find(arg.key)) keys.push_back(arg.key);
+  }
+  return keys;
+}
+
+dgpp::text::GrammarSpec golden_tool_spec(const dgpp::minijson::Value* tools,
+                                         const dgpp::minijson::Value& calls,
+                                         dgpp::text::GrammarSpec::Mode mode, bool parallel,
+                                         const std::string& named, bool opt_out = true) {
+  using dgpp::minijson::Value;
+  dgpp::text::GrammarSpec spec;
+  spec.mode = mode;
+  spec.parallel = parallel;
+  spec.named = named;
+  if (tools) {
+    for (const auto& tool : tools->items()) {
+      const auto& def = function_of(tool);
+      auto members = def.members();
+      if (opt_out && !undeclared_golden_keys(def, calls).empty()) {
+        for (auto& member : members) {
+          if (member.key != "parameters") continue;
+          auto params = member.value.members();
+          bool replaced = false;
+          for (auto& param : params) {
+            if (param.key != "additionalProperties") continue;
+            param.value = Value::make_bool(true);
+            replaced = true;
+          }
+          if (!replaced) params.push_back({"additionalProperties", Value::make_bool(true)});
+          member.value = Value::make_object(std::move(params));
+        }
+      }
+      spec.tools.push_back(
+          dgpp::text::grammar_tool_from_function(Value::make_object(std::move(members)), nullptr));
+    }
+  }
+  return spec;
+}
+
+bool check_golden_key_closure(const dgpp::text::GrammarVocab& vocab,
+                              const dgpp::text::Tokenizer& tok, const dgpp::minijson::Value* tools,
+                              const dgpp::minijson::Value& calls, const std::string& turn,
+                              const std::vector<int64_t>& ids, bool thinks,
+                              const std::string& name) {
+  const bool qwen = vocab.markers().tool_format() == dgpp::text::ToolFormat::kQwenXml;
+  size_t first = std::string::npos, end = 0;
+  if (tools) {
+    for (const auto& tool : tools->items()) {
+      for (const auto& key : undeclared_golden_keys(function_of(tool), calls)) {
+        const std::string tag = qwen ? "<parameter=" + key + ">" : "<arg_key>" + key + "</arg_key>";
+        const size_t at = turn.find(tag);
+        require(at != std::string::npos,
+                name + ": undeclared key is present in the rendered turn: " + key);
+        if (at < first) {
+          first = at;
+          end = at + tag.size();
+        }
+      }
+    }
+  }
+  if (first == std::string::npos) return false;
+  dgpp::text::GrammarState closed(
+      &vocab,
+      golden_tool_spec(tools, calls, dgpp::text::GrammarSpec::Mode::kRequired, true, "", false),
+      thinks);
+  size_t offset = 0;
+  for (const int64_t id : ids) {
+    const std::string bytes = tok.decode(id, false);
+    if (!closed.allows(id)) {
+      require(offset < end && offset + bytes.size() > first,
+              name + ": default grammar must first refuse the undeclared parameter, at byte " +
+                  std::to_string(offset));
+      dgpp::text::TokenMask mask;
+      closed.mask(&mask);
+      require(!mask.allows(id), name + ": the sampling mask also refuses the undeclared parameter");
+      return true;
+    }
+    closed.advance(id);
+    offset += bytes.size();
+  }
+  throw std::runtime_error(name + ": the default grammar accepted an undeclared argument");
+}
+
 DGPP_TEST(qwen_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
   const std::string kGoldenPath = golden_path(g_argc, g_argv);
   if (!corpus_is_qwen(kGoldenPath)) return;
@@ -709,20 +814,7 @@ DGPP_TEST(qwen_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
     while (std::getline(f, line))
       if (!line.empty()) lines.push_back(line);
   }
-  const auto spec_of = [](const dgpp::minijson::Value* tools, dgpp::text::GrammarSpec::Mode mode,
-                          bool parallel, const std::string& named) {
-    dgpp::text::GrammarSpec g;
-    g.mode = mode;
-    g.parallel = parallel;
-    g.named = named;
-    if (tools)
-      for (const dgpp::minijson::Value& t : tools->items()) {
-        const dgpp::minijson::Value* fn = t.find("function");
-        g.tools.push_back(dgpp::text::grammar_tool_from_function(fn ? *fn : t, nullptr));
-      }
-    return g;
-  };
-  size_t turns = 0;
+  size_t turns = 0, opt_out_turns = 0;
   for (size_t i = 1; i < lines.size(); ++i) {
     const dgpp::minijson::ParseResult parsed = dgpp::minijson::parse(lines[i]);
     const dgpp::minijson::Value& rec = parsed.root;
@@ -754,7 +846,10 @@ DGPP_TEST(qwen_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
       if (thinks) turn.erase(0, 8);  // the prompt opened the block
       std::vector<int64_t> ids = tok.encode(turn);
       ids.push_back(vocab.call_turn_eos());
-      dgpp::text::GrammarState g(&vocab, spec_of(tools, dgpp::text::GrammarSpec::Mode::kRequired, true, ""), thinks);
+      opt_out_turns += check_golden_key_closure(vocab, tok, tools, *tcs, turn, ids, thinks, name);
+      dgpp::text::GrammarState g(
+          &vocab, golden_tool_spec(tools, *tcs, dgpp::text::GrammarSpec::Mode::kRequired, true, ""),
+          thinks);
       for (size_t j = 0; j < ids.size(); ++j) {
         require(g.allows(ids[j]), name + ": id " + std::to_string(ids[j]) + " (" + tok.decode(ids[j], false) +
                                       ") at position " + std::to_string(j) + " refused in state " + g.state_name());
@@ -767,7 +862,10 @@ DGPP_TEST(qwen_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
       // The single-call spec: the first call is accepted through its close;
       // then only the turn's end — the separator before a second call (the
       // template's "\n<tool_call>") is refused at its first id.
-      dgpp::text::GrammarState single(&vocab, spec_of(tools, dgpp::text::GrammarSpec::Mode::kRequired, false, ""), thinks);
+      dgpp::text::GrammarState single(
+          &vocab,
+          golden_tool_spec(tools, *tcs, dgpp::text::GrammarSpec::Mode::kRequired, false, ""),
+          thinks);
       bool closed_first = false;
       for (size_t j = 0; j < ids.size(); ++j) {
         if (closed_first) {
@@ -780,9 +878,14 @@ DGPP_TEST(qwen_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
         single.advance(ids[j]);
         if (ids[j] == vocab.markers().tool_call_close.id) closed_first = true;
       }
-      dgpp::text::GrammarState owed(&vocab, spec_of(tools, dgpp::text::GrammarSpec::Mode::kRequired, true, ""), true);
+      dgpp::text::GrammarState owed(
+          &vocab, golden_tool_spec(tools, *tcs, dgpp::text::GrammarSpec::Mode::kRequired, true, ""),
+          true);
       require(!owed.allows(vocab.call_turn_eos()) && !owed.allows(eos[1]), name + ": EOS refused while a call is owed");
-      dgpp::text::GrammarState wrong(&vocab, spec_of(tools, dgpp::text::GrammarSpec::Mode::kNamed, true, first_name), true);
+      dgpp::text::GrammarState wrong(
+          &vocab,
+          golden_tool_spec(tools, *tcs, dgpp::text::GrammarSpec::Mode::kNamed, true, first_name),
+          true);
       wrong.advance(vocab.markers().think_close.id);
       wrong.advance(vocab.markers().tool_call_open.id);
       for (const int64_t id : tok.encode("\n<function=")) {
@@ -795,6 +898,11 @@ DGPP_TEST(qwen_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
     }
   }
   require(turns >= 4, "expected at least 4 tool-call turns, got " + std::to_string(turns));
+  require(opt_out_turns == 1, "the Qwen undeclared-key golden needs the explicit opt-out");
+  DGPP_LOG_INFO(
+      "qwen_chat_template_test: {} turn(s) reject undeclared keys by default and pass with the "
+      "opt-out",
+      opt_out_turns);
   DGPP_LOG_INFO("qwen_chat_template_test: {} tool-call turns accepted by the grammar over the real tokenizer", turns);
 }
 
@@ -834,24 +942,7 @@ DGPP_TEST(glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
     while (std::getline(f, line))
       if (!line.empty()) lines.push_back(line);
   }
-  const auto spec_of = [](const dgpp::minijson::Value* tools,
-                          dgpp::text::GrammarSpec::Mode mode, bool parallel,
-                          const std::string& named) {
-    dgpp::text::GrammarSpec g;
-    g.mode = mode;
-    g.parallel = parallel;
-    g.named = named;
-    if (tools)
-      for (const dgpp::minijson::Value& t : tools->items()) {
-        const dgpp::minijson::Value* fn = t.find("function");
-        const dgpp::minijson::Value& def = fn ? *fn : t;
-        // The closed keys and typed values as the service derives them
-        // (M6 6i): every golden turn must pass under the typing too.
-        g.tools.push_back(dgpp::text::grammar_tool_from_function(def, nullptr));
-      }
-    return g;
-  };
-  size_t turns = 0;
+  size_t turns = 0, opt_out_turns = 0;
   for (size_t i = 1; i < lines.size(); ++i) {
     const dgpp::minijson::ParseResult parsed = dgpp::minijson::parse(lines[i]);
     const dgpp::minijson::Value& rec = parsed.root;
@@ -877,10 +968,12 @@ DGPP_TEST(glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
       turn.erase(0, std::string("<|assistant|>").size());
       std::vector<int64_t> ids = tok.encode(turn);
       ids.push_back(vocab.call_turn_eos());
+      opt_out_turns += check_golden_key_closure(vocab, tok, tools, *tcs, turn, ids, true, name);
       // Required (parallel): every turn is accepted; the grammar ends the
       // turn only on EOS.
-      dgpp::text::GrammarState g(&vocab, spec_of(tools, dgpp::text::GrammarSpec::Mode::kRequired, true, ""),
-                                /*prompt_opens_thinking=*/true);
+      dgpp::text::GrammarState g(
+          &vocab, golden_tool_spec(tools, *tcs, dgpp::text::GrammarSpec::Mode::kRequired, true, ""),
+          /*prompt_opens_thinking=*/true);
       for (size_t j = 0; j < ids.size(); ++j) {
         require(g.allows(ids[j]),
                 name + ": id " + std::to_string(ids[j]) + " (" +
@@ -896,7 +989,9 @@ DGPP_TEST(glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
       const dgpp::minijson::Value* ffn = first.find("function");
       const std::string first_name(
           (ffn ? *ffn : first).at("name").as_string());
-      dgpp::text::GrammarState single(&vocab, spec_of(tools, dgpp::text::GrammarSpec::Mode::kRequired, false, ""), true);
+      dgpp::text::GrammarState single(
+          &vocab,
+          golden_tool_spec(tools, *tcs, dgpp::text::GrammarSpec::Mode::kRequired, false, ""), true);
       int calls_seen = 0;
       bool refused_second = false;
       for (size_t j = 0; j < ids.size(); ++j) {
@@ -912,11 +1007,16 @@ DGPP_TEST(glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
       if (tcs->items().size() >= 2)
         require(refused_second, name + ": the single-call spec must refuse the second call");
       // A stray EOS before the call is refused while the call is owed.
-      dgpp::text::GrammarState owed(&vocab, spec_of(tools, dgpp::text::GrammarSpec::Mode::kRequired, true, ""), true);
+      dgpp::text::GrammarState owed(
+          &vocab, golden_tool_spec(tools, *tcs, dgpp::text::GrammarSpec::Mode::kRequired, true, ""),
+          true);
       require(!owed.allows(vocab.call_turn_eos()) && !owed.allows(154827),
               name + ": EOS refused while a call is owed");
       // A name outside the tools: refused at its first byte.
-      dgpp::text::GrammarState wrong(&vocab, spec_of(tools, dgpp::text::GrammarSpec::Mode::kNamed, true, first_name), true);
+      dgpp::text::GrammarState wrong(
+          &vocab,
+          golden_tool_spec(tools, *tcs, dgpp::text::GrammarSpec::Mode::kNamed, true, first_name),
+          true);
       owed.advance(vocab.markers().think_close.id);
       wrong.advance(vocab.markers().think_close.id);
       wrong.advance(vocab.markers().tool_call_open.id);
@@ -928,6 +1028,11 @@ DGPP_TEST(glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
   }
   require(turns >= 6, "expected at least 6 tool-call turns, got " +
                           std::to_string(turns));
+  require(opt_out_turns == 3, "the three GLM undeclared-key goldens need the explicit opt-out");
+  DGPP_LOG_INFO(
+      "glm_chat_template_test: {} turn(s) reject undeclared keys by default and pass with the "
+      "opt-out",
+      opt_out_turns);
   // The typing derived from a function definition: a plain string is
   // free, an integer is a JSON value (its bounds enforced, 2026-09-07), an
   // enum string is its texts, a type list with string is free, an untyped

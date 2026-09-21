@@ -255,6 +255,54 @@ DGPP_TEST(tool_grammar_qwen_free_keys_typed_values_and_named_single) {
   require(t.active() && std::string(t.state_name()) == "top", "the call closed cleanly");
 }
 
+// A schema that declares properties and does not opt out with an explicit
+// `additionalProperties: true` closes the parameter names: an open name slot
+// is free text, which is what lets the model write an undeclared or a
+// repeated name (the wire evidence in
+// benchmarks/results/2026-09-19-tool-key-closure.md).
+DGPP_TEST(tool_grammar_open_schema_closes_the_parameter_names) {
+  const GrammarVocab vocab = qwen_vocab();
+  const dgpp::minijson::ParseResult def = dgpp::minijson::parse(
+      R"({"name":"get_weather","parameters":{"type":"object","properties":)"
+      R"({"city":{"type":"string"},"days":{"type":"number"}},"required":["city"]}})");
+  std::vector<std::string> notes;
+  GrammarSpec spec;
+  spec.mode = GrammarSpec::Mode::kRequired;
+  spec.tools.push_back(dgpp::text::grammar_tool_from_function(def.root, nullptr, &notes));
+  require(spec.tools[0].constrain_keys &&
+              spec.tools[0].keys == std::vector<std::string>{"city", "days"} && notes.empty(),
+          "an unspecified additionalProperties closes the declared names");
+  GrammarState g(&vocab, spec, /*prompt_opens_thinking=*/false);
+  g.advance(kToolOpen);
+  feed(g, bytes_of("\n<function=get_weather>\n<parameter="));
+  require(std::string(g.state_name()) == "q-key-or-close",
+          std::string("after <parameter=: ") + g.state_name());
+  require(g.allows('c') && g.allows('d') && !g.allows('l') && !g.allows('x'),
+          "only the declared names start a key: " + show(allowed_ids(g)));
+  feed(g, bytes_of("city>\nRome\n</parameter>\n<parameter="));
+  require(g.allows('d') && !g.allows('c'),
+          "a declared name is offered once: " + show(allowed_ids(g)));
+  // days is a number: its value is the JSON machine, not free text.
+  feed(g, bytes_of("days>\n"));
+  require(g.allows('5') && !g.allows('x'),
+          "a number property opens the JSON machine: " + show(allowed_ids(g)));
+  feed(g, bytes_of("5\n</parameter>\n</function>\n"));
+  require(same(allowed_ids(g), {kToolClose}),
+          "every declared name used: only </tool_call>: " + show(allowed_ids(g)));
+  g.advance(kToolClose);
+  require(g.active() && std::string(g.state_name()) == "top", "the call closed cleanly");
+  // An explicit opt-out keeps the free name slot, and says so once.
+  const dgpp::minijson::ParseResult open =
+      dgpp::minijson::parse(R"({"name":"get_weather","parameters":{"type":"object","properties":)"
+                            R"({"city":{"type":"string"}},"additionalProperties":true}})");
+  std::vector<std::string> free_notes;
+  const GrammarTool f = dgpp::text::grammar_tool_from_function(open.root, nullptr, &free_notes);
+  require(!f.constrain_keys && f.keys.empty() && free_notes.size() == 1 &&
+              free_notes[0].find("get_weather") != std::string::npos &&
+              free_notes[0].find("additionalProperties") != std::string::npos,
+          "an explicit additionalProperties:true keeps the keys free, noted");
+}
+
 // ---- the DeepSeek-V4.1 DSML format --------------------------------
 // One marker id (the tag token, empty text like every special token) inside
 // text tags: "<" TAG " calls>\n", "<" TAG " invoke name=\"NAME\">\n", the
@@ -946,9 +994,56 @@ DGPP_TEST(tool_grammar_closedKeysOnceAndStrictRequiredKeysGateTheClose) {
     const dgpp::minijson::ParseResult lax = dgpp::minijson::parse(
         R"({"name":"f","parameters":{"type":"object","properties":{"a":{"type":"string"}},"required":["a"]}})");
     const GrammarTool u = dgpp::text::grammar_tool_from_function(lax.root, nullptr);
-    require(!u.strict && !u.constrain_keys && u.required_keys == std::vector<std::string>{"a"},
-            "derived: a non-strict tool records its required keys unenforced");
+    require(!u.strict && u.constrain_keys && u.keys == std::vector<std::string>{"a"} &&
+                u.required_keys == std::vector<std::string>{"a"},
+            "derived: a non-strict tool closes its declared names and records its "
+            "required keys unenforced");
   }
+}
+
+DGPP_TEST(tool_grammar_keyClosureSchemaEdges) {
+  struct Case {
+    std::string params;
+    bool closed;
+    std::vector<std::string> keys;
+    bool note;
+  };
+  for (const auto& c : std::vector<Case>{
+           {R"({"type":"object","properties":{"x":{"type":"string"}}})", true, {"x"}, false},
+           {R"({"properties":{"x":{}},"additionalProperties":false})", true, {"x"}, false},
+           {R"({"properties":{"x":{}},"additionalProperties":true})", false, {}, true},
+           {R"({"properties":{"x":{}},"additionalProperties":{"type":"number"}})",
+            true,
+            {"x"},
+            false},
+           {R"({"properties":{}})", true, {}, false},
+           {R"({"properties":{},"additionalProperties":false})", true, {}, false},
+           {R"({"properties":{},"additionalProperties":true})", false, {}, true},
+           {R"({"type":"object"})", false, {}, false},
+           {R"({"type":"object","additionalProperties":false})", false, {}, false}}) {
+    const std::string text = R"({"name":"f","parameters":)" + c.params + "}";
+    const auto def = dgpp::minijson::parse(text);
+    std::vector<std::string> notes;
+    const auto tool = dgpp::text::grammar_tool_from_function(def.root, nullptr, &notes);
+    require(tool.constrain_keys == c.closed && tool.keys == c.keys, "key policy: " + c.params);
+    require(notes.size() == static_cast<size_t>(c.note), "opt-out note: " + c.params);
+  }
+}
+
+DGPP_TEST(tool_grammar_keyClosureLeavesNestedJsonOpen) {
+  const auto def = dgpp::minijson::parse(
+      R"({"name":"get_weather","parameters":{"properties":{"options":{"type":"object","properties":{"x":{"type":"number"}}}}}})");
+  GrammarSpec spec;
+  spec.mode = GrammarSpec::Mode::kRequired;
+  spec.tools.push_back(dgpp::text::grammar_tool_from_function(def.root, nullptr));
+  require(spec.tools[0].constrain_keys && spec.tools[0].keys == std::vector<std::string>{"options"},
+          "only the top-level argument name closes");
+  const auto vocab = qwen_vocab();
+  GrammarState state(&vocab, spec, false);
+  state.advance(kToolOpen);
+  feed(state, bytes_of("\n<function=get_weather>\n<parameter=options>\n{\"x\":1,\"extra\":2}\n"
+                       "</parameter>\n</function>\n"));
+  require(state.allows(kToolClose), "a nested object retains JSON Schema's open default");
 }
 
 }  // namespace

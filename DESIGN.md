@@ -2008,8 +2008,24 @@ optional, required, forbidden or restricted to a named function;
 also applies in auto mode to validate calls the model chooses to make.
 
 Names and keys are matched through token text, allowing different BPE
-segmentations of the same valid string. Schemas determine argument types
-and whether undeclared keys are allowed. `grammar_tool_from_function`
+segmentations of the same valid string. Schemas determine argument types,
+and the keys close to the properties a schema declares: JSON Schema's
+`additionalProperties` default is open, but that is a validation semantic,
+and as a decoding grammar an open key slot is free text the model fills
+from its own prior — an undeclared name, or the same one twice, which a
+client cannot tell from a model fault. A schema that declares no
+`properties` at all has nothing to close to and keeps the free key; an
+explicit `additionalProperties: true` keeps it as well, and is noted once
+naming the tool ([record](benchmarks/results/2026-09-19-tool-key-closure.md)).
+An explicitly empty `properties: {}` closes to the empty key set. A
+schema-valued `additionalProperties` also closes the declared top-level set
+in non-strict mode; it cannot type arbitrary argument names on this path.
+Strict schemas still reject unsupported forms. This policy applies only
+to top-level tool arguments: nested objects and `response_format: json_schema`
+retain the JSON machine's ordinary open default. With free argument keys,
+the model can repeat a name; the parser rejects that block as literal
+content, so `required` and named tool choices are best-effort on that path.
+`grammar_tool_from_function`
 builds the constraint. With `function.strict: true`, unsupported
 schema keywords are rejected by path. In non-strict tools, supported
 types remain enforced while unsupported value restrictions are logged
