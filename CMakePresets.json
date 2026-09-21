@@ -2,12 +2,6 @@
   "version": 6,
   "configurePresets": [
     {
-      "name": "spark-cross",
-      "inherits": "release",
-      "generator": "Ninja",
-      "toolchainFile": "${sourceDir}/cmake/spark-cross.cmake"
-    },
-    {
       "name": "base",
       "binaryDir": "${sourceDir}/build-${presetName}",
       "cacheVariables": {
@@ -53,15 +47,21 @@
       "inherits": "base",
       "description": "Testing: optimized host code with debug symbols and warnings as errors",
       "cacheVariables": {"CMAKE_BUILD_TYPE": "RelWithDebInfo", "DGPP_WERROR": "ON"}
+    },
+    {
+      "name": "spark-cross",
+      "inherits": "release",
+      "generator": "Ninja",
+      "toolchainFile": "${sourceDir}/cmake/spark-cross.cmake"
     }
   ],
   "buildPresets": [
-    {"name": "spark-cross", "configurePreset": "spark-cross", "targets": ["dgpp_serve_app"]},
     {"name": "release", "configurePreset": "release", "targets": ["dgpp_serve_app"]},
     {"name": "debug", "configurePreset": "debug"},
     {"name": "asan", "configurePreset": "asan"},
     {"name": "ubsan", "configurePreset": "ubsan"},
-    {"name": "ci", "configurePreset": "ci"}
+    {"name": "ci", "configurePreset": "ci"},
+    {"name": "spark-cross", "configurePreset": "spark-cross", "targets": ["dgpp_serve_app"]}
   ],
   "testPresets": [
     {"name": "release", "configurePreset": "release", "output": {"outputOnFailure": true}},

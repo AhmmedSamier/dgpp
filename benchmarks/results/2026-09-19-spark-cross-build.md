@@ -167,3 +167,45 @@ Logs are under `artifacts/cross-build-pr/merge-*.log`. No inference node was
 contacted or restarted during this integration. The hardware results above
 apply to `53a5339`; GPU/RDMA and live serving were not rerun for the merged
 upstream runtime.
+
+## Issue #21 follow-ups (2026-09-21)
+
+The follow-up branch starts from upstream
+`c5a69134410f2646d195b339c8f197043410cb04`. Both configure and build preset
+lists now put `spark-cross` after `ci`. The wrapper prints `nvcc --version`
+and `aarch64-linux-gnu-g++-13 --version` before configuration, so saved build
+logs identify the compilers even when image package versions float. The guide
+now explicitly distinguishes the default `dgpp_serve_app` build from
+`build --target all`, which also builds the test executables.
+
+Local validation:
+
+- All 12 wrapper tests passed. The two new tests fail against the unchanged
+  upstream wrapper and pass with the change: compiler versions precede
+  configuration, and a failed compiler probe prevents configuration and
+  compilation.
+- Python discovery ran 227 tests: 222 passed and five skipped.
+- Shell syntax and `git diff --check` passed.
+- Real container `cmake --list-presets` puts `spark-cross` after `ci`.
+- A clean server cross-build completed all 184 build steps. An incremental
+  run through the actual wrapper printed both compiler versions and passed.
+- Install staging passed. `file` identifies the stripped server, cudart and
+  cuBLASLt as AArch64 ELF files; `readelf -d` confirms `$ORIGIN/../lib` as
+  the server's RUNPATH, with no dynamic PCRE2 dependency.
+
+The existing image is
+`sha256:845fb41b6b74c3e9a161b3dea641c51968b337bc49b1b2e55ae1a3c71b29cbd2`;
+it reports nvcc 13.0.88 and AArch64 G++ 13.3.0
+(`13.3.0-6ubuntu2~24.04.1`). The workstation's Docker bridge was unavailable
+(`adding interface ... to bridge docker0 failed: Device does not exist`).
+Local container validation uses `--network host` as a workstation workaround;
+an ignored local `docker` shim injects that flag when checking the actual
+wrapper. The repository wrapper's networking behavior is unchanged. Logs are retained
+under `artifacts/issue-21/`.
+
+Target validation remains pending an authorized idle-hardware window. No Spark
+was contacted or restarted for these local checks. The earlier hardware results
+in this record do not validate this upstream revision. Before marking issue #21
+complete, stage the current cross-built server on both idle Sparks, run
+`serve_api_check.py`, stop the test world, compare both ranks' operation-stream
+digests, and restore and verify the exact production release and configuration.

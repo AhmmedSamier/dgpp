@@ -26,7 +26,7 @@ class SparkCrossTest(unittest.TestCase):
         self.env = {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}",
                     "CROSS_TEST_LOG": str(self.log), "DGPP_CROSS_IMAGE": "test-cross:local",
                     "DGPP_BUILD_JOBS": "3"}
-        for name in ("docker", "cmake"):
+        for name in ("docker", "cmake", "nvcc", "aarch64-linux-gnu-g++-13"):
             stub = self.bin / name
             stub.write_text('''#!/usr/bin/env python3
 import json, os, pathlib, subprocess, sys
@@ -43,6 +43,9 @@ if name == "docker":
         command = args[args.index("test-cross:local") + 1:]
         sys.exit(subprocess.call(command))
     sys.exit(int(os.environ.get("CROSS_TEST_RUN_RC", "0")))
+if name in ("nvcc", "aarch64-linux-gnu-g++-13"):
+    print(f"{name} test compiler version")
+    sys.exit(int(os.environ.get("CROSS_TEST_COMPILER_RC", "0")))
 key = "CROSS_TEST_CONFIGURE_RC" if args[0] == "--preset" else "CROSS_TEST_BUILD_RC"
 sys.exit(int(os.environ.get(key, "0")))
 ''')
@@ -82,6 +85,21 @@ sys.exit(int(os.environ.get(key, "0")))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.calls()[-1], ["cmake", "--build", "--preset", "spark-cross",
                                           "--parallel", "3", "--target", "target with spaces"])
+
+    def test_build_reports_compilers_before_configure(self):
+        result = self.run_cli("build", CROSS_TEST_RUN_BUILD="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [c for c in self.calls() if c[0] != "docker"]
+        self.assertEqual(calls[:3], [["nvcc", "--version"],
+                                    ["aarch64-linux-gnu-g++-13", "--version"],
+                                    ["cmake", "--preset", "spark-cross"]])
+        self.assertIn("nvcc test compiler version", result.stdout)
+        self.assertIn("aarch64-linux-gnu-g++-13 test compiler version", result.stdout)
+
+    def test_compiler_probe_failure_prevents_build(self):
+        result = self.run_cli("build", CROSS_TEST_RUN_BUILD="1", CROSS_TEST_COMPILER_RC="29")
+        self.assertEqual(result.returncode, 29)
+        self.assertEqual([c for c in self.calls() if c[0] == "cmake"], [])
 
     def test_configure_failure_prevents_build(self):
         result = self.run_cli("build", CROSS_TEST_RUN_BUILD="1", CROSS_TEST_CONFIGURE_RC="19")
