@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import runpy
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -266,6 +267,45 @@ class SiteEnvTest(unittest.TestCase):
                 self.assertIn(f"--config {cluster.stage_dir}/cluster.json --rank 1", command)
                 self.assertNotIn("HF_ACCESS_TOKEN", command)
                 self.assertNotIn("DGPP_ENV_FILE", command)
+
+    def test_diagnostic_settings_reach_head_and_peer_with_precedence(self):
+        self.env_file.write_text(self.env_file.read_text() +
+                                 'DGPP_LOG_LEVEL=debug\nDGPP_MLOCK=off\n')
+        module = runpy.run_path(str(ROOT / "scripts/dgpp-cluster"))
+        args = argparse.Namespace(config=str(self.config), log_dir=str(self.root / "logs"), knobs="")
+        cases = [
+            ({}, [("debug", "off"), ("debug", "off")]),
+            ({"DGPP_LOG_LEVEL": "info", "DGPP_MLOCK": "on"},
+             [("info", "on"), ("info", "on")]),
+            ({"DGPP_LOG_LEVEL": "info", "DGPP_MLOCK": "on",
+              "DGPP_NODE_OVERRIDES": json.dumps({
+                  "head": {"DGPP_LOG_LEVEL": "trace", "DGPP_MLOCK": "off"},
+                  "peer1": {"DGPP_LOG_LEVEL": "debug", "DGPP_MLOCK": "off"},
+              })}, [("trace", "off"), ("debug", "off")]),
+        ]
+        for exported, expected in cases:
+            with self.subTest(exported=exported), patch.dict(
+                    os.environ, {**self.environ, **exported}, clear=True):
+                cluster = module["Cluster"](args)
+                Path(cluster.log_dir).mkdir(parents=True, exist_ok=True)
+                for rank, values in enumerate(expected):
+                    self.assertEqual(cluster.cfg["node_env"][rank]["DGPP_LOG_LEVEL"], values[0])
+                    self.assertEqual(cluster.cfg["node_env"][rank]["DGPP_MLOCK"], values[1])
+                with patch.object(module["cluster_process"], "launch") as launch:
+                    launch.return_value.pid = 12345
+                    cluster.boot_head()
+                    env = launch.call_args.args[4]
+                    self.assertEqual((env["DGPP_LOG_LEVEL"], env["DGPP_MLOCK"]), expected[0])
+                with patch.object(module["subprocess"], "run") as remote:
+                    remote.return_value.returncode = 0
+                    cluster.spawn_peer(1, "peer1")
+                    words = shlex.split(remote.call_args.args[0][-1])
+                    # Shell assignments are applied left to right; a node
+                    # override must win over the launcher's default log level.
+                    assignments = dict(word.split("=", 1) for word in words[:words.index("python3")]
+                                       if word.startswith("DGPP_") and "=" in word)
+                    self.assertEqual((assignments["DGPP_LOG_LEVEL"], assignments["DGPP_MLOCK"]),
+                                     expected[1])
 
     def test_operational_wrappers_stop_on_invalid_env_before_running(self):
         scripts = [p for p in (ROOT / "scripts").glob("*.sh")

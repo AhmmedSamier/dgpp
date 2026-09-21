@@ -1159,6 +1159,7 @@ int main(int argc, char** argv) {
       }
       for (const auto& [key, value] : c.node_env[rank])
         setenv(key.c_str(), dgpp::serve::expand_home(value).c_str(), 1);
+      dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");
     }
     fabric_port = static_cast<uint16_t>(c.fabric_port);
     journal_port = static_cast<uint16_t>(c.journal_port);
@@ -1641,6 +1642,14 @@ int main(int argc, char** argv) {
   std::signal(SIGTERM, on_signal);
 
   try {
+    // Registration precedes prepare_serving_process(), which pins the host
+    // working set after the bus is up. Prepare its limit before CUDA too,
+    // including when DGPP_MLOCK=off skips that later optional pin.
+    DGPP_LOG_DEBUG("serve: rank {} memlock before preparation: {}", rank, dgpp::memlock_status());
+    std::string memlock_error;
+    if (!dgpp::raise_memlock_soft_limit(&memlock_error))
+      DGPP_LOG_WARN("serve: rank {} {}", rank, memlock_error);
+    DGPP_LOG_DEBUG("serve: rank {} memlock after preparation: {}", rank, dgpp::memlock_status());
     int devices = 0;
     if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
       DGPP_LOG_ERROR("no CUDA device visible");

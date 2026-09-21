@@ -160,6 +160,18 @@ DGPP_TEST(cluster_config_http_override_is_order_independent) {
   require(!refusal(R"({"model":"m","nodes":["h"],"node_env":[{"HF_TOKEN":"x"}]})").empty(), "credentials disallowed");
 }
 
+DGPP_TEST(cluster_config_accepts_per_rank_registration_diagnostics) {
+  const auto c = dgpp::serve::parse_cluster_config(
+      R"({"model":"m","nodes":["h","w"],"node_env":[
+        {"DGPP_LOG_LEVEL":"debug","DGPP_MLOCK":"off"},
+        {"DGPP_LOG_LEVEL":"info","DGPP_MLOCK":"on"}]})", "t");
+  require(c.node_env.at(0).at("DGPP_LOG_LEVEL") == "debug" &&
+              c.node_env.at(0).at("DGPP_MLOCK") == "off" &&
+              c.node_env.at(1).at("DGPP_LOG_LEVEL") == "info" &&
+              c.node_env.at(1).at("DGPP_MLOCK") == "on",
+          "both diagnostic settings retain per-rank values");
+}
+
 DGPP_TEST(cluster_config_fileInputLimitsAndPaths) {
   const auto c = dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"],"engine":{
     "file_inputs":{"directory":"~/dgpp/input-files","pdf_command":"/usr/bin/pdftotext",

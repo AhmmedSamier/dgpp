@@ -92,15 +92,40 @@ DGPP_RESIDENT_CACHE_DIR="~/dgpp/resident-cache"
 DGPP_NODE_OVERRIDES='{"192.0.2.12":{"DGPP_ROCE_DEVICES":"rocep1s0f0 roceP2p1s0f0","HF_HUB_CACHE":"/srv/models/hub"}}'
 ```
 
-Override keys must match a host in `DGPP_NODES` exactly. Only RoCE devices,
-GID indices, HF hub cache, resident cache directory and the engine's L2
+Override keys must match a host in `DGPP_NODES` exactly. Accepted settings
+include RoCE devices, GID indices, HF hub cache, resident cache directory,
+`DGPP_LOG_LEVEL`, `DGPP_MLOCK` and the engine's L2
 weight-prefetch knobs (`DGPP_L2_PREFETCH=off`, `DGPP_L2_PREFETCH_MB`,
 `DGPP_L2_PREFETCH_BOUNDARY`, `DGPP_L2_PREFETCH_LAYER`; an A/B sets them the
-same way on every rank) are accepted in each node override. `~/` expands on the destination host; `$VARIABLE` substitution
+same way on every rank). `~/` expands on the destination host; `$VARIABLE` substitution
 and shell commands are not supported. `HF_HUB_CACHE` takes precedence over
 `HF_HOME/hub`. The launcher forwards only these allowlisted site values, not
 `.env` or its credentials. Direct native programs do not parse `.env`; use
 the wrappers, a resolved config, or explicitly export their settings.
+
+## Memory registration failures
+
+`dgpp-serve` raises its soft `RLIMIT_MEMLOCK` to the existing hard limit before
+CUDA/RDMA setup. It does this even with `DGPP_MLOCK=off`, which only disables
+the later optional `mlockall(MCL_CURRENT)` call. The bus starts before resident
+model construction and before that optional pin.
+
+Set `DGPP_LOG_LEVEL=debug` in `.env` or export it before launching to log the
+limits before and after preparation, staging geometry, and each registration.
+Both staging-block and bus-slab registration errors include the device, byte
+count, access flags, CUDA pointer type/device, and the soft/hard limits and
+`VmPin` captured immediately before the failed attempt, even at INFO level.
+
+An `ENOMEM` registration failure can reflect a cumulative process memlock
+limit. Registering one shared buffer on two devices charges its pages twice.
+Compare the failing rank's logged limits with the successful rank and with any
+standalone probe; rank 0 inherits the launcher's limits while peers inherit
+their SSH session's limits. A 5 MiB allocation succeeding once does not prove
+that a second registration fits. If the hard limit is insufficient, adjust the
+launching session/service's memlock limit and verify the next startup log.
+If the limits already permit the registrations, retain these diagnostics and
+collect the kernel log for the same attempt to investigate pinning, DMA mapping
+or driver resource failures.
 
 ## HTTP exposure
 

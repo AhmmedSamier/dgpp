@@ -12,6 +12,7 @@
 #include <cuda_runtime.h>
 
 #include "common/log.hpp"
+#include "common/process_memory.hpp"
 
 namespace dgpp::net {
 namespace {
@@ -134,6 +135,31 @@ VerbsDevice::~VerbsDevice() {
   if (ctx_) ibv_close_device(ctx_);
 }
 
+ibv_mr* VerbsDevice::register_memory(void* buffer, size_t bytes, int access,
+                                   const char* purpose, std::string* error) const {
+  cudaPointerAttributes attrs{};
+  const cudaError_t attr_error = cudaPointerGetAttributes(&attrs, buffer);
+  const std::string visibility = attr_error == cudaSuccess
+      ? "type=" + std::to_string(static_cast<int>(attrs.type)) +
+            " device=" + std::to_string(attrs.device)
+      : std::string("unqueryable (") + cudaGetErrorString(attr_error) + ")";
+  const std::string before = memlock_status();
+  DGPP_LOG_DEBUG("verbs: {} registration on {} bytes={} access={} cuda {}; before: {}",
+                 purpose, name_, bytes, access, visibility, before);
+  errno = 0;
+  ibv_mr* mr = ibv_reg_mr(pd_, buffer, bytes, access);
+  const int reg_errno = errno;
+  if (!mr) {
+    *error = std::string(purpose) + " registration failed on " + name_ +
+             " errno=" + std::to_string(reg_errno) + " (" + std::strerror(reg_errno) +
+             ") bytes=" + std::to_string(bytes) + " access=" + std::to_string(access) +
+             " cuda " + visibility + "; before registration: " + before;
+  } else {
+    DGPP_LOG_DEBUG("verbs: {} registration on {} bytes={} -> ok", purpose, name_, bytes);
+  }
+  return mr;
+}
+
 RcLane::RcLane(VerbsDevice& device, const BusSlabLayout& layout, int qp_depth,
                std::string* error)
     : device_(&device), layout_(layout) {
@@ -151,12 +177,10 @@ RcLane::RcLane(VerbsDevice& device, const BusSlabLayout& layout, int qp_depth,
 
   // Remote write lets the peer's credit WRITEs land in the completion cells;
   // that is the only remote access the bus grants (no READ, no atomic).
-  mr_ = ibv_reg_mr(device.pd(), slab_, layout.total_bytes,
-                   IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
-  if (!mr_) {
-    *error = "bus slab reg_mr failed errno=" + std::to_string(errno);
-    return;
-  }
+  mr_ = device.register_memory(slab_, layout.total_bytes,
+                               IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE,
+                               "bus slab", error);
+  if (!mr_) return;
 
   // One CQ pair per pool's QP. Only doorbell SENDs are signaled and credit
   // WRITEs never are, so send-CQ load stays near one entry per message.

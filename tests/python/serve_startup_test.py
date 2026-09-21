@@ -1,6 +1,8 @@
 """Exercise the server's settings handshake before model loading or GPU use."""
+import json
 import os
 from pathlib import Path
+import resource
 import socket
 import subprocess
 import tempfile
@@ -63,6 +65,33 @@ class ServeStartupTest(unittest.TestCase):
                     process.wait(timeout=5)
                 for output in files:
                     output.close()
+
+    def test_memlock_prepared_before_cuda_with_config_debug_and_mlock_off(self):
+        _, inherited_hard = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+        hard = 8192 if inherited_hard == resource.RLIM_INFINITY else min(inherited_hard, 8192)
+
+        def lower_soft_limit():
+            resource.setrlimit(resource.RLIMIT_MEMLOCK, (0, hard))
+
+        with tempfile.TemporaryDirectory(prefix="dgpp-memlock-") as directory:
+            config = Path(directory) / "cluster.json"
+            config.write_text(json.dumps({
+                "model": "unused/model", "nodes": ["127.0.0.1"],
+                "node_env": [{"DGPP_LOG_LEVEL": "debug", "DGPP_MLOCK": "off"}],
+            }))
+            # Clear the config's model id so reaching CUDA needs no cached checkpoint.
+            result = subprocess.run(
+                [self.binary, "--config", str(config), "--rank", "0", "--model", "",
+                 "--checkpoint-dir", str(Path(directory) / "unused")],
+                env={**os.environ, "CUDA_VISIBLE_DEVICES": "", "DGPP_LOG_LEVEL": "info"},
+                preexec_fn=lower_soft_limit, text=True, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, timeout=15)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn("memlock before preparation: RLIMIT_MEMLOCK soft 0 bytes", result.stdout)
+            after = f"memlock after preparation: RLIMIT_MEMLOCK soft {hard} bytes, hard {hard} bytes"
+            self.assertIn(after, result.stdout)
+            self.assertIn("no CUDA device visible", result.stdout)
+            self.assertLess(result.stdout.index(after), result.stdout.index("no CUDA device visible"))
 
     def test_matching_defaults_are_quiet(self):
         for slots in (1, 2, 4, 8):

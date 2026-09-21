@@ -3115,13 +3115,12 @@ bool CollectiveBus::start(std::string* error) {
                cudaGetErrorString(alloc);
       return false;
     }
+    DGPP_LOG_DEBUG("bus: staging block {} bytes (stage {} + arena {} + counters {}), {} device(s)",
+                   block_bytes, stage_bytes, arena_bytes, counters_bytes, impl.devices.size());
     for (auto& device : impl.devices) {
-      ibv_mr* mr = ibv_reg_mr(device->pd(), impl.stage_block, block_bytes, 0);
-      if (mr == nullptr) {
-        *error = "collective staging block registration failed on " +
-                 device->name() + " errno=" + std::to_string(errno);
-        return false;
-      }
+      ibv_mr* mr = device->register_memory(impl.stage_block, block_bytes, 0,
+                                          "collective staging block", error);
+      if (mr == nullptr) return false;
       impl.stage_mrs.push_back(mr);
     }
     DGPP_LOG_DEBUG("bus: staging block {}B x {} MR(s)", block_bytes,

@@ -18,6 +18,7 @@ SITE_KEYS = (
     "DGPP_HTTP_BIND", "DGPP_ROCE_DEVICES", "DGPP_ROCE_GID_INDICES",
     "HF_HOME", "HF_HUB_CACHE", "DGPP_RESIDENT_CACHE_DIR", "DGPP_NODE_OVERRIDES",
     "DGPP_BUILD_DIR", "DGPP_DATA_DIR",
+    "DGPP_LOG_LEVEL", "DGPP_MLOCK",
     # The engine's L2 weight-prefetch knobs (src/kernels/l2_prefetch.hpp); site
     # settings so an A/B runs with the same setting on every rank.
     "DGPP_L2_PREFETCH", "DGPP_L2_PREFETCH_MB", "DGPP_L2_PREFETCH_BOUNDARY", "DGPP_L2_PREFETCH_LAYER",
@@ -29,6 +30,7 @@ SITE_KEYS = (
     "DGPP_BUS_TIMELINE", "DGPP_DSV41_DENSE_GEMV", "DGPP_DENSE_GEMV_ROWS", "DGPP_DSV41_EAGER_FOLD",
 )
 NODE_KEYS = ("DGPP_ROCE_DEVICES", "DGPP_ROCE_GID_INDICES", "HF_HUB_CACHE", "DGPP_RESIDENT_CACHE_DIR",
+    "DGPP_LOG_LEVEL", "DGPP_MLOCK",
     # The engine's L2 weight-prefetch knobs (src/kernels/l2_prefetch.hpp): an A/B runs
     # with the same setting on every rank.
     "DGPP_L2_PREFETCH", "DGPP_L2_PREFETCH_MB", "DGPP_L2_PREFETCH_BOUNDARY", "DGPP_L2_PREFETCH_LAYER",

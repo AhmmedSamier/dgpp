@@ -49,6 +49,11 @@ class VerbsDevice {
   // could not be read) — the bus derives its bulk pacing from it.
   double port_rate_gbps() const { return rate_gbps_; }
 
+  // Caller owns the MR. Errors include the device, buffer size, CUDA view and
+  // memlock state captured before registration; successful attempts log at DEBUG.
+  ibv_mr* register_memory(void* buffer, size_t bytes, int access,
+                         const char* purpose, std::string* error) const;
+
  private:
   ibv_context* ctx_ = nullptr;
   ibv_pd* pd_ = nullptr;

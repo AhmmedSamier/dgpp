@@ -19,18 +19,40 @@ std::string limit_text(rlim_t v) {
   return v == RLIM_INFINITY ? "unlimited" : std::to_string(v) + " bytes";
 }
 
-// The soft limit is ours to raise up to the hard one without privilege;
-// ssh-spawned processes on the lab fabric arrive with a finite soft limit
-// (2026-09-02: two of four ranks) that the hard limit did not require.
-void raise_memlock_soft_limit() {
+}  // namespace
+
+bool raise_memlock_soft_limit(std::string* error) {
   rlimit lim{};
-  if (getrlimit(RLIMIT_MEMLOCK, &lim) != 0) return;
-  if (lim.rlim_cur == lim.rlim_max) return;
+  if (getrlimit(RLIMIT_MEMLOCK, &lim) != 0) {
+    const int err = errno;
+    if (error) *error = std::string("getrlimit(RLIMIT_MEMLOCK) failed: ") + std::strerror(err);
+    return false;
+  }
+  if (lim.rlim_cur == lim.rlim_max) return true;
   lim.rlim_cur = lim.rlim_max;
-  setrlimit(RLIMIT_MEMLOCK, &lim);  // best effort; mlockall reports the truth
+  if (setrlimit(RLIMIT_MEMLOCK, &lim) != 0) {
+    const int err = errno;
+    if (error) *error = std::string("setrlimit(RLIMIT_MEMLOCK) failed: ") + std::strerror(err);
+    return false;
+  }
+  return true;
 }
 
-}  // namespace
+std::string memlock_status() {
+  rlimit lim{};
+  std::string limits = "RLIMIT_MEMLOCK unavailable";
+  if (getrlimit(RLIMIT_MEMLOCK, &lim) == 0)
+    limits = "RLIMIT_MEMLOCK soft " + limit_text(lim.rlim_cur) +
+             ", hard " + limit_text(lim.rlim_max);
+  std::ifstream status("/proc/self/status");
+  std::string line;
+  while (std::getline(status, line)) {
+    unsigned long long kib = 0;
+    if (std::sscanf(line.c_str(), "VmPin: %llu kB", &kib) == 1)
+      return limits + ", VmPin " + std::to_string(kib * 1024) + " bytes";
+  }
+  return limits + ", VmPin unavailable";
+}
 
 bool lock_process_memory(std::string* error, size_t* locked_bytes) {
   raise_memlock_soft_limit();

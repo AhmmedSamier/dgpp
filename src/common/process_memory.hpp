@@ -1,8 +1,18 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 
 namespace dgpp {
+
+// Raise only the soft RLIMIT_MEMLOCK to the existing hard limit. Call before
+// CUDA/RDMA setup: every MR charges pinned pages, even for a shared buffer.
+// This does not lock memory and is independent of DGPP_MLOCK=off.
+bool raise_memlock_soft_limit(std::string* error = nullptr);
+
+// Limits and /proc/self/status VmPin, with unavailable fields named explicitly.
+// Capture before registration: a failed ibv_reg_mr rolls back its page charge.
+std::string memlock_status();
 
 // Pins every page the process currently maps into RAM (mlockall
 // MCL_CURRENT) and reports what happened.
@@ -13,8 +23,8 @@ namespace dgpp {
 // the box runs at its memory watermark the kernel swaps those cold-looking
 // pages out, and the next step pays a 2-10 ms major fault for a vocab
 // entry (2026-09-02: every ~10th token on the fabric, in lockstep across
-// ranks because the token is shared). Locking after the model is loaded
-// faults the swapped pages back once and forbids the next eviction.
+// ranks because the token is shared). Serving locks before model construction
+// so checkpoint mappings are excluded.
 //
 // MCL_CURRENT only — MCL_FUTURE would turn every later allocation into a
 // hard failure when RLIMIT_MEMLOCK is finite, and the hot set exists by
