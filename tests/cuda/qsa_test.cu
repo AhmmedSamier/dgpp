@@ -13,6 +13,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <numeric>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -469,6 +471,150 @@ DGPP_TEST(qsa_index_score_and_select_match_the_reference_bitwise) {
   std::printf("[ .. ] select: %d rows, lists of", sf.rows());
   for (int r = 0; r < sf.rows(); ++r) std::printf(" %d", got_counts[static_cast<size_t>(r)]);
   std::printf(" tokens, keys and lists bitwise\n");
+}
+
+DGPP_TEST(qsa_index_large_paged_pools_match_every_host_key_and_token) {
+  // Preserve the reviewer's 65322-pool / position-261288 case as a normal
+  // gate, then cross the 128K-pool boundary. Neither the score stripe nor
+  // the old selection tile divides these visible counts evenly.
+  constexpr int heads = 4, dim = 128, ppb = 16, kpool = 4, select_k = 512;
+  constexpr int rows = 3, width = select_k * kpool + kpool - 1;
+  cudaStream_t stream = test_stream();
+  for (int pools : {65322, 131071}) {
+    const int blocks = (pools + ppb - 1) / ppb;
+    const int stride = blocks * ppb;
+    std::vector<int32_t> table(blocks);
+    std::iota(table.begin(), table.end(), 0);
+    std::mt19937 rng(20260921);
+    std::shuffle(table.begin(), table.end(), rng);
+    const auto cache = random_bf16_normal(200, int64_t(stride) * dim, 1.0f);
+    const auto q = random_bf16_normal(201, rows * heads * dim, 1.0f);
+    std::vector<int64_t> pos{int64_t(pools) * kpool, int64_t(pools) * kpool - 2, -1};
+    DevBuf dc = up(cache), dq = up(q), dt = up(table), dp = up(pos);
+    DevBuf dr = up(std::vector<int32_t>(rows, 0));
+    DevBuf keys(size_t(rows) * stride * sizeof(uint64_t));
+    DevBuf selected(rows * width * sizeof(int32_t)), counts(rows * sizeof(int32_t));
+    DGPP_CUDA_OK(cudaMemsetAsync(keys.p, 0xff, keys.bytes, stream));
+    auto launch = [&] {
+      dgpp::qsa_index_score(ptr<uint16_t>(dq), heads * dim, ptr<int32_t>(dr), ptr<int64_t>(dp),
+                            rows, ptr<int32_t>(dt), blocks, ptr<uint16_t>(dc), ppb, heads, dim,
+                            kpool, mptr<uint64_t>(keys), stride, stream);
+      dgpp::qsa_select_from_keys(ptr<uint64_t>(keys), stride, ptr<int64_t>(dp), rows, select_k,
+                                 kpool, width, mptr<int32_t>(selected), mptr<int32_t>(counts),
+                                 stream);
+    };
+    launch();
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+    const auto got_keys = down<uint64_t>(keys, size_t(rows) * stride);
+    const auto got_selected = down<int32_t>(selected, rows * width);
+    const auto got_counts = down<int32_t>(counts, rows);
+    for (int r = 0; r < rows; ++r) {
+      const int visible = pos[r] < 0 ? 0 : int((pos[r] + 1) / kpool);
+      std::vector<float> scores(visible);
+      for (int p = 0; p < visible; ++p) {
+        const int slot = table[p / ppb] * ppb + p % ppb;
+        const float score =
+            dgpp::qwen_ref::qsa_index_score(q.data() + r * heads * dim, cache.data() + slot * dim);
+        scores[p] = score;
+        uint32_t bits;
+        std::memcpy(&bits, &score, sizeof(bits));
+        const uint32_t sortable = bits >> 31 ? ~bits : bits | 0x80000000u;
+        const uint64_t key = (uint64_t(~sortable) << 21) | uint64_t(p);
+        require(got_keys[size_t(r) * stride + p] == key, "large paged score differs from host");
+      }
+      for (int p = visible; p < stride; ++p)
+        require(got_keys[size_t(r) * stride + p] == UINT64_MAX,
+                "score overwrote an invisible pool");
+      std::vector<int32_t> ids, tokens;
+      dgpp::qwen_ref::qsa_select(scores, select_k, ids);
+      if (pos[r] >= 0) dgpp::qwen_ref::qsa_expand(ids, pos[r], kpool, tokens);
+      require(got_counts[r] == int(tokens.size()), "large paged selected count differs");
+      tokens.resize(width, -1);
+      require(std::equal(tokens.begin(), tokens.end(), got_selected.begin() + r * width),
+              "large paged selected tokens differ from host");
+    }
+    cudaGraph_t graph;
+    cudaGraphExec_t exec;
+    DGPP_CUDA_OK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+    launch();
+    DGPP_CUDA_OK(cudaStreamEndCapture(stream, &graph));
+    DGPP_CUDA_OK(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
+    for (int repeat = 0; repeat < 3; ++repeat) {
+      DGPP_CUDA_OK(cudaGraphLaunch(exec, stream));
+      DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+      require(down<uint64_t>(keys, size_t(rows) * stride) == got_keys, "large graph score changed");
+      require(down<int32_t>(selected, rows * width) == got_selected,
+              "large graph selection changed");
+    }
+    cudaGraphExecDestroy(exec);
+    cudaGraphDestroy(graph);
+    std::printf(
+        "[ .. ] %d pools, 64-token permuted paging: every key/token and graph replay exact\n",
+        pools);
+  }
+}
+
+DGPP_TEST(qsa_select_long_ties_boundaries_and_graph_shape_changes) {
+  constexpr int rows = 8, stride = 131073, kpool = 4;
+  cudaStream_t stream = test_stream();
+  std::vector<uint64_t> keys(size_t(rows) * stride);
+  const std::vector<int> visible{0, 511, 512, 2048, 2049, 65322, 131071, stride};
+  std::vector<int64_t> pos(rows);
+  DevBuf dkeys(keys.size() * sizeof(uint64_t)), dpos(rows * sizeof(int64_t));
+  for (int select_k : {8, 512, 1024}) {
+    const int width = select_k * kpool + kpool - 1;
+    DevBuf selected(rows * width * sizeof(int32_t)), counts(rows * sizeof(int32_t));
+    cudaGraph_t graph;
+    cudaGraphExec_t exec;
+    DGPP_CUDA_OK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+    dgpp::qsa_select_from_keys(ptr<uint64_t>(dkeys), stride, ptr<int64_t>(dpos), rows, select_k,
+                               kpool, width, mptr<int32_t>(selected), mptr<int32_t>(counts),
+                               stream);
+    DGPP_CUDA_OK(cudaStreamEndCapture(stream, &graph));
+    DGPP_CUDA_OK(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
+    for (int pattern = 0; pattern < 4; ++pattern) {
+      // Equal scores force refinement into pool-id bits. Reverse scores
+      // put all winners in the final partial tile. Rotation and an inactive
+      // row change the work beneath the same captured graph on every replay.
+      for (int r = 0; r < rows; ++r) {
+        const int n = visible[(r + pattern) % rows];
+        pos[r] = pattern == 3 && r == 0 ? -1 : int64_t(n) * kpool + r % kpool - 1;
+        for (int p = 0; p < stride; ++p) {
+          const float score = pattern == 0   ? 0.f
+                              : pattern == 1 ? float(p)
+                                             : float((p * 73 + r) % 257);
+          uint32_t bits;
+          std::memcpy(&bits, &score, sizeof(bits));
+          keys[size_t(r) * stride + p] = (uint64_t(~(bits | 0x80000000u)) << 21) | uint64_t(p);
+        }
+      }
+      dkeys.upload(keys.data(), keys.size() * sizeof(uint64_t));
+      dpos.upload(pos.data(), pos.size() * sizeof(int64_t));
+      DGPP_CUDA_OK(cudaGraphLaunch(exec, stream));
+      DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+      const auto got = down<int32_t>(selected, rows * width),
+                 got_counts = down<int32_t>(counts, rows);
+      for (int r = 0; r < rows; ++r) {
+        const int n = pos[r] < 0 ? 0 : int((pos[r] + 1) / kpool);
+        std::vector<uint64_t> ordered(keys.begin() + size_t(r) * stride,
+                                      keys.begin() + size_t(r) * stride + n);
+        std::sort(ordered.begin(), ordered.end());
+        ordered.resize(std::min(n, select_k));
+        std::vector<int32_t> ids;
+        for (uint64_t key : ordered) ids.push_back(int32_t(key & ((1u << 21) - 1)));
+        std::sort(ids.begin(), ids.end());
+        std::vector<int32_t> want;
+        if (pos[r] >= 0) dgpp::qwen_ref::qsa_expand(ids, pos[r], kpool, want);
+        require(got_counts[r] == int(want.size()), "tie/edge count differs");
+        want.resize(width, -1);
+        require(std::equal(want.begin(), want.end(), got.begin() + r * width),
+                "tie/edge selection differs: pattern=" + std::to_string(pattern) +
+                    " row=" + std::to_string(r));
+      }
+    }
+    cudaGraphExecDestroy(exec);
+    cudaGraphDestroy(graph);
+  }
 }
 
 DGPP_TEST(qsa_listed_attention_and_gate_match_the_reference) {

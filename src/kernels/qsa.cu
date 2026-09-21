@@ -288,6 +288,117 @@ struct KeysRowFn {
 
 constexpr int kSelectThreads = 256;
 
+// Find the exact top-k boundary by radix digits. Sorting every 2048-key
+// tile leaves almost all SMs idle during long-context decode; only the
+// boundary bin needs ordering. Composite keys make ties unambiguous, and
+// expand_from_best sorts the final pool ids independently of gather order.
+constexpr int kQsaRadixBits = 10;
+constexpr int kQsaHistBins = 1 << kQsaRadixBits;
+constexpr int kQsaBoundaryKeys = 256;
+
+__device__ inline void qsa_hist_add(int32_t* hist, int bin) {
+  const unsigned peers = __match_any_sync(__activemask(), bin);
+  if ((threadIdx.x & 31) == __ffs(peers) - 1) atomicAdd(hist + bin, __popc(peers));
+}
+
+__device__ inline void qsa_boundary_bin(const int32_t* hist, int remaining, int* boundary,
+                                        int* below) {
+  __shared__ int warp_totals[kSelectThreads / 32];
+  constexpr int per = kQsaHistBins / kSelectThreads;
+  const int first = threadIdx.x * per;
+  int sum = 0;
+#pragma unroll
+  for (int i = 0; i < per; ++i) sum += hist[first + i];
+  int inclusive = sum;
+  const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+#pragma unroll
+  for (int offset = 1; offset < 32; offset <<= 1) {
+    const int value = __shfl_up_sync(0xffffffffu, inclusive, offset);
+    if (lane >= offset) inclusive += value;
+  }
+  if (lane == 31) warp_totals[warp] = inclusive;
+  __syncthreads();
+  int exclusive = inclusive - sum;
+  for (int w = 0; w < warp; ++w) exclusive += warp_totals[w];
+  if (exclusive < remaining && remaining <= exclusive + sum) {
+    for (int i = 0; i < per; ++i) {
+      if (exclusive + hist[first + i] >= remaining) {
+        *boundary = first + i;
+        *below = exclusive;
+        break;
+      }
+      exclusive += hist[first + i];
+    }
+  }
+  __syncthreads();
+}
+
+__device__ inline void qsa_select_radix(const uint64_t* keys, int64_t visible, int select_k,
+                                        uint32_t* best_hi, uint32_t* best_lo, uint32_t* tile_hi,
+                                        uint32_t* tile_lo) {
+  __shared__ int boundary, below, definite_count, candidate_count;
+  int32_t* hist = reinterpret_cast<int32_t*>(tile_hi);
+  uint64_t prefix = 0;
+  int prefix_shift = 32 + kIdxBits;
+  int remaining = select_k, lower = 0, count = 0, shift = 0;
+  for (;;) {
+    shift = max(0, prefix_shift - kQsaRadixBits);
+    const int bits = prefix_shift - shift;
+    const uint64_t mask = (1ull << bits) - 1;
+    for (int i = threadIdx.x; i < kQsaHistBins; i += blockDim.x) hist[i] = 0;
+    __syncthreads();
+    for (int64_t p = threadIdx.x; p < visible; p += blockDim.x) {
+      const uint64_t key = keys[p];
+      if ((key >> prefix_shift) == prefix) qsa_hist_add(hist, int((key >> shift) & mask));
+    }
+    __syncthreads();
+    qsa_boundary_bin(hist, remaining, &boundary, &below);
+    count = hist[boundary];
+    lower += below;
+    remaining -= below;
+    prefix = (prefix << bits) | uint64_t(boundary);
+    // The pool-id suffix makes keys unique, so the final digit always
+    // leaves at most one key. Equal scores need no approximation/fallback.
+    __syncthreads();
+    if (count <= kQsaBoundaryKeys || shift == 0) break;
+    prefix_shift = shift;
+  }
+
+  // The histogram storage becomes the boundary-key array. Values below
+  // the boundary go straight into best; only its <=256 candidates are ranked.
+  if (threadIdx.x == 0) definite_count = candidate_count = 0;
+  __syncthreads();
+  for (int64_t p = threadIdx.x; p < visible; p += blockDim.x) {
+    const uint64_t key = keys[p];
+    const uint64_t top = key >> shift;
+    if (top < prefix) {
+      const int i = atomicAdd(&definite_count, 1);
+      if (i < select_k) {
+        best_hi[i] = uint32_t(key >> 32);
+        best_lo[i] = uint32_t(key);
+      }
+    } else if (top == prefix) {
+      const int i = atomicAdd(&candidate_count, 1);
+      if (i < kQsaBoundaryKeys) {
+        tile_hi[i] = uint32_t(key >> 32);
+        tile_lo[i] = uint32_t(key);
+      }
+    }
+  }
+  __syncthreads();
+  const int i = threadIdx.x;
+  const uint32_t hi = i < count ? tile_hi[i] : 0xffffffffu;
+  const uint32_t lo = i < count ? tile_lo[i] : 0xffffffffu;
+  int rank = 0;
+#pragma unroll 8
+  for (int j = 0; j < count; ++j) rank += key_less(tile_hi[j], tile_lo[j], hi, lo);
+  if (i < count && rank < remaining) {
+    best_hi[lower + rank] = hi;
+    best_lo[lower + rank] = lo;
+  }
+  __syncthreads();
+}
+
 __global__ __launch_bounds__(kSelectThreads) void select_from_keys_kernel(
     const uint64_t* __restrict__ keys_ws, int64_t ws_stride, const int64_t* __restrict__ pos,
     int select_k, int kpool, int max_selected, int32_t* __restrict__ topk_out,
@@ -313,8 +424,13 @@ __global__ __launch_bounds__(kSelectThreads) void select_from_keys_kernel(
     best_lo[i] = 0xFFFFFFFFu;
   }
   __syncthreads();
-  KeysRowFn fn{keys_ws + r * ws_stride};
-  select_topk_stream(fn, 0, visible, best_hi, best_lo, tile_hi, tile_lo, select_k);
+  if (visible > kSelectTile)
+    qsa_select_radix(keys_ws + r * ws_stride, visible, select_k, best_hi, best_lo, tile_hi,
+                     tile_lo);
+  else {
+    KeysRowFn fn{keys_ws + r * ws_stride};
+    select_topk_stream(fn, 0, visible, best_hi, best_lo, tile_hi, tile_lo, select_k);
+  }
   __syncthreads();
   const int cnt = expand_from_best(best_hi, best_lo, select_k, p, kpool, max_selected,
                                    topk_out + r * max_selected, scratch, smem_count);

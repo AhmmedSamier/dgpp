@@ -169,6 +169,15 @@ the last ≤ 3 raw indexer keys per request. Torch's `topk` does not define its
 tie order; the engine pins "higher score first, ties to the lower block
 index" as it does for DSA, and the host oracle uses the same rule.
 
+The scorer keeps a fixed FP32 reduction order and writes composite score/pool
+keys. Above 2048 visible pools, selection finds the exact top-512 boundary
+with radix histograms, refining only its boundary bin until at most 256
+keys need ordering. It then sorts the selected pool ids before expanding
+them to tokens. Short rows retain streaming top-k. Both paths use the same
+workspace and graph nodes; ties, incomplete pools and inactive rows preserve
+the selection contract. The [long-context selection record](../benchmarks/results/2026-09-21-qwen-qsa-select.md)
+contains cold/warm measurements and exact host-oracle coverage through 131K pools.
+
 ### 1.5 Gated Residual (GR)
 
 Per site (`attn_hyper_connection`, `mlp_hyper_connection`, and the final
@@ -618,12 +627,15 @@ also what makes the MTP draft rows' ids available before the replay.
 K/V bf16 for the rank's kv head (the DSA block-table design), a compressed
 key cache written once per completed 4-token block, and a per-request
 pending ring of ≤ 3 raw indexer keys. Decode scores `tokens/4` compressed
-keys (at 262 K context: 16.8 MB per layer, 200 MB per step, ~0.85 ms), then
+keys (at 262 K context: 16.8 MB per layer, 200 MB per backbone pass), then
 top-512 with the pinned tie rule, then the listed GQA attention over ≤ 2051
 positions (split across blocks and combined, as `dsa_attn_partial/combine`
 do). Prompts of ≤ 2051 tokens take the dense kernel, which computes the same
 softmax set. The indexer is replicated so every rank selects identically;
 its kernels must be deterministic (fixed reduction order).
+These byte counts exclude selection work and are not a latency prediction:
+the old streaming top-k dominated long-context decode. The exact radix
+selector described in §1.4 reduces that cost without changing score arithmetic.
 
 **D6 — GDN as a KDA variant, not a new operator family.** The recurrent form
 (state row per warp, token-sequential, fp32) serves decode and prefill as it

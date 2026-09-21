@@ -12,6 +12,12 @@ operators are documented in [its architecture study](docs/qwen38_flash_next_plan
 and GLM-4.7's GQA and NVFP4 layout in [its implementation notes](docs/glm47_plan.md).
 Shared session and engine interfaces live in `src/engine/`.
 
+Qwen's QSA indexer preserves its FP32 scoring order and deterministic
+score/pool tie rule. Long rows use exact radix selection; short rows use
+streaming top-k. Both expand the same sorted pool ids with the existing
+workspace and captured graph shape. See the
+[selection measurements](benchmarks/results/2026-09-21-qwen-qsa-select.md).
+
 Use [PLAN.md](PLAN.md) for implementation status and
 [operations](docs/operations.md) for deployment. Dated measurements here
 explain design choices; current benchmark tables and reproduction commands

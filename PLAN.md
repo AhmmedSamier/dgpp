@@ -104,7 +104,10 @@ serving kernels are unchanged. The
 adds int4/int8 tensor-core tiles, FP64 arithmetic checks and prefill likelihood
 scoring. [Qwen QSA tile reuse](benchmarks/results/2026-09-15-qwen-qsa-prefill.md)
 then reduces measured cold TP2 prefill time by 8–14%, preserving the existing
-partial arithmetic and decode kernels. Grouped Qwen continuation and
+partial arithmetic and decode kernels. The
+[long-context QSA selector](benchmarks/results/2026-09-21-qwen-qsa-select.md)
+uses exact radix selection above 2048 pools, retaining the score arithmetic,
+tie order and workspace. Grouped Qwen continuation and
 GLM-Flash row expansion are the next targets in the
 [performance plan](docs/performance_improvement_plan.md#10-next-priorities-after-the-first-delivery).
 

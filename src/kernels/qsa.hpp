@@ -109,8 +109,8 @@ void qsa_index_score(const uint16_t* q, int64_t q_row_stride, const int32_t* req
                      int64_t ws_stride, cudaStream_t stream);
 
 // One block per row: the select_k smallest keys of keys_ws[r, 0..visible)
-// (the streaming composite-key top-k), their pools expanded to tokens in
-// ascending order, the row's incomplete tail appended; topk_out int32
+// (exact radix selection above 2048 pools, streaming top-k otherwise), with
+// pools expanded in ascending order and the row's incomplete tail appended; topk_out int32
 // [rows, max_selected] (-1 padded), out_counts [rows]. select_k <= 1024.
 void qsa_select_from_keys(const uint64_t* keys_ws, int64_t ws_stride, const int64_t* pos,
                           int rows, int select_k, int kpool, int max_selected,

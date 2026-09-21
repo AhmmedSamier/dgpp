@@ -6,6 +6,12 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Reduce QSA selection cost at long context** (2026-09-21,
+  [#19](https://github.com/HawkBearPig/dgpp/issues/19)): use exact radix
+  selection above 2048 compressed pools, preserving score arithmetic,
+  ties, token order and graph workspace. Add a cold/warm indexer benchmark
+  and permanent large-pool, partial-tile and graph-replay correctness gates.
+  See the [performance and parity record](benchmarks/results/2026-09-21-qwen-qsa-select.md).
 - **Make the YaRN release check accurate and resumable** (2026-09-21,
   [#16](https://github.com/HawkBearPig/dgpp/issues/16)): allow reasoning in
   retrieval probes, correct decode timing units, repeat the latest cached
