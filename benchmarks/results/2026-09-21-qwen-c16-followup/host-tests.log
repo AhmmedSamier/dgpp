@@ -1,0 +1,54 @@
+Internal ctest changing into directory: <checkout>/build-ci
+Test project <checkout>/build-ci
+      Start  14: unit_tests
+ 1/22 Test  #14: unit_tests .......................   Passed    9.91 sec
+      Start  15: qwen_yarn_fixture_test
+ 2/22 Test  #15: qwen_yarn_fixture_test ...........   Passed    0.01 sec
+      Start  26: http_server_test
+ 3/22 Test  #26: http_server_test .................   Passed    6.27 sec
+      Start  27: serve_test
+ 4/22 Test  #27: serve_test .......................   Passed  116.49 sec
+      Start  28: fabric_serve_test
+ 5/22 Test  #28: fabric_serve_test ................   Passed    3.09 sec
+      Start  29: scheduler_test
+ 6/22 Test  #29: scheduler_test ...................   Passed    0.01 sec
+      Start  30: unit
+ 7/22 Test  #30: unit .............................   Passed    9.12 sec
+      Start  31: checkpoint_audit_test
+ 8/22 Test  #31: checkpoint_audit_test ............   Passed    0.08 sec
+      Start  32: route_trace_test
+ 9/22 Test  #32: route_trace_test .................   Passed    0.13 sec
+      Start  33: sampling_profile_test
+10/22 Test  #33: sampling_profile_test ............   Passed    0.05 sec
+      Start  34: site_env_test
+11/22 Test  #34: site_env_test ....................   Passed    1.93 sec
+      Start  35: script_reports_test
+12/22 Test  #35: script_reports_test ..............   Passed    0.90 sec
+      Start  36: portability_test
+13/22 Test  #36: portability_test .................   Passed    0.38 sec
+      Start  37: timed_load_test
+14/22 Test  #37: timed_load_test ..................   Passed    0.80 sec
+      Start  38: qwen_yarn_release_check_test
+15/22 Test  #38: qwen_yarn_release_check_test .....   Passed    0.13 sec
+      Start  39: qwen_head_compare_test
+16/22 Test  #39: qwen_head_compare_test ...........   Passed    0.38 sec
+      Start  40: spark_cross_test
+17/22 Test  #40: spark_cross_test .................   Passed    0.78 sec
+      Start  41: setup_tools_test
+18/22 Test  #41: setup_tools_test .................   Passed    1.83 sec
+      Start  42: bootstrap_test
+19/22 Test  #42: bootstrap_test ...................   Passed    0.14 sec
+      Start  43: launcher_test
+20/22 Test  #43: launcher_test ....................   Passed    9.84 sec
+      Start  44: serve_startup_test
+21/22 Test  #44: serve_startup_test ...............   Passed    1.90 sec
+      Start 126: roster_selftest
+22/22 Test #126: roster_selftest ..................   Passed    0.06 sec
+
+100% tests passed, 0 tests failed out of 22
+
+Label Time Summary:
+host      = 164.22 sec*proc (22 tests)
+python    =  19.26 sec*proc (14 tests)
+
+Total Test time (real) = 164.23 sec

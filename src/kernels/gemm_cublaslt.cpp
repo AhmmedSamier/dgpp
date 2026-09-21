@@ -52,6 +52,7 @@ struct PlanKey {
 
 struct CublasLtGemm::Impl {
   int decode_rows = kGemmDecodeRowsDefault;  // the decode lowering bound (set_decode_rows)
+  int kernel_only_min_rows = 0, kernel_only_max_rows = 0;
   bool decode_mma = false;                   // the lowering's tensor-core form (set_decode_mma)
   int decode_mma_max_rows = 0;               // its bound (0: every row count)
   int plan_rows = 0;                         // the Lt algorithm's row count (set_plan_rows)
@@ -367,6 +368,14 @@ void CublasLtGemm::set_decode_rows(int rows) {
 }
 
 int CublasLtGemm::decode_rows() const { return impl_->decode_rows; }
+void CublasLtGemm::set_kernel_only_rows(int min_rows, int max_rows) {
+  if (!((min_rows == 0 && max_rows == 0) ||
+        (min_rows >= 1 && min_rows <= max_rows && max_rows <= kGemmDecodeLoweringRows)))
+    throw std::invalid_argument("CublasLtGemm::set_kernel_only_rows: invalid min_rows/max_rows");
+  impl_->kernel_only_min_rows = min_rows;
+  impl_->kernel_only_max_rows = max_rows;
+}
+
 void CublasLtGemm::set_decode_mma(bool on, int max_rows) {
   if (max_rows < 0) throw std::invalid_argument("CublasLtGemm::set_decode_mma: negative bound");
   if (on)
@@ -460,6 +469,13 @@ void CublasLtGemm::matmul(const void* act, const void* weight, void* out,
                           int m, int n, int k, DType io_dtype, GemmOut out_dtype,
                           size_t act_row_stride, void* workspace,
                           size_t ws_bytes, cudaStream_t stream) {
+  const bool kernel_only = io_dtype == DType::BF16 && impl_->kernel_only_min_rows > 0 &&
+                           m >= impl_->kernel_only_min_rows && m <= impl_->kernel_only_max_rows;
+  if (kernel_only && !bf16_gemv_accepts(weight, 1, k))
+    throw std::invalid_argument(
+        "CublasLtGemm::matmul: kernel-only BF16 decode requires aligned weights and a supported k; "
+        "refusing cuBLASLt fallback for m=" +
+        std::to_string(m) + ", k=" + std::to_string(k));
   // Decode-shaped bf16 calls take the bandwidth GEMV (bf16_gemv.hpp):
   // cuBLASLt's m=1 kernel sits at ~128 GB/s on this part. Each GEMV row has
   // the scalar reduction order regardless of the rows sharing its launch.
@@ -502,7 +518,7 @@ void CublasLtGemm::matmul(const void* act, const void* weight, void* out,
   // (gemm.hpp, bf12_release_raw): a capture never sees the scratch.
   const bool released = packed != nullptr && packed->released;
   if (io_dtype == DType::BF16 && m >= 1 &&
-      (m <= impl_->gemv_rows(packed) || (released && impl_->bf12_wide)) &&
+      (kernel_only || m <= impl_->gemv_rows(packed) || (released && impl_->bf12_wide)) &&
       bf16_gemv_accepts(weight, /*m=*/1, k)) {
     const auto* x = static_cast<const uint16_t*>(act);
     const auto* w = static_cast<const uint16_t*>(weight);

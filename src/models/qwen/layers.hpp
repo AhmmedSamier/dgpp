@@ -46,6 +46,10 @@ struct QwenGemmWorkspace {
   int mma_from_rows = 0;
 };
 
+// Select decode lowering by token rows, before a projection flattens the
+// hyper-state branches. Existing walks of at most 16 tokens keep their kernels.
+void qwen_configure_gemm_rows(CublasLtGemm& gemm, int tokens, bool decode);
+
 // The draft's hidden projection flattens the hyper-state branches into
 // tokens * hc rows. Wider decode must remain safe for collective graphs.
 void qwen_mtp_hidden_projection(const QwenGemmWorkspace& gemm, const uint16_t* act,

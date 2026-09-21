@@ -94,7 +94,7 @@ constexpr int kGemmDecodeRowsDefault = 8;
 // not bitwise (the engine gates' near-tie rule). 256 restores the old
 // lowering (every decode row count through the chunks, fp8 to 128 rows).
 int dense_gemv_rows();
-constexpr int kGemmDecodeLoweringRows = 32;
+constexpr int kGemmDecodeLoweringRows = 64;
 
 // cuBLASLt-backed implementation with per-shape heuristic caching. Decode-
 // shaped bf16 calls (m <= the decode rows, k % 8 == 0, 16B-aligned weight)
@@ -138,6 +138,11 @@ class CublasLtGemm : public IGemm {
   // calls up to it take the GEMV core. [1, kGemmDecodeLoweringRows].
   void set_decode_rows(int rows);
   int decode_rows() const;
+  // Force BF16 matmul in this inclusive row range through kernel-only
+  // lowering. Other row counts retain their existing dispatch. The model
+  // enables this for decode and clears it for prefill; (0, 0) disables it.
+  // Unsupported shapes fail explicitly instead of falling back to cuBLASLt.
+  void set_kernel_only_rows(int min_rows, int max_rows);
   // Decode-shaped bf16 calls take the streaming tensor-core GEMM
   // (mma_gemv.hpp) instead of the 4-row GEMV chunks: the weights read once
   // for every row of the launch, each row's chain the same whatever m. The

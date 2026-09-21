@@ -1,0 +1,951 @@
+Internal ctest changing into directory: <checkout>/build-ci
+Test project <checkout>/build-ci
+        Start   1: qwen_forward_fixture
+  1/131 Test   #1: qwen_forward_fixture ......................   Passed    0.16 sec
+        Start   2: qwen_plan_check
+  2/131 Test   #2: qwen_plan_check ...........................   Passed    0.07 sec
+        Start   3: qwen_forward_smoke
+  3/131 Test   #3: qwen_forward_smoke ........................   Passed    1.11 sec
+        Start   4: qwen_forward_smoke_yarn
+  4/131 Test   #4: qwen_forward_smoke_yarn ...................   Passed    1.29 sec
+        Start   5: qwen_forward_cross_limit
+  5/131 Test   #5: qwen_forward_cross_limit ..................   Passed    1.28 sec
+        Start   6: qwen_forward_generate
+  6/131 Test   #6: qwen_forward_generate .....................   Passed   19.14 sec
+        Start   7: qwen_forward_test
+  7/131 Test   #7: qwen_forward_test .........................   Passed    1.35 sec
+        Start   8: qwen_decode_test
+  8/131 Test   #8: qwen_decode_test ..........................   Passed    4.37 sec
+        Start   9: qwen_decode_fp8_head
+  9/131 Test   #9: qwen_decode_fp8_head ......................   Passed    5.30 sec
+        Start  10: qwen_decode_fp8_head_row_independent
+ 10/131 Test  #10: qwen_decode_fp8_head_row_independent ......   Passed    4.66 sec
+        Start  11: nic_regress_selftest
+ 11/131 Test  #11: nic_regress_selftest ......................   Passed    0.51 sec
+        Start  12: glm_tp_test
+ 12/131 Test  #12: glm_tp_test ...............................   Passed   39.52 sec
+        Start  13: glm_mtp_sampling_no_pipeline
+ 13/131 Test  #13: glm_mtp_sampling_no_pipeline ..............   Passed    3.29 sec
+        Start  14: unit_tests
+ 14/131 Test  #14: unit_tests ................................   Passed    9.46 sec
+        Start  15: qwen_yarn_fixture_test
+ 15/131 Test  #15: qwen_yarn_fixture_test ....................   Passed    0.01 sec
+        Start  16: tokenizer_test
+ 16/131 Test  #16: tokenizer_test ............................   Passed    0.26 sec
+        Start  17: qwen_tokenizer_test
+ 17/131 Test  #17: qwen_tokenizer_test .......................   Passed    0.16 sec
+        Start  18: dsv41_tokenizer_test
+ 18/131 Test  #18: dsv41_tokenizer_test ......................   Passed    0.08 sec
+        Start  19: dsv41_prompt_test
+ 19/131 Test  #19: dsv41_prompt_test .........................   Passed    0.09 sec
+        Start  20: glm4_tokenizer_test
+ 20/131 Test  #20: glm4_tokenizer_test .......................   Passed    0.20 sec
+        Start  21: glm_dsa_tokenizer_test
+ 21/131 Test  #21: glm_dsa_tokenizer_test ....................   Passed    0.21 sec
+        Start  22: chat_template_test
+ 22/131 Test  #22: chat_template_test ........................   Passed    1.96 sec
+        Start  23: qwen_chat_template_test
+ 23/131 Test  #23: qwen_chat_template_test ...................   Passed    1.61 sec
+        Start  24: glm4_chat_template_test
+ 24/131 Test  #24: glm4_chat_template_test ...................   Passed    1.97 sec
+        Start  25: glm_dsa_chat_template_test
+ 25/131 Test  #25: glm_dsa_chat_template_test ................   Passed    1.81 sec
+        Start  26: http_server_test
+ 26/131 Test  #26: http_server_test ..........................   Passed    6.32 sec
+        Start  27: serve_test
+ 27/131 Test  #27: serve_test ................................   Passed  118.38 sec
+        Start  28: fabric_serve_test
+ 28/131 Test  #28: fabric_serve_test .........................   Passed    3.18 sec
+        Start  29: scheduler_test
+ 29/131 Test  #29: scheduler_test ............................   Passed    0.00 sec
+        Start  30: unit
+ 30/131 Test  #30: unit ......................................   Passed    9.20 sec
+        Start  31: checkpoint_audit_test
+ 31/131 Test  #31: checkpoint_audit_test .....................   Passed    0.04 sec
+        Start  32: route_trace_test
+ 32/131 Test  #32: route_trace_test ..........................   Passed    0.11 sec
+        Start  33: sampling_profile_test
+ 33/131 Test  #33: sampling_profile_test .....................   Passed    0.05 sec
+        Start  34: site_env_test
+ 34/131 Test  #34: site_env_test .............................   Passed    1.55 sec
+        Start  35: script_reports_test
+ 35/131 Test  #35: script_reports_test .......................   Passed    0.71 sec
+        Start  36: portability_test
+ 36/131 Test  #36: portability_test ..........................   Passed    0.34 sec
+        Start  37: timed_load_test
+ 37/131 Test  #37: timed_load_test ...........................   Passed    0.81 sec
+        Start  38: qwen_yarn_release_check_test
+ 38/131 Test  #38: qwen_yarn_release_check_test ..............   Passed    0.13 sec
+        Start  39: qwen_head_compare_test
+ 39/131 Test  #39: qwen_head_compare_test ....................   Passed    0.40 sec
+        Start  40: spark_cross_test
+ 40/131 Test  #40: spark_cross_test ..........................   Passed    0.51 sec
+        Start  41: setup_tools_test
+ 41/131 Test  #41: setup_tools_test ..........................   Passed    1.62 sec
+        Start  42: bootstrap_test
+ 42/131 Test  #42: bootstrap_test ............................   Passed    0.14 sec
+        Start  43: launcher_test
+ 43/131 Test  #43: launcher_test .............................   Passed    9.68 sec
+        Start  44: serve_startup_test
+ 44/131 Test  #44: serve_startup_test ........................   Passed    2.85 sec
+        Start  45: kda_test
+ 45/131 Test  #45: kda_test ..................................   Passed    3.10 sec
+        Start  46: dsa_test
+ 46/131 Test  #46: dsa_test ..................................   Passed   15.13 sec
+        Start  47: qwen_gr_test
+ 47/131 Test  #47: qwen_gr_test ..............................   Passed    0.42 sec
+        Start  48: qwen_norm_test
+ 48/131 Test  #48: qwen_norm_test ............................   Passed    0.39 sec
+        Start  49: gdn_test
+ 49/131 Test  #49: gdn_test ..................................   Passed    0.45 sec
+        Start  50: qsa_test
+ 50/131 Test  #50: qsa_test ..................................   Passed    1.77 sec
+        Start  51: qwen_ple_test
+ 51/131 Test  #51: qwen_ple_test .............................   Passed    0.74 sec
+        Start  52: csa2_test
+ 52/131 Test  #52: csa2_test .................................   Passed    0.68 sec
+        Start  53: csa2_layer_test
+ 53/131 Test  #53: csa2_layer_test ...........................   Passed    3.82 sec
+        Start  54: dsv41_engram_layer_test
+ 54/131 Test  #54: dsv41_engram_layer_test ...................   Passed    1.07 sec
+        Start  55: dsv41_model_test
+ 55/131 Test  #55: dsv41_model_test ..........................   Passed    3.70 sec
+        Start  56: dsv41_forward_fixture
+ 56/131 Test  #56: dsv41_forward_fixture .....................   Passed    0.62 sec
+        Start  57: dsv41_forward_smoke
+ 57/131 Test  #57: dsv41_forward_smoke .......................   Passed    0.99 sec
+        Start  58: dsv41_forward_generate
+ 58/131 Test  #58: dsv41_forward_generate ....................   Passed    0.65 sec
+        Start  59: dsv41_forward_test_e2e
+ 59/131 Test  #59: dsv41_forward_test_e2e ....................   Passed    0.97 sec
+        Start  60: dsv41_forward_generate_teacher
+ 60/131 Test  #60: dsv41_forward_generate_teacher ............   Passed    0.64 sec
+        Start  61: dsv41_forward_test
+ 61/131 Test  #61: dsv41_forward_test ........................   Passed    0.97 sec
+        Start  62: dsv41_forward_generate_bounded
+ 62/131 Test  #62: dsv41_forward_generate_bounded ............   Passed    0.61 sec
+        Start  63: dsv41_forward_test_bounded_e2e
+ 63/131 Test  #63: dsv41_forward_test_bounded_e2e ............   Passed    0.93 sec
+        Start  64: dsv41_forward_generate_teacher_bounded
+ 64/131 Test  #64: dsv41_forward_generate_teacher_bounded ....   Passed    0.60 sec
+        Start  65: dsv41_forward_test_bounded
+ 65/131 Test  #65: dsv41_forward_test_bounded ................   Passed    0.93 sec
+        Start  66: dsv41_decode_test
+ 66/131 Test  #66: dsv41_decode_test .........................   Passed    3.36 sec
+        Start  67: dsv41_engram_test
+ 67/131 Test  #67: dsv41_engram_test .........................   Passed    0.40 sec
+        Start  68: qwen_moe_test
+ 68/131 Test  #68: qwen_moe_test .............................   Passed    2.63 sec
+        Start  69: qwen_loader_test
+ 69/131 Test  #69: qwen_loader_test ..........................   Passed    6.47 sec
+        Start  70: glm4_attn_test
+ 70/131 Test  #70: glm4_attn_test ............................   Passed    0.42 sec
+        Start  71: glm4_loader_test
+ 71/131 Test  #71: glm4_loader_test ..........................   Passed    0.90 sec
+        Start  72: glm4_forward_fixture
+ 72/131 Test  #72: glm4_forward_fixture ......................   Passed    0.08 sec
+        Start  73: glm4_forward_smoke
+ 73/131 Test  #73: glm4_forward_smoke ........................   Passed    0.87 sec
+        Start  74: glm4_forward_generate
+ 74/131 Test  #74: glm4_forward_generate .....................   Passed    6.87 sec
+        Start  75: glm4_forward_test
+ 75/131 Test  #75: glm4_forward_test .........................   Passed    0.94 sec
+        Start  76: glm_dsa_forward_fixture
+ 76/131 Test  #76: glm_dsa_forward_fixture ...................   Passed    0.11 sec
+        Start  77: glm_dsa_forward_smoke
+ 77/131 Test  #77: glm_dsa_forward_smoke .....................   Passed    0.92 sec
+        Start  78: glm_dsa_forward_generate
+ 78/131 Test  #78: glm_dsa_forward_generate ..................   Passed   13.14 sec
+        Start  79: glm_dsa_forward_test
+ 79/131 Test  #79: glm_dsa_forward_test ......................   Passed    0.99 sec
+        Start  80: glm_dsa_prefill_fixture
+ 80/131 Test  #80: glm_dsa_prefill_fixture ...................   Passed    0.10 sec
+        Start  81: glm_dsa_prefill_generate
+ 81/131 Test  #81: glm_dsa_prefill_generate ..................   Passed  105.46 sec
+        Start  82: glm_dsa_prefill_test
+ 82/131 Test  #82: glm_dsa_prefill_test ......................   Passed    0.98 sec
+        Start  83: glm_dsa_decode_test
+ 83/131 Test  #83: glm_dsa_decode_test .......................   Passed    1.35 sec
+        Start  84: glm_dsa_tp_test
+ 84/131 Test  #84: glm_dsa_tp_test ...........................   Passed    3.71 sec
+        Start  85: glm_dsa_engine_test
+ 85/131 Test  #85: glm_dsa_engine_test .......................   Passed    5.99 sec
+        Start  86: glm4_decode_test
+ 86/131 Test  #86: glm4_decode_test ..........................   Passed    1.02 sec
+        Start  87: glm4_tp_test
+ 87/131 Test  #87: glm4_tp_test ..............................   Passed    2.09 sec
+        Start  88: glm4_engine_test
+ 88/131 Test  #88: glm4_engine_test ..........................   Passed    3.90 sec
+        Start  89: glm_dsa_loader_test
+ 89/131 Test  #89: glm_dsa_loader_test .......................   Passed    1.05 sec
+        Start  90: dsv41_loader_test
+ 90/131 Test  #90: dsv41_loader_test .........................   Passed    8.64 sec
+        Start  91: dsv41_tp_test
+ 91/131 Test  #91: dsv41_tp_test .............................   Passed    6.56 sec
+        Start  92: dsv41_engine_test
+ 92/131 Test  #92: dsv41_engine_test .........................   Passed    8.05 sec
+        Start  93: qwen_tp_test
+ 93/131 Test  #93: qwen_tp_test ..............................   Passed    4.15 sec
+        Start  94: qwen_engine_test
+ 94/131 Test  #94: qwen_engine_test ..........................   Passed   10.58 sec
+        Start  95: qwen_engine_row_independent
+ 95/131 Test  #95: qwen_engine_row_independent ...............   Passed    3.24 sec
+        Start  96: qwen_engine_bf12
+ 96/131 Test  #96: qwen_engine_bf12 ..........................   Passed   10.14 sec
+        Start  97: qwen_engine_fp8_head_4
+ 97/131 Test  #97: qwen_engine_fp8_head_4 ....................   Passed    2.66 sec
+        Start  98: qwen_engine_fp8_head_256
+ 98/131 Test  #98: qwen_engine_fp8_head_256 ..................   Passed    2.75 sec
+        Start  99: qwen_engine_fp8_wide
+ 99/131 Test  #99: qwen_engine_fp8_wide ......................   Passed    3.09 sec
+        Start 100: qwen_engine_fp8_mtp3_rows32
+100/131 Test #100: qwen_engine_fp8_mtp3_rows32 ...............***Failed    2.72 sec
+2026-09-21 18:41:43.978 INFO  bus: globaltimer offset 20421248996 ns (+-2 us)
+2026-09-21 18:41:43.980 INFO  bus: globaltimer offset 20421249439 ns (+-3 us)
+2026-09-21 18:41:43.984 INFO  verbs: device roceP2p1s0f0 port 1 gid_index 3
+2026-09-21 18:41:43.985 INFO  verbs: device roceP2p1s0f0 port 1 gid_index 3
+2026-09-21 18:41:43.986 INFO  verbs: device rocep1s0f0 port 1 gid_index 3
+2026-09-21 18:41:43.997 INFO  verbs: device rocep1s0f0 port 1 gid_index 3
+2026-09-21 18:41:44.024 INFO  bus: rank 0 rendezvous listening on port 29947
+2026-09-21 18:41:44.533 INFO  bus: rank 1 up — 1 peer(s) x 2 lane(s), lat 8x262144B, bulk 8x262144B, bulk pace 85.0 Gb/s per QP, window 4 per lane
+2026-09-21 18:41:44.534 INFO  bus: rank 0 up — 1 peer(s) x 2 lane(s), lat 8x262144B, bulk 8x262144B, bulk pace 85.0 Gb/s per QP, window 4 per lane
+2026-09-21 18:41:44.535 INFO  bus engine: rank 1 pinned to cpu 18
+2026-09-21 18:41:44.535 INFO  bus engine: rank 0 pinned to cpu 19
+2026-09-21 18:41:44.536 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 102.2 of 121.6 GiB, host available 114.7 GiB
+2026-09-21 18:41:44.536 INFO  qwen loader: rank 1 resident footprint 0.0 GiB; device free 102.2 of 121.6 GiB, host available 114.7 GiB
+2026-09-21 18:41:44.830 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-21 18:41:44.831 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-21 18:41:44.840 INFO  qwen loader: rank 0 n-gram table rows [0, 660) resident (0.00 GiB, scale 0.020019531)
+2026-09-21 18:41:44.842 INFO  qwen loader: rank 1 n-gram table rows [660, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-09-21 18:41:44.846 INFO  qwen loader: rank 1 resident footprint 0.0 GiB; device free 101.6 of 121.6 GiB, host available 114.1 GiB
+2026-09-21 18:41:44.846 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 101.6 of 121.6 GiB, host available 114.1 GiB
+2026-09-21 18:41:44.970 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-21 18:41:45.104 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-21 18:41:45.110 INFO  qwen loader: rank 0 n-gram table rows [0, 660) resident (0.00 GiB, scale 0.020019531)
+2026-09-21 18:41:45.115 INFO  qwen loader: rank 1 n-gram table rows [660, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-09-21 18:41:45.334 INFO  allreduce: device clock rate 2418000 kHz (stamps conversion)
+2026-09-21 18:41:45.334 INFO  allreduce: rank 1 seq 1 launched (1 peers)
+2026-09-21 18:41:45.334 INFO  allreduce: rank 1 seq 1 ready after 25.3us
+2026-09-21 18:41:45.335 INFO  allreduce: device clock rate 2418000 kHz (stamps conversion)
+2026-09-21 18:41:45.335 INFO  allreduce: rank 0 seq 1 launched (1 peers)
+2026-09-21 18:41:45.335 INFO  allreduce: rank 0 seq 1 ready after 8.0us
+2026-09-21 18:41:45.335 INFO  allreduce: rank 0 seq 1 done status=0 after 22.1us
+2026-09-21 18:41:45.335 INFO  allreduce: rank 1 seq 1 done status=0 after 1279.0us
+2026-09-21 18:41:45.367 INFO  allreduce: rank 0 seq 2 launched (1 peers)
+2026-09-21 18:41:45.367 INFO  allreduce: rank 1 seq 2 launched (1 peers)
+2026-09-21 18:41:45.367 INFO  allreduce: rank 0 seq 2 ready after 8.1us
+2026-09-21 18:41:45.367 INFO  allreduce: rank 1 seq 2 ready after 7.6us
+2026-09-21 18:41:45.367 INFO  allreduce: rank 1 seq 2 done status=0 after 23.1us
+2026-09-21 18:41:45.367 INFO  allreduce: rank 0 seq 2 done status=0 after 32.0us
+2026-09-21 18:41:45.377 INFO  allreduce: rank 1 seq 3 launched (1 peers)
+2026-09-21 18:41:45.377 INFO  allreduce: rank 1 seq 3 ready after 17.1us
+2026-09-21 18:41:45.378 INFO  allreduce: rank 0 seq 3 launched (1 peers)
+2026-09-21 18:41:45.378 INFO  allreduce: rank 0 seq 3 ready after 10.6us
+2026-09-21 18:41:45.378 INFO  allreduce: rank 0 seq 3 done status=0 after 29.0us
+2026-09-21 18:41:45.378 INFO  allreduce: rank 0 seq 4 launched (1 peers)
+2026-09-21 18:41:45.378 INFO  allreduce: rank 1 seq 3 done status=0 after 641.5us
+2026-09-21 18:41:45.378 INFO  allreduce: rank 0 seq 4 ready after 6.7us
+2026-09-21 18:41:45.378 INFO  allreduce: rank 1 seq 4 launched (1 peers)
+2026-09-21 18:41:45.378 INFO  allreduce: rank 1 seq 4 ready after 7.1us
+2026-09-21 18:41:45.378 INFO  allreduce: rank 1 seq 4 done status=0 after 19.0us
+2026-09-21 18:41:45.378 INFO  allreduce: rank 0 seq 4 done status=0 after 54.3us
+2026-09-21 18:41:45.378 INFO  allreduce: rank 1 seq 5 launched (1 peers)
+2026-09-21 18:41:45.378 INFO  allreduce: rank 0 seq 5 launched (1 peers)
+2026-09-21 18:41:45.378 INFO  allreduce: rank 1 seq 5 ready after 6.7us
+2026-09-21 18:41:45.378 INFO  allreduce: rank 0 seq 5 ready after 6.4us
+2026-09-21 18:41:45.378 INFO  allreduce: rank 0 seq 5 done status=0 after 21.7us
+2026-09-21 18:41:45.378 INFO  allreduce: rank 1 seq 5 done status=0 after 27.5us
+2026-09-21 18:41:45.378 INFO  allreduce: rank 1 seq 6 launched (1 peers)
+2026-09-21 18:41:45.378 INFO  allreduce: rank 0 seq 6 launched (1 peers)
+2026-09-21 18:41:45.378 INFO  allreduce: rank 1 seq 6 ready after 6.7us
+2026-09-21 18:41:45.378 INFO  allreduce: rank 0 seq 6 ready after 6.5us
+2026-09-21 18:41:45.378 INFO  allreduce: rank 0 seq 6 done status=0 after 25.2us
+2026-09-21 18:41:45.378 INFO  allreduce: rank 1 seq 6 done status=0 after 27.2us
+2026-09-21 18:41:45.388 INFO  allreduce: rank 0 seq 7 launched (1 peers)
+2026-09-21 18:41:45.388 INFO  allreduce: rank 0 seq 7 ready after 8.2us
+2026-09-21 18:41:45.388 INFO  allreduce: rank 1 seq 7 launched (1 peers)
+2026-09-21 18:41:45.388 INFO  allreduce: rank 1 seq 7 ready after 9.7us
+2026-09-21 18:41:45.388 INFO  allreduce: rank 1 seq 7 done status=0 after 23.2us
+2026-09-21 18:41:45.388 INFO  allreduce: rank 0 seq 7 done status=0 after 83.9us
+2026-09-21 18:41:45.388 INFO  allreduce: rank 1 seq 8 launched (1 peers)
+2026-09-21 18:41:45.388 INFO  allreduce: rank 0 seq 8 launched (1 peers)
+2026-09-21 18:41:45.388 INFO  allreduce: rank 0 seq 8 ready after 6.3us
+2026-09-21 18:41:45.388 INFO  allreduce: rank 1 seq 8 ready after 8.0us
+2026-09-21 18:41:45.388 INFO  allreduce: rank 1 seq 8 done status=0 after 27.3us
+2026-09-21 18:41:45.388 INFO  allreduce: rank 0 seq 8 done status=0 after 28.1us
+2026-09-21 18:41:45.396 INFO  allreduce: rank 1 seq 9 launched (1 peers)
+2026-09-21 18:41:45.396 INFO  allreduce: rank 1 seq 9 ready after 9.5us
+2026-09-21 18:41:45.397 INFO  allreduce: rank 0 seq 9 launched (1 peers)
+2026-09-21 18:41:45.397 INFO  allreduce: rank 0 seq 9 ready after 8.4us
+2026-09-21 18:41:45.397 INFO  allreduce: rank 0 seq 9 done status=0 after 21.5us
+2026-09-21 18:41:45.397 INFO  allreduce: rank 1 seq 9 done status=0 after 942.3us
+2026-09-21 18:41:45.397 INFO  allreduce: rank 0 seq 10 launched (1 peers)
+2026-09-21 18:41:45.397 INFO  allreduce: rank 0 seq 10 ready after 5.4us
+2026-09-21 18:41:45.397 INFO  allreduce: rank 1 seq 10 launched (1 peers)
+2026-09-21 18:41:45.397 INFO  allreduce: rank 1 seq 10 ready after 7.2us
+2026-09-21 18:41:45.397 INFO  allreduce: rank 1 seq 10 done status=0 after 19.1us
+2026-09-21 18:41:45.397 INFO  allreduce: rank 0 seq 10 done status=0 after 51.8us
+2026-09-21 18:41:45.397 INFO  allreduce: rank 1 seq 11 launched (1 peers)
+2026-09-21 18:41:45.397 INFO  allreduce: rank 1 seq 11 ready after 6.6us
+2026-09-21 18:41:45.397 INFO  allreduce: rank 0 seq 11 launched (1 peers)
+2026-09-21 18:41:45.397 INFO  allreduce: rank 0 seq 11 ready after 39.7us
+2026-09-21 18:41:45.397 INFO  allreduce: rank 0 seq 11 done status=0 after 49.4us
+2026-09-21 18:41:45.397 INFO  allreduce: rank 1 seq 11 done status=0 after 64.2us
+2026-09-21 18:41:45.397 INFO  allreduce: rank 0 seq 12 launched (1 peers)
+2026-09-21 18:41:45.397 INFO  allreduce: rank 1 seq 12 launched (1 peers)
+2026-09-21 18:41:45.397 INFO  allreduce: rank 0 seq 12 ready after 5.3us
+2026-09-21 18:41:45.397 INFO  allreduce: rank 1 seq 12 ready after 4.2us
+2026-09-21 18:41:45.397 INFO  allreduce: rank 1 seq 12 done status=0 after 18.0us
+2026-09-21 18:41:45.397 INFO  allreduce: rank 0 seq 12 done status=0 after 21.6us
+2026-09-21 18:41:45.398 INFO  allreduce: rank 1 seq 13 launched (1 peers)
+2026-09-21 18:41:45.398 INFO  allreduce: rank 1 seq 13 ready after 6.0us
+2026-09-21 18:41:45.398 INFO  allreduce: rank 0 seq 13 launched (1 peers)
+2026-09-21 18:41:45.398 INFO  allreduce: rank 0 seq 13 ready after 5.4us
+2026-09-21 18:41:45.398 INFO  allreduce: rank 0 seq 13 done status=0 after 15.9us
+2026-09-21 18:41:45.398 INFO  allreduce: rank 1 seq 13 done status=0 after 31.3us
+2026-09-21 18:41:45.398 INFO  allreduce: rank 0 seq 14 launched (1 peers)
+2026-09-21 18:41:45.398 INFO  allreduce: rank 1 seq 14 launched (1 peers)
+2026-09-21 18:41:45.398 INFO  allreduce: rank 0 seq 14 ready after 5.1us
+2026-09-21 18:41:45.398 INFO  allreduce: rank 1 seq 14 ready after 5.3us
+2026-09-21 18:41:45.398 INFO  allreduce: rank 1 seq 14 done status=0 after 15.9us
+2026-09-21 18:41:45.398 INFO  allreduce: rank 0 seq 14 done status=0 after 24.6us
+2026-09-21 18:41:45.398 INFO  allreduce: rank 1 seq 15 launched (1 peers)
+2026-09-21 18:41:45.398 INFO  allreduce: rank 1 seq 15 ready after 24.4us
+2026-09-21 18:41:45.398 INFO  allreduce: rank 0 seq 15 launched (1 peers)
+2026-09-21 18:41:45.398 INFO  allreduce: rank 0 seq 15 ready after 5.3us
+2026-09-21 18:41:45.398 INFO  allreduce: rank 0 seq 15 done status=0 after 16.2us
+2026-09-21 18:41:45.398 INFO  allreduce: rank 1 seq 15 done status=0 after 50.9us
+2026-09-21 18:41:45.398 INFO  allreduce: rank 1 seq 16 launched (1 peers)
+2026-09-21 18:41:45.398 INFO  allreduce: rank 0 seq 16 launched (1 peers)
+2026-09-21 18:41:45.398 INFO  allreduce: rank 1 seq 16 ready after 5.7us
+2026-09-21 18:41:45.398 INFO  allreduce: rank 0 seq 16 ready after 4.7us
+2026-09-21 18:41:45.398 INFO  allreduce: rank 0 seq 16 done status=0 after 20.8us
+2026-09-21 18:41:45.398 INFO  allreduce: rank 1 seq 16 done status=0 after 23.2us
+2026-09-21 18:41:45.559 INFO  bus graph era: variant 22 recorded with 20 collective node(s)
+2026-09-21 18:41:45.559 INFO  bus graph era: variant 22 recorded with 20 collective node(s)
+2026-09-21 18:41:45.559 INFO  rank 0: graph variant 22 shape: 536 nodes, 572 edges: kernel 536 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-21 18:41:45.559 INFO  rank 1: graph variant 22 shape: 536 nodes, 572 edges: kernel 536 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-21 18:41:45.563 INFO  rank 0: graph variant 22 instantiated — 5.7 MiB of device memory (100.3 GiB free)
+2026-09-21 18:41:45.564 INFO  rank 1: graph variant 22 instantiated — 7.9 MiB of device memory (100.3 GiB free)
+2026-09-21 18:41:45.564 INFO  bus graph era: variant 23 recorded with 20 collective node(s)
+2026-09-21 18:41:45.564 INFO  rank 0: graph variant 23 shape: 536 nodes, 572 edges: kernel 536 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-21 18:41:45.565 INFO  bus graph era: variant 23 recorded with 20 collective node(s)
+2026-09-21 18:41:45.565 INFO  rank 1: graph variant 23 shape: 536 nodes, 572 edges: kernel 536 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-21 18:41:45.567 INFO  rank 0: graph variant 23 instantiated — 8.7 MiB of device memory (100.3 GiB free)
+2026-09-21 18:41:45.567 INFO  rank 0: serving row-batched graph variants 22/23 captured for 6 slots x 4 rows = 24 fixed rows, MTP (a batch is selected at 2+ live requests, the smallest that covers the live slots)
+2026-09-21 18:41:45.568 INFO  rank 1: graph variant 23 instantiated — 11.4 MiB of device memory (100.3 GiB free)
+2026-09-21 18:41:45.568 INFO  rank 1: serving row-batched graph variants 22/23 captured for 6 slots x 4 rows = 24 fixed rows, MTP (a batch is selected at 2+ live requests, the smallest that covers the live slots)
+2026-09-21 18:41:45.977 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:45.977 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:45.981 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:45.983 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:45.987 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:45.987 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:45.988 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:45.989 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:45.994 INFO  rank 0: Qwen wide MTP hidden projection shape: 2 nodes, 1 edges: kernel 2 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:45.997 INFO  rank 0: Qwen wide MTP hidden projection shape: 2 nodes, 1 edges: kernel 2 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:46.067 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:46.067 INFO  rank 0: Qwen wide BF16 dense shard shape: 12 nodes, 11 edges: kernel 12 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:46.067 INFO  rank 0: Qwen wide BF16 dense shard shape: 16 nodes, 15 edges: kernel 16 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:46.068 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:46.068 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:46.069 INFO  rank 0: Qwen wide BF16 dense shard shape: 12 nodes, 11 edges: kernel 12 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:46.069 INFO  rank 0: Qwen wide BF16 dense shard shape: 16 nodes, 15 edges: kernel 16 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:46.070 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:46.071 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:46.071 INFO  rank 0: Qwen wide BF16 dense shard shape: 12 nodes, 11 edges: kernel 12 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:46.071 INFO  rank 0: Qwen wide BF16 dense shard shape: 16 nodes, 15 edges: kernel 16 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:46.073 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:46.073 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:46.074 INFO  rank 0: Qwen wide BF16 dense shard shape: 12 nodes, 11 edges: kernel 12 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:46.074 INFO  rank 0: Qwen wide BF16 dense shard shape: 16 nodes, 15 edges: kernel 16 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:46.076 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+qwen fixture written: 376 tensors, 18.11 MB payload
+[FAIL] qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation: last launched batch shape
+[ OK ] qwen_mtp_wide_hidden_projection_real_shape_is_kernel_only
+[ OK ] qwen_wide_bf16_dense_real_shards_are_kernel_only
+3 tests, 1 failed
+
+        Start 101: qwen_engine_mtp3_rows32_row_independent
+101/131 Test #101: qwen_engine_mtp3_rows32_row_independent ...***Failed    2.78 sec
+2026-09-21 18:41:46.708 INFO  bus: globaltimer offset 20421225232 ns (+-2 us)
+2026-09-21 18:41:46.711 INFO  bus: globaltimer offset 20421225448 ns (+-2 us)
+2026-09-21 18:41:46.714 INFO  verbs: device roceP2p1s0f0 port 1 gid_index 3
+2026-09-21 18:41:46.717 INFO  verbs: device roceP2p1s0f0 port 1 gid_index 3
+2026-09-21 18:41:46.717 INFO  verbs: device rocep1s0f0 port 1 gid_index 3
+2026-09-21 18:41:46.727 INFO  verbs: device rocep1s0f0 port 1 gid_index 3
+2026-09-21 18:41:46.755 INFO  bus: rank 0 rendezvous listening on port 29947
+2026-09-21 18:41:47.263 INFO  bus: rank 1 up — 1 peer(s) x 2 lane(s), lat 8x262144B, bulk 8x262144B, bulk pace 85.0 Gb/s per QP, window 4 per lane
+2026-09-21 18:41:47.263 INFO  bus: rank 0 up — 1 peer(s) x 2 lane(s), lat 8x262144B, bulk 8x262144B, bulk pace 85.0 Gb/s per QP, window 4 per lane
+2026-09-21 18:41:47.264 INFO  bus engine: rank 0 pinned to cpu 19
+2026-09-21 18:41:47.264 INFO  bus engine: rank 1 pinned to cpu 18
+2026-09-21 18:41:47.265 INFO  qwen loader: rank 1 resident footprint 0.0 GiB; device free 102.3 of 121.6 GiB, host available 114.8 GiB
+2026-09-21 18:41:47.265 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 102.3 of 121.6 GiB, host available 114.8 GiB
+2026-09-21 18:41:47.553 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-21 18:41:47.553 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-21 18:41:47.562 INFO  qwen loader: rank 0 n-gram table rows [0, 660) resident (0.00 GiB, scale 0.020019531)
+2026-09-21 18:41:47.562 INFO  qwen loader: rank 1 n-gram table rows [660, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-09-21 18:41:47.568 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 101.7 of 121.6 GiB, host available 114.2 GiB
+2026-09-21 18:41:47.689 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-21 18:41:47.689 INFO  qwen loader: rank 1 resident footprint 0.0 GiB; device free 101.5 of 121.6 GiB, host available 114.0 GiB
+2026-09-21 18:41:47.832 INFO  qwen loader: rank 0 n-gram table rows [0, 660) resident (0.00 GiB, scale 0.020019531)
+2026-09-21 18:41:47.834 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-21 18:41:47.840 INFO  qwen loader: rank 1 n-gram table rows [660, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-09-21 18:41:47.869 INFO  allreduce: device clock rate 2418000 kHz (stamps conversion)
+2026-09-21 18:41:47.869 INFO  allreduce: rank 1 seq 1 launched (1 peers)
+2026-09-21 18:41:47.869 INFO  allreduce: rank 1 seq 1 ready after 10.7us
+2026-09-21 18:41:47.870 INFO  allreduce: device clock rate 2418000 kHz (stamps conversion)
+2026-09-21 18:41:47.870 INFO  allreduce: rank 0 seq 1 launched (1 peers)
+2026-09-21 18:41:47.870 INFO  allreduce: rank 0 seq 1 ready after 13.9us
+2026-09-21 18:41:47.870 INFO  allreduce: rank 0 seq 1 done status=0 after 27.3us
+2026-09-21 18:41:47.870 INFO  allreduce: rank 1 seq 1 done status=0 after 399.0us
+2026-09-21 18:41:47.902 INFO  allreduce: rank 1 seq 2 launched (1 peers)
+2026-09-21 18:41:47.902 INFO  allreduce: rank 1 seq 2 ready after 6.8us
+2026-09-21 18:41:47.905 INFO  allreduce: rank 0 seq 2 launched (1 peers)
+2026-09-21 18:41:47.905 INFO  allreduce: rank 0 seq 2 ready after 6.4us
+2026-09-21 18:41:47.905 INFO  allreduce: rank 0 seq 2 done status=0 after 18.4us
+2026-09-21 18:41:47.905 INFO  allreduce: rank 1 seq 2 done status=0 after 2970.2us
+2026-09-21 18:41:47.915 INFO  allreduce: rank 0 seq 3 launched (1 peers)
+2026-09-21 18:41:47.915 INFO  allreduce: rank 0 seq 3 ready after 29.8us
+2026-09-21 18:41:47.916 INFO  allreduce: rank 1 seq 3 launched (1 peers)
+2026-09-21 18:41:47.916 INFO  allreduce: rank 1 seq 3 ready after 11.2us
+2026-09-21 18:41:47.916 INFO  allreduce: rank 1 seq 3 done status=0 after 29.4us
+2026-09-21 18:41:47.916 INFO  allreduce: rank 1 seq 4 launched (1 peers)
+2026-09-21 18:41:47.916 INFO  allreduce: rank 1 seq 4 ready after 5.9us
+2026-09-21 18:41:47.919 INFO  allreduce: rank 0 seq 3 done status=0 after 3698.1us
+2026-09-21 18:41:47.919 INFO  allreduce: rank 0 seq 4 launched (1 peers)
+2026-09-21 18:41:47.919 INFO  allreduce: rank 0 seq 4 ready after 6.9us
+2026-09-21 18:41:47.919 INFO  allreduce: rank 0 seq 4 done status=0 after 18.5us
+2026-09-21 18:41:47.919 INFO  allreduce: rank 1 seq 4 done status=0 after 3251.5us
+2026-09-21 18:41:47.919 INFO  allreduce: rank 0 seq 5 launched (1 peers)
+2026-09-21 18:41:47.919 INFO  allreduce: rank 0 seq 5 ready after 6.9us
+2026-09-21 18:41:47.920 INFO  allreduce: rank 1 seq 5 launched (1 peers)
+2026-09-21 18:41:47.920 INFO  allreduce: rank 1 seq 5 ready after 6.5us
+2026-09-21 18:41:47.920 INFO  allreduce: rank 1 seq 5 done status=0 after 18.5us
+2026-09-21 18:41:47.920 INFO  allreduce: rank 0 seq 5 done status=0 after 817.1us
+2026-09-21 18:41:47.920 INFO  allreduce: rank 0 seq 6 launched (1 peers)
+2026-09-21 18:41:47.920 INFO  allreduce: rank 0 seq 6 ready after 6.9us
+2026-09-21 18:41:47.921 INFO  allreduce: rank 1 seq 6 launched (1 peers)
+2026-09-21 18:41:47.921 INFO  allreduce: rank 1 seq 6 ready after 6.3us
+2026-09-21 18:41:47.921 INFO  allreduce: rank 1 seq 6 done status=0 after 18.5us
+2026-09-21 18:41:47.921 INFO  allreduce: rank 0 seq 6 done status=0 after 532.4us
+2026-09-21 18:41:47.931 INFO  allreduce: rank 1 seq 7 launched (1 peers)
+2026-09-21 18:41:47.931 INFO  allreduce: rank 1 seq 7 ready after 10.7us
+2026-09-21 18:41:47.934 INFO  allreduce: rank 0 seq 7 launched (1 peers)
+2026-09-21 18:41:47.934 INFO  allreduce: rank 0 seq 7 ready after 9.6us
+2026-09-21 18:41:47.934 INFO  allreduce: rank 0 seq 7 done status=0 after 22.4us
+2026-09-21 18:41:47.934 INFO  allreduce: rank 1 seq 7 done status=0 after 2808.9us
+2026-09-21 18:41:47.934 INFO  allreduce: rank 0 seq 8 launched (1 peers)
+2026-09-21 18:41:47.934 INFO  allreduce: rank 0 seq 8 ready after 6.6us
+2026-09-21 18:41:47.935 INFO  allreduce: rank 1 seq 8 launched (1 peers)
+2026-09-21 18:41:47.935 INFO  allreduce: rank 1 seq 8 ready after 6.9us
+2026-09-21 18:41:47.935 INFO  allreduce: rank 1 seq 8 done status=0 after 19.0us
+2026-09-21 18:41:47.935 INFO  allreduce: rank 0 seq 8 done status=0 after 634.6us
+2026-09-21 18:41:47.946 INFO  allreduce: rank 0 seq 9 launched (1 peers)
+2026-09-21 18:41:47.946 INFO  allreduce: rank 1 seq 9 launched (1 peers)
+2026-09-21 18:41:47.946 INFO  allreduce: rank 0 seq 9 ready after 11.3us
+2026-09-21 18:41:47.946 INFO  allreduce: rank 1 seq 9 ready after 11.0us
+2026-09-21 18:41:47.946 INFO  allreduce: rank 1 seq 9 done status=0 after 33.6us
+2026-09-21 18:41:47.946 INFO  allreduce: rank 0 seq 9 done status=0 after 37.4us
+2026-09-21 18:41:47.947 INFO  allreduce: rank 1 seq 10 launched (1 peers)
+2026-09-21 18:41:47.947 INFO  allreduce: rank 1 seq 10 ready after 6.0us
+2026-09-21 18:41:47.947 INFO  allreduce: rank 0 seq 10 launched (1 peers)
+2026-09-21 18:41:47.947 INFO  allreduce: rank 0 seq 10 ready after 6.3us
+2026-09-21 18:41:47.947 INFO  allreduce: rank 0 seq 10 done status=0 after 18.0us
+2026-09-21 18:41:47.947 INFO  allreduce: rank 1 seq 10 done status=0 after 30.7us
+2026-09-21 18:41:47.947 INFO  allreduce: rank 1 seq 11 launched (1 peers)
+2026-09-21 18:41:47.947 INFO  allreduce: rank 1 seq 11 ready after 6.6us
+2026-09-21 18:41:47.950 INFO  allreduce: rank 0 seq 11 launched (1 peers)
+2026-09-21 18:41:47.950 INFO  allreduce: rank 0 seq 11 ready after 5.8us
+2026-09-21 18:41:47.950 INFO  allreduce: rank 0 seq 11 done status=0 after 15.6us
+2026-09-21 18:41:47.950 INFO  allreduce: rank 0 seq 12 launched (1 peers)
+2026-09-21 18:41:47.950 INFO  allreduce: rank 0 seq 12 ready after 5.2us
+2026-09-21 18:41:47.950 INFO  allreduce: rank 1 seq 11 done status=0 after 2847.0us
+2026-09-21 18:41:47.951 INFO  allreduce: rank 1 seq 12 launched (1 peers)
+2026-09-21 18:41:47.951 INFO  allreduce: rank 1 seq 12 ready after 4.9us
+2026-09-21 18:41:47.951 INFO  allreduce: rank 1 seq 12 done status=0 after 15.0us
+2026-09-21 18:41:47.951 INFO  allreduce: rank 0 seq 12 done status=0 after 586.2us
+2026-09-21 18:41:47.951 INFO  allreduce: rank 0 seq 13 launched (1 peers)
+2026-09-21 18:41:47.951 INFO  allreduce: rank 0 seq 13 ready after 6.2us
+2026-09-21 18:41:47.955 INFO  allreduce: rank 1 seq 13 launched (1 peers)
+2026-09-21 18:41:47.955 INFO  allreduce: rank 1 seq 13 ready after 5.6us
+2026-09-21 18:41:47.955 INFO  allreduce: rank 1 seq 13 done status=0 after 16.6us
+2026-09-21 18:41:47.955 INFO  allreduce: rank 0 seq 13 done status=0 after 3669.5us
+2026-09-21 18:41:47.956 INFO  allreduce: rank 1 seq 14 launched (1 peers)
+2026-09-21 18:41:47.956 INFO  allreduce: rank 0 seq 14 launched (1 peers)
+2026-09-21 18:41:47.956 INFO  allreduce: rank 1 seq 14 ready after 6.4us
+2026-09-21 18:41:47.956 INFO  allreduce: rank 0 seq 14 ready after 5.2us
+2026-09-21 18:41:47.956 INFO  allreduce: rank 0 seq 14 done status=0 after 17.8us
+2026-09-21 18:41:47.956 INFO  allreduce: rank 1 seq 14 done status=0 after 23.6us
+2026-09-21 18:41:47.956 INFO  allreduce: rank 1 seq 15 launched (1 peers)
+2026-09-21 18:41:47.956 INFO  allreduce: rank 0 seq 15 launched (1 peers)
+2026-09-21 18:41:47.956 INFO  allreduce: rank 0 seq 15 ready after 5.2us
+2026-09-21 18:41:47.956 INFO  allreduce: rank 1 seq 15 ready after 6.4us
+2026-09-21 18:41:47.956 INFO  allreduce: rank 1 seq 15 done status=0 after 23.7us
+2026-09-21 18:41:47.956 INFO  allreduce: rank 0 seq 15 done status=0 after 24.1us
+2026-09-21 18:41:47.957 INFO  allreduce: rank 1 seq 16 launched (1 peers)
+2026-09-21 18:41:47.957 INFO  allreduce: rank 0 seq 16 launched (1 peers)
+2026-09-21 18:41:47.957 INFO  allreduce: rank 1 seq 16 ready after 5.9us
+2026-09-21 18:41:47.957 INFO  allreduce: rank 0 seq 16 ready after 5.8us
+2026-09-21 18:41:47.957 INFO  allreduce: rank 0 seq 16 done status=0 after 16.8us
+2026-09-21 18:41:47.957 INFO  allreduce: rank 1 seq 16 done status=0 after 23.2us
+2026-09-21 18:41:48.308 INFO  bus graph era: variant 22 recorded with 20 collective node(s)
+2026-09-21 18:41:48.308 INFO  rank 0: graph variant 22 shape: 773 nodes, 809 edges: kernel 773 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-21 18:41:48.310 INFO  bus graph era: variant 22 recorded with 20 collective node(s)
+2026-09-21 18:41:48.310 INFO  rank 0: graph variant 22 instantiated — 3.9 MiB of device memory (100.4 GiB free)
+2026-09-21 18:41:48.311 INFO  rank 1: graph variant 22 shape: 773 nodes, 809 edges: kernel 773 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-21 18:41:48.312 INFO  bus graph era: variant 23 recorded with 20 collective node(s)
+2026-09-21 18:41:48.312 INFO  rank 0: graph variant 23 shape: 773 nodes, 809 edges: kernel 773 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-21 18:41:48.313 INFO  rank 1: graph variant 22 instantiated — 5.7 MiB of device memory (100.4 GiB free)
+2026-09-21 18:41:48.314 INFO  rank 0: graph variant 23 instantiated — 7.9 MiB of device memory (100.4 GiB free)
+2026-09-21 18:41:48.314 INFO  rank 0: serving row-batched graph variants 22/23 captured for 6 slots x 4 rows = 24 fixed rows, MTP (a batch is selected at 2+ live requests, the smallest that covers the live slots)
+2026-09-21 18:41:48.315 INFO  bus graph era: variant 23 recorded with 20 collective node(s)
+2026-09-21 18:41:48.315 INFO  rank 1: graph variant 23 shape: 773 nodes, 809 edges: kernel 773 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-21 18:41:48.317 INFO  rank 1: graph variant 23 instantiated — 6.1 MiB of device memory (100.4 GiB free)
+2026-09-21 18:41:48.317 INFO  rank 1: serving row-batched graph variants 22/23 captured for 6 slots x 4 rows = 24 fixed rows, MTP (a batch is selected at 2+ live requests, the smallest that covers the live slots)
+2026-09-21 18:41:48.743 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:48.745 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:48.745 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:48.747 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:48.750 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:48.751 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:48.752 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:48.753 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:48.757 INFO  rank 0: Qwen wide MTP hidden projection shape: 2 nodes, 1 edges: kernel 2 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:48.760 INFO  rank 0: Qwen wide MTP hidden projection shape: 2 nodes, 1 edges: kernel 2 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:48.831 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:48.831 INFO  rank 0: Qwen wide BF16 dense shard shape: 12 nodes, 11 edges: kernel 12 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:48.832 INFO  rank 0: Qwen wide BF16 dense shard shape: 16 nodes, 15 edges: kernel 16 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:48.843 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:48.843 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:48.845 INFO  rank 0: Qwen wide BF16 dense shard shape: 12 nodes, 11 edges: kernel 12 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:48.845 INFO  rank 0: Qwen wide BF16 dense shard shape: 16 nodes, 15 edges: kernel 16 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:48.847 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:48.847 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:48.848 INFO  rank 0: Qwen wide BF16 dense shard shape: 12 nodes, 11 edges: kernel 12 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:48.849 INFO  rank 0: Qwen wide BF16 dense shard shape: 16 nodes, 15 edges: kernel 16 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:48.851 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:48.851 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:48.851 INFO  rank 0: Qwen wide BF16 dense shard shape: 12 nodes, 11 edges: kernel 12 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:48.852 INFO  rank 0: Qwen wide BF16 dense shard shape: 16 nodes, 15 edges: kernel 16 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:48.855 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+qwen fixture written: 376 tensors, 18.11 MB payload
+[FAIL] qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation: last launched batch shape
+[ OK ] qwen_mtp_wide_hidden_projection_real_shape_is_kernel_only
+[ OK ] qwen_wide_bf16_dense_real_shards_are_kernel_only
+3 tests, 1 failed
+
+        Start 102: qwen_engine_fp8_mtp3_rows64
+102/131 Test #102: qwen_engine_fp8_mtp3_rows64 ...............***Failed    2.79 sec
+2026-09-21 18:41:49.482 INFO  bus: globaltimer offset 20421200982 ns (+-2 us)
+2026-09-21 18:41:49.485 INFO  bus: globaltimer offset 20421201257 ns (+-2 us)
+2026-09-21 18:41:49.489 INFO  verbs: device roceP2p1s0f0 port 1 gid_index 3
+2026-09-21 18:41:49.490 INFO  verbs: device roceP2p1s0f0 port 1 gid_index 3
+2026-09-21 18:41:49.495 INFO  verbs: device rocep1s0f0 port 1 gid_index 3
+2026-09-21 18:41:49.501 INFO  verbs: device rocep1s0f0 port 1 gid_index 3
+2026-09-21 18:41:49.538 INFO  bus: rank 0 rendezvous listening on port 29947
+2026-09-21 18:41:50.044 INFO  bus: rank 1 up — 1 peer(s) x 2 lane(s), lat 8x262144B, bulk 8x262144B, bulk pace 85.0 Gb/s per QP, window 4 per lane
+2026-09-21 18:41:50.044 INFO  bus: rank 0 up — 1 peer(s) x 2 lane(s), lat 8x262144B, bulk 8x262144B, bulk pace 85.0 Gb/s per QP, window 4 per lane
+2026-09-21 18:41:50.045 INFO  bus engine: rank 0 pinned to cpu 19
+2026-09-21 18:41:50.045 INFO  bus engine: rank 1 pinned to cpu 18
+2026-09-21 18:41:50.046 INFO  qwen loader: rank 1 resident footprint 0.0 GiB; device free 102.4 of 121.6 GiB, host available 114.9 GiB
+2026-09-21 18:41:50.171 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 102.4 of 121.6 GiB, host available 114.9 GiB
+2026-09-21 18:41:50.311 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-21 18:41:50.312 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-21 18:41:50.320 INFO  qwen loader: rank 1 n-gram table rows [660, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-09-21 18:41:50.320 INFO  qwen loader: rank 0 n-gram table rows [0, 660) resident (0.00 GiB, scale 0.020019531)
+2026-09-21 18:41:50.329 INFO  qwen loader: rank 1 resident footprint 0.0 GiB; device free 101.9 of 121.6 GiB, host available 114.4 GiB
+2026-09-21 18:41:50.469 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-21 18:41:50.469 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 101.8 of 121.6 GiB, host available 114.4 GiB
+2026-09-21 18:41:50.604 INFO  qwen loader: rank 1 n-gram table rows [660, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-09-21 18:41:50.608 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-21 18:41:50.615 INFO  qwen loader: rank 0 n-gram table rows [0, 660) resident (0.00 GiB, scale 0.020019531)
+2026-09-21 18:41:50.832 INFO  allreduce: device clock rate 2418000 kHz (stamps conversion)
+2026-09-21 18:41:50.832 INFO  allreduce: rank 1 seq 1 launched (1 peers)
+2026-09-21 18:41:50.832 INFO  allreduce: rank 1 seq 1 ready after 29.9us
+2026-09-21 18:41:50.833 INFO  allreduce: device clock rate 2418000 kHz (stamps conversion)
+2026-09-21 18:41:50.833 INFO  allreduce: rank 0 seq 1 launched (1 peers)
+2026-09-21 18:41:50.833 INFO  allreduce: rank 0 seq 1 ready after 8.2us
+2026-09-21 18:41:50.833 INFO  allreduce: rank 0 seq 1 done status=0 after 22.4us
+2026-09-21 18:41:50.833 INFO  allreduce: rank 1 seq 1 done status=0 after 1283.7us
+2026-09-21 18:41:50.867 INFO  allreduce: rank 1 seq 2 launched (1 peers)
+2026-09-21 18:41:50.867 INFO  allreduce: rank 1 seq 2 ready after 8.9us
+2026-09-21 18:41:50.867 INFO  allreduce: rank 0 seq 2 launched (1 peers)
+2026-09-21 18:41:50.867 INFO  allreduce: rank 0 seq 2 ready after 7.7us
+2026-09-21 18:41:50.867 INFO  allreduce: rank 0 seq 2 done status=0 after 20.8us
+2026-09-21 18:41:50.867 INFO  allreduce: rank 1 seq 2 done status=0 after 130.6us
+2026-09-21 18:41:50.877 INFO  allreduce: rank 1 seq 3 launched (1 peers)
+2026-09-21 18:41:50.877 INFO  allreduce: rank 1 seq 3 ready after 12.2us
+2026-09-21 18:41:50.878 INFO  allreduce: rank 0 seq 3 launched (1 peers)
+2026-09-21 18:41:50.878 INFO  allreduce: rank 0 seq 3 ready after 11.1us
+2026-09-21 18:41:50.878 INFO  allreduce: rank 0 seq 3 done status=0 after 30.2us
+2026-09-21 18:41:50.878 INFO  allreduce: rank 0 seq 4 launched (1 peers)
+2026-09-21 18:41:50.878 INFO  allreduce: rank 1 seq 3 done status=0 after 642.1us
+2026-09-21 18:41:50.878 INFO  allreduce: rank 0 seq 4 ready after 6.7us
+2026-09-21 18:41:50.878 INFO  allreduce: rank 1 seq 4 launched (1 peers)
+2026-09-21 18:41:50.878 INFO  allreduce: rank 1 seq 4 ready after 6.9us
+2026-09-21 18:41:50.878 INFO  allreduce: rank 1 seq 4 done status=0 after 19.5us
+2026-09-21 18:41:50.878 INFO  allreduce: rank 0 seq 4 done status=0 after 53.5us
+2026-09-21 18:41:50.878 INFO  allreduce: rank 0 seq 5 launched (1 peers)
+2026-09-21 18:41:50.878 INFO  allreduce: rank 1 seq 5 launched (1 peers)
+2026-09-21 18:41:50.878 INFO  allreduce: rank 0 seq 5 ready after 6.6us
+2026-09-21 18:41:50.878 INFO  allreduce: rank 1 seq 5 ready after 6.7us
+2026-09-21 18:41:50.878 INFO  allreduce: rank 1 seq 5 done status=0 after 25.9us
+2026-09-21 18:41:50.878 INFO  allreduce: rank 0 seq 5 done status=0 after 28.9us
+2026-09-21 18:41:50.878 INFO  allreduce: rank 0 seq 6 launched (1 peers)
+2026-09-21 18:41:50.878 INFO  allreduce: rank 0 seq 6 ready after 7.5us
+2026-09-21 18:41:50.878 INFO  allreduce: rank 1 seq 6 launched (1 peers)
+2026-09-21 18:41:50.878 INFO  allreduce: rank 1 seq 6 ready after 13.8us
+2026-09-21 18:41:50.878 INFO  allreduce: rank 1 seq 6 done status=0 after 24.9us
+2026-09-21 18:41:50.878 INFO  allreduce: rank 0 seq 6 done status=0 after 31.5us
+2026-09-21 18:41:50.889 INFO  allreduce: rank 0 seq 7 launched (1 peers)
+2026-09-21 18:41:50.889 INFO  allreduce: rank 0 seq 7 ready after 9.1us
+2026-09-21 18:41:50.889 INFO  allreduce: rank 1 seq 7 launched (1 peers)
+2026-09-21 18:41:50.889 INFO  allreduce: rank 1 seq 7 ready after 8.4us
+2026-09-21 18:41:50.889 INFO  allreduce: rank 1 seq 7 done status=0 after 21.7us
+2026-09-21 18:41:50.889 INFO  allreduce: rank 0 seq 7 done status=0 after 128.7us
+2026-09-21 18:41:50.889 INFO  allreduce: rank 1 seq 8 launched (1 peers)
+2026-09-21 18:41:50.889 INFO  allreduce: rank 1 seq 8 ready after 6.4us
+2026-09-21 18:41:50.889 INFO  allreduce: rank 0 seq 8 launched (1 peers)
+2026-09-21 18:41:50.889 INFO  allreduce: rank 0 seq 8 ready after 6.7us
+2026-09-21 18:41:50.889 INFO  allreduce: rank 0 seq 8 done status=0 after 19.3us
+2026-09-21 18:41:50.889 INFO  allreduce: rank 1 seq 8 done status=0 after 37.1us
+2026-09-21 18:41:50.897 INFO  allreduce: rank 1 seq 9 launched (1 peers)
+2026-09-21 18:41:50.897 INFO  allreduce: rank 1 seq 9 ready after 7.5us
+2026-09-21 18:41:50.897 INFO  allreduce: rank 0 seq 9 launched (1 peers)
+2026-09-21 18:41:50.897 INFO  allreduce: rank 0 seq 9 ready after 9.2us
+2026-09-21 18:41:50.898 INFO  allreduce: rank 0 seq 9 done status=0 after 22.7us
+2026-09-21 18:41:50.898 INFO  allreduce: rank 1 seq 9 done status=0 after 134.2us
+2026-09-21 18:41:50.898 INFO  allreduce: rank 0 seq 10 launched (1 peers)
+2026-09-21 18:41:50.898 INFO  allreduce: rank 1 seq 10 launched (1 peers)
+2026-09-21 18:41:50.898 INFO  allreduce: rank 0 seq 10 ready after 6.0us
+2026-09-21 18:41:50.898 INFO  allreduce: rank 1 seq 10 ready after 6.4us
+2026-09-21 18:41:50.898 INFO  allreduce: rank 1 seq 10 done status=0 after 20.5us
+2026-09-21 18:41:50.898 INFO  allreduce: rank 0 seq 10 done status=0 after 29.0us
+2026-09-21 18:41:50.898 INFO  allreduce: rank 0 seq 11 launched (1 peers)
+2026-09-21 18:41:50.898 INFO  allreduce: rank 1 seq 11 launched (1 peers)
+2026-09-21 18:41:50.898 INFO  allreduce: rank 0 seq 11 ready after 7.0us
+2026-09-21 18:41:50.898 INFO  allreduce: rank 1 seq 11 ready after 5.5us
+2026-09-21 18:41:50.898 INFO  allreduce: rank 1 seq 11 done status=0 after 20.1us
+2026-09-21 18:41:50.898 INFO  allreduce: rank 0 seq 11 done status=0 after 24.3us
+2026-09-21 18:41:50.898 INFO  allreduce: rank 0 seq 12 launched (1 peers)
+2026-09-21 18:41:50.898 INFO  allreduce: rank 1 seq 12 launched (1 peers)
+2026-09-21 18:41:50.898 INFO  allreduce: rank 1 seq 12 ready after 7.2us
+2026-09-21 18:41:50.898 INFO  allreduce: rank 0 seq 12 ready after 5.5us
+2026-09-21 18:41:50.898 INFO  allreduce: rank 0 seq 12 done status=0 after 20.9us
+2026-09-21 18:41:50.898 INFO  allreduce: rank 1 seq 12 done status=0 after 22.5us
+2026-09-21 18:41:50.898 INFO  allreduce: rank 1 seq 13 launched (1 peers)
+2026-09-21 18:41:50.898 INFO  allreduce: rank 1 seq 13 ready after 6.2us
+2026-09-21 18:41:50.898 INFO  allreduce: rank 0 seq 13 launched (1 peers)
+2026-09-21 18:41:50.898 INFO  allreduce: rank 0 seq 13 ready after 5.6us
+2026-09-21 18:41:50.898 INFO  allreduce: rank 0 seq 13 done status=0 after 16.8us
+2026-09-21 18:41:50.898 INFO  allreduce: rank 1 seq 13 done status=0 after 29.4us
+2026-09-21 18:41:50.899 INFO  allreduce: rank 0 seq 14 launched (1 peers)
+2026-09-21 18:41:50.899 INFO  allreduce: rank 1 seq 14 launched (1 peers)
+2026-09-21 18:41:50.899 INFO  allreduce: rank 0 seq 14 ready after 6.9us
+2026-09-21 18:41:50.899 INFO  allreduce: rank 1 seq 14 ready after 5.6us
+2026-09-21 18:41:50.899 INFO  allreduce: rank 1 seq 14 done status=0 after 16.6us
+2026-09-21 18:41:50.899 INFO  allreduce: rank 0 seq 14 done status=0 after 25.0us
+2026-09-21 18:41:50.899 INFO  allreduce: rank 0 seq 15 launched (1 peers)
+2026-09-21 18:41:50.899 INFO  allreduce: rank 1 seq 15 launched (1 peers)
+2026-09-21 18:41:50.899 INFO  allreduce: rank 1 seq 15 ready after 6.2us
+2026-09-21 18:41:50.899 INFO  allreduce: rank 0 seq 15 ready after 6.1us
+2026-09-21 18:41:50.899 INFO  allreduce: rank 0 seq 15 done status=0 after 28.4us
+2026-09-21 18:41:50.899 INFO  allreduce: rank 1 seq 15 done status=0 after 32.5us
+2026-09-21 18:41:50.899 INFO  allreduce: rank 0 seq 16 launched (1 peers)
+2026-09-21 18:41:50.899 INFO  allreduce: rank 0 seq 16 ready after 7.6us
+2026-09-21 18:41:50.899 INFO  allreduce: rank 1 seq 16 launched (1 peers)
+2026-09-21 18:41:50.899 INFO  allreduce: rank 1 seq 16 ready after 6.0us
+2026-09-21 18:41:50.899 INFO  allreduce: rank 1 seq 16 done status=0 after 16.3us
+2026-09-21 18:41:50.899 INFO  allreduce: rank 0 seq 16 done status=0 after 32.5us
+2026-09-21 18:41:51.153 INFO  bus graph era: variant 42 recorded with 20 collective node(s)
+2026-09-21 18:41:51.153 INFO  rank 1: graph variant 42 shape: 708 nodes, 752 edges: kernel 708 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-21 18:41:51.154 INFO  bus graph era: variant 42 recorded with 20 collective node(s)
+2026-09-21 18:41:51.154 INFO  rank 0: graph variant 42 shape: 708 nodes, 752 edges: kernel 708 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-21 18:41:51.157 INFO  rank 0: graph variant 42 instantiated — 10.9 MiB of device memory (100.7 GiB free)
+2026-09-21 18:41:51.158 INFO  rank 1: graph variant 42 instantiated — 15.3 MiB of device memory (100.7 GiB free)
+2026-09-21 18:41:51.159 INFO  bus graph era: variant 43 recorded with 20 collective node(s)
+2026-09-21 18:41:51.159 INFO  rank 0: graph variant 43 shape: 708 nodes, 752 edges: kernel 708 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-21 18:41:51.159 INFO  bus graph era: variant 43 recorded with 20 collective node(s)
+2026-09-21 18:41:51.159 INFO  rank 1: graph variant 43 shape: 708 nodes, 752 edges: kernel 708 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-21 18:41:51.162 INFO  rank 1: graph variant 43 instantiated — 12.8 MiB of device memory (100.7 GiB free)
+2026-09-21 18:41:51.162 INFO  rank 1: serving row-batched graph variants 42/43 captured for 12 slots x 4 rows = 48 fixed rows, MTP (a batch is selected at 2+ live requests, the smallest that covers the live slots)
+2026-09-21 18:41:51.163 INFO  rank 0: graph variant 43 instantiated — 18.9 MiB of device memory (100.7 GiB free)
+2026-09-21 18:41:51.163 INFO  rank 0: serving row-batched graph variants 42/43 captured for 12 slots x 4 rows = 48 fixed rows, MTP (a batch is selected at 2+ live requests, the smallest that covers the live slots)
+2026-09-21 18:41:51.547 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:51.547 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:51.551 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:51.554 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:51.557 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:51.558 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:51.559 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:51.559 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:51.564 INFO  rank 0: Qwen wide MTP hidden projection shape: 2 nodes, 1 edges: kernel 2 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:51.567 INFO  rank 0: Qwen wide MTP hidden projection shape: 2 nodes, 1 edges: kernel 2 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:51.637 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:51.638 INFO  rank 0: Qwen wide BF16 dense shard shape: 12 nodes, 11 edges: kernel 12 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:51.638 INFO  rank 0: Qwen wide BF16 dense shard shape: 16 nodes, 15 edges: kernel 16 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:51.639 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:51.639 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:51.639 INFO  rank 0: Qwen wide BF16 dense shard shape: 12 nodes, 11 edges: kernel 12 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:51.640 INFO  rank 0: Qwen wide BF16 dense shard shape: 16 nodes, 15 edges: kernel 16 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:51.641 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:51.641 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:51.641 INFO  rank 0: Qwen wide BF16 dense shard shape: 12 nodes, 11 edges: kernel 12 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:51.642 INFO  rank 0: Qwen wide BF16 dense shard shape: 16 nodes, 15 edges: kernel 16 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:51.644 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:51.644 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:51.644 INFO  rank 0: Qwen wide BF16 dense shard shape: 12 nodes, 11 edges: kernel 12 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:51.645 INFO  rank 0: Qwen wide BF16 dense shard shape: 16 nodes, 15 edges: kernel 16 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:51.646 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+qwen fixture written: 376 tensors, 18.11 MB payload
+[FAIL] qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation: last launched batch shape
+[ OK ] qwen_mtp_wide_hidden_projection_real_shape_is_kernel_only
+[ OK ] qwen_wide_bf16_dense_real_shards_are_kernel_only
+3 tests, 1 failed
+
+        Start 103: qwen_engine_mtp3_rows64_row_independent
+103/131 Test #103: qwen_engine_mtp3_rows64_row_independent ...***Failed    2.39 sec
+2026-09-21 18:41:52.250 INFO  bus: globaltimer offset 20421176838 ns (+-2 us)
+2026-09-21 18:41:52.253 INFO  bus: globaltimer offset 20421176848 ns (+-2 us)
+2026-09-21 18:41:52.260 INFO  verbs: device roceP2p1s0f0 port 1 gid_index 3
+2026-09-21 18:41:52.262 INFO  verbs: device roceP2p1s0f0 port 1 gid_index 3
+2026-09-21 18:41:52.264 INFO  verbs: device rocep1s0f0 port 1 gid_index 3
+2026-09-21 18:41:52.269 INFO  verbs: device rocep1s0f0 port 1 gid_index 3
+2026-09-21 18:41:52.303 INFO  bus: rank 0 rendezvous listening on port 29947
+2026-09-21 18:41:52.316 INFO  bus: rank 0 up — 1 peer(s) x 2 lane(s), lat 8x262144B, bulk 8x262144B, bulk pace 85.0 Gb/s per QP, window 4 per lane
+2026-09-21 18:41:52.316 INFO  bus: rank 1 up — 1 peer(s) x 2 lane(s), lat 8x262144B, bulk 8x262144B, bulk pace 85.0 Gb/s per QP, window 4 per lane
+2026-09-21 18:41:52.316 INFO  bus engine: rank 0 pinned to cpu 19
+2026-09-21 18:41:52.317 INFO  bus engine: rank 1 pinned to cpu 18
+2026-09-21 18:41:52.318 INFO  qwen loader: rank 1 resident footprint 0.0 GiB; device free 102.4 of 121.6 GiB, host available 114.9 GiB
+2026-09-21 18:41:52.472 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 102.4 of 121.6 GiB, host available 114.9 GiB
+2026-09-21 18:41:52.613 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-21 18:41:52.613 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-21 18:41:52.621 INFO  qwen loader: rank 1 n-gram table rows [660, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-09-21 18:41:52.621 INFO  qwen loader: rank 0 n-gram table rows [0, 660) resident (0.00 GiB, scale 0.020019531)
+2026-09-21 18:41:52.632 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 101.8 of 121.6 GiB, host available 114.4 GiB
+2026-09-21 18:41:52.760 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-21 18:41:52.760 INFO  qwen loader: rank 1 resident footprint 0.0 GiB; device free 101.6 of 121.6 GiB, host available 114.1 GiB
+2026-09-21 18:41:52.914 INFO  qwen loader: rank 0 n-gram table rows [0, 660) resident (0.00 GiB, scale 0.020019531)
+2026-09-21 18:41:52.919 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-21 18:41:52.925 INFO  qwen loader: rank 1 n-gram table rows [660, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-09-21 18:41:52.953 INFO  allreduce: device clock rate 2418000 kHz (stamps conversion)
+2026-09-21 18:41:52.953 INFO  allreduce: rank 1 seq 1 launched (1 peers)
+2026-09-21 18:41:52.953 INFO  allreduce: rank 1 seq 1 ready after 8.5us
+2026-09-21 18:41:52.954 INFO  allreduce: device clock rate 2418000 kHz (stamps conversion)
+2026-09-21 18:41:52.954 INFO  allreduce: rank 0 seq 1 launched (1 peers)
+2026-09-21 18:41:52.954 INFO  allreduce: rank 0 seq 1 ready after 11.1us
+2026-09-21 18:41:52.954 INFO  allreduce: rank 0 seq 1 done status=0 after 24.4us
+2026-09-21 18:41:52.954 INFO  allreduce: rank 1 seq 1 done status=0 after 402.2us
+2026-09-21 18:41:52.990 INFO  allreduce: rank 0 seq 2 launched (1 peers)
+2026-09-21 18:41:52.990 INFO  allreduce: rank 0 seq 2 ready after 6.7us
+2026-09-21 18:41:52.990 INFO  allreduce: rank 1 seq 2 launched (1 peers)
+2026-09-21 18:41:52.990 INFO  allreduce: rank 1 seq 2 ready after 5.9us
+2026-09-21 18:41:52.990 INFO  allreduce: rank 1 seq 2 done status=0 after 18.2us
+2026-09-21 18:41:52.990 INFO  allreduce: rank 0 seq 2 done status=0 after 436.5us
+2026-09-21 18:41:53.001 INFO  allreduce: rank 0 seq 3 launched (1 peers)
+2026-09-21 18:41:53.001 INFO  allreduce: rank 0 seq 3 ready after 15.6us
+2026-09-21 18:41:53.002 INFO  allreduce: rank 1 seq 3 launched (1 peers)
+2026-09-21 18:41:53.002 INFO  allreduce: rank 1 seq 3 ready after 11.4us
+2026-09-21 18:41:53.002 INFO  allreduce: rank 1 seq 3 done status=0 after 30.7us
+2026-09-21 18:41:53.002 INFO  allreduce: rank 0 seq 3 done status=0 after 549.2us
+2026-09-21 18:41:53.002 INFO  allreduce: rank 1 seq 4 launched (1 peers)
+2026-09-21 18:41:53.002 INFO  allreduce: rank 1 seq 4 ready after 8.2us
+2026-09-21 18:41:53.002 INFO  allreduce: rank 0 seq 4 launched (1 peers)
+2026-09-21 18:41:53.002 INFO  allreduce: rank 0 seq 4 ready after 6.8us
+2026-09-21 18:41:53.002 INFO  allreduce: rank 0 seq 4 done status=0 after 18.7us
+2026-09-21 18:41:53.002 INFO  allreduce: rank 1 seq 4 done status=0 after 44.6us
+2026-09-21 18:41:53.002 INFO  allreduce: rank 0 seq 5 launched (1 peers)
+2026-09-21 18:41:53.002 INFO  allreduce: rank 1 seq 5 launched (1 peers)
+2026-09-21 18:41:53.002 INFO  allreduce: rank 0 seq 5 ready after 6.5us
+2026-09-21 18:41:53.002 INFO  allreduce: rank 1 seq 5 ready after 6.5us
+2026-09-21 18:41:53.002 INFO  allreduce: rank 1 seq 5 done status=0 after 22.7us
+2026-09-21 18:41:53.002 INFO  allreduce: rank 0 seq 5 done status=0 after 27.8us
+2026-09-21 18:41:53.002 INFO  allreduce: rank 0 seq 6 launched (1 peers)
+2026-09-21 18:41:53.002 INFO  allreduce: rank 1 seq 6 launched (1 peers)
+2026-09-21 18:41:53.002 INFO  allreduce: rank 0 seq 6 ready after 7.3us
+2026-09-21 18:41:53.002 INFO  allreduce: rank 1 seq 6 ready after 7.4us
+2026-09-21 18:41:53.002 INFO  allreduce: rank 1 seq 6 done status=0 after 26.8us
+2026-09-21 18:41:53.002 INFO  allreduce: rank 0 seq 6 done status=0 after 28.1us
+2026-09-21 18:41:53.012 INFO  allreduce: rank 1 seq 7 launched (1 peers)
+2026-09-21 18:41:53.012 INFO  allreduce: rank 1 seq 7 ready after 10.8us
+2026-09-21 18:41:53.012 INFO  allreduce: rank 0 seq 7 launched (1 peers)
+2026-09-21 18:41:53.012 INFO  allreduce: rank 0 seq 7 ready after 10.4us
+2026-09-21 18:41:53.012 INFO  allreduce: rank 0 seq 7 done status=0 after 23.1us
+2026-09-21 18:41:53.012 INFO  allreduce: rank 1 seq 7 done status=0 after 130.3us
+2026-09-21 18:41:53.013 INFO  allreduce: rank 0 seq 8 launched (1 peers)
+2026-09-21 18:41:53.013 INFO  allreduce: rank 1 seq 8 launched (1 peers)
+2026-09-21 18:41:53.013 INFO  allreduce: rank 0 seq 8 ready after 6.0us
+2026-09-21 18:41:53.013 INFO  allreduce: rank 1 seq 8 ready after 6.1us
+2026-09-21 18:41:53.013 INFO  allreduce: rank 1 seq 8 done status=0 after 21.9us
+2026-09-21 18:41:53.013 INFO  allreduce: rank 0 seq 8 done status=0 after 27.1us
+2026-09-21 18:41:53.021 INFO  allreduce: rank 0 seq 9 launched (1 peers)
+2026-09-21 18:41:53.021 INFO  allreduce: rank 0 seq 9 ready after 9.4us
+2026-09-21 18:41:53.021 INFO  allreduce: rank 1 seq 9 launched (1 peers)
+2026-09-21 18:41:53.021 INFO  allreduce: rank 1 seq 9 ready after 9.8us
+2026-09-21 18:41:53.021 INFO  allreduce: rank 1 seq 9 done status=0 after 22.2us
+2026-09-21 18:41:53.021 INFO  allreduce: rank 0 seq 9 done status=0 after 149.7us
+2026-09-21 18:41:53.021 INFO  allreduce: rank 0 seq 10 launched (1 peers)
+2026-09-21 18:41:53.021 INFO  allreduce: rank 1 seq 10 launched (1 peers)
+2026-09-21 18:41:53.021 INFO  allreduce: rank 1 seq 10 ready after 5.1us
+2026-09-21 18:41:53.021 INFO  allreduce: rank 0 seq 10 ready after 5.6us
+2026-09-21 18:41:53.021 INFO  allreduce: rank 0 seq 10 done status=0 after 25.2us
+2026-09-21 18:41:53.021 INFO  allreduce: rank 1 seq 10 done status=0 after 24.4us
+2026-09-21 18:41:53.021 INFO  allreduce: rank 0 seq 11 launched (1 peers)
+2026-09-21 18:41:53.021 INFO  allreduce: rank 0 seq 11 ready after 6.4us
+2026-09-21 18:41:53.021 INFO  allreduce: rank 1 seq 11 launched (1 peers)
+2026-09-21 18:41:53.021 INFO  allreduce: rank 1 seq 11 ready after 6.7us
+2026-09-21 18:41:53.021 INFO  allreduce: rank 1 seq 11 done status=0 after 16.6us
+2026-09-21 18:41:53.021 INFO  allreduce: rank 0 seq 11 done status=0 after 25.7us
+2026-09-21 18:41:53.021 INFO  allreduce: rank 1 seq 12 launched (1 peers)
+2026-09-21 18:41:53.021 INFO  allreduce: rank 0 seq 12 launched (1 peers)
+2026-09-21 18:41:53.021 INFO  allreduce: rank 0 seq 12 ready after 5.0us
+2026-09-21 18:41:53.021 INFO  allreduce: rank 1 seq 12 ready after 5.2us
+2026-09-21 18:41:53.021 INFO  allreduce: rank 0 seq 12 done status=0 after 19.6us
+2026-09-21 18:41:53.021 INFO  allreduce: rank 1 seq 12 done status=0 after 21.2us
+2026-09-21 18:41:53.022 INFO  allreduce: rank 1 seq 13 launched (1 peers)
+2026-09-21 18:41:53.022 INFO  allreduce: rank 0 seq 13 launched (1 peers)
+2026-09-21 18:41:53.022 INFO  allreduce: rank 1 seq 13 ready after 6.3us
+2026-09-21 18:41:53.022 INFO  allreduce: rank 0 seq 13 ready after 5.4us
+2026-09-21 18:41:53.022 INFO  allreduce: rank 0 seq 13 done status=0 after 16.0us
+2026-09-21 18:41:53.022 INFO  allreduce: rank 1 seq 13 done status=0 after 26.0us
+2026-09-21 18:41:53.022 INFO  allreduce: rank 0 seq 14 launched (1 peers)
+2026-09-21 18:41:53.022 INFO  allreduce: rank 1 seq 14 launched (1 peers)
+2026-09-21 18:41:53.022 INFO  allreduce: rank 0 seq 14 ready after 6.1us
+2026-09-21 18:41:53.022 INFO  allreduce: rank 1 seq 14 ready after 5.9us
+2026-09-21 18:41:53.022 INFO  allreduce: rank 1 seq 14 done status=0 after 18.8us
+2026-09-21 18:41:53.022 INFO  allreduce: rank 0 seq 14 done status=0 after 25.5us
+2026-09-21 18:41:53.022 INFO  allreduce: rank 0 seq 15 launched (1 peers)
+2026-09-21 18:41:53.022 INFO  allreduce: rank 0 seq 15 ready after 5.7us
+2026-09-21 18:41:53.022 INFO  allreduce: rank 1 seq 15 launched (1 peers)
+2026-09-21 18:41:53.022 INFO  allreduce: rank 1 seq 15 ready after 5.9us
+2026-09-21 18:41:53.022 INFO  allreduce: rank 1 seq 15 done status=0 after 16.4us
+2026-09-21 18:41:53.022 INFO  allreduce: rank 0 seq 15 done status=0 after 31.4us
+2026-09-21 18:41:53.022 INFO  allreduce: rank 1 seq 16 launched (1 peers)
+2026-09-21 18:41:53.022 INFO  allreduce: rank 0 seq 16 launched (1 peers)
+2026-09-21 18:41:53.022 INFO  allreduce: rank 1 seq 16 ready after 5.5us
+2026-09-21 18:41:53.022 INFO  allreduce: rank 0 seq 16 ready after 5.7us
+2026-09-21 18:41:53.022 INFO  allreduce: rank 0 seq 16 done status=0 after 18.9us
+2026-09-21 18:41:53.022 INFO  allreduce: rank 1 seq 16 done status=0 after 24.9us
+2026-09-21 18:41:53.491 INFO  bus graph era: variant 42 recorded with 20 collective node(s)
+2026-09-21 18:41:53.491 INFO  rank 1: graph variant 42 shape: 1251 nodes, 1295 edges: kernel 1251 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-21 18:41:53.496 INFO  rank 1: graph variant 42 instantiated — 10.1 MiB of device memory (100.4 GiB free)
+2026-09-21 18:41:53.498 INFO  bus graph era: variant 42 recorded with 20 collective node(s)
+2026-09-21 18:41:53.498 INFO  bus graph era: variant 43 recorded with 20 collective node(s)
+2026-09-21 18:41:53.498 INFO  rank 0: graph variant 42 shape: 1251 nodes, 1295 edges: kernel 1251 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-21 18:41:53.498 INFO  rank 1: graph variant 43 shape: 1251 nodes, 1295 edges: kernel 1251 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-21 18:41:53.507 INFO  rank 1: graph variant 43 instantiated — 17.0 MiB of device memory (100.4 GiB free)
+2026-09-21 18:41:53.507 INFO  rank 1: serving row-batched graph variants 42/43 captured for 12 slots x 4 rows = 48 fixed rows, MTP (a batch is selected at 2+ live requests, the smallest that covers the live slots)
+2026-09-21 18:41:53.509 INFO  rank 0: graph variant 42 instantiated — 19.2 MiB of device memory (100.4 GiB free)
+2026-09-21 18:41:53.510 INFO  bus graph era: variant 43 recorded with 20 collective node(s)
+2026-09-21 18:41:53.510 INFO  rank 0: graph variant 43 shape: 1251 nodes, 1295 edges: kernel 1251 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-21 18:41:53.514 INFO  rank 0: graph variant 43 instantiated — 8.3 MiB of device memory (100.4 GiB free)
+2026-09-21 18:41:53.514 INFO  rank 0: serving row-batched graph variants 42/43 captured for 12 slots x 4 rows = 48 fixed rows, MTP (a batch is selected at 2+ live requests, the smallest that covers the live slots)
+2026-09-21 18:41:53.926 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:53.928 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:53.928 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:53.929 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:53.931 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:53.932 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:53.933 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:53.933 INFO  rank 0: Qwen wide MTP hidden projection shape: 1 nodes, 0 edges: kernel 1 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 0
+2026-09-21 18:41:53.938 INFO  rank 0: Qwen wide MTP hidden projection shape: 2 nodes, 1 edges: kernel 2 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:53.941 INFO  rank 0: Qwen wide MTP hidden projection shape: 2 nodes, 1 edges: kernel 2 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:54.012 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:54.012 INFO  rank 0: Qwen wide BF16 dense shard shape: 12 nodes, 11 edges: kernel 12 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:54.012 INFO  rank 0: Qwen wide BF16 dense shard shape: 16 nodes, 15 edges: kernel 16 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:54.026 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:54.027 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:54.027 INFO  rank 0: Qwen wide BF16 dense shard shape: 12 nodes, 11 edges: kernel 12 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:54.028 INFO  rank 0: Qwen wide BF16 dense shard shape: 16 nodes, 15 edges: kernel 16 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:54.030 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:54.030 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:54.032 INFO  rank 0: Qwen wide BF16 dense shard shape: 12 nodes, 11 edges: kernel 12 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:54.033 INFO  rank 0: Qwen wide BF16 dense shard shape: 16 nodes, 15 edges: kernel 16 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:54.034 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:54.035 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:54.035 INFO  rank 0: Qwen wide BF16 dense shard shape: 12 nodes, 11 edges: kernel 12 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:54.036 INFO  rank 0: Qwen wide BF16 dense shard shape: 16 nodes, 15 edges: kernel 16 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+2026-09-21 18:41:54.040 INFO  rank 0: Qwen wide BF16 dense shard shape: 6 nodes, 5 edges: kernel 6 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 1
+qwen fixture written: 376 tensors, 18.11 MB payload
+[FAIL] qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation: last launched batch shape
+[ OK ] qwen_mtp_wide_hidden_projection_real_shape_is_kernel_only
+[ OK ] qwen_wide_bf16_dense_real_shards_are_kernel_only
+3 tests, 1 failed
+
+        Start 104: qwen_head_check_fixture
+104/131 Test #104: qwen_head_check_fixture ...................   Passed    2.54 sec
+        Start 105: glm_loader_test
+105/131 Test #105: glm_loader_test ...........................   Passed    3.02 sec
+        Start 106: bf16_gemv_test
+106/131 Test #106: bf16_gemv_test ............................   Passed   16.30 sec
+        Start 107: bf12_gemv_test
+107/131 Test #107: bf12_gemv_test ............................   Passed    1.51 sec
+        Start 108: mma_gemv_test
+108/131 Test #108: mma_gemv_test .............................   Passed    3.06 sec
+        Start 109: fp4_gemv_test
+109/131 Test #109: fp4_gemv_test .............................   Passed    0.53 sec
+        Start 110: packq_gemv_test
+110/131 Test #110: packq_gemv_test ...........................   Passed    0.58 sec
+        Start 111: packq_gemm_test
+111/131 Test #111: packq_gemm_test ...........................   Passed    0.51 sec
+        Start 112: scale_gemm_test
+112/131 Test #112: scale_gemm_test ...........................   Passed    2.84 sec
+        Start 113: glm_mhc_test
+113/131 Test #113: glm_mhc_test ..............................   Passed    2.68 sec
+        Start 114: det_math_test
+114/131 Test #114: det_math_test .............................   Passed    4.49 sec
+        Start 115: glm_pick_test
+115/131 Test #115: glm_pick_test .............................   Passed    1.66 sec
+        Start 116: glm_moe_test
+116/131 Test #116: glm_moe_test ..............................   Passed   25.20 sec
+        Start 117: glm_forward_fixture
+117/131 Test #117: glm_forward_fixture .......................   Passed    0.09 sec
+        Start 118: glm_forward_generate
+118/131 Test #118: glm_forward_generate ......................   Passed    2.20 sec
+        Start 119: glm_forward_test
+119/131 Test #119: glm_forward_test ..........................   Passed    0.94 sec
+        Start 120: dsa_dump_generate
+120/131 Test #120: dsa_dump_generate .........................   Passed    0.50 sec
+        Start 121: dsa_dump_test
+121/131 Test #121: dsa_dump_test .............................   Passed    0.83 sec
+        Start 122: kda_dump_generate
+122/131 Test #122: kda_dump_generate .........................   Passed    0.06 sec
+        Start 123: kda_dump_test
+123/131 Test #123: kda_dump_test .............................   Passed    3.01 sec
+        Start 124: doll_selftest
+124/131 Test #124: doll_selftest .............................   Passed    0.85 sec
+        Start 125: flag_protocol_test
+125/131 Test #125: flag_protocol_test ........................   Passed    1.29 sec
+        Start 126: roster_selftest
+126/131 Test #126: roster_selftest ...........................   Passed    0.05 sec
+        Start 127: bus_test
+127/131 Test #127: bus_test ..................................   Passed   35.06 sec
+        Start 128: bus_selftest
+128/131 Test #128: bus_selftest ..............................   Passed    2.24 sec
+        Start 129: glm_vision_test
+129/131 Test #129: glm_vision_test ...........................   Passed    0.89 sec
+        Start 130: glm_vision_stream_test
+130/131 Test #130: glm_vision_stream_test ....................   Passed   23.28 sec
+        Start 131: glm_vision_frontend_test
+131/131 Test #131: glm_vision_frontend_test ..................   Passed    0.26 sec
+
+97% tests passed, 4 tests failed out of 131
+
+Label Time Summary:
+checkpoint    =  29.87 sec*proc (10 tests)
+fixture       =  29.08 sec*proc (8 tests)
+gpu           = 464.55 sec*proc (92 tests)
+host          = 172.11 sec*proc (31 tests)
+python        =  18.93 sec*proc (14 tests)
+rdma          = 145.21 sec*proc (19 tests)
+
+Total Test time (real) = 665.80 sec
+
+The following tests FAILED:
+	100 - qwen_engine_fp8_mtp3_rows32 (Failed)
+	101 - qwen_engine_mtp3_rows32_row_independent (Failed)
+	102 - qwen_engine_fp8_mtp3_rows64 (Failed)
+	103 - qwen_engine_mtp3_rows64_row_independent (Failed)
+Errors while running CTest
