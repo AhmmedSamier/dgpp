@@ -3738,6 +3738,16 @@ DGPP_TEST(glm_tp_serving_mtp_graph_constrained_is_rank_identical_and_valid) {
                 seqs[0].size(), fallbacks[0]);
 }
 
+class MtpSamplingTrace : public dgpp::sched::SchedulerObserver {
+ public:
+  std::map<std::string, std::vector<int64_t>> tokens;
+  std::map<std::string, dgpp::sched::Scheduler::Result> retired;
+  void on_token(const std::string& id, int64_t token, int) override { tokens[id].push_back(token); }
+  void on_retire(const std::string& id, const dgpp::sched::Scheduler::Result& result) override {
+    retired[id] = result;
+  }
+};
+
 // M6 6b, the device path under MTP: the one-graph T=2 step with the
 // on-device speculative verdict (the accept test, the residual, row 1's
 // sample) in lockstep with the eager SampledSpeculator on a second model
@@ -3766,9 +3776,15 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
     const char* id;
     int max_steps;
     uint64_t seed;
+    int admit_after = 0;
   };
+  // Seed 13 must match both alone and co-admitted. The second batch reuses
+  // captured slots and seed 814480 accepts drafts after an exact fallback.
   const std::vector<std::vector<Spec>> phases{{{"solo", 7, 7}},
-                                              {{"a", 7, 11}, {"b", 6, 13}}};
+                                              {{"solo_b", 6, 13}},
+                                              {{"a", 7, 11}, {"b", 6, 13}},
+                                              {{"reuse_a", 7, 814480}, {"reuse_b", 6, 13}},
+                                              {{"stagger_a", 7, 11}, {"stagger_b", 6, 13, 1}}};
 
   std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29932);
   require(!buses.empty(), "tp bus world failed to start");
@@ -3839,6 +3855,8 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
           throw std::runtime_error("the MTP graph engine did not arm the "
                                    "device sampler at the capped width");
         dgpp::sched::Scheduler sched(&engine, /*eos=*/{});
+        MtpSamplingTrace trace;
+        sched.set_observer(&trace);
 
         size_t result_index = 0;
         for (const std::vector<Spec>& phase : phases) {
@@ -3860,7 +3878,7 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
                 prompt));
             specs.back()->start(first);
           }
-          for (size_t i = 0; i < n; ++i) {
+          const auto submit = [&](size_t i) {
             dgpp::sched::SchedulerRequest req;
             req.id = phase[i].id;
             req.prompt = prompt;
@@ -3868,56 +3886,50 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
             req.sampling = params;
             req.seed = phase[i].seed;
             sched.submit(std::move(req));
-          }
-          // Lockstep: one scheduler tick (at most one admission, one replay
-          // for every live slot), then one eager step per request that was
-          // live in that replay, then the transcript and feed checks.
+          };
+          for (size_t i = 0; i < n; ++i)
+            if (phase[i].admit_after == 0) submit(i);
+          // Group admissions can make several requests live in one tick.
+          // Follow observer output; stored results appear only at retirement.
           std::vector<bool> live(n, false);
           std::vector<bool> finished(n, false);
+          int tick = 0;
           while (sched.tick()) {
+            require(++tick < 32, "sampled requests must finish within the replay budget");
             ++replays[static_cast<size_t>(r)];
-            for (size_t i = 0; i < n; ++i)
-              if (!live[i]) {
-                live[i] = true;  // the tick's one admission, in order
-                break;
-              }
+            for (size_t i = 0; i < n; ++i) live[i] = !trace.tokens[phase[i].id].empty();
             for (size_t i = 0; i < n; ++i) {
               if (!live[i] || finished[i]) continue;
               engine.drain();
               const std::vector<int32_t> committed = specs[i]->step();
               streams[i].insert(streams[i].end(), committed.begin(),
                                 committed.end());
-              const dgpp::sched::Scheduler::Result* res = sched.find(phase[i].id);
-              if (res == nullptr) throw std::runtime_error("result lookup");
+              const auto& generated = trace.tokens.at(phase[i].id);
               // The graph's tokens so far vs the speculator's committed
               // stream plus its pending next, over the same length.
               std::vector<int64_t> want(streams[i].begin(), streams[i].end());
               want.push_back(specs[i]->next());
-              if (res->generated.size() > want.size())
+              if (generated.size() > want.size())
                 throw std::runtime_error("the graph engine ran ahead of the "
                                          "speculator");
-              if (!std::equal(res->generated.begin(), res->generated.end(),
-                              want.begin()))
+              if (!std::equal(generated.begin(), generated.end(), want.begin()))
                 throw std::runtime_error(
                     std::string("request '") + phase[i].id +
                     "' graph transcript differs from the eager sampled "
                     "speculator's after replay " +
                     std::to_string(replays[static_cast<size_t>(r)]));
-              if (res->status != dgpp::sched::Scheduler::Result::Status::kActive) {
+              if (trace.retired.contains(phase[i].id)) {
                 finished[i] = true;
                 continue;
               }
               int64_t fed[2] = {-1, -1};
-              DGPP_CUDA_OK(cudaMemcpyAsync(fed, graph.device_feed(res->slot, 2),
-                                           sizeof(fed), cudaMemcpyDeviceToHost,
-                                           graph.stream()));
+              DGPP_CUDA_OK(cudaMemcpyAsync(fed, graph.device_feed(static_cast<int>(i), 2),
+                                           sizeof(fed), cudaMemcpyDeviceToHost, graph.stream()));
               DGPP_CUDA_OK(cudaStreamSynchronize(graph.stream()));
               // The scalar variant stages its feed at the next replay from
               // the adapter's pending/draft; the batch keeps it on the
               // device. Both must equal the speculator's (next, draft).
-              const bool batch_live =
-                  static_cast<int>(std::count(live.begin(), live.end(), true)) -
-                      static_cast<int>(std::count(finished.begin(), finished.end(), true)) >= kSlots;
+              const bool batch_live = engine.decode_batch_stats().slots == kSlots;
               if (batch_live && (fed[0] != specs[i]->next() || fed[1] != specs[i]->draft()))
                 throw std::runtime_error(
                     std::string("request '") + phase[i].id + "': the graph feeds [" +
@@ -3926,16 +3938,27 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
                     std::to_string(specs[i]->next()) + ", draft " +
                     std::to_string(specs[i]->draft()));
             }
+            for (size_t i = 0; i < n; ++i)
+              if (phase[i].admit_after == tick) submit(i);
           }
           for (size_t i = 0; i < n; ++i) {
             const auto& got = sched.results()[result_index++].generated;
             if (got.size() != static_cast<size_t>(phase[i].max_steps))
               throw std::runtime_error(std::string("transcript length for ") +
                                        phase[i].id);
+            require(finished[i] && got == trace.tokens.at(phase[i].id),
+                    "every completed transcript was checked through its final token");
             graph_seqs[static_cast<size_t>(r)].push_back(got);
             eager.session_close(static_cast<int>(i));
           }
         }
+        require(trace.tokens.at("b") == trace.tokens.at("solo_b") &&
+                    trace.tokens.at("reuse_b") == trace.tokens.at("solo_b") &&
+                    trace.tokens.at("stagger_b") == trace.tokens.at("solo_b"),
+                "seed 13 is independent of co-admission, slot reuse and arrival timing");
+        const auto batch = engine.decode_batch_stats();
+        require(batch.replays_by_slots[1] > 0 && batch.replays_by_slots[kSlots] > 0,
+                "the oracle must exercise actual scalar and batched replays");
         fallbacks[static_cast<size_t>(r)] = engine.fallbacks();
         release();
       } catch (const std::exception& e) {
@@ -4309,20 +4332,13 @@ DGPP_TEST(glm_tp_serving_mtp_depth3_graph_matches_plain_and_eager_feed) {
   run_mtp_depth_gate(3, 29934);
 }
 
-class MtpSamplingTrace : public dgpp::sched::SchedulerObserver {
- public:
-  std::map<std::string, std::vector<int64_t>> tokens;
-  void on_token(const std::string& id, int64_t token, int) override { tokens[id].push_back(token); }
-  void on_retire(const std::string&, const dgpp::sched::Scheduler::Result&) override {}
-};
-
 static void run_mtp_depth_sampling_gate(int depth, int port) {
   const GlmTextConfig cfg = glm_tp_test_config();
   const std::string dir = "glm_tp_fixture";
   glm_tp_write_fixture(dir);
   const std::vector<int64_t> prompt = make_tokens(9, cfg.vocab_size);
   constexpr int kWorld = 2;
-  const int kSlots = depth == 1 ? 1 : 2;
+  constexpr int kSlots = 2;
   constexpr int kCap = 24;
   const int max_tokens = static_cast<int>(prompt.size()) + 16;
   dgpp::sample::Params params;
@@ -4336,10 +4352,7 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
     uint64_t seed;
   };
   // The solo seed accepts drafts after the capped candidate prefix falls back.
-  const std::vector<std::vector<Spec>> phases =
-      depth == 1
-          ? std::vector<std::vector<Spec>>{{{"solo", 7, 814480}}, {{"a", 7, 11}}, {{"b", 6, 13}}}
-          : std::vector<std::vector<Spec>>{{{"solo", 7, 814480}}, {{"a", 7, 11}, {"b", 6, 13}}};
+  const std::vector<std::vector<Spec>> phases{{{"solo", 7, 814480}}, {{"a", 7, 11}, {"b", 6, 13}}};
 
   std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, port);
   require(!buses.empty(), "tp bus world failed to start");
@@ -4369,8 +4382,8 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
       try {
         CollectiveBus& bus = *buses[static_cast<size_t>(r)];
         GlmBusBoundaryReducer reducer(bus, test_wait_timeout_ms());
-        // Depth 1 reuses one scalar slot; depth 2 also exercises
-        // simultaneous requests through its scalar graph path.
+        // Both depths co-admit two requests. Depth 1 batches their verify;
+        // depth 2 uses scalar graphs because GLM has no batched draft chain.
         GlmDiagnosticModel eager(cfg, dir, max_tokens, 256, &reducer, r,
                                  kWorld, GlmResidency::Streaming,
                                  GlmHeadSharding::VocabSharded, kSlots,
@@ -4469,8 +4482,6 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
               }
               streams[i].insert(streams[i].end(), committed.begin(),
                                 committed.end());
-              const dgpp::sched::Scheduler::Result* res = sched.find(phase[i].id);
-              if (res == nullptr) throw std::runtime_error("result lookup");
               // The graph's tokens so far vs the speculator's committed
               // stream plus its pending next, over the same length.
               std::vector<int64_t> want(streams[i].begin(), streams[i].end());
@@ -4485,8 +4496,7 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
                     "' graph transcript differs from the eager sampled "
                     "speculator's after replay " +
                     std::to_string(replays[static_cast<size_t>(r)]));
-              if (res->status == dgpp::sched::Scheduler::Result::Status::kDone ||
-                  res->status == dgpp::sched::Scheduler::Result::Status::kCancelled) {
+              if (trace.retired.contains(phase[i].id)) {
                 finished[i] = true;
                 continue;
               }
@@ -4495,7 +4505,6 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
                 require(slot.attempts[p] == slot_expected[i].attempts[p] &&
                             slot.accepts[p] == slot_expected[i].accepts[p],
                         "slot MTP counters match the eager final verdict");
-              (void)kSlots;
             }
           }
           const auto actual = engine.mtp_acceptance();
@@ -4514,10 +4523,16 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
             if (got.size() != static_cast<size_t>(phase[i].max_steps))
               throw std::runtime_error(std::string("transcript length for ") +
                                        phase[i].id);
+            require(finished[i] && got == trace.tokens.at(phase[i].id),
+                    "every completed transcript was checked through its final token");
             graph_seqs[static_cast<size_t>(r)].push_back(got);
             eager.session_close(static_cast<int>(i));
           }
         }
+        const auto batch = engine.decode_batch_stats();
+        require(batch.replays_by_slots[1] > 0, "scalar replay coverage");
+        require((batch.replays_by_slots[kSlots] > 0) == (depth == 1),
+                "depth 1 batches; depth 2 is the true scalar co-admission control");
         fallbacks[static_cast<size_t>(r)] = engine.fallbacks();
         release();
       } catch (const std::exception& e) {

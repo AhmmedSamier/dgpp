@@ -541,6 +541,10 @@ if(DGPP_ENABLE_IBV)
   # sharing queues for the eager collectives' sake.
   set_tests_properties(glm_tp_test PROPERTIES SKIP_RETURN_CODE 2
                        ENVIRONMENT "CUDA_DEVICE_MAX_CONNECTIONS=32")
+  add_test(NAME glm_mtp_sampling_no_pipeline COMMAND glm_tp_test)
+  set_tests_properties(glm_mtp_sampling_no_pipeline PROPERTIES
+      SKIP_RETURN_CODE 2 LABELS "gpu;rdma" RUN_SERIAL TRUE
+      ENVIRONMENT "CUDA_DEVICE_MAX_CONNECTIONS=32;DGPP_PIPELINE=0;DGPP_TEST_FILTER=glm_tp_serving_mtp_graph_sampling_matches_eager_speculator")
 
   # M5 deliverable 3 fabric runner: TP forward on real nodes.
   add_executable(glm_tp_check apps/glm_tp_check.cpp)

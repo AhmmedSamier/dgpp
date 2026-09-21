@@ -1842,6 +1842,12 @@ shape alternates between two graph variants so cells are not reset while
 their previous window is in flight. Prefill, graph capture and sampling
 fallbacks drain live windows before issuing eager collectives. A fallback
 also marks its provisional draft state for replacement before draining.
+After the older replay settles, the engine freezes every live slot's
+verified drafts before collecting any current verdict. Draining for one
+slot's fallback can publish new drafts for the entire batch; those new
+drafts must never replace the inputs used to resolve another slot's
+current accept/residual decision or update its context. The same snapshot
+precedes the drain when pipelining is disabled.
 
 `DGPP_PIPELINE=0` settles each replay immediately after launch;
 `DGPP_PIPELINE_TRACE=1` logs launches and settlements. The stats
@@ -1983,6 +1989,11 @@ appropriate fed tokens. The commit updates counts for accepted rows.
 On fallback, the adapter gathers the saved verifier logits, completes
 sampling on the host and replaces the provisional feed and draft state.
 Verifier logits are saved before the draft head reuses their buffer.
+The sampled-MTP oracle gates follow scheduler token and retirement events,
+compare every live transcript through its final token, and cover grouped
+admission, staggered arrival and reused slots. Stored request results are
+populated at retirement and cannot be used as live transcripts. See the
+[fallback isolation record](benchmarks/results/2026-09-21-mtp-fallback-isolation.md).
 
 ### Logprobs and validation
 

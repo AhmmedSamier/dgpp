@@ -6,6 +6,12 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Keep batched MTP fallback decisions isolated** (2026-09-21,
+  [#15](https://github.com/HawkBearPig/dgpp/issues/15)): preserve each request's
+  verified drafts before another request's fallback publishes new drafts.
+  Repair the live sampling oracle, cover grouped and staggered admission,
+  slot reuse and disabled pipelining, and test batched fallback counters.
+  See the [validation record](benchmarks/results/2026-09-21-mtp-fallback-isolation.md).
 - **Reduce QSA selection cost at long context** (2026-09-21,
   [#19](https://github.com/HawkBearPig/dgpp/issues/19)): use exact radix
   selection above 2048 compressed pools, preserving score arithmetic,

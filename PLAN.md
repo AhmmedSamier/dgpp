@@ -117,6 +117,12 @@ and per-position attempts and accepts, including sampled exact-fallback
 acceptance. See the
 [metrics contract](docs/openai-compatibility.md#speculative-decoding-counters).
 
+Sampled MTP now preserves the drafts each request verified before settling
+another request's fallback. Live observer-based oracle checks cover grouped
+and staggered admission, reused slots, final transcripts and counters, with
+pipelining enabled and disabled. See the
+[fallback isolation record](benchmarks/results/2026-09-21-mtp-fallback-isolation.md).
+
 Other work includes request-level observability, additional API fields,
 silent-node-loss detection, wider batching for GLM-5.3-Flash, arbitrary
 slot subsets for oversized batches, and

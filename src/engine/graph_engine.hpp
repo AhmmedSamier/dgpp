@@ -426,6 +426,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     pending_.assign(static_cast<size_t>(slots_), -1);
     drafts_.assign(static_cast<size_t>(slots_),
                    std::vector<int32_t>(static_cast<size_t>(depth_), -1));
+    fed_drafts_ = drafts_;
     hop_slot_.assign(static_cast<size_t>(slots_), -1);
     hop_position_.assign(static_cast<size_t>(slots_), 0);
     live_.assign(static_cast<size_t>(slots_), false);
@@ -1369,13 +1370,17 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     r.rows = rows;
     launch(std::move(r));
     settle_older();
+    // A fallback drains the whole batch and publishes its new drafts.
+    // Preserve every slot's verified drafts before collecting any verdict.
+    for (const int req : reqs)
+      fed_drafts_[static_cast<size_t>(req)] = drafts_[static_cast<size_t>(req)];
     if (rows < rows_per_request_)
       stage_masks_compact(fam.requests, rows);
     else
       for (const int req : reqs) stage_masks(req);
     publish_stage(batch_index(family));
-    if (!pipeline_) drain();  // after the publish: the replay's gate waits on it
     wait_verdict(inflight_.back());
+    if (!pipeline_) drain();  // after the publish: the replay's gate waits on it
 
     std::vector<std::vector<int32_t>> batches;
     batches.reserve(reqs.size());
@@ -2349,7 +2354,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     int32_t next = verify.next;
     // The drafts this step fed (the verify's rows after the first); the
     // slot's drafts are replaced below by the block's new ones.
-    const std::vector<int32_t> fed_drafts = drafts_[static_cast<size_t>(req)];
+    const std::vector<int32_t>& fed_drafts = fed_drafts_[static_cast<size_t>(req)];
     const bool stochastic = sampled_slot(req);
     const bool full_path = full_path_slot(req);
     if (stochastic) {
@@ -2688,10 +2693,11 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     r.rows = rows;
     launch(std::move(r));
     settle_older();
+    fed_drafts_[static_cast<size_t>(req)] = drafts_[static_cast<size_t>(req)];
     stage_masks(req);
     publish_stage(req);
-    if (!pipeline_) drain();  // after the publish: the replay's gate waits on it
     wait_verdict(inflight_.back());
+    if (!pipeline_) drain();  // after the publish: the replay's gate waits on it
     std::vector<int32_t> out = collect_verdict(req, /*verdict_request=*/0, /*batched=*/false, rows);
     if (schedule_ && model_->mtp_enabled()) note_step_for_lambda(static_cast<int>(out.size()), rows);
     return out;
@@ -3024,6 +3030,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   // Per slot: the drafts fed with the pending token, one per position
   // (depth_ of them; depth 1 is the two-row step as built).
   std::vector<std::vector<int32_t>> drafts_;
+  // The current verify's inputs, frozen after the older replay settles and
+  // before this replay can publish new drafts (including another slot's fallback).
+  std::vector<std::vector<int32_t>> fed_drafts_;
   int depth_ = 0;
   // ---- the confidence-scheduled verify depth (configure_verify_schedule) ----
   bool schedule_ = false;

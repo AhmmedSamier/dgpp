@@ -258,7 +258,10 @@ build. The suites cover:
   checked against the eager speculator after every replay, the MTP depth-2
   and depth-3 greedy gates — plain transcript, device feed equal to the
   eager chain's — and the sampled depth-2 gate against the eager
-  speculator through its fallbacks; every gate's eager oracle drains the
+  speculator through its fallbacks; observer events keep the live transcript
+  checks active through retirement, including grouped/staggered admissions
+  and slot reuse. `glm_mtp_sampling_no_pipeline` repeats the sampled gate
+  with `DGPP_PIPELINE=0`. Every gate's eager oracle drains the
   pipelined engine before it steps); the pick/spec kernels against their
   host oracles, the T=2 and T=3 sampled verdict chains included
   (`glm_pick_test`); the bus's graph era including two replay windows
