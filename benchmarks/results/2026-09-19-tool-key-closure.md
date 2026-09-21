@@ -115,12 +115,13 @@ closed key set `{"city", "days"}` where it previously required
 
 The chat-template golden gates could not run here: `chat_template_test`
 exits 2 with "checkpoint unavailable" for every model, because this box has
-no HF cache for them. They are prompt-rendering goldens, and key closure
-changes the decoding grammar, not rendering, so they are not expected to
-move. Checked directly instead: the four `tests/data/*chat_template_goldens.jsonl`
-corpora contain schemas with `properties` and no `additionalProperties`,
-and **zero** golden tool calls use a key outside the declared properties,
-so no golden's expected arguments depend on the old open key slot.
+no HF cache for them. The original claim that no golden call uses an
+undeclared key was incorrect: ten calls do, across the GLM, GLM4, GLM DSA
+and Qwen corpora. Their reference renders stay unchanged, but the grammar
+gates must explicitly opt into those extra keys and also verify rejection
+under the new default. See the
+[follow-up validation](2026-09-21-tool-key-closure.md), which runs all four
+checkpoint-backed gates.
 
 ## Not covered here
 

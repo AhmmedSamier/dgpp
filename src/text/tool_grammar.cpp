@@ -172,14 +172,9 @@ GrammarTool grammar_tool_from_function(const minijson::Value& def,
   const minijson::Value* props = params->find("properties");
   const minijson::Value* extra = params->find("additionalProperties");
   if (props == nullptr || !props->is_object()) return tool;
-  // The keys close whenever the schema declares properties and does not
-  // opt out with an explicit `additionalProperties: true`. JSON Schema's
-  // default is open, but that is a validation semantic: as a decoding
-  // grammar an open key set makes the name slot free text, and the model
-  // then writes names from its own prior — an undeclared one, or the same
-  // one twice — which no client can tell from a model fault. Any other
-  // value (false, or a subschema this grammar cannot type per name)
-  // closes the set too; the opt-out is noted.
+  // Constrained generation defaults to the declared top-level names. Only
+  // explicit true opts out; a subschema cannot type an unknown name here.
+  // Nested objects still use the JSON machine's schema semantics.
   const bool open_keys = extra != nullptr && extra->is_bool() && extra->as_bool();
   if (open_keys) {
     if (notes != nullptr)

@@ -406,7 +406,8 @@ DGPP_TEST(tool_parser_rejects_aRepeatedParameterName) {
       "<tool_call>\n<function=get_weather>\n<parameter=city>\nRome\n</parameter>\n"
       "<parameter=days>\n2\n</parameter>\n</function>\n</tool_call>",
       plain);
-  require(ok.calls.size() == 1 && ok.calls[0].arguments == "{\"city\": \"Rome\", \"days\": 2}",
+  require(ok.calls.size() == 1, "distinct names produce one call");
+  require(ok.calls[0].arguments == "{\"city\": \"Rome\", \"days\": 2}",
           "distinct names parse: " + ok.calls[0].arguments);
   // The DSML format's ledger, for parity: a repeat is content there too.
   const std::string dsml_dup =
@@ -417,6 +418,29 @@ DGPP_TEST(tool_parser_rejects_aRepeatedParameterName) {
   const Run dsml = drive_dsml(dsml_dup, plain);
   require(dsml.calls.empty() && dsml.content == dsml_dup,
           "a repeated DSML parameter is content: " + dsml.content);
+}
+
+DGPP_TEST(tool_parser_qwen_duplicateKeysFallbackAndRecover) {
+  const auto parameter = [](const std::string& name, const std::string& value) {
+    return "<parameter=" + name + ">\n" + value + "\n</parameter>\n";
+  };
+  const auto block = [](const std::string& body) {
+    return "<tool_call>\n<function=get_weather>\n" + body + "</function>\n</tool_call>";
+  };
+  const std::string good = block(parameter("city", "Paris"));
+  for (const std::string key : {"city", "days", "unknown", "cité"}) {
+    for (const std::string second : {"1", "2"}) {
+      const std::string bad =
+          block(parameter(key, "1") + parameter("between", "x") + parameter(key, second));
+      const Run run = drive_qwen("Reason</think>Before" + good + bad + good + "After");
+      require(run.reasoning == "Reason" && run.content == "Before" + bad + "After",
+              "a duplicate preserves literal content and reasoning: " + key);
+      require(run.calls.size() == 2, "valid calls before and after a duplicate survive");
+      require(run.calls[0].arguments == "{\"city\": \"Paris\"}" &&
+                  run.calls[1].arguments == run.calls[0].arguments,
+              "key use is scoped to each call");
+    }
+  }
 }
 
 DGPP_TEST(tool_parser_splitsReasoningFromContentExactly) {

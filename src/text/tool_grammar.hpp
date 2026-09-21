@@ -19,8 +19,8 @@
 //   NAME     := one of the request's tool names (a byte automaton over the
 //               vocabulary's token texts, so any tokenization of the name
 //               is accepted and nothing else)
-//   KEY      := a property name of that tool's schema when it declares
-//               properties, else free text
+//   KEY      := a declared property name unless additionalProperties is
+//               explicitly true; free text when no properties are declared
 //   VALUE    := typed by the property's schema (M6 6i): a JSON text under
 //               the 6h machine for a JSON-typed property, one of the enum
 //               texts for an enum string, free text otherwise; the closing

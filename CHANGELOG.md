@@ -6,6 +6,14 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Constrain declared tool argument names by default** (2026-09-21,
+  [#11](https://github.com/HawkBearPig/dgpp/issues/11),
+  [#12](https://github.com/HawkBearPig/dgpp/pull/12)): top-level argument
+  names close to declared `properties` unless `additionalProperties: true`
+  explicitly opts out. Repeated Qwen XML parameters become literal content.
+  The checkpoint grammar gates cover both the closed default and the opt-out
+  without altering reference renders. See the
+  [validation record](benchmarks/results/2026-09-21-tool-key-closure.md).
 - **Reconcile timed benchmark counters** (2026-09-20,
   [#24](https://github.com/HawkBearPig/dgpp/issues/24)): `scripts/timed_load.py`
   waits for published counters to match completed requests under a deadline,
