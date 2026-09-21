@@ -24,13 +24,34 @@ sampled-fallback state transitions. See `docs/numerics.md` for the protocol.
 
 ## Validation
 
-- Full native CI build with warnings as errors passed.
-- All 22 host CTest entries passed; the analyzer has 20 passing cases,
-  including omitted sparse cases, repeat drift, dense-control drift and
-  numerical regressions.
-- Assertion-enabled and deliberately incorrect fallback binaries built.
-- GPU, sanitizer, real-model numerical and four-node service checks are
-  pending an approved idle-hardware window. Production remains unchanged.
+The tested implementation is `33c8c4eeebe5c6506e00b5e038ba104d2bbd0909`.
+The native CI build completed with warnings as errors. Production was
+stopped for serial GPU/RDMA validation on GB10 hardware with CUDA 13.
 
-The feature remains default off. This record does not yet establish merge
-readiness; runtime results will be added after the prepared validation.
+- All 138 CTest entries passed across the full run and a dependency-corrected
+  rerun; no checkpoint cases were skipped. The initial full run passed 130
+  entries. Four DeepSeek reference generators lacked NumPy in this worktree,
+  and their four consumers consequently lacked reference dumps. Reconfiguring
+  with the existing NumPy virtual environment and rebuilding fixed the test
+  environment; all eight entries then passed. No source change was needed.
+- The analyzer's 20 tests include missing sparse cases, repeat drift,
+  dense-control drift and numerical regressions. The new compaction fixture
+  also passed end to end through the scorer and analyzer.
+- Forced sampled fallback passed with compaction disabled and enabled at
+  depth 1, and enabled at C16/MTP3. Restoring the incorrect physical-indexed
+  fallback gather in a separate negative-control binary failed at the
+  expected gathered-logit/device-verdict consistency check.
+- The assertion-enabled C16 engine lane passed all three checks, including
+  capture-time stride assertions, slot reuse and prefill continuation.
+- Both bus-free mapped-state tests passed compute-sanitizer memcheck with
+  zero errors, covering sampling state, commit/draft/chain state and inactive
+  PLE padding.
+
+The first real-model baseline exposed insufficient KV allocation in the new
+scorer at C16: each request reserves 64 additional tokens and rounds its
+allocation to a full block. The scorer now budgets that slack per request.
+The synthetic compaction corpus uses 1040 tokens, making each C16 stream
+65 tokens long so this rounding boundary is exercised.
+
+Real-model numerical and four-node service results are pending. The feature
+remains default off.

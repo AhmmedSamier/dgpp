@@ -334,9 +334,14 @@ int main(int argc, char** argv) {
       require(bus->start(&error), error);
       reducer = std::make_unique<dgpp::BusBoundaryReducer>(*bus, 120000);
     }
-    dgpp::QwenModel model(cfg, checkpoint, 64, static_cast<int64_t>(max_tokens + 1024),
-                          dgpp::QwenResidency::Resident, reducer.get(), rank, world,
-                          compaction.empty() ? 4 : 16, false, capacity, mode == "mma");
+    const int request_slots = compaction.empty() ? 4 : 16;
+    // Each request reserves 64 extra tokens and rounds up to a complete KV
+    // block. Account for that slack per request, including the dense C16 case.
+    const int64_t cache_slack = std::max<int64_t>(
+        1024, request_slots * (64 + dgpp::QwenModel::kv_block_tokens_static() - 1));
+    dgpp::QwenModel model(cfg, checkpoint, 64, static_cast<int64_t>(max_tokens) + cache_slack,
+                          dgpp::QwenResidency::Resident, reducer.get(), rank, world, request_slots,
+                          false, capacity, mode == "mma");
     model.set_decode_route_traces(false);
     model.set_decode_tail_mirrors(false);
     model.session_graph_prepare();

@@ -16,7 +16,10 @@ def main():
     with tempfile.TemporaryDirectory(prefix="qwen-head-fixture-") as directory:
         root = Path(directory)
         manifest = root / "corpora.json"
-        manifest.write_text(json.dumps([{"name": "fixture", "ids": [5 + i % 100 for i in range(1024 if compact else 256)]}]))
+        # C16 streams of 65 tokens cross a KV-block boundary after reserving
+        # decode slack; an aligned 64-token stream would hide under-allocation.
+        count = 1040 if compact else 256
+        manifest.write_text(json.dumps([{"name": "fixture", "ids": [5 + i % 100 for i in range(count)]}]))
         for mode in modes:
             (root / mode).mkdir()
             with (root / mode / "r0.log").open("w") as log:
