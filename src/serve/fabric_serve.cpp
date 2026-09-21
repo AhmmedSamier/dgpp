@@ -376,6 +376,8 @@ std::string encode_journal_settings(const WorldSettings& s) {
   append_json_string(&out, s.ngram_table);
   out += ",\"dw\":";
   append_json_string(&out, s.dense_weights);
+  out += ",\"fp8_head\":";
+  append_json_string(&out, s.fp8_head);
   out += ",\"bfw\":";
   append_json_string(&out, s.bf16_weights);
   out += ",\"pf\":";
@@ -536,6 +538,11 @@ JournalRecord decode_journal_line(std::string_view line) {
     s.kv_dtype = std::string(field(v, "kvdt", "settings").as_string());
     // Records before 2026-09-10 carry no table residency: resident.
     if (const dgpp::minijson::Value* ngt = v.find("ngt")) s.ngram_table = std::string(ngt->as_string());
+    if (const auto* head = v.find("fp8_head")) {
+      if (!head->is_string() || (head->as_string() != "gemv" && head->as_string() != "mma"))
+        throw std::runtime_error("journal: engine.fp8_head must be gemv or mma");
+      s.fp8_head = std::string(head->as_string());
+    }
     if (const dgpp::minijson::Value* dw = v.find("dw")) s.dense_weights = std::string(dw->as_string());
     // The bf16 weights' form (2026-09-19): records before it carry none.
     if (const dgpp::minijson::Value* bfw = v.find("bfw")) s.bf16_weights = std::string(bfw->as_string());

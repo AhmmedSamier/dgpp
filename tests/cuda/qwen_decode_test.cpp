@@ -479,8 +479,13 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
       ~RestoreDenseWeights() { dgpp::QwenLayerStream::set_dense_weights_fp8(fp8); }
     } restore_dense_weights{old_fp8};
     if (fp8_head) dgpp::QwenLayerStream::set_dense_weights_fp8(true);
-    QwenModel reference(cfg, dir, 64, 2048, QwenResidency::Resident, nullptr, 0, 1, 8, false, 16);
-    QwenModel wide(cfg, dir, 64, 2048, QwenResidency::Resident, nullptr, 0, 1, 8, false, 16);
+    QwenModel reference(cfg, dir, 64, 2048, QwenResidency::Resident, nullptr, 0, 1, 8, false, 16,
+                        fp8_head);
+    QwenModel wide(cfg, dir, 64, 2048, QwenResidency::Resident, nullptr, 0, 1, 8, false, 16,
+                   fp8_head);
+    require(reference.max_decode_rows() == wide.max_decode_rows() &&
+                reference.fp8_head_mma() == wide.fp8_head_mma(),
+            "eager/graph parity requires matching decode capacity and head mode");
     wide.session_graph_prepare();
     const auto nll = [V](const float* row, int64_t token) {
       const double top = *std::max_element(row, row + V);
@@ -489,10 +494,14 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
       return top + std::log(sum) - row[token];
     };
     if (fp8_head && dgpp::dense_gemv_rows() == 4) {
-      // A four-row ceiling retains the old head for 5..16-row prefill.
-      // Both models still use the same four-row dense lowering threshold.
-      // Check hidden states too, so this comparison isolates head numerics.
-      QwenModel old_head(cfg, dir, 64, 2048, QwenResidency::Resident, nullptr, 0, 1, 1, false, 4);
+      // The default head must retain GEMV even with a wide decode capacity.
+      // A narrow model opted into MMA also retains GEMV above its ceiling.
+      // Both controls share the same dense lowering threshold; compare hidden
+      // states to establish that these comparisons isolate the head.
+      QwenModel old_head(cfg, dir, 64, 2048, QwenResidency::Resident, nullptr, 0, 1, 8, false, 16);
+      QwenModel narrow(cfg, dir, 64, 2048, QwenResidency::Resident, nullptr, 0, 1, 1, false, 4,
+                       true);
+      require(!old_head.fp8_head_mma(), "the default head must remain GEMV");
       for (const int length : {1, 4, 5, 8, 16, 17}) {
         double prefill_loss_delta = 0;
         for (int trial = 0; trial < 8; ++trial) {
@@ -501,6 +510,11 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
           prompt.pop_back();
           const auto expected = old_head.session_prefill(0, prompt);
           const auto actual = wide.session_prefill(0, prompt);
+          const auto narrow_output = narrow.session_prefill(0, prompt);
+          require(narrow_output.final_hidden_bits == expected.final_hidden_bits &&
+                      bitwise(narrow_output.logits, expected.logits),
+                  "opt-in MMA outside the decode ceiling must retain default GEMV");
+          narrow.session_close(0);
           require(actual.logits.size() == static_cast<size_t>(V) &&
                       expected.logits.size() == static_cast<size_t>(V),
                   "FP8 short prefill: one vocabulary row");

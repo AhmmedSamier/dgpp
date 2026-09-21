@@ -29,6 +29,11 @@ over RoCE. Each quant links to its specific Hugging Face model card.
 | GLM-5.3 | [HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64](https://huggingface.co/HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64) | 4 | [Four nodes](deploy/cluster_glm-5.3_int4-int8_w4.example.json) |
 | DeepSeek-V4.1-Flash | [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) | 4 | [Four nodes](deploy/cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json) |
 
+Qwen FP8 vocabulary-head streaming MMA is available with
+`engine.fp8_head: "mma"` and `engine.dense_weights: "fp8"`; the default remains
+`"gemv"` pending real-checkpoint numerical validation. See
+[operation and numerical constraints](docs/operations.md).
+
 The Qwen NVFP4 templates use `engine.ngram_table: "mmap"` to read the
 n-gram table from NVMe, `engine.decode_graph: true` for resident graph serving,
 and `engine.dense_weights: "fp8"` to encode dense projections at load. On two

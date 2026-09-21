@@ -487,9 +487,15 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
     try {
       auto* bus = buses[rank].get();
       BusBoundaryReducer reducer(*bus, wait_timeout_ms());
-      QwenModel eager(cfg, dir, kMaxTokens, 2048, QwenResidency::Resident, &reducer, rank, kWorld, 8);
-      QwenModel model(cfg, dir, kMaxTokens, 2048, QwenResidency::Resident, &reducer, rank, kWorld, 8,
-                      /*mtp=*/true, /*decode_rows=*/16);
+      QwenModel eager(
+          cfg, dir, kMaxTokens, 2048, QwenResidency::Resident, &reducer, rank, kWorld, 8,
+          /*mtp=*/false, /*decode_rows=*/16, dgpp::QwenLayerStream::dense_weights_fp8());
+      QwenModel model(cfg, dir, kMaxTokens, 2048, QwenResidency::Resident, &reducer, rank, kWorld,
+                      8,
+                      /*mtp=*/true, /*decode_rows=*/16, dgpp::QwenLayerStream::dense_weights_fp8());
+      require(eager.max_decode_rows() == model.max_decode_rows() &&
+                  eager.fp8_head_mma() == model.fp8_head_mma(),
+              "eager/graph parity requires matching decode capacity and head mode");
       DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&scratch),
                                  sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld), cudaHostAllocDefault));
       arrived = true;

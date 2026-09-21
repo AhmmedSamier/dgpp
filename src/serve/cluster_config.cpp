@@ -180,18 +180,19 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           e.dense_weights = text(x, ek, what);
           if (e.dense_weights != "checkpoint" && e.dense_weights != "fp8")
             fail(what, "'" + ek + "' must be \"checkpoint\" or \"fp8\"");
-        }
-        else if (p.key == "bf16_weights") {
+        } else if (p.key == "fp8_head") {
+          e.fp8_head = text(x, ek, what);
+          if (e.fp8_head != "gemv" && e.fp8_head != "mma")
+            fail(what, "'" + ek + "' must be \"gemv\" or \"mma\"");
+        } else if (p.key == "bf16_weights") {
           e.bf16_weights = text(x, ek, what);
           if (!parse_bf16_residency(e.bf16_weights, nullptr))
             fail(what, "'" + ek + "' must be \"checkpoint\", \"bf12\" or \"bf12+bf16\"");
-        }
-        else if (p.key == "prefill") {
+        } else if (p.key == "prefill") {
           e.prefill = text(x, ek, what);
           if (e.prefill != "bounded" && e.prefill != "exact")
             fail(what, "'" + ek + "' must be \"bounded\" or \"exact\"");
-        }
-        else if (p.key == "rope_scaling") {
+        } else if (p.key == "rope_scaling") {
           if (!x.is_object()) fail(what, "'" + ek + "' must be an object");
           dgpp::RopeScaling rs;
           bool saw_factor = false, saw_original = false;
@@ -229,8 +230,8 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
             fail(what, err.what());
           }
           e.rope_scaling = rs;
-        }
-        else if (p.key == "default_max_tokens") e.default_max_tokens = static_cast<int>(integer(x, ek, what, 1, 1 << 30));
+        } else if (p.key == "default_max_tokens")
+          e.default_max_tokens = static_cast<int>(integer(x, ek, what, 1, 1 << 30));
         else if (p.key == "file_inputs") {
           if (!x.is_object()) fail(what, "engine.file_inputs must be an object");
           for (const auto& f : x.members()) {

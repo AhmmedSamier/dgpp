@@ -127,18 +127,23 @@ with `--calibration` separately; do not include it in the A/B aggregate.
 Both binaries must use the same build preset and production code apart from
 the head dispatch. Run this only on reserved idle hardware.
 
-The four compressed raw epoch files retain request texts, usage counts,
-receive timestamps, timing gaps, prompt/text hashes and metric snapshots.
+The [raw epoch archive](https://github.com/jontaylor/dgpp/releases/download/fp8-head-benchmark-2026-09-20/fp8-head-raw-epochs.tar.gz)
+retains request texts, usage counts, receive timestamps, timing gaps,
+prompt/text hashes, metric snapshots and both calibration records. It is
+hosted separately to keep compressed measurement data out of the source tree.
+The downloaded archive was hash-checked and its analyzer output reproduced
+`summary.json` exactly. Extract it into a scratch directory and check the
+[SHA256SUMS](2026-09-20-qwen-fp8-head-e2e/raw/SHA256SUMS) retained here.
 The same analyzer reads either uncompressed `.json` or `.json.gz`:
 
 ```bash
 python3 benchmarks/results/2026-09-20-qwen-fp8-head-e2e/analyze.py \
-  benchmarks/results/2026-09-20-qwen-fp8-head-e2e/raw
+  /path/to/extracted-epochs
 ```
 
 See [summary.json](2026-09-20-qwen-fp8-head-e2e/raw/summary.json),
-[protocol.json](2026-09-20-qwen-fp8-head-e2e/raw/protocol.json), both calibration
-records and the raw A1/B1/B2/A2 files in that directory. The pooled table uses
+[protocol.json](2026-09-20-qwen-fp8-head-e2e/raw/protocol.json), and the calibration
+and A1/B1/B2/A2 files in the archive. The pooled table uses
 all phases; the class table uses per-class medians.
 
 Every epoch was shut down with its explicit launch configuration and both
@@ -150,4 +155,5 @@ Both ranks retained the original release binary SHA256
 and original configuration. The service reported no engine failure, the
 repeat smoke prompt reused 1128 tokens, and the production cache had 148 slots.
 
-PR creation remains on hold.
+Draft [PR #10](https://github.com/HawkBearPig/dgpp/pull/10) is open;
+real-checkpoint teacher-forced numerical validation remains pending.

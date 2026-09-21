@@ -147,4 +147,11 @@ Matched real-checkpoint teacher-forced comparisons covering wide verification
 rows and short prefill remain outstanding. Fixture NLL, throughput and the
 serving API smoke are not substitutes for that numerical comparison.
 
-PR creation remains intentionally on hold. No production release was updated.
+Draft [PR #10](https://github.com/HawkBearPig/dgpp/pull/10) is open.
+No production release was updated.
+
+The [review follow-up](2026-09-21-qwen-fp8-head-review.md) makes this path
+opt-in with `engine.fp8_head: "mma"` and retains GEMV by default. Results
+above apply to the earlier unconditional implementation. `raw/head-bench.cpp`
+is an archived, one-off reproducer for those measurements, not a maintained
+benchmark target.

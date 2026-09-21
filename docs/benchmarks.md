@@ -602,6 +602,10 @@ varied within the unchanged baseline as well as across builds, so this is
 fixed-prompt/output-budget throughput evidence, not identical-token-path or
 quality-equivalence evidence. The [record and raw results](results/2026-09-20-qwen-fp8-head-e2e.md)
 include per-class results, calibration, transcript comparisons and restoration.
+These measurements predate the deployment switch: the optimized path now
+requires `engine.fp8_head: "mma"`. The shipped default remains `"gemv"`;
+this is historical evidence for the kernel change, not a rerun of the
+subsequent configuration plumbing or current upstream integration.
 
 ### Qwen3.8-Flash-Next-NVFP4, world 1, FP8 dense
 
