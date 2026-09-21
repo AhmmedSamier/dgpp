@@ -423,7 +423,7 @@ struct Glm4Family final : ServeFamily {
   // The row walk, the attention's split scratch, the MoE slot path and the
   // draft window all take the runtime ceiling (the batched depth >= 2
   // chain, 2026-09-10).
-  int decode_rows_cap() const override { return 32; }
+  int decode_rows_cap() const override { return dgpp::Glm4Model::decode_rows_cap(); }
   // The widest fold the decode graph records: a block output [rows, hidden].
   size_t lat_slot_bytes(int decode_rows) const override {
     return static_cast<size_t>(decode_rows) * static_cast<size_t>(cfg.hidden_size) * 2;

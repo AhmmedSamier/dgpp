@@ -41,6 +41,8 @@ Glm4Model::Glm4Model(const Glm4TextConfig& cfg, const std::string& checkpoint_di
       loader_(cfg, checkpoint_dir, tp_rank, tp_world, residency,
               tp_world > 1 ? Glm4HeadSharding::VocabSharded : Glm4HeadSharding::Full,
               mtp && residency == Glm4Residency::Resident) {
+  if (decode_rows > decode_rows_cap())
+    throw std::invalid_argument("Glm4Model: decode_rows exceeds the GLM-4.7 limit of 32");
   if (max_tokens <= 0) throw std::invalid_argument("Glm4Model: max_tokens must be positive");
   if (mtp && cfg_.mtp_layer() < 0) throw std::invalid_argument("Glm4Model: the config has no draft layer (mtp)");
   if (max_requests <= 0 || max_requests > kPickMaxRequests)
@@ -142,7 +144,8 @@ Glm4Model::MemoryPlan Glm4Model::plan_memory(const Glm4TextConfig& cfg, int max_
   if (max_tokens <= 0) throw std::invalid_argument("plan_memory: max_tokens must be positive");
   if (max_requests <= 0 || max_requests > kPickMaxRequests)
     throw std::invalid_argument("plan_memory: max_requests must be in [1, kPickMaxRequests]");
-  if (decode_rows > kDecodeRowsMax) throw std::invalid_argument("plan_memory: decode_rows exceeds kDecodeRowsMax");
+  if (decode_rows > decode_rows_cap())
+    throw std::invalid_argument("plan_memory: decode_rows exceeds the GLM-4.7 limit of 32");
   // The fixed batch's row ceiling, floored as the session core floors it.
   const int rows = std::max({kDecodeRows, decode_rows, max_requests});
   if (mtp && cfg.mtp_layer() < 0) throw std::invalid_argument("plan_memory: the config has no draft layer");
