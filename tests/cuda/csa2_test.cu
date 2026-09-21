@@ -30,6 +30,7 @@
 #include "kernels/csa2.hpp"
 #include "kernels/dsa.hpp"
 #include "kernels/latent_format.hpp"
+#include "kernels/topk_select.cuh"
 #include "models/dsa_reference.hpp"
 
 namespace {
@@ -509,7 +510,8 @@ struct SelectFixture {
   std::vector<int64_t> pos_sel;
   std::vector<float> logits;   // [rows, n] the DSA oracle's (relu)
   DevBuf dk, dks, dq8, dwf, dt, dpos, dri;
-  SelectFixture(int n_, int epb_, std::vector<int64_t> ps, uint64_t seed) : n(n_), epb(epb_), rows(int(ps.size())), pos_sel(std::move(ps)) {
+  SelectFixture(int n_, int epb_, std::vector<int64_t> ps, uint64_t seed, bool host_logits = true)
+      : n(n_), epb(epb_), rows(int(ps.size())), pos_sel(std::move(ps)) {
     const int blocks = (n + epb - 1) / epb;
     table.resize(size_t(blocks));
     for (int b = 0; b < blocks; ++b) table[size_t(b)] = (b * 7 + 3) % blocks;
@@ -544,7 +546,7 @@ struct SelectFixture {
       std::copy(k.begin() + size_t(slot) * 128, k.begin() + size_t(slot + 1) * 128, kl.begin() + size_t(e) * 128);
       ksl[size_t(e)] = ks[size_t(slot)];
     }
-    for (int r = 0; r < rows; ++r)
+    for (int r = 0; host_logits && r < rows; ++r)
       dgpp::dsa_ref::pool_logits<float>(&q8[size_t(r) * 32 * 128], &wf[size_t(r) * 32], kl.data(), ksl.data(), n, 32, 128,
                                         &logits[size_t(r) * n], true);
     dk = upload(k); dks = upload(ks); dq8 = upload(q8); dwf = upload(wf); dt = upload(table); dpos = upload(pos_sel);
@@ -557,17 +559,130 @@ struct SelectFixture {
 };
 }  // namespace
 
+DGPP_TEST(csa2_long_decode_selection_replays) {
+  // Production block size and selection widths, a non-tile-aligned long pool,
+  // all partial-tail lengths, the all-candidates-fit transition, inactive rows,
+  // and the six-request/depth-four batch width. The unchanged DSA scorer supplies
+  // score keys; host sorting independently supplies candidate and selected IDs.
+  // The small fixture below also retains its fully independent host score oracle.
+  constexpr int rows = 30, entries = 131073, topk_blocks = 2048, select_k = 512, block_size = 8;
+  std::vector<int64_t> positions(rows);
+  const std::vector<int64_t> lengths{0,      1,      511,    512,    513,    4095,   16383,
+                                     16384,  16385,  32768,  131065, 131066, 131067, 131068,
+                                     131069, 131070, 131071, 131072, 131073};
+  for (int r = 0; r < rows; ++r) positions[size_t(r)] = lengths[size_t(r) % lengths.size()] - 1;
+  SelectFixture fx(entries, 128, positions, 0x285E1, false);
+  DevBuf oracle_ws(dgpp::dsa_select_workspace_bytes(rows, entries)), oracle_counter(16),
+      oracle_top(rows * 4), oracle_counts(rows * 4),
+      work(dgpp::csa2_select_workspace_bytes(rows, entries)),
+      candidates(size_t(rows) * topk_blocks * 4), candidate_counts(rows * 4),
+      selected(size_t(rows) * select_k * 4), selected_counts(rows * 4);
+  cudaStream_t stream;
+  DGPP_CUDA_OK(cudaStreamCreate(&stream));
+  auto launch = [&](int count) {
+    dgpp::csa2_select_candidates_decode(
+        fx.dq8.p, static_cast<const float*>(fx.dwf.p), fx.ri(), fx.ps(), count, fx.tab(), fx.bpr(),
+        fx.dk.p, static_cast<const float*>(fx.dks.p), fx.epb, 32, block_size, topk_blocks,
+        static_cast<uint64_t*>(work.p), entries, static_cast<int32_t*>(candidates.p),
+        static_cast<int32_t*>(candidate_counts.p), stream);
+    dgpp::csa2_select_listed_decode(
+        fx.dq8.p, static_cast<const float*>(fx.dwf.p), fx.ri(), fx.ps(), count, fx.tab(), fx.bpr(),
+        fx.dk.p, static_cast<const float*>(fx.dks.p), fx.epb, 32,
+        static_cast<const int32_t*>(candidates.p), topk_blocks,
+        static_cast<const int32_t*>(candidate_counts.p), block_size, select_k,
+        static_cast<uint64_t*>(work.p), entries, static_cast<int32_t*>(selected.p),
+        static_cast<int32_t*>(selected_counts.p), stream);
+  };
+  DGPP_CUDA_OK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
+  launch(rows);
+  cudaGraph_t graph;
+  cudaGraphExec_t exec;
+  DGPP_CUDA_OK(cudaStreamEndCapture(stream, &graph));
+  DGPP_CUDA_OK(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
+  for (int pass = 0; pass < 3; ++pass) {
+    if (pass == 1) {
+      // Every score ties. Preserve the lowest original IDs, except for the
+      // reference's pinned newest complete block in the candidate stage.
+      std::fill(fx.wf.begin(), fx.wf.end(), 0.f);
+    } else if (pass == 2) {
+      // Change signs and visibility under the SAME captured graph.
+      for (size_t i = 0; i < fx.wf.size(); ++i)
+        fx.wf[i] = (i % 3 == 0 ? -1.f : 1.f) * float(i % 31 + 1) / 1024.f;
+      for (int r = 0; r < rows; ++r) fx.pos_sel[size_t(r)] = positions[size_t((r + 7) % rows)];
+    }
+    fx.dwf.upload(fx.wf.data(), fx.wf.size() * 4);
+    fx.dpos.upload(fx.pos_sel.data(), fx.pos_sel.size() * 8);
+    dgpp::dsa_select_decode(fx.dq8.p, static_cast<const float*>(fx.dwf.p), fx.ri(), fx.ps(), rows,
+                            fx.tab(), fx.bpr(), fx.dk.p, static_cast<const float*>(fx.dks.p),
+                            fx.epb, 32, 128, 1, 1, 1, static_cast<int32_t*>(oracle_top.p),
+                            static_cast<int32_t*>(oracle_counts.p), oracle_ws.p, entries,
+                            static_cast<int32_t*>(oracle_counter.p), 0, stream, true);
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+    const auto keys = download<uint64_t>(oracle_ws, size_t(rows) * entries);
+    std::vector<int32_t> want_candidates(size_t(rows) * topk_blocks, -1), want_nc(rows),
+        want_selected(size_t(rows) * select_k, -1), want_ns(rows);
+    for (int r = 0; r < rows; ++r) {
+      const int64_t visible = fx.pos_sel[size_t(r)] + 1;
+      float* scores = fx.logits.data() + size_t(r) * entries;
+      for (int64_t i = 0; i < visible; ++i) {
+        if (visible == 1) {
+          scores[i] = 0.f;
+          continue;
+        }  // no ranking is needed
+        const uint32_t sortable = ~uint32_t(keys[size_t(r) * entries + i] >> dgpp::kIdxBits);
+        const uint32_t bits = sortable & 0x80000000u ? sortable ^ 0x80000000u : ~sortable;
+        std::memcpy(scores + i, &bits, sizeof(bits));
+      }
+      const auto blocks = ref_candidate_blocks(scores, visible, block_size, topk_blocks);
+      const auto ids =
+          ref_topk_among(scores, ref_pool_entries(blocks, visible, block_size), visible, select_k);
+      want_nc[size_t(r)] = int(blocks.size());
+      want_ns[size_t(r)] = int(ids.size());
+      std::copy(blocks.begin(), blocks.end(), want_candidates.begin() + size_t(r) * topk_blocks);
+      std::copy(ids.begin(), ids.end(), want_selected.begin() + size_t(r) * select_k);
+    }
+    auto check = [&](int count) {
+      DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+      const auto got_c = download<int32_t>(candidates, size_t(count) * topk_blocks),
+                 got_nc = download<int32_t>(candidate_counts, count),
+                 got_s = download<int32_t>(selected, size_t(count) * select_k),
+                 got_ns = download<int32_t>(selected_counts, count);
+      require(std::equal(got_c.begin(), got_c.end(), want_candidates.begin()),
+              "long candidate IDs/pass " + std::to_string(pass));
+      require(std::equal(got_nc.begin(), got_nc.end(), want_nc.begin()), "long candidate counts");
+      require(std::equal(got_s.begin(), got_s.end(), want_selected.begin()),
+              "long selected IDs/pass " + std::to_string(pass));
+      require(std::equal(got_ns.begin(), got_ns.end(), want_ns.begin()), "long selected counts");
+    };
+    for (int replay = 0; replay < 2; ++replay) {
+      DGPP_CUDA_OK(cudaGraphLaunch(exec, stream));
+      check(rows);
+    }
+    // Change the launch row count while reusing the exact same workspace stride.
+    for (int count : {1, 5, 2, rows}) {
+      launch(count);
+      check(count);
+    }
+  }
+  DGPP_CUDA_OK(cudaGraphExecDestroy(exec));
+  DGPP_CUDA_OK(cudaGraphDestroy(graph));
+  DGPP_CUDA_OK(cudaStreamDestroy(stream));
+}
+
 DGPP_TEST(csa2_selections_match_the_oracles) {
   // 300 entries of 8 per block; queries seeing 0, 1, 37, 64 (a whole number
   // of blocks: the newest complete block pinned), 299 and 300 entries.
   SelectFixture fx(300, 8, {-1, 0, 36, 63, 298, 299}, 0x5E1);
   const int rows = fx.rows;
+  DevBuf dsel_ws(dgpp::csa2_select_workspace_bytes(rows, fx.n));
   // 1) the listed select with no list = the plain top-k over the visible entries.
   for (const int select_k : {16, 64}) {
     DevBuf dtop(size_t(rows) * select_k * 4), dcnt(rows * 4);
-    dgpp::csa2_select_listed_decode(fx.dq8.p, static_cast<const float*>(fx.dwf.p), fx.ri(), fx.ps(), rows, fx.tab(), fx.bpr(),
-                                    fx.dk.p, static_cast<const float*>(fx.dks.p), fx.epb, 32, nullptr, 0, nullptr, 0, select_k,
-                                    static_cast<int32_t*>(dtop.p), static_cast<int32_t*>(dcnt.p), 0);
+    dgpp::csa2_select_listed_decode(
+        fx.dq8.p, static_cast<const float*>(fx.dwf.p), fx.ri(), fx.ps(), rows, fx.tab(), fx.bpr(),
+        fx.dk.p, static_cast<const float*>(fx.dks.p), fx.epb, 32, nullptr, 0, nullptr, 0, select_k,
+        static_cast<uint64_t*>(dsel_ws.p), fx.n, static_cast<int32_t*>(dtop.p),
+        static_cast<int32_t*>(dcnt.p), 0);
     sync();
     const auto top = download<int32_t>(dtop, size_t(rows) * select_k);
     const auto cnt = download<int32_t>(dcnt, rows);
@@ -579,7 +694,8 @@ DGPP_TEST(csa2_selections_match_the_oracles) {
       for (int i = 0; i < select_k; ++i) require(top[size_t(r) * select_k + i] == (i < wn ? want[size_t(i)] : -1), "plain selection row " + std::to_string(r));
     }
   }
-  // 2) candidates: block max, the pinned newest block, expansion + the partial tail; parts 1 and 3.
+  // 2) candidates: block max, the pinned newest block, expansion + the partial tail; reuse the same
+  // workspace twice.
   const int block_size = 8, topk_blocks = 4;
   const int cand_stride = topk_blocks;
   std::vector<int32_t> cand_ref;  // rows x cand_stride block ids from the oracle
@@ -589,31 +705,35 @@ DGPP_TEST(csa2_selections_match_the_oracles) {
     cand_ref.insert(cand_ref.end(), c.begin(), c.end());
   }
   DevBuf dcand(size_t(rows) * cand_stride * 4), dcc(rows * 4);
-  for (const int parts : {1, 3}) {
-    DevBuf dws(size_t(rows) * parts * topk_blocks * 8);
-    dgpp::csa2_select_candidates_decode(fx.dq8.p, static_cast<const float*>(fx.dwf.p), fx.ri(), fx.ps(), rows, fx.tab(), fx.bpr(),
-                                        fx.dk.p, static_cast<const float*>(fx.dks.p), fx.epb, 32, block_size, topk_blocks, parts,
-                                        static_cast<uint64_t*>(dws.p), static_cast<int32_t*>(dcand.p), static_cast<int32_t*>(dcc.p), 0);
+  for (const int replay : {0, 1}) {
+    dgpp::csa2_select_candidates_decode(
+        fx.dq8.p, static_cast<const float*>(fx.dwf.p), fx.ri(), fx.ps(), rows, fx.tab(), fx.bpr(),
+        fx.dk.p, static_cast<const float*>(fx.dks.p), fx.epb, 32, block_size, topk_blocks,
+        static_cast<uint64_t*>(dsel_ws.p), fx.n, static_cast<int32_t*>(dcand.p),
+        static_cast<int32_t*>(dcc.p), 0);
     sync();
     const auto cand = download<int32_t>(dcand, size_t(rows) * cand_stride);
     const auto cc = download<int32_t>(dcc, rows);
     for (int r = 0; r < rows; ++r) {
       int wn = 0;
       while (wn < cand_stride && cand_ref[size_t(r) * cand_stride + wn] >= 0) ++wn;
-      require(cc[size_t(r)] == wn, "candidate count row " + std::to_string(r) + " parts " + std::to_string(parts));
+      require(cc[size_t(r)] == wn,
+              "candidate count row " + std::to_string(r) + " replay " + std::to_string(replay));
       for (int i = 0; i < cand_stride; ++i)
         require(cand[size_t(r) * cand_stride + i] == cand_ref[size_t(r) * cand_stride + i],
-                "candidate list row " + std::to_string(r) + " parts " + std::to_string(parts));
+                "candidate list row " + std::to_string(r) + " replay " + std::to_string(replay));
     }
   }
   // 3) the restricted select among the candidates.
   {
     const int select_k = 16;
     DevBuf dtop(size_t(rows) * select_k * 4), dcnt(rows * 4);
-    dgpp::csa2_select_listed_decode(fx.dq8.p, static_cast<const float*>(fx.dwf.p), fx.ri(), fx.ps(), rows, fx.tab(), fx.bpr(),
-                                    fx.dk.p, static_cast<const float*>(fx.dks.p), fx.epb, 32, static_cast<const int32_t*>(dcand.p),
-                                    cand_stride, static_cast<const int32_t*>(dcc.p), block_size, select_k,
-                                    static_cast<int32_t*>(dtop.p), static_cast<int32_t*>(dcnt.p), 0);
+    dgpp::csa2_select_listed_decode(
+        fx.dq8.p, static_cast<const float*>(fx.dwf.p), fx.ri(), fx.ps(), rows, fx.tab(), fx.bpr(),
+        fx.dk.p, static_cast<const float*>(fx.dks.p), fx.epb, 32,
+        static_cast<const int32_t*>(dcand.p), cand_stride, static_cast<const int32_t*>(dcc.p),
+        block_size, select_k, static_cast<uint64_t*>(dsel_ws.p), fx.n,
+        static_cast<int32_t*>(dtop.p), static_cast<int32_t*>(dcnt.p), 0);
     sync();
     const auto top = download<int32_t>(dtop, size_t(rows) * select_k);
     const auto cnt = download<int32_t>(dcnt, rows);

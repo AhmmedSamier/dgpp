@@ -253,6 +253,7 @@ void test_settings_handshake() {
   sent.decode_graph = true;
   sent.mtp = true;
   sent.mtp_depth = 2;
+  sent.fp8_head = "mma";
   sent.sampling_candidates = 128;
   sent.prefix_cache_gib = 1.5;
   sent.admission = "full";
@@ -275,6 +276,7 @@ void test_settings_handshake() {
     writer.broadcast(dgpp::serve::encode_journal_settings(sent));
     peer.join();
     require(ok && got == sent, "the peer's first read is rank 0's settings, whole");
+    require(got.fp8_head == "mma", "rank 0 overrides the peer default head mode");
   }
   {
     // A peer of another version refuses: a mixed-version world cannot form.
@@ -460,10 +462,71 @@ void test_journal_codec() {
     ws.reasoning_in_content = true;
     ws.kv_dtype = "fp8";
     ws.bf16_weights = "bf12";
+    ws.fp8_head = "mma";
+    // The opt-in rope knob rides the record: a peer that ran without it
+    // would rope at different frequencies from rank 0 — silently
+    // divergent text, the reason the settings record exists at all.
+    dgpp::RopeScaling rs;
+    rs.factor = 2.0;
+    rs.original_max_position_embeddings = 262144;
+    ws.rope_scaling = rs;
     const dgpp::serve::JournalRecord sr = dgpp::serve::decode_journal_line(
         dgpp::serve::encode_journal_settings(ws));
     require(sr.settings && !sr.warm && !sr.stop && sr.world_settings == ws,
             "codec: the settings record round-trips");
+    for (const std::string mode : {"gemv", "mma"}) {
+      auto head = ws;
+      head.fp8_head = mode;
+      const auto decoded =
+          dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_settings(head));
+      require(decoded.world_settings.fp8_head == mode, "codec: head mode round-trips");
+    }
+    {
+      std::string legacy = dgpp::serve::encode_journal_settings(ws);
+      const std::string key = ",\"fp8_head\":\"mma\"";
+      const auto pos = legacy.find(key);
+      require(pos != std::string::npos, "codec: head key is emitted");
+      legacy.erase(pos, key.size());
+      require(dgpp::serve::decode_journal_line(legacy).world_settings.fp8_head == "gemv",
+              "codec: absent head mode defaults to GEMV");
+      for (const std::string value : {"\"auto\"", "true", "null", "4"}) {
+        std::string bad = legacy;
+        bad.insert(bad.find('{') + 1, "\"fp8_head\":" + value + ",");
+        std::string error;
+        try {
+          (void)dgpp::serve::decode_journal_line(bad);
+        } catch (const std::runtime_error& e) {
+          error = e.what();
+        }
+        require(error.find("engine.fp8_head") != std::string::npos,
+                "codec: invalid head mode names engine.fp8_head: " + error);
+      }
+    }
+    require(sr.world_settings.rope_scaling.has_value() &&
+                sr.world_settings.rope_scaling->context_limit() == 524288,
+            "codec: the rope scaling rides the settings record");
+    {
+      // A plain run carries no key at all: a peer decoding it gets the
+      // plain table, which is what it would have run anyway.
+      dgpp::serve::WorldSettings plain = ws;
+      plain.rope_scaling.reset();
+      const std::string line = dgpp::serve::encode_journal_settings(plain);
+      require(line.find("\"rs\"") == std::string::npos, "codec: no rope key when off");
+      const dgpp::serve::JournalRecord got = dgpp::serve::decode_journal_line(line);
+      require(!got.world_settings.rope_scaling.has_value(), "codec: absent decodes to off");
+    }
+    {
+      // An impossible ramp (a sub-unity factor) is refused, not applied.
+      dgpp::serve::WorldSettings bad = ws;
+      bad.rope_scaling->factor = 0.5;
+      bool refused_rope = false;
+      try {
+        (void)dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_settings(bad));
+      } catch (const std::runtime_error&) {
+        refused_rope = true;
+      }
+      require(refused_rope, "codec: a settings record with an impossible rope scaling is refused");
+    }
     {
       // The KV dtype rides by name; an unknown one is refused.
       dgpp::serve::WorldSettings bad = ws;

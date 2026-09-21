@@ -2,14 +2,19 @@
 // geometry: per-head norm+RoPE within two bf16 ulps; the index compression
 // through the prefill kernel, the decode ring and a prefill-then-decode
 // split all bitwise one another (and the ring snapshots the ring's own
-// history), within two ulps of the reference; the indexer scores and the
-// selection bitwise; the listed attention (one and three splits) with its
-// gate within two ulps.
+// history), within two ulps of the reference — under BOTH rope tables the
+// engine can run them with, the plain one and the YaRN one the
+// engine.rope_scaling knob builds; the indexer scores and the selection
+// bitwise; the listed attention (one and three splits) with its gate
+// within two ulps. Plus the frozen plain rope table and the YaRN cos/sin
+// scale itself.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <numeric>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -21,6 +26,7 @@
 #include "kda_test_helpers.hpp"
 #include "kernels/dsa.hpp"
 #include "kernels/qsa.hpp"
+#include "kernels/rope_scaling.hpp"
 #include "models/qwen/qsa_reference.hpp"
 
 using namespace dgpp::kda_test;
@@ -76,7 +82,106 @@ std::vector<int32_t> identity_table(const Geo& g) {
   return t;
 }
 
+// The two rope states a compressed index cache is ever built under. The
+// plain one is the checkpoint's own table with mscale 1.0f — bit for bit
+// what every QSA path ran before engine.rope_scaling existed. The YaRN one
+// is what the knob builds for the 512K recipe: factor 2 over 262144, the
+// correction band from the mrope-enlarged 4 x 262144, and the attention
+// factor riding the cos/sin, exactly as
+// qsa_rope_inv_freq_is_frozen_and_yarn_rides_the_cos_sin freezes them.
+// Table and mscale travel together: one without the other is a state the
+// engine never runs.
+//
+// The serving-path half of the reviewer's ask (the Qwen decode, CUDA
+// graph, speculative-decoding, prefix-reuse and tensor-parallel checks
+// with rope_scaling on) is a noted follow-up: those fixtures live in
+// tests/cuda/qwen_*_test.cpp, and this PR's YaRN coverage there is the
+// forward smoke test only.
+struct RopeMode {
+  const char* name;
+  bool yarn = false;
+};
+
+constexpr RopeMode kPlain{"plain", false};
+constexpr RopeMode kYarn{"yarn", true};
+
+// The recipe's ramp as a spec — the same six fields the cluster config
+// parses into cfg.rope_scaling.
+dgpp::RopeScaling recipe() {
+  dgpp::RopeScaling rs;
+  rs.factor = 2.0;
+  rs.original_max_position_embeddings = 262144;
+  rs.beta_fast = 32.0;
+  rs.beta_slow = 1.0;
+  rs.attn_factor = 1.0;
+  rs.mrope_cache_factor = 4.0;
+  return rs;
+}
+
+std::vector<float> rope_table(const Geo& g, const RopeMode& m) {
+  if (!m.yarn) return inv_freq_host(g);  // host bits, gated against the device's
+  const dgpp::RopeScaling rs = recipe();
+  std::vector<float> f(static_cast<size_t>(g.rotary / 2), 0.f);
+  dgpp::yarn_rope_inv_freq_host(g.rotary, g.theta, rs.correction_max_position(), rs.factor,
+                                rs.beta_fast, rs.beta_slow, f.data());
+  return f;
+}
+
+float rope_mscale(const RopeMode& m) { return m.yarn ? recipe().mscale() : 1.0f; }
+
 }  // namespace
+
+DGPP_TEST(qsa_rope_inv_freq_is_frozen_and_yarn_rides_the_cos_sin) {
+  // The plain table, frozen from the build that predates the YaRN knob
+  // (2026-09-17): the knob must not move it.
+  const uint32_t plain[32] = {
+      0x3f800000, 0x3f1ab32b, 0x3ebaf81b, 0x3e61f835, 0x3e088d77, 0x3da50956, 0x3d47763f,
+      0x3cf11177, 0x3c91ad39, 0x3c301052, 0x3bd4ca15, 0x3b80967d, 0x3b1b690d, 0x3abbd3ed,
+      0x3a6301e2, 0x3a092e02, 0x39a5cb60, 0x394860c1, 0x38f22ce2, 0x3892587e, 0x3830df52,
+      0x37d5c441, 0x37812dab, 0x371c1fc4, 0x36bcb0c1, 0x36640cc6, 0x3609cf4a, 0x35a68e4c,
+      0x35494c57, 0x34f3499d, 0x3493048e, 0x3431af44};
+  std::vector<float> f(32);
+  dgpp::qsa_rope_inv_freq(1e7, 64, f.data());
+  for (int i = 0; i < 32; ++i) {
+    uint32_t u = 0;
+    std::memcpy(&u, &f[static_cast<size_t>(i)], 4);
+    require(u == plain[i], "the plain rope table moved");
+  }
+  // The YaRN rope the knob builds is the same kernel, cos/sin scaled by
+  // the attention factor before their bf16 rounding: the reference (built
+  // with the mscale) is the gate's oracle for it, bit for bit.
+  Geo g;
+  const int rows = 4, heads = 2;
+  // 524287 is the recipe's last position at factor 2 over 262144: the
+  // largest argument the cosf/sinf reduction sees at 512K.
+  const std::vector<int64_t> pos{0, 5, 4096, 524287};
+  const int64_t x_head_stride = 2 * g.dim, x_row_stride = heads * x_head_stride;
+  const std::vector<uint16_t> x = random_bf16_normal(0x31, rows * x_row_stride, 1.0f);
+  const std::vector<uint16_t> w = random_bf16_uniform(0x32, g.dim, 0.5f);
+  const float mscale = dgpp::RopeScaling{2.0, 262144, 32.0, 1.0, 1.0, 4.0}.mscale();
+  require(mscale > 1.0f, "the recipe's attention factor");
+  std::vector<float> yarn(32);
+  dgpp::yarn_rope_inv_freq_host(64, 1e7, 262144 * 4, 2.0, 32.0, 1.0, yarn.data());
+  std::vector<uint16_t> ref(static_cast<size_t>(rows) * heads * g.dim);
+  for (int r = 0; r < rows; ++r)
+    for (int h = 0; h < heads; ++h)
+      dgpp::qwen_ref::qsa_norm_rope(x.data() + r * x_row_stride + h * x_head_stride, w.data(),
+                                    pos[static_cast<size_t>(r)], yarn.data(),
+                                    ref.data() + (static_cast<size_t>(r) * heads + h) * g.dim, g.dim,
+                                    g.rotary, g.eps, mscale);
+  DevBuf dx = up(x), dw = up(w), dpos = up(pos), dinv = up(yarn), dout(ref.size() * 2);
+  cudaStream_t st = test_stream();
+  dgpp::qsa_norm_rope_bf16(ptr<uint16_t>(dx), x_row_stride, x_head_stride, ptr<uint16_t>(dw),
+                           ptr<int64_t>(dpos), ptr<float>(dinv), mptr<uint16_t>(dout),
+                           static_cast<int64_t>(heads) * g.dim, rows, heads, g.dim, g.rotary, g.eps,
+                           mscale, st);
+  DGPP_CUDA_OK(cudaStreamSynchronize(st));
+  const std::vector<uint16_t> got = down<uint16_t>(dout, ref.size());
+  const Stats s = compare_bf16(got, ref, 2);
+  std::printf("[ .. ] yarn norm+rope: max_rel %.3g l2_rel %.3g mismatches %ld/%ld\n", s.max_rel,
+              s.l2_rel, s.mismatches, s.n);
+  require_bf16("yarn norm+rope", s, 2e-3, 0.01);
+}
 
 DGPP_TEST(qsa_norm_rope_matches_the_reference) {
   Geo g;
@@ -97,7 +202,8 @@ DGPP_TEST(qsa_norm_rope_matches_the_reference) {
   cudaStream_t st = test_stream();
   dgpp::qsa_norm_rope_bf16(ptr<uint16_t>(dx), x_row_stride, x_head_stride, ptr<uint16_t>(dw),
                            ptr<int64_t>(dpos), ptr<float>(dinv), mptr<uint16_t>(dout),
-                           static_cast<int64_t>(heads) * g.dim, rows, heads, g.dim, g.rotary, g.eps, st);
+                           static_cast<int64_t>(heads) * g.dim, rows, heads, g.dim, g.rotary, g.eps,
+                           1.0f, st);
   DGPP_CUDA_OK(cudaStreamSynchronize(st));
   const std::vector<uint16_t> got = down<uint16_t>(dout, ref.size());
   const Stats s = compare_bf16(got, ref, 2);
@@ -110,15 +216,18 @@ namespace {
 
 struct IndexFixture {
   Geo g;
+  RopeMode mode;
+  float mscale = 1.0f;
   std::vector<uint16_t> raw;   // [seq, idx_dim]
   std::vector<uint16_t> w_k;   // [idx_dim]
   std::vector<float> inv;
   std::vector<int32_t> table;
   DevBuf draw, dwk, dinv, dtable;
-  explicit IndexFixture(uint64_t seed) {
+  explicit IndexFixture(uint64_t seed, const RopeMode& m = kPlain)
+      : mode(m), mscale(rope_mscale(m)) {
     raw = random_bf16_normal(seed, static_cast<int64_t>(g.seq) * g.idx_dim, 1.0f);
     w_k = random_bf16_uniform(seed + 1, g.idx_dim, 0.5f);
-    inv = inv_freq_host(g);
+    inv = rope_table(g, mode);
     table = identity_table(g);
     draw = up(raw);
     dwk = up(w_k);
@@ -132,7 +241,7 @@ struct IndexFixture {
       dgpp::qwen_ref::qsa_index_compress(raw.data() + static_cast<size_t>(p) * g.kpool * g.idx_dim, g.kpool,
                                          w_k.data(), inv.data(), static_cast<int64_t>(p) * g.kpool,
                                          c.data() + static_cast<size_t>(p) * g.idx_dim, g.idx_dim, g.rotary,
-                                         g.eps);
+                                         g.eps, mscale);
     return c;
   }
   // Decode updates over tokens [t0, t1) one span each, into cache/ring.
@@ -149,17 +258,20 @@ struct IndexFixture {
                                     ptr<uint16_t>(dwk), ptr<float>(dinv), ptr<int32_t>(dreq),
                                     ptr<int64_t>(dpos), ptr<int32_t>(dspans), 1, ptr<int32_t>(dtable),
                                     g.blocks_per_request, mptr<uint16_t>(dring), mptr<uint16_t>(dcache),
-                                    g.pools_per_block(), g.kpool, g.idx_dim, g.rotary, g.eps, st,
+                                    g.pools_per_block(), g.kpool, g.idx_dim, g.rotary, g.eps, mscale, st,
                                     snapshots);
       DGPP_CUDA_OK(cudaStreamSynchronize(st));
     }
   }
 };
 
-}  // namespace
-
-DGPP_TEST(qsa_index_compression_prefill_decode_and_split_agree) {
-  IndexFixture f(10);
+// The fixture's whole sequence — prefill, token-by-token decode, the
+// prefill-then-decode split with its ring snapshots, and the host oracle —
+// under one rope state, returning a checksum of the cache it built so the
+// caller can prove the two states really differ. Every invariant is a
+// bitwise one; the only tolerance is the two-ulp reference comparison.
+uint64_t index_compression_agreement(const RopeMode& mode) {
+  IndexFixture f(10, mode);
   const Geo& g = f.g;
   cudaStream_t st = test_stream();
   const size_t cache_elems = static_cast<size_t>(g.pool_slots()) * g.idx_dim;
@@ -170,7 +282,8 @@ DGPP_TEST(qsa_index_compression_prefill_decode_and_split_agree) {
   const int n_pools = g.seq / g.kpool;
   dgpp::qsa_index_compress_write(ptr<uint16_t>(f.draw), g.idx_dim, ptr<uint16_t>(f.dwk), ptr<float>(f.dinv),
                                  ptr<int32_t>(f.dtable), g.pools_per_block(), 0, n_pools,
-                                 mptr<uint16_t>(c_prefill), g.kpool, g.idx_dim, g.rotary, g.eps, st);
+                                 mptr<uint16_t>(c_prefill), g.kpool, g.idx_dim, g.rotary, g.eps,
+                                 f.mscale, st);
   DGPP_CUDA_OK(cudaStreamSynchronize(st));
   const std::vector<uint16_t> prefill = down<uint16_t>(c_prefill, cache_elems);
   // 2. Decode token by token from an empty ring.
@@ -187,7 +300,8 @@ DGPP_TEST(qsa_index_compression_prefill_decode_and_split_agree) {
   DGPP_CUDA_OK(cudaMemset(ring2.p, 0, ring_elems * 2));
   dgpp::qsa_index_compress_write(ptr<uint16_t>(f.draw), g.idx_dim, ptr<uint16_t>(f.dwk), ptr<float>(f.dinv),
                                  ptr<int32_t>(f.dtable), g.pools_per_block(), 0, cut / g.kpool,
-                                 mptr<uint16_t>(c_split), g.kpool, g.idx_dim, g.rotary, g.eps, st);
+                                 mptr<uint16_t>(c_split), g.kpool, g.idx_dim, g.rotary, g.eps,
+                                 f.mscale, st);
   {
     std::vector<int32_t> req_ids(static_cast<size_t>(cut), 0);
     std::vector<int64_t> pos(static_cast<size_t>(cut));
@@ -223,7 +337,7 @@ DGPP_TEST(qsa_index_compression_prefill_decode_and_split_agree) {
                                   ptr<uint16_t>(f.dwk), ptr<float>(f.dinv), ptr<int32_t>(dreq),
                                   ptr<int64_t>(dpos), ptr<int32_t>(dspans), 1, ptr<int32_t>(f.dtable),
                                   g.blocks_per_request, mptr<uint16_t>(ring2), mptr<uint16_t>(c_split),
-                                  g.pools_per_block(), g.kpool, g.idx_dim, g.rotary, g.eps, st,
+                                  g.pools_per_block(), g.kpool, g.idx_dim, g.rotary, g.eps, f.mscale, st,
                                   mptr<uint16_t>(snaps));
     DGPP_CUDA_OK(cudaStreamSynchronize(st));
     const std::vector<uint16_t> got_snaps = down<uint16_t>(snaps, static_cast<size_t>(n) * ring_elems);
@@ -245,9 +359,28 @@ DGPP_TEST(qsa_index_compression_prefill_decode_and_split_agree) {
   const size_t used = static_cast<size_t>(n_pools) * g.idx_dim;
   const Stats s = compare_bf16(std::vector<uint16_t>(prefill.begin(), prefill.begin() + used),
                                std::vector<uint16_t>(oracle.begin(), oracle.begin() + used), 2);
-  std::printf("[ .. ] compressed keys: max_rel %.3g l2_rel %.3g mismatches %ld/%ld\n", s.max_rel, s.l2_rel,
-              s.mismatches, s.n);
+  std::printf("[ .. ] compressed keys (%s rope): max_rel %.3g l2_rel %.3g mismatches %ld/%ld\n",
+              mode.name, s.max_rel, s.l2_rel, s.mismatches, s.n);
   require_bf16("compressed keys", s, 2e-3, 0.01);
+  uint64_t sum = 1469598103934665603ull;  // FNV-1a over the cache this run built
+  for (const uint16_t v : prefill) sum = (sum ^ static_cast<uint64_t>(v)) * 1099511628211ull;
+  return sum;
+}
+
+}  // namespace
+
+DGPP_TEST(qsa_index_compression_prefill_decode_and_split_agree) {
+  // Both rope states, every invariant: the plain table with mscale 1.0f
+  // (bit-identical to the build before the engine.rope_scaling knob — the
+  // frozen table above is what keeps that honest) and the YaRN table with
+  // the recipe's attention factor. The compression kernels take the table
+  // and the mscale as arguments, so a fixture that only ever passed 1.0f
+  // never touched the new ones on the prefill, decode, split or snapshot
+  // path.
+  const uint64_t plain = index_compression_agreement(kPlain);
+  const uint64_t yarn = index_compression_agreement(kYarn);
+  require(plain != yarn, "the YaRN run rebuilt the plain cache: the mode is inert");
+  std::printf("[ .. ] compressed keys: prefill, decode, split and snapshots agree under both tables\n");
 }
 
 namespace {
@@ -268,7 +401,7 @@ struct SelectFixture {
     DGPP_CUDA_OK(cudaMemset(dcache.p, 0, cache_elems * 2));
     dgpp::qsa_index_compress_write(ptr<uint16_t>(f.draw), g.idx_dim, ptr<uint16_t>(f.dwk), ptr<float>(f.dinv),
                                    ptr<int32_t>(f.dtable), g.pools_per_block(), 0, g.seq / g.kpool,
-                                   mptr<uint16_t>(dcache), g.kpool, g.idx_dim, g.rotary, g.eps, st);
+                                   mptr<uint16_t>(dcache), g.kpool, g.idx_dim, g.rotary, g.eps, 1.0f, st);
     DGPP_CUDA_OK(cudaStreamSynchronize(st));
     cache = down<uint16_t>(dcache, cache_elems);
     dq = up(q);
@@ -338,6 +471,150 @@ DGPP_TEST(qsa_index_score_and_select_match_the_reference_bitwise) {
   std::printf("[ .. ] select: %d rows, lists of", sf.rows());
   for (int r = 0; r < sf.rows(); ++r) std::printf(" %d", got_counts[static_cast<size_t>(r)]);
   std::printf(" tokens, keys and lists bitwise\n");
+}
+
+DGPP_TEST(qsa_index_large_paged_pools_match_every_host_key_and_token) {
+  // Preserve the reviewer's 65322-pool / position-261288 case as a normal
+  // gate, then cross the 128K-pool boundary. Neither the score stripe nor
+  // the old selection tile divides these visible counts evenly.
+  constexpr int heads = 4, dim = 128, ppb = 16, kpool = 4, select_k = 512;
+  constexpr int rows = 3, width = select_k * kpool + kpool - 1;
+  cudaStream_t stream = test_stream();
+  for (int pools : {65322, 131071}) {
+    const int blocks = (pools + ppb - 1) / ppb;
+    const int stride = blocks * ppb;
+    std::vector<int32_t> table(blocks);
+    std::iota(table.begin(), table.end(), 0);
+    std::mt19937 rng(20260921);
+    std::shuffle(table.begin(), table.end(), rng);
+    const auto cache = random_bf16_normal(200, int64_t(stride) * dim, 1.0f);
+    const auto q = random_bf16_normal(201, rows * heads * dim, 1.0f);
+    std::vector<int64_t> pos{int64_t(pools) * kpool, int64_t(pools) * kpool - 2, -1};
+    DevBuf dc = up(cache), dq = up(q), dt = up(table), dp = up(pos);
+    DevBuf dr = up(std::vector<int32_t>(rows, 0));
+    DevBuf keys(size_t(rows) * stride * sizeof(uint64_t));
+    DevBuf selected(rows * width * sizeof(int32_t)), counts(rows * sizeof(int32_t));
+    DGPP_CUDA_OK(cudaMemsetAsync(keys.p, 0xff, keys.bytes, stream));
+    auto launch = [&] {
+      dgpp::qsa_index_score(ptr<uint16_t>(dq), heads * dim, ptr<int32_t>(dr), ptr<int64_t>(dp),
+                            rows, ptr<int32_t>(dt), blocks, ptr<uint16_t>(dc), ppb, heads, dim,
+                            kpool, mptr<uint64_t>(keys), stride, stream);
+      dgpp::qsa_select_from_keys(ptr<uint64_t>(keys), stride, ptr<int64_t>(dp), rows, select_k,
+                                 kpool, width, mptr<int32_t>(selected), mptr<int32_t>(counts),
+                                 stream);
+    };
+    launch();
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+    const auto got_keys = down<uint64_t>(keys, size_t(rows) * stride);
+    const auto got_selected = down<int32_t>(selected, rows * width);
+    const auto got_counts = down<int32_t>(counts, rows);
+    for (int r = 0; r < rows; ++r) {
+      const int visible = pos[r] < 0 ? 0 : int((pos[r] + 1) / kpool);
+      std::vector<float> scores(visible);
+      for (int p = 0; p < visible; ++p) {
+        const int slot = table[p / ppb] * ppb + p % ppb;
+        const float score =
+            dgpp::qwen_ref::qsa_index_score(q.data() + r * heads * dim, cache.data() + slot * dim);
+        scores[p] = score;
+        uint32_t bits;
+        std::memcpy(&bits, &score, sizeof(bits));
+        const uint32_t sortable = bits >> 31 ? ~bits : bits | 0x80000000u;
+        const uint64_t key = (uint64_t(~sortable) << 21) | uint64_t(p);
+        require(got_keys[size_t(r) * stride + p] == key, "large paged score differs from host");
+      }
+      for (int p = visible; p < stride; ++p)
+        require(got_keys[size_t(r) * stride + p] == UINT64_MAX,
+                "score overwrote an invisible pool");
+      std::vector<int32_t> ids, tokens;
+      dgpp::qwen_ref::qsa_select(scores, select_k, ids);
+      if (pos[r] >= 0) dgpp::qwen_ref::qsa_expand(ids, pos[r], kpool, tokens);
+      require(got_counts[r] == int(tokens.size()), "large paged selected count differs");
+      tokens.resize(width, -1);
+      require(std::equal(tokens.begin(), tokens.end(), got_selected.begin() + r * width),
+              "large paged selected tokens differ from host");
+    }
+    cudaGraph_t graph;
+    cudaGraphExec_t exec;
+    DGPP_CUDA_OK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+    launch();
+    DGPP_CUDA_OK(cudaStreamEndCapture(stream, &graph));
+    DGPP_CUDA_OK(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
+    for (int repeat = 0; repeat < 3; ++repeat) {
+      DGPP_CUDA_OK(cudaGraphLaunch(exec, stream));
+      DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+      require(down<uint64_t>(keys, size_t(rows) * stride) == got_keys, "large graph score changed");
+      require(down<int32_t>(selected, rows * width) == got_selected,
+              "large graph selection changed");
+    }
+    cudaGraphExecDestroy(exec);
+    cudaGraphDestroy(graph);
+    std::printf(
+        "[ .. ] %d pools, 64-token permuted paging: every key/token and graph replay exact\n",
+        pools);
+  }
+}
+
+DGPP_TEST(qsa_select_long_ties_boundaries_and_graph_shape_changes) {
+  constexpr int rows = 8, stride = 131073, kpool = 4;
+  cudaStream_t stream = test_stream();
+  std::vector<uint64_t> keys(size_t(rows) * stride);
+  const std::vector<int> visible{0, 511, 512, 2048, 2049, 65322, 131071, stride};
+  std::vector<int64_t> pos(rows);
+  DevBuf dkeys(keys.size() * sizeof(uint64_t)), dpos(rows * sizeof(int64_t));
+  for (int select_k : {8, 512, 1024}) {
+    const int width = select_k * kpool + kpool - 1;
+    DevBuf selected(rows * width * sizeof(int32_t)), counts(rows * sizeof(int32_t));
+    cudaGraph_t graph;
+    cudaGraphExec_t exec;
+    DGPP_CUDA_OK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+    dgpp::qsa_select_from_keys(ptr<uint64_t>(dkeys), stride, ptr<int64_t>(dpos), rows, select_k,
+                               kpool, width, mptr<int32_t>(selected), mptr<int32_t>(counts),
+                               stream);
+    DGPP_CUDA_OK(cudaStreamEndCapture(stream, &graph));
+    DGPP_CUDA_OK(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
+    for (int pattern = 0; pattern < 4; ++pattern) {
+      // Equal scores force refinement into pool-id bits. Reverse scores
+      // put all winners in the final partial tile. Rotation and an inactive
+      // row change the work beneath the same captured graph on every replay.
+      for (int r = 0; r < rows; ++r) {
+        const int n = visible[(r + pattern) % rows];
+        pos[r] = pattern == 3 && r == 0 ? -1 : int64_t(n) * kpool + r % kpool - 1;
+        for (int p = 0; p < stride; ++p) {
+          const float score = pattern == 0   ? 0.f
+                              : pattern == 1 ? float(p)
+                                             : float((p * 73 + r) % 257);
+          uint32_t bits;
+          std::memcpy(&bits, &score, sizeof(bits));
+          keys[size_t(r) * stride + p] = (uint64_t(~(bits | 0x80000000u)) << 21) | uint64_t(p);
+        }
+      }
+      dkeys.upload(keys.data(), keys.size() * sizeof(uint64_t));
+      dpos.upload(pos.data(), pos.size() * sizeof(int64_t));
+      DGPP_CUDA_OK(cudaGraphLaunch(exec, stream));
+      DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+      const auto got = down<int32_t>(selected, rows * width),
+                 got_counts = down<int32_t>(counts, rows);
+      for (int r = 0; r < rows; ++r) {
+        const int n = pos[r] < 0 ? 0 : int((pos[r] + 1) / kpool);
+        std::vector<uint64_t> ordered(keys.begin() + size_t(r) * stride,
+                                      keys.begin() + size_t(r) * stride + n);
+        std::sort(ordered.begin(), ordered.end());
+        ordered.resize(std::min(n, select_k));
+        std::vector<int32_t> ids;
+        for (uint64_t key : ordered) ids.push_back(int32_t(key & ((1u << 21) - 1)));
+        std::sort(ids.begin(), ids.end());
+        std::vector<int32_t> want;
+        if (pos[r] >= 0) dgpp::qwen_ref::qsa_expand(ids, pos[r], kpool, want);
+        require(got_counts[r] == int(want.size()), "tie/edge count differs");
+        want.resize(width, -1);
+        require(std::equal(want.begin(), want.end(), got.begin() + r * width),
+                "tie/edge selection differs: pattern=" + std::to_string(pattern) +
+                    " row=" + std::to_string(r));
+      }
+    }
+    cudaGraphExecDestroy(exec);
+    cudaGraphDestroy(graph);
+  }
 }
 
 DGPP_TEST(qsa_listed_attention_and_gate_match_the_reference) {

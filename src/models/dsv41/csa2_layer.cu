@@ -92,7 +92,6 @@ Csa2Layer::Layout Csa2Layer::layout(const Csa2Config& cfg, int max_tokens, int64
   L.counts = alloc(T * 4);
   L.cand = alloc(T * cfg.candidate_blocks * 4);
   L.cand_counts = alloc(T * 4);
-  L.part_ws = alloc(size_t(max_decode_rows) * kCandidateParts * cfg.candidate_blocks * 8);
   L.m_main = alloc(size_t(L.ws_slots) * lh * 4);
   L.l_main = alloc(size_t(L.ws_slots) * lh * 4);
   L.c_main = alloc(size_t(L.ws_slots) * lh * kCsa2Latent * 4);
@@ -165,7 +164,6 @@ Csa2Layer::Csa2Layer(IGemm& gemm, const Csa2Config& cfg, int max_tokens, int64_t
   counts_ = reinterpret_cast<int32_t*>(at(L.counts));
   cand_ = reinterpret_cast<int32_t*>(at(L.cand));
   cand_counts_ = reinterpret_cast<int32_t*>(at(L.cand_counts));
-  part_ws_ = reinterpret_cast<uint64_t*>(at(L.part_ws));
   m_main_ = reinterpret_cast<float*>(at(L.m_main));
   l_main_ = reinterpret_cast<float*>(at(L.l_main));
   c_main_ = reinterpret_cast<float*>(at(L.c_main));
@@ -414,19 +412,22 @@ void Csa2Layer::enqueue_decode(const void* hidden_in, Csa2StatePool& pool, const
       indexer_query(hidden_in, tokens, pos, stream);
       const int epb = pool.entries_per_block(ord);
       if (w_.candidate_source) {
-        csa2_select_candidates_decode(q_fp8_, w_folded_, req_ids, pos_sel_, tokens, pool.block_tables(),
-                                      int(pool.total_blocks()), pool.index_k(ord), pool.index_scale(ord), epb,
-                                      cfg_.index_heads, cfg_.candidate_block, cfg_.candidate_blocks, kCandidateParts,
-                                      part_ws_, cand_, cand_counts_, stream);
+        csa2_select_candidates_decode(
+            q_fp8_, w_folded_, req_ids, pos_sel_, tokens, pool.block_tables(),
+            int(pool.total_blocks()), pool.index_k(ord), pool.index_scale(ord), epb,
+            cfg_.index_heads, cfg_.candidate_block, cfg_.candidate_blocks,
+            static_cast<uint64_t*>(select_ws_), max_entries_, cand_, cand_counts_, stream);
         cand_at(0) = shape;
       } else if (w_.uses_candidates) {
         require_shape(cand_at(0), shape, "the candidate pool");
       }
       if (w_.candidate_source || w_.uses_candidates)
         csa2_select_listed_decode(q_fp8_, w_folded_, req_ids, pos_sel_, tokens, pool.block_tables(),
-                                  int(pool.total_blocks()), pool.index_k(ord), pool.index_scale(ord), epb,
-                                  cfg_.index_heads, cand_, cfg_.candidate_blocks, cand_counts_, cfg_.candidate_block,
-                                  cfg_.index_topk, topk_, counts_, stream);
+                                  int(pool.total_blocks()), pool.index_k(ord),
+                                  pool.index_scale(ord), epb, cfg_.index_heads, cand_,
+                                  cfg_.candidate_blocks, cand_counts_, cfg_.candidate_block,
+                                  cfg_.index_topk, static_cast<uint64_t*>(select_ws_), max_entries_,
+                                  topk_, counts_, stream);
       else
         dsa_select_decode(q_fp8_, w_folded_, req_ids, pos_sel_, tokens, pool.block_tables(), int(pool.total_blocks()),
                           pool.index_k(ord), pool.index_scale(ord), epb, cfg_.index_heads, kCsa2IndexDim,

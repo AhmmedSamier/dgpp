@@ -292,13 +292,27 @@ void rank_work_mtp(int r, const QwenTextConfig& cfg, const std::string& dir, con
       out->ma.push_back(mtp_engine.prefill(0, A));
       mtp_engine.reserve(0, static_cast<int64_t>(A.size()) + kSteps + 2 + depth);
       while (out->ma.size() < static_cast<size_t>(kSteps) + 1) {
+        const auto before = mtp_engine.decode_batch_stats();
         const std::vector<int32_t> t = mtp_engine.step(0);
+        const auto after = mtp_engine.decode_batch_stats();
+        require(after.slots == 1 && after.active == 1 && after.rows_per_request == 1 + depth,
+                "scalar MTP launch shape");
+        require(after.replays == before.replays + 1 &&
+                    after.replays_by_slots[1] == before.replays_by_slots[1] + 1 &&
+                    after.rows - before.rows == static_cast<uint64_t>(1 + depth) &&
+                    after.padded_rows == before.padded_rows,
+                "scalar MTP launch has no padding");
         require(!t.empty() && t.size() <= static_cast<size_t>(1 + depth), "mtp step shape");
         out->ma.insert(out->ma.end(), t.begin(), t.end());
         ++out->mtp_steps_a;
       }
       out->ma.resize(static_cast<size_t>(kSteps) + 1);
+      const auto last = mtp_engine.decode_batch_stats();
       mtp_engine.close(0);
+      require(mtp_engine.decode_batch_stats().replays == last.replays &&
+                  mtp_engine.decode_batch_stats().active == last.active &&
+                  mtp_engine.decode_batch_stats().rows_per_request == last.rows_per_request,
+              "closing the last request retains its last launch");
       if (depth == 2) {
         require(mtp_engine.batch_families() == std::vector<int>{2},
                 "three configured slots at depth two retain the fitting two-slot family");
@@ -465,12 +479,12 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
   const int mtp_depth = (rows32 || rows64) ? 3 : 1;
   require(QwenModel::decode_rows_cap() >= decode_rows, "Qwen advertises the tested decode width");
   const bool old_fp8 = dgpp::QwenLayerStream::dense_weights_fp8();
-  if (const char* fp8 = std::getenv("DGPP_TEST_DENSE_FP8"); fp8 && std::string(fp8) == "1")
-    dgpp::QwenLayerStream::set_dense_weights_fp8(true);
   struct RestoreDenseWeights {
     bool fp8;
     ~RestoreDenseWeights() { dgpp::QwenLayerStream::set_dense_weights_fp8(fp8); }
   } restore_dense_weights{old_fp8};
+  if (const char* fp8 = std::getenv("DGPP_TEST_DENSE_FP8"); fp8 && std::string(fp8) == "1")
+    dgpp::QwenLayerStream::set_dense_weights_fp8(true);
   const QwenTextConfig cfg = qwenfx::tiny_config();
   const std::string dir = "qwen_engine_fixture";
   qwenfx::write_fixture(cfg, dir);
@@ -486,10 +500,14 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
       auto* bus = buses[rank].get();
       BusBoundaryReducer reducer(*bus, wait_timeout_ms());
       QwenModel eager(cfg, dir, kMaxTokens, 2048, QwenResidency::Resident, &reducer, rank, kWorld,
-                      slots);
+                      slots,
+                      /*mtp=*/false, decode_rows, dgpp::QwenLayerStream::dense_weights_fp8());
       QwenModel model(cfg, dir, kMaxTokens, 2048, QwenResidency::Resident, &reducer, rank, kWorld,
                       slots,
-                      /*mtp=*/true, decode_rows);
+                      /*mtp=*/true, decode_rows, dgpp::QwenLayerStream::dense_weights_fp8());
+      require(eager.max_decode_rows() == model.max_decode_rows() &&
+                  eager.fp8_head_mma() == model.fp8_head_mma(),
+              "eager/graph parity requires matching decode capacity and head mode");
       DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&scratch),
                                  sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld), cudaHostAllocDefault));
       arrived = true;
@@ -544,7 +562,19 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
             live.push_back(req);
           }
           for (int step = 0; step < kSteps; ++step) {
+            const auto before = graph.decode_batch_stats();
             const auto tokens = graph.step_batch(live);
+            const auto after = graph.decode_batch_stats();
+            require(after.slots == count && after.active == static_cast<int>(live.size()) &&
+                        after.rows_per_request == 1 + mtp_depth,
+                    "last launched batch shape");
+            require(after.replays == before.replays + 1 &&
+                        after.replays_by_slots[count] == before.replays_by_slots[count] + 1,
+                    "one graph launch in its capacity bucket");
+            require(after.rows - before.rows == static_cast<uint64_t>(count * (1 + mtp_depth)) &&
+                        after.padded_rows - before.padded_rows ==
+                            (count - live.size()) * (1 + mtp_depth),
+                    "interior retired slots count as padding");
             for (size_t i = 0; i < live.size(); ++i) {
               auto& out = got[live[i]];
               out.insert(out.end(), tokens[i].begin(), tokens[i].end());

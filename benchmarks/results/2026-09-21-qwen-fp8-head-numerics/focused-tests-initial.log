@@ -1,0 +1,46 @@
+Internal ctest changing into directory: /tmp/dgpp-pr10-review/build-ci
+Test project /tmp/dgpp-pr10-review/build-ci
+    Start   1: qwen_forward_fixture
+1/8 Test   #1: qwen_forward_fixture ...................   Passed    0.16 sec
+    Start   9: qwen_decode_fp8_head
+2/8 Test   #9: qwen_decode_fp8_head ...................   Passed    6.36 sec
+    Start  10: qwen_decode_fp8_head_row_independent
+3/8 Test  #10: qwen_decode_fp8_head_row_independent ...   Passed    5.48 sec
+    Start  39: qwen_head_compare_test
+4/8 Test  #39: qwen_head_compare_test .................   Passed    0.27 sec
+    Start  97: qwen_engine_fp8_head_4
+5/8 Test  #97: qwen_engine_fp8_head_4 .................   Passed    3.35 sec
+    Start  98: qwen_engine_fp8_head_256
+6/8 Test  #98: qwen_engine_fp8_head_256 ...............   Passed    3.85 sec
+    Start  99: qwen_head_check_fixture
+7/8 Test  #99: qwen_head_check_fixture ................***Failed    4.17 sec
+Traceback (most recent call last):
+  File "/tmp/dgpp-pr10-review/tests/python/qwen_head_check_test.py", line 31, in <module>
+    main()
+  File "/tmp/dgpp-pr10-review/tests/python/qwen_head_check_test.py", line 24, in main
+    result = compare(str(root / "gemv"), str(root / "mma"))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/dgpp-pr10-review/scripts/qwen_head_compare.py", line 130, in compare
+    rh, rc, ref = read_run(reference)
+                  ^^^^^^^^^^^^^^^^^^^
+  File "/tmp/dgpp-pr10-review/scripts/qwen_head_compare.py", line 86, in read_run
+    require({k: v for k, v in record.items() if k != "repeat"} ==
+  File "/tmp/dgpp-pr10-review/scripts/qwen_head_compare.py", line 22, in require
+    raise ValueError(message)
+ValueError: unchanged-mode repeat differs: rank 0, (1, 'fixture', 'verify', 4, 2)
+
+    Start 107: scale_gemm_test
+8/8 Test #107: scale_gemm_test ........................   Passed    3.65 sec
+
+88% tests passed, 1 tests failed out of 8
+
+Label Time Summary:
+fixture    =   0.16 sec*proc (1 test)
+gpu        =  27.13 sec*proc (7 tests)
+rdma       =   7.20 sec*proc (2 tests)
+
+Total Test time (real) =  27.29 sec
+
+The following tests FAILED:
+	 99 - qwen_head_check_fixture (Failed)
+Errors while running CTest

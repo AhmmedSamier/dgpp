@@ -1,0 +1,56 @@
+Internal ctest changing into directory: <checkout>/build-ci
+Test project <checkout>/build-ci
+    Start 6: qwen_decode_fp8_head
+1/1 Test #6: qwen_decode_fp8_head .............***Failed    3.34 sec
+2026-09-20 00:20:07.530 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 101.8 of 121.6 GiB, host available 115.9 GiB
+2026-09-20 00:20:07.670 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-20 00:20:07.674 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-09-20 00:20:08.075 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 101.1 of 121.6 GiB, host available 115.2 GiB
+2026-09-20 00:20:08.197 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-20 00:20:08.200 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-09-20 00:20:08.299 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 100.9 of 121.6 GiB, host available 115.0 GiB
+2026-09-20 00:20:08.432 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-20 00:20:08.435 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-09-20 00:20:08.533 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 100.9 of 121.6 GiB, host available 115.0 GiB
+2026-09-20 00:20:08.662 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-20 00:20:08.669 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-09-20 00:20:08.673 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 100.8 of 121.6 GiB, host available 114.9 GiB
+2026-09-20 00:20:08.796 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-20 00:20:08.802 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-09-20 00:20:08.857 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 100.3 of 121.6 GiB, host available 114.4 GiB
+2026-09-20 00:20:08.964 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-20 00:20:08.971 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+[FAIL] FP8 vocabulary head did not honor the dense GEMV row boundary
+[ OK ] prefill last row bitwise the cold forward (23 tokens)
+[ .. ] group prefill (23 + 17 rows) vs the prefills alone: relative l2 0 / 0, top-1 equal / equal
+[ .. ] decode after the group prefill: 9 rows vs the re-forward — worst relative l2 0.00107, top-1 hard 0 near-tie 0
+[ OK ] group prefill: the spans' rows and an 8-step decode off the group's cache (0 near ties)
+[ .. ] decode 12 steps: 13 rows vs the re-forward — worst relative l2 0.00253, top-1 hard 0 near-tie 0
+[ OK ] incremental decode matches the re-forward (0 near ties); ids 458,44,149,35,100,459,233,18,38,331,424,163,289
+[ OK ] two interleaved slots reproduce their solo transcripts bitwise
+[ .. ] chunked prefill (8-row chunks): relative l2 0.00249, top-1 equal
+[ .. ] decode after the chunked prefill: 7 rows vs the re-forward — worst relative l2 0.00279, top-1 hard 0 near-tie 0
+[ OK ] chunked prefill and its decode agree with the one-shot walk
+[ OK ] close/reopen restarts bitwise; pool accounting; forward guarded
+[ OK ] prefix snapshots: hot == cold bitwise at a cut and mid-decode
+[ .. ] mtp round 0: 12 steps for 13 tokens, 1 drafts accepted (the forced one included)
+[ .. ] mtp round 1: 12 steps for 13 tokens, 1 drafts accepted (the forced one included)
+[ OK ] the eager speculator reproduces the greedy transcript through the draft block
+[ .. ] FP8 prefill length 1: mean NLL delta 0
+[ .. ] FP8 prefill length 4: mean NLL delta 0
+[ .. ] FP8 prefill length 5: mean NLL delta 0
+[ .. ] FP8 prefill length 8: mean NLL delta 0
+[ .. ] FP8 prefill length 16: mean NLL delta 0
+[ .. ] FP8 prefill length 17: mean NLL delta 0
+
+
+0% tests passed, 1 tests failed out of 1
+
+Label Time Summary:
+gpu    =   3.34 sec*proc (1 test)
+
+Total Test time (real) =   3.34 sec
+
+The following tests FAILED:
+	  6 - qwen_decode_fp8_head (Failed)
+Errors while running CTest

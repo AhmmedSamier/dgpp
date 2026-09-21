@@ -265,7 +265,10 @@ def phase(host, port, model, c, max_tokens, think, prompt_base, prompts=None, te
     return metrics["wall_tokens_per_s"]
 
 
-def main():
+def main(*, phase_runner=None, settle=None):
+    # Counter-based clients can reconcile every request group, including warmup
+    # and isolation, before starting the next measured phase.
+    run_phase = phase if phase_runner is None else phase_runner
     ap = argparse.ArgumentParser()
     ap.add_argument("host")
     ap.add_argument("port", type=int)
@@ -298,17 +301,23 @@ def main():
         check_corpus()
     model = served_model(args.host, args.port)
     print(f"model {model}")
+    if settle is not None:
+        settle(args.host, args.port, [])
     for w in range(args.warm):
         o = {}
         stream_one(args.host, args.port, model, PROMPTS[w % len(PROMPTS)], 64, args.think, o)
         if o.get("error"):
             raise RuntimeError(o["error"])
+        if settle is not None:
+            settle(args.host, args.port, [o])
         print(f"warm {w}: status {o['status']} tokens {o['tokens']}")
     if args.isolation > 1:
         alone = {}
         stream_one(args.host, args.port, model, PROMPTS[0], args.max_tokens, args.think, alone)
         if alone.get("error"):
             raise RuntimeError(alone["error"])
+        if settle is not None:
+            settle(args.host, args.port, [alone])
         outs = [dict() for _ in range(args.isolation)]
         threads = [threading.Thread(target=stream_one,
                                     args=(args.host, args.port, model, PROMPTS[i % len(PROMPTS)], args.max_tokens,
@@ -319,6 +328,8 @@ def main():
         for out in outs:
             if out.get("error"):
                 raise RuntimeError(out["error"])
+        if settle is not None:
+            settle(args.host, args.port, outs)
         same = alone["text"] == outs[0]["text"] and alone["tokens"] == outs[0]["tokens"]
         print(f"== isolation: prompt 0 alone ({alone['tokens']} tokens) vs beside {args.isolation - 1} others "
               f"({outs[0]['tokens']} tokens): {'IDENTICAL' if same else 'DIFFERENT'}")
@@ -338,7 +349,7 @@ def main():
         for n in names:
             base = 0
             for c in cs:
-                rates = [phase(args.host, args.port, model, c, args.max_tokens, args.think, base,
+                rates = [run_phase(args.host, args.port, model, c, args.max_tokens, args.think, base,
                                CLASSES[n], args.temperature, f"{n} ", reports) for _ in range(args.repeat)]
                 table[(n, c)] = statistics.median(rates)
                 base += c
@@ -352,7 +363,7 @@ def main():
     base = 0
     summary = []
     for c in cs:
-        rate = statistics.median(phase(args.host, args.port, model, c, args.max_tokens, args.think, base,
+        rate = statistics.median(run_phase(args.host, args.port, model, c, args.max_tokens, args.think, base,
                                        None, args.temperature, reports=reports) for _ in range(args.repeat))
         summary.append((c, rate))
         base += c

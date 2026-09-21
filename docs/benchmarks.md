@@ -101,7 +101,7 @@ template, which is what "supported" means on this page:
 | `HawkBearPig/GLM-5.3-Flash-NVFP4-FP8` | 2 | `cluster_glm-5.3-flash_nvfp4-fp8_w2.example.json` (the 256K-context two-slot shape: `--knobs "--max-concurrency 2 --kv-capacity 262144 --prefix-cache-gib 2"`) | T=1, MTP depth 1 |
 | `Qwen/Qwen3.8-Flash-Next-FP8` | 4 | `cluster_qwen-3.8-flash-next_fp8_w4.example.json` | T=1 (`--no-mtp`), MTP depth 1, depth 2 (`--mtp-depth 2`) |
 | `Qwen/Qwen3.8-Flash-Next-FP8` | 2 | `cluster_qwen-3.8-flash-next_fp8_w2.example.json` | T=1, MTP depth 1, depth 2 |
-| `nvidia/Qwen3.8-Flash-Next-NVFP4` | 1 | `cluster_qwen-3.8-flash-next_nvfp4_w1.example.json` (the FP8 dense stack; `--dense-weights checkpoint` for BF16) | T=1, MTP depth 1, depth 2; BF16 or FP8 dense stack |
+| `nvidia/Qwen3.8-Flash-Next-NVFP4` | 1 | `cluster_qwen-3.8-flash-next_nvfp4_w1.example.json` (the FP8 dense stack; `--dense-weights checkpoint --fp8-head gemv` for BF16) | T=1, MTP depth 1, depth 2; BF16 or FP8 dense stack |
 | `nvidia/Qwen3.8-Flash-Next-NVFP4` | 2 | `cluster_qwen-3.8-flash-next_nvfp4_w2.example.json` (FP8 dense stack, mmap n-gram table, 262K context) | MTP depth 1; mmap is shipped, resident is the measured placement baseline |
 | `nvidia/GLM-4.7-NVFP4` | 4 | `cluster_glm-4.7_nvfp4_w4.example.json` | T=1, MTP depth 1, depth 2 |
 | `HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64` (the full GLM-5.3) | 4 | `cluster_glm-5.3_int4-int8_w4.example.json` (eight slots; the fp8 latent cache at 208K: `--knobs "--kv-dtype fp8 --kv-capacity 212992 --prefix-cache-gib 1.5"`) | T=1, MTP depth 1, depth 2 (two slots); bf16 or fp8 latent cache |
@@ -226,6 +226,27 @@ acceptance and greedy transcripts. Mmap changes request-wall throughput by at
 most 3.6% and prefill time by at most 2.9%. The
 [two-Spark result](../benchmarks/results/2026-09-16-qwen-nvfp4-w2.md) contains
 the repeated decode, prefill, memory and quality measurements.
+
+### Qwen3.8-Flash-Next-NVFP4, world 2, long-context selection (2026-09-21)
+
+The YaRN factor-two template, FP8 dense weights, mapped n-gram table and
+depth-one MTP, with one active request and 256 generated tokens per sample.
+Decode is the median of one cold and two cached requests. The old baseline
+is `9fa8e0f`; the new path uses exact radix selection above 2048 pools.
+
+| Actual prompt tokens | Old decode ms/pass | New decode ms/pass | Latency reduction | Cold prefill seconds, old / new |
+| ---: | ---: | ---: | ---: | ---: |
+| 3,139 | 28.54 | 28.12 | 1.5% | 2.11 / 2.07 |
+| 31,670 | 31.31 | 28.04 | 10.4% | 20.74 / 20.32 |
+| 129,560 | 43.39 | 29.55 | 31.9% | 98.62 / 93.16 |
+| 260,062 | 59.38 | 31.36 | 47.2% | 235.97 / 215.07 |
+| 520,742 | 93.52 | 37.06 | 60.4% | 732.40 / 655.18 |
+
+All 15 old/new response comparisons match exactly, including reasoning and
+usage. Acceptance stays at 1.85–1.92 tokens per pass. Cold prefill has one
+sample per build at each length. These are parity/performance measurements,
+not a retrieval-quality score. The [record](../benchmarks/results/2026-09-21-qwen-qsa-select.md)
+contains the deterministic prompt recipe, microbenchmarks and validation.
 
 ### GLM-4.7-NVFP4, world 4
 
@@ -566,6 +587,27 @@ The current mmap placement is within 0.8–1.5% of the resident baseline at C1,
 0.4–1.6% at C2 and 0.2–3.6% at C4. All five C1 transcripts match byte for
 byte. Mmap saves 23.84 GiB per rank and is the deployment default.
 
+### Qwen FP8 vocabulary-head A/B, world 2, MTP3 (2026-09-20)
+
+A Release-build ABBA comparison of the previous head dispatch and streaming
+MMA measured **129.28 → 143.84 request-wall tokens/s (+11.26%) at C4**.
+C1 was effectively unchanged (74.94 → 75.06, +0.16%). This uses the five
+fixed prompt classes, greedy output capped at 256 tokens, FP8 dense weights,
+mmap n-gram tables, and prefix caching disabled. Three repetitions in each
+of two process epochs per build give six measurements per class/concurrency.
+Both block comparisons improved C4 throughput (+11.83% and +10.69%).
+
+All 300 measured requests completed with 256 output tokens. C4 greedy text
+varied within the unchanged baseline as well as across builds, so this is
+fixed-prompt/output-budget throughput evidence, not identical-token-path or
+quality-equivalence evidence. The [record and raw results](../benchmarks/results/2026-09-20-qwen-fp8-head-e2e.md)
+include per-class results, calibration, transcript comparisons and restoration.
+These measurements predate the deployment setting. The Qwen NVFP4 templates
+now select `engine.fp8_head: "mma"` after
+[matched real-checkpoint numerical validation](../benchmarks/results/2026-09-21-qwen-fp8-head-numerics.md).
+This remains historical throughput evidence; the numerical campaign does not
+rerun the performance measurement on the current integration.
+
 ### Qwen3.8-Flash-Next-NVFP4, world 1, FP8 dense
 
 | class | c=1 | c=2 | c=4 | c=1 greedy, ms/token |
@@ -718,9 +760,10 @@ DeepSeek's 4,096-token chunk reduced matched ~8,400-token prefill time by 3.7%
 [study](../benchmarks/results/2026-09-16-dsv41-perf/README.md) includes the
 repeated chunk sweep and exact long-prompt output comparisons.
 
-Qwen's current QSA kernel runs at 0.637, 0.634 and 0.656 ms per actual prompt
-token at the three sizes. It starts at 128 prefill rows; decode, speculative
-verification and short prefill keep the existing path. Across the matched
+Qwen's September 15 QSA listed-attention change measured 0.637, 0.634 and
+0.656 ms per actual prompt token at the three sizes. It starts at 128 prefill
+rows; decode, speculative verification and short prefill keep the existing
+listed-attention path. Across the matched
 campaign it reduced cold service prefill by 7.75%, 13.73% and 14.43%, while
 all paired outputs and usage remained identical. See the
 [QSA record](../benchmarks/results/2026-09-15-qwen-qsa-prefill.md) for the A/B
@@ -798,8 +841,10 @@ The current snapshot still has these gaps:
    dense stack has only its older four-live point. Fill the common C1/C2/C4
    matrix with
    `scripts/serve_load.py HOST PORT --concurrency 1,2,4 --classes all`.
-2. **Long-context service prefill remains incomplete.** Qwen FP8 world 2,
-   Qwen NVFP4 world 2 and the four-node Flash hybrid have current 32K points.
+2. **Long-context service prefill remains incomplete across configurations.**
+   Qwen NVFP4 world 2 now has matched old/new cold measurements through
+   520,742 prompt tokens with YaRN. Qwen FP8 world 2 and the four-node
+   Flash hybrid have 32K points.
    Flash FP8, the two-node Flash hybrid and full GLM need remeasurement after
    context-aware DSA query tiling. Qwen world 4, Qwen NVFP4 world 1 and
    GLM-4.7 still lack current 32K service measurements.
@@ -820,8 +865,9 @@ The current snapshot still has these gaps:
    C1/MTP behavior; lowering it requires service and numerical evidence.
    This campaign does not add a soak, failure drill or sampled sweep.
 
-The current tables include two-Spark Qwen and four-Spark Flash hybrid service
-prefill through 32K, and DeepSeek at six live requests. The
+The current tables include two-Spark Qwen NVFP4 service prefill through
+520,742 tokens, Qwen FP8 and four-Spark Flash hybrid through 32K, and
+DeepSeek at six live requests. The
 dated records provide the exact workloads and reproduction commands.
 
 ## 9. Reproducing all of it
@@ -906,6 +952,30 @@ byte-identical to its answer beside three others.
 `scripts/fabric_glm4_load.sh CONFIG OUT` wraps the mixed form for the GLM-4.7
 worlds.
 
+For engine-call rates alongside the client timings, use the same arguments with
+`scripts/timed_load.py`, on an otherwise idle server:
+
+```bash
+scripts/timed_load.py HOST PORT --concurrency 1,2,4 --classes all --repeat 2 --json-out load.json
+```
+
+The wrapper checks counters immediately after each completed request group,
+including warmup and isolation. It accepts a snapshot only when the server is
+idle and its prompt/token deltas exactly match the completed requests. Behind
+counters are polled under a five-second deadline; excess or reset counters
+fail immediately. Errors include expected and observed counts. Consecutive
+identical snapshots alone do not establish readiness. The verified snapshot
+carries into the next phase, so unrelated intervening work cannot silently
+become its baseline.
+
+Polling occurs outside measured client intervals. The `engine` report fields
+retain the scheduler deltas and compute decode tokens/s as
+`1000 * (tokens_generated - prompts_prefilled) / step_ms`, excluding the first
+token produced by each prefill. The dated
+`benchmarks/results/2026-09-16-dsv41-perf/timed_load.py` path remains a compatible
+entry point. Neither entry point requires the repository to be the working
+directory.
+
 ### 9.4 Prefill
 
 Through the endpoint, with the prefix cache defeated by a unique nonce per
@@ -971,3 +1041,63 @@ its own method statement, `docs/measurements.md` the platform and GLM-4.7
 readings, `docs/qwen38_single_spark.md` the single-Spark campaign, and
 `docs/qwen38_optimization_plan.md` and `docs/nvfp4_plan.md` the optimization
 rounds with their A/B pairs.
+
+### 9.8 QSA score and selection microbenchmark
+
+On idle Spark hardware, build the release benchmark and measure the indexer
+separately from the model:
+
+```bash
+cmake --preset release
+cmake --build build-release --target qsa_index_bench -j 4
+CUDA_DEVICE_MAX_CONNECTIONS=32 build-release/qsa_index_bench --graph \
+  --pools 16384,65322,131072 --rows 2 --iters 30 --warmup 5
+```
+
+Omit `--graph` for eager launches. JSONL reports empty-launch, score, select
+and combined CUDA-event timings, each with warm inputs and with L2 evicted
+before the measured interval. The default has two adjacent query positions,
+four 128-dimensional indexer heads, 64-token pages and a permuted block table.
+Every score key and selected token is checked against the host oracle before
+timing, and selection is checked after repeated launches. `--rows 16` covers
+wide decode; larger row counts exercise prefill shapes.
+
+The reported input GB/s counts logical reads, including repeated reads of
+shared cache rows. It is not a DRAM-bandwidth counter. Warm means repeated
+inputs; the 131K-pool cache exceeds the Spark's L2. Use profiler counters
+to distinguish memory saturation from instruction or launch costs. See the
+[September 21 comparison](../benchmarks/results/2026-09-21-qwen-qsa-select.md)
+for the baseline, exactness gates and full-model measurements.
+
+### 9.9 DeepSeek CSA2 score and selection microbenchmark
+
+Run on an idle GPU:
+
+```bash
+cmake --preset release
+cmake --build build-release --target csa2_select_bench -j 4
+CUDA_DEVICE_MAX_CONNECTIONS=32 build-release/csa2_select_bench \
+  --ctx 131072 --rows 5 --iters 30 --warmup 5
+```
+
+The default measures DeepSeek's candidate selector, restricted selector,
+and their combined cost using captured CUDA graphs. `combined` contains
+one candidate and **one** restricted call; a full model pass has five
+restricted calls. `restricted_select_only` is a diagnostic of the unchanged
+prefill selector over precomputed logits, not a stage of the new decoder.
+Use `--stage candidate`, `--stage restricted` or `--stage combined` to narrow
+the run, and `--eager` for ordinary launches. `--rows 1`, `5` and `30` cover
+plain decode, one depth-four verification batch and six such requests.
+
+JSONL reports median/min/max CUDA-event latency with repeated inputs and
+with L2 eviction outside each timed interval. The physical block table is
+permuted. Candidate and entry IDs, causal visibility, ties and padding are
+checked against a CPU sort of the unchanged DSA scorer's keys before and
+after timing. This validates selection; the independent score arithmetic
+oracle lives in `csa2_test`. The optional `--family flash`, `full` and
+`deepseek-encoder` modes exercise the existing DSA path as controls.
+
+See the [DeepSeek comparison](../benchmarks/results/2026-09-21-deepseek-selection/README.md)
+for matched old/new binaries, the short/long-context matrix and full-model
+checks, and the [cross-model investigation](../benchmarks/results/2026-09-21-attention-selection-audit/README.md)
+for why this change is specific to DeepSeek's decoder.

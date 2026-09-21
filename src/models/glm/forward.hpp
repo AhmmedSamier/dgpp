@@ -220,6 +220,7 @@ class GlmDiagnosticModel : public PrefillReporting {
     void* dst = nullptr;             // session_snapshot_bytes() of device memory
     SessionSnapshotMeta* meta = nullptr;
     bool taken = false;
+    SnapshotRequest* next = nullptr;  // additional cuts, owned by the caller
   };
   static constexpr bool kResumablePrefill = true;
   // The engine owns ids/images/snap for the cursor's entire lifetime.

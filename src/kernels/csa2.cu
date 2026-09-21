@@ -11,6 +11,7 @@
 
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
+#include "kernels/rope_scaling.hpp"
 #include "kernels/topk_select.cuh"
 
 namespace dgpp {
@@ -372,117 +373,11 @@ __device__ __forceinline__ int64_t entry_slot(const int32_t* table, int entries_
   const int32_t blk = table[e / entries_per_block];
   return int64_t(blk) * entries_per_block + (e % entries_per_block);
 }
-__device__ __forceinline__ void load_krow(const uint8_t* index_k, int64_t slot, uint32_t* krow) {
-  const int lane = threadIdx.x & 31;
-  krow[lane] = reinterpret_cast<const uint32_t*>(index_k + slot * kCsa2IndexDim)[lane];
-  __syncwarp();
-}
 __device__ __forceinline__ uint64_t make_key(float logit, int64_t idx) {
   return (uint64_t(~sortable_f32_dev(logit)) << kIdxBits) | uint64_t(idx);
 }
 
-struct CandKeyFn {
-  static constexpr bool kWarpCooperative = true;
-  const uint2* q8;
-  const float* w;
-  uint32_t* krow;  // this warp's staging [32]
-  const uint8_t* index_k;
-  const float* index_scale;
-  const int32_t* table;
-  int entries_per_block;
-  int block_size;
-  int64_t pinned;  // the block scored +inf (-1: none)
-  __device__ uint64_t operator()(int64_t b) const {
-    if (b == pinned) return make_key(INFINITY, b);
-    float best = -INFINITY;
-    for (int k = 0; k < block_size; ++k) {
-      const int64_t e = b * block_size + k;
-      const int64_t slot = entry_slot(table, entries_per_block, e);
-      load_krow(index_k, slot, krow);
-      best = fmaxf(best, entry_logit(q8, krow, w, index_scale[slot]));
-      __syncwarp();
-    }
-    return make_key(best, b);
-  }
-};
-
-constexpr int kCandTile = 2 * kSelectTile;  // 4096: select_k 2048 needs 2 x 2048
-__global__ void select_candidates_part_kernel(const uint8_t* q_fp8, const float* w_folded,
-                                              const int32_t* req_ids, const int64_t* pos_sel,
-                                              const int32_t* block_tables, int blocks_per_request,
-                                              const uint8_t* index_k, const float* index_scale,
-                                              int entries_per_block, int block_size, int topk_blocks,
-                                              int parts, uint64_t* part_ws) {
-  extern __shared__ uint8_t smem_raw[];
-  uint2* q8 = reinterpret_cast<uint2*>(smem_raw);                  // [16][32]
-  float* w = reinterpret_cast<float*>(q8 + 16 * 32);               // [32]
-  uint32_t* krow = reinterpret_cast<uint32_t*>(w + 32);            // [8 warps][32]
-  uint32_t* best_hi = krow + 8 * 32;                               // [topk_blocks]
-  uint32_t* best_lo = best_hi + topk_blocks;
-  uint32_t* tile_hi = best_lo + topk_blocks;                       // [kCandTile]
-  uint32_t* tile_lo = tile_hi + kCandTile;
-  const int r = blockIdx.x, part = blockIdx.y;
-  const int64_t p = pos_sel[r];
-  uint64_t* out = part_ws + (int64_t(r) * parts + part) * topk_blocks;
-  for (int i = threadIdx.x; i < topk_blocks; i += blockDim.x) {
-    best_hi[i] = 0xFFFFFFFFu;
-    best_lo[i] = 0xFFFFFFFFu;
-  }
-  if (p < 0) {
-    for (int i = threadIdx.x; i < topk_blocks; i += blockDim.x) out[i] = kCsa2KeyMax;
-    return;
-  }
-  const int64_t visible = p + 1;
-  const int64_t nb = visible / block_size;  // complete blocks
-  const int64_t chunk = (nb + parts - 1) / parts;
-  const int64_t lo = int64_t(part) * chunk, hi = min(nb, lo + chunk);
-  stage_query(q_fp8 + int64_t(r) * 32 * kCsa2IndexDim, w_folded + int64_t(r) * 32, q8, w);
-  __syncthreads();
-  CandKeyFn fn{q8, w, krow + (threadIdx.x >> 5) * 32, index_k, index_scale,
-               block_tables + int64_t(req_ids[r]) * blocks_per_request, entries_per_block,
-               block_size, (visible % block_size == 0) ? nb - 1 : -1};
-  if (lo < hi) select_topk_stream<kCandTile>(fn, lo, hi, best_hi, best_lo, tile_hi, tile_lo, topk_blocks);
-  for (int i = threadIdx.x; i < topk_blocks; i += blockDim.x)
-    out[i] = (uint64_t(best_hi[i]) << 32) | best_lo[i];
-}
-struct MergeKeyFn {
-  static constexpr bool kWarpCooperative = false;
-  const uint64_t* keys;
-  __device__ uint64_t operator()(int64_t i) const { return keys[i]; }
-};
-__global__ void select_candidates_merge_kernel(const int64_t* pos_sel, int block_size, int topk_blocks,
-                                               int parts, const uint64_t* part_ws, int cand_stride,
-                                               int32_t* cand_out, int32_t* cand_counts) {
-  extern __shared__ uint8_t smem_raw[];
-  uint32_t* best_hi = reinterpret_cast<uint32_t*>(smem_raw);  // [topk_blocks]
-  uint32_t* best_lo = best_hi + topk_blocks;
-  uint32_t* tile_hi = best_lo + topk_blocks;                  // [kCandTile]
-  uint32_t* tile_lo = tile_hi + kCandTile;
-  int32_t* scratch = reinterpret_cast<int32_t*>(tile_lo + kCandTile);  // [topk_blocks]
-  __shared__ int smem_count;
-  const int r = blockIdx.x;
-  const int64_t p = pos_sel[r];
-  int32_t* out = cand_out + int64_t(r) * cand_stride;
-  if (p < 0) {
-    for (int i = threadIdx.x; i < cand_stride; i += blockDim.x) out[i] = -1;
-    if (threadIdx.x == 0) cand_counts[r] = 0;
-    return;
-  }
-  for (int i = threadIdx.x; i < topk_blocks; i += blockDim.x) {
-    best_hi[i] = 0xFFFFFFFFu;
-    best_lo[i] = 0xFFFFFFFFu;
-  }
-  __syncthreads();
-  MergeKeyFn fn{part_ws + int64_t(r) * parts * topk_blocks};
-  select_topk_stream<kCandTile>(fn, 0, int64_t(parts) * topk_blocks, best_hi, best_lo, tile_hi, tile_lo,
-                                topk_blocks);
-  // The block ids ascending (kpool 1 over blocks: the "position" is the
-  // last complete block, so nothing real is filtered and no tail is added).
-  const int64_t nb = (p + 1) / block_size;
-  const int n = expand_from_best(best_hi, best_lo, topk_blocks, nb - 1, 1, cand_stride, out, scratch,
-                                 &smem_count);
-  if (threadIdx.x == 0) cand_counts[r] = n;
-}
+constexpr int kCandTile = 2 * kSelectTile;  // prefill top-2048 block selection
 
 // The candidate pool's i-th entry: the listed complete blocks' entries in
 // list order, then the newest partial block's [nb * bs, visible).
@@ -498,68 +393,258 @@ __device__ __forceinline__ int64_t pool_entry(const int32_t* cand, int n_blocks,
 __device__ __forceinline__ int64_t pool_size(int n_blocks, int block_size, int64_t visible) {
   return int64_t(n_blocks) * block_size + (visible - (visible / block_size) * block_size);
 }
-struct ListedKeyFn {
-  static constexpr bool kWarpCooperative = true;
-  const uint2* q8;
-  const float* w;
-  uint32_t* krow;
-  const uint8_t* index_k;
-  const float* index_scale;
-  const int32_t* table;
-  int entries_per_block;
-  const int32_t* cand;  // null: the entry is its index
-  int n_blocks;
-  int block_size;
-  int64_t pos_sel;
-  __device__ uint64_t operator()(int64_t i) const {
-    const int64_t e = cand ? pool_entry(cand, n_blocks, block_size, pos_sel + 1, i) : i;
-    if (e < 0 || e > pos_sel) return kCsa2KeyMax;
-    const int64_t slot = entry_slot(table, entries_per_block, e);
-    load_krow(index_k, slot, krow);
-    const float logit = entry_logit(q8, krow, w, index_scale[slot]);
-    __syncwarp();
-    return make_key(logit, e);
+constexpr int kCsaRadixBits = 10;
+constexpr int kCsaHistBins = 1 << kCsaRadixBits;
+constexpr int kCsaBoundaryKeys = 256;
+
+__device__ inline void csa_hist_add(int32_t* hist, int bin) {
+  const unsigned peers = __match_any_sync(__activemask(), bin);
+  if ((threadIdx.x & 31) == __ffs(peers) - 1) atomicAdd(hist + bin, __popc(peers));
+}
+
+__device__ inline void csa_boundary_bin(const int32_t* hist, int remaining, int* boundary,
+                                        int* below) {
+  __shared__ int warp_totals[256 / 32];
+  constexpr int per = kCsaHistBins / 256;
+  const int first = threadIdx.x * per;
+  int sum = 0;
+#pragma unroll
+  for (int i = 0; i < per; ++i) sum += hist[first + i];
+  int inclusive = sum;
+  const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+#pragma unroll
+  for (int offset = 1; offset < 32; offset <<= 1) {
+    const int value = __shfl_up_sync(0xffffffffu, inclusive, offset);
+    if (lane >= offset) inclusive += value;
   }
-};
-__global__ void select_listed_decode_kernel(const uint8_t* q_fp8, const float* w_folded,
-                                            const int32_t* req_ids, const int64_t* pos_sel,
-                                            const int32_t* block_tables, int blocks_per_request,
-                                            const uint8_t* index_k, const float* index_scale,
-                                            int entries_per_block, const int32_t* cand, int cand_stride,
-                                            const int32_t* cand_counts, int block_size, int select_k,
-                                            int32_t* topk_out, int32_t* counts) {
-  extern __shared__ uint8_t smem_raw[];
-  uint2* q8 = reinterpret_cast<uint2*>(smem_raw);
-  float* w = reinterpret_cast<float*>(q8 + 16 * 32);
-  uint32_t* krow = reinterpret_cast<uint32_t*>(w + 32);
-  uint32_t* best_hi = krow + 8 * 32;
-  uint32_t* best_lo = best_hi + select_k;
-  uint32_t* tile_hi = best_lo + select_k;
-  uint32_t* tile_lo = tile_hi + kSelectTile;
-  int32_t* scratch = reinterpret_cast<int32_t*>(tile_lo + kSelectTile);
-  __shared__ int smem_count;
-  const int r = blockIdx.x;
+  if (lane == 31) warp_totals[warp] = inclusive;
+  __syncthreads();
+  int exclusive = inclusive - sum;
+  for (int w = 0; w < warp; ++w) exclusive += warp_totals[w];
+  if (exclusive < remaining && remaining <= exclusive + sum) {
+    for (int i = 0; i < per; ++i) {
+      if (exclusive + hist[first + i] >= remaining) {
+        *boundary = first + i;
+        *below = exclusive;
+        break;
+      }
+      exclusive += hist[first + i];
+    }
+  }
+  __syncthreads();
+}
+
+__device__ inline void csa_select_radix(const uint64_t* keys, int64_t visible, int select_k,
+                                        uint32_t* best_hi, uint32_t* best_lo, uint32_t* tile_hi,
+                                        uint32_t* tile_lo) {
+  __shared__ int boundary, below, definite_count, candidate_count;
+  int32_t* hist = reinterpret_cast<int32_t*>(tile_hi);
+  uint64_t prefix = 0;
+  int prefix_shift = 32 + kIdxBits;
+  int remaining = select_k, lower = 0, count = 0, shift = 0;
+  for (;;) {
+    shift = max(0, prefix_shift - kCsaRadixBits);
+    const int bits = prefix_shift - shift;
+    const uint64_t mask = (1ull << bits) - 1;
+    for (int i = threadIdx.x; i < kCsaHistBins; i += blockDim.x) hist[i] = 0;
+    __syncthreads();
+    for (int64_t p = threadIdx.x; p < visible; p += blockDim.x) {
+      const uint64_t key = keys[p];
+      if ((key >> prefix_shift) == prefix) csa_hist_add(hist, int((key >> shift) & mask));
+    }
+    __syncthreads();
+    csa_boundary_bin(hist, remaining, &boundary, &below);
+    count = hist[boundary];
+    lower += below;
+    remaining -= below;
+    prefix = (prefix << bits) | uint64_t(boundary);
+    // The pool-id suffix makes keys unique, so the final digit always
+    // leaves at most one key. Equal scores need no approximation/fallback.
+    __syncthreads();
+    if (count <= kCsaBoundaryKeys || shift == 0) break;
+    prefix_shift = shift;
+  }
+
+  // The histogram storage becomes the boundary-key array. Values below
+  // the boundary go straight into best; only its <=256 candidates are ranked.
+  if (threadIdx.x == 0) definite_count = candidate_count = 0;
+  __syncthreads();
+  for (int64_t p = threadIdx.x; p < visible; p += blockDim.x) {
+    const uint64_t key = keys[p];
+    const uint64_t top = key >> shift;
+    if (top < prefix) {
+      const int i = atomicAdd(&definite_count, 1);
+      if (i < select_k) {
+        best_hi[i] = uint32_t(key >> 32);
+        best_lo[i] = uint32_t(key);
+      }
+    } else if (top == prefix) {
+      const int i = atomicAdd(&candidate_count, 1);
+      if (i < kCsaBoundaryKeys) {
+        tile_hi[i] = uint32_t(key >> 32);
+        tile_lo[i] = uint32_t(key);
+      }
+    }
+  }
+  __syncthreads();
+  const int i = threadIdx.x;
+  const uint32_t hi = i < count ? tile_hi[i] : 0xffffffffu;
+  const uint32_t lo = i < count ? tile_lo[i] : 0xffffffffu;
+  int rank = 0;
+#pragma unroll 8
+  for (int j = 0; j < count; ++j) rank += key_less(tile_hi[j], tile_lo[j], hi, lo);
+  if (i < count && rank < remaining) {
+    best_hi[lower + rank] = hi;
+    best_lo[lower + rank] = lo;
+  }
+  __syncthreads();
+}
+
+// Independent scoring stripes fill the existing decode key workspace.
+// Four index rows are fetched before their dots, preserving entry_logit's
+// per-head arithmetic while hiding the dependent table/key/scale loads.
+template <bool Candidates>
+__global__ void csa_decode_scores_kernel(
+    const uint8_t* q_fp8, const float* w_folded, const int32_t* req_ids, const int64_t* pos_sel,
+    const int32_t* block_tables, int blocks_per_request, const uint8_t* index_k,
+    const float* index_scale, int entries_per_block, const int32_t* cand, int cand_stride,
+    const int32_t* cand_counts, int block_size, int select_k, uint64_t* keys, int64_t keys_stride) {
+  __shared__ uint2 q8[16 * 32];
+  __shared__ float w[32];
+  __shared__ uint32_t krows[8 * 4 * 32];
+  const int r = blockIdx.y;
   const int64_t p = pos_sel[r];
-  int32_t* out = topk_out + int64_t(r) * select_k;
-  if (p < 0) {
-    for (int i = threadIdx.x; i < select_k; i += blockDim.x) out[i] = -1;
-    if (threadIdx.x == 0) counts[r] = 0;
-    return;
-  }
-  for (int i = threadIdx.x; i < select_k; i += blockDim.x) {
-    best_hi[i] = 0xFFFFFFFFu;
-    best_lo[i] = 0xFFFFFFFFu;
-  }
+  if (p < 0) return;
+  const int64_t visible = p + 1;
+  const int n_blocks = !Candidates && cand ? cand_counts[r] : 0;
+  const int64_t n = Candidates ? visible / block_size
+                               : (cand ? pool_size(n_blocks, block_size, visible) : visible);
+  // All entries will be kept. The selector writes their IDs directly.
+  if (n <= select_k) return;
+  const int32_t* table = block_tables + int64_t(req_ids[r]) * blocks_per_request;
+  const int32_t* list = cand ? cand + int64_t(r) * cand_stride : nullptr;
   stage_query(q_fp8 + int64_t(r) * 32 * kCsa2IndexDim, w_folded + int64_t(r) * 32, q8, w);
   __syncthreads();
-  const int n_blocks = cand ? cand_counts[r] : 0;
-  const int64_t n = cand ? pool_size(n_blocks, block_size, p + 1) : p + 1;
-  ListedKeyFn fn{q8, w, krow + (threadIdx.x >> 5) * 32, index_k, index_scale,
-                 block_tables + int64_t(req_ids[r]) * blocks_per_request, entries_per_block,
-                 cand ? cand + int64_t(r) * cand_stride : nullptr, n_blocks, block_size, p};
-  if (n > 0) select_topk_stream<kSelectTile>(fn, 0, n, best_hi, best_lo, tile_hi, tile_lo, select_k);
-  const int cnt = expand_from_best(best_hi, best_lo, select_k, p, 1, select_k, out, scratch, &smem_count);
-  if (threadIdx.x == 0) counts[r] = cnt;
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  uint32_t* staged = krows + warp * 4 * 32;
+  const int64_t stripe = (n + gridDim.x - 1) / gridDim.x;
+  const int64_t lo = min(n, int64_t(blockIdx.x) * stripe), hi = min(n, lo + stripe);
+  const int64_t sub = (hi - lo + 7) / 8;
+  const int64_t wlo = min(hi, lo + warp * sub), whi = min(hi, wlo + sub);
+  if constexpr (Candidates) {
+    const int64_t pinned = visible % block_size == 0 ? n - 1 : -1;
+    for (int64_t b = wlo; b < whi; ++b) {
+      float best = -INFINITY;
+      if (b == pinned) {
+        best = INFINITY;
+      } else {
+        for (int j = 0; j < block_size; j += 4) {
+          int64_t slots[4];
+          uint32_t words[4];
+          float scales[4];
+#pragma unroll
+          for (int u = 0; u < 4; ++u)
+            slots[u] = j + u < block_size
+                           ? entry_slot(table, entries_per_block, b * block_size + j + u)
+                           : -1;
+#pragma unroll
+          for (int u = 0; u < 4; ++u) {
+            words[u] =
+                slots[u] >= 0
+                    ? reinterpret_cast<const uint32_t*>(index_k + slots[u] * kCsa2IndexDim)[lane]
+                    : 0;
+            scales[u] = slots[u] >= 0 ? index_scale[slots[u]] : 0.f;
+          }
+#pragma unroll
+          for (int u = 0; u < 4; ++u) staged[u * 32 + lane] = words[u];
+          __syncwarp();
+#pragma unroll
+          for (int u = 0; u < 4; ++u)
+            if (slots[u] >= 0) best = fmaxf(best, entry_logit(q8, staged + u * 32, w, scales[u]));
+          __syncwarp();
+        }
+      }
+      if (lane == 0) keys[int64_t(r) * keys_stride + b] = make_key(best, b);
+    }
+  } else {
+    for (int64_t i = wlo; i < whi; i += 4) {
+      int64_t ids[4], slots[4];
+      uint32_t words[4];
+      float scales[4];
+#pragma unroll
+      for (int u = 0; u < 4; ++u) {
+        ids[u] = i + u < whi
+                     ? (list ? pool_entry(list, n_blocks, block_size, visible, i + u) : i + u)
+                     : -1;
+        slots[u] = ids[u] >= 0 && ids[u] <= p ? entry_slot(table, entries_per_block, ids[u]) : -1;
+      }
+#pragma unroll
+      for (int u = 0; u < 4; ++u) {
+        words[u] = slots[u] >= 0
+                       ? reinterpret_cast<const uint32_t*>(index_k + slots[u] * kCsa2IndexDim)[lane]
+                       : 0;
+        scales[u] = slots[u] >= 0 ? index_scale[slots[u]] : 0.f;
+      }
+#pragma unroll
+      for (int u = 0; u < 4; ++u) staged[u * 32 + lane] = words[u];
+      __syncwarp();
+#pragma unroll
+      for (int u = 0; u < 4; ++u) {
+        if (i + u >= whi) break;
+        const uint64_t key = slots[u] >= 0
+                                 ? make_key(entry_logit(q8, staged + u * 32, w, scales[u]), ids[u])
+                                 : kCsa2KeyMax;
+        if (lane == 0) keys[int64_t(r) * keys_stride + i + u] = key;
+      }
+      __syncwarp();
+    }
+  }
+}
+
+template <bool Candidates>
+__global__ void csa_decode_select_kernel(const uint64_t* keys, int64_t keys_stride,
+                                         const int64_t* pos_sel, const int32_t* cand,
+                                         int cand_stride, const int32_t* cand_counts,
+                                         int block_size, int select_k, int32_t* out,
+                                         int32_t* counts) {
+  const int r = blockIdx.x;
+  const int64_t p = pos_sel[r], visible = p + 1;
+  const int n_blocks = !Candidates && cand && p >= 0 ? cand_counts[r] : 0;
+  const int64_t n =
+      p < 0 ? 0
+            : (Candidates ? visible / block_size
+                          : (cand ? pool_size(n_blocks, block_size, visible) : visible));
+  int32_t* dst = out + int64_t(r) * select_k;
+  if (n <= select_k) {
+    const int32_t* list = cand ? cand + int64_t(r) * cand_stride : nullptr;
+    for (int i = threadIdx.x; i < select_k; i += blockDim.x) {
+      int32_t id = -1;
+      if (i < n)
+        id = !Candidates && list ? int32_t(pool_entry(list, n_blocks, block_size, visible, i)) : i;
+      dst[i] = id;
+    }
+    if (threadIdx.x == 0) counts[r] = int(n);
+    return;
+  }
+  extern __shared__ uint32_t smem[];
+  uint32_t* best_hi = smem;
+  uint32_t* best_lo = best_hi + select_k;
+  uint32_t* boundary_hi = best_lo + select_k;  // also the 1024-bin histogram
+  uint32_t* boundary_lo = boundary_hi + kCsaHistBins;
+  int32_t* scratch = reinterpret_cast<int32_t*>(boundary_lo + kCsaBoundaryKeys);
+  __shared__ int count;
+  for (int i = threadIdx.x; i < select_k; i += blockDim.x) best_hi[i] = best_lo[i] = 0xffffffffu;
+  __syncthreads();
+  csa_select_radix(keys + int64_t(r) * keys_stride, n, select_k, best_hi, best_lo, boundary_hi,
+                   boundary_lo);
+  const int64_t last = Candidates ? n - 1 : p;
+  const int kept =
+      expand_from_best(best_hi, best_lo, select_k, last, 1, select_k, dst, scratch, &count);
+  if (threadIdx.x == 0) counts[r] = kept;
+}
+
+size_t decode_select_smem(int select_k) {
+  return size_t(select_k) * 12 + size_t(kCsaHistBins + kCsaBoundaryKeys) * 4;
 }
 
 // Prefill: the logits rows.
@@ -732,16 +817,6 @@ __global__ void attn_finish_kernel(const float* m_main, const float* l_main, con
 }
 
 int g_csa2_smem_cap = -1;
-size_t cand_part_smem(int topk_blocks) {
-  return size_t(16 * 32) * 8 + 32 * 4 + size_t(8 * 32) * 4 + size_t(topk_blocks) * 8 + size_t(kCandTile) * 8;
-}
-size_t cand_merge_smem(int topk_blocks) {
-  return size_t(topk_blocks) * 8 + size_t(kCandTile) * 8 + size_t(topk_blocks) * 4;
-}
-size_t listed_smem(int select_k) {
-  return size_t(16 * 32) * 8 + 32 * 4 + size_t(8 * 32) * 4 + size_t(select_k) * 8 + size_t(kSelectTile) * 8 +
-         size_t(select_k) * 4;
-}
 size_t rows_smem(int select_k) {
   return size_t(select_k) * 8 + size_t(kSelectTile) * 8 + size_t(select_k) * 4;
 }
@@ -756,12 +831,6 @@ void csa2_prepare_kernel_smem() {
   int cap = 0;
   DGPP_CUDA_OK(cudaDeviceGetAttribute(&cap, cudaDevAttrMaxSharedMemoryPerBlockOptin, 0));
   g_csa2_smem_cap = cap - 1024;
-  DGPP_CUDA_OK(cudaFuncSetAttribute(select_candidates_part_kernel,
-                                    cudaFuncAttributeMaxDynamicSharedMemorySize, g_csa2_smem_cap));
-  DGPP_CUDA_OK(cudaFuncSetAttribute(select_candidates_merge_kernel,
-                                    cudaFuncAttributeMaxDynamicSharedMemorySize, g_csa2_smem_cap));
-  DGPP_CUDA_OK(cudaFuncSetAttribute(select_listed_decode_kernel,
-                                    cudaFuncAttributeMaxDynamicSharedMemorySize, g_csa2_smem_cap));
   DGPP_CUDA_OK(cudaFuncSetAttribute(select_rows_prefill_kernel,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize, g_csa2_smem_cap));
   DGPP_CUDA_OK(cudaFuncSetAttribute(select_candidates_prefill_kernel,
@@ -780,33 +849,10 @@ void csa2_rmsnorm_bf16(const void* x, int64_t x_stride, const void* w, void* y, 
 
 void csa2_rope_inv_freq_host(int rope_dim, double theta, int64_t original_seq_len, double factor,
                              double beta_fast, double beta_slow, float* out) {
-  if (rope_dim <= 0 || rope_dim % 2 != 0) throw std::invalid_argument("csa2_rope_inv_freq_host: rope_dim");
-  const int half = rope_dim / 2;
-  std::vector<float> freqs(static_cast<size_t>(half));
-  for (int i = 0; i < half; ++i) {
-    // torch: base ** (arange(0, dim, 2, float32) / dim) in fp32, then 1 / it.
-    const float e = float(2 * i) / float(rope_dim);
-    const float pw = static_cast<float>(std::pow(theta, static_cast<double>(e)));
-    freqs[size_t(i)] = 1.0f / pw;
-  }
-  if (original_seq_len > 0) {
-    const auto corrected_dim = [&](double rotations) {
-      return rope_dim * std::log(static_cast<double>(original_seq_len) / (rotations * 2.0 * 3.14159265358979323846)) /
-             (2.0 * std::log(theta));
-    };
-    const int low = std::max(static_cast<int>(std::floor(corrected_dim(beta_fast))), 0);
-    const int high = std::min(static_cast<int>(std::ceil(corrected_dim(beta_slow))), rope_dim - 1);
-    const float denom = std::max(float(high - low), 1e-3f);
-    const float f = static_cast<float>(factor);
-    for (int i = 0; i < half; ++i) {
-      float ramp = (float(i) - float(low)) / denom;
-      ramp = std::min(std::max(ramp, 0.0f), 1.0f);
-      const float smooth = 1.0f - ramp;
-      const float fr = freqs[size_t(i)];
-      freqs[size_t(i)] = fr / f * (1.0f - smooth) + fr * smooth;
-    }
-  }
-  for (int i = 0; i < half; ++i) out[i] = freqs[size_t(i)];
+  // The one YaRN builder (kernels/rope_scaling.cpp, moved verbatim): this
+  // name stays for the DeepSeek-V4.1 callers and their tests, `original_seq_len`
+  // being the builder's correction_max_position.
+  yarn_rope_inv_freq_host(rope_dim, theta, original_seq_len, factor, beta_fast, beta_slow, out);
 }
 
 void csa2_rope_apply(void* x, int64_t row_stride, int64_t head_stride, int heads, int rope_dim,
@@ -940,47 +986,67 @@ void check_select_common(int heads, int select_k, const char* who) {
 }
 }  // namespace
 
+size_t csa2_select_workspace_bytes(int max_rows, int64_t max_entries) {
+  if (max_rows <= 0 || max_rows > 32 || max_entries <= 0 || max_entries > (int64_t(1) << kIdxBits))
+    throw std::invalid_argument(
+        "csa2_select_workspace_bytes: rows in [1, 32], entries in [1, 2^21]");
+  return size_t(max_rows) * size_t(max_entries) * sizeof(uint64_t);
+}
+
 void csa2_select_candidates_decode(const void* q_fp8, const float* w_folded, const int32_t* req_ids,
                                    const int64_t* pos_sel, int rows, const int32_t* block_tables,
-                                   int blocks_per_request, const void* index_k, const float* index_scale,
-                                   int entries_per_block, int heads, int block_size, int topk_blocks,
-                                   int parts, uint64_t* part_ws, int32_t* cand_out, int32_t* cand_counts,
+                                   int blocks_per_request, const void* index_k,
+                                   const float* index_scale, int entries_per_block, int heads,
+                                   int block_size, int topk_blocks, uint64_t* keys_ws,
+                                   int64_t max_entries, int32_t* cand_out, int32_t* cand_counts,
                                    cudaStream_t stream) {
   if (rows <= 0) return;
   check_select_common(heads, topk_blocks, "csa2_select_candidates_decode");
-  if (block_size <= 0 || parts <= 0 || entries_per_block <= 0)
+  if (block_size <= 0 || entries_per_block <= 0 || blocks_per_request <= 0 || keys_ws == nullptr)
     throw std::invalid_argument("csa2_select_candidates_decode: shape");
   if (topk_blocks > kCsa2CandidateMaxBlocks)
     throw std::invalid_argument("csa2_select_candidates_decode: topk_blocks exceeds the select bound");
-  csa2_prepare_kernel_smem();
-  const int cand_stride = topk_blocks;
-  select_candidates_part_kernel<<<dim3(unsigned(rows), unsigned(parts)), kCsa2Threads,
-                                  cand_part_smem(topk_blocks), stream>>>(
-      static_cast<const uint8_t*>(q_fp8), w_folded, req_ids, pos_sel, block_tables, blocks_per_request,
-      static_cast<const uint8_t*>(index_k), index_scale, entries_per_block, block_size, topk_blocks, parts,
-      part_ws);
+  (void)csa2_select_workspace_bytes(rows, max_entries);
+  const int stripes = std::max(1, 96 / rows);
+  csa_decode_scores_kernel<true>
+      <<<dim3(unsigned(stripes), unsigned(rows)), kCsa2Threads, 0, stream>>>(
+          static_cast<const uint8_t*>(q_fp8), w_folded, req_ids, pos_sel, block_tables,
+          blocks_per_request, static_cast<const uint8_t*>(index_k), index_scale, entries_per_block,
+          nullptr, 0, nullptr, block_size, topk_blocks, keys_ws, max_entries);
   DGPP_CUDA_OK(cudaGetLastError());
-  select_candidates_merge_kernel<<<unsigned(rows), kCsa2Threads, cand_merge_smem(topk_blocks), stream>>>(
-      pos_sel, block_size, topk_blocks, parts, part_ws, cand_stride, cand_out, cand_counts);
+  csa_decode_select_kernel<true>
+      <<<unsigned(rows), kCsa2Threads, decode_select_smem(topk_blocks), stream>>>(
+          keys_ws, max_entries, pos_sel, nullptr, 0, nullptr, block_size, topk_blocks, cand_out,
+          cand_counts);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
 void csa2_select_listed_decode(const void* q_fp8, const float* w_folded, const int32_t* req_ids,
                                const int64_t* pos_sel, int rows, const int32_t* block_tables,
-                               int blocks_per_request, const void* index_k, const float* index_scale,
-                               int entries_per_block, int heads, const int32_t* cand, int cand_stride,
-                               const int32_t* cand_counts, int block_size, int select_k, int32_t* topk_out,
-                               int32_t* counts, cudaStream_t stream) {
+                               int blocks_per_request, const void* index_k,
+                               const float* index_scale, int entries_per_block, int heads,
+                               const int32_t* cand, int cand_stride, const int32_t* cand_counts,
+                               int block_size, int select_k, uint64_t* keys_ws, int64_t max_entries,
+                               int32_t* topk_out, int32_t* counts, cudaStream_t stream) {
   if (rows <= 0) return;
   check_select_common(heads, select_k, "csa2_select_listed_decode");
   if (select_k > kSelectTile / 2) throw std::invalid_argument("csa2_select_listed_decode: select_k <= 1024");
   if (cand != nullptr && (cand_counts == nullptr || cand_stride <= 0 || block_size <= 0))
     throw std::invalid_argument("csa2_select_listed_decode: a candidate pool needs its counts, stride and block size");
-  csa2_prepare_kernel_smem();
-  select_listed_decode_kernel<<<unsigned(rows), kCsa2Threads, listed_smem(select_k), stream>>>(
-      static_cast<const uint8_t*>(q_fp8), w_folded, req_ids, pos_sel, block_tables, blocks_per_request,
-      static_cast<const uint8_t*>(index_k), index_scale, entries_per_block, cand, cand_stride, cand_counts,
-      block_size, select_k, topk_out, counts);
+  if (entries_per_block <= 0 || blocks_per_request <= 0 || keys_ws == nullptr)
+    throw std::invalid_argument("csa2_select_listed_decode: shape or workspace");
+  (void)csa2_select_workspace_bytes(rows, max_entries);
+  const int stripes = std::max(1, 96 / rows);
+  csa_decode_scores_kernel<false>
+      <<<dim3(unsigned(stripes), unsigned(rows)), kCsa2Threads, 0, stream>>>(
+          static_cast<const uint8_t*>(q_fp8), w_folded, req_ids, pos_sel, block_tables,
+          blocks_per_request, static_cast<const uint8_t*>(index_k), index_scale, entries_per_block,
+          cand, cand_stride, cand_counts, block_size, select_k, keys_ws, max_entries);
+  DGPP_CUDA_OK(cudaGetLastError());
+  csa_decode_select_kernel<false>
+      <<<unsigned(rows), kCsa2Threads, decode_select_smem(select_k), stream>>>(
+          keys_ws, max_entries, pos_sel, cand, cand_stride, cand_counts, block_size, select_k,
+          topk_out, counts);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

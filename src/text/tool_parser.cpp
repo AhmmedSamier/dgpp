@@ -304,6 +304,8 @@ bool ToolCallParser::parse_qwen_block(const std::string& text) {
       if (key_end == std::string::npos || key_end == i) return false;
       const std::string key = text.substr(i, key_end - i);
       if (key.find('\n') != std::string::npos || key.find('<') != std::string::npos) return false;
+      for (const auto& seen : args_)
+        if (seen.first == key) return false;  // a duplicate parameter
       i = key_end + 1;
       if (i < text.size() && text[i] == '\n') ++i;
       const size_t close = text.find("</parameter>", i);
@@ -740,6 +742,12 @@ void ToolCallParser::feed(int64_t id, std::vector<Event>* out) {
         return;
       }
       if (value_close) {
+        for (const auto& arg : args_) {
+          if (arg.first == key_) {
+            abort_block(out);
+            return;
+          }
+        }
         args_.emplace_back(key_, decode_(value_ids_));
         sub_ = Sub::kAfterValue;
         return;

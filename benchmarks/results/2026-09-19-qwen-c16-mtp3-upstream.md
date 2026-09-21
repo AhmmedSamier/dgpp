@@ -180,3 +180,24 @@ restoration evidence are retained under `artifacts/c16-review/`. This validates
 the follow-up on the available two-node fabric and synthetic TP=4 shard
 shapes. A real four-node run of the follow-up still needs the maintainer's
 hardware; no four-node success or performance improvement is claimed here.
+
+## Upstream merge validation, 2026-09-21
+
+Merged upstream `c5a69134410f2646d195b339c8f197043410cb04` into the
+reviewed `b62ba54` branch. The Qwen engine fixture retains upstream's dense
+weight restoration guard and matching eager/graph head settings, using the
+configured slot and decode-row counts. Its new telemetry assertions derive
+rows per request from the MTP depth instead of assuming MTP1.
+
+On GB10, `cmake --preset ci` and native builds of `qwen_engine_test`,
+`dgpp_serve_app`, and the contribution guide's host targets succeeded.
+`ctest --test-dir build-ci -L host -LE checkpoint --output-on-failure` passed
+21 tests; the new upstream `qwen_yarn_fixture_test` initially could not run
+because the guide's explicit target list does not build it. After building
+that target, its focused CTest rerun passed, completing all 22 host tests.
+Touched-code formatting and the PR delta's whitespace check passed. Logs
+are retained under `artifacts/c16-merge/`.
+
+Production was left running and unchanged. GPU/RDMA tests were not rerun on
+this merged tree; the earlier GPU and two-rank serving results above apply
+to the pre-merge review fix, not this integration.

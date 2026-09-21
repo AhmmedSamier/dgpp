@@ -149,6 +149,10 @@ class EagerEngineAdapter : public sched::SchedulerEngine {
     info.align = model_->session_snapshot_align();
     info.block_tokens = model_->kv_block_tokens();
     info.chunk_tokens = Model::prefill_chunk_tokens();
+    if constexpr (requires { model_->mtp_enabled(); })
+      info.prefill_lookahead = model_->mtp_enabled();
+    if constexpr (requires { model_->prefill_bounded(); })
+      info.body_snapshots = !model_->prefill_bounded();
     return info;
   }
   int32_t prefill_cached(int req, const std::vector<int64_t>& prompt,
@@ -156,34 +160,51 @@ class EagerEngineAdapter : public sched::SchedulerEngine {
     if (plan == nullptr || plan->boundaries == nullptr)
       throw std::invalid_argument("generation engine: prefill_cached without a plan");
     return open_slot(req, prompt, [&] {
-      typename Model::SnapshotRequest snap;
+      typename Model::SnapshotRequest snap, body_snap;
       typename Model::SnapshotRequest* snap_ptr = nullptr;
       if (plan->snap_slot >= 0) {
         snap = arena_.request(plan->snap_slot, plan->snap_position);
         snap_ptr = &snap;
       }
-      typename Model::Outputs out;
-      if (plan->attach_slot >= 0) {
-        if (arena_.position(plan->attach_slot) != plan->attach_position)
-          throw std::logic_error("generation engine: the attach slot's position differs from the plan");
-        arena_.attach(req, plan->attach_slot);
-        try {
-          const std::vector<int64_t> suffix(
-              prompt.begin() + plan->attach_position, prompt.end());
-          out = cached_model_prefill(model_, req, suffix, *plan->boundaries,
-                                   snap_ptr, plan->images, true);
-        } catch (...) {
-          model_->session_close(req);  // the attach opened it
-          throw;
+      if (plan->body_snap_slot >= 0) {
+        body_snap = arena_.request(plan->body_snap_slot, plan->body_snap_position);
+        body_snap.next = snap_ptr;
+        snap_ptr = &body_snap;
+      }
+      const auto commit = [&] {
+        if (plan->snap_slot >= 0) {
+          arena_.commit(plan->snap_slot, snap);
+          plan->snap_taken = snap.taken;
         }
-      } else {
-        out = cached_model_prefill(model_, req, prompt, *plan->boundaries,
-                                   snap_ptr, plan->images, false);
+        if (plan->body_snap_slot >= 0) {
+          arena_.commit(plan->body_snap_slot, body_snap);
+          plan->body_snap_taken = body_snap.taken;
+        }
+      };
+      typename Model::Outputs out;
+      try {
+        if (plan->attach_slot >= 0) {
+          if (arena_.position(plan->attach_slot) != plan->attach_position)
+            throw std::logic_error(
+                "generation engine: the attach slot's position differs from the plan");
+          arena_.attach(req, plan->attach_slot);
+          try {
+            const std::vector<int64_t> suffix(prompt.begin() + plan->attach_position, prompt.end());
+            out = cached_model_prefill(model_, req, suffix, *plan->boundaries, snap_ptr,
+                                       plan->images, true);
+          } catch (...) {
+            model_->session_close(req);  // the attach opened it
+            throw;
+          }
+        } else {
+          out = cached_model_prefill(model_, req, prompt, *plan->boundaries, snap_ptr, plan->images,
+                                     false);
+        }
+      } catch (...) {
+        commit();  // a completed earlier snapshot still owns its pinned blocks
+        throw;
       }
-      if (snap_ptr != nullptr) {
-        arena_.commit(plan->snap_slot, snap);
-        plan->snap_taken = snap.taken;
-      }
+      commit();
       return out;
     });
   }

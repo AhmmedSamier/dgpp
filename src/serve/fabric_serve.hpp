@@ -38,6 +38,7 @@
 #include <thread>
 #include <vector>
 
+#include "kernels/rope_scaling.hpp"
 #include "sched/scheduler.hpp"
 #include "net/tcp.hpp"
 #include "serve/generation_service.hpp"
@@ -120,9 +121,11 @@ struct WorldSettings {
   int64_t kv_capacity = 0;
   std::string kv_dtype = "bf16";  // the latent cache's format
   std::string ngram_table = "resident";  // the Qwen n-gram table's residency
+  std::string fp8_head = "gemv";         // Qwen head: gemv | mma (opt-in)
   std::string dense_weights = "checkpoint";  // the Qwen dense stack's form
   std::string bf16_weights = "checkpoint";   // the bf16 decode weights' resident form: checkpoint | bf12 | bf12+bf16
   std::string prefill = "bounded";           // the DeepSeek-V4.1 prefill mode: bounded | exact
+  std::optional<dgpp::RopeScaling> rope_scaling;  // the opt-in YaRN ramp: absent = plain
   std::string embed_sharding = "replicated";  // the full GLM-5.3's embedding: replicated | vocab
   int default_max_tokens = 0;
   int queue_limit = 0;

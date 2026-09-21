@@ -231,11 +231,11 @@ GlmDiagnosticModel::PrefillCursor GlmDiagnosticModel::prefill_cursor(
   cursor.end = start + count;
   cursor.cuts = prefill_cuts(start, cursor.end, boundaries);
   cursor.snap = snap;
-  if (snap != nullptr) {
-    if (snap->dst == nullptr || snap->meta == nullptr)
+  for (auto* at = snap; at != nullptr; at = at->next) {
+    if (at->dst == nullptr || at->meta == nullptr)
       throw std::invalid_argument("session_prefill: snapshot request without a buffer");
-    if (!std::binary_search(cursor.cuts.begin(), cursor.cuts.end(), snap->position) &&
-        snap->position != cursor.end)
+    if (!std::binary_search(cursor.cuts.begin(), cursor.cuts.end(), at->position) &&
+        at->position != cursor.end)
       throw std::invalid_argument("session_prefill: the snapshot position is not a chunk end");
   }
   return cursor;
@@ -285,9 +285,11 @@ void GlmDiagnosticModel::prefill_chunk(PrefillCursor& cursor, int64_t budget) {
     mtp_pos_[static_cast<size_t>(req)] = std::max<int64_t>(mtp_pos_[static_cast<size_t>(req)], r1);
     push_mtp_position(req);
   }
-  if (snap != nullptr && !snap->taken && snap->position == c1) {
-    *snap->meta = session_snapshot(req, snap->dst);
-    snap->taken = true;
+  for (auto* at = snap; at != nullptr; at = at->next) {
+    if (!at->taken && at->position == c1) {
+      *at->meta = session_snapshot(req, at->dst);
+      at->taken = true;
+    }
   }
   cursor.next = c1;
   report_prefill_progress(req, c1);
@@ -345,8 +347,9 @@ GlmDiagnosticModel::PrefillCursor GlmDiagnosticModel::session_prefill_begin(
           throw std::invalid_argument("GLM: image span does not contain image tokens");
   }
   auto cuts = boundaries;
-  if (snap && snap->position > attach_position && snap->position < end &&
-      snap->position % chunk_tokens == 0) cuts.push_back(snap->position);
+  for (auto* at = snap; at != nullptr; at = at->next)
+    if (at->position > attach_position && at->position < end && at->position % chunk_tokens == 0)
+      cuts.push_back(at->position);
   auto cursor = prefill_cursor(req, prompt.data() + attach_position, attach_position,
                                end - attach_position, cuts, snap);
   cursor.images = images;

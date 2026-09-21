@@ -20,7 +20,7 @@ extensions. Model sampling defaults come from the checkpoint configuration.
 | --- | --- |
 | `POST /v1/chat/completions` | One-shot JSON or SSE with stable completion ID, model, timestamp, indexed choices, finish reason and usage. |
 | Messages | Developer, system, user, assistant and tool roles; text strings, text parts and user file/image parts when supported; assistant function/custom-tool history and refusal text. Developer instructions map to the checkpoint's system role. Standard tool results require `tool_call_id`; text parts are joined in order. |
-| Limits | `max_completion_tokens` or legacy `max_tokens`, including generated reasoning tokens; send one. Positive integers up to the implementation's 32-bit bound, further limited by KV capacity. `n` accepts 1–128, subject to admission capacity. |
+| Limits | `max_completion_tokens` or legacy `max_tokens`, including generated reasoning tokens; send one. Positive integers up to the implementation's 32-bit bound, further limited by KV capacity. `n` accepts 1–128, subject to admission capacity. `/v1/models` reports the resulting number: `context.request_limit_tokens` (the lesser of the model's positional ceiling and the K/V pool), with `position_ceiling_tokens`, `kv_pool_tokens` and `limited_by` beside it, and `rope_scaling` while an `engine.rope_scaling` ramp is in force. |
 | Sampling | Temperature, top-p, presence/frequency penalties, signed 64-bit seed, logit bias, and logprobs when supported by the engine. `top_p: 0` selects the highest-probability candidate. Nullable standard options treat null as omitted. |
 | Stops | One to four nonempty stop strings, removed from visible content. Usage still counts the generated tokens that completed the match. |
 | Function tools | Up to 128 unique functions; auto, none, required, named function and `allowed_tools` subset selection. Required/named/subset selection, strict schemas and disabling parallel calls require constrained decoding. Without constraints, auto is prompt-driven and none omits tools from the prompt. |
@@ -36,6 +36,12 @@ DGPP also accepts existing extensions: `top_k`, `min_p`,
 historical tool arguments, flat function definitions, and template-specific
 tool output lists. These extensions should not be assumed portable to OpenAI.
 Historical function arguments must be valid JSON objects for DGPP's templates.
+
+Both completion endpoints accept the `ignore_eos` extension. It defaults to
+`false` and accepts only a boolean; explicit `null` and other non-boolean
+values return HTTP 400 naming `ignore_eos`. When `true`, sampled EOS tokens
+still count toward usage but do not end generation. The token limit, stop
+strings, cancellation and resource limits still apply.
 
 ## File inputs
 
@@ -192,6 +198,47 @@ After rebuilding and redeploying this version, monitor rank 0:
 ```bash
 watch -n 2 'curl -fsS http://192.168.50.221:18080/metrics | jq "{prefill, scheduler: (.scheduler | {active, queued, prefilling, snapshot_age_ms})}"'
 ```
+
+### Speculative decoding counters
+
+`scheduler.spec_decode` exposes the engine's cumulative MTP verification
+counters on both metrics routes:
+
+| Field | Meaning |
+| --- | --- |
+| `depth` | Configured maximum speculative depth (0 for engines without MTP). |
+| `num_drafts_total` | Request verification rounds that attempted at least one draft position. |
+| `num_draft_tokens_total` | Sum of attempts across all speculative positions. |
+| `num_accepted_tokens_total` | Sum of accepted draft tokens across all positions. |
+| `num_draft_tokens_per_pos_total` | Attempt counts, starting with the first speculative position. |
+| `num_accepted_tokens_per_pos_total` | Accepted counts in the same position order. |
+
+The arrays contain `depth` entries, up to eight. Non-MTP engines report zero
+totals and empty arrays. Counts exclude graph padding and the non-speculative
+row. An attempt at a later position still counts when an earlier rejection
+prevents accepting it. Counts include drafts accepted by the exact host fallback during sampled
+decoding. These are final verification decisions before response stop and
+length trimming, so accepted drafts need not all appear in the response.
+
+Counters accumulate for the engine lifetime and reset when it is recreated.
+They come from the existing completed-pass scheduler snapshot; use
+`scheduler.snapshot_age_ms` to assess freshness. Read rank 0 once rather than
+summing counters across tensor-parallel ranks.
+
+For a measurement interval, subtract consecutive snapshots from the same
+engine lifetime. Divide accepted tokens by attempted draft tokens for the
+acceptance fraction, or by draft rounds for accepted drafts per round. Treat
+a zero denominator as unavailable. For example, position attempts `[10, 8, 6]`
+and accepts `[7, 4, 2]` mean 10 rounds, 24 attempted draft tokens and 13 accepted
+drafts. Variable verification depth means attempted tokens are not necessarily
+rounds multiplied by maximum depth.
+
+For graph capacity and padded verification rows, see the
+[decode graph batch counters](operations.md#decode-graph-batch-counters).
+They describe launched graph work, while these counters describe completed
+verification decisions; rejected drafts are not graph padding.
+
+### Prefill progress
 
 `prefill.requests` contains one entry per currently prefilling scheduler choice:
 

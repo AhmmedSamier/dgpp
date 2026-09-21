@@ -1,0 +1,11 @@
+Internal ctest changing into directory: <checkout>/build-ci
+Test project <checkout>/build-ci
+    Start 6: qwen_decode_fp8_head
+1/1 Test #6: qwen_decode_fp8_head .............   Passed    5.52 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Label Time Summary:
+gpu    =   5.52 sec*proc (1 test)
+
+Total Test time (real) =   5.52 sec

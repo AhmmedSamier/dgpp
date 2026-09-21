@@ -53,6 +53,9 @@ void csa2_rmsnorm_bf16(const void* x, int64_t x_stride, const void* w, void* y,
 // the YaRN mix — dims whose wavelength fits the training context keep
 // their frequency, those far beyond it are divided by `factor`, the
 // beta_fast..beta_slow band in between fades linearly. out: [rope_dim/2].
+// The one builder lives in kernels/rope_scaling.cpp (yarn_rope_inv_freq_host),
+// which the Qwen QSA rope shares; this name and these arguments are the
+// CSA2 callers' (original_seq_len is that builder's correction max position).
 void csa2_rope_inv_freq_host(int rope_dim, double theta, int64_t original_seq_len,
                              double factor, double beta_fast, double beta_slow,
                              float* out);
@@ -184,32 +187,39 @@ void csa2_compress_decode_update(const float* kv, const float* score, const int3
 // implicitly, the newest PARTIAL block's entries, which every consumer
 // appends (a query at pos_sel with visible = pos_sel + 1 entries: the
 // entries [visible / block_size * block_size, visible)).
-// Decode: every entry of the index cache is scored (the fp8 dot per head,
-// relu, the folded weight, the entry's scale — dsa_select_decode's logit);
-// `parts` blocks per row split the stream (part_ws: uint64 [rows, parts,
-// topk_blocks]); a merge finishes each row.
-void csa2_select_candidates_decode(const void* q_fp8, const float* w_folded,
-                                   const int32_t* req_ids, const int64_t* pos_sel, int rows,
-                                   const int32_t* block_tables, int blocks_per_request,
-                                   const void* index_k, const float* index_scale,
-                                   int entries_per_block, int heads, int block_size,
-                                   int topk_blocks, int parts, uint64_t* part_ws,
-                                   int32_t* cand_out, int32_t* cand_counts,
+// Scratch for the two decode selectors: uint64 keys [max_rows, max_entries].
+// max_entries bounds each row's visible compressed entries, not token positions.
+// The same row stride is used at every replay size; no counters or initialization
+// are needed. A DSA selection workspace with these bounds is also sufficient.
+size_t csa2_select_workspace_bytes(int max_rows, int64_t max_entries);
+// Decode: parallel stripes score the index cache (the unchanged fp8 dot,
+// relu, folded weight and entry scale); exact radix selection keeps the
+// block maxima. When all complete blocks fit, emit their IDs without scoring.
+// keys_ws has csa2_select_workspace_bytes(rows, max_entries) bytes; max_entries
+// must bound the actual visible entry count. No allocation occurs at launch.
+void csa2_select_candidates_decode(const void* q_fp8, const float* w_folded, const int32_t* req_ids,
+                                   const int64_t* pos_sel, int rows, const int32_t* block_tables,
+                                   int blocks_per_request, const void* index_k,
+                                   const float* index_scale, int entries_per_block, int heads,
+                                   int block_size, int topk_blocks, uint64_t* keys_ws,
+                                   int64_t max_entries, int32_t* cand_out, int32_t* cand_counts,
                                    cudaStream_t stream);
 // Decode, a restricted (or short) selection: the `select_k` best entries
 // among a row's candidate pool (cand: the block ids [rows, cand_stride],
 // cand_counts, block_size — the partial newest block appended) — or,
 // with cand null, among every visible entry (the plain selection for the
 // tests and the short-context case) — ascending in topk_out [rows,
-// select_k] (-1 padded) with counts.
-void csa2_select_listed_decode(const void* q_fp8, const float* w_folded,
-                               const int32_t* req_ids, const int64_t* pos_sel, int rows,
-                               const int32_t* block_tables, int blocks_per_request,
-                               const void* index_k, const float* index_scale,
-                               int entries_per_block, int heads, const int32_t* cand,
-                               int cand_stride, const int32_t* cand_counts, int block_size,
-                               int select_k, int32_t* topk_out, int32_t* counts,
-                               cudaStream_t stream);
+// select_k] (-1 padded) with counts. Candidate block IDs must be distinct and
+// ascending, as produced above. Uses the same scratch contract; the parallel
+// scores retain original entry IDs in their tie keys. If every entry fits,
+// emit the IDs directly. Both launches are graph-capturable kernel nodes.
+void csa2_select_listed_decode(const void* q_fp8, const float* w_folded, const int32_t* req_ids,
+                               const int64_t* pos_sel, int rows, const int32_t* block_tables,
+                               int blocks_per_request, const void* index_k,
+                               const float* index_scale, int entries_per_block, int heads,
+                               const int32_t* cand, int cand_stride, const int32_t* cand_counts,
+                               int block_size, int select_k, uint64_t* keys_ws, int64_t max_entries,
+                               int32_t* topk_out, int32_t* counts, cudaStream_t stream);
 // Prefill: the per-row logits over entries [0, n) from the dot buffer
 // (fp32 [rows * heads, dot_stride], row r head h at r * heads + h):
 // sum_h w_folded[r, h] * relu(dot) * k_scale[j]; entries at or past the

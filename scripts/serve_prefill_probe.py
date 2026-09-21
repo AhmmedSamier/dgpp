@@ -22,8 +22,8 @@ from data_paths import data_dir, require_file
 from bench_stream import read_completion
 
 
-def get(host, port, path):
-    conn = http.client.HTTPConnection(host, port, timeout=60)
+def get(host, port, path, *, timeout=60):
+    conn = http.client.HTTPConnection(host, port, timeout=timeout)
     try:
         conn.request("GET", path)
         response = conn.getresponse()

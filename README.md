@@ -29,12 +29,19 @@ over RoCE. Each quant links to its specific Hugging Face model card.
 | GLM-5.3 | [HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64](https://huggingface.co/HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64) | 4 | [Four nodes](deploy/cluster_glm-5.3_int4-int8_w4.example.json) |
 | DeepSeek-V4.1-Flash | [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) | 4 | [Four nodes](deploy/cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json) |
 
+The Qwen NVFP4 templates select streaming MMA for the FP8 vocabulary head
+with `engine.fp8_head: "mma"`, following matched one- and two-Spark
+[real-checkpoint numerical validation](benchmarks/results/2026-09-21-qwen-fp8-head-numerics.md),
+including the YaRN template. `--fp8-head gemv` restores the previous head
+path. See [operation and numerical constraints](docs/operations.md).
+
 The Qwen NVFP4 templates use `engine.ngram_table: "mmap"` to read the
 n-gram table from NVMe, `engine.decode_graph: true` for resident graph serving,
 and `engine.dense_weights: "fp8"` to encode dense projections at load. On two
 Sparks, mapping saves 23.84 GiB per rank while staying within 3.6% of resident
 decode throughput and 2.9% of resident prefill time in the matched campaign.
-Use `--dense-weights checkpoint` to retain the checkpoint's BF16 dense stack.
+Use `--dense-weights checkpoint --fp8-head gemv` to retain the checkpoint's
+BF16 dense stack.
 See the [single-node guide](docs/qwen38_single_spark.md) and
 [two-node benchmark](benchmarks/results/2026-09-16-qwen-nvfp4-w2.md).
 
@@ -66,6 +73,11 @@ record the modes measured for each deployment.
   decoding, with scalar or batched graphs selected for the active requests.
   Greedy MTP produces the same tokens as plain decode; sampled MTP
   preserves the target distribution.
+- **Faster DeepSeek decoder selection**: parallel scoring and exact radix
+  selection reduce the time spent choosing attention entries, especially at
+  long context. Scores, tie rules and selected entries are preserved; existing
+  recipes use the improvement automatically. See the
+  [comparison and validation](benchmarks/results/2026-09-21-deepseek-selection/README.md).
 - **Row-aware tensor-core execution and grouped prefill**: dense kernels select
   their lowering from the active row count, and queued cold prompts can share a
   forward pass while retaining request-local attention and state.
@@ -81,6 +93,11 @@ record the modes measured for each deployment.
   full GLM-5.3, tiled QSA prefill for Qwen, and bounded grouped prefill for
   DeepSeek-V4.1-Flash. Qwen can optionally yield between prefill chunks so
   active decodes continue making progress.
+- **Opt-in 512K context for Qwen3.8-Flash-Next** with `engine.rope_scaling`
+  (YaRN): the [two-Spark NVFP4 template](deploy/cluster_qwen-3.8-flash-next_nvfp4_w2_yarn512k.example.json)
+  supports a 524288-token request ceiling, with 5/5 retrieval probes passing
+  at both 261K and 522K prompt tokens. See the [validation record](benchmarks/results/2026-09-20-qwen-yarn512k.md)
+  and [release-check procedure](docs/qwen_yarn_release_check.md).
 - **Adaptive DSpark verification**: DeepSeek uses confidence-scheduled draft
   depth, including a batch-aware rule and an adaptive value of decode time.
 - **Exact prefix caching**: matching token prefixes can reuse a stored
@@ -102,8 +119,10 @@ record the modes measured for each deployment.
   within seconds. Silent node loss is detected by the bus watchdog.
 - **Deployment and monitoring**: a shared cluster config, versioned
   releases, periodic throughput logs and JSON counters at `/metrics`
-  (also available at `/v1/metrics`). Startup checks the memory plan before
-  allocation. Cache capacity is configurable,
+  (also available at `/v1/metrics`), including
+  [decode graph batch and padding counters](docs/operations.md#decode-graph-batch-counters)
+  and [MTP acceptance counters](docs/openai-compatibility.md#speculative-decoding-counters).
+  Startup checks the memory plan before allocation. Cache capacity is configurable,
   with BF16, FP8 or FP4 latent storage for GLM-5.3.
 
 ## Performance
@@ -166,6 +185,9 @@ Use an internet-connected Spark as rank 0. First get the source:
 git clone https://github.com/HawkBearPig/dgpp.git
 cd dgpp
 ```
+
+For an x86 Linux build workstation, use the Docker-based
+[Spark cross-build](docs/cross-compiling.md); run the resulting binaries on a Spark.
 
 Run the guided setup on rank 0:
 
@@ -347,7 +369,7 @@ Startup checks the combined memory plan before loading.
 | `engine.default_max_tokens` | no | Answer-token budget for requests that omit `max_tokens`. Clients may supply their own value; this is not a global hard limit. A larger default also reserves more context space under full admission. | 256 |
 | `engine.queue_limit` | no | Maximum requests waiting for an execution slot or memory budget. Additional arrivals receive HTTP 503 `overloaded`. Increase to tolerate bursts, at the cost of longer waits—not higher execution capacity. | 64 |
 | `engine.max_connections` | no | Maximum simultaneously open HTTP connections on rank 0, including idle keep-alive connections and streams. Excess connections receive 503. Size this separately from active request slots. | 64 |
-| `engine.prefix_cache_gib` | no | Memory budget per rank for reusable prefix-state snapshots. Repeated conversation prefixes can skip prefill work; larger budgets retain more snapshots but leave less memory for other state. Set 0 to disable. This is not the on-disk resident weight cache. | 1.5 GiB |
+| `engine.prefix_cache_gib` | no | Memory budget per rank for reusable prefix-state snapshots. Long documents can reuse an earlier snapshot when their question changes. Snapshot slots and the KV token pool are separate limits; see [sizing and recipe capacities](docs/prefix-cache.md). Set 0 to disable. | 1.5 GiB |
 | `engine.admission` | no | When to reserve context space. `full` reserves prompt plus the requested answer budget before admitting a request. `grow` starts with a smaller reservation and extends it during generation; if space runs out, the youngest request is shed. Use `full` for predictable reservations, `grow` to trade that guarantee for denser occupancy. | `full` |
 | `engine.admission_window` | no | Answer-token reservation increment used by `grow` admission. Larger increments reduce growth frequency but reserve more space ahead of use. Has no effect under `full`. Must be positive. | 256 tokens |
 | `engine.prefill_budget_tokens` | no | Qwen and GLM-5.3-Flash graph engines: maximum prefill tokens per scheduler tick, with a decode pass between chunks. Use an aligned budget no larger than the model's prefill chunk limit. 0 keeps full-prompt admission. | 0 (disabled) |
@@ -367,8 +389,9 @@ first; change one setting at a time and measure the effect on your workload.
 | `engine.mtp_schedule_row_ms`, `engine.mtp_schedule_base_ms` | no | Cost model for scheduled verification: milliseconds for another verify row and fixed work per pass. These values are deployment measurements; retain the DeepSeek template values unless re-profiling that world. | 8.0 / 28.0 |
 | `engine.mtp_schedule_lambda`, `engine.mtp_schedule_min_depth`, `engine.mtp_schedule_adapt` | no | Floor for the value of decode time in tokens/ms, minimum verified draft depth, and whether the value adapts from committed tokens and modeled time. Lambda 0 derives the reservation rate. | 0 / 1 / true |
 | `engine.prefill` | no | DeepSeek prefill mode: `bounded` runs every prompt row through the encoder and only the final window through the decoder; `exact` runs every layer over every row for parity work. Other families ignore it. | `bounded` |
-| `engine.ngram_table` | no | Qwen n-gram embedding-table placement. `resident` keeps it in device-accessible memory; `mmap` leaves it on local NVMe and fetches needed rows through the host page cache. Both shipped Qwen NVFP4 templates use `mmap`; the two-Spark campaign measured at most 3.6% lower decode throughput for 23.84 GiB less planned model memory per rank. DeepSeek's Engram tables use their own mapped checkpoint sidecar. | `resident` |
+| `engine.ngram_table` | no | Qwen n-gram embedding-table placement. `resident` keeps it in device-accessible memory; `mmap` leaves it on local NVMe and fetches needed rows through the host page cache. The Qwen NVFP4 templates use `mmap`; the two-Spark campaign measured at most 3.6% lower decode throughput for 23.84 GiB less planned model memory per rank. DeepSeek's Engram tables use their own mapped checkpoint sidecar. | `resident` |
 | `engine.dense_weights` | no | Qwen dense-projection storage. `checkpoint` retains the checkpoint's BF16 form; `fp8` converts dense projections at load time to reduce their memory footprint, with quantization error. Does not select another HF repository or change the expert quant; other families ignore it. | `checkpoint` |
+| `engine.fp8_head` | no | Qwen FP8 vocabulary-head dispatch. `mma` uses streaming MMA above the dense GEMV threshold and within the configured decode capacity, including short prefills in that interval. Requires `dense_weights: "fp8"`; the NVFP4 templates select it after [matched numerical validation](benchmarks/results/2026-09-21-qwen-fp8-head-numerics.md). `gemv` restores the previous dispatch. | `gemv` (NVFP4 templates: `mma`) |
 | `engine.bf16_weights` | no | Resident form of the BF16 weights that decode streams (attention/linear-attention projections, the LM head). `checkpoint` keeps the BF16 bytes alone. `bf12` and `bf12+bf16` add a **lossless** 12-bit form of each matrix (sign+mantissa byte plus a 4-bit exponent code; exact side tables for the rare outliers): decode launches of up to eight rows read 0.75 of the bytes and produce bit-identical results, so transcripts do not change. This is a storage format, not quantization. `bf12+bf16` keeps both forms resident: prefill is untouched and the 12-bit copies cost about 0.75× those matrices in additional memory (GLM-5.3-Flash: +2.0 GiB/rank at four Sparks, +3.8 at two; GLM-4.7: +4.9). `bf12` keeps the 12-bit form **alone**: each matrix's BF16 bytes are returned to the node as its layer loads, the footprint drops below `checkpoint`'s (GLM-5.3-Flash −0.5 GiB/rank at four Sparks, −1.0 at two; GLM-4.7 −1.4), and a prefill GEMM expands the rows it reads into a small scratch first — the same bits, so the same results, for about 10 ms per prefill chunk on four-node GLM-5.3-Flash (+1–2% on 8K–32K prompts, +25–40 ms to a short prompt's first token). The memory plan includes either. Measured single-stream decode: GLM-5.3-Flash +6–7%, GLM-4.7 +11–12%, full GLM-5.3 +5–6.5%, Qwen3.8-Flash-Next-FP8 +6.4% on four Sparks and +9.0% on two ([benchmarks](docs/benchmarks.md)). On Qwen it packs the GDN/QSA projections and the head of the FP8 checkpoint and always keeps both forms resident (every Qwen recipe has the room); under `dense_weights: "fp8"` those matrices are already FP8 and nothing is packed. DeepSeek accepts the key and currently packs nothing. Templates with memory to spare ship `bf12+bf16`; the two sized to their nodes' memory (two-node GLM-5.3-Flash, full GLM-5.3) ship `bf12`. | `checkpoint` |
 | `engine.graph_batch_min_live` | no | Active-request count at which decode switches from scalar to batched graphs. A lower threshold starts batching earlier; batching may improve throughput while doing extra padded-row work. 0 chooses min(2, `max_concurrency`); explicit values must be 1 through `max_concurrency`. | 0 (automatic) |
 | `engine.sampling_candidates` | no | Number of candidate tokens gathered per rank on the sampled-token fast path, 1–256. Smaller values reduce routine work but may trigger more full-gather fallbacks. The fallback preserves sampling correctness; this is not the client's `top_k` parameter. | 128 |

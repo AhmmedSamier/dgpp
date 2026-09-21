@@ -147,6 +147,9 @@ std::string encode_journal_tick(const GenerationService::PassEvents& events) {
         out += ",\"ca\":";
         append_json_int(&out, r.cancel_after);
       }
+      // Omitted when false, so every record that predates ignore_eos is
+      // byte-identical to what it was.
+      if (r.ignore_eos) out += ",\"ie\":true";
       // The prefix cache's inputs (M7): a request without boundaries that
       // has not opted out writes neither — the pre-cache record, byte for
       // byte.
@@ -376,10 +379,21 @@ std::string encode_journal_settings(const WorldSettings& s) {
   append_json_string(&out, s.ngram_table);
   out += ",\"dw\":";
   append_json_string(&out, s.dense_weights);
+  out += ",\"fp8_head\":";
+  append_json_string(&out, s.fp8_head);
   out += ",\"bfw\":";
   append_json_string(&out, s.bf16_weights);
   out += ",\"pf\":";
   append_json_string(&out, s.prefill);
+  // The opt-in YaRN ramp: absent when off, so a record from a plain run
+  // carries no key at all (an older peer decodes it to "off", which is
+  // what it would have run anyway — a world never mixes the two).
+  if (s.rope_scaling) {
+    const dgpp::RopeScaling& rs = *s.rope_scaling;
+    out += std::format(",\"rs\":[{:.17g},{},{:.17g},{:.17g},{:.17g},{:.17g}]", rs.factor,
+                       rs.original_max_position_embeddings, rs.beta_fast, rs.beta_slow,
+                       rs.attn_factor, rs.mrope_cache_factor);
+  }
   out += ",\"emsh\":";
   append_json_string(&out, s.embed_sharding);
   out += std::format(",\"mss\":{},\"msrow\":{:.17g},\"msbase\":{:.17g},\"mslam\":{:.17g},\"msmin\":{},\"msad\":{}",
@@ -527,11 +541,39 @@ JournalRecord decode_journal_line(std::string_view line) {
     s.kv_dtype = std::string(field(v, "kvdt", "settings").as_string());
     // Records before 2026-09-10 carry no table residency: resident.
     if (const dgpp::minijson::Value* ngt = v.find("ngt")) s.ngram_table = std::string(ngt->as_string());
+    if (const auto* head = v.find("fp8_head")) {
+      if (!head->is_string() || (head->as_string() != "gemv" && head->as_string() != "mma"))
+        throw std::runtime_error("journal: engine.fp8_head must be gemv or mma");
+      s.fp8_head = std::string(head->as_string());
+    }
     if (const dgpp::minijson::Value* dw = v.find("dw")) s.dense_weights = std::string(dw->as_string());
     // The bf16 weights' form (2026-09-19): records before it carry none.
     if (const dgpp::minijson::Value* bfw = v.find("bfw")) s.bf16_weights = std::string(bfw->as_string());
     // Records before 2026-09-14 carry no prefill mode: bounded.
     if (const dgpp::minijson::Value* pf = v.find("pf")) s.prefill = std::string(pf->as_string());
+    // Records without the rope ramp key carry none: the plain table
+    // (records before the knob, 2026-09-18, and every plain run since).
+    if (const dgpp::minijson::Value* rs = v.find("rs")) {
+      if (!rs->is_array() || rs->items().size() != 6)
+        throw std::runtime_error("journal: settings record with a bad rope scaling");
+      for (const dgpp::minijson::Value& item : rs->items())
+        if (!item.is_number())
+          throw std::runtime_error("journal: settings record with a non-numeric rope scaling");
+      dgpp::RopeScaling r;
+      r.factor = rs->items()[0].as_double();
+      r.original_max_position_embeddings = rs->items()[1].as_int();
+      r.beta_fast = rs->items()[2].as_double();
+      r.beta_slow = rs->items()[3].as_double();
+      r.attn_factor = rs->items()[4].as_double();
+      r.mrope_cache_factor = rs->items()[5].as_double();
+      try {
+        r.validate("journal settings rope scaling");
+      } catch (const std::runtime_error& e) {
+        throw std::runtime_error("journal: settings record with an impossible rope scaling (" +
+                                 std::string(e.what()) + ")");
+      }
+      s.rope_scaling = r;
+    }
     // Records before 2026-09-13 carry no embedding sharding: replicated.
     if (const dgpp::minijson::Value* es = v.find("emsh")) s.embed_sharding = std::string(es->as_string());
     // Records before 2026-09-14 carry no scheduled verify depth: off.
@@ -616,6 +658,11 @@ JournalRecord decode_journal_line(std::string_view line) {
         throw std::runtime_error("journal: submit '" + r.id +
                                  "' has bad max_steps");
       r.max_steps = static_cast<int>(m.as_int());
+      if (const dgpp::minijson::Value* ie = item.find("ie")) {
+        if (!ie->is_bool())
+          throw std::runtime_error("journal: submit '" + r.id + "' has bad ignore_eos");
+        r.ignore_eos = ie->as_bool();
+      }
       if (const dgpp::minijson::Value* ca = item.find("ca")) {
         if (!ca->is_number() || ca->as_int() < 0)
           throw std::runtime_error("journal: submit '" + r.id +

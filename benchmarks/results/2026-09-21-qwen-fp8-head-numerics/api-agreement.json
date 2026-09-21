@@ -1,0 +1,15 @@
+{
+  "api_checks_passed": 9,
+  "config_digest": "d4e0850e9af0e0ca",
+  "op_stream_md5": "bb64055b2616ff6aaec64b5667bb7ac3",
+  "ranks": [
+    {
+      "rank": 0,
+      "configuration": "model=nvidia/Qwen3.8-Flash-Next-NVFP4 world=2 fabric=29870 journal=29871 conc=4 kv=65536 kvdt=bf16 ngt=mmap dw=fp8 bfw=bf12+bf16 fp8head=mma pf=bounded emsh=replicated maxtok=256 queue=8 eos=1 graph=1 mtp=1 mtpd=3 mss=0 msrow=8 msbase=28 mslam=0 msmin=1 msad=1 batchmin=2 cand=128 pcgib=1.5 adm=full win=256 pfbudget=0 pfidle=0 pace=-1 inflight=-1 reasoning_in_content=0 rs=off (digest d4e0850e9af0e0ca)"
+    },
+    {
+      "rank": 1,
+      "configuration": "model=nvidia/Qwen3.8-Flash-Next-NVFP4 world=2 fabric=29870 journal=29871 conc=4 kv=65536 kvdt=bf16 ngt=mmap dw=fp8 bfw=bf12+bf16 fp8head=mma pf=bounded emsh=replicated maxtok=256 queue=8 eos=1 graph=1 mtp=1 mtpd=3 mss=0 msrow=8 msbase=28 mslam=0 msmin=1 msad=1 batchmin=2 cand=128 pcgib=1.5 adm=full win=256 pfbudget=0 pfidle=0 pace=-1 inflight=-1 reasoning_in_content=0 rs=off (digest d4e0850e9af0e0ca)"
+    }
+  ]
+}

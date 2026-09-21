@@ -1,0 +1,28 @@
+{
+  "passed": true,
+  "entries": 126,
+  "initial_passed": 117,
+  "initial_failed": [
+    "dsv41_forward_generate",
+    "dsv41_forward_generate_bounded",
+    "dsv41_forward_generate_teacher",
+    "dsv41_forward_generate_teacher_bounded",
+    "dsv41_forward_test",
+    "dsv41_forward_test_bounded",
+    "dsv41_forward_test_bounded_e2e",
+    "dsv41_forward_test_e2e",
+    "portability_test"
+  ],
+  "rerun_passed": [
+    "dsv41_forward_generate",
+    "dsv41_forward_generate_bounded",
+    "dsv41_forward_generate_teacher",
+    "dsv41_forward_generate_teacher_bounded",
+    "dsv41_forward_test",
+    "dsv41_forward_test_bounded",
+    "dsv41_forward_test_bounded_e2e",
+    "dsv41_forward_test_e2e",
+    "portability_test"
+  ],
+  "optional_unittest_skip": "local zsh staging probe: zsh is not installed"
+}

@@ -1,0 +1,7 @@
+N=124160 K=2560; synthetic weights; alternating order; 5 pairs x 20 products
+m=1 gemv_ms=1.936709 mma_ms=1.952592 ratio=0.9919 rel_l2=0 fp64_max_abs=0
+m=4 gemv_ms=1.939854 mma_ms=1.936296 ratio=1.0018 rel_l2=0 fp64_max_abs=0
+m=5 gemv_ms=3.885965 mma_ms=1.824350 ratio=2.1301 rel_l2=0 fp64_max_abs=0
+m=8 gemv_ms=3.919661 mma_ms=1.913115 ratio=2.0488 rel_l2=0 fp64_max_abs=0
+m=12 gemv_ms=5.878384 mma_ms=1.960000 ratio=2.9992 rel_l2=0 fp64_max_abs=0
+m=16 gemv_ms=7.857568 mma_ms=1.994789 ratio=3.9390 rel_l2=0 fp64_max_abs=0

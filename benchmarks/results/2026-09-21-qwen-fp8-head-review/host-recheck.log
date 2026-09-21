@@ -1,0 +1,26 @@
+[0/2] Re-checking globbed directories...
+[1/5] stamping dgpp_version.hpp
+[2/5] Building CXX object CMakeFiles/qwen_yarn_fixture_test.dir/tests/unit/qwen_yarn_fixture_test.cpp.o
+[3/5] Linking CXX executable qwen_yarn_fixture_test
+[4/5] Building CXX object CMakeFiles/dgpp_serve_app.dir/apps/dgpp_serve.cpp.o
+[5/5] Linking CXX executable dgpp-serve
+Internal ctest changing into directory: /home/jon/dgpp-fp8-head-pr/build-review-host
+Test project /home/jon/dgpp-fp8-head-pr/build-review-host
+    Start 15: qwen_yarn_fixture_test
+1/5 Test #15: qwen_yarn_fixture_test ...........   Passed    0.01 sec
+    Start 36: portability_test
+2/5 Test #36: portability_test .................   Passed    0.32 sec
+    Start 41: bootstrap_test
+3/5 Test #41: bootstrap_test ...................   Passed    0.16 sec
+    Start 42: launcher_test
+4/5 Test #42: launcher_test ....................   Passed    9.62 sec
+    Start 43: serve_startup_test
+5/5 Test #43: serve_startup_test ...............   Passed    2.15 sec
+
+100% tests passed, 0 tests failed out of 5
+
+Label Time Summary:
+host      =  12.26 sec*proc (5 tests)
+python    =  12.25 sec*proc (4 tests)
+
+Total Test time (real) =  12.26 sec
