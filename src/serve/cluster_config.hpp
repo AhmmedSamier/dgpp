@@ -57,6 +57,7 @@ struct ClusterConfig {
     // encoded to block FP8 at load — the same recipe as the FP8 releases;
     // docs/qwen38_single_spark.md).
     std::string dense_weights = "checkpoint";
+    std::string fp8_head = "gemv";  // Qwen head: gemv | mma (opt-in)
     // The resident form of the bf16 weights the decode GEMV reads (the
     // attention / linear-attention projections, the lm head):
     // "checkpoint" (the default: the bf16 bytes alone), "bf12" — a lossless

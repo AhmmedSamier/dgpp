@@ -15,7 +15,7 @@ class ServeStartupTest(unittest.TestCase):
             raise unittest.SkipTest("set DGPP_SERVE_TEST_BINARY to the freshly built server")
         cls.binary = str(Path(binary).resolve(strict=True))
 
-    def run_world(self, settings):
+    def run_world(self, settings, head_modes=None):
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             port = listener.getsockname()[1]
@@ -31,6 +31,8 @@ class ServeStartupTest(unittest.TestCase):
             try:
                 for rank, (slots, threshold) in enumerate(settings):
                     args = common + ["--rank", str(rank), "--max-concurrency", str(slots)]
+                    if head_modes is not None and head_modes[rank] is not None:
+                        args += ["--fp8-head", head_modes[rank]]
                     if rank:
                         args += ["--peer", "127.0.0.1"]
                     if threshold is not None:
@@ -91,6 +93,38 @@ class ServeStartupTest(unittest.TestCase):
                 own, adopted = log.split(" ; runs: ", 1)
                 self.assertIn(f"batchmin={peer or 2} ", own)
                 self.assertIn(f"batchmin={effective} ", adopted)
+
+    def test_fp8_head_default_and_rank_zero_override(self):
+        for head, peer, effective in ((None, None, "gemv"), ("mma", None, "mma"),
+                                      ("gemv", "mma", "gemv")):
+            with self.subTest(head=head, peer=peer):
+                logs = self.run_world([(4, 0), (4, 0)], [head, peer])
+                self.assertIn(f"fp8head={effective} ", logs[0])
+                if head != peer:
+                    own, adopted = logs[1].split(" ; runs: ", 1)
+                    self.assertIn(f"fp8head={peer or 'gemv'} ", own)
+                    self.assertIn(f"fp8head={effective} ", adopted)
+                else:
+                    self.assertNotIn("settings override", logs[1])
+
+    def test_invalid_fp8_head_names_setting_before_gpu_use(self):
+        result = subprocess.run(
+            [self.binary, "--checkpoint-dir", "/unused", "--fp8-head", "auto"],
+            env={**os.environ, "CUDA_VISIBLE_DEVICES": ""}, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("engine.fp8_head", result.stdout)
+        self.assertIn("must be gemv or mma", result.stdout)
+        self.assertNotIn("no CUDA device", result.stdout)
+
+    def test_mma_requires_fp8_dense_weights_before_gpu_use(self):
+        result = subprocess.run(
+            [self.binary, "--checkpoint-dir", "/unused", "--fp8-head", "mma"],
+            env={**os.environ, "CUDA_VISIBLE_DEVICES": ""}, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("engine.fp8_head mma requires engine.dense_weights fp8", result.stdout)
+        self.assertNotIn("no CUDA device", result.stdout)
 
     def test_different_concurrency_still_warns(self):
         log = self.run_world([(4, 0), (1, 0)])[1]

@@ -69,7 +69,8 @@ std::vector<uint16_t> run_kernel(const Problem& p) {
 
 // The same production dispatch with its unrounded f32 epilogue. Used by the
 // row-independence gate because the MoE accumulation consumes these bits.
-std::vector<float> run_kernel_f32(const Problem& p) {
+std::vector<float> run_kernel_f32(const Problem& p, int mma_from_rows = 0,
+                                  int expected_mma_warps = 0) {
   uint16_t* act = nullptr;
   uint8_t* w = nullptr;
   float* s = nullptr;
@@ -82,14 +83,46 @@ std::vector<float> run_kernel_f32(const Problem& p) {
   std::memcpy(act, p.act.data(), p.act.size() * 2);
   std::memcpy(w, p.payload.data(), p.payload.size());
   std::memcpy(s, p.scales.data(), p.scales.size() * 4);
-  dgpp::launch_scale_gemm_f32(act, p.k, w, s, out, p.m, p.n, p.k, nullptr);
+  cudaStream_t stream = nullptr;
+  cudaGraph_t graph = nullptr;
+  cudaGraphExec_t executable = nullptr;
+  if (expected_mma_warps) {
+    DGPP_CUDA_OK(cudaStreamCreate(&stream));
+    DGPP_CUDA_OK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+  }
+  dgpp::launch_scale_gemm_f32(act, p.k, w, s, out, p.m, p.n, p.k, stream, 0, mma_from_rows);
+  bool width_matches = true;
+  if (expected_mma_warps) {
+    DGPP_CUDA_OK(cudaStreamEndCapture(stream, &graph));
+    size_t count = 0;
+    DGPP_CUDA_OK(cudaGraphGetNodes(graph, nullptr, &count));
+    std::vector<cudaGraphNode_t> nodes(count);
+    DGPP_CUDA_OK(cudaGraphGetNodes(graph, nodes.data(), &count));
+    width_matches = count == 1;
+    if (count == 1) {
+      cudaKernelNodeParams params{};
+      DGPP_CUDA_OK(cudaGraphKernelNodeGetParams(nodes[0], &params));
+      const char* name = nullptr;
+      DGPP_CUDA_OK(cudaFuncGetName(&name, params.func));
+      width_matches = std::string(name).find("mma_gemv_kernel") != std::string::npos &&
+                      params.blockDim.x == static_cast<unsigned>(32 * expected_mma_warps);
+    }
+    DGPP_CUDA_OK(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0));
+    DGPP_CUDA_OK(cudaGraphLaunch(executable, stream));
+  }
   DGPP_CUDA_OK(cudaDeviceSynchronize());
+  if (expected_mma_warps) {
+    DGPP_CUDA_OK(cudaGraphExecDestroy(executable));
+    DGPP_CUDA_OK(cudaGraphDestroy(graph));
+    DGPP_CUDA_OK(cudaStreamDestroy(stream));
+  }
   std::vector<float> got(static_cast<size_t>(p.m) * p.n);
   std::memcpy(got.data(), out, got.size() * 4);
   DGPP_CUDA_OK(cudaFree(act));
   DGPP_CUDA_OK(cudaFree(w));
   DGPP_CUDA_OK(cudaFree(s));
   DGPP_CUDA_OK(cudaFree(out));
+  require(width_matches, "FP8 head did not select the expected MMA warp width");
   return got;
 }
 
@@ -141,6 +174,48 @@ void check_both_oracles(const Problem& p, const std::vector<uint16_t>& got,
 }
 
 }  // namespace
+
+// Vocabulary-head dimensions in K, with ragged two- and eight-warp slices. Check
+// unrounded FP32 logits against an independent FP64 accumulation of the
+// exact BF16-rounded weights, including the GEMV/MMA transition at row 5.
+DGPP_TEST(scale_gemm_f32_fp8_head_numerics) {
+  // N=4097 selects the same eight-warp specialization as a production
+  // TP2 vocabulary shard, while keeping the exhaustive FP64 oracle bounded.
+  // Its final block also exercises masked columns in that specialization.
+  for (const int n : {257, 4097})
+    for (const int m : {4, 5, 8, 16}) {
+      const auto p = make_problem(m, n, 2560, 0x12345678 + m + n);
+      const auto got = run_kernel_f32(p, 5, n == 4097 && m > 4 ? 8 : 0);
+      const auto repeat = run_kernel_f32(p, 5);
+      const auto gemv = run_kernel_f32(p);
+      require(std::memcmp(got.data(), repeat.data(), got.size() * sizeof(float)) == 0,
+              "FP8 head must repeat bitwise at a fixed shape");
+      double error2 = 0, reference2 = 0;
+      const int scale_cols = (p.k + 127) / 128;
+      for (int row = 0; row < p.m; ++row) {
+        for (int col = 0; col < p.n; ++col) {
+          double reference = 0, magnitude = 0;
+          for (int k = 0; k < p.k; ++k) {
+            const float decoded = dgpp::fp8_e4m3_bits_to_float(p.payload[col * p.k + k]);
+            const float scale = p.scales[(col / 128) * scale_cols + k / 128];
+            const double weight = bf16_to_float(dgpp::float_to_bf16_bits(decoded * scale));
+            const double product = bf16_to_float(p.act[row * p.k + k]) * weight;
+            reference += product;
+            magnitude += std::abs(product);
+          }
+          const size_t i = static_cast<size_t>(row) * p.n + col;
+          require(std::isfinite(got[i]) && std::isfinite(gemv[i]), "nonfinite FP8 head logit");
+          require(std::abs(got[i] - reference) <= 3e-5 * magnitude,
+                  "streaming FP8 head exceeds the FP64 error budget");
+          require(std::abs(gemv[i] - reference) <= 3e-5 * magnitude,
+                  "reference GEMV exceeds the FP64 error budget");
+          error2 += (got[i] - reference) * (got[i] - reference);
+          reference2 += reference * reference;
+        }
+      }
+      require(std::sqrt(error2 / reference2) < 1e-5, "FP8 head relative L2 error");
+    }
+}
 
 DGPP_TEST(scale_gemm_full_blocks_match_both_oracles) {
   // Exact 128-block geometry with n/k tiles straddling block boundaries:

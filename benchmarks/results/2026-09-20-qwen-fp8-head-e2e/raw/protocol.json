@@ -1,0 +1,45 @@
+{
+  "epoch_order": [
+    "A1",
+    "B1",
+    "B2",
+    "A2"
+  ],
+  "calibration_evidence": "default-calibration.json.gz",
+  "transcript_limit": "Baseline repeated requests vary; compare matched prompts and output budgets, report all output differences. This is not an identical-token-path or quality-equivalence claim.",
+  "classes": [
+    "prose",
+    "code",
+    "json",
+    "math",
+    "chat"
+  ],
+  "concurrency": [
+    1,
+    4
+  ],
+  "repeat": 3,
+  "max_tokens": 256,
+  "temperature": 0,
+  "thinking": false,
+  "engine": {
+    "max_concurrency": 4,
+    "kv_capacity": 65536,
+    "kv_dtype": "bf16",
+    "ngram_table": "mmap",
+    "default_max_tokens": 256,
+    "queue_limit": 64,
+    "max_connections": 128,
+    "decode_graph": true,
+    "mtp": true,
+    "mtp_depth": 3,
+    "prefix_cache_gib": 0,
+    "admission": "full",
+    "admission_window": 256,
+    "sampling_candidates": 128,
+    "stats_interval_s": 10,
+    "dense_weights": "fp8"
+  },
+  "primary_metric": "server completion tokens / client phase wall time, prefill included",
+  "calibration_limit_cv": 0.03
+}

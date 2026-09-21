@@ -1572,6 +1572,22 @@ the draft block's and its two fc matrices, the head — 1.7 of a world-4 rank's
 `dense_weights = "fp8"` the projections and the head are already block-FP8:
 nothing is packed. DeepSeek (tensor-core lowering) still packs nothing.
 
+Qwen's FP8 vocabulary head defaults to GEMV. With `engine.fp8_head: "mma"`,
+it uses streaming MMA when its row count exceeds
+`dense_gemv_rows()` and fits the model's configured decode-row ceiling.
+This reuses each weight tile across verification rows instead of rereading
+it for each GEMV chunk. Short prefill calls in that interval use the same
+path; larger prefill calls retain their existing dispatch. The kernel's
+shape and alignment checks still fall back when MMA is unsuitable. Weight
+values and FP32 logit storage are unchanged, but accumulation order can
+change. The decode ceiling bounds this optimization to the verification
+shapes covered by its gates. Consequently short-prefill logits can depend on
+deployment capacity; bitwise eager/graph gates must use matching decode
+capacities and head settings. The setting rides the rank-0 settings record
+and effective configuration digest. `engine.fp8_head: "gemv"` retains the
+previous dispatch, and the BF16 head is unaffected. Validation status
+is recorded in [the FP8 head record](benchmarks/results/2026-09-19-qwen-fp8-head.md).
+
 *Companions and the prefetch windows.* `WeightPrefetcher::add` coalesces a
 window's adds and bridges holes of up to 2 MB between them — a read of
 whatever lies between, which inside one layer image is a neighbouring tensor

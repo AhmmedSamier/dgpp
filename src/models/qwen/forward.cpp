@@ -44,8 +44,10 @@ void d2d(void* dst, const void* src, size_t bytes, cudaStream_t stream) {
 
 QwenModel::QwenModel(const QwenTextConfig& cfg, const std::string& checkpoint_dir, int max_tokens,
                      int64_t max_cache_tokens, QwenResidency residency, BoundaryReducer* boundary,
-                     int tp_rank, int tp_world, int max_requests, bool mtp, int decode_rows)
-    : cfg_(cfg),
+                     int tp_rank, int tp_world, int max_requests, bool mtp, int decode_rows,
+                     bool fp8_head_mma)
+    : fp8_head_mma_(fp8_head_mma),
+      cfg_(cfg),
       loader_(cfg, checkpoint_dir, tp_rank, tp_world, residency,
               tp_world > 1 ? QwenHeadSharding::VocabSharded : QwenHeadSharding::Full,
               mtp && residency == QwenResidency::Resident) {
@@ -370,12 +372,20 @@ size_t QwenModel::dense_bridge_bytes(const QwenTextConfig& cfg, const QwenLocalG
 
 // The lm_head product into logits_ (f32): the checkpoint's BF16 through the
 // GEMM interface, or the block-FP8 form (engine.dense_weights) through the scale
-// GEMM — 2026-09-10.
+// GEMM.
 void QwenModel::lm_head_logits(const uint16_t* hidden, int rows, cudaStream_t stream) {
   const int H = cfg_.hidden_size;
+  // Opt in to weight-tile reuse only within the configured decode envelope;
+  // this bounds the optimization to verification shapes covered by its gates.
+  // Short prefill chunks/tails in that envelope also use MMA, so their logits
+  // depend on decode capacity as well as the head setting. Bitwise eager/graph
+  // gates must construct both models with the same capacity and head setting.
+  // Streaming MMA preserves weight values but reassociates FP32 sums.
   if (globals_.lm_head_fp8.payload)
-    launch_scale_gemm_f32(hidden, static_cast<size_t>(H), globals_.lm_head_fp8.payload, globals_.lm_head_fp8.scales,
-                          logits_, rows, lm_vocab_count_, H, stream, static_cast<size_t>(lm_vocab_count_));
+    launch_scale_gemm_f32(hidden, static_cast<size_t>(H), globals_.lm_head_fp8.payload,
+                          globals_.lm_head_fp8.scales, logits_, rows, lm_vocab_count_, H, stream,
+                          static_cast<size_t>(lm_vocab_count_),
+                          fp8_head_mma_ && rows <= max_decode_rows_ ? dense_gemv_rows() + 1 : 0);
   else
     gemm_.matmul(hidden, globals_.lm_head, logits_, rows, lm_vocab_count_, H, DType::BF16, GemmOut::F32,
                  static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream);
