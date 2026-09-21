@@ -23,3 +23,7 @@ Upstream `5631fa1` was merged without rewriting PR history. Conflict resolution 
 The maintainer reports a full 113/113 suite with no skipped cases at `0425604`, no measurable dense-occupancy regression at the tested C1-C4 shapes, a 26 percent sparse step-time improvement, and matching rank operation streams. See the PR review for the exact protocols. These are maintainer-reported results and do not validate the later edits.
 
 Snapshotting all physical slots remains unchanged. Measure its C16 cost before optimizing the mapping further. Full-model teacher-forced comparisons and four-node Qwen validation remain pending; the feature stays default off. The maintainer's four-node GLM run supplies shared-kernel evidence only. PR #13 remains separate and its overlapping wide-lane tests must be reconciled when either PR lands.
+
+## Subsequent idle-hardware validation
+
+The reviewed head `ec2ac41` subsequently passed the full native build, 113 CTest cases (10 checkpoint skips, zero failures), assertion-enabled capture checks, both mapped-state memcheck cases, and two-node API/concurrency checks. An isolated sixteen-slot snapshot probe measured the extra copy cost. See the [GPU validation record](../2026-09-21-sparse-compaction-gpu/README.md) for commands, scope, results and restoration evidence.
