@@ -600,7 +600,7 @@ Both block comparisons improved C4 throughput (+11.83% and +10.69%).
 All 300 measured requests completed with 256 output tokens. C4 greedy text
 varied within the unchanged baseline as well as across builds, so this is
 fixed-prompt/output-budget throughput evidence, not identical-token-path or
-quality-equivalence evidence. The [record and raw results](results/2026-09-20-qwen-fp8-head-e2e.md)
+quality-equivalence evidence. The [record and raw results](../benchmarks/results/2026-09-20-qwen-fp8-head-e2e.md)
 include per-class results, calibration, transcript comparisons and restoration.
 These measurements predate the deployment switch: the optimized path now
 requires `engine.fp8_head: "mma"`. The shipped default remains `"gemv"`;
