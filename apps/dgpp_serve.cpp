@@ -1223,6 +1223,7 @@ int main(int argc, char** argv) {
   std::optional<int> top_k;
   std::optional<uint64_t> fixed_seed;
   bool reasoning_in_content = false;
+  std::string model_alias;
   double stats_interval_s = 10.0;  // the throughput line's period
   // The cluster config: found first, whatever its position,
   // because the flags after it override what it sets.
@@ -1293,6 +1294,7 @@ int main(int argc, char** argv) {
     prefix_cache_gib = e.prefix_cache_gib;
     admission_mode = e.admission;
     admission_window = e.admission_window;
+    model_alias = e.model_alias;
     prefill_budget_tokens = e.prefill_budget_tokens;
     prefill_idle_budget_tokens = e.prefill_idle_budget_tokens;
     bulk_pace_gbps = e.bulk_pace_gbps;
@@ -1314,6 +1316,7 @@ int main(int argc, char** argv) {
       return argv[++i];
     };
     if (a == "--model") model_id = next();
+    else if (a == "--model-alias") model_alias = next();
     else if (a == "--checkpoint-dir") ckpt = next();
     else if (a == "--port") port = static_cast<uint16_t>(std::stoi(next()));
     else if (a == "--bind-host") http_bind = next();
@@ -1990,9 +1993,11 @@ int main(int argc, char** argv) {
     }
     std::vector<int64_t> eos =
         no_eos ? std::vector<int64_t>{} : family->eos_token_ids();
-    const std::string model_display = model_id.empty()
-                                          ? fs::path(ckpt).filename().string()
-                                          : model_id;
+    const std::string model_display = model_alias.empty()
+                                            ? (model_id.empty()
+                                                   ? fs::path(ckpt).filename().string()
+                                                   : model_id)
+                                            : model_alias;
     // Constrained decoding (M6 6g): every rank builds the grammar's token
     // table from the same tokenizer.json, so the masks it derives from a
     // journal record are identical on every rank. Peers keep no tokenizer

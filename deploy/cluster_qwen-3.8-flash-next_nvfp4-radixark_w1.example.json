@@ -16,8 +16,9 @@
     "prefix_cache_gib": 1.5,
     "admission": "full",
     "admission_window": 256,
+    "model_alias": "Qwen3.8-Flash-Next",
     "sampling_candidates": 128,
-    "stats_interval_s": 10,
+    "stats_interval_s": 1,
     "dense_weights": "fp8",
     "mtp_expert_format": "bf16_fused"
   },
