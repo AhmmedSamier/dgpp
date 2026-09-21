@@ -227,6 +227,11 @@ and accepts `[7, 4, 2]` mean 10 rounds, 24 attempted draft tokens and 13 accepte
 drafts. Variable verification depth means attempted tokens are not necessarily
 rounds multiplied by maximum depth.
 
+For graph capacity and padded verification rows, see the
+[decode graph batch counters](operations.md#decode-graph-batch-counters).
+They describe launched graph work, while these counters describe completed
+verification decisions; rejected drafts are not graph padding.
+
 ### Prefill progress
 
 `prefill.requests` contains one entry per currently prefilling scheduler choice:

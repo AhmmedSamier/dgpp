@@ -693,14 +693,31 @@ engine construction. A six-slot graph with five requests and two verification
 rows per request adds one replay, twelve rows and two padded rows. Speculative
 draft-chain work is excluded; rejected draft tokens are not padding.
 `replays_by_slots` counts launches by graph capacity, with keys `"1"` through
-`"16"`; bucket `"1"` includes scalar fallback. Zero buckets do not establish
-which graph families an engine supports. Non-graph engines report zeros.
+`"16"`; bucket `"1"` includes scalar fallback. All sixteen buckets are always
+present, even for engines with fewer slots, to keep the shape stable for
+scrapers across deployments. Zero buckets do not establish which graph
+families an engine supports. Non-graph engines report zeros.
 
 For an interval, divide the increase in `padded_rows` by the increase in `rows`
 when that denominator is positive. This measures verification-row padding,
 not GPU time or utilization. Read the serving rank's counters once rather
 than summing identical work across ranks. Launch counters do not assert GPU
 completion; `snapshot_age_ms` describes the publication delay.
+
+Graph capacity depends on the highest live slot as well as the number of
+requests. With the default batching threshold, live slots 0 and 3 in a
+four-slot engine require the four-slot graph even though only two requests
+are active. The histogram records that capacity; it does not distinguish a
+full graph from a sparse one. Use the row deltas to measure padding over a
+representative traffic interval. The retained last-launch fields alone cannot
+establish how often sparse launches occur, and an idle interval with no new
+rows has no padding fraction. A server without `scheduler.decode_batch` needs
+a newer binary; missing counters do not mean zero padding.
+
+For draft attempts and acceptance, see the
+[speculative decoding counters](openai-compatibility.md#speculative-decoding-counters).
+Those count request verification decisions, excluding graph padding; rejected
+drafts and padded rows measure different work.
 
 ## Ports and processes
 

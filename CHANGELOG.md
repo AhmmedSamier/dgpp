@@ -6,6 +6,13 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Tighten decode metrics bookkeeping and documentation** (2026-09-21,
+  [#20](https://github.com/HawkBearPig/dgpp/issues/20)): record each replay's
+  end event immediately after its graph launch, before host counter updates.
+  Cross-link the batch and speculative-counter references, retain the fixed
+  sixteen-bucket histogram contract, and give the depth-one sampled-MTP
+  gate its own port. See the
+  [validation record](benchmarks/results/2026-09-21-metrics-follow-ups.md).
 - **Constrain declared tool argument names by default** (2026-09-21,
   [#11](https://github.com/HawkBearPig/dgpp/issues/11),
   [#12](https://github.com/HawkBearPig/dgpp/pull/12)): top-level argument
