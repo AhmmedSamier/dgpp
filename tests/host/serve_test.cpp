@@ -891,10 +891,10 @@ DGPP_TEST(serve_ignoreEos_runsPastTheStopToTheTokenLimit) {
 
 DGPP_TEST(serve_ignoreEos_defaultsOffAndRefusesNonBooleans) {
   ServiceRig rig;
-  {
-    // Omitted: the EOS retires the request, exactly as before.
+  for (const std::string extra : {"", ",\"ignore_eos\":false"}) {
+    // Omitted or explicitly false: EOS still retires the request.
     Client c(rig.port());
-    const std::string body = chat_body("abc", 8);
+    const std::string body = chat_body("abc", 8, extra);
     c.send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\n"
                "Content-Type: application/json\r\nContent-Length: " +
                std::to_string(body.size()) + "\r\n\r\n" + body);
@@ -902,17 +902,23 @@ DGPP_TEST(serve_ignoreEos_defaultsOffAndRefusesNonBooleans) {
     require(resp.find("\"finish_reason\":\"stop\"") != std::string::npos,
             "the default is unchanged: " + resp);
   }
-  {
-    // A non-boolean is refused by name rather than ignored.
-    Client c(rig.port());
-    const std::string body = chat_body("abcd", 2, ",\"ignore_eos\":\"yes\"");
-    c.send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\n"
-               "Content-Type: application/json\r\nContent-Length: " +
-               std::to_string(body.size()) + "\r\n\r\n" + body);
-    const std::string resp = c.read_until("}", 5000);
-    require(resp.find("400") != std::string::npos &&
-                resp.find("\"param\":\"ignore_eos\"") != std::string::npos,
-            "non-boolean ignore_eos is a 400 naming the field: " + resp);
+  for (const std::string path : {"/v1/chat/completions", "/v1/completions"}) {
+    for (const std::string value : {"null", "\"yes\"", "1", "[]", "{}"}) {
+      // Every non-boolean, including explicit null, is refused by name.
+      Client c(rig.port());
+      const std::string extra = ",\"ignore_eos\":" + value;
+      const std::string body = path == "/v1/chat/completions"
+          ? chat_body("abcd", 2, extra)
+          : "{\"model\":\"" + kModel +
+                "\",\"prompt\":\"abcd\",\"max_tokens\":2" + extra + "}";
+      c.send_all("POST " + path + " HTTP/1.1\r\nHost: t\r\n"
+                 "Content-Type: application/json\r\nContent-Length: " +
+                 std::to_string(body.size()) + "\r\n\r\n" + body);
+      const std::string resp = c.read_until("}", 5000);
+      require(resp.find("400 Bad Request\r\n") != std::string::npos &&
+                  resp.find("\"param\":\"ignore_eos\"") != std::string::npos,
+              path + " must reject ignore_eos=" + value + ": " + resp);
+    }
   }
 }
 

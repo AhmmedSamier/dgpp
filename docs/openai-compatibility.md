@@ -37,6 +37,12 @@ historical tool arguments, flat function definitions, and template-specific
 tool output lists. These extensions should not be assumed portable to OpenAI.
 Historical function arguments must be valid JSON objects for DGPP's templates.
 
+Both completion endpoints accept the `ignore_eos` extension. It defaults to
+`false` and accepts only a boolean; explicit `null` and other non-boolean
+values return HTTP 400 naming `ignore_eos`. When `true`, sampled EOS tokens
+still count toward usage but do not end generation. The token limit, stop
+strings, cancellation and resource limits still apply.
+
 ## File inputs
 
 User messages accept `{ "type": "file", "file": { "filename": "report.pdf",

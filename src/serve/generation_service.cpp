@@ -1723,7 +1723,7 @@ bool GenerationService::parse_max_tokens(const minijson::Value& body, HttpRespon
 bool GenerationService::parse_ignore_eos(const minijson::Value& body, HttpResponseWriter& w,
                                          bool* ignore) {
   *ignore = false;
-  const auto* v = optional_field(body, "ignore_eos");
+  const auto* v = body.find("ignore_eos");
   if (!v) return true;
   if (!v->is_bool()) {
     respond_error(w, 400, "ignore_eos must be a boolean", "invalid_request_error", "ignore_eos");
@@ -1975,7 +1975,6 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
     sr.images = images;
     sr.prompt = prompt;
     sr.max_steps = steps;
-  sr.ignore_eos = ignore_eos;
     sr.ignore_eos = ignore_eos;
     sr.sampling = sampling;
     sr.seed = seed + static_cast<uint64_t>(choice);
