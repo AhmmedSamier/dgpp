@@ -742,6 +742,12 @@ void ToolCallParser::feed(int64_t id, std::vector<Event>* out) {
         return;
       }
       if (value_close) {
+        for (const auto& arg : args_) {
+          if (arg.first == key_) {
+            abort_block(out);
+            return;
+          }
+        }
         args_.emplace_back(key_, decode_(value_ids_));
         sub_ = Sub::kAfterValue;
         return;

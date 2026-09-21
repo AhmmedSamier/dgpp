@@ -6,6 +6,55 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Reconcile timed benchmark counters** (2026-09-20,
+  [#24](https://github.com/HawkBearPig/dgpp/issues/24)): `scripts/timed_load.py`
+  waits for published counters to match completed requests under a deadline,
+  including warmup and isolation, so late snapshots no longer cause false
+  unexpected-traffic failures. Genuine mismatches still fail with expected
+  and observed counts. The dated script path remains compatible. See the
+  [validation record](benchmarks/results/2026-09-20-timed-load-counters.md).
+- **Compare effective settings across ranks** (2026-09-20,
+  [#18](https://github.com/HawkBearPig/dgpp/issues/18)): automatic graph
+  batch thresholds no longer cause false settings-override warnings on
+  peers. Genuine threshold and concurrency differences still warn; the
+  engine settings remain unchanged. See the
+  [validation record](benchmarks/results/2026-09-20-rank-settings-default.md).
+- **Reject duplicate GLM tool arguments** (2026-09-20,
+  [#22](https://github.com/HawkBearPig/dgpp/issues/22)): a repeated argument
+  name makes the tool block literal content instead of a structured call
+  with duplicate JSON keys. Valid calls retain their argument types and
+  can reuse the same names in later calls. See the
+  [validation record](benchmarks/results/2026-09-20-glm-tool-duplicate-keys.md).
+- **Opt-in 512K YaRN context for Qwen3.8-Flash-Next** (2026-09-20,
+  [#3](https://github.com/HawkBearPig/dgpp/pull/3)): `engine.rope_scaling`
+  with YaRN factor 2 extends the ceiling to 524288 tokens; omitting it preserves the
+  plain RoPE path bit for bit. Includes the two-node NVFP4 `_w2_yarn512k`
+  deployment template and `scripts/qwen_yarn_release_check.py`. Two-Spark
+  validation retrieved 5/5 needles at both 261K and 522K prompt tokens:
+  cold prefill 0.909 / 1.397 ms per token, decode about 60.7 / 96.0 ms per
+  pass. See the [validation record](benchmarks/results/2026-09-20-qwen-yarn512k.md)
+  for the recipe, measured scope and release-check limitations.
+- **Cross-compile for DGX Spark from x86 Linux** (2026-09-20,
+  [#5](https://github.com/HawkBearPig/dgpp/pull/5)): `scripts/spark-cross`
+  and the `spark-cross` CMake preset build the ARM64/GB10 server in Docker
+  using the release settings. The host needs no GPU or NVIDIA driver;
+  execution checks run on the Spark. See the [cross-compiling guide](docs/cross-compiling.md)
+  and [build and target validation record](benchmarks/results/2026-09-19-spark-cross-build.md).
+- **Decode graph batch counters on `/metrics` and `/v1/metrics`**
+  (2026-09-20, [#8](https://github.com/HawkBearPig/dgpp/pull/8)):
+  `scheduler.decode_batch` reports cumulative graph launches, verification
+  rows, padded rows and a launch histogram by graph capacity, plus the
+  last launch's capacity, active requests and verification width. See the
+  [counter contract](docs/operations.md#decode-graph-batch-counters) and
+  [validation record](benchmarks/results/2026-09-19-decode-batch-telemetry.md).
+- **MTP acceptance counters on `/metrics` and `/v1/metrics`**
+  (2026-09-20, [#9](https://github.com/HawkBearPig/dgpp/pull/9)):
+  `scheduler.spec_decode` reports verification rounds and total and
+  per-position attempted/accepted drafts. Acceptance is counted after
+  exact host fallback resolves, including drafts a sampled fallback
+  accepts after provisional device rejection; counts precede response
+  stop/length trimming. See the [counter contract](docs/openai-compatibility.md#speculative-decoding-counters)
+  and [validation record](benchmarks/results/2026-09-19-mtp-acceptance-metrics.md).
 - **Lossless 12-bit weights on Qwen3.8-Flash-Next; format v2** (2026-09-19;
   round four of `benchmarks/results/2026-09-19-glm-flash-line-rate/`). The
   format no longer needs rows of whole 1024-column super-blocks: the columns

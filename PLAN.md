@@ -83,6 +83,10 @@ Their implementation and evaluation records are maintained separately:
 
 ## Remaining work
 
+The [Docker cross-build](docs/cross-compiling.md) provides x86-to-ARM64/GB10
+compilation and install staging. Its [validation record](benchmarks/results/2026-09-19-spark-cross-build.md)
+tracks host checks separately from target execution on idle Spark hardware.
+
 Qwen graph serving can interleave prefill chunks with decode using
 `engine.prefill_budget_tokens`; zero preserves monolithic admission.
 An optional `engine.prefill_idle_budget_tokens` increases chunk size when
@@ -103,6 +107,12 @@ then reduces measured cold TP2 prefill time by 8–14%, preserving the existing
 partial arithmetic and decode kernels. Grouped Qwen continuation and
 GLM-Flash row expansion are the next targets in the
 [performance plan](docs/performance_improvement_plan.md#10-next-priorities-after-the-first-delivery).
+
+The metrics endpoints expose existing engine-lifetime MTP verification counters
+under `scheduler.spec_decode`, including separate round and draft-token totals
+and per-position attempts and accepts, including sampled exact-fallback
+acceptance. See the
+[metrics contract](docs/openai-compatibility.md#speculative-decoding-counters).
 
 Other work includes request-level observability, additional API fields,
 silent-node-loss detection, wider batching for GLM-5.3-Flash, arbitrary
@@ -131,3 +141,12 @@ Record benchmark conditions, commands, revisions and results with each
 measurement. [Testing](docs/testing.md), [operations](docs/operations.md)
 and [the benchmark procedures](docs/benchmarks.md) describe the available
 checks. Proposed performance targets remain estimates until measured.
+
+## Decode batch observability
+
+Implemented graph launch, verification-row and padding counters with a capacity
+histogram and retained last-launch shape in the JSON metrics snapshot. Host
+contract tests, the native Spark suite and live two-rank metrics/API checks
+passed; the physical four-node and unavailable checkpoint cases remain
+untested. See the
+[validation record](benchmarks/results/2026-09-19-decode-batch-telemetry.md).

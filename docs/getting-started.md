@@ -6,6 +6,8 @@ on Linux/aarch64; choose a model and node count from the
 [supported configurations](../README.md#supported-models-and-configurations).
 For the abbreviated command sequence, see the [quickstart](../README.md#quickstart).
 
+For compilation on an x86 Linux workstation, see [cross-compiling for Spark](cross-compiling.md).
+
 ## Guided setup
 
 From a source checkout, run:

@@ -20,10 +20,15 @@ checks do not need model weights or GPU execution:
 
 ```bash
 cmake --preset ci
-cmake --build build-ci -j 4 --target unit_tests http_server_test serve_test fabric_serve_test scheduler_test roster_check
+cmake --build build-ci -j 4 --target unit_tests http_server_test serve_test fabric_serve_test scheduler_test roster_check dgpp_serve_app
 ctest --test-dir build-ci -L host -LE checkpoint --output-on-failure
 ctest --test-dir build-ci -L python --output-on-failure
 ```
+
+`serve_startup_test` uses the built server for two- and four-process settings
+handshakes over loopback. It deliberately fails a local HTTP capacity check
+after settings adoption, before model loading, CUDA initialization or RDMA
+setup. It is registered when the server target is enabled (libibverbs required).
 
 `DGPP_TEST_FILTER=<substring>` runs a subset of a binary's cases; the
 loopback tests use fixed ports in the 299xx range. Run GPU/RDMA tests only
@@ -285,7 +290,11 @@ that pass by scheduling luck, undersized test buffers that made a graph test
 pass vacuously) are pinned in `DESIGN.md` §12.
 
 Cross-node RoCE and NIC→GPU checks are intentionally manual/deployment tests;
-they require a peer and are documented under `benchmarks/README.md`.
+they require a peer and are documented under `benchmarks/README.md`. The same
+holds for the release checks: long, real-checkpoint cluster runs that no CI job
+starts, each behind an explicit acknowledgement — today
+`scripts/qwen_yarn_release_check.py` (`docs/qwen_yarn_release_check.md`), the
+YaRN acceptance run near 256K and 512K.
 
 ## Vision arithmetic
 

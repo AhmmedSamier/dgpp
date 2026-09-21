@@ -81,6 +81,11 @@ record the modes measured for each deployment.
   full GLM-5.3, tiled QSA prefill for Qwen, and bounded grouped prefill for
   DeepSeek-V4.1-Flash. Qwen can optionally yield between prefill chunks so
   active decodes continue making progress.
+- **Opt-in 512K context for Qwen3.8-Flash-Next** with `engine.rope_scaling`
+  (YaRN): the [two-Spark NVFP4 template](deploy/cluster_qwen-3.8-flash-next_nvfp4_w2_yarn512k.example.json)
+  supports a 524288-token request ceiling, with 5/5 retrieval probes passing
+  at both 261K and 522K prompt tokens. See the [validation record](benchmarks/results/2026-09-20-qwen-yarn512k.md)
+  and [release-check procedure](docs/qwen_yarn_release_check.md).
 - **Adaptive DSpark verification**: DeepSeek uses confidence-scheduled draft
   depth, including a batch-aware rule and an adaptive value of decode time.
 - **Exact prefix caching**: matching token prefixes can reuse a stored
@@ -102,8 +107,10 @@ record the modes measured for each deployment.
   within seconds. Silent node loss is detected by the bus watchdog.
 - **Deployment and monitoring**: a shared cluster config, versioned
   releases, periodic throughput logs and JSON counters at `/metrics`
-  (also available at `/v1/metrics`). Startup checks the memory plan before
-  allocation. Cache capacity is configurable,
+  (also available at `/v1/metrics`), including
+  [decode graph batch and padding counters](docs/operations.md#decode-graph-batch-counters)
+  and [MTP acceptance counters](docs/openai-compatibility.md#speculative-decoding-counters).
+  Startup checks the memory plan before allocation. Cache capacity is configurable,
   with BF16, FP8 or FP4 latent storage for GLM-5.3.
 
 ## Performance
@@ -166,6 +173,9 @@ Use an internet-connected Spark as rank 0. First get the source:
 git clone https://github.com/HawkBearPig/dgpp.git
 cd dgpp
 ```
+
+For an x86 Linux build workstation, use the Docker-based
+[Spark cross-build](docs/cross-compiling.md); run the resulting binaries on a Spark.
 
 Run the guided setup on rank 0:
 

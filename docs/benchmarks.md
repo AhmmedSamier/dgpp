@@ -906,6 +906,30 @@ byte-identical to its answer beside three others.
 `scripts/fabric_glm4_load.sh CONFIG OUT` wraps the mixed form for the GLM-4.7
 worlds.
 
+For engine-call rates alongside the client timings, use the same arguments with
+`scripts/timed_load.py`, on an otherwise idle server:
+
+```bash
+scripts/timed_load.py HOST PORT --concurrency 1,2,4 --classes all --repeat 2 --json-out load.json
+```
+
+The wrapper checks counters immediately after each completed request group,
+including warmup and isolation. It accepts a snapshot only when the server is
+idle and its prompt/token deltas exactly match the completed requests. Behind
+counters are polled under a five-second deadline; excess or reset counters
+fail immediately. Errors include expected and observed counts. Consecutive
+identical snapshots alone do not establish readiness. The verified snapshot
+carries into the next phase, so unrelated intervening work cannot silently
+become its baseline.
+
+Polling occurs outside measured client intervals. The `engine` report fields
+retain the scheduler deltas and compute decode tokens/s as
+`1000 * (tokens_generated - prompts_prefilled) / step_ms`, excluding the first
+token produced by each prefill. The dated
+`benchmarks/results/2026-09-16-dsv41-perf/timed_load.py` path remains a compatible
+entry point. Neither entry point requires the repository to be the working
+directory.
+
 ### 9.4 Prefill
 
 Through the endpoint, with the prefix cache defeated by a unique nonce per
