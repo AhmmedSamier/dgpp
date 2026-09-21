@@ -1,3 +1,4 @@
+#include "kernels/qwen_ple.hpp"
 // The on-device greedy pick (kernels/glm_pick.hpp) and the step's device
 // commit (kernels/glm_spec.hpp) against their host oracles: glm_pick_local's top-2 vs sample::local_max plus the gen
 // log's runner-up scan; glm_pick_verdict's merge vs sample::merge_greedy
@@ -769,14 +770,12 @@ struct SampleWorldRun {
 // columns [k*count, (k+1)*count) of `full` ([requests, world*count]).
 // `masks` (optional): the rows' token masks, device_sample_mask_words(vocab)
 // words per row (the header word = the allowed count, 0 = unconstrained).
-SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
-                                int world, int count,
+SampleWorldRun run_sample_world(const std::vector<float>& full, int requests, int world, int count,
                                 const std::vector<dgpp::SampleSpec>& specs,
                                 const std::vector<int32_t>& counts_in,
                                 const std::vector<int64_t>& fed,
-                                const std::vector<int64_t>& positions,
-                                int candidates, uint64_t carry,
-                                int rows_per_request = 1,
+                                const std::vector<int64_t>& positions, int candidates,
+                                uint64_t carry, int rows_per_request = 1,
                                 const std::vector<uint32_t>& masks = {},
                                 const std::vector<dgpp::DraftProposal>& proposals = {},
                                 const std::vector<int32_t>& request_map = {}) {
@@ -830,7 +829,8 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
     if (!request_map.empty()) {
       require(request_map.size() == static_cast<size_t>(requests), "request map shape");
       d_map = device_alloc<int32_t>(requests);
-      DGPP_CUDA_OK(cudaMemcpy(d_map, request_map.data(), requests * sizeof(int32_t), cudaMemcpyHostToDevice));
+      DGPP_CUDA_OK(cudaMemcpy(d_map, request_map.data(), requests * sizeof(int32_t),
+                              cudaMemcpyHostToDevice));
     }
     uint32_t* d_masks = nullptr;
     if (!masks.empty()) {
@@ -838,12 +838,11 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
       DGPP_CUDA_OK(cudaMemcpy(d_masks, masks.data(), masks.size() * 4,
                               cudaMemcpyHostToDevice));
     }
-    dgpp::device_sample_local(d_logits, rows, count, k * count, vocab, k,
-                           world, candidates, d_specs, rows_per_request,
-                           d_fed, d_pos, /*position_stride=*/rows_per_request,
-                           d_counts, /*bias=*/nullptr, d_masks,
-                           d_masks ? mask_stride : 0, d_carry, d_table,
-                           d_locals, d_scratch, nullptr, nullptr, 0, d_map);
+    dgpp::device_sample_local(d_logits, rows, count, k * count, vocab, k, world, candidates,
+                              d_specs, rows_per_request, d_fed, d_pos,
+                              /*position_stride=*/rows_per_request, d_counts, /*bias=*/nullptr,
+                              d_masks, d_masks ? mask_stride : 0, d_carry, d_table, d_locals,
+                              d_scratch, nullptr, nullptr, 0, d_map);
     DGPP_CUDA_OK(cudaDeviceSynchronize());
     if (d_masks) cudaFree(d_masks);
     if (d_map) cudaFree(d_map);
@@ -905,7 +904,8 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
     if (!request_map.empty()) {
       require(request_map.size() == static_cast<size_t>(requests), "request map shape");
       d_map = device_alloc<int32_t>(requests);
-      DGPP_CUDA_OK(cudaMemcpy(d_map, request_map.data(), requests * sizeof(int32_t), cudaMemcpyHostToDevice));
+      DGPP_CUDA_OK(cudaMemcpy(d_map, request_map.data(), requests * sizeof(int32_t),
+                              cudaMemcpyHostToDevice));
     }
     uint32_t* d_masks = nullptr;
     if (!masks.empty()) {
@@ -923,12 +923,12 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
                               proposals.size() * sizeof(dgpp::DraftProposal),
                               cudaMemcpyHostToDevice));
     }
-    dgpp::device_sample_verdict(d_table, rows, world, k, candidates, vocab,
-                             d_specs, requests, rows_per_request, d_fed, d_pos,
-                             /*position_stride=*/rows_per_request, d_counts,
-                             d_masks, d_masks ? mask_stride : 0, d_verdicts,
-                             /*device_verdicts=*/nullptr, d_out, d_carry,
-                             nullptr, d_props, nullptr, nullptr, 0, d_map);
+    dgpp::device_sample_verdict(d_table, rows, world, k, candidates, vocab, d_specs, requests,
+                                rows_per_request, d_fed, d_pos,
+                                /*position_stride=*/rows_per_request, d_counts, d_masks,
+                                d_masks ? mask_stride : 0, d_verdicts,
+                                /*device_verdicts=*/nullptr, d_out, d_carry, nullptr, d_props,
+                                nullptr, nullptr, 0, d_map);
     DGPP_CUDA_OK(cudaDeviceSynchronize());
     if (d_masks) cudaFree(d_masks);
     if (d_map) cudaFree(d_map);
@@ -947,8 +947,7 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
     DGPP_CUDA_OK(cudaMemcpy(outcomes.data(), d_out,
                             sizeof(dgpp::SampleOutcome) * requests,
                             cudaMemcpyDeviceToHost));
-    DGPP_CUDA_OK(cudaMemcpy(specs_after.data(), d_specs,
-                            sizeof(dgpp::SampleSpec) * specs.size(),
+    DGPP_CUDA_OK(cudaMemcpy(specs_after.data(), d_specs, sizeof(dgpp::SampleSpec) * specs.size(),
                             cudaMemcpyDeviceToHost));
     DGPP_CUDA_OK(cudaMemcpy(&carry_out, d_carry, 8, cudaMemcpyDeviceToHost));
     out.verdicts.push_back(std::move(verdicts));
@@ -2558,9 +2557,11 @@ DGPP_TEST(sample_pick_compact_mapping_preserves_physical_sampling_state) {
     specs[q].presence_penalty = .3f;
   }
   std::vector<int32_t> counts(requests * vocab, 0);
-  counts[7] = 3; counts[vocab + 9] = 5;
+  counts[7] = 3;
+  counts[vocab + 9] = 5;
   std::vector<int64_t> fed(requests * rpr, 7), pos{50, 70, -1};
-  const auto baseline = run_sample_world(logits, requests, world, count, specs, counts, fed, pos, 32, 123, rpr);
+  const auto baseline =
+      run_sample_world(logits, requests, world, count, specs, counts, fed, pos, 32, 123, rpr);
   const std::vector<int32_t> map{15, 3, -1};
   std::vector<dgpp::SampleSpec> physical_specs(16);
   std::vector<int32_t> physical_counts(16 * vocab, 0);
@@ -2570,25 +2571,131 @@ DGPP_TEST(sample_pick_compact_mapping_preserves_physical_sampling_state) {
   }
   // The map sentinel alone must disable the last group, even with a real position.
   pos[2] = 99;
-  const auto mapped = run_sample_world(logits, requests, world, count, physical_specs, physical_counts,
-                                       fed, pos, 32, 123, rpr, {}, {}, map);
+  const auto mapped = run_sample_world(logits, requests, world, count, physical_specs,
+                                       physical_counts, fed, pos, 32, 123, rpr, {}, {}, map);
   for (int rank = 0; rank < world; ++rank) {
-    require(mapped.carry_out[rank] == baseline.carry_out[rank], "mapped verdict digest matches identity");
+    require(mapped.carry_out[rank] == baseline.carry_out[rank],
+            "mapped verdict digest matches identity");
     for (int q = 0; q < 2; ++q) {
-      const auto& x = mapped.verdicts[rank][q]; const auto& y = baseline.verdicts[rank][q];
+      const auto& x = mapped.verdicts[rank][q];
+      const auto& y = baseline.verdicts[rank][q];
       require(x.accepted == y.accepted && x.next == y.next &&
                   mapped.outcomes[rank][q].counter == baseline.outcomes[rank][q].counter,
               "mapped sample and RNG match identity");
       require(std::equal(mapped.counts_after[rank].begin() + map[q] * vocab,
-                         mapped.counts_after[rank].begin() + (map[q]+1) * vocab,
-                         baseline.counts_after[rank].begin() + q * vocab), "mapped count updates");
+                         mapped.counts_after[rank].begin() + (map[q] + 1) * vocab,
+                         baseline.counts_after[rank].begin() + q * vocab),
+              "mapped count updates");
     }
     require(mapped.verdicts[rank][2].accepted == 0, "map sentinel is inactive");
-    for (int req = 0; req < 16; ++req) if (req != 3 && req != 15) {
-      require(mapped.specs_after[rank][req].counter == 0, "unmapped RNG unchanged");
-      require(std::all_of(mapped.counts_after[rank].begin() + req * vocab,
-                          mapped.counts_after[rank].begin() + (req+1) * vocab,
-                          [](int32_t x) { return x == 0; }), "unmapped counts unchanged");
-    }
+    for (int req = 0; req < 16; ++req)
+      if (req != 3 && req != 15) {
+        require(mapped.specs_after[rank][req].counter == 0, "unmapped RNG unchanged");
+        require(std::all_of(mapped.counts_after[rank].begin() + req * vocab,
+                            mapped.counts_after[rank].begin() + (req + 1) * vocab,
+                            [](int32_t x) { return x == 0; }),
+                "unmapped counts unchanged");
+      }
   }
+}
+
+DGPP_TEST(compact_mapping_commit_draft_chain_and_ple_padding) {
+  // Deliberately give the padded group an accepted verdict. Only the map
+  // sentinel can protect physical state; no bus or timeout masks a bad access.
+  constexpr int groups = 3, per = 2, hidden = 8;
+  std::vector<void*> allocations;
+  auto allocate = [&]<class T>(const std::vector<T>& values) {
+    T* p = device_alloc<T>(values.size());
+    allocations.push_back(p);
+    DGPP_CUDA_OK(cudaMemcpy(p, values.data(), values.size() * sizeof(T), cudaMemcpyHostToDevice));
+    return p;
+  };
+  struct Cleanup {
+    std::vector<void*>& pointers;
+    ~Cleanup() {
+      for (void* p : pointers) cudaFree(p);
+    }
+  } cleanup{allocations};
+  auto read = []<class T>(const T* p, size_t n) {
+    std::vector<T> result(n);
+    DGPP_CUDA_OK(cudaMemcpy(result.data(), p, n * sizeof(T), cudaMemcpyDeviceToHost));
+    return result;
+  };
+  const auto* map = allocate(std::vector<int32_t>{2, -1, 0});
+  auto* position = allocate(std::vector<int64_t>{10, 20, 30});
+  auto* block = allocate(std::vector<int64_t>{10, 20, 30});
+  auto* live = allocate(std::vector<uint8_t>(groups * 16, 0xaa));
+  const auto* snapshot = allocate(std::vector<uint8_t>(16, 0x11));
+  std::vector<PickVerdict> verdicts(groups);
+  for (auto& v : verdicts) {
+    v.rows = per;
+    v.accepted = 1;
+    v.next = 7;
+    v.winners[0] = 5;
+  }
+  const auto* verify = allocate(verdicts);
+  dgpp::GlmSpecSegments segments;
+  segments.count = 1;
+  segments.seg[0] = {live, snapshot, 16, 16, 16};
+  for (int q = 0; q < groups; ++q)
+    dgpp::glm_spec_commit(verify + q, per, segments, position, nullptr, map, q);
+  require(read(position, groups) == std::vector<int64_t>({11, 20, 31}), "mapped commit positions");
+  const auto committed = read(live, groups * 16);
+  for (int i = 0; i < groups * 16; ++i)
+    require(committed[i] == (i / 16 == 1 ? 0xaa : 0x11), "commit preserves unmapped state");
+
+  auto* pos = allocate(std::vector<int64_t>(groups * per, 0));
+  auto* tokens = allocate(std::vector<int64_t>(groups * per, 0));
+  auto* next = allocate(std::vector<int64_t>(groups, -99));
+  dgpp::glm_spec_draft_rows_batched(verify, groups, per, block, pos, tokens, next, nullptr, map);
+  require(read(block, groups) == std::vector<int64_t>({11, 20, 31}), "mapped draft positions");
+  require(read(next, groups) == std::vector<int64_t>({7, -99, 7}), "draft preserves unmapped feed");
+  require(read(pos, groups * per) == std::vector<int64_t>({30, -1, -1, -1, 10, -1}),
+          "draft padding");
+
+  const auto* x = allocate(std::vector<uint16_t>(groups * per * hidden, 0x3f80));
+  auto* window = allocate(std::vector<uint16_t>(groups * hidden, 0));
+  auto* ids = allocate(std::vector<int32_t>(groups, 0));
+  auto* spans = allocate(std::vector<int32_t>(groups * 2, 0));
+  dgpp::glm_spec_chain_rows_batched(verify, verify, groups, per, x, hidden, window, 1, hidden,
+                                    block, 0, 100, pos, tokens, ids, spans, nullptr, map);
+  require(read(pos, groups) == std::vector<int64_t>({31, -1, 11}), "mapped chain positions");
+  require(read(ids, groups) == std::vector<int32_t>({2, -1, 0}), "mapped chain request IDs");
+  const auto hidden_state = read(window, groups * hidden);
+  for (int i = 0; i < groups * hidden; ++i)
+    require(hidden_state[i] == (i / hidden == 1 ? 0 : 0x3f80), "chain preserves unmapped window");
+
+  // A valid position on padding makes these checks depend on the negative
+  // request guard, including PLE's span-indexed context and convolution paths.
+  const int64_t valid_position = 5;
+  DGPP_CUDA_OK(
+      cudaMemcpy(pos + 1, &valid_position, sizeof(valid_position), cudaMemcpyHostToDevice));
+  auto* ctx = allocate(std::vector<int32_t>(groups * 4, 2));
+  auto* ctx_rows = allocate(std::vector<int32_t>(groups * 4, -99));
+  const auto* multipliers = allocate(std::vector<int64_t>{3, 5, 7});
+  const auto* vocab = allocate(std::vector<int64_t>{17});
+  const auto* offsets = allocate(std::vector<int64_t>{0});
+  auto* hashes = allocate(std::vector<int32_t>(groups, -99));
+  dgpp::qwen_ple_hash_ids_rows(tokens, groups, ids, pos, spans, groups, ctx, 0, multipliers, vocab,
+                               offsets, 1, 1, hashes, nullptr);
+  require(read(hashes, groups) == std::vector<int32_t>({14, 0, 14}),
+          "mapped PLE hashes and padding");
+  dgpp::qwen_ple_context_rows(tokens, groups, ids, pos, spans, groups, ctx, ctx_rows, nullptr);
+  const auto contexts = read(ctx, groups * 4);
+  require(contexts[0] == 7 && contexts[8] == 7 && contexts[4] == 2, "mapped PLE contexts");
+  const auto context_rows = read(ctx_rows, groups * 4);
+  for (int i = 4; i < 8; ++i) require(context_rows[i] == 0, "padded PLE context snapshots");
+
+  auto* states = allocate(std::vector<uint16_t>(groups * 9, 0x3f80));
+  const auto* un = allocate(std::vector<uint16_t>(groups, 0));
+  const auto* weight = allocate(std::vector<uint16_t>(4, 0));
+  auto* out = allocate(std::vector<uint16_t>(groups, 0xffff));
+  auto* snapshots = allocate(std::vector<uint16_t>(groups * 9, 0xffff));
+  dgpp::qwen_ple_conv_rows_bf16(un, un, states, 9, weight, nullptr, out, ids, pos, spans, groups, 1,
+                                4, 3, nullptr, snapshots);
+  const auto conv_state = read(states, groups * 9);
+  for (int i = 9; i < 18; ++i) require(conv_state[i] == 0x3f80, "unmapped PLE conv state");
+  require(read(out, groups)[1] == 0, "padded PLE conv output");
+  const auto conv_snapshots = read(snapshots, groups * 9);
+  for (int i = 9; i < 18; ++i) require(conv_snapshots[i] == 0, "padded PLE conv snapshots");
 }

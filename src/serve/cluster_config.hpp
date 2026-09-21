@@ -77,6 +77,7 @@ struct ClusterConfig {
     int queue_limit = 64;
     int max_connections = 64;
     bool no_eos = false;
+    bool compact_batches = false;
     bool decode_graph = false;
     bool mtp = false;
     int mtp_depth = 1;             // draft tokens per step (1..5); needs mtp

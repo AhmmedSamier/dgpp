@@ -685,14 +685,15 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
 
 ### Compact Qwen batch mappings
 
-Fixed-depth Qwen graph serving compacts active requests into the smallest
-available bucket by count. Persistent KV, recurrent/conv and prefix-cache
+With `engine.compact_batches: true`, fixed-depth Qwen graph serving compacts active
+requests into the smallest available bucket by count. Persistent KV, recurrent/conv and prefix-cache
 state stays in the physical request slots; only row mappings and token feeds
 are staged. Sampling RNG/counts/bias/proposals remain indexed by physical
 request ID. Graph masks and verdicts are indexed by compact batch group.
 The mapping is double-buffered per graph family for pipelined replays.
 
-Set `DGPP_COMPACT_BATCH=0` consistently on all ranks before startup to retain
-the previous physical-prefix policy for comparison. Confidence-scheduled
-verify depth and other model families currently use the previous policy.
+The setting defaults to false, retaining the physical-prefix policy until
+full-model numerical comparisons are complete. Rank 0 journals the setting
+and peers adopt it before graph construction; it is not read from the
+environment. Confidence-scheduled verify depth and other model families currently use the previous policy.
 This changes neither model capacity nor the set of graph bucket sizes.

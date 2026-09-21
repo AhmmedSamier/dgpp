@@ -2,7 +2,7 @@
 
 ## Revision and scope
 
-Validated the uncommitted extraction on `codex/upstream-sparse-compaction`, based on upstream `444441feed0c4d7c256ff7ff7868b587823b737f`. No implementation changes were made during this validation window. The source snapshot was checked against a SHA-256 manifest after copying to spark-1.
+Validated the uncommitted extraction on `codex/upstream-sparse-compaction`, based on upstream `444441feed0c4d7c256ff7ff7868b587823b737f`. No implementation changes were made during this validation window. The source snapshot was checked against a SHA-256 manifest after copying to rank 0's node.
 
 - Source patch SHA-256: `24a93c0d4a3f794b2fd40c1400410796a48e51addf96df59eb07909a6b906eb1`.
 - Source manifest SHA-256: `2314b1805ab021cb6fe80507220c25983e432dbb959396936db547812c4dada2`.

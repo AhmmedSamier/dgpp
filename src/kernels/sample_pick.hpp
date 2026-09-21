@@ -219,17 +219,14 @@ constexpr int device_sample_candidates_that_fit(int rows, int world,
 // shape: its head ran on the verify layout and the pick samples the row the
 // verdict accepted. `counts` may be null, and then no row is penalized (the
 // draft's proposal needs no penalty: any Q is exact, see DraftProposal).
-void device_sample_local(float* logits, int rows, int vocab_count,
-                      int vocab_begin, int vocab_size, int rank, int world,
-                      int candidates, const SampleSpec* specs,
-                      int rows_per_request, const int64_t* fed,
-                      const int64_t* positions, int position_stride,
-                      const int32_t* counts, const float* bias,
-                      const uint32_t* masks,
-                      int mask_stride, const uint64_t* carry_digest,
-                      uint16_t* table, PickLocal* locals, double* scratch,
-                      cudaStream_t stream, const PickVerdict* row_select = nullptr,
-                      int source_row_stride = 0, const int32_t* request_map = nullptr);
+void device_sample_local(float* logits, int rows, int vocab_count, int vocab_begin, int vocab_size,
+                         int rank, int world, int candidates, const SampleSpec* specs,
+                         int rows_per_request, const int64_t* fed, const int64_t* positions,
+                         int position_stride, const int32_t* counts, const float* bias,
+                         const uint32_t* masks, int mask_stride, const uint64_t* carry_digest,
+                         uint16_t* table, PickLocal* locals, double* scratch, cudaStream_t stream,
+                         const PickVerdict* row_select = nullptr, int source_row_stride = 0,
+                         const int32_t* request_map = nullptr);
 
 // Kernel 2 (after the fold), one block per request plus the digest pass:
 // decodes every rank's group, merges the k-way prefix in canonical order
@@ -255,19 +252,16 @@ void device_sample_local(float* logits, int rows, int vocab_count,
 // from its constructor so the first launch inside a capture finds it set.
 void device_sample_verdict_prepare();
 
-void device_sample_verdict(const uint16_t* table, int rows, int world, int rank,
-                        int candidates, int vocab_size, SampleSpec* specs,
-                        int requests, int rows_per_request, const int64_t* fed,
-                        const int64_t* positions, int position_stride,
-                        int32_t* counts, const uint32_t* masks, int mask_stride,
-                        PickVerdict* verdicts,
-                        PickVerdict* device_verdicts,
-                        SampleOutcome* outcomes, uint64_t* carry_digest,
-                        cudaStream_t stream,
-                        const DraftProposal* proposals_in = nullptr,
-                        DraftProposal* proposals_out = nullptr,
-                        DraftProposal* proposals_out_host = nullptr,
-                        int draft_index = 0, const int32_t* request_map = nullptr);
+void device_sample_verdict(const uint16_t* table, int rows, int world, int rank, int candidates,
+                           int vocab_size, SampleSpec* specs, int requests, int rows_per_request,
+                           const int64_t* fed, const int64_t* positions, int position_stride,
+                           int32_t* counts, const uint32_t* masks, int mask_stride,
+                           PickVerdict* verdicts, PickVerdict* device_verdicts,
+                           SampleOutcome* outcomes, uint64_t* carry_digest, cudaStream_t stream,
+                           const DraftProposal* proposals_in = nullptr,
+                           DraftProposal* proposals_out = nullptr,
+                           DraftProposal* proposals_out_host = nullptr, int draft_index = 0,
+                           const int32_t* request_map = nullptr);
 
 // counts[token] += delta (the host's correction of a request's context after
 // a fallback it decided: a provisionally rejected draft joins the table

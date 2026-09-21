@@ -248,16 +248,15 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   // it and the device sampler the adapter constrains the pick per slot
   // (configure_constraint) — the masks live in a device table the captures
   // bake in, staged before every replay.
-  GraphEngineAdapter(Model* model, net::CollectiveBus* bus,
-                        int rank, int world, uint16_t* pick_scratch,
-                        int64_t vocab, int pick_timeout_ms = 60000,
-                        int batch_min_live = 4,
-                        uint16_t* sample_prefix_scratch = nullptr,
-                        uint16_t* sample_gather_scratch = nullptr,
-                        int sampling_candidates_cap = kSamplingCandidates,
-                        const text::GrammarVocab* grammar_vocab = nullptr,
-                        int prefix_slots = 0, int mtp_depth = 1)
-      : model_(model),
+  GraphEngineAdapter(Model* model, net::CollectiveBus* bus, int rank, int world,
+                     uint16_t* pick_scratch, int64_t vocab, int pick_timeout_ms = 60000,
+                     int batch_min_live = 4, uint16_t* sample_prefix_scratch = nullptr,
+                     uint16_t* sample_gather_scratch = nullptr,
+                     int sampling_candidates_cap = kSamplingCandidates,
+                     const text::GrammarVocab* grammar_vocab = nullptr, int prefix_slots = 0,
+                     int mtp_depth = 1, bool compact_batches = false)
+      : compact_batches_(compact_batches),
+        model_(model),
         bus_(bus),
         rank_(rank),
         world_(world),
@@ -549,7 +548,8 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       for (cudaEvent_t ev : f.end_events)
         if (ev != nullptr) cudaEventDestroy(ev);
     for (auto& f : families_)
-      for (auto* map : f.request_maps) if (map) cudaFreeHost(map);
+      for (auto* map : f.request_maps)
+        if (map) cudaFreeHost(map);
     if (h_verdict_seq_) cudaFreeHost(h_verdict_seq_);
     if (d_verdict_seq_) cudaFree(d_verdict_seq_);
     if (h_stage_seq_) cudaFreeHost(h_stage_seq_);
@@ -1385,8 +1385,8 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     int committed = 0;
     for (size_t q = 0; q < reqs.size(); ++q) {
       const int req = reqs[q];
-      batches.push_back(
-          collect_verdict(req, compact_batches() ? static_cast<int>(q) : req, /*batched=*/true, rows));
+      batches.push_back(collect_verdict(req, compact_batches() ? static_cast<int>(q) : req,
+                                        /*batched=*/true, rows));
       committed += static_cast<int>(batches.back().size());
     }
     if (schedule_ && model_->mtp_enabled())
@@ -1511,8 +1511,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     in.requests = requests;
     in.rows_per_request = rows;
     if (compact_batches()) in.request_map = batch_request_map();
-    in.fed = rows == rows_per_request_ && !compact_batches() ? model_->device_feed(0, rows_per_request_)
-                                       : model_->device_tokens();
+    in.fed = rows == rows_per_request_ && !compact_batches()
+                 ? model_->device_feed(0, rows_per_request_)
+                 : model_->device_tokens();
     in.positions = model_->device_positions();
     in.position_stride = rows;
     if (sampling_) {
@@ -1751,11 +1752,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   }
   bool compact_batches() const {
     if constexpr (requires { Model::kCompactBatches; }) {
-      static const bool enabled = [] {
-        const char* v = std::getenv("DGPP_COMPACT_BATCH");
-        return v == nullptr || std::string(v) != "0";
-      }();
-      return Model::kCompactBatches && enabled && !schedule_;
+      return Model::kCompactBatches && compact_batches_ && !schedule_;
     }
     return false;
   }
@@ -2087,12 +2084,14 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     const int index = batch_index(family);
     if (compact_batches()) {
       for (auto*& map : fam.request_maps) {
-        DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&map), k * sizeof(int32_t), cudaHostAllocDefault));
+        DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&map), k * sizeof(int32_t),
+                                   cudaHostAllocDefault));
         for (int q = 0; q < k; ++q) map[q] = q;
       }
     }
     const auto build = [&](int parity) {
-      set_batch_map_source(compact_batches() ? fam.request_maps[static_cast<size_t>(parity)] : nullptr);
+      set_batch_map_source(compact_batches() ? fam.request_maps[static_cast<size_t>(parity)]
+                                             : nullptr);
       if (mtp) {
         record_batch_mtp(family, rows_per_request_);
         return;
@@ -2241,8 +2240,8 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
           continue;
         std::vector<int32_t>& drafts = drafts_[static_cast<size_t>(req)];
         for (int c = 0; c < depth_; ++c) {
-          const PickVerdict draft =
-              picker_->verdict(1 + c, r.batched ? (compact_batches() ? static_cast<int>(q) : req) : 0);
+          const PickVerdict draft = picker_->verdict(
+              1 + c, r.batched ? (compact_batches() ? static_cast<int>(q) : req) : 0);
           if (draft.rows != 1 || draft.accepted != 1 || draft.next < 0 ||
               draft.next >= vocab_)
             throw std::runtime_error(
@@ -2353,9 +2352,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
               std::to_string(model_->session_position(req)) + " after a " +
               std::to_string(verify.accepted) + "-row step, the armed hop expects " +
               std::to_string(hop + rows_after));
-        arena_.snapshot_post_row0(req, slot, hop,
-                                  batched ? verdict_request * rows : 0,
-                                  rows_after);
+        arena_.snapshot_post_row0(req, slot, hop, batched ? verdict_request * rows : 0, rows_after);
       }
     }
 
@@ -2561,8 +2558,12 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     // (the logits buffer itself holds the draft head's rows now); the
     // snapshot is indexed [slot][row], the scalar and the batch alike.
     const auto gather_row = [&](size_t t) {
-      const float* src = d_verify_logits_ +
-                         (static_cast<size_t>(batched && compact_batches() ? verdict_request : req) * rows_per_request_ + t) * count;
+      const float* src =
+          d_verify_logits_ +
+          (static_cast<size_t>(batched && compact_batches() ? verdict_request : req) *
+               rows_per_request_ +
+           t) *
+              count;
       DGPP_CUDA_OK(cudaMemcpyAsync(h_fallback_row_, src, sizeof(float) * count,
                                    cudaMemcpyDeviceToHost, model_->stream()));
       DGPP_CUDA_OK(cudaStreamSynchronize(model_->stream()));
@@ -2933,6 +2934,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
         live == 1 ? "" : "s", batch_min_live_);
   }
 
+  const bool compact_batches_;
   Model* model_ = nullptr;
   net::CollectiveBus* bus_ = nullptr;
   int rank_ = 0;
@@ -3007,10 +3009,10 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   // every slot where the rows allow — each with its two parities' execs
   // and end events and its own parity clock; the steps each replayed.
   struct BatchFamily {
-    std::array<int32_t*, 2> request_maps{};
     int requests = 0;
     std::array<cudaGraphExec_t, 2> execs{{nullptr, nullptr}};
     std::array<cudaEvent_t, 2> end_events{{nullptr, nullptr}};
+    std::array<int32_t*, 2> request_maps{};
     int parity = 0;
     // The scheduled verify depth: the family's reduced-depth variants
     // [option] (the last option is `execs`) and its replays per option.

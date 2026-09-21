@@ -188,10 +188,8 @@ struct RowSpec {
 // allowed count (0: unconstrained), the words after it the bitmask over
 // [0, vocab_size). A constrained row takes the full path — its greedy
 // argmax must respect the mask too.
-__device__ inline RowSpec row_spec(const SampleSpec* specs, int q,
-                                   const int64_t* positions,
-                                   int position_stride,
-                                   const uint32_t* masks, int mask_stride,
+__device__ inline RowSpec row_spec(const SampleSpec* specs, int q, const int64_t* positions,
+                                   int position_stride, const uint32_t* masks, int mask_stride,
                                    int row, bool draft, const int32_t* request_map) {
   const int req = request_map ? request_map[q] : q;
   RowSpec rs;
@@ -256,24 +254,23 @@ __device__ __forceinline__ size_t source_row(int row, int q, int rows_per_reques
          static_cast<size_t>(pick);
 }
 
-__global__ void __launch_bounds__(kChunkThreads) sample_prepare_kernel(
-    float* __restrict__ logits, int vocab_count, int vocab_begin,
-    int vocab_size, const SampleSpec* __restrict__ specs,
-    int rows_per_request, const int64_t* __restrict__ fed,
-    const int64_t* __restrict__ positions, int position_stride,
-    const int32_t* __restrict__ counts, const float* __restrict__ bias,
-    const uint32_t* __restrict__ masks, int mask_stride,
-    double* __restrict__ maxes, const PickVerdict* __restrict__ row_select,
-    int source_row_stride, const int32_t* request_map) {
+__global__ void __launch_bounds__(kChunkThreads)
+    sample_prepare_kernel(float* __restrict__ logits, int vocab_count, int vocab_begin,
+                          int vocab_size, const SampleSpec* __restrict__ specs,
+                          int rows_per_request, const int64_t* __restrict__ fed,
+                          const int64_t* __restrict__ positions, int position_stride,
+                          const int32_t* __restrict__ counts, const float* __restrict__ bias,
+                          const uint32_t* __restrict__ masks, int mask_stride,
+                          double* __restrict__ maxes, const PickVerdict* __restrict__ row_select,
+                          int source_row_stride, const int32_t* request_map) {
   __shared__ float fred[32];
   const int c = blockIdx.x;
   const int row = blockIdx.y;
   const int q = row / rows_per_request;
   const int req = request_map ? request_map[q] : q;
   const int t = row % rows_per_request;
-  const RowSpec rs =
-      row_spec(specs, q, positions, position_stride, masks, mask_stride, row,
-               row_select != nullptr, request_map);
+  const RowSpec rs = row_spec(specs, q, positions, position_stride, masks, mask_stride, row,
+                              row_select != nullptr, request_map);
   if (!rs.sampled) return;
   const int nchunks = gridDim.x;
   float* slice = logits + source_row(row, q, rows_per_request, row_select,
@@ -283,9 +280,8 @@ __global__ void __launch_bounds__(kChunkThreads) sample_prepare_kernel(
   if (i < vocab_count) {
     float l = slice[i];
     if (rs.penalized && counts != nullptr) {
-      const int32_t cnt =
-          context_count(counts + static_cast<size_t>(req) * vocab_size,
-                        vocab_begin + i, fed, q * rows_per_request, t);
+      const int32_t cnt = context_count(counts + static_cast<size_t>(req) * vocab_size,
+                                        vocab_begin + i, fed, q * rows_per_request, t);
       if (cnt != 0) {
         l = penalize(l, cnt, rs.spec);
         slice[i] = l;
@@ -316,21 +312,21 @@ __global__ void __launch_bounds__(kChunkThreads) sample_prepare_kernel(
 // order — the slice max, the chunk's terms exp_d(scaled - max) summed by
 // recursive halving (sample::chunked_exp_sum's inner tree).
 // ---------------------------------------------------------------------------
-__global__ void __launch_bounds__(kChunkThreads) sample_partials_kernel(
-    const float* __restrict__ logits, int vocab_count,
-    const SampleSpec* __restrict__ specs, int rows_per_request,
-    const int64_t* __restrict__ positions, int position_stride,
-    const uint32_t* __restrict__ masks, int mask_stride,
-    const double* __restrict__ maxes, double* __restrict__ partials,
-    const PickVerdict* __restrict__ row_select, int source_row_stride, const int32_t* request_map) {
+__global__ void __launch_bounds__(kChunkThreads)
+    sample_partials_kernel(const float* __restrict__ logits, int vocab_count,
+                           const SampleSpec* __restrict__ specs, int rows_per_request,
+                           const int64_t* __restrict__ positions, int position_stride,
+                           const uint32_t* __restrict__ masks, int mask_stride,
+                           const double* __restrict__ maxes, double* __restrict__ partials,
+                           const PickVerdict* __restrict__ row_select, int source_row_stride,
+                           const int32_t* request_map) {
   __shared__ double terms[kChunkThreads];
   __shared__ float fred[32];
   const int c = blockIdx.x;
   const int row = blockIdx.y;
   const int q = row / rows_per_request;
-  const RowSpec rs =
-      row_spec(specs, q, positions, position_stride, masks, mask_stride, row,
-               row_select != nullptr, request_map);
+  const RowSpec rs = row_spec(specs, q, positions, position_stride, masks, mask_stride, row,
+                              row_select != nullptr, request_map);
   if (!rs.sampled) return;
   const int nchunks = gridDim.x;
   float m = -INFINITY;
@@ -495,15 +491,13 @@ constexpr int kListCap = 2048;
 // or the greedy row's argmax; the digest carry.
 // ---------------------------------------------------------------------------
 __global__ void __launch_bounds__(kLocalThreads) sample_local_kernel(
-    const float* __restrict__ logits, int rows, int vocab_count,
-    int vocab_begin, int rank, int world, int candidates,
-    const SampleSpec* __restrict__ specs, int rows_per_request,
-    const int64_t* __restrict__ positions, int position_stride,
-    const uint32_t* __restrict__ masks, int mask_stride,
-    const double* __restrict__ maxes, const double* __restrict__ partials,
-    int nchunks, const uint64_t* __restrict__ carry_digest,
-    uint16_t* __restrict__ table, PickLocal* __restrict__ locals,
-    const PickVerdict* __restrict__ row_select, int source_row_stride, const int32_t* request_map) {
+    const float* __restrict__ logits, int rows, int vocab_count, int vocab_begin, int rank,
+    int world, int candidates, const SampleSpec* __restrict__ specs, int rows_per_request,
+    const int64_t* __restrict__ positions, int position_stride, const uint32_t* __restrict__ masks,
+    int mask_stride, const double* __restrict__ maxes, const double* __restrict__ partials,
+    int nchunks, const uint64_t* __restrict__ carry_digest, uint16_t* __restrict__ table,
+    PickLocal* __restrict__ locals, const PickVerdict* __restrict__ row_select,
+    int source_row_stride, const int32_t* request_map) {
   __shared__ uint32_t hist[kRadixBins];
   __shared__ int found[3];
   __shared__ int sel_count;
@@ -523,9 +517,8 @@ __global__ void __launch_bounds__(kLocalThreads) sample_local_kernel(
   const int tid = threadIdx.x;
   const size_t group = device_sample_rank_group_slots(candidates);
   const size_t row_slots = static_cast<size_t>(world) * group;
-  const RowSpec rs =
-      row_spec(specs, q, positions, position_stride, masks, mask_stride, row,
-               row_select != nullptr, request_map);
+  const RowSpec rs = row_spec(specs, q, positions, position_stride, masks, mask_stride, row,
+                              row_select != nullptr, request_map);
   uint16_t* row_base = table + static_cast<size_t>(row) * row_slots;
   uint16_t* mine = row_base + static_cast<size_t>(rank) * group;
   const float* slice = logits + source_row(row, q, rows_per_request, row_select,
@@ -1248,16 +1241,12 @@ constexpr size_t kVerdictDynamicSmemBytes =
     kVerdictSmemQMass + sizeof(float) * kSampleProposalSlots * kSampleMaxCandidates;
 
 __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
-    const uint16_t* __restrict__ table, int rows, int world, int candidates,
-    int vocab_size, SampleSpec* __restrict__ specs, int rows_per_request,
-    const int64_t* __restrict__ fed, const int64_t* __restrict__ positions,
-    int position_stride, int32_t* __restrict__ counts,
-    const uint32_t* __restrict__ masks, int mask_stride,
-    PickVerdict* __restrict__ verdicts,
-    PickVerdict* __restrict__ device_verdicts,
-    SampleOutcome* __restrict__ outcomes,
-    const DraftProposal* __restrict__ proposals_in,
-    DraftProposal* __restrict__ proposals_out,
+    const uint16_t* __restrict__ table, int rows, int world, int candidates, int vocab_size,
+    SampleSpec* __restrict__ specs, int rows_per_request, const int64_t* __restrict__ fed,
+    const int64_t* __restrict__ positions, int position_stride, int32_t* __restrict__ counts,
+    const uint32_t* __restrict__ masks, int mask_stride, PickVerdict* __restrict__ verdicts,
+    PickVerdict* __restrict__ device_verdicts, SampleOutcome* __restrict__ outcomes,
+    const DraftProposal* __restrict__ proposals_in, DraftProposal* __restrict__ proposals_out,
     DraftProposal* __restrict__ proposals_out_host, int draft_index, const int32_t* request_map) {
   // One row's split composite keys at a time (hi = ~primary, lo = id; the
   // empty slot is the maximal key) — the merge is per row, and T rows of
@@ -1301,8 +1290,7 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
   const int row0 = q * rows_per_request;
   const int tid = threadIdx.x;
   const size_t group = device_sample_rank_group_slots(candidates);
-  const bool active =
-      req >= 0 && (positions == nullptr || positions[q * position_stride] >= 0);
+  const bool active = req >= 0 && (positions == nullptr || positions[q * position_stride] >= 0);
   if (!active) {
     if (tid == 0) {
       PickVerdict v;
@@ -1583,8 +1571,7 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
         // The draft pick (one row per request) keeps the set it drew from.
         DraftProposal* out =
             (proposals_out != nullptr && rows_per_request == 1)
-                ? proposals_out + static_cast<size_t>(req) * kSampleProposalSlots +
-                      draft_index
+                ? proposals_out + static_cast<size_t>(req) * kSampleProposalSlots + draft_index
                 : nullptr;
         if (out != nullptr) out->n = 0;
         const Decision d =
@@ -1596,9 +1583,8 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
           out->token = d.resolved ? d.token : kNoId;
           if (!d.resolved) out->n = 0;
           if (proposals_out_host != nullptr) {
-            DraftProposal* mirror = proposals_out_host +
-                                    static_cast<size_t>(req) * kSampleProposalSlots +
-                                    draft_index;
+            DraftProposal* mirror =
+                proposals_out_host + static_cast<size_t>(req) * kSampleProposalSlots + draft_index;
             mirror->n = out->n;
             mirror->token = out->token;
             for (int e = 0; e < out->n; ++e) {
@@ -1722,17 +1708,14 @@ __global__ void adjust_count_kernel(int32_t* __restrict__ counts, int64_t token,
 
 }  // namespace
 
-void device_sample_local(float* logits, int rows, int vocab_count,
-                      int vocab_begin, int vocab_size, int rank, int world,
-                      int candidates, const SampleSpec* specs,
-                      int rows_per_request, const int64_t* fed,
-                      const int64_t* positions, int position_stride,
-                      const int32_t* counts, const float* bias,
-                      const uint32_t* masks,
-                      int mask_stride, const uint64_t* carry_digest,
-                      uint16_t* table, PickLocal* locals, double* scratch,
-                      cudaStream_t stream, const PickVerdict* row_select,
-                      int source_row_stride, const int32_t* request_map) {
+void device_sample_local(float* logits, int rows, int vocab_count, int vocab_begin, int vocab_size,
+                         int rank, int world, int candidates, const SampleSpec* specs,
+                         int rows_per_request, const int64_t* fed, const int64_t* positions,
+                         int position_stride, const int32_t* counts, const float* bias,
+                         const uint32_t* masks, int mask_stride, const uint64_t* carry_digest,
+                         uint16_t* table, PickLocal* locals, double* scratch, cudaStream_t stream,
+                         const PickVerdict* row_select, int source_row_stride,
+                         const int32_t* request_map) {
   check_common(rows, world, rank, candidates, rows_per_request,
                "glm_sample_local");
   if (row_select != nullptr &&
@@ -1764,20 +1747,18 @@ void device_sample_local(float* logits, int rows, int vocab_count,
   double* partials = scratch + static_cast<size_t>(rows) * nchunks;
   const dim3 chunk_grid(static_cast<unsigned>(nchunks), static_cast<unsigned>(rows));
   sample_prepare_kernel<<<chunk_grid, kChunkThreads, 0, stream>>>(
-      logits, vocab_count, vocab_begin, vocab_size, specs, rows_per_request,
-      fed, positions, position_stride, counts, bias, masks, mask_stride, maxes,
-      row_select, source_row_stride, request_map);
+      logits, vocab_count, vocab_begin, vocab_size, specs, rows_per_request, fed, positions,
+      position_stride, counts, bias, masks, mask_stride, maxes, row_select, source_row_stride,
+      request_map);
   DGPP_CUDA_OK(cudaGetLastError());
   sample_partials_kernel<<<chunk_grid, kChunkThreads, 0, stream>>>(
-      logits, vocab_count, specs, rows_per_request, positions,
-      position_stride, masks, mask_stride, maxes, partials, row_select,
-      source_row_stride, request_map);
+      logits, vocab_count, specs, rows_per_request, positions, position_stride, masks, mask_stride,
+      maxes, partials, row_select, source_row_stride, request_map);
   DGPP_CUDA_OK(cudaGetLastError());
   sample_local_kernel<<<rows, kLocalThreads, 0, stream>>>(
-      logits, rows, vocab_count, vocab_begin, rank, world, candidates, specs,
-      rows_per_request, positions, position_stride, masks, mask_stride, maxes,
-      partials, nchunks, carry_digest, table, locals, row_select,
-      source_row_stride, request_map);
+      logits, rows, vocab_count, vocab_begin, rank, world, candidates, specs, rows_per_request,
+      positions, position_stride, masks, mask_stride, maxes, partials, nchunks, carry_digest, table,
+      locals, row_select, source_row_stride, request_map);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
@@ -1793,17 +1774,15 @@ void device_sample_verdict_prepare() {
   });
 }
 
-void device_sample_verdict(const uint16_t* table, int rows, int world, int rank,
-                        int candidates, int vocab_size, SampleSpec* specs,
-                        int requests, int rows_per_request, const int64_t* fed,
-                        const int64_t* positions, int position_stride,
-                        int32_t* counts, const uint32_t* masks, int mask_stride,
-                        PickVerdict* verdicts,
-                        PickVerdict* device_verdicts,
-                        SampleOutcome* outcomes, uint64_t* carry_digest,
-                        cudaStream_t stream, const DraftProposal* proposals_in,
-                        DraftProposal* proposals_out,
-                        DraftProposal* proposals_out_host, int draft_index, const int32_t* request_map) {
+void device_sample_verdict(const uint16_t* table, int rows, int world, int rank, int candidates,
+                           int vocab_size, SampleSpec* specs, int requests, int rows_per_request,
+                           const int64_t* fed, const int64_t* positions, int position_stride,
+                           int32_t* counts, const uint32_t* masks, int mask_stride,
+                           PickVerdict* verdicts, PickVerdict* device_verdicts,
+                           SampleOutcome* outcomes, uint64_t* carry_digest, cudaStream_t stream,
+                           const DraftProposal* proposals_in, DraftProposal* proposals_out,
+                           DraftProposal* proposals_out_host, int draft_index,
+                           const int32_t* request_map) {
   check_common(rows, world, rank, candidates, rows_per_request,
                "glm_sample_verdict");
   if (proposals_out != nullptr &&
@@ -1823,10 +1802,9 @@ void device_sample_verdict(const uint16_t* table, int rows, int world, int rank,
     throw std::invalid_argument("glm_sample_verdict: position stride");
   device_sample_verdict_prepare();
   sample_verdict_kernel<<<requests, kVerdictThreads, kVerdictDynamicSmemBytes, stream>>>(
-      table, rows, world, candidates, vocab_size, specs, rows_per_request,
-      fed, positions, position_stride, counts, masks, mask_stride, verdicts,
-      device_verdicts, outcomes, proposals_in, proposals_out,
-      proposals_out_host, draft_index, request_map);
+      table, rows, world, candidates, vocab_size, specs, rows_per_request, fed, positions,
+      position_stride, counts, masks, mask_stride, verdicts, device_verdicts, outcomes,
+      proposals_in, proposals_out, proposals_out_host, draft_index, request_map);
   DGPP_CUDA_OK(cudaGetLastError());
   const uint16_t* digests =
       table + static_cast<size_t>(rows) * world *

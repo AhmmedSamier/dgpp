@@ -2230,9 +2230,11 @@ digest exits with an error. The stop record is handled between ticks.
 and a family of batched variants. The graph engine uses the smallest
 available batch covering the active slot IDs once the live-request count
 reaches `graph_batch_min_live`; the default threshold is
-`min(2, max_concurrency)`. For Qwen at fixed MTP depth, a compact group-to-request map selects by
+`min(2, max_concurrency)`. For Qwen at fixed MTP depth with `engine.compact_batches: true`, a compact
+group-to-request map selects by
 live count and keeps KV/recurrent state in its original physical slots.
-Each captured parity has a separate pinned map, uploaded by a kernel at
+The setting defaults off and is journaled by rank 0 before graph construction.
+Each captured parity has a separate pinned map, uploaded at
 replay entry; tokens are gathered to compact rows and the verdict, draft
 feeds, sampling state and cache-hop snapshots map back to physical slots.
 The host can stage the next map while the previous replay finishes. Other

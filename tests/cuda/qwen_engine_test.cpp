@@ -57,6 +57,11 @@ void require(bool cond, const std::string& what) {
   if (!cond) throw std::runtime_error(what);
 }
 
+bool test_compaction() {
+  const char* value = std::getenv("DGPP_TEST_COMPACT_BATCH");
+  return !value || std::string(value) != "0";
+}
+
 int wait_timeout_ms() {
   const char* v = std::getenv("DGPP_TEST_WAIT_TIMEOUT_MS");
   return v ? std::atoi(v) : 60000;
@@ -206,8 +211,9 @@ void rank_work(int r, const QwenTextConfig& cfg, const std::string& dir, const s
     arrive_once();
     EagerEngineAdapter<QwenModel> eager_engine(
         &eager, kSlots, dgpp::make_fabric_pick(bus, r, kWorld, scratch, cfg.vocab_size, wait_timeout_ms()));
-    GraphEngineAdapter<QwenModel> graph_engine(&graph, bus, r, kWorld, scratch, cfg.vocab_size,
-                                               wait_timeout_ms(), /*batch_min_live=*/2);
+    GraphEngineAdapter<QwenModel> graph_engine(
+        &graph, bus, r, kWorld, scratch, cfg.vocab_size, wait_timeout_ms(), /*batch_min_live=*/2,
+        nullptr, nullptr, dgpp::kSamplingCandidates, nullptr, 0, 1, test_compaction());
 
     // 1. The eager engine at world 2.
     out->ea = solo(eager_engine, 0, A, kSteps);
@@ -285,10 +291,11 @@ void rank_work_mtp(int r, const QwenTextConfig& cfg, const std::string& dir, con
     out->eb = solo(eager_engine, 1, B, kSteps);
     out->ec = solo(eager_engine, 2, C, kSteps);
     {
-      GraphEngineAdapter<QwenModel> mtp_engine(&mtp, bus, r, kWorld, scratch, cfg.vocab_size, wait_timeout_ms(),
-                                               /*batch_min_live=*/2, /*prefix_scratch=*/nullptr,
-                                               /*gather_scratch=*/nullptr, /*candidates=*/0, /*grammar=*/nullptr,
-                                               /*prefix_slots=*/0, /*mtp_depth=*/depth);
+      GraphEngineAdapter<QwenModel> mtp_engine(
+          &mtp, bus, r, kWorld, scratch, cfg.vocab_size, wait_timeout_ms(),
+          /*batch_min_live=*/2, /*prefix_scratch=*/nullptr,
+          /*gather_scratch=*/nullptr, /*candidates=*/0, /*grammar=*/nullptr,
+          /*prefix_slots=*/0, /*mtp_depth=*/depth, test_compaction());
       out->ma.push_back(mtp_engine.prefill(0, A));
       mtp_engine.reserve(0, static_cast<int64_t>(A.size()) + kSteps + 2 + depth);
       while (out->ma.size() < static_cast<size_t>(kSteps) + 1) {
@@ -336,10 +343,11 @@ void rank_work_mtp(int r, const QwenTextConfig& cfg, const std::string& dir, con
       mtp_engine.close(2);
       mtp_engine.drain();
       if (depth == 2) {
-        const bool compact = !std::getenv("DGPP_COMPACT_BATCH") || std::string(std::getenv("DGPP_COMPACT_BATCH")) != "0";
+        const bool compact = test_compaction();
         require(compact ? mtp_engine.batch_family_steps(0) > fitting_steps
                         : mtp_engine.batch_family_steps(0) == fitting_steps,
-                "sparse slots compact into the fitting family, or preserve scalar fallback when disabled");
+                "sparse slots compact into the fitting family, or preserve scalar fallback when "
+                "disabled");
       }
     }
     cudaFreeHost(scratch);
@@ -455,7 +463,9 @@ DGPP_TEST(qwen_engines_loopback_world_2_mtp_depth2_graph_matches_plain_decode) {
 }
 
 DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
-  const int sample_cap = std::getenv("DGPP_TEST_COMPACT_SAMPLING") ? std::atoi(std::getenv("DGPP_TEST_COMPACT_SAMPLING")) : 0;
+  const int sample_cap = std::getenv("DGPP_TEST_COMPACT_SAMPLING")
+                             ? std::atoi(std::getenv("DGPP_TEST_COMPACT_SAMPLING"))
+                             : 0;
   constexpr int slots = 8;
   constexpr int mtp_depth = 1;
   const QwenTextConfig cfg = qwenfx::tiny_config();
@@ -481,17 +491,20 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
                                  sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld), cudaHostAllocDefault));
       if (sample_cap) {
         DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&prefix_scratch),
-            2 * dgpp::fabric_sampling_prefix_scratch_elems(kWorld), cudaHostAllocDefault));
+                                   2 * dgpp::fabric_sampling_prefix_scratch_elems(kWorld),
+                                   cudaHostAllocDefault));
         DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&gather_scratch),
-            2 * dgpp::sampling_gather_scratch_elems(cfg.vocab_size), cudaHostAllocDefault));
+                                   2 * dgpp::sampling_gather_scratch_elems(cfg.vocab_size),
+                                   cudaHostAllocDefault));
       }
       arrived = true;
       barrier.arrive_and_wait();
       EagerEngineAdapter<QwenModel> plain(&eager, 8,
           dgpp::make_fabric_pick(bus, rank, kWorld, scratch, cfg.vocab_size, wait_timeout_ms()));
       GraphEngineAdapter<QwenModel> graph(&model, bus, rank, kWorld, scratch, cfg.vocab_size,
-                                           wait_timeout_ms(), /*batch_min_live=*/2, prefix_scratch, gather_scratch, sample_cap, nullptr,
-                                           /*prefix_slots=*/2, mtp_depth);
+                                          wait_timeout_ms(), /*batch_min_live=*/2, prefix_scratch,
+                                          gather_scratch, sample_cap, nullptr,
+                                          /*prefix_slots=*/2, mtp_depth, test_compaction());
       if (sample_cap)
         for (int req = 0; req < slots; ++req)
           graph.configure_sampling(req, dgpp::sample::greedy_params(), 0);
@@ -573,7 +586,7 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
         require(graph.advance_prefill(1).first_token < 0, "the long prefill yields");
         const auto compact_steps = graph.batch_family_steps(0);
         (void)graph.step_batch({0, slots - 1});
-        if (!std::getenv("DGPP_COMPACT_BATCH") || std::string(std::getenv("DGPP_COMPACT_BATCH")) != "0") {
+        if (test_compaction()) {
           require(graph.batch_family_steps(0) == compact_steps + 1,
                   "sparse physical slots use the two-request graph");
         }
@@ -630,14 +643,18 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
             const auto compact_steps = graph.batch_family_steps(0);
             auto next = graph.step_batch(order);
             for (int q = 0; q < 2; ++q) {
-              const auto& tokens = next[reverse ? 1-q : q];
+              const auto& tokens = next[reverse ? 1 - q : q];
               generated[q].insert(generated[q].end(), tokens.begin(), tokens.end());
             }
-            require(graph.batch_family_steps(0) == compact_steps + 1, "sampled sparse requests use compact bucket");
+            require(graph.batch_family_steps(0) == compact_steps + 1,
+                    "sampled sparse requests use compact bucket");
           }
           for (auto& g : generated) g.resize(24);
-          if (reference.empty()) reference = generated;
-          else require(generated == reference, "sampled transcripts survive physical remapping and slot reuse");
+          if (reference.empty())
+            reference = generated;
+          else
+            require(generated == reference,
+                    "sampled transcripts survive physical remapping and slot reuse");
           for (int req : ids) graph.close(req);
         }
       }
