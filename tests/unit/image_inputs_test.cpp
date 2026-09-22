@@ -2,6 +2,8 @@
 
 #include "models/qwen/vision_config.hpp"
 
+#include <array>
+
 #include <algorithm>
 #include <cmath>
 
@@ -118,6 +120,34 @@ DGPP_TEST(image_png_decode_and_detail_validation) {
       require(e.param == "image_url.detail", "precise image detail error");
     }
   }
+}
+
+DGPP_TEST(image_webp_decode_matches_its_pixels_and_keeps_the_magic_check) {
+  using V = dgpp::minijson::Value;
+  // 4x2 lossless: columns 0-1 red, columns 2-3 blue. Small enough to embed, and
+  // asymmetric so a decode that returns one flat colour cannot pass.
+  const auto webp = V::make_string(
+      "data:image/webp;base64,UklGRiIAAABXRUJQVlA4TBYAAAAvA0AAAA8Q87//8x8OFAIIgIImov/x");
+  const auto image = dgpp::serve::prepare_glm_image(V::make_object({{"url", webp}}), "image_url");
+  // A 4x2 source keeps its 2:1 aspect on the 28-pixel grid: 6x3 cells, 18
+  // tokens, rather than the square canvas a 1x1 source lands on.
+  require(image.width == 168 && image.height == 84 && image.tokens == 18, "webp canvas");
+  // Sample the middle of each half after the resize to 112x112.
+  const auto pixel = [&image](int x, int y) {
+    const size_t at = (static_cast<size_t>(y) * image.width + static_cast<size_t>(x)) * 3;
+    return std::array<int, 3>{image.rgb[at], image.rgb[at + 1], image.rgb[at + 2]};
+  };
+  const auto left = pixel(image.width / 4, image.height / 2);
+  const auto right = pixel(3 * image.width / 4, image.height / 2);
+  require(left[0] > 200 && left[1] < 60 && left[2] < 60, "webp left half is red");
+  require(right[2] > 200 && right[0] < 60 && right[1] < 60, "webp right half is blue");
+
+  // The magic check must still hold now that a third format is accepted.
+  const auto mismatched = V::make_string(
+      "data:image/png;base64,UklGRiIAAABXRUJQVlA4TBYAAAAvA0AAAA8Q87//8x8OFAIIgIImov/x");
+  rejects([&] { dgpp::serve::prepare_glm_image(V::make_object({{"url", mismatched}}), "image_url"); });
+  const auto gif = V::make_string("data:image/gif;base64,R0lGODlhAQABAAAAACw=");
+  rejects([&] { dgpp::serve::prepare_glm_image(V::make_object({{"url", gif}}), "image_url"); });
 }
 
 DGPP_TEST(image_qwen_smart_resize_rounds_without_padding) {

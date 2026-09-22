@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <vector>
+#include <string>
+#include <cstdint>
 
 #include "common/base64.hpp"
 #define STB_IMAGE_IMPLEMENTATION
@@ -11,6 +14,11 @@
 #define STBI_NO_STDIO
 #define STBI_MAX_DIMENSIONS 16384
 #include "../../third_party/stb/stb_image.h"
+
+// WebP comes from the same single-file tradition as stb_image and needs no new
+// build dependency; it decodes VP8, VP8L and alpha.
+#define SIMPLEWEBP_IMPLEMENTATION
+#include "../../third_party/simplewebp/simplewebp.h"
 
 namespace dgpp::serve {
 namespace {
@@ -165,6 +173,41 @@ ImageInput resize_glm_image(const uint8_t* rgb, int width, int height, int max_t
   pp.max_tokens = max_tokens;
   return resize_image(rgb, width, height, pp);
 }
+// Decode a WebP bitstream to packed 8-bit RGB. Alpha is composited on white,
+// which is what libwebp produces when asked for plain RGB.
+void decode_webp_rgb(const std::string& data, std::vector<uint8_t>* rgb, int* width,
+                     int* height) {
+  simplewebp* image = nullptr;
+  if (simplewebp_load_from_memory(const_cast<char*>(data.data()), data.size(), nullptr, &image) !=
+          SIMPLEWEBP_NO_ERROR ||
+      image == nullptr)
+    throw std::invalid_argument("cannot decode WebP image");
+  struct Guard {
+    simplewebp* image;
+    ~Guard() { simplewebp_unload(image); }
+  } guard{image};
+
+  size_t w = 0, h = 0;
+  simplewebp_get_dimensions(image, &w, &h);
+  if (w < 1 || h < 1 || static_cast<int64_t>(w) * h > 32 * 1024 * 1024)
+    throw std::invalid_argument("invalid image or image exceeds 32 megapixels");
+
+  std::vector<uint8_t> rgba(static_cast<size_t>(w) * h * 4);
+  if (simplewebp_decode(image, rgba.data(), nullptr) != SIMPLEWEBP_NO_ERROR)
+    throw std::invalid_argument("cannot decode WebP image");
+
+  rgb->resize(static_cast<size_t>(w) * h * 3);
+  for (size_t i = 0, n = static_cast<size_t>(w) * h; i < n; ++i) {
+    const uint32_t a = rgba[i * 4 + 3];
+    for (int c = 0; c < 3; ++c) {
+      const uint32_t v = rgba[i * 4 + c];
+      (*rgb)[i * 3 + c] = static_cast<uint8_t>(a == 255 ? v : (v * a + 255 * (255 - a) + 127) / 255);
+    }
+  }
+  *width = static_cast<int>(w);
+  *height = static_cast<int>(h);
+}
+
 ImageInput prepare_image(const minijson::Value& value, const std::string& param,
                          const ImagePreprocess& pp) {
   const auto* url = value.find("url");
@@ -179,17 +222,27 @@ ImageInput prepare_image(const minijson::Value& value, const std::string& param,
   }
   const auto s = url->as_string();
   const bool png = s.starts_with("data:image/png;base64,"),
-             jpeg = s.starts_with("data:image/jpeg;base64,");
-  if (!png && !jpeg)
+             jpeg = s.starts_with("data:image/jpeg;base64,"),
+             webp = s.starts_with("data:image/webp;base64,");
+  if (!png && !jpeg && !webp)
     throw ImageInputError(
-        "use a base64 data URI with image/png or image/jpeg; remote URLs are not supported",
+        "use a base64 data URI with image/png, image/jpeg or image/webp; "
+        "remote URLs are not supported",
         param + ".url");
   try {
     const std::string data = decode_base64(s.substr(s.find(',') + 1), 20 * 1024 * 1024);
     if ((png && !std::string_view(data).starts_with("\x89PNG\r\n\x1a\n")) ||
-        (jpeg && !std::string_view(data).starts_with("\xff\xd8\xff")))
+        (jpeg && !std::string_view(data).starts_with("\xff\xd8\xff")) ||
+        (webp && !(std::string_view(data).size() >= 12 &&
+                   std::string_view(data).substr(0, 4) == "RIFF" &&
+                   std::string_view(data).substr(8, 4) == "WEBP")))
       throw std::invalid_argument("image MIME type does not match its bytes");
     int w = 0, h = 0, channels = 0;
+    if (webp) {
+      std::vector<uint8_t> rgb;
+      decode_webp_rgb(data, &rgb, &w, &h);
+      return resize_image(rgb.data(), w, h, spec);
+    }
     const auto* bytes = reinterpret_cast<const stbi_uc*>(data.data());
     if (!stbi_info_from_memory(bytes, static_cast<int>(data.size()), &w, &h, &channels) || w < 1 ||
         h < 1 || static_cast<int64_t>(w) * h > 32 * 1024 * 1024)
