@@ -94,6 +94,7 @@
 #include "serve/generation_service.hpp"
 #include "serve/frontend.hpp"
 #include "serve/glm_vision_frontend.hpp"
+#include "serve/qwen_vision_frontend.hpp"
 #include "serve/http_server.hpp"
 
 namespace fs = std::filesystem;
@@ -786,10 +787,24 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
     tpl.emplace(dgpp::text::ChatTemplate::load((fs::path(ckpt) / "chat_template.jinja").string()));
     template_hash = tpl->source_hash();
     DGPP_LOG_INFO("serve: tokenizer {:#x}, template {:#x} loaded", tok.revision_hash(), template_hash);
-    if (family_name == "glm5" && engine->supports_images())
-      frontend = std::make_unique<dgpp::serve::GlmVisionFrontend>(&tok, &*tpl);
-    else
-      frontend = std::make_unique<dgpp::serve::TextFrontend>(&tok, &*tpl);
+    // A family whose engine carries a vision tower serves images with it: the
+    // same template, with each image_url part replaced by the checkpoint's own
+    // delimiters and one pad token per visual token. The delimiter ids come
+    // from the checkpoint config, so nothing here is model-specific but the
+    // family's processor geometry, which the spec carries.
+    std::unique_ptr<dgpp::serve::ModelFrontend> vision_frontend;
+    if (engine->supports_images()) {
+      const auto ids = engine->image_token_ids();
+      if (family_name == "glm5")
+        vision_frontend = std::make_unique<dgpp::serve::GlmVisionFrontend>(&tok, &*tpl, ids);
+      else if (family_name == "qwen4_exp")
+        vision_frontend = std::make_unique<dgpp::serve::QwenVisionFrontend>(&tok, &*tpl, ids);
+    }
+    frontend = vision_frontend ? std::move(vision_frontend)
+                               : std::make_unique<dgpp::serve::TextFrontend>(&tok, &*tpl);
+    if (engine->supports_images())
+      DGPP_LOG_INFO("serve: image inputs enabled ({} visual tokens per image max)",
+                    dgpp::kMaxImageTokens);
   }
 
   dgpp::serve::ServiceConfig scfg;

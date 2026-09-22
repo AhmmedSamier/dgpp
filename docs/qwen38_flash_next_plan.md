@@ -655,8 +655,18 @@ the first client, gated by identical transcripts and unchanged step times on
 the fabric. Kernels, binding tables, loaders and the walk itself stay
 per-model.
 
-**D8 — Text only.** The vision tower (1.1 GiB) is not loaded; image inputs
-are refused at the API, as for GLM.
+**D8 — Multimodal, with the vision tower loaded.** The checkpoint is
+`Qwen4ExpForConditionalGeneration` with `language_model_only: false`: it ships
+a Qwen3-VL-style BF16 tower (`model.visual.*`, ~0.9 GB, 27 blocks, `patch 16`,
+`spatial_merge_size 2`, `out_hidden_size` equal to the text hidden size, and
+an empty `deepstack_visual_indexes`). DGPP serves it: `vision_config` and the
+three image token ids are parsed with the text config, the tower runs on image
+prefills only, and its rows replace the embedding at the prompt's
+`image_token_id` positions. `docs/vision.md` carries the geometry, the
+deviations still open (single-frame images, one-dimensional positions until the
+three-axis mRoPE positions land) and the parity harness. A
+`language_model_only` export has no `vision_config`, and the served model is
+text-only then.
 
 **D9 — Numerics and parity method.** The reference is the transformers
 modular implementation; parity is established module by module with host

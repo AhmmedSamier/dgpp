@@ -108,10 +108,11 @@ record the modes measured for each deployment.
   `logit_bias` and usage details; plus model, health and metrics endpoints.
   See the [API compatibility profile and live prefill metrics](docs/openai-compatibility.md)
   for supported options and model-dependent limitations.
-- **GLM-5.3-Flash image inputs**: PNG/JPEG data URIs in Chat Completions,
-  using the checkpoint's native vision encoder. Multiple images, streaming
-  and MTP work together, with image-aware prefix caching; see
-  [image inputs](docs/vision.md) for examples and memory requirements.
+- **Image inputs**: PNG/JPEG data URIs in Chat Completions for GLM-5.3-Flash
+  and Qwen3.8-Flash-Next, using each checkpoint's native vision encoder.
+  Multiple images, streaming and MTP work together, with image-aware prefix
+  caching; see [image inputs](docs/vision.md) for the geometry each family's
+  processor uses, examples and memory requirements.
 - **Deterministic across ranks**: admissions journaled from the head, every
   tick's operation-stream digest checked on every peer, and all ranks'
   complete streams compared at shutdown.

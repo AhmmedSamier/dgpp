@@ -172,6 +172,12 @@ class GlmDiagnosticModel : public PrefillReporting {
   // parity harness runs engine and reference on SEPARATE instances.
   Outputs session_prefill(int req, const std::vector<int64_t>& prompt_ids);
   bool supports_images() const { return vision_ != nullptr; }
+  // The pad token the frontend expands one per visual token (config.json).
+  // The three delimiters, for the serving frontend that renders them.
+  ImageTokens image_tokens() const { return cfg_.image_tokens(); }
+  int64_t image_pad_id() const {
+    return cfg_.vision ? cfg_.vision->tokens.pad : static_cast<int64_t>(154854);
+  }
   Outputs session_prefill_images(int req, const std::vector<int64_t>& prompt_ids,
                                  const std::vector<ImageInput>& images);
 

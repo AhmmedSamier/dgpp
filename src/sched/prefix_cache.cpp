@@ -9,7 +9,7 @@ namespace dgpp::sched {
 namespace {
 bool same_image(const ImageInput& a, const ImageInput& b) {
   return a.offset == b.offset && a.tokens == b.tokens && a.width == b.width &&
-         a.height == b.height && a.rgb == b.rgb;
+         a.height == b.height && a.grid == b.grid && a.rgb == b.rgb;
 }
 bool same_image_key(const PrefixCache::ImageKey& a, const PrefixCache::ImageKey& b) {
   return a.input == b.input || (a.hash == b.hash && same_image(*a.input, *b.input));
@@ -28,6 +28,7 @@ PrefixCache::Images PrefixCache::image_keys(const std::vector<ImageInput>& image
     h = extend_hash(h, image.tokens);
     h = extend_hash(h, image.width);
     h = extend_hash(h, image.height);
+    h = extend_hash(h, image.grid);
     for (uint8_t byte : image.rgb) h = (h ^ byte) * 0x100000001b3ull;
     std::shared_ptr<const ImageInput> input;
     // Repeated conversation turns share the existing immutable image data.

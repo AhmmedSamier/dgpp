@@ -177,6 +177,8 @@ std::string encode_journal_tick(const GenerationService::PassEvents& events) {
           out += ',';
           append_json_int(&out, im.height);
           out += ',';
+          append_json_int(&out, im.grid);
+          out += ',';
           append_json_string(
               &out, encode_base64(std::string_view(reinterpret_cast<const char*>(im.rgb.data()),
                                                    im.rgb.size())));
@@ -694,21 +696,23 @@ JournalRecord decode_journal_line(std::string_view line) {
           throw std::runtime_error("journal: invalid image list");
         size_t image_bytes = 0;
         for (const auto& entry : images->items()) {
-          if (!entry.is_array() || entry.items().size() != 5)
+          if (!entry.is_array() || (entry.items().size() != 5 && entry.items().size() != 6))
             throw std::runtime_error("journal: invalid image entry");
           const auto& a = entry.items();
-          for (int j = 0; j < 4; ++j)
+          for (size_t j = 0; j + 1 < a.size(); ++j)
             if (!a[j].is_number() || !std::isfinite(a[j].as_double()) || a[j].as_double() < 0 ||
                 a[j].as_double() > INT32_MAX || a[j].as_double() != std::floor(a[j].as_double()))
               throw std::runtime_error("journal: invalid image dimension or span");
-          if (!a[4].is_string()) throw std::runtime_error("journal: invalid image pixels");
+          if (!a.back().is_string()) throw std::runtime_error("journal: invalid image pixels");
           ImageInput im;
           im.offset = a[0].as_int();
           im.tokens = static_cast<int>(a[1].as_int());
           im.width = static_cast<int>(a[2].as_int());
           im.height = static_cast<int>(a[3].as_int());
-          const auto bytes = decode_base64(a[4].as_string(),
-              std::min(kMaxImagePixels * 3, kMaxRequestImageBytes - image_bytes));
+          // A five-field entry predates the per-family pixel grid.
+          im.grid = a.size() == 6 ? static_cast<int>(a[4].as_int()) : 28;
+          const auto bytes =
+              decode_base64(a.back().as_string(), kMaxRequestImageBytes - image_bytes);
           image_bytes += bytes.size();
           im.rgb.assign(bytes.begin(), bytes.end());
           r.images.push_back(std::move(im));

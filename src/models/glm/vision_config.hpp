@@ -15,6 +15,8 @@ struct GlmVisionConfig {
   int depth = 24, hidden = 1024, heads = 16, intermediate = 4096;
   int output = 4096, projection = 10240;
   float eps = 1e-5f, swiglu_limit = 10.0f;
+  // The three delimiters the frontend renders (validated in parse).
+  ImageTokens tokens;
   static GlmVisionConfig parse(const minijson::Value& root, int text_hidden) {
     const auto& v = root.at("vision_config");
     GlmVisionConfig c;
@@ -48,12 +50,17 @@ struct GlmVisionConfig {
     if (v.at("hidden_act").as_string() != "silu" || !v.at("attention_bias").is_bool() ||
         !v.at("attention_bias").as_bool())
       throw std::invalid_argument("GLM vision_config: requires silu and attention_bias");
-    const auto token_is = [&](const char* name, int id) {
+    const auto token_id = [&](const char* name) {
       const auto* f = root.find(name);
-      return f && f->is_number() && f->as_double() == id;
+      if (!f || !f->is_number() || !std::isfinite(f->as_double()) ||
+          f->as_double() != std::floor(f->as_double()))
+        throw std::invalid_argument(std::string("GLM vision: ") + name +
+                                    ": must be an integer token id");
+      return f->as_int();
     };
-    if (!token_is("image_token_id", 154854) || !token_is("image_start_token_id", 154830) ||
-        !token_is("image_end_token_id", 154831))
+    c.tokens = ImageTokens{token_id("image_start_token_id"), token_id("image_token_id"),
+                           token_id("image_end_token_id")};
+    if (c.tokens.pad != 154854 || c.tokens.start != 154830 || c.tokens.end != 154831)
       throw std::invalid_argument("GLM vision: incompatible image token ids");
     if (const auto* rope = v.find("rope_parameters"))
       if (!rope->is_object() || rope->at("rope_type").as_string() != "axial" ||

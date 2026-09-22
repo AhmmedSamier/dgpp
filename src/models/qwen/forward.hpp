@@ -50,6 +50,7 @@
 
 #include <cuda_runtime.h>
 
+#include "common/image_input.hpp"
 #include "engine/boundary_reducer.hpp"
 #include "engine/decode_outputs.hpp"
 #include "engine/memory_plan.hpp"
@@ -66,6 +67,9 @@
 #include "models/qwen/moe_layer.hpp"
 
 namespace dgpp {
+
+class QwenVisionEncoder;  // models/qwen/vision.hpp; built only when the
+                          // checkpoint ships a vision tower
 
 class QwenModel : public SessionModel<QwenModel> {
  public:
@@ -156,6 +160,27 @@ class QwenModel : public SessionModel<QwenModel> {
   bool has_pool() const { return num_qsa_ > 0; }
   QwenKvPool& pool() { return pool_; }
   const QwenKvPool& pool() const { return pool_; }
+
+  // ---- image inputs (docs/vision.md) --------------------------------------
+  // The checkpoint's own BF16 tower, replicated on every rank and run only
+  // on image prefills. Its rows replace the embedding at the prompt's
+  // image_token_id positions (deepstack_visual_indexes is empty, so there is
+  // nowhere else for them to enter); decode graphs are untouched.
+  bool supports_images() const { return vision_ != nullptr; }
+  // The pad id repeated once per visual token, -1 without a tower.
+  int64_t image_pad_id() const { return cfg_.vision ? cfg_.vision->tokens.pad : -1; }
+  // The three delimiters, for the serving frontend that renders them.
+  ImageTokens image_tokens() const { return cfg_.image_tokens(); }
+  uint64_t vision_digest() const;  // 0 without a tower; see models/qwen/vision.hpp
+  Outputs session_prefill_images(int req, const std::vector<int64_t>& prompt_ids,
+                                 const std::vector<ImageInput>& images);
+  Outputs session_prefill_images(int req, const std::vector<int64_t>& prompt_ids,
+                                 const std::vector<ImageInput>& images,
+                                 const std::vector<int64_t>& boundaries, SnapshotRequest* snap);
+  Outputs session_prefill_resume_images(int req, const std::vector<int64_t>& suffix_ids,
+                                        const std::vector<ImageInput>& images,
+                                        const std::vector<int64_t>& boundaries,
+                                        SnapshotRequest* snap);
   void graph_prepare();
   void mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode_row,
                     bool capture, int head_rows, int batch_requests);
@@ -180,6 +205,24 @@ class QwenModel : public SessionModel<QwenModel> {
   const bool fp8_head_mma_;
   static constexpr int kBlockTokens = 64;
   static constexpr int kPrefillChunkTokens = 2048;
+
+  // The images of the prefill currently running (null outside one), plus the
+  // staged rows covering [image_window_first_, image_window_end_). The engine
+  // owns the vector for the call's whole lifetime, across chunks.
+  Outputs session_prefill_with_images(int req, const std::vector<int64_t>& ids,
+                                     const std::vector<ImageInput>& images,
+                                     const std::vector<int64_t>& boundaries, SnapshotRequest* snap,
+                                     bool resume);
+  void stage_image_embeddings(int64_t first, int64_t end);
+  // Rows [first + shift, first + shift + rows) into dst, whose rows are
+  // `branches` copies of hidden wide. `shift` is 0 for the main walk's
+  // embedding (branches = hc_count) and 1 for the draft's, whose row at
+  // position p embeds token p + 1 (branches = 1).
+  void apply_image_embeddings(uint16_t* dst, int64_t first, int rows, int shift, int branches);
+  std::unique_ptr<QwenVisionEncoder> vision_;
+  const std::vector<ImageInput>* prefill_images_ = nullptr;
+  const uint16_t* image_embeddings_ = nullptr;
+  int64_t image_window_first_ = 0, image_window_end_ = 0;
 
   void build_layer_objects(const QwenLayerResident& r);
   void lm_head_logits(const uint16_t* hidden, int rows, cudaStream_t stream);

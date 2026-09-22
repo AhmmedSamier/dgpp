@@ -149,7 +149,7 @@ struct GlmVisionEncoder::Impl {
   }
   void encode_one(const ImageInput& image, uint16_t* dst) {
     const int n = image.tokens * 4, h = c.hidden, o = c.output, d = h / c.heads;
-    if (image.width % 28 || image.height % 28 ||
+    if (image.grid != kGlmImageGrid || image.width % 28 || image.height % 28 ||
         image.tokens != (image.width / 28) * (image.height / 28))
       throw std::invalid_argument("GLM vision: image grid and token count disagree");
     const size_t rows = std::max(static_cast<size_t>(n) * h, static_cast<size_t>(image.tokens) * o);

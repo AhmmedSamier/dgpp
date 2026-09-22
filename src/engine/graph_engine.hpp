@@ -974,6 +974,10 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     if constexpr (requires { model_->supports_images(); }) return model_->supports_images();
     return false;
   }
+  ImageTokens image_token_ids() const override {
+    if constexpr (requires { model_->image_tokens(); }) return model_->image_tokens();
+    return {};
+  }
   bool supports_image_prefix_cache() const override {
     return supports_images() && kImagePrefixCache<Model>;
   }
