@@ -6,82 +6,9 @@ All values below are calculated by `summarize.py` from this directory's raw resu
 
 [Environment comparison](environment.md) · [Interruption record](interruptions.md) · [Batching diagnostic](isolation.md)
 
-## GLM-5.3-Flash NVFP4/FP8 · 4 nodes
+Deployments follow the [overview](../../../docs/benchmarks.md) order: model family, node count, then configuration options. KV labels describe the shared key/value-cache token pool (K = 1,024 tokens); slots are the configured concurrent-request limit.
 
-Configuration: [glm-flash-hybrid-w4](configs/glm-flash-hybrid-w4.json).
-
-### Greedy serving
-
-Rates are tokens/s. Brackets show minimum–maximum across three repetitions; the leading value is the median. TTFT is the median of per-phase mean request TTFTs.
-
-| Class | C | Engine tok/s | Wall tok/s | ms/pass | Tokens/pass/request | TTFT ms |
-|---|---|---|---|---|---|---|
-| prose | 1 | 59.1 [59.0–59.1] | 58.0 [55.4–58.0] | 31.52 | 1.86 | 76 |
-| prose | 2 | 79.5 [79.5–79.7] | 77.7 [73.5–77.7] | 42.74 | 1.74 | 127 |
-| prose | 4 | 107.9 [106.2–108.3] | 103.3 [97.0–105.2] | 64.08 | 1.77 | 229 |
-| code | 1 | 60.3 [59.8–60.4] | 59.0 [56.4–59.3] | 32.76 | 1.98 | 76 |
-| code | 2 | 83.0 [82.6–84.3] | 81.5 [75.5–82.8] | 45.05 | 1.88 | 114 |
-| code | 4 | 110.5 [109.7–110.5] | 107.2 [98.3–107.4] | 65.48 | 1.86 | 236 |
-| json | 1 | 61.8 [61.8–61.8] | 60.8 [57.9–60.8] | 31.74 | 1.96 | 76 |
-| json | 2 | 79.9 [79.9–80.0] | 78.4 [73.5–78.4] | 43.15 | 1.83 | 115 |
-| json | 4 | 117.7 [117.4–117.7] | 114.1 [104.4–114.1] | 64.68 | 1.95 | 236 |
-| math | 1 | 59.6 [59.6–59.7] | 58.5 [55.4–58.7] | 32.17 | 1.92 | 77 |
-| math | 2 | 86.5 [86.5–86.7] | 84.5 [78.4–84.7] | 44.34 | 1.94 | 127 |
-| math | 4 | 108.8 [106.2–109.6] | 106.0 [95.2–106.6] | 65.31 | 1.86 | 230 |
-| chat | 1 | 54.0 [54.0–54.1] | 53.1 [51.0–53.1] | 31.89 | 1.72 | 76 |
-| chat | 2 | 79.3 [79.2–79.6] | 77.5 [72.9–77.8] | 43.21 | 1.78 | 139 |
-| chat | 4 | 105.8 [105.6–106.8] | 102.8 [95.5–103.8] | 65.12 | 1.80 | 229 |
-
-### Sampled serving
-
-Temperature one; medians of three repetitions. Other sampling parameters use each model's server defaults.
-
-| Class | C | Engine tok/s | Wall tok/s |
-|---|---|---|---|
-| prose | 1 | 58.3 | 57.3 |
-| prose | 4 | 106.2 | 103.3 |
-| code | 1 | 60.1 | 59.0 |
-| code | 4 | 108.0 | 105.2 |
-| json | 1 | 60.9 | 60.0 |
-| json | 4 | 109.7 | 106.3 |
-| math | 1 | 58.1 | 57.0 |
-| math | 4 | 112.1 | 109.0 |
-| chat | 1 | 54.3 | 53.3 |
-| chat | 4 | 105.0 | 102.0 |
-
-### Cold prefill
-
-| Target tokens | Actual prompt tokens (all samples) | Prefill median s | Prefill min–max s | ms/token | TTFT median s |
-|---|---|---|---|---|---|
-| 2048 | 2071, 2098, 2073 | 1.497 | 1.487–1.527 | 0.722 | 1.512 |
-| 8192 | 8257, 8302, 8429 | 5.847 | 5.747–5.865 | 0.696 | 5.872 |
-| 32768 | 33245, 33321, 33241 | 26.686 | 26.626–26.806 | 0.801 | 26.703 |
-
-### Decode mode checks
-
-| Mode | Class | Engine tok/s | ms/pass | Tokens/pass | All greedy repetitions match default |
-|---|---|---|---|---|---|
-| plain | prose | 39.7 | 25.18 | 1.00 | yes |
-| plain | code | 39.7 | 25.17 | 1.00 | yes |
-| plain | json | 39.8 | 25.12 | 1.00 | yes |
-| plain | math | 39.8 | 25.15 | 1.00 | yes |
-| plain | chat | 39.8 | 25.12 | 1.00 | yes |
-
-Solo/batched exact-text check: == isolation: prompt 0 alone (256 tokens) vs beside 3 others (256 tokens): DIFFERENT
-
-### Quality
-
-One greedy response per problem, using the repository's chat prompts and concurrency 4. Token caps include reasoning. HumanEval runs generated Python in the pinned container recorded in `manifest.json`.
-
-| Task | Passed / evaluated | At token cap | Mean completion tokens |
-|---|---|---|---|
-| humaneval | 157/164 | 0 | 170 |
-| gsm8k | 292/300 | 0 | 77 |
-| extract | 100/100 | 0 | 51 |
-
-Raw results: [raw/glm-flash-hybrid-w4/](raw/glm-flash-hybrid-w4/).
-
-## GLM-5.3-Flash NVFP4/FP8 · 2 nodes
+## GLM-5.3-Flash NVFP4/FP8 · 2 nodes · 160K FP8 KV, 4 slots
 
 Configuration: [glm-flash-hybrid-w2](configs/glm-flash-hybrid-w2.json).
 
@@ -156,7 +83,152 @@ One greedy response per problem, using the repository's chat prompts and concurr
 
 Raw results: [raw/glm-flash-hybrid-w2/](raw/glm-flash-hybrid-w2/).
 
-## GLM-5.3-Flash FP8 · 4 nodes
+## GLM-5.3-Flash NVFP4/FP8 · 2 nodes · 256K FP8 KV, 2 slots
+
+Configuration: [glm-flash-hybrid-256k-w2](configs/glm-flash-hybrid-256k-w2.json).
+
+### Greedy serving
+
+Rates are tokens/s. Brackets show minimum–maximum across three repetitions; the leading value is the median. TTFT is the median of per-phase mean request TTFTs.
+
+| Class | C | Engine tok/s | Wall tok/s | ms/pass | Tokens/pass/request | TTFT ms |
+|---|---|---|---|---|---|---|
+| prose | 1 | 35.0 [34.2–35.0] | 34.4 [32.2–34.4] | 54.36 | 1.90 | 127 |
+| prose | 2 | 44.7 [44.5–44.7] | 43.9 [41.3–44.0] | 77.68 | 1.77 | 178 |
+| code | 1 | 35.6 [35.6–35.6] | 35.1 [33.3–35.2] | 55.55 | 1.98 | 103 |
+| code | 2 | 45.7 [45.7–45.7] | 45.1 [42.0–45.1] | 79.70 | 1.85 | 167 |
+| json | 1 | 35.8 [35.8–35.8] | 35.4 [33.5–35.5] | 54.82 | 1.96 | 77 |
+| json | 2 | 44.4 [44.3–44.4] | 43.8 [40.9–43.8] | 78.21 | 1.83 | 166 |
+| math | 1 | 33.8 [33.8–33.8] | 33.4 [31.5–33.4] | 55.49 | 1.88 | 103 |
+| math | 2 | 47.4 [47.4–47.5] | 46.6 [43.2–46.6] | 80.84 | 1.92 | 205 |
+| chat | 1 | 31.2 [31.2–31.2] | 30.8 [29.5–30.8] | 54.87 | 1.71 | 103 |
+| chat | 2 | 44.3 [44.3–44.3] | 43.5 [40.8–43.5] | 78.80 | 1.78 | 217 |
+
+### Sampled serving
+
+Temperature one; medians of three repetitions. Other sampling parameters use each model's server defaults.
+
+| Class | C | Engine tok/s | Wall tok/s |
+|---|---|---|---|
+| prose | 1 | 33.9 | 33.3 |
+| prose | 2 | 43.8 | 42.9 |
+| code | 1 | 35.1 | 34.6 |
+| code | 2 | 45.4 | 44.8 |
+| json | 1 | 35.6 | 35.3 |
+| json | 2 | 45.1 | 42.9 |
+| math | 1 | 33.7 | 33.3 |
+| math | 2 | 47.1 | 46.3 |
+| chat | 1 | 32.3 | 30.7 |
+| chat | 2 | 43.9 | 42.6 |
+
+### Cold prefill
+
+| Target tokens | Actual prompt tokens (all samples) | Prefill median s | Prefill min–max s | ms/token | TTFT median s |
+|---|---|---|---|---|---|
+| 2048 | 2071, 2098, 2073 | 2.367 | 2.343–2.402 | 1.142 | 2.388 |
+| 8192 | 8257, 8302, 8429 | 9.180 | 9.107–9.361 | 1.111 | 9.211 |
+| 32768 | 33245, 33321, 33241 | 39.596 | 39.417–40.065 | 1.188 | 39.612 |
+
+### Decode mode checks
+
+| Mode | Class | Engine tok/s | ms/pass | Tokens/pass | All greedy repetitions match default |
+|---|---|---|---|---|---|
+| plain | prose | 24.1 | 41.44 | 1.00 | yes |
+| plain | code | 24.1 | 41.47 | 1.00 | yes |
+| plain | json | 24.1 | 41.46 | 1.00 | yes |
+| plain | math | 24.1 | 41.50 | 1.00 | yes |
+| plain | chat | 24.1 | 41.49 | 1.00 | yes |
+
+Solo/batched exact-text check: == isolation: prompt 0 alone (256 tokens) vs beside 1 others (256 tokens): IDENTICAL
+
+### Quality
+
+One greedy response per problem, using the repository's chat prompts and concurrency 2. Token caps include reasoning. HumanEval runs generated Python in the pinned container recorded in `manifest.json`.
+
+| Task | Passed / evaluated | At token cap | Mean completion tokens |
+|---|---|---|---|
+| humaneval | 158/164 | 0 | 172 |
+| gsm8k | 292/300 | 0 | 76 |
+| extract | 100/100 | 0 | 51 |
+
+Raw results: [raw/glm-flash-hybrid-256k-w2/](raw/glm-flash-hybrid-256k-w2/).
+
+## GLM-5.3-Flash NVFP4/FP8 · 4 nodes · 768K BF16 KV, 4 slots
+
+Configuration: [glm-flash-hybrid-w4](configs/glm-flash-hybrid-w4.json).
+
+### Greedy serving
+
+Rates are tokens/s. Brackets show minimum–maximum across three repetitions; the leading value is the median. TTFT is the median of per-phase mean request TTFTs.
+
+| Class | C | Engine tok/s | Wall tok/s | ms/pass | Tokens/pass/request | TTFT ms |
+|---|---|---|---|---|---|---|
+| prose | 1 | 59.1 [59.0–59.1] | 58.0 [55.4–58.0] | 31.52 | 1.86 | 76 |
+| prose | 2 | 79.5 [79.5–79.7] | 77.7 [73.5–77.7] | 42.74 | 1.74 | 127 |
+| prose | 4 | 107.9 [106.2–108.3] | 103.3 [97.0–105.2] | 64.08 | 1.77 | 229 |
+| code | 1 | 60.3 [59.8–60.4] | 59.0 [56.4–59.3] | 32.76 | 1.98 | 76 |
+| code | 2 | 83.0 [82.6–84.3] | 81.5 [75.5–82.8] | 45.05 | 1.88 | 114 |
+| code | 4 | 110.5 [109.7–110.5] | 107.2 [98.3–107.4] | 65.48 | 1.86 | 236 |
+| json | 1 | 61.8 [61.8–61.8] | 60.8 [57.9–60.8] | 31.74 | 1.96 | 76 |
+| json | 2 | 79.9 [79.9–80.0] | 78.4 [73.5–78.4] | 43.15 | 1.83 | 115 |
+| json | 4 | 117.7 [117.4–117.7] | 114.1 [104.4–114.1] | 64.68 | 1.95 | 236 |
+| math | 1 | 59.6 [59.6–59.7] | 58.5 [55.4–58.7] | 32.17 | 1.92 | 77 |
+| math | 2 | 86.5 [86.5–86.7] | 84.5 [78.4–84.7] | 44.34 | 1.94 | 127 |
+| math | 4 | 108.8 [106.2–109.6] | 106.0 [95.2–106.6] | 65.31 | 1.86 | 230 |
+| chat | 1 | 54.0 [54.0–54.1] | 53.1 [51.0–53.1] | 31.89 | 1.72 | 76 |
+| chat | 2 | 79.3 [79.2–79.6] | 77.5 [72.9–77.8] | 43.21 | 1.78 | 139 |
+| chat | 4 | 105.8 [105.6–106.8] | 102.8 [95.5–103.8] | 65.12 | 1.80 | 229 |
+
+### Sampled serving
+
+Temperature one; medians of three repetitions. Other sampling parameters use each model's server defaults.
+
+| Class | C | Engine tok/s | Wall tok/s |
+|---|---|---|---|
+| prose | 1 | 58.3 | 57.3 |
+| prose | 4 | 106.2 | 103.3 |
+| code | 1 | 60.1 | 59.0 |
+| code | 4 | 108.0 | 105.2 |
+| json | 1 | 60.9 | 60.0 |
+| json | 4 | 109.7 | 106.3 |
+| math | 1 | 58.1 | 57.0 |
+| math | 4 | 112.1 | 109.0 |
+| chat | 1 | 54.3 | 53.3 |
+| chat | 4 | 105.0 | 102.0 |
+
+### Cold prefill
+
+| Target tokens | Actual prompt tokens (all samples) | Prefill median s | Prefill min–max s | ms/token | TTFT median s |
+|---|---|---|---|---|---|
+| 2048 | 2071, 2098, 2073 | 1.497 | 1.487–1.527 | 0.722 | 1.512 |
+| 8192 | 8257, 8302, 8429 | 5.847 | 5.747–5.865 | 0.696 | 5.872 |
+| 32768 | 33245, 33321, 33241 | 26.686 | 26.626–26.806 | 0.801 | 26.703 |
+
+### Decode mode checks
+
+| Mode | Class | Engine tok/s | ms/pass | Tokens/pass | All greedy repetitions match default |
+|---|---|---|---|---|---|
+| plain | prose | 39.7 | 25.18 | 1.00 | yes |
+| plain | code | 39.7 | 25.17 | 1.00 | yes |
+| plain | json | 39.8 | 25.12 | 1.00 | yes |
+| plain | math | 39.8 | 25.15 | 1.00 | yes |
+| plain | chat | 39.8 | 25.12 | 1.00 | yes |
+
+Solo/batched exact-text check: == isolation: prompt 0 alone (256 tokens) vs beside 3 others (256 tokens): DIFFERENT
+
+### Quality
+
+One greedy response per problem, using the repository's chat prompts and concurrency 4. Token caps include reasoning. HumanEval runs generated Python in the pinned container recorded in `manifest.json`.
+
+| Task | Passed / evaluated | At token cap | Mean completion tokens |
+|---|---|---|---|
+| humaneval | 157/164 | 0 | 170 |
+| gsm8k | 292/300 | 0 | 77 |
+| extract | 100/100 | 0 | 51 |
+
+Raw results: [raw/glm-flash-hybrid-w4/](raw/glm-flash-hybrid-w4/).
+
+## GLM-5.3-Flash FP8 · 4 nodes · 384K BF16 KV, 4 slots
 
 Configuration: [glm-flash-fp8-w4](configs/glm-flash-fp8-w4.json).
 
@@ -231,167 +303,7 @@ One greedy response per problem, using the repository's chat prompts and concurr
 
 Raw results: [raw/glm-flash-fp8-w4/](raw/glm-flash-fp8-w4/).
 
-## Qwen3.8-Flash-Next FP8 · 4 nodes
-
-Configuration: [qwen-fp8-w4](configs/qwen-fp8-w4.json).
-
-### Greedy serving
-
-Rates are tokens/s. Brackets show minimum–maximum across three repetitions; the leading value is the median. TTFT is the median of per-phase mean request TTFTs.
-
-| Class | C | Engine tok/s | Wall tok/s | ms/pass | Tokens/pass/request | TTFT ms |
-|---|---|---|---|---|---|---|
-| prose | 1 | 72.6 [71.8–73.1] | 71.1 [68.7–71.7] | 23.73 | 1.72 | 76 |
-| prose | 2 | 108.8 [108.2–109.6] | 105.6 [100.3–106.8] | 29.86 | 1.66 | 114 |
-| prose | 4 | 149.0 [148.9–149.6] | 143.3 [134.7–144.3] | 43.34 | 1.67 | 206 |
-| code | 1 | 81.4 [81.4–81.5] | 79.7 [76.2–79.7] | 23.72 | 1.93 | 78 |
-| code | 2 | 124.6 [124.6–125.4] | 120.5 [113.7–121.7] | 29.67 | 1.88 | 116 |
-| code | 4 | 168.8 [167.6–170.4] | 160.8 [154.3–161.6] | 43.17 | 1.89 | 203 |
-| json | 1 | 83.3 [83.2–83.3] | 81.3 [78.2–81.8] | 23.74 | 1.98 | 77 |
-| json | 2 | 132.0 [131.8–132.1] | 127.2 [120.4–127.5] | 29.96 | 1.99 | 116 |
-| json | 4 | 172.3 [172.2–172.7] | 164.9 [154.8–165.7] | 43.53 | 1.97 | 205 |
-| math | 1 | 78.9 [78.9–78.9] | 77.3 [74.4–77.5] | 23.78 | 1.88 | 78 |
-| math | 2 | 129.3 [129.3–129.3] | 124.7 [118.0–125.0] | 29.88 | 1.95 | 116 |
-| math | 4 | 167.3 [167.1–167.5] | 160.5 [150.8–160.6] | 43.23 | 1.89 | 205 |
-| chat | 1 | 65.3 [65.0–66.2] | 63.7 [62.8–64.0] | 24.30 | 1.59 | 77 |
-| chat | 2 | 111.8 [110.9–112.9] | 107.5 [104.7–108.2] | 30.01 | 1.72 | 141 |
-| chat | 4 | 153.8 [150.8–157.0] | 148.1 [136.1–150.9] | 43.92 | 1.73 | 203 |
-
-### Sampled serving
-
-Temperature one; medians of three repetitions. Other sampling parameters use each model's server defaults.
-
-| Class | C | Engine tok/s | Wall tok/s |
-|---|---|---|---|
-| prose | 1 | 71.2 | 69.1 |
-| prose | 4 | 152.9 | 145.3 |
-| code | 1 | 78.0 | 75.5 |
-| code | 4 | 166.2 | 158.8 |
-| json | 1 | 83.4 | 81.0 |
-| json | 4 | 177.4 | 168.9 |
-| math | 1 | 80.7 | 78.4 |
-| math | 4 | 169.9 | 162.8 |
-| chat | 1 | 71.8 | 68.1 |
-| chat | 4 | 155.1 | 148.6 |
-
-### Cold prefill
-
-| Target tokens | Actual prompt tokens (all samples) | Prefill median s | Prefill min–max s | ms/token | TTFT median s |
-|---|---|---|---|---|---|
-| 2048 | 2063, 2054, 2038 | 1.113 | 1.064–1.167 | 0.542 | 1.122 |
-| 8192 | 8091, 8132, 8300 | 4.440 | 4.419–4.596 | 0.546 | 4.477 |
-| 32768 | 32664, 32698, 32653 | 18.315 | 18.221–18.402 | 0.561 | 18.366 |
-
-### Decode mode checks
-
-| Mode | Class | Engine tok/s | ms/pass | Tokens/pass | All greedy repetitions match default |
-|---|---|---|---|---|---|
-| depth2 | prose | 78.9 | 27.64 | 2.18 | yes |
-| depth2 | code | 99.8 | 27.78 | 2.77 | yes |
-| depth2 | json | 106.6 | 27.81 | 2.97 | yes |
-| depth2 | math | 94.8 | 28.03 | 2.66 | yes |
-| depth2 | chat | 71.7 | 27.88 | 2.00 | yes |
-| plain | prose | 50.6 | 19.76 | 1.00 | yes |
-| plain | code | 50.6 | 19.76 | 1.00 | yes |
-| plain | json | 50.8 | 19.69 | 1.00 | yes |
-| plain | math | 50.6 | 19.77 | 1.00 | yes |
-| plain | chat | 50.8 | 19.70 | 1.00 | yes |
-
-Solo/batched exact-text check: == isolation: prompt 0 alone (256 tokens) vs beside 3 others (256 tokens): DIFFERENT
-
-### Quality
-
-One greedy response per problem, using the repository's chat prompts and concurrency 4. Token caps include reasoning. HumanEval runs generated Python in the pinned container recorded in `manifest.json`.
-
-| Task | Passed / evaluated | At token cap | Mean completion tokens |
-|---|---|---|---|
-| humaneval | 158/164 | 0 | 234 |
-| gsm8k | 291/300 | 0 | 353 |
-| extract | 100/100 | 0 | 63 |
-
-Raw results: [raw/qwen-fp8-w4/](raw/qwen-fp8-w4/).
-
-## Qwen3.8-Flash-Next FP8 · 2 nodes
-
-Configuration: [qwen-fp8-w2](configs/qwen-fp8-w2.json).
-
-### Greedy serving
-
-Rates are tokens/s. Brackets show minimum–maximum across three repetitions; the leading value is the median. TTFT is the median of per-phase mean request TTFTs.
-
-| Class | C | Engine tok/s | Wall tok/s | ms/pass | Tokens/pass/request | TTFT ms |
-|---|---|---|---|---|---|---|
-| prose | 1 | 48.4 [48.4–48.4] | 47.6 [46.8–47.6] | 36.07 | 1.75 | 102 |
-| prose | 2 | 68.5 [68.5–68.5] | 67.0 [64.2–67.0] | 45.67 | 1.66 | 152 |
-| prose | 4 | 92.2 [91.9–93.4] | 89.3 [84.7–90.6] | 70.49 | 1.67 | 272 |
-| code | 1 | 53.4 [53.3–53.4] | 52.5 [50.6–52.5] | 36.21 | 1.93 | 77 |
-| code | 2 | 79.6 [79.6–79.9] | 77.7 [74.0–77.8] | 47.08 | 1.89 | 152 |
-| code | 4 | 103.9 [103.8–104.1] | 100.2 [96.2–100.5] | 70.72 | 1.90 | 273 |
-| json | 1 | 54.8 [54.7–54.8] | 53.8 [51.9–53.9] | 36.38 | 1.99 | 102 |
-| json | 2 | 83.3 [83.3–83.3] | 81.2 [77.4–81.2] | 47.46 | 1.98 | 153 |
-| json | 4 | 105.4 [105.0–105.4] | 101.7 [96.4–102.0] | 70.62 | 1.97 | 272 |
-| math | 1 | 51.1 [51.1–51.1] | 50.3 [48.8–50.3] | 36.44 | 1.86 | 102 |
-| math | 2 | 81.9 [81.9–81.9] | 79.7 [75.9–79.9] | 47.18 | 1.95 | 153 |
-| math | 4 | 102.2 [102.1–102.3] | 98.8 [93.8–99.0] | 71.31 | 1.88 | 273 |
-| chat | 1 | 44.7 [44.7–44.7] | 44.1 [42.8–44.1] | 36.32 | 1.62 | 101 |
-| chat | 2 | 72.5 [72.4–72.6] | 70.7 [67.9–71.0] | 46.60 | 1.72 | 152 |
-| chat | 4 | 94.6 [94.4–94.8] | 91.6 [86.9–92.1] | 70.91 | 1.73 | 272 |
-
-### Sampled serving
-
-Temperature one; medians of three repetitions. Other sampling parameters use each model's server defaults.
-
-| Class | C | Engine tok/s | Wall tok/s |
-|---|---|---|---|
-| prose | 1 | 47.6 | 46.9 |
-| prose | 4 | 91.0 | 88.0 |
-| code | 1 | 52.7 | 51.0 |
-| code | 4 | 102.1 | 97.3 |
-| json | 1 | 54.0 | 52.9 |
-| json | 4 | 108.2 | 104.1 |
-| math | 1 | 51.1 | 50.2 |
-| math | 4 | 103.9 | 99.0 |
-| chat | 1 | 46.2 | 45.6 |
-| chat | 4 | 93.1 | 89.9 |
-
-### Cold prefill
-
-| Target tokens | Actual prompt tokens (all samples) | Prefill median s | Prefill min–max s | ms/token | TTFT median s |
-|---|---|---|---|---|---|
-| 2048 | 2063, 2054, 2038 | 1.311 | 1.257–1.383 | 0.638 | 1.327 |
-| 8192 | 8091, 8132, 8300 | 5.178 | 5.156–5.408 | 0.637 | 5.215 |
-| 32768 | 32664, 32698, 32653 | 21.110 | 21.086–21.127 | 0.646 | 21.168 |
-
-### Decode mode checks
-
-| Mode | Class | Engine tok/s | ms/pass | Tokens/pass | All greedy repetitions match default |
-|---|---|---|---|---|---|
-| depth2 | prose | 50.4 | 43.22 | 2.18 | yes |
-| depth2 | code | 61.4 | 43.28 | 2.66 | yes |
-| depth2 | json | 68.1 | 43.56 | 2.97 | yes |
-| depth2 | math | 61.6 | 43.61 | 2.68 | yes |
-| depth2 | chat | 48.4 | 43.53 | 2.11 | yes |
-| plain | prose | 35.8 | 27.91 | 1.00 | yes |
-| plain | code | 35.8 | 27.96 | 1.00 | yes |
-| plain | json | 35.8 | 27.92 | 1.00 | yes |
-| plain | math | 35.7 | 28.00 | 1.00 | yes |
-| plain | chat | 35.9 | 27.83 | 1.00 | yes |
-
-Solo/batched exact-text check: == isolation: prompt 0 alone (256 tokens) vs beside 3 others (256 tokens): DIFFERENT
-
-### Quality
-
-One greedy response per problem, using the repository's chat prompts and concurrency 4. Token caps include reasoning. HumanEval runs generated Python in the pinned container recorded in `manifest.json`.
-
-| Task | Passed / evaluated | At token cap | Mean completion tokens |
-|---|---|---|---|
-| humaneval | 160/164 | 0 | 235 |
-| gsm8k | 292/300 | 0 | 349 |
-| extract | 100/100 | 0 | 63 |
-
-Raw results: [raw/qwen-fp8-w2/](raw/qwen-fp8-w2/).
-
-## Qwen3.8-Flash-Next NVFP4 · 1 node
+## Qwen3.8-Flash-Next NVFP4 · 1 node · FP8 dense
 
 Configuration: [qwen-nvfp4-w1](configs/qwen-nvfp4-w1.json).
 
@@ -471,7 +383,87 @@ One greedy response per problem, using the repository's chat prompts and concurr
 
 Raw results: [raw/qwen-nvfp4-w1/](raw/qwen-nvfp4-w1/).
 
-## Qwen3.8-Flash-Next NVFP4 · 2 nodes
+## Qwen3.8-Flash-Next NVFP4 · 1 node · BF16 dense
+
+Configuration: [qwen-nvfp4-bf16-w1](configs/qwen-nvfp4-bf16-w1.json).
+
+### Greedy serving
+
+Rates are tokens/s. Brackets show minimum–maximum across three repetitions; the leading value is the median. TTFT is the median of per-phase mean request TTFTs.
+
+| Class | C | Engine tok/s | Wall tok/s | ms/pass | Tokens/pass/request | TTFT ms |
+|---|---|---|---|---|---|---|
+| prose | 1 | 33.1 [32.7–33.2] | 32.7 [31.7–32.8] | 51.29 | 1.70 | 127 |
+| prose | 2 | 51.4 [51.1–51.5] | 50.4 [48.1–50.5] | 61.98 | 1.63 | 178 |
+| prose | 4 | 74.6 [74.3–75.0] | 72.2 [69.0–72.4] | 86.36 | 1.66 | 338 |
+| code | 1 | 37.9 [37.8–37.9] | 37.3 [36.2–37.4] | 51.41 | 1.95 | 102 |
+| code | 2 | 59.7 [59.5–60.0] | 58.2 [55.6–58.7] | 63.03 | 1.90 | 179 |
+| code | 4 | 84.4 [84.3–84.9] | 81.3 [77.8–81.9] | 86.90 | 1.88 | 336 |
+| json | 1 | 38.4 [38.3–38.4] | 37.8 [36.5–37.9] | 51.92 | 1.99 | 102 |
+| json | 2 | 62.3 [62.1–62.4] | 60.8 [58.0–60.9] | 63.43 | 1.99 | 178 |
+| json | 4 | 86.5 [86.2–86.9] | 83.6 [78.8–84.0] | 86.94 | 1.97 | 339 |
+| math | 1 | 36.8 [36.6–36.8] | 36.3 [35.2–36.3] | 51.67 | 1.90 | 127 |
+| math | 2 | 60.6 [59.9–60.7] | 59.1 [55.9–59.3] | 63.23 | 1.93 | 179 |
+| math | 4 | 83.6 [83.5–84.0] | 80.8 [77.0–80.8] | 87.11 | 1.87 | 344 |
+| chat | 1 | 31.9 [31.6–31.9] | 31.5 [30.5–31.6] | 51.53 | 1.65 | 104 |
+| chat | 2 | 51.6 [51.5–51.8] | 50.4 [48.8–50.8] | 61.91 | 1.66 | 180 |
+| chat | 4 | 75.7 [74.8–77.5] | 72.6 [69.6–75.0] | 85.23 | 1.71 | 335 |
+
+### Sampled serving
+
+Temperature one; medians of three repetitions. Other sampling parameters use each model's server defaults.
+
+| Class | C | Engine tok/s | Wall tok/s |
+|---|---|---|---|
+| prose | 1 | 32.2 | 31.8 |
+| prose | 4 | 74.3 | 70.1 |
+| code | 1 | 36.3 | 35.8 |
+| code | 4 | 82.9 | 80.0 |
+| json | 1 | 38.0 | 37.3 |
+| json | 4 | 88.8 | 84.9 |
+| math | 1 | 36.2 | 35.0 |
+| math | 4 | 84.2 | 81.2 |
+| chat | 1 | 31.4 | 30.7 |
+| chat | 4 | 75.4 | 72.3 |
+
+### Cold prefill
+
+| Target tokens | Actual prompt tokens (all samples) | Prefill median s | Prefill min–max s | ms/token | TTFT median s |
+|---|---|---|---|---|---|
+| 2048 | 2063, 2054, 2038 | 1.707 | 1.646–1.806 | 0.831 | 1.723 |
+| 8192 | 8091, 8132, 8300 | 6.939 | 6.897–7.283 | 0.853 | 6.976 |
+| 32768 | 32664, 32698, 32653 | 28.424 | 28.405–28.585 | 0.870 | 28.482 |
+
+### Decode mode checks
+
+| Mode | Class | Engine tok/s | ms/pass | Tokens/pass | All greedy repetitions match default |
+|---|---|---|---|---|---|
+| depth2 | prose | 35.0 | 60.20 | 2.11 | yes |
+| depth2 | code | 47.1 | 60.19 | 2.83 | yes |
+| depth2 | json | 48.0 | 60.40 | 2.90 | yes |
+| depth2 | math | 45.2 | 60.72 | 2.74 | yes |
+| depth2 | chat | 35.4 | 60.51 | 2.14 | yes |
+| plain | prose | 24.4 | 40.94 | 1.00 | yes |
+| plain | code | 24.4 | 41.05 | 1.00 | yes |
+| plain | json | 24.4 | 41.02 | 1.00 | yes |
+| plain | math | 24.3 | 41.12 | 1.00 | yes |
+| plain | chat | 24.4 | 41.01 | 1.00 | yes |
+
+Solo/batched exact-text check: == isolation: prompt 0 alone (256 tokens) vs beside 3 others (256 tokens): DIFFERENT
+
+### Quality
+
+One greedy response per problem, using the repository's chat prompts and concurrency 4. Token caps include reasoning. HumanEval runs generated Python in the pinned container recorded in `manifest.json`.
+
+| Task | Passed / evaluated | At token cap | Mean completion tokens |
+|---|---|---|---|
+| humaneval | 158/164 | 0 | 229 |
+| gsm8k | 291/300 | 0 | 352 |
+| extract | 100/100 | 0 | 63 |
+
+Raw results: [raw/qwen-nvfp4-bf16-w1/](raw/qwen-nvfp4-bf16-w1/).
+
+## Qwen3.8-Flash-Next NVFP4 · 2 nodes · FP8 dense
 
 Configuration: [qwen-nvfp4-w2](configs/qwen-nvfp4-w2.json).
 
@@ -551,7 +543,242 @@ One greedy response per problem, using the repository's chat prompts and concurr
 
 Raw results: [raw/qwen-nvfp4-w2/](raw/qwen-nvfp4-w2/).
 
-## GLM-5.3 int4/int8 · 4 nodes
+## Qwen3.8-Flash-Next NVFP4 · 2 nodes · FP8 dense, YaRN 512K, 2 slots
+
+Configuration: [qwen-yarn-w2](configs/qwen-yarn-w2.json).
+
+### Greedy serving
+
+Rates are tokens/s. Brackets show minimum–maximum across three repetitions; the leading value is the median. TTFT is the median of per-phase mean request TTFTs.
+
+| Class | C | Engine tok/s | Wall tok/s | ms/pass | Tokens/pass/request | TTFT ms |
+|---|---|---|---|---|---|---|
+| prose | 1 | 66.6 [64.1–66.6] | 65.3 [61.2–65.4] | 25.69 | 1.71 | 77 |
+| prose | 2 | 98.7 [94.8–98.9] | 96.1 [87.8–96.3] | 33.28 | 1.67 | 115 |
+| code | 1 | 73.0 [72.7–73.1] | 71.5 [68.2–71.5] | 25.89 | 1.89 | 76 |
+| code | 2 | 111.4 [109.9–111.9] | 108.0 [99.5–108.8] | 33.90 | 1.91 | 115 |
+| json | 1 | 75.8 [75.8–76.2] | 74.1 [70.6–74.5] | 26.07 | 1.98 | 76 |
+| json | 2 | 115.2 [115.0–115.3] | 111.1 [104.8–111.2] | 34.28 | 1.98 | 126 |
+| math | 1 | 73.5 [71.2–73.7] | 72.0 [66.5–72.1] | 26.09 | 1.92 | 77 |
+| math | 2 | 112.1 [112.1–112.7] | 108.4 [101.5–108.7] | 34.29 | 1.94 | 127 |
+| chat | 1 | 64.5 [62.5–64.6] | 63.4 [59.1–63.5] | 26.00 | 1.68 | 76 |
+| chat | 2 | 101.5 [98.6–101.9] | 98.5 [91.1–99.1] | 33.50 | 1.72 | 127 |
+
+### Sampled serving
+
+Temperature one; medians of three repetitions. Other sampling parameters use each model's server defaults.
+
+| Class | C | Engine tok/s | Wall tok/s |
+|---|---|---|---|
+| prose | 1 | 63.8 | 62.3 |
+| prose | 2 | 96.4 | 90.6 |
+| code | 1 | 70.0 | 66.1 |
+| code | 2 | 103.3 | 100.5 |
+| json | 1 | 72.4 | 71.0 |
+| json | 2 | 113.6 | 109.8 |
+| math | 1 | 70.4 | 67.5 |
+| math | 2 | 105.3 | 102.1 |
+| chat | 1 | 61.5 | 60.4 |
+| chat | 2 | 96.1 | 93.0 |
+
+### Cold prefill
+
+| Target tokens | Actual prompt tokens (all samples) | Prefill median s | Prefill min–max s | ms/token | TTFT median s |
+|---|---|---|---|---|---|
+| 2048 | 2063, 2054, 2038 | 1.278 | 1.246–1.347 | 0.622 | 1.287 |
+| 8192 | 8091, 8132, 8300 | 5.117 | 5.106–5.373 | 0.631 | 5.138 |
+| 32768 | 32664, 32698, 32653 | 20.975 | 20.964–20.985 | 0.642 | 21.036 |
+
+### Decode mode checks
+
+| Mode | Class | Engine tok/s | ms/pass | Tokens/pass | All greedy repetitions match default |
+|---|---|---|---|---|---|
+| depth2 | prose | 70.3 | 31.26 | 2.20 | yes |
+| depth2 | code | 84.4 | 31.48 | 2.66 | yes |
+| depth2 | json | 91.5 | 31.69 | 2.90 | yes |
+| depth2 | math | 87.5 | 31.67 | 2.77 | yes |
+| depth2 | chat | 65.9 | 31.71 | 2.09 | yes |
+| plain | prose | 47.4 | 21.09 | 1.00 | yes |
+| plain | code | 47.4 | 21.12 | 1.00 | yes |
+| plain | json | 47.4 | 21.10 | 1.00 | yes |
+| plain | math | 47.2 | 21.20 | 1.00 | yes |
+| plain | chat | 47.2 | 21.20 | 1.00 | yes |
+
+Solo/batched exact-text check: == isolation: prompt 0 alone (256 tokens) vs beside 1 others (256 tokens): IDENTICAL
+
+### Quality
+
+One greedy response per problem, using the repository's chat prompts and concurrency 2. Token caps include reasoning. HumanEval runs generated Python in the pinned container recorded in `manifest.json`.
+
+| Task | Passed / evaluated | At token cap | Mean completion tokens |
+|---|---|---|---|
+| humaneval | 161/164 | 0 | 230 |
+| gsm8k | 293/300 | 0 | 349 |
+| extract | 100/100 | 0 | 63 |
+
+Raw results: [raw/qwen-yarn-w2/](raw/qwen-yarn-w2/).
+
+## Qwen3.8-Flash-Next FP8 · 2 nodes · Default
+
+Configuration: [qwen-fp8-w2](configs/qwen-fp8-w2.json).
+
+### Greedy serving
+
+Rates are tokens/s. Brackets show minimum–maximum across three repetitions; the leading value is the median. TTFT is the median of per-phase mean request TTFTs.
+
+| Class | C | Engine tok/s | Wall tok/s | ms/pass | Tokens/pass/request | TTFT ms |
+|---|---|---|---|---|---|---|
+| prose | 1 | 48.4 [48.4–48.4] | 47.6 [46.8–47.6] | 36.07 | 1.75 | 102 |
+| prose | 2 | 68.5 [68.5–68.5] | 67.0 [64.2–67.0] | 45.67 | 1.66 | 152 |
+| prose | 4 | 92.2 [91.9–93.4] | 89.3 [84.7–90.6] | 70.49 | 1.67 | 272 |
+| code | 1 | 53.4 [53.3–53.4] | 52.5 [50.6–52.5] | 36.21 | 1.93 | 77 |
+| code | 2 | 79.6 [79.6–79.9] | 77.7 [74.0–77.8] | 47.08 | 1.89 | 152 |
+| code | 4 | 103.9 [103.8–104.1] | 100.2 [96.2–100.5] | 70.72 | 1.90 | 273 |
+| json | 1 | 54.8 [54.7–54.8] | 53.8 [51.9–53.9] | 36.38 | 1.99 | 102 |
+| json | 2 | 83.3 [83.3–83.3] | 81.2 [77.4–81.2] | 47.46 | 1.98 | 153 |
+| json | 4 | 105.4 [105.0–105.4] | 101.7 [96.4–102.0] | 70.62 | 1.97 | 272 |
+| math | 1 | 51.1 [51.1–51.1] | 50.3 [48.8–50.3] | 36.44 | 1.86 | 102 |
+| math | 2 | 81.9 [81.9–81.9] | 79.7 [75.9–79.9] | 47.18 | 1.95 | 153 |
+| math | 4 | 102.2 [102.1–102.3] | 98.8 [93.8–99.0] | 71.31 | 1.88 | 273 |
+| chat | 1 | 44.7 [44.7–44.7] | 44.1 [42.8–44.1] | 36.32 | 1.62 | 101 |
+| chat | 2 | 72.5 [72.4–72.6] | 70.7 [67.9–71.0] | 46.60 | 1.72 | 152 |
+| chat | 4 | 94.6 [94.4–94.8] | 91.6 [86.9–92.1] | 70.91 | 1.73 | 272 |
+
+### Sampled serving
+
+Temperature one; medians of three repetitions. Other sampling parameters use each model's server defaults.
+
+| Class | C | Engine tok/s | Wall tok/s |
+|---|---|---|---|
+| prose | 1 | 47.6 | 46.9 |
+| prose | 4 | 91.0 | 88.0 |
+| code | 1 | 52.7 | 51.0 |
+| code | 4 | 102.1 | 97.3 |
+| json | 1 | 54.0 | 52.9 |
+| json | 4 | 108.2 | 104.1 |
+| math | 1 | 51.1 | 50.2 |
+| math | 4 | 103.9 | 99.0 |
+| chat | 1 | 46.2 | 45.6 |
+| chat | 4 | 93.1 | 89.9 |
+
+### Cold prefill
+
+| Target tokens | Actual prompt tokens (all samples) | Prefill median s | Prefill min–max s | ms/token | TTFT median s |
+|---|---|---|---|---|---|
+| 2048 | 2063, 2054, 2038 | 1.311 | 1.257–1.383 | 0.638 | 1.327 |
+| 8192 | 8091, 8132, 8300 | 5.178 | 5.156–5.408 | 0.637 | 5.215 |
+| 32768 | 32664, 32698, 32653 | 21.110 | 21.086–21.127 | 0.646 | 21.168 |
+
+### Decode mode checks
+
+| Mode | Class | Engine tok/s | ms/pass | Tokens/pass | All greedy repetitions match default |
+|---|---|---|---|---|---|
+| depth2 | prose | 50.4 | 43.22 | 2.18 | yes |
+| depth2 | code | 61.4 | 43.28 | 2.66 | yes |
+| depth2 | json | 68.1 | 43.56 | 2.97 | yes |
+| depth2 | math | 61.6 | 43.61 | 2.68 | yes |
+| depth2 | chat | 48.4 | 43.53 | 2.11 | yes |
+| plain | prose | 35.8 | 27.91 | 1.00 | yes |
+| plain | code | 35.8 | 27.96 | 1.00 | yes |
+| plain | json | 35.8 | 27.92 | 1.00 | yes |
+| plain | math | 35.7 | 28.00 | 1.00 | yes |
+| plain | chat | 35.9 | 27.83 | 1.00 | yes |
+
+Solo/batched exact-text check: == isolation: prompt 0 alone (256 tokens) vs beside 3 others (256 tokens): DIFFERENT
+
+### Quality
+
+One greedy response per problem, using the repository's chat prompts and concurrency 4. Token caps include reasoning. HumanEval runs generated Python in the pinned container recorded in `manifest.json`.
+
+| Task | Passed / evaluated | At token cap | Mean completion tokens |
+|---|---|---|---|
+| humaneval | 160/164 | 0 | 235 |
+| gsm8k | 292/300 | 0 | 349 |
+| extract | 100/100 | 0 | 63 |
+
+Raw results: [raw/qwen-fp8-w2/](raw/qwen-fp8-w2/).
+
+## Qwen3.8-Flash-Next FP8 · 4 nodes · Default
+
+Configuration: [qwen-fp8-w4](configs/qwen-fp8-w4.json).
+
+### Greedy serving
+
+Rates are tokens/s. Brackets show minimum–maximum across three repetitions; the leading value is the median. TTFT is the median of per-phase mean request TTFTs.
+
+| Class | C | Engine tok/s | Wall tok/s | ms/pass | Tokens/pass/request | TTFT ms |
+|---|---|---|---|---|---|---|
+| prose | 1 | 72.6 [71.8–73.1] | 71.1 [68.7–71.7] | 23.73 | 1.72 | 76 |
+| prose | 2 | 108.8 [108.2–109.6] | 105.6 [100.3–106.8] | 29.86 | 1.66 | 114 |
+| prose | 4 | 149.0 [148.9–149.6] | 143.3 [134.7–144.3] | 43.34 | 1.67 | 206 |
+| code | 1 | 81.4 [81.4–81.5] | 79.7 [76.2–79.7] | 23.72 | 1.93 | 78 |
+| code | 2 | 124.6 [124.6–125.4] | 120.5 [113.7–121.7] | 29.67 | 1.88 | 116 |
+| code | 4 | 168.8 [167.6–170.4] | 160.8 [154.3–161.6] | 43.17 | 1.89 | 203 |
+| json | 1 | 83.3 [83.2–83.3] | 81.3 [78.2–81.8] | 23.74 | 1.98 | 77 |
+| json | 2 | 132.0 [131.8–132.1] | 127.2 [120.4–127.5] | 29.96 | 1.99 | 116 |
+| json | 4 | 172.3 [172.2–172.7] | 164.9 [154.8–165.7] | 43.53 | 1.97 | 205 |
+| math | 1 | 78.9 [78.9–78.9] | 77.3 [74.4–77.5] | 23.78 | 1.88 | 78 |
+| math | 2 | 129.3 [129.3–129.3] | 124.7 [118.0–125.0] | 29.88 | 1.95 | 116 |
+| math | 4 | 167.3 [167.1–167.5] | 160.5 [150.8–160.6] | 43.23 | 1.89 | 205 |
+| chat | 1 | 65.3 [65.0–66.2] | 63.7 [62.8–64.0] | 24.30 | 1.59 | 77 |
+| chat | 2 | 111.8 [110.9–112.9] | 107.5 [104.7–108.2] | 30.01 | 1.72 | 141 |
+| chat | 4 | 153.8 [150.8–157.0] | 148.1 [136.1–150.9] | 43.92 | 1.73 | 203 |
+
+### Sampled serving
+
+Temperature one; medians of three repetitions. Other sampling parameters use each model's server defaults.
+
+| Class | C | Engine tok/s | Wall tok/s |
+|---|---|---|---|
+| prose | 1 | 71.2 | 69.1 |
+| prose | 4 | 152.9 | 145.3 |
+| code | 1 | 78.0 | 75.5 |
+| code | 4 | 166.2 | 158.8 |
+| json | 1 | 83.4 | 81.0 |
+| json | 4 | 177.4 | 168.9 |
+| math | 1 | 80.7 | 78.4 |
+| math | 4 | 169.9 | 162.8 |
+| chat | 1 | 71.8 | 68.1 |
+| chat | 4 | 155.1 | 148.6 |
+
+### Cold prefill
+
+| Target tokens | Actual prompt tokens (all samples) | Prefill median s | Prefill min–max s | ms/token | TTFT median s |
+|---|---|---|---|---|---|
+| 2048 | 2063, 2054, 2038 | 1.113 | 1.064–1.167 | 0.542 | 1.122 |
+| 8192 | 8091, 8132, 8300 | 4.440 | 4.419–4.596 | 0.546 | 4.477 |
+| 32768 | 32664, 32698, 32653 | 18.315 | 18.221–18.402 | 0.561 | 18.366 |
+
+### Decode mode checks
+
+| Mode | Class | Engine tok/s | ms/pass | Tokens/pass | All greedy repetitions match default |
+|---|---|---|---|---|---|
+| depth2 | prose | 78.9 | 27.64 | 2.18 | yes |
+| depth2 | code | 99.8 | 27.78 | 2.77 | yes |
+| depth2 | json | 106.6 | 27.81 | 2.97 | yes |
+| depth2 | math | 94.8 | 28.03 | 2.66 | yes |
+| depth2 | chat | 71.7 | 27.88 | 2.00 | yes |
+| plain | prose | 50.6 | 19.76 | 1.00 | yes |
+| plain | code | 50.6 | 19.76 | 1.00 | yes |
+| plain | json | 50.8 | 19.69 | 1.00 | yes |
+| plain | math | 50.6 | 19.77 | 1.00 | yes |
+| plain | chat | 50.8 | 19.70 | 1.00 | yes |
+
+Solo/batched exact-text check: == isolation: prompt 0 alone (256 tokens) vs beside 3 others (256 tokens): DIFFERENT
+
+### Quality
+
+One greedy response per problem, using the repository's chat prompts and concurrency 4. Token caps include reasoning. HumanEval runs generated Python in the pinned container recorded in `manifest.json`.
+
+| Task | Passed / evaluated | At token cap | Mean completion tokens |
+|---|---|---|---|
+| humaneval | 158/164 | 0 | 234 |
+| gsm8k | 291/300 | 0 | 353 |
+| extract | 100/100 | 0 | 63 |
+
+Raw results: [raw/qwen-fp8-w4/](raw/qwen-fp8-w4/).
+
+## GLM-5.3 int4/int8 · 4 nodes · 120K BF16 KV
 
 Configuration: [glm53-w4](configs/glm53-w4.json).
 
@@ -636,7 +863,87 @@ One greedy response per problem, using the repository's chat prompts and concurr
 
 Raw results: [raw/glm53-w4/](raw/glm53-w4/).
 
-## DeepSeek-V4.1-Flash · 4 nodes
+## GLM-5.3 int4/int8 · 4 nodes · 208K FP8 KV
+
+Configuration: [glm53-fp8kv-w4](configs/glm53-fp8kv-w4.json).
+
+### Greedy serving
+
+Rates are tokens/s. Brackets show minimum–maximum across three repetitions; the leading value is the median. TTFT is the median of per-phase mean request TTFTs.
+
+| Class | C | Engine tok/s | Wall tok/s | ms/pass | Tokens/pass/request | TTFT ms |
+|---|---|---|---|---|---|---|
+| prose | 1 | 30.2 [30.1–30.2] | 29.6 [27.6–29.7] | 63.04 | 1.90 | 128 |
+| prose | 2 | 38.1 [38.1–38.1] | 37.3 [34.1–37.3] | 89.86 | 1.75 | 204 |
+| prose | 4 | 47.2 [47.1–47.7] | 46.0 [41.4–46.5] | 144.42 | 1.80 | 385 |
+| prose | 8 | 56.1 [56.0–56.4] | 52.5 [47.1–52.6] | 237.74 | 1.79 | 893 |
+| code | 1 | 30.5 [30.5–30.5] | 29.9 [27.6–30.0] | 64.29 | 1.96 | 127 |
+| code | 2 | 39.5 [39.4–39.5] | 38.6 [34.8–38.7] | 93.01 | 1.85 | 190 |
+| code | 4 | 46.8 [46.8–46.9] | 45.6 [41.1–45.7] | 150.20 | 1.83 | 387 |
+| code | 8 | 54.6 [54.6–54.9] | 51.4 [45.7–51.6] | 249.33 | 1.82 | 903 |
+| json | 1 | 30.1 [30.0–30.1] | 29.5 [27.4–29.6] | 63.79 | 1.92 | 127 |
+| json | 2 | 39.5 [39.4–39.5] | 38.6 [35.0–38.6] | 92.21 | 1.86 | 191 |
+| json | 4 | 50.5 [50.4–50.8] | 49.1 [43.8–49.5] | 149.85 | 1.95 | 392 |
+| json | 8 | 58.4 [58.3–58.5] | 54.8 [48.5–54.9] | 242.93 | 1.92 | 896 |
+| math | 1 | 29.3 [29.3–29.3] | 28.9 [26.3–28.9] | 64.41 | 1.89 | 128 |
+| math | 2 | 41.1 [41.0–41.1] | 40.1 [35.7–40.2] | 94.07 | 1.95 | 204 |
+| math | 4 | 47.5 [47.3–47.6] | 46.1 [41.2–46.4] | 149.87 | 1.88 | 382 |
+| math | 8 | 56.5 [56.0–56.8] | 52.6 [46.8–53.1] | 256.21 | 1.91 | 905 |
+| chat | 1 | 27.8 [27.8–27.9] | 27.4 [25.5–27.5] | 63.60 | 1.77 | 102 |
+| chat | 2 | 38.2 [38.1–38.3] | 37.3 [34.0–37.4] | 91.95 | 1.78 | 203 |
+| chat | 4 | 47.1 [46.9–47.2] | 45.7 [41.4–46.0] | 150.18 | 1.82 | 382 |
+| chat | 8 | 56.1 [55.7–56.3] | 52.4 [47.0–52.8] | 245.83 | 1.84 | 893 |
+
+### Sampled serving
+
+Temperature one; medians of three repetitions. Other sampling parameters use each model's server defaults.
+
+| Class | C | Engine tok/s | Wall tok/s |
+|---|---|---|---|
+| prose | 1 | 28.8 | 28.4 |
+| prose | 8 | 55.0 | 51.6 |
+| code | 1 | 30.0 | 29.5 |
+| code | 8 | 54.5 | 51.3 |
+| json | 1 | 30.2 | 29.7 |
+| json | 8 | 58.3 | 54.7 |
+| math | 1 | 29.7 | 29.2 |
+| math | 8 | 56.0 | 52.6 |
+| chat | 1 | 27.1 | 26.7 |
+| chat | 8 | 55.1 | 51.7 |
+
+### Cold prefill
+
+| Target tokens | Actual prompt tokens (all samples) | Prefill median s | Prefill min–max s | ms/token | TTFT median s |
+|---|---|---|---|---|---|
+| 2048 | 2071, 2098, 2073 | 4.747 | 4.733–4.914 | 2.290 | 4.759 |
+| 8192 | 8257, 8302, 8429 | 24.735 | 24.427–25.097 | 2.977 | 24.746 |
+| 32768 | 33245, 33321, 33241 | 186.045 | 185.371–186.236 | 5.589 | 186.071 |
+
+### Decode mode checks
+
+| Mode | Class | Engine tok/s | ms/pass | Tokens/pass | All greedy repetitions match default |
+|---|---|---|---|---|---|
+| plain | prose | 20.1 | 49.79 | 1.00 | yes |
+| plain | code | 19.8 | 50.46 | 1.00 | yes |
+| plain | json | 20.1 | 49.78 | 1.00 | yes |
+| plain | math | 20.1 | 49.79 | 1.00 | yes |
+| plain | chat | 20.1 | 49.83 | 1.00 | yes |
+
+Solo/batched exact-text check: == isolation: prompt 0 alone (256 tokens) vs beside 7 others (256 tokens): IDENTICAL
+
+### Quality
+
+One greedy response per problem, using the repository's chat prompts and concurrency 8. Token caps include reasoning. HumanEval runs generated Python in the pinned container recorded in `manifest.json`.
+
+| Task | Passed / evaluated | At token cap | Mean completion tokens |
+|---|---|---|---|
+| humaneval | 160/164 | 0 | 138 |
+| gsm8k | 293/300 | 0 | 94 |
+| extract | 100/100 | 0 | 57 |
+
+Raw results: [raw/glm53-fp8kv-w4/](raw/glm53-fp8kv-w4/).
+
+## DeepSeek-V4.1-Flash MXFP4/FP8 · 4 nodes · Default
 
 Configuration: [deepseek-w4](configs/deepseek-w4.json).
 
@@ -720,311 +1027,6 @@ One greedy response per problem, using the repository's chat prompts and concurr
 | extract | 100/100 | 0 | 53 |
 
 Raw results: [raw/deepseek-w4/](raw/deepseek-w4/).
-
-## Qwen NVFP4, YaRN 512K · 2 nodes
-
-Configuration: [qwen-yarn-w2](configs/qwen-yarn-w2.json).
-
-### Greedy serving
-
-Rates are tokens/s. Brackets show minimum–maximum across three repetitions; the leading value is the median. TTFT is the median of per-phase mean request TTFTs.
-
-| Class | C | Engine tok/s | Wall tok/s | ms/pass | Tokens/pass/request | TTFT ms |
-|---|---|---|---|---|---|---|
-| prose | 1 | 66.6 [64.1–66.6] | 65.3 [61.2–65.4] | 25.69 | 1.71 | 77 |
-| prose | 2 | 98.7 [94.8–98.9] | 96.1 [87.8–96.3] | 33.28 | 1.67 | 115 |
-| code | 1 | 73.0 [72.7–73.1] | 71.5 [68.2–71.5] | 25.89 | 1.89 | 76 |
-| code | 2 | 111.4 [109.9–111.9] | 108.0 [99.5–108.8] | 33.90 | 1.91 | 115 |
-| json | 1 | 75.8 [75.8–76.2] | 74.1 [70.6–74.5] | 26.07 | 1.98 | 76 |
-| json | 2 | 115.2 [115.0–115.3] | 111.1 [104.8–111.2] | 34.28 | 1.98 | 126 |
-| math | 1 | 73.5 [71.2–73.7] | 72.0 [66.5–72.1] | 26.09 | 1.92 | 77 |
-| math | 2 | 112.1 [112.1–112.7] | 108.4 [101.5–108.7] | 34.29 | 1.94 | 127 |
-| chat | 1 | 64.5 [62.5–64.6] | 63.4 [59.1–63.5] | 26.00 | 1.68 | 76 |
-| chat | 2 | 101.5 [98.6–101.9] | 98.5 [91.1–99.1] | 33.50 | 1.72 | 127 |
-
-### Sampled serving
-
-Temperature one; medians of three repetitions. Other sampling parameters use each model's server defaults.
-
-| Class | C | Engine tok/s | Wall tok/s |
-|---|---|---|---|
-| prose | 1 | 63.8 | 62.3 |
-| prose | 2 | 96.4 | 90.6 |
-| code | 1 | 70.0 | 66.1 |
-| code | 2 | 103.3 | 100.5 |
-| json | 1 | 72.4 | 71.0 |
-| json | 2 | 113.6 | 109.8 |
-| math | 1 | 70.4 | 67.5 |
-| math | 2 | 105.3 | 102.1 |
-| chat | 1 | 61.5 | 60.4 |
-| chat | 2 | 96.1 | 93.0 |
-
-### Cold prefill
-
-| Target tokens | Actual prompt tokens (all samples) | Prefill median s | Prefill min–max s | ms/token | TTFT median s |
-|---|---|---|---|---|---|
-| 2048 | 2063, 2054, 2038 | 1.278 | 1.246–1.347 | 0.622 | 1.287 |
-| 8192 | 8091, 8132, 8300 | 5.117 | 5.106–5.373 | 0.631 | 5.138 |
-| 32768 | 32664, 32698, 32653 | 20.975 | 20.964–20.985 | 0.642 | 21.036 |
-
-### Decode mode checks
-
-| Mode | Class | Engine tok/s | ms/pass | Tokens/pass | All greedy repetitions match default |
-|---|---|---|---|---|---|
-| depth2 | prose | 70.3 | 31.26 | 2.20 | yes |
-| depth2 | code | 84.4 | 31.48 | 2.66 | yes |
-| depth2 | json | 91.5 | 31.69 | 2.90 | yes |
-| depth2 | math | 87.5 | 31.67 | 2.77 | yes |
-| depth2 | chat | 65.9 | 31.71 | 2.09 | yes |
-| plain | prose | 47.4 | 21.09 | 1.00 | yes |
-| plain | code | 47.4 | 21.12 | 1.00 | yes |
-| plain | json | 47.4 | 21.10 | 1.00 | yes |
-| plain | math | 47.2 | 21.20 | 1.00 | yes |
-| plain | chat | 47.2 | 21.20 | 1.00 | yes |
-
-Solo/batched exact-text check: == isolation: prompt 0 alone (256 tokens) vs beside 1 others (256 tokens): IDENTICAL
-
-### Quality
-
-One greedy response per problem, using the repository's chat prompts and concurrency 2. Token caps include reasoning. HumanEval runs generated Python in the pinned container recorded in `manifest.json`.
-
-| Task | Passed / evaluated | At token cap | Mean completion tokens |
-|---|---|---|---|
-| humaneval | 161/164 | 0 | 230 |
-| gsm8k | 293/300 | 0 | 349 |
-| extract | 100/100 | 0 | 63 |
-
-Raw results: [raw/qwen-yarn-w2/](raw/qwen-yarn-w2/).
-
-## Qwen NVFP4, BF16 dense · 1 node
-
-Configuration: [qwen-nvfp4-bf16-w1](configs/qwen-nvfp4-bf16-w1.json).
-
-### Greedy serving
-
-Rates are tokens/s. Brackets show minimum–maximum across three repetitions; the leading value is the median. TTFT is the median of per-phase mean request TTFTs.
-
-| Class | C | Engine tok/s | Wall tok/s | ms/pass | Tokens/pass/request | TTFT ms |
-|---|---|---|---|---|---|---|
-| prose | 1 | 33.1 [32.7–33.2] | 32.7 [31.7–32.8] | 51.29 | 1.70 | 127 |
-| prose | 2 | 51.4 [51.1–51.5] | 50.4 [48.1–50.5] | 61.98 | 1.63 | 178 |
-| prose | 4 | 74.6 [74.3–75.0] | 72.2 [69.0–72.4] | 86.36 | 1.66 | 338 |
-| code | 1 | 37.9 [37.8–37.9] | 37.3 [36.2–37.4] | 51.41 | 1.95 | 102 |
-| code | 2 | 59.7 [59.5–60.0] | 58.2 [55.6–58.7] | 63.03 | 1.90 | 179 |
-| code | 4 | 84.4 [84.3–84.9] | 81.3 [77.8–81.9] | 86.90 | 1.88 | 336 |
-| json | 1 | 38.4 [38.3–38.4] | 37.8 [36.5–37.9] | 51.92 | 1.99 | 102 |
-| json | 2 | 62.3 [62.1–62.4] | 60.8 [58.0–60.9] | 63.43 | 1.99 | 178 |
-| json | 4 | 86.5 [86.2–86.9] | 83.6 [78.8–84.0] | 86.94 | 1.97 | 339 |
-| math | 1 | 36.8 [36.6–36.8] | 36.3 [35.2–36.3] | 51.67 | 1.90 | 127 |
-| math | 2 | 60.6 [59.9–60.7] | 59.1 [55.9–59.3] | 63.23 | 1.93 | 179 |
-| math | 4 | 83.6 [83.5–84.0] | 80.8 [77.0–80.8] | 87.11 | 1.87 | 344 |
-| chat | 1 | 31.9 [31.6–31.9] | 31.5 [30.5–31.6] | 51.53 | 1.65 | 104 |
-| chat | 2 | 51.6 [51.5–51.8] | 50.4 [48.8–50.8] | 61.91 | 1.66 | 180 |
-| chat | 4 | 75.7 [74.8–77.5] | 72.6 [69.6–75.0] | 85.23 | 1.71 | 335 |
-
-### Sampled serving
-
-Temperature one; medians of three repetitions. Other sampling parameters use each model's server defaults.
-
-| Class | C | Engine tok/s | Wall tok/s |
-|---|---|---|---|
-| prose | 1 | 32.2 | 31.8 |
-| prose | 4 | 74.3 | 70.1 |
-| code | 1 | 36.3 | 35.8 |
-| code | 4 | 82.9 | 80.0 |
-| json | 1 | 38.0 | 37.3 |
-| json | 4 | 88.8 | 84.9 |
-| math | 1 | 36.2 | 35.0 |
-| math | 4 | 84.2 | 81.2 |
-| chat | 1 | 31.4 | 30.7 |
-| chat | 4 | 75.4 | 72.3 |
-
-### Cold prefill
-
-| Target tokens | Actual prompt tokens (all samples) | Prefill median s | Prefill min–max s | ms/token | TTFT median s |
-|---|---|---|---|---|---|
-| 2048 | 2063, 2054, 2038 | 1.707 | 1.646–1.806 | 0.831 | 1.723 |
-| 8192 | 8091, 8132, 8300 | 6.939 | 6.897–7.283 | 0.853 | 6.976 |
-| 32768 | 32664, 32698, 32653 | 28.424 | 28.405–28.585 | 0.870 | 28.482 |
-
-### Decode mode checks
-
-| Mode | Class | Engine tok/s | ms/pass | Tokens/pass | All greedy repetitions match default |
-|---|---|---|---|---|---|
-| depth2 | prose | 35.0 | 60.20 | 2.11 | yes |
-| depth2 | code | 47.1 | 60.19 | 2.83 | yes |
-| depth2 | json | 48.0 | 60.40 | 2.90 | yes |
-| depth2 | math | 45.2 | 60.72 | 2.74 | yes |
-| depth2 | chat | 35.4 | 60.51 | 2.14 | yes |
-| plain | prose | 24.4 | 40.94 | 1.00 | yes |
-| plain | code | 24.4 | 41.05 | 1.00 | yes |
-| plain | json | 24.4 | 41.02 | 1.00 | yes |
-| plain | math | 24.3 | 41.12 | 1.00 | yes |
-| plain | chat | 24.4 | 41.01 | 1.00 | yes |
-
-Solo/batched exact-text check: == isolation: prompt 0 alone (256 tokens) vs beside 3 others (256 tokens): DIFFERENT
-
-### Quality
-
-One greedy response per problem, using the repository's chat prompts and concurrency 4. Token caps include reasoning. HumanEval runs generated Python in the pinned container recorded in `manifest.json`.
-
-| Task | Passed / evaluated | At token cap | Mean completion tokens |
-|---|---|---|---|
-| humaneval | 158/164 | 0 | 229 |
-| gsm8k | 291/300 | 0 | 352 |
-| extract | 100/100 | 0 | 63 |
-
-Raw results: [raw/qwen-nvfp4-bf16-w1/](raw/qwen-nvfp4-bf16-w1/).
-
-## GLM-5.3 int4/int8, FP8 KV · 4 nodes
-
-Configuration: [glm53-fp8kv-w4](configs/glm53-fp8kv-w4.json).
-
-### Greedy serving
-
-Rates are tokens/s. Brackets show minimum–maximum across three repetitions; the leading value is the median. TTFT is the median of per-phase mean request TTFTs.
-
-| Class | C | Engine tok/s | Wall tok/s | ms/pass | Tokens/pass/request | TTFT ms |
-|---|---|---|---|---|---|---|
-| prose | 1 | 30.2 [30.1–30.2] | 29.6 [27.6–29.7] | 63.04 | 1.90 | 128 |
-| prose | 2 | 38.1 [38.1–38.1] | 37.3 [34.1–37.3] | 89.86 | 1.75 | 204 |
-| prose | 4 | 47.2 [47.1–47.7] | 46.0 [41.4–46.5] | 144.42 | 1.80 | 385 |
-| prose | 8 | 56.1 [56.0–56.4] | 52.5 [47.1–52.6] | 237.74 | 1.79 | 893 |
-| code | 1 | 30.5 [30.5–30.5] | 29.9 [27.6–30.0] | 64.29 | 1.96 | 127 |
-| code | 2 | 39.5 [39.4–39.5] | 38.6 [34.8–38.7] | 93.01 | 1.85 | 190 |
-| code | 4 | 46.8 [46.8–46.9] | 45.6 [41.1–45.7] | 150.20 | 1.83 | 387 |
-| code | 8 | 54.6 [54.6–54.9] | 51.4 [45.7–51.6] | 249.33 | 1.82 | 903 |
-| json | 1 | 30.1 [30.0–30.1] | 29.5 [27.4–29.6] | 63.79 | 1.92 | 127 |
-| json | 2 | 39.5 [39.4–39.5] | 38.6 [35.0–38.6] | 92.21 | 1.86 | 191 |
-| json | 4 | 50.5 [50.4–50.8] | 49.1 [43.8–49.5] | 149.85 | 1.95 | 392 |
-| json | 8 | 58.4 [58.3–58.5] | 54.8 [48.5–54.9] | 242.93 | 1.92 | 896 |
-| math | 1 | 29.3 [29.3–29.3] | 28.9 [26.3–28.9] | 64.41 | 1.89 | 128 |
-| math | 2 | 41.1 [41.0–41.1] | 40.1 [35.7–40.2] | 94.07 | 1.95 | 204 |
-| math | 4 | 47.5 [47.3–47.6] | 46.1 [41.2–46.4] | 149.87 | 1.88 | 382 |
-| math | 8 | 56.5 [56.0–56.8] | 52.6 [46.8–53.1] | 256.21 | 1.91 | 905 |
-| chat | 1 | 27.8 [27.8–27.9] | 27.4 [25.5–27.5] | 63.60 | 1.77 | 102 |
-| chat | 2 | 38.2 [38.1–38.3] | 37.3 [34.0–37.4] | 91.95 | 1.78 | 203 |
-| chat | 4 | 47.1 [46.9–47.2] | 45.7 [41.4–46.0] | 150.18 | 1.82 | 382 |
-| chat | 8 | 56.1 [55.7–56.3] | 52.4 [47.0–52.8] | 245.83 | 1.84 | 893 |
-
-### Sampled serving
-
-Temperature one; medians of three repetitions. Other sampling parameters use each model's server defaults.
-
-| Class | C | Engine tok/s | Wall tok/s |
-|---|---|---|---|
-| prose | 1 | 28.8 | 28.4 |
-| prose | 8 | 55.0 | 51.6 |
-| code | 1 | 30.0 | 29.5 |
-| code | 8 | 54.5 | 51.3 |
-| json | 1 | 30.2 | 29.7 |
-| json | 8 | 58.3 | 54.7 |
-| math | 1 | 29.7 | 29.2 |
-| math | 8 | 56.0 | 52.6 |
-| chat | 1 | 27.1 | 26.7 |
-| chat | 8 | 55.1 | 51.7 |
-
-### Cold prefill
-
-| Target tokens | Actual prompt tokens (all samples) | Prefill median s | Prefill min–max s | ms/token | TTFT median s |
-|---|---|---|---|---|---|
-| 2048 | 2071, 2098, 2073 | 4.747 | 4.733–4.914 | 2.290 | 4.759 |
-| 8192 | 8257, 8302, 8429 | 24.735 | 24.427–25.097 | 2.977 | 24.746 |
-| 32768 | 33245, 33321, 33241 | 186.045 | 185.371–186.236 | 5.589 | 186.071 |
-
-### Decode mode checks
-
-| Mode | Class | Engine tok/s | ms/pass | Tokens/pass | All greedy repetitions match default |
-|---|---|---|---|---|---|
-| plain | prose | 20.1 | 49.79 | 1.00 | yes |
-| plain | code | 19.8 | 50.46 | 1.00 | yes |
-| plain | json | 20.1 | 49.78 | 1.00 | yes |
-| plain | math | 20.1 | 49.79 | 1.00 | yes |
-| plain | chat | 20.1 | 49.83 | 1.00 | yes |
-
-Solo/batched exact-text check: == isolation: prompt 0 alone (256 tokens) vs beside 7 others (256 tokens): IDENTICAL
-
-### Quality
-
-One greedy response per problem, using the repository's chat prompts and concurrency 8. Token caps include reasoning. HumanEval runs generated Python in the pinned container recorded in `manifest.json`.
-
-| Task | Passed / evaluated | At token cap | Mean completion tokens |
-|---|---|---|---|
-| humaneval | 160/164 | 0 | 138 |
-| gsm8k | 293/300 | 0 | 94 |
-| extract | 100/100 | 0 | 57 |
-
-Raw results: [raw/glm53-fp8kv-w4/](raw/glm53-fp8kv-w4/).
-
-## GLM-Flash hybrid, 256K KV · 2 nodes
-
-Configuration: [glm-flash-hybrid-256k-w2](configs/glm-flash-hybrid-256k-w2.json).
-
-### Greedy serving
-
-Rates are tokens/s. Brackets show minimum–maximum across three repetitions; the leading value is the median. TTFT is the median of per-phase mean request TTFTs.
-
-| Class | C | Engine tok/s | Wall tok/s | ms/pass | Tokens/pass/request | TTFT ms |
-|---|---|---|---|---|---|---|
-| prose | 1 | 35.0 [34.2–35.0] | 34.4 [32.2–34.4] | 54.36 | 1.90 | 127 |
-| prose | 2 | 44.7 [44.5–44.7] | 43.9 [41.3–44.0] | 77.68 | 1.77 | 178 |
-| code | 1 | 35.6 [35.6–35.6] | 35.1 [33.3–35.2] | 55.55 | 1.98 | 103 |
-| code | 2 | 45.7 [45.7–45.7] | 45.1 [42.0–45.1] | 79.70 | 1.85 | 167 |
-| json | 1 | 35.8 [35.8–35.8] | 35.4 [33.5–35.5] | 54.82 | 1.96 | 77 |
-| json | 2 | 44.4 [44.3–44.4] | 43.8 [40.9–43.8] | 78.21 | 1.83 | 166 |
-| math | 1 | 33.8 [33.8–33.8] | 33.4 [31.5–33.4] | 55.49 | 1.88 | 103 |
-| math | 2 | 47.4 [47.4–47.5] | 46.6 [43.2–46.6] | 80.84 | 1.92 | 205 |
-| chat | 1 | 31.2 [31.2–31.2] | 30.8 [29.5–30.8] | 54.87 | 1.71 | 103 |
-| chat | 2 | 44.3 [44.3–44.3] | 43.5 [40.8–43.5] | 78.80 | 1.78 | 217 |
-
-### Sampled serving
-
-Temperature one; medians of three repetitions. Other sampling parameters use each model's server defaults.
-
-| Class | C | Engine tok/s | Wall tok/s |
-|---|---|---|---|
-| prose | 1 | 33.9 | 33.3 |
-| prose | 2 | 43.8 | 42.9 |
-| code | 1 | 35.1 | 34.6 |
-| code | 2 | 45.4 | 44.8 |
-| json | 1 | 35.6 | 35.3 |
-| json | 2 | 45.1 | 42.9 |
-| math | 1 | 33.7 | 33.3 |
-| math | 2 | 47.1 | 46.3 |
-| chat | 1 | 32.3 | 30.7 |
-| chat | 2 | 43.9 | 42.6 |
-
-### Cold prefill
-
-| Target tokens | Actual prompt tokens (all samples) | Prefill median s | Prefill min–max s | ms/token | TTFT median s |
-|---|---|---|---|---|---|
-| 2048 | 2071, 2098, 2073 | 2.367 | 2.343–2.402 | 1.142 | 2.388 |
-| 8192 | 8257, 8302, 8429 | 9.180 | 9.107–9.361 | 1.111 | 9.211 |
-| 32768 | 33245, 33321, 33241 | 39.596 | 39.417–40.065 | 1.188 | 39.612 |
-
-### Decode mode checks
-
-| Mode | Class | Engine tok/s | ms/pass | Tokens/pass | All greedy repetitions match default |
-|---|---|---|---|---|---|
-| plain | prose | 24.1 | 41.44 | 1.00 | yes |
-| plain | code | 24.1 | 41.47 | 1.00 | yes |
-| plain | json | 24.1 | 41.46 | 1.00 | yes |
-| plain | math | 24.1 | 41.50 | 1.00 | yes |
-| plain | chat | 24.1 | 41.49 | 1.00 | yes |
-
-Solo/batched exact-text check: == isolation: prompt 0 alone (256 tokens) vs beside 1 others (256 tokens): IDENTICAL
-
-### Quality
-
-One greedy response per problem, using the repository's chat prompts and concurrency 2. Token caps include reasoning. HumanEval runs generated Python in the pinned container recorded in `manifest.json`.
-
-| Task | Passed / evaluated | At token cap | Mean completion tokens |
-|---|---|---|---|
-| humaneval | 158/164 | 0 | 172 |
-| gsm8k | 292/300 | 0 | 76 |
-| extract | 100/100 | 0 | 51 |
-
-Raw results: [raw/glm-flash-hybrid-256k-w2/](raw/glm-flash-hybrid-256k-w2/).
 
 ## Selection microbenchmarks
 

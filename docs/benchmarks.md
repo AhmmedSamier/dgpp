@@ -8,23 +8,27 @@ Measured 2026-09-22 (UTC), using source revision `a3ed8994a34c` and one release 
 
 Rates are tokens per second. Each range spans the five prompt classes' medians, with three repetitions per class. **C** is concurrent requests. The single-request column measures engine decode; the loaded column measures completed output over full request wall time, including admission and prefill. The two columns have different timing scopes.
 
-| Deployment | C1 engine tok/s | Loaded wall tok/s | Cold prefill seconds: ~2K / ~8K / ~32K |
-|---|---|---|---|
-| GLM-5.3-Flash NVFP4/FP8 · 4 nodes | 54.0–61.8 | C4: 102.8–114.1 | 1.497 / 5.847 / 26.686 |
-| GLM-5.3-Flash NVFP4/FP8 · 2 nodes | 31.3–36.0 | C4: 56.3–61.8 | 2.380 / 9.204 / 39.950 |
-| GLM-5.3-Flash FP8 · 4 nodes | 45.4–52.1 | C4: 73.1–78.4 | 1.714 / 6.508 / 29.140 |
-| Qwen3.8-Flash-Next FP8 · 4 nodes | 65.3–83.3 | C4: 143.3–164.9 | 1.113 / 4.440 / 18.315 |
-| Qwen3.8-Flash-Next FP8 · 2 nodes | 44.7–54.8 | C4: 89.3–101.7 | 1.311 / 5.178 / 21.110 |
-| Qwen3.8-Flash-Next NVFP4 · 1 node | 42.3–50.0 | C4: 83.4–95.4 | 1.839 / 7.485 / 30.266 |
-| Qwen3.8-Flash-Next NVFP4 · 2 nodes | 62.6–74.6 | C4: 124.5–143.8 | 1.311 / 5.188 / 20.871 |
-| GLM-5.3 int4/int8 · 4 nodes | 26.8–30.6 | C8: 51.1–54.2 | 4.785 / 24.209 / 169.138 |
-| DeepSeek-V4.1-Flash · 4 nodes | 39.8–75.5 | C6: 85.3–123.4 | 1.602 / 5.866 / 27.087 |
-| Qwen NVFP4, YaRN 512K · 2 nodes | 64.5–75.8 | C2: 96.1–111.1 | 1.278 / 5.117 / 20.975 |
-| Qwen NVFP4, BF16 dense · 1 node | 31.9–38.4 | C4: 72.2–83.6 | 1.707 / 6.939 / 28.424 |
-| GLM-5.3 int4/int8, FP8 KV · 4 nodes | 27.8–30.5 | C8: 51.4–54.8 | 4.747 / 24.735 / 186.045 |
-| GLM-Flash hybrid, 256K KV · 2 nodes | 31.2–35.8 | C2: 43.5–46.6 | 2.367 / 9.180 / 39.596 |
+Rows are grouped by model family and node count, with configuration options next to each other throughout this page. **Nodes** is the tensor-parallel world size. **KV** is the shared key/value-cache token pool; **slots** is the configured concurrent-request limit. In configuration labels, K = 1,024 tokens.
 
-Rows cover the checked-in deployment templates, the GLM Flash FP8 checkpoint, and the three configuration variants described below. Qwen NVFP4 uses an FP8 dense stack unless the row says BF16. All Qwen NVFP4 rows map the n-gram table from NVMe.
+| Model / weights | Nodes | Options | C1 engine tok/s | Loaded wall tok/s | Cold prefill seconds: ~2K / ~8K / ~32K |
+|---|---|---|---|---|---|
+| GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 31.3–36.0 | C4: 56.3–61.8 | 2.380 / 9.204 / 39.950 |
+| GLM-5.3-Flash NVFP4/FP8 | 2 | 256K FP8 KV, 2 slots | 31.2–35.8 | C2: 43.5–46.6 | 2.367 / 9.180 / 39.596 |
+| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 54.0–61.8 | C4: 102.8–114.1 | 1.497 / 5.847 / 26.686 |
+| GLM-5.3-Flash FP8 | 4 | 384K BF16 KV, 4 slots | 45.4–52.1 | C4: 73.1–78.4 | 1.714 / 6.508 / 29.140 |
+| Qwen3.8-Flash-Next NVFP4 | 1 | FP8 dense | 42.3–50.0 | C4: 83.4–95.4 | 1.839 / 7.485 / 30.266 |
+| Qwen3.8-Flash-Next NVFP4 | 1 | BF16 dense | 31.9–38.4 | C4: 72.2–83.6 | 1.707 / 6.939 / 28.424 |
+| Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense | 62.6–74.6 | C4: 124.5–143.8 | 1.311 / 5.188 / 20.871 |
+| Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense, YaRN 512K, 2 slots | 64.5–75.8 | C2: 96.1–111.1 | 1.278 / 5.117 / 20.975 |
+| Qwen3.8-Flash-Next FP8 | 2 | Default | 44.7–54.8 | C4: 89.3–101.7 | 1.311 / 5.178 / 21.110 |
+| Qwen3.8-Flash-Next FP8 | 4 | Default | 65.3–83.3 | C4: 143.3–164.9 | 1.113 / 4.440 / 18.315 |
+| GLM-5.3 int4/int8 | 4 | 120K BF16 KV | 26.8–30.6 | C8: 51.1–54.2 | 4.785 / 24.209 / 169.138 |
+| GLM-5.3 int4/int8 | 4 | 208K FP8 KV | 27.8–30.5 | C8: 51.4–54.8 | 4.747 / 24.735 / 186.045 |
+| DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | Default | 39.8–75.5 | C6: 85.3–123.4 | 1.602 / 5.866 / 27.087 |
+
+Rows cover the checked-in deployment templates, the GLM Flash FP8 checkpoint, and the three configuration variants described below. For Qwen NVFP4, the Options column identifies the dense projection format; the expert weights remain NVFP4 in both cases. All Qwen NVFP4 rows map the n-gram table from NVMe. YaRN 512K denotes the extended-context configuration.
+
+The two-node GLM-5.3-Flash NVFP4/FP8 rows use the same checkpoint: one has a 163,840-token FP8 KV pool and four request slots; the other has a 262,144-token FP8 KV pool and two slots. NVFP4/FP8 identifies the [mixed-weight checkpoint](model_cards/GLM-5.3-Flash-NVFP4-FP8.md), which combines NVFP4 main-stack routed experts with the remaining tensors from the FP8 release, retaining their original formats.
 
 ## Hardware and configuration
 
@@ -36,23 +40,23 @@ Four-node launches after Node 3's second recovery also collect host memory and p
 
 MTP is speculative multi-token prediction. A pass can commit several output tokens. DeepSeek uses its configured adaptive depth schedule. KV capacity below is the deployment's shared token pool; it is not a promise that every concurrent request can use that full context.
 
-| Deployment | Request slots | KV pool tokens | KV format | Default MTP depth |
-|---|---|---|---|---|
-| GLM-5.3-Flash NVFP4/FP8 · 4 nodes | 4 | 786,432 | bf16 | 1 |
-| GLM-5.3-Flash NVFP4/FP8 · 2 nodes | 4 | 163,840 | fp8 | 1 |
-| GLM-5.3-Flash FP8 · 4 nodes | 4 | 393,216 | bf16 | 1 |
-| Qwen3.8-Flash-Next FP8 · 4 nodes | 4 | 262,144 | bf16 | 1 |
-| Qwen3.8-Flash-Next FP8 · 2 nodes | 4 | 262,144 | bf16 | 1 |
-| Qwen3.8-Flash-Next NVFP4 · 1 node | 4 | 65,536 | bf16 | 1 |
-| Qwen3.8-Flash-Next NVFP4 · 2 nodes | 4 | 262,144 | bf16 | 1 |
-| GLM-5.3 int4/int8 · 4 nodes | 8 | 122,880 | bf16 | 1 |
-| DeepSeek-V4.1-Flash · 4 nodes | 6 | 131,072 | model default | 4 (adaptive) |
-| Qwen NVFP4, YaRN 512K · 2 nodes | 2 | 532,480 | bf16 | 1 |
-| Qwen NVFP4, BF16 dense · 1 node | 4 | 65,536 | bf16 | 1 |
-| GLM-5.3 int4/int8, FP8 KV · 4 nodes | 8 | 212,992 | fp8 | 1 |
-| GLM-Flash hybrid, 256K KV · 2 nodes | 2 | 262,144 | fp8 | 1 |
+| Model / weights | Nodes | Options | Request slots | KV pool tokens | KV format | Default MTP depth |
+|---|---|---|---|---|---|---|
+| GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 4 | 163,840 | fp8 | 1 |
+| GLM-5.3-Flash NVFP4/FP8 | 2 | 256K FP8 KV, 2 slots | 2 | 262,144 | fp8 | 1 |
+| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 4 | 786,432 | bf16 | 1 |
+| GLM-5.3-Flash FP8 | 4 | 384K BF16 KV, 4 slots | 4 | 393,216 | bf16 | 1 |
+| Qwen3.8-Flash-Next NVFP4 | 1 | FP8 dense | 4 | 65,536 | bf16 | 1 |
+| Qwen3.8-Flash-Next NVFP4 | 1 | BF16 dense | 4 | 65,536 | bf16 | 1 |
+| Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense | 4 | 262,144 | bf16 | 1 |
+| Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense, YaRN 512K, 2 slots | 2 | 532,480 | bf16 | 1 |
+| Qwen3.8-Flash-Next FP8 | 2 | Default | 4 | 262,144 | bf16 | 1 |
+| Qwen3.8-Flash-Next FP8 | 4 | Default | 4 | 262,144 | bf16 | 1 |
+| GLM-5.3 int4/int8 | 4 | 120K BF16 KV | 8 | 122,880 | bf16 | 1 |
+| GLM-5.3 int4/int8 | 4 | 208K FP8 KV | 8 | 212,992 | fp8 | 1 |
+| DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | Default | 6 | 131,072 | model default | 4 (adaptive) |
 
-GLM Flash FP8 uses the four-node Flash template with the FP8 model ID and `kv_capacity=393216`. The alternative Qwen BF16 row selects `dense_weights=checkpoint` and `fp8_head=gemv`; full GLM's FP8 KV row selects `kv_dtype=fp8`, `kv_capacity=212992`, and a 1.5 GiB prefix cache; the two-node Flash 256K row selects two slots, `kv_capacity=262144`, and a 2 GiB prefix cache. Every effective configuration is saved in the [configuration matrix](../benchmarks/results/2026-09-22-current/matrix.json).
+GLM-5.3-Flash FP8 uses the four-node Flash template with the FP8 model ID and `kv_capacity=393216`. The alternative Qwen BF16 row selects `dense_weights=checkpoint` and `fp8_head=gemv`; full GLM's FP8 KV row selects `kv_dtype=fp8`, `kv_capacity=212992`, and a 1.5 GiB prefix cache; the two-node GLM-5.3-Flash NVFP4/FP8 256K KV row selects two slots, `kv_capacity=262144`, and a 2 GiB prefix cache (the 160K KV row uses 1.5 GiB). Every effective configuration is saved in the [configuration matrix](../benchmarks/results/2026-09-22-current/matrix.json).
 
 ## Workload and timing
 
@@ -68,41 +72,41 @@ The [detailed tables](../benchmarks/results/2026-09-22-current/README.md) includ
 
 Engine tokens/s, greedy; median of three repetitions.
 
-| Deployment | Prose | Code | JSON | Math | Chat |
-|---|---|---|---|---|---|
-| GLM-5.3-Flash NVFP4/FP8 · 4 nodes | 59.1 | 60.3 | 61.8 | 59.6 | 54.0 |
-| GLM-5.3-Flash NVFP4/FP8 · 2 nodes | 35.2 | 35.7 | 36.0 | 33.9 | 31.3 |
-| GLM-5.3-Flash FP8 · 4 nodes | 50.2 | 51.0 | 52.1 | 48.8 | 45.4 |
-| Qwen3.8-Flash-Next FP8 · 4 nodes | 72.6 | 81.4 | 83.3 | 78.9 | 65.3 |
-| Qwen3.8-Flash-Next FP8 · 2 nodes | 48.4 | 53.4 | 54.8 | 51.1 | 44.7 |
-| Qwen3.8-Flash-Next NVFP4 · 1 node | 45.5 | 49.0 | 50.0 | 47.5 | 42.3 |
-| Qwen3.8-Flash-Next NVFP4 · 2 nodes | 69.8 | 72.7 | 74.6 | 72.4 | 62.6 |
-| GLM-5.3 int4/int8 · 4 nodes | 29.8 | 30.6 | 30.4 | 30.0 | 26.8 |
-| DeepSeek-V4.1-Flash · 4 nodes | 39.8 | 62.2 | 75.5 | 63.0 | 45.8 |
-| Qwen NVFP4, YaRN 512K · 2 nodes | 66.6 | 73.0 | 75.8 | 73.5 | 64.5 |
-| Qwen NVFP4, BF16 dense · 1 node | 33.1 | 37.9 | 38.4 | 36.8 | 31.9 |
-| GLM-5.3 int4/int8, FP8 KV · 4 nodes | 30.2 | 30.5 | 30.1 | 29.3 | 27.8 |
-| GLM-Flash hybrid, 256K KV · 2 nodes | 35.0 | 35.6 | 35.8 | 33.8 | 31.2 |
+| Model / weights | Nodes | Options | Prose | Code | JSON | Math | Chat |
+|---|---|---|---|---|---|---|---|
+| GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 35.2 | 35.7 | 36.0 | 33.9 | 31.3 |
+| GLM-5.3-Flash NVFP4/FP8 | 2 | 256K FP8 KV, 2 slots | 35.0 | 35.6 | 35.8 | 33.8 | 31.2 |
+| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 59.1 | 60.3 | 61.8 | 59.6 | 54.0 |
+| GLM-5.3-Flash FP8 | 4 | 384K BF16 KV, 4 slots | 50.2 | 51.0 | 52.1 | 48.8 | 45.4 |
+| Qwen3.8-Flash-Next NVFP4 | 1 | FP8 dense | 45.5 | 49.0 | 50.0 | 47.5 | 42.3 |
+| Qwen3.8-Flash-Next NVFP4 | 1 | BF16 dense | 33.1 | 37.9 | 38.4 | 36.8 | 31.9 |
+| Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense | 69.8 | 72.7 | 74.6 | 72.4 | 62.6 |
+| Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense, YaRN 512K, 2 slots | 66.6 | 73.0 | 75.8 | 73.5 | 64.5 |
+| Qwen3.8-Flash-Next FP8 | 2 | Default | 48.4 | 53.4 | 54.8 | 51.1 | 44.7 |
+| Qwen3.8-Flash-Next FP8 | 4 | Default | 72.6 | 81.4 | 83.3 | 78.9 | 65.3 |
+| GLM-5.3 int4/int8 | 4 | 120K BF16 KV | 29.8 | 30.6 | 30.4 | 30.0 | 26.8 |
+| GLM-5.3 int4/int8 | 4 | 208K FP8 KV | 30.2 | 30.5 | 30.1 | 29.3 | 27.8 |
+| DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | Default | 39.8 | 62.2 | 75.5 | 63.0 | 45.8 |
 
 ## Decode modes
 
 Single-request engine tokens/s, shown as the range of the five class medians. Plain decoding has MTP disabled. The deeper run uses depth two, or fixed depth five for DeepSeek. Full GLM's depth-two and DeepSeek's depth-five runs use two request slots. Other settings are saved with each run.
 
-| Deployment | Plain | Template default | Deeper MTP |
-|---|---|---|---|
-| GLM-5.3-Flash NVFP4/FP8 · 4 nodes | 39.7–39.8 | 54.0–61.8 | — |
-| GLM-5.3-Flash NVFP4/FP8 · 2 nodes | 24.0–24.1 | 31.3–36.0 | — |
-| GLM-5.3-Flash FP8 · 4 nodes | 34.3–34.4 | 45.4–52.1 | — |
-| Qwen3.8-Flash-Next FP8 · 4 nodes | 50.6–50.8 | 65.3–83.3 | 71.7–106.6 |
-| Qwen3.8-Flash-Next FP8 · 2 nodes | 35.7–35.9 | 44.7–54.8 | 48.4–68.1 |
-| Qwen3.8-Flash-Next NVFP4 · 1 node | 32.7–32.8 | 42.3–50.0 | 44.0–60.7 |
-| Qwen3.8-Flash-Next NVFP4 · 2 nodes | 47.0–47.6 | 62.6–74.6 | 68.1–92.3 |
-| GLM-5.3 int4/int8 · 4 nodes | 19.8–20.1 | 26.8–30.6 | 28.0–35.0 |
-| DeepSeek-V4.1-Flash · 4 nodes | 32.2–32.3 | 39.8–75.5 | 34.2–82.7 |
-| Qwen NVFP4, YaRN 512K · 2 nodes | 47.2–47.4 | 64.5–75.8 | 65.9–91.5 |
-| Qwen NVFP4, BF16 dense · 1 node | 24.3–24.4 | 31.9–38.4 | 35.0–48.0 |
-| GLM-5.3 int4/int8, FP8 KV · 4 nodes | 19.8–20.1 | 27.8–30.5 | — |
-| GLM-Flash hybrid, 256K KV · 2 nodes | 24.1 | 31.2–35.8 | — |
+| Model / weights | Nodes | Options | Plain | Template default | Deeper MTP |
+|---|---|---|---|---|---|
+| GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 24.0–24.1 | 31.3–36.0 | — |
+| GLM-5.3-Flash NVFP4/FP8 | 2 | 256K FP8 KV, 2 slots | 24.1 | 31.2–35.8 | — |
+| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 39.7–39.8 | 54.0–61.8 | — |
+| GLM-5.3-Flash FP8 | 4 | 384K BF16 KV, 4 slots | 34.3–34.4 | 45.4–52.1 | — |
+| Qwen3.8-Flash-Next NVFP4 | 1 | FP8 dense | 32.7–32.8 | 42.3–50.0 | 44.0–60.7 |
+| Qwen3.8-Flash-Next NVFP4 | 1 | BF16 dense | 24.3–24.4 | 31.9–38.4 | 35.0–48.0 |
+| Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense | 47.0–47.6 | 62.6–74.6 | 68.1–92.3 |
+| Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense, YaRN 512K, 2 slots | 47.2–47.4 | 64.5–75.8 | 65.9–91.5 |
+| Qwen3.8-Flash-Next FP8 | 2 | Default | 35.7–35.9 | 44.7–54.8 | 48.4–68.1 |
+| Qwen3.8-Flash-Next FP8 | 4 | Default | 50.6–50.8 | 65.3–83.3 | 71.7–106.6 |
+| GLM-5.3 int4/int8 | 4 | 120K BF16 KV | 19.8–20.1 | 26.8–30.6 | 28.0–35.0 |
+| GLM-5.3 int4/int8 | 4 | 208K FP8 KV | 19.8–20.1 | 27.8–30.5 | — |
+| DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | Default | 32.2–32.3 | 39.8–75.5 | 34.2–82.7 |
 
 A dash means that deeper MTP was not part of that deployment's mode sweep. Prompt-dependent acceptance is included in these rates; pass times and committed tokens per pass are recorded separately.
 
@@ -112,43 +116,43 @@ All deployments use all 164 HumanEval problems, the same first 300 GSM8K test pr
 
 HumanEval executes generated code in a container without network access or host-file mounts. Scores are specific to the repository's chat prompts, execution wrapper and token budgets. The HumanEval wrapper executes the returned code block independently; omitted context helpers can cause a failure, as observed for `encode_cyclic` in HumanEval/38. Raw responses and execution errors are retained.
 
-| Deployment | HumanEval | GSM8K | Schema extraction | Responses at token cap |
-|---|---|---|---|---|
-| GLM-5.3-Flash NVFP4/FP8 · 4 nodes | 157/164 | 292/300 | 100/100 | 0 |
-| GLM-5.3-Flash NVFP4/FP8 · 2 nodes | 157/164 | 292/300 | 100/100 | 0 |
-| GLM-5.3-Flash FP8 · 4 nodes | 154/164 | 295/300 | 100/100 | 0 |
-| Qwen3.8-Flash-Next FP8 · 4 nodes | 158/164 | 291/300 | 100/100 | 0 |
-| Qwen3.8-Flash-Next FP8 · 2 nodes | 160/164 | 292/300 | 100/100 | 0 |
-| Qwen3.8-Flash-Next NVFP4 · 1 node | 160/164 | 294/300 | 100/100 | 0 |
-| Qwen3.8-Flash-Next NVFP4 · 2 nodes | 159/164 | 293/300 | 100/100 | 0 |
-| GLM-5.3 int4/int8 · 4 nodes | 159/164 | 292/300 | 100/100 | 0 |
-| DeepSeek-V4.1-Flash · 4 nodes | 160/164 | 296/300 | 100/100 | 0 |
-| Qwen NVFP4, YaRN 512K · 2 nodes | 161/164 | 293/300 | 100/100 | 0 |
-| Qwen NVFP4, BF16 dense · 1 node | 158/164 | 291/300 | 100/100 | 0 |
-| GLM-5.3 int4/int8, FP8 KV · 4 nodes | 160/164 | 293/300 | 100/100 | 0 |
-| GLM-Flash hybrid, 256K KV · 2 nodes | 158/164 | 292/300 | 100/100 | 0 |
+| Model / weights | Nodes | Options | HumanEval | GSM8K | Schema extraction | Responses at token cap |
+|---|---|---|---|---|---|---|
+| GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 157/164 | 292/300 | 100/100 | 0 |
+| GLM-5.3-Flash NVFP4/FP8 | 2 | 256K FP8 KV, 2 slots | 158/164 | 292/300 | 100/100 | 0 |
+| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 157/164 | 292/300 | 100/100 | 0 |
+| GLM-5.3-Flash FP8 | 4 | 384K BF16 KV, 4 slots | 154/164 | 295/300 | 100/100 | 0 |
+| Qwen3.8-Flash-Next NVFP4 | 1 | FP8 dense | 160/164 | 294/300 | 100/100 | 0 |
+| Qwen3.8-Flash-Next NVFP4 | 1 | BF16 dense | 158/164 | 291/300 | 100/100 | 0 |
+| Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense | 159/164 | 293/300 | 100/100 | 0 |
+| Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense, YaRN 512K, 2 slots | 161/164 | 293/300 | 100/100 | 0 |
+| Qwen3.8-Flash-Next FP8 | 2 | Default | 160/164 | 292/300 | 100/100 | 0 |
+| Qwen3.8-Flash-Next FP8 | 4 | Default | 158/164 | 291/300 | 100/100 | 0 |
+| GLM-5.3 int4/int8 | 4 | 120K BF16 KV | 159/164 | 292/300 | 100/100 | 0 |
+| GLM-5.3 int4/int8 | 4 | 208K FP8 KV | 160/164 | 293/300 | 100/100 | 0 |
+| DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | Default | 160/164 | 296/300 | 100/100 | 0 |
 
 Complete matching operation streams were collected for 54/54 recorded launches. The detailed record reports greedy plain/MTP transcript comparisons and solo/batched text checks for each deployment, including any failures.
 
-| Deployment | Rank checks passed | Plain/default greedy match | Solo/batched greedy text |
-|---|---|---|---|
-| GLM-5.3-Flash NVFP4/FP8 · 4 nodes | 7/7 | 5/5 classes | different |
-| GLM-5.3-Flash NVFP4/FP8 · 2 nodes | 3/3 | 5/5 classes | different |
-| GLM-5.3-Flash FP8 · 4 nodes | 4/4 | 5/5 classes | different |
-| Qwen3.8-Flash-Next FP8 · 4 nodes | 4/4 | 5/5 classes | different |
-| Qwen3.8-Flash-Next FP8 · 2 nodes | 4/4 | 5/5 classes | different |
-| Qwen3.8-Flash-Next NVFP4 · 1 node | 4/4 | 5/5 classes | identical |
-| Qwen3.8-Flash-Next NVFP4 · 2 nodes | 4/4 | 5/5 classes | different |
-| GLM-5.3 int4/int8 · 4 nodes | 4/4 | 5/5 classes | identical |
-| DeepSeek-V4.1-Flash · 4 nodes | 5/5 | 5/5 classes | identical |
-| Qwen NVFP4, YaRN 512K · 2 nodes | 5/5 | 5/5 classes | identical |
-| Qwen NVFP4, BF16 dense · 1 node | 4/4 | 5/5 classes | different |
-| GLM-5.3 int4/int8, FP8 KV · 4 nodes | 3/3 | 5/5 classes | identical |
-| GLM-Flash hybrid, 256K KV · 2 nodes | 3/3 | 5/5 classes | identical |
+| Model / weights | Nodes | Options | Rank checks passed | Plain/default greedy match | Solo/batched greedy text |
+|---|---|---|---|---|---|
+| GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 3/3 | 5/5 classes | different |
+| GLM-5.3-Flash NVFP4/FP8 | 2 | 256K FP8 KV, 2 slots | 3/3 | 5/5 classes | identical |
+| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 7/7 | 5/5 classes | different |
+| GLM-5.3-Flash FP8 | 4 | 384K BF16 KV, 4 slots | 4/4 | 5/5 classes | different |
+| Qwen3.8-Flash-Next NVFP4 | 1 | FP8 dense | 4/4 | 5/5 classes | identical |
+| Qwen3.8-Flash-Next NVFP4 | 1 | BF16 dense | 4/4 | 5/5 classes | different |
+| Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense | 4/4 | 5/5 classes | different |
+| Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense, YaRN 512K, 2 slots | 5/5 | 5/5 classes | identical |
+| Qwen3.8-Flash-Next FP8 | 2 | Default | 4/4 | 5/5 classes | different |
+| Qwen3.8-Flash-Next FP8 | 4 | Default | 4/4 | 5/5 classes | different |
+| GLM-5.3 int4/int8 | 4 | 120K BF16 KV | 4/4 | 5/5 classes | identical |
+| GLM-5.3 int4/int8 | 4 | 208K FP8 KV | 3/3 | 5/5 classes | identical |
+| DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | Default | 5/5 | 5/5 classes | identical |
 
 A class counts as a plain/default match only when all three repetitions in both modes produce the same text and token count. A differing transcript fails the exact-text check. Current dense kernels can use different floating-point reduction orders for different batch shapes, so identical greedy text across batch sizes is not guaranteed. A text mismatch alone does not establish request-state contamination. Rank operation-stream agreement checks execution order, not numerical equality or request isolation; single-node launches have only one stream to record.
 
-For the four-node GLM Flash hybrid, repeated solo runs and C2 matched; C3/C4 reproducibly diverged. With `DGPP_DENSE_GEMV_ROWS=8` or `256`, every tested C1–C4 response matched its configuration's solo response. This supports kernel dispatch as the explanation for that mismatch. The diagnostic does not measure logit error or prove isolation for all workloads. [Procedure and full responses](../benchmarks/results/2026-09-22-current/isolation.md). Tracked in [issue #32](https://github.com/HawkBearPig/dgpp/issues/32). Performance tables use the default kernel setting.
+For GLM-5.3-Flash NVFP4/FP8 on four nodes, repeated solo runs and C2 matched; C3/C4 reproducibly diverged. With `DGPP_DENSE_GEMV_ROWS=8` or `256`, every tested C1–C4 response matched its configuration's solo response. This supports kernel dispatch as the explanation for that mismatch. The diagnostic does not measure logit error or prove isolation for all workloads. [Procedure and full responses](../benchmarks/results/2026-09-22-current/isolation.md). Tracked in [issue #32](https://github.com/HawkBearPig/dgpp/issues/32). Performance tables use the default kernel setting.
 
 GLM-4.7 attempts were interrupted when a node became unreachable during cold prefill. GLM-4.7 is excluded from this benchmark matrix at the user's request. Its failed attempts are retained separately from the reported results. The available logs do not establish the outages' cause. [Interruption and recovery record](../benchmarks/results/2026-09-22-current/interruptions.md).
 
@@ -156,22 +160,22 @@ GLM-4.7 attempts were interrupted when a node became unreachable during cold pre
 
 Each deterministic parcel document is generated once cold and twice more with the prefix cache enabled. Decode columns are medians over those three 256-token requests; cold prefill is one sample. These requests use the model's default reasoning mode. These are timing measurements; retrieval accuracy is measured separately.
 
-| Deployment | Prompt tokens | Cold prefill (s) | Decode ms/pass | Tokens/pass | Engine tok/s |
-|---|---|---|---|---|---|
-| GLM-5.3-Flash NVFP4/FP8 · 4 nodes | 1,845 | 1.245 | 32.56 | 1.92 | 58.9 |
-| GLM-5.3-Flash NVFP4/FP8 · 4 nodes | 7,921 | 5.389 | 32.96 | 1.98 | 60.0 |
-| GLM-5.3-Flash NVFP4/FP8 · 4 nodes | 32,682 | 26.287 | 33.60 | 1.96 | 58.4 |
-| GLM-5.3-Flash FP8 · 4 nodes | 1,845 | 1.418 | 39.05 | 1.92 | 49.1 |
-| GLM-5.3-Flash FP8 · 4 nodes | 7,921 | 5.971 | 39.28 | 1.95 | 49.6 |
-| GLM-5.3-Flash FP8 · 4 nodes | 32,682 | 27.876 | 39.96 | 1.98 | 49.5 |
-| DeepSeek-V4.1-Flash · 4 nodes | 3,836 | 2.576 | 53.94 | 2.93 | 54.3 |
-| DeepSeek-V4.1-Flash · 4 nodes | 32,365 | 25.446 | 56.39 | 3.07 | 54.5 |
-| DeepSeek-V4.1-Flash · 4 nodes | 121,107 | 172.642 | 59.31 | 2.97 | 50.0 |
-| Qwen NVFP4, YaRN 512K · 2 nodes | 3,855 | 2.491 | 28.33 | 1.77 | 62.5 |
-| Qwen NVFP4, YaRN 512K · 2 nodes | 32,299 | 20.799 | 28.30 | 1.78 | 63.0 |
-| Qwen NVFP4, YaRN 512K · 2 nodes | 129,826 | 93.769 | 29.69 | 1.83 | 61.8 |
-| Qwen NVFP4, YaRN 512K · 2 nodes | 259,964 | 216.397 | 31.45 | 1.83 | 58.3 |
-| Qwen NVFP4, YaRN 512K · 2 nodes | 520,053 | 658.938 | 37.24 | 1.89 | 50.7 |
+| Model / weights | Nodes | Options | Prompt tokens | Cold prefill (s) | Decode ms/pass | Tokens/pass | Engine tok/s |
+|---|---|---|---|---|---|---|---|
+| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 1,845 | 1.245 | 32.56 | 1.92 | 58.9 |
+| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 7,921 | 5.389 | 32.96 | 1.98 | 60.0 |
+| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 32,682 | 26.287 | 33.60 | 1.96 | 58.4 |
+| GLM-5.3-Flash FP8 | 4 | 384K BF16 KV, 4 slots | 1,845 | 1.418 | 39.05 | 1.92 | 49.1 |
+| GLM-5.3-Flash FP8 | 4 | 384K BF16 KV, 4 slots | 7,921 | 5.971 | 39.28 | 1.95 | 49.6 |
+| GLM-5.3-Flash FP8 | 4 | 384K BF16 KV, 4 slots | 32,682 | 27.876 | 39.96 | 1.98 | 49.5 |
+| Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense, YaRN 512K, 2 slots | 3,855 | 2.491 | 28.33 | 1.77 | 62.5 |
+| Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense, YaRN 512K, 2 slots | 32,299 | 20.799 | 28.30 | 1.78 | 63.0 |
+| Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense, YaRN 512K, 2 slots | 129,826 | 93.769 | 29.69 | 1.83 | 61.8 |
+| Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense, YaRN 512K, 2 slots | 259,964 | 216.397 | 31.45 | 1.83 | 58.3 |
+| Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense, YaRN 512K, 2 slots | 520,053 | 658.938 | 37.24 | 1.89 | 50.7 |
+| DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | Default | 3,836 | 2.576 | 53.94 | 2.93 | 54.3 |
+| DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | Default | 32,365 | 25.446 | 56.39 | 3.07 | 54.5 |
+| DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | Default | 121,107 | 172.642 | 59.31 | 2.97 | 50.0 |
 
 YaRN retrieval uses five planted numeric codes at 5%, 25%, 50%, 75% and 95% of each document, with a 768-token response budget including reasoning. A hit means the expected code occurs in the response, including reasoning, after removing non-digit characters. Prefix reuse repeats the final probe. The two-stream test checks completion; admission may queue a request when the shared KV pool is full.
 

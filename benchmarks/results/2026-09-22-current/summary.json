@@ -319,7 +319,7 @@
       "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
       "world": 4,
       "slots": 4,
-      "name": "GLM-5.3-Flash NVFP4/FP8 \u00b7 4 nodes",
+      "name": "GLM-5.3-Flash NVFP4/FP8 \u00b7 4 nodes \u00b7 768K BF16 KV, 4 slots",
       "settings": {
         "max_concurrency": 4,
         "kv_capacity": 786432,
@@ -1935,7 +1935,7 @@
       "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
       "world": 2,
       "slots": 4,
-      "name": "GLM-5.3-Flash NVFP4/FP8 \u00b7 2 nodes",
+      "name": "GLM-5.3-Flash NVFP4/FP8 \u00b7 2 nodes \u00b7 160K FP8 KV, 4 slots",
       "settings": {
         "max_concurrency": 4,
         "kv_capacity": 163840,
@@ -3499,7 +3499,7 @@
       "model": "unsloth/GLM-5.3-Flash-FP8",
       "world": 4,
       "slots": 4,
-      "name": "GLM-5.3-Flash FP8 \u00b7 4 nodes",
+      "name": "GLM-5.3-Flash FP8 \u00b7 4 nodes \u00b7 384K BF16 KV, 4 slots",
       "settings": {
         "max_concurrency": 4,
         "kv_capacity": 393216,
@@ -5082,7 +5082,7 @@
       "model": "Qwen/Qwen3.8-Flash-Next-FP8",
       "world": 4,
       "slots": 4,
-      "name": "Qwen3.8-Flash-Next FP8 \u00b7 4 nodes",
+      "name": "Qwen3.8-Flash-Next FP8 \u00b7 4 nodes \u00b7 Default",
       "settings": {
         "max_concurrency": 4,
         "kv_capacity": 262144,
@@ -6920,7 +6920,7 @@
       "model": "Qwen/Qwen3.8-Flash-Next-FP8",
       "world": 2,
       "slots": 4,
-      "name": "Qwen3.8-Flash-Next FP8 \u00b7 2 nodes",
+      "name": "Qwen3.8-Flash-Next FP8 \u00b7 2 nodes \u00b7 Default",
       "settings": {
         "max_concurrency": 4,
         "kv_capacity": 262144,
@@ -8750,7 +8750,7 @@
       "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
       "world": 1,
       "slots": 4,
-      "name": "Qwen3.8-Flash-Next NVFP4 \u00b7 1 node",
+      "name": "Qwen3.8-Flash-Next NVFP4 \u00b7 1 node \u00b7 FP8 dense",
       "settings": {
         "max_concurrency": 4,
         "kv_capacity": 65536,
@@ -10579,7 +10579,7 @@
       "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
       "world": 2,
       "slots": 4,
-      "name": "Qwen3.8-Flash-Next NVFP4 \u00b7 2 nodes",
+      "name": "Qwen3.8-Flash-Next NVFP4 \u00b7 2 nodes \u00b7 FP8 dense",
       "settings": {
         "max_concurrency": 4,
         "kv_capacity": 262144,
@@ -12412,7 +12412,7 @@
       "model": "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
       "world": 4,
       "slots": 8,
-      "name": "GLM-5.3 int4/int8 \u00b7 4 nodes",
+      "name": "GLM-5.3 int4/int8 \u00b7 4 nodes \u00b7 120K BF16 KV",
       "settings": {
         "max_concurrency": 8,
         "kv_capacity": 122880,
@@ -14476,7 +14476,7 @@
       "model": "deepseek-ai/DeepSeek-V4.1-Flash",
       "world": 4,
       "slots": 6,
-      "name": "DeepSeek-V4.1-Flash \u00b7 4 nodes",
+      "name": "DeepSeek-V4.1-Flash MXFP4/FP8 \u00b7 4 nodes \u00b7 Default",
       "settings": {
         "max_concurrency": 6,
         "kv_capacity": 131072,
@@ -16552,7 +16552,7 @@
       "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
       "world": 2,
       "slots": 2,
-      "name": "Qwen NVFP4, YaRN 512K \u00b7 2 nodes",
+      "name": "Qwen3.8-Flash-Next NVFP4 \u00b7 2 nodes \u00b7 FP8 dense, YaRN 512K, 2 slots",
       "settings": {
         "max_concurrency": 2,
         "kv_capacity": 532480,
@@ -18182,7 +18182,7 @@
         "dense_weights": "checkpoint",
         "fp8_head": "gemv"
       },
-      "name": "Qwen NVFP4, BF16 dense \u00b7 1 node",
+      "name": "Qwen3.8-Flash-Next NVFP4 \u00b7 1 node \u00b7 BF16 dense",
       "settings": {
         "max_concurrency": 4,
         "kv_capacity": 65536,
@@ -20016,7 +20016,7 @@
         "kv_capacity": 212992,
         "prefix_cache_gib": 1.5
       },
-      "name": "GLM-5.3 int4/int8, FP8 KV \u00b7 4 nodes",
+      "name": "GLM-5.3 int4/int8 \u00b7 4 nodes \u00b7 208K FP8 KV",
       "settings": {
         "max_concurrency": 8,
         "kv_capacity": 212992,
@@ -21818,7 +21818,7 @@
         "kv_capacity": 262144,
         "prefix_cache_gib": 2
       },
-      "name": "GLM-Flash hybrid, 256K KV \u00b7 2 nodes",
+      "name": "GLM-5.3-Flash NVFP4/FP8 \u00b7 2 nodes \u00b7 256K FP8 KV, 2 slots",
       "settings": {
         "max_concurrency": 2,
         "kv_capacity": 262144,

@@ -10,22 +10,39 @@ import statistics
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 CLASSES = ("prose", "code", "json", "math", "chat")
-NAMES = {
-    "glm-flash-hybrid-w4": "GLM-5.3-Flash NVFP4/FP8 · 4 nodes",
-    "glm-flash-hybrid-w2": "GLM-5.3-Flash NVFP4/FP8 · 2 nodes",
-    "glm-flash-fp8-w4": "GLM-5.3-Flash FP8 · 4 nodes",
-    "qwen-fp8-w4": "Qwen3.8-Flash-Next FP8 · 4 nodes",
-    "qwen-fp8-w2": "Qwen3.8-Flash-Next FP8 · 2 nodes",
-    "qwen-nvfp4-w1": "Qwen3.8-Flash-Next NVFP4 · 1 node",
-    "qwen-nvfp4-w2": "Qwen3.8-Flash-Next NVFP4 · 2 nodes",
-    "glm47-w4": "GLM-4.7 NVFP4 · 4 nodes",
-    "glm53-w4": "GLM-5.3 int4/int8 · 4 nodes",
-    "deepseek-w4": "DeepSeek-V4.1-Flash · 4 nodes",
-    "qwen-yarn-w2": "Qwen NVFP4, YaRN 512K · 2 nodes",
-    "qwen-nvfp4-bf16-w1": "Qwen NVFP4, BF16 dense · 1 node",
-    "glm53-fp8kv-w4": "GLM-5.3 int4/int8, FP8 KV · 4 nodes",
-    "glm-flash-hybrid-256k-w2": "GLM-Flash hybrid, 256K KV · 2 nodes",
+# Presentation order groups model families, then node counts, with options adjacent.
+# The measurement matrix retains its original campaign order.
+DEPLOYMENTS = {
+    "glm-flash-hybrid-w2": ("GLM-5.3-Flash NVFP4/FP8", "160K FP8 KV, 4 slots"),
+    "glm-flash-hybrid-256k-w2": ("GLM-5.3-Flash NVFP4/FP8", "256K FP8 KV, 2 slots"),
+    "glm-flash-hybrid-w4": ("GLM-5.3-Flash NVFP4/FP8", "768K BF16 KV, 4 slots"),
+    "glm-flash-fp8-w4": ("GLM-5.3-Flash FP8", "384K BF16 KV, 4 slots"),
+    "qwen-nvfp4-w1": ("Qwen3.8-Flash-Next NVFP4", "FP8 dense"),
+    "qwen-nvfp4-bf16-w1": ("Qwen3.8-Flash-Next NVFP4", "BF16 dense"),
+    "qwen-nvfp4-w2": ("Qwen3.8-Flash-Next NVFP4", "FP8 dense"),
+    "qwen-yarn-w2": ("Qwen3.8-Flash-Next NVFP4", "FP8 dense, YaRN 512K, 2 slots"),
+    "qwen-fp8-w2": ("Qwen3.8-Flash-Next FP8", "Default"),
+    "qwen-fp8-w4": ("Qwen3.8-Flash-Next FP8", "Default"),
+    "glm53-w4": ("GLM-5.3 int4/int8", "120K BF16 KV"),
+    "glm53-fp8kv-w4": ("GLM-5.3 int4/int8", "208K FP8 KV"),
+    "deepseek-w4": ("DeepSeek-V4.1-Flash MXFP4/FP8", "Default"),
 }
+DEPLOYMENT_HEADERS = ["Model / weights", "Nodes", "Options"]
+
+
+def deployment_cells(entry):
+    model, options = DEPLOYMENTS[entry["id"]]
+    return [model, entry["world"], options]
+
+
+def deployment_name(entry):
+    model, nodes, options = deployment_cells(entry)
+    return f"{model} · {nodes} {'node' if nodes == 1 else 'nodes'} · {options}"
+
+
+def ordered_deployments(result):
+    order = {key: i for i, key in enumerate(DEPLOYMENTS)}
+    return sorted(result["deployments"], key=lambda entry: order[entry["id"]])
 
 
 def read(path):
@@ -101,7 +118,7 @@ def collect():
         pfile = base / "prefill/default/prefill.json"
         if not pfile.exists():
             pfile = default / "prefill.json"
-        item = {**entry, "name": NAMES[entry["id"]], "settings": read(HERE / entry["config"])["engine"],
+        item = {**entry, "name": deployment_name(entry), "settings": read(HERE / entry["config"])["engine"],
                 "greedy": phases(default / "greedy.json"), "sampled": phases(default / "sampled.json"),
                 "prefill": prefill(pfile), "quality": read(base / "quality/default/eval/summary.json"),
                 "modes": {}, "rank_checks": [], "isolation": None}
@@ -136,7 +153,7 @@ def span(samples, key, concurrency=1):
 
 
 def render(result):
-    deployments = result["deployments"]
+    deployments = ordered_deployments(result)
     commit = result["manifest"]["commit"]
     started = datetime.fromisoformat(result["manifest"]["started_at"]).date()
     ended = datetime.fromisoformat(result["manifest"].get("completed_at", result["manifest"]["started_at"])).date()
@@ -156,18 +173,31 @@ def render(result):
         "medians, with three repetitions per class. **C** is concurrent requests. "
         "The single-request column measures engine decode; the loaded column "
         "measures completed output over full request wall time, including admission "
-        "and prefill. The two columns have different timing scopes.", ""]
+        "and prefill. The two columns have different timing scopes.", "",
+        "Rows are grouped by model family and node count, with configuration "
+        "options next to each other throughout this page. **Nodes** is the tensor-parallel "
+        "world size. **KV** is the shared key/value-cache token pool; **slots** "
+        "is the configured concurrent-request limit. In configuration labels, "
+        "K = 1,024 tokens.", ""]
     overview = []
     for d in deployments:
         p = {s["target"]: s["prefill_s"]["median"] for s in d["prefill"]}
-        overview.append([d["name"], span(d["greedy"], "engine_tokens_per_s"),
+        overview.append([*deployment_cells(d), span(d["greedy"], "engine_tokens_per_s"),
                          f"C{d['slots']}: " + span(d["greedy"], "wall_tokens_per_s", d["slots"]),
                          " / ".join(f"{p[t]:.3f}" for t in (2048, 8192, 32768))])
-    lines += [table(["Deployment", "C1 engine tok/s", "Loaded wall tok/s", "Cold prefill seconds: ~2K / ~8K / ~32K"], overview),
+    lines += [table([*DEPLOYMENT_HEADERS, "C1 engine tok/s", "Loaded wall tok/s", "Cold prefill seconds: ~2K / ~8K / ~32K"], overview),
         "Rows cover the checked-in deployment templates, the GLM Flash FP8 "
         "checkpoint, and the three configuration variants described below. "
-        "Qwen NVFP4 uses an FP8 dense stack unless the row says BF16. "
-        "All Qwen NVFP4 rows map the n-gram table from NVMe.", "",
+        "For Qwen NVFP4, the Options column identifies the dense projection "
+        "format; the expert weights remain NVFP4 in both cases. All Qwen "
+        "NVFP4 rows map the n-gram table from NVMe. YaRN 512K denotes the "
+        "extended-context configuration.", "",
+        "The two-node GLM-5.3-Flash NVFP4/FP8 rows use the same checkpoint: "
+        "one has a 163,840-token FP8 KV pool and four request slots; the other "
+        "has a 262,144-token FP8 KV pool and two slots. NVFP4/FP8 identifies "
+        "the [mixed-weight checkpoint](model_cards/GLM-5.3-Flash-NVFP4-FP8.md), "
+        "which combines NVFP4 main-stack routed experts with the remaining "
+        "tensors from the FP8 release, retaining their original formats.", "",
         "## Hardware and configuration", "",
         "The cluster consists of four GB10 systems: MSI EdgeXpert (rank 0), "
         "ASUS GX10 (rank 1), NVIDIA DGX Spark (rank 2), and AI TOP ATOM (rank 3). "
@@ -191,17 +221,18 @@ def render(result):
         "output tokens. DeepSeek uses its configured adaptive depth schedule. "
         "KV capacity below is the deployment's shared token pool; it is not a "
         "promise that every concurrent request can use that full context.", ""]
-    lines.append(table(["Deployment", "Request slots", "KV pool tokens", "KV format", "Default MTP depth"],
-        [[d["name"], d["slots"], f"{d['settings']['kv_capacity']:,}",
+    lines.append(table([*DEPLOYMENT_HEADERS, "Request slots", "KV pool tokens", "KV format", "Default MTP depth"],
+        [[*deployment_cells(d), d["slots"], f"{d['settings']['kv_capacity']:,}",
           d["settings"].get("kv_dtype", "model default"),
           str(d["settings"].get("mtp_depth", 1)) + (" (adaptive)" if d["settings"].get("mtp_schedule") else "")]
          for d in deployments]))
-    lines += ["GLM Flash FP8 uses the four-node Flash template with the FP8 model ID "
+    lines += ["GLM-5.3-Flash FP8 uses the four-node Flash template with the FP8 model ID "
               "and `kv_capacity=393216`. The alternative Qwen BF16 row selects "
               "`dense_weights=checkpoint` and `fp8_head=gemv`; full GLM's FP8 KV row "
               "selects `kv_dtype=fp8`, `kv_capacity=212992`, and a 1.5 GiB prefix cache; "
-              "the two-node Flash 256K row selects two slots, `kv_capacity=262144`, "
-              "and a 2 GiB prefix cache. Every effective configuration is saved in "
+              "the two-node GLM-5.3-Flash NVFP4/FP8 256K KV row selects two slots, "
+              "`kv_capacity=262144`, and a 2 GiB prefix cache (the 160K KV row "
+              "uses 1.5 GiB). Every effective configuration is saved in "
               f"the [configuration matrix]({record}matrix.json).", "",
         "## Workload and timing", "",
         "- **Decode:** the repository's prose, code, JSON, math and chat corpus; "
@@ -232,8 +263,8 @@ def render(result):
         "variation across prompt classes, not confidence intervals.", "",
         "## Single-request decode by class", "",
         "Engine tokens/s, greedy; median of three repetitions.", ""]
-    lines.append(table(["Deployment", *["JSON" if c == "json" else c.title() for c in CLASSES]],
-        [[d["name"], *[f"{next(s for s in d['greedy'] if s['class'] == c and s['concurrency'] == 1)['engine_tokens_per_s']['median']:.1f}"
+    lines.append(table([*DEPLOYMENT_HEADERS, *["JSON" if c == "json" else c.title() for c in CLASSES]],
+        [[*deployment_cells(d), *[f"{next(s for s in d['greedy'] if s['class'] == c and s['concurrency'] == 1)['engine_tokens_per_s']['median']:.1f}"
                        for c in CLASSES]] for d in deployments]))
     lines += ["## Decode modes", "",
               "Single-request engine tokens/s, shown as the range of the five "
@@ -241,8 +272,8 @@ def render(result):
               "depth two, or fixed depth five for DeepSeek. Full GLM's depth-two "
               "and DeepSeek's depth-five runs use two request slots. Other "
               "settings are saved with each run.", ""]
-    lines.append(table(["Deployment", "Plain", "Template default", "Deeper MTP"],
-        [[d["name"], span(d["modes"].get("plain", {}).get("greedy", []), "engine_tokens_per_s"),
+    lines.append(table([*DEPLOYMENT_HEADERS, "Plain", "Template default", "Deeper MTP"],
+        [[*deployment_cells(d), span(d["modes"].get("plain", {}).get("greedy", []), "engine_tokens_per_s"),
           span(d["greedy"], "engine_tokens_per_s"),
           span(d["modes"].get("depth2", d["modes"].get("depth5", {})).get("greedy", []), "engine_tokens_per_s")]
          for d in deployments]))
@@ -267,9 +298,9 @@ def render(result):
     quality_rows = []
     for d in deployments:
         tasks = d["quality"]["tasks"]
-        quality_rows.append([d["name"], *[f"{tasks[t]['passed']}/{tasks[t]['n']}" for t in ("humaneval", "gsm8k", "extract")],
+        quality_rows.append([*deployment_cells(d), *[f"{tasks[t]['passed']}/{tasks[t]['n']}" for t in ("humaneval", "gsm8k", "extract")],
                              sum(tasks[t]["truncated"] for t in tasks)])
-    lines.append(table(["Deployment", "HumanEval", "GSM8K", "Schema extraction", "Responses at token cap"], quality_rows))
+    lines.append(table([*DEPLOYMENT_HEADERS, "HumanEval", "GSM8K", "Schema extraction", "Responses at token cap"], quality_rows))
     checks = [c for d in deployments for c in d["rank_checks"]]
     lines.append(f"Complete matching operation streams were collected for {sum(c['passed'] for c in checks)}/{len(checks)} "
                  "recorded launches. The detailed record reports greedy "
@@ -280,11 +311,11 @@ def render(result):
         comparisons = d["modes"].get("plain", {}).get("parity") or {}
         matched = sum(value["identical"] for value in comparisons.values())
         isolation = d["isolation"] or ""
-        identity_rows.append([d["name"],
+        identity_rows.append([*deployment_cells(d),
             f"{sum(c['passed'] for c in d['rank_checks'])}/{len(d['rank_checks'])}",
             f"{matched}/{len(comparisons)} classes",
             "different" if "DIFFERENT" in isolation else "identical" if "IDENTICAL" in isolation else "not completed"])
-    lines += ["", table(["Deployment", "Rank checks passed", "Plain/default greedy match", "Solo/batched greedy text"], identity_rows),
+    lines += ["", table([*DEPLOYMENT_HEADERS, "Rank checks passed", "Plain/default greedy match", "Solo/batched greedy text"], identity_rows),
               "A class counts as a plain/default match only when all three "
               "repetitions in both modes produce the same text and token count. "
               "A differing transcript fails the exact-text check. Current dense "
@@ -294,7 +325,7 @@ def render(result):
               "request-state contamination. Rank operation-stream agreement "
               "checks execution order, not numerical equality or request isolation; "
               "single-node launches have only one stream to record.", "",
-              "For the four-node GLM Flash hybrid, repeated solo runs and C2 "
+              "For GLM-5.3-Flash NVFP4/FP8 on four nodes, repeated solo runs and C2 "
               "matched; C3/C4 reproducibly diverged. With "
               "`DGPP_DENSE_GEMV_ROWS=8` or `256`, every tested C1–C4 response "
               "matched its configuration's solo response. This supports kernel "
@@ -327,12 +358,12 @@ def render(result):
             groups[s["requested_tokens"]].append(s)
         for _, samples in groups.items():
             first = samples[0]
-            long_rows.append([d["name"], f"{first['answer']['usage']['prompt_tokens']:,}",
+            long_rows.append([*deployment_cells(d), f"{first['answer']['usage']['prompt_tokens']:,}",
                 f"{first['engine']['prefill_ms'] / 1000:.3f}",
                 f"{statistics.median(s['ms_per_pass'] for s in samples):.2f}",
                 f"{statistics.median(s['tokens_per_pass'] for s in samples):.2f}",
                 f"{statistics.median(s['engine_tokens_per_s'] for s in samples):.1f}"])
-    lines.append(table(["Deployment", "Prompt tokens", "Cold prefill (s)", "Decode ms/pass", "Tokens/pass", "Engine tok/s"], long_rows))
+    lines.append(table([*DEPLOYMENT_HEADERS, "Prompt tokens", "Cold prefill (s)", "Decode ms/pass", "Tokens/pass", "Engine tok/s"], long_rows))
     retrieval = read(HERE / "raw/qwen-yarn-w2/long/default/retrieval.json")
     if retrieval:
         lane = retrieval["results"]["dgpp"]
@@ -417,8 +448,12 @@ def detailed(result):
                   "user's request.", ""]
     lines += ["[Environment comparison](environment.md) · "
               "[Interruption record](interruptions.md) · "
-              "[Batching diagnostic](isolation.md)", ""]
-    for d in result["deployments"]:
+              "[Batching diagnostic](isolation.md)", "",
+              "Deployments follow the [overview](../../../docs/benchmarks.md) order: "
+              "model family, node count, then configuration options. KV labels "
+              "describe the shared key/value-cache token pool (K = 1,024 tokens); "
+              "slots are the configured concurrent-request limit.", ""]
+    for d in ordered_deployments(result):
         if not (d["greedy"] or d["sampled"] or d["prefill"] or d["modes"] or d["quality"]):
             continue
         lines += ["## " + d["name"], "", f"Configuration: [{d['id']}]({d['config']}).", "",
