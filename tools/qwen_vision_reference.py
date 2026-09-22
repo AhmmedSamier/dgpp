@@ -8,6 +8,10 @@ with an empty deepstack_visual_indexes -- restated here directly, so a shared
 bug with the C++ side is unlikely and an indexing mistake shows up as a large
 error rather than a silent match.
 
+The CUDA oracle uses the native encoder's BF16 projections and probabilities
+with FP32 QK scores and scaling. It does not assert bitwise parity with a
+Transformers attention backend that rounds scores to BF16.
+
 Usage: python tools/qwen_vision_reference.py CHECKPOINT WIDTH HEIGHT NATIVE.bf16
 
 WIDTH and HEIGHT are the processed canvas (multiples of 32) and must match the
@@ -103,8 +107,7 @@ def position_embeddings(weights, width, height, device, dtype):
     dh, dw = (hy - hf)[:, None], (wx - wf)[:, None]
     idx = np.stack([hf * SIDE + wf, hf * SIDE + wc, hc * SIDE + wf, hc * SIDE + wc])
     wgt = np.stack([(1 - dh) * (1 - dw), (1 - dh) * dw, dh * (1 - dw), dh * dw])
-    # The four products round in bf16 upstream; summing them in fp32 costs a
-    # rounding, not a direction.
+    # Interpolate in FP32 and round the final sum to the encoder's dtype.
     gathered = table[torch.from_numpy(idx).to(device)] * torch.from_numpy(
         wgt.astype(np.float32)).to(device)
     return gathered.sum(dim=0).to(dtype)
@@ -117,7 +120,7 @@ def rope_tables(width, height, dim, theta, device, dtype):
     rotate_half reads a full-head-width angle vector."""
     py, px = token_coords(width, height)
     angles, n_freq = dim // 2, dim // 4
-    inv = torch.tensor([theta ** (-2.0 * i / angles) for i in range(n_freq)], dtype=torch.float64)
+    inv = np.array([theta ** (-2.0 * i / angles) for i in range(n_freq)], dtype=np.float64)
     ang_h = torch.from_numpy(py.astype(np.float64)[:, None] * inv[None, :]).to(device)
     ang_w = torch.from_numpy(px.astype(np.float64)[:, None] * inv[None, :]).to(device)
     ang = torch.cat([ang_h, ang_w], dim=1)  # (tokens, dim/2)
@@ -131,7 +134,7 @@ def rotate_half(x):
 
 
 def layernorm(x, weight, bias, eps):
-    return F.layer_norm(x.float(), (x.shape[-1],), weight.float(), bias.float(), eps).to(x.dtype)
+    return F.layer_norm(x, (x.shape[-1],), weight.to(x.dtype), bias.to(x.dtype), eps)
 
 
 def encode(cfg, weights, width, height, device, dtype, trace_dir=None):
@@ -150,37 +153,65 @@ def encode(cfg, weights, width, height, device, dtype, trace_dir=None):
     rgb = fixture(width, height, device)
     dump("fixture_rgb", rgb)
     x = patchify(rgb, width, height, device).to(dtype)
-    lin = lambda name, inp: inp @ weights[name + ".weight"].to(dtype).reshape(
-        weights[name + ".weight"].shape[0], -1).t()
-    bias = lambda name: weights[name + ".bias"].to(dtype)
-    x = lin("patch_embed.proj", x) + bias("patch_embed.proj")
-    x = x + position_embeddings(weights, width, height, device, dtype)
+    # nn.Linear/Conv3d include bias before the BF16 output rounding. A
+    # separate BF16 matmul followed by addition introduces another rounding.
+    def lin(name, inp):
+        weight = weights[name + ".weight"].to(dtype)
+        return F.linear(inp, weight.reshape(weight.shape[0], -1),
+                        weights[name + ".bias"].to(dtype))
+
+    x = lin("patch_embed.proj", x)
+    dump("patch_projection", x)
+    positions = position_embeddings(weights, width, height, device, dtype)
+    dump("position_embeddings", positions)
+    x = x + positions
     dump("patch_embed", x)
-    cos, sin = rope_tables(width, height, dim, v.get("rope_theta", 10000.0), device, dtype)
+    cos, sin = rope_tables(width, height, dim, v.get("rope_theta", 10000.0), device, torch.float32)
     scale = dim ** -0.5
     for i in range(v["depth"]):
         p = f"blocks.{i}."
         h = layernorm(x, weights[p + "norm1.weight"], weights[p + "norm1.bias"], eps)
-        qkv = (lin(p + "attn.qkv", h) + bias(p + "attn.qkv")).view(-1, 3, heads, dim)
+        dump(f"layer{i}.norm1", h)
+        qkv = lin(p + "attn.qkv", h)
+        dump(f"layer{i}.qkv", qkv)
+        qkv = qkv.view(-1, 3, heads, dim)
         q, k, val = qkv.unbind(dim=1)
-        q = q * cos.view(-1, 1, dim) + rotate_half(q) * sin.view(-1, 1, dim)
-        k = k * cos.view(-1, 1, dim) + rotate_half(k) * sin.view(-1, 1, dim)
-        att = torch.softmax(torch.einsum("qhd,khd->hqk", q.float(), k.float()) * scale,
-                            dim=-1).to(dtype)
+        # Upstream apply_rotary_pos_emb_vision promotes the entire rotation
+        # to FP32, then casts the final q/k back to the input dtype.
+        q = (q.float() * cos.view(-1, 1, dim) +
+             rotate_half(q.float()) * sin.view(-1, 1, dim)).to(dtype)
+        k = (k.float() * cos.view(-1, 1, dim) +
+             rotate_half(k.float()) * sin.view(-1, 1, dim)).to(dtype)
+        dump(f"layer{i}.q", q.transpose(0, 1).contiguous())
+        dump(f"layer{i}.k", k.transpose(0, 1).contiguous())
+        qh, kh = q.transpose(0, 1), k.transpose(0, 1)
+        # Keep BF16 GEMM inputs with FP32 scores, matching the encoder's
+        # attention contract without switching to a different FP32 GEMM.
+        if q.is_cuda and dtype == torch.bfloat16:
+            scores = torch.bmm(qh, kh.transpose(1, 2), out_dtype=torch.float32)
+        else:
+            scores = torch.bmm(qh.float(), kh.float().transpose(1, 2))
+        att = torch.softmax(scores * scale, dim=-1).to(dtype)
         o = torch.einsum("hqk,khd->qhd", att, val)
-        x = x + (o.reshape(-1, hidden) @ weights[p + "attn.proj.weight"].to(dtype).t() +
-                 bias(p + "attn.proj"))
+        projected = lin(p + "attn.proj", o.reshape(-1, hidden))
+        dump(f"layer{i}.attn_proj", projected)
+        x = x + projected
         h = layernorm(x, weights[p + "norm2.weight"], weights[p + "norm2.bias"], eps)
-        h = lin(p + "mlp.linear_fc1", h) + bias(p + "mlp.linear_fc1")
-        h = F.gelu(h.float(), approximate="tanh").to(dtype)
-        x = x + (h @ weights[p + "mlp.linear_fc2.weight"].to(dtype).t() + bias(p + "mlp.linear_fc2"))
+        dump(f"layer{i}.norm2", h)
+        h = lin(p + "mlp.linear_fc1", h)
+        dump(f"layer{i}.mlp_hidden", h)
+        h = F.gelu(h, approximate="tanh")
+        dump(f"layer{i}.mlp_act", h)
+        projected = lin(p + "mlp.linear_fc2", h)
+        dump(f"layer{i}.mlp_proj", projected)
+        x = x + projected
         dump(f"layer{i}", x)
     x = layernorm(x, weights["merger.norm.weight"], weights["merger.norm.bias"], eps)
     dump("merger_norm", x)
     x = x.view(tokens, hidden * MERGE * MERGE)
-    x = lin("merger.linear_fc1", x) + bias("merger.linear_fc1")
-    x = F.gelu(x.float(), approximate="tanh").to(dtype)
-    return lin("merger.linear_fc2", x) + bias("merger.linear_fc2")
+    x = lin("merger.linear_fc1", x)
+    x = F.gelu(x)
+    return lin("merger.linear_fc2", x)
 
 
 def main(argv=None):
@@ -201,6 +232,9 @@ def main(argv=None):
             ap.error(f"each side must be a multiple of {GRID}")
     device = "cpu" if args.diagnostic else args.device
     dtype = torch.float32 if args.diagnostic else torch.bfloat16
+    torch.set_grad_enabled(False)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
     if args.trace_dir is not None:
         args.trace_dir.mkdir(parents=True, exist_ok=True)
     cfg, weights = load(args.checkpoint, device)
@@ -210,8 +244,8 @@ def main(argv=None):
         ap.error(f"{args.native} holds {native.numel()} values, expected {want}")
     mine = encode(cfg, weights, args.width, args.height, device, dtype, args.trace_dir)
     native = native.view(want // cfg["vision_config"]["out_hidden_size"],
-                         cfg["vision_config"]["out_hidden_size"]).to(dtype)
-    delta = (mine.float() - native.float().to(dtype).float()).abs()
+                         cfg["vision_config"]["out_hidden_size"]).to(device=device, dtype=dtype)
+    delta = (mine.float() - native.float()).abs()
     rel = (delta.pow(2).mean().sqrt() / native.float().pow(2).mean().sqrt()).item()
     cos = F.cosine_similarity(mine.float().flatten(), native.float().flatten(), dim=0).item()
     print(f"{args.width}x{args.height}, {mine.shape[0]} rows: max {delta.max().item():.6g}, "

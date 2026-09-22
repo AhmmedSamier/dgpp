@@ -70,7 +70,7 @@ delimiters are per-family data (`serve/image_inputs.hpp`,
 | Pixel budget | at least 16 tokens, at most 1,024 | at least 64 tokens, at most 1,024 (`min_pixels`/`max_pixels` growth and shrink, so a small image is scaled up rather than refused) |
 | Normalization | CLIP mean/std, temporal patch duplication | mean = std = 0.5, both temporal frames identical |
 | Delimiters | `image_start_token_id` 154830, `image_token_id` 154854, `image_end_token_id` 154831 | `vision_start_token_id`, `image_token_id`, `vision_end_token_id` (248053, 248056, 248054), rendered from the tokenizer's own vocabulary |
-| Tower | 24 blocks, RMSNorm, SwiGLU, windowed attention, deepstack injections | 27 blocks, LayerNorm ε 1e-6, gated-GELU MLP, full attention, 2-D axial RoPE with θ 10000, a learned 48×48 position table resampled bilinearly, `deepstack_visual_indexes: []` |
+| Tower | 24 blocks, RMSNorm, SwiGLU, windowed attention, deepstack injections | 27 blocks, LayerNorm ε 1e-6, GELU MLP, full attention, 2-D axial RoPE with θ 10000, a learned 48×48 position table resampled bilinearly, `deepstack_visual_indexes: []` |
 | Where the rows enter | the embedding and the deepstack layers | the embedding only (no deepstack) |
 
 Qwen3.8-Flash-Next deviations, both recorded here rather than hidden in a
@@ -159,7 +159,7 @@ python3 tools/glm_vision_reference.py "$CKPT" 112 112 /tmp/vision.bf16 \
 python3 tools/glm_vision_reference.py "$CKPT" 112 112 /tmp/vision.bf16 --device cuda
 ```
 
-The default oracle targets CUDA BF16 eager attention and enforces a full-depth
+The GLM oracle targets CUDA BF16 eager attention and enforces a full-depth
 relative RMS bound of 0.5% and cosine similarity of at least 0.99998. The same
 bounds apply to isolated blocks and operations; patches must match exactly.
 The pinned 30-case regression runner requires bitwise matching final embeddings.
@@ -178,7 +178,7 @@ outputs across attention backends. The
 [initial validation](../benchmarks/results/2026-09-18-glm-vision.md) also records
 input plumbing and controlled answer comparisons.
 
-Encoder equations and preprocessing follow the official Transformers
+GLM encoder equations and preprocessing follow the official Transformers
 [GLM5-Next implementation](https://github.com/huggingface/transformers/blob/f0d778337771dd81082653d752f8bd6563b1d2eb/src/transformers/models/glm5_next/modeling_glm5_next.py).
 All projections explicitly select FP32 reductions followed by BF16 output,
 with a fused epilogue when a bias is present. Final LayerNorm follows the
@@ -189,3 +189,22 @@ rounds probabilities to BF16. It batches heads and tiles queries while using
 the untiled matrix's algorithm, preserving the reduction order without
 increasing workspace. The oracle disables TF32 and reduced-precision BF16
 reductions. Serving does not depend on PyTorch.
+
+For Qwen, build `qwen_vision_check` and `qwen_vision_test`, and set `CKPT` to
+the Qwen3.8-Flash-Next snapshot directory:
+
+```bash
+cmake --build build-ci -j 4 --target qwen_vision_check qwen_vision_test
+ctest --test-dir build-ci --output-on-failure -R '^qwen_vision_test$'
+build-ci/qwen_vision_check "$CKPT" 1024 1024 /tmp/qwen-vision.bf16
+python3 tools/qwen_vision_reference.py "$CKPT" 1024 1024 /tmp/qwen-vision.bf16
+```
+
+The Qwen oracle checks the native encoder's BF16 projections and probabilities
+with FP32 attention scores and scaling. Blocks use tanh GELU; the merger uses
+exact GELU. The same 0.5% relative RMS and 0.99998 cosine limits apply, without
+asserting bitwise parity with Transformers attention backends that round scores
+to BF16. The [PR follow-up validation](../benchmarks/results/2026-09-22-pr29-vision-followup.md)
+records bitwise agreement for four deterministic canvases, including the
+1,024-token ceiling, plus memory and race sanitizer checks. These encoder
+checks do not cover the language-model mRoPE limitation described above.

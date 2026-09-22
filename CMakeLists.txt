@@ -1477,6 +1477,12 @@ add_executable(qwen_vision_check apps/qwen_vision_check.cpp)
 target_link_libraries(qwen_vision_check PRIVATE dgpp_models_qwen_loader CUDA::cudart)
 dgpp_set_common(qwen_vision_check)
 
+add_executable(qwen_vision_test tests/cuda/qwen_vision_test.cpp)
+target_link_libraries(qwen_vision_test PRIVATE dgpp_kernels CUDA::cudart)
+dgpp_set_common(qwen_vision_test)
+add_test(NAME qwen_vision_test COMMAND qwen_vision_test)
+set_tests_properties(qwen_vision_test PROPERTIES LABELS "gpu" SKIP_RETURN_CODE 2)
+
 add_executable(glm_vision_test tests/cuda/glm_vision_test.cpp)
 target_link_libraries(glm_vision_test PRIVATE dgpp_kernels CUDA::cudart)
 dgpp_set_common(glm_vision_test)

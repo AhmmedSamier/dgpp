@@ -30,9 +30,9 @@ void qwen_vision_layernorm(const uint16_t* x, const uint16_t* gamma, const uint1
 
 // The tanh approximation, 0.5x(1 + tanh(sqrt(2/pi)(x + 0.044715x^3))):
 // hidden_act gelu_pytorch_tanh is nn.GELU(approximate="tanh") in
-// transformers. (exllamav3's port of this tower uses the erf form, which
-// differs by ~1e-3 relative; a parity run against it needs that switched.)
+// transformers' blocks. The merger uses nn.GELU()'s exact erf form instead.
 void qwen_vision_gelu(uint16_t* x, int64_t count, cudaStream_t stream);
+void qwen_vision_gelu_exact(uint16_t* x, int64_t count, cudaStream_t stream);
 
 void qwen_vision_residual_add(uint16_t* x, const uint16_t* y, int64_t count, cudaStream_t stream);
 

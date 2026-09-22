@@ -158,9 +158,9 @@ struct QwenVisionEncoder::Impl {
     patches.resize(n * static_cast<size_t>(c.patch_in()) * 2);
     for (auto* buf : {&x, &norm, &tmp, &q, &k, &v, &attn}) buf->resize(rows * 2);
     qkv.resize(rows * 3 * 2);
-    // One query tile of one head's fp32 scores, and the same buffer reused
-    // for the P@V tile.
-    scores.resize(static_cast<size_t>(c.heads) * QwenVisionConfig::kQueryTile * kMaxImageTokens * 4);
+    // One query tile across all heads and all unmerged patches; the same
+    // buffer is reused for the smaller P@V tile.
+    scores.resize(c.attention_score_bytes());
     probs.resize(n * n * 2);
     hidden.resize(std::max(rows, n * static_cast<size_t>(c.intermediate) * 2));
     merged.resize(static_cast<size_t>(kMaxImageTokens) * m * 2);
@@ -281,7 +281,9 @@ struct QwenVisionEncoder::Impl {
     trace("patches", patches.b(), static_cast<size_t>(n) * c.patch_in());
     // The conv over a patch is a linear map of the patchified row.
     linear(patches.b(), x.b(), n, h, c.patch_in(), "patch_embed.proj");
+    trace("patch_projection", x.b(), rows);
     qwen_pos_embed_gather(w("pos_embed.weight"), pos_idx.i(), pos_weight.f(), tmp.b(), n, h, stream);
+    trace("position_embeddings", tmp.b(), rows);
     qwen_vision_residual_add(x.b(), tmp.b(), static_cast<int64_t>(rows), stream);
     trace("patch_embed", x.b(), rows);
     for (int b = 0; b < c.depth; ++b) {
@@ -308,8 +310,12 @@ struct QwenVisionEncoder::Impl {
                                  static_cast<float*>(scores.p), tile, n, dim, c.heads,
                                  static_cast<int64_t>(n) * dim, static_cast<int64_t>(n) * dim,
                                  static_cast<int64_t>(tile) * n, work.p, work.bytes, stream, n);
+        if (observer)
+          observer(t + "scores" + std::to_string(first), scores.p,
+                   static_cast<size_t>(c.heads) * tile * n, DType::F32);
         qwen_vision_softmax(static_cast<const float*>(scores.p), probs.b(), c.heads * tile, n,
-                            1.0f / std::sqrt(static_cast<float>(dim)), stream);
+                            static_cast<float>(1.0 / std::sqrt(static_cast<double>(dim))), stream);
+        trace(t + "probs" + std::to_string(first), probs.b(), static_cast<size_t>(c.heads) * tile * n);
         gemm.matmul_batched_bf16(probs.b(), v.b(), static_cast<float*>(scores.p), tile, dim, n,
                                  c.heads, static_cast<int64_t>(tile) * n,
                                  static_cast<int64_t>(n) * dim, static_cast<int64_t>(tile) * dim,
@@ -317,15 +323,20 @@ struct QwenVisionEncoder::Impl {
         qwen_vision_store_attention(static_cast<const float*>(scores.p), attn.b(), tile, n, h,
                                     c.heads, first, stream);
       }
+      trace(t + "attn", attn.b(), rows);
       qwen_vision_unhead(attn.b(), norm.b(), n, h, c.heads, stream);
       linear(norm.b(), tmp.b(), n, h, h, p + "attn.proj");
       qwen_vision_residual_add(x.b(), tmp.b(), static_cast<int64_t>(rows), stream);
       trace(t + "attn_proj", tmp.b(), rows);
       qwen_vision_layernorm(x.b(), w(p + "norm2.weight"), w(p + "norm2.bias"), norm.b(), n, h, c.eps,
                             stream);
+      trace(t + "norm2", norm.b(), rows);
       linear(norm.b(), hidden.b(), n, c.intermediate, h, p + "mlp.linear_fc1");
+      trace(t + "mlp_hidden", hidden.b(), static_cast<size_t>(n) * c.intermediate);
       qwen_vision_gelu(hidden.b(), static_cast<int64_t>(n) * c.intermediate, stream);
+      trace(t + "mlp_act", hidden.b(), static_cast<size_t>(n) * c.intermediate);
       linear(hidden.b(), tmp.b(), n, h, c.intermediate, p + "mlp.linear_fc2");
+      trace(t + "mlp_proj", tmp.b(), rows);
       qwen_vision_residual_add(x.b(), tmp.b(), static_cast<int64_t>(rows), stream);
       trace("layer" + std::to_string(b), x.b(), rows);
     }
@@ -335,7 +346,7 @@ struct QwenVisionEncoder::Impl {
                           c.eps, stream);
     trace("merger_norm", norm.b(), rows);
     linear(norm.b(), merged.b(), tokens, m, m, "merger.linear_fc1");
-    qwen_vision_gelu(merged.b(), static_cast<int64_t>(tokens) * m, stream);
+    qwen_vision_gelu_exact(merged.b(), static_cast<int64_t>(tokens) * m, stream);
     linear(merged.b(), dst, tokens, c.output, m, "merger.linear_fc2");
     trace("image_rows", dst, static_cast<size_t>(tokens) * c.output);
     DGPP_CUDA_OK(cudaStreamSynchronize(stream));

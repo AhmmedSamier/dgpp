@@ -153,6 +153,11 @@ struct QwenVisionConfig {
                 2 * h + 2 * m + m * m + m + o * m + o);
   }
 
+  size_t attention_score_bytes() const {
+    const size_t patches = static_cast<size_t>(kMaxImageTokens) * patches_per_token();
+    return static_cast<size_t>(heads) * kQueryTile * patches * sizeof(float);
+  }
+
   size_t workspace_bytes() const {
     const size_t n = static_cast<size_t>(kMaxImageTokens) * patches_per_token(), h = hidden;
     const size_t rows = n * h, tok = kMaxImageTokens, hd = head_dim(), o = output;
@@ -163,7 +168,7 @@ struct QwenVisionConfig {
            3 * rows * 2 +                                  // residual, norm, projected
            4 * rows * 2 +                                  // q, k, v, attention out
            rows * 3 * 2 +                                  // fused qkv
-           static_cast<size_t>(heads) * kQueryTile * tok * 4 +  // fp32 score tile
+           attention_score_bytes() +                       // fp32 score tile
            n * n * 2 +                                     // probabilities
            n * hd * 2 * 4 +                                // rope cos | sin
            n * 4 * (sizeof(int32_t) + sizeof(float)) +     // position gather plan

@@ -9,30 +9,10 @@
 namespace dgpp {
 namespace {
 constexpr int B = 256;
-constexpr int kWarp = 32;
 constexpr int kTemporal = 2;  // the tower's temporal_patch_size
 
 __device__ inline float bf(uint16_t v) { return bf16_bits_to_float(v); }
 __device__ inline uint16_t fb(float v) { return float_to_bf16_bits(v); }
-
-__device__ float block_sum(float v, float* smem) {
-  for (int off = kWarp / 2; off; off >>= 1) v += __shfl_down_sync(0xffffffffu, v, off);
-  if (threadIdx.x % kWarp == 0) smem[threadIdx.x / kWarp] = v;
-  __syncthreads();
-  float total = 0.0f;
-  for (int w = 0; w < static_cast<int>(blockDim.x) / kWarp; ++w) total += smem[w];
-  return total;
-}
-
-__device__ float block_max(float v, float* smem) {
-  for (int off = kWarp / 2; off; off >>= 1)
-    v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, off));
-  if (threadIdx.x % kWarp == 0) smem[threadIdx.x / kWarp] = v;
-  __syncthreads();
-  float total = -CUDART_INF_F;
-  for (int w = 0; w < static_cast<int>(blockDim.x) / kWarp; ++w) total = fmaxf(total, smem[w]);
-  return total;
-}
 
 // The checkpoint's image normalization is mean = std = 0.5, i.e. a linear map
 // of the byte onto [-1, 1].
@@ -76,40 +56,80 @@ __global__ void pos_embed_gather(const uint16_t* table, const int32_t* index, co
   float sum = 0.0f;
 #pragma unroll
   for (int k = 0; k < 4; ++k)
-    sum += weight[t * 4 + k] * bf(table[static_cast<int64_t>(index[t * 4 + k]) * hidden + e]);
+    sum = __fadd_rn(sum, __fmul_rn(weight[t * 4 + k],
+                                 bf(table[static_cast<int64_t>(index[t * 4 + k]) * hidden + e])));
   out[i] = fb(sum);
 }
 
-// One block per row. The tower's widest LayerNorm is the merger's input
-// (4 * hidden), which the strided pass covers for any hidden size.
-__global__ void layernorm(const uint16_t* x, const uint16_t* gamma, const uint16_t* beta,
+// Welford schedule adapted from PyTorch CUDA LayerNorm (BSD-3-Clause).
+// See docs/licenses/pytorch.md for attribution and license.
+struct Moments {
+  float mean = 0, m2 = 0, count = 0;
+};
+__device__ Moments combine_moments(Moments left, Moments right) {
+  const float count = left.count + right.count;
+  if (count == 0) return {};
+  const float inverse = 1.0f / count;
+  const float a = right.count * inverse, b = left.count * inverse;
+  const float delta = left.mean - right.mean;
+  return {__fmaf_rn(a, right.mean, __fmul_rn(b, left.mean)),
+          right.m2 + left.m2 + delta * delta * right.count * b,
+          count};
+}
+__global__ void layernorm(const uint16_t* x, const uint16_t* weight, const uint16_t* bias,
                           uint16_t* y, int dim, float eps) {
-  __shared__ float smem[B / kWarp];
-  const int64_t row = blockIdx.x;
-  const uint16_t* xr = x + row * dim;
-  float sum = 0.0f, sq = 0.0f;
-  for (int i = threadIdx.x; i < dim; i += blockDim.x) {
-    const float v = bf(xr[i]);
-    sum += v;
-    sq += v * v;
+  // Welford moments with four adjacent values per thread and warp-pair
+  // reduction, matching the CUDA LayerNorm reference's FP32 arithmetic.
+  constexpr int threads = 128;
+  __shared__ Moments partial[threads / 32];
+  const int t = threadIdx.x, lane = t % 32, warp = t / 32;
+  const uint16_t* row = x + blockIdx.x * dim;
+  Moments moments;
+  for (int base = t * 4; base < dim; base += threads * 4)
+    for (int j = 0; j < 4 && base + j < dim; ++j) {
+      const float value = bf16_bits_to_float(row[base + j]);
+      const float delta = value - moments.mean;
+      const float count = moments.count + 1;
+      const float mean = moments.mean + delta * (1.0f / count);
+      moments = {mean, moments.m2 + delta * (value - mean), count};
+    }
+  for (int offset = 16; offset; offset /= 2) {
+    Moments other{__shfl_down_sync(0xffffffff, moments.mean, offset),
+                  __shfl_down_sync(0xffffffff, moments.m2, offset),
+                  __shfl_down_sync(0xffffffff, moments.count, offset)};
+    moments = combine_moments(moments, other);
   }
-  __shared__ float s2[B / kWarp];
-  sum = block_sum(sum, smem);
+  if (lane == 0) partial[warp] = moments;
   __syncthreads();
-  sq = block_sum(sq, s2);
-  const float mean = sum / static_cast<float>(dim);
-  const float var = fmaxf(sq / static_cast<float>(dim) - mean * mean, 0.0f);
-  const float rstd = rsqrtf(var + eps);
-  for (int i = threadIdx.x; i < dim; i += blockDim.x)
-    y[row * dim + i] = fb((bf(xr[i]) - mean) * rstd * bf(gamma[i]) + bf(beta[i]));
+  for (int offset = threads / 64; offset; offset /= 2) {
+    if (lane == 0 && warp < offset) {
+      moments = combine_moments(moments, partial[warp + offset]);
+      partial[warp] = moments;
+    }
+    __syncthreads();
+  }
+  const float mean = partial[0].mean;
+  const float variance = __fdiv_rn(partial[0].m2, static_cast<float>(dim));
+  const float rstd = rsqrtf(__fadd_rn(variance, eps));
+  for (int j = t; j < dim; j += threads) {
+    const float norm = (bf16_bits_to_float(row[j]) - mean) * rstd;
+    y[blockIdx.x * dim + j] = float_to_bf16_bits(
+        norm * bf16_bits_to_float(weight[j]) + bf16_bits_to_float(bias[j]));
+  }
 }
 
 // hidden_act gelu_pytorch_tanh: 0.5x(1 + tanh(sqrt(2/pi)(x + 0.044715x^3))).
+template <bool Approximate>
 __global__ void gelu(uint16_t* x, int64_t count) {
   const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (i >= count) return;
   const float v = bf(x[i]);
-  x[i] = fb(0.5f * v * (1.0f + tanhf(0.7978845608028654f * (v + 0.044715f * v * v * v))));
+  if constexpr (Approximate) {
+    const float cube = v * v * v;
+    x[i] = fb(0.5f * v * (1.0f + tanhf(0.7978845608028654f * (v + 0.044715f * cube))));
+  } else {
+    x[i] = fb(v * 0.5f * (1.0f + erff(v * 0.7071067811865475f)));
+  }
 }
 
 __global__ void residual_add(uint16_t* x, const uint16_t* y, int64_t count) {
@@ -145,7 +165,8 @@ __global__ void split_rope(const uint16_t* qkv, uint16_t* q, uint16_t* k, uint16
   const float other =
       bf(qkv[t * 3 * hidden + part * hidden + j * dim + pair]);
   const float sign = e < half ? -1.0f : 1.0f;
-  dst[at] = fb(self * cos_tab[t * dim + e] + sign * other * sin_tab[t * dim + e]);
+  dst[at] = fb(__fadd_rn(__fmul_rn(self, cos_tab[t * dim + e]),
+                        __fmul_rn(sign * other, sin_tab[t * dim + e])));
 }
 
 // head-major [heads, n, dim] -> token-major [n, hidden].
@@ -169,20 +190,58 @@ __global__ void store_attention(const float* tile, uint16_t* attn, int first, in
   attn[((static_cast<int64_t>(head) * n) + first + r) * dim + e] = fb(tile[i]);
 }
 
-// Softmax over the score row with the 1/sqrt(dim) scale folded in.
+// Match the CUDA reference's warp and block reduction order. The barrier
+// before shared writes also lets successive reductions reuse their scratch.
+template <bool Maximum>
+__device__ float attention_reduce(float value, float* partials) {
+  const int lane = threadIdx.x % 32, warp = threadIdx.x / 32;
+  for (int s = 16; s; s /= 2) {
+    const float other = __shfl_down_sync(0xffffffff, value, s);
+    value = Maximum ? fmaxf(value, other) : value + other;
+  }
+  __syncthreads();
+  if (lane == 0) partials[warp] = value;
+  __syncthreads();
+  if (warp == 0) {
+    value = partials[lane];
+    for (int s = 16; s; s /= 2) {
+      const float other = __shfl_down_sync(0xffffffff, value, s);
+      value = Maximum ? fmaxf(value, other) : value + other;
+    }
+    if (lane == 0) partials[0] = value;
+  }
+  __syncthreads();
+  return partials[0];
+}
 __global__ void softmax(const float* scores, uint16_t* probs, int n, float scale) {
-  __shared__ float smem[B / kWarp];
-  const int64_t row = blockIdx.x;
-  const float* s = scores + row * n;
-  float max_v = -CUDART_INF_F;
-  for (int i = threadIdx.x; i < n; i += blockDim.x) max_v = fmaxf(max_v, s[i]);
-  max_v = block_max(max_v, smem) * scale;
-  float sum = 0.0f;
-  for (int i = threadIdx.x; i < n; i += blockDim.x) sum += expf(s[i] * scale - max_v);
-  sum = block_sum(sum, smem);
-  const float inv = 1.0f / sum;
-  for (int i = threadIdx.x; i < n; i += blockDim.x)
-    probs[row * n + i] = fb(expf(s[i] * scale - max_v) * inv);
+  __shared__ float partials[32];
+  const int row = blockIdx.x, t = threadIdx.x;
+  float largest = -CUDART_INF_F;
+  for (int j = t; j < n; j += 1024)
+    largest = fmaxf(largest, __fmul_rn(scores[row * n + j], scale));
+  largest = attention_reduce<true>(largest, partials);
+  float sum = 0;
+  for (int j = t; j < n; j += 1024)
+    sum += expf(__fmul_rn(scores[row * n + j], scale) - largest);
+  const float denom = attention_reduce<false>(sum, partials);
+  for (int j = t; j < n; j += 1024)
+    probs[row * n + j] =
+        float_to_bf16_bits(expf(__fmul_rn(scores[row * n + j], scale) - largest) / denom);
+}
+__global__ void softmax_warp(const float* scores, uint16_t* probs, int rows, int n, float scale) {
+  const int row = blockIdx.x * 4 + threadIdx.y, lane = threadIdx.x;
+  if (row >= rows) return;
+  float largest = -CUDART_INF_F;
+  for (int j = lane; j < n; j += 32)
+    largest = fmaxf(largest, __fmul_rn(scores[row * n + j], scale));
+  for (int s = 16; s; s /= 2) largest = fmaxf(largest, __shfl_xor_sync(0xffffffff, largest, s));
+  float sum = 0;
+  for (int j = lane; j < n; j += 32)
+    sum += expf(__fmul_rn(scores[row * n + j], scale) - largest);
+  for (int s = 16; s; s /= 2) sum += __shfl_xor_sync(0xffffffff, sum, s);
+  for (int j = lane; j < n; j += 32)
+    probs[row * n + j] =
+        float_to_bf16_bits(expf(__fmul_rn(scores[row * n + j], scale) - largest) / sum);
 }
 
 // Image rows into the hyper-connection embedding: the [row][branch][hidden]
@@ -216,13 +275,19 @@ void qwen_pos_embed_gather(const uint16_t* table, const int32_t* index, const fl
 
 void qwen_vision_layernorm(const uint16_t* x, const uint16_t* gamma, const uint16_t* beta,
                            uint16_t* y, int rows, int dim, float eps, cudaStream_t stream) {
-  layernorm<<<static_cast<unsigned>(rows), B, 0, stream>>>(x, gamma, beta, y, dim, eps);
+  layernorm<<<static_cast<unsigned>(rows), 128, 0, stream>>>(x, gamma, beta, y, dim, eps);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
 void qwen_vision_gelu(uint16_t* x, int64_t count, cudaStream_t stream) {
   if (count <= 0) return;
-  gelu<<<grid_for(count), B, 0, stream>>>(x, count);
+  gelu<true><<<grid_for(count), B, 0, stream>>>(x, count);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void qwen_vision_gelu_exact(uint16_t* x, int64_t count, cudaStream_t stream) {
+  if (count <= 0) return;
+  gelu<false><<<grid_for(count), B, 0, stream>>>(x, count);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
@@ -250,7 +315,10 @@ void qwen_vision_unhead(const uint16_t* attn, uint16_t* out, int n, int hidden, 
 
 void qwen_vision_softmax(const float* scores, uint16_t* probs, int rows, int n, float scale,
                          cudaStream_t stream) {
-  softmax<<<static_cast<unsigned>(rows), B, 0, stream>>>(scores, probs, n, scale);
+  if (n <= 2048)
+    softmax_warp<<<(rows + 3) / 4, dim3(32, 4), 0, stream>>>(scores, probs, rows, n, scale);
+  else
+    softmax<<<static_cast<unsigned>(rows), 1024, 0, stream>>>(scores, probs, n, scale);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

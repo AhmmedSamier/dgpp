@@ -146,7 +146,7 @@ DGPP_TEST(image_qwen_smart_resize_rounds_without_padding) {
   require(im.tokens > 900, "the ceiling is not wasteful");
   // A side below the grid grows to the pixel floor; an extreme aspect ratio
   // is refused, as the reference processor does.
-  std::vector<uint8_t> thin(16 * 16 * 3, 3);
+  std::vector<uint8_t> thin(16 * 1024 * 3, 3);
   im = dgpp::serve::resize_image(thin.data(), 16, 1024, pp);
   require(im.tokens >= 64 && im.width % 32 == 0 && im.height % 32 == 0, "a short side grows");
   std::vector<uint8_t> sliver(6600 * 32 * 3, 3);
