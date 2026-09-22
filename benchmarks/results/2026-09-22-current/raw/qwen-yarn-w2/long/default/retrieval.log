@@ -1,0 +1,37 @@
+[lanes] dgpp=127.0.0.1:18080 model=nvidia/Qwen3.8-Flash-Next-NVFP4
+[dgpp/calibrate] 256 records -> 11549 prompt tokens (45.020 tok/record)
+[dgpp/262144] 5822 records, 598123 chars, 5 needles at depths [0.05, 0.25, 0.5, 0.75, 0.95]
+[dgpp/retrieval] depth 0.05 prompt 261388 tok (cached 8192) prefill 213104 ms ttft 213177 ms -> HIT (want 24144786, got 'We need answer user\'s question: "What is the vault code for shipment VL-65993? Answer with the digits only, nothing else." Need extract from provided text. Ther')
+[dgpp/retrieval] depth 0.25 prompt 261388 tok (cached 258048) prefill 3636 ms ttft 3711 ms -> HIT (want 46044186, got 'We need answer user\'s question: "What is the vault code for shipment VL-38045? Answer with the digits only, nothing else." Need find in prompt: "IMPORTANT: the ')
+[dgpp/retrieval] depth 0.50 prompt 261388 tok (cached 258048) prefill 3624 ms ttft 3712 ms -> HIT (want 59349529, got 'The user is asking for the vault code for shipment VL-96058. I need to search through the provided text for this specific shipment code.\n\nLooking through the te')
+[dgpp/retrieval] depth 0.75 prompt 261388 tok (cached 258048) prefill 3623 ms ttft 3711 ms -> HIT (want 59435610, got 'We need answer user\'s question: "What is the vault code for shipment VL-41415? Answer with the digits only, nothing else." Need find in prompt. There are IMPORT')
+[dgpp/retrieval] depth 0.95 prompt 261388 tok (cached 258048) prefill 3623 ms ttft 3712 ms -> HIT (want 30793231, got 'The user is asking for the vault code for shipment VL-49585. I need to search through the provided text for this specific vault code.\n\nLooking through the text,')
+[dgpp/262144] cache reuse: cached 261380/261388 tokens (100.0%) in 80 ms
+[dgpp/262144] decode: 128 tokens, ttft 5392 ms, decode 16.69 ms/token
+[dgpp/262144] concurrent: 2/2 streams in 3.5 s, 75.28 tok/s aggregate
+[dgpp/524288] 11645 records, 1196146 chars, 5 needles at depths [0.05, 0.25, 0.5, 0.75, 0.95]
+[dgpp/retrieval] depth 0.05 prompt 522619 tok (cached 8192) prefill 656733 ms ttft 656878 ms -> HIT (want 24144786, got 'The user is asking for the vault code for shipment VL-65993. I need to search through the provided text for this specific shipment code.\n\nLooking through the te')
+[dgpp/retrieval] depth 0.25 prompt 522619 tok (cached 520192) prefill 6806 ms ttft 6967 ms -> HIT (want 46044186, got 'The user is asking for the vault code for shipment VL-38045. I need to search through the provided text for this specific shipment code.\n\nLooking through the te')
+[dgpp/retrieval] depth 0.50 prompt 522619 tok (cached 520192) prefill 6813 ms ttft 6946 ms -> HIT (want 59349529, got 'The user is asking for the vault code for shipment VL-96058. I need to search through the provided text for this specific shipment code.\n\nLooking through the te')
+[dgpp/retrieval] depth 0.75 prompt 522619 tok (cached 520192) prefill 6818 ms ttft 6969 ms -> HIT (want 59435610, got "The user is asking for the vault code for shipment VL-41415. I need to search through the provided text for the mention of this shipment's vault code.\n\nLooking ")
+[dgpp/retrieval] depth 0.95 prompt 522619 tok (cached 520192) prefill 6813 ms ttft 6968 ms -> HIT (want 30793231, got 'The user is asking for the vault code for shipment VL-49585. I need to search through the provided text for this specific shipment code.\n\nLooking through the te')
+[dgpp/524288] cache reuse: cached 522612/522619 tokens (100.0%) in 124 ms
+[dgpp/524288] decode: 128 tokens, ttft 5325 ms, decode 15.92 ms/token
+[dgpp/524288] concurrent: 2/2 streams in 16.3 s, 11.92 tok/s aggregate
+[dgpp/short_context] depth 0.05 prompt 4273 tok (cached 0) prefill 2903 ms ttft 2923 ms -> HIT (want 24144786, got 'We need answer user\'s question: "What is the vault code for shipment VL-65993? Answer with the digits only, nothing else." Need extract from provided text. It s')
+[dgpp/short_context] depth 0.25 prompt 4273 tok (cached 0) prefill 2902 ms ttft 2923 ms -> HIT (want 46044186, got 'We need answer user\'s question: "What is the vault code for shipment VL-38045? Answer with the digits only, nothing else." Need extract from provided text. Ther')
+[dgpp/short_context] depth 0.50 prompt 4273 tok (cached 0) prefill 2910 ms ttft 2922 ms -> HIT (want 59349529, got 'We need answer user\'s question: "What is the vault code for shipment VL-96058? Answer with the digits only, nothing else." Need extract from provided text. Ther')
+[dgpp/short_context] depth 0.75 prompt 4273 tok (cached 0) prefill 2903 ms ttft 2925 ms -> HIT (want 59435610, got 'We need answer user\'s question: "What is the vault code for shipment VL-41415? Answer with the digits only, nothing else." Need extract from provided text. Ther')
+[dgpp/short_context] depth 0.95 prompt 4273 tok (cached 0) prefill 2902 ms ttft 2924 ms -> HIT (want 30793231, got 'We need answer user\'s question: "What is the vault code for shipment VL-49585? Answer with the digits only, nothing else." Need extract from provided text. Ther')
+
+== YaRN release check PASS ==
+  check=retrieval@262144 dgpp_hits=5 requests=5 floor=0.6 ok=True
+  check=retrieval@524288 dgpp_hits=5 requests=5 floor=0.6 ok=True
+  check=short_context@4096 dgpp_hits=5 requests=5 floor=0.6 ok=True
+  check=concurrent@dgpp/262144 completed=2 requests=2 ok=True
+  check=concurrent@dgpp/524288 completed=2 requests=2 ok=True
+  dgpp @262144: cold prefill 213104 ms (0.8417 ms/token), decode 16.69 ms/token, reuse 100.0%, concurrent 75.28 tok/s
+  dgpp @524288: cold prefill 656733 ms (1.2766 ms/token), decode 15.92 ms/token, reuse 100.0%, concurrent 11.92 tok/s
+  dgpp control @4096: 5/5 needles
+  peak memory: 52962 MiB on edgexpert-409e
+  record: /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/qwen-yarn-w2/long/default/retrieval.json

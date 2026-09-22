@@ -1,0 +1,3 @@
+2026-09-22T09:12:04+00:00 spark-a289 kernel: nvidia 000f:01:00.0: Using 40-bit DMA addresses
+2026-09-22T09:57:34+00:00 spark-a289 kernel: audit: type=1400 audit(1790071054.161:172): apparmor="DENIED" operation="capable" class="cap" profile="ubuntu_pro_esm_cache_systemd_detect_virt" pid=118419 comm="systemd-detect-" capability=38  capname="perfmon"
+2026-09-22T09:57:34+00:00 spark-a289 kernel: audit: type=1400 audit(1790071054.163:173): apparmor="DENIED" operation="capable" class="cap" profile="ubuntu_pro_esm_cache//cloud_id" pid=118415 comm="cloud-id" capability=38  capname="perfmon"

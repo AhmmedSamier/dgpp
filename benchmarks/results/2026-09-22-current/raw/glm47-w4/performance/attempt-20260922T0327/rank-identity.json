@@ -1,0 +1,10 @@
+{
+  "expected_ranks": 4,
+  "md5": {
+    "serve_rank0.ops": "8ae60fc140aef0deb08e3422a6876cf8",
+    "serve_rank1.ops": "8ae60fc140aef0deb08e3422a6876cf8",
+    "serve_rank3.ops": "8ae60fc140aef0deb08e3422a6876cf8"
+  },
+  "passed": false,
+  "note": "Three recovered streams match. Rank 2 stream was lost when the user restarted the unresponsive node."
+}

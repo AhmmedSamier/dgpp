@@ -1,0 +1,36 @@
+{
+  "model": "unsloth/GLM-5.3-Flash-FP8",
+  "settings": {
+    "max_tokens": 2048,
+    "reasoning_effort": "low",
+    "no_think": false,
+    "limit": 300,
+    "seed": 20260908
+  },
+  "tasks": {
+    "humaneval": {
+      "n": 164,
+      "passed": 154,
+      "rate": 0.939,
+      "seconds": 418,
+      "mean_completion_tokens": 164,
+      "truncated": 0
+    },
+    "gsm8k": {
+      "n": 300,
+      "passed": 295,
+      "rate": 0.9833,
+      "seconds": 412,
+      "mean_completion_tokens": 76,
+      "truncated": 0
+    },
+    "extract": {
+      "n": 100,
+      "passed": 100,
+      "rate": 1.0,
+      "seconds": 105,
+      "mean_completion_tokens": 52,
+      "truncated": 0
+    }
+  }
+}

@@ -1,0 +1,106 @@
+{
+  "libraries": {
+    "/usr/local/cuda-13.0/targets/sbsa-linux/lib/libcudart.so.13": {
+      "resolved": "/usr/local/cuda-13.0/targets/sbsa-linux/lib/libcudart.so.13.0.96",
+      "build_ids": [],
+      "returncode": 0,
+      "stderr": ""
+    },
+    "/usr/local/cuda-13.0/targets/sbsa-linux/lib/libcublasLt.so.13": {
+      "resolved": "/usr/local/cuda-13.0/targets/sbsa-linux/lib/libcublasLt.so.13.1.1.3",
+      "build_ids": [],
+      "returncode": 0,
+      "stderr": ""
+    },
+    "/lib/aarch64-linux-gnu/libcuda.so.1": {
+      "resolved": "/usr/lib/aarch64-linux-gnu/libcuda.so.580.173.02",
+      "build_ids": [
+        "6d8ad151001be47379baa14cf0350a9cfc062904"
+      ],
+      "returncode": 0,
+      "stderr": ""
+    },
+    "/lib/aarch64-linux-gnu/libibverbs.so.1": {
+      "resolved": "/usr/lib/aarch64-linux-gnu/libibverbs.so.1.14.50.0",
+      "build_ids": [
+        "55b84b9a4e051642d786602b8c3825ae654a89f5"
+      ],
+      "returncode": 0,
+      "stderr": ""
+    },
+    "/lib/aarch64-linux-gnu/libstdc++.so.6": {
+      "resolved": "/usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.33",
+      "build_ids": [
+        "7c239d1743727054caa3df1ab866bfa72cd4dd93"
+      ],
+      "returncode": 0,
+      "stderr": ""
+    },
+    "/lib/aarch64-linux-gnu/libgcc_s.so.1": {
+      "resolved": "/usr/lib/aarch64-linux-gnu/libgcc_s.so.1",
+      "build_ids": [
+        "d4cda90afc8eb822cc2ede7761e5a026972e4d6d"
+      ],
+      "returncode": 0,
+      "stderr": ""
+    },
+    "/lib/aarch64-linux-gnu/libc.so.6": {
+      "resolved": "/usr/lib/aarch64-linux-gnu/libc.so.6",
+      "build_ids": [
+        "d5ef86dde36cbd3289566cf5098226035d76f2e1"
+      ],
+      "returncode": 0,
+      "stderr": ""
+    },
+    "/lib/aarch64-linux-gnu/libnl-route-3.so.200": {
+      "resolved": "/usr/lib/aarch64-linux-gnu/libnl-route-3.so.200.26.0",
+      "build_ids": [
+        "34c233b436253132f3b9e125174fe888f1f494f0"
+      ],
+      "returncode": 0,
+      "stderr": ""
+    },
+    "/lib/aarch64-linux-gnu/libnl-3.so.200": {
+      "resolved": "/usr/lib/aarch64-linux-gnu/libnl-3.so.200.26.0",
+      "build_ids": [
+        "dd65a924988cd1efd884df1a2156c848438ed8cc"
+      ],
+      "returncode": 0,
+      "stderr": ""
+    }
+  },
+  "environment": {
+    "LD_LIBRARY_PATH": null,
+    "CUDA_DEVICE_MAX_CONNECTIONS": null,
+    "CUDA_VISIBLE_DEVICES": null,
+    "DGPP_DENSE_GEMV_ROWS": null,
+    "DGPP_ROCE_DEVICES": null,
+    "DGPP_BUS_CHUNK_BYTES": null
+  },
+  "links": {
+    "enp1s0f0np0": {
+      "link": {
+        "returncode": 0,
+        "stdout": "Settings for enp1s0f0np0:\n\tSupported ports: [ Backplane ]\n\tSupported link modes:   1000baseT/Full\n\t                        10000baseT/Full\n\t                        1000baseKX/Full\n\t                        10000baseKR/Full\n\t                        10000baseR_FEC\n\t                        40000baseKR4/Full\n\t                        40000baseCR4/Full\n\t                        40000baseSR4/Full\n\t                        40000baseLR4/Full\n\t                        25000baseCR/Full\n\t                        25000baseKR/Full\n\t                        25000baseSR/Full\n\t                        50000baseCR2/Full\n\t                        50000baseKR2/Full\n\t                        100000baseKR4/Full\n\t                        100000baseSR4/Full\n\t                        100000baseCR4/Full\n\t                        100000baseLR4_ER4/Full\n\t                        50000baseSR2/Full\n\t                        1000baseX/Full\n\t                        10000baseCR/Full\n\t                        10000baseSR/Full\n\t                        10000baseLR/Full\n\t                        10000baseER/Full\n\t                        50000baseKR/Full\n\t                        50000baseSR/Full\n\t                        50000baseCR/Full\n\t                        50000baseLR_ER_FR/Full\n\t                        50000baseDR/Full\n\t                        100000baseKR2/Full\n\t                        100000baseSR2/Full\n\t                        100000baseCR2/Full\n\t                        100000baseLR2_ER2_FR2/Full\n\t                        100000baseDR2/Full\n\t                        200000baseKR4/Full\n\t                        200000baseSR4/Full\n\t                        200000baseLR4_ER4_FR4/Full\n\t                        200000baseDR4/Full\n\t                        200000baseCR4/Full\n\t                        100000baseKR/Full\n\t                        100000baseSR/Full\n\t                        100000baseLR_ER_FR/Full\n\t                        100000baseCR/Full\n\t                        100000baseDR/Full\n\t                        200000baseKR2/Full\n\t                        200000baseSR2/Full\n\t                        200000baseLR2_ER2_FR2/Full\n\t                        200000baseDR2/Full\n\t                        200000baseCR2/Full\n\tSupported pause frame use: Symmetric\n\tSupports auto-negotiation: Yes\n\tSupported FEC modes: None\t RS\t BASER\n\tAdvertised link modes:  1000baseT/Full\n\t                        10000baseT/Full\n\t                        1000baseKX/Full\n\t                        10000baseKR/Full\n\t                        10000baseR_FEC\n\t                        40000baseKR4/Full\n\t                        40000baseCR4/Full\n\t                        40000baseSR4/Full\n\t                        40000baseLR4/Full\n\t                        25000baseCR/Full\n\t                        25000baseKR/Full\n\t                        25000baseSR/Full\n\t                        50000baseCR2/Full\n\t                        50000baseKR2/Full\n\t                        100000baseKR4/Full\n\t                        100000baseSR4/Full\n\t                        100000baseCR4/Full\n\t                        100000baseLR4_ER4/Full\n\t                        50000baseSR2/Full\n\t                        1000baseX/Full\n\t                        10000baseCR/Full\n\t                        10000baseSR/Full\n\t                        10000baseLR/Full\n\t                        10000baseER/Full\n\t                        50000baseKR/Full\n\t                        50000baseSR/Full\n\t                        50000baseCR/Full\n\t                        50000baseLR_ER_FR/Full\n\t                        50000baseDR/Full\n\t                        100000baseKR2/Full\n\t                        100000baseSR2/Full\n\t                        100000baseCR2/Full\n\t                        100000baseLR2_ER2_FR2/Full\n\t                        100000baseDR2/Full\n\t                        200000baseKR4/Full\n\t                        200000baseSR4/Full\n\t                        200000baseLR4_ER4_FR4/Full\n\t                        200000baseDR4/Full\n\t                        200000baseCR4/Full\n\t                        100000baseKR/Full\n\t                        100000baseSR/Full\n\t                        100000baseLR_ER_FR/Full\n\t                        100000baseCR/Full\n\t                        100000baseDR/Full\n\t                        200000baseKR2/Full\n\t                        200000baseSR2/Full\n\t                        200000baseLR2_ER2_FR2/Full\n\t                        200000baseDR2/Full\n\t                        200000baseCR2/Full\n\tAdvertised pause frame use: Symmetric\n\tAdvertised auto-negotiation: Yes\n\tAdvertised FEC modes: RS\n\tSpeed: 200000Mb/s\n\tLanes: 4\n\tDuplex: Full\n\tAuto-negotiation: on\n\tPort: Direct Attach Copper\n\tPHYAD: 0\n\tTransceiver: internal\n\tLink detected: yes\n",
+        "stderr": "netlink error: Operation not permitted\n"
+      },
+      "--show-fec": {
+        "returncode": 0,
+        "stdout": "FEC parameters for enp1s0f0np0:\nSupported/Configured FEC encodings: Auto\nActive FEC encoding: RS\n",
+        "stderr": ""
+      }
+    },
+    "enP2p1s0f0np0": {
+      "link": {
+        "returncode": 0,
+        "stdout": "Settings for enP2p1s0f0np0:\n\tSupported ports: [ Backplane ]\n\tSupported link modes:   1000baseT/Full\n\t                        10000baseT/Full\n\t                        1000baseKX/Full\n\t                        10000baseKR/Full\n\t                        10000baseR_FEC\n\t                        40000baseKR4/Full\n\t                        40000baseCR4/Full\n\t                        40000baseSR4/Full\n\t                        40000baseLR4/Full\n\t                        25000baseCR/Full\n\t                        25000baseKR/Full\n\t                        25000baseSR/Full\n\t                        50000baseCR2/Full\n\t                        50000baseKR2/Full\n\t                        100000baseKR4/Full\n\t                        100000baseSR4/Full\n\t                        100000baseCR4/Full\n\t                        100000baseLR4_ER4/Full\n\t                        50000baseSR2/Full\n\t                        1000baseX/Full\n\t                        10000baseCR/Full\n\t                        10000baseSR/Full\n\t                        10000baseLR/Full\n\t                        10000baseER/Full\n\t                        50000baseKR/Full\n\t                        50000baseSR/Full\n\t                        50000baseCR/Full\n\t                        50000baseLR_ER_FR/Full\n\t                        50000baseDR/Full\n\t                        100000baseKR2/Full\n\t                        100000baseSR2/Full\n\t                        100000baseCR2/Full\n\t                        100000baseLR2_ER2_FR2/Full\n\t                        100000baseDR2/Full\n\t                        200000baseKR4/Full\n\t                        200000baseSR4/Full\n\t                        200000baseLR4_ER4_FR4/Full\n\t                        200000baseDR4/Full\n\t                        200000baseCR4/Full\n\t                        100000baseKR/Full\n\t                        100000baseSR/Full\n\t                        100000baseLR_ER_FR/Full\n\t                        100000baseCR/Full\n\t                        100000baseDR/Full\n\t                        200000baseKR2/Full\n\t                        200000baseSR2/Full\n\t                        200000baseLR2_ER2_FR2/Full\n\t                        200000baseDR2/Full\n\t                        200000baseCR2/Full\n\tSupported pause frame use: Symmetric\n\tSupports auto-negotiation: Yes\n\tSupported FEC modes: None\t RS\t BASER\n\tAdvertised link modes:  1000baseT/Full\n\t                        10000baseT/Full\n\t                        1000baseKX/Full\n\t                        10000baseKR/Full\n\t                        10000baseR_FEC\n\t                        40000baseKR4/Full\n\t                        40000baseCR4/Full\n\t                        40000baseSR4/Full\n\t                        40000baseLR4/Full\n\t                        25000baseCR/Full\n\t                        25000baseKR/Full\n\t                        25000baseSR/Full\n\t                        50000baseCR2/Full\n\t                        50000baseKR2/Full\n\t                        100000baseKR4/Full\n\t                        100000baseSR4/Full\n\t                        100000baseCR4/Full\n\t                        100000baseLR4_ER4/Full\n\t                        50000baseSR2/Full\n\t                        1000baseX/Full\n\t                        10000baseCR/Full\n\t                        10000baseSR/Full\n\t                        10000baseLR/Full\n\t                        10000baseER/Full\n\t                        50000baseKR/Full\n\t                        50000baseSR/Full\n\t                        50000baseCR/Full\n\t                        50000baseLR_ER_FR/Full\n\t                        50000baseDR/Full\n\t                        100000baseKR2/Full\n\t                        100000baseSR2/Full\n\t                        100000baseCR2/Full\n\t                        100000baseLR2_ER2_FR2/Full\n\t                        100000baseDR2/Full\n\t                        200000baseKR4/Full\n\t                        200000baseSR4/Full\n\t                        200000baseLR4_ER4_FR4/Full\n\t                        200000baseDR4/Full\n\t                        200000baseCR4/Full\n\t                        100000baseKR/Full\n\t                        100000baseSR/Full\n\t                        100000baseLR_ER_FR/Full\n\t                        100000baseCR/Full\n\t                        100000baseDR/Full\n\t                        200000baseKR2/Full\n\t                        200000baseSR2/Full\n\t                        200000baseLR2_ER2_FR2/Full\n\t                        200000baseDR2/Full\n\t                        200000baseCR2/Full\n\tAdvertised pause frame use: Symmetric\n\tAdvertised auto-negotiation: Yes\n\tAdvertised FEC modes: RS\n\tSpeed: 200000Mb/s\n\tLanes: 4\n\tDuplex: Full\n\tAuto-negotiation: on\n\tPort: Direct Attach Copper\n\tPHYAD: 0\n\tTransceiver: internal\n\tLink detected: yes\n",
+        "stderr": "netlink error: Operation not permitted\n"
+      },
+      "--show-fec": {
+        "returncode": 0,
+        "stdout": "FEC parameters for enP2p1s0f0np0:\nSupported/Configured FEC encodings: Auto\nActive FEC encoding: RS\n",
+        "stderr": ""
+      }
+    }
+  }
+}

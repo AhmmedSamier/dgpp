@@ -1,0 +1,6 @@
+2026-09-22T06:12:37.297201+00:00 Waiting for existing runner 2416201 20838761
+2026-09-22T09:11:47.993522+00:00 RUN ['/usr/bin/python3', '-u', '/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/run.py', 'performance']
+2026-09-22T11:03:27.600594+00:00 RUN ['/usr/bin/python3', '-u', '/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/run.py', 'all']
+2026-09-22T14:05:22.882829+00:00 RUN ['/usr/bin/python3', '/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/summarize.py']
+2026-09-22T14:05:23.728545+00:00 RUN ['/usr/bin/python3', '/home/stephen/workspace/dgpp/scripts/dgpp-cluster', 'up', '--config', '/home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json', '--bin', '/home/stephen/workspace/dgpp/build-release/dgpp-serve']
+2026-09-22T14:05:57.807551+00:00 Measurements complete; documents generated; original service restored.

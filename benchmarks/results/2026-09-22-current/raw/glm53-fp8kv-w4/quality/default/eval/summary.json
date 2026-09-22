@@ -1,0 +1,36 @@
+{
+  "model": "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
+  "settings": {
+    "max_tokens": 2048,
+    "reasoning_effort": "low",
+    "no_think": false,
+    "limit": 300,
+    "seed": 20260908
+  },
+  "tasks": {
+    "humaneval": {
+      "n": 164,
+      "passed": 160,
+      "rate": 0.9756,
+      "seconds": 620,
+      "mean_completion_tokens": 138,
+      "truncated": 0
+    },
+    "gsm8k": {
+      "n": 300,
+      "passed": 293,
+      "rate": 0.9767,
+      "seconds": 827,
+      "mean_completion_tokens": 94,
+      "truncated": 0
+    },
+    "extract": {
+      "n": 100,
+      "passed": 100,
+      "rate": 1.0,
+      "seconds": 197,
+      "mean_completion_tokens": 57,
+      "truncated": 0
+    }
+  }
+}

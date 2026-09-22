@@ -1,0 +1,15 @@
+{
+  "command": [
+    "/usr/bin/python3",
+    "/home/stephen/workspace/dgpp/scripts/dgpp-cluster",
+    "down",
+    "--config",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm-flash-hybrid-w4/isolation-diagnostic/rows8/config.json",
+    "--log-dir",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm-flash-hybrid-w4/isolation-diagnostic/rows8/server"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-09-22T02:18:10.526356+00:00",
+  "returncode": 0,
+  "finished_at": "2026-09-22T02:18:18.116133+00:00"
+}

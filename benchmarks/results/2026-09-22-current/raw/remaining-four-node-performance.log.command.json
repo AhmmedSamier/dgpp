@@ -1,0 +1,12 @@
+{
+  "command": [
+    "/usr/bin/python3",
+    "-u",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/run.py",
+    "performance"
+  ],
+  "started_at": "2026-09-22T09:11:47.993500+00:00",
+  "cwd": "/home/stephen/workspace/dgpp",
+  "returncode": 0,
+  "finished_at": "2026-09-22T11:03:27.600223+00:00"
+}

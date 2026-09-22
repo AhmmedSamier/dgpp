@@ -1,0 +1,17 @@
+[calibrate] 400 words -> 518 prompt tokens (1.220 tok/word)
+[n2048 r0] prompt 2093 tok, computed 2093 in 2755 ms = 1.32 ms/token; ttft 2765 ms
+[n2048 r1] prompt 2118 tok, computed 2118 in 2807 ms = 1.33 ms/token; ttft 2819 ms
+[n2048 r2] prompt 2094 tok, computed 2094 in 2776 ms = 1.33 ms/token; ttft 2787 ms
+[n2048] median: 1.33 ms/token; prefill 2776 ms; wall 2787 ms
+Traceback (most recent call last):
+  File "/home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py", line 166, in <module>
+    main()
+  File "/home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py", line 148, in main
+    response = ask(args.host, args.port, model, prompt, args.no_think)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py", line 72, in ask
+    result = read_completion(conn.getresponse())
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/stephen/workspace/dgpp/scripts/bench_stream.py", line 36, in read_completion
+    raise RuntimeError(f"stream error: {obj['error']}")
+RuntimeError: stream error: {'message': 'the engine failed (boundary reduce (boundary bulk): bus lane to rank 2 lane 1 failed: wc status=12 (transport retry counter exceeded) opcode=52 vendor_err=129) — this response is incomplete; the service is restarting, retry', 'type': 'server_error', 'param': None, 'code': 'engine_failure'}

@@ -1,0 +1,16 @@
+{
+  "command": [
+    "/usr/bin/python3",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/long_context.py",
+    "--lengths",
+    "4096",
+    "32768",
+    "122000",
+    "--json-out",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/deepseek-w4/long/default/long.json"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-09-22T13:12:35.322165+00:00",
+  "returncode": 0,
+  "finished_at": "2026-09-22T13:16:48.315509+00:00"
+}

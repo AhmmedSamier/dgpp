@@ -128,33 +128,10 @@ record the modes measured for each deployment.
 
 ## Performance
 
-These are the latest measurements for representative shipped configurations.
-See [the benchmark tables](docs/benchmarks.md) for the complete per-model and
-per-class results, measurement scopes and reproduction commands.
-
-| configuration | single-request engine decode | loaded request-wall decode | cold service prefill at ~2K / 8K / 32K |
-|---|---:|---:|---:|
-| GLM-5.3-Flash-FP8, 4 Sparks | 41.5–51.3 tok/s | 66.1–72.2 tok/s at C4 | 1.484 / 5.938 / 35.391 s |
-| GLM-5.3-Flash NVFP4/FP8, 4 Sparks | 55.0–62.8 tok/s | 102.0–115.1 tok/s at C4 | 1.283 / 5.287 / 24.600 s |
-| GLM-5.3-Flash NVFP4/FP8, 2 Sparks | 31.7–36.5 tok/s | 55.2–58.2 tok/s at C4 | 2.084 / 8.429 / 36.937 s |
-| Qwen3.8-Flash-Next-FP8, 4 Sparks | 68.1–84.6 tok/s by class | 142.3–162.6 tok/s at C4 | 1.038 / 3.945 / 16.258 s |
-| Qwen3.8-Flash-Next-FP8, 2 Sparks | 45.6–55.7 tok/s by class | 85.5–98.0 tok/s at C4 | 1.299 / 5.108 / 21.168 s |
-| Qwen3.8-Flash-Next-NVFP4, 2 Sparks, mapped n-gram | 62.1–74.9 tok/s by class | 119.0–136.9 tok/s at C4 | 1.241 / 4.870 / 20.286 s |
-| Qwen3.8-Flash-Next-NVFP4, 1 Spark | 42.6–50.3 tok/s by class | 69.4–83.7 tok/s at C4 | — |
-| GLM-4.7-NVFP4, 4 Sparks | 33.5–37.7 tok/s by class | 62.8–68.2 tok/s at C4 | 2.386 / 14.912 / 157.414 s |
-| full GLM-5.3 int4/int8, 4 Sparks | 27.3–31.1 tok/s by class | 44.2–45.9 tok/s at C4 | 4.185 / 21.282 / 149.684 s |
-| DeepSeek-V4.1-Flash MXFP4/FP8, 4 Sparks | 49.64 aggregate tok/s | 108.49 aggregate tok/s at C6 | 1,383 prompt tok/s on its 2,950-token cold prompt |
-
-Except for DeepSeek, decode ranges are the five prompt classes and prefill is
-the cold HTTP service path. The single-request column uses the server's retired
-decode work, while the loaded column includes full request wall time. Every
-row runs its shipped template. Qwen's single-Spark service prefill has not
-been measured on the current path. DeepSeek uses the vLLM DGX Spark recipe's
-client and prompt set, with different aggregate and per-stream timing scopes, so compare
-its row within that workload. Dates, actual prompt lengths, quality gates and
-reproduction commands are in [the benchmark tables](docs/benchmarks.md).
-DSA prefill now sizes query tiles for the current context within its existing
-workspace; every DSA configuration above has been remeasured on that path.
+See [Benchmarks](docs/benchmarks.md) for current serving throughput, cold
+prefill latency, quality scores and long-context measurements. The document
+identifies the measured source revision, hardware, workload and timing scope,
+and links to the raw results and reproduction commands.
 
 ## Status
 

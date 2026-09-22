@@ -1,0 +1,5 @@
+model nvidia/Qwen3.8-Flash-Next-NVFP4
+warm 0: status 200 tokens 64
+== isolation: prompt 0 alone (256 tokens) vs beside 3 others (256 tokens): DIFFERENT
+   first difference at char 149: alone 'shifted the primary bottleneck from computational throughput' | batched 'exposed a critical bottleneck in traditional inference engin'
+transcript isolation failed

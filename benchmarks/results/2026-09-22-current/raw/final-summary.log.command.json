@@ -1,0 +1,10 @@
+{
+  "command": [
+    "/usr/bin/python3",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/summarize.py"
+  ],
+  "started_at": "2026-09-22T14:05:22.882817+00:00",
+  "cwd": "/home/stephen/workspace/dgpp",
+  "returncode": 0,
+  "finished_at": "2026-09-22T14:05:23.727854+00:00"
+}

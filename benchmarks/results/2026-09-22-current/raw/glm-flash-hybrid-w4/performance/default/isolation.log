@@ -1,0 +1,5 @@
+model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8
+warm 0: status 200 tokens 64
+== isolation: prompt 0 alone (256 tokens) vs beside 3 others (256 tokens): DIFFERENT
+   first difference at char 495: alone 'poor sharing\n3. Paged KV cache mechanics: blocks, block size' | batched 'inflexible scheduling\n3. Paged KV cache mechanics: blocks, b'
+transcript isolation failed

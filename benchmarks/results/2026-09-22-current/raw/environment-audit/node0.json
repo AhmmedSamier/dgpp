@@ -1,0 +1,530 @@
+{
+  "captured_at": "2026-09-22T06:04:03.117923+00:00",
+  "hostname": "edgexpert-409e",
+  "kernel": {
+    "system": "Linux",
+    "node": "edgexpert-409e",
+    "release": "6.17.0-1026-nvidia",
+    "version": "#26-Ubuntu SMP PREEMPT_DYNAMIC Thu Jun 25 00:57:17 UTC 2026",
+    "machine": "aarch64",
+    "processor": "aarch64"
+  },
+  "os_release": "PRETTY_NAME=\"Ubuntu 24.04.4 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.4 LTS (Noble Numbat)\"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo",
+  "dgx_release": "DGX_NAME=\"DGX Spark\"\nDGX_PRETTY_NAME=\"NVIDIA DGX Spark\"\nDGX_SWBUILD_DATE=\"2025-09-10-13-50-03\"\nDGX_SWBUILD_VERSION=\"7.2.3\"\nDGX_COMMIT_ID=\"833b4a7\"\nDGX_PLATFORM=\"MS-C931\"\n\nDGX_OTA_VERSION=\"7.5.0\"\nDGX_OTA_DATE=\"Fri Apr  3 22:19:52 UTC 2026\"",
+  "kernel_command_line": "BOOT_IMAGE=/boot/vmlinuz-6.17.0-1026-nvidia root=<node-root> ro init_on_alloc=0 iommu.passthrough=0 console=tty0 plymouth.ignore-serial-consoles plymouth.use-simpledrm earlycon=uart,mmio32,0x16A00000 console=tty0 console=ttyS0,921600 crashkernel=1G-:0M quiet splash initcall_blacklist=tegra234_cbb_init pci=pcie_bus_safe vt.handoff=7",
+  "meminfo": "MemTotal:       127535252 kB\nMemFree:        22594572 kB\nMemAvailable:   31755800 kB\nBuffers:          102148 kB\nCached:         12902036 kB\nSwapCached:        50488 kB\nActive:          7935588 kB\nInactive:        5539296 kB\nActive(anon):    3558528 kB\nInactive(anon):   111232 kB\nActive(file):    4377060 kB\nInactive(file):  5428064 kB\nUnevictable:     1084108 kB\nMlocked:         1084108 kB\nSwapTotal:      16777212 kB\nSwapFree:       16565416 kB\nZswap:                 0 kB\nZswapped:              0 kB\nDirty:               640 kB\nWriteback:             0 kB\nAnonPages:       1541312 kB\nMapped:          6552156 kB\nShmem:           2735936 kB\nKReclaimable:     497256 kB\nSlab:            1530464 kB\nSReclaimable:     497256 kB\nSUnreclaim:      1033208 kB\nKernelStack:       11408 kB\nShadowCallStack:    2912 kB\nPageTables:       108808 kB\nSecPageTables:    186456 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:    80544836 kB\nCommitted_AS:    6909196 kB\nVmallocTotal:   135288315904 kB\nVmallocUsed:      614476 kB\nVmallocChunk:          0 kB\nPercpu:            21680 kB\nHardwareCorrupted:     0 kB\nAnonHugePages:         0 kB\nShmemHugePages:        0 kB\nShmemPmdMapped:        0 kB\nFileHugePages:    116736 kB\nFilePmdMapped:     34816 kB\nCmaTotal:         131072 kB\nCmaFree:           69320 kB\nBalloon:               0 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\nHugetlb:               0 kB",
+  "memory_pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=551249617\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=551198565",
+  "swap": "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n/swap.img                               file\t\t16777212\t211796\t\t-2",
+  "vmstat": "nr_free_pages 5648643\nnr_free_pages_blocks 5525504\nnr_zone_inactive_anon 27808\nnr_zone_active_anon 889632\nnr_zone_inactive_file 1357016\nnr_zone_active_file 1094265\nnr_zone_unevictable 271027\nnr_zone_write_pending 152\nnr_mlock 271027\nnr_zspages 0\nnr_free_cma 17330\nnuma_hit 2145421512\nnuma_miss 0\nnuma_foreign 0\nnuma_interleave 3549\nnuma_local 2145421513\nnuma_other 0\nnr_inactive_anon 27808\nnr_active_anon 889632\nnr_inactive_file 1357016\nnr_active_file 1094265\nnr_unevictable 271027\nnr_slab_reclaimable 124314\nnr_slab_unreclaimable 258302\nnr_isolated_anon 0\nnr_isolated_file 0\nworkingset_nodes 265881\nworkingset_refault_anon 202105\nworkingset_refault_file 7624058\nworkingset_activate_anon 134787\nworkingset_activate_file 3235256\nworkingset_restore_anon 20939\nworkingset_restore_file 745180\nworkingset_nodereclaim 436236\nnr_anon_pages 385328\nnr_mapped 1638039\nnr_file_pages 3263668\nnr_dirty 160\nnr_writeback 0\nnr_shmem 683984\nnr_shmem_hugepages 0\nnr_shmem_pmdmapped 0\nnr_file_hugepages 57\nnr_file_pmdmapped 17\nnr_anon_transparent_hugepages 0\nnr_vmscan_write 521651\nnr_vmscan_immediate_reclaim 0\nnr_dirtied 74724674\nnr_written 86174798\nnr_throttled_written 0\nnr_kernel_misc_reclaimable 0\nnr_foll_pin_acquired 2006008144\nnr_foll_pin_released 2005324432\nnr_kernel_stack 11408\nnr_shadow_call_stack 2912\nnr_page_table_pages 27202\nnr_sec_page_table_pages 46614\nnr_iommu_pages 46614\nnr_swapcached 12622\npgpromote_success 0\npgpromote_candidate 0\npgdemote_kswapd 0\npgdemote_direct 0\npgdemote_khugepaged 0\npgdemote_proactive 0\nnr_hugetlb 0\nnr_balloon_pages 0\nnr_dirty_threshold 1579812\nnr_dirty_background_threshold 788941\nnr_memmap_pages 0\nnr_memmap_boot_pages 523776\npgpgin 7383453464\npgpgout 317154881\npswpin 270009\npswpout 501232\npgalloc_dma 1174139\npgalloc_dma32 0\npgalloc_normal 5549221795\npgalloc_movable 0\npgalloc_device 0\nallocstall_dma 0\nallocstall_dma32 0\nallocstall_normal 22132\nallocstall_movable 31330\nallocstall_device 0\npgskip_dma 0\npgskip_dma32 0\npgskip_normal 96\npgskip_movable 0\npgskip_device 0\npgfree 5608102048\npgactivate 2229291\npgdeactivate 101548\npglazyfree 0\npgfault 2072362919\npgmajfault 527946\npglazyfreed 0\npgrefill 28113625\npgreuse 20058418\npgsteal_kswapd 32579712\npgsteal_direct 8108033\npgsteal_khugepaged 2208\npgsteal_proactive 0\npgscan_kswapd 33753881\npgscan_direct 9704508\npgscan_khugepaged 2240\npgscan_proactive 0\npgscan_direct_throttle 0\npgscan_anon 2894651\npgscan_file 40565978\npgsteal_anon 527846\npgsteal_file 40162107\nzone_reclaim_success 0\nzone_reclaim_failed 0\npginodesteal 1\nslabs_scanned 3212619\nkswapd_inodesteal 51773\nkswapd_low_wmark_hit_quickly 2412\nkswapd_high_wmark_hit_quickly 54\npageoutrun 2883\npgrotated 621435\ndrop_pagecache 0\ndrop_slab 0\noom_kill 0\nnuma_pte_updates 0\nnuma_huge_pte_updates 0\nnuma_hint_faults 0\nnuma_hint_faults_local 0\nnuma_pages_migrated 0\npgmigrate_success 49239576\npgmigrate_fail 205718387\nthp_migration_success 0\nthp_migration_fail 0\nthp_migration_split 0\ncompact_migrate_scanned 6874770441\ncompact_free_scanned 832068633\ncompact_isolated 306083167\ncompact_stall 125902\ncompact_fail 99063\ncompact_success 26839\ncompact_daemon_wake 5982\ncompact_daemon_migrate_scanned 4026442356\ncompact_daemon_free_scanned 470528565\nhtlb_buddy_alloc_success 0\nhtlb_buddy_alloc_fail 0\ncma_alloc_success 32\ncma_alloc_fail 0\nunevictable_pgs_culled 309906732\nunevictable_pgs_scanned 0\nunevictable_pgs_rescued 309603046\nunevictable_pgs_mlocked 325302916\nunevictable_pgs_munlocked 308891559\nunevictable_pgs_cleared 0\nunevictable_pgs_stranded 16140330\nthp_fault_alloc 379022\nthp_fault_fallback 27361\nthp_fault_fallback_charge 0\nthp_collapse_alloc 9\nthp_collapse_alloc_failed 10\nthp_file_alloc 0\nthp_file_fallback 0\nthp_file_fallback_charge 0\nthp_file_mapped 813446\nthp_split_page 0\nthp_split_page_failed 0\nthp_deferred_split_page 186\nthp_underused_split_page 0\nthp_split_pmd 765931\nthp_scan_exceed_none_pte 1\nthp_scan_exceed_swap_pte 0\nthp_scan_exceed_share_pte 0\nthp_zero_page_alloc 3\nthp_zero_page_alloc_failed 0\nthp_swpout 0\nthp_swpout_fallback 0\nballoon_inflate 0\nballoon_deflate 0\nballoon_migrate 0\nswap_ra 155241\nswap_ra_hit 143751\nswpin_zero 6426\nswpout_zero 20419\nksm_swpin_copy 0\ncow_ksm 0\nzswpin 0\nzswpout 0\nzswpwb 0\nnr_unstable 0",
+  "uptime": "210625.14 3927256.55",
+  "dmi": {
+    "bios_vendor": "American Megatrends International, LLC.",
+    "bios_version": "5.36_1.5.0",
+    "bios_date": "01/30/2026",
+    "board_vendor": "MSI",
+    "board_name": "EdgeXpert (MS-C931)",
+    "board_version": "5.36_0ACUM024",
+    "product_name": "MS-C931",
+    "product_version": "5.36_0ACUM024"
+  },
+  "cpu_governors": {
+    "/sys/devices/system/cpu/cpufreq/policy11/scaling_governor": "performance",
+    "/sys/devices/system/cpu/cpufreq/policy8/scaling_governor": "performance",
+    "/sys/devices/system/cpu/cpufreq/policy6/scaling_governor": "performance",
+    "/sys/devices/system/cpu/cpufreq/policy18/scaling_governor": "performance",
+    "/sys/devices/system/cpu/cpufreq/policy4/scaling_governor": "performance",
+    "/sys/devices/system/cpu/cpufreq/policy16/scaling_governor": "performance",
+    "/sys/devices/system/cpu/cpufreq/policy2/scaling_governor": "performance",
+    "/sys/devices/system/cpu/cpufreq/policy14/scaling_governor": "performance",
+    "/sys/devices/system/cpu/cpufreq/policy0/scaling_governor": "performance",
+    "/sys/devices/system/cpu/cpufreq/policy12/scaling_governor": "performance",
+    "/sys/devices/system/cpu/cpufreq/policy9/scaling_governor": "performance",
+    "/sys/devices/system/cpu/cpufreq/policy10/scaling_governor": "performance",
+    "/sys/devices/system/cpu/cpufreq/policy7/scaling_governor": "performance",
+    "/sys/devices/system/cpu/cpufreq/policy19/scaling_governor": "performance",
+    "/sys/devices/system/cpu/cpufreq/policy5/scaling_governor": "performance",
+    "/sys/devices/system/cpu/cpufreq/policy17/scaling_governor": "performance",
+    "/sys/devices/system/cpu/cpufreq/policy3/scaling_governor": "performance",
+    "/sys/devices/system/cpu/cpufreq/policy15/scaling_governor": "performance",
+    "/sys/devices/system/cpu/cpufreq/policy1/scaling_governor": "performance",
+    "/sys/devices/system/cpu/cpufreq/policy13/scaling_governor": "performance"
+  },
+  "transparent_hugepages": "always [madvise] never",
+  "system_settings": {
+    "returncode": 0,
+    "stdout": "vm.swappiness = 60\nvm.overcommit_memory = 0\nvm.overcommit_ratio = 50\nvm.panic_on_oom = 0\nvm.max_map_count = 1048576\nvm.min_free_kbytes = 45155\nkernel.numa_balancing = 0\nkernel.panic = 0\nkernel.panic_on_oops = 0\nkernel.softlockup_panic = 0",
+    "stderr": ""
+  },
+  "gpu": {
+    "returncode": 0,
+    "stdout": "NVIDIA GB10, 580.173.02, 9A.0B.1E.00.00, P0, 77, [N/A], 62.78 W, 3003 MHz, 2515 MHz, Not Active, Not Active",
+    "stderr": ""
+  },
+  "gpu_processes": {
+    "returncode": 0,
+    "stdout": "2475428, /home/stephen/workspace/dgpp/build-release/dgpp-serve",
+    "stderr": ""
+  },
+  "cuda_compiler": {
+    "returncode": 0,
+    "stdout": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Wed_Aug_20_01:57:39_PM_PDT_2025\nCuda compilation tools, release 13.0, V13.0.88\nBuild cuda_13.0.r13.0/compiler.36424714_0",
+    "stderr": ""
+  },
+  "cuda_link": "/usr/local/cuda-13.0",
+  "compiler": {
+    "returncode": 0,
+    "stdout": "g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0\nCopyright (C) 2023 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.",
+    "stderr": ""
+  },
+  "rdma": {
+    "returncode": 0,
+    "stdout": "hca_id:\trocep1s0f0\n\ttransport:\t\t\tInfiniBand (0)\n\tfw_ver:\t\t\t\t28.45.4028\n\tnode_guid:\t\t\tfc9d:0503:0013:409f\n\tsys_image_guid:\t\t\tfc9d:0503:0013:409f\n\tvendor_id:\t\t\t0x02c9\n\tvendor_part_id:\t\t\t4129\n\thw_ver:\t\t\t\t0x0\n\tboard_id:\t\t\tNVD0000000087\n\tphys_port_cnt:\t\t\t1\n\t\tport:\t1\n\t\t\tstate:\t\t\tPORT_ACTIVE (4)\n\t\t\tmax_mtu:\t\t4096 (5)\n\t\t\tactive_mtu:\t\t4096 (5)\n\t\t\tsm_lid:\t\t\t0\n\t\t\tport_lid:\t\t0\n\t\t\tport_lmc:\t\t0x00\n\t\t\tlink_layer:\t\tEthernet\n\nhca_id:\trocep1s0f1\n\ttransport:\t\t\tInfiniBand (0)\n\tfw_ver:\t\t\t\t28.45.4028\n\tnode_guid:\t\t\tfc9d:0503:0013:40a0\n\tsys_image_guid:\t\t\tfc9d:0503:0013:409f\n\tvendor_id:\t\t\t0x02c9\n\tvendor_part_id:\t\t\t4129\n\thw_ver:\t\t\t\t0x0\n\tboard_id:\t\t\tNVD0000000087\n\tphys_port_cnt:\t\t\t1\n\t\tport:\t1\n\t\t\tstate:\t\t\tPORT_DOWN (1)\n\t\t\tmax_mtu:\t\t4096 (5)\n\t\t\tactive_mtu:\t\t1024 (3)\n\t\t\tsm_lid:\t\t\t0\n\t\t\tport_lid:\t\t0\n\t\t\tport_lmc:\t\t0x00\n\t\t\tlink_layer:\t\tEthernet\n\nhca_id:\troceP2p1s0f0\n\ttransport:\t\t\tInfiniBand (0)\n\tfw_ver:\t\t\t\t28.45.4028\n\tnode_guid:\t\t\tfc9d:0503:0013:40a3\n\tsys_image_guid:\t\t\tfc9d:0503:0013:409f\n\tvendor_id:\t\t\t0x02c9\n\tvendor_part_id:\t\t\t4129\n\thw_ver:\t\t\t\t0x0\n\tboard_id:\t\t\tNVD0000000087\n\tphys_port_cnt:\t\t\t1\n\t\tport:\t1\n\t\t\tstate:\t\t\tPORT_ACTIVE (4)\n\t\t\tmax_mtu:\t\t4096 (5)\n\t\t\tactive_mtu:\t\t4096 (5)\n\t\t\tsm_lid:\t\t\t0\n\t\t\tport_lid:\t\t0\n\t\t\tport_lmc:\t\t0x00\n\t\t\tlink_layer:\t\tEthernet\n\nhca_id:\troceP2p1s0f1\n\ttransport:\t\t\tInfiniBand (0)\n\tfw_ver:\t\t\t\t28.45.4028\n\tnode_guid:\t\t\tfc9d:0503:0013:40a4\n\tsys_image_guid:\t\t\tfc9d:0503:0013:409f\n\tvendor_id:\t\t\t0x02c9\n\tvendor_part_id:\t\t\t4129\n\thw_ver:\t\t\t\t0x0\n\tboard_id:\t\t\tNVD0000000087\n\tphys_port_cnt:\t\t\t1\n\t\tport:\t1\n\t\t\tstate:\t\t\tPORT_DOWN (1)\n\t\t\tmax_mtu:\t\t4096 (5)\n\t\t\tactive_mtu:\t\t1024 (3)\n\t\t\tsm_lid:\t\t\t0\n\t\t\tport_lid:\t\t0\n\t\t\tport_lmc:\t\t0x00\n\t\t\tlink_layer:\t\tEthernet",
+    "stderr": ""
+  },
+  "interfaces": {
+    "returncode": 0,
+    "stdout": "[{\"ifindex\":1,\"ifname\":\"lo\",\"flags\":[\"LOOPBACK\",\"UP\",\"LOWER_UP\"],\"mtu\":65536,\"qdisc\":\"noqueue\",\"operstate\":\"UNKNOWN\",\"group\":\"default\",\"txqlen\":1000,\"link_type\":\"loopback\",\"address\":\"00:00:00:00:00:00\",\"broadcast\":\"00:00:00:00:00:00\",\"addr_info\":[{\"family\":\"inet\",\"local\":\"127.0.0.1\",\"prefixlen\":8,\"scope\":\"host\",\"label\":\"lo\",\"valid_life_time\":4294967295,\"preferred_life_time\":4294967295},{\"family\":\"inet6\",\"local\":\"::1\",\"prefixlen\":128,\"scope\":\"host\",\"noprefixroute\":true,\"valid_life_time\":4294967295,\"preferred_life_time\":4294967295}]},{\"ifindex\":2,\"ifname\":\"enP7s7\",\"flags\":[\"BROADCAST\",\"MULTICAST\",\"UP\",\"LOWER_UP\"],\"mtu\":1500,\"qdisc\":\"mq\",\"operstate\":\"UP\",\"group\":\"default\",\"txqlen\":1000,\"link_type\":\"ether\",\"address\":\"fc:9d:05:13:40:9e\",\"broadcast\":\"ff:ff:ff:ff:ff:ff\",\"altnames\":[\"enP7p1s0\"],\"addr_info\":[{\"family\":\"inet\",\"local\":\"192.168.50.221\",\"prefixlen\":24,\"broadcast\":\"192.168.50.255\",\"scope\":\"global\",\"dynamic\":true,\"noprefixroute\":true,\"label\":\"enP7s7\",\"valid_life_time\":75023,\"preferred_life_time\":75023},{\"family\":\"inet6\",\"local\":\"fe80::b2e:8952:33ea:eaa3\",\"prefixlen\":64,\"scope\":\"link\",\"noprefixroute\":true,\"valid_life_time\":4294967295,\"preferred_life_time\":4294967295}]},{\"ifindex\":3,\"ifname\":\"enp1s0f0np0\",\"flags\":[\"BROADCAST\",\"MULTICAST\",\"UP\",\"LOWER_UP\"],\"mtu\":9000,\"qdisc\":\"mq\",\"operstate\":\"UP\",\"group\":\"default\",\"txqlen\":1000,\"link_type\":\"ether\",\"address\":\"fc:9d:05:13:40:9f\",\"broadcast\":\"ff:ff:ff:ff:ff:ff\",\"addr_info\":[{\"family\":\"inet\",\"local\":\"192.168.88.11\",\"prefixlen\":24,\"broadcast\":\"192.168.88.255\",\"scope\":\"global\",\"noprefixroute\":true,\"label\":\"enp1s0f0np0\",\"valid_life_time\":4294967295,\"preferred_life_time\":4294967295},{\"family\":\"inet6\",\"local\":\"fe80::fe9d:5ff:fe13:409f\",\"prefixlen\":64,\"scope\":\"link\",\"valid_life_time\":4294967295,\"preferred_life_time\":4294967295}]},{\"ifindex\":4,\"ifname\":\"enp1s0f1np1\",\"flags\":[\"NO-CARRIER\",\"BROADCAST\",\"MULTICAST\",\"UP\"],\"mtu\":1500,\"qdisc\":\"mq\",\"operstate\":\"DOWN\",\"group\":\"default\",\"txqlen\":1000,\"link_type\":\"ether\",\"address\":\"fc:9d:05:13:40:a0\",\"broadcast\":\"ff:ff:ff:ff:ff:ff\",\"addr_info\":[]},{\"ifindex\":5,\"ifname\":\"enP2p1s0f0np0\",\"flags\":[\"BROADCAST\",\"MULTICAST\",\"UP\",\"LOWER_UP\"],\"mtu\":9000,\"qdisc\":\"mq\",\"operstate\":\"UP\",\"group\":\"default\",\"txqlen\":1000,\"link_type\":\"ether\",\"address\":\"fc:9d:05:13:40:a3\",\"broadcast\":\"ff:ff:ff:ff:ff:ff\",\"addr_info\":[{\"family\":\"inet\",\"local\":\"192.168.89.11\",\"prefixlen\":24,\"broadcast\":\"192.168.89.255\",\"scope\":\"global\",\"noprefixroute\":true,\"label\":\"enP2p1s0f0np0\",\"valid_life_time\":4294967295,\"preferred_life_time\":4294967295},{\"family\":\"inet6\",\"local\":\"fe80::fe9d:5ff:fe13:40a3\",\"prefixlen\":64,\"scope\":\"link\",\"valid_life_time\":4294967295,\"preferred_life_time\":4294967295}]},{\"ifindex\":6,\"ifname\":\"enP2p1s0f1np1\",\"flags\":[\"NO-CARRIER\",\"BROADCAST\",\"MULTICAST\",\"UP\"],\"mtu\":1500,\"qdisc\":\"mq\",\"operstate\":\"DOWN\",\"group\":\"default\",\"txqlen\":1000,\"link_type\":\"ether\",\"address\":\"fc:9d:05:13:40:a4\",\"broadcast\":\"ff:ff:ff:ff:ff:ff\",\"addr_info\":[]},{\"ifindex\":7,\"ifname\":\"wlP9s9\",\"flags\":[\"NO-CARRIER\",\"BROADCAST\",\"MULTICAST\",\"UP\"],\"mtu\":1500,\"qdisc\":\"noqueue\",\"operstate\":\"DOWN\",\"group\":\"default\",\"txqlen\":1000,\"link_type\":\"ether\",\"address\":\"9c:c7:d3:77:3f:be\",\"broadcast\":\"ff:ff:ff:ff:ff:ff\",\"altnames\":[\"wlP9p1s0\"],\"addr_info\":[]},{\"ifindex\":8,\"ifname\":\"docker0\",\"flags\":[\"NO-CARRIER\",\"BROADCAST\",\"MULTICAST\",\"UP\"],\"mtu\":1500,\"qdisc\":\"noqueue\",\"operstate\":\"DOWN\",\"group\":\"default\",\"link_type\":\"ether\",\"address\":\"56:16:1f:b3:e5:8d\",\"broadcast\":\"ff:ff:ff:ff:ff:ff\",\"addr_info\":[{\"family\":\"inet\",\"local\":\"172.17.0.1\",\"prefixlen\":16,\"broadcast\":\"172.17.255.255\",\"scope\":\"global\",\"label\":\"docker0\",\"valid_life_time\":4294967295,\"preferred_life_time\":4294967295}]}]",
+    "stderr": ""
+  },
+  "routes": {
+    "returncode": 0,
+    "stdout": "[{\"dst\":\"default\",\"gateway\":\"192.168.50.1\",\"dev\":\"enP7s7\",\"protocol\":\"dhcp\",\"prefsrc\":\"192.168.50.221\",\"metric\":102,\"flags\":[]},{\"dst\":\"172.17.0.0/16\",\"dev\":\"docker0\",\"protocol\":\"kernel\",\"scope\":\"link\",\"prefsrc\":\"172.17.0.1\",\"flags\":[\"linkdown\"]},{\"dst\":\"192.168.50.0/24\",\"dev\":\"enP7s7\",\"protocol\":\"kernel\",\"scope\":\"link\",\"prefsrc\":\"192.168.50.221\",\"metric\":102,\"flags\":[]},{\"dst\":\"192.168.88.0/24\",\"dev\":\"enp1s0f0np0\",\"protocol\":\"kernel\",\"scope\":\"link\",\"prefsrc\":\"192.168.88.11\",\"metric\":101,\"flags\":[]},{\"dst\":\"192.168.89.0/24\",\"dev\":\"enP2p1s0f0np0\",\"protocol\":\"kernel\",\"scope\":\"link\",\"prefsrc\":\"192.168.89.11\",\"metric\":100,\"flags\":[]}]",
+    "stderr": ""
+  },
+  "limits": {
+    "returncode": 0,
+    "stdout": "real-time non-blocking time  (microseconds, -R) unlimited\ncore file size              (blocks, -c) 0\ndata seg size               (kbytes, -d) unlimited\nscheduling priority                 (-e) 0\nfile size                   (blocks, -f) unlimited\npending signals                     (-i) 511827\nmax locked memory           (kbytes, -l) unlimited\nmax memory size             (kbytes, -m) unlimited\nopen files                          (-n) 500000\npipe size                (512 bytes, -p) 8\nPOSIX message queues         (bytes, -q) 819200\nreal-time priority                  (-r) 0\nstack size                  (kbytes, -s) 8192\ncpu time                   (seconds, -t) unlimited\nmax user processes                  (-u) 511827\nvirtual memory              (kbytes, -v) unlimited\nfile locks                          (-x) unlimited",
+    "stderr": ""
+  },
+  "disk": {
+    "returncode": 0,
+    "stdout": "Filesystem         1B-blocks          Used    Available Use% Mounted on\n/dev/nvme0n1p2 3936289308672 3611515179008 124744994816  97% /\n/dev/nvme0n1p2 3936289308672 3611515179008 124744994816  97% /",
+    "stderr": ""
+  },
+  "packages": [
+    "cuda-cccl-13-0\t13.0.85-1\tarm64\tinstalled",
+    "cuda-command-line-tools-13-0\t13.0.3-1\tarm64\tinstalled",
+    "cuda-compiler-13-0\t13.0.3-1\tarm64\tinstalled",
+    "cuda-compute-repo-lowpri\t25.10-2\tarm64\tinstalled",
+    "cuda-crt-13-0\t13.0.88-1\tarm64\tinstalled",
+    "cuda-cudart-13-0\t13.0.96-1\tarm64\tinstalled",
+    "cuda-cudart-dev-13-0\t13.0.96-1\tarm64\tinstalled",
+    "cuda-culibos-dev-13-0\t13.0.85-1\tarm64\tinstalled",
+    "cuda-cuobjdump-13-0\t13.0.85-1\tarm64\tinstalled",
+    "cuda-cupti-13-0\t13.0.85-1\tarm64\tinstalled",
+    "cuda-cupti-dev-13-0\t13.0.85-1\tarm64\tinstalled",
+    "cuda-cuxxfilt-13-0\t13.0.85-1\tarm64\tinstalled",
+    "cuda-documentation-13-0\t13.0.85-1\tarm64\tinstalled",
+    "cuda-driver-dev-13-0\t13.0.96-1\tarm64\tinstalled",
+    "cuda-gdb-13-0\t13.0.85-1\tarm64\tinstalled",
+    "cuda-libraries-13-0\t13.0.3-1\tarm64\tinstalled",
+    "cuda-libraries-dev-13-0\t13.0.3-1\tarm64\tinstalled",
+    "cuda-nsight-compute-13-0\t13.0.3-1\tarm64\tinstalled",
+    "cuda-nsight-systems-13-0\t13.0.3-1\tarm64\tinstalled",
+    "cuda-nvcc-13-0\t13.0.88-1\tarm64\tinstalled",
+    "cuda-nvdisasm-13-0\t13.0.85-1\tarm64\tinstalled",
+    "cuda-nvml-dev-13-0\t13.0.87-1\tarm64\tinstalled",
+    "cuda-nvprune-13-0\t13.0.85-1\tarm64\tinstalled",
+    "cuda-nvrtc-13-0\t13.0.88-1\tarm64\tinstalled",
+    "cuda-nvrtc-dev-13-0\t13.0.88-1\tarm64\tinstalled",
+    "cuda-nvtx-13-0\t13.0.85-1\tarm64\tinstalled",
+    "cuda-profiler-api-13-0\t13.0.85-1\tarm64\tinstalled",
+    "cuda-sanitizer-13-0\t13.0.85-1\tarm64\tinstalled",
+    "cuda-toolkit-13-0\t13.0.3-1\tarm64\tinstalled",
+    "cuda-toolkit-13-0-config-common\t13.0.96-1\tall\tinstalled",
+    "cuda-toolkit-13-config-common\t13.3.29-1\tall\tinstalled",
+    "cuda-toolkit-config-common\t13.3.29-1\tall\tinstalled",
+    "cuda-tools-13-0\t13.0.3-1\tarm64\tinstalled",
+    "cuda-visual-tools-13-0\t13.0.3-1\tarm64\tinstalled",
+    "dgx-dashboard\t0.29.1\tarm64\tinstalled",
+    "dgx-oobe\t0.25.1\tarm64\tinstalled",
+    "dgx-oobe-desktop\t0.5.0-116\tarm64\tinstalled",
+    "dgx-release\t7.5.0\tall\tinstalled",
+    "dgx-repo\t25.10-2\tarm64\tinstalled",
+    "dgx-spark-mlnx-hotplug\t26.01-1\tall\tinstalled",
+    "dgx-spark-ota-update-meta\t26.04.1\tall\tinstalled",
+    "dgxstation-desktop\t25.11-1\tall\tinstalled",
+    "dgxstation-grub\t25.02-1\tall\tinstalled",
+    "fwupd\t2.0.20-1ubuntu2~24.04.2\tarm64\tinstalled",
+    "fwupd-signed\t1.52+1.4-1\tarm64\tinstalled",
+    "ibverbs-providers\t50.0-2ubuntu0.2\tarm64\tinstalled",
+    "ibverbs-utils\t50.0-2ubuntu0.2\tarm64\tinstalled",
+    "libc6\t2.39-0ubuntu8.7\tarm64\tinstalled",
+    "libc6-dbg\t2.39-0ubuntu8.7\tarm64\tinstalled",
+    "libc6-dev\t2.39-0ubuntu8.7\tarm64\tinstalled",
+    "libcublas-13-0\t13.1.1.3-1\tarm64\tinstalled",
+    "libcublas-dev-13-0\t13.1.1.3-1\tarm64\tinstalled",
+    "libfwupd2\t1.9.34-0ubuntu1~24.04.1\tarm64\tinstalled",
+    "libfwupd3\t2.0.20-1ubuntu2~24.04.2\tarm64\tinstalled",
+    "libgcc-13-dev\t13.3.0-6ubuntu2~24.04.1\tarm64\tinstalled",
+    "libgcc-s1\t14.2.0-4ubuntu2~24.04.1\tarm64\tinstalled",
+    "libibverbs-dev\t50.0-2ubuntu0.2\tarm64\tinstalled",
+    "libibverbs1\t50.0-2ubuntu0.2\tarm64\tinstalled",
+    "libnss-systemd\t255.4-1ubuntu8.16\tarm64\tinstalled",
+    "libnvidia-cfg1-580\t580.173.02-0ubuntu0.24.04.1\tarm64\tinstalled",
+    "libnvidia-common-580\t580.173.02-0ubuntu0.24.04.1\tall\tinstalled",
+    "libnvidia-compute-580\t580.173.02-0ubuntu0.24.04.1\tarm64\tinstalled",
+    "libnvidia-container-tools\t1.19.1-1\tarm64\tinstalled",
+    "libnvidia-container1\t1.19.1-1\tarm64\tinstalled",
+    "libnvidia-decode-580\t580.173.02-0ubuntu0.24.04.1\tarm64\tinstalled",
+    "libnvidia-egl-wayland1\t1:1.1.21-1ubuntu1\tarm64\tinstalled",
+    "libnvidia-encode-580\t580.173.02-0ubuntu0.24.04.1\tarm64\tinstalled",
+    "libnvidia-extra-580\t580.173.02-0ubuntu0.24.04.1\tarm64\tinstalled",
+    "libnvidia-fbc1-580\t580.173.02-0ubuntu0.24.04.1\tarm64\tinstalled",
+    "libnvidia-gl-580\t580.173.02-0ubuntu0.24.04.1\tarm64\tinstalled",
+    "libpam-systemd\t255.4-1ubuntu8.16\tarm64\tinstalled",
+    "librdmacm-dev\t50.0-2ubuntu0.2\tarm64\tinstalled",
+    "librdmacm1t64\t50.0-2ubuntu0.2\tarm64\tinstalled",
+    "libstdc++-13-dev\t13.3.0-6ubuntu2~24.04.1\tarm64\tinstalled",
+    "libstdc++6\t14.2.0-4ubuntu2~24.04.1\tarm64\tinstalled",
+    "libsystemd-shared\t255.4-1ubuntu8.16\tarm64\tinstalled",
+    "libsystemd0\t255.4-1ubuntu8.16\tarm64\tinstalled",
+    "libvncclient1\t0.9.14+dfsg-1ubuntu0.2\tarm64\tinstalled",
+    "linux-firmware\t20240318.git3b128b60-0ubuntu2.27\tarm64\tinstalled",
+    "linux-headers-6.11.0-1014-nvidia\t6.11.0-1014.14\tarm64\tinstalled",
+    "linux-headers-6.17.0-1014-nvidia\t6.17.0-1014.14\tarm64\tinstalled",
+    "linux-headers-6.17.0-1026-nvidia\t6.17.0-1026.26\tarm64\tinstalled",
+    "linux-headers-nvidia-hwe-24.04\t6.17.0-1026.26\tarm64\tinstalled",
+    "linux-image-6.11.0-1014-nvidia\t6.11.0-1014.14\tarm64\tinstalled",
+    "linux-image-6.17.0-1014-nvidia\t6.17.0-1014.14\tarm64\tinstalled",
+    "linux-image-6.17.0-1026-nvidia\t6.17.0-1026.26\tarm64\tinstalled",
+    "linux-image-nvidia-hwe-24.04\t6.17.0-1026.26\tarm64\tinstalled",
+    "linux-modules-6.11.0-1014-nvidia\t6.11.0-1014.14\tarm64\tinstalled",
+    "linux-modules-6.17.0-1014-nvidia\t6.17.0-1014.14\tarm64\tinstalled",
+    "linux-modules-6.17.0-1026-nvidia\t6.17.0-1026.26\tarm64\tinstalled",
+    "linux-modules-extra-6.11.0-1014-nvidia\t6.11.0-1014.14\tarm64\tinstalled",
+    "linux-modules-nvidia-580-open-6.17.0-1026-nvidia\t6.17.0-1026.26+3\tarm64\tinstalled",
+    "linux-modules-nvidia-580-open-nvidia-hwe-24.04\t6.17.0-1026.26+3\tarm64\tinstalled",
+    "linux-modules-nvidia-fs-6.11.0-1014-nvidia\t6.11.0-1014.14\tarm64\tinstalled",
+    "linux-modules-nvidia-fs-6.17.0-1014-nvidia\t6.17.0-1014.14\tarm64\tinstalled",
+    "linux-modules-nvidia-fs-6.17.0-1026-nvidia\t6.17.0-1026.26\tarm64\tinstalled",
+    "linux-modules-nvidia-fs-nvidia-hwe-24.04\t6.17.0-1026.26\tarm64\tinstalled",
+    "linux-nvidia-6.11-headers-6.11.0-1014\t6.11.0-1014.14\tall\tinstalled",
+    "linux-nvidia-6.11-tools-6.11.0-1014\t6.11.0-1014.14\tarm64\tinstalled",
+    "linux-nvidia-6.17-headers-6.17.0-1014\t6.17.0-1014.14\tall\tinstalled",
+    "linux-nvidia-6.17-headers-6.17.0-1026\t6.17.0-1026.26\tall\tinstalled",
+    "linux-nvidia-6.17-tools-6.17.0-1014\t6.17.0-1014.14\tarm64\tinstalled",
+    "linux-nvidia-6.17-tools-6.17.0-1026\t6.17.0-1026.26\tarm64\tinstalled",
+    "linux-nvidia-hwe-24.04\t6.17.0-1026.26\tarm64\tinstalled",
+    "linux-tools-6.11.0-1014-nvidia\t6.11.0-1014.14\tarm64\tinstalled",
+    "linux-tools-6.17.0-1014-nvidia\t6.17.0-1014.14\tarm64\tinstalled",
+    "linux-tools-6.17.0-1026-nvidia\t6.17.0-1026.26\tarm64\tinstalled",
+    "linux-tools-nvidia-hwe-24.04\t6.17.0-1026.26\tarm64\tinstalled",
+    "nvidia-ai-workbench\t0.169.2~17-7778\tarm64\tinstalled",
+    "nvidia-compute-utils-580\t580.173.02-0ubuntu0.24.04.1\tarm64\tinstalled",
+    "nvidia-conf-xconfig\t26.02-1\tall\tinstalled",
+    "nvidia-console-settings\t25.07-1\tall\tinstalled",
+    "nvidia-container-toolkit\t1.19.1-1\tarm64\tinstalled",
+    "nvidia-container-toolkit-base\t1.19.1-1\tarm64\tinstalled",
+    "nvidia-cppc-cpufreq-options\t25.06-1\tall\tinstalled",
+    "nvidia-crashdump\t25.08-1\tall\tinstalled",
+    "nvidia-desktop-default-remove-gnome-software-deb\t25.10-1\tall\tinstalled",
+    "nvidia-desktop-default-snaps\t25.10-2\tarm64\tinstalled",
+    "nvidia-dgx-telemetry\t7.3\tarm64\tinstalled",
+    "nvidia-disable-aqc-nic\t25.06-1\tall\tinstalled",
+    "nvidia-disable-init-on-alloc\t24.10-1\tall\tinstalled",
+    "nvidia-disable-numa-balancing\t24.10-2\tall\tinstalled",
+    "nvidia-driver-580-open\t580.173.02-0ubuntu0.24.04.1\tarm64\tinstalled",
+    "nvidia-drm-options-modeset0\t25.07-1\tall\tinstalled",
+    "nvidia-earlycon\t25.06-1\tall\tinstalled",
+    "nvidia-enable-bt-profiles\t26.03-1\tall\tinstalled",
+    "nvidia-enable-power-meter-cap\t24.10-3\tall\tinstalled",
+    "nvidia-esm-hook-epilogue\t23.03-2\tall\tinstalled",
+    "nvidia-firmware-580-580.126.09\t580.126.09-0ubuntu0.24.04.2\tarm64\tinstalled",
+    "nvidia-firmware-580-580.173.02\t580.173.02-0ubuntu0.24.04.1\tarm64\tinstalled",
+    "nvidia-grub-params\t25.10-1\tall\tinstalled",
+    "nvidia-kernel-common-580\t580.173.02-0ubuntu0.24.04.1\tarm64\tinstalled",
+    "nvidia-kernel-defaults\t21.05-1\tall\tinstalled",
+    "nvidia-kernel-source-580-open\t580.173.02-0ubuntu0.24.04.1\tarm64\tinstalled",
+    "nvidia-logrotate\t21.11-1\tall\tinstalled",
+    "nvidia-lvfs-config\t25.09-1\tall\tinstalled",
+    "nvidia-mlnx-tools\t23.04\tall\tinstalled",
+    "nvidia-modprobe\t610.43.02-1ubuntu1\tarm64\tinstalled",
+    "nvidia-motd\t24.01-1\tall\tinstalled",
+    "nvidia-mstflint-loader\t23.03-1\tall\tinstalled",
+    "nvidia-no-systemd-suspend\t25.06-1\tall\tinstalled",
+    "nvidia-nvme-options\t26.02-1\tall\tinstalled",
+    "nvidia-oem-config-bmc\t25.04-1\tall\tinstalled",
+    "nvidia-oem-config-crypt-passwd\t25.04-1\tall\tinstalled",
+    "nvidia-oem-config-eula\t25.04-1\tall\tinstalled",
+    "nvidia-oem-config-grub-passwd\t25.04-1\tall\tinstalled",
+    "nvidia-oem-config-postact\t25.04-1\tall\tinstalled",
+    "nvidia-pci-realloc\t25.02-1\tall\tinstalled",
+    "nvidia-plymouth\t20.06-2\tall\tinstalled",
+    "nvidia-raid-config\t25.10-1\tall\tinstalled",
+    "nvidia-redfish-config\t25.03-1\tall\tinstalled",
+    "nvidia-relaxed-ordering-gpu\t25.07-2\tall\tinstalled",
+    "nvidia-relaxed-ordering-nvme\t25.07-2\tall\tinstalled",
+    "nvidia-repo-keys\t26.02-1\tall\tinstalled",
+    "nvidia-sbsa-gwdt-options\t25.06-1\tarm64\tinstalled",
+    "nvidia-settings\t610.43.02-1ubuntu1\tarm64\tinstalled",
+    "nvidia-spark-avahi-conf\t1.0-1\tarm64\tinstalled",
+    "nvidia-spark-baud-rate\t25.09-1\tall\tinstalled",
+    "nvidia-spark-default-remove-nvidia-fs-pkg\t25.09-2\tall\tinstalled",
+    "nvidia-spark-desktop-edge-ppa\t1.1-1\tarm64\tinstalled",
+    "nvidia-spark-fstab-config\t1.0.0-1\tarm64\tinstalled",
+    "nvidia-spark-grub-pci\t1.0-1\tarm64\tinstalled",
+    "nvidia-spark-initcall-bl\t1.0-1\tarm64\tinstalled",
+    "nvidia-spark-limits\t1.0-1\tall\tinstalled",
+    "nvidia-spark-mlnx-firmware-manager\t5.0.8-1\tarm64\tinstalled",
+    "nvidia-spark-ota-check\t1.0.16-1\tarm64\tinstalled",
+    "nvidia-spark-realtek-mod-options\t1.1-1\tarm64\tinstalled",
+    "nvidia-spark-repo\t1.1-1\tarm64\tinstalled",
+    "nvidia-spark-run-apt-upgrade\t25.10-2\tall\tinstalled",
+    "nvidia-spark-wifi-fw-ppa\t1.2-1\tarm64\tinstalled",
+    "nvidia-system-core\t2404.26.01-1\tall\tinstalled",
+    "nvidia-system-extra\t2404.26.01-1\tall\tinstalled",
+    "nvidia-system-station\t2404.26.01-1\tall\tinstalled",
+    "nvidia-system-station-apps\t2404.26.01-1\tall\tinstalled",
+    "nvidia-system-station-common\t2404.26.01-1\tall\tinstalled",
+    "nvidia-system-station-core\t2404.26.01-1\tall\tinstalled",
+    "nvidia-system-station-games\t2404.26.01-1\tall\tinstalled",
+    "nvidia-system-station-localization\t2404.26.01-1\tall\tinstalled",
+    "nvidia-system-station-utils\t2404.26.01-1\tarm64\tinstalled",
+    "nvidia-system-utils\t2404.25.09-2\tall\tinstalled",
+    "nvidia-update-manager\t20.06-1\tall\tinstalled",
+    "nvidia-utils-580\t580.173.02-0ubuntu0.24.04.1\tarm64\tinstalled",
+    "python3-systemd\t235-1build4\tarm64\tinstalled",
+    "rdma-core\t50.0-2ubuntu0.2\tarm64\tinstalled",
+    "rdmacm-utils\t50.0-2ubuntu0.2\tarm64\tinstalled",
+    "systemd\t255.4-1ubuntu8.16\tarm64\tinstalled",
+    "systemd-dev\t255.4-1ubuntu8.16\tall\tinstalled",
+    "systemd-hwe-hwdb\t255.1.7\tall\tinstalled",
+    "systemd-resolved\t255.4-1ubuntu8.16\tarm64\tinstalled",
+    "systemd-sysv\t255.4-1ubuntu8.16\tarm64\tinstalled",
+    "systemd-timesyncd\t255.4-1ubuntu8.16\tarm64\tinstalled",
+    "xserver-xorg-video-nvidia-580\t580.173.02-0ubuntu0.24.04.1\tarm64\tinstalled"
+  ],
+  "firmware": [
+    {
+      "Name": "ESL04TBTLCZ-27J4-TYN",
+      "Vendor": "Phison",
+      "Version": "ERFM12.0",
+      "VersionFormat": "plain",
+      "Plugin": "nvme",
+      "Flags": [
+        "internal",
+        "updatable",
+        "require-ac",
+        "needs-shutdown",
+        "usable-during-update",
+        "can-emulation-tag"
+      ]
+    },
+    {
+      "Name": "Embedded Controller",
+      "Vendor": "MSI",
+      "Version": "10500",
+      "VersionRaw": 10500,
+      "VersionFormat": "number",
+      "Plugin": "uefi_capsule",
+      "Flags": [
+        "internal",
+        "updatable",
+        "require-ac",
+        "supported",
+        "needs-reboot",
+        "usable-during-update",
+        "signed-payload"
+      ]
+    },
+    {
+      "Name": "KEK CA",
+      "Vendor": "Microsoft",
+      "Version": "2023",
+      "VersionRaw": 2023,
+      "VersionFormat": "number",
+      "Plugin": "uefi_kek",
+      "Flags": [
+        "internal",
+        "updatable",
+        "needs-reboot",
+        "usable-during-update",
+        "signed-payload",
+        "can-emulation-tag"
+      ]
+    },
+    {
+      "Name": "MSI SHIP PK",
+      "Vendor": "Unknown",
+      "Version": "2025",
+      "VersionRaw": 2025,
+      "VersionFormat": "number",
+      "Plugin": "uefi_pk",
+      "Flags": [
+        "internal"
+      ]
+    },
+    {
+      "Name": "MT2910 Family (ConnectX-7)",
+      "Vendor": "Mellanox",
+      "Plugin": "devlink",
+      "Flags": [
+        "can-emulation-tag"
+      ]
+    },
+    {
+      "Name": "MT2910 Family (ConnectX-7) (Composite)",
+      "Vendor": "Mellanox",
+      "Version": "28.45.4028",
+      "VersionFormat": "triplet",
+      "Plugin": "devlink",
+      "Flags": [
+        "updatable",
+        "dual-image",
+        "usable-during-update",
+        "signed-payload"
+      ]
+    },
+    {
+      "Name": "SBAT",
+      "Version": "1.5.4",
+      "VersionFormat": "triplet",
+      "Plugin": "uefi_sbat",
+      "Flags": [
+        "updatable",
+        "needs-reboot",
+        "signed-payload"
+      ]
+    },
+    {
+      "Name": "TPM",
+      "Vendor": "MSI",
+      "Version": "117572608",
+      "VersionRaw": 117572608,
+      "VersionFormat": "number",
+      "Plugin": "uefi_capsule",
+      "Flags": [
+        "internal",
+        "updatable",
+        "require-ac",
+        "supported",
+        "needs-reboot",
+        "usable-during-update",
+        "signed-payload"
+      ]
+    },
+    {
+      "Name": "UEFI CA",
+      "Vendor": "Microsoft",
+      "Version": "2023",
+      "VersionRaw": 2023,
+      "VersionFormat": "number",
+      "Plugin": "uefi_db",
+      "Flags": [
+        "internal",
+        "updatable",
+        "supported",
+        "needs-reboot",
+        "signed-payload",
+        "can-emulation-tag"
+      ]
+    },
+    {
+      "Name": "UEFI Device Firmware",
+      "Vendor": "MSI",
+      "Version": "10600",
+      "VersionRaw": 10600,
+      "VersionFormat": "number",
+      "Plugin": "uefi_capsule",
+      "Flags": [
+        "internal",
+        "updatable",
+        "require-ac",
+        "supported",
+        "needs-reboot",
+        "usable-during-update",
+        "signed-payload"
+      ]
+    },
+    {
+      "Name": "UEFI Device Firmware",
+      "Vendor": "MSI",
+      "Version": "1",
+      "VersionRaw": 1,
+      "VersionFormat": "number",
+      "Plugin": "uefi_capsule",
+      "Flags": [
+        "internal",
+        "updatable",
+        "require-ac",
+        "supported",
+        "needs-reboot",
+        "usable-during-update",
+        "signed-payload"
+      ]
+    },
+    {
+      "Name": "UEFI Key Exchange Key",
+      "Plugin": "uefi_kek",
+      "Flags": [
+        "internal"
+      ]
+    },
+    {
+      "Name": "UEFI Signature Database",
+      "Plugin": "uefi_db",
+      "Flags": [
+        "internal"
+      ]
+    },
+    {
+      "Name": "UEFI dbx",
+      "Vendor": "Microsoft",
+      "Version": "20230501",
+      "VersionFormat": "number",
+      "Plugin": "uefi_dbx",
+      "Flags": [
+        "internal",
+        "updatable",
+        "needs-reboot",
+        "usable-during-update",
+        "only-version-upgrade",
+        "signed-payload",
+        "can-emulation-tag"
+      ]
+    },
+    {
+      "Name": "Windows UEFI CA",
+      "Vendor": "Microsoft",
+      "Version": "2023",
+      "VersionRaw": 2023,
+      "VersionFormat": "number",
+      "Plugin": "uefi_db",
+      "Flags": [
+        "internal",
+        "updatable",
+        "needs-reboot",
+        "signed-payload",
+        "can-emulation-tag"
+      ]
+    }
+  ],
+  "network_drivers": {
+    "enP2p1s0f1np1": {
+      "returncode": 0,
+      "stdout": "driver: mlx5_core\nversion: 6.17.0-1026-nvidia\nfirmware-version: 28.45.4028 (NVD0000000087)\nexpansion-rom-version: \nbus-info: 0002:01:00.1\nsupports-statistics: yes\nsupports-test: yes\nsupports-eeprom-access: no\nsupports-register-dump: no\nsupports-priv-flags: yes",
+      "stderr": ""
+    },
+    "enP7s7": {
+      "returncode": 0,
+      "stdout": "driver: r8127\nversion: 11.014.00-NAPI\nfirmware-version: \nexpansion-rom-version: \nbus-info: 0007:01:00.0\nsupports-statistics: yes\nsupports-test: no\nsupports-eeprom-access: no\nsupports-register-dump: yes\nsupports-priv-flags: no",
+      "stderr": ""
+    },
+    "enp1s0f0np0": {
+      "returncode": 0,
+      "stdout": "driver: mlx5_core\nversion: 6.17.0-1026-nvidia\nfirmware-version: 28.45.4028 (NVD0000000087)\nexpansion-rom-version: \nbus-info: 0000:01:00.0\nsupports-statistics: yes\nsupports-test: yes\nsupports-eeprom-access: no\nsupports-register-dump: no\nsupports-priv-flags: yes",
+      "stderr": ""
+    },
+    "enP2p1s0f0np0": {
+      "returncode": 0,
+      "stdout": "driver: mlx5_core\nversion: 6.17.0-1026-nvidia\nfirmware-version: 28.45.4028 (NVD0000000087)\nexpansion-rom-version: \nbus-info: 0002:01:00.0\nsupports-statistics: yes\nsupports-test: yes\nsupports-eeprom-access: no\nsupports-register-dump: no\nsupports-priv-flags: yes",
+      "stderr": ""
+    },
+    "enp1s0f1np1": {
+      "returncode": 0,
+      "stdout": "driver: mlx5_core\nversion: 6.17.0-1026-nvidia\nfirmware-version: 28.45.4028 (NVD0000000087)\nexpansion-rom-version: \nbus-info: 0000:01:00.1\nsupports-statistics: yes\nsupports-test: yes\nsupports-eeprom-access: no\nsupports-register-dump: no\nsupports-priv-flags: yes",
+      "stderr": ""
+    }
+  }
+}

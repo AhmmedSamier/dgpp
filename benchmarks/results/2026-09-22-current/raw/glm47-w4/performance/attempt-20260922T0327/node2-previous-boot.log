@@ -1,0 +1,36 @@
+-- No entries --
+Sep 22 03:17:54 spark-a289 bluetoothd[1460]: Endpoint registered: sender=:1.4458 path=/MediaEndpoint/A2DPSource/sbc_xq
+Sep 22 03:17:54 spark-a289 bluetoothd[1460]: Endpoint registered: sender=:1.4458 path=/MediaEndpoint/A2DPSource/aptx_ll_1
+Sep 22 03:17:54 spark-a289 bluetoothd[1460]: Endpoint registered: sender=:1.4458 path=/MediaEndpoint/A2DPSource/aptx_ll_0
+Sep 22 03:17:54 spark-a289 bluetoothd[1460]: Endpoint registered: sender=:1.4458 path=/MediaEndpoint/A2DPSource/aptx_ll_duplex_1
+Sep 22 03:17:54 spark-a289 bluetoothd[1460]: Endpoint registered: sender=:1.4458 path=/MediaEndpoint/A2DPSource/aptx_ll_duplex_0
+Sep 22 03:17:54 spark-a289 bluetoothd[1460]: Endpoint registered: sender=:1.4458 path=/MediaEndpoint/A2DPSource/faststream
+Sep 22 03:17:54 spark-a289 bluetoothd[1460]: Endpoint registered: sender=:1.4458 path=/MediaEndpoint/A2DPSource/faststream_duplex
+Sep 22 03:17:54 spark-a289 bluetoothd[1460]: Endpoint registered: sender=:1.4458 path=/MediaEndpoint/A2DPSource/opus_05
+Sep 22 03:17:54 spark-a289 bluetoothd[1460]: Endpoint registered: sender=:1.4458 path=/MediaEndpoint/A2DPSource/opus_05_duplex
+Sep 22 03:17:54 spark-a289 sshd[1842078]: Received disconnect from 192.168.88.11 port 51412:11: disconnected by user
+Sep 22 03:17:54 spark-a289 sshd[1842078]: Disconnected from user stephen 192.168.88.11 port 51412
+Sep 22 03:17:54 spark-a289 sshd[1841907]: pam_unix(sshd:session): session closed for user stephen
+Sep 22 03:17:54 spark-a289 systemd[1]: session-1699.scope: Deactivated successfully.
+Sep 22 03:17:54 spark-a289 systemd-logind[1507]: Session 1699 logged out. Waiting for processes to exit.
+Sep 22 03:17:54 spark-a289 systemd-logind[1507]: Removed session 1699.
+Sep 22 03:17:54 spark-a289 bluetoothd[1460]: Endpoint unregistered: sender=:1.4458 path=/MediaEndpoint/A2DPSource/ldac
+Sep 22 03:17:54 spark-a289 bluetoothd[1460]: Endpoint unregistered: sender=:1.4458 path=/MediaEndpoint/A2DPSource/aptx_hd
+Sep 22 03:17:54 spark-a289 bluetoothd[1460]: Endpoint unregistered: sender=:1.4458 path=/MediaEndpoint/A2DPSource/aptx
+Sep 22 03:17:54 spark-a289 bluetoothd[1460]: Endpoint unregistered: sender=:1.4458 path=/MediaEndpoint/A2DPSource/sbc
+Sep 22 03:17:54 spark-a289 bluetoothd[1460]: Endpoint unregistered: sender=:1.4458 path=/MediaEndpoint/A2DPSource/sbc_xq
+Sep 22 03:17:54 spark-a289 bluetoothd[1460]: Endpoint unregistered: sender=:1.4458 path=/MediaEndpoint/A2DPSource/aptx_ll_1
+Sep 22 03:17:54 spark-a289 bluetoothd[1460]: Endpoint unregistered: sender=:1.4458 path=/MediaEndpoint/A2DPSource/aptx_ll_0
+Sep 22 03:17:54 spark-a289 bluetoothd[1460]: Endpoint unregistered: sender=:1.4458 path=/MediaEndpoint/A2DPSource/aptx_ll_duplex_1
+Sep 22 03:17:54 spark-a289 bluetoothd[1460]: Endpoint unregistered: sender=:1.4458 path=/MediaEndpoint/A2DPSource/aptx_ll_duplex_0
+Sep 22 03:17:54 spark-a289 bluetoothd[1460]: Endpoint unregistered: sender=:1.4458 path=/MediaEndpoint/A2DPSource/faststream
+Sep 22 03:17:54 spark-a289 bluetoothd[1460]: Endpoint unregistered: sender=:1.4458 path=/MediaEndpoint/A2DPSource/faststream_duplex
+Sep 22 03:17:54 spark-a289 bluetoothd[1460]: Endpoint unregistered: sender=:1.4458 path=/MediaEndpoint/A2DPSource/opus_05
+Sep 22 03:17:54 spark-a289 bluetoothd[1460]: Endpoint unregistered: sender=:1.4458 path=/MediaEndpoint/A2DPSource/opus_05_duplex
+Sep 22 03:20:04 spark-a289 systemd[1]: Starting sysstat-collect.service - system activity accounting tool...
+Sep 22 03:20:04 spark-a289 systemd[1]: sysstat-collect.service: Deactivated successfully.
+Sep 22 03:20:04 spark-a289 systemd[1]: Finished sysstat-collect.service - system activity accounting tool.
+Sep 22 03:23:23 spark-a289 systemd[1840703]: launchpadlib-cache-clean.service - Clean up old files in the Launchpadlib cache was skipped because of an unmet condition check (ConditionPathExists=/home/stephen/.launchpadlib/api.launchpad.net/cache).
+Sep 22 03:25:01 spark-a289 CRON[1849570]: pam_unix(cron:session): session opened for user root(uid=0) by root(uid=0)
+Sep 22 03:25:01 spark-a289 CRON[1849571]: (root) CMD (command -v debian-sa1 > /dev/null && debian-sa1 1 1)
+Sep 22 03:25:01 spark-a289 CRON[1849570]: pam_unix(cron:session): session closed for user root

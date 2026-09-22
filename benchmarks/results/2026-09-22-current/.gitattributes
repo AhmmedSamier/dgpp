@@ -1,0 +1,3 @@
+# Preserve captured diagnostic output, including its original whitespace.
+raw/**/*.log -whitespace
+raw/**/*.txt -whitespace

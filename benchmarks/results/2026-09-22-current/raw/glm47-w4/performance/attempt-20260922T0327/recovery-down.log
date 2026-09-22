@@ -1,0 +1,10 @@
+2026-09-22 03:33:13.195 === nvidia/GLM-4.7-NVFP4 on 4 node(s) [server] (benchmarks/results/2026-09-22-current/raw/glm47-w4/performance/default/config.json): no rank recorded as running; nothing to stop
+2026-09-22 03:33:13.195 === waiting for the peers to drain
+2026-09-22 03:33:16.273 WARN: no serve_rank2.ops on 192.168.88.13
+2026-09-22 03:33:17.292 === op-stream identity (every rank)
+2026-09-22 03:33:17.297 8ae60fc140aef0deb08e3422a6876cf8  /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm47-w4/performance/default/server/serve_rank0.ops
+2026-09-22 03:33:17.301 8ae60fc140aef0deb08e3422a6876cf8  /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm47-w4/performance/default/server/serve_rank1.ops
+2026-09-22 03:33:17.302 WARN: no /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm47-w4/performance/default/server/serve_rank2.ops
+2026-09-22 03:33:17.305 8ae60fc140aef0deb08e3422a6876cf8  /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm47-w4/performance/default/server/serve_rank3.ops
+2026-09-22 03:33:17.305 op streams: DIFFER or missing
+2026-09-22 03:33:17.305 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm47-w4/performance/default/server

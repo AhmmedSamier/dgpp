@@ -1,0 +1,66 @@
+[
+  {
+    "epoch_ns": 1790061540085999792,
+    "timesync": {
+      "returncode": 0,
+      "stdout": "NTP=yes\nNTPSynchronized=yes\n",
+      "stderr": ""
+    },
+    "chrony": {
+      "error": "[Errno 2] No such file or directory: 'chronyc'"
+    },
+    "rank": 0,
+    "local_started_ns": 1790061540056164145,
+    "local_finished_ns": 1790061540232800792,
+    "remote_minus_local_midpoint_s": -0.058482688,
+    "roundtrip_s": 0.176636647
+  },
+  {
+    "epoch_ns": 1790061552281388159,
+    "timesync": {
+      "returncode": 0,
+      "stdout": "NTP=yes\nNTPSynchronized=no\n",
+      "stderr": ""
+    },
+    "chrony": {
+      "error": "[Errno 2] No such file or directory: 'chronyc'"
+    },
+    "rank": 1,
+    "local_started_ns": 1790061540056340643,
+    "local_finished_ns": 1790061540551242940,
+    "remote_minus_local_midpoint_s": 11.97759616,
+    "roundtrip_s": 0.494902297
+  },
+  {
+    "epoch_ns": 1790061540696115370,
+    "timesync": {
+      "returncode": 0,
+      "stdout": "NTP=yes\nNTPSynchronized=yes\n",
+      "stderr": ""
+    },
+    "chrony": {
+      "error": "[Errno 2] No such file or directory: 'chronyc'"
+    },
+    "rank": 2,
+    "local_started_ns": 1790061540056608693,
+    "local_finished_ns": 1790061540773647754,
+    "remote_minus_local_midpoint_s": 0.280987136,
+    "roundtrip_s": 0.717039061
+  },
+  {
+    "epoch_ns": 1790061540710401897,
+    "timesync": {
+      "returncode": 0,
+      "stdout": "NTP=yes\nNTPSynchronized=yes\n",
+      "stderr": ""
+    },
+    "chrony": {
+      "error": "[Errno 2] No such file or directory: 'chronyc'"
+    },
+    "rank": 3,
+    "local_started_ns": 1790061540057532909,
+    "local_finished_ns": 1790061540787662306,
+    "remote_minus_local_midpoint_s": 0.28780416,
+    "roundtrip_s": 0.730129397
+  }
+]

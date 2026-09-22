@@ -1,0 +1,25 @@
+{
+  "observed_at": "2026-09-22T03:31:07+00:00",
+  "command": "nvidia-smi -q -d TEMPERATURE,PERFORMANCE",
+  "nodes": [
+    {
+      "rank": 0,
+      "gpu_celsius": 75,
+      "gpu_tlimit_celsius": 17,
+      "hardware_thermal_slowdown_active": false,
+      "software_thermal_slowdown_active": false,
+      "hardware_thermal_slowdown_counter_us": 0,
+      "software_thermal_slowdown_counter_us": 0
+    },
+    {
+      "rank": 1,
+      "gpu_celsius": 66,
+      "gpu_tlimit_celsius": 27,
+      "hardware_thermal_slowdown_active": false,
+      "software_thermal_slowdown_active": false,
+      "hardware_thermal_slowdown_counter_us": 0,
+      "software_thermal_slowdown_counter_us": 46389658
+    }
+  ],
+  "note": "Counters cover time before this snapshot, not just the current campaign; no initial counter baseline was recorded. Rank 2 was unreachable. These snapshots do not establish the cause of its outage."
+}

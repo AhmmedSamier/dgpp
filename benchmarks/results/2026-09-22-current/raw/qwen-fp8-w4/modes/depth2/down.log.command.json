@@ -1,0 +1,15 @@
+{
+  "command": [
+    "/usr/bin/python3",
+    "/home/stephen/workspace/dgpp/scripts/dgpp-cluster",
+    "down",
+    "--config",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/qwen-fp8-w4/modes/depth2/config.json",
+    "--log-dir",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/qwen-fp8-w4/modes/depth2/server"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-09-22T11:45:28.885786+00:00",
+  "returncode": 0,
+  "finished_at": "2026-09-22T11:45:36.478447+00:00"
+}

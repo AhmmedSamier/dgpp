@@ -1,0 +1,9 @@
+2026-09-22 10:16:56.075 === SIGINT rank 0 (2706234) — the stop record releases the peers
+2026-09-22 10:16:58.077 === waiting for the peers to drain
+2026-09-22 10:17:02.159 === op-stream identity (every rank)
+2026-09-22 10:17:02.166 b90d3ae5db5ca16eba0a2eaff3593645  /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/deepseek-w4/performance/default/server/serve_rank0.ops
+2026-09-22 10:17:02.173 b90d3ae5db5ca16eba0a2eaff3593645  /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/deepseek-w4/performance/default/server/serve_rank1.ops
+2026-09-22 10:17:02.180 b90d3ae5db5ca16eba0a2eaff3593645  /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/deepseek-w4/performance/default/server/serve_rank2.ops
+2026-09-22 10:17:02.187 b90d3ae5db5ca16eba0a2eaff3593645  /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/deepseek-w4/performance/default/server/serve_rank3.ops
+2026-09-22 10:17:02.187 op streams: identical across 4 ranks
+2026-09-22 10:17:02.187 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/deepseek-w4/performance/default/server

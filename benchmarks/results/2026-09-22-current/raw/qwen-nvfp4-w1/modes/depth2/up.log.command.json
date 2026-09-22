@@ -1,0 +1,17 @@
+{
+  "command": [
+    "/usr/bin/python3",
+    "/home/stephen/workspace/dgpp/scripts/dgpp-cluster",
+    "up",
+    "--config",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/qwen-nvfp4-w1/modes/depth2/config.json",
+    "--bin",
+    "/home/stephen/workspace/dgpp/build-release/dgpp-serve",
+    "--log-dir",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/qwen-nvfp4-w1/modes/depth2/server"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-09-22T06:00:47.873363+00:00",
+  "returncode": 0,
+  "finished_at": "2026-09-22T06:01:16.894423+00:00"
+}

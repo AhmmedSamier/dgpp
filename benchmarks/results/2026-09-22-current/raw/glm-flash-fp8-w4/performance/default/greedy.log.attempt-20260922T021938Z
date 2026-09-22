@@ -1,0 +1,53 @@
+model unsloth/GLM-5.3-Flash-FP8
+warm 0: status 200 tokens 64
+== prose concurrency 1: 02:07:58.537 .. 02:08:03.985  wall 5.4 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 354 ms  client update pace 19.98 ms/update
+   aggregate wall: 256 tokens in 5.45 s = 46.98 tok/s (prefill included)
+   legacy output-span aggregate: 50.254256907712566 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 50.100 tok/s
+== prose concurrency 1: 02:08:03.986 .. 02:08:09.184  wall 5.2 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 101 ms  client update pace 19.98 ms/update
+   aggregate wall: 256 tokens in 5.20 s = 49.26 tok/s (prefill included)
+   legacy output-span aggregate: 50.243344571936916 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 50.072 tok/s
+== prose concurrency 1: 02:08:09.212 .. 02:08:14.409  wall 5.2 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 101 ms  client update pace 19.98 ms/update
+   aggregate wall: 256 tokens in 5.20 s = 49.26 tok/s (prefill included)
+   legacy output-span aggregate: 50.246444363813524 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 50.010 tok/s
+== prose concurrency 2: 02:08:14.445 .. 02:08:23.048  wall 8.6 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 353 ms  client update pace 32.35 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 731 ms  client update pace 30.56 ms/update
+   aggregate wall: 512 tokens in 8.60 s = 59.51 tok/s (prefill included)
+   legacy output-span aggregate: 62.06924648344177 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 64.647 tok/s
+== prose concurrency 2: 02:08:23.049 .. 02:08:31.714  wall 8.7 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 102 ms  client update pace 33.57 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 204 ms  client update pace 32.87 ms/update
+   aggregate wall: 512 tokens in 8.66 s = 59.09 tok/s (prefill included)
+   legacy output-span aggregate: 59.80319700187093 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 60.131 tok/s
+== prose concurrency 2: 02:08:31.715 .. 02:08:39.827  wall 8.1 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 204 ms  client update pace 31.01 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 77 ms  client update pace 30.90 ms/update
+   aggregate wall: 512 tokens in 8.11 s = 63.12 tok/s (prefill included)
+   legacy output-span aggregate: 63.72820493363809 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 64.422 tok/s
+== prose concurrency 4: 02:08:39.832 .. 02:08:51.711  wall 11.9 s
+Traceback (most recent call last):
+  File "/home/stephen/workspace/dgpp/scripts/timed_load.py", line 97, in <module>
+    main()
+  File "/home/stephen/workspace/dgpp/scripts/timed_load.py", line 93, in main
+    serve_load.main(phase_runner=load.phase, settle=load.settle)
+  File "/home/stephen/workspace/dgpp/scripts/serve_load.py", line 352, in main
+    rates = [run_phase(args.host, args.port, model, c, args.max_tokens, args.think, base,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/stephen/workspace/dgpp/scripts/timed_load.py", line 75, in phase
+    rate = serve_load.phase(host, port, model, c, max_tokens, think, prompt_base,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/stephen/workspace/dgpp/scripts/serve_load.py", line 250, in phase
+    metrics = phase_metrics(outs, t_start, t_end)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/stephen/workspace/dgpp/scripts/bench_stream.py", line 65, in phase_metrics
+    raise RuntimeError(request["error"])
+RuntimeError: stream error: {'message': 'the server is shutting down — this response is incomplete; retry on another instance', 'type': 'server_error', 'param': None, 'code': 'server_shutdown'}

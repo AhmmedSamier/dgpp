@@ -1,0 +1,31 @@
+{
+  "checked_at": "2026-09-22T14:09:08.926269+00:00",
+  "source": "a3ed8994a34cf05f79e63dc1ad51ffd1f65c9f82",
+  "counts": {
+    "configurations": 13,
+    "greedy_timing_groups": 600,
+    "sampled_timing_groups": 390,
+    "cold_prefill_requests": 117,
+    "mode_sweeps": 21,
+    "quality_cases": 7332,
+    "quality_token_cap_responses": 0,
+    "rank_checks": 54,
+    "long_context_suites": 4,
+    "long_context_requests": 42,
+    "microbenchmark_commands": 11
+  },
+  "checks": [
+    "complete raw-data and settings validation by summarize.py",
+    "54 matching rank operation-stream checks",
+    "all 105 prompt-class mode comparisons match default",
+    "all local documentation links resolve",
+    "current-only benchmark page reviewed",
+    "restored original service configuration and successful completion request",
+    "campaign telemetry stopped on every node",
+    "git diff --check"
+  ],
+  "excluded": [
+    "GLM-4.7, at user request"
+  ],
+  "known_issue": "https://github.com/HawkBearPig/dgpp/issues/32"
+}

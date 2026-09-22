@@ -1,0 +1,5 @@
+model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8
+warm 0: status 200 tokens 64
+== isolation: prompt 0 alone (256 tokens) vs beside 3 others (256 tokens): DIFFERENT
+   first difference at char 338: alone 'why KV caches exist, what they store, memory demands\n2. The ' | batched 'KV cache in transformer inference, why it matters\n2. The pro'
+transcript isolation failed

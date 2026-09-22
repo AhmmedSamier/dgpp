@@ -1,0 +1,68 @@
+[  2%] Built target dgpp_rope_scaling
+[  4%] Built target dgpp_device_ranges
+[ 21%] Built target pcre2-8-static
+[ 24%] Built target dgpp_core
+[ 26%] stamping dgpp_version.hpp
+[ 26%] Built target dgpp_net
+[ 31%] Built target dgpp_loaders
+[ 31%] Built target dgpp_version
+[ 34%] Built target dgpp_bus
+[ 39%] Built target dgpp_text
+[ 39%] Building CUDA object CMakeFiles/dgpp_kernels.dir/src/kernels/qwen_vision.cu.o
+[ 41%] Built target dgpp_models_glm4
+[ 43%] Built target dgpp_models_glm_dsa
+[ 46%] Built target dgpp_models_dsv41
+[ 46%] Building CXX object CMakeFiles/dgpp_sched.dir/src/sched/prefix_cache.cpp.o
+[ 46%] Building CXX object CMakeFiles/dgpp_models_qwen.dir/src/models/qwen/config.cpp.o
+[ 46%] Built target dgpp_models_glm4_loader
+[ 48%] Built target dgpp_models_glm_dsa_loader
+[ 51%] Built target dgpp_models_dsv41_loader
+[ 53%] Building CXX object CMakeFiles/dgpp_models_qwen.dir/src/models/qwen/binding.cpp.o
+[ 53%] Building CXX object CMakeFiles/dgpp_sched.dir/src/sched/scheduler.cpp.o
+[ 53%] Linking CXX static library libdgpp_models_qwen.a
+[ 56%] Built target dgpp_models_qwen
+[ 56%] Linking CXX static library libdgpp_kernels.a
+[ 73%] Built target dgpp_kernels
+[ 73%] Built target dgpp_models_csa2
+[ 75%] Built target dgpp_models_dsa
+[ 78%] Built target dgpp_models_kda
+[ 78%] Building CXX object CMakeFiles/dgpp_models_qwen_loader.dir/src/models/qwen/vision.cpp.o
+[ 80%] Building CXX object CMakeFiles/dgpp_models_qwen_loader.dir/src/models/qwen/loader.cpp.o
+[ 82%] Linking CXX static library libdgpp_sched.a
+[ 82%] Built target dgpp_sched
+[ 82%] Building CXX object CMakeFiles/dgpp_models_glm.dir/src/models/glm/binding.cpp.o
+[ 82%] Building CXX object CMakeFiles/dgpp_models_glm.dir/src/models/glm/config.cpp.o
+[ 82%] Linking CXX static library libdgpp_models_glm.a
+[ 85%] Built target dgpp_models_glm
+[ 85%] Built target dgpp_models_moe
+[ 85%] Building CXX object CMakeFiles/dgpp_serve.dir/src/serve/image_inputs.cpp.o
+[ 87%] Built target dgpp_models_glm4_layers
+[ 87%] Built target dgpp_models_glm_dsa_layers
+[ 87%] Built target dgpp_models_dsv41_layers
+[ 87%] Building CXX object CMakeFiles/dgpp_models_glm_loader.dir/src/models/glm/vision.cpp.o
+[ 87%] Building CXX object CMakeFiles/dgpp_models_glm_loader.dir/src/models/glm/loader.cpp.o
+[ 87%] Linking CXX static library libdgpp_models_qwen_loader.a
+[ 87%] Built target dgpp_models_qwen_loader
+[ 90%] Building CXX object CMakeFiles/dgpp_models_glm_loader.dir/src/models/glm/forward.cpp.o
+[ 90%] Building CXX object CMakeFiles/dgpp_serve.dir/src/serve/vision_frontend.cpp.o
+[ 90%] Building CXX object CMakeFiles/dgpp_models_glm_loader.dir/src/models/glm/decode.cpp.o
+[ 90%] Building CXX object CMakeFiles/dgpp_serve.dir/src/serve/glm_vision_frontend.cpp.o
+[ 90%] Building CXX object CMakeFiles/dgpp_models_glm_loader.dir/src/models/glm/mtp.cpp.o
+[ 90%] Building CXX object CMakeFiles/dgpp_models_glm_loader.dir/src/models/glm/tp.cpp.o
+[ 90%] Building CXX object CMakeFiles/dgpp_serve.dir/src/serve/qwen_vision_frontend.cpp.o
+[ 90%] Building CXX object CMakeFiles/dgpp_serve.dir/src/serve/generation_service.cpp.o
+[ 90%] Building CXX object CMakeFiles/dgpp_models_glm_loader.dir/src/models/glm/tp_parity.cpp.o
+[ 92%] Building CXX object CMakeFiles/dgpp_models_qwen_layers.dir/src/models/qwen/layers.cpp.o
+[ 92%] Building CXX object CMakeFiles/dgpp_models_qwen_layers.dir/src/models/qwen/kv_pool.cpp.o
+[ 95%] Linking CXX static library libdgpp_models_glm_loader.a
+[ 95%] Built target dgpp_models_glm_loader
+[ 95%] Building CXX object CMakeFiles/dgpp_models_qwen_layers.dir/src/models/qwen/forward.cpp.o
+[ 97%] Building CXX object CMakeFiles/dgpp_serve.dir/src/serve/fabric_serve.cpp.o
+[ 97%] Building CXX object CMakeFiles/dgpp_serve.dir/src/serve/serve_stats.cpp.o
+[ 97%] Linking CXX static library libdgpp_models_qwen_layers.a
+[ 97%] Built target dgpp_models_qwen_layers
+[ 97%] Linking CXX static library libdgpp_serve.a
+[100%] Built target dgpp_serve
+[100%] Building CXX object CMakeFiles/dgpp_serve_app.dir/apps/dgpp_serve.cpp.o
+[100%] Linking CXX executable dgpp-serve
+[100%] Built target dgpp_serve_app

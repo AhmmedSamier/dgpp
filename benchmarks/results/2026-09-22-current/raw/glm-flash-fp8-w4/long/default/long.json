@@ -1,0 +1,361 @@
+{
+  "model": "unsloth/GLM-5.3-Flash-FP8",
+  "seed": 20260922,
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "calibration": {
+    "prompt_sha256": "e4a17121fd76f8e6581ae84417f7cd280299d8545a2b241d77e9599fb486c914",
+    "usage": {
+      "prompt_tokens": 9146,
+      "completion_tokens": 1,
+      "total_tokens": 9147,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 1
+      }
+    },
+    "finish": "length",
+    "text": "We",
+    "wall_ms": 7121.195440995507,
+    "ttft_ms": 7121.0480949957855,
+    "last_ms": 7121.0480949957855,
+    "tokens": 1
+  },
+  "samples": [
+    {
+      "requested_tokens": 2048,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 5194.3,
+        "prefill_ms": 1418.499999999999,
+        "decode_steps": 133,
+        "decode_rows": 133,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 1845,
+        "prompt_tokens_computed": 1845
+      },
+      "engine_tokens_per_s": 49.09227422366825,
+      "ms_per_pass": 39.05488721804512,
+      "tokens_per_pass": 1.9172932330827068,
+      "answer": {
+        "prompt_sha256": "6b16033e1425d88f06f23e96b16808f1743345c81404e01ec31d6c04f97ce67d",
+        "usage": {
+          "prompt_tokens": 1845,
+          "completion_tokens": 256,
+          "total_tokens": 2101,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list describing the first 200 parcels and their cities. But the document only contains 50 items (000000 through 000049). The user says \"Continue until you have listed all 200.\" However, there are only 50 items in the provided document. I should list all 50 parcels that exist and note that the document only contains 50 items, not 200.\n\nLet me list the parcels and their cities:\n\n1. PX-0757343 \u2014 Income\n2. PX-0081436 \u2014 Jamesport\n3. PX-0126529 \u2014 Dunmore\n4. PX-0226532 \u2014 Dunmore\n5. PX-0538039 \u2014 Belvedere\n6. PX-0133958 \u2014 Glencarr\n7. PX-0510348 \u2014 Fenwick\n8. PX-0381529 \u2014 Jamesport\n9. PX-0284743 \u2014 Calder\n10. PX-0428050 \u2014 Eastvale\n11. PX-0735655 \u2014 Arcadia\n12. PX-0712386 \u2014 Belvedere\n13. PX-0688270",
+        "wall_ms": 6637.165461987024,
+        "ttft_ms": 1437.925941980211,
+        "last_ms": 6636.937651986955,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 2048,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 5194.2,
+        "prefill_ms": 83.70000000000073,
+        "decode_steps": 133,
+        "decode_rows": 133,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 1845,
+        "prompt_tokens_computed": 5
+      },
+      "engine_tokens_per_s": 49.09321936005545,
+      "ms_per_pass": 39.054135338345866,
+      "tokens_per_pass": 1.9172932330827068,
+      "answer": {
+        "prompt_sha256": "6b16033e1425d88f06f23e96b16808f1743345c81404e01ec31d6c04f97ce67d",
+        "usage": {
+          "prompt_tokens": 1845,
+          "completion_tokens": 256,
+          "total_tokens": 2101,
+          "prompt_tokens_details": {
+            "cached_tokens": 1840
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list describing the first 200 parcels and their cities. But the document only contains 50 items (000000 through 000049). The user says \"Continue until you have listed all 200.\" However, there are only 50 items in the provided document. I should list all 50 parcels that exist and note that the document only contains 50 items, not 200.\n\nLet me list the parcels and their cities:\n\n1. PX-0757343 \u2014 Income\n2. PX-0081436 \u2014 Jamesport\n3. PX-0126529 \u2014 Dunmore\n4. PX-0226532 \u2014 Dunmore\n5. PX-0538039 \u2014 Belvedere\n6. PX-0133958 \u2014 Glencarr\n7. PX-0510348 \u2014 Fenwick\n8. PX-0381529 \u2014 Jamesport\n9. PX-0284743 \u2014 Calder\n10. PX-0428050 \u2014 Eastvale\n11. PX-0735655 \u2014 Arcadia\n12. PX-0712386 \u2014 Belvedere\n13. PX-0688270",
+        "wall_ms": 5300.80133699812,
+        "ttft_ms": 102.92233800282702,
+        "last_ms": 5300.566645979416,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 2048,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 5197.5,
+        "prefill_ms": 83.10000000000036,
+        "decode_steps": 133,
+        "decode_rows": 133,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 1845,
+        "prompt_tokens_computed": 5
+      },
+      "engine_tokens_per_s": 49.06204906204906,
+      "ms_per_pass": 39.078947368421055,
+      "tokens_per_pass": 1.9172932330827068,
+      "answer": {
+        "prompt_sha256": "6b16033e1425d88f06f23e96b16808f1743345c81404e01ec31d6c04f97ce67d",
+        "usage": {
+          "prompt_tokens": 1845,
+          "completion_tokens": 256,
+          "total_tokens": 2101,
+          "prompt_tokens_details": {
+            "cached_tokens": 1840
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list describing the first 200 parcels and their cities. But the document only contains 50 items (000000 through 000049). The user says \"Continue until you have listed all 200.\" However, there are only 50 items in the provided document. I should list all 50 parcels that exist and note that the document only contains 50 items, not 200.\n\nLet me list the parcels and their cities:\n\n1. PX-0757343 \u2014 Income\n2. PX-0081436 \u2014 Jamesport\n3. PX-0126529 \u2014 Dunmore\n4. PX-0226532 \u2014 Dunmore\n5. PX-0538039 \u2014 Belvedere\n6. PX-0133958 \u2014 Glencarr\n7. PX-0510348 \u2014 Fenwick\n8. PX-0381529 \u2014 Jamesport\n9. PX-0284743 \u2014 Calder\n10. PX-0428050 \u2014 Eastvale\n11. PX-0735655 \u2014 Arcadia\n12. PX-0712386 \u2014 Belvedere\n13. PX-0688270",
+        "wall_ms": 5307.702040998265,
+        "ttft_ms": 104.21094397315755,
+        "last_ms": 5307.3795569944195,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 8192,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 5144.299999999999,
+        "prefill_ms": 5971.0,
+        "decode_steps": 131,
+        "decode_rows": 131,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 7921,
+        "prompt_tokens_computed": 7921
+      },
+      "engine_tokens_per_s": 49.569426355383634,
+      "ms_per_pass": 39.269465648854954,
+      "tokens_per_pass": 1.9465648854961832,
+      "answer": {
+        "prompt_sha256": "47d63c307744a9396f1ae71c27df4e37479f11786d7902cbe21ef9bf84df1c81",
+        "usage": {
+          "prompt_tokens": 7921,
+          "completion_tokens": 256,
+          "total_tokens": 8177,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list describing the first 200 parcels and their cities. The document has items 000000 through 000220, so the first 200 parcels are items 000000 through 000199. I need to list each parcel ID and its city.\n\nLet me extract items 000000 to 000199:\n\n000000: PX-0757343 - Income\n000001: PX-0081436 - Jamesport\n000002: PX-0126529 - Dunmore\n000003: PX-0226532 - Dunmore\n000004: PX-0538039 - Belvedere\n000005: PX-0133958 - Glencarr\n000006: PX-0510348 - Fenwick\n000007: PX-0381529 - Jamesport\n000008: PX-0284743 - Calder\n000009: PX-0428050 - Eastvale\n000010: PX-0735655 - Arcadia\n000011: PX-0712386 - Belvedere\n000012: PX-0688270 - Calder\n000",
+        "wall_ms": 11145.643441996071,
+        "ttft_ms": 5998.038249992533,
+        "last_ms": 11145.475199009525,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 8192,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 5145.5,
+        "prefill_ms": 88.19999999999891,
+        "decode_steps": 131,
+        "decode_rows": 131,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 7921,
+        "prompt_tokens_computed": 5
+      },
+      "engine_tokens_per_s": 49.55786609658925,
+      "ms_per_pass": 39.278625954198475,
+      "tokens_per_pass": 1.9465648854961832,
+      "answer": {
+        "prompt_sha256": "47d63c307744a9396f1ae71c27df4e37479f11786d7902cbe21ef9bf84df1c81",
+        "usage": {
+          "prompt_tokens": 7921,
+          "completion_tokens": 256,
+          "total_tokens": 8177,
+          "prompt_tokens_details": {
+            "cached_tokens": 7916
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list describing the first 200 parcels and their cities. The document has items 000000 through 000220, so the first 200 parcels are items 000000 through 000199. I need to list each parcel ID and its city.\n\nLet me extract items 000000 to 000199:\n\n000000: PX-0757343 - Income\n000001: PX-0081436 - Jamesport\n000002: PX-0126529 - Dunmore\n000003: PX-0226532 - Dunmore\n000004: PX-0538039 - Belvedere\n000005: PX-0133958 - Glencarr\n000006: PX-0510348 - Fenwick\n000007: PX-0381529 - Jamesport\n000008: PX-0284743 - Calder\n000009: PX-0428050 - Eastvale\n000010: PX-0735655 - Arcadia\n000011: PX-0712386 - Belvedere\n000012: PX-0688270 - Calder\n000",
+        "wall_ms": 5274.028173997067,
+        "ttft_ms": 104.97984298854135,
+        "last_ms": 5248.117842013016,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 8192,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 5153.5,
+        "prefill_ms": 88.80000000000109,
+        "decode_steps": 131,
+        "decode_rows": 131,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 7921,
+        "prompt_tokens_computed": 5
+      },
+      "engine_tokens_per_s": 49.48093528669836,
+      "ms_per_pass": 39.33969465648855,
+      "tokens_per_pass": 1.9465648854961832,
+      "answer": {
+        "prompt_sha256": "47d63c307744a9396f1ae71c27df4e37479f11786d7902cbe21ef9bf84df1c81",
+        "usage": {
+          "prompt_tokens": 7921,
+          "completion_tokens": 256,
+          "total_tokens": 8177,
+          "prompt_tokens_details": {
+            "cached_tokens": 7916
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list describing the first 200 parcels and their cities. The document has items 000000 through 000220, so the first 200 parcels are items 000000 through 000199. I need to list each parcel ID and its city.\n\nLet me extract items 000000 to 000199:\n\n000000: PX-0757343 - Income\n000001: PX-0081436 - Jamesport\n000002: PX-0126529 - Dunmore\n000003: PX-0226532 - Dunmore\n000004: PX-0538039 - Belvedere\n000005: PX-0133958 - Glencarr\n000006: PX-0510348 - Fenwick\n000007: PX-0381529 - Jamesport\n000008: PX-0284743 - Calder\n000009: PX-0428050 - Eastvale\n000010: PX-0735655 - Arcadia\n000011: PX-0712386 - Belvedere\n000012: PX-0688270 - Calder\n000",
+        "wall_ms": 5262.188355991384,
+        "ttft_ms": 105.48143100459129,
+        "last_ms": 5262.012162012979,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 32768,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 5194.600000000002,
+        "prefill_ms": 27876.200000000004,
+        "decode_steps": 129,
+        "decode_rows": 129,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 32682,
+        "prompt_tokens_computed": 32682
+      },
+      "engine_tokens_per_s": 49.089439032841774,
+      "ms_per_pass": 40.26821705426358,
+      "tokens_per_pass": 1.9767441860465116,
+      "answer": {
+        "prompt_sha256": "c8b8e061b86f9a61daad584165921768e935b78a29031a86ab65ffe33b5d90ca",
+        "usage": {
+          "prompt_tokens": 32682,
+          "completion_tokens": 256,
+          "total_tokens": 32938,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list describing the first 200 parcels and their cities. So items 000000 through 000199. I need to list each parcel ID and its city.\n\nLet me extract items 0-199:\n\n0: PX-0757343 - Income\n1: PX-0081436 - Jamesport\n2: PX-0126529 - Dunmore\n3: PX-0226532 - Dunmore\n4: PX-0538039 - Belvedere\n5: PX-0133958 - Glencarr\n6: PX-0510348 - Fenwick\n7: PX-0381529 - Jamesport\n8: PX-0284743 - Calder\n9: PX-0428050 - Eastvale\n10: PX-0735655 - Arcadia\n11: PX-0712386 - Belvedere\n12: PX-0688270 - Calder\n13: PX-0441960 - Calder\n14: PX-0809310 - Belvedere\n15: PX-0131018 - Belvedere\n16: PX-0",
+        "wall_ms": 33116.58191101742,
+        "ttft_ms": 27907.94783399906,
+        "last_ms": 33116.39526800718,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 32768,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 5155.199999999997,
+        "prefill_ms": 69.5,
+        "decode_steps": 129,
+        "decode_rows": 129,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 32682,
+        "prompt_tokens_computed": 2
+      },
+      "engine_tokens_per_s": 49.46461824953448,
+      "ms_per_pass": 39.96279069767439,
+      "tokens_per_pass": 1.9767441860465116,
+      "answer": {
+        "prompt_sha256": "c8b8e061b86f9a61daad584165921768e935b78a29031a86ab65ffe33b5d90ca",
+        "usage": {
+          "prompt_tokens": 32682,
+          "completion_tokens": 256,
+          "total_tokens": 32938,
+          "prompt_tokens_details": {
+            "cached_tokens": 32680
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list describing the first 200 parcels and their cities. So items 000000 through 000199. I need to list each parcel ID and its city.\n\nLet me extract items 0-199:\n\n0: PX-0757343 - Income\n1: PX-0081436 - Jamesport\n2: PX-0126529 - Dunmore\n3: PX-0226532 - Dunmore\n4: PX-0538039 - Belvedere\n5: PX-0133958 - Glencarr\n6: PX-0510348 - Fenwick\n7: PX-0381529 - Jamesport\n8: PX-0284743 - Calder\n9: PX-0428050 - Eastvale\n10: PX-0735655 - Arcadia\n11: PX-0712386 - Belvedere\n12: PX-0688270 - Calder\n13: PX-0441960 - Calder\n14: PX-0809310 - Belvedere\n15: PX-0131018 - Belvedere\n16: PX-0",
+        "wall_ms": 5268.71108499472,
+        "ttft_ms": 85.37447301205248,
+        "last_ms": 5243.584416020894,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 32768,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 5151.800000000003,
+        "prefill_ms": 67.59999999999854,
+        "decode_steps": 129,
+        "decode_rows": 129,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 32682,
+        "prompt_tokens_computed": 2
+      },
+      "engine_tokens_per_s": 49.497263092511325,
+      "ms_per_pass": 39.93643410852715,
+      "tokens_per_pass": 1.9767441860465116,
+      "answer": {
+        "prompt_sha256": "c8b8e061b86f9a61daad584165921768e935b78a29031a86ab65ffe33b5d90ca",
+        "usage": {
+          "prompt_tokens": 32682,
+          "completion_tokens": 256,
+          "total_tokens": 32938,
+          "prompt_tokens_details": {
+            "cached_tokens": 32680
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list describing the first 200 parcels and their cities. So items 000000 through 000199. I need to list each parcel ID and its city.\n\nLet me extract items 0-199:\n\n0: PX-0757343 - Income\n1: PX-0081436 - Jamesport\n2: PX-0126529 - Dunmore\n3: PX-0226532 - Dunmore\n4: PX-0538039 - Belvedere\n5: PX-0133958 - Glencarr\n6: PX-0510348 - Fenwick\n7: PX-0381529 - Jamesport\n8: PX-0284743 - Calder\n9: PX-0428050 - Eastvale\n10: PX-0735655 - Arcadia\n11: PX-0712386 - Belvedere\n12: PX-0688270 - Calder\n13: PX-0441960 - Calder\n14: PX-0809310 - Belvedere\n15: PX-0131018 - Belvedere\n16: PX-0",
+        "wall_ms": 5253.694550978253,
+        "ttft_ms": 84.96787399053574,
+        "last_ms": 5253.529156994773,
+        "tokens": 256
+      }
+    }
+  ]
+}

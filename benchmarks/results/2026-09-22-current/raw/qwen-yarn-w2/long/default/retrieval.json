@@ -1,0 +1,525 @@
+{
+  "schema_version": 2,
+  "kind": "qwen_yarn_release_check",
+  "tag": "",
+  "started": "2026-09-22T07:19:40+0000",
+  "seed": 20260918,
+  "args": {
+    "host": "127.0.0.1",
+    "port": 18080,
+    "model": null,
+    "lengths": [
+      262144,
+      524288
+    ],
+    "depths": [
+      0.05,
+      0.25,
+      0.5,
+      0.75,
+      0.95
+    ],
+    "control_length": 4096,
+    "probe_tokens": 768,
+    "decode_tokens": 128,
+    "decode_context": 8192,
+    "concurrency": 2,
+    "seed": 20260918,
+    "reference_url": null,
+    "reference_model": null,
+    "reference_lengths": null,
+    "expect_limit": 524288,
+    "allow_ceiling_mismatch": false,
+    "min_hit_rate": 0.6,
+    "max_shortfall": 0,
+    "mem_sample_s": 2.0,
+    "json_out": "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/qwen-yarn-w2/long/default/retrieval.json",
+    "resume": false,
+    "tag": ""
+  },
+  "lanes": {
+    "dgpp": {
+      "url": "127.0.0.1:18080",
+      "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+      "reported_limit": 524288,
+      "rope_scaling": {
+        "rope_type": "yarn",
+        "factor": 2,
+        "original_max_position_embeddings": 262144,
+        "beta_fast": 32,
+        "beta_slow": 1,
+        "attn_factor": 1,
+        "mrope_cache_factor": 4,
+        "mscale": 1.0693147,
+        "correction_max_position_embeddings": 1048576,
+        "scaled_max_position_embeddings": 524288
+      },
+      "context": {
+        "request_limit_tokens": 524288,
+        "position_ceiling_tokens": 524288,
+        "kv_pool_tokens": 532480,
+        "limited_by": "position-ceiling"
+      }
+    }
+  },
+  "results": {
+    "dgpp": {
+      "lengths": {
+        "262144": {
+          "retrieval": {
+            "probes": [
+              {
+                "depth": 0.05,
+                "expected": "24144786",
+                "answer": "We need answer user's question: \"What is the vault code for shipment VL-65993? Answer with the digits only, nothing else.\" Need extract from provided text. Ther",
+                "hit": true,
+                "prompt_tokens": 261388,
+                "cached_tokens": 8192,
+                "computed_tokens": 253196,
+                "prefill_ms": 213104.1000000001,
+                "prefill_ms_per_token": 0.841656661242674,
+                "ttft_ms": 213177.26595900604,
+                "wall_ms": 216203.69035299518,
+                "finish": "stop",
+                "cold": true,
+                "prompt_sha256": "f7d3abe08041c661e3611fcc84a0c0af133e9c65a4db2110260c36a270f3c367",
+                "completion_tokens": 170,
+                "text_sha256": "459daee847ff3f3a5a5283de6598d46441001a25459a14c278b2297f11ae8423"
+              },
+              {
+                "depth": 0.25,
+                "expected": "46044186",
+                "answer": "We need answer user's question: \"What is the vault code for shipment VL-38045? Answer with the digits only, nothing else.\" Need find in prompt: \"IMPORTANT: the ",
+                "hit": true,
+                "prompt_tokens": 261388,
+                "cached_tokens": 258048,
+                "computed_tokens": 3340,
+                "prefill_ms": 3635.899999999907,
+                "prefill_ms_per_token": 1.0885928143712296,
+                "ttft_ms": 3711.440926999785,
+                "wall_ms": 5351.429804024519,
+                "finish": "stop",
+                "cold": false,
+                "prompt_sha256": "2f04af379a00303a13bdc7f0ccf30512726c3c6418d030e2ce8933839c72b642",
+                "completion_tokens": 96,
+                "text_sha256": "c60283accbe818c26c05bb3f6a58c7145c3a87613ff3b010923f3eca4f604c7b"
+              },
+              {
+                "depth": 0.5,
+                "expected": "59349529",
+                "answer": "The user is asking for the vault code for shipment VL-96058. I need to search through the provided text for this specific shipment code.\n\nLooking through the te",
+                "hit": true,
+                "prompt_tokens": 261388,
+                "cached_tokens": 258048,
+                "computed_tokens": 3340,
+                "prefill_ms": 3624.4000000001397,
+                "prefill_ms_per_token": 1.0851497005988442,
+                "ttft_ms": 3711.6827860008925,
+                "wall_ms": 5578.462510020472,
+                "finish": "stop",
+                "cold": false,
+                "prompt_sha256": "b4570fe3f5d1f1983c184378ef7866230bbf2b372854bda695f86bea1ad6b28f",
+                "completion_tokens": 104,
+                "text_sha256": "e00a1e7370acce25c0e424897df6a3beab3e1662c6592569d0a09dacb88ef62b"
+              },
+              {
+                "depth": 0.75,
+                "expected": "59435610",
+                "answer": "We need answer user's question: \"What is the vault code for shipment VL-41415? Answer with the digits only, nothing else.\" Need find in prompt. There are IMPORT",
+                "hit": true,
+                "prompt_tokens": 261388,
+                "cached_tokens": 258048,
+                "computed_tokens": 3340,
+                "prefill_ms": 3622.5999999998603,
+                "prefill_ms_per_token": 1.0846107784430719,
+                "ttft_ms": 3711.2206549791154,
+                "wall_ms": 6939.326043997426,
+                "finish": "stop",
+                "cold": false,
+                "prompt_sha256": "6077960c62cf4623a9c1aa0cda557e319995fe0e20d4e52d4a3dc571b9b7462f",
+                "completion_tokens": 194,
+                "text_sha256": "3f61d96b2dedf684e3f86369384e0eeea18b95c769e3ec097264c9e668010b72"
+              },
+              {
+                "depth": 0.95,
+                "expected": "30793231",
+                "answer": "The user is asking for the vault code for shipment VL-49585. I need to search through the provided text for this specific vault code.\n\nLooking through the text,",
+                "hit": true,
+                "prompt_tokens": 261388,
+                "cached_tokens": 258048,
+                "computed_tokens": 3340,
+                "prefill_ms": 3622.6999999999534,
+                "prefill_ms_per_token": 1.0846407185628604,
+                "ttft_ms": 3711.8609139870387,
+                "wall_ms": 5528.256841993425,
+                "finish": "stop",
+                "cold": false,
+                "prompt_sha256": "81887ae85595ed9b744da31c637936cb5fb37c4949c763632890ff07ff80162e",
+                "completion_tokens": 106,
+                "text_sha256": "d1d9764427d63b90e228c5b8a71b42311598c8c1d98289baa584463cd61ee0da"
+              }
+            ],
+            "hits": 5,
+            "requests": 5,
+            "hit_rate": 1.0,
+            "cold_prefill_ms": 213104.1000000001,
+            "cold_prefill_ms_per_token": 0.841656661242674
+          },
+          "cache_reuse": {
+            "depth": 0.95,
+            "expected": "30793231",
+            "answer": "The user is asking for the vault code for shipment VL-49585. I need to search through the provided text for this specific vault code.\n\nLooking through the text,",
+            "hit": true,
+            "prompt_tokens": 261388,
+            "cached_tokens": 261380,
+            "computed_tokens": 8,
+            "prefill_ms": 80.30000000004657,
+            "prefill_ms_per_token": 10.03750000000582,
+            "ttft_ms": 161.7816099897027,
+            "wall_ms": 1926.1203329951968,
+            "finish": "stop",
+            "cold": false,
+            "prompt_sha256": "81887ae85595ed9b744da31c637936cb5fb37c4949c763632890ff07ff80162e",
+            "completion_tokens": 106,
+            "text_sha256": "d1d9764427d63b90e228c5b8a71b42311598c8c1d98289baa584463cd61ee0da",
+            "cached_ratio": 0.9999693941573446
+          },
+          "decode": {
+            "prompt_tokens": 8213,
+            "completion_tokens": 128,
+            "ttft_ms": 5391.916958993534,
+            "wall_ms": 7511.241333006183,
+            "ms_per_token": 16.686631346444095,
+            "finish": "length",
+            "text_sha256": "22b92e22408daecda24faadbb32dcac1c2cc2e2a4a93a6c951b7d3b7b4b39d01"
+          },
+          "concurrent": {
+            "requests": 2,
+            "completed": 2,
+            "errors": [],
+            "wall_s": 3.533505655999761,
+            "completion_tokens": 266,
+            "aggregate_tokens_per_s": 75.27934745154346,
+            "ttft_ms": [
+              175.28585297986865,
+              274.4241369946394
+            ],
+            "ttft_median_ms": 224.85499498725403,
+            "per_token_ms": [
+              20.443202199806507,
+              19.70186941418659
+            ]
+          }
+        },
+        "524288": {
+          "retrieval": {
+            "probes": [
+              {
+                "depth": 0.05,
+                "expected": "24144786",
+                "answer": "The user is asking for the vault code for shipment VL-65993. I need to search through the provided text for this specific shipment code.\n\nLooking through the te",
+                "hit": true,
+                "prompt_tokens": 522619,
+                "cached_tokens": 8192,
+                "computed_tokens": 514427,
+                "prefill_ms": 656732.8,
+                "prefill_ms_per_token": 1.2766297258891932,
+                "ttft_ms": 656878.0899970152,
+                "wall_ms": 658807.7970120066,
+                "finish": "stop",
+                "cold": true,
+                "prompt_sha256": "9b32474cf7545abec9bf38e4bb846cf370c465addcdc81ebbfeea4175c94b514",
+                "completion_tokens": 96,
+                "text_sha256": "f6579255ed4859e0205d5b2bd0761c6babba1d8959955339698d3276458bfaf5"
+              },
+              {
+                "depth": 0.25,
+                "expected": "46044186",
+                "answer": "The user is asking for the vault code for shipment VL-38045. I need to search through the provided text for this specific shipment code.\n\nLooking through the te",
+                "hit": true,
+                "prompt_tokens": 522619,
+                "cached_tokens": 520192,
+                "computed_tokens": 2427,
+                "prefill_ms": 6806.09999999986,
+                "prefill_ms_per_token": 2.8043263288009315,
+                "ttft_ms": 6966.941106977174,
+                "wall_ms": 8856.912872986868,
+                "finish": "stop",
+                "cold": false,
+                "prompt_sha256": "5af8401f68987e92716cb5bdeaf3a32dd9ed9d7fc27316d8d031a097e530a276",
+                "completion_tokens": 98,
+                "text_sha256": "7855bc2913852d45efccf0591444bbe5873d45b7232a9ffdf21fa5aaa4ee751f"
+              },
+              {
+                "depth": 0.5,
+                "expected": "59349529",
+                "answer": "The user is asking for the vault code for shipment VL-96058. I need to search through the provided text for this specific shipment code.\n\nLooking through the te",
+                "hit": true,
+                "prompt_tokens": 522619,
+                "cached_tokens": 520192,
+                "computed_tokens": 2427,
+                "prefill_ms": 6813.200000000186,
+                "prefill_ms_per_token": 2.8072517511331627,
+                "ttft_ms": 6946.354931977112,
+                "wall_ms": 9039.994735998334,
+                "finish": "stop",
+                "cold": false,
+                "prompt_sha256": "1d1eed64fce55c2a9140b01ac827907048a04bbe2372b918280455003457a13b",
+                "completion_tokens": 104,
+                "text_sha256": "4eec7437de9763c3ceeceafc816fac5ffe35f345f898605a4faf1ae9429dd95c"
+              },
+              {
+                "depth": 0.75,
+                "expected": "59435610",
+                "answer": "The user is asking for the vault code for shipment VL-41415. I need to search through the provided text for the mention of this shipment's vault code.\n\nLooking ",
+                "hit": true,
+                "prompt_tokens": 522619,
+                "cached_tokens": 520192,
+                "computed_tokens": 2427,
+                "prefill_ms": 6817.5,
+                "prefill_ms_per_token": 2.8090234857849197,
+                "ttft_ms": 6969.058966002194,
+                "wall_ms": 9011.762734007789,
+                "finish": "stop",
+                "cold": false,
+                "prompt_sha256": "2323530dc4eeac670103a38a9213d9c767ecb3fc5e68084f4add913c64d68176",
+                "completion_tokens": 100,
+                "text_sha256": "1120826578fb9f1b9e05011b704015de48ca1f1863fab20a8e3ce382a36bdabb"
+              },
+              {
+                "depth": 0.95,
+                "expected": "30793231",
+                "answer": "The user is asking for the vault code for shipment VL-49585. I need to search through the provided text for this specific shipment code.\n\nLooking through the te",
+                "hit": true,
+                "prompt_tokens": 522619,
+                "cached_tokens": 520192,
+                "computed_tokens": 2427,
+                "prefill_ms": 6812.799999999814,
+                "prefill_ms_per_token": 2.807086938607257,
+                "ttft_ms": 6967.7503329876345,
+                "wall_ms": 8983.232869999483,
+                "finish": "stop",
+                "cold": false,
+                "prompt_sha256": "84bbe5b9d560216f2a241635c76a6b42acf15264c7725c7556aa6023feabf7e6",
+                "completion_tokens": 103,
+                "text_sha256": "8d74ff1515f2e111d751361c8f72ccc97c6249f6e7a7d35a67b3afe85d3e37fe"
+              }
+            ],
+            "hits": 5,
+            "requests": 5,
+            "hit_rate": 1.0,
+            "cold_prefill_ms": 656732.8,
+            "cold_prefill_ms_per_token": 1.2766297258891932
+          },
+          "cache_reuse": {
+            "depth": 0.95,
+            "expected": "30793231",
+            "answer": "The user is asking for the vault code for shipment VL-49585. I need to search through the provided text for this specific shipment code.\n\nLooking through the te",
+            "hit": true,
+            "prompt_tokens": 522619,
+            "cached_tokens": 522612,
+            "computed_tokens": 7,
+            "prefill_ms": 123.5,
+            "prefill_ms_per_token": 17.642857142857142,
+            "ttft_ms": 270.4881459940225,
+            "wall_ms": 2287.367387994891,
+            "finish": "stop",
+            "cold": false,
+            "prompt_sha256": "84bbe5b9d560216f2a241635c76a6b42acf15264c7725c7556aa6023feabf7e6",
+            "completion_tokens": 103,
+            "text_sha256": "8d74ff1515f2e111d751361c8f72ccc97c6249f6e7a7d35a67b3afe85d3e37fe",
+            "cached_ratio": 0.9999866059213308
+          },
+          "decode": {
+            "prompt_tokens": 8213,
+            "completion_tokens": 128,
+            "ttft_ms": 5325.488322996534,
+            "wall_ms": 7347.54210698884,
+            "ms_per_token": 15.920497062955214,
+            "finish": "length",
+            "text_sha256": "22b92e22408daecda24faadbb32dcac1c2cc2e2a4a93a6c951b7d3b7b4b39d01"
+          },
+          "concurrent": {
+            "requests": 2,
+            "completed": 2,
+            "errors": [],
+            "wall_s": 16.27747334301239,
+            "completion_tokens": 194,
+            "aggregate_tokens_per_s": 11.918311639151327,
+            "ttft_ms": [
+              6996.164095995482,
+              13846.887558989692
+            ],
+            "ttft_median_ms": 10421.525827492587,
+            "per_token_ms": [
+              97.11053470535644,
+              24.9787318041985
+            ]
+          }
+        }
+      },
+      "calibration": {
+        "probe_records": 256,
+        "probe_prompt_tokens": 11549,
+        "tokens_per_record": 45.01953125
+      },
+      "short_context": {
+        "probes": [
+          {
+            "depth": 0.05,
+            "expected": "24144786",
+            "answer": "We need answer user's question: \"What is the vault code for shipment VL-65993? Answer with the digits only, nothing else.\" Need extract from provided text. It s",
+            "hit": true,
+            "prompt_tokens": 4273,
+            "cached_tokens": 0,
+            "computed_tokens": 4273,
+            "prefill_ms": 2903.0,
+            "prefill_ms_per_token": 0.6793821670957173,
+            "ttft_ms": 2922.5152420112863,
+            "wall_ms": 4534.931136993691,
+            "finish": "stop",
+            "cold": true,
+            "prompt_sha256": "c4970b09854818609e6b3cd9785773bb4971b4c75fc94f052ce7339b2f1bf8e5",
+            "completion_tokens": 104,
+            "text_sha256": "1abf7279ef9f545836c6ec688c920c930aa53a955f9586e0cc14a257fec926a9"
+          },
+          {
+            "depth": 0.25,
+            "expected": "46044186",
+            "answer": "We need answer user's question: \"What is the vault code for shipment VL-38045? Answer with the digits only, nothing else.\" Need extract from provided text. Ther",
+            "hit": true,
+            "prompt_tokens": 4273,
+            "cached_tokens": 0,
+            "computed_tokens": 4273,
+            "prefill_ms": 2902.3000000000466,
+            "prefill_ms_per_token": 0.6792183477650472,
+            "ttft_ms": 2922.5336810050067,
+            "wall_ms": 6073.205078981118,
+            "finish": "stop",
+            "cold": false,
+            "prompt_sha256": "2200cab7ea260067f4e7915fcee12f9de79f8577af7f1a3a5c552f2b0c2de786",
+            "completion_tokens": 205,
+            "text_sha256": "4a2a62278a2d12c760f3a919db8b21478cc5b502ebcb61d6ed823139a6837eee"
+          },
+          {
+            "depth": 0.5,
+            "expected": "59349529",
+            "answer": "We need answer user's question: \"What is the vault code for shipment VL-96058? Answer with the digits only, nothing else.\" Need extract from provided text. Ther",
+            "hit": true,
+            "prompt_tokens": 4273,
+            "cached_tokens": 0,
+            "computed_tokens": 4273,
+            "prefill_ms": 2909.5,
+            "prefill_ms_per_token": 0.6809033465948982,
+            "ttft_ms": 2921.9410289952066,
+            "wall_ms": 5997.178069985239,
+            "finish": "stop",
+            "cold": false,
+            "prompt_sha256": "6f52672f435d11f8a3fa03d7705b7d9e2ce0cb23393645625aefb7842c096323",
+            "completion_tokens": 205,
+            "text_sha256": "066dc0a9abd50e1a0f9c18fdfd7a8e4d3bb67b0b2654dd42e389c61215cd779f"
+          },
+          {
+            "depth": 0.75,
+            "expected": "59435610",
+            "answer": "We need answer user's question: \"What is the vault code for shipment VL-41415? Answer with the digits only, nothing else.\" Need extract from provided text. Ther",
+            "hit": true,
+            "prompt_tokens": 4273,
+            "cached_tokens": 0,
+            "computed_tokens": 4273,
+            "prefill_ms": 2903.1999999999534,
+            "prefill_ms_per_token": 0.6794289726187581,
+            "ttft_ms": 2924.9115489947144,
+            "wall_ms": 6027.433299983386,
+            "finish": "stop",
+            "cold": false,
+            "prompt_sha256": "155e089d3fd8b535d5d6daa42d033d844313d27c5f705d0494b87d9289f7ab74",
+            "completion_tokens": 205,
+            "text_sha256": "21be37503101ea9e293a3bfcea15633bd3993655d18813ff1370ed95ed57d8bc"
+          },
+          {
+            "depth": 0.95,
+            "expected": "30793231",
+            "answer": "We need answer user's question: \"What is the vault code for shipment VL-49585? Answer with the digits only, nothing else.\" Need extract from provided text. Ther",
+            "hit": true,
+            "prompt_tokens": 4273,
+            "cached_tokens": 0,
+            "computed_tokens": 4273,
+            "prefill_ms": 2902.100000000093,
+            "prefill_ms_per_token": 0.6791715422420064,
+            "ttft_ms": 2923.8079960050527,
+            "wall_ms": 5872.38878099015,
+            "finish": "stop",
+            "cold": false,
+            "prompt_sha256": "3bc7a606b7f5f965a290384b1db2dee3cf81d8ef825e785a5e9d0562d9da879d",
+            "completion_tokens": 199,
+            "text_sha256": "dbfb576173a87e3e3f5bca660353380fd37636b55f29af14d3ead89a58626044"
+          }
+        ],
+        "hits": 5,
+        "requests": 5,
+        "hit_rate": 1.0,
+        "cold_prefill_ms": 2903.0,
+        "cold_prefill_ms_per_token": 0.6793821670957173
+      }
+    }
+  },
+  "peak_memory": {
+    "available": true,
+    "node": "edgexpert-409e",
+    "peak_mib": 52962,
+    "samples": 491
+  },
+  "attempts": [
+    {
+      "started": "2026-09-22T07:19:40+0000",
+      "finished": "2026-09-22T07:36:30+0000",
+      "peak_memory": {
+        "available": true,
+        "node": "edgexpert-409e",
+        "peak_mib": 52962,
+        "samples": 491
+      }
+    }
+  ],
+  "status": "completed",
+  "verdict": {
+    "checks": [
+      {
+        "check": "retrieval@262144",
+        "dgpp_hits": 5,
+        "requests": 5,
+        "floor": 0.6,
+        "ok": true
+      },
+      {
+        "check": "retrieval@524288",
+        "dgpp_hits": 5,
+        "requests": 5,
+        "floor": 0.6,
+        "ok": true
+      },
+      {
+        "check": "short_context@4096",
+        "dgpp_hits": 5,
+        "requests": 5,
+        "floor": 0.6,
+        "ok": true
+      },
+      {
+        "check": "concurrent@dgpp/262144",
+        "completed": 2,
+        "requests": 2,
+        "ok": true
+      },
+      {
+        "check": "concurrent@dgpp/524288",
+        "completed": 2,
+        "requests": 2,
+        "ok": true
+      }
+    ],
+    "pass": true
+  },
+  "finished": "2026-09-22T07:36:30+0000"
+}

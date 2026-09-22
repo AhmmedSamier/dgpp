@@ -1,0 +1,20 @@
+{
+  "command": [
+    "/usr/bin/python3",
+    "/home/stephen/workspace/dgpp/scripts/timed_load.py",
+    "127.0.0.1",
+    "18080",
+    "--concurrency",
+    "1,2,4",
+    "--classes",
+    "all",
+    "--repeat",
+    "3",
+    "--max-tokens",
+    "256",
+    "--json-out",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm-flash-fp8-w4/performance/default/greedy.json"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-09-22T02:07:56.757463+00:00"
+}

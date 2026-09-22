@@ -1,0 +1,30 @@
+{
+  "paused_at": "2026-09-22T04:06:43.842778+00:00",
+  "reason": "User requested exclusive cluster access for an unrelated task. Resume only after explicit user signal.",
+  "last_completed": "glm-flash-hybrid-256k-w2/performance",
+  "runner_exit_code": 0,
+  "idle_verification": {
+    "nodes": [
+      "192.168.88.11",
+      "192.168.88.12",
+      "192.168.88.13",
+      "192.168.88.14"
+    ],
+    "dgpp_server_processes": 0,
+    "gpu_compute_processes": 0,
+    "local_benchmark_client_processes": 0
+  },
+  "resumed_at": "2026-09-22T05:15:17.094626+00:00",
+  "resume_verification": {
+    "source": "a3ed8994a34cf05f79e63dc1ad51ffd1f65c9f82",
+    "binary_sha256": "bdf69fe085e06b757ee26fb4d236ab3fafd71378f8ead88685209723d46e607c",
+    "gpu_temperatures_c": [
+      42,
+      39,
+      39,
+      48
+    ],
+    "active_thermal_slowdown": false,
+    "gpu_compute_processes": 0
+  }
+}

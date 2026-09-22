@@ -1,0 +1,26 @@
+{
+  "model": "unsloth/GLM-5.3-Flash-FP8",
+  "world_size": 4,
+  "release": "",
+  "engine": {
+    "max_concurrency": 4,
+    "kv_capacity": 393216,
+    "kv_dtype": "bf16",
+    "bf16_weights": "bf12+bf16",
+    "default_max_tokens": 256,
+    "queue_limit": 8,
+    "max_connections": 64,
+    "decode_graph": true,
+    "prefill_budget_tokens": 256,
+    "prefill_idle_budget_tokens": 2048,
+    "mtp": true,
+    "prefix_cache_gib": 8,
+    "admission": "full",
+    "admission_window": 256,
+    "sampling_candidates": 128,
+    "stats_interval_s": 10
+  },
+  "paths": {
+    "resident_cache": ""
+  }
+}

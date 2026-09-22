@@ -1,0 +1,2 @@
+2026-09-22T12:57:34+00:00 spark-a289 kernel: audit: type=1400 audit(1790081854.087:178): apparmor="DENIED" operation="capable" class="cap" profile="ubuntu_pro_esm_cache_systemd_detect_virt" pid=267204 comm="systemd-detect-" capability=38  capname="perfmon"
+2026-09-22T12:57:34+00:00 spark-a289 kernel: audit: type=1400 audit(1790081854.089:179): apparmor="DENIED" operation="capable" class="cap" profile="ubuntu_pro_esm_cache//cloud_id" pid=267199 comm="cloud-id" capability=38  capname="perfmon"

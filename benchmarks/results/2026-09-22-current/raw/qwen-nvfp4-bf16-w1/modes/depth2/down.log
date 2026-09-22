@@ -1,0 +1,5 @@
+2026-09-22 08:08:14.517 === SIGINT rank 0 (2603247) — the stop record releases the peers
+2026-09-22 08:08:16.518 === op-stream identity (every rank)
+2026-09-22 08:08:16.519 3d8c2a8254bdd5eef85e3e18f6394757  /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/qwen-nvfp4-bf16-w1/modes/depth2/server/serve_rank0.ops
+2026-09-22 08:08:16.519 op streams: identical across 1 ranks
+2026-09-22 08:08:16.519 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/qwen-nvfp4-bf16-w1/modes/depth2/server

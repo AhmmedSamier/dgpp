@@ -1,0 +1,36 @@
+{
+  "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+  "settings": {
+    "max_tokens": 2048,
+    "reasoning_effort": "low",
+    "no_think": false,
+    "limit": 300,
+    "seed": 20260908
+  },
+  "tasks": {
+    "humaneval": {
+      "n": 164,
+      "passed": 157,
+      "rate": 0.9573,
+      "seconds": 589,
+      "mean_completion_tokens": 176,
+      "truncated": 0
+    },
+    "gsm8k": {
+      "n": 300,
+      "passed": 292,
+      "rate": 0.9733,
+      "seconds": 548,
+      "mean_completion_tokens": 77,
+      "truncated": 0
+    },
+    "extract": {
+      "n": 100,
+      "passed": 100,
+      "rate": 1.0,
+      "seconds": 137,
+      "mean_completion_tokens": 51,
+      "truncated": 0
+    }
+  }
+}

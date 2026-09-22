@@ -1,0 +1,7 @@
+2026-09-22 07:00:04.756 === SIGINT rank 0 (2536499) — the stop record releases the peers
+2026-09-22 07:00:06.758 === waiting for the peers to drain
+2026-09-22 07:00:08.055 === op-stream identity (every rank)
+2026-09-22 07:00:08.056 b2bc118274047b4b263c7cf0ae76239f  /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/qwen-yarn-w2/modes/plain/server/serve_rank0.ops
+2026-09-22 07:00:08.056 b2bc118274047b4b263c7cf0ae76239f  /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/qwen-yarn-w2/modes/plain/server/serve_rank1.ops
+2026-09-22 07:00:08.056 op streams: identical across 2 ranks
+2026-09-22 07:00:08.056 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/qwen-yarn-w2/modes/plain/server

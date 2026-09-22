@@ -1,0 +1,5 @@
+model nvidia/Qwen3.8-Flash-Next-NVFP4
+warm 0: status 200 tokens 64
+== isolation: prompt 0 alone (256 tokens) vs beside 3 others (256 tokens): DIFFERENT
+   first difference at char 556: alone 'solution, popularized by systems like vLLM, is the paged KV ' | batched 'introduction of the Paged Key-Value Cache, popularized by sy'
+transcript isolation failed

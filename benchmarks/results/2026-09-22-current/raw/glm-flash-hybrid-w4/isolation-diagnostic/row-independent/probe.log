@@ -1,0 +1,72 @@
+== isolation-c1concurrency 1: 02:12:50.701 .. 02:12:55.342  wall 4.6 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 76 ms  client update pace 17.90 ms/update
+   aggregate wall: 256 tokens in 4.64 s = 55.15 tok/s (prefill included)
+   legacy output-span aggregate: 56.086990243491044 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 55.722 tok/s
+PROBE 1 {"text_sha256": "37225350895f9b5f9fb29991072ec041be2064de1e9d6a57cf34449f59748f9f", "identical_to_first_solo": true, "first_difference": null, "solo_excerpt": "", "batch_excerpt": ""}
+== isolation-c1concurrency 1: 02:12:55.345 .. 02:12:59.987  wall 4.6 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 76 ms  client update pace 17.91 ms/update
+   aggregate wall: 256 tokens in 4.64 s = 55.14 tok/s (prefill included)
+   legacy output-span aggregate: 56.067711148895796 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 55.769 tok/s
+PROBE 1 {"text_sha256": "37225350895f9b5f9fb29991072ec041be2064de1e9d6a57cf34449f59748f9f", "identical_to_first_solo": true, "first_difference": null, "solo_excerpt": "", "batch_excerpt": ""}
+== isolation-c2concurrency 2: 02:12:59.990 .. 02:13:06.699  wall 6.7 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 77 ms  client update pace 26.01 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 407 ms  client update pace 24.51 ms/update
+   aggregate wall: 512 tokens in 6.71 s = 76.32 tok/s (prefill included)
+   legacy output-span aggregate: 77.20590026564334 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 81.026 tok/s
+PROBE 2 {"text_sha256": "37225350895f9b5f9fb29991072ec041be2064de1e9d6a57cf34449f59748f9f", "identical_to_first_solo": true, "first_difference": null, "solo_excerpt": "", "batch_excerpt": ""}
+== isolation-c2concurrency 2: 02:13:06.704 .. 02:13:13.158  wall 6.5 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 77 ms  client update pace 24.91 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 153 ms  client update pace 24.51 ms/update
+   aggregate wall: 512 tokens in 6.45 s = 79.32 tok/s (prefill included)
+   legacy output-span aggregate: 80.60070317488939 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 80.974 tok/s
+PROBE 2 {"text_sha256": "37225350895f9b5f9fb29991072ec041be2064de1e9d6a57cf34449f59748f9f", "identical_to_first_solo": true, "first_difference": null, "solo_excerpt": "", "batch_excerpt": ""}
+== isolation-c3concurrency 3: 02:13:13.199 .. 02:13:21.770  wall 8.6 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 77 ms  client update pace 32.91 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 535 ms  client update pace 31.11 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 256 ttft 433 ms  client update pace 31.91 ms/update
+   aggregate wall: 768 tokens in 8.57 s = 89.60 tok/s (prefill included)
+   legacy output-span aggregate: 90.42683553965706 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 94.599 tok/s
+PROBE 3 {"text_sha256": "37225350895f9b5f9fb29991072ec041be2064de1e9d6a57cf34449f59748f9f", "identical_to_first_solo": true, "first_difference": null, "solo_excerpt": "", "batch_excerpt": ""}
+== isolation-c3concurrency 3: 02:13:21.775 .. 02:13:30.074  wall 8.3 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 76 ms  client update pace 31.84 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 253 ms  client update pace 31.15 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 256 ttft 152 ms  client update pace 31.95 ms/update
+   aggregate wall: 768 tokens in 8.30 s = 92.54 tok/s (prefill included)
+   legacy output-span aggregate: 93.41183926697883 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 94.567 tok/s
+PROBE 3 {"text_sha256": "37225350895f9b5f9fb29991072ec041be2064de1e9d6a57cf34449f59748f9f", "identical_to_first_solo": true, "first_difference": null, "solo_excerpt": "", "batch_excerpt": ""}
+== isolation-c4concurrency 4: 02:13:30.080 .. 02:13:40.345  wall 10.3 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 408 ms  client update pace 38.15 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 510 ms  client update pace 37.45 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 256 ttft 612 ms  client update pace 37.85 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 256 ttft 332 ms  client update pace 36.16 ms/update
+   aggregate wall: 1024 tokens in 10.26 s = 99.76 tok/s (prefill included)
+   legacy output-span aggregate: 103.09620406781491 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 104.782 tok/s
+PROBE 4 {"text_sha256": "37225350895f9b5f9fb29991072ec041be2064de1e9d6a57cf34449f59748f9f", "identical_to_first_solo": true, "first_difference": null, "solo_excerpt": "", "batch_excerpt": ""}
+== isolation-c4concurrency 4: 02:13:40.351 .. 02:13:50.392  wall 10.0 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 255 ms  client update pace 37.97 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 77 ms  client update pace 37.67 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 256 ttft 356 ms  client update pace 37.98 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 256 ttft 153 ms  client update pace 36.07 ms/update
+   aggregate wall: 1024 tokens in 10.04 s = 101.98 tok/s (prefill included)
+   legacy output-span aggregate: 102.78402584021714 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 104.430 tok/s
+PROBE 4 {"text_sha256": "37225350895f9b5f9fb29991072ec041be2064de1e9d6a57cf34449f59748f9f", "identical_to_first_solo": true, "first_difference": null, "solo_excerpt": "", "batch_excerpt": ""}
+== isolation-c1concurrency 1: 02:13:50.402 .. 02:13:55.077  wall 4.7 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 77 ms  client update pace 18.03 ms/update
+   aggregate wall: 256 tokens in 4.67 s = 54.76 tok/s (prefill included)
+   legacy output-span aggregate: 55.68986806033047 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 55.629 tok/s
+PROBE 1 {"text_sha256": "37225350895f9b5f9fb29991072ec041be2064de1e9d6a57cf34449f59748f9f", "identical_to_first_solo": true, "first_difference": null, "solo_excerpt": "", "batch_excerpt": ""}
+== isolation-c1concurrency 1: 02:13:55.085 .. 02:13:59.758  wall 4.7 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 77 ms  client update pace 18.03 ms/update
+   aggregate wall: 256 tokens in 4.67 s = 54.77 tok/s (prefill included)
+   legacy output-span aggregate: 55.69206985939459 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 55.593 tok/s
+PROBE 1 {"text_sha256": "37225350895f9b5f9fb29991072ec041be2064de1e9d6a57cf34449f59748f9f", "identical_to_first_solo": true, "first_difference": null, "solo_excerpt": "", "batch_excerpt": ""}

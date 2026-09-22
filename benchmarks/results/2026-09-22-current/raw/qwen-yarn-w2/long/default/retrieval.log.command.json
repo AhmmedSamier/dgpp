@@ -1,0 +1,22 @@
+{
+  "command": [
+    "/usr/bin/python3",
+    "/home/stephen/workspace/dgpp/scripts/qwen_yarn_release_check.py",
+    "--run",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "18080",
+    "--lengths",
+    "262144",
+    "524288",
+    "--concurrency",
+    "2",
+    "--json-out",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/qwen-yarn-w2/long/default/retrieval.json"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-09-22T07:19:40.914142+00:00",
+  "returncode": 0,
+  "finished_at": "2026-09-22T07:36:30.221043+00:00"
+}

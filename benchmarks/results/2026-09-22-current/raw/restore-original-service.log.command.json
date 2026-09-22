@@ -1,0 +1,15 @@
+{
+  "command": [
+    "/usr/bin/python3",
+    "/home/stephen/workspace/dgpp/scripts/dgpp-cluster",
+    "up",
+    "--config",
+    "/home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json",
+    "--bin",
+    "/home/stephen/workspace/dgpp/build-release/dgpp-serve"
+  ],
+  "started_at": "2026-09-22T14:05:23.728533+00:00",
+  "cwd": "/home/stephen/workspace/dgpp",
+  "returncode": 0,
+  "finished_at": "2026-09-22T14:05:57.805293+00:00"
+}

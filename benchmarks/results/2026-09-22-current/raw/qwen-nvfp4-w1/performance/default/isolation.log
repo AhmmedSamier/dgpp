@@ -1,0 +1,11 @@
+model nvidia/Qwen3.8-Flash-Next-NVFP4
+warm 0: status 200 tokens 64
+== isolation: prompt 0 alone (256 tokens) vs beside 3 others (256 tokens): IDENTICAL
+== chat concurrency 1: 03:08:10.776 .. 03:08:17.086  wall 6.3 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 306 ms  client update pace 23.54 ms/update
+   aggregate wall: 256 tokens in 6.31 s = 40.57 tok/s (prefill included)
+   legacy output-span aggregate: 42.64741063574463 tok/s (initial TTFT excluded; later admissions included)
+== per-class wall aggregate tokens/s (prefill included), greedy, max_tokens 256
+| class | c=1 |
+|---|---|
+| chat | 40.6 |

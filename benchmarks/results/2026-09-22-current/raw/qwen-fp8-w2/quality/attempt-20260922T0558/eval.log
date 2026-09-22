@@ -1,0 +1,32 @@
+HumanEval container image: sha256:8630ab77c5adf06e1f914483db4dd70e3fa59118160daab9b0ee75e685344221
+Traceback (most recent call last):
+  File "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/isolated_eval.py", line 37, in <module>
+    runpy.run_path(str(ROOT / "scripts/serve_eval.py"), run_name="__main__")
+  File "<frozen runpy>", line 286, in run_path
+  File "<frozen runpy>", line 98, in _run_module_code
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/stephen/workspace/dgpp/scripts/serve_eval.py", line 247, in <module>
+    for res in pool.map(run_fn, items):
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 619, in result_iterator
+    yield _result_or_cancel(fs.pop())
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 317, in _result_or_cancel
+    return fut.result(timeout)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/stephen/workspace/dgpp/scripts/serve_eval.py", line 123, in humaneval_run
+    r = chat([{"role": "user", "content": prompt}])
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/stephen/workspace/dgpp/scripts/serve_eval.py", line 96, in chat
+    r = request("/v1/chat/completions", body)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/stephen/workspace/dgpp/scripts/serve_eval.py", line 79, in request
+    raise RuntimeError(f"{path}: {resp.status} {data[:300]}")
+RuntimeError: /v1/chat/completions: 400 {"error":{"message":"reasoning_effort conflicts with the explicit thinking switch","type":"invalid_request_error","param":"chat_template_kwargs.enable_thinking","code":null}}

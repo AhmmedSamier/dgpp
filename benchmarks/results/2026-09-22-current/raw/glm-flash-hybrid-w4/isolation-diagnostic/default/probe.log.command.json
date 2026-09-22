@@ -1,0 +1,12 @@
+{
+  "command": [
+    "/usr/bin/python3",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/isolation_probe.py",
+    "--json-out",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm-flash-hybrid-w4/isolation-diagnostic/default/probe.json"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-09-22T02:10:56.571736+00:00",
+  "returncode": 0,
+  "finished_at": "2026-09-22T02:12:05.643675+00:00"
+}

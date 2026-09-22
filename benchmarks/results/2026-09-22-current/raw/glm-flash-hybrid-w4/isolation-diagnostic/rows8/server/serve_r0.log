@@ -1,0 +1,215 @@
+2026-09-22 02:16:33.599 INFO  dgpp-serve 0.1.0+ga3ed8994a34c (git a3ed8994a34c)
+2026-09-22 02:16:33.599 INFO  config /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm-flash-hybrid-w4/isolation-diagnostic/rows8/server/cluster.resolved.json: model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8, world 4, rank 0, http :18080, fabric :29970, journal :29971
+2026-09-22 02:16:33.599 INFO  model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 -> /home/stephen/.cache/huggingface/hub/models--HawkBearPig--GLM-5.3-Flash-NVFP4-FP8/snapshots/17b8d4d83e33e836e9549d7e1a8d25b5117203c1
+2026-09-22 02:16:33.599 INFO  journal: listening on :29971 for 3 peer(s)
+2026-09-22 02:16:35.925 INFO  journal: rank 1 connected (1/3, 119999ms left in window)
+2026-09-22 02:16:35.936 INFO  journal: rank 2 connected (2/3, 117674ms left in window)
+2026-09-22 02:16:35.949 INFO  journal: rank 3 connected (3/3, 117663ms left in window)
+2026-09-22 02:16:35.949 INFO  journal: world complete (3 peer connection(s))
+2026-09-22 02:16:35.949 INFO  journal: settings pushed to 3 peer(s): model=HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 world=4 fabric=29970 journal=29971 conc=4 kv=786432 kvdt=bf16 ngt=resident dw=checkpoint bfw=bf12+bf16 fp8head=gemv pf=bounded emsh=replicated maxtok=256 queue=8 eos=1 graph=1 compact=0 mtp=1 mtpd=1 mss=0 msrow=8 msbase=28 mslam=0 msmin=1 msad=1 batchmin=2 cand=128 pcgib=8 adm=full win=256 pfbudget=256 pfidle=2048 pace=-1 inflight=-1 reasoning_in_content=0 rs=off
+2026-09-22 02:16:35.949 INFO  config: model=HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 world=4 fabric=29970 journal=29971 conc=4 kv=786432 kvdt=bf16 ngt=resident dw=checkpoint bfw=bf12+bf16 fp8head=gemv pf=bounded emsh=replicated maxtok=256 queue=8 eos=1 graph=1 compact=0 mtp=1 mtpd=1 mss=0 msrow=8 msbase=28 mslam=0 msmin=1 msad=1 batchmin=2 cand=128 pcgib=8 adm=full win=256 pfbudget=256 pfidle=2048 pace=-1 inflight=-1 reasoning_in_content=0 rs=off (digest ee39883879453127)
+2026-09-22 02:16:36.074 INFO  serve: model family glm5 (/home/stephen/.cache/huggingface/hub/models--HawkBearPig--GLM-5.3-Flash-NVFP4-FP8/snapshots/17b8d4d83e33e836e9549d7e1a8d25b5117203c1)
+2026-09-22 02:16:36.074 INFO  serve: decode rows 8 (4 slot(s) x 2 row(s) per request, floor 8, the glm5 family's cap 8)
+2026-09-22 02:16:36.074 WARN  generation config /home/stephen/.cache/huggingface/hub/models--HawkBearPig--GLM-5.3-Flash-NVFP4-FP8/snapshots/17b8d4d83e33e836e9549d7e1a8d25b5117203c1/generation_config.json omits top_k, min_p, repetition_penalty; using greedy-safe/neutral fallbacks for those fields
+2026-09-22 02:16:36.074 INFO  generation defaults: temperature=1 top_p=0.95 top_k=0 min_p=0 repetition_penalty=1
+2026-09-22 02:16:36.074 INFO  serve: sampling defaults temperature 1 top_p 0.95 top_k 0 min_p 0 repetition_penalty 1 (from generation_config.json; overrides: none)
+2026-09-22 02:16:36.074 INFO  serve: request context limit 786432 tokens (the 786432-token K/V pool from engine.kv_capacity 786432; this family states no positional ceiling of its own)
+2026-09-22 02:16:36.074 INFO  rank 0: prefix cache plan — 8 GiB budget, 232 slots of 35.227 MiB, 7.981 GiB allocated; cached K/V blocks share the 786432-token pool
+2026-09-22 02:16:36.247 INFO  tokenizer: loaded vocab 154820 merges 321649 added 36 (revision 0x700b4469fc43f23b; glm pattern, no normalizer, ignore_merges true)
+2026-09-22 02:16:36.257 INFO  serve: grammar vocabulary built (154880 ids, tool markers present, call-turn EOS 154829)
+2026-09-22 02:16:36.367 INFO  serve: JSON grammar tables built in 0.11 s
+2026-09-22 02:16:37.069 INFO  bus: globaltimer offset 20188519297 ns (+-2 us)
+2026-09-22 02:16:37.079 INFO  verbs: device roceP2p1s0f0 port 1 gid_index 3
+2026-09-22 02:16:37.088 INFO  verbs: device rocep1s0f0 port 1 gid_index 3
+2026-09-22 02:16:37.158 INFO  bus: rank 0 rendezvous listening on port 29970
+2026-09-22 02:16:37.675 INFO  bus: rank 0 up — 3 peer(s) x 2 lane(s), lat 8x65536B, bulk 8x262144B, bulk pace 28.3 Gb/s per QP, window 4 per lane
+2026-09-22 02:16:37.675 INFO  rank 0: boundary reducer host-driven
+2026-09-22 02:16:37.824 INFO  rank 0: process memory locked (mlockall MCL_CURRENT, 14513 MiB)
+2026-09-22 02:16:37.824 INFO  rank 0: resident image cache at /home/stephen/.cache/dgpp/resident
+2026-09-22 02:16:37.825 INFO  bus engine: rank 0 pinned to cpu 19
+2026-09-22 02:16:37.883 INFO  rank 0: memory plan for a 786432-token context — vision weights (replicated) 1.05 GiB; vision workspace (bounded image prefill) 0.33 GiB; model weights (resident) 48.27 GiB (1.81 GiB pinned); tensor-parallel slice views 0.67 GiB; bf16 decode packing (12-bit companions) 1.96 GiB; gemm workspace (at least) 0.06 GiB; kda scratch 0.08 GiB; kv cache pool (bf16) 9.29 GiB; dsa scratch 0.23 GiB; moe scratch 0.68 GiB (0.00 GiB pinned); kda state (request slots) 0.14 GiB; kda speculative snapshots 0.27 GiB; draft hidden cache (per position) 24.00 GiB; draft activations 0.05 GiB; activations (per-forward rows) 0.61 GiB (0.00 GiB pinned); route-trace staging 0.10 GiB (0.10 GiB pinned); prefix cache 7.98 GiB; engine 0.08 GiB
+2026-09-22 02:16:37.883 INFO  rank 0: memory plan total 95.85 GiB (85.87 GiB device + 9.97 GiB pinned) + 4.00 GiB headroom against 115.97 GiB free (device free 112.67 GiB of 121.63 GiB, host available 115.97 GiB)
+2026-09-22 02:16:37.883 INFO  memory ledger: rank 0 after the plan check — rss 1.26 GiB (anon 0.41, shmem 0.21, file 0.64; locked 14.17); device free 112.67 GiB, node available 115.97 GiB
+2026-09-22 02:16:37.883 INFO  memory ledger: rank 0 after the bus — rss 1.26 GiB (anon 0.41, shmem 0.21, file 0.64; locked 14.17); device free 112.67 GiB, node available 115.97 GiB
+2026-09-22 02:16:38.210 INFO  glm loader: rank 0 resident footprint 46.5 GiB; device free 112.6 of 121.6 GiB, host available 115.9 GiB
+2026-09-22 02:16:39.100 INFO  glm loader: rank 0 resident image /home/stephen/.cache/dgpp/resident/fcd6413a7faac259.img — 46/46 layers present, direct I/O
+2026-09-22 02:16:39.137 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-22 02:16:39.137 INFO  glm loader: rank 0 boot digest from the resident image (713 tensors, 2.91 GiB)
+2026-09-22 02:16:53.454 INFO  glm loader: rank 0 resident load complete — released 40 shard mappings (181.7 GiB) and evicted their page cache; image: 46 layers restored, 0 captured
+2026-09-22 02:16:53.815 INFO  rank 0 bf12: 70 decode matrices packed (2.55 GiB of bf16 -> 1.92 GiB, 218034 escapes, widest row 64, 35 rows kept raw; 0 matrices kept bf16) in 1.4 s
+2026-09-22 02:16:58.058 INFO  rank 0 boot phases: digest 0.0 s (3.96 GiB hashed), globals 1.1 s, layers 16.6 s
+2026-09-22 02:16:58.059 INFO  memory ledger: rank 0 after the model — rss 3.23 GiB (anon 0.46, shmem 2.13, file 0.64; locked 14.16); device free 23.88 GiB, node available 27.15 GiB
+2026-09-22 02:16:58.059 INFO  rank 0: model constructed in 20.2s (resident, 4 request slots, 786432-token pool in bf16, 2048-row forwards)
+2026-09-22 02:16:58.059 INFO  rank 0: prefix cache on — 232 snapshot slot(s) of 35.2 MiB (8.00 GiB asked)
+2026-09-22 02:16:58.336 INFO  rank 0: graph engine samples on the device — 112 candidates per rank (8 rows x 4 ranks in a 65536-byte latency slot; the planned width is 128); constrained decoding available
+2026-09-22 02:16:58.336 INFO  memory ledger: rank 0 after the graph engine — rss 3.24 GiB (anon 0.46, shmem 2.13, file 0.64; locked 14.16); device free 15.76 GiB, node available 19.03 GiB
+2026-09-22 02:16:58.607 INFO  allreduce: device clock rate 2418000 kHz (stamps conversion)
+2026-09-22 02:16:58.607 INFO  allreduce: rank 0 seq 1 launched (3 peers)
+2026-09-22 02:16:58.607 INFO  allreduce: rank 0 seq 1 ready after 39.7us
+2026-09-22 02:16:58.607 INFO  allreduce: rank 0 seq 1 done status=0 after 124.8us
+2026-09-22 02:16:58.642 INFO  allreduce: rank 0 seq 2 launched (3 peers)
+2026-09-22 02:16:58.642 INFO  allreduce: rank 0 seq 2 ready after 11.2us
+2026-09-22 02:16:58.642 INFO  allreduce: rank 0 seq 2 done status=0 after 455.1us
+2026-09-22 02:16:58.643 INFO  allreduce: rank 0 seq 3 launched (3 peers)
+2026-09-22 02:16:58.643 INFO  allreduce: rank 0 seq 3 ready after 11.2us
+2026-09-22 02:16:58.643 INFO  allreduce: rank 0 seq 3 done status=0 after 47.8us
+2026-09-22 02:16:58.643 INFO  allreduce: rank 0 seq 4 launched (3 peers)
+2026-09-22 02:16:58.643 INFO  allreduce: rank 0 seq 4 ready after 11.0us
+2026-09-22 02:16:58.643 INFO  allreduce: rank 0 seq 4 done status=0 after 60.3us
+2026-09-22 02:16:58.643 INFO  allreduce: rank 0 seq 5 launched (3 peers)
+2026-09-22 02:16:58.643 INFO  allreduce: rank 0 seq 5 ready after 11.1us
+2026-09-22 02:16:58.643 INFO  allreduce: rank 0 seq 5 done status=0 after 56.8us
+2026-09-22 02:16:58.644 INFO  allreduce: rank 0 seq 6 launched (3 peers)
+2026-09-22 02:16:58.644 INFO  allreduce: rank 0 seq 6 ready after 11.3us
+2026-09-22 02:16:58.644 INFO  allreduce: rank 0 seq 6 done status=0 after 88.6us
+2026-09-22 02:16:58.646 INFO  allreduce: rank 0 seq 7 launched (3 peers)
+2026-09-22 02:16:58.646 INFO  allreduce: rank 0 seq 7 ready after 13.8us
+2026-09-22 02:16:58.647 INFO  allreduce: rank 0 seq 7 done status=0 after 687.9us
+2026-09-22 02:16:58.648 INFO  allreduce: rank 0 seq 8 launched (3 peers)
+2026-09-22 02:16:58.648 INFO  allreduce: rank 0 seq 8 ready after 11.3us
+2026-09-22 02:16:58.648 INFO  allreduce: rank 0 seq 8 done status=0 after 68.6us
+2026-09-22 02:16:58.648 INFO  allreduce: rank 0 seq 9 launched (3 peers)
+2026-09-22 02:16:58.648 INFO  allreduce: rank 0 seq 9 ready after 10.8us
+2026-09-22 02:16:58.648 INFO  allreduce: rank 0 seq 9 done status=0 after 57.8us
+2026-09-22 02:16:58.649 INFO  allreduce: rank 0 seq 10 launched (3 peers)
+2026-09-22 02:16:58.649 INFO  allreduce: rank 0 seq 10 ready after 12.3us
+2026-09-22 02:16:58.649 INFO  allreduce: rank 0 seq 10 done status=0 after 59.3us
+2026-09-22 02:16:58.649 INFO  allreduce: rank 0 seq 11 launched (3 peers)
+2026-09-22 02:16:58.649 INFO  allreduce: rank 0 seq 11 ready after 10.7us
+2026-09-22 02:16:58.649 INFO  allreduce: rank 0 seq 11 done status=0 after 85.1us
+2026-09-22 02:16:58.650 INFO  allreduce: rank 0 seq 12 launched (3 peers)
+2026-09-22 02:16:58.650 INFO  allreduce: rank 0 seq 12 ready after 13.5us
+2026-09-22 02:16:58.650 INFO  allreduce: rank 0 seq 12 done status=0 after 69.2us
+2026-09-22 02:16:58.651 INFO  allreduce: rank 0 seq 13 launched (3 peers)
+2026-09-22 02:16:58.651 INFO  allreduce: rank 0 seq 13 ready after 10.7us
+2026-09-22 02:16:58.651 INFO  allreduce: rank 0 seq 13 done status=0 after 47.6us
+2026-09-22 02:16:58.651 INFO  allreduce: rank 0 seq 14 launched (3 peers)
+2026-09-22 02:16:58.651 INFO  allreduce: rank 0 seq 14 ready after 16.3us
+2026-09-22 02:16:58.651 INFO  allreduce: rank 0 seq 14 done status=0 after 56.3us
+2026-09-22 02:16:58.652 INFO  allreduce: rank 0 seq 15 launched (3 peers)
+2026-09-22 02:16:58.652 INFO  allreduce: rank 0 seq 15 ready after 8.6us
+2026-09-22 02:16:58.652 INFO  allreduce: rank 0 seq 15 done status=0 after 82.9us
+2026-09-22 02:16:58.653 INFO  allreduce: rank 0 seq 16 launched (3 peers)
+2026-09-22 02:16:58.653 INFO  allreduce: rank 0 seq 16 ready after 8.8us
+2026-09-22 02:16:58.653 INFO  allreduce: rank 0 seq 16 done status=0 after 59.4us
+2026-09-22 02:16:58.731 INFO  bus graph era: variant 0 recorded with 94 collective node(s)
+2026-09-22 02:16:58.731 INFO  rank 0: graph variant 0 shape: 1297 nodes, 1612 edges: kernel 1297 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 02:16:58.736 INFO  rank 0: graph variant 0 instantiated — 23.2 MiB of device memory (15.4 GiB free)
+2026-09-22 02:16:58.737 INFO  bus graph era: variant 1 recorded with 94 collective node(s)
+2026-09-22 02:16:58.737 INFO  rank 0: graph variant 1 shape: 1297 nodes, 1612 edges: kernel 1297 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 02:16:58.741 INFO  rank 0: graph variant 1 instantiated — 21.1 MiB of device memory (15.4 GiB free)
+2026-09-22 02:16:58.741 INFO  rank 0: serving scalar graph variants 0/1 captured for request slot 0 (2 rows, MTP)
+2026-09-22 02:16:58.742 INFO  bus graph era: variant 8 recorded with 94 collective node(s)
+2026-09-22 02:16:58.742 INFO  rank 0: graph variant 8 shape: 1299 nodes, 1614 edges: kernel 1299 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 02:16:58.748 INFO  rank 0: graph variant 8 instantiated — 28.5 MiB of device memory (15.4 GiB free)
+2026-09-22 02:16:58.749 INFO  bus graph era: variant 9 recorded with 94 collective node(s)
+2026-09-22 02:16:58.750 INFO  rank 0: graph variant 9 shape: 1299 nodes, 1614 edges: kernel 1299 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 02:16:58.757 INFO  rank 0: graph variant 9 instantiated — 34.6 MiB of device memory (15.3 GiB free)
+2026-09-22 02:16:58.757 INFO  rank 0: serving row-batched graph variants 8/9 captured for 2 slots x 2 rows = 4 fixed rows, MTP (a batch is selected at 2+ live requests, the smallest that covers the live slots)
+2026-09-22 02:16:58.758 INFO  bus graph era: variant 10 recorded with 94 collective node(s)
+2026-09-22 02:16:58.758 INFO  rank 0: graph variant 10 shape: 1508 nodes, 1823 edges: kernel 1508 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 02:16:58.765 INFO  rank 0: graph variant 10 instantiated — 32.8 MiB of device memory (15.3 GiB free)
+2026-09-22 02:16:58.766 INFO  bus graph era: variant 11 recorded with 94 collective node(s)
+2026-09-22 02:16:58.766 INFO  rank 0: graph variant 11 shape: 1508 nodes, 1823 edges: kernel 1508 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 02:16:58.774 INFO  rank 0: graph variant 11 instantiated — 38.1 MiB of device memory (15.3 GiB free)
+2026-09-22 02:16:58.774 INFO  rank 0: serving row-batched graph variants 10/11 captured for 3 slots x 2 rows = 6 fixed rows, MTP (a batch is selected at 2+ live requests, the smallest that covers the live slots)
+2026-09-22 02:16:58.776 INFO  bus graph era: variant 12 recorded with 94 collective node(s)
+2026-09-22 02:16:58.776 INFO  rank 0: graph variant 12 shape: 1510 nodes, 1825 edges: kernel 1510 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 02:16:58.783 INFO  rank 0: graph variant 12 instantiated — 32.1 MiB of device memory (15.2 GiB free)
+2026-09-22 02:16:58.784 INFO  bus graph era: variant 13 recorded with 94 collective node(s)
+2026-09-22 02:16:58.784 INFO  rank 0: graph variant 13 shape: 1510 nodes, 1825 edges: kernel 1510 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 02:16:58.792 INFO  rank 0: graph variant 13 instantiated — 32.8 MiB of device memory (15.2 GiB free)
+2026-09-22 02:16:58.792 INFO  rank 0: serving row-batched graph variants 12/13 captured for 4 slots x 2 rows = 8 fixed rows, MTP (a batch is selected at 2+ live requests, the smallest that covers the live slots)
+2026-09-22 02:16:58.857 INFO  bus graph era: variant 2 recorded with 94 collective node(s)
+2026-09-22 02:16:58.857 INFO  rank 0: graph variant 2 shape: 1297 nodes, 1612 edges: kernel 1297 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 02:16:58.864 INFO  rank 0: graph variant 2 instantiated — 34.6 MiB of device memory (15.2 GiB free)
+2026-09-22 02:16:58.865 INFO  bus graph era: variant 3 recorded with 94 collective node(s)
+2026-09-22 02:16:58.865 INFO  rank 0: graph variant 3 shape: 1297 nodes, 1612 edges: kernel 1297 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 02:16:58.872 INFO  rank 0: graph variant 3 instantiated — 31.6 MiB of device memory (15.1 GiB free)
+2026-09-22 02:16:58.872 INFO  rank 0: serving scalar graph variants 2/3 captured for request slot 1 (2 rows, MTP)
+2026-09-22 02:16:58.936 INFO  bus graph era: variant 4 recorded with 94 collective node(s)
+2026-09-22 02:16:58.936 INFO  rank 0: graph variant 4 shape: 1297 nodes, 1612 edges: kernel 1297 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 02:16:58.943 INFO  rank 0: graph variant 4 instantiated — 32.3 MiB of device memory (15.1 GiB free)
+2026-09-22 02:16:58.944 INFO  bus graph era: variant 5 recorded with 94 collective node(s)
+2026-09-22 02:16:58.944 INFO  rank 0: graph variant 5 shape: 1297 nodes, 1612 edges: kernel 1297 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 02:16:58.955 INFO  rank 0: graph variant 5 instantiated — 36.7 MiB of device memory (15.1 GiB free)
+2026-09-22 02:16:58.955 INFO  rank 0: serving scalar graph variants 4/5 captured for request slot 2 (2 rows, MTP)
+2026-09-22 02:16:59.021 INFO  bus graph era: variant 6 recorded with 94 collective node(s)
+2026-09-22 02:16:59.021 INFO  rank 0: graph variant 6 shape: 1297 nodes, 1612 edges: kernel 1297 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 02:16:59.028 INFO  rank 0: graph variant 6 instantiated — 31.0 MiB of device memory (15.0 GiB free)
+2026-09-22 02:16:59.029 INFO  bus graph era: variant 7 recorded with 94 collective node(s)
+2026-09-22 02:16:59.029 INFO  rank 0: graph variant 7 shape: 1297 nodes, 1612 edges: kernel 1297 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 02:16:59.036 INFO  rank 0: graph variant 7 instantiated — 32.8 MiB of device memory (15.0 GiB free)
+2026-09-22 02:16:59.036 INFO  rank 0: serving scalar graph variants 6/7 captured for request slot 3 (2 rows, MTP)
+2026-09-22 02:16:59.036 INFO  rank 0: warm capture complete — 4 scalar variants and the row batches for 2 slots, 3 slots, 4 slots recorded before the first request
+2026-09-22 02:16:59.037 INFO  memory ledger: rank 0 after the warm capture — rss 3.65 GiB (anon 0.86, shmem 2.13, file 0.65; locked 14.15); device free 15.00 GiB, node available 18.27 GiB
+2026-09-22 02:16:59.037 INFO  rank 0: graph variants warm-captured in 0.70s
+2026-09-22 02:16:59.200 INFO  tokenizer: loaded vocab 154820 merges 321649 added 36 (revision 0x700b4469fc43f23b; glm pattern, no normalizer, ignore_merges true)
+2026-09-22 02:16:59.201 INFO  serve: tokenizer 0x700b4469fc43f23b, template 0xe823b72c4bff24e7 loaded
+2026-09-22 02:16:59.201 INFO  serve: image inputs enabled (1024 visual tokens per image max)
+2026-09-22 02:16:59.203 INFO  serve: prefix cache on — 232 snapshot slots, 4 boundary token(s)
+2026-09-22 02:16:59.203 INFO  serve: sampling available — defaults temperature 1 top_p 0.95 top_k 0 min_p 0 repetition_penalty 1; seedless requests draw a fresh seed each
+2026-09-22 02:16:59.203 INFO  serve: tool calls available (the template's markers are in the tokenizer); tool_choice/parallel_tool_calls enforced by constrained decoding; reasoning on reasoning_content
+2026-09-22 02:16:59.203 INFO  serve: HTTP request body limit 268435456 bytes
+2026-09-22 02:16:59.204 INFO  memory ledger: rank 0 at listening — rss 3.81 GiB (anon 1.02, shmem 2.13, file 0.65; locked 14.15); device free 14.83 GiB, node available 18.10 GiB
+2026-09-22 02:16:59.204 INFO  serve: listening on :18080 — HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 (boot 23.0s) [fabric rank 0]; endpoints: POST /v1/chat/completions, POST /v1/completions, GET /v1/models, GET /health, GET /metrics, GET /v1/metrics
+2026-09-22 02:17:01.292 INFO  sched: request 'chatcmpl-52f0b9d96f7e9dd3' prefix cache miss — 2 cut(s), the cache is empty
+2026-09-22 02:17:01.292 INFO  sched: request 'chatcmpl-52f0b9d96f7e9dd3' admitted to slot 0 (reserve 1 blocks; pool 2/6144 blocks in use) — first token 785
+2026-09-22 02:17:02.375 INFO  sched: request 'chatcmpl-52f0b9d96f7e9dd3' retired (steps): 64 tok in 1.1 s — prefill 62 tok (0 cached) in 328 ms; decode 63 tok / 34 passes in 0.8 s: 83.5 tok/s, 12.0 ms/tok, 22 ms/pass, 1.85 tok/pass, accept p1 85 %
+2026-09-22 02:17:02.443 INFO  sched: request 'chatcmpl-52f0b9d96f7e9dd4' admitted to slot 0 (reserve 3 blocks; pool 5/6144 blocks in use) — first token 785
+2026-09-22 02:17:06.988 INFO  sched: request 'chatcmpl-52f0b9d96f7e9dd4' retired (steps): 256 tok in 4.5 s — prefill 62 tok (60 cached) in 52 ms; decode 255 tok / 143 passes in 4.5 s: 56.7 tok/s, 17.6 ms/tok, 31 ms/pass, 1.78 tok/pass, accept p1 78 %
+2026-09-22 02:17:07.044 INFO  sched: request 'chatcmpl-52f0b9d96f7e9dd5' admitted to slot 0 (reserve 3 blocks; pool 8/6144 blocks in use) — first token 785
+2026-09-22 02:17:09.231 INFO  stats: rank 0 | 10.0 s | decode 44.7 tok/s, 17.4 ms/tok, 31.7 ms/step (246 steps / 448 tok, 78 % of wall) | mtp 1.82 tok/step/req, accept p1 81 % | prefill 3 prompts / 66 tok, 7 tok/s, 6.52 ms/tok, 143 ms avg (4 % of wall), 120 tok cached (2/3 hits) | live 1, queued 0 | pool 9/6144 blocks (0 %) | prefix cache 3/232 entries | requests +3 (shed 0, cancelled 0)
+2026-09-22 02:17:11.583 INFO  sched: request 'chatcmpl-52f0b9d96f7e9dd5' retired (steps): 256 tok in 4.5 s — prefill 62 tok (60 cached) in 50 ms; decode 255 tok / 143 passes in 4.5 s: 56.8 tok/s, 17.6 ms/tok, 31 ms/pass, 1.78 tok/pass, accept p1 78 %
+2026-09-22 02:17:11.677 INFO  sched: request 'chatcmpl-52f0b9d96f7e9dd6' admitted to slot 0 (reserve 3 blocks; pool 8/6144 blocks in use) — first token 785
+2026-09-22 02:17:12.017 INFO  sched: request 'chatcmpl-52f0b9d96f7e9dd7' prefix cache miss — 2 cut(s) probed against 3 entries; the nearest entry (position 316) shares the first 22 of the prompt's 59 tokens (the prompt differs from it from that token on)
+2026-09-22 02:17:12.017 INFO  sched: request 'chatcmpl-52f0b9d96f7e9dd7' admitted to slot 1 (reserve 3 blocks; pool 12/6144 blocks in use) — first token 785
+2026-09-22 02:17:18.078 INFO  sched: request 'chatcmpl-52f0b9d96f7e9dd7' retired (steps): 256 tok in 6.1 s — prefill 59 tok (0 cached) in 306 ms; decode 255 tok / 138 passes in 5.8 s: 44.3 tok/s, 22.6 ms/tok, 42 ms/pass, 1.85 tok/pass, accept p1 86 %
+2026-09-22 02:17:18.208 INFO  sched: request 'chatcmpl-52f0b9d96f7e9dd6' retired (steps): 256 tok in 6.5 s — prefill 62 tok (60 cached) in 53 ms; decode 255 tok / 143 passes in 6.5 s: 39.4 tok/s, 25.4 ms/tok, 45 ms/pass, 1.78 tok/pass, accept p1 78 %
+2026-09-22 02:17:18.275 INFO  sched: request 'chatcmpl-52f0b9d96f7e9dd8' admitted to slot 0 (reserve 3 blocks; pool 12/6144 blocks in use) — first token 785
+2026-09-22 02:17:18.361 INFO  sched: request 'chatcmpl-52f0b9d96f7e9dd9' admitted to slot 1 (reserve 3 blocks; pool 15/6144 blocks in use) — first token 785
+2026-09-22 02:17:19.240 INFO  stats: rank 0 | 10.0 s | decode 71.8 tok/s, 13.2 ms/tok, 39.7 ms/step (238 steps / 719 tok, 94 % of wall) | mtp 1.82 tok/step/req, accept p1 81 % | prefill 4 prompts / 66 tok, 7 tok/s, 7.02 ms/tok, 116 ms avg (5 % of wall), 176 tok cached (3/4 hits) | live 2, queued 0 | pool 17/6144 blocks (0 %) | prefix cache 5/232 entries | requests +4 (shed 0, cancelled 0)
+2026-09-22 02:17:24.429 INFO  sched: request 'chatcmpl-52f0b9d96f7e9dd9' retired (steps): 256 tok in 6.1 s — prefill 59 tok (56 cached) in 53 ms; decode 255 tok / 138 passes in 6.0 s: 42.4 tok/s, 23.6 ms/tok, 44 ms/pass, 1.85 tok/pass, accept p1 86 %
+2026-09-22 02:17:24.558 INFO  sched: request 'chatcmpl-52f0b9d96f7e9dd8' retired (steps): 256 tok in 6.3 s — prefill 62 tok (60 cached) in 51 ms; decode 255 tok / 143 passes in 6.2 s: 40.9 tok/s, 24.4 ms/tok, 44 ms/pass, 1.78 tok/pass, accept p1 78 %
+2026-09-22 02:17:24.637 INFO  sched: request 'chatcmpl-52f0b9d96f7e9dda' admitted to slot 0 (reserve 3 blocks; pool 12/6144 blocks in use) — first token 785
+2026-09-22 02:17:24.719 INFO  sched: request 'chatcmpl-52f0b9d96f7e9ddb' admitted to slot 1 (reserve 3 blocks; pool 16/6144 blocks in use) — first token 785
+2026-09-22 02:17:25.067 INFO  sched: request 'chatcmpl-52f0b9d96f7e9ddc' prefix cache miss — 2 cut(s) probed against 5 entries; the nearest entry (position 316) shares the first 22 of the prompt's 66 tokens (the prompt differs from it from that token on)
+2026-09-22 02:17:25.067 INFO  sched: request 'chatcmpl-52f0b9d96f7e9ddc' admitted to slot 2 (reserve 3 blocks; pool 20/6144 blocks in use) — first token 785
+2026-09-22 02:17:29.273 INFO  stats: rank 0 | 10.0 s | decode 84.8 tok/s, 11.2 ms/tok, 48.1 ms/step (199 steps / 851 tok, 95 % of wall) | mtp 1.82 tok/step/req, accept p1 81 % | prefill 3 prompts / 71 tok, 7 tok/s, 5.77 ms/tok, 137 ms avg (4 % of wall), 116 tok cached (2/3 hits) | live 3, queued 0 | pool 22/6144 blocks (0 %) | prefix cache 6/232 entries | requests +3 (shed 0, cancelled 0)
+2026-09-22 02:17:32.646 INFO  sched: request 'chatcmpl-52f0b9d96f7e9dda' retired (steps): 256 tok in 8.0 s — prefill 59 tok (56 cached) in 58 ms; decode 255 tok / 138 passes in 8.0 s: 32.1 tok/s, 31.2 ms/tok, 58 ms/pass, 1.85 tok/pass, accept p1 86 %
+2026-09-22 02:17:32.959 INFO  sched: request 'chatcmpl-52f0b9d96f7e9ddb' retired (steps): 256 tok in 8.2 s — prefill 62 tok (60 cached) in 49 ms; decode 255 tok / 143 passes in 8.2 s: 31.1 tok/s, 32.1 ms/tok, 57 ms/pass, 1.78 tok/pass, accept p1 78 %
+2026-09-22 02:17:33.026 INFO  sched: request 'chatcmpl-52f0b9d96f7e9ddc' retired (steps): 256 tok in 8.0 s — prefill 66 tok (0 cached) in 304 ms; decode 255 tok / 144 passes in 7.7 s: 33.3 tok/s, 30.0 ms/tok, 53 ms/pass, 1.77 tok/pass, accept p1 78 %
+2026-09-22 02:17:33.088 INFO  sched: request 'chatcmpl-52f0b9d96f7e9ddd' admitted to slot 0 (reserve 3 blocks; pool 16/6144 blocks in use) — first token 785
+2026-09-22 02:17:33.171 INFO  sched: request 'chatcmpl-52f0b9d96f7e9dde' admitted to slot 1 (reserve 3 blocks; pool 19/6144 blocks in use) — first token 785
+2026-09-22 02:17:33.271 INFO  sched: request 'chatcmpl-52f0b9d96f7e9ddf' admitted to slot 2 (reserve 3 blocks; pool 23/6144 blocks in use) — first token 785
+2026-09-22 02:17:39.310 INFO  stats: rank 0 | 10.0 s | decode 94.2 tok/s, 10.4 ms/tok, 54.9 ms/step (179 steps / 945 tok, 98 % of wall) | mtp 1.80 tok/step/req, accept p1 80 % | prefill 3 prompts / 7 tok, 1 tok/s, 22.54 ms/tok, 53 ms avg (2 % of wall), 180 tok cached (3/3 hits) | live 3, queued 0 | pool 25/6144 blocks (0 %) | prefix cache 7/232 entries | requests +3 (shed 0, cancelled 0)
+2026-09-22 02:17:40.967 INFO  sched: request 'chatcmpl-52f0b9d96f7e9ddf' retired (steps): 256 tok in 7.7 s — prefill 59 tok (56 cached) in 56 ms; decode 255 tok / 138 passes in 7.6 s: 33.4 tok/s, 30.0 ms/tok, 55 ms/pass, 1.85 tok/pass, accept p1 86 %
+2026-09-22 02:17:41.099 INFO  sched: request 'chatcmpl-52f0b9d96f7e9ddd' retired (steps): 256 tok in 8.0 s — prefill 62 tok (60 cached) in 51 ms; decode 255 tok / 143 passes in 8.0 s: 32.0 tok/s, 31.2 ms/tok, 56 ms/pass, 1.78 tok/pass, accept p1 78 %
+2026-09-22 02:17:41.165 INFO  sched: request 'chatcmpl-52f0b9d96f7e9dde' retired (steps): 256 tok in 8.0 s — prefill 66 tok (64 cached) in 51 ms; decode 255 tok / 144 passes in 7.9 s: 32.1 tok/s, 31.2 ms/tok, 55 ms/pass, 1.77 tok/pass, accept p1 78 %
+2026-09-22 02:17:41.243 INFO  sched: request 'chatcmpl-52f0b9d96f7e9de0' admitted to slot 0 (reserve 3 blocks; pool 16/6144 blocks in use) — first token 785
+2026-09-22 02:17:41.579 INFO  sched: request 'chatcmpl-52f0b9d96f7e9de1' prefix cache miss — 2 cut(s) probed against 7 entries; the nearest entry (position 320) shares the first 22 of the prompt's 62 tokens (the prompt differs from it from that token on)
+2026-09-22 02:17:41.579 INFO  sched: request 'chatcmpl-52f0b9d96f7e9de1' admitted to slot 1 (reserve 3 blocks; pool 20/6144 blocks in use) — first token 785
+2026-09-22 02:17:41.680 INFO  sched: request 'chatcmpl-52f0b9d96f7e9de2' admitted to slot 2 (reserve 3 blocks; pool 24/6144 blocks in use) — first token 785
+2026-09-22 02:17:41.787 INFO  sched: request 'chatcmpl-52f0b9d96f7e9de3' admitted to slot 3 (reserve 3 blocks; pool 29/6144 blocks in use) — first token 785
+2026-09-22 02:17:49.363 INFO  stats: rank 0 | 10.1 s | decode 100.7 tok/s, 9.4 ms/tok, 63.1 ms/step (151 steps / 1012 tok, 95 % of wall) | mtp 1.82 tok/step/req, accept p1 82 % | prefill 4 prompts / 69 tok, 7 tok/s, 6.69 ms/tok, 115 ms avg (5 % of wall), 180 tok cached (3/4 hits) | live 4, queued 0 | pool 30/6144 blocks (0 %) | prefix cache 8/232 entries | requests +4 (shed 0, cancelled 0)
+2026-09-22 02:17:50.783 INFO  sched: request 'chatcmpl-52f0b9d96f7e9de1' retired (steps): 256 tok in 9.2 s — prefill 62 tok (0 cached) in 302 ms; decode 255 tok / 136 passes in 8.9 s: 28.6 tok/s, 34.9 ms/tok, 65 ms/pass, 1.88 tok/pass, accept p1 88 %
+2026-09-22 02:17:50.982 INFO  sched: request 'chatcmpl-52f0b9d96f7e9de2' retired (steps): 256 tok in 9.3 s — prefill 59 tok (56 cached) in 57 ms; decode 255 tok / 138 passes in 9.2 s: 27.6 tok/s, 36.3 ms/tok, 67 ms/pass, 1.85 tok/pass, accept p1 86 %
+2026-09-22 02:17:51.225 INFO  sched: request 'chatcmpl-52f0b9d96f7e9de0' retired (steps): 256 tok in 10.0 s — prefill 66 tok (64 cached) in 52 ms; decode 255 tok / 144 passes in 9.9 s: 25.7 tok/s, 38.9 ms/tok, 69 ms/pass, 1.77 tok/pass, accept p1 78 %
+2026-09-22 02:17:51.295 INFO  sched: request 'chatcmpl-52f0b9d96f7e9de3' retired (steps): 256 tok in 9.5 s — prefill 62 tok (60 cached) in 51 ms; decode 255 tok / 143 passes in 9.5 s: 27.0 tok/s, 37.1 ms/tok, 66 ms/pass, 1.78 tok/pass, accept p1 78 %
+2026-09-22 02:17:51.385 INFO  sched: request 'chatcmpl-52f0b9d96f7e9de4' admitted to slot 0 (reserve 3 blocks; pool 20/6144 blocks in use) — first token 785
+2026-09-22 02:17:51.468 INFO  sched: request 'chatcmpl-52f0b9d96f7e9de5' admitted to slot 1 (reserve 3 blocks; pool 24/6144 blocks in use) — first token 785
+2026-09-22 02:17:51.561 INFO  sched: request 'chatcmpl-52f0b9d96f7e9de6' admitted to slot 2 (reserve 3 blocks; pool 27/6144 blocks in use) — first token 785
+2026-09-22 02:17:51.669 INFO  sched: request 'chatcmpl-52f0b9d96f7e9de7' admitted to slot 3 (reserve 3 blocks; pool 31/6144 blocks in use) — first token 785
+2026-09-22 02:17:59.380 INFO  stats: rank 0 | 10.0 s | decode 103.6 tok/s, 9.4 ms/tok, 65.7 ms/step (148 steps / 1038 tok, 97 % of wall) | mtp 1.82 tok/step/req, accept p1 82 % | prefill 4 prompts / 9 tok, 1 tok/s, 23.37 ms/tok, 53 ms avg (2 % of wall), 240 tok cached (4/4 hits) | live 4, queued 0 | pool 33/6144 blocks (1 %) | prefix cache 9/232 entries | requests +4 (shed 0, cancelled 0)
+2026-09-22 02:18:00.653 INFO  sched: request 'chatcmpl-52f0b9d96f7e9de5' retired (steps): 256 tok in 9.2 s — prefill 62 tok (60 cached) in 50 ms; decode 255 tok / 136 passes in 9.1 s: 27.9 tok/s, 35.8 ms/tok, 67 ms/pass, 1.88 tok/pass, accept p1 88 %
+2026-09-22 02:18:00.719 INFO  sched: request 'chatcmpl-52f0b9d96f7e9de4' retired (steps): 256 tok in 9.3 s — prefill 59 tok (56 cached) in 58 ms; decode 255 tok / 138 passes in 9.3 s: 27.5 tok/s, 36.4 ms/tok, 67 ms/pass, 1.85 tok/pass, accept p1 86 %
+2026-09-22 02:18:01.131 INFO  sched: request 'chatcmpl-52f0b9d96f7e9de6' retired (steps): 256 tok in 9.6 s — prefill 62 tok (60 cached) in 51 ms; decode 255 tok / 143 passes in 9.5 s: 26.8 tok/s, 37.3 ms/tok, 67 ms/pass, 1.78 tok/pass, accept p1 78 %
+2026-09-22 02:18:01.199 INFO  sched: request 'chatcmpl-52f0b9d96f7e9de7' retired (steps): 256 tok in 9.5 s — prefill 66 tok (64 cached) in 51 ms; decode 255 tok / 144 passes in 9.5 s: 26.9 tok/s, 37.2 ms/tok, 66 ms/pass, 1.77 tok/pass, accept p1 78 %
+2026-09-22 02:18:01.268 INFO  sched: request 'chatcmpl-52f0b9d96f7e9de8' admitted to slot 0 (reserve 3 blocks; pool 20/6144 blocks in use) — first token 785
+2026-09-22 02:18:05.821 INFO  sched: request 'chatcmpl-52f0b9d96f7e9de8' retired (steps): 256 tok in 4.6 s — prefill 62 tok (60 cached) in 53 ms; decode 255 tok / 143 passes in 4.5 s: 56.7 tok/s, 17.6 ms/tok, 31 ms/pass, 1.78 tok/pass, accept p1 78 %
+2026-09-22 02:18:05.910 INFO  sched: request 'chatcmpl-52f0b9d96f7e9de9' admitted to slot 0 (reserve 3 blocks; pool 20/6144 blocks in use) — first token 785
+2026-09-22 02:18:09.382 INFO  stats: rank 0 | 10.0 s | decode 62.1 tok/s, 15.8 ms/tok, 34.9 ms/step (281 steps / 621 tok, 98 % of wall) | mtp 1.79 tok/step/req, accept p1 79 % | prefill 2 prompts / 4 tok, 0 tok/s, 26.30 ms/tok, 53 ms avg (1 % of wall), 120 tok cached (2/2 hits) | live 1, queued 0 | pool 21/6144 blocks (0 %) | prefix cache 9/232 entries | requests +2 (shed 0, cancelled 0)
+2026-09-22 02:18:10.467 INFO  sched: request 'chatcmpl-52f0b9d96f7e9de9' retired (steps): 256 tok in 4.6 s — prefill 62 tok (60 cached) in 52 ms; decode 255 tok / 143 passes in 4.5 s: 56.6 tok/s, 17.7 ms/tok, 31 ms/pass, 1.78 tok/pass, accept p1 78 %
+2026-09-22 02:18:12.079 INFO  serve: stop — 0 in-flight request(s) retired through the drain pass on every rank, the queue shed, in 0 ms
+2026-09-22 02:18:12.113 INFO  serve: stopped cleanly
+2026-09-22 02:18:12.156 INFO  rank 0: graph engine sampling summary — 0 sampled decode steps, 0 served by the exact gather fallback (0.0%), 112 candidates per rank

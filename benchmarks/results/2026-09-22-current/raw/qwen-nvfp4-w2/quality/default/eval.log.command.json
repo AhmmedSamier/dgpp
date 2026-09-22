@@ -1,0 +1,24 @@
+{
+  "command": [
+    "/usr/bin/python3",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/isolated_eval.py",
+    "127.0.0.1",
+    "18080",
+    "--out",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/qwen-nvfp4-w2/quality/default/eval",
+    "--tasks",
+    "humaneval,gsm8k,extract",
+    "--limit",
+    "300",
+    "--concurrency",
+    "4",
+    "--max-tokens",
+    "2048",
+    "--no-think",
+    "--allow-code-execution"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-09-22T06:37:26.442934+00:00",
+  "returncode": 0,
+  "finished_at": "2026-09-22T06:58:10.461223+00:00"
+}

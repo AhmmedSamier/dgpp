@@ -1,0 +1,19 @@
+2026-09-22T10:57:34+00:00 spark-a289 systemd[1]: Starting apt-news.service - Update APT News...
+2026-09-22T10:57:34+00:00 spark-a289 systemd[1]: Starting esm-cache.service - Update the local ESM caches...
+2026-09-22T10:57:34+00:00 spark-a289 systemd[1]: apt-news.service: Deactivated successfully.
+2026-09-22T10:57:34+00:00 spark-a289 systemd[1]: Finished apt-news.service - Update APT News.
+2026-09-22T10:57:34+00:00 spark-a289 kernel: audit: type=1400 audit(1790074654.377:174): apparmor="DENIED" operation="capable" class="cap" profile="ubuntu_pro_esm_cache_systemd_detect_virt" pid=154596 comm="systemd-detect-" capability=38  capname="perfmon"
+2026-09-22T10:57:34+00:00 spark-a289 kernel: audit: type=1400 audit(1790074654.379:175): apparmor="DENIED" operation="capable" class="cap" profile="ubuntu_pro_esm_cache//cloud_id" pid=154507 comm="cloud-id" capability=38  capname="perfmon"
+2026-09-22T10:57:34+00:00 spark-a289 systemd[1]: esm-cache.service: Deactivated successfully.
+2026-09-22T10:57:34+00:00 spark-a289 systemd[1]: Finished esm-cache.service - Update the local ESM caches.
+2026-09-22T10:57:39+00:00 spark-a289 dbus-daemon[1457]: [system] Activating via systemd: service name='org.freedesktop.PackageKit' unit='packagekit.service' requested by ':1.229' (uid=0 pid=155069 comm="/usr/bin/gdbus call --system --dest org.freedeskto" label="unconfined")
+2026-09-22T10:57:39+00:00 spark-a289 systemd[1]: Starting packagekit.service - PackageKit Daemon...
+2026-09-22T10:57:39+00:00 spark-a289 PackageKit[155073]: daemon start
+2026-09-22T10:57:39+00:00 spark-a289 dbus-daemon[1457]: [system] Successfully activated service 'org.freedesktop.PackageKit'
+2026-09-22T10:57:39+00:00 spark-a289 systemd[1]: Started packagekit.service - PackageKit Daemon.
+2026-09-13 00:00:00.280464571 +0000 /var/log/dpkg.log
+2026-09-13 00:00:00.178463780 +0000 /var/log/apt/history.log
+Result=success
+ExecMainStartTimestamp=Tue 2026-09-22 06:23:04 UTC
+ExecMainExitTimestamp=Tue 2026-09-22 06:23:04 UTC
+ActiveState=inactive

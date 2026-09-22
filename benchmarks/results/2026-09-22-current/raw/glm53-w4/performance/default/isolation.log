@@ -1,0 +1,11 @@
+model HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64
+warm 0: status 200 tokens 64
+== isolation: prompt 0 alone (256 tokens) vs beside 7 others (256 tokens): IDENTICAL
+== chat concurrency 1: 09:57:17.240 .. 09:57:26.920  wall 9.7 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 127 ms  client update pace 37.46 ms/update
+   aggregate wall: 256 tokens in 9.68 s = 26.44 tok/s (prefill included)
+   legacy output-span aggregate: 26.798076893211274 tok/s (initial TTFT excluded; later admissions included)
+== per-class wall aggregate tokens/s (prefill included), greedy, max_tokens 256
+| class | c=1 |
+|---|---|
+| chat | 26.4 |

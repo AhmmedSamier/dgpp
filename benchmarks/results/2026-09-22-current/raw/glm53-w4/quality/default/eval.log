@@ -1,0 +1,34 @@
+HumanEval container image: sha256:8630ab77c5adf06e1f914483db4dd70e3fa59118160daab9b0ee75e685344221
+  humaneval: 20/164 done, 20 pass, 101s
+  humaneval: 40/164 done, 40 pass, 184s
+  humaneval: 60/164 done, 60 pass, 239s
+  humaneval: 80/164 done, 80 pass, 326s
+  humaneval: 100/164 done, 98 pass, 423s
+  humaneval: 120/164 done, 118 pass, 485s
+  humaneval: 140/164 done, 137 pass, 567s
+  humaneval: 160/164 done, 155 pass, 639s
+  humaneval: 164/164 done, 159 pass, 640s
+== humaneval: 159/164 = 97.0 %  (640 s, mean 146 completion tokens, 0 truncated)
+  gsm8k: 20/300 done, 19 pass, 73s
+  gsm8k: 40/300 done, 39 pass, 148s
+  gsm8k: 60/300 done, 59 pass, 174s
+  gsm8k: 80/300 done, 78 pass, 247s
+  gsm8k: 100/300 done, 98 pass, 279s
+  gsm8k: 120/300 done, 117 pass, 390s
+  gsm8k: 140/300 done, 136 pass, 397s
+  gsm8k: 160/300 done, 155 pass, 463s
+  gsm8k: 180/300 done, 175 pass, 506s
+  gsm8k: 200/300 done, 194 pass, 561s
+  gsm8k: 220/300 done, 213 pass, 615s
+  gsm8k: 240/300 done, 232 pass, 655s
+  gsm8k: 260/300 done, 252 pass, 718s
+  gsm8k: 280/300 done, 272 pass, 785s
+  gsm8k: 300/300 done, 292 pass, 813s
+== gsm8k: 292/300 = 97.3 %  (813 s, mean 91 completion tokens, 0 truncated)
+  extract: 20/100 done, 20 pass, 47s
+  extract: 40/100 done, 40 pass, 87s
+  extract: 60/100 done, 60 pass, 128s
+  extract: 80/100 done, 80 pass, 164s
+  extract: 100/100 done, 100 pass, 198s
+== extract: 100/100 = 100.0 %  (198 s, mean 58 completion tokens, 0 truncated)
+{"humaneval": {"n": 164, "passed": 159, "rate": 0.9695, "seconds": 640, "mean_completion_tokens": 146, "truncated": 0}, "gsm8k": {"n": 300, "passed": 292, "rate": 0.9733, "seconds": 813, "mean_completion_tokens": 91, "truncated": 0}, "extract": {"n": 100, "passed": 100, "rate": 1.0, "seconds": 198, "mean_completion_tokens": 58, "truncated": 0}}

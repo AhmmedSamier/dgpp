@@ -5,10 +5,9 @@ high-bandwidth tests in a maintenance window: they can consume both RoCE
 lanes and more than 25 GB/s of shared memory bandwidth.
 
 For serving throughput by model, world size, concurrency and prompt class,
-see [the serving benchmarks](../docs/benchmarks.md). The current two-Spark
-Qwen3.8-Flash-Next NVFP4 result, including its mapped n-gram placement,
-memory plan, prefill measurements and quality gates, is recorded in the
-[dated result](results/2026-09-16-qwen-nvfp4-w2.md).
+see [the serving benchmarks](../docs/benchmarks.md). Exact configurations,
+commands and request-level measurements are in the
+[current campaign record](results/2026-09-22-current/README.md).
 
 The original DGX Spark platform baseline is in
 [`2026-08-27-dgx-spark.md`](results/2026-08-27-dgx-spark.md). Curated platform

@@ -1,0 +1,23 @@
+Traceback (most recent call last):
+  File "/home/stephen/workspace/dgpp/scripts/timed_load.py", line 97, in <module>
+    main()
+  File "/home/stephen/workspace/dgpp/scripts/timed_load.py", line 93, in main
+    serve_load.main(phase_runner=load.phase, settle=load.settle)
+  File "/home/stephen/workspace/dgpp/scripts/serve_load.py", line 302, in main
+    model = served_model(args.host, args.port)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/stephen/workspace/dgpp/scripts/serve_load.py", line 182, in served_model
+    data = json.loads(conn.getresponse().read().decode())
+                      ^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/http/client.py", line 1457, in getresponse
+    response.begin()
+  File "/usr/lib/python3.12/http/client.py", line 336, in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/http/client.py", line 297, in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/socket.py", line 707, in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+ConnectionResetError: [Errno 104] Connection reset by peer

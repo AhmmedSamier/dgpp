@@ -1,0 +1,83 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+      "object": "model",
+      "created": 1790047806,
+      "owned_by": "dgpp",
+      "sampling": {
+        "available": true,
+        "defaults": {
+          "temperature": 1,
+          "top_p": 0.95,
+          "top_k": 20,
+          "min_p": 0,
+          "repetition_penalty": 1
+        }
+      },
+      "tools": {
+        "available": true,
+        "constrained": true
+      },
+      "response_format": {
+        "json_object": true,
+        "json_schema": true
+      },
+      "reasoning": {
+        "in_content": false,
+        "effort_mapping": {
+          "none": {
+            "enable_thinking": false
+          },
+          "minimal": {
+            "enable_thinking": true,
+            "reasoning_effort": "low"
+          },
+          "low": {
+            "enable_thinking": true,
+            "reasoning_effort": "low"
+          },
+          "medium": {
+            "enable_thinking": true,
+            "reasoning_effort": "medium"
+          },
+          "high": {
+            "enable_thinking": true,
+            "reasoning_effort": "xhigh"
+          },
+          "xhigh": {
+            "enable_thinking": true,
+            "reasoning_effort": "xhigh"
+          },
+          "max": {
+            "enable_thinking": true,
+            "reasoning_effort": "xhigh"
+          }
+        }
+      },
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "rope_scaling": {
+        "rope_type": "yarn",
+        "factor": 2,
+        "original_max_position_embeddings": 262144,
+        "beta_fast": 32,
+        "beta_slow": 1,
+        "attn_factor": 1,
+        "mrope_cache_factor": 4,
+        "mscale": 1.0693147,
+        "correction_max_position_embeddings": 1048576,
+        "scaled_max_position_embeddings": 524288
+      },
+      "context": {
+        "request_limit_tokens": 524288,
+        "position_ceiling_tokens": 524288,
+        "kv_pool_tokens": 532480,
+        "limited_by": "position-ceiling"
+      }
+    }
+  ]
+}

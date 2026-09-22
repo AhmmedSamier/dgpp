@@ -1,0 +1,17 @@
+{
+  "command": [
+    "/home/stephen/workspace/dgpp/build-release/csa2_select_bench",
+    "--ctx",
+    "4096",
+    "--rows",
+    "5",
+    "--iters",
+    "30",
+    "--warmup",
+    "5"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-09-22T01:35:32.022654+00:00",
+  "returncode": 0,
+  "finished_at": "2026-09-22T01:35:33.345640+00:00"
+}

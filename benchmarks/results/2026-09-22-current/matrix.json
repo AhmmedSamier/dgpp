@@ -1,0 +1,120 @@
+[
+  {
+    "id": "glm-flash-hybrid-w4",
+    "template": "deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json",
+    "config": "configs/glm-flash-hybrid-w4.json",
+    "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+    "world": 4,
+    "slots": 4
+  },
+  {
+    "id": "glm-flash-hybrid-w2",
+    "template": "deploy/cluster_glm-5.3-flash_nvfp4-fp8_w2.example.json",
+    "config": "configs/glm-flash-hybrid-w2.json",
+    "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+    "world": 2,
+    "slots": 4
+  },
+  {
+    "id": "glm-flash-fp8-w4",
+    "template": "deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json",
+    "config": "configs/glm-flash-fp8-w4.json",
+    "model": "unsloth/GLM-5.3-Flash-FP8",
+    "world": 4,
+    "slots": 4
+  },
+  {
+    "id": "qwen-fp8-w4",
+    "template": "deploy/cluster_qwen-3.8-flash-next_fp8_w4.example.json",
+    "config": "configs/qwen-fp8-w4.json",
+    "model": "Qwen/Qwen3.8-Flash-Next-FP8",
+    "world": 4,
+    "slots": 4
+  },
+  {
+    "id": "qwen-fp8-w2",
+    "template": "deploy/cluster_qwen-3.8-flash-next_fp8_w2.example.json",
+    "config": "configs/qwen-fp8-w2.json",
+    "model": "Qwen/Qwen3.8-Flash-Next-FP8",
+    "world": 2,
+    "slots": 4
+  },
+  {
+    "id": "qwen-nvfp4-w1",
+    "template": "deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.example.json",
+    "config": "configs/qwen-nvfp4-w1.json",
+    "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+    "world": 1,
+    "slots": 4
+  },
+  {
+    "id": "qwen-nvfp4-w2",
+    "template": "deploy/cluster_qwen-3.8-flash-next_nvfp4_w2.example.json",
+    "config": "configs/qwen-nvfp4-w2.json",
+    "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+    "world": 2,
+    "slots": 4
+  },
+  {
+    "id": "glm53-w4",
+    "template": "deploy/cluster_glm-5.3_int4-int8_w4.example.json",
+    "config": "configs/glm53-w4.json",
+    "model": "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
+    "world": 4,
+    "slots": 8
+  },
+  {
+    "id": "deepseek-w4",
+    "template": "deploy/cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json",
+    "config": "configs/deepseek-w4.json",
+    "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+    "world": 4,
+    "slots": 6
+  },
+  {
+    "id": "qwen-yarn-w2",
+    "template": "deploy/cluster_qwen-3.8-flash-next_nvfp4_w2_yarn512k.example.json",
+    "config": "configs/qwen-yarn-w2.json",
+    "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+    "world": 2,
+    "slots": 2
+  },
+  {
+    "id": "qwen-nvfp4-bf16-w1",
+    "template": "deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.example.json",
+    "config": "configs/qwen-nvfp4-bf16-w1.json",
+    "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+    "world": 1,
+    "slots": 4,
+    "overrides": {
+      "dense_weights": "checkpoint",
+      "fp8_head": "gemv"
+    }
+  },
+  {
+    "id": "glm53-fp8kv-w4",
+    "template": "deploy/cluster_glm-5.3_int4-int8_w4.example.json",
+    "config": "configs/glm53-fp8kv-w4.json",
+    "model": "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
+    "world": 4,
+    "slots": 8,
+    "overrides": {
+      "kv_dtype": "fp8",
+      "kv_capacity": 212992,
+      "prefix_cache_gib": 1.5
+    }
+  },
+  {
+    "id": "glm-flash-hybrid-256k-w2",
+    "template": "deploy/cluster_glm-5.3-flash_nvfp4-fp8_w2.example.json",
+    "config": "configs/glm-flash-hybrid-256k-w2.json",
+    "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+    "world": 2,
+    "slots": 2,
+    "overrides": {
+      "max_concurrency": 2,
+      "kv_capacity": 262144,
+      "prefix_cache_gib": 2
+    }
+  }
+]

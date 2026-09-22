@@ -1,0 +1,36 @@
+{
+  "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+  "settings": {
+    "max_tokens": 2048,
+    "reasoning_effort": "none",
+    "no_think": true,
+    "limit": 300,
+    "seed": 20260908
+  },
+  "tasks": {
+    "humaneval": {
+      "n": 164,
+      "passed": 160,
+      "rate": 0.9756,
+      "seconds": 488,
+      "mean_completion_tokens": 237,
+      "truncated": 0
+    },
+    "gsm8k": {
+      "n": 300,
+      "passed": 294,
+      "rate": 0.98,
+      "seconds": 1248,
+      "mean_completion_tokens": 355,
+      "truncated": 0
+    },
+    "extract": {
+      "n": 100,
+      "passed": 100,
+      "rate": 1.0,
+      "seconds": 100,
+      "mean_completion_tokens": 63,
+      "truncated": 0
+    }
+  }
+}

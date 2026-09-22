@@ -1,0 +1,312 @@
+{
+  "started_at": "2026-09-22T01:34:37.645160+00:00",
+  "commit": "a3ed8994a34cf05f79e63dc1ad51ffd1f65c9f82",
+  "tracked_diff": "",
+  "site_settings": {
+    "DGPP_HTTP_PORT": "18080",
+    "DGPP_FABRIC_PORT": "29970",
+    "DGPP_JOURNAL_PORT": "29971",
+    "DGPP_LOG_DIR": "~/dgpp/log",
+    "DGPP_STAGE_DIR": "/tmp/bus4",
+    "DGPP_RELEASE_DIR": "~/dgpp/releases",
+    "DGPP_HTTP_BIND": "0.0.0.0",
+    "DGPP_NODES": "192.168.88.11 192.168.88.12 192.168.88.13 192.168.88.14",
+    "DGPP_SSH_USER": "stephen"
+  },
+  "templates": [
+    {
+      "id": "glm-flash-hybrid-w4",
+      "template": "deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json",
+      "config": "configs/glm-flash-hybrid-w4.json",
+      "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+      "world": 4,
+      "slots": 4
+    },
+    {
+      "id": "glm-flash-hybrid-w2",
+      "template": "deploy/cluster_glm-5.3-flash_nvfp4-fp8_w2.example.json",
+      "config": "configs/glm-flash-hybrid-w2.json",
+      "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+      "world": 2,
+      "slots": 4
+    },
+    {
+      "id": "glm-flash-fp8-w4",
+      "template": "deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json",
+      "config": "configs/glm-flash-fp8-w4.json",
+      "model": "unsloth/GLM-5.3-Flash-FP8",
+      "world": 4,
+      "slots": 4
+    },
+    {
+      "id": "qwen-fp8-w4",
+      "template": "deploy/cluster_qwen-3.8-flash-next_fp8_w4.example.json",
+      "config": "configs/qwen-fp8-w4.json",
+      "model": "Qwen/Qwen3.8-Flash-Next-FP8",
+      "world": 4,
+      "slots": 4
+    },
+    {
+      "id": "qwen-fp8-w2",
+      "template": "deploy/cluster_qwen-3.8-flash-next_fp8_w2.example.json",
+      "config": "configs/qwen-fp8-w2.json",
+      "model": "Qwen/Qwen3.8-Flash-Next-FP8",
+      "world": 2,
+      "slots": 4
+    },
+    {
+      "id": "qwen-nvfp4-w1",
+      "template": "deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.example.json",
+      "config": "configs/qwen-nvfp4-w1.json",
+      "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+      "world": 1,
+      "slots": 4
+    },
+    {
+      "id": "qwen-nvfp4-w2",
+      "template": "deploy/cluster_qwen-3.8-flash-next_nvfp4_w2.example.json",
+      "config": "configs/qwen-nvfp4-w2.json",
+      "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+      "world": 2,
+      "slots": 4
+    },
+    {
+      "id": "glm53-w4",
+      "template": "deploy/cluster_glm-5.3_int4-int8_w4.example.json",
+      "config": "configs/glm53-w4.json",
+      "model": "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
+      "world": 4,
+      "slots": 8
+    },
+    {
+      "id": "deepseek-w4",
+      "template": "deploy/cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json",
+      "config": "configs/deepseek-w4.json",
+      "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+      "world": 4,
+      "slots": 6
+    },
+    {
+      "id": "qwen-yarn-w2",
+      "template": "deploy/cluster_qwen-3.8-flash-next_nvfp4_w2_yarn512k.example.json",
+      "config": "configs/qwen-yarn-w2.json",
+      "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+      "world": 2,
+      "slots": 2
+    },
+    {
+      "id": "qwen-nvfp4-bf16-w1",
+      "template": "deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.example.json",
+      "config": "configs/qwen-nvfp4-bf16-w1.json",
+      "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+      "world": 1,
+      "slots": 4,
+      "overrides": {
+        "dense_weights": "checkpoint",
+        "fp8_head": "gemv"
+      }
+    },
+    {
+      "id": "glm53-fp8kv-w4",
+      "template": "deploy/cluster_glm-5.3_int4-int8_w4.example.json",
+      "config": "configs/glm53-fp8kv-w4.json",
+      "model": "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
+      "world": 4,
+      "slots": 8,
+      "overrides": {
+        "kv_dtype": "fp8",
+        "kv_capacity": 212992,
+        "prefix_cache_gib": 1.5
+      }
+    },
+    {
+      "id": "glm-flash-hybrid-256k-w2",
+      "template": "deploy/cluster_glm-5.3-flash_nvfp4-fp8_w2.example.json",
+      "config": "configs/glm-flash-hybrid-256k-w2.json",
+      "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+      "world": 2,
+      "slots": 2,
+      "overrides": {
+        "max_concurrency": 2,
+        "kv_capacity": 262144,
+        "prefix_cache_gib": 2
+      }
+    }
+  ],
+  "datasets": {
+    "gsm8k_test.jsonl": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14",
+    "HumanEval.jsonl": "1d49078ba3e2b196b9344535bef34a43021f038fad9561d6ee7c53450609a6a2"
+  },
+  "eval_image": "sha256:8630ab77c5adf06e1f914483db4dd70e3fa59118160daab9b0ee75e685344221",
+  "checkpoint_revisions": {
+    "models--deepseek-ai--DeepSeek-V4.1-Flash": [
+      "dba1be0a40aa45a94ad051997016db3960a90277"
+    ],
+    "models--nvidia--GLM-4.7-NVFP4": [
+      "47fa7dc885a174b67af8eb53d3cd4f9c72f0fbf7"
+    ],
+    "models--HawkBearPig--GLM-5.3-Int4-Int8Mix-RTN-g64": [
+      "147684fbad20c1e283ddff46fd07cb9d4ccbb3da"
+    ],
+    "models--HawkBearPig--GLM-5.3-Flash-NVFP4-FP8": [
+      "17b8d4d83e33e836e9549d7e1a8d25b5117203c1"
+    ],
+    "models--Qwen--Qwen3.8-Flash-Next-FP8": [
+      "236dfdf285828023ca3bcd3f37366c58a3469b13"
+    ],
+    "models--nvidia--Qwen3.8-Flash-Next-NVFP4": [
+      "fc694b54fb0174e0913e6adf86691ef85a4ead47"
+    ],
+    "models--unsloth--GLM-5.3-Flash-FP8": [
+      "a160e2291674d9e3e92e98fd82faa2544a2867a3"
+    ]
+  },
+  "remote_head_at_start": "a3ed8994a34cf05f79e63dc1ad51ffd1f65c9f82",
+  "binary_sha256": "bdf69fe085e06b757ee26fb4d236ab3fafd71378f8ead88685209723d46e607c",
+  "version": "dgpp-serve 0.1.0+ga3ed8994a34c (git a3ed8994a34c, cuda 13.0)",
+  "benchmark_environment": {
+    "CUDA_DEVICE_MAX_CONNECTIONS": "32"
+  },
+  "micro_binaries": {
+    "qsa_index_bench": "be4123b494b507c8808cdf1f67f3edf24a41af945629e899053802be6863231c",
+    "csa2_select_bench": "e0533129aed72daeecf960510f3910fe9a5c57ed9e2bb575b32dfb8f2c1489e3"
+  },
+  "benchmark_environment_scope": "CUDA_DEVICE_MAX_CONNECTIONS=32 on the benchmark client/rank-0 launch and local microbenchmarks; peer launches use their login environment.",
+  "follow_up_issues": [
+    "https://github.com/HawkBearPig/dgpp/issues/32"
+  ],
+  "isolation_diagnostic": {
+    "model_id": "glm-flash-hybrid-w4",
+    "settings": {
+      "default": 4,
+      "rows8": 8,
+      "row-independent": 256
+    },
+    "variable": "DGPP_DENSE_GEMV_ROWS",
+    "concurrency_sequence": [
+      1,
+      1,
+      2,
+      2,
+      3,
+      3,
+      4,
+      4,
+      1,
+      1
+    ],
+    "record": "isolation.md",
+    "performance_uses_default": true
+  },
+  "hardware_records": [
+    {
+      "rank": 0,
+      "path": "raw/hardware-node-0.txt",
+      "captured_at": "2026-09-22T01:21:31.553272+00:00"
+    },
+    {
+      "rank": 1,
+      "path": "raw/hardware-node-1.txt",
+      "captured_at": "2026-09-22T01:21:31.640712+00:00"
+    },
+    {
+      "rank": 2,
+      "path": "raw/hardware-node-2.txt",
+      "captured_at": "2026-09-22T01:21:31.589570+00:00"
+    },
+    {
+      "rank": 3,
+      "path": "raw/hardware-node-3.txt",
+      "captured_at": "2026-09-22T01:21:31.658154+00:00"
+    }
+  ],
+  "hardware_note": "Hardware inventory captured on the same cluster before benchmark timing; clocks and memory readings in these files are pre-run snapshots.",
+  "eval_image_repo_digests": [
+    "python@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9"
+  ],
+  "eval_image_platform": "linux/arm64",
+  "interruptions": [
+    {
+      "observed_at": "2026-09-22T03:27:07+00:00",
+      "deployment": "glm47-w4",
+      "stage": "performance/prefill",
+      "error": "RDMA transport retry counter exceeded to rank 2; 192.168.88.13 also unreachable over SSH and ICMP",
+      "failed_attempt": "raw/glm47-w4/performance/attempt-20260922T0327",
+      "recovery": "Node restarted by user; deployment fully stopped at 03:33:17 UTC. Fresh rerun later reproduced the outage; GLM-4.7 is now excluded at the user\u2019s request.",
+      "recovered_at": "2026-09-22T03:33:17+00:00",
+      "cause": "unconfirmed; user reported a hot case, but previous-boot kernel logs have no entry near the outage",
+      "recovered_gpu_celsius": 50
+    },
+    {
+      "observed_at": "2026-09-22T05:24:38+00:00",
+      "deployment": "glm47-w4",
+      "stage": "performance/prefill",
+      "error": "RDMA transport retry counter exceeded to rank 2 at first 8K cold-prefill request; node192.168.88.13 also unreachable over SSH and ICMP",
+      "failed_attempt": "raw/glm47-w4/performance/attempt-20260922T0524",
+      "recovery": "Node restarted by user; clean deployment shutdown confirmed at 06:01:03 UTC. Rank 2 operation stream lost on restart; GLM-4.7 excluded at the user\u2019s request.",
+      "cause": "unconfirmed; recurrence at same workload boundary after restart",
+      "temperature_before_resume_c": 39,
+      "last_observed_temperature_c": 75,
+      "last_observed_active_thermal_slowdown": false,
+      "recovered_at": "2026-09-22T06:01:03+00:00"
+    }
+  ],
+  "user_pause_record": "raw/user-pause.json",
+  "excluded_deployments": [
+    {
+      "configuration": {
+        "id": "glm47-w4",
+        "template": "deploy/cluster_glm-4.7_nvfp4_w4.example.json",
+        "config": "configs/glm47-w4.json",
+        "model": "nvidia/GLM-4.7-NVFP4",
+        "world": 4,
+        "slots": 4
+      },
+      "reason": "User requested skipping GLM-4.7 after two node outages at first 8K cold prefill. No further GLM-4.7 benchmarks or accuracy evaluation; retain failure evidence."
+    }
+  ],
+  "evaluation_thinking_controls": "Reasoning effort low when thinking enabled; none with --no-think. isolated_eval.py supplies none to avoid conflicting API parameters.",
+  "environment_audit": "environment.md",
+  "telemetry": {
+    "script": "node_telemetry.py",
+    "scope": "Four-node launches initiated after the second Node3 recovery; earlier performance runs do not have this continuous telemetry.",
+    "memory_interval_s": 1,
+    "gpu_interval_s": 5,
+    "node3_kernel_stream": true,
+    "spot_checks": [
+      "raw/qwen-yarn-w2/long/default/health-snapshots.jsonl"
+    ],
+    "node3_management_ssh": {
+      "host": "192.168.50.232",
+      "host_key_alias": "192.168.88.13",
+      "verified_hostname": "spark-a289",
+      "record": "raw/environment-audit/node3-management-link.json"
+    }
+  },
+  "clock_alignment": "raw/environment-audit/clock-offsets.json",
+  "long_context_targets": {
+    "glm-flash-hybrid-w4": [
+      2048,
+      8192,
+      32768
+    ],
+    "glm-flash-fp8-w4": [
+      2048,
+      8192,
+      32768
+    ],
+    "deepseek-w4": [
+      4096,
+      32768,
+      122000
+    ],
+    "qwen-yarn-w2": [
+      4096,
+      32768,
+      131072,
+      262144,
+      524288
+    ]
+  },
+  "completed_at": "2026-09-22T14:05:22.881715+00:00"
+}

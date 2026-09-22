@@ -1,0 +1,12 @@
+[  7%] Built target dgpp_rope_scaling
+[ 15%] Built target dgpp_core
+[ 30%] Built target dgpp_loaders
+[ 46%] Built target dgpp_models_qwen
+[100%] Built target dgpp_kernels
+[100%] Linking CXX executable qsa_index_bench
+[100%] Built target qsa_index_bench
+[ 11%] Built target dgpp_rope_scaling
+[ 22%] Built target dgpp_core
+[100%] Built target dgpp_kernels
+[100%] Linking CXX executable csa2_select_bench
+[100%] Built target csa2_select_bench

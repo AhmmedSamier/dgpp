@@ -1,0 +1,9 @@
+2048 r0: 1845 prompt tokens, 0 cached, prefill 1.245s, decode 58.89 tok/s, 32.56 ms/pass
+2048 r1: 1845 prompt tokens, 1840 cached, prefill 0.071s, decode 58.92 tok/s, 32.54 ms/pass
+2048 r2: 1845 prompt tokens, 1840 cached, prefill 0.071s, decode 58.79 tok/s, 32.62 ms/pass
+8192 r0: 7921 prompt tokens, 0 cached, prefill 5.389s, decode 59.98 tok/s, 32.96 ms/pass
+8192 r1: 7921 prompt tokens, 7916 cached, prefill 0.076s, decode 59.97 tok/s, 32.96 ms/pass
+8192 r2: 7921 prompt tokens, 7916 cached, prefill 0.074s, decode 59.95 tok/s, 32.97 ms/pass
+32768 r0: 32682 prompt tokens, 0 cached, prefill 26.287s, decode 56.91 tok/s, 34.46 ms/pass
+32768 r1: 32682 prompt tokens, 32680 cached, prefill 0.064s, decode 58.43 tok/s, 33.57 ms/pass
+32768 r2: 32682 prompt tokens, 32680 cached, prefill 0.063s, decode 58.37 tok/s, 33.60 ms/pass

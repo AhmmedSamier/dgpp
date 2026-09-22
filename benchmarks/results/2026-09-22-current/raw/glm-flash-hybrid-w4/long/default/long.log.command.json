@@ -1,0 +1,16 @@
+{
+  "command": [
+    "/usr/bin/python3",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/long_context.py",
+    "--lengths",
+    "2048",
+    "8192",
+    "32768",
+    "--json-out",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm-flash-hybrid-w4/long/default/long.json"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-09-22T11:06:23.853441+00:00",
+  "returncode": 0,
+  "finished_at": "2026-09-22T11:07:42.967296+00:00"
+}

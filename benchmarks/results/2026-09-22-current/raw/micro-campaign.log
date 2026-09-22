@@ -1,0 +1,22 @@
+2026-09-22T01:35:22.792816+00:00 RUN /home/stephen/workspace/dgpp/build-release/qsa_index_bench --graph --pools 16384,65322,131072 --rows 2 --iters 30 --warmup 5
+2026-09-22T01:35:24.672371+00:00 EXIT 0 raw/micro/qsa-rows2.jsonl
+2026-09-22T01:35:24.672576+00:00 RUN /home/stephen/workspace/dgpp/build-release/qsa_index_bench --graph --pools 16384,65322,131072 --rows 16 --iters 30 --warmup 5
+2026-09-22T01:35:27.953890+00:00 EXIT 0 raw/micro/qsa-rows16.jsonl
+2026-09-22T01:35:27.954070+00:00 RUN /home/stephen/workspace/dgpp/build-release/csa2_select_bench --ctx 4096 --rows 1 --iters 30 --warmup 5
+2026-09-22T01:35:29.275244+00:00 EXIT 0 raw/micro/csa2-ctx4096-rows1.jsonl
+2026-09-22T01:35:29.275422+00:00 RUN /home/stephen/workspace/dgpp/build-release/csa2_select_bench --ctx 16384 --rows 1 --iters 30 --warmup 5
+2026-09-22T01:35:30.597546+00:00 EXIT 0 raw/micro/csa2-ctx16384-rows1.jsonl
+2026-09-22T01:35:30.597738+00:00 RUN /home/stephen/workspace/dgpp/build-release/csa2_select_bench --ctx 131072 --rows 1 --iters 30 --warmup 5
+2026-09-22T01:35:32.022516+00:00 EXIT 0 raw/micro/csa2-ctx131072-rows1.jsonl
+2026-09-22T01:35:32.022699+00:00 RUN /home/stephen/workspace/dgpp/build-release/csa2_select_bench --ctx 4096 --rows 5 --iters 30 --warmup 5
+2026-09-22T01:35:33.345814+00:00 EXIT 0 raw/micro/csa2-ctx4096-rows5.jsonl
+2026-09-22T01:35:33.345998+00:00 RUN /home/stephen/workspace/dgpp/build-release/csa2_select_bench --ctx 16384 --rows 5 --iters 30 --warmup 5
+2026-09-22T01:35:34.718616+00:00 EXIT 0 raw/micro/csa2-ctx16384-rows5.jsonl
+2026-09-22T01:35:34.718790+00:00 RUN /home/stephen/workspace/dgpp/build-release/csa2_select_bench --ctx 131072 --rows 5 --iters 30 --warmup 5
+2026-09-22T01:35:36.393292+00:00 EXIT 0 raw/micro/csa2-ctx131072-rows5.jsonl
+2026-09-22T01:35:36.393490+00:00 RUN /home/stephen/workspace/dgpp/build-release/csa2_select_bench --ctx 4096 --rows 30 --iters 30 --warmup 5
+2026-09-22T01:35:37.766579+00:00 EXIT 0 raw/micro/csa2-ctx4096-rows30.jsonl
+2026-09-22T01:35:37.766765+00:00 RUN /home/stephen/workspace/dgpp/build-release/csa2_select_bench --ctx 16384 --rows 30 --iters 30 --warmup 5
+2026-09-22T01:35:39.342091+00:00 EXIT 0 raw/micro/csa2-ctx16384-rows30.jsonl
+2026-09-22T01:35:39.342322+00:00 RUN /home/stephen/workspace/dgpp/build-release/csa2_select_bench --ctx 131072 --rows 30 --iters 30 --warmup 5
+2026-09-22T01:35:42.382530+00:00 EXIT 0 raw/micro/csa2-ctx131072-rows30.jsonl

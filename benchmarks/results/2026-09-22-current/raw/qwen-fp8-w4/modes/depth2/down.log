@@ -1,0 +1,9 @@
+2026-09-22 11:45:30.438 === SIGINT rank 0 (2813888) — the stop record releases the peers
+2026-09-22 11:45:32.440 === waiting for the peers to drain
+2026-09-22 11:45:36.470 === op-stream identity (every rank)
+2026-09-22 11:45:36.471 8f25eec81e5cc6512f92f28383bd0606  /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/qwen-fp8-w4/modes/depth2/server/serve_rank0.ops
+2026-09-22 11:45:36.471 8f25eec81e5cc6512f92f28383bd0606  /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/qwen-fp8-w4/modes/depth2/server/serve_rank1.ops
+2026-09-22 11:45:36.471 8f25eec81e5cc6512f92f28383bd0606  /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/qwen-fp8-w4/modes/depth2/server/serve_rank2.ops
+2026-09-22 11:45:36.472 8f25eec81e5cc6512f92f28383bd0606  /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/qwen-fp8-w4/modes/depth2/server/serve_rank3.ops
+2026-09-22 11:45:36.472 op streams: identical across 4 ranks
+2026-09-22 11:45:36.472 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/qwen-fp8-w4/modes/depth2/server

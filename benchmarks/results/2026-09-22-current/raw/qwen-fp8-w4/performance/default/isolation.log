@@ -1,0 +1,5 @@
+model Qwen/Qwen3.8-Flash-Next-FP8
+warm 0: status 200 tokens 64
+== isolation: prompt 0 alone (256 tokens) vs beside 3 others (256 tokens): DIFFERENT
+   first difference at char 642: alone 'concurrent requests. To address these limitations, modern in' | batched 'high-concurrency workloads. To address these limitations, mo'
+transcript isolation failed

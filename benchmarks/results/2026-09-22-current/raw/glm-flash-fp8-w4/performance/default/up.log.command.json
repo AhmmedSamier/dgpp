@@ -1,0 +1,17 @@
+{
+  "command": [
+    "/usr/bin/python3",
+    "/home/stephen/workspace/dgpp/scripts/dgpp-cluster",
+    "up",
+    "--config",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm-flash-fp8-w4/performance/default/config.json",
+    "--bin",
+    "/home/stephen/workspace/dgpp/build-release/dgpp-serve",
+    "--log-dir",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm-flash-fp8-w4/performance/default/server"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-09-22T02:18:53.320553+00:00",
+  "returncode": 0,
+  "finished_at": "2026-09-22T02:19:38.123935+00:00"
+}

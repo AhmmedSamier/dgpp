@@ -1,0 +1,9 @@
+2026-09-22 02:33:26.212 === SIGINT rank 0 (2271972) — the stop record releases the peers
+2026-09-22 02:33:28.213 === waiting for the peers to drain
+2026-09-22 02:33:32.313 === op-stream identity (every rank)
+2026-09-22 02:33:32.318 cd67359b3ce4264a15b1c13d99345972  /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm-flash-fp8-w4/performance/default/server/serve_rank0.ops
+2026-09-22 02:33:32.322 cd67359b3ce4264a15b1c13d99345972  /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm-flash-fp8-w4/performance/default/server/serve_rank1.ops
+2026-09-22 02:33:32.326 cd67359b3ce4264a15b1c13d99345972  /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm-flash-fp8-w4/performance/default/server/serve_rank2.ops
+2026-09-22 02:33:32.329 cd67359b3ce4264a15b1c13d99345972  /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm-flash-fp8-w4/performance/default/server/serve_rank3.ops
+2026-09-22 02:33:32.329 op streams: identical across 4 ranks
+2026-09-22 02:33:32.329 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm-flash-fp8-w4/performance/default/server

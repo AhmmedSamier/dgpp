@@ -1,0 +1,18 @@
+{
+  "command": [
+    "/home/stephen/workspace/dgpp/build-release/qsa_index_bench",
+    "--graph",
+    "--pools",
+    "16384,65322,131072",
+    "--rows",
+    "16",
+    "--iters",
+    "30",
+    "--warmup",
+    "5"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-09-22T01:35:24.672532+00:00",
+  "returncode": 0,
+  "finished_at": "2026-09-22T01:35:27.953693+00:00"
+}

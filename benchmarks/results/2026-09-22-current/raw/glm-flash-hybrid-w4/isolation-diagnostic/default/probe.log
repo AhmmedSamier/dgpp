@@ -1,0 +1,72 @@
+== isolation-c1concurrency 1: 02:10:58.011 .. 02:11:02.528  wall 4.5 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 76 ms  client update pace 17.41 ms/update
+   aggregate wall: 256 tokens in 4.52 s = 56.68 tok/s (prefill included)
+   legacy output-span aggregate: 57.6574353126845 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 57.400 tok/s
+PROBE 1 {"text_sha256": "8d354804060ca574b6ff81fbb4a6cca9c22793fa7614bdbcd7ebda6ba83a6ca4", "identical_to_first_solo": true, "first_difference": null, "solo_excerpt": "", "batch_excerpt": ""}
+== isolation-c1concurrency 1: 02:11:02.529 .. 02:11:07.044  wall 4.5 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 76 ms  client update pace 17.40 ms/update
+   aggregate wall: 256 tokens in 4.51 s = 56.70 tok/s (prefill included)
+   legacy output-span aggregate: 57.683646842939034 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 57.460 tok/s
+PROBE 1 {"text_sha256": "8d354804060ca574b6ff81fbb4a6cca9c22793fa7614bdbcd7ebda6ba83a6ca4", "identical_to_first_solo": true, "first_difference": null, "solo_excerpt": "", "batch_excerpt": ""}
+== isolation-c2concurrency 2: 02:11:07.045 .. 02:11:13.603  wall 6.6 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 76 ms  client update pace 25.21 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 404 ms  client update pace 24.03 ms/update
+   aggregate wall: 512 tokens in 6.56 s = 78.08 tok/s (prefill included)
+   legacy output-span aggregate: 79.31255790838725 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 82.831 tok/s
+PROBE 2 {"text_sha256": "8d354804060ca574b6ff81fbb4a6cca9c22793fa7614bdbcd7ebda6ba83a6ca4", "identical_to_first_solo": true, "first_difference": null, "solo_excerpt": "", "batch_excerpt": ""}
+== isolation-c2concurrency 2: 02:11:13.605 .. 02:11:19.907  wall 6.3 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 152 ms  client update pace 24.12 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 76 ms  client update pace 24.31 ms/update
+   aggregate wall: 512 tokens in 6.30 s = 81.24 tok/s (prefill included)
+   legacy output-span aggregate: 82.23645606703673 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 82.807 tok/s
+PROBE 2 {"text_sha256": "8d354804060ca574b6ff81fbb4a6cca9c22793fa7614bdbcd7ebda6ba83a6ca4", "identical_to_first_solo": true, "first_difference": null, "solo_excerpt": "", "batch_excerpt": ""}
+== isolation-c3concurrency 3: 02:11:19.909 .. 02:11:28.439  wall 8.5 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 77 ms  client update pace 32.55 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 505 ms  client update pace 29.98 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 256 ttft 404 ms  client update pace 31.86 ms/update
+   aggregate wall: 768 tokens in 8.53 s = 90.04 tok/s (prefill included)
+   legacy output-span aggregate: 90.86377740791495 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 94.709 tok/s
+PROBE 3 {"text_sha256": "11f99abc53960bc633aeec53a688165d60d6ae851bff61f5c67cc0f76818fe3b", "identical_to_first_solo": false, "first_difference": 495, "solo_excerpt": "poor sharing\n3. Paged KV cache mechanics: blocks, block size, block tables, logical vs physical views\n4. Attention kerne", "batch_excerpt": "inflexible scheduling\n3. Paged KV cache mechanics: blocks, block tables, logical vs physical blocks, block size, mapping"}
+== isolation-c3concurrency 3: 02:11:28.443 .. 02:11:36.640  wall 8.2 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 77 ms  client update pace 31.84 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 153 ms  client update pace 30.45 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 256 ttft 253 ms  client update pace 31.15 ms/update
+   aggregate wall: 768 tokens in 8.20 s = 93.70 tok/s (prefill included)
+   legacy output-span aggregate: 94.59079696035465 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 95.827 tok/s
+PROBE 3 {"text_sha256": "11f99abc53960bc633aeec53a688165d60d6ae851bff61f5c67cc0f76818fe3b", "identical_to_first_solo": false, "first_difference": 495, "solo_excerpt": "poor sharing\n3. Paged KV cache mechanics: blocks, block size, block tables, logical vs physical views\n4. Attention kerne", "batch_excerpt": "inflexible scheduling\n3. Paged KV cache mechanics: blocks, block tables, logical vs physical blocks, block size, mapping"}
+== isolation-c4concurrency 4: 02:11:36.643 .. 02:11:46.689  wall 10.0 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 77 ms  client update pace 38.89 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 153 ms  client update pace 37.49 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 256 ttft 606 ms  client update pace 37.02 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 256 ttft 480 ms  client update pace 34.92 ms/update
+   aggregate wall: 1024 tokens in 10.05 s = 101.93 tok/s (prefill included)
+   legacy output-span aggregate: 102.72466227090305 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 107.088 tok/s
+PROBE 4 {"text_sha256": "11f99abc53960bc633aeec53a688165d60d6ae851bff61f5c67cc0f76818fe3b", "identical_to_first_solo": false, "first_difference": 495, "solo_excerpt": "poor sharing\n3. Paged KV cache mechanics: blocks, block size, block tables, logical vs physical views\n4. Attention kerne", "batch_excerpt": "inflexible scheduling\n3. Paged KV cache mechanics: blocks, block tables, logical vs physical blocks, block size, mapping"}
+== isolation-c4concurrency 4: 02:11:46.694 .. 02:11:56.534  wall 9.8 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 78 ms  client update pace 37.68 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 358 ms  client update pace 35.88 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 256 ttft 154 ms  client update pace 37.98 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 256 ttft 255 ms  client update pace 34.69 ms/update
+   aggregate wall: 1024 tokens in 9.84 s = 104.06 tok/s (prefill included)
+   legacy output-span aggregate: 104.89807905481241 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 106.588 tok/s
+PROBE 4 {"text_sha256": "11f99abc53960bc633aeec53a688165d60d6ae851bff61f5c67cc0f76818fe3b", "identical_to_first_solo": false, "first_difference": 495, "solo_excerpt": "poor sharing\n3. Paged KV cache mechanics: blocks, block size, block tables, logical vs physical views\n4. Attention kerne", "batch_excerpt": "inflexible scheduling\n3. Paged KV cache mechanics: blocks, block tables, logical vs physical blocks, block size, mapping"}
+== isolation-c1concurrency 1: 02:11:56.539 .. 02:12:01.068  wall 4.5 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 76 ms  client update pace 17.46 ms/update
+   aggregate wall: 256 tokens in 4.53 s = 56.53 tok/s (prefill included)
+   legacy output-span aggregate: 57.508516211602114 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 57.252 tok/s
+PROBE 1 {"text_sha256": "8d354804060ca574b6ff81fbb4a6cca9c22793fa7614bdbcd7ebda6ba83a6ca4", "identical_to_first_solo": true, "first_difference": null, "solo_excerpt": "", "batch_excerpt": ""}
+== isolation-c1concurrency 1: 02:12:01.075 .. 02:12:05.601  wall 4.5 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 77 ms  client update pace 17.45 ms/update
+   aggregate wall: 256 tokens in 4.53 s = 56.56 tok/s (prefill included)
+   legacy output-span aggregate: 57.544540061263724 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 57.254 tok/s
+PROBE 1 {"text_sha256": "8d354804060ca574b6ff81fbb4a6cca9c22793fa7614bdbcd7ebda6ba83a6ca4", "identical_to_first_solo": true, "first_difference": null, "solo_excerpt": "", "batch_excerpt": ""}

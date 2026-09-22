@@ -1,0 +1,22 @@
+2026-09-22T05:15:15.973401+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm47-w4/performance/default/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm47-w4/performance/default/server
+2026-09-22T05:15:51.124959+00:00 EXIT 0 raw/glm47-w4/performance/default/up.log
+2026-09-22T05:15:51.139148+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,2,4 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm47-w4/performance/default/greedy.json
+2026-09-22T05:24:19.820035+00:00 EXIT 0 raw/glm47-w4/performance/default/greedy.log
+2026-09-22T05:24:19.820401+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py 127.0.0.1 18080 2048 8192 32768 --repeat 3 --no-think --seed 7 --tag current-20260922 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm47-w4/performance/default/prefill.json
+2026-09-22T05:24:38.869379+00:00 EXIT 1 raw/glm47-w4/performance/default/prefill.log
+2026-09-22T05:24:38.869739+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,4 --classes all --repeat 3 --max-tokens 256 --temperature 1 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm47-w4/performance/default/sampled.json
+2026-09-22T05:24:38.984706+00:00 EXIT 1 raw/glm47-w4/performance/default/sampled.log
+2026-09-22T05:24:38.985052+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_load.py 127.0.0.1 18080 --concurrency 1 --max-tokens 256 --isolation 4 --classes chat --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm47-w4/performance/default/isolation.json
+2026-09-22T05:24:39.099340+00:00 EXIT 1 raw/glm47-w4/performance/default/isolation.log
+2026-09-22T05:24:39.099667+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm47-w4/performance/default/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/raw/glm47-w4/performance/default/server
+2026-09-22T05:24:56.572796+00:00 EXIT 1 raw/glm47-w4/performance/default/down.log
+Traceback (most recent call last):
+  File "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/run.py", line 250, in <module>
+    main()
+  File "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/run.py", line 246, in main
+    globals()[args.stage](entry)
+  File "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/run.py", line 133, in performance
+    stop(directory, config, server)
+  File "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/run.py", line 107, in stop
+    raise RuntimeError("cluster did not stop cleanly")
+RuntimeError: cluster did not stop cleanly

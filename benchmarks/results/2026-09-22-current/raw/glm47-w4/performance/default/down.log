@@ -1,0 +1,4 @@
+2026-09-22 05:24:45.112 WARN: rank 2 (192.168.88.13) UNKNOWN: 192.168.88.13: process status failed: ssh: connect to host 192.168.88.13 port 22: Connection timed out
+2026-09-22 05:24:45.112 === waiting for the peers to drain
+2026-09-22 05:24:56.536 ERROR: rank 2 (192.168.88.13) UNKNOWN: 192.168.88.13: process status failed: ssh: connect to host 192.168.88.13 port 22: Connection timed out
+2026-09-22 05:24:56.536 ERROR: shutdown incomplete for nvidia/GLM-4.7-NVFP4 on 4 node(s) [server] (benchmarks/results/2026-09-22-current/raw/glm47-w4/performance/default/config.json); retry down after resolving the errors
