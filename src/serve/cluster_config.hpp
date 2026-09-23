@@ -114,7 +114,7 @@ struct ClusterConfig {
     double prefix_cache_gib = 1.5;
     std::string admission = "full";
     int admission_window = 256;
-    int prefill_budget_tokens = 0;
+    int prefill_budget_tokens = -1;  // automatic on engines with resumable prefill
     int prefill_idle_budget_tokens = 0;
     double bulk_pace_gbps = -1.0;  // derived from the port rate
     int bulk_inflight = -1;

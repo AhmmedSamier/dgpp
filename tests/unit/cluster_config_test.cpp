@@ -330,3 +330,13 @@ DGPP_TEST(cluster_config_the_yarn512k_template_is_a_deployment_the_engine_reads)
           "the pool clears the ceiling with room for an answer: a 524288-token "
           "request must be admissible in this template");
 }
+
+DGPP_TEST(cluster_config_prefill_defaults_to_auto_with_explicit_opt_out) {
+  const auto defaults = dgpp::serve::parse_cluster_config(engine_json("{}"), "t");
+  require(defaults.engine.prefill_budget_tokens == -1, "unset prefill budget is automatic");
+  for (int budget : {-1, 0, 256}) {
+    const auto config = dgpp::serve::parse_cluster_config(
+        engine_json("{\"prefill_budget_tokens\":" + std::to_string(budget) + "}"), "t");
+    require(config.engine.prefill_budget_tokens == budget, "explicit budget preserved");
+  }
+}

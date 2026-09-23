@@ -98,6 +98,8 @@
 #include "serve/glm_vision_frontend.hpp"
 #include "serve/qwen_vision_frontend.hpp"
 #include "serve/http_server.hpp"
+#include "serve/prefill_policy.hpp"
+#include "serve/shutdown_watchdog.hpp"
 
 namespace fs = std::filesystem;
 
@@ -113,13 +115,12 @@ std::atomic<bool> g_stop_requested{false};
 std::atomic<int> g_stop_signals{0};
 void on_signal(int) {
   g_stop_requested.store(true);
-  g_stop_signals.fetch_add(1);
+  if (g_stop_signals.fetch_add(1) >= 1) std::_Exit(2);
 }
 
-// A PEER never leaves on its own signal (M6 6c): it follows rank 0's
-// journal to the stop record, which rank 0 sends only after its final
-// pass — so the bus never comes down under a collective on either side.
-// A second signal forces the exit, under whatever is in flight.
+// A peer follows rank 0's journal to the stop record during graceful
+// shutdown. The independent watchdog bounds this wait; the signal handler
+// forces an immediate exit on a second signal, even inside a collective.
 bool peer_should_stop(int rank) {
   static std::atomic<bool> warned{false};
   const int n = g_stop_signals.load();
@@ -1152,7 +1153,7 @@ int main(int argc, char** argv) {
       "    tokens, grows at tick top, and sheds the youngest request\n"
       "    (finish_reason length) when the pool runs out; every rank takes\n"
       "    rank 0's policy from the warm record\n"
-      "  [--prefill-budget-tokens N (default 0)]: Qwen/GLM-5.3-Flash graph prefill tokens/tick, 0 "
+      "  [--prefill-budget-tokens N (default -1)]: automatic aligned chunks on supported graph engines; 0 "
       "disables\n"
       "  [--prefill-idle-budget-tokens N (default 0)]: larger budget without active decode; 0 uses "
       "the busy budget\n"
@@ -1195,7 +1196,7 @@ int main(int argc, char** argv) {
   int sampling_candidates = dgpp::kSamplingCandidates;
   std::string admission_mode = "full";
   int admission_window = 256;
-  int prefill_budget_tokens = 0;
+  int prefill_budget_tokens = -1;
   int prefill_idle_budget_tokens = 0;
   // The bulk collective's sender pacing (prefill all-reduces): negative
   // derives the per-QP rate from the port at bus start.
@@ -1706,8 +1707,8 @@ int main(int argc, char** argv) {
         graph_batch_min_live, max_concurrency);
     return 1;
   }
-  if (prefill_budget_tokens < 0 || prefill_budget_tokens > (1 << 30)) {
-    DGPP_LOG_ERROR("--prefill-budget-tokens must be in [0, 1073741824]");
+  if (prefill_budget_tokens < -1 || prefill_budget_tokens > (1 << 30)) {
+    DGPP_LOG_ERROR("--prefill-budget-tokens must be -1 (automatic) or in [0, 1073741824]");
     return 1;
   }
 
@@ -1731,6 +1732,7 @@ int main(int argc, char** argv) {
 
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
+  dgpp::serve::ShutdownWatchdog shutdown_watchdog(g_stop_requested);
 
   try {
     // Registration precedes prepare_serving_process(), which pins the host
@@ -2133,6 +2135,10 @@ int main(int argc, char** argv) {
               family->make_graph_engine(bus.get(), rank, world, pick_scratch, graph_batch_min_live,
                                         sample_prefix.data, sample_gather.data, sampling_candidates,
                                         &grammar_vocab, prefix_slots, mtp_depth, compact_batches);
+          knobs.admission = dgpp::serve::resolve_prefill_policy(knobs.admission, *graph_engine->engine());
+          peer_policy = knobs.admission;
+          DGPP_LOG_INFO("rank {}: prefill budget {} tokens/tick (0 = full prompt)",
+                        rank, knobs.admission.prefill_budget_tokens);
           if (mtp_schedule) {
             // The value of decode time: the configured throughput, or the
             // reservation rate of the configured curve (a plain step's).
@@ -2182,6 +2188,8 @@ int main(int argc, char** argv) {
               dgpp::make_fabric_sample(bus.get(), rank, world, sample_prefix.data, sample_gather.data,
                                        family->vocab_size()),
               &grammar_vocab, prefix_slots);
+          knobs.admission = dgpp::serve::resolve_prefill_policy(knobs.admission, *engine);
+          peer_policy = knobs.admission;
           // The eager fabric path exchanges the warm record too: it
           // carries the admission policy (no capture to start here).
           if (rank == 0) {
@@ -2307,6 +2315,7 @@ int main(int argc, char** argv) {
     std::unique_ptr<dgpp::sched::SchedulerEngine> engine = family->make_eager_engine(
         max_concurrency, dgpp::make_w1_pick(family->vocab_size()), dgpp::make_w1_sample(family->vocab_size()),
         &grammar_vocab, prefix_slots);
+    knobs.admission = dgpp::serve::resolve_prefill_policy(knobs.admission, *engine);
     const int rc = serve_openai(engine.get(), family->vocab_size(), family->eos_token_ids(), ckpt,
                                 model_display, knobs, no_eos, boot_s(), /*journal=*/nullptr,
                                 /*oplog=*/nullptr, family->name());

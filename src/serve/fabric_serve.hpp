@@ -147,7 +147,7 @@ struct WorldSettings {
   double prefix_cache_gib = 0.0;
   std::string admission;
   int admission_window = 0;
-  int prefill_budget_tokens = 0;
+  int prefill_budget_tokens = 0;  // settings: -1 = automatic; absent legacy field = disabled
   int prefill_idle_budget_tokens = 0;
   double bulk_pace_gbps = 0.0;
   int bulk_inflight = 0;
