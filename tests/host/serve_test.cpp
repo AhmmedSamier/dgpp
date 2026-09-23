@@ -46,6 +46,7 @@
 #include "serve/prefill_policy.hpp"
 #include "serve/serve_stats.hpp"
 #include "text/chat_template.hpp"
+#include "text/dsv41_prompt.hpp"
 
 namespace {
 
@@ -380,17 +381,16 @@ class FakeEngine : public SchedulerEngine {
   std::vector<std::pair<int, std::vector<dgpp::sched::LogitBias>>> biases_;
 };
 
-// The 6f markers of the fake tokenizer: 1001..1008, decoding to their
+// The markers of the fake tokenizer: 1001..1009, decoding to their
 // literal text (not special, exactly like the real added tokens).
-constexpr int64_t kThinkOpen = 1001, kThinkClose = 1002, kToolOpen = 1003,
-                  kToolClose = 1004, kKeyOpen = 1005, kKeyClose = 1006,
-                  kValueOpen = 1007, kValueClose = 1008;
+constexpr int64_t kThinkOpen = 1001, kThinkClose = 1002, kToolOpen = 1003, kToolClose = 1004,
+                  kKeyOpen = 1005, kKeyClose = 1006, kValueOpen = 1007, kValueClose = 1008,
+                  kDsml = 1009;
 const std::vector<std::pair<std::string, int64_t>>& marker_table() {
   static const std::vector<std::pair<std::string, int64_t>> t = {
-      {"</tool_call>", kToolClose}, {"<tool_call>", kToolOpen},
-      {"</arg_value>", kValueClose}, {"<arg_value>", kValueOpen},
-      {"</arg_key>", kKeyClose},   {"<arg_key>", kKeyOpen},
-      {"</think>", kThinkClose},   {"<think>", kThinkOpen},
+      {"</tool_call>", kToolClose}, {"<tool_call>", kToolOpen}, {"</arg_value>", kValueClose},
+      {"<arg_value>", kValueOpen},  {"</arg_key>", kKeyClose},  {"<arg_key>", kKeyOpen},
+      {"</think>", kThinkClose},    {"<think>", kThinkOpen},    {"｜DSML｜", kDsml},
   };
   return t;
 }
@@ -455,8 +455,8 @@ class FakeFrontend : public ModelFrontend {
     return input;
   }
 
-  explicit FakeFrontend(bool with_markers = false)
-      : with_markers_(with_markers) {}
+  explicit FakeFrontend(bool with_markers = false, bool with_dsml = false)
+      : with_markers_(with_markers), with_dsml_(with_dsml) {}
   // The template knob gate: a template that reads enable_thinking (Qwen3.8-
   // Flash-Next, GLM-4.7) accepts it in chat_template_kwargs; the default
   // fake, like GLM-5.3-Flash's template, does not.
@@ -521,6 +521,10 @@ class FakeFrontend : public ModelFrontend {
     if (!with_markers_) return m;
     m.think_open = {kThinkOpen, "<think>"};
     m.think_close = {kThinkClose, "</think>"};
+    if (with_dsml_) {
+      m.dsml = {kDsml, "｜DSML｜"};
+      return m;
+    }
     m.tool_call_open = {kToolOpen, "<tool_call>"};
     m.tool_call_close = {kToolClose, "</tool_call>"};
     m.arg_key_open = {kKeyOpen, "<arg_key>"};
@@ -541,6 +545,7 @@ class FakeFrontend : public ModelFrontend {
 
  private:
   bool with_markers_;
+  bool with_dsml_;
   mutable std::mutex mu_;
   mutable std::string last_globals_;
 };
@@ -653,22 +658,18 @@ struct ServiceRig {
   // the fake render opens <think> (the 6f rigs); `reasoning_in_content`:
   // the fold knob.
   explicit ServiceRig(int queue_limit = 8,
-                      dgpp::sample::Params sampling_defaults =
-                          dgpp::sample::greedy_params(),
-                      bool can_sample = false,
-                      std::optional<uint64_t> fixed_seed = std::nullopt,
-                      bool with_markers = false,
-                      bool reasoning_in_content = false,
-                      dgpp::sched::AdmissionPolicy admission = {},
-                      int prefix_slots = 0,
+                      dgpp::sample::Params sampling_defaults = dgpp::sample::greedy_params(),
+                      bool can_sample = false, std::optional<uint64_t> fixed_seed = std::nullopt,
+                      bool with_markers = false, bool reasoning_in_content = false,
+                      dgpp::sched::AdmissionPolicy admission = {}, int prefix_slots = 0,
                       dgpp::serve::FileInputConfig file_inputs = {},
                       // The request-context surface (review item 7): the rig's
                       // rope ramp and its two bounds, advertised on /v1/models.
                       std::optional<dgpp::RopeScaling> rope_scaling = std::nullopt,
                       int64_t position_ceiling = 0, int64_t kv_pool_tokens = 0,
-                      bool resumable_prefill = false)
+                      bool resumable_prefill = false, bool with_dsml = false)
       : engine(kSlots, /*total_blocks=*/100, /*block_tokens=*/4, can_sample),
-        frontend(with_markers),
+        frontend(with_markers, with_dsml),
         cfg([&] {
           ServiceConfig c;
           c.model_id = "glm-5.3-flash-fp8";
@@ -686,8 +687,7 @@ struct ServiceRig {
           c.file_inputs = std::move(file_inputs);
           return c;
         }()),
-        service((engine.set_prefix_arena(prefix_slots, 4), cfg), &engine, &frontend,
-                {kFakeEos}),
+        service((engine.set_prefix_arena(prefix_slots, 4), cfg), &engine, &frontend, {kFakeEos}),
         http(0, &service, /*max_connections=*/64) {
     http_loop = std::thread([this] { http.serve(); });
     engine_loop = std::thread([this] {
@@ -1786,6 +1786,104 @@ std::string concat_field(const std::string& resp, const std::string& field) {
     pos = vend;
   }
   return out;
+}
+
+DGPP_TEST(serve_tools_renderOnlyTheOpenAIToolFields) {
+  // GIVEN a frontend with the template's markers (tool calls available),
+  ServiceRig rig(/*queue_limit=*/8, dgpp::sample::greedy_params(),
+                 /*can_sample=*/false, std::nullopt, /*with_markers=*/true);
+  // WHEN a client sends tools carrying fields outside the OpenAI tool schema
+  // -- a per-function `response` schema (the Berkeley Function Calling
+  // Leaderboard's OpenAI handler sends one for 161 of its 162 multi-turn
+  // functions) and a
+  // vendor key on the tool object --
+  const std::string tools =
+      ",\"tools\":[{\"type\":\"function\",\"x_vendor\":{\"id\":7},\"function\":{"
+      "\"name\":\"get_weather\",\"description\":\"Weather\",\"strict\":false,"
+      "\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},"
+      "\"required\":[\"city\"]},"
+      "\"response\":{\"type\":\"object\",\"properties\":{\"temp_c_marker\":{\"type\":\"number\"}}}}}]";
+  (void)post_until_usage(rig, chat_body("abcd", 2, tools));
+  const std::string g = rig.frontend.last_globals();
+  // THEN the template sees type and function.{name, description, parameters,
+  // strict} -- what SGLang and vLLM render after parsing tools into the
+  // OpenAI model -- and nothing else.
+  require(g.find("\"name\":\"get_weather\"") != std::string::npos &&
+              g.find("\"description\":\"Weather\"") != std::string::npos &&
+              g.find("\"city\"") != std::string::npos && g.find("\"strict\":false") != std::string::npos,
+          "the OpenAI tool fields reach the template: " + g);
+  require(g.find("temp_c_marker") == std::string::npos && g.find("\"response\"") == std::string::npos,
+          "a function's response schema is not rendered: " + g);
+  require(g.find("x_vendor") == std::string::npos, "unknown tool-level keys are not rendered: " + g);
+}
+
+DGPP_TEST(serve_tools_preserveFlatDefinitionsWhileFiltering) {
+  ServiceRig rig(8, dgpp::sample::greedy_params(), true, std::nullopt, true);
+  // Flat definitions are accepted with or without an explicit tool type.
+  // Keep their shape and member order, including arbitrary schema properties.
+  const std::string fields =
+      R"("strict":true,"name":"lookup","description":"Lookup","parameters":{"type":"object","properties":{"response":{"type":"string"},"namespace":{"type":"string"}}})";
+  for (const std::string& type : {std::string{}, std::string{R"("type":"function",)"}}) {
+    const std::string expected = "[{" + type + fields + "}]";
+    const std::string tools =
+        ",\"tools\":[{" + type + fields +
+        R"(,"response":{"response_schema_marker":true},"x_vendor":7,"namespace":"unused"}])";
+    const auto response = post_until_usage(rig, chat_body("abcd", 2, tools));
+    require(response.find("200 OK") != std::string::npos, "flat tools accepted: " + response);
+    const std::string globals = rig.frontend.last_globals();
+    const auto parsed = dgpp::minijson::parse(globals);
+    require(json_of(parsed.root.at("tools")) == expected,
+            "flat tool fields and order preserved, extras removed: " + globals);
+    // Use the real renderer too: erasing a flat definition previously made
+    // DeepSeek reject it for a missing function name.
+    require(dgpp::text::Dsv41Prompt::render(parsed.root).find("\"name\": \"lookup\"") !=
+                std::string::npos,
+            "flat definitions remain renderable by DeepSeek");
+  }
+}
+
+DGPP_TEST(serve_tools_dsmlNamespacesMatchRenderedAndConstrainedNames) {
+  ServiceRig rig(8, dgpp::sample::greedy_params(), true, std::nullopt, true, false, {}, 0, {},
+                 std::nullopt, 0, 0, /*resumable_prefill=*/false, /*with_dsml=*/true);
+  const std::string ns = R"("namespace":{"name":"search","description":"Search tools"})";
+  const std::string fields =
+      R"("name":"lookup","description":"Lookup","parameters":{"type":"object","properties":{}},"response":{"response_schema_marker":true})";
+  size_t expected_grammars = 0;
+  // The renderer accepts namespaces on the wrapper, the function or a flat
+  // definition. All three must retain their descriptions and qualified names.
+  for (const std::string& tool :
+       {"{\"type\":\"function\"," + ns + ",\"function\":{" + fields + "}}",
+        "{\"type\":\"function\",\"function\":{" + ns + "," + fields + "}}",
+        "{" + ns + "," + fields + "}"}) {
+    for (
+        const std::string& choice :
+        {std::string{R"(,"tool_choice":"required")"},
+         std::string{R"(,"tool_choice":{"type":"function","function":{"name":"lookup"}})"},
+         std::string{
+             R"(,"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"required","tools":[{"type":"function","function":{"name":"lookup"}}]}})"}}) {
+      const auto response =
+          post_until_usage(rig, chat_body("abcd", 2, ",\"tools\":[" + tool + "]" + choice));
+      require(response.find("200 OK") != std::string::npos,
+              "namespaced tools accepted: " + response);
+      const std::string globals = rig.frontend.last_globals();
+      const auto parsed = dgpp::minijson::parse(globals);
+      const std::string prompt = dgpp::text::Dsv41Prompt::render(parsed.root);
+      const auto grammars = rig.engine.grammars();
+      require(grammars.size() == ++expected_grammars, "each request installs a constraint");
+      const auto& grammar = grammars.back();
+      require(grammar.tools.size() == 1 && grammar.tools[0].name == "search::lookup",
+              "the grammar retains the qualified tool name");
+      require(prompt.find("\"name\": \"" + grammar.tools[0].name + "\"") != std::string::npos,
+              "rendered tool name must agree with the decoding constraint: " + prompt);
+      if (grammar.mode == dgpp::text::GrammarSpec::Mode::kNamed)
+        require(grammar.named == grammar.tools[0].name,
+                "named choice uses the same qualified name");
+      require(prompt.find("Search tools\\nLookup") != std::string::npos,
+              "the namespace description reaches the model: " + prompt);
+      require(globals.find("response_schema_marker") == std::string::npos,
+              "DeepSeek still drops unrelated tool fields: " + globals);
+    }
+  }
 }
 
 DGPP_TEST(serve_tools_requestSideRendersThroughTheTemplateAndRefusesByName) {

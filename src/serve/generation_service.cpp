@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
@@ -1525,8 +1526,44 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
   // ---- the template globals ----------------------------------------------
   std::vector<Member> globals;
   globals.push_back(Member{"messages", Value::make_array(std::move(msgs))});
-  if (have_tools && choice != Choice::kNone)
-    globals.push_back(Member{"tools", *tools});
+  if (have_tools && choice != Choice::kNone) {
+    // Keep function fields in their original wrapped or flat shape, plus
+    // DeepSeek namespaces so rendered names agree with the tool grammar.
+    // Omit unrelated metadata, such as BFCL's function-level response schemas.
+    // DGPP_TOOLS_RAW=1 renders the tools verbatim.
+    static const bool raw = std::getenv("DGPP_TOOLS_RAW") != nullptr;
+    if (raw) {
+      globals.push_back(Member{"tools", *tools});
+    } else {
+      const bool dsml = markers_.tool_format() == dgpp::text::ToolFormat::kDsml;
+      const auto keep_function_field = [dsml](std::string_view key) {
+        return key == "name" || key == "description" || key == "parameters" || key == "strict" ||
+               (dsml && key == "namespace");
+      };
+      std::vector<Value> clean;
+      for (const Value& t : tools->items()) {
+        if (!t.is_object()) {
+          clean.push_back(t);
+          continue;
+        }
+        const bool flat = t.find("function") == nullptr;
+        std::vector<Member> tm;
+        for (const Member& m : t.members()) {
+          if (m.key == "type" || (dsml && m.key == "namespace") ||
+              (flat && keep_function_field(m.key))) {
+            tm.push_back(m);
+          } else if (m.key == "function" && m.value.is_object()) {
+            std::vector<Member> fm;
+            for (const Member& f : m.value.members())
+              if (keep_function_field(f.key)) fm.push_back(f);
+            tm.push_back(Member{"function", Value::make_object(std::move(fm))});
+          }
+        }
+        clean.push_back(Value::make_object(std::move(tm)));
+      }
+      globals.push_back(Member{"tools", Value::make_array(std::move(clean))});
+    }
+  }
   if (effort.has_value())
     globals.push_back(
         Member{"reasoning_effort", Value::make_owned_string(*effort)});
