@@ -1,0 +1,480 @@
+{
+  "recursive-mtp1": {
+    "groups": {
+      "code-c1": {
+        "ttft": 0.28128984855720773,
+        "decode_tps": 47.50889343299477,
+        "n": 2
+      },
+      "json-c1": {
+        "ttft": 0.36732332152314484,
+        "decode_tps": 47.9670388290597,
+        "n": 2
+      },
+      "prose-c1": {
+        "ttft": 0.2837123714853078,
+        "decode_tps": 42.64116239590196,
+        "n": 2
+      },
+      "math-c1": {
+        "ttft": 0.33610010950360447,
+        "decode_tps": 49.283037796252486,
+        "n": 2
+      },
+      "code-c2": {
+        "ttft": 0.4633798325667158,
+        "decode_tps": 31.475038513804435,
+        "n": 2
+      },
+      "json-c2": {
+        "ttft": 0.46310482104308903,
+        "decode_tps": 32.77741207926823,
+        "n": 2
+      },
+      "cold-700": {
+        "ttft": 10.99003118253313,
+        "decode_tps": 45.42382023299367,
+        "n": 2
+      },
+      "cold-2800": {
+        "ttft": 50.609438914980274,
+        "decode_tps": 43.371131335969274,
+        "n": 2
+      },
+      "long-seed": {
+        "ttft": 127.19147128693294,
+        "decode_tps": 39.88977356203696,
+        "n": 1
+      },
+      "long-warm": {
+        "ttft": 0.30533597798785195,
+        "decode_tps": 39.91789619572452,
+        "n": 2
+      }
+    },
+    "outputs_differing": [],
+    "acceptance": {
+      "acceptance-code": {
+        "rounds": 133,
+        "accepted_per_position": [
+          123
+        ],
+        "accepted_per_all_drafts": [
+          0.924812030075188
+        ],
+        "attempts": [
+          133
+        ]
+      },
+      "acceptance-json": {
+        "rounds": 129,
+        "accepted_per_position": [
+          127
+        ],
+        "accepted_per_all_drafts": [
+          0.9844961240310077
+        ],
+        "attempts": [
+          129
+        ]
+      },
+      "acceptance-prose": {
+        "rounds": 151,
+        "accepted_per_position": [
+          105
+        ],
+        "accepted_per_all_drafts": [
+          0.695364238410596
+        ],
+        "attempts": [
+          151
+        ]
+      },
+      "acceptance-math": {
+        "rounds": 129,
+        "accepted_per_position": [
+          126
+        ],
+        "accepted_per_all_drafts": [
+          0.9767441860465116
+        ],
+        "attempts": [
+          129
+        ]
+      }
+    },
+    "requests": 19,
+    "complete": true
+  },
+  "recursive-mtp3": {
+    "groups": {
+      "code-c1": {
+        "ttft": 0.3049460425390862,
+        "decode_tps": 42.55048123740582,
+        "n": 2
+      },
+      "json-c1": {
+        "ttft": 0.38614527304889634,
+        "decode_tps": 50.77059168100347,
+        "n": 2
+      },
+      "prose-c1": {
+        "ttft": 0.3057646880042739,
+        "decode_tps": 33.018598721609365,
+        "n": 2
+      },
+      "math-c1": {
+        "ttft": 0.3556899140239693,
+        "decode_tps": 44.30128489695163,
+        "n": 2
+      },
+      "code-c2": {
+        "ttft": 0.5059905274538323,
+        "decode_tps": 28.95100021460283,
+        "n": 2
+      },
+      "json-c2": {
+        "ttft": 0.5058147090021521,
+        "decode_tps": 33.864672924634974,
+        "n": 2
+      },
+      "cold-700": {
+        "ttft": 11.19863031496061,
+        "decode_tps": 41.52322393341339,
+        "n": 2
+      },
+      "cold-2800": {
+        "ttft": 51.3198905424797,
+        "decode_tps": 40.77882757717387,
+        "n": 2
+      },
+      "long-seed": {
+        "ttft": 127.67616725596599,
+        "decode_tps": 35.177919984753274,
+        "n": 1
+      },
+      "long-warm": {
+        "ttft": 0.3533554070163518,
+        "decode_tps": 35.32069138637361,
+        "n": 2
+      }
+    },
+    "outputs_differing": [],
+    "acceptance": {
+      "acceptance-code": {
+        "rounds": 96,
+        "accepted_per_position": [
+          90,
+          49,
+          21
+        ],
+        "accepted_per_all_drafts": [
+          0.9375,
+          0.5104166666666666,
+          0.21875
+        ],
+        "attempts": [
+          96,
+          96,
+          96
+        ]
+      },
+      "acceptance-json": {
+        "rounds": 78,
+        "accepted_per_position": [
+          76,
+          60,
+          41
+        ],
+        "accepted_per_all_drafts": [
+          0.9743589743589743,
+          0.7692307692307693,
+          0.5256410256410257
+        ],
+        "attempts": [
+          78,
+          78,
+          78
+        ]
+      },
+      "acceptance-prose": {
+        "rounds": 127,
+        "accepted_per_position": [
+          93,
+          32,
+          4
+        ],
+        "accepted_per_all_drafts": [
+          0.7322834645669292,
+          0.25196850393700787,
+          0.031496062992125984
+        ],
+        "attempts": [
+          127,
+          127,
+          127
+        ]
+      },
+      "acceptance-math": {
+        "rounds": 93,
+        "accepted_per_position": [
+          92,
+          49,
+          22
+        ],
+        "accepted_per_all_drafts": [
+          0.989247311827957,
+          0.5268817204301075,
+          0.23655913978494625
+        ],
+        "attempts": [
+          93,
+          93,
+          93
+        ]
+      }
+    },
+    "requests": 19,
+    "complete": true
+  },
+  "native-mtp3": {
+    "groups": {
+      "code-c1": {
+        "ttft": 0.3067884430056438,
+        "decode_tps": 54.250949988728074,
+        "n": 2
+      },
+      "json-c1": {
+        "ttft": 0.3865014109760523,
+        "decode_tps": 58.47798059689302,
+        "n": 2
+      },
+      "prose-c1": {
+        "ttft": 0.30893134605139494,
+        "decode_tps": 37.38894352517323,
+        "n": 2
+      },
+      "math-c1": {
+        "ttft": 0.3604815464350395,
+        "decode_tps": 60.147849786726894,
+        "n": 2
+      },
+      "code-c2": {
+        "ttft": 0.40708569798152894,
+        "decode_tps": 35.24696817183628,
+        "n": 2
+      },
+      "json-c2": {
+        "ttft": 0.5990617365459912,
+        "decode_tps": 39.36501165905898,
+        "n": 2
+      },
+      "cold-700": {
+        "ttft": 10.745850912993774,
+        "decode_tps": 52.21370231522295,
+        "n": 2
+      },
+      "cold-2800": {
+        "ttft": 49.489671176997945,
+        "decode_tps": 54.66989873933424,
+        "n": 2
+      },
+      "long-seed": {
+        "ttft": 124.8098961089272,
+        "decode_tps": 45.189556804076375,
+        "n": 1
+      },
+      "long-warm": {
+        "ttft": 0.34425542555982247,
+        "decode_tps": 45.29679418051193,
+        "n": 2
+      }
+    },
+    "outputs_differing": [
+      "code-c2-r0"
+    ],
+    "acceptance": {
+      "acceptance-code": {
+        "rounds": 74,
+        "accepted_per_position": [
+          69,
+          59,
+          55
+        ],
+        "accepted_per_all_drafts": [
+          0.9324324324324325,
+          0.7972972972972973,
+          0.7432432432432432
+        ],
+        "attempts": [
+          74,
+          74,
+          74
+        ]
+      },
+      "acceptance-json": {
+        "rounds": 66,
+        "accepted_per_position": [
+          65,
+          63,
+          61
+        ],
+        "accepted_per_all_drafts": [
+          0.9848484848484849,
+          0.9545454545454546,
+          0.9242424242424242
+        ],
+        "attempts": [
+          66,
+          66,
+          66
+        ]
+      },
+      "acceptance-prose": {
+        "rounds": 110,
+        "accepted_per_position": [
+          78,
+          45,
+          23
+        ],
+        "accepted_per_all_drafts": [
+          0.7090909090909091,
+          0.4090909090909091,
+          0.20909090909090908
+        ],
+        "attempts": [
+          110,
+          110,
+          110
+        ]
+      },
+      "acceptance-math": {
+        "rounds": 67,
+        "accepted_per_position": [
+          66,
+          62,
+          60
+        ],
+        "accepted_per_all_drafts": [
+          0.9850746268656716,
+          0.9253731343283582,
+          0.8955223880597015
+        ],
+        "attempts": [
+          67,
+          67,
+          67
+        ]
+      }
+    },
+    "requests": 19,
+    "complete": true
+  },
+  "native-control-mtp1": {
+    "groups": {
+      "code-c1": {
+        "ttft": 0.28147936501773074,
+        "decode_tps": 47.680125575790306,
+        "n": 2
+      },
+      "json-c1": {
+        "ttft": 0.35824943450279534,
+        "decode_tps": 47.914291811465695,
+        "n": 2
+      },
+      "prose-c1": {
+        "ttft": 0.2823079579975456,
+        "decode_tps": 42.71181828638276,
+        "n": 2
+      },
+      "math-c1": {
+        "ttft": 0.3333064219914377,
+        "decode_tps": 49.383673861431205,
+        "n": 2
+      },
+      "code-c2": {
+        "ttft": 0.4614343930152245,
+        "decode_tps": 31.558032337966274,
+        "n": 2
+      },
+      "json-c2": {
+        "ttft": 0.4612333429977298,
+        "decode_tps": 32.80310435566833,
+        "n": 2
+      },
+      "cold-700": {
+        "ttft": 11.005123562936205,
+        "decode_tps": 45.368411557792214,
+        "n": 2
+      },
+      "cold-2800": {
+        "ttft": 50.743784716993105,
+        "decode_tps": 43.131716859715866,
+        "n": 2
+      },
+      "long-seed": {
+        "ttft": 127.5353832859546,
+        "decode_tps": 39.98648004798909,
+        "n": 1
+      },
+      "long-warm": {
+        "ttft": 0.2957632884499617,
+        "decode_tps": 39.957753348026365,
+        "n": 2
+      }
+    },
+    "outputs_differing": [],
+    "acceptance": {
+      "acceptance-code": {
+        "rounds": 133,
+        "accepted_per_position": [
+          123
+        ],
+        "accepted_per_all_drafts": [
+          0.924812030075188
+        ],
+        "attempts": [
+          133
+        ]
+      },
+      "acceptance-json": {
+        "rounds": 129,
+        "accepted_per_position": [
+          127
+        ],
+        "accepted_per_all_drafts": [
+          0.9844961240310077
+        ],
+        "attempts": [
+          129
+        ]
+      },
+      "acceptance-prose": {
+        "rounds": 151,
+        "accepted_per_position": [
+          105
+        ],
+        "accepted_per_all_drafts": [
+          0.695364238410596
+        ],
+        "attempts": [
+          151
+        ]
+      },
+      "acceptance-math": {
+        "rounds": 129,
+        "accepted_per_position": [
+          126
+        ],
+        "accepted_per_all_drafts": [
+          0.9767441860465116
+        ],
+        "attempts": [
+          129
+        ]
+      }
+    },
+    "requests": 19,
+    "complete": true
+  }
+}

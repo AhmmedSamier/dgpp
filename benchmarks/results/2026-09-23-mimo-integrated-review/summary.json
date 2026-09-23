@@ -1,0 +1,371 @@
+{
+  "integrated-control": {
+    "groups": {
+      "code-c1": {
+        "ttft": 0.4217259254655801,
+        "decode_tps": 47.693410781755944,
+        "n": 2
+      },
+      "json-c1": {
+        "ttft": 0.3581517299753614,
+        "decode_tps": 47.92293959851972,
+        "n": 2
+      },
+      "prose-c1": {
+        "ttft": 0.280911565059796,
+        "decode_tps": 42.78708704417412,
+        "n": 2
+      },
+      "math-c1": {
+        "ttft": 0.33478470443515107,
+        "decode_tps": 49.279981089389935,
+        "n": 2
+      },
+      "code-c2": {
+        "ttft": 0.4619458995293826,
+        "decode_tps": 31.527979446570107,
+        "n": 2
+      },
+      "json-c2": {
+        "ttft": 0.4616430585156195,
+        "decode_tps": 32.82808228656917,
+        "n": 2
+      },
+      "cold-700": {
+        "ttft": 11.00544171052752,
+        "decode_tps": 45.63108462105477,
+        "n": 2
+      },
+      "cold-2800": {
+        "ttft": 50.663125487044454,
+        "decode_tps": 43.2013182094563,
+        "n": 2
+      },
+      "long-seed": {
+        "ttft": 127.41517810104415,
+        "decode_tps": 40.18900620028075,
+        "n": 1
+      },
+      "long-warm": {
+        "ttft": 0.3050722554908134,
+        "decode_tps": 40.08538013051481,
+        "n": 2
+      }
+    },
+    "outputs_differing": [],
+    "acceptance": {
+      "acceptance-code": {
+        "rounds": 133,
+        "accepted_per_position": [
+          123
+        ],
+        "accepted_per_all_drafts": [
+          0.924812030075188
+        ],
+        "attempts": [
+          133
+        ]
+      },
+      "acceptance-json": {
+        "rounds": 129,
+        "accepted_per_position": [
+          127
+        ],
+        "accepted_per_all_drafts": [
+          0.9844961240310077
+        ],
+        "attempts": [
+          129
+        ]
+      },
+      "acceptance-prose": {
+        "rounds": 151,
+        "accepted_per_position": [
+          105
+        ],
+        "accepted_per_all_drafts": [
+          0.695364238410596
+        ],
+        "attempts": [
+          151
+        ]
+      },
+      "acceptance-math": {
+        "rounds": 129,
+        "accepted_per_position": [
+          126
+        ],
+        "accepted_per_all_drafts": [
+          0.9767441860465116
+        ],
+        "attempts": [
+          129
+        ]
+      }
+    },
+    "requests": 19,
+    "complete": true
+  },
+  "integrated-native": {
+    "groups": {
+      "code-c1": {
+        "ttft": 0.4460324745159596,
+        "decode_tps": 54.2773356725219,
+        "n": 2
+      },
+      "json-c1": {
+        "ttft": 0.3845180824864656,
+        "decode_tps": 58.429832561757216,
+        "n": 2
+      },
+      "prose-c1": {
+        "ttft": 0.3071499149664305,
+        "decode_tps": 37.46556505805859,
+        "n": 2
+      },
+      "math-c1": {
+        "ttft": 0.3581221155473031,
+        "decode_tps": 60.14563907250661,
+        "n": 2
+      },
+      "code-c2": {
+        "ttft": 0.511569068999961,
+        "decode_tps": 35.44338757501751,
+        "n": 2
+      },
+      "json-c2": {
+        "ttft": 0.5113328385050409,
+        "decode_tps": 39.31280103039376,
+        "n": 2
+      },
+      "cold-700": {
+        "ttft": 10.888716882502194,
+        "decode_tps": 52.17950525884938,
+        "n": 2
+      },
+      "cold-2800": {
+        "ttft": 50.11633766343584,
+        "decode_tps": 54.7186781724735,
+        "n": 2
+      },
+      "long-seed": {
+        "ttft": 125.93924755090848,
+        "decode_tps": 44.97322735954711,
+        "n": 1
+      },
+      "long-warm": {
+        "ttft": 0.34757420897949487,
+        "decode_tps": 45.370552168998486,
+        "n": 2
+      }
+    },
+    "outputs_differing": [],
+    "acceptance": {
+      "acceptance-code": {
+        "rounds": 74,
+        "accepted_per_position": [
+          69,
+          59,
+          55
+        ],
+        "accepted_per_all_drafts": [
+          0.9324324324324325,
+          0.7972972972972973,
+          0.7432432432432432
+        ],
+        "attempts": [
+          74,
+          74,
+          74
+        ]
+      },
+      "acceptance-json": {
+        "rounds": 66,
+        "accepted_per_position": [
+          65,
+          63,
+          61
+        ],
+        "accepted_per_all_drafts": [
+          0.9848484848484849,
+          0.9545454545454546,
+          0.9242424242424242
+        ],
+        "attempts": [
+          66,
+          66,
+          66
+        ]
+      },
+      "acceptance-prose": {
+        "rounds": 110,
+        "accepted_per_position": [
+          78,
+          45,
+          23
+        ],
+        "accepted_per_all_drafts": [
+          0.7090909090909091,
+          0.4090909090909091,
+          0.20909090909090908
+        ],
+        "attempts": [
+          110,
+          110,
+          110
+        ]
+      },
+      "acceptance-math": {
+        "rounds": 67,
+        "accepted_per_position": [
+          66,
+          62,
+          60
+        ],
+        "accepted_per_all_drafts": [
+          0.9850746268656716,
+          0.9253731343283582,
+          0.8955223880597015
+        ],
+        "attempts": [
+          67,
+          67,
+          67
+        ]
+      }
+    },
+    "requests": 19,
+    "complete": true
+  },
+  "integrated-all": {
+    "groups": {
+      "code-c1": {
+        "ttft": 0.39484594349050894,
+        "decode_tps": 54.32547392482745,
+        "n": 2
+      },
+      "json-c1": {
+        "ttft": 0.3840811459813267,
+        "decode_tps": 58.49784729523121,
+        "n": 2
+      },
+      "prose-c1": {
+        "ttft": 0.28156191506423056,
+        "decode_tps": 37.31139256407822,
+        "n": 2
+      },
+      "math-c1": {
+        "ttft": 0.358463003532961,
+        "decode_tps": 60.30943322699699,
+        "n": 2
+      },
+      "code-c2": {
+        "ttft": 0.5498933365452103,
+        "decode_tps": 35.34488353131658,
+        "n": 2
+      },
+      "json-c2": {
+        "ttft": 0.5496009505004622,
+        "decode_tps": 38.84692226568037,
+        "n": 2
+      },
+      "cold-700": {
+        "ttft": 10.829298470984213,
+        "decode_tps": 52.09218995179147,
+        "n": 2
+      },
+      "cold-2800": {
+        "ttft": 49.841189667000435,
+        "decode_tps": 54.91959333321719,
+        "n": 2
+      },
+      "long-seed": {
+        "ttft": 125.42861686402466,
+        "decode_tps": 45.38856534543731,
+        "n": 1
+      },
+      "long-warm": {
+        "ttft": 0.3509975854540244,
+        "decode_tps": 45.43210813406445,
+        "n": 2
+      }
+    },
+    "outputs_differing": [],
+    "acceptance": {
+      "acceptance-code": {
+        "rounds": 74,
+        "accepted_per_position": [
+          69,
+          59,
+          55
+        ],
+        "accepted_per_all_drafts": [
+          0.9324324324324325,
+          0.7972972972972973,
+          0.7432432432432432
+        ],
+        "attempts": [
+          74,
+          74,
+          74
+        ]
+      },
+      "acceptance-json": {
+        "rounds": 66,
+        "accepted_per_position": [
+          65,
+          63,
+          61
+        ],
+        "accepted_per_all_drafts": [
+          0.9848484848484849,
+          0.9545454545454546,
+          0.9242424242424242
+        ],
+        "attempts": [
+          66,
+          66,
+          66
+        ]
+      },
+      "acceptance-prose": {
+        "rounds": 110,
+        "accepted_per_position": [
+          78,
+          45,
+          23
+        ],
+        "accepted_per_all_drafts": [
+          0.7090909090909091,
+          0.4090909090909091,
+          0.20909090909090908
+        ],
+        "attempts": [
+          110,
+          110,
+          110
+        ]
+      },
+      "acceptance-math": {
+        "rounds": 67,
+        "accepted_per_position": [
+          66,
+          62,
+          60
+        ],
+        "accepted_per_all_drafts": [
+          0.9850746268656716,
+          0.9253731343283582,
+          0.8955223880597015
+        ],
+        "attempts": [
+          67,
+          67,
+          67
+        ]
+      }
+    },
+    "requests": 19,
+    "complete": true
+  }
+}

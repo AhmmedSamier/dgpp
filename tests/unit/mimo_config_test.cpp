@@ -124,3 +124,31 @@ DGPP_TEST(mimo_config_reads_the_landed_checkpoint) {
     return;
   }
 }
+
+DGPP_TEST(mimo_native_mtp_config_preserves_no_draft_and_rejects_incomplete_heads) {
+  struct RestoreEnv {
+    bool present = std::getenv("DGPP_MIMO_NATIVE_MTP") != nullptr;
+    std::string value = present ? std::getenv("DGPP_MIMO_NATIVE_MTP") : "";
+    ~RestoreEnv() {
+      if (present)
+        setenv("DGPP_MIMO_NATIVE_MTP", value.c_str(), 1);
+      else
+        unsetenv("DGPP_MIMO_NATIVE_MTP");
+    }
+  } restore;
+  setenv("DGPP_MIMO_NATIVE_MTP", "1", 1);
+  require(parse(mimo_test::config_json()).mtp_layers_loaded == 3, "load native heads");
+  require(parse(mimo_test::config_json("\"num_nextn_predict_layers\": 3",
+                                       "\"num_nextn_predict_layers\": 0"))
+                  .mtp_layers_loaded == 0,
+          "native opt-in must preserve no-draft models");
+  for (int count : {1, 2}) {
+    const auto message =
+        refusal(mimo_test::config_json("\"num_nextn_predict_layers\": 3",
+                                       "\"num_nextn_predict_layers\": " + std::to_string(count)));
+    require(message.find("num_nextn_predict_layers") != std::string::npos,
+            "name invalid native head count");
+  }
+  unsetenv("DGPP_MIMO_NATIVE_MTP");
+  require(parse(mimo_test::config_json()).mtp_layers_loaded == 1, "default remains recursive");
+}

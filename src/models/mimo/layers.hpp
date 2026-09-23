@@ -43,6 +43,7 @@ struct MimoAttnRows {
   const int32_t* req_ids = nullptr;
   const int64_t* pos = nullptr;
   bool decode = false;
+  bool cache_only = false;  // append K/V without attention or the output projection
 };
 
 class MimoAttentionLayer {

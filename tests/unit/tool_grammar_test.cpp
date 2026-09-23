@@ -124,7 +124,7 @@ void feed(GrammarState& g, const std::vector<int64_t>& ids) {
 }
 
 // ---- the Qwen3.8 XML format --------------------------------------
-GrammarVocab qwen_vocab() {
+GrammarVocab qwen_vocab(bool compact = false) {
   std::vector<std::string> texts(static_cast<size_t>(kVocab));
   for (int b = 0; b < 256; ++b) texts[static_cast<size_t>(b)] = std::string(1, static_cast<char>(b));
   texts[kGet] = "get";
@@ -145,6 +145,14 @@ GrammarVocab qwen_vocab() {
   m.think_close = ChatMarker{kThinkClose, "</think>"};
   m.tool_call_open = ChatMarker{kToolOpen, "<tool_call>"};
   m.tool_call_close = ChatMarker{kToolClose, "</tool_call>"};
+  texts[280] = "></";
+  texts[281] =
+      "<function=get_weather><parameter=city>Paris</parameter><parameter=days>3</parameter></"
+      "function>";
+  texts[282] = "></function>";
+  texts[283] = "><parameter=unknown>";
+  texts[284] = "3</parameter><parameter=city>Paris</parameter></function>";
+  m.xml_compact = compact;
   return GrammarVocab(std::move(texts), m, {kEosText, kEosUser}, kVocab, kEosUser);
 }
 std::vector<int64_t> bytes_of(const std::string& s) {
@@ -261,7 +269,7 @@ DGPP_TEST(tool_grammar_qwen_free_keys_typed_values_and_named_single) {
 // opening state; any other first id settles the grammar as before — and
 // the Qwen2 tokenizer's straddling token that closes a JSON value and runs
 // into the terminator's newline ('"\n').
-DGPP_TEST(tool_grammar_mimo_modelOpensThinkingAndStraddledTerminator) {
+DGPP_TEST(tool_grammar_xml_modelOpensThinkingAndStraddledTerminator) {
   std::vector<std::string> texts(static_cast<size_t>(kVocab));
   for (int b = 0; b < 256; ++b) texts[static_cast<size_t>(b)] = std::string(1, static_cast<char>(b));
   texts[kGetWeather] = "get_weather";
@@ -275,7 +283,7 @@ DGPP_TEST(tool_grammar_mimo_modelOpensThinkingAndStraddledTerminator) {
   m.think_close = ChatMarker{kThinkClose, "</think>"};
   m.tool_call_open = ChatMarker{kToolOpen, "<tool_call>"};
   m.tool_call_close = ChatMarker{kToolClose, "</tool_call>"};
-  m.xml_compact = true;
+  m.xml_compact = false;
   const GrammarVocab vocab(std::move(texts), m, {kEosText, kEosUser}, kVocab, kEosUser);
   // Required call, the choice left to the model: <think> allowed first.
   GrammarState g(&vocab, spec_of(GrammarSpec::Mode::kRequired), /*prompt_opens_thinking=*/false,
@@ -338,6 +346,97 @@ DGPP_TEST(tool_grammar_mimo_modelOpensThinkingAndStraddledTerminator) {
   feed(j, bytes_of("why"));
   j.advance(kThinkClose);
   require(std::string(j.state_name()) == "json-body" || j.allows('{'), std::string("the body after the block: ") + j.state_name());
+  require(j.allows('{') && !j.allows('x'), "the JSON body follows");
+}
+
+DGPP_TEST(tool_grammar_mimo_modelOpensThinkingAndStraddledTerminator) {
+  std::vector<std::string> texts(static_cast<size_t>(kVocab));
+  for (int b = 0; b < 256; ++b)
+    texts[static_cast<size_t>(b)] = std::string(1, static_cast<char>(b));
+  texts[kGetWeather] = "get_weather";
+  texts[kCity] = "\"</";  // the straddling token: a string's close quote + the terminator's newline
+  texts[kThinkOpen] = "<think>";
+  texts[kThinkClose] = "</think>";
+  texts[kToolOpen] = "<tool_call>";
+  texts[kToolClose] = "</tool_call>";
+  ChatMarkers m;
+  m.think_open = ChatMarker{kThinkOpen, "<think>"};
+  m.think_close = ChatMarker{kThinkClose, "</think>"};
+  m.tool_call_open = ChatMarker{kToolOpen, "<tool_call>"};
+  m.tool_call_close = ChatMarker{kToolClose, "</tool_call>"};
+  m.xml_compact = true;
+  const GrammarVocab vocab(std::move(texts), m, {kEosText, kEosUser}, kVocab, kEosUser);
+  // Required call, the choice left to the model: <think> allowed first.
+  GrammarState g(&vocab, spec_of(GrammarSpec::Mode::kRequired), /*prompt_opens_thinking=*/false,
+                 /*model_may_open_thinking=*/true);
+  require(g.allows(kThinkOpen) && g.allows(kToolOpen) && g.allows('H') && !g.allows(kEosUser),
+          "first position: the opener, the call or text; never EOS while owed");
+  g.advance(kThinkOpen);
+  require(std::string(g.state_name()) == "think",
+          std::string("the opener enters the reasoning: ") + g.state_name());
+  require(g.allows('x') && g.allows(kThinkClose) && !g.allows(kEosUser),
+          "free reasoning, EOS refused while owed");
+  feed(g, bytes_of("plan"));
+  g.advance(kThinkClose);
+  require(std::string(g.state_name()) == "top",
+          std::string("</think> returns to the top: ") + g.state_name());
+  g.advance(kToolOpen);
+  feed(g, bytes_of("<function="));
+  feed(g, {kGetWeather});
+  feed(g, bytes_of("><parameter=city>"));
+  // JSON mode for the value: a typed string closing with the straddling token.
+  // (city is a free value in spec_of; a typed one is built below.)
+  feed(g, bytes_of("Paris</parameter></function>"));
+  g.advance(kToolClose);
+  require(g.active(), "the call closed");
+  // A JSON-typed value whose close quote and terminator newline share a token.
+  GrammarSpec spec = spec_of(GrammarSpec::Mode::kRequired);
+  GrammarArg city;
+  city.key = "city";
+  city.kind = GrammarArg::Kind::kJson;
+  city.schema = R"({"type": "string"})";
+  spec.tools[0].keys = {"city"};
+  spec.tools[0].args = {city};
+  GrammarState t(&vocab, spec, false, true);
+  // Any other first id settles the opening (the top's rules apply).
+  t.advance(kToolOpen);
+  require(std::string(t.state_name()) == "q-name" && !t.allows(kThinkOpen),
+          "a call first: inside the call no opener");
+  feed(t, bytes_of("<function="));
+  feed(t, {kGetWeather});
+  feed(t, bytes_of("><parameter=city>\"Oslo"));
+  require(t.allows(kCity),
+          "the straddling '\"\\n' token closes the value and opens the terminator");
+  t.advance(kCity);
+  require(t.allows('p') && !t.allows('<') && !t.allows('x'), "inside the terminator: '</' next");
+  feed(t, bytes_of("parameter></function>"));
+  t.advance(kToolClose);
+  require(t.active() && std::string(t.state_name()) == "top", "the typed call closed cleanly");
+  // Without the choice (a Qwen prompt that opened the block, or one that
+  // closed it): the opener is not offered at the first position.
+  GrammarState settled(&vocab, spec_of(GrammarSpec::Mode::kRequired), false, false);
+  settled.advance(
+      kThinkOpen);  // free text at the XML top (the format's own rule): no reasoning state
+  require(std::string(settled.state_name()) == "top",
+          std::string("no choice: the marker is text at the top: ") + settled.state_name());
+  GrammarSpec json_settled;
+  json_settled.mode = GrammarSpec::Mode::kJson;
+  GrammarState js(&vocab, json_settled, false, false);
+  require(!js.allows(kThinkOpen) && js.allows('{'), "no choice in JSON mode: the body only");
+  GrammarState opened(&vocab, spec_of(GrammarSpec::Mode::kRequired), true, true);
+  require(std::string(opened.state_name()) == "think",
+          "a prompt that opened the block starts in the reasoning");
+  // JSON mode: <think> first, then the JSON body after </think>.
+  GrammarSpec json;
+  json.mode = GrammarSpec::Mode::kJson;
+  GrammarState j(&vocab, json, false, true);
+  require(j.allows(kThinkOpen) && j.allows('{') && !j.allows('x'),
+          "JSON mode: the opener or the body");
+  j.advance(kThinkOpen);
+  feed(j, bytes_of("why"));
+  j.advance(kThinkClose);
+  require(std::string(j.state_name()) == "json-body" || j.allows('{'),
+          std::string("the body after the block: ") + j.state_name());
   require(j.allows('{') && !j.allows('x'), "the JSON body follows");
 }
 
@@ -1133,3 +1232,144 @@ DGPP_TEST(tool_grammar_keyClosureLeavesNestedJsonOpen) {
 }
 
 }  // namespace
+
+DGPP_TEST(tool_grammar_mimo_compact_calls_empty_text_and_typed_values) {
+  const GrammarVocab vocab = qwen_vocab(true);
+  for (const std::string& value :
+       {std::string(""), std::string("."), std::string("/home/jon/dgpp")}) {
+    auto spec = spec_of(GrammarSpec::Mode::kAuto, false);
+    GrammarState g(&vocab, spec, false);
+    g.advance(kToolOpen);
+    require(!g.allows('\n') && g.allows('<'), "MiMo uses compact function tags");
+    feed(g, bytes_of("<function=get_weather><parameter=city>" + value + "</parameter>"));
+    require(std::string(g.state_name()) == "q-key-or-close", "compact/empty value closes");
+    feed(g, bytes_of("</function>"));
+    require(same(allowed_ids(g), {kToolClose}), "call closes without a newline");
+    g.advance(kToolClose);
+    g.advance(kEosUser);
+    require(std::string(g.state_name()) == "done", "compact automatic call completes");
+  }
+  auto spec = spec_of(GrammarSpec::Mode::kNamed, false, "get_weather");
+  GrammarArg days;
+  days.key = "days";
+  days.kind = GrammarArg::Kind::kJson;
+  days.schema = R"({"type":"integer"})";
+  GrammarArg city;
+  city.key = "city";
+  city.kind = GrammarArg::Kind::kText;
+  city.texts = {"Paris"};
+  spec.tools[0].args = {days, city};
+  GrammarState g(&vocab, spec, false);
+  g.advance(kToolOpen);
+  feed(g, bytes_of("<function=get_weather><parameter=days>3</parameter>"));
+  feed(g, bytes_of("<parameter=city>Paris</parameter></function>"));
+  g.advance(kToolClose);
+  g.advance(kEosUser);
+  require(std::string(g.state_name()) == "done", "typed compact call completes");
+}
+
+DGPP_TEST(tool_grammar_mimo_tokens_can_cross_xml_fields_without_bypassing_masks) {
+  const GrammarVocab vocab = qwen_vocab(true);
+  GrammarState g(&vocab, spec_of(GrammarSpec::Mode::kAuto), false);
+  g.advance(kToolOpen);
+  feed(g, bytes_of("<function=get_weather><parameter=city>Paris</parameter"));
+  require(g.allows(280), "merged closing delimiter/next tag is legal");
+  require(!g.allows(283), "unknown next key cannot bypass its mask");
+  g.advance(280);
+  feed(g, bytes_of("function>"));
+  g.advance(kToolClose);
+  require(std::string(g.state_name()) == "top", "cross-token call completed");
+  g.advance(kToolOpen);
+  require(g.allows(281), "one token may span an entire valid call body");
+  g.advance(281);
+  g.advance(kToolClose);
+  require(std::string(g.state_name()) == "top", "multi-field token completed");
+  auto spec = spec_of(GrammarSpec::Mode::kAuto);
+  spec.tools[0].required_keys = {"city", "days"};
+  spec.tools[0].args = {{"days", GrammarArg::Kind::kJson, R"({"type":"integer"})", {}},
+                        {"city", GrammarArg::Kind::kText, "", {"Paris"}}};
+  GrammarState typed(&vocab, spec, false);
+  typed.advance(kToolOpen);
+  feed(typed, bytes_of("<function=get_weather><parameter=days>"));
+  require(typed.allows(284), "JSON/enum values and their closing tags can share a token");
+  typed.advance(284);
+  typed.advance(kToolClose);
+  require(std::string(typed.state_name()) == "top", "typed multi-field token completed");
+  GrammarState required(&vocab, spec, false);
+  required.advance(kToolOpen);
+  feed(required, bytes_of("<function=get_weather><parameter=days>3</parameter"));
+  require(!required.allows(282), "cross-state token cannot skip a required argument");
+}
+
+DGPP_TEST(tool_grammar_mimo_non_strict_required_fields_block_empty_and_partial_calls) {
+  const GrammarVocab vocab = qwen_vocab(true);
+  for (const bool closed : {true, false}) {
+    auto spec = spec_of(GrammarSpec::Mode::kAuto);
+    spec.tools[0].strict = false;
+    spec.tools[0].required_keys = {"city", "days"};
+    spec.tools[0].constrain_keys = closed;
+    GrammarState g(&vocab, spec, false);
+    g.advance(kToolOpen);
+    feed(g, bytes_of("<function=get_weather><"));
+    require(!g.allows('/'), "non-strict MiMo call cannot close before required fields");
+    feed(g, bytes_of("parameter=city>Paris</parameter><"));
+    require(!g.allows('/'), "partial required fields cannot close the call");
+    feed(g, bytes_of("parameter=days>3</parameter></function>"));
+    g.advance(kToolClose);
+    require(std::string(g.state_name()) == "top", "all required keys permit closing");
+    // A legitimate no-argument tool remains callable.
+    g.advance(kToolOpen);
+    feed(g, bytes_of("<function=ping></function>"));
+    g.advance(kToolClose);
+    require(std::string(g.state_name()) == "top", "no required keys permits an empty call");
+  }
+}
+
+DGPP_TEST(tool_grammar_mimo_free_fields_keep_constraints_for_every_allowed_token) {
+  const GrammarVocab vocab = qwen_vocab(true);
+  for (const std::string& prefix : {
+           std::string("<function=get_time><parameter="),
+           std::string("<function=get_weather><parameter=city>Paris"),
+           std::string("<function=get_weather><parameter=city>Paris</parameter"),
+       }) {
+    GrammarState g(&vocab, spec_of(GrammarSpec::Mode::kAuto), false);
+    g.advance(kToolOpen);
+    feed(g, bytes_of(prefix));
+    // The vocabulary includes zero-width tokens and merged XML delimiters.
+    // Every token admitted by the mask must leave the grammar enforceable.
+    for (const int64_t id : allowed_ids(g)) {
+      GrammarState next = g;
+      next.advance(id);
+      require(next.active(), "allowed token disabled compact XML constraints: " +
+                                 std::to_string(id) + " after " + prefix);
+    }
+    g.advance(319);  // a zero-width token in a free field
+    require(g.active(), "zero-width token preserves the field state");
+    require(!g.allows(kToolClose) && !g.allows(kEosUser),
+            "a zero-width token cannot permit an unfinished call to close");
+  }
+}
+
+DGPP_TEST(tool_grammar_mimo_open_keys_reject_duplicates_across_token_boundaries) {
+  const GrammarVocab vocab = qwen_vocab(true);
+  auto spec = spec_of(GrammarSpec::Mode::kAuto);
+  spec.tools[0].constrain_keys = false;
+  GrammarState g(&vocab, spec, false);
+  g.advance(kToolOpen);
+  feed(g, bytes_of("<function=get_weather><parameter=city>Paris</parameter>"));
+  feed(g, bytes_of("<parameter=city"));
+  require(!g.allows('>') && !g.allows(280) && !g.allows(283),
+          "duplicate key cannot close alone or inside a merged token");
+  // An open schema still permits new names sharing the used key's prefix.
+  feed(g, bytes_of("_code>FR</parameter>"));
+  feed(g, bytes_of("<parameter=city_code"));
+  require(!g.allows('>'), "undeclared keys also enter the duplicate ledger");
+  feed(g, bytes_of("_extra>75</parameter></function>"));
+  g.advance(kToolClose);
+  require(g.active() && std::string(g.state_name()) == "top",
+          "distinct open keys produce a complete call");
+  g.advance(kToolOpen);
+  feed(g, bytes_of("<function=get_weather><parameter=city>Paris</parameter></function>"));
+  g.advance(kToolClose);
+  require(g.active(), "the duplicate ledger resets between calls");
+}

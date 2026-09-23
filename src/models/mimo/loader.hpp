@@ -138,7 +138,7 @@ struct MimoLoaderFamily {
   struct Builder;  // models/mimo/loader.cpp
   static const char* who() { return "mimo loader"; }
   static uint64_t loader_format() { return 1; }
-  static int max_layer(const Config& c) { return c.num_hidden_layers + (c.mtp_layer() >= 0 ? 1 : 0); }
+  static int max_layer(const Config& c) { return c.num_hidden_layers + c.mtp_layers_loaded; }
   static int main_layers(const Config& c) { return c.num_hidden_layers; }
   static std::vector<Expected> layer_table(const Config& c, int layer) {
     return mimo_expected_layer_tensors(c, layer);

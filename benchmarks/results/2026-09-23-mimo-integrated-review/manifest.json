@@ -1,0 +1,20 @@
+{
+  "source_commit": "810144c19fdc",
+  "upstream_base": "c6ca191863d620360f3b4370c0156f9e26a2631f",
+  "binary_sha256": "111bd8768bb000ecf4e309b2056137fdb4e6c47ddb5912e0f8c49cdd93dad945",
+  "build_preset": "spark-cross (Release)",
+  "build_all_log": "../dgpp-mimo-mtp3-20260923/integrated-build.log",
+  "stamp_build_log": "build-stamped.log",
+  "gate_results": {
+    "host": 0,
+    "families": 0,
+    "integrated-engine": 0,
+    "integrated-native-state": 0
+  },
+  "host_entries": 22,
+  "selected_ctest_entries": 41,
+  "gpu_entries": 37,
+  "fixture_entries": 4,
+  "optional_checkpoint_skip": "glm_tp_forward_parity_real: DGPP_TP_REAL_MODEL unset",
+  "checkpoint_snapshot": "3b38d063180c3e4aed9691fdc735f3d10b266ee4"
+}
