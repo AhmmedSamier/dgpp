@@ -1967,7 +1967,9 @@ seed and counter. Greedy selection consumes no random draw.
 
 Defaults come from `generation_config.json`, with explicit handling of
 missing fields and EOS IDs. Process flags and request fields override
-them. `/v1/models` reports effective defaults. The service journals
+them. Generation stop IDs are resolved separately from the model's
+`config.json` EOS: Qwen PLE uses the trained EOS for n-gram padding and
+context resets. `/v1/models` reports effective defaults. The service journals
 sampling parameters as float bits together with the seed, allowing peers
 to reproduce the request's draws. Eager and graph engines both support
 sampling; a backend without that capability rejects stochastic requests.

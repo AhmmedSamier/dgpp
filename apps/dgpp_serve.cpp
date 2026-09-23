@@ -248,7 +248,7 @@ struct ServeFamily {
   virtual ~ServeFamily() = default;
   virtual const char* name() const = 0;
   virtual int64_t vocab_size() const = 0;
-  virtual std::vector<int64_t>& eos_token_ids() = 0;
+  virtual const std::vector<int64_t>& eos_token_ids() const = 0;
   virtual int64_t block_tokens() const = 0;
   virtual int prefill_chunk_tokens() const = 0;
   // Empty when a pool of `pool_tokens` fits the family's id spaces.
@@ -309,7 +309,7 @@ struct GlmFamily final : ServeFamily {
   }
   const char* name() const override { return "glm5"; }
   int64_t vocab_size() const override { return cfg.vocab_size; }
-  std::vector<int64_t>& eos_token_ids() override { return cfg.eos_token_ids; }
+  const std::vector<int64_t>& eos_token_ids() const override { return cfg.eos_token_ids; }
   int64_t block_tokens() const override { return dsa().block_tokens; }
   int prefill_chunk_tokens() const override { return dgpp::GlmDiagnosticModel::prefill_chunk_tokens(); }
   std::string pool_check(int64_t pool_tokens) const override {
@@ -405,7 +405,7 @@ struct QwenFamily final : ServeFamily {
   }
   const char* name() const override { return "qwen4_exp"; }
   int64_t vocab_size() const override { return cfg.vocab_size; }
-  std::vector<int64_t>& eos_token_ids() override { return cfg.eos_token_ids; }
+  const std::vector<int64_t>& eos_token_ids() const override { return cfg.eos_token_ids; }
   int64_t block_tokens() const override { return dgpp::QwenModel::kv_block_tokens_static(); }
   int prefill_chunk_tokens() const override { return dgpp::QwenModel::prefill_chunk_tokens(); }
   std::string pool_check(int64_t pool_tokens) const override {
@@ -477,7 +477,7 @@ struct Glm4Family final : ServeFamily {
         ckpt(checkpoint) {}
   const char* name() const override { return "glm4_moe"; }
   int64_t vocab_size() const override { return cfg.vocab_size; }
-  std::vector<int64_t>& eos_token_ids() override { return cfg.eos_token_ids; }
+  const std::vector<int64_t>& eos_token_ids() const override { return cfg.eos_token_ids; }
   int64_t block_tokens() const override { return dgpp::Glm4Model::kv_block_tokens_static(); }
   int prefill_chunk_tokens() const override { return dgpp::Glm4Model::prefill_chunk_tokens(); }
   std::string pool_check(int64_t) const override { return ""; }
@@ -545,7 +545,7 @@ struct GlmDsaFamily final : ServeFamily {
         ckpt(checkpoint), world(world_), kv_format(fmt) {}
   const char* name() const override { return "glm_moe_dsa"; }
   int64_t vocab_size() const override { return cfg.vocab_size; }
-  std::vector<int64_t>& eos_token_ids() override { return cfg.eos_token_ids; }
+  const std::vector<int64_t>& eos_token_ids() const override { return cfg.eos_token_ids; }
   int64_t block_tokens() const override { return dgpp::GlmDsaModel::kv_block_tokens_static(); }
   int prefill_chunk_tokens() const override { return dgpp::GlmDsaModel::prefill_chunk_tokens(); }
   std::string pool_check(int64_t pool_tokens) const override {
@@ -618,7 +618,7 @@ struct Dsv41Family final : ServeFamily {
         ckpt(checkpoint), eos{cfg.eos_token_id} {}
   const char* name() const override { return "deepseek_v41"; }
   int64_t vocab_size() const override { return cfg.vocab_size; }
-  std::vector<int64_t>& eos_token_ids() override { return eos; }
+  const std::vector<int64_t>& eos_token_ids() const override { return eos; }
   int64_t block_tokens() const override { return dgpp::Dsv41Model::kv_block_tokens_static(); }
   int prefill_chunk_tokens() const override { return dgpp::Dsv41Model::prefill_chunk_tokens(); }
   std::string pool_check(int64_t pool_tokens) const override {
@@ -698,7 +698,7 @@ struct MimoFamily final : ServeFamily {
   }
   const char* name() const override { return "mimo_v2"; }
   int64_t vocab_size() const override { return cfg.vocab_size; }
-  std::vector<int64_t>& eos_token_ids() override { return cfg.eos_token_ids; }
+  const std::vector<int64_t>& eos_token_ids() const override { return cfg.eos_token_ids; }
   int64_t block_tokens() const override { return dgpp::MimoModel::kv_block_tokens_static(); }
   int prefill_chunk_tokens() const override { return dgpp::MimoModel::prefill_chunk_tokens(); }
   std::string pool_check(int64_t) const override { return ""; }
@@ -1861,10 +1861,10 @@ int main(int argc, char** argv) {
                     prefill == "bounded" ? "the decoder over the last window rows of each prompt" : "every layer over every row");
     const dgpp::GlmGenerationDefaults generation_defaults =
         dgpp::GlmGenerationDefaults::from_checkpoint_dir(ckpt, family->vocab_size());
-    // generation_config.json is the generation authority. Retain the
-    // config.json value only for old checkpoints/fixtures that omit it.
-    if (generation_defaults.eos_token_ids.has_value())
-      family->eos_token_ids() = *generation_defaults.eos_token_ids;
+    // Stop policy must not mutate the model's trained token semantics:
+    // Qwen PLE uses config.json's EOS to pad and reset n-gram history.
+    const auto generation_eos =
+        generation_defaults.effective_eos_token_ids(family->eos_token_ids());
 
     // The served sampling defaults: the file's values, then the process
     // overrides (DESIGN §10 — defaults from the model, overrides from the
@@ -1996,7 +1996,7 @@ int main(int argc, char** argv) {
       return 0;
     }
     std::vector<int64_t> eos =
-        no_eos ? std::vector<int64_t>{} : family->eos_token_ids();
+        no_eos ? std::vector<int64_t>{} : generation_eos;
     const std::string model_display = model_alias.empty()
                                             ? (model_id.empty()
                                                    ? fs::path(ckpt).filename().string()
@@ -2011,7 +2011,7 @@ int main(int argc, char** argv) {
       const dgpp::text::Tokenizer tok = dgpp::text::Tokenizer::load(
           (fs::path(ckpt) / "tokenizer.json").string());
       dgpp::text::GrammarVocab v = dgpp::text::GrammarVocab::from_tokenizer(
-          tok, family->eos_token_ids(), static_cast<int>(family->vocab_size()));
+          tok, generation_eos, static_cast<int>(family->vocab_size()));
       DGPP_LOG_INFO(
           "serve: grammar vocabulary built ({} ids, tool markers {}, "
           "call-turn EOS {})",
@@ -2300,7 +2300,7 @@ int main(int argc, char** argv) {
         }
         dgpp::serve::OpStreamObserver oplog;  // rank 0's audit leg
         open_ops_file(&oplog, "serve_rank0.ops");
-        const int rc = serve_openai(engine_ptr(), family->vocab_size(), family->eos_token_ids(), ckpt,
+        const int rc = serve_openai(engine_ptr(), family->vocab_size(), generation_eos, ckpt,
                                     model_display, knobs, no_eos, boot_s(), journal ? &*journal : nullptr, &oplog,
                                     family->name());
         engine_release();
@@ -2344,7 +2344,7 @@ int main(int argc, char** argv) {
         max_concurrency, dgpp::make_w1_pick(family->vocab_size()), dgpp::make_w1_sample(family->vocab_size()),
         &grammar_vocab, prefix_slots);
     knobs.admission = dgpp::serve::resolve_prefill_policy(knobs.admission, *engine);
-    const int rc = serve_openai(engine.get(), family->vocab_size(), family->eos_token_ids(), ckpt,
+    const int rc = serve_openai(engine.get(), family->vocab_size(), generation_eos, ckpt,
                                 model_display, knobs, no_eos, boot_s(), /*journal=*/nullptr,
                                 /*oplog=*/nullptr, family->name());
     engine.reset();

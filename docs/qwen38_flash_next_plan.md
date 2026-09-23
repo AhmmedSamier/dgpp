@@ -213,6 +213,10 @@ Experts are FP8 e4m3 with `weight_scale_inv` BF16 `[5, 20]` for gate/up
 The n-gram ids depend only on token ids. With `EOS = 248044`
 (`<|endoftext|>`; `<|im_end|>` does NOT reset the context):
 
+Serving resolves generation stop IDs separately. In particular,
+`generation_config.json` may list `<|im_end|>` first without changing
+the EOS used by PLE or its initial session history.
+
 ```
 y_0 = x_t
 y_s = x_{t−s}  if t−s ≥ 0 and no EOS occurs at positions t−s .. t−1, else EOS   (s = 1, 2)

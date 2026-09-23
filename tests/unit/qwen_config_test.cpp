@@ -9,6 +9,7 @@
 #include "common/test.hpp"
 #include "loaders/architecture.hpp"
 #include "loaders/minijson.hpp"
+#include "models/glm/config.hpp"
 #include "models/qwen/config.hpp"
 
 namespace {
@@ -105,6 +106,25 @@ DGPP_TEST(qwen_config_parses_the_release) {
   // config carries none and reports the checkpoint's own ceiling.
   require(!c.rope_scaling.has_value(), "no rope scaling from the checkpoint");
   require(c.context_limit() == 262144, "the checkpoint's ceiling");
+}
+
+DGPP_TEST(qwen_generation_stop_tokens_preserve_ple_eos) {
+  const auto cfg = parse(text_json());
+  const auto generation = dgpp::minijson::parse(
+      R"({"eos_token_id": [248046, 248044]})");
+  const auto defaults = dgpp::GlmGenerationDefaults::parse(generation.root, cfg.vocab_size);
+  const auto stops = defaults.effective_eos_token_ids(cfg.eos_token_ids);
+  require(stops == std::vector<int64_t>({248046, 248044}),
+          "both generation terminators must stop decoding");
+  require(cfg.eos_token_ids == std::vector<int64_t>({248044}),
+          "PLE padding and reset must retain the model's trained EOS");
+  require(dgpp::GlmGenerationDefaults{}.effective_eos_token_ids(cfg.eos_token_ids) ==
+              cfg.eos_token_ids,
+          "missing generation EOS must fall back to the model");
+  auto empty = defaults;
+  empty.eos_token_ids = std::vector<int64_t>{};
+  require(empty.effective_eos_token_ids(cfg.eos_token_ids).empty(),
+          "an explicit empty stop set must not fall back");
 }
 
 DGPP_TEST(qwen_config_rope_scaling_knob_lifts_the_ceiling) {
