@@ -225,7 +225,8 @@ class QwenModel : public SessionModel<QwenModel> {
   int64_t image_window_first_ = 0, image_window_end_ = 0;
 
   void build_layer_objects(const QwenLayerResident& r);
-  void lm_head_logits(const uint16_t* hidden, int rows, cudaStream_t stream);
+  // `dst`: where the logits rows go (nullptr: logits_ from row 0).
+  void lm_head_logits(const uint16_t* hidden, int rows, cudaStream_t stream, float* dst = nullptr);
   static size_t dense_bridge_bytes(const QwenTextConfig& cfg, const QwenLocalGeometry& geo);
   size_t dense_bridge_bytes_ = 0;
   static QwenMoeWeights moe_view(const QwenMoeResident& m);
