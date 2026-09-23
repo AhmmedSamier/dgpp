@@ -13,6 +13,7 @@
 #include "kernels/bf16_gemv.hpp"
 #include "kernels/mma_gemv.hpp"
 #include "kernels/dsa.hpp"
+#include "kernels/gdn_chunk.hpp"
 #include "kernels/kda.hpp"
 #include "kernels/qsa.hpp"
 #include "kernels/rope_scaling.hpp"
@@ -376,8 +377,26 @@ void QwenGdnLayer::enqueue(const uint16_t* x, float* recurrent_state, uint16_t* 
   in_projections(x, tokens, stream);
   kda_causal_conv_silu_bf16(qkv_, C, w_.conv, conv_state, conv_width_ - 1, qkvc_, tokens, C,
                             conv_width_, stream, conv_snap);
-  gdn_recurrent_fwd(qkvc_, a_, lv_, b_, lv_, w_.a_log, w_.dt_bias, recurrent_state, core_, tokens,
-                    lv_, lv_ / lk_, k_dim_, v_dim_, scale_, stream, rec_snap);
+  // Prefill-sized walks take the chunked tensor-core form (kernels/
+  // gdn_chunk.cu): flash-linear-attention's chunk_gated_delta_rule, the
+  // algorithm SGLang runs for these layers, with bf16 matrix operands.
+  // Walks of fewer than DGPP_GDN_CHUNKED_MIN rows (default 64) and
+  // speculative snapshot rows keep the recurrence; DGPP_GDN_CHUNKED=0 keeps
+  // it everywhere.
+  static const bool chunked = [] {
+    const char* e = std::getenv("DGPP_GDN_CHUNKED");
+    return !(e != nullptr && e[0] == '0');
+  }();
+  static const int chunked_min = [] {
+    const char* e = std::getenv("DGPP_GDN_CHUNKED_MIN");
+    return e != nullptr ? std::atoi(e) : 64;
+  }();
+  if (chunked && tokens >= chunked_min && rec_snap.states == nullptr && gdn_chunked_supported(k_dim_, v_dim_))
+    gdn_chunked_fwd(qkvc_, a_, lv_, b_, lv_, w_.a_log, w_.dt_bias, recurrent_state, core_,
+                    tokens, lv_, lv_ / lk_, k_dim_, v_dim_, scale_, stream);
+  else
+    gdn_recurrent_fwd(qkvc_, a_, lv_, b_, lv_, w_.a_log, w_.dt_bias, recurrent_state, core_, tokens,
+                      lv_, lv_ / lk_, k_dim_, v_dim_, scale_, stream, rec_snap);
   gdn_gated_rmsnorm_bf16(core_, z_, w_.norm, normed_, static_cast<int64_t>(tokens) * lv_, v_dim_,
                          eps_, stream);
   gemm_dense(g_, normed_, LV, w_.out_proj, w_.out_proj_fp8, out, GemmOut::BF16, tokens, H, LV, stream);

@@ -174,6 +174,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/l2_prefetch.cu
   src/kernels/glm_mhc.cu
   src/kernels/glm_moe.cu
+  src/kernels/gdn_chunk.cu
   src/kernels/glm_vision.cu
   src/kernels/qwen_vision.cu
   src/kernels/glm_norm.cu
@@ -1490,6 +1491,12 @@ set_tests_properties(glm_pick_test PROPERTIES SKIP_RETURN_CODE 2)
 
 # MoE module parity (M4): router vs oracle at real geometry, expert path on
 # small geometry, swiglu clamps, accumulation order, determinism.
+add_executable(gdn_chunk_test tests/cuda/gdn_chunk_test.cu)
+target_include_directories(gdn_chunk_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(gdn_chunk_test PRIVATE dgpp_models_glm_loader dgpp_models_glm dgpp_models_kda CUDA::cudart)
+dgpp_set_common(gdn_chunk_test)
+add_test(NAME gdn_chunk_test COMMAND gdn_chunk_test)
+
 add_executable(glm_moe_test tests/cuda/glm_moe_test.cu)
 target_include_directories(glm_moe_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(glm_moe_test PRIVATE dgpp_models_glm_loader dgpp_models_glm CUDA::cudart)
