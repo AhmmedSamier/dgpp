@@ -39,3 +39,9 @@ Validation surfaces:
 Real-checkpoint measurements and all-attempt hardware test outcomes live
 in `/mnt/benchmarks/dgpp-mimo-mtp3-20260923/`; the final dated benchmark
 record distinguishes recursive and native depth 3 and lists quality limits.
+
+The [integrated follow-up](../../benchmarks/results/2026-09-23-mimo-integrated-review.md)
+adds the combined prefill/native-head matrix, broader shared-engine regression
+coverage and controlled arrival-order/probability diagnostics. Use the
+[portable benchmark procedure](../../benchmarks/mimo_upstream/README.md) to
+repeat those checks on another deployment.

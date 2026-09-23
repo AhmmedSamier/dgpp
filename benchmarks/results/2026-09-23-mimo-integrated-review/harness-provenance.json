@@ -1,0 +1,7 @@
+{
+  "checkout": "/home/jon/artifact-agent-orchestration",
+  "commit": "d7142aa532c365e9665f118942bf468b9401b1de",
+  "dirty": false,
+  "client": "ChatCompletionsClient with RecordingTransport",
+  "tools_executed": false
+}

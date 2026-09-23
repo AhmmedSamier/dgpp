@@ -18,6 +18,10 @@ The [native MTP record](benchmarks/results/2026-09-23-mimo-native-mtp.md)
 separates native heads from recursive block-0 MTP3 and records acceptance,
 validation failures/fixes, final gates and the deployed configuration. Capacity remains the
 upstream shared 128K pool in this experiment.
+The [integrated review](benchmarks/results/2026-09-23-mimo-integrated-review.md)
+checks the grammar repair, native heads and both prefill switches together,
+records broader family regressions and arrival-dependent output diagnostics,
+and links the portable reproduction tools.
 
 This page summarizes the implemented features and remaining work as of
 2026-09-21. [DESIGN.md](DESIGN.md) describes the architecture;

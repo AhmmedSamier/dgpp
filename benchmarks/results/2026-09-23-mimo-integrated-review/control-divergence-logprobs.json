@@ -1,0 +1,81 @@
+{
+  "content_token_index_zero_based": 55,
+  "solo": {
+    "token": " pairs",
+    "logprob": -0.952116,
+    "bytes": [
+      32,
+      112,
+      97,
+      105,
+      114,
+      115
+    ],
+    "top_logprobs": [
+      {
+        "token": " pairs",
+        "logprob": -0.952116,
+        "bytes": [
+          32,
+          112,
+          97,
+          105,
+          114,
+          115
+        ]
+      },
+      {
+        "token": " lists",
+        "logprob": -1.1250916,
+        "bytes": [
+          32,
+          108,
+          105,
+          115,
+          116,
+          115
+        ]
+      }
+    ]
+  },
+  "burst": {
+    "token": " lists",
+    "logprob": -0.9850826,
+    "bytes": [
+      32,
+      108,
+      105,
+      115,
+      116,
+      115
+    ],
+    "top_logprobs": [
+      {
+        "token": " lists",
+        "logprob": -0.9850826,
+        "bytes": [
+          32,
+          108,
+          105,
+          115,
+          116,
+          115
+        ]
+      },
+      {
+        "token": " pairs",
+        "logprob": -1.1295033,
+        "bytes": [
+          32,
+          112,
+          97,
+          105,
+          114,
+          115
+        ]
+      }
+    ]
+  },
+  "same_prefix_tokens": 55,
+  "same_reasoning": true
+}
