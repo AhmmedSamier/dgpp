@@ -814,6 +814,9 @@ void MimoModel::native_mtp_rows(int req, const int64_t* tokens, int64_t first_po
   const int64_t* pos = decode ? d_step_pos_ : d_prefill_pos_;
   const int32_t* ids = decode ? d_req_ids_ : d_prefill_req_;
   if (draft_block_ == 0) {
+    // Graph entry points snapshot before capture; eager drafting needs its
+    // own pre-call history for session_draft_rollback and prefix cuts.
+    if (decode && !capture) snapshot_draft_state(req);
     const uint16_t* hidden = h_;
     if (decode) { gather_draft_hidden(ids, pos, mtp_h_, T); hidden = mtp_h_; }
     mimo_mtp_history_store(native_history_, hidden, pos, ids, T, H, kNativeHistoryRows, 0, stream_);

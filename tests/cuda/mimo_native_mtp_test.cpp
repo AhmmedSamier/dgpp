@@ -76,6 +76,8 @@ int main() {
      m.session_prefill(0,prompt);
      auto meta=m.session_snapshot(0,snap);
      auto want=drafts(m,0);
+     m.session_draft_rollback(0,1);
+     require(drafts(m,0)==want,"native eager draft rollback changed proposals");
      m.session_close(0);
      // Different prompt overwrites ring storage before attachment.
      m.session_prefill(1,{41,42,43,44}); m.session_close(1);
