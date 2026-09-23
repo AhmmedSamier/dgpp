@@ -2518,7 +2518,9 @@ disagree by hours; `scripts/fabric_xrank.py`).
 
 The [Spark cross-build](docs/cross-compiling.md) uses native x86 build tools
 with an AArch64 host compiler and CUDA SBSA target libraries. It inherits the
-release configuration; target execution and deployment remain separate steps.
+release configuration and builds the server target by default. The wrapper
+prints the CUDA and AArch64 C++ compiler versions before each build; target
+execution and deployment remain separate steps.
 
 ## 14. Validation scope
 

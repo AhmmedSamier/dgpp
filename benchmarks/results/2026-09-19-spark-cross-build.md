@@ -167,3 +167,81 @@ Logs are under `artifacts/cross-build-pr/merge-*.log`. No inference node was
 contacted or restarted during this integration. The hardware results above
 apply to `53a5339`; GPU/RDMA and live serving were not rerun for the merged
 upstream runtime.
+
+## Issue #21 follow-ups (2026-09-21)
+
+The follow-up branch starts from upstream
+`c5a69134410f2646d195b339c8f197043410cb04`. Both configure and build preset
+lists now put `spark-cross` after `ci`. The wrapper prints `nvcc --version`
+and `aarch64-linux-gnu-g++-13 --version` before configuration, so saved build
+logs identify the compilers even when image package versions float. The guide
+now explicitly distinguishes the default `dgpp_serve_app` build from
+`build --target all`, which also builds the test executables.
+
+Local validation:
+
+- All 12 wrapper tests passed. The two new tests fail against the unchanged
+  upstream wrapper and pass with the change: compiler versions precede
+  configuration, and a failed compiler probe prevents configuration and
+  compilation.
+- Python discovery ran 227 tests: 222 passed and five skipped.
+- Shell syntax and `git diff --check` passed.
+- Real container `cmake --list-presets` puts `spark-cross` after `ci`.
+- A clean server cross-build completed all 184 build steps. An incremental
+  run through the actual wrapper printed both compiler versions and passed.
+- Install staging passed. `file` identifies the stripped server, cudart and
+  cuBLASLt as AArch64 ELF files; `readelf -d` confirms `$ORIGIN/../lib` as
+  the server's RUNPATH, with no dynamic PCRE2 dependency.
+
+The existing image is
+`sha256:845fb41b6b74c3e9a161b3dea641c51968b337bc49b1b2e55ae1a3c71b29cbd2`;
+it reports nvcc 13.0.88 and AArch64 G++ 13.3.0
+(`13.3.0-6ubuntu2~24.04.1`). The workstation's Docker bridge was unavailable
+(`adding interface ... to bridge docker0 failed: Device does not exist`).
+Local container validation uses `--network host` as a workstation workaround;
+an ignored local `docker` shim injects that flag when checking the actual
+wrapper. The repository wrapper's networking behavior is unchanged. Logs are retained
+under `artifacts/issue-21/`.
+
+### Follow-up target validation
+
+After the local checks, an authorized idle-hardware window validated the
+cross-built server from `196d0d5c33b7` (upstream `c5a6913` plus the tooling,
+tests and documentation changes above). Both ranks ran
+`0.1.0+g196d0d5c33b7` with server SHA256
+`0f47f6600fb857a78e212eb3399ddf9985c4d6cea705e741ee5369dec71bfe86`.
+This closes the two-Spark target-validation gap identified in issue #21.
+
+The temporary deployment used the upstream Qwen NVFP4 two-rank recipe at
+C4/MTP1, with 65,536 KV tokens, 1.5 GiB prefix snapshots, FP8 dense weights,
+`bf12+bf16` BF16 weights and the MMA vocabulary head. HTTP port 30002,
+fabric/journal ports 29870/29871, release staging and logs were isolated from
+production. Both rank logs reported configuration digest `84a458bdfefa48c0`.
+Preflight verified both staged versions, checkpoints, RoCE devices and runtime
+library resolution before startup.
+
+`python3 scripts/serve_api_check.py 127.0.0.1 30002` passed all nine checks:
+streamed and non-streamed stops and multiple choices, logit-bias forcing,
+banning and validation, cached-token usage, and reasoning-token usage. The
+test world shut down cleanly, with both operation streams reporting MD5
+`0b55ebf21c5fc22f83127cf219e253f7`. Both logs were inspected; neither reported
+an ERROR or FATAL. Both reported the checkpoint's missing `min_p` and
+`repetition_penalty` generation defaults and their documented fallback.
+
+Production was restored to `0.1.0+g116d3c375d87`, retaining the original C16/MTP3
+configuration, 256/512 prefill budgets and 148 prefix slots. The deployment and
+site-file hashes were unchanged, and the resolved configuration matched its
+pre-maintenance snapshot. Both ranks again ran the original binary SHA256
+`126c060ca0eff544dba2379f9a38b91c43663557e698b5803a936d4c2224e57b`;
+their resolved configuration files had identical SHA256
+`4acb2a06d9c37a059e4c85afbd48c43bb8950b88a3a7ec792b9dab187041c969`.
+Two smoke requests returned `READY`; the second reused 808 prompt tokens.
+Service metrics reported no engine failure. The maintenance locks were released
+after verification.
+
+The commands, both-rank logs, API output, digests and restoration snapshots
+are under `artifacts/issue-21/server-validation/`. This run validates the
+current cross-built server's two-node request path. It does not rerun the full
+native or GPU/RDMA CTest suites, establish numerical equivalence or throughput,
+or provide four-node coverage. The subsequent record/status update changes
+only Markdown; the executed server revision remains `196d0d5c33b7`.

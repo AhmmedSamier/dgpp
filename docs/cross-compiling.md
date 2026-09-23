@@ -23,7 +23,9 @@ server's revision stamp can resolve the checkout's commit.
 Compilation defaults to two jobs; use `DGPP_BUILD_JOBS=4 scripts/spark-cross build`
 if memory permits. Re-run `image` after changing the Dockerfile. Package updates
 are not locked; use `docker build --no-cache` with the same Dockerfile to refresh
-cached installation layers deliberately.
+cached installation layers deliberately. Each `spark-cross build` prints the
+CUDA and AArch64 C++ compiler versions before configuring. Keep this output
+with the source revision and build log when reporting a cross-built binary.
 `DGPP_BUILD_JOBS` must be a positive integer; unset or empty uses two jobs.
 Use `scripts/spark-cross --help` for the command summary.
 
@@ -37,9 +39,11 @@ scripts/spark-cross command cmake --build --preset spark-cross --target all --pa
 
 The `spark-cross` CMake preset selects `cmake/spark-cross.cmake`. Python and CMake
 run on x86, while C++ code and CUDA host code compile for ARM64. CUDA device code
-compiles for GB10. The default build includes the server and its dependencies;
-other targets can be built explicitly. Do not run the cross-built CTest suite
-on the x86 host: executable and GPU validation belong on the Spark.
+compiles for GB10. The `spark-cross` build preset builds only `dgpp_serve_app`
+and its dependencies by default, so it does not produce a runnable test tree. Use
+`scripts/spark-cross build --target all` to build the test executables as well.
+Do not run the cross-built CTest suite on the x86 host: executable and GPU
+validation belong on the Spark.
 The preset inherits the native release optimization and stripping settings.
 PCRE2 follows the normal CMake dependency selection: in this image it is built
 from the pinned source archive for ARM64 and linked statically. Configuration

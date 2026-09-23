@@ -16,7 +16,10 @@ case "${1:-build}" in
       exit 2
     fi
     if [[ $# -gt 0 ]]; then shift; fi
-    set -- bash -c 'cmake --preset spark-cross && cmake --build --preset spark-cross --parallel "${DGPP_BUILD_JOBS:-2}" "$@"' bash "$@"
+    set -- bash -c 'nvcc --version &&
+      aarch64-linux-gnu-g++-13 --version &&
+      cmake --preset spark-cross &&
+      cmake --build --preset spark-cross --parallel "${DGPP_BUILD_JOBS:-2}" "$@"' bash "$@"
     ;;
   shell)
     shift
