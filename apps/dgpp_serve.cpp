@@ -100,6 +100,7 @@
 #include "serve/http_server.hpp"
 #include "serve/prefill_policy.hpp"
 #include "serve/shutdown_watchdog.hpp"
+#include "serve/engine_watchdog.hpp"
 
 namespace fs = std::filesystem;
 
@@ -945,6 +946,8 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
     journal->watch_peers([&](int peer, const std::string& why) {
       fail_service("rank " + std::to_string(peer) + " died (" + why + ")");
     });
+  dgpp::serve::EngineWatchdog engine_watchdog(*engine->prefill_monitor());
+  DGPP_LOG_INFO("serve: engine progress deadline 120 s (scheduler passes and prefill progress)");
   std::thread engine_loop([&] {
     const auto pass = [&] {
       return journal
@@ -966,6 +969,7 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
       stats.observe(service.meters(), &sc);
     };
     while (!g_stop_requested.load()) {
+      const auto work = engine_watchdog.work();
       try {
         const bool worked = pass();
         observe();

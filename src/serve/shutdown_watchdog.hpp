@@ -2,10 +2,9 @@
 
 #include <atomic>
 #include <chrono>
-#include <cstdlib>
-#include <fcntl.h>
 #include <thread>
-#include <unistd.h>
+
+#include "serve/emergency_exit.hpp"
 
 namespace dgpp::serve {
 
@@ -23,13 +22,8 @@ class ShutdownWatchdog {
           const auto deadline = std::chrono::steady_clock::now() + grace;
           while (!stop.stop_requested()) {
             if (std::chrono::steady_clock::now() >= deadline) {
-              constexpr char message[] =
-                  "ERROR serve: shutdown deadline exceeded; exiting with status 2 without engine teardown\n";
-              // A full supervisor log pipe must not block the emergency exit.
-              const int flags = ::fcntl(STDERR_FILENO, F_GETFL);
-              if (flags >= 0 && ::fcntl(STDERR_FILENO, F_SETFL, flags | O_NONBLOCK) == 0)
-                (void)!::write(STDERR_FILENO, message, sizeof(message) - 1);
-              std::_Exit(2);
+              emergency_exit(
+                  "ERROR serve: shutdown deadline exceeded; exiting with status 2 without engine teardown\n");
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
           }

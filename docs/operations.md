@@ -449,9 +449,22 @@ per peer and retired/posted TX pairs. Their gate counter counts retries; zero
 is not evidence that the gate was never reached. A 500 ms stall dump is diagnostic,
 not a timeout. Serving uses a 120 s bus completion watchdog and a 60 s reducer
 wait; the latter now also covers stream completion after the GPU's done stamp.
-The bus watchdog shares the progress thread, so a blocked driver call still
-needs process supervision. These diagnostics do not identify the root cause of
-the permanent two-node hang reported in issue #36.
+The bus watchdog shares its progress thread and does not cover model CUDA waits
+outside a collective. Rank 0 therefore also runs an independent **120-second
+engine progress watchdog** once serving starts. It observes scheduler passes and
+advancing prefill token positions using atomics, without calling CUDA or taking
+the service, metrics or logging locks. An in-flight pass that stops making
+progress exits with status 2 without engine teardown; the closed journal makes
+the peers exit too. Clients receive a closed connection on this emergency path.
+No termination signal is needed. Journal broadcasts and
+stats publication are inside the monitored work scope. Idle serving has no time
+limit, and a full-prompt prefill can exceed 120 seconds while its internal chunks
+continue to advance. Startup/model loading is outside this watchdog's scope.
+
+This is a fatal backstop, not recovery of a failed CUDA context: an external
+supervisor must restart the service. The separate 30-second shutdown deadline
+still applies after a termination signal. Neither watchdog identifies why the
+underlying operation stopped progressing; retain the incident evidence above.
 
 Use `scripts/serve_prefill_interference.py HOST PORT --json-out RUN.json`
 on an otherwise idle server to compare the longest client update pause

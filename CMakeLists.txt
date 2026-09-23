@@ -835,6 +835,12 @@ dgpp_set_common(shutdown_watchdog_test)
 add_test(NAME shutdown_watchdog_test COMMAND shutdown_watchdog_test)
 set_tests_properties(shutdown_watchdog_test PROPERTIES TIMEOUT 15)
 
+add_executable(engine_watchdog_test tests/host/engine_watchdog_test.cpp)
+target_link_libraries(engine_watchdog_test PRIVATE Threads::Threads)
+dgpp_set_common(engine_watchdog_test)
+add_test(NAME engine_watchdog_test COMMAND engine_watchdog_test)
+set_tests_properties(engine_watchdog_test PROPERTIES TIMEOUT 20)
+
 add_executable(cuda_wait_test tests/cuda/cuda_wait_test.cpp)
 target_link_libraries(cuda_wait_test PRIVATE CUDA::cudart Threads::Threads)
 dgpp_set_common(cuda_wait_test)
@@ -1687,7 +1693,7 @@ get_property(DGPP_ALL_TESTS DIRECTORY PROPERTY TESTS)
 foreach(_test IN LISTS DGPP_ALL_TESTS)
   set_tests_properties(${_test} PROPERTIES LABELS "gpu")
 endforeach()
-set_tests_properties(unit unit_tests http_server_test serve_test fabric_serve_test scheduler_test shutdown_watchdog_test
+set_tests_properties(unit unit_tests http_server_test serve_test fabric_serve_test scheduler_test shutdown_watchdog_test engine_watchdog_test
   qwen_yarn_fixture_test PROPERTIES LABELS "host")
 set_tests_properties(checkpoint_audit_test route_trace_test sampling_profile_test
   site_env_test script_reports_test timed_load_test qwen_yarn_release_check_test qwen_head_compare_test portability_test spark_cross_test setup_tools_test bootstrap_test launcher_test PROPERTIES LABELS "host;python")
