@@ -71,7 +71,7 @@ void expect_moe(TensorList& out, const std::string& p, const MimoTextConfig& cfg
 }
 
 int max_layer(const MimoTextConfig& cfg) {
-  return cfg.num_hidden_layers + (cfg.mtp_layer() >= 0 ? 1 : 0);
+  return cfg.num_hidden_layers + cfg.mtp_layers_loaded;
 }
 
 bool starts_with(const std::string& s, const char* prefix) {
@@ -81,7 +81,8 @@ bool starts_with(const std::string& s, const char* prefix) {
 }  // namespace
 
 std::string mimo_layer_prefix(const MimoTextConfig& cfg, int layer) {
-  if (cfg.is_mtp_layer(layer)) return "model.mtp.layers.0.";
+  if (cfg.is_mtp_layer(layer))
+    return "model.mtp.layers." + std::to_string(layer - cfg.num_hidden_layers) + ".";
   return "model.layers." + std::to_string(layer) + ".";
 }
 

@@ -206,9 +206,10 @@ class CollectiveBus {
                           size_t bf16_elems, std::string* error);
 
   // Blocks for the collective; on success the destination is stream-ordered
-  // for the caller (one cudaStreamSynchronize after the engine's
-  // completion). timeout_ms is a backstop; the engine watchdog owns the
-  // lifecycle. Removes the request record.
+  // for the caller (waits for the stream after the engine's completion).
+  // timeout_ms also bounds that stream wait. A failure closes subsequent
+  // collective submissions; the engine watchdog owns in-flight cleanup.
+  // Removes completed request records.
   BusAllReduceResult wait_allreduce(uint64_t id, int timeout_ms);
 
   // ---- graph capture (DESIGN §6.2, the decode step) ------------------------

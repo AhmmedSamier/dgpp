@@ -167,7 +167,7 @@ inline std::vector<MimoExpectedTensor> ignored_extras(const MimoTextConfig& cfg)
   add("visual.blocks.0.norm1.weight", {64});
   add("speech_embeddings.0.weight", {16, H});
   add("audio_encoder.projection.0.weight", {H, 64});
-  if (cfg.mtp_layer() >= 0) add("model.mtp.layers.1.enorm.weight", {H});
+  if (cfg.mtp_layers_loaded == 1) add("model.mtp.layers.1.enorm.weight", {H});
   return out;
 }
 

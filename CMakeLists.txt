@@ -192,6 +192,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/qsa_prefill.cu
   src/kernels/glm4_attn.cu
   src/kernels/mimo_attn.cu
+  src/kernels/mimo_mtp_history.cu
   src/kernels/mimo_attn_prefill.cu
   src/kernels/add_rmsnorm.cu)
 target_link_libraries(dgpp_kernels PUBLIC CUDA::cudart CUDA::cublasLt dgpp_core dgpp_rope_scaling)
@@ -827,6 +828,24 @@ target_include_directories(scheduler_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/sr
 target_link_libraries(scheduler_test PRIVATE dgpp_models_glm Threads::Threads)
 dgpp_set_common(scheduler_test)
 add_test(NAME scheduler_test COMMAND scheduler_test)
+
+add_executable(shutdown_watchdog_test tests/host/shutdown_watchdog_test.cpp)
+target_link_libraries(shutdown_watchdog_test PRIVATE Threads::Threads)
+dgpp_set_common(shutdown_watchdog_test)
+add_test(NAME shutdown_watchdog_test COMMAND shutdown_watchdog_test)
+set_tests_properties(shutdown_watchdog_test PROPERTIES TIMEOUT 15)
+
+add_executable(engine_watchdog_test tests/host/engine_watchdog_test.cpp)
+target_link_libraries(engine_watchdog_test PRIVATE Threads::Threads)
+dgpp_set_common(engine_watchdog_test)
+add_test(NAME engine_watchdog_test COMMAND engine_watchdog_test)
+set_tests_properties(engine_watchdog_test PROPERTIES TIMEOUT 20)
+
+add_executable(cuda_wait_test tests/cuda/cuda_wait_test.cpp)
+target_link_libraries(cuda_wait_test PRIVATE CUDA::cudart Threads::Threads)
+dgpp_set_common(cuda_wait_test)
+add_test(NAME cuda_wait_test COMMAND cuda_wait_test)
+set_tests_properties(cuda_wait_test PROPERTIES TIMEOUT 15 SKIP_RETURN_CODE 2)
 
 add_executable(flag_protocol_test tests/cuda/flag_protocol_test.cu)
 target_link_libraries(flag_protocol_test PRIVATE CUDA::cudart)
@@ -1674,7 +1693,7 @@ get_property(DGPP_ALL_TESTS DIRECTORY PROPERTY TESTS)
 foreach(_test IN LISTS DGPP_ALL_TESTS)
   set_tests_properties(${_test} PROPERTIES LABELS "gpu")
 endforeach()
-set_tests_properties(unit unit_tests http_server_test serve_test fabric_serve_test scheduler_test
+set_tests_properties(unit unit_tests http_server_test serve_test fabric_serve_test scheduler_test shutdown_watchdog_test engine_watchdog_test
   qwen_yarn_fixture_test PROPERTIES LABELS "host")
 set_tests_properties(checkpoint_audit_test route_trace_test sampling_profile_test
   site_env_test script_reports_test timed_load_test qwen_yarn_release_check_test qwen_head_compare_test portability_test spark_cross_test setup_tools_test bootstrap_test launcher_test PROPERTIES LABELS "host;python")
@@ -1734,3 +1753,18 @@ target_link_libraries(glm_vision_frontend_test PRIVATE dgpp_serve)
 dgpp_set_common(glm_vision_frontend_test)
 add_test(NAME glm_vision_frontend_test COMMAND glm_vision_frontend_test)
 set_tests_properties(glm_vision_frontend_test PROPERTIES LABELS "host;checkpoint" SKIP_RETURN_CODE 2)
+
+# Isolated upstream-port regression: paged BF16/FP8 history and head rows.
+add_executable(mimo_port_test tests/cuda/mimo_port_test.cpp)
+target_include_directories(mimo_port_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(mimo_port_test PRIVATE dgpp_models_mimo_layers dgpp_models_glm_loader CUDA::cudart Threads::Threads)
+dgpp_set_common(mimo_port_test)
+add_test(NAME mimo_port_test COMMAND mimo_port_test)
+set_tests_properties(mimo_port_test PROPERTIES LABELS "gpu" RUN_SERIAL TRUE)
+
+add_executable(mimo_native_mtp_test tests/cuda/mimo_native_mtp_test.cpp)
+target_include_directories(mimo_native_mtp_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(mimo_native_mtp_test PRIVATE dgpp_models_mimo_layers dgpp_models_glm_loader CUDA::cudart Threads::Threads)
+dgpp_set_common(mimo_native_mtp_test)
+add_test(NAME mimo_native_mtp_test COMMAND mimo_native_mtp_test)
+set_tests_properties(mimo_native_mtp_test PROPERTIES LABELS "gpu" RUN_SERIAL TRUE)

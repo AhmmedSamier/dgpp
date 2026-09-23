@@ -1,0 +1,222 @@
+{
+  "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+  "messages": [
+    {
+      "role": "user",
+      "content": "astroid 2.9.1 breaks pylint with missing __init__.py: F0010: error while code parsing: Unable to load file __init__.py\n### Steps to reproduce\n> Steps provided are for Windows 11, but initial problem found in Ubuntu 20.04\n\n> Update 2022-01-04: Corrected repro steps and added more environment details\n\n1. Set up simple repo with following structure (all files can be empty):\n```\nroot_dir/\n|--src/\n|----project/ # Notice the missing __init__.py\n|------file.py # It can be empty, but I added `import os` at the top\n|----__init__.py\n```\n2. Open a command prompt\n3. `cd root_dir`\n4. `python -m venv venv`\n5. `venv/Scripts/activate`\n6. `pip install pylint astroid==2.9.1` # I also repro'd on the latest, 2.9.2\n7. `pylint src/project` # Updated from `pylint src`\n8. Observe failure:\n```\nsrc\\project\\__init__.py:1:0: F0010: error while code parsing: Unable to load file src\\project\\__init__.py:\n```\n\n### Current behavior\nFails with `src\\project\\__init__.py:1:0: F0010: error while code parsing: Unable to load file src\\project\\__init__.py:`\n\n### Expected behavior\nDoes not fail with error.\n> If you replace step 6 with `pip install pylint astroid==2.9.0`, you get no failure with an empty output - since no files have content\n\n### `python -c \"from astroid import __pkginfo__; print(__pkginfo__.version)\"` output\n2.9.1\n\n`python 3.9.1`\n`pylint 2.12.2 `\n\n\n\nThis issue has been observed with astroid `2.9.1` and `2.9.2`\n"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "list_directory",
+        "description": "List a workspace directory. Use '.' for the project root.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "read_file",
+        "description": "Read numbered UTF-8 text lines. Offset is zero-based; limit counts lines. Output reports truncation and next_offset. Paths may be absolute within the workspace or relative to its root.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2000
+            }
+          },
+          "required": [
+            "file_path"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "glob",
+        "description": "Find workspace files by glob (e.g. '**/*.py'). Honors local ignore files; returns up to 200 paths, newest first.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "pattern": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "grep_search",
+        "description": "Search file contents with a case-insensitive regex. Returns paths, line numbers and two context lines. Use glob to filter files. Output is bounded and reports truncation.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "pattern": {
+              "type": "string"
+            },
+            "glob": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "write_file",
+        "description": "Write a complete UTF-8 file. file_path may be absolute within the workspace or relative to its root.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string"
+            },
+            "content": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "file_path",
+            "content"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "edit",
+        "description": "Replace exact text in a workspace file. old_string must be non-empty and match exactly once unless replace_all is true.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string"
+            },
+            "old_string": {
+              "type": "string",
+              "minLength": 1
+            },
+            "new_string": {
+              "type": "string"
+            },
+            "replace_all": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "file_path",
+            "old_string",
+            "new_string"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "run_shell_command",
+        "description": "Run a foreground Bash command in the workspace. Python is available on PATH. Timeout is in milliseconds, default 120000. Returns exit status and bounded stdout/stderr. Background execution is unsupported; descendants are stopped when the call ends.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string"
+            },
+            "directory": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "timeout": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 600000
+            },
+            "is_background": {
+              "type": "boolean",
+              "enum": [
+                false
+              ]
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "run_tests",
+        "description": "Run pytest on a workspace-relative file or directory (default root). Pattern selects Python test filenames. Returns exit code and output; 120-second timeout.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Relative test directory, default '.'"
+            },
+            "pattern": {
+              "type": "string",
+              "description": "Test filename pattern, default *test_*.py"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}

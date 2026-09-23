@@ -98,6 +98,9 @@
 #include "serve/glm_vision_frontend.hpp"
 #include "serve/qwen_vision_frontend.hpp"
 #include "serve/http_server.hpp"
+#include "serve/prefill_policy.hpp"
+#include "serve/shutdown_watchdog.hpp"
+#include "serve/engine_watchdog.hpp"
 
 namespace fs = std::filesystem;
 
@@ -113,13 +116,12 @@ std::atomic<bool> g_stop_requested{false};
 std::atomic<int> g_stop_signals{0};
 void on_signal(int) {
   g_stop_requested.store(true);
-  g_stop_signals.fetch_add(1);
+  if (g_stop_signals.fetch_add(1) >= 1) std::_Exit(2);
 }
 
-// A PEER never leaves on its own signal (M6 6c): it follows rank 0's
-// journal to the stop record, which rank 0 sends only after its final
-// pass — so the bus never comes down under a collective on either side.
-// A second signal forces the exit, under whatever is in flight.
+// A peer follows rank 0's journal to the stop record during graceful
+// shutdown. The independent watchdog bounds this wait; the signal handler
+// forces an immediate exit on a second signal, even inside a collective.
 bool peer_should_stop(int rank) {
   static std::atomic<bool> warned{false};
   const int n = g_stop_signals.load();
@@ -375,6 +377,10 @@ struct QwenFamily final : ServeFamily {
       : cfg(dgpp::QwenTextConfig::from_json_file((fs::path(checkpoint) / "config.json").string())),
         ckpt(checkpoint),
         fp8_head_mma(head_mma) {
+    // The fused BF16 MTP expert format is a process-wide flag (set from the
+    // engine config or CLI before the family is built); it must be on the
+    // config before the binding table and the loader see it.
+    cfg.mtp_experts_bf16_fused = dgpp::QwenLayerStream::mtp_experts_bf16_fused();
     // The engine's opt-in YaRN ramp (engine.rope_scaling): it rides the
     // parsed config, so the layer's table, the session's max_context()
     // and the memory plan's context line all take it from one place.
@@ -944,6 +950,8 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
     journal->watch_peers([&](int peer, const std::string& why) {
       fail_service("rank " + std::to_string(peer) + " died (" + why + ")");
     });
+  dgpp::serve::EngineWatchdog engine_watchdog(*engine->prefill_monitor());
+  DGPP_LOG_INFO("serve: engine progress deadline 120 s (scheduler passes and prefill progress)");
   std::thread engine_loop([&] {
     const auto pass = [&] {
       return journal
@@ -965,6 +973,7 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
       stats.observe(service.meters(), &sc);
     };
     while (!g_stop_requested.load()) {
+      const auto work = engine_watchdog.work();
       try {
         const bool worked = pass();
         observe();
@@ -1152,7 +1161,7 @@ int main(int argc, char** argv) {
       "    tokens, grows at tick top, and sheds the youngest request\n"
       "    (finish_reason length) when the pool runs out; every rank takes\n"
       "    rank 0's policy from the warm record\n"
-      "  [--prefill-budget-tokens N (default 0)]: Qwen/GLM-5.3-Flash graph prefill tokens/tick, 0 "
+      "  [--prefill-budget-tokens N (default -1)]: automatic aligned chunks on supported graph engines; 0 "
       "disables\n"
       "  [--prefill-idle-budget-tokens N (default 0)]: larger budget without active decode; 0 uses "
       "the busy budget\n"
@@ -1179,6 +1188,7 @@ int main(int argc, char** argv) {
   std::string ngram_table = "resident";  // the Qwen n-gram table: resident | mmap
   std::string fp8_head = "gemv";
   std::string dense_weights = "checkpoint";  // the Qwen dense stack: checkpoint | fp8
+  std::string mtp_expert_format = "fp8";    // the Qwen MTP draft experts: fp8 | bf16_fused
   std::string bf16_weights = "checkpoint";  // the bf16 decode weights' resident form: checkpoint | bf12 | bf12+bf16
   std::string prefill = "bounded";  // the DeepSeek-V4.1 prefill: bounded | exact
   // The opt-in YaRN rope ramp (engine.rope_scaling): absent = the plain
@@ -1195,7 +1205,7 @@ int main(int argc, char** argv) {
   int sampling_candidates = dgpp::kSamplingCandidates;
   std::string admission_mode = "full";
   int admission_window = 256;
-  int prefill_budget_tokens = 0;
+  int prefill_budget_tokens = -1;
   int prefill_idle_budget_tokens = 0;
   // The bulk collective's sender pacing (prefill all-reduces): negative
   // derives the per-QP rate from the port at bus start.
@@ -1217,6 +1227,7 @@ int main(int argc, char** argv) {
   std::optional<int> top_k;
   std::optional<uint64_t> fixed_seed;
   bool reasoning_in_content = false;
+  std::string model_alias;
   double stats_interval_s = 10.0;  // the throughput line's period
   // The cluster config: found first, whatever its position,
   // because the flags after it override what it sets.
@@ -1261,6 +1272,7 @@ int main(int argc, char** argv) {
     ngram_table = e.ngram_table;
     dense_weights = e.dense_weights;
     fp8_head = e.fp8_head;
+    mtp_expert_format = e.mtp_expert_format;
     bf16_weights = e.bf16_weights;
     prefill = e.prefill;
     rope_scaling = e.rope_scaling;
@@ -1286,6 +1298,7 @@ int main(int argc, char** argv) {
     prefix_cache_gib = e.prefix_cache_gib;
     admission_mode = e.admission;
     admission_window = e.admission_window;
+    model_alias = e.model_alias;
     prefill_budget_tokens = e.prefill_budget_tokens;
     prefill_idle_budget_tokens = e.prefill_idle_budget_tokens;
     bulk_pace_gbps = e.bulk_pace_gbps;
@@ -1307,6 +1320,7 @@ int main(int argc, char** argv) {
       return argv[++i];
     };
     if (a == "--model") model_id = next();
+    else if (a == "--model-alias") model_alias = next();
     else if (a == "--checkpoint-dir") ckpt = next();
     else if (a == "--port") port = static_cast<uint16_t>(std::stoi(next()));
     else if (a == "--bind-host") http_bind = next();
@@ -1324,6 +1338,7 @@ int main(int argc, char** argv) {
     else if (a == "--dense-weights") dense_weights = next();
     else if (a == "--fp8-head")
       fp8_head = next();
+    else if (a == "--mtp-expert-format") mtp_expert_format = next();
     else if (a == "--bf16-weights") bf16_weights = next();
     else if (a == "--prefill") prefill = next();
     else if (a == "--embed-sharding") embed_sharding = next();
@@ -1426,7 +1441,7 @@ int main(int argc, char** argv) {
     const int effective_batch_min_live =
         graph_batch_min_live == 0 ? std::min(2, max_concurrency) : graph_batch_min_live;
     return std::format(
-        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} ngt={} dw={} bfw={} "
+        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} ngt={} dw={} mtpef={} bfw={} "
         "fp8head={} pf={} "
         "emsh={} maxtok={} queue={} "
         "eos={} graph={} compact={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} "
@@ -1435,7 +1450,7 @@ int main(int argc, char** argv) {
         "pcgib={} adm={} win={} pfbudget={} pfidle={} pace={} inflight={} reasoning_in_content={} "
         "rs={}",
         model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port, max_concurrency,
-        kv_capacity, kv_dtype, ngram_table, dense_weights, bf16_weights, fp8_head, prefill,
+        kv_capacity, kv_dtype, ngram_table, dense_weights, mtp_expert_format, bf16_weights, fp8_head, prefill,
         embed_sharding, default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0,
         compact_batches ? 1 : 0, mtp ? 1 : 0, mtp_depth, mtp_schedule ? 1 : 0, mtp_schedule_row_ms,
         mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth,
@@ -1474,6 +1489,7 @@ int main(int argc, char** argv) {
         ws.ngram_table = ngram_table;
         ws.dense_weights = dense_weights;
         ws.fp8_head = fp8_head;
+        ws.mtp_expert_format = mtp_expert_format;
         ws.bf16_weights = bf16_weights;
         ws.prefill = prefill;
         ws.rope_scaling = rope_scaling;
@@ -1527,6 +1543,7 @@ int main(int argc, char** argv) {
         ngram_table = ws.ngram_table;
         dense_weights = ws.dense_weights;
         fp8_head = ws.fp8_head;
+        mtp_expert_format = ws.mtp_expert_format;
         bf16_weights = ws.bf16_weights;
         prefill = ws.prefill;
         rope_scaling = ws.rope_scaling;
@@ -1623,6 +1640,13 @@ int main(int argc, char** argv) {
   // The DeepSeek-V4.1 prefill mode: every model built from here on takes it.
   dgpp::Dsv41Model::set_default_prefill_bounded(prefill == "bounded");
   dgpp::QwenLayerStream::set_dense_weights_fp8(dense_weights == "fp8");
+  if (mtp_expert_format != "fp8" && mtp_expert_format != "bf16_fused") {
+    DGPP_LOG_ERROR("--mtp-expert-format must be fp8 or bf16_fused, got '{}'", mtp_expert_format);
+    return 2;
+  }
+  // The RadixArk fusion flag: set before the plan and the load (both read it
+  // through QwenLayerStream::mtp_experts_bf16_fused and loader_format()).
+  dgpp::QwenLayerStream::set_mtp_expert_format(mtp_expert_format == "bf16_fused");
   if (embed_sharding != "replicated" && embed_sharding != "vocab") {
     DGPP_LOG_ERROR("--embed-sharding must be replicated or vocab, got '{}'", embed_sharding);
     return 2;
@@ -1706,8 +1730,8 @@ int main(int argc, char** argv) {
         graph_batch_min_live, max_concurrency);
     return 1;
   }
-  if (prefill_budget_tokens < 0 || prefill_budget_tokens > (1 << 30)) {
-    DGPP_LOG_ERROR("--prefill-budget-tokens must be in [0, 1073741824]");
+  if (prefill_budget_tokens < -1 || prefill_budget_tokens > (1 << 30)) {
+    DGPP_LOG_ERROR("--prefill-budget-tokens must be -1 (automatic) or in [0, 1073741824]");
     return 1;
   }
 
@@ -1731,6 +1755,7 @@ int main(int argc, char** argv) {
 
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
+  dgpp::serve::ShutdownWatchdog shutdown_watchdog(g_stop_requested);
 
   try {
     // Registration precedes prepare_serving_process(), which pins the host
@@ -1821,6 +1846,9 @@ int main(int argc, char** argv) {
     if (std::string(family->name()) != "qwen4_exp" && dense_weights != "checkpoint")
       DGPP_LOG_WARN("serve: --dense-weights {} applies to the Qwen dense stack only; the {} family loads as shipped",
                     dense_weights, family->name());
+    if (std::string(family->name()) != "qwen4_exp" && mtp_expert_format != "fp8")
+      DGPP_LOG_WARN("serve: --mtp-expert-format {} applies to the Qwen draft experts only; the {} family loads as shipped",
+                    mtp_expert_format, family->name());
     if (bf16_weights != "checkpoint" && std::string(family->name()) == "deepseek_v41")
       DGPP_LOG_INFO("serve: --bf16-weights {} packs nothing on the {} family yet (its bf16 sites ride the "
                     "tensor-core kernels): the bf16 bytes serve as shipped",
@@ -1969,9 +1997,11 @@ int main(int argc, char** argv) {
     }
     std::vector<int64_t> eos =
         no_eos ? std::vector<int64_t>{} : generation_eos;
-    const std::string model_display = model_id.empty()
-                                          ? fs::path(ckpt).filename().string()
-                                          : model_id;
+    const std::string model_display = model_alias.empty()
+                                            ? (model_id.empty()
+                                                   ? fs::path(ckpt).filename().string()
+                                                   : model_id)
+                                            : model_alias;
     // Constrained decoding (M6 6g): every rank builds the grammar's token
     // table from the same tokenizer.json, so the masks it derives from a
     // journal record are identical on every rank. Peers keep no tokenizer
@@ -2133,6 +2163,10 @@ int main(int argc, char** argv) {
               family->make_graph_engine(bus.get(), rank, world, pick_scratch, graph_batch_min_live,
                                         sample_prefix.data, sample_gather.data, sampling_candidates,
                                         &grammar_vocab, prefix_slots, mtp_depth, compact_batches);
+          knobs.admission = dgpp::serve::resolve_prefill_policy(knobs.admission, *graph_engine->engine());
+          peer_policy = knobs.admission;
+          DGPP_LOG_INFO("rank {}: prefill budget {} tokens/tick (0 = full prompt)",
+                        rank, knobs.admission.prefill_budget_tokens);
           if (mtp_schedule) {
             // The value of decode time: the configured throughput, or the
             // reservation rate of the configured curve (a plain step's).
@@ -2182,6 +2216,8 @@ int main(int argc, char** argv) {
               dgpp::make_fabric_sample(bus.get(), rank, world, sample_prefix.data, sample_gather.data,
                                        family->vocab_size()),
               &grammar_vocab, prefix_slots);
+          knobs.admission = dgpp::serve::resolve_prefill_policy(knobs.admission, *engine);
+          peer_policy = knobs.admission;
           // The eager fabric path exchanges the warm record too: it
           // carries the admission policy (no capture to start here).
           if (rank == 0) {
@@ -2307,6 +2343,7 @@ int main(int argc, char** argv) {
     std::unique_ptr<dgpp::sched::SchedulerEngine> engine = family->make_eager_engine(
         max_concurrency, dgpp::make_w1_pick(family->vocab_size()), dgpp::make_w1_sample(family->vocab_size()),
         &grammar_vocab, prefix_slots);
+    knobs.admission = dgpp::serve::resolve_prefill_policy(knobs.admission, *engine);
     const int rc = serve_openai(engine.get(), family->vocab_size(), generation_eos, ckpt,
                                 model_display, knobs, no_eos, boot_s(), /*journal=*/nullptr,
                                 /*oplog=*/nullptr, family->name());

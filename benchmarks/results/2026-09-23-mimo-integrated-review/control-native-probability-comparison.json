@@ -1,0 +1,38 @@
+{
+  "code-solo-0": {
+    "count_control": 231,
+    "count_native": 231,
+    "exact_token_logprobs": true,
+    "differing_entries": 0
+  },
+  "json-solo-0": {
+    "count_control": 242,
+    "count_native": 242,
+    "exact_token_logprobs": true,
+    "differing_entries": 0
+  },
+  "code-first-0": {
+    "count_control": 231,
+    "count_native": 231,
+    "exact_token_logprobs": true,
+    "differing_entries": 0
+  },
+  "json-second-0": {
+    "count_control": 242,
+    "count_native": 242,
+    "exact_token_logprobs": true,
+    "differing_entries": 0
+  },
+  "json-first-0": {
+    "count_control": 242,
+    "count_native": 242,
+    "exact_token_logprobs": true,
+    "differing_entries": 0
+  },
+  "code-second-0": {
+    "count_control": 231,
+    "count_native": 231,
+    "exact_token_logprobs": true,
+    "differing_entries": 0
+  }
+}

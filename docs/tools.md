@@ -94,3 +94,13 @@ Tool key closure applies to top-level arguments only. `properties: {}` closes
 to an empty set; a schema-valued `additionalProperties` also closes the declared
 set in non-strict mode. Nested objects and `response_format: json_schema` keep
 the JSON machine's open default. See [DESIGN §10](../DESIGN.md) for the policy.
+
+MiMo compact XML calls preserve required top-level arguments even without
+`strict: true`. The grammar consumes all bytes of tokens that span XML
+fields, so a merged delimiter cannot bypass the next function/key/value
+constraint. Plain string values remain free text, including empty strings
+when their schema permits them.
+Tokens that decode to no text leave the grammar state unchanged. Argument
+names must remain distinct even when `additionalProperties: true` allows
+undeclared names. Truncated or malformed calls still return as literal
+content; reaching the generation limit retains `finish_reason: length`.

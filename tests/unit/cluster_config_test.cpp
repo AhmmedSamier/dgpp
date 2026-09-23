@@ -150,6 +150,37 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
   require(one.http_max_body_bytes == 256ll * 1024 * 1024, "HTTP body default supports large prefills");
 }
 
+DGPP_TEST(cluster_config_world_size_one_runs_locally) {
+  const auto c = dgpp::serve::parse_cluster_config(
+      R"({"model":"m","world_size":1})", "t");
+  require(c.world() == 1 && c.nodes[0] == "localhost", "single-node shortcut stays local");
+}
+
+DGPP_TEST(cluster_config_world_size_requires_resolved_peer_addresses) {
+  for (const int world : {2, 4}) {
+    const std::string error = refusal(
+        R"({"model":"m","world_size":)" + std::to_string(world) + "}");
+    require(error.find("explicit 'nodes'") != std::string::npos,
+            "multi-node shortcut must require real peer addresses: " + error);
+  }
+  const auto c = dgpp::serve::parse_cluster_config(
+      R"({"model":"m","nodes":["head","peer"]})", "t");
+  require(c.world() == 2 && c.nodes[0] == "head" && c.nodes[1] == "peer",
+          "resolved multi-node configurations preserve the rank addresses");
+}
+
+DGPP_TEST(cluster_config_world_size_and_nodes_are_mutually_exclusive) {
+  for (const char* json : {
+           R"({"model":"m","world_size":2,"nodes":["head","peer"]})",
+           R"({"model":"m","nodes":["head","peer"],"world_size":2})",
+           R"({"model":"m","world_size":1,"nodes":["head"]})",
+           R"({"model":"m","nodes":["head"],"world_size":1})"}) {
+    const std::string error = refusal(json);
+    require(error.find("'nodes' and 'world_size' are mutually exclusive") != std::string::npos,
+            "mixed configuration must fail regardless of key order: " + error);
+  }
+}
+
 DGPP_TEST(cluster_config_http_override_is_order_independent) {
   const auto c = dgpp::serve::parse_cluster_config(
       R"({"model":"m","nodes":["h"],"http":{"bind_host":"0.0.0.0","port":8080,"max_body_bytes":5368709120},"ports":{"http":18080},"node_env":[{"HF_HUB_CACHE":"~/cache"}]})", "t");
@@ -329,4 +360,14 @@ DGPP_TEST(cluster_config_the_yarn512k_template_is_a_deployment_the_engine_reads)
   require(c.engine.kv_capacity > rs.context_limit() + c.engine.default_max_tokens,
           "the pool clears the ceiling with room for an answer: a 524288-token "
           "request must be admissible in this template");
+}
+
+DGPP_TEST(cluster_config_prefill_defaults_to_auto_with_explicit_opt_out) {
+  const auto defaults = dgpp::serve::parse_cluster_config(engine_json("{}"), "t");
+  require(defaults.engine.prefill_budget_tokens == -1, "unset prefill budget is automatic");
+  for (int budget : {-1, 0, 256}) {
+    const auto config = dgpp::serve::parse_cluster_config(
+        engine_json("{\"prefill_budget_tokens\":" + std::to_string(budget) + "}"), "t");
+    require(config.engine.prefill_budget_tokens == budget, "explicit budget preserved");
+  }
 }

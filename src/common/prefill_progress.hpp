@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -11,9 +12,9 @@
 
 namespace dgpp {
 
-// Observability only: the engine publishes completed chunk boundaries here.
-// HTTP readers never inspect mutable model or scheduler state. No GPU work,
-// synchronization, or scheduling decisions depend on these measurements.
+// The engine publishes completed chunk boundaries here. HTTP readers never
+// inspect mutable model or scheduler state. A separate atomic epoch lets the
+// serving watchdog observe forward progress without taking the metrics lock.
 class PrefillMonitor {
  public:
   struct Request {
@@ -33,8 +34,18 @@ class PrefillMonitor {
 
   void update(int slot, int64_t position) {
     std::lock_guard<std::mutex> lock(mutex_);
-    for (auto& r : requests_)
-      if (r.slot == slot) r.processed = std::clamp(position, r.processed, r.total);
+    for (auto& r : requests_) {
+      if (r.slot != slot) continue;
+      const int64_t next = std::clamp(position, r.processed, r.total);
+      if (next > r.processed) {
+        r.processed = next;
+        progress_epoch_.fetch_add(1, std::memory_order_release);
+      }
+    }
+  }
+
+  uint64_t progress_epoch() const {
+    return progress_epoch_.load(std::memory_order_acquire);
   }
 
   void finish(int slot) {
@@ -53,6 +64,7 @@ class PrefillMonitor {
   }
 
  private:
+  std::atomic<uint64_t> progress_epoch_{0};
   mutable std::mutex mutex_;
   std::vector<Request> requests_;
 };

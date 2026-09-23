@@ -475,6 +475,14 @@ void test_journal_codec() {
         dgpp::serve::encode_journal_settings(ws));
     require(sr.settings && !sr.warm && !sr.stop && sr.world_settings == ws,
             "codec: the settings record round-trips");
+    for (int budget : {-1, 0, 256}) {
+      auto settings = ws;
+      settings.prefill_budget_tokens = budget;
+      const auto decoded = dgpp::serve::decode_journal_line(
+          dgpp::serve::encode_journal_settings(settings));
+      require(decoded.world_settings.prefill_budget_tokens == budget,
+              "automatic, disabled and explicit prefill budgets survive the settings handshake");
+    }
     for (const std::string mode : {"gemv", "mma"}) {
       auto head = ws;
       head.fp8_head = mode;

@@ -284,6 +284,12 @@ class QwenLayerStream : public ResidentLayerStream<QwenLoaderFamily> {
   // stream is built; the memory plan and the resident image key follow it.
   static void set_dense_weights_fp8(bool on);
   static bool dense_weights_fp8();
+  // The RadixArk MTP expert format (engine.mtp_expert_format = "bf16_fused"):
+  // fused BF16 gate_up_proj + down_proj instead of per-expert FP8 tensors.
+  // Set before the stream is built; the memory plan and the resident image
+  // key follow it.
+  static void set_mtp_expert_format(bool on);
+  static bool mtp_experts_bf16_fused();
   const QwenNgramTableMmap* ngram_mmap() const { return mmap_table_.get(); }
 
   static void set_resident_image_dir(const std::string& dir);

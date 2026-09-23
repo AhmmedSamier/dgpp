@@ -6,6 +6,48 @@ scheduler operations. The examples below use GLM-5.3 on four Sparks.
 Other model templates use the same launcher with their own memory and
 engine settings. See [README](../README.md) for the configuration schema.
 
+## MiMo native MTP and prefill options
+
+MiMo defaults to upstream's recursive block-0 drafting. To use all three
+checkpoint heads, set `DGPP_MIMO_NATIVE_MTP=1` on every rank and set
+`engine.mtp: true`, `engine.mtp_depth: 3` in the deployment JSON. The loader
+requires three checkpoint heads when native drafting is enabled; a model
+without MTP remains valid. For example, using the normal site configuration:
+
+```sh
+DGPP_MIMO_NATIVE_MTP=1 DGPP_RESIDENT_CACHE=off \
+  python3 scripts/dgpp-cluster up --config /path/to/mimo.json
+```
+
+The launcher forwards these `DGPP_` settings to peers. Verify the resolved
+configuration and both rank startup logs. Restart all ranks to change them.
+Unset `DGPP_MIMO_NATIVE_MTP` and set depth 1 to return to the default control.
+`DGPP_RESIDENT_CACHE=off` disables resident image caching; `0` does not.
+Loading extra heads changes the resident image layout and memory requirement.
+
+Native MTP loads blocks 0/1/2 and keeps their independent paged K/V state,
+plus backbone history and rollback buffers. Prefix snapshots include that
+history, so the same prefix-cache byte budget retains fewer snapshots. The
+2048-row native walk limit is an internal chunk size, not the context limit.
+`engine.kv_capacity` is a shared pool across active requests. Our measured
+C2 configuration used 131072 tokens total, BF16 K/V and a 1.5 GiB prefix
+budget; it does not provide 128K simultaneously to each request.
+
+Two independent, default-off prefill switches are available:
+`DGPP_MIMO_PREFILL_LAST_HEAD=1` projects only the requested final prefill
+rows to vocabulary logits, and `DGPP_MIMO_MTP_CACHE_ONLY=1` avoids unused
+attention/MLP work during one-head history updates. Native MTP already uses
+cache-only updates for history and unselected heads. All flags must agree
+across ranks. The final-row projection changes GEMM shape; validation uses
+numerical tolerances and top-1 checks rather than a universal bitwise claim.
+
+Native MTP3 improves acceptance on the measured code, JSON and arithmetic
+probes, but slows the prose probe relative to MTP1. Use the
+[reproduction procedure](../benchmarks/mimo_upstream/README.md) to compare
+representative traffic. [Native-head measurements](../benchmarks/results/2026-09-23-mimo-native-mtp.md)
+and [prefill measurements](../benchmarks/results/2026-09-23-mimo-upstream-ports.md)
+record the configurations and limitations separately.
+
 ## Configure and start
 
 For a new machine, follow [Getting started](getting-started.md),
@@ -35,6 +77,7 @@ its node.
 | `cluster_glm-5.3-flash_nvfp4-fp8_w2.example.json` | the same hybrid on two nodes, FP8 latent cache, 132K context on four request slots (160K with `--bf16-weights checkpoint --kv-capacity 163840`) |
 | `cluster_qwen-3.8-flash-next_fp8_w{2,4}.example.json` | Qwen FP8 with MTP depth 1, four or two nodes |
 | `cluster_qwen-3.8-flash-next_nvfp4_w{1,2}.example.json` | Qwen NVFP4 on one or two Sparks, MTP depth 1, the dense projections FP8 at load, a mapped n-gram table |
+| `cluster_qwen-3.8-flash-next_nvfp4-radixark_w{1,2}.example.json` | RadixArk's Qwen NVFP4 on one or two Sparks, identical engine configuration to the NVIDIA release |
 | `cluster_glm-4.7_nvfp4_w4.example.json` | GLM-4.7 NVFP4, four nodes, MTP depth 1 |
 | `cluster_glm-5.3_int4-int8_w4.example.json` | the full GLM-5.3 (int4/int8 RTN), four nodes, MTP depth 1, eight request slots, 100K bf16 context (120K with `--bf16-weights checkpoint --kv-capacity 122880`), the embedding vocab-sharded |
 | `cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json` | DeepSeek-V4.1-Flash as shipped, four nodes, six request slots, DSpark depth 4 with the scheduled verify depth, the bounded prefill, 128K context |
@@ -226,9 +269,12 @@ encoder oracle; its default full-depth gate is documented in the
 `down` sends SIGINT to rank 0. New requests receive 503
 `server_shutdown`; queued and active requests are cancelled at the
 next scheduler boundary. Streams receive a shutdown error, then the stop
-record releases peers. A signal during prefill waits for that pass to
-finish. The launcher waits up to 240 s for rank 0 before handling peers
-and collecting logs.
+record releases peers. A signal during prefill waits for the current scheduler
+pass. An independent watchdog exits with status 2 if shutdown has not completed
+within 30 s, including a stuck engine, HTTP loop or teardown. A second SIGINT
+or SIGTERM exits immediately with status 2 on any rank. Forced exits skip CUDA
+teardown and may truncate responses. The launcher waits up to 240 s for rank 0
+before handling peers and collecting logs.
 
 `down` checks that every recorded rank has exited, including after SIGKILL.
 If a rank remains alive or cannot be checked (SSH failure, unreadable process
@@ -285,8 +331,11 @@ exits before its first tick rather than form a mixed world.
   per node) and the resident image cache (~82 GiB per rank, built on the
   first boot; the two sections below have the memory and cache details
   and knobs).
-- Nothing privileged: no locked clocks, no memlock limit changes, no root
-  (the memory section below says why).
+- Serving runs as a normal user and does not need locked clocks. Each rank
+  needs a sufficient memlock limit for RDMA registration; increasing the
+  launching session or service's hard limit may require administrator setup.
+  See [memory registration failures](networking.md#memory-registration-failures)
+  for the systemd configuration and startup checks.
 - The default peers' staging directory (`/tmp/bus4/deployments/ID`)
   lives in `/tmp`: a reboot empties it, and
   `dgpp-cluster up` recreates it. The log dir (`DGPP_LOG_DIR`,
@@ -335,7 +384,8 @@ check their allocations before loading:
   decode loop. This is optional: with the one-pass loader a rank with the
   pin off measured identically (p99 46 ms, 0 stalls, no swap traffic over
   1000 steps). A finite `RLIMIT_MEMLOCK` is logged, not warned about;
-  `DGPP_MLOCK=off` skips the attempt.
+  `DGPP_MLOCK=off` skips the attempt. RDMA registration still requires a
+  sufficient memlock limit with this optional pin disabled.
 
 **GLM-5.3-FP8 context memory.** With per-forward activations sized to the
 prefill chunk (2,048 rows) rather than the context, the memory that grows
@@ -349,8 +399,11 @@ cache format and arena size. Use the startup plan for the configured limit.
 
 **Budgeted prefill** (`engine.prefill_budget_tokens`, `--prefill-budget-tokens`)
 is supported on Qwen and GLM-5.3-Flash graph engines, including GLM image
-requests. Zero preserves full-prompt admission. The four-rank GLM-5.3-Flash
-deployment enables 256-token busy and 2,048-token idle budgets.
+requests. The default, -1, selects 256 tokens rounded down to the engine
+alignment and capped by its prefill limit (at least one aligned unit).
+An explicit zero preserves full-prompt admission. The resolved budget is logged
+at startup and carried in rank 0's warm record. The four-rank GLM-5.3-Flash
+deployment explicitly selects 256-token busy and 2,048-token idle budgets.
 A positive budget executes one aligned prefill chunk per tick, followed by
 a decode pass for active requests. Try 256 or 512 tokens; the budget must
 be a multiple of the snapshot alignment and fit the prefill scratch limit.
@@ -377,6 +430,42 @@ and `prefill_request_ms` (summed request waits, including waits between
 chunks). Logical and computed prompt-token counters advance with each chunk,
 including cancelled partial work; their difference counts attached cache
 tokens. Other model families retain full-prompt admission.
+
+Client disconnects are counted when the HTTP connection closes; retirement
+occurs at the next scheduler boundary. With full-prompt admission enabled,
+that boundary may be minutes away. Automatic chunking bounds the work between
+cancellation checks in tokens, not elapsed time. It interleaves existing decode
+requests, but a second queued prompt still waits behind the unfinished prefill.
+The `starting prefill` log precedes model work; `admitted to slot` marks its first
+token, after prefill has completed.
+
+For a suspected hang, retain both ranks' logs and op streams, the exact request
+and whether it connects directly or through a proxy, and repeated `/metrics`
+snapshots. Compare `prefill.requests[].processed_tokens`,
+`scheduler.snapshot_age_ms` and `service.pending_cancellations`. Pool counters
+are scheduler snapshots and can stay unchanged during synchronous prefill.
+Capture all-thread host backtraces on every rank before stopping the world.
+Bulk stall dumps name the active pool and report posted/staged/expected stripes
+per peer and retired/posted TX pairs. Their gate counter counts retries; zero
+is not evidence that the gate was never reached. A 500 ms stall dump is diagnostic,
+not a timeout. Serving uses a 120 s bus completion watchdog and a 60 s reducer
+wait; the latter now also covers stream completion after the GPU's done stamp.
+The bus watchdog shares its progress thread and does not cover model CUDA waits
+outside a collective. Rank 0 therefore also runs an independent **120-second
+engine progress watchdog** once serving starts. It observes scheduler passes and
+advancing prefill token positions using atomics, without calling CUDA or taking
+the service, metrics or logging locks. An in-flight pass that stops making
+progress exits with status 2 without engine teardown; the closed journal makes
+the peers exit too. Clients receive a closed connection on this emergency path.
+No termination signal is needed. Journal broadcasts and
+stats publication are inside the monitored work scope. Idle serving has no time
+limit, and a full-prompt prefill can exceed 120 seconds while its internal chunks
+continue to advance. Startup/model loading is outside this watchdog's scope.
+
+This is a fatal backstop, not recovery of a failed CUDA context: an external
+supervisor must restart the service. The separate 30-second shutdown deadline
+still applies after a termination signal. Neither watchdog identifies why the
+underlying operation stopped progressing; retain the incident evidence above.
 
 Use `scripts/serve_prefill_interference.py HOST PORT --json-out RUN.json`
 on an otherwise idle server to compare the longest client update pause
@@ -765,7 +854,7 @@ drafts and padded rows measure different work.
 | admission journal | 29971 (rank 0 listens; peers connect and send `hello <rank>`) |
 | peer binary, config and logs | `<stage_dir>/dgpp-serve`, `<stage_dir>/cluster.json`, `<stage_dir>/serve_r<rank>.log`, `<stage_dir>/serve_rank<rank>.ops` (fetched into the log dir by `down`) |
 | rank 0 log, pid and op stream | `<log_dir>/serve_r0.log`, `<log_dir>/r0.pid`, `<log_dir>/serve_rank0.ops`, written as the run records it (flushed at every retire) |
-| exit statuses | 0 orderly stop; 1 a startup or contract error (a configuration that differs from rank 0's included); 2 rank 0 after an engine failure; 3 a peer released by its in-tick watch |
+| exit statuses | 0 orderly stop; 1 a startup or contract error (a configuration that differs from rank 0's included); 2 rank 0 after an engine failure or any rank after forced shutdown; 3 a peer released by its in-tick watch |
 
 ### Compact Qwen batch mappings
 

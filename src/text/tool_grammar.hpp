@@ -47,8 +47,9 @@
 // `strict: true` the call cannot close while a required key is missing
 // (OpenAI's strict guarantee — every required
 // property present, each typed by its schema). A non-strict tool's
-// required keys and its free-text values stay the parser's schema typing
-// and the client's validation, as with OpenAI's non-strict tools.
+// free-text values stay the parser's schema typing and the client's
+// validation. MiMo compact calls also retain required keys for non-strict
+// schemas, avoiding empty calls from its unconstrained XML dialect.
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -190,6 +191,7 @@ class GrammarVocab {
   }
   // The structural ids free text may never contain: the eight markers.
   const std::vector<int64_t>& marker_ids() const { return marker_ids_; }
+  const std::vector<int32_t>& xml_end_ids() const { return xml_end_ids_; }
   bool is_eos(int64_t id) const;
   bool usable() const { return markers_.tool_calls_available() && !eos_.empty(); }
   // The JSON grammar's per-vocabulary tables (M6 6h), built once on first
@@ -203,6 +205,7 @@ class GrammarVocab {
   mutable std::shared_ptr<JsonHolder> json_;
   std::vector<std::string> texts_;
   std::vector<int32_t> by_first_[256];
+  std::vector<int32_t> xml_end_ids_;
   ChatMarkers markers_;
   std::vector<int64_t> marker_ids_;
   std::vector<int64_t> eos_;
@@ -328,6 +331,13 @@ class GrammarState {
   // Inside a Qwen call: everything but the markers, the think markers and
   // every EOS id (a call never ends the turn mid-block).
   void free_mask_in_call(TokenMask* out) const;
+  const char* xml_function_open() const;
+  const char* xml_header_end() const;
+  const char* xml_parameter_end() const;
+  const char* xml_function_end() const;
+  bool compact_xml_text_state() const;
+  bool compact_xml_text(const std::string& text);
+  void compact_xml_mask(TokenMask* out) const;
   bool qwen() const;
   bool dsml() const;
   // The ids that continue `target` from `emitted`.

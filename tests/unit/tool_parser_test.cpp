@@ -754,6 +754,27 @@ DGPP_TEST(tool_parser_mimo_jsonBodyIsTheArguments) {
   require(bad.calls.empty() && bad.content.find("<function=get_weather>") != std::string::npos, "a malformed body is content");
 }
 
+DGPP_TEST(tool_parser_mimo_unclosed_and_mixed_dialect_calls_stay_content) {
+  ToolCallParser::Options plain;
+  plain.start_in_reasoning = false;
+  const std::string function =
+      "<tool_call>\n<function=read_file>\n"
+      "<parameter=path>/tmp/dgpp-tool-probe.txt</parameter>\n</function>\n";
+  const std::string mixed =
+      function + "</invoke>\n<invoke name=\"read_file\">\n"
+                 "<parameter name=\"path\">/tmp/dgpp-tool-probe.txt</parameter>";
+  for (const std::string& text : {
+           function, mixed, mixed + "</tool_call>",
+           std::string("<tool_call><function=read_file><parameter=path>/tmp/dgpp"),
+           std::string("<tool_call><function=read_file><parameter=path>a</parameter>"
+                       "<parameter=path>b</parameter></function></tool_call>"),
+       }) {
+    const Run run = drive_mimo(text, plain);
+    require(run.calls.empty() && run.content == text,
+            "malformed MiMo output must remain literal content: " + text);
+  }
+}
+
 DGPP_TEST(tool_parser_mimo_modelOpensItsOwnThinking) {
   ChatMarkers m = mimo_markers();
   constexpr int64_t kNewline = 198;

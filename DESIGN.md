@@ -2081,8 +2081,11 @@ in non-strict mode; it cannot type arbitrary argument names on this path.
 Strict schemas still reject unsupported forms. This policy applies only
 to top-level tool arguments: nested objects and `response_format: json_schema`
 retain the JSON machine's ordinary open default. With free argument keys,
-the model can repeat a name; the parser rejects that block as literal
-content, so `required` and named tool choices are best-effort on that path.
+MiMo's compact XML grammar rejects repeated names, including undeclared
+names and delimiters merged into a token. Tokens that decode to no text
+preserve the current grammar state. Other tool formats can repeat a free
+key; the parser rejects that block as literal content, so `required` and
+named tool choices are best-effort on those paths.
 `grammar_tool_from_function`
 builds the constraint. With `function.strict: true`, unsupported
 schema keywords are rejected by path. In non-strict tools, supported
@@ -2536,6 +2539,26 @@ If fabric runs show retries, drops or latency spikes, collect node and
 switch counter deltas and inspect flow-control settings. Comparisons with
 other inference engines are optional. The current work list is in
 [docs/next_steps.md](docs/next_steps.md).
+
+### MiMo prefill work reduction experiments
+
+MiMo retains upstream's paged KV, scaled FP8 representation, query-tiled
+attention and model-opened thinking. Two opt-in paths skip scalar prefill
+vocabulary rows whose logits are unused and stop history-only MTP after KV
+append. Neither changes decode verification or grouped prefill outputs.
+The head projection changes GEMM shape and needs a numerical gate; the
+history path requires bitwise-identical subsequent draft logits. See
+[the experiment contract](docs/experiments/mimo-upstream-ports.md).
+
+### Native MiMo MTP experiment
+
+`DGPP_MIMO_NATIVE_MTP=1` selects the three checkpoint heads, each consuming
+backbone hidden p-d and token p+1 with attention position p-d. Every head
+owns a layer in the paged pool; unselected heads update K/V only. A per-slot
+backbone history ring is included in draft rollback and prefix snapshots.
+The default remains recursion through head 0. See the
+[native contract](docs/experiments/mimo-native-mtp.md) and
+[two-Spark measurements](benchmarks/results/2026-09-23-mimo-native-mtp.md).
 
 ## 15. Primary references
 

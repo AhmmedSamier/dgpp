@@ -248,7 +248,7 @@ struct MimoLoaderFamily::Builder : WeightBuilder<MimoExpectedTensor> {
   }
 
   void build_layer(int layer) {
-    const int max_layer = cfg.num_hidden_layers + (cfg.mtp_layer() >= 0 ? 1 : 0);
+    const int max_layer = cfg.num_hidden_layers + cfg.mtp_layers_loaded;
     if (layer < 0 || layer >= max_layer) fail("layer index out of range: " + std::to_string(layer));
     const bool is_mtp = cfg.is_mtp_layer(layer);
     const std::string p = mimo_layer_prefix(cfg, layer);
