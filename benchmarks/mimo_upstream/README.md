@@ -19,6 +19,19 @@ python3 benchmarks/mimo_upstream/quality.py native-mtp3 2800 6000
 python3 benchmarks/mimo_upstream/order_probe.py native-mtp3 --repeats 3
 ```
 
+For rank provenance and logs (SSH targets in rank order):
+
+```sh
+python3 benchmarks/mimo_upstream/capture.py live native-mtp3 --hosts user@head user@peer
+# Run the probes, then stop the world with the normal launcher.
+python3 benchmarks/mimo_upstream/capture.py stopped native-mtp3 --hosts user@head user@peer
+```
+
+The stopped capture checks nonempty, identical operation-stream MD5s. Both
+captures refuse overwrite. They record only MiMo, resident-cache and dense-row
+options from process environments, never the full site environment. Capture
+before replacing a deployment, since log locations may be reused.
+
 Record the exact Git commit, dirty diff (if any), binary SHA256, deployment
 JSON and rank environment alongside the results. Keep startup and warmup
 outside timings. Launch configurations using the normal
@@ -59,7 +72,9 @@ performance evidence; compare both content and reasoning against solo and
 concurrent controls. Use `compare_outputs.py --output variants.json FILE...`
 to group exact content/reasoning variants from saved `results.json` and
 `order-probe.json` files without contacting the server. Temperature zero does not guarantee row-shape-independent
-floating-point results. Fixed retrieval and tool probes are not a broad
+floating-point results. Add `--delay 0` for back-to-back arrivals or
+`--logprobs` to record top-two token probabilities in a separate diagnostic
+run; probability tracing is excluded from timing comparisons. Fixed retrieval and tool probes are not a broad
 coding-quality evaluation. The 256-token timing outputs may be truncated.
 
 `tool_probe.py` includes the original failing request and validates assembled

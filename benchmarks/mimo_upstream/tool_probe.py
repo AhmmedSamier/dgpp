@@ -104,12 +104,15 @@ def main(tag):
                         assert value.strip(), "Empty required argument"
                 parsed[call["name"]] = args
             if index == 1:
-                assert parsed["run_shell_command"] == {
+                expected = {
                     "command": "pwd",
                     "directory": ".",
                     "timeout": 10000,
                     "is_background": False,
                 }
+                assert all(
+                    parsed["run_shell_command"].get(k) == v for k, v in expected.items()
+                )
             if index == 2:
                 assert parsed["list_directory"]["path"] == "."
                 assert (

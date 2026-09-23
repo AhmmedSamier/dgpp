@@ -5,6 +5,7 @@
 // The derived family supplies the layer walk and its state operations.
 // See engine/decode_outputs.hpp for the engine-facing types.
 //
+// clang-format off
 // A family Derived : SessionModel<Derived> provides:
 //   static constexpr int prefill_chunk_tokens();
 //   Outputs run_rows(const RowRun&);            // the walk (see RowRun)
@@ -12,28 +13,24 @@
 //   GlmSpecSegments spec_segments(int req, int row0) const;  // the rollback table
 //   size_t snapshot_state_bytes() const;        // the non-draft state families' bytes
 //   size_t draft_state_bytes() const;           // the draft block's own state (0: none)
-//   void write_state_snapshot(int req, uint8_t* dst, int spec_row);   // live (spec_row < 0) or
-//   from the spec rows void write_draft_snapshot(int req, uint8_t* dst, bool live, int64_t pos);
+//   void write_state_snapshot(int req, uint8_t* dst, int spec_row);   // live (spec_row < 0) or from the spec rows
+//   void write_draft_snapshot(int req, uint8_t* dst, bool live, int64_t pos);
 //   void read_state_snapshot(int req, const uint8_t* src);
 //   void read_draft_snapshot(int req, const uint8_t* src);
-//   bool has_pool() const;  Pool& pool();       // the paged pool (PagedBlockTable's protocol +
-//   copy_block_contents) void graph_prepare();                       // the layers' graph tables,
-//   before a capture void mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T,
-//   bool decode_row,
+//   bool has_pool() const;  Pool& pool();       // the paged pool (PagedBlockTable's protocol + copy_block_contents)
+//   void graph_prepare();                       // the layers' graph tables, before a capture
+//   void mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode_row,
 //                     bool capture, int head_rows, int batch_requests);
-//   void snapshot_draft_state(int req);  void restore_draft_state(int req);  // around an in-graph
-//   draft static constexpr bool kDraftChain;          // depth >= 2 drafting wired (the chain rows)
+//   void snapshot_draft_state(int req);  void restore_draft_state(int req);  // around an in-graph draft
+//   static constexpr bool kDraftChain;          // depth >= 2 drafting wired (the chain rows)
 //   static constexpr bool kVerifyConfidence;    // optional (default false here): the draft emits a
-//                                               // per-position acceptance logit —
-//                                               confidence_rows()
-//                                               // entries per slot at device_confidence() + slot *
-//                                               rows
-//                                               // (engine/verify_schedule.hpp, the scheduled
-//                                               verify depth)
-//   const uint16_t* draft_hidden_rows() const;  // the block's output rows [T, draft_width] of its
-//   last run void snapshot_chain_state(int req);  void restore_chain_state(int req);  // around the
-//   chain rows void mtp_select_block(int index);          // optional native heads: catch-up 0,
-//   chain index+1
+//                                               // per-position acceptance logit — confidence_rows()
+//                                               // entries per slot at device_confidence() + slot * rows
+//                                               // (engine/verify_schedule.hpp, the scheduled verify depth)
+//   const uint16_t* draft_hidden_rows() const;  // the block's output rows [T, draft_width] of its last run
+//   void snapshot_chain_state(int req);  void restore_chain_state(int req);  // around the chain rows
+//   void mtp_select_block(int index);          // optional: catch-up 0, chain index+1
+// clang-format on
 // and calls init_session(params) from its constructor once its loader is
 // up (the base's buffers need the vocab slice). The walk reads the
 // base's staged inputs through begin_run() and hands its results to
