@@ -6,10 +6,18 @@ The first local MiMo migration onto upstream `c6ca191` adds a compact-tool
 grammar repair and two default-off prefill work reductions. On two Sparks,
 the combined ports reduced cold TTFT by 3.55–4.39% versus the repeated
 same-source control; decode was essentially unchanged. One concurrent code
-output differed and its cause remains unassigned. This branch still uses
+output differed and its cause remains unassigned. That first panel used
 upstream MTP1 and a shared 128K pool, not our native MTP3/256K-per-request
 capacity. See the [migration record](benchmarks/results/2026-09-23-mimo-upstream-ports.md)
 for gates, limitations and measurements.
+
+The native MiMo MTP follow-up adds opt-in blocks 0/1/2 with correctly offset
+backbone inputs and paged KV history. On the two-Spark panel this improves
+code, JSON and maths decode relative to MTP1, while prose remains slower.
+The [native MTP record](benchmarks/results/2026-09-23-mimo-native-mtp.md)
+separates native heads from recursive block-0 MTP3 and records acceptance,
+validation failures/fixes, final gates and the deployed configuration. Capacity remains the
+upstream shared 128K pool in this experiment.
 
 This page summarizes the implemented features and remaining work as of
 2026-09-21. [DESIGN.md](DESIGN.md) describes the architecture;

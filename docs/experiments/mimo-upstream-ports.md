@@ -53,3 +53,7 @@ usage, outputs, timings and before/after metrics; they refuse to overwrite
 an existing timing panel. `quality.py UNIQUE_TAG 2800 6000` checks exact
 retrieval at approximately 31K and 67K tokens. Tools are exercised separately
 through the user's actual Python harness; no generated tools are executed.
+
+The subsequent [native MTP experiment](mimo-native-mtp.md) migrates blocks
+1/2 behind a separate opt-in. Its depth comparison keeps both prefill flags
+off; the original prefill results above remain a separate experiment.

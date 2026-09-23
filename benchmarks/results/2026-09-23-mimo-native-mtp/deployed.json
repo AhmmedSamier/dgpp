@@ -1,0 +1,297 @@
+{
+  "state": {
+    "directory": "/home/jon/dgpp/experimental/mimo-upstream-native-mtp3-manual-20260923",
+    "running": true,
+    "env": {
+      "DGPP_RESIDENT_CACHE": "off",
+      "DGPP_MIMO_NATIVE_MTP": "1"
+    },
+    "tag": "native-mtp3-manual",
+    "config": {
+      "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+      "world_size": 2,
+      "release": "",
+      "engine": {
+        "max_concurrency": 2,
+        "kv_capacity": 131072,
+        "bf16_weights": "bf12",
+        "default_max_tokens": 256,
+        "queue_limit": 8,
+        "max_connections": 64,
+        "decode_graph": true,
+        "mtp": true,
+        "mtp_depth": 3,
+        "prefix_cache_gib": 1.5,
+        "admission": "full",
+        "admission_window": 256,
+        "sampling_candidates": 128,
+        "stats_interval_s": 10,
+        "kv_dtype": "bf16"
+      },
+      "paths": {
+        "resident_cache": ""
+      },
+      "http": {
+        "bind_host": "0.0.0.0",
+        "port": 30001
+      }
+    }
+  },
+  "ranks": [
+    {
+      "pid": 250056,
+      "sha256": "15547ec43066d029165c31dfba60231e7aad5e76d9a09a9799b3e21e61c08874",
+      "argv": [
+        "/home/jon/dgpp/experimental/mimo-upstream-native-mtp3-manual-20260923/dgpp-serve",
+        "--config",
+        "/home/jon/dgpp/log/deployments/9d3542d52c50d662/cluster.resolved.json",
+        "--rank",
+        "0",
+        ""
+      ],
+      "config": {
+        "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+        "release": "",
+        "engine": {
+          "max_concurrency": 2,
+          "kv_capacity": 131072,
+          "bf16_weights": "bf12",
+          "default_max_tokens": 256,
+          "queue_limit": 8,
+          "max_connections": 64,
+          "decode_graph": true,
+          "mtp": true,
+          "mtp_depth": 3,
+          "prefix_cache_gib": 1.5,
+          "admission": "full",
+          "admission_window": 256,
+          "sampling_candidates": 128,
+          "stats_interval_s": 10,
+          "kv_dtype": "bf16"
+        },
+        "paths": {
+          "resident_cache": "",
+          "log_dir": "~/dgpp/log/deployments/9d3542d52c50d662",
+          "stage_dir": "/tmp/bus4/deployments/9d3542d52c50d662",
+          "release_dir": "~/dgpp/releases"
+        },
+        "http": {
+          "bind_host": "0.0.0.0",
+          "port": 30001
+        },
+        "nodes": [
+          "192.168.0.171",
+          "192.168.0.172"
+        ],
+        "ssh_user": "jon",
+        "ports": {
+          "http": 30001,
+          "fabric": 29970,
+          "journal": 29971
+        },
+        "node_env": [
+          {
+            "DGPP_ROCE_DEVICES": "rocep1s0f0 roceP2p1s0f0",
+            "DGPP_ROCE_GID_INDICES": "3 3"
+          },
+          {
+            "DGPP_ROCE_DEVICES": "rocep1s0f0 roceP2p1s0f0",
+            "DGPP_ROCE_GID_INDICES": "3 3"
+          }
+        ]
+      },
+      "env": [
+        "DGPP_RESIDENT_CACHE=off",
+        "DGPP_MIMO_NATIVE_MTP=1"
+      ]
+    },
+    {
+      "pid": 3238790,
+      "sha256": "15547ec43066d029165c31dfba60231e7aad5e76d9a09a9799b3e21e61c08874",
+      "argv": [
+        "./dgpp-serve",
+        "--config",
+        "/tmp/bus4/deployments/9d3542d52c50d662/cluster.json",
+        "--rank",
+        "1",
+        ""
+      ],
+      "config": {
+        "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+        "release": "",
+        "engine": {
+          "max_concurrency": 2,
+          "kv_capacity": 131072,
+          "bf16_weights": "bf12",
+          "default_max_tokens": 256,
+          "queue_limit": 8,
+          "max_connections": 64,
+          "decode_graph": true,
+          "mtp": true,
+          "mtp_depth": 3,
+          "prefix_cache_gib": 1.5,
+          "admission": "full",
+          "admission_window": 256,
+          "sampling_candidates": 128,
+          "stats_interval_s": 10,
+          "kv_dtype": "bf16"
+        },
+        "paths": {
+          "resident_cache": "",
+          "log_dir": "~/dgpp/log/deployments/9d3542d52c50d662",
+          "stage_dir": "/tmp/bus4/deployments/9d3542d52c50d662",
+          "release_dir": "~/dgpp/releases"
+        },
+        "http": {
+          "bind_host": "0.0.0.0",
+          "port": 30001
+        },
+        "nodes": [
+          "192.168.0.171",
+          "192.168.0.172"
+        ],
+        "ssh_user": "jon",
+        "ports": {
+          "http": 30001,
+          "fabric": 29970,
+          "journal": 29971
+        },
+        "node_env": [
+          {
+            "DGPP_ROCE_DEVICES": "rocep1s0f0 roceP2p1s0f0",
+            "DGPP_ROCE_GID_INDICES": "3 3"
+          },
+          {
+            "DGPP_ROCE_DEVICES": "rocep1s0f0 roceP2p1s0f0",
+            "DGPP_ROCE_GID_INDICES": "3 3"
+          }
+        ]
+      },
+      "env": [
+        "DGPP_RESIDENT_CACHE=off",
+        "DGPP_MIMO_NATIVE_MTP=1"
+      ]
+    }
+  ],
+  "metrics": {
+    "scheduler": {
+      "active": 0,
+      "queued": 0,
+      "terminal": 0,
+      "records": 0,
+      "record_tokens": 0,
+      "pool_blocks_total": 2048,
+      "pool_blocks_in_use": 0,
+      "prefilling": 0,
+      "tokens_generated": 0,
+      "snapshot_age_ms": 2.028712,
+      "prompts_prefilled": 0,
+      "prompt_tokens": 0,
+      "prompt_tokens_computed": 0,
+      "decode_steps": 0,
+      "decode_rows": 0,
+      "decode_batch": {
+        "last_slots": 0,
+        "last_active": 0,
+        "last_rows_per_request": 0,
+        "replays": 0,
+        "rows": 0,
+        "padded_rows": 0,
+        "replays_by_slots": {
+          "1": 0,
+          "2": 0,
+          "3": 0,
+          "4": 0,
+          "5": 0,
+          "6": 0,
+          "7": 0,
+          "8": 0,
+          "9": 0,
+          "10": 0,
+          "11": 0,
+          "12": 0,
+          "13": 0,
+          "14": 0,
+          "15": 0,
+          "16": 0
+        }
+      },
+      "spec_decode": {
+        "depth": 3,
+        "num_drafts_total": 0,
+        "num_draft_tokens_total": 0,
+        "num_accepted_tokens_total": 0,
+        "num_draft_tokens_per_pos_total": [
+          0,
+          0,
+          0
+        ],
+        "num_accepted_tokens_per_pos_total": [
+          0,
+          0,
+          0
+        ]
+      },
+      "prefill_ms": 0.0,
+      "prefill_request_ms": 0.0,
+      "step_ms": 0.0
+    },
+    "service": {
+      "requests_total": 0,
+      "requests_shed": 0,
+      "pending_admissions": 0,
+      "pending_cancellations": 0,
+      "requests_cancelled": 0,
+      "requests_shed_pool": 0,
+      "requests_failed": 0,
+      "engine_failed": false,
+      "reservations_grown": 0,
+      "admission": {
+        "mode": "full",
+        "window": 256,
+        "prefill_budget_tokens": 0,
+        "prefill_idle_budget_tokens": 0
+      },
+      "tokens_out": 0,
+      "rejects_bad": 0,
+      "tool_calls_out": 0
+    },
+    "prefix_cache": {
+      "enabled": true,
+      "slots": 94,
+      "entries": 0,
+      "hits": 0,
+      "misses": 0,
+      "tokens_saved": 0,
+      "snapshots": 0,
+      "close_entries": 0,
+      "rolling_snapshots": 0,
+      "hop_snapshots": 0,
+      "evictions": 0,
+      "duplicates": 0,
+      "skipped_no_block": 0,
+      "skipped_no_slot": 0,
+      "skipped_image_bytes": 0,
+      "image_bytes": 0,
+      "blocks_pinned": 0,
+      "snapshot_bytes": 17072144,
+      "arena_snapshots": 0,
+      "snapshot_ms_avg": 0.0,
+      "arena_attaches": 0,
+      "attach_ms_avg": 0.0,
+      "ttft_hit_count": 0,
+      "ttft_hit_ms_avg": 0.0,
+      "ttft_miss_count": 0,
+      "ttft_miss_ms_avg": 0.0,
+      "key": "tok:48f2a839c5f8d38a tpl:0e9362d2cd4f732a ckpt:3b38d063180c3e4aed9691fdc735f3d10b266ee4"
+    },
+    "prefill": {
+      "requests": [],
+      "prompt_tokens": 0,
+      "processed_tokens": 0,
+      "cached_tokens": 0,
+      "computed_tokens": 0,
+      "remaining_tokens": 0
+    }
+  }
+}

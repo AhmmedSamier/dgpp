@@ -2545,6 +2545,16 @@ The head projection changes GEMM shape and needs a numerical gate; the
 history path requires bitwise-identical subsequent draft logits. See
 [the experiment contract](docs/experiments/mimo-upstream-ports.md).
 
+### Native MiMo MTP experiment
+
+`DGPP_MIMO_NATIVE_MTP=1` selects the three checkpoint heads, each consuming
+backbone hidden p-d and token p+1 with attention position p-d. Every head
+owns a layer in the paged pool; unselected heads update K/V only. A per-slot
+backbone history ring is included in draft rollback and prefix snapshots.
+The default remains recursion through head 0. See the
+[native contract](docs/experiments/mimo-native-mtp.md) and
+[two-Spark measurements](benchmarks/results/2026-09-23-mimo-native-mtp.md).
+
 ## 15. Primary references
 
 - [NVIDIA DGX Spark platform specifications](https://www.nvidia.com/en-us/products/workstations/dgx-spark/)
