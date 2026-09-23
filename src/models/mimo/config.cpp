@@ -276,7 +276,7 @@ MimoTextConfig MimoTextConfig::parse(const minijson::Value& root) {
   c.num_nextn_predict_layers = optional_int(root, "num_nextn_predict_layers", 0);
   if (c.num_nextn_predict_layers < 0) reject("num_nextn_predict_layers", "must be >= 0");
   c.mtp_layers_loaded = c.num_nextn_predict_layers > 0 ? 1 : 0;
-  if (const char* v = std::getenv("DGPP_MIMO_NATIVE_MTP"); v && std::string(v) == "1") {
+  if (const char* v = std::getenv("DGPP_MIMO_NATIVE_MTP"); v && std::string(v) == "1" && c.num_nextn_predict_layers > 0) {
     if (c.num_nextn_predict_layers != 3) reject("num_nextn_predict_layers", "native MTP requires three heads");
     c.mtp_layers_loaded = 3;
   }
