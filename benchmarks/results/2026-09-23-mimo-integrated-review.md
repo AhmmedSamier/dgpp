@@ -70,3 +70,39 @@ The optional custom-client replay used a clean `artifact-agent-orchestration` ch
 The tested integrated build was left deployed on both Sparks at `http://192.168.0.171:30001/v1`, with native MTP3 and both prefill switches enabled, resident cache off, C2, BF16 KV, shared 128K capacity and 94 prefix snapshots within 1.5 GiB. Final identical binary/config/flag checks and eight prefix-reuse requests passed; the service ended idle with no engine or request failures. The previous 256K-per-request capacity remains unported.
 
 Raw attempts, logs, configuration captures and SSE traces: `/mnt/benchmarks/dgpp-mimo-integrated-20260923/`. The dirty main checkout was not staged or reset.
+
+## Maintainer tool-grammar follow-up
+
+Review of PR #37 at `4dc7a2207b8747cda2aca2421f1455a0dc7c6745`, following
+[issue #35](https://github.com/HawkBearPig/dgpp/issues/35), found two further
+compact XML cases. A free field's mask admitted tokens whose decoded text
+was empty, but consuming one marked the grammar dead and left subsequent
+generation unconstrained. Free argument names also admitted duplicates,
+which the parser would reject as literal content.
+
+The follow-up keeps empty decoded tokens as no-ops and checks the used-key
+ledger before completing any free argument name. It covers ordinary and
+merged delimiters, undeclared names, names sharing a prefix, and ledger
+reset between calls. Every allowed token in representative free-field
+states must preserve an active grammar. Both new grammar tests failed on
+the original PR code; all 22 grammar tests passed with the fix.
+
+A separate MiMo parser regression preserves literal fallback for the
+reported mixed-dialect prefix, complete functions missing the outer close,
+partial arguments and duplicate parameters. This does not salvage malformed
+calls or change capped requests' `finish_reason: length`.
+
+Validation on native ARM64 with the `ci` preset (`DGPP_WERROR=ON`):
+
+- Built `dgpp_serve_app`, all host test executables, and the MiMo port,
+  native MTP and engine test executables successfully.
+- All 22 host CTest entries passed with checkpoint-labeled tests excluded.
+  The final unit executable includes both new grammar cases and the MiMo
+  malformed-output regression.
+- `git diff --check` passed.
+
+The follow-up changes only host grammar behavior, regression tests and
+documentation. GPU/fabric tests and real-checkpoint request panels were not
+rerun while the local production service was active; the original PR's
+hardware evidence is recorded above. The reported live failure frequency
+has not been remeasured.

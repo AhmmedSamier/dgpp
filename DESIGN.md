@@ -2079,8 +2079,11 @@ in non-strict mode; it cannot type arbitrary argument names on this path.
 Strict schemas still reject unsupported forms. This policy applies only
 to top-level tool arguments: nested objects and `response_format: json_schema`
 retain the JSON machine's ordinary open default. With free argument keys,
-the model can repeat a name; the parser rejects that block as literal
-content, so `required` and named tool choices are best-effort on that path.
+MiMo's compact XML grammar rejects repeated names, including undeclared
+names and delimiters merged into a token. Tokens that decode to no text
+preserve the current grammar state. Other tool formats can repeat a free
+key; the parser rejects that block as literal content, so `required` and
+named tool choices are best-effort on those paths.
 `grammar_tool_from_function`
 builds the constraint. With `function.strict: true`, unsupported
 schema keywords are rejected by path. In non-strict tools, supported

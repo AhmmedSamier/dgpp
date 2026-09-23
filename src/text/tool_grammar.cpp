@@ -469,7 +469,7 @@ bool GrammarState::compact_xml_text(const std::string& text) {
     }
     if (state_ == State::kQFreeKey) {
       if (ch == '>') {
-        if (match_.emitted.empty()) return false;
+        if (match_.emitted.empty() || key_used(match_.emitted)) return false;
         key_ = match_.emitted;
         used_keys_.push_back(key_);
         enter(State::kQValue);
@@ -498,7 +498,9 @@ bool GrammarState::compact_xml_text(const std::string& text) {
       if (ends_with(match_.emitted, xml_parameter_end())) enter(State::kQKeyOrClose);
     }
   }
-  return !text.empty();
+  // Free fields admit tokens whose decoder text is empty. They consume no
+  // XML bytes and must not disable constraints for the rest of the call.
+  return true;
 }
 
 void GrammarState::compact_xml_mask(TokenMask* out) const {

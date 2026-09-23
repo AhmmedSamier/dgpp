@@ -1324,3 +1324,52 @@ DGPP_TEST(tool_grammar_mimo_non_strict_required_fields_block_empty_and_partial_c
     require(std::string(g.state_name()) == "top", "no required keys permits an empty call");
   }
 }
+
+DGPP_TEST(tool_grammar_mimo_free_fields_keep_constraints_for_every_allowed_token) {
+  const GrammarVocab vocab = qwen_vocab(true);
+  for (const std::string& prefix : {
+           std::string("<function=get_time><parameter="),
+           std::string("<function=get_weather><parameter=city>Paris"),
+           std::string("<function=get_weather><parameter=city>Paris</parameter"),
+       }) {
+    GrammarState g(&vocab, spec_of(GrammarSpec::Mode::kAuto), false);
+    g.advance(kToolOpen);
+    feed(g, bytes_of(prefix));
+    // The vocabulary includes zero-width tokens and merged XML delimiters.
+    // Every token admitted by the mask must leave the grammar enforceable.
+    for (const int64_t id : allowed_ids(g)) {
+      GrammarState next = g;
+      next.advance(id);
+      require(next.active(), "allowed token disabled compact XML constraints: " +
+                                 std::to_string(id) + " after " + prefix);
+    }
+    g.advance(319);  // a zero-width token in a free field
+    require(g.active(), "zero-width token preserves the field state");
+    require(!g.allows(kToolClose) && !g.allows(kEosUser),
+            "a zero-width token cannot permit an unfinished call to close");
+  }
+}
+
+DGPP_TEST(tool_grammar_mimo_open_keys_reject_duplicates_across_token_boundaries) {
+  const GrammarVocab vocab = qwen_vocab(true);
+  auto spec = spec_of(GrammarSpec::Mode::kAuto);
+  spec.tools[0].constrain_keys = false;
+  GrammarState g(&vocab, spec, false);
+  g.advance(kToolOpen);
+  feed(g, bytes_of("<function=get_weather><parameter=city>Paris</parameter>"));
+  feed(g, bytes_of("<parameter=city"));
+  require(!g.allows('>') && !g.allows(280) && !g.allows(283),
+          "duplicate key cannot close alone or inside a merged token");
+  // An open schema still permits new names sharing the used key's prefix.
+  feed(g, bytes_of("_code>FR</parameter>"));
+  feed(g, bytes_of("<parameter=city_code"));
+  require(!g.allows('>'), "undeclared keys also enter the duplicate ledger");
+  feed(g, bytes_of("_extra>75</parameter></function>"));
+  g.advance(kToolClose);
+  require(g.active() && std::string(g.state_name()) == "top",
+          "distinct open keys produce a complete call");
+  g.advance(kToolOpen);
+  feed(g, bytes_of("<function=get_weather><parameter=city>Paris</parameter></function>"));
+  g.advance(kToolClose);
+  require(g.active(), "the duplicate ledger resets between calls");
+}
