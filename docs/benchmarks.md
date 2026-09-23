@@ -1,6 +1,6 @@
 # Benchmarks
 
-Measured 2026-09-22 (UTC), using source revision `a3ed8994a34c` and one release binary across the cluster. All results on this page come from this campaign. [Raw results, exact configurations and commands](../benchmarks/results/2026-09-22-current/README.md).
+Measured 2026-09-22 (UTC), using source revision `a3ed8994a34c` and one release binary across the cluster. All results on this page come from this campaign, except the MiMo-V2.6-Flash rows, which come from [a second campaign (2026-09-22/23)](../benchmarks/results/2026-09-22-mimo-v26-flash-opt/README.md) on the tree that adds the family and its decode / prefill kernels (revision `a895db96bb17` plus the changes its manifest records) with the same runner, workload and timing scope. [Raw results, exact configurations and commands](../benchmarks/results/2026-09-22-current/README.md).
 
 [Performance](#serving-performance) · [Configuration](#hardware-and-configuration) · [Method](#workload-and-timing) · [Decode modes](#decode-modes) · [Quality](#quality-and-correctness) · [Long context](#long-context) · [Reproduce](#reproduce)
 
@@ -25,8 +25,11 @@ Rows are grouped by model family and node count, with configuration options next
 | GLM-5.3 int4/int8 | 4 | 120K BF16 KV | 26.8–30.6 | C8: 51.1–54.2 | 4.785 / 24.209 / 169.138 |
 | GLM-5.3 int4/int8 | 4 | 208K FP8 KV | 27.8–30.5 | C8: 51.4–54.8 | 4.747 / 24.735 / 186.045 |
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | Default | 39.8–75.5 | C6: 85.3–123.4 | 1.602 / 5.866 / 27.087 |
+| MiMo-V2.6-Flash MXFP4/FP8 | 2 | 128K BF16 KV, 4 slots | 42.3–49.2 | C4: 70.1–78.5 | 3.503 / 12.972 / 57.213 |
+| MiMo-V2.6-Flash MXFP4/FP8 | 2 | 256K FP8 KV, 4 slots | 39.9–48.2 | C4: 72.1–78.5 | 3.486 / 13.201 / 58.513 |
+| MiMo-V2.6-Flash MXFP4/FP8 | 4 | 128K BF16 KV, 4 slots | 75.8–85.8 | C4: 128.7–142.1 | 1.771 / 6.547 / 28.428 |
 
-Rows cover the checked-in deployment templates, the GLM Flash FP8 checkpoint, and the three configuration variants described below. For Qwen NVFP4, the Options column identifies the dense projection format; the expert weights remain NVFP4 in both cases. All Qwen NVFP4 rows map the n-gram table from NVMe. YaRN 512K denotes the extended-context configuration.
+Rows cover the checked-in deployment templates, the GLM Flash FP8 checkpoint, and the three configuration variants described below. The MiMo-V2.6-Flash rows cover its two templates (four nodes with a 128K BF16 pool; two nodes with a 256K FP8 pool) and the two-node template's BF16-cache variant at 128K. For Qwen NVFP4, the Options column identifies the dense projection format; the expert weights remain NVFP4 in both cases. All Qwen NVFP4 rows map the n-gram table from NVMe. YaRN 512K denotes the extended-context configuration.
 
 The two-node GLM-5.3-Flash NVFP4/FP8 rows use the same checkpoint: one has a 163,840-token FP8 KV pool and four request slots; the other has a 262,144-token FP8 KV pool and two slots. NVFP4/FP8 identifies the [mixed-weight checkpoint](model_cards/GLM-5.3-Flash-NVFP4-FP8.md), which combines NVFP4 main-stack routed experts with the remaining tensors from the FP8 release, retaining their original formats.
 
@@ -55,8 +58,11 @@ MTP is speculative multi-token prediction. A pass can commit several output toke
 | GLM-5.3 int4/int8 | 4 | 120K BF16 KV | 8 | 122,880 | bf16 | 1 |
 | GLM-5.3 int4/int8 | 4 | 208K FP8 KV | 8 | 212,992 | fp8 | 1 |
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | Default | 6 | 131,072 | model default | 4 (adaptive) |
+| MiMo-V2.6-Flash MXFP4/FP8 | 2 | 128K BF16 KV, 4 slots | 4 | 131,072 | bf16 | 1 |
+| MiMo-V2.6-Flash MXFP4/FP8 | 2 | 256K FP8 KV, 4 slots | 4 | 262,144 | fp8 | 1 |
+| MiMo-V2.6-Flash MXFP4/FP8 | 4 | 128K BF16 KV, 4 slots | 4 | 131,072 | bf16 | 1 |
 
-GLM-5.3-Flash FP8 uses the four-node Flash template with the FP8 model ID and `kv_capacity=393216`. The alternative Qwen BF16 row selects `dense_weights=checkpoint` and `fp8_head=gemv`; full GLM's FP8 KV row selects `kv_dtype=fp8`, `kv_capacity=212992`, and a 1.5 GiB prefix cache; the two-node GLM-5.3-Flash NVFP4/FP8 256K KV row selects two slots, `kv_capacity=262144`, and a 2 GiB prefix cache (the 160K KV row uses 1.5 GiB). Every effective configuration is saved in the [configuration matrix](../benchmarks/results/2026-09-22-current/matrix.json).
+MiMo-V2.6-Flash's two-node BF16 KV row selects `kv_dtype=bf16` and `kv_capacity=131072` on its two-node template (whose shipped form keeps the K/V cache in the fp8 row form, 57 KiB per token per rank, for a 256K pool). GLM-5.3-Flash FP8 uses the four-node Flash template with the FP8 model ID and `kv_capacity=393216`. The alternative Qwen BF16 row selects `dense_weights=checkpoint` and `fp8_head=gemv`; full GLM's FP8 KV row selects `kv_dtype=fp8`, `kv_capacity=212992`, and a 1.5 GiB prefix cache; the two-node GLM-5.3-Flash NVFP4/FP8 256K KV row selects two slots, `kv_capacity=262144`, and a 2 GiB prefix cache (the 160K KV row uses 1.5 GiB). Every effective configuration is saved in the [configuration matrix](../benchmarks/results/2026-09-22-current/matrix.json).
 
 ## Workload and timing
 
@@ -87,6 +93,9 @@ Engine tokens/s, greedy; median of three repetitions.
 | GLM-5.3 int4/int8 | 4 | 120K BF16 KV | 29.8 | 30.6 | 30.4 | 30.0 | 26.8 |
 | GLM-5.3 int4/int8 | 4 | 208K FP8 KV | 30.2 | 30.5 | 30.1 | 29.3 | 27.8 |
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | Default | 39.8 | 62.2 | 75.5 | 63.0 | 45.8 |
+| MiMo-V2.6-Flash MXFP4/FP8 | 2 | 128K BF16 KV, 4 slots | 45.0 | 46.0 | 49.2 | 46.1 | 42.3 |
+| MiMo-V2.6-Flash MXFP4/FP8 | 2 | 256K FP8 KV, 4 slots | 43.2 | 44.6 | 48.2 | 46.8 | 39.9 |
+| MiMo-V2.6-Flash MXFP4/FP8 | 4 | 128K BF16 KV, 4 slots | 76.8 | 81.3 | 85.8 | 83.9 | 75.8 |
 
 ## Decode modes
 
@@ -107,6 +116,9 @@ Single-request engine tokens/s, shown as the range of the five class medians. Pl
 | GLM-5.3 int4/int8 | 4 | 120K BF16 KV | 19.8–20.1 | 26.8–30.6 | 28.0–35.0 |
 | GLM-5.3 int4/int8 | 4 | 208K FP8 KV | 19.8–20.1 | 27.8–30.5 | — |
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | Default | 32.2–32.3 | 39.8–75.5 | 34.2–82.7 |
+| MiMo-V2.6-Flash MXFP4/FP8 | 2 | 128K BF16 KV, 4 slots | 33.8–33.9 | 42.3–49.2 | — |
+| MiMo-V2.6-Flash MXFP4/FP8 | 2 | 256K FP8 KV, 4 slots | 33.1–33.4 | 39.9–48.2 | — |
+| MiMo-V2.6-Flash MXFP4/FP8 | 4 | 128K BF16 KV, 4 slots | 57.4–57.9 | 75.8–85.8 | — |
 
 A dash means that deeper MTP was not part of that deployment's mode sweep. Prompt-dependent acceptance is included in these rates; pass times and committed tokens per pass are recorded separately.
 
@@ -131,8 +143,11 @@ HumanEval executes generated code in a container without network access or host-
 | GLM-5.3 int4/int8 | 4 | 120K BF16 KV | 159/164 | 292/300 | 100/100 | 0 |
 | GLM-5.3 int4/int8 | 4 | 208K FP8 KV | 160/164 | 293/300 | 100/100 | 0 |
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | Default | 160/164 | 296/300 | 100/100 | 0 |
+| MiMo-V2.6-Flash MXFP4/FP8 | 2 | 128K BF16 KV, 4 slots | 154/164 | 295/300 | 100/100 | 0 |
+| MiMo-V2.6-Flash MXFP4/FP8 | 2 | 256K FP8 KV, 4 slots | 153/164 | 294/300 | 100/100 | 0 |
+| MiMo-V2.6-Flash MXFP4/FP8 | 4 | 128K BF16 KV, 4 slots | 154/164 | 294/300 | 100/100 | 0 |
 
-Complete matching operation streams were collected for 54/54 recorded launches. The detailed record reports greedy plain/MTP transcript comparisons and solo/batched text checks for each deployment, including any failures.
+Complete matching operation streams were collected for 54/54 recorded launches of the current-code campaign and 11/11 of the MiMo campaign. The detailed record reports greedy plain/MTP transcript comparisons and solo/batched text checks for each deployment, including any failures.
 
 | Model / weights | Nodes | Options | Rank checks passed | Plain/default greedy match | Solo/batched greedy text |
 |---|---|---|---|---|---|
@@ -149,6 +164,9 @@ Complete matching operation streams were collected for 54/54 recorded launches. 
 | GLM-5.3 int4/int8 | 4 | 120K BF16 KV | 4/4 | 5/5 classes | identical |
 | GLM-5.3 int4/int8 | 4 | 208K FP8 KV | 3/3 | 5/5 classes | identical |
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | Default | 5/5 | 5/5 classes | identical |
+| MiMo-V2.6-Flash MXFP4/FP8 | 2 | 128K BF16 KV, 4 slots | 3/3 | 5/5 classes | identical |
+| MiMo-V2.6-Flash MXFP4/FP8 | 2 | 256K FP8 KV, 4 slots | 4/4 | 5/5 classes | identical |
+| MiMo-V2.6-Flash MXFP4/FP8 | 4 | 128K BF16 KV, 4 slots | 4/4 | 5/5 classes | identical |
 
 A class counts as a plain/default match only when all three repetitions in both modes produce the same text and token count. A differing transcript fails the exact-text check. Current dense kernels can use different floating-point reduction orders for different batch shapes, so identical greedy text across batch sizes is not guaranteed. A text mismatch alone does not establish request-state contamination. Rank operation-stream agreement checks execution order, not numerical equality or request isolation; single-node launches have only one stream to record.
 
@@ -176,6 +194,13 @@ Each deterministic parcel document is generated once cold and twice more with th
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | Default | 3,836 | 2.576 | 53.94 | 2.93 | 54.3 |
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | Default | 32,365 | 25.446 | 56.39 | 3.07 | 54.5 |
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | Default | 121,107 | 172.642 | 59.31 | 2.97 | 50.0 |
+| MiMo-V2.6-Flash MXFP4/FP8 | 2 | 256K FP8 KV, 4 slots | 3,864 | 6.071 | 42.58 | 1.89 | 44.4 |
+| MiMo-V2.6-Flash MXFP4/FP8 | 2 | 256K FP8 KV, 4 slots | 32,382 | 56.763 | 47.38 | 1.99 | 42.0 |
+| MiMo-V2.6-Flash MXFP4/FP8 | 2 | 256K FP8 KV, 4 slots | 130,288 | 338.640 | 63.72 | 1.99 | 31.3 |
+| MiMo-V2.6-Flash MXFP4/FP8 | 2 | 256K FP8 KV, 4 slots | 238,855 | 838.780 | 82.15 | 1.99 | 24.2 |
+| MiMo-V2.6-Flash MXFP4/FP8 | 4 | 128K BF16 KV, 4 slots | 3,864 | 3.071 | 23.72 | 1.92 | 80.8 |
+| MiMo-V2.6-Flash MXFP4/FP8 | 4 | 128K BF16 KV, 4 slots | 32,382 | 27.606 | 25.80 | 1.99 | 77.2 |
+| MiMo-V2.6-Flash MXFP4/FP8 | 4 | 128K BF16 KV, 4 slots | 121,266 | 142.864 | 31.60 | 1.99 | 63.1 |
 
 YaRN retrieval uses five planted numeric codes at 5%, 25%, 50%, 75% and 95% of each document, with a 768-token response budget including reasoning. A hit means the expected code occurs in the response, including reasoning, after removing non-digit characters. Prefix reuse repeats the final probe. The two-stream test checks completion; admission may queue a request when the shared KV pool is full.
 

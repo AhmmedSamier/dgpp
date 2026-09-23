@@ -1,0 +1,4 @@
+== 00:24:26 leg base (/home/stephen/dgpp-ab-bins/dgpp-serve.mimo-base-1f75f564) env []
+== 00:30:23 leg final (/home/stephen/dgpp-ab-bins/dgpp-serve.mimo-final-4638e3c5) env []
+== 00:36:17 done
+python3: can't open file '/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-mimo-v26-flash/ab/glm/../ab/summarize_ab.py': [Errno 2] No such file or directory

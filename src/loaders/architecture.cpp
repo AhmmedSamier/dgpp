@@ -37,9 +37,13 @@ ModelArchitecture detect_architecture(const minijson::Value& root) {
   // `deepseek_v41_text`).
   if (arch.rfind("DeepseekV41", 0) == 0 || (arch.empty() && type == "deepseek_v41"))
     return ModelArchitecture::DeepseekV41;
+  // MiMo-V2.6-Flash (2026-09-22, docs/mimo_v26_flash_plan.md):
+  // `MiMoV2ForCausalLM` / `mimo_v2`.
+  if (arch.rfind("MiMoV2", 0) == 0 || (arch.empty() && type == "mimo_v2"))
+    return ModelArchitecture::MimoV2;
   throw std::runtime_error(
       "config.json: unsupported architecture '" + arch + "' (model_type '" +
-      type + "'); the engine implements Glm5*, Qwen4Exp*, Glm4Moe*, GlmMoeDsa* and DeepseekV41*");
+      type + "'); the engine implements Glm5*, Qwen4Exp*, Glm4Moe*, GlmMoeDsa*, DeepseekV41* and MiMoV2*");
 }
 
 ModelArchitecture detect_architecture_file(const std::string& path) {

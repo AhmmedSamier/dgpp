@@ -1,0 +1,81 @@
+{
+  "started_at": "2026-09-22T21:49:05.547799+00:00",
+  "commit": "a895db96bb1749dcd5ec13ee8c2630ae3dc8762b",
+  "tracked_diff": ".gitignore                         |   2 +\n CHANGELOG.md                       |  16 ++\n CMakeLists.txt                     | 154 +++++++++++++++-\n PLAN.md                            |   6 +\n README.md                          |  22 ++-\n apps/dgpp_serve.cpp                |  82 ++++++++-\n deploy/README.md                   |   9 +-\n docs/operations.md                 |   1 +\n docs/testing.md                    |  21 ++-\n scripts/README.md                  |   1 +\n src/engine/eager_engine.hpp        |   2 +-\n src/engine/graph_engine.hpp        |   3 +-\n src/kernels/fp4_gemv.cuh           | 225 ++++++++++++++++++++----\n src/kernels/glm_moe.cu             |  44 +++--\n src/kernels/l2_prefetch.cu         |  85 ++++++++-\n src/kernels/l2_prefetch.hpp        |  40 ++++-\n src/loaders/architecture.cpp       |   6 +-\n src/loaders/architecture.hpp       |   2 +\n src/serve/generation_service.cpp   |   7 +\n src/text/tokenizer.cpp             |  29 ++-\n src/text/tokenizer.hpp             |  20 ++-\n src/text/tool_grammar.cpp          |  49 +++++-\n src/text/tool_grammar.hpp          |   8 +-\n src/text/tool_parser.cpp           |  62 ++++++-\n src/text/tool_parser.hpp           |  42 +++++\n tests/cuda/fp4_gemv_test.cu        |  19 +-\n tests/host/chat_template_test.cpp  |  86 +++++++--\n tests/host/tokenizer_test.cpp      |  10 +-\n tests/python/portability_test.py   |   1 +\n tests/unit/tool_grammar_test.cpp   |  86 +++++++++\n tests/unit/tool_parser_test.cpp    | 102 +++++++++++\n tools/checkpoint_audit.py          | 352 +++++++++++++++++++++++++++++++++++++\n tools/gen_chat_template_goldens.py |  79 ++++++++-\n tools/gen_tokenizer_goldens.py     |  24 ++-\n 34 files changed, 1583 insertions(+), 114 deletions(-)",
+  "site_settings": {
+    "DGPP_HTTP_PORT": "18080",
+    "DGPP_FABRIC_PORT": "29970",
+    "DGPP_JOURNAL_PORT": "29971",
+    "DGPP_LOG_DIR": "~/dgpp/log",
+    "DGPP_STAGE_DIR": "/tmp/bus4",
+    "DGPP_RELEASE_DIR": "~/dgpp/releases",
+    "DGPP_HTTP_BIND": "0.0.0.0",
+    "DGPP_NODES": "192.168.88.11 192.168.88.12 192.168.88.13 192.168.88.14",
+    "DGPP_SSH_USER": "stephen"
+  },
+  "templates": [
+    {
+      "id": "mimo-w4",
+      "template": "deploy/cluster_mimo-v2.6-flash_mxfp4-fp8_w4.example.json",
+      "config": "configs/mimo-w4.json",
+      "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+      "world": 4,
+      "slots": 4
+    },
+    {
+      "id": "mimo-w2",
+      "template": "deploy/cluster_mimo-v2.6-flash_mxfp4-fp8_w2.example.json",
+      "config": "configs/mimo-w2.json",
+      "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+      "world": 2,
+      "slots": 4
+    },
+    {
+      "id": "mimo-w2-fp8kv",
+      "template": "deploy/cluster_mimo-v2.6-flash_mxfp4-fp8_w2.example.json",
+      "config": "configs/mimo-w2-fp8kv.json",
+      "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+      "world": 2,
+      "slots": 4
+    }
+  ],
+  "datasets": {
+    "gsm8k_test.jsonl": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14",
+    "HumanEval.jsonl": "1d49078ba3e2b196b9344535bef34a43021f038fad9561d6ee7c53450609a6a2"
+  },
+  "eval_image": "sha256:8630ab77c5adf06e1f914483db4dd70e3fa59118160daab9b0ee75e685344221",
+  "eval_image_repo_digests": [
+    "python@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9"
+  ],
+  "eval_image_platform": "linux/arm64",
+  "checkpoint_revisions": {
+    "models--XiaomiMiMo--MiMo-V2.6-Flash-RL": [
+      "5711b268169967567844e1e560e8a3966da959b1"
+    ]
+  },
+  "binary_sha256": "4638e3c595a2765d6d50c4626a9fef3aa2aa82936c6c50e3d0eec871fcde8e00",
+  "version": "dgpp-serve 0.1.0+ga895db96bb17.dirty (git a895db96bb17, cuda 13.0)",
+  "benchmark_environment": {
+    "CUDA_DEVICE_MAX_CONNECTIONS": "32"
+  },
+  "benchmark_environment_scope": "CUDA_DEVICE_MAX_CONNECTIONS=32 on the benchmark client/rank-0 launch and local microbenchmarks; peer launches use their login environment.",
+  "evaluation_thinking_controls": "Reasoning effort low when thinking enabled; none with --no-think. isolated_eval.py supplies none to avoid conflicting API parameters.",
+  "telemetry": {
+    "script": "node_telemetry.py",
+    "scope": "Four-node launches initiated after the second Node3 recovery; earlier performance runs do not have this continuous telemetry.",
+    "memory_interval_s": 1,
+    "gpu_interval_s": 5,
+    "node3_kernel_stream": true,
+    "spot_checks": [
+      "raw/qwen-yarn-w2/long/default/health-snapshots.jsonl"
+    ],
+    "node3_management_ssh": {
+      "host": "192.168.50.232",
+      "host_key_alias": "192.168.88.13",
+      "verified_hostname": "spark-a289",
+      "record": "raw/environment-audit/node3-management-link.json"
+    }
+  },
+  "note": "The MiMo-V2.6-Flash campaign: the family's first measurement, on the tree that adds it (tracked_diff lists the uncommitted files); the other deployments' numbers are the 2026-09-22-current campaign's.",
+  "completed_at": "2026-09-23T00:15:29.065446+00:00"
+}

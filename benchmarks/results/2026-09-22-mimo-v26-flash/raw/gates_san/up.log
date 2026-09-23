@@ -1,0 +1,17 @@
+2026-09-22 17:41:10.829 === staging dgpp-serve and the config to the peers
+2026-09-22 17:41:15.263 === rank 0 on 192.168.88.11 (HTTP :18080, fabric :29970, journal :29971)
+2026-09-22 17:41:15.268 head pid 3139963
+2026-09-22 17:41:17.269 journal listening: ok (2s)
+2026-09-22 17:41:17.269 === peers 192.168.88.12 192.168.88.13 192.168.88.14
+2026-09-22 17:51:18.840 TIMEOUT waiting for rank 0 serving (600s)
+  2026-09-22 17:41:22.619 INFO  allreduce: rank 0 seq 14 ready after 195.8us
+  2026-09-22 17:41:22.619 INFO  allreduce: rank 0 seq 14 done status=0 after 860.7us
+  2026-09-22 17:41:22.822 INFO  allreduce: rank 0 seq 15 launched (3 peers)
+  2026-09-22 17:41:22.822 INFO  allreduce: rank 0 seq 15 ready after 189.2us
+  2026-09-22 17:41:22.823 INFO  allreduce: rank 0 seq 15 done status=0 after 788.7us
+  2026-09-22 17:41:22.837 INFO  allreduce: rank 0 seq 16 launched (3 peers)
+  2026-09-22 17:41:22.837 INFO  allreduce: rank 0 seq 16 ready after 186.8us
+  2026-09-22 17:41:22.838 INFO  allreduce: rank 0 seq 16 done status=0 after 783.8us
+  2026-09-22 17:41:36.763 INFO  rank 0: graph engine sampling summary — 0 sampled decode steps, 0 served by the exact gather fallback (0.0%), 112 candidates per rank
+  2026-09-22 17:41:37.144 ERROR serve: cuda failure 719: unspecified launch failure | cudaMemcpyAsync(tables_ + static_cast<size_t>(req) * total_blocks_, row, static_cast<size_t>(held) * 4, cudaMemcpyHo
+cluster configuration: rank 0 did not become ready

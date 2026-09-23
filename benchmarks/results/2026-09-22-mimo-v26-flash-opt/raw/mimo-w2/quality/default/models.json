@@ -1,0 +1,64 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+      "object": "model",
+      "created": 1790116789,
+      "owned_by": "dgpp",
+      "sampling": {
+        "available": true,
+        "defaults": {
+          "temperature": 0,
+          "top_p": 0.95,
+          "top_k": 0,
+          "min_p": 0,
+          "repetition_penalty": 1
+        }
+      },
+      "tools": {
+        "available": true,
+        "constrained": true
+      },
+      "response_format": {
+        "json_object": true,
+        "json_schema": true
+      },
+      "reasoning": {
+        "in_content": false,
+        "effort_mapping": {
+          "none": {
+            "enable_thinking": false
+          },
+          "minimal": {
+            "enable_thinking": true
+          },
+          "low": {
+            "enable_thinking": true
+          },
+          "medium": {
+            "enable_thinking": true
+          },
+          "high": {
+            "enable_thinking": true
+          },
+          "xhigh": {
+            "enable_thinking": true
+          },
+          "max": {
+            "enable_thinking": true
+          }
+        }
+      },
+      "input_modalities": [
+        "text"
+      ],
+      "context": {
+        "request_limit_tokens": 131072,
+        "position_ceiling_tokens": null,
+        "kv_pool_tokens": 131072,
+        "limited_by": "kv-pool"
+      }
+    }
+  ]
+}

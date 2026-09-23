@@ -201,6 +201,7 @@ class PortabilityTest(unittest.TestCase):
             "Qwen/Qwen3.8-Flash-Next-FP8": "qwen-3.8-flash-next_fp8",
             "nvidia/Qwen3.8-Flash-Next-NVFP4": "qwen-3.8-flash-next_nvfp4",
             "deepseek-ai/DeepSeek-V4.1-Flash": "deepseek-v4.1-flash_mxfp4-fp8",
+            "XiaomiMiMo/MiMo-V2.6-Flash-RL": "mimo-v2.6-flash_mxfp4-fp8",
         }
         values = {**site_env.DEFAULTS, "DGPP_NODES": "head peer1 peer2 peer3", "DGPP_SSH_USER": "ops"}
         templates = list((ROOT / "deploy").glob("*.example.json"))

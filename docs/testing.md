@@ -206,8 +206,32 @@ build. The suites cover:
   `dsv41_tokenizer_test` and `dsv41_prompt_test` against the snapshot's own
   tokenizer and encoder; the DSML tool grammar's walks in `unit_tests`'
   `tool_grammar_test`; the six-row sampled verdict oracle in
-  `glm_pick_test`); the fp4 GEMV
-  core at every compiled K and the MoE layer's NVFP4 shared expert;
+  `glm_pick_test`); the MiMo-V2.6-Flash chain (2026-09-22:
+  `mimo_config`/`mimo_binding` units over the real config.json,
+  `mimo_attn_test` — the fused-projection finish and the windowed sink
+  attention bitwise against the host oracle over window / sink / split /
+  hpk configurations, the one-launch decode attention bitwise the
+  three-kernel chain (bf16 and fp8 caches, same-request batch rows,
+  self-resetting counters) and the query-tiled tensor-core prefill
+  attention against the split-KV chain at the oracle's statistic;
+  `add_rmsnorm_test` — the fused residual add + norm bitwise the
+  two-kernel chain over random rows of several dims and magnitude
+  profiles; `fp4_gemv_test` additionally pins the MXFP4 f16 fast path's
+  window boundaries against the double oracle; `mimo_loader_test` — every class byte-exact at
+  worlds 1, 2 and 4 with the padded chunk stacking and the ignored
+  encoders, `mimo_forward_test` vs `tools/mimo_reference_dump.py` (strict
+  teacher-forced and relaxed end to end, the draft rows included),
+  `mimo_decode_test` — prefill == forward bitwise, the batched rows bitwise
+  their scalar rows through four rows, certified routing flips, the window
+  verified at the session level (positions past it leave a sliding-window
+  layer's rows bitwise unmoved), `mimo_tp_test` worlds 2 and 4 on
+  29962/29963, `mimo_engine_test` on 29908/29909/29911/29913 with MTP
+  depths 1 and 2 and the scheduled depth; `mimo_tokenizer_test` and
+  `mimo_chat_template_test` against the snapshot's own tokenizer and
+  template, the compact `<tool_call>` dialect in `tool_parser_test` /
+  `tool_grammar_test`); the fp4 GEMV
+  core at every compiled K (the MXFP4 set 2048 / 4096 included) and the
+  MoE layer's NVFP4 shared expert;
 - the KDA operator suite: conv/recurrent kernel parity against host
   fp32/fp64 references, chunked-vs-unchunked bitwise equivalence, decode
   graph replay, snapshot round-trip, head-slice TP readiness, and

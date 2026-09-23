@@ -1,0 +1,4 @@
+chat   256 tokens    4.18 s    16.3 ms/token (wall, prefill included) length | The user wants an explanation of CUDA graph replay performan
+code   256 tokens    3.38 s    13.2 ms/token (wall, prefill included) length | The user wants a Python function that parses ISO-8601 timest
+math   256 tokens    3.38 s    13.2 ms/token (wall, prefill included) length | Let me work through this step by step.  **Given information:
+json   239 tokens    3.05 s    12.8 ms/token (wall, prefill included) stop | The user wants a JSON array of 8 objects with country, capit

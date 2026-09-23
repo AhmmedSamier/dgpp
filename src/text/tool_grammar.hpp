@@ -229,8 +229,13 @@ struct TokenMask {
 
 class GrammarState {
  public:
+  // prompt_opens_thinking: the prompt ended in <think> (the reasoning is
+  // free until </think>). model_may_open_thinking: the prompt left the
+  // choice to the model (ChatMarkers::prompt_leaves_thinking_to_model) —
+  // a <think> as the FIRST id opens the same free reasoning; any other
+  // first id settles the grammar's opening state as before.
   GrammarState(const GrammarVocab* vocab, GrammarSpec spec,
-               bool prompt_opens_thinking);
+               bool prompt_opens_thinking, bool model_may_open_thinking = false);
 
   bool active() const { return vocab_ != nullptr && spec_.active() && !dead_; }
   const GrammarSpec& spec() const { return spec_; }
@@ -347,6 +352,7 @@ class GrammarState {
   std::string key_;        // the open argument's key (kAfterKey / kValue)
   std::string term_;       // kQValue / kDValue (JSON, or a free DSML value past its "</" tag): the terminator emitted so far
   bool top_lt_ = false;    // DSML top: the last committed text ended in "<" (the tag may follow)
+  bool think_openable_ = false;  // the first id may be <think> (model_may_open_thinking, until the first advance)
   bool flag_string_ = true;  // DSML: the open parameter's string="true" (a raw value) or "false" (JSON)
   std::vector<std::string> used_keys_;  // the open call's keys so far
   int arg_ = -1;           // the open argument (index into the tool's args)

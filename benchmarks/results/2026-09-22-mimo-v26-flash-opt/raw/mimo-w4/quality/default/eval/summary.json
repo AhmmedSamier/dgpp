@@ -1,0 +1,36 @@
+{
+  "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+  "settings": {
+    "max_tokens": 2048,
+    "reasoning_effort": "none",
+    "no_think": true,
+    "limit": 300,
+    "seed": 20260908
+  },
+  "tasks": {
+    "humaneval": {
+      "n": 164,
+      "passed": 154,
+      "rate": 0.939,
+      "seconds": 288,
+      "mean_completion_tokens": 198,
+      "truncated": 0
+    },
+    "gsm8k": {
+      "n": 300,
+      "passed": 294,
+      "rate": 0.98,
+      "seconds": 514,
+      "mean_completion_tokens": 208,
+      "truncated": 0
+    },
+    "extract": {
+      "n": 100,
+      "passed": 100,
+      "rate": 1.0,
+      "seconds": 66,
+      "mean_completion_tokens": 58,
+      "truncated": 0
+    }
+  }
+}

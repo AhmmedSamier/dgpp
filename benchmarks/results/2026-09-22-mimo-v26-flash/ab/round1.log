@@ -1,0 +1,15 @@
+== 20:45:09 leg base1 (/home/stephen/dgpp-ab-bins/dgpp-serve.mimo-base-1f75f564) env []
+up failed: benchmarks/results/2026-09-22-mimo-v26-flash/ab/round1/base1/up-plain.txt
+== 20:50:23 leg base1 (/home/stephen/dgpp-ab-bins/dgpp-serve.mimo-base-1f75f564) env []
+   base1/mtp done already
+== 20:57:21 leg base1 (/home/stephen/dgpp-ab-bins/dgpp-serve.mimo-base-1f75f564) env []
+   base1/mtp done already
+   base1/plain done already
+== 20:57:21 leg cand2c (/home/stephen/dgpp-ab-bins/dgpp-serve.mimo-cand2-f59d421a) env [DGPP_MIMO_PREFILL_ATTN=chain]
+== 21:03:42 leg cand2p16 (/home/stephen/dgpp-ab-bins/dgpp-serve.mimo-cand2-f59d421a) env [DGPP_MIMO_L2_PERSIST_MB=16]
+== 21:10:25 leg base2 (/home/stephen/dgpp-ab-bins/dgpp-serve.mimo-base-1f75f564) env []
+benchmarks/results/2026-09-22-mimo-v26-flash/ab/run_ab.sh: line 35: syntax error near unexpected token `$mode'
+benchmarks/results/2026-09-22-mimo-v26-flash/ab/run_ab.sh: line 35: `_load ($mode) failed: $d/$mode.log"'
+== 21:24:45 leg cand2p8 (/home/stephen/dgpp-ab-bins/dgpp-serve.mimo-cand2-f59d421a) env [DGPP_MIMO_L2_PERSIST_MB=8]
+== 21:31:23 done
+python3: can't open file '/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-mimo-v26-flash/ab/round1/../ab/summarize_ab.py': [Errno 2] No such file or directory

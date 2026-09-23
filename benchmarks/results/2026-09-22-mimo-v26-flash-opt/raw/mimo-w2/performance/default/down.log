@@ -1,0 +1,7 @@
+2026-09-22 22:36:43.799 === SIGINT rank 0 (3393626) — the stop record releases the peers
+2026-09-22 22:36:45.801 === waiting for the peers to drain
+2026-09-22 22:36:47.093 === op-stream identity (every rank)
+2026-09-22 22:36:47.099 89eb4dfb25f20a88aa1cd63e648059d3  /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-mimo-v26-flash-opt/raw/mimo-w2/performance/default/server/serve_rank0.ops
+2026-09-22 22:36:47.104 89eb4dfb25f20a88aa1cd63e648059d3  /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-mimo-v26-flash-opt/raw/mimo-w2/performance/default/server/serve_rank1.ops
+2026-09-22 22:36:47.104 op streams: identical across 2 ranks
+2026-09-22 22:36:47.104 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-mimo-v26-flash-opt/raw/mimo-w2/performance/default/server

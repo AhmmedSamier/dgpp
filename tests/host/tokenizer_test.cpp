@@ -65,7 +65,8 @@ DGPP_TEST(glm_tokenizer_differential_goldens) {
   std::string model_id = golden_model(kGoldenPath);
   if (env_model && *env_model) model_id = env_model;
   if (model_id.empty()) model_id = "unsloth/GLM-5.3-Flash-FP8";
-  const bool qwen = model_id.find("Qwen") != std::string::npos;
+  const bool mimo = model_id.find("MiMo") != std::string::npos;
+  const bool qwen = model_id.find("Qwen") != std::string::npos || mimo;  // the NFC tokenizers
   const bool dsv41 = model_id.find("DeepSeek-V4") != std::string::npos;
   std::string err;
   const std::string snap = dgpp::hf::model_dir(model_id, &err);
@@ -87,6 +88,13 @@ DGPP_TEST(glm_tokenizer_differential_goldens) {
             "deepseek anchor prompt does not encode to the recorded ids");
     require(tok.encode(" Paris") == std::vector<int64_t>{11111}, "deepseek anchor ' Paris' != id 11111");
     require(tok.decode(std::vector<int64_t>{11111, 16}, false) == " Paris.", "deepseek anchor does not decode to ' Paris.'");
+  } else if (mimo) {
+    // The MiMo-V2.6 corpus's anchors (HF tokenizers 0.23.2 on the snapshot,
+    // 2026-09-22): the Qwen2 vocabulary's plain words.
+    require(tok.encode("The capital of France is") == std::vector<int64_t>{785, 6722, 315, 9625, 374},
+            "mimo anchor prompt does not encode to the recorded ids");
+    require(tok.encode(" Paris") == std::vector<int64_t>{12095}, "mimo anchor ' Paris' != id 12095");
+    require(tok.decode(std::vector<int64_t>{12095, 13}, false) == " Paris.", "mimo anchor does not decode to ' Paris.'");
   } else if (!qwen) {
     const std::vector<int64_t> got =
         tok.encode("The capital of France is");

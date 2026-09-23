@@ -190,7 +190,10 @@ add_library(dgpp_kernels STATIC
   src/kernels/qwen_mtp.cu
   src/kernels/qsa.cu
   src/kernels/qsa_prefill.cu
-  src/kernels/glm4_attn.cu)
+  src/kernels/glm4_attn.cu
+  src/kernels/mimo_attn.cu
+  src/kernels/mimo_attn_prefill.cu
+  src/kernels/add_rmsnorm.cu)
 target_link_libraries(dgpp_kernels PUBLIC CUDA::cudart CUDA::cublasLt dgpp_core dgpp_rope_scaling)
 dgpp_set_common(dgpp_kernels)
 # The device sampler mirrors the host oracle bit for bit: no contraction of
@@ -282,6 +285,34 @@ target_include_directories(dgpp_models_glm4_layers PUBLIC ${CMAKE_CURRENT_SOURCE
 target_link_libraries(dgpp_models_glm4_layers
   PUBLIC dgpp_models_glm4 dgpp_models_glm4_loader dgpp_models_moe dgpp_models_glm dgpp_kernels CUDA::cudart)
 dgpp_set_common(dgpp_models_glm4_layers)
+
+# MiMo-V2.6-Flash (2026-09-22, docs/mimo_v26_flash_plan.md): the host-side
+# model description.
+add_library(dgpp_models_mimo STATIC
+  src/models/mimo/config.cpp
+  src/models/mimo/binding.cpp
+  src/models/mimo/attn_reference.cpp)
+target_include_directories(dgpp_models_mimo PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_mimo PUBLIC dgpp_loaders dgpp_common)
+dgpp_set_common(dgpp_models_mimo)
+
+# The MiMo resident loader (loaders/resident_stream.hpp + the family's builders).
+add_library(dgpp_models_mimo_loader STATIC
+  src/models/mimo/loader.cpp)
+target_include_directories(dgpp_models_mimo_loader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_mimo_loader PUBLIC dgpp_models_mimo dgpp_loaders CUDA::cudart dgpp_device_ranges)
+dgpp_set_common(dgpp_models_mimo_loader)
+
+# The MiMo layer objects and model (the paged K/V pool first; the layers
+# and the model follow).
+add_library(dgpp_models_mimo_layers STATIC
+  src/models/mimo/kv_pool.cpp
+  src/models/mimo/layers.cpp
+  src/models/mimo/forward.cpp)
+target_include_directories(dgpp_models_mimo_layers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_mimo_layers
+  PUBLIC dgpp_models_mimo dgpp_models_mimo_loader dgpp_models_moe dgpp_models_glm dgpp_kernels CUDA::cudart)
+dgpp_set_common(dgpp_models_mimo_layers)
 
 # The full GLM-5.3 model on the session core (docs/glm53_plan.md G5).
 add_library(dgpp_models_glm_dsa_layers STATIC
@@ -575,7 +606,7 @@ if(DGPP_ENABLE_IBV)
   # layout split of 2026-09-06; dgpp_serve is the library it links).
   add_executable(dgpp_serve_app apps/dgpp_serve.cpp)
   target_link_libraries(dgpp_serve_app PRIVATE dgpp_models_glm_loader dgpp_models_qwen_layers dgpp_models_glm4_layers dgpp_models_glm_dsa_layers
-                                             dgpp_models_dsv41_layers
+                                             dgpp_models_dsv41_layers dgpp_models_mimo_layers
                                              dgpp_loaders dgpp_bus
                                              dgpp_serve CUDA::cudart
                                              Threads::Threads)
@@ -656,13 +687,15 @@ add_executable(unit_tests
   tests/unit/glm_dsa_binding_test.cpp
   tests/unit/dsv41_config_test.cpp
   tests/unit/dsv41_binding_test.cpp
+  tests/unit/mimo_config_test.cpp
+  tests/unit/mimo_binding_test.cpp
   tests/unit/nvfp4_quant_test.cpp
   tests/unit/verify_schedule_test.cpp
   src/core/trace.cpp)
 target_include_directories(unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(unit_tests PRIVATE CUDA::cudart dgpp_loaders
                                         dgpp_models_glm dgpp_models_qwen dgpp_models_glm4
-                                        dgpp_models_glm_dsa dgpp_models_dsv41
+                                        dgpp_models_glm_dsa dgpp_models_dsv41 dgpp_models_mimo
                                         dgpp_rope_scaling
                                         dgpp_net dgpp_serve Threads::Threads)
 target_compile_definitions(unit_tests PRIVATE DGPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
@@ -718,6 +751,9 @@ set_tests_properties(glm4_tokenizer_test PROPERTIES SKIP_RETURN_CODE 2)
 add_test(NAME glm_dsa_tokenizer_test
   COMMAND tokenizer_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/glm_dsa_tokenizer_goldens.jsonl)
 set_tests_properties(glm_dsa_tokenizer_test PROPERTIES SKIP_RETURN_CODE 2)
+add_test(NAME mimo_tokenizer_test
+  COMMAND tokenizer_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mimo_tokenizer_goldens.jsonl)
+set_tests_properties(mimo_tokenizer_test PROPERTIES SKIP_RETURN_CODE 2)
 
 # M6 Stage 3b: the chat-template differential gate (host). Skips with rc 2
 # when the model cache is absent, same as above.
@@ -737,6 +773,9 @@ set_tests_properties(glm4_chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
 add_test(NAME glm_dsa_chat_template_test
   COMMAND chat_template_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/glm_dsa_chat_template_goldens.jsonl)
 set_tests_properties(glm_dsa_chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
+add_test(NAME mimo_chat_template_test
+  COMMAND chat_template_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mimo_chat_template_goldens.jsonl)
+set_tests_properties(mimo_chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
 
 # M6 Stage 4: the serving capstone — HTTP/SSE over epoll + the OpenAI
 # generation service (host-only; the engine adapters live in the apps,
@@ -1003,11 +1042,29 @@ target_link_libraries(glm4_attn_test PRIVATE dgpp_models_glm4 dgpp_kernels CUDA:
 dgpp_set_common(glm4_attn_test)
 add_test(NAME glm4_attn_test COMMAND glm4_attn_test)
 
+add_executable(mimo_attn_test tests/cuda/mimo_attn_test.cu)
+target_include_directories(mimo_attn_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(mimo_attn_test PRIVATE dgpp_models_mimo dgpp_kernels CUDA::cudart Threads::Threads)
+dgpp_set_common(mimo_attn_test)
+add_test(NAME mimo_attn_test COMMAND mimo_attn_test)
+
+add_executable(add_rmsnorm_test tests/cuda/add_rmsnorm_test.cu)
+target_include_directories(add_rmsnorm_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(add_rmsnorm_test PRIVATE dgpp_kernels CUDA::cudart Threads::Threads)
+dgpp_set_common(add_rmsnorm_test)
+add_test(NAME add_rmsnorm_test COMMAND add_rmsnorm_test)
+
 add_executable(glm4_loader_test tests/cuda/glm4_loader_test.cpp)
 target_include_directories(glm4_loader_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
 target_link_libraries(glm4_loader_test PRIVATE dgpp_models_glm4_loader CUDA::cudart Threads::Threads)
 dgpp_set_common(glm4_loader_test)
 add_test(NAME glm4_loader_test COMMAND glm4_loader_test)
+
+add_executable(mimo_loader_test tests/cuda/mimo_loader_test.cpp)
+target_include_directories(mimo_loader_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(mimo_loader_test PRIVATE dgpp_models_mimo_loader dgpp_loaders CUDA::cudart Threads::Threads)
+dgpp_set_common(mimo_loader_test)
+add_test(NAME mimo_loader_test COMMAND mimo_loader_test)
 
 # The GLM-4.7 forward (docs/glm47_plan.md G4): fixture -> smoke; the python
 # reference chain follows (the same chain as the Qwen forward's).
@@ -1028,6 +1085,43 @@ add_test(NAME glm4_forward_test
   COMMAND glm4_forward_test --checkpoint-dir ${GLM4_FORWARD_FIXTURE}
           --dump-file ${CMAKE_CURRENT_BINARY_DIR}/glm4_pure_ref.g4dump)
 set_tests_properties(glm4_forward_test PROPERTIES DEPENDS glm4_forward_generate)
+
+# The MiMo-V2.6-Flash forward (docs/mimo_v26_flash_plan.md G3): fixture ->
+# smoke; the numpy reference chain follows (the GLM-4.7 chain's shape). The
+# decode / tp / engine gates read ${MIMO_FORWARD_FIXTURE}.
+add_executable(mimo_forward_test tests/cuda/mimo_forward_test.cpp)
+target_include_directories(mimo_forward_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(mimo_forward_test PRIVATE dgpp_models_mimo_layers dgpp_models_glm_loader CUDA::cudart Threads::Threads)
+dgpp_set_common(mimo_forward_test)
+set(MIMO_FORWARD_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/mimo_forward_fixture)
+add_test(NAME mimo_forward_fixture COMMAND mimo_forward_test --write-fixture ${MIMO_FORWARD_FIXTURE})
+add_test(NAME mimo_forward_smoke COMMAND mimo_forward_test --smoke ${MIMO_FORWARD_FIXTURE})
+set_tests_properties(mimo_forward_smoke PROPERTIES DEPENDS mimo_forward_fixture)
+add_test(NAME mimo_forward_generate
+  COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/mimo_reference_dump.py
+          gen-pure --checkpoint-dir ${MIMO_FORWARD_FIXTURE}
+          --out ${CMAKE_CURRENT_BINARY_DIR}/mimo_pure_ref.mdump)
+set_tests_properties(mimo_forward_generate PROPERTIES DEPENDS mimo_forward_fixture)
+# End to end under the relaxed budgets (a routing near tie on the random
+# fixture may flip and cascade: the rows from the first flip on are
+# reported, not judged), writing the engine's states; then the reference
+# teacher-forced on them (every layer fed the engine's own input) under the
+# strict budgets — the DeepSeek ladder's design.
+add_test(NAME mimo_forward_test_e2e
+  COMMAND ${CMAKE_COMMAND} -E env DGPP_MIMO_DUMP_ENGINE_STATES=${CMAKE_CURRENT_BINARY_DIR}/mimo_engine_states.bin
+          $<TARGET_FILE:mimo_forward_test> --checkpoint-dir ${MIMO_FORWARD_FIXTURE}
+          --dump-file ${CMAKE_CURRENT_BINARY_DIR}/mimo_pure_ref.mdump --relaxed)
+set_tests_properties(mimo_forward_test_e2e PROPERTIES DEPENDS mimo_forward_generate)
+add_test(NAME mimo_forward_generate_teacher
+  COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/mimo_reference_dump.py
+          gen-pure --checkpoint-dir ${MIMO_FORWARD_FIXTURE}
+          --out ${CMAKE_CURRENT_BINARY_DIR}/mimo_teacher_ref.mdump
+          --teacher ${CMAKE_CURRENT_BINARY_DIR}/mimo_engine_states.bin)
+set_tests_properties(mimo_forward_generate_teacher PROPERTIES DEPENDS mimo_forward_test_e2e)
+add_test(NAME mimo_forward_test
+  COMMAND mimo_forward_test --checkpoint-dir ${MIMO_FORWARD_FIXTURE}
+          --dump-file ${CMAKE_CURRENT_BINARY_DIR}/mimo_teacher_ref.mdump)
+set_tests_properties(mimo_forward_test PROPERTIES DEPENDS mimo_forward_generate_teacher)
 
 # The full GLM-5.3 forward (docs/glm53_plan.md G5): fixture -> smoke; the
 # python reference -> the dump parity.
@@ -1115,9 +1209,48 @@ target_link_libraries(glm4_engine_test PRIVATE dgpp_models_glm4_layers dgpp_bus 
 dgpp_set_common(glm4_engine_test)
 add_test(NAME glm4_engine_test COMMAND glm4_engine_test)
 
+# ---- MiMo-V2.6-Flash: the session, TP and engine gates (2026-09-22) ---------
+# The fixture the forward ladder writes (the same directory when that
+# ladder is registered; the gates write their own copy when it is not).
+if(NOT DEFINED MIMO_FORWARD_FIXTURE)
+  set(MIMO_FORWARD_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/mimo_forward_fixture)
+endif()
+# The MiMo session surface: incremental decode vs the re-forward, the verify
+# rows vs the scalar steps, the prefix snapshots, the eager speculator
+# through the draft block, the sliding window through the paged cache.
+add_executable(mimo_decode_test tests/cuda/mimo_decode_test.cpp)
+target_include_directories(mimo_decode_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(mimo_decode_test PRIVATE dgpp_models_mimo_layers dgpp_models_glm_loader CUDA::cudart Threads::Threads)
+dgpp_set_common(mimo_decode_test)
+add_test(NAME mimo_decode_test COMMAND mimo_decode_test --fixture ${MIMO_FORWARD_FIXTURE})
+if(TEST mimo_forward_fixture)
+  set_tests_properties(mimo_decode_test PROPERTIES DEPENDS mimo_forward_fixture)
+endif()
+
+# The MiMo TP forwards: loopback worlds 2 and 4 vs world 1 (ports 29962, 29963).
+add_executable(mimo_tp_test tests/cuda/mimo_tp_test.cpp)
+target_include_directories(mimo_tp_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(mimo_tp_test PRIVATE dgpp_models_mimo_layers dgpp_bus dgpp_loaders CUDA::cudart Threads::Threads)
+dgpp_set_common(mimo_tp_test)
+add_test(NAME mimo_tp_test COMMAND mimo_tp_test)
+
+# The MiMo engines: the graph engine's scalar, row-batched, MTP (depth 1
+# and 2) and scheduled-depth replays against the eager engine over a
+# loopback world of 2 (ports 29908, 29909, 29911, 29913).
+add_executable(mimo_engine_test tests/cuda/mimo_engine_test.cpp)
+target_include_directories(mimo_engine_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(mimo_engine_test PRIVATE dgpp_models_mimo_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
+dgpp_set_common(mimo_engine_test)
+add_test(NAME mimo_engine_test COMMAND mimo_engine_test)
+# (the gpu;rdma labels and RUN_SERIAL join the loopback gates' list below)
+
 add_executable(glm4_load_check apps/glm4_load_check.cpp)
 target_link_libraries(glm4_load_check PRIVATE dgpp_models_glm4_loader dgpp_loaders CUDA::cudart Threads::Threads)
 dgpp_set_common(glm4_load_check)
+
+add_executable(mimo_load_check apps/mimo_load_check.cpp)
+target_link_libraries(mimo_load_check PRIVATE dgpp_models_mimo_loader dgpp_loaders CUDA::cudart Threads::Threads)
+dgpp_set_common(mimo_load_check)
 
 add_executable(glm_dsa_loader_test tests/cuda/glm_dsa_loader_test.cpp)
 target_include_directories(glm_dsa_loader_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
@@ -1164,6 +1297,10 @@ add_test(NAME dsv41_engine_test COMMAND dsv41_engine_test)
 add_executable(glm4_forward_check apps/glm4_forward_check.cpp)
 target_link_libraries(glm4_forward_check PRIVATE dgpp_models_glm4_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
 dgpp_set_common(glm4_forward_check)
+
+add_executable(mimo_forward_check apps/mimo_forward_check.cpp)
+target_link_libraries(mimo_forward_check PRIVATE dgpp_models_mimo_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
+dgpp_set_common(mimo_forward_check)
 
 add_executable(qwen_load_check apps/qwen_load_check.cpp)
 target_link_libraries(qwen_load_check PRIVATE dgpp_models_qwen_loader dgpp_loaders CUDA::cudart Threads::Threads)
@@ -1478,6 +1615,11 @@ target_include_directories(moe_slot_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/sr
 target_link_libraries(moe_slot_bench PRIVATE dgpp_models_glm_loader dgpp_models_glm CUDA::cudart CUDA::cublasLt)
 dgpp_set_common(moe_slot_bench)
 
+add_executable(mimo_step_bench benchmarks/micro/mimo_step_bench.cu src/common/log.cpp)
+target_include_directories(mimo_step_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mimo_step_bench PRIVATE dgpp_models_moe dgpp_models_glm dgpp_kernels CUDA::cudart CUDA::cublasLt)
+dgpp_set_common(mimo_step_bench)
+
 add_executable(dsa_select_bench benchmarks/micro/dsa_select_bench.cu)
 target_include_directories(dsa_select_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(dsa_select_bench PRIVATE dgpp_models_dsa CUDA::cudart)
@@ -1542,12 +1684,14 @@ set_tests_properties(tokenizer_test qwen_tokenizer_test glm4_tokenizer_test dsv4
   chat_template_test qwen_chat_template_test glm4_chat_template_test dsv41_prompt_test
   PROPERTIES LABELS "host;checkpoint")
 foreach(_test qwen_forward_fixture qwen_forward_generate glm4_forward_fixture
-    glm4_forward_generate glm_forward_fixture glm_forward_generate dsa_dump_generate kda_dump_generate)
+    glm4_forward_generate mimo_forward_fixture mimo_forward_generate mimo_forward_generate_teacher
+    glm_forward_fixture glm_forward_generate dsa_dump_generate kda_dump_generate)
   set_tests_properties(${_test} PROPERTIES LABELS "fixture")
 endforeach()
 if(DGPP_ENABLE_IBV)
   set_tests_properties(bus_test bus_selftest glm_tp_test glm4_tp_test glm4_engine_test
-    qwen_tp_test qwen_engine_test qwen_engine_fp8_head_4 qwen_engine_fp8_head_256 dsv41_tp_test dsv41_engine_test PROPERTIES LABELS "gpu;rdma" RUN_SERIAL TRUE)
+    qwen_tp_test qwen_engine_test qwen_engine_fp8_head_4 qwen_engine_fp8_head_256 dsv41_tp_test dsv41_engine_test
+    mimo_tp_test mimo_engine_test PROPERTIES LABELS "gpu;rdma" RUN_SERIAL TRUE)
   set_tests_properties(nic_regress_selftest PROPERTIES LABELS "gpu;rdma" RUN_SERIAL TRUE)
 endif()
 set_tests_properties(qwen_engine_row_independent qwen_engine_bf12

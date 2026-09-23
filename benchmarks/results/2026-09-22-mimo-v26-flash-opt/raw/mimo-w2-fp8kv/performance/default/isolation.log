@@ -1,0 +1,11 @@
+model XiaomiMiMo/MiMo-V2.6-Flash-RL
+warm 0: status 200 tokens 64
+== isolation: prompt 0 alone (256 tokens) vs beside 3 others (256 tokens): IDENTICAL
+== chat concurrency 1: 23:22:39.626 .. 23:22:46.190  wall 6.6 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 102 ms  client update pace 25.34 ms/update
+   aggregate wall: 256 tokens in 6.56 s = 39.00 tok/s (prefill included)
+   legacy output-span aggregate: 39.61971961745975 tok/s (initial TTFT excluded; later admissions included)
+== per-class wall aggregate tokens/s (prefill included), greedy, max_tokens 256
+| class | c=1 |
+|---|---|
+| chat | 39.0 |

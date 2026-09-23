@@ -1,17 +1,19 @@
 #pragma once
-// ByteLevel-BPE tokenizer for the supported GLM, Qwen and DeepSeek-V4.1
-// checkpoints. Three tokenizer.json configurations share this
+// ByteLevel-BPE tokenizer for the supported GLM, Qwen, DeepSeek-V4.1 and
+// MiMo checkpoints. Four tokenizer.json configurations share this
 // implementation (DeepSeek-V4.1, 2026-09-13: no normalizer (an empty
 // Sequence), THREE Split stages — number runs of at most three, CJK runs,
 // its own main pattern over the \p{P}/\p{S} classes — then ByteLevel, BPE
-// without ignore_merges). Loading rejects unsupported shapes and
-// validates the following properties:
-//   * pre-tokenizer: Sequence[Split (one of the two pinned GPT-2-family
+// without ignore_merges; MiMo-V2.6, 2026-09-22: the Qwen2 regex — GLM's
+// classes with a single \p{N} per pretoken — under NFC). Loading rejects
+// unsupported shapes and validates the following properties:
+//   * pre-tokenizer: Sequence[Split (one of the three pinned GPT-2-family
 //     regexes, Isolated), ByteLevel (map only, add_prefix_space=false,
 //     use_regex=false)] — the regex string is matched exactly and the
-//     scanner hardcodes both (text/unicode_tables.hpp carries the Unicode
-//     predicates: GLM's pattern; Qwen's with [\p{L}\p{M}]+ letter runs, a
-//     single \p{N}, and marks outside the punctuation class);
+//     scanner hardcodes them (text/unicode_tables.hpp carries the Unicode
+//     predicates: GLM's pattern; Qwen3.8's with [\p{L}\p{M}]+ letter runs, a
+//     single \p{N}, and marks outside the punctuation class; Qwen2's with
+//     GLM's classes and the single \p{N});
 //   * normalizer: none (GLM) or NFC (Qwen; text/unicode_normalize.hpp);
 //     post-processor: ByteLevel (offsets-only — no special tokens are
 //     injected at encode);
@@ -136,7 +138,7 @@ class Tokenizer {
   uint64_t revision_hash_ = 0;
   int64_t max_id_ = -1;
   // The pinned shape this file matched at load.
-  int pattern_ = 0;            // 0: the GLM regex, 1: the Qwen3.8 regex, 2: the DeepSeek-V4.1 three-stage sequence
+  int pattern_ = 0;            // 0: the GLM regex, 1: the Qwen3.8 regex, 2: the DeepSeek-V4.1 three-stage sequence, 3: the Qwen2 regex (MiMo)
   bool nfc_ = false;           // normalizer NFC (Qwen)
   bool ignore_merges_ = true;  // model.ignore_merges
 };

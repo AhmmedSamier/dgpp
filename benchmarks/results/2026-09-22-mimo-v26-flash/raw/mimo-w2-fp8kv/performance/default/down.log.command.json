@@ -1,0 +1,15 @@
+{
+  "command": [
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-mimo-v26-flash/../../../.venv/bin/python",
+    "/home/stephen/workspace/dgpp/scripts/dgpp-cluster",
+    "down",
+    "--config",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-mimo-v26-flash/raw/mimo-w2-fp8kv/performance/default/config.json",
+    "--log-dir",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-mimo-v26-flash/raw/mimo-w2-fp8kv/performance/default/server"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-09-22T19:27:08.939359+00:00",
+  "returncode": 0,
+  "finished_at": "2026-09-22T19:27:12.834557+00:00"
+}

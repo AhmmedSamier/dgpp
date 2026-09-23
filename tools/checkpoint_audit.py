@@ -41,6 +41,354 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_WORLD = 4
 DEFAULT_BANDWIDTH_GBPS = 230.0
 
+# ---------------------------------------------------------------------------
+# MiMo-V2.6-Flash (2026-09-22, docs/mimo_v26_flash_plan.md): fp8 dense on the
+# 128x128 grid (`.weight` F8_E4M3 + `.weight_scale_inv` F32), MXFP4 experts
+# (`.weight` U8 [N, K/2] + `.weight_scale` U8 e8m0 [N, K/32]), BF16 o_proj /
+# router / norms / embedding / head; the vision and audio encoders and the
+# draft layers past the first present and never loaded.
+MIMO_LAYER_RE = re.compile(r"^model\.layers\.(\d+)\.(.+)$")
+MIMO_DRAFT_RE = re.compile(r"^model\.mtp\.layers\.(\d+)\.(.+)$")
+MIMO_FP8_BLOCK = 128
+MIMO_FP4_BLOCK = 32
+
+
+def classify_mimo(name: str, num_layers: int) -> str:
+    """Mutually exclusive storage class of a MiMo-V2.6-Flash tensor."""
+    if name == "lm_head.weight":
+        return "lm_head"
+    if name == "model.embed_tokens.weight":
+        return "embed"
+    if name == "model.norm.weight":
+        return "norm"
+    if name.startswith(("visual.", "audio_encoder.", "speech_embeddings.", "audio_projector.")):
+        return "encoder"
+    match = MIMO_LAYER_RE.match(name)
+    if match is None:
+        draft = MIMO_DRAFT_RE.match(name)
+        if draft is None:
+            return "other"
+        return "draft" if int(draft.group(1)) == 0 else "draft_unserved"
+    layer = int(match.group(1))
+    if layer >= num_layers:
+        return "other"
+    tail = match.group(2)
+    if tail in ("input_layernorm.weight", "post_attention_layernorm.weight"):
+        return "norm"
+    if tail.startswith("self_attn.qkv_proj."):
+        return "attention_qkv"
+    if tail.startswith("self_attn.o_proj."):
+        return "attention_o"
+    if tail == "self_attn.attention_sink_bias":
+        return "attention_sink"
+    if tail.startswith("mlp.experts."):
+        return "routed_expert"
+    if tail.startswith("mlp.gate."):
+        return "router"
+    if tail.startswith(("mlp.gate_proj.", "mlp.up_proj.", "mlp.down_proj.")):
+        return "dense_mlp"
+    return "other"
+
+
+def validate_mimo_pairs(tensors: dict[str, tuple[str, str, tuple[int, ...]]],
+                        qkv_chunks: int) -> dict[str, dict]:
+    """Check every quantized pair and return {base: {fmt, n, k, payload, scales}}.
+
+    fp8 pairs: `.weight` F8_E4M3 [N, K] with `.weight_scale_inv` F32 on the
+    128x128 grid — the fused qkv_proj's grid tiled per chunk (ceil(N / chunks
+    / 128) rows per chunk); MXFP4 pairs: `.weight` U8 [N, K/2] with
+    `.weight_scale` U8 [N, K/32]. Every scale belongs to exactly one pair.
+    """
+    pairs: dict[str, dict] = {}
+    scales_seen = set()
+    for name, (_file, dtype, shape) in tensors.items():
+        if not name.endswith(".weight") or dtype not in ("F8_E4M3", "U8"):
+            continue
+        base = name[: -len(".weight")]
+        if dtype == "U8":
+            scale = tensors.get(base + ".weight_scale")
+            if scale is None:
+                raise ValueError(f"{name}: a U8 payload without its .weight_scale")
+            _sfile, sdtype, sshape = scale
+            n, k = shape[0], shape[1] * 2
+            if sdtype != "U8" or tuple(sshape) != (n, k // MIMO_FP4_BLOCK) or k % MIMO_FP4_BLOCK:
+                raise ValueError(f"{base}: MXFP4 scale {sdtype} {sshape} does not tile [{n}, {k}] by {MIMO_FP4_BLOCK}")
+            scales_seen.add(base + ".weight_scale")
+            pairs[base] = {"fmt": "mxfp4", "n": n, "k": k, "payload": numel(shape), "scales": numel(sshape)}
+            continue
+        scale = tensors.get(base + ".weight_scale_inv")
+        if scale is None:
+            raise ValueError(f"{name}: an F8_E4M3 payload without its .weight_scale_inv")
+        _sfile, sdtype, sshape = scale
+        n, k = shape[0], shape[1]
+        if sdtype != "F32" or len(sshape) != 2 or k % MIMO_FP8_BLOCK:
+            raise ValueError(f"{base}: fp8 scale is {sdtype} {sshape}, not F32 [rows, {k // MIMO_FP8_BLOCK}]")
+        if base.endswith("qkv_proj"):
+            rows_per_chunk = n // qkv_chunks
+            expected = (qkv_chunks * (-(-rows_per_chunk // MIMO_FP8_BLOCK)), k // MIMO_FP8_BLOCK)
+        else:
+            expected = (-(-n // MIMO_FP8_BLOCK), k // MIMO_FP8_BLOCK)
+        if tuple(sshape) != expected:
+            raise ValueError(f"{base}: fp8 scale {sshape} is not the grid {expected}")
+        scales_seen.add(base + ".weight_scale_inv")
+        pairs[base] = {"fmt": "fp8", "n": n, "k": k, "payload": numel(shape), "scales": numel(sshape)}
+    for name, (_file, _dtype, _shape) in tensors.items():
+        if (name.endswith(".weight_scale") or name.endswith(".weight_scale_inv")) and name not in scales_seen:
+            raise ValueError(f"{name}: a scale without its payload")
+    return pairs
+
+
+def audit_mimo(root: Path, snapshot: Path, config: dict, world: int,
+               bandwidth_gbps: float) -> tuple[dict, str]:
+    num_layers = int(config["num_hidden_layers"])
+    drafts = int(config.get("num_nextn_predict_layers", 0))
+    hidden = int(config["hidden_size"])
+    experts = int(config["n_routed_experts"])
+    topk = int(config["num_experts_per_tok"])
+    heads = int(config["num_attention_heads"])
+    kv_heads = int(config["num_key_value_heads"])
+    swa_kv_heads = int(config.get("swa_num_key_value_heads", kv_heads))
+    head_dim = int(config["head_dim"])
+    v_head_dim = int(config.get("v_head_dim", head_dim))
+    pattern = [int(x) for x in config["hybrid_layer_pattern"]]
+    moe_pattern = [int(x) for x in config["moe_layer_freq"]]
+    window = int(config.get("sliding_window", 0))
+    if len(pattern) != num_layers or len(moe_pattern) != num_layers:
+        raise ValueError("hybrid_layer_pattern / moe_layer_freq do not match num_hidden_layers")
+    quant = config.get("quantization_config") or {}
+    if quant.get("quant_method") != "fp8" or quant.get("store_dtype") != "mxfp4" \
+            or list(quant.get("weight_block_size", [])) != [128, 128] or int(quant.get("mxfp4_block_size", 32)) != 32:
+        raise ValueError("quantization_config is not the release's fp8 [128, 128] + MXFP4 expert format")
+
+    index = json.loads((snapshot / "model.safetensors.index.json").read_text(encoding="utf-8"))
+    weight_map = index["weight_map"]
+    files = sorted(set(weight_map.values()))
+    tensors: dict[str, tuple[str, str, tuple[int, ...]]] = {}
+    file_bytes: dict[str, int] = defaultdict(int)
+    for filename in files:
+        for name, meta in read_header(snapshot / filename).items():
+            if name == "__metadata__":
+                continue
+            if name in tensors:
+                raise ValueError(f"duplicate tensor in safetensors headers: {name}")
+            if weight_map.get(name) != filename:
+                raise ValueError(f"index maps {name} to {weight_map.get(name)!r}, not {filename!r}")
+            tensors[name] = (filename, meta["dtype"], tuple(int(v) for v in meta.get("shape", [])))
+    if set(tensors) != set(weight_map):
+        missing = set(weight_map) - set(tensors)
+        extra = set(tensors) - set(weight_map)
+        raise ValueError(f"index/header mismatch: missing={len(missing)} extra={len(extra)}")
+
+    pairs = validate_mimo_pairs(tensors, kv_heads)
+    class_bytes: dict[str, int] = defaultdict(int)
+    class_count: dict[str, int] = defaultdict(int)
+    dtype_bytes: dict[str, int] = defaultdict(int)
+    unmatched: list[tuple[str, str, tuple[int, ...]]] = []
+    inventory: dict[str, dict] = {}
+    total = 0
+    for name, (filename, dtype, shape) in sorted(tensors.items()):
+        if dtype not in DT_BYTES:
+            raise ValueError(f"unsupported dtype {dtype} for {name}")
+        size = numel(shape) * DT_BYTES[dtype]
+        cls = classify_mimo(name, num_layers)
+        class_bytes[cls] += size
+        class_count[cls] += 1
+        dtype_bytes[dtype] += size
+        file_bytes[filename] += size
+        total += size
+        base = None
+        for suffix in (".weight", ".weight_scale", ".weight_scale_inv"):
+            if name.endswith(suffix):
+                base = name[: -len(suffix)]
+                break
+        inventory[name] = {"file": filename, "dtype": dtype, "shape": list(shape), "class": cls, "nbytes": size,
+                           "fmt": pairs[base]["fmt"] if base in pairs else "plain"}
+        if cls == "other":
+            unmatched.append((name, dtype, shape))
+
+    fmt_count: dict[str, int] = defaultdict(int)
+    for info in pairs.values():
+        fmt_count[info["fmt"]] += 1
+    moe_layers = sum(moe_pattern)
+    if fmt_count.get("mxfp4", 0) != moe_layers * experts * 3:
+        raise ValueError(f"{fmt_count.get('mxfp4', 0)} MXFP4 matrices; expected {moe_layers * experts * 3}")
+    swa_layers = sum(pattern)
+    sinks = class_count.get("attention_sink", 0)
+    if sinks != swa_layers:
+        raise ValueError(f"{sinks} attention_sink_bias tensors; expected one per sliding-window layer ({swa_layers})")
+
+    # ---- placement (docs/mimo_v26_flash_plan.md §2) --------------------------
+    # Sharded by W: the fused qkv_proj (its pre-sharded chunks), o_proj
+    # (columns), the sink (heads), the dense MLPs and every expert
+    # (intermediate slices), the head (vocab). Replicated: the router, the
+    # norms, the embedding, the draft's enorm / hnorm / eh_proj / norms.
+    # The encoders and the draft layers past the first are never loaded.
+    def rank_terms(w: int) -> dict[str, float]:
+        out: dict[str, float] = defaultdict(float)
+        for name, meta in inventory.items():
+            cls = meta["class"]
+            size = meta["nbytes"]
+            if cls in ("routed_expert", "dense_mlp", "attention_qkv", "attention_o", "attention_sink", "lm_head"):
+                out[cls] += size / w
+            elif cls == "draft":
+                tail = MIMO_DRAFT_RE.match(name).group(2)
+                if tail.startswith(("self_attn.qkv_proj.", "self_attn.o_proj.", "self_attn.attention_sink_bias", "mlp.")):
+                    out["draft"] += size / w
+                else:
+                    out["draft"] += size
+            elif cls in ("encoder", "draft_unserved"):
+                continue
+            else:  # router, norm, embed: replicated
+                out[cls] += size
+        out["total"] = sum(out.values())
+        return dict(out)
+
+    def traffic_terms(w: int) -> dict[str, float]:
+        """Per token per rank at batch 1, T=1: the resident set minus the
+        experts a token does not route to and minus the embedding (one row);
+        the draft pass is listed apart."""
+        terms = dict(rank_terms(w))
+        terms["routed_expert"] *= topk / experts
+        terms["embed"] = 0.0
+        draft_pass = terms.get("draft", 0.0)
+        terms["draft"] = 0.0
+        terms["total"] = sum(v for k, v in terms.items() if k != "total")
+        terms["draft_pass"] = draft_pass
+        return terms
+
+    worlds = sorted({2, 4, world})
+    resident = {w: rank_terms(w) for w in worlds}
+    traffic = {w: traffic_terms(w) for w in worlds}
+
+    # The paged K/V per context token per rank (every layer's rows in bf16,
+    # the sliding-window layers' too — read through the window; the draft
+    # layer's rows with MTP): kv heads / W x (192 + 128) x 2 bytes.
+    def kv_per_token(w: int) -> float:
+        per_head = (head_dim + v_head_dim) * 2
+        ga = (num_layers - swa_layers) * (kv_heads / w) * per_head
+        swa = swa_layers * (swa_kv_heads / w) * per_head
+        draft = (swa_kv_heads / w) * per_head if drafts else 0
+        return ga + swa + draft
+
+    summary = {
+        "arch": "mimo_v2",
+        "model": model_label(root, snapshot),
+        "files": len(files),
+        "tensors": len(tensors),
+        "total_bytes": total,
+        "class_bytes": dict(class_bytes),
+        "class_count": dict(class_count),
+        "dtype_bytes": dict(dtype_bytes),
+        "pairs": dict(fmt_count),
+        "kv_bytes_per_token": {str(w): kv_per_token(w) for w in worlds},
+        "resident_rank_bytes": {str(w): resident[w] for w in worlds},
+        "traffic_rank_bytes": {str(w): traffic[w] for w in worlds},
+        "world": world,
+        "bandwidth_gbps": bandwidth_gbps,
+        "unmatched": len(unmatched),
+        "inventory": inventory,
+    }
+
+    def ms(nbytes: float) -> float:
+        return nbytes / (bandwidth_gbps * 1e9) * 1000
+
+    shard_sizes = sorted(file_bytes.items())
+    lines = [
+        "# MiMo-V2.6-Flash Checkpoint Budget Report",
+        "",
+        f"- Model revision: `{summary['model']}`",
+        f"- Files: {len(files)} shards; tensors: {len(tensors):,}",
+        f"- Total weights: **{total / 1e9:.2f} GB ({total / 2**30:.2f} GiB)**",
+        "- Generated by `tools/checkpoint_audit.py`; no tensor payloads were read.",
+        f"- Layers: {num_layers} ({swa_layers} sliding-window of {window} tokens with a per-head sink, "
+        f"{num_layers - swa_layers} global; {moe_layers} MoE, {num_layers - moe_layers} dense) + {drafts} draft layers "
+        f"(the first served); experts {experts} top-{topk}, no shared expert; hidden {hidden}; "
+        f"{heads} query heads over {kv_heads} global / {swa_kv_heads} sliding-window kv heads, qk {head_dim} / v {v_head_dim}.",
+        f"- Quantized pairs: {fmt_count.get('mxfp4', 0):,} MXFP4 matrices (U8 e2m1 codes + e8m0 per 32), "
+        f"{fmt_count.get('fp8', 0):,} fp8 matrices (e4m3 + F32 on the 128x128 grid, the fused qkv_proj's tiled per "
+        f"chunk); every scale checked against its payload.",
+        "",
+        "## Storage inventory",
+        "",
+        "| class | tensors | GB | share |",
+        "|---|---:|---:|---:|",
+    ]
+    for name, size in sorted(class_bytes.items(), key=lambda item: -item[1]):
+        lines.append(f"| {name} | {class_count[name]:,} | {size / 1e9:.3f} | {100 * size / total:.2f}% |")
+    lines.extend(["", "## Storage by dtype", "", "| dtype | GB |", "|---|---:|"])
+    for dtype, size in sorted(dtype_bytes.items(), key=lambda item: -item[1]):
+        lines.append(f"| {dtype} | {size / 1e9:.3f} |")
+    lines.extend([
+        "",
+        "## Shards",
+        "",
+        f"- {len(shard_sizes)} shards from {min(s for _, s in shard_sizes) / 1e9:.2f} to "
+        f"{max(s for _, s in shard_sizes) / 1e9:.2f} GB (the expert shards hold four experts of every "
+        "layer each; the first also carries the embedding, the head, the dense layer and the encoders).",
+        "",
+        "## Resident bytes per rank",
+        "",
+        "Placement follows docs/mimo_v26_flash_plan.md §2: the fused qkv_proj (its "
+        "pre-sharded chunks), o_proj (columns), the sink (heads), the dense MLPs and "
+        "every routed expert (intermediate slices) and the head (vocabulary) divide by "
+        "W; the router, the norms, the embedding and the draft's fusion tensors are "
+        "replicated; the vision and audio encoders and the draft layers past the first "
+        "are never loaded.",
+        "",
+        "| class | " + " | ".join(f"TP={w} GiB" for w in worlds) + " |",
+        "|---|" + "---:|" * len(worlds),
+    ])
+    keys = ("routed_expert", "attention_qkv", "attention_o", "attention_sink", "dense_mlp", "router", "norm",
+            "embed", "lm_head", "draft", "other")
+    for key in keys:
+        if any(resident[w].get(key, 0) for w in worlds):
+            lines.append(f"| {key} | " + " | ".join(f"{resident[w].get(key, 0) / 2**30:.2f}" for w in worlds) + " |")
+    lines.append("| **weights** | " + " | ".join(f"**{resident[w]['total'] / 2**30:.2f}**" for w in worlds) + " |")
+    lines.extend([
+        "",
+        "The paged K/V cache costs " + ", ".join(f"**{kv_per_token(w) / 1024:.1f} KiB per context token per rank at TP={w}**" for w in worlds) +
+        " (every layer's bf16 K 192 / V 128 rows for the rank's kv heads, the draft's included). The CUDA "
+        "context, the prefix cache and the bus staging come on top; `dgpp-serve --memory-plan` is the authority.",
+        "",
+        "## Decode traffic model (batch size 1)",
+        "",
+        f"Per token per rank at T=1: the resident set minus the experts a token does not route to "
+        f"(top-{topk} of {experts}) and minus the embedding (one row). The draft pass (the first draft "
+        "layer, then the shared head once more) is listed apart. The bf16 o_proj, head and eh_proj stream "
+        "their 12-bit companions under `engine.bf16_weights = bf12` (0.75 of the bytes listed).",
+        "",
+        "| class | " + " | ".join(f"TP={w} MB/token" for w in worlds) + " |",
+        "|---|" + "---:|" * len(worlds),
+    ])
+    for key in keys:
+        if any(traffic[w].get(key, 0) for w in worlds):
+            lines.append(f"| {key} | " + " | ".join(f"{traffic[w].get(key, 0) / 1e6:,.1f}" for w in worlds) + " |")
+    lines.append("| **total** | " + " | ".join(f"**{traffic[w]['total'] / 1e6:,.1f}**" for w in worlds) + " |")
+    lines.append(f"| floor at {bandwidth_gbps:.0f} GB/s | " + " | ".join(f"**{ms(traffic[w]['total']):.1f} ms**" for w in worlds) + " |")
+    lines.append("| replicated share | " + " | ".join(
+        f"{100 * sum(traffic[w].get(k, 0) for k in ('router', 'norm')) / traffic[w]['total']:.0f}%"
+        for w in worlds) + " |")
+    lines.append("| draft pass (apart) | " + " | ".join(f"{traffic[w]['draft_pass'] / 1e6:,.1f} MB, +{ms(traffic[w]['draft_pass']):.1f} ms" for w in worlds) + " |")
+    lines.extend([
+        "",
+        "This is a weight-bandwidth floor: the collectives (two folds per layer, the "
+        "draft and the head), the cache reads and the kernels add to it.",
+        "",
+        "## Reconciliation and exclusions",
+        "",
+        f"- Unmatched tensors: **{len(unmatched)}**.",
+        f"- Quantized pairs: **{len(pairs):,}** — every F8_E4M3 `.weight` has its F32 `.weight_scale_inv` of the "
+        "contract's grid, every U8 `.weight` its U8 `.weight_scale`, every scale its payload.",
+        f"- Encoder tensors ({class_count.get('encoder', 0)}, {class_bytes.get('encoder', 0) / 1e9:.2f} GB) and the "
+        f"draft layers past the first ({class_count.get('draft_unserved', 0)}, "
+        f"{class_bytes.get('draft_unserved', 0) / 1e9:.2f} GB) are present in the files and never loaded.",
+    ])
+    if unmatched:
+        lines.extend(["", f"## First {min(80, len(unmatched))} unmatched names", ""])
+        lines.extend(f"- `{name}` [{dtype}] {shape}" for name, dtype, shape in unmatched[:80])
+    return summary, "\n".join(lines) + "\n"
+
+
 DT_BYTES = {
     "BF16": 2,
     "F32": 4,
@@ -215,6 +563,8 @@ def audit(root: Path, world: int, bandwidth_gbps: float) -> tuple[dict, str]:
         return audit_glm53(root, snapshot, config, world, bandwidth_gbps)
     if arch.startswith("DeepseekV41"):
         return audit_dsv41(root, snapshot, config, world, bandwidth_gbps)
+    if arch.startswith("MiMoV2"):
+        return audit_mimo(root, snapshot, config, world, bandwidth_gbps)
     text_config = config["text_config"]
     layer_types = text_config["layer_types"]
     if len(layer_types) != int(text_config["num_hidden_layers"]):
@@ -1732,6 +2082,8 @@ def main(argv: list[str] | None = None) -> int:
             inventory_name, report_name = "glm53_checkpoint_inventory.json", "checkpoint_budget_glm53.md"
         elif arch == "deepseek_v41":
             inventory_name, report_name = "dsv41_checkpoint_inventory.json", "checkpoint_budget_dsv41.md"
+        elif arch == "mimo_v2":
+            inventory_name, report_name = "mimo_checkpoint_inventory.json", "checkpoint_budget_mimo.md"
         else:
             inventory_name, report_name = "checkpoint_inventory.json", "checkpoint_budget.md"
         (artifacts_dir / inventory_name).write_text(

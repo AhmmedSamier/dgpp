@@ -302,7 +302,7 @@ class EagerEngineAdapter : public sched::SchedulerEngine {
       const text::ChatMarkers& m = grammar_vocab_->markers();
       const bool opens = m.prompt_opens_thinking(prompt);
       s.grammar = std::make_unique<text::GrammarState>(
-          grammar_vocab_, s.grammar->spec(), opens);
+          grammar_vocab_, s.grammar->spec(), opens, m.prompt_leaves_thinking_to_model(prompt));
     }
     const int32_t token = decide(s, run());
     s.context.push_back(token);

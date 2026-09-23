@@ -89,6 +89,15 @@ struct ChatMarkers {
   ChatMarker arg_value_open;    // "<arg_value>"    (GLM)
   ChatMarker arg_value_close;   // "</arg_value>"   (GLM)
   ChatMarker dsml;              // "｜DSML｜"        (DeepSeek-V4.1: the tool-call tag token)
+  // The XML format's dialect (kQwenXml): true when the template writes the
+  // call without the newlines Qwen3.8's puts between its tags —
+  // "<function=NAME><parameter=K>V</parameter></function>", the MiMo-V2.6
+  // form, where a value's trailing newline is the value's. The parser
+  // accepts both forms under either dialect; the constrained-decoding
+  // grammar emits the newline form for both (tool_grammar.cpp). Set from
+  // the tokenizer (the MiMo tokenizers carry the <|mimo_audio_start|>
+  // marker).
+  bool xml_compact = false;
   // The template's role markers (<|system|>, <|user|>, <|assistant|>,
   // <|observation|>; <|im_start|>, <|im_end|>), the ones the tokenizer
   // has: their positions in a prompt are the prefix cache's structural
@@ -109,6 +118,28 @@ struct ChatMarkers {
     if (prompt.back() == think_open.id) return true;
     return newline.available() && prompt.size() >= 2 && prompt.back() == newline.id &&
            prompt[prompt.size() - 2] == think_open.id;
+  }
+  // Whether a rendered prompt leaves the choice to the model: the reasoning
+  // markers exist but the prompt's tail carries neither — the MiMo-V2.6
+  // template's generation prompt ends in "assistant\n" and the model opens
+  // <think> itself (its enable_thinking=false form ends in "<think></think>",
+  // which settles it). GLM's and Qwen's templates always end in one of the
+  // two markers (a bare newline after them aside); the rule is nonetheless
+  // confined to the MiMo dialect (xml_compact) so that every other family's
+  // constrained decoding keeps its opening state bit for bit whatever a
+  // prompt's tail (the loopback gates feed synthetic prompts).
+  bool prompt_leaves_thinking_to_model(const std::vector<int64_t>& prompt) const {
+    if (!xml_compact) return false;
+    if (!think_open.available() || !think_close.available() || prompt.empty()) return false;
+    if (prompt_opens_thinking(prompt)) return false;
+    size_t n = prompt.size();
+    for (int k = 0; k < 3 && n > 0; ++k) {
+      const int64_t id = prompt[n - 1];
+      if (id == think_open.id || id == think_close.id) return false;
+      if (!newline.available() || id != newline.id) break;
+      --n;
+    }
+    return true;
   }
 
   // The reasoning split needs </think>; tool calls need the six GLM
@@ -181,6 +212,10 @@ class ToolCallParser {
     bool track_tokens = false;  // content logprobs need token provenance
     // The prompt ended in <think>: ids route to reasoning until </think>.
     bool start_in_reasoning = true;
+    // The prompt left the choice to the model (ChatMarkers::
+    // prompt_leaves_thinking_to_model): a <think> id before any content
+    // opens the reasoning; otherwise the marker is content text.
+    bool model_may_open_thinking = false;
     // The prompt itself ends inside a "<tool_call>" block (a prompt-side
     // forced block): the first ids are a function name. The service no
     // longer forces blocks — tool_choice is the grammar of constrained
@@ -204,6 +239,8 @@ class ToolCallParser {
 
   int calls() const { return calls_; }
   bool in_tool_call() const { return state_ == State::kToolCall; }
+  // Inside the reasoning (the prompt's or the model's own <think> block).
+  bool in_reasoning() const { return state_ == State::kReasoning; }
 
  private:
   enum class State { kReasoning, kContent, kToolCall };
@@ -260,10 +297,15 @@ class ToolCallParser {
   size_t next_token_ = 0;
   size_t current_token_ = 0;
   bool raw_has_prefix_ = false;  // raw_ lacks the forced prefix's ids
+  bool content_started_ = false; // some content text or call was emitted
   std::string seeded_name_;
   std::vector<int64_t> name_ids_, key_ids_, value_ids_;
   std::string name_, key_;
   std::vector<std::pair<std::string, std::string>> args_;  // key, text
+  // The XML block carried one JSON object instead of parameter tags (the
+  // MiMo template's rendering of pre-serialized arguments): args_ holds
+  // the members' JSON texts, emitted verbatim.
+  bool args_json_ = false;
 
   // DSML: the content run's emitted length (the held prefix follows it),
   // the held prefix carried into an open block, the block's parsed calls.

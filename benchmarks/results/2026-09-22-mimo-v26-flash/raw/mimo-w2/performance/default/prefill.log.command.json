@@ -1,0 +1,24 @@
+{
+  "command": [
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-mimo-v26-flash/../../../.venv/bin/python",
+    "/home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py",
+    "127.0.0.1",
+    "18080",
+    "2048",
+    "8192",
+    "32768",
+    "--repeat",
+    "3",
+    "--no-think",
+    "--seed",
+    "7",
+    "--tag",
+    "current-20260922",
+    "--json-out",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-mimo-v26-flash/raw/mimo-w2/performance/default/prefill.json"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-09-22T18:26:15.568821+00:00",
+  "returncode": 0,
+  "finished_at": "2026-09-22T18:30:49.115324+00:00"
+}

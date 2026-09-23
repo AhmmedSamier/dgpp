@@ -37,6 +37,9 @@ ChatMarkers ChatMarkers::from_tokenizer(const Tokenizer& tok) {
   m.arg_value_open = lookup("<arg_value>");
   m.arg_value_close = lookup("</arg_value>");
   m.dsml = lookup("｜DSML｜");
+  // The MiMo tokenizers (the Qwen2 vocabulary with the audio / video
+  // markers) go with the compact XML call format.
+  m.xml_compact = lookup("<|mimo_audio_start|>").available();
   for (const char* role : {"<|system|>", "<|user|>", "<|assistant|>", "<|observation|>",
                            "<|im_start|>", "<|im_end|>", "<｜System｜>", "<｜User｜>", "<｜Assistant｜>"}) {
     const ChatMarker r = lookup(role);
@@ -278,6 +281,16 @@ std::string ToolCallParser::typed_value(const std::string& function,
 // one), strict about the tags themselves; a value keeps its inner text
 // verbatim (the template writes strings raw and other values as JSON,
 // which typed_value() sorts out).
+// Both dialects of the format parse here: Qwen3.8's writes a newline after
+// every tag and its value is what sits between the newlines (one leading
+// and one trailing newline are the format's, not the value's); the
+// compact dialect (ChatMarkers::xml_compact — MiMo-V2.6) writes no
+// newlines, so a value's newlines are all its own. A forced call under the
+// compact dialect arrives in the newline form (the grammar emits it): the
+// format's own newlines are the ones RIGHT AFTER a ">" and RIGHT BEFORE a
+// "</parameter>", stripped once under the Qwen dialect; under the compact
+// dialect a value between "\n" .. "\n" is stripped only when the block is
+// in the newline form throughout (a newline follows the function name).
 bool ToolCallParser::parse_qwen_block(const std::string& text) {
   size_t i = 0;
   const auto skip_ws = [&] {
@@ -296,8 +309,36 @@ bool ToolCallParser::parse_qwen_block(const std::string& text) {
   name_ = text.substr(i, name_end - i);
   if (name_.find('\n') != std::string::npos || name_.find('<') != std::string::npos) return false;
   i = name_end + 1;
-  if (i < text.size() && text[i] == '\n') ++i;
+  const bool newline_form = !markers_.xml_compact || (i < text.size() && text[i] == '\n');
+  if (newline_form && i < text.size() && text[i] == '\n') ++i;
   args_.clear();
+  args_json_ = false;
+  // One JSON object as the body (the MiMo template writes a client's
+  // pre-serialized arguments so): its members are the call's arguments.
+  {
+    size_t j = i;
+    while (j < text.size() && (text[j] == '\n' || text[j] == ' ')) ++j;
+    if (j < text.size() && text[j] == '{') {
+      const size_t end = text.rfind("</function>");
+      if (end == std::string::npos || end < j) return false;
+      minijson::ParseResult parsed;
+      try {
+        parsed = minijson::parse(std::string_view(text).substr(j, end - j));
+      } catch (const std::exception&) {
+        return false;
+      }
+      if (!parsed.root.is_object()) return false;
+      for (const minijson::Member& m : parsed.root.members()) {
+        for (const auto& seen : args_)
+          if (seen.first == m.key) return false;
+        args_.emplace_back(m.key, Value::from_minijson(m.value).to_json(false));
+      }
+      args_json_ = true;
+      i = end + std::strlen("</function>");
+      skip_ws();
+      return i == text.size();
+    }
+  }
   for (;;) {
     if (accept("<parameter=")) {
       const size_t key_end = text.find('>', i);
@@ -307,14 +348,14 @@ bool ToolCallParser::parse_qwen_block(const std::string& text) {
       for (const auto& seen : args_)
         if (seen.first == key) return false;  // a duplicate parameter
       i = key_end + 1;
-      if (i < text.size() && text[i] == '\n') ++i;
+      if (newline_form && i < text.size() && text[i] == '\n') ++i;
       const size_t close = text.find("</parameter>", i);
       if (close == std::string::npos) return false;
       std::string value = text.substr(i, close - i);
-      if (!value.empty() && value.back() == '\n') value.pop_back();
+      if (newline_form && !value.empty() && value.back() == '\n') value.pop_back();
       args_.emplace_back(key, std::move(value));
       i = close + std::strlen("</parameter>");
-      if (i < text.size() && text[i] == '\n') ++i;
+      if (newline_form && i < text.size() && text[i] == '\n') ++i;
       continue;
     }
     break;
@@ -597,7 +638,7 @@ void ToolCallParser::complete_block(std::vector<Event>* out) {
     if (i) args += ", ";
     args += Value::string_value(args_[i].first).to_json(false);
     args += ": ";
-    args += typed_value(name_, args_[i].first, args_[i].second);
+    args += args_json_ ? args_[i].second : typed_value(name_, args_[i].first, args_[i].second);
   }
   args += "}";
   ev.call.arguments = std::move(args);
@@ -628,15 +669,26 @@ void ToolCallParser::feed(int64_t id, std::vector<Event>* out) {
       return;
 
     case State::kContent:
+      // The model's own opener (the prompt left it the choice): before any
+      // content, <think> opens the reasoning.
+      if (options_.model_may_open_thinking && !content_started_ && is_marker(id, markers_.think_open) &&
+          markers_.reasoning_available()) {
+        state_ = State::kReasoning;
+        run_ = Run{};
+        return;
+      }
       if (markers_.tool_format() == ToolFormat::kDsml) {
+        content_started_ = true;
         dsml_content_append(id, out);
         return;
       }
       if (is_marker(id, markers_.tool_call_open) &&
           markers_.tool_calls_available()) {
+        content_started_ = true;
         enter_tool_call(id);
         return;
       }
+      content_started_ = true;
       run_append(&run_, id, Event::Kind::kContent, out);
       return;
 

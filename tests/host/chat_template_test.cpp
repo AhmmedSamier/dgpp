@@ -63,8 +63,14 @@ std::string corpus_model(const std::string& golden_path) {
   if (model_id.empty()) model_id = "unsloth/GLM-5.3-Flash-FP8";
   return model_id;
 }
+// The MiMo-V2.6 corpus: the ChatML / XML-call family of the Qwen gates in
+// its compact dialect (no newlines between the call's tags, no newline
+// after <|im_end|>, the reasoning markers the model's own).
+bool corpus_is_mimo(const std::string& golden_path) {
+  return corpus_model(golden_path).find("MiMo") != std::string::npos;
+}
 bool corpus_is_qwen(const std::string& golden_path) {
-  return corpus_model(golden_path).find("Qwen") != std::string::npos;
+  return corpus_model(golden_path).find("Qwen") != std::string::npos || corpus_is_mimo(golden_path);
 }
 std::string read_text_file(const std::string& path) {
   std::ifstream f(path);
@@ -98,7 +104,7 @@ EosVocab eos_and_vocab(const std::string& config_path) {
 
 DGPP_TEST(qwen_reasoning_effort_renders_each_level) {
   const std::string golden = golden_path(g_argc, g_argv);
-  if (!corpus_is_qwen(golden)) return;
+  if (!corpus_is_qwen(golden) || corpus_is_mimo(golden)) return;
   std::string err;
   const std::string snap = dgpp::hf::model_dir(corpus_model(golden), &err);
   if (snap.empty()) {
@@ -558,6 +564,15 @@ DGPP_TEST(glm_tool_call_render_encode_parse_roundTrip) {
 }
 
 
+// A tool_calls list with a custom-shaped entry ({"type": "custom", "custom":
+// {...}}): the template renders it raw, but the service never sends one
+// (custom tools are adapted into function calls with an `input` string).
+bool has_custom_call(const dgpp::minijson::Value& calls) {
+  for (const auto& call : calls.items())
+    if (call.find("function") == nullptr) return true;
+  return false;
+}
+
 // The Qwen3.8 round trip: render(assistant turn) -> encode ->
 // parse recovers the reasoning, the content and every call's name and
 // arguments through the <function=...><parameter=...> text format.
@@ -605,6 +620,7 @@ DGPP_TEST(qwen_tool_call_render_encode_parse_roundTrip) {
       const dgpp::minijson::Value& msg = messages.items()[k];
       const dgpp::minijson::Value* tcs = msg.find("tool_calls");
       if (msg.at("role").as_string() != "assistant" || tcs == nullptr) continue;
+      if (has_custom_call(*tcs)) continue;  // the service renders custom calls as function calls
       const auto render_through = [&](size_t count) {
         std::vector<dgpp::text::Value> ms;
         for (size_t j = 0; j < count; ++j)
@@ -622,16 +638,22 @@ DGPP_TEST(qwen_tool_call_render_encode_parse_roundTrip) {
       const std::string kAssistant = "<|im_start|>assistant\n";
       require(turn.compare(0, kAssistant.size(), kAssistant) == 0, name + ": the turn opens with the assistant header: " + turn);
       turn.erase(0, kAssistant.size());
-      // The template closes the turn with <|im_end|>\n; the model's turn ends at <|im_end|>.
-      const std::string kEnd = "<|im_end|>\n";
+      // The template closes the turn with <|im_end|>\n (MiMo: <|im_end|>);
+      // the model's turn ends at <|im_end|>.
+      const bool mimo = corpus_is_mimo(kGoldenPath);
+      const std::string kEnd = mimo ? "<|im_end|>" : "<|im_end|>\n";
       require(turn.size() >= kEnd.size() && turn.compare(turn.size() - kEnd.size(), kEnd.size(), kEnd) == 0,
               name + ": the turn ends with <|im_end|>");
       turn.erase(turn.size() - kEnd.size());
-      const bool thinks = turn.compare(0, 8, "<think>\n") == 0;
+      // Qwen's prompt opens the block (the turn's "<think>\n" is the
+      // prompt's); MiMo's leaves it to the model (the turn's "<think>" is
+      // the model's first id — the service's model_may_open_thinking).
+      const bool thinks = !mimo && turn.compare(0, 8, "<think>\n") == 0;
       std::vector<int64_t> ids = tok.encode(turn);
       ids.push_back(im_end[0]);
       dgpp::text::ToolCallParser::Options opts;
       opts.start_in_reasoning = thinks;
+      opts.model_may_open_thinking = mimo;
       dgpp::text::ToolCallParser parser(
           markers, [&](const std::vector<int64_t>& v) { return tok.decode(v, true); },
           tools ? dgpp::text::ToolSchemas(*tools) : dgpp::text::ToolSchemas(), opts);
@@ -660,7 +682,11 @@ DGPP_TEST(qwen_tool_call_render_encode_parse_roundTrip) {
         const dgpp::minijson::Value& def = fn ? *fn : tc;
         require(got[c].name == def.at("name").as_string(), name + ": call " + std::to_string(c) + " name '" + got[c].name + "'");
         const dgpp::minijson::ParseResult args = dgpp::minijson::parse(got[c].arguments);
-        require(json_equal(args.root, def.at("arguments")),
+        // A case's pre-serialized arguments (a JSON string) compare parsed.
+        const dgpp::minijson::Value& want_args = def.at("arguments");
+        const dgpp::minijson::ParseResult want_parsed =
+            want_args.is_string() ? dgpp::minijson::parse(want_args.as_string()) : dgpp::minijson::ParseResult{};
+        require(json_equal(args.root, want_args.is_string() ? want_parsed.root : want_args),
                 name + ": call " + std::to_string(c) + " arguments " + got[c].arguments + " differ from the case's");
         ++calls;
       }
@@ -763,7 +789,7 @@ bool check_golden_key_closure(const dgpp::text::GrammarVocab& vocab,
   dgpp::text::GrammarState closed(
       &vocab,
       golden_tool_spec(tools, calls, dgpp::text::GrammarSpec::Mode::kRequired, true, "", false),
-      thinks);
+      thinks, /*model_may_open_thinking=*/vocab.markers().xml_compact);
   size_t offset = 0;
   for (const int64_t id : ids) {
     const std::string bytes = tok.decode(id, false);
@@ -806,7 +832,9 @@ DGPP_TEST(qwen_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
       dgpp::text::GrammarVocab::from_tokenizer(tok, eos, static_cast<int>(tok.max_id() + 1));
   require(vocab.usable() && vocab.markers().tool_format() == dgpp::text::ToolFormat::kQwenXml,
           "the grammar vocabulary is the Qwen format");
-  require(vocab.call_turn_eos() == 248046, "the call-turn EOS is <|im_end|>");
+  const bool mimo = corpus_is_mimo(kGoldenPath);
+  require(vocab.markers().xml_compact == mimo, "the XML dialect follows the tokenizer");
+  require(vocab.call_turn_eos() == (mimo ? 151645 : 248046), "the call-turn EOS is <|im_end|>");
   std::vector<std::string> lines;
   {
     std::istringstream f(read_text_file(kGoldenPath));
@@ -826,6 +854,7 @@ DGPP_TEST(qwen_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
       const dgpp::minijson::Value& msg = messages.items()[k];
       const dgpp::minijson::Value* tcs = msg.find("tool_calls");
       if (msg.at("role").as_string() != "assistant" || tcs == nullptr) continue;
+      if (has_custom_call(*tcs)) continue;  // the service renders custom calls as function calls
       const auto render_through = [&](size_t count) {
         std::vector<dgpp::text::Value> ms;
         for (size_t j = 0; j < count; ++j)
@@ -838,18 +867,50 @@ DGPP_TEST(qwen_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
       };
       std::string turn = render_through(k + 1).substr(render_through(k).size());
       turn.erase(0, std::string("<|im_start|>assistant\n").size());
-      const std::string kEnd = "<|im_end|>\n";
+      const std::string kEnd = mimo ? "<|im_end|>" : "<|im_end|>\n";
       require(turn.size() >= kEnd.size() && turn.compare(turn.size() - kEnd.size(), kEnd.size(), kEnd) == 0,
               name + ": the turn ends with <|im_end|>");
       turn.erase(turn.size() - kEnd.size());
-      const bool thinks = turn.compare(0, 8, "<think>\n") == 0;
+      if (mimo) {
+        // The MiMo template renders the compact form; the grammar emits the
+        // newline form on every XML tokenizer (tool_grammar.cpp), so the
+        // turn the constrained path would produce is rebuilt from the case:
+        // the model's own <think> block and content, then the calls.
+        const dgpp::minijson::Value* rc = msg.find("reasoning_content");
+        const dgpp::minijson::Value* mc = msg.find("content");
+        std::string rebuilt = "<think>";
+        if (rc && rc->is_string()) rebuilt += std::string(rc->as_string());
+        rebuilt += "</think>";
+        if (mc && mc->is_string()) rebuilt += std::string(mc->as_string());
+        for (size_t c = 0; c < tcs->items().size(); ++c) {
+          const dgpp::minijson::Value& fn = function_of(tcs->items()[c]);
+          if (c > 0) rebuilt += "\n";
+          rebuilt += "<tool_call>\n<function=" + std::string(fn.at("name").as_string()) + ">\n";
+          const dgpp::minijson::Value& args = fn.at("arguments");
+          const dgpp::minijson::ParseResult parsed_args =
+              args.is_string() ? dgpp::minijson::parse(args.as_string()) : dgpp::minijson::ParseResult{};
+          const dgpp::minijson::Value& argv = args.is_string() ? parsed_args.root : args;
+          for (const auto& arg : argv.members()) {
+            rebuilt += "<parameter=" + arg.key + ">\n";
+            rebuilt += arg.value.is_string() ? std::string(arg.value.as_string())
+                                             : dgpp::text::Value::from_minijson(arg.value).to_json(false);
+            rebuilt += "\n</parameter>\n";
+          }
+          rebuilt += "</function>\n</tool_call>";
+        }
+        turn = rebuilt;
+      }
+      // Qwen: the prompt opened the block (the turn's "<think>\n" is
+      // dropped); MiMo: the model opens it — the turn's ids start with the
+      // opener, under model_may_open_thinking.
+      const bool thinks = !mimo && turn.compare(0, 8, "<think>\n") == 0;
       if (thinks) turn.erase(0, 8);  // the prompt opened the block
       std::vector<int64_t> ids = tok.encode(turn);
       ids.push_back(vocab.call_turn_eos());
       opt_out_turns += check_golden_key_closure(vocab, tok, tools, *tcs, turn, ids, thinks, name);
       dgpp::text::GrammarState g(
           &vocab, golden_tool_spec(tools, *tcs, dgpp::text::GrammarSpec::Mode::kRequired, true, ""),
-          thinks);
+          thinks, mimo);
       for (size_t j = 0; j < ids.size(); ++j) {
         require(g.allows(ids[j]), name + ": id " + std::to_string(ids[j]) + " (" + tok.decode(ids[j], false) +
                                       ") at position " + std::to_string(j) + " refused in state " + g.state_name());
@@ -865,7 +926,7 @@ DGPP_TEST(qwen_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
       dgpp::text::GrammarState single(
           &vocab,
           golden_tool_spec(tools, *tcs, dgpp::text::GrammarSpec::Mode::kRequired, false, ""),
-          thinks);
+          thinks, mimo);
       bool closed_first = false;
       for (size_t j = 0; j < ids.size(); ++j) {
         if (closed_first) {
@@ -954,6 +1015,7 @@ DGPP_TEST(glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
       const dgpp::minijson::Value& msg = messages.items()[k];
       const dgpp::minijson::Value* tcs = msg.find("tool_calls");
       if (msg.at("role").as_string() != "assistant" || tcs == nullptr) continue;
+      if (has_custom_call(*tcs)) continue;  // the service renders custom calls as function calls
       const auto render_through = [&](size_t count) {
         std::vector<dgpp::text::Value> ms;
         for (size_t j = 0; j < count; ++j)

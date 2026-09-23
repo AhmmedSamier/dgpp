@@ -188,6 +188,24 @@ DSV41_CASES = [c for c in CASES if USER not in c and ASSIST not in c and EOS not
 ]
 
 
+# The MiMo-V2.6-Flash corpus (2026-09-22): the Qwen2 regex under NFC —
+# GLM's letter/punctuation classes (marks are punctuation, not letters)
+# with a single \p{N} per pretoken — and its own added tokens (Qwen's plus
+# the audio / video markers); the tool-call block in the MiMo template's
+# newline-free form.
+MIMO_CASES = QWEN_CASES + [
+    "<|mimo_audio_start|>", "<|mimo_audio_end|>", "<|mimo_video_start|>", "<|mimo_video_end|>",
+    "<|audio_pad|>", "<|mimo_audio_eod|>", "<|vision_start|><|image_pad|><|vision_end|>",
+    IM_START + "assistant\n" + THINK_OPEN + "plan" + THINK_CLOSE + "Sure." + IM_END,
+    IM_START + "assistant\n" + THINK_OPEN + THINK_CLOSE + "Sure." + IM_END,
+    TOOL_CALL + "<function=get_weather><parameter=city>Paris</parameter></function>" + TOOL_CALL_END,
+    IM_START + "user\n" + TOOL_RESP + "{\"temp\": 21}" + "</" + "tool_response>" + IM_END,
+    # Marks are punctuation under this regex: a mark run after a letter run
+    # splits, a leading mark is its own piece.
+    "a\u0301\u0302b", "x\u20dd y", "\u0301abc",
+]
+
+
 def main():
     import argparse
     ap = argparse.ArgumentParser()
@@ -197,11 +215,13 @@ def main():
     ap.add_argument("--out", dest="out_opt", default=None)
     args = ap.parse_args()
     model = args.model
-    is_qwen = "Qwen" in model
+    is_mimo = "MiMo" in model
+    is_qwen = "Qwen" in model or is_mimo  # NFC tokenizers
     is_dsv41 = "DeepSeek-V4" in model
-    cases = DSV41_CASES if is_dsv41 else QWEN_CASES if is_qwen else CASES
+    cases = DSV41_CASES if is_dsv41 else MIMO_CASES if is_mimo else QWEN_CASES if is_qwen else CASES
     out_path = args.out_opt or args.out or (
         "tests/data/dsv41_tokenizer_goldens.jsonl" if is_dsv41 else
+        "tests/data/mimo_tokenizer_goldens.jsonl" if is_mimo else
         "tests/data/qwen_tokenizer_goldens.jsonl" if is_qwen else "tests/data/glm_tokenizer_goldens.jsonl")
     if args.tokenizer_json:
         tok_path = args.tokenizer_json

@@ -1667,6 +1667,16 @@ void launch_moe_slot_accum(uint16_t* out, const float* contrib,
 // at the shared width n_shared and the routed K.
 namespace {
 
+// The decode slot kernels' weight loads as streaming (evict-first) lines
+// (2026-09-22 experiment, docs/mimo_v26_flash_plan.md §7.1: the expert
+// bytes are read once per step; evict-first keeps the L2 for the
+// prefetcher's lines). -DDGPP_FP4_SLOT_STREAMING=1 builds it; off until a
+// fabric A/B decides.
+#ifndef DGPP_FP4_SLOT_STREAMING
+#define DGPP_FP4_SLOT_STREAMING 0
+#endif
+constexpr bool kFp4SlotStreaming = DGPP_FP4_SLOT_STREAMING != 0;
+
 template <int K, bool kSharedFp4, int kGroup = fp4_gemv::kGroup>
 __global__ void moe_slot_gate_up_swiglu_fp4_kernel(
     const uint16_t* __restrict__ x, size_t x_stride,
@@ -1689,13 +1699,13 @@ __global__ void moe_slot_gate_up_swiglu_fp4_kernel(
   const int n = shared ? n_shared : n_routed;
   const int k = (shared && !kSharedFp4) ? k_shared : K;
   if (n0 >= n) return;
-  fp8_gemv::stage_activations<1>(x + static_cast<size_t>(t) * x_stride, x_stride,
-                                 k, sx);
-  __syncthreads();
   const int warp = threadIdx.x / 32;
   const int lane = threadIdx.x % 32;
   uint16_t* act_row = act + static_cast<size_t>(slot) * act_stride;
   if (shared && !kSharedFp4) {
+    fp8_gemv::stage_activations<1>(x + static_cast<size_t>(t) * x_stride, x_stride,
+                                   k, sx);
+    __syncthreads();
     // The fp8 kernel's per-row math (moe_slot_gate_up_swiglu_kernel), one
     // row at a time over this warp's rows.
     const int scale_cols = (k + (1 << sh_cs) - 1) >> sh_cs;
@@ -1723,9 +1733,16 @@ __global__ void moe_slot_gate_up_swiglu_fp4_kernel(
                                           : ids[static_cast<size_t>(t) * top_k + j] * 3;
   const MoeExpertView vg = views[static_cast<size_t>(base) + 0];
   const MoeExpertView vu = views[static_cast<size_t>(base) + 1];
+  // The first pass's weight loads in flight before the activations are
+  // staged (fp4_gemv.cuh: PassLoads).
+  fp4_gemv::PassLoads<G::pass_chunks(0)> L0, L1;
+  fp4_gemv::issue_pass_pair<K, 0, G::pass_chunks(0), kGroup, kFp4SlotStreaming>(
+      vg.payload, vg.fp4_scales, vu.payload, vu.fp4_scales, n0, n, L0, L1);
+  fp8_gemv::stage_activations<1>(x + static_cast<size_t>(t) * x_stride, x_stride, k, sx);
+  __syncthreads();
   float acc_g[fp4_gemv::kSteps][1], acc_u[fp4_gemv::kSteps][1];
-  fp4_gemv::warp_row_dots_pair<K, 1, kGroup>(vg.payload, vg.fp4_scales, vu.payload,
-                                             vu.fp4_scales, sx, n0, n, acc_g, acc_u);
+  fp4_gemv::warp_row_dots_pair_issued<K, 1, kGroup, kFp4SlotStreaming>(
+      L0, L1, vg.payload, vg.fp4_scales, vu.payload, vu.fp4_scales, sx, n0, n, acc_g, acc_u);
   // MXFP4 (kGroup 32) has no global: the dots stand undivided.
   const float gg = kGroup == fp4_gemv::kGroup ? *vg.fp4_global : 1.f;
   const float gu = kGroup == fp4_gemv::kGroup ? *vu.fp4_global : 1.f;
@@ -1770,11 +1787,11 @@ __global__ void moe_slot_down_fp4_kernel(
   const int n = shared ? n_shared : n_routed;
   const int k = (shared && !kSharedFp4) ? k_shared : K;
   if (n0 >= n) return;
-  fp8_gemv::stage_activations<1>(act + static_cast<size_t>(slot) * act_stride,
-                                 act_stride, k, sx);
-  __syncthreads();
   float* out_row = out + static_cast<size_t>(slot) * out_stride;
   if (shared && !kSharedFp4) {
+    fp8_gemv::stage_activations<1>(act + static_cast<size_t>(slot) * act_stride,
+                                   act_stride, k, sx);
+    __syncthreads();
     fp8_gemv::block_rows_multi<1, G::rows_per_warp>(
         sh_payload, sh_scales, sx, n0, n, k, out_row, static_cast<size_t>(out_stride), sh_rs, sh_cs);
     return;
@@ -1783,8 +1800,25 @@ __global__ void moe_slot_down_fp4_kernel(
                                           : ids[static_cast<size_t>(t) * top_k + j] * 3;
   const MoeExpertView v = views[static_cast<size_t>(base) + 2];
   const float g = kGroup == fp4_gemv::kGroup ? *v.fp4_global : 1.f;
-  fp4_gemv::block_rows<K, 1, float, kGroup>(v.payload, v.fp4_scales, g, sx, n0, n,
-                                            out_row, static_cast<size_t>(out_stride));
+  // The first pass's weight loads in flight before the activations are
+  // staged (fp4_gemv.cuh: PassLoads); the epilogue is block_rows's.
+  fp4_gemv::PassLoads<G::pass_chunks(0)> L0;
+  fp4_gemv::issue_pass<K, 0, G::pass_chunks(0), kGroup, kFp4SlotStreaming>(v.payload, v.fp4_scales, n0, n, L0);
+  fp8_gemv::stage_activations<1>(act + static_cast<size_t>(slot) * act_stride, act_stride, k, sx);
+  __syncthreads();
+  float acc[fp4_gemv::kSteps][1];
+  fp4_gemv::warp_row_dots_issued<K, 1, kGroup, kFp4SlotStreaming>(L0, v.payload, v.fp4_scales, sx, n0, n, acc);
+#pragma unroll
+  for (int st = 0; st < fp4_gemv::kSteps; ++st) {
+    bool mine = false;
+    const int row = fp4_gemv::owned_row<K>(n0, st, mine);
+    if (mine && row < n) {
+      if constexpr (kGroup == fp4_gemv::kGroup)
+        fp4_gemv::store_dot(out_row + row, __fdiv_rn(acc[st][0], g));
+      else
+        fp4_gemv::store_dot(out_row + row, acc[st][0]);
+    }
+  }
 }
 
 // The host path's grouped kernel over NVFP4 segments: rows staged four at a

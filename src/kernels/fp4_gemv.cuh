@@ -194,9 +194,9 @@ __device__ __forceinline__ float e8m0_scale_x16384(uint32_t byte) {
 // times 2^14), each code decoded to fp32 by bit placement and multiplied
 // once — exact — then the same FMA chain as consume_chunk's.
 template <int kRows>
-__device__ __forceinline__ void consume_chunk_mx(const uint4& wchunk, float s14,
-                                                 const uint4 (&xv)[kRows][4],
-                                                 float (&acc)[kRows]) {
+__device__ __forceinline__ void consume_chunk_mx_exact(const uint4& wchunk, float s14,
+                                                       const uint4 (&xv)[kRows][4],
+                                                       float (&acc)[kRows]) {
   const uint32_t words[4] = {wchunk.x, wchunk.y, wchunk.z, wchunk.w};
 #pragma unroll
   for (int q = 0; q < 4; ++q) {
@@ -206,6 +206,56 @@ __device__ __forceinline__ void consume_chunk_mx(const uint4& wchunk, float s14,
       const uint32_t byte = (word >> (8 * j)) & 0xFFu;
       const float w0 = e2m1_scaled(byte & 0xFu) * s14;
       const float w1 = e2m1_scaled(byte >> 4) * s14;
+#pragma unroll
+      for (int r = 0; r < kRows; ++r) {
+        const uint32_t xw = j == 0 ? xv[r][q].x : j == 1 ? xv[r][q].y
+                          : j == 2 ? xv[r][q].z : xv[r][q].w;
+        const float x0 = bf16_bits_to_float(static_cast<uint16_t>(xw & 0xFFFFu));
+        const float x1 = bf16_bits_to_float(static_cast<uint16_t>(xw >> 16));
+        acc[r] = __fmaf_rn(w0, x0, acc[r]);
+        acc[r] = __fmaf_rn(w1, x1, acc[r]);
+      }
+    }
+  }
+}
+
+// The MXFP4 chunk through the f16 path when its scale allows (2026-09-22):
+// the hardware e2m1x2 -> f16x2 conversion and ONE f16x2 multiply by the
+// scale, as consume_chunk does for NVFP4. An e2m1 value c (0, ±0.5 .. ±6)
+// times 2^(e - 127) is exact in f16 for 104 <= e <= 140: within that
+// range the product is either an f16 normal (c has three significant
+// bits) or a subnormal multiple of 2^-24 (2c is an integer, e - 128 >=
+// -24), and the scale itself is an f16 power of two; so the fp32 values
+// the FMA chain consumes are the exact-path's, bitwise. Every scale a
+// weight tensor carries sits in that range (|w| <= 6 x 2^(e - 127) puts
+// e near 117..124); the exact path takes any other (the codec's NaN and
+// saturation semantics included). The per-byte cost drops from eight
+// instructions to four.
+template <int kRows>
+__device__ __forceinline__ void consume_chunk_mx(const uint4& wchunk, uint32_t scale_byte,
+                                                 const uint4 (&xv)[kRows][4],
+                                                 float (&acc)[kRows]) {
+  if (scale_byte < 104u || scale_byte > 140u) {
+    consume_chunk_mx_exact<kRows>(wchunk, e8m0_scale_x16384(scale_byte), xv, acc);
+    return;
+  }
+  // 2^(e - 127) as f16 bits: exponent field e - 127 + 15 (positive for
+  // e >= 113); below that a subnormal 2^(e - 127) = 2^(e - 103) x 2^-24
+  // (mantissa bit e - 103: e = 104 is 2 x 2^-24, e = 112 is 2^9 x 2^-24).
+  const uint16_t sbits = scale_byte >= 113u ? static_cast<uint16_t>((scale_byte - 112u) << 10)
+                                            : static_cast<uint16_t>(1u << (scale_byte - 103u));
+  const __half2 s2 = __half2half2(__ushort_as_half(sbits));
+  const uint32_t words[4] = {wchunk.x, wchunk.y, wchunk.z, wchunk.w};
+#pragma unroll
+  for (int q = 0; q < 4; ++q) {
+    const uint32_t word = words[q];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+      const uint32_t byte = (word >> (8 * j)) & 0xFFu;
+      const __half2 pair(__nv_cvt_fp4x2_to_halfraw2(static_cast<__nv_fp4x2_storage_t>(byte), __NV_E2M1));
+      const __half2 p = __hmul2(pair, s2);  // {code lo, code hi} x s, exact
+      const float w0 = __low2float(p);
+      const float w1 = __high2float(p);
 #pragma unroll
       for (int r = 0; r < kRows; ++r) {
         const uint32_t xw = j == 0 ? xv[r][q].x : j == 1 ? xv[r][q].y
@@ -325,23 +375,41 @@ __device__ __forceinline__ void consume_by_group(const uint4& wchunk, uint16_t s
   if constexpr (kGroupT == kGroup)
     consume_chunk<kRows>(wchunk, scales_f16(sv), xv, acc);
   else
-    consume_chunk_mx<kRows>(wchunk, e8m0_scale_x16384(sv), xv, acc);
+    consume_chunk_mx<kRows>(wchunk, static_cast<uint32_t>(sv), xv, acc);
 }
 
-template <int K, int kRows, int C0, int NC, int kGroupT = kGroup>
-__device__ __forceinline__ void pass_row_dots(const uint8_t* __restrict__ w,
-                                              const uint8_t* __restrict__ scales,
-                                              const uint16_t* __restrict__ sx,
-                                              int n0, int n,
-                                              float (&acc)[kSteps][kRows]) {
+// One pass's loads, held in registers between their issue and their
+// consumption (2026-09-22: the slot kernels issue the first pass BEFORE
+// staging the activations, so the DRAM latency overlaps the staging and
+// its barrier — a block's life is one pass at K <= 4096, and its prologue
+// was a third of it with nothing in flight; the FMA chain is untouched).
+template <int NC>
+struct PassLoads {
+  uint4 wv[kSteps * NC];
+  uint16_t sv[kSteps * NC];
+};
+
+// The chunk load: `kStream` reads it as a streaming (evict-first) line —
+// the decode slot kernels' weights are read once per step, and marking
+// them so keeps the L2 for what the prefetcher put there (2026-09-22
+// experiment; the grouped prefill kernels re-read rows across their row
+// groups and keep the normal loads).
+template <bool kStream>
+__device__ __forceinline__ uint4 load_chunk(const uint4* p) {
+  if constexpr (kStream) return __ldcs(p);
+  else return *p;
+}
+
+template <int K, int C0, int NC, int kGroupT = kGroup, bool kStream = false>
+__device__ __forceinline__ void issue_pass(const uint8_t* __restrict__ w,
+                                           const uint8_t* __restrict__ scales, int n0, int n,
+                                           PassLoads<NC>& L) {
   using G = Geom<K>;
   const int warp = threadIdx.x / 32;
   const int lane = threadIdx.x % 32;
   const int group = lane / G::lanes_per_row;
   const int lig = lane % G::lanes_per_row;
   const int row_base = n0 + warp * G::rows_per_warp;
-  uint4 wv[kSteps * NC];
-  uint16_t sv[kSteps * NC];
 #pragma unroll
   for (int st = 0; st < kSteps; ++st) {
     const int row = row_base + st * G::rows_per_step + group;
@@ -350,12 +418,24 @@ __device__ __forceinline__ void pass_row_dots(const uint8_t* __restrict__ w,
     for (int c = 0; c < NC; ++c) {
       const int boff = ((C0 + c) * G::lanes_per_row + lig) * kChunkBytes;
       const int i = st * NC + c;
-      wv[i] = ok ? *reinterpret_cast<const uint4*>(
-                       w + static_cast<size_t>(row) * G::row_bytes + boff)
-                 : make_uint4(0u, 0u, 0u, 0u);
-      sv[i] = ok ? load_chunk_scale<K, kGroupT>(scales, row, boff) : static_cast<uint16_t>(0);
+      L.wv[i] = ok ? load_chunk<kStream>(reinterpret_cast<const uint4*>(
+                         w + static_cast<size_t>(row) * G::row_bytes + boff))
+                   : make_uint4(0u, 0u, 0u, 0u);
+      L.sv[i] = ok ? load_chunk_scale<K, kGroupT>(scales, row, boff) : static_cast<uint16_t>(0);
     }
   }
+}
+
+template <int K, int kRows, int C0, int NC, int kGroupT = kGroup>
+__device__ __forceinline__ void consume_pass(const PassLoads<NC>& L,
+                                             const uint16_t* __restrict__ sx, int n0, int n,
+                                             float (&acc)[kSteps][kRows]) {
+  using G = Geom<K>;
+  const int warp = threadIdx.x / 32;
+  const int lane = threadIdx.x % 32;
+  const int group = lane / G::lanes_per_row;
+  const int lig = lane % G::lanes_per_row;
+  const int row_base = n0 + warp * G::rows_per_warp;
 #pragma unroll
   for (int c = 0; c < NC; ++c) {
     const int e0 = ((C0 + c) * G::lanes_per_row + lig) * kCodesPerChunk;
@@ -366,9 +446,20 @@ __device__ __forceinline__ void pass_row_dots(const uint8_t* __restrict__ w,
       const int row = row_base + st * G::rows_per_step + group;
       if (row >= n) continue;  // per lane; no barrier inside
       const int i = st * NC + c;
-      consume_by_group<kRows, kGroupT>(wv[i], sv[i], xv, acc[st]);
+      consume_by_group<kRows, kGroupT>(L.wv[i], L.sv[i], xv, acc[st]);
     }
   }
+}
+
+template <int K, int kRows, int C0, int NC, int kGroupT = kGroup>
+__device__ __forceinline__ void pass_row_dots(const uint8_t* __restrict__ w,
+                                              const uint8_t* __restrict__ scales,
+                                              const uint16_t* __restrict__ sx,
+                                              int n0, int n,
+                                              float (&acc)[kSteps][kRows]) {
+  PassLoads<NC> L;
+  issue_pass<K, C0, NC, kGroupT>(w, scales, n0, n, L);
+  consume_pass<K, kRows, C0, NC, kGroupT>(L, sx, n0, n, acc);
 }
 
 // The dots of a warp's rows_per_warp rows against kRows staged activation
@@ -404,20 +495,17 @@ __device__ __forceinline__ void warp_row_dots(const uint8_t* __restrict__ w,
 // up): every load of both issued before either is consumed — twice the
 // bytes in flight per lane at the same block count. Each matrix's row
 // chain is pass_row_dots's exactly (bitwise).
-template <int K, int kRows, int C0, int NC, int kGroupT = kGroup>
-__device__ __forceinline__ void pass_row_dots_pair(
+template <int K, int C0, int NC, int kGroupT = kGroup, bool kStream = false>
+__device__ __forceinline__ void issue_pass_pair(
     const uint8_t* __restrict__ w0, const uint8_t* __restrict__ scales0,
-    const uint8_t* __restrict__ w1, const uint8_t* __restrict__ scales1,
-    const uint16_t* __restrict__ sx, int n0, int n,
-    float (&acc0)[kSteps][kRows], float (&acc1)[kSteps][kRows]) {
+    const uint8_t* __restrict__ w1, const uint8_t* __restrict__ scales1, int n0, int n,
+    PassLoads<NC>& L0, PassLoads<NC>& L1) {
   using G = Geom<K>;
   const int warp = threadIdx.x / 32;
   const int lane = threadIdx.x % 32;
   const int group = lane / G::lanes_per_row;
   const int lig = lane % G::lanes_per_row;
   const int row_base = n0 + warp * G::rows_per_warp;
-  uint4 wv0[kSteps * NC], wv1[kSteps * NC];
-  uint16_t sv0[kSteps * NC], sv1[kSteps * NC];
 #pragma unroll
   for (int st = 0; st < kSteps; ++st) {
     const int row = row_base + st * G::rows_per_step + group;
@@ -427,12 +515,25 @@ __device__ __forceinline__ void pass_row_dots_pair(
       const int boff = ((C0 + c) * G::lanes_per_row + lig) * kChunkBytes;
       const int i = st * NC + c;
       const size_t wo = static_cast<size_t>(row) * G::row_bytes + boff;
-      wv0[i] = ok ? *reinterpret_cast<const uint4*>(w0 + wo) : make_uint4(0u, 0u, 0u, 0u);
-      wv1[i] = ok ? *reinterpret_cast<const uint4*>(w1 + wo) : make_uint4(0u, 0u, 0u, 0u);
-      sv0[i] = ok ? load_chunk_scale<K, kGroupT>(scales0, row, boff) : static_cast<uint16_t>(0);
-      sv1[i] = ok ? load_chunk_scale<K, kGroupT>(scales1, row, boff) : static_cast<uint16_t>(0);
+      L0.wv[i] = ok ? load_chunk<kStream>(reinterpret_cast<const uint4*>(w0 + wo)) : make_uint4(0u, 0u, 0u, 0u);
+      L1.wv[i] = ok ? load_chunk<kStream>(reinterpret_cast<const uint4*>(w1 + wo)) : make_uint4(0u, 0u, 0u, 0u);
+      L0.sv[i] = ok ? load_chunk_scale<K, kGroupT>(scales0, row, boff) : static_cast<uint16_t>(0);
+      L1.sv[i] = ok ? load_chunk_scale<K, kGroupT>(scales1, row, boff) : static_cast<uint16_t>(0);
     }
   }
+}
+
+template <int K, int kRows, int C0, int NC, int kGroupT = kGroup>
+__device__ __forceinline__ void consume_pass_pair(const PassLoads<NC>& L0, const PassLoads<NC>& L1,
+                                                  const uint16_t* __restrict__ sx, int n0, int n,
+                                                  float (&acc0)[kSteps][kRows],
+                                                  float (&acc1)[kSteps][kRows]) {
+  using G = Geom<K>;
+  const int warp = threadIdx.x / 32;
+  const int lane = threadIdx.x % 32;
+  const int group = lane / G::lanes_per_row;
+  const int lig = lane % G::lanes_per_row;
+  const int row_base = n0 + warp * G::rows_per_warp;
 #pragma unroll
   for (int c = 0; c < NC; ++c) {
     const int e0 = ((C0 + c) * G::lanes_per_row + lig) * kCodesPerChunk;
@@ -443,10 +544,21 @@ __device__ __forceinline__ void pass_row_dots_pair(
       const int row = row_base + st * G::rows_per_step + group;
       if (row >= n) continue;
       const int i = st * NC + c;
-      consume_by_group<kRows, kGroupT>(wv0[i], sv0[i], xv, acc0[st]);
-      consume_by_group<kRows, kGroupT>(wv1[i], sv1[i], xv, acc1[st]);
+      consume_by_group<kRows, kGroupT>(L0.wv[i], L0.sv[i], xv, acc0[st]);
+      consume_by_group<kRows, kGroupT>(L1.wv[i], L1.sv[i], xv, acc1[st]);
     }
   }
+}
+
+template <int K, int kRows, int C0, int NC, int kGroupT = kGroup>
+__device__ __forceinline__ void pass_row_dots_pair(
+    const uint8_t* __restrict__ w0, const uint8_t* __restrict__ scales0,
+    const uint8_t* __restrict__ w1, const uint8_t* __restrict__ scales1,
+    const uint16_t* __restrict__ sx, int n0, int n,
+    float (&acc0)[kSteps][kRows], float (&acc1)[kSteps][kRows]) {
+  PassLoads<NC> L0, L1;
+  issue_pass_pair<K, C0, NC, kGroupT>(w0, scales0, w1, scales1, n0, n, L0, L1);
+  consume_pass_pair<K, kRows, C0, NC, kGroupT>(L0, L1, sx, n0, n, acc0, acc1);
 }
 
 template <int K, int kRows, int kGroupT = kGroup>
@@ -467,6 +579,78 @@ __device__ __forceinline__ void warp_row_dots_pair(
     pass_row_dots_pair<K, kRows, 2 * kMaxChunksPerLane, G::pass_chunks(2), kGroupT>(w0, scales0, w1, scales1, sx, n0, n, acc0, acc1);
   if constexpr (G::passes > 3)
     pass_row_dots_pair<K, kRows, 3 * kMaxChunksPerLane, G::pass_chunks(3), kGroupT>(w0, scales0, w1, scales1, sx, n0, n, acc0, acc1);
+#pragma unroll
+  for (int st = 0; st < kSteps; ++st) {
+    group_reduce<kRows, G::lanes_per_row>(acc0[st]);
+    group_reduce<kRows, G::lanes_per_row>(acc1[st]);
+  }
+}
+
+// The early-issue forms (the slot kernels): the caller issued pass 0's
+// loads (issue_pass / issue_pass_pair with C0 = 0, NC = pass_chunks(0))
+// before staging the activations; these consume them and run the
+// remaining passes as warp_row_dots / warp_row_dots_pair do. Bitwise the
+// same chains.
+template <int K, int kRows, int C0, int NC, int kGroupT = kGroup, bool kStream = false>
+__device__ __forceinline__ void pass_row_dots_s(const uint8_t* __restrict__ w,
+                                                const uint8_t* __restrict__ scales,
+                                                const uint16_t* __restrict__ sx, int n0, int n,
+                                                float (&acc)[kSteps][kRows]) {
+  PassLoads<NC> L;
+  issue_pass<K, C0, NC, kGroupT, kStream>(w, scales, n0, n, L);
+  consume_pass<K, kRows, C0, NC, kGroupT>(L, sx, n0, n, acc);
+}
+template <int K, int kRows, int C0, int NC, int kGroupT = kGroup, bool kStream = false>
+__device__ __forceinline__ void pass_row_dots_pair_s(
+    const uint8_t* __restrict__ w0, const uint8_t* __restrict__ scales0,
+    const uint8_t* __restrict__ w1, const uint8_t* __restrict__ scales1,
+    const uint16_t* __restrict__ sx, int n0, int n,
+    float (&acc0)[kSteps][kRows], float (&acc1)[kSteps][kRows]) {
+  PassLoads<NC> L0, L1;
+  issue_pass_pair<K, C0, NC, kGroupT, kStream>(w0, scales0, w1, scales1, n0, n, L0, L1);
+  consume_pass_pair<K, kRows, C0, NC, kGroupT>(L0, L1, sx, n0, n, acc0, acc1);
+}
+
+template <int K, int kRows, int kGroupT = kGroup, bool kStream = false>
+__device__ __forceinline__ void warp_row_dots_issued(
+    const PassLoads<Geom<K>::pass_chunks(0)>& L0, const uint8_t* __restrict__ w,
+    const uint8_t* __restrict__ scales, const uint16_t* __restrict__ sx, int n0, int n,
+    float (&acc)[kSteps][kRows]) {
+  using G = Geom<K>;
+#pragma unroll
+  for (int st = 0; st < kSteps; ++st)
+#pragma unroll
+    for (int a = 0; a < kRows; ++a) acc[st][a] = 0.f;
+  consume_pass<K, kRows, 0, G::pass_chunks(0), kGroupT>(L0, sx, n0, n, acc);
+  if constexpr (G::passes > 1)
+    pass_row_dots_s<K, kRows, kMaxChunksPerLane, G::pass_chunks(1), kGroupT, kStream>(w, scales, sx, n0, n, acc);
+  if constexpr (G::passes > 2)
+    pass_row_dots_s<K, kRows, 2 * kMaxChunksPerLane, G::pass_chunks(2), kGroupT, kStream>(w, scales, sx, n0, n, acc);
+  if constexpr (G::passes > 3)
+    pass_row_dots_s<K, kRows, 3 * kMaxChunksPerLane, G::pass_chunks(3), kGroupT, kStream>(w, scales, sx, n0, n, acc);
+#pragma unroll
+  for (int st = 0; st < kSteps; ++st) group_reduce<kRows, G::lanes_per_row>(acc[st]);
+}
+
+template <int K, int kRows, int kGroupT = kGroup, bool kStream = false>
+__device__ __forceinline__ void warp_row_dots_pair_issued(
+    const PassLoads<Geom<K>::pass_chunks(0)>& L0, const PassLoads<Geom<K>::pass_chunks(0)>& L1,
+    const uint8_t* __restrict__ w0, const uint8_t* __restrict__ scales0,
+    const uint8_t* __restrict__ w1, const uint8_t* __restrict__ scales1,
+    const uint16_t* __restrict__ sx, int n0, int n,
+    float (&acc0)[kSteps][kRows], float (&acc1)[kSteps][kRows]) {
+  using G = Geom<K>;
+#pragma unroll
+  for (int st = 0; st < kSteps; ++st)
+#pragma unroll
+    for (int a = 0; a < kRows; ++a) acc0[st][a] = acc1[st][a] = 0.f;
+  consume_pass_pair<K, kRows, 0, G::pass_chunks(0), kGroupT>(L0, L1, sx, n0, n, acc0, acc1);
+  if constexpr (G::passes > 1)
+    pass_row_dots_pair_s<K, kRows, kMaxChunksPerLane, G::pass_chunks(1), kGroupT, kStream>(w0, scales0, w1, scales1, sx, n0, n, acc0, acc1);
+  if constexpr (G::passes > 2)
+    pass_row_dots_pair_s<K, kRows, 2 * kMaxChunksPerLane, G::pass_chunks(2), kGroupT, kStream>(w0, scales0, w1, scales1, sx, n0, n, acc0, acc1);
+  if constexpr (G::passes > 3)
+    pass_row_dots_pair_s<K, kRows, 3 * kMaxChunksPerLane, G::pass_chunks(3), kGroupT, kStream>(w0, scales0, w1, scales1, sx, n0, n, acc0, acc1);
 #pragma unroll
   for (int st = 0; st < kSteps; ++st) {
     group_reduce<kRows, G::lanes_per_row>(acc0[st]);
@@ -554,8 +738,10 @@ __host__ inline void dispatch_k(int k, F&& f) {
 // The MXFP4 compiled set (2026-09-13): DeepSeek-V4.1-Flash's widths —
 // 5120 (hidden: w1/w3) and the expert down at worlds 4 / 2 / 1 (576 /
 // 1152 / 2304: 18 / 36 / 72 chunks — 2 x 9, 4 x 9 and 8 x 9 in passes of
-// four), plus the power-of-two test geometries. Its own switch keeps the
-// NVFP4 instantiation set as it is.
+// four), plus the power-of-two test geometries; MiMo-V2.6-Flash's
+// (2026-09-22) — 4096 (hidden: gate/up) and the expert down at worlds 4 /
+// 2 / 1 (512 / 1024 / 2048). Its own switch keeps the NVFP4 instantiation
+// set as it is.
 template <typename F>
 __host__ inline void dispatch_k_mx(int k, F&& f) {
   switch (k) {
@@ -567,17 +753,19 @@ __host__ inline void dispatch_k_mx(int k, F&& f) {
     case 576: f(std::integral_constant<int, 576>{}); return;
     case 1024: f(std::integral_constant<int, 1024>{}); return;
     case 1152: f(std::integral_constant<int, 1152>{}); return;
+    case 2048: f(std::integral_constant<int, 2048>{}); return;
     case 2304: f(std::integral_constant<int, 2304>{}); return;
+    case 4096: f(std::integral_constant<int, 4096>{}); return;
     case 5120: f(std::integral_constant<int, 5120>{}); return;
     default:
       throw std::invalid_argument(
           "fp4_gemv: K is not in the MXFP4 compiled set (32, 64, 128, 256, 512, "
-          "576, 1024, 1152, 2304, 5120)");
+          "576, 1024, 1152, 2048, 2304, 4096, 5120)");
   }
 }
 __host__ __device__ constexpr bool k_compiled_mx(int k) {
   return k == 32 || k == 64 || k == 128 || k == 256 || k == 512 || k == 576 || k == 1024 ||
-         k == 1152 || k == 2304 || k == 5120;
+         k == 1152 || k == 2048 || k == 2304 || k == 4096 || k == 5120;
 }
 // True when dispatch_k compiles a kernel for k.
 __host__ __device__ constexpr bool k_compiled(int k) {

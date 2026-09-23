@@ -1,0 +1,2 @@
+[profiled] content chunks 398, ttft 76 ms, decode pace 18.25 ms/chunk (client), wall 7322 ms
+[profiled] text: "The user wants an explanation of CUDA graph replay performance benefits and costs.## Why CUDA Graph Replay Can Be Faster\n\nWhen you launch kernels eagerly (one `cudaLaunchKernel` call at a time), each launch involves a round-trip through the CUDA driver: the host thread validates parameters, allocates or retrieves a launch configuration, and enqueues the work onto the GPU's stream. Each of these ca"

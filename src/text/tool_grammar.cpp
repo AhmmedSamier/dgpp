@@ -278,9 +278,11 @@ GrammarTool grammar_tool_from_function(const minijson::Value& def,
 // ---------------------------------------------------------------------------
 
 GrammarState::GrammarState(const GrammarVocab* vocab, GrammarSpec spec,
-                           bool prompt_opens_thinking)
+                           bool prompt_opens_thinking, bool model_may_open_thinking)
     : vocab_(vocab), spec_(std::move(spec)) {
   if (!spec_.active()) return;
+  think_openable_ = model_may_open_thinking && !prompt_opens_thinking && vocab_ != nullptr &&
+                    vocab_->markers().think_open.available() && vocab_->markers().think_close.available();
   if (spec_.has_json()) {
     if (vocab_ == nullptr || vocab_->eos_ids().empty())
       throw std::invalid_argument(
@@ -386,6 +388,14 @@ const char* GrammarState::state_name() const {
 }
 
 namespace {
+// The XML call format's literals as the Qwen3.8 template writes them —
+// "\n<function=NAME>\n<parameter=K>\nV\n</parameter>\n</function>\n" — the
+// form the constrained path emits for every XML tokenizer, the MiMo-V2.6
+// one included: its own template's compact form ("<function=NAME>
+// <parameter=K>V</parameter></function>") tokenizes into pieces that
+// straddle the automaton's states ("><", "></", ">true", "\"</"), which the
+// literal matcher does not cross; the parser accepts both forms, so a
+// forced call in the newline form parses like the model's own.
 constexpr const char* kQFn = "\n<function=";
 constexpr const char* kQGt = ">\n";
 constexpr const char* kQParam = "<parameter=";
@@ -416,6 +426,7 @@ const std::string kDCallsClose = "</" + kDTag + " calls>";
 bool GrammarState::qwen() const {
   return vocab_ != nullptr && vocab_->markers().tool_format() == ToolFormat::kQwenXml;
 }
+
 
 bool GrammarState::dsml() const {
   return vocab_ != nullptr && vocab_->markers().tool_format() == ToolFormat::kDsml;
@@ -712,6 +723,23 @@ void GrammarState::mask(TokenMask* out) const {
   out->allowed = 0;
   if (!active()) return;
   const ChatMarkers& m = vocab_->markers();
+  if (think_openable_) {
+    // The first position: the state's own mask, plus the model's opener.
+    GrammarState settled = *this;
+    settled.think_openable_ = false;
+    settled.mask(out);
+    if (out->allowed == 0) return;  // unconstrained already
+    const int64_t id = m.think_open.id;
+    if (id >= 0 && id < vocab_->vocab_size()) {
+      uint32_t& w = out->words[static_cast<size_t>(id >> 5)];
+      const uint32_t bit = 1u << (id & 31);
+      if (!(w & bit)) {
+        w |= bit;
+        ++out->allowed;
+      }
+    }
+    return;
+  }
   switch (state_) {
     case State::kThink:
       // Free (the markers included — reasoning is the model's), but the
@@ -963,6 +991,12 @@ bool GrammarState::keys_possible_for(const std::string& name) const {
 
 bool GrammarState::allows(int64_t id) const {
   if (!active()) return true;
+  if (think_openable_) {
+    if (id == vocab_->markers().think_open.id) return true;
+    GrammarState settled = *this;
+    settled.think_openable_ = false;
+    return settled.allows(id);
+  }
   if (state_ == State::kJsonBody) return json_allows(json_, -1, id);
   if (state_ == State::kValue) {
     const GrammarArg* a = current_arg();
@@ -1001,6 +1035,15 @@ void GrammarState::advance(int64_t id) {
     return;
   }
   const ChatMarkers& m = vocab_->markers();
+  if (think_openable_) {
+    // The first id settles the opening: the model's <think> enters the
+    // free reasoning (its close returns to the mode's opening state).
+    think_openable_ = false;
+    if (id == m.think_open.id) {
+      enter(State::kThink);
+      return;
+    }
+  }
   const auto after_call = [&] {
     ++calls_;
     if (calls_remaining())
@@ -1216,6 +1259,10 @@ void GrammarState::advance(int64_t id) {
             dead_ = true;
             return;
           }
+        // A token that closes the value and runs on into the terminator's
+        // newline ('"\n' on the Qwen2 tokenizers): the machine took the
+        // newline as trailing whitespace; the terminator match starts there.
+        if (value_json_.done() && !text.empty() && text.back() == '\n') term_ = "\n";
         return;
       }
       match_.emitted += text;

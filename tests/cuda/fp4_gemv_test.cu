@@ -222,6 +222,20 @@ DGPP_TEST(fp4_gemv_mxfp4_is_exact_beyond_the_f16_window) {
   check_oracle(mixed, run_bf16(mixed), "mxfp4 scales 2^-60..2^20");
 }
 
+DGPP_TEST(fp4_gemv_mxfp4_f16_window_boundaries_are_exact) {
+  // The f16 fast path (fp4_gemv.cuh consume_chunk_mx, 2026-09-22) takes
+  // exponent codes 104..140 and the exact path the rest: scales 2^-27 ..
+  // 2^18 (codes 100..145) mix both, cross both boundaries and run
+  // through the f16 subnormal scales (codes 104..112), every chunk exact
+  // against the double oracle.
+  for (int k : {1024, 4096, 512}) {
+    const Problem p = make_problem_mx(2, 96, k, 0xEB + k, -27, 18);
+    check_oracle(p, run_bf16(p), ("mxfp4 scales 2^-27..2^18 (k " + std::to_string(k) + ")").c_str());
+  }
+  const Problem sub = make_problem_mx(3, 64, 2304, 0xEC, -23, -15);
+  check_oracle(sub, run_bf16(sub), "mxfp4 subnormal-f16 scales 2^-23..2^-15");
+}
+
 DGPP_TEST(fp4_gemv_mxfp4_rows_are_independent_of_row_count) {
   for (int k : {1024, 576, 5120, 2304}) {
     const Problem p8 = make_problem_mx(8, 136, k, 0x3E8 + k);
@@ -270,10 +284,13 @@ DGPP_TEST(fp4_gemv_mxfp4_rejects_geometry_outside_its_set) {
     return false;
   };
   require(rejects(48), "k=48 rejected (not a multiple of 32)");
-  require(rejects(4096), "k=4096 rejected (not in the MXFP4 compiled set)");
+  require(rejects(3072), "k=3072 rejected (not in the MXFP4 compiled set)");
   require(!rejects(576), "k=576 accepted (world-4 down)");
   require(!rejects(1152), "k=1152 accepted (world-2 down)");
   require(!rejects(2304), "k=2304 accepted (world-1 down)");
+  // MiMo-V2.6-Flash's widths (2026-09-22): the hidden and the world-1 down.
+  require(!rejects(4096), "k=4096 accepted (the MiMo gate/up)");
+  require(!rejects(2048), "k=2048 accepted (the MiMo world-1 down)");
   // An NVFP4 view without its global is refused; an MXFP4 one needs none.
   Problem p = make_problem(1, 8, 1024, 0x3BAE);
   bool refused = false;

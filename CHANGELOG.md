@@ -6,6 +6,41 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Serve MiMo-V2.6-Flash** (2026-09-22): the sixth family, `mimo_v2`
+  (`XiaomiMiMo/MiMo-V2.6-Flash-RL` as shipped: MXFP4 routed experts, fp8
+  block-128 dense projections, BF16 o_proj / head / eh_proj packable into
+  their 12-bit companions). New: paged GQA attention over 192/128-wide
+  heads with a 128-token sliding window and a per-head sink on 39 of 48
+  layers, the fused pre-sharded qkv projection read in the checkpoint's
+  chunk layout, a per-layer-width K/V pool, the family's loader / model /
+  fixture ladder (attention oracle, loader, numpy forward reference, decode,
+  TP worlds 2 and 4, graph engine), the Qwen2 pre-tokenizer pattern, the
+  compact `<tool_call>` dialect and the model-opened `<think>` flow (confined
+  to that dialect), deployment templates for two and four nodes, and the
+  MXFP4 GEMV core's K = 2048 / 4096 instantiations. Measurements in
+  [docs/benchmarks.md](docs/benchmarks.md) and the
+  [campaign record](benchmarks/results/2026-09-22-mimo-v26-flash-opt/README.md);
+  the plan in [docs/mimo_v26_flash_plan.md](docs/mimo_v26_flash_plan.md).
+- **MiMo-V2.6-Flash decode and prefill kernels** (2026-09-22, plan §7):
+  the residual add fused into the two-rounding norm that follows it
+  (`kernels/add_rmsnorm`, every MiMo block boundary), the decode attention
+  in one launch (finish + split partials + last-block combine, the batch's
+  same-request rows overlaid from the projection, register-prefetched
+  tiles), the MXFP4 chunk decode through the hardware f16 conversion when
+  its scale allows (bitwise the exact path; DeepSeek-V4.1-Flash shares
+  it), and the query-tiled tensor-core prefill attention
+  (`kernels/mimo_attn_prefill.cu`: each K/V tile staged — and under the
+  fp8 cache dequantized — once per 64 query vectors instead of once per
+  row, `mma.sync` bf16 scores and PV; prefill rows are no longer bitwise
+  the split-KV kernel's, l2-relative 1e-4 against it). The decode step at
+  C1 with MTP −1.5 % on four nodes, the plain T=1 step unchanged (the
+  in-situ profile, the cold microbench `mimo_step_bench --cold` and the
+  rejected experiments — a register cap, an early L2-persisting prefetch
+  of the next layer's projection — are in the plan and the
+  [A/B record](benchmarks/results/2026-09-22-mimo-v26-flash/ab/README.md)).
+  `WeightPrefetcher` gains a persisting-window mode and a line release
+  (`applypriority.global.L2::evict_normal`) for such experiments.
+
 - **Support sixteen Qwen requests at MTP depth 3** (2026-09-21): widen decode
   graphs to 64 rows and keep wide BF16 projections kernel-only. Preserve
   existing small MTP projection dispatch, including expanded hyper-state

@@ -119,8 +119,29 @@ size_t env_window_bytes(size_t fallback) {
 
 }  // namespace
 
+// The kernel launch with the persisting access-policy window over
+// [begin, end) (cudaLaunchKernelEx: the attribute is captured into the
+// graph node).
+template <int kUnroll>
+void launch_persisting(const uint4* p, size_t vecs, int blocks, cudaStream_t stream) {
+  cudaLaunchConfig_t cfg = {};
+  cfg.gridDim = dim3(static_cast<unsigned>(blocks));
+  cfg.blockDim = dim3(kThreads);
+  cfg.stream = stream;
+  cudaLaunchAttribute attr[1];
+  attr[0].id = cudaLaunchAttributeAccessPolicyWindow;
+  attr[0].val.accessPolicyWindow.base_ptr = const_cast<uint4*>(p);
+  attr[0].val.accessPolicyWindow.num_bytes = vecs * 16;
+  attr[0].val.accessPolicyWindow.hitRatio = 1.0f;
+  attr[0].val.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
+  attr[0].val.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
+  cfg.attrs = attr;
+  cfg.numAttrs = 1;
+  DGPP_CUDA_OK(cudaLaunchKernelEx(&cfg, l2_prefetch_kernel<kUnroll>, p, vecs));
+}
+
 void launch_l2_prefetch(const void* ptr, size_t bytes, PrefetchRate rate,
-                        cudaStream_t stream) {
+                        cudaStream_t stream, bool persisting) {
   if (ptr == nullptr || bytes == 0 || rate == PrefetchRate::Off) return;
   // Widen to 16-byte boundaries: the read may cover a few bytes past either
   // end of the request, which is safe for any cudaMalloc'd range (256-byte
@@ -130,6 +151,13 @@ void launch_l2_prefetch(const void* ptr, size_t bytes, PrefetchRate rate,
       (reinterpret_cast<uintptr_t>(ptr) + bytes + 15) & ~uintptr_t{15};
   const uint4* p = reinterpret_cast<const uint4*>(begin);
   const size_t vecs = (end - begin) / 16;
+  if (persisting) {
+    if (rate == PrefetchRate::Full)
+      launch_persisting<kFullUnroll>(p, vecs, kFullBlocks, stream);
+    else
+      launch_persisting<kLightUnroll>(p, vecs, light_blocks(), stream);
+    return;
+  }
   if (rate == PrefetchRate::Full) {
     l2_prefetch_kernel<kFullUnroll><<<kFullBlocks, kThreads, 0, stream>>>(p, vecs);
   } else if (env_prefetch_form_lines()) {
@@ -140,6 +168,47 @@ void launch_l2_prefetch(const void* ptr, size_t bytes, PrefetchRate rate,
     l2_prefetch_kernel<kLightUnroll><<<light_blocks(), kThreads, 0, stream>>>(p, vecs);
   }
   DGPP_CUDA_OK(cudaGetLastError());
+}
+
+__global__ __launch_bounds__(kThreads) void l2_release_kernel(const uint8_t* p, size_t lines) {
+  const size_t stride = static_cast<size_t>(gridDim.x) * kThreads;
+  for (size_t i = static_cast<size_t>(blockIdx.x) * kThreads + threadIdx.x; i < lines; i += stride)
+    asm volatile("applypriority.global.L2::evict_normal [%0], 128;" ::"l"(p + i * 128) : "memory");
+}
+
+void launch_l2_release(const void* ptr, size_t bytes, cudaStream_t stream) {
+  if (ptr == nullptr || bytes == 0) return;
+  const uintptr_t begin = reinterpret_cast<uintptr_t>(ptr) & ~uintptr_t{127};
+  const uintptr_t end = (reinterpret_cast<uintptr_t>(ptr) + bytes + 127) & ~uintptr_t{127};
+  const size_t lines = (end - begin) / 128;
+  l2_release_kernel<<<kFullBlocks, kThreads, 0, stream>>>(reinterpret_cast<const uint8_t*>(begin), lines);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+size_t l2_set_persisting_limit(size_t bytes) {
+  int dev = 0;
+  DGPP_CUDA_OK(cudaGetDevice(&dev));
+  int max_bytes = 0;
+  DGPP_CUDA_OK(cudaDeviceGetAttribute(&max_bytes, cudaDevAttrMaxPersistingL2CacheSize, dev));
+  if (max_bytes <= 0) return 0;
+  const size_t want = std::min(bytes, static_cast<size_t>(max_bytes));
+  DGPP_CUDA_OK(cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, want));
+  size_t got = 0;
+  DGPP_CUDA_OK(cudaDeviceGetLimit(&got, cudaLimitPersistingL2CacheSize));
+  return got;
+}
+
+void WeightPrefetcher::note_persisting(const void* ptr, size_t bytes) {
+  persisted_[persisted_next_] = Range{reinterpret_cast<uintptr_t>(ptr), bytes};
+  persisted_next_ = (persisted_next_ + 1) % kPersistRing;
+}
+
+void WeightPrefetcher::release_persisting(cudaStream_t main) {
+  for (Range& r : persisted_) {
+    if (r.bytes == 0) continue;
+    launch_l2_release(reinterpret_cast<const void*>(r.begin), r.bytes, main);
+    r = Range{};
+  }
 }
 
 WeightPrefetcher::WeightPrefetcher() {
@@ -176,17 +245,19 @@ WeightPrefetcher::~WeightPrefetcher() {
 void WeightPrefetcher::flush_pending() {
   if (pending_end_ > pending_begin_) {
     launch_l2_prefetch(reinterpret_cast<const void*>(pending_begin_),
-                       pending_end_ - pending_begin_, rate_, side_);
+                       pending_end_ - pending_begin_, rate_, side_, persisting_);
+    if (persisting_) note_persisting(reinterpret_cast<const void*>(pending_begin_), pending_end_ - pending_begin_);
     ++launches_;
   }
   pending_begin_ = pending_end_ = 0;
 }
 
 void WeightPrefetcher::open_window(cudaStream_t main, size_t budget_bytes,
-                                   PrefetchRate rate) {
+                                   PrefetchRate rate, bool persisting) {
   if (!enabled_) return;
-  flush_pending();  // the previous window's tail, at its own rate
+  flush_pending();  // the previous window's tail, at its own rate and policy
   rate_ = rate;
+  persisting_ = persisting;
   remaining_ = budget_bytes > 0 ? budget_bytes : window_bytes_;
   window_open_ = true;
   if (rate == PrefetchRate::Off) return;  // no fork: nothing will launch
@@ -203,7 +274,8 @@ void WeightPrefetcher::add(const void* ptr, size_t bytes) {
     const size_t take = std::min(bytes, remaining_);
     if (take == 0) return;
     remaining_ -= take;
-    launch_l2_prefetch(ptr, take, rate_, side_);
+    launch_l2_prefetch(ptr, take, rate_, side_, persisting_);
+    if (persisting_) note_persisting(ptr, take);
     ++launches_;
     return;
   }
@@ -234,7 +306,8 @@ void WeightPrefetcher::add_isolated(const void* ptr, size_t bytes) {
   if (take == 0) return;
   remaining_ -= take;
   flush_pending();  // nothing pending may grow into this range, nor this range into the next add
-  launch_l2_prefetch(ptr, take, rate_, side_);
+  launch_l2_prefetch(ptr, take, rate_, side_, persisting_);
+  if (persisting_) note_persisting(ptr, take);
   ++launches_;
 }
 

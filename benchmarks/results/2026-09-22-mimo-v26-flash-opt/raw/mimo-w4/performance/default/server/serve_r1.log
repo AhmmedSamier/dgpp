@@ -1,0 +1,740 @@
+2026-09-22 21:49:37.140 INFO  dgpp-serve 0.1.0+ga895db96bb17.dirty (git a895db96bb17)
+2026-09-22 21:49:37.140 INFO  config /tmp/bus4/deployments/ad508451c47d63eb/cluster.json: model XiaomiMiMo/MiMo-V2.6-Flash-RL, world 4, rank 1, http :18080, fabric :29970, journal :29971
+2026-09-22 21:49:37.140 INFO  model XiaomiMiMo/MiMo-V2.6-Flash-RL -> /home/stephen/.cache/huggingface/hub/models--XiaomiMiMo--MiMo-V2.6-Flash-RL/snapshots/5711b268169967567844e1e560e8a3966da959b1
+2026-09-22 21:49:37.141 INFO  journal: connected to rank 0 at 192.168.88.11:29971 (120000 attempt window)
+2026-09-22 21:49:37.174 INFO  rank 1: settings from rank 0: model=XiaomiMiMo/MiMo-V2.6-Flash-RL world=4 fabric=29970 journal=29971 conc=4 kv=131072 kvdt=bf16 ngt=resident dw=checkpoint bfw=bf12 fp8head=gemv pf=bounded emsh=replicated maxtok=256 queue=8 eos=1 graph=1 compact=0 mtp=1 mtpd=1 mss=0 msrow=8 msbase=28 mslam=0 msmin=1 msad=1 batchmin=2 cand=128 pcgib=1.5 adm=full win=256 pfbudget=0 pfidle=0 pace=-1 inflight=-1 reasoning_in_content=0 rs=off
+2026-09-22 21:49:37.174 INFO  config: model=XiaomiMiMo/MiMo-V2.6-Flash-RL world=4 fabric=29970 journal=29971 conc=4 kv=131072 kvdt=bf16 ngt=resident dw=checkpoint bfw=bf12 fp8head=gemv pf=bounded emsh=replicated maxtok=256 queue=8 eos=1 graph=1 compact=0 mtp=1 mtpd=1 mss=0 msrow=8 msbase=28 mslam=0 msmin=1 msad=1 batchmin=2 cand=128 pcgib=1.5 adm=full win=256 pfbudget=0 pfidle=0 pace=-1 inflight=-1 reasoning_in_content=0 rs=off (digest 658121b461a8e3f3)
+2026-09-22 21:49:37.294 INFO  serve: model family mimo_v2 (/home/stephen/.cache/huggingface/hub/models--XiaomiMiMo--MiMo-V2.6-Flash-RL/snapshots/5711b268169967567844e1e560e8a3966da959b1)
+2026-09-22 21:49:37.294 INFO  serve: decode rows 8 (4 slot(s) x 2 row(s) per request, floor 8, the mimo_v2 family's cap 32)
+2026-09-22 21:49:37.294 WARN  generation config /home/stephen/.cache/huggingface/hub/models--XiaomiMiMo--MiMo-V2.6-Flash-RL/snapshots/5711b268169967567844e1e560e8a3966da959b1/generation_config.json omits top_k, min_p, repetition_penalty; using greedy-safe/neutral fallbacks for those fields
+2026-09-22 21:49:37.294 INFO  generation defaults: temperature=0 top_p=0.95 top_k=0 min_p=0 repetition_penalty=1 (do_sample=false: greedy)
+2026-09-22 21:49:37.294 INFO  serve: sampling defaults temperature 0 top_p 0.95 top_k 0 min_p 0 repetition_penalty 1 (from generation_config.json; overrides: none)
+2026-09-22 21:49:37.294 INFO  serve: request context limit 131072 tokens (the 131072-token K/V pool from engine.kv_capacity 131072; this family states no positional ceiling of its own)
+2026-09-22 21:49:37.294 INFO  rank 1: prefix cache plan — 1.5 GiB budget, 4096 slots of 0.008 MiB, 0.031 GiB allocated; cached K/V blocks share the 131072-token pool
+2026-09-22 21:49:37.394 INFO  tokenizer: loaded vocab 151643 merges 151387 added 32 (revision 0x48f2a839c5f8d38a; qwen2 pattern, NFC, ignore_merges false)
+2026-09-22 21:49:37.403 INFO  serve: grammar vocabulary built (152576 ids, tool markers present, call-turn EOS 151645)
+2026-09-22 21:49:37.499 INFO  serve: JSON grammar tables built in 0.10 s
+2026-09-22 21:49:37.707 INFO  bus: globaltimer offset 4305887424 ns (+-2 us)
+2026-09-22 21:49:37.720 INFO  verbs: device roceP2p1s0f0 port 1 gid_index 3
+2026-09-22 21:49:37.728 INFO  verbs: device rocep1s0f0 port 1 gid_index 3
+2026-09-22 21:49:38.802 INFO  bus: rank 1 up — 3 peer(s) x 2 lane(s), lat 8x65536B, bulk 8x262144B, bulk pace 28.3 Gb/s per QP, window 4 per lane
+2026-09-22 21:49:38.802 INFO  rank 1: boundary reducer host-driven
+2026-09-22 21:49:38.837 INFO  bus engine: rank 1 pinned to cpu 19
+2026-09-22 21:49:38.927 INFO  rank 1: process memory locked (mlockall MCL_CURRENT, 14465 MiB)
+2026-09-22 21:49:38.927 INFO  rank 1: resident image cache at /home/stephen/.cache/dgpp/resident
+2026-09-22 21:49:38.983 INFO  rank 1: memory plan for a 131072-token context — model weights (resident, packed bf16 matrices released) 39.49 GiB; loader staging (pinned host, freed when the last layer is resident) 1.46 GiB (1.46 GiB pinned); bf16 decode packing (12-bit companions) 0.86 GiB; bf16 prefill expansion scratch 0.06 GiB; gemm workspace (at least) 0.06 GiB; kv cache pool (K/V bf16, every layer, the draft's included) 6.95 GiB; activations (session core, residual, block io, the moe chain's fp32 sum, route staging) 0.39 GiB (0.01 GiB pinned); layer objects (attention, dense MLP) 0.11 GiB; moe scratch (routed slots, graph tables) 0.52 GiB (0.00 GiB pinned); draft block (gathered hidden, the fused input, its residual) 0.06 GiB; prefix cache 0.03 GiB; engine 0.07 GiB
+2026-09-22 21:49:38.983 INFO  rank 1: memory plan total 50.06 GiB (48.50 GiB device + 1.57 GiB pinned) + 4.00 GiB headroom against 116.60 GiB free (device free 104.95 GiB of 121.69 GiB, host available 116.60 GiB)
+2026-09-22 21:49:38.983 INFO  memory ledger: rank 1 after the plan check — rss 1.10 GiB (anon 0.36, shmem 0.09, file 0.64; locked 14.13); device free 104.95 GiB, node available 116.60 GiB
+2026-09-22 21:49:38.983 INFO  memory ledger: rank 1 after the bus — rss 1.10 GiB (anon 0.36, shmem 0.09, file 0.64; locked 14.13); device free 104.95 GiB, node available 116.60 GiB
+2026-09-22 21:49:39.141 INFO  mimo loader: 491 checkpoint tensors ignored (the vision / audio encoders, the draft layers past the first)
+2026-09-22 21:49:39.177 INFO  mimo loader: rank 1 resident footprint 40.6 GiB; device free 104.9 of 121.7 GiB, host available 116.6 GiB
+2026-09-22 21:49:39.839 INFO  mimo loader: rank 1 resident image /home/stephen/.cache/dgpp/resident/c3a272b3ff8756e8.img — 49/49 layers present, direct I/O
+2026-09-22 21:49:39.845 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-22 21:49:40.298 INFO  memory ledger: rank 1 after the model — rss 4.06 GiB (anon 0.40, shmem 1.55, file 2.11; locked 14.13); device free 94.36 GiB, node available 106.00 GiB
+2026-09-22 21:49:40.298 INFO  rank 1: model constructed in 1.3s (resident, 4 request slots, 131072-token pool in bf16, 2048-row forwards)
+2026-09-22 21:49:40.298 INFO  rank 1: prefix cache on — 4096 snapshot slot(s) of 0.0 MiB (1.50 GiB asked)
+2026-09-22 21:49:40.301 INFO  rank 1: graph engine samples on the device — 112 candidates per rank (8 rows x 4 ranks in a 65536-byte latency slot; the planned width is 128); constrained decoding available
+2026-09-22 21:49:40.496 INFO  memory ledger: rank 1 after the graph engine — rss 4.07 GiB (anon 0.40, shmem 1.56, file 2.11; locked 14.13); device free 94.32 GiB, node available 105.96 GiB
+2026-09-22 21:49:40.526 INFO  allreduce: device clock rate 2418000 kHz (stamps conversion)
+2026-09-22 21:49:40.526 INFO  allreduce: rank 1 seq 1 launched (3 peers)
+2026-09-22 21:49:40.526 INFO  allreduce: rank 1 seq 1 ready after 38.5us
+2026-09-22 21:49:40.566 INFO  allreduce: rank 1 seq 1 done status=0 after 39726.8us
+2026-09-22 21:49:40.604 INFO  allreduce: rank 1 seq 2 launched (3 peers)
+2026-09-22 21:49:40.604 INFO  allreduce: rank 1 seq 2 ready after 11.3us
+2026-09-22 21:49:40.605 INFO  allreduce: rank 1 seq 2 done status=0 after 1136.2us
+2026-09-22 21:49:40.762 INFO  allreduce: rank 1 seq 3 launched (3 peers)
+2026-09-22 21:49:40.762 INFO  allreduce: rank 1 seq 3 ready after 16.4us
+2026-09-22 21:49:40.833 INFO  allreduce: rank 1 seq 3 done status=0 after 70547.8us
+2026-09-22 21:49:40.834 INFO  allreduce: rank 1 seq 4 launched (3 peers)
+2026-09-22 21:49:40.834 INFO  allreduce: rank 1 seq 4 ready after 12.6us
+2026-09-22 21:49:40.834 INFO  allreduce: rank 1 seq 4 done status=0 after 193.6us
+2026-09-22 21:49:40.969 INFO  allreduce: rank 1 seq 5 launched (3 peers)
+2026-09-22 21:49:40.969 INFO  allreduce: rank 1 seq 5 ready after 16.7us
+2026-09-22 21:49:41.035 INFO  allreduce: rank 1 seq 5 done status=0 after 66101.1us
+2026-09-22 21:49:41.036 INFO  allreduce: rank 1 seq 6 launched (3 peers)
+2026-09-22 21:49:41.036 INFO  allreduce: rank 1 seq 6 ready after 11.2us
+2026-09-22 21:49:41.036 INFO  allreduce: rank 1 seq 6 done status=0 after 95.1us
+2026-09-22 21:49:41.165 INFO  allreduce: rank 1 seq 7 launched (3 peers)
+2026-09-22 21:49:41.165 INFO  allreduce: rank 1 seq 7 ready after 16.4us
+2026-09-22 21:49:41.242 INFO  allreduce: rank 1 seq 7 done status=0 after 76554.6us
+2026-09-22 21:49:41.243 INFO  allreduce: rank 1 seq 8 launched (3 peers)
+2026-09-22 21:49:41.243 INFO  allreduce: rank 1 seq 8 ready after 11.2us
+2026-09-22 21:49:41.243 INFO  allreduce: rank 1 seq 8 done status=0 after 177.5us
+2026-09-22 21:49:41.368 INFO  allreduce: rank 1 seq 9 launched (3 peers)
+2026-09-22 21:49:41.368 INFO  allreduce: rank 1 seq 9 ready after 16.7us
+2026-09-22 21:49:41.443 INFO  allreduce: rank 1 seq 9 done status=0 after 75372.8us
+2026-09-22 21:49:41.444 INFO  allreduce: rank 1 seq 10 launched (3 peers)
+2026-09-22 21:49:41.444 INFO  allreduce: rank 1 seq 10 ready after 11.7us
+2026-09-22 21:49:41.444 INFO  allreduce: rank 1 seq 10 done status=0 after 49.9us
+2026-09-22 21:49:41.588 INFO  allreduce: rank 1 seq 11 launched (3 peers)
+2026-09-22 21:49:41.588 INFO  allreduce: rank 1 seq 11 ready after 16.5us
+2026-09-22 21:49:41.650 INFO  allreduce: rank 1 seq 11 done status=0 after 61908.9us
+2026-09-22 21:49:41.651 INFO  allreduce: rank 1 seq 12 launched (3 peers)
+2026-09-22 21:49:41.651 INFO  allreduce: rank 1 seq 12 ready after 11.2us
+2026-09-22 21:49:41.651 INFO  allreduce: rank 1 seq 12 done status=0 after 256.6us
+2026-09-22 21:49:41.780 INFO  allreduce: rank 1 seq 13 launched (3 peers)
+2026-09-22 21:49:41.780 INFO  allreduce: rank 1 seq 13 ready after 16.1us
+2026-09-22 21:49:41.854 INFO  allreduce: rank 1 seq 13 done status=0 after 74454.1us
+2026-09-22 21:49:41.855 INFO  allreduce: rank 1 seq 14 launched (3 peers)
+2026-09-22 21:49:41.855 INFO  allreduce: rank 1 seq 14 ready after 12.3us
+2026-09-22 21:49:41.855 INFO  allreduce: rank 1 seq 14 done status=0 after 210.8us
+2026-09-22 21:49:41.980 INFO  allreduce: rank 1 seq 15 launched (3 peers)
+2026-09-22 21:49:41.980 INFO  allreduce: rank 1 seq 15 ready after 16.7us
+2026-09-22 21:49:42.058 INFO  allreduce: rank 1 seq 15 done status=0 after 78758.9us
+2026-09-22 21:49:42.059 INFO  allreduce: rank 1 seq 16 launched (3 peers)
+2026-09-22 21:49:42.059 INFO  allreduce: rank 1 seq 16 ready after 11.1us
+2026-09-22 21:49:42.059 INFO  allreduce: rank 1 seq 16 done status=0 after 49.5us
+2026-09-22 21:49:50.797 INFO  rank 1 bf12: 51 decode matrices packed (1.12 GiB of bf16 -> 0.84 GiB, 90735 escapes, widest row 8, 0 rows kept raw; 0 matrices kept bf16) in 0.5 s
+2026-09-22 21:49:50.797 INFO  rank 1 bf12: 51 of them released their bf16 bytes (1.12 GiB returned; prefill expands through a 64 MiB scratch)
+2026-09-22 21:49:50.800 INFO  bus graph era: variant 0 recorded with 100 collective node(s)
+2026-09-22 21:49:50.804 INFO  rank 1: graph variant 0 shape: 860 nodes, 958 edges: kernel 860 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 21:49:50.809 INFO  rank 1: graph variant 0 instantiated — 6.1 MiB of device memory (53.6 GiB free)
+2026-09-22 21:49:50.810 INFO  bus graph era: variant 1 recorded with 100 collective node(s)
+2026-09-22 21:49:50.810 INFO  rank 1: graph variant 1 shape: 860 nodes, 958 edges: kernel 860 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 21:49:50.812 INFO  rank 1: graph variant 1 instantiated — 6.1 MiB of device memory (53.6 GiB free)
+2026-09-22 21:49:50.812 INFO  rank 1: serving scalar graph variants 0/1 captured for request slot 0 (2 rows, MTP)
+2026-09-22 21:49:50.815 INFO  bus graph era: variant 8 recorded with 100 collective node(s)
+2026-09-22 21:49:50.815 INFO  rank 1: graph variant 8 shape: 861 nodes, 959 edges: kernel 861 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 21:49:50.817 INFO  rank 1: graph variant 8 instantiated — 7.9 MiB of device memory (53.6 GiB free)
+2026-09-22 21:49:50.821 INFO  bus graph era: variant 9 recorded with 100 collective node(s)
+2026-09-22 21:49:50.821 INFO  rank 1: graph variant 9 shape: 861 nodes, 959 edges: kernel 861 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 21:49:50.827 INFO  rank 1: graph variant 9 instantiated — 9.6 MiB of device memory (53.5 GiB free)
+2026-09-22 21:49:50.827 INFO  rank 1: serving row-batched graph variants 8/9 captured for 2 slots x 2 rows = 4 fixed rows, MTP (a batch is selected at 2+ live requests, the smallest that covers the live slots)
+2026-09-22 21:49:50.828 INFO  bus graph era: variant 10 recorded with 100 collective node(s)
+2026-09-22 21:49:50.828 INFO  rank 1: graph variant 10 shape: 862 nodes, 960 edges: kernel 862 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 21:49:50.836 INFO  rank 1: graph variant 10 instantiated — 8.3 MiB of device memory (53.5 GiB free)
+2026-09-22 21:49:50.839 INFO  bus graph era: variant 11 recorded with 100 collective node(s)
+2026-09-22 21:49:50.839 INFO  rank 1: graph variant 11 shape: 862 nodes, 960 edges: kernel 862 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 21:49:50.844 INFO  rank 1: graph variant 11 instantiated — 8.3 MiB of device memory (53.5 GiB free)
+2026-09-22 21:49:50.844 INFO  rank 1: serving row-batched graph variants 10/11 captured for 3 slots x 2 rows = 6 fixed rows, MTP (a batch is selected at 2+ live requests, the smallest that covers the live slots)
+2026-09-22 21:49:50.846 INFO  bus graph era: variant 12 recorded with 100 collective node(s)
+2026-09-22 21:49:50.846 INFO  rank 1: graph variant 12 shape: 863 nodes, 961 edges: kernel 863 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 21:49:50.850 INFO  rank 1: graph variant 12 instantiated — 11.4 MiB of device memory (53.5 GiB free)
+2026-09-22 21:49:50.851 INFO  bus graph era: variant 13 recorded with 100 collective node(s)
+2026-09-22 21:49:50.852 INFO  rank 1: graph variant 13 shape: 863 nodes, 961 edges: kernel 863 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 21:49:50.856 INFO  rank 1: graph variant 13 instantiated — 13.6 MiB of device memory (53.5 GiB free)
+2026-09-22 21:49:50.856 INFO  rank 1: serving row-batched graph variants 12/13 captured for 4 slots x 2 rows = 8 fixed rows, MTP (a batch is selected at 2+ live requests, the smallest that covers the live slots)
+2026-09-22 21:49:50.905 INFO  bus graph era: variant 2 recorded with 100 collective node(s)
+2026-09-22 21:49:50.905 INFO  rank 1: graph variant 2 shape: 860 nodes, 958 edges: kernel 860 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 21:49:50.908 INFO  rank 1: graph variant 2 instantiated — 13.2 MiB of device memory (53.5 GiB free)
+2026-09-22 21:49:50.909 INFO  bus graph era: variant 3 recorded with 100 collective node(s)
+2026-09-22 21:49:50.909 INFO  rank 1: graph variant 3 shape: 860 nodes, 958 edges: kernel 860 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 21:49:50.913 INFO  rank 1: graph variant 3 instantiated — 14.5 MiB of device memory (53.5 GiB free)
+2026-09-22 21:49:50.913 INFO  rank 1: serving scalar graph variants 2/3 captured for request slot 1 (2 rows, MTP)
+2026-09-22 21:49:50.961 INFO  bus graph era: variant 4 recorded with 100 collective node(s)
+2026-09-22 21:49:50.961 INFO  rank 1: graph variant 4 shape: 860 nodes, 958 edges: kernel 860 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 21:49:50.964 INFO  rank 1: graph variant 4 instantiated — 15.3 MiB of device memory (53.5 GiB free)
+2026-09-22 21:49:50.964 INFO  bus graph era: variant 5 recorded with 100 collective node(s)
+2026-09-22 21:49:50.965 INFO  rank 1: graph variant 5 shape: 860 nodes, 958 edges: kernel 860 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 21:49:50.968 INFO  rank 1: graph variant 5 instantiated — 11.8 MiB of device memory (53.4 GiB free)
+2026-09-22 21:49:50.968 INFO  rank 1: serving scalar graph variants 4/5 captured for request slot 2 (2 rows, MTP)
+2026-09-22 21:49:51.015 INFO  bus graph era: variant 6 recorded with 100 collective node(s)
+2026-09-22 21:49:51.015 INFO  rank 1: graph variant 6 shape: 860 nodes, 958 edges: kernel 860 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 21:49:51.018 INFO  rank 1: graph variant 6 instantiated — 14.0 MiB of device memory (53.4 GiB free)
+2026-09-22 21:49:51.019 INFO  bus graph era: variant 7 recorded with 100 collective node(s)
+2026-09-22 21:49:51.019 INFO  rank 1: graph variant 7 shape: 860 nodes, 958 edges: kernel 860 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-09-22 21:49:51.022 INFO  rank 1: graph variant 7 instantiated — 14.9 MiB of device memory (53.4 GiB free)
+2026-09-22 21:49:51.022 INFO  rank 1: serving scalar graph variants 6/7 captured for request slot 3 (2 rows, MTP)
+2026-09-22 21:49:51.022 INFO  rank 1: warm capture complete — 4 scalar variants and the row batches for 2 slots, 3 slots, 4 slots recorded before the first request
+2026-09-22 21:49:51.022 INFO  memory ledger: rank 1 after the warm capture — rss 4.21 GiB (anon 0.54, shmem 1.56, file 2.11; locked 14.11); device free 53.42 GiB, node available 65.07 GiB
+2026-09-22 21:49:51.022 INFO  rank 1: graph variants warm-captured in 10.53s
+2026-09-22 21:49:51.022 INFO  rank 1: following rank 0's journal (admission full, window 256)
+2026-09-22 21:49:52.771 INFO  sched: request 'chatcmpl-286d5308977d762b' prefix cache miss — 2 cut(s), the cache is empty
+2026-09-22 21:49:52.771 INFO  sched: request 'chatcmpl-286d5308977d762b' admitted to slot 0 (reserve 2 blocks; pool 3/2048 blocks in use) — first token 334
+2026-09-22 21:49:53.643 INFO  sched: request 'chatcmpl-286d5308977d762b' retired (steps): 64 tok in 0.9 s — prefill 61 tok (0 cached) in 540 ms; decode 63 tok / 37 passes in 0.3 s: 189.2 tok/s, 5.3 ms/tok, 9 ms/pass, 1.70 tok/pass, accept p1 73 %
+2026-09-22 21:49:53.866 INFO  sched: request 'chatcmpl-286d5308977d762c' prefix cache miss — 2 cut(s) probed against 2 entries; the nearest entry (position 123) shares the first 5 of the prompt's 34 tokens (the prompt differs from it from that token on)
+2026-09-22 21:49:53.866 INFO  sched: request 'chatcmpl-286d5308977d762c' admitted to slot 0 (reserve 5 blocks; pool 9/2048 blocks in use) — first token 785
+2026-09-22 21:49:57.213 INFO  sched: request 'chatcmpl-286d5308977d762c' retired (steps): 256 tok in 3.3 s — prefill 34 tok (0 cached) in 212 ms; decode 255 tok / 146 passes in 3.1 s: 81.3 tok/s, 12.3 ms/tok, 21 ms/pass, 1.75 tok/pass, accept p1 75 %
+2026-09-22 21:49:57.299 INFO  sched: request 'chatcmpl-286d5308977d762d' admitted to slot 0 (reserve 5 blocks; pool 14/2048 blocks in use) — first token 785
+2026-09-22 21:50:00.656 INFO  sched: request 'chatcmpl-286d5308977d762d' retired (steps): 256 tok in 3.4 s — prefill 34 tok (29 cached) in 59 ms; decode 255 tok / 146 passes in 3.3 s: 77.3 tok/s, 12.9 ms/tok, 23 ms/pass, 1.75 tok/pass, accept p1 75 %
+2026-09-22 21:50:00.761 INFO  sched: request 'chatcmpl-286d5308977d762e' admitted to slot 0 (reserve 5 blocks; pool 14/2048 blocks in use) — first token 785
+2026-09-22 21:50:01.130 INFO  stats: rank 1 | 10.0 s | decode 60.4 tok/s, 12.6 ms/tok, 22.2 ms/step (345 steps / 605 tok, 76 % of wall) | mtp 1.75 tok/step/req, accept p1 75 % | prefill 4 prompts / 105 tok, 10 tok/s, 8.28 ms/tok, 217 ms avg (9 % of wall), 58 tok cached (2/4 hits) | live 1, queued 0 | pool 15/2048 blocks (1 %) | prefix cache 4/4096 entries
+2026-09-22 21:50:04.128 INFO  sched: request 'chatcmpl-286d5308977d762e' retired (steps): 256 tok in 3.4 s — prefill 34 tok (29 cached) in 59 ms; decode 255 tok / 146 passes in 3.3 s: 77.1 tok/s, 13.0 ms/tok, 23 ms/pass, 1.75 tok/pass, accept p1 75 %
+2026-09-22 21:50:04.352 INFO  sched: request 'chatcmpl-286d5308977d762f' prefix cache miss — 2 cut(s) probed against 4 entries; the nearest entry (position 288) shares the first 11 of the prompt's 33 tokens (the prompt differs from it from that token on)
+2026-09-22 21:50:04.352 INFO  sched: request 'chatcmpl-286d5308977d762f' admitted to slot 0 (reserve 5 blocks; pool 15/2048 blocks in use) — first token 785
+2026-09-22 21:50:04.587 INFO  sched: request 'chatcmpl-286d5308977d7630' prefix cache miss — 2 cut(s) probed against 5 entries; the nearest entry (position 288) shares the first 11 of the prompt's 33 tokens (the prompt differs from it from that token on)
+2026-09-22 21:50:04.587 INFO  sched: request 'chatcmpl-286d5308977d7630' admitted to slot 1 (reserve 5 blocks; pool 22/2048 blocks in use) — first token 785
+2026-09-22 21:50:09.514 INFO  sched: request 'chatcmpl-286d5308977d7630' retired (steps): 256 tok in 4.9 s — prefill 33 tok (0 cached) in 211 ms; decode 255 tok / 150 passes in 4.7 s: 54.1 tok/s, 18.5 ms/tok, 31 ms/pass, 1.70 tok/pass, accept p1 71 %
+2026-09-22 21:50:09.582 INFO  sched: request 'chatcmpl-286d5308977d762f' retired (steps): 256 tok in 5.2 s — prefill 33 tok (0 cached) in 212 ms; decode 255 tok / 154 passes in 5.0 s: 50.8 tok/s, 19.7 ms/tok, 33 ms/pass, 1.66 tok/pass, accept p1 66 %
+2026-09-22 21:50:09.654 INFO  sched: request 'chatcmpl-286d5308977d7631' admitted to slot 0 (reserve 5 blocks; pool 26/2048 blocks in use) — first token 785
+2026-09-22 21:50:09.734 INFO  sched: request 'chatcmpl-286d5308977d7632' admitted to slot 1 (reserve 5 blocks; pool 32/2048 blocks in use) — first token 785
+2026-09-22 21:50:11.137 INFO  stats: rank 1 | 10.0 s | decode 88.7 tok/s, 10.3 ms/tok, 27.8 ms/step (328 steps / 888 tok, 91 % of wall) | mtp 1.70 tok/step/req, accept p1 70 % | prefill 4 prompts / 76 tok, 8 tok/s, 7.12 ms/tok, 135 ms avg (5 % of wall), 56 tok cached (2/4 hits) | live 2, queued 0 | pool 33/2048 blocks (2 %) | prefix cache 8/4096 entries
+2026-09-22 21:50:14.663 INFO  sched: request 'chatcmpl-286d5308977d7632' retired (steps): 256 tok in 4.9 s — prefill 33 tok (28 cached) in 56 ms; decode 255 tok / 150 passes in 4.9 s: 52.3 tok/s, 19.1 ms/tok, 32 ms/pass, 1.70 tok/pass, accept p1 71 %
+2026-09-22 21:50:14.732 INFO  sched: request 'chatcmpl-286d5308977d7631' retired (steps): 256 tok in 5.1 s — prefill 33 tok (28 cached) in 61 ms; decode 255 tok / 154 passes in 5.0 s: 50.8 tok/s, 19.7 ms/tok, 33 ms/pass, 1.66 tok/pass, accept p1 66 %
+2026-09-22 21:50:14.804 INFO  sched: request 'chatcmpl-286d5308977d7633' admitted to slot 0 (reserve 5 blocks; pool 26/2048 blocks in use) — first token 785
+2026-09-22 21:50:14.885 INFO  sched: request 'chatcmpl-286d5308977d7634' admitted to slot 1 (reserve 5 blocks; pool 32/2048 blocks in use) — first token 785
+2026-09-22 21:50:19.816 INFO  sched: request 'chatcmpl-286d5308977d7634' retired (steps): 256 tok in 4.9 s — prefill 33 tok (28 cached) in 58 ms; decode 255 tok / 150 passes in 4.9 s: 52.3 tok/s, 19.1 ms/tok, 32 ms/pass, 1.70 tok/pass, accept p1 71 %
+2026-09-22 21:50:19.886 INFO  sched: request 'chatcmpl-286d5308977d7633' retired (steps): 256 tok in 5.1 s — prefill 33 tok (28 cached) in 60 ms; decode 255 tok / 154 passes in 5.0 s: 50.8 tok/s, 19.7 ms/tok, 33 ms/pass, 1.66 tok/pass, accept p1 66 %
+2026-09-22 21:50:20.110 INFO  sched: request 'chatcmpl-286d5308977d7635' prefix cache miss — 2 cut(s) probed against 8 entries; the nearest entry (position 288) shares the first 11 of the prompt's 32 tokens (the prompt differs from it from that token on)
+2026-09-22 21:50:20.110 INFO  sched: request 'chatcmpl-286d5308977d7635' admitted to slot 0 (reserve 5 blocks; pool 27/2048 blocks in use) — first token 785
+2026-09-22 21:50:20.335 INFO  sched: request 'chatcmpl-286d5308977d7636' prefix cache miss — 2 cut(s) probed against 9 entries; the nearest entry (position 288) shares the first 3 of the prompt's 29 tokens (the prompt differs from it from that token on)
+2026-09-22 21:50:20.335 INFO  sched: request 'chatcmpl-286d5308977d7636' admitted to slot 1 (reserve 5 blocks; pool 34/2048 blocks in use) — first token 2124
+2026-09-22 21:50:20.574 INFO  sched: request 'chatcmpl-286d5308977d7637' prefix cache miss — 2 cut(s) probed against 10 entries; the nearest entry (position 24) shares the first 5 of the prompt's 29 tokens (the prompt differs from it from that token on)
+2026-09-22 21:50:20.574 INFO  sched: request 'chatcmpl-286d5308977d7637' admitted to slot 2 (reserve 5 blocks; pool 41/2048 blocks in use) — first token 2124
+2026-09-22 21:50:20.819 INFO  sched: request 'chatcmpl-286d5308977d7638' prefix cache miss — 2 cut(s) probed against 11 entries; the nearest entry (position 24) shares the first 5 of the prompt's 28 tokens (the prompt differs from it from that token on)
+2026-09-22 21:50:20.819 INFO  sched: request 'chatcmpl-286d5308977d7638' admitted to slot 3 (reserve 5 blocks; pool 48/2048 blocks in use) — first token 2124
+2026-09-22 21:50:21.180 INFO  stats: rank 1 | 10.0 s | decode 94.1 tok/s, 9.3 ms/tok, 32.0 ms/step (274 steps / 945 tok, 87 % of wall) | mtp 1.70 tok/step/req, accept p1 70 % | prefill 6 prompts / 128 tok, 13 tok/s, 7.33 ms/tok, 156 ms avg (9 % of wall), 56 tok cached (2/6 hits) | live 4, queued 0 | pool 49/2048 blocks (2 %) | prefix cache 12/4096 entries
+2026-09-22 21:50:28.003 INFO  sched: request 'chatcmpl-286d5308977d7637' retired (steps): 256 tok in 7.4 s — prefill 29 tok (0 cached) in 205 ms; decode 255 tok / 141 passes in 7.2 s: 35.3 tok/s, 28.3 ms/tok, 51 ms/pass, 1.81 tok/pass, accept p1 81 %
+2026-09-22 21:50:28.208 INFO  sched: request 'chatcmpl-286d5308977d7636' retired (steps): 256 tok in 7.9 s — prefill 29 tok (0 cached) in 200 ms; decode 255 tok / 146 passes in 7.7 s: 33.2 tok/s, 30.1 ms/tok, 53 ms/pass, 1.75 tok/pass, accept p1 75 %
+2026-09-22 21:50:28.208 INFO  sched: request 'chatcmpl-286d5308977d7635' retired (steps): 256 tok in 8.1 s — prefill 32 tok (0 cached) in 213 ms; decode 255 tok / 147 passes in 7.9 s: 32.3 tok/s, 30.9 ms/tok, 54 ms/pass, 1.73 tok/pass, accept p1 73 %
+2026-09-22 21:50:28.283 INFO  sched: request 'chatcmpl-286d5308977d7638' retired (steps): 256 tok in 7.5 s — prefill 28 tok (0 cached) in 202 ms; decode 255 tok / 147 passes in 7.3 s: 35.1 tok/s, 28.5 ms/tok, 49 ms/pass, 1.73 tok/pass, accept p1 74 %
+2026-09-22 21:50:28.372 INFO  sched: request 'chatcmpl-286d5308977d7639' admitted to slot 0 (reserve 5 blocks; pool 50/2048 blocks in use) — first token 785
+2026-09-22 21:50:28.453 INFO  sched: request 'chatcmpl-286d5308977d763a' admitted to slot 1 (reserve 5 blocks; pool 56/2048 blocks in use) — first token 2124
+2026-09-22 21:50:28.542 INFO  sched: request 'chatcmpl-286d5308977d763b' admitted to slot 2 (reserve 5 blocks; pool 62/2048 blocks in use) — first token 2124
+2026-09-22 21:50:28.641 INFO  sched: request 'chatcmpl-286d5308977d763c' admitted to slot 3 (reserve 5 blocks; pool 68/2048 blocks in use) — first token 2124
+2026-09-22 21:50:31.226 INFO  stats: rank 1 | 10.0 s | decode 134.0 tok/s, 7.0 ms/tok, 48.7 ms/step (194 steps / 1346 tok, 94 % of wall) | mtp 1.78 tok/step/req, accept p1 77 % | prefill 4 prompts / 20 tok, 2 tok/s, 11.45 ms/tok, 57 ms avg (2 % of wall), 98 tok cached (4/4 hits) | live 4, queued 0 | pool 69/2048 blocks (3 %) | prefix cache 16/4096 entries
+2026-09-22 21:50:35.859 INFO  sched: request 'chatcmpl-286d5308977d763c' retired (steps): 256 tok in 7.2 s — prefill 29 tok (24 cached) in 55 ms; decode 255 tok / 141 passes in 7.2 s: 35.6 tok/s, 28.1 ms/tok, 51 ms/pass, 1.81 tok/pass, accept p1 81 %
+2026-09-22 21:50:35.988 INFO  sched: request 'chatcmpl-286d5308977d7639' retired (steps): 256 tok in 7.6 s — prefill 32 tok (27 cached) in 62 ms; decode 255 tok / 147 passes in 7.6 s: 33.8 tok/s, 29.6 ms/tok, 51 ms/pass, 1.73 tok/pass, accept p1 73 %
+2026-09-22 21:50:36.034 INFO  sched: request 'chatcmpl-286d5308977d763a' retired (steps): 256 tok in 7.6 s — prefill 28 tok (23 cached) in 56 ms; decode 255 tok / 147 passes in 7.5 s: 33.9 tok/s, 29.5 ms/tok, 51 ms/pass, 1.73 tok/pass, accept p1 74 %
+2026-09-22 21:50:36.035 INFO  sched: request 'chatcmpl-286d5308977d763b' retired (steps): 256 tok in 7.5 s — prefill 29 tok (24 cached) in 56 ms; decode 255 tok / 146 passes in 7.4 s: 34.3 tok/s, 29.2 ms/tok, 51 ms/pass, 1.75 tok/pass, accept p1 75 %
+2026-09-22 21:50:36.118 INFO  sched: request 'chatcmpl-286d5308977d763d' admitted to slot 0 (reserve 5 blocks; pool 50/2048 blocks in use) — first token 2124
+2026-09-22 21:50:36.200 INFO  sched: request 'chatcmpl-286d5308977d763e' admitted to slot 1 (reserve 5 blocks; pool 56/2048 blocks in use) — first token 785
+2026-09-22 21:50:36.290 INFO  sched: request 'chatcmpl-286d5308977d763f' admitted to slot 2 (reserve 5 blocks; pool 62/2048 blocks in use) — first token 2124
+2026-09-22 21:50:36.389 INFO  sched: request 'chatcmpl-286d5308977d7640' admitted to slot 3 (reserve 5 blocks; pool 68/2048 blocks in use) — first token 2124
+2026-09-22 21:50:41.240 INFO  stats: rank 1 | 10.0 s | decode 132.3 tok/s, 7.1 ms/tok, 49.3 ms/step (192 steps / 1325 tok, 94 % of wall) | mtp 1.75 tok/step/req, accept p1 75 % | prefill 4 prompts / 20 tok, 2 tok/s, 11.59 ms/tok, 58 ms avg (2 % of wall), 98 tok cached (4/4 hits) | live 4, queued 0 | pool 69/2048 blocks (3 %) | prefix cache 16/4096 entries
+2026-09-22 21:50:43.434 INFO  sched: request 'chatcmpl-286d5308977d763d' retired (steps): 256 tok in 7.3 s — prefill 29 tok (24 cached) in 61 ms; decode 255 tok / 141 passes in 7.3 s: 35.1 tok/s, 28.5 ms/tok, 51 ms/pass, 1.81 tok/pass, accept p1 81 %
+2026-09-22 21:50:43.788 INFO  sched: request 'chatcmpl-286d5308977d763e' retired (steps): 256 tok in 7.6 s — prefill 32 tok (27 cached) in 58 ms; decode 255 tok / 147 passes in 7.5 s: 33.9 tok/s, 29.5 ms/tok, 51 ms/pass, 1.73 tok/pass, accept p1 73 %
+2026-09-22 21:50:43.788 INFO  sched: request 'chatcmpl-286d5308977d763f' retired (steps): 256 tok in 7.5 s — prefill 29 tok (24 cached) in 57 ms; decode 255 tok / 146 passes in 7.4 s: 34.3 tok/s, 29.2 ms/tok, 51 ms/pass, 1.75 tok/pass, accept p1 75 %
+2026-09-22 21:50:43.836 INFO  sched: request 'chatcmpl-286d5308977d7640' retired (steps): 256 tok in 7.4 s — prefill 28 tok (23 cached) in 56 ms; decode 255 tok / 147 passes in 7.4 s: 34.5 tok/s, 29.0 ms/tok, 50 ms/pass, 1.73 tok/pass, accept p1 74 %
+2026-09-22 21:50:44.106 INFO  sched: request 'chatcmpl-286d5308977d7641' prefix cache miss — 2 cut(s) probed against 16 entries; the nearest entry (position 288) shares the first 5 of the prompt's 48 tokens (the prompt differs from it from that token on)
+2026-09-22 21:50:44.106 INFO  sched: request 'chatcmpl-286d5308977d7641' admitted to slot 0 (reserve 5 blocks; pool 51/2048 blocks in use) — first token 8420
+2026-09-22 21:50:47.259 INFO  sched: request 'chatcmpl-286d5308977d7641' retired (steps): 256 tok in 3.2 s — prefill 48 tok (0 cached) in 242 ms; decode 255 tok / 134 passes in 2.9 s: 87.6 tok/s, 11.4 ms/tok, 22 ms/pass, 1.90 tok/pass, accept p1 91 %
+2026-09-22 21:50:47.335 INFO  sched: request 'chatcmpl-286d5308977d7642' admitted to slot 0 (reserve 5 blocks; pool 56/2048 blocks in use) — first token 8420
+2026-09-22 21:50:50.516 INFO  sched: request 'chatcmpl-286d5308977d7642' retired (steps): 256 tok in 3.2 s — prefill 48 tok (43 cached) in 60 ms; decode 255 tok / 134 passes in 3.1 s: 81.7 tok/s, 12.2 ms/tok, 23 ms/pass, 1.90 tok/pass, accept p1 91 %
+2026-09-22 21:50:50.586 INFO  sched: request 'chatcmpl-286d5308977d7643' admitted to slot 0 (reserve 5 blocks; pool 56/2048 blocks in use) — first token 8420
+2026-09-22 21:50:51.241 INFO  stats: rank 1 | 10.0 s | decode 89.4 tok/s, 10.3 ms/tok, 26.6 ms/step (348 steps / 894 tok, 92 % of wall) | mtp 1.82 tok/step/req, accept p1 82 % | prefill 3 prompts / 58 tok, 6 tok/s, 6.23 ms/tok, 120 ms avg (4 % of wall), 86 tok cached (2/3 hits) | live 1, queued 0 | pool 57/2048 blocks (3 %) | prefix cache 18/4096 entries
+2026-09-22 21:50:53.759 INFO  sched: request 'chatcmpl-286d5308977d7643' retired (steps): 256 tok in 3.2 s — prefill 48 tok (43 cached) in 59 ms; decode 255 tok / 134 passes in 3.1 s: 81.9 tok/s, 12.2 ms/tok, 23 ms/pass, 1.90 tok/pass, accept p1 91 %
+2026-09-22 21:50:54.035 INFO  sched: request 'chatcmpl-286d5308977d7644' prefix cache miss — 2 cut(s) probed against 18 entries; the nearest entry (position 302) shares the first 8 of the prompt's 48 tokens (the prompt differs from it from that token on)
+2026-09-22 21:50:54.035 INFO  sched: request 'chatcmpl-286d5308977d7644' admitted to slot 0 (reserve 5 blocks; pool 57/2048 blocks in use) — first token 8420
+2026-09-22 21:50:54.291 INFO  sched: request 'chatcmpl-286d5308977d7645' prefix cache miss — 2 cut(s) probed against 19 entries; the nearest entry (position 302) shares the first 7 of the prompt's 44 tokens (the prompt differs from it from that token on)
+2026-09-22 21:50:54.291 INFO  sched: request 'chatcmpl-286d5308977d7645' admitted to slot 1 (reserve 5 blocks; pool 64/2048 blocks in use) — first token 8420
+2026-09-22 21:50:59.025 INFO  sched: request 'chatcmpl-286d5308977d7644' retired (steps): 256 tok in 5.0 s — prefill 48 tok (0 cached) in 244 ms; decode 255 tok / 141 passes in 4.7 s: 53.7 tok/s, 18.6 ms/tok, 34 ms/pass, 1.81 tok/pass, accept p1 81 %
+2026-09-22 21:50:59.049 INFO  sched: request 'chatcmpl-286d5308977d7645' retired (steps): 256 tok in 4.8 s — prefill 44 tok (0 cached) in 233 ms; decode 255 tok / 141 passes in 4.5 s: 56.4 tok/s, 17.7 ms/tok, 32 ms/pass, 1.81 tok/pass, accept p1 81 %
+2026-09-22 21:50:59.120 INFO  sched: request 'chatcmpl-286d5308977d7646' admitted to slot 0 (reserve 5 blocks; pool 68/2048 blocks in use) — first token 8420
+2026-09-22 21:50:59.199 INFO  sched: request 'chatcmpl-286d5308977d7647' admitted to slot 1 (reserve 5 blocks; pool 74/2048 blocks in use) — first token 8420
+2026-09-22 21:51:01.274 INFO  stats: rank 1 | 10.0 s | decode 93.8 tok/s, 9.6 ms/tok, 29.2 ms/step (311 steps / 941 tok, 91 % of wall) | mtp 1.83 tok/step/req, accept p1 83 % | prefill 4 prompts / 102 tok, 10 tok/s, 5.81 ms/tok, 148 ms avg (6 % of wall), 82 tok cached (2/4 hits) | live 2, queued 0 | pool 75/2048 blocks (4 %) | prefix cache 22/4096 entries
+2026-09-22 21:51:03.931 INFO  sched: request 'chatcmpl-286d5308977d7646' retired (steps): 256 tok in 4.8 s — prefill 48 tok (43 cached) in 60 ms; decode 255 tok / 141 passes in 4.8 s: 53.7 tok/s, 18.6 ms/tok, 34 ms/pass, 1.81 tok/pass, accept p1 81 %
+2026-09-22 21:51:03.956 INFO  sched: request 'chatcmpl-286d5308977d7647' retired (steps): 256 tok in 4.8 s — prefill 44 tok (39 cached) in 56 ms; decode 255 tok / 141 passes in 4.7 s: 54.2 tok/s, 18.4 ms/tok, 33 ms/pass, 1.81 tok/pass, accept p1 81 %
+2026-09-22 21:51:04.033 INFO  sched: request 'chatcmpl-286d5308977d7648' admitted to slot 0 (reserve 5 blocks; pool 68/2048 blocks in use) — first token 8420
+2026-09-22 21:51:04.114 INFO  sched: request 'chatcmpl-286d5308977d7649' admitted to slot 1 (reserve 5 blocks; pool 74/2048 blocks in use) — first token 8420
+2026-09-22 21:51:08.860 INFO  sched: request 'chatcmpl-286d5308977d7648' retired (steps): 256 tok in 4.8 s — prefill 44 tok (39 cached) in 60 ms; decode 255 tok / 141 passes in 4.8 s: 53.5 tok/s, 18.7 ms/tok, 34 ms/pass, 1.81 tok/pass, accept p1 81 %
+2026-09-22 21:51:08.885 INFO  sched: request 'chatcmpl-286d5308977d7649' retired (steps): 256 tok in 4.8 s — prefill 48 tok (43 cached) in 57 ms; decode 255 tok / 141 passes in 4.7 s: 54.1 tok/s, 18.5 ms/tok, 33 ms/pass, 1.81 tok/pass, accept p1 81 %
+2026-09-22 21:51:09.148 INFO  sched: request 'chatcmpl-286d5308977d764a' prefix cache miss — 2 cut(s) probed against 22 entries; the nearest entry (position 299) shares the first 8 of the prompt's 42 tokens (the prompt differs from it from that token on)
+2026-09-22 21:51:09.148 INFO  sched: request 'chatcmpl-286d5308977d764a' admitted to slot 0 (reserve 5 blocks; pool 69/2048 blocks in use) — first token 8420
+2026-09-22 21:51:09.377 INFO  sched: request 'chatcmpl-286d5308977d764b' prefix cache miss — 2 cut(s) probed against 23 entries; the nearest entry (position 303) shares the first 3 of the prompt's 31 tokens (the prompt differs from it from that token on)
+2026-09-22 21:51:09.377 INFO  sched: request 'chatcmpl-286d5308977d764b' admitted to slot 1 (reserve 5 blocks; pool 76/2048 blocks in use) — first token 8420
+2026-09-22 21:51:09.612 INFO  sched: request 'chatcmpl-286d5308977d764c' prefix cache miss — 2 cut(s) probed against 24 entries; the nearest entry (position 26) shares the first 5 of the prompt's 30 tokens (the prompt differs from it from that token on)
+2026-09-22 21:51:09.612 INFO  sched: request 'chatcmpl-286d5308977d764c' admitted to slot 2 (reserve 5 blocks; pool 83/2048 blocks in use) — first token 8420
+2026-09-22 21:51:09.857 INFO  sched: request 'chatcmpl-286d5308977d764d' prefix cache miss — 2 cut(s) probed against 25 entries; the nearest entry (position 26) shares the first 5 of the prompt's 30 tokens (the prompt differs from it from that token on)
+2026-09-22 21:51:09.857 INFO  sched: request 'chatcmpl-286d5308977d764d' admitted to slot 3 (reserve 5 blocks; pool 90/2048 blocks in use) — first token 8420
+2026-09-22 21:51:11.318 INFO  stats: rank 1 | 10.0 s | decode 102.5 tok/s, 8.5 ms/tok, 34.6 ms/step (253 steps / 1030 tok, 87 % of wall) | mtp 1.84 tok/step/req, accept p1 83 % | prefill 6 prompts / 143 tok, 14 tok/s, 6.73 ms/tok, 161 ms avg (10 % of wall), 82 tok cached (2/6 hits) | live 4, queued 0 | pool 91/2048 blocks (4 %) | prefix cache 26/4096 entries
+2026-09-22 21:51:16.780 INFO  sched: request 'chatcmpl-286d5308977d764c' retired (steps): 256 tok in 7.2 s — prefill 30 tok (0 cached) in 202 ms; decode 255 tok / 133 passes in 7.0 s: 36.6 tok/s, 27.3 ms/tok, 52 ms/pass, 1.92 tok/pass, accept p1 92 %
+2026-09-22 21:51:16.781 INFO  sched: request 'chatcmpl-286d5308977d764a' retired (steps): 256 tok in 7.6 s — prefill 42 tok (0 cached) in 237 ms; decode 255 tok / 135 passes in 7.4 s: 34.5 tok/s, 29.0 ms/tok, 55 ms/pass, 1.89 tok/pass, accept p1 89 %
+2026-09-22 21:51:16.929 INFO  sched: request 'chatcmpl-286d5308977d764b' retired (steps): 256 tok in 7.6 s — prefill 31 tok (0 cached) in 206 ms; decode 255 tok / 137 passes in 7.3 s: 34.7 tok/s, 28.8 ms/tok, 54 ms/pass, 1.86 tok/pass, accept p1 87 %
+2026-09-22 21:51:16.979 INFO  sched: request 'chatcmpl-286d5308977d764d' retired (steps): 256 tok in 7.1 s — prefill 30 tok (0 cached) in 202 ms; decode 255 tok / 137 passes in 6.9 s: 36.8 tok/s, 27.1 ms/tok, 51 ms/pass, 1.86 tok/pass, accept p1 86 %
+2026-09-22 21:51:17.063 INFO  sched: request 'chatcmpl-286d5308977d764e' admitted to slot 0 (reserve 5 blocks; pool 92/2048 blocks in use) — first token 8420
+2026-09-22 21:51:17.142 INFO  sched: request 'chatcmpl-286d5308977d764f' admitted to slot 1 (reserve 5 blocks; pool 98/2048 blocks in use) — first token 8420
+2026-09-22 21:51:17.231 INFO  sched: request 'chatcmpl-286d5308977d7650' admitted to slot 2 (reserve 5 blocks; pool 104/2048 blocks in use) — first token 8420
+2026-09-22 21:51:17.329 INFO  sched: request 'chatcmpl-286d5308977d7651' admitted to slot 3 (reserve 5 blocks; pool 110/2048 blocks in use) — first token 8420
+2026-09-22 21:51:21.338 INFO  stats: rank 1 | 10.0 s | decode 138.3 tok/s, 6.8 ms/tok, 50.4 ms/step (188 steps / 1386 tok, 95 % of wall) | mtp 1.89 tok/step/req, accept p1 89 % | prefill 4 prompts / 20 tok, 2 tok/s, 11.47 ms/tok, 57 ms avg (2 % of wall), 113 tok cached (4/4 hits) | live 4, queued 0 | pool 111/2048 blocks (5 %) | prefix cache 30/4096 entries
+2026-09-22 21:51:24.248 INFO  sched: request 'chatcmpl-286d5308977d7650' retired (steps): 256 tok in 7.0 s — prefill 30 tok (25 cached) in 57 ms; decode 255 tok / 133 passes in 7.0 s: 36.6 tok/s, 27.3 ms/tok, 52 ms/pass, 1.92 tok/pass, accept p1 92 %
+2026-09-22 21:51:24.248 INFO  sched: request 'chatcmpl-286d5308977d764e' retired (steps): 256 tok in 7.2 s — prefill 42 tok (37 cached) in 61 ms; decode 255 tok / 135 passes in 7.1 s: 35.8 tok/s, 27.9 ms/tok, 53 ms/pass, 1.89 tok/pass, accept p1 89 %
+2026-09-22 21:51:24.394 INFO  sched: request 'chatcmpl-286d5308977d764f' retired (steps): 256 tok in 7.3 s — prefill 31 tok (26 cached) in 55 ms; decode 255 tok / 137 passes in 7.2 s: 35.4 tok/s, 28.2 ms/tok, 53 ms/pass, 1.86 tok/pass, accept p1 87 %
+2026-09-22 21:51:24.446 INFO  sched: request 'chatcmpl-286d5308977d7651' retired (steps): 256 tok in 7.1 s — prefill 30 tok (25 cached) in 56 ms; decode 255 tok / 137 passes in 7.1 s: 36.1 tok/s, 27.7 ms/tok, 52 ms/pass, 1.86 tok/pass, accept p1 86 %
+2026-09-22 21:51:24.517 INFO  sched: request 'chatcmpl-286d5308977d7652' admitted to slot 0 (reserve 5 blocks; pool 92/2048 blocks in use) — first token 8420
+2026-09-22 21:51:24.595 INFO  sched: request 'chatcmpl-286d5308977d7653' admitted to slot 1 (reserve 5 blocks; pool 98/2048 blocks in use) — first token 8420
+2026-09-22 21:51:24.684 INFO  sched: request 'chatcmpl-286d5308977d7654' admitted to slot 2 (reserve 5 blocks; pool 104/2048 blocks in use) — first token 8420
+2026-09-22 21:51:24.782 INFO  sched: request 'chatcmpl-286d5308977d7655' admitted to slot 3 (reserve 5 blocks; pool 110/2048 blocks in use) — first token 8420
+2026-09-22 21:51:31.382 INFO  stats: rank 1 | 10.0 s | decode 139.2 tok/s, 6.8 ms/tok, 50.3 ms/step (189 steps / 1398 tok, 95 % of wall) | mtp 1.89 tok/step/req, accept p1 89 % | prefill 4 prompts / 20 tok, 2 tok/s, 11.41 ms/tok, 57 ms avg (2 % of wall), 113 tok cached (4/4 hits) | live 4, queued 0 | pool 111/2048 blocks (5 %) | prefix cache 30/4096 entries
+2026-09-22 21:51:31.703 INFO  sched: request 'chatcmpl-286d5308977d7652' retired (steps): 256 tok in 7.2 s — prefill 42 tok (37 cached) in 60 ms; decode 255 tok / 135 passes in 7.1 s: 35.8 tok/s, 27.9 ms/tok, 53 ms/pass, 1.89 tok/pass, accept p1 89 %
+2026-09-22 21:51:31.759 INFO  sched: request 'chatcmpl-286d5308977d7655' retired (steps): 256 tok in 7.0 s — prefill 30 tok (25 cached) in 56 ms; decode 255 tok / 133 passes in 6.9 s: 36.8 tok/s, 27.1 ms/tok, 52 ms/pass, 1.92 tok/pass, accept p1 92 %
+2026-09-22 21:51:31.844 INFO  sched: request 'chatcmpl-286d5308977d7653' retired (steps): 256 tok in 7.2 s — prefill 31 tok (26 cached) in 55 ms; decode 255 tok / 137 passes in 7.2 s: 35.5 tok/s, 28.2 ms/tok, 53 ms/pass, 1.86 tok/pass, accept p1 87 %
+2026-09-22 21:51:31.868 INFO  sched: request 'chatcmpl-286d5308977d7654' retired (steps): 256 tok in 7.2 s — prefill 30 tok (25 cached) in 56 ms; decode 255 tok / 137 passes in 7.1 s: 35.8 tok/s, 27.9 ms/tok, 52 ms/pass, 1.86 tok/pass, accept p1 86 %
+2026-09-22 21:51:32.126 INFO  sched: request 'chatcmpl-286d5308977d7656' prefix cache miss — 2 cut(s) probed against 30 entries; the nearest entry (position 303) shares the first 3 of the prompt's 45 tokens (the prompt differs from it from that token on)
+2026-09-22 21:51:32.126 INFO  sched: request 'chatcmpl-286d5308977d7656' admitted to slot 0 (reserve 5 blocks; pool 93/2048 blocks in use) — first token 9640
+2026-09-22 21:51:35.144 INFO  sched: request 'chatcmpl-286d5308977d7656' retired (steps): 256 tok in 3.0 s — prefill 45 tok (0 cached) in 237 ms; decode 255 tok / 129 passes in 2.8 s: 91.7 tok/s, 10.9 ms/tok, 22 ms/pass, 1.98 tok/pass, accept p1 98 %
+2026-09-22 21:51:35.223 INFO  sched: request 'chatcmpl-286d5308977d7657' admitted to slot 0 (reserve 5 blocks; pool 98/2048 blocks in use) — first token 9640
+2026-09-22 21:51:38.223 INFO  sched: request 'chatcmpl-286d5308977d7657' retired (steps): 256 tok in 3.0 s — prefill 45 tok (40 cached) in 57 ms; decode 255 tok / 129 passes in 2.9 s: 86.7 tok/s, 11.5 ms/tok, 23 ms/pass, 1.98 tok/pass, accept p1 98 %
+2026-09-22 21:51:38.311 INFO  sched: request 'chatcmpl-286d5308977d7658' admitted to slot 0 (reserve 5 blocks; pool 98/2048 blocks in use) — first token 9640
+2026-09-22 21:51:41.326 INFO  sched: request 'chatcmpl-286d5308977d7658' retired (steps): 256 tok in 3.0 s — prefill 45 tok (40 cached) in 59 ms; decode 255 tok / 129 passes in 3.0 s: 86.3 tok/s, 11.6 ms/tok, 23 ms/pass, 1.98 tok/pass, accept p1 98 %
+2026-09-22 21:51:41.604 INFO  sched: request 'chatcmpl-286d5308977d7659' prefix cache miss — 2 cut(s) probed against 32 entries; the nearest entry (position 299) shares the first 17 of the prompt's 46 tokens (the prompt differs from it from that token on)
+2026-09-22 21:51:41.604 INFO  sched: request 'chatcmpl-286d5308977d7659' admitted to slot 0 (reserve 5 blocks; pool 99/2048 blocks in use) — first token 73594
+2026-09-22 21:51:41.626 INFO  stats: rank 1 | 10.2 s | decode 80.9 tok/s, 11.1 ms/tok, 23.1 ms/step (398 steps / 829 tok, 90 % of wall) | mtp 1.97 tok/step/req, accept p1 98 % | prefill 4 prompts / 101 tok, 10 tok/s, 5.87 ms/tok, 148 ms avg (6 % of wall), 80 tok cached (2/4 hits) | live 1, queued 1 | pool 100/2048 blocks (5 %) | prefix cache 33/4096 entries
+2026-09-22 21:51:41.860 INFO  sched: request 'chatcmpl-286d5308977d765a' prefix cache miss — 2 cut(s) probed against 33 entries; the nearest entry (position 299) shares the first 17 of the prompt's 45 tokens (the prompt differs from it from that token on)
+2026-09-22 21:51:41.860 INFO  sched: request 'chatcmpl-286d5308977d765a' admitted to slot 1 (reserve 5 blocks; pool 106/2048 blocks in use) — first token 9640
+2026-09-22 21:51:46.173 INFO  sched: request 'chatcmpl-286d5308977d765a' retired (steps): 256 tok in 4.3 s — prefill 45 tok (0 cached) in 232 ms; decode 255 tok / 128 passes in 4.1 s: 62.5 tok/s, 16.0 ms/tok, 32 ms/pass, 1.99 tok/pass, accept p1 100 %
+2026-09-22 21:51:46.173 INFO  sched: request 'chatcmpl-286d5308977d7659' retired (steps): 256 tok in 4.6 s — prefill 46 tok (0 cached) in 240 ms; decode 255 tok / 129 passes in 4.3 s: 58.9 tok/s, 17.0 ms/tok, 34 ms/pass, 1.98 tok/pass, accept p1 98 %
+2026-09-22 21:51:46.265 INFO  sched: request 'chatcmpl-286d5308977d765b' admitted to slot 0 (reserve 5 blocks; pool 110/2048 blocks in use) — first token 73594
+2026-09-22 21:51:46.344 INFO  sched: request 'chatcmpl-286d5308977d765c' admitted to slot 1 (reserve 5 blocks; pool 116/2048 blocks in use) — first token 9640
+2026-09-22 21:51:50.659 INFO  sched: request 'chatcmpl-286d5308977d765c' retired (steps): 256 tok in 4.3 s — prefill 45 tok (40 cached) in 56 ms; decode 255 tok / 128 passes in 4.3 s: 59.9 tok/s, 16.7 ms/tok, 33 ms/pass, 1.99 tok/pass, accept p1 100 %
+2026-09-22 21:51:50.659 INFO  sched: request 'chatcmpl-286d5308977d765b' retired (steps): 256 tok in 4.4 s — prefill 46 tok (41 cached) in 60 ms; decode 255 tok / 129 passes in 4.3 s: 58.8 tok/s, 17.0 ms/tok, 34 ms/pass, 1.98 tok/pass, accept p1 98 %
+2026-09-22 21:51:50.747 INFO  sched: request 'chatcmpl-286d5308977d765d' admitted to slot 0 (reserve 5 blocks; pool 110/2048 blocks in use) — first token 73594
+2026-09-22 21:51:50.824 INFO  sched: request 'chatcmpl-286d5308977d765e' admitted to slot 1 (reserve 5 blocks; pool 116/2048 blocks in use) — first token 9640
+2026-09-22 21:51:51.641 INFO  stats: rank 1 | 10.0 s | decode 112.3 tok/s, 8.2 ms/tok, 32.5 ms/step (283 steps / 1125 tok, 92 % of wall) | mtp 1.99 tok/step/req, accept p1 99 % | prefill 5 prompts / 65 tok, 6 tok/s, 7.12 ms/tok, 93 ms avg (5 % of wall), 162 tok cached (4/5 hits) | live 2, queued 0 | pool 117/2048 blocks (6 %) | prefix cache 36/4096 entries
+2026-09-22 21:51:55.133 INFO  sched: request 'chatcmpl-286d5308977d765e' retired (steps): 256 tok in 4.3 s — prefill 45 tok (40 cached) in 54 ms; decode 255 tok / 128 passes in 4.3 s: 59.9 tok/s, 16.7 ms/tok, 33 ms/pass, 1.99 tok/pass, accept p1 100 %
+2026-09-22 21:51:55.133 INFO  sched: request 'chatcmpl-286d5308977d765d' retired (steps): 256 tok in 4.4 s — prefill 46 tok (41 cached) in 61 ms; decode 255 tok / 129 passes in 4.3 s: 59.0 tok/s, 17.0 ms/tok, 34 ms/pass, 1.98 tok/pass, accept p1 98 %
+2026-09-22 21:51:55.419 INFO  sched: request 'chatcmpl-286d5308977d765f' prefix cache miss — 2 cut(s) probed against 36 entries; the nearest entry (position 300) shares the first 17 of the prompt's 44 tokens (the prompt differs from it from that token on)
+2026-09-22 21:51:55.419 INFO  sched: request 'chatcmpl-286d5308977d765f' admitted to slot 0 (reserve 5 blocks; pool 111/2048 blocks in use) — first token 73594
+2026-09-22 21:51:55.647 INFO  sched: request 'chatcmpl-286d5308977d7660' prefix cache miss — 2 cut(s) probed against 37 entries; the nearest entry (position 303) shares the first 3 of the prompt's 31 tokens (the prompt differs from it from that token on)
+2026-09-22 21:51:55.647 INFO  sched: request 'chatcmpl-286d5308977d7660' admitted to slot 1 (reserve 5 blocks; pool 118/2048 blocks in use) — first token 73594
+2026-09-22 21:51:55.894 INFO  sched: request 'chatcmpl-286d5308977d7661' prefix cache miss — 2 cut(s) probed against 38 entries; the nearest entry (position 26) shares the first 8 of the prompt's 34 tokens (the prompt differs from it from that token on)
+2026-09-22 21:51:55.894 INFO  sched: request 'chatcmpl-286d5308977d7661' admitted to slot 2 (reserve 5 blocks; pool 125/2048 blocks in use) — first token 73594
+2026-09-22 21:51:56.144 INFO  sched: request 'chatcmpl-286d5308977d7662' prefix cache miss — 2 cut(s) probed against 39 entries; the nearest entry (position 29) shares the first 8 of the prompt's 32 tokens (the prompt differs from it from that token on)
+2026-09-22 21:51:56.144 INFO  sched: request 'chatcmpl-286d5308977d7662' admitted to slot 3 (reserve 5 blocks; pool 132/2048 blocks in use) — first token 73594
+2026-09-22 21:52:01.644 INFO  stats: rank 1 | 10.0 s | decode 124.8 tok/s, 7.1 ms/tok, 41.8 ms/step (211 steps / 1248 tok, 88 % of wall) | mtp 1.97 tok/step/req, accept p1 97 % | prefill 4 prompts / 141 tok, 14 tok/s, 6.15 ms/tok, 217 ms avg (9 % of wall), 0 tok cached (0/4 hits) | live 4, queued 0 | pool 133/2048 blocks (6 %) | prefix cache 40/4096 entries
+2026-09-22 21:52:02.806 INFO  sched: request 'chatcmpl-286d5308977d7661' retired (steps): 256 tok in 6.9 s — prefill 34 tok (0 cached) in 216 ms; decode 255 tok / 128 passes in 6.7 s: 38.1 tok/s, 26.3 ms/tok, 52 ms/pass, 1.99 tok/pass, accept p1 100 %
+2026-09-22 21:52:02.806 INFO  sched: request 'chatcmpl-286d5308977d765f' retired (steps): 256 tok in 7.4 s — prefill 44 tok (0 cached) in 238 ms; decode 255 tok / 130 passes in 7.1 s: 35.7 tok/s, 28.0 ms/tok, 55 ms/pass, 1.96 tok/pass, accept p1 97 %
+2026-09-22 21:52:02.858 INFO  sched: request 'chatcmpl-286d5308977d7662' retired (steps): 256 tok in 6.7 s — prefill 32 tok (0 cached) in 209 ms; decode 255 tok / 128 passes in 6.5 s: 39.2 tok/s, 25.5 ms/tok, 51 ms/pass, 1.99 tok/pass, accept p1 100 %
+2026-09-22 21:52:03.002 INFO  sched: request 'chatcmpl-286d5308977d7660' retired (steps): 256 tok in 7.4 s — prefill 31 tok (0 cached) in 205 ms; decode 255 tok / 136 passes in 7.2 s: 35.7 tok/s, 28.0 ms/tok, 53 ms/pass, 1.88 tok/pass, accept p1 88 %
+2026-09-22 21:52:03.078 INFO  sched: request 'chatcmpl-286d5308977d7663' admitted to slot 0 (reserve 5 blocks; pool 134/2048 blocks in use) — first token 73594
+2026-09-22 21:52:03.158 INFO  sched: request 'chatcmpl-286d5308977d7664' admitted to slot 1 (reserve 5 blocks; pool 140/2048 blocks in use) — first token 73594
+2026-09-22 21:52:03.245 INFO  sched: request 'chatcmpl-286d5308977d7665' admitted to slot 2 (reserve 5 blocks; pool 146/2048 blocks in use) — first token 73594
+2026-09-22 21:52:03.343 INFO  sched: request 'chatcmpl-286d5308977d7666' admitted to slot 3 (reserve 5 blocks; pool 152/2048 blocks in use) — first token 73594
+2026-09-22 21:52:09.946 INFO  sched: request 'chatcmpl-286d5308977d7664' retired (steps): 256 tok in 6.8 s — prefill 32 tok (27 cached) in 56 ms; decode 255 tok / 128 passes in 6.7 s: 37.9 tok/s, 26.4 ms/tok, 53 ms/pass, 1.99 tok/pass, accept p1 100 %
+2026-09-22 21:52:10.000 INFO  sched: request 'chatcmpl-286d5308977d7665' retired (steps): 256 tok in 6.8 s — prefill 34 tok (29 cached) in 56 ms; decode 255 tok / 128 passes in 6.7 s: 38.1 tok/s, 26.3 ms/tok, 52 ms/pass, 1.99 tok/pass, accept p1 100 %
+2026-09-22 21:52:10.000 INFO  sched: request 'chatcmpl-286d5308977d7663' retired (steps): 256 tok in 6.9 s — prefill 44 tok (39 cached) in 59 ms; decode 255 tok / 130 passes in 6.9 s: 37.2 tok/s, 26.9 ms/tok, 53 ms/pass, 1.96 tok/pass, accept p1 97 %
+2026-09-22 21:52:10.214 INFO  sched: request 'chatcmpl-286d5308977d7666' retired (steps): 256 tok in 6.9 s — prefill 31 tok (26 cached) in 58 ms; decode 255 tok / 136 passes in 6.8 s: 37.4 tok/s, 26.7 ms/tok, 50 ms/pass, 1.88 tok/pass, accept p1 88 %
+2026-09-22 21:52:10.278 INFO  sched: request 'chatcmpl-286d5308977d7667' admitted to slot 0 (reserve 5 blocks; pool 134/2048 blocks in use) — first token 73594
+2026-09-22 21:52:10.357 INFO  sched: request 'chatcmpl-286d5308977d7668' admitted to slot 1 (reserve 5 blocks; pool 140/2048 blocks in use) — first token 73594
+2026-09-22 21:52:10.444 INFO  sched: request 'chatcmpl-286d5308977d7669' admitted to slot 2 (reserve 5 blocks; pool 146/2048 blocks in use) — first token 73594
+2026-09-22 21:52:10.542 INFO  sched: request 'chatcmpl-286d5308977d766a' admitted to slot 3 (reserve 5 blocks; pool 152/2048 blocks in use) — first token 73594
+2026-09-22 21:52:11.697 INFO  stats: rank 1 | 10.1 s | decode 139.4 tok/s, 6.6 ms/tok, 47.8 ms/step (194 steps / 1401 tok, 92 % of wall) | mtp 1.96 tok/step/req, accept p1 96 % | prefill 8 prompts / 40 tok, 4 tok/s, 11.42 ms/tok, 57 ms avg (5 % of wall), 242 tok cached (8/8 hits) | live 4, queued 0 | pool 153/2048 blocks (7 %) | prefix cache 44/4096 entries
+2026-09-22 21:52:17.056 INFO  sched: request 'chatcmpl-286d5308977d7667' retired (steps): 256 tok in 6.8 s — prefill 32 tok (27 cached) in 58 ms; decode 255 tok / 128 passes in 6.7 s: 37.9 tok/s, 26.4 ms/tok, 53 ms/pass, 1.99 tok/pass, accept p1 100 %
+2026-09-22 21:52:17.161 INFO  sched: request 'chatcmpl-286d5308977d7669' retired (steps): 256 tok in 6.7 s — prefill 34 tok (29 cached) in 56 ms; decode 255 tok / 128 passes in 6.7 s: 38.3 tok/s, 26.1 ms/tok, 52 ms/pass, 1.99 tok/pass, accept p1 100 %
+2026-09-22 21:52:17.211 INFO  sched: request 'chatcmpl-286d5308977d7668' retired (steps): 256 tok in 6.9 s — prefill 44 tok (39 cached) in 55 ms; decode 255 tok / 130 passes in 6.8 s: 37.5 tok/s, 26.7 ms/tok, 52 ms/pass, 1.96 tok/pass, accept p1 97 %
+2026-09-22 21:52:17.402 INFO  sched: request 'chatcmpl-286d5308977d766a' retired (steps): 256 tok in 6.9 s — prefill 31 tok (26 cached) in 59 ms; decode 255 tok / 136 passes in 6.8 s: 37.5 tok/s, 26.7 ms/tok, 50 ms/pass, 1.88 tok/pass, accept p1 88 %
+2026-09-22 21:52:17.755 INFO  sched: request 'chatcmpl-286d5308977d766b' prefix cache miss — 2 cut(s) probed against 44 entries; the nearest entry (position 303) shares the first 3 of the prompt's 70 tokens (the prompt differs from it from that token on)
+2026-09-22 21:52:17.755 INFO  sched: request 'chatcmpl-286d5308977d766b' admitted to slot 0 (reserve 6 blocks; pool 136/2048 blocks in use) — first token 8420
+2026-09-22 21:52:20.833 INFO  sched: request 'chatcmpl-286d5308977d766b' retired (steps): 256 tok in 3.1 s — prefill 70 tok (0 cached) in 272 ms; decode 255 tok / 131 passes in 2.8 s: 90.9 tok/s, 11.0 ms/tok, 21 ms/pass, 1.95 tok/pass, accept p1 95 %
+2026-09-22 21:52:20.905 INFO  sched: request 'chatcmpl-286d5308977d766c' admitted to slot 0 (reserve 6 blocks; pool 141/2048 blocks in use) — first token 8420
+2026-09-22 21:52:21.699 INFO  stats: rank 1 | 10.0 s | decode 115.4 tok/s, 8.0 ms/tok, 33.3 ms/step (278 steps / 1154 tok, 93 % of wall) | mtp 1.96 tok/step/req, accept p1 96 % | prefill 2 prompts / 75 tok, 7 tok/s, 4.44 ms/tok, 167 ms avg (3 % of wall), 65 tok cached (1/2 hits) | live 1, queued 0 | pool 142/2048 blocks (7 %) | prefix cache 46/4096 entries
+2026-09-22 21:52:23.982 INFO  sched: request 'chatcmpl-286d5308977d766c' retired (steps): 256 tok in 3.1 s — prefill 70 tok (65 cached) in 61 ms; decode 255 tok / 131 passes in 3.0 s: 84.6 tok/s, 11.8 ms/tok, 23 ms/pass, 1.95 tok/pass, accept p1 95 %
+2026-09-22 21:52:24.066 INFO  sched: request 'chatcmpl-286d5308977d766d' admitted to slot 0 (reserve 6 blocks; pool 141/2048 blocks in use) — first token 8420
+2026-09-22 21:52:27.147 INFO  sched: request 'chatcmpl-286d5308977d766d' retired (steps): 256 tok in 3.1 s — prefill 70 tok (65 cached) in 61 ms; decode 255 tok / 131 passes in 3.0 s: 84.4 tok/s, 11.8 ms/tok, 23 ms/pass, 1.95 tok/pass, accept p1 95 %
+2026-09-22 21:52:27.447 INFO  sched: request 'chatcmpl-286d5308977d766e' prefix cache miss — 2 cut(s) probed against 46 entries; the nearest entry (position 324) shares the first 4 of the prompt's 61 tokens (the prompt differs from it from that token on)
+2026-09-22 21:52:27.447 INFO  sched: request 'chatcmpl-286d5308977d766e' admitted to slot 0 (reserve 5 blocks; pool 142/2048 blocks in use) — first token 8420
+2026-09-22 21:52:27.717 INFO  sched: request 'chatcmpl-286d5308977d766f' prefix cache miss — 2 cut(s) probed against 47 entries; the nearest entry (position 324) shares the first 3 of the prompt's 51 tokens (the prompt differs from it from that token on)
+2026-09-22 21:52:27.717 INFO  sched: request 'chatcmpl-286d5308977d766f' admitted to slot 1 (reserve 5 blocks; pool 149/2048 blocks in use) — first token 8420
+2026-09-22 21:52:31.726 INFO  stats: rank 1 | 10.0 s | decode 91.2 tok/s, 9.9 ms/tok, 26.0 ms/step (349 steps / 914 tok, 90 % of wall) | mtp 1.95 tok/step/req, accept p1 95 % | prefill 3 prompts / 117 tok, 12 tok/s, 4.87 ms/tok, 190 ms avg (6 % of wall), 65 tok cached (1/3 hits) | live 2, queued 0 | pool 150/2048 blocks (7 %) | prefix cache 48/4096 entries
+2026-09-22 21:52:32.093 INFO  sched: request 'chatcmpl-286d5308977d766e' retired (steps): 256 tok in 4.6 s — prefill 61 tok (0 cached) in 262 ms; decode 255 tok / 132 passes in 4.4 s: 58.2 tok/s, 17.2 ms/tok, 33 ms/pass, 1.93 tok/pass, accept p1 94 %
+2026-09-22 21:52:32.141 INFO  sched: request 'chatcmpl-286d5308977d766f' retired (steps): 256 tok in 4.4 s — prefill 51 tok (0 cached) in 246 ms; decode 255 tok / 133 passes in 4.2 s: 61.0 tok/s, 16.4 ms/tok, 31 ms/pass, 1.92 tok/pass, accept p1 92 %
+2026-09-22 21:52:32.228 INFO  sched: request 'chatcmpl-286d5308977d7670' admitted to slot 0 (reserve 5 blocks; pool 153/2048 blocks in use) — first token 8420
+2026-09-22 21:52:32.309 INFO  sched: request 'chatcmpl-286d5308977d7671' admitted to slot 1 (reserve 5 blocks; pool 159/2048 blocks in use) — first token 8420
+2026-09-22 21:52:36.697 INFO  sched: request 'chatcmpl-286d5308977d7670' retired (steps): 256 tok in 4.5 s — prefill 61 tok (56 cached) in 60 ms; decode 255 tok / 132 passes in 4.4 s: 57.8 tok/s, 17.3 ms/tok, 33 ms/pass, 1.93 tok/pass, accept p1 94 %
+2026-09-22 21:52:36.744 INFO  sched: request 'chatcmpl-286d5308977d7671' retired (steps): 256 tok in 4.4 s — prefill 51 tok (46 cached) in 57 ms; decode 255 tok / 133 passes in 4.4 s: 58.2 tok/s, 17.2 ms/tok, 33 ms/pass, 1.92 tok/pass, accept p1 92 %
+2026-09-22 21:52:36.832 INFO  sched: request 'chatcmpl-286d5308977d7672' admitted to slot 0 (reserve 5 blocks; pool 153/2048 blocks in use) — first token 8420
+2026-09-22 21:52:36.912 INFO  sched: request 'chatcmpl-286d5308977d7673' admitted to slot 1 (reserve 5 blocks; pool 159/2048 blocks in use) — first token 8420
+2026-09-22 21:52:41.290 INFO  sched: request 'chatcmpl-286d5308977d7672' retired (steps): 256 tok in 4.5 s — prefill 61 tok (56 cached) in 61 ms; decode 255 tok / 132 passes in 4.4 s: 58.0 tok/s, 17.2 ms/tok, 33 ms/pass, 1.93 tok/pass, accept p1 94 %
+2026-09-22 21:52:41.338 INFO  sched: request 'chatcmpl-286d5308977d7673' retired (steps): 256 tok in 4.4 s — prefill 51 tok (46 cached) in 57 ms; decode 255 tok / 133 passes in 4.4 s: 58.4 tok/s, 17.1 ms/tok, 33 ms/pass, 1.92 tok/pass, accept p1 92 %
+2026-09-22 21:52:41.602 INFO  sched: request 'chatcmpl-286d5308977d7674' prefix cache miss — 2 cut(s) probed against 50 entries; the nearest entry (position 324) shares the first 4 of the prompt's 51 tokens (the prompt differs from it from that token on)
+2026-09-22 21:52:41.602 INFO  sched: request 'chatcmpl-286d5308977d7674' admitted to slot 0 (reserve 5 blocks; pool 154/2048 blocks in use) — first token 8420
+2026-09-22 21:52:41.838 INFO  sched: request 'chatcmpl-286d5308977d7675' prefix cache miss — 2 cut(s) probed against 51 entries; the nearest entry (position 324) shares the first 3 of the prompt's 34 tokens (the prompt differs from it from that token on)
+2026-09-22 21:52:41.838 INFO  sched: request 'chatcmpl-286d5308977d7675' admitted to slot 1 (reserve 5 blocks; pool 161/2048 blocks in use) — first token 8420
+2026-09-22 21:52:41.869 INFO  stats: rank 1 | 10.1 s | decode 106.0 tok/s, 8.4 ms/tok, 32.0 ms/step (283 steps / 1075 tok, 89 % of wall) | mtp 1.93 tok/step/req, accept p1 93 % | prefill 6 prompts / 105 tok, 10 tok/s, 6.62 ms/tok, 116 ms avg (7 % of wall), 204 tok cached (4/6 hits) | live 2, queued 2 | pool 162/2048 blocks (8 %) | prefix cache 52/4096 entries
+2026-09-22 21:52:42.085 INFO  sched: request 'chatcmpl-286d5308977d7676' prefix cache miss — 2 cut(s) probed against 52 entries; the nearest entry (position 29) shares the first 8 of the prompt's 36 tokens (the prompt differs from it from that token on)
+2026-09-22 21:52:42.085 INFO  sched: request 'chatcmpl-286d5308977d7676' admitted to slot 2 (reserve 5 blocks; pool 168/2048 blocks in use) — first token 8420
+2026-09-22 21:52:42.337 INFO  sched: request 'chatcmpl-286d5308977d7677' prefix cache miss — 2 cut(s) probed against 53 entries; the nearest entry (position 31) shares the first 7 of the prompt's 32 tokens (the prompt differs from it from that token on)
+2026-09-22 21:52:42.337 INFO  sched: request 'chatcmpl-286d5308977d7677' admitted to slot 3 (reserve 5 blocks; pool 175/2048 blocks in use) — first token 8420
+2026-09-22 21:52:49.076 INFO  sched: request 'chatcmpl-286d5308977d7674' retired (steps): 256 tok in 7.5 s — prefill 51 tok (0 cached) in 248 ms; decode 255 tok / 134 passes in 7.2 s: 35.3 tok/s, 28.3 ms/tok, 54 ms/pass, 1.90 tok/pass, accept p1 91 %
+2026-09-22 21:52:49.280 INFO  sched: request 'chatcmpl-286d5308977d7676' retired (steps): 256 tok in 7.2 s — prefill 36 tok (0 cached) in 214 ms; decode 255 tok / 136 passes in 7.0 s: 36.5 tok/s, 27.4 ms/tok, 51 ms/pass, 1.88 tok/pass, accept p1 88 %
+2026-09-22 21:52:49.380 INFO  sched: request 'chatcmpl-286d5308977d7675' retired (steps): 256 tok in 7.5 s — prefill 34 tok (0 cached) in 213 ms; decode 255 tok / 139 passes in 7.3 s: 34.8 tok/s, 28.7 ms/tok, 53 ms/pass, 1.83 tok/pass, accept p1 84 %
+2026-09-22 21:52:49.381 INFO  sched: request 'chatcmpl-286d5308977d7677' retired (steps): 256 tok in 7.0 s — prefill 32 tok (0 cached) in 209 ms; decode 255 tok / 137 passes in 6.8 s: 37.3 tok/s, 26.8 ms/tok, 50 ms/pass, 1.86 tok/pass, accept p1 86 %
+2026-09-22 21:52:49.451 INFO  sched: request 'chatcmpl-286d5308977d7678' admitted to slot 0 (reserve 5 blocks; pool 177/2048 blocks in use) — first token 8420
+2026-09-22 21:52:49.534 INFO  sched: request 'chatcmpl-286d5308977d7679' admitted to slot 1 (reserve 5 blocks; pool 183/2048 blocks in use) — first token 8420
+2026-09-22 21:52:49.621 INFO  sched: request 'chatcmpl-286d5308977d767a' admitted to slot 2 (reserve 5 blocks; pool 189/2048 blocks in use) — first token 8420
+2026-09-22 21:52:49.720 INFO  sched: request 'chatcmpl-286d5308977d767b' admitted to slot 3 (reserve 5 blocks; pool 195/2048 blocks in use) — first token 8420
+2026-09-22 21:52:51.915 INFO  stats: rank 1 | 10.0 s | decode 134.6 tok/s, 6.7 ms/tok, 49.5 ms/step (184 steps / 1352 tok, 91 % of wall) | mtp 1.88 tok/step/req, accept p1 87 % | prefill 6 prompts / 88 tok, 9 tok/s, 7.47 ms/tok, 110 ms avg (7 % of wall), 133 tok cached (4/6 hits) | live 4, queued 0 | pool 196/2048 blocks (10 %) | prefix cache 58/4096 entries
+2026-09-22 21:52:56.501 INFO  sched: request 'chatcmpl-286d5308977d7678' retired (steps): 256 tok in 7.0 s — prefill 51 tok (46 cached) in 65 ms; decode 255 tok / 134 passes in 7.0 s: 36.5 tok/s, 27.4 ms/tok, 52 ms/pass, 1.90 tok/pass, accept p1 91 %
+2026-09-22 21:52:56.654 INFO  sched: request 'chatcmpl-286d5308977d7679' retired (steps): 256 tok in 7.1 s — prefill 36 tok (31 cached) in 56 ms; decode 255 tok / 136 passes in 7.1 s: 36.1 tok/s, 27.7 ms/tok, 52 ms/pass, 1.88 tok/pass, accept p1 88 %
+2026-09-22 21:52:56.796 INFO  sched: request 'chatcmpl-286d5308977d767b' retired (steps): 256 tok in 7.1 s — prefill 32 tok (27 cached) in 58 ms; decode 255 tok / 137 passes in 7.0 s: 36.3 tok/s, 27.5 ms/tok, 51 ms/pass, 1.86 tok/pass, accept p1 86 %
+2026-09-22 21:52:56.822 INFO  sched: request 'chatcmpl-286d5308977d767a' retired (steps): 256 tok in 7.2 s — prefill 34 tok (29 cached) in 55 ms; decode 255 tok / 139 passes in 7.1 s: 35.7 tok/s, 28.0 ms/tok, 51 ms/pass, 1.83 tok/pass, accept p1 84 %
+2026-09-22 21:52:56.899 INFO  sched: request 'chatcmpl-286d5308977d767c' admitted to slot 0 (reserve 5 blocks; pool 177/2048 blocks in use) — first token 8420
+2026-09-22 21:52:56.979 INFO  sched: request 'chatcmpl-286d5308977d767d' admitted to slot 1 (reserve 5 blocks; pool 183/2048 blocks in use) — first token 8420
+2026-09-22 21:52:57.068 INFO  sched: request 'chatcmpl-286d5308977d767e' admitted to slot 2 (reserve 5 blocks; pool 189/2048 blocks in use) — first token 8420
+2026-09-22 21:52:57.167 INFO  sched: request 'chatcmpl-286d5308977d767f' admitted to slot 3 (reserve 5 blocks; pool 195/2048 blocks in use) — first token 8420
+2026-09-22 21:53:01.929 INFO  stats: rank 1 | 10.0 s | decode 138.6 tok/s, 6.8 ms/tok, 49.8 ms/step (190 steps / 1388 tok, 94 % of wall) | mtp 1.87 tok/step/req, accept p1 87 % | prefill 4 prompts / 20 tok, 2 tok/s, 11.61 ms/tok, 58 ms avg (2 % of wall), 133 tok cached (4/4 hits) | live 4, queued 0 | pool 196/2048 blocks (10 %) | prefix cache 58/4096 entries
+2026-09-22 21:53:03.948 INFO  sched: request 'chatcmpl-286d5308977d767c' retired (steps): 256 tok in 7.0 s — prefill 51 tok (46 cached) in 61 ms; decode 255 tok / 134 passes in 7.0 s: 36.5 tok/s, 27.4 ms/tok, 52 ms/pass, 1.90 tok/pass, accept p1 91 %
+2026-09-22 21:53:04.156 INFO  sched: request 'chatcmpl-286d5308977d767d' retired (steps): 256 tok in 7.2 s — prefill 32 tok (27 cached) in 57 ms; decode 255 tok / 137 passes in 7.1 s: 35.8 tok/s, 27.9 ms/tok, 52 ms/pass, 1.86 tok/pass, accept p1 86 %
+2026-09-22 21:53:04.156 INFO  sched: request 'chatcmpl-286d5308977d767e' retired (steps): 256 tok in 7.1 s — prefill 36 tok (31 cached) in 57 ms; decode 255 tok / 136 passes in 7.0 s: 36.3 tok/s, 27.6 ms/tok, 52 ms/pass, 1.88 tok/pass, accept p1 88 %
+2026-09-22 21:53:04.256 INFO  sched: request 'chatcmpl-286d5308977d767f' retired (steps): 256 tok in 7.1 s — prefill 34 tok (29 cached) in 57 ms; decode 255 tok / 139 passes in 7.0 s: 36.3 tok/s, 27.6 ms/tok, 51 ms/pass, 1.83 tok/pass, accept p1 84 %
+2026-09-22 21:53:04.535 INFO  sched: request 'chatcmpl-286d5308977d7680' prefix cache miss — 2 cut(s) probed against 58 entries; the nearest entry (position 291) shares the first 5 of the prompt's 37 tokens (the prompt differs from it from that token on)
+2026-09-22 21:53:04.535 INFO  sched: request 'chatcmpl-286d5308977d7680' admitted to slot 0 (reserve 5 blocks; pool 178/2048 blocks in use) — first token 2124
+2026-09-22 21:53:07.931 INFO  sched: request 'chatcmpl-286d5308977d7680' retired (steps): 256 tok in 3.4 s — prefill 37 tok (0 cached) in 231 ms; decode 255 tok / 144 passes in 3.2 s: 80.5 tok/s, 12.4 ms/tok, 22 ms/pass, 1.77 tok/pass, accept p1 77 %
+2026-09-22 21:53:08.003 INFO  sched: request 'chatcmpl-286d5308977d7681' admitted to slot 0 (reserve 5 blocks; pool 183/2048 blocks in use) — first token 2124
+2026-09-22 21:53:11.401 INFO  sched: request 'chatcmpl-286d5308977d7681' retired (steps): 256 tok in 3.4 s — prefill 37 tok (32 cached) in 60 ms; decode 255 tok / 144 passes in 3.3 s: 76.4 tok/s, 13.1 ms/tok, 23 ms/pass, 1.77 tok/pass, accept p1 77 %
+2026-09-22 21:53:11.490 INFO  sched: request 'chatcmpl-286d5308977d7682' admitted to slot 0 (reserve 5 blocks; pool 183/2048 blocks in use) — first token 2124
+2026-09-22 21:53:11.941 INFO  stats: rank 1 | 10.0 s | decode 87.2 tok/s, 10.6 ms/tok, 26.1 ms/step (354 steps / 873 tok, 92 % of wall) | mtp 1.82 tok/step/req, accept p1 82 % | prefill 3 prompts / 47 tok, 5 tok/s, 7.51 ms/tok, 118 ms avg (4 % of wall), 64 tok cached (2/3 hits) | live 1, queued 0 | pool 184/2048 blocks (9 %) | prefix cache 60/4096 entries
+2026-09-22 21:53:14.895 INFO  sched: request 'chatcmpl-286d5308977d7682' retired (steps): 256 tok in 3.4 s — prefill 37 tok (32 cached) in 62 ms; decode 255 tok / 144 passes in 3.3 s: 76.3 tok/s, 13.1 ms/tok, 23 ms/pass, 1.77 tok/pass, accept p1 77 %
+2026-09-22 21:53:15.167 INFO  sched: request 'chatcmpl-286d5308977d7683' prefix cache miss — 2 cut(s) probed against 60 entries; the nearest entry (position 292) shares the first 13 of the prompt's 38 tokens (the prompt differs from it from that token on)
+2026-09-22 21:53:15.167 INFO  sched: request 'chatcmpl-286d5308977d7683' admitted to slot 0 (reserve 5 blocks; pool 184/2048 blocks in use) — first token 32
+2026-09-22 21:53:15.416 INFO  sched: request 'chatcmpl-286d5308977d7684' prefix cache miss — 2 cut(s) probed against 61 entries; the nearest entry (position 292) shares the first 12 of the prompt's 37 tokens (the prompt differs from it from that token on)
+2026-09-22 21:53:15.416 INFO  sched: request 'chatcmpl-286d5308977d7684' admitted to slot 1 (reserve 5 blocks; pool 191/2048 blocks in use) — first token 2124
+2026-09-22 21:53:20.241 INFO  sched: request 'chatcmpl-286d5308977d7684' retired (steps): 256 tok in 4.8 s — prefill 37 tok (0 cached) in 225 ms; decode 255 tok / 142 passes in 4.6 s: 55.4 tok/s, 18.0 ms/tok, 32 ms/pass, 1.80 tok/pass, accept p1 80 %
+2026-09-22 21:53:20.409 INFO  sched: request 'chatcmpl-286d5308977d7683' retired (steps): 256 tok in 5.2 s — prefill 38 tok (0 cached) in 235 ms; decode 255 tok / 150 passes in 5.0 s: 50.9 tok/s, 19.6 ms/tok, 33 ms/pass, 1.70 tok/pass, accept p1 70 %
+2026-09-22 21:53:20.482 INFO  sched: request 'chatcmpl-286d5308977d7685' admitted to slot 0 (reserve 5 blocks; pool 195/2048 blocks in use) — first token 32
+2026-09-22 21:53:20.563 INFO  sched: request 'chatcmpl-286d5308977d7686' admitted to slot 1 (reserve 5 blocks; pool 201/2048 blocks in use) — first token 2124
+2026-09-22 21:53:21.951 INFO  stats: rank 1 | 10.0 s | decode 88.2 tok/s, 10.3 ms/tok, 28.6 ms/step (317 steps / 883 tok, 91 % of wall) | mtp 1.77 tok/step/req, accept p1 76 % | prefill 4 prompts / 85 tok, 8 tok/s, 6.80 ms/tok, 145 ms avg (6 % of wall), 65 tok cached (2/4 hits) | live 2, queued 0 | pool 202/2048 blocks (10 %) | prefix cache 64/4096 entries
+2026-09-22 21:53:25.383 INFO  sched: request 'chatcmpl-286d5308977d7686' retired (steps): 256 tok in 4.8 s — prefill 37 tok (32 cached) in 57 ms; decode 255 tok / 142 passes in 4.8 s: 53.5 tok/s, 18.7 ms/tok, 34 ms/pass, 1.80 tok/pass, accept p1 80 %
+2026-09-22 21:53:25.550 INFO  sched: request 'chatcmpl-286d5308977d7685' retired (steps): 256 tok in 5.1 s — prefill 38 tok (33 cached) in 62 ms; decode 255 tok / 150 passes in 5.0 s: 50.9 tok/s, 19.6 ms/tok, 33 ms/pass, 1.70 tok/pass, accept p1 70 %
+2026-09-22 21:53:25.643 INFO  sched: request 'chatcmpl-286d5308977d7687' admitted to slot 0 (reserve 5 blocks; pool 195/2048 blocks in use) — first token 2124
+2026-09-22 21:53:25.725 INFO  sched: request 'chatcmpl-286d5308977d7688' admitted to slot 1 (reserve 5 blocks; pool 201/2048 blocks in use) — first token 32
+2026-09-22 21:53:30.517 INFO  sched: request 'chatcmpl-286d5308977d7687' retired (steps): 256 tok in 4.9 s — prefill 37 tok (32 cached) in 60 ms; decode 255 tok / 142 passes in 4.8 s: 53.0 tok/s, 18.9 ms/tok, 34 ms/pass, 1.80 tok/pass, accept p1 80 %
+2026-09-22 21:53:30.731 INFO  sched: request 'chatcmpl-286d5308977d7688' retired (steps): 256 tok in 5.0 s — prefill 38 tok (33 cached) in 58 ms; decode 255 tok / 150 passes in 4.9 s: 51.5 tok/s, 19.4 ms/tok, 33 ms/pass, 1.70 tok/pass, accept p1 70 %
+2026-09-22 21:53:30.997 INFO  sched: request 'chatcmpl-286d5308977d7689' prefix cache miss — 2 cut(s) probed against 64 entries; the nearest entry (position 293) shares the first 12 of the prompt's 37 tokens (the prompt differs from it from that token on)
+2026-09-22 21:53:30.997 INFO  sched: request 'chatcmpl-286d5308977d7689' admitted to slot 0 (reserve 5 blocks; pool 196/2048 blocks in use) — first token 2124
+2026-09-22 21:53:31.219 INFO  sched: request 'chatcmpl-286d5308977d768a' prefix cache miss — 2 cut(s) probed against 65 entries; the nearest entry (position 293) shares the first 5 of the prompt's 28 tokens (the prompt differs from it from that token on)
+2026-09-22 21:53:31.219 INFO  sched: request 'chatcmpl-286d5308977d768a' admitted to slot 1 (reserve 5 blocks; pool 203/2048 blocks in use) — first token 2124
+2026-09-22 21:53:31.454 INFO  sched: request 'chatcmpl-286d5308977d768b' prefix cache miss — 2 cut(s) probed against 66 entries; the nearest entry (position 293) shares the first 5 of the prompt's 28 tokens (the prompt differs from it from that token on)
+2026-09-22 21:53:31.454 INFO  sched: request 'chatcmpl-286d5308977d768b' admitted to slot 2 (reserve 5 blocks; pool 210/2048 blocks in use) — first token 334
+2026-09-22 21:53:31.702 INFO  sched: request 'chatcmpl-286d5308977d768c' prefix cache miss — 2 cut(s) probed against 67 entries; the nearest entry (position 293) shares the first 5 of the prompt's 28 tokens (the prompt differs from it from that token on)
+2026-09-22 21:53:31.702 INFO  sched: request 'chatcmpl-286d5308977d768c' admitted to slot 3 (reserve 5 blocks; pool 217/2048 blocks in use) — first token 2124
+2026-09-22 21:53:31.959 INFO  stats: rank 1 | 10.0 s | decode 92.5 tok/s, 9.4 ms/tok, 32.6 ms/step (267 steps / 926 tok, 87 % of wall) | mtp 1.76 tok/step/req, accept p1 75 % | prefill 6 prompts / 131 tok, 13 tok/s, 7.26 ms/tok, 158 ms avg (9 % of wall), 65 tok cached (2/6 hits) | live 4, queued 0 | pool 218/2048 blocks (11 %) | prefix cache 68/4096 entries
+2026-09-22 21:53:38.999 INFO  sched: request 'chatcmpl-286d5308977d7689' retired (steps): 256 tok in 8.0 s — prefill 37 tok (0 cached) in 229 ms; decode 255 tok / 143 passes in 7.8 s: 32.8 tok/s, 30.5 ms/tok, 54 ms/pass, 1.78 tok/pass, accept p1 79 %
+2026-09-22 21:53:39.105 INFO  sched: request 'chatcmpl-286d5308977d768a' retired (steps): 256 tok in 7.9 s — prefill 28 tok (0 cached) in 198 ms; decode 255 tok / 144 passes in 7.7 s: 33.2 tok/s, 30.1 ms/tok, 53 ms/pass, 1.77 tok/pass, accept p1 78 %
+2026-09-22 21:53:39.159 INFO  sched: request 'chatcmpl-286d5308977d768b' retired (steps): 256 tok in 7.7 s — prefill 28 tok (0 cached) in 203 ms; decode 255 tok / 144 passes in 7.5 s: 34.0 tok/s, 29.4 ms/tok, 52 ms/pass, 1.77 tok/pass, accept p1 78 %
+2026-09-22 21:53:39.304 INFO  sched: request 'chatcmpl-286d5308977d768c' retired (steps): 256 tok in 7.6 s — prefill 28 tok (0 cached) in 202 ms; decode 255 tok / 149 passes in 7.4 s: 34.5 tok/s, 29.0 ms/tok, 50 ms/pass, 1.71 tok/pass, accept p1 72 %
+2026-09-22 21:53:39.396 INFO  sched: request 'chatcmpl-286d5308977d768d' admitted to slot 0 (reserve 5 blocks; pool 219/2048 blocks in use) — first token 2124
+2026-09-22 21:53:39.477 INFO  sched: request 'chatcmpl-286d5308977d768e' admitted to slot 1 (reserve 5 blocks; pool 225/2048 blocks in use) — first token 334
+2026-09-22 21:53:39.568 INFO  sched: request 'chatcmpl-286d5308977d768f' admitted to slot 2 (reserve 5 blocks; pool 231/2048 blocks in use) — first token 2124
+2026-09-22 21:53:39.668 INFO  sched: request 'chatcmpl-286d5308977d7690' admitted to slot 3 (reserve 5 blocks; pool 237/2048 blocks in use) — first token 2124
+2026-09-22 21:53:42.008 INFO  stats: rank 1 | 10.0 s | decode 130.1 tok/s, 7.3 ms/tok, 49.5 ms/step (192 steps / 1307 tok, 95 % of wall) | mtp 1.77 tok/step/req, accept p1 77 % | prefill 4 prompts / 20 tok, 2 tok/s, 11.69 ms/tok, 58 ms avg (2 % of wall), 101 tok cached (4/4 hits) | live 4, queued 0 | pool 238/2048 blocks (12 %) | prefix cache 72/4096 entries
+2026-09-22 21:53:46.981 INFO  sched: request 'chatcmpl-286d5308977d768d' retired (steps): 256 tok in 7.6 s — prefill 37 tok (32 cached) in 64 ms; decode 255 tok / 143 passes in 7.5 s: 33.9 tok/s, 29.5 ms/tok, 53 ms/pass, 1.78 tok/pass, accept p1 79 %
+2026-09-22 21:53:47.085 INFO  sched: request 'chatcmpl-286d5308977d768e' retired (steps): 256 tok in 7.6 s — prefill 28 tok (23 cached) in 57 ms; decode 255 tok / 144 passes in 7.6 s: 33.8 tok/s, 29.6 ms/tok, 52 ms/pass, 1.77 tok/pass, accept p1 78 %
+2026-09-22 21:53:47.182 INFO  sched: request 'chatcmpl-286d5308977d7690' retired (steps): 256 tok in 7.5 s — prefill 28 tok (23 cached) in 56 ms; decode 255 tok / 144 passes in 7.5 s: 34.2 tok/s, 29.2 ms/tok, 52 ms/pass, 1.77 tok/pass, accept p1 78 %
+2026-09-22 21:53:47.280 INFO  sched: request 'chatcmpl-286d5308977d768f' retired (steps): 256 tok in 7.7 s — prefill 28 tok (23 cached) in 57 ms; decode 255 tok / 149 passes in 7.7 s: 33.3 tok/s, 30.0 ms/tok, 51 ms/pass, 1.71 tok/pass, accept p1 72 %
+2026-09-22 21:53:47.351 INFO  sched: request 'chatcmpl-286d5308977d7691' admitted to slot 0 (reserve 5 blocks; pool 219/2048 blocks in use) — first token 2124
+2026-09-22 21:53:47.432 INFO  sched: request 'chatcmpl-286d5308977d7692' admitted to slot 1 (reserve 5 blocks; pool 225/2048 blocks in use) — first token 334
+2026-09-22 21:53:47.522 INFO  sched: request 'chatcmpl-286d5308977d7693' admitted to slot 2 (reserve 5 blocks; pool 231/2048 blocks in use) — first token 2124
+2026-09-22 21:53:47.623 INFO  sched: request 'chatcmpl-286d5308977d7694' admitted to slot 3 (reserve 5 blocks; pool 237/2048 blocks in use) — first token 2124
+2026-09-22 21:53:52.025 INFO  stats: rank 1 | 10.0 s | decode 129.4 tok/s, 7.3 ms/tok, 49.6 ms/step (191 steps / 1296 tok, 95 % of wall) | mtp 1.75 tok/step/req, accept p1 75 % | prefill 4 prompts / 20 tok, 2 tok/s, 11.55 ms/tok, 58 ms avg (2 % of wall), 101 tok cached (4/4 hits) | live 4, queued 0 | pool 238/2048 blocks (12 %) | prefix cache 72/4096 entries
+2026-09-22 21:53:54.916 INFO  sched: request 'chatcmpl-286d5308977d7691' retired (steps): 256 tok in 7.6 s — prefill 37 tok (32 cached) in 61 ms; decode 255 tok / 143 passes in 7.5 s: 34.0 tok/s, 29.4 ms/tok, 52 ms/pass, 1.78 tok/pass, accept p1 79 %
+2026-09-22 21:53:55.024 INFO  sched: request 'chatcmpl-286d5308977d7692' retired (steps): 256 tok in 7.6 s — prefill 28 tok (23 cached) in 57 ms; decode 255 tok / 144 passes in 7.5 s: 33.8 tok/s, 29.5 ms/tok, 52 ms/pass, 1.77 tok/pass, accept p1 78 %
+2026-09-22 21:53:55.127 INFO  sched: request 'chatcmpl-286d5308977d7694' retired (steps): 256 tok in 7.5 s — prefill 28 tok (23 cached) in 57 ms; decode 255 tok / 144 passes in 7.4 s: 34.2 tok/s, 29.2 ms/tok, 52 ms/pass, 1.77 tok/pass, accept p1 78 %
+2026-09-22 21:53:55.225 INFO  sched: request 'chatcmpl-286d5308977d7693' retired (steps): 256 tok in 7.7 s — prefill 28 tok (23 cached) in 57 ms; decode 255 tok / 149 passes in 7.6 s: 33.4 tok/s, 30.0 ms/tok, 51 ms/pass, 1.71 tok/pass, accept p1 72 %
+2026-09-22 21:53:55.946 INFO  sched: request 'chatcmpl-286d5308977d7695' prefix cache miss — 2 cut(s) probed against 72 entries; the nearest entry (position 324) shares the first 3 of the prompt's 550 tokens (the prompt differs from it from that token on)
+2026-09-22 21:53:55.946 INFO  sched: request 'chatcmpl-286d5308977d7695' admitted to slot 0 (reserve 9 blocks; pool 224/2048 blocks in use) — first token 1986
+2026-09-22 21:53:55.946 INFO  sched: request 'chatcmpl-286d5308977d7695' retired (steps): 1 tok in 0.0 s — prefill 550 tok (0 cached) in 631 ms; decode 0 tok / 0 passes in 0.0 s
+2026-09-22 21:53:57.748 INFO  sched: request 'chatcmpl-286d5308977d7696' prefix cache miss — 3 cut(s) probed against 74 entries; the nearest entry (position 550) shares the first 14 of the prompt's 2076 tokens (the prompt differs from it from that token on)
+2026-09-22 21:53:57.749 INFO  sched: request 'chatcmpl-286d5308977d7696' admitted to slot 0 (reserve 33 blocks; pool 258/2048 blocks in use) — first token 1986
+2026-09-22 21:53:57.759 INFO  sched: request 'chatcmpl-286d5308977d7696' retired (steps): 1 tok in 0.0 s — prefill 2076 tok (0 cached) in 1774 ms; decode 0 tok / 0 passes in 0.0 s
+2026-09-22 21:53:59.543 INFO  sched: request 'chatcmpl-286d5308977d7697' prefix cache miss — 3 cut(s) probed against 76 entries; the nearest entry (position 2076) shares the first 20 of the prompt's 2075 tokens (the prompt differs from it from that token on)
+2026-09-22 21:53:59.544 INFO  sched: request 'chatcmpl-286d5308977d7697' admitted to slot 0 (reserve 33 blocks; pool 292/2048 blocks in use) — first token 1986
+2026-09-22 21:53:59.544 INFO  sched: request 'chatcmpl-286d5308977d7697' retired (steps): 1 tok in 0.0 s — prefill 2075 tok (0 cached) in 1768 ms; decode 0 tok / 0 passes in 0.0 s
+2026-09-22 21:54:01.235 INFO  sched: request 'chatcmpl-286d5308977d7698' prefix cache miss — 2 cut(s) probed against 78 entries; the nearest entry (position 2076) shares the first 20 of the prompt's 2054 tokens (the prompt differs from it from that token on)
+2026-09-22 21:54:01.235 INFO  sched: request 'chatcmpl-286d5308977d7698' admitted to slot 0 (reserve 33 blocks; pool 326/2048 blocks in use) — first token 1986
+2026-09-22 21:54:01.235 INFO  sched: request 'chatcmpl-286d5308977d7698' retired (steps): 1 tok in 0.0 s — prefill 2054 tok (0 cached) in 1656 ms; decode 0 tok / 0 passes in 0.0 s
+2026-09-22 21:54:07.688 INFO  sched: request 'chatcmpl-286d5308977d7699' prefix cache miss — 5 cut(s) probed against 80 entries; the nearest entry (position 2076) shares the first 15 of the prompt's 8160 tokens (the prompt differs from it from that token on)
+2026-09-22 21:54:07.688 INFO  sched: request 'chatcmpl-286d5308977d7699' admitted to slot 0 (reserve 128 blocks; pool 455/2048 blocks in use) — first token 1986
+2026-09-22 21:54:07.689 INFO  sched: request 'chatcmpl-286d5308977d7699' retired (steps): 1 tok in 0.0 s — prefill 8160 tok (0 cached) in 6431 ms; decode 0 tok / 0 passes in 0.0 s
+2026-09-22 21:54:07.689 INFO  stats: rank 1 | 15.7 s | decode 26.8 tok/s, 7.4 ms/tok, 49.3 ms/step (63 steps / 420 tok, 20 % of wall) | mtp 1.79 tok/step/req, accept p1 79 % | prefill 5 prompts / 14915 tok, 952 tok/s, 0.82 ms/tok, 2452 ms avg (78 % of wall), 0 tok cached (0/5 hits) | live 0, queued 0 | pool 455/2048 blocks (22 %) | prefix cache 82/4096 entries
+2026-09-22 21:54:14.251 INFO  sched: request 'chatcmpl-286d5308977d769a' prefix cache miss — 6 cut(s) probed against 82 entries; the nearest entry (position 8160) shares the first 20 of the prompt's 8206 tokens (the prompt differs from it from that token on)
+2026-09-22 21:54:14.252 INFO  sched: request 'chatcmpl-286d5308977d769a' admitted to slot 0 (reserve 129 blocks; pool 585/2048 blocks in use) — first token 1986
+2026-09-22 21:54:14.252 INFO  sched: request 'chatcmpl-286d5308977d769a' retired (steps): 1 tok in 0.0 s — prefill 8206 tok (0 cached) in 6546 ms; decode 0 tok / 0 passes in 0.0 s
+2026-09-22 21:54:21.067 INFO  sched: request 'chatcmpl-286d5308977d769b' prefix cache miss — 6 cut(s) probed against 85 entries; the nearest entry (position 8206) shares the first 20 of the prompt's 8385 tokens (the prompt differs from it from that token on)
+2026-09-22 21:54:21.067 INFO  sched: request 'chatcmpl-286d5308977d769b' admitted to slot 0 (reserve 132 blocks; pool 718/2048 blocks in use) — first token 1986
+2026-09-22 21:54:21.067 INFO  sched: request 'chatcmpl-286d5308977d769b' retired (steps): 1 tok in 0.0 s — prefill 8385 tok (0 cached) in 6792 ms; decode 0 tok / 0 passes in 0.0 s
+2026-09-22 21:54:21.067 INFO  stats: rank 1 | 13.4 s | decode 0.1 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 2 tok, 0 % of wall) | prefill 2 prompts / 16591 tok, 1240 tok/s, 0.80 ms/tok, 6669 ms avg (100 % of wall), 0 tok cached (0/2 hits) | live 0, queued 0 | pool 718/2048 blocks (35 %) | prefix cache 88/4096 entries
+2026-09-22 21:54:49.579 INFO  sched: request 'chatcmpl-286d5308977d769c' prefix cache miss — 18 cut(s) probed against 88 entries; the nearest entry (position 8385) shares the first 15 of the prompt's 32940 tokens (the prompt differs from it from that token on)
+2026-09-22 21:54:49.580 INFO  sched: request 'chatcmpl-286d5308977d769c' admitted to slot 0 (reserve 515 blocks; pool 1234/2048 blocks in use) — first token 1986
+2026-09-22 21:54:49.581 INFO  sched: request 'chatcmpl-286d5308977d769c' retired (steps): 1 tok in 0.0 s — prefill 32940 tok (0 cached) in 28465 ms; decode 0 tok / 0 passes in 0.0 s
+2026-09-22 21:54:49.581 INFO  stats: rank 1 | 28.5 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 1 tok, 0 % of wall) | prefill 1 prompt / 32940 tok, 1155 tok/s, 0.86 ms/tok, 28465 ms avg (100 % of wall), 0 tok cached (0/1 hit) | live 0, queued 0 | pool 1234/2048 blocks (60 %) | prefix cache 91/4096 entries
+2026-09-22 21:55:18.064 INFO  sched: request 'chatcmpl-286d5308977d769d' prefix cache miss — 18 cut(s) probed against 91 entries; the nearest entry (position 32940) shares the first 21 of the prompt's 32976 tokens (the prompt differs from it from that token on)
+2026-09-22 21:55:18.064 INFO  sched: request 'chatcmpl-286d5308977d769d' admitted to slot 0 (reserve 516 blocks; pool 1751/2048 blocks in use) — first token 1986
+2026-09-22 21:55:18.065 INFO  sched: request 'chatcmpl-286d5308977d769d' retired (steps): 1 tok in 0.0 s — prefill 32976 tok (0 cached) in 28426 ms; decode 0 tok / 0 passes in 0.0 s
+2026-09-22 21:55:18.065 INFO  stats: rank 1 | 28.5 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 1 tok, 0 % of wall) | prefill 1 prompt / 32976 tok, 1158 tok/s, 0.86 ms/tok, 28426 ms avg (100 % of wall), 0 tok cached (0/1 hit) | live 0, queued 0 | pool 1751/2048 blocks (85 %) | prefix cache 94/4096 entries
+2026-09-22 21:55:46.535 INFO  sched: request 'chatcmpl-286d5308977d769e' prefix cache miss — 18 cut(s) probed against 20 entries; the nearest entry (position 32976) shares the first 21 of the prompt's 32935 tokens (the prompt differs from it from that token on)
+2026-09-22 21:55:46.536 INFO  sched: request 'chatcmpl-286d5308977d769e' admitted to slot 0 (reserve 515 blocks; pool 2043/2048 blocks in use) — first token 1986
+2026-09-22 21:55:46.536 INFO  sched: request 'chatcmpl-286d5308977d769e' retired (steps): 1 tok in 0.0 s — prefill 32935 tok (0 cached) in 28425 ms; decode 0 tok / 0 passes in 0.0 s
+2026-09-22 21:55:46.536 INFO  stats: rank 1 | 28.5 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 1 tok, 0 % of wall) | prefill 1 prompt / 32935 tok, 1157 tok/s, 0.86 ms/tok, 28425 ms avg (100 % of wall), 0 tok cached (0/1 hit) | live 0, queued 0 | pool 2043/2048 blocks (100 %) | prefix cache 23/4096 entries
+2026-09-22 21:55:46.901 INFO  sched: request 'chatcmpl-286d5308977d769f' prefix cache miss — 2 cut(s) probed against 23 entries; an entry at this prompt's cut 56 was evicted (74 eviction(s) ago, last used at tick 204, now tick 6866; the arena holds 4096 slots)
+2026-09-22 21:55:46.901 INFO  sched: request 'chatcmpl-286d5308977d769f' admitted to slot 0 (reserve 2 blocks; pool 2046/2048 blocks in use) — first token 334
+2026-09-22 21:55:47.768 INFO  sched: request 'chatcmpl-286d5308977d769f' retired (steps): 64 tok in 0.9 s — prefill 61 tok (0 cached) in 269 ms; decode 63 tok / 37 passes in 0.6 s: 105.3 tok/s, 9.5 ms/tok, 16 ms/pass, 1.70 tok/pass, accept p1 73 %
+2026-09-22 21:55:47.988 INFO  sched: request 'chatcmpl-286d5308977d76a0' prefix cache miss — 2 cut(s) probed against 23 entries; an entry at this prompt's cut 29 was evicted (73 eviction(s) ago, last used at tick 542, now tick 6904; the arena holds 4096 slots)
+2026-09-22 21:55:47.988 INFO  sched: request 'chatcmpl-286d5308977d76a0' admitted to slot 0 (reserve 5 blocks; pool 2018/2048 blocks in use) — first token 785
+2026-09-22 21:55:51.515 INFO  rank 1: slot 0 closed: 151 sampled decode steps, 1 fallbacks
+2026-09-22 21:55:51.515 INFO  sched: request 'chatcmpl-286d5308977d76a0' retired (steps): 256 tok in 3.5 s — prefill 34 tok (0 cached) in 214 ms; decode 255 tok / 151 passes in 3.3 s: 77.0 tok/s, 13.0 ms/tok, 22 ms/pass, 1.69 tok/pass, accept p1 69 %
+2026-09-22 21:55:51.598 INFO  sched: request 'chatcmpl-286d5308977d76a1' admitted to slot 0 (reserve 5 blocks; pool 2023/2048 blocks in use) — first token 785
+2026-09-22 21:55:55.074 INFO  rank 1: slot 0 closed: 149 sampled decode steps, 2 fallbacks
+2026-09-22 21:55:55.074 INFO  sched: request 'chatcmpl-286d5308977d76a1' retired (steps): 256 tok in 3.5 s — prefill 34 tok (29 cached) in 61 ms; decode 255 tok / 149 passes in 3.4 s: 74.7 tok/s, 13.4 ms/tok, 23 ms/pass, 1.71 tok/pass, accept p1 72 %
+2026-09-22 21:55:55.145 INFO  sched: request 'chatcmpl-286d5308977d76a2' admitted to slot 0 (reserve 5 blocks; pool 2028/2048 blocks in use) — first token 14374
+2026-09-22 21:55:56.552 INFO  stats: rank 1 | 10.0 s | decode 68.4 tok/s, 13.1 ms/tok, 22.5 ms/step (397 steps / 685 tok, 89 % of wall) | mtp 1.73 tok/step/req, accept p1 72 % | prefill 4 prompts / 105 tok, 10 tok/s, 5.75 ms/tok, 151 ms avg (6 % of wall), 58 tok cached (2/4 hits) | live 1, queued 0 | pool 2029/2048 blocks (99 %) | prefix cache 26/4096 entries
+2026-09-22 21:55:58.577 INFO  rank 1: slot 0 closed: 147 sampled decode steps, 1 fallbacks
+2026-09-22 21:55:58.578 INFO  sched: request 'chatcmpl-286d5308977d76a2' retired (steps): 256 tok in 3.4 s — prefill 34 tok (29 cached) in 61 ms; decode 255 tok / 147 passes in 3.4 s: 75.6 tok/s, 13.2 ms/tok, 23 ms/pass, 1.73 tok/pass, accept p1 73 %
+2026-09-22 21:55:58.819 INFO  sched: request 'chatcmpl-286d5308977d76a3' prefix cache miss — 2 cut(s) probed against 27 entries; an entry at this prompt's cut 28 was evicted (69 eviction(s) ago, last used at tick 1003, now tick 7361; the arena holds 4096 slots)
+2026-09-22 21:55:58.819 INFO  sched: request 'chatcmpl-286d5308977d76a3' admitted to slot 0 (reserve 5 blocks; pool 2034/2048 blocks in use) — first token 785
+2026-09-22 21:55:59.059 INFO  sched: request 'chatcmpl-286d5308977d76a4' prefix cache miss — 2 cut(s) probed against 28 entries; an entry at this prompt's cut 28 was evicted (70 eviction(s) ago, last used at tick 1002, now tick 7362; the arena holds 4096 slots)
+2026-09-22 21:55:59.059 INFO  sched: request 'chatcmpl-286d5308977d76a4' admitted to slot 1 (reserve 5 blocks; pool 2041/2048 blocks in use) — first token 334
+2026-09-22 21:55:59.305 INFO  sched: request 'chatcmpl-286d5308977d76a5' prefix cache miss — 2 cut(s) probed against 28 entries; an entry at this prompt's cut 27 was evicted (64 eviction(s) ago, last used at tick 1466, now tick 7363; the arena holds 4096 slots)
+2026-09-22 21:55:59.305 INFO  sched: request 'chatcmpl-286d5308977d76a5' admitted to slot 2 (reserve 5 blocks; pool 2047/2048 blocks in use) — first token 785
+2026-09-22 21:55:59.554 INFO  sched: request 'chatcmpl-286d5308977d76a6' prefix cache miss — 2 cut(s) probed against 28 entries; an entry at this prompt's cut 24 was evicted (66 eviction(s) ago, last used at tick 1465, now tick 7364; the arena holds 4096 slots)
+2026-09-22 21:55:59.554 INFO  sched: request 'chatcmpl-286d5308977d76a6' admitted to slot 3 (reserve 5 blocks; pool 2021/2048 blocks in use) — first token 334
+2026-09-22 21:56:06.595 INFO  stats: rank 1 | 10.0 s | decode 102.5 tok/s, 8.7 ms/tok, 40.7 ms/step (219 steps / 1029 tok, 89 % of wall) | mtp 1.69 tok/step/req, accept p1 68 % | prefill 4 prompts / 127 tok, 13 tok/s, 6.72 ms/tok, 213 ms avg (8 % of wall), 0 tok cached (0/4 hits) | live 4, queued 0 | pool 2022/2048 blocks (99 %) | prefix cache 29/4096 entries
+2026-09-22 21:56:07.660 INFO  rank 1: slot 2 closed: 150 sampled decode steps, 3 fallbacks
+2026-09-22 21:56:07.660 INFO  sched: request 'chatcmpl-286d5308977d76a5' retired (steps): 256 tok in 8.4 s — prefill 32 tok (0 cached) in 211 ms; decode 255 tok / 150 passes in 8.1 s: 31.3 tok/s, 31.9 ms/tok, 54 ms/pass, 1.70 tok/pass, accept p1 71 %
+2026-09-22 21:56:07.714 INFO  rank 1: slot 0 closed: 153 sampled decode steps, 6 fallbacks
+2026-09-22 21:56:07.714 INFO  sched: request 'chatcmpl-286d5308977d76a3' retired (steps): 256 tok in 8.9 s — prefill 33 tok (0 cached) in 219 ms; decode 255 tok / 153 passes in 8.7 s: 29.4 tok/s, 34.0 ms/tok, 57 ms/pass, 1.67 tok/pass, accept p1 67 %
+2026-09-22 21:56:07.766 INFO  rank 1: slot 3 closed: 151 sampled decode steps, 5 fallbacks
+2026-09-22 21:56:07.766 INFO  sched: request 'chatcmpl-286d5308977d76a6' retired (steps): 256 tok in 8.2 s — prefill 29 tok (0 cached) in 207 ms; decode 255 tok / 151 passes in 8.0 s: 31.9 tok/s, 31.4 ms/tok, 53 ms/pass, 1.69 tok/pass, accept p1 70 %
+2026-09-22 21:56:07.814 INFO  rank 1: slot 1 closed: 155 sampled decode steps, 29 fallbacks
+2026-09-22 21:56:07.815 INFO  sched: request 'chatcmpl-286d5308977d76a4' retired (steps): 256 tok in 8.8 s — prefill 33 tok (0 cached) in 215 ms; decode 255 tok / 155 passes in 8.5 s: 29.9 tok/s, 33.5 ms/tok, 55 ms/pass, 1.65 tok/pass, accept p1 65 %
+2026-09-22 21:56:07.909 INFO  sched: request 'chatcmpl-286d5308977d76a7' admitted to slot 0 (reserve 5 blocks; pool 2023/2048 blocks in use) — first token 785
+2026-09-22 21:56:07.994 INFO  sched: request 'chatcmpl-286d5308977d76a8' admitted to slot 1 (reserve 5 blocks; pool 2029/2048 blocks in use) — first token 2124
+2026-09-22 21:56:08.084 INFO  sched: request 'chatcmpl-286d5308977d76a9' admitted to slot 2 (reserve 5 blocks; pool 2035/2048 blocks in use) — first token 2124
+2026-09-22 21:56:08.185 INFO  sched: request 'chatcmpl-286d5308977d76aa' admitted to slot 3 (reserve 5 blocks; pool 2041/2048 blocks in use) — first token 2124
+2026-09-22 21:56:15.850 INFO  rank 1: slot 2 closed: 147 sampled decode steps, 4 fallbacks
+2026-09-22 21:56:15.851 INFO  sched: request 'chatcmpl-286d5308977d76a9' retired (steps): 256 tok in 7.8 s — prefill 29 tok (24 cached) in 56 ms; decode 255 tok / 147 passes in 7.7 s: 33.1 tok/s, 30.2 ms/tok, 52 ms/pass, 1.73 tok/pass, accept p1 73 %
+2026-09-22 21:56:16.275 INFO  rank 1: slot 1 closed: 156 sampled decode steps, 5 fallbacks
+2026-09-22 21:56:16.275 INFO  sched: request 'chatcmpl-286d5308977d76a8' retired (steps): 256 tok in 8.3 s — prefill 33 tok (28 cached) in 60 ms; decode 255 tok / 156 passes in 8.2 s: 31.0 tok/s, 32.2 ms/tok, 53 ms/pass, 1.63 tok/pass, accept p1 64 %
+2026-09-22 21:56:16.417 INFO  rank 1: slot 0 closed: 160 sampled decode steps, 15 fallbacks
+2026-09-22 21:56:16.417 INFO  sched: request 'chatcmpl-286d5308977d76a7' retired (steps): 256 tok in 8.5 s — prefill 33 tok (28 cached) in 62 ms; decode 255 tok / 160 passes in 8.4 s: 30.2 tok/s, 33.1 ms/tok, 53 ms/pass, 1.59 tok/pass, accept p1 59 %
+2026-09-22 21:56:16.567 INFO  rank 1: slot 3 closed: 163 sampled decode steps, 2 fallbacks
+2026-09-22 21:56:16.567 INFO  sched: request 'chatcmpl-286d5308977d76aa' retired (steps): 256 tok in 8.4 s — prefill 32 tok (27 cached) in 57 ms; decode 255 tok / 163 passes in 8.3 s: 30.6 tok/s, 32.6 ms/tok, 51 ms/pass, 1.56 tok/pass, accept p1 56 %
+2026-09-22 21:56:16.652 INFO  sched: request 'chatcmpl-286d5308977d76ab' admitted to slot 0 (reserve 5 blocks; pool 2043/2048 blocks in use) — first token 334
+2026-09-22 21:56:16.673 INFO  stats: rank 1 | 10.1 s | decode 116.0 tok/s, 8.1 ms/tok, 49.4 ms/step (191 steps / 1169 tok, 94 % of wall) | mtp 1.64 tok/step/req, accept p1 64 % | prefill 5 prompts / 25 tok, 2 tok/s, 11.96 ms/tok, 60 ms avg (3 % of wall), 135 tok cached (5/5 hits) | live 1, queued 1 | pool 2044/2048 blocks (100 %) | prefix cache 37/4096 entries
+2026-09-22 21:56:16.733 INFO  sched: request 'chatcmpl-286d5308977d76ac' admitted to slot 1 (reserve 5 blocks; pool 2015/2048 blocks in use) — first token 785
+2026-09-22 21:56:16.825 INFO  sched: request 'chatcmpl-286d5308977d76ad' admitted to slot 2 (reserve 5 blocks; pool 2021/2048 blocks in use) — first token 14374
+2026-09-22 21:56:16.925 INFO  sched: request 'chatcmpl-286d5308977d76ae' admitted to slot 3 (reserve 5 blocks; pool 2027/2048 blocks in use) — first token 8420
+2026-09-22 21:56:24.812 INFO  rank 1: slot 3 closed: 145 sampled decode steps, 8 fallbacks
+2026-09-22 21:56:24.812 INFO  sched: request 'chatcmpl-286d5308977d76ae' retired (steps): 256 tok in 7.9 s — prefill 29 tok (24 cached) in 58 ms; decode 255 tok / 145 passes in 7.8 s: 32.6 tok/s, 30.7 ms/tok, 54 ms/pass, 1.76 tok/pass, accept p1 77 %
+2026-09-22 21:56:24.980 INFO  rank 1: slot 2 closed: 150 sampled decode steps, 8 fallbacks
+2026-09-22 21:56:24.980 INFO  sched: request 'chatcmpl-286d5308977d76ad' retired (steps): 256 tok in 8.2 s — prefill 32 tok (27 cached) in 58 ms; decode 255 tok / 150 passes in 8.1 s: 31.5 tok/s, 31.8 ms/tok, 54 ms/pass, 1.70 tok/pass, accept p1 71 %
+2026-09-22 21:56:25.146 INFO  rank 1: slot 1 closed: 156 sampled decode steps, 20 fallbacks
+2026-09-22 21:56:25.146 INFO  sched: request 'chatcmpl-286d5308977d76ac' retired (steps): 256 tok in 8.4 s — prefill 33 tok (28 cached) in 58 ms; decode 255 tok / 156 passes in 8.4 s: 30.5 tok/s, 32.8 ms/tok, 54 ms/pass, 1.63 tok/pass, accept p1 63 %
+2026-09-22 21:56:25.196 INFO  rank 1: slot 0 closed: 159 sampled decode steps, 17 fallbacks
+2026-09-22 21:56:25.196 INFO  sched: request 'chatcmpl-286d5308977d76ab' retired (steps): 256 tok in 8.5 s — prefill 33 tok (28 cached) in 63 ms; decode 255 tok / 159 passes in 8.5 s: 30.1 tok/s, 33.3 ms/tok, 53 ms/pass, 1.60 tok/pass, accept p1 60 %
+2026-09-22 21:56:25.450 INFO  sched: request 'chatcmpl-286d5308977d76af' prefix cache miss — 2 cut(s) probed against 39 entries; an entry at this prompt's cut 43 was evicted (63 eviction(s) ago, last used at tick 1893, now tick 7854; the arena holds 4096 slots)
+2026-09-22 21:56:25.450 INFO  sched: request 'chatcmpl-286d5308977d76af' admitted to slot 0 (reserve 5 blocks; pool 2030/2048 blocks in use) — first token 8420
+2026-09-22 21:56:26.694 INFO  stats: rank 1 | 10.0 s | decode 111.3 tok/s, 8.4 ms/tok, 44.4 ms/step (210 steps / 1115 tok, 93 % of wall) | mtp 1.69 tok/step/req, accept p1 68 % | prefill 4 prompts / 63 tok, 6 tok/s, 6.61 ms/tok, 104 ms avg (4 % of wall), 79 tok cached (3/4 hits) | live 1, queued 0 | pool 2031/2048 blocks (99 %) | prefix cache 40/4096 entries
+2026-09-22 21:56:28.673 INFO  rank 1: slot 0 closed: 135 sampled decode steps, 0 fallbacks
+2026-09-22 21:56:28.673 INFO  sched: request 'chatcmpl-286d5308977d76af' retired (steps): 256 tok in 3.2 s — prefill 48 tok (0 cached) in 242 ms; decode 255 tok / 135 passes in 3.0 s: 85.6 tok/s, 11.7 ms/tok, 22 ms/pass, 1.89 tok/pass, accept p1 90 %
+2026-09-22 21:56:28.756 INFO  sched: request 'chatcmpl-286d5308977d76b0' admitted to slot 0 (reserve 5 blocks; pool 2035/2048 blocks in use) — first token 73594
+2026-09-22 21:56:32.116 INFO  rank 1: slot 0 closed: 141 sampled decode steps, 0 fallbacks
+2026-09-22 21:56:32.116 INFO  sched: request 'chatcmpl-286d5308977d76b0' retired (steps): 256 tok in 3.4 s — prefill 48 tok (43 cached) in 61 ms; decode 255 tok / 141 passes in 3.3 s: 77.3 tok/s, 12.9 ms/tok, 23 ms/pass, 1.81 tok/pass, accept p1 82 %
+2026-09-22 21:56:32.180 INFO  sched: request 'chatcmpl-286d5308977d76b1' admitted to slot 0 (reserve 5 blocks; pool 2040/2048 blocks in use) — first token 8420
+2026-09-22 21:56:35.446 INFO  rank 1: slot 0 closed: 138 sampled decode steps, 0 fallbacks
+2026-09-22 21:56:35.446 INFO  sched: request 'chatcmpl-286d5308977d76b1' retired (steps): 256 tok in 3.3 s — prefill 48 tok (43 cached) in 58 ms; decode 255 tok / 138 passes in 3.2 s: 79.5 tok/s, 12.6 ms/tok, 23 ms/pass, 1.85 tok/pass, accept p1 86 %
+2026-09-22 21:56:35.701 INFO  sched: request 'chatcmpl-286d5308977d76b2' prefix cache miss — 2 cut(s) probed against 43 entries; an entry at this prompt's cut 39 was evicted (60 eviction(s) ago, last used at tick 2322, now tick 8276; the arena holds 4096 slots)
+2026-09-22 21:56:35.701 INFO  sched: request 'chatcmpl-286d5308977d76b2' admitted to slot 0 (reserve 5 blocks; pool 2046/2048 blocks in use) — first token 8420
+2026-09-22 21:56:35.958 INFO  sched: request 'chatcmpl-286d5308977d76b3' prefix cache miss — 2 cut(s) probed against 42 entries; an entry at this prompt's cut 37 was evicted (56 eviction(s) ago, last used at tick 2755, now tick 8277; the arena holds 4096 slots)
+2026-09-22 21:56:35.958 INFO  sched: request 'chatcmpl-286d5308977d76b3' admitted to slot 1 (reserve 5 blocks; pool 1924/2048 blocks in use) — first token 8420
+2026-09-22 21:56:36.196 INFO  sched: request 'chatcmpl-286d5308977d76b4' prefix cache miss — 2 cut(s) probed against 43 entries; an entry at this prompt's cut 26 was evicted (55 eviction(s) ago, last used at tick 2756, now tick 8278; the arena holds 4096 slots)
+2026-09-22 21:56:36.196 INFO  sched: request 'chatcmpl-286d5308977d76b4' admitted to slot 2 (reserve 5 blocks; pool 1931/2048 blocks in use) — first token 8420
+2026-09-22 21:56:36.494 INFO  sched: request 'chatcmpl-286d5308977d76b5' prefix cache miss — 2 cut(s) probed against 44 entries; an entry at this prompt's cut 43 was evicted (61 eviction(s) ago, last used at tick 2323, now tick 8279; the arena holds 4096 slots)
+2026-09-22 21:56:36.494 INFO  sched: request 'chatcmpl-286d5308977d76b5' admitted to slot 3 (reserve 5 blocks; pool 1938/2048 blocks in use) — first token 8420
+2026-09-22 21:56:36.742 INFO  stats: rank 1 | 10.0 s | decode 72.2 tok/s, 11.9 ms/tok, 23.3 ms/step (370 steps / 725 tok, 86 % of wall) | mtp 1.87 tok/step/req, accept p1 86 % | prefill 6 prompts / 175 tok, 17 tok/s, 6.01 ms/tok, 175 ms avg (10 % of wall), 86 tok cached (2/6 hits) | live 4, queued 0 | pool 1939/2048 blocks (95 %) | prefix cache 45/4096 entries
+2026-09-22 21:56:43.657 INFO  rank 1: slot 0 closed: 137 sampled decode steps, 0 fallbacks
+2026-09-22 21:56:43.657 INFO  sched: request 'chatcmpl-286d5308977d76b2' retired (steps): 256 tok in 8.0 s — prefill 44 tok (0 cached) in 239 ms; decode 255 tok / 137 passes in 7.7 s: 33.0 tok/s, 30.3 ms/tok, 56 ms/pass, 1.86 tok/pass, accept p1 87 %
+2026-09-22 21:56:43.714 INFO  rank 1: slot 2 closed: 136 sampled decode steps, 0 fallbacks
+2026-09-22 21:56:43.714 INFO  sched: request 'chatcmpl-286d5308977d76b4' retired (steps): 256 tok in 7.5 s — prefill 31 tok (0 cached) in 205 ms; decode 255 tok / 136 passes in 7.3 s: 34.9 tok/s, 28.7 ms/tok, 54 ms/pass, 1.88 tok/pass, accept p1 88 %
+2026-09-22 21:56:43.715 INFO  rank 1: slot 3 closed: 135 sampled decode steps, 0 fallbacks
+2026-09-22 21:56:43.715 INFO  sched: request 'chatcmpl-286d5308977d76b5' retired (steps): 256 tok in 7.2 s — prefill 48 tok (0 cached) in 255 ms; decode 255 tok / 135 passes in 7.0 s: 36.6 tok/s, 27.3 ms/tok, 52 ms/pass, 1.89 tok/pass, accept p1 89 %
+2026-09-22 21:56:43.790 INFO  rank 1: slot 1 closed: 140 sampled decode steps, 0 fallbacks
+2026-09-22 21:56:43.790 INFO  sched: request 'chatcmpl-286d5308977d76b3' retired (steps): 256 tok in 7.8 s — prefill 42 tok (0 cached) in 233 ms; decode 255 tok / 140 passes in 7.6 s: 33.6 tok/s, 29.8 ms/tok, 54 ms/pass, 1.82 tok/pass, accept p1 83 %
+2026-09-22 21:56:43.863 INFO  sched: request 'chatcmpl-286d5308977d76b6' admitted to slot 0 (reserve 5 blocks; pool 1940/2048 blocks in use) — first token 8420
+2026-09-22 21:56:43.944 INFO  sched: request 'chatcmpl-286d5308977d76b7' admitted to slot 1 (reserve 5 blocks; pool 1946/2048 blocks in use) — first token 8420
+2026-09-22 21:56:44.035 INFO  sched: request 'chatcmpl-286d5308977d76b8' admitted to slot 2 (reserve 5 blocks; pool 1952/2048 blocks in use) — first token 8420
+2026-09-22 21:56:44.134 INFO  sched: request 'chatcmpl-286d5308977d76b9' admitted to slot 3 (reserve 5 blocks; pool 1958/2048 blocks in use) — first token 8420
+2026-09-22 21:56:46.796 INFO  stats: rank 1 | 10.1 s | decode 134.4 tok/s, 7.0 ms/tok, 51.2 ms/step (186 steps / 1351 tok, 95 % of wall) | mtp 1.86 tok/step/req, accept p1 85 % | prefill 4 prompts / 20 tok, 2 tok/s, 11.78 ms/tok, 59 ms avg (2 % of wall), 145 tok cached (4/4 hits) | live 4, queued 0 | pool 1959/2048 blocks (96 %) | prefix cache 49/4096 entries
+2026-09-22 21:56:51.268 INFO  rank 1: slot 1 closed: 136 sampled decode steps, 0 fallbacks
+2026-09-22 21:56:51.268 INFO  sched: request 'chatcmpl-286d5308977d76b7' retired (steps): 256 tok in 7.3 s — prefill 42 tok (37 cached) in 58 ms; decode 255 tok / 136 passes in 7.3 s: 35.1 tok/s, 28.5 ms/tok, 53 ms/pass, 1.88 tok/pass, accept p1 88 %
+2026-09-22 21:56:51.479 INFO  rank 1: slot 0 closed: 141 sampled decode steps, 2 fallbacks
+2026-09-22 21:56:51.479 INFO  sched: request 'chatcmpl-286d5308977d76b6' retired (steps): 256 tok in 7.6 s — prefill 44 tok (39 cached) in 62 ms; decode 255 tok / 141 passes in 7.6 s: 33.8 tok/s, 29.6 ms/tok, 54 ms/pass, 1.81 tok/pass, accept p1 82 %
+2026-09-22 21:56:51.535 INFO  rank 1: slot 2 closed: 140 sampled decode steps, 0 fallbacks
+2026-09-22 21:56:51.536 INFO  sched: request 'chatcmpl-286d5308977d76b8' retired (steps): 256 tok in 7.5 s — prefill 48 tok (43 cached) in 59 ms; decode 255 tok / 140 passes in 7.4 s: 34.3 tok/s, 29.2 ms/tok, 53 ms/pass, 1.82 tok/pass, accept p1 82 %
+2026-09-22 21:56:51.536 INFO  rank 1: slot 3 closed: 139 sampled decode steps, 0 fallbacks
+2026-09-22 21:56:51.536 INFO  sched: request 'chatcmpl-286d5308977d76b9' retired (steps): 256 tok in 7.4 s — prefill 31 tok (26 cached) in 57 ms; decode 255 tok / 139 passes in 7.3 s: 34.7 tok/s, 28.8 ms/tok, 53 ms/pass, 1.83 tok/pass, accept p1 83 %
+2026-09-22 21:56:51.611 INFO  sched: request 'chatcmpl-286d5308977d76ba' admitted to slot 0 (reserve 5 blocks; pool 1960/2048 blocks in use) — first token 8420
+2026-09-22 21:56:51.692 INFO  sched: request 'chatcmpl-286d5308977d76bb' admitted to slot 1 (reserve 5 blocks; pool 1966/2048 blocks in use) — first token 8420
+2026-09-22 21:56:51.782 INFO  sched: request 'chatcmpl-286d5308977d76bc' admitted to slot 2 (reserve 5 blocks; pool 1972/2048 blocks in use) — first token 8420
+2026-09-22 21:56:51.884 INFO  sched: request 'chatcmpl-286d5308977d76bd' admitted to slot 3 (reserve 5 blocks; pool 1978/2048 blocks in use) — first token 8420
+2026-09-22 21:56:56.800 INFO  stats: rank 1 | 10.0 s | decode 134.3 tok/s, 7.0 ms/tok, 50.9 ms/step (186 steps / 1344 tok, 95 % of wall) | mtp 1.84 tok/step/req, accept p1 83 % | prefill 4 prompts / 20 tok, 2 tok/s, 11.91 ms/tok, 60 ms avg (2 % of wall), 145 tok cached (4/4 hits) | live 4, queued 0 | pool 1979/2048 blocks (97 %) | prefix cache 53/4096 entries
+2026-09-22 21:56:58.953 INFO  rank 1: slot 3 closed: 134 sampled decode steps, 0 fallbacks
+2026-09-22 21:56:58.953 INFO  sched: request 'chatcmpl-286d5308977d76bd' retired (steps): 256 tok in 7.1 s — prefill 48 tok (43 cached) in 59 ms; decode 255 tok / 134 passes in 7.0 s: 36.4 tok/s, 27.5 ms/tok, 52 ms/pass, 1.90 tok/pass, accept p1 91 %
+2026-09-22 21:56:59.089 INFO  rank 1: slot 2 closed: 138 sampled decode steps, 0 fallbacks
+2026-09-22 21:56:59.089 INFO  sched: request 'chatcmpl-286d5308977d76bc' retired (steps): 256 tok in 7.3 s — prefill 42 tok (37 cached) in 59 ms; decode 255 tok / 138 passes in 7.2 s: 35.2 tok/s, 28.4 ms/tok, 53 ms/pass, 1.85 tok/pass, accept p1 86 %
+2026-09-22 21:56:59.125 INFO  rank 1: slot 1 closed: 140 sampled decode steps, 0 fallbacks
+2026-09-22 21:56:59.125 INFO  sched: request 'chatcmpl-286d5308977d76bb' retired (steps): 256 tok in 7.4 s — prefill 31 tok (26 cached) in 58 ms; decode 255 tok / 140 passes in 7.4 s: 34.6 tok/s, 28.9 ms/tok, 53 ms/pass, 1.82 tok/pass, accept p1 83 %
+2026-09-22 21:56:59.295 INFO  rank 1: slot 0 closed: 148 sampled decode steps, 2 fallbacks
+2026-09-22 21:56:59.295 INFO  sched: request 'chatcmpl-286d5308977d76ba' retired (steps): 256 tok in 7.7 s — prefill 44 tok (39 cached) in 63 ms; decode 255 tok / 148 passes in 7.6 s: 33.5 tok/s, 29.9 ms/tok, 51 ms/pass, 1.72 tok/pass, accept p1 72 %
+2026-09-22 21:56:59.540 INFO  sched: request 'chatcmpl-286d5308977d76be' prefix cache miss — 2 cut(s) probed against 57 entries; an entry at this prompt's cut 40 was evicted (51 eviction(s) ago, last used at tick 3161, now tick 8714; the arena holds 4096 slots)
+2026-09-22 21:56:59.540 INFO  sched: request 'chatcmpl-286d5308977d76be' admitted to slot 0 (reserve 5 blocks; pool 1981/2048 blocks in use) — first token 9640
+2026-09-22 21:57:02.589 INFO  rank 1: slot 0 closed: 129 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:02.589 INFO  sched: request 'chatcmpl-286d5308977d76be' retired (steps): 256 tok in 3.0 s — prefill 45 tok (0 cached) in 233 ms; decode 255 tok / 129 passes in 2.8 s: 90.5 tok/s, 11.0 ms/tok, 22 ms/pass, 1.98 tok/pass, accept p1 98 %
+2026-09-22 21:57:02.676 INFO  sched: request 'chatcmpl-286d5308977d76bf' admitted to slot 0 (reserve 5 blocks; pool 1986/2048 blocks in use) — first token 9640
+2026-09-22 21:57:05.706 INFO  rank 1: slot 0 closed: 129 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:05.706 INFO  sched: request 'chatcmpl-286d5308977d76bf' retired (steps): 256 tok in 3.0 s — prefill 45 tok (40 cached) in 60 ms; decode 255 tok / 129 passes in 3.0 s: 85.8 tok/s, 11.6 ms/tok, 23 ms/pass, 1.98 tok/pass, accept p1 98 %
+2026-09-22 21:57:05.782 INFO  sched: request 'chatcmpl-286d5308977d76c0' admitted to slot 0 (reserve 5 blocks; pool 1991/2048 blocks in use) — first token 9640
+2026-09-22 21:57:06.809 INFO  stats: rank 1 | 10.0 s | decode 92.4 tok/s, 10.0 ms/tok, 26.4 ms/step (352 steps / 925 tok, 93 % of wall) | mtp 1.93 tok/step/req, accept p1 94 % | prefill 3 prompts / 55 tok, 5 tok/s, 6.41 ms/tok, 118 ms avg (4 % of wall), 80 tok cached (2/3 hits) | live 1, queued 0 | pool 1992/2048 blocks (97 %) | prefix cache 60/4096 entries
+2026-09-22 21:57:08.801 INFO  rank 1: slot 0 closed: 128 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:08.801 INFO  sched: request 'chatcmpl-286d5308977d76c0' retired (steps): 256 tok in 3.0 s — prefill 45 tok (40 cached) in 60 ms; decode 255 tok / 128 passes in 3.0 s: 86.2 tok/s, 11.6 ms/tok, 23 ms/pass, 1.99 tok/pass, accept p1 100 %
+2026-09-22 21:57:09.076 INFO  sched: request 'chatcmpl-286d5308977d76c1' prefix cache miss — 2 cut(s) probed against 61 entries; an entry at this prompt's cut 41 was evicted (48 eviction(s) ago, last used at tick 3566, now tick 9114; the arena holds 4096 slots)
+2026-09-22 21:57:09.077 INFO  sched: request 'chatcmpl-286d5308977d76c1' admitted to slot 0 (reserve 5 blocks; pool 1997/2048 blocks in use) — first token 9640
+2026-09-22 21:57:09.335 INFO  sched: request 'chatcmpl-286d5308977d76c2' prefix cache miss — 2 cut(s) probed against 62 entries; an entry at this prompt's cut 40 was evicted (47 eviction(s) ago, last used at tick 3567, now tick 9115; the arena holds 4096 slots)
+2026-09-22 21:57:09.335 INFO  sched: request 'chatcmpl-286d5308977d76c2' admitted to slot 1 (reserve 5 blocks; pool 2004/2048 blocks in use) — first token 9640
+2026-09-22 21:57:09.603 INFO  sched: request 'chatcmpl-286d5308977d76c3' prefix cache miss — 2 cut(s) probed against 63 entries; an entry at this prompt's cut 39 was evicted (41 eviction(s) ago, last used at tick 3985, now tick 9116; the arena holds 4096 slots)
+2026-09-22 21:57:09.603 INFO  sched: request 'chatcmpl-286d5308977d76c3' admitted to slot 2 (reserve 5 blocks; pool 2011/2048 blocks in use) — first token 73594
+2026-09-22 21:57:09.856 INFO  sched: request 'chatcmpl-286d5308977d76c4' prefix cache miss — 2 cut(s) probed against 64 entries; an entry at this prompt's cut 27 was evicted (42 eviction(s) ago, last used at tick 3984, now tick 9117; the arena holds 4096 slots)
+2026-09-22 21:57:09.856 INFO  sched: request 'chatcmpl-286d5308977d76c4' admitted to slot 3 (reserve 5 blocks; pool 2018/2048 blocks in use) — first token 9640
+2026-09-22 21:57:16.361 INFO  rank 1: slot 0 closed: 128 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:16.361 INFO  sched: request 'chatcmpl-286d5308977d76c1' retired (steps): 256 tok in 7.3 s — prefill 46 tok (0 cached) in 243 ms; decode 255 tok / 128 passes in 7.0 s: 36.2 tok/s, 27.6 ms/tok, 55 ms/pass, 1.99 tok/pass, accept p1 100 %
+2026-09-22 21:57:16.416 INFO  rank 1: slot 1 closed: 128 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:16.416 INFO  sched: request 'chatcmpl-286d5308977d76c2' retired (steps): 256 tok in 7.1 s — prefill 45 tok (0 cached) in 234 ms; decode 255 tok / 128 passes in 6.8 s: 37.2 tok/s, 26.9 ms/tok, 53 ms/pass, 1.99 tok/pass, accept p1 100 %
+2026-09-22 21:57:16.467 INFO  rank 1: slot 2 closed: 128 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:16.467 INFO  sched: request 'chatcmpl-286d5308977d76c3' retired (steps): 256 tok in 6.9 s — prefill 44 tok (0 cached) in 237 ms; decode 255 tok / 128 passes in 6.6 s: 38.5 tok/s, 26.0 ms/tok, 52 ms/pass, 1.99 tok/pass, accept p1 100 %
+2026-09-22 21:57:16.491 INFO  rank 1: slot 3 closed: 128 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:16.491 INFO  sched: request 'chatcmpl-286d5308977d76c4' retired (steps): 256 tok in 6.6 s — prefill 32 tok (0 cached) in 209 ms; decode 255 tok / 128 passes in 6.4 s: 39.7 tok/s, 25.2 ms/tok, 50 ms/pass, 1.99 tok/pass, accept p1 100 %
+2026-09-22 21:57:16.567 INFO  sched: request 'chatcmpl-286d5308977d76c5' admitted to slot 0 (reserve 5 blocks; pool 2020/2048 blocks in use) — first token 9640
+2026-09-22 21:57:16.651 INFO  sched: request 'chatcmpl-286d5308977d76c6' admitted to slot 1 (reserve 5 blocks; pool 2026/2048 blocks in use) — first token 73594
+2026-09-22 21:57:16.741 INFO  sched: request 'chatcmpl-286d5308977d76c7' admitted to slot 2 (reserve 5 blocks; pool 2032/2048 blocks in use) — first token 9640
+2026-09-22 21:57:16.845 INFO  sched: request 'chatcmpl-286d5308977d76c8' admitted to slot 3 (reserve 5 blocks; pool 2038/2048 blocks in use) — first token 73594
+2026-09-22 21:57:16.895 INFO  stats: rank 1 | 10.1 s | decode 120.7 tok/s, 7.1 ms/tok, 39.0 ms/step (220 steps / 1217 tok, 85 % of wall) | mtp 2.00 tok/step/req, accept p1 100 % | prefill 8 prompts / 187 tok, 19 tok/s, 6.21 ms/tok, 145 ms avg (12 % of wall), 147 tok cached (4/8 hits) | live 4, queued 0 | pool 2039/2048 blocks (100 %) | prefix cache 69/4096 entries
+2026-09-22 21:57:23.368 INFO  rank 1: slot 0 closed: 128 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:23.368 INFO  sched: request 'chatcmpl-286d5308977d76c5' retired (steps): 256 tok in 6.8 s — prefill 46 tok (41 cached) in 59 ms; decode 255 tok / 128 passes in 6.7 s: 37.8 tok/s, 26.4 ms/tok, 53 ms/pass, 1.99 tok/pass, accept p1 99 %
+2026-09-22 21:57:23.423 INFO  rank 1: slot 1 closed: 128 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:23.423 INFO  sched: request 'chatcmpl-286d5308977d76c6' retired (steps): 256 tok in 6.8 s — prefill 44 tok (39 cached) in 60 ms; decode 255 tok / 128 passes in 6.7 s: 38.0 tok/s, 26.3 ms/tok, 52 ms/pass, 1.99 tok/pass, accept p1 100 %
+2026-09-22 21:57:23.487 INFO  rank 1: slot 2 closed: 128 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:23.487 INFO  sched: request 'chatcmpl-286d5308977d76c7' retired (steps): 256 tok in 6.7 s — prefill 45 tok (40 cached) in 57 ms; decode 255 tok / 128 passes in 6.7 s: 38.1 tok/s, 26.2 ms/tok, 52 ms/pass, 1.99 tok/pass, accept p1 100 %
+2026-09-22 21:57:23.512 INFO  rank 1: slot 3 closed: 128 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:23.513 INFO  sched: request 'chatcmpl-286d5308977d76c8' retired (steps): 256 tok in 6.7 s — prefill 32 tok (27 cached) in 62 ms; decode 255 tok / 128 passes in 6.6 s: 38.6 tok/s, 25.9 ms/tok, 52 ms/pass, 1.99 tok/pass, accept p1 99 %
+2026-09-22 21:57:23.595 INFO  sched: request 'chatcmpl-286d5308977d76c9' admitted to slot 0 (reserve 5 blocks; pool 2035/2048 blocks in use) — first token 73594
+2026-09-22 21:57:23.675 INFO  sched: request 'chatcmpl-286d5308977d76ca' admitted to slot 1 (reserve 5 blocks; pool 2041/2048 blocks in use) — first token 9640
+2026-09-22 21:57:23.762 INFO  sched: request 'chatcmpl-286d5308977d76cb' admitted to slot 2 (reserve 5 blocks; pool 2047/2048 blocks in use) — first token 9640
+2026-09-22 21:57:23.859 INFO  sched: request 'chatcmpl-286d5308977d76cc' admitted to slot 3 (reserve 5 blocks; pool 1923/2048 blocks in use) — first token 73594
+2026-09-22 21:57:26.927 INFO  stats: rank 1 | 10.0 s | decode 147.9 tok/s, 6.4 ms/tok, 50.2 ms/step (189 steps / 1484 tok, 95 % of wall) | mtp 1.99 tok/step/req, accept p1 99 % | prefill 4 prompts / 20 tok, 2 tok/s, 11.53 ms/tok, 58 ms avg (2 % of wall), 147 tok cached (4/4 hits) | live 4, queued 0 | pool 1924/2048 blocks (94 %) | prefix cache 69/4096 entries
+2026-09-22 21:57:30.441 INFO  rank 1: slot 1 closed: 128 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:30.442 INFO  sched: request 'chatcmpl-286d5308977d76ca' retired (steps): 256 tok in 6.8 s — prefill 32 tok (27 cached) in 55 ms; decode 255 tok / 128 passes in 6.7 s: 38.0 tok/s, 26.3 ms/tok, 52 ms/pass, 1.99 tok/pass, accept p1 99 %
+2026-09-22 21:57:30.442 INFO  rank 1: slot 0 closed: 129 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:30.442 INFO  sched: request 'chatcmpl-286d5308977d76c9' retired (steps): 256 tok in 6.8 s — prefill 46 tok (41 cached) in 60 ms; decode 255 tok / 129 passes in 6.8 s: 37.6 tok/s, 26.6 ms/tok, 53 ms/pass, 1.98 tok/pass, accept p1 98 %
+2026-09-22 21:57:30.542 INFO  rank 1: slot 2 closed: 129 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:30.542 INFO  sched: request 'chatcmpl-286d5308977d76cb' retired (steps): 256 tok in 6.8 s — prefill 45 tok (40 cached) in 57 ms; decode 255 tok / 129 passes in 6.7 s: 37.9 tok/s, 26.4 ms/tok, 52 ms/pass, 1.98 tok/pass, accept p1 98 %
+2026-09-22 21:57:30.542 INFO  rank 1: slot 3 closed: 128 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:30.543 INFO  sched: request 'chatcmpl-286d5308977d76cc' retired (steps): 256 tok in 6.7 s — prefill 44 tok (39 cached) in 59 ms; decode 255 tok / 128 passes in 6.6 s: 38.5 tok/s, 26.0 ms/tok, 52 ms/pass, 1.99 tok/pass, accept p1 100 %
+2026-09-22 21:57:30.835 INFO  sched: request 'chatcmpl-286d5308977d76cd' prefix cache miss — 2 cut(s) probed against 73 entries; an entry at this prompt's cut 65 was evicted (40 eviction(s) ago, last used at tick 4406, now tick 9518; the arena holds 4096 slots)
+2026-09-22 21:57:30.835 INFO  sched: request 'chatcmpl-286d5308977d76cd' admitted to slot 0 (reserve 6 blocks; pool 1927/2048 blocks in use) — first token 2124
+2026-09-22 21:57:34.096 INFO  rank 1: slot 0 closed: 138 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:34.096 INFO  sched: request 'chatcmpl-286d5308977d76cd' retired (steps): 256 tok in 3.3 s — prefill 70 tok (0 cached) in 271 ms; decode 255 tok / 138 passes in 3.0 s: 85.3 tok/s, 11.7 ms/tok, 22 ms/pass, 1.85 tok/pass, accept p1 86 %
+2026-09-22 21:57:34.187 INFO  sched: request 'chatcmpl-286d5308977d76ce' admitted to slot 0 (reserve 6 blocks; pool 1932/2048 blocks in use) — first token 8420
+2026-09-22 21:57:36.932 INFO  stats: rank 1 | 10.0 s | decode 102.1 tok/s, 9.1 ms/tok, 28.8 ms/step (323 steps / 1022 tok, 93 % of wall) | mtp 1.94 tok/step/req, accept p1 95 % | prefill 2 prompts / 75 tok, 7 tok/s, 4.44 ms/tok, 167 ms avg (3 % of wall), 65 tok cached (1/2 hits) | live 1, queued 0 | pool 1933/2048 blocks (94 %) | prefix cache 75/4096 entries
+2026-09-22 21:57:37.320 INFO  rank 1: slot 0 closed: 132 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:37.320 INFO  sched: request 'chatcmpl-286d5308977d76ce' retired (steps): 256 tok in 3.1 s — prefill 70 tok (65 cached) in 62 ms; decode 255 tok / 132 passes in 3.1 s: 83.0 tok/s, 12.0 ms/tok, 23 ms/pass, 1.93 tok/pass, accept p1 94 %
+2026-09-22 21:57:37.404 INFO  sched: request 'chatcmpl-286d5308977d76cf' admitted to slot 0 (reserve 6 blocks; pool 1937/2048 blocks in use) — first token 8420
+2026-09-22 21:57:40.536 INFO  rank 1: slot 0 closed: 133 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:40.536 INFO  sched: request 'chatcmpl-286d5308977d76cf' retired (steps): 256 tok in 3.1 s — prefill 70 tok (65 cached) in 62 ms; decode 255 tok / 133 passes in 3.1 s: 83.1 tok/s, 12.0 ms/tok, 23 ms/pass, 1.92 tok/pass, accept p1 92 %
+2026-09-22 21:57:40.820 INFO  sched: request 'chatcmpl-286d5308977d76d0' prefix cache miss — 2 cut(s) probed against 77 entries; an entry at this prompt's cut 56 was evicted (37 eviction(s) ago, last used at tick 4822, now tick 9934; the arena holds 4096 slots)
+2026-09-22 21:57:40.820 INFO  sched: request 'chatcmpl-286d5308977d76d0' admitted to slot 0 (reserve 5 blocks; pool 1943/2048 blocks in use) — first token 2124
+2026-09-22 21:57:41.086 INFO  sched: request 'chatcmpl-286d5308977d76d1' prefix cache miss — 2 cut(s) probed against 78 entries; an entry at this prompt's cut 46 was evicted (36 eviction(s) ago, last used at tick 4823, now tick 9935; the arena holds 4096 slots)
+2026-09-22 21:57:41.086 INFO  sched: request 'chatcmpl-286d5308977d76d1' admitted to slot 1 (reserve 5 blocks; pool 1950/2048 blocks in use) — first token 8420
+2026-09-22 21:57:41.366 INFO  sched: request 'chatcmpl-286d5308977d76d2' prefix cache miss — 2 cut(s) probed against 79 entries; an entry at this prompt's cut 46 was evicted (31 eviction(s) ago, last used at tick 5244, now tick 9936; the arena holds 4096 slots)
+2026-09-22 21:57:41.366 INFO  sched: request 'chatcmpl-286d5308977d76d2' admitted to slot 2 (reserve 5 blocks; pool 1957/2048 blocks in use) — first token 8420
+2026-09-22 21:57:41.626 INFO  sched: request 'chatcmpl-286d5308977d76d3' prefix cache miss — 2 cut(s) probed against 80 entries; an entry at this prompt's cut 31 was evicted (29 eviction(s) ago, last used at tick 5246, now tick 9937; the arena holds 4096 slots)
+2026-09-22 21:57:41.626 INFO  sched: request 'chatcmpl-286d5308977d76d3' admitted to slot 3 (reserve 5 blocks; pool 1964/2048 blocks in use) — first token 2124
+2026-09-22 21:57:46.939 INFO  stats: rank 1 | 10.0 s | decode 108.0 tok/s, 8.0 ms/tok, 33.9 ms/step (255 steps / 1081 tok, 86 % of wall) | mtp 1.91 tok/step/req, accept p1 90 % | prefill 5 prompts / 204 tok, 20 tok/s, 5.06 ms/tok, 207 ms avg (10 % of wall), 65 tok cached (1/5 hits) | live 4, queued 0 | pool 1964/2048 blocks (96 %) | prefix cache 81/4096 entries
+2026-09-22 21:57:48.424 INFO  rank 1: slot 1 closed: 133 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:48.425 INFO  sched: request 'chatcmpl-286d5308977d76d1' retired (steps): 256 tok in 7.3 s — prefill 51 tok (0 cached) in 243 ms; decode 255 tok / 133 passes in 7.1 s: 35.9 tok/s, 27.8 ms/tok, 53 ms/pass, 1.92 tok/pass, accept p1 92 %
+2026-09-22 21:57:48.479 INFO  rank 1: slot 0 closed: 135 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:48.480 INFO  sched: request 'chatcmpl-286d5308977d76d0' retired (steps): 256 tok in 7.7 s — prefill 61 tok (0 cached) in 262 ms; decode 255 tok / 135 passes in 7.4 s: 34.5 tok/s, 29.0 ms/tok, 55 ms/pass, 1.89 tok/pass, accept p1 89 %
+2026-09-22 21:57:48.533 INFO  rank 1: slot 2 closed: 134 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:48.533 INFO  sched: request 'chatcmpl-286d5308977d76d2' retired (steps): 256 tok in 7.2 s — prefill 51 tok (0 cached) in 248 ms; decode 255 tok / 134 passes in 6.9 s: 36.9 tok/s, 27.1 ms/tok, 52 ms/pass, 1.90 tok/pass, accept p1 91 %
+2026-09-22 21:57:48.533 INFO  rank 1: slot 3 closed: 133 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:48.533 INFO  sched: request 'chatcmpl-286d5308977d76d3' retired (steps): 256 tok in 6.9 s — prefill 36 tok (0 cached) in 217 ms; decode 255 tok / 133 passes in 6.7 s: 38.1 tok/s, 26.2 ms/tok, 50 ms/pass, 1.92 tok/pass, accept p1 92 %
+2026-09-22 21:57:48.626 INFO  sched: request 'chatcmpl-286d5308977d76d4' admitted to slot 0 (reserve 5 blocks; pool 1966/2048 blocks in use) — first token 8420
+2026-09-22 21:57:48.707 INFO  sched: request 'chatcmpl-286d5308977d76d5' admitted to slot 1 (reserve 5 blocks; pool 1972/2048 blocks in use) — first token 8420
+2026-09-22 21:57:48.797 INFO  sched: request 'chatcmpl-286d5308977d76d6' admitted to slot 2 (reserve 5 blocks; pool 1978/2048 blocks in use) — first token 2124
+2026-09-22 21:57:48.897 INFO  sched: request 'chatcmpl-286d5308977d76d7' admitted to slot 3 (reserve 5 blocks; pool 1984/2048 blocks in use) — first token 2
+2026-09-22 21:57:55.603 INFO  rank 1: slot 0 closed: 131 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:55.603 INFO  sched: request 'chatcmpl-286d5308977d76d4' retired (steps): 256 tok in 7.0 s — prefill 61 tok (56 cached) in 61 ms; decode 255 tok / 131 passes in 6.9 s: 36.9 tok/s, 27.1 ms/tok, 53 ms/pass, 1.95 tok/pass, accept p1 95 %
+2026-09-22 21:57:55.710 INFO  rank 1: slot 3 closed: 130 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:55.710 INFO  sched: request 'chatcmpl-286d5308977d76d7' retired (steps): 256 tok in 6.8 s — prefill 36 tok (31 cached) in 57 ms; decode 255 tok / 130 passes in 6.8 s: 37.7 tok/s, 26.5 ms/tok, 52 ms/pass, 1.96 tok/pass, accept p1 96 %
+2026-09-22 21:57:55.876 INFO  rank 1: slot 1 closed: 136 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:55.876 INFO  sched: request 'chatcmpl-286d5308977d76d5' retired (steps): 256 tok in 7.2 s — prefill 51 tok (46 cached) in 56 ms; decode 255 tok / 136 passes in 7.1 s: 35.9 tok/s, 27.9 ms/tok, 52 ms/pass, 1.88 tok/pass, accept p1 88 %
+2026-09-22 21:57:55.923 INFO  rank 1: slot 2 closed: 137 sampled decode steps, 0 fallbacks
+2026-09-22 21:57:55.923 INFO  sched: request 'chatcmpl-286d5308977d76d6' retired (steps): 256 tok in 7.1 s — prefill 51 tok (46 cached) in 57 ms; decode 255 tok / 137 passes in 7.1 s: 36.1 tok/s, 27.7 ms/tok, 52 ms/pass, 1.86 tok/pass, accept p1 87 %
+2026-09-22 21:57:56.005 INFO  sched: request 'chatcmpl-286d5308977d76d8' admitted to slot 0 (reserve 5 blocks; pool 1986/2048 blocks in use) — first token 2
+2026-09-22 21:57:56.087 INFO  sched: request 'chatcmpl-286d5308977d76d9' admitted to slot 1 (reserve 5 blocks; pool 1992/2048 blocks in use) — first token 8420
+2026-09-22 21:57:56.178 INFO  sched: request 'chatcmpl-286d5308977d76da' admitted to slot 2 (reserve 5 blocks; pool 1998/2048 blocks in use) — first token 8420
+2026-09-22 21:57:56.278 INFO  sched: request 'chatcmpl-286d5308977d76db' admitted to slot 3 (reserve 5 blocks; pool 2003/2048 blocks in use) — first token 8420
+2026-09-22 21:57:56.947 INFO  stats: rank 1 | 10.0 s | decode 136.4 tok/s, 6.7 ms/tok, 49.7 ms/step (185 steps / 1365 tok, 92 % of wall) | mtp 1.93 tok/step/req, accept p1 92 % | prefill 8 prompts / 40 tok, 4 tok/s, 11.55 ms/tok, 58 ms avg (5 % of wall), 358 tok cached (8/8 hits) | live 4, queued 0 | pool 2005/2048 blocks (98 %) | prefix cache 89/4096 entries
+2026-09-22 21:58:02.941 INFO  rank 1: slot 0 closed: 131 sampled decode steps, 0 fallbacks
+2026-09-22 21:58:02.941 INFO  sched: request 'chatcmpl-286d5308977d76d8' retired (steps): 256 tok in 6.9 s — prefill 61 tok (56 cached) in 61 ms; decode 255 tok / 131 passes in 6.9 s: 37.1 tok/s, 27.0 ms/tok, 52 ms/pass, 1.95 tok/pass, accept p1 95 %
+2026-09-22 21:58:03.042 INFO  rank 1: slot 1 closed: 132 sampled decode steps, 0 fallbacks
+2026-09-22 21:58:03.042 INFO  sched: request 'chatcmpl-286d5308977d76d9' retired (steps): 256 tok in 7.0 s — prefill 51 tok (46 cached) in 57 ms; decode 255 tok / 132 passes in 6.9 s: 37.0 tok/s, 27.1 ms/tok, 52 ms/pass, 1.93 tok/pass, accept p1 94 %
+2026-09-22 21:58:03.231 INFO  rank 1: slot 2 closed: 135 sampled decode steps, 0 fallbacks
+2026-09-22 21:58:03.231 INFO  sched: request 'chatcmpl-286d5308977d76da' retired (steps): 256 tok in 7.1 s — prefill 51 tok (46 cached) in 57 ms; decode 255 tok / 135 passes in 7.0 s: 36.4 tok/s, 27.4 ms/tok, 52 ms/pass, 1.89 tok/pass, accept p1 90 %
+2026-09-22 21:58:03.256 INFO  rank 1: slot 3 closed: 135 sampled decode steps, 0 fallbacks
+2026-09-22 21:58:03.256 INFO  sched: request 'chatcmpl-286d5308977d76db' retired (steps): 256 tok in 7.0 s — prefill 36 tok (31 cached) in 57 ms; decode 255 tok / 135 passes in 6.9 s: 36.8 tok/s, 27.1 ms/tok, 51 ms/pass, 1.89 tok/pass, accept p1 89 %
+2026-09-22 21:58:03.517 INFO  sched: request 'chatcmpl-286d5308977d76dc' prefix cache miss — 2 cut(s) probed against 93 entries; an entry at this prompt's cut 32 was evicted (26 eviction(s) ago, last used at tick 5690, now tick 10363; the arena holds 4096 slots)
+2026-09-22 21:58:03.517 INFO  sched: request 'chatcmpl-286d5308977d76dc' admitted to slot 0 (reserve 5 blocks; pool 2007/2048 blocks in use) — first token 2124
+2026-09-22 21:58:06.965 INFO  stats: rank 1 | 10.0 s | decode 114.8 tok/s, 8.2 ms/tok, 35.6 ms/step (265 steps / 1150 tok, 94 % of wall) | mtp 1.86 tok/step/req, accept p1 86 % | prefill 1 prompt / 37 tok, 4 tok/s, 6.20 ms/tok, 229 ms avg (2 % of wall), 0 tok cached (0/1 hit) | live 1, queued 0 | pool 2008/2048 blocks (98 %) | prefix cache 94/4096 entries
+2026-09-22 21:58:07.227 INFO  rank 1: slot 0 closed: 153 sampled decode steps, 1 fallbacks
+2026-09-22 21:58:07.227 INFO  sched: request 'chatcmpl-286d5308977d76dc' retired (steps): 256 tok in 3.7 s — prefill 37 tok (0 cached) in 229 ms; decode 255 tok / 153 passes in 3.5 s: 73.3 tok/s, 13.6 ms/tok, 23 ms/pass, 1.67 tok/pass, accept p1 67 %
+2026-09-22 21:58:07.317 INFO  sched: request 'chatcmpl-286d5308977d76dd' admitted to slot 0 (reserve 5 blocks; pool 2012/2048 blocks in use) — first token 2124
+2026-09-22 21:58:11.021 INFO  rank 1: slot 0 closed: 153 sampled decode steps, 0 fallbacks
+2026-09-22 21:58:11.021 INFO  sched: request 'chatcmpl-286d5308977d76dd' retired (steps): 256 tok in 3.7 s — prefill 37 tok (32 cached) in 63 ms; decode 255 tok / 153 passes in 3.6 s: 70.0 tok/s, 14.3 ms/tok, 24 ms/pass, 1.67 tok/pass, accept p1 67 %
+2026-09-22 21:58:11.104 INFO  sched: request 'chatcmpl-286d5308977d76de' admitted to slot 0 (reserve 5 blocks; pool 2017/2048 blocks in use) — first token 2124
+2026-09-22 21:58:14.849 INFO  rank 1: slot 0 closed: 155 sampled decode steps, 1 fallbacks
+2026-09-22 21:58:14.850 INFO  sched: request 'chatcmpl-286d5308977d76de' retired (steps): 256 tok in 3.7 s — prefill 37 tok (32 cached) in 61 ms; decode 255 tok / 155 passes in 3.7 s: 69.2 tok/s, 14.4 ms/tok, 24 ms/pass, 1.65 tok/pass, accept p1 65 %
+2026-09-22 21:58:15.118 INFO  sched: request 'chatcmpl-286d5308977d76df' prefix cache miss — 2 cut(s) probed against 97 entries; an entry at this prompt's cut 33 was evicted (22 eviction(s) ago, last used at tick 6150, now tick 10839; the arena holds 4096 slots)
+2026-09-22 21:58:15.118 INFO  sched: request 'chatcmpl-286d5308977d76df' admitted to slot 0 (reserve 5 blocks; pool 2023/2048 blocks in use) — first token 641
+2026-09-22 21:58:15.368 INFO  sched: request 'chatcmpl-286d5308977d76e0' prefix cache miss — 2 cut(s) probed against 98 entries; an entry at this prompt's cut 32 was evicted (17 eviction(s) ago, last used at tick 6617, now tick 10840; the arena holds 4096 slots)
+2026-09-22 21:58:15.368 INFO  sched: request 'chatcmpl-286d5308977d76e0' admitted to slot 1 (reserve 5 blocks; pool 2030/2048 blocks in use) — first token 2124
+2026-09-22 21:58:15.629 INFO  sched: request 'chatcmpl-286d5308977d76e1' prefix cache miss — 2 cut(s) probed against 99 entries; an entry at this prompt's cut 32 was evicted (23 eviction(s) ago, last used at tick 6149, now tick 10841; the arena holds 4096 slots)
+2026-09-22 21:58:15.629 INFO  sched: request 'chatcmpl-286d5308977d76e1' admitted to slot 2 (reserve 5 blocks; pool 2037/2048 blocks in use) — first token 334
+2026-09-22 21:58:15.877 INFO  sched: request 'chatcmpl-286d5308977d76e2' prefix cache miss — 2 cut(s) probed against 100 entries; an entry at this prompt's cut 23 was evicted (16 eviction(s) ago, last used at tick 6618, now tick 10842; the arena holds 4096 slots)
+2026-09-22 21:58:15.877 INFO  sched: request 'chatcmpl-286d5308977d76e2' admitted to slot 3 (reserve 5 blocks; pool 2044/2048 blocks in use) — first token 14335
+2026-09-22 21:58:16.988 INFO  stats: rank 1 | 10.0 s | decode 68.4 tok/s, 12.6 ms/tok, 25.2 ms/step (342 steps / 686 tok, 86 % of wall) | mtp 1.68 tok/step/req, accept p1 67 % | prefill 6 prompts / 150 tok, 15 tok/s, 6.77 ms/tok, 169 ms avg (10 % of wall), 64 tok cached (2/6 hits) | live 4, queued 0 | pool 2045/2048 blocks (100 %) | prefix cache 101/4096 entries
+2026-09-22 21:58:23.527 INFO  rank 1: slot 1 closed: 144 sampled decode steps, 0 fallbacks
+2026-09-22 21:58:23.527 INFO  sched: request 'chatcmpl-286d5308977d76e0' retired (steps): 256 tok in 8.2 s — prefill 37 tok (0 cached) in 225 ms; decode 255 tok / 144 passes in 7.9 s: 32.1 tok/s, 31.1 ms/tok, 55 ms/pass, 1.77 tok/pass, accept p1 77 %
+2026-09-22 21:58:23.846 INFO  rank 1: slot 0 closed: 151 sampled decode steps, 7 fallbacks
+2026-09-22 21:58:23.846 INFO  sched: request 'chatcmpl-286d5308977d76df' retired (steps): 256 tok in 8.7 s — prefill 38 tok (0 cached) in 236 ms; decode 255 tok / 151 passes in 8.5 s: 30.0 tok/s, 33.3 ms/tok, 56 ms/pass, 1.69 tok/pass, accept p1 69 %
+2026-09-22 21:58:23.898 INFO  rank 1: slot 3 closed: 149 sampled decode steps, 0 fallbacks
+2026-09-22 21:58:23.899 INFO  sched: request 'chatcmpl-286d5308977d76e2' retired (steps): 256 tok in 8.0 s — prefill 28 tok (0 cached) in 203 ms; decode 255 tok / 149 passes in 7.8 s: 32.6 tok/s, 30.7 ms/tok, 52 ms/pass, 1.71 tok/pass, accept p1 71 %
+2026-09-22 21:58:24.116 INFO  rank 1: slot 2 closed: 159 sampled decode steps, 4 fallbacks
+2026-09-22 21:58:24.116 INFO  sched: request 'chatcmpl-286d5308977d76e1' retired (steps): 256 tok in 8.5 s — prefill 37 tok (0 cached) in 227 ms; decode 255 tok / 159 passes in 8.3 s: 30.9 tok/s, 32.4 ms/tok, 52 ms/pass, 1.60 tok/pass, accept p1 61 %
+2026-09-22 21:58:24.189 INFO  sched: request 'chatcmpl-286d5308977d76e3' admitted to slot 0 (reserve 5 blocks; pool 2046/2048 blocks in use) — first token 32
+2026-09-22 21:58:24.276 INFO  sched: request 'chatcmpl-286d5308977d76e4' admitted to slot 1 (reserve 5 blocks; pool 1919/2048 blocks in use) — first token 2124
+2026-09-22 21:58:24.380 INFO  sched: request 'chatcmpl-286d5308977d76e5' admitted to slot 2 (reserve 5 blocks; pool 1925/2048 blocks in use) — first token 334
+2026-09-22 21:58:24.481 INFO  sched: request 'chatcmpl-286d5308977d76e6' admitted to slot 3 (reserve 5 blocks; pool 1931/2048 blocks in use) — first token 19
+2026-09-22 21:58:27.026 INFO  stats: rank 1 | 10.0 s | decode 120.7 tok/s, 7.8 ms/tok, 50.5 ms/step (188 steps / 1212 tok, 95 % of wall) | mtp 1.70 tok/step/req, accept p1 70 % | prefill 4 prompts / 20 tok, 2 tok/s, 12.20 ms/tok, 61 ms avg (2 % of wall), 120 tok cached (4/4 hits) | live 4, queued 0 | pool 1932/2048 blocks (94 %) | prefix cache 102/4096 entries
+2026-09-22 21:58:32.275 INFO  rank 1: slot 1 closed: 149 sampled decode steps, 1 fallbacks
+2026-09-22 21:58:32.275 INFO  sched: request 'chatcmpl-286d5308977d76e4' retired (steps): 256 tok in 8.0 s — prefill 37 tok (32 cached) in 63 ms; decode 255 tok / 149 passes in 7.9 s: 32.1 tok/s, 31.1 ms/tok, 53 ms/pass, 1.71 tok/pass, accept p1 72 %
+2026-09-22 21:58:32.336 INFO  rank 1: slot 2 closed: 149 sampled decode steps, 1 fallbacks
+2026-09-22 21:58:32.336 INFO  sched: request 'chatcmpl-286d5308977d76e5' retired (steps): 256 tok in 8.0 s — prefill 28 tok (23 cached) in 62 ms; decode 255 tok / 149 passes in 7.9 s: 32.3 tok/s, 31.0 ms/tok, 53 ms/pass, 1.71 tok/pass, accept p1 72 %
+2026-09-22 21:58:32.336 INFO  rank 1: slot 0 closed: 151 sampled decode steps, 1 fallbacks
+2026-09-22 21:58:32.336 INFO  sched: request 'chatcmpl-286d5308977d76e3' retired (steps): 256 tok in 8.1 s — prefill 38 tok (33 cached) in 61 ms; decode 255 tok / 151 passes in 8.1 s: 31.5 tok/s, 31.7 ms/tok, 54 ms/pass, 1.69 tok/pass, accept p1 69 %
+2026-09-22 21:58:32.387 INFO  rank 1: slot 3 closed: 150 sampled decode steps, 0 fallbacks
+2026-09-22 21:58:32.387 INFO  sched: request 'chatcmpl-286d5308977d76e6' retired (steps): 256 tok in 7.9 s — prefill 37 tok (32 cached) in 58 ms; decode 255 tok / 150 passes in 7.8 s: 32.5 tok/s, 30.8 ms/tok, 52 ms/pass, 1.70 tok/pass, accept p1 71 %
+2026-09-22 21:58:32.474 INFO  sched: request 'chatcmpl-286d5308977d76e7' admitted to slot 0 (reserve 5 blocks; pool 1933/2048 blocks in use) — first token 641
+2026-09-22 21:58:32.567 INFO  sched: request 'chatcmpl-286d5308977d76e8' admitted to slot 1 (reserve 5 blocks; pool 1939/2048 blocks in use) — first token 2124
+2026-09-22 21:58:32.660 INFO  sched: request 'chatcmpl-286d5308977d76e9' admitted to slot 2 (reserve 5 blocks; pool 1945/2048 blocks in use) — first token 334
+2026-09-22 21:58:32.760 INFO  sched: request 'chatcmpl-286d5308977d76ea' admitted to slot 3 (reserve 5 blocks; pool 1951/2048 blocks in use) — first token 334
+2026-09-22 21:58:37.034 INFO  stats: rank 1 | 10.0 s | decode 123.1 tok/s, 7.7 ms/tok, 51.1 ms/step (185 steps / 1232 tok, 95 % of wall) | mtp 1.69 tok/step/req, accept p1 69 % | prefill 4 prompts / 20 tok, 2 tok/s, 12.53 ms/tok, 63 ms avg (3 % of wall), 120 tok cached (4/4 hits) | live 4, queued 0 | pool 1952/2048 blocks (95 %) | prefix cache 106/4096 entries
+2026-09-22 21:58:40.560 INFO  rank 1: slot 3 closed: 146 sampled decode steps, 0 fallbacks
+2026-09-22 21:58:40.561 INFO  sched: request 'chatcmpl-286d5308977d76ea' retired (steps): 256 tok in 7.8 s — prefill 28 tok (23 cached) in 57 ms; decode 255 tok / 146 passes in 7.7 s: 32.9 tok/s, 30.4 ms/tok, 53 ms/pass, 1.75 tok/pass, accept p1 75 %
+2026-09-22 21:58:40.606 INFO  rank 1: slot 1 closed: 149 sampled decode steps, 2 fallbacks
+2026-09-22 21:58:40.606 INFO  sched: request 'chatcmpl-286d5308977d76e8' retired (steps): 256 tok in 8.0 s — prefill 37 tok (32 cached) in 65 ms; decode 255 tok / 149 passes in 8.0 s: 32.0 tok/s, 31.3 ms/tok, 54 ms/pass, 1.71 tok/pass, accept p1 71 %
+2026-09-22 21:58:40.606 INFO  rank 1: slot 2 closed: 148 sampled decode steps, 0 fallbacks
+2026-09-22 21:58:40.606 INFO  sched: request 'chatcmpl-286d5308977d76e9' retired (steps): 256 tok in 7.9 s — prefill 37 tok (32 cached) in 58 ms; decode 255 tok / 148 passes in 7.9 s: 32.3 tok/s, 30.9 ms/tok, 53 ms/pass, 1.72 tok/pass, accept p1 73 %
+2026-09-22 21:58:40.845 INFO  rank 1: slot 0 closed: 160 sampled decode steps, 6 fallbacks
+2026-09-22 21:58:40.845 INFO  sched: request 'chatcmpl-286d5308977d76e7' retired (steps): 256 tok in 8.4 s — prefill 38 tok (33 cached) in 70 ms; decode 255 tok / 160 passes in 8.3 s: 30.7 tok/s, 32.6 ms/tok, 52 ms/pass, 1.59 tok/pass, accept p1 60 %
+2026-09-22 21:58:41.012 INFO  sched: request 'chatcmpl-286d5308977d76eb' admitted to slot 0 (reserve 2 blocks; pool 1950/2048 blocks in use) — first token 334
+2026-09-22 21:58:41.887 INFO  sched: request 'chatcmpl-286d5308977d76eb' retired (steps): 64 tok in 0.9 s — prefill 61 tok (56 cached) in 60 ms; decode 63 tok / 37 passes in 0.8 s: 77.3 tok/s, 12.9 ms/tok, 22 ms/pass, 1.70 tok/pass, accept p1 73 %
+2026-09-22 21:58:41.978 INFO  sched: request 'chatcmpl-286d5308977d76ec' admitted to slot 0 (reserve 5 blocks; pool 1953/2048 blocks in use) — first token 334
+2026-09-22 21:58:45.366 INFO  sched: request 'chatcmpl-286d5308977d76ec' retired (steps): 256 tok in 3.4 s — prefill 61 tok (56 cached) in 64 ms; decode 255 tok / 144 passes in 3.3 s: 76.7 tok/s, 13.0 ms/tok, 23 ms/pass, 1.77 tok/pass, accept p1 77 %
+2026-09-22 21:58:45.456 INFO  sched: request 'chatcmpl-286d5308977d76ed' admitted to slot 0 (reserve 5 blocks; pool 1958/2048 blocks in use) — first token 334
+2026-09-22 21:58:45.739 INFO  sched: request 'chatcmpl-286d5308977d76ee' prefix cache miss — 2 cut(s) probed against 111 entries; the nearest entry (position 316) shares the first 17 of the prompt's 58 tokens (the prompt differs from it from that token on)
+2026-09-22 21:58:45.739 INFO  sched: request 'chatcmpl-286d5308977d76ee' admitted to slot 1 (reserve 5 blocks; pool 1965/2048 blocks in use) — first token 334
+2026-09-22 21:58:46.035 INFO  sched: request 'chatcmpl-286d5308977d76ef' prefix cache miss — 2 cut(s) probed against 112 entries; the nearest entry (position 316) shares the first 17 of the prompt's 61 tokens (the prompt differs from it from that token on)
+2026-09-22 21:58:46.035 INFO  sched: request 'chatcmpl-286d5308977d76ef' admitted to slot 2 (reserve 5 blocks; pool 1972/2048 blocks in use) — first token 334
+2026-09-22 21:58:46.344 INFO  sched: request 'chatcmpl-286d5308977d76f0' prefix cache miss — 2 cut(s) probed against 113 entries; the nearest entry (position 316) shares the first 17 of the prompt's 65 tokens (the prompt differs from it from that token on)
+2026-09-22 21:58:46.344 INFO  sched: request 'chatcmpl-286d5308977d76f0' admitted to slot 3 (reserve 6 blocks; pool 1980/2048 blocks in use) — first token 334
+2026-09-22 21:58:47.051 INFO  stats: rank 1 | 10.0 s | decode 90.6 tok/s, 9.5 ms/tok, 31.3 ms/step (275 steps / 908 tok, 86 % of wall) | mtp 1.75 tok/step/req, accept p1 74 % | prefill 6 prompts / 199 tok, 20 tok/s, 4.88 ms/tok, 162 ms avg (10 % of wall), 168 tok cached (3/6 hits) | live 4, queued 0 | pool 1981/2048 blocks (97 %) | prefix cache 114/4096 entries
+2026-09-22 21:58:53.462 INFO  sched: request 'chatcmpl-286d5308977d76ee' retired (steps): 256 tok in 7.7 s — prefill 58 tok (0 cached) in 259 ms; decode 255 tok / 141 passes in 7.5 s: 34.2 tok/s, 29.3 ms/tok, 53 ms/pass, 1.81 tok/pass, accept p1 81 %
+2026-09-22 21:58:53.571 INFO  sched: request 'chatcmpl-286d5308977d76ed' retired (steps): 256 tok in 8.1 s — prefill 61 tok (56 cached) in 62 ms; decode 255 tok / 144 passes in 8.1 s: 31.7 tok/s, 31.6 ms/tok, 56 ms/pass, 1.77 tok/pass, accept p1 77 %
+2026-09-22 21:58:53.622 INFO  sched: request 'chatcmpl-286d5308977d76ef' retired (steps): 256 tok in 7.6 s — prefill 61 tok (0 cached) in 261 ms; decode 255 tok / 143 passes in 7.3 s: 34.8 tok/s, 28.7 ms/tok, 51 ms/pass, 1.78 tok/pass, accept p1 78 %
+2026-09-22 21:58:53.790 INFO  sched: request 'chatcmpl-286d5308977d76f0' retired (steps): 256 tok in 7.4 s — prefill 65 tok (0 cached) in 265 ms; decode 255 tok / 149 passes in 7.2 s: 35.5 tok/s, 28.2 ms/tok, 48 ms/pass, 1.71 tok/pass, accept p1 72 %
+2026-09-22 21:58:53.879 INFO  sched: request 'chatcmpl-286d5308977d76f1' admitted to slot 0 (reserve 5 blocks; pool 1976/2048 blocks in use) — first token 2124
+2026-09-22 21:58:57.053 INFO  stats: rank 1 | 10.0 s | decode 114.8 tok/s, 8.4 ms/tok, 35.5 ms/step (270 steps / 1148 tok, 96 % of wall) | mtp 1.77 tok/step/req, accept p1 77 % | prefill 1 prompt / 5 tok, 0 tok/s, 12.17 ms/tok, 61 ms avg (1 % of wall), 32 tok cached (1/1 hit) | live 1, queued 0 | pool 1977/2048 blocks (97 %) | prefix cache 117/4096 entries
+2026-09-22 21:58:57.272 INFO  sched: request 'chatcmpl-286d5308977d76f1' retired (steps): 256 tok in 3.4 s — prefill 37 tok (32 cached) in 61 ms; decode 255 tok / 144 passes in 3.3 s: 76.5 tok/s, 13.1 ms/tok, 23 ms/pass, 1.77 tok/pass, accept p1 77 %
+2026-09-22 21:58:58.917 INFO  journal: stop record — exiting
+2026-09-22 21:58:59.003 INFO  rank 1: graph engine sampling summary — 10565 sampled decode steps, 154 served by the exact gather fallback (1.5%), 112 candidates per rank
+2026-09-22 21:58:59.964 INFO  rank 1: exited cleanly

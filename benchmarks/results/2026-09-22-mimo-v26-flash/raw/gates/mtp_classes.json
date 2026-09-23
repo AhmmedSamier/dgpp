@@ -1,0 +1,96 @@
+{
+ "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+ "max_tokens": 300,
+ "classes": {
+  "chat": {
+   "id": "chatcmpl-612c36a8857ff300",
+   "wall_s": 4.157,
+   "completion_tokens": 300,
+   "finish": "length",
+   "head": "The user wants an explanation of CUDA graph replay performance benefits and costs.## Why CUDA Graph Replay Can Be Faster\n\nWhen you launch kernels eagerly (one `cudaLaunchKernel` call at a time), each ",
+   "server": {
+    "prefill_tok": 35,
+    "prefill_ms": 47,
+    "decode_tok": 299,
+    "passes": 173,
+    "tok_per_s": 73.9,
+    "ms_per_tok": 13.5,
+    "ms_per_pass": 23,
+    "tok_per_pass": 1.73,
+    "accept_p1": 73
+   }
+  },
+  "code": {
+   "id": "chatcmpl-612c36a8857ff301",
+   "wall_s": 3.929,
+   "completion_tokens": 300,
+   "finish": "length",
+   "head": "The user wants a Python module that:\n\n1. Parses an OpenAI-style SSE (Server-Sent Events) stream of chat completion chunks\n2. Aggregates them into a single message object\n3. Has type hints and docstrin",
+   "server": {
+    "prefill_tok": 46,
+    "prefill_ms": 234,
+    "decode_tok": 299,
+    "passes": 153,
+    "tok_per_s": 87.1,
+    "ms_per_tok": 11.5,
+    "ms_per_pass": 22,
+    "tok_per_pass": 1.95,
+    "accept_p1": 96
+   }
+  },
+  "prose": {
+   "id": "chatcmpl-612c36a8857ff302",
+   "wall_s": 3.955,
+   "completion_tokens": 300,
+   "finish": "length",
+   "head": "The user wants a long, detailed history of the Roman Republic from its founding to the rise of Augustus, with one era per paragraph. Let me organize this into distinct eras and write comprehensive par",
+   "server": {
+    "prefill_tok": 32,
+    "prefill_ms": 203,
+    "decode_tok": 299,
+    "passes": 160,
+    "tok_per_s": 84.9,
+    "ms_per_tok": 11.8,
+    "ms_per_pass": 22,
+    "tok_per_pass": 1.87,
+    "accept_p1": 88
+   }
+  },
+  "json": {
+   "id": "chatcmpl-612c36a8857ff303",
+   "wall_s": 3.809,
+   "completion_tokens": 300,
+   "finish": "length",
+   "head": "The user wants a JSON array of 25 country objects.```json\n[\n  {\"country\": \"United States\", \"capital\": \"Washington, D.C.\", \"population_millions\": 331.9, \"currency\": \"US Dollar\"},\n  {\"country\": \"Canada\"",
+   "server": {
+    "prefill_tok": 43,
+    "prefill_ms": 226,
+    "decode_tok": 299,
+    "passes": 151,
+    "tok_per_s": 89.8,
+    "ms_per_tok": 11.1,
+    "ms_per_pass": 22,
+    "tok_per_pass": 1.98,
+    "accept_p1": 98
+   }
+  },
+  "math": {
+   "id": "chatcmpl-612c36a8857ff304",
+   "wall_s": 3.981,
+   "completion_tokens": 300,
+   "finish": "length",
+   "head": "Let me work through this step by step.\n\n**Given:**\n- Train 1 leaves City A at 60 km/h\n- City B is 450 km away from City A\n- Train 2 leaves City B at 90 km/h toward City A\n- Train 2 leaves 30 minutes (",
+   "server": {
+    "prefill_tok": 68,
+    "prefill_ms": 258,
+    "decode_tok": 299,
+    "passes": 157,
+    "tok_per_s": 86.7,
+    "ms_per_tok": 11.5,
+    "ms_per_pass": 22,
+    "tok_per_pass": 1.9,
+    "accept_p1": 91
+   }
+  }
+ }
+}

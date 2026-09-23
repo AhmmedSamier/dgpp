@@ -1,0 +1,67 @@
+========= COMPUTE-SANITIZER
+========= Invalid __global__ read of size 4 bytes
+=========     at void dgpp::<unnamed>::l2_prefetch_kernel<(int)2>(const uint4 *, unsigned long)+0x180
+=========     by thread (64,0,0) in block (0,0,0)
+=========     Access to 0xfc838a810400 is out of bounds
+=========     and is 58,369 bytes after the nearest allocation at 0xfc8340000000 of size 1,249,910,784 bytes
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: cuLaunchKernel [0x35f55b] in libcuda.so.1
+=========         Host Frame:  [0x16f8f] in libcudart.so.13
+=========         Host Frame: cudaLaunchKernel [0x6d283] in libcudart.so.13
+=========         Host Frame:  [0x47a597] in dgpp-serve
+=========         Host Frame:  [0x47a84f] in dgpp-serve
+=========         Host Frame:  [0x47acd3] in dgpp-serve
+=========         Host Frame:  [0x215c93] in dgpp-serve
+=========         Host Frame:  [0xe6c13] in dgpp-serve
+=========         Host Frame:  [0xf9bbb] in dgpp-serve
+=========         Host Frame:  [0x15ab7f] in dgpp-serve
+=========         Host Frame:  [0x4106f] in dgpp-serve
+=========         Host Frame: __libc_start_call_main in libc_start_call_main.h:58 [0x284c3] in libc.so.6
+=========         Host Frame: __libc_start_main in libc-start.c:360 [0x28597] in libc.so.6
+=========         Host Frame:  [0x5406f] in dgpp-serve
+========= 
+========= Invalid __global__ read of size 4 bytes
+=========     at void dgpp::<unnamed>::l2_prefetch_kernel<(int)2>(const uint4 *, unsigned long)+0x180
+=========     by thread (65,0,0) in block (0,0,0)
+=========     Access to 0xfc838a810410 is out of bounds
+=========     and is 58,385 bytes after the nearest allocation at 0xfc8340000000 of size 1,249,910,784 bytes
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: cuLaunchKernel [0x35f55b] in libcuda.so.1
+=========         Host Frame:  [0x16f8f] in libcudart.so.13
+=========         Host Frame: cudaLaunchKernel [0x6d283] in libcudart.so.13
+=========         Host Frame:  [0x47a597] in dgpp-serve
+=========         Host Frame:  [0x47a84f] in dgpp-serve
+=========         Host Frame:  [0x47acd3] in dgpp-serve
+=========         Host Frame:  [0x215c93] in dgpp-serve
+=========         Host Frame:  [0xe6c13] in dgpp-serve
+=========         Host Frame:  [0xf9bbb] in dgpp-serve
+=========         Host Frame:  [0x15ab7f] in dgpp-serve
+=========         Host Frame:  [0x4106f] in dgpp-serve
+=========         Host Frame: __libc_start_call_main in libc_start_call_main.h:58 [0x284c3] in libc.so.6
+=========         Host Frame: __libc_start_main in libc-start.c:360 [0x28597] in libc.so.6
+=========         Host Frame:  [0x5406f] in dgpp-serve
+========= 
+========= Invalid __global__ read of size 4 bytes
+=========     at void dgpp::<unnamed>::l2_prefetch_kernel<(int)2>(const uint4 *, unsigned long)+0x180
+=========     by thread (66,0,0) in block (0,0,0)
+=========     Access to 0xfc838a810420 is out of bounds
+=========     and is 58,401 bytes after the nearest allocation at 0xfc8340000000 of size 1,249,910,784 bytes
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: cuLaunchKernel [0x35f55b] in libcuda.so.1
+=========         Host Frame:  [0x16f8f] in libcudart.so.13
+=========         Host Frame: cudaLaunchKernel [0x6d283] in libcudart.so.13
+=========         Host Frame:  [0x47a597] in dgpp-serve
+=========         Host Frame:  [0x47a84f] in dgpp-serve
+=========         Host Frame:  [0x47acd3] in dgpp-serve
+=========         Host Frame:  [0x215c93] in dgpp-serve
+=========         Host Frame:  [0xe6c13] in dgpp-serve
+=========         Host Frame:  [0xf9bbb] in dgpp-serve
+=========         Host Frame:  [0x15ab7f] in dgpp-serve
+=========         Host Frame:  [0x4106f] in dgpp-serve
+=========         Host Frame: __libc_start_call_main in libc_start_call_main.h:58 [0x284c3] in libc.so.6
+=========         Host Frame: __libc_start_main in libc-start.c:360 [0x28597] in libc.so.6
+=========         Host Frame:  [0x5406f] in dgpp-serve
+========= 
+========= Target application returned an error
+========= ERROR SUMMARY: 1199 errors
+========= ERROR SUMMARY: 1196 errors were not printed. Use --print-limit option to adjust the number of printed errors

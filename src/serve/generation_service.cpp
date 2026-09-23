@@ -1902,6 +1902,7 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
   ToolCallParser::Options popts;
   popts.track_tokens = logprobs >= 0;
   popts.start_in_reasoning = opens_thinking;
+  popts.model_may_open_thinking = markers_.prompt_leaves_thinking_to_model(prompt);
 
   // Full-reserve admission arithmetic — a request that can never fit is
   // a 400, never a scheduler deadlock.
@@ -2624,6 +2625,12 @@ void GenerationService::on_token(const std::string& id, int64_t token,
         // call block) and yields the exact text deltas of each run.
         std::vector<ParserEvent> events;
         r->parser->feed(token, &events);
+        // The model's own <think> (a prompt that left it the choice): the
+        // opener counts as reasoning, as does everything through </think>.
+        if (!r->reasoning_open && r->parser->in_reasoning()) {
+          r->reasoning_open = true;
+          ++r->reasoning_tokens;
+        }
         for (ParserEvent& ev : events) absorb(*r, std::move(ev));
       } else {
         // Exact incremental text: the suffix diff of successive full

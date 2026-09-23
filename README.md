@@ -28,6 +28,7 @@ over RoCE. Each quant links to its specific Hugging Face model card.
 | GLM-4.7 | [nvidia/GLM-4.7-NVFP4](https://huggingface.co/nvidia/GLM-4.7-NVFP4) | 4 | [Four nodes](deploy/cluster_glm-4.7_nvfp4_w4.example.json) |
 | GLM-5.3 | [HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64](https://huggingface.co/HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64) | 4 | [Four nodes](deploy/cluster_glm-5.3_int4-int8_w4.example.json) |
 | DeepSeek-V4.1-Flash | [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) | 4 | [Four nodes](deploy/cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json) |
+| MiMo-V2.6-Flash | [XiaomiMiMo/MiMo-V2.6-Flash-RL](https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Flash-RL) | 2, 4 | [Two nodes](deploy/cluster_mimo-v2.6-flash_mxfp4-fp8_w2.example.json), [four nodes](deploy/cluster_mimo-v2.6-flash_mxfp4-fp8_w4.example.json) |
 
 The Qwen NVFP4 templates select streaming MMA for the FP8 vocabulary head
 with `engine.fp8_head: "mma"`, following matched one- and two-Spark
@@ -57,6 +58,21 @@ instead, set
 To reproduce the hybrid from its sources, use
 [the composition tool](tools/compose_nvfp4_hybrid.py) and
 [the NVFP4 notes](docs/nvfp4_plan.md).
+
+MiMo-V2.6-Flash is served as shipped — MXFP4 routed experts, fp8 block-128
+dense projections, BF16 `o_proj` / head / `eh_proj` (resident in their
+lossless 12-bit form under `engine.bf16_weights: "bf12"`) — with its hybrid
+sliding-window (128, sink-biased) / global attention, one MTP draft layer
+and the checkpoint's own chat template and `<tool_call>` format. The vision
+and audio encoders in the checkpoint are not loaded; text prompts only. The
+two-node template keeps its K/V cache in the fp8 row form
+(`engine.kv_dtype: "fp8"`, 58 KiB per token per rank against 109 in BF16)
+for a 256K-token pool; `--kv-dtype bf16` restores the BF16 cache. Decode
+runs the attention as one launch per layer with the residual add fused
+into each norm; prefill attention is query-tiled on the tensor cores (each
+K/V tile staged — and under the fp8 cache dequantized — once per 64 query
+vectors). See the [model card](docs/model_cards/MiMo-V2.6-Flash.md) and
+[plan](docs/mimo_v26_flash_plan.md).
 
 The linked templates enable MTP at the depth measured best for that deployment.
 Plain decode, deeper MTP, alternate cache formats and slot counts are launcher
@@ -135,8 +151,8 @@ and links to the raw results and reproduction commands.
 
 ## Status
 
-As of 2026-09-16, the source tree has nine measured deployment templates
-covering five model architectures on one, two or four Sparks. The shared
+As of 2026-09-22, the source tree has eleven measured deployment templates
+covering six model architectures on one, two or four Sparks. The shared
 engine provides graph decode, transactional MTP, row-batched execution,
 grouped prefill, prefix caching, deterministic multi-rank scheduling and the
 OpenAI-compatible service. Current quantized paths cover FP8, NVFP4, MXFP4 and
@@ -148,7 +164,8 @@ opt-in controls; the shipped Qwen templates retain four slots and monolithic
 admission. DeepSeek ships at six slots with DSpark depth 4, confidence
 scheduling, bounded grouped prefill and the stream-ordered eager collective.
 Full GLM-5.3 ships at eight slots and uses packed tensor-core prefill from 128
-rows. Version 0.1.0 remains the original GLM-5.3-Flash sign-off release; the
+rows. MiMo-V2.6-Flash ships at four slots with MTP depth 1 on two or four
+Sparks. Version 0.1.0 remains the original GLM-5.3-Flash sign-off release; the
 current source has advanced beyond that baseline.
 
 [PLAN.md](PLAN.md) summarizes implementation status,
@@ -342,7 +359,7 @@ Startup checks the combined memory plan before loading.
 |---|---|---|---|
 | `engine.max_concurrency` | no | Maximum actively executing requests, not TCP connections or queued requests. More slots can improve aggregate throughput but use more state/scratch memory and may increase per-request latency. Allowed range is 1–16, subject to model/MTP row limits below. | 8 |
 | `engine.kv_capacity` | no | Shared context-token pool on each rank, across active requests—not a separate allowance for every request. A prompt and its generated answer must fit. Increase for longer contexts or more simultaneous context; memory use increases and allocation is rounded to model block boundaries. | 8192 tokens |
-| `engine.kv_dtype` | no | GLM-5.3 latent-cache precision: `bf16`, `fp8`, or `fp4`. Lower precision reduces latent storage at a numerical-accuracy cost; it does not quantize model weights. The index cache stays FP8. Qwen, GLM-4.7 and DeepSeek K/V caches remain BF16. | `bf16` |
+| `engine.kv_dtype` | no | GLM-5.3 latent-cache precision: `bf16`, `fp8`, or `fp4`; the MiMo-V2.6-Flash K/V cache takes `bf16` or `fp8` (e4m3 rows with one scale per head row, half the bytes). Lower precision reduces cache storage at a numerical-accuracy cost; it does not quantize model weights. The GLM index cache stays FP8. Qwen, GLM-4.7 and DeepSeek K/V caches remain BF16. | `bf16` |
 | `engine.embed_sharding` | no | Full GLM-5.3 and DeepSeek embedding/head placement: `replicated` keeps the full table on every rank; `vocab` keeps each rank's vocabulary slice and folds token lookups. The full-GLM template uses `vocab` to save 1.33 GiB/rank; the DeepSeek template retains `replicated`. Other families ignore it. | `replicated` |
 | `engine.default_max_tokens` | no | Answer-token budget for requests that omit `max_tokens`. Clients may supply their own value; this is not a global hard limit. A larger default also reserves more context space under full admission. | 256 |
 | `engine.queue_limit` | no | Maximum requests waiting for an execution slot or memory budget. Additional arrivals receive HTTP 503 `overloaded`. Increase to tolerate bursts, at the cost of longer waits—not higher execution capacity. | 64 |

@@ -22,6 +22,7 @@ operations to its peers. Every rank checks the operation-stream digest.
 | GLM-4.7 | Paged GQA, partial RoPE, NVFP4 dense and expert weights, draft-layer requantization, graph decode, prefix cache and MTP | Four-node serving is measured. The engine supports up to 32 batched decode rows, including deeper MTP; the supplied default recipe uses depth 1 |
 | GLM-5.3 (full) | MLA with decoupled RoPE and per-token DSA selection shared across layers, int4/int8 pack-quantized experts and attention, draft-layer requantization, graph decode, prefix cache and MTP | Four nodes at 99.3 GiB of weights per rank (48K bf16 / 96K fp8 latent cache at four slots); served 2026-09-12: T=1 51 ms/step, MTP 68–76 ms/pass at 1.8–2.0 tokens/pass, gsm8k 59/60, HumanEval 40/40. Batched decode up to sixteen rows (eight request slots at MTP depth 1, five at depth 2; the select in row groups of eight); packed experts and attention use tensor-core prefill from 128 rows; shorter prompts retain GEMV to preserve measured C1/MTP behavior |
 | DeepSeek-V4.1-Flash | CED encoder/decoder, CSA2 sliding-window + compressed-KV attention with a two-level indexer, single-pass hyper-connections, Engram n-gram tables mapped from NVMe, the DSpark block draft (five drafts per pass), the MXFP4/FP8 checkpoint as shipped, graph decode, prefix cache and a bounded (SWA-replay) prefill | Four nodes at 72.94 GiB of weights per rank (128K context at two slots); served 2026-09-14: 76 ms/pass at 2.33 tokens/pass (32.5 ms/token), bounded prefill 1.6–2.4 ms/token, gsm8k 60/60, HumanEval 40/40, extract 30/30. `engine.prefill` chooses bounded (the default) or the exact 40-layer parity mode. Prefix caching is whole-block, so prompts shorter than 128 tokens are not cached yet |
+| MiMo-V2.6-Flash | Hybrid sliding-window (128, sink-biased) / global GQA attention over 192/128-wide heads with partial RoPE, the fused pre-sharded fp8 qkv projection read in the checkpoint's chunk layout, MXFP4 routed experts without a shared expert, BF16 o_proj / head / eh_proj as 12-bit companions, one MTP draft layer, a per-layer-width paged K/V pool in BF16 or the fp8 row form, graph decode and prefix cache | Served 2026-09-22 on four nodes (50.06 GiB per rank at 128K: C1 71.0–84.4 tok/s at 23 ms/pass, cold prefill 1.83 / 7.42 / 36.6 s at 2K / 8K / 32K, HumanEval 151/164, GSM8K 294/300, extraction 100/100) and two nodes (97.2 GiB per rank with a 256K fp8 pool: C1 42–48 tok/s). The vision and audio encoders are not served; the sliding-window layers keep their full history in the paged cache (a 128-token ring is the recorded memory lever); the one-split prefill attention is the recorded prefill lever past 8K |
 
 World size comes from the configuration's node list. A single-node graph
 world uses resident weights and identity collectives. A single-node run
@@ -82,6 +83,11 @@ Their implementation and evaluation records are maintained separately:
   the CED/CSA2/Engram/DSpark operators, the quantization decision (serve
   as shipped), the reference and torch cross-checks, the bounded prefill,
   the tokenizer and DSML tool grammar, and the serving record.
+- [MiMo-V2.6-Flash architecture and port](docs/mimo_v26_flash_plan.md):
+  the hybrid SWA/GA attention with sinks, the pre-sharded fused projection,
+  the MXFP4/fp8 checkpoint as shipped, the fp8 K/V form, the fixture
+  ladder, the two defects met only on the real checkpoint, and the serving
+  record.
 
 ## Qwen FP8 vocabulary head
 

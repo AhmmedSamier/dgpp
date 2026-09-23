@@ -1,0 +1,3 @@
+[mimo] status 200 finish=length usage={'prompt_tokens': 45, 'completion_tokens': 200, 'total_tokens': 245, 'prompt_tokens_details': {'cached_tokens': 0}, 'completion_tokens_details': {'reasoning_tokens': 16}}
+[mimo] content chunks 198, ttft 353 ms, decode pace 14.00 ms/chunk (client), wall 3111 ms
+[mimo] text: "The user wants an explanation of CUDA graph replay performance benefits and costs.## Why CUDA Graph Replay Can Be Faster\n\nWhen you launch kernels eagerly (one `cudaLaunchKernel` call at a time), each launch involves a round-trip through the CUDA driver: the host thread validates parameters, allocates or retrieves a launch configuration, and enqueues the work onto the GPU's stream. Each of these ca"

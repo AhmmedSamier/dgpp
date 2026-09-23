@@ -86,6 +86,8 @@
 #include "models/dsv41/model.hpp"
 #include "text/dsv41_prompt.hpp"
 #include "models/glm_dsa/model.hpp"
+#include "models/mimo/config.hpp"
+#include "models/mimo/forward.hpp"
 #include "sched/scheduler.hpp"
 #include "text/tokenizer.hpp"
 #include "text/tool_grammar.hpp"
@@ -666,6 +668,79 @@ struct Dsv41Family final : ServeFamily {
   }
 };
 
+// MiMo-V2.6-Flash (MiMoV2ForCausalLM, fp8 dense + MXFP4 experts as
+// shipped; docs/mimo_v26_flash_plan.md): the paged K/V pool (64-token
+// blocks, bf16 K 192 / V 128 wide, every layer's rows — the sliding-window
+// layers read theirs through the window), no recurrent state (snapshots at
+// any position), the first draft layer as the mtp block, the resident
+// fabric model / the streaming world-1 one. The vision and audio encoders
+// in the checkpoint are not served (text prompts only).
+struct MimoFamily final : ServeFamily {
+  dgpp::MimoTextConfig cfg;
+  std::string ckpt;
+  // The K/V pool's format (engine.kv_dtype): bf16, or the fp8 row form per
+  // head (models/mimo/kv_pool.hpp) — the fp4 latent forms are the GLM DSA
+  // caches' alone and are refused here by name.
+  dgpp::LatentFormat kv_format = dgpp::LatentFormat::kBf16;
+  std::unique_ptr<dgpp::MimoModel> model;
+  MimoFamily(const std::string& checkpoint, dgpp::LatentFormat fmt)
+      : cfg(dgpp::MimoTextConfig::from_json_file((fs::path(checkpoint) / "config.json").string())),
+        ckpt(checkpoint), kv_format(fmt) {
+    if (kv_format != dgpp::LatentFormat::kBf16 && kv_format != dgpp::LatentFormat::kFp8)
+      throw std::invalid_argument(std::string("engine.kv_dtype ") + dgpp::latent_format_name(kv_format) +
+                                  " is not implemented for the MiMo-V2 K/V cache (bf16 or fp8)");
+  }
+  const char* name() const override { return "mimo_v2"; }
+  int64_t vocab_size() const override { return cfg.vocab_size; }
+  std::vector<int64_t>& eos_token_ids() override { return cfg.eos_token_ids; }
+  int64_t block_tokens() const override { return dgpp::MimoModel::kv_block_tokens_static(); }
+  int prefill_chunk_tokens() const override { return dgpp::MimoModel::prefill_chunk_tokens(); }
+  std::string pool_check(int64_t) const override { return ""; }
+  const char* kv_format_name() const override { return dgpp::latent_format_name(kv_format); }
+  int decode_rows_cap() const override { return dgpp::MimoModel::decode_rows_cap(); }
+  // The widest fold the decode graph records: a block output [rows, hidden].
+  size_t lat_slot_bytes(int decode_rows) const override {
+    return static_cast<size_t>(decode_rows) * static_cast<size_t>(cfg.hidden_size) * 2;
+  }
+  dgpp::MemoryPlan plan(int forward_rows, int64_t context, int rank, int world_, bool fabric, int slots,
+                        bool mtp, int decode_rows) const override {
+    return dgpp::MimoModel::plan_memory(cfg, forward_rows, context, fabric ? rank : 0, fabric ? world_ : 1,
+                                        fabric ? dgpp::MimoResidency::Resident : dgpp::MimoResidency::Streaming,
+                                        slots, fabric && mtp, decode_rows, kv_format);
+  }
+  size_t snapshot_bytes(int world_, bool mtp) const override {
+    return dgpp::MimoModel::session_snapshot_bytes(cfg, world_, mtp);
+  }
+  void build_model(dgpp::BoundaryReducer* reducer, int rank, int world_, bool fabric, int forward_rows,
+                   int64_t pool_tokens, int slots, bool mtp, int decode_rows) override {
+    dgpp::MimoLayerStream::set_resident_image_dir(dgpp::GlmLayerStream::resident_image_dir());
+    model = std::make_unique<dgpp::MimoModel>(
+        cfg, ckpt, forward_rows, pool_tokens,
+        fabric ? dgpp::MimoResidency::Resident : dgpp::MimoResidency::Streaming, reducer, fabric ? rank : 0,
+        fabric ? world_ : 1, slots, fabric && mtp, decode_rows, kv_format);
+  }
+  void destroy_model() override { model.reset(); }
+  size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
+  std::unique_ptr<ServeGraphEngine> make_graph_engine(dgpp::net::CollectiveBus* bus, int rank,
+                                                      int world_, uint16_t* pick_scratch,
+                                                      int batch_min_live, uint16_t* prefix_scratch,
+                                                      uint16_t* gather_scratch, int candidates,
+                                                      const dgpp::text::GrammarVocab* grammar,
+                                                      int prefix_slots, int mtp_depth,
+                                                      bool compact_batches) override {
+    return std::make_unique<ServeGraphEngineOf<dgpp::MimoModel>>(
+        model.get(), bus, rank, world_, pick_scratch, cfg.vocab_size, /*pick_timeout_ms=*/60000,
+        batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots,
+        mtp_depth, compact_batches);
+  }
+  std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
+      int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
+      int prefix_slots) override {
+    return std::make_unique<dgpp::EagerEngineAdapter<dgpp::MimoModel>>(
+        model.get(), slots, std::move(pick), std::move(sample), grammar, prefix_slots);
+  }
+};
+
 std::unique_ptr<ServeFamily> make_family(const std::string& ckpt, int world,
                                          dgpp::LatentFormat kv_format,
                                          const std::optional<dgpp::RopeScaling>& rope_scaling,
@@ -673,6 +748,7 @@ std::unique_ptr<ServeFamily> make_family(const std::string& ckpt, int world,
   const dgpp::ModelArchitecture arch =
       dgpp::detect_architecture_file((fs::path(ckpt) / "config.json").string());
   if (arch == dgpp::ModelArchitecture::DeepseekV41) return std::make_unique<Dsv41Family>(ckpt);
+  if (arch == dgpp::ModelArchitecture::MimoV2) return std::make_unique<MimoFamily>(ckpt, kv_format);
   if (arch == dgpp::ModelArchitecture::Qwen4Exp)
     return std::make_unique<QwenFamily>(ckpt, rope_scaling, fp8_head_mma);
   if (arch == dgpp::ModelArchitecture::Glm4Moe) return std::make_unique<Glm4Family>(ckpt);
@@ -1734,8 +1810,10 @@ int main(int argc, char** argv) {
     DGPP_LOG_INFO("serve: decode rows {} ({} slot(s) x {} row(s) per request, floor {}, the {} family's cap {})",
                   decode_rows, max_concurrency, graph_rows_per_request, dgpp::kDecodeRows, family->name(),
                   family->decode_rows_cap());
-    if (std::string(family->name()) != "glm5" && std::string(family->name()) != "glm_moe_dsa" && kv_dtype != "bf16")
-      DGPP_LOG_WARN("serve: --kv-dtype {} applies to the GLM-5.3 latent caches only; the {} caches stay bf16",
+    if (std::string(family->name()) != "glm5" && std::string(family->name()) != "glm_moe_dsa" &&
+        std::string(family->name()) != "mimo_v2" && kv_dtype != "bf16")
+      DGPP_LOG_WARN("serve: --kv-dtype {} applies to the GLM-5.3 latent caches and the MiMo-V2 K/V cache only; "
+                    "the {} caches stay bf16",
                     kv_dtype, family->name());
     if (std::string(family->name()) != "qwen4_exp" && ngram_table != "resident")
       DGPP_LOG_WARN("serve: --ngram-table {} applies to the Qwen n-gram table only; the {} family has none",

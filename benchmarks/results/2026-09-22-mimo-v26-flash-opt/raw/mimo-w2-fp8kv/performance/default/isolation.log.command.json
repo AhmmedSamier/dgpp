@@ -1,0 +1,22 @@
+{
+  "command": [
+    "/usr/bin/python3",
+    "/home/stephen/workspace/dgpp/scripts/serve_load.py",
+    "127.0.0.1",
+    "18080",
+    "--concurrency",
+    "1",
+    "--max-tokens",
+    "256",
+    "--isolation",
+    "4",
+    "--classes",
+    "chat",
+    "--json-out",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-mimo-v26-flash-opt/raw/mimo-w2-fp8kv/performance/default/isolation.json"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-09-22T23:22:16.901187+00:00",
+  "returncode": 0,
+  "finished_at": "2026-09-22T23:22:46.222817+00:00"
+}

@@ -1,0 +1,472 @@
+{
+  "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+  "seed": 20260922,
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "calibration": {
+    "prompt_sha256": "e4a17121fd76f8e6581ae84417f7cd280299d8545a2b241d77e9599fb486c914",
+    "usage": {
+      "prompt_tokens": 11269,
+      "completion_tokens": 1,
+      "total_tokens": 11270,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 1
+      }
+    },
+    "finish": "length",
+    "text": "",
+    "wall_ms": 18357.173357973807,
+    "ttft_ms": null,
+    "last_ms": null,
+    "tokens": 1
+  },
+  "samples": [
+    {
+      "requested_tokens": 4096,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 5747.8,
+        "prefill_ms": 6070.5999999999985,
+        "decode_steps": 135,
+        "decode_rows": 135,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 3864,
+        "prompt_tokens_computed": 3864
+      },
+      "engine_tokens_per_s": 44.3648004453878,
+      "ms_per_pass": 42.5762962962963,
+      "tokens_per_pass": 1.8888888888888888,
+      "answer": {
+        "prompt_sha256": "f1b17410877d2098d2367369641ffe7753c1e028e7c1cfef9665fe1e0e07fbc6",
+        "usage": {
+          "prompt_tokens": 3864,
+          "completion_tokens": 256,
+          "total_tokens": 4120,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 124
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list of the first 200 parcels and their cities. However, looking at the document, it says \"Current benchmark document 4096\" but only 87 items are shown (000000 through 000086). I can only list what's provided in the document. Let me list all 87 parcels that are shown.\n\nWait, the user says \"first 200 parcels\" but only 87 are provided. I should list all that are available and note that only 87 are shown.Here is the numbered list of all parcels provided in the document (87 parcels total, as only items 000000\u2013000086 are shown):\n\n1. Parcel PX-0757343 \u2014 Income\n2. Parcel PX-0081436 \u2014 Jamesport\n3. Parcel PX-0126529 \u2014 Dunmore\n4. Parcel PX-0226532 \u2014 Dunmore\n5. Parcel PX-0538039 \u2014 Belvedere\n6. Parcel PX-0133958 \u2014 Gl",
+        "wall_ms": 11910.146818961948,
+        "ttft_ms": 6126.4119549887255,
+        "last_ms": 11884.739247965626,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 4096,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 5745.2,
+        "prefill_ms": 82.70000000000073,
+        "decode_steps": 135,
+        "decode_rows": 135,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 3864,
+        "prompt_tokens_computed": 3
+      },
+      "engine_tokens_per_s": 44.384877811042266,
+      "ms_per_pass": 42.557037037037034,
+      "tokens_per_pass": 1.8888888888888888,
+      "answer": {
+        "prompt_sha256": "f1b17410877d2098d2367369641ffe7753c1e028e7c1cfef9665fe1e0e07fbc6",
+        "usage": {
+          "prompt_tokens": 3864,
+          "completion_tokens": 256,
+          "total_tokens": 4120,
+          "prompt_tokens_details": {
+            "cached_tokens": 3861
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 124
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list of the first 200 parcels and their cities. However, looking at the document, it says \"Current benchmark document 4096\" but only 87 items are shown (000000 through 000086). I can only list what's provided in the document. Let me list all 87 parcels that are shown.\n\nWait, the user says \"first 200 parcels\" but only 87 are provided. I should list all that are available and note that only 87 are shown.Here is the numbered list of all parcels provided in the document (87 parcels total, as only items 000000\u2013000086 are shown):\n\n1. Parcel PX-0757343 \u2014 Income\n2. Parcel PX-0081436 \u2014 Jamesport\n3. Parcel PX-0126529 \u2014 Dunmore\n4. Parcel PX-0226532 \u2014 Dunmore\n5. Parcel PX-0538039 \u2014 Belvedere\n6. Parcel PX-0133958 \u2014 Gl",
+        "wall_ms": 5893.330343009438,
+        "ttft_ms": 128.8172350032255,
+        "last_ms": 5893.1675250059925,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 4096,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 5748.9000000000015,
+        "prefill_ms": 78.90000000000146,
+        "decode_steps": 135,
+        "decode_rows": 135,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 3864,
+        "prompt_tokens_computed": 3
+      },
+      "engine_tokens_per_s": 44.3563116422272,
+      "ms_per_pass": 42.58444444444446,
+      "tokens_per_pass": 1.8888888888888888,
+      "answer": {
+        "prompt_sha256": "f1b17410877d2098d2367369641ffe7753c1e028e7c1cfef9665fe1e0e07fbc6",
+        "usage": {
+          "prompt_tokens": 3864,
+          "completion_tokens": 256,
+          "total_tokens": 4120,
+          "prompt_tokens_details": {
+            "cached_tokens": 3861
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 124
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list of the first 200 parcels and their cities. However, looking at the document, it says \"Current benchmark document 4096\" but only 87 items are shown (000000 through 000086). I can only list what's provided in the document. Let me list all 87 parcels that are shown.\n\nWait, the user says \"first 200 parcels\" but only 87 are provided. I should list all that are available and note that only 87 are shown.Here is the numbered list of all parcels provided in the document (87 parcels total, as only items 000000\u2013000086 are shown):\n\n1. Parcel PX-0757343 \u2014 Income\n2. Parcel PX-0081436 \u2014 Jamesport\n3. Parcel PX-0126529 \u2014 Dunmore\n4. Parcel PX-0226532 \u2014 Dunmore\n5. Parcel PX-0538039 \u2014 Belvedere\n6. Parcel PX-0133958 \u2014 Gl",
+        "wall_ms": 5914.795945980586,
+        "ttft_ms": 128.07561096269637,
+        "last_ms": 5914.52314297203,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 32768,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 6060.799999999999,
+        "prefill_ms": 56763.299999999996,
+        "decode_steps": 128,
+        "decode_rows": 128,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 32382,
+        "prompt_tokens_computed": 32382
+      },
+      "engine_tokens_per_s": 42.073653643083425,
+      "ms_per_pass": 47.349999999999994,
+      "tokens_per_pass": 1.9921875,
+      "answer": {
+        "prompt_sha256": "e337424852d0dd051b70f861bdeae086be42e7d8802e6d12069f18f8ea215480",
+        "usage": {
+          "prompt_tokens": 32382,
+          "completion_tokens": 256,
+          "total_tokens": 32638,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 20
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list of the first 200 parcels and their cities.1. PX-0757343 \u2013 Income\n2. PX-0081436 \u2013 Jamesport\n3. PX-0126529 \u2013 Dunmore\n4. PX-0226532 \u2013 Dunmore\n5. PX-0538039 \u2013 Belvedere\n6. PX-0133958 \u2013 Glencarr\n7. PX-0510348 \u2013 Fenwick\n8. PX-0381529 \u2013 Jamesport\n9. PX-0284743 \u2013 Calder\n10. PX-0428050 \u2013 Eastvale\n11. PX-0735655 \u2013 Arcadia\n12. PX-0712386 \u2013 Belvedere\n13. PX-0688270 \u2013 Calder\n14. PX-0441960 \u2013 Calder\n15. PX-0809310 \u2013 Belvedere\n16. PX-",
+        "wall_ms": 62902.055397978984,
+        "ttft_ms": 56840.93712596223,
+        "last_ms": 62901.92446799483,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 32768,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 6075.399999999998,
+        "prefill_ms": 169.3000000000029,
+        "decode_steps": 128,
+        "decode_rows": 128,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 32382,
+        "prompt_tokens_computed": 3
+      },
+      "engine_tokens_per_s": 41.97254501761203,
+      "ms_per_pass": 47.46406249999998,
+      "tokens_per_pass": 1.9921875,
+      "answer": {
+        "prompt_sha256": "e337424852d0dd051b70f861bdeae086be42e7d8802e6d12069f18f8ea215480",
+        "usage": {
+          "prompt_tokens": 32382,
+          "completion_tokens": 256,
+          "total_tokens": 32638,
+          "prompt_tokens_details": {
+            "cached_tokens": 32379
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 20
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list of the first 200 parcels and their cities.1. PX-0757343 \u2013 Income\n2. PX-0081436 \u2013 Jamesport\n3. PX-0126529 \u2013 Dunmore\n4. PX-0226532 \u2013 Dunmore\n5. PX-0538039 \u2013 Belvedere\n6. PX-0133958 \u2013 Glencarr\n7. PX-0510348 \u2013 Fenwick\n8. PX-0381529 \u2013 Jamesport\n9. PX-0284743 \u2013 Calder\n10. PX-0428050 \u2013 Eastvale\n11. PX-0735655 \u2013 Arcadia\n12. PX-0712386 \u2013 Belvedere\n13. PX-0688270 \u2013 Calder\n14. PX-0441960 \u2013 Calder\n15. PX-0809310 \u2013 Belvedere\n16. PX-",
+        "wall_ms": 6330.437473021448,
+        "ttft_ms": 237.39021201618016,
+        "last_ms": 6330.313535989262,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 32768,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 6064.800000000003,
+        "prefill_ms": 164.10000000000582,
+        "decode_steps": 128,
+        "decode_rows": 128,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 32382,
+        "prompt_tokens_computed": 3
+      },
+      "engine_tokens_per_s": 42.04590423426986,
+      "ms_per_pass": 47.38125000000002,
+      "tokens_per_pass": 1.9921875,
+      "answer": {
+        "prompt_sha256": "e337424852d0dd051b70f861bdeae086be42e7d8802e6d12069f18f8ea215480",
+        "usage": {
+          "prompt_tokens": 32382,
+          "completion_tokens": 256,
+          "total_tokens": 32638,
+          "prompt_tokens_details": {
+            "cached_tokens": 32379
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 20
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list of the first 200 parcels and their cities.1. PX-0757343 \u2013 Income\n2. PX-0081436 \u2013 Jamesport\n3. PX-0126529 \u2013 Dunmore\n4. PX-0226532 \u2013 Dunmore\n5. PX-0538039 \u2013 Belvedere\n6. PX-0133958 \u2013 Glencarr\n7. PX-0510348 \u2013 Fenwick\n8. PX-0381529 \u2013 Jamesport\n9. PX-0284743 \u2013 Calder\n10. PX-0428050 \u2013 Eastvale\n11. PX-0735655 \u2013 Arcadia\n12. PX-0712386 \u2013 Belvedere\n13. PX-0688270 \u2013 Calder\n14. PX-0441960 \u2013 Calder\n15. PX-0809310 \u2013 Belvedere\n16. PX-",
+        "wall_ms": 6309.711317997426,
+        "ttft_ms": 237.23232198972255,
+        "last_ms": 6309.58786100382,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 131072,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 8156.5999999999985,
+        "prefill_ms": 338639.80000000005,
+        "decode_steps": 128,
+        "decode_rows": 128,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 130288,
+        "prompt_tokens_computed": 130288
+      },
+      "engine_tokens_per_s": 31.263026260942066,
+      "ms_per_pass": 63.72343749999999,
+      "tokens_per_pass": 1.9921875,
+      "answer": {
+        "prompt_sha256": "c2339bf5ebc716104ba17ddec3e3cffbc2f96f64b532a3ea52fb74753d31c375",
+        "usage": {
+          "prompt_tokens": 130288,
+          "completion_tokens": 256,
+          "total_tokens": 130544,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 20
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list of the first 200 parcels and their cities.1. PX-0757343 \u2014 Income\n2. PX-0081436 \u2014 Jamesport\n3. PX-0126529 \u2014 Dunmore\n4. PX-0226532 \u2014 Dunmore\n5. PX-0538039 \u2014 Belvedere\n6. PX-0133958 \u2014 Glencarr\n7. PX-0510348 \u2014 Fenwick\n8. PX-0381529 \u2014 Jamesport\n9. PX-0284743 \u2014 Calder\n10. PX-0428050 \u2014 Eastvale\n11. PX-0735655 \u2014 Arcadia\n12. PX-0712386 \u2014 Belvedere\n13. PX-0688270 \u2014 Calder\n14. PX-0441960 \u2014 Calder\n15. PX-0809310 \u2014 Belvedere\n16. PX-",
+        "wall_ms": 346906.77367098397,
+        "ttft_ms": 338757.98125501024,
+        "last_ms": 346906.60842199577,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 131072,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 8151.0999999999985,
+        "prefill_ms": 464.29999999998836,
+        "decode_steps": 128,
+        "decode_rows": 128,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 130288,
+        "prompt_tokens_computed": 3
+      },
+      "engine_tokens_per_s": 31.28412116156102,
+      "ms_per_pass": 63.68046874999999,
+      "tokens_per_pass": 1.9921875,
+      "answer": {
+        "prompt_sha256": "c2339bf5ebc716104ba17ddec3e3cffbc2f96f64b532a3ea52fb74753d31c375",
+        "usage": {
+          "prompt_tokens": 130288,
+          "completion_tokens": 256,
+          "total_tokens": 130544,
+          "prompt_tokens_details": {
+            "cached_tokens": 130285
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 20
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list of the first 200 parcels and their cities.1. PX-0757343 \u2014 Income\n2. PX-0081436 \u2014 Jamesport\n3. PX-0126529 \u2014 Dunmore\n4. PX-0226532 \u2014 Dunmore\n5. PX-0538039 \u2014 Belvedere\n6. PX-0133958 \u2014 Glencarr\n7. PX-0510348 \u2014 Fenwick\n8. PX-0381529 \u2014 Jamesport\n9. PX-0284743 \u2014 Calder\n10. PX-0428050 \u2014 Eastvale\n11. PX-0735655 \u2014 Arcadia\n12. PX-0712386 \u2014 Belvedere\n13. PX-0688270 \u2014 Calder\n14. PX-0441960 \u2014 Calder\n15. PX-0809310 \u2014 Belvedere\n16. PX-",
+        "wall_ms": 8729.4291779981,
+        "ttft_ms": 567.1194960013963,
+        "last_ms": 8729.272759985179,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 131072,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 8165.4000000000015,
+        "prefill_ms": 459.5999999999767,
+        "decode_steps": 128,
+        "decode_rows": 128,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 130288,
+        "prompt_tokens_computed": 3
+      },
+      "engine_tokens_per_s": 31.229333529282087,
+      "ms_per_pass": 63.79218750000001,
+      "tokens_per_pass": 1.9921875,
+      "answer": {
+        "prompt_sha256": "c2339bf5ebc716104ba17ddec3e3cffbc2f96f64b532a3ea52fb74753d31c375",
+        "usage": {
+          "prompt_tokens": 130288,
+          "completion_tokens": 256,
+          "total_tokens": 130544,
+          "prompt_tokens_details": {
+            "cached_tokens": 130285
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 20
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list of the first 200 parcels and their cities.1. PX-0757343 \u2014 Income\n2. PX-0081436 \u2014 Jamesport\n3. PX-0126529 \u2014 Dunmore\n4. PX-0226532 \u2014 Dunmore\n5. PX-0538039 \u2014 Belvedere\n6. PX-0133958 \u2014 Glencarr\n7. PX-0510348 \u2014 Fenwick\n8. PX-0381529 \u2014 Jamesport\n9. PX-0284743 \u2014 Calder\n10. PX-0428050 \u2014 Eastvale\n11. PX-0735655 \u2014 Arcadia\n12. PX-0712386 \u2014 Belvedere\n13. PX-0688270 \u2014 Calder\n14. PX-0441960 \u2014 Calder\n15. PX-0809310 \u2014 Belvedere\n16. PX-",
+        "wall_ms": 8737.416099989787,
+        "ttft_ms": 585.2859680308029,
+        "last_ms": 8737.259074987378,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 240000,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 10510.5,
+        "prefill_ms": 838780.5,
+        "decode_steps": 128,
+        "decode_rows": 128,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 238855,
+        "prompt_tokens_computed": 238855
+      },
+      "engine_tokens_per_s": 24.261452832881403,
+      "ms_per_pass": 82.11328125,
+      "tokens_per_pass": 1.9921875,
+      "answer": {
+        "prompt_sha256": "6c5d0dd8c109475e5d367321c14de67638b8867c90a90a7171f8ee9ae8825e9e",
+        "usage": {
+          "prompt_tokens": 238855,
+          "completion_tokens": 256,
+          "total_tokens": 239111,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 20
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list of the first 200 parcels and their cities.1. PX-0757343 \u2013 Income\n2. PX-0081436 \u2013 Jamesport\n3. PX-0126529 \u2013 Dunmore\n4. PX-0226532 \u2013 Dunmore\n5. PX-0538039 \u2013 Belvedere\n6. PX-0133958 \u2013 Glencarr\n7. PX-0510348 \u2013 Fenwick\n8. PX-0381529 \u2013 Jamesport\n9. PX-0284743 \u2013 Calder\n10. PX-0428050 \u2013 Eastvale\n11. PX-0735655 \u2013 Arcadia\n12. PX-0712386 \u2013 Belvedere\n13. PX-0688270 \u2013 Calder\n14. PX-0441960 \u2013 Calder\n15. PX-0809310 \u2013 Belvedere\n16. PX-",
+        "wall_ms": 849427.5708280038,
+        "ttft_ms": 838941.5602100198,
+        "last_ms": 849427.4531790288,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 240000,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 10515.699999999997,
+        "prefill_ms": 783.5999999998603,
+        "decode_steps": 128,
+        "decode_rows": 128,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 238855,
+        "prompt_tokens_computed": 3
+      },
+      "engine_tokens_per_s": 24.24945557594835,
+      "ms_per_pass": 82.15390624999998,
+      "tokens_per_pass": 1.9921875,
+      "answer": {
+        "prompt_sha256": "6c5d0dd8c109475e5d367321c14de67638b8867c90a90a7171f8ee9ae8825e9e",
+        "usage": {
+          "prompt_tokens": 238855,
+          "completion_tokens": 256,
+          "total_tokens": 239111,
+          "prompt_tokens_details": {
+            "cached_tokens": 238852
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 20
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list of the first 200 parcels and their cities.1. PX-0757343 \u2013 Income\n2. PX-0081436 \u2013 Jamesport\n3. PX-0126529 \u2013 Dunmore\n4. PX-0226532 \u2013 Dunmore\n5. PX-0538039 \u2013 Belvedere\n6. PX-0133958 \u2013 Glencarr\n7. PX-0510348 \u2013 Fenwick\n8. PX-0381529 \u2013 Jamesport\n9. PX-0284743 \u2013 Calder\n10. PX-0428050 \u2013 Eastvale\n11. PX-0735655 \u2013 Arcadia\n12. PX-0712386 \u2013 Belvedere\n13. PX-0688270 \u2013 Calder\n14. PX-0441960 \u2013 Calder\n15. PX-0809310 \u2013 Belvedere\n16. PX-",
+        "wall_ms": 11457.998435012996,
+        "ttft_ms": 969.2306549986824,
+        "last_ms": 11457.819809031207,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 240000,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 10516.800000000003,
+        "prefill_ms": 783.3000000000466,
+        "decode_steps": 128,
+        "decode_rows": 128,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 238855,
+        "prompt_tokens_computed": 3
+      },
+      "engine_tokens_per_s": 24.246919214970326,
+      "ms_per_pass": 82.16250000000002,
+      "tokens_per_pass": 1.9921875,
+      "answer": {
+        "prompt_sha256": "6c5d0dd8c109475e5d367321c14de67638b8867c90a90a7171f8ee9ae8825e9e",
+        "usage": {
+          "prompt_tokens": 238855,
+          "completion_tokens": 256,
+          "total_tokens": 239111,
+          "prompt_tokens_details": {
+            "cached_tokens": 238852
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 20
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list of the first 200 parcels and their cities.1. PX-0757343 \u2013 Income\n2. PX-0081436 \u2013 Jamesport\n3. PX-0126529 \u2013 Dunmore\n4. PX-0226532 \u2013 Dunmore\n5. PX-0538039 \u2013 Belvedere\n6. PX-0133958 \u2013 Glencarr\n7. PX-0510348 \u2013 Fenwick\n8. PX-0381529 \u2013 Jamesport\n9. PX-0284743 \u2013 Calder\n10. PX-0428050 \u2013 Eastvale\n11. PX-0735655 \u2013 Arcadia\n12. PX-0712386 \u2013 Belvedere\n13. PX-0688270 \u2013 Calder\n14. PX-0441960 \u2013 Calder\n15. PX-0809310 \u2013 Belvedere\n16. PX-",
+        "wall_ms": 11460.085030004848,
+        "ttft_ms": 968.8559479545802,
+        "last_ms": 11434.897495957557,
+        "tokens": 256
+      }
+    }
+  ]
+}

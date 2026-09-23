@@ -1,0 +1,26 @@
+[
+  {
+    "id": "mimo-w4",
+    "template": "deploy/cluster_mimo-v2.6-flash_mxfp4-fp8_w4.example.json",
+    "config": "configs/mimo-w4.json",
+    "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+    "world": 4,
+    "slots": 4
+  },
+  {
+    "id": "mimo-w2",
+    "template": "deploy/cluster_mimo-v2.6-flash_mxfp4-fp8_w2.example.json",
+    "config": "configs/mimo-w2.json",
+    "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+    "world": 2,
+    "slots": 4
+  },
+  {
+    "id": "mimo-w2-fp8kv",
+    "template": "deploy/cluster_mimo-v2.6-flash_mxfp4-fp8_w2.example.json",
+    "config": "configs/mimo-w2-fp8kv.json",
+    "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+    "world": 2,
+    "slots": 4
+  }
+]

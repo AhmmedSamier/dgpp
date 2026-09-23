@@ -1,0 +1,22 @@
+{
+  "command": [
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-mimo-v26-flash/../../../.venv/bin/python",
+    "/home/stephen/workspace/dgpp/scripts/timed_load.py",
+    "127.0.0.1",
+    "18080",
+    "--concurrency",
+    "1",
+    "--classes",
+    "all",
+    "--repeat",
+    "3",
+    "--max-tokens",
+    "256",
+    "--json-out",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-mimo-v26-flash/raw/mimo-w4/modes/plain/greedy.json"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-09-22T17:59:16.090310+00:00",
+  "returncode": 0,
+  "finished_at": "2026-09-22T18:00:28.828999+00:00"
+}

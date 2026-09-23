@@ -552,6 +552,79 @@ GLM4_CASES = [c for c in CASES if c[0] not in GLM4_SKIP] + [
 ]
 
 
+# The MiMo-V2.6-Flash template (2026-09-22): ChatML roles, the tools as
+# one JSON line each inside <tools> in a leading system turn (or after a
+# message's own `tools`), assistant turns always opening with the
+# reasoning in think markers (empty when none), tool calls as
+# <tool_call><function=NAME><parameter=K>V</parameter>...</function></tool_call>
+# with non-string values JSON-serialized, tool responses as a plain `tool`
+# role turn, image / audio / video parts as their pad markers, and
+# enable_thinking=false closing the think block in the generation prompt.
+MIMO_SKIP = {"effort_low", "effort_medium_system", "multi_turn_preserve_thinking_false"}
+MIMO_CASES = [c for c in QWEN_CASES if c[0] not in MIMO_SKIP] + [
+    ("mimo_multimodal_parts", {
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "Describe "},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+            {"type": "text", "text": " and "},
+            {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}},
+            {"type": "video", "video": "x.mp4"},
+            {"type": "text", "text": "."},
+        ]}],
+        "add_generation_prompt": True,
+    }),
+    ("mimo_message_tools", {
+        "messages": [
+            {"role": "system", "content": "Be helpful."},
+            {"role": "user", "content": "Weather in Oslo?", "tools": [weather_tool()]},
+        ],
+        "add_generation_prompt": True,
+    }),
+    ("mimo_message_tools_empty_body", {
+        "messages": [{"role": "user", "content": "", "tools": [weather_tool()]}],
+        "add_generation_prompt": True,
+    }),
+    ("mimo_string_arguments", {
+        "messages": [
+            {"role": "user", "content": "Weather?"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"Oslo\"}"}}]},
+            {"role": "tool", "content": "cold"},
+        ],
+        "tools": [weather_tool()], "add_generation_prompt": True,
+    }),
+    ("mimo_custom_tool_input", {
+        "messages": [
+            {"role": "user", "content": "Run it."},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "c1", "type": "custom", "custom": {"name": "shell", "input": "ls -la\n"}}]},
+            {"role": "tool", "content": "total 0"},
+        ],
+        "tools": [{"type": "custom", "custom": {"name": "shell", "description": "Run a shell command"}}],
+        "add_generation_prompt": True,
+    }),
+    ("mimo_reasoning_then_tool_call", {
+        "messages": [
+            {"role": "user", "content": "Weather in Paris and Rome?"},
+            {"role": "assistant", "content": "Checking.", "reasoning_content": "two cities",
+             "tool_calls": [qwen_call("c1", "get_weather", {"city": "Paris"}),
+                            qwen_call("c2", "get_weather", {"city": "Rome", "days": 2})]},
+            {"role": "tool", "content": "Paris: 21C"},
+            {"role": "tool", "content": "Rome: 25C"},
+        ],
+        "tools": [weather_tool()], "add_generation_prompt": True, "enable_thinking": False,
+    }),
+    ("mimo_chinese_tool_args", {
+        "messages": [
+            {"role": "user", "content": "巴黎天气？"},
+            {"role": "assistant", "content": "", "tool_calls": [qwen_call("c1", "get_weather", {"city": "巴黎", "days": 1})]},
+            {"role": "tool", "content": "晴"},
+        ],
+        "tools": [weather_tool()], "add_generation_prompt": True,
+    }),
+]
+
+
 def main():
     import argparse
     ap = argparse.ArgumentParser()
@@ -564,8 +637,10 @@ def main():
     model = args.model
     is_qwen = "Qwen" in model
     is_glm4 = "GLM-4" in model
-    cases = QWEN_CASES if is_qwen else GLM4_CASES if is_glm4 else CASES
+    is_mimo = "MiMo" in model
+    cases = MIMO_CASES if is_mimo else QWEN_CASES if is_qwen else GLM4_CASES if is_glm4 else CASES
     out_path = args.out_opt or args.out or (
+        "tests/data/mimo_chat_template_goldens.jsonl" if is_mimo else
         "tests/data/qwen_chat_template_goldens.jsonl" if is_qwen else
         "tests/data/glm4_chat_template_goldens.jsonl" if is_glm4 else "tests/data/glm_chat_template_goldens.jsonl")
     if args.template and args.tokenizer_json:
@@ -578,7 +653,7 @@ def main():
     tok_raw = pathlib.Path(tok_path).read_bytes()
     template_hash = f"{fnv1a64(tpl_raw):016x}"
     tok_hash = f"{fnv1a64(tok_raw):016x}"
-    if not is_qwen and not is_glm4 and tok_hash != "700b4469fc43f23b":
+    if not is_qwen and not is_glm4 and not is_mimo and tok_hash != "700b4469fc43f23b":
         sys.exit(f"unexpected tokenizer revision {tok_hash} — the tokenizer "
                  "goldens are keyed to 700b4469fc43f23b")
 

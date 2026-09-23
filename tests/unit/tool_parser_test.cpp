@@ -685,6 +685,108 @@ DGPP_TEST(tool_parser_promptOpensThinkingSeesTheQwenNewline) {
   require(!m.prompt_opens_thinking({}), "an empty prompt");
 }
 
+// ---- the MiMo-V2.6 dialect of the XML format (2026-09-22): the same two
+// markers, the template writing the call without newlines, the model
+// opening its own <think> block (the prompt ends in "assistant\n").
+ChatMarkers mimo_markers() {
+  ChatMarkers m = qwen_markers();
+  m.xml_compact = true;
+  return m;
+}
+Run drive_mimo(const std::string& text, ToolCallParser::Options opts = {}) {
+  ToolCallParser parser(mimo_markers(), fake_decode, weather_schemas(), opts);
+  std::vector<Event> events;
+  for (const int64_t id : qwen_ids_of(text)) parser.feed(id, &events);
+  parser.finish(&events);
+  Run run;
+  for (const Event& ev : events) {
+    run.order.push_back(ev.kind);
+    switch (ev.kind) {
+      case Kind::kReasoning: run.reasoning += ev.text; break;
+      case Kind::kReasoningClosed: ++run.reasoning_closed; break;
+      case Kind::kContent: run.content += ev.text; break;
+      case Kind::kToolCall: run.calls.push_back(ev.call); break;
+    }
+  }
+  require(static_cast<int>(run.calls.size()) == parser.calls(), "calls() counts the emitted calls");
+  return run;
+}
+
+DGPP_TEST(tool_parser_mimo_compactCallsKeepTheirNewlines) {
+  ToolCallParser::Options plain;
+  plain.start_in_reasoning = false;
+  // The template's exact shape: no newlines around the tags, so a value's
+  // trailing newline is the value's (the Qwen dialect would strip it).
+  const Run run = drive_mimo(
+      "Checking.<tool_call><function=get_weather><parameter=city>Paris</parameter>"
+      "<parameter=days>3</parameter></function></tool_call>"
+      "<tool_call><function=get_weather><parameter=code>print(1)\nprint(2)\n</parameter>"
+      "<parameter=opts>{\"a\": 1, \"b\": [1, 2]}</parameter></function></tool_call>", plain);
+  require(run.content == "Checking.", "content: '" + run.content + "'");
+  require(run.calls.size() == 2, "two calls");
+  require(run.calls[0].arguments == "{\"city\": \"Paris\", \"days\": 3}", "first: " + run.calls[0].arguments);
+  require(run.calls[1].arguments == "{\"code\": \"print(1)\\nprint(2)\\n\", \"opts\": {\"a\": 1, \"b\": [1, 2]}}",
+          "second keeps the trailing newline: " + run.calls[1].arguments);
+  // The newline form (a forced call: the grammar emits it) parses under the
+  // compact dialect with the format's own newlines stripped.
+  const Run forced = drive_mimo(
+      "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n"
+      "<parameter=code>\nprint(1)\nprint(2)\n\n</parameter>\n</function>\n</tool_call>", plain);
+  require(forced.calls.size() == 1 && forced.calls[0].arguments == "{\"city\": \"Paris\", \"code\": \"print(1)\\nprint(2)\\n\"}",
+          "the newline form under the compact dialect: " + (forced.calls.empty() ? std::string("no call") : forced.calls[0].arguments));
+  // The Qwen dialect on the same newline form: identical.
+  const Run qwen = drive_qwen(
+      "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n"
+      "<parameter=code>\nprint(1)\nprint(2)\n\n</parameter>\n</function>\n</tool_call>", plain);
+  require(qwen.calls.size() == 1 && qwen.calls[0].arguments == forced.calls[0].arguments, "the dialects agree on the newline form");
+}
+
+DGPP_TEST(tool_parser_mimo_jsonBodyIsTheArguments) {
+  ToolCallParser::Options plain;
+  plain.start_in_reasoning = false;
+  // The template renders a client's pre-serialized arguments as one JSON
+  // object inside the function tags (no parameter tags).
+  const Run run = drive_mimo("<tool_call><function=get_weather>{\"city\": \"Oslo\", \"days\": 2}</function></tool_call>", plain);
+  require(run.calls.size() == 1 && run.calls[0].name == "get_weather", "one call");
+  require(run.calls[0].arguments == "{\"city\": \"Oslo\", \"days\": 2}", "the object's members: " + run.calls[0].arguments);
+  // Not an object, or malformed: the block falls back to content.
+  const Run bad = drive_mimo("<tool_call><function=get_weather>{\"city\": </function></tool_call>", plain);
+  require(bad.calls.empty() && bad.content.find("<function=get_weather>") != std::string::npos, "a malformed body is content");
+}
+
+DGPP_TEST(tool_parser_mimo_modelOpensItsOwnThinking) {
+  ChatMarkers m = mimo_markers();
+  constexpr int64_t kNewline = 198;
+  m.newline = ChatMarker{kNewline, "\n"};
+  // The generation prompt ends in "assistant\n": neither marker in the tail.
+  require(m.prompt_leaves_thinking_to_model({7, 8, kNewline}), "a bare assistant header leaves the choice");
+  require(!m.prompt_leaves_thinking_to_model({7, kThinkOpen}), "an opened block is the prompt's");
+  require(!m.prompt_leaves_thinking_to_model({7, kThinkOpen, kThinkClose}), "enable_thinking=false settles it");
+  require(!m.prompt_leaves_thinking_to_model({7, kThinkClose, kNewline}), "a closed block then a newline settles it");
+  require(!m.prompt_opens_thinking({7, 8, kNewline}), "the bare header does not open");
+  require(!ChatMarkers{}.prompt_leaves_thinking_to_model({7}), "no markers, no choice");
+  // The parser: <think> as the first id opens the reasoning; </think> closes
+  // it; the call follows as content-state structure.
+  ToolCallParser::Options opts;
+  opts.start_in_reasoning = false;
+  opts.model_may_open_thinking = true;
+  const Run run = drive_mimo(
+      "<think>plan the call</think>Sure.<tool_call><function=get_weather><parameter=city>Rome</parameter></function></tool_call>", opts);
+  require(run.reasoning == "plan the call", "reasoning: '" + run.reasoning + "'");
+  require(run.reasoning_closed == 1, "one close event");
+  require(run.content == "Sure.", "content: '" + run.content + "'");
+  require(run.calls.size() == 1 && run.calls[0].arguments == "{\"city\": \"Rome\"}", "the call after the block");
+  // Thinking disabled (the prompt ended in <think></think>): a stray opener
+  // after content is text.
+  ToolCallParser::Options settled;
+  settled.start_in_reasoning = false;
+  const Run plain = drive_mimo("Hi <think>x</think> there", settled);
+  require(plain.reasoning.empty() && plain.content == "Hi <think>x</think> there", "markers are text once settled: '" + plain.content + "'");
+  // With the choice left but content already out, an opener is text too.
+  const Run late = drive_mimo("Hi <think>x</think>", opts);
+  require(late.reasoning.empty() && late.content == "Hi <think>x</think>", "a late opener is content: '" + late.content + "'");
+}
+
 DGPP_TEST(tool_parser_schemasReadBothToolForms) {
   const ToolSchemas s = weather_schemas();
   require(s.has("get_weather") && s.has("flat_tool") && !s.has("none"),

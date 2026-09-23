@@ -11,14 +11,15 @@ without `.example` and stay Git-ignored; the launcher fills the nodes, the SSH
 user and the ports from the site's `.env` (`scripts/site_env.py`).
 
 - Model names are `glm-5.3-flash`, `glm-5.3` (the full model), `glm-4.7`,
-  `qwen-3.8-flash-next` and `deepseek-v4.1-flash`.
+  `qwen-3.8-flash-next`, `deepseek-v4.1-flash` and `mimo-v2.6-flash`.
 - The quant names the checkpoint representation: `fp8`, `nvfp4`,
   `nvfp4-fp8` for the custom GLM-5.3-Flash hybrid, `int4-int8` for the full
   GLM-5.3's pack-quantized release (int4 group-64 routed experts, int8
   attention and shared experts), `mxfp4-fp8` for DeepSeek-V4.1-Flash as it
   ships (MXFP4 experts, FP8 dense and attention, FP8 Engram tables mapped
-  from the NVMe). The JSON's `model` field gives the exact Hugging Face
-  repository.
+  from the NVMe) and for MiMo-V2.6-Flash as it ships (MXFP4 experts, FP8
+  fused attention projections and dense MLPs, BF16 o_proj / head). The
+  JSON's `model` field gives the exact Hugging Face repository.
 - `w<n>` gives the participating node count. Nothing restricts that number to
   the counts in use today; a world is refused by the engine's geometry check or
   a rank's memory plan, not by a list of allowed sizes.
@@ -40,6 +41,8 @@ a template does not name are knobs appended at boot:
 | [cluster_qwen-3.8-flash-next_nvfp4_w2_yarn512k.example.json](cluster_qwen-3.8-flash-next_nvfp4_w2_yarn512k.example.json) | the two-Spark NVFP4 deployment with the opt-in YaRN ramp: `engine.rope_scaling` yarn ×2 over the checkpoint's 262 144 positions, so one request reaches 524 288 tokens; two request slots, a 532 480-token pool, the n-gram table mapped, FP8 dense projections, MTP depth 1 | two full-length streams at once: `--kv-capacity 1048576` (see [the YaRN notes](#the-512k-yarn-template-enginerope_scaling)); the plain 262K template: [cluster_qwen-3.8-flash-next_nvfp4_w2.example.json](cluster_qwen-3.8-flash-next_nvfp4_w2.example.json) |
 | [cluster_glm-4.7_nvfp4_w4.example.json](cluster_glm-4.7_nvfp4_w4.example.json) | GLM-4.7 NVFP4 on four nodes: MTP depth 1, 256K context, four request slots | T=1: `--no-mtp`; depth 2: `--mtp-depth 2` (single-stream +4–13 %, measured behind depth 1 under concurrency before the 2026-09-14 lowering) |
 | [cluster_glm-5.3_int4-int8_w4.example.json](cluster_glm-5.3_int4-int8_w4.example.json) | the full GLM-5.3 (int4/int8 RTN) on four nodes: MTP depth 1, eight request slots (sixteen decode rows; c=4 the four-slot shape's 41–42 tok/s, c=8 48–50 aggregate), 120K bf16 context, the embedding vocab-sharded; the BF16 decode weights resident in their 12-bit form alone (`"bf12"`: 110.1 GiB per rank under the 4 GiB headroom — 0.3 GiB under the BF16 plan, where both forms resident stopped at 100K) | both forms resident (100K context): `--bf16-weights bf12+bf16 --kv-capacity 102400`; T=1: `--no-mtp` (144K context with `--kv-capacity 147456`); the fp8 latent cache at 208K: `--kv-dtype fp8 --kv-capacity 212992 --prefix-cache-gib 1.5`; depth 2 at two slots: `--mtp-depth 2 --max-concurrency 2` |
+| [cluster_mimo-v2.6-flash_mxfp4-fp8_w4.example.json](cluster_mimo-v2.6-flash_mxfp4-fp8_w4.example.json) | MiMo-V2.6-Flash as shipped on four nodes: MTP depth 1 (the first of the release's three draft layers), the BF16 o_proj / head / eh_proj resident in their 12-bit form alone (`"bf12"`), 128K context (every layer's K/V paged, the sliding-window layers read theirs through the window), four request slots; text prompts only (the vision and audio encoders are not served) | T=1: `--no-mtp`; depth 2: `--mtp-depth 2` |
+| [cluster_mimo-v2.6-flash_mxfp4-fp8_w2.example.json](cluster_mimo-v2.6-flash_mxfp4-fp8_w2.example.json) | the same on two nodes: MTP depth 1, the K/V cache in the fp8 row form (`"kv_dtype": "fp8"`: 58 KiB per token per rank against 109 in bf16), 256K context (97.5 GiB of the 121.6 GiB per rank), four request slots | T=1: `--no-mtp` |
 | [cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json](cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json) | DeepSeek-V4.1-Flash as shipped on four nodes: six request slots at DSpark depth 4 (30 decode rows in one batched replay, the family's 32-row cap) with the confidence-scheduled verify depth (λ 0.045), the bounded prefill, 128K context — the six-stream shape the vLLM recipe reports its aggregate at; single and dual streams measure the same as the two-slot shapes did | the two-slot depth-5 shape: `--max-concurrency 2 --mtp-depth 5`; the two-slot depth-4 shape: `--max-concurrency 2`; T=1 at four slots: `--no-mtp --max-concurrency 4` |
 
 The Qwen NVFP4 templates use `engine.fp8_head: "mma"` after matched

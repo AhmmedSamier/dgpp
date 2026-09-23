@@ -1,0 +1,51 @@
+{
+  "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+  "release": "",
+  "engine": {
+    "max_concurrency": 6,
+    "kv_capacity": 131072,
+    "bf16_weights": "bf12",
+    "prefill": "bounded",
+    "default_max_tokens": 256,
+    "queue_limit": 8,
+    "max_connections": 64,
+    "decode_graph": true,
+    "mtp": true,
+    "mtp_depth": 4,
+    "prefix_cache_gib": 1.5,
+    "admission": "full",
+    "admission_window": 256,
+    "sampling_candidates": 128,
+    "stats_interval_s": 10,
+    "mtp_schedule": true,
+    "mtp_schedule_lambda": 0.045
+  },
+  "paths": {
+    "resident_cache": "",
+    "log_dir": "benchmarks/results/2026-09-22-mimo-v26-flash/ab/deepseek/base/server-mtp",
+    "stage_dir": "/tmp/bus4/deployments/d8b86b4df49d5cb8",
+    "release_dir": "~/dgpp/releases"
+  },
+  "nodes": [
+    "192.168.88.11",
+    "192.168.88.12",
+    "192.168.88.13",
+    "192.168.88.14"
+  ],
+  "ssh_user": "stephen",
+  "ports": {
+    "http": 18080,
+    "fabric": 29970,
+    "journal": 29971
+  },
+  "http": {
+    "bind_host": "0.0.0.0",
+    "port": 18080
+  },
+  "node_env": [
+    {},
+    {},
+    {},
+    {}
+  ]
+}

@@ -1271,7 +1271,8 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     if (grammar) {
       const text::ChatMarkers& m = grammar_vocab_->markers();
       const bool opens = m.prompt_opens_thinking(prompt);
-      grammar = std::make_unique<text::GrammarState>(grammar_vocab_, grammar->spec(), opens);
+      grammar = std::make_unique<text::GrammarState>(grammar_vocab_, grammar->spec(), opens,
+                                                     m.prompt_leaves_thinking_to_model(prompt));
     }
   }
   // session_prefill opens the slot before any later pick/draft can fail:

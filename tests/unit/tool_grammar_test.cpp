@@ -255,6 +255,92 @@ DGPP_TEST(tool_grammar_qwen_free_keys_typed_values_and_named_single) {
   require(t.active() && std::string(t.state_name()) == "top", "the call closed cleanly");
 }
 
+// The MiMo-V2.6 flows on the XML grammar (2026-09-22): the prompt leaves
+// the thinking to the model (model_may_open_thinking) — a <think> as the
+// first id opens the free reasoning and </think> returns to the mode's
+// opening state; any other first id settles the grammar as before — and
+// the Qwen2 tokenizer's straddling token that closes a JSON value and runs
+// into the terminator's newline ('"\n').
+DGPP_TEST(tool_grammar_mimo_modelOpensThinkingAndStraddledTerminator) {
+  std::vector<std::string> texts(static_cast<size_t>(kVocab));
+  for (int b = 0; b < 256; ++b) texts[static_cast<size_t>(b)] = std::string(1, static_cast<char>(b));
+  texts[kGetWeather] = "get_weather";
+  texts[kCity] = "\"\n";  // the straddling token: a string's close quote + the terminator's newline
+  texts[kThinkOpen] = "<think>";
+  texts[kThinkClose] = "</think>";
+  texts[kToolOpen] = "<tool_call>";
+  texts[kToolClose] = "</tool_call>";
+  ChatMarkers m;
+  m.think_open = ChatMarker{kThinkOpen, "<think>"};
+  m.think_close = ChatMarker{kThinkClose, "</think>"};
+  m.tool_call_open = ChatMarker{kToolOpen, "<tool_call>"};
+  m.tool_call_close = ChatMarker{kToolClose, "</tool_call>"};
+  m.xml_compact = true;
+  const GrammarVocab vocab(std::move(texts), m, {kEosText, kEosUser}, kVocab, kEosUser);
+  // Required call, the choice left to the model: <think> allowed first.
+  GrammarState g(&vocab, spec_of(GrammarSpec::Mode::kRequired), /*prompt_opens_thinking=*/false,
+                 /*model_may_open_thinking=*/true);
+  require(g.allows(kThinkOpen) && g.allows(kToolOpen) && g.allows('H') && !g.allows(kEosUser),
+          "first position: the opener, the call or text; never EOS while owed");
+  g.advance(kThinkOpen);
+  require(std::string(g.state_name()) == "think", std::string("the opener enters the reasoning: ") + g.state_name());
+  require(g.allows('x') && g.allows(kThinkClose) && !g.allows(kEosUser), "free reasoning, EOS refused while owed");
+  feed(g, bytes_of("plan"));
+  g.advance(kThinkClose);
+  require(std::string(g.state_name()) == "top", std::string("</think> returns to the top: ") + g.state_name());
+  g.advance(kToolOpen);
+  feed(g, bytes_of("\n<function="));
+  feed(g, {kGetWeather});
+  feed(g, bytes_of(">\n<parameter=city>\n"));
+  // JSON mode for the value: a typed string closing with the straddling token.
+  // (city is a free value in spec_of; a typed one is built below.)
+  feed(g, bytes_of("Paris\n</parameter>\n</function>\n"));
+  g.advance(kToolClose);
+  require(g.active(), "the call closed");
+  // A JSON-typed value whose close quote and terminator newline share a token.
+  GrammarSpec spec = spec_of(GrammarSpec::Mode::kRequired);
+  GrammarArg city;
+  city.key = "city";
+  city.kind = GrammarArg::Kind::kJson;
+  city.schema = R"({"type": "string"})";
+  spec.tools[0].keys = {"city"};
+  spec.tools[0].args = {city};
+  GrammarState t(&vocab, spec, false, true);
+  // Any other first id settles the opening (the top's rules apply).
+  t.advance(kToolOpen);
+  require(std::string(t.state_name()) == "q-name" && !t.allows(kThinkOpen), "a call first: inside the call no opener");
+  feed(t, bytes_of("\n<function="));
+  feed(t, {kGetWeather});
+  feed(t, bytes_of(">\n<parameter=city>\n\"Oslo"));
+  require(t.allows(kCity), "the straddling '\"\\n' token closes the value and opens the terminator");
+  t.advance(kCity);
+  require(t.allows('<') && !t.allows('\n') && !t.allows('x'), "inside the terminator: '</' next");
+  feed(t, bytes_of("</parameter>\n</function>\n"));
+  t.advance(kToolClose);
+  require(t.active() && std::string(t.state_name()) == "top", "the typed call closed cleanly");
+  // Without the choice (a Qwen prompt that opened the block, or one that
+  // closed it): the opener is not offered at the first position.
+  GrammarState settled(&vocab, spec_of(GrammarSpec::Mode::kRequired), false, false);
+  settled.advance(kThinkOpen);  // free text at the XML top (the format's own rule): no reasoning state
+  require(std::string(settled.state_name()) == "top", std::string("no choice: the marker is text at the top: ") + settled.state_name());
+  GrammarSpec json_settled;
+  json_settled.mode = GrammarSpec::Mode::kJson;
+  GrammarState js(&vocab, json_settled, false, false);
+  require(!js.allows(kThinkOpen) && js.allows('{'), "no choice in JSON mode: the body only");
+  GrammarState opened(&vocab, spec_of(GrammarSpec::Mode::kRequired), true, true);
+  require(std::string(opened.state_name()) == "think", "a prompt that opened the block starts in the reasoning");
+  // JSON mode: <think> first, then the JSON body after </think>.
+  GrammarSpec json;
+  json.mode = GrammarSpec::Mode::kJson;
+  GrammarState j(&vocab, json, false, true);
+  require(j.allows(kThinkOpen) && j.allows('{') && !j.allows('x'), "JSON mode: the opener or the body");
+  j.advance(kThinkOpen);
+  feed(j, bytes_of("why"));
+  j.advance(kThinkClose);
+  require(std::string(j.state_name()) == "json-body" || j.allows('{'), std::string("the body after the block: ") + j.state_name());
+  require(j.allows('{') && !j.allows('x'), "the JSON body follows");
+}
+
 // A schema that declares properties and does not opt out with an explicit
 // `additionalProperties: true` closes the parameter names: an open name slot
 // is free text, which is what lets the model write an undeclared or a

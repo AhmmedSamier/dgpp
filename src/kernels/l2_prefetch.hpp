@@ -29,8 +29,28 @@ enum class PrefetchRate { Off, Light, Full };
 // Streams [ptr, ptr + bytes) through L2 (cache-global loads, no L1) with a
 // modest grid so a concurrently running chain kernel still finds SM slots.
 // bytes == 0 or ptr == nullptr is a no-op. ptr need not be aligned.
+// `persisting`: the loads carry an L2 access-policy window over the range
+// (cudaAccessPropertyPersisting), so the lines land in the persisting
+// set-aside (l2_set_persisting_limit) and survive the streaming traffic
+// that follows — the routed experts' — until later persisting fills
+// replace them. Capture-safe (a launch attribute).
 void launch_l2_prefetch(const void* ptr, size_t bytes, PrefetchRate rate,
-                        cudaStream_t stream);
+                        cudaStream_t stream, bool persisting = false);
+
+// The L2 set-aside for persisting accesses (2026-09-22, the MiMo decode
+// step's early projection prefetch: docs/mimo_v26_flash_plan.md §7.1):
+// the granted size in bytes (0: unavailable). While persisting lines hold
+// it, normal accesses have the rest of the L2; l2_reset_persisting()
+// returns the lines to normal (before a prefill walk, whose tile kernels
+// want the whole L2).
+size_t l2_set_persisting_limit(size_t bytes);
+// [ptr, ptr + bytes) back to the normal eviction priority
+// (applypriority.global.L2::evict_normal per line: 6 us over 14 MB, no
+// reads) — the release of persisting lines, on a stream. NOT
+// cudaCtxResetPersistingL2Cache: that one needs the device idle and
+// deadlocks against a peer's spinning collective kernel (the world-2
+// loopback engine tests, 2026-09-22).
+void launch_l2_release(const void* ptr, size_t bytes, cudaStream_t stream);
 
 // The prefetch scheduler. A WINDOW is opened at a point of the main stream
 // (everything added to it starts once the main stream reaches that point)
@@ -67,8 +87,10 @@ class WeightPrefetcher {
   // Opens a window at `main`'s current position with the given budget
   // (0 = the default) and rate. Adds before the next open_window() share
   // it. Rate Off opens a window that ignores every add().
+  // `persisting`: every launch of the window carries the persisting
+  // access policy (launch_l2_prefetch).
   void open_window(cudaStream_t main, size_t budget_bytes = 0,
-                   PrefetchRate rate = PrefetchRate::Full);
+                   PrefetchRate rate = PrefetchRate::Full, bool persisting = false);
   // Adds a range to the open window, clamped to its remaining budget.
   // Adjacent (or nearly adjacent) ranges coalesce into one launch
   //: a window's adds are a layer's tensors in consumption
@@ -106,6 +128,11 @@ class WeightPrefetcher {
   void join(cudaStream_t main);
   // Launches (and cumulative bytes) issued so far — the merge's evidence.
   size_t launches() const { return launches_; }
+  // The persisting lines the recent persisting windows filled, released
+  // to the normal priority on `main` (launch_l2_release over the last
+  // kPersistRing persisting launches' ranges — the set-aside holds no
+  // more than those): before a walk that wants the whole L2.
+  void release_persisting(cudaStream_t main);
 
  private:
   // The coalescing range (see add): [pending_begin_, pending_end_) not
@@ -120,6 +147,15 @@ class WeightPrefetcher {
   PrefetchRate boundary_rate_ = PrefetchRate::Light;
   PrefetchRate layer_rate_ = PrefetchRate::Light;
   PrefetchRate rate_ = PrefetchRate::Full;  // the open window's
+  bool persisting_ = false;                 // the open window's access policy
+  static constexpr int kPersistRing = 4;
+  struct Range {
+    uintptr_t begin = 0;
+    size_t bytes = 0;
+  };
+  Range persisted_[kPersistRing];
+  int persisted_next_ = 0;
+  void note_persisting(const void* ptr, size_t bytes);
   size_t remaining_ = 0;
   bool window_open_ = false;
   bool forked_ = false;  // a fork since the last join (join must follow)
