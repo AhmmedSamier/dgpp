@@ -189,6 +189,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/csa2.cu
   src/kernels/qwen_mtp.cu
   src/kernels/qsa.cu
+  src/kernels/qsa_warp.cu
   src/kernels/qsa_prefill.cu
   src/kernels/glm4_attn.cu
   src/kernels/mimo_attn.cu
