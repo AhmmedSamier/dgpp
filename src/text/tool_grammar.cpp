@@ -954,9 +954,21 @@ void GrammarState::mask(TokenMask* out) const {
       }
       // The Qwen format lets natural-language text precede a call ("You
       // may provide optional reasoning ... BEFORE the function call"), so
-      // its top is free under every mode; the obligation still forbids EOS.
-      const bool free_top = qwen() || dsml() || spec_.mode == GrammarSpec::Mode::kAuto ||
-                            spec_.mode == GrammarSpec::Mode::kForbidCalls;
+      // its top is free whenever no call is owed (auto, forbid, or an
+      // obligation already met). While a call is owed (required / named
+      // with no call closed yet) the top is the opener alone: a free top
+      // only forbids EOS, so a greedy model that prefers prose emits text
+      // until max_tokens without ever taking the low-probability
+      // <tool_call> — the TC-45 probe ("reply OK, do not call tools" with
+      // tool_choice required) then sees no tool call and reports the
+      // endpoint as not enforcing required. DSML keeps the free top: its
+      // opener is ordinary text ("<" + tag), not forceable by a token mask.
+      // MiMo's compact dialect keeps it too: its template leaves the
+      // opening to the model (it opens <think> itself), pinned by
+      // tool_grammar_mimo_modelOpensThinkingAndStraddledTerminator.
+      const bool free_top = dsml() || spec_.mode == GrammarSpec::Mode::kAuto ||
+                            spec_.mode == GrammarSpec::Mode::kForbidCalls ||
+                            (qwen() && (!obligation_open() || m.xml_compact));
       if (free_top) {
         // DSML: the text may carry on; the tag opens a block right after a
         // "<" (content runs before "\n\n<" in the format).
