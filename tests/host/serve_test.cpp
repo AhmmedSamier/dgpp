@@ -43,6 +43,7 @@
 #include "serve/generation_service.hpp"
 #include "serve/image_inputs.hpp"
 #include "serve/http_server.hpp"
+#include "serve/prefill_policy.hpp"
 #include "serve/serve_stats.hpp"
 #include "text/chat_template.hpp"
 #include "text/dsv41_prompt.hpp"
@@ -304,6 +305,29 @@ class FakeEngine : public SchedulerEngine {
     return live.last_token;
   }
   std::atomic<bool> hold_prefill{false}, prefill_entered{false};
+  bool resumable_prefill = false;
+  std::atomic<bool> hold_chunk{false}, chunk_entered{false};
+  std::atomic<int> chunks_computed{0};
+  int64_t prefill_chunk_alignment() const override { return resumable_prefill ? 4 : 0; }
+  int64_t prefill_chunk_limit() const override { return resumable_prefill ? 16 : 0; }
+  void begin_prefill(int req, const std::vector<int64_t>& prompt, int64_t reserved,
+                     int64_t, const PrefixPrefill&) override {
+    const auto first = prefill(req, prompt);
+    reserve(req, reserved);
+    partial_prefills_[req] = {static_cast<int64_t>(prompt.size()), first};
+  }
+  PrefillProgress advance_prefill(int req, int64_t budget) override {
+    chunk_entered = true;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (hold_chunk && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    auto& pending = partial_prefills_.at(req);
+    const int64_t count = std::min(pending.first, budget);
+    pending.first -= count;
+    ++chunks_computed;
+    return {count, pending.first == 0 ? pending.second : -1};
+  }
+
   void note_logprobs(int req, int32_t token, int index) {
     if (report_.count(req) == 0 || report_[req] < 0) return;
     dgpp::sample::Result r;
@@ -334,7 +358,7 @@ class FakeEngine : public SchedulerEngine {
   }
   void fail_at_step(int n) { fail_at_step_ = n; }
 
-  void close(int req) override { live_.erase(req); }
+  void close(int req) override { partial_prefills_.erase(req); live_.erase(req); }
 
  private:
   std::map<size_t, std::vector<int32_t>> scripts_;
@@ -348,6 +372,7 @@ class FakeEngine : public SchedulerEngine {
   std::map<int, int64_t> pinned_;
   std::vector<std::string> prefix_ops_;  // under armed_mu_
   std::map<int, Live> live_;
+  std::map<int, std::pair<int64_t, int32_t>> partial_prefills_;
   std::map<int, int> report_;
   std::map<int, std::vector<dgpp::sample::Result>> pending_lps_;
   mutable std::mutex armed_mu_;
@@ -642,7 +667,7 @@ struct ServiceRig {
                       // rope ramp and its two bounds, advertised on /v1/models.
                       std::optional<dgpp::RopeScaling> rope_scaling = std::nullopt,
                       int64_t position_ceiling = 0, int64_t kv_pool_tokens = 0,
-                      bool with_dsml = false)
+                      bool resumable_prefill = false, bool with_dsml = false)
       : engine(kSlots, /*total_blocks=*/100, /*block_tokens=*/4, can_sample),
         frontend(with_markers, with_dsml),
         cfg([&] {
@@ -653,7 +678,8 @@ struct ServiceRig {
           c.sampling_defaults = sampling_defaults;
           c.fixed_seed = fixed_seed;
           c.reasoning_in_content = reasoning_in_content;
-          c.admission = admission;
+          engine.resumable_prefill = resumable_prefill;
+          c.admission = dgpp::serve::resolve_prefill_policy(admission, engine);
           c.vocab_size = 512;  // the fake's ids are bytes and markers
           c.rope_scaling = rope_scaling;
           c.position_ceiling = position_ceiling;
@@ -1346,6 +1372,68 @@ DGPP_TEST(serve_api_streamUsageAndObfuscation) {
   }
 }
 
+
+DGPP_TEST(serve_auto_prefill_disconnect_releases_slot_before_the_remaining_chunks) {
+  for (bool stream : {false, true}) {
+    dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_budget_tokens = -1;
+    ServiceRig rig(8, dgpp::sample::greedy_params(), false, std::nullopt, false, false,
+                   policy, 0, {}, std::nullopt, 0, 0, true);
+    rig.engine.hold_chunk = true;
+    struct Release { FakeEngine& engine; ~Release() { engine.hold_chunk = false; } } release{rig.engine};
+    Client request(rig.port());
+    const auto body = chat_body(std::string(128, 'a'), 8,
+                               stream ? ",\"stream\":true" : ",\"stream\":false");
+    request.send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\nContent-Length: " +
+                     std::to_string(body.size()) + "\r\n\r\n" + body);
+    for (int i = 0; i < 500 && !rig.engine.chunk_entered; ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    require(rig.engine.chunk_entered, "automatic budget entered resumable prefill");
+    request.hard_close();
+    for (int i = 0; i < 500 && rig.service.stats().requests_cancelled == 0; ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    require(rig.service.stats().requests_cancelled == 1, "disconnect registered during a chunk");
+    rig.engine.hold_chunk = false;
+    for (int i = 0; i < 500 && rig.service.meters().terminal == 0; ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    require(rig.service.meters().terminal == 1 && rig.service.meters().pool_blocks_in_use == 0,
+            "cancel returns the slot and reservation at the first yield");
+    require(rig.engine.chunks_computed == 1, "abandoned prompt never computes a second chunk");
+    require(rig.engine.prefill_monitor()->snapshot().empty(), "cancel clears live prefill progress");
+    const auto fresh = post_chat(rig, chat_body("abcdefgh", 2), "usage", 2000);
+    require(fresh.find("200 OK") != std::string::npos, "fresh request reuses the released slot");
+  }
+}
+
+DGPP_TEST(serve_disconnect_during_blocked_prefill_counts_before_the_tick_returns) {
+  for (bool stream : {false, true}) {
+    ServiceRig rig;
+    rig.engine.hold_prefill = true;
+    struct Release { FakeEngine& engine; ~Release() { engine.hold_prefill = false; } } release{rig.engine};
+    Client request(rig.port());
+    const auto body = chat_body("abcdefgh", 100, stream ? ",\"stream\":true" : ",\"stream\":false");
+    request.send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\nContent-Length: " +
+                     std::to_string(body.size()) + "\r\n\r\n" + body);
+    for (int i = 0; i < 500 && !rig.engine.prefill_entered.load(); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    require(rig.engine.prefill_entered.load(), "prefill entered");
+    request.hard_close();
+    for (int i = 0; i < 500 && rig.service.stats().requests_cancelled == 0; ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    require(rig.service.stats().requests_cancelled == 1, "disconnect counted before prefill returns");
+    Client metrics(rig.port());
+    metrics.send_all("GET /metrics HTTP/1.1\r\nHost: t\r\n\r\n");
+    const auto response = metrics.read_until("\"remaining_tokens\":4}}", 1000);
+    const auto parsed = dgpp::minijson::parse(std::string_view(response).substr(response.find("\r\n\r\n") + 4));
+    require(parsed.root.at("scheduler").at("prefilling").as_int() == 1, "prefill still running after cancellation queued");
+    require(parsed.root.at("service").at("pending_cancellations").as_int() == 1, "cancel waits for scheduler pass boundary");
+    rig.engine.hold_prefill = false;
+    for (int i = 0; i < 500 && rig.service.meters().terminal == 0; ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    require(rig.service.meters().terminal == 1, "request retires after prefill returns");
+  }
+}
+
 DGPP_TEST(serve_metrics_liveDuringBlockedPrefill) {
   ServiceRig rig;
   rig.engine.hold_prefill = true;
@@ -1756,7 +1844,7 @@ DGPP_TEST(serve_tools_preserveFlatDefinitionsWhileFiltering) {
 
 DGPP_TEST(serve_tools_dsmlNamespacesMatchRenderedAndConstrainedNames) {
   ServiceRig rig(8, dgpp::sample::greedy_params(), true, std::nullopt, true, false, {}, 0, {},
-                 std::nullopt, 0, 0, /*with_dsml=*/true);
+                 std::nullopt, 0, 0, /*resumable_prefill=*/false, /*with_dsml=*/true);
   const std::string ns = R"("namespace":{"name":"search","description":"Search tools"})";
   const std::string fields =
       R"("name":"lookup","description":"Lookup","parameters":{"type":"object","properties":{}},"response":{"response_schema_marker":true})";

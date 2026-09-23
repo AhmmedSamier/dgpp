@@ -84,6 +84,9 @@ std::string& resident_image_dir_storage() {
 bool g_ngram_table_mmap = false;
 // The dense stack's form (engine.dense_weights = "fp8", 2026-09-10).
 bool g_dense_weights_fp8 = false;
+// The RadixArk MTP expert format (engine.mtp_expert_format = "bf16_fused"):
+// fused BF16 gate_up_proj + down_proj instead of per-expert FP8 tensors.
+bool g_mtp_experts_bf16_fused = false;
 }  // namespace
 
 // The per-class builders (loaders/weight_build.hpp's primitives).
@@ -265,9 +268,49 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
         m.experts_fp4[static_cast<size_t>(e) * 3 + 1] = load_fp4_rows_mo(ep + "up_proj", r * I, I, g + 1);
         m.experts_fp4[static_cast<size_t>(e) * 3 + 2] = load_fp4_cols_mo(ep + "down_proj", r * I, I, g + 2);
       }
-      return;
-    }
-    m.experts.resize(static_cast<size_t>(E) * 3);
+       return;
+     }
+     // The RadixArk release stores the MTP layer's 512 experts as a single
+     // fused BF16 pair: gate_up_proj [E, 2*I_full, H] (gate || up along the
+     // intermediate axis) and down_proj [E, H, I_full]. The loader encodes
+     // each expert's row/column slice to the resident FP8 form at load; the
+     // resident GlmQuantMatrix is identical to the per-expert FP8 path, so
+     // the moE kernels are format-agnostic about the source. The two fused
+     // tensors are consumed once and note_read'd once each (counting mode
+     // allocates the same from the bump with a null host_src).
+     if (cfg.mtp_experts_bf16_fused && p.rfind("mtp.", 0) == 0) {
+       const int64_t I_full = cfg.moe_intermediate_size, H = cfg.hidden_size;
+       m.experts.resize(static_cast<size_t>(E) * 3);
+       const std::string gup = p + "experts.gate_up_proj";
+       const std::string dwn = p + "experts.down_proj";
+       const QwenExpectedTensor& eg = expected(gup);
+       const QwenExpectedTensor& ed = expected(dwn);
+       const uint16_t* gup_src = nullptr;
+       const uint16_t* dwn_src = nullptr;
+       if (copy) {
+         gup_src = static_cast<const uint16_t*>(source(gup).data);
+         dwn_src = static_cast<const uint16_t*>(source(dwn).data);
+       }
+       for (int e = 0; e < E; ++e) {
+         const size_t eo = static_cast<size_t>(e) * 2 * I_full * H;
+         m.experts[static_cast<size_t>(e) * 3 + 0] =
+             encode_fp8(gup_src + eo + static_cast<size_t>(r) * I * H, H, I, H);
+         m.experts[static_cast<size_t>(e) * 3 + 1] =
+             encode_fp8(gup_src + eo + static_cast<size_t>(I_full) * H + static_cast<size_t>(r) * I * H,
+                        H, I, H);
+         const size_t doff = static_cast<size_t>(e) * H * I_full + static_cast<size_t>(r) * I;
+         m.experts[static_cast<size_t>(e) * 3 + 2] =
+             encode_fp8(dwn_src + doff, I_full, H, I);
+       }
+       if (copy) {
+         consumed(source(gup));
+         consumed(source(dwn));
+       }
+       note_read(eg, static_cast<size_t>(E) * 2 * I * H * 2);
+       note_read(ed, static_cast<size_t>(E) * H * I * 2);
+       return;
+     }
+     m.experts.resize(static_cast<size_t>(E) * 3);
     for (int e = 0; e < E; ++e) {
       const std::string ep = p + "experts." + std::to_string(e) + ".";
       m.experts[static_cast<size_t>(e) * 3 + 0] =
@@ -691,7 +734,12 @@ bool QwenLayerStream::ngram_table_mmap() { return g_ngram_table_mmap; }
 
 void QwenLayerStream::set_dense_weights_fp8(bool on) { g_dense_weights_fp8 = on; }
 bool QwenLayerStream::dense_weights_fp8() { return g_dense_weights_fp8; }
-uint64_t QwenLoaderFamily::loader_format() { return g_dense_weights_fp8 ? 2 : 1; }
+uint64_t QwenLoaderFamily::loader_format() {
+  return (g_dense_weights_fp8 ? 2 : 1) | (g_mtp_experts_bf16_fused ? 4 : 0);
+}
+
+void QwenLayerStream::set_mtp_expert_format(bool on) { g_mtp_experts_bf16_fused = on; }
+bool QwenLayerStream::mtp_experts_bf16_fused() { return g_mtp_experts_bf16_fused; }
 
 // ---- QwenNgramTableMmap ---------------------------------------------------------
 

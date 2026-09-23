@@ -33,6 +33,19 @@ std::filesystem::path landed_snapshot() {
   return {};
 }
 
+std::filesystem::path radixark_snapshot() {
+  namespace fs = std::filesystem;
+  const char* home = std::getenv("HOME");
+  if (!home) return {};
+  const fs::path root = fs::path(home) / ".cache/huggingface/hub/models--RadixArk--Qwen3.8-Flash-Next-NVFP4/snapshots";
+  if (!fs::is_directory(root)) return {};
+  for (const auto& snap : fs::directory_iterator(root))
+    if (fs::exists(snap.path() / "config.json") &&
+        fs::exists(snap.path() / "model.safetensors.index.json"))
+      return snap.path();
+  return {};
+}
+
 }  // namespace
 
 DGPP_TEST(qwen_binding_table_has_the_release_shape) {
@@ -93,4 +106,40 @@ DGPP_TEST(qwen_binding_validates_the_landed_checkpoint_when_present) {
                         std::to_string(rep.unexpected) + " first: " + first);
   require(rep.vision == 333 && rep.quantized_matrices == 73728 + 1536 && rep.ngram_shards == 128,
           "the census");
+}
+
+DGPP_TEST(qwen_binding_table_has_the_radixark_fused_shape) {
+  const auto snap = radixark_snapshot();
+  if (snap.empty()) return;
+  const dgpp::QwenTextConfig cfg = dgpp::QwenTextConfig::from_json_file((snap / "config.json").string());
+  // The RadixArk NVFP4 checkpoint stores the MTP layer's experts as fused BF16
+  // tensors, not per-expert FP8 — the loader encodes the slices to FP8 at load.
+  dgpp::QwenTextConfig fused = cfg;
+  fused.mtp_experts_bf16_fused = true;
+  const auto table = dgpp::qwen_expected_text_tensors(fused);
+  const auto unfused = dgpp::qwen_expected_text_tensors(cfg);
+  // The fused table replaces 512*3*2=3072 per-expert FP8 MTP tensors with
+  // 2 fused tensors, so it is smaller by 3070.
+  require(table.size() == unfused.size() - 3070,
+          "fused table smaller by 3070 (" + std::to_string(table.size()) + " vs " +
+              std::to_string(unfused.size()) + ")");
+  // The fused tensor names must be present.
+  bool found_gate_up = false, found_down = false;
+  for (const auto& t : table) {
+    if (t.name == "mtp.layers.0.mlp.experts.gate_up_proj") found_gate_up = true;
+    if (t.name == "mtp.layers.0.mlp.experts.down_proj") found_down = true;
+  }
+  require(found_gate_up && found_down, "fused MTP tensor names present");
+  // The fused gate_up_proj is [E, 2*I, H], down_proj is [E, H, I].
+  const int64_t E = cfg.num_experts, I = cfg.moe_intermediate_size, H = cfg.hidden_size;
+  for (const auto& t : table) {
+    if (t.name == "mtp.layers.0.mlp.experts.gate_up_proj") {
+      require(t.dtype == dgpp::DType::BF16 && t.shape == std::vector<int64_t>{E, 2 * I, H},
+              "gate_up_proj shape {E, 2*I, H}");
+    }
+    if (t.name == "mtp.layers.0.mlp.experts.down_proj") {
+      require(t.dtype == dgpp::DType::BF16 && t.shape == std::vector<int64_t>{E, H, I},
+              "down_proj shape {E, H, I}");
+    }
+  }
 }

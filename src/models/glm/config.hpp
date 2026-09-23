@@ -69,6 +69,13 @@ struct GlmGenerationDefaults {
   float effective_repetition_penalty() const {
     return repetition_penalty.value_or(1.0f);
   }
+  // Generation stop tokens may differ from the model's trained EOS (for
+  // example, Qwen uses the latter to pad/reset PLE n-gram history).
+  // Resolve the serving policy without overwriting model configuration.
+  std::vector<int64_t> effective_eos_token_ids(
+      const std::vector<int64_t>& model_eos_token_ids) const {
+    return eos_token_ids.value_or(model_eos_token_ids);
+  }
 
   // Names every absent sampler field whose neutral/greedy-safe fallback is
   // in effect. JSON null is treated as absent, matching generated HF config

@@ -96,10 +96,20 @@ void expect_moe(TensorList& out, const std::string& p, const QwenTextConfig& cfg
   add_bf16(out, p + "shared_expert.up_proj.weight", {S, H}, QwenWeightClass::SharedExpert, layer);
   add_bf16(out, p + "shared_expert.down_proj.weight", {H, S}, QwenWeightClass::SharedExpert, layer);
   const int64_t I = cfg.moe_intermediate_size;
+  const int64_t E = cfg.num_experts;
   // The NVFP4 release quantizes the backbone's routed experts only; the MTP
   // layer's keep the FP8 block form.
   const bool nvfp4 = cfg.experts_nvfp4 && layer != cfg.mtp_layer();
-  for (int e = 0; e < cfg.num_experts; ++e) {
+  // The RadixArk release stores the draft layer's 512 experts as one fused
+  // BF16 pair (gate_up_proj [E, 2*I, H] and down_proj [E, H, I]) — the gate
+  // and up projections stacked on dim 1, no per-expert index — which the
+  // loader encodes to FP8 at load. Skip the per-expert FP8/NVFP4 table.
+  if (cfg.mtp_experts_bf16_fused && layer == cfg.mtp_layer()) {
+    add_bf16(out, p + "experts.gate_up_proj", {E, 2 * I, H}, QwenWeightClass::RoutedExpert, layer);
+    add_bf16(out, p + "experts.down_proj", {E, H, I}, QwenWeightClass::RoutedExpert, layer);
+    return;
+  }
+  for (int e = 0; e < E; ++e) {
     const std::string ep = p + "experts." + std::to_string(e) + ".";
     add_quantized(out, ep + "gate_proj.weight", I, H, QwenWeightClass::RoutedExpert, layer, e, nvfp4);
     add_quantized(out, ep + "up_proj.weight", I, H, QwenWeightClass::RoutedExpert, layer, e, nvfp4);

@@ -371,7 +371,7 @@ std::string encode_journal_settings(const WorldSettings& s) {
       s.queue_limit, s.no_eos ? 1 : 0, s.decode_graph ? 1 : 0, s.mtp ? 1 : 0,
       s.mtp_depth, s.graph_batch_min_live, s.sampling_candidates, s.prefix_cache_gib);
   append_json_string(&out, s.admission);
-  if (s.prefill_budget_tokens > 0) out += ",\"pfbudget\":" + std::to_string(s.prefill_budget_tokens);
+  if (s.prefill_budget_tokens != 0) out += ",\"pfbudget\":" + std::to_string(s.prefill_budget_tokens);
   if (s.prefill_idle_budget_tokens > 0) out += ",\"pfidle\":" + std::to_string(s.prefill_idle_budget_tokens);
   out += std::format(",\"win\":{},\"pace\":{:.17g},\"inflight\":{},\"rdv\":{},\"stats\":{:.17g},\"ric\":{},\"kvdt\":",
       s.admission_window, s.bulk_pace_gbps, s.bulk_inflight, s.rendezvous_timeout_ms,
@@ -383,6 +383,8 @@ std::string encode_journal_settings(const WorldSettings& s) {
   append_json_string(&out, s.dense_weights);
   out += ",\"fp8_head\":";
   append_json_string(&out, s.fp8_head);
+  out += ",\"mtpef\":";
+  append_json_string(&out, s.mtp_expert_format);
   out += ",\"bfw\":";
   append_json_string(&out, s.bf16_weights);
   out += std::format(",\"compact\":{}", s.compact_batches ? 1 : 0);
@@ -528,7 +530,7 @@ JournalRecord decode_journal_line(std::string_view line) {
     s.admission = std::string(field(v, "adm", "settings").as_string());
     s.admission_window = static_cast<int>(num("win").as_int());
     if (const auto* budget = v.find("pfbudget")) {
-      if (!budget->is_number() || budget->as_int() < 0 || budget->as_int() > (1 << 30))
+      if (!budget->is_number() || budget->as_int() < -1 || budget->as_int() > (1 << 30))
         throw std::runtime_error("journal: settings record with a bad prefill budget");
       s.prefill_budget_tokens = static_cast<int>(budget->as_int());
     }
@@ -551,6 +553,7 @@ JournalRecord decode_journal_line(std::string_view line) {
       s.fp8_head = std::string(head->as_string());
     }
     if (const dgpp::minijson::Value* dw = v.find("dw")) s.dense_weights = std::string(dw->as_string());
+    if (const dgpp::minijson::Value* mtpef = v.find("mtpef")) s.mtp_expert_format = std::string(mtpef->as_string());
     // The bf16 weights' form (2026-09-19): records before it carry none.
     if (const dgpp::minijson::Value* bfw = v.find("bfw")) s.bf16_weights = std::string(bfw->as_string());
     // Records before 2026-09-14 carry no prefill mode: bounded.

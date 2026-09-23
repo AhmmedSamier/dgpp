@@ -26,3 +26,20 @@ The host build uses Release with `DGPP_WERROR=ON`. These checks use fake
 engines and the production DeepSeek renderer; no GPU inference or BFCL
 benchmark was run. The author's prompt-token measurements were not
 remeasured during this follow-up.
+
+## Integration with current master
+
+Integrated `ca6b34f` without rewriting the author's commit. The shared test
+fixture now preserves upstream's resumable-prefill option and the added
+DeepSeek marker option. The rebuilt combined tree passed all four selected
+host suites with no failures: 68 service cases, 17 HTTP cases, 66 scheduler
+cases and three fabric cases.
+
+```sh
+cmake --build build-review -j 4 --target serve_test http_server_test scheduler_test fabric_serve_test
+env -u DGPP_TOOLS_RAW ctest --test-dir build-review \
+  -R '^(serve_test|http_server_test|scheduler_test|fabric_serve_test)$' --output-on-failure
+```
+
+Touched C++ ranges were formatted with clang-format 19. The final diff
+passed whitespace checks.
