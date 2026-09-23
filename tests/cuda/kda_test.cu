@@ -8,6 +8,7 @@
 // reader needs minijson, which nvcc refuses) and runs via --dump-file.
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -169,9 +170,42 @@ DGPP_TEST(kda_state_pool_slots_isolation_and_snapshot_roundtrip) {
 // Conv kernel parity
 // ---------------------------------------------------------------------------
 
+// The token-tiled prefill conv against the serial kernel, bitwise: one
+// 2048-token launch (the tiled path) vs the same rows as 100-token chunks
+// (under the tiled threshold: the serial path), the state carried between
+// chunks. Every output and the committed state must match byte for byte.
+DGPP_TEST(kda_conv_tiled_matches_serial_bitwise) {
+  cudaStream_t s = test_stream();
+  const int tokens = 2048, channels = 192, conv_width = 4, state_width = 6, chunk = 100;
+  std::vector<uint16_t> src = random_bf16_normal(41, int64_t(tokens) * channels, 1.0f);
+  std::vector<uint16_t> weight = random_bf16_uniform(42, int64_t(channels) * conv_width, 0.2f);
+  std::vector<uint16_t> state_init = random_bf16_normal(43, int64_t(channels) * state_width, 0.5f);
+  DevBuf dsrc(src.size() * 2), dw(weight.size() * 2), ddst1(src.size() * 2), ddst2(src.size() * 2),
+      dst1(state_init.size() * 2), dst2(state_init.size() * 2);
+  dsrc.upload(src.data(), src.size() * 2);
+  dw.upload(weight.data(), weight.size() * 2);
+  dst1.upload(state_init.data(), state_init.size() * 2);
+  dst2.upload(state_init.data(), state_init.size() * 2);
+  kda_causal_conv_silu_bf16(dsrc.p, channels, dw.p, dst1.p, state_width, ddst1.p, tokens, channels, conv_width, s);
+  for (int t0 = 0; t0 < tokens; t0 += chunk) {
+    const int n = std::min(chunk, tokens - t0);
+    kda_causal_conv_silu_bf16(static_cast<uint16_t*>(dsrc.p) + int64_t(t0) * channels, channels, dw.p, dst2.p,
+                              state_width, static_cast<uint16_t*>(ddst2.p) + int64_t(t0) * channels, n, channels,
+                              conv_width, s);
+  }
+  DGPP_CUDA_OK(cudaStreamSynchronize(s));
+  std::vector<uint16_t> o1(src.size()), o2(src.size()), s1(state_init.size()), s2(state_init.size());
+  ddst1.download(o1.data(), o1.size() * 2);
+  ddst2.download(o2.data(), o2.size() * 2);
+  dst1.download(s1.data(), s1.size() * 2);
+  dst2.download(s2.data(), s2.size() * 2);
+  if (o1 != o2) throw std::runtime_error("tiled conv output differs from the serial chunks");
+  if (s1 != s2) throw std::runtime_error("tiled conv state differs from the serial chunks");
+}
+
 DGPP_TEST(kda_conv_kernel_matches_host_reference) {
   cudaStream_t s = test_stream();
-  for (int tokens : {1, 2, 3, 64, 2048}) {
+  for (int tokens : {1, 2, 3, 64, 1000, 2048}) {
     const int channels = 96, conv_width = 4, state_width = 6;
     std::vector<uint16_t> src =
         random_bf16_normal(21, int64_t(tokens) * channels, 1.0f);

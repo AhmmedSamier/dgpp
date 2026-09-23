@@ -1,6 +1,7 @@
 #include "kernels/kda.hpp"
 
 #include <cmath>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -95,6 +96,61 @@ __global__ void kda_conv_kernel(const uint16_t* __restrict__ src,
 
 #pragma unroll
   for (int j = 0; j < CW - 1; ++j) sc[j] = float_to_bf16_bits(hist[j]);
+}
+
+// The prefill form (2026-09-23): the conv is not recurrent -- output t needs
+// only inputs t-CW+1..t -- so a single request's rows split into token tiles
+// across blocks instead of one thread walking every row of the chunk (the
+// 32k profile: 590 ms against SGLang's 110 for the same conv; the per-channel
+// grid was ~16 blocks on a 48-SM part). Each output keeps the association
+// order above, so the tiles are bitwise the serial kernel. The new state is
+// written by kda_conv_state_kernel after every tile has read the old one.
+constexpr int kConvTileTokens = 64;
+template <int CW>
+__global__ void kda_conv_tiled_kernel(const uint16_t* __restrict__ src, int64_t src_stride,
+                                      const uint16_t* __restrict__ weight,
+                                      const uint16_t* __restrict__ state, int state_width,
+                                      uint16_t* __restrict__ dst, int tokens, int channels) {
+  const int c = blockIdx.x * blockDim.x + threadIdx.x;
+  if (c >= channels) return;
+  const int a = blockIdx.y * kConvTileTokens;
+  const int b = min(tokens, a + kConvTileTokens);
+  const uint16_t* wc = weight + static_cast<int64_t>(c) * CW;
+  float wv[CW];
+#pragma unroll
+  for (int j = 0; j < CW; ++j) wv[j] = bf16_bits_to_float(wc[j]);
+  // hist[j] = input at position a - (CW-1) + j; negative positions come from
+  // the incoming state (state[j'] is position j' - (CW-1)).
+  float hist[CW - 1];
+#pragma unroll
+  for (int j = 0; j < CW - 1; ++j) {
+    const int pos = a - (CW - 1) + j;
+    hist[j] = pos >= 0 ? bf16_bits_to_float(src[static_cast<int64_t>(pos) * src_stride + c])
+                       : bf16_bits_to_float(state[static_cast<int64_t>(c) * state_width + pos + (CW - 1)]);
+  }
+  for (int t = a; t < b; ++t) {
+    const float x = bf16_bits_to_float(src[static_cast<int64_t>(t) * src_stride + c]);
+    float acc = wv[CW - 1] * x;
+#pragma unroll
+    for (int j = 0; j < CW - 1; ++j) acc = fmaf(wv[j], hist[j], acc);
+    const float y = acc / (1.0f + expf(-acc));
+    dst[static_cast<int64_t>(t) * channels + c] = float_to_bf16_bits(y);
+#pragma unroll
+    for (int j = 0; j < CW - 2; ++j) hist[j] = hist[j + 1];
+    hist[CW - 2] = x;
+  }
+}
+// The committed state after a tiled prefill: the last CW-1 inputs (tokens >= CW-1).
+template <int CW>
+__global__ void kda_conv_state_kernel(const uint16_t* __restrict__ src, int64_t src_stride,
+                                      uint16_t* __restrict__ state, int state_width, int tokens,
+                                      int channels) {
+  const int c = blockIdx.x * blockDim.x + threadIdx.x;
+  if (c >= channels) return;
+#pragma unroll
+  for (int j = 0; j < CW - 1; ++j)
+    state[static_cast<int64_t>(c) * state_width + j] =
+        src[static_cast<int64_t>(tokens - (CW - 1) + j) * src_stride + c];
 }
 
 // ---------------------------------------------------------------------------
@@ -407,6 +463,23 @@ void conv_launch(const void* src, int64_t src_stride, const void* weight,
                  const KdaRequestRows& requests,
                  const KdaConvSnapshots& snap, cudaStream_t stream) {
   constexpr int kBlock = 256;
+  if constexpr (!kBatched) {
+    // Single-request prefill without per-row snapshots: the token-tiled form.
+    static const bool tiled = std::getenv("DGPP_KDA_CONV_SERIAL") == nullptr;
+    if (tiled && snap.states == nullptr && tokens >= 2 * kConvTileTokens) {
+      const dim3 tgrid(static_cast<unsigned>((channels + kBlock - 1) / kBlock),
+                       static_cast<unsigned>((tokens + kConvTileTokens - 1) / kConvTileTokens), 1);
+      kda_conv_tiled_kernel<CW><<<tgrid, kBlock, 0, stream>>>(
+          static_cast<const uint16_t*>(src), src_stride, static_cast<const uint16_t*>(weight),
+          static_cast<const uint16_t*>(conv_state), state_width, static_cast<uint16_t*>(dst), tokens, channels);
+      DGPP_CUDA_OK(cudaGetLastError());
+      kda_conv_state_kernel<CW><<<(channels + kBlock - 1) / kBlock, kBlock, 0, stream>>>(
+          static_cast<const uint16_t*>(src), src_stride, static_cast<uint16_t*>(conv_state), state_width,
+          tokens, channels);
+      DGPP_CUDA_OK(cudaGetLastError());
+      return;
+    }
+  }
   const dim3 grid(static_cast<unsigned>((channels + kBlock - 1) / kBlock),
                   static_cast<unsigned>(kBatched ? requests.num_requests : 1),
                   1);
