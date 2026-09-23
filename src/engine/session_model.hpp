@@ -28,6 +28,7 @@
 //                                               // (engine/verify_schedule.hpp, the scheduled verify depth)
 //   const uint16_t* draft_hidden_rows() const;  // the block's output rows [T, draft_width] of its last run
 //   void snapshot_chain_state(int req);  void restore_chain_state(int req);  // around the chain rows
+//   void mtp_select_block(int index);          // optional native heads: catch-up 0, chain index+1
 // and calls init_session(params) from its constructor once its loader is
 // up (the base's buffers need the vocab slice). The walk reads the
 // base's staged inputs through begin_run() and hands its results to
@@ -1577,6 +1578,7 @@ void SessionModel<D>::mtp_prefill_rows(int req, int64_t row0, int64_t row1, cons
   if (n > max_tokens_) throw std::invalid_argument("mtp_prefill_rows: chunk too long");
   DGPP_CUDA_OK(cudaMemcpyAsync(d_tokens_, tokens, static_cast<size_t>(n) * 8, cudaMemcpyHostToDevice, stream_));
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  if constexpr (requires { derived().mtp_select_block(0); }) derived().mtp_select_block(0);
   derived().mtp_run_rows(req, d_tokens_, row0, static_cast<int>(n), /*decode_row=*/false, /*capture=*/false,
                          /*head_rows=*/0, /*batch_requests=*/0);
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
@@ -1619,6 +1621,7 @@ typename SessionModel<D>::Outputs SessionModel<D>::session_draft(int req, const 
   step_tokens_ = d_tokens_;
   mtp_decode_host_prep(req, tokens, /*upload=*/true);
   const int64_t q = mtp_pos_[static_cast<size_t>(req)];
+  if constexpr (requires { derived().mtp_select_block(0); }) derived().mtp_select_block(0);
   derived().mtp_run_rows(req, d_tokens_, q, static_cast<int>(tokens.size()), /*decode_row=*/true, /*capture=*/false,
                          /*head_rows=*/1, 0);
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
@@ -1659,6 +1662,7 @@ void SessionModel<D>::session_graph_capture_draft(int req, const PickVerdict* ve
   // (same batch shape); the rows' positions and tokens come off the verdict.
   glm_spec_draft_rows(verify_verdict, T, d_mtp_pos_ + req, d_step_pos_, step_tokens_, d_next_ + req, stream_);
   draft_rows_ = T;
+  if constexpr (requires { derived().mtp_select_block(0); }) derived().mtp_select_block(0);
   derived().mtp_run_rows(req, step_tokens_, 0, T, /*decode_row=*/true, /*capture=*/true, /*head_rows=*/T, 0);
   graph_has_draft_ = true;
 }
@@ -1722,6 +1726,7 @@ typename SessionModel<D>::Outputs SessionModel<D>::session_draft_chain(int req, 
   // the row's position (the store reads the staged position).
   store_draft_hidden(derived().draft_hidden_rows() + static_cast<size_t>(draft_last_row_) * draft_width_, d_req_ids_,
                      d_step_pos_, 1);
+  if constexpr (requires { derived().mtp_select_block(0); }) derived().mtp_select_block(index + 1);
   derived().mtp_run_rows(req, d_tokens_, pos, /*T=*/1, /*decode_row=*/true, /*capture=*/false, /*head_rows=*/1, 0);
   if (last) derived().restore_chain_state(req);
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
@@ -1751,6 +1756,7 @@ void SessionModel<D>::session_graph_capture_draft_chain(int req, const PickVerdi
   glm_spec_chain_row_window(index == 0 ? verify_verdict : nullptr, /*src_row=*/0, draft_verdict,
                             derived().draft_hidden_rows(), draft_width_, mtp_window(req), max_decode_rows_,
                             d_mtp_pos_ + req, index, max_context_, d_step_pos_, step_tokens_, d_req_spans_, stream_);
+  if constexpr (requires { derived().mtp_select_block(0); }) derived().mtp_select_block(index + 1);
   derived().mtp_run_rows(req, step_tokens_, 0, /*T=*/1, /*decode_row=*/true, /*capture=*/true, /*head_rows=*/1, 0);
   if (last) derived().restore_chain_state(req);
 }
@@ -1768,6 +1774,7 @@ void SessionModel<D>::session_graph_capture_draft_batch(const PickVerdict* verif
                               d_mtp_pos_, d_step_pos_, step_tokens_, d_next_, stream_,
                               graph_batch_map_source_ ? d_batch_map_ : nullptr);
   draft_rows_ = decode_rows_;
+  if constexpr (requires { derived().mtp_select_block(0); }) derived().mtp_select_block(0);
   derived().mtp_run_rows(/*req=*/0, step_tokens_, 0, decode_rows_, /*decode_row=*/true, /*capture=*/true,
                          /*head_rows=*/decode_rows_, graph_batch_requests_);
   graph_has_draft_ = true;
@@ -1800,6 +1807,7 @@ void SessionModel<D>::session_graph_capture_draft_chain_batch(const PickVerdict*
       static_cast<size_t>(max_decode_rows_) * static_cast<size_t>(draft_width_), d_mtp_pos_, index,
       max_context_, d_step_pos_, step_tokens_, d_req_ids_, d_req_spans_, stream_,
       graph_batch_map_source_ ? d_batch_map_ : nullptr);
+  if constexpr (requires { derived().mtp_select_block(0); }) derived().mtp_select_block(index + 1);
   derived().mtp_run_rows(/*req=*/0, step_tokens_, 0, /*T=*/k, /*decode_row=*/true, /*capture=*/true, /*head_rows=*/k, k);
   if (last)
     for (int q = 0; q < (graph_batch_map_source_ ? max_requests_ : k); ++q)

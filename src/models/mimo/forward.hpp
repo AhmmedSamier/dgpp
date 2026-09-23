@@ -36,13 +36,15 @@
 // `boundary` (the canonical rank-order sum). The router and the norms are
 // replicated; every rank's residual is bitwise the others'.
 //
-// The MTP draft block (plan D5): the first draft layer (model.mtp.layers.0)
+// The default MTP draft block: the first draft layer (model.mtp.layers.0)
 // resident beside the stack — a sliding-window layer with the dense MLP —
 // one more pool layer for its K/V, the hidden window per slot; its input
 // is eh_proj([enorm(embed(tok_{q+1})) | hnorm(h_q)]) with h_q the main
 // stack's output hidden at q (POST final norm — vLLM's mimo_v2_mtp
 // convention, as GLM-4.7's), its head final_layernorm then the shared
-// lm_head.
+// lm_head. Native opt-in loads all three heads, each conditioned on the
+// backbone hidden at p-d and token p+1, with independent paged K/V. Its
+// backbone history ring is included in prefix snapshots and draft rollback.
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -140,22 +142,24 @@ class MimoModel : public SessionModel<MimoModel> {
   void reset_slot_state(int req);
   GlmSpecSegments spec_segments(int req, int snapshot_row0 = 0) const;
   size_t snapshot_state_bytes() const { return kSnapshotStamp; }
-  size_t draft_state_bytes() const { return 0; }
+  size_t draft_state_bytes() const { return native_mtp() ? size_t(kNativeHistoryRows) * cfg_.hidden_size * 2 : 0; }
   void write_state_snapshot(int req, uint8_t* dst, int spec_row);
-  void write_draft_snapshot(int, uint8_t*, bool, int64_t) {}
+  void write_draft_snapshot(int req, uint8_t* dst, bool live, int64_t pos);
   void read_state_snapshot(int, const uint8_t*) {}
-  void read_draft_snapshot(int, const uint8_t*) {}
+  void read_draft_snapshot(int req, const uint8_t* src);
   bool has_pool() const { return true; }
   MimoKvPool& pool() { return pool_; }
   const MimoKvPool& pool() const { return pool_; }
   void graph_prepare();
   void mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode_row,
                     bool capture, int head_rows, int batch_requests);
-  void snapshot_draft_state(int) {}
-  void restore_draft_state(int) {}
+  void snapshot_draft_state(int req);
+  void restore_draft_state(int req);
+  void mtp_select_block(int index);
   // Depth >= 2: the chain rows take the block's output residual (pre
   // final_layernorm — the previous_hidden_states vLLM's mimo_v2_mtp feeds
-  // its next step) from mtp_r_; no state to snapshot around them.
+  // its next step) from mtp_r_; native heads ignore these recursive inputs.
+  // Chain proposals do not mutate the native backbone history ring.
   static constexpr bool kDraftChain = true;
   static constexpr bool kBatchedDraftChain = true;
   const uint16_t* draft_hidden_rows() const { return mtp_r_; }
@@ -173,7 +177,7 @@ class MimoModel : public SessionModel<MimoModel> {
   static GlmMoeWeights moe_view(const MimoMoeResident& m);
   int moe_ordinal(int layer) const { return moe_ordinal_[static_cast<size_t>(layer)]; }
   int table_slots() const;
-  int pool_layers() const { return cfg_.num_hidden_layers + (mtp_ ? 1 : 0); }
+  int pool_layers() const { return cfg_.num_hidden_layers + (mtp_ ? cfg_.mtp_layers_loaded : 0); }
   static std::vector<int> pool_kv_heads(const MimoTextConfig& cfg, const MimoLocalGeometry& geo, bool mtp);
   // The layer's two blocks over `resid` (the residual, updated in place):
   // the attention block and the MLP/MoE block with their folds.
@@ -272,6 +276,15 @@ class MimoModel : public SessionModel<MimoModel> {
 
   // The draft block (mtp_): its fusion scratch and residual (the window,
   // the counters and the feeds are the core's).
+  static constexpr int kNativeHistoryRows = kPrefillChunkTokens + 32 + 3;
+  bool native_mtp() const { return mtp_ && cfg_.mtp_layers_loaded == 3; }
+  void native_mtp_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode,
+                       bool capture, int head_rows);
+  int draft_block_ = 0;
+  uint16_t* native_history_ = nullptr;
+  uint8_t* native_backup_ = nullptr;
+  int64_t* native_positions_ = nullptr;
+  uint16_t* native_output_ = nullptr;
   uint16_t* mtp_h_ = nullptr;   // [M, H] the gathered hidden rows (decode rows)
   uint16_t* mtp_in_ = nullptr;  // [M, 2H] [enorm(embed) | hnorm(h)]
   uint16_t* mtp_r_ = nullptr;   // [M, H] the draft's residual

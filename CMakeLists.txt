@@ -192,6 +192,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/qsa_prefill.cu
   src/kernels/glm4_attn.cu
   src/kernels/mimo_attn.cu
+  src/kernels/mimo_mtp_history.cu
   src/kernels/mimo_attn_prefill.cu
   src/kernels/add_rmsnorm.cu)
 target_link_libraries(dgpp_kernels PUBLIC CUDA::cudart CUDA::cublasLt dgpp_core dgpp_rope_scaling)
@@ -1742,3 +1743,10 @@ target_link_libraries(mimo_port_test PRIVATE dgpp_models_mimo_layers dgpp_models
 dgpp_set_common(mimo_port_test)
 add_test(NAME mimo_port_test COMMAND mimo_port_test)
 set_tests_properties(mimo_port_test PROPERTIES LABELS "gpu" RUN_SERIAL TRUE)
+
+add_executable(mimo_native_mtp_test tests/cuda/mimo_native_mtp_test.cpp)
+target_include_directories(mimo_native_mtp_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(mimo_native_mtp_test PRIVATE dgpp_models_mimo_layers dgpp_models_glm_loader CUDA::cudart Threads::Threads)
+dgpp_set_common(mimo_native_mtp_test)
+add_test(NAME mimo_native_mtp_test COMMAND mimo_native_mtp_test)
+set_tests_properties(mimo_native_mtp_test PROPERTIES LABELS "gpu" RUN_SERIAL TRUE)
