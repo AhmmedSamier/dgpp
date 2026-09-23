@@ -11,7 +11,9 @@
 // templates set serving values explicitly. Each rank hashes its effective
 // shared configuration, and the warm record checks those hashes before
 // serving. See README.md for the schema and deploy/*.example.json for
-// templates. Deployment templates must be resolved before this loader reads them.
+// templates. Multi-node deployment templates must be resolved before this loader
+// reads them. A single-node template may use world_size: 1 directly (localhost);
+// nodes and world_size are mutually exclusive.
 #pragma once
 #include "serve/file_inputs.hpp"
 

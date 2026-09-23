@@ -101,8 +101,13 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
       }
       saw_nodes = true;
     } else if (k == "world_size") {
+      if (root.find("nodes"))
+        fail(what, "'nodes' and 'world_size' are mutually exclusive");
       const int64_t ws = integer(v, k, what, 1, 1024);
-      for (int64_t r = 0; r < ws; ++r) c.nodes.push_back("localhost");
+      if (ws != 1)
+        fail(what, "multi-node configurations require explicit 'nodes'; "
+                   "resolve the deployment through scripts/dgpp-cluster");
+      c.nodes.push_back("localhost");
       saw_nodes = true;
     } else if (k == "ssh_user") {
       c.ssh_user = text(v, k, what);
