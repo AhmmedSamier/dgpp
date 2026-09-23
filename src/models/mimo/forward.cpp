@@ -115,6 +115,8 @@ MimoModel::MimoModel(const MimoTextConfig& cfg, const std::string& checkpoint_di
   // tensor-core GEMM at decode rows: a row's chain the same whatever rows
   // share the launch (DGPP_MIMO_DENSE_GEMV=1 restores the 4-row chunks).
   dense_mma_ = std::getenv("DGPP_MIMO_DENSE_GEMV") == nullptr;
+  if (const char* v = std::getenv("DGPP_MIMO_PREFILL_LAST_HEAD")) prefill_last_head_ = std::string(v) == "1";
+  if (const char* v = std::getenv("DGPP_MIMO_MTP_CACHE_ONLY")) mtp_cache_only_ = std::string(v) == "1";
   bf16_side_grants_ = residency == MimoResidency::Resident && bf16_side_grants();
   moe_cfg_ = cfg_.moe_config(static_cast<int>(loader_.geometry().local_inter));
   n_split_ = MimoAttentionLayer::default_decode_splits();
@@ -560,11 +562,16 @@ MimoModel::Outputs MimoModel::run_rows(const RowRun& run) {
       out.layer_states.push_back(std::move(snap));
     }
   }
-  // The head on every row: a prefill chunk's last row comes off the same
-  // m=T GEMM the diagnostic forward runs (the prefill == forward bitwise
-  // gate).
+  // Normalize every row: MTP consumes the complete hidden-state chunk.
+  // By default the head retains the diagnostic forward's m=T shape.
   add_rmsnorm_bf16(resid_, pending, globals_.final_norm, h_, T, H, cfg_.rms_norm_eps, stream_);
-  gemm_.matmul(h_, globals_.lm_head, logits_, T, lm_vocab_count_, H, DType::BF16, GemmOut::F32,
+  // Keep all hidden rows for MTP, but project only the row consumed by a
+  // scalar serving prefill. Diagnostics, grouped prefill and verification
+  // retain every row and the common finish_run output layout is unchanged.
+  const int head_first = prefill_last_head_ && !run.decode && !run.all_rows && run.num_spans == 0 ? T - 1 : 0;
+  gemm_.matmul(h_ + static_cast<size_t>(head_first) * H, globals_.lm_head,
+               logits_ + static_cast<size_t>(head_first) * lm_vocab_count_, T - head_first,
+               lm_vocab_count_, H, DType::BF16, GemmOut::F32,
                static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
   // The draft block's input: the last rows' POST-final-norm hidden (the
   // model's output hidden state, vLLM's mimo_v2_mtp convention — the draft
@@ -715,6 +722,19 @@ void MimoModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, 
   rows.moe_table_slot = -1;
   rows.trace = nullptr;
   (void)batch_requests;
+  // No caller consumes the residual or logits of a history-only prefill.
+  // Preserve the input fusion, normalization, projection and paged K/V
+  // append, including FP8 scale planes. Decode chain rows still run fully.
+  if (mtp_cache_only_ && head_rows == 0 && !decode_row) {
+    build_layer_objects(r);
+    add_rmsnorm_bf16(mtp_r_, nullptr, r.input_norm, x_, T, H, eps, stream_);
+    MimoAttnRows arows;
+    arows.req_ids = d_req;
+    arows.pos = d_pos;
+    arows.cache_only = true;
+    attn_->enqueue(x_, T, arows, pool_.view(cfg_.num_hidden_layers), y_, stream_);
+    return;
+  }
   const uint16_t* pending = enqueue_layer(r, cfg_.num_hidden_layers, mtp_r_, T, rows, nullptr);
   // The draft's residual is the chain rows' input at depth >= 2
   // (draft_hidden_rows): every row completes — the head rows through the

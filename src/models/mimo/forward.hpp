@@ -212,6 +212,8 @@ class MimoModel : public SessionModel<MimoModel> {
   double bf12_s_ = 0.0;
   int walk_rows_ = 1;
   bool dense_mma_ = true;
+  bool prefill_last_head_ = false;
+  bool mtp_cache_only_ = false;
   bool decode_row_traces_ = false;
   void* gemm_ws_ = nullptr;
   size_t gemm_ws_bytes_ = 0;
