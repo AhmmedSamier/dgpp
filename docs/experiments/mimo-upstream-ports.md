@@ -33,3 +33,23 @@ and these ports; report comparison with the saved implementation separately.
 
 Raw evidence and deployment restoration records live in
 `/mnt/benchmarks/dgpp-mimo-upstream-20260923/`.
+
+## Tool-call compatibility
+
+The pure upstream baseline returned malformed XML as content on the first
+actual custom-harness request (0/1 attempted passed; two later probes were
+not attempted). The local compact grammar was ported without replacing
+upstream's newer schema/reference support or model-opened thinking.
+Required argument keys are retained for non-strict MiMo tools too. Generic
+newline XML continues to use its existing grammar. Tests cover both forms.
+
+## Reproduce the request panel
+
+On an exclusively reserved server, point `DGPP_MIMO_BENCH_URL` at its `/v1/`
+endpoint and `DGPP_MIMO_BENCH_ROOT` at an evidence directory. Run
+`python3 benchmarks/mimo_upstream/benchmark.py UNIQUE_TAG`, followed by
+`acceptance.py UNIQUE_TAG`. The scripts preserve requests, raw SSE events,
+usage, outputs, timings and before/after metrics; they refuse to overwrite
+an existing timing panel. `quality.py UNIQUE_TAG 2800 6000` checks exact
+retrieval at approximately 31K and 67K tokens. Tools are exercised separately
+through the user's actual Python harness; no generated tools are executed.

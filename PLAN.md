@@ -2,6 +2,15 @@
 
 Qwen C16/MTP3 supports 64 decode rows with scheduled verification disabled. Review fixes keep wide BF16 projections kernel-only while preserving existing small MTP walks. All 131 native checks are clear after a targeted rerun, and real four-node BF16, FP8-dense/MMA-head and BF12 serving each pass through sixteen concurrent requests with clean graphs and matching rank operation streams. See the [engineering record](benchmarks/results/2026-09-19-qwen-c16-mtp3-upstream.md).
 
+The first local MiMo migration onto upstream `c6ca191` adds a compact-tool
+grammar repair and two default-off prefill work reductions. On two Sparks,
+the combined ports reduced cold TTFT by 3.55–4.39% versus the repeated
+same-source control; decode was essentially unchanged. One concurrent code
+output differed and its cause remains unassigned. This branch still uses
+upstream MTP1 and a shared 128K pool, not our native MTP3/256K-per-request
+capacity. See the [migration record](benchmarks/results/2026-09-23-mimo-upstream-ports.md)
+for gates, limitations and measurements.
+
 This page summarizes the implemented features and remaining work as of
 2026-09-21. [DESIGN.md](DESIGN.md) describes the architecture;
 [CHANGELOG.md](CHANGELOG.md) and the dated records in

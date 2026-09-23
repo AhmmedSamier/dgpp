@@ -2535,6 +2535,16 @@ switch counter deltas and inspect flow-control settings. Comparisons with
 other inference engines are optional. The current work list is in
 [docs/next_steps.md](docs/next_steps.md).
 
+### MiMo prefill work reduction experiments
+
+MiMo retains upstream's paged KV, scaled FP8 representation, query-tiled
+attention and model-opened thinking. Two opt-in paths skip scalar prefill
+vocabulary rows whose logits are unused and stop history-only MTP after KV
+append. Neither changes decode verification or grouped prefill outputs.
+The head projection changes GEMM shape and needs a numerical gate; the
+history path requires bitwise-identical subsequent draft logits. See
+[the experiment contract](docs/experiments/mimo-upstream-ports.md).
+
 ## 15. Primary references
 
 - [NVIDIA DGX Spark platform specifications](https://www.nvidia.com/en-us/products/workstations/dgx-spark/)
