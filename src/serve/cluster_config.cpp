@@ -100,6 +100,15 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
         c.nodes.push_back(host);
       }
       saw_nodes = true;
+    } else if (k == "world_size") {
+      if (root.find("nodes"))
+        fail(what, "'nodes' and 'world_size' are mutually exclusive");
+      const int64_t ws = integer(v, k, what, 1, 1024);
+      if (ws != 1)
+        fail(what, "multi-node configurations require explicit 'nodes'; "
+                   "resolve the deployment through scripts/dgpp-cluster");
+      c.nodes.push_back("localhost");
+      saw_nodes = true;
     } else if (k == "ssh_user") {
       c.ssh_user = text(v, k, what);
     } else if (k == "release") {
@@ -181,11 +190,18 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           e.dense_weights = text(x, ek, what);
           if (e.dense_weights != "checkpoint" && e.dense_weights != "fp8")
             fail(what, "'" + ek + "' must be \"checkpoint\" or \"fp8\"");
-        } else if (p.key == "fp8_head") {
+        }
+        else if (p.key == "fp8_head") {
           e.fp8_head = text(x, ek, what);
           if (e.fp8_head != "gemv" && e.fp8_head != "mma")
             fail(what, "'" + ek + "' must be \"gemv\" or \"mma\"");
-        } else if (p.key == "bf16_weights") {
+        }
+        else if (p.key == "mtp_expert_format") {
+          e.mtp_expert_format = text(x, ek, what);
+          if (e.mtp_expert_format != "fp8" && e.mtp_expert_format != "bf16_fused")
+            fail(what, "'" + ek + "' must be \"fp8\" or \"bf16_fused\"");
+        }
+        else if (p.key == "bf16_weights") {
           e.bf16_weights = text(x, ek, what);
           if (!parse_bf16_residency(e.bf16_weights, nullptr))
             fail(what, "'" + ek + "' must be \"checkpoint\", \"bf12\" or \"bf12+bf16\"");
@@ -282,6 +298,7 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
             fail(what, "'" + ek + "' must be \"full\" or \"grow\"");
         } else if (p.key == "admission_window") e.admission_window = static_cast<int>(integer(x, ek, what, 1, 1 << 30));
         else if (p.key == "prefill_budget_tokens") e.prefill_budget_tokens = static_cast<int>(integer(x, ek, what, -1, 1 << 30));
+        else if (p.key == "model_alias") e.model_alias = text(p.value, ek, what);
         else if (p.key == "prefill_idle_budget_tokens") e.prefill_idle_budget_tokens = static_cast<int>(integer(x, ek, what, 0, 1 << 30));
         else if (p.key == "bulk_pace_gbps") e.bulk_pace_gbps = number(x, ek, what);
         else if (p.key == "bulk_inflight") e.bulk_inflight = static_cast<int>(integer(x, ek, what, -1, 1 << 20));

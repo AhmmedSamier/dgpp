@@ -11,7 +11,9 @@
 // templates set serving values explicitly. Each rank hashes its effective
 // shared configuration, and the warm record checks those hashes before
 // serving. See README.md for the schema and deploy/*.example.json for
-// templates. Deployment templates must be resolved before this loader reads them.
+// templates. Multi-node deployment templates must be resolved before this loader
+// reads them. A single-node template may use world_size: 1 directly (localhost);
+// nodes and world_size are mutually exclusive.
 #pragma once
 #include "serve/file_inputs.hpp"
 
@@ -58,6 +60,12 @@ struct ClusterConfig {
     // docs/qwen38_single_spark.md).
     std::string dense_weights = "checkpoint";
     std::string fp8_head = "gemv";  // Qwen head: gemv | mma (opt-in)
+    // The MTP draft layer's routed-expert layout: "fp8" (the default:
+    // per-expert FP8 tensors as the NVIDIA release ships) or "bf16_fused"
+    // (the RadixArk release: all 512 experts stacked as fused BF16
+    // gate_up_proj and down_proj, encoded to FP8 at load). Applies to the
+    // Qwen family only.
+    std::string mtp_expert_format = "fp8";
     // The resident form of the bf16 weights the decode GEMV reads (the
     // attention / linear-attention projections, the lm head):
     // "checkpoint" (the default: the bf16 bytes alone), "bf12" — a lossless
@@ -115,6 +123,7 @@ struct ClusterConfig {
     std::string admission = "full";
     int admission_window = 256;
     int prefill_budget_tokens = -1;  // automatic on engines with resumable prefill
+    std::string model_alias = "";  // override the served model name (display only)
     int prefill_idle_budget_tokens = 0;
     double bulk_pace_gbps = -1.0;  // derived from the port rate
     int bulk_inflight = -1;

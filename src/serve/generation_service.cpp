@@ -2302,7 +2302,8 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {
                   m.prefill_ms, m.prefill_request_ms, m.step_ms);
     out.append(tbuf);
   }
-  out.append("},\"service\":{\"requests_total\":");
+  out.append("}");
+  out.append(",\"service\":{\"requests_total\":");
   append_json_int(&out, static_cast<int64_t>(st.requests_total));
   out.append(",\"requests_shed\":");
   append_json_int(&out, static_cast<int64_t>(st.requests_shed));

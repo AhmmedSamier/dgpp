@@ -123,6 +123,7 @@ struct WorldSettings {
   std::string ngram_table = "resident";  // the Qwen n-gram table's residency
   std::string fp8_head = "gemv";         // Qwen head: gemv | mma (opt-in)
   std::string dense_weights = "checkpoint";  // the Qwen dense stack's form
+  std::string mtp_expert_format = "fp8";      // the Qwen MTP draft experts: fp8 | bf16_fused
   std::string bf16_weights = "checkpoint";   // the bf16 decode weights' resident form: checkpoint | bf12 | bf12+bf16
   std::string prefill = "bounded";           // the DeepSeek-V4.1 prefill mode: bounded | exact
   std::optional<dgpp::RopeScaling> rope_scaling;  // the opt-in YaRN ramp: absent = plain
