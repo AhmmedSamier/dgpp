@@ -285,8 +285,11 @@ exits before its first tick rather than form a mixed world.
   per node) and the resident image cache (~82 GiB per rank, built on the
   first boot; the two sections below have the memory and cache details
   and knobs).
-- Nothing privileged: no locked clocks, no memlock limit changes, no root
-  (the memory section below says why).
+- Serving runs as a normal user and does not need locked clocks. Each rank
+  needs a sufficient memlock limit for RDMA registration; increasing the
+  launching session or service's hard limit may require administrator setup.
+  See [memory registration failures](networking.md#memory-registration-failures)
+  for the systemd configuration and startup checks.
 - The default peers' staging directory (`/tmp/bus4/deployments/ID`)
   lives in `/tmp`: a reboot empties it, and
   `dgpp-cluster up` recreates it. The log dir (`DGPP_LOG_DIR`,
@@ -335,7 +338,8 @@ check their allocations before loading:
   decode loop. This is optional: with the one-pass loader a rank with the
   pin off measured identically (p99 46 ms, 0 stalls, no swap traffic over
   1000 steps). A finite `RLIMIT_MEMLOCK` is logged, not warned about;
-  `DGPP_MLOCK=off` skips the attempt.
+  `DGPP_MLOCK=off` skips the attempt. RDMA registration still requires a
+  sufficient memlock limit with this optional pin disabled.
 
 **GLM-5.3-FP8 context memory.** With per-forward activations sized to the
 prefill chunk (2,048 rows) rather than the context, the memory that grows

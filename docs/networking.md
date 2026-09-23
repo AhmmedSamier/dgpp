@@ -127,6 +127,46 @@ If the limits already permit the registrations, retain these diagnostics and
 collect the kernel log for the same attempt to investigate pinning, DMA mapping
 or driver resource failures.
 
+### systemd launchers
+
+A systemd unit's single-value `LimitMEMLOCK=` sets both the soft and hard
+limits. With `LimitMEMLOCK=8M`, the server's soft-limit preparation leaves
+both at 8 MiB; it cannot raise the hard limit. For a launcher running as a
+system service, add this drop-in (replace `dgpp-launcher.service` with the
+unit that starts your launcher or server):
+
+```sh
+sudo systemctl edit dgpp-launcher.service
+```
+
+```ini
+[Service]
+LimitMEMLOCK=infinity
+```
+
+Stop the existing DGPP deployment, then reload systemd and restart the
+launcher service so newly started ranks inherit the new limit:
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl restart dgpp-launcher.service
+systemctl show dgpp-launcher.service -p LimitMEMLOCK -p LimitMEMLOCKSoft
+```
+
+The unit should report `infinity` for both limits. With
+`DGPP_LOG_LEVEL=debug`, verify that each rank's startup log reports
+`RLIMIT_MEMLOCK soft unlimited, hard unlimited`. Peer ranks inherit their
+SSH session's limits, so check those separately if a peer still reports a
+finite hard limit. Changing the unit does not update an already-running
+rank's limits.
+
+For a user service (`systemctl --user`), `LimitMEMLOCK=infinity` cannot
+exceed the user manager's inherited hard limit. An administrator must first
+raise that limit (for example, on the user's `user@.service` instance), and
+the user manager must be restarted before relaunching the deployment. See
+the resource-limit settings in
+[systemd.exec](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html).
+
 ## HTTP exposure
 
 HTTP defaults to `127.0.0.1:18080`. Set `http.bind_host` and `http.port` in
