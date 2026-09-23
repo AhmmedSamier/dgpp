@@ -795,12 +795,12 @@ void MimoModel::write_draft_snapshot(int req, uint8_t* dst, bool live, int64_t p
   const void* src = !live && mtp_pos_[req] > pos
       ? static_cast<const void*>(native_backup_ + size_t(req) * draft_state_bytes())
       : static_cast<const void*>(native_history_ + size_t(req) * kNativeHistoryRows * cfg_.hidden_size);
-  DGPP_CUDA_OK(cudaMemcpyAsync(dst, src, draft_state_bytes(), cudaMemcpyDeviceToDevice, stream_));
+  glm_device_copy(dst, src, draft_state_bytes(), stream_);
 }
 void MimoModel::read_draft_snapshot(int req, const uint8_t* src) {
   if (!native_mtp()) return;
-  DGPP_CUDA_OK(cudaMemcpyAsync(native_history_ + size_t(req) * kNativeHistoryRows * cfg_.hidden_size,
-                               src, draft_state_bytes(), cudaMemcpyDeviceToDevice, stream_));
+  glm_device_copy(native_history_ + size_t(req) * kNativeHistoryRows * cfg_.hidden_size,
+                    src, draft_state_bytes(), stream_);
 }
 void MimoModel::native_mtp_rows(int req, const int64_t* tokens, int64_t first_pos, int T,
                                bool decode, bool capture, int head_rows) {
@@ -852,7 +852,7 @@ void MimoModel::native_mtp_rows(int req, const int64_t* tokens, int64_t first_po
     gemm_.matmul(native_output_, globals_.lm_head, logits_, head_rows, lm_vocab_count_, H,
                  DType::BF16, GemmOut::F32, size_t(H), gemm_ws_, gemm_ws_bytes_, stream_);
     // Keep the diagnostic mtp_forward hidden-output surface valid.
-    DGPP_CUDA_OK(cudaMemcpyAsync(h_, native_output_, size_t(head_rows) * H * 2, cudaMemcpyDeviceToDevice, stream_));
+    glm_device_copy(h_, native_output_, size_t(head_rows) * H * 2, stream_);
   }
   if (decode) prefetch_.join(stream_);
   if (decode && head_rows && (!capture || decode_tail_mirrors_))
