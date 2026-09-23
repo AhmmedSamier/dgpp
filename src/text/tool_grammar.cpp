@@ -429,8 +429,8 @@ const char* GrammarState::xml_function_end() const {
 
 bool GrammarState::compact_xml_text_state() const {
   if (!vocab_->markers().xml_compact) return false;
-  return state_ == State::kQName || state_ == State::kQKeyOrClose ||
-         state_ == State::kQFreeKey || state_ == State::kQValue;
+  return state_ == State::kQName || state_ == State::kQKeyOrClose || state_ == State::kQFreeKey ||
+         state_ == State::kQValue;
 }
 
 // A tokenizer token may span several XML fields. Validate all its bytes,
@@ -447,9 +447,9 @@ bool GrammarState::compact_xml_text(const std::string& text) {
       if (!match_byte(ch)) return false;
       if (!match_.complete()) continue;
       if (state_ == State::kQName) {
-        const std::string name = match_.emitted.substr(
-            std::strlen(xml_function_open()),
-            match_.emitted.size() - std::strlen(xml_function_open()) - 1);
+        const std::string name =
+            match_.emitted.substr(std::strlen(xml_function_open()),
+                                  match_.emitted.size() - std::strlen(xml_function_open()) - 1);
         tool_ = -1;
         used_keys_.clear();
         for (size_t i = 0; i < spec_.tools.size(); ++i)
@@ -461,7 +461,7 @@ bool GrammarState::compact_xml_text(const std::string& text) {
         enter(State::kQFreeKey);
       } else {
         key_ = match_.emitted.substr(std::strlen(kQParam),
-                                    match_.emitted.size() - std::strlen(kQParam) - 1);
+                                     match_.emitted.size() - std::strlen(kQParam) - 1);
         used_keys_.push_back(key_);
         enter(State::kQValue);
       }
@@ -503,8 +503,8 @@ bool GrammarState::compact_xml_text(const std::string& text) {
 
 void GrammarState::compact_xml_mask(TokenMask* out) const {
   const GrammarArg* arg = state_ == State::kQValue ? current_arg() : nullptr;
-  const bool free_value = state_ == State::kQValue &&
-                         (!arg || arg->kind == GrammarArg::Kind::kFree);
+  const bool free_value =
+      state_ == State::kQValue && (!arg || arg->kind == GrammarArg::Kind::kFree);
   if (free_value) {
     free_mask_in_call(out);
     const std::string end = xml_parameter_end();
@@ -516,7 +516,10 @@ void GrammarState::compact_xml_mask(TokenMask* out) const {
       if (trial.compact_xml_text(vocab_->text(id))) continue;
       uint32_t& word = out->words[static_cast<size_t>(id >> 5)];
       const uint32_t bit = 1u << (id & 31);
-      if (word & bit) { word &= ~bit; --out->allowed; }
+      if (word & bit) {
+        word &= ~bit;
+        --out->allowed;
+      }
     }
     return;
   }
@@ -529,11 +532,15 @@ void GrammarState::compact_xml_mask(TokenMask* out) const {
       if (trial.compact_xml_text(vocab_->text(id))) continue;
       uint32_t& word = out->words[static_cast<size_t>(id >> 5)];
       const uint32_t bit = 1u << (id & 31);
-      if (word & bit) { word &= ~bit; --out->allowed; }
+      if (word & bit) {
+        word &= ~bit;
+        --out->allowed;
+      }
     }
     return;
   } else if (json_value) {
-    if (term_.empty()) json_mask(value_json_, -2, out);
+    if (term_.empty())
+      json_mask(value_json_, -2, out);
     else {
       out->vocab = vocab_->vocab_size();
       out->words.assign(static_cast<size_t>(TokenMask::words_for(out->vocab)), 0u);
@@ -547,7 +554,8 @@ void GrammarState::compact_xml_mask(TokenMask* out) const {
     bool seen[256] = {};
     for (const std::string& target : match_.targets) {
       if (target.size() <= match_.emitted.size() ||
-          target.compare(0, match_.emitted.size(), match_.emitted) != 0) continue;
+          target.compare(0, match_.emitted.size(), match_.emitted) != 0)
+        continue;
       const unsigned char first = static_cast<unsigned char>(target[match_.emitted.size()]);
       if (seen[first]) continue;
       seen[first] = true;
@@ -559,7 +567,8 @@ void GrammarState::compact_xml_mask(TokenMask* out) const {
     if (vocab_->is_eos(id) || id == vocab_->markers().think_open.id ||
         id == vocab_->markers().think_close.id ||
         std::find(vocab_->marker_ids().begin(), vocab_->marker_ids().end(), id) !=
-            vocab_->marker_ids().end()) continue;
+            vocab_->marker_ids().end())
+      continue;
     GrammarState trial = *this;
     if (trial.compact_xml_text(vocab_->text(id))) accepted.push_back(id);
   }
@@ -569,7 +578,10 @@ void GrammarState::compact_xml_mask(TokenMask* out) const {
     for (const int64_t id : accepted) {
       uint32_t& word = out->words[static_cast<size_t>(id >> 5)];
       const uint32_t bit = 1u << (id & 31);
-      if (!(word & bit)) { word |= bit; ++out->allowed; }
+      if (!(word & bit)) {
+        word |= bit;
+        ++out->allowed;
+      }
     }
   }
 }
@@ -659,7 +671,8 @@ bool GrammarState::call_closable() const {
 bool GrammarState::call_closable_for(const std::string& name) const {
   // At the name, before any key: closable unless a strict tool requires one.
   for (const GrammarTool& t : spec_.tools)
-    if (t.name == name) return (!t.strict && !vocab_->markers().xml_compact) || t.required_keys.empty();
+    if (t.name == name)
+      return (!t.strict && !vocab_->markers().xml_compact) || t.required_keys.empty();
   return true;
 }
 
@@ -873,7 +886,10 @@ void GrammarState::list_mask(TokenMask* out,
 void GrammarState::mask(TokenMask* out) const {
   out->allowed = 0;
   if (!active()) return;
-  if (compact_xml_text_state()) { compact_xml_mask(out); return; }
+  if (compact_xml_text_state()) {
+    compact_xml_mask(out);
+    return;
+  }
   const ChatMarkers& m = vocab_->markers();
   if (think_openable_) {
     // The first position: the state's own mask, plus the model's opener.
@@ -1143,7 +1159,11 @@ bool GrammarState::keys_possible_for(const std::string& name) const {
 
 bool GrammarState::allows(int64_t id) const {
   if (!active()) return true;
-  if (compact_xml_text_state()) { TokenMask m; mask(&m); return m.allows(id); }
+  if (compact_xml_text_state()) {
+    TokenMask m;
+    mask(&m);
+    return m.allows(id);
+  }
   if (think_openable_) {
     if (id == vocab_->markers().think_open.id) return true;
     GrammarState settled = *this;
@@ -1159,7 +1179,8 @@ bool GrammarState::allows(int64_t id) const {
   if (state_ == State::kQValue || state_ == State::kDValue) {
     const GrammarArg* a = current_arg();
     if (a != nullptr && a->kind == GrammarArg::Kind::kJson) {
-      const std::string& closer = state_ == State::kQValue ? std::string(xml_parameter_end()) : kDParamClose;
+      const std::string& closer =
+          state_ == State::kQValue ? std::string(xml_parameter_end()) : kDParamClose;
       if (!term_.empty()) {
         for (const int64_t t : literal_ids(closer, term_))
           if (t == id) return true;
@@ -1358,8 +1379,10 @@ void GrammarState::advance(int64_t id) {
       match_.emitted += vocab_->text(id);
       if (match_.complete()) {
         // "\n<function=" NAME ">\n": bind the tool; the key ledger opens.
-        const std::string name = match_.emitted.substr(
-            std::strlen(xml_function_open()), match_.emitted.size() - std::strlen(xml_function_open()) - std::strlen(xml_header_end()));
+        const std::string name =
+            match_.emitted.substr(std::strlen(xml_function_open()),
+                                  match_.emitted.size() - std::strlen(xml_function_open()) -
+                                      std::strlen(xml_header_end()));
         tool_ = -1;
         used_keys_.clear();
         for (size_t i = 0; i < spec_.tools.size(); ++i)
@@ -1376,7 +1399,8 @@ void GrammarState::advance(int64_t id) {
         enter(State::kQFreeKey);
       } else {
         key_ = match_.emitted.substr(
-            std::strlen(kQParam), match_.emitted.size() - std::strlen(kQParam) - std::strlen(xml_header_end()));
+            std::strlen(kQParam),
+            match_.emitted.size() - std::strlen(kQParam) - std::strlen(xml_header_end()));
         used_keys_.push_back(key_);
         enter(State::kQValue);
       }

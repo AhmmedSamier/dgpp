@@ -142,7 +142,9 @@ class MimoModel : public SessionModel<MimoModel> {
   void reset_slot_state(int req);
   GlmSpecSegments spec_segments(int req, int snapshot_row0 = 0) const;
   size_t snapshot_state_bytes() const { return kSnapshotStamp; }
-  size_t draft_state_bytes() const { return native_mtp() ? size_t(kNativeHistoryRows) * cfg_.hidden_size * 2 : 0; }
+  size_t draft_state_bytes() const {
+    return native_mtp() ? size_t(kNativeHistoryRows) * cfg_.hidden_size * 2 : 0;
+  }
   void write_state_snapshot(int req, uint8_t* dst, int spec_row);
   void write_draft_snapshot(int req, uint8_t* dst, bool live, int64_t pos);
   void read_state_snapshot(int, const uint8_t*) {}

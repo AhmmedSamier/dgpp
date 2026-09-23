@@ -81,7 +81,8 @@ bool starts_with(const std::string& s, const char* prefix) {
 }  // namespace
 
 std::string mimo_layer_prefix(const MimoTextConfig& cfg, int layer) {
-  if (cfg.is_mtp_layer(layer)) return "model.mtp.layers." + std::to_string(layer - cfg.num_hidden_layers) + ".";
+  if (cfg.is_mtp_layer(layer))
+    return "model.mtp.layers." + std::to_string(layer - cfg.num_hidden_layers) + ".";
   return "model.layers." + std::to_string(layer) + ".";
 }
 

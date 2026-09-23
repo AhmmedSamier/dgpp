@@ -74,8 +74,8 @@ struct MimoTextConfig {
   int topk_group = 1;
 
   // --- MTP --------------------------------------------------------------------
-  int num_nextn_predict_layers = 3;    // the checkpoint carries three heads
-  int mtp_layers_loaded = 1;           // 0/1 by default; 3 with DGPP_MIMO_NATIVE_MTP=1
+  int num_nextn_predict_layers = 3;  // the checkpoint carries three heads
+  int mtp_layers_loaded = 1;         // 0/1 by default; 3 with DGPP_MIMO_NATIVE_MTP=1
 
   // --- weight formats -----------------------------------------------------
   int fp8_block = 128;                 // weight_block_size (both axes)
@@ -87,7 +87,9 @@ struct MimoTextConfig {
   // Layer index of the draft layer in the family's layer space
   // (num_hidden_layers), -1 when absent.
   int mtp_layer() const { return mtp_layers_loaded > 0 ? num_hidden_layers : -1; }
-  bool is_mtp_layer(int l) const { return l >= num_hidden_layers && l < num_hidden_layers + mtp_layers_loaded; }
+  bool is_mtp_layer(int l) const {
+    return l >= num_hidden_layers && l < num_hidden_layers + mtp_layers_loaded;
+  }
   // Whether layer `l` (a main layer or the draft) is a sliding-window
   // layer; the draft is SWA (vLLM's mimo_v2_mtp).
   bool is_swa_layer(int l) const { return is_mtp_layer(l) ? true : swa_layer[static_cast<size_t>(l)] != 0; }

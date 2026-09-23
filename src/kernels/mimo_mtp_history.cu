@@ -1,6 +1,7 @@
-#include "kernels/mimo_mtp_history.hpp"
-#include "common/cuda_check.hpp"
 #include <stdexcept>
+
+#include "common/cuda_check.hpp"
+#include "kernels/mimo_mtp_history.hpp"
 namespace dgpp {
 namespace {
 __global__ void mtp_history_gather(const uint16_t* history, uint16_t* hidden,
@@ -45,4 +46,4 @@ void mimo_mtp_history_store(uint16_t* history, const uint16_t* hidden, const int
                                               layer);
   DGPP_CUDA_OK(cudaGetLastError());
 }
-}
+}  // namespace dgpp

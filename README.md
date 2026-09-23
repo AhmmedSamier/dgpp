@@ -72,7 +72,9 @@ runs the attention as one launch per layer with the residual add fused
 into each norm; prefill attention is query-tiled on the tensor cores (each
 K/V tile staged — and under the fp8 cache dequantized — once per 64 query
 vectors). See the [model card](docs/model_cards/MiMo-V2.6-Flash.md) and
-[plan](docs/mimo_v26_flash_plan.md).
+[plan](docs/mimo_v26_flash_plan.md). Native blocks 0/1/2 MTP3 and prefill
+work reductions are opt-in; see [MiMo operations](docs/operations.md#mimo-native-mtp-and-prefill-options)
+for settings, memory implications and measured workload tradeoffs.
 
 The linked templates enable MTP at the depth measured best for that deployment.
 Plain decode, deeper MTP, alternate cache formats and slot counts are launcher

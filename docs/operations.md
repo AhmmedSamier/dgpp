@@ -6,6 +6,48 @@ scheduler operations. The examples below use GLM-5.3 on four Sparks.
 Other model templates use the same launcher with their own memory and
 engine settings. See [README](../README.md) for the configuration schema.
 
+## MiMo native MTP and prefill options
+
+MiMo defaults to upstream's recursive block-0 drafting. To use all three
+checkpoint heads, set `DGPP_MIMO_NATIVE_MTP=1` on every rank and set
+`engine.mtp: true`, `engine.mtp_depth: 3` in the deployment JSON. The loader
+requires three checkpoint heads when native drafting is enabled; a model
+without MTP remains valid. For example, using the normal site configuration:
+
+```sh
+DGPP_MIMO_NATIVE_MTP=1 DGPP_RESIDENT_CACHE=off \
+  python3 scripts/dgpp-cluster up --config /path/to/mimo.json
+```
+
+The launcher forwards these `DGPP_` settings to peers. Verify the resolved
+configuration and both rank startup logs. Restart all ranks to change them.
+Unset `DGPP_MIMO_NATIVE_MTP` and set depth 1 to return to the default control.
+`DGPP_RESIDENT_CACHE=off` disables resident image caching; `0` does not.
+Loading extra heads changes the resident image layout and memory requirement.
+
+Native MTP loads blocks 0/1/2 and keeps their independent paged K/V state,
+plus backbone history and rollback buffers. Prefix snapshots include that
+history, so the same prefix-cache byte budget retains fewer snapshots. The
+2048-row native walk limit is an internal chunk size, not the context limit.
+`engine.kv_capacity` is a shared pool across active requests. Our measured
+C2 configuration used 131072 tokens total, BF16 K/V and a 1.5 GiB prefix
+budget; it does not provide 128K simultaneously to each request.
+
+Two independent, default-off prefill switches are available:
+`DGPP_MIMO_PREFILL_LAST_HEAD=1` projects only the requested final prefill
+rows to vocabulary logits, and `DGPP_MIMO_MTP_CACHE_ONLY=1` avoids unused
+attention/MLP work during one-head history updates. Native MTP already uses
+cache-only updates for history and unselected heads. All flags must agree
+across ranks. The final-row projection changes GEMM shape; validation uses
+numerical tolerances and top-1 checks rather than a universal bitwise claim.
+
+Native MTP3 improves acceptance on the measured code, JSON and arithmetic
+probes, but slows the prose probe relative to MTP1. Use the
+[reproduction procedure](../benchmarks/mimo_upstream/README.md) to compare
+representative traffic. [Native-head measurements](../benchmarks/results/2026-09-23-mimo-native-mtp.md)
+and [prefill measurements](../benchmarks/results/2026-09-23-mimo-upstream-ports.md)
+record the configurations and limitations separately.
+
 ## Configure and start
 
 For a new machine, follow [Getting started](getting-started.md),

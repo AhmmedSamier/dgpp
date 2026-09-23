@@ -169,9 +169,9 @@ void MimoAttentionLayer::enqueue(const uint16_t* x, int tokens, const MimoAttnRo
     throw std::invalid_argument("MimoAttentionLayer: decode rows exceed the layer's decode_rows");
   const float* inv_freq = w_.swa ? d_inv_freq_swa_ : d_inv_freq_ga_;
   if (rows.cache_only) {
-    mimo_qkv_finish(qkv_, qkv_cols_, layout, inv_freq, value_scale_, rows.req_ids, rows.pos, tokens, lh_, lkv,
-                    cache.block_tables, cache.blocks_per_request, cache.block_tokens, q_, Q, cache.k_cache,
-                    cache.v_cache, stream, cache.k_scale, cache.v_scale);
+    mimo_qkv_finish(qkv_, qkv_cols_, layout, inv_freq, value_scale_, rows.req_ids, rows.pos, tokens,
+                    lh_, lkv, cache.block_tables, cache.blocks_per_request, cache.block_tokens, q_,
+                    Q, cache.k_cache, cache.v_cache, stream, cache.k_scale, cache.v_scale);
     return;
   }
   if (rows.decode && fused_decode_ && tokens <= kMimoAttnFusedMaxRows && tokens <= decode_rows_ &&

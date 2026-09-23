@@ -353,8 +353,9 @@ void rank_work_mtp(int r, const MimoTextConfig& cfg, const std::string& dir, con
 // runtime decode-row ceiling, kSlots x 3, above the 8-row floor). The
 // transcripts must be the plain eager engine's exactly; the pass count
 // reports the second draft's worth.
-void rank_work_mtp_depth2(int r, const MimoTextConfig& cfg, const std::string& dir, const std::vector<int64_t>& A,
-                          const std::vector<int64_t>& B, const std::vector<int64_t>& C, CollectiveBus* bus,
+void rank_work_mtp_depth2(int r, const MimoTextConfig& cfg, const std::string& dir,
+                          const std::vector<int64_t>& A, const std::vector<int64_t>& B,
+                          const std::vector<int64_t>& C, CollectiveBus* bus,
                           ConstructBarrier* barrier, RankOutcome* out, int depth) {
   bool arrived = false;
   const auto arrive_once = [&] {
@@ -367,9 +368,11 @@ void rank_work_mtp_depth2(int r, const MimoTextConfig& cfg, const std::string& d
     BusBoundaryReducer reducer(*bus, wait_timeout_ms());
     MimoModel eager(cfg, dir, kMaxTokens, kCache, MimoResidency::Resident, &reducer, r, kWorld, kSlots);
     // The decode-row ceiling of the depth-2 shape: kSlots x 3 rows = 9.
-    MimoModel mtp(cfg, dir, kMaxTokens, kCache, MimoResidency::Resident, &reducer, r, kWorld, kSlots, /*mtp=*/true,
+    MimoModel mtp(cfg, dir, kMaxTokens, kCache, MimoResidency::Resident, &reducer, r, kWorld,
+                  kSlots, /*mtp=*/true,
                   /*decode_rows=*/kSlots * (depth + 1));
-    require(mtp.max_decode_rows() == kSlots * (depth + 1), "the model takes the runtime decode-row ceiling");
+    require(mtp.max_decode_rows() == kSlots * (depth + 1),
+            "the model takes the runtime decode-row ceiling");
     DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&scratch),
                                sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld), cudaHostAllocDefault));
     arrive_once();
@@ -379,9 +382,10 @@ void rank_work_mtp_depth2(int r, const MimoTextConfig& cfg, const std::string& d
     out->eb = solo(eager_engine, 1, B, kSteps);
     out->ec = solo(eager_engine, 2, C, kSteps);
     {
-      GraphEngineAdapter<MimoModel> d2(&mtp, bus, r, kWorld, scratch, cfg.vocab_size, wait_timeout_ms(),
-                                       /*batch_min_live=*/2, nullptr, nullptr, dgpp::kSamplingCandidates, nullptr, 0,
-                                       /*mtp_depth=*/depth);
+      GraphEngineAdapter<MimoModel> d2(
+          &mtp, bus, r, kWorld, scratch, cfg.vocab_size, wait_timeout_ms(),
+          /*batch_min_live=*/2, nullptr, nullptr, dgpp::kSamplingCandidates, nullptr, 0,
+          /*mtp_depth=*/depth);
       require(d2.batch_families() == std::vector<int>{2, 3},
               "the depth-2 world builds the 2- and 3-slot batch families over the 9-row ceiling");
       // A alone: the scalar depth-2 graph.
@@ -403,7 +407,8 @@ void rank_work_mtp_depth2(int r, const MimoTextConfig& cfg, const std::string& d
       d2.reserve(2, static_cast<int64_t>(C.size()) + kSteps + depth + 1);
       while (out->mb.size() < static_cast<size_t>(kSteps) + 1 || out->mc.size() < static_cast<size_t>(kSteps) + 1) {
         const auto t = d2.step_batch({1, 2});
-        require(t.size() == 2 && !t[0].empty() && t[0].size() <= size_t(depth + 1) && !t[1].empty() && t[1].size() <= size_t(depth + 1),
+        require(t.size() == 2 && !t[0].empty() && t[0].size() <= size_t(depth + 1) &&
+                    !t[1].empty() && t[1].size() <= size_t(depth + 1),
                 "mtp depth-2 batch step shape");
         out->mb.insert(out->mb.end(), t[0].begin(), t[0].end());
         out->mc.insert(out->mc.end(), t[1].begin(), t[1].end());
@@ -629,8 +634,9 @@ DGPP_TEST(mimo_engines_loopback_world_2_mtp_depth2_graph_matches_plain_decode) {
   ConstructBarrier barrier(kWorld);
   std::vector<std::thread> workers;
   for (int r = 0; r < kWorld; ++r)
-    workers.emplace_back(rank_work_mtp_depth2, r, std::cref(cfg), std::cref(dir), std::cref(A), std::cref(B),
-                         std::cref(C), buses[static_cast<size_t>(r)].get(), &barrier, &outs[static_cast<size_t>(r)], 2);
+    workers.emplace_back(rank_work_mtp_depth2, r, std::cref(cfg), std::cref(dir), std::cref(A),
+                         std::cref(B), std::cref(C), buses[static_cast<size_t>(r)].get(), &barrier,
+                         &outs[static_cast<size_t>(r)], 2);
   for (auto& t : workers) t.join();
   for (int r = 0; r < kWorld; ++r) require(outs[static_cast<size_t>(r)].error.empty(), outs[static_cast<size_t>(r)].error);
   for (int r = 1; r < kWorld; ++r)
@@ -660,21 +666,28 @@ DGPP_TEST(mimo_engines_loopback_world_2_native_mtp_depth3_graph_matches_plain_de
   ConstructBarrier barrier(kWorld);
   std::vector<std::thread> workers;
   for (int r = 0; r < kWorld; ++r)
-    workers.emplace_back(rank_work_mtp_depth2, r, std::cref(cfg), std::cref(dir), std::cref(A), std::cref(B),
-                         std::cref(C), buses[static_cast<size_t>(r)].get(), &barrier, &outs[static_cast<size_t>(r)], 3);
+    workers.emplace_back(rank_work_mtp_depth2, r, std::cref(cfg), std::cref(dir), std::cref(A),
+                         std::cref(B), std::cref(C), buses[static_cast<size_t>(r)].get(), &barrier,
+                         &outs[static_cast<size_t>(r)], 3);
   for (auto& t : workers) t.join();
-  for (int r = 0; r < kWorld; ++r) require(outs[static_cast<size_t>(r)].error.empty(), outs[static_cast<size_t>(r)].error);
+  for (int r = 0; r < kWorld; ++r)
+    require(outs[static_cast<size_t>(r)].error.empty(), outs[static_cast<size_t>(r)].error);
   for (int r = 1; r < kWorld; ++r)
-    require(outs[static_cast<size_t>(r)].ma == outs[0].ma && outs[static_cast<size_t>(r)].mb == outs[0].mb &&
+    require(outs[static_cast<size_t>(r)].ma == outs[0].ma &&
+                outs[static_cast<size_t>(r)].mb == outs[0].mb &&
                 outs[static_cast<size_t>(r)].mc == outs[0].mc,
             "the ranks' native depth-3 transcripts differ");
   const Ref ref = world1_reference(cfg, dir, A, B, C);
   const RankOutcome& o = outs[0];
-  DGPP_LOG_INFO("world 2 MTP native depth 3: scalar A {} ({} steps for {} tokens) | batched B {} | C {}", ids_text(o.ma),
-                o.mtp_steps_a, kSteps, ids_text(o.mb), ids_text(o.mc));
-  require(o.ma == o.ea, "the scalar native depth-3 transcript of A differs from the plain eager engine's");
-  engine_ties::require_agrees_or_tie(o.mb, o.eb, ref.bm, kTieMargin, kAgreePositions, "the batched native depth-3 transcript of B");
-  engine_ties::require_agrees_or_tie(o.mc, o.ec, ref.cm, kTieMargin, kAgreePositions, "the batched native depth-3 transcript of C");
+  DGPP_LOG_INFO(
+      "world 2 MTP native depth 3: scalar A {} ({} steps for {} tokens) | batched B {} | C {}",
+      ids_text(o.ma), o.mtp_steps_a, kSteps, ids_text(o.mb), ids_text(o.mc));
+  require(o.ma == o.ea,
+          "the scalar native depth-3 transcript of A differs from the plain eager engine's");
+  engine_ties::require_agrees_or_tie(o.mb, o.eb, ref.bm, kTieMargin, kAgreePositions,
+                                     "the batched native depth-3 transcript of B");
+  engine_ties::require_agrees_or_tie(o.mc, o.ec, ref.cm, kTieMargin, kAgreePositions,
+                                     "the batched native depth-3 transcript of C");
 }
 
 DGPP_TEST(mimo_engines_loopback_world_2_mtp_graph_matches_plain_decode) {

@@ -146,7 +146,9 @@ GrammarVocab qwen_vocab(bool compact = false) {
   m.tool_call_open = ChatMarker{kToolOpen, "<tool_call>"};
   m.tool_call_close = ChatMarker{kToolClose, "</tool_call>"};
   texts[280] = "></";
-  texts[281] = "<function=get_weather><parameter=city>Paris</parameter><parameter=days>3</parameter></function>";
+  texts[281] =
+      "<function=get_weather><parameter=city>Paris</parameter><parameter=days>3</parameter></"
+      "function>";
   texts[282] = "></function>";
   texts[283] = "><parameter=unknown>";
   texts[284] = "3</parameter><parameter=city>Paris</parameter></function>";
@@ -349,7 +351,8 @@ DGPP_TEST(tool_grammar_xml_modelOpensThinkingAndStraddledTerminator) {
 
 DGPP_TEST(tool_grammar_mimo_modelOpensThinkingAndStraddledTerminator) {
   std::vector<std::string> texts(static_cast<size_t>(kVocab));
-  for (int b = 0; b < 256; ++b) texts[static_cast<size_t>(b)] = std::string(1, static_cast<char>(b));
+  for (int b = 0; b < 256; ++b)
+    texts[static_cast<size_t>(b)] = std::string(1, static_cast<char>(b));
   texts[kGetWeather] = "get_weather";
   texts[kCity] = "\"</";  // the straddling token: a string's close quote + the terminator's newline
   texts[kThinkOpen] = "<think>";
@@ -369,11 +372,14 @@ DGPP_TEST(tool_grammar_mimo_modelOpensThinkingAndStraddledTerminator) {
   require(g.allows(kThinkOpen) && g.allows(kToolOpen) && g.allows('H') && !g.allows(kEosUser),
           "first position: the opener, the call or text; never EOS while owed");
   g.advance(kThinkOpen);
-  require(std::string(g.state_name()) == "think", std::string("the opener enters the reasoning: ") + g.state_name());
-  require(g.allows('x') && g.allows(kThinkClose) && !g.allows(kEosUser), "free reasoning, EOS refused while owed");
+  require(std::string(g.state_name()) == "think",
+          std::string("the opener enters the reasoning: ") + g.state_name());
+  require(g.allows('x') && g.allows(kThinkClose) && !g.allows(kEosUser),
+          "free reasoning, EOS refused while owed");
   feed(g, bytes_of("plan"));
   g.advance(kThinkClose);
-  require(std::string(g.state_name()) == "top", std::string("</think> returns to the top: ") + g.state_name());
+  require(std::string(g.state_name()) == "top",
+          std::string("</think> returns to the top: ") + g.state_name());
   g.advance(kToolOpen);
   feed(g, bytes_of("<function="));
   feed(g, {kGetWeather});
@@ -394,11 +400,13 @@ DGPP_TEST(tool_grammar_mimo_modelOpensThinkingAndStraddledTerminator) {
   GrammarState t(&vocab, spec, false, true);
   // Any other first id settles the opening (the top's rules apply).
   t.advance(kToolOpen);
-  require(std::string(t.state_name()) == "q-name" && !t.allows(kThinkOpen), "a call first: inside the call no opener");
+  require(std::string(t.state_name()) == "q-name" && !t.allows(kThinkOpen),
+          "a call first: inside the call no opener");
   feed(t, bytes_of("<function="));
   feed(t, {kGetWeather});
   feed(t, bytes_of("><parameter=city>\"Oslo"));
-  require(t.allows(kCity), "the straddling '\"\\n' token closes the value and opens the terminator");
+  require(t.allows(kCity),
+          "the straddling '\"\\n' token closes the value and opens the terminator");
   t.advance(kCity);
   require(t.allows('p') && !t.allows('<') && !t.allows('x'), "inside the terminator: '</' next");
   feed(t, bytes_of("parameter></function>"));
@@ -407,23 +415,28 @@ DGPP_TEST(tool_grammar_mimo_modelOpensThinkingAndStraddledTerminator) {
   // Without the choice (a Qwen prompt that opened the block, or one that
   // closed it): the opener is not offered at the first position.
   GrammarState settled(&vocab, spec_of(GrammarSpec::Mode::kRequired), false, false);
-  settled.advance(kThinkOpen);  // free text at the XML top (the format's own rule): no reasoning state
-  require(std::string(settled.state_name()) == "top", std::string("no choice: the marker is text at the top: ") + settled.state_name());
+  settled.advance(
+      kThinkOpen);  // free text at the XML top (the format's own rule): no reasoning state
+  require(std::string(settled.state_name()) == "top",
+          std::string("no choice: the marker is text at the top: ") + settled.state_name());
   GrammarSpec json_settled;
   json_settled.mode = GrammarSpec::Mode::kJson;
   GrammarState js(&vocab, json_settled, false, false);
   require(!js.allows(kThinkOpen) && js.allows('{'), "no choice in JSON mode: the body only");
   GrammarState opened(&vocab, spec_of(GrammarSpec::Mode::kRequired), true, true);
-  require(std::string(opened.state_name()) == "think", "a prompt that opened the block starts in the reasoning");
+  require(std::string(opened.state_name()) == "think",
+          "a prompt that opened the block starts in the reasoning");
   // JSON mode: <think> first, then the JSON body after </think>.
   GrammarSpec json;
   json.mode = GrammarSpec::Mode::kJson;
   GrammarState j(&vocab, json, false, true);
-  require(j.allows(kThinkOpen) && j.allows('{') && !j.allows('x'), "JSON mode: the opener or the body");
+  require(j.allows(kThinkOpen) && j.allows('{') && !j.allows('x'),
+          "JSON mode: the opener or the body");
   j.advance(kThinkOpen);
   feed(j, bytes_of("why"));
   j.advance(kThinkClose);
-  require(std::string(j.state_name()) == "json-body" || j.allows('{'), std::string("the body after the block: ") + j.state_name());
+  require(std::string(j.state_name()) == "json-body" || j.allows('{'),
+          std::string("the body after the block: ") + j.state_name());
   require(j.allows('{') && !j.allows('x'), "the JSON body follows");
 }
 
@@ -1222,7 +1235,8 @@ DGPP_TEST(tool_grammar_keyClosureLeavesNestedJsonOpen) {
 
 DGPP_TEST(tool_grammar_mimo_compact_calls_empty_text_and_typed_values) {
   const GrammarVocab vocab = qwen_vocab(true);
-  for (const std::string& value : {std::string(""), std::string("."), std::string("/home/jon/dgpp")}) {
+  for (const std::string& value :
+       {std::string(""), std::string("."), std::string("/home/jon/dgpp")}) {
     auto spec = spec_of(GrammarSpec::Mode::kAuto, false);
     GrammarState g(&vocab, spec, false);
     g.advance(kToolOpen);
@@ -1273,7 +1287,7 @@ DGPP_TEST(tool_grammar_mimo_tokens_can_cross_xml_fields_without_bypassing_masks)
   auto spec = spec_of(GrammarSpec::Mode::kAuto);
   spec.tools[0].required_keys = {"city", "days"};
   spec.tools[0].args = {{"days", GrammarArg::Kind::kJson, R"({"type":"integer"})", {}},
-                      {"city", GrammarArg::Kind::kText, "", {"Paris"}}};
+                        {"city", GrammarArg::Kind::kText, "", {"Paris"}}};
   GrammarState typed(&vocab, spec, false);
   typed.advance(kToolOpen);
   feed(typed, bytes_of("<function=get_weather><parameter=days>"));

@@ -52,7 +52,8 @@ std::vector<int> moe_ordinals(const MimoTextConfig& cfg) {
 std::vector<int> MimoModel::pool_kv_heads(const MimoTextConfig& cfg, const MimoLocalGeometry& geo, bool mtp) {
   std::vector<int> heads;
   for (int l = 0; l < cfg.num_hidden_layers; ++l) heads.push_back(geo.kv_heads_of(cfg, l));
-  if (mtp) for (int d = 0; d < cfg.mtp_layers_loaded; ++d) heads.push_back(geo.local_swa_kv_heads);
+  if (mtp)
+    for (int d = 0; d < cfg.mtp_layers_loaded; ++d) heads.push_back(geo.local_swa_kv_heads);
   return heads;
 }
 
@@ -118,8 +119,10 @@ MimoModel::MimoModel(const MimoTextConfig& cfg, const std::string& checkpoint_di
   // tensor-core GEMM at decode rows: a row's chain the same whatever rows
   // share the launch (DGPP_MIMO_DENSE_GEMV=1 restores the 4-row chunks).
   dense_mma_ = std::getenv("DGPP_MIMO_DENSE_GEMV") == nullptr;
-  if (const char* v = std::getenv("DGPP_MIMO_PREFILL_LAST_HEAD")) prefill_last_head_ = std::string(v) == "1";
-  if (const char* v = std::getenv("DGPP_MIMO_MTP_CACHE_ONLY")) mtp_cache_only_ = std::string(v) == "1";
+  if (const char* v = std::getenv("DGPP_MIMO_PREFILL_LAST_HEAD"))
+    prefill_last_head_ = std::string(v) == "1";
+  if (const char* v = std::getenv("DGPP_MIMO_MTP_CACHE_ONLY"))
+    mtp_cache_only_ = std::string(v) == "1";
   bf16_side_grants_ = residency == MimoResidency::Resident && bf16_side_grants();
   moe_cfg_ = cfg_.moe_config(static_cast<int>(loader_.geometry().local_inter));
   n_split_ = MimoAttentionLayer::default_decode_splits();
@@ -179,7 +182,8 @@ MimoModel::MimoModel(const MimoTextConfig& cfg, const std::string& checkpoint_di
       native_backup_ = dev_alloc<uint8_t>(size_t(max_requests_) * draft_state_bytes());
       native_positions_ = dev_alloc<int64_t>(M);
       native_output_ = dev_alloc<uint16_t>(M * H);
-      DGPP_CUDA_OK(cudaMemsetAsync(native_history_, 0, size_t(max_requests_) * draft_state_bytes(), stream_));
+      DGPP_CUDA_OK(cudaMemsetAsync(native_history_, 0, size_t(max_requests_) * draft_state_bytes(),
+                                   stream_));
     }
   }
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
@@ -197,7 +201,10 @@ MimoModel::~MimoModel() {
   cudaFree(mtp_h_);
   cudaFree(mtp_in_);
   cudaFree(mtp_r_);
-  cudaFree(native_history_); cudaFree(native_backup_); cudaFree(native_positions_); cudaFree(native_output_);
+  cudaFree(native_history_);
+  cudaFree(native_backup_);
+  cudaFree(native_positions_);
+  cudaFree(native_output_);
 }
 
 int MimoModel::table_slots() const {
@@ -297,8 +304,10 @@ MimoModel::MemoryPlan MimoModel::plan_memory(const MimoTextConfig& cfg, int max_
     plan.add("moe scratch (routed slots, graph tables)", moe_dev, moe_pinned);
   }
   if (mtp && cfg.mtp_layers_loaded == 3) {
-    if (max_tokens > kPrefillChunkTokens) throw std::invalid_argument("native MiMo MTP supports at most 2048 rows per walk");
-    plan.add("native MTP history, rollback and scratch", size_t(max_requests) * kNativeHistoryRows * H * 4 + M * (H * 2 + 8));
+    if (max_tokens > kPrefillChunkTokens)
+      throw std::invalid_argument("native MiMo MTP supports at most 2048 rows per walk");
+    plan.add("native MTP history, rollback and scratch",
+             size_t(max_requests) * kNativeHistoryRows * H * 4 + M * (H * 2 + 8));
   }
   if (mtp) plan.add("draft block (gathered hidden, the fused input, its residual)", M * H * 2 + M * 2 * H * 2 + M * H * 2);
   return plan;
@@ -345,8 +354,10 @@ void MimoModel::build_layer_objects(const MimoLayerResident& r) {
 // (the K/V rows are written before any row reads them).
 void MimoModel::reset_slot_state(int req) {
   pool_.release_request_blocks(req, stream_);
-  if (native_mtp()) DGPP_CUDA_OK(cudaMemsetAsync(native_history_ + size_t(req) * kNativeHistoryRows * cfg_.hidden_size,
-                                                0, draft_state_bytes(), stream_));
+  if (native_mtp())
+    DGPP_CUDA_OK(
+        cudaMemsetAsync(native_history_ + size_t(req) * kNativeHistoryRows * cfg_.hidden_size, 0,
+                        draft_state_bytes(), stream_));
 }
 
 GlmSpecSegments MimoModel::spec_segments(int, int) const { return GlmSpecSegments{}; }
@@ -588,11 +599,12 @@ MimoModel::Outputs MimoModel::run_rows(const RowRun& run) {
   // Keep all hidden rows for MTP, but project only the row consumed by a
   // scalar serving prefill. Diagnostics, grouped prefill and verification
   // retain every row and the common finish_run output layout is unchanged.
-  const int head_first = prefill_last_head_ && !run.decode && !run.all_rows && run.num_spans == 0 ? T - 1 : 0;
+  const int head_first =
+      prefill_last_head_ && !run.decode && !run.all_rows && run.num_spans == 0 ? T - 1 : 0;
   gemm_.matmul(h_ + static_cast<size_t>(head_first) * H, globals_.lm_head,
                logits_ + static_cast<size_t>(head_first) * lm_vocab_count_, T - head_first,
-               lm_vocab_count_, H, DType::BF16, GemmOut::F32,
-               static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
+               lm_vocab_count_, H, DType::BF16, GemmOut::F32, static_cast<size_t>(H), gemm_ws_,
+               gemm_ws_bytes_, stream_);
   // The draft block's input: the last rows' POST-final-norm hidden (the
   // model's output hidden state, vLLM's mimo_v2_mtp convention — the draft
   // applies hnorm to it) into the slots' windows by position (the last
@@ -659,12 +671,13 @@ void MimoModel::graph_prepare() {
     if (r.moe) moe_->prepare_graph_table(moe_ordinal(layer), stream_);
     if (pack) pack_layer_companions(layer, r);
   }
-  if (mtp_) for (int d = 0; d < cfg_.mtp_layers_loaded; ++d) {
-    const int layer = cfg_.mtp_layer() + d;
-    const MimoLayerResident& r = loader_.load_layer(layer);
-    build_layer_objects(r);
-    if (pack) pack_layer_companions(layer, r);
-  }
+  if (mtp_)
+    for (int d = 0; d < cfg_.mtp_layers_loaded; ++d) {
+      const int layer = cfg_.mtp_layer() + d;
+      const MimoLayerResident& r = loader_.load_layer(layer);
+      build_layer_objects(r);
+      if (pack) pack_layer_companions(layer, r);
+    }
   if (pack) finish_companions();
 }
 
@@ -708,7 +721,10 @@ void MimoModel::finish_companions() {
 void MimoModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode_row,
                              bool capture, int head_rows, int batch_requests) {
   if (!mtp_) throw std::logic_error("mtp_run_rows: MTP is not enabled");
-  if (native_mtp()) { native_mtp_rows(req, tokens, first_pos, T, decode_row, capture, head_rows); return; }
+  if (native_mtp()) {
+    native_mtp_rows(req, tokens, first_pos, T, decode_row, capture, head_rows);
+    return;
+  }
   if (T <= 0 || T > max_tokens_) throw std::invalid_argument("mtp_run_rows: rows");
   gemm_.set_bf12_wide(decode_row);  // the decode batch's alone (kernels/gemm.hpp)
   walk_rows_ = T;
@@ -781,29 +797,33 @@ void MimoModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, 
 // recursive path and all other model families retain their original contract.
 void MimoModel::mtp_select_block(int index) {
   if (!native_mtp()) return;
-  if (index < 0 || index >= cfg_.mtp_layers_loaded) throw std::invalid_argument("native MTP head index");
+  if (index < 0 || index >= cfg_.mtp_layers_loaded)
+    throw std::invalid_argument("native MTP head index");
   draft_block_ = index;
 }
 void MimoModel::snapshot_draft_state(int req) {
-  if (native_mtp()) write_draft_snapshot(req, native_backup_ + size_t(req) * draft_state_bytes(), true, 0);
+  if (native_mtp())
+    write_draft_snapshot(req, native_backup_ + size_t(req) * draft_state_bytes(), true, 0);
 }
 void MimoModel::restore_draft_state(int req) {
   if (native_mtp()) read_draft_snapshot(req, native_backup_ + size_t(req) * draft_state_bytes());
 }
 void MimoModel::write_draft_snapshot(int req, uint8_t* dst, bool live, int64_t pos) {
   if (!native_mtp()) return;
-  const void* src = !live && mtp_pos_[req] > pos
-      ? static_cast<const void*>(native_backup_ + size_t(req) * draft_state_bytes())
-      : static_cast<const void*>(native_history_ + size_t(req) * kNativeHistoryRows * cfg_.hidden_size);
+  const void* src =
+      !live && mtp_pos_[req] > pos
+          ? static_cast<const void*>(native_backup_ + size_t(req) * draft_state_bytes())
+          : static_cast<const void*>(native_history_ +
+                                     size_t(req) * kNativeHistoryRows * cfg_.hidden_size);
   glm_device_copy(dst, src, draft_state_bytes(), stream_);
 }
 void MimoModel::read_draft_snapshot(int req, const uint8_t* src) {
   if (!native_mtp()) return;
-  glm_device_copy(native_history_ + size_t(req) * kNativeHistoryRows * cfg_.hidden_size,
-                    src, draft_state_bytes(), stream_);
+  glm_device_copy(native_history_ + size_t(req) * kNativeHistoryRows * cfg_.hidden_size, src,
+                  draft_state_bytes(), stream_);
 }
 void MimoModel::native_mtp_rows(int req, const int64_t* tokens, int64_t first_pos, int T,
-                               bool decode, bool capture, int head_rows) {
+                                bool decode, bool capture, int head_rows) {
   if (T <= 0 || T > max_tokens_ || head_rows < 0 || head_rows > T)
     throw std::invalid_argument("native MTP rows");
   gemm_.set_bf12_wide(decode);
@@ -818,7 +838,10 @@ void MimoModel::native_mtp_rows(int req, const int64_t* tokens, int64_t first_po
     // own pre-call history for session_draft_rollback and prefix cuts.
     if (decode && !capture) snapshot_draft_state(req);
     const uint16_t* hidden = h_;
-    if (decode) { gather_draft_hidden(ids, pos, mtp_h_, T); hidden = mtp_h_; }
+    if (decode) {
+      gather_draft_hidden(ids, pos, mtp_h_, T);
+      hidden = mtp_h_;
+    }
     mimo_mtp_history_store(native_history_, hidden, pos, ids, T, H, kNativeHistoryRows, 0, stream_);
   }
   for (int d = draft_block_; d < cfg_.mtp_layers_loaded; ++d) {
@@ -826,26 +849,33 @@ void MimoModel::native_mtp_rows(int req, const int64_t* tokens, int64_t first_po
                             kNativeHistoryRows, d, stream_);
     const int layer = cfg_.mtp_layer() + d;
     const auto& r = loader_.load_layer(layer);
-    glm_mtp_input_bf16(globals_.embed, tokens, mtp_h_, nullptr, 0, r.enorm, r.hnorm,
-                       mtp_in_, T, H, eps, stream_);
-    gemm_.matmul(mtp_in_, r.eh_proj, mtp_r_, T, H, 2 * H, DType::BF16, GemmOut::BF16,
-                 size_t(2 * H), gemm_ws_, gemm_ws_bytes_, stream_);
+    glm_mtp_input_bf16(globals_.embed, tokens, mtp_h_, nullptr, 0, r.enorm, r.hnorm, mtp_in_, T, H,
+                       eps, stream_);
+    gemm_.matmul(mtp_in_, r.eh_proj, mtp_r_, T, H, 2 * H, DType::BF16, GemmOut::BF16, size_t(2 * H),
+                 gemm_ws_, gemm_ws_bytes_, stream_);
     // Deeper heads only need K/V until selected. No head consumes another
     // head's residual. Padded negative positions never append K/V.
     const bool history_only = head_rows == 0 || d != draft_block_;
     WalkRows rows;
-    rows.req_ids = ids; rows.pos = native_positions_; rows.req = req;
-    rows.decode = decode; rows.capture = capture;
+    rows.req_ids = ids;
+    rows.pos = native_positions_;
+    rows.req = req;
+    rows.decode = decode;
+    rows.capture = capture;
     if (history_only) {
       build_layer_objects(r);
       add_rmsnorm_bf16(mtp_r_, nullptr, r.input_norm, x_, T, H, eps, stream_);
       MimoAttnRows ar;
-      ar.req_ids = ids; ar.pos = native_positions_; ar.cache_only = true; ar.decode = decode;
+      ar.req_ids = ids;
+      ar.pos = native_positions_;
+      ar.cache_only = true;
+      ar.decode = decode;
       attn_->enqueue(x_, T, ar, pool_.view(layer), y_, stream_);
     } else {
       const uint16_t* pending = enqueue_layer(r, layer, mtp_r_, T, rows, nullptr);
       const size_t off = size_t(T - head_rows) * H;
-      add_rmsnorm_bf16(mtp_r_ + off, pending + off, r.final_norm, native_output_, head_rows, H, eps, stream_);
+      add_rmsnorm_bf16(mtp_r_ + off, pending + off, r.final_norm, native_output_, head_rows, H, eps,
+                       stream_);
     }
   }
   if (head_rows) {
@@ -856,7 +886,8 @@ void MimoModel::native_mtp_rows(int req, const int64_t* tokens, int64_t first_po
   }
   if (decode) prefetch_.join(stream_);
   if (decode && head_rows && (!capture || decode_tail_mirrors_))
-    DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_logits_, logits_, size_t(head_rows) * lm_vocab_count_ * sizeof(float),
+    DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_logits_, logits_,
+                                 size_t(head_rows) * lm_vocab_count_ * sizeof(float),
                                  cudaMemcpyDeviceToHost, stream_));
 }
 
