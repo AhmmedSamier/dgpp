@@ -2056,6 +2056,12 @@ measurements. See [numerics](docs/numerics.md) for the procedure and
 
 ### Constrained tool calls
 
+Tool rendering keeps `name`, `description`, `parameters` and `strict` in
+wrapped or flat definitions, preserving member order and nested schemas.
+DeepSeek namespace metadata is retained so prompt names agree with the
+decoding grammar. Other tool metadata is omitted from prompts unless the
+server runs with `DGPP_TOOLS_RAW=1`.
+
 `src/text/tool_grammar.*` implements the tool-call formats used by the
 supported templates. A per-request grammar supplies the allowed token
 mask for each position. `tool_choice` controls whether calls are

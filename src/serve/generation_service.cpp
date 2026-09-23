@@ -1527,32 +1527,35 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
   std::vector<Member> globals;
   globals.push_back(Member{"messages", Value::make_array(std::move(msgs))});
   if (have_tools && choice != Choice::kNone) {
-    // The template sees each tool as the OpenAI schema defines it:
-    // `type` and function.{name, description, parameters, strict}. Clients
-    // attach more -- BFCL's OpenAI handler keeps every function's `response`
-    // schema -- and SGLang parses tools into pydantic models that drop it, so
-    // its prompts never carry it. On BFCL multi_turn_base those schemas are
-    // a third of a first-turn prompt (median 1,911 of 5,753 tokens).
+    // Keep function fields in their original wrapped or flat shape, plus
+    // DeepSeek namespaces so rendered names agree with the tool grammar.
+    // Omit unrelated metadata, such as BFCL's function-level response schemas.
     // DGPP_TOOLS_RAW=1 renders the tools verbatim.
     static const bool raw = std::getenv("DGPP_TOOLS_RAW") != nullptr;
     if (raw) {
       globals.push_back(Member{"tools", *tools});
     } else {
+      const bool dsml = markers_.tool_format() == dgpp::text::ToolFormat::kDsml;
+      const auto keep_function_field = [dsml](std::string_view key) {
+        return key == "name" || key == "description" || key == "parameters" || key == "strict" ||
+               (dsml && key == "namespace");
+      };
       std::vector<Value> clean;
       for (const Value& t : tools->items()) {
         if (!t.is_object()) {
           clean.push_back(t);
           continue;
         }
+        const bool flat = t.find("function") == nullptr;
         std::vector<Member> tm;
         for (const Member& m : t.members()) {
-          if (m.key == "type") {
+          if (m.key == "type" || (dsml && m.key == "namespace") ||
+              (flat && keep_function_field(m.key))) {
             tm.push_back(m);
           } else if (m.key == "function" && m.value.is_object()) {
             std::vector<Member> fm;
             for (const Member& f : m.value.members())
-              if (f.key == "name" || f.key == "description" || f.key == "parameters" || f.key == "strict")
-                fm.push_back(f);
+              if (keep_function_field(f.key)) fm.push_back(f);
             tm.push_back(Member{"function", Value::make_object(std::move(fm))});
           }
         }

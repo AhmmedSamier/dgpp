@@ -97,6 +97,20 @@ restarts. Delete files to reclaim the configured storage quota. Install
 `poppler-utils` on rank 0 for PDF extraction. Inline base64 also counts toward
 `http.max_body_bytes` and adds approximately one-third encoding overhead.
 
+## Function tool rendering
+
+DGPP accepts both `{ "type": "function", "function": { "name": "lookup",
+"parameters": { ... } } }` and flat `{ "name": "lookup", "parameters":
+{ ... } }` definitions. Prompt rendering keeps `name`, `description`,
+`parameters` and `strict`, the optional tool `type`, and their original
+member order. Nested parameter schemas are preserved. Other tool metadata,
+such as a function-level `response` schema, is omitted from the prompt.
+
+DeepSeek also retains `namespace` on the tool or function so its rendered
+names and descriptions agree with constrained decoding. Set
+`DGPP_TOOLS_RAW=1` in the server environment before startup if a client
+needs additional tool metadata rendered verbatim.
+
 ## Custom tools
 
 Tools accept OpenAI's `{ "type": "custom", "custom": { "name": "code_exec",
