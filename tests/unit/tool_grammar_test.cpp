@@ -166,13 +166,13 @@ DGPP_TEST(tool_grammar_qwen_required_call_walks_the_xml_shape) {
   require(vocab.usable() && vocab.markers().tool_format() == dgpp::text::ToolFormat::kQwenXml,
           "the two-marker vocabulary is the Qwen format");
   GrammarState g(&vocab, spec_of(GrammarSpec::Mode::kRequired), /*prompt_opens_thinking=*/false);
-  // A call is owed: only <tool_call> opens the turn.
-  // Text may precede the call (the Qwen format's optional reasoning); the
-  // turn may not end while the call is owed.
-  require(g.allows('H') && g.allows(kToolOpen) && !g.allows(kEosUser) && !g.allows(kEosText) &&
+  // A call is owed: only <tool_call> opens the turn. (The template's
+  // "optional reasoning BEFORE the function call" lives in <think>; free
+  // prose here only lets a greedy model ramble until max_tokens instead of
+  // calling — TC-45.) The turn may not end while the call is owed.
+  require(!g.allows('H') && g.allows(kToolOpen) && !g.allows(kEosUser) && !g.allows(kEosText) &&
               !g.allows(kToolClose),
-          "top: free text or <tool_call>, never EOS while owed");
-  g.advance('H');
+          "top: <tool_call> only, never prose or EOS while owed");
   g.advance(kToolOpen);
   // "\n<function=": any tokenization of the literal, nothing else.
   require(g.allows('\n') && !g.allows('x') && !g.allows(kToolClose) && !g.allows(kEosUser),
@@ -288,8 +288,8 @@ DGPP_TEST(tool_grammar_xml_modelOpensThinkingAndStraddledTerminator) {
   // Required call, the choice left to the model: <think> allowed first.
   GrammarState g(&vocab, spec_of(GrammarSpec::Mode::kRequired), /*prompt_opens_thinking=*/false,
                  /*model_may_open_thinking=*/true);
-  require(g.allows(kThinkOpen) && g.allows(kToolOpen) && g.allows('H') && !g.allows(kEosUser),
-          "first position: the opener, the call or text; never EOS while owed");
+  require(g.allows(kThinkOpen) && g.allows(kToolOpen) && !g.allows('H') && !g.allows(kEosUser),
+          "first position: the opener or the call; never prose or EOS while owed");
   g.advance(kThinkOpen);
   require(std::string(g.state_name()) == "think", std::string("the opener enters the reasoning: ") + g.state_name());
   require(g.allows('x') && g.allows(kThinkClose) && !g.allows(kEosUser), "free reasoning, EOS refused while owed");
@@ -327,10 +327,14 @@ DGPP_TEST(tool_grammar_xml_modelOpensThinkingAndStraddledTerminator) {
   t.advance(kToolClose);
   require(t.active() && std::string(t.state_name()) == "top", "the typed call closed cleanly");
   // Without the choice (a Qwen prompt that opened the block, or one that
-  // closed it): the opener is not offered at the first position.
+  // closed it): the opener is not offered at the first position, and prose
+  // is refused — the owed call is forced, so the marker id kills the grammar.
   GrammarState settled(&vocab, spec_of(GrammarSpec::Mode::kRequired), false, false);
-  settled.advance(kThinkOpen);  // free text at the XML top (the format's own rule): no reasoning state
-  require(std::string(settled.state_name()) == "top", std::string("no choice: the marker is text at the top: ") + settled.state_name());
+  require(!settled.allows(kThinkOpen) && settled.allows(kToolOpen) && !settled.allows('H'),
+          "no choice: the call forced, the opener and prose refused");
+  settled.advance(kThinkOpen);  // a disallowed id kills the grammar
+  require(!settled.active() && std::string(settled.state_name()) == "dead",
+          std::string("no choice: the marker kills the forced top: ") + settled.state_name());
   GrammarSpec json_settled;
   json_settled.mode = GrammarSpec::Mode::kJson;
   GrammarState js(&vocab, json_settled, false, false);
