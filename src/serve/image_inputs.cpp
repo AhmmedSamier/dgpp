@@ -2,10 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
-#include <memory>
-#include <vector>
-#include <string>
 #include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
 
 #include "common/base64.hpp"
 #define STB_IMAGE_IMPLEMENTATION
@@ -18,6 +18,7 @@
 // WebP comes from the same single-file tradition as stb_image and needs no new
 // build dependency; it decodes VP8, VP8L and alpha.
 #define SIMPLEWEBP_IMPLEMENTATION
+#define SIMPLEWEBP_DISABLE_STDIO
 #include "../../third_party/simplewebp/simplewebp.h"
 
 namespace dgpp::serve {
@@ -173,10 +174,9 @@ ImageInput resize_glm_image(const uint8_t* rgb, int width, int height, int max_t
   pp.max_tokens = max_tokens;
   return resize_image(rgb, width, height, pp);
 }
-// Decode a WebP bitstream to packed 8-bit RGB. Alpha is composited on white,
-// which is what libwebp produces when asked for plain RGB.
-void decode_webp_rgb(const std::string& data, std::vector<uint8_t>* rgb, int* width,
-                     int* height) {
+// Decode a WebP bitstream to packed 8-bit RGB, compositing alpha on white.
+namespace {
+void decode_webp_rgb(const std::string& data, std::vector<uint8_t>* rgb, int* width, int* height) {
   simplewebp* image = nullptr;
   if (simplewebp_load_from_memory(const_cast<char*>(data.data()), data.size(), nullptr, &image) !=
           SIMPLEWEBP_NO_ERROR ||
@@ -201,12 +201,14 @@ void decode_webp_rgb(const std::string& data, std::vector<uint8_t>* rgb, int* wi
     const uint32_t a = rgba[i * 4 + 3];
     for (int c = 0; c < 3; ++c) {
       const uint32_t v = rgba[i * 4 + c];
-      (*rgb)[i * 3 + c] = static_cast<uint8_t>(a == 255 ? v : (v * a + 255 * (255 - a) + 127) / 255);
+      (*rgb)[i * 3 + c] =
+          static_cast<uint8_t>(a == 255 ? v : (v * a + 255 * (255 - a) + 127) / 255);
     }
   }
   *width = static_cast<int>(w);
   *height = static_cast<int>(h);
 }
+}  // namespace
 
 ImageInput prepare_image(const minijson::Value& value, const std::string& param,
                          const ImagePreprocess& pp) {
@@ -233,9 +235,9 @@ ImageInput prepare_image(const minijson::Value& value, const std::string& param,
     const std::string data = decode_base64(s.substr(s.find(',') + 1), 20 * 1024 * 1024);
     if ((png && !std::string_view(data).starts_with("\x89PNG\r\n\x1a\n")) ||
         (jpeg && !std::string_view(data).starts_with("\xff\xd8\xff")) ||
-        (webp && !(std::string_view(data).size() >= 12 &&
-                   std::string_view(data).substr(0, 4) == "RIFF" &&
-                   std::string_view(data).substr(8, 4) == "WEBP")))
+        (webp &&
+         !(std::string_view(data).size() >= 12 && std::string_view(data).substr(0, 4) == "RIFF" &&
+           std::string_view(data).substr(8, 4) == "WEBP")))
       throw std::invalid_argument("image MIME type does not match its bytes");
     int w = 0, h = 0, channels = 0;
     if (webp) {

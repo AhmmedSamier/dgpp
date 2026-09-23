@@ -14,7 +14,7 @@ external image service is required.
 
 ## Request format
 
-Put PNG or JPEG base64 data URIs in a user message's content array. Text and
+Put PNG, JPEG or WebP base64 data URIs in a user message's content array. Text and
 images retain their order, including across conversation turns.
 
 ```python
@@ -47,8 +47,8 @@ print(json.load(urlopen(request))["choices"][0]["message"])
 
 | Input | Supported behavior |
 | --- | --- |
-| Source | `data:image/png;base64,...` or `data:image/jpeg;base64,...`; remote URLs, local paths and file IDs are rejected |
-| Size | Up to 20 MiB of decoded PNG/JPEG file bytes, 32 megapixels and 16,384 pixels per source dimension |
+| Source | `data:image/png;base64,...`, `data:image/jpeg;base64,...` or `data:image/webp;base64,...`; remote URLs, local paths and file IDs are rejected |
+| Size | Up to 20 MiB of decoded PNG/JPEG/WebP file bytes, 32 megapixels and 16,384 pixels per source dimension |
 | History | Image tokens use the ordinary context budget; no separate image-count or aggregate visual-token cap |
 | Decoded data | Up to 256 MiB of resized RGB pixels per request, independently of compressed upload size |
 | Detail | `auto` and `high` allow up to 1,024 visual tokens per image; `low` allows 256 |
@@ -91,9 +91,11 @@ ratio and grid alignment determine the actual count. DGPP's 1,024-token
 per-image ceiling bounds the native encoder's workspace; it is lower than
 the upstream processor's 8,000-token default. Images are decoded and resized
 on the HTTP head before admission, so preparation of a large image can delay
-other HTTP work. PNG/JPEG decoding does not apply EXIF orientation or color
-profiles. PDF file inputs still extract text only; page rasterization is not
-part of this feature. Video and audio inputs are unsupported.
+other HTTP work. PNG/JPEG/WebP decoding does not apply EXIF orientation or color
+profiles. WebP supports lossy and lossless still images; alpha is composited
+on white before resizing, and animated WebP is unsupported. PDF file inputs
+still extract text only; page rasterization is not part of this feature.
+Video and audio inputs are unsupported.
 
 Images of the same dimensions have identical placeholder token IDs but
 different embeddings. Cache lookups compare processed RGB pixels, geometry

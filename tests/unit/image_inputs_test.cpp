@@ -1,15 +1,13 @@
 #include "serve/image_inputs.hpp"
 
-#include "models/qwen/vision_config.hpp"
-
-#include <array>
-
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 #include "common/base64.hpp"
 #include "common/test.hpp"
 #include "models/glm/vision_config.hpp"
+#include "models/qwen/vision_config.hpp"
 
 namespace {
 void require(bool value, const char* message) {
@@ -132,7 +130,7 @@ DGPP_TEST(image_webp_decode_matches_its_pixels_and_keeps_the_magic_check) {
   // A 4x2 source keeps its 2:1 aspect on the 28-pixel grid: 6x3 cells, 18
   // tokens, rather than the square canvas a 1x1 source lands on.
   require(image.width == 168 && image.height == 84 && image.tokens == 18, "webp canvas");
-  // Sample the middle of each half after the resize to 112x112.
+  // Sample the middle of each half after the resize.
   const auto pixel = [&image](int x, int y) {
     const size_t at = (static_cast<size_t>(y) * image.width + static_cast<size_t>(x)) * 3;
     return std::array<int, 3>{image.rgb[at], image.rgb[at + 1], image.rgb[at + 2]};
@@ -145,9 +143,81 @@ DGPP_TEST(image_webp_decode_matches_its_pixels_and_keeps_the_magic_check) {
   // The magic check must still hold now that a third format is accepted.
   const auto mismatched = V::make_string(
       "data:image/png;base64,UklGRiIAAABXRUJQVlA4TBYAAAAvA0AAAA8Q87//8x8OFAIIgIImov/x");
-  rejects([&] { dgpp::serve::prepare_glm_image(V::make_object({{"url", mismatched}}), "image_url"); });
+  rejects(
+      [&] { dgpp::serve::prepare_glm_image(V::make_object({{"url", mismatched}}), "image_url"); });
   const auto gif = V::make_string("data:image/gif;base64,R0lGODlhAQABAAAAACw=");
   rejects([&] { dgpp::serve::prepare_glm_image(V::make_object({{"url", gif}}), "image_url"); });
+}
+
+DGPP_TEST(image_webp_lossy_and_alpha_decode) {
+  using V = dgpp::minijson::Value;
+  // The same red 4x2 image: opaque VP8, VP8 + uncompressed ALPH, and VP8L alpha.
+  const std::array<const char*, 3> payloads = {
+      "UklGRkQAAABXRUJQVlA4IDgAAABQAgCdASoEAAIAAAAAJaACdLoB+AH6AfwAB5AA/v9vVv/8sPx/Unn/"
+      "yxD//xPTm8RU8r/+JkAAAA==",
+      "UklGRmgAAABXRUJQVlA4WAoAAAAQAAAAAwAAAQAAQUxQSAkAAAAAgICAgICAgIAAVlA4IDgAAABQAgCdASoE"
+      "AAIAAAAAJaACdLoB+AH6AfwAB5AA/v9vVv/8sPx/Unn/yxD//xPTm8RU8r/+JkAAAA==",
+      "UklGRhwAAABXRUJQVlA4TA8AAAAvA0AAEAcQ/Y8CBiKi/wEA"};
+  for (size_t i = 0; i < payloads.size(); ++i) {
+    const auto uri = std::string("data:image/webp;base64,") + payloads[i];
+    const auto url = V::make_string(uri);
+    const auto image = dgpp::serve::prepare_glm_image(V::make_object({{"url", url}}), "image_url");
+    require(image.width == 168 && image.height == 84, "lossy/alpha webp canvas");
+    const size_t at = (static_cast<size_t>(image.height / 2) * image.width + image.width / 2) * 3;
+    const int other = i == 0 ? 0 : 127;
+    require(image.rgb[at] >= 252 && std::abs(image.rgb[at + 1] - other) <= 3 &&
+                std::abs(image.rgb[at + 2] - other) <= 3,
+            "webp red and alpha composited on white");
+  }
+}
+
+DGPP_TEST(image_webp_rejects_malformed_chunk_and_partition_lengths) {
+  using V = dgpp::minijson::Value;
+  const auto reject_bytes = [](const std::string& bytes) {
+    const auto uri = "data:image/webp;base64," + dgpp::encode_base64(bytes);
+    const auto url = V::make_string(uri);
+    try {
+      dgpp::serve::prepare_glm_image(V::make_object({{"url", url}}), "image_url");
+      throw std::runtime_error("malformed WebP accepted");
+    } catch (const dgpp::serve::ImageInputError& e) {
+      require(e.param == "image_url.url", "precise WebP decode error");
+    }
+  };
+  const auto set_u32 = [](std::string& bytes, size_t offset, uint32_t value) {
+    for (int i = 0; i < 4; ++i) bytes[offset + i] = static_cast<char>(value >> (8 * i));
+  };
+  // Previously copied eight bytes into the four-byte RIFF type buffer.
+  reject_bytes(std::string("RIFF\0\0\0\0WEBPABCD", 16));
+  // A ten-byte VP8 frame declares a nine-byte first partition after its header.
+  // Previously the partition reader ran past its ten-byte heap allocation.
+  reject_bytes(dgpp::decode_base64("UklGRhYAAABXRUJQVlA4IAoAAAAwAQCdASoBAAEA", 100));
+
+  const auto valid =
+      dgpp::decode_base64("UklGRiIAAABXRUJQVlA4TBYAAAAvA0AAAA8Q87//8x8OFAIIgIImov/x", 100);
+  for (size_t n = 12; n < valid.size(); ++n) reject_bytes(valid.substr(0, n));
+  for (size_t offset : {size_t{4}, size_t{16}}) {
+    for (uint32_t length : {0u, 1u, 4u, 0xffffffffu}) {
+      auto bytes = valid;
+      set_u32(bytes, offset, length);
+      reject_bytes(bytes);
+    }
+  }
+  // Finding an image chunk must not hide a truncated trailing chunk header.
+  for (size_t n = 1; n < 8; ++n) {
+    auto bytes = valid + std::string(n, 'X');
+    set_u32(bytes, 4, static_cast<uint32_t>(bytes.size() - 8));
+    reject_bytes(bytes);
+  }
+  // Unknown metadata chunks are still allowed, including their odd-byte padding.
+  auto metadata = valid + std::string("XMP \1\0\0\0x\0", 10);
+  set_u32(metadata, 4, static_cast<uint32_t>(metadata.size() - 8));
+  const auto uri = "data:image/webp;base64," + dgpp::encode_base64(metadata);
+  const auto url = V::make_string(uri);
+  const auto image = dgpp::serve::prepare_glm_image(V::make_object({{"url", url}}), "image_url");
+  require(image.width == 168 && image.height == 84, "webp with metadata");
+  metadata.pop_back();
+  set_u32(metadata, 4, static_cast<uint32_t>(metadata.size() - 8));
+  reject_bytes(metadata);
 }
 
 DGPP_TEST(image_qwen_smart_resize_rounds_without_padding) {

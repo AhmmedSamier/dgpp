@@ -7,6 +7,10 @@ releases list their runtime dependencies in their own README.
 PNG/JPEG image inputs use the vendored `stb_image.h`, compiled directly into
 the service. No additional runtime image library is needed. Its pinned source
 and license are recorded in [licenses/stb_image.md](licenses/stb_image.md).
+WebP uses the vendored `simplewebp.h`, also compiled into the service. Its
+source and local fixes are recorded in `third_party/simplewebp/README.md`; the
+BSD license and WebM patent grant ship in
+[licenses/simplewebp.md](licenses/simplewebp.md).
 
 The vision LayerNorm reduction schedule adapts PyTorch CUDA arithmetic under
 the [PyTorch license](licenses/pytorch.md). PyTorch is only needed for optional

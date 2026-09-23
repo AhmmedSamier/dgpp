@@ -531,23 +531,19 @@ const char *simplewebp_get_error_text(simplewebp_error error)
 static size_t swebp__memoryinput_read(size_t size, void *dest, void *userdata)
 {
 	struct simplewebp_memoryinput_data *input_data;
-	size_t nextpos, readed;
+	size_t readed;
 
 	input_data = (struct simplewebp_memoryinput_data *) userdata;
-	nextpos = input_data->pos + size;
-
-	if (nextpos >= input_data->size)
-	{
-		readed = input_data->size - input_data->pos;
-		nextpos = input_data->size;
-	}
-	else
+	if (input_data->pos >= input_data->size)
+		return 0;
+	readed = input_data->size - input_data->pos;
+	if (readed > size)
 		readed = size;
 
 	if (readed > 0)
 	{
 		memcpy(dest, ((char *) input_data->data) + input_data->pos, readed);
-		input_data->pos = nextpos;
+		input_data->pos += readed;
 	}
 
 	return readed;
@@ -651,19 +647,15 @@ static size_t swebp__proxy_tell(void *userdata)
 static size_t swebp__proxy_read(size_t size, void *dest, void *userdata)
 {
 	struct simplewebp_input_proxy *proxy;
-	size_t pos, nextpos, readed;
+	size_t pos, readed;
 
 	proxy = (struct simplewebp_input_proxy *) userdata;
 	pos = swebp__proxy_tell(userdata);
 	
-	nextpos = pos + size;
-
-	if (nextpos >= proxy->length)
-	{
-		readed = size - (proxy->length - nextpos);
-		nextpos = proxy->length;
-	}
-	else
+	if (pos >= proxy->length)
+		return 0;
+	readed = proxy->length - pos;
+	if (readed > size)
 		readed = size;
 
 	if (readed > 0)
@@ -702,7 +694,17 @@ static simplewebp_error swebp__proxy_create(
 	size_t length
 )
 {
-	struct simplewebp_input_proxy *proxy = (struct simplewebp_input_proxy *) allocator->alloc(
+	struct simplewebp_input_proxy *proxy;
+	/* Validate declared chunk sizes before allocating or reading their payloads. */
+	if (input->read == swebp__memoryinput_read || input->read == swebp__proxy_read)
+	{
+		size_t input_size = input->read == swebp__memoryinput_read
+			? ((struct simplewebp_memoryinput_data *) input->userdata)->size
+			: ((struct simplewebp_input_proxy *) input->userdata)->length;
+		if (start > input_size || length > input_size - start)
+			return SIMPLEWEBP_CORRUPT_ERROR;
+	}
+	proxy = (struct simplewebp_input_proxy *) allocator->alloc(
 		allocator->userdata,
 		sizeof(struct simplewebp_input_proxy)
 	);
@@ -773,7 +775,8 @@ static simplewebp_error swebp__load_lossy(simplewebp_input *vp8_input, simpleweb
 		return SIMPLEWEBP_UNSUPPORTED_ERROR;
 
 	partition_size = frametag >> 5;
-	if (partition_size >= swebp__proxy_size(vp8_input->userdata))
+	if (swebp__proxy_size(vp8_input->userdata) < 10 ||
+		partition_size > swebp__proxy_size(vp8_input->userdata) - 10)
 		/* Inconsistent data */
 		return SIMPLEWEBP_CORRUPT_ERROR;
 
@@ -1062,7 +1065,10 @@ simplewebp_error simplewebp_load(simplewebp_input *input, const simplewebp_alloc
 	/* Allocate simplewebp structure */
 	result = (simplewebp *) allocator->alloc(allocator->userdata, sizeof(simplewebp));
 	if (result == NULL)
+	{
+		simplewebp_close_input(&riff_input);
 		return SIMPLEWEBP_ALLOC_ERROR;
+	}
 	memset(result, 0, sizeof(simplewebp));
 
 	result->allocator = *allocator;
@@ -1073,22 +1079,30 @@ simplewebp_error simplewebp_load(simplewebp_input *input, const simplewebp_alloc
 		simplewebp_input chunk_input_proxy;
 		size_t current_position;
 
-		err = swebp__get_input_chunk_4cc(allocator, &result->riff_input, &chunk_input_proxy, temp, &chunk_size);
-		if (err != SIMPLEWEBP_NO_ERROR)
+		if (swebp__tell(&result->riff_input) == swebp__proxy_size(result->riff_input.userdata))
 		{
-			if (swebp__has_decoder(result))
-				/* Loaded successfully */
-				err = SIMPLEWEBP_NO_ERROR;
-
+			err = swebp__has_decoder(result) ? SIMPLEWEBP_NO_ERROR : SIMPLEWEBP_CORRUPT_ERROR;
 			break;
 		}
 
+		err = swebp__get_input_chunk_4cc(allocator, &result->riff_input, &chunk_input_proxy, temp, &chunk_size);
+		if (err != SIMPLEWEBP_NO_ERROR)
+			break;
+
 		current_position = swebp__tell(&result->riff_input);
+		if (((chunk_size + 1) & (~((size_t) 1))) >
+			swebp__proxy_size(result->riff_input.userdata) - current_position)
+		{
+			simplewebp_close_input(&chunk_input_proxy);
+			err = SIMPLEWEBP_CORRUPT_ERROR;
+			break;
+		}
 
 		if (memcmp(temp, "VP8 ", 4) == 0)
 		{
 			if (swebp__has_decoder(result))
 			{
+				simplewebp_close_input(&chunk_input_proxy);
 				err = SIMPLEWEBP_UNSUPPORTED_ERROR;
 				break;
 			}
@@ -1123,7 +1137,7 @@ simplewebp_error simplewebp_load(simplewebp_input *input, const simplewebp_alloc
 		}
 		else if (memcmp(temp, "ALPH", 4) == 0)
 		{
-			if (result->vp8l_input.userdata != NULL)
+			if (result->vp8l_input.userdata != NULL || result->alph_input.userdata != NULL)
 			{
 				/* Alpha channel already present in VP8L */
 				simplewebp_close_input(&chunk_input_proxy);
@@ -2999,6 +3013,8 @@ static simplewebp_error swebp__load_vp8_header(struct swebp__vp8 *vp8d, simplewe
 	memset(&vp8d->segment_header.filter_strength, 0, sizeof(vp8d->segment_header.filter_strength));
 
 	/* Initialize bitreader */
+	if (vp8d->frame_header.partition_length > bufsize)
+		return SIMPLEWEBP_CORRUPT_ERROR;
 	swebp__bitread_init(&br, buf, vp8d->frame_header.partition_length);
 	buf += vp8d->frame_header.partition_length;
 	bufsize -= vp8d->frame_header.partition_length;
@@ -4224,7 +4240,7 @@ static simplewebp_error swebp__decode_lossy(simplewebp *simplewebp, struct swebp
 
 	vp8size = swebp__proxy_size(input.userdata);
 	/* Sanity check */
-	if (vp8d->frame_header.partition_length > vp8size)
+	if (vp8size < 10 || vp8d->frame_header.partition_length > vp8size - 10)
 		return SIMPLEWEBP_CORRUPT_ERROR;
 
 	/* Read all VP8 chunk */
