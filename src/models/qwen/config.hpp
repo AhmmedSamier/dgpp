@@ -45,7 +45,9 @@ struct QwenTextConfig {
   std::string hidden_act = "silu";
   int max_position_embeddings = 262144;
   std::vector<QwenLayerKind> layers;  // size == num_hidden_layers
-  std::vector<int64_t> eos_token_ids;  // config.json's; generation_config.json overrides at serve
+  // Trained EOS from config.json, including PLE padding/reset semantics.
+  // Generation stop tokens are resolved separately by the serving layer.
+  std::vector<int64_t> eos_token_ids;
   int64_t bos_token_id = -1;
 
   // --- gated residual (hyper-connections) ---------------------------------

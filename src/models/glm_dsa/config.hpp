@@ -39,7 +39,7 @@ struct GlmDsaTextConfig {
   std::string hidden_act = "silu";
   int max_position_embeddings = 1048576;
   int first_k_dense_replace = 3;   // layers [0, first_k_dense_replace) carry the dense MLP
-  std::vector<int64_t> eos_token_ids;  // config.json's; generation_config.json overrides at serve
+  std::vector<int64_t> eos_token_ids;  // config.json's; serving resolves generation stop IDs separately
   int64_t pad_token_id = -1;
 
   // --- MLA attention (DeepSeek-V3 shape with interleaved decoupled RoPE)

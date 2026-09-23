@@ -11,6 +11,11 @@ revisions recorded with them.
 
 ## Serving support
 
+Serving keeps generation stop IDs separate from the model's trained EOS,
+preserving Qwen PLE padding and segmentation. The correction passes host tests
+and was exercised in a real TP2 replay. It does not resolve the near-limit
+retrieval failure in issue #4; see the [EOS investigation record](benchmarks/results/2026-09-23-issue4-eos/README.md).
+
 The server uses a shared scheduler, text frontend and decode engine for
 three model families. Rank 0 accepts HTTP requests and journals scheduler
 operations to its peers. Every rank checks the operation-stream digest.

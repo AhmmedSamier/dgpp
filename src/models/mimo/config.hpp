@@ -43,7 +43,7 @@ struct MimoTextConfig {
   bool tie_word_embeddings = false;
   std::string hidden_act = "silu";
   int max_position_embeddings = 1048576;
-  std::vector<int64_t> eos_token_ids;  // config.json's; generation_config.json overrides at serve
+  std::vector<int64_t> eos_token_ids;  // config.json's; serving resolves generation stop IDs separately
   int64_t pad_token_id = -1;
   std::vector<uint8_t> swa_layer;      // [num_hidden_layers]: 1 = sliding window, 0 = global
   std::vector<uint8_t> moe_layer;      // [num_hidden_layers]: 1 = routed MoE, 0 = dense MLP
