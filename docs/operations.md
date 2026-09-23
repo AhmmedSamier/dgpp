@@ -268,9 +268,12 @@ encoder oracle; its default full-depth gate is documented in the
 `down` sends SIGINT to rank 0. New requests receive 503
 `server_shutdown`; queued and active requests are cancelled at the
 next scheduler boundary. Streams receive a shutdown error, then the stop
-record releases peers. A signal during prefill waits for that pass to
-finish. The launcher waits up to 240 s for rank 0 before handling peers
-and collecting logs.
+record releases peers. A signal during prefill waits for the current scheduler
+pass. An independent watchdog exits with status 2 if shutdown has not completed
+within 30 s, including a stuck engine, HTTP loop or teardown. A second SIGINT
+or SIGTERM exits immediately with status 2 on any rank. Forced exits skip CUDA
+teardown and may truncate responses. The launcher waits up to 240 s for rank 0
+before handling peers and collecting logs.
 
 `down` checks that every recorded rank has exited, including after SIGKILL.
 If a rank remains alive or cannot be checked (SSH failure, unreadable process
@@ -395,8 +398,11 @@ cache format and arena size. Use the startup plan for the configured limit.
 
 **Budgeted prefill** (`engine.prefill_budget_tokens`, `--prefill-budget-tokens`)
 is supported on Qwen and GLM-5.3-Flash graph engines, including GLM image
-requests. Zero preserves full-prompt admission. The four-rank GLM-5.3-Flash
-deployment enables 256-token busy and 2,048-token idle budgets.
+requests. The default, -1, selects 256 tokens rounded down to the engine
+alignment and capped by its prefill limit (at least one aligned unit).
+An explicit zero preserves full-prompt admission. The resolved budget is logged
+at startup and carried in rank 0's warm record. The four-rank GLM-5.3-Flash
+deployment explicitly selects 256-token busy and 2,048-token idle budgets.
 A positive budget executes one aligned prefill chunk per tick, followed by
 a decode pass for active requests. Try 256 or 512 tokens; the budget must
 be a multiple of the snapshot alignment and fit the prefill scratch limit.
@@ -423,6 +429,29 @@ and `prefill_request_ms` (summed request waits, including waits between
 chunks). Logical and computed prompt-token counters advance with each chunk,
 including cancelled partial work; their difference counts attached cache
 tokens. Other model families retain full-prompt admission.
+
+Client disconnects are counted when the HTTP connection closes; retirement
+occurs at the next scheduler boundary. With full-prompt admission enabled,
+that boundary may be minutes away. Automatic chunking bounds the work between
+cancellation checks in tokens, not elapsed time. It interleaves existing decode
+requests, but a second queued prompt still waits behind the unfinished prefill.
+The `starting prefill` log precedes model work; `admitted to slot` marks its first
+token, after prefill has completed.
+
+For a suspected hang, retain both ranks' logs and op streams, the exact request
+and whether it connects directly or through a proxy, and repeated `/metrics`
+snapshots. Compare `prefill.requests[].processed_tokens`,
+`scheduler.snapshot_age_ms` and `service.pending_cancellations`. Pool counters
+are scheduler snapshots and can stay unchanged during synchronous prefill.
+Capture all-thread host backtraces on every rank before stopping the world.
+Bulk stall dumps name the active pool and report posted/staged/expected stripes
+per peer and retired/posted TX pairs. Their gate counter counts retries; zero
+is not evidence that the gate was never reached. A 500 ms stall dump is diagnostic,
+not a timeout. Serving uses a 120 s bus completion watchdog and a 60 s reducer
+wait; the latter now also covers stream completion after the GPU's done stamp.
+The bus watchdog shares the progress thread, so a blocked driver call still
+needs process supervision. These diagnostics do not identify the root cause of
+the permanent two-node hang reported in issue #36.
 
 Use `scripts/serve_prefill_interference.py HOST PORT --json-out RUN.json`
 on an otherwise idle server to compare the longest client update pause
@@ -811,7 +840,7 @@ drafts and padded rows measure different work.
 | admission journal | 29971 (rank 0 listens; peers connect and send `hello <rank>`) |
 | peer binary, config and logs | `<stage_dir>/dgpp-serve`, `<stage_dir>/cluster.json`, `<stage_dir>/serve_r<rank>.log`, `<stage_dir>/serve_rank<rank>.ops` (fetched into the log dir by `down`) |
 | rank 0 log, pid and op stream | `<log_dir>/serve_r0.log`, `<log_dir>/r0.pid`, `<log_dir>/serve_rank0.ops`, written as the run records it (flushed at every retire) |
-| exit statuses | 0 orderly stop; 1 a startup or contract error (a configuration that differs from rank 0's included); 2 rank 0 after an engine failure; 3 a peer released by its in-tick watch |
+| exit statuses | 0 orderly stop; 1 a startup or contract error (a configuration that differs from rank 0's included); 2 rank 0 after an engine failure or any rank after forced shutdown; 3 a peer released by its in-tick watch |
 
 ### Compact Qwen batch mappings
 
