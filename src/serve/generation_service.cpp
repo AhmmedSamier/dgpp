@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
@@ -1525,8 +1526,41 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
   // ---- the template globals ----------------------------------------------
   std::vector<Member> globals;
   globals.push_back(Member{"messages", Value::make_array(std::move(msgs))});
-  if (have_tools && choice != Choice::kNone)
-    globals.push_back(Member{"tools", *tools});
+  if (have_tools && choice != Choice::kNone) {
+    // The template sees each tool as the OpenAI schema defines it:
+    // `type` and function.{name, description, parameters, strict}. Clients
+    // attach more -- BFCL's OpenAI handler keeps every function's `response`
+    // schema -- and SGLang parses tools into pydantic models that drop it, so
+    // its prompts never carry it. On BFCL multi_turn_base those schemas are
+    // a third of a first-turn prompt (median 1,911 of 5,753 tokens).
+    // DGPP_TOOLS_RAW=1 renders the tools verbatim.
+    static const bool raw = std::getenv("DGPP_TOOLS_RAW") != nullptr;
+    if (raw) {
+      globals.push_back(Member{"tools", *tools});
+    } else {
+      std::vector<Value> clean;
+      for (const Value& t : tools->items()) {
+        if (!t.is_object()) {
+          clean.push_back(t);
+          continue;
+        }
+        std::vector<Member> tm;
+        for (const Member& m : t.members()) {
+          if (m.key == "type") {
+            tm.push_back(m);
+          } else if (m.key == "function" && m.value.is_object()) {
+            std::vector<Member> fm;
+            for (const Member& f : m.value.members())
+              if (f.key == "name" || f.key == "description" || f.key == "parameters" || f.key == "strict")
+                fm.push_back(f);
+            tm.push_back(Member{"function", Value::make_object(std::move(fm))});
+          }
+        }
+        clean.push_back(Value::make_object(std::move(tm)));
+      }
+      globals.push_back(Member{"tools", Value::make_array(std::move(clean))});
+    }
+  }
   if (effort.has_value())
     globals.push_back(
         Member{"reasoning_effort", Value::make_owned_string(*effort)});

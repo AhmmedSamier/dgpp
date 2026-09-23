@@ -1699,6 +1699,35 @@ std::string concat_field(const std::string& resp, const std::string& field) {
   return out;
 }
 
+DGPP_TEST(serve_tools_renderOnlyTheOpenAIToolFields) {
+  // GIVEN a frontend with the template's markers (tool calls available),
+  ServiceRig rig(/*queue_limit=*/8, dgpp::sample::greedy_params(),
+                 /*can_sample=*/false, std::nullopt, /*with_markers=*/true);
+  // WHEN a client sends tools carrying fields outside the OpenAI tool schema
+  // -- a per-function `response` schema (the Berkeley Function Calling
+  // Leaderboard's OpenAI handler sends one for 161 of its 162 multi-turn
+  // functions) and a
+  // vendor key on the tool object --
+  const std::string tools =
+      ",\"tools\":[{\"type\":\"function\",\"x_vendor\":{\"id\":7},\"function\":{"
+      "\"name\":\"get_weather\",\"description\":\"Weather\",\"strict\":false,"
+      "\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},"
+      "\"required\":[\"city\"]},"
+      "\"response\":{\"type\":\"object\",\"properties\":{\"temp_c_marker\":{\"type\":\"number\"}}}}}]";
+  (void)post_until_usage(rig, chat_body("abcd", 2, tools));
+  const std::string g = rig.frontend.last_globals();
+  // THEN the template sees type and function.{name, description, parameters,
+  // strict} -- what SGLang and vLLM render after parsing tools into the
+  // OpenAI model -- and nothing else.
+  require(g.find("\"name\":\"get_weather\"") != std::string::npos &&
+              g.find("\"description\":\"Weather\"") != std::string::npos &&
+              g.find("\"city\"") != std::string::npos && g.find("\"strict\":false") != std::string::npos,
+          "the OpenAI tool fields reach the template: " + g);
+  require(g.find("temp_c_marker") == std::string::npos && g.find("\"response\"") == std::string::npos,
+          "a function's response schema is not rendered: " + g);
+  require(g.find("x_vendor") == std::string::npos, "unknown tool-level keys are not rendered: " + g);
+}
+
 DGPP_TEST(serve_tools_requestSideRendersThroughTheTemplateAndRefusesByName) {
   // GIVEN a frontend with the template's markers (tool calls available),
   ServiceRig rig(/*queue_limit=*/8, dgpp::sample::greedy_params(),
