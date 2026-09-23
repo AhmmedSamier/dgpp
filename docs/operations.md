@@ -206,7 +206,7 @@ increasing the KV pool alone does not change it.
 
 GLM-5.3-Flash checkpoints with compatible vision tensors enable image inputs
 automatically. `/v1/models` reports `input_modalities: ["text", "image"]`.
-Send PNG/JPEG data URIs in user `image_url` content parts; the
+Send PNG/JPEG/WebP data URIs in user `image_url` content parts; the
 [image input guide](vision.md) gives a complete request and limits.
 
 The startup plan reserves 1.05 GiB of vision weights and 0.33 GiB of workspace

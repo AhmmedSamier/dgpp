@@ -4,7 +4,7 @@
 #include "loaders/minijson.hpp"
 
 namespace dgpp::serve {
-// Inline PNG/JPEG only. Resolving arbitrary URLs is deliberately not part of
+// Inline PNG/JPEG/WebP only. Resolving arbitrary URLs is deliberately not part of
 // the HTTP/event-loop path. Decode errors carry the content part's API field.
 struct ImageInputError : std::invalid_argument {
   ImageInputError(std::string message, std::string param)

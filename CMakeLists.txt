@@ -648,7 +648,8 @@ if(DGPP_ENABLE_IBV)
   install(FILES docs/release-install.md DESTINATION . RENAME README.md)
   install(FILES requirements-download.txt LICENSE DESTINATION .)
   install(FILES docs/dependencies.md docs/networking.md docs/vision.md DESTINATION docs)
-  install(FILES docs/licenses/PCRE2.md docs/licenses/stb_image.md docs/licenses/pytorch.md DESTINATION docs/licenses)
+  install(FILES docs/licenses/PCRE2.md docs/licenses/stb_image.md docs/licenses/simplewebp.md
+                docs/licenses/pytorch.md DESTINATION docs/licenses)
   install(FILES deploy/nginx.example.conf DESTINATION deploy)
 endif()
 
