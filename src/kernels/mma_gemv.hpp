@@ -42,12 +42,19 @@ constexpr int kMmaGemvMaxRowsPerLaunch = 128;
 
 // fp8 weights with block scales; out bf16 or f32 (the epilogue store is the
 // only difference: bf16(out_f32) == out_bf16 bit for bit).
+// ws / ws_bytes (2026-09-21): a device workspace lets the decode forms (m <=
+// 32) split the k range across blocks when a small n leaves the grid
+// under-filled (fp32 partials in ws, one reduce launch; the split count a
+// function of the shape only, so a row's chain is still the same whatever
+// m rides in the launch). nullptr: the unsplit form, as before.
 void launch_mma_gemv_fp8_bf16(const uint16_t* act, size_t act_stride, const uint8_t* w,
                               const float* scales, uint16_t* out, int m, int n, int k,
-                              size_t out_stride, int rs, int cs, cudaStream_t stream);
+                              size_t out_stride, int rs, int cs, cudaStream_t stream,
+                              void* ws = nullptr, size_t ws_bytes = 0);
 void launch_mma_gemv_fp8_f32(const uint16_t* act, size_t act_stride, const uint8_t* w,
                              const float* scales, float* out, int m, int n, int k,
-                             size_t out_stride, int rs, int cs, cudaStream_t stream);
+                             size_t out_stride, int rs, int cs, cudaStream_t stream,
+                             void* ws = nullptr, size_t ws_bytes = 0);
 // bf16 weights (the lm head); out bf16 or f32.
 void launch_mma_gemv_bf16_bf16(const uint16_t* act, size_t act_stride, const uint16_t* w,
                                uint16_t* out, int m, int n, int k, size_t out_stride,

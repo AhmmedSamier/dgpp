@@ -183,9 +183,11 @@ void QwenMoeLayer::shared_tail(const uint16_t* hidden, uint16_t* out, int tokens
     // The FP8 form (engine.dense_weights): the scale GEMM's chunked GEMV at
     // decode rows; the same roundings.
     launch_scale_gemm_bf16(hidden, static_cast<size_t>(H), w_.shared_fp8[0].payload, w_.shared_fp8[0].scales,
-                           d_sgate_, tokens, S, H, stream, static_cast<size_t>(S), mma_from_rows_);
+                           d_sgate_, tokens, S, H, stream, static_cast<size_t>(S), mma_from_rows_, gemm_ws_,
+                           gemm_ws_bytes_);
     launch_scale_gemm_bf16(hidden, static_cast<size_t>(H), w_.shared_fp8[1].payload, w_.shared_fp8[1].scales,
-                           d_sup_, tokens, S, H, stream, static_cast<size_t>(S), mma_from_rows_);
+                           d_sup_, tokens, S, H, stream, static_cast<size_t>(S), mma_from_rows_, gemm_ws_,
+                           gemm_ws_bytes_);
   } else {
     gemm_.matmul(hidden, w_.shared_gate_proj, d_sgate_, tokens, S, H, DType::BF16,
                  GemmOut::BF16, static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream);
@@ -201,7 +203,8 @@ void QwenMoeLayer::shared_tail(const uint16_t* hidden, uint16_t* out, int tokens
                  GemmOut::F32, static_cast<size_t>(S), gemm_ws_, gemm_ws_bytes_, stream);
   } else if (w_.shared_fp8)
     launch_scale_gemm_f32(d_sact_, static_cast<size_t>(S), w_.shared_fp8[2].payload, w_.shared_fp8[2].scales,
-                          d_sdown_, tokens, H, S, stream, static_cast<size_t>(H), mma_from_rows_);
+                          d_sdown_, tokens, H, S, stream, static_cast<size_t>(H), mma_from_rows_,
+                          /*last_row_only=*/false, gemm_ws_, gemm_ws_bytes_);
   else
     gemm_.matmul(d_sact_, w_.shared_down_proj, d_sdown_, tokens, H, S, DType::BF16,
                  GemmOut::F32, static_cast<size_t>(S), gemm_ws_, gemm_ws_bytes_, stream);

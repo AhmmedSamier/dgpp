@@ -57,12 +57,16 @@ void gemm_dense(const QwenGemmWorkspace& g, const uint16_t* act, int64_t act_str
       gemm_bf16(g, act, act_stride, g.dequant, out, out_type, m, n, k, stream);
       return;
     }
+    // The GEMM workspace rides along for the streaming form's split-K at a
+    // small n (the hyperconnection down projection, [320 x 10240]).
     if (out_type == GemmOut::F32)
       launch_scale_gemm_f32(act, static_cast<size_t>(act_stride), w8.payload, w8.scales,
-                            static_cast<float*>(out), m, n, k, stream, static_cast<size_t>(n), g.mma_from_rows);
+                            static_cast<float*>(out), m, n, k, stream, static_cast<size_t>(n), g.mma_from_rows,
+                            /*last_row_only=*/false, g.ws, g.ws_bytes);
     else
       launch_scale_gemm_bf16(act, static_cast<size_t>(act_stride), w8.payload, w8.scales,
-                             static_cast<uint16_t*>(out), m, n, k, stream, static_cast<size_t>(n), g.mma_from_rows);
+                             static_cast<uint16_t*>(out), m, n, k, stream, static_cast<size_t>(n), g.mma_from_rows,
+                             g.ws, g.ws_bytes);
     return;
   }
   if (!w) throw std::invalid_argument("qwen dense: null weight");

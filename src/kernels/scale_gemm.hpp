@@ -50,11 +50,14 @@ namespace dgpp {
 // other, so a site's rows reorder across the bounds (the engine gates'
 // near-tie rule).
 inline constexpr int kScaleGemmMmaMaxRows = 256;
+// ws / ws_bytes: the caller's GEMM workspace, handed to the streaming
+// tensor-core form for its split-K partials at a small n (mma_gemv.hpp);
+// nullptr keeps that form unsplit.
 void launch_scale_gemm_bf16(const uint16_t* act, size_t act_row_stride_elems,
                             const uint8_t* w_payload, const float* w_scales,
                             uint16_t* out, int m, int n, int k,
                             cudaStream_t stream, size_t out_row_stride_elems = 0,
-                            int mma_from_rows = 0);
+                            int mma_from_rows = 0, void* ws = nullptr, size_t ws_bytes = 0);
 
 // The same product with the fp32 accumulators stored UNROUNDED: out is f32
 // row-major [M, N]. bf16(out_f32[i]) == out_bf16[i] bit for bit — the two
@@ -69,7 +72,8 @@ void launch_scale_gemm_f32(const uint16_t* act, size_t act_row_stride_elems,
                            const uint8_t* w_payload, const float* w_scales,
                            float* out, int m, int n, int k,
                            cudaStream_t stream, size_t out_row_stride_elems = 0,
-                           int mma_from_rows = 0, bool last_row_only = false);
+                           int mma_from_rows = 0, bool last_row_only = false, void* ws = nullptr,
+                           size_t ws_bytes = 0);
 
 // The tile kernel regardless of m (the bf16 mma.sync m16n8k16 path the
 // large-m route takes): the reference the grouped tensor-core MoE kernel is

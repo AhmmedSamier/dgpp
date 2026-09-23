@@ -206,7 +206,8 @@ template <typename OutT>
 void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
                        const uint8_t* w_payload, const float* w_scales,
                        OutT* out, int m, int n, int k, cudaStream_t stream,
-                       size_t out_stride, int mma_from_rows, bool last_row_only = false) {
+                       size_t out_stride, int mma_from_rows, bool last_row_only = false,
+                       void* ws = nullptr, size_t ws_bytes = 0) {
   if (m <= 0 || n <= 0) return;  // empty output by definition
   if (!act || !w_payload || !w_scales || !out)
     throw std::invalid_argument("scale_gemm: null pointer");
@@ -233,10 +234,10 @@ void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
   if (streaming_mma) {
     if constexpr (std::is_same_v<OutT, float>)
       launch_mma_gemv_fp8_f32(act, act_row_stride_elems, w_payload, w_scales, out, m, n, k,
-                              out_stride, 7, 7, stream);
+                              out_stride, 7, 7, stream, ws, ws_bytes);
     else
       launch_mma_gemv_fp8_bf16(act, act_row_stride_elems, w_payload, w_scales, out, m, n, k,
-                               out_stride, 7, 7, stream);
+                               out_stride, 7, 7, stream, ws, ws_bytes);
     return;
   }
   // Small-M calls take the row-independent bandwidth GEMV (the tile below
@@ -435,18 +436,21 @@ void launch_scale_gemv_multi_bf16(const Fp8GemvProblem* problems, int n_problems
 void launch_scale_gemm_bf16(const uint16_t* act, size_t act_row_stride_elems,
                             const uint8_t* w_payload, const float* w_scales,
                             uint16_t* out, int m, int n, int k,
-                            cudaStream_t stream, size_t out_row_stride_elems, int mma_from_rows) {
+                            cudaStream_t stream, size_t out_row_stride_elems, int mma_from_rows,
+                            void* ws, size_t ws_bytes) {
   launch_scale_gemm<uint16_t>(act, act_row_stride_elems, w_payload, w_scales,
-                              out, m, n, k, stream, out_row_stride_elems, mma_from_rows);
+                              out, m, n, k, stream, out_row_stride_elems, mma_from_rows,
+                              /*last_row_only=*/false, ws, ws_bytes);
 }
 
 void launch_scale_gemm_f32(const uint16_t* act, size_t act_row_stride_elems,
                            const uint8_t* w_payload, const float* w_scales,
                            float* out, int m, int n, int k,
                            cudaStream_t stream, size_t out_row_stride_elems, int mma_from_rows,
-                           bool last_row_only) {
+                           bool last_row_only, void* ws, size_t ws_bytes) {
   launch_scale_gemm<float>(act, act_row_stride_elems, w_payload, w_scales,
-                           out, m, n, k, stream, out_row_stride_elems, mma_from_rows, last_row_only);
+                           out, m, n, k, stream, out_row_stride_elems, mma_from_rows, last_row_only, ws,
+                           ws_bytes);
 }
 
 namespace {
