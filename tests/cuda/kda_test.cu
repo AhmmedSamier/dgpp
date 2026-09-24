@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -170,37 +171,94 @@ DGPP_TEST(kda_state_pool_slots_isolation_and_snapshot_roundtrip) {
 // Conv kernel parity
 // ---------------------------------------------------------------------------
 
-// The token-tiled prefill conv against the serial kernel, bitwise: one
-// 2048-token launch (the tiled path) vs the same rows as 100-token chunks
-// (under the tiled threshold: the serial path), the state carried between
-// chunks. Every output and the committed state must match byte for byte.
-DGPP_TEST(kda_conv_tiled_matches_serial_bitwise) {
+namespace {
+
+// Compare one prefill with serial chunks below the tiling threshold, then
+// decode another row from each resulting state. Include reserve columns in
+// the comparison so writes outside the committed history cannot go unnoticed.
+void check_conv_tiled_matches_serial(int tokens, int channels, int conv_width,
+                                      int stride_extra, bool graph = false,
+                                      bool special_values = false) {
   cudaStream_t s = test_stream();
-  const int tokens = 2048, channels = 192, conv_width = 4, state_width = 6, chunk = 100;
-  std::vector<uint16_t> src = random_bf16_normal(41, int64_t(tokens) * channels, 1.0f);
+  const int state_width = conv_width + 2, chunk = 100, stride = channels + stride_extra;
+  const size_t output_elems = int64_t(tokens + 1) * channels;
   std::vector<uint16_t> weight = random_bf16_uniform(42, int64_t(channels) * conv_width, 0.2f);
-  std::vector<uint16_t> state_init = random_bf16_normal(43, int64_t(channels) * state_width, 0.5f);
-  DevBuf dsrc(src.size() * 2), dw(weight.size() * 2), ddst1(src.size() * 2), ddst2(src.size() * 2),
-      dst1(state_init.size() * 2), dst2(state_init.size() * 2);
-  dsrc.upload(src.data(), src.size() * 2);
+  DevBuf dsrc(int64_t(tokens + 1) * stride * 2), dw(weight.size() * 2),
+      ddst1(output_elems * 2), ddst2(output_elems * 2),
+      dst1(int64_t(channels) * state_width * 2), dst2(dst1.bytes);
   dw.upload(weight.data(), weight.size() * 2);
-  dst1.upload(state_init.data(), state_init.size() * 2);
-  dst2.upload(state_init.data(), state_init.size() * 2);
-  kda_causal_conv_silu_bf16(dsrc.p, channels, dw.p, dst1.p, state_width, ddst1.p, tokens, channels, conv_width, s);
-  for (int t0 = 0; t0 < tokens; t0 += chunk) {
-    const int n = std::min(chunk, tokens - t0);
-    kda_causal_conv_silu_bf16(static_cast<uint16_t*>(dsrc.p) + int64_t(t0) * channels, channels, dw.p, dst2.p,
-                              state_width, static_cast<uint16_t*>(ddst2.p) + int64_t(t0) * channels, n, channels,
-                              conv_width, s);
+  dgpp::GraphCache graphs;
+  const std::string shape = " T=" + std::to_string(tokens) + " C=" + std::to_string(channels) +
+                            " CW=" + std::to_string(conv_width) + " stride=" + std::to_string(stride);
+  auto compare = [&](int rows, const char* phase) {
+    DGPP_CUDA_OK(cudaStreamSynchronize(s));
+    std::vector<uint16_t> o1(int64_t(rows) * channels), o2(o1.size()),
+        s1(dst1.bytes / 2), s2(s1.size());
+    ddst1.download(o1.data(), o1.size() * 2);
+    ddst2.download(o2.data(), o2.size() * 2);
+    dst1.download(s1.data(), s1.size() * 2);
+    dst2.download(s2.data(), s2.size() * 2);
+    if (o1 != o2) throw std::runtime_error(std::string(phase) + " output differs" + shape);
+    if (s1 != s2) throw std::runtime_error(std::string(phase) + " state differs" + shape);
+  };
+  // A second graph run uses new inputs and history at the captured addresses.
+  for (int variant = 0; variant < (graph ? 2 : 1); ++variant) {
+    std::vector<uint16_t> src = random_bf16_normal(41 + variant, int64_t(tokens + 1) * stride, 1.0f);
+    std::vector<uint16_t> state_init = random_bf16_normal(43 + variant, dst1.bytes / 2, 0.5f);
+    if (special_values) {
+      // Signed zeros, subnormals, infinities and noncanonical signed NaNs in
+      // the final history: serial state stores canonicalize NaN payloads.
+      constexpr uint16_t bits[] = {0x0000, 0x8000, 0x0001, 0x8001, 0x7f80,
+                                    0xff80, 0x7f81, 0xff81, 0x7fff, 0xffff};
+      for (int j = 0; j < conv_width - 1; ++j)
+        for (int c = 0; c < channels; ++c)
+          src[int64_t(tokens - (conv_width - 1) + j) * stride + c] = bits[(c + j) % 10];
+    }
+    dsrc.upload(src.data(), src.size() * 2);
+    dst1.upload(state_init.data(), state_init.size() * 2);
+    dst2.upload(state_init.data(), state_init.size() * 2);
+    auto prefill = [&](cudaStream_t stream) {
+      kda_causal_conv_silu_bf16(dsrc.p, stride, dw.p, dst1.p, state_width, ddst1.p,
+                                tokens, channels, conv_width, stream);
+    };
+    if (graph) graphs.replay_or_capture(1, "kda-conv-prefill", s, prefill);
+    else prefill(s);
+    for (int t0 = 0; t0 < tokens; t0 += chunk) {
+      const int n = std::min(chunk, tokens - t0);
+      kda_causal_conv_silu_bf16(dsrc.as<uint16_t>() + int64_t(t0) * stride, stride, dw.p, dst2.p,
+                                state_width, ddst2.as<uint16_t>() + int64_t(t0) * channels,
+                                n, channels, conv_width, s);
+    }
+    compare(tokens, "prefill");
+    const uint16_t* next = dsrc.as<uint16_t>() + int64_t(tokens) * stride;
+    kda_causal_conv_silu_bf16(next, stride, dw.p, dst1.p, state_width,
+                              ddst1.as<uint16_t>() + int64_t(tokens) * channels, 1, channels, conv_width, s);
+    kda_causal_conv_silu_bf16(next, stride, dw.p, dst2.p, state_width,
+                              ddst2.as<uint16_t>() + int64_t(tokens) * channels, 1, channels, conv_width, s);
+    compare(tokens + 1, "decode continuation");
   }
-  DGPP_CUDA_OK(cudaStreamSynchronize(s));
-  std::vector<uint16_t> o1(src.size()), o2(src.size()), s1(state_init.size()), s2(state_init.size());
-  ddst1.download(o1.data(), o1.size() * 2);
-  ddst2.download(o2.data(), o2.size() * 2);
-  dst1.download(s1.data(), s1.size() * 2);
-  dst2.download(s2.data(), s2.size() * 2);
-  if (o1 != o2) throw std::runtime_error("tiled conv output differs from the serial chunks");
-  if (s1 != s2) throw std::runtime_error("tiled conv state differs from the serial chunks");
+  if (graph && graphs.hits() != 1) throw std::runtime_error("prefill graph was never replayed");
+}
+
+}  // namespace
+
+DGPP_TEST(kda_conv_tiled_matches_serial_bitwise) {
+  for (int width = 2; width <= 8; ++width)
+    for (int tokens : {127, 128, 129, 191, 192, 193, 1000, 2048})
+      for (int channels : {31, 192, 257})
+        for (int stride_extra : {0, 13})
+          check_conv_tiled_matches_serial(tokens, channels, width, stride_extra);
+  check_conv_tiled_matches_serial(2048, 5120, 4, 0);  // Qwen TP=2 channel count
+}
+
+DGPP_TEST(kda_conv_tiled_graph_replay_matches_serial_bitwise) {
+  for (int width = 2; width <= 8; ++width)
+    check_conv_tiled_matches_serial(129, 257, width, 13, true);
+}
+
+DGPP_TEST(kda_conv_tiled_special_values_match_serial_bitwise) {
+  for (int width = 2; width <= 8; ++width)
+    check_conv_tiled_matches_serial(129, 257, width, 13, false, true);
 }
 
 DGPP_TEST(kda_conv_kernel_matches_host_reference) {
@@ -1151,6 +1209,12 @@ DGPP_TEST(kda_head_slice_matches_full_run_core_outputs) {
 // ---------------------------------------------------------------------------
 
 int main(int argc, char** argv) {
+  // conv_launch caches this setting at first use, including the earlier
+  // layer tests. Reject it before any call can silently disable tiled coverage.
+  if (std::getenv("DGPP_KDA_CONV_SERIAL") != nullptr) {
+    std::fprintf(stderr, "kda_test requires DGPP_KDA_CONV_SERIAL to be unset to exercise tiled prefill\n");
+    return 1;
+  }
   int devices = 0;
   const cudaError_t err = cudaGetDeviceCount(&devices);
   if (err != cudaSuccess || devices < 1) return 2;  // ctest: skip, no GPU

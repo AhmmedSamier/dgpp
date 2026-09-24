@@ -149,8 +149,10 @@ __global__ void kda_conv_state_kernel(const uint16_t* __restrict__ src, int64_t 
   if (c >= channels) return;
 #pragma unroll
   for (int j = 0; j < CW - 1; ++j)
+    // Match the serial state's BF16 round-trip, including NaN canonicalization.
     state[static_cast<int64_t>(c) * state_width + j] =
-        src[static_cast<int64_t>(tokens - (CW - 1) + j) * src_stride + c];
+        float_to_bf16_bits(bf16_bits_to_float(
+            src[static_cast<int64_t>(tokens - (CW - 1) + j) * src_stride + c]));
 }
 
 // ---------------------------------------------------------------------------
