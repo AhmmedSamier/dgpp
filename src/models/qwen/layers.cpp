@@ -575,11 +575,25 @@ void QwenQsaLayer::enqueue(const uint16_t* x, int tokens, const QwenQsaRows& row
                        counts_, stream);
   // Small grids do not amortize the wider head group. Keep decode/verify and
   // short prefills on their existing kernel; both paths use identical arithmetic.
-  const auto attend = !rows.decode && T >= 128 ? qsa_attn_prefill_partial : qsa_attn_partial;
-  attend(qn_, static_cast<int64_t>(lh_) * D, cache.k_cache, cache.v_cache, d_req, topk_,
-                   max_selected_, counts_, T, n_split_, lh_, lkv_, D, cache.block_tokens,
-                   cache.block_tables, cache.blocks_per_request, scale_, m_ws_, l_ws_, c_ws_, stream);
-  dsa_attn_combine(m_ws_, l_ws_, c_ws_, T, n_split_, lh_, D, c_out_, stream);
+  // Long prefill walks take the one-warp tensor-core kernel
+  // (kernels/qsa_warp.cu), which writes c_out directly -- the shape and the
+  // bf16-probability numerics SGLang's sparse GQA prefill kernel runs.
+  // DGPP_QSA_WARP=0 keeps the partial kernels + combine.
+  static const bool warp_attn = [] {
+    const char* e = std::getenv("DGPP_QSA_WARP");
+    return !(e != nullptr && e[0] == '0');
+  }();
+  if (warp_attn && !rows.decode && T >= 128 && qsa_warp_supported(D, lh_, lkv_)) {
+    qsa_attn_prefill_warp(qn_, static_cast<int64_t>(lh_) * D, cache.k_cache, cache.v_cache, d_req, topk_,
+                          max_selected_, counts_, T, lh_, lkv_, cache.block_tokens, cache.block_tables,
+                          cache.blocks_per_request, scale_, c_out_, stream);
+  } else {
+    const auto attend = !rows.decode && T >= 128 ? qsa_attn_prefill_partial : qsa_attn_partial;
+    attend(qn_, static_cast<int64_t>(lh_) * D, cache.k_cache, cache.v_cache, d_req, topk_,
+           max_selected_, counts_, T, n_split_, lh_, lkv_, D, cache.block_tokens,
+           cache.block_tables, cache.blocks_per_request, scale_, m_ws_, l_ws_, c_ws_, stream);
+    dsa_attn_combine(m_ws_, l_ws_, c_ws_, T, n_split_, lh_, D, c_out_, stream);
+  }
   qsa_gate_out(c_out_, q_ + D, QW, 2 * D, o_, T, lh_, D, stream);
   gemm_dense(g_, o_, static_cast<int64_t>(lh_) * D, w_.o_proj, w_.o_proj_fp8, out, GemmOut::BF16, T, H,
              lh_ * D, stream);

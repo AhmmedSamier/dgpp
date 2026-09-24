@@ -48,6 +48,14 @@ representative traffic. [Native-head measurements](../benchmarks/results/2026-09
 and [prefill measurements](../benchmarks/results/2026-09-23-mimo-upstream-ports.md)
 record the configurations and limitations separately.
 
+## Qwen sparse prefill attention
+
+Qwen QSA uses the tensor-core warp kernel for prefills of at least 128 rows
+with supported head groups. To use the previous partial kernels for all
+prefills, launch with `DGPP_QSA_WARP=0`. The cluster launcher forwards this
+setting to every rank; restart the deployment to change it. Decode and
+shorter prefills retain their existing kernels in both modes.
+
 ## Configure and start
 
 For a new machine, follow [Getting started](getting-started.md),

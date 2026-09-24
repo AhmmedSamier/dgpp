@@ -144,6 +144,13 @@ build. The suites cover:
   over real HTTP with a fake engine, and the admission journal with two
   real peer loops over localhost;
 - synthetic CUDA graph/eager parity;
+- QSA warp prefill against one-, three- and eight-split references in
+  `qsa_test`, including tile edges and empty lists. `qwen_qsa_prefill` runs
+  separate warp-on/off processes on a synthetic model with twelve query heads
+  per KV head and an indexer budget of 2048. It compares every logit at
+  127/128/129/256/513/1024 rows, checks exact repeats and the unchanged short
+  path, and exercises session prefill followed by decode. This is numerical
+  regression coverage, not real-checkpoint quality or performance evidence;
 - the second and third families on the shared cores (2026-09-09/10): the
   Qwen3.8-Flash-Next chain (config/binding units, the loader, GDN/QSA/GR/
   PLE/MoE kernel oracles, the fixture forward against the pure-python
