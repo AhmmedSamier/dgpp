@@ -205,6 +205,14 @@ class GlmMoeLayer {
   uint16_t* d_up_ = nullptr;
   uint16_t* d_act_ = nullptr;
   float* d_down_ = nullptr;  // [max_tokens, hidden] fp32 segment output
+  // W4A4 prefill (DGPP_MOE_W4A4=1, 2026-09-23): the NVFP4 activation
+  // buffers, grown on first use (eager prefill only, never under capture).
+  uint8_t* d_q_codes_ = nullptr;
+  uint8_t* d_q_scales_ = nullptr;
+  float* d_q_gs_ = nullptr;
+  size_t q_rows_cap_ = 0, q_k_cap_ = 0;
+  bool down_bf16_ = false;  // the last chain wrote bf16 down rows into d_down_ (W4A4, no shared segment)
+  void ensure_w4a4(size_t rows, int k);
   float* d_acc_ = nullptr;   // [max_tokens, hidden] the fp32 chain
 
   // decode-slot scratch (cudaMalloc; sized to decode_slots*(top_k+1) rows —

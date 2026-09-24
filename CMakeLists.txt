@@ -174,6 +174,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/l2_prefetch.cu
   src/kernels/glm_mhc.cu
   src/kernels/glm_moe.cu
+  src/kernels/moe_w4a4.cu
   src/kernels/glm_vision.cu
   src/kernels/qwen_vision.cu
   src/kernels/glm_norm.cu
@@ -1515,6 +1516,12 @@ set_tests_properties(glm_pick_test PROPERTIES SKIP_RETURN_CODE 2)
 
 # MoE module parity (M4): router vs oracle at real geometry, expert path on
 # small geometry, swiglu clamps, accumulation order, determinism.
+add_executable(moe_w4a4_test tests/cuda/moe_w4a4_test.cu)
+target_include_directories(moe_w4a4_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(moe_w4a4_test PRIVATE dgpp_models_glm_loader dgpp_models_glm CUDA::cudart)
+dgpp_set_common(moe_w4a4_test)
+add_test(NAME moe_w4a4_test COMMAND moe_w4a4_test --tokens 1024 --experts 64)
+
 add_executable(glm_moe_test tests/cuda/glm_moe_test.cu)
 target_include_directories(glm_moe_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(glm_moe_test PRIVATE dgpp_models_glm_loader dgpp_models_glm CUDA::cudart)

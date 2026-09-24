@@ -125,6 +125,12 @@ struct GlmMoeWeights {
   const GlmQuantMatrix* experts = nullptr;
   const GlmFp4Matrix* experts_fp4 = nullptr;
   bool nvfp4() const { return experts_fp4 != nullptr; }
+  // W4A4 activation scales (the checkpoint's max input_scale over the layer's
+  // experts, gate/up and down; 0 = quantize with a dynamic per-row scale).
+  float act_scale_w13 = 0.0f, act_scale_w2 = 0.0f;
+  // [2] F32 on the device (gate/up, down input_scale) from the layer image;
+  // the W4A4 quantizers read it there, so a cached restore keeps it.
+  const float* act_scales_dev = nullptr;
   // The packed-int format (2026-09-12, full GLM-5.3, docs/glm53_plan.md
   // D2): routed experts as int4 or int8 group-64 triples, the shared
   // expert as an int8 triple of the routed experts' shapes read as

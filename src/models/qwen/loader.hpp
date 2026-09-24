@@ -100,6 +100,10 @@ struct QwenMoeResident {
   std::vector<GlmQuantMatrix> experts;    // gate, up, down per expert (inter-sliced), the FP8 form
   std::vector<GlmFp4Matrix> experts_fp4;  // the same, the NVFP4 release's backbone experts
   float* expert_globals = nullptr;        // [E * 3] F32 on the device: 1 / weight_scale_2 per matrix
+  // The layer's activation scales for W4A4 (max input_scale over the experts'
+  // gate/up and over their down; 0 = not read): SGLang's flashinfer_cutlass form.
+  float act_scale_w13 = 0.0f, act_scale_w2 = 0.0f;
+  float* act_scales = nullptr;  // [2] F32 in the layer image: max gate/up, down input_scale
   bool nvfp4() const { return !experts_fp4.empty(); }
   int64_t local_inter = 0;                // I/W
   int64_t local_shared_inter = 0;         // S/W

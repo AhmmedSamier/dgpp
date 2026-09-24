@@ -261,12 +261,23 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
     if (cfg.experts_nvfp4 && p.rfind("mtp.", 0) != 0) {
       m.experts_fp4.resize(static_cast<size_t>(E) * 3);
       m.expert_globals = static_cast<float*>(bump.alloc(static_cast<size_t>(E) * 3 * sizeof(float)));
+      m.act_scales = static_cast<float*>(bump.alloc(2 * sizeof(float)));
       for (int e = 0; e < E; ++e) {
         const std::string ep = p + "experts." + std::to_string(e) + ".";
         float* g = m.expert_globals + static_cast<size_t>(e) * 3;
         m.experts_fp4[static_cast<size_t>(e) * 3 + 0] = load_fp4_rows_mo(ep + "gate_proj", r * I, I, g + 0);
+        m.act_scale_w13 = std::max(m.act_scale_w13, last_input_scale_);
         m.experts_fp4[static_cast<size_t>(e) * 3 + 1] = load_fp4_rows_mo(ep + "up_proj", r * I, I, g + 1);
+        m.act_scale_w13 = std::max(m.act_scale_w13, last_input_scale_);
         m.experts_fp4[static_cast<size_t>(e) * 3 + 2] = load_fp4_cols_mo(ep + "down_proj", r * I, I, g + 2);
+        m.act_scale_w2 = std::max(m.act_scale_w2, last_input_scale_);
+      }
+      // The layer's activation scales go into the image with the weights: a
+      // resident-image restore lays the views out without the copy pass, so
+      // host-side values would come back as 0.
+      if (copy) {
+        const float v[2] = {m.act_scale_w13, m.act_scale_w2};
+        std::memcpy(bump.host(m.act_scales), v, sizeof(v));
       }
        return;
      }
@@ -327,6 +338,7 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
   // base.weight_scale e4m3 [N, K/16], base.weight_scale_2 F32 [] — stored
   // in `global` as its reciprocal (the kernels divide by it once), and the
   // unused base.input_scale consumed so the checkpoint reconciles.
+  float last_input_scale_ = 0.0f;  // the last NVFP4 matrix's input_scale (0: not read)
   void load_global_reciprocal_into(const std::string& base, float* slot) {
     const QwenExpectedTensor& eg = expected(base + ".weight_scale_2");
     if (copy) {
@@ -340,6 +352,11 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
       consumed(t);
     }
     note_read(eg, 4);
+    // The activation scale (modelopt input_scale, amax / (6 * 448) from
+    // calibration): kept host-side for the W4A4 prefill path, which quantizes
+    // with the layer's maximum like SGLang's flashinfer_cutlass MoE.
+    last_input_scale_ = 0.0f;
+    if (copy) std::memcpy(&last_input_scale_, source(base + ".input_scale").data, 4);
     (void)load_raw(base + ".input_scale");
   }
   GlmFp4Matrix load_fp4_rows_mo(const std::string& base, int64_t row_start, int64_t rows, float* global) {
@@ -734,8 +751,10 @@ bool QwenLayerStream::ngram_table_mmap() { return g_ngram_table_mmap; }
 
 void QwenLayerStream::set_dense_weights_fp8(bool on) { g_dense_weights_fp8 = on; }
 bool QwenLayerStream::dense_weights_fp8() { return g_dense_weights_fp8; }
+// Bit 8: the NVFP4 experts' activation scales live in the layer image (a
+// resident image written without them is rebuilt, not misread).
 uint64_t QwenLoaderFamily::loader_format() {
-  return (g_dense_weights_fp8 ? 2 : 1) | (g_mtp_experts_bf16_fused ? 4 : 0);
+  return (g_dense_weights_fp8 ? 2 : 1) | (g_mtp_experts_bf16_fused ? 4 : 0) | 8;
 }
 
 void QwenLayerStream::set_mtp_expert_format(bool on) { g_mtp_experts_bf16_fused = on; }

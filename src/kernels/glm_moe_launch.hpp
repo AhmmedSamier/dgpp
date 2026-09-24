@@ -143,6 +143,13 @@ void launch_moe_accum_ordered_f32(float* out, const float* down,
                                   int shared_row0, int tokens, int top_k,
                                   int hidden, cudaStream_t stream);
 
+// The same fp32 chain over bf16 down rows (the W4A4 prefill chain; no
+// shared row).
+void launch_moe_accum_ordered_f32_bf16down(float* out, const uint16_t* down, size_t down_stride,
+                                           const int32_t* slot_row, const int32_t* slot_ids,
+                                           const float* slot_w, int tokens, int top_k, int hidden,
+                                           cudaStream_t stream);
+
 // out[i] = bf16(acc[i]) — the chain's single rounding, as the sum leaves for
 // the FFN all-reduce (bf16 on the wire).
 void launch_moe_round_bf16(uint16_t* out, const float* acc, int64_t n,
