@@ -125,6 +125,11 @@ the sixteen-row deeper-MTP envelope and the factor-2 YaRN recipe. The
 retains per-case results, exact repeat controls, short-prefill coverage and
 serving checks. Configurations that omit the setting retain GEMV.
 
+Plain FP8 prefills compute only their final vocabulary row while preserving
+the full chunk's kernel selection and accumulation order. The
+[prefill-head follow-up](benchmarks/results/2026-09-24-pr43-prefill-head.md)
+covers the GEMV/tensor-core boundary and the full-head comparison switch.
+
 The earlier Release-build ABBA workload measured 11.26% higher C4/MTP3
 throughput with C1 effectively unchanged; its
 [results and transcript limits](benchmarks/results/2026-09-20-qwen-fp8-head-e2e.md)

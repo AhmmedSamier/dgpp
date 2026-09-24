@@ -8,8 +8,8 @@
 //                                greedy transcript and its re-forward audit
 //
 // Gates on the fixture: a one-shot prefill's last row is bitwise the cold
-// forward's (the same m=T GEMMs on the same state); T=1 steps agree with
-// the re-forward's rows at every position under the near-tie rule (their
+// forward's (the same accumulation order on the same state); T=1 steps
+// agree with the re-forward's rows at every position under the near-tie rule (their
 // m=1 GEMMs reassociate); two interleaved slots reproduce their solo runs
 // bitwise; a chunked prefill (chunk == max_tokens, pool-aligned boundary
 // cuts) agrees with the one-shot; a closed and reopened slot restarts
@@ -147,6 +147,41 @@ int audit(QwenModel& ref, const std::vector<int64_t>& prompt, const Transcript& 
   require(hard == 0, std::string(what) + ": a top-1 mismatch beyond the near-tie margin");
   require(worst_l2 < l2_budget, std::string(what) + ": relative l2 over budget");
   return soft;
+}
+
+// The prefill head must match the diagnostic full head across the GEMV/dense
+// transition. A one-row GEMV substitution fails this gate for long prompts.
+int run_prefill_head(const std::string& dir) {
+  const QwenTextConfig cfg = QwenTextConfig::from_json_file((fs::path(dir) / "config.json").string());
+  const bool old_fp8 = dgpp::QwenLayerStream::dense_weights_fp8();
+  struct RestoreDenseWeights {
+    bool fp8;
+    ~RestoreDenseWeights() { dgpp::QwenLayerStream::set_dense_weights_fp8(fp8); }
+  } restore{old_fp8};
+  for (const bool fp8 : {false, true}) {
+    dgpp::QwenLayerStream::set_dense_weights_fp8(fp8);
+    for (const bool mma : {false, true}) {
+      if (!fp8 && mma) continue;
+      // Capacity must exceed the longest prompt after alignment: 257 would
+      // round the prefill chunk to 256 and compare two walks with one.
+      QwenModel model(cfg, dir, 512, 512, QwenResidency::Resident, nullptr, 0, 1, 1, false, 16, mma);
+      const int vocab = model.lm_vocab_count();
+      for (const int length : {1, 4, 5, 8, 9, 16, 17, 127, 128, 129, 257}) {
+        const auto prompt = smoke_tokens(cfg, length, 0x4300 + length);
+        const auto full = model.forward(prompt);
+        const auto prefill = model.session_prefill(0, prompt);
+        require(bitwise(prefill.logits, std::vector<float>(full.logits.end() - vocab, full.logits.end())),
+                "prefill head differs from full head: T=" + std::to_string(length) +
+                    " fp8=" + std::to_string(fp8) + " mma=" + std::to_string(mma));
+        require(std::equal(prefill.final_hidden_bits.begin(), prefill.final_hidden_bits.end(),
+                           full.final_hidden_bits.end() - cfg.hidden_size),
+                "prefill head comparison received different hidden states");
+        model.session_close(0);
+      }
+    }
+  }
+  std::printf("[ OK ] BF16/FP8 prefill heads match full forwards through 257 rows\n");
+  return 0;
 }
 
 // ---- the fixture gates ----------------------------------------------------------
@@ -904,7 +939,7 @@ int run_checkpoint(const std::string& dir, const std::vector<int64_t>& ids, int 
 
 int main(int argc, char** argv) {
   std::string fixture, checkpoint, ids_text;
-  bool fp8_head = false;
+  bool fp8_head = false, prefill_head = false;
   int steps = 4;
   int layers_extra = -1;
   for (int i = 1; i < argc; ++i) {
@@ -912,13 +947,15 @@ int main(int argc, char** argv) {
     if (a == "--fixture" && i + 1 < argc) fixture = argv[++i];
     else if (a == "--fp8-head")
       fp8_head = true;
+    else if (a == "--prefill-head")
+      prefill_head = true;
     else if (a == "--checkpoint-dir" && i + 1 < argc) checkpoint = argv[++i];
     else if (a == "--ids" && i + 1 < argc) ids_text = argv[++i];
     else if (a == "--steps" && i + 1 < argc) steps = std::stoi(argv[++i]);
     else if (a == "--layers" && i + 1 < argc) layers_extra = std::stoi(argv[++i]);
   }
   try {
-    if (!fixture.empty()) return run_fixture(fixture, fp8_head);
+    if (!fixture.empty()) return prefill_head ? run_prefill_head(fixture) : run_fixture(fixture, fp8_head);
     if (!checkpoint.empty()) {
       std::vector<int64_t> ids;
       std::stringstream ss(ids_text);
@@ -930,7 +967,7 @@ int main(int argc, char** argv) {
     }
     std::fprintf(
         stderr,
-        "usage: --fixture DIR [--fp8-head] | --checkpoint-dir DIR --ids 1,2,... [--steps N]\n");
+        "usage: --fixture DIR [--fp8-head | --prefill-head] | --checkpoint-dir DIR --ids 1,2,... [--steps N]\n");
     return 2;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "[FAIL] %s\n", e.what());

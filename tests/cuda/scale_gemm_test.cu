@@ -4,6 +4,7 @@
 // pattern). Every synthetic case is checked against both oracles: strict
 // (bf16-rounded weights, fp64 accumulation — isolates the kernel) and
 // semantic (true dequant — pins the DESIGN §4 scale contract).
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <cstdio>
@@ -253,6 +254,53 @@ DGPP_TEST(scale_gemm_large_m_route_is_bitwise_the_tile_kernel) {
   require(std::memcmp(routed.data(), tile.data(), routed.size() * 2) == 0,
           "large-m route bitwise the tile kernel");
   check_both_oracles(p, routed, "large-m M300xN200xK512");
+}
+
+DGPP_TEST(scale_gemm_last_row_preserves_full_product_bits_and_output_bounds) {
+  // Cross the GEMV/dense boundary with the production head's K, including
+  // row positions on both sides of an MMA tile. Also cover streaming MMA
+  // and the ragged-K fallback, with padded input/output strides.
+  for (const int k : {1000, 2560}) {
+    for (const int m : {1, 4, 5, 17, 127, 128, 129, 255, 256, 257}) {
+      const Problem p = make_problem(m, 137, k, 0x43A0 + m + k);
+      const size_t act_stride = static_cast<size_t>(k) + 8;
+      const size_t out_stride = static_cast<size_t>(p.n) + 7;
+      uint16_t* act = nullptr;
+      uint8_t* w = nullptr;
+      float *scales = nullptr, *full = nullptr, *last = nullptr;
+      DGPP_CUDA_OK(cudaMallocManaged(&act, m * act_stride * sizeof(uint16_t)));
+      DGPP_CUDA_OK(cudaMallocManaged(&w, p.payload.size()));
+      DGPP_CUDA_OK(cudaMallocManaged(&scales, p.scales.size() * sizeof(float)));
+      DGPP_CUDA_OK(cudaMallocManaged(&full, m * out_stride * sizeof(float)));
+      DGPP_CUDA_OK(cudaMallocManaged(&last, m * out_stride * sizeof(float)));
+      for (int row = 0; row < m; ++row)
+        std::memcpy(act + row * act_stride, p.act.data() + row * k, k * sizeof(uint16_t));
+      std::memcpy(w, p.payload.data(), p.payload.size());
+      std::memcpy(scales, p.scales.data(), p.scales.size() * sizeof(float));
+      bool equal = true, untouched = true;
+      for (const int mma_from : {0, 5}) {
+        constexpr float sentinel = -12345.0f;
+        std::fill(last, last + m * out_stride, sentinel);
+        dgpp::launch_scale_gemm_f32(act, act_stride, w, scales, full, m, p.n, k,
+                                    nullptr, out_stride, mma_from);
+        dgpp::launch_scale_gemm_f32(act, act_stride, w, scales, last, m, p.n, k,
+                                    nullptr, out_stride, mma_from, true);
+        DGPP_CUDA_OK(cudaDeviceSynchronize());
+        const size_t offset = static_cast<size_t>(m - 1) * out_stride;
+        equal &= std::memcmp(full + offset, last + offset, p.n * sizeof(float)) == 0;
+        for (size_t i = 0; i < m * out_stride; ++i)
+          if (i < offset || i >= offset + p.n) untouched &= last[i] == sentinel;
+      }
+      DGPP_CUDA_OK(cudaFree(act));
+      DGPP_CUDA_OK(cudaFree(w));
+      DGPP_CUDA_OK(cudaFree(scales));
+      DGPP_CUDA_OK(cudaFree(full));
+      DGPP_CUDA_OK(cudaFree(last));
+      require(equal, ("last-row head differs from the full product at M=" + std::to_string(m) +
+                      " K=" + std::to_string(k)).c_str());
+      require(untouched, "last-row head overwrote another row or output padding");
+    }
+  }
 }
 
 DGPP_TEST(scale_gemm_ragged_tails_match_both_oracles) {

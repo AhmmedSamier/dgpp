@@ -1,0 +1,34 @@
+Internal ctest changing into directory: /tmp/dgpp-pr43-followup/build-ci
+Test project /tmp/dgpp-pr43-followup/build-ci
+      Start 65: dsv41_forward_generate
+ 1/12 Test #65: dsv41_forward_generate ...................   Passed    0.89 sec
+      Start 66: dsv41_forward_test_e2e
+ 2/12 Test #66: dsv41_forward_test_e2e ...................   Passed    1.01 sec
+      Start 67: dsv41_forward_generate_teacher
+ 3/12 Test #67: dsv41_forward_generate_teacher ...........   Passed    0.67 sec
+      Start 68: dsv41_forward_test
+ 4/12 Test #68: dsv41_forward_test .......................   Passed    0.94 sec
+      Start 69: dsv41_forward_generate_bounded
+ 5/12 Test #69: dsv41_forward_generate_bounded ...........   Passed    0.58 sec
+      Start 70: dsv41_forward_test_bounded_e2e
+ 6/12 Test #70: dsv41_forward_test_bounded_e2e ...........   Passed    0.92 sec
+      Start 71: dsv41_forward_generate_teacher_bounded
+ 7/12 Test #71: dsv41_forward_generate_teacher_bounded ...   Passed    0.62 sec
+      Start 72: dsv41_forward_test_bounded
+ 8/12 Test #72: dsv41_forward_test_bounded ...............   Passed    0.91 sec
+      Start 88: mimo_forward_generate
+ 9/12 Test #88: mimo_forward_generate ....................   Passed    0.40 sec
+      Start 89: mimo_forward_test_e2e
+10/12 Test #89: mimo_forward_test_e2e ....................   Passed    0.90 sec
+      Start 90: mimo_forward_generate_teacher
+11/12 Test #90: mimo_forward_generate_teacher ............   Passed    0.34 sec
+      Start 91: mimo_forward_test
+12/12 Test #91: mimo_forward_test ........................   Passed    0.87 sec
+
+100% tests passed, 0 tests failed out of 12
+
+Label Time Summary:
+fixture    =   0.73 sec*proc (2 tests)
+gpu        =   8.32 sec*proc (10 tests)
+
+Total Test time (real) =   9.06 sec

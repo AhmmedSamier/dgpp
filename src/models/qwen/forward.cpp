@@ -384,7 +384,7 @@ size_t QwenModel::dense_bridge_bytes(const QwenTextConfig& cfg, const QwenLocalG
 // The lm_head product into logits_ (f32): the checkpoint's BF16 through the
 // GEMM interface, or the block-FP8 form (engine.dense_weights) through the scale
 // GEMM.
-void QwenModel::lm_head_logits(const uint16_t* hidden, int rows, cudaStream_t stream) {
+void QwenModel::lm_head_logits(const uint16_t* hidden, int rows, cudaStream_t stream, bool last_row_only) {
   const int H = cfg_.hidden_size;
   // Opt in to weight-tile reuse only within the configured decode envelope;
   // this bounds the optimization to verification shapes covered by its gates.
@@ -396,7 +396,8 @@ void QwenModel::lm_head_logits(const uint16_t* hidden, int rows, cudaStream_t st
     launch_scale_gemm_f32(hidden, static_cast<size_t>(H), globals_.lm_head_fp8.payload,
                           globals_.lm_head_fp8.scales, logits_, rows, lm_vocab_count_, H, stream,
                           static_cast<size_t>(lm_vocab_count_),
-                          fp8_head_mma_ && rows <= max_decode_rows_ ? dense_gemv_rows() + 1 : 0);
+                          fp8_head_mma_ && rows <= max_decode_rows_ ? dense_gemv_rows() + 1 : 0,
+                          last_row_only);
   else
     gemm_.matmul(hidden, globals_.lm_head, logits_, rows, lm_vocab_count_, H, DType::BF16, GemmOut::F32,
                  static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream);
@@ -807,11 +808,23 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
       out.layer_states.push_back(std::move(snap));
     }
   }
-  // The head on every row: a prefill chunk's last row then comes off the
-  // same m=T GEMM the diagnostic forward runs (the prefill == forward
-  // bitwise gate), not an m=1 GEMV.
+  // A plain prefill chunk reads back only its last row's logits for the
+  // scheduler's next-token pick, so only that row takes the head.
+  // Keep the original T-row dispatch: GEMV and the large-m tensor-core
+  // kernel accumulate differently. The FP8 launcher computes only row T-1
+  // through the same kernel family the full head would use. Streaming-MMA
+  // chunks, BF16 heads (cuBLAS is m-dependent), decode, all-row runs and
+  // group prefills keep the full head. DGPP_PREFILL_HEAD_ALL_ROWS=1 keeps
+  // it everywhere.
   mixer_->mix(r_, h_, T, stream_);
-  lm_head_logits(h_, T, stream_);
+  static const bool head_all_rows = [] {
+    const char* e = std::getenv("DGPP_PREFILL_HEAD_ALL_ROWS");
+    return e != nullptr && e[0] == '1';
+  }();
+  const bool mma_envelope = fp8_head_mma_ && T <= max_decode_rows_;
+  const bool last_row_only = !run.decode && !run.all_rows && run.num_spans == 0 && T > 1 &&
+                             globals_.lm_head_fp8.payload != nullptr && !mma_envelope && !head_all_rows;
+  lm_head_logits(h_, T, stream_, last_row_only);
   // The draft block's input: the last rows' hyper states into the slots'
   // windows by position (the last window rows of a prefill chunk, every
   // decode row — distinct slots within one launch).

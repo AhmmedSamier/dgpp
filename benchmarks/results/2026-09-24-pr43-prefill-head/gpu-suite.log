@@ -1,0 +1,348 @@
+Internal ctest changing into directory: /tmp/dgpp-pr43-followup/build-ci
+Test project /tmp/dgpp-pr43-followup/build-ci
+        Start   1: qwen_forward_fixture
+  1/124 Test   #1: qwen_forward_fixture .......................   Passed    0.16 sec
+        Start   2: qwen_plan_check
+  2/124 Test   #2: qwen_plan_check ............................   Passed    0.06 sec
+        Start   3: qwen_forward_smoke
+  3/124 Test   #3: qwen_forward_smoke .........................   Passed    1.09 sec
+        Start   4: qwen_forward_smoke_yarn
+  4/124 Test   #4: qwen_forward_smoke_yarn ....................   Passed    1.25 sec
+        Start   5: qwen_forward_cross_limit
+  5/124 Test   #5: qwen_forward_cross_limit ...................   Passed    1.27 sec
+        Start   6: qwen_forward_generate
+  6/124 Test   #6: qwen_forward_generate ......................   Passed   18.67 sec
+        Start   7: qwen_forward_test
+  7/124 Test   #7: qwen_forward_test ..........................   Passed    1.33 sec
+        Start   8: qwen_decode_test
+  8/124 Test   #8: qwen_decode_test ...........................   Passed    4.12 sec
+        Start   9: qwen_decode_fp8_head
+  9/124 Test   #9: qwen_decode_fp8_head .......................   Passed    5.13 sec
+        Start  10: qwen_decode_fp8_head_row_independent
+ 10/124 Test  #10: qwen_decode_fp8_head_row_independent .......   Passed    4.82 sec
+        Start  11: nic_regress_selftest
+ 11/124 Test  #11: nic_regress_selftest .......................   Passed    0.49 sec
+        Start  12: glm_tp_test
+ 12/124 Test  #12: glm_tp_test ................................   Passed   33.38 sec
+        Start  13: glm_mtp_sampling_no_pipeline
+ 13/124 Test  #13: glm_mtp_sampling_no_pipeline ...............   Passed    3.05 sec
+        Start  21: glm_dsa_tokenizer_test
+ 14/124 Test  #21: glm_dsa_tokenizer_test .....................   Passed    0.22 sec
+        Start  22: mimo_tokenizer_test
+ 15/124 Test  #22: mimo_tokenizer_test ........................   Passed    0.15 sec
+        Start  26: glm_dsa_chat_template_test
+ 16/124 Test  #26: glm_dsa_chat_template_test .................   Passed    1.81 sec
+        Start  27: mimo_chat_template_test
+ 17/124 Test  #27: mimo_chat_template_test ....................***Failed    0.73 sec
+2026-09-24 03:11:09.154 INFO  tokenizer: loaded vocab 151643 merges 151387 added 32 (revision 0x48f2a839c5f8d38a; qwen2 pattern, NFC, ignore_merges false)
+2026-09-24 03:11:09.375 INFO  tokenizer: loaded vocab 151643 merges 151387 added 32 (revision 0x48f2a839c5f8d38a; qwen2 pattern, NFC, ignore_merges false)
+2026-09-24 03:11:09.473 INFO  tokenizer: loaded vocab 151643 merges 151387 added 32 (revision 0x48f2a839c5f8d38a; qwen2 pattern, NFC, ignore_merges false)
+2026-09-24 03:11:09.568 INFO  tokenizer: loaded vocab 151643 merges 151387 added 32 (revision 0x48f2a839c5f8d38a; qwen2 pattern, NFC, ignore_merges false)
+2026-09-24 03:11:09.571 INFO  glm_chat_template_test: 24/24 cases exact (render + ids)
+2026-09-24 03:11:09.585 INFO  glm_tool_call_render_encode_parse_roundTrip: GLM format only; the Qwen corpus has its own gate
+2026-09-24 03:11:09.656 INFO  tokenizer: loaded vocab 151643 merges 151387 added 32 (revision 0x48f2a839c5f8d38a; qwen2 pattern, NFC, ignore_merges false)
+2026-09-24 03:11:09.656 INFO  qwen_chat_template_test: 7 tool-call turns (9 calls) round-trip render -> encode -> parse
+2026-09-24 03:11:09.741 INFO  tokenizer: loaded vocab 151643 merges 151387 added 32 (revision 0x48f2a839c5f8d38a; qwen2 pattern, NFC, ignore_merges false)
+2026-09-24 03:11:09.764 INFO  glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer: GLM format only; the Qwen corpus has its own gate
+2026-09-24 03:11:09.764 INFO  json grammar: the GLM config; the Qwen corpus has its own gate
+[ OK ] qwen_reasoning_effort_renders_each_level
+[FAIL] structured_output_with_tools_over_the_real_tokenizer: structured tools accepted/rejected: <tool_call>
+<function=record_score>
+<parameter=score>
+0.5
+</parameter>
+</function>
+</tool_call>
+[ OK ] reasoning_effort_edge_nativeControlsForEveryCheckpoint
+[FAIL] custom_tools_and_references_over_the_real_tokenizer: custom grammar enforces decoded input: "ABC=12"
+[ OK ] glm_chat_template_differential_goldens
+[ OK ] glm_tool_call_render_encode_parse_roundTrip
+[ OK ] qwen_tool_call_render_encode_parse_roundTrip
+[FAIL] qwen_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer: tool_call_and_response: id 198 (
+) at position 9 refused in state q-name
+[ OK ] glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer
+[ OK ] glm_json_grammar_accepts_tokenized_documents_over_the_real_tokenizer
+10 tests, 3 failed
+
+        Start  34: cuda_wait_test
+ 18/124 Test  #34: cuda_wait_test .............................   Passed    0.47 sec
+        Start  50: kda_test
+ 19/124 Test  #50: kda_test ...................................   Passed    2.99 sec
+        Start  51: dsa_test
+ 20/124 Test  #51: dsa_test ...................................   Passed   15.01 sec
+        Start  52: qwen_gr_test
+ 21/124 Test  #52: qwen_gr_test ...............................   Passed    0.41 sec
+        Start  53: qwen_norm_test
+ 22/124 Test  #53: qwen_norm_test .............................   Passed    0.38 sec
+        Start  54: gdn_test
+ 23/124 Test  #54: gdn_test ...................................   Passed    0.45 sec
+        Start  55: qsa_test
+ 24/124 Test  #55: qsa_test ...................................   Passed    1.74 sec
+        Start  56: qwen_ple_test
+ 25/124 Test  #56: qwen_ple_test ..............................   Passed    0.72 sec
+        Start  57: csa2_test
+ 26/124 Test  #57: csa2_test ..................................   Passed    0.67 sec
+        Start  58: csa2_layer_test
+ 27/124 Test  #58: csa2_layer_test ............................   Passed    3.78 sec
+        Start  59: dsv41_engram_layer_test
+ 28/124 Test  #59: dsv41_engram_layer_test ....................   Passed    1.04 sec
+        Start  60: dsv41_model_test
+ 29/124 Test  #60: dsv41_model_test ...........................   Passed    3.62 sec
+        Start  61: dsv41_forward_fixture
+ 30/124 Test  #61: dsv41_forward_fixture ......................   Passed    0.60 sec
+        Start  62: dsv41_forward_smoke
+ 31/124 Test  #62: dsv41_forward_smoke ........................   Passed    0.93 sec
+        Start  63: dsv41_forward_generate
+ 32/124 Test  #63: dsv41_forward_generate .....................***Failed    0.06 sec
+Traceback (most recent call last):
+  File "/tmp/dgpp-pr43-followup/tools/dsv41_reference_dump.py", line 37, in <module>
+    import numpy as np
+ModuleNotFoundError: No module named 'numpy'
+
+        Start  64: dsv41_forward_test_e2e
+ 33/124 Test  #64: dsv41_forward_test_e2e .....................***Failed    0.06 sec
+[FAIL] dump: cannot open /tmp/dgpp-pr43-followup/build-ci/dsv41_pure_ref.dump
+
+        Start  65: dsv41_forward_generate_teacher
+ 34/124 Test  #65: dsv41_forward_generate_teacher .............***Failed    0.06 sec
+Traceback (most recent call last):
+  File "/tmp/dgpp-pr43-followup/tools/dsv41_reference_dump.py", line 37, in <module>
+    import numpy as np
+ModuleNotFoundError: No module named 'numpy'
+
+        Start  66: dsv41_forward_test
+ 35/124 Test  #66: dsv41_forward_test .........................***Failed    0.05 sec
+[FAIL] dump: cannot open /tmp/dgpp-pr43-followup/build-ci/dsv41_teacher_ref.dump
+
+        Start  67: dsv41_forward_generate_bounded
+ 36/124 Test  #67: dsv41_forward_generate_bounded .............***Failed    0.07 sec
+Traceback (most recent call last):
+  File "/tmp/dgpp-pr43-followup/tools/dsv41_reference_dump.py", line 37, in <module>
+    import numpy as np
+ModuleNotFoundError: No module named 'numpy'
+
+        Start  68: dsv41_forward_test_bounded_e2e
+ 37/124 Test  #68: dsv41_forward_test_bounded_e2e .............***Failed    0.06 sec
+[FAIL] dump: cannot open /tmp/dgpp-pr43-followup/build-ci/dsv41_bounded_ref.dump
+
+        Start  69: dsv41_forward_generate_teacher_bounded
+ 38/124 Test  #69: dsv41_forward_generate_teacher_bounded .....***Failed    0.06 sec
+Traceback (most recent call last):
+  File "/tmp/dgpp-pr43-followup/tools/dsv41_reference_dump.py", line 37, in <module>
+    import numpy as np
+ModuleNotFoundError: No module named 'numpy'
+
+        Start  70: dsv41_forward_test_bounded
+ 39/124 Test  #70: dsv41_forward_test_bounded .................***Failed    0.06 sec
+[FAIL] dump: cannot open /tmp/dgpp-pr43-followup/build-ci/dsv41_teacher_bounded_ref.dump
+
+        Start  71: dsv41_decode_test
+ 40/124 Test  #71: dsv41_decode_test ..........................   Passed    3.23 sec
+        Start  72: dsv41_engram_test
+ 41/124 Test  #72: dsv41_engram_test ..........................   Passed    0.39 sec
+        Start  73: qwen_moe_test
+ 42/124 Test  #73: qwen_moe_test ..............................   Passed    2.63 sec
+        Start  74: qwen_loader_test
+ 43/124 Test  #74: qwen_loader_test ...........................   Passed    5.61 sec
+        Start  75: glm4_attn_test
+ 44/124 Test  #75: glm4_attn_test .............................   Passed    0.42 sec
+        Start  76: mimo_attn_test
+ 45/124 Test  #76: mimo_attn_test .............................   Passed    0.61 sec
+        Start  77: add_rmsnorm_test
+ 46/124 Test  #77: add_rmsnorm_test ...........................   Passed    1.12 sec
+        Start  78: glm4_loader_test
+ 47/124 Test  #78: glm4_loader_test ...........................   Passed    0.93 sec
+        Start  79: mimo_loader_test
+ 48/124 Test  #79: mimo_loader_test ...........................   Passed    0.69 sec
+        Start  80: glm4_forward_fixture
+ 49/124 Test  #80: glm4_forward_fixture .......................   Passed    0.08 sec
+        Start  81: glm4_forward_smoke
+ 50/124 Test  #81: glm4_forward_smoke .........................   Passed    0.84 sec
+        Start  82: glm4_forward_generate
+ 51/124 Test  #82: glm4_forward_generate ......................   Passed    6.87 sec
+        Start  83: glm4_forward_test
+ 52/124 Test  #83: glm4_forward_test ..........................   Passed    0.93 sec
+        Start  84: mimo_forward_fixture
+ 53/124 Test  #84: mimo_forward_fixture .......................   Passed    0.07 sec
+        Start  85: mimo_forward_smoke
+ 54/124 Test  #85: mimo_forward_smoke .........................   Passed    0.87 sec
+        Start  86: mimo_forward_generate
+ 55/124 Test  #86: mimo_forward_generate ......................***Failed    0.09 sec
+Traceback (most recent call last):
+  File "/tmp/dgpp-pr43-followup/tools/mimo_reference_dump.py", line 45, in <module>
+    import numpy as np
+ModuleNotFoundError: No module named 'numpy'
+
+        Start  87: mimo_forward_test_e2e
+ 56/124 Test  #87: mimo_forward_test_e2e ......................***Failed    0.07 sec
+[FAIL] dump: cannot open /tmp/dgpp-pr43-followup/build-ci/mimo_pure_ref.mdump
+
+        Start  88: mimo_forward_generate_teacher
+ 57/124 Test  #88: mimo_forward_generate_teacher ..............***Failed    0.07 sec
+Traceback (most recent call last):
+  File "/tmp/dgpp-pr43-followup/tools/mimo_reference_dump.py", line 45, in <module>
+    import numpy as np
+ModuleNotFoundError: No module named 'numpy'
+
+        Start  89: mimo_forward_test
+ 58/124 Test  #89: mimo_forward_test ..........................***Failed    0.05 sec
+[FAIL] dump: cannot open /tmp/dgpp-pr43-followup/build-ci/mimo_teacher_ref.mdump
+
+        Start  90: glm_dsa_forward_fixture
+ 59/124 Test  #90: glm_dsa_forward_fixture ....................   Passed    0.11 sec
+        Start  91: glm_dsa_forward_smoke
+ 60/124 Test  #91: glm_dsa_forward_smoke ......................   Passed    0.90 sec
+        Start  92: glm_dsa_forward_generate
+ 61/124 Test  #92: glm_dsa_forward_generate ...................   Passed   13.35 sec
+        Start  93: glm_dsa_forward_test
+ 62/124 Test  #93: glm_dsa_forward_test .......................   Passed    0.96 sec
+        Start  94: glm_dsa_prefill_fixture
+ 63/124 Test  #94: glm_dsa_prefill_fixture ....................   Passed    0.10 sec
+        Start  95: glm_dsa_prefill_generate
+ 64/124 Test  #95: glm_dsa_prefill_generate ...................   Passed  105.51 sec
+        Start  96: glm_dsa_prefill_test
+ 65/124 Test  #96: glm_dsa_prefill_test .......................   Passed    0.98 sec
+        Start  97: glm_dsa_decode_test
+ 66/124 Test  #97: glm_dsa_decode_test ........................   Passed    1.36 sec
+        Start  98: glm_dsa_tp_test
+ 67/124 Test  #98: glm_dsa_tp_test ............................   Passed    4.11 sec
+        Start  99: glm_dsa_engine_test
+ 68/124 Test  #99: glm_dsa_engine_test ........................   Passed    7.50 sec
+        Start 100: glm4_decode_test
+ 69/124 Test #100: glm4_decode_test ...........................   Passed    1.00 sec
+        Start 101: glm4_tp_test
+ 70/124 Test #101: glm4_tp_test ...............................   Passed    1.44 sec
+        Start 102: glm4_engine_test
+ 71/124 Test #102: glm4_engine_test ...........................   Passed    4.36 sec
+        Start 103: mimo_decode_test
+ 72/124 Test #103: mimo_decode_test ...........................   Passed    1.07 sec
+        Start 104: mimo_tp_test
+ 73/124 Test #104: mimo_tp_test ...............................   Passed    2.01 sec
+        Start 105: mimo_engine_test
+ 74/124 Test #105: mimo_engine_test ...........................   Passed    5.34 sec
+        Start 106: glm_dsa_loader_test
+ 75/124 Test #106: glm_dsa_loader_test ........................   Passed    1.01 sec
+        Start 107: dsv41_loader_test
+ 76/124 Test #107: dsv41_loader_test ..........................   Passed    8.68 sec
+        Start 108: dsv41_tp_test
+ 77/124 Test #108: dsv41_tp_test ..............................   Passed    8.41 sec
+        Start 109: dsv41_engine_test
+ 78/124 Test #109: dsv41_engine_test ..........................   Passed    8.54 sec
+        Start 110: qwen_tp_test
+ 79/124 Test #110: qwen_tp_test ...............................   Passed    3.93 sec
+        Start 111: qwen_engine_test
+ 80/124 Test #111: qwen_engine_test ...........................   Passed    8.24 sec
+        Start 112: qwen_engine_row_independent
+ 81/124 Test #112: qwen_engine_row_independent ................   Passed    2.66 sec
+        Start 113: qwen_engine_bf12
+ 82/124 Test #113: qwen_engine_bf12 ...........................   Passed    8.74 sec
+        Start 114: qwen_engine_fp8_head_4
+ 83/124 Test #114: qwen_engine_fp8_head_4 .....................   Passed    2.53 sec
+        Start 115: qwen_engine_fp8_head_256
+ 84/124 Test #115: qwen_engine_fp8_head_256 ...................   Passed    3.10 sec
+        Start 116: qwen_engine_fp8_wide
+ 85/124 Test #116: qwen_engine_fp8_wide .......................   Passed    3.06 sec
+        Start 117: qwen_engine_fp8_mtp3_rows32
+ 86/124 Test #117: qwen_engine_fp8_mtp3_rows32 ................   Passed    3.15 sec
+        Start 118: qwen_engine_mtp3_rows32_row_independent
+ 87/124 Test #118: qwen_engine_mtp3_rows32_row_independent ....   Passed    2.83 sec
+        Start 119: qwen_engine_fp8_mtp3_rows64
+ 88/124 Test #119: qwen_engine_fp8_mtp3_rows64 ................   Passed    3.56 sec
+        Start 120: qwen_engine_mtp3_rows64_row_independent
+ 89/124 Test #120: qwen_engine_mtp3_rows64_row_independent ....   Passed    3.94 sec
+        Start 121: qwen_engine_compaction_disabled
+ 90/124 Test #121: qwen_engine_compaction_disabled ............   Passed    9.08 sec
+        Start 122: qwen_engine_compact_sampling_1
+ 91/124 Test #122: qwen_engine_compact_sampling_1 .............   Passed    2.81 sec
+        Start 123: qwen_engine_compact_sampling_32
+ 92/124 Test #123: qwen_engine_compact_sampling_32 ............   Passed    2.72 sec
+        Start 124: qwen_engine_compact_fallback_0
+ 93/124 Test #124: qwen_engine_compact_fallback_0 .............   Passed    3.32 sec
+        Start 125: qwen_engine_compact_fallback_1
+ 94/124 Test #125: qwen_engine_compact_fallback_1 .............   Passed    3.32 sec
+        Start 126: qwen_engine_compact_fallback_mtp3_rows64
+ 95/124 Test #126: qwen_engine_compact_fallback_mtp3_rows64 ...   Passed    4.09 sec
+        Start 127: qwen_head_check_fixture
+ 96/124 Test #127: qwen_head_check_fixture ....................   Passed    2.51 sec
+        Start 128: qwen_compact_check_fixture
+ 97/124 Test #128: qwen_compact_check_fixture .................   Passed    4.00 sec
+        Start 129: glm_loader_test
+ 98/124 Test #129: glm_loader_test ............................   Passed    2.91 sec
+        Start 130: bf16_gemv_test
+ 99/124 Test #130: bf16_gemv_test .............................   Passed   16.36 sec
+        Start 131: bf12_gemv_test
+100/124 Test #131: bf12_gemv_test .............................   Passed    1.50 sec
+        Start 132: mma_gemv_test
+101/124 Test #132: mma_gemv_test ..............................   Passed    3.06 sec
+        Start 133: fp4_gemv_test
+102/124 Test #133: fp4_gemv_test ..............................   Passed    0.52 sec
+        Start 134: packq_gemv_test
+103/124 Test #134: packq_gemv_test ............................   Passed    0.56 sec
+        Start 135: packq_gemm_test
+104/124 Test #135: packq_gemm_test ............................   Passed    0.48 sec
+        Start 136: glm_mhc_test
+105/124 Test #136: glm_mhc_test ...............................   Passed    2.74 sec
+        Start 137: det_math_test
+106/124 Test #137: det_math_test ..............................   Passed    4.43 sec
+        Start 138: glm_pick_test
+107/124 Test #138: glm_pick_test ..............................   Passed    1.72 sec
+        Start 139: glm_moe_test
+108/124 Test #139: glm_moe_test ...............................   Passed   25.06 sec
+        Start 140: glm_forward_fixture
+109/124 Test #140: glm_forward_fixture ........................   Passed    0.08 sec
+        Start 141: glm_forward_generate
+110/124 Test #141: glm_forward_generate .......................   Passed    2.16 sec
+        Start 142: glm_forward_test
+111/124 Test #142: glm_forward_test ...........................   Passed    0.94 sec
+        Start 143: dsa_dump_generate
+112/124 Test #143: dsa_dump_generate ..........................   Passed    0.49 sec
+        Start 144: dsa_dump_test
+113/124 Test #144: dsa_dump_test ..............................   Passed    0.81 sec
+        Start 145: kda_dump_generate
+114/124 Test #145: kda_dump_generate ..........................   Passed    0.06 sec
+        Start 146: kda_dump_test
+115/124 Test #146: kda_dump_test ..............................   Passed    3.00 sec
+        Start 147: doll_selftest
+116/124 Test #147: doll_selftest ..............................   Passed    0.82 sec
+        Start 148: flag_protocol_test
+117/124 Test #148: flag_protocol_test .........................   Passed    1.30 sec
+        Start 150: bus_test
+118/124 Test #150: bus_test ...................................   Passed   36.40 sec
+        Start 151: bus_selftest
+119/124 Test #151: bus_selftest ...............................   Passed    2.32 sec
+        Start 152: qwen_vision_test
+120/124 Test #152: qwen_vision_test ...........................   Passed    0.39 sec
+        Start 153: glm_vision_test
+121/124 Test #153: glm_vision_test ............................   Passed    0.86 sec
+        Start 154: glm_vision_stream_test
+122/124 Test #154: glm_vision_stream_test .....................   Passed   24.48 sec
+        Start 156: mimo_port_test
+123/124 Test #156: mimo_port_test .............................   Passed    2.05 sec
+        Start 157: mimo_native_mtp_test
+124/124 Test #157: mimo_native_mtp_test .......................   Passed    1.75 sec
+
+90% tests passed, 13 tests failed out of 124
+
+Label Time Summary:
+checkpoint    =  24.48 sec*proc (1 test)
+fixture       =  28.80 sec*proc (11 tests)
+gpu           = 499.32 sec*proc (113 tests)
+rdma          = 148.41 sec*proc (21 tests)
+
+Total Test time (real) = 528.19 sec
+
+The following tests FAILED:
+	 27 - mimo_chat_template_test (Failed)
+	 63 - dsv41_forward_generate (Failed)
+	 64 - dsv41_forward_test_e2e (Failed)
+	 65 - dsv41_forward_generate_teacher (Failed)
+	 66 - dsv41_forward_test (Failed)
+	 67 - dsv41_forward_generate_bounded (Failed)
+	 68 - dsv41_forward_test_bounded_e2e (Failed)
+	 69 - dsv41_forward_generate_teacher_bounded (Failed)
+	 70 - dsv41_forward_test_bounded (Failed)
+	 86 - mimo_forward_generate (Failed)
+	 87 - mimo_forward_test_e2e (Failed)
+	 88 - mimo_forward_generate_teacher (Failed)
+	 89 - mimo_forward_test (Failed)
+Errors while running CTest

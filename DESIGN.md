@@ -1591,6 +1591,15 @@ previous dispatch, and the BF16 head is unaffected. The
 covers native one- and two-Spark deployments, the YaRN recipe, dispatch
 boundaries, repeated teacher-forced scoring and short prefills.
 
+Plain Qwen prefills with an FP8 head compute only the final vocabulary row.
+The scale-GEMM launcher selects the kernel using the original chunk length
+before narrowing execution to that row, so GEMV chunks and large tensor-core
+products retain their respective accumulation orders. Streaming-MMA chunks
+inside the decode envelope, BF16 heads, grouped prefills and callers that
+read every row keep the full head. `DGPP_PREFILL_HEAD_ALL_ROWS=1` restores
+the full head for comparison. The [prefill-head record](benchmarks/results/2026-09-24-pr43-prefill-head.md)
+describes the regression checks across the 128-row dispatch boundary.
+
 *Companions and the prefetch windows.* `WeightPrefetcher::add` coalesces a
 window's adds and bridges holes of up to 2 MB between them — a read of
 whatever lies between, which inside one layer image is a neighbouring tensor
