@@ -420,6 +420,10 @@ add_test(NAME qwen_forward_fixture COMMAND qwen_forward_test --write-fixture ${Q
 add_test(NAME qwen_plan_check COMMAND qwen_forward_test --plan-check)
 add_test(NAME qwen_forward_smoke COMMAND qwen_forward_test --smoke ${QWEN_FORWARD_FIXTURE})
 set_tests_properties(qwen_forward_smoke PROPERTIES DEPENDS qwen_forward_fixture)
+add_test(NAME qwen_qsa_prefill
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda/qwen_qsa_prefill_test.py
+          $<TARGET_FILE:qwen_forward_test>)
+set_tests_properties(qwen_qsa_prefill PROPERTIES RUN_SERIAL TRUE TIMEOUT 180)
 # The same model under the engine's YaRN knob (engine.rope_scaling, factor 2
 # over the fixture's 4096 native positions): the table, the mscale and the
 # lifted ceiling through a whole forward, and logits that differ from the

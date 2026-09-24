@@ -18,6 +18,16 @@ streaming top-k. Both expand the same sorted pool ids with the existing
 workspace and captured graph shape. See the
 [selection measurements](benchmarks/results/2026-09-21-qwen-qsa-select.md).
 
+QSA prefills of at least 128 rows use one warp per query and KV-head group
+when the head dimension is 256 and each KV head serves at most 16 query heads.
+The warp gathers 16 selected tokens at a time and keeps the online softmax
+in registers, using BF16 tensor-core products for QK and PV. It writes the
+normalized output directly, bypassing the split-partial combine launch.
+Decode, shorter prefills and unsupported groups use the existing partial
+kernels. `DGPP_QSA_WARP=0` selects those kernels for all rows. The numerical
+comparison and dispatch-boundary checks are recorded in the
+[warp-prefill validation](benchmarks/results/2026-09-24-qsa-warp-review.md).
+
 Use [PLAN.md](PLAN.md) for implementation status and
 [operations](docs/operations.md) for deployment. Dated measurements here
 explain design choices; current benchmark tables and reproduction commands
