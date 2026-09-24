@@ -1,0 +1,7 @@
+2026-09-24 03:09:13.687 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 108.0 of 121.6 GiB, host available 116.3 GiB
+2026-09-24 03:09:13.828 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-24 03:09:13.833 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-09-24 03:09:14.319 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 107.4 of 121.6 GiB, host available 115.7 GiB
+2026-09-24 03:09:14.444 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-09-24 03:09:14.451 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+[FAIL] prefill head differs from full head: T=129 fp8=1 mma=0

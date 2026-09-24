@@ -1,0 +1,25 @@
+2026-09-24 03:23:52.555 INFO  tokenizer: loaded vocab 248044 merges 247587 added 33 (revision 0x53952643d9dcd76d; qwen pattern, NFC, ignore_merges false)
+2026-09-24 03:23:52.682 INFO  tokenizer: loaded vocab 248044 merges 247587 added 33 (revision 0x53952643d9dcd76d; qwen pattern, NFC, ignore_merges false)
+2026-09-24 03:23:53.037 INFO  tokenizer: loaded vocab 248044 merges 247587 added 33 (revision 0x53952643d9dcd76d; qwen pattern, NFC, ignore_merges false)
+2026-09-24 03:23:53.143 INFO  tokenizer: loaded vocab 248044 merges 247587 added 33 (revision 0x53952643d9dcd76d; qwen pattern, NFC, ignore_merges false)
+2026-09-24 03:23:53.503 INFO  tokenizer: loaded vocab 248044 merges 247587 added 33 (revision 0x53952643d9dcd76d; qwen pattern, NFC, ignore_merges false)
+2026-09-24 03:23:53.505 INFO  glm_chat_template_test: 20/20 cases exact (render + ids)
+2026-09-24 03:23:53.531 INFO  glm_tool_call_render_encode_parse_roundTrip: GLM format only; the Qwen corpus has its own gate
+2026-09-24 03:23:53.612 INFO  tokenizer: loaded vocab 248044 merges 247587 added 33 (revision 0x53952643d9dcd76d; qwen pattern, NFC, ignore_merges false)
+2026-09-24 03:23:53.613 INFO  qwen_chat_template_test: 4 tool-call turns (5 calls) round-trip render -> encode -> parse
+2026-09-24 03:23:53.719 INFO  tokenizer: loaded vocab 248044 merges 247587 added 33 (revision 0x53952643d9dcd76d; qwen pattern, NFC, ignore_merges false)
+2026-09-24 03:23:53.759 INFO  glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer: GLM format only; the Qwen corpus has its own gate
+2026-09-24 03:23:53.759 INFO  json grammar: the GLM config; the Qwen corpus has its own gate
+[ OK ] qwen_reasoning_effort_renders_each_level
+[ OK ] structured_output_with_tools_over_the_real_tokenizer
+[ OK ] reasoning_effort_edge_nativeControlsForEveryCheckpoint
+[ OK ] custom_tools_and_references_over_the_real_tokenizer
+[ OK ] glm_chat_template_differential_goldens
+[ OK ] glm_tool_call_render_encode_parse_roundTrip
+[ OK ] qwen_tool_call_render_encode_parse_roundTrip
+[FAIL] qwen_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer: tool_call_and_response: id 271 (
+
+) at position 8 refused in state top
+[ OK ] glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer
+[ OK ] glm_json_grammar_accepts_tokenized_documents_over_the_real_tokenizer
+10 tests, 1 failed

@@ -1,0 +1,58 @@
+Internal ctest changing into directory: /tmp/dgpp-pr43-followup/build-ci
+Test project /tmp/dgpp-pr43-followup/build-ci
+    Start  18: tokenizer_test
+1/9 Test  #18: tokenizer_test ...................   Passed    0.29 sec
+    Start  19: qwen_tokenizer_test
+2/9 Test  #19: qwen_tokenizer_test ..............   Passed    0.22 sec
+    Start  20: dsv41_tokenizer_test
+3/9 Test  #20: dsv41_tokenizer_test .............   Passed    0.11 sec
+    Start  21: dsv41_prompt_test
+4/9 Test  #21: dsv41_prompt_test ................   Passed    0.11 sec
+    Start  22: glm4_tokenizer_test
+5/9 Test  #22: glm4_tokenizer_test ..............   Passed    0.25 sec
+    Start  25: chat_template_test
+6/9 Test  #25: chat_template_test ...............   Passed    2.53 sec
+    Start  26: qwen_chat_template_test
+7/9 Test  #26: qwen_chat_template_test ..........***Failed    1.66 sec
+2026-09-24 03:22:59.906 INFO  tokenizer: loaded vocab 248044 merges 247587 added 33 (revision 0x53952643d9dcd76d; qwen pattern, NFC, ignore_merges false)
+2026-09-24 03:23:00.076 INFO  tokenizer: loaded vocab 248044 merges 247587 added 33 (revision 0x53952643d9dcd76d; qwen pattern, NFC, ignore_merges false)
+2026-09-24 03:23:00.468 INFO  tokenizer: loaded vocab 248044 merges 247587 added 33 (revision 0x53952643d9dcd76d; qwen pattern, NFC, ignore_merges false)
+2026-09-24 03:23:00.591 INFO  tokenizer: loaded vocab 248044 merges 247587 added 33 (revision 0x53952643d9dcd76d; qwen pattern, NFC, ignore_merges false)
+2026-09-24 03:23:01.028 INFO  tokenizer: loaded vocab 248044 merges 247587 added 33 (revision 0x53952643d9dcd76d; qwen pattern, NFC, ignore_merges false)
+2026-09-24 03:23:01.033 INFO  glm_chat_template_test: 20/20 cases exact (render + ids)
+2026-09-24 03:23:01.072 INFO  glm_tool_call_render_encode_parse_roundTrip: GLM format only; the Qwen corpus has its own gate
+2026-09-24 03:23:01.174 INFO  tokenizer: loaded vocab 248044 merges 247587 added 33 (revision 0x53952643d9dcd76d; qwen pattern, NFC, ignore_merges false)
+2026-09-24 03:23:01.175 INFO  qwen_chat_template_test: 4 tool-call turns (5 calls) round-trip render -> encode -> parse
+2026-09-24 03:23:01.322 INFO  tokenizer: loaded vocab 248044 merges 247587 added 33 (revision 0x53952643d9dcd76d; qwen pattern, NFC, ignore_merges false)
+2026-09-24 03:23:01.374 INFO  glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer: GLM format only; the Qwen corpus has its own gate
+2026-09-24 03:23:01.374 INFO  json grammar: the GLM config; the Qwen corpus has its own gate
+[ OK ] qwen_reasoning_effort_renders_each_level
+[ OK ] structured_output_with_tools_over_the_real_tokenizer
+[ OK ] reasoning_effort_edge_nativeControlsForEveryCheckpoint
+[ OK ] custom_tools_and_references_over_the_real_tokenizer
+[ OK ] glm_chat_template_differential_goldens
+[ OK ] glm_tool_call_render_encode_parse_roundTrip
+[ OK ] qwen_tool_call_render_encode_parse_roundTrip
+[FAIL] qwen_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer: tool_call_and_response: id 271 (
+
+) at position 8 refused in state top
+[ OK ] glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer
+[ OK ] glm_json_grammar_accepts_tokenized_documents_over_the_real_tokenizer
+10 tests, 1 failed
+
+    Start  27: glm4_chat_template_test
+8/9 Test  #27: glm4_chat_template_test ..........   Passed    2.16 sec
+    Start 158: glm_vision_frontend_test
+9/9 Test #158: glm_vision_frontend_test .........   Passed    0.32 sec
+
+89% tests passed, 1 tests failed out of 9
+
+Label Time Summary:
+checkpoint    =   7.65 sec*proc (9 tests)
+host          =   7.65 sec*proc (9 tests)
+
+Total Test time (real) =   7.65 sec
+
+The following tests FAILED:
+	 26 - qwen_chat_template_test (Failed)
+Errors while running CTest

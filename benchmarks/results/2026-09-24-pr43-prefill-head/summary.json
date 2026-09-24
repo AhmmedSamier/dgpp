@@ -1,0 +1,75 @@
+{
+  "source_commit": "c22630d2cbc9e7208a0477a687e64809f1090594",
+  "base_commit": "92cfc68",
+  "gpu": "NVIDIA GB10",
+  "kernel_timing": {
+    "method": "CUDA events, one warmup and median of five timed calls; synthetic BF16 activations and block FP8 weights",
+    "m": 8192,
+    "n": 124160,
+    "k": 2560,
+    "full_head_ms": 236.237,
+    "last_row_same_kernel_ms": 2.086,
+    "last_row_tile_ms": 2.423,
+    "last_row_gemv_ms": 1.946,
+    "last_row_streaming_mma_ms": 1.866,
+    "same_kernel_differing_logits": 0,
+    "tile_differing_logits": 0,
+    "gemv_differing_logits": 123683,
+    "streaming_mma_differing_logits": 113446
+  },
+  "negative_control": {
+    "result": "expected failure",
+    "first_failure": "T=129 fp8=1 mma=0",
+    "method": "the submitted one-row GEMV call substituted into the new model regression"
+  },
+  "model_regressions": {
+    "passed": 2,
+    "note": "capacity 512 prevents an unintended 256+1 chunk split in the 257-token case"
+  },
+  "host_tests": {
+    "passed": 24,
+    "failed": 0
+  },
+  "ctest": {
+    "total": 160,
+    "passed": 158,
+    "pre_existing_failures": [
+      "mimo_chat_template_test",
+      "qwen_chat_template_test"
+    ],
+    "baseline_commit": "92cfc68",
+    "reference_tests_rerun_with_numpy": 12
+  },
+  "serving_comparison": {
+    "world_size": 2,
+    "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+    "prompt_tokens": [
+      5,
+      196,
+      4223,
+      8423
+    ],
+    "completion_tokens_per_prompt": 32,
+    "exact_fields": [
+      "text",
+      "logprobs",
+      "usage",
+      "finish_reason"
+    ],
+    "optimized_opstream_md5": "09ebabb68ae32f39dce552177818f852",
+    "all_rows_opstream_md5": "b539b3ef744ec39f242d3c07022f81fd"
+  },
+  "api_check": {
+    "result": "passed",
+    "prefix_cache_gib": 1,
+    "opstream_md5": "3f65500c6a77687719f13b8afb91f58c"
+  },
+  "original_deployment_restored": {
+    "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+    "ranks_running": 4,
+    "configuration_unchanged": true,
+    "binary_sha256": "4638e3c595a2765d6d50c4626a9fef3aa2aa82936c6c50e3d0eec871fcde8e00",
+    "health_http_status": 200,
+    "models_http_status": 200
+  }
+}

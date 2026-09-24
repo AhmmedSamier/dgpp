@@ -1,0 +1,15 @@
+m=129 n=124160 k=2560 mode=full_dense differing_logits=0 median_ms=5.931
+m=129 n=124160 k=2560 mode=last_dense_128 differing_logits=0 median_ms=2.086
+m=129 n=124160 k=2560 mode=last_tile_16 differing_logits=0 median_ms=2.417
+m=129 n=124160 k=2560 mode=last_gemv differing_logits=123595 median_ms=1.932
+m=129 n=124160 k=2560 mode=last_streaming_mma differing_logits=114094 median_ms=1.801
+m=4096 n=124160 k=2560 mode=full_dense differing_logits=0 median_ms=119.709
+m=4096 n=124160 k=2560 mode=last_dense_128 differing_logits=0 median_ms=2.104
+m=4096 n=124160 k=2560 mode=last_tile_16 differing_logits=0 median_ms=2.444
+m=4096 n=124160 k=2560 mode=last_gemv differing_logits=123502 median_ms=1.938
+m=4096 n=124160 k=2560 mode=last_streaming_mma differing_logits=113715 median_ms=1.877
+m=8192 n=124160 k=2560 mode=full_dense differing_logits=0 median_ms=236.237
+m=8192 n=124160 k=2560 mode=last_dense_128 differing_logits=0 median_ms=2.086
+m=8192 n=124160 k=2560 mode=last_tile_16 differing_logits=0 median_ms=2.423
+m=8192 n=124160 k=2560 mode=last_gemv differing_logits=123683 median_ms=1.946
+m=8192 n=124160 k=2560 mode=last_streaming_mma differing_logits=113446 median_ms=1.866

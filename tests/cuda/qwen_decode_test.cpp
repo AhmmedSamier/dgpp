@@ -162,7 +162,9 @@ int run_prefill_head(const std::string& dir) {
     dgpp::QwenLayerStream::set_dense_weights_fp8(fp8);
     for (const bool mma : {false, true}) {
       if (!fp8 && mma) continue;
-      QwenModel model(cfg, dir, 257, 512, QwenResidency::Resident, nullptr, 0, 1, 1, false, 16, mma);
+      // Capacity must exceed the longest prompt after alignment: 257 would
+      // round the prefill chunk to 256 and compare two walks with one.
+      QwenModel model(cfg, dir, 512, 512, QwenResidency::Resident, nullptr, 0, 1, 1, false, 16, mma);
       const int vocab = model.lm_vocab_count();
       for (const int length : {1, 4, 5, 8, 9, 16, 17, 127, 128, 129, 257}) {
         const auto prompt = smoke_tokens(cfg, length, 0x4300 + length);
