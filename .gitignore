@@ -18,6 +18,10 @@ install/
 # cache; regenerate with tools/make_shardspec.py or tools/checkpoint_audit.py.
 artifacts/
 
+# Large raw captures from the issue #4 investigations overwhelm workspace
+# snapshots. Keep the reports and scripts visible, but skip generated dumps.
+/benchmarks/results/2026-09-23-issue4-*/raw/
+
 # --- Python tooling -------------------------------------------------------------
 __pycache__/
 *.py[cod]
