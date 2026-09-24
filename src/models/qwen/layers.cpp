@@ -33,6 +33,18 @@ T* dev_alloc(size_t n) {
   return p;
 }
 
+bool use_chunked_gdn(int tokens, int k_dim, int v_dim) {
+  static const bool enabled = [] {
+    const char* e = std::getenv("DGPP_GDN_CHUNKED");
+    return !(e != nullptr && e[0] == '0');
+  }();
+  static const int min_tokens = [] {
+    const char* e = std::getenv("DGPP_GDN_CHUNKED_MIN");
+    return e != nullptr ? std::atoi(e) : 64;
+  }();
+  return enabled && tokens >= min_tokens && gdn_chunked_supported(k_dim, v_dim);
+}
+
 void gemm_bf16(const QwenGemmWorkspace& g, const uint16_t* act, int64_t act_stride,
                const uint16_t* w, void* out, GemmOut out_type, int m, int n, int k,
                cudaStream_t stream) {
@@ -271,6 +283,10 @@ QwenGdnLayer::QwenGdnLayer(const QwenGdnResident& w, const QwenGemmWorkspace& ge
   b_ = dev_alloc<uint16_t>(M * static_cast<size_t>(lv_));
   core_ = dev_alloc<uint16_t>(M * static_cast<size_t>(lv_) * v_dim_);
   normed_ = dev_alloc<uint16_t>(M * static_cast<size_t>(lv_) * v_dim_);
+  if (use_chunked_gdn(max_tokens_, k_dim_, v_dim_)) {
+    chunked_ws_bytes_ = gdn_chunked_workspace_bytes(max_tokens_, lv_);
+    chunked_ws_ = dev_alloc<uint8_t>(chunked_ws_bytes_);
+  }
 }
 
 QwenGdnLayer::~QwenGdnLayer() {
@@ -281,6 +297,7 @@ QwenGdnLayer::~QwenGdnLayer() {
   cudaFree(b_);
   cudaFree(core_);
   cudaFree(normed_);
+  cudaFree(chunked_ws_);
 }
 
 void QwenGdnLayer::rebind(const QwenGdnResident& w) {
@@ -383,17 +400,9 @@ void QwenGdnLayer::enqueue(const uint16_t* x, float* recurrent_state, uint16_t* 
   // Walks of fewer than DGPP_GDN_CHUNKED_MIN rows (default 64) and
   // speculative snapshot rows keep the recurrence; DGPP_GDN_CHUNKED=0 keeps
   // it everywhere.
-  static const bool chunked = [] {
-    const char* e = std::getenv("DGPP_GDN_CHUNKED");
-    return !(e != nullptr && e[0] == '0');
-  }();
-  static const int chunked_min = [] {
-    const char* e = std::getenv("DGPP_GDN_CHUNKED_MIN");
-    return e != nullptr ? std::atoi(e) : 64;
-  }();
-  if (chunked && tokens >= chunked_min && rec_snap.states == nullptr && gdn_chunked_supported(k_dim_, v_dim_))
-    gdn_chunked_fwd(qkvc_, a_, lv_, b_, lv_, w_.a_log, w_.dt_bias, recurrent_state, core_,
-                    tokens, lv_, lv_ / lk_, k_dim_, v_dim_, scale_, stream);
+  if (use_chunked_gdn(tokens, k_dim_, v_dim_) && rec_snap.states == nullptr)
+    gdn_chunked_fwd(qkvc_, a_, lv_, b_, lv_, w_.a_log, w_.dt_bias, recurrent_state, core_, tokens,
+                    lv_, lv_ / lk_, k_dim_, v_dim_, scale_, chunked_ws_, chunked_ws_bytes_, stream);
   else
     gdn_recurrent_fwd(qkvc_, a_, lv_, b_, lv_, w_.a_log, w_.dt_bias, recurrent_state, core_, tokens,
                       lv_, lv_ / lk_, k_dim_, v_dim_, scale_, stream, rec_snap);
@@ -435,7 +444,10 @@ size_t QwenGdnLayer::scratch_bytes(const QwenTextConfig& cfg, int local_key_head
   const size_t lk = static_cast<size_t>(local_key_heads), lv = static_cast<size_t>(local_value_heads);
   const size_t K = static_cast<size_t>(cfg.gdn_key_head_dim), V = static_cast<size_t>(cfg.gdn_value_head_dim);
   const size_t C = 2 * lk * K + lv * V;
-  return M * (2 * C + 3 * lv * V + 2 * lv) * 2;  // qkv, qkvc, z, core, normed, a, b
+  const size_t chunked = use_chunked_gdn(max_tokens, cfg.gdn_key_head_dim, cfg.gdn_value_head_dim)
+                             ? gdn_chunked_workspace_bytes(max_tokens, local_value_heads)
+                             : 0;
+  return M * (2 * C + 3 * lv * V + 2 * lv) * 2 + chunked;  // qkv, qkvc, z, core, normed, a, b
 }
 
 // ---- QwenQsaLayer ----------------------------------------------------------------

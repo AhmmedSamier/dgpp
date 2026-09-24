@@ -1493,7 +1493,7 @@ set_tests_properties(glm_pick_test PROPERTIES SKIP_RETURN_CODE 2)
 # small geometry, swiglu clamps, accumulation order, determinism.
 add_executable(gdn_chunk_test tests/cuda/gdn_chunk_test.cu)
 target_include_directories(gdn_chunk_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(gdn_chunk_test PRIVATE dgpp_models_glm_loader dgpp_models_glm dgpp_models_kda CUDA::cudart)
+target_link_libraries(gdn_chunk_test PRIVATE dgpp_models_kda CUDA::cudart Threads::Threads)
 dgpp_set_common(gdn_chunk_test)
 add_test(NAME gdn_chunk_test COMMAND gdn_chunk_test)
 

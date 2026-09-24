@@ -1,131 +1,232 @@
-// The chunked GDN prefill (src/kernels/gdn_chunk.cu) against the sequential
-// recurrence (gdn_recurrent_fwd): output and final state relative l2, and speed.
+// Chunked GDN parity, workspace isolation/lifetime, and kernel timing.
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <random>
+#include <thread>
 #include <vector>
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
 #include "common/cuda_check.hpp"
+#include "common/test.hpp"
+#include "kda_test_helpers.hpp"
 #include "kernels/gdn_chunk.hpp"
 #include "kernels/kda.hpp"
 
 using namespace dgpp;
+using dgpp::kda_test::DevBuf;
 
-static uint16_t bf16(float f) {
+namespace {
+
+uint16_t bf16(float f) {
   const __nv_bfloat16 b = __float2bfloat16_rn(f);
   uint16_t u;
   std::memcpy(&u, &b, 2);
   return u;
 }
-static float fbf(uint16_t u) {
+float fbf(uint16_t u) {
   uint32_t x = static_cast<uint32_t>(u) << 16;
   float f;
   std::memcpy(&f, &x, 4);
   return f;
 }
-template <typename T>
-static T* dev(const std::vector<T>& h) {
-  T* d = nullptr;
-  DGPP_CUDA_OK(cudaMalloc(&d, h.size() * sizeof(T)));
-  DGPP_CUDA_OK(cudaMemcpy(d, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice));
-  return d;
+void require(bool ok, const char* message) {
+  if (!ok) throw std::runtime_error(message);
 }
 
-static int run(int tokens, int heads, int kv_ratio, bool time_it) {
-  const int K = 128, V = 128, hk = heads / kv_ratio;
-  std::mt19937 rng(7 + tokens);
-  std::normal_distribution<float> nd(0.f, 1.f);
-  const size_t qs = static_cast<size_t>(2 * hk * K + heads * V);
-  std::vector<uint16_t> qkv(static_cast<size_t>(tokens) * qs), a(static_cast<size_t>(tokens) * heads),
-      b(static_cast<size_t>(tokens) * heads);
-  for (auto& x : qkv) x = bf16(nd(rng));
-  for (auto& x : a) x = bf16(nd(rng));
-  for (auto& x : b) x = bf16(nd(rng));
-  std::vector<float> alog(heads), dtb(heads), s0(static_cast<size_t>(heads) * V * K);
-  std::uniform_real_distribution<float> u(0.f, 1.f);
-  for (int h = 0; h < heads; ++h) {
-    alog[h] = std::log(1.f + 15.f * u(rng));
-    dtb[h] = nd(rng) * 0.5f;
+struct Stream {
+  cudaStream_t s = nullptr;
+  Stream() { DGPP_CUDA_OK(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking)); }
+  ~Stream() { cudaStreamDestroy(s); }
+  Stream(const Stream&) = delete;
+  Stream& operator=(const Stream&) = delete;
+};
+
+struct Result {
+  std::vector<uint16_t> output;
+  std::vector<float> state;
+};
+
+struct Problem {
+  static constexpr int K = 128, V = 128;
+  int tokens, heads, kv_ratio;
+  float scale = 1.f / std::sqrt(static_cast<float>(K));
+  DevBuf qkv, a, b, alog, dtb, initial, state, output, workspace;
+
+  Problem(int t, int h, int ratio, int seed)
+      : tokens(t),
+        heads(h),
+        kv_ratio(ratio),
+        qkv(static_cast<size_t>(t) * (2 * h / ratio * K + h * V) * 2),
+        a(static_cast<size_t>(t) * h * 2),
+        b(a.bytes),
+        alog(h * 4),
+        dtb(h * 4),
+        initial(static_cast<size_t>(h) * V * K * 4),
+        state(initial.bytes),
+        output(static_cast<size_t>(t) * h * V * 2),
+        workspace(gdn_chunked_workspace_bytes(t, h)) {
+    std::mt19937 rng(seed);
+    std::normal_distribution<float> nd(0.f, 1.f);
+    for (DevBuf* buffer : {&qkv, &a, &b}) {
+      std::vector<uint16_t> values(buffer->bytes / 2);
+      for (auto& x : values) x = bf16(nd(rng));
+      buffer->upload(values.data(), buffer->bytes);
+    }
+    std::vector<float> ha(h), hd(h), hs(initial.bytes / 4);
+    std::uniform_real_distribution<float> u(0.f, 1.f);
+    for (int i = 0; i < h; ++i) {
+      ha[i] = std::log(1.f + 15.f * u(rng));
+      hd[i] = nd(rng) * 0.5f;
+    }
+    for (auto& x : hs) x = nd(rng) * 0.1f;
+    alog.upload(ha.data(), alog.bytes);
+    dtb.upload(hd.data(), dtb.bytes);
+    initial.upload(hs.data(), initial.bytes);
   }
-  for (auto& x : s0) x = nd(rng) * 0.1f;
-  const float scale = 1.f / std::sqrt(static_cast<float>(K));
-  auto* dq = dev(qkv);
-  auto* da = dev(a);
-  auto* db = dev(b);
-  auto* dal = dev(alog);
-  auto* ddt = dev(dtb);
-  auto* st_ref = dev(s0);
-  auto* st_chk = dev(s0);
-  uint16_t *o_ref = nullptr, *o_chk = nullptr;
-  const size_t on = static_cast<size_t>(tokens) * heads * V;
-  DGPP_CUDA_OK(cudaMalloc(&o_ref, on * 2));
-  DGPP_CUDA_OK(cudaMalloc(&o_chk, on * 2));
-  gdn_recurrent_fwd(dq, da, heads, db, heads, dal, ddt, st_ref, o_ref, tokens, heads, kv_ratio, K, V, scale,
-                    nullptr);
-  gdn_chunked_fwd(dq, da, heads, db, heads, dal, ddt, st_chk, o_chk, tokens, heads, kv_ratio, K, V, scale, nullptr);
-  DGPP_CUDA_OK(cudaDeviceSynchronize());
-  std::vector<uint16_t> hr(on), hc(on);
-  std::vector<float> sr(s0.size()), sc(s0.size());
-  DGPP_CUDA_OK(cudaMemcpy(hr.data(), o_ref, on * 2, cudaMemcpyDeviceToHost));
-  DGPP_CUDA_OK(cudaMemcpy(hc.data(), o_chk, on * 2, cudaMemcpyDeviceToHost));
-  DGPP_CUDA_OK(cudaMemcpy(sr.data(), st_ref, sr.size() * 4, cudaMemcpyDeviceToHost));
-  DGPP_CUDA_OK(cudaMemcpy(sc.data(), st_chk, sc.size() * 4, cudaMemcpyDeviceToHost));
+
+  void reset(cudaStream_t stream) {
+    DGPP_CUDA_OK(
+        cudaMemcpyAsync(state.p, initial.p, state.bytes, cudaMemcpyDeviceToDevice, stream));
+  }
+  void chunked(cudaStream_t stream) {
+    gdn_chunked_fwd(qkv.p, a.p, heads, b.p, heads, alog.as<float>(), dtb.as<float>(),
+                    state.as<float>(), output.p, tokens, heads, kv_ratio, K, V, scale, workspace.p,
+                    workspace.bytes, stream);
+  }
+  void recurrent(cudaStream_t stream) {
+    gdn_recurrent_fwd(qkv.p, a.p, heads, b.p, heads, alog.as<float>(), dtb.as<float>(),
+                      state.as<float>(), output.p, tokens, heads, kv_ratio, K, V, scale, stream);
+  }
+  Result result(cudaStream_t stream) {
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+    Result r{std::vector<uint16_t>(output.bytes / 2), std::vector<float>(state.bytes / 4)};
+    output.download(r.output.data(), output.bytes);
+    state.download(r.state.data(), state.bytes);
+    return r;
+  }
+};
+
+void run(int tokens, int heads, int kv_ratio, bool time_it) {
+  Problem p(tokens, heads, kv_ratio, 7 + tokens);
+  Stream stream;
+  p.reset(stream.s);
+  p.recurrent(stream.s);
+  const Result ref = p.result(stream.s);
+  p.reset(stream.s);
+  p.chunked(stream.s);
+  const Result got = p.result(stream.s);
   double on2 = 0, od2 = 0, sn2 = 0, sd2 = 0;
-  for (size_t i = 0; i < on; ++i) {
-    const double r = fbf(hr[i]), c = fbf(hc[i]);
+  for (size_t i = 0; i < ref.output.size(); ++i) {
+    const double r = fbf(ref.output[i]), c = fbf(got.output[i]);
     on2 += r * r;
     od2 += (r - c) * (r - c);
   }
-  for (size_t i = 0; i < sr.size(); ++i) {
-    sn2 += double(sr[i]) * sr[i];
-    sd2 += (double(sr[i]) - sc[i]) * (double(sr[i]) - sc[i]);
+  for (size_t i = 0; i < ref.state.size(); ++i) {
+    sn2 += double(ref.state[i]) * ref.state[i];
+    sd2 += (double(ref.state[i]) - got.state[i]) * (double(ref.state[i]) - got.state[i]);
   }
   const double eo = std::sqrt(od2 / on2), es = std::sqrt(sd2 / sn2);
-  std::printf("[ .. ] tokens %d heads %d kv_ratio %d: out rel l2 %.4g, state rel l2 %.4g\n", tokens, heads, kv_ratio,
-              eo, es);
-  int fails = 0;
-  if (!(eo < 2e-2) || !(es < 2e-2)) {
-    std::printf("[FAIL] chunked GDN differs from the recurrence beyond bf16 tolerance\n");
-    ++fails;
-  }
+  std::printf("[ .. ] tokens %d heads %d kv_ratio %d: out rel l2 %.4g, state rel l2 %.4g\n", tokens,
+              heads, kv_ratio, eo, es);
+  require(eo < 2e-2 && es < 2e-2, "chunked GDN exceeds bf16 tolerance");
   if (time_it) {
     cudaEvent_t e0, e1;
-    cudaEventCreate(&e0);
-    cudaEventCreate(&e1);
-    auto t = [&](auto f) {
+    DGPP_CUDA_OK(cudaEventCreate(&e0));
+    DGPP_CUDA_OK(cudaEventCreate(&e1));
+    auto time = [&](auto f) {
       f();
-      cudaEventRecord(e0);
+      DGPP_CUDA_OK(cudaEventRecord(e0, stream.s));
       for (int i = 0; i < 10; ++i) f();
-      cudaEventRecord(e1);
-      cudaEventSynchronize(e1);
+      DGPP_CUDA_OK(cudaEventRecord(e1, stream.s));
+      DGPP_CUDA_OK(cudaEventSynchronize(e1));
       float ms = 0;
-      cudaEventElapsedTime(&ms, e0, e1);
+      DGPP_CUDA_OK(cudaEventElapsedTime(&ms, e0, e1));
       return ms / 10;
     };
-    const float tr = t([&] {
-      gdn_recurrent_fwd(dq, da, heads, db, heads, dal, ddt, st_ref, o_ref, tokens, heads, kv_ratio, K, V, scale,
-                        nullptr);
-    });
-    const float tc = t([&] {
-      gdn_chunked_fwd(dq, da, heads, db, heads, dal, ddt, st_chk, o_chk, tokens, heads, kv_ratio, K, V, scale,
-                      nullptr);
-    });
-    std::printf("[ .. ] %d tokens x %d heads: recurrent %.3f ms, chunked %.3f ms (%.2fx)\n", tokens, heads, tr, tc,
-                tr / tc);
+    const float tr = time([&] { p.recurrent(stream.s); });
+    const float tc = time([&] { p.chunked(stream.s); });
+    DGPP_CUDA_OK(cudaEventDestroy(e0));
+    DGPP_CUDA_OK(cudaEventDestroy(e1));
+    std::printf("[ .. ] %d tokens x %d heads: recurrent %.3f ms, chunked %.3f ms (%.2fx)\n", tokens,
+                heads, tr, tc, tr / tc);
   }
-  return fails;
+}
+
+}  // namespace
+
+DGPP_TEST(gdn_chunk_recurrence_parity) {
+  run(1, 3, 3, false);
+  run(63, 3, 3, false);
+  run(64, 3, 3, false);
+  run(65, 3, 3, false);
+  run(300, 6, 3, false);
+  run(1000, 6, 3, false);
+  run(8192, 24, 3, true);
+}
+
+DGPP_TEST(gdn_chunk_concurrent_streams) {
+  Problem a(8192, 3, 3, 123), b(8192, 3, 3, 456);
+  Stream sa, sb;
+  a.reset(sa.s);
+  a.chunked(sa.s);
+  const Result ref_a = a.result(sa.s);
+  b.reset(sb.s);
+  b.chunked(sb.s);
+  const Result ref_b = b.result(sb.s);
+  // All allocations precede the overlap: cudaMalloc/cudaFree must not
+  // accidentally serialize the calls and hide workspace aliasing.
+  for (int trial = 0; trial < 3; ++trial) {
+    a.reset(sa.s);
+    a.chunked(sa.s);
+    b.reset(sb.s);
+    b.chunked(sb.s);
+    const Result got_a = a.result(sa.s), got_b = b.result(sb.s);
+    require(got_a.output == ref_a.output && got_a.state == ref_a.state,
+            "stream A differs from its serialized output/state");
+    require(got_b.output == ref_b.output && got_b.state == ref_b.state,
+            "stream B differs from its serialized output/state");
+  }
+}
+
+DGPP_TEST(gdn_chunk_workspace_lifetime) {
+  // Run under compute-sanitizer --leak-check full. Each worker releases its
+  // own buffers before exit; a hidden TLS allocation would leak per worker.
+  for (int trial = 0; trial < 3; ++trial) {
+    std::exception_ptr error;
+    std::thread worker([&] {
+      try {
+        run(8192, 24, 3, false);
+      } catch (...) {
+        error = std::current_exception();
+      }
+    });
+    worker.join();
+    if (error) std::rethrow_exception(error);
+  }
+}
+
+DGPP_TEST(gdn_chunk_workspace_bounds) {
+  Problem p(65, 3, 3, 123);
+  auto rejected = [&](void* workspace, size_t bytes) {
+    bool threw = false;
+    try {
+      gdn_chunked_fwd(p.qkv.p, p.a.p, p.heads, p.b.p, p.heads, p.alog.as<float>(),
+                      p.dtb.as<float>(), p.state.as<float>(), p.output.p, p.tokens, p.heads,
+                      p.kv_ratio, p.K, p.V, p.scale, workspace, bytes, nullptr);
+    } catch (const std::invalid_argument&) {
+      threw = true;
+    }
+    require(threw, "invalid workspace was accepted");
+  };
+  rejected(nullptr, p.workspace.bytes);
+  rejected(p.workspace.p, p.workspace.bytes - 1);
+  rejected(p.workspace.as<uint8_t>() + 1, p.workspace.bytes);
 }
 
 int main() {
-  int fails = 0;
-  fails += run(64, 3, 3, false);
-  fails += run(300, 6, 3, false);   // a ragged tail chunk
-  fails += run(1000, 6, 3, false);
-  fails += run(8192, 24, 3, true);  // one rank's heads at a prefill chunk
-  std::printf(fails == 0 ? "[ OK ] gdn_chunk_test\n" : "[FAIL] gdn_chunk_test\n");
-  return fails == 0 ? 0 : 1;
+  return dgpp::test::run_all();
 }

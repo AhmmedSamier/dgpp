@@ -444,35 +444,35 @@ __global__ __launch_bounds__(kStateThreads) void gdn_chunk_state_kernel(
   for (int e = tid; e < BV * D; e += kStateThreads) st[e] = s32[e / D][e % D];
 }
 
-struct Workspace {
-  void* p = nullptr;
-  size_t bytes = 0;
-};
-// One scratch per host thread: every engine rank drives its model (and its
-// stream) from its own thread, so ranks sharing a process -- the loopback TP
-// worlds -- must not share it. Reuse within a thread is stream-ordered.
-thread_local Workspace g_ws;
-
 }  // namespace
 
 bool gdn_chunked_supported(int k_dim, int v_dim) { return k_dim == D && v_dim == D; }
 
+size_t gdn_chunked_workspace_bytes(int tokens, int heads) {
+  if (tokens <= 0) return 0;
+  if (heads <= 0)
+    throw std::invalid_argument("gdn_chunked_workspace_bytes: heads must be positive");
+  const size_t chunks = (static_cast<size_t>(tokens) + C - 1) / C;
+  const size_t blocks = static_cast<size_t>(heads) * chunks;
+  return blocks * (C * (4 * D + C) * sizeof(__nv_bfloat16) + sizeof(float));
+}
+
 void gdn_chunked_fwd(const void* qkv, const void* a_raw, int64_t a_row_stride, const void* beta_raw,
-                     int64_t beta_row_stride, const float* a_log, const float* dt_bias, float* state, void* out,
-                     int tokens, int heads, int kv_ratio, int k_dim, int v_dim, float scale, cudaStream_t stream) {
+                     int64_t beta_row_stride, const float* a_log, const float* dt_bias,
+                     float* state, void* out, int tokens, int heads, int kv_ratio, int k_dim,
+                     int v_dim, float scale, void* workspace, size_t workspace_bytes,
+                     cudaStream_t stream) {
   if (tokens <= 0) return;
   if (!gdn_chunked_supported(k_dim, v_dim)) throw std::invalid_argument("gdn_chunked_fwd: K = V = 128 only");
-  if (heads % kv_ratio != 0) throw std::invalid_argument("gdn_chunked_fwd: heads % kv_ratio");
-  const int chunks = (tokens + C - 1) / C;
+  if (heads <= 0 || kv_ratio <= 0 || heads % kv_ratio != 0)
+    throw std::invalid_argument("gdn_chunked_fwd: heads must be a positive multiple of kv_ratio");
+  if (!workspace || workspace_bytes < gdn_chunked_workspace_bytes(tokens, heads) ||
+      reinterpret_cast<uintptr_t>(workspace) % 16 != 0)
+    throw std::invalid_argument("gdn_chunked_fwd: workspace is too small or not 16-byte aligned");
+  const int chunks = 1 + (tokens - 1) / C;
   const size_t blocks = static_cast<size_t>(heads) * chunks;
   const size_t big = blocks * C * D, pn = blocks * C * C;
-  const size_t need = (4 * big + pn) * sizeof(__nv_bfloat16) + blocks * sizeof(float) + 1024;
-  if (need > g_ws.bytes) {
-    if (g_ws.p) DGPP_CUDA_OK(cudaFree(g_ws.p));
-    DGPP_CUDA_OK(cudaMalloc(&g_ws.p, need));
-    g_ws.bytes = need;
-  }
-  auto* w = static_cast<__nv_bfloat16*>(g_ws.p);
+  auto* w = static_cast<__nv_bfloat16*>(workspace);
   auto* u = w + big;
   auto* qg = u + big;
   auto* kd = qg + big;
