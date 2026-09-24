@@ -251,6 +251,7 @@ struct CollectiveBus::Impl {
   // submitter reads it (relaxed) for staging-handout rotation. Atomic so
   // that read is race-free by the letter, not just by the protocol.
   std::atomic<uint32_t> ctl_seq_counter{0};
+  std::atomic<uint64_t> completion_epoch{0};
   uint64_t ar_deadline_cycles = 0;  // cached device-clock rate conversion
   uint64_t ar_last_ready_seq = 0;   // one-shot ready-log gating (per bus)
   struct CollectiveFlight {
@@ -570,6 +571,7 @@ struct CollectiveBus::Impl {
   void finish_flight(std::shared_ptr<BusRequest> finished, bool ok,
                      const std::string& error) {
     if (!ok) coll_poisoned = true;
+    if (ok) completion_epoch.fetch_add(1, std::memory_order_release);
     coll = {};
     bulk = {};
     coll_active.store(false, std::memory_order_relaxed);
@@ -1523,6 +1525,7 @@ struct CollectiveBus::Impl {
         record_latency(BusMessageClass::kLatency,
                        elapsed_us(graph.flight.started_at));
         graph.flight = {};
+        completion_epoch.fetch_add(1, std::memory_order_release);
         *completed = true;
         return true;
       }
@@ -4633,6 +4636,10 @@ void CollectiveBus::stop() {
 
 double CollectiveBus::bulk_pace_gbps() const {
   return impl_->opt.bulk_pace_gbps < 0 ? 0.0 : impl_->opt.bulk_pace_gbps;
+}
+
+const std::atomic<uint64_t>& CollectiveBus::completion_epoch() const {
+  return impl_->completion_epoch;
 }
 
 BusStats CollectiveBus::stats() const {

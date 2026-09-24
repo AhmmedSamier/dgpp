@@ -32,6 +32,13 @@ revisions recorded with them.
 
 ## Serving support
 
+The engine watchdog observes successful collective completions inside model
+chunks, preventing a false timeout while tensor-parallel prefill is still
+advancing. Controlled TP2 regression and genuine-stall tests pass; a full
+261,120-token Qwen request also completes with the fix. The reporter's exact
+full-model failure remains unreproduced; see the
+[issue #45 investigation](benchmarks/results/2026-09-24-issue45/README.md).
+
 Serving keeps generation stop IDs separate from the model's trained EOS,
 preserving Qwen PLE padding and segmentation. The correction passes host tests
 and was exercised in a real TP2 replay. It does not resolve the near-limit

@@ -12,7 +12,8 @@ namespace dgpp::serve {
 
 // Rank 0's final serving backstop. Bus watchdogs cannot cover a model/driver
 // wait outside a collective, or a blocked bus progress thread. This thread
-// reads only atomics, including progress within an unchunked scheduler pass.
+// reads only atomics, including completed collectives within a model chunk
+// and completed chunks within an unchunked scheduler pass.
 // On failure the journal closes with the process; peers follow its death path.
 class EngineWatchdog {
  public:
@@ -31,16 +32,22 @@ class EngineWatchdog {
 
   explicit EngineWatchdog(
       const PrefillMonitor& prefill,
-      std::chrono::milliseconds timeout = std::chrono::seconds(120))
-      : thread_([this, &prefill, timeout](std::stop_token stop) {
+      std::chrono::milliseconds timeout = std::chrono::seconds(120),
+      const std::atomic<uint64_t>* collective_progress = nullptr)
+      : thread_([this, &prefill, timeout, collective_progress](std::stop_token stop) {
           uint64_t previous_work = 0;
           uint64_t previous_prefill = prefill.progress_epoch();
+          uint64_t previous_collective = collective_progress
+              ? collective_progress->load(std::memory_order_acquire) : 0;
           auto deadline = std::chrono::steady_clock::now() + timeout;
           while (!stop.stop_requested()) {
             const auto now = std::chrono::steady_clock::now();
             const uint64_t work = epoch_.load(std::memory_order_acquire);
             const uint64_t progress = prefill.progress_epoch();
-            if ((work & 1) == 0 || work != previous_work || progress != previous_prefill) {
+            const uint64_t collective = collective_progress
+                ? collective_progress->load(std::memory_order_acquire) : 0;
+            if ((work & 1) == 0 || work != previous_work || progress != previous_prefill ||
+                collective != previous_collective) {
               deadline = now + timeout;
             } else if (now >= deadline) {
               emergency_exit(
@@ -48,6 +55,7 @@ class EngineWatchdog {
             }
             previous_work = work;
             previous_prefill = progress;
+            previous_collective = collective;
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
           }
         }) {}

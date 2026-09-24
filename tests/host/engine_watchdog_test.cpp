@@ -113,6 +113,50 @@ DGPP_TEST(engine_watchdog_expires_after_prefill_progress_stops) {
   if (wait_child(child) != 2) throw std::runtime_error("stalled prefill survived");
 }
 
+DGPP_TEST(engine_watchdog_allows_collective_progress_inside_one_prefill_chunk) {
+  for (bool advance : {false, true}) {
+    const pid_t child = ::fork();
+    if (child < 0) throw std::runtime_error("fork");
+    if (child == 0) {
+      dgpp::PrefillMonitor prefill;
+      prefill.begin(0, "slow-chunk", 2048);
+      std::atomic<uint64_t> collective_progress{0};
+      {
+        dgpp::serve::EngineWatchdog watchdog(prefill, 250ms, &collective_progress);
+        const auto work = watchdog.work();
+        for (int i = 0; i < 70; ++i) {
+          if (advance) collective_progress.fetch_add(1, std::memory_order_release);
+          std::this_thread::sleep_for(10ms);
+        }
+        // Finishing a layer's collective is liveness, not completed tokens.
+        if (prefill.progress_epoch() != 0 || prefill.snapshot()[0].processed != 0)
+          std::_Exit(1);
+      }
+      std::_Exit(0);
+    }
+    if (wait_child(child) != (advance ? 0 : 2))
+      throw std::runtime_error("collective completion did not govern the deadline");
+  }
+}
+
+DGPP_TEST(engine_watchdog_expires_when_collectives_stop_inside_a_chunk) {
+  const pid_t child = ::fork();
+  if (child < 0) throw std::runtime_error("fork");
+  if (child == 0) {
+    dgpp::PrefillMonitor prefill;
+    prefill.begin(0, "stalled-chunk", 2048);
+    std::atomic<uint64_t> collective_progress{0};
+    dgpp::serve::EngineWatchdog watchdog(prefill, 250ms, &collective_progress);
+    const auto work = watchdog.work();
+    for (int i = 0; i < 50; ++i) {
+      collective_progress.fetch_add(1, std::memory_order_release);
+      std::this_thread::sleep_for(10ms);
+    }
+    for (;;) ::pause();
+  }
+  if (wait_child(child) != 2) throw std::runtime_error("stalled collective progress survived");
+}
+
 }  // namespace
 
 int main() { return dgpp::test::run_all(); }

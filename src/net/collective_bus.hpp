@@ -12,6 +12,7 @@
 // traffic is a supported, tested mode. The class slot pools make the credit
 // floors structural: bulk can never occupy a latency slot.
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -342,6 +343,11 @@ class CollectiveBus {
   void stop();
 
   BusStats stats() const;
+  // Successful multi-rank collective completions (eager, bulk, stream and
+  // graph). Readable without CUDA or bus locks, including while a model
+  // chunk is still running. Submissions, polls and failed flights do not
+  // advance it. The reference lives as long as this bus.
+  const std::atomic<uint64_t>& completion_epoch() const;
   // The bulk pacing rate in effect after start() (the derived one when
   // the option was negative), Gb/s per (peer, lane) QP; 0 = unpaced.
   double bulk_pace_gbps() const;
