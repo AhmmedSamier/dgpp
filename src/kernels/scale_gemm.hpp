@@ -61,11 +61,15 @@ void launch_scale_gemm_bf16(const uint16_t* act, size_t act_row_stride_elems,
 // launchers differ only in the epilogue store. This is the MoE down
 // projection's output (its partials feed an fp32 accumulation chain that
 // rounds to bf16 once, at the end — see models/glm/moe_layer.hpp).
+// last_row_only: write only row m-1 at its original output offset, retaining
+// the dispatch and accumulation order of the full m-row product. Earlier
+// output rows are untouched. Selecting an m=1 GEMV instead is not bitwise
+// equivalent when the full product uses a tensor-core kernel.
 void launch_scale_gemm_f32(const uint16_t* act, size_t act_row_stride_elems,
                            const uint8_t* w_payload, const float* w_scales,
                            float* out, int m, int n, int k,
                            cudaStream_t stream, size_t out_row_stride_elems = 0,
-                           int mma_from_rows = 0);
+                           int mma_from_rows = 0, bool last_row_only = false);
 
 // The tile kernel regardless of m (the bf16 mma.sync m16n8k16 path the
 // large-m route takes): the reference the grouped tensor-core MoE kernel is

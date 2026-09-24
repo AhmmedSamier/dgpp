@@ -458,6 +458,13 @@ add_test(NAME qwen_decode_fp8_head_row_independent
           $<TARGET_FILE:qwen_decode_test> --fixture ${QWEN_FORWARD_FIXTURE} --fp8-head)
 set_tests_properties(qwen_decode_fp8_head qwen_decode_fp8_head_row_independent
   PROPERTIES DEPENDS qwen_forward_fixture RUN_SERIAL TRUE)
+add_test(NAME qwen_prefill_head
+  COMMAND qwen_decode_test --fixture ${QWEN_FORWARD_FIXTURE} --prefill-head)
+add_test(NAME qwen_prefill_head_all_rows
+  COMMAND ${CMAKE_COMMAND} -E env DGPP_PREFILL_HEAD_ALL_ROWS=1
+          $<TARGET_FILE:qwen_decode_test> --fixture ${QWEN_FORWARD_FIXTURE} --prefill-head)
+set_tests_properties(qwen_prefill_head qwen_prefill_head_all_rows
+  PROPERTIES DEPENDS qwen_forward_fixture LABELS "gpu" RUN_SERIAL TRUE)
 
 # The MoE layer both families run: GLM's sigmoid+bias router
 # with the FP8 shared expert in the chain, Qwen's softmax router without

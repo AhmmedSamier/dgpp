@@ -206,13 +206,21 @@ template <typename OutT>
 void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
                        const uint8_t* w_payload, const float* w_scales,
                        OutT* out, int m, int n, int k, cudaStream_t stream,
-                       size_t out_stride, int mma_from_rows) {
+                       size_t out_stride, int mma_from_rows, bool last_row_only = false) {
   if (m <= 0 || n <= 0) return;  // empty output by definition
   if (!act || !w_payload || !w_scales || !out)
     throw std::invalid_argument("scale_gemm: null pointer");
   if (out_stride == 0) out_stride = static_cast<size_t>(n);
   if (out_stride < static_cast<size_t>(n))
     throw std::invalid_argument("scale_gemm: output row stride narrower than n");
+  const int dispatch_rows = m;
+  const bool streaming_mma = mma_from_rows > 0 && m >= mma_from_rows && m <= kScaleGemmMmaMaxRows &&
+                            mma_gemv_shape_ok(w_payload, act, act_row_stride_elems, m, k);
+  if (last_row_only) {
+    act += static_cast<size_t>(m - 1) * act_row_stride_elems;
+    out += static_cast<size_t>(m - 1) * out_stride;
+    m = 1;
+  }
   if (k <= 0) {
     // Degenerate contraction: zero outputs (matches the fp64 oracle).
     DGPP_CUDA_OK(cudaMemset2DAsync(out, out_stride * sizeof(OutT), 0,
@@ -222,8 +230,7 @@ void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
   }
   // The streaming tensor-core form between its bounds (the header's
   // table); a shape it cannot take (k % 64, alignment) falls through.
-  if (mma_from_rows > 0 && m >= mma_from_rows && m <= kScaleGemmMmaMaxRows &&
-      mma_gemv_shape_ok(w_payload, act, act_row_stride_elems, m, k)) {
+  if (streaming_mma) {
     if constexpr (std::is_same_v<OutT, float>)
       launch_mma_gemv_fp8_f32(act, act_row_stride_elems, w_payload, w_scales, out, m, n, k,
                               out_stride, 7, 7, stream);
@@ -236,14 +243,14 @@ void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
   // is latency-bound at small m — see fp8_gemv.cuh): one GEMV launch
   // carries at most four rows (fewer when K fills the 48-KiB smem budget),
   // and the rows are chunked through the same scalar-order core, so each
-  // output row is bitwise invariant to m and to the path — the two kernels
-  // agree bit for bit, which is what makes this threshold a pure
-  // performance knob. It was 8 (the decode-row bound); the 2026-09-04
-  // prefill profile found the tile kernel at 578 us for the MoE experts'
+  // output row is bitwise invariant within the GEMV path. The tensor-core
+  // paths have different accumulation orders. The threshold was 8 (the
+  // decode-row bound); the 2026-09-04 prefill profile found the tile kernel
+  // at 578 us for the MoE experts'
   // 9..30-row segments (grid 8 x 1..2 blocks on a 48-SM part) against 15 us
   // per four-row GEMV launch, so prefill-sized segments go this way too.
   // The tile kernel keeps the large-m shapes where its grid fills the GPU.
-  if (m >= 1 && m <= kGemvMaxM && fp8_gemv::shape_ok(w_payload, /*rows=*/1, k)) {
+  if (dispatch_rows <= kGemvMaxM && fp8_gemv::shape_ok(w_payload, /*rows=*/1, k)) {
     for (int row0 = 0; row0 < m;) {
       int rows = std::min(fp8_gemv::kMaxRows, m - row0);
       while (!fp8_gemv::shape_ok(w_payload, rows, k)) --rows;
@@ -436,9 +443,10 @@ void launch_scale_gemm_bf16(const uint16_t* act, size_t act_row_stride_elems,
 void launch_scale_gemm_f32(const uint16_t* act, size_t act_row_stride_elems,
                            const uint8_t* w_payload, const float* w_scales,
                            float* out, int m, int n, int k,
-                           cudaStream_t stream, size_t out_row_stride_elems, int mma_from_rows) {
+                           cudaStream_t stream, size_t out_row_stride_elems, int mma_from_rows,
+                           bool last_row_only) {
   launch_scale_gemm<float>(act, act_row_stride_elems, w_payload, w_scales,
-                           out, m, n, k, stream, out_row_stride_elems, mma_from_rows);
+                           out, m, n, k, stream, out_row_stride_elems, mma_from_rows, last_row_only);
 }
 
 namespace {

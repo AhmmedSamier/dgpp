@@ -123,6 +123,11 @@ The setting is distributed by rank 0 and included in the configuration digest,
 so peers use the same dispatch. It changes floating-point accumulation order.
 Use `--fp8-head gemv` to restore the previous head path. When restoring BF16
 dense weights, pass `--dense-weights checkpoint --fp8-head gemv` together.
+Plain FP8 prefills compute only their last vocabulary row, retaining the
+kernel selected for the original chunk length. For a full-head comparison,
+set `DGPP_PREFILL_HEAD_ALL_ROWS=1` in each rank process before startup.
+BF16 heads, grouped prefills and streaming-MMA chunks within the decode
+envelope continue to compute every row.
 The earlier [throughput measurement and limits](../benchmarks/results/2026-09-20-qwen-fp8-head-e2e.md)
 remain historical evidence.
 The [single-node guide](qwen38_single_spark.md) covers the one-Spark memory
