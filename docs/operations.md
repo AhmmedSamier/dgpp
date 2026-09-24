@@ -406,9 +406,12 @@ cache format and arena size. Use the startup plan for the configured limit.
 is supported on Qwen and GLM-5.3-Flash graph engines, including GLM image
 requests. The default, -1, selects 256 tokens rounded down to the engine
 alignment and capped by its prefill limit (at least one aligned unit).
-An explicit zero preserves full-prompt admission. The resolved budget is logged
-at startup and carried in rank 0's warm record. The four-rank GLM-5.3-Flash
-deployment explicitly selects 256-token busy and 2,048-token idle budgets.
+An explicit zero preserves full-prompt admission within a scheduler pass;
+model and snapshot boundaries still split the work. Qwen retains its internal
+2,048-token limit and reports token progress after each completed chunk.
+The resolved budget is logged at startup and carried in rank 0's warm record.
+The four-rank GLM-5.3-Flash deployment explicitly selects 256-token busy and
+2,048-token idle budgets.
 A positive budget executes one aligned prefill chunk per tick, followed by
 a decode pass for active requests. Try 256 or 512 tokens; the budget must
 be a multiple of the snapshot alignment and fit the prefill scratch limit.
@@ -457,15 +460,19 @@ not a timeout. Serving uses a 120 s bus completion watchdog and a 60 s reducer
 wait; the latter now also covers stream completion after the GPU's done stamp.
 The bus watchdog shares its progress thread and does not cover model CUDA waits
 outside a collective. Rank 0 therefore also runs an independent **120-second
-engine progress watchdog** once serving starts. It observes scheduler passes and
-advancing prefill token positions using atomics, without calling CUDA or taking
+engine progress watchdog** once serving starts. It observes scheduler passes,
+advancing prefill token positions and successful multi-rank collective completions
+using atomics, without calling CUDA or taking
 the service, metrics or logging locks. An in-flight pass that stops making
 progress exits with status 2 without engine teardown; the closed journal makes
 the peers exit too. Clients receive a closed connection on this emergency path.
 No termination signal is needed. Journal broadcasts and
 stats publication are inside the monitored work scope. Idle serving has no time
-limit, and a full-prompt prefill can exceed 120 seconds while its internal chunks
-continue to advance. Startup/model loading is outside this watchdog's scope.
+limit. A full-prompt prefill can exceed 120 seconds while its internal chunks
+continue to advance; an individual chunk can also exceed the deadline while
+its collectives complete. Submissions, repeated polling and failed collectives
+do not reset the deadline. Single-rank execution still relies on completed
+chunks and scheduler passes. Startup/model loading is outside this watchdog's scope.
 
 This is a fatal backstop, not recovery of a failed CUDA context: an external
 supervisor must restart the service. The separate 30-second shutdown deadline

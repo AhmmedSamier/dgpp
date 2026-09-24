@@ -852,7 +852,8 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
                  const std::string& model_display, const ServeKnobs& k,
                  bool no_eos, double boot_s,
                  dgpp::serve::JournalWriter* journal,
-                 dgpp::serve::OpStreamObserver* oplog, const std::string& family_name) {
+                 dgpp::serve::OpStreamObserver* oplog, const std::string& family_name,
+                 const std::atomic<uint64_t>* collective_progress = nullptr) {
   const dgpp::text::Tokenizer tok =
       dgpp::text::Tokenizer::load((fs::path(ckpt) / "tokenizer.json").string());
   // The prompt renderer: the checkpoint's chat_template.jinja, or the
@@ -950,8 +951,9 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
     journal->watch_peers([&](int peer, const std::string& why) {
       fail_service("rank " + std::to_string(peer) + " died (" + why + ")");
     });
-  dgpp::serve::EngineWatchdog engine_watchdog(*engine->prefill_monitor());
-  DGPP_LOG_INFO("serve: engine progress deadline 120 s (scheduler passes and prefill progress)");
+  dgpp::serve::EngineWatchdog engine_watchdog(
+      *engine->prefill_monitor(), std::chrono::seconds(120), collective_progress);
+  DGPP_LOG_INFO("serve: engine progress deadline 120 s (scheduler passes, prefill progress and completed collectives)");
   std::thread engine_loop([&] {
     const auto pass = [&] {
       return journal
@@ -2302,7 +2304,7 @@ int main(int argc, char** argv) {
         open_ops_file(&oplog, "serve_rank0.ops");
         const int rc = serve_openai(engine_ptr(), family->vocab_size(), generation_eos, ckpt,
                                     model_display, knobs, no_eos, boot_s(), journal ? &*journal : nullptr, &oplog,
-                                    family->name());
+                                    family->name(), &bus->completion_epoch());
         engine_release();
         cudaFreeHost(pick_scratch);
         bus->stop();

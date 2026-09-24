@@ -544,6 +544,48 @@ int allreduce_rank_work(CollectiveBus& bus, int world, int my_rank,
   return failures;
 }
 
+void scenario_collective_progress() {
+  auto buses = start_world(2, 29908);
+  CHECK(buses.size() == 2, "progress world failed to start");
+  if (buses.size() != 2) return;
+  constexpr size_t bulk_elems = 16384;
+  uint16_t* data[2]{};
+  for (int rank = 0; rank < 2; ++rank) {
+    CHECK(cudaMalloc(&data[rank], bulk_elems * 2) == cudaSuccess, "progress alloc");
+    CHECK(cudaMemset(data[rank], 0, bulk_elems * 2) == cudaSuccess, "progress zero");
+    CHECK(buses[rank]->completion_epoch().load() == 0, "startup is not completed work");
+  }
+  std::string error;
+  const uint64_t first = buses[0]->allreduce(data[0], data[0], 4096, &error);
+  CHECK(first != 0, "progress submit: " + error);
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  CHECK(buses[0]->completion_epoch().load() == 0, "submission/polling is not completion");
+  const uint64_t second = buses[1]->allreduce(data[1], data[1], 4096, &error);
+  CHECK(second != 0, "progress peer submit: " + error);
+  CHECK(buses[0]->wait_allreduce(first, 15000).ok, "progress rank 0 completion");
+  CHECK(buses[1]->wait_allreduce(second, 15000).ok, "progress rank 1 completion");
+  for (const auto& bus : buses)
+    CHECK(bus->completion_epoch().load() == 1, "eager completion must advance once");
+
+  uint64_t ids[2]{};
+  for (int rank = 0; rank < 2; ++rank)
+    ids[rank] = buses[rank]->allreduce_bulk(data[rank], data[rank], bulk_elems, &error);
+  for (int rank = 0; rank < 2; ++rank) {
+    CHECK(ids[rank] != 0 && buses[rank]->wait_allreduce(ids[rank], 15000).ok,
+          "bulk progress completion: " + error);
+    CHECK(buses[rank]->completion_epoch().load() == 2, "bulk completion must advance once");
+  }
+  // A missing peer causes a real failed flight, not a successful heartbeat.
+  const uint64_t stalled = buses[0]->allreduce(data[0], data[0], 4096, &error);
+  CHECK(stalled != 0, "stalled progress submit: " + error);
+  CHECK(!buses[0]->wait_allreduce(stalled, 15000).ok, "missing peer should fail");
+  CHECK(buses[0]->completion_epoch().load() == 2, "failed flight must not advance progress");
+  for (auto& bus : buses) bus->quiesce();
+  for (auto& bus : buses) bus->stop();
+  for (auto* buffer : data) cudaFree(buffer);
+  DGPP_LOG_INFO("scenario collective_progress: successful completions only");
+}
+
 void scenario_allreduce() {
   // One-shot all-to-all all-reduce over loopback worlds: bitwise-identical
   // results on every rank, across generations (slot recycling), plus the
@@ -1308,6 +1350,7 @@ int allreduce_graph_rank_work(CollectiveBus& bus, int world, int my_rank,
       std::vector<double> step_us;
       std::vector<uint16_t> got(elems, 0);
       std::vector<uint16_t> bulk_got(bulk_elems, 0);
+      const uint64_t completions_before = bus.completion_epoch().load();
       if (!bus.graph_replay_arm(&error, /*variant=*/1)) {
         fail("second graph variant arm rejected: " + error);
       } else if (cudaGraphLaunch(alt_exec, stream) != cudaSuccess ||
@@ -1324,6 +1367,8 @@ int allreduce_graph_rank_work(CollectiveBus& bus, int world, int my_rank,
                  0) {
         fail("second graph variant diverged from eager bitwise");
       }
+      if (failures == 0 && bus.completion_epoch().load() != completions_before + alt_gens)
+        fail("graph completions did not advance progress once per generation");
       for (int replay = 0; replay < 2 + replays && failures == 0; ++replay) {
         if (!bus.graph_replay_arm(&error)) {
           fail("arm rejected: " + error);
@@ -1733,6 +1778,7 @@ int allreduce_stream_rank_work(CollectiveBus& bus, int world, int my_rank,
   // The oracle for generation g: the canonical chain over every rank's
   // bf16(fill + g) — the source each rank uploads, rounded the same way.
   for (int pass = 0; pass < passes && failures == 0; ++pass) {
+    const uint64_t completions_before = bus.completion_epoch().load();
     // Re-upload (the folds ran in place).
     for (int g = 0; g < gens; ++g) {
       std::vector<uint16_t> src(elems);
@@ -1766,6 +1812,10 @@ int allreduce_stream_rank_work(CollectiveBus& bus, int world, int my_rank,
     }
     if (cudaStreamSynchronize(stream) != cudaSuccess) {
       fail("stream sync failed");
+      break;
+    }
+    if (bus.completion_epoch().load() != completions_before + gens) {
+      fail("stream completions did not advance progress once per generation");
       break;
     }
     for (int g = 0; g < gens; ++g) {
@@ -2035,6 +2085,13 @@ int main() {
     scenario_allreduce_graph_rows();
     return g_failures == 0 ? 0 : 1;
   }
+  if (const char* f = std::getenv("DGPP_TEST_FILTER");
+      f && std::string(f) == "collective_progress") {
+    scenario_collective_progress();
+    scenario_allreduce_graph();
+    scenario_allreduce_stream();
+    return g_failures == 0 ? 0 : 1;
+  }
   scenario_latency_ping();
   scenario_credit_recycle();
   scenario_bulk_dual_lane();
@@ -2042,6 +2099,7 @@ int main() {
   scenario_completion_timeout();
   scenario_consumer_inactivity_exit();
   scenario_mesh_three_way();
+  scenario_collective_progress();
   scenario_allreduce();
   scenario_allreduce_done_before_posted();
   scenario_allreduce_staged();

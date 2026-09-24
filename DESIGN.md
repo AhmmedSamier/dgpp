@@ -2398,6 +2398,16 @@ relies on the bus watchdog. There is no mid-run failover or automatic
 request recovery. The launcher can restart the configured world from its
 resident images; clients must resubmit requests.
 
+**Engine progress.** Rank 0's independent watchdog observes scheduler passes,
+completed prefill token positions and successful multi-rank collective
+completions through atomics. This includes progress inside a model chunk,
+before its token count advances. Eager, bulk, stream and graph collectives
+publish completions; submissions, polling and failures do not. An active
+pass with no observed progress for 120 seconds exits with status 2 without
+engine teardown, closing the journal so peers follow the failure path.
+The watchdog takes no bus, metrics or logging locks and calls no CUDA APIs.
+Idle serving and startup/model construction are outside this deadline.
+
 **Drift detection.** Each tick record contains rank 0's operation-stream
 fold (`od`) and, with prefix caching, the cache-decision digest (`pd`).
 Peers compare these against their state from the preceding tick. A
