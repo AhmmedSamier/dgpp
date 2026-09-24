@@ -13,6 +13,7 @@
 #include "kernels/bf16_gemv.hpp"
 #include "kernels/mma_gemv.hpp"
 #include "kernels/dsa.hpp"
+#include "kernels/gdn_chunk.hpp"
 #include "kernels/kda.hpp"
 #include "kernels/qsa.hpp"
 #include "kernels/rope_scaling.hpp"
@@ -30,6 +31,18 @@ T* dev_alloc(size_t n) {
   T* p = nullptr;
   DGPP_CUDA_OK(cudaMalloc(&p, std::max<size_t>(n, 1) * sizeof(T)));
   return p;
+}
+
+bool use_chunked_gdn(int tokens, int k_dim, int v_dim) {
+  static const bool enabled = [] {
+    const char* e = std::getenv("DGPP_GDN_CHUNKED");
+    return !(e != nullptr && e[0] == '0');
+  }();
+  static const int min_tokens = [] {
+    const char* e = std::getenv("DGPP_GDN_CHUNKED_MIN");
+    return e != nullptr ? std::atoi(e) : 64;
+  }();
+  return enabled && tokens >= min_tokens && gdn_chunked_supported(k_dim, v_dim);
 }
 
 void gemm_bf16(const QwenGemmWorkspace& g, const uint16_t* act, int64_t act_stride,
@@ -270,6 +283,10 @@ QwenGdnLayer::QwenGdnLayer(const QwenGdnResident& w, const QwenGemmWorkspace& ge
   b_ = dev_alloc<uint16_t>(M * static_cast<size_t>(lv_));
   core_ = dev_alloc<uint16_t>(M * static_cast<size_t>(lv_) * v_dim_);
   normed_ = dev_alloc<uint16_t>(M * static_cast<size_t>(lv_) * v_dim_);
+  if (use_chunked_gdn(max_tokens_, k_dim_, v_dim_)) {
+    chunked_ws_bytes_ = gdn_chunked_workspace_bytes(max_tokens_, lv_);
+    chunked_ws_ = dev_alloc<uint8_t>(chunked_ws_bytes_);
+  }
 }
 
 QwenGdnLayer::~QwenGdnLayer() {
@@ -280,6 +297,7 @@ QwenGdnLayer::~QwenGdnLayer() {
   cudaFree(b_);
   cudaFree(core_);
   cudaFree(normed_);
+  cudaFree(chunked_ws_);
 }
 
 void QwenGdnLayer::rebind(const QwenGdnResident& w) {
@@ -376,8 +394,18 @@ void QwenGdnLayer::enqueue(const uint16_t* x, float* recurrent_state, uint16_t* 
   in_projections(x, tokens, stream);
   kda_causal_conv_silu_bf16(qkv_, C, w_.conv, conv_state, conv_width_ - 1, qkvc_, tokens, C,
                             conv_width_, stream, conv_snap);
-  gdn_recurrent_fwd(qkvc_, a_, lv_, b_, lv_, w_.a_log, w_.dt_bias, recurrent_state, core_, tokens,
-                    lv_, lv_ / lk_, k_dim_, v_dim_, scale_, stream, rec_snap);
+  // Prefill-sized walks take the chunked tensor-core form (kernels/
+  // gdn_chunk.cu): flash-linear-attention's chunk_gated_delta_rule, the
+  // algorithm SGLang runs for these layers, with bf16 matrix operands.
+  // Walks of fewer than DGPP_GDN_CHUNKED_MIN rows (default 64) and
+  // speculative snapshot rows keep the recurrence; DGPP_GDN_CHUNKED=0 keeps
+  // it everywhere.
+  if (use_chunked_gdn(tokens, k_dim_, v_dim_) && rec_snap.states == nullptr)
+    gdn_chunked_fwd(qkvc_, a_, lv_, b_, lv_, w_.a_log, w_.dt_bias, recurrent_state, core_, tokens,
+                    lv_, lv_ / lk_, k_dim_, v_dim_, scale_, chunked_ws_, chunked_ws_bytes_, stream);
+  else
+    gdn_recurrent_fwd(qkvc_, a_, lv_, b_, lv_, w_.a_log, w_.dt_bias, recurrent_state, core_, tokens,
+                      lv_, lv_ / lk_, k_dim_, v_dim_, scale_, stream, rec_snap);
   gdn_gated_rmsnorm_bf16(core_, z_, w_.norm, normed_, static_cast<int64_t>(tokens) * lv_, v_dim_,
                          eps_, stream);
   gemm_dense(g_, normed_, LV, w_.out_proj, w_.out_proj_fp8, out, GemmOut::BF16, tokens, H, LV, stream);
@@ -416,7 +444,10 @@ size_t QwenGdnLayer::scratch_bytes(const QwenTextConfig& cfg, int local_key_head
   const size_t lk = static_cast<size_t>(local_key_heads), lv = static_cast<size_t>(local_value_heads);
   const size_t K = static_cast<size_t>(cfg.gdn_key_head_dim), V = static_cast<size_t>(cfg.gdn_value_head_dim);
   const size_t C = 2 * lk * K + lv * V;
-  return M * (2 * C + 3 * lv * V + 2 * lv) * 2;  // qkv, qkvc, z, core, normed, a, b
+  const size_t chunked = use_chunked_gdn(max_tokens, cfg.gdn_key_head_dim, cfg.gdn_value_head_dim)
+                             ? gdn_chunked_workspace_bytes(max_tokens, local_value_heads)
+                             : 0;
+  return M * (2 * C + 3 * lv * V + 2 * lv) * 2 + chunked;  // qkv, qkvc, z, core, normed, a, b
 }
 
 // ---- QwenQsaLayer ----------------------------------------------------------------
