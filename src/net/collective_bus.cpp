@@ -26,6 +26,7 @@
 #include <unordered_set>
 
 #include "common/log.hpp"
+#include "common/cuda_wait.hpp"
 #include "net/bus_types.hpp"
 #include "net/tcp.hpp"
 #include "net/verbs.hpp"
@@ -230,7 +231,7 @@ struct CollectiveBus::Impl {
   std::deque<std::shared_ptr<BusRequest>> coll_q;
   std::atomic<bool> coll_active{false};
   std::atomic<bool> coll_mode{false};  // send() and intake() gate on it
-  bool coll_poisoned = false;  // any collective failure poisons the mode
+  std::atomic<bool> coll_poisoned{false};  // engine or waiter failure closes submissions
   // A world of one (2026-09-10, the single-Spark serve): no lanes, no
   // rendezvous, no engine thread — every collective is the identity (a
   // copy when src and dst differ), every graph hook succeeds, the staging
@@ -1815,7 +1816,7 @@ struct CollectiveBus::Impl {
           }
           lanes += "]";
         }
-      // TEMP hunt (burst wedge): live QP state per latency lane — a wedged
+      // Live QP state for the active pool on every lane — a wedged
       // SQ freezes sq_psn below the posted generations while rq_psn keeps
       // counting arrivals; an ERR QP is a flushed one.
       std::string qps;
@@ -1824,38 +1825,54 @@ struct CollectiveBus::Impl {
           if (peers[p][l].failed) continue;
           qps += " p" + std::to_string(peer_ranks[p]) + "l" +
                  std::to_string(l) + "[" +
-                 peers[p][l].lane->qp_state_dump(BusPool::kLatency) + "]";
+                 peers[p][l].lane->qp_state_dump(coll.req->is_bulk ? BusPool::kBulk : BusPool::kLatency) + "]";
         }
       DGPP_LOG_INFO(
-          "hunt qp: rank {} seq {} {}", opt.my_rank, coll.req->ctl_seq, qps);
-      DGPP_LOG_INFO(
-          "allreduce: rank {} seq {} STALLED {:.0f}ms posted={:#x} "
-          "ctl(ready={:#x} done={} status={} gate(waits={} spins={}) "
-          "first_claim(cell={} len={} seq={})) {}",
-          opt.my_rank, coll.req->ctl_seq,
-          std::chrono::duration<double, std::milli>(Clock::now() -
-                                                     coll.launched_at)
-              .count(),
-          coll.posted_bits, acquire_u64(&ar_ctl->ready_bits),
-          acquire_u64(&ar_ctl->done_seq), acquire_u32(&ar_ctl->status),
-          acquire_u32(&ar_ctl->dbg_gate_waits),
-          acquire_u32(&ar_ctl->dbg_gate_spins),
-          ar_ctl->dbg_first_cell ? static_cast<int>(ar_ctl->dbg_first_cell) - 1 : -1,
-          ar_ctl->dbg_first_len ? static_cast<int>(ar_ctl->dbg_first_len) : -1,
-          ar_ctl->dbg_first_seq ? static_cast<int>(ar_ctl->dbg_first_seq) : -1,
-          lanes);
+          "hunt qp: rank {} seq {} pool={} {}", opt.my_rank, coll.req->ctl_seq,
+          coll.req->is_bulk ? "bulk" : "latency", qps);
+      if (!coll.req->is_bulk) {
+        DGPP_LOG_INFO(
+            "allreduce: rank {} seq {} STALLED {:.0f}ms posted={:#x} "
+            "ctl(ready={:#x} done={} status={} gate(waits={} spins={}) "
+            "first_claim(cell={} len={} seq={})) {}",
+            opt.my_rank, coll.req->ctl_seq,
+            std::chrono::duration<double, std::milli>(Clock::now() -
+                                                       coll.launched_at)
+                .count(),
+            coll.posted_bits, acquire_u64(&ar_ctl->ready_bits),
+            acquire_u64(&ar_ctl->done_seq), acquire_u32(&ar_ctl->status),
+            acquire_u32(&ar_ctl->dbg_gate_waits),
+            acquire_u32(&ar_ctl->dbg_gate_spins),
+            ar_ctl->dbg_first_cell ? static_cast<int>(ar_ctl->dbg_first_cell) - 1 : -1,
+            ar_ctl->dbg_first_len ? static_cast<int>(ar_ctl->dbg_first_len) : -1,
+            ar_ctl->dbg_first_seq ? static_cast<int>(ar_ctl->dbg_first_seq) : -1,
+            lanes);
+      }
       if (coll.req->is_bulk) {
         std::string posted_counts;
-        for (size_t p = 0; p < peer_ranks.size(); ++p)
-          posted_counts += " p" + std::to_string(peer_ranks[p]) + ":" +
-                           std::to_string(bulk.posted[p]) + "/" +
-                           std::to_string(acquire_u64(
-                               &bulk_staged_counters()[p]));
+        for (size_t p = 0; p < peer_ranks.size(); ++p) {
+          // The first launch can be held behind the preceding flight's TX
+          // fence. No posting vector or current staged counters exist yet.
+          const uint64_t posted = bulk.launched ? bulk.posted.at(p) : 0;
+          const uint64_t staged = bulk.launched ? acquire_u64(&bulk_staged_counters()[p]) : 0;
+          const uint32_t expected = !bulk.launched ? 0
+              : bulk.phase == 0 ? bulk.plan.out_count[p] : bulk.plan.my_count;
+          posted_counts += " p" + std::to_string(peer_ranks[p]) +
+                           ":posted=" + std::to_string(posted) +
+                           "/staged=" + std::to_string(staged) +
+                           "/expected=" + std::to_string(expected);
+        }
         DGPP_LOG_INFO(
-            "allreduce: rank {} seq {} bulk {} seg {}/{} tx {}/{} STALLED {}",
-            opt.my_rank, coll.req->ctl_seq, bulk.phase == 0 ? "RS" : "AG",
-            bulk.segment + 1, coll.req->bulk_seg_count, bulk_doorbell_ce_seen,
-            bulk_pairs_posted, posted_counts);
+            "allreduce: rank {} seq {} bulk {} seg {}/{} STALLED {:.0f}ms "
+            "launched={} tx_retired={}/{} ctl(done={} status={} gate_redos={}) {} {}",
+            opt.my_rank, coll.req->ctl_seq,
+            bulk.phase < 0 ? "waiting_for_tx" : bulk.phase == 0 ? "RS" : "AG",
+            bulk.phase < 0 ? 0 : bulk.segment + 1, coll.req->bulk_seg_count,
+            std::chrono::duration<double, std::milli>(Clock::now() - coll.launched_at).count(),
+            bulk.launched, bulk_doorbell_ce_seen, bulk_pairs_posted,
+            bulk.phase < 0 ? 0 : acquire_u64(&ar_ctl->done_seq),
+            bulk.phase < 0 ? 0 : acquire_u32(&ar_ctl->status),
+            bulk.phase < 0 ? 0 : acquire_u32(&ar_ctl->dbg_gate_spins), posted_counts, lanes);
       } else if (!coll.claims.empty()) {
         // The KERNEL's actual claimed cells (ctl-cell claim records),
         // not the engine's send-side bookkeeping: for each record, the
@@ -3928,6 +3945,7 @@ bool CollectiveBus::allreduce_settle(int timeout_ms, std::string* error) {
 
 BusAllReduceResult CollectiveBus::wait_allreduce(uint64_t id,
                                                   int timeout_ms) {
+  const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
   if (impl_->world1) {
     Impl& w = *impl_;
     BusAllReduceResult r;
@@ -3952,6 +3970,7 @@ BusAllReduceResult CollectiveBus::wait_allreduce(uint64_t id,
   if (!done) {
     result.error = "wait backstop timeout (engine watchdog should have "
                    "failed the request first)";
+    impl.coll_poisoned.store(true, std::memory_order_release);
     return result;
   }
   result.ok = req->ok;
@@ -3959,11 +3978,13 @@ BusAllReduceResult CollectiveBus::wait_allreduce(uint64_t id,
   result.elapsed_us = elapsed_us(req->submitted);
   DGPP_LOG_DEBUG("allreduce wait: submit->wake={:.1f}us", elapsed_us(req->submitted));
   if (result.ok && impl.collective_stream != nullptr) {
-    const cudaError_t sync = cudaStreamSynchronize(impl.collective_stream);
+    const cudaError_t sync = dgpp::wait_cuda_stream_until(impl.collective_stream, deadline);
     if (sync != cudaSuccess) {
       result.ok = false;
-      result.error = std::string("collective stream sync failed: ") +
-                     cudaGetErrorString(sync);
+      impl.coll_poisoned.store(true, std::memory_order_release);
+      result.error = sync == cudaErrorNotReady
+                         ? "collective stream completion timeout after the request's done stamp"
+                         : std::string("collective stream sync failed: ") + cudaGetErrorString(sync);
     }
   }
   {

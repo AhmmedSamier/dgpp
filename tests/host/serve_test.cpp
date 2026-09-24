@@ -43,8 +43,10 @@
 #include "serve/generation_service.hpp"
 #include "serve/image_inputs.hpp"
 #include "serve/http_server.hpp"
+#include "serve/prefill_policy.hpp"
 #include "serve/serve_stats.hpp"
 #include "text/chat_template.hpp"
+#include "text/dsv41_prompt.hpp"
 
 namespace {
 
@@ -303,6 +305,29 @@ class FakeEngine : public SchedulerEngine {
     return live.last_token;
   }
   std::atomic<bool> hold_prefill{false}, prefill_entered{false};
+  bool resumable_prefill = false;
+  std::atomic<bool> hold_chunk{false}, chunk_entered{false};
+  std::atomic<int> chunks_computed{0};
+  int64_t prefill_chunk_alignment() const override { return resumable_prefill ? 4 : 0; }
+  int64_t prefill_chunk_limit() const override { return resumable_prefill ? 16 : 0; }
+  void begin_prefill(int req, const std::vector<int64_t>& prompt, int64_t reserved,
+                     int64_t, const PrefixPrefill&) override {
+    const auto first = prefill(req, prompt);
+    reserve(req, reserved);
+    partial_prefills_[req] = {static_cast<int64_t>(prompt.size()), first};
+  }
+  PrefillProgress advance_prefill(int req, int64_t budget) override {
+    chunk_entered = true;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (hold_chunk && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    auto& pending = partial_prefills_.at(req);
+    const int64_t count = std::min(pending.first, budget);
+    pending.first -= count;
+    ++chunks_computed;
+    return {count, pending.first == 0 ? pending.second : -1};
+  }
+
   void note_logprobs(int req, int32_t token, int index) {
     if (report_.count(req) == 0 || report_[req] < 0) return;
     dgpp::sample::Result r;
@@ -333,7 +358,7 @@ class FakeEngine : public SchedulerEngine {
   }
   void fail_at_step(int n) { fail_at_step_ = n; }
 
-  void close(int req) override { live_.erase(req); }
+  void close(int req) override { partial_prefills_.erase(req); live_.erase(req); }
 
  private:
   std::map<size_t, std::vector<int32_t>> scripts_;
@@ -347,6 +372,7 @@ class FakeEngine : public SchedulerEngine {
   std::map<int, int64_t> pinned_;
   std::vector<std::string> prefix_ops_;  // under armed_mu_
   std::map<int, Live> live_;
+  std::map<int, std::pair<int64_t, int32_t>> partial_prefills_;
   std::map<int, int> report_;
   std::map<int, std::vector<dgpp::sample::Result>> pending_lps_;
   mutable std::mutex armed_mu_;
@@ -355,17 +381,16 @@ class FakeEngine : public SchedulerEngine {
   std::vector<std::pair<int, std::vector<dgpp::sched::LogitBias>>> biases_;
 };
 
-// The 6f markers of the fake tokenizer: 1001..1008, decoding to their
+// The markers of the fake tokenizer: 1001..1009, decoding to their
 // literal text (not special, exactly like the real added tokens).
-constexpr int64_t kThinkOpen = 1001, kThinkClose = 1002, kToolOpen = 1003,
-                  kToolClose = 1004, kKeyOpen = 1005, kKeyClose = 1006,
-                  kValueOpen = 1007, kValueClose = 1008;
+constexpr int64_t kThinkOpen = 1001, kThinkClose = 1002, kToolOpen = 1003, kToolClose = 1004,
+                  kKeyOpen = 1005, kKeyClose = 1006, kValueOpen = 1007, kValueClose = 1008,
+                  kDsml = 1009;
 const std::vector<std::pair<std::string, int64_t>>& marker_table() {
   static const std::vector<std::pair<std::string, int64_t>> t = {
-      {"</tool_call>", kToolClose}, {"<tool_call>", kToolOpen},
-      {"</arg_value>", kValueClose}, {"<arg_value>", kValueOpen},
-      {"</arg_key>", kKeyClose},   {"<arg_key>", kKeyOpen},
-      {"</think>", kThinkClose},   {"<think>", kThinkOpen},
+      {"</tool_call>", kToolClose}, {"<tool_call>", kToolOpen}, {"</arg_value>", kValueClose},
+      {"<arg_value>", kValueOpen},  {"</arg_key>", kKeyClose},  {"<arg_key>", kKeyOpen},
+      {"</think>", kThinkClose},    {"<think>", kThinkOpen},    {"｜DSML｜", kDsml},
   };
   return t;
 }
@@ -430,8 +455,8 @@ class FakeFrontend : public ModelFrontend {
     return input;
   }
 
-  explicit FakeFrontend(bool with_markers = false)
-      : with_markers_(with_markers) {}
+  explicit FakeFrontend(bool with_markers = false, bool with_dsml = false)
+      : with_markers_(with_markers), with_dsml_(with_dsml) {}
   // The template knob gate: a template that reads enable_thinking (Qwen3.8-
   // Flash-Next, GLM-4.7) accepts it in chat_template_kwargs; the default
   // fake, like GLM-5.3-Flash's template, does not.
@@ -496,6 +521,10 @@ class FakeFrontend : public ModelFrontend {
     if (!with_markers_) return m;
     m.think_open = {kThinkOpen, "<think>"};
     m.think_close = {kThinkClose, "</think>"};
+    if (with_dsml_) {
+      m.dsml = {kDsml, "｜DSML｜"};
+      return m;
+    }
     m.tool_call_open = {kToolOpen, "<tool_call>"};
     m.tool_call_close = {kToolClose, "</tool_call>"};
     m.arg_key_open = {kKeyOpen, "<arg_key>"};
@@ -516,6 +545,7 @@ class FakeFrontend : public ModelFrontend {
 
  private:
   bool with_markers_;
+  bool with_dsml_;
   mutable std::mutex mu_;
   mutable std::string last_globals_;
 };
@@ -628,21 +658,18 @@ struct ServiceRig {
   // the fake render opens <think> (the 6f rigs); `reasoning_in_content`:
   // the fold knob.
   explicit ServiceRig(int queue_limit = 8,
-                      dgpp::sample::Params sampling_defaults =
-                          dgpp::sample::greedy_params(),
-                      bool can_sample = false,
-                      std::optional<uint64_t> fixed_seed = std::nullopt,
-                      bool with_markers = false,
-                      bool reasoning_in_content = false,
-                      dgpp::sched::AdmissionPolicy admission = {},
-                      int prefix_slots = 0,
+                      dgpp::sample::Params sampling_defaults = dgpp::sample::greedy_params(),
+                      bool can_sample = false, std::optional<uint64_t> fixed_seed = std::nullopt,
+                      bool with_markers = false, bool reasoning_in_content = false,
+                      dgpp::sched::AdmissionPolicy admission = {}, int prefix_slots = 0,
                       dgpp::serve::FileInputConfig file_inputs = {},
                       // The request-context surface (review item 7): the rig's
                       // rope ramp and its two bounds, advertised on /v1/models.
                       std::optional<dgpp::RopeScaling> rope_scaling = std::nullopt,
-                      int64_t position_ceiling = 0, int64_t kv_pool_tokens = 0)
+                      int64_t position_ceiling = 0, int64_t kv_pool_tokens = 0,
+                      bool resumable_prefill = false, bool with_dsml = false)
       : engine(kSlots, /*total_blocks=*/100, /*block_tokens=*/4, can_sample),
-        frontend(with_markers),
+        frontend(with_markers, with_dsml),
         cfg([&] {
           ServiceConfig c;
           c.model_id = "glm-5.3-flash-fp8";
@@ -651,7 +678,8 @@ struct ServiceRig {
           c.sampling_defaults = sampling_defaults;
           c.fixed_seed = fixed_seed;
           c.reasoning_in_content = reasoning_in_content;
-          c.admission = admission;
+          engine.resumable_prefill = resumable_prefill;
+          c.admission = dgpp::serve::resolve_prefill_policy(admission, engine);
           c.vocab_size = 512;  // the fake's ids are bytes and markers
           c.rope_scaling = rope_scaling;
           c.position_ceiling = position_ceiling;
@@ -659,8 +687,7 @@ struct ServiceRig {
           c.file_inputs = std::move(file_inputs);
           return c;
         }()),
-        service((engine.set_prefix_arena(prefix_slots, 4), cfg), &engine, &frontend,
-                {kFakeEos}),
+        service((engine.set_prefix_arena(prefix_slots, 4), cfg), &engine, &frontend, {kFakeEos}),
         http(0, &service, /*max_connections=*/64) {
     http_loop = std::thread([this] { http.serve(); });
     engine_loop = std::thread([this] {
@@ -1345,6 +1372,68 @@ DGPP_TEST(serve_api_streamUsageAndObfuscation) {
   }
 }
 
+
+DGPP_TEST(serve_auto_prefill_disconnect_releases_slot_before_the_remaining_chunks) {
+  for (bool stream : {false, true}) {
+    dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_budget_tokens = -1;
+    ServiceRig rig(8, dgpp::sample::greedy_params(), false, std::nullopt, false, false,
+                   policy, 0, {}, std::nullopt, 0, 0, true);
+    rig.engine.hold_chunk = true;
+    struct Release { FakeEngine& engine; ~Release() { engine.hold_chunk = false; } } release{rig.engine};
+    Client request(rig.port());
+    const auto body = chat_body(std::string(128, 'a'), 8,
+                               stream ? ",\"stream\":true" : ",\"stream\":false");
+    request.send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\nContent-Length: " +
+                     std::to_string(body.size()) + "\r\n\r\n" + body);
+    for (int i = 0; i < 500 && !rig.engine.chunk_entered; ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    require(rig.engine.chunk_entered, "automatic budget entered resumable prefill");
+    request.hard_close();
+    for (int i = 0; i < 500 && rig.service.stats().requests_cancelled == 0; ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    require(rig.service.stats().requests_cancelled == 1, "disconnect registered during a chunk");
+    rig.engine.hold_chunk = false;
+    for (int i = 0; i < 500 && rig.service.meters().terminal == 0; ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    require(rig.service.meters().terminal == 1 && rig.service.meters().pool_blocks_in_use == 0,
+            "cancel returns the slot and reservation at the first yield");
+    require(rig.engine.chunks_computed == 1, "abandoned prompt never computes a second chunk");
+    require(rig.engine.prefill_monitor()->snapshot().empty(), "cancel clears live prefill progress");
+    const auto fresh = post_chat(rig, chat_body("abcdefgh", 2), "usage", 2000);
+    require(fresh.find("200 OK") != std::string::npos, "fresh request reuses the released slot");
+  }
+}
+
+DGPP_TEST(serve_disconnect_during_blocked_prefill_counts_before_the_tick_returns) {
+  for (bool stream : {false, true}) {
+    ServiceRig rig;
+    rig.engine.hold_prefill = true;
+    struct Release { FakeEngine& engine; ~Release() { engine.hold_prefill = false; } } release{rig.engine};
+    Client request(rig.port());
+    const auto body = chat_body("abcdefgh", 100, stream ? ",\"stream\":true" : ",\"stream\":false");
+    request.send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\nContent-Length: " +
+                     std::to_string(body.size()) + "\r\n\r\n" + body);
+    for (int i = 0; i < 500 && !rig.engine.prefill_entered.load(); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    require(rig.engine.prefill_entered.load(), "prefill entered");
+    request.hard_close();
+    for (int i = 0; i < 500 && rig.service.stats().requests_cancelled == 0; ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    require(rig.service.stats().requests_cancelled == 1, "disconnect counted before prefill returns");
+    Client metrics(rig.port());
+    metrics.send_all("GET /metrics HTTP/1.1\r\nHost: t\r\n\r\n");
+    const auto response = metrics.read_until("\"remaining_tokens\":4}}", 1000);
+    const auto parsed = dgpp::minijson::parse(std::string_view(response).substr(response.find("\r\n\r\n") + 4));
+    require(parsed.root.at("scheduler").at("prefilling").as_int() == 1, "prefill still running after cancellation queued");
+    require(parsed.root.at("service").at("pending_cancellations").as_int() == 1, "cancel waits for scheduler pass boundary");
+    rig.engine.hold_prefill = false;
+    for (int i = 0; i < 500 && rig.service.meters().terminal == 0; ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    require(rig.service.meters().terminal == 1, "request retires after prefill returns");
+  }
+}
+
 DGPP_TEST(serve_metrics_liveDuringBlockedPrefill) {
   ServiceRig rig;
   rig.engine.hold_prefill = true;
@@ -1697,6 +1786,104 @@ std::string concat_field(const std::string& resp, const std::string& field) {
     pos = vend;
   }
   return out;
+}
+
+DGPP_TEST(serve_tools_renderOnlyTheOpenAIToolFields) {
+  // GIVEN a frontend with the template's markers (tool calls available),
+  ServiceRig rig(/*queue_limit=*/8, dgpp::sample::greedy_params(),
+                 /*can_sample=*/false, std::nullopt, /*with_markers=*/true);
+  // WHEN a client sends tools carrying fields outside the OpenAI tool schema
+  // -- a per-function `response` schema (the Berkeley Function Calling
+  // Leaderboard's OpenAI handler sends one for 161 of its 162 multi-turn
+  // functions) and a
+  // vendor key on the tool object --
+  const std::string tools =
+      ",\"tools\":[{\"type\":\"function\",\"x_vendor\":{\"id\":7},\"function\":{"
+      "\"name\":\"get_weather\",\"description\":\"Weather\",\"strict\":false,"
+      "\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},"
+      "\"required\":[\"city\"]},"
+      "\"response\":{\"type\":\"object\",\"properties\":{\"temp_c_marker\":{\"type\":\"number\"}}}}}]";
+  (void)post_until_usage(rig, chat_body("abcd", 2, tools));
+  const std::string g = rig.frontend.last_globals();
+  // THEN the template sees type and function.{name, description, parameters,
+  // strict} -- what SGLang and vLLM render after parsing tools into the
+  // OpenAI model -- and nothing else.
+  require(g.find("\"name\":\"get_weather\"") != std::string::npos &&
+              g.find("\"description\":\"Weather\"") != std::string::npos &&
+              g.find("\"city\"") != std::string::npos && g.find("\"strict\":false") != std::string::npos,
+          "the OpenAI tool fields reach the template: " + g);
+  require(g.find("temp_c_marker") == std::string::npos && g.find("\"response\"") == std::string::npos,
+          "a function's response schema is not rendered: " + g);
+  require(g.find("x_vendor") == std::string::npos, "unknown tool-level keys are not rendered: " + g);
+}
+
+DGPP_TEST(serve_tools_preserveFlatDefinitionsWhileFiltering) {
+  ServiceRig rig(8, dgpp::sample::greedy_params(), true, std::nullopt, true);
+  // Flat definitions are accepted with or without an explicit tool type.
+  // Keep their shape and member order, including arbitrary schema properties.
+  const std::string fields =
+      R"("strict":true,"name":"lookup","description":"Lookup","parameters":{"type":"object","properties":{"response":{"type":"string"},"namespace":{"type":"string"}}})";
+  for (const std::string& type : {std::string{}, std::string{R"("type":"function",)"}}) {
+    const std::string expected = "[{" + type + fields + "}]";
+    const std::string tools =
+        ",\"tools\":[{" + type + fields +
+        R"(,"response":{"response_schema_marker":true},"x_vendor":7,"namespace":"unused"}])";
+    const auto response = post_until_usage(rig, chat_body("abcd", 2, tools));
+    require(response.find("200 OK") != std::string::npos, "flat tools accepted: " + response);
+    const std::string globals = rig.frontend.last_globals();
+    const auto parsed = dgpp::minijson::parse(globals);
+    require(json_of(parsed.root.at("tools")) == expected,
+            "flat tool fields and order preserved, extras removed: " + globals);
+    // Use the real renderer too: erasing a flat definition previously made
+    // DeepSeek reject it for a missing function name.
+    require(dgpp::text::Dsv41Prompt::render(parsed.root).find("\"name\": \"lookup\"") !=
+                std::string::npos,
+            "flat definitions remain renderable by DeepSeek");
+  }
+}
+
+DGPP_TEST(serve_tools_dsmlNamespacesMatchRenderedAndConstrainedNames) {
+  ServiceRig rig(8, dgpp::sample::greedy_params(), true, std::nullopt, true, false, {}, 0, {},
+                 std::nullopt, 0, 0, /*resumable_prefill=*/false, /*with_dsml=*/true);
+  const std::string ns = R"("namespace":{"name":"search","description":"Search tools"})";
+  const std::string fields =
+      R"("name":"lookup","description":"Lookup","parameters":{"type":"object","properties":{}},"response":{"response_schema_marker":true})";
+  size_t expected_grammars = 0;
+  // The renderer accepts namespaces on the wrapper, the function or a flat
+  // definition. All three must retain their descriptions and qualified names.
+  for (const std::string& tool :
+       {"{\"type\":\"function\"," + ns + ",\"function\":{" + fields + "}}",
+        "{\"type\":\"function\",\"function\":{" + ns + "," + fields + "}}",
+        "{" + ns + "," + fields + "}"}) {
+    for (
+        const std::string& choice :
+        {std::string{R"(,"tool_choice":"required")"},
+         std::string{R"(,"tool_choice":{"type":"function","function":{"name":"lookup"}})"},
+         std::string{
+             R"(,"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"required","tools":[{"type":"function","function":{"name":"lookup"}}]}})"}}) {
+      const auto response =
+          post_until_usage(rig, chat_body("abcd", 2, ",\"tools\":[" + tool + "]" + choice));
+      require(response.find("200 OK") != std::string::npos,
+              "namespaced tools accepted: " + response);
+      const std::string globals = rig.frontend.last_globals();
+      const auto parsed = dgpp::minijson::parse(globals);
+      const std::string prompt = dgpp::text::Dsv41Prompt::render(parsed.root);
+      const auto grammars = rig.engine.grammars();
+      require(grammars.size() == ++expected_grammars, "each request installs a constraint");
+      const auto& grammar = grammars.back();
+      require(grammar.tools.size() == 1 && grammar.tools[0].name == "search::lookup",
+              "the grammar retains the qualified tool name");
+      require(prompt.find("\"name\": \"" + grammar.tools[0].name + "\"") != std::string::npos,
+              "rendered tool name must agree with the decoding constraint: " + prompt);
+      if (grammar.mode == dgpp::text::GrammarSpec::Mode::kNamed)
+        require(grammar.named == grammar.tools[0].name,
+                "named choice uses the same qualified name");
+      require(prompt.find("Search tools\\nLookup") != std::string::npos,
+              "the namespace description reaches the model: " + prompt);
+      require(globals.find("response_schema_marker") == std::string::npos,
+              "DeepSeek still drops unrelated tool fields: " + globals);
+    }
+  }
 }
 
 DGPP_TEST(serve_tools_requestSideRendersThroughTheTemplateAndRefusesByName) {

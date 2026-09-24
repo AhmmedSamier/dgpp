@@ -200,6 +200,7 @@ class PortabilityTest(unittest.TestCase):
             "nvidia/GLM-4.7-NVFP4": "glm-4.7_nvfp4",
             "Qwen/Qwen3.8-Flash-Next-FP8": "qwen-3.8-flash-next_fp8",
             "nvidia/Qwen3.8-Flash-Next-NVFP4": "qwen-3.8-flash-next_nvfp4",
+            "RadixArk/Qwen3.8-Flash-Next-NVFP4": "qwen-3.8-flash-next_nvfp4-radixark",
             "deepseek-ai/DeepSeek-V4.1-Flash": "deepseek-v4.1-flash_mxfp4-fp8",
             "XiaomiMiMo/MiMo-V2.6-Flash-RL": "mimo-v2.6-flash_mxfp4-fp8",
         }

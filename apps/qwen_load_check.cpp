@@ -24,7 +24,7 @@
 #include "models/qwen/loader.hpp"
 
 int main(int argc, char** argv) {
-  std::string model_id, ckpt, image_dir, ngram_table, dense_weights;
+  std::string model_id, ckpt, image_dir, ngram_table, dense_weights, mtp_expert_format;
   int world = 1, rank = 0, layers = -1;
   bool streaming = false, mtp = false;
   auto next = [&](int& i) -> std::string {
@@ -44,6 +44,7 @@ int main(int argc, char** argv) {
       else if (a == "--image-dir") image_dir = next(i);
       else if (a == "--ngram-table") ngram_table = next(i);
       else if (a == "--dense-weights") dense_weights = next(i);
+      else if (a == "--mtp-expert-format") mtp_expert_format = next(i);
       else throw std::runtime_error("unknown argument " + a);
     }
     if (ckpt.empty()) {
@@ -55,10 +56,12 @@ int main(int argc, char** argv) {
     const std::string cfg_path = (std::filesystem::path(ckpt) / "config.json").string();
     if (dgpp::detect_architecture_file(cfg_path) != dgpp::ModelArchitecture::Qwen4Exp)
       throw std::runtime_error("not a Qwen4Exp checkpoint: " + ckpt);
-    const dgpp::QwenTextConfig cfg = dgpp::QwenTextConfig::from_json_file(cfg_path);
+    dgpp::QwenTextConfig cfg = dgpp::QwenTextConfig::from_json_file(cfg_path);
     if (!image_dir.empty()) dgpp::QwenLayerStream::set_resident_image_dir(image_dir == "off" ? "" : image_dir);
     if (!ngram_table.empty()) dgpp::QwenLayerStream::set_ngram_table_mmap(ngram_table == "mmap");
     if (!dense_weights.empty()) dgpp::QwenLayerStream::set_dense_weights_fp8(dense_weights == "fp8");
+    if (!mtp_expert_format.empty()) dgpp::QwenLayerStream::set_mtp_expert_format(mtp_expert_format == "bf16_fused");
+    cfg.mtp_experts_bf16_fused = dgpp::QwenLayerStream::mtp_experts_bf16_fused();
     const dgpp::QwenResidency residency = streaming ? dgpp::QwenResidency::Streaming : dgpp::QwenResidency::Resident;
     const dgpp::QwenHeadSharding head = world > 1 ? dgpp::QwenHeadSharding::VocabSharded : dgpp::QwenHeadSharding::Full;
     const double kGiB = 1024.0 * 1024.0 * 1024.0;

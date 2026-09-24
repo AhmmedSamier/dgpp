@@ -1967,7 +1967,9 @@ seed and counter. Greedy selection consumes no random draw.
 
 Defaults come from `generation_config.json`, with explicit handling of
 missing fields and EOS IDs. Process flags and request fields override
-them. `/v1/models` reports effective defaults. The service journals
+them. Generation stop IDs are resolved separately from the model's
+`config.json` EOS: Qwen PLE uses the trained EOS for n-gram padding and
+context resets. `/v1/models` reports effective defaults. The service journals
 sampling parameters as float bits together with the seed, allowing peers
 to reproduce the request's draws. Eager and graph engines both support
 sampling; a backend without that capability rejects stochastic requests.
@@ -2055,6 +2057,12 @@ measurements. See [numerics](docs/numerics.md) for the procedure and
 [benchmarks](docs/benchmarks.md) for dated results.
 
 ### Constrained tool calls
+
+Tool rendering keeps `name`, `description`, `parameters` and `strict` in
+wrapped or flat definitions, preserving member order and nested schemas.
+DeepSeek namespace metadata is retained so prompt names agree with the
+decoding grammar. Other tool metadata is omitted from prompts unless the
+server runs with `DGPP_TOOLS_RAW=1`.
 
 `src/text/tool_grammar.*` implements the tool-call formats used by the
 supported templates. A per-request grammar supplies the allowed token

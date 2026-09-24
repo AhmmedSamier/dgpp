@@ -1,0 +1,139 @@
+{
+  "date": "2026-09-23",
+  "base_commit": "0c316bf829599c96a35e5a0eff2f87257513abfc",
+  "binaries": {
+    "restore-dgpp-serve": {
+      "sha256": "4638e3c595a2765d6d50c4626a9fef3aa2aa82936c6c50e3d0eec871fcde8e00"
+    },
+    "pr40-dgpp-serve": {
+      "sha256": "f431a2aacc15540c30e49a25089979444084309c23222af7f389e37d33de74e3"
+    },
+    "candidate-dgpp-serve": {
+      "sha256": "54b8a081d8394c3ceaa8d27c5cf2ed3c9e1cbbc22d8808b003e3769be81a17eb"
+    }
+  },
+  "cancellation": {
+    "qwen-legacy": {
+      "curl_exit": 28,
+      "baseline_fresh_s": 0.1271688180277124,
+      "after_disconnect_fresh_s": 199.01578954601428,
+      "cancellations": 1,
+      "pool_blocks_after": 3128,
+      "prefill_budget_tokens": 0
+    },
+    "qwen-auto": {
+      "curl_exit": 28,
+      "baseline_fresh_s": 0.12815338803920895,
+      "after_disconnect_fresh_s": 0.1300786350038834,
+      "cancellations": 1,
+      "pool_blocks_after": 2,
+      "prefill_budget_tokens": 256
+    },
+    "qwen-auto-stream": {
+      "curl_exit": 28,
+      "baseline_fresh_s": 0.1275500549818389,
+      "after_disconnect_fresh_s": 0.1285336469882168,
+      "cancellations": 1,
+      "pool_blocks_after": 2,
+      "prefill_budget_tokens": 256
+    },
+    "qwen-progress-long": {
+      "curl_exit": 28,
+      "baseline_fresh_s": 0.1288801259943284,
+      "after_disconnect_fresh_s": 200.81570502801333,
+      "cancellations": 1,
+      "pool_blocks_after": 3128,
+      "prefill_budget_tokens": 0
+    },
+    "glm-auto": {
+      "curl_exit": 28,
+      "baseline_fresh_s": 0.7323133789468557,
+      "after_disconnect_fresh_s": 0.9712419150164351,
+      "cancellations": 1,
+      "pool_blocks_after": 2,
+      "prefill_budget_tokens": 256
+    },
+    "glm-auto-stream": {
+      "curl_exit": 28,
+      "baseline_fresh_s": 0.7371751290047541,
+      "after_disconnect_fresh_s": 0.9718669900321402,
+      "cancellations": 1,
+      "pool_blocks_after": 2,
+      "prefill_budget_tokens": 256
+    }
+  },
+  "normal_glm_operation_streams": {
+    "glm-legacy": {
+      "rank0_sha256": "b2c8363fa4f76cb7ae6c0ab809ed543c6da04c1ae11f10e61d44d385a93e77c7",
+      "rank1_sha256": "b2c8363fa4f76cb7ae6c0ab809ed543c6da04c1ae11f10e61d44d385a93e77c7",
+      "identical": true
+    },
+    "glm-candidate": {
+      "rank0_sha256": "a9d9b677ce261e833ecb4035685dfee8c383afc5a7aa37e7e1423d7b32bfffbc",
+      "rank1_sha256": "a9d9b677ce261e833ecb4035685dfee8c383afc5a7aa37e7e1423d7b32bfffbc",
+      "identical": true
+    }
+  },
+  "glm_legacy": {
+    "fresh_timeout_s": 600,
+    "prefill_ms": 748125,
+    "recovered_without_signal": true,
+    "probe_error": "TimeoutError('fresh request or engine did not finish before deadline')"
+  },
+  "glm_deferred": {
+    "passed": true,
+    "fresh_s": 0.7380587959778495,
+    "deferred_scheduler": {
+      "active": 1,
+      "queued": 1,
+      "prefilling": 0,
+      "pool_blocks_in_use": 3128
+    },
+    "promoted_processed_tokens": 8,
+    "cancellations": 2
+  },
+  "healthy_unchunked_qwen_prefill_ms": 204686,
+  "fault_injection": {
+    "fault-pr40": {
+      "passed": true,
+      "elapsed_s": 125.04367964802077,
+      "exit_before_cleanup": null,
+      "client_end_s": 126.16567463101819
+    },
+    "fault-candidate": {
+      "passed": true,
+      "elapsed_s": 120.33783707098337,
+      "exit_before_cleanup": 2,
+      "client_end_s": 120.02110353100579
+    },
+    "glm-fault-result": {
+      "passed": true,
+      "client_end_s": 120.02241169800982,
+      "exits": {
+        "0": {
+          "exit_code": 2,
+          "uptime_s": 152.02598202301306,
+          "observed_s": 122.27999863802688
+        },
+        "1": {
+          "exit_code": 3,
+          "uptime_s": 152.1022998089902,
+          "observed_s": 122.59646645502653
+        }
+      }
+    }
+  },
+  "host_tests": [
+    "engine_watchdog_test",
+    "shutdown_watchdog_test",
+    "serve_test",
+    "scheduler_test",
+    "fabric_serve_test"
+  ],
+  "limits": [
+    "Original spontaneous permanent hardware stall not reproduced; initiating driver/fabric cause unknown.",
+    "Reported zero disconnect cancellation count not reproduced with direct curl on either baseline or fixed build.",
+    "Deferred admission uses a large output reservation, not the original cached 283K prompt.",
+    "Fatal watchdog exits require external supervision to restart the deployment."
+  ]
+}

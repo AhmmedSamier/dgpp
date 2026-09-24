@@ -77,6 +77,7 @@ its node.
 | `cluster_glm-5.3-flash_nvfp4-fp8_w2.example.json` | the same hybrid on two nodes, FP8 latent cache, 132K context on four request slots (160K with `--bf16-weights checkpoint --kv-capacity 163840`) |
 | `cluster_qwen-3.8-flash-next_fp8_w{2,4}.example.json` | Qwen FP8 with MTP depth 1, four or two nodes |
 | `cluster_qwen-3.8-flash-next_nvfp4_w{1,2}.example.json` | Qwen NVFP4 on one or two Sparks, MTP depth 1, the dense projections FP8 at load, a mapped n-gram table |
+| `cluster_qwen-3.8-flash-next_nvfp4-radixark_w{1,2}.example.json` | RadixArk's Qwen NVFP4 on one or two Sparks, identical engine configuration to the NVIDIA release |
 | `cluster_glm-4.7_nvfp4_w4.example.json` | GLM-4.7 NVFP4, four nodes, MTP depth 1 |
 | `cluster_glm-5.3_int4-int8_w4.example.json` | the full GLM-5.3 (int4/int8 RTN), four nodes, MTP depth 1, eight request slots, 100K bf16 context (120K with `--bf16-weights checkpoint --kv-capacity 122880`), the embedding vocab-sharded |
 | `cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json` | DeepSeek-V4.1-Flash as shipped, four nodes, six request slots, DSpark depth 4 with the scheduled verify depth, the bounded prefill, 128K context |
@@ -268,9 +269,12 @@ encoder oracle; its default full-depth gate is documented in the
 `down` sends SIGINT to rank 0. New requests receive 503
 `server_shutdown`; queued and active requests are cancelled at the
 next scheduler boundary. Streams receive a shutdown error, then the stop
-record releases peers. A signal during prefill waits for that pass to
-finish. The launcher waits up to 240 s for rank 0 before handling peers
-and collecting logs.
+record releases peers. A signal during prefill waits for the current scheduler
+pass. An independent watchdog exits with status 2 if shutdown has not completed
+within 30 s, including a stuck engine, HTTP loop or teardown. A second SIGINT
+or SIGTERM exits immediately with status 2 on any rank. Forced exits skip CUDA
+teardown and may truncate responses. The launcher waits up to 240 s for rank 0
+before handling peers and collecting logs.
 
 `down` checks that every recorded rank has exited, including after SIGKILL.
 If a rank remains alive or cannot be checked (SSH failure, unreadable process
@@ -395,8 +399,11 @@ cache format and arena size. Use the startup plan for the configured limit.
 
 **Budgeted prefill** (`engine.prefill_budget_tokens`, `--prefill-budget-tokens`)
 is supported on Qwen and GLM-5.3-Flash graph engines, including GLM image
-requests. Zero preserves full-prompt admission. The four-rank GLM-5.3-Flash
-deployment enables 256-token busy and 2,048-token idle budgets.
+requests. The default, -1, selects 256 tokens rounded down to the engine
+alignment and capped by its prefill limit (at least one aligned unit).
+An explicit zero preserves full-prompt admission. The resolved budget is logged
+at startup and carried in rank 0's warm record. The four-rank GLM-5.3-Flash
+deployment explicitly selects 256-token busy and 2,048-token idle budgets.
 A positive budget executes one aligned prefill chunk per tick, followed by
 a decode pass for active requests. Try 256 or 512 tokens; the budget must
 be a multiple of the snapshot alignment and fit the prefill scratch limit.
@@ -423,6 +430,42 @@ and `prefill_request_ms` (summed request waits, including waits between
 chunks). Logical and computed prompt-token counters advance with each chunk,
 including cancelled partial work; their difference counts attached cache
 tokens. Other model families retain full-prompt admission.
+
+Client disconnects are counted when the HTTP connection closes; retirement
+occurs at the next scheduler boundary. With full-prompt admission enabled,
+that boundary may be minutes away. Automatic chunking bounds the work between
+cancellation checks in tokens, not elapsed time. It interleaves existing decode
+requests, but a second queued prompt still waits behind the unfinished prefill.
+The `starting prefill` log precedes model work; `admitted to slot` marks its first
+token, after prefill has completed.
+
+For a suspected hang, retain both ranks' logs and op streams, the exact request
+and whether it connects directly or through a proxy, and repeated `/metrics`
+snapshots. Compare `prefill.requests[].processed_tokens`,
+`scheduler.snapshot_age_ms` and `service.pending_cancellations`. Pool counters
+are scheduler snapshots and can stay unchanged during synchronous prefill.
+Capture all-thread host backtraces on every rank before stopping the world.
+Bulk stall dumps name the active pool and report posted/staged/expected stripes
+per peer and retired/posted TX pairs. Their gate counter counts retries; zero
+is not evidence that the gate was never reached. A 500 ms stall dump is diagnostic,
+not a timeout. Serving uses a 120 s bus completion watchdog and a 60 s reducer
+wait; the latter now also covers stream completion after the GPU's done stamp.
+The bus watchdog shares its progress thread and does not cover model CUDA waits
+outside a collective. Rank 0 therefore also runs an independent **120-second
+engine progress watchdog** once serving starts. It observes scheduler passes and
+advancing prefill token positions using atomics, without calling CUDA or taking
+the service, metrics or logging locks. An in-flight pass that stops making
+progress exits with status 2 without engine teardown; the closed journal makes
+the peers exit too. Clients receive a closed connection on this emergency path.
+No termination signal is needed. Journal broadcasts and
+stats publication are inside the monitored work scope. Idle serving has no time
+limit, and a full-prompt prefill can exceed 120 seconds while its internal chunks
+continue to advance. Startup/model loading is outside this watchdog's scope.
+
+This is a fatal backstop, not recovery of a failed CUDA context: an external
+supervisor must restart the service. The separate 30-second shutdown deadline
+still applies after a termination signal. Neither watchdog identifies why the
+underlying operation stopped progressing; retain the incident evidence above.
 
 Use `scripts/serve_prefill_interference.py HOST PORT --json-out RUN.json`
 on an otherwise idle server to compare the longest client update pause
@@ -811,7 +854,7 @@ drafts and padded rows measure different work.
 | admission journal | 29971 (rank 0 listens; peers connect and send `hello <rank>`) |
 | peer binary, config and logs | `<stage_dir>/dgpp-serve`, `<stage_dir>/cluster.json`, `<stage_dir>/serve_r<rank>.log`, `<stage_dir>/serve_rank<rank>.ops` (fetched into the log dir by `down`) |
 | rank 0 log, pid and op stream | `<log_dir>/serve_r0.log`, `<log_dir>/r0.pid`, `<log_dir>/serve_rank0.ops`, written as the run records it (flushed at every retire) |
-| exit statuses | 0 orderly stop; 1 a startup or contract error (a configuration that differs from rank 0's included); 2 rank 0 after an engine failure; 3 a peer released by its in-tick watch |
+| exit statuses | 0 orderly stop; 1 a startup or contract error (a configuration that differs from rank 0's included); 2 rank 0 after an engine failure or any rank after forced shutdown; 3 a peer released by its in-tick watch |
 
 ### Compact Qwen batch mappings
 

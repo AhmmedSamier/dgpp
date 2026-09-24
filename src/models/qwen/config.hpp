@@ -45,7 +45,9 @@ struct QwenTextConfig {
   std::string hidden_act = "silu";
   int max_position_embeddings = 262144;
   std::vector<QwenLayerKind> layers;  // size == num_hidden_layers
-  std::vector<int64_t> eos_token_ids;  // config.json's; generation_config.json overrides at serve
+  // Trained EOS from config.json, including PLE padding/reset semantics.
+  // Generation stop tokens are resolved separately by the serving layer.
+  std::vector<int64_t> eos_token_ids;
   int64_t bos_token_id = -1;
 
   // --- gated residual (hyper-connections) ---------------------------------
@@ -112,6 +114,13 @@ struct QwenTextConfig {
   // layer's experts stay FP8 block-128, the n-gram table FP8 as before.
   bool experts_nvfp4 = false;
   bool ngram_table_fp8 = true;
+  // The RadixArk release stores the MTP draft layer's 512 experts as a
+  // single fused BF16 tensor pair (gate_up_proj [E, 2*I, H] and
+  // down_proj [E, H, I]) instead of per-expert FP8 matrices. When true,
+  // the loader encodes the BF16 slices to FP8 at load time (the resident
+  // form is identical to the standard FP8 path). Set from
+  // engine.mtp_expert_format = "bf16_fused" before model construction.
+  bool mtp_experts_bf16_fused = false;
 
   // --- vision (docs/vision.md) --------------------------------------------
   // The multimodal release's tower, parsed from the root config's

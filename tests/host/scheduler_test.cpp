@@ -30,6 +30,7 @@
 
 #include "common/test.hpp"
 #include "sched/scheduler.hpp"
+#include "serve/prefill_policy.hpp"
 
 namespace {
 
@@ -468,6 +469,34 @@ class ChunkFakeEngine : public FakeEngine {
   };
   std::map<int, Pending> pending_;
 };
+
+DGPP_TEST(scheduler_serving_auto_prefill_budget_respects_engine_geometry_and_opt_out) {
+  struct GeometryEngine : ChunkFakeEngine {
+    int64_t align = 128, limit = 2048;
+    int64_t prefill_chunk_alignment() const override { return align; }
+    int64_t prefill_chunk_limit() const override { return limit; }
+  } engine;
+  dgpp::sched::AdmissionPolicy policy;
+  policy.prefill_budget_tokens = -1;
+  const auto resolved = [&] { return dgpp::serve::resolve_prefill_policy(policy, engine); };
+  require(resolved().prefill_budget_tokens == 256, "automatic budget yields after 256 tokens");
+  engine.limit = 128;
+  require(resolved().prefill_budget_tokens == 128, "small forward limit caps the budget");
+  engine.align = 512;
+  engine.limit = 2048;
+  require(resolved().prefill_budget_tokens == 512, "alignment wider than the default is honored");
+  engine.align = 128;
+  policy.prefill_idle_budget_tokens = 128;
+  require(resolved().prefill_budget_tokens == 128, "explicit idle budget can bound the automatic busy budget");
+  policy.prefill_idle_budget_tokens = 0;
+  policy.prefill_budget_tokens = 0;
+  require(resolved().prefill_budget_tokens == 0, "explicit full-prompt opt-out survives");
+  policy.prefill_budget_tokens = 1024;
+  require(resolved().prefill_budget_tokens == 1024, "explicit chunk size survives");
+  policy.prefill_budget_tokens = -1;
+  engine.align = engine.limit = 0;
+  require(resolved().prefill_budget_tokens == 0, "unsupported engine keeps synchronous prefill");
+}
 
 DGPP_TEST(scheduler_chunked_prefill_bounds_work_and_keeps_decode_running) {
   ChunkFakeEngine engine;
