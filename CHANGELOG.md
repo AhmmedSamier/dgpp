@@ -6,6 +6,21 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Deployment templates: `engine.default_max_tokens` 256 → 32768**
+  (2026-09-25): every template's answer budget for requests that omit
+  `max_tokens` was 256 tokens, and reasoning tokens count against it. Agent
+  clients such as Hermes deliberately send no `max_tokens` to an
+  OpenAI-compatible endpoint, and Qwen3.8-Flash-Next thinks at the template's
+  default effort (xhigh), so the first call of a Hermes session spent 271–611
+  reasoning tokens before its first tool call and retired at the budget with
+  `finish_reason: "length"` and no visible content — the agent's
+  "thinking-only / empty response" recovery loop. The YaRN 512K template's pool
+  grows to 565 248 tokens so a full-length request without `max_tokens` is
+  still admissible (53.53 GiB per rank against 52.97). The binary's own
+  fallback when a configuration omits the key is unchanged at 256; existing
+  local deployment files must be edited (or re-copied from the template).
+  Evidence:
+  [record](benchmarks/results/2026-09-25-hermes-default-max-tokens/README.md).
 - **Serve MiMo-V2.6-Flash** (2026-09-22): the sixth family, `mimo_v2`
   (`XiaomiMiMo/MiMo-V2.6-Flash-RL` as shipped: MXFP4 routed experts, fp8
   block-128 dense projections, BF16 o_proj / head / eh_proj packable into

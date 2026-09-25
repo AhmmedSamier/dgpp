@@ -7,7 +7,7 @@
     "kv_capacity": 131072,
     "bf16_weights": "bf12",
     "prefill": "bounded",
-    "default_max_tokens": 256,
+    "default_max_tokens": 32768,
     "queue_limit": 8,
     "max_connections": 64,
     "decode_graph": true,

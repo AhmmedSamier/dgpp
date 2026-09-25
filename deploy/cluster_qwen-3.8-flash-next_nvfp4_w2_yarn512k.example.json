@@ -3,7 +3,7 @@
   "world_size": 2,
   "engine": {
     "max_concurrency": 2,
-    "kv_capacity": 532480,
+    "kv_capacity": 565248,
     "kv_dtype": "bf16",
     "ngram_table": "mmap",
     "rope_scaling": {
@@ -15,7 +15,7 @@
       "attn_factor": 1.0,
       "mrope_cache_factor": 4.0
     },
-    "default_max_tokens": 256,
+    "default_max_tokens": 32768,
     "queue_limit": 8,
     "max_connections": 64,
     "decode_graph": true,

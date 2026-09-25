@@ -352,8 +352,9 @@ Where the setting shows up, for the operator:
 
 - `deploy/cluster_qwen-3.8-flash-next_nvfp4_w2_yarn512k.example.json`: the
   recipe as a ready-to-run template — the ramp spelled out field by field, two
-  request slots and a 532 480-token pool (the ceiling plus room for an answer),
-  ~51.73 GiB per rank at TP=2 under the 4 GiB headroom. The KV-pool and
+  request slots and a 565 248-token pool (the ceiling plus the 32 768-token
+  default answer budget and room), 53.53 GiB per rank at TP=2 under the 4 GiB
+  headroom. The KV-pool and
   headroom notes, and the ceiling-versus-pool point, are in `deploy/README.md`.
 - the startup log: `serve: request context limit N tokens — the lesser of the
   positional ceiling (…) and the K/V pool …`, next to the YaRN line the

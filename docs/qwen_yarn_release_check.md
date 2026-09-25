@@ -37,7 +37,7 @@ hardware, and it belongs next to the deployment, not in a CI job.
 - **The deployment**: copy
   [`../deploy/cluster_qwen-3.8-flash-next_nvfp4_w2_yarn512k.example.json`](../deploy/cluster_qwen-3.8-flash-next_nvfp4_w2_yarn512k.example.json)
   without `.example` and resolve it as usual. It is the two-Spark NVFP4 shape
-  with `engine.rope_scaling` on, two request slots and a 532 480-token pool. The
+  with `engine.rope_scaling` on, two request slots and a 565 248-token pool. The
   KV-pool and headroom notes are in
   [`../deploy/README.md`](../deploy/README.md).
 - **Optionally, the reference lane**: the vLLM container the q-dgx-gateway
@@ -154,7 +154,7 @@ mean the cache is disabled, too small, or its entries were evicted; check the
 cache configuration and capacity before attributing it to a disabled cache.
 
 For the plan, quote the memory-plan total next to the peak: the 512K shape is
-51.73 GiB per rank with 2 slots at `kv_capacity` 532 480, plus the 4 GiB the
+53.53 GiB per rank with 2 slots at `kv_capacity` 565 248, plus the 4 GiB the
 pre-flight check adds, and the YaRN knob itself moves nothing
 (§1.9.1: the same plan with the ramp on and off is the same number).
 
