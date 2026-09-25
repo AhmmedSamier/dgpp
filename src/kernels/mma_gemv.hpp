@@ -17,10 +17,13 @@
 // NUMERICS: the weight VALUES are the dequant bridge's (bf16(e4m3 x scale),
 // exact for the e8m0 scales); the activations are the bf16 rows as given;
 // the fp32 accumulation is the mma's over the k16 slices in ascending k
-// order — deterministic, and the SAME chain for a row whatever m (a padded
-// row never touches another row's accumulators), so a batched row is
+// order — deterministic, and without split-K the SAME chain whatever m
+// (a padded row never touches another row's accumulators), so a batched row is
 // bitwise the row alone at m = 1 through this kernel. It is not bitwise
 // the GEMV cores' chain (a different fp32 order, inside the oracle budgets).
+// With workspace, groups of at most 32 rows may use split-K. Their chain
+// is independent of the group's row count, but differs from wider groups'
+// unsplit chain. A caller changing batch size must preserve this boundary.
 //
 // CONTRACT: m >= 1 (rows 1..128 in one launch — 1/2/4/8 sixteen-row tiles
 // by the count — and wider m in 128-row groups, each group its own launch
@@ -42,12 +45,19 @@ constexpr int kMmaGemvMaxRowsPerLaunch = 128;
 
 // fp8 weights with block scales; out bf16 or f32 (the epilogue store is the
 // only difference: bf16(out_f32) == out_bf16 bit for bit).
+// ws / ws_bytes (2026-09-21): a device workspace lets the decode forms (m <=
+// 32) split the k range across blocks when a small n leaves the grid
+// under-filled (fp32 partials in ws, one reduce launch; the split count a
+// function of the shape only, so a row's chain is still the same whatever
+// m rides in the launch). nullptr: the unsplit form, as before.
 void launch_mma_gemv_fp8_bf16(const uint16_t* act, size_t act_stride, const uint8_t* w,
                               const float* scales, uint16_t* out, int m, int n, int k,
-                              size_t out_stride, int rs, int cs, cudaStream_t stream);
+                              size_t out_stride, int rs, int cs, cudaStream_t stream,
+                              void* ws = nullptr, size_t ws_bytes = 0);
 void launch_mma_gemv_fp8_f32(const uint16_t* act, size_t act_stride, const uint8_t* w,
                              const float* scales, float* out, int m, int n, int k,
-                             size_t out_stride, int rs, int cs, cudaStream_t stream);
+                             size_t out_stride, int rs, int cs, cudaStream_t stream,
+                             void* ws = nullptr, size_t ws_bytes = 0);
 // bf16 weights (the lm head); out bf16 or f32.
 void launch_mma_gemv_bf16_bf16(const uint16_t* act, size_t act_stride, const uint16_t* w,
                                uint16_t* out, int m, int n, int k, size_t out_stride,

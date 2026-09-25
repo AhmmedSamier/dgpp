@@ -37,6 +37,7 @@
 #include "engine/graph_engine.hpp"
 #include "engine/tp_bus.hpp"
 #include "kda_test_helpers.hpp"
+#include "kernels/scale_gemm.hpp"
 #include "models/qwen/config.hpp"
 #include "models/qwen/forward.hpp"
 #include "models/qwen/loader.hpp"
@@ -476,7 +477,7 @@ DGPP_TEST(qwen_engines_loopback_world_2_mtp_depth2_graph_matches_plain_decode) {
 }
 
 DGPP_TEST(qwen_wide_compaction_keeps_numerical_dispatch_range) {
-  for (int rows : {2, 4, 8, 16, 24, 32, 64})
+  for (int rows : {2, 4, 8, 16, 24, 32, 48, 64})
     require(QwenModel::compact_batch_compatible(rows, rows), "unchanged width is compatible");
   for (int rows : {2, 4, 8, 16}) {
     require(!QwenModel::compact_batch_compatible(16, rows / 2),
@@ -484,10 +485,52 @@ DGPP_TEST(qwen_wide_compaction_keeps_numerical_dispatch_range) {
     require(!QwenModel::compact_batch_compatible(64, rows),
             "wide verification must not enter the small-graph lowering");
   }
-  require(
-      QwenModel::compact_batch_compatible(32, 24) && QwenModel::compact_batch_compatible(64, 24),
-      "wide sparse batches can use the six-request MTP3 family");
+  require(QwenModel::compact_batch_compatible(32, 24),
+          "split-K batches can use the six-request MTP3 family");
+  require(QwenModel::compact_batch_compatible(64, 48),
+          "unsplit batches can use the twelve-request MTP3 family");
+  for (int physical_rows : {33, 48, 64})
+    for (int compact_rows : {17, 24, 32})
+      require(!QwenModel::compact_batch_compatible(physical_rows, compact_rows),
+              "compaction must not cross the split-K boundary");
   require(!QwenModel::compact_batch_compatible(24, 32), "compaction never grows a graph");
+}
+
+DGPP_TEST(qwen_wide_compaction_fp8_preserves_projection_bits) {
+  using namespace dgpp::kda_test;
+  // The production hyperconnection down projection, with enough workspace
+  // for split-K. Every compaction the model permits must preserve its rows.
+  constexpr int N = 320, K = 10240, max_rows = 64;
+  constexpr size_t ws_bytes = 4u << 20;
+  const auto act = random_bf16_normal(5101, max_rows * K, 0.3f);
+  const auto weights = random_bf16_normal(5102, N * K, 0.1f);
+  std::vector<uint8_t> payload(weights.size());
+  std::transform(weights.begin(), weights.end(), payload.begin(), [](uint16_t w) {
+    return dgpp::float_to_fp8_e4m3_bits(dgpp::bf16_bits_to_float(w));
+  });
+  const std::vector<float> scales(((N + 127) / 128) * ((K + 127) / 128), 1.f);
+  DevBuf da(act.size() * 2), dw(payload.size()), ds(scales.size() * 4),
+      out(max_rows * N * 2), ws(ws_bytes);
+  da.upload(act.data(), act.size() * 2);
+  dw.upload(payload.data(), payload.size());
+  ds.upload(scales.data(), scales.size() * 4);
+  const auto run = [&](int rows) {
+    dgpp::launch_scale_gemm_bf16(static_cast<const uint16_t*>(da.p), K,
+        static_cast<const uint8_t*>(dw.p), static_cast<const float*>(ds.p),
+        static_cast<uint16_t*>(out.p), rows, N, K, test_stream(), 0, 5, ws.p, ws_bytes);
+    DGPP_CUDA_OK(cudaStreamSynchronize(test_stream()));
+    std::vector<uint16_t> values(rows * N);
+    out.download(values.data(), values.size() * 2);
+    return values;
+  };
+  for (int physical_rows : {24, 32, 48, 64}) {
+    const auto full = run(physical_rows);
+    for (int compact_rows : {24, 32, 48, 64}) {
+      if (!QwenModel::compact_batch_compatible(physical_rows, compact_rows)) continue;
+      const auto compact = run(compact_rows);
+      require_bitwise("allowed FP8 graph compaction", full.data(), compact.data(), compact.size() * 2);
+    }
+  }
 }
 
 DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
@@ -506,7 +549,7 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
   const int slots = rows64 ? 16 : 8;
   const int decode_rows = rows64 ? 64 : rows32 ? 32 : 16;
   const int mtp_depth = (rows32 || rows64) ? 3 : 1;
-  const int sparse_bucket = test_compaction() && (rows32 || rows64) ? 6 : slots;
+  const int sparse_bucket = test_compaction() ? (rows64 ? 12 : rows32 ? 6 : slots) : slots;
   require(QwenModel::decode_rows_cap() >= decode_rows, "Qwen advertises the tested decode width");
   const bool old_fp8 = dgpp::QwenLayerStream::dense_weights_fp8();
   struct RestoreDenseWeights {

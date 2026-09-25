@@ -2,6 +2,7 @@
 #include "kernels/mma_gemv.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cuda_fp8.h>
 #include <cuda_fp16.h>
 #include <stdexcept>
@@ -196,7 +197,7 @@ __global__ __launch_bounds__(kW * 32, 2) void mma_gemv_kernel(const uint16_t* __
                                                             const float* __restrict__ scales,
                                                             OutT* __restrict__ out, int m, int n,
                                                             int k, size_t out_stride, int rs,
-                                                            int cs) {
+                                                            int cs, float* __restrict__ part) {
   const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
   const int r = lane / 4, t = lane % 4;
   const int n0 = (blockIdx.x * kW + warp) * kRowsPerWarp;  // this warp's first weight row
@@ -223,6 +224,13 @@ __global__ __launch_bounds__(kW * 32, 2) void mma_gemv_kernel(const uint16_t* __
   uint8_t* wring = reinterpret_cast<uint8_t*>(sA_raw) + W::kSmemBytes +
                    static_cast<size_t>(warp) * L::kStages * L::kWarpBytes;
   const int nwin = (k + W::kK - 1) / W::kK;
+  // Split-K (the decode forms at a small n, grid.y > 1): this block folds
+  // windows [win0, win1) of the k range and stores fp32 partials to
+  // part[blockIdx.y][m][n]; mma_gemv_split_reduce_kernel sums the splits in
+  // split order. grid.y == 1: the whole range, the output stored directly.
+  const int wper = (nwin + static_cast<int>(gridDim.y) - 1) / static_cast<int>(gridDim.y);
+  const int win0 = static_cast<int>(blockIdx.y) * wper;
+  const int win1 = nwin < win0 + wper ? nwin : win0 + wper;
   // Window `win` of the warp's eight rows into its ring stage, as one
   // asynchronous group (an empty group past the last window keeps the
   // group accounting uniform). Instruction i covers rows i*kRowsPerInstr..
@@ -231,7 +239,7 @@ __global__ __launch_bounds__(kW * 32, 2) void mma_gemv_kernel(const uint16_t* __
   // row's slice whole or absent past k.
   auto issue = [&](int win) {
     if constexpr (L::kOn) {
-      if (win < nwin) {
+      if (win < win1) {
         uint8_t* dst = wring + static_cast<size_t>(win % L::kStages) * L::kWarpBytes;
         const size_t kb = static_cast<size_t>(win) * W::kK * (kFp8 ? 1 : 2);  // the window's byte offset in a row
 #pragma unroll
@@ -254,7 +262,7 @@ __global__ __launch_bounds__(kW * 32, 2) void mma_gemv_kernel(const uint16_t* __
   };
   if constexpr (L::kOn) {
 #pragma unroll
-    for (int s0 = 0; s0 < L::kStages - 1; ++s0) issue(s0);
+    for (int s0 = 0; s0 < L::kStages - 1; ++s0) issue(win0 + s0);
   }
   // The first window's activations, then per window: issue the weight
   // loads, stage the NEXT window's activations, consume, one barrier.
@@ -262,10 +270,10 @@ __global__ __launch_bounds__(kW * 32, 2) void mma_gemv_kernel(const uint16_t* __
   // staging touches only the live rows (a sixteenth of the stores at one row).
   zero_rows<kTiles, kFp8, F::kLaneUnits, kW>(m, sA[0]);
   zero_rows<kTiles, kFp8, F::kLaneUnits, kW>(m, sA[1]);
-  stage_a<kTiles, kFp8, F::kLaneUnits, kW>(act, act_stride, m, k, 0, sA[0]);
+  stage_a<kTiles, kFp8, F::kLaneUnits, kW>(act, act_stride, m, k, win0 * W::kK, sA[0]);
   __syncthreads();
   int buf = 0;
-  for (int base = 0; base < k; base += W::kK, buf ^= 1) {
+  for (int base = win0 * W::kK, base_end = win1 * W::kK; base < base_end; base += W::kK, buf ^= 1) {
     uint4 wv4[kGroups][F::kVecs];
     if constexpr (L::kOn) {
       // Keep kStages - 1 windows in flight: window base + (kStages - 1)
@@ -338,6 +346,22 @@ __global__ __launch_bounds__(kW * 32, 2) void mma_gemv_kernel(const uint16_t* __
   // Epilogue: C fragment (m16n8): (r, 2t), (r, 2t+1), (r+8, 2t), (r+8, 2t+1)
   // of the warp's [16 x 8] slice; the slice's n columns are the warp's rows.
   const int col0 = n0 + 2 * t;
+  if (part) {
+    float* prow = part + static_cast<size_t>(blockIdx.y) * m * n;
+#pragma unroll
+    for (int tt = 0; tt < kTiles; ++tt) {
+      const int mrow = tt * 16 + r;
+      if (mrow < m) {
+        if (col0 < n) prow[static_cast<size_t>(mrow) * n + col0] = c[tt][0];
+        if (col0 + 1 < n) prow[static_cast<size_t>(mrow) * n + col0 + 1] = c[tt][1];
+      }
+      if (mrow + 8 < m) {
+        if (col0 < n) prow[static_cast<size_t>(mrow + 8) * n + col0] = c[tt][2];
+        if (col0 + 1 < n) prow[static_cast<size_t>(mrow + 8) * n + col0 + 1] = c[tt][3];
+      }
+    }
+    return;
+  }
 #pragma unroll
   for (int tt = 0; tt < kTiles; ++tt) {
     const int mrow = tt * 16 + r;
@@ -352,12 +376,77 @@ __global__ __launch_bounds__(kW * 32, 2) void mma_gemv_kernel(const uint16_t* __
   }
 }
 
+// The split-K reduce: out[m, n] = sum over the splits, in split order, of
+// the fp32 partials (deterministic; the split count is a function of the
+// shape, never of m).
+template <typename OutT>
+__global__ void mma_gemv_split_reduce_kernel(const float* __restrict__ part, int splits, int m, int n,
+                                             OutT* __restrict__ out, size_t out_stride) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= m * n) return;
+  const int mrow = i / n, col = i - mrow * n;
+  float acc = 0.f;
+  for (int s = 0; s < splits; ++s) acc += part[(static_cast<size_t>(s) * m + mrow) * n + col];
+  fp8_gemv::store_dot(out + static_cast<size_t>(mrow) * out_stride + col, acc);
+}
+
+// Split-K for the decode forms (2026-09-21): a small-n site's grid is n / 16
+// blocks at two warps (the [320 x 10240] hyperconnection down projection: 20
+// blocks on a 48-SM part), and each warp then walks its k windows in
+// sequence with nothing else resident — the c=4 profile has that site at
+// 68 us for 3.3 MB (48 GB/s) and the shared expert's [320 x 2560] gate and
+// up at 19-24 us (under 45 GB/s). Splitting the k range across grid.y
+// blocks (fp32 partials in the caller's GEMM workspace, one reduce launch)
+// fills the part. The split count is a function of (n, k, width) only, so a
+// row's chain is the same whatever m rides in the launch (the decode
+// forms' invariant); it is not the unsplit chain (tolerance-equal, the
+// contract above the GEMV chunk bound). On by default -- the same trade
+// cuBLAS makes by heuristic for small-n shapes; DGPP_MMA_SPLITK=0 keeps the
+// unsplit chain. Measured on two GB10s (Qwen3.8-Flash-Next, TP=2, MTP depth
+// 3): the decode pass shortens 119.0 -> 113.5 ms (-4.6%); tokens per pass
+// also move a little, because the summation order (and so the text) does.
+// DGPP_MMA_SPLITK_FILL overrides the block target (default two resident
+// blocks per SM).
+constexpr int kMaxSplit = 16;
+int split_k_target_blocks() {
+  static const int target = [] {
+    if (const char* v = std::getenv("DGPP_MMA_SPLITK_FILL")) {
+      const int t = std::atoi(v);
+      if (t >= 1) return t;
+    }
+    int dev = 0, sms = 48;
+    if (cudaGetDevice(&dev) == cudaSuccess) cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
+    return 2 * sms;
+  }();
+  return target;
+}
+bool split_k_enabled() {
+  static const bool on = [] {
+    const char* v = std::getenv("DGPP_MMA_SPLITK");
+    return !(v && v[0] == '0' && v[1] == '\0');
+  }();
+  return on;
+}
+int split_k_for(int blocks, int n, int k, int win_k, const void* ws, size_t ws_bytes) {
+  if (!ws || !split_k_enabled()) return 1;
+  const int fill = split_k_target_blocks();
+  if (blocks >= fill) return 1;
+  const int nwin = (k + win_k - 1) / win_k;
+  const int s = std::min({(fill + blocks - 1) / blocks, nwin, kMaxSplit});
+  // The workspace check at the decode forms' widest m, so the split (and the
+  // chain) never depends on the rows in the launch.
+  if (s < 2 || static_cast<size_t>(s) * kMmaGemvMaxRows * static_cast<size_t>(n) * sizeof(float) > ws_bytes)
+    return 1;
+  return s;
+}
+
 // One decode form at one width: the shared-memory opt-in once per
 // instantiation (the A windows + the warp weight buffers exceed the default
 // budget at the wide widths).
 template <int kTiles, bool kFp8, int kW, typename OutT>
 void launch_decode_form(const uint16_t* a, size_t act_stride, const void* w, const float* scales, OutT* o,
-                        int rows, int n, int k, size_t out_stride, int rs, int cs, cudaStream_t stream) {
+                        int rows, int n, int k, size_t out_stride, int rs, int cs, cudaStream_t stream,
+                        void* ws, size_t ws_bytes) {
   using L = WarpLoads<kTiles, kFp8, kW>;
   static bool opted_in = false;
   if (!opted_in) {
@@ -366,9 +455,19 @@ void launch_decode_form(const uint16_t* a, size_t act_stride, const void* w, con
                                       static_cast<int>(L::kSmemBytes)));
     opted_in = true;
   }
-  const dim3 grid((n + kW * kRowsPerWarp - 1) / (kW * kRowsPerWarp));
-  mma_gemv_kernel<kTiles, kFp8, kW, OutT><<<grid, kW * 32, L::kSmemBytes, stream>>>(
-      a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs);
+  const int blocks = (n + kW * kRowsPerWarp - 1) / (kW * kRowsPerWarp);
+  const int splits = split_k_for(blocks, n, k, Win<kTiles, kFp8>::kK, ws, ws_bytes);
+  if (splits > 1) {
+    float* part = static_cast<float*>(ws);
+    mma_gemv_kernel<kTiles, kFp8, kW, OutT><<<dim3(blocks, splits), kW * 32, L::kSmemBytes, stream>>>(
+        a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, part);
+    const int total = rows * n;
+    mma_gemv_split_reduce_kernel<OutT><<<(total + 255) / 256, 256, 0, stream>>>(part, splits, rows, n, o,
+                                                                                 out_stride);
+    return;
+  }
+  mma_gemv_kernel<kTiles, kFp8, kW, OutT><<<dim3(blocks), kW * 32, L::kSmemBytes, stream>>>(
+      a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, nullptr);
 }
 // The decode forms' width from n: the widest whose grid fills the resident
 // blocks (n >= 6144 rows: eight warps; [2048, 6144): four; [1024, 2048):
@@ -380,22 +479,24 @@ void launch_decode_form(const uint16_t* a, size_t act_stride, const void* w, con
 int g_mma_decode_width = 0;  // mma_gemv_set_decode_width: 0 the rule, else a fixed width (the sweep)
 template <int kTiles, bool kFp8, typename OutT>
 void launch_decode(const uint16_t* a, size_t act_stride, const void* w, const float* scales, OutT* o, int rows,
-                   int n, int k, size_t out_stride, int rs, int cs, cudaStream_t stream) {
+                   int n, int k, size_t out_stride, int rs, int cs, cudaStream_t stream, void* ws,
+                   size_t ws_bytes) {
   const int warps = (n + kRowsPerWarp - 1) / kRowsPerWarp;
   const int width = g_mma_decode_width > 0 ? g_mma_decode_width : warps >= 512 ? 8 : warps >= 128 ? 4 : 2;
   if (width == 8)
-    launch_decode_form<kTiles, kFp8, 8, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream);
+    launch_decode_form<kTiles, kFp8, 8, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes);
   else if (width == 4)
-    launch_decode_form<kTiles, kFp8, 4, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream);
+    launch_decode_form<kTiles, kFp8, 4, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes);
   else if (width == 2)
-    launch_decode_form<kTiles, kFp8, 2, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream);
+    launch_decode_form<kTiles, kFp8, 2, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes);
   else
-    launch_decode_form<kTiles, kFp8, 1, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream);
+    launch_decode_form<kTiles, kFp8, 1, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes);
 }
 
 template <bool kFp8, typename OutT>
 void launch(const uint16_t* act, size_t act_stride, const void* w, const float* scales, OutT* out,
-            int m, int n, int k, size_t out_stride, int rs, int cs, cudaStream_t stream) {
+            int m, int n, int k, size_t out_stride, int rs, int cs, cudaStream_t stream, void* ws = nullptr,
+            size_t ws_bytes = 0) {
   if (m < 1) throw std::invalid_argument("mma_gemv: m outside [1, ...)");
   if (n <= 0 || k <= 0 || (k % 64) != 0) throw std::invalid_argument("mma_gemv: k a multiple of 64");
   if (!mma_gemv_shape_ok(w, act, act_stride, m, k)) throw std::invalid_argument("mma_gemv: alignment");
@@ -410,13 +511,13 @@ void launch(const uint16_t* act, size_t act_stride, const void* w, const float* 
     const uint16_t* a = act + static_cast<size_t>(row0) * act_stride;
     OutT* o = out + static_cast<size_t>(row0) * out_stride;
     if (rows <= 16)
-      launch_decode<1, kFp8, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream);
+      launch_decode<1, kFp8, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes);
     else if (rows <= 32)
-      launch_decode<2, kFp8, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream);
+      launch_decode<2, kFp8, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes);
     else if (rows <= 64)
-      mma_gemv_kernel<4, kFp8, kWideWarps, OutT><<<grid, kWideThreads, Win<4, kFp8>::kSmemBytes, stream>>>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs);
+      mma_gemv_kernel<4, kFp8, kWideWarps, OutT><<<grid, kWideThreads, Win<4, kFp8>::kSmemBytes, stream>>>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, nullptr);
     else
-      mma_gemv_kernel<8, kFp8, kWideWarps, OutT><<<grid, kWideThreads, Win<8, kFp8>::kSmemBytes, stream>>>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs);
+      mma_gemv_kernel<8, kFp8, kWideWarps, OutT><<<grid, kWideThreads, Win<8, kFp8>::kSmemBytes, stream>>>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, nullptr);
     DGPP_CUDA_OK(cudaGetLastError());
   }
 }
@@ -436,13 +537,15 @@ bool mma_gemv_shape_ok(const void* w, const void* act, size_t act_stride, int m,
 
 void launch_mma_gemv_fp8_bf16(const uint16_t* act, size_t act_stride, const uint8_t* w,
                               const float* scales, uint16_t* out, int m, int n, int k,
-                              size_t out_stride, int rs, int cs, cudaStream_t stream) {
-  launch<true, uint16_t>(act, act_stride, w, scales, out, m, n, k, out_stride, rs, cs, stream);
+                              size_t out_stride, int rs, int cs, cudaStream_t stream, void* ws,
+                              size_t ws_bytes) {
+  launch<true, uint16_t>(act, act_stride, w, scales, out, m, n, k, out_stride, rs, cs, stream, ws, ws_bytes);
 }
 void launch_mma_gemv_fp8_f32(const uint16_t* act, size_t act_stride, const uint8_t* w,
                              const float* scales, float* out, int m, int n, int k,
-                             size_t out_stride, int rs, int cs, cudaStream_t stream) {
-  launch<true, float>(act, act_stride, w, scales, out, m, n, k, out_stride, rs, cs, stream);
+                             size_t out_stride, int rs, int cs, cudaStream_t stream, void* ws,
+                             size_t ws_bytes) {
+  launch<true, float>(act, act_stride, w, scales, out, m, n, k, out_stride, rs, cs, stream, ws, ws_bytes);
 }
 void launch_mma_gemv_bf16_bf16(const uint16_t* act, size_t act_stride, const uint16_t* w,
                                uint16_t* out, int m, int n, int k, size_t out_stride,

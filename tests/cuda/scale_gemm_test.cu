@@ -259,9 +259,14 @@ DGPP_TEST(scale_gemm_large_m_route_is_bitwise_the_tile_kernel) {
 DGPP_TEST(scale_gemm_last_row_preserves_full_product_bits_and_output_bounds) {
   // Cross the GEMV/dense boundary with the production head's K, including
   // row positions on both sides of an MMA tile. Also cover streaming MMA
-  // and the ragged-K fallback, with padded input/output strides.
+  // and the ragged-K fallback, with padded input/output strides. A workspace
+  // enables split-K only for groups of at most 32 rows: cover both sides of
+  // that boundary, including the final group of products above 128 rows.
+  void* workspace = nullptr;
+  constexpr size_t workspace_bytes = 4u << 20;
+  DGPP_CUDA_OK(cudaMalloc(&workspace, workspace_bytes));
   for (const int k : {1000, 2560}) {
-    for (const int m : {1, 4, 5, 17, 127, 128, 129, 255, 256, 257}) {
+    for (const int m : {1, 4, 5, 16, 17, 32, 33, 64, 127, 128, 129, 144, 160, 161, 255, 256, 257}) {
       const Problem p = make_problem(m, 137, k, 0x43A0 + m + k);
       const size_t act_stride = static_cast<size_t>(k) + 8;
       const size_t out_stride = static_cast<size_t>(p.n) + 7;
@@ -279,17 +284,20 @@ DGPP_TEST(scale_gemm_last_row_preserves_full_product_bits_and_output_bounds) {
       std::memcpy(scales, p.scales.data(), p.scales.size() * sizeof(float));
       bool equal = true, untouched = true;
       for (const int mma_from : {0, 5}) {
-        constexpr float sentinel = -12345.0f;
-        std::fill(last, last + m * out_stride, sentinel);
-        dgpp::launch_scale_gemm_f32(act, act_stride, w, scales, full, m, p.n, k,
-                                    nullptr, out_stride, mma_from);
-        dgpp::launch_scale_gemm_f32(act, act_stride, w, scales, last, m, p.n, k,
-                                    nullptr, out_stride, mma_from, true);
-        DGPP_CUDA_OK(cudaDeviceSynchronize());
-        const size_t offset = static_cast<size_t>(m - 1) * out_stride;
-        equal &= std::memcmp(full + offset, last + offset, p.n * sizeof(float)) == 0;
-        for (size_t i = 0; i < m * out_stride; ++i)
-          if (i < offset || i >= offset + p.n) untouched &= last[i] == sentinel;
+        for (const size_t capacity : {size_t{0}, size_t{128}, workspace_bytes}) {
+          void* ws = capacity ? workspace : nullptr;
+          constexpr float sentinel = -12345.0f;
+          std::fill(last, last + m * out_stride, sentinel);
+          dgpp::launch_scale_gemm_f32(act, act_stride, w, scales, full, m, p.n, k,
+                                      nullptr, out_stride, mma_from, false, ws, capacity);
+          dgpp::launch_scale_gemm_f32(act, act_stride, w, scales, last, m, p.n, k,
+                                      nullptr, out_stride, mma_from, true, ws, capacity);
+          DGPP_CUDA_OK(cudaDeviceSynchronize());
+          const size_t offset = static_cast<size_t>(m - 1) * out_stride;
+          equal &= std::memcmp(full + offset, last + offset, p.n * sizeof(float)) == 0;
+          for (size_t i = 0; i < m * out_stride; ++i)
+            if (i < offset || i >= offset + p.n) untouched &= last[i] == sentinel;
+        }
       }
       DGPP_CUDA_OK(cudaFree(act));
       DGPP_CUDA_OK(cudaFree(w));
@@ -301,6 +309,7 @@ DGPP_TEST(scale_gemm_last_row_preserves_full_product_bits_and_output_bounds) {
       require(untouched, "last-row head overwrote another row or output padding");
     }
   }
+  DGPP_CUDA_OK(cudaFree(workspace));
 }
 
 DGPP_TEST(scale_gemm_ragged_tails_match_both_oracles) {
