@@ -232,6 +232,14 @@ void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
   // The streaming tensor-core form between its bounds (the header's
   // table); a shape it cannot take (k % 64, alignment) falls through.
   if (streaming_mma) {
+    // A last-row request must retain the full product's reduction order.
+    // Only its final group can contain the selected row; groups above the
+    // decode bound run unsplit even when a workspace was supplied.
+    const int last_group_rows = (dispatch_rows - 1) % kMmaGemvMaxRowsPerLaunch + 1;
+    if (last_row_only && last_group_rows > kMmaGemvMaxRows) {
+      ws = nullptr;
+      ws_bytes = 0;
+    }
     if constexpr (std::is_same_v<OutT, float>)
       launch_mma_gemv_fp8_f32(act, act_row_stride_elems, w_payload, w_scales, out, m, n, k,
                               out_stride, 7, 7, stream, ws, ws_bytes);

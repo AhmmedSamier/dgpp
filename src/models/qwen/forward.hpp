@@ -58,6 +58,7 @@
 #include "kernels/bf12_companions.hpp"
 #include "kernels/l2_prefetch.hpp"
 #include "kernels/gemm.hpp"
+#include "kernels/mma_gemv.hpp"
 #include "kernels/glm_spec.hpp"
 #include "kernels/pick.hpp"
 #include "models/qwen/config.hpp"
@@ -86,11 +87,13 @@ class QwenModel : public SessionModel<QwenModel> {
   using RowRun = Base::RowRun;
 
   // Small graph widths can select different Lt/GEMV reductions. Preserve
-  // their physical-prefix width; wider verification stays in the common
-  // kernel-only lowering range and can contract without crossing it.
+  // their physical-prefix width. Wider verification may contract within
+  // the split-K (17..32 rows) or unsplit (>32 rows) range, never across it.
   static bool compact_batch_compatible(int physical_rows, int compact_rows) {
     return compact_rows > 0 && compact_rows <= physical_rows &&
-           (physical_rows == compact_rows || (physical_rows > 16 && compact_rows > 16));
+           (physical_rows == compact_rows ||
+            (physical_rows > 16 && compact_rows > 16 &&
+             (physical_rows <= kMmaGemvMaxRows) == (compact_rows <= kMmaGemvMaxRows)));
   }
 
   // max_tokens bounds a walk's rows (a prefill chunk, the diagnostic

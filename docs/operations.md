@@ -873,12 +873,13 @@ drafts and padded rows measure different work.
 With `engine.compact_batches: true`, fixed-depth Qwen graph serving places active
 requests in the smallest bucket that preserves the physical graph's numerical
 dispatch range. Graphs of at most sixteen verification rows retain their width.
-Wider graphs can shrink to a bucket above sixteen rows: for example, two live
-requests in slots 0 and 15 at MTP depth 3 use six groups (24 rows) instead of
-sixteen groups (64 rows). Slots outside every physical family retain scalar
-fallback. This conservative policy avoids the numerical changes found when
-contracting into the small-graph kernels. Persistent KV, recurrent/conv and prefix-cache
-state stays in the physical request slots; only row mappings and token feeds
+Wider graphs can shrink within the 17–32-row or above-32-row range, preserving
+the FP8 split-K reduction boundary. For example, two live requests in slots 0
+and 15 at MTP depth 3 use twelve groups (48 rows) instead of sixteen groups
+(64 rows); a 32-row graph can still shrink to six groups (24 rows). Slots
+outside every physical family retain scalar fallback. This conservative policy
+avoids numerical changes from crossing kernel boundaries. Persistent KV,
+recurrent/conv and prefix-cache state stays in the physical request slots; only row mappings and token feeds
 are staged. Sampling RNG/counts/bias/proposals remain indexed by physical
 request ID. Graph masks and verdicts are indexed by compact batch group.
 The mapping is double-buffered per graph family for pipelined replays.

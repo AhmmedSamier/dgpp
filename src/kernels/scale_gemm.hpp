@@ -52,7 +52,8 @@ namespace dgpp {
 inline constexpr int kScaleGemmMmaMaxRows = 256;
 // ws / ws_bytes: the caller's GEMM workspace, handed to the streaming
 // tensor-core form for its split-K partials at a small n (mma_gemv.hpp);
-// nullptr keeps that form unsplit.
+// nullptr keeps that form unsplit. Within each 128-row launch group, only
+// groups of at most 32 rows split, introducing another numerical boundary.
 void launch_scale_gemm_bf16(const uint16_t* act, size_t act_row_stride_elems,
                             const uint8_t* w_payload, const float* w_scales,
                             uint16_t* out, int m, int n, int k,
