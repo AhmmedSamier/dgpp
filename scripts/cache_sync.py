@@ -33,12 +33,16 @@ def snapshot_files(snapshot):
     """List snapshot files and referenced blobs, never other models or HF tokens."""
     snapshot = Path(snapshot).resolve()
     repository = snapshot.parent.parent
-    blobs = (repository / "blobs").resolve()
+    blobs = repository / "blobs"
     files = set()
     for path in snapshot.rglob("*"):
         if path.is_symlink():
-            target = path.resolve(strict=True)
-            if not target.is_file() or not target.is_relative_to(blobs) or Path(os.readlink(path)).is_absolute():
+            link = Path(os.readlink(path))
+            # Keep the repository blob's name: it may itself link to the shared
+            # Hub blob store. Resolve the chain only to check its contents.
+            target = Path(os.path.normpath(path.parent / link))
+            if (link.is_absolute() or not target.is_relative_to(blobs)
+                    or not target.resolve(strict=True).is_file()):
                 raise ValueError(f"snapshot link must be relative and point into its own blobs directory: {path}")
             files.add(str(target.relative_to(repository)))
         elif path.is_dir():
@@ -82,10 +86,12 @@ def sync_snapshot(snapshot, target, env):
                         str(Path(__file__).resolve()), str(Path(cluster_doctor.__file__).resolve()),
                         f"{target}:{temporary}/"], check=True)
         ssh(target, "mkdir -p -- " + shlex.quote(destination))
-        # Preserve relative snapshot symlinks and content-addressed blobs.
+        # With the repository as the transfer root, snapshot links stay inside
+        # the tree and are preserved; blob links to shared stores are outside
+        # the tree and --copy-unsafe-links copies their contents instead.
         # No --delete or --inplace: retain other revisions and keep partial
         # transfers from replacing complete files.
-        subprocess.run(["rsync", "-rlt", "--links", "--checksum", "--protect-args",
+        subprocess.run(["rsync", "-rlt", "--links", "--copy-unsafe-links", "--checksum", "--protect-args",
                         "--info=progress2", "--partial-dir=.dgpp-partial", "--files-from=-", "-e", transport,
                         str(snapshot.parent.parent) + "/", f"{target}:{destination}/"],
                        input=manifest, text=True, check=True)
