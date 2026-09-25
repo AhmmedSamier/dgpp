@@ -39,6 +39,8 @@ venv/
 .DS_Store
 
 # --- Debug residue ---------------------------------------------------------------
+benchmarks/*
+
 /core
 core.*
 
