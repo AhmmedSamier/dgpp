@@ -51,6 +51,42 @@ using dgpp::sched::Scheduler;
 using dgpp::sched::SchedulerRequest;
 using dgpp::text::ToolCallParser;
 
+// Whether the history's reasoning_content travels in the prompt is ONE
+// switch the checkpoints spell four ways: `preserve_thinking` on
+// Qwen3.8-Flash-Next (false drops the reasoning blocks of the turns before
+// the last user query — the golden corpus's multi_turn_preserve_thinking_false
+// case), and its inverted spellings `clear_thinking`, `drop_thinking` and
+// `truncate_history_thinking` on the GLM and DeepSeek templates. A request
+// may name the switch any of these ways; the render receives the spelling
+// THIS template reads, at that spelling's polarity, so a flag is never
+// accepted and then ignored — which is what an alias-unaware pass-through
+// does to a client written for the other stack (llama.cpp's
+// caps_apply_preserve_reasoning is the same table). `means_keep` is the
+// global's value that KEEPS the history's reasoning.
+struct HistoryKnob {
+  std::string_view name;
+  bool means_keep;
+};
+
+constexpr HistoryKnob kHistoryKnobs[] = {
+    {"preserve_thinking", true},
+    {"clear_thinking", false},
+    {"drop_thinking", false},
+    {"truncate_history_thinking", false},
+};
+
+const HistoryKnob* find_history_knob(std::string_view name) {
+  for (const HistoryKnob& k : kHistoryKnobs)
+    if (k.name == name) return &k;
+  return nullptr;
+}
+
+bool template_has_history_knob(const ModelFrontend& frontend) {
+  for (const HistoryKnob& k : kHistoryKnobs)
+    if (frontend.template_reads(k.name)) return true;
+  return false;
+}
+
 const minijson::Value* optional_field(const minijson::Value& body, std::string_view name) {
   const auto* v = body.find(name);
   return v && !v->is_null() ? v : nullptr;
@@ -1211,6 +1247,7 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
     effort = std::string(re->as_string());
   }
   std::vector<Member> extra;
+  std::optional<bool> keep_history;  // the history switch, whichever spelling carried it
   if (const Value* kw = body.find("chat_template_kwargs")) {
     if (!kw->is_object())
       return refuse("chat_template_kwargs must be an object",
@@ -1219,9 +1256,22 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
     for (const Member& m : kw->members()) {
       const std::string where = "chat_template_kwargs." + m.key;
       if (!seen_kwargs.insert(m.key).second) return refuse("duplicate template parameter", where);
-      if (m.key == "clear_thinking") {
+      if (const HistoryKnob* knob = find_history_knob(m.key)) {
+        // One switch, four spellings (kHistoryKnobs): the name the client
+        // sent only has to be a spelling of a knob this template has; the
+        // global goes out in the template's own spelling, below.
+        if (!template_has_history_knob(*frontend_))
+          return refuse(
+              "this template has no history-thinking knob (it renders the "
+              "reasoning_content of every history turn it is given)",
+              where, "unsupported_parameter");
         if (!m.value.is_bool()) return refuse(where + " must be a boolean", where);
-        extra.push_back(m);
+        const bool keep = m.value.as_bool() == knob->means_keep;
+        if (keep_history && *keep_history != keep)
+          return refuse(where + " disagrees with this request's other "
+                                "history-thinking spelling; send one",
+                        where);
+        keep_history = keep;
       } else if (m.key == "reasoning_effort") {
         if (!m.value.is_string() || !effort_ok(m.value.as_string()))
           return refuse(where + " must be none, minimal, low, medium, high, xhigh or max",
@@ -1257,7 +1307,9 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
         extra.push_back(alias);
       } else {
         return refuse(where + " is not a knob of this template (it reads "
-                      "enable_thinking / thinking, clear_thinking and "
+                      "enable_thinking / thinking, one history-thinking "
+                      "switch (preserve_thinking / clear_thinking / "
+                      "drop_thinking / truncate_history_thinking) and "
                       "reasoning_effort)",
                       where, "unsupported_parameter");
       }
@@ -1276,6 +1328,15 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
   if (thinking) {
     std::erase_if(extra, [](const auto& m) { return m.key == "enable_thinking"; });
     extra.push_back({"enable_thinking", Value::make_bool(*thinking)});
+  }
+  // The history-thinking switch, in the spelling this template reads (and
+  // only in it: an extra global a template never names is noise in the
+  // render's inputs).
+  if (keep_history) {
+    for (const HistoryKnob& k : kHistoryKnobs)
+      if (frontend_->template_reads(k.name))
+        extra.push_back(Member{std::string(k.name),
+                               Value::make_bool(*keep_history == k.means_keep)});
   }
   if (effort) {
     ModelFrontend::ReasoningSettings settings;

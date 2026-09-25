@@ -462,8 +462,16 @@ class FakeFrontend : public ModelFrontend {
   // fake, like GLM-5.3-Flash's template, does not.
   std::atomic<bool> reads_enable_thinking{false};
   std::atomic<bool> reads_reasoning_effort{true};
+  // Qwen3.8-Flash-Next's template reads preserve_thinking (it drops the
+  // history's reasoning blocks when false); the GLM/DeepSeek templates
+  // spell the same switch clear_thinking; a template with neither (the
+  // default fake, like a plain ChatML template) refuses the whole family.
+  std::atomic<bool> reads_preserve_thinking{false};
+  std::atomic<bool> reads_clear_thinking{false};
   bool template_reads(std::string_view name) const override {
-    return (name == "reasoning_effort" && reads_reasoning_effort) || (name == "enable_thinking" && reads_enable_thinking);
+    return (name == "reasoning_effort" && reads_reasoning_effort) || (name == "enable_thinking" && reads_enable_thinking) ||
+           (name == "preserve_thinking" && reads_preserve_thinking) ||
+           (name == "clear_thinking" && reads_clear_thinking);
   }
 
   std::vector<int64_t> encode_text(std::string_view text) const override {
@@ -1295,6 +1303,9 @@ DGPP_TEST(serve_api_integerBoundsAndUnsupportedParameters) {
 
 DGPP_TEST(serve_api_opencodeProviderExtensionsRemainCompatible) {
   ServiceRig rig(8, model_defaults(), true);
+  // The request carries a template knob, so the fake's template reads it
+  // (a knob no template reads is a 400, not a silently ignored option).
+  rig.frontend.reads_clear_thinking = true;
   const std::string settings = R"(,"seed":42,"temperature":0.7,"top_p":0.95,"min_p":0.05,"presence_penalty":0.2,"repetition_penalty":1.1,"chat_template_kwargs":{"clear_thinking":false})";
   require(post_chat(rig, chat_body("abcd", 2, settings), "usage").find("200 OK") != std::string::npos,
           "baseline request accepted");
@@ -1918,10 +1929,17 @@ DGPP_TEST(serve_tools_requestSideRendersThroughTheTemplateAndRefusesByName) {
   require(g.find("\"tools\"") == std::string::npos,
           "tool_choice none omits the tools from the render: " + g);
 
+  // The history-thinking knob reaches a template that reads it, verbatim in
+  // this spelling (the GLM/DeepSeek one; the translations are in
+  // serve_historyThinkingIsOneSwitchWhicheverSpellingArrives). It goes back
+  // off below because the refusals at the end of this test need a template
+  // with no such knob.
+  rig.frontend.reads_clear_thinking = true;
   (void)post_until_usage(
       rig, chat_body("abcd", 2,
                      ",\"reasoning_effort\":\"low\",\"chat_template_kwargs\":"
                      "{\"clear_thinking\":false}"));
+  rig.frontend.reads_clear_thinking = false;
   g = rig.frontend.last_globals();
   require(g.find("\"reasoning_effort\":\"low\"") != std::string::npos &&
               g.find("\"clear_thinking\":false") != std::string::npos,
@@ -2004,6 +2022,8 @@ DGPP_TEST(serve_tools_requestSideRendersThroughTheTemplateAndRefusesByName) {
           "\"param\":\"reasoning_effort\"");
   refused(chat_body("abcd", 2, ",\"chat_template_kwargs\":{\"enable_thinking\":false}"),
           "\"param\":\"chat_template_kwargs.enable_thinking\"");
+  refused(chat_body("abcd", 2, ",\"chat_template_kwargs\":{\"preserve_thinking\":false}"),
+          "\"param\":\"chat_template_kwargs.preserve_thinking\"");
   refused(chat_body("abcd", 2, ",\"chat_template_kwargs\":{\"foo\":1}"),
           "\"param\":\"chat_template_kwargs.foo\"");
   refused(chat_body("abcd", 2,
@@ -2038,6 +2058,136 @@ DGPP_TEST(serve_enableThinkingIsAcceptedOnlyWhenTheTemplateReadsIt) {
           "enable_thinking reaches the render globals: " + g);
   const std::string bad = post_chat(rig, chat_body("abcd", 2, ",\"chat_template_kwargs\":{\"enable_thinking\":\"no\"}"));
   require(bad.find("must be a boolean") != std::string::npos, "a non-boolean enable_thinking is refused: " + bad);
+}
+
+DGPP_TEST(serve_preserveThinkingIsPassedToTheTemplatesThatReadIt) {
+  // Qwen3.8-Flash-Next's template reads preserve_thinking (false keeps the
+  // reasoning blocks of the assistant turns after the last user query only):
+  // the service passes it through as a boolean global and otherwise renders
+  // the request unchanged. A template with no such knob refuses it (the
+  // case above), and a non-boolean is a type error rather than a silent
+  // truthiness read.
+  ServiceRig rig;
+  rig.frontend.reads_preserve_thinking = true;
+  const std::string ok = post_until_usage(
+      rig, chat_body("abcd", 2,
+                     ",\"chat_template_kwargs\":{\"preserve_thinking\":false}"));
+  require(ok.find("\"object\":\"chat.completion\"") != std::string::npos,
+          "preserve_thinking accepted by a template that reads it: " + ok.substr(0, 300));
+  require(rig.frontend.last_globals().find("\"preserve_thinking\":false") != std::string::npos,
+          "preserve_thinking reaches the render globals: " + rig.frontend.last_globals());
+  const std::string bad = post_chat(
+      rig, chat_body("abcd", 2, ",\"chat_template_kwargs\":{\"preserve_thinking\":\"no\"}"));
+  require(bad.find("must be a boolean") != std::string::npos,
+          "a non-boolean preserve_thinking is refused: " + bad);
+}
+
+DGPP_TEST(serve_historyThinkingIsOneSwitchWhicheverSpellingArrives) {
+  // preserve_thinking (Qwen3.8-Flash-Next) and clear_thinking / drop_thinking
+  // / truncate_history_thinking (GLM, DeepSeek) are the SAME switch with
+  // inverted spellings: whatever the client sends, the render receives the
+  // name this template reads, at that name's polarity. A name the render
+  // never looks at is worse than a refusal — it reads as a request the
+  // service honoured.
+  const auto post_kw = [&](ServiceRig& rig, const std::string& kwargs) {
+    return post_until_usage(rig, chat_body("abcd", 2, ",\"chat_template_kwargs\":" + kwargs));
+  };
+  const auto globals_of = [](ServiceRig& rig) { return rig.frontend.last_globals(); };
+  {
+    ServiceRig rig;
+    rig.frontend.reads_preserve_thinking = true;  // the Qwen spelling
+    for (const char* kwargs : {"{\"clear_thinking\":false}", "{\"drop_thinking\":false}",
+                               "{\"truncate_history_thinking\":false}"}) {
+      const std::string ok = post_kw(rig, kwargs);
+      require(ok.find("\"object\":\"chat.completion\"") != std::string::npos,
+              std::string(kwargs) + " keeps the history on a preserve_thinking template: " +
+                  ok.substr(0, 300));
+      require(globals_of(rig).find("\"preserve_thinking\":true") != std::string::npos,
+              std::string(kwargs) + " arrives as preserve_thinking=true: " + globals_of(rig));
+      require(globals_of(rig).find("clear_thinking") == std::string::npos,
+              "the unread spelling stays out of the globals: " + globals_of(rig));
+    }
+    const std::string off = post_kw(rig, "{\"clear_thinking\":true}");
+    require(off.find("\"object\":\"chat.completion\"") != std::string::npos,
+            "clear_thinking=true is served: " + off.substr(0, 300));
+    require(globals_of(rig).find("\"preserve_thinking\":false") != std::string::npos,
+            "clear_thinking=true arrives as preserve_thinking=false: " + globals_of(rig));
+  }
+  {
+    ServiceRig rig;
+    rig.frontend.reads_clear_thinking = true;  // the GLM / DeepSeek spelling
+    const std::string off = post_kw(rig, "{\"preserve_thinking\":false}");
+    require(off.find("\"object\":\"chat.completion\"") != std::string::npos,
+            "preserve_thinking accepted by a clear_thinking template: " + off.substr(0, 300));
+    require(globals_of(rig).find("\"clear_thinking\":true") != std::string::npos,
+            "preserve_thinking=false arrives as clear_thinking=true: " + globals_of(rig));
+    require(globals_of(rig).find("preserve_thinking") == std::string::npos,
+            "the unread spelling stays out of the globals: " + globals_of(rig));
+    const std::string on = post_kw(rig, "{\"preserve_thinking\":true}");
+    require(on.find("\"object\":\"chat.completion\"") != std::string::npos,
+            "preserve_thinking=true is served: " + on.substr(0, 300));
+    require(globals_of(rig).find("\"clear_thinking\":false") != std::string::npos,
+            "preserve_thinking=true arrives as clear_thinking=false: " + globals_of(rig));
+  }
+  {
+    // Two spellings of one switch, disagreeing: an error, not last-one-wins.
+    ServiceRig rig;
+    rig.frontend.reads_preserve_thinking = true;
+    rig.frontend.reads_clear_thinking = true;
+    const std::string both = post_kw(rig, "{\"preserve_thinking\":true,\"clear_thinking\":true}");
+    require(both.find("400 ") != std::string::npos && both.find("disagree") != std::string::npos,
+            "disagreeing spellings refuse: " + both.substr(0, 300));
+    const std::string agree = post_kw(rig, "{\"preserve_thinking\":false,\"clear_thinking\":true}");
+    require(agree.find("\"object\":\"chat.completion\"") != std::string::npos,
+            "agreeing spellings serve: " + agree.substr(0, 300));
+  }
+  {
+    // No such switch anywhere in the template: every spelling is a 400
+    // naming the field, not a flag that quietly does nothing.
+    ServiceRig rig;
+    for (const char* name : {"preserve_thinking", "clear_thinking", "drop_thinking",
+                             "truncate_history_thinking"}) {
+      const std::string bad = post_chat(
+          rig, chat_body("abcd", 2,
+                         ",\"chat_template_kwargs\":{\"" + std::string(name) + "\":false}"));
+      require(bad.find("400 ") != std::string::npos &&
+                  bad.find("\"param\":\"chat_template_kwargs." + std::string(name) + "\"") !=
+                      std::string::npos,
+              std::string(name) + " refuses on a template with no such knob: " + bad.substr(0, 300));
+    }
+  }
+}
+
+DGPP_TEST(serve_templateReadsMeansTheRenderCanSeeTheGlobal) {
+  // The gate above is ChatTemplate::reads, which must answer "can this
+  // render depend on the global" — not "does this word appear in the file".
+  // A source-text search calls all five of these a knob of the template.
+  const auto reads = [](const std::string& src, std::string_view name) {
+    return dgpp::text::ChatTemplate::compile(src).reads(name);
+  };
+  require(!reads("{# preserve_thinking is not a knob here #}hi", "preserve_thinking"),
+          "a comment is not a read");
+  require(!reads(R"({{ "preserve_thinking" }})", "preserve_thinking"),
+          "a printed word is not a read");
+  require(!reads("{% if m.preserve_thinking %}a{% endif %}", "preserve_thinking"),
+          "an attribute of another object is not a read of the global");
+  require(!reads("{% set preserve_thinking = true %}{{ preserve_thinking }}",
+                 "preserve_thinking"),
+          "a name the template sets for itself is not the client's knob");
+  require(!reads("{% for preserve_thinking in items %}{{ preserve_thinking }}{% endfor %}",
+                 "preserve_thinking"),
+          "a loop variable is not a read of the global");
+  require(reads("{% for preserve_thinking in items %}{{ preserve_thinking }}{% endfor %}",
+                "items"),
+          "the iterable still is");
+  require(!reads("{% macro f(preserve_thinking) %}{{ preserve_thinking }}{% endmacro %}{{ f(1) }}",
+                 "preserve_thinking"),
+          "a macro parameter is not a read of the global");
+  require(reads("{% if preserve_thinking is defined and preserve_thinking %}a{% else %}b{% endif %}",
+                "preserve_thinking"),
+          "the real thing: an is-defined test on the global");
+  require(reads("{% for m in messages %}{{ preserve_thinking }}{% endfor %}", "preserve_thinking"),
+          "a read inside a loop counts");
 }
 
 DGPP_TEST(serve_toolCalls_oneShotMessageShapeAndFinishReason) {

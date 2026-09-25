@@ -174,7 +174,13 @@ prefixes through a trie and are checked against the exhaustive mask oracle.
 Unknown top-level client/provider extensions are accepted and ignored, as in
 earlier DGPP versions. This includes `preserveThinking`, which OpenCode can
 forward from its model options. It does not control DGPP's prompt rendering;
-use `chat_template_kwargs.clear_thinking` for the existing template control.
+name the switch inside `chat_template_kwargs`, where any of the template
+spellings works: `preserve_thinking` (Qwen3.8-Flash-Next) or its inverted
+`clear_thinking` / `drop_thinking` / `truncate_history_thinking` (GLM,
+DeepSeek-V4.1). These are one switch, not four: the render receives the
+spelling the served checkpoint's template actually reads, so a flag is never
+accepted and then ignored, and a template with no such switch refuses all
+four by name.
 Recognized request fields remain validated, and known unsupported API features
 still return explicit errors. Unknown fields inside `chat_template_kwargs`
 remain errors because that object explicitly requests prompt changes.
