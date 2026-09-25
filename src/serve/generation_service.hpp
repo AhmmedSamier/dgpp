@@ -181,6 +181,13 @@ struct ServiceConfig {
   // true folds them into content as "<think>…</think>" text for clients
   // that expect the raw transcript.
   bool reasoning_in_content = false;
+  // Whether the history's reasoning_content travels in the prompt when a
+  // request does not name the switch: nullopt (default) leaves the template's
+  // own default, which differs by checkpoint (Qwen3.8-Flash-Next keeps, the GLM
+  // and DeepSeek templates drop). Set: this process overrides it — and a
+  // template with no such switch makes it a startup error, not a flag that
+  // quietly does nothing.
+  std::optional<bool> preserve_thinking;
   // The prefix cache's key (M7), reported by /v1/metrics: the tokenizer
   // revision, the template hash and the checkpoint the entries were taken
   // under (the cache is per process; the key names what it is bound to).

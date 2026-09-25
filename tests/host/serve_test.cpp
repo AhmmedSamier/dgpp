@@ -675,7 +675,12 @@ struct ServiceRig {
                       // rope ramp and its two bounds, advertised on /v1/models.
                       std::optional<dgpp::RopeScaling> rope_scaling = std::nullopt,
                       int64_t position_ceiling = 0, int64_t kv_pool_tokens = 0,
-                      bool resumable_prefill = false, bool with_dsml = false)
+                      bool resumable_prefill = false, bool with_dsml = false,
+                      // The history-thinking switch: the process default
+                      // (--preserve-thinking) and the spelling this fake's
+                      // template reads ("" = it has none).
+                      std::optional<bool> preserve_thinking = std::nullopt,
+                      std::string history_spelling = "")
       : engine(kSlots, /*total_blocks=*/100, /*block_tokens=*/4, can_sample),
         frontend(with_markers, with_dsml),
         cfg([&] {
@@ -693,6 +698,9 @@ struct ServiceRig {
           c.position_ceiling = position_ceiling;
           c.kv_pool_tokens = kv_pool_tokens;
           c.file_inputs = std::move(file_inputs);
+          c.preserve_thinking = preserve_thinking;
+          frontend.reads_preserve_thinking = history_spelling == "preserve_thinking";
+          frontend.reads_clear_thinking = history_spelling == "clear_thinking";
           return c;
         }()),
         service((engine.set_prefix_arena(prefix_slots, 4), cfg), &engine, &frontend, {kFakeEos}),
@@ -2145,8 +2153,8 @@ DGPP_TEST(serve_historyThinkingIsOneSwitchWhicheverSpellingArrives) {
     // No such switch anywhere in the template: every spelling is a 400
     // naming the field, not a flag that quietly does nothing.
     ServiceRig rig;
-    for (const char* name : {"preserve_thinking", "clear_thinking", "drop_thinking",
-                             "truncate_history_thinking"}) {
+    for (const char* name : {"preserve_thinking", "preserve_reasoning", "clear_thinking",
+                             "drop_thinking", "truncate_history_thinking"}) {
       const std::string bad = post_chat(
           rig, chat_body("abcd", 2,
                          ",\"chat_template_kwargs\":{\"" + std::string(name) + "\":false}"));
@@ -2155,6 +2163,123 @@ DGPP_TEST(serve_historyThinkingIsOneSwitchWhicheverSpellingArrives) {
                       std::string::npos,
               std::string(name) + " refuses on a template with no such knob: " + bad.substr(0, 300));
     }
+  }
+}
+
+DGPP_TEST(serve_historyThinkingAtTheTopLevelOfTheRequest) {
+  // The snake_case spelling is a documented request field; the camelCase one
+  // OpenCode forwards stays a tolerated extension.
+  {
+    ServiceRig rig;
+    rig.frontend.reads_preserve_thinking = true;
+    for (const char* field : {"preserve_thinking", "preserveThinking"}) {
+      const std::string ok = post_until_usage(
+          rig, chat_body("abcd", 2, std::string(",\"") + field + "\":false"));
+      require(ok.find("\"object\":\"chat.completion\"") != std::string::npos,
+              std::string(field) + " at the top level is served: " + ok.substr(0, 300));
+      require(rig.frontend.last_globals().find("\"preserve_thinking\":false") != std::string::npos,
+              std::string(field) + " reaches the render globals: " + rig.frontend.last_globals());
+    }
+    const std::string bad = post_chat(
+        rig, chat_body("abcd", 2, ",\"preserveThinking\":\"no\""));
+    expect_invalid_request(bad, "preserveThinking");
+    require(bad.find("must be a boolean") != std::string::npos,
+            "a non-boolean top-level flag is refused: " + bad);
+    const std::string clash = post_chat(rig, chat_body(
+        "abcd", 2, ",\"preserve_thinking\":false,\"chat_template_kwargs\":{\"clear_thinking\":false}"));
+    expect_invalid_request(clash, "preserve_thinking");
+    require(clash.find("disagree") != std::string::npos,
+            "a top-level flag and a kwargs flag that disagree refuse: " + clash);
+  }
+  {
+    ServiceRig rig;  // the default fake reads none of the spellings
+    const std::string ignored = post_until_usage(
+        rig, chat_body("abcd", 2, ",\"preserveThinking\":false"));
+    require(ignored.find("\"object\":\"chat.completion\"") != std::string::npos,
+            "an extension this template cannot honour is still served: " + ignored.substr(0, 300));
+    require(rig.frontend.last_globals().find("preserve_thinking") == std::string::npos,
+            "and never reaches the render: " + rig.frontend.last_globals());
+    expect_invalid_request(
+        post_chat(rig, chat_body("abcd", 2, ",\"preserve_thinking\":false")),
+        "preserve_thinking");
+  }
+}
+
+DGPP_TEST(serve_preserveReasoningIsAnotherNameForTheSameSwitch) {
+  // llama.cpp's client-facing name, accepted in both places the switch lives
+  // and always re-spelled for this template.
+  ServiceRig rig;
+  rig.frontend.reads_preserve_thinking = true;
+  const auto globals_after = [&](const std::string& body_suffix) {
+    const std::string ok = post_until_usage(rig, chat_body("abcd", 2, body_suffix));
+    require(ok.find("\"object\":\"chat.completion\"") != std::string::npos,
+            "preserve_reasoning served: " + ok.substr(0, 300));
+    return rig.frontend.last_globals();
+  };
+  require(globals_after(",\"chat_template_kwargs\":{\"preserve_reasoning\":false}")
+              .find("\"preserve_thinking\":false") != std::string::npos,
+          "preserve_reasoning=false arrives as preserve_thinking=false");
+  require(globals_after(",\"chat_template_kwargs\":{\"preserve_reasoning\":true}")
+              .find("\"preserve_thinking\":true") != std::string::npos,
+          "preserve_reasoning=true arrives as preserve_thinking=true");
+  require(globals_after(",\"preserve_reasoning\":false")
+              .find("\"preserve_thinking\":false") != std::string::npos,
+          "and the same at the top level");
+  ServiceRig plain;
+  expect_invalid_request(
+      post_chat(plain, chat_body("abcd", 2, ",\"preserve_reasoning\":false")),
+      "preserve_reasoning");
+}
+
+DGPP_TEST(serve_preserveThinkingProcessDefaultAndAdvertisedCapability) {
+  // --preserve-thinking keep|drop is what a request that names no spelling
+  // gets, in the template's own spelling; a request wins over it; a template
+  // that cannot honour the operator's choice refuses at startup; and
+  // /v1/models says which of the three states this process is in.
+  const auto models_of = [](ServiceRig& rig) {
+    Client c(rig.port());
+    c.send_all("GET /v1/models HTTP/1.1\r\nHost: t\r\n\r\n");
+    return c.read_available(800);
+  };
+  {
+    ServiceRig rig(8, model_defaults(), true, std::nullopt, false, false, {}, 0, {},
+                   {}, 0, 0, false, false, std::optional<bool>(false), "clear_thinking");
+    const std::string ok = post_until_usage(rig, chat_body("abcd", 2));
+    require(ok.find("\"object\":\"chat.completion\"") != std::string::npos,
+            "the plain request is served: " + ok.substr(0, 300));
+    require(rig.frontend.last_globals().find("\"clear_thinking\":true") != std::string::npos,
+            "the process default reaches the render in the template's spelling: " +
+                rig.frontend.last_globals());
+    require(models_of(rig).find("\"history_thinking\":{\"supported\":true,\"default\":\"drop\","
+                                "\"spelling\":\"clear_thinking\"}") != std::string::npos,
+            "the capability line names the spelling and the default: " + models_of(rig));
+    (void)post_until_usage(rig, chat_body("abcd", 2, ",\"preserve_thinking\":true"));
+    require(rig.frontend.last_globals().find("\"clear_thinking\":false") != std::string::npos,
+            "a request overrides the process default: " + rig.frontend.last_globals());
+  }
+  {
+    ServiceRig rig(8, model_defaults(), true, std::nullopt, false, false, {}, 0, {},
+                   {}, 0, 0, false, false, std::nullopt, "preserve_thinking");
+    (void)post_until_usage(rig, chat_body("abcd", 2));
+    require(rig.frontend.last_globals().find("preserve_thinking") == std::string::npos,
+            "auto sends the template nothing: " + rig.frontend.last_globals());
+    require(models_of(rig).find("\"history_thinking\":{\"supported\":true,\"default\":\"template\","
+                                "\"spelling\":\"preserve_thinking\"}") != std::string::npos,
+            "and says so: " + models_of(rig));
+  }
+  {
+    ServiceRig rig;  // the default fake reads no spelling
+    require(models_of(rig).find("\"history_thinking\":{\"supported\":false,\"default\":\"none\","
+                                "\"spelling\":null}") != std::string::npos,
+            "nothing to advertise: " + models_of(rig));
+    bool refused = false;
+    try {
+      ServiceRig strict(8, model_defaults(), true, std::nullopt, false, false, {}, 0, {},
+                        {}, 0, 0, false, false, std::optional<bool>(false), "");
+    } catch (const std::invalid_argument&) {
+      refused = true;
+    }
+    require(refused, "an operator default the template cannot honour refuses at startup");
   }
 }
 

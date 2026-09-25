@@ -51,18 +51,14 @@ using dgpp::sched::Scheduler;
 using dgpp::sched::SchedulerRequest;
 using dgpp::text::ToolCallParser;
 
-// Whether the history's reasoning_content travels in the prompt is ONE
-// switch the checkpoints spell four ways: `preserve_thinking` on
-// Qwen3.8-Flash-Next (false drops the reasoning blocks of the turns before
-// the last user query — the golden corpus's multi_turn_preserve_thinking_false
-// case), and its inverted spellings `clear_thinking`, `drop_thinking` and
-// `truncate_history_thinking` on the GLM and DeepSeek templates. A request
-// may name the switch any of these ways; the render receives the spelling
-// THIS template reads, at that spelling's polarity, so a flag is never
-// accepted and then ignored — which is what an alias-unaware pass-through
-// does to a client written for the other stack (llama.cpp's
-// caps_apply_preserve_reasoning is the same table). `means_keep` is the
-// global's value that KEEPS the history's reasoning.
+// Whether the history's reasoning_content travels in the prompt is ONE switch
+// the checkpoints spell four ways: `preserve_thinking` on Qwen3.8-Flash-Next
+// and the inverted `clear_thinking` / `drop_thinking` /
+// `truncate_history_thinking` on the GLM and DeepSeek templates. A request may
+// name it any of those, or `preserve_reasoning` (llama.cpp's name for it); the
+// render gets the spelling THIS template reads, at that spelling's polarity, so
+// a flag is never accepted and then ignored. `means_keep` is the global's value
+// that KEEPS the history's reasoning.
 struct HistoryKnob {
   std::string_view name;
   bool means_keep;
@@ -70,6 +66,7 @@ struct HistoryKnob {
 
 constexpr HistoryKnob kHistoryKnobs[] = {
     {"preserve_thinking", true},
+    {"preserve_reasoning", true},  // llama.cpp's name; a template's never
     {"clear_thinking", false},
     {"drop_thinking", false},
     {"truncate_history_thinking", false},
@@ -81,10 +78,15 @@ const HistoryKnob* find_history_knob(std::string_view name) {
   return nullptr;
 }
 
-bool template_has_history_knob(const ModelFrontend& frontend) {
+// The spelling this template reads for the switch, "" when it has none.
+std::string history_knob_spelling(const ModelFrontend& frontend) {
   for (const HistoryKnob& k : kHistoryKnobs)
-    if (frontend.template_reads(k.name)) return true;
-  return false;
+    if (frontend.template_reads(k.name)) return std::string(k.name);
+  return {};
+}
+
+bool template_has_history_knob(const ModelFrontend& frontend) {
+  return !history_knob_spelling(frontend).empty();
 }
 
 const minijson::Value* optional_field(const minijson::Value& body, std::string_view name) {
@@ -448,6 +450,21 @@ std::string model_object(const ServiceConfig& scfg, const std::string& model_id,
     } catch (const std::invalid_argument&) { /* unsupported efforts are absent */ }
   }
   out += '}';
+  // The switch, advertised: whether this template has one at all, the name it
+  // answers to, and what an unnamed request gets ("template": this process
+  // leaves the checkpoint's default, which differs by family).
+  const std::string knob = history_knob_spelling(frontend);
+  out.append(",\"history_thinking\":{\"supported\":");
+  out.append(knob.empty() ? "false" : "true");
+  out.append(",\"default\":");
+  if (!scfg.preserve_thinking)
+    out.append(knob.empty() ? "\"none\"" : "\"template\"");
+  else
+    out.append(*scfg.preserve_thinking ? "\"keep\"" : "\"drop\"");
+  out.append(",\"spelling\":");
+  if (knob.empty()) out.append("null");
+  else append_json_string(&out, knob);
+  out.append("}");
   out.append("},\"input_modalities\":[\"text\"");
   if (images_available) out.append(",\"image\"");
   out.append("]");
@@ -549,6 +566,11 @@ GenerationService::GenerationService(const ServiceConfig& cfg,
   std::sort(boundary_ids_.begin(), boundary_ids_.end());
   boundary_ids_.erase(std::unique(boundary_ids_.begin(), boundary_ids_.end()),
                       boundary_ids_.end());
+  if (cfg_.preserve_thinking && !template_has_history_knob(*frontend_))
+    throw std::invalid_argument(
+        "GenerationService: --preserve-thinking keep|drop needs a template with "
+        "a history-thinking switch; this one renders every history turn it is "
+        "given");
   if (sched_.prefix_slots() > 0)
     DGPP_LOG_INFO(
         "serve: prefix cache on — {} snapshot slots, {} boundary token(s)",
@@ -591,6 +613,15 @@ GenerationService::GenerationService(const ServiceConfig& cfg,
           ? "not split (no </think> marker)"
           : cfg_.reasoning_in_content ? "folded into content"
                                       : "on reasoning_content");
+  const std::string knob = history_knob_spelling(*frontend_);
+  DGPP_LOG_INFO(
+      "serve: history reasoning {}; template knob {}",
+      !cfg_.preserve_thinking
+          ? std::string("the template's own default")
+          : *cfg_.preserve_thinking
+                ? std::string("kept unless a request names it off")
+                : std::string("dropped unless a request names it on"),
+      knob.empty() ? std::string("none") : knob);
   // The SSE tap: tokens and retires ride the scheduler's observer
   // callbacks straight into the request records.
   sched_.set_observer(this);
@@ -1315,6 +1346,29 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
       }
     }
   }
+
+  // The same switch at the top level, as reasoning_effort already arrives.
+  // The snake_case spelling is documented, so a template without the knob
+  // refuses it; the camelCase one clients forward (OpenCode's
+  // preserveThinking) stays a tolerated extension: ignored where unsupported.
+  const auto take_top_history = [&](std::string_view name, bool documented) -> bool {
+    const Value* v = optional_field(body, name);
+    if (v == nullptr) return true;
+    if (!v->is_bool()) return refuse(std::string(name) + " must be a boolean", std::string(name));
+    if (!template_has_history_knob(*frontend_))
+      return !documented ||
+             refuse(std::string(name) + ": this template has no history-thinking "
+                                        "knob (it renders the reasoning_content of "
+                                        "every history turn it is given)",
+                     std::string(name), "unsupported_parameter");
+    return note_keep_history(v->as_bool(), std::string(name));
+  };
+  if (!take_top_history("preserve_thinking", true) ||
+      !take_top_history("preserve_reasoning", true) ||
+      !take_top_history("preserveThinking", false))
+    return false;
+  // The process default, for requests that name none of the spellings.
+  if (!keep_history && cfg_.preserve_thinking) keep_history = cfg_.preserve_thinking;
 
   // Resolve effort once, before rendering, including conflicts with either
   // spelling of the explicit thinking switch. Do not silently override it.
