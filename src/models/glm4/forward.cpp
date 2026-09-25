@@ -230,6 +230,7 @@ Glm4Model::MemoryPlan Glm4Model::plan_memory(const Glm4TextConfig& cfg, int max_
     size_t moe_pinned = 0;
     const size_t moe_dev = GlmMoeLayer::scratch_bytes(moe_cfg, max_tokens, rows, slots, &moe_pinned);
     plan.add("moe scratch (routed slots, shared expert, graph tables)", moe_dev, moe_pinned);
+    plan.add("moe W4A4 activation workspace", GlmMoeLayer::w4a4_scratch_bytes(moe_cfg, max_tokens));
   }
   if (mtp) plan.add("draft block (gathered hidden, the fused input, its residual)", M * H * 2 + M * 2 * H * 2 + M * H * 2);
   (void)R;

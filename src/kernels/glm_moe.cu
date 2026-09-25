@@ -1309,9 +1309,14 @@ __global__ void moe_segment_place_kernel(const int32_t* __restrict__ ids, int tk
   }
 }
 
-template <class OutT>
+// The down rows' element: fp32, or bf16 (the W4A4 prefill chain's
+// DGPP_MOE_W4A4 down output, halving its write and this read; 2026-09-23).
+__device__ __forceinline__ float down_value(float v) { return v; }
+__device__ __forceinline__ float down_value(uint16_t v) { return bf16_bits_to_float(v); }
+
+template <typename OutT, typename DownT = float>
 __global__ void moe_accum_ordered_kernel(OutT* __restrict__ out,
-                                         const float* __restrict__ down,
+                                         const DownT* __restrict__ down,
                                          size_t down_stride,
                                          const int32_t* __restrict__ slot_row,
                                          const int32_t* __restrict__ slot_ids,
@@ -1340,13 +1345,13 @@ __global__ void moe_accum_ordered_kernel(OutT* __restrict__ out,
   for (int j = 0; j < K; ++j) {
     const int s = t * K + order[j];
     acc = __fmaf_rn(slot_w[s],
-                    down[static_cast<size_t>(slot_row[s]) * down_stride + h], acc);
+                    down_value(down[static_cast<size_t>(slot_row[s]) * down_stride + h]), acc);
   }
   // shared_row0 < 0: no shared expert in this chain (the Qwen MoE adds its
   // BF16 shared branch after the routed sum, with its own weight).
   if (shared_row0 >= 0)
     acc = __fmaf_rn(1.0f,
-                    down[static_cast<size_t>(shared_row0 + t) * down_stride + h], acc);
+                    down_value(down[static_cast<size_t>(shared_row0 + t) * down_stride + h]), acc);
   if constexpr (std::is_same<OutT, float>::value)
     out[i] = acc;
   else
@@ -1433,8 +1438,8 @@ void launch_moe_segment(const int32_t* ids, int tokens, int top_k,
 
 namespace {
 
-template <class OutT>
-void launch_accum_ordered_t(OutT* out, const float* down, size_t down_stride,
+template <class OutT, class DownT = float>
+void launch_accum_ordered_t(OutT* out, const DownT* down, size_t down_stride,
                             const int32_t* slot_row, const int32_t* slot_ids,
                             const float* slot_w, int shared_row0, int tokens,
                             int top_k, int hidden, cudaStream_t stream) {
@@ -1445,7 +1450,7 @@ void launch_accum_ordered_t(OutT* out, const float* down, size_t down_stride,
     throw std::invalid_argument("moe accum ordered: top_k outside [1, 16]");
   const int64_t n = static_cast<int64_t>(tokens) * hidden;
   const int64_t blocks = (n + kElemThreads - 1) / kElemThreads;
-  moe_accum_ordered_kernel<OutT><<<static_cast<int>(blocks), kElemThreads, 0, stream>>>(
+  moe_accum_ordered_kernel<OutT, DownT><<<static_cast<int>(blocks), kElemThreads, 0, stream>>>(
       out, down, down_stride, slot_row, slot_ids, slot_w, shared_row0, tokens,
       top_k, hidden);
   DGPP_CUDA_OK(cudaGetLastError());
@@ -1471,6 +1476,22 @@ void launch_moe_accum_ordered_f32(float* out, const float* down,
   launch_accum_ordered_t<float>(out, down, down_stride, slot_row, slot_ids,
                                 slot_w, shared_row0, tokens, top_k, hidden,
                                 stream);
+}
+
+void launch_moe_accum_ordered_bf16down(uint16_t* out, const uint16_t* down, size_t down_stride,
+                                      const int32_t* slot_row, const int32_t* slot_ids,
+                                      const float* slot_w, int tokens, int top_k, int hidden,
+                                      cudaStream_t stream) {
+  launch_accum_ordered_t<uint16_t, uint16_t>(out, down, down_stride, slot_row, slot_ids, slot_w, -1,
+                                             tokens, top_k, hidden, stream);
+}
+
+void launch_moe_accum_ordered_f32_bf16down(float* out, const uint16_t* down, size_t down_stride,
+                                           const int32_t* slot_row, const int32_t* slot_ids,
+                                           const float* slot_w, int tokens, int top_k, int hidden,
+                                           cudaStream_t stream) {
+  launch_accum_ordered_t<float, uint16_t>(out, down, down_stride, slot_row, slot_ids, slot_w, -1, tokens,
+                                          top_k, hidden, stream);
 }
 
 void launch_moe_accum(float* acc, const float* y, const int32_t* rows,

@@ -157,6 +157,11 @@ class GlmMoeLayer {
   static size_t scratch_bytes(const GlmMoeConfig& cfg, int max_tokens,
                               int decode_slots = 0, int graph_table_slots = 0,
                               size_t* pinned_bytes = nullptr);
+  // Additional lazy workspace for NVFP4 experts. Call only for that format;
+  // calibrated selects the default-on policy used by the Qwen loader.
+  // Disabled modes and unsupported shapes need no W4A4 workspace.
+  static size_t w4a4_scratch_bytes(const GlmMoeConfig& cfg, int max_tokens,
+                                   bool calibrated = false);
 
   // Streaming-weight interface (M4 diagnostic forward): swap the device weight
   // views (router gate/bias, expert and shared matrices). Device scratch
@@ -168,6 +173,8 @@ class GlmMoeLayer {
   // enqueue()/enqueue_f32(): exactly one of out_bf16 / out_f32 is set.
   void enqueue_host(const uint16_t* hidden, uint16_t* out_bf16, float* out_f32,
                     int tokens, cudaStream_t stream, MoeExpertKernel kernel);
+  void accumulate_grouped(uint16_t* out_bf16, float* out_f32, int shared_row0, int tokens,
+                          cudaStream_t stream);
   // enqueue_decode / enqueue_decode_f32: exactly one of out_bf16 (the
   // full chain with the shared expert) / out_f32 (the routed chain) is set.
   void enqueue_decode_impl(const uint16_t* hidden, uint16_t* out_bf16,
@@ -182,7 +189,8 @@ class GlmMoeLayer {
                            cudaStream_t stream);
   // The grouped chain shared by enqueue() and enqueue_prefill(): gather,
   // gate/up over the routed segments and the shared segment, swiglu, the
-  // fp32 down projection — on the chosen kernel.
+  // down projection — on the chosen kernel. accumulate_grouped consumes the
+  // resulting buffer in its actual element format.
   void grouped_expert_chain(MoeExpertKernel kernel, const uint16_t* hidden,
                             const MoeSegment* segs, int n_segs, int max_rows,
                             const MoeSegment* shared_seg, int tokens,
@@ -205,6 +213,14 @@ class GlmMoeLayer {
   uint16_t* d_up_ = nullptr;
   uint16_t* d_act_ = nullptr;
   float* d_down_ = nullptr;  // [max_tokens, hidden] fp32 segment output
+  // W4A4 prefill (DGPP_MOE_W4A4=1, 2026-09-23): the NVFP4 activation
+  // buffers, grown on first use (eager prefill only, never under capture).
+  uint8_t* d_q_codes_ = nullptr;
+  uint8_t* d_q_scales_ = nullptr;
+  float* d_q_gs_ = nullptr;
+  size_t q_rows_cap_ = 0, q_k_cap_ = 0;
+  bool down_bf16_ = false;  // the last chain wrote bf16 down rows into d_down_ (W4A4, no shared segment)
+  void ensure_w4a4(size_t rows, int k);
   float* d_acc_ = nullptr;   // [max_tokens, hidden] the fp32 chain
 
   // decode-slot scratch (cudaMalloc; sized to decode_slots*(top_k+1) rows —

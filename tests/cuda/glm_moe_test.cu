@@ -1894,6 +1894,47 @@ DGPP_TEST(moe_expert_path_matches_oracle_small_geometry_nvfp4) {
   c.free_all();
 }
 
+DGPP_TEST(moe_w4a4_host_and_device_segmentation_match_both_output_formats) {
+  SmallCase c = make_small_case(/*E=*/4, /*H=*/128, /*I=*/64, /*K=*/2,
+                                /*tokens=*/137, 0xF4BF16, /*nvfp4=*/true);
+  c.alloc();
+  c.cfg.n_shared_experts = 0;
+  c.cfg.router_mode = dgpp::MoeRouterMode::SoftmaxTopk;
+  float *act_scales = nullptr, *out = nullptr;
+  DGPP_CUDA_OK(cudaMallocManaged(&act_scales, 2 * sizeof(float)));
+  act_scales[0] = act_scales[1] = 1e-4f;
+  c.dev_w.act_scales_dev = act_scales;
+  DGPP_CUDA_OK(cudaMallocManaged(&out, c.hidden.size() * sizeof(float)));
+  {
+    GlmMoeLayer layer(c.dev_w, c.cfg, c.tokens);
+    // Enter W4A4, fall back below its row threshold, then reuse the W4A4
+    // buffers. Both output APIs must follow the current down-row format.
+    for (int tokens : {c.tokens, 1, c.tokens}) {
+      const size_t n = static_cast<size_t>(tokens) * c.cfg.hidden;
+      layer.enqueue_prefill_f32(c.d_hidden, out, tokens, nullptr, nullptr);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      const std::vector<float> expected(out, out + n);
+      require(std::all_of(expected.begin(), expected.end(), [](float v) { return std::isfinite(v); }),
+              "W4A4 prefill output must be finite");
+      require(std::any_of(expected.begin(), expected.end(), [](float v) { return v != 0.f; }),
+              "W4A4 fixture must exercise nonzero down rows");
+      DGPP_CUDA_OK(cudaMemset(out, 0xFF, n * sizeof(float)));
+      layer.enqueue_f32(c.d_hidden, out, tokens, nullptr, dgpp::MoeExpertKernel::kMma);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      require(std::memcmp(out, expected.data(), n * sizeof(float)) == 0,
+              "host FP32 output must match device-segmented W4A4 output bitwise");
+      layer.enqueue(c.d_hidden, c.d_out, tokens, nullptr, dgpp::MoeExpertKernel::kMma);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      for (size_t i = 0; i < n; ++i)
+        require(c.d_out[i] == float_to_bf16_bits(expected[i]),
+                "host BF16 output must match rounded device-segmented W4A4 output");
+    }
+  }
+  cudaFree(out);
+  cudaFree(act_scales);
+  c.free_all();
+}
+
 DGPP_TEST(moe_decode_slot_path_is_bitwise_host_path_nvfp4) {
   struct Case {
     int E, H, I, K, M;

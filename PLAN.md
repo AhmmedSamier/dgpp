@@ -122,6 +122,14 @@ Their implementation and evaluation records are maintained separately:
   ladder, the two defects met only on the real checkpoint, and the serving
   record.
 
+## Qwen NVFP4 expert prefill
+
+Calibrated Qwen NVFP4 experts use W4A4 for eligible grouped prefills. The
+host reference supports both output formats, and the memory plan reserves
+the quantized activation buffers. Decode retains W4A16. The
+[PR #50 follow-up](benchmarks/results/2026-09-25-pr50-w4a4.md) records the
+regression coverage and validation.
+
 ## Qwen FP8 vocabulary head
 
 The NVFP4 deployment templates now select streaming MMA with

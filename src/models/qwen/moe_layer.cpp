@@ -37,6 +37,9 @@ GlmMoeWeights QwenMoeLayer::routed_view(const QwenMoeWeights& w) {
   g.router_bias = nullptr;
   g.experts = w.experts;
   g.experts_fp4 = w.experts_fp4;
+  g.act_scale_w13 = w.act_scale_w13;
+  g.act_scales_dev = w.act_scales_dev;
+  g.act_scale_w2 = w.act_scale_w2;
   return g;
 }
 

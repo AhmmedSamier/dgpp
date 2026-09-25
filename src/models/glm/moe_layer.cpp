@@ -12,6 +12,7 @@
 #include "common/dtypes.hpp"
 #include "common/log.hpp"
 #include "kernels/glm_moe_launch.hpp"
+#include "kernels/moe_w4a4.hpp"
 #include "kernels/packq_gemm.hpp"
 #include "kernels/scale_gemm.hpp"
 #include "models/glm/step_timing.hpp"
@@ -209,6 +210,9 @@ GlmMoeLayer::~GlmMoeLayer() {
   cudaFree(d_gate_);
   cudaFree(d_up_);
   cudaFree(d_act_);
+  cudaFree(d_q_codes_);
+  cudaFree(d_q_scales_);
+  cudaFree(d_q_gs_);
   cudaFree(d_down_);
   cudaFree(d_acc_);
   cudaFree(d_slot_act_);
@@ -372,7 +376,7 @@ void GlmMoeLayer::enqueue_host(const uint16_t* hidden, uint16_t* out_bf16,
     throw std::invalid_argument("GlmMoeLayer: tokens exceed max_tokens");
   if (!hidden || (!out_bf16 && !out_f32))
     throw std::invalid_argument("GlmMoeLayer: null pointer");
-  const int H = cfg_.hidden, E = cfg_.n_experts, K = cfg_.top_k;
+  const int E = cfg_.n_experts, K = cfg_.top_k;
   const bool shared = has_shared();
   check_expert_geometry();
 
@@ -441,7 +445,7 @@ void GlmMoeLayer::enqueue_host(const uint16_t* hidden, uint16_t* out_bf16,
   // 3. The grouped chain: gather every row once; gate and up over the
   //    routed segments in one launch each and the shared segment in one
   //    more (its inter may differ); swiglu over every row; the down
-  //    projection the same way, fp32 (the chain rounds once, at the end).
+  //    projection in the selected chain's FP32 or BF16 format.
   //    The inter dims come from the matrix views (the rank's slices).
   grouped_expert_chain(kernel, hidden, d_segs_, n_segs, max_rows,
                        shared ? d_segs_ + n_segs : nullptr, tokens, rows_total,
@@ -451,7 +455,21 @@ void GlmMoeLayer::enqueue_host(const uint16_t* hidden, uint16_t* out_bf16,
   //    id, then the shared row (weight 1), the fmaf chain from zero, one
   //    rounding onto the wire buffer — or the chain unrounded, for a
   //    caller that continues it.
-  if (out_bf16)
+  accumulate_grouped(out_bf16, out_f32, shared_row0, tokens, stream);
+}
+
+void GlmMoeLayer::accumulate_grouped(uint16_t* out_bf16, float* out_f32, int shared_row0,
+                                     int tokens, cudaStream_t stream) {
+  const int H = cfg_.hidden, K = cfg_.top_k;
+  if (down_bf16_) {
+    const auto* down = reinterpret_cast<const uint16_t*>(d_down_);
+    if (out_bf16)
+      launch_moe_accum_ordered_bf16down(out_bf16, down, H, d_slot_row_, d_ids_, d_weights_, tokens,
+                                        K, H, stream);
+    else
+      launch_moe_accum_ordered_f32_bf16down(out_f32, down, H, d_slot_row_, d_ids_, d_weights_,
+                                            tokens, K, H, stream);
+  } else if (out_bf16)
     launch_moe_accum_ordered(out_bf16, d_down_, H, d_slot_row_, d_ids_,
                              d_weights_, shared_row0, tokens, K,
                              static_cast<int>(H), stream);
@@ -503,7 +521,7 @@ void GlmMoeLayer::enqueue_prefill(const uint16_t* hidden, uint16_t* out,
     throw std::invalid_argument("GlmMoeLayer: tokens exceed max_tokens");
   if (!hidden || !out)
     throw std::invalid_argument("GlmMoeLayer: null pointer");
-  const int H = cfg_.hidden, E = cfg_.n_experts, K = cfg_.top_k;
+  const int E = cfg_.n_experts, K = cfg_.top_k;
   check_expert_geometry();
   const size_t tk = static_cast<size_t>(tokens) * K;
 
@@ -544,8 +562,7 @@ void GlmMoeLayer::enqueue_prefill(const uint16_t* hidden, uint16_t* out,
   const bool mma = mma_takes_grid() && (!w_.packq() || tokens >= kPackqMmaFromRows);
   grouped_expert_chain(mma ? MoeExpertKernel::kMma : MoeExpertKernel::kGemv, hidden, d_segs_, E,
                        /*max_rows=*/std::max(tokens, 1), d_segs_ + E, tokens, rows_total, stream);
-  launch_moe_accum_ordered(out, d_down_, H, d_slot_row_, d_ids_, d_weights_,
-                           shared_row0, tokens, K, H, stream);
+  accumulate_grouped(out, nullptr, shared_row0, tokens, stream);
 }
 
 bool GlmMoeLayer::mma_takes_grid() const {
@@ -569,7 +586,7 @@ void GlmMoeLayer::enqueue_prefill_f32(const uint16_t* hidden, float* out, int to
     throw std::invalid_argument("GlmMoeLayer: tokens exceed max_tokens");
   if (!hidden || !out)
     throw std::invalid_argument("GlmMoeLayer: null pointer");
-  const int H = cfg_.hidden, E = cfg_.n_experts, K = cfg_.top_k;
+  const int E = cfg_.n_experts, K = cfg_.top_k;
   check_expert_geometry();
   const size_t tk = static_cast<size_t>(tokens) * K;
   launch_moe_router(hidden, w_.router_gate, w_.router_bias, d_ids_,
@@ -596,8 +613,63 @@ void GlmMoeLayer::enqueue_prefill_f32(const uint16_t* hidden, float* out, int to
   grouped_expert_chain(kernel, hidden, d_segs_, E,
                        /*max_rows=*/std::max(tokens, 1), /*shared_seg=*/nullptr,
                        tokens, tk, stream);
-  launch_moe_accum_ordered_f32(out, d_down_, H, d_slot_row_, d_ids_, d_weights_,
-                               /*shared_row0=*/-1, tokens, K, H, stream);
+  accumulate_grouped(nullptr, out, /*shared_row0=*/-1, tokens, stream);
+}
+
+void GlmMoeLayer::ensure_w4a4(size_t rows, int k) {
+  if (rows <= q_rows_cap_ && static_cast<size_t>(k) <= q_k_cap_) return;
+  const size_t r = std::max(rows, q_rows_cap_), kk = std::max(static_cast<size_t>(k), q_k_cap_);
+  cudaFree(d_q_codes_);
+  cudaFree(d_q_scales_);
+  cudaFree(d_q_gs_);
+  DGPP_CUDA_OK(cudaMalloc(&d_q_codes_, r * kk / 2));
+  DGPP_CUDA_OK(cudaMalloc(&d_q_scales_, r * nvfp4_act_scale_stride(static_cast<int>(kk))));
+  DGPP_CUDA_OK(cudaMalloc(&d_q_gs_, r * sizeof(float)));
+  q_rows_cap_ = r;
+  q_k_cap_ = kk;
+}
+
+// The routed NVFP4 experts' prefill GEMMs on the native block-scaled FP4
+// tensor cores (src/kernels/moe_w4a4.cu), activations quantized to NVFP4 per
+// row with the checkpoint's static input_scale -- what SGLang's
+// flashinfer_cutlass MoE runs for these checkpoints. On by default where the
+// loader provides that calibrated scale (Qwen3.8 NVFP4); DGPP_MOE_W4A4=0 keeps
+// W4A16 everywhere, DGPP_MOE_W4A4=1 also takes it without a static scale
+// (dynamic per-row activation scale). Chains of at least
+// DGPP_MOE_W4A4_MIN_ROWS routed rows (default 256), eager only.
+static int moe_w4a4_mode() {  // 0 off, 1 forced on, -1 default (on with a static scale)
+  static const int v = [] {
+    const char* e = std::getenv("DGPP_MOE_W4A4");
+    return e == nullptr || *e == '\0' ? -1 : e[0] == '0' ? 0 : 1;
+  }();
+  return v;
+}
+// DGPP_MOE_W4A4_DYNAMIC=1: a per-row dynamic activation global instead of
+// the checkpoint's static input_scale (the default, SGLang's form).
+static bool moe_w4a4_static() {
+  static const bool v = std::getenv("DGPP_MOE_W4A4_DYNAMIC") == nullptr;
+  return v;
+}
+static size_t moe_w4a4_min_rows() {
+  static const size_t v = [] {
+    const char* e = std::getenv("DGPP_MOE_W4A4_MIN_ROWS");
+    return e != nullptr ? static_cast<size_t>(std::atoll(e)) : size_t{256};
+  }();
+  return v;
+}
+
+static bool moe_w4a4_eligible(bool calibrated, int hidden, int inter, size_t rows) {
+  const int mode = moe_w4a4_mode();
+  return (mode == 1 || (mode == -1 && calibrated)) && rows >= moe_w4a4_min_rows() && hidden > 0 &&
+         inter > 0 && hidden % 64 == 0 && inter % 64 == 0 && hidden <= 16384 && inter <= 16384;
+}
+
+size_t GlmMoeLayer::w4a4_scratch_bytes(const GlmMoeConfig& cfg, int max_tokens, bool calibrated) {
+  const size_t rows =
+      static_cast<size_t>(std::max(max_tokens, 0)) * (cfg.top_k + cfg.n_shared_experts);
+  if (!moe_w4a4_eligible(calibrated, cfg.hidden, cfg.inter, rows)) return 0;
+  const int k = std::max(cfg.hidden, cfg.inter);
+  return rows * (static_cast<size_t>(k) / 2 + nvfp4_act_scale_stride(k) + sizeof(float));
 }
 
 void GlmMoeLayer::grouped_expert_chain(MoeExpertKernel kernel,
@@ -622,6 +694,25 @@ void GlmMoeLayer::grouped_expert_chain(MoeExpertKernel kernel,
   const int shared_bits = (packq && shared_seg) ? w_.shared_packed[0].bits : 0;
   const int fp4_group = fp4 ? w_.experts_fp4[0].scale_group : kFp4Group;
   const size_t I_max = static_cast<size_t>(std::max(I_r, I_s));
+  const bool w4a4 = fp4 && !packq && fp4_group == kFp4Group && kernel == MoeExpertKernel::kMma &&
+                    moe_w4a4_eligible(w_.act_scales_dev != nullptr, H, I_r, rows_total);
+  // The W4A4 chain's down rows in bf16 (half the write and the ordered
+  // accumulation's read; SGLang's CUTLASS MoE keeps a bf16 intermediate too)
+  // unless DGPP_MOE_W4A4_F32_DOWN=1; only without a shared segment, whose
+  // rows would share the buffer in fp32.
+  static const bool f32_down = std::getenv("DGPP_MOE_W4A4_F32_DOWN") != nullptr;
+  down_bf16_ = w4a4 && shared_seg == nullptr && !f32_down;
+  if (w4a4) {
+    static const bool logged = [&] {
+      DGPP_LOG_INFO("moe: W4A4 NVFP4 prefill experts on ({} activation scale; DGPP_MOE_W4A4=0 turns it off)",
+                    moe_w4a4_static() && w_.act_scales_dev != nullptr ? "the checkpoint's static" : "a dynamic per-row");
+      return true;
+    }();
+    (void)logged;
+    ensure_w4a4(std::max(static_cast<size_t>(tokens), rows_total), std::max(H, I_r));
+    launch_quantize_rows_nvfp4(hidden, static_cast<size_t>(H), tokens, H, d_q_codes_, d_q_scales_, d_q_gs_,
+                               stream, 0.f, moe_w4a4_static() ? w_.act_scales_dev : nullptr);
+  }
   // The shared segment is every token: split across blocks along z (the
   // GEMV core in 16-row pieces, the tensor-core kernel in whole m-tiles).
   const bool mma = kernel == MoeExpertKernel::kMma;
@@ -663,6 +754,9 @@ void GlmMoeLayer::grouped_expert_chain(MoeExpertKernel kernel,
       launch_moe_grouped_gemv_packq_bf16(d_gather_, H, sg, ns, mr, split, d_views_prefill_,
                                          which, out, I_max, n, H,
                                          routed_arg ? routed_bits : shared_bits, stream);
+    else if (w4a4 && routed_arg)
+      launch_moe_grouped_w4a4_bf16(d_q_codes_, d_q_scales_, d_q_gs_, d_rows_, sg, ns, mr, d_views_prefill_, which, out,
+                                   I_max, n, H, stream);
     else if (mma && routed && fp4)
       launch_moe_grouped_mma_fp4_bf16(hidden, H, sg, ns, mr, split, d_views_prefill_,
                                       which, out, I_max, n, H, stream, d_rows_, fp4_group);
@@ -686,6 +780,12 @@ void GlmMoeLayer::grouped_expert_chain(MoeExpertKernel kernel,
       launch_moe_grouped_gemv_packq_f32(d_act_, I_max, sg, ns, mr, split, d_views_prefill_,
                                         2, d_down_, H, H, k,
                                         routed_arg ? routed_bits : shared_bits, stream);
+    else if (w4a4 && routed_arg && down_bf16_)
+      launch_moe_grouped_w4a4_bf16(d_q_codes_, d_q_scales_, d_q_gs_, nullptr, sg, ns, mr, d_views_prefill_, 2,
+                                   reinterpret_cast<uint16_t*>(d_down_), H, H, k, stream);
+    else if (w4a4 && routed_arg)
+      launch_moe_grouped_w4a4_f32(d_q_codes_, d_q_scales_, d_q_gs_, nullptr, sg, ns, mr, d_views_prefill_, 2, d_down_, H, H,
+                                  k, stream);
     else if (mma && routed && fp4)
       launch_moe_grouped_mma_fp4_f32(d_act_, I_max, sg, ns, mr, split, d_views_prefill_,
                                      2, d_down_, H, H, k, stream, nullptr, fp4_group);
@@ -703,13 +803,39 @@ void GlmMoeLayer::grouped_expert_chain(MoeExpertKernel kernel,
   if (shared_seg) gemm_bf16(shared_seg, 1, tokens, shared_split, 0, d_gate_, I_s, false);
   gemm_bf16(segs, n_segs, max_rows, 0, 1, d_up_, I_r, true);
   if (shared_seg) gemm_bf16(shared_seg, 1, tokens, shared_split, 1, d_up_, I_s, false);
-  launch_moe_swiglu_clamp(d_gate_, d_up_, d_act_,
-                          static_cast<int64_t>(rows_total) * I_max,
-                          cfg_.swiglu_limit, stream);
+  // The down projection's activations to NVFP4 (routed rows; the shared
+  // expert's rows, when present, sit past them and keep the bf16 path).
+  // Without a shared segment the bf16 act buffer feeds nothing but that
+  // quantizer, so the activation runs inside it (bitwise the two-kernel chain;
+  // DGPP_MOE_SWIGLU_QUANT=0 keeps the two launches).
+  static const bool fused_act = [] {
+    const char* e = std::getenv("DGPP_MOE_SWIGLU_QUANT");
+    return e == nullptr || e[0] != '0';
+  }();
+  const bool fused_swiglu =
+      w4a4 && shared_seg == nullptr && fused_act && I_max == static_cast<size_t>(I_r);
+  if (fused_swiglu) {
+    launch_swiglu_quantize_rows_nvfp4(d_gate_, d_up_, I_max, static_cast<int>(rows_total), I_r, cfg_.swiglu_limit,
+                                      d_q_codes_, d_q_scales_, d_q_gs_, stream,
+                                      0.f, moe_w4a4_static() && w_.act_scales_dev ? w_.act_scales_dev + 1 : nullptr);
+  } else {
+    launch_moe_swiglu_clamp(d_gate_, d_up_, d_act_,
+                            static_cast<int64_t>(rows_total) * I_max,
+                            cfg_.swiglu_limit, stream);
+    if (w4a4)
+      launch_quantize_rows_nvfp4(d_act_, I_max, static_cast<int>(rows_total), I_r, d_q_codes_, d_q_scales_, d_q_gs_,
+                                 stream, 0.f, moe_w4a4_static() && w_.act_scales_dev ? w_.act_scales_dev + 1 : nullptr);
+  }
   gemm_f32(segs, n_segs, max_rows, 0, I_r, true);
   if (shared_seg) gemm_f32(shared_seg, 1, tokens, shared_split, I_s, false);
   if (std::getenv("DGPP_MOE_CHAIN_DUMP") != nullptr) {
     // Hunt instrument: per-stage checksums of the chain's buffers.
+    // Materialize stages bypassed by the optimized chain before reading them.
+    if (mma)
+      launch_moe_gather_rows(hidden, d_rows_, d_gather_, static_cast<int>(rows_total), H, stream);
+    if (fused_swiglu)
+      launch_moe_swiglu_clamp(d_gate_, d_up_, d_act_, static_cast<int64_t>(rows_total) * I_max,
+                              cfg_.swiglu_limit, stream);
     DGPP_CUDA_OK(cudaStreamSynchronize(stream));
     auto sum_bf16 = [&](const uint16_t* d, size_t n) {
       std::vector<uint16_t> h(n);
@@ -739,10 +865,11 @@ void GlmMoeLayer::grouped_expert_chain(MoeExpertKernel kernel,
     DGPP_LOG_INFO(
         "[chain {}] rows_total={} I_r={} I_s={} segs:{} | gather {:.6g} gate {:.6g} "
         "up {:.6g} act {:.6g} down {:.6g}",
-        mma ? "mma" : "gemv", rows_total, I_r, I_s, segtxt,
-        sum_bf16(d_gather_, rows_total * H), sum_bf16(d_gate_, rows_total * I_max),
-        sum_bf16(d_up_, rows_total * I_max), sum_bf16(d_act_, rows_total * I_max),
-        sum_f32(d_down_, rows_total * H));
+        mma ? "mma" : "gemv", rows_total, I_r, I_s, segtxt, sum_bf16(d_gather_, rows_total * H),
+        sum_bf16(d_gate_, rows_total * I_max), sum_bf16(d_up_, rows_total * I_max),
+        sum_bf16(d_act_, rows_total * I_max),
+        down_bf16_ ? sum_bf16(reinterpret_cast<const uint16_t*>(d_down_), rows_total * H)
+                   : sum_f32(d_down_, rows_total * H));
   }
 }
 

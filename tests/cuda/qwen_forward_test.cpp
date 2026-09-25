@@ -197,6 +197,42 @@ int run_plan_check() {  // The memory plan's context line under the rope knob (e
   return 0;
 }
 
+int run_w4a4_plan_check() {
+  const char* mode = std::getenv("DGPP_MOE_W4A4");
+  const bool enabled = mode == nullptr || mode[0] != '0';
+  const bool forced = mode != nullptr && mode[0] == '1';
+  auto cfg = qwenfx::tiny_nvfp4_config();
+  const auto workspace = [&](const QwenTextConfig& c, int tokens, int world) {
+    const auto plan = QwenModel::plan_memory(c, tokens, 512, 0, world,
+                                             dgpp::QwenResidency::Resident, 4, false, 8);
+    for (const auto& item : plan.items)
+      if (item.name == "moe W4A4 activation workspace") return item.device;
+    return size_t{0};
+  };
+  // 137 tokens * top-2; k=256: 128 code bytes, 16 scale bytes, one float.
+  require(workspace(cfg, 137, 1) == (enabled ? size_t{137 * 2 * 148} : 0),
+          "NVFP4 plan includes all lazy W4A4 activation buffers");
+  require(workspace(cfg, 127, 1) == 0, "below-threshold plans need no W4A4 workspace");
+  require(workspace(cfg, 137, 2) == 0, "32-wide TP slices use W4A16");
+  cfg.experts_nvfp4 = false;
+  require(workspace(cfg, 137, 1) == 0, "FP8 plans need no W4A4 workspace even when forced");
+
+  auto moe = dgpp::QwenMoeLayer::routed_config(2560, 320, 256, 10, true);
+  require(
+      dgpp::GlmMoeLayer::w4a4_scratch_bytes(moe, 2048, true) == (enabled ? size_t{29573120} : 0),
+      "production Qwen chunks reserve 28.2 MiB for W4A4");
+  require(dgpp::GlmMoeLayer::w4a4_scratch_bytes(moe, 2048) == (forced ? size_t{29573120} : 0),
+          "uncalibrated NVFP4 reserves workspace only when forced");
+  moe.n_shared_experts = 1;
+  require(dgpp::GlmMoeLayer::w4a4_scratch_bytes(moe, 2048) == (forced ? size_t{32530432} : 0),
+          "forced GLM chains also reserve the shared rows");
+  moe.hidden = 16448;
+  require(dgpp::GlmMoeLayer::w4a4_scratch_bytes(moe, 2048, true) == 0,
+          "widths beyond the quantizer limit use W4A16");
+  std::printf("[ OK ] qwen_w4a4_plan_check\n");
+  return 0;
+}
+
 int run_cross_limit(const std::string& dir) {
   // The reviewer's cross-limit gate (2026-09-18): the smoke above never
   // crosses the fixture's 4096 native ceiling (72 tokens, a 256-token
@@ -545,7 +581,7 @@ int run_dump_parity(const std::string& dir, const std::string& dump_path) {
 int main(int argc, char** argv) {
   std::string fixture, smoke, checkpoint, dump, cross_limit, qsa_prefill, logits_path;
   std::string rope_scaling_arg;
-  bool plan_check = false;
+  bool plan_check = false, w4a4_plan_check = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--write-fixture" && i + 1 < argc) fixture = argv[++i];
@@ -555,6 +591,8 @@ int main(int argc, char** argv) {
     else if (a == "--qsa-prefill" && i + 1 < argc) qsa_prefill = argv[++i];
     else if (a == "--logits" && i + 1 < argc) logits_path = argv[++i];
     else if (a == "--plan-check") plan_check = true;
+    else if (a == "--w4a4-plan-check")
+      w4a4_plan_check = true;
     else if (a == "--checkpoint-dir" && i + 1 < argc) checkpoint = argv[++i];
     else if (a == "--dump-file" && i + 1 < argc) dump = argv[++i];
     else { std::fprintf(stderr, "unknown argument %s\n", a.c_str()); return 2; }
@@ -585,6 +623,7 @@ int main(int argc, char** argv) {
       return 0;
     }
     if (plan_check) return run_plan_check();
+    if (w4a4_plan_check) return run_w4a4_plan_check();
     if (!qsa_prefill.empty()) {
       require(!logits_path.empty(), "--qsa-prefill requires --logits FILE");
       return run_qsa_prefill(qsa_prefill, logits_path);

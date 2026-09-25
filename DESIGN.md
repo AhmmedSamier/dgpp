@@ -279,6 +279,15 @@ path's; the decode slot path, the host grouped path and the sliced fold
 are bitwise twins as under FP8, and the tile kernel's grouped form is
 bitwise its dense form per segment.
 
+Qwen NVFP4 prefills use native block-scaled W4A4 GEMMs when calibrated
+activation scales are available and the routed batch has at least 256 rows.
+The loader stores the layer's maximum gate/up and down input scales in the
+resident image. Activations are quantized per 16 values; gate/up and down
+outputs are BF16, and routed accumulation is FP32. The host reference and
+device-segmented paths consume the same down-row format. Decode retains
+W4A16. Memory plans include the lazy activation workspace separately from
+constructor scratch; see the [PR #50 follow-up](benchmarks/results/2026-09-25-pr50-w4a4.md).
+
 ## 5. Process, memory, and execution layout
 
 There is one process and one CUDA context per node. Rank 0 additionally owns

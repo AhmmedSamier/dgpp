@@ -36,6 +36,8 @@ struct QwenMoeWeights {
   int64_t shared_inter = 0;                    // S: this rank's shared slice
   const GlmQuantMatrix* experts = nullptr;     // [n_experts * 3] gate, up, down (FP8 block form)
   const GlmFp4Matrix* experts_fp4 = nullptr;   // the NVFP4 form instead (one of the two is set)
+  float act_scale_w13 = 0.0f, act_scale_w2 = 0.0f;  // W4A4 activation scales (0: dynamic)
+  const float* act_scales_dev = nullptr;             // [2] on the device, from the layer image
 };
 
 class QwenMoeLayer {

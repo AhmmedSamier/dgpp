@@ -304,6 +304,9 @@ QwenModel::MemoryPlan QwenModel::plan_memory(const QwenTextConfig& cfg, int max_
   const size_t moe_dev = QwenMoeLayer::scratch_bytes(moe_cfg, geo.local_shared_inter, max_tokens, &moe_pinned,
                                                      static_cast<int>(rows), table_slots);
   plan.add("moe scratch (routed slots, shared expert, graph tables)", moe_dev, moe_pinned);
+  if (cfg.experts_nvfp4)
+    plan.add("moe W4A4 activation workspace",
+             GlmMoeLayer::w4a4_scratch_bytes(moe_cfg, max_tokens, true));
   if (mtp) {
     plan.add("draft block (hyper-state window, ring snapshot, fusion scratch, mixer)",
              R * rows * W * 2 + R * ring_elems * 2 + 4 * M * W * 2 + 3 * M * H * 2 + R * 24 +
@@ -358,6 +361,9 @@ QwenMoeWeights QwenModel::moe_view(const QwenMoeResident& m) {
   w.shared_inter = m.local_shared_inter;
   w.experts = m.experts.empty() ? nullptr : m.experts.data();
   w.experts_fp4 = m.experts_fp4.empty() ? nullptr : m.experts_fp4.data();
+  w.act_scale_w13 = m.act_scale_w13;
+  w.act_scale_w2 = m.act_scale_w2;
+  w.act_scales_dev = m.act_scales;
   return w;
 }
 
