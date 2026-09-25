@@ -175,6 +175,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/glm_mhc.cu
   src/kernels/glm_moe.cu
   src/kernels/moe_w4a4.cu
+  src/kernels/gdn_chunk.cu
   src/kernels/glm_vision.cu
   src/kernels/qwen_vision.cu
   src/kernels/glm_norm.cu
@@ -190,6 +191,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/csa2.cu
   src/kernels/qwen_mtp.cu
   src/kernels/qsa.cu
+  src/kernels/qsa_warp.cu
   src/kernels/qsa_prefill.cu
   src/kernels/glm4_attn.cu
   src/kernels/mimo_attn.cu
@@ -418,8 +420,20 @@ dgpp_set_common(qwen_forward_test)
 set(QWEN_FORWARD_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/qwen_forward_fixture)
 add_test(NAME qwen_forward_fixture COMMAND qwen_forward_test --write-fixture ${QWEN_FORWARD_FIXTURE})
 add_test(NAME qwen_plan_check COMMAND qwen_forward_test --plan-check)
+add_test(NAME qwen_w4a4_plan_default COMMAND ${CMAKE_COMMAND} -E env
+  --unset=DGPP_MOE_W4A4 DGPP_MOE_W4A4_MIN_ROWS=256
+  $<TARGET_FILE:qwen_forward_test> --w4a4-plan-check)
+foreach(_mode IN ITEMS 0 1)
+  add_test(NAME qwen_w4a4_plan_mode_${_mode} COMMAND ${CMAKE_COMMAND} -E env
+    DGPP_MOE_W4A4=${_mode} DGPP_MOE_W4A4_MIN_ROWS=256
+    $<TARGET_FILE:qwen_forward_test> --w4a4-plan-check)
+endforeach()
 add_test(NAME qwen_forward_smoke COMMAND qwen_forward_test --smoke ${QWEN_FORWARD_FIXTURE})
 set_tests_properties(qwen_forward_smoke PROPERTIES DEPENDS qwen_forward_fixture)
+add_test(NAME qwen_qsa_prefill
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda/qwen_qsa_prefill_test.py
+          $<TARGET_FILE:qwen_forward_test>)
+set_tests_properties(qwen_qsa_prefill PROPERTIES RUN_SERIAL TRUE TIMEOUT 180)
 # The same model under the engine's YaRN knob (engine.rope_scaling, factor 2
 # over the fixture's 4096 native positions): the table, the mscale and the
 # lifted ceiling through a whole forward, and logits that differ from the
@@ -1521,6 +1535,13 @@ target_include_directories(moe_w4a4_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 target_link_libraries(moe_w4a4_test PRIVATE dgpp_models_glm_loader dgpp_models_glm CUDA::cudart)
 dgpp_set_common(moe_w4a4_test)
 add_test(NAME moe_w4a4_test COMMAND moe_w4a4_test --tokens 1024 --experts 64)
+set_tests_properties(moe_w4a4_test PROPERTIES SKIP_RETURN_CODE 2)
+
+add_executable(gdn_chunk_test tests/cuda/gdn_chunk_test.cu)
+target_include_directories(gdn_chunk_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(gdn_chunk_test PRIVATE dgpp_models_kda CUDA::cudart Threads::Threads)
+dgpp_set_common(gdn_chunk_test)
+add_test(NAME gdn_chunk_test COMMAND gdn_chunk_test)
 
 add_executable(glm_moe_test tests/cuda/glm_moe_test.cu)
 target_include_directories(glm_moe_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -1528,6 +1549,12 @@ target_link_libraries(glm_moe_test PRIVATE dgpp_models_glm_loader dgpp_models_gl
 dgpp_set_common(glm_moe_test)
 add_test(NAME glm_moe_test COMMAND glm_moe_test)
 set_tests_properties(glm_moe_test PROPERTIES SKIP_RETURN_CODE 2)
+add_test(NAME moe_w4a4_layer_test COMMAND ${CMAKE_COMMAND} -E env
+  --unset=DGPP_MOE_W4A4 --unset=DGPP_MOE_W4A4_F32_DOWN --unset=DGPP_MOE_W4A4_DYNAMIC
+  DGPP_MOE_W4A4_MIN_ROWS=256 DGPP_MOE_SWIGLU_QUANT=1
+  DGPP_TEST_FILTER=moe_w4a4_host_and_device_segmentation_match_both_output_formats
+  $<TARGET_FILE:glm_moe_test>)
+set_tests_properties(moe_w4a4_layer_test PROPERTIES SKIP_RETURN_CODE 2)
 
 # Full-model forward parity (M4 chunk 6): this test writes a synthetic
 # mini-checkpoint, python computes the full-stack pure reference from the
@@ -1708,7 +1735,7 @@ foreach(_test IN LISTS DGPP_ALL_TESTS)
   set_tests_properties(${_test} PROPERTIES LABELS "gpu")
 endforeach()
 set_tests_properties(unit unit_tests http_server_test serve_test fabric_serve_test scheduler_test shutdown_watchdog_test engine_watchdog_test
-  qwen_yarn_fixture_test PROPERTIES LABELS "host")
+  qwen_yarn_fixture_test qwen_w4a4_plan_default qwen_w4a4_plan_mode_0 qwen_w4a4_plan_mode_1 PROPERTIES LABELS "host")
 set_tests_properties(checkpoint_audit_test route_trace_test sampling_profile_test
   site_env_test script_reports_test timed_load_test qwen_yarn_release_check_test qwen_head_compare_test portability_test spark_cross_test setup_tools_test bootstrap_test launcher_test PROPERTIES LABELS "host;python")
 if(TARGET dgpp_serve_app)

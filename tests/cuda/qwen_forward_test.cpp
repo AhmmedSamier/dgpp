@@ -3,6 +3,7 @@
 // Modes:
 //   --write-fixture DIR          the tiny synthetic checkpoint (tests/cuda/qwen_fixture.hpp)
 //   --smoke DIR                  QwenModel over the fixture: finite outputs, bitwise repeat
+//   --qsa-prefill DIR --logits FILE  warp/partial comparison fixture and long-prefill logits
 //   --rope-scaling F:O[:BF:BS:AF:MF]  run --smoke with the engine's YaRN knob
 //                                (factor, original_max_position_embeddings,
 //                                 beta_fast, beta_slow, attn_factor,
@@ -196,6 +197,42 @@ int run_plan_check() {  // The memory plan's context line under the rope knob (e
   return 0;
 }
 
+int run_w4a4_plan_check() {
+  const char* mode = std::getenv("DGPP_MOE_W4A4");
+  const bool enabled = mode == nullptr || mode[0] != '0';
+  const bool forced = mode != nullptr && mode[0] == '1';
+  auto cfg = qwenfx::tiny_nvfp4_config();
+  const auto workspace = [&](const QwenTextConfig& c, int tokens, int world) {
+    const auto plan = QwenModel::plan_memory(c, tokens, 512, 0, world,
+                                             dgpp::QwenResidency::Resident, 4, false, 8);
+    for (const auto& item : plan.items)
+      if (item.name == "moe W4A4 activation workspace") return item.device;
+    return size_t{0};
+  };
+  // 137 tokens * top-2; k=256: 128 code bytes, 16 scale bytes, one float.
+  require(workspace(cfg, 137, 1) == (enabled ? size_t{137 * 2 * 148} : 0),
+          "NVFP4 plan includes all lazy W4A4 activation buffers");
+  require(workspace(cfg, 127, 1) == 0, "below-threshold plans need no W4A4 workspace");
+  require(workspace(cfg, 137, 2) == 0, "32-wide TP slices use W4A16");
+  cfg.experts_nvfp4 = false;
+  require(workspace(cfg, 137, 1) == 0, "FP8 plans need no W4A4 workspace even when forced");
+
+  auto moe = dgpp::QwenMoeLayer::routed_config(2560, 320, 256, 10, true);
+  require(
+      dgpp::GlmMoeLayer::w4a4_scratch_bytes(moe, 2048, true) == (enabled ? size_t{29573120} : 0),
+      "production Qwen chunks reserve 28.2 MiB for W4A4");
+  require(dgpp::GlmMoeLayer::w4a4_scratch_bytes(moe, 2048) == (forced ? size_t{29573120} : 0),
+          "uncalibrated NVFP4 reserves workspace only when forced");
+  moe.n_shared_experts = 1;
+  require(dgpp::GlmMoeLayer::w4a4_scratch_bytes(moe, 2048) == (forced ? size_t{32530432} : 0),
+          "forced GLM chains also reserve the shared rows");
+  moe.hidden = 16448;
+  require(dgpp::GlmMoeLayer::w4a4_scratch_bytes(moe, 2048, true) == 0,
+          "widths beyond the quantizer limit use W4A16");
+  std::printf("[ OK ] qwen_w4a4_plan_check\n");
+  return 0;
+}
+
 int run_cross_limit(const std::string& dir) {
   // The reviewer's cross-limit gate (2026-09-18): the smoke above never
   // crosses the fixture's 4096 native ceiling (72 tokens, a 256-token
@@ -366,6 +403,54 @@ int run_smoke(const std::string& dir, const std::optional<dgpp::RopeScaling>& ro
   return 0;
 }
 
+// Separate processes select DGPP_QSA_WARP before the layer's first enqueue.
+// The Python driver compares every logit across both modes; the production
+// head group and selection budget exercise twelve query heads and eight splits.
+int run_qsa_prefill(const std::string& dir, const std::string& logits_path) {
+  std::string text = qwenfx::tiny_text_json();
+  const auto replace = [&](const std::string& from, const std::string& to) {
+    const size_t pos = text.find(from);
+    require(pos != std::string::npos, "qsa prefill: missing fixture setting " + from);
+    text.replace(pos, from.size(), to);
+  };
+  replace("\"num_attention_heads\": 4", "\"num_attention_heads\": 24");
+  replace("\"indexer_budget\": 64", "\"indexer_budget\": 2048");
+  const auto tc = dgpp::minijson::parse(text);
+  const auto qc = dgpp::minijson::parse(qwenfx::tiny_quant_json());
+  const QwenTextConfig cfg = QwenTextConfig::parse(tc.root, &qc.root);
+  qwenfx::write_fixture(cfg, dir, text.c_str());
+  QwenModel model(cfg, dir, 1024, 2048, dgpp::QwenResidency::Resident);
+  std::ofstream logits(logits_path, std::ios::binary);
+  require(logits.good(), "qsa prefill: cannot open logits file");
+  for (const int count : {127, 128, 129, 256, 513, 1024}) {
+    const auto tokens = smoke_tokens(cfg, count);
+    const auto first = model.forward(tokens);
+    const auto again = model.forward(tokens);
+    require(first.logits.size() == static_cast<size_t>(count) * cfg.vocab_size,
+            "qsa prefill: incomplete logits");
+    for (float v : first.logits) require(std::isfinite(v), "qsa prefill: non-finite logit");
+    require(first.final_hidden_bits == again.final_hidden_bits && first.logits == again.logits,
+            "qsa prefill: forward is not repeatable");
+    const int32_t header[] = {count, cfg.vocab_size};
+    logits.write(reinterpret_cast<const char*>(header), sizeof(header));
+    logits.write(reinterpret_cast<const char*>(first.logits.data()), first.logits.size() * sizeof(float));
+
+    const auto prefill = model.session_prefill(0, tokens);
+    require(prefill.logits.size() == static_cast<size_t>(cfg.vocab_size) &&
+                std::equal(prefill.logits.begin(), prefill.logits.end(), first.logits.end() - cfg.vocab_size),
+            "qsa prefill: session differs from the cold forward");
+    for (int step = 0; step < 4; ++step) {
+      const auto next = model.session_step(0, tokens[step]);
+      for (float v : next.logits) require(std::isfinite(v), "qsa prefill: non-finite decode logit");
+    }
+    model.session_close(0);
+    std::printf("[ OK ] qsa prefill %d rows: repeatable forward, matching session, four decode steps\n", count);
+  }
+  logits.close();
+  require(logits.good(), "qsa prefill: cannot write logits file");
+  return 0;
+}
+
 int run_dump_parity(const std::string& dir, const std::string& dump_path) {
   const Dump dump = Dump::load(dump_path);
   const QwenTextConfig cfg = QwenTextConfig::from_json_file((fs::path(dir) / "config.json").string());
@@ -494,16 +579,20 @@ int run_dump_parity(const std::string& dir, const std::string& dump_path) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  std::string fixture, smoke, checkpoint, dump, cross_limit;
+  std::string fixture, smoke, checkpoint, dump, cross_limit, qsa_prefill, logits_path;
   std::string rope_scaling_arg;
-  bool plan_check = false;
+  bool plan_check = false, w4a4_plan_check = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--write-fixture" && i + 1 < argc) fixture = argv[++i];
     else if (a == "--smoke" && i + 1 < argc) smoke = argv[++i];
     else if (a == "--rope-scaling" && i + 1 < argc) rope_scaling_arg = argv[++i];
     else if (a == "--cross-limit" && i + 1 < argc) cross_limit = argv[++i];
+    else if (a == "--qsa-prefill" && i + 1 < argc) qsa_prefill = argv[++i];
+    else if (a == "--logits" && i + 1 < argc) logits_path = argv[++i];
     else if (a == "--plan-check") plan_check = true;
+    else if (a == "--w4a4-plan-check")
+      w4a4_plan_check = true;
     else if (a == "--checkpoint-dir" && i + 1 < argc) checkpoint = argv[++i];
     else if (a == "--dump-file" && i + 1 < argc) dump = argv[++i];
     else { std::fprintf(stderr, "unknown argument %s\n", a.c_str()); return 2; }
@@ -534,12 +623,17 @@ int main(int argc, char** argv) {
       return 0;
     }
     if (plan_check) return run_plan_check();
+    if (w4a4_plan_check) return run_w4a4_plan_check();
+    if (!qsa_prefill.empty()) {
+      require(!logits_path.empty(), "--qsa-prefill requires --logits FILE");
+      return run_qsa_prefill(qsa_prefill, logits_path);
+    }
     if (!cross_limit.empty()) return run_cross_limit(cross_limit);
     if (!smoke.empty()) return run_smoke(smoke, rope_scaling);
     if (!checkpoint.empty() && !dump.empty()) return run_dump_parity(checkpoint, dump);
     std::fprintf(stderr,
                  "usage: --write-fixture DIR | --smoke DIR | --cross-limit DIR | --plan-check | "
-                 "--checkpoint-dir DIR --dump-file FILE\n");
+                 "--checkpoint-dir DIR --dump-file FILE | --qsa-prefill DIR --logits FILE\n");
     return 2;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "[FAIL] %s\n", e.what());

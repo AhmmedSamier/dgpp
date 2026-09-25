@@ -109,9 +109,9 @@ record the modes measured for each deployment.
   Qwen3.8-Flash-Next-FP8. The 12-bit form can also be the only resident one,
   which puts the model below its checkpoint's footprint.
 - **Model-specific prefill paths**: packed int4/int8 tensor-core prefill for
-  full GLM-5.3, tiled QSA prefill for Qwen, and bounded grouped prefill for
-  DeepSeek-V4.1-Flash. Qwen can optionally yield between prefill chunks so
-  active decodes continue making progress.
+  full GLM-5.3, tiled QSA and calibrated NVFP4 W4A4 expert prefill for Qwen,
+  and bounded grouped prefill for DeepSeek-V4.1-Flash. Qwen can optionally
+  yield between prefill chunks so active decodes continue making progress.
 - **Opt-in 512K context for Qwen3.8-Flash-Next** with `engine.rope_scaling`
   (YaRN): the [two-Spark NVFP4 template](deploy/cluster_qwen-3.8-flash-next_nvfp4_w2_yarn512k.example.json)
   supports a 524288-token request ceiling, with 5/5 retrieval probes passing

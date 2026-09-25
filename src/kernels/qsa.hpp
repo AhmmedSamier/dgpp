@@ -141,6 +141,18 @@ void qsa_attn_prefill_partial(const uint16_t* q, int64_t q_row_stride, const uin
                       const int32_t* block_tables, int blocks_per_request, float scale,
                       float* m_ws, float* l_ws, float* c_ws, cudaStream_t stream);
 
+// One warp per (query, KV group) on the tensor cores (qsa_warp.cu): the
+// prefill attention over each row's listed tokens, written normalized as fp32
+// [rows, local_heads, 256] straight to `out` (no partials, no combine).
+// dim 256 and at most 16 query heads per KV head; tolerance-equal to
+// qsa_attn_prefill_partial + dsa_attn_combine.
+bool qsa_warp_supported(int dim, int local_heads, int kv_heads);
+void qsa_attn_prefill_warp(const uint16_t* q, int64_t q_row_stride, const uint16_t* k_cache,
+                           const uint16_t* v_cache, const int32_t* req_ids, const int32_t* topk, int topk_stride,
+                           const int32_t* counts, int rows, int local_heads, int kv_heads, int block_tokens,
+                           const int32_t* block_tables, int blocks_per_request, float scale, float* out,
+                           cudaStream_t stream);
+
 // out[r, h * dim + d] = bf16(bf16(c[r, h, d]) x bf16(sigmoid(gate))) with
 // the gate of head h at gate + r * gate_row_stride + h * gate_head_stride.
 void qsa_gate_out(const float* c, const uint16_t* gate, int64_t gate_row_stride,

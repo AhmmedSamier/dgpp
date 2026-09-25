@@ -243,12 +243,30 @@ int run(int tokens, int experts, int topk, int n, int k, bool check_exact, const
   const float tb = time(gemm_bf16), tf = time(gemm_f32);
   std::printf("[ .. ] %s GEMM only: f32 out %.3f ms (%.1f TF), bf16 out %.3f ms (%.1f TF)\n", label, tf,
               flop / tf / 1e9, tb, flop / tb / 1e9);
+  cudaEventDestroy(e0);
+  cudaEventDestroy(e1);
+  for (auto* p : d.bufs) cudaFree(p);
+  for (auto* p : d.globals) cudaFree(p);
+  cudaFree(d.views);
+  cudaFree(act);
+  cudaFree(segs);
+  cudaFree(act_rows);
+  cudaFree(codes);
+  cudaFree(scales);
+  cudaFree(gs);
+  cudaFree(out4);
+  cudaFree(out16);
   return fails;
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
+  int devices = 0;
+  if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
+    std::printf("[SKIP] moe_w4a4_test: no CUDA device\n");
+    return 2;
+  }
   int tokens = 8192, experts = 256, topk = 10;
   for (int i = 1; i + 1 < argc; ++i) {
     const std::string a = argv[i];

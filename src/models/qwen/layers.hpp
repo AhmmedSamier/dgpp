@@ -152,6 +152,8 @@ class QwenGdnLayer {
   uint16_t* b_ = nullptr;       // [M, lv]
   uint16_t* core_ = nullptr;    // [M, lv*V]
   uint16_t* normed_ = nullptr;  // [M, lv*V]
+  void* chunked_ws_ = nullptr;
+  size_t chunked_ws_bytes_ = 0;
 };
 
 // ---- Qwen Sparse Attention ----------------------------------------------------------

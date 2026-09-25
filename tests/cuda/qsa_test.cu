@@ -777,4 +777,104 @@ DGPP_TEST(qsa_prefill_partials_preserve_arithmetic_and_graph_replay) {
   }
 }
 
+// The one-warp tensor-core prefill kernel against the partial kernel +
+// combine it replaces, row by row: representative GQA shapes (1-16 query
+// heads per KV head), empty/short/tile-edge/long lists, a high-dynamic-range
+// query, the engine's 64-token and a 256-token cache block, scrambled block
+// tables, two requests, 1/3/8 reference splits (production uses up to 8),
+// and a graph replay. P V runs on bf16 probabilities and
+// the dots in the tensor cores' order, so the bound is a tolerance: rel l2
+// per (row, head) under 1e-2, empty lists exactly zero in both.
+DGPP_TEST(qsa_warp_prefill_matches_the_partial_kernels) {
+  constexpr int dim = 256, requests = 2, stride = 2051;
+  const std::vector<int32_t> counts{0, 1, 7, 15, 16, 17, 31, 32, 33, 64, 255, 256, 257, 1000, 2048, 2051};
+  const int rows = static_cast<int>(counts.size());
+  cudaStream_t stream = test_stream();
+  double worst_overall = 0.0;
+  for (const int block_tokens : {64, 256}) {
+    const int blocks = (3 * stride + 2 * rows) / block_tokens + 1;  // covers every listed position
+    std::vector<int32_t> req(rows), topk(rows * stride, -1), table(blocks * requests);
+    for (int i = 0; i < blocks * requests; ++i) table[i] = (i * 17 + 3) % (blocks * requests);
+    for (int r = 0; r < rows; ++r) {
+      req[r] = r % requests;
+      for (int i = 0; i < counts[r]; ++i) topk[r * stride + i] = i * 3 + r;
+    }
+    DevBuf dreq = up(req), dtopk = up(topk), dcounts = up(counts), dtable = up(table);
+    for (auto shape : {std::pair{12, 1}, std::pair{16, 1}, std::pair{6, 1}, std::pair{24, 2},
+                       std::pair{6, 2}, std::pair{2, 2}, std::pair{1, 1}}) {
+      const int heads = shape.first, kv_heads = shape.second, qstride = heads * dim + 8;
+      require(dgpp::qsa_warp_supported(dim, heads, kv_heads), "shape outside the warp kernel's envelope");
+      auto q = random_bf16_normal(800 + heads, static_cast<int64_t>(rows) * qstride, 1.0f);
+      const int64_t kv_elems = static_cast<int64_t>(blocks * requests * block_tokens) * kv_heads * dim;
+      auto k = random_bf16_normal(810 + kv_heads, kv_elems, 1.0f);
+      auto v = random_bf16_normal(820 + kv_heads, kv_elems, 1.0f);
+      for (int d = 0; d < heads * dim; ++d)  // repeated maximum rescaling
+        q[static_cast<size_t>(rows - 1) * qstride + d] =
+            float_to_bf16_bits(bf16_bits_to_float(q[static_cast<size_t>(rows - 1) * qstride + d]) * 32);
+      DevBuf dq = up(q), dk = up(k), dv = up(v);
+      for (const int splits : {1, 3, 8}) {
+        const size_t part = static_cast<size_t>(rows) * heads;
+        DevBuf m(part * splits * 4), l(part * splits * 4), c(part * splits * dim * 4),
+            ref(part * dim * 4), got(part * dim * 4);
+        dgpp::qsa_attn_prefill_partial(ptr<uint16_t>(dq), qstride, ptr<uint16_t>(dk), ptr<uint16_t>(dv),
+                                       ptr<int32_t>(dreq), ptr<int32_t>(dtopk), stride,
+                                       ptr<int32_t>(dcounts), rows, splits, heads, kv_heads, dim,
+                                       block_tokens, ptr<int32_t>(dtable), blocks, 1.0f / 16,
+                                       mptr<float>(m), mptr<float>(l), mptr<float>(c), stream);
+        dgpp::dsa_attn_combine(ptr<float>(m), ptr<float>(l), ptr<float>(c), rows, splits, heads, dim,
+                               mptr<float>(ref), stream);
+        auto warp = [&] {
+          dgpp::qsa_attn_prefill_warp(ptr<uint16_t>(dq), qstride, ptr<uint16_t>(dk), ptr<uint16_t>(dv),
+                                    ptr<int32_t>(dreq), ptr<int32_t>(dtopk), stride,
+                                    ptr<int32_t>(dcounts), rows, heads, kv_heads, block_tokens,
+                                    ptr<int32_t>(dtable), blocks, 1.0f / 16, mptr<float>(got), stream);
+        };
+        DGPP_CUDA_OK(cudaMemsetAsync(got.p, 0xff, got.bytes, stream));
+        warp();
+        DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+        const auto want = down<float>(ref, part * dim);
+        auto check = [&](const char* what) {
+          const auto have = down<float>(got, part * dim);
+          const std::string tag = std::string(what) + " splits=" + std::to_string(splits) +
+                                  " bt=" + std::to_string(block_tokens) +
+                                  " heads=" + std::to_string(heads) + " kv=" + std::to_string(kv_heads);
+          for (int r = 0; r < rows; ++r)
+            for (int h = 0; h < heads; ++h) {
+              const size_t o = (static_cast<size_t>(r) * heads + h) * dim;
+              double num = 0.0, den = 0.0;
+              for (int d = 0; d < dim; ++d) {
+                require(std::isfinite(have[o + d]), tag + ": non-finite output");
+                const double e = static_cast<double>(have[o + d]) - want[o + d];
+                num += e * e;
+                den += static_cast<double>(want[o + d]) * want[o + d];
+              }
+              if (counts[r] == 0) {
+                require(num == 0.0, tag + ": an empty list must write the combine's output exactly");
+                continue;
+              }
+              const double rel = std::sqrt(num / den);
+              worst_overall = std::max(worst_overall, rel);
+              require(rel < 1e-2, tag + ": row " + std::to_string(r) + " head " + std::to_string(h) +
+                                      " rel l2 " + std::to_string(rel));
+            }
+        };
+        check("eager");
+        cudaGraph_t graph = nullptr;
+        cudaGraphExec_t exec = nullptr;
+        DGPP_CUDA_OK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+        warp();
+        DGPP_CUDA_OK(cudaStreamEndCapture(stream, &graph));
+        DGPP_CUDA_OK(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
+        DGPP_CUDA_OK(cudaMemsetAsync(got.p, 0xff, got.bytes, stream));
+        DGPP_CUDA_OK(cudaGraphLaunch(exec, stream));
+        DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+        check("graph");
+        cudaGraphExecDestroy(exec);
+        cudaGraphDestroy(graph);
+      }
+    }
+  }
+  std::printf("[ .. ] warp vs partial+combine: worst per-(row, head) rel l2 %.3g\n", worst_overall);
+}
+
 int main() { return dgpp::test::run_all(); }

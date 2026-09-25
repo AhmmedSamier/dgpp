@@ -447,7 +447,38 @@ DGPP_TEST(qwen_loader_nvfp4_metadata_is_replicated_at_world_two) {
     require(layer.moe.experts_fp4.size() == static_cast<size_t>(fx.cfg.num_experts) * 3,
             "every local NVFP4 expert matrix is present");
     require(layer.moe.expert_globals != nullptr, "the replicated weight scales are loaded");
+    float scales[2] = {};
+    require(layer.moe.act_scales != nullptr, "the activation scales are in the layer image");
+    DGPP_CUDA_OK(cudaMemcpy(scales, layer.moe.act_scales, sizeof(scales), cudaMemcpyDeviceToHost));
+    require(scales[0] == 1.f && scales[1] == 1.f,
+            "both replicated activation scales match the fixture");
   }
+}
+
+DGPP_TEST(qwen_loader_nvfp4_activation_scales_survive_image_restore) {
+  const Fixture fx = write_nvfp4_fixture();
+  const fs::path cache = fs::current_path() / "qwen_loader_nvfp4_image_cache";
+  fs::remove_all(cache);
+  const std::string saved = QwenLayerStream::resident_image_dir();
+  QwenLayerStream::set_resident_image_dir(cache.string());
+  for (int pass = 0; pass < 2; ++pass) {
+    QwenLayerStream stream(fx.cfg, fx.dir, 1, 2, dgpp::QwenResidency::Resident);
+    const auto& layer = stream.load_layer(0);
+    float scales[2] = {};
+    DGPP_CUDA_OK(cudaMemcpy(scales, layer.moe.act_scales, sizeof(scales), cudaMemcpyDeviceToHost));
+    require(scales[0] == 1.f && scales[1] == 1.f,
+            "activation globals survive a resident-image round trip");
+    if (pass == 0)
+      require(stream.image_layers_captured() == 1, "the cold load captures the NVFP4 image");
+    else {
+      require(stream.image_layers_restored() == 1, "the second load restores the NVFP4 image");
+      require(
+          layer.moe.act_scale_w13 == 0.f && layer.moe.act_scale_w2 == 0.f,
+          "restore obtains activation globals from the image without rereading them on the host");
+    }
+  }
+  QwenLayerStream::set_resident_image_dir(saved);
+  fs::remove_all(cache);
 }
 
 DGPP_TEST(qwen_loader_resident_mode_and_image_round_trip) {

@@ -549,6 +549,12 @@ GlmDiagnosticModel::MemoryPlan GlmDiagnosticModel::plan_memory(
     const size_t dev = GlmMoeLayer::scratch_bytes(moe_cfg, max_tokens, kDecodeRows,
                                                   n_moe + (mtp ? 1 : 0), &pinned);
     plan.add("moe scratch", dev, pinned);
+    if (cfg.routed_expert_format == GlmExpertFormat::Nvfp4Group16) {
+      GlmMoeConfig local_moe = moe_cfg;
+      local_moe.inter /= tp_world;
+      plan.add("moe W4A4 activation workspace",
+               GlmMoeLayer::w4a4_scratch_bytes(local_moe, max_tokens));
+    }
   }
   if (kda_cfg.num_kda_layers > 0) {
     const size_t layers = static_cast<size_t>(kda_cfg.num_kda_layers);

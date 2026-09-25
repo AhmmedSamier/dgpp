@@ -48,6 +48,14 @@ representative traffic. [Native-head measurements](../benchmarks/results/2026-09
 and [prefill measurements](../benchmarks/results/2026-09-23-mimo-upstream-ports.md)
 record the configurations and limitations separately.
 
+## Qwen sparse prefill attention
+
+Qwen QSA uses the tensor-core warp kernel for prefills of at least 128 rows
+with supported head groups. To use the previous partial kernels for all
+prefills, launch with `DGPP_QSA_WARP=0`. The cluster launcher forwards this
+setting to every rank; restart the deployment to change it. Decode and
+shorter prefills retain their existing kernels in both modes.
+
 ## Configure and start
 
 For a new machine, follow [Getting started](getting-started.md),
@@ -117,6 +125,7 @@ threshold and within the configured decode capacity, including short prefills
 in that interval. Matched one- and two-Spark teacher-forced checks passed;
 see the [numerical results and scope](../benchmarks/results/2026-09-21-qwen-fp8-head-numerics.md).
 The interface default remains `"gemv"` for configurations that omit the key.
+
 The service rejects unsupported `fp8_head` values. MMA requires Qwen and FP8
 dense weights.
 The setting is distributed by rank 0 and included in the configuration digest,
@@ -130,6 +139,15 @@ BF16 heads, grouped prefills and streaming-MMA chunks within the decode
 envelope continue to compute every row.
 The earlier [throughput measurement and limits](../benchmarks/results/2026-09-20-qwen-fp8-head-e2e.md)
 remain historical evidence.
+
+Qwen NVFP4 expert prefills default to W4A4 when the checkpoint supplies
+calibrated activation scales. Set `DGPP_MOE_W4A4=0` in every rank process
+to retain W4A16, or `DGPP_MOE_W4A4=1` to also enable dynamic activation
+scales for uncalibrated NVFP4 experts. `DGPP_MOE_W4A4_MIN_ROWS` defaults to
+256 routed rows. Hidden and local expert widths must be multiples of 64
+and at most 16384; other shapes and decode use W4A16. Memory plans include
+the activation workspace (28.2 MiB per rank for standard Qwen chunks).
+
 The [single-node guide](qwen38_single_spark.md) covers the one-Spark memory
 plan, and the [two-node benchmark](../benchmarks/results/2026-09-16-qwen-nvfp4-w2.md)
 records the resident-versus-mapped placement decision.
