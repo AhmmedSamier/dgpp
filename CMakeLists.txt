@@ -704,6 +704,7 @@ add_executable(unit_tests
   tests/unit/net_test.cpp
   tests/unit/cluster_config_test.cpp
   tests/unit/qwen_config_test.cpp
+  tests/unit/qwen_image_stage_test.cpp
   tests/unit/qwen_binding_test.cpp
   tests/unit/qwen_rope_scaling_test.cpp
   tests/unit/glm4_config_test.cpp

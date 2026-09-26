@@ -78,6 +78,11 @@ class QwenModel : public SessionModel<QwenModel> {
   using Outputs = Base::Outputs;
   using SessionSnapshotMeta = Base::SessionSnapshotMeta;
   using SnapshotRequest = Base::SnapshotRequest;
+  using PrefillCursor = Base::PrefillCursor;
+  // The resumable text entry points stay visible beside the image overloads
+  // below (a derived overload would otherwise hide them from the engine).
+  using Base::session_prefill_begin;
+  using Base::session_prefill_advance;
   // Several cold prompts as the spans of one walk (session_prefill_group,
   // 2026-09-14, the group prefill ported from DeepSeek): the GDN scan and
   // the QSA attention run per span (their state and cache are per
@@ -181,9 +186,18 @@ class QwenModel : public SessionModel<QwenModel> {
                                  const std::vector<ImageInput>& images,
                                  const std::vector<int64_t>& boundaries, SnapshotRequest* snap);
   Outputs session_prefill_resume_images(int req, const std::vector<int64_t>& suffix_ids,
-                                        const std::vector<ImageInput>& images,
-                                        const std::vector<int64_t>& boundaries,
-                                        SnapshotRequest* snap);
+                                         const std::vector<ImageInput>& images,
+                                         const std::vector<int64_t>& boundaries,
+                                         SnapshotRequest* snap);
+  // Chunked image prefill (the engine's yield path): validates the images,
+  // borrows them per request slot for the cursor's lifetime, and runs the
+  // base text machinery chunk by chunk. This overload is what flips
+  // supports_image_chunked_prefill() on.
+  PrefillCursor session_prefill_begin(int req, const std::vector<int64_t>& prompt,
+                                      int64_t reserve_tokens, int64_t chunk_tokens,
+                                      const std::vector<int64_t>& boundaries, SnapshotRequest* snap,
+                                      int64_t attach_position, const std::vector<ImageInput>* images);
+  bool session_prefill_advance(PrefillCursor& cursor, int64_t chunk_tokens = 0);
   void graph_prepare();
   void mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode_row,
                     bool capture, int head_rows, int batch_requests);
@@ -216,14 +230,22 @@ class QwenModel : public SessionModel<QwenModel> {
                                      const std::vector<ImageInput>& images,
                                      const std::vector<int64_t>& boundaries, SnapshotRequest* snap,
                                      bool resume);
-  void stage_image_embeddings(int64_t first, int64_t end);
+  void stage_image_embeddings(int64_t first, int64_t end, const std::vector<ImageInput>* images);
   // Rows [first + shift, first + shift + rows) into dst, whose rows are
   // `branches` copies of hidden wide. `shift` is 0 for the main walk's
   // embedding (branches = hc_count) and 1 for the draft's, whose row at
   // position p embeds token p + 1 (branches = 1).
-  void apply_image_embeddings(uint16_t* dst, int64_t first, int rows, int shift, int branches);
+  void apply_image_embeddings(uint16_t* dst, int64_t first, int rows, int shift, int branches,
+                              const std::vector<ImageInput>* images);
   std::unique_ptr<QwenVisionEncoder> vision_;
-  const std::vector<ImageInput>* prefill_images_ = nullptr;
+  // Per-slot borrows of the prefills currently running (null outside one).
+  // The engine owns each vector for its cursor's whole lifetime, across
+  // chunks; run_rows resolves its own slot, so interleaved image prefills
+  // never see each other's images. reset_slot_state clears the slot (every
+  // open and close funnels through it), and advance clears on completion.
+  const std::vector<ImageInput>* images_for_req(int req) const;
+  void store_request_images(int req, const std::vector<ImageInput>* images);
+  std::vector<const std::vector<ImageInput>*> prefill_images_per_req_;
   const uint16_t* image_embeddings_ = nullptr;
   int64_t image_window_first_ = 0, image_window_end_ = 0;
 
