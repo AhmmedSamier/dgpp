@@ -181,13 +181,9 @@ struct ServiceConfig {
   // true folds them into content as "<think>…</think>" text for clients
   // that expect the raw transcript.
   bool reasoning_in_content = false;
-  // Whether the history's reasoning_content travels in the prompt when a
-  // request does not name the switch: nullopt (default) leaves the template's
-  // own default, which differs by checkpoint (Qwen3.8-Flash-Next keeps, the GLM
-  // and DeepSeek templates drop). Set: this process overrides it — and a
-  // template with no such switch makes it a startup error, not a flag that
-  // quietly does nothing.
-  std::optional<bool> preserve_thinking;
+  // JSON object of defaults for supported template kwargs. Requests override
+  // the same keys; native history names are never translated into each other.
+  std::string default_chat_template_kwargs = "{}";
   // The prefix cache's key (M7), reported by /v1/metrics: the tokenizer
   // revision, the template hash and the checkpoint the entries were taken
   // under (the cache is per process; the key names what it is bound to).
@@ -553,6 +549,8 @@ class GenerationService : public HttpHandler,
   void flush_stream_carries(StreamRecord& r);  // the held UTF-8 tails, at the end
 
   ServiceConfig cfg_;
+  // Parsed once at startup; string values borrow storage from cfg_.
+  minijson::Value default_chat_template_kwargs_;
   FileInputs file_inputs_;
   struct PendingFileWork {
     uint64_t tag;

@@ -173,14 +173,34 @@ prefixes through a trie and are checked against the exhaustive mask oracle.
 
 Unknown top-level client/provider extensions are accepted and ignored, as in
 earlier DGPP versions. This includes `preserveThinking`, which OpenCode can
-forward from its model options. It does not control DGPP's prompt rendering;
-name the switch inside `chat_template_kwargs`, where any of the template
-spellings works: `preserve_thinking` (Qwen3.8-Flash-Next) or its inverted
-`clear_thinking` / `drop_thinking` / `truncate_history_thinking` (GLM,
-DeepSeek-V4.1). These are one switch, not four: the render receives the
-spelling the served checkpoint's template actually reads, so a flag is never
-accepted and then ignored, and a template with no such switch refuses all
-four by name.
+forward from its model options, and top-level `preserve_thinking` and
+`preserve_reasoning`. They do not control prompt rendering, even when
+`chat_template_kwargs` is absent.
+
+History controls in `chat_template_kwargs` follow vLLM's native-key model:
+`preserve_thinking`, `clear_thinking`, `drop_thinking`,
+`truncate_history_thinking`, and `preserve_reasoning` pass through under their
+original names. The checkpoint's template determines their meaning. DGPP does
+not translate names, invert values, or reject different keys as contradictory.
+In particular, `preserve_reasoning` is not a generic alias. A key the template
+does not read has no effect. For Qwen3.8-Flash-Next, use
+`{"chat_template_kwargs":{"preserve_thinking":false}}` to drop earlier history
+reasoning according to its template's policy.
+
+`--default-chat-template-kwargs JSON` sets defaults for the supported template
+kwargs. Request kwargs override matching keys; omitted keys retain server
+defaults, and keys absent from both use the checkpoint's behavior. For example,
+server defaults `{"preserve_thinking":true,"clear_thinking":true}` plus request
+kwargs `{"preserve_thinking":false}` render with `preserve_thinking=false` and
+`clear_thinking=true`, independently of field order. `/v1/models` reports the
+configured `default_chat_template_kwargs` object. Invalid defaults fail at
+startup. Top-level request `reasoning_effort` also overrides its server default.
+
+DGPP retains validation for its supported kwargs: history controls must be
+booleans, duplicate keys are rejected, and conflicting explicit request
+`reasoning_effort` / thinking controls still return errors. This change adopts
+vLLM's history-key and server-default precedence, not its entire validation
+surface; `null` and `"auto"` are not boolean history overrides.
 Recognized request fields remain validated, and known unsupported API features
 still return explicit errors. Unknown fields inside `chat_template_kwargs`
 remain errors because that object explicitly requests prompt changes.

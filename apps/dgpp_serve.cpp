@@ -155,9 +155,8 @@ struct ServeKnobs {
   dgpp::sample::Params sampling_defaults = dgpp::sample::greedy_params();
   std::optional<uint64_t> fixed_seed;
   bool reasoning_in_content = false;
-  // What a request that names no history-thinking spelling gets; absent
-  // leaves the checkpoint's template default.
-  std::optional<bool> preserve_thinking;
+  // Native template defaults; request kwargs override the same keys.
+  std::string default_chat_template_kwargs = "{}";
   dgpp::sched::AdmissionPolicy admission;  // M6 6d: full (default) or grow
   double stats_interval_s = 10.0;  // the throughput line's period; 0 = off
   bool mtp = false;                // the throughput line's MTP group
@@ -901,7 +900,7 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
   scfg.sampling_defaults = k.sampling_defaults;
   scfg.fixed_seed = k.fixed_seed;
   scfg.reasoning_in_content = k.reasoning_in_content;
-  scfg.preserve_thinking = k.preserve_thinking;
+  scfg.default_chat_template_kwargs = k.default_chat_template_kwargs;
   scfg.admission = k.admission;
   scfg.vocab_size = vocab_size;  // logit_bias's id bound
   // The request-context surface (review item 7): what the app computed from
@@ -1180,9 +1179,8 @@ int main(int argc, char** argv) {
       "    [--repetition-penalty X] [--seed N (for requests that omit one)]\n"
       "  reasoning (M6 6f): [--reasoning-in-content] folds the ids before\n"
       "    </think> into content instead of reasoning_content\n"
-      "  history: [--preserve-thinking auto|keep|drop (default auto)] is what\n"
-      "    a request that names no history-thinking spelling gets; auto leaves\n"
-      "    the checkpoint's own template default\n"
+      "  template defaults: [--default-chat-template-kwargs JSON (default {})]\n"
+      "    sets native template kwargs; request kwargs override the same keys\n"
       "  logging: [--stats-interval-s X (default 10; 0 = off)]: one INFO line\n"
       "    per interval with the aggregate prefill and decode throughput,\n"
       "    the live and queued counts, the pool and the prefix cache; the\n"
@@ -1236,7 +1234,7 @@ int main(int argc, char** argv) {
   std::optional<int> top_k;
   std::optional<uint64_t> fixed_seed;
   bool reasoning_in_content = false;
-  std::string preserve_thinking = "auto";  // auto | keep | drop
+  std::string default_chat_template_kwargs = "{}";
   std::string model_alias;
   double stats_interval_s = 10.0;  // the throughput line's period
   // The cluster config: found first, whatever its position,
@@ -1399,7 +1397,7 @@ int main(int argc, char** argv) {
     else if (a == "--repetition-penalty") repetition_penalty = std::stof(next());
     else if (a == "--seed") fixed_seed = std::stoull(next());
     else if (a == "--reasoning-in-content") reasoning_in_content = true;
-    else if (a == "--preserve-thinking") preserve_thinking = next();
+    else if (a == "--default-chat-template-kwargs") default_chat_template_kwargs = next();
     else if (a == "--stats-interval-s") stats_interval_s = std::stod(next());
     else if (a == "--config") next();  // applied above, before the flags
     else {
@@ -1698,10 +1696,14 @@ int main(int argc, char** argv) {
     DGPP_LOG_ERROR("--admission must be full or grow, got '{}'", admission_mode);
     return 2;
   }
-  if (preserve_thinking != "auto" && preserve_thinking != "keep" &&
-      preserve_thinking != "drop") {
-    DGPP_LOG_ERROR("--preserve-thinking must be auto, keep or drop, got '{}'",
-                   preserve_thinking);
+  try {
+    const auto defaults = dgpp::minijson::parse(default_chat_template_kwargs);
+    if (!defaults.root.is_object() ||
+        default_chat_template_kwargs.find_first_not_of(" \t\r\n", defaults.consumed) !=
+            std::string::npos)
+      throw std::invalid_argument("expected a JSON object");
+  } catch (const std::exception& e) {
+    DGPP_LOG_ERROR("--default-chat-template-kwargs: {}", e.what());
     return 2;
   }
   if (admission_window < 1) {
@@ -2066,11 +2068,7 @@ int main(int argc, char** argv) {
     knobs.sampling_defaults = sampling_defaults;
     knobs.fixed_seed = fixed_seed;
     knobs.reasoning_in_content = reasoning_in_content;
-    knobs.preserve_thinking =
-        preserve_thinking == "keep"
-            ? std::optional<bool>(true)
-            : preserve_thinking == "drop" ? std::optional<bool>(false)
-                                          : std::nullopt;
+    knobs.default_chat_template_kwargs = default_chat_template_kwargs;
     knobs.mtp = mtp;
     knobs.stats_interval_s = stats_interval_s;
     knobs.position_ceiling = position_ceiling;
