@@ -184,9 +184,11 @@ class ChatTemplate {
 
   // FNV-1a-64 over the raw source bytes — the golden corpus's key.
   uint64_t source_hash() const;
-  // Whether the template's source names the global `name` as a whole
-  // identifier (the service's knob gate: a template that never reads
-  // enable_thinking must not accept it as if it did).
+  // Whether the compiled program can read the global `name` (the service's
+  // knob gate: a template that never reads enable_thinking must not accept
+  // it as if it did). Resolved from the syntax tree at compile, so a
+  // comment, a printed word, an attribute (`m.preserve_thinking`) or a name
+  // a {% set %} shadows does not count as a knob of the template.
   bool reads(std::string_view name) const;
 
  private:

@@ -51,6 +51,18 @@ using dgpp::sched::Scheduler;
 using dgpp::sched::SchedulerRequest;
 using dgpp::text::ToolCallParser;
 
+// History kwargs are native template inputs, not aliases of one switch.
+bool is_history_kwarg(std::string_view name) {
+  return name == "preserve_thinking" || name == "preserve_reasoning" ||
+         name == "clear_thinking" || name == "drop_thinking" ||
+         name == "truncate_history_thinking";
+}
+
+bool valid_reasoning_effort(std::string_view value) {
+  return value == "none" || value == "minimal" || value == "low" ||
+         value == "medium" || value == "high" || value == "xhigh" || value == "max";
+}
+
 const minijson::Value* optional_field(const minijson::Value& body, std::string_view name) {
   const auto* v = body.find(name);
   return v && !v->is_null() ? v : nullptr;
@@ -412,7 +424,9 @@ std::string model_object(const ServiceConfig& scfg, const std::string& model_id,
     } catch (const std::invalid_argument&) { /* unsupported efforts are absent */ }
   }
   out += '}';
-  out.append("},\"input_modalities\":[\"text\"");
+  out.append("},\"default_chat_template_kwargs\":");
+  out.append(scfg.default_chat_template_kwargs);
+  out.append(",\"input_modalities\":[\"text\"");
   if (images_available) out.append(",\"image\"");
   out.append("]");
   // The rope ramp in force, under the names the deployment JSON uses, so
@@ -513,6 +527,30 @@ GenerationService::GenerationService(const ServiceConfig& cfg,
   std::sort(boundary_ids_.begin(), boundary_ids_.end());
   boundary_ids_.erase(std::unique(boundary_ids_.begin(), boundary_ids_.end()),
                       boundary_ids_.end());
+  const auto defaults = minijson::parse(cfg_.default_chat_template_kwargs);
+  if (!defaults.root.is_object() ||
+      cfg_.default_chat_template_kwargs.find_first_not_of(" \t\r\n", defaults.consumed) !=
+          std::string::npos)
+    throw std::invalid_argument("GenerationService: --default-chat-template-kwargs must be a JSON object");
+  std::unordered_set<std::string> seen_defaults;
+  for (const auto& m : defaults.root.members()) {
+    const std::string where = "--default-chat-template-kwargs." + m.key;
+    if (!seen_defaults.insert(m.key).second)
+      throw std::invalid_argument(where + ": duplicate template parameter");
+    if (is_history_kwarg(m.key) || m.key == "enable_thinking" || m.key == "thinking") {
+      if (!m.value.is_bool()) throw std::invalid_argument(where + " must be a boolean");
+      if ((m.key == "enable_thinking" || m.key == "thinking") &&
+          !frontend_->template_reads("enable_thinking"))
+        throw std::invalid_argument(where + ": this template has no thinking switch");
+    } else if (m.key == "reasoning_effort") {
+      if (!m.value.is_string() || !valid_reasoning_effort(m.value.as_string()))
+        throw std::invalid_argument(where + ": unsupported reasoning effort");
+      (void)frontend_->reasoning_settings(m.value.as_string());
+    } else {
+      throw std::invalid_argument(where + ": unsupported template parameter");
+    }
+  }
+  default_chat_template_kwargs_ = defaults.root;
   if (sched_.prefix_slots() > 0)
     DGPP_LOG_INFO(
         "serve: prefix cache on — {} snapshot slots, {} boundary token(s)",
@@ -555,6 +593,7 @@ GenerationService::GenerationService(const ServiceConfig& cfg,
           ? "not split (no </think> marker)"
           : cfg_.reasoning_in_content ? "folded into content"
                                       : "on reasoning_content");
+  DGPP_LOG_INFO("serve: default chat template kwargs {}", cfg_.default_chat_template_kwargs);
   // The SSE tap: tokens and retires ride the scheduler's observer
   // callbacks straight into the request records.
   sched_.set_observer(this);
@@ -1200,67 +1239,82 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
 
   // ---- reasoning_effort / chat_template_kwargs --------------------------
   std::optional<std::string> effort;
-  const auto effort_ok = [](std::string_view s) {
-    return s == "none" || s == "minimal" || s == "low" || s == "medium" ||
-           s == "high" || s == "xhigh" || s == "max";
-  };
   if (const Value* re = optional_field(body, "reasoning_effort")) {
-    if (!re->is_string() || !effort_ok(re->as_string()))
+    if (!re->is_string() || !valid_reasoning_effort(re->as_string()))
       return refuse("reasoning_effort must be none, minimal, low, medium, high, xhigh or max",
                     "reasoning_effort");
     effort = std::string(re->as_string());
   }
-  std::vector<Member> extra;
+  // Merge by exact key before validating/rendering. Explicit false is an
+  // override; an omitted key inherits its server default. Top-level history
+  // fields remain ignored provider extensions.
+  std::vector<Member> kwargs = default_chat_template_kwargs_.members();
+  std::unordered_set<std::string> seen_kwargs;
   if (const Value* kw = body.find("chat_template_kwargs")) {
     if (!kw->is_object())
-      return refuse("chat_template_kwargs must be an object",
-                    "chat_template_kwargs");
-    std::unordered_set<std::string> seen_kwargs;
+      return refuse("chat_template_kwargs must be an object", "chat_template_kwargs");
     for (const Member& m : kw->members()) {
       const std::string where = "chat_template_kwargs." + m.key;
       if (!seen_kwargs.insert(m.key).second) return refuse("duplicate template parameter", where);
-      if (m.key == "clear_thinking") {
-        if (!m.value.is_bool()) return refuse(where + " must be a boolean", where);
-        extra.push_back(m);
-      } else if (m.key == "reasoning_effort") {
-        if (!m.value.is_string() || !effort_ok(m.value.as_string()))
-          return refuse(where + " must be none, minimal, low, medium, high, xhigh or max",
-                        where);
-        if (effort.has_value() && *effort != m.value.as_string())
-          return refuse("reasoning_effort and chat_template_kwargs."
-                        "reasoning_effort disagree; send one",
-                        where);
-        effort = std::string(m.value.as_string());
-      } else if (m.key == "enable_thinking") {
-        // A knob of the templates that read it (Qwen3.8-Flash-Next,
-        // GLM-4.7: false closes the think block in the generation prompt);
-        // GLM-5.3-Flash's never does — thinking is always on there.
-        if (!frontend_->template_reads("enable_thinking"))
-          return refuse(
-              "this template has no enable_thinking knob — thinking is always "
-              "on (the generation prompt opens <think>); use reasoning_effort",
-              where, "unsupported_parameter");
-        if (!m.value.is_bool()) return refuse(where + " must be a boolean", where);
-        extra.push_back(m);
-      } else if (m.key == "thinking") {
-        // The vLLM DeepSeek-V4.1 template's name for the same switch
-        // (2026-09-14): an alias of enable_thinking, so a client written
-        // for that stack turns thinking off here too.
-        if (!frontend_->template_reads("enable_thinking"))
-          return refuse(
-              "this template has no thinking knob — thinking is always on "
-              "(the generation prompt opens <think>); use reasoning_effort",
-              where, "unsupported_parameter");
-        if (!m.value.is_bool()) return refuse(where + " must be a boolean", where);
-        Member alias = m;
-        alias.key = "enable_thinking";
-        extra.push_back(alias);
-      } else {
-        return refuse(where + " is not a knob of this template (it reads "
-                      "enable_thinking / thinking, clear_thinking and "
-                      "reasoning_effort)",
-                      where, "unsupported_parameter");
-      }
+      auto existing = std::find_if(kwargs.begin(), kwargs.end(),
+                                   [&](const Member& d) { return d.key == m.key; });
+      if (existing == kwargs.end()) kwargs.push_back(m);
+      else *existing = m;
+    }
+  }
+  // A top-level request effort also overrides a server effort default.
+  // Conflicts between two explicit request spellings retain their validation.
+  if (effort && !seen_kwargs.contains("reasoning_effort"))
+    std::erase_if(kwargs, [](const Member& m) { return m.key == "reasoning_effort"; });
+  std::vector<Member> extra;
+  for (const Member& m : kwargs) {
+    const std::string where = "chat_template_kwargs." + m.key;
+    if (is_history_kwarg(m.key)) {
+      if (!m.value.is_bool()) return refuse(where + " must be a boolean", where);
+      // History controls retain their native names, as in vLLM. The
+      // template determines their meaning; no cross-name aliases or
+      // conflict checks are applied, including for preserve_reasoning.
+      extra.push_back(m);
+    } else if (m.key == "reasoning_effort") {
+      if (!m.value.is_string() || !valid_reasoning_effort(m.value.as_string()))
+        return refuse(where + " must be none, minimal, low, medium, high, xhigh or max",
+                      where);
+      if (effort.has_value() && *effort != m.value.as_string())
+        return refuse("reasoning_effort and chat_template_kwargs."
+                      "reasoning_effort disagree; send one",
+                      where);
+      effort = std::string(m.value.as_string());
+    } else if (m.key == "enable_thinking") {
+      // A knob of the templates that read it (Qwen3.8-Flash-Next,
+      // GLM-4.7: false closes the think block in the generation prompt);
+      // GLM-5.3-Flash's never does — thinking is always on there.
+      if (!frontend_->template_reads("enable_thinking"))
+        return refuse(
+            "this template has no enable_thinking knob — thinking is always "
+            "on (the generation prompt opens <think>); use reasoning_effort",
+            where, "unsupported_parameter");
+      if (!m.value.is_bool()) return refuse(where + " must be a boolean", where);
+      extra.push_back(m);
+    } else if (m.key == "thinking") {
+      // The vLLM DeepSeek-V4.1 template's name for the same switch
+      // (2026-09-14): an alias of enable_thinking, so a client written
+      // for that stack turns thinking off here too.
+      if (!frontend_->template_reads("enable_thinking"))
+        return refuse(
+            "this template has no thinking knob — thinking is always on "
+            "(the generation prompt opens <think>); use reasoning_effort",
+            where, "unsupported_parameter");
+      if (!m.value.is_bool()) return refuse(where + " must be a boolean", where);
+      Member alias = m;
+      alias.key = "enable_thinking";
+      extra.push_back(alias);
+    } else {
+      return refuse(where + " is not a knob of this template (it reads "
+                    "enable_thinking / thinking, preserve_reasoning, "
+                    "native history controls (preserve_thinking / clear_thinking / "
+                    "drop_thinking / truncate_history_thinking) and "
+                    "reasoning_effort)",
+                    where, "unsupported_parameter");
     }
   }
 

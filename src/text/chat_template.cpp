@@ -5,6 +5,7 @@
 // tree-walking renderer. Everything outside the subset refuses by name.
 #include "text/chat_template.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <cmath>
@@ -1789,6 +1790,83 @@ struct Renderer {
   Ctx ctx_;
 };
 
+// ---------------------------------------------------------------------------
+// Which globals the program reads — ChatTemplate::reads, resolved once at
+// compile. The service's knob gate must ask "can this render depend on the
+// global", which is a question about the syntax tree: a search of the source
+// text counts a {# comment #}, a word the template prints, an attribute
+// (m.preserve_thinking), a loop variable or a {% set %} that shadows the
+// global as a knob the template has, and every one of those is how a
+// request's flag ends up silently ignored.
+// ---------------------------------------------------------------------------
+
+// `bound` names what the current scope already rebinds (a {% set %} target,
+// a {% for %} target, a macro parameter), which is what separates a read of
+// the global from a read of a local with the same spelling.
+void collect_name_reads(const Expr& e, const std::vector<std::string>& bound,
+                        std::vector<std::string>& out) {
+  if (e.tag == Expr::Tag::Name) {
+    if (std::find(bound.begin(), bound.end(), e.name) == bound.end())
+      out.push_back(e.name);
+    return;
+  }
+  // Every other tag's `name` is a member, filter or test name, never a
+  // global; only its operands can read one.
+  for (const ExprPtr& k : e.kids)
+    if (k) collect_name_reads(*k, bound, out);
+  for (const auto& [key, v] : e.kwargs)
+    if (v) collect_name_reads(*v, bound, out);
+}
+
+void collect_global_reads(const std::vector<StmtPtr>& body,
+                          std::vector<std::string> bound,
+                          std::vector<std::string>& out) {
+  for (const StmtPtr& s : body) {
+    if (!s) continue;
+    switch (s->tag) {
+      case Stmt::Tag::Text:
+      case Stmt::Tag::Break:
+        break;
+      case Stmt::Tag::Output:
+        collect_name_reads(*s->expr, bound, out);
+        break;
+      case Stmt::Tag::Set:
+        collect_name_reads(*s->expr, bound, out);
+        // From here down the scope, this name is the template's own.
+        // (A {% set ns.attr = value %} target binds no name.)
+        if (s->target_attr.empty()) bound.push_back(s->target);
+        break;
+      case Stmt::Tag::If:
+        collect_name_reads(*s->expr, bound, out);
+        collect_global_reads(s->body, bound, out);
+        for (const auto& [cond, branch] : s->elifs) {
+          collect_name_reads(*cond, bound, out);
+          collect_global_reads(branch, bound, out);
+        }
+        collect_global_reads(s->else_body, bound, out);
+        break;
+      case Stmt::Tag::For: {
+        collect_name_reads(*s->expr, bound, out);  // the iterable is the parent's
+        std::vector<std::string> inner = bound;
+        for (const std::string& n : s->names) inner.push_back(n);
+        collect_global_reads(s->body, std::move(inner), out);
+        break;
+      }
+      case Stmt::Tag::Macro:
+        if (s->macro) {
+          for (const ExprPtr& d : s->macro->defaults)
+            if (d) collect_name_reads(*d, bound, out);
+          // A macro body closes over the root frame only (call_macro), so
+          // its scope is its parameters — not the definition site's.
+          std::vector<std::string> inner;
+          for (const std::string& p : s->macro->params) inner.push_back(p);
+          collect_global_reads(s->macro->body, std::move(inner), out);
+        }
+        break;
+    }
+  }
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -1799,6 +1877,8 @@ struct ChatTemplate::Impl {
   std::string source;
   uint64_t hash = 0;
   std::vector<StmtPtr> root;
+  // Sorted, unique: every global the program can read (reads()'s table).
+  std::vector<std::string> globals_read;
 };
 
 ChatTemplate::ChatTemplate(std::unique_ptr<Impl> impl)
@@ -1819,6 +1899,11 @@ ChatTemplate ChatTemplate::compile(std::string source) {
   impl->source = std::move(source);
   impl->hash = fnv1a64(impl->source.data(), impl->source.size());
   impl->root = std::move(root);
+  collect_global_reads(impl->root, {}, impl->globals_read);
+  std::sort(impl->globals_read.begin(), impl->globals_read.end());
+  impl->globals_read.erase(std::unique(impl->globals_read.begin(),
+                                       impl->globals_read.end()),
+                           impl->globals_read.end());
   return ChatTemplate(std::move(impl));
 }
 
@@ -1853,16 +1938,8 @@ std::string ChatTemplate::render(const Value& globals) const {
 uint64_t ChatTemplate::source_hash() const { return impl_->hash; }
 
 bool ChatTemplate::reads(std::string_view name) const {
-  const std::string& src = impl_->source;
-  const auto ident = [](char c) {
-    return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
-  };
-  for (size_t at = src.find(name); at != std::string::npos; at = src.find(name, at + 1)) {
-    const bool left_ok = at == 0 || !ident(src[at - 1]);
-    const bool right_ok = at + name.size() >= src.size() || !ident(src[at + name.size()]);
-    if (left_ok && right_ok) return true;
-  }
-  return false;
+  return std::binary_search(impl_->globals_read.begin(),
+                            impl_->globals_read.end(), std::string(name));
 }
 
 }  // namespace dgpp::text
