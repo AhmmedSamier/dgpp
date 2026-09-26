@@ -2217,6 +2217,18 @@ templates, tokenizes prompts and writes responses. The engine thread owns
 admissions, model operations and token events. A mutex protects the event
 queue and request records; sockets are written only by the HTTP thread.
 
+Streaming keep-alives run in `GenerationService::idle()` after draining all
+normal and terminal events. `HttpResponseWriter` frames comments inside HTTP
+chunks and owns a monotonic silence clock per connection, shared by every
+choice of a request. Stream start, queued events/comments and successful
+socket writes refresh that clock. Pending output suppresses pings so a slow
+reader does not accumulate redundant comments. The default interval is 30
+seconds; cluster `http.sse_ping_interval`, CLI `--sse-ping-interval`, then
+request `sse_ping_interval` override it in that order. `-1` disables pings.
+Queued and prefilling records remain visible to this HTTP pass even while
+the engine thread is busy. Pings never touch token counters, scheduler state,
+journal records or watchdog progress, and stop at stream termination.
+
 ### Scheduler
 
 `src/sched/scheduler.*` depends on `SchedulerEngine`, which exposes
