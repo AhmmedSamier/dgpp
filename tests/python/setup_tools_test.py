@@ -146,14 +146,50 @@ class SetupToolsTest(unittest.TestCase):
             "blobs/weights", "snapshots/revision/config.json", "snapshots/revision/tokenizer.json",
             "snapshots/revision/chat_template.jinja", "snapshots/revision/model.safetensors"})
 
+    def test_manifest_uses_immediate_targets_for_shared_blobs(self):
+        blob = self.snapshot.parent.parent / "blobs/weights"
+        shared = self.cache / "blobs/9d/shared-weights"
+        shared.parent.mkdir(parents=True)
+        blob.rename(shared)
+        nested = self.snapshot / "nested/weights-copy"
+        nested.parent.mkdir()
+        nested.symlink_to("../../../blobs/weights")
+        for target in ("../../blobs/9d/shared-weights", str(shared)):
+            with self.subTest(target=target):
+                blob.unlink(missing_ok=True)
+                blob.symlink_to(target)
+                self.assertEqual(set(cache_sync.snapshot_files(self.snapshot).splitlines()), {
+                    "blobs/weights", "snapshots/revision/config.json", "snapshots/revision/tokenizer.json",
+                    "snapshots/revision/chat_template.jinja", "snapshots/revision/model.safetensors",
+                    "snapshots/revision/nested/weights-copy"})
+
     def test_absolute_and_escaping_symlinks_rejected(self):
+        shared = self.cache / "blobs/9d/shared-weights"
+        shared.parent.mkdir(parents=True)
+        shared.write_text("outside the repository")
         link = self.snapshot / "bad-link"
-        for target in (str(self.snapshot / "config.json"), "../../refs/main", "../../blobs/missing"):
+        for target in (str(self.snapshot / "config.json"), str(self.snapshot.parent.parent / "blobs/weights"),
+                       "../../refs/main", "../../blobs/../refs/main", "../../blobs/missing",
+                       "../../../blobs/9d/shared-weights", "../../blobs"):
             with self.subTest(target=target):
                 link.symlink_to(target)
                 with self.assertRaises((ValueError, OSError)):
                     cache_sync.snapshot_files(self.snapshot)
                 link.unlink()
+
+    def test_invalid_blob_chains_rejected_before_contacting_peer(self):
+        blob = self.snapshot.parent.parent / "blobs/weights"
+        blob.unlink()
+        (blob.parent / "loop").symlink_to("weights")
+        shared_directory = self.cache / "blobs/9d"
+        shared_directory.mkdir(parents=True)
+        for target in ("../../blobs/9d/missing", "loop", "../../blobs/9d"):
+            with self.subTest(target=target), patch.object(cache_sync, "peer_cache") as peer:
+                blob.symlink_to(target)
+                with self.assertRaises((ValueError, OSError, RuntimeError)):
+                    cache_sync.sync_snapshot(self.snapshot, "tester@fake-peer", {})
+                peer.assert_not_called()
+                blob.unlink()
 
     def test_activation_keeps_old_ref_if_checkpoint_invalid(self):
         ref = self.snapshot.parent.parent / "refs/main"
@@ -172,6 +208,24 @@ class SetupToolsTest(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("rsync"), "rsync integration requires rsync")
     def test_real_rsync_over_local_test_transport(self):
+        self.check_real_rsync()
+
+    @unittest.skipUnless(shutil.which("rsync"), "rsync integration requires rsync")
+    def test_real_rsync_with_relative_shared_blobs(self):
+        self.check_real_rsync(shared_links="relative")
+
+    @unittest.skipUnless(shutil.which("rsync"), "rsync integration requires rsync")
+    def test_real_rsync_with_absolute_shared_blobs(self):
+        self.check_real_rsync(shared_links="absolute")
+
+    def check_real_rsync(self, shared_links=None):
+        if shared_links:
+            source_blob = self.snapshot.parent.parent / "blobs/weights"
+            shared = self.cache / "blobs/9d/shared-weights"
+            shared.parent.mkdir(parents=True)
+            source_blob.rename(shared)
+            source_blob.symlink_to(shared if shared_links == "absolute" else "../../blobs/9d/shared-weights")
+        (self.cache / "token").write_text("not-for-peers")
         peer = self.root / "peer"
         peer.mkdir()
         binaries = self.root / "bin"
@@ -191,19 +245,34 @@ class SetupToolsTest(unittest.TestCase):
         blob = destination / "blobs/weights"
         blob.parent.mkdir()
         original = (self.snapshot / "model.safetensors").read_bytes()
-        blob.write_bytes(b"x" * len(original))
+        if shared_links == "relative":
+            # Repair a prior transfer that preserved the shared-store link.
+            blob.symlink_to("../../blobs/9d/shared-weights")
+        else:
+            blob.write_bytes(b"x" * len(original))
         with patch.dict(os.environ, env, clear=True):
-            cache_sync.sync_snapshot(self.snapshot, "tester@fake-peer", {})
+            with patch.object(cache_sync.subprocess, "run", wraps=subprocess.run) as run:
+                cache_sync.sync_snapshot(self.snapshot, "tester@fake-peer", {})
+            transfers = [call for call in run.call_args_list
+                         if call.args[0][0] == "rsync" and "--files-from=-" in call.args[0]]
+            self.assertEqual(len(transfers), 1)
+            # Absolute links could accidentally work while the source is present.
+            shutil.rmtree(self.cache)
             verified = cache_sync.peer_cache("tester@fake-peer", "org/model", {}, verify=True, revision="revision")
             with self.assertRaisesRegex(RuntimeError, "revision"):
                 cache_sync.peer_cache("tester@fake-peer", "org/model", {}, verify=True, revision="wrong")
         self.assertEqual((destination / "refs/main").read_text().strip(), "revision")
         copied = destination / "snapshots/revision/model.safetensors"
         self.assertTrue(copied.is_symlink())
+        self.assertEqual(os.readlink(copied), "../../blobs/weights")
+        self.assertTrue(blob.is_file())
+        self.assertFalse(blob.is_symlink())
         self.assertEqual(copied.read_bytes(), original)
         self.assertEqual(unrelated.read_text(), "keep this")
         self.assertEqual(verified["repository"], str(destination))
         self.assertFalse((peer / ".cache/huggingface/token").exists())
+        self.assertFalse((destination.parent / "token").exists())
+        self.assertFalse((destination.parent / "blobs").exists())
 
     def test_explicit_config_forwarded_by_bash_wrapper(self):
         result = subprocess.run(["bash", str(ROOT / "scripts/serve_run.sh"), "resolve", "--config", str(self.config)], env=self.env, text=True, capture_output=True, timeout=20)

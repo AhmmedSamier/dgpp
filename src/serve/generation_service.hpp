@@ -165,6 +165,7 @@ struct ServiceConfig {
   std::string model_id;
   int default_max_tokens = 256;  // when the request omits max_tokens
   int queue_limit = 64;          // admission bound; beyond → 503
+  int sse_ping_interval = kDefaultSsePingInterval;  // seconds; -1 disables
   dgpp::sched::AdmissionPolicy admission;  // full-reserve unless told otherwise
   // The sampling defaults every omitted request field takes: the
   // checkpoint's generation_config.json with the process's overrides
@@ -181,6 +182,9 @@ struct ServiceConfig {
   // true folds them into content as "<think>…</think>" text for clients
   // that expect the raw transcript.
   bool reasoning_in_content = false;
+  // JSON object of defaults for supported template kwargs. Requests override
+  // the same keys; native history names are never translated into each other.
+  std::string default_chat_template_kwargs = "{}";
   // The prefix cache's key (M7), reported by /v1/metrics: the tokenizer
   // revision, the template hash and the checkpoint the entries were taken
   // under (the cache is per process; the key names what it is bound to).
@@ -352,6 +356,7 @@ class GenerationService : public HttpHandler,
   // one end sequence once every choice is done — the usage summed, the
   // one-shot's choices assembled by index.
   struct ChoiceGroup {
+    int sse_ping_interval = kDefaultSsePingInterval;
     int n = 1;
     int finished = 0;            // choices whose end sequence is written
     bool ended = false;          // the stream ended / the one-shot answered
@@ -450,6 +455,8 @@ class GenerationService : public HttpHandler,
   bool parse_max_tokens(const minijson::Value& body, HttpResponseWriter& w, int* steps, bool chat);
   // OpenAI's ignore_eos: generate to the token limit whatever is drawn.
   bool parse_ignore_eos(const minijson::Value& body, HttpResponseWriter& w, bool* ignore);
+  bool parse_sse_ping_interval(const minijson::Value& body, HttpResponseWriter& w, bool stream,
+                               int* interval);
   bool parse_stream_options(const minijson::Value& body, HttpResponseWriter& w,
                             bool stream, bool* usage, bool* obfuscation);
   void write_stream_event(StreamRecord& r, std::string event, bool usage = false);
@@ -546,6 +553,8 @@ class GenerationService : public HttpHandler,
   void flush_stream_carries(StreamRecord& r);  // the held UTF-8 tails, at the end
 
   ServiceConfig cfg_;
+  // Parsed once at startup; string values borrow storage from cfg_.
+  minijson::Value default_chat_template_kwargs_;
   FileInputs file_inputs_;
   struct PendingFileWork {
     uint64_t tag;

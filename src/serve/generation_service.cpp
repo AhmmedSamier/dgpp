@@ -17,6 +17,7 @@
 
 #include "common/log.hpp"
 #include "serve/json_out.hpp"
+#include "serve/utf8.hpp"
 
 namespace dgpp::serve {
 
@@ -50,6 +51,18 @@ void log_tool_schema_note(bool warn, size_t index, const std::string& text) {
 using dgpp::sched::Scheduler;
 using dgpp::sched::SchedulerRequest;
 using dgpp::text::ToolCallParser;
+
+// History kwargs are native template inputs, not aliases of one switch.
+bool is_history_kwarg(std::string_view name) {
+  return name == "preserve_thinking" || name == "preserve_reasoning" ||
+         name == "clear_thinking" || name == "drop_thinking" ||
+         name == "truncate_history_thinking";
+}
+
+bool valid_reasoning_effort(std::string_view value) {
+  return value == "none" || value == "minimal" || value == "low" ||
+         value == "medium" || value == "high" || value == "xhigh" || value == "max";
+}
 
 const minijson::Value* optional_field(const minijson::Value& body, std::string_view name) {
   const auto* v = body.find(name);
@@ -412,7 +425,9 @@ std::string model_object(const ServiceConfig& scfg, const std::string& model_id,
     } catch (const std::invalid_argument&) { /* unsupported efforts are absent */ }
   }
   out += '}';
-  out.append("},\"input_modalities\":[\"text\"");
+  out.append("},\"default_chat_template_kwargs\":");
+  out.append(scfg.default_chat_template_kwargs);
+  out.append(",\"input_modalities\":[\"text\"");
   if (images_available) out.append(",\"image\"");
   out.append("]");
   // The rope ramp in force, under the names the deployment JSON uses, so
@@ -507,12 +522,39 @@ GenerationService::GenerationService(const ServiceConfig& cfg,
     throw std::invalid_argument("GenerationService: frontend required");
   if (cfg_.model_id.empty())
     throw std::invalid_argument("GenerationService: model_id required");
+  if (!valid_sse_ping_interval(cfg_.sse_ping_interval))
+    throw std::invalid_argument(
+        "GenerationService: sse_ping_interval must be -1 or positive seconds");
   meters_ = sched_.meters();
   prefix_stats_ = engine_->prefix_engine_stats();
   boundary_ids_ = frontend_->boundary_token_ids();
   std::sort(boundary_ids_.begin(), boundary_ids_.end());
   boundary_ids_.erase(std::unique(boundary_ids_.begin(), boundary_ids_.end()),
                       boundary_ids_.end());
+  const auto defaults = minijson::parse(cfg_.default_chat_template_kwargs);
+  if (!defaults.root.is_object() ||
+      cfg_.default_chat_template_kwargs.find_first_not_of(" \t\r\n", defaults.consumed) !=
+          std::string::npos)
+    throw std::invalid_argument("GenerationService: --default-chat-template-kwargs must be a JSON object");
+  std::unordered_set<std::string> seen_defaults;
+  for (const auto& m : defaults.root.members()) {
+    const std::string where = "--default-chat-template-kwargs." + m.key;
+    if (!seen_defaults.insert(m.key).second)
+      throw std::invalid_argument(where + ": duplicate template parameter");
+    if (is_history_kwarg(m.key) || m.key == "enable_thinking" || m.key == "thinking") {
+      if (!m.value.is_bool()) throw std::invalid_argument(where + " must be a boolean");
+      if ((m.key == "enable_thinking" || m.key == "thinking") &&
+          !frontend_->template_reads("enable_thinking"))
+        throw std::invalid_argument(where + ": this template has no thinking switch");
+    } else if (m.key == "reasoning_effort") {
+      if (!m.value.is_string() || !valid_reasoning_effort(m.value.as_string()))
+        throw std::invalid_argument(where + ": unsupported reasoning effort");
+      (void)frontend_->reasoning_settings(m.value.as_string());
+    } else {
+      throw std::invalid_argument(where + ": unsupported template parameter");
+    }
+  }
+  default_chat_template_kwargs_ = defaults.root;
   if (sched_.prefix_slots() > 0)
     DGPP_LOG_INFO(
         "serve: prefix cache on — {} snapshot slots, {} boundary token(s)",
@@ -555,6 +597,7 @@ GenerationService::GenerationService(const ServiceConfig& cfg,
           ? "not split (no </think> marker)"
           : cfg_.reasoning_in_content ? "folded into content"
                                       : "on reasoning_content");
+  DGPP_LOG_INFO("serve: default chat template kwargs {}", cfg_.default_chat_template_kwargs);
   // The SSE tap: tokens and retires ride the scheduler's observer
   // callbacks straight into the request records.
   sched_.set_observer(this);
@@ -1200,67 +1243,82 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
 
   // ---- reasoning_effort / chat_template_kwargs --------------------------
   std::optional<std::string> effort;
-  const auto effort_ok = [](std::string_view s) {
-    return s == "none" || s == "minimal" || s == "low" || s == "medium" ||
-           s == "high" || s == "xhigh" || s == "max";
-  };
   if (const Value* re = optional_field(body, "reasoning_effort")) {
-    if (!re->is_string() || !effort_ok(re->as_string()))
+    if (!re->is_string() || !valid_reasoning_effort(re->as_string()))
       return refuse("reasoning_effort must be none, minimal, low, medium, high, xhigh or max",
                     "reasoning_effort");
     effort = std::string(re->as_string());
   }
-  std::vector<Member> extra;
+  // Merge by exact key before validating/rendering. Explicit false is an
+  // override; an omitted key inherits its server default. Top-level history
+  // fields remain ignored provider extensions.
+  std::vector<Member> kwargs = default_chat_template_kwargs_.members();
+  std::unordered_set<std::string> seen_kwargs;
   if (const Value* kw = body.find("chat_template_kwargs")) {
     if (!kw->is_object())
-      return refuse("chat_template_kwargs must be an object",
-                    "chat_template_kwargs");
-    std::unordered_set<std::string> seen_kwargs;
+      return refuse("chat_template_kwargs must be an object", "chat_template_kwargs");
     for (const Member& m : kw->members()) {
       const std::string where = "chat_template_kwargs." + m.key;
       if (!seen_kwargs.insert(m.key).second) return refuse("duplicate template parameter", where);
-      if (m.key == "clear_thinking") {
-        if (!m.value.is_bool()) return refuse(where + " must be a boolean", where);
-        extra.push_back(m);
-      } else if (m.key == "reasoning_effort") {
-        if (!m.value.is_string() || !effort_ok(m.value.as_string()))
-          return refuse(where + " must be none, minimal, low, medium, high, xhigh or max",
-                        where);
-        if (effort.has_value() && *effort != m.value.as_string())
-          return refuse("reasoning_effort and chat_template_kwargs."
-                        "reasoning_effort disagree; send one",
-                        where);
-        effort = std::string(m.value.as_string());
-      } else if (m.key == "enable_thinking") {
-        // A knob of the templates that read it (Qwen3.8-Flash-Next,
-        // GLM-4.7: false closes the think block in the generation prompt);
-        // GLM-5.3-Flash's never does — thinking is always on there.
-        if (!frontend_->template_reads("enable_thinking"))
-          return refuse(
-              "this template has no enable_thinking knob — thinking is always "
-              "on (the generation prompt opens <think>); use reasoning_effort",
-              where, "unsupported_parameter");
-        if (!m.value.is_bool()) return refuse(where + " must be a boolean", where);
-        extra.push_back(m);
-      } else if (m.key == "thinking") {
-        // The vLLM DeepSeek-V4.1 template's name for the same switch
-        // (2026-09-14): an alias of enable_thinking, so a client written
-        // for that stack turns thinking off here too.
-        if (!frontend_->template_reads("enable_thinking"))
-          return refuse(
-              "this template has no thinking knob — thinking is always on "
-              "(the generation prompt opens <think>); use reasoning_effort",
-              where, "unsupported_parameter");
-        if (!m.value.is_bool()) return refuse(where + " must be a boolean", where);
-        Member alias = m;
-        alias.key = "enable_thinking";
-        extra.push_back(alias);
-      } else {
-        return refuse(where + " is not a knob of this template (it reads "
-                      "enable_thinking / thinking, clear_thinking and "
-                      "reasoning_effort)",
-                      where, "unsupported_parameter");
-      }
+      auto existing = std::find_if(kwargs.begin(), kwargs.end(),
+                                   [&](const Member& d) { return d.key == m.key; });
+      if (existing == kwargs.end()) kwargs.push_back(m);
+      else *existing = m;
+    }
+  }
+  // A top-level request effort also overrides a server effort default.
+  // Conflicts between two explicit request spellings retain their validation.
+  if (effort && !seen_kwargs.contains("reasoning_effort"))
+    std::erase_if(kwargs, [](const Member& m) { return m.key == "reasoning_effort"; });
+  std::vector<Member> extra;
+  for (const Member& m : kwargs) {
+    const std::string where = "chat_template_kwargs." + m.key;
+    if (is_history_kwarg(m.key)) {
+      if (!m.value.is_bool()) return refuse(where + " must be a boolean", where);
+      // History controls retain their native names, as in vLLM. The
+      // template determines their meaning; no cross-name aliases or
+      // conflict checks are applied, including for preserve_reasoning.
+      extra.push_back(m);
+    } else if (m.key == "reasoning_effort") {
+      if (!m.value.is_string() || !valid_reasoning_effort(m.value.as_string()))
+        return refuse(where + " must be none, minimal, low, medium, high, xhigh or max",
+                      where);
+      if (effort.has_value() && *effort != m.value.as_string())
+        return refuse("reasoning_effort and chat_template_kwargs."
+                      "reasoning_effort disagree; send one",
+                      where);
+      effort = std::string(m.value.as_string());
+    } else if (m.key == "enable_thinking") {
+      // A knob of the templates that read it (Qwen3.8-Flash-Next,
+      // GLM-4.7: false closes the think block in the generation prompt);
+      // GLM-5.3-Flash's never does — thinking is always on there.
+      if (!frontend_->template_reads("enable_thinking"))
+        return refuse(
+            "this template has no enable_thinking knob — thinking is always "
+            "on (the generation prompt opens <think>); use reasoning_effort",
+            where, "unsupported_parameter");
+      if (!m.value.is_bool()) return refuse(where + " must be a boolean", where);
+      extra.push_back(m);
+    } else if (m.key == "thinking") {
+      // The vLLM DeepSeek-V4.1 template's name for the same switch
+      // (2026-09-14): an alias of enable_thinking, so a client written
+      // for that stack turns thinking off here too.
+      if (!frontend_->template_reads("enable_thinking"))
+        return refuse(
+            "this template has no thinking knob — thinking is always on "
+            "(the generation prompt opens <think>); use reasoning_effort",
+            where, "unsupported_parameter");
+      if (!m.value.is_bool()) return refuse(where + " must be a boolean", where);
+      Member alias = m;
+      alias.key = "enable_thinking";
+      extra.push_back(alias);
+    } else {
+      return refuse(where + " is not a knob of this template (it reads "
+                    "enable_thinking / thinking, preserve_reasoning, "
+                    "native history controls (preserve_thinking / clear_thinking / "
+                    "drop_thinking / truncate_history_thinking) and "
+                    "reasoning_effort)",
+                    where, "unsupported_parameter");
     }
   }
 
@@ -1770,6 +1828,26 @@ bool GenerationService::parse_ignore_eos(const minijson::Value& body, HttpRespon
   return true;
 }
 
+bool GenerationService::parse_sse_ping_interval(const minijson::Value& body, HttpResponseWriter& w,
+                                                bool stream, int* interval) {
+  *interval = cfg_.sse_ping_interval;
+  const auto* value = body.find("sse_ping_interval");
+  if (!value) return true;
+  if (value->kind() != minijson::Value::Kind::Int || !valid_sse_ping_interval(value->as_int())) {
+    respond_error(
+        w, 400, "sse_ping_interval must be -1 (disabled) or an integer in [1, 2147483647] seconds",
+        "invalid_request_error", "sse_ping_interval");
+    return false;
+  }
+  if (!stream) {
+    respond_error(w, 400, "sse_ping_interval requires stream: true", "invalid_request_error",
+                  "sse_ping_interval");
+    return false;
+  }
+  *interval = static_cast<int>(value->as_int());
+  return true;
+}
+
 bool GenerationService::parse_stream_options(const minijson::Value& body, HttpResponseWriter& w,
                                               bool stream, bool* usage, bool* obfuscation) {
   *usage = false;
@@ -1843,6 +1921,8 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
   }
   bool include_usage = false, include_obfuscation = true;
   if (!parse_stream_options(body, w, stream, &include_usage, &include_obfuscation)) return;
+  int sse_ping_interval = cfg_.sse_ping_interval;
+  if (!parse_sse_ping_interval(body, w, stream, &sse_ping_interval)) return;
   // prefix_cache (ours, M7): false opts the request out of the prefix
   // cache — no attach, no snapshot of its state.
   bool prefix_cache = true;
@@ -1969,6 +2049,7 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
   }
   const int64_t created = std::time(nullptr);
   auto group = std::make_shared<ChoiceGroup>();
+  group->sse_ping_interval = sse_ping_interval;
   group->n = n;
   group->choices.resize(static_cast<size_t>(n));
   const std::vector<int64_t> boundaries = prompt_boundaries(prompt);
@@ -2081,6 +2162,8 @@ void GenerationService::route_completions(const HttpRequest& req,
   }
   bool include_usage = false, include_obfuscation = false;
   if (!parse_stream_options(body, w, stream, &include_usage, &include_obfuscation)) return;
+  int sse_ping_interval = cfg_.sse_ping_interval;
+  if (!parse_sse_ping_interval(body, w, stream, &sse_ping_interval)) return;
   bool prefix_cache = true;
   if (const dgpp::minijson::Value* pcv = body.find("prefix_cache")) {
     if (!pcv->is_bool()) {
@@ -2157,6 +2240,7 @@ void GenerationService::route_completions(const HttpRequest& req,
   }
   record->sched_id = record->id;
   record->group = std::make_shared<ChoiceGroup>();
+  record->group->sse_ping_interval = sse_ping_interval;
   record->group->choices.resize(1);
   record->call_seed = record->tag;
   record->stop.stops = stops;
@@ -2758,10 +2842,6 @@ void append_bytes_array(std::string* out, const std::string& s) {
 
 }  // namespace
 
-namespace {
-void sanitize_utf8(std::string* text);  // the delta streams' UTF-8 discipline, below
-}  // namespace
-
 std::string GenerationService::logprobs_content(const StreamRecord& r,
                                                 size_t from, size_t to,
                                                 bool unreported_only) const {
@@ -2836,12 +2916,16 @@ std::string GenerationService::legacy_logprobs(const StreamRecord& r, size_t fro
       offsets.push_back(',');
     }
     first = false;
-    append_json_string(&tokens, tok);
+    std::string shown = tok;
+    sanitize_utf8(&shown);
+    append_json_string(&tokens, shown);
     append_json_float(&lps, r.lps[i].logprob);
     tops.push_back('{');
     for (size_t j = 0; j < r.lps[i].top_logprobs.size(); ++j) {
       if (j) tops.push_back(',');
-      append_json_string(&tops, frontend_->decode_ids({r.lps[i].top_logprobs[j].first}));
+      shown = frontend_->decode_ids({r.lps[i].top_logprobs[j].first});
+      sanitize_utf8(&shown);
+      append_json_string(&tops, shown);
       tops.push_back(':');
       append_json_float(&tops, r.lps[i].top_logprobs[j].second);
     }
@@ -2965,77 +3049,6 @@ void GenerationService::write_stream_event(StreamRecord& r, std::string event, b
   }
   r.writer->write_event(event);
 }
-
-// ---------------------------------------------------------------------------
-// UTF-8 discipline for the delta streams (the soak's find, 2026-09-05): a
-// token's decoded bytes can end inside a multi-byte character, and a JSON
-// text that is not UTF-8 breaks a strict client (Python's json.loads on
-// the payload bytes raised, and the soak's chat workers died on the first
-// accented name). carry_utf8 prepends the field's held bytes, holds back an
-// incomplete trailing sequence for the next delta, and replaces invalid
-// bytes with U+FFFD; finish_utf8 renders what is still held at the end.
-// ---------------------------------------------------------------------------
-namespace {
-
-size_t utf8_sequence_length(unsigned char b) {
-  if (b < 0x80) return 1;
-  if ((b & 0xE0) == 0xC0) return 2;
-  if ((b & 0xF0) == 0xE0) return 3;
-  if ((b & 0xF8) == 0xF0) return 4;
-  return 0;  // a stray continuation or an invalid lead byte
-}
-
-constexpr const char* kReplacement = "\xEF\xBF\xBD";  // U+FFFD
-
-void carry_utf8(std::string* text, std::string* carry) {
-  if (!carry->empty()) {
-    text->insert(0, *carry);
-    carry->clear();
-  }
-  std::string out;
-  out.reserve(text->size());
-  const size_t n = text->size();
-  size_t i = 0;
-  while (i < n) {
-    const unsigned char b = static_cast<unsigned char>((*text)[i]);
-    const size_t len = utf8_sequence_length(b);
-    if (len == 0) {
-      out.append(kReplacement);
-      ++i;
-      continue;
-    }
-    bool continuation_ok = true;
-    const size_t have = std::min(len, n - i);
-    for (size_t k = 1; k < have; ++k)
-      if ((static_cast<unsigned char>((*text)[i + k]) & 0xC0) != 0x80) continuation_ok = false;
-    if (!continuation_ok) {
-      out.append(kReplacement);
-      ++i;
-      continue;
-    }
-    if (have < len) {  // incomplete at the end: the next delta completes it
-      carry->assign(*text, i, n - i);
-      break;
-    }
-    out.append(*text, i, len);
-    i += len;
-  }
-  text->swap(out);
-}
-
-std::string finish_utf8(std::string* carry) {
-  if (carry->empty()) return {};
-  carry->clear();
-  return kReplacement;  // an incomplete character at the very end
-}
-
-void sanitize_utf8(std::string* text) {
-  std::string carry;
-  carry_utf8(text, &carry);
-  text->append(finish_utf8(&carry));
-}
-
-}  // namespace
 
 void GenerationService::flush_chat_stream(StreamRecord& r) {
   // Take the unflushed events (and, when a chunk will carry them, the
@@ -3361,6 +3374,14 @@ void GenerationService::pump_records() {
     // Records leave the list only here — done and (writer drained or
     // dead). A cancelled-but-still-generating record keeps its entry
     // until on_retire lands.
+  }
+
+  // Drain all choices and terminal events first. The writer owns one silence
+  // clock per connection; sibling choices cannot cause duplicate pings. This
+  // runs on the HTTP thread even while an engine pass is blocked in prefill.
+  for (auto& r : live) {
+    if (r->stream && r->writer != nullptr && !r->writer_dead && !r->group->ended)
+      r->writer->ping_if_idle(r->group->sse_ping_interval);
   }
 
   std::lock_guard<std::mutex> lock(mutex_);

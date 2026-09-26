@@ -32,6 +32,12 @@ revisions recorded with them.
 
 ## Serving support
 
+Issue #49 adds SSE keep-alive comments during admission, prefill and gaps in
+stream output. The interval defaults to 30 seconds and is configurable through
+cluster JSON, CLI and each streaming request; `-1` disables it. Optional prompt
+progress events remain separate work. See the
+[implementation and validation record](benchmarks/results/2026-09-26-sse-keep-alive.md).
+
 The engine watchdog observes successful collective completions inside model
 chunks, preventing a false timeout while tensor-parallel prefill is still
 advancing. Controlled TP2 regression and genuine-stall tests pass; a full

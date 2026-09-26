@@ -149,12 +149,15 @@ struct ServeKnobs {
   uint16_t http_port = 8080;
   std::string http_bind = "127.0.0.1";
   int64_t http_max_body_bytes = dgpp::serve::kDefaultHttpMaxBodyBytes;
+  int sse_ping_interval = dgpp::serve::kDefaultSsePingInterval;
   int max_connections = 64;
   int queue_limit = 64;
   int default_max_tokens = 256;
   dgpp::sample::Params sampling_defaults = dgpp::sample::greedy_params();
   std::optional<uint64_t> fixed_seed;
   bool reasoning_in_content = false;
+  // Native template defaults; request kwargs override the same keys.
+  std::string default_chat_template_kwargs = "{}";
   dgpp::sched::AdmissionPolicy admission;  // M6 6d: full (default) or grow
   double stats_interval_s = 10.0;  // the throughput line's period; 0 = off
   bool mtp = false;                // the throughput line's MTP group
@@ -895,9 +898,11 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
   scfg.model_id = model_display;
   scfg.default_max_tokens = k.default_max_tokens;
   scfg.queue_limit = k.queue_limit;
+  scfg.sse_ping_interval = k.sse_ping_interval;
   scfg.sampling_defaults = k.sampling_defaults;
   scfg.fixed_seed = k.fixed_seed;
   scfg.reasoning_in_content = k.reasoning_in_content;
+  scfg.default_chat_template_kwargs = k.default_chat_template_kwargs;
   scfg.admission = k.admission;
   scfg.vocab_size = vocab_size;  // logit_bias's id bound
   // The request-context surface (review item 7): what the app computed from
@@ -1105,6 +1110,10 @@ int main(int argc, char** argv) {
       "    engine knob below; flags given after it override\n"
       "  [--port N (default 18080; rank 0 only)]\n"
       "  [--bind-host IPV4 (default 127.0.0.1; rank 0 only)]\n"
+      "  [--sse-ping-interval N (default 30 seconds; -1 disables; rank 0 only)]:\n"
+      "    SSE comments while a stream is silent; overrides http.sse_ping_interval\n"
+      "    in cluster JSON; request sse_ping_interval overrides the server setting.\n"
+      "    N must be -1 or an integer in [1, 2147483647]; engine deadlines are unchanged.\n"
       "  [--http-max-body-bytes N (default 268435456 = 256 MiB; rank 0 only)]:\n"
       "    positive serialized request-body byte limit, independent of KV tokens\n"
       "  [--kv-capacity TOKENS (default 8192)]: the KV pool per rank; a prompt\n"
@@ -1163,7 +1172,8 @@ int main(int argc, char** argv) {
       "    tokens, grows at tick top, and sheds the youngest request\n"
       "    (finish_reason length) when the pool runs out; every rank takes\n"
       "    rank 0's policy from the warm record\n"
-      "  [--prefill-budget-tokens N (default -1)]: automatic aligned chunks on supported graph engines; 0 "
+      "  [--prefill-budget-tokens N (default -1)]: automatic aligned chunks on supported graph "
+      "engines; 0 "
       "disables\n"
       "  [--prefill-idle-budget-tokens N (default 0)]: larger budget without active decode; 0 uses "
       "the busy budget\n"
@@ -1176,6 +1186,8 @@ int main(int argc, char** argv) {
       "    [--repetition-penalty X] [--seed N (for requests that omit one)]\n"
       "  reasoning (M6 6f): [--reasoning-in-content] folds the ids before\n"
       "    </think> into content instead of reasoning_content\n"
+      "  template defaults: [--default-chat-template-kwargs JSON (default {})]\n"
+      "    sets native template kwargs; request kwargs override the same keys\n"
       "  logging: [--stats-interval-s X (default 10; 0 = off)]: one INFO line\n"
       "    per interval with the aggregate prefill and decode throughput,\n"
       "    the live and queued counts, the pool and the prefix cache; the\n"
@@ -1186,6 +1198,7 @@ int main(int argc, char** argv) {
   uint16_t port = 8080, fabric_port = 29970, journal_port = 29971;
   int64_t kv_capacity = 8192;
   int64_t http_max_body_bytes = dgpp::serve::kDefaultHttpMaxBodyBytes;
+  int sse_ping_interval = dgpp::serve::kDefaultSsePingInterval;
   std::string kv_dtype = "bf16";  // the latent cache's format
   std::string ngram_table = "resident";  // the Qwen n-gram table: resident | mmap
   std::string fp8_head = "gemv";
@@ -1229,6 +1242,7 @@ int main(int argc, char** argv) {
   std::optional<int> top_k;
   std::optional<uint64_t> fixed_seed;
   bool reasoning_in_content = false;
+  std::string default_chat_template_kwargs = "{}";
   std::string model_alias;
   double stats_interval_s = 10.0;  // the throughput line's period
   // The cluster config: found first, whatever its position,
@@ -1256,6 +1270,7 @@ int main(int argc, char** argv) {
     port = static_cast<uint16_t>(c.http_port);
     http_bind = c.http_bind;
     http_max_body_bytes = c.http_max_body_bytes;
+    sse_ping_interval = c.sse_ping_interval;
     if (!c.node_env.empty()) {
       if (rank < 0 || rank >= world) {
         DGPP_LOG_ERROR("rank is outside configured nodes");
@@ -1326,15 +1341,25 @@ int main(int argc, char** argv) {
     else if (a == "--checkpoint-dir") ckpt = next();
     else if (a == "--port") port = static_cast<uint16_t>(std::stoi(next()));
     else if (a == "--bind-host") http_bind = next();
-    else if (a == "--http-max-body-bytes") {
+    else if (a == "--sse-ping-interval") {
+      const std::string value = next();
+      const auto [end, error] =
+          std::from_chars(value.data(), value.data() + value.size(), sse_ping_interval);
+      if (error != std::errc{} || end != value.data() + value.size() ||
+          !dgpp::serve::valid_sse_ping_interval(sse_ping_interval)) {
+        DGPP_LOG_ERROR(
+            "--sse-ping-interval must be -1 (disabled) or an integer in [1, 2147483647] seconds");
+        return 2;
+      }
+    } else if (a == "--http-max-body-bytes") {
       const std::string value = next();
       const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), http_max_body_bytes);
       if (error != std::errc{} || end != value.data() + value.size() || http_max_body_bytes < 1) {
         DGPP_LOG_ERROR("--http-max-body-bytes must be a positive integer byte count");
         return 2;
       }
-    }
-    else if (a == "--kv-capacity") kv_capacity = std::stoll(next());
+    } else if (a == "--kv-capacity")
+      kv_capacity = std::stoll(next());
     else if (a == "--kv-dtype") kv_dtype = next();
     else if (a == "--ngram-table") ngram_table = next();
     else if (a == "--dense-weights") dense_weights = next();
@@ -1391,6 +1416,7 @@ int main(int argc, char** argv) {
     else if (a == "--repetition-penalty") repetition_penalty = std::stof(next());
     else if (a == "--seed") fixed_seed = std::stoull(next());
     else if (a == "--reasoning-in-content") reasoning_in_content = true;
+    else if (a == "--default-chat-template-kwargs") default_chat_template_kwargs = next();
     else if (a == "--stats-interval-s") stats_interval_s = std::stod(next());
     else if (a == "--config") next();  // applied above, before the flags
     else {
@@ -1595,6 +1621,7 @@ int main(int argc, char** argv) {
     std::fputs(kUsage, stderr);
     return 1;
   }
+  if (rank == 0) DGPP_LOG_INFO("serve: SSE ping interval {} s (-1 disables)", sse_ping_interval);
   if (kv_capacity < 1 || max_concurrency < 1 || queue_limit < 1 ||
       default_max_tokens < 1 || max_connections < 1) {
     DGPP_LOG_ERROR("all capacity knobs must be >= 1");
@@ -1687,6 +1714,16 @@ int main(int argc, char** argv) {
   }
   if (admission_mode != "full" && admission_mode != "grow") {
     DGPP_LOG_ERROR("--admission must be full or grow, got '{}'", admission_mode);
+    return 2;
+  }
+  try {
+    const auto defaults = dgpp::minijson::parse(default_chat_template_kwargs);
+    if (!defaults.root.is_object() ||
+        default_chat_template_kwargs.find_first_not_of(" \t\r\n", defaults.consumed) !=
+            std::string::npos)
+      throw std::invalid_argument("expected a JSON object");
+  } catch (const std::exception& e) {
+    DGPP_LOG_ERROR("--default-chat-template-kwargs: {}", e.what());
     return 2;
   }
   if (admission_window < 1) {
@@ -2038,6 +2075,7 @@ int main(int argc, char** argv) {
     knobs.http_port = port;
     knobs.http_bind = http_bind;
     knobs.http_max_body_bytes = http_max_body_bytes;
+    knobs.sse_ping_interval = sse_ping_interval;
     knobs.max_connections = max_connections;
     knobs.queue_limit = queue_limit;
     knobs.admission.mode = admission_mode == "grow"
@@ -2051,6 +2089,7 @@ int main(int argc, char** argv) {
     knobs.sampling_defaults = sampling_defaults;
     knobs.fixed_seed = fixed_seed;
     knobs.reasoning_in_content = reasoning_in_content;
+    knobs.default_chat_template_kwargs = default_chat_template_kwargs;
     knobs.mtp = mtp;
     knobs.stats_interval_s = stats_interval_s;
     knobs.position_ceiling = position_ceiling;

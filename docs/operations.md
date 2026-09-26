@@ -236,6 +236,37 @@ slot would reach about 534,000. Decode costs what the doubled per-rank weight re
 implies, near 1.75x the four-node pace; prefill costs about 1.45x
 (benchmarks.md §3 to §6).
 
+### Streaming keep-alives
+
+Streaming chat and text completions send the SSE comment `: keep-alive` followed
+by a blank line after 30 seconds without output. This covers the admission
+queue, prefill and pauses between output chunks. To change the interval, add
+this top-level section to the deployment JSON:
+
+```json
+{
+  "http": {
+    "sse_ping_interval": 15
+  }
+}
+```
+
+The value is an integer number of seconds in 1–2147483647; `-1` disables pings.
+Zero, fractional values, booleans and null are rejected. The binary flag
+`--sse-ping-interval 15` overrides JSON and is also accepted through the
+launcher's `--knobs`. Restart the server to change its default; the rank 0
+startup log reports the effective interval. A streaming request can override
+it with the top-level `sse_ping_interval` field, including `-1` to disable.
+Precedence is request, CLI, cluster JSON, then the 30-second default.
+
+Choose an interval shorter than the proxy or client's network idle timeout.
+Keep response buffering disabled along the path; the supplied nginx example
+uses `proxy_buffering off`. SSE parsers ignore comments, so they do not become
+content, usage or finish events. They can keep a transport read alive even
+when the application only receives parsed completion chunks, but do not reset
+an application's deadline waiting for such a chunk. Server engine and shutdown
+deadlines are unchanged. Non-streaming responses receive no pings.
+
 ### Large document and agent requests
 
 `http.max_body_bytes` caps each serialized HTTP request body. The default is

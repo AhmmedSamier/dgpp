@@ -6,6 +6,23 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **JSON Unicode and UTF-8 responses** (2026-09-26, issue #59): escaped
+  UTF-16 surrogate pairs now decode to the same UTF-8 as raw supplementary
+  characters; lone surrogates become U+FFFD and malformed hex escapes are
+  rejected. Streaming and complete responses replace overlong encodings,
+  encoded surrogates and out-of-range code points while preserving valid
+  characters split across tokens. Legacy completion logprob strings now
+  receive the same validation. Regression tests cover Unicode boundaries,
+  chunk partitions, escaped/raw requests, reasoning and both response modes.
+
+- **SSE keep-alive comments** (2026-09-26, issue #49): streaming chat and text
+  completions send comments after 30 seconds of silence while queued,
+  prefilling or between output chunks. Cluster `http.sse_ping_interval`,
+  `--sse-ping-interval` and request `sse_ping_interval` configure the interval;
+  `-1` disables it. Choices share one timer; comments do not change output,
+  usage, finish events or engine deadlines. See the
+  [validation record](benchmarks/results/2026-09-26-sse-keep-alive.md).
+
 - **Deployment templates: `engine.default_max_tokens` 256 → 32768**
   (2026-09-25): every template's answer budget for requests that omit
   `max_tokens` was 256 tokens, and reasoning tokens count against it. Agent

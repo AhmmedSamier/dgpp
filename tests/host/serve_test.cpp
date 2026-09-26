@@ -39,6 +39,7 @@
 #include "common/log.hpp"
 
 #include "common/test.hpp"
+#include "../common/utf8.hpp"
 #include "sched/scheduler.hpp"
 #include "serve/generation_service.hpp"
 #include "serve/image_inputs.hpp"
@@ -462,8 +463,15 @@ class FakeFrontend : public ModelFrontend {
   // fake, like GLM-5.3-Flash's template, does not.
   std::atomic<bool> reads_enable_thinking{false};
   std::atomic<bool> reads_reasoning_effort{true};
+  // Qwen3.8-Flash-Next's template reads preserve_thinking (it drops the
+  // history's reasoning blocks when false); other templates read their
+  // own native control names.
+  std::atomic<bool> reads_preserve_thinking{false};
+  std::atomic<bool> reads_clear_thinking{false};
   bool template_reads(std::string_view name) const override {
-    return (name == "reasoning_effort" && reads_reasoning_effort) || (name == "enable_thinking" && reads_enable_thinking);
+    return (name == "reasoning_effort" && reads_reasoning_effort) || (name == "enable_thinking" && reads_enable_thinking) ||
+           (name == "preserve_thinking" && reads_preserve_thinking) ||
+           (name == "clear_thinking" && reads_clear_thinking);
   }
 
   std::vector<int64_t> encode_text(std::string_view text) const override {
@@ -667,7 +675,9 @@ struct ServiceRig {
                       // rope ramp and its two bounds, advertised on /v1/models.
                       std::optional<dgpp::RopeScaling> rope_scaling = std::nullopt,
                       int64_t position_ceiling = 0, int64_t kv_pool_tokens = 0,
-                      bool resumable_prefill = false, bool with_dsml = false)
+                      bool resumable_prefill = false, bool with_dsml = false,
+                      std::string default_chat_template_kwargs = "{}",
+                      int sse_ping_interval = dgpp::serve::kDefaultSsePingInterval)
       : engine(kSlots, /*total_blocks=*/100, /*block_tokens=*/4, can_sample),
         frontend(with_markers, with_dsml),
         cfg([&] {
@@ -685,6 +695,8 @@ struct ServiceRig {
           c.position_ceiling = position_ceiling;
           c.kv_pool_tokens = kv_pool_tokens;
           c.file_inputs = std::move(file_inputs);
+          c.default_chat_template_kwargs = std::move(default_chat_template_kwargs);
+          c.sse_ping_interval = sse_ping_interval;
           return c;
         }()),
         service((engine.set_prefix_arena(prefix_slots, 4), cfg), &engine, &frontend, {kFakeEos}),
@@ -760,6 +772,138 @@ std::string fake_text(size_t prompt_len, int n) {
   for (int i = 0; i < n; ++i)
     out.push_back(static_cast<char>(fake_token(prompt_len, i)));
   return out;
+}
+
+void post_completion(Client& client, bool chat, const std::string& extra, int tokens = 3) {
+  const std::string body =
+      chat ? chat_body("abcde", tokens, extra)
+           : "{\"model\":\"" + kModel +
+                 "\",\"prompt\":\"abcde\",\"max_tokens\":" + std::to_string(tokens) + extra + "}";
+  client.send_all(std::string("POST /v1/") + (chat ? "chat/completions" : "completions") +
+                  " HTTP/1.1\r\nHost: t\r\nContent-Length: " + std::to_string(body.size()) +
+                  "\r\n\r\n" + body);
+}
+
+constexpr std::string_view kPingFrame = "e\r\n: keep-alive\n\n\r\n";
+
+DGPP_TEST(serve_ssePing_queuedChoicesAndLegacyCompleteNormally) {
+  for (bool chat : {true, false}) {
+    ServiceRig rig;
+    rig.gate = true;
+    Client client(rig.port());
+    post_completion(
+        client, chat,
+        ",\"stream\":true,\"sse_ping_interval\":1,\"stream_options\":{\"include_usage\":true}" +
+            std::string(chat ? ",\"n\":3" : ""));
+    const auto response = client.read_until(std::string(kPingFrame), 2500);
+    const auto ping = response.find(kPingFrame);
+    require(ping != std::string::npos, "queued request receives a chunked SSE comment");
+    require(response.find(kPingFrame, ping + kPingFrame.size()) == std::string::npos,
+            "choices share one ping per interval");
+    require(client.read_until(std::string(kPingFrame), 250).empty(), "no duplicate choice ping");
+    require(rig.service.stats().tokens_out == 0, "ping does not count as generated tokens");
+    rig.gate = false;
+    const auto completed = client.read_until("0\r\n\r\n", 3000);
+    require(completed.find("data: [DONE]") != std::string::npos, "stream finishes normally");
+    require(completed.find("\"finish_reason\":\"length\"") != std::string::npos,
+            "finish reason unchanged");
+    require(completed.find(chat ? "\"completion_tokens\":9" : "\"completion_tokens\":3") !=
+                std::string::npos,
+            "pings do not enter usage");
+    require(completed.find(kPingFrame) == std::string::npos, "active output suppresses pings");
+    require(client.read_until(std::string(kPingFrame), 1200).empty(), "no ping after DONE");
+    // Reusing the same connection must not inherit the previous ping policy.
+    post_completion(client, chat, "");
+    const auto one_shot = client.read_until("\"usage\"", 2000);
+    require(one_shot.find("200 OK") != std::string::npos &&
+                one_shot.find(kPingFrame) == std::string::npos,
+            "the next non-stream response stays JSON");
+  }
+}
+
+DGPP_TEST(serve_ssePing_blockedPrefillDoesNotCountAsEngineProgress) {
+  ServiceRig rig;
+  rig.engine.hold_prefill = true;
+  struct Release {
+    FakeEngine& engine;
+    ~Release() { engine.hold_prefill = false; }
+  } release{rig.engine};
+  Client client(rig.port());
+  post_completion(client, true, ",\"stream\":true,\"sse_ping_interval\":1");
+  for (int i = 0; i < 500 && !rig.engine.prefill_entered; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  require(rig.engine.prefill_entered, "prefill is blocked");
+  const auto epoch = rig.engine.prefill_monitor()->progress_epoch();
+  require(client.read_until(std::string(kPingFrame), 2500).find(kPingFrame) != std::string::npos,
+          "ping arrives before synchronous prefill returns");
+  require(rig.engine.prefill_monitor()->progress_epoch() == epoch &&
+              rig.service.stats().tokens_out == 0,
+          "transport activity does not advance the engine or token counters");
+  client.hard_close();
+  for (int i = 0; i < 500 && rig.service.stats().requests_cancelled == 0; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  require(rig.service.stats().requests_cancelled == 1,
+          "pinging request can disconnect during prefill");
+}
+
+DGPP_TEST(serve_ssePing_betweenTokensAndDuringActiveOutput) {
+  for (const int delay_ms : {1400, 250}) {
+    ServiceRig rig;
+    rig.pass_delay_ms = delay_ms;
+    Client client(rig.port());
+    post_completion(client, true, ",\"stream\":true,\"sse_ping_interval\":1", 8);
+    const auto response = client.read_until("data: [DONE]", 15000);
+    require(response.find("data: [DONE]") != std::string::npos, "decode finishes");
+    require((response.find(kPingFrame) != std::string::npos) == (delay_ms > 1000),
+            "only gaps in emitted output cause pings");
+    if (delay_ms > 1000)
+      require(response.find("\"content\":\"" + fake_text(5, 1)) < response.find(kPingFrame),
+              "content arrives before the decode-gap ping");
+  }
+}
+
+DGPP_TEST(serve_ssePing_serverDefaultAndRequestOverride) {
+  for (const int server_interval : {1, -1}) {
+    ServiceRig rig(8, dgpp::sample::greedy_params(), false, std::nullopt, false, false, {}, 0, {},
+                   std::nullopt, 0, 0, false, false, "{}", server_interval);
+    rig.gate = true;
+    Client inherited(rig.port()), overridden(rig.port()), one_shot(rig.port());
+    post_completion(inherited, true, ",\"stream\":true");
+    post_completion(
+        overridden, false,
+        ",\"stream\":true,\"sse_ping_interval\":" + std::to_string(server_interval == 1 ? -1 : 1));
+    post_completion(one_shot, true, "");
+    const auto base = inherited.read_until(std::string(kPingFrame), 1300);
+    const auto custom =
+        overridden.read_until(std::string(kPingFrame), server_interval == 1 ? 300 : 1300);
+    require((base.find(kPingFrame) != std::string::npos) == (server_interval == 1),
+            "server default honored");
+    require((custom.find(kPingFrame) != std::string::npos) == (server_interval == -1),
+            "request overrides default");
+    require(one_shot.read_until(std::string(kPingFrame), 100).empty(),
+            "non-stream requests never ping");
+  }
+}
+
+DGPP_TEST(serve_ssePing_rejectsInvalidRequestIntervals) {
+  ServiceRig rig;
+  for (bool chat : {true, false}) {
+    for (const char* value :
+         {"0", "-2", "true", "null", "\"1\"", "1.5", "1.0", "2147483648", "1e100"}) {
+      Client client(rig.port());
+      post_completion(client, chat, std::string(",\"stream\":true,\"sse_ping_interval\":") + value);
+      const auto response = client.read_until("\"param\":\"sse_ping_interval\"", 1000);
+      require(response.find("400 Bad Request") != std::string::npos &&
+                  response.find("\"param\":\"sse_ping_interval\"") != std::string::npos,
+              "invalid interval rejected by name before admission");
+    }
+    Client client(rig.port());
+    post_completion(client, chat, ",\"sse_ping_interval\":1");
+    require(client.read_until("requires stream: true", 1000).find("400 Bad Request") !=
+                std::string::npos,
+            "explicit interval requires streaming");
+  }
+  require(rig.service.stats().requests_total == 0, "invalid requests never reach admission");
 }
 
 DGPP_TEST(serve_chatNonStream_exactCompletionShape) {
@@ -1295,6 +1439,8 @@ DGPP_TEST(serve_api_integerBoundsAndUnsupportedParameters) {
 
 DGPP_TEST(serve_api_opencodeProviderExtensionsRemainCompatible) {
   ServiceRig rig(8, model_defaults(), true);
+  // The request carries the GLM template's native history control.
+  rig.frontend.reads_clear_thinking = true;
   const std::string settings = R"(,"seed":42,"temperature":0.7,"top_p":0.95,"min_p":0.05,"presence_penalty":0.2,"repetition_penalty":1.1,"chat_template_kwargs":{"clear_thinking":false})";
   require(post_chat(rig, chat_body("abcd", 2, settings), "usage").find("200 OK") != std::string::npos,
           "baseline request accepted");
@@ -1918,10 +2064,16 @@ DGPP_TEST(serve_tools_requestSideRendersThroughTheTemplateAndRefusesByName) {
   require(g.find("\"tools\"") == std::string::npos,
           "tool_choice none omits the tools from the render: " + g);
 
+  // The history-thinking knob reaches a template that reads it, verbatim in
+  // this spelling (the GLM/DeepSeek one). It goes back
+  // off below because the refusals at the end of this test need a template
+  // with no such knob.
+  rig.frontend.reads_clear_thinking = true;
   (void)post_until_usage(
       rig, chat_body("abcd", 2,
                      ",\"reasoning_effort\":\"low\",\"chat_template_kwargs\":"
                      "{\"clear_thinking\":false}"));
+  rig.frontend.reads_clear_thinking = false;
   g = rig.frontend.last_globals();
   require(g.find("\"reasoning_effort\":\"low\"") != std::string::npos &&
               g.find("\"clear_thinking\":false") != std::string::npos,
@@ -2038,6 +2190,209 @@ DGPP_TEST(serve_enableThinkingIsAcceptedOnlyWhenTheTemplateReadsIt) {
           "enable_thinking reaches the render globals: " + g);
   const std::string bad = post_chat(rig, chat_body("abcd", 2, ",\"chat_template_kwargs\":{\"enable_thinking\":\"no\"}"));
   require(bad.find("must be a boolean") != std::string::npos, "a non-boolean enable_thinking is refused: " + bad);
+}
+
+DGPP_TEST(serve_preserveThinkingIsPassedToTheTemplatesThatReadIt) {
+  // Qwen3.8-Flash-Next's template reads preserve_thinking (false keeps the
+  // reasoning blocks of the assistant turns after the last user query only):
+  // the service passes it through as a boolean global and otherwise renders
+  // the request unchanged. A non-boolean is a type error rather than a
+  // silent truthiness read.
+  ServiceRig rig;
+  rig.frontend.reads_preserve_thinking = true;
+  const std::string ok = post_until_usage(
+      rig, chat_body("abcd", 2,
+                     ",\"chat_template_kwargs\":{\"preserve_thinking\":false}"));
+  require(ok.find("\"object\":\"chat.completion\"") != std::string::npos,
+          "preserve_thinking accepted by a template that reads it: " + ok.substr(0, 300));
+  require(rig.frontend.last_globals().find("\"preserve_thinking\":false") != std::string::npos,
+          "preserve_thinking reaches the render globals: " + rig.frontend.last_globals());
+  const std::string bad = post_chat(
+      rig, chat_body("abcd", 2, ",\"chat_template_kwargs\":{\"preserve_thinking\":\"no\"}"));
+  require(bad.find("must be a boolean") != std::string::npos,
+          "a non-boolean preserve_thinking is refused: " + bad);
+}
+
+DGPP_TEST(serve_historyThinkingKwargsKeepTheirNativeNames) {
+  ServiceRig rig;
+  for (bool supported : {false, true}) {
+    rig.frontend.reads_preserve_thinking = supported;
+    for (const char* name : {"preserve_thinking", "preserve_reasoning", "clear_thinking",
+                             "drop_thinking", "truncate_history_thinking"}) {
+      for (bool keep : {false, true}) {
+        const auto ok = post_until_usage(
+            rig, chat_body("abcd", 2, std::string(",\"chat_template_kwargs\":{\"") + name +
+                                         "\":" + (keep ? "true}" : "false}")));
+        require(ok.find("200 OK") != std::string::npos, "native kwarg is served: " + ok);
+        const auto globals = dgpp::minijson::parse(rig.frontend.last_globals());
+        require(globals.root.at(name).as_bool() == keep, "native kwarg retains its value");
+        for (const char* other : {"preserve_thinking", "preserve_reasoning", "clear_thinking",
+                                  "drop_thinking", "truncate_history_thinking"})
+          if (std::string_view(name) != other)
+            require(globals.root.find(other) == nullptr,
+                    "a history kwarg never sets a differently named template global");
+      }
+    }
+  }
+}
+
+DGPP_TEST(serve_historyThinkingKwargsRemainIndependent) {
+  ServiceRig rig;
+  rig.frontend.reads_preserve_thinking = true;
+  rig.frontend.reads_clear_thinking = true;
+  for (const char* kwargs : {
+           R"({"preserve_reasoning":false,"preserve_thinking":true,"clear_thinking":true})",
+           R"({"clear_thinking":true,"preserve_thinking":true,"preserve_reasoning":false})"}) {
+    const auto ok = post_until_usage(
+        rig, chat_body("abcd", 2, ",\"chat_template_kwargs\":" + std::string(kwargs)));
+    require(ok.find("200 OK") != std::string::npos, "independent kwargs are served: " + ok);
+    const auto globals = dgpp::minijson::parse(rig.frontend.last_globals());
+    require(globals.root.at("preserve_thinking").as_bool() &&
+                globals.root.at("clear_thinking").as_bool() &&
+                !globals.root.at("preserve_reasoning").as_bool(),
+            "different native keys retain their values regardless of JSON order");
+  }
+}
+
+DGPP_TEST(serve_historyThinkingValidationNamesTheField) {
+  ServiceRig rig;
+  for (const char* name : {"preserve_thinking", "preserve_reasoning", "clear_thinking",
+                           "drop_thinking", "truncate_history_thinking"}) {
+    const std::string key = std::string("\"") + name + "\":";
+    const auto post_kw = [&](const std::string& kwargs) {
+      return post_chat(rig, chat_body("abcd", 2, ",\"chat_template_kwargs\":{" + kwargs + "}"));
+    };
+    for (const char* value : {"null", "\"false\"", "0"})
+      expect_invalid_request(post_kw(key + value), "chat_template_kwargs." + std::string(name));
+    expect_invalid_request(post_kw(key + "true," + key + "false"),
+                           "chat_template_kwargs." + std::string(name));
+  }
+}
+
+DGPP_TEST(serve_historyThinkingTopLevelFieldsAreIgnored) {
+  ServiceRig rig;
+  for (bool supported : {false, true}) {
+    rig.frontend.reads_preserve_thinking = supported;
+    (void)post_until_usage(rig, chat_body("abcd", 2));
+    const auto baseline = rig.frontend.last_globals();
+    for (const char* name : {"preserve_thinking", "preserve_reasoning", "preserveThinking"}) {
+      for (const char* value : {"true", "false", "null", "\"no\""}) {
+        const std::string top = std::string(",\"") + name + "\":" + value;
+        const auto ok = post_until_usage(rig, chat_body("abcd", 2, top));
+        require(ok.find("200 OK") != std::string::npos, "top-level extension is served: " + ok);
+        require(rig.frontend.last_globals() == baseline,
+                "top-level history field is ignored even without template kwargs");
+        if (supported) {
+          const auto nested = post_until_usage(
+              rig, chat_body("abcd", 2, top +
+                             R"(,"chat_template_kwargs":{"preserve_reasoning":false,"preserve_thinking":true})"));
+          require(nested.find("200 OK") != std::string::npos, "nested controls are served: " + nested);
+          const auto globals = dgpp::minijson::parse(rig.frontend.last_globals());
+          require(globals.root.at("preserve_thinking").as_bool(),
+                  "top-level history field does not interfere with template kwargs");
+        }
+      }
+    }
+  }
+}
+
+DGPP_TEST(serve_historyThinkingRequestOverridesOnlyTheSameDefaultKey) {
+  ServiceRig rig(8, model_defaults(), true, std::nullopt, false, false, {}, 0, {},
+                 {}, 0, 0, false, false,
+                 R"({"preserve_thinking":true,"clear_thinking":true,"preserve_reasoning":false})");
+  const auto globals_after = [&](const std::string& suffix) {
+    const auto response = post_until_usage(rig, chat_body("abcd", 2, suffix));
+    require(response.find("200 OK") != std::string::npos, "request served: " + response);
+    return dgpp::minijson::parse(rig.frontend.last_globals()).root;
+  };
+  for (const char* suffix : {"", R"(,"chat_template_kwargs":{})",
+                             R"(,"preserve_thinking":false,"preserveThinking":false)"}) {
+    const auto globals = globals_after(suffix);
+    require(globals.at("preserve_thinking").as_bool() && globals.at("clear_thinking").as_bool(),
+            "omitted kwargs inherit the server's native defaults; top-level extensions are ignored");
+  }
+  for (const char* suffix : {
+           R"(,"chat_template_kwargs":{"preserve_thinking":false,"preserve_reasoning":true})",
+           R"(,"chat_template_kwargs":{"preserve_reasoning":true,"preserve_thinking":false})"}) {
+    const auto globals = globals_after(suffix);
+    require(!globals.at("preserve_thinking").as_bool() && globals.at("preserve_reasoning").as_bool(),
+            "explicit false and true each override their matching default key");
+    require(globals.at("clear_thinking").as_bool(), "other native defaults remain unchanged");
+    size_t occurrences = 0;
+    for (const auto& member : globals.members())
+      if (member.key == "preserve_thinking") ++occurrences;
+    require(occurrences == 1, "overridden key occurs exactly once in the render globals");
+  }
+  const auto inherited = globals_after("");
+  require(inherited.at("preserve_thinking").as_bool() && !inherited.at("preserve_reasoning").as_bool(),
+          "a request never mutates the server defaults for subsequent requests");
+  Client c(rig.port());
+  c.send_all("GET /v1/models HTTP/1.1\r\nHost: t\r\n\r\n");
+  const auto models = c.read_available(800);
+  require(models.find(R"("default_chat_template_kwargs":{"preserve_thinking":true,"clear_thinking":true,"preserve_reasoning":false})") != std::string::npos,
+          "model metadata reports the exact configured defaults: " + models);
+}
+
+DGPP_TEST(serve_templateKwargDefaultsRespectRequestReasoningEffort) {
+  ServiceRig rig(8, model_defaults(), true, std::nullopt, false, false, {}, 0, {},
+                 {}, 0, 0, false, false, R"({"reasoning_effort":"high"})");
+  for (const char* suffix : {"", R"(,"reasoning_effort":"low")",
+                             R"(,"chat_template_kwargs":{"reasoning_effort":"low"})"}) {
+    const auto response = post_until_usage(rig, chat_body("abcd", 2, suffix));
+    require(response.find("200 OK") != std::string::npos, "effort default/override is served: " + response);
+    const auto raw = rig.frontend.last_globals();
+    const auto globals = dgpp::minijson::parse(raw);
+    require(globals.root.at("reasoning_effort").as_string() == (std::string_view(suffix).empty() ? "high" : "low"),
+            "either request spelling overrides the server's effort default");
+  }
+}
+
+DGPP_TEST(serve_templateKwargDefaultsAreValidatedAtStartup) {
+  for (const char* defaults : {"null", "[]", "{", "{} garbage",
+                               R"({"preserve_thinking":"false"})",
+                               R"({"preserve_thinking":true,"preserve_thinking":false})",
+                               R"({"reasoning_effort":"extreme"})", R"({"unknown":true})"}) {
+    bool refused = false;
+    try {
+      ServiceRig rig(8, model_defaults(), true, std::nullopt, false, false, {}, 0, {},
+                     {}, 0, 0, false, false, defaults);
+    } catch (const std::exception&) {
+      refused = true;
+    }
+    require(refused, std::string("invalid template defaults fail at startup: ") + defaults);
+  }
+}
+
+DGPP_TEST(serve_templateReadsMeansTheRenderCanSeeTheGlobal) {
+  // The gate above is ChatTemplate::reads, which must answer "can this
+  // render depend on the global" — not "does this word appear in the file".
+  // A source-text search calls all five of these a knob of the template.
+  const auto reads = [](const std::string& src, std::string_view name) {
+    return dgpp::text::ChatTemplate::compile(src).reads(name);
+  };
+  require(!reads("{# preserve_thinking is not a knob here #}hi", "preserve_thinking"),
+          "a comment is not a read");
+  require(!reads(R"({{ "preserve_thinking" }})", "preserve_thinking"),
+          "a printed word is not a read");
+  require(!reads("{% if m.preserve_thinking %}a{% endif %}", "preserve_thinking"),
+          "an attribute of another object is not a read of the global");
+  require(!reads("{% set preserve_thinking = true %}{{ preserve_thinking }}",
+                 "preserve_thinking"),
+          "a name the template sets for itself is not the client's knob");
+  require(!reads("{% for preserve_thinking in items %}{{ preserve_thinking }}{% endfor %}",
+                 "preserve_thinking"),
+          "a loop variable is not a read of the global");
+  require(reads("{% for preserve_thinking in items %}{{ preserve_thinking }}{% endfor %}",
+                "items"),
+          "the iterable still is");
+  require(!reads("{% macro f(preserve_thinking) %}{{ preserve_thinking }}{% endmacro %}{{ f(1) }}",
+                 "preserve_thinking"),
+          "a macro parameter is not a read of the global");
+  require(reads("{% if preserve_thinking is defined and preserve_thinking %}a{% else %}b{% endif %}",
+                "preserve_thinking"),
+          "the real thing: an is-defined test on the global");
+  require(reads("{% for m in messages %}{{ preserve_thinking }}{% endfor %}", "preserve_thinking"),
+          "a read inside a loop counts");
 }
 
 DGPP_TEST(serve_toolCalls_oneShotMessageShapeAndFinishReason) {
@@ -2980,6 +3335,111 @@ DGPP_TEST(serve_pipelinedRequests_areAnsweredOneAtATimeInOrder) {
   require(rig.service.drained(), "nothing owed");
 }
 
+std::pair<std::string, std::string> utf8_completion_text(
+    const std::string& response, bool chat, bool stream) {
+  require(response.find("200 OK") != std::string::npos, "UTF-8 request succeeds");
+  // Check the entire wire response, including logprob strings and each SSE
+  // payload, with scalar-value validation independent of the serving helper.
+  dgpp::test::require_utf8(response);
+  std::string content, reasoning;
+  const auto inspect = [&](const dgpp::minijson::Value& root) {
+    for (const auto& choice : root.at("choices").items()) {
+      const auto& message = chat ? choice.at(stream ? "delta" : "message") : choice;
+      if (const auto* field = message.find(chat ? "content" : "text"); field && field->is_string())
+        content += field->as_string();
+      if (const auto* field = message.find("reasoning_content"); field && field->is_string())
+        reasoning += field->as_string();
+    }
+  };
+  if (stream) {
+    require(response.find("data: [DONE]") != std::string::npos, "UTF-8 stream finishes");
+    for (size_t at = 0; (at = response.find("data: ", at)) != std::string::npos;) {
+      at += 6;
+      const auto end = response.find("\n\n", at);
+      require(end != std::string::npos, "complete SSE payload");
+      const auto payload = response.substr(at, end - at);
+      if (payload == "[DONE]") break;
+      dgpp::test::require_utf8(payload);
+      inspect(dgpp::minijson::parse(payload).root);
+      at = end + 2;
+    }
+  } else {
+    const auto start = response.find("\r\n\r\n");
+    require(start != std::string::npos, "complete response headers");
+    inspect(dgpp::minijson::parse(std::string_view(response).substr(start + 4)).root);
+  }
+  return {content, reasoning};
+}
+
+std::string post_utf8_completion(ServiceRig& rig, bool chat, bool stream,
+                                 const std::string& quoted_prompt,
+                                 const std::string& extra = "",
+                                 const std::string& until = "") {
+  const std::string input = chat ? "\"messages\":[{\"role\":\"user\",\"content\":" + quoted_prompt + "}]"
+                                 : "\"prompt\":" + quoted_prompt;
+  const std::string body = "{\"model\":\"" + kModel + "\"," + input +
+      ",\"max_tokens\":256" + (stream ? ",\"stream\":true" : "") + extra + "}";
+  Client client(rig.port());
+  client.send_all(std::string("POST /v1/") + (chat ? "chat/completions" : "completions") +
+      " HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: " +
+      std::to_string(body.size()) + "\r\n\r\n" + body);
+  return client.read_until(until.empty() ? (stream ? "\r\n0\r\n\r\n" : "usage") : until, 5000);
+}
+
+DGPP_TEST(serve_utf8_escapedAndRawPromptsReachFrontendIdentically) {
+  const std::string text = "📭🏢𠀀";
+  for (const bool chat : {false, true}) {
+    ServiceRig rig(8, model_defaults(), false, std::nullopt, chat);
+    rig.pass_delay_ms = 2;
+    rig.engine.script(text.size() + (chat ? 1 : 0),
+                      script_of(rig, chat ? text + "</think>" + text : text));
+    for (const bool stream : {false, true}) {
+      for (const std::string& prompt : {"\"" + text + "\"",
+                                      std::string(R"("\ud83d\udced\ud83c\udfe2\ud840\udc00")")}) {
+        const auto response = post_utf8_completion(rig, chat, stream, prompt);
+        const auto [content, reasoning] = utf8_completion_text(response, chat, stream);
+        require(content == text && reasoning == (chat ? text : ""),
+                "escaped and raw supplementary characters survive both response modes");
+        if (chat) {
+          const auto globals = rig.frontend.last_globals();
+          require(dgpp::minijson::parse(globals).root.at("messages").items().front().at("content").as_string() == text,
+                  "the frontend receives correct UTF-8 from escaped input");
+        }
+      }
+    }
+  }
+}
+
+DGPP_TEST(serve_utf8_invalidOutputIsReplacedInContentReasoningAndLogprobs) {
+  const std::string bytes = "\xED\xA0\xBD|\xED\xB3\xAD|\xC0\x80|\xE0\x80\x80|"
+                            "\xF0\x80\x80\x80|\xF4\x90\x80\x80|\xF5\x80\x80\x80|"
+                            "\xE2\x82" "A|📭\xE2\x82";
+  const std::string expected = "���|���|��|���|����|����|����|�A|📭�";
+  for (const bool chat : {false, true}) {
+    ServiceRig rig(8, model_defaults(), true, std::nullopt, chat);
+    rig.pass_delay_ms = 2;
+    rig.engine.script(chat ? 5 : 4, script_of(rig, chat ? bytes + "</think>" + bytes : bytes));
+    for (const bool stream : {false, true}) {
+      const auto response = post_utf8_completion(rig, chat, stream, "\"abcd\"",
+          chat ? ",\"logprobs\":true,\"top_logprobs\":2" : ",\"logprobs\":2");
+      const auto [content, reasoning] = utf8_completion_text(response, chat, stream);
+      require(content == expected && reasoning == (chat ? expected : ""),
+              "invalid UTF-8 is replaced without losing following valid characters");
+    }
+  }
+}
+
+DGPP_TEST(serve_utf8_malformedHexEscapesAreBadRequests) {
+  ServiceRig rig;
+  for (const bool chat : {false, true}) {
+    for (const char* prompt : {R"("\u12xz")", R"("\ud83d\udcez")", R"("\ud83d\u123")"}) {
+      const auto response = post_utf8_completion(rig, chat, false, prompt, "", "\"error\"");
+      require(response.find("400 Bad Request") != std::string::npos,
+              "malformed hex is rejected before generation");
+    }
+  }
+}
+
 DGPP_TEST(serve_utf8_aCharacterSplitAcrossTokensIsHeldUntilComplete) {
   // The soak's find: a byte-level BPE token can end inside a
   // multi-byte character, and the delta carried its bytes as they came —
@@ -3016,15 +3476,7 @@ DGPP_TEST(serve_utf8_aCharacterSplitAcrossTokensIsHeldUntilComplete) {
       at += 11;
       const size_t end = raw.find('"', at);
       const std::string piece = raw.substr(at, end - at);
-      // A strict check: every byte >= 0x80 sits inside a complete sequence.
-      for (size_t i = 0; i < piece.size();) {
-        const unsigned char b = static_cast<unsigned char>(piece[i]);
-        const size_t len = b < 0x80 ? 1 : (b & 0xE0) == 0xC0 ? 2 : (b & 0xF0) == 0xE0 ? 3 : (b & 0xF8) == 0xF0 ? 4 : 0;
-        require(len > 0 && i + len <= piece.size(), "a delta that is not UTF-8: " + piece);
-        for (size_t k = 1; k < len; ++k)
-          require((static_cast<unsigned char>(piece[i + k]) & 0xC0) == 0x80, "a delta that is not UTF-8: " + piece);
-        i += len;
-      }
+      dgpp::test::require_utf8(piece);
       at = end;
     }
   }

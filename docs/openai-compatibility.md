@@ -43,6 +43,28 @@ values return HTTP 400 naming `ignore_eos`. When `true`, sampled EOS tokens
 still count toward usage but do not end generation. The token limit, stop
 strings, cancellation and resource limits still apply.
 
+## Streaming keep-alives (DGPP extension)
+
+Both `POST /v1/chat/completions` and `POST /v1/completions` send SSE comments
+while an accepted stream waits in the queue, prefills or pauses between output
+chunks. The comment payload is `: keep-alive\n\n`, carried in the normal
+chunked HTTP response. Comments never enter the completion content, token
+usage, finish reason or `[DONE]` sequence. Multiple chat choices share one
+keep-alive timer, and all comments stop when the stream ends or disconnects.
+
+The server default is 30 seconds of silence. `http.sse_ping_interval` in the
+cluster JSON changes it; `--sse-ping-interval` overrides JSON. A request with
+`"stream": true` may set top-level `"sse_ping_interval": 15` to override either,
+or `-1` to disable pings. Values must be integers in 1–2147483647 or `-1`;
+invalid values, including explicit null, and use without `stream: true`
+return HTTP 400 naming `sse_ping_interval` before admission.
+
+SSE parsers ignore comment lines. Network read timeouts can be kept alive by
+the bytes even if the parser hides them; an application timeout waiting for a
+completion chunk still needs its own policy. Pings do not extend server
+engine or shutdown deadlines. Optional `return_progress` / `prompt_progress`
+events are not implemented by this extension.
+
 ## File inputs
 
 User messages accept `{ "type": "file", "file": { "filename": "report.pdf",
@@ -173,8 +195,34 @@ prefixes through a trie and are checked against the exhaustive mask oracle.
 
 Unknown top-level client/provider extensions are accepted and ignored, as in
 earlier DGPP versions. This includes `preserveThinking`, which OpenCode can
-forward from its model options. It does not control DGPP's prompt rendering;
-use `chat_template_kwargs.clear_thinking` for the existing template control.
+forward from its model options, and top-level `preserve_thinking` and
+`preserve_reasoning`. They do not control prompt rendering, even when
+`chat_template_kwargs` is absent.
+
+History controls in `chat_template_kwargs` follow vLLM's native-key model:
+`preserve_thinking`, `clear_thinking`, `drop_thinking`,
+`truncate_history_thinking`, and `preserve_reasoning` pass through under their
+original names. The checkpoint's template determines their meaning. DGPP does
+not translate names, invert values, or reject different keys as contradictory.
+In particular, `preserve_reasoning` is not a generic alias. A key the template
+does not read has no effect. For Qwen3.8-Flash-Next, use
+`{"chat_template_kwargs":{"preserve_thinking":false}}` to drop earlier history
+reasoning according to its template's policy.
+
+`--default-chat-template-kwargs JSON` sets defaults for the supported template
+kwargs. Request kwargs override matching keys; omitted keys retain server
+defaults, and keys absent from both use the checkpoint's behavior. For example,
+server defaults `{"preserve_thinking":true,"clear_thinking":true}` plus request
+kwargs `{"preserve_thinking":false}` render with `preserve_thinking=false` and
+`clear_thinking=true`, independently of field order. `/v1/models` reports the
+configured `default_chat_template_kwargs` object. Invalid defaults fail at
+startup. Top-level request `reasoning_effort` also overrides its server default.
+
+DGPP retains validation for its supported kwargs: history controls must be
+booleans, duplicate keys are rejected, and conflicting explicit request
+`reasoning_effort` / thinking controls still return errors. This change adopts
+vLLM's history-key and server-default precedence, not its entire validation
+surface; `null` and `"auto"` are not boolean history overrides.
 Recognized request fields remain validated, and known unsupported API features
 still return explicit errors. Unknown fields inside `chat_template_kwargs`
 remain errors because that object explicitly requests prompt changes.
