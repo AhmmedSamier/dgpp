@@ -17,6 +17,7 @@
 
 #include "common/log.hpp"
 #include "serve/json_out.hpp"
+#include "serve/utf8.hpp"
 
 namespace dgpp::serve {
 
@@ -2841,10 +2842,6 @@ void append_bytes_array(std::string* out, const std::string& s) {
 
 }  // namespace
 
-namespace {
-void sanitize_utf8(std::string* text);  // the delta streams' UTF-8 discipline, below
-}  // namespace
-
 std::string GenerationService::logprobs_content(const StreamRecord& r,
                                                 size_t from, size_t to,
                                                 bool unreported_only) const {
@@ -2919,12 +2916,16 @@ std::string GenerationService::legacy_logprobs(const StreamRecord& r, size_t fro
       offsets.push_back(',');
     }
     first = false;
-    append_json_string(&tokens, tok);
+    std::string shown = tok;
+    sanitize_utf8(&shown);
+    append_json_string(&tokens, shown);
     append_json_float(&lps, r.lps[i].logprob);
     tops.push_back('{');
     for (size_t j = 0; j < r.lps[i].top_logprobs.size(); ++j) {
       if (j) tops.push_back(',');
-      append_json_string(&tops, frontend_->decode_ids({r.lps[i].top_logprobs[j].first}));
+      shown = frontend_->decode_ids({r.lps[i].top_logprobs[j].first});
+      sanitize_utf8(&shown);
+      append_json_string(&tops, shown);
       tops.push_back(':');
       append_json_float(&tops, r.lps[i].top_logprobs[j].second);
     }
@@ -3048,77 +3049,6 @@ void GenerationService::write_stream_event(StreamRecord& r, std::string event, b
   }
   r.writer->write_event(event);
 }
-
-// ---------------------------------------------------------------------------
-// UTF-8 discipline for the delta streams (the soak's find, 2026-09-05): a
-// token's decoded bytes can end inside a multi-byte character, and a JSON
-// text that is not UTF-8 breaks a strict client (Python's json.loads on
-// the payload bytes raised, and the soak's chat workers died on the first
-// accented name). carry_utf8 prepends the field's held bytes, holds back an
-// incomplete trailing sequence for the next delta, and replaces invalid
-// bytes with U+FFFD; finish_utf8 renders what is still held at the end.
-// ---------------------------------------------------------------------------
-namespace {
-
-size_t utf8_sequence_length(unsigned char b) {
-  if (b < 0x80) return 1;
-  if ((b & 0xE0) == 0xC0) return 2;
-  if ((b & 0xF0) == 0xE0) return 3;
-  if ((b & 0xF8) == 0xF0) return 4;
-  return 0;  // a stray continuation or an invalid lead byte
-}
-
-constexpr const char* kReplacement = "\xEF\xBF\xBD";  // U+FFFD
-
-void carry_utf8(std::string* text, std::string* carry) {
-  if (!carry->empty()) {
-    text->insert(0, *carry);
-    carry->clear();
-  }
-  std::string out;
-  out.reserve(text->size());
-  const size_t n = text->size();
-  size_t i = 0;
-  while (i < n) {
-    const unsigned char b = static_cast<unsigned char>((*text)[i]);
-    const size_t len = utf8_sequence_length(b);
-    if (len == 0) {
-      out.append(kReplacement);
-      ++i;
-      continue;
-    }
-    bool continuation_ok = true;
-    const size_t have = std::min(len, n - i);
-    for (size_t k = 1; k < have; ++k)
-      if ((static_cast<unsigned char>((*text)[i + k]) & 0xC0) != 0x80) continuation_ok = false;
-    if (!continuation_ok) {
-      out.append(kReplacement);
-      ++i;
-      continue;
-    }
-    if (have < len) {  // incomplete at the end: the next delta completes it
-      carry->assign(*text, i, n - i);
-      break;
-    }
-    out.append(*text, i, len);
-    i += len;
-  }
-  text->swap(out);
-}
-
-std::string finish_utf8(std::string* carry) {
-  if (carry->empty()) return {};
-  carry->clear();
-  return kReplacement;  // an incomplete character at the very end
-}
-
-void sanitize_utf8(std::string* text) {
-  std::string carry;
-  carry_utf8(text, &carry);
-  text->append(finish_utf8(&carry));
-}
-
-}  // namespace
 
 void GenerationService::flush_chat_stream(StreamRecord& r) {
   // Take the unflushed events (and, when a chunk will carry them, the

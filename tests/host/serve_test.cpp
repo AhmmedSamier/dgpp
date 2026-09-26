@@ -39,6 +39,7 @@
 #include "common/log.hpp"
 
 #include "common/test.hpp"
+#include "../common/utf8.hpp"
 #include "sched/scheduler.hpp"
 #include "serve/generation_service.hpp"
 #include "serve/image_inputs.hpp"
@@ -3334,6 +3335,111 @@ DGPP_TEST(serve_pipelinedRequests_areAnsweredOneAtATimeInOrder) {
   require(rig.service.drained(), "nothing owed");
 }
 
+std::pair<std::string, std::string> utf8_completion_text(
+    const std::string& response, bool chat, bool stream) {
+  require(response.find("200 OK") != std::string::npos, "UTF-8 request succeeds");
+  // Check the entire wire response, including logprob strings and each SSE
+  // payload, with scalar-value validation independent of the serving helper.
+  dgpp::test::require_utf8(response);
+  std::string content, reasoning;
+  const auto inspect = [&](const dgpp::minijson::Value& root) {
+    for (const auto& choice : root.at("choices").items()) {
+      const auto& message = chat ? choice.at(stream ? "delta" : "message") : choice;
+      if (const auto* field = message.find(chat ? "content" : "text"); field && field->is_string())
+        content += field->as_string();
+      if (const auto* field = message.find("reasoning_content"); field && field->is_string())
+        reasoning += field->as_string();
+    }
+  };
+  if (stream) {
+    require(response.find("data: [DONE]") != std::string::npos, "UTF-8 stream finishes");
+    for (size_t at = 0; (at = response.find("data: ", at)) != std::string::npos;) {
+      at += 6;
+      const auto end = response.find("\n\n", at);
+      require(end != std::string::npos, "complete SSE payload");
+      const auto payload = response.substr(at, end - at);
+      if (payload == "[DONE]") break;
+      dgpp::test::require_utf8(payload);
+      inspect(dgpp::minijson::parse(payload).root);
+      at = end + 2;
+    }
+  } else {
+    const auto start = response.find("\r\n\r\n");
+    require(start != std::string::npos, "complete response headers");
+    inspect(dgpp::minijson::parse(std::string_view(response).substr(start + 4)).root);
+  }
+  return {content, reasoning};
+}
+
+std::string post_utf8_completion(ServiceRig& rig, bool chat, bool stream,
+                                 const std::string& quoted_prompt,
+                                 const std::string& extra = "",
+                                 const std::string& until = "") {
+  const std::string input = chat ? "\"messages\":[{\"role\":\"user\",\"content\":" + quoted_prompt + "}]"
+                                 : "\"prompt\":" + quoted_prompt;
+  const std::string body = "{\"model\":\"" + kModel + "\"," + input +
+      ",\"max_tokens\":256" + (stream ? ",\"stream\":true" : "") + extra + "}";
+  Client client(rig.port());
+  client.send_all(std::string("POST /v1/") + (chat ? "chat/completions" : "completions") +
+      " HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: " +
+      std::to_string(body.size()) + "\r\n\r\n" + body);
+  return client.read_until(until.empty() ? (stream ? "\r\n0\r\n\r\n" : "usage") : until, 5000);
+}
+
+DGPP_TEST(serve_utf8_escapedAndRawPromptsReachFrontendIdentically) {
+  const std::string text = "📭🏢𠀀";
+  for (const bool chat : {false, true}) {
+    ServiceRig rig(8, model_defaults(), false, std::nullopt, chat);
+    rig.pass_delay_ms = 2;
+    rig.engine.script(text.size() + (chat ? 1 : 0),
+                      script_of(rig, chat ? text + "</think>" + text : text));
+    for (const bool stream : {false, true}) {
+      for (const std::string& prompt : {"\"" + text + "\"",
+                                      std::string(R"("\ud83d\udced\ud83c\udfe2\ud840\udc00")")}) {
+        const auto response = post_utf8_completion(rig, chat, stream, prompt);
+        const auto [content, reasoning] = utf8_completion_text(response, chat, stream);
+        require(content == text && reasoning == (chat ? text : ""),
+                "escaped and raw supplementary characters survive both response modes");
+        if (chat) {
+          const auto globals = rig.frontend.last_globals();
+          require(dgpp::minijson::parse(globals).root.at("messages").items().front().at("content").as_string() == text,
+                  "the frontend receives correct UTF-8 from escaped input");
+        }
+      }
+    }
+  }
+}
+
+DGPP_TEST(serve_utf8_invalidOutputIsReplacedInContentReasoningAndLogprobs) {
+  const std::string bytes = "\xED\xA0\xBD|\xED\xB3\xAD|\xC0\x80|\xE0\x80\x80|"
+                            "\xF0\x80\x80\x80|\xF4\x90\x80\x80|\xF5\x80\x80\x80|"
+                            "\xE2\x82" "A|📭\xE2\x82";
+  const std::string expected = "���|���|��|���|����|����|����|�A|📭�";
+  for (const bool chat : {false, true}) {
+    ServiceRig rig(8, model_defaults(), true, std::nullopt, chat);
+    rig.pass_delay_ms = 2;
+    rig.engine.script(chat ? 5 : 4, script_of(rig, chat ? bytes + "</think>" + bytes : bytes));
+    for (const bool stream : {false, true}) {
+      const auto response = post_utf8_completion(rig, chat, stream, "\"abcd\"",
+          chat ? ",\"logprobs\":true,\"top_logprobs\":2" : ",\"logprobs\":2");
+      const auto [content, reasoning] = utf8_completion_text(response, chat, stream);
+      require(content == expected && reasoning == (chat ? expected : ""),
+              "invalid UTF-8 is replaced without losing following valid characters");
+    }
+  }
+}
+
+DGPP_TEST(serve_utf8_malformedHexEscapesAreBadRequests) {
+  ServiceRig rig;
+  for (const bool chat : {false, true}) {
+    for (const char* prompt : {R"("\u12xz")", R"("\ud83d\udcez")", R"("\ud83d\u123")"}) {
+      const auto response = post_utf8_completion(rig, chat, false, prompt, "", "\"error\"");
+      require(response.find("400 Bad Request") != std::string::npos,
+              "malformed hex is rejected before generation");
+    }
+  }
+}
+
 DGPP_TEST(serve_utf8_aCharacterSplitAcrossTokensIsHeldUntilComplete) {
   // The soak's find: a byte-level BPE token can end inside a
   // multi-byte character, and the delta carried its bytes as they came —
@@ -3370,15 +3476,7 @@ DGPP_TEST(serve_utf8_aCharacterSplitAcrossTokensIsHeldUntilComplete) {
       at += 11;
       const size_t end = raw.find('"', at);
       const std::string piece = raw.substr(at, end - at);
-      // A strict check: every byte >= 0x80 sits inside a complete sequence.
-      for (size_t i = 0; i < piece.size();) {
-        const unsigned char b = static_cast<unsigned char>(piece[i]);
-        const size_t len = b < 0x80 ? 1 : (b & 0xE0) == 0xC0 ? 2 : (b & 0xF0) == 0xE0 ? 3 : (b & 0xF8) == 0xF0 ? 4 : 0;
-        require(len > 0 && i + len <= piece.size(), "a delta that is not UTF-8: " + piece);
-        for (size_t k = 1; k < len; ++k)
-          require((static_cast<unsigned char>(piece[i + k]) & 0xC0) == 0x80, "a delta that is not UTF-8: " + piece);
-        i += len;
-      }
+      dgpp::test::require_utf8(piece);
       at = end;
     }
   }
