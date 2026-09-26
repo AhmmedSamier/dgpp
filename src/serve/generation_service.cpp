@@ -3030,6 +3030,14 @@ void GenerationService::pump_file_work() {
 void GenerationService::idle() { pump_file_work(); pump_records(); }
 
 void GenerationService::write_stream_event(StreamRecord& r, std::string event, bool usage) {
+  // Delay the preamble until an actual completion chunk is ready. Empty
+  // completions still need it before their terminal chunk, and UTF-8 tails
+  // can produce the first output only when the stream is finishing.
+  if (!usage && !r.first_chunk_sent) {
+    r.first_chunk_sent = true;
+    write_stream_event(r, r.chat ? chat_chunk_first(r.id, r.created_unix, r.model, r.choice)
+                                 : text_chunk_first(r.id, r.created_unix, r.model));
+  }
   event.pop_back();  // every caller supplies a complete completion JSON object
   if (r.include_usage && !usage) event.append(",\"usage\":null");
   if (r.report_service_tier) event.append(",\"service_tier\":\"default\"");
@@ -3061,17 +3069,6 @@ void GenerationService::flush_chat_stream(StreamRecord& r) {
     events.swap(r.pending);
     lp_json = take_content_logprobs(r);
   }
-  // The role preamble rides with the first real output. An early
-  // content-less chunk would make clients that derive prefill time from
-  // the first SSE event (e.g. llama-benchy: est_ppt = first_response -
-  // latency) measure header latency instead of prefill.
-  auto ensure_first = [&] {
-    if (!r.first_chunk_sent) {
-      r.first_chunk_sent = true;
-      write_stream_event(r,
-          chat_chunk_first(r.id, r.created_unix, r.model, r.choice));
-    }
-  };
   for (const ParserEvent& ev : events) {
     std::string delta;
     switch (ev.kind) {
@@ -3079,7 +3076,6 @@ void GenerationService::flush_chat_stream(StreamRecord& r) {
         std::string text = ev.text;
         carry_utf8(&text, &r.carry_reasoning);
         if (text.empty()) continue;  // wholly held back: an incomplete character
-        ensure_first();
         delta = delta_text("reasoning_content", text);
         break;
       }
@@ -3087,14 +3083,12 @@ void GenerationService::flush_chat_stream(StreamRecord& r) {
         std::string text = ev.text;
         carry_utf8(&text, &r.carry_content);
         if (text.empty()) continue;
-        ensure_first();
         delta = delta_text("content", text);
         break;
       }
       case ParserEvent::Kind::kToolCall: {
         const int index = r.calls_announced++;
         const std::string call_id = tool_call_id(r.call_seed, index);
-        ensure_first();
         write_stream_event(r, chat_chunk_delta(
             r.id, r.created_unix, r.model,
             delta_tool_call_start(index, call_id, ev.call.name, ev.call.custom), "",
@@ -3113,7 +3107,6 @@ void GenerationService::flush_chat_stream(StreamRecord& r) {
   // Logprobs follow the batch's visible deltas. An empty delta is valid;
   // provenance may arrive after a buffered parser block or stop tail.
   if (!lp_json.empty()) {
-    ensure_first();
     write_stream_event(r, chat_chunk_delta(r.id, r.created_unix, r.model,
                                            "{}", lp_json, r.choice));
   }
@@ -3127,11 +3120,6 @@ void GenerationService::flush_stream_carries(StreamRecord& r) {
                                 std::pair{&r.carry_content, "content"}}) {
       const std::string rest = finish_utf8(carry);
       if (rest.empty()) continue;
-      if (!r.first_chunk_sent) {
-        r.first_chunk_sent = true;
-        write_stream_event(r,
-            chat_chunk_first(r.id, r.created_unix, r.model, r.choice));
-      }
       write_stream_event(r, chat_chunk_delta(r.id, r.created_unix, r.model,
                                              delta_text(field, rest), "",
                                              r.choice));
@@ -3154,14 +3142,7 @@ void GenerationService::flush_legacy_stream(StreamRecord& r) {
       r.lps_flushed = r.lps.size();
     }
   }
-  if (!r.first_chunk_sent) {
-    carry_utf8(&delta, &r.carry_text);
-    if (delta.empty()) return;  // nothing to say yet: withhold the preamble
-    r.first_chunk_sent = true;
-    write_stream_event(r, text_chunk_first(r.id, r.created_unix, r.model));
-  } else {
-    carry_utf8(&delta, &r.carry_text);
-  }
+  carry_utf8(&delta, &r.carry_text);
   if (!delta.empty())
     write_stream_event(r,
         text_chunk_delta(r.id, r.created_unix, r.model, delta, lp_json));

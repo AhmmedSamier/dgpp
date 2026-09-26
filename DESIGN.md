@@ -2294,7 +2294,11 @@ distribution. A backend without the needed sampling or mask capability
 rejects those requests.
 
 Streaming responses begin with the role, emit content/reasoning/tool
-deltas, then finish metadata and `[DONE]`. Incomplete UTF-8 tails are
+deltas, then finish metadata and `[DONE]`. Each choice's preamble waits
+until its first output chunk, or its terminal chunk when the completion is
+empty. The legacy route delays its initial empty text chunk the same way.
+HTTP headers and keep-alive comments can arrive before generation completes.
+Incomplete UTF-8 tails are
 held until a complete sequence can be written. Stop-string matching holds
 a possible match suffix back from the client and journals retirement when
 a stop is found. Multiple chat choices use separate scheduler requests

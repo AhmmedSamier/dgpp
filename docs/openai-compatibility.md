@@ -228,6 +228,11 @@ still return explicit errors. Unknown fields inside `chat_template_kwargs`
 remain errors because that object explicitly requests prompt changes.
 
 Streaming uses `chat.completion.chunk` events followed by `[DONE]`.
+Each choice's assistant-role preamble arrives immediately before its first
+output, or before its terminal chunk if the completion is empty. The legacy
+route likewise delays its initial empty text chunk. HTTP headers and SSE
+keep-alive comments may arrive while the request is queued or prefilling;
+they are not completion events.
 With `stream_options.include_usage: true`, ordinary chunks carry `usage: null`
 and one final chunk carries aggregate usage with `choices: []`. Interrupted
 streams may have no final usage chunk. Content logprobs may follow content in
