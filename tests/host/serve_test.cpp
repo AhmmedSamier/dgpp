@@ -800,6 +800,8 @@ DGPP_TEST(serve_ssePing_queuedChoicesAndLegacyCompleteNormally) {
     require(ping != std::string::npos, "queued request receives a chunked SSE comment");
     require(response.find(kPingFrame, ping + kPingFrame.size()) == std::string::npos,
             "choices share one ping per interval");
+    require(response.find("data: ") == std::string::npos,
+            "keep-alives do not send completion chunks before generation");
     require(client.read_until(std::string(kPingFrame), 250).empty(), "no duplicate choice ping");
     require(rig.service.stats().tokens_out == 0, "ping does not count as generated tokens");
     rig.gate = false;
@@ -4107,6 +4109,95 @@ DGPP_TEST(serve_edge_malformedModelCustomOutputTerminatesWithError) {
   const auto stream = post_chat(rig, chat_body("abcd", 128, tools + R"(,"stream":true)"), "[DONE]", 3000);
   require(stream.find("invalid_tool_output") != std::string::npos && stream.find("[DONE]") != std::string::npos &&
           stream.find(R"("finish_reason":"tool_calls")") == std::string::npos, "stream emits terminal error and DONE");
+}
+
+namespace {
+
+size_t require_stream_preamble(const std::string& response, bool chat, int choice = 0) {
+  const std::string preamble =
+      "\"index\":" + std::to_string(choice) +
+      (chat ? ",\"delta\":{\"role\":\"assistant\",\"content\":\"\"}" : ",\"text\":\"\"") +
+      ",\"logprobs\":null,\"finish_reason\":null";
+  const auto first = response.find(preamble);
+  require(first != std::string::npos && response.find(preamble, first + 1) == std::string::npos,
+          "exactly one preamble per choice: " + response);
+  return first;
+}
+
+}  // namespace
+
+DGPP_TEST(serve_streamPreamble_emptyCompletionsKeepPreamble) {
+  for (bool chat : {true, false}) {
+    for (bool initial_stop : {false, true}) {
+      ServiceRig rig;
+      // Either the prefill pick is EOS, or all output is a stop string.
+      rig.engine.script(5, initial_stop ? std::vector<int32_t>{'X'} : std::vector<int32_t>{});
+      Client client(rig.port());
+      post_completion(client, chat,
+                      std::string(R"(,"stream":true,"stream_options":{"include_usage":true})") +
+                          (chat ? R"(,"n":2)" : "") + (initial_stop ? R"(,"stop":"X")" : ""));
+      const auto response = client.read_until("0\r\n\r\n", 5000);
+      for (int choice = 0; choice < (chat ? 2 : 1); ++choice) {
+        const auto first = require_stream_preamble(response, chat, choice);
+        const std::string terminal = "\"index\":" + std::to_string(choice) +
+                                     (chat ? ",\"delta\":{}" : ",\"text\":\"\"") +
+                                     ",\"logprobs\":null,\"finish_reason\":\"stop\"";
+        const auto finish = response.find(terminal);
+        require(finish != std::string::npos && first < finish,
+                "empty choice starts before its terminal chunk: " + response);
+      }
+      const auto usage = response.find("\"choices\":[],\"usage\":{");
+      require(usage != std::string::npos && response.find("\"finish_reason\":\"stop\"") < usage &&
+                  usage < response.find("data: [DONE]"),
+              "usage and DONE follow the completed choices: " + response);
+    }
+  }
+}
+
+DGPP_TEST(serve_streamPreamble_truncatedUtf8KeepsPreamble) {
+  for (bool chat : {true, false}) {
+    ServiceRig rig;
+    rig.engine.script(5, {0xE2});
+    Client client(rig.port());
+    post_completion(client, chat, R"(,"stream":true)", 1);
+    const auto response = client.read_until("0\r\n\r\n", 5000);
+    const auto first = require_stream_preamble(response, chat);
+    const auto replacement = response.find("\xEF\xBF\xBD");
+    const auto finish = response.find(R"("finish_reason":"length")");
+    require(replacement != std::string::npos && finish != std::string::npos &&
+                first < replacement && replacement < finish,
+            "preamble precedes the final UTF-8 replacement: " + response);
+  }
+}
+
+DGPP_TEST(serve_streamPreamble_waitsForOutput) {
+  for (bool chat : {true, false}) {
+    ServiceRig rig;
+    rig.engine.hold_prefill = true;
+    struct Release {
+      FakeEngine& engine;
+      ~Release() { engine.hold_prefill = false; }
+    } release{rig.engine};
+    Client client(rig.port());
+    post_completion(client, chat, R"(,"stream":true)", 1);
+    for (int i = 0; i < 500 && !rig.engine.prefill_entered; ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    require(rig.engine.prefill_entered, "prefill is blocked");
+    const auto headers = client.read_available(100);
+    require(headers.find("text/event-stream") != std::string::npos,
+            "headers arrive before generation");
+    require(headers.find("data: ") == std::string::npos,
+            "no completion chunk before prefill finishes: " + headers);
+    rig.engine.hold_prefill = false;
+    const auto response = client.read_until("0\r\n\r\n", 5000);
+    const auto first = require_stream_preamble(response, chat);
+    const std::string output =
+        std::string(chat ? "\"content\":\"" : "\"text\":\"") + fake_text(5, 1) + "\"";
+    const auto content = response.find(output);
+    require(content != std::string::npos && first < content &&
+                content < response.find(R"("finish_reason":"length")"),
+            "delayed preamble precedes the first output: " + response);
+  }
 }
 
 int main() {

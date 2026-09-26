@@ -6,6 +6,13 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Lazy SSE preambles** (2026-09-26, PR #57): chat and legacy completion
+  preambles wait for the first output, preserving first-event prefill timing.
+  Empty completions still receive a preamble before their terminal chunk,
+  and truncated UTF-8 output receives one before the replacement character.
+  Each chat choice retains its own preamble. See the
+  [validation record](benchmarks/results/2026-09-26-lazy-sse-preamble.md).
+
 - **JSON Unicode and UTF-8 responses** (2026-09-26, issue #59): escaped
   UTF-16 surrogate pairs now decode to the same UTF-8 as raw supplementary
   characters; lone surrogates become U+FFFD and malformed hex escapes are

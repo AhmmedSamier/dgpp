@@ -3030,6 +3030,14 @@ void GenerationService::pump_file_work() {
 void GenerationService::idle() { pump_file_work(); pump_records(); }
 
 void GenerationService::write_stream_event(StreamRecord& r, std::string event, bool usage) {
+  // Delay the preamble until an actual completion chunk is ready. Empty
+  // completions still need it before their terminal chunk, and UTF-8 tails
+  // can produce the first output only when the stream is finishing.
+  if (!usage && !r.first_chunk_sent) {
+    r.first_chunk_sent = true;
+    write_stream_event(r, r.chat ? chat_chunk_first(r.id, r.created_unix, r.model, r.choice)
+                                 : text_chunk_first(r.id, r.created_unix, r.model));
+  }
   event.pop_back();  // every caller supplies a complete completion JSON object
   if (r.include_usage && !usage) event.append(",\"usage\":null");
   if (r.report_service_tier) event.append(",\"service_tier\":\"default\"");
@@ -3060,11 +3068,6 @@ void GenerationService::flush_chat_stream(StreamRecord& r) {
     std::lock_guard<std::mutex> lock(mutex_);
     events.swap(r.pending);
     lp_json = take_content_logprobs(r);
-  }
-  if (!r.first_chunk_sent) {
-    r.first_chunk_sent = true;
-    write_stream_event(r,
-        chat_chunk_first(r.id, r.created_unix, r.model, r.choice));
   }
   for (const ParserEvent& ev : events) {
     std::string delta;
@@ -3103,9 +3106,10 @@ void GenerationService::flush_chat_stream(StreamRecord& r) {
   }
   // Logprobs follow the batch's visible deltas. An empty delta is valid;
   // provenance may arrive after a buffered parser block or stop tail.
-  if (!lp_json.empty())
+  if (!lp_json.empty()) {
     write_stream_event(r, chat_chunk_delta(r.id, r.created_unix, r.model,
                                            "{}", lp_json, r.choice));
+  }
 }
 
 // The stream's end: whatever a field still holds is an incomplete
@@ -3137,10 +3141,6 @@ void GenerationService::flush_legacy_stream(StreamRecord& r) {
       lp_json = legacy_logprobs(r, r.lps_flushed, r.lps.size());
       r.lps_flushed = r.lps.size();
     }
-  }
-  if (!r.first_chunk_sent) {
-    r.first_chunk_sent = true;
-    write_stream_event(r, text_chunk_first(r.id, r.created_unix, r.model));
   }
   carry_utf8(&delta, &r.carry_text);
   if (!delta.empty())

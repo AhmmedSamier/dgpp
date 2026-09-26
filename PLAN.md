@@ -32,6 +32,11 @@ revisions recorded with them.
 
 ## Serving support
 
+Completion streams delay their preamble until output is available, with a
+terminal fallback for empty responses. Host regressions cover both endpoints,
+multiple choices, UTF-8 tails and keep-alive compatibility; see the
+[PR #57 record](benchmarks/results/2026-09-26-lazy-sse-preamble.md).
+
 Issue #49 adds SSE keep-alive comments during admission, prefill and gaps in
 stream output. The interval defaults to 30 seconds and is configurable through
 cluster JSON, CLI and each streaming request; `-1` disables it. Optional prompt
