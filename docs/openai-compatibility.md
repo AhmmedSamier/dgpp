@@ -43,6 +43,28 @@ values return HTTP 400 naming `ignore_eos`. When `true`, sampled EOS tokens
 still count toward usage but do not end generation. The token limit, stop
 strings, cancellation and resource limits still apply.
 
+## Streaming keep-alives (DGPP extension)
+
+Both `POST /v1/chat/completions` and `POST /v1/completions` send SSE comments
+while an accepted stream waits in the queue, prefills or pauses between output
+chunks. The comment payload is `: keep-alive\n\n`, carried in the normal
+chunked HTTP response. Comments never enter the completion content, token
+usage, finish reason or `[DONE]` sequence. Multiple chat choices share one
+keep-alive timer, and all comments stop when the stream ends or disconnects.
+
+The server default is 30 seconds of silence. `http.sse_ping_interval` in the
+cluster JSON changes it; `--sse-ping-interval` overrides JSON. A request with
+`"stream": true` may set top-level `"sse_ping_interval": 15` to override either,
+or `-1` to disable pings. Values must be integers in 1–2147483647 or `-1`;
+invalid values, including explicit null, and use without `stream: true`
+return HTTP 400 naming `sse_ping_interval` before admission.
+
+SSE parsers ignore comment lines. Network read timeouts can be kept alive by
+the bytes even if the parser hides them; an application timeout waiting for a
+completion chunk still needs its own policy. Pings do not extend server
+engine or shutdown deadlines. Optional `return_progress` / `prompt_progress`
+events are not implemented by this extension.
+
 ## File inputs
 
 User messages accept `{ "type": "file", "file": { "filename": "report.pdf",

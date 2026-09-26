@@ -675,7 +675,8 @@ struct ServiceRig {
                       std::optional<dgpp::RopeScaling> rope_scaling = std::nullopt,
                       int64_t position_ceiling = 0, int64_t kv_pool_tokens = 0,
                       bool resumable_prefill = false, bool with_dsml = false,
-                      std::string default_chat_template_kwargs = "{}")
+                      std::string default_chat_template_kwargs = "{}",
+                      int sse_ping_interval = dgpp::serve::kDefaultSsePingInterval)
       : engine(kSlots, /*total_blocks=*/100, /*block_tokens=*/4, can_sample),
         frontend(with_markers, with_dsml),
         cfg([&] {
@@ -694,6 +695,7 @@ struct ServiceRig {
           c.kv_pool_tokens = kv_pool_tokens;
           c.file_inputs = std::move(file_inputs);
           c.default_chat_template_kwargs = std::move(default_chat_template_kwargs);
+          c.sse_ping_interval = sse_ping_interval;
           return c;
         }()),
         service((engine.set_prefix_arena(prefix_slots, 4), cfg), &engine, &frontend, {kFakeEos}),
@@ -769,6 +771,138 @@ std::string fake_text(size_t prompt_len, int n) {
   for (int i = 0; i < n; ++i)
     out.push_back(static_cast<char>(fake_token(prompt_len, i)));
   return out;
+}
+
+void post_completion(Client& client, bool chat, const std::string& extra, int tokens = 3) {
+  const std::string body =
+      chat ? chat_body("abcde", tokens, extra)
+           : "{\"model\":\"" + kModel +
+                 "\",\"prompt\":\"abcde\",\"max_tokens\":" + std::to_string(tokens) + extra + "}";
+  client.send_all(std::string("POST /v1/") + (chat ? "chat/completions" : "completions") +
+                  " HTTP/1.1\r\nHost: t\r\nContent-Length: " + std::to_string(body.size()) +
+                  "\r\n\r\n" + body);
+}
+
+constexpr std::string_view kPingFrame = "e\r\n: keep-alive\n\n\r\n";
+
+DGPP_TEST(serve_ssePing_queuedChoicesAndLegacyCompleteNormally) {
+  for (bool chat : {true, false}) {
+    ServiceRig rig;
+    rig.gate = true;
+    Client client(rig.port());
+    post_completion(
+        client, chat,
+        ",\"stream\":true,\"sse_ping_interval\":1,\"stream_options\":{\"include_usage\":true}" +
+            std::string(chat ? ",\"n\":3" : ""));
+    const auto response = client.read_until(std::string(kPingFrame), 2500);
+    const auto ping = response.find(kPingFrame);
+    require(ping != std::string::npos, "queued request receives a chunked SSE comment");
+    require(response.find(kPingFrame, ping + kPingFrame.size()) == std::string::npos,
+            "choices share one ping per interval");
+    require(client.read_until(std::string(kPingFrame), 250).empty(), "no duplicate choice ping");
+    require(rig.service.stats().tokens_out == 0, "ping does not count as generated tokens");
+    rig.gate = false;
+    const auto completed = client.read_until("0\r\n\r\n", 3000);
+    require(completed.find("data: [DONE]") != std::string::npos, "stream finishes normally");
+    require(completed.find("\"finish_reason\":\"length\"") != std::string::npos,
+            "finish reason unchanged");
+    require(completed.find(chat ? "\"completion_tokens\":9" : "\"completion_tokens\":3") !=
+                std::string::npos,
+            "pings do not enter usage");
+    require(completed.find(kPingFrame) == std::string::npos, "active output suppresses pings");
+    require(client.read_until(std::string(kPingFrame), 1200).empty(), "no ping after DONE");
+    // Reusing the same connection must not inherit the previous ping policy.
+    post_completion(client, chat, "");
+    const auto one_shot = client.read_until("\"usage\"", 2000);
+    require(one_shot.find("200 OK") != std::string::npos &&
+                one_shot.find(kPingFrame) == std::string::npos,
+            "the next non-stream response stays JSON");
+  }
+}
+
+DGPP_TEST(serve_ssePing_blockedPrefillDoesNotCountAsEngineProgress) {
+  ServiceRig rig;
+  rig.engine.hold_prefill = true;
+  struct Release {
+    FakeEngine& engine;
+    ~Release() { engine.hold_prefill = false; }
+  } release{rig.engine};
+  Client client(rig.port());
+  post_completion(client, true, ",\"stream\":true,\"sse_ping_interval\":1");
+  for (int i = 0; i < 500 && !rig.engine.prefill_entered; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  require(rig.engine.prefill_entered, "prefill is blocked");
+  const auto epoch = rig.engine.prefill_monitor()->progress_epoch();
+  require(client.read_until(std::string(kPingFrame), 2500).find(kPingFrame) != std::string::npos,
+          "ping arrives before synchronous prefill returns");
+  require(rig.engine.prefill_monitor()->progress_epoch() == epoch &&
+              rig.service.stats().tokens_out == 0,
+          "transport activity does not advance the engine or token counters");
+  client.hard_close();
+  for (int i = 0; i < 500 && rig.service.stats().requests_cancelled == 0; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  require(rig.service.stats().requests_cancelled == 1,
+          "pinging request can disconnect during prefill");
+}
+
+DGPP_TEST(serve_ssePing_betweenTokensAndDuringActiveOutput) {
+  for (const int delay_ms : {1400, 250}) {
+    ServiceRig rig;
+    rig.pass_delay_ms = delay_ms;
+    Client client(rig.port());
+    post_completion(client, true, ",\"stream\":true,\"sse_ping_interval\":1", 8);
+    const auto response = client.read_until("data: [DONE]", 15000);
+    require(response.find("data: [DONE]") != std::string::npos, "decode finishes");
+    require((response.find(kPingFrame) != std::string::npos) == (delay_ms > 1000),
+            "only gaps in emitted output cause pings");
+    if (delay_ms > 1000)
+      require(response.find("\"content\":\"" + fake_text(5, 1)) < response.find(kPingFrame),
+              "content arrives before the decode-gap ping");
+  }
+}
+
+DGPP_TEST(serve_ssePing_serverDefaultAndRequestOverride) {
+  for (const int server_interval : {1, -1}) {
+    ServiceRig rig(8, dgpp::sample::greedy_params(), false, std::nullopt, false, false, {}, 0, {},
+                   std::nullopt, 0, 0, false, false, "{}", server_interval);
+    rig.gate = true;
+    Client inherited(rig.port()), overridden(rig.port()), one_shot(rig.port());
+    post_completion(inherited, true, ",\"stream\":true");
+    post_completion(
+        overridden, false,
+        ",\"stream\":true,\"sse_ping_interval\":" + std::to_string(server_interval == 1 ? -1 : 1));
+    post_completion(one_shot, true, "");
+    const auto base = inherited.read_until(std::string(kPingFrame), 1300);
+    const auto custom =
+        overridden.read_until(std::string(kPingFrame), server_interval == 1 ? 300 : 1300);
+    require((base.find(kPingFrame) != std::string::npos) == (server_interval == 1),
+            "server default honored");
+    require((custom.find(kPingFrame) != std::string::npos) == (server_interval == -1),
+            "request overrides default");
+    require(one_shot.read_until(std::string(kPingFrame), 100).empty(),
+            "non-stream requests never ping");
+  }
+}
+
+DGPP_TEST(serve_ssePing_rejectsInvalidRequestIntervals) {
+  ServiceRig rig;
+  for (bool chat : {true, false}) {
+    for (const char* value :
+         {"0", "-2", "true", "null", "\"1\"", "1.5", "1.0", "2147483648", "1e100"}) {
+      Client client(rig.port());
+      post_completion(client, chat, std::string(",\"stream\":true,\"sse_ping_interval\":") + value);
+      const auto response = client.read_until("\"param\":\"sse_ping_interval\"", 1000);
+      require(response.find("400 Bad Request") != std::string::npos &&
+                  response.find("\"param\":\"sse_ping_interval\"") != std::string::npos,
+              "invalid interval rejected by name before admission");
+    }
+    Client client(rig.port());
+    post_completion(client, chat, ",\"sse_ping_interval\":1");
+    require(client.read_until("requires stream: true", 1000).find("400 Bad Request") !=
+                std::string::npos,
+            "explicit interval requires streaming");
+  }
+  require(rig.service.stats().requests_total == 0, "invalid requests never reach admission");
 }
 
 DGPP_TEST(serve_chatNonStream_exactCompletionShape) {

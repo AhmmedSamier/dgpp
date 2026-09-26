@@ -521,6 +521,9 @@ GenerationService::GenerationService(const ServiceConfig& cfg,
     throw std::invalid_argument("GenerationService: frontend required");
   if (cfg_.model_id.empty())
     throw std::invalid_argument("GenerationService: model_id required");
+  if (!valid_sse_ping_interval(cfg_.sse_ping_interval))
+    throw std::invalid_argument(
+        "GenerationService: sse_ping_interval must be -1 or positive seconds");
   meters_ = sched_.meters();
   prefix_stats_ = engine_->prefix_engine_stats();
   boundary_ids_ = frontend_->boundary_token_ids();
@@ -1824,6 +1827,26 @@ bool GenerationService::parse_ignore_eos(const minijson::Value& body, HttpRespon
   return true;
 }
 
+bool GenerationService::parse_sse_ping_interval(const minijson::Value& body, HttpResponseWriter& w,
+                                                bool stream, int* interval) {
+  *interval = cfg_.sse_ping_interval;
+  const auto* value = body.find("sse_ping_interval");
+  if (!value) return true;
+  if (value->kind() != minijson::Value::Kind::Int || !valid_sse_ping_interval(value->as_int())) {
+    respond_error(
+        w, 400, "sse_ping_interval must be -1 (disabled) or an integer in [1, 2147483647] seconds",
+        "invalid_request_error", "sse_ping_interval");
+    return false;
+  }
+  if (!stream) {
+    respond_error(w, 400, "sse_ping_interval requires stream: true", "invalid_request_error",
+                  "sse_ping_interval");
+    return false;
+  }
+  *interval = static_cast<int>(value->as_int());
+  return true;
+}
+
 bool GenerationService::parse_stream_options(const minijson::Value& body, HttpResponseWriter& w,
                                               bool stream, bool* usage, bool* obfuscation) {
   *usage = false;
@@ -1897,6 +1920,8 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
   }
   bool include_usage = false, include_obfuscation = true;
   if (!parse_stream_options(body, w, stream, &include_usage, &include_obfuscation)) return;
+  int sse_ping_interval = cfg_.sse_ping_interval;
+  if (!parse_sse_ping_interval(body, w, stream, &sse_ping_interval)) return;
   // prefix_cache (ours, M7): false opts the request out of the prefix
   // cache — no attach, no snapshot of its state.
   bool prefix_cache = true;
@@ -2023,6 +2048,7 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
   }
   const int64_t created = std::time(nullptr);
   auto group = std::make_shared<ChoiceGroup>();
+  group->sse_ping_interval = sse_ping_interval;
   group->n = n;
   group->choices.resize(static_cast<size_t>(n));
   const std::vector<int64_t> boundaries = prompt_boundaries(prompt);
@@ -2135,6 +2161,8 @@ void GenerationService::route_completions(const HttpRequest& req,
   }
   bool include_usage = false, include_obfuscation = false;
   if (!parse_stream_options(body, w, stream, &include_usage, &include_obfuscation)) return;
+  int sse_ping_interval = cfg_.sse_ping_interval;
+  if (!parse_sse_ping_interval(body, w, stream, &sse_ping_interval)) return;
   bool prefix_cache = true;
   if (const dgpp::minijson::Value* pcv = body.find("prefix_cache")) {
     if (!pcv->is_bool()) {
@@ -2211,6 +2239,7 @@ void GenerationService::route_completions(const HttpRequest& req,
   }
   record->sched_id = record->id;
   record->group = std::make_shared<ChoiceGroup>();
+  record->group->sse_ping_interval = sse_ping_interval;
   record->group->choices.resize(1);
   record->call_seed = record->tag;
   record->stop.stops = stops;
@@ -3396,6 +3425,14 @@ void GenerationService::pump_records() {
     // Records leave the list only here — done and (writer drained or
     // dead). A cancelled-but-still-generating record keeps its entry
     // until on_retire lands.
+  }
+
+  // Drain all choices and terminal events first. The writer owns one silence
+  // clock per connection; sibling choices cannot cause duplicate pings. This
+  // runs on the HTTP thread even while an engine pass is blocked in prefill.
+  for (auto& r : live) {
+    if (r->stream && r->writer != nullptr && !r->writer_dead && !r->group->ended)
+      r->writer->ping_if_idle(r->group->sse_ping_interval);
   }
 
   std::lock_guard<std::mutex> lock(mutex_);
