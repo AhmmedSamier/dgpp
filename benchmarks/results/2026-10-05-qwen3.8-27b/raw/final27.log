@@ -1,0 +1,59 @@
+
+=== 21:46:19 production down (final27)
+2026-10-05 21:46:26.267 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 21:46:26 w1-plain up (--no-dflash)
+2026-10-05 21:46:42.613 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final27/w1-plain/server)
+
+=== 21:46:42 w1-plain transcripts
+json   256 tokens   31.32 s   122.3 ms/token (wall, prefill included) length | We need to respond to user: "Return a JSON array of 8 object
+8.2 tok/s, 121.8 ms/tok, 121.8 ms/step
+
+=== 21:48:48 w1-plain down
+2026-10-05 21:48:50.055 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final27/w1-plain/server
+
+=== 21:48:50 w1-eager up (--no-dflash)
+2026-10-05 21:49:06.363 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /tmp/claude-1000/-home-stephen-workspace-dgpp/cb0c821d-8834-47e0-869d-81a0e620a1d4/scratchpad/w1_eager.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final27/w1-eager/server)
+
+=== 21:49:06 w1-eager transcripts
+json   256 tokens   31.12 s   121.6 ms/token (wall, prefill included) length | We need to respond to user: "Return a JSON array of 8 object
+8.2 tok/s, 121.2 ms/tok, 121.2 ms/step
+
+=== 21:51:11 w1-eager down
+2026-10-05 21:51:14.047 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final27/w1-eager/server
+
+=== 21:51:14 w2-drafter up ()
+2026-10-05 21:51:36.054 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w2_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final27/w2-drafter/server)
+decode graph
+
+=== 21:51:36 w2-drafter transcripts
+json   256 tokens    4.73 s    18.5 ms/token (wall, prefill included) length | We need to respond to user: "Return a JSON array of 8 object
+56.0 tok/s, 17.0 ms/tok, 78.8 ms/step
+
+=== 21:51:59 w2-drafter down
+2026-10-05 21:52:03.059 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final27/w2-drafter/server
+
+=== 21:52:03 w2-plain up (--no-dflash)
+2026-10-05 21:52:18.755 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w2_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final27/w2-plain/server)
+
+=== 21:52:18 w2-plain transcripts
+json   256 tokens   16.93 s    66.1 ms/token (wall, prefill included) length | We need to respond to user: "Return a JSON array of 8 object
+15.1 tok/s, 65.2 ms/tok, 65.7 ms/step
+
+=== 21:53:26 w2-plain down
+2026-10-05 21:53:30.151 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final27/w2-plain/server
+
+=== 21:53:30 w4-plain up (--no-dflash)
+2026-10-05 21:53:48.566 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w4_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final27/w4-plain/server)
+
+=== 21:53:48 w4-plain transcripts
+json   256 tokens    9.13 s    35.7 ms/token (wall, prefill included) length | We need to respond to user: "Return a JSON array of 8 object
+28.1 tok/s, 35.1 ms/tok, 35.3 ms/step
+
+=== 21:54:25 w4-plain down
+2026-10-05 21:54:32.255 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final27/w4-plain/server
+
+=== 21:54:32 production up
+2026-10-05 21:55:10.423 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+FINAL27_DONE 21:55:10

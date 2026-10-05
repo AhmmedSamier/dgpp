@@ -1,0 +1,18 @@
+
+=== 21:56:26 production down (final28)
+2026-10-05 21:56:33.541 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 21:56:33 w1 eager engine with the drafter up
+cluster configuration: rank 0 did not become ready
+graph variants instantiated: 0
+
+=== 22:06:34 w1 eager drafter transcripts
+ConnectionRefusedError: [Errno 111] Connection refused
+
+=== 22:06:34 down
+2026-10-05 22:06:34.161 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final28/w1-eager-drafter/server
+
+=== 22:06:34 production up
+2026-10-05 22:07:12.667 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+FINAL28_DONE 22:07:12
