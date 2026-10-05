@@ -1,0 +1,51 @@
+
+=== 04:59:18 build
+BUILD_EXIT=0
+
+=== 05:01:02 host gates
+cluster_config_test: no such binary
+fabric_serve_test            fabric_serve_test: ALL PASS
+dflash2_speculator_test: no such binary
+qwen_dflash2_config_test: no such binary
+
+=== 05:01:06 ctest (host suite, serial)
+	205 - compact_head_test (Failed)
+	206 - compact_head_all_rows (Failed)
+Errors while running CTest
+
+=== 05:13:45 glm down
+2026-10-05 05:13:54.364 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 05:13:54 w4-ship up (the drafter recipe as it ships)
+2026-10-05 05:14:20.498 READY — curl http://<node-0>:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w4_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/sampled/w4-ship/server)
+the DFlash2 block proposal (7 drafts a step) on the decode graph; sampled requests draw each draft from the selector's softmax under the ratio verify (engine.mtp_draft auto, draft temperature 0.7 x the request's)
+
+=== 05:14:20 w4-ship llama-benchy pp2048 tg128
+
+=== 05:15:27 w4-ship timed_load C1 temperature 1
+| prose | 52.2 |
+| code | 84.4 |
+| json | 117.0 |
+| math | 98.2 |
+| chat | 47.6 |
+mtp 3.66 tok/step/req, accept p1 78 % p2 56 % p3 40 % p4 31 % p5 25 % p6 22 % p7 18 %, first miss was the drafter's 2nd 21 % / 3rd 13 % / 4th-8th 33 % / 9th-16th 7 % / none 19 % (150 misses) 
+
+=== 05:16:05 w4-ship down
+2026-10-05 05:16:12.927 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/sampled/w4-ship/server
+
+=== 05:16:12 w1-ship up (the one-node template's recipe)
+2026-10-05 05:16:39.210 READY — curl http://<node-0>:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/sampled/w1-ship/server)
+the DFlash2 block proposal (7 drafts a step) on the decode graph; sampled requests draw each draft from the selector's softmax under the ratio verify (engine.mtp_draft auto, draft temperature 0.7 x the request's)
+
+=== 05:16:39 w1-ship greedy transcripts vs w1-graph-ab (bitwise expected)
+math   256 tokens    7.88 s    30.8 ms/token (wall, prefill included) length | We need answer user: "A train leaves city A at 60 km/h and a
+json   256 tokens    9.27 s    36.2 ms/token (wall, prefill included) length | We need to respond to user: "Return a JSON array of 8 object
+identical transcripts: 4 of 4
+
+=== 05:17:24 w1-ship down
+2026-10-05 05:17:26.138 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/sampled/w1-ship/server
+
+=== 05:17:28 glm up
+2026-10-05 05:18:06.458 READY — curl http://<node-0>:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+FINAL_DONE 05:18:06

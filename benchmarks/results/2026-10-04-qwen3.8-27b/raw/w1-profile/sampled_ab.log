@@ -1,0 +1,86 @@
+
+=== 04:00:39 glm down
+2026-10-05 04:00:48.203 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 04:00:48 w1-sampled up 
+2026-10-05 04:01:16.514 READY — curl http://<node-0>:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/sampled/w1-sampled/server)
+the DFlash2 block proposal (7 drafts a step) on the decode graph; sampled requests draw each draft from the selector's softmax under the ratio verify (engine.mtp_draft auto)
+
+=== 04:01:16 w1-sampled MT-Bench think-sampled (temperature 1.0, top-p 0.95, top-k 20)
+## w1-sampled: 30 requests, think=on, temperature=1.0, max_tokens=384
+  roleplay     n=10  tokens  3840  tok/pass  3.50  ms/pass  154.0  ->  22.7 tok/s
+  stem         n=10  tokens  3840  tok/pass  3.04  ms/pass  154.0  ->  19.7 tok/s
+  writing      n=10  tokens  3840  tok/pass  3.32  ms/pass  154.0  ->  21.5 tok/s
+  ALL          n=30  tokens 11520  tok/pass  3.27
+mtp 2.63 tok/step/req, accept p1 68 % p2 38 % p3 26 % p4 14 % p5 8 % p6 6 % p7 3 %, first miss was the drafter's 2nd 13 % / 3rd 3 % / 4th-8th 21 % / 9th-16th 6 % / none 43 % (63 misses) 
+
+=== 04:12:44 w1-sampled timed_load C1 temperature 1
+== per-class wall aggregate tokens/s (prefill included), sampled T=1.0, max_tokens 256
+| class | c=1 |
+|---|---|
+| prose | 16.9 |
+| code | 29.3 |
+| json | 37.2 |
+| math | 31.3 |
+| chat | 17.1 |
+
+=== 04:14:36 w1-sampled greedy transcripts vs w1-graph-ab (the greedy walk is untouched: identical expected)
+code   256 tokens   10.11 s    39.5 ms/token (wall, prefill included) length | We need answer user: "Write a Python function that parses an
+math   256 tokens    7.93 s    31.0 ms/token (wall, prefill included) length | We need answer user: "A train leaves city A at 60 km/h and a
+json   256 tokens    9.33 s    36.4 ms/token (wall, prefill included) length | We need to respond to user: "Return a JSON array of 8 object
+identical transcripts: 4 of 4
+
+=== 04:15:22 w1-sampled down
+2026-10-05 04:15:24.092 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/sampled/w1-sampled/server
+
+=== 04:15:26 w1-argmax up --mtp-draft greedy
+2026-10-05 04:15:50.455 READY — curl http://<node-0>:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/sampled/w1-argmax/server)
+the DFlash2 block proposal (7 drafts a step) on the decode graph; sampled requests take the walk's argmax, accepted with probability P(draft) (engine.mtp_draft greedy)
+
+=== 04:15:50 w1-argmax timed_load C1 temperature 1
+== per-class wall aggregate tokens/s (prefill included), sampled T=1.0, max_tokens 256
+| class | c=1 |
+|---|---|
+| prose | 15.5 |
+| code | 28.1 |
+| json | 38.6 |
+| math | 33.3 |
+| chat | 15.2 |
+mtp 2.44 tok/step/req, accept p1 64 % p2 42 % p3 22 % p4 8 % p5 3 % p6 2 % p7 2 %, first miss was the drafter's 2nd 22 % / 3rd 14 % / 4th-8th 25 % / 9th-16th 11 % / none 22 % (63 misses) 
+
+=== 04:17:48 w1-argmax down
+2026-10-05 04:17:50.260 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/sampled/w1-argmax/server
+
+=== 04:17:52 w4-sampled up 
+2026-10-05 04:18:19.368 READY — curl http://<node-0>:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w4_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/sampled/w4-sampled/server)
+the DFlash2 block proposal (7 drafts a step) on the decode graph; sampled requests draw each draft from the selector's softmax under the ratio verify (engine.mtp_draft auto)
+
+=== 04:18:19 w4-sampled llama-benchy pp2048 tg128
+
+=== 04:18:28 w4-sampled timed_load C1 temperature 1
+== per-class wall aggregate tokens/s (prefill included), sampled T=1.0, max_tokens 256
+| class | c=1 |
+|---|---|
+| prose | 49.0 |
+| code | 91.0 |
+| json | 115.2 |
+| math | 91.1 |
+| chat | 50.9 |
+mtp 4.53 tok/step/req, accept p1 85 % p2 69 % p3 54 % p4 46 % p5 40 % p6 35 % p7 31 %, first miss was the drafter's 2nd 27 % / 3rd 15 % / 4th-8th 16 % / 9th-16th 6 % / none 23 % (127 misses) 
+
+=== 04:19:06 w4-sampled down
+2026-10-05 04:19:13.763 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/sampled/w4-sampled/server
+
+=== 04:19:13 w4-argmax up --mtp-draft greedy
+2026-10-05 04:19:37.805 READY — curl http://<node-0>:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w4_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/sampled/w4-argmax/server)
+the DFlash2 block proposal (7 drafts a step) on the decode graph; sampled requests take the walk's argmax, accepted with probability P(draft) (engine.mtp_draft greedy)
+
+=== 04:19:37 w4-argmax llama-benchy pp2048 tg128
+
+=== 04:19:46 w4-argmax down
+2026-10-05 04:19:53.811 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/sampled/w4-argmax/server
+
+=== 04:19:53 glm up
+2026-10-05 04:20:32.273 READY — curl http://<node-0>:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+SAMPLED_DONE 04:20:32

@@ -1,0 +1,88 @@
+
+=== 03:53:09 waiting for the probe
+
+=== 03:53:09 glm down
+2026-10-05 03:53:18.068 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 03:53:18 ncu: mma_gemv at m = 1 and 8, gate|up shape, world 1
+=== m=1 (launch-skip 20)
+=== m=8 (launch-skip 100)
+
+=== 03:53:25 w1-graph-ab up (nsys node trace, 110 s)
+2026-10-05 03:53:53.474 READY — curl http://<node-0>:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/w1-graph-ab/server)
+
+=== 03:53:53 w1-graph-ab transcripts (vs the pre-change graph run, informative)
+code   256 tokens   10.08 s    39.4 ms/token (wall, prefill included) length | We need answer user: "Write a Python function that parses an
+math   256 tokens    7.94 s    31.0 ms/token (wall, prefill included) length | We need answer user: "A train leaves city A at 60 km/h and a
+json   256 tokens    9.30 s    36.3 ms/token (wall, prefill included) length | We need to respond to user: "Return a JSON array of 8 object
+chat  DIFFERS at character 323 of 1379/1414 (tokens 256 vs 256): 's into DAG, upload to device, instantiate. Replay launches w' | 's into DAG, upload to device, replay with single API call. R'
+math  DIFFERS at character 193 of 762/710 (tokens 256 vs 256): 'd where they meet." Need solve. Need be careful about times.' | 'd where they meet." Need solve step by step. Need be careful'
+identical transcripts: 2 of 4
+
+=== 03:54:38 w1-graph-ab wait for the profile
+1
+
+=== 03:55:53 w1-graph-ab timed_load greedy C1
+== per-class wall aggregate tokens/s (prefill included), greedy, max_tokens 256
+| class | c=1 |
+|---|---|
+| prose | 18.9 |
+| code | 30.3 |
+| json | 42.6 |
+| math | 33.0 |
+| chat | 17.9 |
+mtp 2.73 tok/step/req, accept p1 73 % p2 47 % p3 29 % p4 14 % p5 6 % p6 3 % p7 2 %, first miss was the drafter's 2nd 22 % / 3rd 12 % / 4th-8th 32 % / 9th-16th 11 % / none 17 % (65 misses) 
+
+=== 03:57:37 w1-graph-ab down
+2026-10-05 03:57:37.814 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/w1-graph-ab/server
+stray dgpp-serve: 1049282 /home/stephen/workspace/dgpp/build-ci/dgpp-serve --config /home/stephen/workspace/dgpp/bench
+
+=== 03:58:46 nsys per-kernel table
+Processing 511623 events: [1%                                                  ]Processing 511623 events: [2%                                                  ]Processing 511623 events: [3%                                                  ]Processing 511623 events: [4%                                                  ]Processing 511623 events: [5%                                                  ]Processing 511623 events: [=6%                                                 ]Processing 511623 events: [=7%                                                 ]Processing 511623 events: [==8%                                                ]Processing 511623 events: [==9%                                                ]Processing 511623 events: [==10%                                               ]Processing 511623 events: [==11%                                               ]Processing 511623 events: [===12%                                              ]Processing 511623 events: [===13%                                              ]Processing 511623 events: [====14%                                             ]Processing 511623 events: [====15%                                             ]Processing 511623 events: [=====16%                                            ]Processing 511623 events: [=====17%                                            ]Processing 511623 events: [======18%                                           ]Processing 511623 events: [======19%                                           ]Processing 511623 events: [=======20%                                          ]Processing 511623 events: [=======21%                                          ]Processing 511623 events: [========22%                                         ]Processing 511623 events: [========23%                                         ]Processing 511623 events: [=========24%                                        ]Processing 511623 events: [==========25%                                       ]Processing 511623 events: [==========26%                                       ]Processing 511623 events: [===========27%                                      ]Processing 511623 events: [===========28%                                      ]Processing 511623 events: [============29%                                     ]Processing 511623 events: [============30%                                     ]Processing 511623 events: [=============31%                                    ]Processing 511623 events: [=============32%                                    ]Processing 511623 events: [==============33%                                   ]Processing 511623 events: [==============34%                                   ]Processing 511623 events: [===============35%                                  ]Processing 511623 events: [===============36%                                  ]Processing 511623 events: [================37%                                 ]Processing 511623 events: [================38%                                 ]Processing 511623 events: [=================39%                                ]Processing 511623 events: [=================40%                                ]Processing 511623 events: [==================41%                               ]Processing 511623 events: [==================42%                               ]Processing 511623 events: [===================43%                              ]Processing 511623 events: [===================44%                              ]Processing 511623 events: [====================45%                             ]Processing 511623 events: [====================46%                             ]Processing 511623 events: [=====================47%                            ]Processing 511623 events: [=====================48%                            ]Processing 511623 events: [======================49%                           ]Processing 511623 events: [=======================50%                          ]Processing 511623 events: [=======================51%                          ]Processing 511623 events: [========================52%                         ]Processing 511623 events: [========================53%                         ]Processing 511623 events: [=========================54%                        ]Processing 511623 events: [=========================55%                        ]Processing 511623 events: [==========================56%                       ]Processing 511623 events: [==========================57%                       ]Processing 511623 events: [===========================58%                      ]Processing 511623 events: [===========================59%                      ]Processing 511623 events: [============================60%                     ]Processing 511623 events: [============================61%                     ]Processing 511623 events: [=============================62%                    ]Processing 511623 events: [=============================63%                    ]Processing 511623 events: [==============================64%                   ]Processing 511623 events: [==============================65%                   ]Processing 511623 events: [===============================66%                  ]Processing 511623 events: [===============================67%                  ]Processing 511623 events: [================================68%                 ]Processing 511623 events: [================================69%                 ]Processing 511623 events: [=================================70%                ]Processing 511623 events: [=================================71%                ]Processing 511623 events: [==================================72%               ]Processing 511623 events: [==================================73%               ]Processing 511623 events: [===================================74%              ]Processing 511623 events: [====================================75%             ]Processing 511623 events: [====================================76%             ]Processing 511623 events: [=====================================77%            ]Processing 511623 events: [=====================================78%            ]Processing 511623 events: [======================================79%           ]Processing 511623 events: [======================================80%           ]Processing 511623 events: [=======================================81%          ]Processing 511623 events: [=======================================82%          ]Processing 511623 events: [========================================83%         ]Processing 511623 events: [========================================84%         ]Processing 511623 events: [=========================================85%        ]Processing 511623 events: [=========================================86%        ]Processing 511623 events: [==========================================87%       ]Processing 511623 events: [==========================================88%       ]Processing 511623 events: [===========================================89%      ]Processing 511623 events: [===========================================90%      ]Processing 511623 events: [============================================91%     ]Processing 511623 events: [============================================92%     ]Processing 511623 events: [=============================================93%    ]Processing 511623 events: [=============================================94%    ]Processing 511623 events: [==============================================95%   ]Processing 511623 events: [==============================================96%   ]Processing 511623 events: [===============================================97%  ]Processing 511623 events: [===============================================98%  ]Processing 511623 events: [================================================99% ]Processing 511623 events: [================================================100%]
+180172 kernels (177662 graph nodes) over 22.5 s; GPU kernel time 22453 ms
+  18767.8 ms  83.6%    58364x  mma_gemv_kernel
+   1681.8 ms   7.5%     4512x  bf12_gemv_wide_kernel
+    777.3 ms   3.5%     6873x  kda_recurrent_kernel
+    171.8 ms   0.8%     2190x  Kernel2
+    147.8 ms   0.7%      144x  spec_commit_kernel
+    146.1 ms   0.7%    11189x  rmsnorm_kernel
+    129.9 ms   0.6%     2291x  full_attn_row_kernel
+    106.2 ms   0.5%    13746x  bf16_gemv_multi_kernel
+     92.9 ms   0.4%      146x  topk_kernel
+     57.8 ms   0.3%     9292x  add_rmsnorm_kernel
+     49.2 ms   0.2%     6969x  kda_conv_kernel
+     37.2 ms   0.2%     9292x  qwen35_swiglu_kernel
+     31.0 ms   0.1%     2920x  grouped_conv_kernel
+     29.9 ms   0.1%     2291x  full_attn_combine_kernel
+     29.3 ms   0.1%      730x  block_attn_split_kernel
+     26.4 ms   0.1%      146x  selector_kernel
+     24.2 ms   0.1%     6969x  gated_rmsnorm_swish_kernel
+     22.7 ms   0.1%     6836x  norm_rope_kernel
+     20.6 ms   0.1%    13746x  mma_gemv_split_reduce_kernel
+     19.4 ms   0.1%    10022x  add_inplace_kernel
+     15.5 ms   0.1%     3783x  kv_append_kernel
+     10.5 ms   0.0%        2x  scale_gemv_kernel
+      9.8 ms   0.0%       96x  gdn_chunk_state_kernel
+      6.1 ms   0.0%      144x  sample_prepare_kernel
+      6.1 ms   0.0%     2323x  gate_out_kernel
+      6.0 ms   0.0%      291x  embed_gather_kernel
+      5.5 ms   0.0%      730x  block_attn_combine_kernel
+      5.2 ms   0.0%       96x  gdn_chunk_prep_kernel
+
+=== 03:58:47 w1-mtp5 up (the same-dispatch exactness gate: 6 verify rows)
+2026-10-05 03:59:03.764 READY — curl http://<node-0>:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/w1-mtp5/server)
+
+=== 03:59:03 w1-mtp5 transcripts vs w1-graph-ab
+chat   256 tokens   20.41 s    79.7 ms/token (wall, prefill included) length | We need answer user: "Explain, in a few paragraphs, why a CU
+code   256 tokens   13.50 s    52.7 ms/token (wall, prefill included) length | We need answer user: "Write a Python function that parses an
+math   256 tokens   10.08 s    39.4 ms/token (wall, prefill included) length | We need answer user: "A train leaves city A at 60 km/h and a
+json   256 tokens   11.43 s    44.6 ms/token (wall, prefill included) length | We need to respond to user: "Return a JSON array of 8 object
+identical transcripts: 4 of 4
+
+=== 03:59:59 w1-mtp5 down
+2026-10-05 04:00:01.284 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/w1-mtp5/server
+
+=== 04:00:01 glm up
+2026-10-05 04:00:39.846 READY — curl http://<node-0>:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+W1V_DONE 04:00:39

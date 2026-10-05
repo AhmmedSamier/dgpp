@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <random>
 #include <string>
 #include <vector>
@@ -233,6 +234,219 @@ DGPP_TEST(dflash2_selector_walks_the_reference_scores) {
     prev = besti;
   }
   }  // shape cases
+}
+
+// The sampled walk (a stochastic spec): every step's token is one of its
+// candidates and the proposal lists the k candidates with softmax(scores /
+// T) masses and the draw as `token`, on the device and in the pinned mirror;
+// the draw is the inverse-CDF walk on the draft stream's uniform keyed by
+// the draft's position (reproduced here), so equal inputs draw equal chains
+// and a greedy spec walks the argmax with n = 0.
+DGPP_TEST(dflash2_selector_sampled_walk_proposes_its_draw) {
+  cudaStream_t s = test_stream();
+  const int steps = 7, k = 16, rank = 256, vocab = 1009;
+  const int32_t anchor = 5;
+  const int64_t anchor64 = anchor;
+  auto pred = random_bf16_normal(41, static_cast<int64_t>(vocab) * rank, 0.5f);
+  auto succ = random_bf16_normal(42, static_cast<int64_t>(vocab) * rank, 0.5f);
+  std::mt19937 rng(43);
+  std::vector<int32_t> ids(steps * k);
+  for (int l = 0; l < steps; ++l)  // distinct candidates per step
+    for (int c = 0; c < k; ++c) ids[l * k + c] = static_cast<int32_t>((l * 37 + c * 7 + rng() % 5) % vocab);
+  std::vector<float> unary(steps * k), hidden(steps * rank);
+  for (auto& v : unary) v = std::uniform_real_distribution<float>(-2.0f, 2.0f)(rng);
+  for (auto& v : hidden) v = std::uniform_real_distribution<float>(-1.0f, 1.0f)(rng);
+  std::vector<int64_t> pos(steps + 1);
+  for (int j = 0; j <= steps; ++j) pos[j] = 1000 + j;
+
+  DevBuf dp(pred.size() * 2), ds(succ.size() * 2), di(ids.size() * 4), du(unary.size() * 4),
+      dh(hidden.size() * 4), dt(steps * 4), da(8), dpos(pos.size() * 8), dspec(sizeof(dgpp::SampleSpec)),
+      dprop(sizeof(dgpp::DraftProposal) * dgpp::kSampleProposalSlots);
+  da.upload(&anchor64, 8);
+  dp.upload(pred.data(), pred.size() * 2);
+  ds.upload(succ.data(), succ.size() * 2);
+  di.upload(ids.data(), ids.size() * 4);
+  du.upload(unary.data(), unary.size() * 4);
+  dh.upload(hidden.data(), hidden.size() * 4);
+  dpos.upload(pos.data(), pos.size() * 8);
+  dgpp::DraftProposal* hprop = nullptr;
+  DGPP_CUDA_OK(cudaMallocHost(reinterpret_cast<void**>(&hprop),
+                              sizeof(dgpp::DraftProposal) * dgpp::kSampleProposalSlots));
+  for (int l = 0; l < dgpp::kSampleProposalSlots; ++l) hprop[l] = dgpp::DraftProposal{};
+
+  auto walk = [&](float temperature, uint64_t seed, std::vector<int32_t>* tokens,
+                  std::vector<dgpp::DraftProposal>* props) {
+    dgpp::SampleSpec spec{};
+    spec.temperature = temperature;
+    spec.seed = seed;
+    dspec.upload(&spec, sizeof(spec));
+    DGPP_CUDA_OK(cudaMemsetAsync(dprop.p, 0x7f, dprop.bytes, s));  // stale rows
+    dgpp::dflash2_selector_walk(ci32(di), cf32(du), cf32(dh), cb16(dp), cb16(ds), ci64(da), i32(dt),
+                                steps, k, rank, s, ci64(dpos),
+                                static_cast<const dgpp::SampleSpec*>(dspec.p),
+                                static_cast<dgpp::DraftProposal*>(dprop.p), hprop);
+    DGPP_CUDA_OK(cudaStreamSynchronize(s));
+    tokens->assign(steps, 0);
+    dt.download(tokens->data(), steps * 4);
+    props->assign(dgpp::kSampleProposalSlots, dgpp::DraftProposal{});
+    dprop.download(props->data(), sizeof(dgpp::DraftProposal) * dgpp::kSampleProposalSlots);
+  };
+
+  // The host's view of the chain: scores of step l given the previous pick.
+  const auto pf = to_f(pred), sf = to_f(succ);
+  auto scores = [&](int l, int prev, std::vector<float>* out) {
+    out->assign(k, 0.0f);
+    for (int c = 0; c < k; ++c) {
+      const int32_t pid = l == 0 ? anchor : ids[static_cast<int64_t>(l - 1) * k + prev];
+      const int32_t sid = ids[static_cast<int64_t>(l) * k + c];
+      float dot = 0.0f;
+      for (int r = 0; r < rank; ++r)
+        dot += pf[static_cast<int64_t>(pid) * rank + r] * hidden[l * rank + r] *
+               sf[static_cast<int64_t>(sid) * rank + r];
+      (*out)[c] = unary[static_cast<int64_t>(l) * k + c] + dot;
+    }
+  };
+
+  // Greedy spec: the argmax chain, no proposal.
+  std::vector<int32_t> greedy;
+  std::vector<dgpp::DraftProposal> gprops;
+  walk(0.0f, 7, &greedy, &gprops);
+  {
+    int prev = 0;
+    for (int l = 0; l < steps; ++l) {
+      std::vector<float> sc;
+      scores(l, prev, &sc);
+      int best = 0;
+      for (int c = 1; c < k; ++c)
+        if (sc[c] > sc[best]) best = c;
+      require(greedy[l] == ids[l * k + best], "greedy step " + std::to_string(l) + " is the argmax");
+      require(gprops[l].n == 0 && hprop[l].n == 0, "a greedy spec writes no proposal (n = 0)");
+      prev = best;
+    }
+  }
+
+  // Sampled spec at temperature 1: candidates, masses, the draw, the mirror.
+  std::vector<int32_t> tok;
+  std::vector<dgpp::DraftProposal> props;
+  walk(1.0f, 12345, &tok, &props);
+  {
+    int prev = 0;
+    for (int l = 0; l < steps; ++l) {
+      std::vector<float> sc;
+      scores(l, prev, &sc);
+      const float mx = *std::max_element(sc.begin(), sc.end());
+      std::vector<double> q(k);
+      double den = 0.0;
+      for (int c = 0; c < k; ++c) {
+        q[c] = std::exp(static_cast<double>(sc[c] - mx));
+        den += q[c];
+      }
+      const dgpp::DraftProposal& p = props[l];
+      require(p.n == k, "step " + std::to_string(l) + ": the proposal lists the k candidates");
+      require(p.token == tok[l], "the proposal's token is the drawn draft");
+      require(hprop[l].n == p.n && hprop[l].token == p.token &&
+                  std::memcmp(hprop[l].ids, p.ids, sizeof(int32_t) * k) == 0 &&
+                  std::memcmp(hprop[l].mass, p.mass, sizeof(float) * k) == 0,
+              "the pinned mirror carries the device proposal (n, token, the k ids and masses)");
+      int chosen = -1;
+      double sum = 0.0;
+      for (int c = 0; c < k; ++c) {
+        require(p.ids[c] == ids[l * k + c], "the proposal's ids are the step's candidates in order");
+        const double want = q[c] / den;
+        require(std::fabs(p.mass[c] - want) <= 1e-4 * std::max(1.0, want) + 1e-6,
+                "step " + std::to_string(l) + " candidate " + std::to_string(c) + ": mass " +
+                    std::to_string(p.mass[c]) + " vs softmax " + std::to_string(want));
+        sum += p.mass[c];
+        if (p.ids[c] == tok[l]) chosen = c;
+      }
+      require(std::fabs(sum - 1.0) < 1e-4, "the masses sum to one");
+      require(chosen >= 0, "the draw is one of the candidates");
+      // The draft stream's uniform at the draft's position decides the draw.
+      const uint64_t seed = 12345ull ^ dgpp::kSampleDraftSeedMix ^ (static_cast<uint64_t>(l + 1) * 0xD1B54A32D192ED03ull);
+      const double u = dgpp::uniform01(seed, static_cast<uint64_t>(pos[l + 1]));
+      double cum = 0.0;
+      int want = k - 1;
+      for (int c = 0; c < k; ++c) {
+        cum += q[c] / den;
+        if (cum > u) {
+          want = c;
+          break;
+        }
+      }
+      // Equal unless the uniform falls within fp32 rounding of a boundary.
+      const bool boundary = std::fabs(cum - u) < 1e-5;
+      require(chosen == want || boundary, "step " + std::to_string(l) + ": the inverse-CDF draw (" +
+                                               std::to_string(want) + ") vs the kernel's (" + std::to_string(chosen) + ")");
+      prev = chosen;
+    }
+  }
+  // The request's truncation on the proposal: top-p 0.5 keeps the smallest
+  // prefix of the mass-ordered candidates reaching 0.5, renormalized; the
+  // draw is one of the survivors.
+  {
+    dgpp::SampleSpec spec{};
+    spec.temperature = 1.0f;
+    spec.seed = 777;
+    spec.top_p = 0.5f;
+    dspec.upload(&spec, sizeof(spec));
+    dgpp::dflash2_selector_walk(ci32(di), cf32(du), cf32(dh), cb16(dp), cb16(ds), ci64(da), i32(dt),
+                                steps, k, rank, s, ci64(dpos),
+                                static_cast<const dgpp::SampleSpec*>(dspec.p),
+                                static_cast<dgpp::DraftProposal*>(dprop.p), hprop);
+    DGPP_CUDA_OK(cudaStreamSynchronize(s));
+    std::vector<int32_t> ttok(steps);
+    dt.download(ttok.data(), steps * 4);
+    std::vector<dgpp::DraftProposal> tp(dgpp::kSampleProposalSlots);
+    dprop.download(tp.data(), sizeof(dgpp::DraftProposal) * dgpp::kSampleProposalSlots);
+    int prev = 0;
+    for (int l = 0; l < steps; ++l) {
+      std::vector<float> sc;
+      scores(l, prev, &sc);
+      const float mx = *std::max_element(sc.begin(), sc.end());
+      std::vector<std::pair<double, int>> q(k);
+      double den = 0.0;
+      for (int c = 0; c < k; ++c) {
+        q[c] = {std::exp(static_cast<double>(sc[c] - mx)), c};
+        den += q[c].first;
+      }
+      std::sort(q.begin(), q.end(), [&](const auto& a, const auto& b) {
+        return a.first != b.first ? a.first > b.first : ids[l * k + a.second] < ids[l * k + b.second];
+      });
+      double cum = 0.0;
+      int keep = 0;
+      while (keep < k) {
+        cum += q[keep].first / den;
+        ++keep;
+        if (cum >= 0.5) break;
+      }
+      double kept = 0.0;
+      for (int i = 0; i < keep; ++i) kept += q[i].first;
+      double sum = 0.0;
+      int chosen = -1;
+      for (int i = 0; i < k; ++i) {
+        const int c = q[i].second;
+        const double want = i < keep ? q[i].first / kept : 0.0;
+        require(std::fabs(tp[l].mass[c] - want) <= 1e-4 * std::max(1.0, want) + 1e-6,
+                "top-p 0.5 step " + std::to_string(l) + " candidate " + std::to_string(c) + ": mass " +
+                    std::to_string(tp[l].mass[c]) + " vs " + std::to_string(want));
+        sum += tp[l].mass[c];
+        if (tp[l].ids[c] == ttok[l]) chosen = c;
+      }
+      require(std::fabs(sum - 1.0) < 1e-4, "the survivors' masses sum to one");
+      require(chosen >= 0 && tp[l].mass[chosen] > 0.0f, "the draw is a survivor");
+      prev = chosen;
+    }
+  }
+  // Determinism and seed sensitivity.
+  std::vector<int32_t> tok2, tok3;
+  std::vector<dgpp::DraftProposal> p2, p3;
+  walk(1.0f, 12345, &tok2, &p2);
+  require(tok2 == tok, "the same spec draws the same chain");
+  walk(1.0f, 99, &tok3, &p3);
+  bool moved = false;
+  for (int l = 0; l < steps; ++l) moved = moved || tok3[l] != tok[l];
+  require(moved || greedy == tok, "another seed moves the chain (unless the scores are near-deterministic)");
+  DGPP_CUDA_OK(cudaFreeHost(hprop));
 }
 
 // ---- the block attention --------------------------------------------------------

@@ -45,12 +45,13 @@ block of seven drafts from one anchor.
 **One Spark** (`cluster_qwen3.8-27b_fp8_w1`): the drafter recipe. 27.5 GiB
 of weights, a 256K-token BF16 KV pool (21.0 GiB), the 3.6 GiB drafter and
 its five K/V planes, eight request slots and a 1.4 GiB prefix cache plan at
-62 GiB; the eager engine runs one block proposal a step (verify rows up to
-eight, the multi-slot verify as a captured graph, the redrafts stacked
-across slots), the drafter's bf16 matrices packed lossless 12-bit. The MTP
-depth-2 world with the decode graph is the template's mode
-(`--no-dflash --mtp --mtp-depth 2`), plain decode `--no-dflash`, the
-drafter on the graph engine `--decode-graph` (the same transcripts, faster).
+62 GiB; the graph engine records the block proposal inside the decode
+step (the 8-row verify and the drafter's forward in one graph, as on the
+fabric — the template since 2026-10-05; the eager engine's transcripts 4/4,
+chat 71 against 95 ms a token), the drafter's bf16 matrices packed lossless
+12-bit. The MTP depth-2 world is the template's mode (`--no-dflash --mtp
+--mtp-depth 2`), plain decode `--no-dflash`, the eager engine
+`engine.decode_graph: false` in the recipe.
 
 **Two and four Sparks** (`cluster_qwen3.8-27b_fp8_w2`, `_w4`): tensor
 parallel — the DeltaNet and attention heads, the MLP and the lm head sliced
@@ -59,7 +60,7 @@ output and the MLP output, bf16 on the wire) — MTP depth 3 with the decode
 graph; 15.0 GiB of weights and a 13 GiB KV pool a rank at 256K on two
 Sparks, eight slots. The DFlash2 drafter is each template's mode since
 2026-10-04 (`--no-mtp --dflash-model z-lab/Qwen3.8-27B-DFlash2
---bf16-weights bf12`): the block proposal recorded inside the graph step on
+--bf16-weights bf12 --mtp-draft-temperature 0.7`): the block proposal recorded inside the graph step on
 every rank, the drafter's heads and MLP rows sharded across the ranks, the
 ranks' top-16 lists merged through one fold ([#92](https://github.com/HawkBearPig/dgpp/issues/92)).
 Greedy C1 by class (prose / code / json / math / chat), the MTP templates

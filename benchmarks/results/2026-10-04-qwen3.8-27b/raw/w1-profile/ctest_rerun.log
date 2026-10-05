@@ -1,0 +1,8 @@
+
+=== 05:21:05 glm down
+2026-10-05 05:21:12.354 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 05:21:12 ctest (host suite, serial, device free)
+100% tests passed, 0 tests failed out of 206
+
+=== 05:36:48 glm up

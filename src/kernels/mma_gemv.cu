@@ -170,6 +170,52 @@ __device__ __forceinline__ void zero_rows(int m, uint16_t* __restrict__ sA) {
   }
 }
 
+// The one-tile decode form's activation staging, pipelined through
+// registers (2026-10-05): the synchronous stage_a put one L2 round trip on
+// every window's critical path — at one row only warp 0 loads and the other
+// warps' consume covers it, at 8 rows every thread loads before its own
+// consume and the window waits the whole latency (gate|up [17408 x 5120]:
+// 237 GB/s at one row, 205 at eight in the step). Window w + 2's rows are
+// requested into registers while window w is consumed and stored into the
+// buffer window w + 1 vacates, one window later. Up to kPreUnits 16-byte
+// units per thread (16 rows x kK / 8 over the block's threads); rows past m
+// stay as zero_rows left them. Not for the swiglu form (its staging computes).
+template <int kTiles, bool kFp8, int kW> struct Pre {
+  using W = Win<kTiles, kFp8>;
+  static constexpr int kUnits = W::kK / 8;
+  static constexpr int kPreUnits = (W::kRows * kUnits + kW * 32 - 1) / (kW * 32);
+  static constexpr bool kOn = kTiles == 1;
+};
+template <int kTiles, bool kFp8, int kW>
+__device__ __forceinline__ void pre_load(const uint16_t* __restrict__ act, size_t act_stride, int m, int k,
+                                         int base, uint4 (&pre)[Pre<kTiles, kFp8, kW>::kPreUnits]) {
+  using P = Pre<kTiles, kFp8, kW>;
+  const int rows = m < P::W::kRows ? m : P::W::kRows;
+#pragma unroll
+  for (int j = 0; j < P::kPreUnits; ++j) {
+    const int i = static_cast<int>(threadIdx.x) + j * kW * 32;
+    const int row = i / P::kUnits, u = i - row * P::kUnits;
+    const int col = base + u * 8;
+    pre[j] = make_uint4(0u, 0u, 0u, 0u);
+    if (base < k && i < rows * P::kUnits && col + 8 <= k)
+      pre[j] = *reinterpret_cast<const uint4*>(act + static_cast<size_t>(row) * act_stride + col);
+  }
+}
+template <int kTiles, bool kFp8, int kLaneUnits, int kW>
+__device__ __forceinline__ void pre_store(int m, int k, int base, const uint4 (&pre)[Pre<kTiles, kFp8, kW>::kPreUnits],
+                                          uint16_t* __restrict__ sA) {
+  using P = Pre<kTiles, kFp8, kW>;
+  if (base >= k) return;
+  const int rows = m < P::W::kRows ? m : P::W::kRows;
+#pragma unroll
+  for (int j = 0; j < P::kPreUnits; ++j) {
+    const int i = static_cast<int>(threadIdx.x) + j * kW * 32;
+    if (i >= rows * P::kUnits) continue;
+    const int row = i / P::kUnits, u = i - row * P::kUnits;
+    *reinterpret_cast<uint4*>(sA + static_cast<size_t>(row) * P::W::kStride + swz<kLaneUnits>(u) * 8) = pre[j];
+  }
+}
+
 __device__ __forceinline__ void mma_bf16(float (&c)[4], uint32_t a0, uint32_t a1, uint32_t a2,
                                          uint32_t a3, uint32_t b0, uint32_t b1) {
   asm volatile(
@@ -296,6 +342,10 @@ __global__ __launch_bounds__(kW * 32, 2) void mma_gemv_kernel(const uint16_t* __
   zero_rows<kTiles, kFp8, F::kLaneUnits, kW>(m, sA[0]);
   zero_rows<kTiles, kFp8, F::kLaneUnits, kW>(m, sA[1]);
   stage_a<kTiles, kFp8, F::kLaneUnits, kW>(act, act_stride, m, k, win0 * W::kK, sA[0], act2, limit);
+  using P = Pre<kTiles, kFp8, kW>;
+  const bool pipelined = L::kOn && P::kOn && act2 == nullptr;
+  uint4 pre[P::kPreUnits];
+  if (pipelined) pre_load<kTiles, kFp8, kW>(act, act_stride, m, k, (win0 + 1) * W::kK, pre);
   __syncthreads();
   int buf = 0;
   for (int base = win0 * W::kK, base_end = win1 * W::kK; base < base_end; base += W::kK, buf ^= 1) {
@@ -308,7 +358,14 @@ __global__ __launch_bounds__(kW * 32, 2) void mma_gemv_kernel(const uint16_t* __
       issue(win + L::kStages - 1);
       cp_async_wait<L::kStages - 1>();
       __syncwarp();  // every lane's copies of this window visible to the warp
-      stage_a<kTiles, kFp8, F::kLaneUnits, kW>(act, act_stride, m, k, base + W::kK, sA[buf ^ 1], act2, limit);
+      if (pipelined) {
+        // Window base + kK (requested last window) lands in the buffer
+        // consumed last window; window base + 2 kK is requested now.
+        pre_store<kTiles, kFp8, F::kLaneUnits, kW>(m, k, base + W::kK, pre, sA[buf ^ 1]);
+        pre_load<kTiles, kFp8, kW>(act, act_stride, m, k, base + 2 * W::kK, pre);
+      } else {
+        stage_a<kTiles, kFp8, F::kLaneUnits, kW>(act, act_stride, m, k, base + W::kK, sA[buf ^ 1], act2, limit);
+      }
       // The quad layout: lane (r, t) takes its run of group g (16 fp8 or 8 bf16
       // k per vector) out of row r's slice.
       const uint8_t* wbuf = wring + static_cast<size_t>(win % L::kStages) * L::kWarpBytes;

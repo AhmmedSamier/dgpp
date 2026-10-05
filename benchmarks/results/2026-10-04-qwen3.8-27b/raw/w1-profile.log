@@ -1,0 +1,56 @@
+
+=== 02:27:50 glm down
+2026-10-05 02:27:58.864 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 02:27:58 w1-eager up
+2026-10-05 02:28:23.164 READY — curl http://<node-0>:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/w1-eager/server)
+
+=== 02:28:23 w1-eager transcripts
+chat   256 tokens   23.65 s    92.4 ms/token (wall, prefill included) length | We need answer user: "Explain, in a few paragraphs, why a CU
+code   256 tokens   10.46 s    40.9 ms/token (wall, prefill included) length | We need answer user: "Write a Python function that parses an
+math   256 tokens    7.76 s    30.3 ms/token (wall, prefill included) length | We need answer user: "A train leaves city A at 60 km/h and a
+json   256 tokens    9.49 s    37.1 ms/token (wall, prefill included) length | We need to respond to user: "Return a JSON array of 8 object
+
+=== 02:29:14 w1-eager timed_load greedy C1,2,4,8
+== per-class wall aggregate tokens/s (prefill included), greedy, max_tokens 256
+| class | c=1 | c=2 | c=4 | c=8 |
+|---|---|---|---|---|
+| prose | 18.2 | 25.8 | 42.1 | 45.2 |
+| code | 29.1 | 46.1 | 74.6 | 78.7 |
+| json | 40.5 | 66.5 | 86.7 | 96.2 |
+| math | 33.0 | 60.6 | 82.2 | 84.3 |
+| chat | 17.4 | 28.6 | 47.8 | 49.5 |
+
+=== 02:41:16 w1-eager down
+2026-10-05 02:41:18.681 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/w1-eager/server
+
+=== 02:41:18 w1-graph up
+2026-10-05 02:41:44.993 READY — curl http://<node-0>:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/w1-graph/server)
+
+=== 02:41:45 w1-graph transcripts
+chat   256 tokens   17.68 s    69.1 ms/token (wall, prefill included) length | We need answer user: "Explain, in a few paragraphs, why a CU
+code   256 tokens   10.30 s    40.2 ms/token (wall, prefill included) length | We need answer user: "Write a Python function that parses an
+math   256 tokens    7.63 s    29.8 ms/token (wall, prefill included) length | We need answer user: "A train leaves city A at 60 km/h and a
+json   256 tokens    9.37 s    36.6 ms/token (wall, prefill included) length | We need to respond to user: "Return a JSON array of 8 object
+
+=== 02:42:30 w1-graph wait for the profile
+1
+
+=== 02:43:40 w1-graph timed_load greedy C1,2,4,8
+== per-class wall aggregate tokens/s (prefill included), greedy, max_tokens 256
+| class | c=1 | c=2 | c=4 | c=8 |
+|---|---|---|---|---|
+| prose | 18.5 | 26.3 | 42.6 | 45.7 |
+| code | 29.6 | 46.7 | 77.9 | 79.8 |
+| json | 41.8 | 68.9 | 88.2 | 98.4 |
+| math | 33.7 | 61.9 | 76.1 | 85.5 |
+| chat | 17.7 | 29.1 | 49.5 | 50.0 |
+
+=== 02:55:31 w1-graph down
+2026-10-05 02:55:31.638 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/w1-graph/server
+
+=== 02:55:31 glm up
+2026-10-05 02:55:42.738 === peers <node-1> <node-2> <node-3>
+
+W1_DONE 03:05:31
+SCRIPT_EXIT=0

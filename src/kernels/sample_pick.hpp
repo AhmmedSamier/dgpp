@@ -66,7 +66,7 @@ struct SampleSpec {
   uint64_t counter = 0;
   // The DRAFT's temperature: the proposal is the draft head's
   // final set at THIS temperature, the request's own scaled by
-  // DGPP_SPEC_PROPOSAL_TEMP (0 = the request's). Any proposal is exact;
+  // engine.mtp_draft_temperature (0 = the request's). Any proposal is exact;
   // the scale only moves the overlap with P, i.e. the acceptance rate.
   float draft_temperature = 0.0f;
 };
@@ -79,6 +79,20 @@ struct SampleSpec {
 // untouched), and it carries no state of its own to keep in step across a
 // fallback's push.
 constexpr uint64_t kSampleDraftSeedMix = 0x9E3779B97F4A7C15ull;
+// The draw primitives (sample::uniform01's arithmetic): splitmix64 and the
+// top 53 bits of splitmix64(splitmix64(counter) ^ seed) as an fp64 in
+// [0, 1) — the verdict's draws, the draft pick's, and the DFlash2 sampled
+// walk's (kernels/dflash2.hpp), host-callable for the gates.
+__host__ __device__ inline uint64_t splitmix64(uint64_t x) {
+  x += 0x9e3779b97f4a7c15ull;
+  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+  x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+  return x ^ (x >> 31);
+}
+__host__ __device__ inline double uniform01(uint64_t seed, uint64_t counter) {
+  const uint64_t draw = splitmix64(splitmix64(counter) ^ seed);
+  return static_cast<double>(draw >> 11) * (1.0 / 9007199254740992.0);
+}
 
 constexpr int kSampleMaxTopLogprobs = 20;
 

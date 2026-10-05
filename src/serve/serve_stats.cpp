@@ -90,6 +90,23 @@ std::string ThroughputLog::format(int rank, double seconds, const Meters& prev,
                                 static_cast<double>(attempts));
     }
     if (!accept.empty()) out += ", accept" + accept;
+    // A block drafter's first rejected draft, ranked among the candidates
+    // its walk scored there (the share a tree verify of that width would
+    // have kept): the 2nd candidate, the 3rd, the 4th..8th, the 9th..16th,
+    // or none of the list.
+    uint64_t miss[5] = {}, total = 0;
+    constexpr int R = decltype(cur.mtp)::kMissRanks;
+    for (int r = 0; r <= R; ++r) {
+      const uint64_t n = cur.mtp.miss_rank[r] - prev.mtp.miss_rank[r];
+      total += n;
+      if (r == 0) continue;  // rank 0 is the draft itself (never a miss)
+      miss[r == 1 ? 0 : r == 2 ? 1 : r <= 7 ? 2 : r < R ? 3 : 4] += n;
+    }
+    if (total > 0) {
+      const auto pct = [&](uint64_t n) { return 100.0 * static_cast<double>(n) / static_cast<double>(total); };
+      out += std::format(", first miss was the drafter's 2nd {:.0f} % / 3rd {:.0f} % / 4th-8th {:.0f} % / 9th-16th {:.0f} % / none {:.0f} % ({} misses)",
+                         pct(miss[0]), pct(miss[1]), pct(miss[2]), pct(miss[3]), pct(miss[4]), total);
+    }
   }
   out += std::format(" | prefill {} prompt{} / {} tok", prompts,
                      prompts == 1 ? "" : "s", computed);

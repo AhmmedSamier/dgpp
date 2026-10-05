@@ -1,0 +1,181 @@
+
+=== 04:20:41 glm down
+2026-10-05 04:20:49.443 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 04:20:49 mma_gemv rows curve, world 1
+== mlp gate|up [I x H]  n=17408 k=5120  89.1 MB
+  m=1 mma         390.1 us   228.5 GB/s
+  m=4 mma         403.7 us   220.8 GB/s
+  m=8 mma         405.2 us   220.0 GB/s
+  m=16 mma         425.5 us   209.5 GB/s
+== mlp down [H x I]  n=5120 k=17408  89.1 MB
+  m=1 mma         393.0 us   226.8 GB/s
+  m=4 mma         393.2 us   226.7 GB/s
+  m=8 mma         407.0 us   219.0 GB/s
+  m=16 mma         443.1 us   201.2 GB/s
+== gdn in_proj qkz [2K+V x H]  n=10240 k=5120  52.4 MB
+  m=1 mma         228.5 us   229.4 GB/s
+  m=4 mma         229.7 us   228.2 GB/s
+  m=8 mma         238.8 us   219.6 GB/s
+  m=16 mma         247.3 us   212.0 GB/s
+== gdn in_proj v [V x H]  n=6144 k=5120  31.5 MB
+  m=1 mma         142.8 us   220.3 GB/s
+  m=4 mma         146.8 us   214.3 GB/s
+  m=8 mma         140.2 us   224.4 GB/s
+  m=16 mma         169.0 us   186.2 GB/s
+== gdn out [H x V]  n=5120 k=6144  31.5 MB
+  m=1 mma         155.1 us   202.8 GB/s
+  m=4 mma         144.5 us   217.7 GB/s
+  m=8 mma         146.1 us   215.3 GB/s
+  m=16 mma         173.0 us   181.8 GB/s
+== attn qkv [2QW x H]  n=12288 k=5120  62.9 MB
+  m=1 mma         283.9 us   221.6 GB/s
+  m=4 mma         288.2 us   218.3 GB/s
+  m=8 mma         275.7 us   228.2 GB/s
+  m=16 mma         295.0 us   213.3 GB/s
+== attn kv [KVW x H]  n=1024 k=5120  5.2 MB
+  m=1 mma          27.8 us   188.4 GB/s
+  m=4 mma          29.3 us   178.8 GB/s
+  m=8 mma          29.9 us   175.3 GB/s
+  m=16 mma          30.8 us   170.4 GB/s
+== attn out [H x QW]  n=5120 k=6144  31.5 MB
+  m=1 mma         140.8 us   223.5 GB/s
+  m=4 mma         142.2 us   221.1 GB/s
+  m=8 mma         164.9 us   190.7 GB/s
+  m=16 mma         167.7 us   187.6 GB/s
+== lm head [V/w x H]  n=248320 k=5120  1271.4 MB
+  m=1 mma        5695.5 us   223.2 GB/s
+  m=4 mma        5541.4 us   229.4 GB/s
+  m=8 mma        5500.2 us   231.2 GB/s
+  m=16 mma        5526.8 us   230.0 GB/s
+
+=== 04:20:51 mma_gemv rows curve, world 2
+== mlp gate|up [I x H]  n=8704 k=5120  44.6 MB
+  m=1 mma         203.5 us   219.0 GB/s
+  m=4 mma         203.8 us   218.6 GB/s
+  m=8 mma         205.4 us   216.9 GB/s
+  m=16 mma         239.5 us   186.0 GB/s
+== mlp down [H x I]  n=5120 k=8704  44.6 MB
+  m=1 mma         202.2 us   220.4 GB/s
+  m=4 mma         215.0 us   207.3 GB/s
+  m=8 mma         207.7 us   214.6 GB/s
+  m=16 mma         238.6 us   186.7 GB/s
+== gdn in_proj qkz [2K+V x H]  n=5120 k=5120  26.2 MB
+  m=1 mma         126.6 us   207.1 GB/s
+  m=4 mma         126.8 us   206.7 GB/s
+  m=8 mma         124.8 us   210.0 GB/s
+  m=16 mma         139.2 us   188.3 GB/s
+== gdn in_proj v [V x H]  n=3072 k=5120  15.7 MB
+  m=1 mma          70.0 us   224.8 GB/s
+  m=4 mma          71.2 us   220.9 GB/s
+  m=8 mma          84.2 us   186.8 GB/s
+  m=16 mma          73.3 us   214.5 GB/s
+== gdn out [H x V]  n=5120 k=3072  15.7 MB
+  m=1 mma          71.6 us   219.8 GB/s
+  m=4 mma          72.4 us   217.4 GB/s
+  m=8 mma          87.7 us   179.4 GB/s
+  m=16 mma          84.1 us   186.9 GB/s
+== attn qkv [2QW x H]  n=6144 k=5120  31.5 MB
+  m=1 mma         141.3 us   222.7 GB/s
+  m=4 mma         141.7 us   222.0 GB/s
+  m=8 mma         141.4 us   222.4 GB/s
+  m=16 mma         151.5 us   207.7 GB/s
+== attn kv [KVW x H]  n=512 k=5120  2.6 MB
+  m=1 mma          15.6 us   168.2 GB/s
+  m=4 mma          16.9 us   155.5 GB/s
+  m=8 mma          16.4 us   160.0 GB/s
+  m=16 mma          18.3 us   143.5 GB/s
+== attn out [H x QW]  n=5120 k=3072  15.7 MB
+  m=1 mma          86.1 us   182.8 GB/s
+  m=4 mma          74.7 us   210.7 GB/s
+  m=8 mma          80.3 us   195.8 GB/s
+  m=16 mma          77.5 us   203.0 GB/s
+== lm head [V/w x H]  n=124160 k=5120  635.7 MB
+  m=1 mma        2783.7 us   228.4 GB/s
+  m=4 mma        2778.4 us   228.8 GB/s
+  m=8 mma        2768.6 us   229.6 GB/s
+  m=16 mma        2908.4 us   218.6 GB/s
+
+=== 04:20:53 mma_gemv rows curve, world 4
+== mlp gate|up [I x H]  n=4352 k=5120  22.3 MB
+  m=1 mma         102.3 us   217.7 GB/s
+  m=4 mma         104.3 us   213.5 GB/s
+  m=8 mma         107.1 us   208.0 GB/s
+  m=16 mma         108.9 us   204.5 GB/s
+== mlp down [H x I]  n=5120 k=4352  22.3 MB
+  m=1 mma         106.9 us   208.5 GB/s
+  m=4 mma         104.3 us   213.5 GB/s
+  m=8 mma         105.2 us   211.8 GB/s
+  m=16 mma         108.2 us   206.0 GB/s
+== gdn in_proj qkz [2K+V x H]  n=2560 k=5120  13.1 MB
+  m=1 mma          61.8 us   212.0 GB/s
+  m=4 mma          63.5 us   206.3 GB/s
+  m=8 mma          66.4 us   197.3 GB/s
+  m=16 mma          66.9 us   196.0 GB/s
+== gdn in_proj v [V x H]  n=1536 k=5120  7.9 MB
+  m=1 mma          39.0 us   201.5 GB/s
+  m=4 mma          40.5 us   194.4 GB/s
+  m=8 mma          40.8 us   193.0 GB/s
+  m=16 mma          40.9 us   192.2 GB/s
+== gdn out [H x V]  n=5120 k=1536  7.9 MB
+  m=1 mma          38.3 us   205.2 GB/s
+  m=4 mma          38.5 us   204.1 GB/s
+  m=8 mma          40.8 us   192.8 GB/s
+  m=16 mma          43.0 us   182.9 GB/s
+== attn qkv [2QW x H]  n=3072 k=5120  15.7 MB
+  m=1 mma          69.9 us   225.0 GB/s
+  m=4 mma          71.2 us   221.0 GB/s
+  m=8 mma          72.5 us   216.9 GB/s
+  m=16 mma          72.2 us   217.8 GB/s
+== attn kv [KVW x H]  n=256 k=5120  1.3 MB
+  m=1 mma          10.4 us   125.6 GB/s
+  m=4 mma          11.3 us   116.1 GB/s
+  m=8 mma          10.6 us   124.2 GB/s
+  m=16 mma          12.5 us   104.8 GB/s
+== attn out [H x QW]  n=5120 k=1536  7.9 MB
+  m=1 mma          38.6 us   203.8 GB/s
+  m=4 mma          38.7 us   203.4 GB/s
+  m=8 mma          41.3 us   190.3 GB/s
+  m=16 mma          43.0 us   182.9 GB/s
+== lm head [V/w x H]  n=62080 k=5120  317.8 MB
+  m=1 mma        1426.7 us   222.8 GB/s
+  m=4 mma        1411.9 us   225.1 GB/s
+  m=8 mma        1424.9 us   223.1 GB/s
+  m=16 mma        1463.7 us   217.1 GB/s
+
+=== 04:20:54 ncu m = 1 / 8 (root)
+=== m=1 (launch-skip 20)
+  Memory Throughput                                  9.26 %
+  Duration                                        498,048 ns
+  Compute (SM) Throughput                           26.14 %
+  Mem Busy                                           9.26 %
+  Max Bandwidth                                      9.13 %
+  L2 Hit Rate                                        1.59 %
+  No Eligible                                       74.63 %
+  Warp Cycles Per Issued Instruction                15.26 cycle
+  Registers Per Thread                                109 register/thread
+  Dynamic Shared Memory Per Block                  49,664 byte/block
+  Block Limit Registers                                 2 block
+  Block Limit Shared Mem                                2 block
+  Theoretical Occupancy                             33.33 %
+  Achieved Occupancy                                31.73 %
+=== m=8 (launch-skip 100)
+  Memory Throughput                                 11.10 %
+  Duration                                        484,288 ns
+  Compute (SM) Throughput                           27.26 %
+  Mem Busy                                          11.10 %
+  Max Bandwidth                                     10.87 %
+  L2 Hit Rate                                       16.01 %
+  No Eligible                                       74.30 %
+  Warp Cycles Per Issued Instruction                15.31 cycle
+  Registers Per Thread                                109 register/thread
+  Dynamic Shared Memory Per Block                  49,664 byte/block
+  Block Limit Registers                                 2 block
+  Block Limit Shared Mem                                2 block
+  Theoretical Occupancy                             33.33 %
+  Achieved Occupancy                                32.46 %
+
+=== 04:21:06 glm up
+2026-10-05 04:21:44.651 READY — curl http://<node-0>:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+CURVE_DONE 04:21:44

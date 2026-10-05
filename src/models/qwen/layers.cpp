@@ -493,6 +493,21 @@ void QwenGdnLayer::in_projections(const uint16_t* x, int tokens, cudaStream_t st
       p[0].act = x; p[0].act_row_stride = static_cast<size_t>(H); p[0].weight = w_.in_proj_a; p[0].out = a_; p[0].n = lv_;
       p[1].act = x; p[1].act_row_stride = static_cast<size_t>(H); p[1].weight = w_.in_proj_b; p[1].out = b_; p[1].n = lv_;
       launch_bf16_gemv_multi(p, 2, /*out_f32=*/false, tokens, H, stream);
+    } else if (tokens <= 8 && bf16_gemv_accepts(w_.in_proj_a, 4, H) && bf16_gemv_accepts(w_.in_proj_b, 4, H)) {
+      // 5..8 decode rows (the 8-row speculative verify, 2026-10-05): the
+      // GEMV core in row chunks of four — each row's chain is the chunk
+      // size's own, so these rows are bitwise the <= 4-row path's — where
+      // cuBLASLt's tiny-tile kernel took 34 us per [48 x 5120] matrix (3.3
+      // ms of a one-node 157 ms pass).
+      for (int r0 = 0; r0 < tokens; r0 += 4) {
+        const int rows = std::min(4, tokens - r0);
+        Bf16GemvProblem p[2];
+        p[0].act = x + static_cast<size_t>(r0) * H; p[0].act_row_stride = static_cast<size_t>(H);
+        p[0].weight = w_.in_proj_a; p[0].out = a_ + static_cast<size_t>(r0) * lv_; p[0].n = lv_;
+        p[1].act = x + static_cast<size_t>(r0) * H; p[1].act_row_stride = static_cast<size_t>(H);
+        p[1].weight = w_.in_proj_b; p[1].out = b_ + static_cast<size_t>(r0) * lv_; p[1].n = lv_;
+        launch_bf16_gemv_multi(p, 2, /*out_f32=*/false, rows, H, stream);
+      }
     } else {
       gemm_bf16(g_, x, H, w_.in_proj_a, a_, GemmOut::BF16, tokens, lv_, H, stream);
       gemm_bf16(g_, x, H, w_.in_proj_b, b_, GemmOut::BF16, tokens, lv_, H, stream);

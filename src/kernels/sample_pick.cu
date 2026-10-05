@@ -87,17 +87,6 @@ __device__ inline int32_t key_id(uint64_t key) {
   return static_cast<int32_t>(key & kKeyIdxMask);
 }
 
-__host__ __device__ inline uint64_t splitmix64(uint64_t x) {
-  x += 0x9e3779b97f4a7c15ull;
-  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
-  x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
-  return x ^ (x >> 31);
-}
-// sample::uniform01: the top 53 bits of the draw as an fp64 in [0, 1).
-__device__ inline double uniform01(uint64_t seed, uint64_t counter) {
-  const uint64_t draw = splitmix64(splitmix64(counter) ^ seed);
-  return static_cast<double>(draw >> 11) * (1.0 / 9007199254740992.0);
-}
 __host__ __device__ inline uint64_t verdict_digest(int rows, int accepted,
                                                    const int32_t* winners) {
   uint64_t h = splitmix64(static_cast<uint64_t>(rows));

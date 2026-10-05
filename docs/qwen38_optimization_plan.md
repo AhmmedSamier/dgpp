@@ -475,7 +475,7 @@ streams 6.2 GB per rank instead of 3.8.
 
 **Calibrating the proposal's temperature — measured, flat.** The draft's
 sampling temperature as a multiple of the request's
-(`DGPP_SPEC_PROPOSAL_TEMP`, `SampleSpec::draft_temperature`; exact at any
+(`engine.mtp_draft_temperature`, `SampleSpec::draft_temperature`; exact at any
 value, only the overlap with P moves). Acceptance p1 on the MTP world,
 two 400-token requests each: 0.7 → 57 %, 60 %; 0.85 → 64 %, 68 %;
 1.0 → 63 %, 65 %; 1.2 → 65 %. Flat from 0.85 up within the ±3-point run

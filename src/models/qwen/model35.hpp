@@ -31,6 +31,7 @@
 #include "models/qwen/config.hpp"
 #include "models/qwen/config35.hpp"
 #include "kernels/l2_prefetch.hpp"
+#include "kernels/sample_pick.hpp"
 #include "models/qwen/dflash2.hpp"
 #include "models/qwen/layers.hpp"
 #include "models/qwen/loader.hpp"
@@ -284,10 +285,35 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   // feeds and mirrors of all slots. An inactive slot's rows run at
   // position -1 (no state write) and its feed is zeroed.
   void session_graph_capture_block_draft_batch(const PickVerdict* verdicts, int requests);
+  // The sampled requests' block proposals (the engine's draft rule): the
+  // recorded walk draws each draft from the selector's softmax at the
+  // request's draft temperature and writes the set it drew from to
+  // proposals[req * stride + l] (and the pinned mirror), the next verify's
+  // ratio rule; a greedy request keeps the argmax and n = 0. `specs` is the
+  // engine's device SampleSpec table (one per slot). Null specs: the argmax
+  // walk, no proposals (the default). Before the first capture.
+  void dflash2_arm_proposals(const SampleSpec* specs, DraftProposal* proposals,
+                             DraftProposal* proposals_host, int stride) {
+    if (specs != nullptr && (proposals == nullptr || stride < dfcfg_.drafts()))
+      throw std::invalid_argument("dflash2_arm_proposals: proposals / stride");
+    df_specs_ = specs;
+    df_props_ = proposals;
+    df_props_h_ = proposals_host;
+    df_props_stride_ = stride;
+  }
+  bool dflash2_proposals_armed() const { return df_specs_ != nullptr; }
   // The mirror the recorded draft of slot `req` publishes (readable once
   // the replay's end event has passed).
   const int32_t* block_drafts_host(int req) const {
     return df_mirror_h_ + static_cast<size_t>(req) * static_cast<size_t>(dfcfg_.drafts());
+  }
+  // The mask rows' top-k candidate ids the recorded draft walked
+  // ([drafts][block_candidates()] per slot; the engine's acceptance
+  // diagnostics rank the verify's correction among them).
+  int block_candidates() const { return dfcfg_.selector_top_k; }
+  const int32_t* block_candidates_host(int req) const {
+    return df_cands_h_ + static_cast<size_t>(req) * static_cast<size_t>(dfcfg_.drafts()) *
+                            static_cast<size_t>(dfcfg_.selector_top_k);
   }
 
  private:
@@ -301,8 +327,11 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   int df_nh_ = 0, df_kvh_ = 0, df_qw_ = 0, df_kvr_ = 0, df_i_ = 0;
   // The mask rows' head rows and top-K per slot (world > 1: this rank's
   // slice lists staged, folded and merged into the global top-K), the
-  // hidden projection and the selector walk into df_tok_ (D per slot).
-  void df_block_select(int slots, bool capture);
+  // hidden projection and the selector walk into df_tok_ (D per slot). The
+  // recorded walk (capture) of slot k draws for request reqs[k] when the
+  // proposals are armed; the eager walk is the argmax (the engine clears
+  // the slot's proposals after an eager draft).
+  void df_block_select(int slots, const int* reqs, bool capture);
   // The shared static padded staging of the two padded verify variants
   // (validate, grow blocks, stage the 8-row blocks, upload, RowRun).
   RowRun df_stage_padded(const std::vector<int>& reqs,
@@ -463,6 +492,13 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   int64_t* df_io64_h_ = nullptr;  // pinned: query_rows positions then tokens
   uint16_t* df_table_ = nullptr;   // world > 1: the top-K gather table (the eager fold's buffer)
   int32_t* df_mirror_h_ = nullptr;  // pinned [max_requests, drafts]: the recorded drafts
+  int32_t* df_cands_h_ = nullptr;   // pinned [max_requests, drafts, top_k]: the walked candidates
+  // The armed proposals (dflash2_arm_proposals): the engine's spec table
+  // and proposal rows, `df_props_stride_` rows per request.
+  const SampleSpec* df_specs_ = nullptr;
+  DraftProposal* df_props_ = nullptr;
+  DraftProposal* df_props_h_ = nullptr;
+  int df_props_stride_ = 0;
   int df_batch_ = 1;  // the stacked draft batch width (slots per forward)
   // The captured verify's replay state (one static 32-row graph): the
   // pool tables pointer the capture baked in (a mismatch means the pool

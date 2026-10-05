@@ -1,0 +1,40 @@
+
+=== 03:16:37 glm down
+2026-10-05 03:16:42.847 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 03:16:42 up
+2026-10-05 03:17:09.126 READY — curl http://<node-0>:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/mtbench/server)
+
+=== 03:17:09 think on, sampled (the authors' setting), 40 chat-like prompts
+## think-sampled: 31 requests, think=on, temperature=1.0, max_tokens=384
+  humanities   n= 1  tokens   384  tok/pass  2.42  ms/pass  155.0  ->  15.6 tok/s
+  roleplay     n=10  tokens  3840  tok/pass  3.18  ms/pass  154.5  ->  20.6 tok/s
+  stem         n=10  tokens  3840  tok/pass  2.49  ms/pass  155.0  ->  16.1 tok/s
+  writing      n=10  tokens  3840  tok/pass  2.84  ms/pass  155.0  ->  18.3 tok/s
+  ALL          n=31  tokens 11904  tok/pass  2.80
+
+=== 03:30:29 think off, greedy (the campaign's setting), the same prompts
+## nothink-greedy: 40 requests, think=off, temperature=0.0, max_tokens=384
+  humanities   n=10  tokens  3840  tok/pass  3.21  ms/pass  154.0  ->  20.8 tok/s
+  roleplay     n=10  tokens  3840  tok/pass  3.16  ms/pass  154.0  ->  20.5 tok/s
+  stem         n=10  tokens  3840  tok/pass  4.07  ms/pass  154.0  ->  26.5 tok/s
+  writing      n=10  tokens  3840  tok/pass  2.44  ms/pass  155.0  ->  15.7 tok/s
+  ALL          n=40  tokens 15360  tok/pass  3.12
+
+=== 03:41:14 think on, greedy
+## think-greedy: 40 requests, think=on, temperature=0.0, max_tokens=384
+  humanities   n=10  tokens  3840  tok/pass  2.93  ms/pass  154.0  ->  19.1 tok/s
+  roleplay     n=10  tokens  3840  tok/pass  3.40  ms/pass  154.0  ->  22.1 tok/s
+  stem         n=10  tokens  3840  tok/pass  3.78  ms/pass  154.0  ->  24.5 tok/s
+  writing      n=10  tokens  3840  tok/pass  3.21  ms/pass  154.0  ->  20.8 tok/s
+  ALL          n=40  tokens 15360  tok/pass  3.30
+mtp 3.02 tok/step/req, accept p1 63 % p2 44 % p3 39 % p4 26 % p5 18 % p6 10 % p7 3 %, first miss was the drafter's 2nd 20 % / 3rd 10 % / 4th-8th 18 % / 9th-16th 13 % / none 32 % (60 misses) 
+
+=== 03:52:15 down
+2026-10-05 03:52:18.925 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/mtbench/server
+
+=== 03:52:18 glm up
+2026-10-05 03:52:59.138 READY — curl http://<node-0>:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+MTB_DONE 03:52:59
+SCRIPT_EXIT=0

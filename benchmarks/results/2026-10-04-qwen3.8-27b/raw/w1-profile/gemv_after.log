@@ -1,0 +1,189 @@
+
+=== 04:21:46 build
+BUILD_EXIT=0
+
+=== 04:22:02 kernel gates
+mma_gemv_test            8 tests, 0 failed
+dflash2_kernels_test     9 tests, 0 failed
+bf16_gemv_test           10 tests, 0 failed
+glm_pick_test            22 tests, 0 failed
+
+=== 04:22:25 glm down
+2026-10-05 04:22:34.789 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 04:22:34 mma_gemv rows curve (pipelined staging), world 1
+== mlp gate|up [I x H]  n=17408 k=5120  89.1 MB
+  m=1 mma         392.5 us   227.1 GB/s
+  m=4 mma         401.1 us   222.2 GB/s
+  m=8 mma         406.3 us   219.4 GB/s
+  m=16 mma         392.7 us   227.0 GB/s
+== mlp down [H x I]  n=5120 k=17408  89.1 MB
+  m=1 mma         394.9 us   225.7 GB/s
+  m=4 mma         407.2 us   218.9 GB/s
+  m=8 mma         420.1 us   212.1 GB/s
+  m=16 mma         406.1 us   219.5 GB/s
+== gdn in_proj qkz [2K+V x H]  n=10240 k=5120  52.4 MB
+  m=1 mma         234.1 us   223.9 GB/s
+  m=4 mma         244.6 us   214.4 GB/s
+  m=8 mma         235.9 us   222.3 GB/s
+  m=16 mma         248.2 us   211.3 GB/s
+== gdn in_proj v [V x H]  n=6144 k=5120  31.5 MB
+  m=1 mma         139.7 us   225.2 GB/s
+  m=4 mma         140.1 us   224.6 GB/s
+  m=8 mma         141.7 us   221.9 GB/s
+  m=16 mma         144.2 us   218.2 GB/s
+== gdn out [H x V]  n=5120 k=6144  31.5 MB
+  m=1 mma         143.3 us   219.5 GB/s
+  m=4 mma         143.8 us   218.8 GB/s
+  m=8 mma         146.8 us   214.4 GB/s
+  m=16 mma         155.2 us   202.7 GB/s
+== attn qkv [2QW x H]  n=12288 k=5120  62.9 MB
+  m=1 mma         286.8 us   219.4 GB/s
+  m=4 mma         287.2 us   219.0 GB/s
+  m=8 mma         286.6 us   219.5 GB/s
+  m=16 mma         277.5 us   226.7 GB/s
+== attn kv [KVW x H]  n=1024 k=5120  5.2 MB
+  m=1 mma          27.4 us   191.3 GB/s
+  m=4 mma          28.1 us   186.4 GB/s
+  m=8 mma          28.3 us   185.4 GB/s
+  m=16 mma          31.1 us   168.8 GB/s
+== attn out [H x QW]  n=5120 k=6144  31.5 MB
+  m=1 mma         143.0 us   220.0 GB/s
+  m=4 mma         144.9 us   217.1 GB/s
+  m=8 mma         158.8 us   198.0 GB/s
+  m=16 mma         152.0 us   206.9 GB/s
+== lm head [V/w x H]  n=248320 k=5120  1271.4 MB
+  m=1 mma        5564.9 us   228.5 GB/s
+  m=4 mma        5530.1 us   229.9 GB/s
+  m=8 mma        5481.4 us   231.9 GB/s
+  m=16 mma        5560.0 us   228.7 GB/s
+
+=== 04:22:37 mma_gemv rows curve (pipelined staging), world 2
+== mlp gate|up [I x H]  n=8704 k=5120  44.6 MB
+  m=1 mma         201.2 us   221.5 GB/s
+  m=4 mma         201.6 us   221.1 GB/s
+  m=8 mma         202.0 us   220.6 GB/s
+  m=16 mma         204.8 us   217.6 GB/s
+== mlp down [H x I]  n=5120 k=8704  44.6 MB
+  m=1 mma         203.0 us   219.5 GB/s
+  m=4 mma         217.1 us   205.2 GB/s
+  m=8 mma         210.4 us   211.9 GB/s
+  m=16 mma         211.2 us   211.0 GB/s
+== gdn in_proj qkz [2K+V x H]  n=5120 k=5120  26.2 MB
+  m=1 mma         130.2 us   201.3 GB/s
+  m=4 mma         128.0 us   204.9 GB/s
+  m=8 mma         125.3 us   209.2 GB/s
+  m=16 mma         124.4 us   210.7 GB/s
+== gdn in_proj v [V x H]  n=3072 k=5120  15.7 MB
+  m=1 mma          69.9 us   224.9 GB/s
+  m=4 mma          71.9 us   218.9 GB/s
+  m=8 mma          71.5 us   220.1 GB/s
+  m=16 mma          71.6 us   219.6 GB/s
+== gdn out [H x V]  n=5120 k=3072  15.7 MB
+  m=1 mma          72.0 us   218.5 GB/s
+  m=4 mma          73.0 us   215.6 GB/s
+  m=8 mma          73.9 us   212.8 GB/s
+  m=16 mma          76.3 us   206.2 GB/s
+== attn qkv [2QW x H]  n=6144 k=5120  31.5 MB
+  m=1 mma         140.0 us   224.8 GB/s
+  m=4 mma         142.3 us   221.1 GB/s
+  m=8 mma         140.6 us   223.7 GB/s
+  m=16 mma         141.8 us   221.8 GB/s
+== attn kv [KVW x H]  n=512 k=5120  2.6 MB
+  m=1 mma          15.3 us   171.2 GB/s
+  m=4 mma          16.1 us   162.4 GB/s
+  m=8 mma          16.5 us   159.1 GB/s
+  m=16 mma          17.2 us   152.7 GB/s
+== attn out [H x QW]  n=5120 k=3072  15.7 MB
+  m=1 mma          72.2 us   217.9 GB/s
+  m=4 mma          74.4 us   211.5 GB/s
+  m=8 mma          84.9 us   185.2 GB/s
+  m=16 mma          83.4 us   188.5 GB/s
+== lm head [V/w x H]  n=124160 k=5120  635.7 MB
+  m=1 mma        2831.4 us   224.5 GB/s
+  m=4 mma        2805.8 us   226.6 GB/s
+  m=8 mma        2871.4 us   221.4 GB/s
+  m=16 mma        2766.5 us   229.8 GB/s
+
+=== 04:22:38 mma_gemv rows curve (pipelined staging), world 4
+== mlp gate|up [I x H]  n=4352 k=5120  22.3 MB
+  m=1 mma         100.5 us   221.8 GB/s
+  m=4 mma         103.8 us   214.7 GB/s
+  m=8 mma         104.9 us   212.5 GB/s
+  m=16 mma         107.6 us   207.1 GB/s
+== mlp down [H x I]  n=5120 k=4352  22.3 MB
+  m=1 mma         100.1 us   222.5 GB/s
+  m=4 mma         101.8 us   218.8 GB/s
+  m=8 mma         115.1 us   193.5 GB/s
+  m=16 mma         112.0 us   198.9 GB/s
+== gdn in_proj qkz [2K+V x H]  n=2560 k=5120  13.1 MB
+  m=1 mma          60.5 us   216.7 GB/s
+  m=4 mma          73.1 us   179.3 GB/s
+  m=8 mma          72.1 us   181.9 GB/s
+  m=16 mma          66.7 us   196.5 GB/s
+== gdn in_proj v [V x H]  n=1536 k=5120  7.9 MB
+  m=1 mma          36.8 us   213.9 GB/s
+  m=4 mma          37.3 us   210.6 GB/s
+  m=8 mma          37.9 us   207.8 GB/s
+  m=16 mma          38.8 us   202.7 GB/s
+== gdn out [H x V]  n=5120 k=1536  7.9 MB
+  m=1 mma          36.8 us   213.9 GB/s
+  m=4 mma          37.4 us   210.3 GB/s
+  m=8 mma          38.2 us   205.7 GB/s
+  m=16 mma          40.4 us   194.7 GB/s
+== attn qkv [2QW x H]  n=3072 k=5120  15.7 MB
+  m=1 mma          69.0 us   227.9 GB/s
+  m=4 mma          70.0 us   224.8 GB/s
+  m=8 mma          69.9 us   224.9 GB/s
+  m=16 mma          70.6 us   222.9 GB/s
+== attn kv [KVW x H]  n=256 k=5120  1.3 MB
+  m=1 mma          10.3 us   127.0 GB/s
+  m=4 mma          10.5 us   125.3 GB/s
+  m=8 mma          10.6 us   124.2 GB/s
+  m=16 mma          12.4 us   105.5 GB/s
+== attn out [H x QW]  n=5120 k=1536  7.9 MB
+  m=1 mma          36.6 us   214.6 GB/s
+  m=4 mma          37.5 us   209.7 GB/s
+  m=8 mma          38.4 us   204.6 GB/s
+  m=16 mma          40.6 us   193.9 GB/s
+== lm head [V/w x H]  n=62080 k=5120  317.8 MB
+  m=1 mma        1420.9 us   223.7 GB/s
+  m=4 mma        1420.2 us   223.8 GB/s
+  m=8 mma        1400.4 us   227.0 GB/s
+  m=16 mma        1429.7 us   222.3 GB/s
+
+=== 04:22:39 w1-pipelined up
+2026-10-05 04:23:09.749 READY — curl http://<node-0>:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/w1-pipelined/server)
+
+=== 04:23:09 w1-pipelined greedy transcripts vs w1-graph-ab (bitwise expected)
+code   256 tokens    9.99 s    39.0 ms/token (wall, prefill included) length | We need answer user: "Write a Python function that parses an
+math   256 tokens    7.88 s    30.8 ms/token (wall, prefill included) length | We need answer user: "A train leaves city A at 60 km/h and a
+json   256 tokens    9.24 s    36.1 ms/token (wall, prefill included) length | We need to respond to user: "Return a JSON array of 8 object
+identical transcripts: 4 of 4
+
+=== 04:23:54 w1-pipelined timed_load greedy C1
+== per-class wall aggregate tokens/s (prefill included), greedy, max_tokens 256
+| class | c=1 |
+|---|---|
+| prose | 19.0 |
+| code | 30.4 |
+| json | 42.9 |
+| math | 33.3 |
+| chat | 18.0 |
+152.3 ms/step | mtp 2.68 tok/step/req, accept p1 71 % p2 46 % p3 28 % p4 14 % p5 6 % p6 3 % p7 0 %, first miss was the drafter's 2nd 22 % / 3rd 12 % / 4th-8th 28 % / 9th-16th 17 % / none 18 % (65 misses) 
+
+=== 04:25:38 w1-pipelined MT-Bench think-sampled (truncated proposals)
+## w1-trunc: 40 requests, think=on, temperature=1.0, max_tokens=384
+  humanities   n=10  tokens  3840  tok/pass  3.04  ms/pass  153.0  ->  19.8 tok/s
+  roleplay     n=10  tokens  3840  tok/pass  3.38  ms/pass  153.0  ->  22.1 tok/s
+  stem         n=10  tokens  3840  tok/pass  3.27  ms/pass  153.0  ->  21.4 tok/s
+  writing      n=10  tokens  2560  tok/pass  3.98  ms/pass  152.0  ->  26.2 tok/s
+  ALL          n=40  tokens 14080  tok/pass  3.34
+
+=== 04:37:05 w1-pipelined down
+2026-10-05 04:37:08.180 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/w1-pipelined/server
+
+=== 04:37:08 glm up
+2026-10-05 04:37:46.559 READY — curl http://<node-0>:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+GEMV_AFTER_DONE 04:37:46

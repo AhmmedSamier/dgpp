@@ -132,6 +132,12 @@ class SchedulerEngine {
     int depth = 0;
     uint64_t attempts[8] = {};
     uint64_t accepts[8] = {};
+    // A block drafter's first rejected draft, ranked among the candidates
+    // its walk scored at that position (2026-10-05, the tree-verify
+    // sizing): miss_rank[r] counts corrections that were the drafter's
+    // (r+1)-th candidate, miss_rank[kMissRanks] those outside the list.
+    static constexpr int kMissRanks = 16;
+    uint64_t miss_rank[kMissRanks + 1] = {};
   };
   // Last launched decode graph, retained while idle; counters since startup.
   struct DecodeBatchStats {

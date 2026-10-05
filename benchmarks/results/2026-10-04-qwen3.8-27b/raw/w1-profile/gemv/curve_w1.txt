@@ -1,0 +1,55 @@
+world 1, 8 copies rotated (cold L2), 24 iters; us per launch / GB/s (weight bytes / time)
+
+== mlp gate|up [I x H]  n=17408 k=5120  89.1 MB
+  m=1 mma         390.1 us   228.5 GB/s
+  m=4 mma         403.7 us   220.8 GB/s
+  m=8 mma         405.2 us   220.0 GB/s
+  m=16 mma         425.5 us   209.5 GB/s
+
+== mlp down [H x I]  n=5120 k=17408  89.1 MB
+  m=1 mma         393.0 us   226.8 GB/s
+  m=4 mma         393.2 us   226.7 GB/s
+  m=8 mma         407.0 us   219.0 GB/s
+  m=16 mma         443.1 us   201.2 GB/s
+
+== gdn in_proj qkz [2K+V x H]  n=10240 k=5120  52.4 MB
+  m=1 mma         228.5 us   229.4 GB/s
+  m=4 mma         229.7 us   228.2 GB/s
+  m=8 mma         238.8 us   219.6 GB/s
+  m=16 mma         247.3 us   212.0 GB/s
+
+== gdn in_proj v [V x H]  n=6144 k=5120  31.5 MB
+  m=1 mma         142.8 us   220.3 GB/s
+  m=4 mma         146.8 us   214.3 GB/s
+  m=8 mma         140.2 us   224.4 GB/s
+  m=16 mma         169.0 us   186.2 GB/s
+
+== gdn out [H x V]  n=5120 k=6144  31.5 MB
+  m=1 mma         155.1 us   202.8 GB/s
+  m=4 mma         144.5 us   217.7 GB/s
+  m=8 mma         146.1 us   215.3 GB/s
+  m=16 mma         173.0 us   181.8 GB/s
+
+== attn qkv [2QW x H]  n=12288 k=5120  62.9 MB
+  m=1 mma         283.9 us   221.6 GB/s
+  m=4 mma         288.2 us   218.3 GB/s
+  m=8 mma         275.7 us   228.2 GB/s
+  m=16 mma         295.0 us   213.3 GB/s
+
+== attn kv [KVW x H]  n=1024 k=5120  5.2 MB
+  m=1 mma          27.8 us   188.4 GB/s
+  m=4 mma          29.3 us   178.8 GB/s
+  m=8 mma          29.9 us   175.3 GB/s
+  m=16 mma          30.8 us   170.4 GB/s
+
+== attn out [H x QW]  n=5120 k=6144  31.5 MB
+  m=1 mma         140.8 us   223.5 GB/s
+  m=4 mma         142.2 us   221.1 GB/s
+  m=8 mma         164.9 us   190.7 GB/s
+  m=16 mma         167.7 us   187.6 GB/s
+
+== lm head [V/w x H]  n=248320 k=5120  1271.4 MB
+  m=1 mma        5695.5 us   223.2 GB/s
+  m=4 mma        5541.4 us   229.4 GB/s
+  m=8 mma        5500.2 us   231.2 GB/s
+  m=16 mma        5526.8 us   230.0 GB/s

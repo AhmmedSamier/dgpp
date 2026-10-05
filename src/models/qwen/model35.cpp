@@ -483,6 +483,7 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
     if (world > 1)
       DGPP_CUDA_OK(cudaMalloc(&df_table_, dflash2_topk_table_elems(BD, dfcfg_.selector_top_k, world) * 2));
     DGPP_CUDA_OK(cudaMallocHost(&df_mirror_h_, static_cast<size_t>(max_requests) * D * 4));
+    DGPP_CUDA_OK(cudaMallocHost(&df_cands_h_, static_cast<size_t>(max_requests) * D * dfcfg_.selector_top_k * 4));
     DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   }
   DGPP_CUDA_OK(cudaMalloc(&gdn_rec_base_, static_cast<size_t>(max_requests) * num_gdn_ * rec_elems_ * 4));
@@ -573,6 +574,7 @@ Qwen35Model::~Qwen35Model() {
   cudaFree(df_io64_h_);
   cudaFree(df_table_);
   cudaFreeHost(df_mirror_h_);
+  cudaFreeHost(df_cands_h_);
   cudaFree(gdn_rec_base_);
   cudaFree(gdn_conv_base_);
   cudaFree(spec_rec_);
@@ -1582,7 +1584,7 @@ bool Qwen35Model::dflash2_draft(int req, int64_t bonus, std::vector<int32_t>* dr
   configure_gemm_rows(QR, true);
   const int reqs[1] = {req};
   df_block_layers(1, reqs, /*capture=*/false);
-  df_block_select(1, /*capture=*/false);
+  df_block_select(1, nullptr, /*capture=*/false);
   DGPP_CUDA_OK(cudaMemcpyAsync(df_tok_h_, df_tok_, D * 4, cudaMemcpyDeviceToHost, stream_));
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   drafts->assign(df_tok_h_, df_tok_h_ + D);
@@ -1684,9 +1686,12 @@ void Qwen35Model::df_block_layers(int slots, const int* reqs, bool capture) {
 // walk (vLLM's _selector_walk_kernel at temperature 0) over each mask
 // row's top-K — scores[l][p][c] = unary[l][c] + <pred[id(l-1,p)] *
 // hidden[l], succ[id(l,c)]>.
-void Qwen35Model::df_block_select(int slots, bool capture) {
+void Qwen35Model::df_block_select(int slots, const int* reqs, bool capture) {
   const int H = cfg_.hidden_size;
   const int QR = dfcfg_.query_rows(), D = dfcfg_.drafts();
+  // The recorded walk draws for a stochastic request (the armed
+  // proposals); the eager walk is the argmax.
+  const bool sampled = capture && df_specs_ != nullptr && reqs != nullptr;
   const int64_t V = lm_vocab_count_;
   const int topk = dfcfg_.selector_top_k, rank = dfcfg_.selector_rank;
   for (int k = 0; k < slots; ++k) {
@@ -1712,9 +1717,12 @@ void Qwen35Model::df_block_select(int slots, bool capture) {
     const size_t ro = static_cast<size_t>(k) * QR, co = static_cast<size_t>(k) * D;
     gemm_.matmul(df_h_ + (ro + 1) * H, dfw_.hidden_projection, df_hidden32_ + co * rank, D, rank, H,
                  DType::BF16, GemmOut::F32, static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
+    const size_t po = sampled ? static_cast<size_t>(reqs[k]) * static_cast<size_t>(df_props_stride_) : 0;
     dflash2_selector_walk(df_ids_ + co * topk, df_sc_ + co * topk, df_hidden32_ + co * rank,
                           dfw_.pred_codebook, dfw_.succ_codebook, df_tokens_ + ro, df_tok_ + co, D, topk,
-                          rank, stream_);
+                          rank, stream_, sampled ? df_pos_ + ro : nullptr,
+                          sampled ? df_specs_ + reqs[k] : nullptr, sampled ? df_props_ + po : nullptr,
+                          sampled && df_props_h_ != nullptr ? df_props_h_ + po : nullptr);
   }
 }
 
@@ -1737,10 +1745,12 @@ void Qwen35Model::session_graph_capture_block_draft(int req, const PickVerdict* 
   configure_gemm_rows(QR, true);
   const int reqs[1] = {req};
   df_block_layers(1, reqs, /*capture=*/true);
-  df_block_select(1, /*capture=*/true);
+  df_block_select(1, reqs, /*capture=*/true);
   // The next replay's feed and the host's copy of the drafts.
   dflash2_block_feed(verdict, df_tok_, D, step_tokens_, stream_);
   dflash2_publish_drafts(df_tok_, df_mirror_h_ + static_cast<size_t>(req) * D, D, stream_);
+  const int K = dfcfg_.selector_top_k;
+  dflash2_publish_words(df_ids_, df_cands_h_ + static_cast<size_t>(req) * D * K, D * K, stream_);
 }
 
 void Qwen35Model::session_graph_capture_block_draft_batch(const PickVerdict* verdicts, int requests) {
@@ -1764,12 +1774,14 @@ void Qwen35Model::session_graph_capture_block_draft_batch(const PickVerdict* ver
   std::vector<int> reqs(static_cast<size_t>(requests));
   for (int q = 0; q < requests; ++q) reqs[static_cast<size_t>(q)] = q;
   df_block_layers(requests, reqs.data(), /*capture=*/true);
-  df_block_select(requests, /*capture=*/true);
+  df_block_select(requests, reqs.data(), /*capture=*/true);
   // The fixed batch's feeds sit behind the decode rows at QR rows per slot
   // (session_graph_capture_batch's step_tokens_).
   int64_t* feeds = d_tokens_ + static_cast<size_t>(max_decode_rows_);
   dflash2_block_feed_batched(verdicts, df_tok_, D, requests, QR, feeds, stream_);
   dflash2_publish_drafts_batched(df_tok_, df_mirror_h_, D, requests, stream_);
+  const int K = dfcfg_.selector_top_k;
+  dflash2_publish_words(df_ids_, df_cands_h_, requests * D * K, stream_);  // slot q == request q
 }
 
 // The batched redraft: the S slots' [bonus, mask x D] blocks stacked into
@@ -1828,7 +1840,7 @@ void Qwen35Model::dflash2_draft_batch(const std::vector<int>& reqs,
   embed_gather_bf16(globals_.embed, df_tokens_, df_resid_, R, H, stream_);
   configure_gemm_rows(R, true);
   df_block_layers(NS, creqs.data(), /*capture=*/false);
-  df_block_select(NS, /*capture=*/false);
+  df_block_select(NS, nullptr, /*capture=*/false);
   DGPP_CUDA_OK(cudaMemcpyAsync(df_tok_h_, df_tok_, static_cast<size_t>(NS) * D * 4,
                                cudaMemcpyDeviceToHost, stream_));
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));

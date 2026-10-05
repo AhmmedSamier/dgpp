@@ -1,0 +1,44 @@
+
+=== 04:37:50 glm down
+2026-10-05 04:37:57.340 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 04:37:57 w1-temp0.7 up (DGPP_SPEC_PROPOSAL_TEMP=0.7)
+2026-10-05 04:38:23.678 READY — curl http://<node-0>:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/sampled/w1-temp0.7/server)
+
+=== 04:38:23 w1-temp0.7 timed_load C1 temperature 1
+| prose | 17.5 |
+| code | 29.8 |
+| json | 40.0 |
+| math | 34.1 |
+| chat | 15.2 |
+mtp 2.32 tok/step/req, accept p1 67 % p2 38 % p3 18 % p4 8 % p5 2 % p6 0 % p7 0 %, first miss was the drafter's 2nd 17 % / 3rd 12 % / 4th-8th 17 % / 9th-16th 12 % / none 24 % (66 misses) 
+
+=== 04:40:15 w1-temp0.7 MT-Bench think-sampled
+## w1-temp0.7: 40 requests, think=on, temperature=1.0, max_tokens=384
+  humanities   n=10  tokens  3840  tok/pass  3.01  ms/pass  153.0  ->  19.7 tok/s
+  roleplay     n=10  tokens  3840  tok/pass  3.43  ms/pass  153.0  ->  22.4 tok/s
+  stem         n=10  tokens  3840  tok/pass  3.63  ms/pass  153.0  ->  23.7 tok/s
+  writing      n=10  tokens  2816  tok/pass  3.77  ms/pass  153.0  ->  24.6 tok/s
+  ALL          n=40  tokens 14336  tok/pass  3.41
+
+=== 04:51:31 w1-temp0.7 down
+2026-10-05 04:51:33.914 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/sampled/w1-temp0.7/server
+
+=== 04:51:33 w1-temp0.5 up (DGPP_SPEC_PROPOSAL_TEMP=0.5)
+2026-10-05 04:52:00.191 READY — curl http://<node-0>:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/sampled/w1-temp0.5/server)
+
+=== 04:52:00 w1-temp0.5 timed_load C1 temperature 1
+| prose | 16.2 |
+| code | 32.0 |
+| json | 42.8 |
+| math | 32.5 |
+| chat | 15.8 |
+mtp 2.61 tok/step/req, accept p1 73 % p2 39 % p3 24 % p4 12 % p5 8 % p6 5 % p7 0 %, first miss was the drafter's 2nd 14 % / 3rd 9 % / 4th-8th 26 % / 9th-16th 14 % / none 32 % (66 misses) 
+
+=== 04:53:52 w1-temp0.5 down
+2026-10-05 04:53:54.221 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/sampled/w1-temp0.5/server
+
+=== 04:53:54 glm up
+2026-10-05 04:54:33.169 READY — curl http://<node-0>:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+CALIB_DONE 04:54:33

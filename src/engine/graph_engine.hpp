@@ -291,9 +291,14 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       throw std::invalid_argument("graph engine: the drafter's block exceeds the verify rows");
     rows_per_request_ = block_ ? 1 + block_drafts : (model_->mtp_enabled() ? 1 + mtp_depth : 1);
     depth_ = rows_per_request_ - 1;
+    if constexpr (requires { model_->block_candidates(); }) {
+      if (block_) block_cands_ = model_->block_candidates();
+    }
     if (slots_ < 1)
       throw std::invalid_argument("graph engine: no request slots");
     prefills_.resize(static_cast<size_t>(slots_));
+    drafts_cands_.assign(static_cast<size_t>(slots_), {});
+    fed_cands_.assign(static_cast<size_t>(slots_), {});
     // Build the fitting slot prefixes even when the configured capacity
     // exceeds one verify pass. Sparse live sets beyond those prefixes use
     // scalar replays; a family must cover every live physical slot.
@@ -400,9 +405,11 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
           DGPP_CUDA_OK(cudaMallocHost(reinterpret_cast<void**>(&h_proposals_),
                                       sizeof(DraftProposal) * n));
           for (size_t i = 0; i < n; ++i) h_proposals_[i] = DraftProposal{};
-          // A block drafter's drafts are point masses: no proposal (n = 0
-          // throughout, the plain P(draft) rule).
+          // A block drafter's drafts are point masses unless its recorded
+          // walk draws them (arm_block_proposals, set_proposal_drafts): the
+          // MTP draft pick's own drawing stays off for the block.
           draft_sampled_ = !block_ && proposal_drafts_enabled();
+          arm_block_proposals();
         }
         // The verify rows as the pick left them (penalized, masked), kept
         // for the host's MTP fallback: the in-graph draft's head reuses the
@@ -622,6 +629,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   MtpAcceptance mtp_acceptance() const override {
     MtpAcceptance a;
     a.depth = rows_per_request_ - 1;
+    for (int r = 0; r <= MtpAcceptance::kMissRanks; ++r) a.miss_rank[r] = miss_rank_[r];
     for (int p = 0; p < a.depth; ++p) {
       a.attempts[p] = mtp_attempts_[static_cast<size_t>(p)];
       a.accepts[p] = mtp_accepts_[static_cast<size_t>(p)];
@@ -692,6 +700,27 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
         throw std::logic_error("graph engine: set_proposal_drafts after a capture");
     proposal_drafts_ = on;
     draft_sampled_ = d_proposals_ != nullptr && !block_ && proposal_drafts_enabled();
+    arm_block_proposals();
+  }
+  // The block drafter's sampled proposals: the model's recorded walk reads
+  // the slots' specs and writes the drawn-from sets to the proposal rows
+  // the next verify tests against (the ratio rule); off, the walk is the
+  // argmax and the plain P(draft) rule applies.
+  void arm_block_proposals() {
+    if (!block_) return;
+    const bool on = sampling_ && d_proposals_ != nullptr && d_specs_ != nullptr && proposal_drafts_enabled();
+    if constexpr (requires { model_->dflash2_arm_proposals(d_specs_, d_proposals_, h_proposals_, int{}); }) {
+      model_->dflash2_arm_proposals(on ? d_specs_ : nullptr, on ? d_proposals_ : nullptr,
+                                    on ? h_proposals_ : nullptr, kSampleProposalSlots);
+    }
+  }
+  // engine.mtp_draft_temperature: the drawn drafts' temperature as a
+  // fraction of the request's, for the MTP draft pick and the block
+  // drafter's walk alike. Takes effect at the next configure_sampling.
+  void set_proposal_temperature_scale(float scale) {
+    if (!(scale > 0.f && scale <= 4.f))
+      throw std::invalid_argument("graph engine: the proposal temperature scale must be in (0, 4]");
+    proposal_temp_scale_ = scale;
   }
   // engine.mtp_schedule_sampled_scale: a sampled slot follows the schedule
   // too, its acceptance per position this fraction of the confidence
@@ -881,7 +910,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     spec.logprobs = -1;
     spec.seed = seed;
     spec.counter = 0;
-    spec.draft_temperature = sampling.temperature * proposal_temperature_scale();
+    spec.draft_temperature = sampling.temperature * proposal_temp_scale_;
     push_spec(req, spec);
     // A fresh context: the prompt's counts arrive with the prefill.
     DGPP_CUDA_OK(cudaMemsetAsync(d_counts_ + static_cast<size_t>(req) * vocab_,
@@ -1498,8 +1527,10 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       pending_[static_cast<size_t>(req)] = first;
       if (block_) {
         // The first block off the prefill's pick, eagerly (the drafter's
-        // planes hold the prompt's features).
+        // planes hold the prompt's features); argmax drafts, so the slot's
+        // proposals (a previous occupant's) say "none".
         block_draft_eagerly(req, first);
+        invalidate_proposal(req);
       } else if (spec_enabled()) {
         // session_prefill filled the draft cache through the prompt. Advance
         // its one-row lag over the first generated token and pick the initial
@@ -1625,8 +1656,10 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     settle_older();
     // A fallback drains the whole batch and publishes its new drafts.
     // Preserve every slot's verified drafts before collecting any verdict.
-    for (const int req : reqs)
+    for (const int req : reqs) {
       fed_drafts_[static_cast<size_t>(req)] = drafts_[static_cast<size_t>(req)];
+      if (block_cands_ > 0) fed_cands_[static_cast<size_t>(req)] = drafts_cands_[static_cast<size_t>(req)];
+    }
     if (rows < rows_per_request_ || compact_batches())
       stage_masks_compact(fam.requests, rows, compact_batches() ? &reqs : nullptr);
     else
@@ -1795,24 +1828,24 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   // the same path and writes no proposal, so its rule is unchanged.
   bool draft_sampled_ = false;  // the draft pick draws (and proposes)
   bool block_ = false;  // the DFlash2 block drafter proposes every step's drafts
+  // The block's candidate tables (per slot: the drafts the replay just
+  // produced, then the ones its verify is judging) and the first-miss rank
+  // histogram (MtpAcceptance::miss_rank): how often the correction was the
+  // drafter's 2nd / 3rd / ... candidate at the rejected position — the
+  // tokens a wider (tree) verify would have kept.
+  std::vector<std::vector<int32_t>> drafts_cands_, fed_cands_;
+  int block_cands_ = 0;
+  uint64_t miss_rank_[sched::SchedulerEngine::MtpAcceptance::kMissRanks + 1] = {};
   // Speculative rows: the MTP draft chain or the block drafter.
   bool spec_enabled() const { return block_ || model_->mtp_enabled(); }
   // set_proposal_drafts: a sampled request's drafts are draws from the draft's
   // own distribution, verified by the ratio rule (true, the default), or the
   // draft's argmax, accepted with probability P(draft) — exact either way.
   bool proposal_drafts_ = true;
-  // DGPP_SPEC_PROPOSAL_TEMP: the draft's temperature as a multiple of the
-  // request's (default 1). Exact at any value; a calibration knob for the
-  // draft head's overlap with the target.
-  static float proposal_temperature_scale() {
-    static const float scale = [] {
-      const char* v = std::getenv("DGPP_SPEC_PROPOSAL_TEMP");
-      if (v == nullptr) return 1.0f;
-      const float f = std::strtof(v, nullptr);
-      return (f > 0.0f && f < 10.0f) ? f : 1.0f;
-    }();
-    return scale;
-  }
+  // engine.mtp_draft_temperature: the draft's temperature as a multiple of
+  // the request's (default 1). Exact at any value; the calibration of the
+  // draft's overlap with the target (set_proposal_temperature_scale).
+  float proposal_temp_scale_ = 1.0f;
   bool proposal_drafts_enabled() const {
     static const bool env_on = [] {
       const char* v = std::getenv("DGPP_SPEC_PROPOSAL");
@@ -2572,6 +2605,13 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
               drafts[static_cast<size_t>(c)] = d[c];
             }
           }
+          if constexpr (requires { model_->block_candidates_host(req); }) {
+            if (block_cands_ > 0) {
+              const int32_t* cands = model_->block_candidates_host(req);
+              drafts_cands_[static_cast<size_t>(req)].assign(
+                  cands, cands + static_cast<size_t>(depth_) * static_cast<size_t>(block_cands_));
+            }
+          }
           continue;
         }
         for (int c = 0; c < depth_; ++c) {
@@ -2721,6 +2761,18 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     // The drafts this step fed (the verify's rows after the first); the
     // slot's drafts are replaced below by the block's new ones.
     const std::vector<int32_t>& fed_drafts = fed_drafts_[static_cast<size_t>(req)];
+    if (block_cands_ > 0 && verify.accepted < rows && next >= 0) {
+      // The first rejected draft: where does the target's correction sit
+      // among the candidates the walk scored at that position?
+      const std::vector<int32_t>& cands = fed_cands_[static_cast<size_t>(req)];
+      const int miss = verify.accepted - 1;
+      const size_t base = static_cast<size_t>(miss) * static_cast<size_t>(block_cands_);
+      int rank = sched::SchedulerEngine::MtpAcceptance::kMissRanks;
+      if (miss >= 0 && base + static_cast<size_t>(block_cands_) <= cands.size())
+        for (int c = 0; c < block_cands_ && c < sched::SchedulerEngine::MtpAcceptance::kMissRanks; ++c)
+          if (cands[base + static_cast<size_t>(c)] == next) { rank = c; break; }
+      ++miss_rank_[rank];
+    }
     const bool stochastic = sampled_slot(req);
     const bool full_path = full_path_slot(req);
     if (stochastic) {
@@ -3073,6 +3125,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     launch(std::move(r));
     settle_older();
     fed_drafts_[static_cast<size_t>(req)] = drafts_[static_cast<size_t>(req)];
+    if (block_cands_ > 0) fed_cands_[static_cast<size_t>(req)] = drafts_cands_[static_cast<size_t>(req)];
     stage_masks(req);
     publish_stage(req);
     wait_verdict(inflight_.back());

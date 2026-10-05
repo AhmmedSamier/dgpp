@@ -6,6 +6,53 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Qwen3.8-27B drafter: sampled proposals, the one-node graph template,
+  the first-miss histogram** (2026-10-05): a sampled request's block is now
+  DRAWN — the recorded selector walk samples each draft from the selector's
+  softmax at the request's temperature and writes the set it drew from as
+  the draft's proposal (`dflash2_selector_walk(..., pos, spec, proposal)`,
+  `Qwen35Model::dflash2_arm_proposals`, the engine's `arm_block_proposals`),
+  so the verify's ratio rule applies (min(1, P/Q), rate 1 − TV(P, Q))
+  instead of the point-mass P(argmax) rule the argmax walk gets; the
+  reference speculator's form. `engine.mtp_draft` rules the drafter too
+  (`sampled` / `auto`, `greedy` = the argmax walk); greedy requests are
+  unchanged. MT-Bench turn-1 prompts (thinking on, T 1.0 / top-p 0.95 /
+  top-k 20, one Spark) read 2.80 tokens per pass with the argmax walk and
+  3.27–3.34 drawn; greedy on the same prose-heavy categories 3.30
+  (thinking on) / 3.12 (off). `timed_load` C1 at temperature 1 on one Spark
+  (prose / code / json / math / chat): argmax 15.5 / 28.1 / 38.6 / 33.3 /
+  15.2 → drawn 16.9 / 29.3 / 37.2 / 31.3 / 17.1 tok/s; four Sparks drawn
+  49.0 / 91.0 / 115.2 / 91.1 / 50.9 (52.2 / 84.4 / 117.0 / 98.2 / 47.6 as
+  the recipe ships, at 0.7). The draft's temperature is a key
+  (`engine.mtp_draft_temperature`, the fraction of the request's; the
+  `DGPP_SPEC_PROPOSAL_TEMP` diagnostic retires): at 0.7 the same one-Spark
+  load reads 17.5 / 29.8 / 40.0 / 34.1 / 15.2 and MT-Bench 3.41 — a sharper
+  draft keeps the argmax's rate where the target is sharp — so the drafter
+  recipes ship 0.7 (the MTP templates stay at the request's).
+  The one-node template runs the drafter on the graph engine
+  (`decode_graph: true`; the eager engine's transcripts, chat 71 against
+  95 ms a token). The GDN in-projections of a 5–8-row verify take the
+  bf16 GEMV in two 4-row chunks (cuBLASLt's 16x16 tile kernel cost 3.3 ms
+  a step at 8 rows; 0.7 now), greedy C1 on one Spark 18.9 / 30.3 / 42.6 /
+  33.0 / 17.9 tok/s (prose / code / json / math / chat). The serve stats
+  line adds the first-miss rank histogram ("first miss was the drafter's
+  2nd / 3rd / 4th-8th / 9th-16th / none"; `MtpAcceptance::miss_rank`, the
+  walked candidate tables published with the drafts): under greedy the
+  correction is the drafter's 2nd candidate for 20–22 % of misses and
+  outside its top-16 for 17–32 % — the sizing of a tree verify, not taken
+  (a +7-row sibling tier would keep ~20 % of misses, +4–5 %, for rows that
+  cost 2–3 ms each on one Spark). The one-tile fp8 GEMV form stages the
+  next window's activation rows through registers one window ahead
+  (`mma_gemv.cu` `Pre` / `pre_load` / `pre_store`; the synchronous staging
+  put an L2 round trip on every window once every warp staged): bitwise,
+  the sixteen-row launches 5–17 % faster in isolation (one node gate|up
+  [17408 x 5120] 209.5 → 227 GB/s, two nodes 186 → 218), eight rows level
+  (the step 154 → 152 ms, greedy C1 19.0 / 30.4 / 42.9 / 33.3 / 18.0).
+  Nsight Compute (root, `ERR_NVGPUCTRPERM` otherwise) puts the one- and
+  eight-row launches at the same duration in isolation: 109 registers a
+  thread, two blocks an SM, 2.83 waves; the step's eight-row GEMV rate
+  (~210 GB/s against the plain step's 237) is the surrounding kernels'
+  interaction, not the kernel's row count.
 - **Prometheus exposition of the service's metrics**: `GET /metrics/prometheus`
   now renders every JSON counter as typed `dgpp_*` families labeled with the
   served model, plus histograms of time to first token (split by prefix-cache

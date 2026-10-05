@@ -211,6 +211,12 @@ struct ClusterConfig {
     // with probability P(draft)) or "auto" (the family's measured better
     // rule: greedy for a DSpark block, sampled elsewhere). Exact either way.
     std::string mtp_draft = "auto";
+    // The drawn drafts' temperature as a fraction of the request's (the
+    // proposal is the draft's distribution at THIS temperature; any value is
+    // exact — it only moves the overlap with the target, i.e. the acceptance
+    // rate: a sharper draft keeps the argmax's rate on sharp distributions,
+    // the request's keeps the overlap on flat ones). 1: the request's.
+    double mtp_draft_temperature = 1.0;
     int graph_batch_min_live = 0;  // 0 = min(2, max_concurrency) (the batch family, 2026-09-07)
     int sampling_candidates = 128;
     double prefix_cache_gib = 1.5;

@@ -80,7 +80,7 @@ int main(int argc, char** argv) {
     uint16_t* out = nullptr; DGPP_CUDA_OK(cudaMalloc(&out, size_t(32) * s.n * 2));
     float* outf = nullptr; DGPP_CUDA_OK(cudaMalloc(&outf, size_t(32) * s.n * 4));
     printf("\n== %s  n=%d k=%d  %.1f MB\n", s.name, s.n, s.k, wbytes / 1e6);
-    for (int m : {1, 4, 8}) {
+    for (int m : {1, 4, 8, 16}) {
       auto report = [&](const char* form, double us) {
         printf("  m=%d %-8s %8.1f us  %6.1f GB/s\n", m, form, us, wbytes / us / 1e3);
       };

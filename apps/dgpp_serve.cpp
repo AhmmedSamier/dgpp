@@ -244,6 +244,8 @@ struct ServeGraphEngine {
                                          bool adapt) = 0;
   // The sampled requests' draft rule (engine.mtp_draft), before the warm capture.
   virtual void set_proposal_drafts(bool on) = 0;
+  // engine.mtp_draft_temperature: the drawn drafts' temperature as a fraction of the request's.
+  virtual void set_proposal_temperature_scale(float scale) = 0;
   // engine.mtp_schedule_sampled_scale, before the warm capture.
   virtual void set_sampled_schedule_scale(float scale) = 0;
 };
@@ -260,6 +262,7 @@ struct ServeGraphEngineOf final : ServeGraphEngine {
     eng.configure_verify_schedule(on, row_ms, lambda, min_depth, base_ms, adapt);
   }
   void set_proposal_drafts(bool on) override { eng.set_proposal_drafts(on); }
+  void set_proposal_temperature_scale(float scale) override { eng.set_proposal_temperature_scale(scale); }
   void set_sampled_schedule_scale(float scale) override { eng.set_sampled_schedule_scale(scale); }
 };
 
@@ -1485,6 +1488,7 @@ int main(int argc, char** argv) {
   bool mtp_schedule_adapt = true;  // lambda follows the modeled throughput (floored at the configured lambda)
   double mtp_schedule_sampled_scale = 0.93;  // engine.mtp_schedule_sampled_scale
   std::string mtp_draft = "auto";  // engine.mtp_draft: auto | sampled | greedy
+  double mtp_draft_temperature = 1.0;  // engine.mtp_draft_temperature: the drawn drafts' temperature / the request's
   double prefix_cache_gib = 1.5;  // M7: the snapshot arena; 0 = off
   std::optional<float> temperature, top_p, min_p, repetition_penalty;
   std::optional<int> top_k;
@@ -1577,6 +1581,7 @@ int main(int argc, char** argv) {
     mtp_schedule_adapt = e.mtp_schedule_adapt;
     mtp_schedule_sampled_scale = e.mtp_schedule_sampled_scale;
     mtp_draft = e.mtp_draft;
+    mtp_draft_temperature = e.mtp_draft_temperature;
     compact_batches = e.compact_batches;
     graph_batch_min_live = e.graph_batch_min_live;
     sampling_candidates = e.sampling_candidates;
@@ -1695,6 +1700,7 @@ int main(int argc, char** argv) {
     else if (a == "--mtp-schedule-fixed-lambda") mtp_schedule_adapt = false;
     else if (a == "--mtp-schedule-sampled-scale") mtp_schedule_sampled_scale = std::stod(next());
     else if (a == "--mtp-draft") mtp_draft = next();
+    else if (a == "--mtp-draft-temperature") mtp_draft_temperature = std::stod(next());
     else if (a == "--sampling-candidates") sampling_candidates = std::stoi(next());
     else if (a == "--prefix-cache-gib") prefix_cache_gib = std::stod(next());
     else if (a == "--no-prefix-cache") prefix_cache_gib = 0.0;
@@ -1833,7 +1839,7 @@ int main(int argc, char** argv) {
         "fp8head={} pf={} "
         "emsh={} maxtok={} queue={} "
         "eos={} graph={} compact={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} "
-        "msad={} msss={} mdr={} "
+        "msad={} msss={} mdr={} mdt={} "
         "batchmin={} cand={} "
         "pcgib={} adm={} win={} pfbudget={} pfidle={} pmin={} phead={} pace={} inflight={} "
         "reasoning_in_content={} "
@@ -1843,7 +1849,8 @@ int main(int argc, char** argv) {
         embed_sharding, default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0,
         compact_batches ? 1 : 0, mtp ? 1 : 0, mtp_depth, mtp_schedule ? 1 : 0, mtp_schedule_row_ms,
         mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth,
-        mtp_schedule_adapt ? 1 : 0, mtp_schedule_sampled_scale, mtp_draft, effective_batch_min_live,
+        mtp_schedule_adapt ? 1 : 0, mtp_schedule_sampled_scale, mtp_draft, mtp_draft_temperature,
+        effective_batch_min_live,
         sampling_candidates, prefix_cache_gib,
         admission_mode, admission_window, prefill_budget_tokens, prefill_idle_budget_tokens,
         prefix_min_tokens, prefix_head_snapshots ? 1 : 0,
@@ -1914,6 +1921,7 @@ int main(int argc, char** argv) {
         ws.mtp_schedule_adapt = mtp_schedule_adapt;
         ws.mtp_schedule_sampled_scale = mtp_schedule_sampled_scale;
         ws.mtp_draft = mtp_draft;
+        ws.mtp_draft_temperature = mtp_draft_temperature;
         ws.compact_batches = compact_batches;
         ws.graph_batch_min_live = graph_batch_min_live;
         ws.sampling_candidates = sampling_candidates;
@@ -1986,6 +1994,7 @@ int main(int argc, char** argv) {
         mtp_schedule_adapt = ws.mtp_schedule_adapt;
         mtp_schedule_sampled_scale = ws.mtp_schedule_sampled_scale;
         mtp_draft = ws.mtp_draft;
+        mtp_draft_temperature = ws.mtp_draft_temperature;
         compact_batches = ws.compact_batches;
         graph_batch_min_live = ws.graph_batch_min_live;
         sampling_candidates = ws.sampling_candidates;
@@ -2075,6 +2084,10 @@ int main(int argc, char** argv) {
   // build (the loaders lay layers out by it, the plan counts by it, every
   // family's model packs by it).
   dgpp::set_bf16_residency(bf16_mode);
+  if (!(mtp_draft_temperature > 0.0 && mtp_draft_temperature <= 4.0)) {
+    DGPP_LOG_ERROR("--mtp-draft-temperature must be in (0, 4], got {}", mtp_draft_temperature);
+    return 2;
+  }
   if (mtp_draft != "auto" && mtp_draft != "sampled" && mtp_draft != "greedy") {
     DGPP_LOG_ERROR("--mtp-draft must be auto, sampled or greedy, got '{}'", mtp_draft);
     return 1;
@@ -2747,6 +2760,7 @@ int main(int argc, char** argv) {
                         knobs.admission.prefill_idle_budget_tokens > 0 ? knobs.admission.prefill_idle_budget_tokens
                                                                        : knobs.admission.prefill_budget_tokens,
                         graph_engine->engine()->prefill_group_advance() ? "; in-flight prompts share one walk" : "");
+          graph_engine->set_proposal_temperature_scale(static_cast<float>(mtp_draft_temperature));
           if (mtp) {
             const bool greedy_draft = mtp_draft == "greedy" || (mtp_draft == "auto" && family->greedy_draft_default());
             graph_engine->set_proposal_drafts(!greedy_draft);
@@ -2755,12 +2769,19 @@ int main(int argc, char** argv) {
                                        : "a draw from the draft's distribution under the ratio verify",
                           mtp_draft);
           } else if (!dflash_dir.empty()) {
-            // The block drafter's walk runs at temperature 0: its drafts
-            // are point masses, accepted with probability P(draft).
-            graph_engine->set_proposal_drafts(false);
+            // The block drafter's rule for sampled requests (engine.mtp_draft):
+            // the recorded walk draws each draft from the selector's softmax
+            // and the verify tests it by the ratio rule (the reference
+            // speculator's form; "auto"), or the argmax walk under the
+            // P(draft) accept ("greedy"). Exact either way.
+            const bool greedy_draft = mtp_draft == "greedy";
+            graph_engine->set_proposal_drafts(!greedy_draft);
             DGPP_LOG_INFO("rank {}: the DFlash2 block proposal ({} drafts a step) on the decode graph; sampled "
-                          "requests accept each draft with probability P(draft)",
-                          rank, dgpp::kSpecRows - 1);
+                          "requests {} (engine.mtp_draft {}, draft temperature {} x the request's)",
+                          rank, dgpp::kSpecRows - 1,
+                          greedy_draft ? "take the walk's argmax, accepted with probability P(draft)"
+                                       : "draw each draft from the selector's softmax under the ratio verify",
+                          mtp_draft, mtp_draft_temperature);
           }
           if (mtp_schedule) {
             // The value of decode time: the configured throughput, or the

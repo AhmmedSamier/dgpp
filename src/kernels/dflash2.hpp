@@ -15,6 +15,8 @@
 
 #include <cuda_runtime.h>
 
+#include "kernels/sample_pick.hpp"
+
 namespace dgpp {
 
 // The 2-tap dynamic grouped convolution (the DFlash2 attention_conv /
@@ -100,9 +102,26 @@ void dflash2_topk_f32(const float* logits, int32_t* ids, float* scores, int64_t 
 // ids[l][argmax_c scores[l][prev][c]], prev = that argmax (ties to the
 // first). One block, steps sequential, scores within a step computed in
 // parallel; the reduction order over the rank is fixed. cb bf16 [vocab, rank].
+//
+// The sampled walk (`spec` given and the request stochastic — temperature
+// > 0, the reference's _selector_walk_kernel with SAMPLE_PROBABILISTIC):
+// step l draws its candidate from softmax(scores[l][prev][.] / T), T the
+// spec's draft_temperature (its temperature when 0), truncated by the
+// spec's top-k / top-p / min-p (the MTP draft's convention; the dropped
+// candidates keep mass 0 in the proposal), by the draft stream's
+// uniform keyed on the draft's position pos[l + 1] (the same draw on every
+// rank), and writes the set it drew from to proposal[l] (n = k, ids, mass,
+// token = the draw) — the next verify's ratio rule, min(1, P/Q) with the
+// (P - Q)+ residual, whose rate is 1 - TV(P, Q) rather than P(argmax)
+// (kernels/sample_pick.hpp DraftProposal). A greedy spec walks the argmax
+// and writes n = 0 (the plain P(draft) rule). `proposal_host` (pinned,
+// optional) mirrors the proposals for the host's fallback. Without `spec`
+// the walk is the argmax and no proposal is written.
 void dflash2_selector_walk(const int32_t* ids, const float* unary, const float* hidden,
                            const uint16_t* pred_cb, const uint16_t* succ_cb, const int64_t* anchor,
-                           int32_t* tokens, int steps, int k, int rank, cudaStream_t stream);
+                           int32_t* tokens, int steps, int k, int rank, cudaStream_t stream,
+                           const int64_t* pos = nullptr, const SampleSpec* spec = nullptr,
+                           DraftProposal* proposal = nullptr, DraftProposal* proposal_host = nullptr);
 
 // ---- the recorded block draft (the graph engine's block proposal) -------------
 //
@@ -120,6 +139,9 @@ void dflash2_block_feed(const PickVerdict* verdict, const int32_t* drafts, int c
 // The drafts' pinned mirror (a kernel node: the host reads it after the
 // replay's end event), system-scope release ordered.
 void dflash2_publish_drafts(const int32_t* drafts, int32_t* pinned, int count, cudaStream_t stream);
+// The same for the mask rows' candidate tables (ids [drafts x k], up to
+// 1024 words): the engine's acceptance diagnostics read them.
+void dflash2_publish_words(const int32_t* src, int32_t* pinned, int count, cudaStream_t stream);
 // The fixed batch's forms over `requests` slots (slot q is request q): the
 // stacked blocks' rows [q*rows, (q+1)*rows) off verdicts[q] and
 // session_pos[q] (an inactive verdict — accepted 0 — stages positions -1

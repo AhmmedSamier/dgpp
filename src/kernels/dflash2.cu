@@ -403,18 +403,38 @@ __global__ void topk_kernel(const float* __restrict__ logits, int32_t* __restric
 // The scores[l][p][c] = unary[l][c] + <pred_code[id(l-1,p)] * hidden[l],
 // succ_code[id(l,c)]> table and the greedy slot walk (vLLM
 // qwen3_dflash2._score_edges + _selector_walk_kernel at temperature 0).
+// A proposal row (kernels/sample_pick.hpp DraftProposal): the k candidates
+// and their masses under the draft temperature, the draw as `token`.
+__device__ __forceinline__ void write_proposal(DraftProposal* pr, const int32_t* ids, const float* exps,
+                                               float den, int k, int32_t token) {
+  pr->n = k;
+  pr->token = token;
+  for (int c = 0; c < k; ++c) {
+    pr->ids[c] = ids[c];
+    pr->mass[c] = __fdiv_rn(exps[c], den);
+  }
+}
+
 __global__ void selector_kernel(const int32_t* __restrict__ ids, const float* __restrict__ unary,
                                 const float* __restrict__ hidden, const uint16_t* __restrict__ pred_cb,
                                 const uint16_t* __restrict__ succ_cb,
                                 const int64_t* __restrict__ anchor_tok, int32_t* __restrict__ tokens,
-                                int steps, int k, int rank) {
+                                int steps, int k, int rank, const int64_t* __restrict__ pos,
+                                const SampleSpec* __restrict__ spec, DraftProposal* __restrict__ proposal,
+                                DraftProposal* __restrict__ proposal_host) {
   extern __shared__ float sm[];
   const int32_t anchor = static_cast<int32_t>(*anchor_tok);
   float* h = sm;                  // [rank]
   float* pred = h + rank;         // [k][rank]
   float* succ = pred + k * rank;  // [k][rank]
   float* sc = succ + k * rank;    // [k][k]
+  float* ex = sc + k * k;         // [k] the sampled step's exps
   const int tid = threadIdx.x;
+  // The sampled walk: a stochastic request (temperature > 0) draws each
+  // step from the softmax of its scores at the draft temperature and
+  // proposes the set it drew from; otherwise the argmax, no proposal.
+  const bool sampled = spec != nullptr && spec->temperature > 0.0f;
+  const float T = sampled ? (spec->draft_temperature > 0.0f ? spec->draft_temperature : spec->temperature) : 1.0f;
   int prev = 0;
   for (int l = 0; l < steps; ++l) {
     __syncthreads();
@@ -435,10 +455,88 @@ __global__ void selector_kernel(const int32_t* __restrict__ ids, const float* __
     }
     __syncthreads();
     if (tid == 0) {
+      const int32_t* lid = ids + static_cast<int64_t>(l) * k;
       int best = 0;
       for (int c = 1; c < k; ++c)
         if (sc[prev * k + c] > sc[prev * k + best]) best = c;
-      tokens[l] = ids[static_cast<int64_t>(l) * k + best];
+      if (sampled) {
+        // softmax(scores / T) over the step's k candidates (fp32, the max
+        // subtracted), the inverse-CDF walk in fp64 on the draft stream's
+        // uniform keyed by the draft's position (kSampleDraftSeedMix ^ the
+        // step, as the chained MTP draft keys its draws).
+        const float mx = __fdiv_rn(sc[prev * k + best], T);
+        float den = 0.0f;
+        for (int c = 0; c < k; ++c) {
+          ex[c] = expf(__fsub_rn(__fdiv_rn(sc[prev * k + c], T), mx));
+          den = __fadd_rn(den, ex[c]);
+        }
+        // The request's truncation on the proposal too (the MTP draft's
+        // convention: the draft's final set after top-k, top-p and min-p):
+        // a draw from the tail the target's final set excludes could only
+        // be rejected. Candidates in mass order (ties to the lower id); the
+        // survivors renormalized, the rest at mass 0.
+        if (spec->top_k > 0 || spec->top_p < 1.0f || spec->min_p > 0.0f) {
+          int order[64];
+          for (int c = 0; c < k; ++c) order[c] = c;
+          for (int i = 1; i < k; ++i) {  // insertion sort by (mass desc, id asc)
+            const int oi = order[i];
+            int j = i;
+            while (j > 0 && (ex[order[j - 1]] < ex[oi] ||
+                             (ex[order[j - 1]] == ex[oi] && lid[order[j - 1]] > lid[oi]))) {
+              order[j] = order[j - 1];
+              --j;
+            }
+            order[j] = oi;
+          }
+          int keep = k;
+          if (spec->top_k > 0 && spec->top_k < keep) keep = spec->top_k;
+          if (spec->min_p > 0.0f) {
+            const float floor_mass = spec->min_p * ex[order[0]];
+            int n = 0;
+            while (n < keep && ex[order[n]] >= floor_mass) ++n;
+            keep = n > 0 ? n : 1;
+          }
+          if (spec->top_p < 1.0f) {
+            float cum = 0.0f;
+            int n = 0;
+            while (n < keep) {
+              cum = __fadd_rn(cum, __fdiv_rn(ex[order[n]], den));
+              ++n;
+              if (cum >= spec->top_p) break;
+            }
+            keep = n;
+          }
+          float kept = 0.0f;
+          for (int i = 0; i < k; ++i) {
+            if (i >= keep) ex[order[i]] = 0.0f;
+            else kept = __fadd_rn(kept, ex[order[i]]);
+          }
+          den = kept;
+        }
+        const uint64_t seed = spec->seed ^ kSampleDraftSeedMix ^
+                              (static_cast<uint64_t>(l + 1) * 0xD1B54A32D192ED03ull);
+        const int64_t p = pos != nullptr ? pos[l + 1] : static_cast<int64_t>(l + 1);
+        const double u = uniform01(seed, static_cast<uint64_t>(p < 0 ? 0 : p));
+        double cum = 0.0;
+        int chosen = -1, last_live = 0;
+        for (int c = 0; c < k; ++c) {
+          if (ex[c] <= 0.0f) continue;
+          last_live = c;
+          cum += static_cast<double>(ex[c]) / static_cast<double>(den);
+          if (cum > u) {
+            chosen = c;
+            break;
+          }
+        }
+        best = chosen >= 0 ? chosen : last_live;  // rounding past 1: the last survivor
+        if (proposal != nullptr) write_proposal(proposal + l, lid, ex, den, k, lid[best]);
+        if (proposal_host != nullptr) write_proposal(proposal_host + l, lid, ex, den, k, lid[best]);
+      } else if (proposal != nullptr || proposal_host != nullptr) {
+        // The argmax is a point mass: no proposal describes it.
+        if (proposal != nullptr) proposal[l].n = 0;
+        if (proposal_host != nullptr) proposal_host[l].n = 0;
+      }
+      tokens[l] = lid[best];
       prev = best;
     }
   }
@@ -470,6 +568,11 @@ __global__ void publish_drafts_kernel(const int32_t* __restrict__ drafts, int32_
   const int j = threadIdx.x;
   if (j >= count) return;
   asm volatile("st.release.sys.global.s32 [%0], %1;" ::"l"(pinned + j), "r"(drafts[j]) : "memory");
+}
+
+__global__ void publish_words_kernel(const int32_t* __restrict__ src, int32_t* __restrict__ pinned, int count) {
+  for (int j = blockIdx.x * blockDim.x + threadIdx.x; j < count; j += gridDim.x * blockDim.x)
+    asm volatile("st.release.sys.global.s32 [%0], %1;" ::"l"(pinned + j), "r"(src[j]) : "memory");
 }
 
 // The fixed batch's forms: one block per request slot q (== request q).
@@ -702,14 +805,20 @@ void dflash2_topk_f32(const float* logits, int32_t* ids, float* scores, int64_t 
 
 void dflash2_selector_walk(const int32_t* ids, const float* unary, const float* hidden,
                            const uint16_t* pred_cb, const uint16_t* succ_cb, const int64_t* anchor,
-                           int32_t* tokens, int steps, int k, int rank, cudaStream_t stream) {
+                           int32_t* tokens, int steps, int k, int rank, cudaStream_t stream,
+                           const int64_t* pos, const SampleSpec* spec, DraftProposal* proposal,
+                           DraftProposal* proposal_host) {
   if (steps <= 0) return;
   if (k < 2 || rank <= 0 || anchor == nullptr) throw std::invalid_argument("dflash2_selector_walk: k/rank/anchor");
-  const size_t smem = (static_cast<size_t>(rank) * (2 * k + 1) + k * k) * 4;
+  if (spec != nullptr && k > kSampleProposalMax)
+    throw std::invalid_argument("dflash2_selector_walk: the proposal holds at most kSampleProposalMax candidates");
+  if (spec != nullptr && steps > kSampleProposalSlots && (proposal != nullptr || proposal_host != nullptr))
+    throw std::invalid_argument("dflash2_selector_walk: more steps than proposal slots");
+  const size_t smem = (static_cast<size_t>(rank) * (2 * k + 1) + k * k + k) * 4;
   if (smem > 47u * 1024)
     throw std::invalid_argument("dflash2_selector_walk: shared memory over the static limit");
   selector_kernel<<<1, 256, smem, stream>>>(ids, unary, hidden, pred_cb, succ_cb, anchor, tokens,
-                                            steps, k, rank);
+                                            steps, k, rank, pos, spec, proposal, proposal_host);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
@@ -735,6 +844,13 @@ void dflash2_publish_drafts(const int32_t* drafts, int32_t* pinned, int count, c
   if (drafts == nullptr || pinned == nullptr || count < 1 || count > 32)
     throw std::invalid_argument("dflash2_publish_drafts: arguments");
   publish_drafts_kernel<<<1, 32, 0, stream>>>(drafts, pinned, count);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void dflash2_publish_words(const int32_t* src, int32_t* pinned, int count, cudaStream_t stream) {
+  if (src == nullptr || pinned == nullptr || count < 1 || count > 1024)
+    throw std::invalid_argument("dflash2_publish_words: arguments");
+  publish_words_kernel<<<(count + 127) / 128, 128, 0, stream>>>(src, pinned, count);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

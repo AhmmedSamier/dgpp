@@ -1,0 +1,24 @@
+
+=== 04:54:37 glm down
+2026-10-05 04:54:44.921 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 04:54:44 w4-sampled-tg128 up 
+cluster configuration: rank 0 did not open the journal
+
+=== 04:56:25 w4-sampled-tg128 llama-benchy pp2048 tg128
+
+=== 04:56:27 w4-sampled-tg128 down
+2026-10-05 04:56:32.313 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/sampled/w4-sampled-tg128/server
+
+=== 04:56:32 w4-argmax-tg128 up --mtp-draft greedy
+cluster configuration: rank 0 did not open the journal
+
+=== 04:58:11 w4-argmax-tg128 llama-benchy pp2048 tg128
+
+=== 04:58:12 w4-argmax-tg128 down
+2026-10-05 04:58:17.883 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-04-qwen3.8-27b/raw/w1-profile/sampled/w4-argmax-tg128/server
+
+=== 04:58:17 glm up
+2026-10-05 04:58:56.058 READY — curl http://<node-0>:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+BENCHY_REDO_DONE 04:58:56

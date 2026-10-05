@@ -77,13 +77,14 @@ rollback apply to it verbatim. Every target pass (prefill chunks and verify
 rows alike) feeds the planes at its positions; the block forward then runs
 `[bonus, mask x 7]` and proposes seven tokens.
 
-Serve it with `engine.dflash_model` and `mtp` off
+Serve it with `engine.dflash_model`, `decode_graph` on and `mtp` off
 (`deploy/cluster_qwen3.8-27b_fp8_w1.example.json`; `--no-dflash` runs
 the same recipe plain on the decode graph, `--no-dflash --mtp --mtp-depth 2`
-as the MTP world). Without `decode_graph` on one Spark it runs on the eager
-engine; on the graph worlds (the fabric, or one Spark with the decode
-graph) the block proposal is recorded inside the graph step — see "On the
-graph worlds" below. A greedy request's acceptance is the ordinary greedy
+as the MTP world). On the graph worlds (the fabric, and one Spark with the
+decode graph — the one-node template since 2026-10-05) the block proposal
+is recorded inside the graph step — see "On the graph worlds" below; with
+`decode_graph` off on one Spark the eager engine runs the same proposal a
+step (the same transcripts, chat 95 against 71 ms a token). A greedy request's acceptance is the ordinary greedy
 verify: the fed rows (the pending token plus the drafts) run through the
 target, the accepted prefix commits, the rest rolls back, and the step
 returns the tokens it decided (the accepted drafts and the verify's next
@@ -190,6 +191,35 @@ identical 4/4 at worlds 1, 2 and 4; the 1-row plain world differs within
 the family's row-count dispatch class (as at world 1 against a 3-row MTP
 verify). World 1's graph engine equals the eager engine 4/4 and runs the
 same tokens faster (chat 70.9 against 95.2 ms a token).
+
+**Sampled requests (2026-10-05).** The recorded walk draws each draft from
+the selector's softmax at the request's temperature (`engine.mtp_draft`
+`sampled` / `auto`; the reference speculator's Gumbel walk, the draw keyed
+on the draft's position so every rank walks the same chain) and writes the
+set it drew from as the draft's proposal; the verify then tests the draft by
+the ratio rule min(1, P/Q) with the (P − Q)+ residual, whose acceptance
+rate is 1 − TV(P, Q) — against P(argmax) for the argmax walk's point
+masses (`greedy`). Both are exact (the output distribution is the
+target's); greedy requests take the argmax walk either way. Measured on
+MT-Bench turn-1 prompts (writing / roleplay / humanities / stem, thinking
+on, temperature 1.0, top-p 0.95, top-k 20, one Spark): the argmax walk
+2.80 tokens per pass, the drawn proposals 3.27–3.34 (two runs; greedy on
+the same prompts 3.30), writing 2.84 → 3.3–4.0, roleplay 3.18 → 3.4–3.5,
+stem 2.49 → 3.0–3.3. `timed_load --temperature 1` C1 on one Spark, prose /
+code / json / math / chat: argmax 15.5 / 28.1 / 38.6 / 33.3 / 15.2 tok/s,
+drawn 16.9 / 29.3 / 37.2 / 31.3 / 17.1 — the flat classes gain 9–12 %, the
+sharp ones (json, math) give back 4–6 % where the drafter's distribution is
+flatter than the target's (Σ min(P, Q) under P(argmax)); four Sparks at
+temperature 1: 49.0 / 91.0 / 115.2 / 91.1 / 50.9 drawn at the request's
+temperature, 52.2 / 84.4 / 117.0 / 98.2 / 47.6 as the recipe ships (0.7),
+against the greedy drafter mode's 54.9 / 86.3 / 120.8 / 101.2 / 52.6. The draft's temperature calibrates the overlap (`engine.mtp_draft_temperature`,
+the draft's temperature as a fraction of the request's; exact at any value):
+the same one-Spark `timed_load` at temperature 1 read 15.5 / 28.1 / 38.6 /
+33.3 / 15.2 (argmax), 16.9 / 29.3 / 37.2 / 31.3 / 17.1 (1.0), 17.5 / 29.8 /
+40.0 / 34.1 / 15.2 (0.7), 16.2 / 32.0 / 42.8 / 32.5 / 15.8 (0.5), and
+MT-Bench think-sampled 2.80 / 3.27–3.34 / 3.41 at argmax / 1.0 / 0.7 — a
+sharper draft keeps the argmax's rate on the sharp classes while the flat
+ones keep the overlap gain; the drafter recipes ship 0.7.
 
 Measured 2026-10-04 (`benchmarks/results/2026-10-04-qwen3.8-27b/raw/drafter-tp`
 and `raw/prefetch`, the repository's `timed_load` workload, greedy C1, the
