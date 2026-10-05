@@ -426,6 +426,9 @@ std::string encode_journal_settings(const WorldSettings& s) {
   out += ",\"mdr\":";
   append_json_string(&out, s.mtp_draft);
   out += std::format(",\"mdt\":{:.17g}", s.mtp_draft_temperature);
+  out += ",\"mvf\":";
+  append_json_string(&out, s.mtp_verify);
+  out += std::format(",\"dbr\":{}", s.dflash_batch_rows);
   out.push_back('}');
   return out;
 }
@@ -656,6 +659,12 @@ JournalRecord decode_journal_line(std::string_view line) {
     if (const dgpp::minijson::Value* mdt = v.find("mdt")) s.mtp_draft_temperature = mdt->as_double();
     if (!(s.mtp_draft_temperature > 0.0 && s.mtp_draft_temperature <= 4.0))
       throw std::runtime_error("worker settings: mdt must be in (0, 4]");
+    // Records before 2026-10-05 carry no verify rule: the token rule.
+    if (const dgpp::minijson::Value* mvf = v.find("mvf")) s.mtp_verify = std::string(mvf->as_string());
+    if (s.mtp_verify != "token" && s.mtp_verify != "block")
+      throw std::runtime_error("worker settings: mvf must be token or block");
+    if (const dgpp::minijson::Value* dbr = v.find("dbr")) s.dflash_batch_rows = static_cast<int>(dbr->as_int());
+    if (s.dflash_batch_rows < 0) throw std::runtime_error("worker settings: dbr must be >= 0");
     if (s.world < 2 || s.max_concurrency < 1 || s.kv_capacity < 1 ||
         (s.admission != "full" && s.admission != "grow") ||
         !latent_format_from_string(s.kv_dtype) ||

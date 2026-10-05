@@ -1,0 +1,22 @@
+
+=== 08:17:26 w4-block-r2 up --mtp-verify block
+2026-10-05 08:17:52.438 READY — curl http://<node-0>:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w4_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/block-verify/w4-block-r2/server)
+
+=== 08:17:52 w4-block-r2 llama-benchy pp2048 tg128
+benchy tg128 mean 66.6 std 7.5
+mtp 3.67 tok/step/req, accept p1 81 % p2 61 % p3 41 % p4 34 % p5 26 % p6 19 % p7 13 %, first miss was the drafter's 2nd 11 % / 3rd 10 % / 4th-8th 32 % / 9th-16th 18 % / none 20 % (111 misses) 
+
+=== 08:18:57 w4-block-r2 down
+2026-10-05 08:19:04.376 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/block-verify/w4-block-r2/server
+
+=== 08:19:04 w4-token-r2 up --mtp-verify token
+2026-10-05 08:19:30.091 READY — curl http://<node-0>:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w4_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/block-verify/w4-token-r2/server)
+
+=== 08:19:30 w4-token-r2 llama-benchy pp2048 tg128
+benchy tg128 mean 65.8 std 6.5
+mtp 3.61 tok/step/req, accept p1 76 % p2 62 % p3 46 % p4 32 % p5 21 % p6 15 % p7 11 %, first miss was the drafter's 2nd 20 % / 3rd 12 % / 4th-8th 18 % / 9th-16th 13 % / none 28 % (104 misses) 
+
+=== 08:20:34 w4-token-r2 down
+2026-10-05 08:20:41.794 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/block-verify/w4-token-r2/server
+
+BLOCKR2_DONE 08:20:41

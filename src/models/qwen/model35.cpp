@@ -198,7 +198,7 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
   if (max_requests <= 0 || max_requests > kPickMaxRequests)
     throw std::invalid_argument("Qwen35Model: max_requests out of range");
   if (decode_rows > decode_rows_cap())
-    throw std::invalid_argument("Qwen35Model: decode_rows exceeds the limit of 32");
+    throw std::invalid_argument("Qwen35Model: decode_rows exceeds the limit of " + std::to_string(decode_rows_cap()));
   if (world < 1 || rank < 0 || rank >= world) throw std::invalid_argument("Qwen35Model: rank / world out of range");
   if (world > 1 && boundary == nullptr) throw std::invalid_argument("Qwen35Model: a TP world needs a boundary reducer");
   if (world == 1 && boundary != nullptr) throw std::invalid_argument("Qwen35Model: world 1 takes no boundary reducer");
@@ -467,10 +467,14 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
     DGPP_CUDA_OK(cudaMemsetAsync(df_zero_, 0, QR * 4, stream_));
     DGPP_CUDA_OK(cudaMalloc(&df_delta_, static_cast<size_t>(BR) * 2 * dfcfg_.conv_taps * dfcfg_.conv_groups() * 2));
     DGPP_CUDA_OK(cudaMalloc(&df_h_, static_cast<size_t>(BR) * H * 2));
-    DGPP_CUDA_OK(cudaMalloc(&df_logits_, static_cast<size_t>(BD) * lm_vocab_count_ * 4));
-    DGPP_CUDA_OK(cudaMalloc(&df_hidden32_, static_cast<size_t>(BD) * dfcfg_.selector_rank * 4));
-    DGPP_CUDA_OK(cudaMalloc(&df_ids_, static_cast<size_t>(BD) * dfcfg_.selector_top_k * 4));
-    DGPP_CUDA_OK(cudaMalloc(&df_sc_, static_cast<size_t>(BD) * dfcfg_.selector_top_k * 4));
+    // The head rows, top-K and hidden projection run once over every
+    // stacked row (the anchor rows' entries unused): one head stream a
+    // step instead of one per slot (2026-10-05; eight slots streamed the
+    // head eight times — ~38 ms a step on one Spark).
+    DGPP_CUDA_OK(cudaMalloc(&df_logits_, static_cast<size_t>(BR) * lm_vocab_count_ * 4));
+    DGPP_CUDA_OK(cudaMalloc(&df_hidden32_, static_cast<size_t>(BR) * dfcfg_.selector_rank * 4));
+    DGPP_CUDA_OK(cudaMalloc(&df_ids_, static_cast<size_t>(BR) * dfcfg_.selector_top_k * 4));
+    DGPP_CUDA_OK(cudaMalloc(&df_sc_, static_cast<size_t>(BR) * dfcfg_.selector_top_k * 4));
     DGPP_CUDA_OK(cudaMalloc(&df_tok_, static_cast<size_t>(BD) * 4));
     DGPP_CUDA_OK(cudaMalloc(&df_pos_, static_cast<size_t>(BR) * 8));
     DGPP_CUDA_OK(cudaMalloc(&df_tokens_, static_cast<size_t>(BR) * 8));
@@ -481,18 +485,33 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
     // recorder's staged buffer). The recorded drafts' pinned mirror, one
     // row per request slot.
     if (world > 1)
-      DGPP_CUDA_OK(cudaMalloc(&df_table_, dflash2_topk_table_elems(BD, dfcfg_.selector_top_k, world) * 2));
+      DGPP_CUDA_OK(cudaMalloc(&df_table_, dflash2_topk_table_elems(BR, dfcfg_.selector_top_k, world) * 2));
     DGPP_CUDA_OK(cudaMallocHost(&df_mirror_h_, static_cast<size_t>(max_requests) * D * 4));
     DGPP_CUDA_OK(cudaMallocHost(&df_cands_h_, static_cast<size_t>(max_requests) * D * dfcfg_.selector_top_k * 4));
     DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   }
   DGPP_CUDA_OK(cudaMalloc(&gdn_rec_base_, static_cast<size_t>(max_requests) * num_gdn_ * rec_elems_ * 4));
   DGPP_CUDA_OK(cudaMalloc(&gdn_conv_base_, static_cast<size_t>(max_requests) * num_gdn_ * conv_elems_ * 2));
-  // The verify's per-row GDN snapshots (the speculative rollback's source).
+  // The verify's per-row GDN conv snapshots (the speculative rollback's
+  // source); the recurrent state replays instead (the checkpoint-and-replay
+  // form: two copies of every slot's saved rows at the block's rows).
   const size_t spec_rows = static_cast<size_t>(max_decode_rows_);
-  DGPP_CUDA_OK(cudaMalloc(&spec_rec_, spec_rows * static_cast<size_t>(num_gdn_) * rec_elems_ * 4));
   DGPP_CUDA_OK(
       cudaMalloc(&spec_conv_, spec_rows * static_cast<size_t>(num_gdn_) * conv_elems_ * 2));
+  if (num_gdn_ > 0) {
+    gdn_replay_ = true;
+    gdn_replay_row_elems_ = ((C + 2 * lv) + 7) / 8 * 8;  // padded to 16 bytes: the commit's copy stays 16-byte-sized
+    // The batched walk's launcher checks the batch's rows against the cap
+    // (the kernel saves per request): the cap is the decode batch's rows,
+    // as the Flash-Next model sizes it (1 GB at eight slots and 64 rows
+    // against the 9.7 GB of per-row snapshots this replaces).
+    gdn_replay_rows_cap_ = max_decode_rows_;
+    const size_t per_req = gdn_replay_block_elems();
+    DGPP_CUDA_OK(cudaMalloc(&gdn_replay_in_, static_cast<size_t>(max_requests) * per_req * 2));
+    DGPP_CUDA_OK(cudaMalloc(&gdn_replay_save_, static_cast<size_t>(max_requests) * per_req * 2));
+    DGPP_CUDA_OK(cudaMalloc(&gdn_pending_, static_cast<size_t>(max_requests) * 4));
+    DGPP_CUDA_OK(cudaMemset(gdn_pending_, 0, static_cast<size_t>(max_requests) * 4));
+  }
   if (Bf12Companions::enabled()) pack_companions();
 }
 
@@ -579,6 +598,9 @@ Qwen35Model::~Qwen35Model() {
   cudaFree(gdn_conv_base_);
   cudaFree(spec_rec_);
   cudaFree(spec_conv_);
+  cudaFree(gdn_replay_in_);
+  cudaFree(gdn_replay_save_);
+  cudaFree(gdn_pending_);
   cudaFree(gemm_ws_);
   if (gw_.dequant) cudaFree(gw_.dequant);
   cudaFree(pt_gate_);
@@ -1039,10 +1061,15 @@ MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens,
       if (k == Qwen35LayerKind::Gdn) ++num_gdn;
     const int64_t lv = cfg.gdn_value_heads, V = cfg.gdn_value_head_dim, K = cfg.gdn_key_head_dim;
     const int64_t C = 2 * static_cast<int64_t>(cfg.gdn_key_heads) * K + lv * V;
-    const size_t rec = static_cast<size_t>(lv) * V * K;
     const size_t conv = static_cast<size_t>(C) * (cfg.gdn_conv_width - 1);
     const size_t rows = static_cast<size_t>(std::max({kDecodeRows, decode_rows, max_requests}));
-    plan.add("spec snapshot rows", rows * static_cast<size_t>(num_gdn) * (rec * 4 + conv * 2));
+    plan.add("spec conv snapshot rows", rows * static_cast<size_t>(num_gdn) * conv * 2);
+    // The recurrent state's replay rows: two copies of every slot's block
+    // (the post-conv row + a_raw + beta_raw, padded to 16 bytes).
+    const size_t row_elems = ((static_cast<size_t>(C) + 2 * static_cast<size_t>(lv)) + 7) / 8 * 8;
+    const size_t rows_cap = static_cast<size_t>(std::max({kDecodeRows, decode_rows, max_requests}));
+    plan.add("gdn replay rows (two copies)",
+             2 * static_cast<size_t>(max_requests) * static_cast<size_t>(num_gdn) * rows_cap * row_elems * 2);
   }
   return plan;
 }
@@ -1052,8 +1079,55 @@ void Qwen35Model::reset_slot_state(int req) {
     DGPP_CUDA_OK(cudaMemsetAsync(gdn_rec(req, 0), 0, static_cast<size_t>(num_gdn_) * rec_elems_ * 4, stream_));
     DGPP_CUDA_OK(
         cudaMemsetAsync(gdn_conv(req, 0), 0, static_cast<size_t>(num_gdn_) * conv_elems_ * 2, stream_));
+    if (gdn_replay_) DGPP_CUDA_OK(cudaMemsetAsync(gdn_pending_ + req, 0, sizeof(int32_t), stream_));
   }
   pool_.reset_request(req, stream_);
+}
+
+// One request's saved rows, every GDN layer: [rows_cap][num_gdn][row] —
+// row-major by row, then layer, so the rows a pass used (its first `rows`
+// per request) are one contiguous span the commit copies (the Flash-Next
+// model's layout).
+size_t Qwen35Model::gdn_replay_block_elems() const {
+  return static_cast<size_t>(num_gdn_) * static_cast<size_t>(gdn_replay_rows_cap_) *
+         static_cast<size_t>(gdn_replay_row_elems_);
+}
+
+KdaReplay Qwen35Model::gdn_replay_view(int req, int ordinal, bool batched) const {
+  KdaReplay rep;
+  const size_t per_req = gdn_replay_block_elems();
+  const size_t layer_off = static_cast<size_t>(ordinal) * static_cast<size_t>(gdn_replay_row_elems_);
+  // A batched walk indexes the request inside the kernel (request_ids); a
+  // single-request walk hands it the request's block.
+  const size_t req_off = batched ? 0 : static_cast<size_t>(req) * per_req;
+  rep.in = gdn_replay_in_ + req_off + layer_off;
+  rep.save = gdn_replay_save_ + req_off + layer_off;
+  rep.count = gdn_pending_ + (batched ? 0 : req);
+  rep.in_stride = static_cast<int64_t>(num_gdn_) * gdn_replay_row_elems_;
+  rep.request_stride = static_cast<int64_t>(per_req);
+  rep.rows_cap = gdn_replay_rows_cap_;
+  rep.checkpoint = true;
+  return rep;
+}
+
+void Qwen35Model::materialize_gdn(int req, float* dst, int rows) {
+  if (!gdn_replay_ || num_gdn_ <= 0) return;
+  if (rows > gdn_replay_rows_cap_) throw std::invalid_argument("materialize_gdn: rows past the saved rows");
+  int ordinal = 0;
+  for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
+    const Qwen35LayerResident& r = loader_.load_layer(layer);
+    if (r.kind != Qwen35LayerKind::Gdn) continue;
+    build_layer_objects(r);
+    KdaReplay rep = gdn_replay_view(req, ordinal, /*batched=*/false);
+    rep.checkpoint = false;
+    rep.save = nullptr;
+    rep.materialize = true;
+    rep.materialize_rows = rows;
+    rep.dst = dst ? dst + static_cast<size_t>(ordinal) * rec_elems_ : nullptr;
+    gdn_->materialize(gdn_rec(req, ordinal), rep, stream_);
+    ++ordinal;
+  }
+  if (dst == nullptr) DGPP_CUDA_OK(cudaMemsetAsync(gdn_pending_ + req, 0, sizeof(int32_t), stream_));
 }
 
 GlmSpecSegments Qwen35Model::spec_segments(int req, int snapshot_row0) const {
@@ -1066,7 +1140,19 @@ GlmSpecSegments Qwen35Model::spec_segments(int req, int snapshot_row0) const {
   if (num_gdn_ > 0) {
     const size_t rec_bytes = static_cast<size_t>(num_gdn_) * rec_elems_ * 4;
     const size_t conv_bytes = static_cast<size_t>(num_gdn_) * conv_elems_ * 2;
-    add(gdn_rec(req, 0), spec_rec_ + row0 * num_gdn_ * rec_elems_, rec_bytes, rec_bytes);
+    if (gdn_replay_) {
+      // The recurrent state replays: the commit copies this pass's saved
+      // rows (one contiguous span: the used rows of every layer) over the
+      // replay source and records the accepted count.
+      const size_t per_req = gdn_replay_block_elems();
+      const size_t used_rows = static_cast<size_t>(std::clamp(gdn_replay_rows_used_, 1, gdn_replay_rows_cap_));
+      segs.replay_dst = gdn_replay_in_ + static_cast<size_t>(req) * per_req;
+      segs.replay_src = gdn_replay_save_ + static_cast<size_t>(req) * per_req;
+      segs.replay_bytes = used_rows * static_cast<size_t>(num_gdn_) * static_cast<size_t>(gdn_replay_row_elems_) * 2;
+      segs.replay_pending = gdn_pending_ + req;
+    } else {
+      add(gdn_rec(req, 0), spec_rec_ + row0 * num_gdn_ * rec_elems_, rec_bytes, rec_bytes);
+    }
     add(gdn_conv(req, 0), spec_conv_ + row0 * num_gdn_ * conv_elems_, conv_bytes, conv_bytes);
   }
   return segs;
@@ -1078,7 +1164,19 @@ void Qwen35Model::write_state_snapshot(int req, uint8_t* d, int spec_row) {
   if (num_gdn_ == 0) return;
   const size_t rec_bytes = static_cast<size_t>(num_gdn_) * rec_elems_ * 4;
   const size_t conv_bytes = static_cast<size_t>(num_gdn_) * conv_elems_ * 2;
-  d2d(d, live ? gdn_rec(req, 0) : spec_rec_ + row * num_gdn_ * rec_elems_, rec_bytes, stream_);
+  if (gdn_replay_) {
+    // The replay form: the live state materialized in place (the pending
+    // rows applied, then copied), or the state after spec row `row`
+    // replayed straight into the snapshot.
+    if (live) {
+      materialize_gdn(req);
+      d2d(d, gdn_rec(req, 0), rec_bytes, stream_);
+    } else {
+      materialize_gdn(req, reinterpret_cast<float*>(d), spec_row + 1);
+    }
+  } else {
+    d2d(d, live ? gdn_rec(req, 0) : spec_rec_ + row * num_gdn_ * rec_elems_, rec_bytes, stream_);
+  }
   d2d(d + rec_bytes, live ? gdn_conv(req, 0) : spec_conv_ + row * num_gdn_ * conv_elems_, conv_bytes,
       stream_);
 }
@@ -1089,6 +1187,7 @@ void Qwen35Model::read_state_snapshot(int req, const uint8_t* d) {
   const size_t conv_bytes = static_cast<size_t>(num_gdn_) * conv_elems_ * 2;
   d2d(gdn_rec(req, 0), d, rec_bytes, stream_);
   d2d(gdn_conv(req, 0), d + rec_bytes, conv_bytes, stream_);
+  if (gdn_replay_) DGPP_CUDA_OK(cudaMemsetAsync(gdn_pending_ + req, 0, sizeof(int32_t), stream_));
 }
 
 void Qwen35Model::graph_prepare() {
@@ -1299,8 +1398,18 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
     if (!run.capture) DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
     boundary_->reduce(buf, T, width);
   };
-  // The speculative verify's per-row GDN snapshots (the rollback source).
+  // The speculative verify's per-row GDN snapshots (the rollback source);
+  // the recurrent state replays (gdn_replay_) and a prefill walk reads it
+  // as it stands: the pending rows are materialized first (a no-op kernel
+  // when none are pending).
   const bool snapshots = run.decode && run.snapshots;
+  if (gdn_replay_ && !run.decode) {
+    if (run.num_spans > 0) {
+      for (int sp = 0; sp < run.num_spans; ++sp) materialize_gdn(run.span_reqs[sp]);
+    } else {
+      materialize_gdn(req);
+    }
+  }
   int full_ord = 0, gdn_ord = 0;
   for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
     const Qwen35LayerResident& r = loader_.load_layer(layer);
@@ -1310,11 +1419,20 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
     if (r.kind == Qwen35LayerKind::Gdn) {
       KdaStateSnapshots rec_snap;
       KdaConvSnapshots conv_snap;
+      KdaReplay replay;
       if (snapshots) {
-        rec_snap.states = spec_rec_ + static_cast<size_t>(gdn_ord) * rec_elems_;
-        rec_snap.stride_elems = static_cast<int64_t>(num_gdn_) * rec_elems_;
+        if (!gdn_replay_) {
+          rec_snap.states = spec_rec_ + static_cast<size_t>(gdn_ord) * rec_elems_;
+          rec_snap.stride_elems = static_cast<int64_t>(num_gdn_) * rec_elems_;
+        }
         conv_snap.states = spec_conv_ + static_cast<size_t>(gdn_ord) * conv_elems_;
         conv_snap.stride_elems = static_cast<int64_t>(num_gdn_) * conv_elems_;
+      }
+      // Every decode walk of the replay form takes the checkpoint form (a
+      // one-row walk included: the live buffer is the checkpoint).
+      if (run.decode && gdn_replay_) {
+        replay = gdn_replay_view(req, gdn_ord, batched);
+        gdn_replay_rows_used_ = batched ? T / std::max(num_requests, 1) : T;
       }
       if (batched) {
         KdaRequestRows requests;
@@ -1325,7 +1443,7 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
         gdn_->enqueue_rows(x_, gdn_rec(0, gdn_ord),
                            static_cast<int64_t>(num_gdn_) * rec_elems_, gdn_conv(0, gdn_ord),
                            static_cast<int64_t>(num_gdn_) * conv_elems_, ao, T, requests, stream_,
-                           rec_snap, conv_snap);
+                           rec_snap, conv_snap, replay);
       } else if (run.num_spans > 0) {
         int64_t row0 = 0;
         for (int sp = 0; sp < run.num_spans; ++sp) {
@@ -1338,7 +1456,7 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
         }
       } else {
         gdn_->enqueue(x_, gdn_rec(req, gdn_ord), gdn_conv(req, gdn_ord), ao, T, stream_, rec_snap,
-                      conv_snap, KdaReplay{}, run.pos0 > 0 && !run.decode);
+                      conv_snap, replay, run.pos0 > 0 && !run.decode);
       }
       ++gdn_ord;
     } else {
@@ -1694,13 +1812,13 @@ void Qwen35Model::df_block_select(int slots, const int* reqs, bool capture) {
   const bool sampled = capture && df_specs_ != nullptr && reqs != nullptr;
   const int64_t V = lm_vocab_count_;
   const int topk = dfcfg_.selector_top_k, rank = dfcfg_.selector_rank;
-  for (int k = 0; k < slots; ++k) {
-    const size_t ro = static_cast<size_t>(k) * QR, co = static_cast<size_t>(k) * D;
-    head_gemv(df_h_ + (ro + 1) * H, df_logits_ + co * V, D, stream_);
-    dflash2_topk_f32(df_logits_ + co * V, df_ids_ + co * topk, df_sc_ + co * topk, V, D, topk, stream_);
-  }
+  // One head stream for every slot's rows (the mask rows of slot k are rows
+  // k*QR + 1 .. k*QR + D; the anchor rows' logits and top-K go unread).
+  const int R = slots * QR;
+  head_gemv(df_h_, df_logits_, R, stream_);
+  dflash2_topk_f32(df_logits_, df_ids_, df_sc_, V, R, topk, stream_);
   if (world_ > 1) {
-    const int rows = slots * D;
+    const int rows = R;
     const size_t elems = dflash2_topk_table_elems(rows, topk, world_);
     uint16_t* table = boundary_->stage(1, static_cast<int>(elems));
     if (table == nullptr) {
@@ -1713,12 +1831,12 @@ void Qwen35Model::df_block_select(int slots, const int* reqs, bool capture) {
     boundary_->reduce(table, 1, static_cast<int>(elems));
     dflash2_topk_merge(table, rows, topk, world_, df_ids_, df_sc_, stream_);
   }
+  gemm_.matmul(df_h_, dfw_.hidden_projection, df_hidden32_, R, rank, H, DType::BF16, GemmOut::F32,
+               static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
   for (int k = 0; k < slots; ++k) {
-    const size_t ro = static_cast<size_t>(k) * QR, co = static_cast<size_t>(k) * D;
-    gemm_.matmul(df_h_ + (ro + 1) * H, dfw_.hidden_projection, df_hidden32_ + co * rank, D, rank, H,
-                 DType::BF16, GemmOut::F32, static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
+    const size_t ro = static_cast<size_t>(k) * QR, co = static_cast<size_t>(k) * D, mo = ro + 1;
     const size_t po = sampled ? static_cast<size_t>(reqs[k]) * static_cast<size_t>(df_props_stride_) : 0;
-    dflash2_selector_walk(df_ids_ + co * topk, df_sc_ + co * topk, df_hidden32_ + co * rank,
+    dflash2_selector_walk(df_ids_ + mo * topk, df_sc_ + mo * topk, df_hidden32_ + mo * rank,
                           dfw_.pred_codebook, dfw_.succ_codebook, df_tokens_ + ro, df_tok_ + co, D, topk,
                           rank, stream_, sampled ? df_pos_ + ro : nullptr,
                           sampled ? df_specs_ + reqs[k] : nullptr, sampled ? df_props_ + po : nullptr,
@@ -1750,7 +1868,7 @@ void Qwen35Model::session_graph_capture_block_draft(int req, const PickVerdict* 
   dflash2_block_feed(verdict, df_tok_, D, step_tokens_, stream_);
   dflash2_publish_drafts(df_tok_, df_mirror_h_ + static_cast<size_t>(req) * D, D, stream_);
   const int K = dfcfg_.selector_top_k;
-  dflash2_publish_words(df_ids_, df_cands_h_ + static_cast<size_t>(req) * D * K, D * K, stream_);
+  dflash2_publish_words(df_ids_ + K, df_cands_h_ + static_cast<size_t>(req) * D * K, D * K, stream_);  // the mask rows' lists
 }
 
 void Qwen35Model::session_graph_capture_block_draft_batch(const PickVerdict* verdicts, int requests) {
@@ -1764,7 +1882,11 @@ void Qwen35Model::session_graph_capture_block_draft_batch(const PickVerdict* ver
     throw std::logic_error("session_graph_capture_block_draft_batch: the block draft takes slot q as request q (no compaction)");
   const int H = cfg_.hidden_size;
   const int QR = dfcfg_.query_rows(), D = dfcfg_.drafts();
-  if (graph_rows_per_request_ != QR || graph_feed_rows_ != 0)
+  // The persistent feed is the whole block per slot ([next, drafts] at
+  // query rows); a reduced-row verify (engine.dflash_batch_rows) reads it
+  // compacted and the block draft still writes the whole of it.
+  const int feed_rows = graph_feed_rows_ > 0 ? graph_feed_rows_ : graph_rows_per_request_;
+  if (feed_rows != QR || graph_rows_per_request_ > QR)
     throw std::logic_error("session_graph_capture_block_draft_batch: the feed is [next, drafts] per slot (T = query rows)");
   const int R = requests * QR;
   dflash2_stage_block_batched(verdicts, d_session_pos_, dfcfg_.mask_token_id, QR, requests, max_context(), df_pos_,
@@ -1781,7 +1903,9 @@ void Qwen35Model::session_graph_capture_block_draft_batch(const PickVerdict* ver
   dflash2_block_feed_batched(verdicts, df_tok_, D, requests, QR, feeds, stream_);
   dflash2_publish_drafts_batched(df_tok_, df_mirror_h_, D, requests, stream_);
   const int K = dfcfg_.selector_top_k;
-  dflash2_publish_words(df_ids_, df_cands_h_, requests * D * K, stream_);  // slot q == request q
+  for (int q = 0; q < requests; ++q)  // slot q == request q: its mask rows' lists
+    dflash2_publish_words(df_ids_ + (static_cast<size_t>(q) * QR + 1) * K, df_cands_h_ + static_cast<size_t>(q) * D * K,
+                          D * K, stream_);
 }
 
 // The batched redraft: the S slots' [bonus, mask x D] blocks stacked into

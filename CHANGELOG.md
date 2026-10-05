@@ -28,7 +28,71 @@ The history by milestone. The dated engineering record in
   `DGPP_SPEC_PROPOSAL_TEMP` diagnostic retires): at 0.7 the same one-Spark
   load reads 17.5 / 29.8 / 40.0 / 34.1 / 15.2 and MT-Bench 3.41 — a sharper
   draft keeps the argmax's rate where the target is sharp — so the drafter
-  recipes ship 0.7 (the MTP templates stay at the request's). With the
+  recipes ship 0.7 (the MTP templates stay at the request's). The ratio
+  rule now runs in the pure temperature regime too (a request that sends
+  only `temperature`: most clients, the arena harness), where the verify
+  priced drawn drafts by the deterministic P(draft) rule (acceptance Σ Q·P
+  against the overlap Σ min(P, Q)); the residual's total there is
+  1 − Σ min(P, Q), exact when the prefix holds every proposed id, else the
+  row keeps the deterministic rule (`sample::spec_accept_from_prefix`, the device's
+  `spec_decide_prefix`; host and device bitwise in both regimes,
+  `sampler_test` / `glm_pick_test`). Measured neutral: MT-Bench
+  think-sampled in the pure regime 3.16 against the deterministic rule's
+  3.20 tokens per pass, one-Spark `timed_load` at temperature 1 within
+  noise — with the 0.7 draft temperature the proposals are sharp enough
+  that the two rules nearly coincide; kept for the uniform semantics, at
+  no runtime cost (no fallbacks over the legs). Block verification (Sun et al. 2024)
+  as `engine.mtp_verify: block`: the sampled chain decided jointly along
+  the drafts' p_i = min(1, p_{i−1} P/Q) with each sub-block accepted by
+  h_i = S_i / (S_i + 1 − p_i) and the residual (p_τ P − Q)+ drawn after
+  the longest accepted one — exact, never fewer tokens in expectation than
+  the token rule; the device decides the block when every row prices its
+  draft (else the token rule), the host draws a pure-regime tail residual
+  (`sample::block_verify_from_prefixes`, `block_residual_complete`;
+  `sampler_test` reproduces the paper's 11/9 against 10/9 example).
+  Measured on the same binary: four Sparks under the arena harness 68.4
+  against the token rule's 65.2 tok/s (two 20-run pairs each, +5 %, about
+  two standard errors), MT-Bench think-sampled 3.45 against 3.41 tokens a
+  pass, one-Spark `timed_load` at temperature 1 within noise, no fallbacks
+  over 5,270 sampled steps; the drafter recipes set `mtp_verify: block`,
+  the engine's default stays `token`.
+  The Qwen3.8-27B decode batch's row ceiling is 64 (`Qwen35Model::
+  decode_rows_cap`, 32 before): eight drafter slots at eight verify rows
+  batch in one replay — at 32 the widest family held four slots and eight
+  live slots ran scalar replays (one node C8 17–39 tok/s against C4's
+  44–96 on the 2026-10-05 dry run; the eager engine's 32-row verify graph
+  read 46–102). The verify's per-row GDN snapshots scale with the ceiling
+  (3.1 MB a layer a row at world 1). With the ceiling the 27B model's
+  recurrent state takes the checkpoint-and-replay form the Flash-Next
+  model has had since 2026-09-29 (`kernels/kda.hpp` KdaReplay: the live
+  buffer is the checkpoint, each pass saves its rows as their inputs —
+  ~21 KB a layer a row — and the next pass replays the accepted ones; the
+  replayed state is bitwise the snapshot it stands in for): the 9.7 GB of
+  per-row snapshots at 64 rows become 1 GB of replay rows, and the snapshot
+  writes leave the step. The drafter's selection runs once over
+  every stacked row — the head, the top-K and the hidden projection as one
+  launch each — where it streamed the lm head once per slot (eight head
+  streams a step at eight slots: ~38 ms on one Spark, ~10 on four). The
+  batched verify-rows budget (`engine.dflash_batch_rows`): a batch family
+  whose slots times the block exceed it verifies the first floor(budget /
+  slots) − 1 drafts of every slot's block through the reduced-depth
+  variants the scheduled verify depth uses (the drafter still proposes the
+  whole block; exact). Measured at eight slots, greedy: four Sparks C8
+  170.5 / 231.9 / 251.3 / 239.0 / 178.2 tok/s at 101 ms a step under a
+  32-row budget against 132.2 / 234.7 / 283.2 / 243.3 / 139.3 at 142 ms
+  for whole blocks (one Spark 69.9 / 100.8 / 105.1 / 100.4 / 71.1 at 252 ms
+  against 64.3 / 114.2 / 129.1 / 116.9 / 68.6 at 305) — the budget lifts
+  prose and chat and costs the sharp classes their deep block; the MTP
+  depth-3 template's eight-slot rows (213 / 290 / 335 / 304 / 232 at 84 ms)
+  stay ahead of either, the drafter's edge being single-stream. The replay
+  form and the batched selection together, greedy at eight slots: one Spark
+  C1 19.8 / 31.5 / 44.3 / 34.3 / 18.7 and C8 87.0 / 150.5 / 171.1 / 158.8 /
+  92.1 tok/s at 202 ms a step (the snapshot form's 64.3 / 114.2 / 129.1 /
+  116.9 / 68.6 at 305); four Sparks C1 57.6 / 88.4 / 123.1 / 102.0 / 53.7 and
+  C8 154.1 / 268.4 / 321.6 / 278.5 / 163.6 at 123 ms (132.2 / 234.7 / 283.2
+  / 243.3 / 139.3 at 142), within 4–8 % of the MTP depth-3 world's eight-slot
+  code / JSON / math and 28–30 % behind it on prose and chat; greedy transcripts
+  bitwise 4/4 (the replayed state is the snapshot's). With the
   drawn proposals the drafter leads MTP on sampled traffic too (four Sparks
   under the arena harness: +14 % over the depth-3 template's 2026-10-04
   reading), so every Qwen3.8-27B template is now the drafter — the two- and

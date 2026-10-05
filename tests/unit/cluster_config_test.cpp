@@ -98,7 +98,8 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
                "admission": "grow", "stats_interval_s": 0, "mtp_depth": 2, "prefill": "exact",
                "prefill_budget_tokens": 256, "prefill_idle_budget_tokens": 2048,
                "prefix_min_tokens": 512, "prefix_head_snapshots": false, "mtp_draft": "greedy",
-               "mtp_schedule_sampled_scale": 0.5, "mtp_draft_temperature": 0.7},
+               "mtp_schedule_sampled_scale": 0.5, "mtp_draft_temperature": 0.7, "mtp_verify": "block",
+               "dflash_batch_rows": 32},
     "paths": {"log_dir": "/var/log/dgpp"}
   })";
   const dgpp::serve::ClusterConfig c = dgpp::serve::parse_cluster_config(json, "t");
@@ -115,8 +116,13 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
               c.engine.prefill_budget_tokens == 256 && c.engine.prefill_idle_budget_tokens == 2048 &&
               c.engine.prefix_min_tokens == 512 && !c.engine.prefix_head_snapshots &&
               c.engine.mtp_draft == "greedy" && c.engine.mtp_schedule_sampled_scale == 0.5 &&
-              c.engine.mtp_draft_temperature == 0.7,
+              c.engine.mtp_draft_temperature == 0.7 && c.engine.mtp_verify == "block" &&
+              c.engine.dflash_batch_rows == 32,
           "the given engine knobs");
+  require(dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"]})", "t").engine.dflash_batch_rows == 0,
+          "the drafter's batches verify whole blocks by default");
+  require(dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"]})", "t").engine.mtp_verify == "token",
+          "the sampled chain's rule defaults to the token test");
   require(dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"]})", "t").engine.mtp_draft_temperature == 1.0,
           "the drawn drafts' temperature defaults to the request's");
   require(dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"]})", "t").engine.mtp_schedule_sampled_scale == 0.93,
@@ -336,6 +342,8 @@ DGPP_TEST(cluster_config_refusesUnknownKeysAndBadValuesByName) {
        "'engine.mtp_draft' must be auto, sampled or greedy"},
       {R"({"model":"m","nodes":["h"],"engine":{"mtp_draft_temperature":0}})",
        "'engine.mtp_draft_temperature' must be in (0, 4]"},
+      {R"({"model":"m","nodes":["h"],"engine":{"mtp_verify":"tree"}})",
+       "'engine.mtp_verify' must be token or block"},
       {R"({"model":"m","nodes":["h"],"engine":{"mtp_schedule_sampled_scale":1.5}})",
        "'engine.mtp_schedule_sampled_scale' must be in [0, 1]"},
       {R"({"model":"m","nodes":["h"],"engine":{"admission":"fast"}})",

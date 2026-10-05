@@ -1,0 +1,77 @@
+model Qwen/Qwen3.8-27B-FP8
+warm 0: status 200 tokens 64
+== prose concurrency 1: 06:43:33.879 .. 06:43:41.315  wall 7.4 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 152 ms  client update pace 28.56 ms/update
+   aggregate wall: 256 tokens in 7.44 s = 34.43 tok/s (prefill included)
+   legacy output-span aggregate: 35.14821239636332 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 35.057 tok/s
+== prose concurrency 1: 06:43:41.315 .. 06:43:48.750  wall 7.4 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 152 ms  client update pace 28.56 ms/update
+   aggregate wall: 256 tokens in 7.43 s = 34.43 tok/s (prefill included)
+   legacy output-span aggregate: 35.156143614628675 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 35.071 tok/s
+== prose concurrency 1: 06:43:48.751 .. 06:43:56.190  wall 7.4 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 152 ms  client update pace 28.58 ms/update
+   aggregate wall: 256 tokens in 7.44 s = 34.41 tok/s (prefill included)
+   legacy output-span aggregate: 35.13083841544619 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 35.027 tok/s
+== prose concurrency 2: 06:43:56.192 .. 06:44:07.410  wall 11.2 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 228 ms  client update pace 40.32 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 228 ms  client update pace 43.00 ms/update
+   aggregate wall: 512 tokens in 11.22 s = 45.64 tok/s (prefill included)
+   legacy output-span aggregate: 46.696931380813304 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 46.554 tok/s
+== prose concurrency 2: 06:44:07.411 .. 06:44:18.607  wall 11.2 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 228 ms  client update pace 40.24 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 227 ms  client update pace 42.91 ms/update
+   aggregate wall: 512 tokens in 11.20 s = 45.73 tok/s (prefill included)
+   legacy output-span aggregate: 46.78966224712087 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 46.638 tok/s
+== prose concurrency 2: 06:44:18.608 .. 06:44:29.804  wall 11.2 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 202 ms  client update pace 40.34 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 202 ms  client update pace 43.01 ms/update
+   aggregate wall: 512 tokens in 11.20 s = 45.73 tok/s (prefill included)
+   legacy output-span aggregate: 46.68219385067356 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 46.638 tok/s
+== prose concurrency 4: 06:44:29.808 .. 06:44:44.082  wall 14.3 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 455 ms  client update pace 54.09 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 455 ms  client update pace 52.20 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 256 ttft 455 ms  client update pace 52.70 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 256 ttft 455 ms  client update pace 51.71 ms/update
+   aggregate wall: 1024 tokens in 14.27 s = 71.74 tok/s (prefill included)
+   legacy output-span aggregate: 74.2411392737009 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 74.405 tok/s
+== prose concurrency 4: 06:44:44.083 .. 06:44:58.323  wall 14.2 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 457 ms  client update pace 54.05 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 457 ms  client update pace 52.26 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 256 ttft 457 ms  client update pace 52.66 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 256 ttft 457 ms  client update pace 51.66 ms/update
+   aggregate wall: 1024 tokens in 14.24 s = 71.91 tok/s (prefill included)
+   legacy output-span aggregate: 74.2986297890205 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 74.473 tok/s
+== prose concurrency 4: 06:44:58.324 .. 06:45:12.568  wall 14.2 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 455 ms  client update pace 54.07 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 456 ms  client update pace 52.18 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 256 ttft 455 ms  client update pace 52.68 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 256 ttft 455 ms  client update pace 51.69 ms/update
+   aggregate wall: 1024 tokens in 14.24 s = 71.89 tok/s (prefill included)
+   legacy output-span aggregate: 74.2689625581479 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 74.455 tok/s
+== prose concurrency 8: 06:45:12.572 .. 06:46:18.180  wall 65.6 s
+Traceback (most recent call last):
+  File "/home/stephen/workspace/dgpp/scripts/timed_load.py", line 97, in <module>
+    main()
+  File "/home/stephen/workspace/dgpp/scripts/timed_load.py", line 93, in main
+    serve_load.main(phase_runner=load.phase, settle=load.settle)
+  File "/home/stephen/workspace/dgpp/scripts/serve_load.py", line 352, in main
+    rates = [run_phase(args.host, args.port, model, c, args.max_tokens, args.think, base,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/stephen/workspace/dgpp/scripts/timed_load.py", line 75, in phase
+    rate = serve_load.phase(host, port, model, c, max_tokens, think, prompt_base,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/stephen/workspace/dgpp/scripts/serve_load.py", line 250, in phase
+    metrics = phase_metrics(outs, t_start, t_end)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/stephen/workspace/dgpp/scripts/bench_stream.py", line 65, in phase_metrics
+    raise RuntimeError(request["error"])
+RuntimeError: stream error: {'message': 'the server is shutting down — this response is incomplete; retry on another instance', 'type': 'server_error', 'param': None, 'code': 'server_shutdown'}

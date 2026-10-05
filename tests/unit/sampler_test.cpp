@@ -1160,6 +1160,139 @@ DGPP_TEST(spec_accept_with_a_proposal_keeps_the_marginal_and_lifts_acceptance) {
               std::to_string(overlap) + " vs mode " + std::to_string(mode_mass) + ")");
 }
 
+// The pure regime (no top-k / top-p / min-p) takes the ratio rule too
+// (2026-10-05): over a complete list the marginal is P and the accept rate
+// the overlap; an incomplete prefix that hides an id the proposal gives
+// mass to cannot price the residual and falls back without a draw.
+DGPP_TEST(spec_accept_pure_regime_uses_the_proposal) {
+  using dgpp::sample::Proposal;
+  using dgpp::sample::spec_accept_from_prefix;
+  const std::vector<float> logits{2.0f, 1.5f, 1.0f, 0.2f, -0.4f, -3.0f};
+  const int n = static_cast<int>(logits.size());
+  Params p;  // temperature 1, no truncation: the pure regime
+  const std::vector<Candidate> sorted = sort_slice(logits.data(), n, 0);
+  const std::vector<VocabSlice> layout{{0, n}};
+  const double lse = sharded_scaled_logsumexp(logits.data(), layout, 1.0f);
+  std::vector<double> target(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i)
+    target[static_cast<size_t>(i)] = std::exp(logits[static_cast<size_t>(i)] - lse);
+  const std::vector<float> draft_logits{1.6f, 1.7f, 0.9f, 0.1f, -0.2f, -2.0f};
+  double qz = 0.0;
+  for (int i = 0; i < n; ++i) qz += std::exp(draft_logits[static_cast<size_t>(i)]);
+  Proposal q;
+  std::vector<double> qmass(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    qmass[static_cast<size_t>(i)] = std::exp(draft_logits[static_cast<size_t>(i)]) / qz;
+    q.mass.emplace_back(i, static_cast<float>(qmass[static_cast<size_t>(i)]));
+  }
+  double overlap = 0.0, mode_mass = 0.0;
+  for (int i = 0; i < n; ++i) {
+    overlap += std::min(target[static_cast<size_t>(i)], qmass[static_cast<size_t>(i)]);
+    mode_mass = std::max(mode_mass, target[static_cast<size_t>(i)]);
+  }
+  constexpr int kTrials = 60000;
+  std::vector<int> counts(static_cast<size_t>(n), 0);
+  int accepted = 0;
+  for (uint64_t t = 0; t < kTrials; ++t) {
+    Rng qrng{t * 6364136223846793005ull + 1442695040888963407ull, 0};
+    const double u = dgpp::sample::uniform01(qrng);
+    double cum = 0.0;
+    int32_t draft = n - 1;
+    for (int i = 0; i < n; ++i) {
+      cum += qmass[static_cast<size_t>(i)];
+      if (cum > u) { draft = i; break; }
+    }
+    Rng rng{t * 7919 + 13, 0};
+    const auto d = spec_accept_from_prefix(sorted, n, lse, draft, p, rng, false, &q);
+    require(d.resolved, "a complete list always decides");
+    counts[static_cast<size_t>(d.result.token)] += 1;
+    accepted += d.accepted ? 1 : 0;
+    require(!d.accepted || d.result.token == draft, "an accept emits the draft");
+  }
+  for (int i = 0; i < n; ++i) {
+    const double freq = static_cast<double>(counts[static_cast<size_t>(i)]) / kTrials;
+    require(std::abs(freq - target[static_cast<size_t>(i)]) < 0.012,
+            "pure regime: token " + std::to_string(i) + " frequency " + std::to_string(freq) +
+                " vs target " + std::to_string(target[static_cast<size_t>(i)]));
+  }
+  const double rate = static_cast<double>(accepted) / kTrials;
+  require(std::abs(rate - overlap) < 0.012,
+          "pure regime: the accept rate " + std::to_string(rate) + " is the overlap " +
+              std::to_string(overlap));
+  require(overlap > mode_mass + 0.05, "the proposal must beat the deterministic ceiling");
+  // An incomplete prefix (the top three of six) with the proposal's mass
+  // partly outside it: the overlap is unseen, so the row keeps the
+  // deterministic rule — the same decision and draws as without a proposal.
+  const std::vector<Candidate> prefix(sorted.begin(), sorted.begin() + 3);
+  for (uint64_t t = 0; t < 50; ++t) {
+    Rng with{99 + t, 5}, without{99 + t, 5};
+    const auto d = spec_accept_from_prefix(prefix, n, lse, prefix[0].id, p, with, false, &q);
+    const auto e = spec_accept_from_prefix(prefix, n, lse, prefix[0].id, p, without, false, nullptr);
+    require(d.resolved == e.resolved && with.counter == without.counter &&
+                (!d.resolved || (d.accepted == e.accepted && d.result.token == e.result.token)),
+            "a hidden overlap keeps the deterministic rule's decision and draws");
+  }
+  // The same prefix with a proposal confined to it decides (the tail holds
+  // no proposal mass): the residual total is exact.
+  Proposal inside;
+  for (int i = 0; i < 3; ++i) inside.mass.emplace_back(prefix[static_cast<size_t>(i)].id, i == 0 ? 0.6f : 0.2f);
+  int decided = 0;
+  for (uint64_t t = 0; t < 200; ++t) {
+    Rng r{t + 1, 0};
+    const auto e = spec_accept_from_prefix(prefix, n, lse, prefix[0].id, p, r, false, &inside);
+    decided += e.resolved ? 1 : 0;
+    require(!e.resolved || e.accepted || e.result.token != prefix[0].id || target[0] > 0.6,
+            "a rejected draft re-emerges only with residual mass");
+  }
+  require(decided > 100, "most draws decide inside the prefix (" + std::to_string(decided) + ")");
+}
+
+// Block verification on the paper's two-token example (Sun et al. 2024,
+// Section 2): M_b = (1/3, 2/3), M_s = (2/3, 1/3), gamma = 2. Token
+// verification accepts 10/9 drafts in expectation, block verification
+// 11/9; both emit the first token with M_b's marginal.
+DGPP_TEST(block_verify_matches_the_papers_two_token_example) {
+  using dgpp::sample::BlockDecision;
+  using dgpp::sample::Proposal;
+  using dgpp::sample::block_verify_from_prefixes;
+  const std::vector<float> target_logits{std::log(1.0f / 3.0f), std::log(2.0f / 3.0f)};  // A, B
+  const double qa = 2.0 / 3.0;  // M_s(A)
+  Params p;  // temperature 1, the pure regime (a complete two-token list)
+  const std::vector<Candidate> row = sort_slice(target_logits.data(), 2, 0);  // B first (canonical)
+  const std::vector<VocabSlice> layout{{0, 2}};
+  const double lse = sharded_scaled_logsumexp(target_logits.data(), layout, 1.0f);
+  Proposal q;
+  q.mass.emplace_back(0, static_cast<float>(qa));
+  q.mass.emplace_back(1, static_cast<float>(1.0 - qa));
+  constexpr int kTrials = 60000;
+  double tau_sum = 0.0;
+  int first_a = 0, unresolved = 0;
+  for (uint64_t t = 0; t < kTrials; ++t) {
+    Rng qrng{t * 6364136223846793005ull + 97, 0};
+    std::vector<int32_t> drafts(2);
+    for (int i = 0; i < 2; ++i) {
+      const double u = dgpp::sample::uniform01(qrng);
+      ++qrng.counter;
+      drafts[static_cast<size_t>(i)] = u < qa ? 0 : 1;
+    }
+    Rng rng{t * 7919 + 3, 0};
+    const BlockDecision d = block_verify_from_prefixes({row, row, row}, 2, {lse, lse, lse}, drafts,
+                                                       {&q, &q}, p, rng);
+    require(d.decidable, "a complete list always decides");
+    if (!d.resolved) { ++unresolved; continue; }
+    tau_sum += d.tau;
+    require(static_cast<int>(d.winners.size()) == d.tau + 1, "the winners are the drafts and the next token");
+    first_a += d.winners[0] == 0 ? 1 : 0;
+    require(rng.counter == 3, "two etas and one final draw");
+  }
+  require(unresolved == 0, "no fallback on a complete list");
+  const double mean_tau = tau_sum / kTrials;
+  require(std::abs(mean_tau - 11.0 / 9.0) < 0.02,
+          "block verification accepts 11/9 drafts in expectation, got " + std::to_string(mean_tau));
+  require(std::abs(static_cast<double>(first_a) / kTrials - 1.0 / 3.0) < 0.012,
+          "the first emitted token keeps the target's marginal");
+}
+
 // A proposal that is absent, or that never proposed this draft, leaves the
 // rule exactly where it was: the same decision, the same draws.
 DGPP_TEST(spec_accept_without_a_proposal_is_the_deterministic_rule) {

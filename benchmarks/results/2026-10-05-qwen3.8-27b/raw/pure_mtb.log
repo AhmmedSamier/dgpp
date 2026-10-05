@@ -1,0 +1,32 @@
+
+=== 07:52:45 w1-pure-token up (build-release/dgpp-serve)
+2026-10-05 07:53:10.135 READY — curl http://<node-0>:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/pure-mtb/w1-pure-token/server)
+
+=== 07:53:10 w1-pure-token MT-Bench think-sampled, pure regime (T 1.0, top-p 1, top-k 0)
+## w1-pure-token: 32 requests, think=on, temperature=1.0, max_tokens=384
+  humanities   n= 2  tokens   768  tok/pass  2.93  ms/pass  152.0  ->  19.3 tok/s
+  roleplay     n=10  tokens  3840  tok/pass  3.49  ms/pass  152.0  ->  22.9 tok/s
+  stem         n=10  tokens  3840  tok/pass  3.06  ms/pass  152.0  ->  20.1 tok/s
+  writing      n=10  tokens  3840  tok/pass  3.15  ms/pass  153.0  ->  20.6 tok/s
+  ALL          n=32  tokens 12288  tok/pass  3.20
+mtp 2.81 tok/step/req, accept p1 63 % p2 33 % p3 24 % p4 19 % p5 17 % p6 17 % p7 9 %, first miss was the drafter's 2nd 12 % / 3rd 14 % / 4th-8th 16 % / 9th-16th 8 % / none 47 % (49 misses) 
+
+=== 08:04:53 w1-pure-token down
+2026-10-05 08:04:55.365 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/pure-mtb/w1-pure-token/server
+
+=== 08:04:57 w1-pure-ratio up (build-ci/dgpp-serve)
+2026-10-05 08:05:23.648 READY — curl http://<node-0>:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/pure-mtb/w1-pure-ratio/server)
+
+=== 08:05:23 w1-pure-ratio MT-Bench think-sampled, pure regime (T 1.0, top-p 1, top-k 0)
+## w1-pure-ratio: 31 requests, think=on, temperature=1.0, max_tokens=384
+  humanities   n= 1  tokens   384  tok/pass  2.99  ms/pass  153.0  ->  19.5 tok/s
+  roleplay     n=10  tokens  3840  tok/pass  3.42  ms/pass  153.0  ->  22.4 tok/s
+  stem         n=10  tokens  3840  tok/pass  2.92  ms/pass  153.0  ->  19.1 tok/s
+  writing      n=10  tokens  3840  tok/pass  3.20  ms/pass  153.0  ->  20.9 tok/s
+  ALL          n=31  tokens 11904  tok/pass  3.16
+mtp 3.06 tok/step/req, accept p1 70 % p2 50 % p3 41 % p4 29 % p5 11 % p6 5 % p7 2 %, first miss was the drafter's 2nd 14 % / 3rd 15 % / 4th-8th 26 % / 9th-16th 12 % / none 31 % (65 misses) 
+
+=== 08:17:02 w1-pure-ratio down
+2026-10-05 08:17:04.139 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/pure-mtb/w1-pure-ratio/server
+
+PUREMTB_DONE 08:17:06

@@ -863,7 +863,8 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests, in
                                 uint64_t carry, int rows_per_request = 1,
                                 const std::vector<uint32_t>& masks = {},
                                 const std::vector<dgpp::DraftProposal>& proposals = {},
-                                const std::vector<int32_t>& request_map = {}) {
+                                const std::vector<int32_t>& request_map = {},
+                                int block_verify = 0) {
   const int vocab = world * count;
   const int rows = requests * rows_per_request;
   const int mask_stride = dgpp::device_sample_mask_words(vocab);
@@ -1013,7 +1014,7 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests, in
                                 /*position_stride=*/rows_per_request, d_counts, d_masks,
                                 d_masks ? mask_stride : 0, d_verdicts,
                                 /*device_verdicts=*/nullptr, d_out, d_carry, nullptr, d_props,
-                                nullptr, nullptr, 0, d_map);
+                                nullptr, nullptr, 0, d_map, block_verify);
     DGPP_CUDA_OK(cudaDeviceSynchronize());
     if (d_masks) cudaFree(d_masks);
     if (d_map) cudaFree(d_map);
@@ -2517,8 +2518,11 @@ DGPP_TEST(sample_pick_t2_with_a_proposal_matches_the_ratio_oracle) {
   constexpr int candidates = 32;
   constexpr int requests = 3;
   constexpr int rpr = 2;
-  int accepts = 0, rejects = 0, ignored = 0;
-  for (int trial = 0; trial < 12; ++trial) {
+  int accepts = 0, rejects = 0, ignored = 0, unresolved = 0;
+  // The materialized regime (top-p 0.95) and the pure one (no truncation,
+  // 2026-10-05): the device's decision is the host's in both.
+  for (int trial = 0; trial < 24; ++trial) {
+  const float top_p = trial < 12 ? 0.95f : 1.0f;
     std::vector<float> full(static_cast<size_t>(requests * rpr) * vocab);
     for (int row = 0; row < requests * rpr; ++row) {
       float* v = full.data() + static_cast<size_t>(row) * vocab;
@@ -2530,7 +2534,7 @@ DGPP_TEST(sample_pick_t2_with_a_proposal_matches_the_ratio_oracle) {
     std::vector<dgpp::SampleSpec> specs(requests);
     for (int q = 0; q < requests; ++q) {
       specs[q].temperature = 1.0f;
-      specs[q].top_p = 0.95f;
+      specs[q].top_p = top_p;
       specs[q].seed = 0x5100 + q + 41 * trial;
       specs[q].counter = 3;
     }
@@ -2593,7 +2597,18 @@ DGPP_TEST(sample_pick_t2_with_a_proposal_matches_the_ratio_oracle) {
           dgpp::sample::spec_accept_from_prefix(
               m0, vocab, Z0, draft, p, host, /*draft_excluded=*/false,
               live ? &host_props[static_cast<size_t>(q)] : nullptr);
-      require(d0.resolved, "the peaked row resolves inside the prefix");
+      if (!d0.resolved) {
+        // The pure regime's residual can run past the held prefix: the
+        // device must then fall back at row 0 too, with no draw consumed.
+        require(top_p >= 1.0f, "the materialized regime always resolves");
+        for (int k = 0; k < kWorld; ++k) {
+          require(run.outcomes[k][q].fallback == 1 && run.outcomes[k][q].fallback_row == 0,
+                  "rank " + std::to_string(k) + ": the device falls back where the oracle does");
+          require(run.specs_after[k][q].counter == specs[q].counter, "a fallback consumes no draw");
+        }
+        ++unresolved;
+        continue;
+      }
       if (!live) ++ignored;
       else if (d0.accepted) ++accepts;
       else ++rejects;
@@ -2632,7 +2647,128 @@ DGPP_TEST(sample_pick_t2_with_a_proposal_matches_the_ratio_oracle) {
   require(accepts > 0 && rejects > 0 && ignored > 0,
           "the sweep must accept, reject and ignore a mismatched proposal "
           "(accepts " + std::to_string(accepts) + ", rejects " +
-          std::to_string(rejects) + ", ignored " + std::to_string(ignored) + ")");
+          std::to_string(rejects) + ", ignored " + std::to_string(ignored) +
+          ", unresolved " + std::to_string(unresolved) + ")");
+}
+
+// Block verification (engine.mtp_verify block, 2026-10-05): a three-row
+// chain (two drafts, each with a proposal) decided jointly on the device is
+// the host oracle's decision bit for bit — tau, the winners, the draws, the
+// fallback row — in the materialized regime (top-p 0.95) and the pure one.
+DGPP_TEST(sample_pick_block_verify_matches_the_host_oracle) {
+  Rng rng(0xb10c);
+  constexpr int kWorld = 4;
+  constexpr int count = 96;
+  constexpr int vocab = kWorld * count;
+  constexpr int candidates = 32;
+  constexpr int requests = 3;
+  constexpr int rpr = 3;
+  int taus[rpr] = {0, 0, 0};
+  int fallbacks = 0, resolved = 0;
+  for (int trial = 0; trial < 24; ++trial) {
+    const float top_p = trial < 12 ? 0.95f : 1.0f;
+    std::vector<float> full(static_cast<size_t>(requests * rpr) * vocab);
+    for (int row = 0; row < requests * rpr; ++row) {
+      float* v = full.data() + static_cast<size_t>(row) * vocab;
+      for (int i = 0; i < vocab; ++i)
+        v[i] = static_cast<float>((rng.next() >> 8) % 41) * 0.25f - 5.0f;
+      // Three spikes at distinct ids: the top-p nucleus stays within the
+      // merged prefix (a shared id would leave a flat row whose nucleus
+      // runs past it — a support the verify cannot resolve, by design).
+      const size_t spike = static_cast<size_t>(rng.next() % vocab);
+      v[spike] = 12.0f;
+      v[(spike + 1 + rng.next() % 7) % vocab] = 9.0f;
+      v[(spike + 9 + rng.next() % 7) % vocab] = 8.0f;
+    }
+    std::vector<dgpp::SampleSpec> specs(requests);
+    for (int q = 0; q < requests; ++q) {
+      specs[q].temperature = 1.0f;
+      specs[q].top_p = top_p;
+      specs[q].seed = 0xb100 + q + 37 * trial;
+      specs[q].counter = 5;
+    }
+    std::vector<int32_t> counts(static_cast<size_t>(requests) * vocab, 0);
+    std::vector<int64_t> fed(requests * rpr), positions(requests);
+    std::vector<dgpp::DraftProposal> props(static_cast<size_t>(requests) * dgpp::kSampleProposalSlots);
+    std::vector<std::vector<dgpp::sample::Proposal>> host_props(requests, std::vector<dgpp::sample::Proposal>(rpr - 1));
+    for (int q = 0; q < requests; ++q) {
+      positions[q] = 11 + q;
+      fed[rpr * q] = static_cast<int64_t>(rng.next() % vocab);
+      for (int t = 0; t + 1 < rpr; ++t) {
+        // Row t's draft: one of the row's top-4; its proposal the row's
+        // top-8 softmaxed (any distribution is legal; this one resembles P).
+        const float* rowt = full.data() + static_cast<size_t>(rpr * q + t) * vocab;
+        const std::vector<Candidate> top = dgpp::sample::local_topk(rowt, vocab, 0, 8);
+        const int pick = static_cast<int>(rng.next() % 4);
+        fed[rpr * q + t + 1] = top[static_cast<size_t>(pick)].id;
+        dgpp::DraftProposal& dp = props[static_cast<size_t>(q) * dgpp::kSampleProposalSlots + t];
+        double z = 0.0;
+        for (const Candidate& c : top) z += std::exp(static_cast<double>(c.logit) - top[0].logit);
+        dp.n = static_cast<int32_t>(top.size());
+        for (size_t i = 0; i < top.size(); ++i) {
+          dp.ids[i] = top[i].id;
+          dp.mass[i] = static_cast<float>(std::exp(static_cast<double>(top[i].logit) - top[0].logit) / z);
+          host_props[static_cast<size_t>(q)][static_cast<size_t>(t)].mass.emplace_back(dp.ids[i], dp.mass[i]);
+        }
+        dp.token = static_cast<int32_t>(fed[rpr * q + t + 1]);
+      }
+    }
+    const uint64_t carry = 0xb10cb10cb10cull;
+    const SampleWorldRun run =
+        run_sample_world(full, requests, kWorld, count, specs, counts, fed, positions,
+                         candidates, carry, rpr, {}, props, {}, /*block_verify=*/1);
+    for (int q = 0; q < requests; ++q) {
+      const dgpp::sample::Params p = params_of(specs[q]);
+      std::vector<std::vector<Candidate>> rows;
+      std::vector<double> lses;
+      for (int t = 0; t < rpr; ++t) {
+        const float* rowt = full.data() + static_cast<size_t>(rpr * q + t) * vocab;
+        std::vector<std::vector<Candidate>> shards;
+        std::vector<double> ls;
+        for (int k = 0; k < kWorld; ++k) {
+          shards.push_back(dgpp::sample::local_topk(rowt + k * count, count, k * count, candidates));
+          ls.push_back(dgpp::sample::slice_logsumexp(rowt + k * count, count, p.temperature));
+        }
+        rows.push_back(dgpp::sample::merge_topk(shards, candidates));
+        lses.push_back(dgpp::sample::merge_logsumexp(ls));
+      }
+      std::vector<int32_t> drafts;
+      std::vector<const dgpp::sample::Proposal*> qs;
+      for (int t = 0; t + 1 < rpr; ++t) {
+        drafts.push_back(static_cast<int32_t>(fed[rpr * q + t + 1]));
+        qs.push_back(&host_props[static_cast<size_t>(q)][static_cast<size_t>(t)]);
+      }
+      dgpp::sample::Rng host{specs[q].seed, specs[q].counter};
+      const dgpp::sample::BlockDecision d =
+          dgpp::sample::block_verify_from_prefixes(rows, vocab, lses, drafts, qs, p, host);
+      require(d.decidable, std::string("the peaked rows price every draft and hold every proposed id (") +
+                               d.reason + ", top_p " + std::to_string(top_p) + ", request " + std::to_string(q) + ")");
+      for (int k = 0; k < kWorld; ++k) {
+        const PickVerdict& v = run.verdicts[k][q];
+        const dgpp::SampleOutcome& o = run.outcomes[k][q];
+        const std::string where = "rank " + std::to_string(k) + " request " + std::to_string(q) + ": ";
+        require(o.block == 1, where + "the device took the block rule");
+        require(v.accepted == d.tau + 1, where + "tau (" + std::to_string(v.accepted - 1) + " vs " + std::to_string(d.tau) + ")");
+        for (int t = 0; t < d.tau; ++t)
+          require(v.winners[t] == d.winners[static_cast<size_t>(t)], where + "an accepted draft");
+        if (d.resolved) {
+          require(o.fallback == 0, where + "no fallback where the oracle resolves");
+          require(v.winners[d.tau] == d.next && v.next == d.next, where + "the block's next token");
+        } else {
+          require(o.fallback == 1 && o.fallback_row == d.fallback_row, where + "the fallback row is the oracle's");
+          if (d.fallback_row < rpr - 1)
+            require(o.block_p == d.block_p, where + "the residual's scale travels to the host");
+        }
+        require(run.specs_after[k][q].counter == host.counter, where + "the draws consumed are the oracle's");
+      }
+      if (d.resolved) ++resolved; else ++fallbacks;
+      taus[d.tau] += 1;
+    }
+  }
+  require(resolved > 0 && taus[0] > 0 && taus[1] > 0 && taus[2] > 0,
+          "the sweep must reach every accepted length (" + std::to_string(taus[0]) + ", " +
+              std::to_string(taus[1]) + ", " + std::to_string(taus[2]) + "; fallbacks " +
+              std::to_string(fallbacks) + ")");
 }
 
 DGPP_TEST(sample_pick_compact_mapping_preserves_physical_sampling_state) {

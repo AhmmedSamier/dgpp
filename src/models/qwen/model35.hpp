@@ -154,7 +154,13 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
               const std::string& dflash2_dir = "");
   ~Qwen35Model();
 
-  static constexpr int decode_rows_cap() { return 32; }
+  // The decode batch's row ceiling (engine/decode_outputs.hpp's
+  // kDecodeRowsMax): eight request slots at the DFlash2 block's eight verify
+  // rows (2026-10-05; 32 until then, which left eight live drafter slots
+  // past the widest four-slot family on scalar replays — one node's C8 read
+  // 17–39 tok/s against C4's 44–96). The verify's per-row GDN snapshots
+  // scale with it (3.1 MB a layer a row at world 1: 9.7 GB at 64 rows).
+  static constexpr int decode_rows_cap() { return 64; }
   // The two opt-in FP8 levers beyond the checkpoint, set from the cluster
   // config before plan_memory and the constructor read them:
   // engine.prefill_fp8_per_tensor (the per-tensor prefill recipe) and
@@ -509,11 +515,30 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   bool df_verify_broken_ = false;
   static constexpr int df_rows_cap() { return 2048; }
   // Model-owned GDN state: [max_requests][num_gdn][elems], plus the
-  // verify's per-row snapshots ([max_decode_rows][num_gdn][elems]) the
-  // speculative rollback reads (engine/session_model.hpp's commit).
+  // verify's per-row CONV snapshots ([max_decode_rows][num_gdn][elems]) the
+  // speculative rollback reads (engine/session_model.hpp's commit). The
+  // recurrent state takes the checkpoint-and-replay form (kernels/kda.hpp
+  // KdaReplay; 2026-10-05, the Flash-Next model's since 2026-09-29): the
+  // live buffer holds the checkpoint before the last pass's rows, each
+  // pass saves its rows as their inputs (~21 KB a row a layer against the
+  // 3.1 MB state a snapshot wrote — 1.2 GB a step at one slot, 9.7 GB at
+  // the 64-row batch) and the next pass replays the accepted ones; the
+  // replayed state is bitwise the snapshot it stands in for.
   float* gdn_rec_base_ = nullptr;
   uint16_t* gdn_conv_base_ = nullptr;
-  float* spec_rec_ = nullptr;
+  float* spec_rec_ = nullptr;             // null under the replay form
+  bool gdn_replay_ = false;
+  uint16_t* gdn_replay_in_ = nullptr;     // [R][num_gdn][rows_cap][row]: the rows the next pass replays
+  uint16_t* gdn_replay_save_ = nullptr;   // [R][num_gdn][rows_cap][row]: this pass's rows (the commit copies them over `in`)
+  int32_t* gdn_pending_ = nullptr;        // [R]: rows to replay (the commit writes the accepted count)
+  int64_t gdn_replay_row_elems_ = 0;      // the post-conv q|k|v row + a_raw + beta_raw, padded to 16 bytes
+  int gdn_replay_rows_cap_ = 0;
+  int gdn_replay_rows_used_ = 1;          // rows per request of the last decode walk (the commit's copy)
+  KdaReplay gdn_replay_view(int req, int ordinal, bool batched) const;
+  size_t gdn_replay_block_elems() const;  // one request's saved rows, every GDN layer
+  // The recurrent state as it stands (the pending rows applied): in place
+  // (dst null; the pending count cleared) or into dst after `rows` rows.
+  void materialize_gdn(int req, float* dst = nullptr, int rows = -1);
   uint16_t* spec_conv_ = nullptr;
   int num_gdn_ = 0, num_full_ = 0;
   int64_t rec_elems_ = 0, conv_elems_ = 0;

@@ -217,6 +217,15 @@ struct ClusterConfig {
     // rate: a sharper draft keeps the argmax's rate on sharp distributions,
     // the request's keeps the overlap on flat ones). 1: the request's.
     double mtp_draft_temperature = 1.0;
+    // The sampled chain's verify rule: "block" (block verification — the
+    // drafts decided jointly; exact, never fewer tokens in expectation
+    // than the token rule) or "token" (the token-by-token test).
+    std::string mtp_verify = "token";
+    // The block drafter's batched verify rows budget: a batch family whose
+    // slots times the block exceed it verifies the first drafts of every
+    // slot's block (exact; the drafter proposes the whole block either
+    // way). 0: every family verifies the whole block.
+    int dflash_batch_rows = 0;
     int graph_batch_min_live = 0;  // 0 = min(2, max_concurrency) (the batch family, 2026-09-07)
     int sampling_candidates = 128;
     double prefix_cache_gib = 1.5;

@@ -1136,13 +1136,16 @@ __device__ inline Decision decide_prefix(const float* logit, const int32_t* id,
 // `qmass`: the proposal's mass at each merged candidate, or
 // null when the draft was deterministic. With it the accept test is
 // min(1, P/Q) and the residual is the normalized (P - Q)+ — the marginal is
-// P either way (sample::spec_select_from_sorted, the host oracle).
+// P either way (sample::spec_select_from_sorted, the host oracle). In the
+// pure regime the residual's total is 1 - sum min(P, Q), exact only when the
+// prefix holds every id the proposal gives mass (`q_missing` counts the
+// proposed ids outside it: any keeps the row on the deterministic rule).
 __device__ inline Decision spec_decide_prefix(
     const float* logit, const int32_t* id, const double* mass, double* prefix,
     const float* expsrc, int held, int vocab_size, double Z, int32_t draft,
     const SampleSpec& s, float* exps, uint64_t* counter,
     const TopReport* top = nullptr, bool draft_excluded = false,
-    const float* qmass = nullptr, double q_draft = 0.0) {
+    const float* qmass = nullptr, double q_draft = 0.0, int q_missing = 0) {
   Decision d{false, false, kNoId, 0.0f, 0.0};
   const Support sup =
       resolve_support(logit, mass, prefix, held, vocab_size, s);
@@ -1167,11 +1170,26 @@ __device__ inline Decision spec_decide_prefix(
       }
   if (j == held && !complete && !draft_excluded) return d;
   const double p_draft = j < held ? mass[j] : 0.0;
+  // The ratio rule when the proposal carries the draft (the host's
+  // arithmetic: the overlap and the proposal's seen mass summed over the
+  // prefix in order, fp64 from the fp32 masses).
+  // An unseen proposed id (the pure regime): the row keeps the deterministic rule.
+  const bool ratio = qmass != nullptr && q_draft > 0.0 && (complete || q_missing == 0);
+  double residual_total = 1.0 - p_draft;
+  if (ratio) {
+    double overlap = 0.0;
+    for (int i = 0; i < held; ++i) {
+      const double qi = static_cast<double>(qmass[i]);
+      if (qi <= 0.0) continue;
+      overlap += mass[i] < qi ? mass[i] : qi;
+    }
+    residual_total = 1.0 - overlap;
+  }
   const uint64_t entry = *counter;
   const double u1 = uniform01(s.seed, *counter);
   *counter += 1;
   const float lse = static_cast<float>(Z);
-  if (p_draft > u1) {
+  if (ratio ? (p_draft > u1 * q_draft) : (p_draft > u1)) {
     d.resolved = true;
     d.accepted = true;
     d.token = draft;
@@ -1180,14 +1198,19 @@ __device__ inline Decision spec_decide_prefix(
   }
   const double u2 = uniform01(s.seed, *counter);
   *counter += 1;
-  const double threshold = u2 * (1.0 - p_draft);
+  const double threshold = u2 * residual_total;
   double cumulative = 0.0;
   int chosen = held;
   int last = held;  // the last residual token with mass
   for (int i = 0; i < held; ++i) {
-    if (i == j) continue;
-    if (mass[i] > 0.0 || last == held) last = i;
-    cumulative += mass[i];
+    if (!ratio && i == j) continue;
+    double m = mass[i];
+    if (ratio) {
+      const double qi = static_cast<double>(qmass[i]);
+      m = m > qi ? m - qi : 0.0;
+    }
+    if (m > 0.0 || last == held) last = i;
+    cumulative += m;
     if (cumulative > threshold) {
       chosen = i;
       break;
@@ -1253,7 +1276,8 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
     const uint32_t* __restrict__ masks, int mask_stride, PickVerdict* __restrict__ verdicts,
     PickVerdict* __restrict__ device_verdicts, SampleOutcome* __restrict__ outcomes,
     const DraftProposal* __restrict__ proposals_in, DraftProposal* __restrict__ proposals_out,
-    DraftProposal* __restrict__ proposals_out_host, int draft_index, const int32_t* request_map) {
+    DraftProposal* __restrict__ proposals_out_host, int draft_index, const int32_t* request_map,
+    int block_verify) {
   // One row's split composite keys at a time (hi = ~primary, lo = id; the
   // empty slot is the maximal key) — the merge is per row, and T rows of
   // keys would not fit the static shared bound — with every row's merged
@@ -1289,6 +1313,7 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
   __shared__ int total[R];
   __shared__ double Z[R];
   __shared__ double q_draft_s[kQ];
+  __shared__ int q_missing_s[kQ];  // proposed ids (with mass) outside the held prefix
   __shared__ int q_live_s[kQ];
 
   const int q = blockIdx.x;
@@ -1432,6 +1457,7 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
   if (tid < kQ) {
     q_live_s[tid] = 0;
     q_draft_s[tid] = 0.0;
+    q_missing_s[tid] = 0;
   }
   __syncthreads();
   // Each draft row's proposal, when this pick was fed the draft it drew.
@@ -1454,13 +1480,22 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
       }
       if (tid == 0) {
         double qd = 0.0;
-        for (int e = 0; e < prop->n; ++e)
-          if (prop->ids[e] == draft_t) {
-            qd = static_cast<double>(prop->mass[e]);
-            break;
+        int missing = 0;
+        bool found = false;
+        for (int e = 0; e < prop->n; ++e) {
+          if (!found && prop->ids[e] == draft_t) {
+            qd = static_cast<double>(prop->mass[e]);  // the first match, as Proposal::at
+            found = true;
           }
+          if (!(prop->mass[e] > 0.0f)) continue;
+          bool held_id = false;
+          for (int i = 0; i < held[t]; ++i)
+            if (m_id[t][i] == prop->ids[e]) { held_id = true; break; }
+          if (!held_id) ++missing;
+        }
         if (qd > 0.0) {
           q_draft_s[t] = qd;
+          q_missing_s[t] = missing;
           q_live_s[t] = 1;
         }
       }
@@ -1530,6 +1565,184 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
     o.sampled = 1;
     v.accepted = 1;
     bool done = false;
+    // Block verification (sample::block_verify; Sun et al. 2024, Algorithm
+    // 2): the chain decided jointly — p_i = min(1, p_{i-1} P_{i-1}(X_i) /
+    // Q_{i-1}(X_i)) along the drafts, h_i = S_i / (S_i + 1 - p_i) with
+    // S_i = sum_x max(p_i P_i(x) - Q_i(x), 0) (h_gamma = p_gamma), tau the
+    // largest i with eta_i <= h_i, then the residual (p_tau P_tau - Q_tau)+
+    // at row tau, or the last row sampled plainly at tau = gamma. Exact for
+    // the output distribution and never fewer tokens in expectation than
+    // the token rule. Taken only when every row prices its draft and, in
+    // the pure regime, holds every id its proposal gives mass (a choice the
+    // draws never see); else the token rule below.
+    if (block_verify != 0 && !draft_mode && rows_per_request >= 2) {
+      const int gamma = rows_per_request - 1;
+      const float T = use.temperature;
+      // The pre-check and the chain's p_i, with the draft's index per row.
+      int kind[R], draft_j[R], fin[R], supn[R], s_topk[R];
+      bool row_live[R];
+      float s_minp[R], s_topp[R];
+      double pcum[R + 1], cover[R];
+      float den[R], lse_r[R];
+      bool decidable = true;
+      pcum[0] = 1.0;
+      for (int t = 0; t < gamma && decidable; ++t) {
+        kind[t] = 0;
+        if (held[t] == 0) { decidable = false; break; }
+        const Support sup = resolve_support(m_logit[t], mass[t], prefix, held[t], row_vocab[t], use);
+        cover[t] = sup.covered;
+        if (sup.kind == 0) { decidable = false; break; }
+        kind[t] = sup.kind;
+        supn[t] = sup.n; s_topk[t] = sup.top_k; s_minp[t] = sup.min_p; s_topp[t] = sup.top_p;
+        const int32_t draft = static_cast<int32_t>(fed[row0 + t + 1]);
+        const bool excluded = row_mask[t] != nullptr &&
+                              (draft < 0 || draft >= vocab_size || !mask_allows(row_mask[t], draft));
+        const bool complete = held[t] == row_vocab[t];
+        if (sup.kind == 1) {
+          int fc = 0; float fd = 0.0f, ls = 0.0f;
+          selector_state(m_logit[t], expsrc[t], sup.n, T, sup.top_k, sup.min_p, sup.top_p, exps, &fc, &fd, &ls);
+          fin[t] = fc; den[t] = fd; lse_r[t] = ls;
+        } else {
+          fin[t] = held[t]; den[t] = 0.0f; lse_r[t] = static_cast<float>(Z[t]);
+        }
+        int j = fin[t];
+        if (!excluded)
+          for (int i = 0; i < fin[t]; ++i)
+            if (m_id[t][i] == draft) { j = i; break; }
+        if (j == fin[t] && !excluded && sup.kind == 2 && !complete) { decidable = false; break; }
+        draft_j[t] = j;
+        // Q at the draft and, in the pure regime, the proposal's whole mass inside the prefix.
+        // A live proposal whose ids are all inside the prefix (the pure
+        // regime; a materialized set prices them all): else a point mass.
+        const bool live = t < kQ && q_live_s[t] != 0 && !(sup.kind == 2 && !complete && q_missing_s[t] > 0);
+        row_live[t] = live;
+        const double q_at = live ? q_draft_s[t] : 1.0;
+        const double p_x = j < fin[t] ? (sup.kind == 1 ? static_cast<double>(__fdiv_rn(exps[j], den[t])) : mass[t][j]) : 0.0;
+        double pi = pcum[t] * (p_x / q_at);
+        if (pi > 1.0) pi = 1.0;
+        pcum[t + 1] = pi;
+      }
+      if (decidable) {
+        // h_i per position and tau = the largest accepted sub-block.
+        int tau = 0;
+        for (int i = 1; i <= gamma; ++i) {
+          const double pi = pcum[i];
+          double h;
+          if (i == gamma) {
+            h = pi;
+          } else {
+            const int t = i;  // the distributions after the i-th draft: row i
+            const bool live = row_live[t];
+            const int32_t next_draft = static_cast<int32_t>(fed[row0 + t + 1]);
+            double S = 0.0;
+            if (kind[t] == 1) {
+              int fc = 0; float fd = 0.0f, ls = 0.0f;  // the row's final set again (the same exps)
+              selector_state(m_logit[t], expsrc[t], supn[t], T, s_topk[t], s_minp[t], s_topp[t], exps, &fc, &fd, &ls);
+              for (int c = 0; c < fin[t]; ++c) {
+                const double px = static_cast<double>(__fdiv_rn(exps[c], den[t]));
+                const double qx = live ? static_cast<double>(qmass_s[t][c]) : (m_id[t][c] == next_draft ? 1.0 : 0.0);
+                const double r = pi * px - qx;
+                if (r > 0.0) S += r;
+              }
+            } else {
+              for (int c = 0; c < held[t]; ++c) {
+                const double qx = live ? static_cast<double>(qmass_s[t][c]) : (m_id[t][c] == next_draft ? 1.0 : 0.0);
+                const double r = pi * mass[t][c] - qx;
+                if (r > 0.0) S += r;
+              }
+              S += pi * (1.0 - cover[t]);  // the unseen tail carries no proposal mass
+            }
+            h = S / (S + 1.0 - pi);
+          }
+          const double eta = uniform01(use.seed, counter + static_cast<uint64_t>(i - 1));
+          if (eta <= h) tau = i;
+        }
+        counter += static_cast<uint64_t>(gamma);
+        // Rows [0, tau): the drafts stand.
+        for (int t = 0; t < tau; ++t) {
+          const int j = draft_j[t];
+          v.winners[t] = static_cast<int32_t>(fed[row0 + t + 1]);
+          o.normalizer[t] = Z[t];
+          o.covered_mass[t] = cover[t];
+          o.logprob[t] = j < fin[t] ? __fsub_rn(__fdiv_rn(m_logit[t][j], T), lse_r[t]) : 0.0f;
+          if (reps[t] != nullptr)
+            report_top(m_logit[t], m_id[t], fin[t], T, lse_r[t], spec.logprobs, o.top_ids[t], o.top_logprobs[t], &o.top_count[t]);
+        }
+        if (tau >= 1) o.accepted_draft = 1;
+        v.accepted = tau + 1;
+        o.block = 1;
+        if (tau < gamma) {
+          // The block residual at row tau: (p_tau P - Q)+ over the row's set
+          // (plus the pure regime's unseen tail, a fallback when drawn).
+          const int t = tau;
+          const double pt = pcum[t];
+          const bool live = row_live[t];
+          const int32_t draft = static_cast<int32_t>(fed[row0 + t + 1]);
+          const bool complete = held[t] == row_vocab[t];
+          if (kind[t] == 1) {
+            int fc = 0; float fd = 0.0f, ls = 0.0f;
+            selector_state(m_logit[t], expsrc[t], supn[t], T, s_topk[t], s_minp[t], s_topp[t], exps, &fc, &fd, &ls);
+          }
+          double total = 0.0;
+          for (int c = 0; c < fin[t]; ++c) {
+            const double px = kind[t] == 1 ? static_cast<double>(__fdiv_rn(exps[c], den[t])) : mass[t][c];
+            const double qx = live ? static_cast<double>(qmass_s[t][c]) : (m_id[t][c] == draft ? 1.0 : 0.0);
+            const double r = pt * px - qx;
+            if (r > 0.0) total += r;
+          }
+          if (kind[t] == 2) total += pt * (1.0 - cover[t]);
+          const double u = uniform01(use.seed, counter);
+          const double threshold = u * total;
+          double cum = 0.0;
+          int chosen = fin[t], last = fin[t];
+          for (int c = 0; c < fin[t]; ++c) {
+            const double px = kind[t] == 1 ? static_cast<double>(__fdiv_rn(exps[c], den[t])) : mass[t][c];
+            const double qx = live ? static_cast<double>(qmass_s[t][c]) : (m_id[t][c] == draft ? 1.0 : 0.0);
+            const double r = pt * px - qx > 0.0 ? pt * px - qx : 0.0;
+            if (r > 0.0 || last == fin[t]) last = c;
+            cum += r;
+            if (cum > threshold) { chosen = c; break; }
+          }
+          o.normalizer[t] = Z[t];
+          o.covered_mass[t] = cover[t];
+          if (chosen == fin[t] && !(kind[t] == 1 || complete)) {
+            // The residual lies in the unseen tail: the host draws it with p_tau.
+            o.fallback = 1;
+            o.fallback_row = t;
+            o.block_p = pt;
+            v.winners[t] = held[t] > 0 ? m_id[t][0] : kNoId;
+          } else {
+            if (chosen == fin[t]) chosen = last;
+            counter += 1;
+            v.winners[t] = m_id[t][chosen];
+            o.logprob[t] = __fsub_rn(__fdiv_rn(m_logit[t][chosen], T), lse_r[t]);
+            if (reps[t] != nullptr)
+              report_top(m_logit[t], m_id[t], fin[t], T, lse_r[t], spec.logprobs, o.top_ids[t], o.top_logprobs[t], &o.top_count[t]);
+          }
+          v.next = v.winners[t];
+        } else {
+          // Every draft stood: the last row is sampled plainly.
+          const int t = gamma;
+          const double Zt = Z[t];
+          o.normalizer[t] = Zt;
+          const Decision none{false, false, kNoId, 0.0f, 0.0};
+          const Decision d = held[t] > 0 ? decide_prefix(m_logit[t], m_id[t], mass[t], prefix, expsrc[t], held[t],
+                                                         row_vocab[t], Zt, use, exps, &counter, reps[t])
+                                         : none;
+          o.covered_mass[t] = d.covered;
+          if (d.resolved) {
+            v.winners[t] = d.token;
+            o.logprob[t] = d.logprob;
+          } else {
+            o.fallback = 1;
+            o.fallback_row = t;
+            v.winners[t] = held[t] > 0 ? m_id[t][0] : kNoId;
+          }
+          v.next = v.winners[t];
+        }
+        done = true;
+      }
+    }
     for (int t = 0; t < rows_per_request && !done; ++t) {
       const double Zt = Z[t];
       o.normalizer[t] = Zt;
@@ -1548,7 +1761,8 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
                                              exps, &counter, reps[t],
                                              draft_excluded,
                                              ratio ? qmass_s[t] : nullptr,
-                                             ratio ? q_draft_s[t] : 0.0)
+                                             ratio ? q_draft_s[t] : 0.0,
+                                             ratio ? q_missing_s[t] : 0)
                         : none;
         o.covered_mass[t] = d.covered;
         if (!d.resolved) {
@@ -1788,7 +2002,7 @@ void device_sample_verdict(const uint16_t* table, int rows, int world, int rank,
                            SampleOutcome* outcomes, uint64_t* carry_digest, cudaStream_t stream,
                            const DraftProposal* proposals_in, DraftProposal* proposals_out,
                            DraftProposal* proposals_out_host, int draft_index,
-                           const int32_t* request_map) {
+                           const int32_t* request_map, int block_verify) {
   check_common(rows, world, rank, candidates, rows_per_request,
                "glm_sample_verdict");
   if (proposals_out != nullptr &&
@@ -1810,7 +2024,7 @@ void device_sample_verdict(const uint16_t* table, int rows, int world, int rank,
   sample_verdict_kernel<<<requests, kVerdictThreads, kVerdictDynamicSmemBytes, stream>>>(
       table, rows, world, candidates, vocab_size, specs, rows_per_request, fed, positions,
       position_stride, counts, masks, mask_stride, verdicts, device_verdicts, outcomes,
-      proposals_in, proposals_out, proposals_out_host, draft_index, request_map);
+      proposals_in, proposals_out, proposals_out_host, draft_index, request_map, block_verify);
   DGPP_CUDA_OK(cudaGetLastError());
   const uint16_t* digests =
       table + static_cast<size_t>(rows) * world *

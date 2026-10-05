@@ -340,6 +340,12 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           if (e.mtp_draft != "auto" && e.mtp_draft != "sampled" && e.mtp_draft != "greedy")
             fail(what, "'" + ek + "' must be auto, sampled or greedy");
         }
+        else if (p.key == "dflash_batch_rows") e.dflash_batch_rows = static_cast<int>(integer(x, ek, what, 0, 4096));
+        else if (p.key == "mtp_verify") {
+          e.mtp_verify = text(x, ek, what);
+          if (e.mtp_verify != "token" && e.mtp_verify != "block")
+            fail(what, "'" + ek + "' must be token or block");
+        }
         else if (p.key == "mtp_draft_temperature") {
           e.mtp_draft_temperature = number(x, ek, what);
           if (!(e.mtp_draft_temperature > 0.0 && e.mtp_draft_temperature <= 4.0))

@@ -13,6 +13,7 @@
     "mtp": false,
     "dflash_model": "z-lab/Qwen3.8-27B-DFlash2",
     "mtp_draft_temperature": 0.7,
+    "mtp_verify": "block",
     "bf16_weights": "bf12",
     "prefix_cache_gib": 1.5,
     "admission": "grow",

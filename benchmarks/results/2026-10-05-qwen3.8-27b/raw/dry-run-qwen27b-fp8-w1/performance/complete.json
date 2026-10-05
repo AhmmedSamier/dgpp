@@ -1,0 +1,9 @@
+{
+  "finished_at": "2026-10-05T06:43:07.860405+00:00",
+  "checks": {
+    "greedy": true,
+    "prefill": true,
+    "sampled": true,
+    "isolation": false
+  }
+}

@@ -1223,6 +1223,10 @@ class DevicePicker {
     DraftProposal* proposals_out = nullptr;
     DraftProposal* proposals_out_host = nullptr;
     int draft_index = 0;
+    // The sampled chain's rule (2026-10-05): 1 = block verification
+    // (sample::block_verify, the whole block decided jointly), 0 = the
+    // token-by-token test. Baked into the captured verdict node.
+    int block_verify = 0;
   };
   bool sampling() const { return candidates_ > 0; }
   int sampling_candidates() const { return candidates_; }
@@ -1439,7 +1443,8 @@ class DevicePicker {
                           position_stride(in), in.counts, in.masks, in.mask_stride,
                           verdict_slot(in.slot), device_verdict_slot(in.slot),
                           outcomes_ + in.slot * kPickMaxRequests, carry_, stream, in.proposals_in,
-                          in.proposals_out, in.proposals_out_host, in.draft_index, in.request_map);
+                          in.proposals_out, in.proposals_out_host, in.draft_index, in.request_map,
+                          in.block_verify);
   }
 
   net::CollectiveBus& bus_;

@@ -160,6 +160,8 @@ struct WorldSettings {
   double mtp_schedule_sampled_scale = 0.93;  // engine.mtp_schedule_sampled_scale
   std::string mtp_draft = "auto";  // engine.mtp_draft: every rank resolves the same rule
   double mtp_draft_temperature = 1.0;  // engine.mtp_draft_temperature: every rank draws the same chain
+  std::string mtp_verify = "token";  // engine.mtp_verify: every rank decides the chain by the same rule
+  int dflash_batch_rows = 0;  // engine.dflash_batch_rows: every rank batches the same rows
   int graph_batch_min_live = 0;
   int sampling_candidates = 0;
   double prefix_cache_gib = 0.0;

@@ -437,6 +437,18 @@ struct Proposal {
   }
 };
 
+// Every id the proposal gives mass is in the candidate list.
+inline bool proposal_inside(const Proposal& q, const std::vector<Candidate>& sorted) {
+  for (const auto& e : q.mass) {
+    if (!(e.second > 0.0f)) continue;
+    bool found = false;
+    for (const Candidate& c : sorted)
+      if (c.id == e.first) { found = true; break; }
+    if (!found) return false;
+  }
+  return true;
+}
+
 inline SpecOutcome spec_select_from_sorted(const std::vector<Candidate>& sorted,
                                            const Params& p, int32_t draft,
                                            Rng& rng, const Proposal* q = nullptr) {
@@ -946,9 +958,15 @@ struct SpecPrefixDecision {
 // `draft_excluded`: the caller knows the draft is outside the row's
 // support (a masked id): its probability is 0 without the list having to
 // show it, so an incomplete prefix still decides (M6 6g).
-// `proposal`: the distribution the draft was drawn from. It
-// steers only the MATERIALIZED regime — the pure temperature walk keeps the
-// deterministic rule, and the device mirrors that split exactly.
+// `proposal`: the distribution the draft was drawn from — the ratio accept
+// min(1, P/Q) and the (P - Q)+ residual in both regimes (2026-10-05; the
+// pure temperature walk kept the deterministic rule before). In the pure
+// regime the residual's total mass is 1 - sum_x min(P, Q), exact only when
+// every id the proposal gives mass is inside the prefix (an unseen one
+// hides min(P, Q) there): such a row keeps the deterministic P(draft) rule,
+// exact for a draft drawn from anything (a choice the draws never see);
+// a residual walk past the prefix falls back as the deterministic walk's
+// does. The device mirrors the split exactly.
 inline SpecPrefixDecision spec_accept_from_prefix(
     const std::vector<Candidate>& sorted_prefix, int vocab_size,
     double global_scaled_logsumexp, int32_t draft, const Params& p,
@@ -990,11 +1008,30 @@ inline SpecPrefixDecision spec_accept_from_prefix(
   if (j == held && !complete && !draft_excluded)
     return decision;  // the draft's mass is unseen
   const double p_draft = j < held ? mass_at(j) : 0.0;
+  // The ratio rule when the proposal carries the draft: the accept test
+  // against Q(draft), the residual (P - Q)+ over the prefix against the
+  // exact total 1 - sum min(P, Q), which needs every proposed id inside
+  // the prefix (else the tail hides part of the overlap: fallback).
+  const double q_draft = (proposal != nullptr && !proposal->empty()) ? proposal->at(draft) : 0.0;
+  // The ratio rule needs every id the proposal gives mass inside the prefix
+  // (an exact set test; two float sums in different orders are not), else
+  // a proposed id's overlap is unseen and the row keeps the deterministic rule.
+  const bool ratio = q_draft > 0.0 && (complete || proposal_inside(*proposal, sorted_prefix));
+  double residual_total = 1.0 - p_draft;
+  if (ratio) {
+    double overlap = 0.0;
+    for (size_t i = 0; i < held; ++i) {
+      const double qi = proposal->at(sorted_prefix[i].id);
+      if (qi <= 0.0) continue;
+      overlap += std::min(mass_at(i), qi);
+    }
+    residual_total = 1.0 - overlap;
+  }
   const Rng entry = rng;
   const double u1 = uniform01(rng);
   ++rng.counter;
   const float lse = static_cast<float>(global_scaled_logsumexp);
-  if (p_draft > u1) {
+  if (ratio ? (p_draft > u1 * q_draft) : (p_draft > u1)) {
     decision.resolved = true;
     decision.accepted = true;
     decision.result.token = draft;
@@ -1003,13 +1040,17 @@ inline SpecPrefixDecision spec_accept_from_prefix(
   }
   const double u2 = uniform01(rng);
   ++rng.counter;
-  const double threshold = u2 * (1.0 - p_draft);
+  const double threshold = u2 * residual_total;
   double cumulative = 0.0;
   size_t chosen = held;
   size_t last = held;  // the last residual token with mass
   for (size_t i = 0; i < held; ++i) {
-    if (i == j) continue;
-    const double m = mass_at(i);
+    if (!ratio && i == j) continue;
+    double m = mass_at(i);
+    if (ratio) {
+      const double qi = proposal->at(sorted_prefix[i].id);
+      m = m > qi ? m - qi : 0.0;
+    }
     if (m > 0.0 || last == held) last = i;
     cumulative += m;
     if (cumulative > threshold) {
@@ -1314,6 +1355,239 @@ inline std::vector<double> topk_probability_masses(
     out.push_back(mass);
     ++next_k;
   }
+  return out;
+}
+
+
+// ---------------------------------------------------------------------------
+// Block verification (Sun, Mendlovic, Leviathan, Aharoni, Ro, Beirami,
+// Suresh 2024, "Block Verification Accelerates Speculative Decoding",
+// Algorithm 2; 2026-10-05). The sampled chain decided jointly instead of
+// token by token: along the drafts X_1..X_gamma with the rows' target
+// distributions P_t and the drafts' proposals Q_t (a point mass at the
+// draft when none), p_i = min(1, p_{i-1} P_{i-1}(X_i) / Q_{i-1}(X_i)); the
+// acceptance of the sub-block of length i is h_i = S_i / (S_i + 1 - p_i)
+// with S_i = sum_x max(p_i P_i(x) - Q_i(x), 0) (h_gamma = p_gamma); tau is
+// the LARGEST i with eta_i <= h_i over gamma uniforms; the block's next
+// token is drawn from the residual (p_tau P_tau - Q_tau)+ at row tau, or
+// from P_gamma plainly when every draft stood. Exact for the output
+// distribution and never fewer tokens in expectation than the token rule
+// (the paper's Theorems 1 and 2). The device's arithmetic (kernels/
+// sample_pick.cu, the verdict's block path) is this one: fp32 masses of a
+// materialized final set, fp64 fold masses in the pure regime, the sums in
+// candidate order, the pure regime's unseen tail counted as p_i (1 -
+// covered) in S_i (it carries no proposal mass once every proposed id is
+// inside the prefix — the condition, with every draft priced, for the
+// block rule to run at all; otherwise the caller takes the token rule, a
+// choice the draws never see).
+struct BlockDecision {
+  bool decidable = false;   // the block rule could run (else the token rule)
+  bool resolved = false;    // the chain's next token drawn (else fallback_row)
+  int fallback_row = -1;    // tau when the pure regime's residual lies in the
+                            // unseen tail (block_p set), gamma when the last
+                            // row's plain sample does
+  int tau = 0;              // accepted drafts
+  double block_p = 1.0;     // p_tau, the fallback residual's scale
+  std::vector<int32_t> winners;  // rows [0, tau]: the drafts, then the next token
+  std::vector<float> logprobs;   // per decided row
+  int32_t next = -1;
+  const char* reason = "";       // why the block rule could not run (diagnostics)
+};
+
+// `rows[t]` is row t's merged prefix in canonical order (t = 0..gamma), with
+// its fold log-sum-exp `lses[t]`; `drafts[t]` the draft fed to row t + 1;
+// `proposals[t]` the distribution it was drawn from (null: a point mass);
+// `excluded[t]`: the draft is masked (probability 0 without the prefix
+// having to show it). The draws: gamma uniforms at rng.counter .. + gamma
+// - 1, then the residual's or the last row's.
+inline BlockDecision block_verify_from_prefixes(
+    const std::vector<std::vector<Candidate>>& rows, int vocab_size,
+    const std::vector<double>& lses, const std::vector<int32_t>& drafts,
+    const std::vector<const Proposal*>& proposals, const Params& p, Rng& rng,
+    const std::vector<bool>& excluded = {}) {
+  BlockDecision out;
+  const int gamma = static_cast<int>(drafts.size());
+  if (gamma < 1 || rows.size() != static_cast<size_t>(gamma + 1) || lses.size() != rows.size() ||
+      proposals.size() != drafts.size())
+    throw std::invalid_argument("block_verify: rows, lses, drafts and proposals must agree");
+  if (!(p.temperature > 0.0f)) throw std::invalid_argument("block_verify: needs T > 0");
+  struct Row {
+    PrefixSupport support;
+    SelectorState state;  // the materialized regime's final set
+    bool materialized = false, complete = false, live = false;
+    size_t fin = 0, j = 0;
+    float lse = 0.0f;
+    double q_at = 1.0;
+  };
+  std::vector<Row> r(static_cast<size_t>(gamma));
+  std::vector<double> pcum(static_cast<size_t>(gamma) + 1, 1.0);
+  const auto mass_at = [&](int t, size_t i) {
+    return detmath::exp_d(static_cast<double>(rows[t][i].logit / p.temperature) - lses[t]);
+  };
+  for (int t = 0; t < gamma; ++t) {
+    Row& row = r[static_cast<size_t>(t)];
+    if (rows[t].empty()) { out.reason = "empty row"; return out; }
+    row.support = resolve_support(rows[t], vocab_size, lses[t], p);
+    if (row.support.kind == PrefixSupport::Kind::kFallback) { out.reason = "unresolved support"; return out; }
+    row.materialized = row.support.kind == PrefixSupport::Kind::kMaterialized;
+    row.complete = rows[t].size() == static_cast<size_t>(vocab_size);
+    const bool is_excluded = t < static_cast<int>(excluded.size()) && excluded[static_cast<size_t>(t)];
+    if (row.materialized) {
+      const std::vector<Candidate> materialized(rows[t].begin(), rows[t].begin() + row.support.n);
+      row.state = selector_state(materialized, row.support.exact);
+      row.fin = row.state.final_count;
+      row.lse = row.state.lse;
+    } else {
+      row.fin = rows[t].size();
+      row.lse = static_cast<float>(lses[t]);
+    }
+    row.j = row.fin;
+    if (!is_excluded)
+      for (size_t i = 0; i < row.fin; ++i)
+        if (rows[t][i].id == drafts[static_cast<size_t>(t)]) { row.j = i; break; }
+    if (row.j == row.fin && !is_excluded && !row.materialized && !row.complete) { out.reason = "draft unseen"; return out; }
+    const Proposal* q = proposals[static_cast<size_t>(t)];
+    row.live = q != nullptr && !q->empty() && q->at(drafts[static_cast<size_t>(t)]) > 0.0;
+    if (row.live && !row.materialized && !row.complete && !proposal_inside(*q, rows[t])) {
+      // An unseen proposed id: the row's draft counts as a point mass (exact
+      // for a draft drawn from anything; the device does the same).
+      row.live = false;
+    }
+    if (row.live) row.q_at = q->at(drafts[static_cast<size_t>(t)]);
+    const double p_x = row.j < row.fin
+        ? (row.materialized ? static_cast<double>(row.state.exps[row.j] / row.state.final_den) : mass_at(t, row.j))
+        : 0.0;
+    double pi = pcum[static_cast<size_t>(t)] * (p_x / row.q_at);
+    if (pi > 1.0) pi = 1.0;
+    pcum[static_cast<size_t>(t) + 1] = pi;
+  }
+  out.decidable = true;
+  const auto p_of = [&](int t, size_t c) {
+    const Row& row = r[static_cast<size_t>(t)];
+    return row.materialized ? static_cast<double>(row.state.exps[c] / row.state.final_den) : mass_at(t, c);
+  };
+  const auto q_of = [&](int t, size_t c) {
+    const Row& row = r[static_cast<size_t>(t)];
+    if (row.live) return proposals[static_cast<size_t>(t)]->at(rows[t][c].id);
+    return rows[t][c].id == drafts[static_cast<size_t>(t)] ? 1.0 : 0.0;
+  };
+  int tau = 0;
+  for (int i = 1; i <= gamma; ++i) {
+    const double pi = pcum[static_cast<size_t>(i)];
+    double h;
+    if (i == gamma) {
+      h = pi;
+    } else {
+      const int t = i;
+      const Row& row = r[static_cast<size_t>(t)];
+      double S = 0.0;
+      for (size_t c = 0; c < row.fin; ++c) {
+        const double d = pi * p_of(t, c) - q_of(t, c);
+        if (d > 0.0) S += d;
+      }
+      if (!row.materialized) S += pi * (1.0 - row.support.covered_mass);
+      h = S / (S + 1.0 - pi);
+    }
+    const Rng draw{rng.seed, rng.counter + static_cast<uint64_t>(i - 1)};
+    if (uniform01(draw) <= h) tau = i;
+  }
+  rng.counter += static_cast<uint64_t>(gamma);
+  out.tau = tau;
+  for (int t = 0; t < tau; ++t) {
+    const Row& row = r[static_cast<size_t>(t)];
+    out.winners.push_back(drafts[static_cast<size_t>(t)]);
+    const float scaled = rows[t][row.j].logit / p.temperature;
+    out.logprobs.push_back(row.j < row.fin ? scaled - row.lse : 0.0f);
+  }
+  if (tau < gamma) {
+    const int t = tau;
+    const Row& row = r[static_cast<size_t>(t)];
+    const double pt = pcum[static_cast<size_t>(t)];
+    double total = 0.0;
+    for (size_t c = 0; c < row.fin; ++c) {
+      const double d = pt * p_of(t, c) - q_of(t, c);
+      if (d > 0.0) total += d;
+    }
+    if (!row.materialized) total += pt * (1.0 - row.support.covered_mass);
+    const double u = uniform01(rng);
+    const double threshold = u * total;
+    double cum = 0.0;
+    size_t chosen = row.fin, last = row.fin;
+    for (size_t c = 0; c < row.fin; ++c) {
+      double d = pt * p_of(t, c) - q_of(t, c);
+      if (d < 0.0) d = 0.0;
+      if (d > 0.0 || last == row.fin) last = c;
+      cum += d;
+      if (cum > threshold) { chosen = c; break; }
+    }
+    if (chosen == row.fin && !(row.materialized || row.complete)) {
+      out.fallback_row = t;
+      out.block_p = pt;
+      return out;
+    }
+    if (chosen == row.fin) chosen = last;
+    ++rng.counter;
+    out.winners.push_back(rows[t][chosen].id);
+    out.logprobs.push_back(rows[t][chosen].logit / p.temperature - row.lse);
+    out.next = rows[t][chosen].id;
+    out.resolved = true;
+    return out;
+  }
+  const PrefixDecision last = sample_from_prefix(rows[gamma], vocab_size, lses[gamma], p, rng);
+  if (!last.resolved) {
+    out.fallback_row = gamma;
+    return out;
+  }
+  out.winners.push_back(last.result.token);
+  out.logprobs.push_back(last.result.logprob);
+  out.next = last.result.token;
+  out.resolved = true;
+  return out;
+}
+
+// The host's draw of a block fallback's residual at row tau over the
+// COMPLETE logits (the pure regime only: a materialized final set never
+// falls back): (block_p P - Q)+ over every present token, the draft a
+// point mass when it carries no proposal.
+inline Result block_residual_complete(const float* adjusted, int vocab, double normalizer,
+                                      double block_p, int32_t draft, const Proposal* q,
+                                      const Params& p, Rng& rng) {
+  if (adjusted == nullptr || vocab <= 0) throw std::invalid_argument("block_residual: empty complete logits");
+  if (p.top_k > 0 || p.top_p < 1.0f || p.min_p > 0.0f)
+    throw std::invalid_argument("block_residual: a materialized final set never falls back");
+  const int present = count_present(adjusted, vocab);
+  if (present <= 0) throw std::invalid_argument("block_residual: every logit is masked");
+  const std::vector<Candidate> sorted = sort_slice(adjusted, vocab, 0);
+  const bool live = q != nullptr && !q->empty() && q->at(draft) > 0.0;
+  const auto q_of = [&](size_t c) {
+    return live ? q->at(sorted[c].id) : (sorted[c].id == draft ? 1.0 : 0.0);
+  };
+  const auto mass_at = [&](size_t c) {
+    return detmath::exp_d(static_cast<double>(sorted[c].logit / p.temperature) - normalizer);
+  };
+  const size_t held = static_cast<size_t>(present);
+  double total = 0.0;
+  for (size_t c = 0; c < held; ++c) {
+    const double d = block_p * mass_at(c) - q_of(c);
+    if (d > 0.0) total += d;
+  }
+  const double u = uniform01(rng);
+  const double threshold = u * total;
+  double cum = 0.0;
+  size_t chosen = held, last = held;
+  for (size_t c = 0; c < held; ++c) {
+    double d = block_p * mass_at(c) - q_of(c);
+    if (d < 0.0) d = 0.0;
+    if (d > 0.0 || last == held) last = c;
+    cum += d;
+    if (cum > threshold) { chosen = c; break; }
+  }
+  if (chosen == held) chosen = last;
+  if (chosen == held) throw std::logic_error("block_residual: the residual has no candidate");
+  ++rng.counter;
+  Result out;
+  out.token = sorted[chosen].id;
+  out.logprob = sorted[chosen].logit / p.temperature - static_cast<float>(normalizer);
   return out;
 }
 

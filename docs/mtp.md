@@ -200,7 +200,52 @@ set it drew from as the draft's proposal; the verify then tests the draft by
 the ratio rule min(1, P/Q) with the (P − Q)+ residual, whose acceptance
 rate is 1 − TV(P, Q) — against P(argmax) for the argmax walk's point
 masses (`greedy`). Both are exact (the output distribution is the
-target's); greedy requests take the argmax walk either way. Measured on
+target's); greedy requests take the argmax walk either way. The ratio rule
+runs in both sampling regimes: the truncated one (top-k / top-p / min-p,
+the materialized final set) and pure temperature sampling (a request that
+sends only `temperature` — most clients, the arena harness, `timed_load
+--temperature 1`), where the verify priced drawn drafts by the
+deterministic P(draft) rule until 2026-10-05 (acceptance Σ Q·P, never
+above the overlap Σ min(P, Q) the ratio rule reaches); in the pure regime
+the residual's total is 1 − Σ min(P, Q), exact when the prefix holds every
+id the proposal gives mass; a row with a proposed id outside the prefix
+keeps the deterministic P(draft) rule (exact for a draft drawn from
+anything).
+
+**Block verification (2026-10-05, `engine.mtp_verify: block`).** The
+sampled chain decided jointly (Sun et al. 2024, "Block Verification
+Accelerates Speculative Decoding", Algorithm 2) instead of token by token:
+p_i = min(1, p_{i−1} P_{i−1}(X_i) / Q_{i−1}(X_i)) along the drafts, each
+sub-block of length i accepted with h_i = S_i / (S_i + 1 − p_i), S_i =
+Σ_x max(p_i P_i(x) − Q_i(x), 0) (h_γ = p_γ), the longest accepted sub-block
+kept and the residual (p_τ P_τ − Q_τ)+ drawn after it — exact for the output
+distribution and never fewer accepted drafts in expectation than the token
+rule (the paper's +7–10 % block efficiency at γ = 8). The device decides the
+block when every row prices its draft (otherwise the step takes the token
+rule); a row whose proposal has an id outside the pure regime's prefix
+counts its draft as a point mass — choices the draws never see. `sample::block_verify_from_prefixes` is the
+host oracle (bitwise the device's), `sample::block_residual_complete` the
+host's draw when the pure regime's residual lies in the unseen tail.
+Measured on one binary: four Sparks under the arena harness (pure
+temperature sampling) 68.4 against the token rule's 65.2 tok/s over two
+20-run pairs each (+5 %), MT-Bench think-sampled 3.45 against 3.41 tokens
+a pass, one-Spark `timed_load` at temperature 1 within noise; the drafter
+templates set it.
+
+**Eight slots (2026-10-05).** The 27B decode batch holds 64 rows (eight
+drafter slots at the block's eight verify rows in one replay; 32 before,
+which put eight live slots on scalar replays), its GDN verify state takes
+the checkpoint-and-replay form (the snapshot writes leave the step), and
+the drafter's head, top-K and hidden projection run once over every
+stacked row instead of once per slot. `engine.dflash_batch_rows` bounds a
+batched step's verify rows: a family past it verifies the first drafts of
+every slot's block through the reduced-depth variants (exact; the drafter
+still proposes the whole block), which lifts prose and chat at eight slots
+and costs the sharp classes their deep block — whole blocks by default. The
+numbers are in the CHANGELOG's 2026-10-05 entry and the campaign record;
+at eight slots on four Sparks the MTP depth-3 world (the template's
+`--no-dflash --mtp --mtp-depth 3` mode) still leads the drafter on every
+class, the drafter's edge being single-stream. Measured on
 MT-Bench turn-1 prompts (writing / roleplay / humanities / stem, thinking
 on, temperature 1.0, top-p 0.95, top-k 20, one Spark): the argmax walk
 2.80 tokens per pass, the drawn proposals 3.27–3.34 (two runs; greedy on

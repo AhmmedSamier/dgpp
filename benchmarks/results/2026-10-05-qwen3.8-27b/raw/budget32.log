@@ -1,0 +1,45 @@
+
+=== 08:21:00 w1-budget32 up (8 slots, --dflash-batch-rows 32)
+2026-10-05 08:21:27.227 READY — curl http://<node-0>:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/budget32/w1-budget32/server)
+the block drafter's batches verify within 32 rows a step (depth options 3,4,7; a family past the budget verifies the first drafts of every slot's block)
+
+=== 08:21:27 w1-budget32 timed_load greedy C1,8
+| class | c=1 | c=8 |
+| prose | 19.0 | 69.9 |
+| code | 30.4 | 100.8 |
+| json | 42.9 | 105.1 |
+| math | 33.2 | 100.4 |
+| chat | 18.0 | 71.1 |
+79.8 tok/s, 12.5 ms/tok, 252.4 ms/step
+serving reduced-depth row-batched graph variants 74/75 captured for 8 slots x 4 rows (3 of the 7 drafts)
+
+=== 08:27:07 w1-budget32 down
+2026-10-05 08:27:09.559 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/budget32/w1-budget32/server
+
+=== 08:27:11 w4-budget32 up (8 slots, --dflash-batch-rows 32)
+2026-10-05 08:27:35.773 READY — curl http://<node-0>:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w4_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/budget32/w4-budget32/server)
+the block drafter's batches verify within 32 rows a step (depth options 3,4,7; a family past the budget verifies the first drafts of every slot's block)
+
+=== 08:27:35 w4-budget32 timed_load greedy C1,8
+| class | c=1 | c=8 |
+| prose | 56.0 | 170.5 |
+| code | 86.5 | 231.9 |
+| json | 120.6 | 251.3 |
+| math | 100.1 | 239.0 |
+| chat | 52.2 | 178.2 |
+175.3 tok/s, 5.3 ms/tok, 100.9 ms/step
+serving reduced-depth row-batched graph variants 74/75 captured for 8 slots x 4 rows (3 of the 7 drafts)
+serving reduced-depth row-batched graph variants 72/73 captured for 6 slots x 5 rows (4 of the 7 drafts)
+
+=== 08:29:49 w4-budget32 timed_load sampled T=1 C8
+| class | c=8 |
+| prose | 165.4 |
+| code | 225.9 |
+| json | 248.1 |
+| math | 230.2 |
+| chat | 174.7 |
+
+=== 08:31:32 w4-budget32 down
+2026-10-05 08:31:39.134 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/budget32/w4-budget32/server
+
+BUDGET_DONE 08:31:39

@@ -1,0 +1,32 @@
+
+=== 05:39:27 release build
+BUILD_EXIT=0
+
+=== 05:44:58 manifest
+{
+  "commit": "e67c0a91e6cbddfae3b92ce514a0d96bb2395ba2",
+  "binary_sha256": "497f83e23fe5f3e896b6b3da2c0a1afb8f133f898d5a68152f43c08a3a2aafe9",
+  "version": "dgpp-serve 0.1.0+ge76cd14f8b7d (git e76cd14f8b7d, cuda 13.0)"
+}
+
+=== 05:44:58 glm down (stays down)
+2026-10-05 05:45:06.523 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 05:45:06 performance
+2026-10-05T05:45:06.656287+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/resu
+2026-10-05T05:45:36.959763+00:00 EXIT 0 raw/qwen27b-fp8-w1/performance/default/up.log
+2026-10-05T05:45:36.977340+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,2,4,8 --classes all --r
+2026-10-05T06:15:48.340731+00:00 EXIT 0 raw/qwen27b-fp8-w1/performance/default/greedy.log
+2026-10-05T06:15:48.341003+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py 127.0.0.1 18080 2048 8192 32768 --repeat 3 --n
+2026-10-05T06:17:49.926658+00:00 EXIT 0 raw/qwen27b-fp8-w1/performance/default/prefill.log
+2026-10-05T06:17:49.926874+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,8 --classes all --repea
+2026-10-05T06:40:58.555837+00:00 EXIT 0 raw/qwen27b-fp8-w1/performance/default/sampled.log
+2026-10-05T06:40:58.556044+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_load.py 127.0.0.1 18080 --concurrency 1 --max-tokens 256 --isol
+2026-10-05T06:43:04.705762+00:00 EXIT 1 raw/qwen27b-fp8-w1/performance/default/isolation.log
+2026-10-05T06:43:04.706061+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/re
+2026-10-05T06:43:07.850150+00:00 EXIT 0 raw/qwen27b-fp8-w1/performance/default/down.log
+2026-10-05T06:43:07.947775+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/resu
+2026-10-05T06:43:31.543142+00:00 EXIT 0 raw/qwen27b-fp8-w2/performance/default/up.log
+2026-10-05T06:43:31.544225+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,2,4,8 --classes all --r
+
+CAMPAIGN_ABORT 06:46:22 (stopped by hand: the 32-row ceiling leaves eight drafter slots on scalar replays, so the performance rows are moot; the campaign re-runs on the final binary)

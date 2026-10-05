@@ -1,0 +1,17 @@
+
+=== 09:11:17 w4-replay2 up (8 slots)
+2026-10-05 09:11:43.619 READY — curl http://<node-0>:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w4_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/replay/w4-replay2/server)
+
+=== 09:11:43 w4-replay2 timed_load greedy C1,8 (vs rows64: C1 56.1/86.8/120.3/99.9/52.3, C8 132.2/234.7/283.2/243.3/139.3 at 142 ms/step)
+| class | c=1 | c=8 |
+| prose | 57.6 | 154.1 |
+| code | 88.4 | 268.4 |
+| json | 123.1 | 321.6 |
+| math | 102.0 | 278.5 |
+| chat | 53.7 | 163.6 |
+175.5 tok/s, 5.7 ms/tok, 123.0 ms/step
+
+=== 09:13:53 w4-replay2 down
+2026-10-05 09:14:00.308 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/replay/w4-replay2/server
+
+W4REPLAY_DONE 09:14:00

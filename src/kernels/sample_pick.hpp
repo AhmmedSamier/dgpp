@@ -115,6 +115,11 @@ struct SampleOutcome {
   int32_t fallback_row = -1;  // which row fell back (0..rows-1), -1 none
   int32_t accepted_draft = 0; // T>=2: the first draft stood (provisional 0
                               // on a row-0 fallback)
+  // Block verification (2026-10-05, sample::block_verify): 1 when the block
+  // rule decided the chain; a fallback at row tau < gamma then needs the
+  // host to draw the block residual (p_tau * P - Q)+ with this p_tau.
+  int32_t block = 0;
+  double block_p = 1.0;
   // Per verify row t (2026-09-06, T = 1 + drafts): the fold log-sum-exp,
   // the prefix mass under it (rows the device decided over) and the
   // outcome's log-probability. Rows the chain never reached stay zero.
@@ -277,7 +282,7 @@ void device_sample_verdict(const uint16_t* table, int rows, int world, int rank,
                            const DraftProposal* proposals_in = nullptr,
                            DraftProposal* proposals_out = nullptr,
                            DraftProposal* proposals_out_host = nullptr, int draft_index = 0,
-                           const int32_t* request_map = nullptr);
+                           const int32_t* request_map = nullptr, int block_verify = 0);
 
 // counts[token] += delta (the host's correction of a request's context after
 // a fallback it decided: a provisionally rejected draft joins the table

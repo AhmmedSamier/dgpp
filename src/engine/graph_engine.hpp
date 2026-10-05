@@ -714,6 +714,70 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
                                     on ? h_proposals_ : nullptr, kSampleProposalSlots);
     }
   }
+  // engine.dflash_batch_rows (2026-10-05): the verify rows a row-batched
+  // step of the block drafter may hold. A family whose slots times the
+  // block exceed it verifies the first floor(budget / slots) - 1 drafts of
+  // every slot's block (the reduced-depth variants the scheduled verify
+  // depth uses: the persistent feed keeps the whole block, the variant
+  // reads it compacted); verifying fewer drafts than proposed is exact.
+  // Eight drafter slots at eight rows cost 142 ms a step on four Sparks
+  // against the MTP depth-3 template's 84 at 32 rows; the budget trades
+  // the deep block for a short step when many slots are live. 0: every
+  // family verifies the whole block. Before the first capture.
+  void configure_block_rows_budget(int budget) {
+    drain();
+    for (const std::array<cudaGraphExec_t, 2>& e : scalar_execs_)
+      if (e[0] != nullptr)
+        throw std::logic_error("graph engine: configure_block_rows_budget after a capture");
+    if (budget < 0) throw std::invalid_argument("graph engine: the block rows budget must be >= 0");
+    block_rows_budget_ = 0;
+    if (!block_ || budget == 0 || families_.empty()) return;
+    if (schedule_)
+      throw std::logic_error("graph engine: the block rows budget and the scheduled verify depth are exclusive");
+    // The depth options: every family's rows under the budget, and the full block.
+    std::vector<int> depths;
+    for (const BatchFamily& f : families_) {
+      const int rows = std::max(2, std::min(rows_per_request_, budget / std::max(1, f.requests)));
+      depths.push_back(rows - 1);
+    }
+    depths.push_back(depth_);
+    std::sort(depths.begin(), depths.end());
+    depths.erase(std::unique(depths.begin(), depths.end()), depths.end());
+    const int variants_per_depth = 2 * (slots_ + static_cast<int>(families_.size()));
+    if (variants_per_depth * static_cast<int>(depths.size()) > net::kBusMaxGraphVariants)
+      throw std::invalid_argument(
+          "engine.dflash_batch_rows: " + std::to_string(depths.size()) + " verify depths over " +
+          std::to_string(families_.size()) + " batch families need " +
+          std::to_string(variants_per_depth * static_cast<int>(depths.size())) +
+          " graph variants, exceeding the bus's " + std::to_string(net::kBusMaxGraphVariants));
+    depth_options_ = depths;
+    sched_execs_.assign(static_cast<size_t>(slots_),
+                        std::vector<std::array<cudaGraphExec_t, 2>>(depth_options_.size() - 1, {{nullptr, nullptr}}));
+    sched_hist_.assign(depth_options_.size(), 0);
+    for (BatchFamily& f : families_) {
+      f.sched_execs.assign(depth_options_.size() - 1, {{nullptr, nullptr}});
+      f.sched_hist.assign(depth_options_.size(), 0);
+    }
+    block_rows_budget_ = budget;
+    std::string opts;
+    for (const int d : depth_options_) opts += (opts.empty() ? "" : ",") + std::to_string(d);
+    DGPP_LOG_INFO("rank {}: the block drafter's batches verify within {} rows a step (depth options {}; "
+                  "a family past the budget verifies the first drafts of every slot's block)",
+                  rank_, budget, opts);
+  }
+  int block_rows_budget() const { return block_rows_budget_; }
+  // engine.mtp_verify: the sampled chain's rule — block verification
+  // (sample::block_verify, the drafts decided jointly; exact, never fewer
+  // tokens in expectation) or the token-by-token test. Before the first
+  // capture (the verdict node bakes it in).
+  void set_block_verify(bool on) {
+    drain();
+    for (const std::array<cudaGraphExec_t, 2>& e : scalar_execs_)
+      if (e[0] != nullptr)
+        throw std::logic_error("graph engine: set_block_verify after a capture");
+    block_verify_ = on;
+  }
+  bool block_verify() const { return block_verify_; }
   // engine.mtp_draft_temperature: the drawn drafts' temperature as a
   // fraction of the request's, for the MTP draft pick and the block
   // drafter's walk alike. Takes effect at the next configure_sampling.
@@ -1632,6 +1696,13 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       if (di < full_depth_option()) ensure_sched_batch_graph(family, di);
       ++fam.sched_hist[static_cast<size_t>(di)];
     }
+    if (!(schedule_ && model_->mtp_enabled()) && block_ && block_rows_budget_ > 0 && !depth_options_.empty()) {
+      // The block drafter's rows budget: the family's static depth.
+      di = block_depth_option(fam.requests);
+      rows = 1 + depth_options_[static_cast<size_t>(di)];
+      if (di < full_depth_option()) ensure_sched_batch_graph(family, di);
+      ++fam.sched_hist[static_cast<size_t>(di)];
+    }
     if (capped && rows > fam.max_rows)
       throw std::logic_error("graph engine: a depth-capped batch family selected past its rows");
     if (compact_batches()) {
@@ -1787,6 +1858,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       in.proposals_in =
           d_proposals_ ? d_proposals_ + static_cast<size_t>(req) * kSampleProposalSlots
                        : nullptr;
+      in.block_verify = block_verify_ ? 1 : 0;
     }
     return in;
   }
@@ -1814,6 +1886,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       in.mask_stride = mask_stride_;
       in.bias = d_bias_;
       in.proposals_in = d_proposals_;
+      in.block_verify = block_verify_ ? 1 : 0;
     }
     return in;
   }
@@ -1846,6 +1919,15 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   // the request's (default 1). Exact at any value; the calibration of the
   // draft's overlap with the target (set_proposal_temperature_scale).
   float proposal_temp_scale_ = 1.0f;
+  bool block_verify_ = false;  // engine.mtp_verify block
+  int block_rows_budget_ = 0;  // engine.dflash_batch_rows (0: the whole block for every family)
+  // The deepest option whose rows times the family's slots fit the budget.
+  int block_depth_option(int requests) const {
+    int di = 0;
+    for (size_t i = 0; i < depth_options_.size(); ++i)
+      if ((1 + depth_options_[i]) * requests <= block_rows_budget_) di = static_cast<int>(i);
+    return di;
+  }
   bool proposal_drafts_enabled() const {
     static const bool env_on = [] {
       const char* v = std::getenv("DGPP_SPEC_PROPOSAL");
@@ -2813,8 +2895,10 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       if (o.fallback_row < 0) {
         // The device's draws: one per draft that stood, two for the reject
         // that ended the chain (the test and the residual), one for the
-        // last row's plain sample when every draft stood.
-        const uint64_t draws = verify.accepted < rows
+        // last row's plain sample when every draft stood; under block
+        // verification the block's rows - 1 uniforms and one final draw.
+        const uint64_t draws = o.block != 0 ? static_cast<uint64_t>(rows)
+                               : verify.accepted < rows
                                    ? static_cast<uint64_t>(verify.accepted) + 1
                                    : static_cast<uint64_t>(rows);
         if (o.counter != rng.counter + draws)
@@ -2938,9 +3022,11 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     const int t0 = o.fallback_row;
 
     // The device's draws: one per draft that stood before row t0 (the
-    // fallback row's own draw is the host's).
+    // fallback row's own draw is the host's); under block verification
+    // the whole block's T - 1 uniforms.
+    const uint64_t device_draws = o.block != 0 ? static_cast<uint64_t>(T - 1) : static_cast<uint64_t>(t0);
     if (t0 < 0 || t0 >= T || verify.accepted != t0 + 1 ||
-        o.counter != rng.counter + static_cast<uint64_t>(t0))
+        o.counter != rng.counter + device_draws)
       throw std::runtime_error(
           "graph engine: a row-" + std::to_string(t0) +
           " fallback must commit the rows before it (" +
@@ -2991,6 +3077,30 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       const text::TokenMask& m =
           masks_[static_cast<size_t>(req) * rows_per_request_ + t];
       const text::TokenMask* mask = m.constrained() ? &m : nullptr;
+      if (t + 1 < T && o.block != 0) {
+        // Block verification rejected the block at row t0 = tau and its
+        // residual lay in the unseen tail: the host draws (p_tau P - Q)+
+        // over the complete row (the pure regime; a materialized final set
+        // never falls back), then the chain ends on that token.
+        if (!gathered || t != t0)
+          throw std::runtime_error("graph engine: a block fallback decides its own row only");
+        const int32_t draft = fed_drafts[static_cast<size_t>(t)];
+        sample::Proposal q;
+        if (h_proposals_ != nullptr) {
+          const DraftProposal& dp = h_proposals_[static_cast<size_t>(req) * kSampleProposalSlots + t];
+          if (dp.n > 0 && dp.token == draft)
+            for (int e = 0; e < dp.n; ++e) q.mass.emplace_back(dp.ids[e], dp.mass[e]);
+        }
+        const sample::Result r = sample::block_residual_complete(
+            fallback_full_.data(), static_cast<int>(vocab_), o.normalizer[t], o.block_p, draft,
+            q.empty() ? nullptr : &q, p, rng);
+        bus_check_decision_digest(*bus_, rank_, false, r, o.normalizer[t], sample_prefix_scratch_,
+                                  pick_timeout_ms_, "graph block-verify fallback row");
+        if (reporting) report->push_back(r);
+        next = r.token;
+        rows.push_back(next);
+        break;
+      }
       if (t + 1 < T) {
         const int32_t draft = fed_drafts[static_cast<size_t>(t)];
         sample::SpecPrefixDecision d;

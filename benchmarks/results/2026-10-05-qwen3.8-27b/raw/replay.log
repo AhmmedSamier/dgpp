@@ -1,0 +1,44 @@
+stray dgpp-serve: 1730345 [dgpp-serve] <defunct>
+
+=== 09:02:44 build
+BUILD_EXIT=0
+
+=== 09:02:44 gates
+qwen35_forward_test      usage: --write-fixture DIR | --smoke DIR | --checkpoint-dir DIR --dump-file FILE [--engine-states FILE] [--relaxed]
+glm_pick_test            23 tests, 0 failed
+dflash2_kernels_test     9 tests, 0 failed
+unit_tests               316 tests, 0 failed
+
+=== 09:02:55 ctest: the qwen35 / engine gates
+100% tests passed, 0 tests failed out of 10
+
+=== 09:03:15 w1-replay up (8 slots)
+2026-10-05 09:03:41.576 READY — curl http://<node-0>:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/replay/w1-replay/server)
+
+=== 09:03:41 w1-replay greedy transcripts vs w1-graph-ab (bitwise expected)
+json   256 tokens    8.87 s    34.7 ms/token (wall, prefill includecluster configuration: rank 0 did not become ready
+SON array of 8 object
+identical transcripts: 4 of 4
+
+=== 09:04:24 w1-replay timed_load greedy C1,8 (vs rows64: C1 19.0/30.4/42.9/33.2/18.0, C8 64.3/114.2/129.1/116.9/68.6 at 305 ms/step)
+| class | c=1 | c=8 |
+| prose | 19.8 | 87.0 |
+| code | 31.5 | 150.5 |
+| json | 44.3 | 171.1 |
+| math | 34.3 | 158.8 |
+| chat | 18.7 | 92.1 |
+84.7 tok/s, 11.6 ms/tok, 202.4 ms/step
+
+=== 09:08:52 w1-replay down
+2026-10-05 09:08:54.995 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/replay/w1-replay/server
+stray dgpp-serve: 1730345 [dgpp-serve] <defunct>
+
+=== 09:10:03 w4-replay up (8 slots)
+cluster configuration: another launcher is starting or stopping this deployment; retry when it finishes
+
+=== 09:10:03 w4-replay timed_load greedy C1,8 (vs rows64: C1 56.1/86.8/120.3/99.9/52.3, C8 132.2/234.7/283.2/243.3/139.3 at 142 ms/step)
+
+=== 09:10:03 w4-replay down
+cluster configuration: another launcher is starting or stopping this deployment; retry when it finishes
+
+REPLAY_DONE 09:10:13

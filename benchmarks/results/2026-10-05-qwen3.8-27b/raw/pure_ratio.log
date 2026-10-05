@@ -1,0 +1,45 @@
+
+=== 07:12:55 build
+BUILD_EXIT=0
+
+=== 07:14:03 gates
+unit_tests (spec_accept) 5 tests, 0 failed
+glm_pick_test 23 tests, 0 failed
+dflash2_kernels_test 9 tests, 0 failed
+
+=== 07:14:05 w1-pure up
+2026-10-05 07:14:31.670 READY — curl http://<node-0>:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/pure-ratio/w1-pure/server)
+
+=== 07:14:31 w1-pure timed_load C1 temperature 1 (vs the campaign's w1 sampled C1)
+| prose | 17.6 |
+| code | 30.4 |
+| json | 41.8 |
+| math | 32.0 |
+| chat | 17.1 |
+mtp 2.91 tok/step/req, accept p1 70 % p2 48 % p3 32 % p4 18 % p5 14 % p6 6 % p7 3 %, first miss was the drafter's 2nd 19 % / 3rd 11 % / 4th-8th 20 % / 9th-16th 12 % / none 30 % (64 misses) 
+
+=== 07:17:13 w1-pure greedy transcripts vs w1-graph-ab (bitwise expected)
+json   256 tokens    9.22 s    36.0 ms/token (wall, prefill included) length | We need to respond to user: "Return a JSON array of 8 object
+identical transcripts: 4 of 4
+
+=== 07:17:57 w1-pure down
+2026-10-05 07:18:00.927 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/pure-ratio/w1-pure/server
+
+=== 07:18:00 w4-pure up
+2026-10-05 07:18:26.080 READY — curl http://<node-0>:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w4_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/pure-ratio/w4-pure/server)
+
+=== 07:18:26 w4-pure llama-benchy pp2048 tg128 (vs w4-ship 62.7)
+benchy tg128 mean 64.6 std 6.9
+
+=== 07:19:31 w4-pure timed_load C1 temperature 1 (vs the campaign's w4 sampled C1)
+| prose | 51.5 |
+| code | 81.1 |
+| json | 115.9 |
+| math | 97.3 |
+| chat | 50.6 |
+mtp 2.78 tok/step/req, accept p1 72 % p2 47 % p3 28 % p4 18 % p5 6 % p6 5 % p7 3 %, first miss was the drafter's 2nd 19 % / 3rd 11 % / 4th-8th 25 % / 9th-16th 15 % / none 23 % (181 misses) 
+
+=== 07:20:28 w4-pure down
+2026-10-05 07:20:35.274 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/pure-ratio/w4-pure/server
+
+PURE_DONE 07:20:35
