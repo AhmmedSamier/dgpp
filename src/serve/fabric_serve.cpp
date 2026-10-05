@@ -402,6 +402,7 @@ std::string encode_journal_settings(const WorldSettings& s) {
                      s.dflash_draft_batch ? 1 : 0, s.dflash_depth);
   out += ",\"dfw\":";
   append_json_string(&out, s.dflash_weights);
+  out += std::format(",\"pfg\":{}", s.prefill_group ? 1 : 0);
   out += ",\"xgemm\":";
   append_json_string(&out, s.expert_gemm);
   out += std::format(",\"xpf\":{},\"xtl\":{},\"xpair\":{},\"npre\":{}", s.expert_gemm_prefetch,
@@ -607,6 +608,7 @@ JournalRecord decode_journal_line(std::string_view line) {
     if (const dgpp::minijson::Value* dfw = v.find("dfw")) s.dflash_weights = std::string(dfw->as_string());
     if (s.dflash_weights != "checkpoint" && s.dflash_weights != "fp8")
       throw std::runtime_error("worker settings: dfw must be checkpoint or fp8");
+    if (v.find("pfg")) s.prefill_group = flag("pfg");  // records before 2026-10-05: grouped
     // The expert GEMM's form and companions (2026-09-30): records before them carry the defaults.
     if (const dgpp::minijson::Value* xg = v.find("xgemm")) s.expert_gemm = std::string(xg->as_string());
     if (const dgpp::minijson::Value* xpf = v.find("xpf")) s.expert_gemm_prefetch = static_cast<int>(xpf->as_int());

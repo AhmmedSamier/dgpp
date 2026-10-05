@@ -983,9 +983,54 @@ int run_checkpoint(const std::string& dir, const std::vector<int64_t>& ids, int 
 
 }  // namespace
 
+// A decode step's rows are bitwise the same whatever the step's row count
+// (2026-10-05, the Qwen3.8-Flash-Next family: the QSA projections took the
+// fp8 GEMV core up to dense_gemv_rows rows and the streaming MMA above): the
+// same context verified as 8 rows and as 1..7 rows, the first rows' logits
+// and hidden bits compared bitwise.
+int run_rows_invariance(const std::string& dir) {
+  const QwenTextConfig cfg = QwenTextConfig::from_json_file((fs::path(dir) / "config.json").string());
+  if (cfg.dense_fp8_shipped) dgpp::QwenLayerStream::set_dense_weights_fp8(true);
+  QwenModel m(cfg, dir, /*max_tokens=*/64, /*max_cache_tokens=*/256, QwenResidency::Resident, nullptr, 0, 1,
+              /*max_requests=*/1, /*mtp=*/false, /*decode_rows=*/8, /*fp8_head_mma=*/true);
+  const int V = m.lm_vocab_count();
+  const int H = cfg.hidden_size;
+  const std::vector<int64_t> prompt = smoke_tokens(cfg, 23, 0x9E3779B97F4A7C15ull);
+  const std::vector<int64_t> block = smoke_tokens(cfg, 8, 0xD1B54A32D192ED03ull);
+  const auto run = [&](int T) {
+    m.session_close(0);
+    (void)m.session_prefill(0, prompt);
+    return m.session_verify(0, std::vector<int64_t>(block.begin(), block.begin() + T));
+  };
+  const QwenModel::Outputs full = run(8);
+  require(full.logits.size() == static_cast<size_t>(8) * V, "rows: the eight-row verify's logits");
+  const QwenModel::Outputs again = run(8);
+  require(again.logits == full.logits, "rows: the eight-row verify is not deterministic across calls");
+  std::vector<int> failures;
+  for (const int T : {1, 2, 3, 4, 5, 6, 7}) {
+    const QwenModel::Outputs got = run(T);
+    int bad = -1;
+    for (int r = 0; r < T && bad < 0; ++r)
+      if (std::memcmp(got.logits.data() + static_cast<size_t>(r) * V, full.logits.data() + static_cast<size_t>(r) * V,
+                      static_cast<size_t>(V) * sizeof(float)) != 0 ||
+          std::memcmp(got.final_hidden_bits.data() + static_cast<size_t>(r) * H,
+                      full.final_hidden_bits.data() + static_cast<size_t>(r) * H, static_cast<size_t>(H) * 2) != 0)
+        bad = r;
+    if (bad >= 0) {
+      std::printf("[ !! ] a %d-row verify's row %d differs from the eight-row verify's\n", T, bad);
+      failures.push_back(T);
+    } else {
+      std::printf("[ .. ] a %d-row verify is bitwise the eight-row verify's first rows\n", T);
+    }
+  }
+  require(failures.empty(), "rows: " + std::to_string(failures.size()) + " row counts differ from the eight-row verify");
+  std::printf("[ OK ] qwen_decode_rows_invariance\n");
+  return 0;
+}
+
 int main(int argc, char** argv) {
   std::string fixture, checkpoint, ids_text;
-  bool fp8_head = false, prefill_head = false, dense_fp8 = false;
+  bool fp8_head = false, prefill_head = false, dense_fp8 = false, rows_invariance = false;
   int steps = 4;
   int layers_extra = -1;
   for (int i = 1; i < argc; ++i) {
@@ -995,6 +1040,8 @@ int main(int argc, char** argv) {
       fp8_head = true;
     else if (a == "--prefill-head")
       prefill_head = true;
+    else if (a == "--rows-invariance")
+      rows_invariance = true;
     else if (a == "--dense-fp8")  // the whole run under engine.dense_weights = fp8
       dense_fp8 = true;
     else if (a == "--checkpoint-dir" && i + 1 < argc) checkpoint = argv[++i];
@@ -1004,6 +1051,7 @@ int main(int argc, char** argv) {
   }
   try {
     if (dense_fp8) dgpp::QwenLayerStream::set_dense_weights_fp8(true);
+    if (!fixture.empty() && rows_invariance) return run_rows_invariance(fixture);
     if (!fixture.empty()) return prefill_head ? run_prefill_head(fixture) : run_fixture(fixture, fp8_head);
     if (!checkpoint.empty()) {
       std::vector<int64_t> ids;

@@ -57,12 +57,13 @@ void launch_bf16_gemv_dual(const Bf16GemvProblem& p0, const Bf16GemvProblem& p1,
 constexpr int kBf16GemvMaxProblems = 4;
 void launch_bf16_gemv_multi(const Bf16GemvProblem* problems, int n_problems,
                             bool out_f32, int m, int k, cudaStream_t stream);
-// The same problems over m <= 64 rows as groups of four (blockIdx.y) plus a
+// The same problems over m rows as groups of four (blockIdx.y) plus a
 // 1..3-row tail launch — every row bitwise the <= 4-row launches' (2026-10-05:
 // the GDN in-projections of a decode batch of any width, where cuBLASLt's
 // tile kernel above 8 rows made a batched request's transcript differ from
-// its solo one).
-constexpr int kBf16GemvMultiMaxRows = 64;
+// its solo one; and of a prefill of any length, so a prompt's rows read the
+// same alone and as a span of a group walk). The grid's y bound.
+constexpr int kBf16GemvMultiMaxRows = 65535 * 4;
 void launch_bf16_gemv_multi_rows(const Bf16GemvProblem* problems, int n_problems, bool out_f32, int m, int k,
                                  cudaStream_t stream);
 

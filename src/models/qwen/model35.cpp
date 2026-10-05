@@ -296,6 +296,11 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
   // launches that re-read the weights per row (mirrors QwenModel).
   gemm_.set_decode_rows(std::min(max_decode_rows_, dense_gemv_rows()));
   gw_.gemv_rows = dense_gemv_rows();
+  // The prefill-shaped bf16 Lt products (the dequant bridge above the
+  // scale GEMM's 128-row lowering) take one algorithm — the heuristic's for
+  // the walk's widest row count — at every width, so a prompt's reduction
+  // is the same alone and as a span of a group walk (2026-10-05).
+  gemm_.set_pinned_rows(max_tokens_);
   // NOTE: dense_gemv_rows() defaults to 4, and the FP8 GEMV row loop
   // re-reads weights per ≤4-row chunk (and per single row when smem can't
   // stage more, e.g. down-proj k=17408). Every decode row count takes the

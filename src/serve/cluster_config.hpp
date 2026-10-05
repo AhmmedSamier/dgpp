@@ -190,6 +190,13 @@ struct ClusterConfig {
     // verify-depth cap (0 = the whole block; transcripts are exact at any
     // value — unverified drafts re-draft next step).
     bool dflash_verify_graph = true;
+    // Several cold prompts prefilled as the spans of one walk (the graph
+    // worlds' admission). false: one prompt per walk — a prompt's prefill
+    // then never depends on who arrived with it (the walk's row count
+    // selects the GEMM lowering above 128 rows; a prompt shorter than that
+    // started together with others can otherwise read differently from the
+    // same prompt alone), at the cost of a burst's prefill throughput.
+    bool prefill_group = true;
     bool dflash_draft_batch = true;
     int dflash_depth = 0;
     // The confidence-scheduled verify depth (engine/verify_schedule.hpp,

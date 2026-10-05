@@ -6,6 +6,52 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Qwen3.8-27B: a prompt's prefill the same alone and in a group; the
+  four-node chat cell explained; the drafter format confirmed** (2026-10-05,
+  the evening round): the campaign's DIFFERENT reading for prompts started
+  together was the prefill GEMM lowering changing with the walk's row count
+  — the tiny-fixture test `qwen35_prefill_group_invariance` showed a group
+  of two prompts (74 rows, the streaming form) bitwise the solo prefill and
+  a group of four (148 rows, the dequant bridge on cuBLASLt) not, with
+  cuBLASLt itself picking different kernels at 148 and 296 rows. Three
+  changes: every prefill-shaped bf16 cuBLASLt product takes one pinned
+  algorithm per shape (the heuristic's choice for the widest walk,
+  `CublasLtGemm::set_pinned_rows`; groups of four and eight are now bitwise
+  each other; 2K / 8K prefill 1.11 / 0.87 ms a token, unchanged); the GDN
+  a / b GEMV runs in row groups at every row count, prefill included (0.5 MB
+  matrices; no 64-row boundary left for them); and `engine.prefill_group`
+  (default true) — `false` prefills one cold prompt per walk, so a prompt
+  shorter than the 128-row lowering bound started together with others
+  reads exactly as alone, at a burst's prefill throughput: a burst of eight short prompts on one node 3.2 s wall against 2.2 s grouped.
+  The streaming form below 128 rows and the bridge above are different
+  chains by construction (scattered against consecutive 16-k mma sets), so
+  that boundary stays; the key is the exact mode for short-prompt bursts.
+  The four-node chat cell (48.8 tok/s against the campaign's 53.4): not the
+  schedule (chat first, chat alone, a fixed lambda and whole blocks all read
+  2.38 tokens a step at the same step time) and not the fp8 drafter (the
+  checkpoint drafter reads 2.38 too, 1.5 ms a step slower) — the chat
+  prompt's four-node continuation changed at char 330 when short prompts'
+  a / b prefill moved from cuBLASLt to the GEMV core (the one-node text is
+  unchanged), and the new continuation drafts worse for this one prompt;
+  the earlier 56.5 counted prefix-cache repeats under the stale-snapshot
+  bug (2.8 a step against the cold request's 2.36). The multi-prompt
+  measure, MT-Bench greedy accepted tokens a pass: one node 3.87 tokens a pass over 80 prompts at 256 tokens (3.53 in the morning's run at its length), four nodes 3.96 over 68 — level or better. The fp8
+  drafter stays the recipe at every world (one node 140.7 against the
+  checkpoint's 145.1 ms a step at identical acceptance; four nodes 48.5
+  against 50.0). C1 after the round: one node 20.1 / 33.3 / 45.9 / 37.9 / 19.7 tok/s at 140.6 ms a pass, four nodes 59.0 / 92.3 / 125.2 / 97.7 / 48.8 at 47.5 — the math and chat cells are single prompts whose continuations moved with the prefill chain (one-node math up, four-node math and chat down), which is why the multi-prompt measure decides. Qwen3.8-Flash-Next:
+  its QSA projections take the dense lowering at every row count (the same
+  four-row boundary), but the family keeps other row-dependent forms (the
+  fp8 head's tile from five rows, the dense sites' `mma_from_rows`, the
+  MoE's fused tails at eight rows, the GR site's fused rows):
+  `qwen_decode_rows_invariance` documents the state and is registered as an
+  expected failure until that family is made one chain. The one-row
+  streaming form's rate, cold (`mma_gemv_test`, no split-K): within 2 % of
+  the GEMV chunks at [5120 x 5120] (122.9 against 120.2 us, 213 GB/s) and
+  6 % behind at [32320 x 5120]; 2.6x behind at a narrow [576 x 6144] site
+  (28.8 against 10.9 us, nine blocks on 48 SMs) — split-K fills such a
+  site in the model, and the four-node shard widths are where the plain
+  T=1 world pays its 10 %. The next kernel item: the decode form at one to
+  four rows on narrow shards.
 - **Qwen3.8-27B: a request's logits are the same alone, at every verify
   depth and in a batch** (2026-10-05): six row-count dependences in the
   decode step, found after the campaign with the solo-vs-co-tenant probe

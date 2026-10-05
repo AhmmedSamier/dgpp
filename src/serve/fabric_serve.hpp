@@ -132,6 +132,7 @@ struct WorldSettings {
   bool prefill_fp8_per_tensor = false;  // the Qwen3.8-27B per-tensor prefill recipe (opt-in)
   std::string dflash_model;             // the DFlash2 drafter (Qwen3.8-27B, world 1); empty: none
   bool dflash_verify_graph = true;
+  bool prefill_group = true;  // engine.prefill_group (2026-10-05): every rank admits the same way
   bool dflash_draft_batch = true;
   int dflash_depth = 0;
   std::string dflash_weights = "checkpoint";  // engine.dflash_weights: every rank serves the drafter the same way

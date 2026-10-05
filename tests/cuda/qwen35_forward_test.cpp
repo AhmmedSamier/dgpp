@@ -92,9 +92,9 @@ std::vector<std::vector<std::pair<int, float>>> topk(const std::vector<float>& l
 }
 
 Qwen35Model make_model(const Qwen35TextConfig& cfg, const std::string& dir, int T, bool mtp,
-                       dgpp::LoaderResidency residency = dgpp::LoaderResidency::Streaming) {
-  return Qwen35Model(cfg, dir, /*max_tokens=*/std::max(256, T), /*max_cache_tokens=*/512, residency,
-                     /*boundary=*/nullptr, /*rank=*/0, /*world=*/1, /*max_requests=*/1, /*decode_rows=*/8, mtp);
+                       dgpp::LoaderResidency residency = dgpp::LoaderResidency::Streaming, int max_requests = 1) {
+  return Qwen35Model(cfg, dir, /*max_tokens=*/std::max(256, T), /*max_cache_tokens=*/1024, residency,
+                     /*boundary=*/nullptr, /*rank=*/0, /*world=*/1, max_requests, /*decode_rows=*/8, mtp);
 }
 
 // ---- the reference dump ------------------------------------------------------
@@ -453,14 +453,77 @@ int run_rows_invariance(const std::string& dir, bool fp8_head) {
   return 0;
 }
 
+// A prompt prefilled as one span of a group walk (several cold prompts in
+// one forward, session_prefill_group) against the same prompt prefilled
+// alone: its last-row logits and its first decode step must be bitwise
+// (2026-10-05: prompts started together read DIFFERENT at char 26 on the
+// fabric while prompts joining later read identical). Groups of two (74
+// rows: the GDN chunked form's threshold) and four (148 rows: past the
+// scale GEMM's 128-row lowering, the dequant bridge on cuBLASLt).
+int run_group_invariance(const std::string& dir) {
+  const Qwen35TextConfig cfg = Qwen35TextConfig::from_json_file((fs::path(dir) / "config.json").string());
+  Qwen35Model::set_dense_weights_fp8(true);
+  Qwen35Model model = make_model(cfg, dir, 512, false, dgpp::LoaderResidency::Resident, /*max_requests=*/8);
+  const int V = cfg.vocab_size;
+  std::vector<int64_t> prompts[8];
+  for (int i = 0; i < 8; ++i) {
+    std::vector<int64_t> t = smoke_tokens(cfg, 37 * (i + 1));
+    prompts[i].assign(t.end() - 37, t.end());  // four unlike 37-token prompts
+  }
+  const std::vector<int64_t> next = {7};
+  const auto solo = [&](int req) {
+    model.session_close(req);
+    const Qwen35Model::Outputs p = model.session_prefill(req, prompts[req]);
+    const Qwen35Model::Outputs d = model.session_verify(req, next);
+    return std::make_pair(p.logits, d.logits);
+  };
+  const auto ref = solo(0);
+  require(ref.first.size() == static_cast<size_t>(V), "group: the prefill's last-row logits");
+  const auto again = solo(0);
+  require(again.first == ref.first && again.second == ref.second, "group: a solo prefill is not deterministic");
+  // The gate: a group inside the scale GEMM's 128-row lowering (two
+  // prompts, 74 rows: the streaming form, as the solo walk) is bitwise the
+  // solo prefill; groups past it (four and eight: the dequant bridge on
+  // cuBLASLt) are bitwise each other (one pinned algorithm per shape,
+  // CublasLtGemm::set_pinned_rows). A group past the bound against the
+  // solo walk is a different chain by construction (reported, not
+  // required): engine.prefill_group false is the exact mode for it.
+  std::vector<float> four_logits, four_step;
+  for (const int n : {2, 4, 8}) {
+    std::vector<int> reqs;
+    std::vector<const std::vector<int64_t>*> ps;
+    for (int i = 0; i < n; ++i) { model.session_close(i); reqs.push_back(i); ps.push_back(&prompts[i]); }
+    const std::vector<Qwen35Model::Outputs> outs = model.session_prefill_group(reqs, ps);
+    const Qwen35Model::Outputs d = model.session_verify(0, next);
+    size_t np = 0, nd = 0; double mp = 0, md = 0;
+    for (int c = 0; c < V; ++c) {
+      if (outs[0].logits[c] != ref.first[c]) { ++np; mp = std::max(mp, static_cast<double>(std::fabs(outs[0].logits[c] - ref.first[c]))); }
+      if (d.logits[c] != ref.second[c]) { ++nd; md = std::max(md, static_cast<double>(std::fabs(d.logits[c] - ref.second[c]))); }
+    }
+    std::printf("[ .. ] a group of %d (%d rows): prompt 0's prefill logits %s its solo walk's (%zu of %d differ, max |d| %.3g; first step %zu, max |d| %.3g)\n",
+                n, 37 * n, np == 0 && nd == 0 ? "bitwise" : "differ from", np, V, mp, nd, md);
+    if (n == 2) require(np == 0 && nd == 0, "group: a group inside the lowering bound must be bitwise the solo prefill");
+    if (n == 4) { four_logits = outs[0].logits; four_step = d.logits; }
+    if (n == 8) {
+      const bool same = outs[0].logits == four_logits && d.logits == four_step;
+      std::printf("[ .. ] a group of 8 (296 rows) against the group of 4 (148 rows), both past the 128-row bound: %s\n",
+                  same ? "bitwise" : "DIFFERENT");
+      require(same, "group: groups past the lowering bound must be bitwise each other (the pinned cuBLASLt algorithm)");
+    }
+  }
+  std::printf("[ OK ] qwen35_prefill_group_invariance\n");
+  return 0;
+}
+
 int main(int argc, char** argv) {
-  std::string fixture, smoke, rows, checkpoint, dump, states;
+  std::string fixture, smoke, rows, group, checkpoint, dump, states;
   bool relaxed = false, bf16_head = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--write-fixture" && i + 1 < argc) fixture = argv[++i];
     else if (a == "--smoke" && i + 1 < argc) smoke = argv[++i];
     else if (a == "--rows-invariance" && i + 1 < argc) rows = argv[++i];
+    else if (a == "--group-invariance" && i + 1 < argc) group = argv[++i];
     else if (a == "--bf16-head") bf16_head = true;
     else if (a == "--checkpoint-dir" && i + 1 < argc) checkpoint = argv[++i];
     else if (a == "--dump-file" && i + 1 < argc) dump = argv[++i];
@@ -476,6 +539,7 @@ int main(int argc, char** argv) {
     }
     if (!smoke.empty()) return run_smoke(smoke);
     if (!rows.empty()) return run_rows_invariance(rows, !bf16_head);
+    if (!group.empty()) return run_group_invariance(group);
     if (!checkpoint.empty() && !dump.empty()) return run_dump_parity(checkpoint, dump, states, relaxed);
     std::fprintf(stderr,
                  "usage: --write-fixture DIR | --smoke DIR | --rows-invariance DIR | --checkpoint-dir DIR --dump-file FILE "

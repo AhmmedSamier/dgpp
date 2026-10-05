@@ -57,6 +57,8 @@ struct CublasLtGemm::Impl {
   int decode_mma_min_rows = 1;               // narrower calls keep their dispatch (set_decode_mma)
   int decode_mma_max_rows = 0;               // its bound (0: every row count)
   int plan_rows = 0;                         // the Lt algorithm's row count (set_plan_rows)
+  int pinned_rows = 0;                       // the prefill-shaped calls' algorithm row count (set_pinned_rows)
+  bool warned_pinned_algo = false;
   bool bf12_wide = false;                    // companions take 5..8-row calls too (set_bf12_wide)
   bool mma_split_k = false;                  // the tensor-core form's split-K (set_decode_split_k)
   cublasLtHandle_t lt{};
@@ -404,6 +406,11 @@ int gemv_chunk_rows(const void* weight, int left, int k) {
 }
 }  // namespace
 
+void CublasLtGemm::set_pinned_rows(int rows) {
+  if (rows < 0) throw std::invalid_argument("CublasLtGemm::set_pinned_rows: negative rows");
+  impl_->pinned_rows = rows;
+}
+
 void CublasLtGemm::set_plan_rows(int rows) {
   if (rows < 0) throw std::invalid_argument("CublasLtGemm::set_plan_rows: negative rows");
   impl_->plan_rows = rows;
@@ -573,8 +580,14 @@ void CublasLtGemm::matmul(const void* act, const void* weight, void* out,
   // A row block of a wider chunk takes the chunk's algorithm (set_plan_rows).
   // bf16 calls only: the fp8 dot GEMMs already run in context-sized tiles
   // and keep their own algorithm either way.
+  // The pinned prefill algorithm (set_pinned_rows): every bf16 call above
+  // the decode lowering takes the heuristic's choice for pinned_rows, so a
+  // prompt's reduction is the same alone, in a group walk and in a chunk.
+  const bool pinned = impl_->pinned_rows > 0 && m > impl_->decode_rows && m != impl_->pinned_rows &&
+                      io_dtype == DType::BF16 && impl_->plan_rows == 0;
   const Impl::Plan& chosen =
-      impl_->plan_rows > m && io_dtype == DType::BF16
+      pinned ? impl_->get_plan(impl_->pinned_rows, n, k, io_dtype, out_dtype, act_row_stride, workspace, ws_bytes)
+      : impl_->plan_rows > m && io_dtype == DType::BF16
           ? impl_->get_plan(impl_->plan_rows, n, k, io_dtype, out_dtype, act_row_stride,
                             workspace, ws_bytes)
           : p;
@@ -599,12 +612,21 @@ void CublasLtGemm::matmul(const void* act, const void* weight, void* out,
   float alpha = 1.f, beta = 0.f;
   // Heuristic-selected algo + fixed layouts keep replays bitwise-stable in
   // process (graph-capture determinism requirement, DESIGN §11).
-  DGPP_CUBLAS_OK(
-      cublasLtMatmul(impl_->lt, p.desc, &alpha, weight, p.la, act, p.lb, &beta,
-                     out, p.ld, out, p.ld, &chosen.algo, workspace, ws_bytes,
-                     stream),
-      std::format("matmul m={} n={} k={} lda={} dtype={}", m, n, k,
-                  act_row_stride, dtype_name(io_dtype)));
+  cublasStatus_t st = cublasLtMatmul(impl_->lt, p.desc, &alpha, weight, p.la, act, p.lb, &beta, out, p.ld,
+                                     out, p.ld, &chosen.algo, workspace, ws_bytes, stream);
+  if (st != CUBLAS_STATUS_SUCCESS && pinned) {
+    // The pinned algorithm does not take this shape: the call's own (its
+    // reduction then depends on its row count — logged once).
+    if (!impl_->warned_pinned_algo) {
+      impl_->warned_pinned_algo = true;
+      std::fprintf(stderr, "cublasLt: the pinned prefill algorithm (rows %d) refused m=%d n=%d k=%d; the call's own\n",
+                   impl_->pinned_rows, m, n, k);
+    }
+    st = cublasLtMatmul(impl_->lt, p.desc, &alpha, weight, p.la, act, p.lb, &beta, out, p.ld, out, p.ld,
+                        &p.algo, workspace, ws_bytes, stream);
+  }
+  DGPP_CUBLAS_OK(st, std::format("matmul m={} n={} k={} lda={} dtype={}", m, n, k, act_row_stride,
+                                 dtype_name(io_dtype)));
 }
 
 size_t CublasLtGemm::query_workspace_bytes(int, int, int, DType) {

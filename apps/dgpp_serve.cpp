@@ -252,6 +252,8 @@ struct ServeGraphEngine {
   virtual void configure_block_rows_budget(int budget) = 0;
   // engine.mtp_schedule_sampled_scale, before the warm capture.
   virtual void set_sampled_schedule_scale(float scale) = 0;
+  // engine.prefill_group: several cold prompts as the spans of one walk.
+  virtual void set_prefill_group(bool on) = 0;
 };
 
 template <class Model>
@@ -270,6 +272,7 @@ struct ServeGraphEngineOf final : ServeGraphEngine {
   void set_block_verify(bool on) override { eng.set_block_verify(on); }
   void configure_block_rows_budget(int budget) override { eng.configure_block_rows_budget(budget); }
   void set_sampled_schedule_scale(float scale) override { eng.set_sampled_schedule_scale(scale); }
+  void set_prefill_group(bool on) override { eng.set_prefill_group(on); }
 };
 
 struct ServeFamily {
@@ -1379,6 +1382,7 @@ int main(int argc, char** argv) {
       "    [--dflash-model DIR_OR_ID]  DFlash2 block drafter checkpoint (replaces --mtp; past world 1 on the decode graph)\n"
       "    [--no-dflash]  run plain from a drafter template on the decode graph (the A/B knob; add --mtp for the MTP world)\n"
       "    [--no-dflash-verify-graph]  the multi-slot verify as an eager batch (engine.dflash_verify_graph)\n"
+      "    [--no-prefill-group]  one cold prompt per prefill walk (engine.prefill_group false)\n"
       "    [--no-dflash-draft-batch]  one block forward per slot (engine.dflash_draft_batch)\n"
       "    [--dflash-depth N]  verify only the first N drafts per step, 0 = the block (engine.dflash_depth)\n"
       "    [--mtp-schedule]  the confidence-scheduled verify depth (DeepSeek-V4.1's\n"
@@ -1429,6 +1433,7 @@ int main(int argc, char** argv) {
 
   std::string ckpt, model_id, peer, dflash_model;
   bool dflash_verify_graph = true, dflash_draft_batch = true;
+  bool prefill_group = true;  // engine.prefill_group: several cold prompts as one walk
   int dflash_depth = 0;
   std::string dflash_weights = "checkpoint";  // engine.dflash_weights: checkpoint | fp8
   uint16_t port = 8080, fabric_port = 29970, journal_port = 29971;
@@ -1579,6 +1584,7 @@ int main(int argc, char** argv) {
     mtp = e.mtp;
     if (dflash_model.empty()) dflash_model = e.dflash_model;  // the flag wins
     dflash_verify_graph = e.dflash_verify_graph;
+    prefill_group = e.prefill_group;
     dflash_draft_batch = e.dflash_draft_batch;
     dflash_depth = e.dflash_depth;
     dflash_weights = e.dflash_weights;
@@ -1691,6 +1697,7 @@ int main(int argc, char** argv) {
       no_dflash_cli = true;
     }
     else if (a == "--no-dflash-verify-graph") dflash_verify_graph = false;
+    else if (a == "--no-prefill-group") prefill_group = false;
     else if (a == "--no-dflash-draft-batch") dflash_draft_batch = false;
     else if (a == "--dflash-depth") dflash_depth = std::stoi(next());
     else if (a == "--dflash-weights") dflash_weights = next();
@@ -1920,6 +1927,7 @@ int main(int argc, char** argv) {
         ws.prefill_fp8_per_tensor = prefill_fp8_per_tensor;
         ws.dflash_model = dflash_model;
         ws.dflash_verify_graph = dflash_verify_graph;
+        ws.prefill_group = prefill_group;
         ws.dflash_draft_batch = dflash_draft_batch;
         ws.dflash_depth = dflash_depth;
         ws.dflash_weights = dflash_weights;
@@ -1996,6 +2004,7 @@ int main(int argc, char** argv) {
         prefill_fp8_per_tensor = ws.prefill_fp8_per_tensor;
         dflash_model = ws.dflash_model;
         dflash_verify_graph = ws.dflash_verify_graph;
+        prefill_group = ws.prefill_group;
         dflash_draft_batch = ws.dflash_draft_batch;
         dflash_depth = ws.dflash_depth;
         dflash_weights = ws.dflash_weights;
@@ -2808,6 +2817,8 @@ int main(int argc, char** argv) {
                         graph_engine->engine()->prefill_group_advance() ? "; in-flight prompts share one walk" : "");
           graph_engine->set_proposal_temperature_scale(static_cast<float>(mtp_draft_temperature));
           graph_engine->set_block_verify(mtp_verify == "block");
+          graph_engine->set_prefill_group(prefill_group);
+          if (!prefill_group) DGPP_LOG_INFO("serve: cold prompts prefill one per walk (engine.prefill_group false)");
           if (!dflash_dir.empty()) graph_engine->configure_block_rows_budget(dflash_batch_rows);
           if (mtp_verify == "block")
             DGPP_LOG_INFO("rank {}: sampled chains decided by block verification (engine.mtp_verify block)", rank);
