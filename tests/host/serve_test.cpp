@@ -21,6 +21,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -779,6 +780,16 @@ std::string fake_text(size_t prompt_len, int n) {
   return out;
 }
 
+// The double behind `"key":<number>` in a response body, or -1 when the
+// key is absent. The timings windows are wall clock, so the checks are of
+// their arithmetic, never of their values.
+double json_number(const std::string& resp, const std::string& key) {
+  const size_t at = resp.find(key);
+  return at == std::string::npos
+             ? -1
+             : std::strtod(resp.c_str() + at + key.size(), nullptr);
+}
+
 void post_completion(Client& client, bool chat, const std::string& extra, int tokens = 3) {
   const std::string body =
       chat ? chat_body("abcde", tokens, extra)
@@ -972,6 +983,24 @@ DGPP_TEST(serve_chatNonStream_exactCompletionShape) {
   require(resp.find("\"prompt_tokens\":4,\"completion_tokens\":3,"
                     "\"total_tokens\":7") != std::string::npos,
           "usage arithmetic: " + resp);
+  // The llama.cpp-style timings the usage travels with: the counters
+  // mirror the usage, prompt_ms is the arrival-to-first-token window, and
+  // the derived rates divide those windows by those counters.
+  require(resp.find("\"timings\":{\"prompt_n\":4,\"cache_n\":0,"
+                    "\"predicted_n\":3,") != std::string::npos,
+          "timings counters: " + resp);
+  const double prompt_ms = json_number(resp, "\"prompt_ms\":");
+  const double predicted_ms = json_number(resp, "\"predicted_ms\":");
+  require(prompt_ms > 0, "prompt_ms measures the arrival-to-first-token window");
+  require(predicted_ms >= 0, "predicted_ms present");
+  require(std::fabs(json_number(resp, "\"prompt_per_token_ms\":") -
+                        prompt_ms / 4) <= 1e-6 + 1e-3 * prompt_ms / 4,
+          "prompt_per_token_ms divides prompt_ms by prompt_n");
+  const double predicted_rate =
+      predicted_ms > 0 ? 3 / predicted_ms * 1000 : 0;
+  require(std::fabs(json_number(resp, "\"predicted_per_second\":") -
+                        predicted_rate) <= 1e-6 + 1e-3 * predicted_rate,
+          "predicted_per_second divides predicted_n by predicted_ms");
 }
 
 DGPP_TEST(serve_chatOneTokenLimit_returnsExactlyOneToken) {
@@ -1025,8 +1054,12 @@ DGPP_TEST(serve_chatStream_chunkLifecycleInOrder) {
                 "\"completion_tokens\":3,\"total_tokens\":8,"
                 "\"prompt_tokens_details\":{\"cached_tokens\":0},"
                 "\"completion_tokens_details\":{\"reasoning_tokens\":0}},"
-                 "\"timings\":{\"prompt_n\":5,\"cache_n\":0,"
-                 "\"predicted_n\":3,");
+                "\"timings\":{\"prompt_n\":5,\"cache_n\":0,"
+                "\"predicted_n\":3,");
+  require(usage != std::string::npos &&
+              resp.find("\"prompt_per_token_ms\"", usage) != std::string::npos &&
+              resp.find("\"predicted_per_second\"", usage) != std::string::npos,
+          "the usage chunk's timings carry the derived rates");
   const size_t done = resp.find("data: [DONE]");
   require(role != std::string::npos, "role chunk present");
   // Concatenate every content payload in arrival order.
@@ -1540,6 +1573,9 @@ DGPP_TEST(serve_legacyCompletions_theTextCompletionObject) {
   require(resp.find("\"prompt_tokens\":5,\"completion_tokens\":2,"
                     "\"total_tokens\":7") != std::string::npos,
           "legacy usage");
+  require(resp.find("\"timings\":{\"prompt_n\":5,\"cache_n\":0,"
+                    "\"predicted_n\":2,") != std::string::npos,
+          "legacy timings: " + resp);
 }
 
 // The checkpoint's defaults for the sampling rigs (generation_config.json:

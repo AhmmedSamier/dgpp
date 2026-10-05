@@ -6,6 +6,19 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Serve: the usage travels with llama.cpp-style timings** (2026-10-05):
+  every completion response — the one-shot chat and legacy bodies and, with
+  `stream_options.include_usage`, the final streaming usage chunk — carries
+  a top-level `timings` object beside the `usage`, the shape llama.cpp
+  reports and timing-aware proxies (llama-swap) read: the usage counters
+  (`prompt_n`, `cache_n`, `predicted_n`), the windows `prompt_ms` (request
+  arrival to the first token, the service's wall clock, queue wait
+  included) and `predicted_ms` (first token to the last), and the derived
+  rates. The window rides the choice group, stamped by the engine thread
+  under the service lock. Streams interrupted before the usage chunk
+  report none. See
+  [openai-compatibility](docs/openai-compatibility.md#completion-timings-dgpp-extension).
+
 - **Qwen3.8-27B drafter: sampled proposals, the one-node graph template,
   the first-miss histogram** (2026-10-05): a sampled request's block is now
   DRAWN — the recorded selector walk samples each draft from the selector's

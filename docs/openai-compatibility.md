@@ -257,6 +257,31 @@ visibility. Clients should accumulate content and logprobs independently.
 `include_obfuscation` defaults to true and adds random padding to delta events;
 false disables it. Padding is transport-only and consumes no model tokens.
 
+## Completion timings (DGPP extension)
+
+Every completion response — the one-shot chat and legacy bodies and, with
+`stream_options.include_usage`, the final streaming usage chunk — carries a
+top-level `timings` object beside the `usage`, in the shape llama.cpp
+reports and timing-aware proxies (llama-swap) read:
+
+```json
+"timings": {"prompt_n": 128, "cache_n": 96, "predicted_n": 32,
+            "prompt_ms": 210.5, "prompt_per_token_ms": 1.64,
+            "prompt_per_second": 608.1,
+            "predicted_ms": 1490.2, "predicted_per_token_ms": 46.6,
+            "predicted_per_second": 21.5}
+```
+
+`prompt_n`, `cache_n` and `predicted_n` mirror the usage counts (prompt
+tokens, prefix-cache-served tokens, completion tokens). The milliseconds
+are the service's wall clock, measured from the engine thread: `prompt_ms`
+runs request arrival to the first token and `predicted_ms` the first token
+to the last. Two differences from llama.cpp's own numbers: `prompt_ms`
+includes the admission queue wait (llama.cpp measures pure prefill), and a
+completion that emitted no token reports zeros rather than a prefill time.
+Streams carry timings in the final usage chunk only, like every other usage
+field; a stream interrupted before that chunk reports none.
+
 Errors use `{ "error": { "message", "type", "param", "code" } }`.
 An overload detected before opening a stream returns HTTP 503. Errors after
 stream headers have been sent use an SSE error followed by `[DONE]`.
