@@ -1024,7 +1024,9 @@ DGPP_TEST(serve_chatStream_chunkLifecycleInOrder) {
       resp.find("\"choices\":[],\"usage\":{\"prompt_tokens\":5,"
                 "\"completion_tokens\":3,\"total_tokens\":8,"
                 "\"prompt_tokens_details\":{\"cached_tokens\":0},"
-                "\"completion_tokens_details\":{\"reasoning_tokens\":0}}");
+                "\"completion_tokens_details\":{\"reasoning_tokens\":0}},"
+                 "\"timings\":{\"prompt_n\":5,\"cache_n\":0,"
+                 "\"predicted_n\":3,");
   const size_t done = resp.find("data: [DONE]");
   require(role != std::string::npos, "role chunk present");
   // Concatenate every content payload in arrival order.

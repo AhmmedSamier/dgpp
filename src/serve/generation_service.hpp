@@ -401,6 +401,10 @@ class GenerationService : public HttpHandler,
     int completion_tokens = 0;   // summed over the choices
     int reasoning_tokens = 0;
     int cached_tokens = 0;       // choice 0's prefix-cache attach position
+    // The request's token window for the timings the usage carries: the
+    // first choice's first token, the last token of any choice (the engine
+    // thread's, under the service mutex).
+    std::chrono::steady_clock::time_point first_token, last_token;
     std::vector<std::string> choices;  // one-shot: each choice's JSON
   };
 

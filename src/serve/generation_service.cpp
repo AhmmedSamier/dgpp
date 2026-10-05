@@ -108,6 +108,38 @@ const char* finish_reason(Scheduler::Result::Reason r, bool tool_calls) {
   }
 }
 
+// The llama.cpp-style timings object, a top-level sibling of the usage
+// (llama.cpp's own placement — timing-aware proxies read it there and
+// store "no data" without it). The ms are the service's wall clock:
+// prompt_ms runs arrival to the first token (llama.cpp measures pure
+// prefill; the queue rides along here), predicted_ms the first token to
+// the last.
+void append_timings(std::string* out, int prompt_tokens, int cached_tokens,
+                    int completion_tokens, double prompt_ms,
+                    double predicted_ms) {
+  out->append(",\"timings\":{\"prompt_n\":");
+  append_json_int(out, prompt_tokens);
+  out->append(",\"cache_n\":");
+  append_json_int(out, cached_tokens);
+  out->append(",\"predicted_n\":");
+  append_json_int(out, completion_tokens);
+  out->append(",\"prompt_ms\":");
+  append_json_float(out, prompt_ms);
+  out->append(",\"prompt_per_token_ms\":");
+  append_json_float(out, prompt_tokens > 0 ? prompt_ms / prompt_tokens : 0);
+  out->append(",\"prompt_per_second\":");
+  append_json_float(out, prompt_ms > 0 ? prompt_tokens / prompt_ms * 1000 : 0);
+  out->append(",\"predicted_ms\":");
+  append_json_float(out, predicted_ms);
+  out->append(",\"predicted_per_token_ms\":");
+  append_json_float(out,
+                    completion_tokens > 0 ? predicted_ms / completion_tokens : 0);
+  out->append(",\"predicted_per_second\":");
+  append_json_float(out,
+                    predicted_ms > 0 ? completion_tokens / predicted_ms * 1000 : 0);
+  out->push_back('}');
+}
+
 // The usage object, with the details OpenAI reports:
 // prompt_tokens_details.cached_tokens — the prompt tokens the prefix cache
 // served (the attach position) — and completion_tokens_details.
@@ -237,7 +269,8 @@ std::string chat_chunk_final(const std::string& id, int64_t created,
 std::string chat_chunk_usage(const std::string& id, int64_t created,
                              const std::string& model, int prompt_tokens,
                              int completion_tokens, int cached_tokens,
-                             int reasoning_tokens) {
+                             int reasoning_tokens, double prompt_ms,
+                             double predicted_ms) {
   std::string out;
   out.append("{\"id\":");
   append_json_string(&out, id);
@@ -248,6 +281,8 @@ std::string chat_chunk_usage(const std::string& id, int64_t created,
   out.append(",\"system_fingerprint\":null,\"choices\":[],");
   append_usage(&out, prompt_tokens, completion_tokens, cached_tokens,
                reasoning_tokens);
+  append_timings(&out, prompt_tokens, cached_tokens, completion_tokens,
+                 prompt_ms, predicted_ms);
   out.push_back('}');
   return out;
 }
@@ -274,7 +309,8 @@ std::string chat_completion_body(const std::string& id, int64_t created,
                                  const std::string& model,
                                  const std::string& choices_json,
                                  int prompt_tokens, int completion_tokens,
-                                 int cached_tokens, int reasoning_tokens) {
+                                 int cached_tokens, int reasoning_tokens,
+                                 double prompt_ms, double predicted_ms) {
   std::string out;
   out.append("{\"id\":");
   append_json_string(&out, id);
@@ -287,6 +323,8 @@ std::string chat_completion_body(const std::string& id, int64_t created,
   out.append("],");
   append_usage(&out, prompt_tokens, completion_tokens, cached_tokens,
                reasoning_tokens);
+  append_timings(&out, prompt_tokens, cached_tokens, completion_tokens,
+                 prompt_ms, predicted_ms);
   out.push_back('}');
   return out;
 }
@@ -357,7 +395,8 @@ std::string text_completion_body(const std::string& id, int64_t created,
                                  const std::string& model,
                                  const std::string& choices_json,
                                  int prompt_tokens, int completion_tokens,
-                                 int cached_tokens) {
+                                 int cached_tokens, double prompt_ms,
+                                 double predicted_ms) {
   std::string out;
   out.append("{\"id\":");
   append_json_string(&out, id);
@@ -369,6 +408,8 @@ std::string text_completion_body(const std::string& id, int64_t created,
   out.append(choices_json);
   out.append("],");
   append_usage(&out, prompt_tokens, completion_tokens, cached_tokens, 0);
+  append_timings(&out, prompt_tokens, cached_tokens, completion_tokens,
+                 prompt_ms, predicted_ms);
   out.push_back('}');
   return out;
 }
@@ -2983,10 +3024,10 @@ void GenerationService::on_token(const std::string& id, int64_t token,
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto& r : records_) {
       if (r->sched_id != id || r->done) continue;
+      const auto now = std::chrono::steady_clock::now();
       if (steps_done == 1) {
         // The first token: the time to first token, split by whether the
         // prefix cache served the prompt's head (M7).
-        const auto now = std::chrono::steady_clock::now();
         const double ms = std::chrono::duration<double, std::milli>(now - r->arrived).count();
         if (r->prefix_hit) {
           stats_.ttft_hit_count++;
@@ -3004,6 +3045,11 @@ void GenerationService::on_token(const std::string& id, int64_t token,
         if (r->admit_seen)
           stats_.prefill_s.observe(std::chrono::duration<double>(now - r->admitted_at).count());
       }
+      // The request's token window, for the timings the usage carries:
+      // first_token at the first token, last_token keeping pace with each.
+      if (r->group->first_token == std::chrono::steady_clock::time_point{})
+        r->group->first_token = now;
+      r->group->last_token = now;
       r->ids.push_back(token);
       if (r->logprobs >= 0) r->content_lps.push_back(false);
       if (r->chat) {
@@ -3470,6 +3516,27 @@ void GenerationService::pump_records() {
       flush_legacy_stream(*r);
   }
 
+  // The request's llama.cpp-style timings, from the token window: prompt_ms
+  // runs arrival to the first token, predicted_ms the first token to the
+  // last (0 before the first). The window is the engine thread's, under the
+  // lock; every choice of a request shares it through its group.
+  auto group_timings = [this](const StreamRecord& r, double* prompt_ms,
+                              double* predicted_ms) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const ChoiceGroup& g = *r.group;
+    const auto none = std::chrono::steady_clock::time_point{};
+    *prompt_ms = g.first_token == none
+                     ? 0
+                     : std::chrono::duration<double, std::milli>(
+                           g.first_token - r.arrived)
+                           .count();
+    *predicted_ms = g.first_token == none || g.last_token <= g.first_token
+                        ? 0
+                        : std::chrono::duration<double, std::milli>(
+                              g.last_token - g.first_token)
+                              .count();
+  };
+
   for (auto& r : finished) {
     if (r->writer != nullptr && !r->writer_dead) {
       ChoiceGroup& g = *r->group;
@@ -3567,9 +3634,12 @@ void GenerationService::pump_records() {
                                        finish, lp_json));
         if (++g.finished == g.n && !g.ended) {
           if (r->include_usage) {
+            double prompt_ms = 0, predicted_ms = 0;
+            group_timings(*r, &prompt_ms, &predicted_ms);
             write_stream_event(*r, chat_chunk_usage(
                 r->id, r->created_unix, r->model, r->prompt_tokens,
-                g.completion_tokens, g.cached_tokens, g.reasoning_tokens), true);
+                g.completion_tokens, g.cached_tokens, g.reasoning_tokens,
+                prompt_ms, predicted_ms), true);
           }
           r->writer->write_event("[DONE]");
           r->writer->end_stream();
@@ -3632,15 +3702,19 @@ void GenerationService::pump_records() {
             if (i) joined.push_back(',');
             joined += g.choices[i];
           }
+          double prompt_ms = 0, predicted_ms = 0;
+          group_timings(*r, &prompt_ms, &predicted_ms);
           std::string response = r->chat ? chat_completion_body(r->id, r->created_unix, r->model,
                                              joined, r->prompt_tokens,
                                              g.completion_tokens,
                                              g.cached_tokens,
-                                             g.reasoning_tokens)
+                                             g.reasoning_tokens,
+                                             prompt_ms, predicted_ms)
                       : text_completion_body(r->id, r->created_unix, r->model,
                                              joined, r->prompt_tokens,
                                              g.completion_tokens,
-                                             g.cached_tokens);
+                                             g.cached_tokens,
+                                             prompt_ms, predicted_ms);
           response.pop_back();
           if (r->report_service_tier) response.append(",\"service_tier\":\"default\"");
           if (!r->metadata.empty()) response.append(",\"metadata\":" + r->metadata);
