@@ -380,7 +380,7 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   void prefetch_attention_side(int layer);
   void prefetch_head();
   WeightPrefetcher prefetch_;
-  size_t prefetch_window_bytes_ = 0;  // 0 = the prefetcher's default (DGPP_L2_PREFETCH_MB)
+  size_t prefetch_window_bytes_ = 0;  // 0 = the prefetcher's window budget (engine.l2_prefetch_boundary_window_mib)
   int walk_rows_ = 1;                 // the rows of the walk in flight (the companions' view)
   // The lm head over `rows` activation rows into F32 logits: the blockwise
   // FP8 head under engine.dense_weights = fp8 (Resident), else the BF16 matmul.

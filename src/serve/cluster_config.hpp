@@ -197,6 +197,20 @@ struct ClusterConfig {
     // started together with others can otherwise read differently from the
     // same prompt alone), at the cost of a burst's prefill throughput.
     bool prefill_group = true;
+    // The L2 weight prefetcher (kernels/l2_prefetch.hpp; environment
+    // variables until 2026-10-05): on/off, the form (load the bytes; one
+    // L2 prefetch per 128-byte line; or touch one line per 64 KB for the
+    // page walks alone), the window budget
+    // in MiB, the boundary windows' budget (0: the window budget), the
+    // rates (off | light | full) of the windows beside a collective and
+    // inside the attention layers, and whether adjacent ranges merge.
+    bool l2_prefetch = true;
+    std::string l2_prefetch_form = "load";
+    int l2_prefetch_window_mib = 12;
+    int l2_prefetch_boundary_window_mib = 20;
+    std::string l2_prefetch_boundary_rate = "light";
+    std::string l2_prefetch_layer_rate = "light";
+    bool l2_prefetch_merge = true;
     bool dflash_draft_batch = true;
     int dflash_depth = 0;
     // The confidence-scheduled verify depth (engine/verify_schedule.hpp,

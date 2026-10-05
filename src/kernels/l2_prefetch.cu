@@ -22,15 +22,7 @@ constexpr int kFullUnroll = 4;
 constexpr int kLightUnroll = 2;
 constexpr int kLightBlocksDefault = 16;
 // DGPP_L2_PREFETCH_LIGHT_BLOCKS: the Light rate's grid (tuning knob).
-int light_blocks() {
-  static const int blocks = [] {
-    const char* v = std::getenv("DGPP_L2_PREFETCH_LIGHT_BLOCKS");
-    if (v == nullptr) return kLightBlocksDefault;
-    const long b = std::strtol(v, nullptr, 10);
-    return (b >= 1 && b <= 96) ? static_cast<int>(b) : kLightBlocksDefault;
-  }();
-  return blocks;
-}
+int light_blocks() { return kLightBlocksDefault; }
 
 // A device word the kernel compares its fold against. Nothing sets it and
 // the fold is arbitrary, so the compare (almost) never matches — and when
@@ -73,13 +65,8 @@ __global__ __launch_bounds__(kThreads) void l2_prefetch_lines_kernel(
     asm volatile("prefetch.global.L2 [%0];" ::"l"(p + i * 128));
 }
 
-bool env_prefetch_form_lines() {
-  static const bool lines = [] {
-    const char* v = std::getenv("DGPP_L2_PREFETCH_FORM");
-    return v != nullptr && std::string(v) == "prefetch";
-  }();
-  return lines;
-}
+L2PrefetchSettings g_l2_settings;  // l2_prefetch_configure, before any model is built
+bool env_prefetch_form_lines() { return g_l2_settings.form == L2PrefetchForm::Lines; }
 
 // The touch form (2026-09-29, the Qwen depth-3 profiles with the prefetch on
 // against off): of the ~3.9 GB a pass prefetched, the consumers found
@@ -87,25 +74,12 @@ bool env_prefetch_form_lines() {
 // delivered was the TRANSLATIONS: a 65 GB working set walks 32K 2 MB
 // pages per pass through a walker every SM shares, and the consumer that
 // finds its pages already walked runs at the isolated rate. This form
-// touches one 128-byte line per DGPP_L2_PREFETCH_TOUCH_KB (default 64 KB:
-// 1/512 of the bytes) so the walks happen ahead of the consumer while the
-// DRAM stays free for it. DGPP_L2_PREFETCH_FORM=touch.
-bool env_prefetch_form_touch() {
-  static const bool touch = [] {
-    const char* v = std::getenv("DGPP_L2_PREFETCH_FORM");
-    return v != nullptr && std::string(v) == "touch";
-  }();
-  return touch;
-}
-size_t env_touch_stride_bytes() {
-  static const size_t stride = [] {
-    const char* v = std::getenv("DGPP_L2_PREFETCH_TOUCH_KB");
-    if (v == nullptr) return size_t{64} << 10;
-    const long kb = std::strtol(v, nullptr, 10);
-    return (kb >= 1 && kb <= (1 << 20)) ? static_cast<size_t>(kb) << 10 : size_t{64} << 10;
-  }();
-  return stride;
-}
+// touches one 128-byte line per 64 KB (1/512 of the bytes) so the walks
+// happen ahead of the consumer while the DRAM stays free for it. The form
+// is the engine's key (engine.l2_prefetch_form touch); the shipped form
+// loads the bytes.
+bool env_prefetch_form_touch() { return g_l2_settings.form == L2PrefetchForm::Touch; }
+size_t env_touch_stride_bytes() { return size_t{64} << 10; }
 __global__ __launch_bounds__(kThreads) void l2_touch_pages_kernel(const uint8_t* __restrict__ p, size_t touches,
                                                                  size_t stride_bytes) {
   const size_t stride = static_cast<size_t>(gridDim.x) * kThreads;
@@ -113,21 +87,6 @@ __global__ __launch_bounds__(kThreads) void l2_touch_pages_kernel(const uint8_t*
     asm volatile("prefetch.global.L2 [%0];" ::"l"(p + i * stride_bytes));
 }
 
-bool env_is_off(const char* name) {
-  const char* v = std::getenv(name);
-  return v != nullptr && std::string(v) == "off";
-}
-
-PrefetchRate env_rate(const char* name, PrefetchRate fallback) {
-  const char* v = std::getenv(name);
-  if (v == nullptr) return fallback;
-  const std::string s(v);
-  if (s == "off") return PrefetchRate::Off;
-  if (s == "light") return PrefetchRate::Light;
-  if (s == "full") return PrefetchRate::Full;
-  DGPP_LOG_WARN("{}={} ignored (off|light|full)", name, s);
-  return fallback;
-}
 
 const char* rate_name(PrefetchRate r) {
   switch (r) {
@@ -138,16 +97,31 @@ const char* rate_name(PrefetchRate r) {
   return "?";
 }
 
-size_t env_window_bytes(size_t fallback) {
-  const char* v = std::getenv("DGPP_L2_PREFETCH_MB");
-  if (v == nullptr) return fallback;
-  const long mb = std::strtol(v, nullptr, 10);
-  if (mb <= 0 || mb > 64) {
-    DGPP_LOG_WARN("DGPP_L2_PREFETCH_MB={} ignored (want 1..64)", v);
-    return fallback;
-  }
-  return static_cast<size_t>(mb) << 20;
+}  // namespace
+
+void l2_prefetch_configure(const L2PrefetchSettings& s) {
+  if (s.window_bytes == 0 || s.window_bytes > (size_t{64} << 20))
+    throw std::invalid_argument("l2_prefetch_configure: the window budget must be 1..64 MiB");
+  if (s.boundary_window_bytes > (size_t{64} << 20))
+    throw std::invalid_argument("l2_prefetch_configure: the boundary window budget must be 0..64 MiB");
+  g_l2_settings = s;
 }
+const L2PrefetchSettings& l2_prefetch_settings() { return g_l2_settings; }
+PrefetchRate l2_prefetch_rate(const std::string& name) {
+  if (name == "off") return PrefetchRate::Off;
+  if (name == "light") return PrefetchRate::Light;
+  if (name == "full") return PrefetchRate::Full;
+  throw std::invalid_argument("l2 prefetch rate: off, light or full (got '" + name + "')");
+}
+const char* l2_prefetch_rate_name(PrefetchRate rate) { return rate_name(rate); }
+L2PrefetchForm l2_prefetch_form(const std::string& name) {
+  if (name == "load") return L2PrefetchForm::Load;
+  if (name == "lines") return L2PrefetchForm::Lines;
+  if (name == "touch") return L2PrefetchForm::Touch;
+  throw std::invalid_argument("l2 prefetch form: load, lines or touch (got '" + name + "')");
+}
+
+namespace {
 
 }  // namespace
 
@@ -249,13 +223,14 @@ void WeightPrefetcher::release_persisting(cudaStream_t main) {
 }
 
 WeightPrefetcher::WeightPrefetcher() {
-  enabled_ = !env_is_off("DGPP_L2_PREFETCH");
-  merge_ = !env_is_off("DGPP_L2_PREFETCH_MERGE");
-  window_bytes_ = env_window_bytes(kDefaultWindowBytes);
-  boundary_rate_ = env_rate("DGPP_L2_PREFETCH_BOUNDARY", PrefetchRate::Light);
-  layer_rate_ = env_rate("DGPP_L2_PREFETCH_LAYER", PrefetchRate::Light);
+  const L2PrefetchSettings& s = g_l2_settings;  // engine.l2_prefetch*, l2_prefetch_configure
+  enabled_ = s.enabled;
+  merge_ = s.merge;
+  window_bytes_ = s.window_bytes;
+  boundary_rate_ = s.boundary_rate;
+  layer_rate_ = s.layer_rate;
   if (!enabled_) {
-    DGPP_LOG_INFO("l2 prefetch: off (DGPP_L2_PREFETCH=off)");
+    DGPP_LOG_INFO("l2 prefetch: off (engine.l2_prefetch false)");
     return;
   }
   // Lowest priority: the chain's kernels (on a higher-priority stream)

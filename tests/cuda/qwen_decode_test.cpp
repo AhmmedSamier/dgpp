@@ -571,11 +571,12 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
       return top + std::log(sum) - row[token];
     };
     if (fp8_head && dgpp::dense_gemv_rows() == 4) {
-      // The default head must retain GEMV even with a wide decode capacity.
-      // The minimum-capacity MMA model retains GEMV above its effective
-      // ceiling (the session core floors requested capacities at eight).
-      // Both controls share the same dense lowering threshold; compare hidden
-      // states to establish that these comparisons isolate the head.
+      // The default head retains the GEMV chunks; the mma head takes the
+      // streaming form at every row count (2026-10-05: one chain whatever the
+      // prompt length or the batch; the GEMV chunks below five rows and
+      // above the decode ceiling were two more chains). The minimum-capacity
+      // MMA control must read bitwise the wide one at every length. Compare
+      // hidden states to establish that these comparisons isolate the head.
       QwenModel old_head(cfg, dir, 64, 2048, QwenResidency::Resident, nullptr, 0, 1, 8, false, 16);
       QwenModel narrow(cfg, dir, 64, 2048, QwenResidency::Resident, nullptr, 0, 1, 1, false, 4,
                        true);
@@ -591,10 +592,9 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
           const auto narrow_output = narrow.session_prefill(0, prompt);
           require(narrow.max_decode_rows() == dgpp::kDecodeRows,
                   "minimum-capacity control must expose the session-core floor");
-          const auto& narrow_expected = length <= narrow.max_decode_rows() ? actual : expected;
-          require(narrow_output.final_hidden_bits == narrow_expected.final_hidden_bits &&
-                      bitwise(narrow_output.logits, narrow_expected.logits),
-                  "MMA must respect the effective decode ceiling, including its floor");
+          require(narrow_output.final_hidden_bits == actual.final_hidden_bits &&
+                      bitwise(narrow_output.logits, actual.logits),
+                  "the MMA head must be one chain whatever the decode capacity");
           narrow.session_close(0);
           require(actual.logits.size() == static_cast<size_t>(V) &&
                       expected.logits.size() == static_cast<size_t>(V),
@@ -609,9 +609,6 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
           require(comparison.l2 < 2e-2, "FP8 short prefill exceeds the logit L2 budget");
           require(comparison.top1_equal || comparison.near_tie,
                   "FP8 short prefill changes top-1 beyond the near-tie margin");
-          if (length <= 4 || length > 16)
-            require(bitwise(actual.logits, expected.logits),
-                    "FP8 prefill outside the optimized interval changed logits");
           prefill_loss_delta +=
               nll(actual.logits.data(), label) - nll(expected.logits.data(), label);
           wide.session_close(0);
@@ -684,14 +681,18 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
             const auto output = *static_cast<void**>(params.kernelParams[4]);
             if (output == wide.device_logits()) ++streaming_heads;
           }
-          const bool expect_streaming = 2 * count > dgpp::dense_gemv_rows();
+          // engine.fp8_head mma: the streaming head at every decode row
+          // count inside the envelope (2026-10-05: one chain 1..64, so a
+          // request's logits are the same alone and in a batch); the GEMV
+          // chunks were the rows up to dense_gemv_rows before.
+          const bool expect_streaming = 2 * count <= wide.max_decode_rows();
           const bool dispatch_ok = streaming_heads == (expect_streaming ? 1 : 0);
           DGPP_CUDA_OK(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0));
           DGPP_CUDA_OK(cudaGraphLaunch(executable, wide.stream()));
           DGPP_CUDA_OK(cudaStreamSynchronize(wide.stream()));
           DGPP_CUDA_OK(cudaGraphExecDestroy(executable));
           DGPP_CUDA_OK(cudaGraphDestroy(graph));
-          require(dispatch_ok, "FP8 vocabulary head did not honor the dense GEMV row boundary");
+          require(dispatch_ok, "FP8 vocabulary head did not take the streaming form at every decode row count");
         } else {
           wide.session_graph_capture_batch(2, count);
         }
@@ -990,25 +991,35 @@ int run_checkpoint(const std::string& dir, const std::vector<int64_t>& ids, int 
 // and hidden bits compared bitwise.
 int run_rows_invariance(const std::string& dir) {
   const QwenTextConfig cfg = QwenTextConfig::from_json_file((fs::path(dir) / "config.json").string());
-  if (cfg.dense_fp8_shipped) dgpp::QwenLayerStream::set_dense_weights_fp8(true);
-  QwenModel m(cfg, dir, /*max_tokens=*/64, /*max_cache_tokens=*/256, QwenResidency::Resident, nullptr, 0, 1,
-              /*max_requests=*/1, /*mtp=*/false, /*decode_rows=*/8, /*fp8_head_mma=*/true);
+  // The shipped recipes serve the dense projections as block FP8
+  // (engine.dense_weights fp8): the fixture's bf16 dense sites would run on
+  // cuBLASLt at every width, a different question.
+  dgpp::QwenLayerStream::set_dense_weights_fp8(true);
+  QwenModel::set_session_capture_layers(true);
+  // Sixteen decode rows (the four-slot MTP-depth-3 batch's width, past the
+  // MoE layer's eight-row fused tails and the GR site's fused rows): a
+  // scalar verify is at most eight rows; the wider forms are reached by the
+  // batched verify (two slots x eight rows, four x four).
+  constexpr int kRows = 16, kSlots = 4;
+  QwenModel m(cfg, dir, /*max_tokens=*/64, /*max_cache_tokens=*/512, QwenResidency::Resident, nullptr, 0, 1,
+              /*max_requests=*/kSlots, /*mtp=*/false, /*decode_rows=*/kRows, /*fp8_head_mma=*/true);
   const int V = m.lm_vocab_count();
   const int H = cfg.hidden_size;
   const std::vector<int64_t> prompt = smoke_tokens(cfg, 23, 0x9E3779B97F4A7C15ull);
   const std::vector<int64_t> block = smoke_tokens(cfg, 8, 0xD1B54A32D192ED03ull);
-  const auto run = [&](int T) {
-    m.session_close(0);
-    (void)m.session_prefill(0, prompt);
+  const auto reset = [&](int slots) {
+    for (int q = 0; q < slots; ++q) { m.session_close(q); (void)m.session_prefill(q, prompt); }
+  };
+  const auto solo = [&](int T) {
+    reset(1);
     return m.session_verify(0, std::vector<int64_t>(block.begin(), block.begin() + T));
   };
-  const QwenModel::Outputs full = run(8);
+  const QwenModel::Outputs full = solo(8);
   require(full.logits.size() == static_cast<size_t>(8) * V, "rows: the eight-row verify's logits");
-  const QwenModel::Outputs again = run(8);
+  const QwenModel::Outputs again = solo(8);
   require(again.logits == full.logits, "rows: the eight-row verify is not deterministic across calls");
-  std::vector<int> failures;
-  for (const int T : {1, 2, 3, 4, 5, 6, 7}) {
-    const QwenModel::Outputs got = run(T);
+  std::vector<std::string> failures;
+  const auto check = [&](const QwenModel::Outputs& got, int T, const std::string& what) {
     int bad = -1;
     for (int r = 0; r < T && bad < 0; ++r)
       if (std::memcmp(got.logits.data() + static_cast<size_t>(r) * V, full.logits.data() + static_cast<size_t>(r) * V,
@@ -1017,13 +1028,33 @@ int run_rows_invariance(const std::string& dir) {
                       full.final_hidden_bits.data() + static_cast<size_t>(r) * H, static_cast<size_t>(H) * 2) != 0)
         bad = r;
     if (bad >= 0) {
-      std::printf("[ !! ] a %d-row verify's row %d differs from the eight-row verify's\n", T, bad);
-      failures.push_back(T);
+      int first_layer = -1;
+      const int W = static_cast<int>(got.layer_states.empty() ? 0 : got.layer_states[0].size() / static_cast<size_t>(T));
+      for (size_t l = 0; l < got.layer_states.size() && first_layer < 0; ++l)
+        if (W > 0 && std::memcmp(got.layer_states[l].data() + static_cast<size_t>(bad) * W,
+                                 full.layer_states[l].data() + static_cast<size_t>(bad) * W, static_cast<size_t>(W) * 2) != 0)
+          first_layer = static_cast<int>(l);
+      std::printf("[ !! ] %s: row %d differs from the eight-row solo verify's (first differing layer %d of %zu)\n", what.c_str(),
+                  bad, first_layer, got.layer_states.size());
+      failures.push_back(what);
     } else {
-      std::printf("[ .. ] a %d-row verify is bitwise the eight-row verify's first rows\n", T);
+      std::printf("[ .. ] %s is bitwise the eight-row solo verify's rows\n", what.c_str());
     }
+  };
+  for (const int T : {1, 2, 3, 4, 5, 6, 7}) check(solo(T), T, "a " + std::to_string(T) + "-row solo verify");
+  // The batched forms: slot 0 beside one slot (2 x 8 = 16 rows) and three (4 x 4 = 16 rows).
+  for (const int slots : {2, 4}) {
+    const int T = kRows / slots;
+    reset(slots);
+    std::vector<int> reqs;
+    std::vector<std::vector<int64_t>> feds;
+    for (int q = 0; q < slots; ++q) { reqs.push_back(q); feds.emplace_back(block.begin(), block.begin() + T); }
+    const std::vector<QwenModel::Outputs> outs = m.session_verify_batch(reqs, feds);
+    QwenModel::Outputs slot0 = outs[0];
+    // The batched walk's layer capture covers the whole batch: slot 0's rows are the first T.
+    check(slot0, T, "slot 0 of a " + std::to_string(slots) + " x " + std::to_string(T) + "-row batched verify");
   }
-  require(failures.empty(), "rows: " + std::to_string(failures.size()) + " row counts differ from the eight-row verify");
+  require(failures.empty(), "rows: " + std::to_string(failures.size()) + " forms differ from the eight-row solo verify");
   std::printf("[ OK ] qwen_decode_rows_invariance\n");
   return 0;
 }

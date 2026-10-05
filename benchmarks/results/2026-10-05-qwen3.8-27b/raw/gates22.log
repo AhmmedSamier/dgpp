@@ -1,0 +1,27 @@
+
+=== 20:37:20 production down (gates22)
+2026-10-05 20:37:29.814 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 20:37:29 the key through a boot: engine.l2_prefetch false
+2026-10-05 20:37:46.156 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/gates22/key/server)
+2026-10-05 20:37:31.299 INFO  l2 prefetch: off (engine.l2_prefetch false)
+2026-10-05 20:37:48.207 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/gates22/key/server
+
+=== 20:37:48 gates with the node free
+2/6 Test  #22: qwen_decode_fp8_head ...................***Failed    3.04 sec
+[FAIL] FP8 prefill outside the optimized interval changed logits
+3/6 Test  #23: qwen_decode_fp8_head_row_independent ...***Failed    2.43 sec
+[FAIL] FP8 vocabulary head did not honor the dense GEMV row boundary
+6/6 Test #166: qwen_head_check_fixture ................***Failed    1.87 sec
+50% tests passed, 3 tests failed out of 6
+	 22 - qwen_decode_fp8_head (Failed)
+	 23 - qwen_decode_fp8_head_row_independent (Failed)
+22/86 Test  #22: qwen_decode_fp8_head .......................***Failed    2.72 sec
+23/86 Test  #23: qwen_decode_fp8_head_row_independent .......***Failed    2.38 sec
+75/86 Test #166: qwen_head_check_fixture ....................***Failed    1.91 sec
+97% tests passed, 3 tests failed out of 86
+
+=== 20:43:05 production up
+2026-10-05 20:43:44.330 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+GATES22_DONE 20:43:44

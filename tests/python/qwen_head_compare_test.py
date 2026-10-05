@@ -105,12 +105,15 @@ class HeadCompareTest(unittest.TestCase):
                 record["target_logit"] -= 0.1
         self.assertFalse(self.run_gate()["passed"])
 
-    def test_dispatch_control_drift(self):
+    def test_every_width_is_a_candidate_width(self):
+        # The mma candidate takes the streaming form at every width
+        # (2026-10-05): a logit hash that differs from the GEMV reference at
+        # four rows or above the capacity is the comparison, not a dispatch
+        # drift — only the hidden states must still agree.
         for kind, record in self.runs["mma"][0]:
-            if kind == "score" and record["width"] == 4:
-                record["logits"] = "wrong-dispatch"
-        with self.assertRaisesRegex(ValueError, "dispatch control changed"):
-            self.run_gate()
+            if kind == "score" and record["width"] in (4, 17):
+                record["logits"] = "another-chain"
+        self.assertTrue(self.run_gate()["passed"])
 
     def change_winner(self, margin):
         for mode in ("gemv", "mma"):

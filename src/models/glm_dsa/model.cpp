@@ -209,7 +209,7 @@ GlmDsaModel::GlmDsaModel(const GlmDsaTextConfig& cfg, const std::string& checkpo
     const size_t K = static_cast<size_t>(cfg_.num_experts_per_tok);
     h_route_ids_ = pinned_alloc<int32_t>(layers * M * K);
     h_route_weights_ = pinned_alloc<float>(layers * M * K);
-    prefetch_window_bytes_ = std::getenv("DGPP_L2_PREFETCH_MB") ? 0 : (size_t{20} << 20);
+    prefetch_window_bytes_ = l2_prefetch_settings().boundary_window_bytes;
   }
   if (mtp_) {
     mtp_h_ = dev_alloc<uint16_t>(M * H);

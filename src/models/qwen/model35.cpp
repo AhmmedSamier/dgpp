@@ -424,9 +424,9 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
     DGPP_CUDA_OK(cudaMalloc(&mtp_h_, M * H * 2));
   }
   // The boundary prefetch windows' budget (run_rows): the measured default
-  // (the 2026-10-04 sweep on the fabric); DGPP_L2_PREFETCH_MB overrides
-  // through the prefetcher's own default for an A/B.
-  prefetch_window_bytes_ = std::getenv("DGPP_L2_PREFETCH_MB") ? 0 : (size_t{20} << 20);
+  // (the 2026-10-04 sweep on the fabric), engine.l2_prefetch_boundary_window_mib
+  // (0 takes the prefetcher's window budget).
+  prefetch_window_bytes_ = l2_prefetch_settings().boundary_window_bytes;
   if (dflash2_) {
     // Weights (bf16, replicated; the shared embed/lm head ride globals_)
     // and the fp32 1/theta^(2i/128) rope table.

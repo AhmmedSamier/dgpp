@@ -1,0 +1,31 @@
+Test project /home/stephen/workspace/dgpp/build-ci
+    Start  20: qwen_decode_test
+1/5 Test  #20: qwen_decode_test .......................   Passed    4.91 sec
+    Start  21: qwen_decode_rows_invariance
+2/5 Test  #21: qwen_decode_rows_invariance ............   Passed    0.89 sec
+    Start  22: qwen_decode_fp8_head
+3/5 Test  #22: qwen_decode_fp8_head ...................   Passed    5.56 sec
+    Start  23: qwen_decode_fp8_head_row_independent
+4/5 Test  #23: qwen_decode_fp8_head_row_independent ...   Passed    4.58 sec
+    Start 166: qwen_head_check_fixture
+5/5 Test #166: qwen_head_check_fixture ................***Failed    1.90 sec
+Traceback (most recent call last):
+  File "/home/stephen/workspace/dgpp/tests/python/qwen_head_check_test.py", line 44, in <module>
+    main()
+  File "/home/stephen/workspace/dgpp/tests/python/qwen_head_check_test.py", line 26, in main
+    subprocess.run([binary, "--checkpoint-dir", checkpoint, "--requests", str(manifest),
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/home/stephen/workspace/dgpp/build-ci/qwen_head_check', '--checkpoint-dir', '/home/stephen/workspace/dgpp/build-ci/qwen_forward_fixture', '--requests', '/tmp/qwen-head-fixture-ljnvvrcu/corpora.json', '--fp8-head', 'mma', '--boundary-tokens', '128', '--prefill-trials', '2']' returned non-zero exit status 1.
+
+
+80% tests passed, 1 tests failed out of 5
+
+Label Time Summary:
+gpu    =  17.85 sec*proc (5 tests)
+
+Total Test time (real) =  17.86 sec
+
+The following tests FAILED:
+	166 - qwen_head_check_fixture (Failed)
+Errors while running CTest

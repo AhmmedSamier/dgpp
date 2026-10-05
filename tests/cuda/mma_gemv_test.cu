@@ -393,6 +393,50 @@ DGPP_TEST(mma_gemv_cold_timing_beside_the_gemv_cores) {
   cudaFree(outf); cudaFree(act); cudaFree(out);
 }
 
+// The decode form at one to four rows on the Qwen3.8-27B shard shapes, cold,
+// against the GEMV chunks (the chain the plain T=1 world left for exactness,
+// 2026-10-05): the rule's width without and with the split-K workspace (the
+// model passes one), per rank of four (narrow) and of one (wide).
+DGPP_TEST(mma_gemv_small_rows_on_the_shard_shapes) {
+  void* ws = nullptr; const size_t ws_bytes = 64u << 20;
+  DGPP_CUDA_OK(cudaMalloc(&ws, ws_bytes));
+  uint16_t* act; DGPP_CUDA_OK(cudaMalloc(&act, size_t(8) * 17408 * 2)); DGPP_CUDA_OK(cudaMemset(act, 0x3f, size_t(8) * 17408 * 2));
+  uint16_t* out; DGPP_CUDA_OK(cudaMalloc(&out, size_t(8) * 65536 * 2));
+  cudaEvent_t e0, e1; DGPP_CUDA_OK(cudaEventCreate(&e0)); DGPP_CUDA_OK(cudaEventCreate(&e1));
+  struct Shape { const char* site; int n, k; };
+  const Shape shapes[] = {{"w4 gdn qkv", 2560, 5120}, {"w4 gdn z", 1536, 5120}, {"w4 gdn out", 5120, 1536}, {"w4 attn q", 1024, 5120},
+                          {"w4 attn kv", 128, 5120}, {"w4 attn o", 5120, 1024}, {"w4 gate/up", 4352, 5120}, {"w4 down", 5120, 4352},
+                          {"w1 gdn qkv", 10240, 5120}, {"w1 attn q", 4096, 5120}, {"w1 attn kv", 512, 5120}, {"w1 attn o", 5120, 4096},
+                          {"w1 gate/up", 17408, 5120}, {"w1 down", 5120, 17408}};
+  std::printf("[ .. ] fp8 decode form at 1..4 rows, cold us per product: site  m  chunks  rule  rule+ws(split)\n");
+  for (const Shape& sh : shapes) {
+    const size_t bytes = size_t(sh.n) * sh.k;
+    const int copies = static_cast<int>(std::max<size_t>(2, std::min<size_t>(48, (64u << 20) / bytes + 1)));
+    std::vector<uint8_t*> w(copies); std::vector<float*> sc(copies);
+    const size_t sb = size_t((sh.n + 127) / 128) * ((sh.k + 127) / 128) * 4;
+    for (int c = 0; c < copies; ++c) { DGPP_CUDA_OK(cudaMalloc(&w[c], bytes)); DGPP_CUDA_OK(cudaMemset(w[c], 0x38, bytes)); DGPP_CUDA_OK(cudaMalloc(&sc[c], sb)); DGPP_CUDA_OK(cudaMemset(sc[c], 0, sb)); }
+    for (int m : {1, 2, 4}) {
+      float t[3];
+      for (int path = 0; path < 3; ++path) {
+        auto run = [&](int i) {
+          if (path == 0) dgpp::launch_scale_gemm_bf16(act, sh.k, w[i], sc[i], out, m, sh.n, sh.k, nullptr, 0);
+          else dgpp::launch_mma_gemv_fp8_bf16(act, sh.k, w[i], sc[i], out, m, sh.n, sh.k, 0, 7, 7, nullptr, path == 2 ? ws : nullptr, path == 2 ? ws_bytes : 0);
+        };
+        for (int i = 0; i < copies; ++i) run(i);
+        DGPP_CUDA_OK(cudaDeviceSynchronize());
+        const int reps = copies * 2;
+        DGPP_CUDA_OK(cudaEventRecord(e0));
+        for (int i = 0; i < reps; ++i) run(i % copies);
+        DGPP_CUDA_OK(cudaEventRecord(e1)); DGPP_CUDA_OK(cudaEventSynchronize(e1));
+        float ms = 0; DGPP_CUDA_OK(cudaEventElapsedTime(&ms, e0, e1)); t[path] = ms * 1000.f / reps;
+      }
+      std::printf("[ .. ]   %-11s [%5d x %5d] m=%d  %7.1f  %7.1f  %7.1f us  (%.0f GB/s split)\n", sh.site, sh.n, sh.k, m, t[0], t[1], t[2], bytes / t[2] / 1e3);
+    }
+    for (int c = 0; c < copies; ++c) { cudaFree(w[c]); cudaFree(sc[c]); }
+  }
+  cudaFree(ws); cudaFree(act); cudaFree(out);
+}
+
 // One chain at every decode row count (2026-10-05): with a workspace the
 // split ranges are 256-k units (a window boundary of every tile form) and
 // the 33..64-row form splits like the 1..32-row forms, so a request's rows

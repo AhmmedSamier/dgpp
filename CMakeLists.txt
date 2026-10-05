@@ -548,13 +548,12 @@ target_link_libraries(qwen_decode_test PRIVATE dgpp_models_qwen_layers dgpp_mode
 dgpp_set_common(qwen_decode_test)
 add_test(NAME qwen_decode_test COMMAND qwen_decode_test --fixture ${QWEN_FORWARD_FIXTURE})
 set_tests_properties(qwen_decode_test PROPERTIES DEPENDS qwen_forward_fixture)
-# Qwen3.8-Flash-Next's decode step is not yet one chain across row counts
-# (2026-10-05: the fp8 head's tile from five rows, the dense sites'
-# mma_from_rows, the MoE experts' forms by rows — the QSA projections were
-# made one chain the same day); the test documents the state and the suite
-# expects it to fail until the family is made row-invariant (then drop WILL_FAIL).
+# Qwen3.8-Flash-Next's decode step is one chain across row counts under the
+# shipped FP8-dense recipe (2026-10-05: the fp8 head and the dense sites on
+# the streaming form from one row, the QSA projections through the dense
+# lowering): a 1..15-row verify bitwise the sixteen-row verify's rows.
 add_test(NAME qwen_decode_rows_invariance COMMAND qwen_decode_test --fixture ${QWEN_FORWARD_FIXTURE} --rows-invariance)
-set_tests_properties(qwen_decode_rows_invariance PROPERTIES DEPENDS qwen_forward_fixture WILL_FAIL TRUE)
+set_tests_properties(qwen_decode_rows_invariance PROPERTIES DEPENDS qwen_forward_fixture)
 add_test(NAME qwen_decode_fp8_head
   COMMAND ${CMAKE_COMMAND} -E env DGPP_DENSE_GEMV_ROWS=4
           $<TARGET_FILE:qwen_decode_test> --fixture ${QWEN_FORWARD_FIXTURE} --fp8-head)

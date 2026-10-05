@@ -11,6 +11,7 @@
 // Capture-safe: the side stream forks from and joins the main stream
 // through events, which under stream capture become graph edges.
 #include <cstddef>
+#include <string>
 #include <cstdint>
 
 #include <cuda_runtime.h>
@@ -61,13 +62,32 @@ void launch_l2_release(const void* ptr, size_t bytes, cudaStream_t stream);
 // in their enqueue where the next weight is known and the chain is about
 // to go latency-bound.
 //
-// Knobs: DGPP_L2_PREFETCH=off disables (every call is a no-op);
-// DGPP_L2_PREFETCH_MB overrides the default window budget;
-// DGPP_L2_PREFETCH_BOUNDARY=off|light|full sets the rate of the windows
-// that overlap a collective (boundary_rate(); default light);
-// DGPP_L2_PREFETCH_LAYER=off|light|full the rate of the windows inside the
-// attention layers (layer_rate(); default light — the Full rate slowed the
-// small kernels it ran beside by as much as it saved on the projection).
+// The knobs are the engine's keys (engine.l2_prefetch*), applied once per
+// process by l2_prefetch_configure before any model is built — every rank
+// the same (2026-10-05; they were environment variables before): `enabled`
+// (every call a no-op when off), the window budget, the boundary windows'
+// budget (the models' windows beside a collective), the rate of the windows
+// that overlap a collective (boundary_rate(); light), the rate of the
+// windows inside the attention layers (layer_rate(); light — the Full rate
+// slowed the small kernels it ran beside by as much as it saved on the
+// projection) and whether adjacent ranges merge into one launch.
+enum class L2PrefetchForm { Load, Lines, Touch };  // engine.l2_prefetch_form: load | lines | touch
+struct L2PrefetchSettings {
+  bool enabled = true;
+  bool merge = true;
+  L2PrefetchForm form = L2PrefetchForm::Load;
+  size_t window_bytes = size_t{12} << 20;           // engine.l2_prefetch_window_mib
+  size_t boundary_window_bytes = size_t{20} << 20;  // engine.l2_prefetch_boundary_window_mib (0: the window budget)
+  PrefetchRate boundary_rate = PrefetchRate::Light;
+  PrefetchRate layer_rate = PrefetchRate::Light;
+};
+void l2_prefetch_configure(const L2PrefetchSettings& s);
+const L2PrefetchSettings& l2_prefetch_settings();
+// "off" | "light" | "full" (throws on anything else).
+PrefetchRate l2_prefetch_rate(const std::string& name);
+// "load" | "lines" | "touch" (throws on anything else).
+L2PrefetchForm l2_prefetch_form(const std::string& name);
+const char* l2_prefetch_rate_name(PrefetchRate rate);
 class WeightPrefetcher {
  public:
   static constexpr size_t kDefaultWindowBytes = size_t{12} << 20;

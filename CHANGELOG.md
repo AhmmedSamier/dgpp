@@ -6,6 +6,27 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **The L2 weight prefetcher's knobs are engine keys** (2026-10-05):
+  `engine.l2_prefetch` (on/off), `engine.l2_prefetch_form` (`load` the
+  bytes, `lines` one L2 prefetch per 128-byte line, `touch` one line per
+  64 KB), `engine.l2_prefetch_window_mib`,
+  `engine.l2_prefetch_boundary_window_mib`, `engine.l2_prefetch_boundary_rate`
+  and `engine.l2_prefetch_layer_rate` (`off` / `light` / `full`), and
+  `engine.l2_prefetch_merge` — the `DGPP_L2_PREFETCH*` environment
+  variables they replace are gone from the prefetcher, the launcher's node
+  keys and the config's `node_env` list; every rank takes the same settings
+  through the worker record. Measured while at it on one node, plain T=1:
+  the prefetcher makes no difference at one row to either the GEMV-chunk
+  world (112.7 ms a step on and off) or the streaming-form world (121.1 /
+  121.2), so the streaming form's 8 % at one row is the form itself, not an
+  L2-residency effect, and the forms read the same at one row (off 121.4,
+  load 121.1, lines 121.1, touch 121.4 ms a step), so it is not the page
+  walks either. The one-node plain step's breakdown (`raw/trace16`): 91 %
+  is the width-8 streaming form at one row, 368 launches at 219 GB/s while
+  the single head launch runs at 231 — wave quantization of 64-row blocks
+  (1.7–2.8 waves a launch) against the GEMV core's 8-row blocks. A finer
+  streaming unit at one to four rows is the kernel item; the drafter
+  templates (8-row steps) are unaffected.
 - **Qwen3.8-27B: a prompt's prefill the same alone and in a group; the
   four-node chat cell explained; the drafter format confirmed** (2026-10-05,
   the evening round): the campaign's DIFFERENT reading for prompts started
@@ -39,12 +60,22 @@ The history by milestone. The dated engineering record in
   drafter stays the recipe at every world (one node 140.7 against the
   checkpoint's 145.1 ms a step at identical acceptance; four nodes 48.5
   against 50.0). C1 after the round: one node 20.1 / 33.3 / 45.9 / 37.9 / 19.7 tok/s at 140.6 ms a pass, four nodes 59.0 / 92.3 / 125.2 / 97.7 / 48.8 at 47.5 — the math and chat cells are single prompts whose continuations moved with the prefill chain (one-node math up, four-node math and chat down), which is why the multi-prompt measure decides. Qwen3.8-Flash-Next:
-  its QSA projections take the dense lowering at every row count (the same
-  four-row boundary), but the family keeps other row-dependent forms (the
-  fp8 head's tile from five rows, the dense sites' `mma_from_rows`, the
-  MoE's fused tails at eight rows, the GR site's fused rows):
-  `qwen_decode_rows_invariance` documents the state and is registered as an
-  expected failure until that family is made one chain. The one-row
+  its decode step is one chain across row counts under the shipped
+  FP8-dense recipe — the QSA projections through the dense lowering, the
+  fp8 head and the dense sites on the streaming form from one row (the MoE
+  layer's eight-row fused tails and the GR site's fused rows were already
+  bitwise their unfused chains): the new `qwen_decode_rows_invariance`
+  holds every solo row count and the two-by-eight and four-by-four batched
+  verifies bitwise the eight-row solo verify's rows; under `engine.fp8_head:
+  "mma"` the head takes the streaming form at every width (the compact
+  prefill row and prompts above the decode capacity included — the GEMV
+  chunks below five rows and above the capacity were two more chains), and
+  the `qwen_head_check` gate counts that kernel at every captured shape and
+  names every captured kernel when the count is off. Its one-node world
+  reads 40.9 / 47.6 tok/s (prose / code) at 39.4 ms a pass in the recipe
+  mode and 31.5 at 31.3 ms plain (44.5 / 48.7 at 38.5 and 32.3 at 30.5
+  before; the plain step pays the one-row streaming form's 3 %, the prose
+  cell is one prompt whose continuation moved). The one-row
   streaming form's rate, cold (`mma_gemv_test`, no split-K): within 2 % of
   the GEMV chunks at [5120 x 5120] (122.9 against 120.2 us, 213 GB/s) and
   6 % behind at [32320 x 5120]; 2.6x behind at a narrow [576 x 6144] site

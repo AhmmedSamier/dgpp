@@ -1,0 +1,39 @@
+
+=== 19:53:55 production down (ab19)
+2026-10-05 19:54:03.651 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 19:54:03 old-nopf up (build-release/dgpp-serve, DGPP_L2_PREFETCH=off)
+2026-10-05 19:54:19.988 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /tmp/claude-1000/-home-stephen-workspace-dgpp/cb0c821d-8834-47e0-869d-81a0e620a1d4/scratchpad/w1_old.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/ab19/old-nopf/server)
+2026-10-05 19:54:05.004 INFO  l2 prefetch: off (DGPP_L2_PREFETCH=off)
+
+=== 19:54:20 old-nopf plain T=1 prose,code x2
+| prose | 8.8 | | code | 8.8 | 
+8.9 tok/s, 112.7 ms/tok, 112.7 ms/step
+
+=== 19:56:23 old-nopf down
+2026-10-05 19:56:25.312 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/ab19/old-nopf/server
+
+=== 19:56:27 new-nopf up (build-ci/dgpp-serve, DGPP_L2_PREFETCH=off)
+2026-10-05 19:56:43.622 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/ab19/new-nopf/server)
+2026-10-05 19:56:28.517 INFO  l2 prefetch: off (DGPP_L2_PREFETCH=off)
+
+=== 19:56:43 new-nopf plain T=1 prose,code x2
+| prose | 8.2 | | code | 8.2 | 
+8.3 tok/s, 121.1 ms/tok, 121.1 ms/step
+
+=== 19:58:55 new-nopf down
+2026-10-05 19:58:58.872 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/ab19/new-nopf/server
+
+=== 19:58:58 final gates with the node free
+[ OK ] qwen35_decode_rows_invariance
+[ OK ] qwen35_prefill_group_invariance
+[ OK ] qwen_decode_rows_invariance
+22/86 Test  #22: qwen_decode_fp8_head .......................***Failed    2.76 sec
+23/86 Test  #23: qwen_decode_fp8_head_row_independent .......***Failed    2.34 sec
+75/86 Test #166: qwen_head_check_fixture ....................***Failed    1.90 sec
+97% tests passed, 3 tests failed out of 86
+
+=== 20:04:13 production up
+2026-10-05 20:04:52.383 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+AB19_DONE 20:04:52

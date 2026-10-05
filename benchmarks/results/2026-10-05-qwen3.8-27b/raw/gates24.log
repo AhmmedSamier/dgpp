@@ -1,0 +1,38 @@
+
+=== 20:45:55 production down (gates24)
+2026-10-05 20:46:04.211 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 20:46:04 the Flash-Next head tests (full output in benchmarks/results/2026-10-05-qwen3.8-27b/raw/gates24/head_tests.txt)
+5/5 Test #166: qwen_head_check_fixture ................***Failed    1.90 sec
+80% tests passed, 1 tests failed out of 5
+	166 - qwen_head_check_fixture (Failed)
+
+=== 20:46:22 the tiny gates and the ctest subset
+75/86 Test #166: qwen_head_check_fixture ....................***Failed    1.80 sec
+99% tests passed, 1 tests failed out of 86
+	166 - qwen_head_check_fixture (Failed)
+
+=== 20:51:38 fn-recipe up ()
+2026-10-05 20:52:09.280 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/gates24/fn-recipe/server)
+
+=== 20:52:09 fn-recipe C1 prose,code x2
+| prose | 36.3 | | code | 41.4 | 
+41.6 tok/s, 23.6 ms/tok, 46.1 ms/step
+
+=== 20:52:37 fn-recipe down
+2026-10-05 20:52:40.455 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/gates24/fn-recipe/server
+
+=== 20:52:40 fn-plain up (--no-mtp)
+2026-10-05 20:53:09.197 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/gates24/fn-plain/server)
+
+=== 20:53:09 fn-plain C1 prose,code x2
+| prose | 31.5 | | code | 31.4 | 
+31.1 tok/s, 31.1 ms/tok, 31.3 ms/step
+
+=== 20:53:43 fn-plain down
+2026-10-05 20:53:45.995 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/gates24/fn-plain/server
+
+=== 20:53:48 production up
+2026-10-05 20:54:26.904 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+GATES24_DONE 20:54:26

@@ -119,7 +119,11 @@ QwenModel::QwenModel(const QwenTextConfig& cfg, const std::string& checkpoint_di
   // algorithm (bf16) or the streaming tensor-core GEMM (fp8) above it.
   gemm_.set_decode_rows(std::min(max_decode_rows_, dense_gemv_rows()));
   gw_.gemv_rows = dense_gemv_rows();
-  gw_.mma_from_rows = dense_gemv_rows() + 1;
+  // Every decode row count on the weights-once streaming form (2026-10-05,
+  // as Qwen3.8-27B's): one chain 1..64, so a request's projections are the
+  // same alone and in a batch; the GEMV chain below dense_gemv_rows + 1 was
+  // a different chain.
+  gw_.mma_from_rows = 1;
   has_ple_ = !cfg_.ple_layer_ids.empty();
   if (has_ple_) table_ = loader_.load_ngram_table();
   for (int l = 0; l < cfg_.num_hidden_layers; ++l)
@@ -204,7 +208,7 @@ QwenModel::QwenModel(const QwenTextConfig& cfg, const std::string& checkpoint_di
     // 23.0–23.1 — the GR site's 13 MB pair plus the next projection fit
     // beside the chain's traffic in the 24 MB L2); DGPP_L2_PREFETCH_MB
     // overrides through the prefetcher's own default.
-    prefetch_window_bytes_ = std::getenv("DGPP_L2_PREFETCH_MB") ? 0 : (size_t{20} << 20);
+    prefetch_window_bytes_ = l2_prefetch_settings().boundary_window_bytes;
   }
   // The mixer (the final read) is a global.
   mixer_ = std::make_unique<QwenGrSite>(globals_.mixer, gw_, cfg_.hc_count, H, cfg_.hc_lowrank, max_tokens_, cfg_.rms_norm_eps);
@@ -569,7 +573,8 @@ void QwenModel::lm_head_logits(const uint16_t* hidden, int rows, cudaStream_t st
     launch_scale_gemm_f32(hidden, static_cast<size_t>(H), globals_.lm_head_fp8.payload,
                           globals_.lm_head_fp8.scales, logits_ + static_cast<size_t>(output_row) * lm_vocab_count_, rows, lm_vocab_count_, H, stream,
                           static_cast<size_t>(lm_vocab_count_),
-                          fp8_head_mma_ && rows <= max_decode_rows_ ? dense_gemv_rows() + 1 : 0,
+                          fp8_head_mma_ ? 1 : 0,  // mma: the streaming form from one row (2026-10-05), the
+                                                   // compact prefill row included — one chain at every width
                           last_row_only, nullptr, 0, compact_row);
   else {
     const bool selected = last_row_only || compact_row >= 0;
@@ -1141,7 +1146,7 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
     if (run.decode) prefetch_attention_side(layer + 1);
     fold(ffn_out, H);  // block boundary 2: the experts' sliced down projections
     pend = mlp_gr_->defer_combine(r_, ffn_out, T, stream_);
-    if (run.capture_layers) {
+    if (run.capture_layers || (session_capture_layers_ && run.decode && !run.capture)) {
       QwenGrSite::apply_pending(r_, pend, T, H, stream_);
       pend = {};
       DGPP_CUDA_OK(cudaStreamSynchronize(stream_));

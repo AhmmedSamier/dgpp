@@ -166,7 +166,11 @@ def compare(reference, candidate):
                     f"head comparisons require identical targets and hidden states: {key}")
         group = key[:3]
         _, _, width, _ = key
-        control = key[1].startswith("dense") if compact else width <= 4 or width > rh["capacity"]
+        # The compaction gate keeps its dense controls (one physical layout
+        # against the other). The head gate has none since 2026-10-05: the mma
+        # candidate takes the streaming form at every width (one chain alone
+        # and in a batch), so no width shares the GEMV reference's chain.
+        control = key[1].startswith("dense") if compact else False
         if control:
             require(a["hashes"] == b["hashes"] and a["hidden"] == b["hidden"],
                     f"dispatch control changed: {key}")

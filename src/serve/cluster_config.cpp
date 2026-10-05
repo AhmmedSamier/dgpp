@@ -146,12 +146,11 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
         if (!node.is_object()) fail(what, "'node_env[]' must be an object");
         std::map<std::string, std::string> env;
         // The launcher's NODE_KEYS (scripts/site_env.py): the fabric's per-node
-        // settings and the L2 weight-prefetch knobs (src/kernels/l2_prefetch.hpp),
-        // which an A/B sets the same way on every rank.
+        // settings (the L2 weight prefetcher's knobs are engine.l2_prefetch*
+        // keys since 2026-10-05).
         static const char* const kNodeKeys[] = {
             "DGPP_ROCE_DEVICES", "DGPP_ROCE_GID_INDICES", "HF_HUB_CACHE", "DGPP_RESIDENT_CACHE_DIR",
             "DGPP_LOG_LEVEL", "DGPP_MLOCK",
-            "DGPP_L2_PREFETCH", "DGPP_L2_PREFETCH_MB", "DGPP_L2_PREFETCH_BOUNDARY", "DGPP_L2_PREFETCH_LAYER",
             // The bus timeline switch and the dense-lowering A/B switches: every rank the same.
             "DGPP_BUS_TIMELINE", "DGPP_DSV41_DENSE_GEMV", "DGPP_DENSE_GEMV_ROWS", "DGPP_DSV41_EAGER_FOLD"};
         for (const Member& setting : node.members()) {
@@ -316,6 +315,21 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
         }
         else if (p.key == "dflash_verify_graph") e.dflash_verify_graph = boolean(x, ek, what);
         else if (p.key == "prefill_group") e.prefill_group = boolean(x, ek, what);
+        else if (p.key == "l2_prefetch") e.l2_prefetch = boolean(x, ek, what);
+        else if (p.key == "l2_prefetch_form") {
+          e.l2_prefetch_form = text(x, ek, what);
+          if (e.l2_prefetch_form != "load" && e.l2_prefetch_form != "lines" && e.l2_prefetch_form != "touch")
+            fail(what, "'" + ek + "' must be load, lines or touch");
+        }
+        else if (p.key == "l2_prefetch_window_mib") e.l2_prefetch_window_mib = static_cast<int>(integer(x, ek, what, 1, 64));
+        else if (p.key == "l2_prefetch_boundary_window_mib")
+          e.l2_prefetch_boundary_window_mib = static_cast<int>(integer(x, ek, what, 0, 64));
+        else if (p.key == "l2_prefetch_boundary_rate" || p.key == "l2_prefetch_layer_rate") {
+          const std::string r = text(x, ek, what);
+          if (r != "off" && r != "light" && r != "full") fail(what, "'" + ek + "' must be off, light or full");
+          (p.key == "l2_prefetch_boundary_rate" ? e.l2_prefetch_boundary_rate : e.l2_prefetch_layer_rate) = r;
+        }
+        else if (p.key == "l2_prefetch_merge") e.l2_prefetch_merge = boolean(x, ek, what);
         else if (p.key == "dflash_draft_batch") e.dflash_draft_batch = boolean(x, ek, what);
         else if (p.key == "dflash_depth") e.dflash_depth = static_cast<int>(integer(x, ek, what, 0, 7));
         else if (p.key == "mtp_depth") {
