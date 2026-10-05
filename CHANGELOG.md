@@ -28,7 +28,13 @@ The history by milestone. The dated engineering record in
   `DGPP_SPEC_PROPOSAL_TEMP` diagnostic retires): at 0.7 the same one-Spark
   load reads 17.5 / 29.8 / 40.0 / 34.1 / 15.2 and MT-Bench 3.41 — a sharper
   draft keeps the argmax's rate where the target is sharp — so the drafter
-  recipes ship 0.7 (the MTP templates stay at the request's).
+  recipes ship 0.7 (the MTP templates stay at the request's). With the
+  drawn proposals the drafter leads MTP on sampled traffic too (four Sparks
+  under the arena harness: +14 % over the depth-3 template's 2026-10-04
+  reading), so every Qwen3.8-27B template is now the drafter — the two- and
+  four-node templates switch from MTP depth 3, which stays as their mode
+  (`--no-dflash --mtp --mtp-depth 3`) — and the benchmarks page carries
+  the 2026-10-05 campaign on the switched templates.
   The one-node template runs the drafter on the graph engine
   (`decode_graph: true`; the eager engine's transcripts, chat 71 against
   95 ms a token). The GDN in-projections of a 5–8-row verify take the

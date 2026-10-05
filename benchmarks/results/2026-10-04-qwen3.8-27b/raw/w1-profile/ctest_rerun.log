@@ -6,3 +6,6 @@
 100% tests passed, 0 tests failed out of 206
 
 === 05:36:48 glm up
+2026-10-05 05:37:26.846 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+CTEST_DONE 05:37:26

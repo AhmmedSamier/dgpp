@@ -235,8 +235,13 @@ pass time from the engine's counters), prose / code / json / math / chat:
 
 The drafter leads on code, JSON and math by 29–58 % at four nodes and ties
 prose and chat; the MTP template's 4-row verify keeps a 6 ms shorter pass,
-so on prose-like traffic the two recipes are level and MTP stays the two-
-and four-node template, the drafter its mode. The nsys node trace of rank 0
+so on prose-like traffic the two recipes were level and MTP stayed the two-
+and four-node template on 2026-10-04. With the drawn proposals (above) the
+drafter also leads sampled traffic, so since 2026-10-05 every Qwen3.8-27B
+template is the drafter and the MTP world it replaced is the template's
+mode (`--no-dflash --mtp --mtp-depth 3` on two and four Sparks, depth 2 on
+one); the benchmarks page carries the campaign on the switched templates.
+The nsys node trace of rank 0
 at four nodes puts the target's fp8 GEMV at 35–38 ms a step for both
 recipes before the prefetch windows (6.9 GB a rank; the GB10 reads at
 233.6 GB/s and the kernels reach 89–97 % of that in isolation), the 128–140

@@ -56,19 +56,22 @@ chat 71 against 95 ms a token), the drafter's bf16 matrices packed lossless
 **Two and four Sparks** (`cluster_qwen3.8-27b_fp8_w2`, `_w4`): tensor
 parallel — the DeltaNet and attention heads, the MLP and the lm head sliced
 across the ranks, two boundary folds a layer (the attention / DeltaNet
-output and the MLP output, bf16 on the wire) — MTP depth 3 with the decode
-graph; 15.0 GiB of weights and a 13 GiB KV pool a rank at 256K on two
-Sparks, eight slots. The DFlash2 drafter is each template's mode since
-2026-10-04 (`--no-mtp --dflash-model z-lab/Qwen3.8-27B-DFlash2
---bf16-weights bf12 --mtp-draft-temperature 0.7`): the block proposal recorded inside the graph step on
-every rank, the drafter's heads and MLP rows sharded across the ranks, the
-ranks' top-16 lists merged through one fold ([#92](https://github.com/HawkBearPig/dgpp/issues/92)).
-Greedy C1 by class (prose / code / json / math / chat), the MTP templates
-read 34.0 / 40.5 / 46.4 / 42.6 / 30.9 tok/s on two nodes at 80 ms a pass and
-57.9 / 69.9 / 79.9 / 73.3 / 50.4 on four at 46 ms; the drafter mode 32.1 /
-50.3 / 71.0 / 57.6 / 30.3 at 94 ms and 54.9 / 86.3 / 120.8 / 101.2 / 52.6 at
-52 ms — ahead on code, JSON and math by 29–58 % on four nodes, level on
-prose and chat ([docs/mtp.md](../mtp.md#on-the-graph-worlds-2026-10-04-92)).
+output and the MLP output, bf16 on the wire) — the DFlash2 drafter with
+the decode graph (since 2026-10-05; MTP depth 3 was the template until
+then): the block proposal recorded inside the graph step on every rank, the
+drafter's heads and MLP rows sharded across the ranks, the ranks' top-16
+lists merged through one fold ([#92](https://github.com/HawkBearPig/dgpp/issues/92)),
+a sampled request's drafts drawn at 0.7 of its temperature under the ratio
+verify, the drafter's matrices packed lossless 12-bit; 15.0 GiB of weights
+and a 13 GiB KV pool a rank at 256K on two Sparks, eight slots. The MTP
+depth-3 world is each template's mode (`--no-dflash --mtp --mtp-depth 3`),
+plain decode `--no-dflash`. Greedy C1 by class (prose / code / json / math /
+chat), 2026-10-04 legs: the drafter 32.1 / 50.3 / 71.0 / 57.6 / 30.3 tok/s on
+two nodes at 94 ms a pass and 54.9 / 86.3 / 120.8 / 101.2 / 52.6 on four at
+52 ms; MTP depth 3 34.0 / 40.5 / 46.4 / 42.6 / 30.9 at 80 ms and 57.9 / 69.9 /
+79.9 / 73.3 / 50.4 at 46 ms — the drafter ahead on code, JSON and math by
+29–58 % on four nodes, within 5 % on prose and chat, and ahead on sampled
+traffic ([docs/mtp.md](../mtp.md#on-the-graph-worlds-2026-10-04-92)).
 
 Both worlds decode through the family's own kernels: the DeltaNet chunked
 and recurrent forms, the query-tiled prefill attention and split-KV decode
