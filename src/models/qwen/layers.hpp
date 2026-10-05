@@ -162,6 +162,15 @@ class QwenGdnLayer {
   QwenGdnLayer(const QwenGdnLayer&) = delete;
   QwenGdnLayer& operator=(const QwenGdnLayer&) = delete;
   void rebind(const QwenGdnResident& w);
+  // Test gate: the last walk's intermediates (the row-count invariance
+  // test's bisection inside a layer): qkv, post-conv qkv, z, a, b, core,
+  // normed — [rows, width] each.
+  struct DebugStage { const char* name; const uint16_t* data; int64_t width; };
+  std::vector<DebugStage> debug_stages() const {
+    const int64_t LV = static_cast<int64_t>(lv_) * v_dim_;
+    return {{"in_proj qkv", qkv_, conv_channels_}, {"conv qkv", qkvc_, conv_channels_}, {"in_proj z", z_, LV},
+            {"in_proj a", a_, lv_}, {"in_proj b", b_, lv_}, {"recurrence core", core_, LV}, {"gated norm", normed_, LV}};
+  }
   // The model's per-tensor FP8 projection view for this bind (qwen35 only).
   void set_pt_attn(const QwenPtAttnView& v) { pt_ = v; }
   // out[T, H] = GDN(x[T, H]); recurrent_state fp32 [lv, V, K] and

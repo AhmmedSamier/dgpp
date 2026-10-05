@@ -181,6 +181,10 @@ struct ClusterConfig {
     // Replaces mtp (mutually exclusive); the draft width is the
     // checkpoint's block_size - 1.
     std::string dflash_model = "";
+    // The drafter's block matrices as served: "checkpoint" (bf16, packed
+    // lossless 12-bit under bf16_weights bf12) or "fp8" (block-128 E4M3 —
+    // lossy for the proposals only; the target's verify is exact).
+    std::string dflash_weights = "checkpoint";
     // Its serving options: the multi-slot verify replayed as a captured
     // graph (the measured best), the redrafts stacked across slots, and a
     // verify-depth cap (0 = the whole block; transcripts are exact at any

@@ -48,8 +48,11 @@ its five K/V planes, eight request slots and a 1.4 GiB prefix cache plan at
 62 GiB; the graph engine records the block proposal inside the decode
 step (the 8-row verify and the drafter's forward in one graph, as on the
 fabric — the template since 2026-10-05; the eager engine's transcripts 4/4,
-chat 71 against 95 ms a token), the drafter's bf16 matrices packed lossless
-12-bit. The MTP depth-2 world is the template's mode (`--no-dflash --mtp
+chat 71 against 95 ms a token), the drafter's five block matrices served as
+block FP8 (`engine.dflash_weights: fp8` — lossy for the proposals only: the
+verify is exact, so transcripts and sampling distributions are unchanged;
+MT-Bench 3.53 against 3.52 tokens a pass, 145.5 → 142.2 ms a pass), its
+other bf16 matrices packed lossless 12-bit. The MTP depth-2 world is the template's mode (`--no-dflash --mtp
 --mtp-depth 2`), plain decode `--no-dflash`, the eager engine
 `engine.decode_graph: false` in the recipe.
 
@@ -62,7 +65,14 @@ then): the block proposal recorded inside the graph step on every rank, the
 drafter's heads and MLP rows sharded across the ranks, the ranks' top-16
 lists merged through one fold ([#92](https://github.com/HawkBearPig/dgpp/issues/92)),
 a sampled request's drafts drawn at 0.7 of its temperature under the ratio
-verify, the drafter's matrices packed lossless 12-bit; 15.0 GiB of weights
+verify, the drafter's block matrices as block FP8 and its other matrices
+packed lossless 12-bit, the verify depth scheduled a step at a time from
+the selector walk's confidence (`engine.mtp_schedule`: eight slots on four
+Sparks 205 / 301 / 352 / 310 / 216 tok/s at 92 ms a step with the one-chain
+split-K of 2026-10-05, 184 / 273 / 326 / 284 / 196 at 106 before it, 154 /
+270 / 320 / 260 / 170 at 117 for whole blocks; C1 level; a request's text
+the same alone, at every scheduled depth and beside co-tenants that join
+it); 15.0 GiB of weights
 and a 13 GiB KV pool a rank at 256K on two Sparks, eight slots. The MTP
 depth-3 world is each template's mode (`--no-dflash --mtp --mtp-depth 3`),
 plain decode `--no-dflash`. Greedy C1 by class (prose / code / json / math /

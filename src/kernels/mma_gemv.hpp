@@ -21,9 +21,14 @@
 // (a padded row never touches another row's accumulators), so a batched row is
 // bitwise the row alone at m = 1 through this kernel. It is not bitwise
 // the GEMV cores' chain (a different fp32 order, inside the oracle budgets).
-// With workspace, groups of at most 32 rows may use split-K. Their chain
-// is independent of the group's row count, but differs from wider groups'
-// unsplit chain. A caller changing batch size must preserve this boundary.
+// With workspace, launches of at most kMmaGemvSplitRows (64, the decode
+// batch bound) may use split-K: the split count is a function of the
+// shape, the split ranges are 256-k units (a window boundary of every
+// tile form), and the 33..64-row form splits like the 1..32-row forms —
+// so a row's chain is the same at every decode row count 1..64, split or
+// not (2026-10-05: a request's rows in an eight-slot batch are bitwise its
+// rows alone). Above 64 rows (the prefill-sized groups) the launch runs
+// unsplit, a different chain from the split one.
 //
 // CONTRACT: m >= 1 (rows 1..128 in one launch — 1/2/4/8 sixteen-row tiles
 // by the count — and wider m in 128-row groups, each group its own launch
@@ -39,6 +44,9 @@
 namespace dgpp {
 
 constexpr int kMmaGemvMaxRows = 32;
+// The decode batch bound: launches of up to this many rows share one chain
+// (split-K by the shape, the same ranges in every tile form).
+constexpr int kMmaGemvSplitRows = 64;
 // Rows per launch: the widest single form (8 tiles); m above it runs in
 // groups of this many rows, the weights read once per group.
 constexpr int kMmaGemvMaxRowsPerLaunch = 128;
@@ -46,10 +54,11 @@ constexpr int kMmaGemvMaxRowsPerLaunch = 128;
 // fp8 weights with block scales; out bf16 or f32 (the epilogue store is the
 // only difference: bf16(out_f32) == out_bf16 bit for bit).
 // ws / ws_bytes (2026-09-21): a device workspace lets the decode forms (m <=
-// 32) split the k range across blocks when a small n leaves the grid
-// under-filled (fp32 partials in ws, one reduce launch; the split count a
-// function of the shape only, so a row's chain is still the same whatever
-// m rides in the launch). nullptr: the unsplit form, as before.
+// kMmaGemvSplitRows) split the k range across blocks when a small n leaves
+// the grid under-filled (fp32 partials in ws, one reduce launch; the split
+// count a function of the shape only and the ranges the same in every tile
+// form, so a row's chain is still the same whatever m rides in the launch,
+// 1..64). nullptr: the unsplit form, as before.
 void launch_mma_gemv_fp8_bf16(const uint16_t* act, size_t act_stride, const uint8_t* w,
                               const float* scales, uint16_t* out, int m, int n, int k,
                               size_t out_stride, int rs, int cs, cudaStream_t stream,

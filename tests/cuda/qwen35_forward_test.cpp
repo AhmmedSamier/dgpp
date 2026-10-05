@@ -91,10 +91,10 @@ std::vector<std::vector<std::pair<int, float>>> topk(const std::vector<float>& l
   return out;
 }
 
-Qwen35Model make_model(const Qwen35TextConfig& cfg, const std::string& dir, int T, bool mtp) {
-  return Qwen35Model(cfg, dir, /*max_tokens=*/std::max(256, T), /*max_cache_tokens=*/512,
-                     dgpp::LoaderResidency::Streaming, /*boundary=*/nullptr, /*rank=*/0, /*world=*/1,
-                     /*max_requests=*/1, /*decode_rows=*/8, mtp);
+Qwen35Model make_model(const Qwen35TextConfig& cfg, const std::string& dir, int T, bool mtp,
+                       dgpp::LoaderResidency residency = dgpp::LoaderResidency::Streaming) {
+  return Qwen35Model(cfg, dir, /*max_tokens=*/std::max(256, T), /*max_cache_tokens=*/512, residency,
+                     /*boundary=*/nullptr, /*rank=*/0, /*world=*/1, /*max_requests=*/1, /*decode_rows=*/8, mtp);
 }
 
 // ---- the reference dump ------------------------------------------------------
@@ -354,13 +354,114 @@ int run_dump_parity(const std::string& dir, const std::string& dump_path, const 
 
 }  // namespace
 
+// A decode step's rows are bitwise the same whatever the step's row count
+// (2026-10-05, the scheduled verify depth: a slot verifies 2 / 4 / 6 / 8
+// rows a step and its text must not move with the depth): the same context
+// verified as 8 rows and as 1..7 rows, the first rows' logits and hidden
+// bits compared bitwise, on the tiny fixture with the production recipe's
+// fp8 head.
+int run_rows_invariance(const std::string& dir, bool fp8_head) {
+  const Qwen35TextConfig cfg = Qwen35TextConfig::from_json_file((fs::path(dir) / "config.json").string());
+  Qwen35Model::set_dense_weights_fp8(fp8_head);
+  Qwen35Model::set_session_capture_layers(true);
+  // Resident: the fp8 head requantizes only on a resident stack (the
+  // serving configuration); the streaming stack's bf16 head runs on
+  // cuBLASLt, whose kernels change with the row count.
+  Qwen35Model model = make_model(cfg, dir, 64, false, dgpp::LoaderResidency::Resident);
+  const std::vector<int64_t> prompt = smoke_tokens(cfg, 37);
+  std::vector<int64_t> block = smoke_tokens(cfg, 16);
+  block.erase(block.begin(), block.begin() + 8);  // eight tokens unlike the prompt's head
+  const int V = cfg.vocab_size, H = cfg.hidden_size;
+  const auto run = [&](int T) {
+    model.session_close(0);
+    (void)model.session_prefill(0, prompt);
+    return model.session_verify(0, std::vector<int64_t>(block.begin(), block.begin() + T));
+  };
+  const Qwen35Model::Outputs full = run(8);
+  require(full.logits.size() == static_cast<size_t>(8) * V, "rows: the eight-row verify's logits");
+  const Qwen35Model::Outputs again = run(8);
+  require(again.logits == full.logits && again.final_hidden_bits == full.final_hidden_bits,
+          "rows: the eight-row verify is not deterministic across calls");
+  std::vector<int> failures;
+  for (const int T : {1, 2, 3, 4, 5, 6, 7}) {
+    const Qwen35Model::Outputs got = run(T);
+    require(got.logits.size() == static_cast<size_t>(T) * V, "rows: the verify's logits");
+    int bad_row = -1;
+    std::string where;
+    for (int r = 0; r < T && bad_row < 0; ++r) {
+      const bool hid = std::memcmp(got.final_hidden_bits.data() + static_cast<size_t>(r) * H,
+                                   full.final_hidden_bits.data() + static_cast<size_t>(r) * H,
+                                   static_cast<size_t>(H) * 2) != 0;
+      size_t nlog = 0;
+      double maxd = 0;
+      for (int c = 0; c < V; ++c) {
+        const float a = got.logits[static_cast<size_t>(r) * V + c], b = full.logits[static_cast<size_t>(r) * V + c];
+        if (a != b) { ++nlog; maxd = std::max(maxd, static_cast<double>(std::fabs(a - b))); }
+      }
+      if (hid || nlog > 0) {
+        bad_row = r;
+        int first_layer = -1;
+        for (size_t l = 0; l < got.layer_states.size() && first_layer < 0; ++l)
+          if (std::memcmp(got.layer_states[l].data() + static_cast<size_t>(r) * H,
+                          full.layer_states[l].data() + static_cast<size_t>(r) * H, static_cast<size_t>(H) * 2) != 0)
+            first_layer = static_cast<int>(l);
+        std::string stage = "none";
+        for (size_t st = 0; st < got.debug_stages.size() && stage == "none"; ++st) {
+          const size_t w = got.debug_stages[st].size() / static_cast<size_t>(T);
+          const uint16_t* gr = got.debug_stages[st].data() + static_cast<size_t>(r) * w;
+          if (std::memcmp(gr, full.debug_stages[st].data() + static_cast<size_t>(r) * w, w * 2) != 0) {
+            stage = got.debug_stage_names[st];
+            size_t nd = 0; double md = 0;
+            for (size_t c = 0; c < w; ++c) {
+              const float a = bf16_bits_to_float(gr[c]), b = bf16_bits_to_float(full.debug_stages[st][static_cast<size_t>(r) * w + c]);
+              if (a != b) { ++nd; md = std::max(md, static_cast<double>(std::fabs(a - b))); }
+            }
+            int same_as = -1;  // the row of the eight-row walk this row equals, if any (a stride / staging slip)
+            for (int rr = 0; rr < 8 && same_as < 0; ++rr)
+              if (std::memcmp(gr, full.debug_stages[st].data() + static_cast<size_t>(rr) * w, w * 2) == 0) same_as = rr;
+            stage += " (" + std::to_string(nd) + " of " + std::to_string(w) + " differ, max |d| " + std::to_string(md) +
+                     ", equals the eight-row walk's row " + std::to_string(same_as) + ")";
+            for (size_t c = 0; c < w; ++c) {
+              const uint16_t a = gr[c], b = full.debug_stages[st][static_cast<size_t>(r) * w + c];
+              if (a != b)
+                std::printf("[ .. ]   %s row %d col %zu: %d-row walk 0x%04x (%.6g) vs eight-row 0x%04x (%.6g)\n",
+                            got.debug_stage_names[st].c_str(), r, c, T, a, bf16_bits_to_float(a), b, bf16_bits_to_float(b));
+            }
+            // Determinism of this row count: the same walk again.
+            const Qwen35Model::Outputs rerun = run(T);
+            std::printf("[ .. ]   the %d-row walk repeated: stage %s %s, logits %s\n", T, got.debug_stage_names[st].c_str(),
+                        rerun.debug_stages[st] == got.debug_stages[st] ? "bitwise" : "DIFFERENT",
+                        rerun.logits == got.logits ? "bitwise" : "DIFFERENT");
+          }
+        }
+        where = (hid ? "the final hidden" : "the final hidden the same") + std::string(", ") + std::to_string(nlog) +
+                " of " + std::to_string(V) + " logits differ, max |d| " + std::to_string(maxd) +
+                ", first differing layer " + std::to_string(first_layer) +
+                (first_layer >= 0 ? (cfg.layers[static_cast<size_t>(first_layer)] == dgpp::Qwen35LayerKind::Gdn ? " (gdn)" : " (full)") : " (none)") +
+                ", first differing stage of GDN layer 0: " + stage;
+      }
+    }
+    if (bad_row >= 0) {
+      std::printf("[ !! ] a %d-row verify's row %d differs from the eight-row verify's (%s)\n", T, bad_row, where.c_str());
+      failures.push_back(T);
+    } else {
+      std::printf("[ .. ] a %d-row verify is bitwise the eight-row verify's first rows\n", T);
+    }
+  }
+  require(failures.empty(), "rows: " + std::to_string(failures.size()) + " row counts differ from the eight-row verify");
+  std::printf("[ OK ] qwen35_decode_rows_invariance\n");
+  return 0;
+}
+
 int main(int argc, char** argv) {
-  std::string fixture, smoke, checkpoint, dump, states;
-  bool relaxed = false;
+  std::string fixture, smoke, rows, checkpoint, dump, states;
+  bool relaxed = false, bf16_head = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--write-fixture" && i + 1 < argc) fixture = argv[++i];
     else if (a == "--smoke" && i + 1 < argc) smoke = argv[++i];
+    else if (a == "--rows-invariance" && i + 1 < argc) rows = argv[++i];
+    else if (a == "--bf16-head") bf16_head = true;
     else if (a == "--checkpoint-dir" && i + 1 < argc) checkpoint = argv[++i];
     else if (a == "--dump-file" && i + 1 < argc) dump = argv[++i];
     else if (a == "--engine-states" && i + 1 < argc) states = argv[++i];
@@ -374,9 +475,10 @@ int main(int argc, char** argv) {
       return 0;
     }
     if (!smoke.empty()) return run_smoke(smoke);
+    if (!rows.empty()) return run_rows_invariance(rows, !bf16_head);
     if (!checkpoint.empty() && !dump.empty()) return run_dump_parity(checkpoint, dump, states, relaxed);
     std::fprintf(stderr,
-                 "usage: --write-fixture DIR | --smoke DIR | --checkpoint-dir DIR --dump-file FILE "
+                 "usage: --write-fixture DIR | --smoke DIR | --rows-invariance DIR | --checkpoint-dir DIR --dump-file FILE "
                  "[--engine-states FILE] [--relaxed]\n");
     return 2;
   } catch (const std::exception& e) {

@@ -266,6 +266,56 @@ MT-Bench think-sampled 2.80 / 3.27–3.34 / 3.41 at argmax / 1.0 / 0.7 — a
 sharper draft keeps the argmax's rate on the sharp classes while the flat
 ones keep the overlap gain; the drafter recipes ship 0.7.
 
+The drafter's five block matrices (q|k|v, o, gate, up, down) serve as block
+FP8 under `engine.dflash_weights: fp8` (the checkpoint's bf16 under
+`checkpoint`, the default; block-128 e4m3 encoded at load by the loader's
+own encoder). Lossy for the proposals only — the target's verify is exact
+whatever the drafter proposes, so transcripts and sampling distributions
+are unchanged and only the acceptance can move: measured on one Spark
+(2026-10-05, `raw/fp8-drafter`), MT-Bench nothink-greedy 3.53 against the
+checkpoint's 3.52 tokens a pass, greedy C1 20.1 / 32.3 / 44.3 / 35.2 / 19.4
+against 19.9 / 31.6 / 44.4 / 34.5 / 18.8 tok/s at 142.2 against 145.5 ms a
+pass, transcripts identical 4/4; the drafter recipes ship `fp8`.
+
+The scheduled verify depth (`engine.mtp_schedule`, the README's engine keys; DeepSeek-V4.1-Flash's confidence head introduced it)
+takes the block drafter too since 2026-10-05: the selector walk writes each
+draft's confidence (the chosen candidate's softmax mass at the walk's
+temperature, as a logit) beside the drafts, and a greedy slot verifies only
+the leading drafts whose survival justifies another row — 1, 3, 5 or 7 of
+the block — through the same reduced-depth variants; sampled slots hold the
+whole block. The cost model from the 2026-10-05 traces: 2.0 ms a row over a
+130 / 66 / 34 ms pass on one / two / four Sparks. Four Sparks, eight slots
+greedy (`raw/sched4`): 183.7 / 273.3 / 326.3 / 284.4 / 195.6 tok/s at 106 ms
+a step against the campaign's whole blocks 153.5 / 270.1 / 319.6 / 260.2 /
+169.7 at 117 (the depth histogram at eight slots 3:118 5:234 7:1007 steps);
+C1 level at every world; transcripts identical 4/4. The drafter recipes
+ship it.
+
+Exact at every depth, alone or in a batch (2026-10-05, `raw/isolation4`,
+`raw/bisect5`, `raw/verify8`): the Qwen decode step's kernels are one chain
+at every row count (the head, the fp8 projections and the GDN / attention
+in-projections on the streaming form from one row — the in-projections'
+fp8 GEMV core below five rows was the chain a scheduled 2- or 4-row step
+took, `dense_gemv_rows` defaulting to 4 — the GDN a / b on the row-group
+GEMV, split-K in 256-k units with the 33–64-row form splitting too; the
+tiny-fixture test `qwen35_decode_rows_invariance` holds a 1..7-row
+verify's rows bitwise to the eight-row verify's), and the recorded scalar
+commit takes a reduced-depth step's own rows — captured with the model's
+decode rows it retracted a step that accepted every row from a snapshot
+its walk never wrote. A request joined by co-tenants now reads the same text
+as alone on one, two and four Sparks, from the first request after boot,
+and a scheduled request's text is the same at every depth mix tried (the
+template, min-depth 3, a forced-shallow schedule: 4/4 against whole
+blocks); prompts started together still differ (the group prefill, open).
+The drafter templates are level (W1 C1 20.1 / 32.8 / 45.5 / 35.1 / 19.6
+tok/s at 142.0 ms, C8 195.2 ms a step; W4 C1 60.0 / 92.7 / 125.1 / 105.3 /
+48.8 at 47.5, C8 205.3 / 299.2 / 356.7 / 310.7 / 218.9 at 91.5; W2 C1 32.6
+/ 57.3 / 80.0 / 66.3 / 34.9 at 78.9). The plain T=1 world pays the one-row
+streaming form on every fp8 site (W1 8.2 tok/s at 121.2 ms against the
+campaign's 8.9 at 112.7; W4 28.0 at 35.3 against 31.0 at 32) — the one-row
+form's rate, about 215 against the GEMV core's 240 GB/s and worse at the
+four-node shard widths, is the next kernel item.
+
 Measured 2026-10-04 (`benchmarks/results/2026-10-04-qwen3.8-27b/raw/drafter-tp`
 and `raw/prefetch`, the repository's `timed_load` workload, greedy C1, the
 pass time from the engine's counters), prose / code / json / math / chat:

@@ -99,7 +99,7 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
                "prefill_budget_tokens": 256, "prefill_idle_budget_tokens": 2048,
                "prefix_min_tokens": 512, "prefix_head_snapshots": false, "mtp_draft": "greedy",
                "mtp_schedule_sampled_scale": 0.5, "mtp_draft_temperature": 0.7, "mtp_verify": "block",
-               "dflash_batch_rows": 32},
+               "dflash_batch_rows": 32, "dflash_weights": "fp8"},
     "paths": {"log_dir": "/var/log/dgpp"}
   })";
   const dgpp::serve::ClusterConfig c = dgpp::serve::parse_cluster_config(json, "t");
@@ -117,8 +117,10 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
               c.engine.prefix_min_tokens == 512 && !c.engine.prefix_head_snapshots &&
               c.engine.mtp_draft == "greedy" && c.engine.mtp_schedule_sampled_scale == 0.5 &&
               c.engine.mtp_draft_temperature == 0.7 && c.engine.mtp_verify == "block" &&
-              c.engine.dflash_batch_rows == 32,
+              c.engine.dflash_batch_rows == 32 && c.engine.dflash_weights == "fp8",
           "the given engine knobs");
+  require(dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"]})", "t").engine.dflash_weights == "checkpoint",
+          "the drafter serves its checkpoint's weights by default");
   require(dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"]})", "t").engine.dflash_batch_rows == 0,
           "the drafter's batches verify whole blocks by default");
   require(dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"]})", "t").engine.mtp_verify == "token",
@@ -344,6 +346,8 @@ DGPP_TEST(cluster_config_refusesUnknownKeysAndBadValuesByName) {
        "'engine.mtp_draft_temperature' must be in (0, 4]"},
       {R"({"model":"m","nodes":["h"],"engine":{"mtp_verify":"tree"}})",
        "'engine.mtp_verify' must be token or block"},
+      {R"({"model":"m","nodes":["h"],"engine":{"dflash_weights":"nvfp4"}})",
+       "'engine.dflash_weights' must be checkpoint or fp8"},
       {R"({"model":"m","nodes":["h"],"engine":{"mtp_schedule_sampled_scale":1.5}})",
        "'engine.mtp_schedule_sampled_scale' must be in [0, 1]"},
       {R"({"model":"m","nodes":["h"],"engine":{"admission":"fast"}})",

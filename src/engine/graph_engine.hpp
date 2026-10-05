@@ -733,7 +733,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     block_rows_budget_ = 0;
     if (!block_ || budget == 0 || families_.empty()) return;
     if (schedule_)
-      throw std::logic_error("graph engine: the block rows budget and the scheduled verify depth are exclusive");
+      throw std::invalid_argument("engine.dflash_batch_rows and engine.mtp_schedule are exclusive (the schedule sets the rows)");
     // The depth options: every family's rows under the budget, and the full block.
     std::vector<int> depths;
     for (const BatchFamily& f : families_) {
@@ -813,9 +813,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       return;
     }
     {
-      if (!model_->mtp_enabled() || depth_ < 1)
+      if (!spec_enabled() || depth_ < 1)
         throw std::invalid_argument(
-            "graph engine: the scheduled verify depth needs MTP");
+            "graph engine: the scheduled verify depth needs MTP or the block drafter");
       if (!(row_ms > 0.f) || !(lambda_tok_per_ms > 0.f))
         throw std::invalid_argument(
             "graph engine: the scheduled verify depth needs row_ms > 0 and "
@@ -844,7 +844,13 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
             "engine.mtp_schedule=true requires engine.mtp_schedule_min_depth < engine.mtp_depth; "
             "set engine.mtp_schedule=false to use a fixed verify depth.");
       const int options = std::min(span, fit);
-      if constexpr (Model::kVerifyConfidence) {
+      if (block_) {
+        // The block drafter: the selector walk writes every draft's
+        // confidence (the model's [slot][drafts] table, read by
+        // record_confidence_publish); no draft-head path.
+        conf_rows_ = depth_;
+        draft_full_path_ = false;
+      } else if constexpr (Model::kVerifyConfidence) {
         conf_rows_ = model_->confidence_rows();
         draft_full_path_ = false;
       } else {
@@ -1096,7 +1102,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
             const int cap = families_[f].max_rows;  // > 0: no full-block variant, the options that fit
             if (cap > 0 && !family_usable(f)) continue;
             if (cap == 0) ensure_batch_graph(static_cast<int>(f));
-            if (schedule_ && model_->mtp_enabled())
+            if (schedule_ && spec_enabled())
               for (size_t di = 0; di + 1 < depth_options_.size(); ++di)
                 if (cap == 0 || 1 + depth_options_[di] <= cap)
                   ensure_sched_batch_graph(static_cast<int>(f), static_cast<int>(di));
@@ -1595,6 +1601,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
         // proposals (a previous occupant's) say "none".
         block_draft_eagerly(req, first);
         invalidate_proposal(req);
+        refresh_confidence_eagerly(req);
       } else if (spec_enabled()) {
         // session_prefill filled the draft cache through the prompt. Advance
         // its one-row lag over the first generated token and pick the initial
@@ -1688,7 +1695,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     // either way); the whole block when any of them is fresh or sampled.
     int di = -1;
     int rows = rows_per_request_;
-    if (schedule_ && model_->mtp_enabled()) {
+    if (schedule_ && spec_enabled()) {
       di = choose_batch_depth_option(reqs);
       // A depth-capped family: the deepest option its rows hold.
       while (capped && di > 0 && 1 + depth_options_[static_cast<size_t>(di)] > fam.max_rows) --di;
@@ -1696,7 +1703,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       if (di < full_depth_option()) ensure_sched_batch_graph(family, di);
       ++fam.sched_hist[static_cast<size_t>(di)];
     }
-    if (!(schedule_ && model_->mtp_enabled()) && block_ && block_rows_budget_ > 0 && !depth_options_.empty()) {
+    if (!(schedule_ && spec_enabled()) && block_ && block_rows_budget_ > 0 && !depth_options_.empty()) {
       // The block drafter's rows budget: the family's static depth.
       di = block_depth_option(fam.requests);
       rows = 1 + depth_options_[static_cast<size_t>(di)];
@@ -1748,7 +1755,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
                                         /*batched=*/true, rows));
       committed += static_cast<int>(batches.back().size());
     }
-    if (schedule_ && model_->mtp_enabled())
+    if (schedule_ && spec_enabled())
       note_step_for_lambda(committed, rows * static_cast<int>(reqs.size()));
     return batches;
   }
@@ -2140,7 +2147,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   bool family_usable(size_t f) const {
     const BatchFamily& fam = families_[f];
     if (fam.max_rows == 0) return true;
-    return schedule_ && model_->mtp_enabled() && !depth_options_.empty() &&
+    return schedule_ && spec_enabled() && !depth_options_.empty() &&
            1 + depth_options_.front() <= fam.max_rows;
   }
   // The widest family that holds the full block.
@@ -2212,7 +2219,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
         glm_publish_seq(d_verdict_seq_ + req, h_verdict_seq_ + req,
                         model_->stream());
         model_->session_graph_capture_commit(
-            req, picker_->device_verdict(0));
+            req, picker_->device_verdict(0), /*rows=*/1);
       }
     };
     for (int parity = 0; parity < 2; ++parity)
@@ -2250,12 +2257,13 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     glm_publish_seq(d_verdict_seq_ + req, h_verdict_seq_ + req,
                     model_->stream());
     snapshot_verify_rows(req, rows, /*first_row=*/0);
-    model_->session_graph_capture_commit(req, picker_->device_verdict(0));
+    model_->session_graph_capture_commit(req, picker_->device_verdict(0), rows);
     if (block_) {
       // The block proposal: one recorded block forward off the verdict
       // writes the slot's next feed [next, drafts] and the drafts' mirror.
       if constexpr (requires { model_->session_graph_capture_block_draft(req, picker_->device_verdict(0)); })
         model_->session_graph_capture_block_draft(req, picker_->device_verdict(0));
+      record_confidence_publish(req, /*request=*/0);  // the walk's confidence for the next step's depth
       return;
     }
     model_->session_graph_capture_draft(req, picker_->device_verdict(0));
@@ -2306,7 +2314,13 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   void record_confidence_publish(int req, int request) {
     if (!schedule_) return;
     const float* src = nullptr;
-    if constexpr (Model::kVerifyConfidence) {
+    if (block_) {
+      // The block drafter: the selector's confidence the walk wrote at the
+      // slot's row (the batched walk writes slot q's at request q).
+      if constexpr (requires { model_->dflash2_confidence(); })
+        src = model_->dflash2_confidence() + static_cast<size_t>(req) * conf_rows_;
+      if (src == nullptr) throw std::logic_error("graph engine: the block drafter publishes no confidence");
+    } else if constexpr (Model::kVerifyConfidence) {
       src = model_->device_confidence() + static_cast<size_t>(req) * conf_rows_;
     } else {
       // The draft picks' outcomes (slots 1 .. depth) -> the logits.
@@ -2323,6 +2337,18 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   // replay of the slot is in flight, so the mirror is simply copied.
   void refresh_confidence_eagerly(int req) {
     if (!schedule_) return;
+    if (block_) {
+      // The eager block draft wrote the slot's confidence: copy it.
+      if constexpr (requires { model_->dflash2_confidence(); }) {
+        DGPP_CUDA_OK(cudaMemcpyAsync(
+            h_conf_ + static_cast<size_t>(req) * conf_rows_,
+            model_->dflash2_confidence() + static_cast<size_t>(req) * conf_rows_,
+            sizeof(float) * static_cast<size_t>(conf_rows_), cudaMemcpyDeviceToHost, model_->stream()));
+        DGPP_CUDA_OK(cudaStreamSynchronize(model_->stream()));
+        conf_stale_[static_cast<size_t>(req)] = false;
+        return;
+      }
+    }
     if constexpr (Model::kVerifyConfidence) {
       DGPP_CUDA_OK(cudaMemcpyAsync(
           h_conf_ + static_cast<size_t>(req) * conf_rows_,
@@ -2453,6 +2479,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       // the verdicts writes the slots' feeds and mirrors.
       if constexpr (requires { model_->session_graph_capture_block_draft_batch(picker_->device_verdict(0), k); })
         model_->session_graph_capture_block_draft_batch(picker_->device_verdict(0), k);
+      for (int q = 0; q < k; ++q) record_confidence_publish(q, q);  // slot q's walk wrote request q's row
       return;
     }
     model_->session_graph_capture_draft_batch(picker_->device_verdict(0));
@@ -2595,7 +2622,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
                                  [static_cast<size_t>(r.parity)];
     r.verdict_seq = ++verdict_seq_[static_cast<size_t>(
         r.batched ? batch_index(r.family) : r.req)];
-    if (schedule_ && model_->mtp_enabled()) {
+    if (schedule_ && spec_enabled()) {
       // Every MTP replay publishes the block confidence of the slots it
       // drafts for; the next scalar step of such a slot waits for it.
       if (r.batched) {
@@ -3205,7 +3232,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     // verifies at; the full block when scheduling is off.
     int di = -1;
     int rows = rows_per_request_;
-    if (schedule_ && model_->mtp_enabled()) {
+    if (schedule_ && spec_enabled()) {
       di = choose_depth_option(req);
       rows = 1 + depth_options_[static_cast<size_t>(di)];
       if (di < full_depth_option()) ensure_sched_graph(req, di);
@@ -3241,7 +3268,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     wait_verdict(inflight_.back());
     if (!pipeline_) drain();  // after the publish: the replay's gate waits on it
     std::vector<int32_t> out = collect_verdict(req, /*verdict_request=*/0, /*batched=*/false, rows);
-    if (schedule_ && model_->mtp_enabled()) note_step_for_lambda(static_cast<int>(out.size()), rows);
+    if (schedule_ && spec_enabled()) note_step_for_lambda(static_cast<int>(out.size()), rows);
     return out;
   }
 

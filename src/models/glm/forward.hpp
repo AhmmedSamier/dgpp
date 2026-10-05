@@ -555,7 +555,7 @@ class GlmDiagnosticModel : public PrefillReporting {
                                   bool device_positions,
                                   bool device_tokens = false, int feed_rows = 0);
   void session_graph_capture_commit(int req,
-                                    const PickVerdict* device_verdict);
+                                    const PickVerdict* device_verdict, int rows = 0);
   void session_graph_capture_draft(int req,
                                    const PickVerdict* verify_verdict);
   void session_graph_capture_next_tokens(int req,

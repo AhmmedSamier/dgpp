@@ -511,6 +511,154 @@ DGPP_TEST(scale_gemm_gemv_multi_is_bitwise_the_single_launches) {
   }
 }
 
+// The multi-problem fp8 GEMV at every decode row count 1..8 (the GDN in-
+// projections and the attention q|k|v at a verify block, scheduled 2 / 4 /
+// 6 / 8 rows): a row's bits are the 8-row launch's whatever the row count
+// — the 4-row chunks and the 1..3-row tail chunk share one chain. Real
+// widths: k = 5120, an fp8 problem of 10240 rows, one of 6144, two bf16
+// problems of 48.
+DGPP_TEST(scale_gemm_gemv_multi_rows_are_one_chain_through_8) {
+  const int k = 5120;
+  const int ns[4] = {10240, 6144, 48, 48};
+  Problem ps[4];
+  for (int i = 0; i < 4; ++i) ps[i] = make_problem(8, ns[i], k, 0x8E0 + i);
+  for (int i = 1; i < 4; ++i) ps[i].act = ps[0].act;
+  std::vector<uint16_t> bf16w[2];
+  Rng rng(0x51);
+  for (int i = 0; i < 2; ++i) {
+    bf16w[i].resize(static_cast<size_t>(48) * k);
+    for (auto& v : bf16w[i]) v = dgpp::float_to_bf16_bits(static_cast<float>(rng.unit()));
+  }
+  uint16_t* act = nullptr;
+  uint8_t* w[2] = {};
+  float* sc[2] = {};
+  uint16_t* wb[2] = {};
+  uint16_t* out[4] = {};
+  DGPP_CUDA_OK(cudaMallocManaged(&act, ps[0].act.size() * 2));
+  std::memcpy(act, ps[0].act.data(), ps[0].act.size() * 2);
+  dgpp::Fp8GemvProblem probs[4];
+  for (int i = 0; i < 2; ++i) {
+    DGPP_CUDA_OK(cudaMallocManaged(&w[i], ps[i].payload.size()));
+    DGPP_CUDA_OK(cudaMallocManaged(&sc[i], ps[i].scales.size() * 4));
+    std::memcpy(w[i], ps[i].payload.data(), ps[i].payload.size());
+    std::memcpy(sc[i], ps[i].scales.data(), ps[i].scales.size() * 4);
+    probs[i].payload = w[i];
+    probs[i].scales = sc[i];
+    probs[i].n = ns[i];
+    DGPP_CUDA_OK(cudaMallocManaged(&wb[i], bf16w[i].size() * 2));
+    std::memcpy(wb[i], bf16w[i].data(), bf16w[i].size() * 2);
+    probs[2 + i].bf16_weight = wb[i];
+    probs[2 + i].n = 48;
+  }
+  for (int i = 0; i < 4; ++i) {
+    DGPP_CUDA_OK(cudaMallocManaged(&out[i], static_cast<size_t>(8) * ns[i] * 2));
+    probs[i].out = out[i];
+  }
+  std::vector<uint16_t> full[4];
+  dgpp::launch_scale_gemv_multi_bf16(probs, 4, act, static_cast<size_t>(k), 8, k, nullptr);
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  for (int i = 0; i < 4; ++i) full[i].assign(out[i], out[i] + static_cast<size_t>(8) * ns[i]);
+  for (const int rows : {1, 2, 3, 4, 5, 6, 7}) {
+    for (int i = 0; i < 4; ++i) std::memset(out[i], 0, static_cast<size_t>(8) * ns[i] * 2);
+    dgpp::launch_scale_gemv_multi_bf16(probs, 4, act, static_cast<size_t>(k), rows, k, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    for (int i = 0; i < 4; ++i)
+      require(std::memcmp(out[i], full[i].data(), static_cast<size_t>(rows) * ns[i] * 2) == 0,
+              ("multi GEMV: problem " + std::to_string(i) + "'s rows differ between " + std::to_string(rows) +
+               " and 8 rows").c_str());
+  }
+  // The bf16 problems through the bf16 row-group launch (the GDN a / b
+  // above four rows): bitwise the fp8 multi launch's bf16 branch at every
+  // row count, so a / b read the same at 4 rows (inside the fp8 launch)
+  // and at 5..8 (their own).
+  for (const int rows : {1, 2, 3, 4, 5, 6, 7, 8}) {
+    for (int i = 2; i < 4; ++i) std::memset(out[i], 0, static_cast<size_t>(8) * ns[i] * 2);
+    dgpp::Bf16GemvProblem q[2];
+    for (int i = 0; i < 2; ++i) {
+      q[i].act = act; q[i].act_row_stride = static_cast<size_t>(k); q[i].weight = wb[i]; q[i].out = out[2 + i]; q[i].n = 48;
+    }
+    dgpp::launch_bf16_gemv_multi_rows(q, 2, /*out_f32=*/false, rows, k, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    for (int i = 2; i < 4; ++i)
+      require(std::memcmp(out[i], full[i].data(), static_cast<size_t>(rows) * ns[i] * 2) == 0,
+              ("bf16 row-group GEMV: problem " + std::to_string(i) + " differs from the fp8 multi launch's bf16 branch at " +
+               std::to_string(rows) + " rows").c_str());
+  }
+  for (int i = 0; i < 2; ++i) { cudaFree(w[i]); cudaFree(sc[i]); cudaFree(wb[i]); }
+  for (int i = 0; i < 4; ++i) cudaFree(out[i]);
+  cudaFree(act);
+  std::printf("[ OK ] the multi-problem GEMV is one chain at 1..8 rows (k = 5120, fp8 10240 / 6144, bf16 48 / 48)\n");
+}
+
+// The GDN in-projection dispatch as the model runs it, at the tiny fixture's
+// shapes (k = 256; fp8 qkv 2048 rows, z 1024; bf16 a / b 8 rows): rows <= 4
+// take a / b INSIDE the fp8 multi launch, rows 5..8 the row-group bf16
+// launch beside a two-problem fp8 launch — the two forms must agree row for
+// row (qwen35_forward_test's rows-invariance found rows 2..4 differing from
+// 5..8 in the first GDN layer, 2026-10-05).
+DGPP_TEST(scale_gemm_gdn_in_projection_dispatch_is_one_chain_1_to_8) {
+  for (const int k : {256, 1024, 5120}) {
+    const int nf[2] = {2048, 1024};
+    Problem ps[2];
+    for (int i = 0; i < 2; ++i) ps[i] = make_problem(8, nf[i], k, 0x6D0 + i + k);
+    ps[1].act = ps[0].act;
+    Rng rng(0x77 + k);
+    std::vector<uint16_t> bw[2];
+    for (int i = 0; i < 2; ++i) {
+      bw[i].resize(static_cast<size_t>(8) * k);
+      for (auto& v : bw[i]) v = dgpp::float_to_bf16_bits(static_cast<float>(rng.unit()));
+    }
+    uint16_t* act = nullptr; uint8_t* w[2] = {}; float* sc[2] = {}; uint16_t* wb[2] = {}; uint16_t* out[4] = {};
+    DGPP_CUDA_OK(cudaMallocManaged(&act, ps[0].act.size() * 2));
+    std::memcpy(act, ps[0].act.data(), ps[0].act.size() * 2);
+    dgpp::Fp8GemvProblem probs[4];
+    for (int i = 0; i < 2; ++i) {
+      DGPP_CUDA_OK(cudaMallocManaged(&w[i], ps[i].payload.size()));
+      DGPP_CUDA_OK(cudaMallocManaged(&sc[i], ps[i].scales.size() * 4));
+      std::memcpy(w[i], ps[i].payload.data(), ps[i].payload.size());
+      std::memcpy(sc[i], ps[i].scales.data(), ps[i].scales.size() * 4);
+      probs[i].payload = w[i]; probs[i].scales = sc[i]; probs[i].n = nf[i];
+      DGPP_CUDA_OK(cudaMallocManaged(&wb[i], bw[i].size() * 2));
+      std::memcpy(wb[i], bw[i].data(), bw[i].size() * 2);
+      probs[2 + i].bf16_weight = wb[i]; probs[2 + i].n = 8;
+    }
+    const int ns[4] = {nf[0], nf[1], 8, 8};
+    for (int i = 0; i < 4; ++i) { DGPP_CUDA_OK(cudaMallocManaged(&out[i], static_cast<size_t>(8) * ns[i] * 2)); probs[i].out = out[i]; }
+    // The model's dispatch at `rows`.
+    const auto run = [&](int rows) {
+      for (int i = 0; i < 4; ++i) std::memset(out[i], 0, static_cast<size_t>(8) * ns[i] * 2);
+      if (rows <= 4) {
+        dgpp::launch_scale_gemv_multi_bf16(probs, 4, act, static_cast<size_t>(k), rows, k, nullptr);
+      } else {
+        dgpp::launch_scale_gemv_multi_bf16(probs, 2, act, static_cast<size_t>(k), rows, k, nullptr);
+        dgpp::Bf16GemvProblem q[2];
+        for (int i = 0; i < 2; ++i) { q[i].act = act; q[i].act_row_stride = static_cast<size_t>(k); q[i].weight = wb[i]; q[i].out = out[2 + i]; q[i].n = 8; }
+        dgpp::launch_bf16_gemv_multi_rows(q, 2, /*out_f32=*/false, rows, k, nullptr);
+      }
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+    };
+    run(8);
+    std::vector<uint16_t> full[4];
+    for (int i = 0; i < 4; ++i) full[i].assign(out[i], out[i] + static_cast<size_t>(8) * ns[i]);
+    for (const int rows : {1, 2, 3, 4, 5, 6, 7}) {
+      run(rows);
+      for (int i = 0; i < 4; ++i) {
+        int bad = -1;
+        for (int r = 0; r < rows && bad < 0; ++r)
+          if (std::memcmp(out[i] + static_cast<size_t>(r) * ns[i], full[i].data() + static_cast<size_t>(r) * ns[i],
+                          static_cast<size_t>(ns[i]) * 2) != 0)
+            bad = r;
+        require(bad < 0, ("GDN in-projection dispatch (k=" + std::to_string(k) + "): problem " + std::to_string(i) +
+                          " row " + std::to_string(bad) + " differs between " + std::to_string(rows) + " and 8 rows").c_str());
+      }
+    }
+    for (int i = 0; i < 2; ++i) { cudaFree(w[i]); cudaFree(sc[i]); cudaFree(wb[i]); }
+    for (int i = 0; i < 4; ++i) cudaFree(out[i]);
+    cudaFree(act);
+    std::printf("[ OK ] the GDN in-projection dispatch is one chain at 1..8 rows (k = %d)\n", k);
+  }
+}
+
 DGPP_TEST(scale_gemm_gemv_multi_takes_bf16_problems_bitwise_the_bf16_launch) {
   const int k = 1008;
   const int ns[4] = {100, 24, 40, 12};  // two fp8 problems, two bf16 ones
@@ -642,6 +790,69 @@ DGPP_TEST(scale_gemm_gemv_rows_are_independent_of_row_count) {
             "chunked fp8/f32 row bits independent of m");
   }
   std::printf("[ OK ] gemv rows independent of m through m=8 chunks\n");
+}
+
+// The streaming MMA form at every decode row count (mma_from_rows = 1: the
+// head and the fp8 projections since 2026-10-05): a row's bits are the
+// same whatever the row count rides in the launch, 1..64 — a request's
+// logits are the same alone, in a verify block of any depth and in a
+// batch. (Asked with mma_from_rows = 5 the rows below five take the GEMV
+// chain, a different chain by design: that was this test's first form.)
+DGPP_TEST(scale_gemm_streaming_mma_row_bits_vs_row_count) {
+  const Problem p64 = make_problem(64, 1024, 5120, 0x5E5E);
+  const std::vector<float> got64 = run_kernel_f32(p64, /*mma_from_rows=*/1);
+  const std::vector<float> again = run_kernel_f32(p64, /*mma_from_rows=*/1);
+  require(std::memcmp(got64.data(), again.data(), got64.size() * sizeof(float)) == 0,
+          "streaming mma: run-to-run bitwise at m=64");
+  for (const float v : got64) require(std::isfinite(v), "streaming mma: finite logits");
+  std::vector<int> failed_m;
+  for (const int m : {1, 2, 3, 4, 5, 8, 15, 16, 17, 31, 32, 33, 48, 63}) {
+    Problem pm;
+    pm.m = m;
+    pm.n = p64.n;
+    pm.k = p64.k;
+    pm.act.assign(p64.act.begin(), p64.act.begin() + static_cast<long>(m) * p64.k);
+    pm.payload = p64.payload;
+    pm.scales = p64.scales;
+    const std::vector<float> gotm = run_kernel_f32(pm, /*mma_from_rows=*/1);
+    int differing = -1;
+    size_t ndiff = 0;
+    double maxrel = 0.0;
+    for (int r = 0; r < m; ++r)
+      for (int c = 0; c < pm.n; ++c) {
+        const float a = gotm[static_cast<size_t>(r) * pm.n + c], b = got64[static_cast<size_t>(r) * p64.n + c];
+        if (a != b) {
+          if (differing < 0) differing = r;
+          ++ndiff;
+          maxrel = std::max(maxrel, static_cast<double>(std::abs(a - b)) / std::max(std::abs(b), 1e-6f));
+        }
+      }
+    std::printf("[ .. ] streaming mma m=%d vs m=64: %s (%zu of %zu elements differ, first row %d, max rel %.3g)\n", m,
+                differing < 0 ? "bitwise" : "DIFFERENT", ndiff, gotm.size(), differing, maxrel);
+    if (differing >= 0) failed_m.push_back(m);
+    // Below five rows the form used to hand off to the GEMV path: the
+    // streaming form must hold the head's FP64 error budget there too
+    // (scale_gemm_f32_fp8_head_numerics' 3e-5 of the products' magnitude).
+    if (m <= 4) {
+      const int scale_cols = (pm.k + 127) / 128;
+      for (int row = 0; row < m; ++row)
+        for (int col = 0; col < pm.n; ++col) {
+          double reference = 0, magnitude = 0;
+          for (int kk = 0; kk < pm.k; ++kk) {
+            const float decoded = dgpp::fp8_e4m3_bits_to_float(pm.payload[static_cast<size_t>(col) * pm.k + kk]);
+            const float scale = pm.scales[(col / 128) * scale_cols + kk / 128];
+            const double weight = bf16_to_float(dgpp::float_to_bf16_bits(decoded * scale));
+            const double product = bf16_to_float(pm.act[static_cast<size_t>(row) * pm.k + kk]) * weight;
+            reference += product;
+            magnitude += std::abs(product);
+          }
+          const float got = gotm[static_cast<size_t>(row) * pm.n + col];
+          require(std::abs(got - reference) <= 3e-5 * magnitude,
+                  "streaming mma at m <= 4: outside the head's FP64 error budget");
+        }
+    }
+  }
+  require(failed_m.empty(), "streaming mma: a row's bits must not depend on the row count: the decode head relies on it");
 }
 
 DGPP_TEST(scale_gemm_gemv_path_propagates_nan_exactly) {

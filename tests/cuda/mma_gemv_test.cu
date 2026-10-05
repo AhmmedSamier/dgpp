@@ -393,6 +393,42 @@ DGPP_TEST(mma_gemv_cold_timing_beside_the_gemv_cores) {
   cudaFree(outf); cudaFree(act); cudaFree(out);
 }
 
+// One chain at every decode row count (2026-10-05): with a workspace the
+// split ranges are 256-k units (a window boundary of every tile form) and
+// the 33..64-row form splits like the 1..32-row forms, so a request's rows
+// in an eight-slot batch are bitwise its rows alone — at the four-node
+// gate / up site ([4352 x 5120]: 68 eight-warp blocks, split 2 on a 48-SM
+// part), a narrow attention site and the hyperconnection down.
+DGPP_TEST(mma_gemv_split_k_rows_are_one_chain_through_64) {
+  void* ws = nullptr; const size_t ws_bytes = 8u << 20;
+  DGPP_CUDA_OK(cudaMalloc(&ws, ws_bytes));
+  for (auto [n, k] : std::vector<std::pair<int, int>>{{4352, 5120}, {576, 6144}, {320, 10240}}) {
+    const Problem p = make(64, n, k, 7, 7, 0xC0FFEEull + n * 7 + k);
+    Dev d(p);
+    dgpp::launch_mma_gemv_fp8_f32(d.act, p.k, d.w8, d.scales, d.outf, 64, p.n, p.k, 0, p.rs, p.cs, nullptr, ws, ws_bytes);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    const std::vector<float> full = fetch_f(d.outf, size_t(64) * p.n);
+    Problem head = p; head.m = 4; head.act.resize(size_t(4) * p.k);  // the oracle over the first rows
+    const double err = max_rel_err(head, full, [&](int r, int c) { return wval8(p, r, c); });
+    require(err < 2e-3, "split-K at 64 rows [" + std::to_string(n) + " x " + std::to_string(k) + "] vs oracle: " + std::to_string(err));
+    dgpp::launch_mma_gemv_fp8_f32(d.act, p.k, d.w8, d.scales, d.outf, 64, p.n, p.k, 0, p.rs, p.cs, nullptr, nullptr, 0);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    const std::vector<float> unsplit = fetch_f(d.outf, size_t(64) * p.n);
+    const bool split_taken = std::memcmp(full.data(), unsplit.data(), full.size() * 4) != 0;
+    for (const int m : {1, 2, 4, 5, 8, 16, 17, 32, 33, 48, 63}) {
+      dgpp::launch_mma_gemv_fp8_f32(d.act, p.k, d.w8, d.scales, d.outf, m, p.n, p.k, 0, p.rs, p.cs, nullptr, ws, ws_bytes);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      const std::vector<float> got = fetch_f(d.outf, size_t(m) * p.n);
+      require(std::memcmp(got.data(), full.data(), got.size() * 4) == 0,
+              "split-K [" + std::to_string(n) + " x " + std::to_string(k) + "]: rows differ between m = " +
+                  std::to_string(m) + " and m = 64");
+    }
+    std::printf("[ OK ] mma_gemv [%d x %d] with workspace: one chain at m = 1..64 (oracle %.3e, the split %s at this shape)\n",
+                n, k, err, split_taken ? "taken" : "not taken");
+  }
+  DGPP_CUDA_OK(cudaFree(ws));
+}
+
 // Split-K at the small-n sites (2026-09-21): with a workspace the decode
 // forms split the k range across blocks. Against the oracle, deterministic
 // across launches, the bf16 epilogue bf16(f32), a row's result the same at

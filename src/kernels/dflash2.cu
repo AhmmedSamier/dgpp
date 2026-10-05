@@ -354,48 +354,116 @@ __device__ __forceinline__ bool better_cand(const Cand& a, const Cand& b) {
   return a.score > b.score || (a.score == b.score && a.id < b.id);
 }
 
-// Thread-local top-K lists (register insertion; one tail compare rejects
-// almost everything once warm) merged by thread 0's walk over the block's
-// blockDim * K candidates. Descending, ties to the lower id.
+constexpr int kTopkThreads = 128;
+constexpr int kTopkMaxChunks = 32;
+constexpr int64_t kTopkChunkSpan = 8192;  // vocabulary entries a block (64 a thread)
+
+// Fold `count` descending K-lists (a power of two, kTopkThreads at most;
+// list i's slot j at X[j * kTopkThreads + i]) into list 0, halving the
+// count a round: thread t merges lists 2t and 2t+1 into list t of the other
+// buffer (two-pointer, K steps, ties to the lower id — ids are distinct, so
+// the order is total and the result is the first K of the union's sort
+// however the lists split the row). Every index is a shared-memory one:
+// no register array is indexed at run time (such arrays spill to local
+// memory, which is what made the first chunked form 0.53 ms). Returns the
+// buffer that holds the result.
 template <int K>
-__global__ void topk_kernel(const float* __restrict__ logits, int32_t* __restrict__ ids,
-                            float* __restrict__ scores, int64_t vocab) {
-  const int row = blockIdx.y;
-  const float* lg = logits + row * vocab;
-  Cand best[K];
-  for (int j = 0; j < K; ++j) best[j] = {-INFINITY, 0x7fffffff};
-  for (int64_t v = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; v < vocab;
-       v += static_cast<int64_t>(gridDim.x) * blockDim.x) {
+__device__ __forceinline__ Cand* block_fold_lists(Cand* X, Cand* Y, int count) {
+  constexpr int S = kTopkThreads;
+  for (int n = count >> 1; n >= 1; n >>= 1) {
+    const int t = threadIdx.x;
+    if (t < n) {
+      int i = 0, j = 0;
+      for (int o = 0; o < K; ++o) {
+        const Cand a = X[i * S + 2 * t], b = X[j * S + 2 * t + 1];
+        if (better_cand(a, b)) {
+          Y[o * S + t] = a;
+          ++i;
+        } else {
+          Y[o * S + t] = b;
+          ++j;
+        }
+      }
+    }
+    __syncthreads();
+    Cand* tmp = X;
+    X = Y;
+    Y = tmp;
+  }
+  return X;
+}
+
+// Pass 1: block (chunk, row) scans its span of the row — each thread keeps
+// a descending K-list in shared memory (one register tail compare rejects
+// almost everything once warm) — then folds the block's lists; the chunk's
+// K go to the partials, or straight to the output when the row is one
+// chunk. The one-block form read a 248K row from one SM and thread 0
+// walked 4096 candidates: 0.63 ms a step for 7 MB.
+template <int K>
+__global__ void __launch_bounds__(kTopkThreads)
+    topk_chunk_kernel(const float* __restrict__ logits, int64_t vocab, int chunks, Cand* __restrict__ partial,
+                      int32_t* __restrict__ ids, float* __restrict__ scores) {
+  constexpr int S = kTopkThreads;
+  __shared__ Cand sl[K * S];
+  __shared__ Cand ml[K * S];
+  const int row = blockIdx.y, chunk = blockIdx.x, t = threadIdx.x;
+  const float* lg = logits + static_cast<int64_t>(row) * vocab;
+  const int64_t span = (vocab + chunks - 1) / chunks;
+  const int64_t v0 = static_cast<int64_t>(chunk) * span;
+  const int64_t v1 = min(vocab, v0 + span);
+  for (int j = 0; j < K; ++j) sl[j * S + t] = Cand{-INFINITY, 0x7fffffff};
+  Cand tail = sl[(K - 1) * S + t];
+  for (int64_t v = v0 + t; v < v1; v += S) {
     const Cand c{lg[v], static_cast<int32_t>(v)};
-    if (!better_cand(c, best[K - 1])) continue;
+    if (!better_cand(c, tail)) continue;
     int j = K - 1;
-    while (j > 0 && better_cand(c, best[j - 1])) {
-      best[j] = best[j - 1];
+    while (j > 0 && better_cand(c, sl[(j - 1) * S + t])) {
+      sl[j * S + t] = sl[(j - 1) * S + t];
       --j;
     }
-    best[j] = c;
+    sl[j * S + t] = c;
+    tail = sl[(K - 1) * S + t];
   }
-  __shared__ Cand merge[256 * K];
-  for (int j = 0; j < K; ++j) merge[threadIdx.x * K + j] = best[j];
   __syncthreads();
-  if (threadIdx.x != 0) return;
-  Cand top[K];
-  for (int j = 0; j < K; ++j) top[j] = {-INFINITY, 0x7fffffff};
-  const int total = blockDim.x * K;
-  for (int i = 0; i < total; ++i) {
-    const Cand c = merge[i];
-    if (!better_cand(c, top[K - 1])) continue;
-    int j = K - 1;
-    while (j > 0 && better_cand(c, top[j - 1])) {
-      top[j] = top[j - 1];
-      --j;
+  const Cand* res = block_fold_lists<K>(sl, ml, S);
+  if (t < K) {
+    const Cand c = res[t * S];
+    if (chunks == 1) {
+      ids[static_cast<int64_t>(row) * K + t] = c.id;
+      scores[static_cast<int64_t>(row) * K + t] = c.score;
+    } else {
+      partial[(static_cast<int64_t>(row) * chunks + chunk) * K + t] = c;
     }
-    top[j] = c;
   }
-  for (int j = 0; j < K; ++j) {
-    ids[row * K + j] = top[j].id;
-    scores[row * K + j] = top[j].score;
+}
+
+// Pass 2: one block a row folds the chunks' lists (sentinel lists past
+// `chunks`, kTopkMaxChunks in all) and writes the row's K.
+template <int K>
+__global__ void __launch_bounds__(kTopkThreads)
+    topk_merge_kernel(const Cand* __restrict__ partial, int chunks, int32_t* __restrict__ ids,
+                      float* __restrict__ scores) {
+  constexpr int S = kTopkThreads;
+  __shared__ Cand sl[K * S];
+  __shared__ Cand ml[K * S];
+  const int row = blockIdx.x, t = threadIdx.x;
+  if (t < kTopkMaxChunks) {
+    const bool have = t < chunks;
+    for (int j = 0; j < K; ++j)
+      sl[j * S + t] = have ? partial[(static_cast<int64_t>(row) * chunks + t) * K + j] : Cand{-INFINITY, 0x7fffffff};
   }
+  __syncthreads();
+  const Cand* res = block_fold_lists<K>(sl, ml, kTopkMaxChunks);
+  if (t < K) {
+    const Cand c = res[t * S];
+    ids[static_cast<int64_t>(row) * K + t] = c.id;
+    scores[static_cast<int64_t>(row) * K + t] = c.score;
+  }
+}
+
+int topk_chunks(int64_t vocab) {
+  const int64_t c = (vocab + kTopkChunkSpan - 1) / kTopkChunkSpan;
+  return static_cast<int>(c < 1 ? 1 : (c > kTopkMaxChunks ? kTopkMaxChunks : c));
 }
 
 // ---- the selector -----------------------------------------------------------------
@@ -421,7 +489,7 @@ __global__ void selector_kernel(const int32_t* __restrict__ ids, const float* __
                                 const int64_t* __restrict__ anchor_tok, int32_t* __restrict__ tokens,
                                 int steps, int k, int rank, const int64_t* __restrict__ pos,
                                 const SampleSpec* __restrict__ spec, DraftProposal* __restrict__ proposal,
-                                DraftProposal* __restrict__ proposal_host) {
+                                DraftProposal* __restrict__ proposal_host, float* __restrict__ conf) {
   extern __shared__ float sm[];
   const int32_t anchor = static_cast<int32_t>(*anchor_tok);
   float* h = sm;                  // [rank]
@@ -459,13 +527,13 @@ __global__ void selector_kernel(const int32_t* __restrict__ ids, const float* __
       int best = 0;
       for (int c = 1; c < k; ++c)
         if (sc[prev * k + c] > sc[prev * k + best]) best = c;
+      float den = 0.0f;  // the sampled step's softmax denominator (the confidence reads it too)
       if (sampled) {
         // softmax(scores / T) over the step's k candidates (fp32, the max
         // subtracted), the inverse-CDF walk in fp64 on the draft stream's
         // uniform keyed by the draft's position (kSampleDraftSeedMix ^ the
         // step, as the chained MTP draft keys its draws).
         const float mx = __fdiv_rn(sc[prev * k + best], T);
-        float den = 0.0f;
         for (int c = 0; c < k; ++c) {
           ex[c] = expf(__fsub_rn(__fdiv_rn(sc[prev * k + c], T), mx));
           den = __fadd_rn(den, ex[c]);
@@ -535,6 +603,21 @@ __global__ void selector_kernel(const int32_t* __restrict__ ids, const float* __
         // The argmax is a point mass: no proposal describes it.
         if (proposal != nullptr) proposal[l].n = 0;
         if (proposal_host != nullptr) proposal_host[l].n = 0;
+      }
+      if (conf != nullptr) {
+        // The chosen candidate's softmax mass at the walk's temperature
+        // (the drawn walk's ex[] stand; the argmax walk's at 1), as a logit.
+        float q;
+        if (sampled) {
+          q = __fdiv_rn(ex[best], den);
+        } else {
+          const float mx = sc[prev * k + best];
+          float d = 0.0f;
+          for (int c = 0; c < k; ++c) d = __fadd_rn(d, expf(__fsub_rn(sc[prev * k + c], mx)));
+          q = __fdiv_rn(1.0f, d);
+        }
+        q = fminf(fmaxf(q, 1e-6f), 1.0f - 1e-6f);
+        conf[l] = fminf(fmaxf(logf(q / (1.0f - q)), -30.0f), 30.0f);
       }
       tokens[l] = lid[best];
       prev = best;
@@ -791,23 +874,36 @@ void dflash2_block_attn_split(const uint16_t* q, int64_t q_row_stride, const uin
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
+size_t dflash2_topk_ws_bytes(int64_t vocab, int rows, int k) {
+  return static_cast<size_t>(rows < 1 ? 1 : rows) * static_cast<size_t>(topk_chunks(vocab)) *
+         static_cast<size_t>(k) * sizeof(Cand);
+}
+
 void dflash2_topk_f32(const float* logits, int32_t* ids, float* scores, int64_t vocab, int rows,
-                      int k, cudaStream_t stream) {
+                      int k, cudaStream_t stream, void* ws, size_t ws_bytes) {
   if (rows <= 0) return;
   if (k != 16) throw std::invalid_argument("dflash2_topk: only k = 16 is implemented");
-  // ONE block per row: every thread strides the vocab into a register
-  // top-K and the block's lists merge in shared memory (several blocks
-  // would race on the row's output with partial views).
-  const dim3 grid(1, static_cast<unsigned>(rows));
-  topk_kernel<16><<<grid, 256, 0, stream>>>(logits, ids, scores, vocab);
+  // Each row in chunks of kTopkChunkSpan over as many blocks (32 at most),
+  // the chunks' lists folded by one block a row.
+  const int chunks = topk_chunks(vocab);
+  if (chunks > 1 && (ws == nullptr || ws_bytes < dflash2_topk_ws_bytes(vocab, rows, k)))
+    throw std::invalid_argument("dflash2_topk: the partials workspace is too small (dflash2_topk_ws_bytes)");
+  const dim3 grid(static_cast<unsigned>(chunks), static_cast<unsigned>(rows));
+  topk_chunk_kernel<16><<<grid, kTopkThreads, 0, stream>>>(logits, vocab, chunks, static_cast<Cand*>(ws), ids,
+                                                           scores);
   DGPP_CUDA_OK(cudaGetLastError());
+  if (chunks > 1) {
+    topk_merge_kernel<16><<<static_cast<unsigned>(rows), kTopkThreads, 0, stream>>>(
+        static_cast<const Cand*>(ws), chunks, ids, scores);
+    DGPP_CUDA_OK(cudaGetLastError());
+  }
 }
 
 void dflash2_selector_walk(const int32_t* ids, const float* unary, const float* hidden,
                            const uint16_t* pred_cb, const uint16_t* succ_cb, const int64_t* anchor,
                            int32_t* tokens, int steps, int k, int rank, cudaStream_t stream,
                            const int64_t* pos, const SampleSpec* spec, DraftProposal* proposal,
-                           DraftProposal* proposal_host) {
+                           DraftProposal* proposal_host, float* conf) {
   if (steps <= 0) return;
   if (k < 2 || rank <= 0 || anchor == nullptr) throw std::invalid_argument("dflash2_selector_walk: k/rank/anchor");
   if (spec != nullptr && k > kSampleProposalMax)
@@ -818,7 +914,7 @@ void dflash2_selector_walk(const int32_t* ids, const float* unary, const float* 
   if (smem > 47u * 1024)
     throw std::invalid_argument("dflash2_selector_walk: shared memory over the static limit");
   selector_kernel<<<1, 256, smem, stream>>>(ids, unary, hidden, pred_cb, succ_cb, anchor, tokens,
-                                            steps, k, rank, pos, spec, proposal, proposal_host);
+                                            steps, k, rank, pos, spec, proposal, proposal_host, conf);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

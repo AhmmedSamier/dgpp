@@ -82,7 +82,8 @@ struct DFlash2Config {
 struct DFlash2LayerWeights {
   const uint16_t* input_norm = nullptr;   // [H]
   const uint16_t* post_norm = nullptr;    // [H]
-  const uint16_t* qkv = nullptr;          // [QW + 2*KW, H] q|k|v rows stacked
+  const uint16_t* qkv = nullptr;          // [QW + 2*KW, H] q|k|v rows stacked (null under fp8)
+  const uint16_t* kv_rows = nullptr;      // [2*KW, H] the k|v rows: a view into qkv, or their own bf16 slot under fp8 (the context features' GEMM reads bf16)
   const uint16_t* o = nullptr;            // [H, QW]
   const uint16_t* gate = nullptr;         // [I, H]
   const uint16_t* up = nullptr;           // [I, H]
@@ -93,6 +94,17 @@ struct DFlash2LayerWeights {
   const uint16_t* attn_conv_kp = nullptr;     // [2*taps*groups, H]
   const uint16_t* mlp_conv_base = nullptr;    // [2 sides][taps][H]
   const uint16_t* mlp_conv_kp = nullptr;      // [2*taps*groups, H]
+  // engine.dflash_weights fp8 (2026-10-05): the five block matrices as
+  // block-128 E4M3 payloads with fp32 scales (kernels/mma_gemv's decode
+  // form); no bf16 copy of the five is kept — only the k|v rows (kv_rows),
+  // which the feature path's GEMM reads.
+  // Null without the recipe. Lossy for the PROPOSALS only (the target's
+  // verify is exact whatever the drafter proposes).
+  const uint8_t* qkv_fp8 = nullptr;   const float* qkv_scales = nullptr;
+  const uint8_t* o_fp8 = nullptr;     const float* o_scales = nullptr;
+  const uint8_t* gate_fp8 = nullptr;  const float* gate_scales = nullptr;
+  const uint8_t* up_fp8 = nullptr;    const float* up_scales = nullptr;
+  const uint8_t* down_fp8 = nullptr;  const float* down_scales = nullptr;
 };
 
 struct DFlash2Weights {
@@ -105,6 +117,8 @@ struct DFlash2Weights {
   const uint16_t* hidden_projection = nullptr;  // [rank, H]
   void* arena = nullptr;
   size_t bytes = 0;
+  void* fp8_arena = nullptr;  // the fp8 payloads + scales (engine.dflash_weights fp8)
+  size_t fp8_bytes = 0;
   ~DFlash2Weights();
   DFlash2Weights() = default;
   DFlash2Weights(const DFlash2Weights&) = delete;
@@ -112,13 +126,17 @@ struct DFlash2Weights {
   DFlash2Weights(DFlash2Weights&& o) noexcept
       : layers(std::move(o.layers)), fc(o.fc), hidden_norm(o.hidden_norm), norm(o.norm),
         pred_codebook(o.pred_codebook), succ_codebook(o.succ_codebook),
-        hidden_projection(o.hidden_projection), arena(o.arena), bytes(o.bytes) {
+        hidden_projection(o.hidden_projection), arena(o.arena), bytes(o.bytes),
+        fp8_arena(o.fp8_arena), fp8_bytes(o.fp8_bytes) {
     o.arena = nullptr;
     o.bytes = 0;
+    o.fp8_arena = nullptr;
+    o.fp8_bytes = 0;
   }
   DFlash2Weights& operator=(DFlash2Weights&& o) noexcept {
     if (this != &o) {
       cudaFree(arena);
+      cudaFree(fp8_arena);
       layers = std::move(o.layers);
       fc = o.fc;
       hidden_norm = o.hidden_norm;
@@ -128,8 +146,12 @@ struct DFlash2Weights {
       hidden_projection = o.hidden_projection;
       arena = o.arena;
       bytes = o.bytes;
+      fp8_arena = o.fp8_arena;
+      fp8_bytes = o.fp8_bytes;
       o.arena = nullptr;
       o.bytes = 0;
+      o.fp8_arena = nullptr;
+      o.fp8_bytes = 0;
     }
     return *this;
   }
@@ -140,8 +162,8 @@ struct DFlash2Weights {
 // `rank` of `world`'s slices of the sharded matrices (cfg.tp_divisible).
 // The caller's stream orders the uploads.
 DFlash2Weights load_dflash2_weights(const DFlash2Config& cfg, const std::string& dir,
-                                    cudaStream_t stream, int rank = 0, int world = 1);
+                                    cudaStream_t stream, int rank = 0, int world = 1, bool fp8 = false);
 // The arena size load_dflash2_weights allocates (the memory plan's line).
-size_t dflash2_weights_bytes(const DFlash2Config& cfg, int world = 1);
+size_t dflash2_weights_bytes(const DFlash2Config& cfg, int world = 1, bool fp8 = false);
 
 }  // namespace dgpp

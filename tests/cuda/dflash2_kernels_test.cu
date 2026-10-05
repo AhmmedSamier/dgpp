@@ -140,36 +140,64 @@ DGPP_TEST(dflash2_norm_rope_matches_the_reference) {
 DGPP_TEST(dflash2_topk_picks_the_sorted_candidates) {
   cudaStream_t s = test_stream();
   const int rows = 3, k = 16;
-  const int64_t V = 10007;
-  std::mt19937 rng(7);
-  std::vector<float> lg(static_cast<size_t>(rows) * V);
-  for (auto& v : lg) v = std::uniform_real_distribution<float>(-8.0f, 8.0f)(rng);
-  // Two forced ties at the very top of row 1.
-  lg[V + 5] = 100.0f;
-  lg[V + 9] = 100.0f;
-  DevBuf dl(lg.size() * 4), did(rows * k * 4), dsc(rows * k * 4);
-  dl.upload(lg.data(), lg.size() * 4);
-  dgpp::dflash2_topk_f32(cf32(dl), i32(did), f32(dsc), V, rows, k, s);
-  DGPP_CUDA_OK(cudaStreamSynchronize(s));
-  std::vector<int32_t> ids(rows * k);
-  std::vector<float> sc(rows * k);
-  did.download(ids.data(), ids.size() * 4);
-  dsc.download(sc.data(), sc.size() * 4);
-  for (int r = 0; r < rows; ++r) {
-    std::vector<std::pair<float, int32_t>> all;
-    for (int64_t v = 0; v < V; ++v) all.push_back({lg[r * V + v], static_cast<int32_t>(v)});
-    std::sort(all.begin(), all.end(), [](const auto& a, const auto& b) {
-      return a.first > b.first || (a.first == b.first && a.second < b.second);
-    });
-    for (int j = 0; j < k; ++j) {
-      if (sc[r * k + j] != all[j].first)
-        throw std::runtime_error("topk score row " + std::to_string(r) + " slot " + std::to_string(j) +
-                                 ": got " + std::to_string(sc[r * k + j]) + " want " +
-                                 std::to_string(all[j].first));
-      if (ids[r * k + j] != all[j].second)
-        throw std::runtime_error("topk id row " + std::to_string(r) + " slot " + std::to_string(j) +
-                                 ": got " + std::to_string(ids[r * k + j]) + " want " +
-                                 std::to_string(all[j].second));
+  // One chunk (the direct write), two uneven chunks, and the drafter's
+  // vocabulary (31 chunks of 8011 — every block merges and the warp folds).
+  for (const int64_t V : {int64_t{4096}, int64_t{10007}, int64_t{248320}}) {
+    std::mt19937 rng(7);
+    std::vector<float> lg(static_cast<size_t>(rows) * V);
+    for (auto& v : lg) v = std::uniform_real_distribution<float>(-8.0f, 8.0f)(rng);
+    // Two forced ties at the very top of row 1, one more straddling a chunk
+    // boundary in row 2 (ties go to the lower id, whichever block saw it).
+    lg[V + 5] = 100.0f;
+    lg[V + 9] = 100.0f;
+    lg[2 * V + 8010] = 50.0f;
+    lg[2 * V + 8011] = 50.0f;
+    DevBuf dl(lg.size() * 4), did(rows * k * 4), dsc(rows * k * 4);
+    DevBuf dws(dgpp::dflash2_topk_ws_bytes(V, rows, k));
+    dl.upload(lg.data(), lg.size() * 4);
+    dgpp::dflash2_topk_f32(cf32(dl), i32(did), f32(dsc), V, rows, k, s, dws.p, dws.bytes);
+    DGPP_CUDA_OK(cudaStreamSynchronize(s));
+    if (V == 248320) {  // the drafter's row set at a block of eight: the kernel's time
+      cudaEvent_t e0, e1;
+      DGPP_CUDA_OK(cudaEventCreate(&e0));
+      DGPP_CUDA_OK(cudaEventCreate(&e1));
+      std::vector<float> lg8(static_cast<size_t>(8) * V);
+      for (size_t i = 0; i < lg8.size(); ++i) lg8[i] = lg[i % lg.size()];
+      DevBuf dl8(lg8.size() * 4), did8(8 * k * 4), dsc8(8 * k * 4), dws8(dgpp::dflash2_topk_ws_bytes(V, 8, k));
+      dl8.upload(lg8.data(), lg8.size() * 4);
+      dgpp::dflash2_topk_f32(cf32(dl8), i32(did8), f32(dsc8), V, 8, k, s, dws8.p, dws8.bytes);
+      DGPP_CUDA_OK(cudaEventRecord(e0, s));
+      for (int it = 0; it < 20; ++it)
+        dgpp::dflash2_topk_f32(cf32(dl8), i32(did8), f32(dsc8), V, 8, k, s, dws8.p, dws8.bytes);
+      DGPP_CUDA_OK(cudaEventRecord(e1, s));
+      DGPP_CUDA_OK(cudaEventSynchronize(e1));
+      float ms = 0.f;
+      DGPP_CUDA_OK(cudaEventElapsedTime(&ms, e0, e1));
+      std::printf("[ .. ] dflash2 top-16 over 8 rows x %lld: %.1f us a call (both passes)\n",
+                  static_cast<long long>(V), ms * 1000.f / 20.f);
+      DGPP_CUDA_OK(cudaEventDestroy(e0));
+      DGPP_CUDA_OK(cudaEventDestroy(e1));
+    }
+    std::vector<int32_t> ids(rows * k);
+    std::vector<float> sc(rows * k);
+    did.download(ids.data(), ids.size() * 4);
+    dsc.download(sc.data(), sc.size() * 4);
+    for (int r = 0; r < rows; ++r) {
+      std::vector<std::pair<float, int32_t>> all;
+      for (int64_t v = 0; v < V; ++v) all.push_back({lg[r * V + v], static_cast<int32_t>(v)});
+      std::sort(all.begin(), all.end(), [](const auto& a, const auto& b) {
+        return a.first > b.first || (a.first == b.first && a.second < b.second);
+      });
+      for (int j = 0; j < k; ++j) {
+        if (sc[r * k + j] != all[j].first)
+          throw std::runtime_error("topk V " + std::to_string(V) + " score row " + std::to_string(r) + " slot " +
+                                   std::to_string(j) + ": got " + std::to_string(sc[r * k + j]) + " want " +
+                                   std::to_string(all[j].first));
+        if (ids[r * k + j] != all[j].second)
+          throw std::runtime_error("topk V " + std::to_string(V) + " id row " + std::to_string(r) + " slot " +
+                                   std::to_string(j) + ": got " + std::to_string(ids[r * k + j]) + " want " +
+                                   std::to_string(all[j].second));
+      }
     }
   }
 }
@@ -194,7 +222,7 @@ DGPP_TEST(dflash2_selector_walks_the_reference_scores) {
   for (auto& v : hidden) v = std::uniform_real_distribution<float>(-1.0f, 1.0f)(rng);
 
   DevBuf dp(pred.size() * 2), ds(succ.size() * 2), di(ids.size() * 4), du(unary.size() * 4),
-      dh(hidden.size() * 4), dt(steps * 4), da(8);
+      dh(hidden.size() * 4), dt(steps * 4), da(8), dconf(steps * 4);
   da.upload(&anchor64, 8);
   dp.upload(pred.data(), pred.size() * 2);
   ds.upload(succ.data(), succ.size() * 2);
@@ -202,10 +230,12 @@ DGPP_TEST(dflash2_selector_walks_the_reference_scores) {
   du.upload(unary.data(), unary.size() * 4);
   dh.upload(hidden.data(), hidden.size() * 4);
   dgpp::dflash2_selector_walk(ci32(di), cf32(du), cf32(dh), cb16(dp), cb16(ds), ci64(da), i32(dt),
-                              steps, k, rank, s);
+                              steps, k, rank, s, nullptr, nullptr, nullptr, nullptr, f32(dconf));
   DGPP_CUDA_OK(cudaStreamSynchronize(s));
   std::vector<int32_t> got(steps);
   dt.download(got.data(), got.size() * 4);
+  std::vector<float> conf(steps);
+  dconf.download(conf.data(), conf.size() * 4);
 
   // The reference: scores[l][p][c] = unary[l][p] + <pred(id(l-1,p)) *
   // hidden[l], succ(id(l,c))>, walked greedily from slot 0.
@@ -231,6 +261,24 @@ DGPP_TEST(dflash2_selector_walks_the_reference_scores) {
             "selector step " + std::to_string(l) + ": got " + std::to_string(got[l]) + ", want " +
                 std::to_string(ids[static_cast<int64_t>(l) * k + besti]) + " (row " + std::to_string(prev) +
                 ", best score " + std::to_string(best) + ")");
+    // The confidence: the argmax's softmax mass over the step's candidates, as a logit.
+    {
+      double den = 0.0;
+      for (int c = 0; c < k; ++c) {
+        const int32_t pid = l == 0 ? anchor : ids[static_cast<int64_t>(l - 1) * k + prev];
+        const int32_t sid = ids[static_cast<int64_t>(l) * k + c];
+        float dot = 0.0f;
+        for (int r = 0; r < rank; ++r)
+          dot += pf[static_cast<int64_t>(pid) * rank + r] * hidden[l * rank + r] *
+                 sf[static_cast<int64_t>(sid) * rank + r];
+        den += std::exp(static_cast<double>(unary[static_cast<int64_t>(l) * k + c] + dot) - best);
+      }
+      const double q = std::min(std::max(1.0 / den, 1e-6), 1.0 - 1e-6);
+      const double want = std::log(q / (1.0 - q));
+      require(std::fabs(conf[l] - want) < 1e-3 * std::max(1.0, std::fabs(want)),
+              "selector step " + std::to_string(l) + ": confidence " + std::to_string(conf[l]) + " vs " +
+                  std::to_string(want));
+    }
     prev = besti;
   }
   }  // shape cases
@@ -572,8 +620,9 @@ DGPP_TEST(dflash2_topk_merges_the_ranks_slices) {
       for (int r = 0; r < rows; ++r)
         std::copy(lg.begin() + r * V + begin, lg.begin() + r * V + end, slice.begin() + r * count);
       DevBuf dl(slice.size() * 4), did(rows * k * 4), dsc(rows * k * 4), dt(elems * 2);
+      DevBuf dws(dgpp::dflash2_topk_ws_bytes(count, rows, k));
       dl.upload(slice.data(), slice.size() * 4);
-      dgpp::dflash2_topk_f32(cf32(dl), i32(did), f32(dsc), count, rows, k, s);
+      dgpp::dflash2_topk_f32(cf32(dl), i32(did), f32(dsc), count, rows, k, s, dws.p, dws.bytes);
       dgpp::dflash2_topk_stage(ci32(did), cf32(dsc), rows, k, static_cast<int32_t>(begin), rank, world,
                                b16(dt), s);
       DGPP_CUDA_OK(cudaStreamSynchronize(s));

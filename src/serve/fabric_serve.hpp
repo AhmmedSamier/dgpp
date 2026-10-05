@@ -134,6 +134,7 @@ struct WorldSettings {
   bool dflash_verify_graph = true;
   bool dflash_draft_batch = true;
   int dflash_depth = 0;
+  std::string dflash_weights = "checkpoint";  // engine.dflash_weights: every rank serves the drafter the same way
   std::string expert_gemm = "wide";          // the packed expert GEMM's form (2026-09-30); absent legacy field = wide
   int expert_gemm_prefetch = 3;
   bool expert_tile_list = true;
