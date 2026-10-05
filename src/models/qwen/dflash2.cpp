@@ -20,6 +20,7 @@
 #include <cuda_runtime.h>
 
 #include "common/cuda_check.hpp"
+#include "loaders/fp8_quant.hpp"
 #include "common/dtypes.hpp"
 #include "engine/decode_outputs.hpp"
 #include "loaders/safetensors.hpp"
@@ -215,9 +216,46 @@ void DFlash2Config::validate_against(const Qwen35TextConfig& target) const {
     reject("max_position_embeddings", "the draft must not exceed the target's");
 }
 
-DFlash2Weights::~DFlash2Weights() { cudaFree(arena); }
+DFlash2Weights::~DFlash2Weights() {
+  cudaFree(arena);
+  cudaFree(fp8_arena);
+}
 
-size_t dflash2_weights_bytes(const DFlash2Config& cfg, int world) {
+// The fp8 region (engine.dflash_weights fp8): per layer the five block
+// matrices' E4M3 payloads and fp32 block-128 scales, 256-byte aligned.
+namespace {
+struct Fp8Off {
+  size_t qkv_p, qkv_s, o_p, o_s, gate_p, gate_s, up_p, up_s, down_p, down_s;
+};
+size_t fp8_layout(const DFlash2Config& cfg, int world, std::vector<Fp8Off>* offs) {
+  const size_t H = cfg.hidden_size, I = cfg.local_intermediate(world);
+  const size_t QW = cfg.local_q_row(world), KW = cfg.local_kv_row(world);
+  size_t total = 0;
+  const auto bump = [&](size_t bytes) {
+    const size_t o = total;
+    total = (total + bytes + 255) & ~size_t{255};
+    return o;
+  };
+  const auto mat = [&](size_t rows, size_t cols, size_t* p, size_t* s) {
+    *p = bump(rows * cols);
+    *s = bump(static_cast<size_t>(fp8_quant::scale_rows(rows)) * fp8_quant::scale_cols(cols) * 4);
+  };
+  if (offs) offs->resize(cfg.num_hidden_layers);
+  for (int l = 0; l < cfg.num_hidden_layers; ++l) {
+    Fp8Off x{};
+    mat(QW + 2 * KW, H, &x.qkv_p, &x.qkv_s);
+    mat(H, QW, &x.o_p, &x.o_s);
+    mat(I, H, &x.gate_p, &x.gate_s);
+    mat(I, H, &x.up_p, &x.up_s);
+    mat(H, I, &x.down_p, &x.down_s);
+    if (offs) (*offs)[l] = x;
+  }
+  return total;
+}
+}  // namespace
+
+size_t dflash2_weights_bytes(const DFlash2Config& cfg, int world, bool fp8) {
+  // fp8: the five block matrices live in the fp8 arena only (no bf16 copy).
   // Element offsets with 128-element (256-byte) alignment — the same bump
   // the loader uses, so this is exactly the arena's byte size.
   if (!cfg.tp_divisible(world)) throw std::invalid_argument("dflash2_weights_bytes: the drafter does not split across this world");
@@ -231,9 +269,16 @@ size_t dflash2_weights_bytes(const DFlash2Config& cfg, int world) {
   };
   for (int l = 0; l < cfg.num_hidden_layers; ++l) {
     bump(H); bump(H);
-    bump(static_cast<size_t>(QW + 2 * KW) * H);
-    bump(H * QW); bump(HD); bump(HD);
-    bump(I * H); bump(I * H); bump(H * I);
+    if (!fp8) {
+      bump(static_cast<size_t>(QW + 2 * KW) * H);
+      bump(H * QW);
+    } else {
+      bump(static_cast<size_t>(2 * KW) * H);  // the k|v rows alone
+    }
+    bump(HD); bump(HD);
+    if (!fp8) {
+      bump(I * H); bump(I * H); bump(H * I);
+    }
     bump(2 * T * H); bump(2 * T * G * H); bump(2 * T * H); bump(2 * T * G * H);
   }
   bump(static_cast<size_t>(cfg.target_layer_ids.size()) * H * H);
@@ -241,11 +286,11 @@ size_t dflash2_weights_bytes(const DFlash2Config& cfg, int world) {
   bump(static_cast<size_t>(cfg.vocab_size) * cfg.selector_rank);
   bump(static_cast<size_t>(cfg.vocab_size) * cfg.selector_rank);
   bump(static_cast<size_t>(cfg.selector_rank) * H);
-  return total * 2;
+  return total * 2 + (fp8 ? fp8_layout(cfg, world, nullptr) : 0);
 }
 
 DFlash2Weights load_dflash2_weights(const DFlash2Config& cfg, const std::string& dir,
-                                    cudaStream_t stream, int rank, int world) {
+                                    cudaStream_t stream, int rank, int world, bool fp8) {
   if (!cfg.tp_divisible(world) || rank < 0 || rank >= world)
     throw std::invalid_argument("DFlash2: the drafter's heads / kv heads / MLP rows must divide across the world");
   std::vector<std::string> shards;
@@ -317,9 +362,11 @@ DFlash2Weights load_dflash2_weights(const DFlash2Config& cfg, const std::string&
   // (256-byte) alignment — the same bump dflash2_weights_bytes uses.
   struct Off {
     size_t input_norm, post_norm, qkv, o, qn, kn, gate, up, down;
+    size_t kv;  // fp8: the k|v rows' own bf16 slot
     size_t acb, ack, mcb, mck;
   };
   std::vector<Off> off(L);
+  constexpr size_t kNoBf16 = ~size_t{0};  // fp8: the block matrices take no bf16 slot
   size_t total = 0;
   const auto bump = [&](size_t elems) {
     const size_t o = total;
@@ -330,13 +377,14 @@ DFlash2Weights load_dflash2_weights(const DFlash2Config& cfg, const std::string&
     Off& x = off[l];
     x.input_norm = bump(H);
     x.post_norm = bump(H);
-    x.qkv = bump(static_cast<size_t>(QW + 2 * KW) * H);  // q, k, v rows contiguous
-    x.o = bump(static_cast<size_t>(H) * QW);
+    x.qkv = fp8 ? kNoBf16 : bump(static_cast<size_t>(QW + 2 * KW) * H);  // q, k, v rows contiguous
+    x.o = fp8 ? kNoBf16 : bump(static_cast<size_t>(H) * QW);
+    x.kv = fp8 ? bump(static_cast<size_t>(2 * KW) * H) : kNoBf16;
     x.qn = bump(HD);
     x.kn = bump(HD);
-    x.gate = bump(static_cast<size_t>(I) * H);
-    x.up = bump(static_cast<size_t>(I) * H);
-    x.down = bump(static_cast<size_t>(H) * I);
+    x.gate = fp8 ? kNoBf16 : bump(static_cast<size_t>(I) * H);
+    x.up = fp8 ? kNoBf16 : bump(static_cast<size_t>(I) * H);
+    x.down = fp8 ? kNoBf16 : bump(static_cast<size_t>(H) * I);
     x.acb = bump(2ull * T * H);
     x.ack = bump(2ull * T * G * H);
     x.mcb = bump(2ull * T * H);
@@ -352,6 +400,23 @@ DFlash2Weights load_dflash2_weights(const DFlash2Config& cfg, const std::string&
   DFlash2Weights w;
   DGPP_CUDA_OK(cudaMalloc(&w.arena, total * 2));
   w.bytes = total * 2;
+  std::vector<Fp8Off> f8;
+  if (fp8) {
+    w.fp8_bytes = fp8_layout(cfg, world, &f8);
+    DGPP_CUDA_OK(cudaMalloc(&w.fp8_arena, w.fp8_bytes));
+  }
+  // The fp8 encode: block-128 E4M3 of a host slice (row-major [rows, cols]
+  // at `stride`), uploaded to the fp8 arena at the matrix's offsets.
+  std::vector<uint8_t> pay;
+  std::vector<float> scl;
+  const auto encode_to = [&](const uint16_t* src, size_t stride, int64_t rows, int64_t cols, size_t p_off,
+                             size_t s_off) {
+    pay.resize(static_cast<size_t>(rows) * cols);
+    scl.resize(static_cast<size_t>(fp8_quant::scale_rows(rows)) * fp8_quant::scale_cols(cols));
+    fp8_quant::encode_block128(src, stride, rows, cols, pay.data(), scl.data());
+    DGPP_CUDA_OK(cudaMemcpy(static_cast<uint8_t*>(w.fp8_arena) + p_off, pay.data(), pay.size(), cudaMemcpyHostToDevice));
+    DGPP_CUDA_OK(cudaMemcpy(static_cast<uint8_t*>(w.fp8_arena) + s_off, scl.data(), scl.size() * 4, cudaMemcpyHostToDevice));
+  };
   auto* base = static_cast<uint16_t*>(w.arena);
   const auto dev = [&](size_t off_elems) { return base + off_elems; };
 
@@ -391,16 +456,68 @@ DFlash2Weights load_dflash2_weights(const DFlash2Config& cfg, const std::string&
     const Off& x = off[l];
     copy((p + "input_layernorm.weight").c_str(), x.input_norm, {H});
     copy((p + "post_attention_layernorm.weight").c_str(), x.post_norm, {H});
-    copy_rows((p + "self_attn.q_proj.weight").c_str(), x.qkv, gQW, H, q0, QW);
-    copy_rows((p + "self_attn.k_proj.weight").c_str(), x.qkv + static_cast<size_t>(QW) * H, gKW, H, kv0, KW);
-    copy_rows((p + "self_attn.v_proj.weight").c_str(), x.qkv + static_cast<size_t>(QW + KW) * H, gKW, H, kv0,
-              KW);
-    copy_cols((p + "self_attn.o_proj.weight").c_str(), x.o, H, gQW, q0, QW);
+    if (!fp8) {
+      copy_rows((p + "self_attn.q_proj.weight").c_str(), x.qkv, gQW, H, q0, QW);
+      copy_rows((p + "self_attn.k_proj.weight").c_str(), x.qkv + static_cast<size_t>(QW) * H, gKW, H, kv0, KW);
+      copy_rows((p + "self_attn.v_proj.weight").c_str(), x.qkv + static_cast<size_t>(QW + KW) * H, gKW, H, kv0,
+                KW);
+      copy_cols((p + "self_attn.o_proj.weight").c_str(), x.o, H, gQW, q0, QW);
+    } else {
+      copy_rows((p + "self_attn.k_proj.weight").c_str(), x.kv, gKW, H, kv0, KW);
+      copy_rows((p + "self_attn.v_proj.weight").c_str(), x.kv + static_cast<size_t>(KW) * H, gKW, H, kv0, KW);
+    }
     copy((p + "self_attn.q_norm.weight").c_str(), x.qn, {HD});
     copy((p + "self_attn.k_norm.weight").c_str(), x.kn, {HD});
-    copy_rows((p + "mlp.gate_proj.weight").c_str(), x.gate, gI, H, i0, I);
-    copy_rows((p + "mlp.up_proj.weight").c_str(), x.up, gI, H, i0, I);
-    copy_cols((p + "mlp.down_proj.weight").c_str(), x.down, H, gI, i0, I);
+    if (!fp8) {
+      copy_rows((p + "mlp.gate_proj.weight").c_str(), x.gate, gI, H, i0, I);
+      copy_rows((p + "mlp.up_proj.weight").c_str(), x.up, gI, H, i0, I);
+      copy_cols((p + "mlp.down_proj.weight").c_str(), x.down, H, gI, i0, I);
+    }
+    if (fp8) {
+      // The five block matrices: the row slices straight from the shards,
+      // the column slices (o, down) from their gathered host copies, the
+      // stacked q|k|v rows from a host stack.
+      const Fp8Off& y = f8[l];
+      const auto rows_of = [&](const char* name) {
+        return static_cast<const uint16_t*>(need(name)->data);
+      };
+      std::vector<uint16_t> qkv(static_cast<size_t>(QW + 2 * KW) * H);
+      std::memcpy(qkv.data(), rows_of((p + "self_attn.q_proj.weight").c_str()) + static_cast<size_t>(q0) * H,
+                  static_cast<size_t>(QW) * H * 2);
+      std::memcpy(qkv.data() + static_cast<size_t>(QW) * H,
+                  rows_of((p + "self_attn.k_proj.weight").c_str()) + static_cast<size_t>(kv0) * H,
+                  static_cast<size_t>(KW) * H * 2);
+      std::memcpy(qkv.data() + static_cast<size_t>(QW + KW) * H,
+                  rows_of((p + "self_attn.v_proj.weight").c_str()) + static_cast<size_t>(kv0) * H,
+                  static_cast<size_t>(KW) * H * 2);
+      encode_to(qkv.data(), static_cast<size_t>(H), QW + 2 * KW, H, y.qkv_p, y.qkv_s);
+      // o: the column slice gathered again (colbuf holds down's by now).
+      {
+        const TensorInfo* t = need((p + "self_attn.o_proj.weight").c_str());
+        std::vector<uint16_t> ob(static_cast<size_t>(H) * QW);
+        const auto* src = static_cast<const uint16_t*>(t->data);
+        for (int64_t r = 0; r < H; ++r)
+          std::memcpy(ob.data() + static_cast<size_t>(r) * QW, src + static_cast<size_t>(r) * gQW + q0,
+                      static_cast<size_t>(QW) * 2);
+        encode_to(ob.data(), static_cast<size_t>(QW), H, QW, y.o_p, y.o_s);
+      }
+      encode_to(rows_of((p + "mlp.gate_proj.weight").c_str()) + static_cast<size_t>(i0) * H, static_cast<size_t>(H), I, H,
+                y.gate_p, y.gate_s);
+      encode_to(rows_of((p + "mlp.up_proj.weight").c_str()) + static_cast<size_t>(i0) * H, static_cast<size_t>(H), I, H,
+                y.up_p, y.up_s);
+      {
+        // down: this rank's column slice, gathered on the host.
+        const TensorInfo* t = need((p + "mlp.down_proj.weight").c_str());
+        if (t->shape != std::vector<int64_t>{H, gI})
+          throw std::runtime_error("DFlash2 tensor " + p + "mlp.down_proj.weight: unexpected shape");
+        std::vector<uint16_t> db(static_cast<size_t>(H) * I);
+        const auto* src = static_cast<const uint16_t*>(t->data);
+        for (int64_t r = 0; r < H; ++r)
+          std::memcpy(db.data() + static_cast<size_t>(r) * I, src + static_cast<size_t>(r) * gI + i0,
+                      static_cast<size_t>(I) * 2);
+        encode_to(db.data(), static_cast<size_t>(I), H, I, y.down_p, y.down_s);
+      }
+    }
     copy((p + "attention_conv.base_kernel").c_str(), x.acb, {2, T, H});
     copy((p + "attention_conv.kernel_projection.weight").c_str(), x.ack, {2ll * T * G, H});
     copy((p + "mlp_conv.base_kernel").c_str(), x.mcb, {2, T, H});
@@ -408,17 +525,27 @@ DFlash2Weights load_dflash2_weights(const DFlash2Config& cfg, const std::string&
     DFlash2LayerWeights& lw = w.layers.emplace_back();
     lw.input_norm = dev(x.input_norm);
     lw.post_norm = dev(x.post_norm);
-    lw.qkv = dev(x.qkv);
-    lw.o = dev(x.o);
-    lw.gate = dev(x.gate);
-    lw.up = dev(x.up);
-    lw.down = dev(x.down);
+    lw.qkv = fp8 ? nullptr : dev(x.qkv);
+    lw.kv_rows = fp8 ? dev(x.kv) : dev(x.qkv) + static_cast<size_t>(QW) * H;
+    lw.o = fp8 ? nullptr : dev(x.o);
+    lw.gate = fp8 ? nullptr : dev(x.gate);
+    lw.up = fp8 ? nullptr : dev(x.up);
+    lw.down = fp8 ? nullptr : dev(x.down);
     lw.q_norm = dev(x.qn);
     lw.k_norm = dev(x.kn);
     lw.attn_conv_base = dev(x.acb);
     lw.attn_conv_kp = dev(x.ack);
     lw.mlp_conv_base = dev(x.mcb);
     lw.mlp_conv_kp = dev(x.mck);
+    if (fp8) {
+      const Fp8Off& y = f8[static_cast<size_t>(l)];
+      const auto* fb = static_cast<const uint8_t*>(w.fp8_arena);
+      lw.qkv_fp8 = fb + y.qkv_p;   lw.qkv_scales = reinterpret_cast<const float*>(fb + y.qkv_s);
+      lw.o_fp8 = fb + y.o_p;       lw.o_scales = reinterpret_cast<const float*>(fb + y.o_s);
+      lw.gate_fp8 = fb + y.gate_p; lw.gate_scales = reinterpret_cast<const float*>(fb + y.gate_s);
+      lw.up_fp8 = fb + y.up_p;     lw.up_scales = reinterpret_cast<const float*>(fb + y.up_s);
+      lw.down_fp8 = fb + y.down_p; lw.down_scales = reinterpret_cast<const float*>(fb + y.down_s);
+    }
   }
   // fc: the [H, nTaps*H] rows are split into nTaps [H, H] GEMM weights
   // (the [N, K] view of the columns fc[o, t*H:(t+1)*H]) — a host transpose

@@ -1132,7 +1132,7 @@ void GlmDiagnosticModel::session_graph_use_batch_contract(
 }
 
 void GlmDiagnosticModel::session_graph_capture_commit(
-    int req, const PickVerdict* device_verdict) {
+    int req, const PickVerdict* device_verdict, int rows) {
   if (req < 0 || req >= max_requests_)
     throw std::out_of_range("session_graph_capture_commit: request slot " +
                             std::to_string(req));
@@ -1140,7 +1140,11 @@ void GlmDiagnosticModel::session_graph_capture_commit(
     throw std::logic_error(
         "session_graph_capture_commit: the step must be captured with "
         "device positions (the commit advances the device position)");
-  glm_spec_commit(device_verdict, decode_rows_, spec_segments(req),
+  if (rows < 0 || rows > decode_rows_)
+    throw std::invalid_argument("session_graph_capture_commit: rows outside [0, decode rows]");
+  // The step's rows (a reduced-depth variant records fewer than the decode
+  // rows): "every row stood" must be judged against them.
+  glm_spec_commit(device_verdict, rows > 0 ? rows : decode_rows_, spec_segments(req),
                   d_session_pos_ + req, stream_);
 }
 

@@ -1,5 +1,6 @@
 #include "kernels/bf16_gemv.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 
 #include "common/cuda_check.hpp"
@@ -95,6 +96,11 @@ __global__ void bf16_gemv_multi_kernel(Bf16GemvMulti mp, int k) {
   const int n = which == 0 ? mp.p[0].n : which == 1 ? mp.p[1].n : which == 2 ? mp.p[2].n : mp.p[3].n;
   const int block0 = which == 0 ? 0 : which == 1 ? mp.block_end[0] : which == 2 ? mp.block_end[1] : mp.block_end[2];
   const int block = bid - block0;
+  // blockIdx.y: the kRows-row group (launch_bf16_gemv_multi_rows) — each
+  // group's chain is exactly the kRows-row launch's, so a 64-row decode
+  // batch is bitwise its rows' own 4-row launches.
+  const size_t group_rows = static_cast<size_t>(blockIdx.y) * kRows;
+  act += group_rows * act_stride;
   gemv::stage_activations<kRows>(act, act_stride, k, sx);
   __syncthreads();
   const int warp = threadIdx.x / 32;
@@ -106,7 +112,7 @@ __global__ void bf16_gemv_multi_kernel(Bf16GemvMulti mp, int k) {
   if (lane != 0) return;
 #pragma unroll
   for (int r = 0; r < kRows; ++r) {
-    const size_t at = static_cast<size_t>(r) * n + row;
+    const size_t at = (group_rows + static_cast<size_t>(r)) * n + row;
     if (kOutF32)
       static_cast<float*>(out)[at] = acc[r];
     else
@@ -115,8 +121,8 @@ __global__ void bf16_gemv_multi_kernel(Bf16GemvMulti mp, int k) {
 }
 
 template <int kRows>
-void launch_multi_rows(const Bf16GemvMulti& mp, bool out_f32, int k, cudaStream_t stream) {
-  const dim3 grid(static_cast<unsigned>(mp.block_end[mp.n - 1]));
+void launch_multi_rows(const Bf16GemvMulti& mp, bool out_f32, int k, cudaStream_t stream, int groups = 1) {
+  const dim3 grid(static_cast<unsigned>(mp.block_end[mp.n - 1]), static_cast<unsigned>(groups));
   const size_t smem = gemv::smem_bytes(kRows, k);
   if (out_f32)
     bf16_gemv_multi_kernel<kRows, true><<<grid, gemv::kThreads, smem, stream>>>(mp, k);
@@ -228,6 +234,48 @@ void launch_bf16_gemv_multi(const Bf16GemvProblem* problems, int n_problems,
     case 3: launch_multi_rows<3>(mp, out_f32, k, stream); break;
     case 4: launch_multi_rows<4>(mp, out_f32, k, stream); break;
     default: throw std::invalid_argument("bf16_gemv_multi: m outside 1..4");
+  }
+}
+
+void launch_bf16_gemv_multi_rows(const Bf16GemvProblem* problems, int n_problems, bool out_f32, int m, int k,
+                                 cudaStream_t stream) {
+  if (m < 1 || m > kBf16GemvMultiMaxRows) throw std::invalid_argument("bf16_gemv_multi_rows: m outside 1..64");
+  if (n_problems <= 0 || n_problems > kBf16GemvMaxProblems || problems == nullptr)
+    throw std::invalid_argument("bf16_gemv_multi_rows: 1..4 problems");
+  const int full = m / 4, tail = m % 4;
+  Bf16GemvMulti mp{};
+  mp.n = n_problems;
+  int blocks = 0;
+  for (int i = 0; i < n_problems; ++i) {
+    const Bf16GemvProblem& p = problems[i];
+    if (p.n <= 0 || !p.act || !p.weight || !p.out)
+      throw std::invalid_argument("bf16_gemv_multi_rows: empty or null problem");
+    if (!bf16_gemv_accepts(p.weight, std::min(m, 4), k))
+      throw std::invalid_argument("bf16_gemv_multi_rows: shape outside the GEMV contract");
+    if (p.act_row_stride < static_cast<size_t>(k))
+      throw std::invalid_argument("bf16_gemv_multi_rows: activation stride narrower than k");
+    mp.p[i] = p;
+    blocks += (p.n + gemv::kWarps - 1) / gemv::kWarps;
+    mp.block_end[i] = blocks;
+  }
+  for (int i = n_problems; i < 4; ++i) mp.block_end[i] = blocks;
+  // The full groups of four in one launch (blockIdx.y the group), the
+  // tail rows as their own 1..3-row launch: every row bitwise the chunked
+  // single launches'.
+  if (full > 0) launch_multi_rows<4>(mp, out_f32, k, stream, full);
+  if (tail > 0) {
+    Bf16GemvMulti mt = mp;
+    for (int i = 0; i < n_problems; ++i) {
+      mt.p[i].act += static_cast<size_t>(full) * 4 * mt.p[i].act_row_stride;
+      const size_t skip = static_cast<size_t>(full) * 4 * static_cast<size_t>(mt.p[i].n);
+      mt.p[i].out = out_f32 ? static_cast<void*>(static_cast<float*>(mt.p[i].out) + skip)
+                            : static_cast<void*>(static_cast<uint16_t*>(mt.p[i].out) + skip);
+    }
+    switch (tail) {
+      case 1: launch_multi_rows<1>(mt, out_f32, k, stream); break;
+      case 2: launch_multi_rows<2>(mt, out_f32, k, stream); break;
+      default: launch_multi_rows<3>(mt, out_f32, k, stream); break;
+    }
   }
 }
 

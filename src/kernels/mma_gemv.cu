@@ -17,6 +17,10 @@ namespace {
 constexpr int kWideWarps = 8;          // the wide forms' block: 8 warps x 8 weight rows
 constexpr int kRowsPerWarp = 8;        // the mma's n
 constexpr int kBatch = 8;              // 16-byte vectors in flight per lane
+// Split-K ranges are counted in these k units: the widest window (the one-
+// and two-tile forms' 256 k), a whole number of windows in every form, so
+// a split folds the same physical k whatever tile form the rows select.
+constexpr int kSplitUnitK = 256;
 // A lane's run: kVecs consecutive 16-byte vectors of its weight row, so a
 // quad's loads cover 4 x kVecs x 16 B contiguous of a row per group: fp8
 // one vector (a quad = 64 B; 64-byte runs, four vectors per lane with the
@@ -63,6 +67,7 @@ template <int kTiles, bool kFp8> struct Win {
   static constexpr int kRows = kTiles * 16;
   static constexpr size_t kBufBytes = static_cast<size_t>(kRows) * kStride * 2;
   static constexpr size_t kSmemBytes = 2 * kBufBytes;                 // double-buffered
+  static_assert(kSplitUnitK % kK == 0, "a split unit is a whole number of windows in every form");
 };
 static_assert(Win<1, true>::kSmemBytes <= 48 * 1024 && Win<1, false>::kSmemBytes <= 48 * 1024 &&
               Win<2, true>::kSmemBytes <= 48 * 1024 && Win<4, true>::kSmemBytes <= 48 * 1024 &&
@@ -299,9 +304,16 @@ __global__ __launch_bounds__(kW * 32, 2) void mma_gemv_kernel(const uint16_t* __
   // windows [win0, win1) of the k range and stores fp32 partials to
   // part[blockIdx.y][m][n]; mma_gemv_split_reduce_kernel sums the splits in
   // split order. grid.y == 1: the whole range, the output stored directly.
-  const int wper = (nwin + static_cast<int>(gridDim.y) - 1) / static_cast<int>(gridDim.y);
-  const int win0 = static_cast<int>(blockIdx.y) * wper;
-  const int win1 = nwin < win0 + wper ? nwin : win0 + wper;
+  // The split ranges in kSplitUnitK-k units (a window boundary of every
+  // form): the k a split folds — and so a row's chain — is the same in
+  // the one-, two- and four-tile forms.
+  constexpr int kWinPerUnit = kSplitUnitK / W::kK;
+  const int units = (k + kSplitUnitK - 1) / kSplitUnitK;
+  const int uper = (units + static_cast<int>(gridDim.y) - 1) / static_cast<int>(gridDim.y);
+  const int u0 = static_cast<int>(blockIdx.y) * uper;
+  const int u1 = units < u0 + uper ? units : u0 + uper;
+  const int win0 = u0 * kWinPerUnit;
+  const int win1 = nwin < u1 * kWinPerUnit ? nwin : u1 * kWinPerUnit;
   // Window `win` of the warp's eight rows into its ring stage, as one
   // asynchronous group (an empty group past the last window keeps the
   // group accounting uniform). Instruction i covers rows i*kRowsPerInstr..
@@ -516,15 +528,33 @@ bool split_k_enabled() {
   }();
   return on;
 }
-int split_k_for(int blocks, int n, int k, int win_k, const void* ws, size_t ws_bytes) {
+// The decode forms' width from n (mma_gemv_test's sweep over the DSA and
+// attention shapes, 2026-09-14): eight warps from 4096 rows, four from
+// 1024, two under (never one: a lone warp per block is issue-bound — the
+// [576 x 6144] site at 16 rows 53 us at one warp, 37 at two, 44 at four).
+int g_mma_decode_width = 0;  // mma_gemv_set_decode_width: 0 the rule, else a fixed width (the sweep)
+int decode_width(int n) {
+  const int warps = (n + kRowsPerWarp - 1) / kRowsPerWarp;
+  return g_mma_decode_width > 0 ? g_mma_decode_width : warps >= 512 ? 8 : warps >= 128 ? 4 : 2;
+}
+// The decode forms' grid at that width: the split decision's block count
+// for every launch of up to kMmaGemvSplitRows rows (the 33..64-row form's
+// own grid is the eight-warp one; it takes the decode width's split so its
+// chain is the 1..32-row forms').
+int decode_blocks(int n) {
+  const int w = decode_width(n);
+  return (n + w * kRowsPerWarp - 1) / (w * kRowsPerWarp);
+}
+int split_k_for(int n, int k, const void* ws, size_t ws_bytes) {
   if (!ws || !split_k_enabled()) return 1;
   const int fill = split_k_target_blocks();
+  const int blocks = decode_blocks(n);
   if (blocks >= fill) return 1;
-  const int nwin = (k + win_k - 1) / win_k;
-  const int s = std::min({(fill + blocks - 1) / blocks, nwin, kMaxSplit});
-  // The workspace check at the decode forms' widest m, so the split (and the
+  const int units = (k + kSplitUnitK - 1) / kSplitUnitK;
+  const int s = std::min({(fill + blocks - 1) / blocks, units, kMaxSplit});
+  // The workspace check at the decode batch bound, so the split (and the
   // chain) never depends on the rows in the launch.
-  if (s < 2 || static_cast<size_t>(s) * kMmaGemvMaxRows * static_cast<size_t>(n) * sizeof(float) > ws_bytes)
+  if (s < 2 || static_cast<size_t>(s) * kMmaGemvSplitRows * static_cast<size_t>(n) * sizeof(float) > ws_bytes)
     return 1;
   return s;
 }
@@ -545,7 +575,7 @@ void launch_decode_form(const uint16_t* a, size_t act_stride, const void* w, con
     opted_in = true;
   }
   const int blocks = (n + kW * kRowsPerWarp - 1) / (kW * kRowsPerWarp);
-  const int splits = split_k_for(blocks, n, k, Win<kTiles, kFp8>::kK, ws, ws_bytes);
+  const int splits = split_k_for(n, k, ws, ws_bytes);
   if (splits > 1) {
     float* part = static_cast<float*>(ws);
     mma_gemv_kernel<kTiles, kFp8, kW, OutT><<<dim3(blocks, splits), kW * 32, L::kSmemBytes, stream>>>(
@@ -558,20 +588,33 @@ void launch_decode_form(const uint16_t* a, size_t act_stride, const void* w, con
   mma_gemv_kernel<kTiles, kFp8, kW, OutT><<<dim3(blocks), kW * 32, L::kSmemBytes, stream>>>(
       a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, nullptr, act2, limit);
 }
-// The decode forms' width from n: the widest whose grid fills the resident
-// blocks (n >= 6144 rows: eight warps; [2048, 6144): four; [1024, 2048):
-// two; under 1024: one).
-// The decode forms' width from n (mma_gemv_test's sweep over the DSA and
-// attention shapes, 2026-09-14): eight warps from 4096 rows, four from
-// 1024, two under (never one: a lone warp per block is issue-bound — the
-// [576 x 6144] site at 16 rows 53 us at one warp, 37 at two, 44 at four).
-int g_mma_decode_width = 0;  // mma_gemv_set_decode_width: 0 the rule, else a fixed width (the sweep)
+// The 33..64-row form (four tiles, eight warps, direct loads) with the
+// decode width's split: the same k ranges as the 1..32-row forms, so an
+// eight-slot batch's rows are bitwise its slots' solo rows (2026-10-05).
+template <int kTiles, bool kFp8, typename OutT>
+void launch_wide_split(const uint16_t* a, size_t act_stride, const void* w, const float* scales, OutT* o, int rows,
+                       int n, int k, size_t out_stride, int rs, int cs, cudaStream_t stream, void* ws,
+                       size_t ws_bytes, const uint16_t* act2 = nullptr, float limit = 0.f) {
+  constexpr int kWideThreads = kWideWarps * 32;
+  const int blocks = (n + kWideWarps * kRowsPerWarp - 1) / (kWideWarps * kRowsPerWarp);
+  const int splits = split_k_for(n, k, ws, ws_bytes);
+  if (splits > 1) {
+    float* part = static_cast<float*>(ws);
+    mma_gemv_kernel<kTiles, kFp8, kWideWarps, OutT><<<dim3(blocks, splits), kWideThreads, Win<kTiles, kFp8>::kSmemBytes, stream>>>(
+        a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, part, act2, limit);
+    const int total = rows * n;
+    mma_gemv_split_reduce_kernel<OutT><<<(total + 255) / 256, 256, 0, stream>>>(part, splits, rows, n, o,
+                                                                                 out_stride);
+    return;
+  }
+  mma_gemv_kernel<kTiles, kFp8, kWideWarps, OutT><<<dim3(blocks), kWideThreads, Win<kTiles, kFp8>::kSmemBytes, stream>>>(
+      a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, nullptr, act2, limit);
+}
 template <int kTiles, bool kFp8, typename OutT>
 void launch_decode(const uint16_t* a, size_t act_stride, const void* w, const float* scales, OutT* o, int rows,
                    int n, int k, size_t out_stride, int rs, int cs, cudaStream_t stream, void* ws,
                    size_t ws_bytes, const uint16_t* act2 = nullptr, float limit = 0.f) {
-  const int warps = (n + kRowsPerWarp - 1) / kRowsPerWarp;
-  const int width = g_mma_decode_width > 0 ? g_mma_decode_width : warps >= 512 ? 8 : warps >= 128 ? 4 : 2;
+  const int width = decode_width(n);
   if (width == 8)
     launch_decode_form<kTiles, kFp8, 8, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes, act2, limit);
   else if (width == 4)
@@ -627,8 +670,8 @@ void launch(const uint16_t* act, size_t act_stride, const void* w, const float* 
       launch_decode<1, kFp8, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes, a2, limit);
     else if (rows <= 32)
       launch_decode<2, kFp8, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes, a2, limit);
-    else if (rows <= 64)
-      mma_gemv_kernel<4, kFp8, kWideWarps, OutT><<<grid, kWideThreads, Win<4, kFp8>::kSmemBytes, stream>>>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, nullptr, a2, limit);
+    else if (rows <= kMmaGemvSplitRows)
+      launch_wide_split<4, kFp8, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes, a2, limit);
     else
       mma_gemv_kernel<8, kFp8, kWideWarps, OutT><<<grid, kWideThreads, Win<8, kFp8>::kSmemBytes, stream>>>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, nullptr, a2, limit);
     DGPP_CUDA_OK(cudaGetLastError());

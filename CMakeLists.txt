@@ -1238,6 +1238,8 @@ set(QWEN35_FORWARD_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/qwen35_forward_fixture)
 add_test(NAME qwen35_forward_fixture COMMAND qwen35_forward_test --write-fixture ${QWEN35_FORWARD_FIXTURE})
 add_test(NAME qwen35_forward_smoke COMMAND qwen35_forward_test --smoke ${QWEN35_FORWARD_FIXTURE})
 set_tests_properties(qwen35_forward_smoke PROPERTIES DEPENDS qwen35_forward_fixture)
+add_test(NAME qwen35_decode_rows_invariance COMMAND qwen35_forward_test --rows-invariance ${QWEN35_FORWARD_FIXTURE})
+set_tests_properties(qwen35_decode_rows_invariance PROPERTIES DEPENDS qwen35_forward_fixture)
 add_test(NAME qwen35_forward_generate
   COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/qwen35_reference_dump.py
           gen-pure --checkpoint-dir ${QWEN35_FORWARD_FIXTURE}

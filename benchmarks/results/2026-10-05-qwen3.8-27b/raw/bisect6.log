@@ -1,0 +1,30 @@
+
+=== 16:49:05 production down (the bisection)
+2026-10-05 16:49:13.536 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 16:49:13 min-depth 4 up (fixed lambda)
+2026-10-05 16:49:37.909 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/bisect6/min4/server)
+
+=== 16:49:37 min-depth 4 transcripts vs whole blocks
+identical transcripts: 4 of 4
+[min4] solo vs solo again: IDENTICAL
+[min4] solo vs beside 0 others (started at once): IDENTICAL
+
+=== 16:51:00 min-depth 4 down
+2026-10-05 16:51:02.357 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/bisect6/min4/server
+
+=== 16:51:04 min-depth 2 up (fixed lambda)
+2026-10-05 16:51:36.714 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/bisect6/min2/server)
+
+=== 16:51:36 min-depth 2 transcripts vs whole blocks
+identical transcripts: 4 of 4
+[min2] solo vs solo again: IDENTICAL
+[min2] solo vs beside 0 others (started at once): IDENTICAL
+
+=== 16:53:00 min-depth 2 down
+2026-10-05 16:53:02.416 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/bisect6/min2/server
+
+=== 16:53:04 production up
+2026-10-05 16:53:42.671 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+BISECT6_DONE 16:53:42

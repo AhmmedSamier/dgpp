@@ -99,6 +99,10 @@ class SessionModel : public PrefillReporting {
   static constexpr bool kVerifyConfidence = false;
   struct Outputs : DecodeOutputs {
     std::vector<std::vector<uint16_t>> layer_states;  // per layer, when captured
+    // A test's bisection inside the first GDN layer (Qwen35Model's
+    // set_session_capture_layers): [stage][rows x width] with the names.
+    std::vector<std::vector<uint16_t>> debug_stages;
+    std::vector<std::string> debug_stage_names;
     std::vector<std::vector<int32_t>> route_ids;      // per MoE layer [T, top_k], ascending
     std::vector<std::vector<float>> route_weights;    // per MoE layer [T, top_k]
     // Per indexed DSA layer [T, max_selected] (-1 padded), when captured
@@ -303,7 +307,12 @@ class SessionModel : public PrefillReporting {
   // rows, as every capture before.
   void session_graph_capture_step(int req, const std::vector<int64_t>& ids, bool device_positions,
                                   bool device_tokens = false, int feed_rows = 0);
-  void session_graph_capture_commit(int req, const PickVerdict* device_verdict);
+  // `rows`: the step's verify rows (0: the model's decode rows). A
+  // reduced-depth variant (the scheduled verify depth) records fewer rows
+  // than the model's decode rows: the commit must know them, or a step
+  // that accepts every row reads a retraction snapshot its walk never
+  // wrote (2026-10-05: the conv state of a scheduled Qwen3.8-27B slot).
+  void session_graph_capture_commit(int req, const PickVerdict* device_verdict, int rows = 0);
   void session_graph_stage(int req, int64_t token_id) { session_graph_stage(req, std::vector<int64_t>{token_id}); }
   void session_graph_stage(int req, const std::vector<int64_t>& ids) {
     decode_host_prep(req, ids, /*upload=*/false, graph_device_positions_);
@@ -1636,12 +1645,18 @@ void SessionModel<D>::session_graph_capture_step(int req, const std::vector<int6
 }
 
 template <class D>
-void SessionModel<D>::session_graph_capture_commit(int req, const PickVerdict* device_verdict) {
+void SessionModel<D>::session_graph_capture_commit(int req, const PickVerdict* device_verdict, int rows) {
   check_req(req, "session_graph_capture_commit");
   if (!graph_device_positions_)
     throw std::logic_error("session_graph_capture_commit: the step must be captured with device positions");
   if (device_verdict == nullptr) throw std::invalid_argument("session_graph_capture_commit: null verdict");
-  glm_spec_commit(device_verdict, decode_rows_, derived().spec_segments(req, 0), d_session_pos_ + req, stream_);
+  if (rows < 0 || rows > decode_rows_)
+    throw std::invalid_argument("session_graph_capture_commit: rows outside [0, decode rows]");
+  // The step's rows decide "every row stood" in the commit kernel: a
+  // reduced-depth step that accepts all of its rows retracts nothing (its
+  // walk wrote no snapshot for its last row).
+  glm_spec_commit(device_verdict, rows > 0 ? rows : decode_rows_, derived().spec_segments(req, 0),
+                  d_session_pos_ + req, stream_);
 }
 
 template <class D>

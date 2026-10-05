@@ -1,0 +1,72 @@
+
+=== 16:53:54 gates
+glm_pick_test            23 tests, 0 failed
+unit_tests               316 tests, 0 failed
+ 9/74 Test   #9: qwen_qsa_prefill ...........................***Failed    0.61 sec
+10/74 Test  #10: qwen_qsa_prefill_nvfp4_dense_0 .............***Failed    0.59 sec
+11/74 Test  #11: qwen_qsa_prefill_nvfp4_dense_1 .............***Failed    0.53 sec
+13/74 Test  #13: qwen_forward_cross_limit ...................***Failed    0.35 sec
+20/74 Test  #20: qwen_decode_test ...........................***Failed    0.35 sec
+21/74 Test  #21: qwen_decode_fp8_head .......................***Failed    0.34 sec
+
+=== 16:56:11 production down (the verification)
+2026-10-05 16:56:19.420 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 16:56:19 w1 template up (adaptive lambda, 8 slots)
+2026-10-05 16:56:45.764 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/verify8/w1-template/server)
+[w1] solo vs solo again: DIFFERENT at char 872 of 1452/1461 (256/256 tokens)
+[w1] solo vs beside 0 others (started at once): DIFFERENT at char 872 of 1452/1461 (256/256 tokens)
+[w1] solo vs solo again: IDENTICAL
+[w1] solo vs beside 7 others (joining after 6 s): IDENTICAL
+
+=== 16:58:16 w1 template transcripts vs whole blocks (4/4 expected)
+identical transcripts: 2 of 4
+
+=== 16:58:58 w1 template timed_load greedy C1 x2 (vs 20.2/32.5/44.5/35.4/19.5 at 141.8 ms)
+| prose | 20.1 |
+| code | 28.6 |
+| json | 39.7 |
+| math | 30.5 |
+| chat | 18.3 |
+17.9 tok/s, 54.8 ms/tok, 140.8 ms/step
+
+=== 17:00:43 w1 template down
+2026-10-05 17:00:46.013 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/verify8/w1-template/server
+
+=== 17:00:48 w1 min-depth 3 up (fixed lambda)
+2026-10-05 17:01:12.364 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/verify8/w1-min3/server)
+
+=== 17:01:12 w1 min-depth 3 transcripts vs whole blocks (4/4 expected; read 3 of 4 before the fix)
+identical transcripts: 3 of 4
+
+=== 17:01:56 w1 min-depth 3 down
+2026-10-05 17:01:58.038 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/verify8/w1-min3/server
+
+=== 17:02:00 w4 template up (8 slots)
+2026-10-05 17:02:26.784 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w4_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/verify8/w4-template/server)
+[w4] solo vs solo again: IDENTICAL
+[w4] solo vs beside 0 others (started at once): IDENTICAL
+[w4] solo vs solo again: IDENTICAL
+[w4] solo vs beside 7 others (joining after 6 s): IDENTICAL
+
+=== 17:03:05 w4 template transcripts vs w4-fp8-2 (4/4 expected; read 2 of 4 before the fix)
+identical transcripts: 2 of 4
+
+=== 17:03:20 w4 template down
+2026-10-05 17:03:27.307 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/verify8/w4-template/server
+
+=== 17:03:27 w2 template up (8 slots)
+2026-10-05 17:03:49.433 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w2_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/verify8/w2-template/server)
+[w2] solo vs solo again: IDENTICAL
+[w2] solo vs beside 0 others (started at once): IDENTICAL
+
+=== 17:04:11 w2 template transcripts vs drafter-tp/w2-dflash2-v2 (read 1 of 4 before the fix)
+identical transcripts: 1 of 4
+
+=== 17:04:35 w2 template down
+2026-10-05 17:04:39.095 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/verify8/w2-template/server
+
+=== 17:04:39 production up
+2026-10-05 17:05:17.599 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+VERIFY8_DONE 17:05:17

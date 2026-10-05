@@ -463,51 +463,34 @@ void QwenGdnLayer::in_projections(const uint16_t* x, int tokens, cudaStream_t st
   const int C = static_cast<int>(conv_channels_);
   const int LV = lv_ * v_dim_;
   if (w_.in_proj_qkv_fp8.payload) {
-    // The FP8 form: qkv and z as one multi-problem fp8 GEMV at decode rows
-    //, the scale GEMM above them; a and b (BF16, [lv, H]) as
-    // one dual GEMV.
-    const bool ab_gemv = tokens <= std::min(4, g_.gemv_rows) && bf16_gemv_accepts(w_.in_proj_a, tokens, H) &&
-                         bf16_gemv_accepts(w_.in_proj_b, tokens, H);
+    // The FP8 form: qkv and z through the dense lowering — the weights-once
+    // streaming MMA at every decode row count (2026-10-05: the fp8 GEMV
+    // core took rows up to dense_gemv_rows (4) and the MMA the rows above,
+    // two chains, so a scheduled 2- or 4-row verify moved a request's text
+    // against its 6- / 8-row steps and its batches); a and b (BF16
+    // [lv, H]) on the bf16 GEMV core, one chain at every width to 64.
     if (pt_.enabled && (tokens > 128 || resume)) {
       // Per-tensor prefill: one shared activation quantize feeds qkv and z;
       // a and b stay BF16 (2 x [lv, H], negligible next to C + LV).
       pt_quant_input(pt_, x, tokens, H, stream);
       pt_gemm(g_, pt_.act, pt_.xw[0], pt_.act_scale, pt_.xscales, qkv_, tokens, C, H, stream);
       pt_gemm(g_, pt_.act, pt_.xw[1], pt_.act_scale, pt_.xscales + 1, z_, tokens, LV, H, stream);
-    } else if (tokens <= std::min(8, g_.gemv_rows)) {
-      // a and b (BF16 [lv, H]) as bf16 problems of the same launch when the
-      // GEMV takes them (2026-09-29): bitwise the dual launch they replace.
-      Fp8GemvProblem p[4];
-      p[0].payload = w_.in_proj_qkv_fp8.payload; p[0].scales = w_.in_proj_qkv_fp8.scales; p[0].out = qkv_; p[0].n = C;
-      p[1].payload = w_.in_proj_z_fp8.payload; p[1].scales = w_.in_proj_z_fp8.scales; p[1].out = z_; p[1].n = LV;
-      p[2].bf16_weight = w_.in_proj_a; p[2].out = a_; p[2].n = lv_;
-      p[3].bf16_weight = w_.in_proj_b; p[3].out = b_; p[3].n = lv_;
-      launch_scale_gemv_multi_bf16(p, ab_gemv ? 4 : 2, x, static_cast<size_t>(H), tokens, H, stream);
-      if (ab_gemv) return;
     } else {
       gemm_dense(g_, x, H, nullptr, w_.in_proj_qkv_fp8, qkv_, GemmOut::BF16, tokens, C, H, stream);
       gemm_dense(g_, x, H, nullptr, w_.in_proj_z_fp8, z_, GemmOut::BF16, tokens, LV, H, stream);
     }
-    if (ab_gemv) {
+    if (tokens <= kBf16GemvMultiMaxRows && bf16_gemv_accepts(w_.in_proj_a, 4, H) &&
+        bf16_gemv_accepts(w_.in_proj_b, 4, H)) {
+      // 1..64 decode rows: the GEMV core in row groups of four (a 1..3-row
+      // tail its own launch) — each row's chain is the group's own, so a
+      // request's rows are bitwise the same alone, at any verify depth and
+      // in an eight-slot batch — where cuBLASLt's tiny-tile kernel took 34
+      // us per [48 x 5120] matrix (3.3 ms of a one-node 157 ms pass) and,
+      // above 8 rows, a different chain.
       Bf16GemvProblem p[2];
       p[0].act = x; p[0].act_row_stride = static_cast<size_t>(H); p[0].weight = w_.in_proj_a; p[0].out = a_; p[0].n = lv_;
       p[1].act = x; p[1].act_row_stride = static_cast<size_t>(H); p[1].weight = w_.in_proj_b; p[1].out = b_; p[1].n = lv_;
-      launch_bf16_gemv_multi(p, 2, /*out_f32=*/false, tokens, H, stream);
-    } else if (tokens <= 8 && bf16_gemv_accepts(w_.in_proj_a, 4, H) && bf16_gemv_accepts(w_.in_proj_b, 4, H)) {
-      // 5..8 decode rows (the 8-row speculative verify, 2026-10-05): the
-      // GEMV core in row chunks of four — each row's chain is the chunk
-      // size's own, so these rows are bitwise the <= 4-row path's — where
-      // cuBLASLt's tiny-tile kernel took 34 us per [48 x 5120] matrix (3.3
-      // ms of a one-node 157 ms pass).
-      for (int r0 = 0; r0 < tokens; r0 += 4) {
-        const int rows = std::min(4, tokens - r0);
-        Bf16GemvProblem p[2];
-        p[0].act = x + static_cast<size_t>(r0) * H; p[0].act_row_stride = static_cast<size_t>(H);
-        p[0].weight = w_.in_proj_a; p[0].out = a_ + static_cast<size_t>(r0) * lv_; p[0].n = lv_;
-        p[1].act = x + static_cast<size_t>(r0) * H; p[1].act_row_stride = static_cast<size_t>(H);
-        p[1].weight = w_.in_proj_b; p[1].out = b_ + static_cast<size_t>(r0) * lv_; p[1].n = lv_;
-        launch_bf16_gemv_multi(p, 2, /*out_f32=*/false, rows, H, stream);
-      }
+      launch_bf16_gemv_multi_rows(p, 2, /*out_f32=*/false, tokens, H, stream);
     } else {
       gemm_bf16(g_, x, H, w_.in_proj_a, a_, GemmOut::BF16, tokens, lv_, H, stream);
       gemm_bf16(g_, x, H, w_.in_proj_b, b_, GemmOut::BF16, tokens, lv_, H, stream);
@@ -960,15 +943,11 @@ void QwenFullAttnLayer::enqueue(const uint16_t* x, int tokens, const QwenQsaRows
     pt_gemm(g_, pt_.act, pt_.xw[0], pt_.act_scale, pt_.xscales, q_, T, QW, H, stream);
     pt_gemm(g_, pt_.act, pt_.xw[1], pt_.act_scale, pt_.xscales + 1, k_, T, KW, H, stream);
     pt_gemm(g_, pt_.act, pt_.xw[2], pt_.act_scale, pt_.xscales + 2, v_, T, KW, H, stream);
-  } else if (w_.q_proj_fp8.payload && T <= std::min(8, g_.gemv_rows)) {
-    // The FP8 form at decode rows: the three projections as one
-    // multi-problem fp8 GEMV (no indexer problem here).
-    Fp8GemvProblem p[3];
-    p[0].payload = w_.q_proj_fp8.payload; p[0].scales = w_.q_proj_fp8.scales; p[0].out = q_; p[0].n = QW;
-    p[1].payload = w_.k_proj_fp8.payload; p[1].scales = w_.k_proj_fp8.scales; p[1].out = k_; p[1].n = KW;
-    p[2].payload = w_.v_proj_fp8.payload; p[2].scales = w_.v_proj_fp8.scales; p[2].out = v_; p[2].n = KW;
-    launch_scale_gemv_multi_bf16(p, 3, x, static_cast<size_t>(H), T, H, stream);
   } else {
+    // Every decode row count through the dense lowering (the streaming MMA
+    // from one row, 2026-10-05): the multi-problem fp8 GEMV the rows up to
+    // dense_gemv_rows (4) took was a different chain from the MMA above
+    // them, so a scheduled 2- or 4-row verify moved a request's text.
     gemm_dense(g_, x, H, w_.q_proj, w_.q_proj_fp8, q_, GemmOut::BF16, T, QW, H, stream);
     gemm_dense(g_, x, H, w_.k_proj, w_.k_proj_fp8, k_, GemmOut::BF16, T, KW, H, stream);
     gemm_dense(g_, x, H, w_.v_proj, w_.v_proj_fp8, v_, GemmOut::BF16, T, KW, H, stream);

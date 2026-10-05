@@ -1,0 +1,56 @@
+
+=== 17:05:25 production down (the final legs)
+2026-10-05 17:05:34.124 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 17:05:34 ctest subset with the node free
+100% tests passed, 0 tests failed out of 74
+
+=== 17:10:11 w1 template, fixed lambda 0.1 tok/ms (shallow steps) up
+2026-10-05 17:10:35.315 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final9/shallow0.1/server)
+
+=== 17:10:35 shallow 0.1 transcripts vs whole blocks
+identical transcripts: 0 of 4
+[shallow0.1] solo vs solo again: IDENTICAL
+[shallow0.1] solo vs beside 0 others (started at once): IDENTICAL
+
+=== 17:11:56 shallow 0.1 down
+2026-10-05 17:11:58.681 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final9/shallow0.1/server
+
+=== 17:12:00 w1 template, fixed lambda 0.5 tok/ms (shallow steps) up
+2026-10-05 17:12:24.991 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final9/shallow0.5/server)
+
+=== 17:12:25 shallow 0.5 transcripts vs whole blocks
+identical transcripts: 2 of 4
+[shallow0.5] solo vs solo again: IDENTICAL
+[shallow0.5] solo vs beside 0 others (started at once): IDENTICAL
+
+=== 17:14:39 shallow 0.5 down
+2026-10-05 17:14:41.818 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final9/shallow0.5/server
+
+=== 17:14:43 w1 template (adaptive) up: the transcripts gate as the first requests
+2026-10-05 17:15:08.177 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final9/first-chat/server)
+
+=== 17:15:08 first requests = the gate (chat first) vs whole blocks
+identical transcripts: 4 of 4
+
+=== 17:15:49 the gate again (after the first requests)
+identical transcripts: 3 of 4
+
+=== 17:16:32 down
+2026-10-05 17:16:35.816 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final9/first-chat/server
+
+=== 17:16:35 w1 template (adaptive) up: a throwaway first request, then the gate
+2026-10-05 17:16:58.102 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final9/first-warm/server)
+[warm] solo vs solo again: IDENTICAL
+[warm] solo vs beside 0 others (started at once): IDENTICAL
+
+=== 17:17:06 the gate after a warm-up request vs whole blocks
+identical transcripts: 2 of 4
+
+=== 17:17:48 down
+2026-10-05 17:17:51.845 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final9/first-warm/server
+
+=== 17:17:51 production up
+2026-10-05 17:18:33.450 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+FINAL9_DONE 17:18:33

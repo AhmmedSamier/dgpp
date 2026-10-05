@@ -1,0 +1,41 @@
+
+=== 16:32:02 production down (the bisection)
+2026-10-05 16:32:07.416 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 16:32:07 min-depth 7 up (fixed lambda)
+cluster configuration: rank 0 did not become ready
+2026-10-05 16:32:24.650 ERROR serve: engine.mtp_schedule=true requires engine.mtp_schedule_min_depth < engine.mtp_depth; set engine.mtp_schedule=false to use a fixed verify depth.
+
+=== 16:42:07 min-depth 7 transcripts vs whole blocks
+ConnectionRefusedError: [Errno 111] Connection refused
+ConnectionRefusedError: [Errno 111] Connection refused
+
+=== 16:42:08 min-depth 7 down
+2026-10-05 16:42:08.128 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/bisect5/min7/server
+
+=== 16:42:08 min-depth 5 up (fixed lambda)
+2026-10-05 16:42:32.432 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/bisect5/min5/server)
+
+=== 16:42:32 min-depth 5 transcripts vs whole blocks
+identical transcripts: 4 of 4
+[min5] solo vs solo again: IDENTICAL
+[min5] solo vs beside 0 others (started at once): IDENTICAL
+
+=== 16:43:54 min-depth 5 down
+2026-10-05 16:43:57.757 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/bisect5/min5/server
+
+=== 16:43:57 min-depth 3 up (fixed lambda)
+2026-10-05 16:44:20.074 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/bisect5/min3/server)
+
+=== 16:44:20 min-depth 3 transcripts vs whole blocks
+identical transcripts: 3 of 4
+[min3] solo vs solo again: IDENTICAL
+[min3] solo vs beside 0 others (started at once): IDENTICAL
+
+=== 16:45:44 min-depth 3 down
+2026-10-05 16:45:46.486 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/bisect5/min3/server
+
+=== 16:45:48 production up
+2026-10-05 16:46:26.808 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+BISECT5_DONE 16:46:26

@@ -18,7 +18,77 @@ The history by milestone. The dated engineering record in
   under the service lock. Streams interrupted before the usage chunk
   report none. See
   [openai-compatibility](docs/openai-compatibility.md#completion-timings-dgpp-extension).
-
+- **Qwen3.8-27B: a request's logits are the same alone, at every verify
+  depth and in a batch** (2026-10-05): six row-count dependences in the
+  decode step, found after the campaign with the solo-vs-co-tenant probe
+  (a request joined by others read DIFFERENT on one and four Sparks) and
+  the scheduled drafter's transcripts (a solo request's text moved with
+  the depth the schedule chose). (1) The decode head took the fp8 GEMV
+  chain below five rows and the streaming MMA from five, so a solo plain
+  request (one row) diverged from its eight-slot batch: the head and every
+  fp8 projection (gate / up / down, attention q|k|v|o, the GDN out) take
+  the weights-once streaming form at every decode row count
+  (`mma_from_rows` 1 — its row chain is bitwise the same 1..64,
+  `scale_gemm_test`). (2) The GDN in-projections a / b went to cuBLASLt's
+  tile kernel above eight rows: `launch_bf16_gemv_multi_rows` (row groups
+  of four by blockIdx.y plus a tail launch) is bitwise the chunked launches
+  at every width to 64. (3) The GDN in-projections qkv / z and the
+  attention q|k|v took the multi-problem fp8 GEMV core up to
+  `dense_gemv_rows` rows — which defaults to 4, not the 16 a comment
+  claimed — and the MMA above, so a scheduled 2- or 4-row verify computed
+  a different chain from the 6- / 8-row steps and the batches (one bf16
+  ulp in one column of the first GDN layer's in-projection, then the
+  text): both take the dense lowering (the streaming form) at every decode
+  width; a / b stay on the bf16 GEMV core. Found by the new tiny-fixture
+  test `qwen35_decode_rows_invariance` (a 1..7-row verify's rows are
+  bitwise the eight-row verify's, with the fp8 head on a resident stack)
+  after transcript legs could not localize it. (4) Split-K's form boundary
+  — launches of <= 32 rows split the k range, 33–64 ran the wide form
+  unsplit, so an eight-slot four-node batch's rows differed from solo: the
+  split ranges are 256-k units (a window boundary of every tile form) and
+  the 33–64-row form splits with the decode width's count
+  (`kMmaGemvSplitRows` 64; `mma_gemv_test`), which also fills the four-node
+  grid: eight slots 205.3 / 299.2 / 356.7 / 310.7 / 218.9 tok/s at 91.5 ms a step against 183.7 /
+  273.3 / 326.3 / 284.4 / 195.6 at 106. (5) The multi-problem fp8 GEMV at
+  <= 8 rows is one chain 1..8 (tested, its bf16 problems against the
+  row-group launch too). (6) The recorded scalar commit was captured with
+  the model's decode rows (8) for every variant; the commit kernel reads
+  `accepted < rows` as a retraction and restores the conv state from the
+  snapshot of row accepted − 1, which the conv kernel never writes for a
+  step's last row, so a reduced-depth step that accepted all its rows
+  restored a stale snapshot: the commit takes the step's rows.
+  Verified on the fabric (`raw/verify10`): a request joined by co-tenants reads the same text as alone on one, two and four Sparks from the first request after boot; the scheduled drafter's transcripts match whole blocks 4/4 at W1 and W4 at every depth mix tried (the template, min-depth 3, a forced-shallow schedule: 3 of 4, 3 of 4 and 0 of 4 before); the tiny-fixture rows test and the ctest subset (75) pass. Costs: W1 / W2 / W4 drafter C1 level (20.1 / 32.8 / 45.5 / 35.1 / 19.6 tok/s at 142.0 ms; 32.6 / 57.3 / 80.0 / 66.3 / 34.9 at 78.9; 60.0 / 92.7 / 125.1 / 105.3 / 48.8 at 47.5), C8 level (W1 195.2 ms a step); the plain T=1 world pays the one-row streaming form on every fp8 site — W1 8.2 tok/s at 121.2 ms against the campaign's 8.9 at 112.7, W4 28.0 at 35.3 against 31.0 at 32 — the one-row form's rate (about 215 against the GEMV core's 240 GB/s, worse at the four-node shard widths) is the next kernel item. Prompts started together
+  still differ (the group prefill, open). Also: `--no-dflash` drops a
+  drafter template's `mtp_schedule` (plain decode from the drafter recipes
+  booted refused); the schedule's min-depth is checked against the
+  drafter's block, not `mtp_depth`; `engine.dflash_depth` is the eager
+  engine's cap (the graph worlds verify the whole block or the scheduled
+  depth).
+- **Qwen3.8-27B drafter: fp8 block matrices, the chunked top-K, the
+  schedule's gate** (2026-10-05): the drafter's five block matrices (q|k|v,
+  o, gate, up, down) serve as block-128 e4m3 under `engine.dflash_weights:
+  fp8` (the loader's own encoder at load; of the five only the k|v rows
+  keep a bf16 copy, for the context features' GEMM; `checkpoint` keeps the
+  bf16 packed 12-bit). Lossy for the proposals only — the verify
+  is exact, so transcripts and sampling distributions are unchanged and
+  only the acceptance can move: one Spark, same binary, MT-Bench
+  nothink-greedy 3.53 against 3.52 tokens a pass, greedy C1 20.1 / 32.3 /
+  44.3 / 35.2 / 19.4 against 19.9 / 31.6 / 44.4 / 34.5 / 18.8 tok/s at 142.2
+  against 145.5 ms a pass, transcripts identical 4/4; every drafter recipe
+  ships `fp8`. The drafter's top-K over the mask rows' head logits ran one
+  block a row (thread 0 walking 4,096 candidates): 0.63 ms a step on one
+  Spark for 7 MB; now kTopkChunkSpan-wide chunk blocks (32 a row at most)
+  fold shared-memory lists and one block a row folds the chunks' partials
+  (`dflash2_topk_ws_bytes`): the same set in the same order (ties to the
+  lower id), 129 us for eight rows in the kernel test. The scheduled
+  verify depth's configuration refused the block drafter ("needs MTP"):
+  it takes `spec_enabled()` now, the block's confidence from the selector
+  walk's table — and the drafter recipes ship the schedule (2.0 ms a row
+  over a 130 / 66 / 34 ms pass on one / two / four Sparks, the traces'
+  cost model): four Sparks at eight slots 183.7 / 273.3 / 326.3 / 284.4 /
+  195.6 tok/s at 106 ms a step against the campaign's whole blocks 153.5 /
+  270.1 / 319.6 / 260.2 / 169.7 at 117, C1 level, transcripts identical;
+  sampled slots hold the whole block.
 - **Qwen3.8-27B drafter: sampled proposals, the one-node graph template,
   the first-miss histogram** (2026-10-05): a sampled request's block is now
   DRAWN — the recorded selector walk samples each draft from the selector's

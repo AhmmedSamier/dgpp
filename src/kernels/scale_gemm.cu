@@ -286,7 +286,7 @@ void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
     // decode bound run unsplit even when a workspace was supplied.
     const int group_start = selected_row / kMmaGemvMaxRowsPerLaunch * kMmaGemvMaxRowsPerLaunch;
     const int selected_group_rows = std::min(kMmaGemvMaxRowsPerLaunch, dispatch_rows - group_start);
-    if (selected_only && selected_group_rows > kMmaGemvMaxRows) {
+    if (selected_only && selected_group_rows > kMmaGemvSplitRows) {
       ws = nullptr;
       ws_bytes = 0;
     }

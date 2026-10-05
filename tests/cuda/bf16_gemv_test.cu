@@ -4,6 +4,7 @@
 // operands. Exercises both outputs (bf16, f32), strided activation views
 // (the KDA f_a/g_a K-column slices), ragged n, short and long k, and the
 // row-independence property (row r's bits at m=1 == its bits in m=3/m=8).
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -369,6 +370,44 @@ DGPP_TEST(bf16_gemv_multi_matches_four_single_launches_bitwise) {
       throw std::runtime_error("multi bf16 GEMV differs from four launches (m=" + std::to_string(m) + ")");
   }
   std::printf("[ OK ] multi GEMV: four problems bitwise their single launches at m = 1..4\n");
+}
+
+// The GDN in-projections of a decode batch of any width (m = 1..64,
+// 2026-10-05): the row-group launch (groups of four by blockIdx.y plus a
+// 1..3-row tail) is bitwise the chunked single launches it replaces, so a
+// request's rows read the same whether it decodes alone (<= 8 rows) or in
+// an eight-slot batch (64).
+DGPP_TEST(bf16_gemv_multi_rows_matches_the_chunked_launches_bitwise) {
+  for (const int m : {1, 2, 3, 4, 5, 8, 13, 32, 64}) {
+    const Problem a = make_problem(m, 48, 5120, 5120, 0x0f00 + m);  // in_proj_a's [48 x 5120]
+    const Problem b = make_problem(m, 48, 5120, 5120, 0x0f10 + m);
+    Device da(a), db(b);
+    uint16_t* oa = nullptr;
+    uint16_t* ob = nullptr;
+    DGPP_CUDA_OK(cudaMallocManaged(&oa, static_cast<size_t>(m) * 48 * 2));
+    DGPP_CUDA_OK(cudaMallocManaged(&ob, static_cast<size_t>(m) * 48 * 2));
+    for (int r0 = 0; r0 < m; r0 += 4) {  // the reference: chunks of four, each its own launch
+      const int rows = std::min(4, m - r0);
+      dgpp::Bf16GemvProblem p[2];
+      p[0].act = da.act + static_cast<size_t>(r0) * a.act_stride; p[0].act_row_stride = a.act_stride;
+      p[0].weight = da.w; p[0].out = oa + static_cast<size_t>(r0) * 48; p[0].n = 48;
+      p[1].act = db.act + static_cast<size_t>(r0) * b.act_stride; p[1].act_row_stride = b.act_stride;
+      p[1].weight = db.w; p[1].out = ob + static_cast<size_t>(r0) * 48; p[1].n = 48;
+      dgpp::launch_bf16_gemv_multi(p, 2, /*out_f32=*/false, rows, a.k, nullptr);
+    }
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    dgpp::Bf16GemvProblem q[2];
+    q[0].act = da.act; q[0].act_row_stride = a.act_stride; q[0].weight = da.w; q[0].out = da.out; q[0].n = 48;
+    q[1].act = db.act; q[1].act_row_stride = b.act_stride; q[1].weight = db.w; q[1].out = db.out; q[1].n = 48;
+    dgpp::launch_bf16_gemv_multi_rows(q, 2, /*out_f32=*/false, m, a.k, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    const bool same = std::memcmp(da.out, oa, static_cast<size_t>(m) * 48 * 2) == 0 &&
+                      std::memcmp(db.out, ob, static_cast<size_t>(m) * 48 * 2) == 0;
+    cudaFree(oa);
+    cudaFree(ob);
+    if (!same) throw std::runtime_error("row-group bf16 GEMV differs from the chunked launches (m=" + std::to_string(m) + ")");
+  }
+  std::printf("[ OK ] row-group GEMV: m = 1..64 bitwise the chunked four-row launches\n");
 }
 
 DGPP_TEST(bf16_gemv_dual_matches_two_single_launches_bitwise) {

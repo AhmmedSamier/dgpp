@@ -296,11 +296,16 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
   // launches that re-read the weights per row (mirrors QwenModel).
   gemm_.set_decode_rows(std::min(max_decode_rows_, dense_gemv_rows()));
   gw_.gemv_rows = dense_gemv_rows();
-  // NOTE: dense_gemv_rows() defaults to 16, but the FP8 GEMV row loop
+  // NOTE: dense_gemv_rows() defaults to 4, and the FP8 GEMV row loop
   // re-reads weights per ≤4-row chunk (and per single row when smem can't
-  // stage more, e.g. down-proj k=17408). Route m>=5 through the
-  // weights-once streaming MMA instead; ≤4-row decodes stay on GEMV.
-  gw_.mma_from_rows = 5;
+  // stage more, e.g. down-proj k=17408). Every decode row count takes the
+  // weights-once streaming MMA (2026-10-05; m >= 5 since 2026-10-03, the
+  // <= 4-row decodes on the GEMV): its per-row chain is the same at any m,
+  // 1..64, so a request's projections are bitwise the same alone, at
+  // every scheduled verify depth (2 / 4 / 6 / 8 rows) and in an eight-slot
+  // batch — the GEMV chain they took below five rows is a different
+  // chain, and a scheduled solo request's transcript moved with its depth.
+  gw_.mma_from_rows = 1;
   // Dense FP8 prefill bridge (mirrors QwenModel): m>128 products dequantize
   // the matrix into scratch and run Lt BF16. Weights here are always FP8,
   // so the bridge is unconditional.
@@ -427,7 +432,7 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
     df_qw_ = dfcfg_.local_q_row(world);
     df_kvr_ = dfcfg_.local_kv_row(world);
     df_i_ = dfcfg_.local_intermediate(world);
-    dfw_ = load_dflash2_weights(dfcfg_, dflash2_dir, stream_, rank, world);
+    dfw_ = load_dflash2_weights(dfcfg_, dflash2_dir, stream_, rank, world, dflash2_fp8_);
     {
       std::vector<float> host(dfcfg_.head_dim / 2);
       const double theta = dfcfg_.rope_theta;
@@ -472,6 +477,8 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
     // step instead of one per slot (2026-10-05; eight slots streamed the
     // head eight times — ~38 ms a step on one Spark).
     DGPP_CUDA_OK(cudaMalloc(&df_logits_, static_cast<size_t>(BR) * lm_vocab_count_ * 4));
+    df_topk_ws_bytes_ = dflash2_topk_ws_bytes(lm_vocab_count_, BR, dfcfg_.selector_top_k);
+    DGPP_CUDA_OK(cudaMalloc(&df_topk_ws_, df_topk_ws_bytes_));
     DGPP_CUDA_OK(cudaMalloc(&df_hidden32_, static_cast<size_t>(BR) * dfcfg_.selector_rank * 4));
     DGPP_CUDA_OK(cudaMalloc(&df_ids_, static_cast<size_t>(BR) * dfcfg_.selector_top_k * 4));
     DGPP_CUDA_OK(cudaMalloc(&df_sc_, static_cast<size_t>(BR) * dfcfg_.selector_top_k * 4));
@@ -488,6 +495,8 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
       DGPP_CUDA_OK(cudaMalloc(&df_table_, dflash2_topk_table_elems(BR, dfcfg_.selector_top_k, world) * 2));
     DGPP_CUDA_OK(cudaMallocHost(&df_mirror_h_, static_cast<size_t>(max_requests) * D * 4));
     DGPP_CUDA_OK(cudaMallocHost(&df_cands_h_, static_cast<size_t>(max_requests) * D * dfcfg_.selector_top_k * 4));
+    DGPP_CUDA_OK(cudaMalloc(&df_conf_, static_cast<size_t>(max_requests) * D * 4));
+    DGPP_CUDA_OK(cudaMemset(df_conf_, 0, static_cast<size_t>(max_requests) * D * 4));
     DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   }
   DGPP_CUDA_OK(cudaMalloc(&gdn_rec_base_, static_cast<size_t>(max_requests) * num_gdn_ * rec_elems_ * 4));
@@ -532,6 +541,10 @@ void Qwen35Model::pack_companions() {
     const int64_t dH = dfcfg_.hidden_size, dI = df_i_;
     const int64_t QW = df_qw_, KV = df_kvr_;
     for (const DFlash2LayerWeights& w : dfw_.layers) {
+      if (w.qkv_fp8 != nullptr) {  // the block matrices stream as fp8: only the k|v rows' companion
+        pack(w.kv_rows, 2 * KV, dH);
+        continue;
+      }
       pack(w.qkv, QW + 2 * KV, dH);
       pack(w.o, dH, QW);
       pack(w.gate, dI, dH);
@@ -583,6 +596,7 @@ Qwen35Model::~Qwen35Model() {
   cudaFree(df_delta_);
   cudaFree(df_h_);
   cudaFree(df_logits_);
+  cudaFree(df_topk_ws_);
   cudaFree(df_hidden32_);
   cudaFree(df_ids_);
   cudaFree(df_sc_);
@@ -592,6 +606,7 @@ Qwen35Model::~Qwen35Model() {
   cudaFree(df_tok_h_);
   cudaFree(df_io64_h_);
   cudaFree(df_table_);
+  cudaFree(df_conf_);
   cudaFreeHost(df_mirror_h_);
   cudaFreeHost(df_cands_h_);
   cudaFree(gdn_rec_base_);
@@ -792,14 +807,18 @@ void Qwen35Model::requant_mlp_pt(int slot, const Qwen35DenseMlpResident& m, cuda
 void Qwen35Model::head_gemv(const uint16_t* act, float* out, int rows, cudaStream_t stream) {
   const int H = cfg_.hidden_size;
   const int64_t V = lm_vocab_count_;
-  // Uniform FP8 dispatch (m<=4 GEMV rows, wider the weights-once streaming
-  // MMA): ~5ms at small row counts, half the BF16 bytes. Past 128 rows the
-  // blockwise dense kernel falls behind BF16 Lt (58ms vs 26ms at m=500,
-  // measured), so wide heads (group walks, diagnostics) keep BF16.
+  // Uniform FP8 dispatch: the weights-once streaming MMA at every decode
+  // row count (~5 ms, half the BF16 bytes). Its row chains are bitwise
+  // the same at any m (scale_gemm_test), so a request's logits are the
+  // same alone or in a batch; the <= 4-row GEMV path it used to take
+  // below five rows is a different chain, and a solo plain-decode request
+  // (one row) diverged from its eight-slot batch (2026-10-05). Past 128
+  // rows the blockwise dense kernel falls behind BF16 Lt (58ms vs 26ms at
+  // m=500, measured), so wide heads (group walks, diagnostics) keep BF16.
   if (head_fp8_enabled_ && rows <= 128) {
     launch_scale_gemm_f32(act, static_cast<size_t>(H), head_fp8_, head_scales_, out, rows,
                           static_cast<int>(V), H, stream, static_cast<size_t>(V),
-                          /*mma_from_rows=*/5);
+                          /*mma_from_rows=*/1);
     return;
   }
   gemm_.matmul(act, globals_.lm_head, out, rows, static_cast<int>(V), H, DType::BF16, GemmOut::F32,
@@ -883,8 +902,7 @@ void Qwen35Model::dense_mlp(const uint16_t* x, uint16_t* out, int tokens,
   // to 151 ms and costs the 1-row T=1 step 8 ms (119 vs 111: the form streams
   // this matrix at ~215 GB/s against the GEMV's 240 — a kernel item).
   launch_scale_gemm_bf16(gate_tmp_, static_cast<size_t>(I), m.down_fp8.payload, m.down_fp8.scales, out,
-                         tokens, static_cast<int>(H), static_cast<int>(I), stream, 0,
-                         std::min(gw_.mma_from_rows, 1));
+                         tokens, static_cast<int>(H), static_cast<int>(I), stream, 0, gw_.mma_from_rows);
 }
 
 size_t Qwen35Model::session_snapshot_bytes(const Qwen35TextConfig& cfg, int world, bool mtp) {
@@ -1016,9 +1034,12 @@ MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens,
     if (dfcfg) {
       const int64_t dH = dfcfg->hidden_size, dI = dfcfg->local_intermediate(world);
       const int64_t QW = dfcfg->local_q_row(world), KV = dfcfg->local_kv_row(world);
-      packed += static_cast<size_t>(dfcfg->num_hidden_layers) *
-                (Bf12Companions::planned_bytes(QW + 2 * KV, dH) + Bf12Companions::planned_bytes(dH, QW) +
-                 2 * Bf12Companions::planned_bytes(dI, dH) + Bf12Companions::planned_bytes(dH, dI));
+      if (!dflash2_fp8_)  // the fp8 block matrices take no companions (pack_companions)
+        packed += static_cast<size_t>(dfcfg->num_hidden_layers) *
+                  (Bf12Companions::planned_bytes(QW + 2 * KV, dH) + Bf12Companions::planned_bytes(dH, QW) +
+                   2 * Bf12Companions::planned_bytes(dI, dH) + Bf12Companions::planned_bytes(dH, dI));
+      else  // only the k|v rows keep a bf16 copy (the feature path), packed
+        packed += static_cast<size_t>(dfcfg->num_hidden_layers) * Bf12Companions::planned_bytes(2 * KV, dH);
       packed += dfcfg->target_layer_ids.size() * Bf12Companions::planned_bytes(dH, dH);
       packed += Bf12Companions::planned_bytes(dfcfg->selector_rank, dH);
     }
@@ -1030,7 +1051,9 @@ MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens,
   if (dfcfg) {
     if (!dfcfg->tp_divisible(world))
       throw std::invalid_argument("plan_memory: the DFlash2 drafter's heads / kv heads / MLP rows must divide across the world");
-    plan.add("dflash2 drafter weights (this rank's slices)", dflash2_weights_bytes(*dfcfg, world));
+    plan.add(dflash2_fp8_ ? "dflash2 drafter weights (this rank's slices; the block matrices as fp8, the rest bf16)"
+                        : "dflash2 drafter weights (this rank's slices)",
+             dflash2_weights_bytes(*dfcfg, world, dflash2_fp8_));
     const size_t QR = static_cast<size_t>(dfcfg->query_rows());
     // The stacked draft batch (dflash2_draft_batch): one verify batch's
     // slots per forward — max_decode_rows_ is max(decode_rows,
@@ -1455,8 +1478,35 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
           row0 += len;
         }
       } else {
+        const bool dbg = session_capture_layers_ && run.decode && !run.capture && gdn_ord == 0;
+        if (dbg) {
+          // The first GDN layer's input rows, before the layer reuses x_.
+          DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+          std::vector<uint16_t> snap(static_cast<size_t>(T) * H);
+          DGPP_CUDA_OK(cudaMemcpy(snap.data(), x_, snap.size() * 2, cudaMemcpyDeviceToHost));
+          out.debug_stages.push_back(std::move(snap));
+          out.debug_stage_names.emplace_back("layer input x");
+          std::vector<uint16_t> res(static_cast<size_t>(T) * H);
+          DGPP_CUDA_OK(cudaMemcpy(res.data(), resid_, res.size() * 2, cudaMemcpyDeviceToHost));
+          out.debug_stages.push_back(std::move(res));
+          out.debug_stage_names.emplace_back("residual in");
+        }
         gdn_->enqueue(x_, gdn_rec(req, gdn_ord), gdn_conv(req, gdn_ord), ao, T, stream_, rec_snap,
                       conv_snap, replay, run.pos0 > 0 && !run.decode);
+        if (dbg) {
+          // The first GDN layer's intermediates (the rows-invariance test).
+          DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+          for (const QwenGdnLayer::DebugStage& st : gdn_->debug_stages()) {
+            std::vector<uint16_t> snap(static_cast<size_t>(T) * st.width);
+            DGPP_CUDA_OK(cudaMemcpy(snap.data(), st.data, snap.size() * 2, cudaMemcpyDeviceToHost));
+            out.debug_stages.push_back(std::move(snap));
+            out.debug_stage_names.emplace_back(st.name);
+          }
+          std::vector<uint16_t> snap(static_cast<size_t>(T) * H);
+          DGPP_CUDA_OK(cudaMemcpy(snap.data(), ao, snap.size() * 2, cudaMemcpyDeviceToHost));
+          out.debug_stages.push_back(std::move(snap));
+          out.debug_stage_names.emplace_back("out_proj");
+        }
       }
       ++gdn_ord;
     } else {
@@ -1508,9 +1558,9 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
     if (run.decode) prefetch_attention_side(layer + 1);  // the next layer's input side (or the head)
     fold(mo, H);
     add_inplace_bf16(resid_, mo, static_cast<size_t>(T) * H, stream_);
-    if (run.capture_layers) {
+    if (run.capture_layers || (session_capture_layers_ && run.decode && !run.capture)) {
       // The fixture gates' per-layer residual read (never under a graph
-      // capture: the diagnostic forward only).
+      // capture: the diagnostic forward, or a test's eager decode walk).
       DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
       std::vector<uint16_t> snap(static_cast<size_t>(T) * H);
       DGPP_CUDA_OK(cudaMemcpy(snap.data(), resid_, snap.size() * 2, cudaMemcpyDeviceToHost));
@@ -1658,7 +1708,7 @@ void Qwen35Model::prefetch_head() {
 
 void Qwen35Model::dflash2_store_features(int T, const int32_t* d_req, const int64_t* d_pos) {
   const int H = cfg_.hidden_size;
-  const int L = dfcfg_.num_hidden_layers, QW = df_qw_, KV = df_kvr_;
+  const int L = dfcfg_.num_hidden_layers, KV = df_kvr_;
   const int KVH = df_kvh_, HD = dfcfg_.head_dim;
   const int32_t* tables = pool_.blocks().device_tables();
   const int bpr = static_cast<int>(pool_.total_blocks());
@@ -1668,8 +1718,9 @@ void Qwen35Model::dflash2_store_features(int T, const int32_t* d_req, const int6
     dflash2_norm_f32_bf16(df_acc_ + static_cast<size_t>(off) * H, dfw_.hidden_norm, df_norm_, rows, H,
                           dfcfg_.rms_norm_eps, stream_);
     for (int l = 0; l < L; ++l) {
-      // k|v rows of the fused layer weight (contiguous right after q).
-      const uint16_t* kv_w = dfw_.layers[l].qkv + static_cast<size_t>(QW) * H;
+      // k|v rows of the fused layer weight (a view right after q, or their
+      // own bf16 slot under the fp8 block matrices).
+      const uint16_t* kv_w = dfw_.layers[l].kv_rows;
       gemm_.matmul(df_norm_, kv_w, df_kv_, rows, 2 * KV, H, DType::BF16, GemmOut::BF16,
                    static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
       dflash2_norm_rope_bf16(df_kv_, 2 * KV, dfw_.layers[l].k_norm, d_pos + off, df_inv_freq_, df_kv_,
@@ -1702,7 +1753,7 @@ bool Qwen35Model::dflash2_draft(int req, int64_t bonus, std::vector<int32_t>* dr
   configure_gemm_rows(QR, true);
   const int reqs[1] = {req};
   df_block_layers(1, reqs, /*capture=*/false);
-  df_block_select(1, nullptr, /*capture=*/false);
+  df_block_select(1, reqs, /*capture=*/false);
   DGPP_CUDA_OK(cudaMemcpyAsync(df_tok_h_, df_tok_, D * 4, cudaMemcpyDeviceToHost, stream_));
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   drafts->assign(df_tok_h_, df_tok_h_ + D);
@@ -1749,8 +1800,12 @@ void Qwen35Model::df_block_layers(int slots, const int* reqs, bool capture) {
                  static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
     dflash2_grouped_conv_bf16(df_x_, df_delta_, w.attn_conv_base, df_xc_, R, QR, H, TAPS,
                               dfcfg_.conv_group_size, 2 * TAPS * G, stream_);
-    gemm_.matmul(df_xc_, w.qkv, df_qkv_, R, static_cast<int>(qkv_stride), H, DType::BF16,
-                 GemmOut::BF16, static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
+    if (w.qkv_fp8 != nullptr)
+      launch_mma_gemv_fp8_bf16(df_xc_, static_cast<size_t>(H), w.qkv_fp8, w.qkv_scales, df_qkv_, R,
+                               static_cast<int>(qkv_stride), H, qkv_stride, 7, 7, stream_, gemm_ws_, gemm_ws_bytes_);
+    else
+      gemm_.matmul(df_xc_, w.qkv, df_qkv_, R, static_cast<int>(qkv_stride), H, DType::BF16,
+                   GemmOut::BF16, static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
     dflash2_norm_rope_bf16(df_qkv_, qkv_stride, w.q_norm, df_pos_, df_inv_freq_, df_q_, QW, R, NH, HD,
                            eps, stream_);
     dflash2_norm_rope_bf16(df_qkv_ + QW, qkv_stride, w.k_norm, df_pos_, df_inv_freq_, df_qkv_ + QW,
@@ -1770,8 +1825,12 @@ void Qwen35Model::df_block_layers(int slots, const int* reqs, bool capture) {
                                df_attn_ + ro * QW, stream_);
     }
     uint16_t* ao = stage(df_o_, H);
-    gemm_.matmul(df_attn_, w.o, ao, R, H, QW, DType::BF16, GemmOut::BF16, QW, gemm_ws_,
-                 gemm_ws_bytes_, stream_);
+    if (w.o_fp8 != nullptr)
+      launch_mma_gemv_fp8_bf16(df_attn_, static_cast<size_t>(QW), w.o_fp8, w.o_scales, ao, R, H, QW,
+                               static_cast<size_t>(H), 7, 7, stream_, gemm_ws_, gemm_ws_bytes_);
+    else
+      gemm_.matmul(df_attn_, w.o, ao, R, H, QW, DType::BF16, GemmOut::BF16, QW, gemm_ws_,
+                   gemm_ws_bytes_, stream_);
     fold(ao, H);
     dflash2_grouped_conv_bf16(ao, df_delta_ + TAPS * G, w.attn_conv_base + static_cast<size_t>(TAPS) * H,
                               df_xc_, R, QR, H, TAPS, dfcfg_.conv_group_size, 2 * TAPS * G, stream_);
@@ -1781,14 +1840,25 @@ void Qwen35Model::df_block_layers(int slots, const int* reqs, bool capture) {
                  static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
     dflash2_grouped_conv_bf16(df_x_, df_delta_, w.mlp_conv_base, df_xc_, R, QR, H, TAPS,
                               dfcfg_.conv_group_size, 2 * TAPS * G, stream_);
-    gemm_.matmul(df_xc_, w.gate, df_gate_, R, I, H, DType::BF16, GemmOut::BF16,
-                 static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
-    gemm_.matmul(df_xc_, w.up, df_up_, R, I, H, DType::BF16, GemmOut::BF16, static_cast<size_t>(H),
-                 gemm_ws_, gemm_ws_bytes_, stream_);
+    if (w.gate_fp8 != nullptr) {
+      launch_mma_gemv_fp8_bf16(df_xc_, static_cast<size_t>(H), w.gate_fp8, w.gate_scales, df_gate_, R, I, H,
+                               static_cast<size_t>(I), 7, 7, stream_, gemm_ws_, gemm_ws_bytes_);
+      launch_mma_gemv_fp8_bf16(df_xc_, static_cast<size_t>(H), w.up_fp8, w.up_scales, df_up_, R, I, H,
+                               static_cast<size_t>(I), 7, 7, stream_, gemm_ws_, gemm_ws_bytes_);
+    } else {
+      gemm_.matmul(df_xc_, w.gate, df_gate_, R, I, H, DType::BF16, GemmOut::BF16,
+                   static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
+      gemm_.matmul(df_xc_, w.up, df_up_, R, I, H, DType::BF16, GemmOut::BF16, static_cast<size_t>(H),
+                   gemm_ws_, gemm_ws_bytes_, stream_);
+    }
     swiglu_limit_bf16(df_gate_, df_up_, df_mlp_, static_cast<int64_t>(R) * I, INFINITY, stream_);
     uint16_t* mo = stage(df_o_, H);
-    gemm_.matmul(df_mlp_, w.down, mo, R, H, I, DType::BF16, GemmOut::BF16,
-                 static_cast<size_t>(I), gemm_ws_, gemm_ws_bytes_, stream_);
+    if (w.down_fp8 != nullptr)
+      launch_mma_gemv_fp8_bf16(df_mlp_, static_cast<size_t>(I), w.down_fp8, w.down_scales, mo, R, H, I,
+                               static_cast<size_t>(H), 7, 7, stream_, gemm_ws_, gemm_ws_bytes_);
+    else
+      gemm_.matmul(df_mlp_, w.down, mo, R, H, I, DType::BF16, GemmOut::BF16,
+                   static_cast<size_t>(I), gemm_ws_, gemm_ws_bytes_, stream_);
     fold(mo, H);
     dflash2_grouped_conv_bf16(mo, df_delta_ + TAPS * G, w.mlp_conv_base + static_cast<size_t>(TAPS) * H,
                               df_xc_, R, QR, H, TAPS, dfcfg_.conv_group_size, 2 * TAPS * G, stream_);
@@ -1808,7 +1878,8 @@ void Qwen35Model::df_block_select(int slots, const int* reqs, bool capture) {
   const int H = cfg_.hidden_size;
   const int QR = dfcfg_.query_rows(), D = dfcfg_.drafts();
   // The recorded walk draws for a stochastic request (the armed
-  // proposals); the eager walk is the argmax.
+  // proposals); the eager walk is the argmax. Every walk with a slot list
+  // writes the slots' confidence (the scheduled verify depth's input).
   const bool sampled = capture && df_specs_ != nullptr && reqs != nullptr;
   const int64_t V = lm_vocab_count_;
   const int topk = dfcfg_.selector_top_k, rank = dfcfg_.selector_rank;
@@ -1816,7 +1887,7 @@ void Qwen35Model::df_block_select(int slots, const int* reqs, bool capture) {
   // k*QR + 1 .. k*QR + D; the anchor rows' logits and top-K go unread).
   const int R = slots * QR;
   head_gemv(df_h_, df_logits_, R, stream_);
-  dflash2_topk_f32(df_logits_, df_ids_, df_sc_, V, R, topk, stream_);
+  dflash2_topk_f32(df_logits_, df_ids_, df_sc_, V, R, topk, stream_, df_topk_ws_, df_topk_ws_bytes_);
   if (world_ > 1) {
     const int rows = R;
     const size_t elems = dflash2_topk_table_elems(rows, topk, world_);
@@ -1840,7 +1911,8 @@ void Qwen35Model::df_block_select(int slots, const int* reqs, bool capture) {
                           dfw_.pred_codebook, dfw_.succ_codebook, df_tokens_ + ro, df_tok_ + co, D, topk,
                           rank, stream_, sampled ? df_pos_ + ro : nullptr,
                           sampled ? df_specs_ + reqs[k] : nullptr, sampled ? df_props_ + po : nullptr,
-                          sampled && df_props_h_ != nullptr ? df_props_h_ + po : nullptr);
+                          sampled && df_props_h_ != nullptr ? df_props_h_ + po : nullptr,
+                          reqs != nullptr ? df_conf_ + static_cast<size_t>(reqs[k]) * D : nullptr);
   }
 }
 
@@ -1964,7 +2036,7 @@ void Qwen35Model::dflash2_draft_batch(const std::vector<int>& reqs,
   embed_gather_bf16(globals_.embed, df_tokens_, df_resid_, R, H, stream_);
   configure_gemm_rows(R, true);
   df_block_layers(NS, creqs.data(), /*capture=*/false);
-  df_block_select(NS, nullptr, /*capture=*/false);
+  df_block_select(NS, creqs.data(), /*capture=*/false);
   DGPP_CUDA_OK(cudaMemcpyAsync(df_tok_h_, df_tok_, static_cast<size_t>(NS) * D * 4,
                                cudaMemcpyDeviceToHost, stream_));
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));

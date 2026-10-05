@@ -309,6 +309,11 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
         else if (p.key == "decode_graph") e.decode_graph = boolean(x, ek, what);
         else if (p.key == "mtp") e.mtp = boolean(x, ek, what);
         else if (p.key == "dflash_model") e.dflash_model = text(x, ek, what);
+        else if (p.key == "dflash_weights") {
+          e.dflash_weights = text(x, ek, what);
+          if (e.dflash_weights != "checkpoint" && e.dflash_weights != "fp8")
+            fail(what, "'" + ek + "' must be checkpoint or fp8");
+        }
         else if (p.key == "dflash_verify_graph") e.dflash_verify_graph = boolean(x, ek, what);
         else if (p.key == "dflash_draft_batch") e.dflash_draft_batch = boolean(x, ek, what);
         else if (p.key == "dflash_depth") e.dflash_depth = static_cast<int>(integer(x, ek, what, 0, 7));

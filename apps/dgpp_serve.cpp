@@ -1430,6 +1430,7 @@ int main(int argc, char** argv) {
   std::string ckpt, model_id, peer, dflash_model;
   bool dflash_verify_graph = true, dflash_draft_batch = true;
   int dflash_depth = 0;
+  std::string dflash_weights = "checkpoint";  // engine.dflash_weights: checkpoint | fp8
   uint16_t port = 8080, fabric_port = 29970, journal_port = 29971;
   // A peer's metrics listener (rank_metrics.hpp): 0 = off; the address
   // defaults to this rank's node in the config.
@@ -1485,6 +1486,7 @@ int main(int argc, char** argv) {
   bool no_eos = false, decode_graph = false, mtp = false;
   int mtp_depth = 1;  // draft tokens per step (needs --mtp; 1..5)
   bool no_mtp_cli = false, mtp_depth_cli = false, mtp_schedule_cli = false;  // given on the command line
+  bool no_dflash_cli = false;
   bool mtp_depth_explicit = false;  // named by the flag or the file (else the family's default)
   bool mtp_schedule = false;  // the confidence-scheduled verify depth (needs --mtp)
   double mtp_schedule_row_ms = 8.0;
@@ -1579,6 +1581,7 @@ int main(int argc, char** argv) {
     dflash_verify_graph = e.dflash_verify_graph;
     dflash_draft_batch = e.dflash_draft_batch;
     dflash_depth = e.dflash_depth;
+    dflash_weights = e.dflash_weights;
     mtp_depth = e.mtp_depth;
     mtp_depth_explicit = e.mtp_depth_set;
     mtp_schedule = e.mtp_schedule;
@@ -1685,10 +1688,12 @@ int main(int argc, char** argv) {
       // --no-mtp gives; --mtp [--mtp-depth N] beside it is the MTP world.
       dflash_model.clear();
       decode_graph = true;
+      no_dflash_cli = true;
     }
     else if (a == "--no-dflash-verify-graph") dflash_verify_graph = false;
     else if (a == "--no-dflash-draft-batch") dflash_draft_batch = false;
     else if (a == "--dflash-depth") dflash_depth = std::stoi(next());
+    else if (a == "--dflash-weights") dflash_weights = next();
     else if (a == "--no-mtp") {  // the plain T=1 world from an MTP template (the A/B knob)
       mtp = false;
       no_mtp_cli = true;
@@ -1783,6 +1788,12 @@ int main(int argc, char** argv) {
     }
     if (!mtp_schedule_cli) mtp_schedule = false;
   }
+  // --no-dflash on a drafter template that schedules the verify depth
+  // (engine.mtp_schedule, the drafter recipes since 2026-10-05): the
+  // schedule and its cost model are the drafter's — the plain world, and
+  // the MTP world beside it (--mtp --mtp-depth N), run without it unless
+  // the command line asked for it.
+  if (no_dflash_cli && !mtp_schedule_cli) mtp_schedule = false;
   // The DFlash2 block drafter (models/qwen/dflash2.hpp): a standalone
   // checkpoint (a directory or a cached HF id) that replaces the MTP
   // draft. World 1 without the decode graph is the eager engine's drafter
@@ -1799,8 +1810,8 @@ int main(int argc, char** argv) {
       DGPP_LOG_ERROR("engine.dflash_model past world 1 runs on the decode graph: set engine.decode_graph");
       return 2;
     }
-    if (mtp_schedule) {
-      DGPP_LOG_ERROR("engine.mtp_schedule needs the MTP draft; the block drafter verifies its whole block");
+    if (mtp_schedule && dflash_batch_rows > 0) {
+      DGPP_LOG_ERROR("engine.mtp_schedule and engine.dflash_batch_rows are exclusive: the schedule sets a step's verify rows");
       return 2;
     }
     if (std::filesystem::is_directory(dflash_model)) {
@@ -1855,7 +1866,7 @@ int main(int argc, char** argv) {
         "batchmin={} cand={} "
         "pcgib={} adm={} win={} pfbudget={} pfidle={} pmin={} phead={} pace={} inflight={} "
         "reasoning_in_content={} "
-        "rs={} dflash={}",
+        "rs={} dflash={} dfw={}",
         model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port, max_concurrency,
         kv_capacity, kv_dtype, ngram_table, dense_weights, mtp_expert_format, bf16_weights, fp8_head, prefill,
         embed_sharding, default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0,
@@ -1872,7 +1883,7 @@ int main(int argc, char** argv) {
                                    rope_scaling->beta_fast, rope_scaling->beta_slow,
                                    rope_scaling->attn_factor, rope_scaling->mrope_cache_factor)
                      : "off",
-        dflash_model.empty() ? "off" : dflash_model);
+        dflash_model.empty() ? "off" : dflash_model, dflash_weights);
   };
   if ((world > 1 || rank > 0) && !memory_plan_only) {
     try {
@@ -1911,6 +1922,7 @@ int main(int argc, char** argv) {
         ws.dflash_verify_graph = dflash_verify_graph;
         ws.dflash_draft_batch = dflash_draft_batch;
         ws.dflash_depth = dflash_depth;
+        ws.dflash_weights = dflash_weights;
         ws.expert_gemm = expert_gemm;
         ws.expert_gemm_prefetch = expert_gemm_prefetch;
         ws.expert_tile_list = expert_tile_list;
@@ -1986,6 +1998,7 @@ int main(int argc, char** argv) {
         dflash_verify_graph = ws.dflash_verify_graph;
         dflash_draft_batch = ws.dflash_draft_batch;
         dflash_depth = ws.dflash_depth;
+        dflash_weights = ws.dflash_weights;
         expert_gemm = ws.expert_gemm;
         expert_gemm_prefetch = ws.expert_gemm_prefetch;
         expert_tile_list = ws.expert_tile_list;
@@ -2150,6 +2163,11 @@ int main(int argc, char** argv) {
   // prefill recipe and the BF16 lm head requantized to block FP8.
   dgpp::Qwen35Model::set_prefill_fp8_per_tensor(prefill_fp8_per_tensor);
   dgpp::Qwen35Model::set_dense_weights_fp8(dense_weights == "fp8");
+  if (dflash_weights != "checkpoint" && dflash_weights != "fp8") {
+    DGPP_LOG_ERROR("--dflash-weights must be checkpoint or fp8, got '{}'", dflash_weights);
+    return 2;
+  }
+  dgpp::Qwen35Model::set_dflash2_weights_fp8(dflash_weights == "fp8");
   if (dflash_depth < 0 || dflash_depth > 7) {
     DGPP_LOG_ERROR("engine.dflash_depth (--dflash-depth) must be in [0, 7], got {}", dflash_depth);
     return 2;
@@ -2241,13 +2259,17 @@ int main(int argc, char** argv) {
     DGPP_LOG_ERROR("--stats-interval-s must be >= 0, got {}", stats_interval_s);
     return 2;
   }
-  if (mtp_schedule && !(mtp && decode_graph)) {
-    DGPP_LOG_ERROR("--mtp-schedule needs --decode-graph --mtp (the scheduled verify depth is a graph-engine feature)");
+  if (mtp_schedule && !((mtp || !dflash_model.empty()) && decode_graph)) {
+    DGPP_LOG_ERROR("--mtp-schedule needs --decode-graph with --mtp or a DFlash2 drafter (the scheduled verify depth is a graph-engine feature)");
     return 2;
   }
+  // min_depth's ceiling is the draft width: mtp_depth for the MTP draft;
+  // with a DFlash2 drafter the block's drafts, known once the drafter's
+  // config is read (the graph engine's configure_verify_schedule refuses a
+  // min_depth past it).
   if (mtp_schedule && (!(mtp_schedule_row_ms > 0.0) || mtp_schedule_base_ms < 0.0 || mtp_schedule_lambda < 0.0 ||
-                       mtp_schedule_min_depth < 1 || mtp_schedule_min_depth > mtp_depth)) {
-    DGPP_LOG_ERROR("--mtp-schedule: row_ms > 0, base_ms >= 0, lambda >= 0 and min_depth in [1, mtp_depth] (got {}, {}, {}, {})",
+                       mtp_schedule_min_depth < 1 || (dflash_model.empty() && mtp_schedule_min_depth > mtp_depth))) {
+    DGPP_LOG_ERROR("--mtp-schedule: row_ms > 0, base_ms >= 0, lambda >= 0 and min_depth in [1, the draft width] (got {}, {}, {}, {})",
                    mtp_schedule_row_ms, mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth);
     return 2;
   }

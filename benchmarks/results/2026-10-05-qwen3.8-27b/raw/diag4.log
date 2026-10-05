@@ -1,0 +1,72 @@
+
+=== 16:02:18 production down (the diagnostics)
+2026-10-05 16:02:26.713 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 16:02:26 E1 depth0 up (schedule off, --dflash-depth 0)
+2026-10-05 16:02:53.061 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /tmp/claude-1000/-home-stephen-workspace-dgpp/cb0c821d-8834-47e0-869d-81a0e620a1d4/scratchpad/w1_nosched.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/diag4/e1-depth0/server)
+[e1-depth0] solo vs solo again: IDENTICAL
+[e1-depth0] solo vs beside 0 others (started at once): IDENTICAL
+[e1-depth0] solo vs solo again: IDENTICAL
+[e1-depth0] solo vs beside 0 others (started at once): IDENTICAL
+
+=== 16:04:13 E1 depth0 transcripts vs depth0
+json   256 tokens    8.52 s    33.3 ms/token (wall, prefill included) length | We need to respond to user: "Return a JSON array of 8 object
+
+=== 16:04:55 E1 depth0 down
+2026-10-05 16:04:58.916 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/diag4/e1-depth0/server
+
+=== 16:04:58 E1 depth3 up (schedule off, --dflash-depth 3)
+2026-10-05 16:05:21.253 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /tmp/claude-1000/-home-stephen-workspace-dgpp/cb0c821d-8834-47e0-869d-81a0e620a1d4/scratchpad/w1_nosched.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/diag4/e1-depth3/server)
+[e1-depth3] solo vs solo again: IDENTICAL
+[e1-depth3] solo vs beside 0 others (started at once): IDENTICAL
+[e1-depth3] solo vs solo again: IDENTICAL
+[e1-depth3] solo vs beside 0 others (started at once): IDENTICAL
+
+=== 16:06:41 E1 depth3 transcripts vs depth0
+identical transcripts: 4 of 4
+
+=== 16:07:23 E1 depth3 down
+2026-10-05 16:07:25.973 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/diag4/e1-depth3/server
+
+=== 16:07:28 E1 depth1 up (schedule off, --dflash-depth 1)
+2026-10-05 16:07:50.271 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /tmp/claude-1000/-home-stephen-workspace-dgpp/cb0c821d-8834-47e0-869d-81a0e620a1d4/scratchpad/w1_nosched.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/diag4/e1-depth1/server)
+[e1-depth1] solo vs solo again: IDENTICAL
+[e1-depth1] solo vs beside 0 others (started at once): IDENTICAL
+[e1-depth1] solo vs solo again: IDENTICAL
+[e1-depth1] solo vs beside 0 others (started at once): IDENTICAL
+
+=== 16:09:10 E1 depth1 transcripts vs depth0
+identical transcripts: 4 of 4
+
+=== 16:09:52 E1 depth1 down
+2026-10-05 16:09:54.987 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/diag4/e1-depth1/server
+
+=== 16:09:57 E2 up (the template, --mtp-schedule-fixed-lambda)
+2026-10-05 16:10:21.304 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/diag4/e2-fixed-lambda/server)
+[e2] solo vs solo again: IDENTICAL
+[e2] solo vs beside 0 others (started at once): IDENTICAL
+[e2] solo vs solo again: IDENTICAL
+[e2] solo vs beside 0 others (started at once): IDENTICAL
+[e2] solo vs solo again: IDENTICAL
+[e2] solo vs beside 7 others (joining after 6 s): IDENTICAL
+
+=== 16:12:33 E2 transcripts vs E1 depth0
+identical transcripts: 3 of 4
+
+=== 16:13:18 E2 down
+2026-10-05 16:13:21.141 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/diag4/e2-fixed-lambda/server
+
+=== 16:13:21 E3 up (the template, --no-prefix-cache)
+2026-10-05 16:13:43.471 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/diag4/e3-noprefix/server)
+[e3] solo vs solo again: DIFFERENT at char 872 of 1452/1461 (256/256 tokens)
+[e3] solo vs beside 0 others (started at once): DIFFERENT at char 872 of 1452/1461 (256/256 tokens)
+[e3] solo vs solo again: IDENTICAL
+[e3] solo vs beside 0 others (started at once): IDENTICAL
+
+=== 16:15:02 E3 down
+2026-10-05 16:15:04.882 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/diag4/e3-noprefix/server
+
+=== 16:15:06 production up
+2026-10-05 16:15:45.916 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+DIAG4_DONE 16:15:46

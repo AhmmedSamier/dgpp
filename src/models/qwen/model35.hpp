@@ -167,8 +167,16 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   // engine.dense_weights = fp8 (the BF16 lm head requantized to block FP8).
   // Both change greedy transcripts; the defaults are the exact paths.
   static void set_prefill_fp8_per_tensor(bool on) { prefill_fp8_per_tensor_ = on; }
+  // engine.dflash_weights fp8: the drafter's five block matrices served as
+  // block-128 E4M3 (lossy for the proposals only; the target's verify is
+  // exact whatever the drafter proposes). Before plan_memory / the ctor.
+  static void set_dflash2_weights_fp8(bool on) { dflash2_fp8_ = on; }
   static bool prefill_fp8_per_tensor() { return prefill_fp8_per_tensor_; }
   static void set_dense_weights_fp8(bool on) { dense_weights_fp8_ = on; }
+  // Test gate: decode walks (eager, not under a capture) copy every layer's
+  // output residual into Outputs::layer_states, as the diagnostic forward
+  // does (the row-count invariance test's per-layer bisection).
+  static void set_session_capture_layers(bool on) { session_capture_layers_ = on; }
   static bool dense_weights_fp8() { return dense_weights_fp8_; }
   // The DFlash2 drafter's serving options (engine.dflash_verify_graph,
   // engine.dflash_draft_batch, engine.dflash_depth), set from the cluster
@@ -308,6 +316,11 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
     df_props_stride_ = stride;
   }
   bool dflash2_proposals_armed() const { return df_specs_ != nullptr; }
+  // The selector's confidence per draft, [max_requests][drafts] acceptance
+  // logits written by every walk (recorded or eager) at the slot's row —
+  // the scheduled verify depth's input for the block drafter
+  // (engine.mtp_schedule with a drafter).
+  const float* dflash2_confidence() const { return df_conf_; }
   // The mirror the recorded draft of slot `req` publishes (readable once
   // the replay's end event has passed).
   const int32_t* block_drafts_host(int req) const {
@@ -416,6 +429,8 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   size_t gemm_ws_bytes_ = 0;
   size_t dense_bridge_bytes_ = 0;
   inline static bool prefill_fp8_per_tensor_ = false;
+  inline static bool dflash2_fp8_ = false;
+  inline static bool session_capture_layers_ = false;
   inline static bool dflash_verify_graph_ = true;
   inline static bool dflash_draft_batch_ = true;
   inline static int dflash_depth_ = 0;
@@ -488,6 +503,8 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   uint16_t* df_delta_ = nullptr;  // [query_rows, 2*taps*groups] the conv deltas
   uint16_t* df_h_ = nullptr;      // [query_rows, H] the draft's final norm rows
   float* df_logits_ = nullptr;    // [drafts, V] F32 (the mask rows' head rows)
+  void* df_topk_ws_ = nullptr;    // the top-K chunk partials (dflash2_topk_ws_bytes)
+  size_t df_topk_ws_bytes_ = 0;
   float* df_hidden32_ = nullptr;  // [drafts, rank] F32 (hidden_projection)
   int32_t* df_ids_ = nullptr;     // [drafts, top_k]
   float* df_sc_ = nullptr;        // [drafts, top_k]
@@ -499,6 +516,7 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   uint16_t* df_table_ = nullptr;   // world > 1: the top-K gather table (the eager fold's buffer)
   int32_t* df_mirror_h_ = nullptr;  // pinned [max_requests, drafts]: the recorded drafts
   int32_t* df_cands_h_ = nullptr;   // pinned [max_requests, drafts, top_k]: the walked candidates
+  float* df_conf_ = nullptr;        // [max_requests, drafts]: the selector's confidence (acceptance logits)
   // The armed proposals (dflash2_arm_proposals): the engine's spec table
   // and proposal rows, `df_props_stride_` rows per request.
   const SampleSpec* df_specs_ = nullptr;

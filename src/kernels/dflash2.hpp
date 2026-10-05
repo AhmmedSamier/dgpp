@@ -92,8 +92,10 @@ void dflash2_block_attn_split(const uint16_t* q, int64_t q_row_stride, const uin
 
 // Per-row top-K of fp32 logits (descending by score, ties to the lower id):
 // the candidate sets the selector walks. K <= 32.
+// The partials workspace the chunked top-K needs for `rows` rows of `vocab`.
+size_t dflash2_topk_ws_bytes(int64_t vocab, int rows, int k);
 void dflash2_topk_f32(const float* logits, int32_t* ids, float* scores, int64_t vocab, int rows,
-                      int k, cudaStream_t stream);
+                      int k, cudaStream_t stream, void* ws, size_t ws_bytes);
 
 // The DFlash2 candidate path selector: the scores[l][p][c] table
 // unary[l][c] + <pred_code[id(l-1, p)] * hidden[l], succ_code[id(l, c)]>
@@ -117,11 +119,18 @@ void dflash2_topk_f32(const float* logits, int32_t* ids, float* scores, int64_t 
 // and writes n = 0 (the plain P(draft) rule). `proposal_host` (pinned,
 // optional) mirrors the proposals for the host's fallback. Without `spec`
 // the walk is the argmax and no proposal is written.
+//
+// `conf` (optional, [steps]): the selector's confidence per step as an
+// acceptance logit — logit of the chosen candidate's softmax mass at the
+// walk's temperature (1 for the argmax walk, the draft temperature for a
+// drawn one), clamped to [-30, 30] — the scheduled verify depth's input
+// (engine/verify_schedule.hpp), as the MTP draft pick's own probability is.
 void dflash2_selector_walk(const int32_t* ids, const float* unary, const float* hidden,
                            const uint16_t* pred_cb, const uint16_t* succ_cb, const int64_t* anchor,
                            int32_t* tokens, int steps, int k, int rank, cudaStream_t stream,
                            const int64_t* pos = nullptr, const SampleSpec* spec = nullptr,
-                           DraftProposal* proposal = nullptr, DraftProposal* proposal_host = nullptr);
+                           DraftProposal* proposal = nullptr, DraftProposal* proposal_host = nullptr,
+                           float* conf = nullptr);
 
 // ---- the recorded block draft (the graph engine's block proposal) -------------
 //
