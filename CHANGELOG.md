@@ -98,7 +98,17 @@ The history by milestone. The dated engineering record in
   reading), so every Qwen3.8-27B template is now the drafter — the two- and
   four-node templates switch from MTP depth 3, which stays as their mode
   (`--no-dflash --mtp --mtp-depth 3`) — and the benchmarks page carries
-  the 2026-10-05 campaign on the switched templates.
+  the 2026-10-05 campaign on the switched templates: greedy C1 (prose /
+  code / json / math / chat) 19.8 / 31.5 / 44.2 / 34.3 / 18.7 tok/s at 146 ms
+  a pass on one Spark (MTP depth 2's mode 18.0 / 20.4 / 22.0 / 21.0 / 16.4
+  at 130), 35.4 / 55.3 / 76.6 / 62.6 / 32.9 at 82 ms on two (MTP depth 3
+  34.2 / 40.3 / 46.0 / 42.4 / 31.2 at 78), 57.4 / 88.4 / 122.1 / 101.5 / 53.4
+  at 50 ms on four (57.7 / 68.7 / 78.1 / 72.3 / 50.5 at 45); eight slots
+  89.8 / 146.6 / 176.8 / 142.4 / 95.8, 127.1 / 218.0 / 263.6 / 219.1 / 144.5
+  and 153.5 / 270.1 / 319.6 / 260.2 / 169.7; HumanEval 156–157 / 164, GSM8K
+  291–292 / 300 and the schema extraction 100 / 100 at every world. The
+  solo-against-batched exact-text check still reads DIFFERENT on one and
+  four nodes and IDENTICAL on two, as on 2026-10-04 (under investigation).
   The one-node template runs the drafter on the graph engine
   (`decode_graph: true`; the eager engine's transcripts, chat 71 against
   95 ms a token). The GDN in-projections of a 5–8-row verify take the

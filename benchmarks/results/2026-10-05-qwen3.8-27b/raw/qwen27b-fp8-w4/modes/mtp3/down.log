@@ -1,0 +1,9 @@
+2026-10-05 10:26:38.376 === SIGINT rank 0 (1885736) — the stop record releases the peers
+2026-10-05 10:26:40.377 === waiting for the peers to drain
+2026-10-05 10:26:44.347 === op-stream identity (every rank)
+2026-10-05 10:26:44.347 689a697d2d925a716b7ce62972655a6c  /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/qwen27b-fp8-w4/modes/mtp3/server/serve_rank0.ops
+2026-10-05 10:26:44.348 689a697d2d925a716b7ce62972655a6c  /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/qwen27b-fp8-w4/modes/mtp3/server/serve_rank1.ops
+2026-10-05 10:26:44.348 689a697d2d925a716b7ce62972655a6c  /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/qwen27b-fp8-w4/modes/mtp3/server/serve_rank2.ops
+2026-10-05 10:26:44.348 689a697d2d925a716b7ce62972655a6c  /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/qwen27b-fp8-w4/modes/mtp3/server/serve_rank3.ops
+2026-10-05 10:26:44.348 op streams: identical across 4 ranks
+2026-10-05 10:26:44.348 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/qwen27b-fp8-w4/modes/mtp3/server

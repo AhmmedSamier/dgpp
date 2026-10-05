@@ -1,7 +1,7 @@
 {
-  "started_at": "2026-10-05T05:44:58.291320+00:00",
-  "commit": "e67c0a91e6cbddfae3b92ce514a0d96bb2395ba2",
-  "tracked_diff": "",
+  "started_at": "2026-10-05T09:15:32.992246+00:00",
+  "commit": "5b57904274d3c1f6f5863652903768ecb9a0c01c",
+  "tracked_diff": "benchmarks/results/2026-10-05-qwen3.8-27b/campaign.log | 6 +++++-\n 1 file changed, 5 insertions(+), 1 deletion(-)",
   "site_settings": {
     "DGPP_HTTP_PORT": "18080",
     "DGPP_FABRIC_PORT": "29970",
@@ -56,8 +56,8 @@
       "50307d4c4cde6860d4eee73e2547cd786fe8e8a4"
     ]
   },
-  "binary_sha256": "497f83e23fe5f3e896b6b3da2c0a1afb8f133f898d5a68152f43c08a3a2aafe9",
-  "version": "dgpp-serve 0.1.0+ge76cd14f8b7d (git e76cd14f8b7d, cuda 13.0)",
+  "binary_sha256": "0e38b02f18123ecadcf4cdd5f0bb96f827363e827d98ba90401120f021496479",
+  "version": "dgpp-serve 0.1.0+g5b57904274d3.dirty (git 5b57904274d3, cuda 13.0)",
   "benchmark_environment": {
     "CUDA_DEVICE_MAX_CONNECTIONS": "32"
   },

@@ -66,12 +66,12 @@ verify, the drafter's matrices packed lossless 12-bit; 15.0 GiB of weights
 and a 13 GiB KV pool a rank at 256K on two Sparks, eight slots. The MTP
 depth-3 world is each template's mode (`--no-dflash --mtp --mtp-depth 3`),
 plain decode `--no-dflash`. Greedy C1 by class (prose / code / json / math /
-chat), 2026-10-04 legs: the drafter 32.1 / 50.3 / 71.0 / 57.6 / 30.3 tok/s on
-two nodes at 94 ms a pass and 54.9 / 86.3 / 120.8 / 101.2 / 52.6 on four at
-52 ms; MTP depth 3 34.0 / 40.5 / 46.4 / 42.6 / 30.9 at 80 ms and 57.9 / 69.9 /
-79.9 / 73.3 / 50.4 at 46 ms — the drafter ahead on code, JSON and math by
-29–58 % on four nodes, within 5 % on prose and chat, and ahead on sampled
-traffic ([docs/mtp.md](../mtp.md#on-the-graph-worlds-2026-10-04-92)).
+chat), the 2026-10-05 campaign: the drafter 35.4 / 55.3 / 76.6 / 62.6 / 32.9
+tok/s on two nodes at 82 ms a pass and 57.4 / 88.4 / 122.1 / 101.5 / 53.4 on
+four at 50 ms; MTP depth 3 34.2 / 40.3 / 46.0 / 42.4 / 31.2 at 78 ms and
+57.7 / 68.7 / 78.1 / 72.3 / 50.5 at 45 ms — the drafter ahead on code, JSON
+and math by 29–56 % on four nodes, level on prose, 6 % ahead on chat, and
+ahead on sampled traffic ([docs/mtp.md](../mtp.md#on-the-graph-worlds-2026-10-04-92)).
 
 Both worlds decode through the family's own kernels: the DeltaNet chunked
 and recurrent forms, the query-tiled prefill attention and split-KV decode
@@ -100,7 +100,7 @@ The serving numbers — single-request engine rates by prompt class,
 concurrency sweeps, cold prefill at 2K / 8K / 32K, the decode modes and the
 full HumanEval / GSM8K / schema evaluation — are the
 [benchmarks page](../benchmarks.md)'s Qwen3.8-27B rows, from the
-[2026-10-04 campaign](../../benchmarks/results/2026-10-04-qwen3.8-27b/README.md).
+[2026-10-05 campaign](../../benchmarks/results/2026-10-05-qwen3.8-27b/README.md).
 Physics on one GB10 (248 GB/s): a T=1 step streams 27 GB — 105 ms — and
 measures 114; at world 2 a rank streams 12.2 GB (49 ms) plus the head's
 reads and measures 63 T=1 / 74.5 an MTP pass, GPU-busy 98.9 % with the 135

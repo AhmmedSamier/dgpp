@@ -1,0 +1,6262 @@
+{
+  "manifest": {
+    "started_at": "2026-10-05T09:15:32.992246+00:00",
+    "commit": "5b57904274d3c1f6f5863652903768ecb9a0c01c",
+    "tracked_diff": "benchmarks/results/2026-10-05-qwen3.8-27b/campaign.log | 6 +++++-\n 1 file changed, 5 insertions(+), 1 deletion(-)",
+    "site_settings": {
+      "DGPP_HTTP_PORT": "18080",
+      "DGPP_FABRIC_PORT": "29970",
+      "DGPP_JOURNAL_PORT": "29971",
+      "DGPP_LOG_DIR": "~/dgpp/log",
+      "DGPP_STAGE_DIR": "/tmp/bus4",
+      "DGPP_RELEASE_DIR": "~/dgpp/releases",
+      "DGPP_HTTP_BIND": "0.0.0.0",
+      "DGPP_NODES": "<node-0> <node-1> <node-2> <node-3>",
+      "DGPP_SSH_USER": "stephen"
+    },
+    "templates": [
+      {
+        "id": "qwen27b-fp8-w1",
+        "template": "deploy/cluster_qwen3.8-27b_fp8_w1.example.json",
+        "config": "configs/qwen27b-fp8-w1.json",
+        "model": "Qwen/Qwen3.8-27B-FP8",
+        "world": 1,
+        "slots": 8
+      },
+      {
+        "id": "qwen27b-fp8-w2",
+        "template": "deploy/cluster_qwen3.8-27b_fp8_w2.example.json",
+        "config": "configs/qwen27b-fp8-w2.json",
+        "model": "Qwen/Qwen3.8-27B-FP8",
+        "world": 2,
+        "slots": 8
+      },
+      {
+        "id": "qwen27b-fp8-w4",
+        "template": "deploy/cluster_qwen3.8-27b_fp8_w4.example.json",
+        "config": "configs/qwen27b-fp8-w4.json",
+        "model": "Qwen/Qwen3.8-27B-FP8",
+        "world": 4,
+        "slots": 8
+      }
+    ],
+    "datasets": {
+      "gsm8k_test.jsonl": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14",
+      "HumanEval.jsonl": "1d49078ba3e2b196b9344535bef34a43021f038fad9561d6ee7c53450609a6a2"
+    },
+    "eval_image": "sha256:8630ab77c5adf06e1f914483db4dd70e3fa59118160daab9b0ee75e685344221",
+    "eval_image_repo_digests": [
+      "python@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9"
+    ],
+    "eval_image_platform": "linux/arm64",
+    "checkpoint_revisions": {
+      "models--Qwen--Qwen3.8-27B-FP8": [
+        "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a"
+      ],
+      "models--z-lab--Qwen3.8-27B-DFlash2": [
+        "50307d4c4cde6860d4eee73e2547cd786fe8e8a4"
+      ]
+    },
+    "binary_sha256": "0e38b02f18123ecadcf4cdd5f0bb96f827363e827d98ba90401120f021496479",
+    "version": "dgpp-serve 0.1.0+g5b57904274d3.dirty (git 5b57904274d3, cuda 13.0)",
+    "benchmark_environment": {
+      "CUDA_DEVICE_MAX_CONNECTIONS": "32"
+    },
+    "benchmark_environment_scope": "CUDA_DEVICE_MAX_CONNECTIONS=32 on the benchmark client/rank-0 launch and local microbenchmarks; peer launches use their login environment.",
+    "evaluation_thinking_controls": "Reasoning effort low when thinking enabled; none with --no-think. isolated_eval.py supplies none to avoid conflicting API parameters.",
+    "telemetry": {
+      "script": "node_telemetry.py",
+      "scope": "Four-node launches initiated after the second Node3 recovery; earlier performance runs do not have this continuous telemetry.",
+      "memory_interval_s": 1,
+      "gpu_interval_s": 5,
+      "node3_kernel_stream": true,
+      "spot_checks": [
+        "raw/qwen-yarn-w2/long/default/health-snapshots.jsonl"
+      ],
+      "node3_management_ssh": {
+        "host": "<address>",
+        "host_key_alias": "<node-2>",
+        "verified_hostname": "spark-a289",
+        "record": "raw/environment-audit/node3-management-link.json"
+      }
+    },
+    "note": "The Qwen3.8-27B-FP8 campaign (2026-10-05): every template is the DFlash2 drafter with drawn proposals (engine.mtp_draft_temperature 0.7) on the graph engine, after the sampled-walk and GEMV-staging changes of the same day; the other deployments' numbers are the earlier campaigns'. The campaign configs are the templates without `http` (the runner expects :18080) and without `model_alias` (the runner matches the served id to the checkpoint id)."
+  },
+  "deployments": [
+    {
+      "id": "qwen27b-fp8-w1",
+      "template": "deploy/cluster_qwen3.8-27b_fp8_w1.example.json",
+      "config": "configs/qwen27b-fp8-w1.json",
+      "model": "Qwen/Qwen3.8-27B-FP8",
+      "world": 1,
+      "slots": 8,
+      "name": "Qwen3.8-27B FP8 \u00b7 1 node \u00b7 DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots",
+      "settings": {
+        "max_concurrency": 8,
+        "kv_capacity": 262144,
+        "kv_dtype": "bf16",
+        "dense_weights": "fp8",
+        "default_max_tokens": 32768,
+        "queue_limit": 8,
+        "max_connections": 64,
+        "decode_graph": true,
+        "mtp": false,
+        "dflash_model": "z-lab/Qwen3.8-27B-DFlash2",
+        "mtp_draft_temperature": 0.7,
+        "prefix_cache_gib": 1.5,
+        "admission": "grow",
+        "admission_window": 256,
+        "sampling_candidates": 128,
+        "stats_interval_s": 10,
+        "bf16_weights": "bf12"
+      },
+      "greedy": [
+        {
+          "class": "prose",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 20.102166304039358,
+            "min": 20.09963111265252,
+            "max": 20.102324774735713,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 19.826428845642067,
+            "min": 19.82339838956216,
+            "max": 19.828494189367152,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 145.8068965517241,
+            "min": 145.80574712643678,
+            "max": 145.82528735632187,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.9310344827586206,
+            "min": 2.9310344827586206,
+            "max": 2.9310344827586206,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 205.18499100580812,
+            "min": 203.1317357905209,
+            "max": 206.0927499551326,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "prose",
+          "concurrency": 2,
+          "engine_tokens_per_s": {
+            "median": 30.20879609062639,
+            "min": 30.208259293482133,
+            "max": 30.227237704626525,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 29.687549588801872,
+            "min": 29.65999222568814,
+            "max": 29.699370964099877,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 156.31944444444446,
+            "min": 156.2240740740742,
+            "max": 156.3222222222222,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.4757281553398056,
+            "min": 2.4757281553398056,
+            "max": 2.4757281553398056,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 328.1372966011986,
+            "min": 307.13647638913244,
+            "max": 330.77863161452115,
+            "n": 3
+          },
+          "completion_tokens": [
+            512,
+            512,
+            512
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "prose",
+          "concurrency": 4,
+          "engine_tokens_per_s": {
+            "median": 54.50057172168372,
+            "min": 54.43483829650977,
+            "max": 54.50697903084455,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 52.27523034739955,
+            "min": 52.26408482473032,
+            "max": 52.31420821846479,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 173.29074074074083,
+            "min": 173.27037037037033,
+            "max": 173.5,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.55,
+            "min": 2.55,
+            "max": 2.55,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 762.2591668041423,
+            "min": 760.1017882698216,
+            "max": 764.0126437181607,
+            "n": 3
+          },
+          "completion_tokens": [
+            1024,
+            1024,
+            1024
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "prose",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 94.29993852013823,
+            "min": 94.19021806882343,
+            "max": 95.4301138144446,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 89.48616930452668,
+            "min": 89.33472315383504,
+            "max": 90.62449231392347,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 210.0300970873784,
+            "min": 209.5774509803921,
+            "max": 210.27475728155358,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.680683311432326,
+            "min": 2.680683311432326,
+            "max": 2.6842105263157894,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 1040.6715733697638,
+            "min": 1037.2414538287558,
+            "max": 1043.008141219616,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "code",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 32.29605988069463,
+            "min": 32.21486684521702,
+            "max": 32.33537490014073,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 31.46315856754988,
+            "min": 31.425786077207242,
+            "max": 31.498203587181013,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 146.21666666666636,
+            "min": 146.038888888889,
+            "max": 146.58518518518528,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 4.722222222222222,
+            "min": 4.722222222222222,
+            "max": 4.722222222222222,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 203.44475097954273,
+            "min": 202.3204390425235,
+            "max": 204.26212390884757,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "code",
+          "concurrency": 2,
+          "engine_tokens_per_s": {
+            "median": 53.8383582467696,
+            "min": 53.77534558567681,
+            "max": 53.84006334125115,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 51.877860876080135,
+            "min": 51.8684668314256,
+            "max": 51.922261529382645,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 155.2918032786888,
+            "min": 155.28688524590117,
+            "max": 155.47377049180318,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 4.636363636363637,
+            "min": 4.636363636363637,
+            "max": 4.636363636363637,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 355.4639865178615,
+            "min": 354.0706109488383,
+            "max": 357.4843821115792,
+            "n": 3
+          },
+          "completion_tokens": [
+            512,
+            512,
+            512
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "code",
+          "concurrency": 4,
+          "engine_tokens_per_s": {
+            "median": 100.06278449223008,
+            "min": 99.83361064891847,
+            "max": 100.75467225097815,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 92.4519227272145,
+            "min": 92.19696155948438,
+            "max": 93.04605702657612,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 175.75172413793163,
+            "min": 174.5448275862065,
+            "max": 176.1551724137931,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 4.788732394366197,
+            "min": 4.788732394366197,
+            "max": 4.788732394366197,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 783.7417315458879,
+            "min": 783.5176049848087,
+            "max": 784.3825797899626,
+            "n": 3
+          },
+          "completion_tokens": [
+            1024,
+            1024,
+            1024
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "code",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 160.33324163948598,
+            "min": 160.32442118168515,
+            "max": 160.43663932427876,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 146.5971452627422,
+            "min": 146.44691418843755,
+            "max": 146.8036637087792,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 201.96031746031747,
+            "min": 201.83015873015856,
+            "max": 201.97142857142876,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 4.880382775119617,
+            "min": 4.880382775119617,
+            "max": 4.880382775119617,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 1094.0319888759404,
+            "min": 1088.6762198933866,
+            "max": 1098.132362269098,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "json",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 45.876511226251964,
+            "min": 45.874035296022356,
+            "max": 45.897980488858586,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 44.24780966731505,
+            "min": 44.15764871864407,
+            "max": 44.329574241493866,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 146.27368421052694,
+            "min": 146.20526315789442,
+            "max": 146.28157894736873,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 6.7105263157894735,
+            "min": 6.7105263157894735,
+            "max": 6.7105263157894735,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 204.94134887121618,
+            "min": 204.25061299465597,
+            "max": 206.31882594898343,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "json",
+          "concurrency": 2,
+          "engine_tokens_per_s": {
+            "median": 80.04771471622286,
+            "min": 79.79097892579497,
+            "max": 80.05399720595838,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 75.59960690801132,
+            "min": 75.5754555392645,
+            "max": 75.71482993964482,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 155.3951219512198,
+            "min": 155.38292682926857,
+            "max": 155.89512195121839,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 6.891891891891892,
+            "min": 6.891891891891892,
+            "max": 6.891891891891892,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 357.30194847565144,
+            "min": 354.15673709940165,
+            "max": 359.3198440503329,
+            "n": 3
+          },
+          "completion_tokens": [
+            512,
+            512,
+            512
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "json",
+          "concurrency": 4,
+          "engine_tokens_per_s": {
+            "median": 112.46609478024978,
+            "min": 112.29151758683327,
+            "max": 112.60639648491434,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 102.78339766647983,
+            "min": 102.73919181929533,
+            "max": 102.9631552774955,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 167.9518518518523,
+            "min": 167.74259259259216,
+            "max": 168.21296296296296,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 6.144578313253012,
+            "min": 6.144578313253012,
+            "max": 6.144578313253012,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 789.3510760040954,
+            "min": 789.0312022645958,
+            "max": 794.3726298981346,
+            "n": 3
+          },
+          "completion_tokens": [
+            1024,
+            1024,
+            1024
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "json",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 198.6019977024477,
+            "min": 198.5073029279825,
+            "max": 198.7103309890707,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 176.73002181602277,
+            "min": 176.65954413300358,
+            "max": 176.87684967882646,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 205.43599999999978,
+            "min": 205.32400000000024,
+            "max": 205.53400000000022,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 5.947521865889213,
+            "min": 5.947521865889213,
+            "max": 5.947521865889213,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 1103.0315060925204,
+            "min": 1094.168877840275,
+            "max": 1111.5905188198667,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "math",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 35.59563360227818,
+            "min": 35.567829943928245,
+            "max": 35.611043613054534,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 34.33275015914938,
+            "min": 34.304302073412586,
+            "max": 34.392811504757034,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 146.19999999999976,
+            "min": 146.1367346938778,
+            "max": 146.3142857142862,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 5.204081632653061,
+            "min": 5.204081632653061,
+            "max": 5.204081632653061,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 254.64697694405913,
+            "min": 253.97125002928078,
+            "max": 255.0251518841833,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "math",
+          "concurrency": 2,
+          "engine_tokens_per_s": {
+            "median": 72.31580738472046,
+            "min": 72.2871073817898,
+            "max": 72.55035848412392,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 68.84997195635668,
+            "min": 68.70980712325066,
+            "max": 68.85341695018111,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 156.71999999999923,
+            "min": 156.2133333333341,
+            "max": 156.78222222222118,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 5.862068965517241,
+            "min": 5.862068965517241,
+            "max": 5.862068965517241,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 330.4937044158578,
+            "min": 329.16507706977427,
+            "max": 357.176041114144,
+            "n": 3
+          },
+          "completion_tokens": [
+            512,
+            512,
+            512
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "math",
+          "concurrency": 4,
+          "engine_tokens_per_s": {
+            "median": 97.26698834703303,
+            "min": 97.12343245636609,
+            "max": 97.82765069774133,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 89.95313876313561,
+            "min": 89.92680350171975,
+            "max": 90.48941065349712,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 169.1387096774199,
+            "min": 168.16935483870967,
+            "max": 169.38870967741897,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 5.151515151515151,
+            "min": 5.151515151515151,
+            "max": 5.151515151515151,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 786.1952302628197,
+            "min": 785.4783749789931,
+            "max": 790.0885425624438,
+            "n": 3
+          },
+          "completion_tokens": [
+            1024,
+            1024,
+            1024
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "math",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 156.23683666357795,
+            "min": 156.20094792536003,
+            "max": 156.3877496262793,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 142.4409634782057,
+            "min": 142.43859323189432,
+            "max": 142.45560569673415,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 200.87846153846118,
+            "min": 200.6846153846154,
+            "max": 200.92461538461592,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 5.062034739454094,
+            "min": 5.062034739454094,
+            "max": 5.062034739454094,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 1146.1859307601117,
+            "min": 1144.3052394897677,
+            "max": 1154.930670018075,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "chat",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 18.98790730922741,
+            "min": 18.97985158500362,
+            "max": 19.006305621394425,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 18.738500148151815,
+            "min": 18.731148981302308,
+            "max": 18.757258008420663,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 145.973913043478,
+            "min": 145.8326086956519,
+            "max": 146.0358695652179,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.7717391304347827,
+            "min": 2.7717391304347827,
+            "max": 2.7717391304347827,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 205.01181483268738,
+            "min": 204.0805029682815,
+            "max": 206.2798379920423,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "chat",
+          "concurrency": 2,
+          "engine_tokens_per_s": {
+            "median": 33.48566025843046,
+            "min": 33.45754172352272,
+            "max": 33.50986241244722,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 32.817692268509646,
+            "min": 32.759578211448854,
+            "max": 32.82961164375816,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 157.01443298969096,
+            "min": 156.90103092783528,
+            "max": 157.14639175257685,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.670157068062827,
+            "min": 2.670157068062827,
+            "max": 2.670157068062827,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 331.29432587884367,
+            "min": 330.29869897291064,
+            "max": 331.93564298562706,
+            "n": 3
+          },
+          "completion_tokens": [
+            512,
+            512,
+            512
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "chat",
+          "concurrency": 4,
+          "engine_tokens_per_s": {
+            "median": 63.473493593533355,
+            "min": 63.32886306064661,
+            "max": 63.514203519434005,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 60.54600612368919,
+            "min": 60.44461754050787,
+            "max": 60.62062807020015,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 174.55869565217418,
+            "min": 173.1870967741938,
+            "max": 174.67065217391254,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.9565217391304346,
+            "min": 2.947976878612717,
+            "max": 2.9565217391304346,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 765.1001725462265,
+            "min": 764.03311121976,
+            "max": 767.052489973139,
+            "n": 3
+          },
+          "completion_tokens": [
+            1024,
+            1024,
+            1024
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "chat",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 101.8070755917535,
+            "min": 100.53272488037086,
+            "max": 102.21106585098252,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 95.92216910224245,
+            "min": 95.00397336434982,
+            "max": 96.47273176989636,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 208.72812500000023,
+            "min": 207.9031249999995,
+            "max": 211.37395833333358,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.869198312236287,
+            "min": 2.865168539325843,
+            "max": 2.869198312236287,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 1042.1601390698925,
+            "min": 1041.9817070069257,
+            "max": 1068.2916803925764,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        }
+      ],
+      "sampled": [
+        {
+          "class": "prose",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 18.11233911981129,
+            "min": 16.23635032313521,
+            "max": 19.719137616381612,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 17.89383163763085,
+            "min": 16.061982941205745,
+            "max": 19.477560936353196,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 146.7803738317757,
+            "min": 146.65416666666715,
+            "max": 146.94999999999973,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.65625,
+            "min": 2.383177570093458,
+            "max": 2.897727272727273,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 203.00631411373615,
+            "min": 202.46937801130116,
+            "max": 203.29180918633938,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "prose",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 84.80706392956033,
+            "min": 84.2014892106524,
+            "max": 89.49056181648265,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 80.88171849352229,
+            "min": 80.1943310720627,
+            "max": 84.80671425647925,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 212.52280701754364,
+            "min": 207.36724137931014,
+            "max": 213.04392523364552,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.55,
+            "min": 2.5092250922509227,
+            "max": 2.585551330798479,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 1094.2553855711594,
+            "min": 1079.8668392235413,
+            "max": 1114.7714342514519,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "code",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 28.52636171426661,
+            "min": 28.51200858714619,
+            "max": 28.952925948634025,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 27.873192545888955,
+            "min": 27.86475962652777,
+            "max": 28.287421902268996,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 146.61639344262258,
+            "min": 146.5426229508193,
+            "max": 146.7900000000004,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 4.180327868852459,
+            "min": 4.180327868852459,
+            "max": 4.25,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 202.35075103119016,
+            "min": 202.0354859996587,
+            "max": 202.39894604310393,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "code",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 149.82043580120833,
+            "min": 145.86431758380073,
+            "max": 154.1693747071543,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 136.51543482101877,
+            "min": 133.18967557323435,
+            "max": 140.30008577518862,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 208.74029850746234,
+            "min": 206.75312499999927,
+            "max": 209.48153846153917,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 4.857142857142857,
+            "min": 4.722222222222222,
+            "max": 4.868735083532219,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 1148.217885143822,
+            "min": 1137.9668380250223,
+            "max": 1155.519752384862,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "json",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 43.82874134167529,
+            "min": 39.954874494687914,
+            "max": 46.28117173037192,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 42.225185907547136,
+            "min": 38.63374655843873,
+            "max": 44.510107114664876,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 148.91351351351162,
+            "min": 148.4232558139551,
+            "max": 149.18205128205068,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 6.538461538461538,
+            "min": 5.930232558139535,
+            "max": 6.891891891891892,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 203.51067883893847,
+            "min": 201.5282791107893,
+            "max": 228.49199501797557,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "json",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 174.99613979103367,
+            "min": 159.90969805286338,
+            "max": 188.02709802295036,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 157.74061854443966,
+            "min": 144.89630579416578,
+            "max": 167.06523428000486,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 204.5157894736846,
+            "min": 199.3312500000011,
+            "max": 208.64423076923077,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 6.257668711656442,
+            "min": 5.895953757225434,
+            "max": 6.276923076923077,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 1170.5475112830754,
+            "min": 1167.7129333547782,
+            "max": 1186.068275012076,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "math",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 34.77241115989899,
+            "min": 34.04039460159347,
+            "max": 39.490800966363416,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 33.59519873509276,
+            "min": 32.88831291614475,
+            "max": 37.9309462754356,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 146.7545454545444,
+            "min": 146.66799999999813,
+            "max": 146.88431372549204,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 5.1,
+            "min": 5.0,
+            "max": 5.795454545454546,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 255.28950919397175,
+            "min": 252.9951089527458,
+            "max": 276.87538880854845,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "math",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 163.66480805487583,
+            "min": 153.4146029645124,
+            "max": 186.8936263776526,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 147.83137785226995,
+            "min": 139.66562159267707,
+            "max": 167.3536321893754,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 207.7703124999989,
+            "min": 204.3360655737705,
+            "max": 214.02549019607935,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 5.151515151515151,
+            "min": 5.1,
+            "max": 5.396825396825397,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 1157.3637618566863,
+            "min": 1156.9646156567615,
+            "max": 1182.220702758059,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "chat",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 17.9185024348083,
+            "min": 17.761741904476715,
+            "max": 17.927950729772935,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 17.710409734412647,
+            "min": 17.558622483290335,
+            "max": 17.731417393586153,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 146.6350515463927,
+            "min": 146.49693877550973,
+            "max": 146.71237113402037,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.6288659793814433,
+            "min": 2.6020408163265305,
+            "max": 2.6288659793814433,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 203.4379008691758,
+            "min": 203.38322990573943,
+            "max": 205.71214193478227,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "chat",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 91.30825936916773,
+            "min": 88.23224109892374,
+            "max": 91.87782051397475,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 86.49909850811605,
+            "min": 83.9168211093394,
+            "max": 87.04492883315136,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 212.11743119266097,
+            "min": 211.4609523809537,
+            "max": 214.82596153846063,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.7983539094650207,
+            "min": 2.7127659574468086,
+            "max": 2.8137931034482757,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 1105.1687815051991,
+            "min": 1091.094635950867,
+            "max": 1113.5479104996193,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        }
+      ],
+      "prefill": [
+        {
+          "target": 2048,
+          "samples": 3,
+          "prefill_s": {
+            "median": 2.197699999999997,
+            "min": 2.1970999999999985,
+            "max": 2.2065999999999986,
+            "n": 3
+          },
+          "ttft_s": {
+            "median": 2.2311000488698483,
+            "min": 2.2100658731069416,
+            "max": 2.2372694090008736,
+            "n": 3
+          },
+          "ms_per_token": {
+            "median": 1.0754282917278506,
+            "min": 1.074294060370009,
+            "max": 1.0831444061113835,
+            "n": 3
+          },
+          "actual_prompt_tokens": [
+            2054,
+            2043,
+            2029
+          ],
+          "all_cold": true
+        },
+        {
+          "target": 8192,
+          "samples": 3,
+          "prefill_s": {
+            "median": 7.061,
+            "min": 6.990900000000002,
+            "max": 7.3015,
+            "n": 3
+          },
+          "ttft_s": {
+            "median": 7.089949192944914,
+            "min": 7.027719252044335,
+            "max": 7.32314568804577,
+            "n": 3
+          },
+          "ms_per_token": {
+            "median": 0.8741025006189651,
+            "min": 0.870706190061029,
+            "max": 0.8855670103092783,
+            "n": 3
+          },
+          "actual_prompt_tokens": [
+            8029,
+            8078,
+            8245
+          ],
+          "all_cold": true
+        },
+        {
+          "target": 32768,
+          "samples": 3,
+          "prefill_s": {
+            "median": 30.79740000000001,
+            "min": 30.784700000000004,
+            "max": 30.943899999999996,
+            "n": 3
+          },
+          "ttft_s": {
+            "median": 30.842921087052673,
+            "min": 30.826342693995684,
+            "max": 30.988093892810866,
+            "n": 3
+          },
+          "ms_per_token": {
+            "median": 0.9504197012714483,
+            "min": 0.9495296258597824,
+            "max": 0.9532932840418975,
+            "n": 3
+          },
+          "actual_prompt_tokens": [
+            32421,
+            32460,
+            32404
+          ],
+          "all_cold": true
+        }
+      ],
+      "quality": {
+        "model": "Qwen/Qwen3.8-27B-FP8",
+        "settings": {
+          "max_tokens": 2048,
+          "reasoning_effort": "none",
+          "no_think": true,
+          "limit": 300,
+          "seed": 20260908
+        },
+        "tasks": {
+          "humaneval": {
+            "n": 164,
+            "passed": 156,
+            "rate": 0.9512,
+            "seconds": 284,
+            "mean_completion_tokens": 255,
+            "truncated": 0
+          },
+          "gsm8k": {
+            "n": 300,
+            "passed": 292,
+            "rate": 0.9733,
+            "seconds": 667,
+            "mean_completion_tokens": 402,
+            "truncated": 4
+          },
+          "extract": {
+            "n": 100,
+            "passed": 100,
+            "rate": 1.0,
+            "seconds": 50,
+            "mean_completion_tokens": 63,
+            "truncated": 0
+          }
+        }
+      },
+      "modes": {
+        "mtp2": {
+          "greedy": [
+            {
+              "class": "prose",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 18.198686839851554,
+                "min": 18.197777730201892,
+                "max": 18.200765145891623,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 18.00573739170538,
+                "min": 18.00528848046134,
+                "max": 18.008106759218347,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 129.74074074074076,
+                "min": 129.72592592592594,
+                "max": 129.7472222222222,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 2.361111111111111,
+                "min": 2.361111111111111,
+                "max": 2.361111111111111,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 180.76002318412066,
+                "min": 180.27193401940167,
+                "max": 180.78163801692426,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            },
+            {
+              "class": "code",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 20.702084821718532,
+                "min": 20.678246484698093,
+                "max": 20.724967490247074,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 20.4222173094331,
+                "min": 20.405992576309888,
+                "max": 20.4306920039035,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 129.65894736842097,
+                "min": 129.5157894736842,
+                "max": 129.80842105263162,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 2.6842105263157894,
+                "min": 2.6842105263157894,
+                "max": 2.6842105263157894,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 204.42961994558573,
+                "min": 204.08572512678802,
+                "max": 205.3072270937264,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            },
+            {
+              "class": "json",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 22.342354971831103,
+                "min": 22.295081967213115,
+                "max": 22.344312715228302,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 21.986505377184383,
+                "min": 21.938911064460004,
+                "max": 22.018739286321704,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 129.69659090909093,
+                "min": 129.6852272727273,
+                "max": 129.9715909090909,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 2.897727272727273,
+                "min": 2.897727272727273,
+                "max": 2.897727272727273,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 206.0473111923784,
+                "min": 204.674320993945,
+                "max": 230.9871488250792,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            },
+            {
+              "class": "math",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 21.34909538440932,
+                "min": 21.347308146300186,
+                "max": 21.351419241396634,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 20.957208694136774,
+                "min": 20.95375819848636,
+                "max": 20.970272222645498,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 129.82934782608683,
+                "min": 129.81521739130434,
+                "max": 129.84021739130455,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 2.7717391304347827,
+                "min": 2.7717391304347827,
+                "max": 2.7717391304347827,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 255.5682440288365,
+                "min": 255.3849641699344,
+                "max": 255.90364402160048,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            },
+            {
+              "class": "chat",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 16.533962704567276,
+                "min": 16.51993081064273,
+                "max": 16.53868105640012,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 16.366327905282674,
+                "min": 16.355485910812746,
+                "max": 16.388191142650417,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 129.60336134453772,
+                "min": 129.56638655462206,
+                "max": 129.71344537815122,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 2.142857142857143,
+                "min": 2.142857142857143,
+                "max": 2.142857142857143,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 205.0260880496353,
+                "min": 202.62281480245292,
+                "max": 205.46270185150206,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            }
+          ],
+          "parity": {
+            "prose": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": true
+            },
+            "code": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": true
+            },
+            "json": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": true
+            },
+            "math": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": true
+            },
+            "chat": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": false
+            }
+          }
+        },
+        "plain": {
+          "greedy": [
+            {
+              "class": "prose",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 8.87391729509081,
+                "min": 8.872620484966998,
+                "max": 8.875955905643366,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 8.850869203291648,
+                "min": 8.85027539608598,
+                "max": 8.8528241711595,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 112.68980392156864,
+                "min": 112.66392156862746,
+                "max": 112.70627450980392,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 1.0,
+                "min": 1.0,
+                "max": 1.0,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 178.76307806000113,
+                "min": 178.35594294592738,
+                "max": 179.58874697797,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            },
+            {
+              "class": "code",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 8.872589613155089,
+                "min": 8.870182273549464,
+                "max": 8.874627613664842,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 8.846751016673677,
+                "min": 8.84575669392945,
+                "max": 8.849968856904603,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 112.7066666666667,
+                "min": 112.68078431372545,
+                "max": 112.73725490196078,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 1.0,
+                "min": 1.0,
+                "max": 1.0,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 178.84089797735214,
+                "min": 178.23899583891034,
+                "max": 179.42260298877954,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            },
+            {
+              "class": "json",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 8.875090926176643,
+                "min": 8.872126561755225,
+                "max": 8.87524537443094,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 8.852066444369754,
+                "min": 8.844691990985847,
+                "max": 8.853685286888805,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 112.67490196078434,
+                "min": 112.67294117647062,
+                "max": 112.71254901960778,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 1.0,
+                "min": 1.0,
+                "max": 1.0,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 179.56010019406676,
+                "min": 179.45484188385308,
+                "max": 179.9495918676257,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            },
+            {
+              "class": "math",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 8.871570963870093,
+                "min": 8.86947266637218,
+                "max": 8.877593649909484,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 8.829940263501287,
+                "min": 8.826998550671691,
+                "max": 8.839178299094133,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 112.71960784313725,
+                "min": 112.64313725490196,
+                "max": 112.74627450980388,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 1.0,
+                "min": 1.0,
+                "max": 1.0,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 253.88564495369792,
+                "min": 231.0504240449518,
+                "max": 254.91748307831585,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            },
+            {
+              "class": "chat",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 8.872188299149313,
+                "min": 8.872157430344854,
+                "max": 8.875276264726867,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 8.849580216933804,
+                "min": 8.848809424848799,
+                "max": 8.855876873893163,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 112.71176470588236,
+                "min": 112.67254901960784,
+                "max": 112.71215686274523,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 1.0,
+                "min": 1.0,
+                "max": 1.0,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 177.33294097706676,
+                "min": 177.24014492705464,
+                "max": 177.6779959909618,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            }
+          ],
+          "parity": {
+            "prose": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": true
+            },
+            "code": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": true
+            },
+            "json": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": true
+            },
+            "math": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": true
+            },
+            "chat": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": false
+            }
+          }
+        }
+      },
+      "rank_checks": [
+        {
+          "path": "raw/qwen27b-fp8-w1/modes/mtp2/rank-identity.json",
+          "expected_ranks": 1,
+          "md5": {
+            "serve_rank0.ops": "1960404ebcf731b7842f9b69e5f5d5f0"
+          },
+          "passed": true
+        },
+        {
+          "path": "raw/qwen27b-fp8-w1/modes/plain/rank-identity.json",
+          "expected_ranks": 1,
+          "md5": {
+            "serve_rank0.ops": "17c668104045ef41fa16bf5617d9b746"
+          },
+          "passed": true
+        },
+        {
+          "path": "raw/qwen27b-fp8-w1/performance/default/rank-identity.json",
+          "expected_ranks": 1,
+          "md5": {
+            "serve_rank0.ops": "40eb4947b06dbdbcb5243b34442ed65b"
+          },
+          "passed": true
+        },
+        {
+          "path": "raw/qwen27b-fp8-w1/quality/default/rank-identity.json",
+          "expected_ranks": 1,
+          "md5": {
+            "serve_rank0.ops": "9ff0c8552ba4685dca5132ac7091aa44"
+          },
+          "passed": true
+        }
+      ],
+      "isolation": "== isolation: prompt 0 alone (256 tokens) vs beside 7 others (256 tokens): DIFFERENT"
+    },
+    {
+      "id": "qwen27b-fp8-w2",
+      "template": "deploy/cluster_qwen3.8-27b_fp8_w2.example.json",
+      "config": "configs/qwen27b-fp8-w2.json",
+      "model": "Qwen/Qwen3.8-27B-FP8",
+      "world": 2,
+      "slots": 8,
+      "name": "Qwen3.8-27B FP8 \u00b7 2 nodes \u00b7 DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots",
+      "settings": {
+        "max_concurrency": 8,
+        "kv_capacity": 262144,
+        "kv_dtype": "bf16",
+        "dense_weights": "fp8",
+        "default_max_tokens": 32768,
+        "queue_limit": 8,
+        "max_connections": 64,
+        "decode_graph": true,
+        "mtp": false,
+        "dflash_model": "z-lab/Qwen3.8-27B-DFlash2",
+        "mtp_draft_temperature": 0.7,
+        "bf16_weights": "bf12",
+        "prefix_cache_gib": 1.5,
+        "admission": "grow",
+        "admission_window": 256,
+        "sampling_candidates": 128,
+        "stats_interval_s": 10
+      },
+      "greedy": [
+        {
+          "class": "prose",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 36.161492973325586,
+            "min": 36.039855840576635,
+            "max": 36.242183058555995,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 35.39120131351777,
+            "min": 35.32806203084083,
+            "max": 35.443916816161625,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 81.99651162790697,
+            "min": 81.81395348837209,
+            "max": 82.27325581395348,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.9651162790697674,
+            "min": 2.9651162790697674,
+            "max": 2.9651162790697674,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 179.87669608555734,
+            "min": 177.75115906260908,
+            "max": 180.27868284843862,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "prose",
+          "concurrency": 2,
+          "engine_tokens_per_s": {
+            "median": 51.18323598482569,
+            "min": 51.103228521613644,
+            "max": 51.25576627370578,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 49.993687715786976,
+            "min": 49.89246048442929,
+            "max": 50.06107076671111,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 93.12336448598128,
+            "min": 92.99158878504674,
+            "max": 93.2691588785047,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.4757281553398056,
+            "min": 2.4757281553398056,
+            "max": 2.4757281553398056,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 255.36989804822952,
+            "min": 252.93251953553408,
+            "max": 256.31374795921147,
+            "n": 3
+          },
+          "completion_tokens": [
+            512,
+            512,
+            512
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "prose",
+          "concurrency": 4,
+          "engine_tokens_per_s": {
+            "median": 88.53398142522344,
+            "min": 88.51861494402499,
+            "max": 88.7172528963574,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 85.05626137138442,
+            "min": 85.02235318658418,
+            "max": 85.13858222491889,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 110.77884615384622,
+            "min": 110.54999999999997,
+            "max": 110.79807692307692,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.543640897755611,
+            "min": 2.543640897755611,
+            "max": 2.543640897755611,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 458.7757794652134,
+            "min": 454.7643149853684,
+            "max": 459.04787100153044,
+            "n": 3
+          },
+          "completion_tokens": [
+            1024,
+            1024,
+            1024
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "prose",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 133.26278244850772,
+            "min": 132.99432818306278,
+            "max": 133.39785255613833,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 127.04137192297036,
+            "min": 126.89766276554603,
+            "max": 127.33267644477418,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 141.7416666666666,
+            "min": 141.59814814814806,
+            "max": 142.02777777777777,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.6020408163265305,
+            "min": 2.6020408163265305,
+            "max": 2.6020408163265305,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 665.6027330027428,
+            "min": 659.0739676321391,
+            "max": 665.6280383758713,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "code",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 57.54648853583702,
+            "min": 57.087848123936375,
+            "max": 57.75633620982529,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 55.39459369844301,
+            "min": 54.797414114957625,
+            "max": 55.60015612097799,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 82.05925925925894,
+            "min": 81.76111111111122,
+            "max": 82.71851851851885,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 4.722222222222222,
+            "min": 4.722222222222222,
+            "max": 4.722222222222222,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 178.5397359635681,
+            "min": 177.50603100284934,
+            "max": 180.07760401815176,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "code",
+          "concurrency": 2,
+          "engine_tokens_per_s": {
+            "median": 92.10098602232104,
+            "min": 91.97972838927245,
+            "max": 92.27929867732986,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 87.67586477659047,
+            "min": 87.61733787831356,
+            "max": 87.72686640143327,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 92.2899999999999,
+            "min": 92.11166666666686,
+            "max": 92.41166666666686,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 4.678899082568807,
+            "min": 4.678899082568807,
+            "max": 4.678899082568807,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 280.28497635386884,
+            "min": 280.2306560333818,
+            "max": 280.50879552029073,
+            "n": 3
+          },
+          "completion_tokens": [
+            512,
+            512,
+            512
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "code",
+          "concurrency": 4,
+          "engine_tokens_per_s": {
+            "median": 155.9370748039326,
+            "min": 155.77037613964342,
+            "max": 155.96091802877618,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 144.71543357984655,
+            "min": 144.30650277561628,
+            "max": 144.73853995476264,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 109.01833333333295,
+            "min": 109.00166666666676,
+            "max": 109.13500000000009,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 4.811320754716981,
+            "min": 4.811320754716981,
+            "max": 4.811320754716981,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 481.2733037979342,
+            "min": 481.19463317561895,
+            "max": 482.68365126568824,
+            "n": 3
+          },
+          "completion_tokens": [
+            1024,
+            1024,
+            1024
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "code",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 238.19532016253345,
+            "min": 237.48821290119807,
+            "max": 238.423599261354,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 218.18161337407412,
+            "min": 217.3519721024971,
+            "max": 218.50031773115228,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 131.7599999999999,
+            "min": 131.63384615384632,
+            "max": 132.1523076923076,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 4.9156626506024095,
+            "min": 4.9156626506024095,
+            "max": 4.9156626506024095,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 687.1935055823997,
+            "min": 684.4622520438861,
+            "max": 690.271355008008,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "json",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 81.39163740823491,
+            "min": 81.09913176223672,
+            "max": 81.4904767991816,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 76.59903068466477,
+            "min": 76.56857958066513,
+            "max": 76.73619548835799,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 82.44736842105263,
+            "min": 82.34736842105293,
+            "max": 82.74473684210496,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 6.7105263157894735,
+            "min": 6.7105263157894735,
+            "max": 6.7105263157894735,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 179.56120590679348,
+            "min": 178.1581852119416,
+            "max": 180.65447895787656,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "json",
+          "concurrency": 2,
+          "engine_tokens_per_s": {
+            "median": 132.37469826355502,
+            "min": 132.0114927652529,
+            "max": 132.4847382776984,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 122.85641256082442,
+            "min": 122.70180351341376,
+            "max": 123.41103662299071,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 91.73095238095266,
+            "min": 91.6547619047619,
+            "max": 91.98333333333305,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 6.8,
+            "min": 6.8,
+            "max": 6.8,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 281.3935864251107,
+            "min": 277.0513480063528,
+            "max": 281.5822910051793,
+            "n": 3
+          },
+          "completion_tokens": [
+            512,
+            512,
+            512
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "json",
+          "concurrency": 4,
+          "engine_tokens_per_s": {
+            "median": 183.8632922344796,
+            "min": 183.55888281025088,
+            "max": 184.21195210489225,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 168.1043577364169,
+            "min": 167.93983539857814,
+            "max": 168.7205592946523,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 104.67169811320765,
+            "min": 104.47358490566049,
+            "max": 104.8452830188677,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 6.144578313253012,
+            "min": 6.144578313253012,
+            "max": 6.144578313253012,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 486.3760960288346,
+            "min": 483.1955902627669,
+            "max": 486.44134757341817,
+            "n": 3
+          },
+          "completion_tokens": [
+            1024,
+            1024,
+            1024
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "json",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 294.0964463346068,
+            "min": 292.9350947731189,
+            "max": 294.28311766997115,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 263.73010400912,
+            "min": 263.22193778836373,
+            "max": 263.9495282931735,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 138.73,
+            "min": 138.64199999999954,
+            "max": 139.28,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 5.913043478260869,
+            "min": 5.913043478260869,
+            "max": 5.913043478260869,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 689.8838226916268,
+            "min": 685.1045804214664,
+            "max": 691.4023339631967,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "math",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 65.75893547887898,
+            "min": 65.66749072929522,
+            "max": 66.11698817672702,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 62.60020256507609,
+            "min": 62.37475324697946,
+            "max": 62.715028165569436,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 82.50638297872439,
+            "min": 82.05957446808486,
+            "max": 82.62127659574493,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 5.425531914893617,
+            "min": 5.425531914893617,
+            "max": 5.425531914893617,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 202.9174289200455,
+            "min": 202.67580985091627,
+            "max": 205.04155894741416,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "math",
+          "concurrency": 2,
+          "engine_tokens_per_s": {
+            "median": 121.0596278009878,
+            "min": 120.86740135087095,
+            "max": 121.08837076784306,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 112.79188245687757,
+            "min": 112.74333606978169,
+            "max": 113.17512078561398,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 93.61777777777752,
+            "min": 93.5955555555553,
+            "max": 93.76666666666667,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 5.862068965517241,
+            "min": 5.862068965517241,
+            "max": 5.862068965517241,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 280.24786338210106,
+            "min": 277.0519454497844,
+            "max": 280.80752154346555,
+            "n": 3
+          },
+          "completion_tokens": [
+            512,
+            512,
+            512
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "math",
+          "concurrency": 4,
+          "engine_tokens_per_s": {
+            "median": 171.39976474542092,
+            "min": 170.94017094017093,
+            "max": 171.47756501857708,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 157.40182571133928,
+            "min": 157.3557604851243,
+            "max": 157.4318329848928,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 108.2,
+            "min": 108.15090909090888,
+            "max": 108.49090909090908,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 5.368421052631579,
+            "min": 5.368421052631579,
+            "max": 5.368421052631579,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 484.27402653032914,
+            "min": 482.8306145500392,
+            "max": 485.54430005606264,
+            "n": 3
+          },
+          "completion_tokens": [
+            1024,
+            1024,
+            1024
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "math",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 237.91752192573176,
+            "min": 237.3141620716127,
+            "max": 245.02149943549003,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 217.18399172756563,
+            "min": 216.73340883112343,
+            "max": 223.32335979855193,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 136.10158730158767,
+            "min": 132.15555555555537,
+            "max": 136.44761904761924,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 5.037037037037037,
+            "min": 5.037037037037037,
+            "max": 5.0495049504950495,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 720.3642331587616,
+            "min": 712.9587642557453,
+            "max": 738.5813835426234,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "chat",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 33.49401704911148,
+            "min": 33.4404301357288,
+            "max": 33.71722487405614,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 32.82971813523122,
+            "min": 32.796009009601526,
+            "max": 32.988189623435055,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 82.7532608695651,
+            "min": 82.20543478260895,
+            "max": 82.88586956521739,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.7717391304347827,
+            "min": 2.7717391304347827,
+            "max": 2.7717391304347827,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 178.44246001914144,
+            "min": 177.76807607151568,
+            "max": 180.1161440089345,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "chat",
+          "concurrency": 2,
+          "engine_tokens_per_s": {
+            "median": 55.41189508681169,
+            "min": 55.37940320549044,
+            "max": 55.44924762981661,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 53.906049697217085,
+            "min": 53.87234784010834,
+            "max": 54.04237580062971,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 93.91632653061272,
+            "min": 93.85306122448957,
+            "max": 93.97142857142809,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.65625,
+            "min": 2.65625,
+            "max": 2.65625,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 255.77727239578962,
+            "min": 252.80468701384962,
+            "max": 257.7311099739745,
+            "n": 3
+          },
+          "completion_tokens": [
+            512,
+            512,
+            512
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "chat",
+          "concurrency": 4,
+          "engine_tokens_per_s": {
+            "median": 100.27033669206193,
+            "min": 100.21319866775406,
+            "max": 100.85329800172032,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 95.8167609700088,
+            "min": 95.6996822729296,
+            "max": 96.35273718187727,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 110.57065217391305,
+            "min": 109.93152173913056,
+            "max": 110.63369565217378,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.9651162790697674,
+            "min": 2.9651162790697674,
+            "max": 2.9651162790697674,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 463.96995265968144,
+            "min": 463.5103794862516,
+            "max": 483.64063480403274,
+            "n": 3
+          },
+          "completion_tokens": [
+            1024,
+            1024,
+            1024
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "chat",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 152.82272563825975,
+            "min": 152.35705323534643,
+            "max": 152.87769784172662,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 144.60174790663459,
+            "min": 144.25855841117692,
+            "max": 144.78127535147834,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 142.00851063829774,
+            "min": 141.95744680851064,
+            "max": 142.44255319148974,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.893617021276596,
+            "min": 2.893617021276596,
+            "max": 2.893617021276596,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 664.4952349597588,
+            "min": 664.0155742352363,
+            "max": 669.3452310573775,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        }
+      ],
+      "sampled": [
+        {
+          "class": "prose",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 29.01453002150485,
+            "min": 28.21920233721386,
+            "max": 31.342568123993793,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 28.523003228723695,
+            "min": 27.749535206321017,
+            "max": 30.777158461721204,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 82.9122641509435,
+            "min": 82.90275229357819,
+            "max": 83.01938775510169,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.4056603773584904,
+            "min": 2.3394495412844036,
+            "max": 2.6020408163265305,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 176.69763206504285,
+            "min": 176.64109799079597,
+            "max": 177.0946360193193,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "prose",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 128.3180274248333,
+            "min": 127.33446519524627,
+            "max": 130.13523858127073,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 122.00737796023483,
+            "min": 121.30617315640738,
+            "max": 123.93253218626465,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 139.4561403508772,
+            "min": 137.50877192982455,
+            "max": 143.04285714285703,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.6254826254826256,
+            "min": 2.5888324873096447,
+            "max": 2.6390685640362226,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 707.9088815080468,
+            "min": 688.6549776245374,
+            "max": 708.7714624649379,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "code",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 51.244950865135586,
+            "min": 43.47529580250264,
+            "max": 53.03881193061224,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 49.3140200609281,
+            "min": 42.1450187612652,
+            "max": 51.13519537460022,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 82.89310344827666,
+            "min": 82.61126760563413,
+            "max": 82.93499999999962,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 4.25,
+            "min": 3.591549295774648,
+            "max": 4.396551724137931,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 202.06072786822915,
+            "min": 201.93823100998998,
+            "max": 203.48832407034934,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "code",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 224.07240614221834,
+            "min": 213.59243631490435,
+            "max": 243.5820895522388,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 205.18346345366504,
+            "min": 196.64860329524325,
+            "max": 221.4836812821238,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 137.9424242424253,
+            "min": 137.29508196721312,
+            "max": 144.71060606060465,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 4.766355140186916,
+            "min": 4.463894967177243,
+            "max": 5.0,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 738.6072911904193,
+            "min": 737.3736351146363,
+            "max": 739.6015019039623,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "json",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 78.88631090487239,
+            "min": 73.70794311481146,
+            "max": 79.19008726437124,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 74.53325495233857,
+            "min": 70.0347576964145,
+            "max": 74.76002068893528,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 82.56666666666607,
+            "min": 82.37142857142801,
+            "max": 82.88461538461539,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 6.538461538461538,
+            "min": 6.071428571428571,
+            "max": 6.538461538461538,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 177.3925160523504,
+            "min": 177.15514404699206,
+            "max": 203.4343529958278,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "json",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 269.9876917375817,
+            "min": 241.58880164848895,
+            "max": 279.1919855477072,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 242.6463844741098,
+            "min": 220.1042725844401,
+            "max": 251.2462185712588,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 129.90923076923042,
+            "min": 128.18947368421135,
+            "max": 139.9240740740745,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 6.276923076923077,
+            "min": 5.9824046920821115,
+            "max": 6.394984326018808,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 733.4303876850754,
+            "min": 733.2515582384076,
+            "max": 739.1761956096161,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "math",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 67.03646257788019,
+            "min": 64.2997629734239,
+            "max": 73.29060443192498,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 63.42428625957388,
+            "min": 61.17804634507103,
+            "max": 69.04767808223167,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 82.69347826087007,
+            "min": 82.62083333333187,
+            "max": 82.8404761904773,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 5.543478260869565,
+            "min": 5.3125,
+            "max": 6.071428571428571,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 203.65604804828763,
+            "min": 203.46992509439588,
+            "max": 228.01349498331547,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "math",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 222.5956397442338,
+            "min": 208.16963784605502,
+            "max": 241.30303639654198,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 203.94159483899062,
+            "min": 191.79196983112612,
+            "max": 218.82953360360554,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 139.99571428571528,
+            "min": 127.28611111111078,
+            "max": 143.28983050847418,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 5.112781954887218,
+            "min": 4.903846153846154,
+            "max": 5.204081632653061,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 739.6850519871805,
+            "min": 733.872458076803,
+            "max": 758.1410707789473,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "chat",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 30.778886890608128,
+            "min": 30.431409988662807,
+            "max": 33.56543944399847,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 30.169529754752944,
+            "min": 29.8984833216009,
+            "max": 32.814184259758996,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 82.84900000000023,
+            "min": 82.57717391304323,
+            "max": 82.96534653465346,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.55,
+            "min": 2.5247524752475248,
+            "max": 2.7717391304347827,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 178.10796201229095,
+            "min": 177.6230449322611,
+            "max": 178.2542890869081,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "chat",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 144.16859244811013,
+            "min": 137.5154199276026,
+            "max": 149.41661600662147,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 135.54690832961677,
+            "min": 130.80586446536688,
+            "max": 141.51892331410193,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 144.02621359223255,
+            "min": 141.50099999999978,
+            "max": 145.2457446808508,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.7983539094650207,
+            "min": 2.680683311432326,
+            "max": 2.926829268292683,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 707.1285472484306,
+            "min": 668.0873632139992,
+            "max": 707.8901396307629,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        }
+      ],
+      "prefill": [
+        {
+          "target": 2048,
+          "samples": 3,
+          "prefill_s": {
+            "median": 1.4667999999999992,
+            "min": 1.4664000000000015,
+            "max": 1.4702999999999993,
+            "n": 3
+          },
+          "ttft_s": {
+            "median": 1.4880942308809608,
+            "min": 1.487863112008199,
+            "max": 1.4882099949754775,
+            "n": 3
+          },
+          "ms_per_token": {
+            "median": 0.7196769456681348,
+            "min": 0.7141187925998049,
+            "max": 0.7227205519960579,
+            "n": 3
+          },
+          "actual_prompt_tokens": [
+            2054,
+            2043,
+            2029
+          ],
+          "all_cold": true
+        },
+        {
+          "target": 8192,
+          "samples": 3,
+          "prefill_s": {
+            "median": 4.863399999999994,
+            "min": 4.832900000000001,
+            "max": 5.073200000000004,
+            "n": 3
+          },
+          "ttft_s": {
+            "median": 4.894110485911369,
+            "min": 4.869416364934295,
+            "max": 5.093332192860544,
+            "n": 3
+          },
+          "ms_per_token": {
+            "median": 0.602054964100024,
+            "min": 0.6019305019305021,
+            "max": 0.6153062462098247,
+            "n": 3
+          },
+          "actual_prompt_tokens": [
+            8029,
+            8078,
+            8245
+          ],
+          "all_cold": true
+        },
+        {
+          "target": 32768,
+          "samples": 3,
+          "prefill_s": {
+            "median": 20.705399999999994,
+            "min": 20.683699999999998,
+            "max": 20.742900000000002,
+            "n": 3
+          },
+          "ttft_s": {
+            "median": 20.756098276004195,
+            "min": 20.72194213210605,
+            "max": 20.789079099195078,
+            "n": 3
+          },
+          "ms_per_token": {
+            "median": 0.6389766695469693,
+            "min": 0.6379723019030874,
+            "max": 0.6390295748613679,
+            "n": 3
+          },
+          "actual_prompt_tokens": [
+            32421,
+            32460,
+            32404
+          ],
+          "all_cold": true
+        }
+      ],
+      "quality": {
+        "model": "Qwen/Qwen3.8-27B-FP8",
+        "settings": {
+          "max_tokens": 2048,
+          "reasoning_effort": "none",
+          "no_think": true,
+          "limit": 300,
+          "seed": 20260908
+        },
+        "tasks": {
+          "humaneval": {
+            "n": 164,
+            "passed": 157,
+            "rate": 0.9573,
+            "seconds": 180,
+            "mean_completion_tokens": 250,
+            "truncated": 0
+          },
+          "gsm8k": {
+            "n": 300,
+            "passed": 292,
+            "rate": 0.9733,
+            "seconds": 449,
+            "mean_completion_tokens": 401,
+            "truncated": 5
+          },
+          "extract": {
+            "n": 100,
+            "passed": 100,
+            "rate": 1.0,
+            "seconds": 33,
+            "mean_completion_tokens": 63,
+            "truncated": 0
+          }
+        }
+      },
+      "modes": {
+        "mtp3": {
+          "greedy": [
+            {
+              "class": "prose",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 34.77478214621774,
+                "min": 34.735938755772295,
+                "max": 34.80753480753481,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 34.165374235953536,
+                "min": 34.14151445924963,
+                "max": 34.16937467922528,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 78.00957446808508,
+                "min": 77.93617021276596,
+                "max": 78.0968085106383,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 2.7127659574468086,
+                "min": 2.7127659574468086,
+                "max": 2.7127659574468086,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 152.72768097929657,
+                "min": 152.62770396657288,
+                "max": 153.46074290573597,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            },
+            {
+              "class": "code",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 41.337050966152255,
+                "min": 41.33169087136928,
+                "max": 41.35984688746877,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 40.320764425718735,
+                "min": 40.26890741356336,
+                "max": 40.32968876540711,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 78.08607594936709,
+                "min": 78.04303797468356,
+                "max": 78.0962025316456,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 3.2278481012658227,
+                "min": 3.2278481012658227,
+                "max": 3.2278481012658227,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 153.37890782393515,
+                "min": 153.05754099972546,
+                "max": 153.42139406129718,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            },
+            {
+              "class": "json",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 47.35112250013924,
+                "min": 47.29491626017771,
+                "max": 47.35639868516355,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 46.045133067912296,
+                "min": 45.94587431919793,
+                "max": 46.09623140645961,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 78.04782608695656,
+                "min": 78.03913043478256,
+                "max": 78.14057971014489,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 3.6956521739130435,
+                "min": 3.6956521739130435,
+                "max": 3.6956521739130435,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 152.9241860844195,
+                "min": 152.72254194132984,
+                "max": 153.4579109866172,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            },
+            {
+              "class": "math",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 43.630763966122,
+                "min": 43.51164576401331,
+                "max": 43.651676737935844,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 42.404128346469655,
+                "min": 42.27461110666761,
+                "max": 42.437905026411244,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 77.92666666666666,
+                "min": 77.8893333333334,
+                "max": 78.14,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 3.4,
+                "min": 3.4,
+                "max": 3.4,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 178.6377690732479,
+                "min": 177.4761511478573,
+                "max": 179.14925795048475,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            },
+            {
+              "class": "chat",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 31.752751905165102,
+                "min": 31.666004371150454,
+                "max": 31.779264964295038,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 31.228250990315168,
+                "min": 31.18008172695934,
+                "max": 31.239654080821854,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 77.96893203883498,
+                "min": 77.90388349514569,
+                "max": 78.18252427184454,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 2.4757281553398056,
+                "min": 2.4757281553398056,
+                "max": 2.4757281553398056,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 153.054776834324,
+                "min": 152.08684699609876,
+                "max": 153.09569681994617,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            }
+          ],
+          "parity": {
+            "prose": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": true
+            },
+            "code": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": true
+            },
+            "json": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": true
+            },
+            "math": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": true
+            },
+            "chat": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": false
+            }
+          }
+        },
+        "plain": {
+          "greedy": [
+            {
+              "class": "prose",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 16.510945785823896,
+                "min": 16.50015529557925,
+                "max": 16.55618389700106,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 16.44480164032469,
+                "min": 16.432455602161863,
+                "max": 16.47443197506683,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 60.56588235294117,
+                "min": 60.400392156862736,
+                "max": 60.605490196078435,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 1.0,
+                "min": 1.0,
+                "max": 1.0,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 128.5818270407617,
+                "min": 128.38886608369648,
+                "max": 128.6413969937712,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            },
+            {
+              "class": "code",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 16.483196835226206,
+                "min": 16.470527444420046,
+                "max": 16.486287288102726,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 16.402943639589502,
+                "min": 16.391961134330934,
+                "max": 16.40722403983034,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 60.66784313725491,
+                "min": 60.65647058823527,
+                "max": 60.71450980392156,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 1.0,
+                "min": 1.0,
+                "max": 1.0,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 129.0760540869087,
+                "min": 128.59652796760201,
+                "max": 129.42214007489383,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            },
+            {
+              "class": "json",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 16.47318746487335,
+                "min": 16.47137855749479,
+                "max": 16.474890328916334,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 16.39473314116828,
+                "min": 16.379387214342273,
+                "max": 16.40884828700977,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 60.70470588235293,
+                "min": 60.698431372549045,
+                "max": 60.71137254901964,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 1.0,
+                "min": 1.0,
+                "max": 1.0,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 128.74041707254946,
+                "min": 128.51696996949613,
+                "max": 128.88478487730026,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            },
+            {
+              "class": "math",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 16.457240217622786,
+                "min": 16.45076383154419,
+                "max": 16.46170233368839,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 16.337201198823955,
+                "min": 16.328496939278903,
+                "max": 16.339229881563593,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 60.76352941176475,
+                "min": 60.747058823529414,
+                "max": 60.78745098039211,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 1.0,
+                "min": 1.0,
+                "max": 1.0,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 154.6547191683203,
+                "min": 153.2964741345495,
+                "max": 177.20861500129104,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            },
+            {
+              "class": "chat",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 16.455541000109715,
+                "min": 16.455222435889155,
+                "max": 16.472016950028436,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 16.384742536580543,
+                "min": 16.382195594252853,
+                "max": 16.39086841280067,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 60.76980392156858,
+                "min": 60.70901960784309,
+                "max": 60.770980392156886,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 1.0,
+                "min": 1.0,
+                "max": 1.0,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 128.38003900833428,
+                "min": 128.05761792697012,
+                "max": 128.8607951719314,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            }
+          ],
+          "parity": {
+            "prose": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": true
+            },
+            "code": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": true
+            },
+            "json": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": true
+            },
+            "math": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": true
+            },
+            "chat": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": false
+            }
+          }
+        }
+      },
+      "rank_checks": [
+        {
+          "path": "raw/qwen27b-fp8-w2/modes/mtp3/rank-identity.json",
+          "expected_ranks": 2,
+          "md5": {
+            "serve_rank0.ops": "834fe420dc9cd7e6c02443e3fd757e4e",
+            "serve_rank1.ops": "834fe420dc9cd7e6c02443e3fd757e4e"
+          },
+          "passed": true
+        },
+        {
+          "path": "raw/qwen27b-fp8-w2/modes/plain/rank-identity.json",
+          "expected_ranks": 2,
+          "md5": {
+            "serve_rank0.ops": "289a52bb980bb3e95622478100db6da6",
+            "serve_rank1.ops": "289a52bb980bb3e95622478100db6da6"
+          },
+          "passed": true
+        },
+        {
+          "path": "raw/qwen27b-fp8-w2/performance/default/rank-identity.json",
+          "expected_ranks": 2,
+          "md5": {
+            "serve_rank0.ops": "22a3cdd7d2ee9e963e1b6669a36fdfde",
+            "serve_rank1.ops": "22a3cdd7d2ee9e963e1b6669a36fdfde"
+          },
+          "passed": true
+        },
+        {
+          "path": "raw/qwen27b-fp8-w2/quality/default/rank-identity.json",
+          "expected_ranks": 2,
+          "md5": {
+            "serve_rank0.ops": "49a043f0061afc37dcef8237b84eabe9",
+            "serve_rank1.ops": "49a043f0061afc37dcef8237b84eabe9"
+          },
+          "passed": true
+        }
+      ],
+      "isolation": "== isolation: prompt 0 alone (256 tokens) vs beside 7 others (256 tokens): IDENTICAL"
+    },
+    {
+      "id": "qwen27b-fp8-w4",
+      "template": "deploy/cluster_qwen3.8-27b_fp8_w4.example.json",
+      "config": "configs/qwen27b-fp8-w4.json",
+      "model": "Qwen/Qwen3.8-27B-FP8",
+      "world": 4,
+      "slots": 8,
+      "name": "Qwen3.8-27B FP8 \u00b7 4 nodes \u00b7 DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots",
+      "settings": {
+        "max_concurrency": 8,
+        "kv_capacity": 262144,
+        "kv_dtype": "bf16",
+        "dense_weights": "fp8",
+        "default_max_tokens": 32768,
+        "queue_limit": 8,
+        "max_connections": 64,
+        "decode_graph": true,
+        "mtp": false,
+        "dflash_model": "z-lab/Qwen3.8-27B-DFlash2",
+        "mtp_draft_temperature": 0.7,
+        "bf16_weights": "bf12",
+        "prefix_cache_gib": 1.5,
+        "admission": "grow",
+        "admission_window": 256,
+        "sampling_candidates": 128,
+        "stats_interval_s": 10
+      },
+      "greedy": [
+        {
+          "class": "prose",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 59.26649002928461,
+            "min": 59.23482543148504,
+            "max": 59.37412685107573,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 57.26442047008966,
+            "min": 57.24917930904696,
+            "max": 57.54436616114842,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 50.03023255813954,
+            "min": 49.939534883720924,
+            "max": 50.05697674418605,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.9651162790697674,
+            "min": 2.9651162790697674,
+            "max": 2.9651162790697674,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 152.92194508947432,
+            "min": 152.79241697862744,
+            "max": 155.14308703131974,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "prose",
+          "concurrency": 2,
+          "engine_tokens_per_s": {
+            "median": 80.56362947049162,
+            "min": 80.42514941731191,
+            "max": 80.69747939049667,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 77.8687574393852,
+            "min": 77.74262403982729,
+            "max": 77.96561098083673,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 59.16261682242989,
+            "min": 59.06448598130842,
+            "max": 59.264485981308404,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.463768115942029,
+            "min": 2.463768115942029,
+            "max": 2.463768115942029,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 230.42176140006632,
+            "min": 230.09428766090423,
+            "max": 231.20372951962054,
+            "n": 3
+          },
+          "completion_tokens": [
+            512,
+            512,
+            512
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "prose",
+          "concurrency": 4,
+          "engine_tokens_per_s": {
+            "median": 127.4490203918433,
+            "min": 127.16143268547488,
+            "max": 128.34870581721637,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 122.84570731878166,
+            "min": 122.31568536660974,
+            "max": 123.67942497166243,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 81.66530612244895,
+            "min": 81.09285714285713,
+            "max": 81.85000000000002,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.6984126984126986,
+            "min": 2.6984126984126986,
+            "max": 2.6984126984126986,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 307.6050641830079,
+            "min": 303.3077747095376,
+            "max": 309.6536209923215,
+            "n": 3
+          },
+          "completion_tokens": [
+            1024,
+            1024,
+            1024
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "prose",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 159.58570299849012,
+            "min": 159.29659620655454,
+            "max": 160.0125500039219,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 153.55479778361507,
+            "min": 153.3297300091533,
+            "max": 153.64779147826923,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 121.74380952380957,
+            "min": 121.41904761904762,
+            "max": 121.96476190476193,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.6020408163265305,
+            "min": 2.6020408163265305,
+            "max": 2.6020408163265305,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 434.3545777082909,
+            "min": 432.52757732989267,
+            "max": 457.84004978486337,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "code",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 93.96418306433773,
+            "min": 93.79482841063754,
+            "max": 94.25941670055117,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 88.45322188614686,
+            "min": 88.22777318813472,
+            "max": 88.45970225649617,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 50.25555555555561,
+            "min": 50.098148148147935,
+            "max": 50.346296296296245,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 4.722222222222222,
+            "min": 4.722222222222222,
+            "max": 4.722222222222222,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 178.20667894557118,
+            "min": 177.1351881325245,
+            "max": 179.10060612484813,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "code",
+          "concurrency": 2,
+          "engine_tokens_per_s": {
+            "median": 143.14584035028616,
+            "min": 142.92520247737005,
+            "max": 143.14985825357184,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 133.49636545403732,
+            "min": 133.30032960089838,
+            "max": 133.49700625460073,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 58.406557377049225,
+            "min": 58.40491803278684,
+            "max": 58.496721311475454,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 4.594594594594595,
+            "min": 4.594594594594595,
+            "max": 4.594594594594595,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 254.2291209101677,
+            "min": 253.17239586729556,
+            "max": 254.69407544005662,
+            "n": 3
+          },
+          "completion_tokens": [
+            512,
+            512,
+            512
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "code",
+          "concurrency": 4,
+          "engine_tokens_per_s": {
+            "median": 212.367270455965,
+            "min": 209.81610235734524,
+            "max": 212.43361449547015,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 198.24869276522395,
+            "min": 195.7785783649472,
+            "max": 198.56608580206907,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 80.05,
+            "min": 80.025,
+            "max": 81.02333333333348,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 4.678899082568807,
+            "min": 4.678899082568807,
+            "max": 4.678899082568807,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 308.88106575002894,
+            "min": 306.9900734699331,
+            "max": 309.8590492736548,
+            "n": 3
+          },
+          "completion_tokens": [
+            1024,
+            1024,
+            1024
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "code",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 289.9663127371972,
+            "min": 289.2919437866054,
+            "max": 290.25511147788154,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 269.84785780497805,
+            "min": 269.8007345987025,
+            "max": 270.780431310179,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 111.6714285714284,
+            "min": 111.56031746031773,
+            "max": 111.93174603174576,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 4.880382775119617,
+            "min": 4.880382775119617,
+            "max": 4.880382775119617,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 483.0339671752881,
+            "min": 480.37207341985777,
+            "max": 491.1434766254388,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "json",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 133.5498062218502,
+            "min": 133.04116450148612,
+            "max": 133.79505745317215,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 121.76474706130023,
+            "min": 121.66513604684454,
+            "max": 122.86476564169881,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 50.24736842105248,
+            "min": 50.15526315789458,
+            "max": 50.43947368421083,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 6.7105263157894735,
+            "min": 6.7105263157894735,
+            "max": 6.7105263157894735,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 180.3740570321679,
+            "min": 179.78529212996364,
+            "max": 180.4520869627595,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "json",
+          "concurrency": 2,
+          "engine_tokens_per_s": {
+            "median": 208.75972165370447,
+            "min": 208.078335373317,
+            "max": 209.33382588351037,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 189.01196513813198,
+            "min": 187.7763115151191,
+            "max": 189.69889339519418,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 58.166666666666664,
+            "min": 58.00714285714327,
+            "max": 58.357142857142854,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 6.8,
+            "min": 6.8,
+            "max": 6.8,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 256.9504404673353,
+            "min": 256.04087905958295,
+            "max": 257.2989844484255,
+            "n": 3
+          },
+          "completion_tokens": [
+            512,
+            512,
+            512
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "json",
+          "concurrency": 4,
+          "engine_tokens_per_s": {
+            "median": 259.02788358982247,
+            "min": 258.25400040510584,
+            "max": 261.2771843541059,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 238.59363805512433,
+            "min": 237.37971301521625,
+            "max": 240.85031860065538,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 74.29811320754695,
+            "min": 73.65849056603818,
+            "max": 74.52075471698069,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 6.144578313253012,
+            "min": 6.144578313253012,
+            "max": 6.144578313253012,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 305.5527447722852,
+            "min": 303.7078763009049,
+            "max": 306.74014799296856,
+            "n": 3
+          },
+          "completion_tokens": [
+            1024,
+            1024,
+            1024
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "json",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 350.7866907402631,
+            "min": 349.1835267536195,
+            "max": 351.16106931988435,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 320.0934729479163,
+            "min": 318.47303104621284,
+            "max": 320.2162331144404,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 118.68367346938776,
+            "min": 118.55714285714262,
+            "max": 119.22857142857167,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 5.947521865889213,
+            "min": 5.947521865889213,
+            "max": 5.947521865889213,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 486.1705584626179,
+            "min": 482.0452995481901,
+            "max": 487.9816715256311,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "math",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 110.25596679349762,
+            "min": 109.80966325036549,
+            "max": 110.28934734656778,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 101.66034813765874,
+            "min": 101.12433879692685,
+            "max": 101.71315365057161,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 50.27826086956497,
+            "min": 50.263043478261,
+            "max": 50.482608695652424,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 5.543478260869565,
+            "min": 5.543478260869565,
+            "max": 5.543478260869565,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 203.78421689383686,
+            "min": 202.0020540803671,
+            "max": 204.61090398021042,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "math",
+          "concurrency": 2,
+          "engine_tokens_per_s": {
+            "median": 198.25072886297377,
+            "min": 198.0121136822506,
+            "max": 198.78391019644482,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 178.29604320974397,
+            "min": 177.9197307223402,
+            "max": 179.2058310975571,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 59.825581395348834,
+            "min": 59.665116279069906,
+            "max": 59.89767441860411,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 6.0,
+            "min": 6.0,
+            "max": 6.0,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 280.12267395388335,
+            "min": 279.0318395709619,
+            "max": 280.8422123780474,
+            "n": 3
+          },
+          "completion_tokens": [
+            512,
+            512,
+            512
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "math",
+          "concurrency": 4,
+          "engine_tokens_per_s": {
+            "median": 219.59095801937568,
+            "min": 217.49792097575485,
+            "max": 219.7092084006462,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 204.47753259086187,
+            "min": 202.35500337956887,
+            "max": 204.54942642577748,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 74.91935483870968,
+            "min": 74.87903225806451,
+            "max": 75.64032258064535,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 5.151515151515151,
+            "min": 5.151515151515151,
+            "max": 5.151515151515151,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 332.0966115570627,
+            "min": 331.8026155466214,
+            "max": 333.3472246886231,
+            "n": 3
+          },
+          "completion_tokens": [
+            1024,
+            1024,
+            1024
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "math",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 279.79317249797674,
+            "min": 279.75096678643,
+            "max": 283.9801770699925,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 259.1344555897503,
+            "min": 258.88778744897195,
+            "max": 262.6426849804506,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 112.17076923076932,
+            "min": 110.51692307692316,
+            "max": 112.18769230769203,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 5.074626865671642,
+            "min": 5.074626865671642,
+            "max": 5.074626865671642,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 508.0903183843475,
+            "min": 507.1486718370579,
+            "max": 510.0487060844898,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "chat",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 55.172115363811486,
+            "min": 55.12202503188424,
+            "max": 55.17927855798131,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 53.406550810526184,
+            "min": 53.39426815092752,
+            "max": 53.48369310944257,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 50.238043478260806,
+            "min": 50.23152173913063,
+            "max": 50.283695652173975,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.7717391304347827,
+            "min": 2.7717391304347827,
+            "max": 2.7717391304347827,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 153.31610199064016,
+            "min": 153.13495113514364,
+            "max": 154.26159417256713,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "chat",
+          "concurrency": 2,
+          "engine_tokens_per_s": {
+            "median": 84.54206382096974,
+            "min": 84.37143282545023,
+            "max": 85.10354264355031,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 81.43721298338785,
+            "min": 81.3387206404001,
+            "max": 82.06280118338167,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 59.26176470588247,
+            "min": 59.1421568627451,
+            "max": 59.333663366336175,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.6288659793814433,
+            "min": 2.6288659793814433,
+            "max": 2.6424870466321244,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 229.7450575279072,
+            "min": 229.42226193845272,
+            "max": 230.7961544720456,
+            "n": 3
+          },
+          "completion_tokens": [
+            512,
+            512,
+            512
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "chat",
+          "concurrency": 4,
+          "engine_tokens_per_s": {
+            "median": 138.16644993498116,
+            "min": 138.08788887986287,
+            "max": 138.22823921616393,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 132.45307894034065,
+            "min": 132.22844311829223,
+            "max": 132.47697050841444,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 80.24347826086918,
+            "min": 80.20760869565255,
+            "max": 80.28913043478299,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.9565217391304346,
+            "min": 2.9565217391304346,
+            "max": 2.9565217391304346,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 307.13510856730863,
+            "min": 307.1230982313864,
+            "max": 309.9971971823834,
+            "n": 3
+          },
+          "completion_tokens": [
+            1024,
+            1024,
+            1024
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "chat",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 177.15099517176736,
+            "min": 176.6753849618064,
+            "max": 177.52560632826592,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 169.67168696902647,
+            "min": 169.3438695267556,
+            "max": 170.06748717704698,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 118.71752577319563,
+            "min": 118.46701030927824,
+            "max": 119.03711340206222,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.914285714285714,
+            "min": 2.914285714285714,
+            "max": 2.914285714285714,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 459.7826515091583,
+            "min": 434.7657540056389,
+            "max": 460.47442316194065,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        }
+      ],
+      "sampled": [
+        {
+          "class": "prose",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 51.06945445806344,
+            "min": 47.190761714412815,
+            "max": 55.357763112191456,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 49.600228966129855,
+            "min": 46.055502295805525,
+            "max": 53.67145120808415,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 50.50093457943903,
+            "min": 50.43636363636317,
+            "max": 50.61978021978047,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.5757575757575757,
+            "min": 2.383177570093458,
+            "max": 2.802197802197802,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 153.3805220387876,
+            "min": 152.81848493032157,
+            "max": 153.53852906264365,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "prose",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 156.96654458157687,
+            "min": 146.7826537440366,
+            "max": 158.05254472344635,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 150.83883813086373,
+            "min": 141.51749936387768,
+            "max": 152.1164074601405,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 117.78050847457656,
+            "min": 115.01238938053066,
+            "max": 121.76509433962298,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.5341614906832297,
+            "min": 2.5123152709359604,
+            "max": 2.608695652173913,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 482.64724711771123,
+            "min": 459.7053426259663,
+            "max": 482.97283696592785,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "code",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 89.81719559015255,
+            "min": 84.06131531234547,
+            "max": 100.57187931374483,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 84.48752182023549,
+            "min": 79.59921063229348,
+            "max": 93.59171177556102,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 50.69821428571387,
+            "min": 50.55833333333333,
+            "max": 50.71,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 4.553571428571429,
+            "min": 4.25,
+            "max": 5.1,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 177.58391005918384,
+            "min": 177.45816591195762,
+            "max": 178.60198486596346,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "code",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 279.23784494086595,
+            "min": 274.3410435718128,
+            "max": 281.9821687746216,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 258.70799485962203,
+            "min": 254.33979896969754,
+            "max": 261.87941938779187,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 111.3,
+            "min": 110.69090909090961,
+            "max": 116.1875,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 4.868735083532219,
+            "min": 4.7331786542923435,
+            "max": 4.963503649635037,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 514.0619471203536,
+            "min": 507.7877633739263,
+            "max": 514.5890614949167,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "json",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 128.85946738086665,
+            "min": 120.03954243750948,
+            "max": 132.25455111249576,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 118.8891969267415,
+            "min": 111.00796924608377,
+            "max": 121.74045676108271,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 50.73947368420991,
+            "min": 50.57857142857115,
+            "max": 50.74102564102624,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 6.538461538461538,
+            "min": 6.071428571428571,
+            "max": 6.7105263157894735,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 179.98302704654634,
+            "min": 178.75120393000543,
+            "max": 180.5200120434165,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "json",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 341.1599438089484,
+            "min": 324.1336574669932,
+            "max": 346.9918865132432,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 310.6363950782415,
+            "min": 296.6797693582276,
+            "max": 315.388886312545,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 106.89272727272684,
+            "min": 101.5112903225799,
+            "max": 119.5920000000007,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 6.257668711656442,
+            "min": 6.144578313253012,
+            "max": 6.315789473684211,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 512.7296901773661,
+            "min": 509.9790761596523,
+            "max": 513.3905358670745,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "math",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 111.6657908565406,
+            "min": 109.57844527523636,
+            "max": 114.27803172895821,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 102.68004844999909,
+            "min": 100.83124816190224,
+            "max": 105.00931024053772,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 50.713636363636894,
+            "min": 50.5891304347821,
+            "max": 50.746666666667444,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 5.666666666666667,
+            "min": 5.543478260869565,
+            "max": 5.795454545454546,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 204.56569408997893,
+            "min": 202.38708797842264,
+            "max": 205.0350890494883,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "math",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 287.61561019625583,
+            "min": 275.43002187238494,
+            "max": 289.8715471183344,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 265.85703147108995,
+            "min": 255.29402706452223,
+            "max": 266.8649471451903,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 107.34202898550691,
+            "min": 105.862686567164,
+            "max": 113.5096774193554,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 5.024630541871921,
+            "min": 4.975609756097561,
+            "max": 5.151515151515151,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 517.1547924692277,
+            "min": 514.298719848739,
+            "max": 532.7607263752725,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "chat",
+          "concurrency": 1,
+          "engine_tokens_per_s": {
+            "median": 51.52035559147389,
+            "min": 49.91485113629679,
+            "max": 51.52347854198707,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 49.8637645781869,
+            "min": 48.52413130573862,
+            "max": 50.04303534805567,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 50.505102040816325,
+            "min": 50.50204081632606,
+            "max": 50.581188118811994,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.6020408163265305,
+            "min": 2.5247524752475248,
+            "max": 2.6020408163265305,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 152.8872528579086,
+            "min": 152.7459209319204,
+            "max": 153.56308710761368,
+            "n": 3
+          },
+          "completion_tokens": [
+            256,
+            256,
+            256
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        },
+        {
+          "class": "chat",
+          "concurrency": 8,
+          "engine_tokens_per_s": {
+            "median": 171.02328934793164,
+            "min": 169.12477926729127,
+            "max": 179.64704639120822,
+            "n": 3
+          },
+          "wall_tokens_per_s": {
+            "median": 163.4139988165141,
+            "min": 161.90752406963298,
+            "max": 171.5288421997773,
+            "n": 3
+          },
+          "ms_per_pass": {
+            "median": 120.62100000000035,
+            "min": 118.28749999999975,
+            "max": 121.71632653061236,
+            "n": 3
+          },
+          "tokens_per_pass_per_request": {
+            "median": 2.8294036061026353,
+            "min": 2.7945205479452055,
+            "max": 2.9565217391304346,
+            "n": 3
+          },
+          "ttft_ms": {
+            "median": 484.30237514548935,
+            "min": 481.9401563727297,
+            "max": 485.18764961045235,
+            "n": 3
+          },
+          "completion_tokens": [
+            2048,
+            2048,
+            2048
+          ],
+          "cached_prompt_tokens": [
+            0,
+            0,
+            0
+          ],
+          "all_http_200": true
+        }
+      ],
+      "prefill": [
+        {
+          "target": 2048,
+          "samples": 3,
+          "prefill_s": {
+            "median": 1.0765999999999984,
+            "min": 1.0651000000000022,
+            "max": 1.0815999999999986,
+            "n": 3
+          },
+          "ttft_s": {
+            "median": 1.0963670290075243,
+            "min": 1.09546454786323,
+            "max": 1.0978478228207678,
+            "n": 3
+          },
+          "ms_per_token": {
+            "median": 0.5241480038948386,
+            "min": 0.5213411649535008,
+            "max": 0.5330704780680131,
+            "n": 3
+          },
+          "actual_prompt_tokens": [
+            2054,
+            2043,
+            2029
+          ],
+          "all_cold": true
+        },
+        {
+          "target": 8192,
+          "samples": 3,
+          "prefill_s": {
+            "median": 3.7532000000000005,
+            "min": 3.714,
+            "max": 3.8900999999999986,
+            "n": 3
+          },
+          "ttft_s": {
+            "median": 3.778042068006471,
+            "min": 3.743080287007615,
+            "max": 3.9133972281124443,
+            "n": 3
+          },
+          "ms_per_token": {
+            "median": 0.46461995543451357,
+            "min": 0.4625731722505916,
+            "max": 0.47181322013341404,
+            "n": 3
+          },
+          "actual_prompt_tokens": [
+            8029,
+            8078,
+            8245
+          ],
+          "all_cold": true
+        },
+        {
+          "target": 32768,
+          "samples": 3,
+          "prefill_s": {
+            "median": 15.409299999999996,
+            "min": 15.406200000000004,
+            "max": 15.511099999999999,
+            "n": 3
+          },
+          "ttft_s": {
+            "median": 15.469278840115294,
+            "min": 15.442245112964883,
+            "max": 15.559382593026385,
+            "n": 3
+          },
+          "ms_per_token": {
+            "median": 0.4755369707443524,
+            "min": 0.47519200518182675,
+            "max": 0.47785274183610593,
+            "n": 3
+          },
+          "actual_prompt_tokens": [
+            32421,
+            32460,
+            32404
+          ],
+          "all_cold": true
+        }
+      ],
+      "quality": {
+        "model": "Qwen/Qwen3.8-27B-FP8",
+        "settings": {
+          "max_tokens": 2048,
+          "reasoning_effort": "none",
+          "no_think": true,
+          "limit": 300,
+          "seed": 20260908
+        },
+        "tasks": {
+          "humaneval": {
+            "n": 164,
+            "passed": 156,
+            "rate": 0.9512,
+            "seconds": 132,
+            "mean_completion_tokens": 247,
+            "truncated": 0
+          },
+          "gsm8k": {
+            "n": 300,
+            "passed": 291,
+            "rate": 0.97,
+            "seconds": 376,
+            "mean_completion_tokens": 397,
+            "truncated": 4
+          },
+          "extract": {
+            "n": 100,
+            "passed": 100,
+            "rate": 1.0,
+            "seconds": 26,
+            "mean_completion_tokens": 63,
+            "truncated": 0
+          }
+        }
+      },
+      "modes": {
+        "mtp3": {
+          "greedy": [
+            {
+              "class": "prose",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 59.44610220067138,
+                "min": 59.44055944055944,
+                "max": 59.5015867089789,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 57.697439664889444,
+                "min": 57.62800615260109,
+                "max": 57.71719324309412,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 45.15368421052632,
+                "min": 45.11157894736842,
+                "max": 45.1578947368421,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 2.6842105263157894,
+                "min": 2.6842105263157894,
+                "max": 2.6842105263157894,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 128.21045494638383,
+                "min": 126.6750160139054,
+                "max": 153.1647751107812,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            },
+            {
+              "class": "code",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 71.48063015081016,
+                "min": 71.25094302718709,
+                "max": 71.59100480080853,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 68.60593937337286,
+                "min": 68.57004519501422,
+                "max": 68.97851221715636,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 45.156962025316425,
+                "min": 45.087341772151916,
+                "max": 45.30253164556964,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 3.2278481012658227,
+                "min": 3.2278481012658227,
+                "max": 3.2278481012658227,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 151.73427411355078,
+                "min": 151.5651228837669,
+                "max": 152.94265700504184,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            },
+            {
+              "class": "json",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 81.67317916853499,
+                "min": 81.38124720750628,
+                "max": 81.73338889066953,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 78.05817300545779,
+                "min": 78.0566956978174,
+                "max": 78.07310528058035,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 45.24927536231885,
+                "min": 45.21594202898553,
+                "max": 45.41159420289852,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 3.6956521739130435,
+                "min": 3.6956521739130435,
+                "max": 3.6956521739130435,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 151.53181506320834,
+                "min": 151.4952420257032,
+                "max": 151.87503513880074,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            },
+            {
+              "class": "math",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 75.2345547884581,
+                "min": 74.96251874062975,
+                "max": 75.33234859675036,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 72.4623009875576,
+                "min": 71.95862312376022,
+                "max": 72.55323739965614,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 45.19200000000002,
+                "min": 45.13333333333333,
+                "max": 45.35599999999996,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 3.4,
+                "min": 3.4,
+                "max": 3.4,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 126.6820221208036,
+                "min": 126.39749306254089,
+                "max": 151.6986850183457,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            },
+            {
+              "class": "chat",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 51.79032028758856,
+                "min": 51.735681389356714,
+                "max": 51.836643424877494,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 50.526425242196744,
+                "min": 50.36891025053383,
+                "max": 50.53483073270556,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 45.17155963302756,
+                "min": 45.13119266055048,
+                "max": 45.21926605504582,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 2.3394495412844036,
+                "min": 2.3394495412844036,
+                "max": 2.3394495412844036,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 151.8970439210534,
+                "min": 151.61123988218606,
+                "max": 152.65047689899802,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            }
+          ],
+          "parity": {
+            "prose": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": true
+            },
+            "code": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": true
+            },
+            "json": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": true
+            },
+            "math": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": true
+            },
+            "chat": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": false
+            }
+          }
+        },
+        "plain": {
+          "greedy": [
+            {
+              "class": "prose",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 31.272994849153797,
+                "min": 31.221303948576676,
+                "max": 31.277981527592083,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 30.961602053812015,
+                "min": 30.95184980396811,
+                "max": 30.9677014880713,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 31.976470588235287,
+                "min": 31.97137254901961,
+                "max": 32.029411764705884,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 1.0,
+                "min": 1.0,
+                "max": 1.0,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 101.15301003679633,
+                "min": 101.08322906307876,
+                "max": 101.37714794836938,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            },
+            {
+              "class": "code",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 31.243490939387637,
+                "min": 31.240428790199083,
+                "max": 31.252297963085514,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 30.95479714289889,
+                "min": 30.941942698593113,
+                "max": 30.961504364762295,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 32.00666666666665,
+                "min": 31.997647058823535,
+                "max": 32.009803921568626,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 1.0,
+                "min": 1.0,
+                "max": 1.0,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 101.54989711008966,
+                "min": 101.51592013426125,
+                "max": 101.93849680945277,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            },
+            {
+              "class": "json",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 31.215571061329417,
+                "min": 31.171688772079946,
+                "max": 31.223215378964124,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 30.948214032573972,
+                "min": 30.850377001132973,
+                "max": 30.971938588877222,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 32.03529411764706,
+                "min": 32.02745098039216,
+                "max": 32.08039215686274,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 1.0,
+                "min": 1.0,
+                "max": 1.0,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 101.48394014686346,
+                "min": 101.25956288538873,
+                "max": 101.49466386064887,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            },
+            {
+              "class": "math",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 31.189608356368783,
+                "min": 31.188082483305212,
+                "max": 31.23392371573456,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 30.80311572144036,
+                "min": 30.77450551275606,
+                "max": 30.855276608184287,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 32.06196078431374,
+                "min": 32.016470588235286,
+                "max": 32.0635294117647,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 1.0,
+                "min": 1.0,
+                "max": 1.0,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 126.43976090475917,
+                "min": 126.030937070027,
+                "max": 127.80063995160162,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            },
+            {
+              "class": "chat",
+              "concurrency": 1,
+              "engine_tokens_per_s": {
+                "median": 31.212514382237007,
+                "min": 31.204493447056343,
+                "max": 31.21748178980229,
+                "n": 3
+              },
+              "wall_tokens_per_s": {
+                "median": 30.920327405091786,
+                "min": 30.9038334342079,
+                "max": 30.940881015458373,
+                "n": 3
+              },
+              "ms_per_pass": {
+                "median": 32.038431372549034,
+                "min": 32.03333333333333,
+                "max": 32.0466666666667,
+                "n": 3
+              },
+              "tokens_per_pass_per_request": {
+                "median": 1.0,
+                "min": 1.0,
+                "max": 1.0,
+                "n": 3
+              },
+              "ttft_ms": {
+                "median": 101.60767589695752,
+                "min": 101.56854195520282,
+                "max": 101.84104391373694,
+                "n": 3
+              },
+              "completion_tokens": [
+                256,
+                256,
+                256
+              ],
+              "cached_prompt_tokens": [
+                0,
+                0,
+                0
+              ],
+              "all_http_200": true
+            }
+          ],
+          "parity": {
+            "prose": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": true
+            },
+            "code": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": true
+            },
+            "json": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": true
+            },
+            "math": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": true
+            },
+            "chat": {
+              "default_repeats": 3,
+              "mode_repeats": 3,
+              "identical": false
+            }
+          }
+        }
+      },
+      "rank_checks": [
+        {
+          "path": "raw/qwen27b-fp8-w4/modes/mtp3/rank-identity.json",
+          "expected_ranks": 4,
+          "md5": {
+            "serve_rank0.ops": "689a697d2d925a716b7ce62972655a6c",
+            "serve_rank2.ops": "689a697d2d925a716b7ce62972655a6c",
+            "serve_rank1.ops": "689a697d2d925a716b7ce62972655a6c",
+            "serve_rank3.ops": "689a697d2d925a716b7ce62972655a6c"
+          },
+          "passed": true
+        },
+        {
+          "path": "raw/qwen27b-fp8-w4/modes/plain/rank-identity.json",
+          "expected_ranks": 4,
+          "md5": {
+            "serve_rank0.ops": "bb7e7758ba14f99056f0665535c62d76",
+            "serve_rank2.ops": "bb7e7758ba14f99056f0665535c62d76",
+            "serve_rank1.ops": "bb7e7758ba14f99056f0665535c62d76",
+            "serve_rank3.ops": "bb7e7758ba14f99056f0665535c62d76"
+          },
+          "passed": true
+        },
+        {
+          "path": "raw/qwen27b-fp8-w4/performance/default/rank-identity.json",
+          "expected_ranks": 4,
+          "md5": {
+            "serve_rank0.ops": "d1bac7fa0ab94ebcb2b44de058278f2b",
+            "serve_rank2.ops": "d1bac7fa0ab94ebcb2b44de058278f2b",
+            "serve_rank1.ops": "d1bac7fa0ab94ebcb2b44de058278f2b",
+            "serve_rank3.ops": "d1bac7fa0ab94ebcb2b44de058278f2b"
+          },
+          "passed": true
+        },
+        {
+          "path": "raw/qwen27b-fp8-w4/quality/default/rank-identity.json",
+          "expected_ranks": 4,
+          "md5": {
+            "serve_rank0.ops": "e91bcb333bc475d7da99ab7232745800",
+            "serve_rank2.ops": "e91bcb333bc475d7da99ab7232745800",
+            "serve_rank1.ops": "e91bcb333bc475d7da99ab7232745800",
+            "serve_rank3.ops": "e91bcb333bc475d7da99ab7232745800"
+          },
+          "passed": true
+        }
+      ],
+      "isolation": "== isolation: prompt 0 alone (256 tokens) vs beside 7 others (256 tokens): DIFFERENT"
+    }
+  ]
+}

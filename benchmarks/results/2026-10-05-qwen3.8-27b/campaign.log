@@ -1,1 +1,114 @@
-CAMPAIGN_ABORT 06:46:22 (stopped by hand: the 32-row ceiling leaves eight drafter slots on scalar replays, so the performance rows are moot; the campaign re-runs on the final binary)
+
+=== 09:14:37 release build
+BUILD_EXIT=0
+
+=== 09:15:32 manifest
+{
+  "commit": "5b57904274d3c1f6f5863652903768ecb9a0c01c",
+  "binary_sha256": "0e38b02f18123ecadcf4cdd5f0bb96f827363e827d98ba90401120f021496479",
+  "version": "dgpp-serve 0.1.0+g5b57904274d3.dirty (git 5b57904274d3, cuda 13.0)"
+}
+
+=== 09:15:33 glm down (stays down)
+2026-10-05 09:15:38.745 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 09:15:38 performance
+2026-10-05T09:15:38.878719+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/resu
+2026-10-05T09:16:05.184547+00:00 EXIT 0 raw/qwen27b-fp8-w1/performance/default/up.log
+2026-10-05T09:16:05.208601+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,2,4,8 --classes all --r
+2026-10-05T09:29:03.362083+00:00 EXIT 0 raw/qwen27b-fp8-w1/performance/default/greedy.log
+2026-10-05T09:29:03.362437+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py 127.0.0.1 18080 2048 8192 32768 --repeat 3 --n
+2026-10-05T09:31:05.163444+00:00 EXIT 0 raw/qwen27b-fp8-w1/performance/default/prefill.log
+2026-10-05T09:31:05.163811+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,8 --classes all --repea
+2026-10-05T09:38:15.912704+00:00 EXIT 0 raw/qwen27b-fp8-w1/performance/default/sampled.log
+2026-10-05T09:38:15.913108+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_load.py 127.0.0.1 18080 --concurrency 1 --max-tokens 256 --isol
+2026-10-05T09:38:54.224463+00:00 EXIT 1 raw/qwen27b-fp8-w1/performance/default/isolation.log
+2026-10-05T09:38:54.224808+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/re
+2026-10-05T09:38:57.267956+00:00 EXIT 0 raw/qwen27b-fp8-w1/performance/default/down.log
+2026-10-05T09:38:57.371655+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/resu
+2026-10-05T09:39:18.916990+00:00 EXIT 0 raw/qwen27b-fp8-w2/performance/default/up.log
+2026-10-05T09:39:18.918106+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,2,4,8 --classes all --r
+2026-10-05T09:47:23.402525+00:00 EXIT 0 raw/qwen27b-fp8-w2/performance/default/greedy.log
+2026-10-05T09:47:23.402891+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py 127.0.0.1 18080 2048 8192 32768 --repeat 3 --n
+2026-10-05T09:48:45.693409+00:00 EXIT 0 raw/qwen27b-fp8-w2/performance/default/prefill.log
+2026-10-05T09:48:45.693648+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,8 --classes all --repea
+2026-10-05T09:53:19.441190+00:00 EXIT 0 raw/qwen27b-fp8-w2/performance/default/sampled.log
+2026-10-05T09:53:19.441535+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_load.py 127.0.0.1 18080 --concurrency 1 --max-tokens 256 --isol
+2026-10-05T09:53:51.324021+00:00 EXIT 0 raw/qwen27b-fp8-w2/performance/default/isolation.log
+2026-10-05T09:53:51.324306+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/re
+2026-10-05T09:53:55.074156+00:00 EXIT 0 raw/qwen27b-fp8-w2/performance/default/down.log
+2026-10-05T09:53:55.182366+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/resu
+2026-10-05T09:54:20.393244+00:00 EXIT 0 raw/qwen27b-fp8-w4/performance/default/up.log
+2026-10-05T09:54:20.394015+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,2,4,8 --classes all --r
+2026-10-05T10:00:13.124097+00:00 EXIT 0 raw/qwen27b-fp8-w4/performance/default/greedy.log
+2026-10-05T10:00:13.124432+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py 127.0.0.1 18080 2048 8192 32768 --repeat 3 --n
+2026-10-05T10:01:14.800241+00:00 EXIT 0 raw/qwen27b-fp8-w4/performance/default/prefill.log
+2026-10-05T10:01:14.800672+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,8 --classes all --repea
+2026-10-05T10:04:36.378803+00:00 EXIT 0 raw/qwen27b-fp8-w4/performance/default/sampled.log
+2026-10-05T10:04:36.379007+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_load.py 127.0.0.1 18080 --concurrency 1 --max-tokens 256 --isol
+2026-10-05T10:04:54.791394+00:00 EXIT 1 raw/qwen27b-fp8-w4/performance/default/isolation.log
+2026-10-05T10:04:54.791618+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/re
+2026-10-05T10:05:01.903291+00:00 EXIT 0 raw/qwen27b-fp8-w4/performance/default/down.log
+
+=== 10:05:01 modes
+2026-10-05T10:05:02.052672+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/resu
+2026-10-05T10:05:18.374700+00:00 EXIT 0 raw/qwen27b-fp8-w1/modes/plain/up.log
+2026-10-05T10:05:18.398872+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 
+2026-10-05T10:12:40.030939+00:00 EXIT 0 raw/qwen27b-fp8-w1/modes/plain/greedy.log
+2026-10-05T10:12:40.031265+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/re
+2026-10-05T10:12:42.071394+00:00 EXIT 0 raw/qwen27b-fp8-w1/modes/plain/down.log
+2026-10-05T10:12:42.166424+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/resu
+2026-10-05T10:12:58.478763+00:00 EXIT 0 raw/qwen27b-fp8-w1/modes/mtp2/up.log
+2026-10-05T10:12:58.479894+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 
+2026-10-05T10:16:21.403422+00:00 EXIT 0 raw/qwen27b-fp8-w1/modes/mtp2/greedy.log
+2026-10-05T10:16:21.403769+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/re
+2026-10-05T10:16:23.445256+00:00 EXIT 0 raw/qwen27b-fp8-w1/modes/mtp2/down.log
+2026-10-05T10:16:23.542628+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/resu
+2026-10-05T10:16:38.874031+00:00 EXIT 0 raw/qwen27b-fp8-w2/modes/plain/up.log
+2026-10-05T10:16:38.875081+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 
+2026-10-05T10:20:37.337127+00:00 EXIT 0 raw/qwen27b-fp8-w2/modes/plain/greedy.log
+2026-10-05T10:20:37.337329+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/re
+2026-10-05T10:20:41.127177+00:00 EXIT 0 raw/qwen27b-fp8-w2/modes/plain/down.log
+2026-10-05T10:20:41.223657+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/resu
+2026-10-05T10:20:56.644652+00:00 EXIT 0 raw/qwen27b-fp8-w2/modes/mtp3/up.log
+2026-10-05T10:20:56.645786+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 
+2026-10-05T10:22:40.041627+00:00 EXIT 0 raw/qwen27b-fp8-w2/modes/mtp3/greedy.log
+2026-10-05T10:22:40.041937+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/re
+2026-10-05T10:22:43.779778+00:00 EXIT 0 raw/qwen27b-fp8-w2/modes/mtp3/down.log
+2026-10-05T10:22:43.859908+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/resu
+2026-10-05T10:23:02.713449+00:00 EXIT 0 raw/qwen27b-fp8-w4/modes/plain/up.log
+2026-10-05T10:23:02.714589+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 
+2026-10-05T10:25:09.390405+00:00 EXIT 0 raw/qwen27b-fp8-w4/modes/plain/greedy.log
+2026-10-05T10:25:09.390735+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/re
+2026-10-05T10:25:16.426123+00:00 EXIT 0 raw/qwen27b-fp8-w4/modes/plain/down.log
+2026-10-05T10:25:16.524685+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/resu
+2026-10-05T10:25:35.761565+00:00 EXIT 0 raw/qwen27b-fp8-w4/modes/mtp3/up.log
+2026-10-05T10:25:35.762622+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 
+2026-10-05T10:26:37.307895+00:00 EXIT 0 raw/qwen27b-fp8-w4/modes/mtp3/greedy.log
+2026-10-05T10:26:37.308090+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/re
+2026-10-05T10:26:44.372229+00:00 EXIT 0 raw/qwen27b-fp8-w4/modes/mtp3/down.log
+
+=== 10:26:44 quality
+2026-10-05T10:26:44.483358+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/resu
+2026-10-05T10:27:10.799443+00:00 EXIT 0 raw/qwen27b-fp8-w1/quality/default/up.log
+2026-10-05T10:27:10.823445+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/isolated_eval.py 127.0.0.1 18080 --
+2026-10-05T10:43:51.774583+00:00 EXIT 0 raw/qwen27b-fp8-w1/quality/default/eval.log
+2026-10-05T10:43:51.774905+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/re
+2026-10-05T10:43:53.856668+00:00 EXIT 0 raw/qwen27b-fp8-w1/quality/default/down.log
+2026-10-05T10:43:53.958698+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/resu
+2026-10-05T10:44:15.562162+00:00 EXIT 0 raw/qwen27b-fp8-w2/quality/default/up.log
+2026-10-05T10:44:15.563406+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/isolated_eval.py 127.0.0.1 18080 --
+2026-10-05T10:55:17.652233+00:00 EXIT 0 raw/qwen27b-fp8-w2/quality/default/eval.log
+2026-10-05T10:55:17.652422+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/re
+2026-10-05T10:55:21.389596+00:00 EXIT 0 raw/qwen27b-fp8-w2/quality/default/down.log
+2026-10-05T10:55:21.498770+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/resu
+2026-10-05T10:55:48.916168+00:00 EXIT 0 raw/qwen27b-fp8-w4/quality/default/up.log
+2026-10-05T10:55:48.917206+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/isolated_eval.py 127.0.0.1 18080 --
+2026-10-05T11:04:42.653711+00:00 EXIT 0 raw/qwen27b-fp8-w4/quality/default/eval.log
+2026-10-05T11:04:42.653891+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/re
+2026-10-05T11:04:50.119669+00:00 EXIT 0 raw/qwen27b-fp8-w4/quality/default/down.log
+
+=== 11:04:50 summarize
+Summarized 4 completed launches.
+
+CAMPAIGN_DONE 11:04:50
