@@ -271,16 +271,22 @@ void dsa_select_decode(const void* q_fp8, const float* w_folded,
                        int grid_blocks, cudaStream_t stream,
                        bool relu = false);
 
-// Prefill select: one block per row over the materialized dot buffer.
+// Prefill select over the materialized dot buffer. Optional workspace:
+// dsa_select_prefill_workspace_bytes(rows, dot_stride, select_k) bytes,
+// aligned for uint64_t, permits
+// parallel coalesced scoring followed by exact radix selection at long
+// contexts. Without workspace, use the streaming selection oracle.
 //   dot: fp32 [rows * heads, dot_stride] (row r head h at
 //   dot[r*heads + h]); k_scale: fp32 [n_pools] contiguous (gathered);
 //   pos: [rows]; visible per row is derived on device.
+size_t dsa_select_prefill_workspace_bytes(int rows, int64_t dot_stride, int select_k);
 void dsa_select_prefill(const float* dot, int64_t dot_stride,
                         const float* w_folded, const float* k_scale,
                         const int64_t* pos, int rows, int64_t n_pools,
                         int heads, int select_k, int kpool, int max_selected,
                         int32_t* topk_out, int32_t* out_counts,
-                        cudaStream_t stream, bool relu = false);
+                        cudaStream_t stream, bool relu = false,
+                        void* workspace = nullptr);
 
 // ---- MLA absorbed attention -------------------------------------------
 

@@ -141,7 +141,11 @@ DsaLayer::ScratchLayout DsaLayer::scratch_layout(
   L.off_dot = alloc(size_t(tile_cap) * size_t(heads) * size_t(max_pools) * 4);
   L.off_gather_k = alloc(size_t(max_pools) * size_t(dim));
   L.off_gather_scale = alloc(size_t(max_pools) * 4);
-  L.off_select_ws = alloc(dsa_select_workspace_bytes(max_decode_rows, max_pools));
+  // Decode and prefill do not overlap. The compact prefill keys occupy
+  // 1/16 of the dot buffer and reuse the decode selector's workspace.
+  L.off_select_ws = alloc(std::max(
+      dsa_select_workspace_bytes(max_decode_rows, max_pools),
+      dsa_select_prefill_workspace_bytes(tile_cap, max_pools, g.select_k)));
   L.off_counter = alloc(8);  // int32 [2]: the select ticket and rows-done
   L.total = align256(off);
   L.max_pools = max_pools;
@@ -745,7 +749,7 @@ void DsaLayer::enqueue_prefill(const void* hidden_in, DsaStatePool& state,
                        pos_dev_ + row0, rows, n_gather, heads, geo_.select_k,
                        kpool, geo_.max_selected,
                        topk_ + size_t(sel_base_ + row0) * geo_.max_selected, counts_ + sel_base_ + row0,
-                       stream, cfg_.index_relu != 0);
+                       stream, cfg_.index_relu != 0, select_ws_);
   }
   note_selection(SelKind::kPrefill, tokens, token_start, req, nullptr);
   }

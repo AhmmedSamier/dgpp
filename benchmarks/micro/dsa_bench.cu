@@ -9,6 +9,8 @@
 // Usage: dsa_bench [--iters N] [--warmup N] [--ctx N]
 //   --ctx: decode context length in tokens (default 65536; must be a
 //          multiple of block_tokens).
+//   --prefill-only --ctx N --capacity N --chunk N: time one prefill chunk
+//          ending at ctx, with synthetic history and the specified KV pool.
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -288,14 +290,28 @@ void bench_decode(int warmup, int iters, const DsaConfig& cfg, int64_t ctx,
 // Prefill chunk throughput at real geometry.
 // ---------------------------------------------------------------------------
 
+__global__ void seed_prefill_history(uint8_t* keys, float* scales,
+                                    int64_t pools, int dim) {
+  for (int64_t i = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+       i < pools * dim; i += int64_t(gridDim.x) * blockDim.x) {
+    uint32_t x = uint32_t(i) * 747796405u + 2891336453u;
+    x = ((x >> ((x >> 28) + 4)) ^ x) * 277803737u;
+    keys[i] = uint8_t((x ^ (x >> 22)) & 0xbfu);  // finite e4m3
+  }
+  for (int64_t i = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+       i < pools; i += int64_t(gridDim.x) * blockDim.x)
+    scales[i] = 0.01f;
+}
+
 void bench_prefill(int warmup, int iters, const DsaConfig& cfg, int tokens,
-                   const char* label) {
+                   const char* label, int64_t context = 0, int64_t capacity = 0) {
   const DsaGeometry g = DsaGeometry::from_config(cfg);
   cudaStream_t s;
   DGPP_CUDA_OK(cudaStreamCreate(&s));
   BenchWeights bw(cfg, 41);
-  const int64_t capacity =
-      (tokens + cfg.block_tokens - 1) / cfg.block_tokens * cfg.block_tokens;
+  context = std::max<int64_t>(context, tokens);
+  capacity = std::max(capacity, context);
+  capacity = (capacity + cfg.block_tokens - 1) / cfg.block_tokens * cfg.block_tokens;
   dgpp::Arena arena;
   dgpp::Arena::Config ac;
   ac.persistent_hot =
@@ -317,7 +333,19 @@ void bench_prefill(int warmup, int iters, const DsaConfig& cfg, int tokens,
   din.upload(random_bf16_bits(42, int64_t(tokens) * cfg.hidden, -2, 0).data(),
              size_t(tokens) * cfg.hidden * 2);
 
-  auto step = [&] { layer.enqueue_prefill(din.p, pool, 0, 0, 0, tokens, dout.p, s); };
+  const int64_t start = context - tokens;
+  if (start > 0) {
+    if (!pool.ensure_request_blocks(0, context, s))
+      throw std::runtime_error("prefill history does not fit");
+    const int64_t pools = (context / cfg.block_tokens) * g.pools_per_block;
+    seed_prefill_history<<<96, 256, 0, s>>>(
+        static_cast<uint8_t*>(pool.index_k(0)), pool.index_scale(0), pools,
+        cfg.index_head_dim);
+    DGPP_CUDA_OK(cudaGetLastError());
+    DGPP_CUDA_OK(cudaMemsetAsync(pool.latent(0), 0,
+                                 size_t(context) * g.latent_bytes_per_token, s));
+  }
+  auto step = [&] { layer.enqueue_prefill(din.p, pool, 0, 0, start, tokens, dout.p, s); };
   for (int i = 0; i < warmup; ++i) step();
   DGPP_CUDA_OK(cudaStreamSynchronize(s));
   const Timing t = time_loop(iters, step, s);
@@ -333,6 +361,9 @@ void bench_prefill(int warmup, int iters, const DsaConfig& cfg, int tokens,
 int main(int argc, char** argv) {
   int iters = 50, warmup = 5, tp = 1;
   int64_t ctx = 65536;
+  int64_t capacity = 0;
+  int chunk = 2048;
+  bool prefill_only = false;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--iters") == 0 && i + 1 < argc)
       iters = std::atoi(argv[++i]);
@@ -342,6 +373,12 @@ int main(int argc, char** argv) {
       ctx = std::atoll(argv[++i]);
     else if (std::strcmp(argv[i], "--tp") == 0 && i + 1 < argc)
       tp = std::atoi(argv[++i]);
+    else if (std::strcmp(argv[i], "--capacity") == 0 && i + 1 < argc)
+      capacity = std::atoll(argv[++i]);
+    else if (std::strcmp(argv[i], "--chunk") == 0 && i + 1 < argc)
+      chunk = std::atoi(argv[++i]);
+    else if (std::strcmp(argv[i], "--prefill-only") == 0)
+      prefill_only = true;
   }
   int devices = 0;
   if (cudaGetDeviceCount(&devices) != cudaSuccess || devices < 1) {
@@ -359,6 +396,17 @@ int main(int argc, char** argv) {
 
   DsaConfig cfg{};  // real GLM-5.3-Flash geometry; --tp N for a rank's slice
   cfg.tp_size = tp;
+  if (prefill_only) {
+    if (chunk <= 0 || chunk > ctx || chunk % cfg.block_tokens ||
+        (capacity && capacity < ctx) || iters <= 0 || warmup < 0) {
+      std::fprintf(stderr, "invalid prefill chunk, capacity, or iteration count\n");
+      return 1;
+    }
+    std::printf("== prefill tail: TP=%d context=%lld capacity=%lld chunk=%d ==\n",
+                tp, (long long)ctx, (long long)std::max(ctx, capacity), chunk);
+    bench_prefill(warmup, iters, cfg, chunk, "prefill tail", ctx, capacity);
+    return 0;
+  }
   const bool decode_only =
       std::any_of(argv + 1, argv + argc, [](const char* a) {
         return std::strcmp(a, "--decode-only") == 0;

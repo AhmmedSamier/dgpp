@@ -513,6 +513,117 @@ DGPP_TEST(dsa_decode_update_ring_continuation_matches_host) {
 // (M3 exit criterion), using synthetic dots so the host mirror and the
 // kernel see identical logits.
 // ---------------------------------------------------------------------------
+DGPP_TEST(dsa_select_prefill_radix_long_context_exact) {
+  // Independent CPU oracle, including exact ties, ReLU, both model
+  // budgets, partial pools, padded strides, and mixed causal positions.
+  // The last Flash case reaches 1M tokens; these are the small row counts
+  // produced by the bounded dot buffer at long context.
+  constexpr int rows = 3, heads = 32;
+  for (const int kpool : {4, 1}) {
+    const int select_k = 2048 / kpool;
+    const int max_selected = 2048 + kpool - 1;
+    for (const int pools : {2053, 32771, 131075, 262144}) {
+      const int stride = pools + 17;
+      for (const bool relu : {false, true}) {
+        for (const bool ties : {false, true}) {
+          std::vector<float> dots(size_t(rows) * heads * stride), w(rows * heads), ks(pools);
+          for (size_t i = 0; i < dots.size(); ++i)
+            dots[i] = ties ? 1.0f : random_f32(931, i);
+          for (size_t i = 0; i < w.size(); ++i)
+            w[i] = ties ? (i % 2 ? -1.0f : 1.0f) : random_f32(932, i);
+          for (int p = 0; p < pools; ++p)
+            ks[p] = ties ? 1.0f : std::fabs(random_f32(933, p));
+          std::vector<int64_t> pos = {int64_t(std::max(0, kpool - 2)),
+                                     int64_t(pools / 2) * kpool + kpool - 2,
+                                     int64_t(pools) * kpool - 1};
+          DevBuf dd(dots.size() * 4), dw(w.size() * 4), dks(ks.size() * 4),
+              dpos(pos.size() * 8), dtopk(size_t(rows) * max_selected * 4),
+              dcnt(rows * 4), dws(dsa_select_prefill_workspace_bytes(rows, stride, select_k));
+          dd.upload(dots.data(), dots.size() * 4);
+          dw.upload(w.data(), w.size() * 4);
+          dks.upload(ks.data(), ks.size() * 4);
+          dpos.upload(pos.data(), pos.size() * 8);
+          // Two calls with reused, initially dirty scratch catch reliance
+          // on zero-initialized keys/histograms and incomplete output writes.
+          DGPP_CUDA_OK(cudaMemset(dws.p, 0xa5, dws.bytes));
+          for (int replay = 0; replay < 2; ++replay)
+            dsa_select_prefill(static_cast<const float*>(dd.p), stride,
+                static_cast<const float*>(dw.p), static_cast<const float*>(dks.p),
+                static_cast<const int64_t*>(dpos.p), rows, pools, heads, select_k,
+                kpool, max_selected, static_cast<int32_t*>(dtopk.p),
+                static_cast<int32_t*>(dcnt.p), nullptr, relu, dws.p);
+          std::vector<int32_t> got(size_t(rows) * max_selected), counts(rows);
+          dtopk.download(got.data(), got.size() * 4);
+          dcnt.download(counts.data(), counts.size() * 4);
+          for (int r = 0; r < rows; ++r) {
+            const int64_t visible = (pos[r] + 1) / kpool;
+            std::vector<float> logits(static_cast<size_t>(visible));
+            for (int64_t p = 0; p < visible; ++p) {
+              float d[32];
+              for (int h = 0; h < heads; ++h) {
+                d[h] = dots[(size_t(r) * heads + h) * stride + p];
+                if (relu) d[h] = std::max(d[h], 0.0f);
+              }
+              logits[p] = prefill_logit_mirror(d, w.data() + r * heads, ks[p]);
+            }
+            std::vector<int32_t> ids(select_k), want(max_selected, -1);
+            const int selected = dsa_ref::select_pools(logits.data(), visible, select_k, ids.data());
+            const int count = dsa_ref::expand_append_tail(ids.data(), selected, pos[r],
+                                                         kpool, max_selected, want.data());
+            if (counts[r] != count)
+              throw std::runtime_error("prefill radix count mismatch");
+            require_bitwise("prefill radix exact pools=" + std::to_string(pools) +
+                            " kpool=" + std::to_string(kpool) + " row=" + std::to_string(r) +
+                            " relu=" + std::to_string(relu) + " ties=" + std::to_string(ties),
+                            got.data() + size_t(r) * max_selected, want.data(), want.size() * 4);
+          }
+        }
+      }
+    }
+  }
+}
+
+DGPP_TEST(dsa_select_prefill_partition_shapes_and_tails) {
+  // Both sides of the 96-block target, including the 190-leaf workspace
+  // bound (95 rows x 2 partitions) and 128 partitions for one long row.
+  constexpr int heads = 32, kpool = 4, select_k = 512, max_selected = 2051;
+  for (const int rows : {1, 2, 5, 7, 31, 95, 96, 97}) {
+    const int pools = rows < 8 ? 131072 : 4097;
+    const int stride = pools + 3;
+    std::vector<float> dots(size_t(rows) * heads * stride, 1.0f),
+        weights(rows * heads, 1.0f), scales(pools, 1.0f);
+    std::vector<int64_t> positions(rows);
+    for (int r = 0; r < rows; ++r)
+      positions[r] = r % 5 == 4 ? r % kpool : int64_t(pools - 1) * kpool + r % kpool;
+    DevBuf dd(dots.size() * 4), dw(weights.size() * 4), ds(scales.size() * 4),
+        dp(positions.size() * 8), dk(size_t(rows) * max_selected * 4), dc(rows * 4),
+        ws(dsa_select_prefill_workspace_bytes(rows, stride, select_k));
+    dd.upload(dots.data(), dots.size() * 4);
+    dw.upload(weights.data(), weights.size() * 4);
+    ds.upload(scales.data(), scales.size() * 4);
+    dp.upload(positions.data(), positions.size() * 8);
+    dsa_select_prefill(static_cast<const float*>(dd.p), stride,
+        static_cast<const float*>(dw.p), static_cast<const float*>(ds.p),
+        static_cast<const int64_t*>(dp.p), rows, pools, heads, select_k, kpool,
+        max_selected, static_cast<int32_t*>(dk.p), static_cast<int32_t*>(dc.p),
+        nullptr, false, ws.p);
+    std::vector<int32_t> got(size_t(rows) * max_selected), counts(rows);
+    dk.download(got.data(), got.size() * 4);
+    dc.download(counts.data(), counts.size() * 4);
+    for (int r = 0; r < rows; ++r) {
+      const int64_t visible = (positions[r] + 1) / kpool;
+      const int selected = int(std::min<int64_t>(select_k, visible));
+      std::vector<int32_t> ids(selected), want(max_selected, -1);
+      for (int i = 0; i < selected; ++i) ids[i] = i;  // exact ties -> lower pool ids
+      const int count = dsa_ref::expand_append_tail(ids.data(), selected, positions[r],
+                                                   kpool, max_selected, want.data());
+      if (counts[r] != count) throw std::runtime_error("partitioned prefill count mismatch");
+      require_bitwise("partitioned prefill rows=" + std::to_string(rows),
+                       got.data() + size_t(r) * max_selected, want.data(), want.size() * 4);
+    }
+  }
+}
+
 DGPP_TEST(dsa_select_prefill_bitwise_fuzz) {
   const DsaConfig cfg{};
   const DsaGeometry g = DsaGeometry::from_config(cfg);

@@ -1547,6 +1547,175 @@ __global__ void select_decode_kernel(
   }
 }
 
+// The old prefill selector gave a warp one pool, so adjacent lanes loaded
+// different head rows. At long contexts only a few query rows fit the dot
+// buffer: three blocks scanned 131K pools and repeatedly sorted tiles.
+// Give each thread a pool instead. Head loads are coalesced across pools;
+// the register tree preserves PrefillKeyFn's exact arithmetic and order.
+template <bool kRelu>
+__global__ void prefill_score_keys_kernel(
+    const float* dot, int64_t stride, const float* w, const float* scales,
+    const int64_t* pos, int64_t n_pools, int select_k, int kpool,
+    uint64_t* keys) {
+  const int r = blockIdx.y;
+  const int64_t visible = min((pos[r] + 1) / kpool, n_pools);
+  const int64_t p = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (visible <= select_k || p >= visible) return;
+  float v[32];
+  const float ks = scales[p];
+#pragma unroll
+  for (int h = 0; h < 32; ++h) {
+    float d = dot[(int64_t(r) * 32 + h) * stride + p];
+    if (kRelu) d = fmaxf(d, 0.0f);
+    v[h] = __fmul_rn(__fmul_rn(w[r * 32 + h], ks), d);
+  }
+#pragma unroll
+  for (int off = 16; off > 0; off >>= 1) {
+#pragma unroll
+    for (int h = 0; h < off; ++h) v[h] = __fadd_rn(v[h], v[h + off]);
+  }
+  keys[int64_t(r) * stride + p] =
+      (uint64_t(~sortable_f32_dev(v[0])) << kIdxBits) | uint64_t(p);
+}
+
+__device__ inline void prefill_hist_add(int32_t* hist, int bin) {
+  const unsigned peers = __match_any_sync(__activemask(), bin);
+  if ((threadIdx.x & 31) == __ffs(peers) - 1) atomicAdd(hist + bin, __popc(peers));
+}
+
+// The boundary key under the same total order as streaming top-k. Only
+// its final <=256-key bin needs ranking; every smaller key is selected.
+// Pool ids make even an all-equal-score row terminate exactly.
+__global__ void prefill_select_keys_kernel(
+    const uint64_t* keys, int64_t stride, const int64_t* pos,
+    int64_t n_pools, int select_k, int kpool, int max_selected,
+    int32_t* topk_out, int32_t* out_counts, int parts, uint64_t* partials) {
+  extern __shared__ uint32_t smem[];
+  uint32_t* best_hi = smem;
+  uint32_t* best_lo = best_hi + select_k;
+  uint32_t* cand_hi = best_lo + select_k;
+  uint32_t* cand_lo = cand_hi + kSelectHistBins;
+  int32_t* scratch = reinterpret_cast<int32_t*>(cand_lo + kSelectStopCandidates);
+  int* smem_count = scratch + select_k;
+  int32_t* hist = reinterpret_cast<int32_t*>(cand_hi);
+  __shared__ int boundary, below, definite_count, candidate_count;
+  const int r = blockIdx.x;
+  const int part = blockIdx.y;
+  const int64_t total_visible = min((pos[r] + 1) / kpool, n_pools);
+  const int64_t lo = total_visible * part / parts;
+  const int64_t visible = total_visible * (part + 1) / parts - lo;
+  const uint64_t* row = keys + int64_t(r) * stride + lo;
+  for (int i = threadIdx.x; i < select_k; i += blockDim.x) {
+    const uint64_t key = visible <= select_k && i < visible
+        ? (total_visible > select_k ? row[i] : uint64_t(lo + i)) : ~uint64_t(0);
+    best_hi[i] = uint32_t(key >> 32);
+    best_lo[i] = uint32_t(key);
+  }
+  __syncthreads();
+  if (visible > select_k) {
+    uint64_t prefix = 0;
+    int prefix_shift = kSelectKeyBits;
+    int remaining = select_k, lower = 0, count = 0, shift = 0;
+    for (;;) {
+      shift = max(0, prefix_shift - kSelectRadixBits);
+      const int bits = prefix_shift - shift;
+      for (int i = threadIdx.x; i < kSelectHistBins; i += blockDim.x) hist[i] = 0;
+      __syncthreads();
+      for (int64_t p = threadIdx.x; p < visible; p += blockDim.x) {
+        const uint64_t key = row[p];
+        if ((key >> prefix_shift) == prefix)
+          prefill_hist_add(hist, select_digit(key, shift, bits));
+      }
+      __syncthreads();
+      select_find_bin(hist, remaining, &boundary, &below);
+      count = hist[boundary];
+      lower += below;
+      remaining -= below;
+      prefix = (prefix << bits) | uint64_t(boundary);
+      __syncthreads();
+      if (count <= kSelectStopCandidates || shift == 0) break;
+      prefix_shift = shift;
+    }
+    if (threadIdx.x == 0) definite_count = candidate_count = 0;
+    __syncthreads();
+    for (int64_t p = threadIdx.x; p < visible; p += blockDim.x) {
+      const uint64_t key = row[p];
+      const uint64_t top = key >> shift;
+      if (top < prefix) {
+        const int i = atomicAdd(&definite_count, 1);
+        if (i < select_k) {
+          best_hi[i] = uint32_t(key >> 32);
+          best_lo[i] = uint32_t(key);
+        }
+      } else if (top == prefix) {
+        const int i = atomicAdd(&candidate_count, 1);
+        if (i < kSelectStopCandidates) {
+          cand_hi[i] = uint32_t(key >> 32);
+          cand_lo[i] = uint32_t(key);
+        }
+      }
+    }
+    __syncthreads();
+    const int i = threadIdx.x;
+    const uint32_t hi = i < count ? cand_hi[i] : 0xffffffffu;
+    const uint32_t lo = i < count ? cand_lo[i] : 0xffffffffu;
+    int rank = 0;
+#pragma unroll 8
+    for (int j = 0; j < count; ++j) rank += key_less(cand_hi[j], cand_lo[j], hi, lo);
+    if (i < count && rank < remaining) {
+      best_hi[lower + rank] = hi;
+      best_lo[lower + rank] = lo;
+    }
+    __syncthreads();
+  }
+  if (parts > 1) {
+    // A pool outside its partition's top-k cannot enter the global top-k.
+    // Sort only these survivors for the exact pairwise merge tree.
+    bitonic_sort_asc(best_hi, best_lo, select_k);
+    uint64_t* out = partials + (int64_t(r) * parts + part) * select_k;
+    for (int i = threadIdx.x; i < select_k; i += blockDim.x)
+      out[i] = (uint64_t(best_hi[i]) << 32) | best_lo[i];
+    return;
+  }
+  const int cnt = expand_from_best(best_hi, best_lo, select_k, pos[r], kpool,
+                                   max_selected, topk_out + int64_t(r) * max_selected,
+                                   scratch, smem_count);
+  if (threadIdx.x == 0) out_counts[r] = cnt;
+}
+
+// Each level owns disjoint ranges of the partial array and writes its
+// winner into the left child's slot. Kernel boundaries order levels; no
+// global spin barrier or second full workspace is needed. The final merge
+// expands the selected pools. Its work is bounded by select_k, not context.
+__global__ void prefill_merge_keys_kernel(
+    uint64_t* partials, const int64_t* pos, int parts, int step,
+    int select_k, int kpool, int max_selected, int32_t* topk_out, int32_t* out_counts) {
+  extern __shared__ uint32_t smem[];
+  uint32_t* hi = smem;
+  uint32_t* lo = hi + 2 * select_k;
+  int32_t* scratch = reinterpret_cast<int32_t*>(lo + 2 * select_k);
+  const int r = blockIdx.x;
+  const int part = blockIdx.y * 2 * step;
+  uint64_t* left = partials + (int64_t(r) * parts + part) * select_k;
+  const uint64_t* right = left + int64_t(step) * select_k;
+  for (int i = threadIdx.x; i < select_k; i += blockDim.x) {
+    const uint64_t a = left[i], b = right[select_k - 1 - i];
+    hi[i] = uint32_t(a >> 32); lo[i] = uint32_t(a);
+    hi[select_k + i] = uint32_t(b >> 32); lo[select_k + i] = uint32_t(b);
+  }
+  __syncthreads();
+  bitonic_merge_asc(hi, lo, 2 * select_k);
+  if (2 * step < parts) {
+    for (int i = threadIdx.x; i < select_k; i += blockDim.x)
+      left[i] = (uint64_t(hi[i]) << 32) | lo[i];
+    return;
+  }
+  const int cnt = expand_from_best(hi, lo, select_k, pos[r], kpool, max_selected,
+                                   topk_out + int64_t(r) * max_selected,
+                                   scratch, scratch + select_k);
+  if (threadIdx.x == 0) out_counts[r] = cnt;
+}
+
 // TILE: the streaming tile (kSelectTile for select_k <= 1024, twice that
 // for the full model's 2048).
 template <bool kRelu, int TILE>
@@ -3263,15 +3432,47 @@ unsigned long long dsa_select_anomalies(long long out[6], bool clear,
   return count;
 }
 
+size_t dsa_select_prefill_workspace_bytes(int rows, int64_t dot_stride, int select_k) {
+  // Partitioned calls have rows < 96 and a power-of-two partition count
+  // bringing rows * parts to at most 190. Reserve 192 leaves, independent
+  // of context. A leaf retains only select_k keys.
+  return (size_t(rows) * size_t(dot_stride) + size_t(192) * size_t(select_k)) * sizeof(uint64_t);
+}
+
 void dsa_select_prefill(const float* dot, int64_t dot_stride,
                         const float* w_folded, const float* k_scale,
                         const int64_t* pos, int rows, int64_t n_pools,
                         int heads, int select_k, int kpool, int max_selected,
                         int32_t* topk_out, int32_t* out_counts,
-                        cudaStream_t stream, bool relu) {
+                        cudaStream_t stream, bool relu, void* workspace) {
   if (rows <= 0) return;
   if (heads != 32) DGPP_CUDA_OK(cudaErrorInvalidValue);
   if (select_k <= 0 || select_k > kSelectMaxK) DGPP_CUDA_OK(cudaErrorInvalidValue);
+  if (workspace && n_pools > kSelectTile) {
+    auto* keys = static_cast<uint64_t*>(workspace);
+    auto* partials = keys + int64_t(rows) * dot_stride;
+    int parts = 1;
+    while (parts * rows < 96 && 2 * parts <= n_pools / (2 * select_k)) parts *= 2;
+    const dim3 grid(unsigned((n_pools + 255) / 256), unsigned(rows));
+    if (relu)
+      prefill_score_keys_kernel<true><<<grid, 256, 0, stream>>>(
+          dot, dot_stride, w_folded, k_scale, pos, n_pools, select_k, kpool, keys);
+    else
+      prefill_score_keys_kernel<false><<<grid, 256, 0, stream>>>(
+          dot, dot_stride, w_folded, k_scale, pos, n_pools, select_k, kpool, keys);
+    const size_t bytes = (size_t(select_k) * 3 + kSelectHistBins +
+                          kSelectStopCandidates + 1) * sizeof(uint32_t);
+    prefill_select_keys_kernel<<<dim3(unsigned(rows), unsigned(parts)), 256, bytes, stream>>>(
+        keys, dot_stride, pos, n_pools, select_k, kpool, max_selected,
+        topk_out, out_counts, parts, partials);
+    const size_t merge_bytes = (size_t(5) * select_k + 1) * sizeof(uint32_t);
+    for (int step = 1; step < parts; step *= 2)
+      prefill_merge_keys_kernel<<<dim3(unsigned(rows), unsigned(parts / (2 * step))),
+                                 256, merge_bytes, stream>>>(
+          partials, pos, parts, step, select_k, kpool, max_selected, topk_out, out_counts);
+    DGPP_CUDA_OK(cudaGetLastError());
+    return;
+  }
   // The tile: 2 * select_k keys or more (kSelectTile up to 1024, twice
   // that for the full model's 2048).
   const bool wide = select_k > kSelectTile / 2;
