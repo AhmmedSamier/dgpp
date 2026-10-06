@@ -93,12 +93,25 @@ std::vector<int64_t> require_int_array(const minijson::Value& v, std::string_vie
 
 // One target/ignore entry: "re:<pattern>" compiles as-is (Python regexes in
 // these checkpoints use `\\.` and alternations ECMAScript reads verbatim);
-// a plain entry is an exact module/parameter name.
+// a plain entry is a literal module/parameter name, escaped into an anchored
+// exact match — the dots of "model.language_model..." match themselves, not
+// any character. A plain entry carrying glob wildcards cannot be read as a
+// literal and is refused, never left to silently claim nothing.
 std::regex compile_target(const std::string& entry, const char* who = "target") {
   const std::string prefix = "re:";
-  const bool is_re = entry.rfind(prefix, 0) == 0;
+  if (entry.rfind(prefix, 0) != 0) {
+    if (entry.find_first_of("*?[") != std::string::npos)
+      throw std::runtime_error(std::string("Qwen3.5 quantization_config ") + who + " '" + entry +
+                               "': plain entries are exact names (wildcards need the re: prefix)");
+    std::string literal;
+    for (const char ch : entry) {
+      if (std::strchr("^$.()[]{}*+?|\\", ch) != nullptr) literal += '\\';
+      literal += ch;
+    }
+    return std::regex("^" + literal + "$");
+  }
   try {
-    return std::regex(is_re ? entry.substr(prefix.size()) : "^" + entry + "$");
+    return std::regex(entry.substr(prefix.size()));
   } catch (const std::regex_error& e) {
     throw std::runtime_error(std::string("Qwen3.5 quantization_config ") + who +
                              " '" + entry + "': " + e.what());

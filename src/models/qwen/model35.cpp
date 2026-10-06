@@ -1170,12 +1170,15 @@ MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens,
   plan.add("activations", 4 * M * H * 2 + 2 * M * I * 2);
   // The NVFP4 dense path's tables (production ldmatrix kernel): one
   // {0, m, 0} segment per row count plus the view tables (per-layer on
-  // resident stacks, one 3-entry staging slot on streaming stacks).
+  // resident mixed-release stacks, one 3-entry staging slot elsewhere —
+  // the ctor's split).
   plan.add("nvfp4 dense segment/view tables",
            M * sizeof(MoeSegment) +
-               (residency == LoaderResidency::Resident
-                    ? (static_cast<size_t>(cfg.num_hidden_layers) + 1) * 3 * sizeof(MoeExpertView)
-                    : 3 * sizeof(MoeExpertView)));
+               (residency == LoaderResidency::Resident &&
+                                cfg.quant_kind == Qwen35QuantKind::Nvfp4Mixed
+                            ? (static_cast<size_t>(cfg.num_hidden_layers) + 1) *
+                                  3 * sizeof(MoeExpertView)
+                            : 3 * sizeof(MoeExpertView)));
   // Dense FP8 prefill bridge: the largest dense matrix dequantized to BF16.
   plan.add("dense fp8 prefill bridge (largest dense matrix in BF16)",
            qwen35_dense_bridge_bytes(cfg));

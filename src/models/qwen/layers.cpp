@@ -126,11 +126,10 @@ void gemm_dense(const QwenGemmWorkspace& g, const uint16_t* act, int64_t act_str
                              static_cast<uint16_t*>(out), m, n, k, stream, static_cast<size_t>(n));
       return;
     }
-    // The channel half's rows the fp8 GEMV can stage (its shape_ok, in
-    // host terms: 16B-aligned payload, k % 16, one BF16 activation row in
-    // the 48 KiB smem budget).
-    const bool gemv_staged = (reinterpret_cast<uintptr_t>(w8.payload) & 15u) == 0 &&
-                             (k % 16) == 0 && k <= 24576;
+    // The channel half's rows the fp8 GEMV can stage (its own shape check,
+    // exposed: the grid launcher below re-applies it and throws on a channel
+    // matrix that fails it with the bridge unavailable).
+    const bool gemv_staged = fp8_gemv_can_stage(w8.payload, k);
     if ((m > 128 || (channel && !gemv_staged)) && g.dequant &&
         bf16_bytes <= g.dequant_bytes) {
       // Bridge above the GEMV ceiling (as the block grid always has), and

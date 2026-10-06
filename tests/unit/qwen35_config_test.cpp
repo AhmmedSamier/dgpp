@@ -82,6 +82,37 @@ DGPP_TEST(qwen35_config_accepts_nvfp4_mixed) {
   require(c.tensor_quant("model.language_model.embed_tokens") == Q::Bf16, "embed bf16");
 }
 
+DGPP_TEST(qwen35_config_plain_targets_are_exact) {
+  // A plain (non-"re:") target is a literal module name: an anchored exact
+  // match, its dots matching themselves. A glob target cannot be read as a
+  // literal and is refused, never left to silently claim nothing.
+  using Q = dgpp::Qwen35TensorQuant;
+  const std::string quant = R"({"quant_method": "compressed-tensors", "format": "mixed-precision",
+      "config_groups": {
+        "group_0": {"format": "float-quantized",
+                    "targets": ["model.language_model.layers.0.self_attn.q_proj", "re:.*lm_head"],
+                    "weights": {"num_bits": 8, "type": "float", "strategy": "channel"}},
+        "group_1": {"format": "nvfp4-pack-quantized",
+                    "targets": ["re:.*mlp\\.(gate|up|down)_proj$"],
+                    "weights": {"num_bits": 4, "type": "float", "group_size": 16}}},
+      "ignore": ["re:^mtp.*"]})";
+  const auto c = parse(qwen35_fixture::text_json(), quant);
+  require(c.tensor_quant("model.language_model.layers.0.self_attn.q_proj") == Q::Fp8Channel,
+          "plain exact target");
+  require(c.tensor_quant("modelXlanguage_model.layers.0.self_attn.q_proj") == Q::Bf16,
+          "the dot matches only itself");
+  const std::string glob = R"({"quant_method": "compressed-tensors", "format": "mixed-precision",
+      "config_groups": {
+        "group_0": {"format": "float-quantized",
+                    "targets": ["model.language_model.layers.*.self_attn.q_proj"],
+                    "weights": {"num_bits": 8, "type": "float", "strategy": "channel"}},
+        "group_1": {"format": "nvfp4-pack-quantized",
+                    "targets": ["re:.*mlp\\.(gate|up|down)_proj$"],
+                    "weights": {"num_bits": 4, "type": "float", "group_size": 16}}}})";
+  require(refusal(qwen35_fixture::text_json(), glob).find("plain entries") != std::string::npos,
+          "glob target refused by name");
+}
+
 DGPP_TEST(qwen35_config_refusals_name_the_field) {
   using namespace qwen35_fixture;
   require(refusal(patched("\"qwen3_5_text\"", "\"qwen4_exp_text\""), kQuantFp8)

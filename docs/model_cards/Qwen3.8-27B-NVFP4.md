@@ -68,7 +68,7 @@ chain the solo-vs-batch bitwise gates require.
 
 Serve A/B against the FP8 release (same prompts, temp 0, identical
 transcripts and drafter acceptance): short prompt 29.1 vs 24.5 tok/s
-(119 vs 141 ms/pass), pp448 prefill 720-741 vs 931 ms. The NVFP4
+(119 vs 141 ms/pass), pp448 prefill 720-748 vs 931 ms. The NVFP4
 release now leads on both — there is no performance case left for a
 lossy dense-W4A4 path, so none is built (see the MoE-side
 `DGPP_MOE_W4A4` gate, still issue-#68-blocked).

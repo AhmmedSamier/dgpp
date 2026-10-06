@@ -26,7 +26,7 @@ The history by milestone. The dated engineering record in
   streaming decode kernel was tried and reverted (correct, but slower on
   every production shape — the production kernel already saturates the
   decode roofline). Serve A/B vs the FP8 release, identical transcripts:
-  29.1 vs 24.5 tok/s short-prompt, pp448 prefill 720-741 vs 931 ms —
+  29.1 vs 24.5 tok/s short-prompt, pp448 prefill 720-748 vs 931 ms —
   NVFP4 leads on both, so no dense-W4A4 path is built.
 - **Qwen3.8-27B NVFP4: mixed formats in one checkpoint** (2026-10-05):
   the `unsloth/Qwen3.8-27B-NVFP4` release binds directly — NVFP4
@@ -38,8 +38,9 @@ The history by milestone. The dated engineering record in
   `config_groups` (targets, `re:` regexes, exact and regex `ignore`,
   document order first-match wins) into a per-module
   `tensor_quant()` resolution; `loader35` builds the three weight
-  forms side by side (fp4 payload + packed scales + folded `1/ws`
-  global slots, channel `weight_scale [N,1]` widened to f32);
+  forms side by side (fp4 payload + packed scales + the
+  `weight_global_scale` slots the kernels divide the finished dot by once,
+  channel `weight_scale [N,1]` widened to f32);
   `layers.cpp`'s dense GEMM derives its scale shifts from the matrix
   itself, so channel matrices ride the streaming fp8 GEMV at decode
   (<= 128 rows, the row-chain invariance preserved) and the

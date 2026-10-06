@@ -433,9 +433,10 @@ struct Qwen35LoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
   }
 
   // An NVFP4 matrix (compressed-tensors naming): weight_packed U8 [N, K/2]
-  // + weight_scale e4m3 [N, K/16]; the resident global is 1 /
-  // weight_global_scale, staged into a device slot like every other GlmFp4
-  // matrix in the repo (models/quant_matrix.hpp).
+  // + weight_scale e4m3 [N, K/16]; the resident global slot holds
+  // weight_global_scale itself — this release's global is already the
+  // divisor the kernels apply to the finished dot once (models/
+  // quant_matrix.hpp), so load_fp4_global stages it as is.
   struct Fp4Source {
     const QwenExpectedTensor* payload_entry = nullptr;
     const QwenExpectedTensor* scale_entry = nullptr;

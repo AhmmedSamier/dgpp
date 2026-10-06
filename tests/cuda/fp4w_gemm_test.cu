@@ -203,6 +203,12 @@ int main() {
   check_sparse_vs_grouped(200, 5120, 17408);
   check_vs_grouped(512, 4352, 5120, 45, "vs grouped gate");
   check_vs_grouped(256, 5120, 17408, 46, "vs grouped down");
+  // The wired shape: the kernel runs above 1024 rows only, where the tile
+  // order spans several m-groups (m_tiles > kGroupM: a full 8-tile group
+  // plus a tail group, the 2080-token prefill's pattern). Below, every
+  // case above stays single-group and never walks the group scheduler.
+  check_oracle(1152, 512, 256, 3200.f, 47, "oracle multi-group tail");
+  check_vs_grouped(1152, 5120, 17408, 48, "vs grouped multi-group");
   if (failures == 0) std::printf("fp4w_gemm_test: all passed\n");
   return failures == 0 ? 0 : 1;
 }

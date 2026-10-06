@@ -444,6 +444,10 @@ void launch_scale_gemm_grid_f32(const uint16_t* act, size_t act_row_stride_elems
                                 stream, out_row_stride_elems, rs, cs);
 }
 
+bool fp8_gemv_can_stage(const void* w_payload, int k) {
+  return fp8_gemv::shape_ok(w_payload, /*rows=*/1, k);
+}
+
 namespace {
 // The multi-problem GEMV: the problems in the parameter space
 // with their block prefixes; a block finds its problem by the prefix table
