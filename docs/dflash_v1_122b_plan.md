@@ -53,5 +53,17 @@ default, eps 1e-6, vocab 248320. TP: 32/8 heads and inter 9216 divide
   attn + MLP, norms), mask proposal loop (anchor + 15 masks →
   per-mask top-1), `dflash_depth`-capped verify wiring, eager greedy
   C1 + transcript parity vs MTP-depth-2 world.
-* Stage 3: graph capture, batching, sampled verify, 16-row budget
-  decision, campaign vs the 31.1 tok/s MTP baseline.
+## 4. Depth ladder (2026-10-07, 416-token prose probe, eager C1)
+
+| depth | tok/pass | accept | ms/pass | tok/s |
+|---|---|---|---|---|
+| 7 | 2.80 | p1 77 … p7 1 | 152 | 18.5 |
+| 4 | 2.69 | p1 79 … p4 15 | 133 | 20.3 |
+| 3 | 2.63 | p1 81 p2 52 p3 30 | 108 | 24.4 |
+| 2 | 2.28 | p1 80 p2 48 | 90 | 25.2 |
+| 1 | 1.80 | p1 80 | 83 | 21.7 |
+
+Depth 2 is the knee (fewer verify rows beat fuller acceptance).
+Transcripts identical at every depth. MTP depth 2 stays ahead
+(31.1 tok/s, graphed) — v1's gap is launch overhead (stage 3b:
+graph capture), not acceptance.
