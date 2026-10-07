@@ -17,7 +17,8 @@
     "sampling_candidates": 128,
     "stats_interval_s": 10,
     "bf16_weights": "bf12",
-    "mtp_expert_format": "bf16"
+    "mtp_expert_format": "bf16",
+    "mtp_depth": 2
   },
   "paths": {
     "resident_cache": ""
