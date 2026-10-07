@@ -41,3 +41,17 @@ Naming gap vs dense-NVFP4: ModelOpt (`.weight/.weight_scale/.weight_scale_2/.inp
 
 * 2026-10-07: survey (this doc), branch `qwen35-122b-moe-nvfp4` from PR95+master.
 * Next: config+binding unit gates on real snapshot → loader smoke (layer 0 + MTP skipped) → fixture/reference-dump → forward parity vs transformers → templates/card → `ci` suite + transcript battery + fabric md5 + campaign.
+
+## 4. MTP draft (2026-10-07)
+
+The checkpoint's draft is Full + MoE with per-expert BF16 (router
+`[256,3072]`, shared + 256×3 experts ≈ 4.6 GB BF16) — no native quantized
+form, and `QwenMoeLayer` serves routed FP8/NVFP4/packed only. Decision:
+`engine.mtp_expert_format=bf16` (qwen3_5-MoE-only) encodes each draft
+expert's slice to block FP8 at load (`load_bf16_rows/cols_fp8`, the
+`bf16_fused` precedent); proposals lossy, verify exact. Refused:
+MoE+mtp without the key, dense+`bf16` (dense draft is dense BF16,
+serves as shipped). Loader format bit 8 carries the key. Model:
+`mtp_run_rows` rides `moe_mlp` on the draft resident (route-table slot
+`num_hidden_layers`), `graph_prepare` harvests it; ctor + plan refuse
+the wrong combinations by key name.

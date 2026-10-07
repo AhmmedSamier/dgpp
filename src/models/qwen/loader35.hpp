@@ -114,6 +114,11 @@ struct Qwen35LayerStream : ResidentLayerStream<Qwen35LoaderFamily> {
                     bool resident_mtp = false);
   static void set_resident_image_dir(const std::string& dir);
   static const std::string& resident_image_dir();
+  // engine.mtp_expert_format for the MoE draft ("bf16": per-expert BF16
+  // encoded to block FP8 at load, draft proposals only). Set before the
+  // plan and the load; the image format carries it.
+  static void set_mtp_expert_format(const std::string& fmt);
+  static const std::string& mtp_expert_format();
   const std::string& image_dir() const override;
 };
 

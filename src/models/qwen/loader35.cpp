@@ -787,8 +787,9 @@ struct Qwen35LoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
   void build_moe(const std::string& p) {
     // ModelOpt NVFP4 MoE (nvidia 122B backbone): router + shared BF16,
     // routed gate/up rows [r*I, I), down cols [r*I, I), globals reciprocal.
-    // MTP draft (BF16 experts): row/col BF16 slices; the model refuses to
-    // run the draft in v1 (serve mtp:false), but the binding counts it.
+    // MTP draft (BF16 experts): engine.mtp_expert_format=bf16 below; the
+    // dense variant has no MoE draft at all.
+    if (!cfg.is_moe) fail("build_moe: dense variant carries no MoE");
     const bool is_mtp = out.layer == cfg.mtp_layer();
     QwenMoeResident& m = out.moe;
     const int64_t I = geo.local_moe_inter, S = geo.local_shared_inter;
@@ -802,16 +803,23 @@ struct Qwen35LoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
     m.shared[1] = load_bf16_rows(p + "mlp.shared_expert.up_proj.weight", r * S, S);
     m.shared[2] = load_bf16_cols(p + "mlp.shared_expert.down_proj.weight", r * S, S);
     if (is_mtp) {
+      // The draft's BF16 experts: engine.mtp_expert_format=bf16 encodes
+      // each expert's slice to block FP8 at load (the fused-release
+      // precedent); the proposals are lossy, the verify exact. Any other
+      // value cannot serve the BF16 draft — refused by key name.
+      if (Qwen35LayerStream::mtp_expert_format() != "bf16")
+        fail("mtp draft MoE needs engine.mtp_expert_format=bf16 (the checkpoint holds "
+             "per-expert BF16, encoded to block FP8 at load for the proposals only)");
       m.experts.resize(static_cast<size_t>(E) * 3);
-      // BF16 routed experts have no GlmQuantMatrix form; stash the slices
-      // as 1-row-scale block-FP8? No — v1 never runs MTP: keep the vectors
-      // empty and consume the tensors as raw rows so the binding reconciles.
-      // Fall through to raw loads below (resident stays empty).
+      m.scale_block = 128;
       for (int64_t e = 0; e < E; ++e) {
         const std::string ep = p + "mlp.experts." + std::to_string(e) + ".";
-        load_raw(ep + "gate_proj.weight");
-        load_raw(ep + "up_proj.weight");
-        load_raw(ep + "down_proj.weight");
+        m.experts[static_cast<size_t>(e) * 3 + 0] =
+            load_bf16_rows_fp8(ep + "gate_proj.weight", r * I, I);
+        m.experts[static_cast<size_t>(e) * 3 + 1] =
+            load_bf16_rows_fp8(ep + "up_proj.weight", r * I, I);
+        m.experts[static_cast<size_t>(e) * 3 + 2] =
+            load_bf16_cols_fp8(ep + "down_proj.weight", r * I, I);
       }
       return;
     }
@@ -910,10 +918,13 @@ struct Qwen35LoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
 
 const char* Qwen35LoaderFamily::who() { return "qwen35 loader"; }
 
+// 5: MoE MTP draft encoded (engine.mtp_expert_format=bf16 carries bit 8).
 // 4: MoE variant adds routed/shared slices (Nvfp4Moe, ModelOpt naming).
 // 3: the NVFP4 global slot holds the weight-side divisor itself (2026-10-06;
 // the 2-era images hold its reciprocal, and the kernels divide by the slot).
-uint64_t Qwen35LoaderFamily::loader_format() { return 4; }
+uint64_t Qwen35LoaderFamily::loader_format() {
+  return 4 | (Qwen35LayerStream::mtp_expert_format() == "bf16" ? 8 : 0);
+}
 
 int Qwen35LoaderFamily::max_layer(const Config& c) {
   return c.num_hidden_layers + (c.mtp_layer() >= 0 ? 1 : 0);
@@ -1069,6 +1080,21 @@ Qwen35LayerStream::Qwen35LayerStream(const Qwen35TextConfig& cfg, const std::str
 
 void Qwen35LayerStream::set_resident_image_dir(const std::string& dir) {
   resident_image_dir_storage_35() = dir;
+}
+
+std::string& mtp_expert_format_storage_35() {
+  static std::string fmt = "fp8";
+  return fmt;
+}
+
+void Qwen35LayerStream::set_mtp_expert_format(const std::string& fmt) {
+  if (fmt != "fp8" && fmt != "bf16_fused" && fmt != "bf16")
+    throw std::invalid_argument("qwen35 mtp_expert_format: fp8 | bf16_fused | bf16");
+  mtp_expert_format_storage_35() = fmt;
+}
+
+const std::string& Qwen35LayerStream::mtp_expert_format() {
+  return mtp_expert_format_storage_35();
 }
 
 const std::string& Qwen35LayerStream::resident_image_dir() { return resident_image_dir_storage_35(); }

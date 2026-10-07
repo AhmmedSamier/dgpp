@@ -9,10 +9,10 @@ gated-delta-net + full-attention hybrid (3:1, interval 4, swish GDN gate,
 partial-rotary MROPE + per-head output gate), 3072 hidden, 48 layers
 (36 GDN + 12 Full), 256K vocab, 262144 context. Each layer carries a
 256-expert top-8 MoE (softmax + renorm, `moe_inter` 1024) plus a gated
-shared expert (1024, sigmoid gate). One MTP draft layer exists in the
-checkpoint but has no kernel yet — v1 serves `mtp: false` (plain or
-DFlash2 when a 122B drafter lands; no `z-lab/Qwen3.5-122B-A10B-DFlash`
-weights are cached today).
+shared expert (1024, sigmoid gate). The MTP draft layer (one Full + MoE
+head) ships per-expert BF16: `engine.mtp_expert_format=bf16` encodes each
+draft expert to block FP8 at load (proposals lossy, verify exact); without
+the key the draft is refused by name and v1 serves `mtp: false`.
 
 The release is ModelOpt NVFP4 for the routed experts only
 (`weight` U8 packed e2m1 + `weight_scale` F8-E4M3 per 16 +

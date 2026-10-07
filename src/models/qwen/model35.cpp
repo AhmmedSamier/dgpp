@@ -225,9 +225,12 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
         "Qwen35Model: the NVFP4 release serves the checkpoint's own formats; "
         "engine.prefill_fp8_per_tensor and engine.dense_weights = fp8 are the FP8 "
         "release's levers (unset them)");
-  if (cfg_.is_moe && mtp_)
-    throw std::invalid_argument("Qwen35Model: the MoE variant serves mtp:false in v1 "
-                                "(the MTP draft's BF16 experts have no kernel yet)");
+  if (cfg_.is_moe && mtp_ && Qwen35LayerStream::mtp_expert_format() != "bf16")
+    throw std::invalid_argument("Qwen35Model: the MoE draft needs engine.mtp_expert_format=bf16 "
+                                "(per-expert BF16 encoded to block FP8 at load for the proposals only)");
+  if (!cfg_.is_moe && mtp_ && Qwen35LayerStream::mtp_expert_format() == "bf16")
+    throw std::invalid_argument("Qwen35Model: engine.mtp_expert_format=bf16 is the MoE draft's key; "
+                                "the dense draft serves its BF16 MLP as shipped");
   if (!dflash2_dir.empty()) {
     if (mtp_)
       throw std::invalid_argument("Qwen35Model: dflash2 replaces the MTP draft; enable one or the other");
@@ -756,7 +759,7 @@ QwenMoeWeights Qwen35Model::moe_view(const QwenMoeResident& m) {
   w.shared_down_proj = m.shared[2];
   w.shared_fp8 = nullptr;  // MoE shared expert is BF16 (no dense_weights fp8 lever)
   w.shared_inter = m.local_shared_inter;
-  w.experts = nullptr;
+  w.experts = m.experts.empty() ? nullptr : m.experts.data();
   w.experts_fp4 = m.experts_fp4.empty() ? nullptr : m.experts_fp4.data();
   w.experts_packed = nullptr;
   w.act_scale_w13 = 0.0f;
@@ -1179,8 +1182,8 @@ MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens,
         "plan_memory: the NVFP4 release serves the checkpoint's own formats; "
         "engine.prefill_fp8_per_tensor and engine.dense_weights = fp8 are the FP8 "
         "release's levers (unset them)");
-  if (cfg.is_moe && mtp)
-    throw std::invalid_argument("plan_memory: the MoE variant serves mtp:false in v1");
+  if (cfg.is_moe && mtp && Qwen35LayerStream::mtp_expert_format() != "bf16")
+    throw std::invalid_argument("plan_memory: the MoE draft needs engine.mtp_expert_format=bf16");
   std::unique_ptr<DFlash2Config> dfcfg;
   if (!dflash2_dir.empty()) {
     if (mtp)
@@ -1502,6 +1505,8 @@ void Qwen35Model::graph_prepare() {
   if (mtp_) {
     const Qwen35LayerResident& r = loader_.load_layer(cfg_.mtp_layer());
     build_layer_objects(r);
+    // The draft MoE's route table takes the slot after the main stack's.
+    if (cfg_.is_moe) moe_->prepare_graph_table(cfg_.num_hidden_layers, stream_);
   }
 }
 
@@ -1576,8 +1581,11 @@ void Qwen35Model::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos
   // Fused residual-add + post norm (bitwise the pair): one launch.
   qwen_add_rmsnorm_bf16(mtp_r_, ao, r.post_norm, x_, T, H, eps, stream_);
   uint16_t* mo = stage(mlp_out_, H);
-  if (cfg_.is_moe) throw std::logic_error("mtp_run_rows: MTP draft is not implemented for MoE");
-  dense_mlp(x_, mo, T, r.mlp, stream_, cfg_.num_hidden_layers, first_pos > 0 && !decode_row);
+  if (cfg_.is_moe)
+    moe_mlp(x_, mo, T, r.moe, stream_, capture ? cfg_.num_hidden_layers : -1,
+            /*decode=*/decode_row);
+  else
+    dense_mlp(x_, mo, T, r.mlp, stream_, cfg_.num_hidden_layers, first_pos > 0 && !decode_row);
   fold(mo, H);
   add_inplace_bf16(mtp_r_, mo, static_cast<size_t>(T) * H, stream_);
   if (head_rows == 0) return;  // prefill rows fill the cache; no head
