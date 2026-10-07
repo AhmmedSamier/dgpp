@@ -459,7 +459,8 @@ struct Scenario {
   int flips = 0;  // certified near-tie selection flips
   std::vector<std::vector<float>> hidden;  // per request, per position: [hidden] rows (all positions ever generated)
 
-  explicit Scenario(int tp, const std::string& tag_) : tag(tag_) {
+  explicit Scenario(int tp, const std::string& tag_, int64_t cache_tokens = 512,
+                    size_t dot_budget = 64ull << 20) : max_cache(cache_tokens), tag(tag_) {
     cfg.hidden = 256; cfg.q_lora = 64; cfg.o_lora = 32; cfg.num_heads = 16; cfg.o_groups = 4;
     cfg.index_topk = 16; cfg.candidate_block = 8; cfg.candidate_blocks = 4; cfg.window = 32; cfg.ring_slots = 48;
     cfg.block_tokens = 32; cfg.tp = tp;
@@ -526,11 +527,12 @@ struct Scenario {
     shape.layers = int(layers.size()); shape.cache_ratio = ratios; shape.tail_ordinals = 1; shape.max_requests = max_requests;
     shape.token_slots = max_cache; shape.block_tokens = cfg.block_tokens; shape.ring_slots = cfg.ring_slots;
     pool.init(shape);
-    const size_t sb = dgpp::Csa2Layer::scratch_bytes(cfg, max_tokens, max_cache, 16, 8);
+    const size_t sb = dgpp::Csa2Layer::scratch_bytes(cfg, max_tokens, max_cache, 16, 8, dot_budget);
     scratch = DevBuf(sb);
     gemm_ws = DevBuf(64u << 20);
     gemm.set_decode_rows(16);
-    layer = std::make_unique<dgpp::Csa2Layer>(gemm, cfg, max_tokens, max_cache, scratch.p, sb, gemm_ws.p, 64u << 20, 16, 8);
+    layer = std::make_unique<dgpp::Csa2Layer>(gemm, cfg, max_tokens, max_cache, scratch.p, sb, gemm_ws.p,
+                                           64u << 20, 16, 8, dot_budget);
     layer->rebind(layers[0].w, 0);
     require(layer->prepare(max_tokens) && layer->prepare(16), "gemm plans");
     hidden.assign(size_t(max_requests), {});
@@ -695,6 +697,27 @@ DGPP_TEST(csa2_layer_matches_the_oracle_over_prefill_decode_and_rollback) {
     s.decode({{1, 45, 1}, {0, 101, 4}});
     require(s.layer->index_violations() == 0, s.tag + ": index-key exactness violations");
     std::printf("[INFO] %s: %d selection flips, every one certified as a near tie\n", s.tag.c_str(), s.flips);
+  }
+}
+
+DGPP_TEST(csa2_prefill_reuses_score_workspace_at_shorter_contexts) {
+  for (const int tp : {1, 4}) {
+    for (const int64_t capacity : {512, 4096}) {
+      // Both allocations fit only one query at their maximum context.
+      // A 32-token prompt uses far fewer entries and must batch queries
+      // within that same allocation. The oracle checks ratio-1/ratio-2
+      // sources, restricted selection and selection reuse at both TP sizes.
+      Scenario s(tp, "workspace-tp" + std::to_string(tp) + "-cap" + std::to_string(capacity),
+                 capacity, 64ull << 10);
+      s.prefill(0, 0, 32);
+      require(s.layer->debug_logits_rows() > 1,
+              "prefill still tiles queries for the allocated capacity instead of the visible history");
+      s.prefill(0, 32, 32);
+      s.prefill(0, 64, 17);  // partial query tile and an odd compressor tail
+      s.decode({{0, 81, 3}});
+      require(s.layer->index_violations() == 0, s.tag + ": index-key exactness violations");
+      std::printf("[INFO] %s: %d selection flips, every one certified as a near tie\n", s.tag.c_str(), s.flips);
+    }
   }
 }
 

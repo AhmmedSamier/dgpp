@@ -388,6 +388,8 @@ struct GlmFamily final : ServeFamily {
         fabric ? dgpp::GlmResidency::Resident : dgpp::GlmResidency::Streaming,
         fabric ? dgpp::GlmHeadSharding::VocabSharded : dgpp::GlmHeadSharding::Full, slots,
         fabric && mtp, kv_format, /*serving_logits=*/true);
+    // Neither the eager nor graph serving path consumes diagnostic routes.
+    model->set_decode_route_traces(false);
   }
   void destroy_model() override { model.reset(); }
   size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }

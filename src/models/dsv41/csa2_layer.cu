@@ -575,8 +575,17 @@ void Csa2Layer::enqueue_prefill(const void* hidden_in, Csa2StatePool& pool, int 
       if (n_gather > 0)
         dsa_gather_index_pools(pool.block_tables() + size_t(req) * pool.total_blocks(), epb, pool.index_k(ord),
                                pool.index_scale(ord), n_gather, gather_k_, gather_scale_, kCsa2IndexDim, stream);
-      for (int row0 = 0; row0 < tokens; row0 += tile_cap_) {
-        const int rows = std::min(tile_cap_, tokens - row0);
+      // The allocation holds tile_cap_ queries at max_entries_, but the
+      // GEMM and logits use only padded_n entries at this context. Reuse
+      // that space for more queries instead of forcing a 1M cache's
+      // single-query tiles on every shorter prompt. Both buffers have
+      // the same query/entry capacity; no workspace allocation changes.
+      const int tile_rows = padded_n > 0
+          ? int(std::min<size_t>(size_t(tokens),
+                                size_t(tile_cap_) * size_t(max_entries_) / size_t(padded_n)))
+          : tokens;
+      for (int row0 = 0; row0 < tokens; row0 += tile_rows) {
+        const int rows = std::min(tile_rows, tokens - row0);
         if (padded_n > 0) {
           gemm_.matmul(q_fp8_ + size_t(row0) * cfg_.index_heads * kCsa2IndexDim, gather_k_, dot_, rows * cfg_.index_heads,
                        int(padded_n), kCsa2IndexDim, DType::F8_E4M3, GemmOut::F32, size_t(kCsa2IndexDim), gemm_ws_,

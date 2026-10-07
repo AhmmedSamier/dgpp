@@ -28,6 +28,13 @@ int64_t round_up_to(int64_t v, int64_t gran) {
   return (v + gran - 1) / gran * gran;
 }
 
+bool fused_prefill_scores(const DsaConfig& cfg, int64_t padded_pools) {
+  // Full GLM's unpooled indexer. Preserve the Flash and short-context
+  // paths while avoiding the full model's 32-head global dot buffer.
+  return cfg.index_kpool == 1 && cfg.qk_rope_head_dim == 64 &&
+         cfg.index_topk == 2048 && padded_pools > 2048;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------
@@ -141,7 +148,11 @@ DsaLayer::ScratchLayout DsaLayer::scratch_layout(
   L.off_dot = alloc(size_t(tile_cap) * size_t(heads) * size_t(max_pools) * 4);
   L.off_gather_k = alloc(size_t(max_pools) * size_t(dim));
   L.off_gather_scale = alloc(size_t(max_pools) * 4);
-  L.off_select_ws = alloc(dsa_select_workspace_bytes(max_decode_rows, max_pools));
+  // Decode and prefill do not overlap. The compact prefill keys occupy
+  // 1/16 of the dot buffer and reuse the decode selector's workspace.
+  L.off_select_ws = alloc(std::max(
+      dsa_select_workspace_bytes(max_decode_rows, max_pools),
+      dsa_select_prefill_workspace_bytes(tile_cap, max_pools, g.select_k)));
   L.off_counter = alloc(8);  // int32 [2]: the select ticket and rows-done
   L.total = align256(off);
   L.max_pools = max_pools;
@@ -373,7 +384,10 @@ bool DsaLayer::prepare(int tokens) {
 }
 
 int DsaLayer::prefill_query_tile_rows(int64_t padded_pools) const {
-  const int64_t row_pool_capacity = int64_t(tile_cap_) * max_pools_;
+  // A reduced 64-bit key replaces 32 FP32 dots. Reuse exactly the same
+  // allocation for 16 times as many queries; selection scratch is separate.
+  const int factor = fused_prefill_scores(cfg_, padded_pools) ? 16 : 1;
+  const int64_t row_pool_capacity = int64_t(tile_cap_) * max_pools_ * factor;
   return int(std::min<int64_t>(max_tokens_, row_pool_capacity /
                                            std::max<int64_t>(padded_pools, 1)));
 }
@@ -384,6 +398,7 @@ bool DsaLayer::prepare_prefill(int tile_rows, int64_t visible_pools) {
   const int64_t padded = round_up_to(visible_pools, kPoolPadGranularity);
   if (tile_rows <= 0 || tile_rows > prefill_query_tile_rows(padded))
     throw std::invalid_argument("dsa layer: prefill tile rows out of range");
+  if (fused_prefill_scores(cfg_, padded)) return true;
   return gemm_.ensure_plan(tile_rows * cfg_.index_n_heads, int(padded),
                            cfg_.index_head_dim, DType::F8_E4M3, GemmOut::F32,
                            size_t(cfg_.index_head_dim));
@@ -730,6 +745,21 @@ void DsaLayer::enqueue_prefill(const void* hidden_in, DsaStatePool& state,
   const int tile_rows = prefill_query_tile_rows(padded_n);
   for (int row0 = 0; row0 < tokens; row0 += tile_rows) {
     const int rows = std::min(tile_rows, tokens - row0);
+    if (fused_prefill_scores(cfg_, padded_n)) {
+      auto* keys = reinterpret_cast<uint64_t*>(dot_);
+      dsa_prefill_score_keys(q_fp8_ + size_t(row0) * heads * dim,
+                             gather_k_, w_folded_ + size_t(row0) * heads,
+                             gather_scale_, pos_dev_ + row0, rows, n_gather,
+                             padded_n, geo_.select_k, kpool, keys, stream,
+                             cfg_.index_relu != 0);
+      dsa_select_prefill_keys(keys, padded_n, pos_dev_ + row0, rows, n_gather,
+                              geo_.select_k, kpool, geo_.max_selected,
+                              topk_ + size_t(sel_base_ + row0) * geo_.max_selected,
+                              counts_ + sel_base_ + row0,
+                              static_cast<uint64_t*>(select_ws_), stream);
+      dot_stride_last_ = 0;  // this path stores reduced keys, not per-head dots
+      continue;
+    }
     if (padded_n > 0) {
       // Dots for this tile's (row, head) pairs against the gathered pools.
       gemm_.matmul(q_fp8_ + size_t(row0) * heads * dim, gather_k_, dot_,
@@ -745,7 +775,7 @@ void DsaLayer::enqueue_prefill(const void* hidden_in, DsaStatePool& state,
                        pos_dev_ + row0, rows, n_gather, heads, geo_.select_k,
                        kpool, geo_.max_selected,
                        topk_ + size_t(sel_base_ + row0) * geo_.max_selected, counts_ + sel_base_ + row0,
-                       stream, cfg_.index_relu != 0);
+                       stream, cfg_.index_relu != 0, select_ws_);
   }
   note_selection(SelKind::kPrefill, tokens, token_start, req, nullptr);
   }

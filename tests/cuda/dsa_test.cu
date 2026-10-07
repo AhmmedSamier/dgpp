@@ -513,6 +513,331 @@ DGPP_TEST(dsa_decode_update_ring_continuation_matches_host) {
 // (M3 exit criterion), using synthetic dots so the host mirror and the
 // kernel see identical logits.
 // ---------------------------------------------------------------------------
+DGPP_TEST(dsa_fused_prefill_score_matches_gemm) {
+  constexpr int heads = 32, dim = 128, selected = 2048;
+  struct Shape { int rows, pools; };
+  CublasLtGemm gemm;
+  DevBuf gemm_ws(64ull << 20);
+  int mismatched_cases = 0;
+  for (const Shape shape : {Shape{1, 2053}, {2, 2053}, {2, 8192}, {2, 262144},
+                             {3, 8192}, {7, 32771}, {32, 65539},
+                             {33, 262144}, {128, 2053}, {97, 8192},
+                             // GEMM tile shapes used by the three full-model
+                             // benchmark configurations before fusion.
+                             {15, 32768}, {7, 65536}, {13, 32768}, {6, 65536},
+                             {3, 131072}, {16, 32768}, {8, 65536}, {4, 131072}}) {
+    const int rows = shape.rows, pools = shape.pools;
+    const int stride = (pools + 255) / 256 * 256;
+    for (const int mode : {0, 1, 2}) {
+      const bool wide_range = mode == 1;
+      std::vector<uint8_t> q(rows * heads * dim), k(size_t(stride) * dim);
+      const auto code = [&](uint32_t h) {
+        if (wide_range) return uint8_t((h & 0x80u) | ((h >> 8) % 127));
+        return float_to_fp8_e4m3_bits(random_f32(1937, h) * 128.0f);
+      };
+      for (size_t i = 0; i < q.size(); ++i) q[i] = code(hash32(uint32_t(i + 173)));
+      for (size_t i = 0; i < k.size(); ++i) k[i] = code(hash32(uint32_t(i + 479)));
+      if (mode == 2) std::fill(q.begin(), q.end(), 0);  // exact ties
+      std::vector<float> w(rows * heads), scales(stride);
+      for (size_t i = 0; i < w.size(); ++i) w[i] = random_f32(1938, i);
+      for (int i = 0; i < stride; ++i) scales[i] = 0.01f + std::fabs(random_f32(1939, i));
+      std::vector<int64_t> pos(rows);
+      for (int r = 0; r < rows; ++r)
+        pos[r] = rows > 1 && r % 3 == 0 ? pools / 2 - 1 : pools - 1 - (r % 3 == 1);
+      DevBuf dq(q.size()), dk(k.size()), dw(w.size() * 4), ds(scales.size() * 4), dp(rows * 8),
+          dots(size_t(rows) * heads * stride * 4), picks(rows * selected * 4), counts(rows * 4),
+          old_ws(dsa_select_prefill_workspace_bytes(rows, stride, selected)),
+          fused(size_t(rows) * stride * sizeof(uint64_t));
+      dq.upload(q.data(), q.size()); dk.upload(k.data(), k.size());
+      dw.upload(w.data(), w.size() * 4); ds.upload(scales.data(), scales.size() * 4);
+      dp.upload(pos.data(), pos.size() * 8);
+      gemm.matmul(dq.p, dk.p, dots.p, rows * heads, stride, dim,
+                  DType::F8_E4M3, GemmOut::F32, dim, gemm_ws.p, gemm_ws.bytes, nullptr);
+      for (const bool relu : {false, true}) {
+        dsa_select_prefill(static_cast<const float*>(dots.p), stride,
+            static_cast<const float*>(dw.p), static_cast<const float*>(ds.p),
+            static_cast<const int64_t*>(dp.p), rows, pools, heads, selected, 1, selected,
+            static_cast<int32_t*>(picks.p), static_cast<int32_t*>(counts.p), nullptr, relu, old_ws.p);
+        dsa_prefill_score_keys(static_cast<const uint8_t*>(dq.p), static_cast<const uint8_t*>(dk.p),
+              static_cast<const float*>(dw.p), static_cast<const float*>(ds.p),
+              static_cast<const int64_t*>(dp.p), rows, pools, stride, selected, 1,
+              static_cast<uint64_t*>(fused.p), nullptr, relu);
+        std::vector<uint64_t> expected(size_t(rows) * stride), got(expected.size());
+        old_ws.download(expected.data(), expected.size() * 8);
+        fused.download(got.data(), got.size() * 8);
+        int different = 0;
+        for (int r = 0; r < rows; ++r) {
+          const int visible = int(pos[r] + 1);
+          if (visible <= selected) continue;
+          for (int p = 0; p < visible; ++p)
+            different += got[size_t(r) * stride + p] != expected[size_t(r) * stride + p];
+        }
+        // The small single-query cuBLAS plan has a different reduction;
+        // its score error is checked against FP64 by the accuracy test.
+        // Still require identical selected IDs/counts for this fixture.
+        if (different && rows != 1) {
+          ++mismatched_cases;
+          std::fprintf(stderr, "fused score key mismatch: rows=%d pools=%d mode=%d relu=%d count=%d\n",
+                       rows, pools, mode, int(relu), different);
+          continue;
+        }
+        std::vector<int32_t> want_picks(size_t(rows) * selected), got_picks(want_picks.size()),
+            want_counts(rows), got_counts(rows);
+        picks.download(want_picks.data(), want_picks.size() * 4);
+        counts.download(want_counts.data(), want_counts.size() * 4);
+        dsa_select_prefill_keys(static_cast<const uint64_t*>(fused.p), stride,
+            static_cast<const int64_t*>(dp.p), rows, pools, selected, 1, selected,
+            static_cast<int32_t*>(picks.p), static_cast<int32_t*>(counts.p),
+            static_cast<uint64_t*>(old_ws.p), nullptr);
+        picks.download(got_picks.data(), got_picks.size() * 4);
+        counts.download(got_counts.data(), got_counts.size() * 4);
+        require_bitwise("fused prefill selected token ids", got_picks.data(),
+                         want_picks.data(), want_picks.size() * 4);
+        require_bitwise("fused prefill selected counts", got_counts.data(),
+                         want_counts.data(), want_counts.size() * 4);
+      }
+    }
+  }
+  if (mismatched_cases)
+    throw std::runtime_error("fused score key mismatched cases=" + std::to_string(mismatched_cases));
+}
+
+DGPP_TEST(dsa_fused_single_query_fp64_accuracy) {
+  constexpr int heads = 32, dim = 128, selected = 2048;
+  CublasLtGemm gemm;
+  DevBuf gemm_ws(64ull << 20);
+  const auto score_from_key = [](uint64_t key) {
+    const uint32_t ordered = ~uint32_t(key >> 21);
+    const uint32_t bits = (ordered & 0x80000000u) ? (ordered ^ 0x80000000u) : ~ordered;
+    float score;
+    std::memcpy(&score, &bits, sizeof(score));
+    return double(score);
+  };
+  for (const int pools : {2053, 8192, 65539, 262144}) {
+    const int stride = (pools + 255) / 256 * 256;
+    for (int seed = 0; seed < (pools == 262144 ? 1 : 3); ++seed) {
+      for (const int mode : {0, 1, 2}) {
+        if (mode == 2 && (seed != 0 || pools > 8192)) continue;
+        std::vector<uint8_t> q(2 * heads * dim), k(size_t(stride) * dim);
+        const auto code = [&](uint32_t h) {
+          return mode == 1 ? uint8_t((h & 0x80u) | ((h >> 8) % 127))
+                           : float_to_fp8_e4m3_bits(random_f32(1937 + seed, h) * 128.0f);
+        };
+        for (int i = 0; i < heads * dim; ++i)
+          q[i] = mode == 2 ? 0 : code(hash32(uint32_t(i + 173 + seed * 7919)));
+        std::copy(q.begin(), q.begin() + heads * dim, q.begin() + heads * dim);
+        for (size_t i = 0; i < k.size(); ++i) k[i] = code(hash32(uint32_t(i + 479 + seed * 7907)));
+        std::vector<float> w(2 * heads), scales(stride);
+        for (int h = 0; h < heads; ++h) w[h] = w[heads + h] = random_f32(1938 + seed, h);
+        for (int p = 0; p < stride; ++p) scales[p] = 0.01f + std::fabs(random_f32(1939 + seed, p));
+        const int64_t positions[2] = {pools - 1, pools - 1};
+        DevBuf dq(q.size()), dk(k.size()), dw(w.size() * 4), ds(scales.size() * 4), dp(16),
+            dots(size_t(heads) * stride * 4), picks(selected * 4), counts(4),
+            workspace(dsa_select_prefill_workspace_bytes(1, stride, selected)),
+            fused(size_t(2) * stride * 8);
+        dq.upload(q.data(), q.size()); dk.upload(k.data(), k.size());
+        dw.upload(w.data(), w.size() * 4); ds.upload(scales.data(), scales.size() * 4);
+        dp.upload(positions, sizeof(positions));
+        gemm.matmul(dq.p, dk.p, dots.p, heads, stride, dim, DType::F8_E4M3,
+                    GemmOut::F32, dim, gemm_ws.p, gemm_ws.bytes, nullptr);
+        std::vector<double> q64(heads * dim), k64(size_t(pools) * dim);
+        for (size_t i = 0; i < q64.size(); ++i) q64[i] = fp8_e4m3_bits_to_float(q[i]);
+        for (size_t i = 0; i < k64.size(); ++i) k64[i] = fp8_e4m3_bits_to_float(k[i]);
+        for (const bool relu : {false, true}) {
+          dsa_select_prefill(static_cast<const float*>(dots.p), stride,
+              static_cast<const float*>(dw.p), static_cast<const float*>(ds.p),
+              static_cast<const int64_t*>(dp.p), 1, pools, heads, selected, 1, selected,
+              static_cast<int32_t*>(picks.p), static_cast<int32_t*>(counts.p), nullptr, relu, workspace.p);
+          dsa_prefill_score_keys(static_cast<const uint8_t*>(dq.p), static_cast<const uint8_t*>(dk.p),
+              static_cast<const float*>(dw.p), static_cast<const float*>(ds.p),
+              static_cast<const int64_t*>(dp.p), 1, pools, stride, selected, 1,
+              static_cast<uint64_t*>(fused.p), nullptr, relu);
+          std::vector<uint64_t> old_keys(pools), new_keys(pools);
+          workspace.download(old_keys.data(), old_keys.size() * 8);
+          fused.download(new_keys.data(), new_keys.size() * 8);
+          std::vector<double> reference(pools);
+          double old_error2 = 0, new_error2 = 0, reference2 = 0;
+          double old_max = 0, new_max = 0, old_scaled = 0, new_scaled = 0;
+          int differing = 0;
+          for (int p = 0; p < pools; ++p) {
+            double sum = 0, magnitude = 0;
+            for (int h = 0; h < heads; ++h) {
+              double dot = 0, absolute_products = 0;
+              for (int d = 0; d < dim; ++d) {
+                const double product = q64[h * dim + d] * k64[size_t(p) * dim + d];
+                dot += product;
+                absolute_products += std::fabs(product);
+              }
+              const double weight = double(w[h]) * double(scales[p]);
+              sum += weight * (relu ? std::max(dot, 0.0) : dot);
+              magnitude += std::fabs(weight) * absolute_products;
+            }
+            reference[p] = sum;
+            const double old_error = std::fabs(score_from_key(old_keys[p]) - sum);
+            const double new_error = std::fabs(score_from_key(new_keys[p]) - sum);
+            if (!std::isfinite(old_error) || !std::isfinite(new_error))
+              throw std::runtime_error("nonfinite single-query score error");
+            old_error2 += old_error * old_error; new_error2 += new_error * new_error;
+            reference2 += sum * sum;
+            old_max = std::max(old_max, old_error); new_max = std::max(new_max, new_error);
+            old_scaled = std::max(old_scaled, old_error / std::max(magnitude, 1e-300));
+            new_scaled = std::max(new_scaled, new_error / std::max(magnitude, 1e-300));
+            differing += old_keys[p] != new_keys[p];
+          }
+          std::vector<int> oracle(pools), before(pools), after(pools);
+          for (int p = 0; p < pools; ++p) oracle[p] = before[p] = after[p] = p;
+          std::partial_sort(oracle.begin(), oracle.begin() + selected, oracle.end(), [&](int a, int b) {
+            return reference[a] != reference[b] ? reference[a] > reference[b] : a < b;
+          });
+          const auto audit = [&](std::vector<int>& ids, const std::vector<uint64_t>& keys, double noise) {
+            std::partial_sort(ids.begin(), ids.begin() + selected, ids.end(),
+                              [&](int a, int b) { return keys[a] < keys[b]; });
+            std::vector<bool> chosen(pools, false), exact(pools, false);
+            for (int i = 0; i < selected; ++i) { chosen[ids[i]] = true; exact[oracle[i]] = true; }
+            int swaps = 0;
+            double lowest_added = reference[oracle[0]], highest_removed = reference[oracle[selected - 1]];
+            for (int p = 0; p < pools; ++p) {
+              if (chosen[p] && !exact[p]) { ++swaps; lowest_added = std::min(lowest_added, reference[p]); }
+              if (!chosen[p] && exact[p]) highest_removed = std::max(highest_removed, reference[p]);
+            }
+            const double gap = swaps ? highest_removed - lowest_added : 0;
+            if (gap > 2 * noise + 1e-12 * std::max(1.0, std::fabs(highest_removed)))
+              throw std::runtime_error("single-query selection not a certified boundary near tie");
+            return std::pair<int, double>{swaps, gap};
+          };
+          const auto old_cut = audit(before, old_keys, old_max), new_cut = audit(after, new_keys, new_max);
+          // A conservative forward-error bound for 128 FP32 dot terms
+          // plus head folding. Report actual errors against FP64, rather
+          // than treating the previous GEMM's bits as ground truth.
+          if (old_scaled > 2e-5 || new_scaled > 2e-5 ||
+              std::sqrt(new_error2 / std::max(reference2, 1e-300)) > 1e-6)
+            throw std::runtime_error("single-query score exceeds FP32 forward-error bound");
+          std::printf("ACCURACY {\"pools\":%d,\"seed\":%d,\"mode\":%d,\"relu\":%d,"
+              "\"differing_keys\":%d,\"old_nrmse\":%.12g,\"fused_nrmse\":%.12g,"
+              "\"old_max_abs\":%.12g,\"fused_max_abs\":%.12g,"
+              "\"old_max_scaled\":%.12g,\"fused_max_scaled\":%.12g,"
+              "\"old_swaps\":%d,\"fused_swaps\":%d,\"old_boundary_gap\":%.12g,\"fused_boundary_gap\":%.12g}\n",
+              pools, seed, mode, int(relu), differing,
+              std::sqrt(old_error2 / std::max(reference2, 1e-300)),
+              std::sqrt(new_error2 / std::max(reference2, 1e-300)), old_max, new_max,
+              old_scaled, new_scaled, old_cut.first, new_cut.first, old_cut.second, new_cut.second);
+        }
+      }
+    }
+  }
+}
+
+DGPP_TEST(dsa_select_prefill_radix_long_context_exact) {
+  // Independent CPU oracle, including exact ties, ReLU, both model
+  // budgets, partial pools, padded strides, and mixed causal positions.
+  // The last Flash case reaches 1M tokens; these are the small row counts
+  // produced by the bounded dot buffer at long context.
+  constexpr int rows = 3, heads = 32;
+  for (const int kpool : {4, 1}) {
+    const int select_k = 2048 / kpool;
+    const int max_selected = 2048 + kpool - 1;
+    for (const int pools : {2053, 32771, 131075, 262144}) {
+      const int stride = pools + 17;
+      for (const bool relu : {false, true}) {
+        for (const bool ties : {false, true}) {
+          std::vector<float> dots(size_t(rows) * heads * stride), w(rows * heads), ks(pools);
+          for (size_t i = 0; i < dots.size(); ++i)
+            dots[i] = ties ? 1.0f : random_f32(931, i);
+          for (size_t i = 0; i < w.size(); ++i)
+            w[i] = ties ? (i % 2 ? -1.0f : 1.0f) : random_f32(932, i);
+          for (int p = 0; p < pools; ++p)
+            ks[p] = ties ? 1.0f : std::fabs(random_f32(933, p));
+          std::vector<int64_t> pos = {int64_t(std::max(0, kpool - 2)),
+                                     int64_t(pools / 2) * kpool + kpool - 2,
+                                     int64_t(pools) * kpool - 1};
+          DevBuf dd(dots.size() * 4), dw(w.size() * 4), dks(ks.size() * 4),
+              dpos(pos.size() * 8), dtopk(size_t(rows) * max_selected * 4),
+              dcnt(rows * 4), dws(dsa_select_prefill_workspace_bytes(rows, stride, select_k));
+          dd.upload(dots.data(), dots.size() * 4);
+          dw.upload(w.data(), w.size() * 4);
+          dks.upload(ks.data(), ks.size() * 4);
+          dpos.upload(pos.data(), pos.size() * 8);
+          // Two calls with reused, initially dirty scratch catch reliance
+          // on zero-initialized keys/histograms and incomplete output writes.
+          DGPP_CUDA_OK(cudaMemset(dws.p, 0xa5, dws.bytes));
+          for (int replay = 0; replay < 2; ++replay)
+            dsa_select_prefill(static_cast<const float*>(dd.p), stride,
+                static_cast<const float*>(dw.p), static_cast<const float*>(dks.p),
+                static_cast<const int64_t*>(dpos.p), rows, pools, heads, select_k,
+                kpool, max_selected, static_cast<int32_t*>(dtopk.p),
+                static_cast<int32_t*>(dcnt.p), nullptr, relu, dws.p);
+          std::vector<int32_t> got(size_t(rows) * max_selected), counts(rows);
+          dtopk.download(got.data(), got.size() * 4);
+          dcnt.download(counts.data(), counts.size() * 4);
+          for (int r = 0; r < rows; ++r) {
+            const int64_t visible = (pos[r] + 1) / kpool;
+            std::vector<float> logits(static_cast<size_t>(visible));
+            for (int64_t p = 0; p < visible; ++p) {
+              float d[32];
+              for (int h = 0; h < heads; ++h) {
+                d[h] = dots[(size_t(r) * heads + h) * stride + p];
+                if (relu) d[h] = std::max(d[h], 0.0f);
+              }
+              logits[p] = prefill_logit_mirror(d, w.data() + r * heads, ks[p]);
+            }
+            std::vector<int32_t> ids(select_k), want(max_selected, -1);
+            const int selected = dsa_ref::select_pools(logits.data(), visible, select_k, ids.data());
+            const int count = dsa_ref::expand_append_tail(ids.data(), selected, pos[r],
+                                                         kpool, max_selected, want.data());
+            if (counts[r] != count)
+              throw std::runtime_error("prefill radix count mismatch");
+            require_bitwise("prefill radix exact pools=" + std::to_string(pools) +
+                            " kpool=" + std::to_string(kpool) + " row=" + std::to_string(r) +
+                            " relu=" + std::to_string(relu) + " ties=" + std::to_string(ties),
+                            got.data() + size_t(r) * max_selected, want.data(), want.size() * 4);
+          }
+        }
+      }
+    }
+  }
+}
+
+DGPP_TEST(dsa_select_prefill_partition_shapes_and_tails) {
+  // Both sides of the 96-block target, including the 190-leaf workspace
+  // bound (95 rows x 2 partitions) and 128 partitions for one long row.
+  constexpr int heads = 32, kpool = 4, select_k = 512, max_selected = 2051;
+  for (const int rows : {1, 2, 5, 7, 31, 95, 96, 97}) {
+    const int pools = rows < 8 ? 131072 : 4097;
+    const int stride = pools + 3;
+    std::vector<float> dots(size_t(rows) * heads * stride, 1.0f),
+        weights(rows * heads, 1.0f), scales(pools, 1.0f);
+    std::vector<int64_t> positions(rows);
+    for (int r = 0; r < rows; ++r)
+      positions[r] = r % 5 == 4 ? r % kpool : int64_t(pools - 1) * kpool + r % kpool;
+    DevBuf dd(dots.size() * 4), dw(weights.size() * 4), ds(scales.size() * 4),
+        dp(positions.size() * 8), dk(size_t(rows) * max_selected * 4), dc(rows * 4),
+        ws(dsa_select_prefill_workspace_bytes(rows, stride, select_k));
+    dd.upload(dots.data(), dots.size() * 4);
+    dw.upload(weights.data(), weights.size() * 4);
+    ds.upload(scales.data(), scales.size() * 4);
+    dp.upload(positions.data(), positions.size() * 8);
+    dsa_select_prefill(static_cast<const float*>(dd.p), stride,
+        static_cast<const float*>(dw.p), static_cast<const float*>(ds.p),
+        static_cast<const int64_t*>(dp.p), rows, pools, heads, select_k, kpool,
+        max_selected, static_cast<int32_t*>(dk.p), static_cast<int32_t*>(dc.p),
+        nullptr, false, ws.p);
+    std::vector<int32_t> got(size_t(rows) * max_selected), counts(rows);
+    dk.download(got.data(), got.size() * 4);
+    dc.download(counts.data(), counts.size() * 4);
+    for (int r = 0; r < rows; ++r) {
+      const int64_t visible = (positions[r] + 1) / kpool;
+      const int selected = int(std::min<int64_t>(select_k, visible));
+      std::vector<int32_t> ids(selected), want(max_selected, -1);
+      for (int i = 0; i < selected; ++i) ids[i] = i;  // exact ties -> lower pool ids
+      const int count = dsa_ref::expand_append_tail(ids.data(), selected, positions[r],
+                                                   kpool, max_selected, want.data());
+      if (counts[r] != count) throw std::runtime_error("partitioned prefill count mismatch");
+      require_bitwise("partitioned prefill rows=" + std::to_string(rows),
+                       got.data() + size_t(r) * max_selected, want.data(), want.size() * 4);
+    }
+  }
+}
+
 DGPP_TEST(dsa_select_prefill_bitwise_fuzz) {
   const DsaConfig cfg{};
   const DsaGeometry g = DsaGeometry::from_config(cfg);
@@ -3139,6 +3464,73 @@ DGPP_TEST(dsa_layer_prefill_dot_budget_preserves_selection_and_output) {
           require_bitwise("prefill tiling selection", ids.data() + size_t(row) * g.max_selected,
                            expected_ids.data() + size_t(row) * g.max_selected, size_t(counts[row]) * 4);
       }
+    }
+  }
+}
+
+DGPP_TEST(dsa_layer_fused_prefill_preserves_gemm_selection) {
+  cudaStream_t s = dgpp::kda_test::test_stream();
+  DsaConfig cfg = full_cfg();
+  cfg.index_topk = 2048;
+  const DsaGeometry g = DsaGeometry::from_config(cfg);
+  constexpr int history = 2048, cache = 4096, padded = 2304;
+  TestWeights tw(cfg, 4250);
+  const auto hidden = random_bf16_bits(4251, int64_t(history) * cfg.hidden, -2, 1);
+  // At 2304 padded pools, these allocations produce legacy tiles of one
+  // and three queries; fusion holds 28/56. Check single-query chunks,
+  // ordinary tails, and a one-query tail created by a wider fused tile.
+  for (const int capacity_rows : {1, 2}) {
+    const size_t budget = size_t(capacity_rows) * cache * 32 * sizeof(float);
+    for (const int tokens : {1, 55, 56, 57}) {
+      LayerEnv env(cfg, history, cache, 1, cache, s, budget);
+      DsaStatePool pool;
+      pool.init(env.arena, cfg, 1, cache);
+      const size_t sb = DsaLayer::scratch_bytes(cfg, history, cache, 8, 32, budget);
+      DsaLayer layer(env.gemm, tw.layer_views, cfg, history, cache,
+                     env.arena.alloc_persistent(MemClass::DeviceHot, sb, 256),
+                     sb, env.ws.p, env.ws.bytes, 8, 32, budget);
+      DevBuf din(hidden.size() * 2), dout(hidden.size() * 2);
+      din.upload(hidden.data(), hidden.size() * 2);
+      layer.enqueue_prefill(din.p, pool, 0, 0, 0, history, dout.p, s, 0, true);
+      layer.enqueue_prefill(din.p, pool, 0, 0, history, tokens, dout.p, s);
+      const int old_rows = capacity_rows * cache / padded;
+      if (layer.debug_dot_stride() != 0)
+        throw std::runtime_error("single-query prefill unexpectedly used the dot buffer");
+      DevBuf keys(size_t(padded) * 128), scales(size_t(padded) * 4),
+          pos(size_t(tokens) * 8), dots(size_t(old_rows) * 32 * padded * 4),
+          ids(size_t(tokens) * g.max_selected * 4), counts(size_t(tokens) * 4),
+          workspace(dsa_select_prefill_workspace_bytes(old_rows, padded, g.select_k));
+      DGPP_CUDA_OK(cudaMemsetAsync(keys.p, 0, keys.bytes, s));
+      DGPP_CUDA_OK(cudaMemsetAsync(scales.p, 0, scales.bytes, s));
+      dsa_gather_index_pools(pool.block_tables(), g.pools_per_block,
+          pool.index_k(0), pool.index_scale(0), history + tokens,
+          static_cast<uint8_t*>(keys.p), static_cast<float*>(scales.p), 128, s);
+      std::vector<int64_t> positions(tokens);
+      for (int r = 0; r < tokens; ++r) positions[r] = history + r;
+      pos.upload(positions.data(), positions.size() * 8);
+      for (int r = 0; r < tokens; r += old_rows) {
+        const int rows = std::min(old_rows, tokens - r);
+        env.gemm.matmul(static_cast<const uint8_t*>(layer.debug_q_fp8()) + size_t(r) * 32 * 128,
+            keys.p, dots.p, rows * 32, padded, 128, DType::F8_E4M3, GemmOut::F32,
+            128, env.ws.p, env.ws.bytes, s);
+        dsa_select_prefill(static_cast<const float*>(dots.p), padded,
+            layer.debug_w_folded() + size_t(r) * 32, static_cast<const float*>(scales.p),
+            static_cast<const int64_t*>(pos.p) + r, rows, history + tokens,
+            32, g.select_k, 1, g.max_selected,
+            static_cast<int32_t*>(ids.p) + size_t(r) * g.max_selected,
+            static_cast<int32_t*>(counts.p) + r, s, true, workspace.p);
+      }
+      DGPP_CUDA_OK(cudaStreamSynchronize(s));
+      std::vector<int32_t> want_ids(size_t(tokens) * g.max_selected), got_ids(want_ids.size()),
+          want_counts(tokens), got_counts(tokens);
+      ids.download(want_ids.data(), want_ids.size() * 4);
+      counts.download(want_counts.data(), want_counts.size() * 4);
+      DGPP_CUDA_OK(cudaMemcpy(got_ids.data(), layer.debug_topk(), got_ids.size() * 4,
+                               cudaMemcpyDeviceToHost));
+      DGPP_CUDA_OK(cudaMemcpy(got_counts.data(), layer.debug_counts(), got_counts.size() * 4,
+                               cudaMemcpyDeviceToHost));
+      require_bitwise("fused layer selection", got_ids.data(), want_ids.data(), got_ids.size() * 4);
+      require_bitwise("fused layer counts", got_counts.data(), want_counts.data(), got_counts.size() * 4);
     }
   }
 }
