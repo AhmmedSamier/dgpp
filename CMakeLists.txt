@@ -441,7 +441,8 @@ add_library(dgpp_models_qwen_loader STATIC
   src/models/qwen/vision.cpp
   src/models/qwen/loader.cpp
   src/models/qwen/loader35.cpp
-  src/models/qwen/dflash2.cpp)
+  src/models/qwen/dflash2.cpp
+  src/models/qwen/dflash.cpp)
 target_include_directories(dgpp_models_qwen_loader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(dgpp_models_qwen_loader PUBLIC dgpp_models_qwen dgpp_loaders dgpp_kernels CUDA::cudart dgpp_device_ranges)
 dgpp_set_common(dgpp_models_qwen_loader)
@@ -821,6 +822,7 @@ add_executable(unit_tests
   tests/unit/qwen35_config_test.cpp
   tests/unit/qwen35_binding_test.cpp
   tests/unit/qwen_dflash2_config_test.cpp
+  tests/unit/qwen_dflash_config_test.cpp
   tests/unit/dflash2_speculator_test.cpp
   tests/unit/qwen_rope_scaling_test.cpp
   tests/unit/glm4_config_test.cpp
