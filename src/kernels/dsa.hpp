@@ -33,8 +33,8 @@
 // path is CUDA-graph capturable.
 //
 // Full GLM long prefill fuses FP8 dots with the head reduction, writing
-// compact score keys into the bounded workspace. Flash, short contexts
-// and single-query tiles keep the IGemm FP8 -> F32 dot path. Both use
+// compact score keys into the bounded workspace. Flash and short contexts
+// keep the IGemm FP8 -> F32 dot path. Both use
 // the same exact key selection, merge and token expansion.
 #include <cstddef>
 #include <cstdint>
@@ -282,8 +282,9 @@ void dsa_select_decode(const void* q_fp8, const float* w_folded,
 //   pos: [rows]; visible per row is derived on device.
 size_t dsa_select_prefill_workspace_bytes(int rows, int64_t dot_stride, int select_k);
 // Fused FP8 dot/head reduction. Q is [rows,32,128], K is [pools,128];
-// keys is [rows,stride] with stride >= pools. Requires rows >= 2; a
-// single query keeps its original GEMM reduction in the layer caller.
+// keys is [rows,stride] with stride >= pools. The tensor-core reduction
+// may differ by FP32 rounding from a small single-query cuBLAS plan;
+// accuracy is checked against FP64, including selection boundaries.
 void dsa_prefill_score_keys(const uint8_t* q, const uint8_t* k,
                             const float* w_folded, const float* k_scale,
                             const int64_t* pos, int rows, int64_t pools,

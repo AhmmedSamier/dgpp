@@ -558,20 +558,10 @@ DGPP_TEST(dsa_fused_prefill_score_matches_gemm) {
             static_cast<const float*>(dw.p), static_cast<const float*>(ds.p),
             static_cast<const int64_t*>(dp.p), rows, pools, heads, selected, 1, selected,
             static_cast<int32_t*>(picks.p), static_cast<int32_t*>(counts.p), nullptr, relu, old_ws.p);
-        bool single_row_refused = false;
-        try {
-          dsa_prefill_score_keys(static_cast<const uint8_t*>(dq.p), static_cast<const uint8_t*>(dk.p),
+        dsa_prefill_score_keys(static_cast<const uint8_t*>(dq.p), static_cast<const uint8_t*>(dk.p),
               static_cast<const float*>(dw.p), static_cast<const float*>(ds.p),
               static_cast<const int64_t*>(dp.p), rows, pools, stride, selected, 1,
               static_cast<uint64_t*>(fused.p), nullptr, relu);
-        } catch (const std::invalid_argument&) {
-          if (rows != 1) throw;
-          single_row_refused = true;
-        }
-        if (rows == 1) {
-          if (!single_row_refused) throw std::runtime_error("single-query fused scoring must refuse");
-          continue;
-        }
         std::vector<uint64_t> expected(size_t(rows) * stride), got(expected.size());
         old_ws.download(expected.data(), expected.size() * 8);
         fused.download(got.data(), got.size() * 8);
@@ -582,7 +572,10 @@ DGPP_TEST(dsa_fused_prefill_score_matches_gemm) {
           for (int p = 0; p < visible; ++p)
             different += got[size_t(r) * stride + p] != expected[size_t(r) * stride + p];
         }
-        if (different) {
+        // The small single-query cuBLAS plan has a different reduction;
+        // its score error is checked against FP64 by the accuracy test.
+        // Still require identical selected IDs/counts for this fixture.
+        if (different && rows != 1) {
           ++mismatched_cases;
           std::fprintf(stderr, "fused score key mismatch: rows=%d pools=%d mode=%d relu=%d count=%d\n",
                        rows, pools, mode, int(relu), different);
@@ -607,6 +600,131 @@ DGPP_TEST(dsa_fused_prefill_score_matches_gemm) {
   }
   if (mismatched_cases)
     throw std::runtime_error("fused score key mismatched cases=" + std::to_string(mismatched_cases));
+}
+
+DGPP_TEST(dsa_fused_single_query_fp64_accuracy) {
+  constexpr int heads = 32, dim = 128, selected = 2048;
+  CublasLtGemm gemm;
+  DevBuf gemm_ws(64ull << 20);
+  const auto score_from_key = [](uint64_t key) {
+    const uint32_t ordered = ~uint32_t(key >> 21);
+    const uint32_t bits = (ordered & 0x80000000u) ? (ordered ^ 0x80000000u) : ~ordered;
+    float score;
+    std::memcpy(&score, &bits, sizeof(score));
+    return double(score);
+  };
+  for (const int pools : {2053, 8192, 65539, 262144}) {
+    const int stride = (pools + 255) / 256 * 256;
+    for (int seed = 0; seed < (pools == 262144 ? 1 : 3); ++seed) {
+      for (const int mode : {0, 1, 2}) {
+        if (mode == 2 && (seed != 0 || pools > 8192)) continue;
+        std::vector<uint8_t> q(2 * heads * dim), k(size_t(stride) * dim);
+        const auto code = [&](uint32_t h) {
+          return mode == 1 ? uint8_t((h & 0x80u) | ((h >> 8) % 127))
+                           : float_to_fp8_e4m3_bits(random_f32(1937 + seed, h) * 128.0f);
+        };
+        for (int i = 0; i < heads * dim; ++i)
+          q[i] = mode == 2 ? 0 : code(hash32(uint32_t(i + 173 + seed * 7919)));
+        std::copy(q.begin(), q.begin() + heads * dim, q.begin() + heads * dim);
+        for (size_t i = 0; i < k.size(); ++i) k[i] = code(hash32(uint32_t(i + 479 + seed * 7907)));
+        std::vector<float> w(2 * heads), scales(stride);
+        for (int h = 0; h < heads; ++h) w[h] = w[heads + h] = random_f32(1938 + seed, h);
+        for (int p = 0; p < stride; ++p) scales[p] = 0.01f + std::fabs(random_f32(1939 + seed, p));
+        const int64_t positions[2] = {pools - 1, pools - 1};
+        DevBuf dq(q.size()), dk(k.size()), dw(w.size() * 4), ds(scales.size() * 4), dp(16),
+            dots(size_t(heads) * stride * 4), picks(selected * 4), counts(4),
+            workspace(dsa_select_prefill_workspace_bytes(1, stride, selected)),
+            fused(size_t(2) * stride * 8);
+        dq.upload(q.data(), q.size()); dk.upload(k.data(), k.size());
+        dw.upload(w.data(), w.size() * 4); ds.upload(scales.data(), scales.size() * 4);
+        dp.upload(positions, sizeof(positions));
+        gemm.matmul(dq.p, dk.p, dots.p, heads, stride, dim, DType::F8_E4M3,
+                    GemmOut::F32, dim, gemm_ws.p, gemm_ws.bytes, nullptr);
+        std::vector<double> q64(heads * dim), k64(size_t(pools) * dim);
+        for (size_t i = 0; i < q64.size(); ++i) q64[i] = fp8_e4m3_bits_to_float(q[i]);
+        for (size_t i = 0; i < k64.size(); ++i) k64[i] = fp8_e4m3_bits_to_float(k[i]);
+        for (const bool relu : {false, true}) {
+          dsa_select_prefill(static_cast<const float*>(dots.p), stride,
+              static_cast<const float*>(dw.p), static_cast<const float*>(ds.p),
+              static_cast<const int64_t*>(dp.p), 1, pools, heads, selected, 1, selected,
+              static_cast<int32_t*>(picks.p), static_cast<int32_t*>(counts.p), nullptr, relu, workspace.p);
+          dsa_prefill_score_keys(static_cast<const uint8_t*>(dq.p), static_cast<const uint8_t*>(dk.p),
+              static_cast<const float*>(dw.p), static_cast<const float*>(ds.p),
+              static_cast<const int64_t*>(dp.p), 1, pools, stride, selected, 1,
+              static_cast<uint64_t*>(fused.p), nullptr, relu);
+          std::vector<uint64_t> old_keys(pools), new_keys(pools);
+          workspace.download(old_keys.data(), old_keys.size() * 8);
+          fused.download(new_keys.data(), new_keys.size() * 8);
+          std::vector<double> reference(pools);
+          double old_error2 = 0, new_error2 = 0, reference2 = 0;
+          double old_max = 0, new_max = 0, old_scaled = 0, new_scaled = 0;
+          int differing = 0;
+          for (int p = 0; p < pools; ++p) {
+            double sum = 0, magnitude = 0;
+            for (int h = 0; h < heads; ++h) {
+              double dot = 0, absolute_products = 0;
+              for (int d = 0; d < dim; ++d) {
+                const double product = q64[h * dim + d] * k64[size_t(p) * dim + d];
+                dot += product;
+                absolute_products += std::fabs(product);
+              }
+              const double weight = double(w[h]) * double(scales[p]);
+              sum += weight * (relu ? std::max(dot, 0.0) : dot);
+              magnitude += std::fabs(weight) * absolute_products;
+            }
+            reference[p] = sum;
+            const double old_error = std::fabs(score_from_key(old_keys[p]) - sum);
+            const double new_error = std::fabs(score_from_key(new_keys[p]) - sum);
+            if (!std::isfinite(old_error) || !std::isfinite(new_error))
+              throw std::runtime_error("nonfinite single-query score error");
+            old_error2 += old_error * old_error; new_error2 += new_error * new_error;
+            reference2 += sum * sum;
+            old_max = std::max(old_max, old_error); new_max = std::max(new_max, new_error);
+            old_scaled = std::max(old_scaled, old_error / std::max(magnitude, 1e-300));
+            new_scaled = std::max(new_scaled, new_error / std::max(magnitude, 1e-300));
+            differing += old_keys[p] != new_keys[p];
+          }
+          std::vector<int> oracle(pools), before(pools), after(pools);
+          for (int p = 0; p < pools; ++p) oracle[p] = before[p] = after[p] = p;
+          std::partial_sort(oracle.begin(), oracle.begin() + selected, oracle.end(), [&](int a, int b) {
+            return reference[a] != reference[b] ? reference[a] > reference[b] : a < b;
+          });
+          const auto audit = [&](std::vector<int>& ids, const std::vector<uint64_t>& keys, double noise) {
+            std::partial_sort(ids.begin(), ids.begin() + selected, ids.end(),
+                              [&](int a, int b) { return keys[a] < keys[b]; });
+            std::vector<bool> chosen(pools, false), exact(pools, false);
+            for (int i = 0; i < selected; ++i) { chosen[ids[i]] = true; exact[oracle[i]] = true; }
+            int swaps = 0;
+            double lowest_added = reference[oracle[0]], highest_removed = reference[oracle[selected - 1]];
+            for (int p = 0; p < pools; ++p) {
+              if (chosen[p] && !exact[p]) { ++swaps; lowest_added = std::min(lowest_added, reference[p]); }
+              if (!chosen[p] && exact[p]) highest_removed = std::max(highest_removed, reference[p]);
+            }
+            const double gap = swaps ? highest_removed - lowest_added : 0;
+            if (gap > 2 * noise + 1e-12 * std::max(1.0, std::fabs(highest_removed)))
+              throw std::runtime_error("single-query selection not a certified boundary near tie");
+            return std::pair<int, double>{swaps, gap};
+          };
+          const auto old_cut = audit(before, old_keys, old_max), new_cut = audit(after, new_keys, new_max);
+          // A conservative forward-error bound for 128 FP32 dot terms
+          // plus head folding. Report actual errors against FP64, rather
+          // than treating the previous GEMM's bits as ground truth.
+          if (old_scaled > 2e-5 || new_scaled > 2e-5 ||
+              std::sqrt(new_error2 / std::max(reference2, 1e-300)) > 1e-6)
+            throw std::runtime_error("single-query score exceeds FP32 forward-error bound");
+          std::printf("ACCURACY {\"pools\":%d,\"seed\":%d,\"mode\":%d,\"relu\":%d,"
+              "\"differing_keys\":%d,\"old_nrmse\":%.12g,\"fused_nrmse\":%.12g,"
+              "\"old_max_abs\":%.12g,\"fused_max_abs\":%.12g,"
+              "\"old_max_scaled\":%.12g,\"fused_max_scaled\":%.12g,"
+              "\"old_swaps\":%d,\"fused_swaps\":%d,\"old_boundary_gap\":%.12g,\"fused_boundary_gap\":%.12g}\n",
+              pools, seed, mode, int(relu), differing,
+              std::sqrt(old_error2 / std::max(reference2, 1e-300)),
+              std::sqrt(new_error2 / std::max(reference2, 1e-300)), old_max, new_max,
+              old_scaled, new_scaled, old_cut.first, new_cut.first, old_cut.second, new_cut.second);
+        }
+      }
+    }
+  }
 }
 
 DGPP_TEST(dsa_select_prefill_radix_long_context_exact) {
@@ -3359,8 +3477,8 @@ DGPP_TEST(dsa_layer_fused_prefill_preserves_gemm_selection) {
   TestWeights tw(cfg, 4250);
   const auto hidden = random_bf16_bits(4251, int64_t(history) * cfg.hidden, -2, 1);
   // At 2304 padded pools, these allocations produce legacy tiles of one
-  // and three queries; fusion holds 56. Check original one-row tails,
-  // ordinary tails, and a 57-row chunk that must not create a new one.
+  // and three queries; fusion holds 28/56. Check single-query chunks,
+  // ordinary tails, and a one-query tail created by a wider fused tile.
   for (const int capacity_rows : {1, 2}) {
     const size_t budget = size_t(capacity_rows) * cache * 32 * sizeof(float);
     for (const int tokens : {1, 55, 56, 57}) {
@@ -3376,9 +3494,8 @@ DGPP_TEST(dsa_layer_fused_prefill_preserves_gemm_selection) {
       layer.enqueue_prefill(din.p, pool, 0, 0, 0, history, dout.p, s, 0, true);
       layer.enqueue_prefill(din.p, pool, 0, 0, history, tokens, dout.p, s);
       const int old_rows = capacity_rows * cache / padded;
-      const bool single_tail = old_rows == 1 || tokens % old_rows == 1;
-      if (layer.debug_dot_stride() != (single_tail ? padded : 0))
-        throw std::runtime_error("fused prefill did not preserve the original GEMM tail");
+      if (layer.debug_dot_stride() != 0)
+        throw std::runtime_error("single-query prefill unexpectedly used the dot buffer");
       DevBuf keys(size_t(padded) * 128), scales(size_t(padded) * 4),
           pos(size_t(tokens) * 8), dots(size_t(old_rows) * 32 * padded * 4),
           ids(size_t(tokens) * g.max_selected * 4), counts(size_t(tokens) * 4),

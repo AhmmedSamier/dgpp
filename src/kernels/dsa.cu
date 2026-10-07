@@ -3535,10 +3535,6 @@ void dsa_prefill_score_keys(const uint8_t* q, const uint8_t* k,
                             int64_t stride, int select_k, int kpool,
                             uint64_t* keys, cudaStream_t stream, bool relu) {
   if (rows <= 0 || pools <= 0) return;
-  // The single-query cuBLAS plan has a different FP32 reduction. Keep
-  // that serving shape on its original GEMM path rather than accepting
-  // changed score keys at a selection boundary.
-  if (rows == 1) throw std::invalid_argument("fused DSA scores require at least two query rows");
   if (stride < pools) throw std::invalid_argument("DSA score key stride");
   const unsigned blocks = unsigned(((pools + 127) / 128) * rows);
   if (relu)

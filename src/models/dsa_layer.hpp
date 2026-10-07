@@ -272,7 +272,6 @@ class DsaLayer {
   // Reuse the allocated dot capacity across more query rows at short
   // contexts. The caller supplies a padded pool count within max_pools_.
   int prefill_query_tile_rows(int64_t padded_pools) const;
-  int prefill_dot_tile_rows(int64_t padded_pools) const;
 
   // The projection chain shared by both paths: fused qkv GEMM, split
   // RMSNorms, RoPE (rope > 0: the q and k rope slices, the indexer's q and
