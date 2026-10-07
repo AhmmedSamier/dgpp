@@ -28,6 +28,13 @@ int64_t round_up_to(int64_t v, int64_t gran) {
   return (v + gran - 1) / gran * gran;
 }
 
+bool fused_prefill_scores(const DsaConfig& cfg, int64_t padded_pools) {
+  // Full GLM's unpooled indexer. Preserve the Flash and short-context
+  // paths while avoiding the full model's 32-head global dot buffer.
+  return cfg.index_kpool == 1 && cfg.qk_rope_head_dim == 64 &&
+         cfg.index_topk == 2048 && padded_pools > 2048;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------
@@ -376,8 +383,19 @@ bool DsaLayer::prepare(int tokens) {
   return ok;
 }
 
+int DsaLayer::prefill_dot_tile_rows(int64_t padded_pools) const {
+  return int(std::min<int64_t>(max_tokens_, int64_t(tile_cap_) * max_pools_ /
+                                           std::max<int64_t>(padded_pools, 1)));
+}
+
 int DsaLayer::prefill_query_tile_rows(int64_t padded_pools) const {
-  const int64_t row_pool_capacity = int64_t(tile_cap_) * max_pools_;
+  // A reduced 64-bit key replaces 32 FP32 dots. Reuse exactly the same
+  // allocation for 16 times as many queries; selection scratch is separate.
+  // cuBLAS uses a different reduction for one-query tiles. Keep that
+  // geometry on its original path even when more fused rows would fit.
+  const int factor = fused_prefill_scores(cfg_, padded_pools) &&
+                             prefill_dot_tile_rows(padded_pools) > 1 ? 16 : 1;
+  const int64_t row_pool_capacity = int64_t(tile_cap_) * max_pools_ * factor;
   return int(std::min<int64_t>(max_tokens_, row_pool_capacity /
                                            std::max<int64_t>(padded_pools, 1)));
 }
@@ -388,6 +406,7 @@ bool DsaLayer::prepare_prefill(int tile_rows, int64_t visible_pools) {
   const int64_t padded = round_up_to(visible_pools, kPoolPadGranularity);
   if (tile_rows <= 0 || tile_rows > prefill_query_tile_rows(padded))
     throw std::invalid_argument("dsa layer: prefill tile rows out of range");
+  if (tile_rows > 1 && fused_prefill_scores(cfg_, padded)) return true;
   return gemm_.ensure_plan(tile_rows * cfg_.index_n_heads, int(padded),
                            cfg_.index_head_dim, DType::F8_E4M3, GemmOut::F32,
                            size_t(cfg_.index_head_dim));
@@ -732,8 +751,33 @@ void DsaLayer::enqueue_prefill(const void* hidden_in, DsaStatePool& state,
   // The allocation is sized for the maximum context. At shorter contexts,
   // use the same bytes for more query rows instead of launching tiny tiles.
   const int tile_rows = prefill_query_tile_rows(padded_n);
-  for (int row0 = 0; row0 < tokens; row0 += tile_rows) {
-    const int rows = std::min(tile_rows, tokens - row0);
+  const int dot_rows = prefill_dot_tile_rows(padded_n);
+  const bool fused = fused_prefill_scores(cfg_, padded_n) && dot_rows > 1;
+  // Preserve the original GEMM's one-query tail: its reduction differs
+  // from the multi-query plan. Conversely, do not create a new one-query
+  // tail merely because the fused allocation holds wider tiles.
+  const int fused_end = tokens - (fused && tokens % dot_rows == 1 ? 1 : 0);
+  for (int row0 = 0, rows = 0; row0 < tokens; row0 += rows) {
+    rows = std::min(tile_rows, tokens - row0);
+    if (fused && row0 < fused_end) {
+      rows = std::min(rows, fused_end - row0);
+      if (fused_end - row0 - rows == 1) --rows;
+    }
+    if (rows > 1 && fused_prefill_scores(cfg_, padded_n)) {
+      auto* keys = reinterpret_cast<uint64_t*>(dot_);
+      dsa_prefill_score_keys(q_fp8_ + size_t(row0) * heads * dim,
+                             gather_k_, w_folded_ + size_t(row0) * heads,
+                             gather_scale_, pos_dev_ + row0, rows, n_gather,
+                             padded_n, geo_.select_k, kpool, keys, stream,
+                             cfg_.index_relu != 0);
+      dsa_select_prefill_keys(keys, padded_n, pos_dev_ + row0, rows, n_gather,
+                              geo_.select_k, kpool, geo_.max_selected,
+                              topk_ + size_t(sel_base_ + row0) * geo_.max_selected,
+                              counts_ + sel_base_ + row0,
+                              static_cast<uint64_t*>(select_ws_), stream);
+      dot_stride_last_ = 0;  // this path stores reduced keys, not per-head dots
+      continue;
+    }
     if (padded_n > 0) {
       // Dots for this tile's (row, head) pairs against the gathered pools.
       gemm_.matmul(q_fp8_ + size_t(row0) * heads * dim, gather_k_, dot_,

@@ -1583,6 +1583,103 @@ __device__ inline void prefill_hist_add(int32_t* hist, int bin) {
   if ((threadIdx.x & 31) == __ffs(peers) - 1) atomicAdd(hist + bin, __popc(peers));
 }
 
+// One query's 32 indexer heads against 128 pools. Keep the per-head
+// tensor-core dots in registers and write only the reduced keys.
+// The old GEMM + score chain writes and rereads 32 floats per query/pool.
+template <bool kRelu>
+__global__ void prefill_fused_score_keys_kernel(
+    const uint8_t* q, const uint8_t* k, const float* w, const float* scales,
+    const int64_t* pos, int rows, int64_t pools, int64_t stride,
+    int select_k, int kpool, uint64_t* keys) {
+  constexpr int S = 144, N = 128;
+  __shared__ __align__(16) uint8_t a[32 * S];
+  __shared__ __align__(16) uint8_t b[N * S];
+  const int r = blockIdx.x % rows;
+  const int64_t p0 = int64_t(blockIdx.x / rows) * N;
+  const int64_t visible = min((pos[r] + 1) / kpool, pools);
+  if (visible <= select_k || p0 >= visible) return;
+  const int tid = threadIdx.x, warp = tid / 32, lane = tid % 32;
+  for (int i = tid; i < 32 * 8; i += 128) {
+    const int row = i / 8, col = (i % 8) * 16;
+    *reinterpret_cast<uint4*>(a + row * S + col) =
+        *reinterpret_cast<const uint4*>(q + (int64_t(r) * 32 + row) * 128 + col);
+  }
+  for (int i = tid; i < N * 8; i += 128) {
+    const int row = i / 8, col = (i % 8) * 16;
+    const int64_t p = p0 + row;
+    *reinterpret_cast<uint4*>(b + row * S + col) = p < visible
+        ? *reinterpret_cast<const uint4*>(k + p * 128 + col)
+        : make_uint4(0, 0, 0, 0);
+  }
+  __syncthreads();
+  float acc[2][4][4] = {};
+#pragma unroll
+  for (int kk = 0; kk < 128; kk += 32) {
+    uint32_t af[2][4], bf[4][2];
+#pragma unroll
+    for (int i = 0; i < 2; ++i) {
+      const unsigned addr = static_cast<unsigned>(__cvta_generic_to_shared(
+          a + (i * 16 + lane % 16) * S + kk + (lane / 16) * 16));
+      asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];"
+          : "=r"(af[i][0]), "=r"(af[i][1]), "=r"(af[i][2]), "=r"(af[i][3]) : "r"(addr));
+    }
+#pragma unroll
+    for (int j = 0; j < 2; ++j) {
+      const int row = warp * 32 + j * 16 + (lane / 16) * 8 + lane % 8;
+      const int col = kk + ((lane / 8) % 2) * 16;
+      const unsigned addr = static_cast<unsigned>(__cvta_generic_to_shared(b + row * S + col));
+      uint32_t v[4];
+      asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];"
+          : "=r"(v[0]), "=r"(v[1]), "=r"(v[2]), "=r"(v[3]) : "r"(addr));
+      bf[j * 2][0] = v[0]; bf[j * 2][1] = v[1];
+      bf[j * 2 + 1][0] = v[2]; bf[j * 2 + 1][1] = v[3];
+    }
+#pragma unroll
+    for (int i = 0; i < 2; ++i)
+#pragma unroll
+      for (int j = 0; j < 4; ++j)
+        asm volatile("mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 "
+          "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+          : "+f"(acc[i][j][0]), "+f"(acc[i][j][1]), "+f"(acc[i][j][2]), "+f"(acc[i][j][3])
+          : "r"(af[i][0]), "r"(af[i][1]), "r"(af[i][2]), "r"(af[i][3]),
+            "r"(bf[j][0]), "r"(bf[j][1]));
+  }
+  // The MMA fragments hold heads h, h+8, h+16, h+24 in each lane.
+  // Fold offsets 16 and 8 in registers, then offsets 4, 2, 1 between
+  // four-lane groups. This is the original head-summation order without
+  // a shared-memory dot matrix or a block-wide reduction barrier.
+  float weight[2][2];
+#pragma unroll
+  for (int i = 0; i < 2; ++i)
+#pragma unroll
+    for (int h = 0; h < 2; ++h)
+      weight[i][h] = w[r * 32 + i * 16 + h * 8 + lane / 4];
+#pragma unroll
+  for (int j = 0; j < 4; ++j)
+#pragma unroll
+    for (int v = 0; v < 2; ++v) {
+      const int64_t p = p0 + warp * 32 + j * 8 + (lane % 4) * 2 + v;
+      const float ks = p < visible ? scales[p] : 0.0f;
+      float c[2][2];
+#pragma unroll
+      for (int i = 0; i < 2; ++i)
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {
+          float d = acc[i][j][h * 2 + v];
+          if (kRelu) d = fmaxf(d, 0.0f);
+          c[i][h] = __fmul_rn(__fmul_rn(weight[i][h], ks), d);
+        }
+      float sum = __fadd_rn(__fadd_rn(c[0][0], c[1][0]),
+                            __fadd_rn(c[0][1], c[1][1]));
+#pragma unroll
+      for (int off = 16; off >= 4; off >>= 1)
+        sum = __fadd_rn(sum, __shfl_xor_sync(0xffffffffu, sum, off));
+      if (lane < 4 && p < visible)
+        keys[int64_t(r) * stride + p] =
+            (uint64_t(~sortable_f32_dev(sum)) << kIdxBits) | uint64_t(p);
+    }
+}
+
 // The boundary key under the same total order as streaming top-k. Only
 // its final <=256-key bin needs ranking; every smaller key is selected.
 // Pool ids make even an all-equal-score row terminate exactly.
@@ -3432,11 +3529,55 @@ unsigned long long dsa_select_anomalies(long long out[6], bool clear,
   return count;
 }
 
+void dsa_prefill_score_keys(const uint8_t* q, const uint8_t* k,
+                            const float* w_folded, const float* k_scale,
+                            const int64_t* pos, int rows, int64_t pools,
+                            int64_t stride, int select_k, int kpool,
+                            uint64_t* keys, cudaStream_t stream, bool relu) {
+  if (rows <= 0 || pools <= 0) return;
+  // The single-query cuBLAS plan has a different FP32 reduction. Keep
+  // that serving shape on its original GEMM path rather than accepting
+  // changed score keys at a selection boundary.
+  if (rows == 1) throw std::invalid_argument("fused DSA scores require at least two query rows");
+  if (stride < pools) throw std::invalid_argument("DSA score key stride");
+  const unsigned blocks = unsigned(((pools + 127) / 128) * rows);
+  if (relu)
+    prefill_fused_score_keys_kernel<true><<<blocks, 128, 0, stream>>>(
+        q, k, w_folded, k_scale, pos, rows, pools, stride, select_k, kpool, keys);
+  else
+    prefill_fused_score_keys_kernel<false><<<blocks, 128, 0, stream>>>(
+        q, k, w_folded, k_scale, pos, rows, pools, stride, select_k, kpool, keys);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
 size_t dsa_select_prefill_workspace_bytes(int rows, int64_t dot_stride, int select_k) {
   // Partitioned calls have rows < 96 and a power-of-two partition count
   // bringing rows * parts to at most 190. Reserve 192 leaves, independent
   // of context. A leaf retains only select_k keys.
   return (size_t(rows) * size_t(dot_stride) + size_t(192) * size_t(select_k)) * sizeof(uint64_t);
+}
+
+void dsa_select_prefill_keys(const uint64_t* keys, int64_t stride,
+                             const int64_t* pos, int rows, int64_t pools,
+                             int select_k, int kpool, int max_selected,
+                             int32_t* topk_out, int32_t* out_counts,
+                             uint64_t* partials, cudaStream_t stream) {
+  if (rows <= 0) return;
+  if (select_k <= 0 || select_k > kSelectMaxK || stride < pools)
+    DGPP_CUDA_OK(cudaErrorInvalidValue);
+  int parts = 1;
+  while (parts * rows < 96 && 2 * parts <= pools / (2 * select_k)) parts *= 2;
+  const size_t bytes = (size_t(select_k) * 3 + kSelectHistBins +
+                        kSelectStopCandidates + 1) * sizeof(uint32_t);
+  prefill_select_keys_kernel<<<dim3(unsigned(rows), unsigned(parts)), 256, bytes, stream>>>(
+      keys, stride, pos, pools, select_k, kpool, max_selected,
+      topk_out, out_counts, parts, partials);
+  const size_t merge_bytes = (size_t(5) * select_k + 1) * sizeof(uint32_t);
+  for (int step = 1; step < parts; step *= 2)
+    prefill_merge_keys_kernel<<<dim3(unsigned(rows), unsigned(parts / (2 * step))),
+                               256, merge_bytes, stream>>>(
+        partials, pos, parts, step, select_k, kpool, max_selected, topk_out, out_counts);
+  DGPP_CUDA_OK(cudaGetLastError());
 }
 
 void dsa_select_prefill(const float* dot, int64_t dot_stride,
@@ -3451,8 +3592,6 @@ void dsa_select_prefill(const float* dot, int64_t dot_stride,
   if (workspace && n_pools > kSelectTile) {
     auto* keys = static_cast<uint64_t*>(workspace);
     auto* partials = keys + int64_t(rows) * dot_stride;
-    int parts = 1;
-    while (parts * rows < 96 && 2 * parts <= n_pools / (2 * select_k)) parts *= 2;
     const dim3 grid(unsigned((n_pools + 255) / 256), unsigned(rows));
     if (relu)
       prefill_score_keys_kernel<true><<<grid, 256, 0, stream>>>(
@@ -3460,17 +3599,8 @@ void dsa_select_prefill(const float* dot, int64_t dot_stride,
     else
       prefill_score_keys_kernel<false><<<grid, 256, 0, stream>>>(
           dot, dot_stride, w_folded, k_scale, pos, n_pools, select_k, kpool, keys);
-    const size_t bytes = (size_t(select_k) * 3 + kSelectHistBins +
-                          kSelectStopCandidates + 1) * sizeof(uint32_t);
-    prefill_select_keys_kernel<<<dim3(unsigned(rows), unsigned(parts)), 256, bytes, stream>>>(
-        keys, dot_stride, pos, n_pools, select_k, kpool, max_selected,
-        topk_out, out_counts, parts, partials);
-    const size_t merge_bytes = (size_t(5) * select_k + 1) * sizeof(uint32_t);
-    for (int step = 1; step < parts; step *= 2)
-      prefill_merge_keys_kernel<<<dim3(unsigned(rows), unsigned(parts / (2 * step))),
-                                 256, merge_bytes, stream>>>(
-          partials, pos, parts, step, select_k, kpool, max_selected, topk_out, out_counts);
-    DGPP_CUDA_OK(cudaGetLastError());
+    dsa_select_prefill_keys(keys, dot_stride, pos, rows, n_pools, select_k,
+                            kpool, max_selected, topk_out, out_counts, partials, stream);
     return;
   }
   // The tile: 2 * select_k keys or more (kSelectTile up to 1024, twice
