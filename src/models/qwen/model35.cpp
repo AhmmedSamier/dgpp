@@ -173,7 +173,7 @@ void Qwen35KvPool::copy_block_contents(int32_t src, int32_t dst, cudaStream_t st
 // instead of the slow hand-rolled tile kernel (mirrors
 // QwenModel::dense_bridge_bytes; world 1 takes full rows).
 static size_t qwen35_dense_bridge_bytes(const Qwen35TextConfig& cfg) {
-  const size_t H = static_cast<size_t>(cfg.hidden_size), I = static_cast<size_t>(cfg.intermediate_size);
+  const size_t H = static_cast<size_t>(cfg.hidden_size);
   const size_t q = 2 * static_cast<size_t>(cfg.num_attention_heads) * cfg.head_dim;
   const size_t kv = static_cast<size_t>(cfg.num_key_value_heads) * cfg.head_dim;
   const size_t o = static_cast<size_t>(cfg.num_attention_heads) * cfg.head_dim;
@@ -182,8 +182,11 @@ static size_t qwen35_dense_bridge_bytes(const Qwen35TextConfig& cfg) {
   take(q, H);    // q_proj
   take(kv, H);   // k / v
   take(H, o);    // o_proj
-  take(I, H);    // gate / up
-  take(H, I);    // down
+  if (!cfg.is_moe) {
+    const size_t I = static_cast<size_t>(cfg.intermediate_size);
+    take(I, H);  // gate / up
+    take(H, I);  // down
+  }
   return elems * 2;
 }
 
@@ -211,13 +214,20 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
   // prefill recipe) requantize the checkpoint's block-FP8 bytes. The mixed
   // NVFP4 release serves its own formats (NVFP4 MLP, FP8-channel
   // attention): neither lever has a subject there, and an operator asking
-  // for one has the wrong release or the wrong config.
-  if (cfg_.quant_kind == Qwen35QuantKind::Nvfp4Mixed &&
+  // for one has the wrong release or the wrong config. The MoE NVFP4
+  // release (routed experts NVFP4, rest BF16) likewise serves its own
+  // formats; the MTP draft's BF16 experts have no kernel yet, so the MoE
+  // variant serves mtp:false (plain or DFlash2) in v1.
+  if ((cfg_.quant_kind == Qwen35QuantKind::Nvfp4Mixed ||
+       cfg_.quant_kind == Qwen35QuantKind::Nvfp4Moe) &&
       (prefill_fp8_per_tensor_ || dense_weights_fp8_))
     throw std::invalid_argument(
-        "Qwen35Model: the NVFP4 mixed release serves the checkpoint's own formats; "
+        "Qwen35Model: the NVFP4 release serves the checkpoint's own formats; "
         "engine.prefill_fp8_per_tensor and engine.dense_weights = fp8 are the FP8 "
         "release's levers (unset them)");
+  if (cfg_.is_moe && mtp_)
+    throw std::invalid_argument("Qwen35Model: the MoE variant serves mtp:false in v1 "
+                                "(the MTP draft's BF16 experts have no kernel yet)");
   if (!dflash2_dir.empty()) {
     if (mtp_)
       throw std::invalid_argument("Qwen35Model: dflash2 replaces the MTP draft; enable one or the other");
@@ -332,13 +342,24 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
   gw_.dequant_bytes = dense_bridge_bytes_;
   // Activation scratch at max_tokens rows.
   const size_t M = static_cast<size_t>(max_tokens_);
-  const size_t I = static_cast<size_t>(cfg_.intermediate_size);
+  // Dense MLP width; the MoE variant runs the routed chain (its own
+  // scratch inside QwenMoeLayer) and needs no dense gate/up tmps.
+  const size_t I = cfg_.is_moe ? 0 : static_cast<size_t>(cfg_.intermediate_size);
   DGPP_CUDA_OK(cudaMalloc(&resid_, M * H * 2));
   DGPP_CUDA_OK(cudaMalloc(&x_, M * H * 2));
   DGPP_CUDA_OK(cudaMalloc(&attn_out_, M * H * 2));
   DGPP_CUDA_OK(cudaMalloc(&mlp_out_, M * H * 2));
-  DGPP_CUDA_OK(cudaMalloc(&gate_tmp_, M * I * 2));
-  DGPP_CUDA_OK(cudaMalloc(&up_tmp_, M * I * 2));
+  if (cfg_.is_moe) {
+    gate_tmp_ = nullptr;
+    up_tmp_ = nullptr;
+    // The routed chain on this rank's expert slice (norm_topk from config).
+    moe_cfg_ = QwenMoeLayer::routed_config(
+        cfg_.hidden_size, static_cast<int>(loader_.geometry().local_moe_inter),
+        cfg_.num_experts, cfg_.num_experts_per_tok, cfg_.norm_topk_prob);
+  } else {
+    DGPP_CUDA_OK(cudaMalloc(&gate_tmp_, M * I * 2));
+    DGPP_CUDA_OK(cudaMalloc(&up_tmp_, M * I * 2));
+  }
   // The NVFP4 dense path's tables (production ldmatrix kernel): one
   // {0, m, 0} segment per row count, staged once — the grouped launcher's
   // only per-launch table, indexed by (rows - 1), never written after.
@@ -713,6 +734,48 @@ void Qwen35Model::build_layer_objects(const Qwen35LayerResident& r) {
       full_->rebind(r.full);
     full_->set_pt_attn(pt_full_view(r.layer));
   }
+  if (cfg_.is_moe) {
+    if (!moe_) {
+      const int table_slots = loader_.residency() == LoaderResidency::Resident
+                                  ? cfg_.num_hidden_layers + (mtp_ ? 1 : 0)
+                                  : 0;
+      moe_ = std::make_unique<QwenMoeLayer>(moe_view(r.moe), moe_cfg_, gemm_, max_tokens_,
+                                            max_decode_rows_, table_slots);
+    } else {
+      moe_->rebind(moe_view(r.moe));
+    }
+  }
+}
+
+QwenMoeWeights Qwen35Model::moe_view(const QwenMoeResident& m) {
+  QwenMoeWeights w;
+  w.router = m.router;
+  w.shared_gate = m.shared_gate;
+  w.shared_gate_proj = m.shared[0];
+  w.shared_up_proj = m.shared[1];
+  w.shared_down_proj = m.shared[2];
+  w.shared_fp8 = nullptr;  // MoE shared expert is BF16 (no dense_weights fp8 lever)
+  w.shared_inter = m.local_shared_inter;
+  w.experts = nullptr;
+  w.experts_fp4 = m.experts_fp4.empty() ? nullptr : m.experts_fp4.data();
+  w.experts_packed = nullptr;
+  w.act_scale_w13 = 0.0f;
+  w.act_scale_w2 = 0.0f;
+  w.act_scales_dev = nullptr;
+  return w;
+}
+
+void Qwen35Model::moe_mlp(const uint16_t* x, uint16_t* out, int tokens,
+                          const QwenMoeResident& m, cudaStream_t stream, int table_slot,
+                          bool decode) {
+  if (!moe_) throw std::logic_error("moe_mlp: no MoE layer (build_layer_objects first)");
+  // Streaming stacks rebind one shared layer; resident stacks hold every
+  // layer — either way the views must match this layer before enqueue.
+  moe_->rebind(moe_view(m));
+  if (decode)
+    moe_->enqueue_decode(x, out, tokens, stream, table_slot);
+  else
+    moe_->enqueue_prefill(x, out, tokens, stream, nullptr);
 }
 
 // One GDN slot's boot requant: dequant each blockwise matrix to the bridge,
@@ -1109,12 +1172,15 @@ MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens,
     throw std::invalid_argument("plan_memory: max_requests out of range");
   if (mtp && cfg.mtp_layer() < 0)
     throw std::invalid_argument("plan_memory: the config has no draft layer (mtp)");
-  if (cfg.quant_kind == Qwen35QuantKind::Nvfp4Mixed &&
+  if ((cfg.quant_kind == Qwen35QuantKind::Nvfp4Mixed ||
+       cfg.quant_kind == Qwen35QuantKind::Nvfp4Moe) &&
       (prefill_fp8_per_tensor_ || dense_weights_fp8_))
     throw std::invalid_argument(
-        "plan_memory: the NVFP4 mixed release serves the checkpoint's own formats; "
+        "plan_memory: the NVFP4 release serves the checkpoint's own formats; "
         "engine.prefill_fp8_per_tensor and engine.dense_weights = fp8 are the FP8 "
         "release's levers (unset them)");
+  if (cfg.is_moe && mtp)
+    throw std::invalid_argument("plan_memory: the MoE variant serves mtp:false in v1");
   std::unique_ptr<DFlash2Config> dfcfg;
   if (!dflash2_dir.empty()) {
     if (mtp)
@@ -1131,7 +1197,8 @@ MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens,
   plan.context_tokens = std::min<int64_t>(cache_tokens, cfg.max_position_embeddings);
   const size_t M = static_cast<size_t>(max_tokens);
   const size_t H = static_cast<size_t>(cfg.hidden_size);
-  const size_t I = static_cast<size_t>(cfg.intermediate_size);
+  // Dense gate/up tmps only; the MoE chain carries its own scratch below.
+  const size_t I = cfg.is_moe ? 0 : static_cast<size_t>(cfg.intermediate_size);
   if (residency == LoaderResidency::Resident) {
     plan.add("model weights (resident)",
              Qwen35LayerStream::resident_bytes(cfg, rank, world, head, mtp));
@@ -1166,6 +1233,19 @@ MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens,
   const int lk = cfg.gdn_key_heads, lv = cfg.gdn_value_heads;
   plan.add("layer scratch", std::max(QwenFullAttnLayer::scratch_bytes(qc, lh, lkv, max_tokens),
                                     QwenGdnLayer::scratch_bytes(qc, lk, lv, max_tokens)));
+  if (cfg.is_moe) {
+    // Routed NVFP4 chain + BF16 shared tail (QwenMoeLayer): decode slots at
+    // the row ceiling, no graph tables in v1 (eager -1 slot).
+    const Qwen35LocalGeometry geo = Qwen35LocalGeometry::from_config(cfg, rank, world, head);
+    const GlmMoeConfig moe_cfg = QwenMoeLayer::routed_config(
+        cfg.hidden_size, static_cast<int>(geo.local_moe_inter), cfg.num_experts,
+        cfg.num_experts_per_tok, cfg.norm_topk_prob);
+    size_t moe_pinned = 0;
+    const int moe_tables = residency == LoaderResidency::Resident ? cfg.num_hidden_layers : 0;
+    const size_t moe_dev = QwenMoeLayer::scratch_bytes(
+        moe_cfg, geo.local_shared_inter, max_tokens, &moe_pinned, decode_rows, moe_tables);
+    plan.add("moe scratch (routed slots, shared expert)", moe_dev, moe_pinned);
+  }
   // Activations: resid/x/attn/mlp [M,H] + gate/up tmps [M,I].
   plan.add("activations", 4 * M * H * 2 + 2 * M * I * 2);
   // The NVFP4 dense path's tables (production ldmatrix kernel): one
@@ -1415,6 +1495,9 @@ void Qwen35Model::graph_prepare() {
   for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
     const Qwen35LayerResident& r = loader_.load_layer(layer);
     build_layer_objects(r);
+    // The MoE decode fast path reads a prepared per-layer route table under
+    // capture (no host round-trip inside the graph); eager passes -1.
+    if (cfg_.is_moe) moe_->prepare_graph_table(layer, stream_);
   }
   if (mtp_) {
     const Qwen35LayerResident& r = loader_.load_layer(cfg_.mtp_layer());
@@ -1493,6 +1576,7 @@ void Qwen35Model::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos
   // Fused residual-add + post norm (bitwise the pair): one launch.
   qwen_add_rmsnorm_bf16(mtp_r_, ao, r.post_norm, x_, T, H, eps, stream_);
   uint16_t* mo = stage(mlp_out_, H);
+  if (cfg_.is_moe) throw std::logic_error("mtp_run_rows: MTP draft is not implemented for MoE");
   dense_mlp(x_, mo, T, r.mlp, stream_, cfg_.num_hidden_layers, first_pos > 0 && !decode_row);
   fold(mo, H);
   add_inplace_bf16(mtp_r_, mo, static_cast<size_t>(T) * H, stream_);
@@ -1750,7 +1834,10 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
       }
     }
     uint16_t* mo = stage(mlp_out_, H);
-    dense_mlp(x_, mo, T, r.mlp, stream_, layer, mlp_resume);
+    if (cfg_.is_moe)
+      moe_mlp(x_, mo, T, r.moe, stream_, run.capture ? layer : -1, run.decode);
+    else
+      dense_mlp(x_, mo, T, r.mlp, stream_, layer, mlp_resume);
     if (run.decode) prefetch_attention_side(layer + 1);  // the next layer's input side (or the head)
     fold(mo, H);
     add_inplace_bf16(resid_, mo, static_cast<size_t>(T) * H, stream_);

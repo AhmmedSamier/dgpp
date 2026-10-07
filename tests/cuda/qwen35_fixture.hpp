@@ -94,6 +94,46 @@ inline std::string tiny_config_json(bool mixed = false) {
   return std::string(tiny_config_text_json()) + (mixed ? tiny_quant_mixed() : tiny_quant_fp8());
 }
 
+// The tiny MoE release (122B layout at toy widths): 8 experts top-2,
+// moe/shared inter 64 (÷16 for the fp4 K, ÷world for 1/2/4), ModelOpt NVFP4
+// routed experts, everything else BF16 incl. the MTP draft's experts.
+inline const char* tiny_moe_config_text_json() {
+  return R"json({
+  "architectures": ["Qwen3_5MoeForConditionalGeneration"], "model_type": "qwen3_5_moe",
+  "language_model_only": true, "tie_word_embeddings": false,
+  "text_config": {
+    "model_type": "qwen3_5_moe_text", "attention_bias": false, "attn_output_gate": true,
+    "bos_token_id": 1, "eos_token_id": 1, "full_attention_interval": 4,
+    "head_dim": 256, "hidden_act": "silu", "hidden_size": 256,
+    "moe_intermediate_size": 64, "shared_expert_intermediate_size": 64,
+    "num_experts": 8, "num_experts_per_tok": 2, "norm_topk_prob": true,
+    "layer_types": ["linear_attention", "linear_attention", "linear_attention", "full_attention"],
+    "linear_conv_kernel_dim": 4, "linear_key_head_dim": 128, "linear_num_key_heads": 4,
+    "linear_num_value_heads": 8, "linear_value_head_dim": 128, "mamba_ssm_dtype": "float32",
+    "max_position_embeddings": 4096, "mtp_num_hidden_layers": 1, "mtp_use_dedicated_embeddings": false,
+    "num_attention_heads": 4, "num_hidden_layers": 4, "num_key_value_heads": 2,
+    "output_gate_type": "swish", "partial_rotary_factor": 0.25, "rms_norm_eps": 1e-06,
+    "rope_parameters": {"mrope_interleaved": true, "mrope_section": [11, 11, 10],
+                        "partial_rotary_factor": 0.25, "rope_theta": 10000000.0, "rope_type": "default"},
+    "tie_word_embeddings": false, "vocab_size": 512
+  },
+  "quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4",
+    "config_groups": {"group_0": {"targets": ["Linear"],
+      "weights": {"dynamic": false, "num_bits": 4, "type": "float", "group_size": 16}}},
+    "ignore": ["lm_head", "model.visual*",
+               "model.language_model.layers.*.linear_attn*",
+               "model.language_model.layers.*.mlp.shared_expert*",
+               "model.language_model.layers.*.self_attn*",
+               "mtp.layers.0*"]}
+})json";
+}
+
+inline Qwen35TextConfig tiny_moe_config() {
+  const std::string json = tiny_moe_config_text_json();
+  const auto t = dgpp::minijson::parse(json);
+  return Qwen35TextConfig::parse(*t.root.find("text_config"), t.root.find("quantization_config"));
+}
+
 inline Qwen35TextConfig tiny_config(bool mixed = false) {
   const std::string json = tiny_config_json(mixed);
   const auto t = dgpp::minijson::parse(json);
@@ -104,7 +144,7 @@ inline bool has(const std::string& name, const char* needle) {
   return name.find(needle) != std::string::npos;
 }
 
-inline std::vector<uint8_t> tensor_bytes(const QwenExpectedTensor& e) {
+inline std::vector<uint8_t> tensor_bytes(const QwenExpectedTensor& e, float fp4_global = 64.0f) {
   std::vector<uint8_t> out(e.nbytes());
   const std::string& name = e.name;
   Rng rng(seed_for(name));
@@ -139,7 +179,10 @@ inline std::vector<uint8_t> tensor_bytes(const QwenExpectedTensor& e) {
         continue;
       }
       case QwenTensorRole::Fp4Global:
-        v = 64.0f;  // the checkpoint's weight-side divisor (the kernels divide the dot by it)
+        // Compressed-tensors: the checkpoint's weight-side divisor (kernels
+        // divide). ModelOpt (write_moe_fixture passes 1/64): weight_scale_2
+        // is a multiplier the loader reciprocals — same served weights.
+        v = fp4_global;
         break;
       case QwenTensorRole::InputScale:
         v = 1.0f;  // input_global_scale / kv scales: bound, never resident
@@ -182,8 +225,9 @@ inline std::vector<QwenExpectedTensor> ignored_extras() {
 // Writes `dir` (config.json + one safetensors shard) for the tiny release.
 // `mixed` swaps the FP8 quantization_config for the NVFP4 mixed release's
 // (the same tensors' table comes out of the binding, in the other forms).
-inline void write_fixture(const std::string& dir, bool mixed = false) {
-  const Qwen35TextConfig cfg = tiny_config(mixed);
+inline void write_fixture_from_cfg(const std::string& dir, const Qwen35TextConfig& cfg,
+                                   const std::string& config_json,
+                                   float fp4_global = 64.0f) {
   fs::path root(dir);
   fs::remove_all(root);
   fs::create_directories(root);
@@ -191,8 +235,7 @@ inline void write_fixture(const std::string& dir, bool mixed = false) {
     const fs::path p = root / "config.json";
     std::FILE* f = std::fopen(p.c_str(), "wb");
     if (!f) throw std::runtime_error("cannot write config.json");
-    const std::string json = tiny_config_json(mixed);
-    std::fwrite(json.data(), 1, json.size(), f);
+    std::fwrite(config_json.data(), 1, config_json.size(), f);
     std::fclose(f);
   }
   auto table = dgpp::qwen35_expected_text_tensors(cfg);
@@ -202,7 +245,7 @@ inline void write_fixture(const std::string& dir, bool mixed = false) {
   size_t off = 0;
   bool first = true;
   for (const auto& e : table) {
-    const auto b = tensor_bytes(e);
+    const auto b = tensor_bytes(e, fp4_global);
     std::string shape = "[";
     for (size_t i = 0; i < e.shape.size(); ++i) {
       if (i) shape += ",";
@@ -228,6 +271,16 @@ inline void write_fixture(const std::string& dir, bool mixed = false) {
   std::fclose(f);
   std::printf("qwen35 fixture written: %zu tensors, %.2f MB payload\n", table.size(),
               static_cast<double>(data.size()) / 1048576.0);
+}
+
+inline void write_fixture(const std::string& dir, bool mixed = false) {
+  write_fixture_from_cfg(dir, tiny_config(mixed), tiny_config_json(mixed));
+}
+
+inline void write_moe_fixture(const std::string& dir) {
+  // ModelOpt multiplier so the loader's reciprocal lands on the same
+  // divide-by-64 the dense fixture serves.
+  write_fixture_from_cfg(dir, tiny_moe_config(), tiny_moe_config_text_json(), 1.0f / 64.0f);
 }
 
 }  // namespace qwen35fx

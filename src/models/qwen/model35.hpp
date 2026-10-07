@@ -24,6 +24,7 @@
 #include "engine/paged_blocks.hpp"
 #include "engine/session_model.hpp"
 #include "models/glm/moe.hpp"
+#include "models/qwen/moe_layer.hpp"
 #include "kernels/bf12_companions.hpp"
 #include "kernels/gemm.hpp"
 #include "kernels/glm_moe_launch.hpp"
@@ -359,6 +360,11 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
                          const std::vector<std::vector<int64_t>>& feds,
                          int* slots_out, std::vector<int>* offs_out);
   void build_layer_objects(const Qwen35LayerResident& r);
+  // MoE MLP (is_moe): routed NVFP4 experts + BF16 shared tail via the
+  // shared QwenMoeLayer (decode fast path vs device prefill path).
+  QwenMoeWeights moe_view(const QwenMoeResident& m);
+  void moe_mlp(const uint16_t* x, uint16_t* out, int tokens, const QwenMoeResident& m,
+               cudaStream_t stream, int table_slot, bool decode);
   // The dense GEMM band for this model's own CublasLtGemm: the shared Qwen
   // rule, plus the streaming mma form for 17..128-row decode batches (the
   // drafter's stacked block forwards and the taps of a wide verify read
@@ -488,6 +494,9 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   MoeSegment* fp4_segs_ = nullptr;      // [max_tokens] device
   MoeExpertView* fp4_views_ = nullptr;  // [layers x 3] resident, [3] slot streaming
   int fp4_view_layers_ = 0;             // 0 = slot mode (streaming)
+  // MoE MLP (is_moe): the routed chain over this rank's expert slice.
+  GlmMoeConfig moe_cfg_ = {};
+  std::unique_ptr<QwenMoeLayer> moe_;
   // MTP draft scratch at max_tokens rows (null when MTP is off): embed rows
   // and their norm, the gathered/gated main hidden and its norm, the
   // [M, 2H] concat, the draft residual, its norm (the chain rows), and the

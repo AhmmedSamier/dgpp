@@ -520,12 +520,13 @@ int run_group_invariance(const std::string& dir) {
 }
 
 int main(int argc, char** argv) {
-  std::string fixture, fixture_mixed, smoke, rows, group, checkpoint, dump, states;
+  std::string fixture, fixture_mixed, fixture_moe, smoke, rows, group, checkpoint, dump, states;
   bool relaxed = false, bf16_head = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--write-fixture" && i + 1 < argc) fixture = argv[++i];
     else if (a == "--write-fixture-mixed" && i + 1 < argc) fixture_mixed = argv[++i];
+    else if (a == "--write-fixture-moe" && i + 1 < argc) fixture_moe = argv[++i];
     else if (a == "--smoke" && i + 1 < argc) smoke = argv[++i];
     else if (a == "--rows-invariance" && i + 1 < argc) rows = argv[++i];
     else if (a == "--group-invariance" && i + 1 < argc) group = argv[++i];
@@ -547,12 +548,17 @@ int main(int argc, char** argv) {
       std::printf("[ OK ] wrote the mixed fixture to %s\n", fixture_mixed.c_str());
       return 0;
     }
+    if (!fixture_moe.empty()) {
+      qwen35fx::write_moe_fixture(fixture_moe);
+      std::printf("[ OK ] wrote the MoE fixture to %s\n", fixture_moe.c_str());
+      return 0;
+    }
     if (!smoke.empty()) return run_smoke(smoke);
     if (!rows.empty()) return run_rows_invariance(rows, !bf16_head);
     if (!group.empty()) return run_group_invariance(group);
     if (!checkpoint.empty() && !dump.empty()) return run_dump_parity(checkpoint, dump, states, relaxed);
     std::fprintf(stderr,
-                 "usage: --write-fixture DIR | --write-fixture-mixed DIR | --smoke DIR | --rows-invariance DIR | "
+                 "usage: --write-fixture DIR | --write-fixture-mixed DIR | --write-fixture-moe DIR | --smoke DIR | --rows-invariance DIR | "
                  "--checkpoint-dir DIR --dump-file FILE "
                  "[--engine-states FILE] [--relaxed]\n");
     return 2;
