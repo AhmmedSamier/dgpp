@@ -2326,27 +2326,27 @@ bool Qwen35Model::dflash1_draft(int req, int64_t bonus, std::vector<int32_t>* dr
   embed_gather_bf16(globals_.embed, df1_tokens_, df1_resid_, QR, H, stream_);
   configure_gemm_rows(QR, true);
   df1_block_layers(req, stream_);
-  // Per-mask-row top-16 off the shared head (the kernel's only K; each
-  // mask row proposes column 0) with one boundary fold at world > 1.
-  head_gemv(df1_h_, df1_logits_, QR, stream_);
-  dflash2_topk_f32(df1_logits_, df1_ids_, df1_sc_, lm_vocab_count_, QR, 16, stream_, df1_topk_ws_,
+  // Only the verifiable prefix needs head rows (per-row independent: top-1
+  // of row j reads no other row's logits — skipping rows N+1..15 is
+  // bitwise-identical for proposals 1..N, and saves (15-N) full-vocab
+  // GEMV rows a step). The whole block still runs, since later masks read
+  // the earlier rows' keys.
+  const int N = dflash2_drafts(), HR = 1 + N;
+  head_gemv(df1_h_, df1_logits_, HR, stream_);
+  dflash2_topk_f32(df1_logits_, df1_ids_, df1_sc_, lm_vocab_count_, HR, 16, stream_, df1_topk_ws_,
                    df1_topk_ws_bytes_);
   if (world_ > 1) {
-    const size_t elems = dflash2_topk_table_elems(QR, 16, world_);
+    const size_t elems = dflash2_topk_table_elems(HR, 16, world_);
     uint16_t* table = boundary_->stage(1, static_cast<int>(elems));
     if (table == nullptr) throw std::runtime_error("dflash v1 draft: the top-16 gather needs a staged buffer");
-    dflash2_topk_stage(df1_ids_, df1_sc_, QR, 16, lm_vocab_begin_, rank_, world_, table, stream_);
+    dflash2_topk_stage(df1_ids_, df1_sc_, HR, 16, lm_vocab_begin_, rank_, world_, table, stream_);
     DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
     boundary_->reduce(table, 1, static_cast<int>(elems));
-    dflash2_topk_merge(table, QR, 16, world_, df1_ids_, df1_sc_, stream_);
+    dflash2_topk_merge(table, HR, 16, world_, df1_ids_, df1_sc_, stream_);
   }
-  // Mask rows 1..D propose their column 0; the anchor row's entry goes unread.
-  // Only the verifiable prefix is returned (dflash2_drafts(): the engine's
-  // rows are 1 + depth, capped by kSpecRows) — the whole block still runs,
-  // since later masks read the earlier rows' keys.
-  const int N = dflash2_drafts();
-  std::vector<int32_t> ids(QR * 16);
-  DGPP_CUDA_OK(cudaMemcpyAsync(ids.data(), df1_ids_, static_cast<size_t>(QR) * 16 * 4,
+  // Mask rows 1..N propose their column 0; the anchor row's entry goes unread.
+  std::vector<int32_t> ids(static_cast<size_t>(HR) * 16);
+  DGPP_CUDA_OK(cudaMemcpyAsync(ids.data(), df1_ids_, static_cast<size_t>(HR) * 16 * 4,
                                cudaMemcpyDeviceToHost, stream_));
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   drafts->resize(N);
