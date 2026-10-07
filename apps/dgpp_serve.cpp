@@ -946,6 +946,9 @@ struct Qwen35Family final : ServeFamily {
                                                       const dgpp::text::GrammarVocab* grammar,
                                                       int prefix_slots, int mtp_depth,
                                                       bool compact_batches) override {
+    if (model && model->dflash1_enabled())
+      throw std::invalid_argument("qwen3_5: the DFlash v1 drafter serves the eager engine "
+                                  "(decode_graph:false in stage 2)");
     return std::make_unique<ServeGraphEngineOf<dgpp::Qwen35Model>>(
         model.get(), bus, rank, world_, pick_scratch, cfg.vocab_size, /*pick_timeout_ms=*/60000,
         batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots,

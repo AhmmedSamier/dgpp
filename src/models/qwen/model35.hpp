@@ -14,6 +14,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <vector>
@@ -24,6 +25,7 @@
 #include "engine/paged_blocks.hpp"
 #include "engine/session_model.hpp"
 #include "models/glm/moe.hpp"
+#include "models/qwen/dflash.hpp"
 #include "models/qwen/moe_layer.hpp"
 #include "kernels/bf12_companions.hpp"
 #include "kernels/gemm.hpp"
@@ -255,8 +257,14 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   // through the five bidirectional layers over the plane context; each
   // mask rows' top-K go through the reference chained selector walk, which
   // proposes the `drafts()` following tokens.
-  bool dflash2_enabled() const { return dflash2_; }
-  int dflash2_drafts() const { return dflash2_ ? dfcfg_.drafts() : 0; }
+  bool dflash2_enabled() const { return dflash2_ || dflash1_; }
+  // The verifiable drafts: v2's block; v1's 15 capped by the verify budget
+  // (dflash_depth, at most 7 — kSpecRows).
+  int dflash2_drafts() const {
+    if (dflash1_) return std::min(df1cfg_.drafts(), dflash_depth_ == 0 ? 7 : dflash_depth_);
+    return dflash2_ ? dfcfg_.drafts() : 0;
+  }
+  bool dflash1_enabled() const { return dflash1_; }
   // False without a draft (pool exhausted / context bound): the caller
   // runs the step without speculation.
   bool dflash2_draft(int req, int64_t bonus, std::vector<int32_t>* drafts);
@@ -546,6 +554,36 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   DraftProposal* df_props_h_ = nullptr;
   int df_props_stride_ = 0;
   int df_batch_ = 1;  // the stacked draft batch width (slots per forward)
+  // The DFlash v1 drafter (null unless a v1 directory was given):
+  // DFlashConfig + weights, eight tap map, single-slot eager scratch
+  // (query_rows = 16 rows; C1 scope — batching and capture stay open).
+  bool dflash1_ = false;
+  DFlashConfig df1cfg_;
+  DFlashWeights df1w_;
+  std::vector<int> df1_tap_;  // per main-layer index: the fc slice, else -1
+  uint16_t *df1_resid_ = nullptr, *df1_x_ = nullptr;
+  uint16_t *df1_q_ = nullptr, *df1_k_ = nullptr, *df1_v_ = nullptr;  // roped q/k/v rows
+  uint16_t *df1_attn_ = nullptr, *df1_o_ = nullptr, *df1_mlp_ = nullptr;
+  float* df1_attn_part_ = nullptr;  // the split-key block attention's partials (QR rows)
+  uint16_t *df1_gate_ = nullptr, *df1_up_ = nullptr;  // [query_rows, draft I]
+  uint16_t* df1_h_ = nullptr;       // [query_rows, H] the draft's final norm rows
+  float* df1_logits_ = nullptr;     // [query_rows, V] F32 (the block rows' head rows)
+  void* df1_topk_ws_ = nullptr;     // the top-1 chunk partials
+  size_t df1_topk_ws_bytes_ = 0;
+  int32_t* df1_ids_ = nullptr;   // [query_rows, 16] top-16 per row (the kernel's only K; row's draft is column 0)
+  float* df1_sc_ = nullptr;      // [query_rows, 16]
+  int32_t* df1_zero_ = nullptr;  // [query_rows] zeros (the single-slot append view)
+  int64_t* df1_pos_ = nullptr;   // [query_rows] device
+  int64_t* df1_tokens_ = nullptr;  // [query_rows] device
+  int64_t* df1_io64_h_ = nullptr;  // pinned: query_rows positions then tokens
+  int32_t* df1_tok_h_ = nullptr;   // pinned [drafts]: the proposed drafts
+  float* df1_inv_freq_ = nullptr;  // [head_dim/2] F32 rope table
+  // The v1 block forward + mask proposal (eager, one slot): stages
+  // [bonus, mask x D], runs the six layers over the draft planes, and
+  // top-1s each mask row off the shared head.
+  bool dflash1_draft(int req, int64_t bonus, std::vector<int32_t>* drafts);
+  void df1_block_layers(int req, cudaStream_t stream);
+  void df1_store_features(int T, const int32_t* d_req, const int64_t* d_pos);
   // The captured verify's replay state (one static 32-row graph): the
   // pool tables pointer the capture baked in (a mismatch means the pool
   // grew — drop and recapture), and the breakage latch (a failed capture

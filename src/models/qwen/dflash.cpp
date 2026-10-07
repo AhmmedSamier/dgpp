@@ -161,7 +161,7 @@ size_t dflash_weights_bytes(const DFlashConfig& cfg, int world) {
   const size_t QW = static_cast<size_t>(cfg.local_q_row(world));
   const size_t KW = static_cast<size_t>(cfg.local_kv_row(world));
   const size_t I = static_cast<size_t>(cfg.local_intermediate(world));
-  const size_t per_layer = (QW + 2 * KW) * H + H * QW + 2 * I * H + H * I + 4 * H + 2 * cfg.head_dim;
+  const size_t per_layer = (QW + 2 * KW) * H + H * QW + 2 * I * H + H * I + 2 * H + 2 * cfg.head_dim;
   const size_t total =
       static_cast<size_t>(cfg.num_hidden_layers) * per_layer +
       static_cast<size_t>(cfg.target_layer_ids.size()) * H * H + 2 * H;

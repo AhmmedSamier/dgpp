@@ -806,8 +806,9 @@ struct Qwen35LoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
       // The draft's BF16 experts: engine.mtp_expert_format=bf16 encodes
       // each expert's slice to block FP8 at load (the fused-release
       // precedent); the proposals are lossy, the verify exact. Any other
-      // value cannot serve the BF16 draft — refused by key name.
-      if (Qwen35LayerStream::mtp_expert_format() != "bf16")
+      // value cannot serve the BF16 draft — refused by key name on a real
+      // load (sizing walks every layer, served or not, so it measures).
+      if (Qwen35LayerStream::mtp_expert_format() != "bf16" && copy)
         fail("mtp draft MoE needs engine.mtp_expert_format=bf16 (the checkpoint holds "
              "per-expert BF16, encoded to block FP8 at load for the proposals only)");
       m.experts.resize(static_cast<size_t>(E) * 3);
