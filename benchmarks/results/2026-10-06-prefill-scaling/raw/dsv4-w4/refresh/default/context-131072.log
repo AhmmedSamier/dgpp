@@ -1,0 +1,3 @@
+131072 r0: 130536 prompt tokens, 0 cached, prefill 225.675s, decode 74.82 tok/s, 44.85 ms/pass
+131072 r1: 130536 prompt tokens, 130432 cached, prefill 0.518s, decode 75.71 tok/s, 44.91 ms/pass
+131072 r2: 130536 prompt tokens, 130432 cached, prefill 0.512s, decode 75.05 tok/s, 44.71 ms/pass

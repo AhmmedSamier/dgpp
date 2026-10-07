@@ -1,0 +1,10 @@
+{
+  "server_binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+  "previous_benchmark_sha256": "2bca3e60f9e83414a85d6ee5419a5ab28b63b8f5b8671af1464001de076c26da",
+  "benchmark_source_sha256": "00343c3673f2c9431600c2972e6f719cbabb0d6f11ea055db06b43ea109dbd32",
+  "kernel_source_sha256": "e5c84247a090e1131c398ec45058777cfda23a8e1178728f03d03d866df8e55e",
+  "model_source_sha256": "bcb8d90533c862cb3b48302fafbad9b08393d0b9cc673674402bbfada870bb5c",
+  "scope": "One indexed full-GLM attention layer, synthetic history, no MoE or network collectives; measure formats at identical context/capacity. No serving binary rebuild.",
+  "full_geometry_baseline_benchmark_sha256": "a95b56e5fa945a1fafb0fa58903f1994a98078dddbc43a3f1366ab5f45d65704",
+  "full_geometry_baseline_note": "Supports --full-glm; fused scoring symbol present but not called by DsaLayer. Same materialized score path as measured baseline."
+}

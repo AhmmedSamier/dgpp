@@ -1,0 +1,1035 @@
+DISK 192.168.88.11: 270.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 463.6 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 570.0 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 633.1 GiB free; removed 0 completed session downloads
+2026-10-06T15:39:52.333483+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm-flash-hybrid-w4/refresh/default/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm-flash-hybrid-w4/refresh/default/server
+2026-10-06T15:40:28.554335+00:00 EXIT 0 raw/glm-flash-hybrid-w4/refresh/default/up.log
+2026-10-06T15:40:28.578765+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,2,4,8 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm-flash-hybrid-w4/refresh/default/greedy.json
+2026-10-06T15:50:09.494033+00:00 EXIT 0 raw/glm-flash-hybrid-w4/refresh/default/greedy.log
+2026-10-06T15:50:09.494514+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py 127.0.0.1 18080 2048 8192 32768 --repeat 3 --seed 7 --tag matrix-b844de711c8748c3a7f47748db3d9078 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm-flash-hybrid-w4/refresh/default/prefill.json
+2026-10-06T15:51:34.662898+00:00 EXIT 0 raw/glm-flash-hybrid-w4/refresh/default/prefill.log
+2026-10-06T15:51:34.663354+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 --tag 6dbfa472f14c4ee5b42c5c95fb1c1bf1 --lengths 0 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm-flash-hybrid-w4/refresh/default/context-0.json
+2026-10-06T15:51:48.892785+00:00 EXIT 0 raw/glm-flash-hybrid-w4/refresh/default/context-0.log
+2026-10-06T15:51:48.893247+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 --tag 22b1b4f964a04f5eac697f6a52dd9267 --lengths 32768 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm-flash-hybrid-w4/refresh/default/context-32768.json
+2026-10-06T15:52:24.779492+00:00 EXIT 0 raw/glm-flash-hybrid-w4/refresh/default/context-32768.log
+2026-10-06T15:52:24.780430+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 --tag 445874b54d7b4a7fa4c4d859bb8c1b42 --lengths 65536 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm-flash-hybrid-w4/refresh/default/context-65536.json
+2026-10-06T15:53:27.737653+00:00 EXIT 0 raw/glm-flash-hybrid-w4/refresh/default/context-65536.log
+2026-10-06T15:53:27.738501+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 --tag a6b23cbc9dae4f7e9d0cdfddbb8b05d4 --lengths 131072 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm-flash-hybrid-w4/refresh/default/context-131072.json
+2026-10-06T15:55:38.236038+00:00 EXIT 0 raw/glm-flash-hybrid-w4/refresh/default/context-131072.log
+2026-10-06T15:55:38.236539+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 --tag 1f54ed992b044ace9fc8942683387ddb --lengths 262144 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm-flash-hybrid-w4/refresh/default/context-262144.json
+2026-10-06T16:01:01.238119+00:00 EXIT 0 raw/glm-flash-hybrid-w4/refresh/default/context-262144.log
+2026-10-06T16:01:01.238605+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 --tag 65e560d9dfbb4047ad9e2f6a3e57862b --lengths 524288 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm-flash-hybrid-w4/refresh/default/context-524288.json
+2026-10-06T16:16:53.444153+00:00 EXIT 0 raw/glm-flash-hybrid-w4/refresh/default/context-524288.log
+2026-10-06T16:16:53.444595+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm-flash-hybrid-w4/refresh/default/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm-flash-hybrid-w4/refresh/default/server
+2026-10-06T16:17:00.912693+00:00 EXIT 0 raw/glm-flash-hybrid-w4/refresh/default/down.log
+Rendered overview; 303 outstanding measurement groups
+SKIP glm-flash-hybrid-w4 plain
+Rendered overview; 303 outstanding measurement groups
+SKIP glm-flash-hybrid-w4 mtp2
+Rendered overview; 303 outstanding measurement groups
+SKIP glm-flash-hybrid-w4 mtp3
+Rendered overview; 303 outstanding measurement groups
+DISK 192.168.88.11: 270.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 463.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 569.9 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 633.0 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+SKIP glm-flash-hybrid-w2 default
+Rendered overview; 136 outstanding measurement groups
+SKIP glm-flash-hybrid-w2 plain
+Rendered overview; 136 outstanding measurement groups
+SKIP glm-flash-hybrid-w2 mtp2
+Rendered overview; 136 outstanding measurement groups
+SKIP glm-flash-hybrid-w2 mtp3
+Rendered overview; 136 outstanding measurement groups
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+SKIP glm-flash-hybrid-256k-w2 default
+Rendered overview; 136 outstanding measurement groups
+SKIP glm-flash-hybrid-256k-w2 plain
+Rendered overview; 136 outstanding measurement groups
+SKIP glm-flash-hybrid-256k-w2 mtp2
+Rendered overview; 136 outstanding measurement groups
+SKIP glm-flash-hybrid-256k-w2 mtp3
+Rendered overview; 136 outstanding measurement groups
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+SKIP glm-flash-hybrid-w4 default
+Rendered overview; 136 outstanding measurement groups
+SKIP glm-flash-hybrid-w4 plain
+Rendered overview; 136 outstanding measurement groups
+SKIP glm-flash-hybrid-w4 mtp2
+Rendered overview; 136 outstanding measurement groups
+SKIP glm-flash-hybrid-w4 mtp3
+Rendered overview; 136 outstanding measurement groups
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+SKIP glm-flash-fp8-w4 default
+Rendered overview; 136 outstanding measurement groups
+SKIP glm-flash-fp8-w4 plain
+Rendered overview; 136 outstanding measurement groups
+SKIP glm-flash-fp8-w4 mtp2
+Rendered overview; 136 outstanding measurement groups
+SKIP glm-flash-fp8-w4 mtp3
+Rendered overview; 136 outstanding measurement groups
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+SKIP glm-flash-fp8-512k-w4 default
+Rendered overview; 136 outstanding measurement groups
+SKIP glm-flash-fp8-512k-w4 plain
+Rendered overview; 136 outstanding measurement groups
+SKIP glm-flash-fp8-512k-w4 mtp2
+Rendered overview; 136 outstanding measurement groups
+SKIP glm-flash-fp8-512k-w4 mtp3
+Rendered overview; 136 outstanding measurement groups
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+SKIP qwen-nvfp4-w1 default
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-nvfp4-w1 plain
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-nvfp4-w1 mtp2
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-nvfp4-w1 mtp3
+Rendered overview; 136 outstanding measurement groups
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+SKIP qwen-nvfp4-bf16-w1 default
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-nvfp4-bf16-w1 plain
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-nvfp4-bf16-w1 mtp2
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-nvfp4-bf16-w1 mtp3
+Rendered overview; 136 outstanding measurement groups
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+SKIP qwen-nvfp4-w2 default
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-nvfp4-w2 plain
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-nvfp4-w2 mtp2
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-nvfp4-w2 mtp3
+Rendered overview; 136 outstanding measurement groups
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+SKIP qwen-yarn-w2 default
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-yarn-w2 plain
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-yarn-w2 mtp2
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-yarn-w2 mtp3
+Rendered overview; 136 outstanding measurement groups
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+SKIP qwen-radixark-w1 default
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-radixark-w1 plain
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-radixark-w1 mtp1
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-radixark-w1 mtp3
+Rendered overview; 136 outstanding measurement groups
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+SKIP qwen-radixark-w2 default
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-radixark-w2 plain
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-radixark-w2 mtp1
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-radixark-w2 mtp2
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-radixark-w2 mtp3
+Rendered overview; 136 outstanding measurement groups
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+SKIP qwen-fp8-w2 default
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-fp8-w2 plain
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-fp8-w2 mtp2
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-fp8-w2 mtp3
+Rendered overview; 136 outstanding measurement groups
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+SKIP qwen-fp8-w4 default
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-fp8-w4 plain
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-fp8-w4 mtp2
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-fp8-w4 mtp3
+Rendered overview; 136 outstanding measurement groups
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+SKIP qwen-autoround-w1 default
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-autoround-w1 plain
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-autoround-w1 mtp1
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-autoround-w1 mtp2
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-autoround-w1 mtp4
+Rendered overview; 136 outstanding measurement groups
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+SKIP qwen-autoround-prefill-w1 default
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-autoround-prefill-w1 plain
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-autoround-prefill-w1 mtp1
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-autoround-prefill-w1 mtp2
+Rendered overview; 136 outstanding measurement groups
+SKIP qwen-autoround-prefill-w1 mtp4
+Rendered overview; 136 outstanding measurement groups
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+SKIP glm53-w4 default
+Rendered overview; 136 outstanding measurement groups
+SKIP glm53-w4 plain
+Rendered overview; 136 outstanding measurement groups
+SKIP glm53-w4 mtp2
+Rendered overview; 136 outstanding measurement groups
+SKIP glm53-w4 mtp3
+Rendered overview; 136 outstanding measurement groups
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+SKIP glm53-fp8kv-w4 default
+Rendered overview; 136 outstanding measurement groups
+SKIP glm53-fp8kv-w4 plain
+Rendered overview; 136 outstanding measurement groups
+SKIP glm53-fp8kv-w4 mtp2
+Rendered overview; 136 outstanding measurement groups
+SKIP glm53-fp8kv-w4 mtp3
+Rendered overview; 136 outstanding measurement groups
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+SKIP glm53-fp4kv-256k-w4 default
+Rendered overview; 136 outstanding measurement groups
+SKIP glm53-fp4kv-256k-w4 plain
+Rendered overview; 136 outstanding measurement groups
+SKIP glm53-fp4kv-256k-w4 mtp2
+Rendered overview; 136 outstanding measurement groups
+SKIP glm53-fp4kv-256k-w4 mtp3
+Rendered overview; 136 outstanding measurement groups
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+PLAN deepseek-w4 default: {"jobs": ["greedy", "prefill", "context-0", "context-32768", "context-65536", "context-131072", "context-262144", "context-524288"], "prefill_lengths": [2048, 8192, 32768], "retained_sources": {}}
+2026-10-07T06:31:47.709977+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/default/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/default/server
+2026-10-07T06:32:23.741646+00:00 EXIT 0 raw/deepseek-w4/refresh/default/up.log
+2026-10-07T06:32:23.755967+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,2,4,8 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/default/greedy.json
+2026-10-07T06:44:15.211203+00:00 EXIT 0 raw/deepseek-w4/refresh/default/greedy.log
+2026-10-07T06:44:15.211731+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py 127.0.0.1 18080 2048 8192 32768 --repeat 3 --no-think --seed 7 --tag matrix-134ddf24d5914c1aba194cc383727c22 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/default/prefill.json
+2026-10-07T06:45:35.414628+00:00 EXIT 0 raw/deepseek-w4/refresh/default/prefill.log
+2026-10-07T06:45:35.415112+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4.1-Flash --tag a2d22cf866c5493c8641e9d30d95fe19 --lengths 0 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/default/context-0.json
+2026-10-07T06:45:49.241484+00:00 EXIT 0 raw/deepseek-w4/refresh/default/context-0.log
+2026-10-07T06:45:49.241948+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4.1-Flash --tag ab68b5f2e6a149a08d2f68c35056d08c --lengths 32768 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/default/context-32768.json
+2026-10-07T06:46:23.944728+00:00 EXIT 0 raw/deepseek-w4/refresh/default/context-32768.log
+2026-10-07T06:46:23.945540+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4.1-Flash --tag 20ed9f78b6ab4895a92f973a8513f6e8 --lengths 65536 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/default/context-65536.json
+2026-10-07T06:47:25.178793+00:00 EXIT 0 raw/deepseek-w4/refresh/default/context-65536.log
+2026-10-07T06:47:25.179615+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4.1-Flash --tag 73a1008e5f744e4ba042c5efd7c269ed --lengths 131072 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/default/context-131072.json
+2026-10-07T06:49:49.620581+00:00 EXIT 0 raw/deepseek-w4/refresh/default/context-131072.log
+2026-10-07T06:49:49.621377+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4.1-Flash --tag 64c0bb8ce6364754bd36150d7c3b5588 --lengths 262144 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/default/context-262144.json
+2026-10-07T06:49:49.887345+00:00 EXIT 0 raw/deepseek-w4/refresh/default/context-262144.log
+2026-10-07T06:49:49.888001+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4.1-Flash --tag 69e93da78aaf456f811616d8a1c758ef --lengths 524288 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/default/context-524288.json
+2026-10-07T06:49:50.153627+00:00 EXIT 0 raw/deepseek-w4/refresh/default/context-524288.log
+2026-10-07T06:49:50.154213+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/default/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/default/server
+2026-10-07T06:49:57.229176+00:00 EXIT 0 raw/deepseek-w4/refresh/default/down.log
+Rendered overview; 129 outstanding measurement groups
+PLAN deepseek-w4 plain: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T06:49:58.446721+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/plain/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/plain/server
+2026-10-07T06:50:34.154286+00:00 EXIT 0 raw/deepseek-w4/refresh/plain/up.log
+2026-10-07T06:50:34.155238+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/plain/greedy.json
+2026-10-07T06:52:41.661063+00:00 EXIT 0 raw/deepseek-w4/refresh/plain/greedy.log
+2026-10-07T06:52:41.661543+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/plain/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/plain/server
+2026-10-07T06:52:48.829562+00:00 EXIT 0 raw/deepseek-w4/refresh/plain/down.log
+Rendered overview; 128 outstanding measurement groups
+PLAN deepseek-w4 dspark1: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T06:52:49.946075+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/dspark1/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/dspark1/server
+2026-10-07T06:53:25.723783+00:00 EXIT 0 raw/deepseek-w4/refresh/dspark1/up.log
+2026-10-07T06:53:25.725087+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/dspark1/greedy.json
+2026-10-07T06:55:00.473974+00:00 EXIT 0 raw/deepseek-w4/refresh/dspark1/greedy.log
+2026-10-07T06:55:00.474386+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/dspark1/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/dspark1/server
+2026-10-07T06:55:07.631901+00:00 EXIT 0 raw/deepseek-w4/refresh/dspark1/down.log
+Rendered overview; 127 outstanding measurement groups
+PLAN deepseek-w4 dspark2: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T06:55:08.791949+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/dspark2/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/dspark2/server
+2026-10-07T06:55:44.567382+00:00 EXIT 0 raw/deepseek-w4/refresh/dspark2/up.log
+2026-10-07T06:55:44.568262+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/dspark2/greedy.json
+2026-10-07T06:57:05.087855+00:00 EXIT 0 raw/deepseek-w4/refresh/dspark2/greedy.log
+2026-10-07T06:57:05.088627+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/dspark2/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/dspark2/server
+2026-10-07T06:57:12.255994+00:00 EXIT 0 raw/deepseek-w4/refresh/dspark2/down.log
+Rendered overview; 126 outstanding measurement groups
+PLAN deepseek-w4 dspark3: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T06:57:13.428085+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/dspark3/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/dspark3/server
+2026-10-07T06:57:49.218181+00:00 EXIT 0 raw/deepseek-w4/refresh/dspark3/up.log
+2026-10-07T06:57:49.219545+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/dspark3/greedy.json
+2026-10-07T06:59:05.957051+00:00 EXIT 0 raw/deepseek-w4/refresh/dspark3/greedy.log
+2026-10-07T06:59:05.957875+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/dspark3/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/dspark3/server
+2026-10-07T06:59:13.139258+00:00 EXIT 0 raw/deepseek-w4/refresh/dspark3/down.log
+Rendered overview; 125 outstanding measurement groups
+PLAN deepseek-w4 dspark5: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T06:59:14.257928+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/dspark5/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/dspark5/server
+2026-10-07T06:59:49.950781+00:00 EXIT 0 raw/deepseek-w4/refresh/dspark5/up.log
+2026-10-07T06:59:49.952110+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/dspark5/greedy.json
+2026-10-07T07:01:09.402419+00:00 EXIT 0 raw/deepseek-w4/refresh/dspark5/greedy.log
+2026-10-07T07:01:09.403183+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/dspark5/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/dspark5/server
+2026-10-07T07:01:16.536336+00:00 EXIT 0 raw/deepseek-w4/refresh/dspark5/down.log
+Rendered overview; 124 outstanding measurement groups
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 394.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 585.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 567.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 630.3 GiB free; removed 0 completed session downloads
+PLAN deepseek-1m-w4 default: {"jobs": ["greedy", "prefill", "context-0", "context-32768", "context-65536", "context-131072", "context-262144", "context-524288"], "prefill_lengths": [2048, 8192, 32768], "retained_sources": {}}
+2026-10-07T07:01:18.468601+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/default/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/default/server
+2026-10-07T07:01:54.213383+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/default/up.log
+2026-10-07T07:01:54.214255+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,2,4,8 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/default/greedy.json
+2026-10-07T07:13:44.474039+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/default/greedy.log
+2026-10-07T07:13:44.474906+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py 127.0.0.1 18080 2048 8192 32768 --repeat 3 --no-think --seed 7 --tag matrix-1d3f35337f0d477c943579d63d1db85d --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/default/prefill.json
+2026-10-07T07:15:03.395265+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/default/prefill.log
+2026-10-07T07:15:03.395750+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4.1-Flash --tag 73b0ffcc93f4491684d98bd0083fd51e --lengths 0 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/default/context-0.json
+2026-10-07T07:15:18.137125+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/default/context-0.log
+2026-10-07T07:15:18.137937+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4.1-Flash --tag c296f1344d5c485ca6b3cd1a1e8d3421 --lengths 32768 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/default/context-32768.json
+2026-10-07T07:15:52.545800+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/default/context-32768.log
+2026-10-07T07:15:52.546256+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4.1-Flash --tag 6b948f5b31934a4280b87e0526443240 --lengths 65536 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/default/context-65536.json
+2026-10-07T07:16:50.148575+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/default/context-65536.log
+2026-10-07T07:16:50.149044+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4.1-Flash --tag ae04826756a24cceb793a9932abadb39 --lengths 131072 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/default/context-131072.json
+2026-10-07T07:18:54.923071+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/default/context-131072.log
+2026-10-07T07:18:54.923551+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4.1-Flash --tag 45665395bf27407280936296c31d9837 --lengths 262144 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/default/context-262144.json
+2026-10-07T07:25:24.710118+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/default/context-262144.log
+2026-10-07T07:25:24.710571+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4.1-Flash --tag 99fe8fe6045442ae9d41d110b848f858 --lengths 524288 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/default/context-524288.json
+2026-10-07T07:57:43.413390+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/default/context-524288.log
+2026-10-07T07:57:43.413821+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/default/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/default/server
+2026-10-07T07:57:50.729667+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/default/down.log
+Rendered overview; 115 outstanding measurement groups
+PLAN deepseek-1m-w4 plain: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T07:57:52.016720+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/plain/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/plain/server
+2026-10-07T07:58:27.794163+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/plain/up.log
+2026-10-07T07:58:27.795812+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/plain/greedy.json
+2026-10-07T08:00:35.010042+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/plain/greedy.log
+2026-10-07T08:00:35.010816+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/plain/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/plain/server
+2026-10-07T08:00:42.088800+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/plain/down.log
+Rendered overview; 114 outstanding measurement groups
+PLAN deepseek-1m-w4 dspark1: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T08:00:43.289074+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/dspark1/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/dspark1/server
+2026-10-07T08:01:18.732992+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/dspark1/up.log
+2026-10-07T08:01:18.734129+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/dspark1/greedy.json
+2026-10-07T08:02:54.243692+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/dspark1/greedy.log
+2026-10-07T08:02:54.244116+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/dspark1/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/dspark1/server
+2026-10-07T08:03:01.550481+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/dspark1/down.log
+Rendered overview; 113 outstanding measurement groups
+PLAN deepseek-1m-w4 dspark2: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T08:03:02.713850+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/dspark2/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/dspark2/server
+2026-10-07T08:03:38.320821+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/dspark2/up.log
+2026-10-07T08:03:38.321686+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/dspark2/greedy.json
+2026-10-07T08:04:59.028869+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/dspark2/greedy.log
+2026-10-07T08:04:59.029657+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/dspark2/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/dspark2/server
+2026-10-07T08:05:06.652834+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/dspark2/down.log
+Rendered overview; 112 outstanding measurement groups
+PLAN deepseek-1m-w4 dspark3: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T08:05:07.798222+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/dspark3/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/dspark3/server
+2026-10-07T08:05:43.549212+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/dspark3/up.log
+2026-10-07T08:05:43.550275+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/dspark3/greedy.json
+2026-10-07T08:07:00.436246+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/dspark3/greedy.log
+2026-10-07T08:07:00.436706+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/dspark3/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/dspark3/server
+2026-10-07T08:07:08.101597+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/dspark3/down.log
+Rendered overview; 111 outstanding measurement groups
+PLAN deepseek-1m-w4 dspark5: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T08:07:09.282064+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/dspark5/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/dspark5/server
+2026-10-07T08:07:44.895238+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/dspark5/up.log
+2026-10-07T08:07:44.896740+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/dspark5/greedy.json
+2026-10-07T08:09:03.863109+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/dspark5/greedy.log
+2026-10-07T08:09:03.863564+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/dspark5/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/dspark5/server
+2026-10-07T08:09:11.629994+00:00 EXIT 0 raw/deepseek-1m-w4/refresh/dspark5/down.log
+Rendered overview; 110 outstanding measurement groups
+DISK 192.168.88.11: 394.7 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 584.7 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 566.7 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 629.9 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 394.7 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 584.7 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 566.7 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 629.9 GiB free; removed 0 completed session downloads
+PLAN dsv4-w2 default: {"jobs": ["greedy", "prefill", "context-0", "context-32768", "context-65536", "context-131072", "context-262144", "context-524288"], "prefill_lengths": [2048, 8192, 32768], "retained_sources": {}}
+2026-10-07T08:09:13.568707+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/default/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/default/server
+2026-10-07T08:12:03.155228+00:00 EXIT 0 raw/dsv4-w2/refresh/default/up.log
+2026-10-07T08:12:03.156598+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,2,4,8 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/default/greedy.json
+2026-10-07T08:24:46.622082+00:00 EXIT 0 raw/dsv4-w2/refresh/default/greedy.log
+2026-10-07T08:24:46.622869+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py 127.0.0.1 18080 2048 8192 32768 --repeat 3 --no-think --seed 7 --tag matrix-56250308e35045bb9467043bedf2e28a --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/default/prefill.json
+2026-10-07T08:27:07.199440+00:00 EXIT 0 raw/dsv4-w2/refresh/default/prefill.log
+2026-10-07T08:27:07.200327+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4-Flash-0731 --tag 6ab197532b2f4199b4743ef139b6714d --lengths 0 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/default/context-0.json
+2026-10-07T08:27:22.694579+00:00 EXIT 0 raw/dsv4-w2/refresh/default/context-0.log
+2026-10-07T08:27:22.695349+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4-Flash-0731 --tag 198d03f76efe43b1865b7cc31a15d460 --lengths 32768 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/default/context-32768.json
+2026-10-07T08:28:14.743184+00:00 EXIT 0 raw/dsv4-w2/refresh/default/context-32768.log
+2026-10-07T08:28:14.744022+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4-Flash-0731 --tag f14c5cc9144c4678ae671e40e5e7a175 --lengths 65536 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/default/context-65536.json
+2026-10-07T08:30:02.232055+00:00 EXIT 0 raw/dsv4-w2/refresh/default/context-65536.log
+2026-10-07T08:30:02.232501+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4-Flash-0731 --tag a837a134efc24fa6b26f1b589b4d1dd5 --lengths 131072 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/default/context-131072.json
+2026-10-07T08:34:48.867635+00:00 EXIT 0 raw/dsv4-w2/refresh/default/context-131072.log
+2026-10-07T08:34:48.868367+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4-Flash-0731 --tag f660e097bc934ebcbf70d585d82851ee --lengths 262144 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/default/context-262144.json
+2026-10-07T08:51:40.134175+00:00 EXIT 0 raw/dsv4-w2/refresh/default/context-262144.log
+2026-10-07T08:51:40.135020+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4-Flash-0731 --tag c5580e6db2ab4e80bdab4644696ad3db --lengths 524288 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/default/context-524288.json
+2026-10-07T10:10:11.190649+00:00 EXIT 0 raw/dsv4-w2/refresh/default/context-524288.log
+2026-10-07T10:10:11.191092+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/default/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/default/server
+2026-10-07T10:10:14.978763+00:00 EXIT 0 raw/dsv4-w2/refresh/default/down.log
+Rendered overview; 101 outstanding measurement groups
+PLAN dsv4-w2 plain: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T10:10:16.246802+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/plain/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/plain/server
+2026-10-07T10:10:45.856289+00:00 EXIT 0 raw/dsv4-w2/refresh/plain/up.log
+2026-10-07T10:10:45.857339+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/plain/greedy.json
+2026-10-07T10:13:00.682441+00:00 EXIT 0 raw/dsv4-w2/refresh/plain/greedy.log
+2026-10-07T10:13:00.683177+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/plain/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/plain/server
+2026-10-07T10:13:04.381495+00:00 EXIT 0 raw/dsv4-w2/refresh/plain/down.log
+Rendered overview; 100 outstanding measurement groups
+PLAN dsv4-w2 dspark1: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T10:13:05.589770+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/dspark1/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/dspark1/server
+2026-10-07T10:13:37.402087+00:00 EXIT 0 raw/dsv4-w2/refresh/dspark1/up.log
+2026-10-07T10:13:37.402922+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/dspark1/greedy.json
+2026-10-07T10:15:17.799251+00:00 EXIT 0 raw/dsv4-w2/refresh/dspark1/greedy.log
+2026-10-07T10:15:17.799974+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/dspark1/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/dspark1/server
+2026-10-07T10:15:21.595467+00:00 EXIT 0 raw/dsv4-w2/refresh/dspark1/down.log
+Rendered overview; 99 outstanding measurement groups
+PLAN dsv4-w2 dspark2: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T10:15:22.767900+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/dspark2/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/dspark2/server
+2026-10-07T10:15:54.308119+00:00 EXIT 0 raw/dsv4-w2/refresh/dspark2/up.log
+2026-10-07T10:15:54.309504+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/dspark2/greedy.json
+2026-10-07T10:17:19.318511+00:00 EXIT 0 raw/dsv4-w2/refresh/dspark2/greedy.log
+2026-10-07T10:17:19.318957+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/dspark2/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/dspark2/server
+2026-10-07T10:17:23.110762+00:00 EXIT 0 raw/dsv4-w2/refresh/dspark2/down.log
+Rendered overview; 98 outstanding measurement groups
+PLAN dsv4-w2 dspark3: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T10:17:24.277324+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/dspark3/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/dspark3/server
+2026-10-07T10:17:56.039115+00:00 EXIT 0 raw/dsv4-w2/refresh/dspark3/up.log
+2026-10-07T10:17:56.040408+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/dspark3/greedy.json
+2026-10-07T10:19:18.496842+00:00 EXIT 0 raw/dsv4-w2/refresh/dspark3/greedy.log
+2026-10-07T10:19:18.497576+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/dspark3/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/dspark3/server
+2026-10-07T10:19:22.240052+00:00 EXIT 0 raw/dsv4-w2/refresh/dspark3/down.log
+Rendered overview; 97 outstanding measurement groups
+PLAN dsv4-w2 dspark5: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T10:19:23.417507+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/dspark5/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/dspark5/server
+2026-10-07T10:19:54.996434+00:00 EXIT 0 raw/dsv4-w2/refresh/dspark5/up.log
+2026-10-07T10:19:54.997947+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/dspark5/greedy.json
+2026-10-07T10:21:20.036848+00:00 EXIT 0 raw/dsv4-w2/refresh/dspark5/greedy.log
+2026-10-07T10:21:20.037653+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/dspark5/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/dspark5/server
+2026-10-07T10:21:23.771576+00:00 EXIT 0 raw/dsv4-w2/refresh/dspark5/down.log
+Rendered overview; 96 outstanding measurement groups
+DISK 192.168.88.11: 317.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 506.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 566.7 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 629.9 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 317.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 506.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 566.7 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 629.9 GiB free; removed 0 completed session downloads
+PLAN dsv4-w4 default: {"jobs": ["greedy", "prefill", "context-0", "context-32768", "context-65536", "context-131072", "context-262144", "context-524288"], "prefill_lengths": [2048, 8192, 32768], "retained_sources": {}}
+2026-10-07T10:21:25.843328+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/default/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/default/server
+2026-10-07T10:24:07.562795+00:00 EXIT 0 raw/dsv4-w4/refresh/default/up.log
+2026-10-07T10:24:07.564127+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,2,4,8 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/default/greedy.json
+2026-10-07T10:31:59.065028+00:00 EXIT 0 raw/dsv4-w4/refresh/default/greedy.log
+2026-10-07T10:31:59.065827+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py 127.0.0.1 18080 2048 8192 32768 --repeat 3 --no-think --seed 7 --tag matrix-57cdfe48894342789f68cf42798bf019 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/default/prefill.json
+2026-10-07T10:33:41.611551+00:00 EXIT 0 raw/dsv4-w4/refresh/default/prefill.log
+2026-10-07T10:33:41.612314+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4-Flash-0731 --tag 95fff1c6d7b24e0390974c774891482e --lengths 0 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/default/context-0.json
+2026-10-07T10:33:51.643823+00:00 EXIT 0 raw/dsv4-w4/refresh/default/context-0.log
+2026-10-07T10:33:51.644608+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4-Flash-0731 --tag d6be48803c30404793b10da6b6d3750a --lengths 32768 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/default/context-32768.json
+2026-10-07T10:34:27.982764+00:00 EXIT 0 raw/dsv4-w4/refresh/default/context-32768.log
+2026-10-07T10:34:27.983557+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4-Flash-0731 --tag b05eac5c629e429196252bdc2293556f --lengths 65536 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/default/context-65536.json
+2026-10-07T10:35:50.020403+00:00 EXIT 0 raw/dsv4-w4/refresh/default/context-65536.log
+2026-10-07T10:35:50.020878+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4-Flash-0731 --tag ca21f236534e4bc9878e6e6e32516120 --lengths 131072 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/default/context-131072.json
+2026-10-07T10:39:49.350859+00:00 EXIT 0 raw/dsv4-w4/refresh/default/context-131072.log
+2026-10-07T10:39:49.351325+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4-Flash-0731 --tag 91a1f9d6b9c549de8ed28830b3357588 --lengths 262144 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/default/context-262144.json
+2026-10-07T10:55:05.243244+00:00 EXIT 0 raw/dsv4-w4/refresh/default/context-262144.log
+2026-10-07T10:55:05.244057+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4-Flash-0731 --tag 40c90ee4618646ada18732a0aed821a9 --lengths 524288 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/default/context-524288.json
+2026-10-07T12:10:08.146233+00:00 EXIT 0 raw/dsv4-w4/refresh/default/context-524288.log
+2026-10-07T12:10:08.146690+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/default/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/default/server
+2026-10-07T12:10:15.609074+00:00 EXIT 0 raw/dsv4-w4/refresh/default/down.log
+Rendered overview; 87 outstanding measurement groups
+PLAN dsv4-w4 plain: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T12:10:16.959146+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/plain/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/plain/server
+2026-10-07T12:10:42.850847+00:00 EXIT 0 raw/dsv4-w4/refresh/plain/up.log
+2026-10-07T12:10:42.852274+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/plain/greedy.json
+2026-10-07T12:12:14.790152+00:00 EXIT 0 raw/dsv4-w4/refresh/plain/greedy.log
+2026-10-07T12:12:14.791026+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/plain/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/plain/server
+2026-10-07T12:12:21.361716+00:00 EXIT 0 raw/dsv4-w4/refresh/plain/down.log
+Rendered overview; 86 outstanding measurement groups
+PLAN dsv4-w4 dspark1: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T12:12:22.556223+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/dspark1/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/dspark1/server
+2026-10-07T12:12:50.091054+00:00 EXIT 0 raw/dsv4-w4/refresh/dspark1/up.log
+2026-10-07T12:12:50.092384+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/dspark1/greedy.json
+2026-10-07T12:13:54.097381+00:00 EXIT 0 raw/dsv4-w4/refresh/dspark1/greedy.log
+2026-10-07T12:13:54.098218+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/dspark1/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/dspark1/server
+2026-10-07T12:14:00.163441+00:00 EXIT 0 raw/dsv4-w4/refresh/dspark1/down.log
+Rendered overview; 85 outstanding measurement groups
+PLAN dsv4-w4 dspark2: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T12:14:01.381654+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/dspark2/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/dspark2/server
+2026-10-07T12:14:28.907343+00:00 EXIT 0 raw/dsv4-w4/refresh/dspark2/up.log
+2026-10-07T12:14:28.908223+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/dspark2/greedy.json
+2026-10-07T12:15:22.583861+00:00 EXIT 0 raw/dsv4-w4/refresh/dspark2/greedy.log
+2026-10-07T12:15:22.584656+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/dspark2/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/dspark2/server
+2026-10-07T12:15:29.151884+00:00 EXIT 0 raw/dsv4-w4/refresh/dspark2/down.log
+Rendered overview; 84 outstanding measurement groups
+PLAN dsv4-w4 dspark3: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T12:15:30.335226+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/dspark3/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/dspark3/server
+2026-10-07T12:15:58.013201+00:00 EXIT 0 raw/dsv4-w4/refresh/dspark3/up.log
+2026-10-07T12:15:58.014574+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/dspark3/greedy.json
+2026-10-07T12:16:48.337522+00:00 EXIT 0 raw/dsv4-w4/refresh/dspark3/greedy.log
+2026-10-07T12:16:48.338267+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/dspark3/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/dspark3/server
+2026-10-07T12:16:55.568562+00:00 EXIT 0 raw/dsv4-w4/refresh/dspark3/down.log
+Rendered overview; 83 outstanding measurement groups
+PLAN dsv4-w4 dspark5: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T12:16:56.797647+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/dspark5/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/dspark5/server
+2026-10-07T12:17:24.262877+00:00 EXIT 0 raw/dsv4-w4/refresh/dspark5/up.log
+2026-10-07T12:17:24.264230+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/dspark5/greedy.json
+2026-10-07T12:18:14.679594+00:00 EXIT 0 raw/dsv4-w4/refresh/dspark5/greedy.log
+2026-10-07T12:18:14.680406+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/dspark5/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/dspark5/server
+2026-10-07T12:18:20.848668+00:00 EXIT 0 raw/dsv4-w4/refresh/dspark5/down.log
+Rendered overview; 82 outstanding measurement groups
+DISK 192.168.88.11: 550.0 GiB free; removed 2 completed session downloads
+DISK 192.168.88.12: 739.1 GiB free; removed 2 completed session downloads
+DISK 192.168.88.13: 721.6 GiB free; removed 2 completed session downloads
+DISK 192.168.88.14: 784.8 GiB free; removed 2 completed session downloads
+DISK 192.168.88.11: 550.0 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 739.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 721.6 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 784.8 GiB free; removed 0 completed session downloads
+PLAN mimo-w2 default: {"jobs": ["greedy", "prefill", "context-0", "context-32768", "context-65536", "context-131072", "context-262144", "context-524288"], "prefill_lengths": [2048, 8192, 32768], "retained_sources": {}}
+2026-10-07T12:18:23.219316+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/default/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/default/server
+2026-10-07T12:21:23.060605+00:00 EXIT 0 raw/mimo-w2/refresh/default/up.log
+2026-10-07T12:21:23.061910+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,2,4,8 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/default/greedy.json
+2026-10-07T12:34:52.557310+00:00 EXIT 0 raw/mimo-w2/refresh/default/greedy.log
+2026-10-07T12:34:52.558202+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py 127.0.0.1 18080 2048 8192 32768 --repeat 3 --no-think --seed 7 --tag matrix-2b857be098de405a95e04c8cb8fa036e --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/default/prefill.json
+2026-10-07T12:38:19.382638+00:00 EXIT 0 raw/mimo-w2/refresh/default/prefill.log
+2026-10-07T12:38:19.383152+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model XiaomiMiMo/MiMo-V2.6-Flash-RL --tag ac6695959d6c4c31961b5f506b92e178 --lengths 0 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/default/context-0.json
+2026-10-07T12:38:38.395266+00:00 EXIT 0 raw/mimo-w2/refresh/default/context-0.log
+2026-10-07T12:38:38.395756+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model XiaomiMiMo/MiMo-V2.6-Flash-RL --tag b8483825de8246a88ee44f193ecce4ed --lengths 32768 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/default/context-32768.json
+2026-10-07T12:39:50.324903+00:00 EXIT 0 raw/mimo-w2/refresh/default/context-32768.log
+2026-10-07T12:39:50.325386+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model XiaomiMiMo/MiMo-V2.6-Flash-RL --tag 290f613883c641fcbd3dbad857bc29e3 --lengths 65536 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/default/context-65536.json
+2026-10-07T12:42:12.733534+00:00 EXIT 0 raw/mimo-w2/refresh/default/context-65536.log
+2026-10-07T12:42:12.734320+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model XiaomiMiMo/MiMo-V2.6-Flash-RL --tag ce1ccadb83ae4d3eac79064caeeccf74 --lengths 131072 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/default/context-131072.json
+2026-10-07T12:47:37.416795+00:00 EXIT 0 raw/mimo-w2/refresh/default/context-131072.log
+2026-10-07T12:47:37.417270+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model XiaomiMiMo/MiMo-V2.6-Flash-RL --tag 9f73d0d34e5d41c4ac41d5d4b4187651 --lengths 262144 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/default/context-262144.json
+2026-10-07T12:47:37.732822+00:00 EXIT 0 raw/mimo-w2/refresh/default/context-262144.log
+2026-10-07T12:47:37.733232+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model XiaomiMiMo/MiMo-V2.6-Flash-RL --tag 360d9226345d417a890a52786eee209a --lengths 524288 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/default/context-524288.json
+2026-10-07T12:47:38.048965+00:00 EXIT 0 raw/mimo-w2/refresh/default/context-524288.log
+2026-10-07T12:47:38.049435+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/default/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/default/server
+2026-10-07T12:47:41.980409+00:00 EXIT 0 raw/mimo-w2/refresh/default/down.log
+Rendered overview; 75 outstanding measurement groups
+PLAN mimo-w2 plain: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T12:47:43.263127+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/plain/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/plain/server
+2026-10-07T12:48:12.973517+00:00 EXIT 0 raw/mimo-w2/refresh/plain/up.log
+2026-10-07T12:48:12.974366+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/plain/greedy.json
+2026-10-07T12:50:14.615033+00:00 EXIT 0 raw/mimo-w2/refresh/plain/greedy.log
+2026-10-07T12:50:14.615817+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/plain/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/plain/server
+2026-10-07T12:50:18.410828+00:00 EXIT 0 raw/mimo-w2/refresh/plain/down.log
+Rendered overview; 74 outstanding measurement groups
+PLAN mimo-w2 mtp2: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T12:50:19.605441+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/mtp2/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/mtp2/server
+2026-10-07T12:50:49.175519+00:00 EXIT 0 raw/mimo-w2/refresh/mtp2/up.log
+2026-10-07T12:50:49.176601+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/mtp2/greedy.json
+2026-10-07T12:52:20.821279+00:00 EXIT 0 raw/mimo-w2/refresh/mtp2/greedy.log
+2026-10-07T12:52:20.822050+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/mtp2/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/mtp2/server
+2026-10-07T12:52:24.564567+00:00 EXIT 0 raw/mimo-w2/refresh/mtp2/down.log
+Rendered overview; 73 outstanding measurement groups
+PLAN mimo-w2 mtp3: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T12:52:25.824602+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/mtp3/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/mtp3/server
+2026-10-07T12:52:55.449226+00:00 EXIT 0 raw/mimo-w2/refresh/mtp3/up.log
+2026-10-07T12:52:55.451162+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/mtp3/greedy.json
+2026-10-07T12:54:39.174966+00:00 EXIT 0 raw/mimo-w2/refresh/mtp3/greedy.log
+2026-10-07T12:54:39.175742+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/mtp3/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/mtp3/server
+2026-10-07T12:54:42.919759+00:00 EXIT 0 raw/mimo-w2/refresh/mtp3/down.log
+Rendered overview; 72 outstanding measurement groups
+DISK 192.168.88.11: 471.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 660.6 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 721.6 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 784.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 471.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 660.6 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 721.6 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 784.8 GiB free; removed 0 completed session downloads
+PLAN mimo-w2-fp8kv default: {"jobs": ["greedy", "prefill", "context-0", "context-32768", "context-65536", "context-131072", "context-262144", "context-524288"], "prefill_lengths": [2048, 8192, 32768], "retained_sources": {}}
+2026-10-07T12:54:45.034570+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/default/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/default/server
+2026-10-07T12:55:14.750845+00:00 EXIT 0 raw/mimo-w2-fp8kv/refresh/default/up.log
+2026-10-07T12:55:14.752294+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,2,4,8 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/default/greedy.json
+2026-10-07T13:08:54.776203+00:00 EXIT 0 raw/mimo-w2-fp8kv/refresh/default/greedy.log
+2026-10-07T13:08:54.777045+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py 127.0.0.1 18080 2048 8192 32768 --repeat 3 --no-think --seed 7 --tag matrix-35e5262100c04f7499ddb2eccac52eed --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/default/prefill.json
+2026-10-07T13:12:31.429772+00:00 EXIT 0 raw/mimo-w2-fp8kv/refresh/default/prefill.log
+2026-10-07T13:12:31.430251+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model XiaomiMiMo/MiMo-V2.6-Flash-RL --tag 42597e3b3c4e4679a8edb206494e4293 --lengths 0 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/default/context-0.json
+2026-10-07T13:12:51.207447+00:00 EXIT 0 raw/mimo-w2-fp8kv/refresh/default/context-0.log
+2026-10-07T13:12:51.207949+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model XiaomiMiMo/MiMo-V2.6-Flash-RL --tag e37edd2eb2c74a2b946d97aa91a7c9e1 --lengths 32768 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/default/context-32768.json
+2026-10-07T13:14:06.914410+00:00 EXIT 0 raw/mimo-w2-fp8kv/refresh/default/context-32768.log
+2026-10-07T13:14:06.915229+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model XiaomiMiMo/MiMo-V2.6-Flash-RL --tag b5f938b007ea4820b6b3f245c99472c4 --lengths 65536 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/default/context-65536.json
+2026-10-07T13:16:41.117770+00:00 EXIT 0 raw/mimo-w2-fp8kv/refresh/default/context-65536.log
+2026-10-07T13:16:41.118240+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model XiaomiMiMo/MiMo-V2.6-Flash-RL --tag a5e62069c70540d9997f7cbc075b0678 --lengths 131072 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/default/context-131072.json
+2026-10-07T13:22:44.947320+00:00 EXIT 0 raw/mimo-w2-fp8kv/refresh/default/context-131072.log
+2026-10-07T13:22:44.948131+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model XiaomiMiMo/MiMo-V2.6-Flash-RL --tag 3b238ae3849e41c5b513f08e7d1f637f --lengths 262144 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/default/context-262144.json
+2026-10-07T13:39:26.873062+00:00 EXIT 0 raw/mimo-w2-fp8kv/refresh/default/context-262144.log
+2026-10-07T13:39:26.873870+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model XiaomiMiMo/MiMo-V2.6-Flash-RL --tag ab5d7ddb7f9646c48b25234e8d6b6fbe --lengths 524288 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/default/context-524288.json
+2026-10-07T13:39:27.190444+00:00 EXIT 0 raw/mimo-w2-fp8kv/refresh/default/context-524288.log
+2026-10-07T13:39:27.191048+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/default/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/default/server
+2026-10-07T13:39:30.937009+00:00 EXIT 0 raw/mimo-w2-fp8kv/refresh/default/down.log
+Rendered overview; 64 outstanding measurement groups
+PLAN mimo-w2-fp8kv plain: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T13:39:32.274137+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/plain/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/plain/server
+2026-10-07T13:40:02.142838+00:00 EXIT 0 raw/mimo-w2-fp8kv/refresh/plain/up.log
+2026-10-07T13:40:02.145154+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/plain/greedy.json
+2026-10-07T13:42:03.307363+00:00 EXIT 0 raw/mimo-w2-fp8kv/refresh/plain/greedy.log
+2026-10-07T13:42:03.308129+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/plain/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/plain/server
+2026-10-07T13:42:07.000019+00:00 EXIT 0 raw/mimo-w2-fp8kv/refresh/plain/down.log
+Rendered overview; 63 outstanding measurement groups
+PLAN mimo-w2-fp8kv mtp2: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T13:42:08.208521+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/mtp2/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/mtp2/server
+2026-10-07T13:42:37.998358+00:00 EXIT 0 raw/mimo-w2-fp8kv/refresh/mtp2/up.log
+2026-10-07T13:42:37.999254+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/mtp2/greedy.json
+2026-10-07T13:44:12.944733+00:00 EXIT 0 raw/mimo-w2-fp8kv/refresh/mtp2/greedy.log
+2026-10-07T13:44:12.945450+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/mtp2/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/mtp2/server
+2026-10-07T13:44:16.641711+00:00 EXIT 0 raw/mimo-w2-fp8kv/refresh/mtp2/down.log
+Rendered overview; 62 outstanding measurement groups
+PLAN mimo-w2-fp8kv mtp3: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T13:44:17.922284+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/mtp3/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/mtp3/server
+2026-10-07T13:44:47.572324+00:00 EXIT 0 raw/mimo-w2-fp8kv/refresh/mtp3/up.log
+2026-10-07T13:44:47.573217+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/mtp3/greedy.json
+2026-10-07T13:46:35.580094+00:00 EXIT 0 raw/mimo-w2-fp8kv/refresh/mtp3/greedy.log
+2026-10-07T13:46:35.580849+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/mtp3/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/mtp3/server
+2026-10-07T13:46:39.321701+00:00 EXIT 0 raw/mimo-w2-fp8kv/refresh/mtp3/down.log
+Rendered overview; 61 outstanding measurement groups
+DISK 192.168.88.11: 471.7 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 660.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 721.6 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 784.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 471.7 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 660.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 721.6 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 784.8 GiB free; removed 0 completed session downloads
+PLAN mimo-w4 default: {"jobs": ["greedy", "prefill", "context-0", "context-32768", "context-65536", "context-131072", "context-262144", "context-524288"], "prefill_lengths": [2048, 8192, 32768], "retained_sources": {}}
+2026-10-07T13:46:41.500846+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/default/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/default/server
+2026-10-07T13:49:41.556640+00:00 EXIT 0 raw/mimo-w4/refresh/default/up.log
+2026-10-07T13:49:41.557427+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,2,4,8 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/default/greedy.json
+2026-10-07T13:57:18.632880+00:00 EXIT 0 raw/mimo-w4/refresh/default/greedy.log
+2026-10-07T13:57:18.633345+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py 127.0.0.1 18080 2048 8192 32768 --repeat 3 --no-think --seed 7 --tag matrix-6858a62a22124cb9b75f263e08ec2ded --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/default/prefill.json
+2026-10-07T13:59:04.777793+00:00 EXIT 0 raw/mimo-w4/refresh/default/prefill.log
+2026-10-07T13:59:04.778280+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model XiaomiMiMo/MiMo-V2.6-Flash-RL --tag cf8a00c259ce43bcb03270bd02b01501 --lengths 0 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/default/context-0.json
+2026-10-07T13:59:15.890749+00:00 EXIT 0 raw/mimo-w4/refresh/default/context-0.log
+2026-10-07T13:59:15.891217+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model XiaomiMiMo/MiMo-V2.6-Flash-RL --tag e3bacea1cb0041b78e9ef425634ac2e8 --lengths 32768 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/default/context-32768.json
+2026-10-07T13:59:54.569249+00:00 EXIT 0 raw/mimo-w4/refresh/default/context-32768.log
+2026-10-07T13:59:54.569742+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model XiaomiMiMo/MiMo-V2.6-Flash-RL --tag 33c5a5449642434da0dea440bec1616a --lengths 65536 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/default/context-65536.json
+2026-10-07T14:01:10.449431+00:00 EXIT 0 raw/mimo-w4/refresh/default/context-65536.log
+2026-10-07T14:01:10.450309+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model XiaomiMiMo/MiMo-V2.6-Flash-RL --tag 0d3d37b261864bdeb534caf919cadb9c --lengths 131072 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/default/context-131072.json
+2026-10-07T14:04:02.742269+00:00 EXIT 0 raw/mimo-w4/refresh/default/context-131072.log
+2026-10-07T14:04:02.743150+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model XiaomiMiMo/MiMo-V2.6-Flash-RL --tag 702b0f58cbeb4d8a908fad850d86fee6 --lengths 262144 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/default/context-262144.json
+2026-10-07T14:04:03.059164+00:00 EXIT 0 raw/mimo-w4/refresh/default/context-262144.log
+2026-10-07T14:04:03.060021+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model XiaomiMiMo/MiMo-V2.6-Flash-RL --tag a384c64c9d9a476da0cfda94e9e79f83 --lengths 524288 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/default/context-524288.json
+2026-10-07T14:04:03.376191+00:00 EXIT 0 raw/mimo-w4/refresh/default/context-524288.log
+2026-10-07T14:04:03.377053+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/default/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/default/server
+2026-10-07T14:04:10.602159+00:00 EXIT 0 raw/mimo-w4/refresh/default/down.log
+Rendered overview; 54 outstanding measurement groups
+PLAN mimo-w4 plain: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T14:04:11.925901+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/plain/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/plain/server
+2026-10-07T14:04:37.489322+00:00 EXIT 0 raw/mimo-w4/refresh/plain/up.log
+2026-10-07T14:04:37.490115+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/plain/greedy.json
+2026-10-07T14:05:49.893354+00:00 EXIT 0 raw/mimo-w4/refresh/plain/greedy.log
+2026-10-07T14:05:49.894191+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/plain/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/plain/server
+2026-10-07T14:05:57.023153+00:00 EXIT 0 raw/mimo-w4/refresh/plain/down.log
+Rendered overview; 53 outstanding measurement groups
+PLAN mimo-w4 mtp2: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T14:05:58.331279+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/mtp2/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/mtp2/server
+2026-10-07T14:06:23.795025+00:00 EXIT 0 raw/mimo-w4/refresh/mtp2/up.log
+2026-10-07T14:06:23.795880+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/mtp2/greedy.json
+2026-10-07T14:07:16.282944+00:00 EXIT 0 raw/mimo-w4/refresh/mtp2/greedy.log
+2026-10-07T14:07:16.283369+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/mtp2/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/mtp2/server
+2026-10-07T14:07:23.491325+00:00 EXIT 0 raw/mimo-w4/refresh/mtp2/down.log
+Rendered overview; 52 outstanding measurement groups
+PLAN mimo-w4 mtp3: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T14:07:24.786723+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/mtp3/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/mtp3/server
+2026-10-07T14:07:50.240260+00:00 EXIT 0 raw/mimo-w4/refresh/mtp3/up.log
+2026-10-07T14:07:50.241137+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/mtp3/greedy.json
+2026-10-07T14:08:47.851643+00:00 EXIT 0 raw/mimo-w4/refresh/mtp3/greedy.log
+2026-10-07T14:08:47.852090+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/mtp3/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w4/refresh/mtp3/server
+2026-10-07T14:08:54.912347+00:00 EXIT 0 raw/mimo-w4/refresh/mtp3/down.log
+Rendered overview; 51 outstanding measurement groups
+DISK 192.168.88.11: 432.6 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 620.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 682.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 745.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 432.6 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 620.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 682.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 745.3 GiB free; removed 0 completed session downloads
+PLAN mimo-1m-w4 default: {"jobs": ["greedy", "prefill", "context-0", "context-32768", "context-65536", "context-131072", "context-262144", "context-524288"], "prefill_lengths": [2048, 8192, 32768], "retained_sources": {}}
+2026-10-07T14:08:56.956493+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/default/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/default/server
+2026-10-07T14:09:24.587270+00:00 EXIT 0 raw/mimo-1m-w4/refresh/default/up.log
+2026-10-07T14:09:24.588655+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,2,4,8 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/default/greedy.json
+2026-10-07T14:17:00.924456+00:00 EXIT 0 raw/mimo-1m-w4/refresh/default/greedy.log
+2026-10-07T14:17:00.925339+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py 127.0.0.1 18080 2048 8192 32768 --repeat 3 --no-think --seed 7 --tag matrix-7034992e27f04e058eeb90001f9dbac3 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/default/prefill.json
+2026-10-07T14:18:46.845545+00:00 EXIT 0 raw/mimo-1m-w4/refresh/default/prefill.log
+2026-10-07T14:18:46.846039+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model XiaomiMiMo/MiMo-V2.6-Flash-RL --tag 01d5707958ff4b999d9e00e3001f5d10 --lengths 0 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/default/context-0.json
+2026-10-07T14:18:57.547196+00:00 EXIT 0 raw/mimo-1m-w4/refresh/default/context-0.log
+2026-10-07T14:18:57.547721+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model XiaomiMiMo/MiMo-V2.6-Flash-RL --tag e2d9e591f16b47d98812ac7952384d24 --lengths 32768 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/default/context-32768.json
+2026-10-07T14:19:35.849057+00:00 EXIT 0 raw/mimo-1m-w4/refresh/default/context-32768.log
+2026-10-07T14:19:35.849566+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model XiaomiMiMo/MiMo-V2.6-Flash-RL --tag 69c37f52d9ef46b6b516bc8ac985eb39 --lengths 65536 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/default/context-65536.json
+2026-10-07T14:20:51.266488+00:00 EXIT 0 raw/mimo-1m-w4/refresh/default/context-65536.log
+2026-10-07T14:20:51.266972+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model XiaomiMiMo/MiMo-V2.6-Flash-RL --tag 9aad226df7a84db9b1d24253c1ad15f8 --lengths 131072 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/default/context-131072.json
+2026-10-07T14:23:43.214963+00:00 EXIT 0 raw/mimo-1m-w4/refresh/default/context-131072.log
+2026-10-07T14:23:43.215782+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model XiaomiMiMo/MiMo-V2.6-Flash-RL --tag d637f4984db140648ab3e5b8282f21ba --lengths 262144 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/default/context-262144.json
+2026-10-07T14:31:17.342560+00:00 EXIT 0 raw/mimo-1m-w4/refresh/default/context-262144.log
+2026-10-07T14:31:17.343351+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model XiaomiMiMo/MiMo-V2.6-Flash-RL --tag 78ed40e855d84be3a365cc91d7393bb9 --lengths 524288 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/default/context-524288.json
+2026-10-07T14:54:06.203670+00:00 EXIT 0 raw/mimo-1m-w4/refresh/default/context-524288.log
+2026-10-07T14:54:06.204117+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/default/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/default/server
+2026-10-07T14:54:13.363169+00:00 EXIT 0 raw/mimo-1m-w4/refresh/default/down.log
+Rendered overview; 42 outstanding measurement groups
+PLAN mimo-1m-w4 plain: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T14:54:14.701698+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/plain/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/plain/server
+2026-10-07T14:54:42.414891+00:00 EXIT 0 raw/mimo-1m-w4/refresh/plain/up.log
+2026-10-07T14:54:42.415751+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/plain/greedy.json
+2026-10-07T14:55:53.843390+00:00 EXIT 0 raw/mimo-1m-w4/refresh/plain/greedy.log
+2026-10-07T14:55:53.844175+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/plain/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/plain/server
+2026-10-07T14:56:00.969443+00:00 EXIT 0 raw/mimo-1m-w4/refresh/plain/down.log
+Rendered overview; 41 outstanding measurement groups
+PLAN mimo-1m-w4 mtp2: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T14:56:02.294505+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/mtp2/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/mtp2/server
+2026-10-07T14:56:29.710019+00:00 EXIT 0 raw/mimo-1m-w4/refresh/mtp2/up.log
+2026-10-07T14:56:29.711387+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/mtp2/greedy.json
+2026-10-07T14:57:21.719212+00:00 EXIT 0 raw/mimo-1m-w4/refresh/mtp2/greedy.log
+2026-10-07T14:57:21.720141+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/mtp2/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/mtp2/server
+2026-10-07T14:57:29.093211+00:00 EXIT 0 raw/mimo-1m-w4/refresh/mtp2/down.log
+Rendered overview; 40 outstanding measurement groups
+PLAN mimo-1m-w4 mtp3: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T14:57:30.354511+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/mtp3/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/mtp3/server
+2026-10-07T14:57:57.683422+00:00 EXIT 0 raw/mimo-1m-w4/refresh/mtp3/up.log
+2026-10-07T14:57:57.684241+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/mtp3/greedy.json
+2026-10-07T14:58:55.085676+00:00 EXIT 0 raw/mimo-1m-w4/refresh/mtp3/greedy.log
+2026-10-07T14:58:55.086507+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/mtp3/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-1m-w4/refresh/mtp3/server
+2026-10-07T14:59:02.211070+00:00 EXIT 0 raw/mimo-1m-w4/refresh/mtp3/down.log
+Rendered overview; 39 outstanding measurement groups
+DISK 192.168.88.11: 715.4 GiB free; removed 2 completed session downloads
+DISK 192.168.88.12: 903.3 GiB free; removed 2 completed session downloads
+DISK 192.168.88.13: 886.4 GiB free; removed 2 completed session downloads
+DISK 192.168.88.14: 949.7 GiB free; removed 2 completed session downloads
+DISK 192.168.88.11: 715.4 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 903.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 886.4 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 949.7 GiB free; removed 0 completed session downloads
+PLAN qwen27b-fp8-w1 default: {"jobs": ["greedy", "prefill", "context-0", "context-32768", "context-65536", "context-131072", "context-262144", "context-524288"], "prefill_lengths": [2048, 8192, 32768], "retained_sources": {}}
+2026-10-07T14:59:05.163564+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/default/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/default/server
+2026-10-07T14:59:31.478804+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/default/up.log
+2026-10-07T14:59:31.480201+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,2,4,8 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/default/greedy.json
+2026-10-07T15:11:46.326269+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/default/greedy.log
+2026-10-07T15:11:46.326732+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py 127.0.0.1 18080 2048 8192 32768 --repeat 3 --no-think --seed 7 --tag matrix-e72c61c5fa1645aca10d3965f9a598fd --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/default/prefill.json
+2026-10-07T15:13:45.955196+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/default/prefill.log
+2026-10-07T15:13:45.956031+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model Qwen/Qwen3.8-27B-FP8 --tag 42678a61f4a448efbce15d5df64a40bf --lengths 0 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/default/context-0.json
+2026-10-07T15:14:10.984549+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/default/context-0.log
+2026-10-07T15:14:10.985097+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model Qwen/Qwen3.8-27B-FP8 --tag af765644cd6947c5b8e54e2dd49d6b5a --lengths 32768 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/default/context-32768.json
+2026-10-07T15:15:07.152544+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/default/context-32768.log
+2026-10-07T15:15:07.153337+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model Qwen/Qwen3.8-27B-FP8 --tag 8a7360bb909d4051a2ba2172aa25be6e --lengths 65536 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/default/context-65536.json
+2026-10-07T15:16:47.807361+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/default/context-65536.log
+2026-10-07T15:16:47.808178+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model Qwen/Qwen3.8-27B-FP8 --tag 33bd4b9de43e48a4bec010e42e0d52fd --lengths 131072 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/default/context-131072.json
+2026-10-07T15:20:22.457888+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/default/context-131072.log
+2026-10-07T15:20:22.458311+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model Qwen/Qwen3.8-27B-FP8 --tag b50ff3da4da04cf498a073717cefdb86 --lengths 262144 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/default/context-262144.json
+2026-10-07T15:29:48.249387+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/default/context-262144.log
+2026-10-07T15:29:48.249839+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model Qwen/Qwen3.8-27B-FP8 --tag ac2fcf7730284aba8d37135b48282af3 --lengths 524288 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/default/context-524288.json
+2026-10-07T15:29:48.666324+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/default/context-524288.log
+2026-10-07T15:29:48.666743+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/default/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/default/server
+2026-10-07T15:29:50.744545+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/default/down.log
+Rendered overview; 31 outstanding measurement groups
+PLAN qwen27b-fp8-w1 plain: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T15:29:52.083315+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/plain/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/plain/server
+2026-10-07T15:30:08.391327+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/plain/up.log
+2026-10-07T15:30:08.392728+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/plain/greedy.json
+2026-10-07T15:38:05.472548+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/plain/greedy.log
+2026-10-07T15:38:05.472981+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/plain/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/plain/server
+2026-10-07T15:38:07.546627+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/plain/down.log
+Rendered overview; 30 outstanding measurement groups
+PLAN qwen27b-fp8-w1 mtp1: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T15:38:08.870914+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/mtp1/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/mtp1/server
+2026-10-07T15:38:25.207512+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/mtp1/up.log
+2026-10-07T15:38:25.208931+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/mtp1/greedy.json
+2026-10-07T15:42:57.961193+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/mtp1/greedy.log
+2026-10-07T15:42:57.961716+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/mtp1/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/mtp1/server
+2026-10-07T15:43:00.040522+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/mtp1/down.log
+Rendered overview; 29 outstanding measurement groups
+PLAN qwen27b-fp8-w1 mtp2: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T15:43:01.378722+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/mtp2/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/mtp2/server
+2026-10-07T15:43:17.738503+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/mtp2/up.log
+2026-10-07T15:43:17.740013+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/mtp2/greedy.json
+2026-10-07T15:46:55.539268+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/mtp2/greedy.log
+2026-10-07T15:46:55.540067+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/mtp2/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/mtp2/server
+2026-10-07T15:46:57.621598+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/mtp2/down.log
+Rendered overview; 28 outstanding measurement groups
+PLAN qwen27b-fp8-w1 mtp3: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T15:46:58.982498+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/mtp3/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/mtp3/server
+2026-10-07T15:47:15.295879+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/mtp3/up.log
+2026-10-07T15:47:15.296764+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/mtp3/greedy.json
+2026-10-07T15:50:29.698031+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/mtp3/greedy.log
+2026-10-07T15:50:29.698814+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/mtp3/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/mtp3/server
+2026-10-07T15:50:31.729557+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/mtp3/down.log
+Rendered overview; 27 outstanding measurement groups
+PLAN qwen27b-fp8-w1 dflash2-fixed: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T15:50:33.090062+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/dflash2-fixed/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/dflash2-fixed/server
+2026-10-07T15:50:57.412074+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/dflash2-fixed/up.log
+2026-10-07T15:50:57.413497+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/dflash2-fixed/greedy.json
+2026-10-07T15:53:19.104215+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/dflash2-fixed/greedy.log
+2026-10-07T15:53:19.104626+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/dflash2-fixed/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/dflash2-fixed/server
+2026-10-07T15:53:21.176082+00:00 EXIT 0 raw/qwen27b-fp8-w1/refresh/dflash2-fixed/down.log
+Rendered overview; 26 outstanding measurement groups
+DISK 192.168.88.11: 715.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 903.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 886.4 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 949.7 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 715.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 903.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 886.4 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 949.7 GiB free; removed 0 completed session downloads
+PLAN qwen27b-fp8-w2 default: {"jobs": ["greedy", "prefill", "context-0", "context-32768", "context-65536", "context-131072", "context-262144", "context-524288"], "prefill_lengths": [2048, 8192, 32768], "retained_sources": {}}
+2026-10-07T15:53:23.399082+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/default/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/default/server
+2026-10-07T15:53:48.891924+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/default/up.log
+2026-10-07T15:53:48.893367+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,2,4,8 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/default/greedy.json
+2026-10-07T16:01:18.325814+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/default/greedy.log
+2026-10-07T16:01:18.326598+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py 127.0.0.1 18080 2048 8192 32768 --repeat 3 --no-think --seed 7 --tag matrix-947700199c62422d851b20edad506481 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/default/prefill.json
+2026-10-07T16:02:39.226022+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/default/prefill.log
+2026-10-07T16:02:39.226811+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model Qwen/Qwen3.8-27B-FP8 --tag 3eadb96ed36747b2a49e22450a67dbe7 --lengths 0 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/default/context-0.json
+2026-10-07T16:02:53.292508+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/default/context-0.log
+2026-10-07T16:02:53.293287+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model Qwen/Qwen3.8-27B-FP8 --tag c311af309d8c4d4c9bc3f2879fe9f7db --lengths 32768 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/default/context-32768.json
+2026-10-07T16:03:29.038726+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/default/context-32768.log
+2026-10-07T16:03:29.039191+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model Qwen/Qwen3.8-27B-FP8 --tag 83ed25adbc6a491f91d4eb97ebde6b9c --lengths 65536 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/default/context-65536.json
+2026-10-07T16:04:33.837111+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/default/context-65536.log
+2026-10-07T16:04:33.837568+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model Qwen/Qwen3.8-27B-FP8 --tag 7b5552ba2fb349e9bf53877a23f80606 --lengths 131072 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/default/context-131072.json
+2026-10-07T16:06:52.195836+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/default/context-131072.log
+2026-10-07T16:06:52.196636+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model Qwen/Qwen3.8-27B-FP8 --tag 0795425f5fb54ea8afe20e03b54f1c8b --lengths 262144 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/default/context-262144.json
+2026-10-07T16:12:31.248957+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/default/context-262144.log
+2026-10-07T16:12:31.249740+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model Qwen/Qwen3.8-27B-FP8 --tag 47c0b10662c649558b62b62fbcbb7131 --lengths 524288 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/default/context-524288.json
+2026-10-07T16:12:31.667216+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/default/context-524288.log
+2026-10-07T16:12:31.667948+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/default/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/default/server
+2026-10-07T16:12:35.413836+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/default/down.log
+Rendered overview; 18 outstanding measurement groups
+PLAN qwen27b-fp8-w2 plain: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T16:12:36.820778+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/plain/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/plain/server
+2026-10-07T16:12:52.225178+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/plain/up.log
+2026-10-07T16:12:52.226570+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/plain/greedy.json
+2026-10-07T16:17:10.229733+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/plain/greedy.log
+2026-10-07T16:17:10.230519+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/plain/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/plain/server
+2026-10-07T16:17:13.930395+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/plain/down.log
+Rendered overview; 17 outstanding measurement groups
+PLAN qwen27b-fp8-w2 mtp1: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T16:17:15.245905+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/mtp1/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/mtp1/server
+2026-10-07T16:17:30.567377+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/mtp1/up.log
+2026-10-07T16:17:30.568740+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/mtp1/greedy.json
+2026-10-07T16:19:57.487701+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/mtp1/greedy.log
+2026-10-07T16:19:57.488113+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/mtp1/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/mtp1/server
+2026-10-07T16:20:01.222483+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/mtp1/down.log
+Rendered overview; 16 outstanding measurement groups
+PLAN qwen27b-fp8-w2 mtp2: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T16:20:02.590324+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/mtp2/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/mtp2/server
+2026-10-07T16:20:18.058729+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/mtp2/up.log
+2026-10-07T16:20:18.060101+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/mtp2/greedy.json
+2026-10-07T16:22:15.934959+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/mtp2/greedy.log
+2026-10-07T16:22:15.935412+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/mtp2/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/mtp2/server
+2026-10-07T16:22:19.717729+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/mtp2/down.log
+Rendered overview; 15 outstanding measurement groups
+PLAN qwen27b-fp8-w2 mtp3: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T16:22:21.084479+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/mtp3/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/mtp3/server
+2026-10-07T16:22:38.510850+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/mtp3/up.log
+2026-10-07T16:22:38.512150+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/mtp3/greedy.json
+2026-10-07T16:24:25.961859+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/mtp3/greedy.log
+2026-10-07T16:24:25.962584+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/mtp3/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/mtp3/server
+2026-10-07T16:24:29.759533+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/mtp3/down.log
+Rendered overview; 14 outstanding measurement groups
+PLAN qwen27b-fp8-w2 dflash2-fixed: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T16:24:31.129988+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/dflash2-fixed/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/dflash2-fixed/server
+2026-10-07T16:24:52.520531+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/dflash2-fixed/up.log
+2026-10-07T16:24:52.521876+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/dflash2-fixed/greedy.json
+2026-10-07T16:26:15.397057+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/dflash2-fixed/greedy.log
+2026-10-07T16:26:15.397814+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/dflash2-fixed/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w2/refresh/dflash2-fixed/server
+2026-10-07T16:26:19.097979+00:00 EXIT 0 raw/qwen27b-fp8-w2/refresh/dflash2-fixed/down.log
+Rendered overview; 13 outstanding measurement groups
+DISK 192.168.88.11: 714.9 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 902.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 886.4 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 949.7 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 714.9 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 902.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 886.4 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 949.7 GiB free; removed 0 completed session downloads
+PLAN qwen27b-fp8-w4 default: {"jobs": ["greedy", "prefill", "context-0", "context-32768", "context-65536", "context-131072", "context-262144", "context-524288"], "prefill_lengths": [2048, 8192, 32768], "retained_sources": {}}
+2026-10-07T16:26:21.375046+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/default/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/default/server
+2026-10-07T16:26:52.612160+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/default/up.log
+2026-10-07T16:26:52.613399+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,2,4,8 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/default/greedy.json
+2026-10-07T16:32:07.265814+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/default/greedy.log
+2026-10-07T16:32:07.266602+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py 127.0.0.1 18080 2048 8192 32768 --repeat 3 --no-think --seed 7 --tag matrix-11bd245d702f46f6899f5f32c89576db --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/default/prefill.json
+2026-10-07T16:33:06.649276+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/default/prefill.log
+2026-10-07T16:33:06.650116+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model Qwen/Qwen3.8-27B-FP8 --tag a6839a140f3e42feaa40e6508fc798e9 --lengths 0 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/default/context-0.json
+2026-10-07T16:33:14.928760+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/default/context-0.log
+2026-10-07T16:33:14.929446+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model Qwen/Qwen3.8-27B-FP8 --tag a5430bccd1c2479f8f32925449d3dad7 --lengths 32768 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/default/context-32768.json
+2026-10-07T16:33:39.534061+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/default/context-32768.log
+2026-10-07T16:33:39.534878+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model Qwen/Qwen3.8-27B-FP8 --tag e5d4953a6a234c53bd8ed386b37a7d69 --lengths 65536 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/default/context-65536.json
+2026-10-07T16:34:24.256830+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/default/context-65536.log
+2026-10-07T16:34:24.257649+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model Qwen/Qwen3.8-27B-FP8 --tag c7bd4b7da7fc4332a8df9778b0135374 --lengths 131072 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/default/context-131072.json
+2026-10-07T16:35:56.477811+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/default/context-131072.log
+2026-10-07T16:35:56.478266+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model Qwen/Qwen3.8-27B-FP8 --tag fa568968a282488f8d1e22f7c2080f6e --lengths 262144 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/default/context-262144.json
+2026-10-07T16:39:37.464899+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/default/context-262144.log
+2026-10-07T16:39:37.465370+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model Qwen/Qwen3.8-27B-FP8 --tag a65d1d6660274cf5902d7039dfc5ca03 --lengths 524288 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/default/context-524288.json
+2026-10-07T16:39:37.931362+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/default/context-524288.log
+2026-10-07T16:39:37.931779+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/default/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/default/server
+2026-10-07T16:39:45.194807+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/default/down.log
+Rendered overview; 5 outstanding measurement groups
+PLAN qwen27b-fp8-w4 plain: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T16:39:46.605651+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/plain/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/plain/server
+2026-10-07T16:40:05.762507+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/plain/up.log
+2026-10-07T16:40:05.763886+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/plain/greedy.json
+2026-10-07T16:42:24.438677+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/plain/greedy.log
+2026-10-07T16:42:24.439555+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/plain/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/plain/server
+2026-10-07T16:42:31.824938+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/plain/down.log
+Rendered overview; 4 outstanding measurement groups
+PLAN qwen27b-fp8-w4 mtp1: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T16:42:33.224798+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/mtp1/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/mtp1/server
+2026-10-07T16:42:52.177908+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/mtp1/up.log
+2026-10-07T16:42:52.179240+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/mtp1/greedy.json
+2026-10-07T16:44:12.811297+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/mtp1/greedy.log
+2026-10-07T16:44:12.812051+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/mtp1/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/mtp1/server
+2026-10-07T16:44:19.898365+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/mtp1/down.log
+Rendered overview; 3 outstanding measurement groups
+PLAN qwen27b-fp8-w4 mtp2: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T16:44:21.313819+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/mtp2/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/mtp2/server
+2026-10-07T16:44:40.541352+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/mtp2/up.log
+2026-10-07T16:44:40.542807+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/mtp2/greedy.json
+2026-10-07T16:45:47.318324+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/mtp2/greedy.log
+2026-10-07T16:45:47.318809+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/mtp2/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/mtp2/server
+2026-10-07T16:45:54.582586+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/mtp2/down.log
+Rendered overview; 2 outstanding measurement groups
+PLAN qwen27b-fp8-w4 mtp3: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T16:45:55.931969+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/mtp3/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/mtp3/server
+2026-10-07T16:46:14.987424+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/mtp3/up.log
+2026-10-07T16:46:14.988842+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/mtp3/greedy.json
+2026-10-07T16:47:17.551653+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/mtp3/greedy.log
+2026-10-07T16:47:17.552364+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/mtp3/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/mtp3/server
+2026-10-07T16:47:24.592937+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/mtp3/down.log
+Rendered overview; 1 outstanding measurement groups
+PLAN qwen27b-fp8-w4 dflash2-fixed: {"jobs": ["greedy"], "prefill_lengths": [], "retained_sources": {}}
+2026-10-07T16:47:25.997568+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/dflash2-fixed/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/dflash2-fixed/server
+2026-10-07T16:47:51.211798+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/dflash2-fixed/up.log
+2026-10-07T16:47:51.212656+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/dflash2-fixed/greedy.json
+2026-10-07T16:48:44.930982+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/dflash2-fixed/greedy.log
+2026-10-07T16:48:44.931410+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/dflash2-fixed/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/dflash2-fixed/server
+2026-10-07T16:48:52.050220+00:00 EXIT 0 raw/qwen27b-fp8-w4/refresh/dflash2-fixed/down.log
+Rendered overview; 0 outstanding measurement groups
+DISK 192.168.88.11: 714.9 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 902.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 885.9 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 949.2 GiB free; removed 0 completed session downloads

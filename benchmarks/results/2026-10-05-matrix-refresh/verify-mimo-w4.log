@@ -1,0 +1,5 @@
+Verified on rank 0: XiaomiMiMo/MiMo-V2.6-Flash-RL, revision 5711b268169967567844e1e560e8a3966da959b1, 161.1 GiB of indexed weights
+Verified rank 1 (192.168.88.12): revision 5711b268169967567844e1e560e8a3966da959b1
+Verified rank 2 (192.168.88.13): revision 5711b268169967567844e1e560e8a3966da959b1
+Verified rank 3 (192.168.88.14): revision 5711b268169967567844e1e560e8a3966da959b1
+Snapshot validation checks metadata and shard lengths; transfers use rsync content checksums.

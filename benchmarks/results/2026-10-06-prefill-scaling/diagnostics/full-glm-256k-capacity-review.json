@@ -1,0 +1,76 @@
+{
+  "at": "2026-10-06T23:49:14.909778+00:00",
+  "kind": "capacity review; no runtime changes",
+  "old_plan": {
+    "context_tokens": 262144,
+    "dtype": "fp8",
+    "planned_GiB": 112.27,
+    "headroom_GiB": 4,
+    "available_GiB": 116.45,
+    "plan_only_RSS_GiB": 0.25
+  },
+  "live_208k_startup": {
+    "context_tokens": 212992,
+    "planned_GiB": 109.77,
+    "headroom_GiB": 4,
+    "available_GiB": 115.07,
+    "RSS_GiB": 1.32,
+    "before_launch_available_GiB": 116.432,
+    "latest_available_GiB_approx": 2.08
+  },
+  "finding": "--memory-plan returns before grammar tables, fabric bus, and prepare_serving_process; normal startup checks after these. This explains why an isolated plan pass is insufficient to establish 256K full-server capacity. Idle host availability is comparable to the early baseline; no large competing process was found in a read-only process snapshot. The 256K FP8 plan would exceed the observed normal-startup budget by 1.20 GiB with the required headroom.",
+  "pending": "Finish all FP4 measurements and shutdown/rank/memory validation.",
+  "sources": [
+    {
+      "path": "benchmarks/results/2026-10-05-matrix-refresh/memory-plans/glm53-fp8-256k-w4-rank0.log",
+      "sha256": "e1b75fc933d0828081fe4498bb138ae76ad36ae9f85518580ac5377c36c35f9e",
+      "live_snapshot": false
+    },
+    {
+      "path": "benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-fp8kv-w4/refresh/default/server/serve_r0.log",
+      "sha256": "fd076461b68aa3d7d487871c6cdfecc20f7cc1661e5efabb714b0a3fb1319ce0",
+      "live_snapshot": true
+    },
+    {
+      "path": "apps/dgpp_serve.cpp",
+      "sha256": "eeb36735a960b712a89e118a6baae4de1b1a285b14a6a54d3d0f3c78f58000b4",
+      "live_snapshot": false
+    }
+  ],
+  "frozen_evidence": [
+    {
+      "path": "diagnostics/full-glm-256k-capacity/208k-startup-excerpt.log",
+      "sha256": "8b9a51efd1bc6398ec2521a4cb67b05c33f560ab5177d4f13db99319f1ea6f90"
+    },
+    {
+      "path": "diagnostics/full-glm-256k-capacity/256k-plan-only.log",
+      "sha256": "e1b75fc933d0828081fe4498bb138ae76ad36ae9f85518580ac5377c36c35f9e"
+    },
+    {
+      "path": "diagnostics/full-glm-256k-capacity/glm53-fp4kv-256k-w4.candidate.json",
+      "sha256": "45469e74e949c8df986192ae08909e6518121510aa2d9bec46e899038dce29a6"
+    }
+  ],
+  "candidate_configuration": "diagnostics/full-glm-256k-capacity/glm53-fp4kv-256k-w4.candidate.json",
+  "confirmed_normal_startup": {
+    "at": "2026-10-07T00:38:09.478+00:00",
+    "planned_GiB": 112.27,
+    "headroom_GiB": 4,
+    "available_GiB": 115.58,
+    "result": "refused before model allocation on rank 0; no benchmark requests",
+    "archive": "attempts/glm53-fp8kv-256k-w4/default-capacity-refused-20261007T004142904639Z"
+  },
+  "fp4_candidate": {
+    "planned_GiB": 107.95,
+    "headroom_GiB": 4,
+    "plan_only_available_GiB": 116.62,
+    "saved_GiB": 4.32,
+    "active_matrix_id": "glm53-fp4kv-256k-w4",
+    "normal_startup": "passed; HTTP serving, all ranks protected by zero-swap scopes",
+    "normal_startup_available_GiB": 115.61,
+    "evidence": {
+      "path": "diagnostics/full-glm-256k-capacity/fp4-startup-excerpt.log",
+      "sha256": "ce55ac1a31fa3fe9c6c7268ab33eec35e10b88c6ba3771d72b8c596036b68570"
+    }
+  }
+}

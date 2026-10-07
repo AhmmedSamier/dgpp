@@ -1,0 +1,35 @@
+{
+  "at": "2026-10-07T12:14:55.818658+00:00",
+  "scope": "Each rank uses its own warm-capture-complete log marker, avoiding host clock skew. Startup warnings precede measurement. Zero warning lines do not establish zero collective wait time.",
+  "first_measurement": "2026-10-07T10:24:07.564055+00:00",
+  "logs": [
+    {
+      "path": "server/serve_r0.log",
+      "sha256": "449ed754c00b6871803bc4986f1ae9d95a8f09689f0daf2e36c6932ee9c96dca",
+      "warm_capture_complete": "2026-10-07 10:24:05.848 INFO  rank 0: warm capture complete \u2014 6 scalar variants and the row batches for 2 slots, 3 slots, 4 slots, 5 slots, 6 slots and 4 reduced-depth variants per slot recorded before the first request",
+      "startup_stall_warning_lines": 105,
+      "post_warm_capture_stall_warning_lines": 0
+    },
+    {
+      "path": "server/serve_r1.log",
+      "sha256": "9eaa45f8ad329d2c83eb10ed15c77db2e247750c89f7ff8c07c87efb4b245f15",
+      "warm_capture_complete": "2026-10-07 10:25:29.075 INFO  rank 1: warm capture complete \u2014 6 scalar variants and the row batches for 2 slots, 3 slots, 4 slots, 5 slots, 6 slots and 4 reduced-depth variants per slot recorded before the first request",
+      "startup_stall_warning_lines": 11,
+      "post_warm_capture_stall_warning_lines": 0
+    },
+    {
+      "path": "server/serve_r2.log",
+      "sha256": "3f7fae163d61a832e32cfad510f6e7d42877224eb892d84ba7f931cdfcf7eb95",
+      "warm_capture_complete": "2026-10-07 10:24:05.755 INFO  rank 2: warm capture complete \u2014 6 scalar variants and the row batches for 2 slots, 3 slots, 4 slots, 5 slots, 6 slots and 4 reduced-depth variants per slot recorded before the first request",
+      "startup_stall_warning_lines": 0,
+      "post_warm_capture_stall_warning_lines": 0
+    },
+    {
+      "path": "server/serve_r3.log",
+      "sha256": "64af32f524b3b016171fac594cdcacdf2429e6e046b75dfa8ba2a38451e3e0e4",
+      "warm_capture_complete": "2026-10-07 10:23:59.395 INFO  rank 3: warm capture complete \u2014 6 scalar variants and the row batches for 2 slots, 3 slots, 4 slots, 5 slots, 6 slots and 4 reduced-depth variants per slot recorded before the first request",
+      "startup_stall_warning_lines": 20,
+      "post_warm_capture_stall_warning_lines": 0
+    }
+  ]
+}

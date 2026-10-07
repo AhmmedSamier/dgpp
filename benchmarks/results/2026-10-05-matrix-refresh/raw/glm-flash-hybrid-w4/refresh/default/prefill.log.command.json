@@ -1,0 +1,23 @@
+{
+  "command": [
+    "/usr/bin/python3",
+    "/home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py",
+    "127.0.0.1",
+    "18080",
+    "2048",
+    "8192",
+    "32768",
+    "--repeat",
+    "3",
+    "--seed",
+    "7",
+    "--tag",
+    "matrix-ef5cd1374df8409f8ac4601e412341d7",
+    "--json-out",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/refresh/default/prefill.json"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-10-06T10:00:06.640673+00:00",
+  "returncode": 0,
+  "finished_at": "2026-10-06T10:01:40.113183+00:00"
+}

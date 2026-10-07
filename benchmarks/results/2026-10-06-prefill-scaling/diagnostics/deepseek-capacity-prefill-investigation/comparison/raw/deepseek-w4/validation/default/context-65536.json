@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+  "surface": {
+    "id": "deepseek-ai/DeepSeek-V4.1-Flash",
+    "object": "model",
+    "created": 1791354040,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 0,
+        "top_p": 1,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "minimal"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "high"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "max"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text"
+    ],
+    "context": {
+      "request_limit_tokens": 131072,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 131072,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "c90dfa01249db1be4245780a052ede752e1361c612ac6d08e2bdada7d599476b",
+  "seed": 20260922,
+  "tag": "40197fb4dad8407197409947ec398c70",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 65536,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 5170.700000000001,
+        "prefill_ms": 43346.30000000002,
+        "decode_steps": 92,
+        "decode_rows": 92,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 65050,
+        "prompt_tokens_computed": 65050
+      },
+      "engine_tokens_per_s": 49.31634014736882,
+      "ms_per_pass": 56.20326086956523,
+      "tokens_per_pass": 2.7717391304347827,
+      "answer": {
+        "prompt_sha256": "f9aa9defabdb7a94f5fadd07afe6a14b7800bc3f23a6caae0a2d7512a4c909a4",
+        "usage": {
+          "prompt_tokens": 65050,
+          "completion_tokens": 256,
+          "total_tokens": 65306,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user. Need parse request. They provided huge list of parcels items 000000 to 001940? They ask: \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Need produce numbered list for first 200 parcels (Item 000000 through 000199) describing parcel and city. Need likely include parcel ID and city. \"describing the first 200 parcels and their cities.\" We need list 1-200 corresponding to Item 000000-000199. Need ensure all 200. We can extract from data. Need be accurate. We can format numbered list. Need maybe include \"PX-... \u2014 City\". Let's compile first 200 items 000000 to 000199 inclusive. Need city for each. Let's carefully extract.\n\nWe need answer only final. Need ensure no mistakes. Let's parse first 200. I'll create list.\n\nGiven:\nItem 000000: parcel PX-0757343 weighed ... in Income...\n000001 PX-0081436 Jamesport\n000002 PX-0126529 Dunmore\n000003 PX-0226532 Dunmore\n000004 PX-0538039 Belvedere",
+        "wall_ms": 48595.4944731202,
+        "ttft_ms": 43407.5693320483,
+        "last_ms": 48595.34280700609,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 65536,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 4988.5999999999985,
+        "prefill_ms": 186.19999999998254,
+        "decode_steps": 91,
+        "decode_rows": 91,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 65050,
+        "prompt_tokens_computed": 26
+      },
+      "engine_tokens_per_s": 51.11654572425131,
+      "ms_per_pass": 54.819780219780206,
+      "tokens_per_pass": 2.802197802197802,
+      "answer": {
+        "prompt_sha256": "f9aa9defabdb7a94f5fadd07afe6a14b7800bc3f23a6caae0a2d7512a4c909a4",
+        "usage": {
+          "prompt_tokens": 65050,
+          "completion_tokens": 256,
+          "total_tokens": 65306,
+          "prompt_tokens_details": {
+            "cached_tokens": 65024
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user. Need parse request. They provided huge list of parcels items 000000 to 001940? They ask: \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Need produce numbered list for first 200 parcels (Item 000000 through 000199) describing parcel and city. Need likely include parcel ID and city. \"describing the first 200 parcels and their cities.\" We need list 1-200 corresponding to Item 000000-000199. Need ensure all 200. We can extract from data. Need be accurate. We can format numbered list. Need maybe include \"PX-... \u2014 City\". Let's compile first 200 items 000000 to 000199 inclusive. Need city for each. Let's carefully extract.\n\nWe need answer only final. Need ensure no mistakes. Let's parse first 200. I'll create list.\n\nGiven:\nItem 000000: parcel PX-0757343 weighed ... in Income...\n000001 PX-0081436 Jamesport\n000002 PX-0126529 Dunmore\n000003 PX-0226532 Dunmore\n000004 PX-0538039 Belvedere",
+        "wall_ms": 5238.370291888714,
+        "ttft_ms": 223.09851692989469,
+        "last_ms": 5238.228146918118,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 65536,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 5013.9000000000015,
+        "prefill_ms": 183.20000000001164,
+        "decode_steps": 91,
+        "decode_rows": 91,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 65050,
+        "prompt_tokens_computed": 26
+      },
+      "engine_tokens_per_s": 50.85861305570513,
+      "ms_per_pass": 55.09780219780222,
+      "tokens_per_pass": 2.802197802197802,
+      "answer": {
+        "prompt_sha256": "f9aa9defabdb7a94f5fadd07afe6a14b7800bc3f23a6caae0a2d7512a4c909a4",
+        "usage": {
+          "prompt_tokens": 65050,
+          "completion_tokens": 256,
+          "total_tokens": 65306,
+          "prompt_tokens_details": {
+            "cached_tokens": 65024
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user. Need parse request. They provided huge list of parcels items 000000 to 001940? They ask: \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Need produce numbered list for first 200 parcels (Item 000000 through 000199) describing parcel and city. Need likely include parcel ID and city. \"describing the first 200 parcels and their cities.\" We need list 1-200 corresponding to Item 000000-000199. Need ensure all 200. We can extract from data. Need be accurate. We can format numbered list. Need maybe include \"PX-... \u2014 City\". Let's compile first 200 items 000000 to 000199 inclusive. Need city for each. Let's carefully extract.\n\nWe need answer only final. Need ensure no mistakes. Let's parse first 200. I'll create list.\n\nGiven:\nItem 000000: parcel PX-0757343 weighed ... in Income...\n000001 PX-0081436 Jamesport\n000002 PX-0126529 Dunmore\n000003 PX-0226532 Dunmore\n000004 PX-0538039 Belvedere",
+        "wall_ms": 5264.7352130152285,
+        "ttft_ms": 223.35263108834624,
+        "last_ms": 5264.580443035811,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

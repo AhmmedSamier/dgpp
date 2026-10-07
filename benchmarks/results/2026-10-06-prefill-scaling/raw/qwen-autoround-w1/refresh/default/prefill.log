@@ -1,0 +1,13 @@
+[calibrate] 400 words -> 575 prompt tokens (1.363 tok/word)
+[n2048 r0] prompt 2013 tok, computed 2013 in 1294 ms = 0.64 ms/token; ttft 1323 ms
+[n2048 r1] prompt 2002 tok, computed 2002 in 1276 ms = 0.64 ms/token; ttft 1298 ms
+[n2048 r2] prompt 1986 tok, computed 1986 in 1262 ms = 0.64 ms/token; ttft 1294 ms
+[n2048] median: 0.64 ms/token; prefill 1276 ms; wall 1298 ms
+[n8192 r0] prompt 7798 tok, computed 7798 in 4295 ms = 0.55 ms/token; ttft 4332 ms
+[n8192 r1] prompt 7856 tok, computed 7856 in 4356 ms = 0.55 ms/token; ttft 4389 ms
+[n8192 r2] prompt 7998 tok, computed 7998 in 4357 ms = 0.54 ms/token; ttft 4392 ms
+[n8192] median: 0.55 ms/token; prefill 4356 ms; wall 4389 ms
+[n32768 r0] prompt 31407 tok, computed 31407 in 17212 ms = 0.55 ms/token; ttft 17257 ms
+[n32768 r1] prompt 31453 tok, computed 31453 in 17135 ms = 0.54 ms/token; ttft 17195 ms
+[n32768 r2] prompt 31415 tok, computed 31415 in 17159 ms = 0.55 ms/token; ttft 17190 ms
+[n32768] median: 0.55 ms/token; prefill 17159 ms; wall 17195 ms

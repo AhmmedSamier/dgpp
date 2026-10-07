@@ -1,0 +1,66 @@
+{
+  "at": "2026-10-07T06:29:36.333651+00:00",
+  "status": "All validation passed",
+  "expected_regression_failure_before_fix": true,
+  "reference_fixture_note": "Initial four model checks failed only because reference fixtures were absent; full eleven-stage generation/reference/decode chain then passed. Original failure log retained.",
+  "memory_checker": "0 errors, all four capacity/TP oracle scenarios passed with zero selection flips",
+  "source_records": {
+    "candidate.json": "0af7dcd0a043cb6a3faf4098b6f15e92c633452248736dc927aa19a0d7cab254",
+    "candidate.patch": "5032933564d29ce13410dc2e20201aedfd42d065b182bd34bcb7eb2764eefc34",
+    "regression-before.log": "025813afbcafb2b9b2fffc2e971d611f93816dd06f5e7f29caa1625edfbf1da8",
+    "candidate-regression.log": "63dbd4caf2acae73f13bae6e0a8d3666541feedea7645dfea0f1675f01bcd157",
+    "reference-regression.log": "f8b6bde49381d3a66634d9e5e79f39cd847cbc29afa11a3b1a95ea12b8cfbbda",
+    "workspace-memcheck.log": "c84ecd4aa791d85708a7f08280a8d471a336df6b177d3212e67475771a41ef52"
+  },
+  "fix_commit": "07a32fb912a264de1ea52801ffee127d8bc05235",
+  "real_model_validation": {
+    "deepseek-w4": {
+      "identical_samples": 18,
+      "complete": true,
+      "max_process_swap_KiB": 0,
+      "cgroup_policy_passed": true,
+      "max_telemetry_gap_s": 1.085512958932668,
+      "rank_operations_match": true,
+      "collective_stall_log_counts": {
+        "serve_r3.log": 0,
+        "serve_r2.log": 0,
+        "serve_r1.log": 0,
+        "serve_r0.log": 0
+      },
+      "files_sha256": {
+        "deepseek-w4-comparison.json": "911f053165915956b715d7c3b3a0e78e83cca7b2929ce52ffa3ea04ad71184ce",
+        "comparison/raw/deepseek-w4/validation/default/memory-check.json": "be7b33d7aff5aef54fa8f80a0ec216f3e7cc5e2e51833ee4de8109cb0156fedb",
+        "comparison/raw/deepseek-w4/validation/default/rank-identity.json": "3a105f21f75240a65033b419ba61d7957d088157b10f20cd284aecbdc04a8d78",
+        "comparison/raw/deepseek-w4/validation/default/down.log.command.json": "30b8190e7d3a3c8121d657fe700ab4ac73e2813c00a7cc4194787dd03f3cbc72",
+        "comparison/raw/deepseek-w4/validation/default/server/serve_r0.log": "52a317e2006d07882a3d5c456b0f2f753f1dbd452c54099079f0b3090df82736",
+        "comparison/raw/deepseek-w4/validation/default/server/serve_r1.log": "470573d494c8947a3fbb73aa1c2ac39f5326194b8dfd857e90241939d5c07253",
+        "comparison/raw/deepseek-w4/validation/default/server/serve_r2.log": "0ec484daffcd7cbfa2b511a1316b3755bc468aeb7caec7387b3e5107179decde",
+        "comparison/raw/deepseek-w4/validation/default/server/serve_r3.log": "79fe3b07d0cc77abf2a75587b37d8859b4250f22df93365289f0bb72b1292542"
+      }
+    },
+    "deepseek-1m-w4": {
+      "identical_samples": 15,
+      "complete": true,
+      "max_process_swap_KiB": 0,
+      "cgroup_policy_passed": true,
+      "max_telemetry_gap_s": 1.0769268271978945,
+      "rank_operations_match": true,
+      "collective_stall_log_counts": {
+        "serve_r3.log": 0,
+        "serve_r2.log": 0,
+        "serve_r1.log": 0,
+        "serve_r0.log": 0
+      },
+      "files_sha256": {
+        "deepseek-1m-w4-comparison.json": "179f74e55b0f38323df9f15c4c9d1913cf36e8b24c5aee86fd6bf98dccdf7af7",
+        "comparison/raw/deepseek-1m-w4/validation/default/memory-check.json": "edf6360fb3bcecf723016b059e74375ac5fc7f21953e18be3f164feef8af4b24",
+        "comparison/raw/deepseek-1m-w4/validation/default/rank-identity.json": "d11c061ebf6b1f950ab49d17a99ac57459352f471b7c01ada1bfdcff13ae99b0",
+        "comparison/raw/deepseek-1m-w4/validation/default/down.log.command.json": "c8b753760f69ed9082c5220cf89a91b3f6cc1f114d2b50f30a2a7501e88bb40a",
+        "comparison/raw/deepseek-1m-w4/validation/default/server/serve_r0.log": "181ecd35f97dc196ce7fef535109e5b05a8faad3567839175f6d4337e5a9b0d2",
+        "comparison/raw/deepseek-1m-w4/validation/default/server/serve_r1.log": "a198585d008f8e854f568e2bd0c50e87e330fb154259bf53d5bfbc37aa5e1ddc",
+        "comparison/raw/deepseek-1m-w4/validation/default/server/serve_r2.log": "1fe4efb918d069bbe8fae5f62978e6d97279b40a0a4da57ad532d89badd84bf2",
+        "comparison/raw/deepseek-1m-w4/validation/default/server/serve_r3.log": "df275645f9a246996ef1405cd534386b0a85d8b2371e0d9d180f83fce2b624a2"
+      }
+    }
+  }
+}

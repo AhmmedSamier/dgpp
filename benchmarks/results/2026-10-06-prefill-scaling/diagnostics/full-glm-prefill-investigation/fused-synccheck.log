@@ -1,0 +1,7 @@
+========= COMPUTE-SANITIZER
+========= Warning: Detected overflow of tracked cuda::barrier structures. Results might be incorrect. Try using --num-cuda-barriers to fix the issue
+========= 
+[FAIL] dsa_fused_prefill_score_matches_gemm: cuda failure 719: unspecified launch failure | cudaGetLastError() at /home/stephen/workspace/dgpp/src/kernels/dsa.cu:3580
+1 tests, 1 failed
+========= Target application returned an error
+========= ERROR SUMMARY: 1 error

@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+  "surface": {
+    "id": "deepseek-ai/DeepSeek-V4.1-Flash",
+    "object": "model",
+    "created": 1791352846,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 0,
+        "top_p": 1,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "minimal"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "high"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "max"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text"
+    ],
+    "context": {
+      "request_limit_tokens": 1048576,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 1048576,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "c90dfa01249db1be4245780a052ede752e1361c612ac6d08e2bdada7d599476b",
+  "seed": 20260922,
+  "tag": "645c2ac4b43c481a9761dbd25c79df0d",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 4715.29999999993,
+        "prefill_ms": 325.9000000000233,
+        "decode_steps": 92,
+        "decode_rows": 92,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 113,
+        "prompt_tokens_computed": 113
+      },
+      "engine_tokens_per_s": 54.07927385320208,
+      "ms_per_pass": 51.25326086956446,
+      "tokens_per_pass": 2.7717391304347827,
+      "answer": {
+        "prompt_sha256": "baeeb036ee85af9320958a2cfd231cf4c00a1fef36572db121097b5895bf2cb4",
+        "usage": {
+          "prompt_tokens": 113,
+          "completion_tokens": 256,
+          "total_tokens": 369,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user. Need parse. User gives context measurement id, bucket 0. Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nRequest: \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need determine if there is hidden data? Context measurement maybe from benchmark? Need infer? We only have one item. They ask first 200 parcels and their cities. We don't have data for 200 parcels. Need maybe generate? But likely task expects retrieving from some dataset? We as model only see prompt. Need respond that insufficient info. But maybe there is a trick: \"Context measurement 645c2ac4b43c481a9761dbd25c79df0d, bucket 0. Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\" This resembles a generated context with item 000000. They ask list first 200 parcels and cities. We only have item 000000, no city. Maybe need fabricate? We should not fabricate",
+        "wall_ms": 5091.802767943591,
+        "ttft_ms": 353.02937706001103,
+        "last_ms": 5091.647390043363,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 4589.20000000007,
+        "prefill_ms": 319.69999999998254,
+        "decode_steps": 90,
+        "decode_rows": 90,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 113,
+        "prompt_tokens_computed": 113
+      },
+      "engine_tokens_per_s": 55.56524012899767,
+      "ms_per_pass": 50.991111111111884,
+      "tokens_per_pass": 2.8333333333333335,
+      "answer": {
+        "prompt_sha256": "baeeb036ee85af9320958a2cfd231cf4c00a1fef36572db121097b5895bf2cb4",
+        "usage": {
+          "prompt_tokens": 113,
+          "completion_tokens": 256,
+          "total_tokens": 369,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user. Need parse. User gives context measurement id, bucket 0. Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nRequest: \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need determine if there is hidden data? Context measurement maybe from benchmark? Need infer? We only have one item. They ask first 200 parcels and their cities. We don't have data for 200 parcels. Need maybe generate? But likely task expects retrieving from some dataset? We as model only see prompt. Need respond that insufficient info. But maybe there is a trick: \"Context measurement 645c2ac4b43c481a9761dbd25c79df0d, bucket 0. Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\" This resembles a generated context with item 000000. They ask list first 200 parcels and cities. We only have item 000000, no city. Maybe need fabricate? We should not fabricate",
+        "wall_ms": 4959.4203280285,
+        "ttft_ms": 327.9371850658208,
+        "last_ms": 4959.250790067017,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 4532.0,
+        "prefill_ms": 321.0,
+        "decode_steps": 90,
+        "decode_rows": 90,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 113,
+        "prompt_tokens_computed": 113
+      },
+      "engine_tokens_per_s": 56.26654898499559,
+      "ms_per_pass": 50.355555555555554,
+      "tokens_per_pass": 2.8333333333333335,
+      "answer": {
+        "prompt_sha256": "baeeb036ee85af9320958a2cfd231cf4c00a1fef36572db121097b5895bf2cb4",
+        "usage": {
+          "prompt_tokens": 113,
+          "completion_tokens": 256,
+          "total_tokens": 369,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user. Need parse. User gives context measurement id, bucket 0. Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nRequest: \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need determine if there is hidden data? Context measurement maybe from benchmark? Need infer? We only have one item. They ask first 200 parcels and their cities. We don't have data for 200 parcels. Need maybe generate? But likely task expects retrieving from some dataset? We as model only see prompt. Need respond that insufficient info. But maybe there is a trick: \"Context measurement 645c2ac4b43c481a9761dbd25c79df0d, bucket 0. Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\" This resembles a generated context with item 000000. They ask list first 200 parcels and cities. We only have item 000000, no city. Maybe need fabricate? We should not fabricate",
+        "wall_ms": 4889.106664108112,
+        "ttft_ms": 327.7435021009296,
+        "last_ms": 4888.965974096209,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

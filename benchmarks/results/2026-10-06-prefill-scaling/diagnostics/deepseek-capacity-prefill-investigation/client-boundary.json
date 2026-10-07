@@ -1,0 +1,14 @@
+{
+  "at": "2026-10-07T06:04:04.008110+00:00",
+  "controller_pid": 3178522,
+  "controller_start_ticks": "149835672",
+  "client_pid": 3439282,
+  "client_start_ticks": "150650891",
+  "controller_command": "python3 benchmarks/results/2026-10-06-prefill-scaling/run.py ",
+  "client_command": "/home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model deepseek-ai/DeepSeek-V4.1-Flash --tag 2abeac6314b143e392f2f7c44ce32e4d --lengths 65536 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-1m-w4/refresh/default/context-65536.json ",
+  "reason": "User requested immediate investigation of DeepSeek KV-capacity-dependent prefill cost; stop controller until current context client finishes.",
+  "client_finished_at": "2026-10-07T06:04:59.447786+00:00",
+  "client_wait_status": 0,
+  "samples": 3,
+  "action": "Send SIGINT to controller, then SIGCONT; runner finally block stops ranks and checks memory/rank identity."
+}

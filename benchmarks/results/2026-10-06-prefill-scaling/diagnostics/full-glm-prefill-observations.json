@@ -1,0 +1,103 @@
+{
+  "at": "2026-10-07T01:35:27.430670+00:00",
+  "interpretation": "Cross-configuration diagnostic observations, not a controlled KV-format-only experiment. Pool capacity and BF16 prefix budget differ. FP4 default was deliberately interrupted at256K for profiling and failed rank identity after interruption; none of that launch is eligible for published tables. FP4 slowdown cause is not established.",
+  "configurations": [
+    {
+      "deployment": "glm53-w4",
+      "kv_dtype": "bf16",
+      "kv_capacity": 122880,
+      "validation": "validated",
+      "context": [
+        {
+          "bucket_tokens": 32768,
+          "actual_prompt_tokens": 32237,
+          "cold_prefill_s": 87.98539999999997,
+          "median_decode_ms_per_pass": 77.33461538461539,
+          "median_engine_tok_s": 25.36430098970508,
+          "source": "raw/glm53-w4/refresh/default/context-32768.json",
+          "sha256": "95bd1c0f396866b5c3180af36339ff877b4d2ec07cd620db198f3af383f7cc4c"
+        },
+        {
+          "bucket_tokens": 65536,
+          "actual_prompt_tokens": 65010,
+          "cold_prefill_s": 223.2848,
+          "median_decode_ms_per_pass": 82.61562500000036,
+          "median_engine_tok_s": 24.113931232741884,
+          "source": "raw/glm53-w4/refresh/default/context-65536.json",
+          "sha256": "448d8a65ed8d30e65931445629264621670613a9fa5bfddba197d4d2bc51c6a1"
+        }
+      ]
+    },
+    {
+      "deployment": "glm53-fp8kv-w4",
+      "kv_dtype": "fp8",
+      "kv_capacity": 212992,
+      "validation": "validated",
+      "context": [
+        {
+          "bucket_tokens": 32768,
+          "actual_prompt_tokens": 32237,
+          "cold_prefill_s": 90.95590000000003,
+          "median_decode_ms_per_pass": 76.21846153846262,
+          "median_engine_tok_s": 25.735739372653143,
+          "source": "raw/glm53-fp8kv-w4/refresh/default/context-32768.json",
+          "sha256": "d47bba3be6579037f453d604332d5f7b07b018029e6189e3e07c0291fcb87636"
+        },
+        {
+          "bucket_tokens": 65536,
+          "actual_prompt_tokens": 65008,
+          "cold_prefill_s": 230.70260000000005,
+          "median_decode_ms_per_pass": 81.04076923076958,
+          "median_engine_tok_s": 24.20434159444903,
+          "source": "raw/glm53-fp8kv-w4/refresh/default/context-65536.json",
+          "sha256": "760b4b368df68a8c2d0928d833268457683b388536d09c20c6f9c563e9096a1b"
+        },
+        {
+          "bucket_tokens": 131072,
+          "actual_prompt_tokens": 130540,
+          "cold_prefill_s": 664.8288,
+          "median_decode_ms_per_pass": 89.95736434108527,
+          "median_engine_tok_s": 21.974234133310354,
+          "source": "raw/glm53-fp8kv-w4/refresh/default/context-131072.json",
+          "sha256": "ce8b116b42d64b25838054d5531003e364d26cb0f5a54dae5651c88f29e03d36"
+        }
+      ]
+    },
+    {
+      "deployment": "glm53-fp4kv-256k-w4",
+      "kv_dtype": "fp4",
+      "kv_capacity": 262144,
+      "validation": "excluded incomplete launch: interrupted for profiling; rank identity differs",
+      "context": [
+        {
+          "bucket_tokens": 32768,
+          "actual_prompt_tokens": 32237,
+          "cold_prefill_s": 124.91989999999997,
+          "median_decode_ms_per_pass": 78.70852713178402,
+          "median_engine_tok_s": 25.114739890085733,
+          "source": "attempts/glm53-fp4kv-256k-w4/default-interrupted-for-full-model-profile-20261007T020000Z/context-32768.json",
+          "sha256": "67bb565ada86c3fe9df0c7f7571a615c6220c4423aea1bdb4d742b511ea7dfb9"
+        },
+        {
+          "bucket_tokens": 65536,
+          "actual_prompt_tokens": 65013,
+          "cold_prefill_s": 296.2111,
+          "median_decode_ms_per_pass": 83.57829457364232,
+          "median_engine_tok_s": 23.65140609928056,
+          "source": "attempts/glm53-fp4kv-256k-w4/default-interrupted-for-full-model-profile-20261007T020000Z/context-65536.json",
+          "sha256": "d0431365dbd5d0b808c38816434f1cf00cf120ac85473410d0870c523fa21358"
+        },
+        {
+          "bucket_tokens": 131072,
+          "actual_prompt_tokens": 130539,
+          "cold_prefill_s": 779.1115,
+          "median_decode_ms_per_pass": 93.3697674418601,
+          "median_engine_tok_s": 21.171137512765032,
+          "source": "attempts/glm53-fp4kv-256k-w4/default-interrupted-for-full-model-profile-20261007T020000Z/context-131072.json",
+          "sha256": "88b33f895a6adce90ea8aaa7034b10fe117a7fd6129de2617945523279880718"
+        }
+      ]
+    }
+  ],
+  "static_dispatch": "src/kernels/dsa.cu launch_attn_flash supports BF16/FP8/FP4 with the same geometry gates; FP4 does not trigger a format-specific fallback."
+}

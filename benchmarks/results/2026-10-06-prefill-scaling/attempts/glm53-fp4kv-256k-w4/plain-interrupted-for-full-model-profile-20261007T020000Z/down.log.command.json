@@ -1,0 +1,15 @@
+{
+  "command": [
+    "/usr/bin/python3",
+    "/home/stephen/workspace/dgpp/scripts/dgpp-cluster",
+    "down",
+    "--config",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-fp4kv-256k-w4/refresh/plain/config.json",
+    "--log-dir",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-fp4kv-256k-w4/refresh/plain/server"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-10-07T02:02:42.713691+00:00",
+  "returncode": 0,
+  "finished_at": "2026-10-07T02:02:49.983046+00:00"
+}

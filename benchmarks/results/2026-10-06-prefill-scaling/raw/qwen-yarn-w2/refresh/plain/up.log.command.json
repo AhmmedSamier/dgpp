@@ -1,0 +1,17 @@
+{
+  "command": [
+    "/usr/bin/python3",
+    "/home/stephen/workspace/dgpp/scripts/dgpp-cluster",
+    "up",
+    "--config",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen-yarn-w2/refresh/plain/config.json",
+    "--bin",
+    "/home/stephen/workspace/dgpp/build-release/dgpp-serve",
+    "--log-dir",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen-yarn-w2/refresh/plain/server"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-10-06T19:58:17.888366+00:00",
+  "returncode": 0,
+  "finished_at": "2026-10-06T19:58:44.288582+00:00"
+}

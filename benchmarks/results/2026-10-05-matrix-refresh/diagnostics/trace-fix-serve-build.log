@@ -1,0 +1,41 @@
+[  2%] Built target dgpp_rope_scaling
+[  2%] Built target dgpp_device_ranges
+[  4%] Built target dgpp_core
+[ 16%] Built target pcre2-8-static
+[ 16%] stamping dgpp_version.hpp
+[ 16%] Built target dgpp_net
+[ 18%] Built target dgpp_loaders
+[ 23%] Built target dgpp_text
+[ 44%] Built target dgpp_kernels
+[ 48%] Built target dgpp_bus
+[ 48%] Built target dgpp_version
+[ 48%] Built target dgpp_models_glm_dsa
+[ 48%] Built target dgpp_models_glm4
+[ 51%] Built target dgpp_models_mimo
+[ 51%] Built target dgpp_models_dsv41
+[ 55%] Built target dgpp_models_dsv4
+[ 55%] Built target dgpp_models_csa2
+[ 55%] Built target dgpp_models_kda
+[ 60%] Built target dgpp_models_qwen
+[ 60%] Built target dgpp_sched
+[ 62%] Built target dgpp_models_dsa
+[ 65%] Built target dgpp_models_glm4_loader
+[ 65%] Built target dgpp_models_mimo_loader
+[ 67%] Built target dgpp_models_glm_dsa_loader
+[ 67%] Built target dgpp_models_dsv41_loader
+[ 69%] Built target dgpp_models_dsv4_loader
+[ 72%] Built target dgpp_models_glm
+[ 74%] Built target dgpp_models_dsv4_attn
+[ 76%] Built target dgpp_models_qwen_loader
+[ 79%] Built target dgpp_models_moe
+[ 86%] Built target dgpp_serve
+[ 86%] Built target dgpp_models_glm_dsa_layers
+[ 88%] Built target dgpp_models_mimo_layers
+[ 90%] Built target dgpp_models_glm4_layers
+[ 93%] Built target dgpp_models_dsv41_layers
+[ 93%] Built target dgpp_models_dsv4_layers
+[ 95%] Built target dgpp_models_qwen_layers
+[100%] Built target dgpp_models_glm_loader
+[100%] Building CXX object CMakeFiles/dgpp_serve_app.dir/apps/dgpp_serve.cpp.o
+[100%] Linking CXX executable dgpp-serve
+[100%] Built target dgpp_serve_app

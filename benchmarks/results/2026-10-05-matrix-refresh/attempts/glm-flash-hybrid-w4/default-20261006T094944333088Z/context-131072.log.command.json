@@ -1,0 +1,20 @@
+{
+  "command": [
+    "/home/stephen/workspace/dgpp/.venv/bin/python",
+    "/home/stephen/workspace/dgpp/scripts/serve_context_matrix.py",
+    "127.0.0.1",
+    "18080",
+    "--model",
+    "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+    "--tag",
+    "349b3613aa1141f7821fa2662aa32043",
+    "--lengths",
+    "131072",
+    "--json-out",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/refresh/default/context-131072.json"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-10-06T05:49:19.005293+00:00",
+  "returncode": 0,
+  "finished_at": "2026-10-06T05:54:17.436823+00:00"
+}

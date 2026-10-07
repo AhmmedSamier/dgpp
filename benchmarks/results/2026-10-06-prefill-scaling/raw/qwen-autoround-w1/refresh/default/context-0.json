@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "model": "Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN",
+  "surface": {
+    "id": "Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN",
+    "object": "model",
+    "created": 1791324847,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": 262144,
+      "kv_pool_tokens": 262144,
+      "limited_by": "position-ceiling"
+    }
+  },
+  "tokenizer_sha256": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+  "seed": 20260922,
+  "tag": "46015ca8c546477a84209d56d9d35345",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 4618.699999999953,
+        "prefill_ms": 300.8000000000029,
+        "decode_steps": 84,
+        "decode_rows": 84,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 161,
+        "prompt_tokens_computed": 161
+      },
+      "engine_tokens_per_s": 55.210340572022986,
+      "ms_per_pass": 54.98452380952325,
+      "tokens_per_pass": 3.0357142857142856,
+      "answer": {
+        "prompt_sha256": "56aa6bdd2f84c866f023233c99b8305f4add114fe4228b1d2d204df7f1c319fa",
+        "usage": {
+          "prompt_tokens": 161,
+          "completion_tokens": 256,
+          "total_tokens": 417,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need parse. User: \"Context measurement 46015ca8c546477a84209d56d9d35345, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need respond. Need likely generate 200 numbered list describing first 200 parcels and their cities. But only one item provided. Need infer? Maybe this is some benchmark requiring hallucination? Need maybe say insufficient data? But user asks write list first 200 parcels and cities. We only have item 000000. Could generate synthetic? Need be careful. Maybe context measurement indicates hidden data? We don't have access. Need maybe produce 200 entries based on given? Could be impossible. Need satisfy? The instruction says continue until listed all 200. We need output 200",
+        "wall_ms": 4939.556529046968,
+        "ttft_ms": 327.92763714678586,
+        "last_ms": 4939.434800064191,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 4609.900000000023,
+        "prefill_ms": 295.5,
+        "decode_steps": 84,
+        "decode_rows": 84,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 161,
+        "prompt_tokens_computed": 161
+      },
+      "engine_tokens_per_s": 55.315733530011215,
+      "ms_per_pass": 54.879761904762184,
+      "tokens_per_pass": 3.0357142857142856,
+      "answer": {
+        "prompt_sha256": "56aa6bdd2f84c866f023233c99b8305f4add114fe4228b1d2d204df7f1c319fa",
+        "usage": {
+          "prompt_tokens": 161,
+          "completion_tokens": 256,
+          "total_tokens": 417,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need parse. User: \"Context measurement 46015ca8c546477a84209d56d9d35345, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need respond. Need likely generate 200 numbered list describing first 200 parcels and their cities. But only one item provided. Need infer? Maybe this is some benchmark requiring hallucination? Need maybe say insufficient data? But user asks write list first 200 parcels and cities. We only have item 000000. Could generate synthetic? Need be careful. Maybe context measurement indicates hidden data? We don't have access. Need maybe produce 200 entries based on given? Could be impossible. Need satisfy? The instruction says continue until listed all 200. We need output 200",
+        "wall_ms": 4940.68250595592,
+        "ttft_ms": 328.02378199994564,
+        "last_ms": 4915.097926976159,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 4601.900000000023,
+        "prefill_ms": 295.1000000000058,
+        "decode_steps": 84,
+        "decode_rows": 84,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 161,
+        "prompt_tokens_computed": 161
+      },
+      "engine_tokens_per_s": 55.41189508681169,
+      "ms_per_pass": 54.78452380952409,
+      "tokens_per_pass": 3.0357142857142856,
+      "answer": {
+        "prompt_sha256": "56aa6bdd2f84c866f023233c99b8305f4add114fe4228b1d2d204df7f1c319fa",
+        "usage": {
+          "prompt_tokens": 161,
+          "completion_tokens": 256,
+          "total_tokens": 417,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need parse. User: \"Context measurement 46015ca8c546477a84209d56d9d35345, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need respond. Need likely generate 200 numbered list describing first 200 parcels and their cities. But only one item provided. Need infer? Maybe this is some benchmark requiring hallucination? Need maybe say insufficient data? But user asks write list first 200 parcels and cities. We only have item 000000. Could generate synthetic? Need be careful. Maybe context measurement indicates hidden data? We don't have access. Need maybe produce 200 entries based on given? Could be impossible. Need satisfy? The instruction says continue until listed all 200. We need output 200",
+        "wall_ms": 4939.570554066449,
+        "ttft_ms": 328.01030902191997,
+        "last_ms": 4914.354603039101,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

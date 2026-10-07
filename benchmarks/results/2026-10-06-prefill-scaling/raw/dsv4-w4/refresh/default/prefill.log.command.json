@@ -1,0 +1,24 @@
+{
+  "command": [
+    "/usr/bin/python3",
+    "/home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py",
+    "127.0.0.1",
+    "18080",
+    "2048",
+    "8192",
+    "32768",
+    "--repeat",
+    "3",
+    "--no-think",
+    "--seed",
+    "7",
+    "--tag",
+    "matrix-57cdfe48894342789f68cf42798bf019",
+    "--json-out",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w4/refresh/default/prefill.json"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-10-07T10:31:59.065713+00:00",
+  "returncode": 0,
+  "finished_at": "2026-10-07T10:33:41.611306+00:00"
+}

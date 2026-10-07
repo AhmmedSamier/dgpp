@@ -1,0 +1,50 @@
+{
+  "passed": false,
+  "ranks": [
+    {
+      "rank": 0,
+      "samples": 14245,
+      "max_swap_KiB": 41156,
+      "max_sample_gap_s": 1.0851745430845767,
+      "violations": [
+        {
+          "at": "2026-10-06T09:33:52.236982+00:00",
+          "kind": "violation",
+          "reason": "dgpp used swap",
+          "pid": 442843,
+          "VmRSS_KiB": 4095496,
+          "VmData_KiB": 1264288,
+          "VmSwap_KiB": 41156,
+          "RssAnon_KiB": 1145852,
+          "RssFile_KiB": 707336,
+          "RssShmem_KiB": 2242308
+        }
+      ],
+      "errors": []
+    },
+    {
+      "rank": 1,
+      "samples": 14242,
+      "max_swap_KiB": 0,
+      "max_sample_gap_s": 1.0655629858374596,
+      "violations": [],
+      "errors": []
+    },
+    {
+      "rank": 2,
+      "samples": 14252,
+      "max_swap_KiB": 0,
+      "max_sample_gap_s": 1.0581824760884047,
+      "violations": [],
+      "errors": []
+    },
+    {
+      "rank": 3,
+      "samples": 14238,
+      "max_swap_KiB": 0,
+      "max_sample_gap_s": 1.0684539801441133,
+      "violations": [],
+      "errors": []
+    }
+  ]
+}

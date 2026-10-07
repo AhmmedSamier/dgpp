@@ -1,0 +1,175 @@
+{
+  "created_at": "2026-10-07T06:29:36.470693+00:00",
+  "source_binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+  "modes": {
+    "glm53-w4/default": {
+      "directory": "raw/glm53-w4/refresh/default",
+      "jobs": {
+        "prefill": {
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        },
+        "context-32768": {},
+        "context-65536": {}
+      },
+      "target_config": {
+        "path": "configs/glm53-w4.json",
+        "sha256": "9ec797af48d0a607e925cc6923556554a2e6440ce00a5b66ec4e2ab8ba899b3b"
+      },
+      "files_sha256": {
+        "config.json": "9ec797af48d0a607e925cc6923556554a2e6440ce00a5b66ec4e2ab8ba899b3b",
+        "context-32768.json": "a518e12d971a3eccfd8c9f42f35b7aa8bfa72f2171a03e402e3b652e02d85171",
+        "context-32768.log.command.json": "a1ba6de95cfdb284c4d59e159c7c83485bc9b8dfeb53fc3c191d0a96073aa588",
+        "context-65536.json": "34c30a4d08f0c4b87908a440a87870040f4ba1a95cd4dba7c6204c38bc5d5a22",
+        "context-65536.log.command.json": "15cd81dbc72a2f76cfa1cf235896916987371cae98d2eff3eea28637fb0cd807",
+        "down.log.command.json": "4631adc8a13f6bb7249e7704be9020f59c2f6884a4bfa2429bea26f636a9db74",
+        "manifest.json": "52547520144830c0348a917e1df826590054a045e3384c9bbc78ed8479174716",
+        "memory-check.json": "21ea5f3dc159f1c745f15db384124b3eca314f99b3dcab43418c4af26f95831b",
+        "prefill.json": "1369f23aefe4c32483c64a8e2c753a0015d28e4587d7f7132ac478cecb0b4ec4",
+        "prefill.log.command.json": "45766bf5f740a84618ff232ca8d9951d11539436cfab582f3c9d4d490cd33987",
+        "rank-identity.json": "7141442219c16c55ed60996ed5f5bae315bbee013af2f04f43fa21b6c1383932"
+      }
+    },
+    "glm53-fp8kv-w4/default": {
+      "directory": "raw/glm53-fp8kv-w4/refresh/default",
+      "jobs": {
+        "prefill": {
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        },
+        "context-32768": {},
+        "context-65536": {},
+        "context-131072": {}
+      },
+      "target_config": {
+        "path": "configs/glm53-fp8kv-w4.json",
+        "sha256": "ac1093e5bb80a63f043f3d21c1bfe54df3faddd95cc34586052bfb1267ebba84"
+      },
+      "files_sha256": {
+        "config.json": "ac1093e5bb80a63f043f3d21c1bfe54df3faddd95cc34586052bfb1267ebba84",
+        "context-131072.json": "922e27f561d80a2644e13837279e432dffc703169d6a42f65e5b268d74bf40e8",
+        "context-131072.log.command.json": "5969719458f2460bc93075a87354c71e348772ae2f705e54bc74137560bf1d3d",
+        "context-32768.json": "6318a9176967d7387179ccd85d87162337fe1e941871e6c3289753efe207bc69",
+        "context-32768.log.command.json": "78bde22a7b21ef5aa8cec0962de856945ef3bd683ca0b2cd4a8680619ac8e289",
+        "context-65536.json": "77b454a7efb88358725e452c8f4e56dc8fcb2c83453b2fbc1896c1798fe77e3e",
+        "context-65536.log.command.json": "8297f2fd6ad864a6c88bd637783fb29939ad79eca774c1f965d9c2269ce0b546",
+        "down.log.command.json": "7dde38c9c31c38644703bc0c51c365e310c5372644c864ccd65d7e1e62a36edd",
+        "manifest.json": "fa655e3f750d9e6fe943927509ee6614ff5bb071493c1b9083486e61ba3e72c1",
+        "memory-check.json": "1fae124229329749681ac91918e5f08e99db4100e99634cccf1a42fb160f8dd6",
+        "prefill.json": "2a53f49fcc290c1ec68cd663c581a565fbe95a6063aa4ee401c791292ea19ec9",
+        "prefill.log.command.json": "52ca27ce7d94beaca9b1737b3e668749f2abe50d13db85dc8f83bc6a7e02f387",
+        "rank-identity.json": "d66df9fc75c356ca70080c9068e60f36ffd1e4d16ecd584668e14f305a19b141"
+      }
+    },
+    "glm53-fp4kv-256k-w4/default": {
+      "directory": "raw/glm53-fp4kv-256k-w4/refresh/default",
+      "jobs": {
+        "greedy": {},
+        "prefill": {
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        },
+        "context-0": {},
+        "context-32768": {},
+        "context-65536": {},
+        "context-131072": {},
+        "context-262144": {},
+        "context-524288": {}
+      },
+      "target_config": {
+        "path": "configs/glm53-fp4kv-256k-w4.json",
+        "sha256": "45469e74e949c8df986192ae08909e6518121510aa2d9bec46e899038dce29a6"
+      },
+      "files_sha256": {
+        "config.json": "45469e74e949c8df986192ae08909e6518121510aa2d9bec46e899038dce29a6",
+        "context-0.json": "d95a02b9cde3b41c0d7d022f00b2f2a543801eb7ab8f5fba74706ff75d1b95b1",
+        "context-0.log.command.json": "2375c851bf7ffee42d557301b9d0e7d75867e017cea9c1afa1eef83f5f13339c",
+        "context-131072.json": "1a6d7b8b588a0a7ce48887aa5edb3c7db59e07b4e41e987922a4740506dbfff5",
+        "context-131072.log.command.json": "9384e4a95b0299a48a6f05debf4e008b5791268eaad72f9d7069dad435223adc",
+        "context-262144.json": "66670fe95e767479ff7bf6a9f742917bc687db62a540051742fad7a0f9514469",
+        "context-262144.log.command.json": "13b13f02e105f7f6a9b567eee50f0d59eec8311fe197fc7026e4f15ccba510e7",
+        "context-32768.json": "0ba58177c5d480d65f98befa46d2978b280be7048caa6f5b4f3259828f148661",
+        "context-32768.log.command.json": "b8507c8aa8dd6b8bc201357805f8f1b61b8ad3fef9712be2fecabe557f6d023d",
+        "context-524288.json": "50661e1614ccb6e3776993aa7d9d421241e9ad105deca7c3c26490650f7b629d",
+        "context-524288.log.command.json": "dad5870caba28a674e3703d2da6a4c2daf34f5880eb1007a9fbd67c4b2e28f08",
+        "context-65536.json": "9d0e77ad59327003a905e258cc3799ebb29304ec6bcffa12465ef59846bdcd04",
+        "context-65536.log.command.json": "a3750b128129c20c26a247d598ed76b6ba508442d6fddf2c70d0ece8e60e7612",
+        "down.log.command.json": "eb3cf24a1251be65a0692f75885b313f4a978fc5610369c0755bd6ae63565fae",
+        "greedy.json": "12f22c9fa2c02b511a3aeff8ed68e42d00d11a709968580fc0971f6564166036",
+        "greedy.log.command.json": "676cd330d2ee059cbf2530a446505c0a87dee78f80bc0febec632824fd6ddfa7",
+        "manifest.json": "b528c9277322e3243f6130c7e8f570de2b8395b5d26c84964c4c782b0151a067",
+        "memory-check.json": "84ac0c1b3d2532c8db0212ea8edee841238fdbd1ab4a44f4a335a2c82b0bc81a",
+        "prefill.json": "f740fc6767c00d3e78f2c689e8a8639f8a66f54dee251b4dac2573f6fd1ebaf3",
+        "prefill.log.command.json": "489d978962a716cf7784434461edde29064066f9fed69db297b99aefe06d778c",
+        "rank-identity.json": "381c8cfd6cb1839ede16738671f9e742ec42c8c0061ac56e23207661c7b618f8"
+      }
+    },
+    "glm53-fp4kv-256k-w4/plain": {
+      "directory": "raw/glm53-fp4kv-256k-w4/refresh/plain",
+      "jobs": {
+        "greedy": {}
+      },
+      "target_config": {
+        "path": "configs/glm53-fp4kv-256k-w4.json",
+        "sha256": "45469e74e949c8df986192ae08909e6518121510aa2d9bec46e899038dce29a6"
+      },
+      "files_sha256": {
+        "config.json": "4afd6d650ee08fe2f6e17d95f3a7626e6da93e2406f80e02bf918aafc496d6dd",
+        "down.log.command.json": "a6db7909e9498af33e600de9240085dd4c8e2717c93854fdaf05b5b247a875f8",
+        "greedy.json": "44578d3e6add7136b3a49eb71100a818b5e3c695f2436d7e4de41fd357b3c991",
+        "greedy.log.command.json": "bf6b4b5a9cc6a5b9662d0e73c14e640be41a1243b5cd1711c90e322f717d8869",
+        "manifest.json": "b528c9277322e3243f6130c7e8f570de2b8395b5d26c84964c4c782b0151a067",
+        "memory-check.json": "3239e578537b280c253d0058740d8b4cda8bac031e62fdfd07246853f84d30d7",
+        "rank-identity.json": "f8065953bb3566e2c5492264893a5f0012004ecdc23f9941fa2a00dd2d27eead"
+      }
+    },
+    "glm53-fp4kv-256k-w4/mtp2": {
+      "directory": "raw/glm53-fp4kv-256k-w4/refresh/mtp2",
+      "jobs": {
+        "greedy": {}
+      },
+      "target_config": {
+        "path": "configs/glm53-fp4kv-256k-w4.json",
+        "sha256": "45469e74e949c8df986192ae08909e6518121510aa2d9bec46e899038dce29a6"
+      },
+      "files_sha256": {
+        "config.json": "8469c20ea6787c71d5b149f19a6ca5cf31eacaf1cfd3e25f38ea35ccf8e2ecb2",
+        "down.log.command.json": "ee16db0f5300110880a2f8d1c09c480c59d6cfe4e273d56fe16985a9c30eb177",
+        "greedy.json": "5cebc5a5fe38ff328eb57f25124b18ee0989937ba4b8f27922a4ea65f56b0f8e",
+        "greedy.log.command.json": "853c6c48a3579f07059082d406396b4dd528e6ce244bb96686fa81772c60a554",
+        "manifest.json": "b528c9277322e3243f6130c7e8f570de2b8395b5d26c84964c4c782b0151a067",
+        "memory-check.json": "81f183360fccc5b768da4c7b444c37ebf01ac509a3b13b326c7b9ad6433bf9bc",
+        "rank-identity.json": "05d81abe723782e06522c9908dbcf7c8a70fc144532d73b3803e0d8f93118563"
+      }
+    },
+    "glm53-fp4kv-256k-w4/mtp3": {
+      "directory": "raw/glm53-fp4kv-256k-w4/refresh/mtp3",
+      "jobs": {
+        "greedy": {}
+      },
+      "target_config": {
+        "path": "configs/glm53-fp4kv-256k-w4.json",
+        "sha256": "45469e74e949c8df986192ae08909e6518121510aa2d9bec46e899038dce29a6"
+      },
+      "files_sha256": {
+        "config.json": "8ba76cfea363e8059f0d9bd0fb832640a0080228d19c781dd7435c4332c7584f",
+        "down.log.command.json": "bdef0d2a578ea989c037498b2f5dfd78d8716abaabcd0a12b26082bf8c3f3b11",
+        "greedy.json": "37ee7c9748538b48ab5a47817c67823a1748c9aa84fe131bfc05471c0a1846e0",
+        "greedy.log.command.json": "1bb8eedfecb0b6c158b2656660b4a71e8045fdeb993f816cc474f9a8b6137996",
+        "manifest.json": "b528c9277322e3243f6130c7e8f570de2b8395b5d26c84964c4c782b0151a067",
+        "memory-check.json": "f4d0842ca04696646bc4f6b1fee730b84a6e4f88592baa533790a0e6ffbcd555",
+        "rank-identity.json": "330d8fee08fb69b5288aa8c7251912ba1d4168f6c1ac4e869ea4bbf37b9b190d"
+      }
+    }
+  },
+  "reason": "The change is confined to Csa2Layer prefill, instantiated only by DeepSeek-V4.1. All earlier DeepSeek-V4.1 serving, prefill, context and mode measurements are rerun. Other families retain their validated measurements and unchanged configurations."
+}

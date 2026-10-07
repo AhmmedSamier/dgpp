@@ -1,0 +1,47 @@
+{
+  "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+  "release": "",
+  "engine": {
+    "max_concurrency": 4,
+    "kv_capacity": 131072,
+    "kv_dtype": "bf16",
+    "bf16_weights": "bf12",
+    "default_max_tokens": 32768,
+    "queue_limit": 8,
+    "max_connections": 64,
+    "decode_graph": true,
+    "mtp": true,
+    "mtp_depth": 2,
+    "prefix_cache_gib": 1.5,
+    "admission": "full",
+    "admission_window": 256,
+    "sampling_candidates": 128,
+    "stats_interval_s": 10,
+    "dflash_model": "",
+    "mtp_schedule": false
+  },
+  "paths": {
+    "resident_cache": "~/.cache/dgpp/matrix-2026-10-05/XiaomiMiMo--MiMo-V2.6-Flash-RL",
+    "log_dir": "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2/refresh/mtp2/server",
+    "stage_dir": "/tmp/bus4/deployments/7fb155a3eba86a5f",
+    "release_dir": "~/dgpp/releases"
+  },
+  "http": {
+    "bind_host": "127.0.0.1",
+    "port": 18080
+  },
+  "nodes": [
+    "192.168.88.11",
+    "192.168.88.12"
+  ],
+  "ssh_user": "stephen",
+  "ports": {
+    "http": 18080,
+    "fabric": 29970,
+    "journal": 29971
+  },
+  "node_env": [
+    {},
+    {}
+  ]
+}

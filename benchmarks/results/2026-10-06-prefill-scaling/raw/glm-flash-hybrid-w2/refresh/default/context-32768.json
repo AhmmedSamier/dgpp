@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+  "surface": {
+    "id": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+    "object": "model",
+    "created": 1791303760,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "minimal": {
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "reasoning_effort": "high"
+        },
+        "high": {
+          "reasoning_effort": "high"
+        },
+        "xhigh": {
+          "reasoning_effort": "max"
+        },
+        "max": {
+          "reasoning_effort": "max"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "context": {
+      "request_limit_tokens": 163840,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 163840,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
+  "seed": 20260922,
+  "tag": "bbef9c4d7ebf43ef93ea32c9f3bfb691",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 32768,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 7375.8,
+        "prefill_ms": 70217.29999999999,
+        "decode_steps": 129,
+        "decode_rows": 129,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 32236,
+        "prompt_tokens_computed": 32236
+      },
+      "engine_tokens_per_s": 34.57252094688034,
+      "ms_per_pass": 57.17674418604651,
+      "tokens_per_pass": 1.9767441860465116,
+      "answer": {
+        "prompt_sha256": "1fb20d0f97e0c3e0ca5c30da8abefb2f823dd1d465661ccd434193fb047ea2d5",
+        "usage": {
+          "prompt_tokens": 32236,
+          "completion_tokens": 256,
+          "total_tokens": 32492,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list of the first 200 parcels and their cities. That means items 000000 through 000199. Let me extract each parcel ID and city.\n\nItem 000000: PX-0757343 - Income\nItem 000001: PX-0081436 - Jamesport\nItem 000002: PX-0126529 - Dunmore\nItem 000003: PX-0226532 - Dunmore\nItem 000004: PX-0538039 - Belvedere\nItem 000005: PX-0133958 - Glencarr\nItem 000006: PX-0510348 - Fenwick\nItem 000007: PX-0381529 - Jamesport\nItem 000008: PX-0284743 - Calder\nItem 000009: PX-0428050 - Eastvale\nItem 000010: PX-0735655 - Arcadia\nItem 000011: PX-0712386 - Belvedere\nItem 000012: PX-0688270 - Calder\nItem 000013:",
+        "wall_ms": 77634.97934211046,
+        "ttft_ms": 70255.45006804168,
+        "last_ms": 77634.80617199093,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 32768,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 7360.3,
+        "prefill_ms": 102.29999999998836,
+        "decode_steps": 129,
+        "decode_rows": 129,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 32236,
+        "prompt_tokens_computed": 4
+      },
+      "engine_tokens_per_s": 34.64532695678165,
+      "ms_per_pass": 57.05658914728682,
+      "tokens_per_pass": 1.9767441860465116,
+      "answer": {
+        "prompt_sha256": "1fb20d0f97e0c3e0ca5c30da8abefb2f823dd1d465661ccd434193fb047ea2d5",
+        "usage": {
+          "prompt_tokens": 32236,
+          "completion_tokens": 256,
+          "total_tokens": 32492,
+          "prompt_tokens_details": {
+            "cached_tokens": 32232
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list of the first 200 parcels and their cities. That means items 000000 through 000199. Let me extract each parcel ID and city.\n\nItem 000000: PX-0757343 - Income\nItem 000001: PX-0081436 - Jamesport\nItem 000002: PX-0126529 - Dunmore\nItem 000003: PX-0226532 - Dunmore\nItem 000004: PX-0538039 - Belvedere\nItem 000005: PX-0133958 - Glencarr\nItem 000006: PX-0510348 - Fenwick\nItem 000007: PX-0381529 - Jamesport\nItem 000008: PX-0284743 - Calder\nItem 000009: PX-0428050 - Eastvale\nItem 000010: PX-0735655 - Arcadia\nItem 000011: PX-0712386 - Belvedere\nItem 000012: PX-0688270 - Calder\nItem 000013:",
+        "wall_ms": 7491.904301801696,
+        "ttft_ms": 135.05829987116158,
+        "last_ms": 7491.7470519430935,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 32768,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 7380.999999999998,
+        "prefill_ms": 104.40000000002328,
+        "decode_steps": 129,
+        "decode_rows": 129,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 32236,
+        "prompt_tokens_computed": 4
+      },
+      "engine_tokens_per_s": 34.54816420539223,
+      "ms_per_pass": 57.21705426356588,
+      "tokens_per_pass": 1.9767441860465116,
+      "answer": {
+        "prompt_sha256": "1fb20d0f97e0c3e0ca5c30da8abefb2f823dd1d465661ccd434193fb047ea2d5",
+        "usage": {
+          "prompt_tokens": 32236,
+          "completion_tokens": 256,
+          "total_tokens": 32492,
+          "prompt_tokens_details": {
+            "cached_tokens": 32232
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list of the first 200 parcels and their cities. That means items 000000 through 000199. Let me extract each parcel ID and city.\n\nItem 000000: PX-0757343 - Income\nItem 000001: PX-0081436 - Jamesport\nItem 000002: PX-0126529 - Dunmore\nItem 000003: PX-0226532 - Dunmore\nItem 000004: PX-0538039 - Belvedere\nItem 000005: PX-0133958 - Glencarr\nItem 000006: PX-0510348 - Fenwick\nItem 000007: PX-0381529 - Jamesport\nItem 000008: PX-0284743 - Calder\nItem 000009: PX-0428050 - Eastvale\nItem 000010: PX-0735655 - Arcadia\nItem 000011: PX-0712386 - Belvedere\nItem 000012: PX-0688270 - Calder\nItem 000013:",
+        "wall_ms": 7510.380411986262,
+        "ttft_ms": 134.9103630054742,
+        "last_ms": 7510.217531118542,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

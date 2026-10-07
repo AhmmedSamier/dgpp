@@ -1,0 +1,44 @@
+{
+  "request": {
+    "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Reply with exactly OK."
+      }
+    ],
+    "temperature": 0,
+    "max_tokens": 32
+  },
+  "response": {
+    "id": "chatcmpl-a1f27de36b8c64ea",
+    "object": "chat.completion",
+    "created": 1791399355,
+    "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+    "system_fingerprint": null,
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "The user has sent a message asking me to reply with exactly \"OK\". This is a simple instruction-following request. There's nothing harmful or problematic about this",
+          "refusal": null
+        },
+        "logprobs": null,
+        "finish_reason": "length"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 17,
+      "completion_tokens": 32,
+      "total_tokens": 49,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 32
+      }
+    }
+  }
+}

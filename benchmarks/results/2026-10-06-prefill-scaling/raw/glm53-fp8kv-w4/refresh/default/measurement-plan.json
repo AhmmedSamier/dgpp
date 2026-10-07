@@ -1,0 +1,15 @@
+{
+  "jobs": [
+    "prefill",
+    "context-32768",
+    "context-65536",
+    "context-131072"
+  ],
+  "prefill_lengths": [
+    2048,
+    8192,
+    32768
+  ],
+  "comparison_baseline": "attempts/glm53-fp8kv-w4/default-before-single-query-fusion-20261007",
+  "reason": "Same tags, seed, prompts, config and client code for a controlled full-model comparison. Short serving/context and above-limit skips retain their separately audited baseline."
+}

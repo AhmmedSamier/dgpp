@@ -1,0 +1,73 @@
+{
+  "at": "2026-10-07T00:39:31.331052+00:00",
+  "reason": "Normal startup refused 256K FP8 before any benchmark request. Stop waiting for the HTTP-readiness timeout, preserve evidence, then resume with a separately named FP4 configuration.",
+  "runner_pid": 2012145,
+  "launcher_pid": 2818815,
+  "children_before_stop": [
+    {
+      "pid": 2818810,
+      "pgid": 2818810,
+      "start_ticks": 148705681,
+      "cmdline": "/usr/bin/python3 /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-fp8kv-256k-w4/refresh/default/node_telemetry.py "
+    },
+    {
+      "pid": 2818811,
+      "pgid": 2818811,
+      "start_ticks": 148705681,
+      "cmdline": "ssh -o BatchMode=yes -o ConnectTimeout=8 stephen@192.168.88.12 python3 - "
+    },
+    {
+      "pid": 2818812,
+      "pgid": 2818812,
+      "start_ticks": 148705681,
+      "cmdline": "ssh -o BatchMode=yes -o ConnectTimeout=8 stephen@192.168.88.13 python3 - "
+    },
+    {
+      "pid": 2818813,
+      "pgid": 2818813,
+      "start_ticks": 148705681,
+      "cmdline": "ssh -o BatchMode=yes -o ConnectTimeout=8 stephen@192.168.88.14 python3 - "
+    },
+    {
+      "pid": 2818814,
+      "pgid": 2818814,
+      "start_ticks": 148705681,
+      "cmdline": "ssh -o BatchMode=yes -o ConnectTimeout=8 stephen@192.168.88.13 sudo -n journalctl -k -f -n 0 -o short-iso "
+    },
+    {
+      "pid": 2818815,
+      "pgid": 2012144,
+      "start_ticks": 148705681,
+      "cmdline": "/usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-fp8kv-256k-w4/refresh/default/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-fp8kv-256k-w4/refresh/default/server "
+    }
+  ],
+  "signals": [
+    [
+      2012145,
+      "SIGSTOP"
+    ],
+    [
+      2818815,
+      "SIGTERM"
+    ],
+    [
+      2012145,
+      "SIGINT"
+    ],
+    [
+      2012145,
+      "SIGCONT"
+    ]
+  ],
+  "telemetry_stopped_after_cluster_down_at": "2026-10-07T00:40:11.711943+00:00",
+  "telemetry_groups_stopped": [
+    2818810,
+    2818811,
+    2818812,
+    2818813,
+    2818814
+  ],
+  "controller_exit_code": 130,
+  "down_receipt": "raw/glm53-fp8kv-256k-w4/refresh/default/down.log.command.json",
+  "archived_down_receipt": "attempts/glm53-fp8kv-256k-w4/default-capacity-refused-20261007T004142904639Z/down.log.command.json"
+}

@@ -1,0 +1,55 @@
+{
+  "scope": "Per-rank interval from first through last serving-process memory sample, plus five seconds on either side; local node clocks match local log timestamps. Older appended logs are excluded.",
+  "ranks": [
+    {
+      "rank": 0,
+      "from": "2026-10-06 13:50:50",
+      "through": "2026-10-06 14:34:49",
+      "warning_lines": 0,
+      "max_logged_wait_ms": 0,
+      "records": []
+    },
+    {
+      "rank": 1,
+      "from": "2026-10-06 13:52:11",
+      "through": "2026-10-06 14:36:09",
+      "warning_lines": 1,
+      "max_logged_wait_ms": 506,
+      "records": [
+        {
+          "at": "2026-10-06 14:35:11.224",
+          "seq": 1202933,
+          "wait_ms": 506
+        }
+      ]
+    },
+    {
+      "rank": 2,
+      "from": "2026-10-06 13:50:53",
+      "through": "2026-10-06 14:34:49",
+      "warning_lines": 1,
+      "max_logged_wait_ms": 508,
+      "records": [
+        {
+          "at": "2026-10-06 14:33:51.789",
+          "seq": 1202933,
+          "wait_ms": 508
+        }
+      ]
+    },
+    {
+      "rank": 3,
+      "from": "2026-10-06 13:50:46",
+      "through": "2026-10-06 14:34:43",
+      "warning_lines": 1,
+      "max_logged_wait_ms": 503,
+      "records": [
+        {
+          "at": "2026-10-06 14:33:45.779",
+          "seq": 1202933,
+          "wait_ms": 503
+        }
+      ]
+    }
+  ]
+}

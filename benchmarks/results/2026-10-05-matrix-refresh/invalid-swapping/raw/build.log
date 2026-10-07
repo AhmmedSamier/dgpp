@@ -1,0 +1,93 @@
+[  2%] Built target dgpp_rope_scaling
+[  2%] Built target dgpp_device_ranges
+[  4%] Built target dgpp_core
+[ 16%] Built target pcre2-8-static
+[ 16%] stamping dgpp_version.hpp
+[ 16%] Built target dgpp_net
+[ 18%] Built target dgpp_loaders
+[ 18%] Built target dgpp_version
+[ 23%] Built target dgpp_text
+[ 27%] Built target dgpp_bus
+[ 27%] Built target dgpp_models_glm4
+[ 30%] Built target dgpp_models_mimo
+[ 30%] Built target dgpp_models_glm_dsa
+[ 30%] Built target dgpp_models_dsv41
+[ 30%] Building CXX object CMakeFiles/dgpp_kernels.dir/src/kernels/gemm_cublaslt.cpp.o
+[ 30%] Building CUDA object CMakeFiles/dgpp_kernels.dir/src/kernels/scale_gemm.cu.o
+[ 32%] Built target dgpp_models_dsv4
+[ 37%] Built target dgpp_models_qwen
+[ 39%] Built target dgpp_models_glm4_loader
+[ 39%] Built target dgpp_sched
+[ 41%] Building CUDA object CMakeFiles/dgpp_kernels.dir/src/kernels/bf16_gemv.cu.o
+[ 41%] Built target dgpp_models_mimo_loader
+[ 44%] Built target dgpp_models_glm_dsa_loader
+[ 44%] Built target dgpp_models_dsv41_loader
+[ 46%] Built target dgpp_models_dsv4_loader
+[ 48%] Built target dgpp_models_glm
+[ 51%] Building CXX object CMakeFiles/dgpp_serve.dir/src/serve/cluster_config.cpp.o
+[ 51%] Building CXX object CMakeFiles/dgpp_serve.dir/src/serve/fabric_serve.cpp.o
+[ 51%] Building CUDA object CMakeFiles/dgpp_kernels.dir/src/kernels/bf12_gemv.cu.o
+[ 51%] Building CXX object CMakeFiles/dgpp_kernels.dir/src/kernels/bf12_companions.cpp.o
+[ 51%] Linking CXX static library libdgpp_serve.a
+[ 55%] Built target dgpp_serve
+[ 55%] Building CUDA object CMakeFiles/dgpp_kernels.dir/src/kernels/mma_gemv.cu.o
+[ 58%] Building CUDA object CMakeFiles/dgpp_kernels.dir/src/kernels/l2_prefetch.cu.o
+[ 58%] Building CUDA object CMakeFiles/dgpp_kernels.dir/src/kernels/dflash2.cu.o
+[ 58%] Linking CXX static library libdgpp_kernels.a
+[ 74%] Built target dgpp_kernels
+[ 74%] Building CXX object CMakeFiles/dgpp_models_moe.dir/src/models/glm/moe_layer.cpp.o
+[ 74%] Building CUDA object CMakeFiles/dgpp_models_kda.dir/src/models/kda_layer.cu.o
+[ 76%] Building CUDA object CMakeFiles/dgpp_models_dsa.dir/src/models/dsa_layer.cu.o
+[ 76%] Building CUDA object CMakeFiles/dgpp_models_csa2.dir/src/models/dsv41/csa2_layer.cu.o
+[ 79%] Linking CXX static library libdgpp_models_moe.a
+[ 79%] Built target dgpp_models_moe
+[ 81%] Building CUDA object CMakeFiles/dgpp_models_dsv4_attn.dir/src/models/dsv4/attn_layer.cu.o
+[ 81%] Linking CXX static library libdgpp_models_kda.a
+[ 81%] Built target dgpp_models_kda
+[ 81%] Building CXX object CMakeFiles/dgpp_models_qwen_loader.dir/src/models/qwen/vision.cpp.o
+[ 81%] Linking CXX static library libdgpp_models_csa2.a
+[ 81%] Built target dgpp_models_csa2
+[ 81%] Building CXX object CMakeFiles/dgpp_models_qwen_loader.dir/src/models/qwen/dflash2.cpp.o
+[ 81%] Linking CXX static library libdgpp_models_dsa.a
+[ 83%] Built target dgpp_models_dsa
+[ 83%] Building CXX object CMakeFiles/dgpp_models_glm4_layers.dir/src/models/glm4/layers.cpp.o
+[ 83%] Building CXX object CMakeFiles/dgpp_models_glm4_layers.dir/src/models/glm4/forward.cpp.o
+[ 83%] Linking CXX static library libdgpp_models_dsv4_attn.a
+[ 83%] Built target dgpp_models_dsv4_attn
+[ 86%] Building CXX object CMakeFiles/dgpp_models_mimo_layers.dir/src/models/mimo/layers.cpp.o
+[ 86%] Building CXX object CMakeFiles/dgpp_models_mimo_layers.dir/src/models/mimo/forward.cpp.o
+[ 86%] Linking CXX static library libdgpp_models_qwen_loader.a
+[ 88%] Built target dgpp_models_qwen_loader
+[ 88%] Building CXX object CMakeFiles/dgpp_models_glm_dsa_layers.dir/src/models/glm_dsa/model.cpp.o
+[ 90%] Building CXX object CMakeFiles/dgpp_models_dsv41_layers.dir/src/models/dsv41/engram_layer.cpp.o
+[ 90%] Linking CXX static library libdgpp_models_glm4_layers.a
+[ 93%] Built target dgpp_models_glm4_layers
+[ 93%] Building CXX object CMakeFiles/dgpp_models_dsv4_layers.dir/src/models/dsv4/model.cpp.o
+[ 93%] Linking CXX static library libdgpp_models_mimo_layers.a
+[ 93%] Built target dgpp_models_mimo_layers
+[ 93%] Building CXX object CMakeFiles/dgpp_models_qwen_layers.dir/src/models/qwen/moe_layer.cpp.o
+[ 93%] Building CXX object CMakeFiles/dgpp_models_dsv41_layers.dir/src/models/dsv41/model.cpp.o
+[ 93%] Linking CXX static library libdgpp_models_glm_dsa_layers.a
+[ 93%] Built target dgpp_models_glm_dsa_layers
+[ 93%] Building CXX object CMakeFiles/dgpp_models_glm_loader.dir/src/models/glm/vision.cpp.o
+[ 93%] Building CXX object CMakeFiles/dgpp_models_qwen_layers.dir/src/models/qwen/layers.cpp.o
+[ 93%] Linking CXX static library libdgpp_models_dsv4_layers.a
+[ 93%] Building CXX object CMakeFiles/dgpp_models_glm_loader.dir/src/models/glm/loader.cpp.o
+[ 93%] Built target dgpp_models_dsv4_layers
+[ 95%] Building CXX object CMakeFiles/dgpp_models_glm_loader.dir/src/models/glm/forward.cpp.o
+[ 95%] Linking CXX static library libdgpp_models_dsv41_layers.a
+[ 95%] Building CXX object CMakeFiles/dgpp_models_qwen_layers.dir/src/models/qwen/kv_pool.cpp.o
+[ 95%] Built target dgpp_models_dsv41_layers
+[ 95%] Building CXX object CMakeFiles/dgpp_models_qwen_layers.dir/src/models/qwen/forward.cpp.o
+[ 97%] Building CXX object CMakeFiles/dgpp_models_qwen_layers.dir/src/models/qwen/model35.cpp.o
+[ 97%] Building CXX object CMakeFiles/dgpp_models_glm_loader.dir/src/models/glm/decode.cpp.o
+[ 97%] Building CXX object CMakeFiles/dgpp_models_glm_loader.dir/src/models/glm/mtp.cpp.o
+[ 97%] Building CXX object CMakeFiles/dgpp_models_glm_loader.dir/src/models/glm/tp.cpp.o
+[ 97%] Building CXX object CMakeFiles/dgpp_models_glm_loader.dir/src/models/glm/tp_parity.cpp.o
+[ 97%] Linking CXX static library libdgpp_models_qwen_layers.a
+[ 97%] Built target dgpp_models_qwen_layers
+[100%] Linking CXX static library libdgpp_models_glm_loader.a
+[100%] Built target dgpp_models_glm_loader
+[100%] Building CXX object CMakeFiles/dgpp_serve_app.dir/apps/dgpp_serve.cpp.o
+[100%] Linking CXX executable dgpp-serve
+[100%] Built target dgpp_serve_app

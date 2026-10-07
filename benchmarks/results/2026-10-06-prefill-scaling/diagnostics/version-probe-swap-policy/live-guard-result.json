@@ -1,0 +1,6 @@
+{
+  "passed": true,
+  "protected_probe_samples": 2,
+  "actual_binary_version": "dgpp-serve 0.1.0+g8f1c4cbcc1e9.dirty (git 8f1c4cbcc1e9, cuda 13.0)",
+  "actual_binary_returncode": 0
+}

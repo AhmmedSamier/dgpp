@@ -1,0 +1,41 @@
+Internal ctest changing into directory: /home/stephen/workspace/dgpp/build-release
+Test project /home/stephen/workspace/dgpp/build-release
+    Start  78: csa2_test
+1/8 Test  #78: csa2_test ........................   Passed    1.52 sec
+    Start  79: csa2_layer_test
+2/8 Test  #79: csa2_layer_test ..................   Passed    6.13 sec
+    Start  83: dsv41_forward_smoke
+3/8 Test  #83: dsv41_forward_smoke ..............***Failed    0.07 sec
+[FAIL] cannot open config /home/stephen/workspace/dgpp/build-release/dsv41_forward_fixture/config.json: No such file or directory
+
+    Start  87: dsv41_forward_test
+4/8 Test  #87: dsv41_forward_test ...............***Failed    0.06 sec
+[FAIL] dump: cannot open /home/stephen/workspace/dgpp/build-release/dsv41_teacher_ref.dump
+
+    Start  91: dsv41_forward_test_bounded
+5/8 Test  #91: dsv41_forward_test_bounded .......***Failed    0.07 sec
+[FAIL] dump: cannot open /home/stephen/workspace/dgpp/build-release/dsv41_teacher_bounded_ref.dump
+
+    Start  92: dsv41_decode_test
+6/8 Test  #92: dsv41_decode_test ................***Failed    0.07 sec
+[FAIL] cannot open config /home/stephen/workspace/dgpp/build-release/dsv41_forward_fixture/config.json: No such file or directory
+
+    Start 140: dsv41_tp_test
+7/8 Test #140: dsv41_tp_test ....................   Passed    7.85 sec
+    Start 141: dsv41_engine_test
+8/8 Test #141: dsv41_engine_test ................   Passed    7.88 sec
+
+50% tests passed, 4 tests failed out of 8
+
+Label Time Summary:
+gpu     =  23.65 sec*proc (8 tests)
+rdma    =  15.73 sec*proc (2 tests)
+
+Total Test time (real) =  23.66 sec
+
+The following tests FAILED:
+	 83 - dsv41_forward_smoke (Failed)
+	 87 - dsv41_forward_test (Failed)
+	 91 - dsv41_forward_test_bounded (Failed)
+	 92 - dsv41_decode_test (Failed)
+Errors while running CTest

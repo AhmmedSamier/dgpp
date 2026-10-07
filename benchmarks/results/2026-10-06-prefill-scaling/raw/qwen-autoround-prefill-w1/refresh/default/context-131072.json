@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "model": "Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN",
+  "surface": {
+    "id": "Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN",
+    "object": "model",
+    "created": 1791326616,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": 262144,
+      "kv_pool_tokens": 262144,
+      "limited_by": "position-ceiling"
+    }
+  },
+  "tokenizer_sha256": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+  "seed": 20260922,
+  "tag": "6951320d58424a919f354acf04f224a0",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 131072,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 5439.699999999953,
+        "prefill_ms": 79916.29999999999,
+        "decode_steps": 89,
+        "decode_rows": 89,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 130576,
+        "prompt_tokens_computed": 130576
+      },
+      "engine_tokens_per_s": 46.87758516094678,
+      "ms_per_pass": 61.1202247191006,
+      "tokens_per_pass": 2.865168539325843,
+      "answer": {
+        "prompt_sha256": "53909c59e74b2b416119134e38a9b2c75ac8d1afedc4bebb185ed7ebd6f8c6b1",
+        "usage": {
+          "prompt_tokens": 130576,
+          "completion_tokens": 256,
+          "total_tokens": 130832,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided huge log items 000000 to 002909. Need list first 200 parcels and cities. \"first 200 parcels\" likely items 000000 through 001999? They say Continue until you have listed all 200. Need numbered list. Need ensure 200 entries. Need extract parcel IDs and cities for items 000000 to 001999 inclusive. Need be careful. Could produce 1. PX-... - City. Need count 200. Need maybe include item numbers? \"describing the first 200 parcels and their cities\" likely parcel ID and city. Need list all 200. Need ensure no mistakes. We can manually extract from provided. Need maybe use analysis to compile. Need be accurate. Let's parse items 000000-001999. Need output numbered 1-200. Need maybe include parcel PX-xxxx and city. Need not include weights etc. Need continue",
+        "wall_ms": 85418.05049101822,
+        "ttft_ms": 79963.91263185069,
+        "last_ms": 85417.93973883614,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 131072,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 5380.400000000023,
+        "prefill_ms": 87.70000000001164,
+        "decode_steps": 89,
+        "decode_rows": 89,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 130576,
+        "prompt_tokens_computed": 8
+      },
+      "engine_tokens_per_s": 47.39424578098262,
+      "ms_per_pass": 60.45393258426992,
+      "tokens_per_pass": 2.865168539325843,
+      "answer": {
+        "prompt_sha256": "53909c59e74b2b416119134e38a9b2c75ac8d1afedc4bebb185ed7ebd6f8c6b1",
+        "usage": {
+          "prompt_tokens": 130576,
+          "completion_tokens": 256,
+          "total_tokens": 130832,
+          "prompt_tokens_details": {
+            "cached_tokens": 130568
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided huge log items 000000 to 002909. Need list first 200 parcels and cities. \"first 200 parcels\" likely items 000000 through 001999? They say Continue until you have listed all 200. Need numbered list. Need ensure 200 entries. Need extract parcel IDs and cities for items 000000 to 001999 inclusive. Need be careful. Could produce 1. PX-... - City. Need count 200. Need maybe include item numbers? \"describing the first 200 parcels and their cities\" likely parcel ID and city. Need list all 200. Need ensure no mistakes. We can manually extract from provided. Need maybe use analysis to compile. Need be accurate. Let's parse items 000000-001999. Need output numbered 1-200. Need maybe include parcel PX-xxxx and city. Need not include weights etc. Need continue",
+        "wall_ms": 5554.6076209284365,
+        "ttft_ms": 150.43021203018725,
+        "last_ms": 5554.4904209673405,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 131072,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 5392.599999999977,
+        "prefill_ms": 87.10000000000582,
+        "decode_steps": 89,
+        "decode_rows": 89,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 130576,
+        "prompt_tokens_computed": 8
+      },
+      "engine_tokens_per_s": 47.28702295738625,
+      "ms_per_pass": 60.591011235954795,
+      "tokens_per_pass": 2.865168539325843,
+      "answer": {
+        "prompt_sha256": "53909c59e74b2b416119134e38a9b2c75ac8d1afedc4bebb185ed7ebd6f8c6b1",
+        "usage": {
+          "prompt_tokens": 130576,
+          "completion_tokens": 256,
+          "total_tokens": 130832,
+          "prompt_tokens_details": {
+            "cached_tokens": 130568
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided huge log items 000000 to 002909. Need list first 200 parcels and cities. \"first 200 parcels\" likely items 000000 through 001999? They say Continue until you have listed all 200. Need numbered list. Need ensure 200 entries. Need extract parcel IDs and cities for items 000000 to 001999 inclusive. Need be careful. Could produce 1. PX-... - City. Need count 200. Need maybe include item numbers? \"describing the first 200 parcels and their cities\" likely parcel ID and city. Need list all 200. Need ensure no mistakes. We can manually extract from provided. Need maybe use analysis to compile. Need be accurate. Let's parse items 000000-001999. Need output numbered 1-200. Need maybe include parcel PX-xxxx and city. Need not include weights etc. Need continue",
+        "wall_ms": 5556.93273502402,
+        "ttft_ms": 150.44938889332116,
+        "last_ms": 5556.825646897778,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

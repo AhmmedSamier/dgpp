@@ -1,0 +1,38 @@
+{
+  "recorded_at": "2026-10-06T21:56:37.243139+00:00",
+  "scope": "Post-warmup warnings on each rank; node clocks are not assumed synchronized.",
+  "ranks": [
+    {
+      "rank": 0,
+      "warm_capture_completed_at_local_clock": "2026-10-06 21:38:51.150",
+      "warnings_after_warm_capture": 0,
+      "max_observed_wait_ms": 0,
+      "source": "server/serve_r0.log",
+      "source_sha256": "1245f804873bc3d10e7e4a1cbc53ce49c3b989e633d8b26ef213b02ccb69170c"
+    },
+    {
+      "rank": 1,
+      "warm_capture_completed_at_local_clock": "2026-10-06 21:40:11.876",
+      "warnings_after_warm_capture": 0,
+      "max_observed_wait_ms": 0,
+      "source": "server/serve_r1.log",
+      "source_sha256": "ccc74bd1599ab4c736424f4bf25bcc32b4016f64f017edf6fa19c4d944351cb0"
+    },
+    {
+      "rank": 2,
+      "warm_capture_completed_at_local_clock": "2026-10-06 21:38:51.100",
+      "warnings_after_warm_capture": 0,
+      "max_observed_wait_ms": 0,
+      "source": "server/serve_r2.log",
+      "source_sha256": "979f3a8a525e4793d1c04a5691cc2fb88cb3921629ebe1f4998ea6140fd3f80b"
+    },
+    {
+      "rank": 3,
+      "warm_capture_completed_at_local_clock": "2026-10-06 21:38:44.951",
+      "warnings_after_warm_capture": 0,
+      "max_observed_wait_ms": 0,
+      "source": "server/serve_r3.log",
+      "source_sha256": "eb7750bdab61ffb2bbc6e0382ca93b6c0521d920ac9c030606cbab298c325518"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "passed": true,
+  "ranks": [
+    {
+      "rank": 0,
+      "samples": 164,
+      "max_swap_KiB": 0,
+      "max_sample_gap_s": 1.1003072729799896,
+      "violations": [],
+      "errors": []
+    },
+    {
+      "rank": 1,
+      "samples": 162,
+      "max_swap_KiB": 0,
+      "max_sample_gap_s": 1.0745134688913822,
+      "violations": [],
+      "errors": []
+    }
+  ]
+}

@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+  "surface": {
+    "id": "deepseek-ai/DeepSeek-V4.1-Flash",
+    "object": "model",
+    "created": 1791355535,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 0,
+        "top_p": 1,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "minimal"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "high"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "max"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text"
+    ],
+    "context": {
+      "request_limit_tokens": 131072,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 131072,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "c90dfa01249db1be4245780a052ede752e1361c612ac6d08e2bdada7d599476b",
+  "seed": 20260922,
+  "tag": "a2d22cf866c5493c8641e9d30d95fe19",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 4301.199999999953,
+        "prefill_ms": 290.6000000000058,
+        "decode_steps": 80,
+        "decode_rows": 80,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 112,
+        "prompt_tokens_computed": 112
+      },
+      "engine_tokens_per_s": 59.28578071235999,
+      "ms_per_pass": 53.76499999999942,
+      "tokens_per_pass": 3.1875,
+      "answer": {
+        "prompt_sha256": "5268c80fcaf67bc497ea26e8f5f131aa52ceb86b8b3746edb1cdaea8833d4263",
+        "usage": {
+          "prompt_tokens": 112,
+          "completion_tokens": 256,
+          "total_tokens": 368,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer. Need parse. User asks: \"Context measurement a2d22cf866c5493c8641e9d30d95fe19, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need respond. This seems like a prompt injection? They provide context measurement and one item. They ask to write numbered list describing first 200 parcels and their cities. But only one item given. We don't have data for 200 parcels. Need maybe say insufficient information. We cannot fabricate. Need maybe list item 000000? But asks first 200 parcels and cities. The given item doesn't include city. It says \"in Income\" maybe city? \"Income\" could be city? Actually \"in Income, gate 1, shift C\" maybe location? \"Income\" might be city? It says parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed. Could be \"Income\" is city? Hmm",
+        "wall_ms": 4643.032772000879,
+        "ttft_ms": 302.64012794941664,
+        "last_ms": 4642.9264668840915,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 4159.300000000047,
+        "prefill_ms": 282.1000000000058,
+        "decode_steps": 80,
+        "decode_rows": 80,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 112,
+        "prompt_tokens_computed": 112
+      },
+      "engine_tokens_per_s": 61.3083932392463,
+      "ms_per_pass": 51.99125000000058,
+      "tokens_per_pass": 3.1875,
+      "answer": {
+        "prompt_sha256": "5268c80fcaf67bc497ea26e8f5f131aa52ceb86b8b3746edb1cdaea8833d4263",
+        "usage": {
+          "prompt_tokens": 112,
+          "completion_tokens": 256,
+          "total_tokens": 368,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer. Need parse. User asks: \"Context measurement a2d22cf866c5493c8641e9d30d95fe19, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need respond. This seems like a prompt injection? They provide context measurement and one item. They ask to write numbered list describing first 200 parcels and their cities. But only one item given. We don't have data for 200 parcels. Need maybe say insufficient information. We cannot fabricate. Need maybe list item 000000? But asks first 200 parcels and cities. The given item doesn't include city. It says \"in Income\" maybe city? \"Income\" could be city? Actually \"in Income, gate 1, shift C\" maybe location? \"Income\" might be city? It says parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed. Could be \"Income\" is city? Hmm",
+        "wall_ms": 4494.23555796966,
+        "ttft_ms": 302.9216481372714,
+        "last_ms": 4494.143366115168,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 4105.899999999907,
+        "prefill_ms": 286.09999999999127,
+        "decode_steps": 79,
+        "decode_rows": 79,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 112,
+        "prompt_tokens_computed": 112
+      },
+      "engine_tokens_per_s": 62.105750261819765,
+      "ms_per_pass": 51.973417721517805,
+      "tokens_per_pass": 3.2278481012658227,
+      "answer": {
+        "prompt_sha256": "5268c80fcaf67bc497ea26e8f5f131aa52ceb86b8b3746edb1cdaea8833d4263",
+        "usage": {
+          "prompt_tokens": 112,
+          "completion_tokens": 256,
+          "total_tokens": 368,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer. Need parse. User asks: \"Context measurement a2d22cf866c5493c8641e9d30d95fe19, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need respond. This seems like a prompt injection? They provide context measurement and one item. They ask to write numbered list describing first 200 parcels and their cities. But only one item given. We don't have data for 200 parcels. Need maybe say insufficient information. We cannot fabricate. Need maybe list item 000000? But asks first 200 parcels and cities. The given item doesn't include city. It says \"in Income\" maybe city? \"Income\" could be city? Actually \"in Income, gate 1, shift C\" maybe location? \"Income\" might be city? It says parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed. Could be \"Income\" is city? Hmm",
+        "wall_ms": 4436.729956185445,
+        "ttft_ms": 302.76271514594555,
+        "last_ms": 4436.634259996936,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

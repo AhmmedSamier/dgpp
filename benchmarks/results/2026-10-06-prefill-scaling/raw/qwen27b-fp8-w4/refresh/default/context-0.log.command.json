@@ -1,0 +1,20 @@
+{
+  "command": [
+    "/home/stephen/workspace/dgpp/.venv/bin/python",
+    "/home/stephen/workspace/dgpp/scripts/serve_context_matrix.py",
+    "127.0.0.1",
+    "18080",
+    "--model",
+    "Qwen/Qwen3.8-27B-FP8",
+    "--tag",
+    "a6839a140f3e42feaa40e6508fc798e9",
+    "--lengths",
+    "0",
+    "--json-out",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/default/context-0.json"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-10-07T16:33:06.650008+00:00",
+  "returncode": 0,
+  "finished_at": "2026-10-07T16:33:14.928570+00:00"
+}

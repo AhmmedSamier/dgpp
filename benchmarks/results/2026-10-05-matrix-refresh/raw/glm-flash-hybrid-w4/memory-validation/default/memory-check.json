@@ -1,0 +1,42 @@
+{
+  "passed": false,
+  "ranks": [
+    {
+      "rank": 0,
+      "samples": 1560,
+      "max_swap_KiB": 0,
+      "violations": [],
+      "errors": [
+        "Traceback (most recent call last):",
+        "  File \"/home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/node_telemetry.py\", line 50, in <module>",
+        "    vm[key] = int(value)",
+        "        ^^^^^^^^^^^^^^^^^",
+        "  File \"/home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/node_telemetry.py\", line 28, in serving_processes",
+        "    rows.append({'pid': int(proc.name), **{key + '_KiB': int(fields[key].split()[0])",
+        "                                                             ~~~~~~^^^^^",
+        "KeyError: 'VmRSS'"
+      ]
+    },
+    {
+      "rank": 1,
+      "samples": 1557,
+      "max_swap_KiB": 0,
+      "violations": [],
+      "errors": []
+    },
+    {
+      "rank": 2,
+      "samples": 1559,
+      "max_swap_KiB": 0,
+      "violations": [],
+      "errors": []
+    },
+    {
+      "rank": 3,
+      "samples": 1556,
+      "max_swap_KiB": 0,
+      "violations": [],
+      "errors": []
+    }
+  ]
+}

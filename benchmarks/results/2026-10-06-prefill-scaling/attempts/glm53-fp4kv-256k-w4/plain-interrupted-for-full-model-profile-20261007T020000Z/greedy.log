@@ -1,0 +1,45 @@
+model HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64
+warm 0: status 200 tokens 64
+== prose concurrency 1: 02:01:32.798 .. 02:01:46.006  wall 13.2 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 454 ms  client update pace 50.01 ms/update
+   aggregate wall: 256 tokens in 13.21 s = 19.38 tok/s (prefill included)
+   legacy output-span aggregate: 20.073274789088764 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 20.003 tok/s
+== prose concurrency 1: 02:01:46.007 .. 02:01:59.229  wall 13.2 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 453 ms  client update pace 50.07 ms/update
+   aggregate wall: 256 tokens in 13.22 s = 19.36 tok/s (prefill included)
+   legacy output-span aggregate: 20.050443794632464 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 20.003 tok/s
+== prose concurrency 1: 02:01:59.230 .. 02:02:12.440  wall 13.2 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 453 ms  client update pace 50.03 ms/update
+   aggregate wall: 256 tokens in 13.21 s = 19.38 tok/s (prefill included)
+   legacy output-span aggregate: 20.06766506398209 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 19.985 tok/s
+== code concurrency 1: 02:02:12.442 .. 02:02:25.754  wall 13.3 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 554 ms  client update pace 50.03 ms/update
+   aggregate wall: 256 tokens in 13.31 s = 19.23 tok/s (prefill included)
+   legacy output-span aggregate: 20.06663313688366 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 19.984 tok/s
+== code concurrency 1: 02:02:25.755 .. 02:02:39.095  wall 13.3 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 555 ms  client update pace 50.13 ms/update
+   aggregate wall: 256 tokens in 13.34 s = 19.19 tok/s (prefill included)
+   legacy output-span aggregate: 20.025017062937614 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 19.948 tok/s
+== code concurrency 1: 02:02:39.096 .. 02:02:44.005  wall 4.9 s
+Traceback (most recent call last):
+  File "/home/stephen/workspace/dgpp/scripts/timed_load.py", line 97, in <module>
+    main()
+  File "/home/stephen/workspace/dgpp/scripts/timed_load.py", line 93, in main
+    serve_load.main(phase_runner=load.phase, settle=load.settle)
+  File "/home/stephen/workspace/dgpp/scripts/serve_load.py", line 352, in main
+    rates = [run_phase(args.host, args.port, model, c, args.max_tokens, args.think, base,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/stephen/workspace/dgpp/scripts/timed_load.py", line 75, in phase
+    rate = serve_load.phase(host, port, model, c, max_tokens, think, prompt_base,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/stephen/workspace/dgpp/scripts/serve_load.py", line 250, in phase
+    metrics = phase_metrics(outs, t_start, t_end)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/stephen/workspace/dgpp/scripts/bench_stream.py", line 65, in phase_metrics
+    raise RuntimeError(request["error"])
+RuntimeError: stream error: {'message': 'the server is shutting down — this response is incomplete; retry on another instance', 'type': 'server_error', 'param': None, 'code': 'server_shutdown'}

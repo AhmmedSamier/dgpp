@@ -1,0 +1,25 @@
+Generating SQLite file benchmarks/results/2026-10-05-matrix-refresh/diagnostics/prefill-scaling/candidate-512k.sqlite from benchmarks/results/2026-10-05-matrix-refresh/diagnostics/prefill-scaling/candidate-512k.nsys-rep
+Processing [benchmarks/results/2026-10-05-matrix-refresh/diagnostics/prefill-scaling/candidate-512k.sqlite] with [/opt/nvidia/nsight-systems/2025.3.2/host-linux-armv8/reports/cuda_gpu_kern_sum.py]... 
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+38.7,247754336,683,362744.3,361792.0,312832,500384,14131.0,"dgpp::<unnamed>::prefill_select_keys_kernel(const unsigned long *, long, const long *, long, int, int, int, int *, int *)"
+29.5,188426464,683,275880.6,274560.0,198784,452672,10488.1,nvjet_sm121_qqsss_mma_192x160x128_2_48x80x128_tmaAB_bz_TNNN
+27.0,172819232,683,253029.6,252416.0,160384,550976,12373.9,"void dgpp::<unnamed>::prefill_score_keys_kernel<(bool)0>(const float *, long, const float *, const float *, const long *, long, int, int, unsigned long *)"
+4.0,25349216,16,1584326.0,1582032.0,1483392,1774368,67955.3,"void dgpp::<unnamed>::attn_flash_kernel<(int)512, (int)512, (bool)1, (dgpp::LatentFormat)0>(const unsigned short *, const unsigned char *, const float *, const int *, const long *, const int *, int, const int *, int, int, int, int, const int *, int, float, float *, float *, float *)"
+0.2,974848,16,60928.0,55904.0,55136,117312,15672.6,"dgpp::vout_mma_kernel(const float *, const unsigned short *, unsigned short *, int, int, int, int, int)"
+0.1,923456,16,57716.0,54272.0,52608,86048,8627.8,"dgpp::<unnamed>::attn_combine_kernel(const float *, const float *, const float *, int, int, int, float *)"
+0.1,821600,1,821600.0,821600.0,821600,821600,0.0,nvjet_sm121_tst_mma_192x144x64_2_48x72x64_tmaAB_bz_TNNN
+0.1,688768,16,43048.0,42736.0,41248,46720,1520.2,"dgpp::absorb_q_mma_kernel(const unsigned short *, const unsigned short *, unsigned short *, int, int, int, int, int, int)"
+0.1,561760,2,280880.0,280880.0,279968,281792,1289.8,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8>(T1::Params)
+0.1,358496,1,358496.0,358496.0,358496,358496,0.0,nvjet_sm121_tst_mma_128x176x64_2_32x88x64_tmaAB_bz_TNNN
+0.0,279040,1,279040.0,279040.0,279040,279040,0.0,"dgpp::<unnamed>::fwht_quant_rows_kernel(const unsigned short *, unsigned char *, float *)"
+0.0,272224,1,272224.0,272224.0,272224,272224,0.0,"dgpp::<unnamed>::gather_index_pools_kernel(const int *, int, const unsigned char *, const float *, long, unsigned char *, float *, int)"
+0.0,167616,2,83808.0,83808.0,83296,84320,724.1,nvjet_sm121_tst_mma_64x128x64_4_64x32x64_tmaAB_bz_TNNN
+0.0,87616,1,87616.0,87616.0,87616,87616,0.0,"<unnamed>::seed_prefill_history(unsigned char *, float *, long, int)"
+0.0,74688,1,74688.0,74688.0,74688,74688,0.0,void cutlass::Kernel2<cutlass_80_wmma_tensorop_s161616gemm_bf16_32x32_128x1_tn_align8>(T1::Params)
+0.0,56448,1,56448.0,56448.0,56448,56448,0.0,"dgpp::<unnamed>::fused_qkv_rmsnorm_kernel(const unsigned short *, long, unsigned short *, unsigned short *, int, int, const unsigned short *, const unsigned short *, float)"
+0.0,22976,1,22976.0,22976.0,22976,22976,0.0,"dgpp::<unnamed>::kpool_compress_write_kernel(const unsigned short *, long, const unsigned short *, long, const float *, const int *, int, long, int, unsigned char *, float *, int, int)"
+0.0,14688,1,14688.0,14688.0,14688,14688,0.0,"dgpp::<unnamed>::latent_append_kernel(const unsigned short *, const int *, const long *, const int *, int, int, unsigned char *, int, unsigned long, const unsigned short *, int)"
+0.0,6752,1,6752.0,6752.0,6752,6752,0.0,"dgpp::<unnamed>::kpool_tail_seed_kernel(const unsigned short *, long, const unsigned short *, long, const int *, const long *, long, unsigned short *, int, int)"
+0.0,6432,1,6432.0,6432.0,6432,6432,0.0,"dgpp::<unnamed>::k_layernorm_kernel(const unsigned short *, long, const unsigned short *, const unsigned short *, unsigned short *, int, float)"
+0.0,3808,1,3808.0,3808.0,3808,3808,0.0,"dgpp::<unnamed>::fold_weights_kernel(const float *, const float *, float *, long, float)"
+

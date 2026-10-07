@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+  "surface": {
+    "id": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+    "object": "model",
+    "created": 1791313002,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": 262144,
+      "kv_pool_tokens": 262144,
+      "limited_by": "position-ceiling"
+    }
+  },
+  "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+  "seed": 20260922,
+  "tag": "79112d49dd0a411b9f43d98bb8fc8d06",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 32768,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 3991.600000000035,
+        "prefill_ms": 30420.099999999977,
+        "decode_steps": 136,
+        "decode_rows": 136,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 32286,
+        "prompt_tokens_computed": 32286
+      },
+      "engine_tokens_per_s": 63.884156729130616,
+      "ms_per_pass": 29.350000000000257,
+      "tokens_per_pass": 1.875,
+      "answer": {
+        "prompt_sha256": "9bc357aec19c52e0bd4cfe01dacac27191999470975aab4863107d0b5e512a1d",
+        "usage": {
+          "prompt_tokens": 32286,
+          "completion_tokens": 256,
+          "total_tokens": 32542,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided items 000000 to 000717. Need first 200 parcels likely items 000000 through 000199 inclusive. Need numbered list. \"describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Need likely include parcel ID and city? Maybe \"Item 000000: PX-0757343, Income\" etc. Need ensure 200 entries. Need be careful. Could just list 1-200 with parcel and city. Need maybe include item number? They ask numbered list describing first 200 parcels and their cities. Could be:\n1. Item 000000: parcel PX-0757343 in Income\n...\n200. Item 000199: parcel PX-0979556 in Eastvale\nNeed verify first 200 are 000000-000199.",
+        "wall_ms": 34443.53652605787,
+        "ttft_ms": 30457.765717059374,
+        "last_ms": 34443.41249298304,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 32768,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 3859.399999999965,
+        "prefill_ms": 61.30000000001746,
+        "decode_steps": 136,
+        "decode_rows": 136,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 32286,
+        "prompt_tokens_computed": 6
+      },
+      "engine_tokens_per_s": 66.07244649427432,
+      "ms_per_pass": 28.37794117647033,
+      "tokens_per_pass": 1.875,
+      "answer": {
+        "prompt_sha256": "9bc357aec19c52e0bd4cfe01dacac27191999470975aab4863107d0b5e512a1d",
+        "usage": {
+          "prompt_tokens": 32286,
+          "completion_tokens": 256,
+          "total_tokens": 32542,
+          "prompt_tokens_details": {
+            "cached_tokens": 32280
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided items 000000 to 000717. Need first 200 parcels likely items 000000 through 000199 inclusive. Need numbered list. \"describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Need likely include parcel ID and city? Maybe \"Item 000000: PX-0757343, Income\" etc. Need ensure 200 entries. Need be careful. Could just list 1-200 with parcel and city. Need maybe include item number? They ask numbered list describing first 200 parcels and their cities. Could be:\n1. Item 000000: parcel PX-0757343 in Income\n...\n200. Item 000199: parcel PX-0979556 in Eastvale\nNeed verify first 200 are 000000-000199.",
+        "wall_ms": 3970.203210134059,
+        "ttft_ms": 89.43702699616551,
+        "last_ms": 3970.090553164482,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 32768,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 3857.100000000035,
+        "prefill_ms": 58.0,
+        "decode_steps": 136,
+        "decode_rows": 136,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 32286,
+        "prompt_tokens_computed": 6
+      },
+      "engine_tokens_per_s": 66.1118456871737,
+      "ms_per_pass": 28.361029411764964,
+      "tokens_per_pass": 1.875,
+      "answer": {
+        "prompt_sha256": "9bc357aec19c52e0bd4cfe01dacac27191999470975aab4863107d0b5e512a1d",
+        "usage": {
+          "prompt_tokens": 32286,
+          "completion_tokens": 256,
+          "total_tokens": 32542,
+          "prompt_tokens_details": {
+            "cached_tokens": 32280
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided items 000000 to 000717. Need first 200 parcels likely items 000000 through 000199 inclusive. Need numbered list. \"describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Need likely include parcel ID and city? Maybe \"Item 000000: PX-0757343, Income\" etc. Need ensure 200 entries. Need be careful. Could just list 1-200 with parcel and city. Need maybe include item number? They ask numbered list describing first 200 parcels and their cities. Could be:\n1. Item 000000: parcel PX-0757343 in Income\n...\n200. Item 000199: parcel PX-0979556 in Eastvale\nNeed verify first 200 are 000000-000199.",
+        "wall_ms": 3969.8206749744713,
+        "ttft_ms": 89.26456095650792,
+        "last_ms": 3969.719952903688,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

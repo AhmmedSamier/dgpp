@@ -1,0 +1,86 @@
+{
+  "recorded_at": "2026-10-06T22:49:22.259980+00:00",
+  "note": "Observed timings of validated launches, not a significance test; actual prompt lengths and individual repeats remain in the raw reports.",
+  "variants": {
+    "off": {
+      "deployment": "qwen-autoround-w1",
+      "cold_prefill_s": {
+        "2048": 1.2758999999999978,
+        "8192": 4.356399999999998,
+        "32768": 17.158899999999996
+      },
+      "context": {
+        "0": {
+          "actual_input_tokens": 161,
+          "cold_prefill_s": 0.3008000000000029,
+          "median_decode_ms_per_pass": 54.879761904762184,
+          "median_engine_tok_s": 55.315733530011215
+        },
+        "32768": {
+          "actual_input_tokens": 32282,
+          "cold_prefill_s": 17.513699999999996,
+          "median_decode_ms_per_pass": 58.080232558139805,
+          "median_engine_tok_s": 51.05207311457663
+        },
+        "65536": {
+          "actual_input_tokens": 65053,
+          "cold_prefill_s": 36.785199999999996,
+          "median_decode_ms_per_pass": 58.42298850574766,
+          "median_engine_tok_s": 50.16919807979808
+        },
+        "131072": {
+          "actual_input_tokens": 130574,
+          "cold_prefill_s": 81.8386,
+          "median_decode_ms_per_pass": 59.718292682927114,
+          "median_engine_tok_s": 52.073760950805365
+        },
+        "262144": {
+          "actual_input_tokens": 261657,
+          "cold_prefill_s": 195.4981,
+          "median_decode_ms_per_pass": 61.92470588235267,
+          "median_engine_tok_s": 48.4459305418347
+        }
+      }
+    },
+    "on": {
+      "deployment": "qwen-autoround-prefill-w1",
+      "cold_prefill_s": {
+        "2048": 1.182,
+        "8192": 4.077400000000002,
+        "32768": 16.681800000000003
+      },
+      "context": {
+        "0": {
+          "actual_input_tokens": 158,
+          "cold_prefill_s": 0.24660000000000581,
+          "median_decode_ms_per_pass": 55.4432098765435,
+          "median_engine_tok_s": 56.78149146050873
+        },
+        "32768": {
+          "actual_input_tokens": 32287,
+          "cold_prefill_s": 16.868899999999993,
+          "median_decode_ms_per_pass": 58.5309523809521,
+          "median_engine_tok_s": 51.86511003539056
+        },
+        "65536": {
+          "actual_input_tokens": 65052,
+          "cold_prefill_s": 35.67809999999999,
+          "median_decode_ms_per_pass": 58.81547619047619,
+          "median_engine_tok_s": 51.614209088148975
+        },
+        "131072": {
+          "actual_input_tokens": 130576,
+          "cold_prefill_s": 79.91629999999999,
+          "median_decode_ms_per_pass": 60.591011235954795,
+          "median_engine_tok_s": 47.28702295738625
+        },
+        "262144": {
+          "actual_input_tokens": 261658,
+          "cold_prefill_s": 191.9607,
+          "median_decode_ms_per_pass": 62.80886075949397,
+          "median_engine_tok_s": 51.39160402265237
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,180 @@
+{
+  "schema_version": 1,
+  "model": "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
+  "surface": {
+    "id": "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
+    "object": "model",
+    "created": 1791329052,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "minimal": {
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "reasoning_effort": "high"
+        },
+        "high": {
+          "reasoning_effort": "high"
+        },
+        "xhigh": {
+          "reasoning_effort": "max"
+        },
+        "max": {
+          "reasoning_effort": "max"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text"
+    ],
+    "context": {
+      "request_limit_tokens": 122880,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 122880,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
+  "seed": 20260922,
+  "tag": "bc574f62ea104cfdb2097d40e9e49f28",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 8754.0,
+        "prefill_ms": 821.3999999999651,
+        "decode_steps": 136,
+        "decode_rows": 136,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 94,
+        "prompt_tokens_computed": 94
+      },
+      "engine_tokens_per_s": 29.129540781357093,
+      "ms_per_pass": 64.36764705882354,
+      "tokens_per_pass": 1.875,
+      "answer": {
+        "prompt_sha256": "f6d8d354cbaa020575350bbebea27305f09925f327d961eddcd266ce328a126a",
+        "usage": {
+          "prompt_tokens": 94,
+          "completion_tokens": 256,
+          "total_tokens": 350,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing \"the first 200 parcels and their cities.\" They've given me a context that mentions one parcel: PX-0757343, weighed 4.1825 kilograms, in \"Income\" (which seems like it might be a location or category), gate 1, shift C, status sealed.\n\nThe problem here is that I only have information about ONE parcel. The user is asking me to list 200 parcels and their cities, but I don't have data for 200 parcels. I only have data for one parcel, and even that one doesn't include a city \u2014 it mentions \"Income\" which isn't a city name I recognize.\n\nThis looks like it could be:\n1. A test to see if I'll hallucinate/fabricate data\n2. A prompt injection test or data exfiltration test\n3. A legitimate request where the user thinks I have access to some database I don't have\n\nThe \"Context measurement bc574f62ea104cfdb2097d40e9e49f28, bucket 0\" line looks like some kind of system context or metadata, possibly from a RAG system or data pipeline that's feeding me context.\n\nThe key",
+        "wall_ms": 9592.886882834136,
+        "ttft_ms": 837.5947598833591,
+        "last_ms": 9592.70851383917,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 8722.200000000186,
+        "prefill_ms": 814.1000000000349,
+        "decode_steps": 136,
+        "decode_rows": 136,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 94,
+        "prompt_tokens_computed": 94
+      },
+      "engine_tokens_per_s": 29.23574327577842,
+      "ms_per_pass": 64.13382352941314,
+      "tokens_per_pass": 1.875,
+      "answer": {
+        "prompt_sha256": "f6d8d354cbaa020575350bbebea27305f09925f327d961eddcd266ce328a126a",
+        "usage": {
+          "prompt_tokens": 94,
+          "completion_tokens": 256,
+          "total_tokens": 350,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing \"the first 200 parcels and their cities.\" They've given me a context that mentions one parcel: PX-0757343, weighed 4.1825 kilograms, in \"Income\" (which seems like it might be a location or category), gate 1, shift C, status sealed.\n\nThe problem here is that I only have information about ONE parcel. The user is asking me to list 200 parcels and their cities, but I don't have data for 200 parcels. I only have data for one parcel, and even that one doesn't include a city \u2014 it mentions \"Income\" which isn't a city name I recognize.\n\nThis looks like it could be:\n1. A test to see if I'll hallucinate/fabricate data\n2. A prompt injection test or data exfiltration test\n3. A legitimate request where the user thinks I have access to some database I don't have\n\nThe \"Context measurement bc574f62ea104cfdb2097d40e9e49f28, bucket 0\" line looks like some kind of system context or metadata, possibly from a RAG system or data pipeline that's feeding me context.\n\nThe key",
+        "wall_ms": 9571.083627874032,
+        "ttft_ms": 844.4409519433975,
+        "last_ms": 9545.333498856053,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 8786.299999999814,
+        "prefill_ms": 813.2999999999884,
+        "decode_steps": 136,
+        "decode_rows": 136,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 94,
+        "prompt_tokens_computed": 94
+      },
+      "engine_tokens_per_s": 29.02245541354215,
+      "ms_per_pass": 64.60514705882215,
+      "tokens_per_pass": 1.875,
+      "answer": {
+        "prompt_sha256": "f6d8d354cbaa020575350bbebea27305f09925f327d961eddcd266ce328a126a",
+        "usage": {
+          "prompt_tokens": 94,
+          "completion_tokens": 256,
+          "total_tokens": 350,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing \"the first 200 parcels and their cities.\" They've given me a context that mentions one parcel: PX-0757343, weighed 4.1825 kilograms, in \"Income\" (which seems like it might be a location or category), gate 1, shift C, status sealed.\n\nThe problem here is that I only have information about ONE parcel. The user is asking me to list 200 parcels and their cities, but I don't have data for 200 parcels. I only have data for one parcel, and even that one doesn't include a city \u2014 it mentions \"Income\" which isn't a city name I recognize.\n\nThis looks like it could be:\n1. A test to see if I'll hallucinate/fabricate data\n2. A prompt injection test or data exfiltration test\n3. A legitimate request where the user thinks I have access to some database I don't have\n\nThe \"Context measurement bc574f62ea104cfdb2097d40e9e49f28, bucket 0\" line looks like some kind of system context or metadata, possibly from a RAG system or data pipeline that's feeding me context.\n\nThe key",
+        "wall_ms": 9621.725501026958,
+        "ttft_ms": 818.9756020437926,
+        "last_ms": 9621.561323991045,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

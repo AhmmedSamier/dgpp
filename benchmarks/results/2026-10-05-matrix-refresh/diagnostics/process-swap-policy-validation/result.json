@@ -1,0 +1,20 @@
+{
+  "recorded_at": "2026-10-06T09:46:08.611211+00:00",
+  "scope": "small synthetic Python processes, no GPU workload",
+  "cases": [
+    {
+      "case": "protected",
+      "samples": 3,
+      "violations": 0,
+      "process_running_after_probe": true,
+      "passed": true
+    },
+    {
+      "case": "unprotected",
+      "samples": 1,
+      "violations": 1,
+      "process_running_after_probe": false,
+      "passed": true
+    }
+  ]
+}

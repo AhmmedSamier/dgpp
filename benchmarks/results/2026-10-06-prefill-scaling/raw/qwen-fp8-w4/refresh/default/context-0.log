@@ -1,0 +1,3 @@
+0 r0: 156 prompt tokens, 0 cached, prefill 0.158s, decode 78.09 tok/s, 23.66 ms/pass
+0 r1: 156 prompt tokens, 0 cached, prefill 0.153s, decode 78.58 tok/s, 23.51 ms/pass
+0 r2: 156 prompt tokens, 0 cached, prefill 0.167s, decode 78.45 tok/s, 23.55 ms/pass

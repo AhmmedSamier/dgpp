@@ -1,0 +1,35 @@
+{
+  "at": "2026-10-07T14:54:21.709881+00:00",
+  "scope": "Each rank uses its own warm-capture-complete log marker, avoiding host clock skew. Startup warnings precede measurement. Zero warning lines do not establish zero collective wait time.",
+  "first_measurement": "2026-10-07T14:09:24.588580+00:00",
+  "logs": [
+    {
+      "path": "server/serve_r0.log",
+      "sha256": "05875e6758ac4a885e85726559f7f632fc68aaef8e947371543c71d2adee5ec8",
+      "warm_capture_complete": "2026-10-07 14:09:22.759 INFO  rank 0: warm capture complete \u2014 4 scalar variants and the row batches for 2 slots, 3 slots, 4 slots recorded before the first request",
+      "startup_stall_warning_lines": 0,
+      "post_warm_capture_stall_warning_lines": 0
+    },
+    {
+      "path": "server/serve_r1.log",
+      "sha256": "b0e957187d28f51c501b870ef2197f1b63473266da4af1d45aed54143e8678d7",
+      "warm_capture_complete": "2026-10-07 14:10:46.695 INFO  rank 1: warm capture complete \u2014 4 scalar variants and the row batches for 2 slots, 3 slots, 4 slots recorded before the first request",
+      "startup_stall_warning_lines": 0,
+      "post_warm_capture_stall_warning_lines": 0
+    },
+    {
+      "path": "server/serve_r2.log",
+      "sha256": "7cbd74219c8b2f86d91c3130b787d2b4df8f90173abda180863a5a35c28d8821",
+      "warm_capture_complete": "2026-10-07 14:09:22.662 INFO  rank 2: warm capture complete \u2014 4 scalar variants and the row batches for 2 slots, 3 slots, 4 slots recorded before the first request",
+      "startup_stall_warning_lines": 0,
+      "post_warm_capture_stall_warning_lines": 0
+    },
+    {
+      "path": "server/serve_r3.log",
+      "sha256": "2bbcc2a6471ea15344735d05fe829f091ab3628dfaefc7add262e8e561393700",
+      "warm_capture_complete": "2026-10-07 14:09:16.193 INFO  rank 3: warm capture complete \u2014 4 scalar variants and the row batches for 2 slots, 3 slots, 4 slots recorded before the first request",
+      "startup_stall_warning_lines": 0,
+      "post_warm_capture_stall_warning_lines": 0
+    }
+  ]
+}

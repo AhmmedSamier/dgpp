@@ -1,0 +1,3 @@
+262144 r0: 261614 prompt tokens, 0 cached, prefill 1523.415s, decode 50.39 tok/s, 38.93 ms/pass
+262144 r1: 261614 prompt tokens, 261612 cached, prefill 0.159s, decode 50.31 tok/s, 38.99 ms/pass
+262144 r2: 261614 prompt tokens, 261612 cached, prefill 0.155s, decode 50.36 tok/s, 38.95 ms/pass

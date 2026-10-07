@@ -1,0 +1,43 @@
+{
+  "at": "2026-10-07T18:54:25.631403+00:00",
+  "passed": true,
+  "scope": "Original snapshot directories and resident-file sizes preserved; all session-downloaded model and dedicated cache directories removed. Extra global images and live serving processes are reported separately.",
+  "nodes": [
+    {
+      "host": "192.168.88.11",
+      "missing_initial_snapshots": [],
+      "changed_or_missing_initial_resident": [],
+      "remaining_session_model_paths": [],
+      "extra_global_resident": {},
+      "serving_processes": [],
+      "free_bytes": 767582887936
+    },
+    {
+      "host": "192.168.88.12",
+      "missing_initial_snapshots": [],
+      "changed_or_missing_initial_resident": [],
+      "remaining_session_model_paths": [],
+      "extra_global_resident": {},
+      "serving_processes": [],
+      "free_bytes": 968763097088
+    },
+    {
+      "host": "192.168.88.13",
+      "missing_initial_snapshots": [],
+      "changed_or_missing_initial_resident": [],
+      "remaining_session_model_paths": [],
+      "extra_global_resident": {},
+      "serving_processes": [],
+      "free_bytes": 951172517888
+    },
+    {
+      "host": "192.168.88.14",
+      "missing_initial_snapshots": [],
+      "changed_or_missing_initial_resident": [],
+      "remaining_session_model_paths": [],
+      "extra_global_resident": {},
+      "serving_processes": [],
+      "free_bytes": 1019151245312
+    }
+  ]
+}

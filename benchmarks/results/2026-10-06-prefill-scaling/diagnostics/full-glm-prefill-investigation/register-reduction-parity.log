@@ -1,0 +1,2 @@
+[FAIL] dsa_fused_prefill_score_matches_gemm: fused score key mismatch: pools=2053 mode=0 relu=0 count=1281
+1 tests, 1 failed

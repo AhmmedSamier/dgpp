@@ -1,0 +1,9 @@
+2026-10-06 17:45:54.535 === SIGINT rank 0 (1780428) — the stop record releases the peers
+2026-10-06 17:45:56.536 === waiting for the peers to drain
+2026-10-06 17:46:00.523 === op-stream identity (every rank)
+2026-10-06 17:46:00.523 709cdb7f819ca6fd8116b0e149d12e96  /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm-flash-fp8-512k-w4/refresh/mtp3/server/serve_rank0.ops
+2026-10-06 17:46:00.523 709cdb7f819ca6fd8116b0e149d12e96  /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm-flash-fp8-512k-w4/refresh/mtp3/server/serve_rank1.ops
+2026-10-06 17:46:00.523 709cdb7f819ca6fd8116b0e149d12e96  /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm-flash-fp8-512k-w4/refresh/mtp3/server/serve_rank2.ops
+2026-10-06 17:46:00.524 709cdb7f819ca6fd8116b0e149d12e96  /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm-flash-fp8-512k-w4/refresh/mtp3/server/serve_rank3.ops
+2026-10-06 17:46:00.524 op streams: identical across 4 ranks
+2026-10-06 17:46:00.524 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm-flash-fp8-512k-w4/refresh/mtp3/server

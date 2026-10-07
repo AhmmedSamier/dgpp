@@ -1,0 +1,20 @@
+{
+  "command": [
+    "/home/stephen/workspace/dgpp/.venv/bin/python",
+    "/home/stephen/workspace/dgpp/scripts/serve_context_matrix.py",
+    "127.0.0.1",
+    "18080",
+    "--model",
+    "Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN",
+    "--tag",
+    "ac822a0417a94d6fb3d5019a5b25d6fb",
+    "--lengths",
+    "131072",
+    "--json-out",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen-autoround-w1/refresh/default/context-131072.json"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-10-06T22:15:49.076806+00:00",
+  "returncode": 0,
+  "finished_at": "2026-10-06T22:17:28.036741+00:00"
+}

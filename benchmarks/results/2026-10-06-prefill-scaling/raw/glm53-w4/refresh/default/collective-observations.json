@@ -1,0 +1,30 @@
+{
+  "recorded_at": "2026-10-07T03:57:56.168564+00:00",
+  "scope": "All STALLED warnings, including startup",
+  "ranks": [
+    {
+      "rank": 0,
+      "source": "server/serve_r0.log",
+      "sha256": "93a497ab6e31f98ca224e8cf27aa38114297ee0549ae4d58fd2cbb27a073f8fd",
+      "stall_warnings": 0
+    },
+    {
+      "rank": 1,
+      "source": "server/serve_r1.log",
+      "sha256": "beafeaef3a0b88c1f5669468182942fbb758a97a05aa8ab31b83fdf670c3fbad",
+      "stall_warnings": 0
+    },
+    {
+      "rank": 2,
+      "source": "server/serve_r2.log",
+      "sha256": "492953bc427167d79b8ed8561aa97b12ee33536c30d2b321f1fe250b320f51c0",
+      "stall_warnings": 0
+    },
+    {
+      "rank": 3,
+      "source": "server/serve_r3.log",
+      "sha256": "211cf32e4456d4524d76c7ba4e77bd86d90fea91a0965166994e40f170be327c",
+      "stall_warnings": 0
+    }
+  ]
+}

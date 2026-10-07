@@ -1,0 +1,20 @@
+{
+  "command": [
+    "/home/stephen/workspace/dgpp/.venv/bin/python",
+    "/home/stephen/workspace/dgpp/scripts/serve_context_matrix.py",
+    "127.0.0.1",
+    "18080",
+    "--model",
+    "deepseek-ai/DeepSeek-V4-Flash-0731",
+    "--tag",
+    "f14c5cc9144c4678ae671e40e5e7a175",
+    "--lengths",
+    "65536",
+    "--json-out",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/default/context-65536.json"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-10-07T08:28:14.743914+00:00",
+  "returncode": 0,
+  "finished_at": "2026-10-07T08:30:02.231900+00:00"
+}

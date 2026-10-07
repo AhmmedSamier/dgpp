@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+  "surface": {
+    "id": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+    "object": "model",
+    "created": 1791311668,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": 262144,
+      "kv_pool_tokens": 262144,
+      "limited_by": "position-ceiling"
+    }
+  },
+  "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+  "seed": 20260922,
+  "tag": "879c4fb0e83f417e82e22d97305c904f",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 262144,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 8195.599999999977,
+        "prefill_ms": 199488.5,
+        "decode_steps": 140,
+        "decode_rows": 140,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 261662,
+        "prompt_tokens_computed": 261662
+      },
+      "engine_tokens_per_s": 31.114256430279752,
+      "ms_per_pass": 58.539999999999836,
+      "tokens_per_pass": 1.8214285714285714,
+      "answer": {
+        "prompt_sha256": "ae887562b9b6d739e1b215f5bf65133af9e71095a0a32b0c5721a620e402faf4",
+        "usage": {
+          "prompt_tokens": 261662,
+          "completion_tokens": 256,
+          "total_tokens": 261918,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. User provided huge context measurement with items 000000 to 005831? They ask: \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Need likely list first 200 parcels and their cities. Need infer numbering? \"first 200 parcels\" likely Item 000000 through Item 000199? They say numbered list describing first 200 parcels and their cities. Continue until you have listed all 200. Need output 1-200 maybe parcel IDs and cities. Need be careful: first 200 parcels in provided list are Item 000000 to Item 000199 inclusive. Need describe parcel and city. Could format: 1. PX-0757343 \u2014 Income. Need include parcel number and city. Maybe \"Item 000000: parcel PX-0757343, Income\". They ask numbered list describing first 200 parcels and their cities. Continue until listed all 200",
+        "wall_ms": 207815.7042649109,
+        "ttft_ms": 199598.49670506082,
+        "last_ms": 207815.45890285634,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 262144,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 8131.599999999977,
+        "prefill_ms": 96.29999999998836,
+        "decode_steps": 140,
+        "decode_rows": 140,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 261662,
+        "prompt_tokens_computed": 6
+      },
+      "engine_tokens_per_s": 31.359142112253522,
+      "ms_per_pass": 58.08285714285697,
+      "tokens_per_pass": 1.8214285714285714,
+      "answer": {
+        "prompt_sha256": "ae887562b9b6d739e1b215f5bf65133af9e71095a0a32b0c5721a620e402faf4",
+        "usage": {
+          "prompt_tokens": 261662,
+          "completion_tokens": 256,
+          "total_tokens": 261918,
+          "prompt_tokens_details": {
+            "cached_tokens": 261656
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. User provided huge context measurement with items 000000 to 005831? They ask: \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Need likely list first 200 parcels and their cities. Need infer numbering? \"first 200 parcels\" likely Item 000000 through Item 000199? They say numbered list describing first 200 parcels and their cities. Continue until you have listed all 200. Need output 1-200 maybe parcel IDs and cities. Need be careful: first 200 parcels in provided list are Item 000000 to Item 000199 inclusive. Need describe parcel and city. Could format: 1. PX-0757343 \u2014 Income. Need include parcel number and city. Maybe \"Item 000000: parcel PX-0757343, Income\". They ask numbered list describing first 200 parcels and their cities. Continue until listed all 200",
+        "wall_ms": 8344.933101907372,
+        "ttft_ms": 212.33577886596322,
+        "last_ms": 8344.773595919833,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 262144,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 8122.5,
+        "prefill_ms": 94.70000000001164,
+        "decode_steps": 140,
+        "decode_rows": 140,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 261662,
+        "prompt_tokens_computed": 6
+      },
+      "engine_tokens_per_s": 31.39427516158818,
+      "ms_per_pass": 58.017857142857146,
+      "tokens_per_pass": 1.8214285714285714,
+      "answer": {
+        "prompt_sha256": "ae887562b9b6d739e1b215f5bf65133af9e71095a0a32b0c5721a620e402faf4",
+        "usage": {
+          "prompt_tokens": 261662,
+          "completion_tokens": 256,
+          "total_tokens": 261918,
+          "prompt_tokens_details": {
+            "cached_tokens": 261656
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. User provided huge context measurement with items 000000 to 005831? They ask: \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Need likely list first 200 parcels and their cities. Need infer numbering? \"first 200 parcels\" likely Item 000000 through Item 000199? They say numbered list describing first 200 parcels and their cities. Continue until you have listed all 200. Need output 1-200 maybe parcel IDs and cities. Need be careful: first 200 parcels in provided list are Item 000000 to Item 000199 inclusive. Need describe parcel and city. Could format: 1. PX-0757343 \u2014 Income. Need include parcel number and city. Maybe \"Item 000000: parcel PX-0757343, Income\". They ask numbered list describing first 200 parcels and their cities. Continue until listed all 200",
+        "wall_ms": 8329.56654089503,
+        "ttft_ms": 190.6904769130051,
+        "last_ms": 8303.844670997933,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

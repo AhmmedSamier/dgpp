@@ -1,0 +1,91 @@
+[ OK ] dsa_fwht_quant_matches_host_reference
+[ OK ] dsa_kpool_compress_matches_host_reference
+[ OK ] dsa_tail_seed_matches_reference_rule
+[ OK ] dsa_decode_update_ring_continuation_matches_host
+[ OK ] dsa_select_prefill_radix_long_context_exact
+[ OK ] dsa_select_prefill_partition_shapes_and_tails
+[ OK ] dsa_select_prefill_bitwise_fuzz
+[ OK ] dsa_select_decode_fused_bitwise
+[ OK ] dsa_absorbed_attention_matches_host_reference
+[ OK ] projections mma heads=64: absorb l2_rel 0 max_rel 0 mismatches 0/1343488; vout l2_rel 8.6e-05 max_rel 0.293 mismatches 46/671744
+[ OK ] projections mma heads=16: absorb l2_rel 0 max_rel 0 mismatches 0/335872; vout l2_rel 9.26e-05 max_rel 0.272 mismatches 9/167936
+[ OK ] dsa_absorb_and_vout_mma_match_the_warp_kernels
+[ OK ] row batches heads=64 rope=0: absorb and vout bitwise the rows alone at 1..16 rows
+[ OK ] row batches heads=64 rope=64: absorb and vout bitwise the rows alone at 1..16 rows
+[ OK ] row batches heads=16 rope=0: absorb and vout bitwise the rows alone at 1..16 rows
+[ OK ] row batches heads=16 rope=64: absorb and vout bitwise the rows alone at 1..16 rows
+[ OK ] dsa_absorb_and_vout_row_batches_match_the_rows_alone
+[ OK ] listed attention heads=64 kv=512: c vs split kernel l2_rel 2.84e-05
+[ OK ] listed attention heads=16 kv=512: c vs split kernel l2_rel 3.59e-05
+[ OK ] listed attention heads=16 kv=256: c vs split kernel l2_rel 3.63e-05
+[ OK ] dsa_listed_attention_matches_split_kernel_and_reference
+[ OK ] dense attention heads=64 kv=512: c vs split kernel l2_rel 7.48e-07 (n_split 4), 0.000152 (n_split 1)
+[ OK ] dense attention heads=16 kv=512: c vs split kernel l2_rel 5.46e-07 (n_split 4), 0.000149 (n_split 1)
+[ OK ] dense attention heads=16 kv=256: c vs split kernel l2_rel 5.16e-07 (n_split 4), 0.00018 (n_split 1)
+[ OK ] dsa_dense_attention_matches_split_kernel_and_reference
+[ OK ] dsa_select_decode_mtp_rows_and_short_context
+[ OK ] dsa_select_decode_row_groups
+[ OK ] dsa_select_decode_64_heads_release_shape
+[ OK ] dsa_select_decode_grid_invariance
+[ OK ] dsa_select_decode_long_context_multitile
+[ OK ] dsa_select_prefill_multi_row
+[ OK ] dsa_select_exact_ties_break_to_lower_pool
+[ OK ] dsa_latent_append_and_gather_roundtrip
+[ OK ] dsa_elementwise_norms_and_fold
+[ OK ] dsa_decode_update_multi_request_and_padding
+[ OK ] dsa_attention_tp1_headgroups_and_empty_row
+[ OK ] dsa_select_decode_graph_replay
+[ OK ] dsa_kpool2_compress_and_ring_smoke
+[ OK ] dsa_state_pool_block_allocation_and_accounting
+[INFO] layer prefill (fp8 projections): 1/29 sparse rows flipped (1 audited as near ties, max certified row l2 0.4716; kept-row max l2 5.96e-03; unaudited max l2 0.0000)
+[INFO] layer prefill (fp8 projections) near-tie audit: 1 rows / 1 swaps certified, max boundary gap 7.727e-02 (0.9x noise)
+[INFO] layer prefill (bridge form): 1/29 sparse rows flipped (1 audited as near ties, max certified row l2 0.4716; kept-row max l2 5.96e-03; unaudited max l2 0.0000)
+[INFO] layer prefill (bridge form) near-tie audit: 1 rows / 1 swaps certified, max boundary gap 7.727e-02 (0.9x noise)
+[ OK ] dsa_layer_prefill_fp8_projections_match_reference
+[ OK ] dsa_layer_prefill_dot_budget_preserves_selection_and_output
+[INFO] layer prefill: 2/29 sparse rows flipped (2 audited as near ties, max certified row l2 0.5736; kept-row max l2 3.86e-03; unaudited max l2 0.0000)
+[INFO] layer prefill near-tie audit: 2 rows / 2 swaps certified, max boundary gap 2.948e+00 (4.1x noise)
+[ OK ] dsa_layer_prefill_matches_reference
+[INFO] layer chunked+decode: 6/103 sparse rows flipped (6 audited as near ties, max certified row l2 0.6798; kept-row max l2 3.72e-03; unaudited max l2 0.0000)
+[INFO] layer chunked+decode near-tie audit: 6 rows / 6 swaps certified, max boundary gap 1.253e+00 (2.1x noise)
+[ OK ] dsa_layer_chunked_prefill_and_decode_match_reference
+[INFO] layer chunked+decode select8: 8/135 sparse rows flipped (8 audited as near ties, max certified row l2 1.0066; kept-row max l2 3.82e-03; unaudited max l2 0.0000)
+[INFO] layer chunked+decode select8 near-tie audit: 8 rows / 8 swaps certified, max boundary gap 2.644e+00 (3.1x noise)
+2026-10-06 15:35:36.683 INFO  graph captured key=0x1 label=dsa-decode nodes=20 (total captures=1)
+[ OK ] dsa_layer_chunked_prefill_and_decode_select8
+[ OK ] dsa_layer_decode_graph_replay_matches_eager
+[ OK ] dsa_layer_decode_padding_row_is_zero_and_leaves_live_rows_bitwise
+[ OK ] dsa_layer_tp2_head_slice_matches_tp1
+[ OK ] dsa_layer_real_geometry_chunked_prefill_decode_smoke
+[ OK ] dsa_latent_append_quantized_matches_host_codec
+[ OK ] dsa_attention_quantized_cache_matches_dequantized_oracle
+[INFO] layer chunked+decode on an fp8 cache: 6/103 sparse rows flipped (6 audited as near ties, max certified row l2 0.6853; kept-row max l2 4.25e-03; unaudited max l2 0.0000)
+[INFO] layer chunked+decode on an fp8 cache near-tie audit: 6 rows / 6 swaps certified, max boundary gap 1.253e+00 (2.1x noise)
+[INFO] layer chunked+decode on an fp4 cache: 6/103 sparse rows flipped (6 audited as near ties, max certified row l2 0.8042; kept-row max l2 4.10e-03; unaudited max l2 0.0000)
+[INFO] layer chunked+decode on an fp4 cache near-tie audit: 6 rows / 6 swaps certified, max boundary gap 1.253e+00 (2.1x noise)
+[ OK ] dsa_layer_quantized_cache_matches_reference
+[ OK ] dsa_rope_interleave_matches_host_table
+[ OK ] dsa_state_pool_index_ordinals_and_full_geometry_bytes
+[INFO] full layer prefill: 0/80 sparse rows flipped (0 audited as near ties, max certified row l2 0.0000; kept-row max l2 3.16e-03; unaudited max l2 0.0000)
+[INFO] full layer prefill near-tie audit: 0 rows / 0 swaps certified, max boundary gap 0.000e+00 (0.0x noise)
+[ OK ] dsa_layer_full_prefill_matches_reference
+[INFO] full layer chunked+decode: 0/154 sparse rows flipped (0 audited as near ties, max certified row l2 0.0000; kept-row max l2 4.21e-03; unaudited max l2 0.0000)
+[INFO] full layer chunked+decode near-tie audit: 0 rows / 0 swaps certified, max boundary gap 0.000e+00 (0.0x noise)
+[INFO] full layer chunked+decode on an fp8 cache: 0/154 sparse rows flipped (0 audited as near ties, max certified row l2 0.0000; kept-row max l2 3.38e-03; unaudited max l2 0.0000)
+[INFO] full layer chunked+decode on an fp8 cache near-tie audit: 0 rows / 0 swaps certified, max boundary gap 0.000e+00 (0.0x noise)
+[INFO] full layer chunked+decode on an fp4 cache: 0/154 sparse rows flipped (0 audited as near ties, max certified row l2 0.0000; kept-row max l2 3.93e-03; unaudited max l2 0.0000)
+[INFO] full layer chunked+decode on an fp4 cache near-tie audit: 0 rows / 0 swaps certified, max boundary gap 0.000e+00 (0.0x noise)
+[ OK ] dsa_layer_full_chunked_prefill_and_decode_match_reference
+[INFO] full layer prefill (packed projections): 0/80 sparse rows flipped (0 audited as near ties, max certified row l2 0.0000; kept-row max l2 3.95e-03; unaudited max l2 0.0000)
+[INFO] full layer prefill (packed projections) near-tie audit: 0 rows / 0 swaps certified, max boundary gap 0.000e+00 (0.0x noise)
+[INFO] full layer prefill (bridge form): 0/80 sparse rows flipped (0 audited as near ties, max certified row l2 0.0000; kept-row max l2 3.95e-03; unaudited max l2 0.0000)
+[INFO] full layer prefill (bridge form) near-tie audit: 0 rows / 0 swaps certified, max boundary gap 0.000e+00 (0.0x noise)
+[ OK ] dsa_layer_full_packed_projections_match_reference
+[INFO] shared selection: layer 0: 0/84 sparse rows flipped (0 audited as near ties, max certified row l2 0.0000; kept-row max l2 1.41e-02; unaudited max l2 0.0000)
+[INFO] shared selection: layer 1: 0/84 sparse rows flipped (0 audited as near ties, max certified row l2 0.0000; kept-row max l2 3.77e-03; unaudited max l2 0.0000)
+[INFO] shared selection near-tie audit: 0 rows / 0 swaps certified, max boundary gap 0.000e+00 (0.0x noise)
+[ OK ] dsa_layer_full_shared_selection_matches_reference
+[ OK ] dsa_layer_full_tp2_head_slice_matches_tp1
+[ OK ] dsa_select_kpool1_select2048_bitwise
+[ OK ] dsa_layer_full_real_geometry_smoke
+48 tests, 0 failed

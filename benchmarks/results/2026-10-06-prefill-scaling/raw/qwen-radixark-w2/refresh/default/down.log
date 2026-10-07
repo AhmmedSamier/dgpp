@@ -1,0 +1,7 @@
+2026-10-06 20:54:31.781 === SIGINT rank 0 (2220398) — the stop record releases the peers
+2026-10-06 20:54:33.783 === waiting for the peers to drain
+2026-10-06 20:54:35.334 === op-stream identity (every rank)
+2026-10-06 20:54:35.339 95a5c79e47035c4bb6e10f37c83e4412  /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen-radixark-w2/refresh/default/server/serve_rank0.ops
+2026-10-06 20:54:35.343 95a5c79e47035c4bb6e10f37c83e4412  /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen-radixark-w2/refresh/default/server/serve_rank1.ops
+2026-10-06 20:54:35.343 op streams: identical across 2 ranks
+2026-10-06 20:54:35.343 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen-radixark-w2/refresh/default/server

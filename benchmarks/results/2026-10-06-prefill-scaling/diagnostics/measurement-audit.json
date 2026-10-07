@@ -1,0 +1,4493 @@
+{
+  "checked_at": "2026-10-07T21:32:04.587624+00:00",
+  "validated_reports_passed": true,
+  "complete": true,
+  "validated_report_count": 336,
+  "scope": "Validated reports only; reconcile request counts, token usage and timing calculations. Pending launches are excluded until memory, rank identity and shutdown gates pass.",
+  "checked": {
+    "glm-flash-hybrid-w2/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/default/greedy.json",
+          "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-w2/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/default/prefill.json",
+          "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+          "reused": true,
+          "lengths": [
+            2048,
+            8192
+          ]
+        },
+        {
+          "path": "raw/glm-flash-hybrid-w2/refresh/default/prefill.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true,
+          "lengths": [
+            32768
+          ]
+        }
+      ]
+    },
+    "glm-flash-hybrid-w2/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 94
+      },
+      "sources": [
+        {
+          "path": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/default/context-0.json",
+          "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-w2/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32236
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-hybrid-w2/refresh/default/context-32768.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-w2/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65011
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-hybrid-w2/refresh/default/context-65536.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-w2/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130537
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-hybrid-w2/refresh/default/context-131072.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-w2/default/context-262144": {
+      "checks": {
+        "skipped_above_request_limit": 163840
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-hybrid-w2/refresh/default/context-262144.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-w2/default/context-524288": {
+      "checks": {
+        "skipped_above_request_limit": 163840
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-hybrid-w2/refresh/default/context-524288.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-w2/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/plain/greedy.json",
+          "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-w2/mtp2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/mtp2/greedy.json",
+          "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-w2/mtp3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/mtp3/greedy.json",
+          "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-256k-w2/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/default/greedy.json",
+          "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-256k-w2/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/default/prefill.json",
+          "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+          "reused": true,
+          "lengths": [
+            2048,
+            8192
+          ]
+        },
+        {
+          "path": "raw/glm-flash-hybrid-256k-w2/refresh/default/prefill.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true,
+          "lengths": [
+            32768
+          ]
+        }
+      ]
+    },
+    "glm-flash-hybrid-256k-w2/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 97
+      },
+      "sources": [
+        {
+          "path": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/default/context-0.json",
+          "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-256k-w2/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32239
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-hybrid-256k-w2/refresh/default/context-32768.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-256k-w2/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65011
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-hybrid-256k-w2/refresh/default/context-65536.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-256k-w2/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130539
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-hybrid-256k-w2/refresh/default/context-131072.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-256k-w2/default/context-262144": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 261632
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-hybrid-256k-w2/refresh/default/context-262144.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-256k-w2/default/context-524288": {
+      "checks": {
+        "skipped_above_request_limit": 262144
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-hybrid-256k-w2/refresh/default/context-524288.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-256k-w2/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/plain/greedy.json",
+          "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-256k-w2/mtp2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/mtp2/greedy.json",
+          "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-256k-w2/mtp3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/mtp3/greedy.json",
+          "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-w4/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-hybrid-w4/refresh/default/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-w4/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-hybrid-w4/refresh/default/prefill.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "glm-flash-hybrid-w4/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 99
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-hybrid-w4/refresh/default/context-0.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-w4/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32239
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-hybrid-w4/refresh/default/context-32768.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-w4/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65014
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-hybrid-w4/refresh/default/context-65536.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-w4/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130538
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-hybrid-w4/refresh/default/context-131072.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-w4/default/context-262144": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 261629
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-hybrid-w4/refresh/default/context-262144.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-w4/default/context-524288": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 523783
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-hybrid-w4/refresh/default/context-524288.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-w4/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/refresh/plain/greedy.json",
+          "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-w4/mtp2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/refresh/mtp2/greedy.json",
+          "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-hybrid-w4/mtp3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/refresh/mtp3/greedy.json",
+          "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-fp8-w4/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "../2026-10-05-matrix-refresh/raw/glm-flash-fp8-w4/refresh/default/greedy.json",
+          "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-fp8-w4/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "../2026-10-05-matrix-refresh/raw/glm-flash-fp8-w4/refresh/default/prefill.json",
+          "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+          "reused": true,
+          "lengths": [
+            2048,
+            8192
+          ]
+        },
+        {
+          "path": "raw/glm-flash-fp8-w4/refresh/default/prefill.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true,
+          "lengths": [
+            32768
+          ]
+        }
+      ]
+    },
+    "glm-flash-fp8-w4/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 99
+      },
+      "sources": [
+        {
+          "path": "../2026-10-05-matrix-refresh/raw/glm-flash-fp8-w4/refresh/default/context-0.json",
+          "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-fp8-w4/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32237
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-fp8-w4/refresh/default/context-32768.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-fp8-w4/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65012
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-fp8-w4/refresh/default/context-65536.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-fp8-w4/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130539
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-fp8-w4/refresh/default/context-131072.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-fp8-w4/default/context-262144": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 261630
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-fp8-w4/refresh/default/context-262144.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-fp8-w4/default/context-524288": {
+      "checks": {
+        "skipped_above_request_limit": 393216
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-fp8-w4/refresh/default/context-524288.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-fp8-w4/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "../2026-10-05-matrix-refresh/raw/glm-flash-fp8-w4/refresh/plain/greedy.json",
+          "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-fp8-w4/mtp2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "../2026-10-05-matrix-refresh/raw/glm-flash-fp8-w4/refresh/mtp2/greedy.json",
+          "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-fp8-w4/mtp3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "../2026-10-05-matrix-refresh/raw/glm-flash-fp8-w4/refresh/mtp3/greedy.json",
+          "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-fp8-512k-w4/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "../2026-10-05-matrix-refresh/raw/glm-flash-fp8-512k-w4/refresh/default/greedy.json",
+          "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-fp8-512k-w4/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "../2026-10-05-matrix-refresh/raw/glm-flash-fp8-512k-w4/refresh/default/prefill.json",
+          "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+          "reused": true,
+          "lengths": [
+            2048,
+            8192
+          ]
+        },
+        {
+          "path": "raw/glm-flash-fp8-512k-w4/refresh/default/prefill.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true,
+          "lengths": [
+            32768
+          ]
+        }
+      ]
+    },
+    "glm-flash-fp8-512k-w4/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 96
+      },
+      "sources": [
+        {
+          "path": "../2026-10-05-matrix-refresh/raw/glm-flash-fp8-512k-w4/refresh/default/context-0.json",
+          "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-fp8-512k-w4/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32234
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-fp8-512k-w4/refresh/default/context-32768.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-fp8-512k-w4/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65009
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-fp8-512k-w4/refresh/default/context-65536.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-fp8-512k-w4/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130539
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-fp8-512k-w4/refresh/default/context-131072.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-fp8-512k-w4/default/context-262144": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 261631
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-fp8-512k-w4/refresh/default/context-262144.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-fp8-512k-w4/default/context-524288": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 523781
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-fp8-512k-w4/refresh/default/context-524288.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-fp8-512k-w4/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-fp8-512k-w4/refresh/plain/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-fp8-512k-w4/mtp2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-fp8-512k-w4/refresh/mtp2/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm-flash-fp8-512k-w4/mtp3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/glm-flash-fp8-512k-w4/refresh/mtp3/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-w1/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-w1/refresh/default/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-w1/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-w1/refresh/default/prefill.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "qwen-nvfp4-w1/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 159
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-w1/refresh/default/context-0.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-w1/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32283
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-w1/refresh/default/context-32768.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-w1/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65052
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-w1/refresh/default/context-65536.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-w1/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130575
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-w1/refresh/default/context-131072.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-w1/default/context-262144": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 261657
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-w1/refresh/default/context-262144.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-w1/default/context-524288": {
+      "checks": {
+        "skipped_above_request_limit": 262144
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-w1/refresh/default/context-524288.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-w1/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-w1/refresh/plain/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-w1/mtp2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-w1/refresh/mtp2/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-w1/mtp3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-w1/refresh/mtp3/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-bf16-w1/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-bf16-w1/refresh/default/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-bf16-w1/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-bf16-w1/refresh/default/prefill.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "qwen-nvfp4-bf16-w1/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 155
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-bf16-w1/refresh/default/context-0.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-bf16-w1/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32286
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-bf16-w1/refresh/default/context-32768.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-bf16-w1/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65051
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-bf16-w1/refresh/default/context-65536.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-bf16-w1/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130574
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-bf16-w1/refresh/default/context-131072.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-bf16-w1/default/context-262144": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 261662
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-bf16-w1/refresh/default/context-262144.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-bf16-w1/default/context-524288": {
+      "checks": {
+        "skipped_above_request_limit": 262144
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-bf16-w1/refresh/default/context-524288.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-bf16-w1/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-bf16-w1/refresh/plain/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-bf16-w1/mtp2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-bf16-w1/refresh/mtp2/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-bf16-w1/mtp3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-bf16-w1/refresh/mtp3/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-w2/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-w2/refresh/default/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-w2/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-w2/refresh/default/prefill.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "qwen-nvfp4-w2/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 156
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-w2/refresh/default/context-0.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-w2/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32286
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-w2/refresh/default/context-32768.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-w2/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65054
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-w2/refresh/default/context-65536.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-w2/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130573
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-w2/refresh/default/context-131072.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-w2/default/context-262144": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 261659
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-w2/refresh/default/context-262144.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-w2/default/context-524288": {
+      "checks": {
+        "skipped_above_request_limit": 262144
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-w2/refresh/default/context-524288.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-w2/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-w2/refresh/plain/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-w2/mtp2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-w2/refresh/mtp2/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-nvfp4-w2/mtp3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-nvfp4-w2/refresh/mtp3/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-yarn-w2/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-yarn-w2/refresh/default/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-yarn-w2/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-yarn-w2/refresh/default/prefill.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "qwen-yarn-w2/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 160
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-yarn-w2/refresh/default/context-0.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-yarn-w2/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32287
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-yarn-w2/refresh/default/context-32768.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-yarn-w2/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65052
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-yarn-w2/refresh/default/context-65536.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-yarn-w2/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130576
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-yarn-w2/refresh/default/context-131072.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-yarn-w2/default/context-262144": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 261657
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-yarn-w2/refresh/default/context-262144.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-yarn-w2/default/context-524288": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 523788
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-yarn-w2/refresh/default/context-524288.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-yarn-w2/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-yarn-w2/refresh/plain/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-yarn-w2/mtp2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-yarn-w2/refresh/mtp2/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-yarn-w2/mtp3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-yarn-w2/refresh/mtp3/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-radixark-w1/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-radixark-w1/refresh/default/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-radixark-w1/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-radixark-w1/refresh/default/prefill.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "qwen-radixark-w1/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 157
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-radixark-w1/refresh/default/context-0.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-radixark-w1/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32285
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-radixark-w1/refresh/default/context-32768.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-radixark-w1/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65055
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-radixark-w1/refresh/default/context-65536.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-radixark-w1/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130573
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-radixark-w1/refresh/default/context-131072.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-radixark-w1/default/context-262144": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 261659
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-radixark-w1/refresh/default/context-262144.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-radixark-w1/default/context-524288": {
+      "checks": {
+        "skipped_above_request_limit": 262144
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-radixark-w1/refresh/default/context-524288.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-radixark-w1/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-radixark-w1/refresh/plain/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-radixark-w1/mtp1/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-radixark-w1/refresh/mtp1/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-radixark-w1/mtp3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-radixark-w1/refresh/mtp3/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-radixark-w2/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-radixark-w2/refresh/default/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-radixark-w2/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-radixark-w2/refresh/default/prefill.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "qwen-radixark-w2/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 159
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-radixark-w2/refresh/default/context-0.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-radixark-w2/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32282
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-radixark-w2/refresh/default/context-32768.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-radixark-w2/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65055
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-radixark-w2/refresh/default/context-65536.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-radixark-w2/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130576
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-radixark-w2/refresh/default/context-131072.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-radixark-w2/default/context-262144": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 261659
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-radixark-w2/refresh/default/context-262144.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-radixark-w2/default/context-524288": {
+      "checks": {
+        "skipped_above_request_limit": 262144
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-radixark-w2/refresh/default/context-524288.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-radixark-w2/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-radixark-w2/refresh/plain/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-radixark-w2/mtp1/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-radixark-w2/refresh/mtp1/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-radixark-w2/mtp2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-radixark-w2/refresh/mtp2/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-radixark-w2/mtp3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-radixark-w2/refresh/mtp3/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-fp8-w2/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-fp8-w2/refresh/default/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-fp8-w2/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-fp8-w2/refresh/default/prefill.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "qwen-fp8-w2/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 158
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-fp8-w2/refresh/default/context-0.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-fp8-w2/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32286
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-fp8-w2/refresh/default/context-32768.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-fp8-w2/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65054
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-fp8-w2/refresh/default/context-65536.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-fp8-w2/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130573
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-fp8-w2/refresh/default/context-131072.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-fp8-w2/default/context-262144": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 261661
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-fp8-w2/refresh/default/context-262144.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-fp8-w2/default/context-524288": {
+      "checks": {
+        "skipped_above_request_limit": 262144
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-fp8-w2/refresh/default/context-524288.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-fp8-w2/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-fp8-w2/refresh/plain/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-fp8-w2/mtp2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-fp8-w2/refresh/mtp2/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-fp8-w2/mtp3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-fp8-w2/refresh/mtp3/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-fp8-w4/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-fp8-w4/refresh/default/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-fp8-w4/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-fp8-w4/refresh/default/prefill.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "qwen-fp8-w4/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 156
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-fp8-w4/refresh/default/context-0.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-fp8-w4/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32286
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-fp8-w4/refresh/default/context-32768.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-fp8-w4/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65055
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-fp8-w4/refresh/default/context-65536.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-fp8-w4/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130572
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-fp8-w4/refresh/default/context-131072.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-fp8-w4/default/context-262144": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 261659
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-fp8-w4/refresh/default/context-262144.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-fp8-w4/default/context-524288": {
+      "checks": {
+        "skipped_above_request_limit": 262144
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-fp8-w4/refresh/default/context-524288.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-fp8-w4/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-fp8-w4/refresh/plain/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-fp8-w4/mtp2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-fp8-w4/refresh/mtp2/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-fp8-w4/mtp3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-fp8-w4/refresh/mtp3/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-autoround-w1/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-autoround-w1/refresh/default/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-autoround-w1/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-autoround-w1/refresh/default/prefill.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "qwen-autoround-w1/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 161
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-autoround-w1/refresh/default/context-0.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-autoround-w1/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32282
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-autoround-w1/refresh/default/context-32768.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-autoround-w1/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65053
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-autoround-w1/refresh/default/context-65536.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-autoround-w1/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130574
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-autoround-w1/refresh/default/context-131072.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-autoround-w1/default/context-262144": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 261657
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-autoround-w1/refresh/default/context-262144.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-autoround-w1/default/context-524288": {
+      "checks": {
+        "skipped_above_request_limit": 262144
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-autoround-w1/refresh/default/context-524288.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-autoround-w1/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-autoround-w1/refresh/plain/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-autoround-w1/mtp1/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-autoround-w1/refresh/mtp1/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-autoround-w1/mtp2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-autoround-w1/refresh/mtp2/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-autoround-w1/mtp4/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-autoround-w1/refresh/mtp4/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-autoround-prefill-w1/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-autoround-prefill-w1/refresh/default/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-autoround-prefill-w1/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-autoround-prefill-w1/refresh/default/prefill.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "qwen-autoround-prefill-w1/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 158
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-autoround-prefill-w1/refresh/default/context-0.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-autoround-prefill-w1/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32287
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-autoround-prefill-w1/refresh/default/context-32768.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-autoround-prefill-w1/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65052
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-autoround-prefill-w1/refresh/default/context-65536.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-autoround-prefill-w1/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130576
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-autoround-prefill-w1/refresh/default/context-131072.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-autoround-prefill-w1/default/context-262144": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 261658
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-autoround-prefill-w1/refresh/default/context-262144.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-autoround-prefill-w1/default/context-524288": {
+      "checks": {
+        "skipped_above_request_limit": 262144
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-autoround-prefill-w1/refresh/default/context-524288.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-autoround-prefill-w1/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-autoround-prefill-w1/refresh/plain/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-autoround-prefill-w1/mtp1/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-autoround-prefill-w1/refresh/mtp1/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-autoround-prefill-w1/mtp2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-autoround-prefill-w1/refresh/mtp2/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "qwen-autoround-prefill-w1/mtp4/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen-autoround-prefill-w1/refresh/mtp4/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-w4/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "attempts/glm53-w4/default-before-fused-scores-20261007/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-w4/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/glm53-w4/refresh/default/prefill.json",
+          "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+          "reused": true,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "glm53-w4/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 94
+      },
+      "sources": [
+        {
+          "path": "attempts/glm53-w4/default-before-fused-scores-20261007/context-0.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-w4/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32237
+      },
+      "sources": [
+        {
+          "path": "raw/glm53-w4/refresh/default/context-32768.json",
+          "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-w4/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65009
+      },
+      "sources": [
+        {
+          "path": "raw/glm53-w4/refresh/default/context-65536.json",
+          "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-w4/default/context-131072": {
+      "checks": {
+        "skipped_above_request_limit": 122880
+      },
+      "sources": [
+        {
+          "path": "attempts/glm53-w4/default-before-fused-scores-20261007/context-131072.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-w4/default/context-262144": {
+      "checks": {
+        "skipped_above_request_limit": 122880
+      },
+      "sources": [
+        {
+          "path": "attempts/glm53-w4/default-before-fused-scores-20261007/context-262144.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-w4/default/context-524288": {
+      "checks": {
+        "skipped_above_request_limit": 122880
+      },
+      "sources": [
+        {
+          "path": "attempts/glm53-w4/default-before-fused-scores-20261007/context-524288.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-w4/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/glm53-w4/refresh/plain/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-w4/mtp2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/glm53-w4/refresh/mtp2/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-w4/mtp3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/glm53-w4/refresh/mtp3/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-fp8kv-w4/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "attempts/glm53-fp8kv-w4/default-before-fused-scores-20261007/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-fp8kv-w4/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/glm53-fp8kv-w4/refresh/default/prefill.json",
+          "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+          "reused": true,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "glm53-fp8kv-w4/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 97
+      },
+      "sources": [
+        {
+          "path": "attempts/glm53-fp8kv-w4/default-before-fused-scores-20261007/context-0.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-fp8kv-w4/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32237
+      },
+      "sources": [
+        {
+          "path": "raw/glm53-fp8kv-w4/refresh/default/context-32768.json",
+          "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-fp8kv-w4/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65008
+      },
+      "sources": [
+        {
+          "path": "raw/glm53-fp8kv-w4/refresh/default/context-65536.json",
+          "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-fp8kv-w4/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130540
+      },
+      "sources": [
+        {
+          "path": "raw/glm53-fp8kv-w4/refresh/default/context-131072.json",
+          "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-fp8kv-w4/default/context-262144": {
+      "checks": {
+        "skipped_above_request_limit": 212992
+      },
+      "sources": [
+        {
+          "path": "attempts/glm53-fp8kv-w4/default-before-fused-scores-20261007/context-262144.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-fp8kv-w4/default/context-524288": {
+      "checks": {
+        "skipped_above_request_limit": 212992
+      },
+      "sources": [
+        {
+          "path": "attempts/glm53-fp8kv-w4/default-before-fused-scores-20261007/context-524288.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-fp8kv-w4/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/glm53-fp8kv-w4/refresh/plain/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-fp8kv-w4/mtp2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/glm53-fp8kv-w4/refresh/mtp2/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-fp8kv-w4/mtp3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/glm53-fp8kv-w4/refresh/mtp3/greedy.json",
+          "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-fp4kv-256k-w4/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "raw/glm53-fp4kv-256k-w4/refresh/default/greedy.json",
+          "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-fp4kv-256k-w4/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/glm53-fp4kv-256k-w4/refresh/default/prefill.json",
+          "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+          "reused": true,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "glm53-fp4kv-256k-w4/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 99
+      },
+      "sources": [
+        {
+          "path": "raw/glm53-fp4kv-256k-w4/refresh/default/context-0.json",
+          "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-fp4kv-256k-w4/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32234
+      },
+      "sources": [
+        {
+          "path": "raw/glm53-fp4kv-256k-w4/refresh/default/context-32768.json",
+          "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-fp4kv-256k-w4/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65009
+      },
+      "sources": [
+        {
+          "path": "raw/glm53-fp4kv-256k-w4/refresh/default/context-65536.json",
+          "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-fp4kv-256k-w4/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130537
+      },
+      "sources": [
+        {
+          "path": "raw/glm53-fp4kv-256k-w4/refresh/default/context-131072.json",
+          "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-fp4kv-256k-w4/default/context-262144": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 261630
+      },
+      "sources": [
+        {
+          "path": "raw/glm53-fp4kv-256k-w4/refresh/default/context-262144.json",
+          "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-fp4kv-256k-w4/default/context-524288": {
+      "checks": {
+        "skipped_above_request_limit": 262144
+      },
+      "sources": [
+        {
+          "path": "raw/glm53-fp4kv-256k-w4/refresh/default/context-524288.json",
+          "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-fp4kv-256k-w4/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/glm53-fp4kv-256k-w4/refresh/plain/greedy.json",
+          "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-fp4kv-256k-w4/mtp2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/glm53-fp4kv-256k-w4/refresh/mtp2/greedy.json",
+          "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+          "reused": true
+        }
+      ]
+    },
+    "glm53-fp4kv-256k-w4/mtp3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/glm53-fp4kv-256k-w4/refresh/mtp3/greedy.json",
+          "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+          "reused": true
+        }
+      ]
+    },
+    "deepseek-w4/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-w4/refresh/default/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "deepseek-w4/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-w4/refresh/default/prefill.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "deepseek-w4/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 112
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-w4/refresh/default/context-0.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "deepseek-w4/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32255
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-w4/refresh/default/context-32768.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "deepseek-w4/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65024
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-w4/refresh/default/context-65536.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "deepseek-w4/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130565
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-w4/refresh/default/context-131072.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "deepseek-w4/default/context-262144": {
+      "checks": {
+        "skipped_above_request_limit": 131072
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-w4/refresh/default/context-262144.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "deepseek-w4/default/context-524288": {
+      "checks": {
+        "skipped_above_request_limit": 131072
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-w4/refresh/default/context-524288.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "deepseek-w4/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-w4/refresh/plain/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "deepseek-w4/dspark1/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-w4/refresh/dspark1/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "deepseek-w4/dspark2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-w4/refresh/dspark2/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "deepseek-w4/dspark3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-w4/refresh/dspark3/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "deepseek-w4/dspark5/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-w4/refresh/dspark5/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "deepseek-1m-w4/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-1m-w4/refresh/default/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "deepseek-1m-w4/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-1m-w4/refresh/default/prefill.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "deepseek-1m-w4/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 111
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-1m-w4/refresh/default/context-0.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "deepseek-1m-w4/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32255
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-1m-w4/refresh/default/context-32768.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "deepseek-1m-w4/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65054
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-1m-w4/refresh/default/context-65536.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "deepseek-1m-w4/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130560
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-1m-w4/refresh/default/context-131072.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "deepseek-1m-w4/default/context-262144": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 261647
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-1m-w4/refresh/default/context-262144.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "deepseek-1m-w4/default/context-524288": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 523803
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-1m-w4/refresh/default/context-524288.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "deepseek-1m-w4/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-1m-w4/refresh/plain/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "deepseek-1m-w4/dspark1/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-1m-w4/refresh/dspark1/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "deepseek-1m-w4/dspark2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-1m-w4/refresh/dspark2/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "deepseek-1m-w4/dspark3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-1m-w4/refresh/dspark3/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "deepseek-1m-w4/dspark5/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/deepseek-1m-w4/refresh/dspark5/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "dsv4-w2/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w2/refresh/default/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "dsv4-w2/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w2/refresh/default/prefill.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "dsv4-w2/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 85
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w2/refresh/default/context-0.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "dsv4-w2/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32226
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w2/refresh/default/context-32768.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "dsv4-w2/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 64996
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w2/refresh/default/context-65536.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "dsv4-w2/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130539
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w2/refresh/default/context-131072.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "dsv4-w2/default/context-262144": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 261622
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w2/refresh/default/context-262144.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "dsv4-w2/default/context-524288": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 523778
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w2/refresh/default/context-524288.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "dsv4-w2/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w2/refresh/plain/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "dsv4-w2/dspark1/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w2/refresh/dspark1/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "dsv4-w2/dspark2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w2/refresh/dspark2/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "dsv4-w2/dspark3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w2/refresh/dspark3/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "dsv4-w2/dspark5/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w2/refresh/dspark5/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "dsv4-w4/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w4/refresh/default/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "dsv4-w4/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w4/refresh/default/prefill.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "dsv4-w4/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 85
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w4/refresh/default/context-0.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "dsv4-w4/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32226
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w4/refresh/default/context-32768.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "dsv4-w4/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65026
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w4/refresh/default/context-65536.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "dsv4-w4/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130536
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w4/refresh/default/context-131072.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "dsv4-w4/default/context-262144": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 261627
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w4/refresh/default/context-262144.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "dsv4-w4/default/context-524288": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 523777
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w4/refresh/default/context-524288.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "dsv4-w4/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w4/refresh/plain/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "dsv4-w4/dspark1/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w4/refresh/dspark1/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "dsv4-w4/dspark2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w4/refresh/dspark2/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "dsv4-w4/dspark3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w4/refresh/dspark3/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "dsv4-w4/dspark5/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/dsv4-w4/refresh/dspark5/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w2/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w2/refresh/default/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w2/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w2/refresh/default/prefill.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "mimo-w2/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 113
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w2/refresh/default/context-0.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w2/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32233
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w2/refresh/default/context-32768.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w2/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65002
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w2/refresh/default/context-65536.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w2/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130535
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w2/refresh/default/context-131072.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w2/default/context-262144": {
+      "checks": {
+        "skipped_above_request_limit": 131072
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w2/refresh/default/context-262144.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w2/default/context-524288": {
+      "checks": {
+        "skipped_above_request_limit": 131072
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w2/refresh/default/context-524288.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w2/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w2/refresh/plain/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w2/mtp2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w2/refresh/mtp2/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w2/mtp3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w2/refresh/mtp3/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w2-fp8kv/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w2-fp8kv/refresh/default/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w2-fp8kv/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w2-fp8kv/refresh/default/prefill.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "mimo-w2-fp8kv/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 113
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w2-fp8kv/refresh/default/context-0.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w2-fp8kv/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32234
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w2-fp8kv/refresh/default/context-32768.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w2-fp8kv/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65005
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w2-fp8kv/refresh/default/context-65536.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w2-fp8kv/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130542
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w2-fp8kv/refresh/default/context-131072.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w2-fp8kv/default/context-262144": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 261615
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w2-fp8kv/refresh/default/context-262144.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w2-fp8kv/default/context-524288": {
+      "checks": {
+        "skipped_above_request_limit": 262144
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w2-fp8kv/refresh/default/context-524288.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w2-fp8kv/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w2-fp8kv/refresh/plain/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w2-fp8kv/mtp2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w2-fp8kv/refresh/mtp2/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w2-fp8kv/mtp3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w2-fp8kv/refresh/mtp3/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w4/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w4/refresh/default/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w4/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w4/refresh/default/prefill.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "mimo-w4/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 110
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w4/refresh/default/context-0.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w4/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32232
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w4/refresh/default/context-32768.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w4/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65002
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w4/refresh/default/context-65536.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w4/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130539
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w4/refresh/default/context-131072.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w4/default/context-262144": {
+      "checks": {
+        "skipped_above_request_limit": 131072
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w4/refresh/default/context-262144.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w4/default/context-524288": {
+      "checks": {
+        "skipped_above_request_limit": 131072
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w4/refresh/default/context-524288.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w4/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w4/refresh/plain/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w4/mtp2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w4/refresh/mtp2/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-w4/mtp3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-w4/refresh/mtp3/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-1m-w4/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-1m-w4/refresh/default/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-1m-w4/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-1m-w4/refresh/default/prefill.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "mimo-1m-w4/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 114
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-1m-w4/refresh/default/context-0.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-1m-w4/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32237
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-1m-w4/refresh/default/context-32768.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-1m-w4/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65003
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-1m-w4/refresh/default/context-65536.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-1m-w4/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130540
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-1m-w4/refresh/default/context-131072.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-1m-w4/default/context-262144": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 261612
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-1m-w4/refresh/default/context-262144.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-1m-w4/default/context-524288": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 523749
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-1m-w4/refresh/default/context-524288.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-1m-w4/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-1m-w4/refresh/plain/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-1m-w4/mtp2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-1m-w4/refresh/mtp2/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "mimo-1m-w4/mtp3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/mimo-1m-w4/refresh/mtp3/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w1/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w1/refresh/default/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w1/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w1/refresh/default/prefill.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "qwen27b-fp8-w1/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 158
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w1/refresh/default/context-0.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w1/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32285
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w1/refresh/default/context-32768.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w1/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65053
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w1/refresh/default/context-65536.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w1/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130573
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w1/refresh/default/context-131072.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w1/default/context-262144": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 261655
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w1/refresh/default/context-262144.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w1/default/context-524288": {
+      "checks": {
+        "skipped_above_request_limit": 262144
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w1/refresh/default/context-524288.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w1/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w1/refresh/plain/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w1/mtp1/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w1/refresh/mtp1/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w1/mtp2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w1/refresh/mtp2/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w1/mtp3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w1/refresh/mtp3/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w1/dflash2-fixed/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w1/refresh/dflash2-fixed/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w2/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w2/refresh/default/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w2/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w2/refresh/default/prefill.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "qwen27b-fp8-w2/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 157
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w2/refresh/default/context-0.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w2/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32284
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w2/refresh/default/context-32768.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w2/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65051
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w2/refresh/default/context-65536.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w2/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130575
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w2/refresh/default/context-131072.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w2/default/context-262144": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 261659
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w2/refresh/default/context-262144.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w2/default/context-524288": {
+      "checks": {
+        "skipped_above_request_limit": 262144
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w2/refresh/default/context-524288.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w2/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w2/refresh/plain/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w2/mtp1/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w2/refresh/mtp1/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w2/mtp2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w2/refresh/mtp2/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w2/mtp3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w2/refresh/mtp3/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w2/dflash2-fixed/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w2/refresh/dflash2-fixed/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w4/default/greedy": {
+      "checks": {
+        "phases": 60,
+        "requests": 225
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w4/refresh/default/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w4/default/prefill": {
+      "checks": {
+        "uncached_requests": 9
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w4/refresh/default/prefill.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false,
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        }
+      ]
+    },
+    "qwen27b-fp8-w4/default/context-0": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 158
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w4/refresh/default/context-0.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w4/default/context-32768": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 32284
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w4/refresh/default/context-32768.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w4/default/context-65536": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 65054
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w4/refresh/default/context-65536.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w4/default/context-131072": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 130573
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w4/refresh/default/context-131072.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w4/default/context-262144": {
+      "checks": {
+        "requests": 3,
+        "input_tokens": 261661
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w4/refresh/default/context-262144.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w4/default/context-524288": {
+      "checks": {
+        "skipped_above_request_limit": 262144
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w4/refresh/default/context-524288.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w4/plain/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w4/refresh/plain/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w4/mtp1/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w4/refresh/mtp1/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w4/mtp2/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w4/refresh/mtp2/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w4/mtp3/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w4/refresh/mtp3/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    },
+    "qwen27b-fp8-w4/dflash2-fixed/greedy": {
+      "checks": {
+        "phases": 15,
+        "requests": 15
+      },
+      "sources": [
+        {
+          "path": "raw/qwen27b-fp8-w4/refresh/dflash2-fixed/greedy.json",
+          "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+          "reused": false
+        }
+      ]
+    }
+  },
+  "pending": []
+}

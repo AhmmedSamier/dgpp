@@ -1,0 +1,21 @@
+Avoid materializing full-GLM prefill head scores
+
+Fuse FP8 indexer dots and the 32-head reduction into compact score keys
+for full GLM long prefill. Reuse the existing allocation for wider query
+tiles and retain the exact selector, tie order, and original single-query
+GEMM tiles/tails. KV allocations, decode, and Flash dispatch are unchanged.
+
+The materialized per-head score path was introduced in 78c0bb4f6225
+(M3 layer phase, 2026-08-28). Full GLM adopted it in 8464e6a7b9bd
+(Serve the full GLM-5.3 on four nodes, 2026-09-13). After the partitioned
+selector fix, producing and rereading this matrix still accounted for
+72.1% of indexed-layer GPU time at 256K and 2048 query tokens.
+
+The full-geometry benchmark now covers BF16/FP8/FP4 KV. At 256K, one
+indexed layer improves from 1154.657 to 263.527 ms with BF16 KV and from
+1163.432 to 277.254 ms with FP4 KV, without changing the scratch budget.
+
+Validation: 49 DSA regressions; expanded bitwise score/selection checks
+across 18 shapes; a focused layer test for original and newly created
+tail boundaries; zero CUDA memcheck/synccheck errors; 10 full-GLM forward,
+prefill, decode, multi-rank and graph CTests. Full-model comparison pending.

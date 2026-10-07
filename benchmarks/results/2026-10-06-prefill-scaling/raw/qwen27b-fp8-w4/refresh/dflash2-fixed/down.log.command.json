@@ -1,0 +1,15 @@
+{
+  "command": [
+    "/usr/bin/python3",
+    "/home/stephen/workspace/dgpp/scripts/dgpp-cluster",
+    "down",
+    "--config",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/dflash2-fixed/config.json",
+    "--log-dir",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w4/refresh/dflash2-fixed/server"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-10-07T16:48:44.931357+00:00",
+  "returncode": 0,
+  "finished_at": "2026-10-07T16:48:52.050058+00:00"
+}

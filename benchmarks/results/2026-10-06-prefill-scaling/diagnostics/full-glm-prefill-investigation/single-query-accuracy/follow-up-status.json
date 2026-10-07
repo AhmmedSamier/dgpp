@@ -1,0 +1,12 @@
+{
+  "recorded_at": "2026-10-07T03:49:57.783111+00:00",
+  "commit": "0b10cbeaed1b7c51d854ec2f3a23729cb7b91c35",
+  "pushed": true,
+  "full_model_replay_complete": true,
+  "benchmarks_resumed": true,
+  "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+  "completed_deployments": 16,
+  "total_deployments": 29,
+  "next": "glm53-w4 affected prefill/context rerun, then glm53-fp4kv-256k-w4 and remaining families",
+  "note": "All benchmark conclusions use the validated result resolver; the current BF16 launch is not counted until clean shutdown and memory/rank checks."
+}

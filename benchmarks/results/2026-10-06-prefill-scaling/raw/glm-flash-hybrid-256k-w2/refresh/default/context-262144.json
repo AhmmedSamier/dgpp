@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+  "surface": {
+    "id": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+    "object": "model",
+    "created": 1791305218,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "minimal": {
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "reasoning_effort": "high"
+        },
+        "high": {
+          "reasoning_effort": "high"
+        },
+        "xhigh": {
+          "reasoning_effort": "max"
+        },
+        "max": {
+          "reasoning_effort": "max"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 262144,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
+  "seed": 20260922,
+  "tag": "d603c5b8030f4ae5b2b0016023644738",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 262144,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 8303.0,
+        "prefill_ms": 669465.0000000001,
+        "decode_steps": 133,
+        "decode_rows": 133,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 261632,
+        "prompt_tokens_computed": 261632
+      },
+      "engine_tokens_per_s": 30.71179091894496,
+      "ms_per_pass": 62.42857142857143,
+      "tokens_per_pass": 1.9172932330827068,
+      "answer": {
+        "prompt_sha256": "248400c4f571fa39edb16a346b21bc299ee543d77d59774a835ee1c4a46fb124",
+        "usage": {
+          "prompt_tokens": 261632,
+          "completion_tokens": 256,
+          "total_tokens": 261888,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list of the first 200 parcels and their cities. Let me extract the first 200 items from the context.\n\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\nItem 000001: parcel PX-0081436 weighed 2.7055 kilograms in Jamesport, gate 15, shift C, status cleared.\nItem 000002: parcel PX-0126529 weighed 20.6551 kilograms in Dunmore, gate 5, shift C, status rerouted.\nItem 000003: parcel PX-0226532 weighed 21.6532 kilograms in Dunmore, gate 13, shift A, status held.\nItem 000004: parcel PX-0538039 weighed 38.0677 kilograms in Belvedere, gate 13, shift C, status held.\nItem 000005: parcel PX-0133958 weighed 4.6830 kilograms in Glencarr, gate 10, shift B, status in-transit.\nItem 000006: parcel PX-051034",
+        "wall_ms": 677885.3438810911,
+        "ttft_ms": 669563.2704321761,
+        "last_ms": 677860.0043770857,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 262144,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 8303.899999999994,
+        "prefill_ms": 134.19999999995343,
+        "decode_steps": 133,
+        "decode_rows": 133,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 261632,
+        "prompt_tokens_computed": 4
+      },
+      "engine_tokens_per_s": 30.70846228880408,
+      "ms_per_pass": 62.435338345864615,
+      "tokens_per_pass": 1.9172932330827068,
+      "answer": {
+        "prompt_sha256": "248400c4f571fa39edb16a346b21bc299ee543d77d59774a835ee1c4a46fb124",
+        "usage": {
+          "prompt_tokens": 261632,
+          "completion_tokens": 256,
+          "total_tokens": 261888,
+          "prompt_tokens_details": {
+            "cached_tokens": 261628
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list of the first 200 parcels and their cities. Let me extract the first 200 items from the context.\n\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\nItem 000001: parcel PX-0081436 weighed 2.7055 kilograms in Jamesport, gate 15, shift C, status cleared.\nItem 000002: parcel PX-0126529 weighed 20.6551 kilograms in Dunmore, gate 5, shift C, status rerouted.\nItem 000003: parcel PX-0226532 weighed 21.6532 kilograms in Dunmore, gate 13, shift A, status held.\nItem 000004: parcel PX-0538039 weighed 38.0677 kilograms in Belvedere, gate 13, shift C, status held.\nItem 000005: parcel PX-0133958 weighed 4.6830 kilograms in Glencarr, gate 10, shift B, status in-transit.\nItem 000006: parcel PX-051034",
+        "wall_ms": 8533.276956062764,
+        "ttft_ms": 209.49972211383283,
+        "last_ms": 8533.07844302617,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 262144,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 8312.800000000003,
+        "prefill_ms": 130.0,
+        "decode_steps": 133,
+        "decode_rows": 133,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 261632,
+        "prompt_tokens_computed": 4
+      },
+      "engine_tokens_per_s": 30.675584640554316,
+      "ms_per_pass": 62.50225563909777,
+      "tokens_per_pass": 1.9172932330827068,
+      "answer": {
+        "prompt_sha256": "248400c4f571fa39edb16a346b21bc299ee543d77d59774a835ee1c4a46fb124",
+        "usage": {
+          "prompt_tokens": 261632,
+          "completion_tokens": 256,
+          "total_tokens": 261888,
+          "prompt_tokens_details": {
+            "cached_tokens": 261628
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list of the first 200 parcels and their cities. Let me extract the first 200 items from the context.\n\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\nItem 000001: parcel PX-0081436 weighed 2.7055 kilograms in Jamesport, gate 15, shift C, status cleared.\nItem 000002: parcel PX-0126529 weighed 20.6551 kilograms in Dunmore, gate 5, shift C, status rerouted.\nItem 000003: parcel PX-0226532 weighed 21.6532 kilograms in Dunmore, gate 13, shift A, status held.\nItem 000004: parcel PX-0538039 weighed 38.0677 kilograms in Belvedere, gate 13, shift C, status held.\nItem 000005: parcel PX-0133958 weighed 4.6830 kilograms in Glencarr, gate 10, shift B, status in-transit.\nItem 000006: parcel PX-051034",
+        "wall_ms": 8541.721875080839,
+        "ttft_ms": 209.00659798644483,
+        "last_ms": 8541.545521002263,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

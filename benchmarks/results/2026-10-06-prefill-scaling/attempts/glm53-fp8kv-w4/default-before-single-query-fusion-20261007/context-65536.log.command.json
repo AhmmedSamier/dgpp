@@ -1,0 +1,20 @@
+{
+  "command": [
+    "/home/stephen/workspace/dgpp/.venv/bin/python",
+    "/home/stephen/workspace/dgpp/scripts/serve_context_matrix.py",
+    "127.0.0.1",
+    "18080",
+    "--model",
+    "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
+    "--tag",
+    "5dc87a58ea9148bdb515433702683520",
+    "--lengths",
+    "65536",
+    "--json-out",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-fp8kv-w4/refresh/default/context-65536.json"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-10-07T02:50:09.760085+00:00",
+  "returncode": 0,
+  "finished_at": "2026-10-07T02:53:23.977025+00:00"
+}

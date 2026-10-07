@@ -1,0 +1,130 @@
+{
+  "complete": true,
+  "all_prompts_and_outputs_equal": true,
+  "samples": [
+    {
+      "job": "prefill",
+      "length": 2048,
+      "repeat": 0,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 1723.699999999997,
+      "after_prefill_ms": 1452.6
+    },
+    {
+      "job": "prefill",
+      "length": 2048,
+      "repeat": 1,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 1824.0,
+      "after_prefill_ms": 1497.8
+    },
+    {
+      "job": "prefill",
+      "length": 2048,
+      "repeat": 2,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 1752.4000000000015,
+      "after_prefill_ms": 1430.2000000000003
+    },
+    {
+      "job": "prefill",
+      "length": 8192,
+      "repeat": 0,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 7401.4000000000015,
+      "after_prefill_ms": 4844.7
+    },
+    {
+      "job": "prefill",
+      "length": 8192,
+      "repeat": 1,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 7678.299999999996,
+      "after_prefill_ms": 4910.200000000001
+    },
+    {
+      "job": "prefill",
+      "length": 8192,
+      "repeat": 2,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 7778.0,
+      "after_prefill_ms": 4988.399999999998
+    },
+    {
+      "job": "prefill",
+      "length": 32768,
+      "repeat": 0,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 50644.8,
+      "after_prefill_ms": 19549.0
+    },
+    {
+      "job": "prefill",
+      "length": 32768,
+      "repeat": 1,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 50564.70000000001,
+      "after_prefill_ms": 19305.300000000003
+    },
+    {
+      "job": "prefill",
+      "length": 32768,
+      "repeat": 2,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 50169.59999999998,
+      "after_prefill_ms": 19124.299999999996
+    },
+    {
+      "job": "context-32768",
+      "length": 32768,
+      "repeat": 0,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 48584.399999999994,
+      "after_prefill_ms": 18683.100000000006
+    },
+    {
+      "job": "context-32768",
+      "length": 32768,
+      "repeat": 1,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 1003.6000000000058,
+      "after_prefill_ms": 376.1999999999971
+    },
+    {
+      "job": "context-32768",
+      "length": 32768,
+      "repeat": 2,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 998.5,
+      "after_prefill_ms": 378.8000000000029
+    },
+    {
+      "job": "context-65536",
+      "length": 65536,
+      "repeat": 0,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 153790.00000000003,
+      "after_prefill_ms": 40894.40000000001
+    },
+    {
+      "job": "context-65536",
+      "length": 65536,
+      "repeat": 1,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 1273.0999999999767,
+      "after_prefill_ms": 452.3999999999942
+    },
+    {
+      "job": "context-65536",
+      "length": 65536,
+      "repeat": 2,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 1271.4000000000233,
+      "after_prefill_ms": 446.1000000000058
+    }
+  ],
+  "candidate_binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+  "baseline_binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+  "baseline_directory": "attempts/deepseek-1m-w4/default-before-capacity-investigation-20261007",
+  "candidate_directory": "diagnostics/deepseek-capacity-prefill-investigation/comparison/raw/deepseek-1m-w4/validation/default"
+}

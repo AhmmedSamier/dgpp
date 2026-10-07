@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "model": "Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN",
+  "surface": {
+    "id": "Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN",
+    "object": "model",
+    "created": 1791324949,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": 262144,
+      "kv_pool_tokens": 262144,
+      "limited_by": "position-ceiling"
+    }
+  },
+  "tokenizer_sha256": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+  "seed": 20260922,
+  "tag": "ac822a0417a94d6fb3d5019a5b25d6fb",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 131072,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 4966.699999999953,
+        "prefill_ms": 81838.6,
+        "decode_steps": 82,
+        "decode_rows": 82,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 130574,
+        "prompt_tokens_computed": 130574
+      },
+      "engine_tokens_per_s": 51.341937302434694,
+      "ms_per_pass": 60.56951219512138,
+      "tokens_per_pass": 3.1097560975609757,
+      "answer": {
+        "prompt_sha256": "bd069198c07818c0c6c5a623d9b42e87c94de7bf1fcc2d984407bb9df0fb6a0d",
+        "usage": {
+          "prompt_tokens": 130574,
+          "completion_tokens": 256,
+          "total_tokens": 130830,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided huge context with items 000000 to 002909. Need list first 200 parcels and cities. Likely items 000000 through 001999? \"first 200 parcels\" could mean first 200 items? But says \"Continue until you have listed all 200.\" Need numbered list describing first 200 parcels and their cities. Could mean parcels numbered 000000 to 000199? There are 200 items if first 200 by item index. But phrase \"all 200\" maybe first 200 parcels (items 000000-000199). Need output 1-200 with parcel ID and city. Need ensure accurate. Need parse first 200 items from context. Let's extract items 000000 to 000199 inclusive. Need list numbered 1 to 200. Each line: \"1. PX",
+        "wall_ms": 86878.0743679963,
+        "ttft_ms": 81904.81894789264,
+        "last_ms": 86852.3745238781,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 131072,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 4896.900000000023,
+        "prefill_ms": 80.5,
+        "decode_steps": 82,
+        "decode_rows": 82,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 130574,
+        "prompt_tokens_computed": 6
+      },
+      "engine_tokens_per_s": 52.073760950805365,
+      "ms_per_pass": 59.718292682927114,
+      "tokens_per_pass": 3.1097560975609757,
+      "answer": {
+        "prompt_sha256": "bd069198c07818c0c6c5a623d9b42e87c94de7bf1fcc2d984407bb9df0fb6a0d",
+        "usage": {
+          "prompt_tokens": 130574,
+          "completion_tokens": 256,
+          "total_tokens": 130830,
+          "prompt_tokens_details": {
+            "cached_tokens": 130568
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided huge context with items 000000 to 002909. Need list first 200 parcels and cities. Likely items 000000 through 001999? \"first 200 parcels\" could mean first 200 items? But says \"Continue until you have listed all 200.\" Need numbered list describing first 200 parcels and their cities. Could mean parcels numbered 000000 to 000199? There are 200 items if first 200 by item index. But phrase \"all 200\" maybe first 200 parcels (items 000000-000199). Need output 1-200 with parcel ID and city. Need ensure accurate. Need parse first 200 items from context. Let's extract items 000000 to 000199 inclusive. Need list numbered 1 to 200. Each line: \"1. PX",
+        "wall_ms": 5051.331551047042,
+        "ttft_ms": 130.5449870415032,
+        "last_ms": 5025.55210608989,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 131072,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 4893.800000000047,
+        "prefill_ms": 79.5,
+        "decode_steps": 82,
+        "decode_rows": 82,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 130574,
+        "prompt_tokens_computed": 6
+      },
+      "engine_tokens_per_s": 52.10674731292607,
+      "ms_per_pass": 59.68048780487862,
+      "tokens_per_pass": 3.1097560975609757,
+      "answer": {
+        "prompt_sha256": "bd069198c07818c0c6c5a623d9b42e87c94de7bf1fcc2d984407bb9df0fb6a0d",
+        "usage": {
+          "prompt_tokens": 130574,
+          "completion_tokens": 256,
+          "total_tokens": 130830,
+          "prompt_tokens_details": {
+            "cached_tokens": 130568
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided huge context with items 000000 to 002909. Need list first 200 parcels and cities. Likely items 000000 through 001999? \"first 200 parcels\" could mean first 200 items? But says \"Continue until you have listed all 200.\" Need numbered list describing first 200 parcels and their cities. Could mean parcels numbered 000000 to 000199? There are 200 items if first 200 by item index. But phrase \"all 200\" maybe first 200 parcels (items 000000-000199). Need output 1-200 with parcel ID and city. Need ensure accurate. Need parse first 200 items from context. Let's extract items 000000 to 000199 inclusive. Need list numbered 1 to 200. Each line: \"1. PX",
+        "wall_ms": 5043.492947937921,
+        "ttft_ms": 130.98601601086557,
+        "last_ms": 5018.22269288823,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

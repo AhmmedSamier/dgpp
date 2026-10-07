@@ -1,0 +1,19 @@
+OK   rank 0 (192.168.88.11) platform: Linux aarch64; supported target is Linux/aarch64 GB10
+OK   rank 0 (192.168.88.11) Python: 3.12.3; Python 3.10+ is required
+OK   rank 0 (192.168.88.11) commands: python3, timeout, ldd, ssh, scp, curl, jq
+OK   rank 0 (192.168.88.11) node address: rank 0 address 192.168.88.11 belongs to this host
+OK   rank 0 (192.168.88.11) GPU: NVIDIA GB10, 12.1, [N/A]
+OK   rank 0 (192.168.88.11) logs/staging: /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/mtp3/server: parent /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/mtp3/server, 715.3 GiB free
+OK   rank 0 (192.168.88.11) resident cache: ~/.cache/dgpp/resident: parent /home/stephen/.cache/dgpp/resident, 715.3 GiB free
+OK   rank 0 (192.168.88.11) model cache: /home/stephen/.cache/huggingface/hub: parent /home/stephen/.cache/huggingface/hub, 715.3 GiB free
+OK   rank 0 (192.168.88.11) checkpoint: /home/stephen/.cache/huggingface/hub/models--Qwen--Qwen3.8-27B-FP8/snapshots/017b9c7af6b5689d5dd426a76e0bc077eb5ca20a: 28.7 GiB; all indexed shards have consistent lengths (not a content hash check)
+OK   rank 0 (192.168.88.11) available memory: 116.2 GiB; startup enforces the exact model memory plan
+OK   rank 0 (192.168.88.11) HTTP port: 127.0.0.1:18080 is available
+OK   rank 0 (192.168.88.11) runtime libraries: all binary dependencies resolve
+OK   rank 0 (192.168.88.11) server version: dgpp-serve 0.1.0+g0b10cbeaed1b.dirty (git 0b10cbeaed1b, cuda 13.0)
+Preflight: 0 failed check(s). No files were installed and no services were started or stopped.
+2026-10-07 15:46:59.277 === staging dgpp-serve and the config to the peers
+2026-10-07 15:46:59.277 === rank 0 on 192.168.88.11 (HTTP :18080, fabric :29970, journal :29971)
+2026-10-07 15:46:59.278 head pid 352788
+2026-10-07 15:47:15.283 rank 0 serving: ok (16s)
+2026-10-07 15:47:15.283 READY — curl http://127.0.0.1:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/mtp3/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen27b-fp8-w1/refresh/mtp3/server)

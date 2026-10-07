@@ -1,0 +1,11 @@
+2026-10-07 00:39:47.626 === HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64 on 4 node(s) [server] (benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-fp8kv-256k-w4/refresh/default/config.json): no rank recorded as running; nothing to stop
+2026-10-07 00:39:47.626 === waiting for the peers to drain
+2026-10-07 00:39:50.024 WARN: no serve_rank1.ops on 192.168.88.12
+2026-10-07 00:39:50.689 WARN: no serve_rank2.ops on 192.168.88.13
+2026-10-07 00:39:51.348 WARN: no serve_rank3.ops on 192.168.88.14
+2026-10-07 00:39:51.696 === op-stream identity (every rank)
+2026-10-07 00:39:51.696 WARN: no /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-fp8kv-256k-w4/refresh/default/server/serve_rank0.ops
+2026-10-07 00:39:51.696 WARN: no /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-fp8kv-256k-w4/refresh/default/server/serve_rank1.ops
+2026-10-07 00:39:51.696 WARN: no /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-fp8kv-256k-w4/refresh/default/server/serve_rank2.ops
+2026-10-07 00:39:51.696 WARN: no /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-fp8kv-256k-w4/refresh/default/server/serve_rank3.ops
+2026-10-07 00:39:51.696 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-fp8kv-256k-w4/refresh/default/server
