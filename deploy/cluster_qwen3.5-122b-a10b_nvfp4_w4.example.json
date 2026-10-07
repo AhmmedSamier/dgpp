@@ -9,14 +9,15 @@
     "queue_limit": 8,
     "max_connections": 64,
     "decode_graph": true,
-    "mtp": false,
+    "mtp": true,
     "prefix_cache_gib": 1.5,
     "admission": "grow",
     "admission_window": 256,
     "model_alias": "Qwen3.5-122B-A10B-NVFP4",
     "sampling_candidates": 128,
     "stats_interval_s": 10,
-    "bf16_weights": "bf12"
+    "bf16_weights": "bf12",
+    "mtp_expert_format": "bf16"
   },
   "paths": {
     "resident_cache": ""
