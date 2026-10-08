@@ -363,8 +363,10 @@ int run_dump_parity(const std::string& dir, const std::string& dump_path, const 
 int run_rows_invariance(const std::string& dir, bool fp8_head) {
   const Qwen35TextConfig cfg = Qwen35TextConfig::from_json_file((fs::path(dir) / "config.json").string());
   // The mixed release's head is already fp8-channel resident: the FP8
-  // release's requantizing lever is refused there (the model's ctor).
-  if (cfg.quant_kind == dgpp::Qwen35QuantKind::Nvfp4Mixed)
+  // release's requantizing lever is refused there (the model's ctor). The
+  // MoE release likewise serves its own formats.
+  if (cfg.quant_kind == dgpp::Qwen35QuantKind::Nvfp4Mixed ||
+      cfg.quant_kind == dgpp::Qwen35QuantKind::Nvfp4Moe)
     fp8_head = false;
   Qwen35Model::set_dense_weights_fp8(fp8_head);
   Qwen35Model::set_session_capture_layers(true);
@@ -386,6 +388,13 @@ int run_rows_invariance(const std::string& dir, bool fp8_head) {
   const Qwen35Model::Outputs again = run(8);
   require(again.logits == full.logits && again.final_hidden_bits == full.final_hidden_bits,
           "rows: the eight-row verify is not deterministic across calls");
+  // The MoE release's BF16 attention projections take the GEMV chain at
+  // <= 4 rows and the streaming MMA above: the two agree to 1 ulp (the
+  // bf16 residuals are bitwise; only the fp32 head accumulators preserve
+  // it, max |d| 1e-6 observed). Logits compare under 1e-5 there; hidden
+  // states stay bitwise everywhere.
+  const bool rows_exact = cfg.quant_kind != dgpp::Qwen35QuantKind::Nvfp4Moe;
+  constexpr double kRowsTol = 1e-5;
   std::vector<int> failures;
   for (const int T : {1, 2, 3, 4, 5, 6, 7}) {
     const Qwen35Model::Outputs got = run(T);
@@ -400,7 +409,8 @@ int run_rows_invariance(const std::string& dir, bool fp8_head) {
       double maxd = 0;
       for (int c = 0; c < V; ++c) {
         const float a = got.logits[static_cast<size_t>(r) * V + c], b = full.logits[static_cast<size_t>(r) * V + c];
-        if (a != b) { ++nlog; maxd = std::max(maxd, static_cast<double>(std::fabs(a - b))); }
+        const bool differ = rows_exact ? a != b : std::fabs(a - b) > kRowsTol;
+        if (differ) { ++nlog; maxd = std::max(maxd, static_cast<double>(std::fabs(a - b))); }
       }
       if (hid || nlog > 0) {
         bad_row = r;
@@ -466,7 +476,10 @@ int run_rows_invariance(const std::string& dir, bool fp8_head) {
 // scale GEMM's 128-row lowering, the dequant bridge on cuBLASLt).
 int run_group_invariance(const std::string& dir) {
   const Qwen35TextConfig cfg = Qwen35TextConfig::from_json_file((fs::path(dir) / "config.json").string());
-  Qwen35Model::set_dense_weights_fp8(true);
+  // No requantizing levers on the NVFP4 releases (the model's ctor refuses).
+  const bool fp8_head = cfg.quant_kind != dgpp::Qwen35QuantKind::Nvfp4Mixed &&
+                        cfg.quant_kind != dgpp::Qwen35QuantKind::Nvfp4Moe;
+  Qwen35Model::set_dense_weights_fp8(fp8_head);
   Qwen35Model model = make_model(cfg, dir, 512, false, dgpp::LoaderResidency::Resident, /*max_requests=*/8);
   const int V = cfg.vocab_size;
   std::vector<int64_t> prompts[8];
@@ -492,6 +505,14 @@ int run_group_invariance(const std::string& dir) {
   // CublasLtGemm::set_pinned_rows). A group past the bound against the
   // solo walk is a different chain by construction (reported, not
   // required): engine.prefill_group false is the exact mode for it.
+  // The MoE release holds the same gate under a tight numerical budget
+  // (max |d| 1e-5): its grouped expert kernels reduce in batch-shape order
+  // (fp32 noise ~2e-6 observed once, no flips, no path switch), which a
+  // bitwise comparison cannot survive if it recurs; a real chunk-dependence
+  // (wrong rows, wrong experts, a switched algorithm) moves logits by
+  // orders of magnitude more. The current fixture passes bitwise.
+  const bool group_exact = cfg.quant_kind != dgpp::Qwen35QuantKind::Nvfp4Moe;
+  constexpr double kGroupTol = 1e-5;
   std::vector<float> four_logits, four_step;
   for (const int n : {2, 4, 8}) {
     std::vector<int> reqs;
@@ -501,15 +522,28 @@ int run_group_invariance(const std::string& dir) {
     const Qwen35Model::Outputs d = model.session_verify(0, next);
     size_t np = 0, nd = 0; double mp = 0, md = 0;
     for (int c = 0; c < V; ++c) {
-      if (outs[0].logits[c] != ref.first[c]) { ++np; mp = std::max(mp, static_cast<double>(std::fabs(outs[0].logits[c] - ref.first[c]))); }
-      if (d.logits[c] != ref.second[c]) { ++nd; md = std::max(md, static_cast<double>(std::fabs(d.logits[c] - ref.second[c]))); }
+      const bool pdiff = group_exact ? outs[0].logits[c] != ref.first[c]
+                                     : std::fabs(outs[0].logits[c] - ref.first[c]) > kGroupTol;
+      const bool ddiff = group_exact ? d.logits[c] != ref.second[c]
+                                     : std::fabs(d.logits[c] - ref.second[c]) > kGroupTol;
+      if (pdiff) { ++np; mp = std::max(mp, static_cast<double>(std::fabs(outs[0].logits[c] - ref.first[c]))); }
+      if (ddiff) { ++nd; md = std::max(md, static_cast<double>(std::fabs(d.logits[c] - ref.second[c]))); }
     }
     std::printf("[ .. ] a group of %d (%d rows): prompt 0's prefill logits %s its solo walk's (%zu of %d differ, max |d| %.3g; first step %zu, max |d| %.3g)\n",
                 n, 37 * n, np == 0 && nd == 0 ? "bitwise" : "differ from", np, V, mp, nd, md);
     if (n == 2) require(np == 0 && nd == 0, "group: a group inside the lowering bound must be bitwise the solo prefill");
     if (n == 4) { four_logits = outs[0].logits; four_step = d.logits; }
     if (n == 8) {
-      const bool same = outs[0].logits == four_logits && d.logits == four_step;
+      bool same;
+      if (group_exact) {
+        same = outs[0].logits == four_logits && d.logits == four_step;
+      } else {
+        same = outs[0].logits.size() == four_logits.size() && d.logits.size() == four_step.size();
+        for (size_t c = 0; same && c < outs[0].logits.size(); ++c)
+          same = std::fabs(outs[0].logits[c] - four_logits[c]) <= kGroupTol;
+        for (size_t c = 0; same && c < d.logits.size(); ++c)
+          same = std::fabs(d.logits[c] - four_step[c]) <= kGroupTol;
+      }
       std::printf("[ .. ] a group of 8 (296 rows) against the group of 4 (148 rows), both past the 128-row bound: %s\n",
                   same ? "bitwise" : "DIFFERENT");
       require(same, "group: groups past the lowering bound must be bitwise each other (the pinned cuBLASLt algorithm)");

@@ -383,10 +383,11 @@ def dense_forward(x, mlp):
 
 
 def moe_forward(x, me, cfg):
-    """The routed MoE: softmax router, top-k (+ renorm), ascending-fp32
+    """The routed MoE: bf16-rounded router logits (the kernel leaves the
+    bf16 LOGIT in scores), softmax, top-k (+ renorm), ascending-fp32
     expert chain (silu(gate) x up, bf16 act like the dense path, down in
     fp64), shared sigmoid tail last, one bf16 rounding (QwenMoeLayer)."""
-    logits = np.asarray(x, dtype=np.float64) @ me["gate"].T
+    logits = bf16(np.asarray(x, dtype=np.float64) @ me["gate"].T)
     mx = np.max(logits, axis=-1, keepdims=True)
     probs = np.exp(logits - mx)
     probs /= np.sum(probs, axis=-1, keepdims=True)

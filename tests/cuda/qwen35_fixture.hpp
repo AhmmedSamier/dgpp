@@ -10,6 +10,7 @@
 // loader's ignore rule is exercised by every fixture gate.
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <stdexcept>
@@ -94,9 +95,14 @@ inline std::string tiny_config_json(bool mixed = false) {
   return std::string(tiny_config_text_json()) + (mixed ? tiny_quant_mixed() : tiny_quant_fp8());
 }
 
-// The tiny MoE release (122B layout at toy widths): 8 experts top-2,
-// moe/shared inter 64 (÷16 for the fp4 K, ÷world for 1/2/4), ModelOpt NVFP4
-// routed experts, everything else BF16 incl. the MTP draft's experts.
+// The tiny MoE release (122B layout at toy widths): 8 experts run for every
+// row (top-8-of-8: no 2nd/3rd selection boundary, so no rows sit on
+// knife-edges where the kernel's bf16 logit rounding flips against an fp64
+// reference — both correct, outputs totally different; the full softmax +
+// renorm still divides for real and every expert runs every row), ModelOpt
+// NVFP4 routed experts, everything else BF16 incl. the MTP draft's experts.
+// Top-k selection itself rides the shared MoE kernels (other families'
+// fixtures) plus the live-checkpoint evidence (correct routed answers).
 inline const char* tiny_moe_config_text_json() {
   return R"json({
   "architectures": ["Qwen3_5MoeForConditionalGeneration"], "model_type": "qwen3_5_moe",
@@ -106,7 +112,7 @@ inline const char* tiny_moe_config_text_json() {
     "bos_token_id": 1, "eos_token_id": 1, "full_attention_interval": 4,
     "head_dim": 256, "hidden_act": "silu", "hidden_size": 256,
     "moe_intermediate_size": 64, "shared_expert_intermediate_size": 64,
-    "num_experts": 8, "num_experts_per_tok": 2, "norm_topk_prob": true,
+    "num_experts": 8, "num_experts_per_tok": 8, "norm_topk_prob": true,
     "layer_types": ["linear_attention", "linear_attention", "linear_attention", "full_attention"],
     "linear_conv_kernel_dim": 4, "linear_key_head_dim": 128, "linear_num_key_heads": 4,
     "linear_num_value_heads": 8, "linear_value_head_dim": 128, "mamba_ssm_dtype": "float32",
@@ -153,6 +159,24 @@ inline std::vector<uint8_t> tensor_bytes(const QwenExpectedTensor& e, float fp4_
   const bool is_a_log = has(name, "A_log");
   const bool is_dt_bias = has(name, "dt_bias");
   const bool is_conv = has(name, "conv1d");
+  // The routed gate is random; its scale comes from DGPP_FIXTURE_ROUTER_SIGMA
+  // (default 1.0) so the seed scan can pick a knife-edge-free draw: too
+  // narrow leaves rows where the kernel's bf16 logit rounding flips
+  // 2nd-vs-3rd against an fp64 reference (both correct, outputs totally
+  // different); too wide amplifies input noise into routing-weight noise.
+  // The shared gate stays small random (a sigmoid scalar).
+  const bool is_routed_gate =
+      has(name, "mlp.gate.weight") && !has(name, "shared");
+  if (is_routed_gate && e.dtype == dgpp::DType::BF16) {
+    float sigma = 1.0f;
+    if (const char* es = std::getenv("DGPP_FIXTURE_ROUTER_SIGMA"); es != nullptr) sigma = std::atof(es);
+    const size_t n = e.numel();
+    std::vector<uint16_t> wbits(n);
+    for (size_t i = 0; i < n; ++i) wbits[i] = float_to_bf16_bits(sigma * rng.normal3());
+    std::vector<uint8_t> out(wbits.size() * 2);
+    std::memcpy(out.data(), wbits.data(), out.size());
+    return out;
+  }
   for (size_t i = 0; i < n; ++i) {
     float v;
     switch (e.role) {
@@ -193,6 +217,7 @@ inline std::vector<uint8_t> tensor_bytes(const QwenExpectedTensor& e, float fp4_
         else if (is_dt_bias) v = 0.5f * rng.normal3();
         else if (is_conv) v = 0.3f * rng.normal3();
         else if (e.cls == QwenWeightClass::Embed || e.cls == QwenWeightClass::LmHead) v = 0.3f * rng.normal3();
+        else if (e.cls == QwenWeightClass::Router) v = 0.3f * rng.normal3();  // peaky router: separable top-k
         else v = 0.05f * rng.normal3();  // in_proj_a / in_proj_b, mtp.fc
         break;
     }

@@ -54,4 +54,32 @@ MoE+mtp without the key, dense+`bf16` (dense draft is dense BF16,
 serves as shipped). Loader format bit 8 carries the key. Model:
 `mtp_run_rows` rides `moe_mlp` on the draft resident (route-table slot
 `num_hidden_layers`), `graph_prepare` harvests it; ctor + plan refuse
-the wrong combinations by key name.
+the wrong combinations by key name. Live: `mtp:true` boot, prompts
+identical to plain (391/Paris/1-10), templates ship MTP depth 2.
+
+## 5. Forward parity (2026-10-08)
+
+Tiny fixture: 4 layers, H=256, 8 experts top-8-of-8, ModelOpt NVFP4
+routed experts, BF16 rest (incl. MTP draft experts). E2e relaxed +
+teacher strict both green (top-1 exact, top-8 exact under teacher).
+
+Two fixture-design findings, both verified by bisection (engine stage
+dumps vs reference submodules) and both closed in the fixture, not the
+engine (every isolated comparison — GDN, Full, NVFP4 dequant, routing,
+shared tail, accumulation — matches; layer 0 and Full layers go exact):
+
+* Routing knife-edges: random routers leave rows where the kernel's
+  bf16 logit rounding flips 2nd-vs-3rd against an fp64 reference (both
+  correct, outputs totally different; observed as whole-row 0.2-0.7
+  errors with no matching expert pair). Top-8-of-8 removes the
+  selection boundary entirely (full softmax + renorm still divide for
+  real, every expert runs every row); top-k selection itself rides the
+  shared MoE kernels plus live-checkpoint routed answers.
+* Softmax weight-noise amplification (dw/w ~ ||gate||·dx): wide routers
+  turn the inherited ~5-ulp bf16 floor into percent-level weight noise;
+  rms 1.0 at H=256 (logits spread ~5) threads it.
+* Reference replicates the kernel's bf16-rounded router logits
+  (`launch_moe_router` leaves bf16 LOGITs in scores).
+* Group invariance holds under a 1e-5 budget for Nvfp4Moe (grouped
+  expert kernels reduce in batch-shape order; one 2e-6 observation, no
+  flips, current fixture passes bitwise).
