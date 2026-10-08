@@ -1,0 +1,36 @@
+{
+  "recorded_at": "2026-10-07T03:41:44.741982+00:00",
+  "commit": "0b10cbeaed1b7c51d854ec2f3a23729cb7b91c35",
+  "candidate_manifest_sha256": "b0b1765f6a788f0a614252a772b4a2e0ac3449a33c3de37021eac76cdad1bb1d",
+  "binary_sha256": {
+    "dgpp-serve": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+    "dsa_test": "54e7c541b9f425444b6889ed839d387be657d0d6eba8b67be84357dfb1180d87",
+    "dsa_bench": "e8e31748e96bb2806f69a19eb0fb526390b6d957f886c434c29fca786aa7d5dd",
+    "glm_dsa_forward_test": "8b45bb61ff45cee13691ae25ea84537a32ce399cba17652b87130625968cc555",
+    "glm_dsa_decode_test": "f9e124f0fc6061ceaa8e202c3da84cd034516c0b401d0e44faa00f66393ff166",
+    "glm_dsa_tp_test": "41dacf453cb99ed5467ff9f9457d48566d106f21a47cc89e8cf9b2f1df6af75f",
+    "glm_dsa_engine_test": "4cf9d9079e9c6f7bd12a7900bc6938ecb8104890edf5fa7f0754c7d18b69f99e"
+  },
+  "cuda_test_result": "51 tests, 0 failed",
+  "ctest_result": "6 tests, 0 failed",
+  "sanitizers": "score memcheck, layer-tail memcheck, synccheck: zero errors",
+  "full_model_replay": {
+    "passed": true,
+    "comparison_sha256": "2c69cdeb37d28a135a9a5ddceb8c4ed7e5bd669a472d5c4ee27939ef007efef6",
+    "memory_sha256": "1fae124229329749681ac91918e5f08e99db4100e99634cccf1a42fb160f8dd6",
+    "rank_identity_sha256": "d66df9fc75c356ca70080c9068e60f36ffd1e4d16ecd584668e14f305a19b141",
+    "samples": 18,
+    "max_swap_KiB": 0,
+    "stall_warnings": [
+      0,
+      0,
+      0,
+      0
+    ]
+  },
+  "fp64_summary_sha256": "f332053390d22028d608b24890ab73b1e4a7d64c854480ba0e63dfbe5be63b27",
+  "build_log_sha256": {
+    "build-unrestricted.log": "619db3d1b9b6ad4369cc6b212c662172419afc121505692781cf7716d0d88382",
+    "build-serving.log": "c2c797ca89bf60f6e8e92233182ae8696d8efccaeea1558b393fa4155a07d4c4"
+  }
+}

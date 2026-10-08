@@ -1,0 +1,21 @@
+{
+  "recorded_at": "2026-10-06T19:15:47.233262+00:00",
+  "tests": {
+    "cluster_process_swap_test.py": {
+      "run": 7,
+      "passed": 7
+    },
+    "launcher_test.py": {
+      "run": 19,
+      "passed": 18,
+      "skipped": 1
+    }
+  },
+  "live_guard": "live-guard-result.json",
+  "launcher_sha256": {
+    "scripts/cluster_process.py": "e855da00fbc40e3392effef87a5ba83420a971c8e511b05d66aae08bfb3b25d9",
+    "scripts/dgpp-cluster": "26e3b1377bf7d5b6b158412a08ac8fee0752e27acb9609073df1916606607a7b",
+    "scripts/cluster_doctor.py": "e1c34a31d1b656c6680a6f2db41fbcb03cd8aafa0a8998f2ed2718c656d4c211"
+  },
+  "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342"
+}

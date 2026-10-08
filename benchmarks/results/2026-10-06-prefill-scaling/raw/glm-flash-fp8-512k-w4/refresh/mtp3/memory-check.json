@@ -1,0 +1,45 @@
+{
+  "passed": true,
+  "ranks": [
+    {
+      "rank": 0,
+      "samples": 123,
+      "max_swap_KiB": 0,
+      "swap_policy_required": true,
+      "swap_policy_passed": true,
+      "max_sample_gap_s": 1.060977471061051,
+      "violations": [],
+      "errors": []
+    },
+    {
+      "rank": 1,
+      "samples": 121,
+      "max_swap_KiB": 0,
+      "swap_policy_required": true,
+      "swap_policy_passed": true,
+      "max_sample_gap_s": 1.0759255320299417,
+      "violations": [],
+      "errors": []
+    },
+    {
+      "rank": 2,
+      "samples": 121,
+      "max_swap_KiB": 0,
+      "swap_policy_required": true,
+      "swap_policy_passed": true,
+      "max_sample_gap_s": 1.1085434930864722,
+      "violations": [],
+      "errors": []
+    },
+    {
+      "rank": 3,
+      "samples": 121,
+      "max_swap_KiB": 0,
+      "swap_policy_required": true,
+      "swap_policy_passed": true,
+      "max_sample_gap_s": 1.0660481329541653,
+      "violations": [],
+      "errors": []
+    }
+  ]
+}

@@ -1,0 +1,145 @@
+{
+  "at": "2026-10-07T21:32:04.627159+00:00",
+  "overview_sha256": "15f9bad5f77decce6da88fcf5ecc2089f9f25f72dd48f478d21090d05a959a5a",
+  "tables": [
+    {
+      "line": 5,
+      "columns": 4,
+      "data_rows": 9
+    },
+    {
+      "line": 23,
+      "columns": 2,
+      "data_rows": 3
+    },
+    {
+      "line": 33,
+      "columns": 9,
+      "data_rows": 29
+    },
+    {
+      "line": 71,
+      "columns": 2,
+      "data_rows": 17
+    },
+    {
+      "line": 97,
+      "columns": 10,
+      "data_rows": 29
+    },
+    {
+      "line": 131,
+      "columns": 2,
+      "data_rows": 12
+    },
+    {
+      "line": 148,
+      "columns": 3,
+      "data_rows": 10
+    },
+    {
+      "line": 173,
+      "columns": 8,
+      "data_rows": 29
+    },
+    {
+      "line": 217,
+      "columns": 9,
+      "data_rows": 18
+    },
+    {
+      "line": 240,
+      "columns": 9,
+      "data_rows": 4
+    },
+    {
+      "line": 249,
+      "columns": 10,
+      "data_rows": 4
+    },
+    {
+      "line": 258,
+      "columns": 10,
+      "data_rows": 3
+    },
+    {
+      "line": 270,
+      "columns": 2,
+      "data_rows": 8
+    },
+    {
+      "line": 281,
+      "columns": 7,
+      "data_rows": 23
+    },
+    {
+      "line": 309,
+      "columns": 6,
+      "data_rows": 22
+    },
+    {
+      "line": 334,
+      "columns": 2,
+      "data_rows": 3
+    },
+    {
+      "line": 344,
+      "columns": 3,
+      "data_rows": 6
+    },
+    {
+      "line": 361,
+      "columns": 3,
+      "data_rows": 4
+    },
+    {
+      "line": 370,
+      "columns": 2,
+      "data_rows": 6
+    },
+    {
+      "line": 383,
+      "columns": 3,
+      "data_rows": 3
+    },
+    {
+      "line": 390,
+      "columns": 2,
+      "data_rows": 6
+    },
+    {
+      "line": 401,
+      "columns": 17,
+      "data_rows": 29
+    },
+    {
+      "line": 439,
+      "columns": 9,
+      "data_rows": 29
+    },
+    {
+      "line": 477,
+      "columns": 5,
+      "data_rows": 2
+    },
+    {
+      "line": 486,
+      "columns": 2,
+      "data_rows": 6
+    },
+    {
+      "line": 501,
+      "columns": 6,
+      "data_rows": 1
+    },
+    {
+      "line": 535,
+      "columns": 2,
+      "data_rows": 2
+    }
+  ],
+  "local_links_checked": 65,
+  "historical_quality_numeric_rows": 45,
+  "quality_matches_HEAD": true,
+  "errors": []
+}

@@ -1,0 +1,202 @@
+{
+  "schema_version": 1,
+  "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+  "surface": {
+    "id": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+    "object": "model",
+    "created": 1791315234,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "rope_scaling": {
+      "rope_type": "yarn",
+      "factor": 2,
+      "original_max_position_embeddings": 262144,
+      "beta_fast": 32,
+      "beta_slow": 1,
+      "attn_factor": 1,
+      "mrope_cache_factor": 4,
+      "mscale": 1.0693147,
+      "correction_max_position_embeddings": 1048576,
+      "scaled_max_position_embeddings": 524288
+    },
+    "context": {
+      "request_limit_tokens": 524288,
+      "position_ceiling_tokens": 524288,
+      "kv_pool_tokens": 565248,
+      "limited_by": "position-ceiling"
+    }
+  },
+  "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+  "seed": 20260922,
+  "tag": "6b2abffdce8c478e9b23916ee12458a7",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 65536,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 4017.1999999999534,
+        "prefill_ms": 63962.29999999999,
+        "decode_steps": 137,
+        "decode_rows": 137,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 65052,
+        "prompt_tokens_computed": 65052
+      },
+      "engine_tokens_per_s": 63.47704869063102,
+      "ms_per_pass": 29.322627737225936,
+      "tokens_per_pass": 1.8613138686131387,
+      "answer": {
+        "prompt_sha256": "2eaaddfdaaeefd8a11fd2520c1ef313faa153294b906eb248bd327df7a5a6dbc",
+        "usage": {
+          "prompt_tokens": 65052,
+          "completion_tokens": 256,
+          "total_tokens": 65308,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided context measurement and items 000000 to 001448. Need list first 200 parcels and their cities. Likely items 000000 through 001199? \"first 200 parcels\" means Item 000000 to Item 001199? Need numbered list describing first 200 parcels and their cities. Continue until listed all 200. Need include parcel IDs and cities? \"describing the first 200 parcels and their cities\" likely numbered list: 1. PX-... - City. Need ensure 200 entries. Could be from Item 000000 to Item 000199? Wait \"first 200 parcels\" could mean first 200 items in the provided list, i.e., Item 000000 through Item 000199. But they say \"Continue until you have listed all 200.\" The context has many items. Need infer. They ask",
+        "wall_ms": 68045.65885011107,
+        "ttft_ms": 64014.97146813199,
+        "last_ms": 68020.38038498722,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 65536,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 3897.20000000007,
+        "prefill_ms": 67.79999999998836,
+        "decode_steps": 137,
+        "decode_rows": 137,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 65052,
+        "prompt_tokens_computed": 8
+      },
+      "engine_tokens_per_s": 65.43159191214087,
+      "ms_per_pass": 28.446715328467665,
+      "tokens_per_pass": 1.8613138686131387,
+      "answer": {
+        "prompt_sha256": "2eaaddfdaaeefd8a11fd2520c1ef313faa153294b906eb248bd327df7a5a6dbc",
+        "usage": {
+          "prompt_tokens": 65052,
+          "completion_tokens": 256,
+          "total_tokens": 65308,
+          "prompt_tokens_details": {
+            "cached_tokens": 65044
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided context measurement and items 000000 to 001448. Need list first 200 parcels and their cities. Likely items 000000 through 001199? \"first 200 parcels\" means Item 000000 to Item 001199? Need numbered list describing first 200 parcels and their cities. Continue until listed all 200. Need include parcel IDs and cities? \"describing the first 200 parcels and their cities\" likely numbered list: 1. PX-... - City. Need ensure 200 entries. Could be from Item 000000 to Item 000199? Wait \"first 200 parcels\" could mean first 200 items in the provided list, i.e., Item 000000 through Item 000199. But they say \"Continue until you have listed all 200.\" The context has many items. Need infer. They ask",
+        "wall_ms": 4019.851171877235,
+        "ttft_ms": 102.31019393540919,
+        "last_ms": 4019.690193934366,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 65536,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 3899.1999999999534,
+        "prefill_ms": 66.20000000001164,
+        "decode_steps": 137,
+        "decode_rows": 137,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 65052,
+        "prompt_tokens_computed": 8
+      },
+      "engine_tokens_per_s": 65.3980303652039,
+      "ms_per_pass": 28.461313868612798,
+      "tokens_per_pass": 1.8613138686131387,
+      "answer": {
+        "prompt_sha256": "2eaaddfdaaeefd8a11fd2520c1ef313faa153294b906eb248bd327df7a5a6dbc",
+        "usage": {
+          "prompt_tokens": 65052,
+          "completion_tokens": 256,
+          "total_tokens": 65308,
+          "prompt_tokens_details": {
+            "cached_tokens": 65044
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided context measurement and items 000000 to 001448. Need list first 200 parcels and their cities. Likely items 000000 through 001199? \"first 200 parcels\" means Item 000000 to Item 001199? Need numbered list describing first 200 parcels and their cities. Continue until listed all 200. Need include parcel IDs and cities? \"describing the first 200 parcels and their cities\" likely numbered list: 1. PX-... - City. Need ensure 200 entries. Could be from Item 000000 to Item 000199? Wait \"first 200 parcels\" could mean first 200 items in the provided list, i.e., Item 000000 through Item 000199. But they say \"Continue until you have listed all 200.\" The context has many items. Need infer. They ask",
+        "wall_ms": 4031.4417970366776,
+        "ttft_ms": 102.48241992667317,
+        "last_ms": 4031.2847399618477,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

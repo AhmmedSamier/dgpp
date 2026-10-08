@@ -1,0 +1,78 @@
+[ OK ] scale_gemm_f32_fp8_head_numerics
+[ OK ] full-blocks M29xN384xK256 strict: l2_rel=1.3e-09 mismatches=0/11136
+[ OK ] full-blocks M29xN384xK256 semantic: l2_rel=0.00217 mismatches=0/11136
+[ OK ] scale_gemm_full_blocks_match_both_oracles
+[ OK ] tile M1xN256xK512 strict: l2_rel=0 mismatches=0/256
+[ OK ] tile M1xN256xK512 semantic: l2_rel=0.00201 mismatches=0/256
+[ OK ] tile M5xN256xK512 strict: l2_rel=0 mismatches=0/1280
+[ OK ] tile M5xN256xK512 semantic: l2_rel=0.00233 mismatches=0/1280
+[ OK ] tile M17xN256xK512 strict: l2_rel=0 mismatches=0/4352
+[ OK ] tile M17xN256xK512 semantic: l2_rel=0.00225 mismatches=0/4352
+[ OK ] scale_gemm_tile_kernel_small_m_matches_both_oracles
+[ OK ] large-m M300xN200xK512 strict: l2_rel=3.68e-05 mismatches=0/60000
+[ OK ] large-m M300xN200xK512 semantic: l2_rel=0.00241 mismatches=0/60000
+[ OK ] scale_gemm_large_m_route_is_bitwise_the_tile_kernel
+[ OK ] scale_gemm_explicit_grid_large_m_dispatch_and_bits
+[ OK ] scale_gemm_last_row_preserves_full_product_bits_and_output_bounds
+[ OK ] ragged M17xN1000xK1000 strict: l2_rel=7.73e-05 mismatches=0/17000
+[ OK ] ragged M17xN1000xK1000 semantic: l2_rel=0.00239 mismatches=0/17000
+[ OK ] scale_gemm_ragged_tails_match_both_oracles
+[ OK ] decode M1xN1536xK4096 strict: l2_rel=0 mismatches=0/1536
+[ OK ] decode M1xN1536xK4096 semantic: l2_rel=0.00231 mismatches=0/1536
+[ OK ] scale_gemm_decode_shape_single_row_real_qa_geometry
+[ OK ] saturation 448x1e30 strict: l2_rel=0 mismatches=0/2304
+[ OK ] saturation 448x1e30 semantic: l2_rel=0.00256 mismatches=0/2304
+[ OK ] subnormal min strict: l2_rel=0 mismatches=0/2304
+[ OK ] subnormal min semantic: l2_rel=0.00135 mismatches=0/2304
+[ OK ] scale_gemm_saturation_extremes
+[ OK ] nan propagation: columns 5 and 130 NaN, others finite
+[ OK ] scale_gemm_propagates_nan_exactly
+[ OK ] scale_gemm_degenerate_k_zeroes_output
+[ OK ] e4m3 hardware conversion == bridge on all 256 codes
+[ OK ] fp8_gemv_hardware_conversion_matches_bridge_on_every_code
+[ OK ] the multi-problem fp8 GEMV is bitwise the single launches at 1 rows
+[ OK ] the multi-problem fp8 GEMV is bitwise the single launches at 2 rows
+[ OK ] the multi-problem fp8 GEMV is bitwise the single launches at 4 rows
+[ OK ] the multi-problem fp8 GEMV is bitwise the single launches at 6 rows
+[ OK ] scale_gemm_gemv_multi_is_bitwise_the_single_launches
+[ OK ] the multi-problem GEMV is one chain at 1..8 rows (k = 5120, fp8 10240 / 6144, bf16 48 / 48)
+[ OK ] scale_gemm_gemv_multi_rows_are_one_chain_through_8
+[ OK ] the GDN in-projection dispatch is one chain at 1..8 rows (k = 256)
+[ OK ] the GDN in-projection dispatch is one chain at 1..8 rows (k = 1024)
+[ OK ] the GDN in-projection dispatch is one chain at 1..8 rows (k = 5120)
+[ OK ] scale_gemm_gdn_in_projection_dispatch_is_one_chain_1_to_8
+[ OK ] the multi-problem GEMV takes bf16 problems bitwise the bf16 launch at 1 rows
+[ OK ] the multi-problem GEMV takes bf16 problems bitwise the bf16 launch at 2 rows
+[ OK ] the multi-problem GEMV takes bf16 problems bitwise the bf16 launch at 4 rows
+[ OK ] scale_gemm_gemv_multi_takes_bf16_problems_bitwise_the_bf16_launch
+[ OK ] gemv M1xN1003xK1008 strict: l2_rel=0 mismatches=0/1003
+[ OK ] gemv M1xN1003xK1008 semantic: l2_rel=0.00235 mismatches=0/1003
+[ OK ] gemv M1xN200xK48 strict: l2_rel=0 mismatches=0/200
+[ OK ] gemv M1xN200xK48 semantic: l2_rel=0.00259 mismatches=0/200
+[ OK ] scale_gemm_gemv_path_ragged_n_and_k_match_both_oracles
+[ OK ] gemv M3xN520xK4096 strict: l2_rel=0 mismatches=0/1560
+[ OK ] gemv M3xN520xK4096 semantic: l2_rel=0.00238 mismatches=0/1560
+[ OK ] gemv M4xN264xK2048 strict: l2_rel=0 mismatches=0/1056
+[ OK ] gemv M4xN264xK2048 semantic: l2_rel=0.00221 mismatches=0/1056
+[ OK ] gemv chunked M8xN136xK4096 strict: l2_rel=0 mismatches=0/1088
+[ OK ] gemv chunked M8xN136xK4096 semantic: l2_rel=0.00238 mismatches=0/1088
+[ OK ] gemv rows independent of m through m=8 chunks
+[ OK ] scale_gemm_gemv_rows_are_independent_of_row_count
+[ .. ] streaming mma m=1 vs m=64: bitwise (0 of 1024 elements differ, first row -1, max rel 0)
+[ .. ] streaming mma m=2 vs m=64: bitwise (0 of 2048 elements differ, first row -1, max rel 0)
+[ .. ] streaming mma m=3 vs m=64: bitwise (0 of 3072 elements differ, first row -1, max rel 0)
+[ .. ] streaming mma m=4 vs m=64: bitwise (0 of 4096 elements differ, first row -1, max rel 0)
+[ .. ] streaming mma m=5 vs m=64: bitwise (0 of 5120 elements differ, first row -1, max rel 0)
+[ .. ] streaming mma m=8 vs m=64: bitwise (0 of 8192 elements differ, first row -1, max rel 0)
+[ .. ] streaming mma m=15 vs m=64: bitwise (0 of 15360 elements differ, first row -1, max rel 0)
+[ .. ] streaming mma m=16 vs m=64: bitwise (0 of 16384 elements differ, first row -1, max rel 0)
+[ .. ] streaming mma m=17 vs m=64: bitwise (0 of 17408 elements differ, first row -1, max rel 0)
+[ .. ] streaming mma m=31 vs m=64: bitwise (0 of 31744 elements differ, first row -1, max rel 0)
+[ .. ] streaming mma m=32 vs m=64: bitwise (0 of 32768 elements differ, first row -1, max rel 0)
+[ .. ] streaming mma m=33 vs m=64: bitwise (0 of 33792 elements differ, first row -1, max rel 0)
+[ .. ] streaming mma m=48 vs m=64: bitwise (0 of 49152 elements differ, first row -1, max rel 0)
+[ .. ] streaming mma m=63 vs m=64: bitwise (0 of 64512 elements differ, first row -1, max rel 0)
+[ OK ] scale_gemm_streaming_mma_row_bits_vs_row_count
+[ OK ] gemv nan propagation: columns 9 and 250 NaN
+[ OK ] scale_gemm_gemv_path_propagates_nan_exactly
+20 tests, 0 failed

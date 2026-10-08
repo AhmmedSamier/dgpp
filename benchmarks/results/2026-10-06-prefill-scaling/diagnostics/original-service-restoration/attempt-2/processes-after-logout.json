@@ -1,0 +1,50 @@
+[
+  {
+    "host": "192.168.88.11",
+    "processes": [
+      {
+        "pid": 692133,
+        "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+        "swap_KiB": 0,
+        "swap_max": "0",
+        "swap_current": 0
+      }
+    ]
+  },
+  {
+    "host": "192.168.88.12",
+    "processes": [
+      {
+        "pid": 554708,
+        "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+        "swap_KiB": 0,
+        "swap_max": "0",
+        "swap_current": 0
+      }
+    ]
+  },
+  {
+    "host": "192.168.88.13",
+    "processes": [
+      {
+        "pid": 1398801,
+        "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+        "swap_KiB": 0,
+        "swap_max": "0",
+        "swap_current": 0
+      }
+    ]
+  },
+  {
+    "host": "192.168.88.14",
+    "processes": [
+      {
+        "pid": 911442,
+        "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+        "swap_KiB": 0,
+        "swap_max": "0",
+        "swap_current": 0
+      }
+    ]
+  }
+]

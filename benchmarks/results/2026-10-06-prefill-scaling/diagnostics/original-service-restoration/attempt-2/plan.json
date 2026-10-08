@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-07T18:55:16.918445+00:00",
+  "config": "/home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json",
+  "config_sha256": "5b5ad90f9a12189dee2e12cb5b843ada42e1e945c62c34163845b96cc4b6d887",
+  "binary": "/home/stephen/workspace/dgpp/build-release/dgpp-serve",
+  "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+  "log_dir": "/home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a",
+  "previous_logs_backup": "/tmp/dgpp-original-service-logs-before-restore-20261007T185516Z",
+  "environment": {
+    "DGPP_NO_SWAP": "1",
+    "CUDA_DEVICE_MAX_CONNECTIONS": "32"
+  }
+}

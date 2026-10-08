@@ -1,0 +1,26 @@
+[
+  {
+    "host": "192.168.88.11",
+    "returncode": 0,
+    "stdout": "{\"models--deepseek-ai--DeepSeek-V4.1-Flash\": [\"dba1be0a40aa45a94ad051997016db3960a90277\"], \"models--HawkBearPig--GLM-5.3-Int4-Int8Mix-RTN-g64\": [\"147684fbad20c1e283ddff46fd07cb9d4ccbb3da\"], \"models--Saren--Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN\": [\"19f9710c8f6600a32e15fb98bc77613ee8ec369b\"], \"models--HawkBearPig--GLM-5.3-Flash-NVFP4-FP8\": [\"17b8d4d83e33e836e9549d7e1a8d25b5117203c1\"], \"models--Qwen--Qwen3.8-Flash-Next-FP8\": [\"236dfdf285828023ca3bcd3f37366c58a3469b13\"], \"models--Qwen--Qwen3.8-27B-FP8\": [\"017b9c7af6b5689d5dd426a76e0bc077eb5ca20a\"], \"models--z-lab--Qwen3.8-27B-DFlash2\": [\"50307d4c4cde6860d4eee73e2547cd786fe8e8a4\"], \"models--nvidia--Qwen3.8-Flash-Next-NVFP4\": [\"fc694b54fb0174e0913e6adf86691ef85a4ead47\"], \"models--unsloth--GLM-5.3-Flash-FP8\": [\"a160e2291674d9e3e92e98fd82faa2544a2867a3\"]}\n",
+    "stderr": ""
+  },
+  {
+    "host": "192.168.88.12",
+    "returncode": 0,
+    "stdout": "{\"models--HawkBearPig--GLM-5.3-Flash-NVFP4-FP8\": [\"17b8d4d83e33e836e9549d7e1a8d25b5117203c1\"], \"models--deepseek-ai--DeepSeek-V4.1-Flash\": [\"dba1be0a40aa45a94ad051997016db3960a90277\"], \"models--Saren--Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN\": [\"19f9710c8f6600a32e15fb98bc77613ee8ec369b\"], \"models--unsloth--GLM-5.3-Flash-FP8\": [\"a160e2291674d9e3e92e98fd82faa2544a2867a3\"], \"models--nvidia--Qwen3.8-Flash-Next-NVFP4\": [\"fc694b54fb0174e0913e6adf86691ef85a4ead47\"], \"models--Qwen--Qwen3.8-Flash-Next-FP8\": [\"236dfdf285828023ca3bcd3f37366c58a3469b13\"], \"models--Qwen--Qwen3.8-27B-FP8\": [\"017b9c7af6b5689d5dd426a76e0bc077eb5ca20a\"], \"models--HawkBearPig--GLM-5.3-Int4-Int8Mix-RTN-g64\": [\"147684fbad20c1e283ddff46fd07cb9d4ccbb3da\"], \"models--z-lab--Qwen3.8-27B-DFlash2\": [\"50307d4c4cde6860d4eee73e2547cd786fe8e8a4\"]}\n",
+    "stderr": ""
+  },
+  {
+    "host": "192.168.88.13",
+    "returncode": 0,
+    "stdout": "{\"models--Qwen--Qwen3.8-Flash-Next-FP8\": [\"236dfdf285828023ca3bcd3f37366c58a3469b13\"], \"models--Qwen--Qwen3.8-27B-FP8\": [\"017b9c7af6b5689d5dd426a76e0bc077eb5ca20a\"], \"models--Saren--Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN\": [\"19f9710c8f6600a32e15fb98bc77613ee8ec369b\"], \"models--z-lab--Qwen3.8-27B-DFlash2\": [\"50307d4c4cde6860d4eee73e2547cd786fe8e8a4\"], \"models--HawkBearPig--GLM-5.3-Int4-Int8Mix-RTN-g64\": [\"147684fbad20c1e283ddff46fd07cb9d4ccbb3da\"], \"models--deepseek-ai--DeepSeek-V4.1-Flash\": [\"dba1be0a40aa45a94ad051997016db3960a90277\"], \"models--nvidia--Qwen3.8-Flash-Next-NVFP4\": [\"fc694b54fb0174e0913e6adf86691ef85a4ead47\"], \"models--unsloth--GLM-5.3-Flash-FP8\": [\"a160e2291674d9e3e92e98fd82faa2544a2867a3\"], \"models--HawkBearPig--GLM-5.3-Flash-NVFP4-FP8\": [\"17b8d4d83e33e836e9549d7e1a8d25b5117203c1\"]}\n",
+    "stderr": ""
+  },
+  {
+    "host": "192.168.88.14",
+    "returncode": 0,
+    "stdout": "{\"models--Qwen--Qwen3.8-Flash-Next-FP8\": [\"236dfdf285828023ca3bcd3f37366c58a3469b13\"], \"models--Qwen--Qwen3.8-27B-FP8\": [\"017b9c7af6b5689d5dd426a76e0bc077eb5ca20a\"], \"models--z-lab--Qwen3.8-27B-DFlash2\": [\"50307d4c4cde6860d4eee73e2547cd786fe8e8a4\"], \"models--Saren--Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN\": [\"19f9710c8f6600a32e15fb98bc77613ee8ec369b\"], \"models--unsloth--GLM-5.3-Flash-FP8\": [\"a160e2291674d9e3e92e98fd82faa2544a2867a3\"], \"models--deepseek-ai--DeepSeek-V4.1-Flash\": [\"dba1be0a40aa45a94ad051997016db3960a90277\"], \"models--HawkBearPig--GLM-5.3-Int4-Int8Mix-RTN-g64\": [\"147684fbad20c1e283ddff46fd07cb9d4ccbb3da\"], \"models--HawkBearPig--GLM-5.3-Flash-NVFP4-FP8\": [\"17b8d4d83e33e836e9549d7e1a8d25b5117203c1\"], \"models--nvidia--Qwen3.8-Flash-Next-NVFP4\": [\"fc694b54fb0174e0913e6adf86691ef85a4ead47\"]}\n",
+    "stderr": ""
+  }
+]

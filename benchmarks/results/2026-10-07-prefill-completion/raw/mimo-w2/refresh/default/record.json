@@ -1,0 +1,388 @@
+{
+  "schema_version": 1,
+  "records": {
+    "config.json": {
+      "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+      "world_size": 2,
+      "release": "",
+      "engine": {
+        "max_concurrency": 4,
+        "kv_capacity": 131072,
+        "kv_dtype": "bf16",
+        "bf16_weights": "bf12",
+        "default_max_tokens": 32768,
+        "queue_limit": 8,
+        "max_connections": 64,
+        "decode_graph": true,
+        "mtp": true,
+        "mtp_depth": 1,
+        "prefix_cache_gib": 1.5,
+        "admission": "full",
+        "admission_window": 256,
+        "sampling_candidates": 128,
+        "stats_interval_s": 10
+      },
+      "paths": {
+        "resident_cache": "~/.cache/dgpp/prefill-completion-2026-10-07/XiaomiMiMo--MiMo-V2.6-Flash-RL"
+      },
+      "http": {
+        "bind_host": "127.0.0.1",
+        "port": 18080
+      }
+    },
+    "manifest.json": {
+      "started_at": "2026-10-07T23:10:42.657935+00:00",
+      "commit": "90ebbf1bcc2976ebaa94e0b4cf8779caed52f3db",
+      "binary_sha256": "616d35a9d3f1a4d61b53622aa7a7a2f0389ffa1f3ab1bbd1d97abe0395bd0f6d",
+      "candidate_binary": "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/mimo-dispatch-fix/native/dgpp-serve",
+      "candidate_binary_sha256": "616d35a9d3f1a4d61b53622aa7a7a2f0389ffa1f3ab1bbd1d97abe0395bd0f6d",
+      "purpose": "Complete all measurements affected by the idle-budget, FP4 conversion and FP8 projection-dispatch fixes.",
+      "benchmark_environment": {
+        "DGPP_NO_SWAP": "1",
+        "CUDA_DEVICE_MAX_CONNECTIONS": "32"
+      },
+      "model_revision": "5711b268169967567844e1e560e8a3966da959b1",
+      "source_sha256": {
+        "src/kernels/dsa.cu": "deae7b318970c402ccc1506700d81dc373b81dece2f6b16a70a53ec6d0bac45c",
+        "src/kernels/scale_gemm.cu": "b3675795b10a0d1486daa98d7cb034cf7967ad6477aa4a0bf35399895dd18663",
+        "tests/cuda/dsa_test.cu": "6a4d96a614323f1c8cfaa83e1619ebf30da1d195889e6f45e18cad4c73a1f44b",
+        "tests/cuda/scale_gemm_test.cu": "ac1e3f66216aade9c1ad4fc68b1d8fe4220d6e3d65b3e1e01a6502495b5847a6"
+      },
+      "binary_role": "binary_sha256 guards the preserved release executable; every measured launch uses candidate_binary_sha256 and records that hash as its binary_sha256.",
+      "harness_sha256": {
+        "run.py": "5cecc45e6fcdf3316d839692d31edd366a41269300d4a31572a373edcaa79632",
+        "results.py": "f49ac58284478a252885916791ba8c1426da1045003cfcb6195f3617801016de",
+        "update_document.py": "9d0713f327703e2592fbd8527e50f80ffb0f179fb25ab7db2a4397e0ca3c09ab",
+        "node_telemetry.py": "345928df413d63db36502018eac0931dd7113c2564c73c81e1d0a1cf55895d23"
+      },
+      "clients_sha256": {
+        "scripts/timed_load.py": "e38328d44f4719b5bfcb110fe0d5737df96aebf61ed8dc467bf3850217c5e12f",
+        "scripts/serve_prefill_probe.py": "0e7443e6e48e34a1fbfc6311e8f1396b48bbae7e22225c8db8d98f1d4290d783",
+        "scripts/serve_context_matrix.py": "ba657bc82c5f15148be2d08563f677e2498fcb3c7e681f8376e70f70b10a5310"
+      },
+      "baseline_binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34"
+    },
+    "measurement-plan.json": {
+      "jobs": [
+        "greedy",
+        "context-0",
+        "context-32768",
+        "context-65536",
+        "context-131072"
+      ],
+      "mode": "default",
+      "deployment": "mimo-w2",
+      "profiled": false,
+      "storage_before": [
+        {
+          "host": "192.168.88.11",
+          "free_bytes": 588664541184
+        },
+        {
+          "host": "192.168.88.12",
+          "free_bytes": 788667146240
+        }
+      ]
+    },
+    "complete.json": {
+      "at": "2026-10-08T02:08:15.416538+00:00",
+      "passed": true
+    },
+    "memory-check.json": {
+      "passed": true,
+      "ranks": [
+        {
+          "rank": 0,
+          "samples": 1343,
+          "max_swap_KiB": 0,
+          "swap_policy_required": true,
+          "swap_policy_passed": true,
+          "max_sample_gap_s": 1.0831284320447594,
+          "violations": [],
+          "errors": []
+        },
+        {
+          "rank": 1,
+          "samples": 1341,
+          "max_swap_KiB": 0,
+          "swap_policy_required": true,
+          "swap_policy_passed": true,
+          "max_sample_gap_s": 1.0830874349921942,
+          "violations": [],
+          "errors": []
+        }
+      ]
+    },
+    "rank-identity.json": {
+      "expected_ranks": 2,
+      "md5": {
+        "serve_rank0.ops": "e0751177dda64cf09c346a0a8660d646",
+        "serve_rank1.ops": "e0751177dda64cf09c346a0a8660d646"
+      },
+      "passed": true
+    },
+    "models.json": {
+      "object": "list",
+      "data": [
+        {
+          "id": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+          "object": "model",
+          "created": 1791424134,
+          "owned_by": "dgpp",
+          "sampling": {
+            "available": true,
+            "defaults": {
+              "temperature": 0,
+              "top_p": 0.95,
+              "top_k": 0,
+              "min_p": 0,
+              "repetition_penalty": 1
+            }
+          },
+          "tools": {
+            "available": true,
+            "constrained": true
+          },
+          "response_format": {
+            "json_object": true,
+            "json_schema": true
+          },
+          "reasoning": {
+            "in_content": false,
+            "effort_mapping": {
+              "none": {
+                "enable_thinking": false
+              },
+              "minimal": {
+                "enable_thinking": true
+              },
+              "low": {
+                "enable_thinking": true
+              },
+              "medium": {
+                "enable_thinking": true
+              },
+              "high": {
+                "enable_thinking": true
+              },
+              "xhigh": {
+                "enable_thinking": true
+              },
+              "max": {
+                "enable_thinking": true
+              }
+            }
+          },
+          "default_chat_template_kwargs": {},
+          "input_modalities": [
+            "text"
+          ],
+          "context": {
+            "request_limit_tokens": 131072,
+            "position_ceiling_tokens": null,
+            "kv_pool_tokens": 131072,
+            "limited_by": "kv-pool"
+          }
+        }
+      ]
+    },
+    "server/cluster.resolved.json": {
+      "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+      "release": "",
+      "engine": {
+        "max_concurrency": 4,
+        "kv_capacity": 131072,
+        "kv_dtype": "bf16",
+        "bf16_weights": "bf12",
+        "default_max_tokens": 32768,
+        "queue_limit": 8,
+        "max_connections": 64,
+        "decode_graph": true,
+        "mtp": true,
+        "mtp_depth": 1,
+        "prefix_cache_gib": 1.5,
+        "admission": "full",
+        "admission_window": 256,
+        "sampling_candidates": 128,
+        "stats_interval_s": 10
+      },
+      "paths": {
+        "resident_cache": "~/.cache/dgpp/prefill-completion-2026-10-07/XiaomiMiMo--MiMo-V2.6-Flash-RL",
+        "log_dir": "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-completion/raw/mimo-w2/refresh/default/server",
+        "stage_dir": "/tmp/bus4/deployments/95ab31b76ac8ef7e",
+        "release_dir": "~/dgpp/releases"
+      },
+      "http": {
+        "bind_host": "127.0.0.1",
+        "port": 18080
+      },
+      "nodes": [
+        "192.168.88.11",
+        "192.168.88.12"
+      ],
+      "ssh_user": "stephen",
+      "ports": {
+        "http": 18080,
+        "fabric": 29970,
+        "journal": 29971
+      },
+      "node_env": [
+        {},
+        {}
+      ]
+    },
+    "up.log.command.json": {
+      "command": [
+        "/usr/bin/python3",
+        "/home/stephen/workspace/dgpp/scripts/dgpp-cluster",
+        "up",
+        "--config",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-completion/raw/mimo-w2/refresh/default/config.json",
+        "--bin",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/mimo-dispatch-fix/native/dgpp-serve",
+        "--log-dir",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-completion/raw/mimo-w2/refresh/default/server"
+      ],
+      "cwd": "/home/stephen/workspace/dgpp",
+      "started_at": "2026-10-08T01:45:30.487515+00:00",
+      "returncode": 0,
+      "finished_at": "2026-10-08T01:48:54.211209+00:00"
+    },
+    "down.log.command.json": {
+      "command": [
+        "/usr/bin/python3",
+        "/home/stephen/workspace/dgpp/scripts/dgpp-cluster",
+        "down",
+        "--config",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-completion/raw/mimo-w2/refresh/default/config.json",
+        "--log-dir",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-completion/raw/mimo-w2/refresh/default/server"
+      ],
+      "cwd": "/home/stephen/workspace/dgpp",
+      "started_at": "2026-10-08T02:08:11.619270+00:00",
+      "returncode": 0,
+      "finished_at": "2026-10-08T02:08:15.368574+00:00"
+    },
+    "greedy.log.command.json": {
+      "command": [
+        "/usr/bin/python3",
+        "/home/stephen/workspace/dgpp/scripts/timed_load.py",
+        "127.0.0.1",
+        "18080",
+        "--concurrency",
+        "1,2,4,8",
+        "--classes",
+        "all",
+        "--repeat",
+        "3",
+        "--max-tokens",
+        "256",
+        "--json-out",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-completion/raw/mimo-w2/refresh/default/greedy.json"
+      ],
+      "cwd": "/home/stephen/workspace/dgpp",
+      "started_at": "2026-10-08T01:48:54.212692+00:00",
+      "returncode": 0,
+      "finished_at": "2026-10-08T02:02:20.943270+00:00"
+    },
+    "context-0.log.command.json": {
+      "command": [
+        "/home/stephen/workspace/dgpp/.venv/bin/python",
+        "/home/stephen/workspace/dgpp/scripts/serve_context_matrix.py",
+        "127.0.0.1",
+        "18080",
+        "--model",
+        "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+        "--tag",
+        "completion-mimo-w2",
+        "--lengths",
+        "0",
+        "--json-out",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-completion/raw/mimo-w2/refresh/default/context-0.json"
+      ],
+      "cwd": "/home/stephen/workspace/dgpp",
+      "started_at": "2026-10-08T02:02:20.944259+00:00",
+      "returncode": 0,
+      "finished_at": "2026-10-08T02:02:38.844199+00:00"
+    },
+    "context-32768.log.command.json": {
+      "command": [
+        "/home/stephen/workspace/dgpp/.venv/bin/python",
+        "/home/stephen/workspace/dgpp/scripts/serve_context_matrix.py",
+        "127.0.0.1",
+        "18080",
+        "--model",
+        "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+        "--tag",
+        "completion-mimo-w2",
+        "--lengths",
+        "32768",
+        "--json-out",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-completion/raw/mimo-w2/refresh/default/context-32768.json"
+      ],
+      "cwd": "/home/stephen/workspace/dgpp",
+      "started_at": "2026-10-08T02:02:38.845022+00:00",
+      "returncode": 0,
+      "finished_at": "2026-10-08T02:03:21.610056+00:00"
+    },
+    "context-65536.log.command.json": {
+      "command": [
+        "/home/stephen/workspace/dgpp/.venv/bin/python",
+        "/home/stephen/workspace/dgpp/scripts/serve_context_matrix.py",
+        "127.0.0.1",
+        "18080",
+        "--model",
+        "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+        "--tag",
+        "completion-mimo-w2",
+        "--lengths",
+        "65536",
+        "--json-out",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-completion/raw/mimo-w2/refresh/default/context-65536.json"
+      ],
+      "cwd": "/home/stephen/workspace/dgpp",
+      "started_at": "2026-10-08T02:03:21.610725+00:00",
+      "returncode": 0,
+      "finished_at": "2026-10-08T02:04:45.194549+00:00"
+    },
+    "context-131072.log.command.json": {
+      "command": [
+        "/home/stephen/workspace/dgpp/.venv/bin/python",
+        "/home/stephen/workspace/dgpp/scripts/serve_context_matrix.py",
+        "127.0.0.1",
+        "18080",
+        "--model",
+        "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+        "--tag",
+        "completion-mimo-w2",
+        "--lengths",
+        "131072",
+        "--json-out",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-completion/raw/mimo-w2/refresh/default/context-131072.json"
+      ],
+      "cwd": "/home/stephen/workspace/dgpp",
+      "started_at": "2026-10-08T02:04:45.219283+00:00",
+      "returncode": 0,
+      "finished_at": "2026-10-08T02:08:11.618588+00:00"
+    }
+  },
+  "evidence_sha256": {
+    "greedy.json": "ec314e8105f5eb4c2dd976d6954cfc513c7cc1b0ae292dad536d7108bfc5fe72",
+    "context-0.json": "5d7bea981f2da1d3e16c2b1d68b09d3d17c2003cd8f840004736727e70f116ad",
+    "context-32768.json": "bd3b3a254abbe20d2ae2984d56aaa7851203491921cef85bdfce27f6e31bbee4",
+    "context-65536.json": "8aa78b1b85ec0dbbfcc50e7517f86eddbd647878d2386a352ea6a0096d4b120d",
+    "context-131072.json": "c66423f0bddec56f40010a09002281921fa178bc5d87c6aaf1cb10e75a7ef5fe"
+  },
+  "local_telemetry": [
+    {
+      "file": "node0-telemetry.jsonl",
+      "bytes": 1887282,
+      "sha256": "77d07ce28181c71d9919758befb87b8709551355e9a73d7bed9db9bc8bfc1bd5"
+    },
+    {
+      "file": "node1-telemetry.jsonl",
+      "bytes": 1854716,
+      "sha256": "e2839e63cc2af83f62108e6bd98a54a6a4a7e03b75b64320f02fbbc211d84fb6"
+    }
+  ]
+}

@@ -1,0 +1,182 @@
+{
+  "snapshot_completion_gap_s": 77.7598340511322,
+  "devices": [
+    {
+      "host": "192.168.88.11",
+      "device": "roceP2p1s0f0",
+      "deltas": {
+        "xmit_data": 5552908499,
+        "packet_seq_err": 2,
+        "out_of_sequence": 26,
+        "roce_adp_retrans": 0,
+        "roce_adp_retrans_to": 0,
+        "local_ack_timeout_err": 0,
+        "rnr_nak_retry_err": 0,
+        "implied_nak_seq_err": 0,
+        "np_cnp_sent": 25,
+        "rp_cnp_handled": 2,
+        "np_ecn_marked_roce_packets": 0,
+        "rx_icrc_encapsulated": 0,
+        "rx_discards_phy": 0,
+        "rx_buffer_passed_thres_phy": 0,
+        "tx_pause_ctrl_phy": 0,
+        "rx_pause_ctrl_phy": 0
+      }
+    },
+    {
+      "host": "192.168.88.11",
+      "device": "rocep1s0f0",
+      "deltas": {
+        "xmit_data": 5090228344,
+        "packet_seq_err": 3,
+        "out_of_sequence": 26,
+        "roce_adp_retrans": 0,
+        "roce_adp_retrans_to": 0,
+        "local_ack_timeout_err": 0,
+        "rnr_nak_retry_err": 0,
+        "implied_nak_seq_err": 0,
+        "np_cnp_sent": 25,
+        "rp_cnp_handled": 2,
+        "np_ecn_marked_roce_packets": 0,
+        "rx_icrc_encapsulated": 0,
+        "rx_discards_phy": 0,
+        "rx_buffer_passed_thres_phy": 0,
+        "tx_pause_ctrl_phy": 0,
+        "rx_pause_ctrl_phy": 0
+      }
+    },
+    {
+      "host": "192.168.88.12",
+      "device": "roceP2p1s0f0",
+      "deltas": {
+        "xmit_data": 5632166560,
+        "packet_seq_err": 9,
+        "out_of_sequence": 9,
+        "roce_adp_retrans": 0,
+        "roce_adp_retrans_to": 0,
+        "local_ack_timeout_err": 0,
+        "rnr_nak_retry_err": 0,
+        "implied_nak_seq_err": 0,
+        "np_cnp_sent": 8,
+        "rp_cnp_handled": 6,
+        "np_ecn_marked_roce_packets": 0,
+        "rx_icrc_encapsulated": 0,
+        "rx_discards_phy": 0,
+        "rx_buffer_passed_thres_phy": 0,
+        "tx_pause_ctrl_phy": 0,
+        "rx_pause_ctrl_phy": 0
+      }
+    },
+    {
+      "host": "192.168.88.12",
+      "device": "rocep1s0f0",
+      "deltas": {
+        "xmit_data": 5157496861,
+        "packet_seq_err": 9,
+        "out_of_sequence": 9,
+        "roce_adp_retrans": 0,
+        "roce_adp_retrans_to": 0,
+        "local_ack_timeout_err": 0,
+        "rnr_nak_retry_err": 0,
+        "implied_nak_seq_err": 0,
+        "np_cnp_sent": 8,
+        "rp_cnp_handled": 6,
+        "np_ecn_marked_roce_packets": 0,
+        "rx_icrc_encapsulated": 0,
+        "rx_discards_phy": 0,
+        "rx_buffer_passed_thres_phy": 0,
+        "tx_pause_ctrl_phy": 0,
+        "rx_pause_ctrl_phy": 0
+      }
+    },
+    {
+      "host": "192.168.88.13",
+      "device": "roceP2p1s0f0",
+      "deltas": {
+        "xmit_data": 5663432242,
+        "packet_seq_err": 12,
+        "out_of_sequence": 0,
+        "roce_adp_retrans": 0,
+        "roce_adp_retrans_to": 0,
+        "local_ack_timeout_err": 0,
+        "rnr_nak_retry_err": 0,
+        "implied_nak_seq_err": 0,
+        "np_cnp_sent": 0,
+        "rp_cnp_handled": 16,
+        "np_ecn_marked_roce_packets": 0,
+        "rx_icrc_encapsulated": 0,
+        "rx_discards_phy": 0,
+        "rx_buffer_passed_thres_phy": 0,
+        "tx_pause_ctrl_phy": 0,
+        "rx_pause_ctrl_phy": 0
+      }
+    },
+    {
+      "host": "192.168.88.13",
+      "device": "rocep1s0f0",
+      "deltas": {
+        "xmit_data": 5202356391,
+        "packet_seq_err": 12,
+        "out_of_sequence": 0,
+        "roce_adp_retrans": 0,
+        "roce_adp_retrans_to": 0,
+        "local_ack_timeout_err": 0,
+        "rnr_nak_retry_err": 0,
+        "implied_nak_seq_err": 0,
+        "np_cnp_sent": 0,
+        "rp_cnp_handled": 16,
+        "np_ecn_marked_roce_packets": 0,
+        "rx_icrc_encapsulated": 0,
+        "rx_discards_phy": 0,
+        "rx_buffer_passed_thres_phy": 0,
+        "tx_pause_ctrl_phy": 0,
+        "rx_pause_ctrl_phy": 0
+      }
+    },
+    {
+      "host": "192.168.88.14",
+      "device": "roceP2p1s0f0",
+      "deltas": {
+        "xmit_data": 5736758304,
+        "packet_seq_err": 12,
+        "out_of_sequence": 0,
+        "roce_adp_retrans": 0,
+        "roce_adp_retrans_to": 0,
+        "local_ack_timeout_err": 0,
+        "rnr_nak_retry_err": 0,
+        "implied_nak_seq_err": 0,
+        "np_cnp_sent": 0,
+        "rp_cnp_handled": 9,
+        "np_ecn_marked_roce_packets": 0,
+        "rx_icrc_encapsulated": 0,
+        "rx_discards_phy": 0,
+        "rx_buffer_passed_thres_phy": 0,
+        "tx_pause_ctrl_phy": 0,
+        "rx_pause_ctrl_phy": 0
+      }
+    },
+    {
+      "host": "192.168.88.14",
+      "device": "rocep1s0f0",
+      "deltas": {
+        "xmit_data": 5248980011,
+        "packet_seq_err": 11,
+        "out_of_sequence": 0,
+        "roce_adp_retrans": 0,
+        "roce_adp_retrans_to": 0,
+        "local_ack_timeout_err": 0,
+        "rnr_nak_retry_err": 0,
+        "implied_nak_seq_err": 0,
+        "np_cnp_sent": 0,
+        "rp_cnp_handled": 9,
+        "np_ecn_marked_roce_packets": 0,
+        "rx_icrc_encapsulated": 0,
+        "rx_discards_phy": 0,
+        "rx_buffer_passed_thres_phy": 0,
+        "tx_pause_ctrl_phy": 0,
+        "rx_pause_ctrl_phy": 0
+      }
+    }
+  ],
+  "finding": "Small packet-sequence and congestion-counter increments; no retransmission, timeout, CRC or ingress-discard increments in this interval. This does not establish the cause of the collective waits."
+}

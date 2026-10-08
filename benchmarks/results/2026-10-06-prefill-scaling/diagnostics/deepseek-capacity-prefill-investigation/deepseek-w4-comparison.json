@@ -1,0 +1,154 @@
+{
+  "complete": true,
+  "all_prompts_and_outputs_equal": true,
+  "samples": [
+    {
+      "job": "prefill",
+      "length": 2048,
+      "repeat": 0,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 1646.8999999999978,
+      "after_prefill_ms": 1585.6000000000001
+    },
+    {
+      "job": "prefill",
+      "length": 2048,
+      "repeat": 1,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 1531.4000000000015,
+      "after_prefill_ms": 1465.5
+    },
+    {
+      "job": "prefill",
+      "length": 2048,
+      "repeat": 2,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 1455.7000000000007,
+      "after_prefill_ms": 1400.3999999999996
+    },
+    {
+      "job": "prefill",
+      "length": 8192,
+      "repeat": 0,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 5467.299999999999,
+      "after_prefill_ms": 4988.500000000001
+    },
+    {
+      "job": "prefill",
+      "length": 8192,
+      "repeat": 1,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 5495.899999999998,
+      "after_prefill_ms": 4973.0
+    },
+    {
+      "job": "prefill",
+      "length": 8192,
+      "repeat": 2,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 5619.4000000000015,
+      "after_prefill_ms": 5009.799999999999
+    },
+    {
+      "job": "prefill",
+      "length": 32768,
+      "repeat": 0,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 26342.699999999997,
+      "after_prefill_ms": 19859.199999999997
+    },
+    {
+      "job": "prefill",
+      "length": 32768,
+      "repeat": 1,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 25992.40000000001,
+      "after_prefill_ms": 19470.5
+    },
+    {
+      "job": "prefill",
+      "length": 32768,
+      "repeat": 2,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 25798.699999999997,
+      "after_prefill_ms": 19418.90000000001
+    },
+    {
+      "job": "context-32768",
+      "length": 32768,
+      "repeat": 0,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 25339.600000000006,
+      "after_prefill_ms": 19027.5
+    },
+    {
+      "job": "context-32768",
+      "length": 32768,
+      "repeat": 1,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 521.6999999999825,
+      "after_prefill_ms": 400.29999999998836
+    },
+    {
+      "job": "context-32768",
+      "length": 32768,
+      "repeat": 2,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 519.0,
+      "after_prefill_ms": 400.5
+    },
+    {
+      "job": "context-65536",
+      "length": 65536,
+      "repeat": 0,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 65494.899999999994,
+      "after_prefill_ms": 43346.30000000002
+    },
+    {
+      "job": "context-65536",
+      "length": 65536,
+      "repeat": 1,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 215.70000000001164,
+      "after_prefill_ms": 186.19999999998254
+    },
+    {
+      "job": "context-65536",
+      "length": 65536,
+      "repeat": 2,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 216.70000000001164,
+      "after_prefill_ms": 183.20000000001164
+    },
+    {
+      "job": "context-131072",
+      "length": 131072,
+      "repeat": 0,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 195174.09999999998,
+      "after_prefill_ms": 126329.4
+    },
+    {
+      "job": "context-131072",
+      "length": 131072,
+      "repeat": 1,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 135.40000000002328,
+      "after_prefill_ms": 127.59999999997672
+    },
+    {
+      "job": "context-131072",
+      "length": 131072,
+      "repeat": 2,
+      "prompt_and_output_equal": true,
+      "before_prefill_ms": 133.39999999996508,
+      "after_prefill_ms": 125.30000000004657
+    }
+  ],
+  "candidate_binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+  "baseline_binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+  "baseline_directory": "raw/deepseek-w4/refresh/default",
+  "candidate_directory": "diagnostics/deepseek-capacity-prefill-investigation/comparison/raw/deepseek-w4/validation/default"
+}

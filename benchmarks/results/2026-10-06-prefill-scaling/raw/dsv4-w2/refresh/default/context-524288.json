@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+  "surface": {
+    "id": "deepseek-ai/DeepSeek-V4-Flash-0731",
+    "object": "model",
+    "created": 1791363100,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 1,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "minimal"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "high"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "max"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text"
+    ],
+    "context": {
+      "request_limit_tokens": 1048576,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 1048576,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c8633cf",
+  "seed": 20260922,
+  "tag": "c5580e6db2ab4e80bdab4644696ad3db",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 524288,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 6411.900000000023,
+        "prefill_ms": 4679600.9,
+        "decode_steps": 78,
+        "decode_rows": 78,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 523778,
+        "prompt_tokens_computed": 523778
+      },
+      "engine_tokens_per_s": 39.76980302250489,
+      "ms_per_pass": 82.20384615384646,
+      "tokens_per_pass": 3.269230769230769,
+      "answer": {
+        "prompt_sha256": "2082c9789c68a49ca90d4c0b997abcf6c6b92e121e936b38f49ff170340ef1a6",
+        "usage": {
+          "prompt_tokens": 523778,
+          "completion_tokens": 256,
+          "total_tokens": 524034,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user asks: \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Need produce list of first 200 parcels (items 000000 to 000199) with parcel ID and city? \"describing the first 200 parcels and their cities.\" Need numbered list 1-200 likely each parcel PX-... in city. Need include maybe weight? \"describing\" maybe parcel and city. We need parse first 200 entries from context. Need list all 200. Let's extract from data.\n\nWe need be careful: first 200 parcels are Item 000000 through 000199. Each line: \"Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\" Need list numbered 1 to 200 with parcel ID and city. Could include \"PX-0757343 (Income)\" etc. Need continue until 200. Let's extract.\n\nI'll go through items 000000-000199:\n\n000000 PX-0757343 Income\n000001 PX-0081436 Jamesport\n000002 PX-0126529 Dunmore\n000",
+        "wall_ms": 4686277.547603939,
+        "ttft_ms": 4679807.903734967,
+        "last_ms": 4686251.969159115,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 524288,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 6398.400000000023,
+        "prefill_ms": 268.5,
+        "decode_steps": 79,
+        "decode_rows": 79,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 523778,
+        "prompt_tokens_computed": 2
+      },
+      "engine_tokens_per_s": 39.85371342835695,
+      "ms_per_pass": 80.99240506329143,
+      "tokens_per_pass": 3.2278481012658227,
+      "answer": {
+        "prompt_sha256": "2082c9789c68a49ca90d4c0b997abcf6c6b92e121e936b38f49ff170340ef1a6",
+        "usage": {
+          "prompt_tokens": 523778,
+          "completion_tokens": 256,
+          "total_tokens": 524034,
+          "prompt_tokens_details": {
+            "cached_tokens": 523776
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user asks: \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Need produce list of first 200 parcels (items 000000 to 000199) with parcel ID and city? \"describing the first 200 parcels and their cities.\" Need numbered list 1-200 likely each parcel PX-... in city. Need include maybe weight? \"describing\" maybe parcel and city. We need parse first 200 entries from context. Need list all 200. Let's extract from data.\n\nWe need be careful: first 200 parcels are Item 000000 through 000199. Each line: \"Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\" Need list numbered 1 to 200 with parcel ID and city. Could include \"PX-0757343 (Income)\" etc. Need continue until 200. Let's extract.\n\nI'll go through items 000000-000199:\n\n000000 PX-0757343 Income\n000001 PX-0081436 Jamesport\n000002 PX-0126529 Dunmore\n000",
+        "wall_ms": 6922.33055899851,
+        "ttft_ms": 495.89795409701765,
+        "last_ms": 6922.158733010292,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 524288,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 6369.29999999993,
+        "prefill_ms": 259.3999999994412,
+        "decode_steps": 79,
+        "decode_rows": 79,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 523778,
+        "prompt_tokens_computed": 2
+      },
+      "engine_tokens_per_s": 40.035796712355015,
+      "ms_per_pass": 80.62405063291051,
+      "tokens_per_pass": 3.2278481012658227,
+      "answer": {
+        "prompt_sha256": "2082c9789c68a49ca90d4c0b997abcf6c6b92e121e936b38f49ff170340ef1a6",
+        "usage": {
+          "prompt_tokens": 523778,
+          "completion_tokens": 256,
+          "total_tokens": 524034,
+          "prompt_tokens_details": {
+            "cached_tokens": 523776
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user asks: \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Need produce list of first 200 parcels (items 000000 to 000199) with parcel ID and city? \"describing the first 200 parcels and their cities.\" Need numbered list 1-200 likely each parcel PX-... in city. Need include maybe weight? \"describing\" maybe parcel and city. We need parse first 200 entries from context. Need list all 200. Let's extract from data.\n\nWe need be careful: first 200 parcels are Item 000000 through 000199. Each line: \"Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\" Need list numbered 1 to 200 with parcel ID and city. Could include \"PX-0757343 (Income)\" etc. Need continue until 200. Let's extract.\n\nI'll go through items 000000-000199:\n\n000000 PX-0757343 Income\n000001 PX-0081436 Jamesport\n000002 PX-0126529 Dunmore\n000",
+        "wall_ms": 6877.557496074587,
+        "ttft_ms": 473.62527111545205,
+        "last_ms": 6852.342416997999,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

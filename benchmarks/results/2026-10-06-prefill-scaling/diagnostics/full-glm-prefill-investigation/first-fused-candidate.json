@@ -1,0 +1,20 @@
+{
+  "at": "2026-10-07T02:17:48.294256+00:00",
+  "files": {
+    "src/kernels/dsa.cu": "7a94c1253b4181c5dbfe1415448d98f00d276731b8a990e8f40df0fd4f7bc0f4",
+    "src/kernels/dsa.hpp": "f8a125f367a3dde21d554d968a4e7836a9d8e80f9201829afafe6a7551bfe7d7",
+    "src/models/dsa_layer.cu": "7be9f3a33bdd0a3f97ae3ae496c9c9738a9b91cbc182ca9d25aa49722d83af89",
+    "tests/cuda/dsa_test.cu": "c220bb740561fec0650a492afb4484540643c51d1d8352de13ac0f0df51fbafc",
+    "benchmarks/micro/dsa_bench.cu": "00343c3673f2c9431600c2972e6f719cbabb0d6f11ea055db06b43ea109dbd32"
+  },
+  "benchmark_sha256": "9183cb5e7ff1ca631d261e3ddc6c53edd65e92a7867d5de2b7709cf19641fd0b",
+  "test_sha256": "92e262619331752cc1aa369e26aa91bbb893f4f83225fe7c2723715c29a0b2ed",
+  "server_binary_still_original": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+  "parity": "42 shape/data/ReLU combinations, bitwise score keys and selected ids/counts vs original GEMM/selector; initial smaller test also passed",
+  "timing_ms": {
+    "baseline_bf16": 1154.657,
+    "fused_bf16": 350.921,
+    "baseline_fp4": 1163.432,
+    "fused_fp4": 366.221
+  }
+}

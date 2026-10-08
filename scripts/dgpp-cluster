@@ -531,8 +531,9 @@ class Cluster:
         errors = {rank: error for rank, _, error in unreachable}
         say(f"=== {self.label}")
         try:
-            ver = subprocess.run([self.bin, "--version"], capture_output=True, text=True, timeout=20).stdout.strip()
-        except (OSError, subprocess.TimeoutExpired):
+            import cluster_doctor
+            ver = cluster_doctor.server_version(self.bin).stdout.strip()
+        except (OSError, subprocess.TimeoutExpired, ValueError):
             ver = "?"
         say(f"binary: {self.bin} — {ver}")
         for rank, host in enumerate(self.nodes):

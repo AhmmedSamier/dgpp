@@ -619,12 +619,13 @@ class GlmDiagnosticModel : public PrefillReporting {
   int graph_batch_requests() const { return graph_batch_requests_; }
   int graph_rows_per_request() const { return graph_rows_per_request_; }
 
-  // Decode-step route traces (Outputs.routes / route_biased): the per-MoE-
+  // Route traces for prefill and decode (Outputs.routes / route_biased): the per-MoE-
   // layer ids, weights and biased scores the parity gates and the near-tie
-  // audit read. They cost three D2H nodes per MoE layer per step (126 per
-  // token here), which a serving loop that only wants logits should not
-  // pay. Default on; the serving apps turn them off. Takes effect at the
-  // next capture / eager step.
+  // audit read. Decode adds three D2H nodes per MoE layer per step;
+  // prefill also accumulates scores for the entire prompt on the host.
+  // Default on for diagnostics; serving disables both. The setter keeps
+  // its existing name, matching SessionModel. Takes effect at the next
+  // capture / eager forward.
   void set_decode_route_traces(bool on) { decode_route_traces_ = on; }
   // Q0 measurement knob (2026-09-09): after the attention-site fold of the
   // first N layers of every decode row, issue boundary_->probe(T, 10240) —

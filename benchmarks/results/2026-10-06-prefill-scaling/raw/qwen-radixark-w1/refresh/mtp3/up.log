@@ -1,0 +1,19 @@
+OK   rank 0 (192.168.88.11) platform: Linux aarch64; supported target is Linux/aarch64 GB10
+OK   rank 0 (192.168.88.11) Python: 3.12.3; Python 3.10+ is required
+OK   rank 0 (192.168.88.11) commands: python3, timeout, ldd, ssh, scp, curl, jq
+OK   rank 0 (192.168.88.11) node address: rank 0 address 192.168.88.11 belongs to this host
+OK   rank 0 (192.168.88.11) GPU: NVIDIA GB10, 12.1, [N/A]
+OK   rank 0 (192.168.88.11) logs/staging: /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen-radixark-w1/refresh/mtp3/server: parent /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen-radixark-w1/refresh/mtp3/server, 200.9 GiB free
+OK   rank 0 (192.168.88.11) resident cache: ~/.cache/dgpp/matrix-2026-10-05/RadixArk--Qwen3.8-Flash-Next-NVFP4: parent /home/stephen/.cache/dgpp/matrix-2026-10-05/RadixArk--Qwen3.8-Flash-Next-NVFP4, 200.9 GiB free
+OK   rank 0 (192.168.88.11) model cache: /home/stephen/.cache/huggingface/hub: parent /home/stephen/.cache/huggingface/hub, 200.9 GiB free
+OK   rank 0 (192.168.88.11) checkpoint: /home/stephen/.cache/huggingface/hub/models--RadixArk--Qwen3.8-Flash-Next-NVFP4/snapshots/7b719225242aacd3dbd3f9407468c2ee9a9d2594: 125.9 GiB; all indexed shards have consistent lengths (not a content hash check)
+OK   rank 0 (192.168.88.11) available memory: 116.8 GiB; startup enforces the exact model memory plan
+OK   rank 0 (192.168.88.11) HTTP port: 127.0.0.1:18080 is available
+OK   rank 0 (192.168.88.11) runtime libraries: all binary dependencies resolve
+OK   rank 0 (192.168.88.11) server version: dgpp-serve 0.1.0+g8f1c4cbcc1e9.dirty (git 8f1c4cbcc1e9, cuda 13.0)
+Preflight: 0 failed check(s). No files were installed and no services were started or stopped.
+2026-10-06 20:30:04.181 === staging dgpp-serve and the config to the peers
+2026-10-06 20:30:04.181 === rank 0 on 192.168.88.11 (HTTP :18080, fabric :29970, journal :29971)
+2026-10-06 20:30:04.182 head pid 2217062
+2026-10-06 20:30:32.189 rank 0 serving: ok (28s)
+2026-10-06 20:30:32.189 READY — curl http://127.0.0.1:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen-radixark-w1/refresh/mtp3/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen-radixark-w1/refresh/mtp3/server)

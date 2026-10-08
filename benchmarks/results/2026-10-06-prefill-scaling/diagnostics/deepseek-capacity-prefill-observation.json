@@ -1,0 +1,123 @@
+{
+  "recorded_at": "2026-10-07T06:02:37.446342+00:00",
+  "status": "provisional: 1M launch still running; record an optimization lead without changing the benchmark",
+  "only_config_change": "engine.kv_capacity: 131072 -> 1048576",
+  "measurements": [
+    {
+      "deployment": "deepseek-w4",
+      "kv_capacity": 131072,
+      "validated_launch": true,
+      "groups": [
+        {
+          "requested_tokens": 2048,
+          "actual_tokens": [
+            2036,
+            2072,
+            2050
+          ],
+          "prefill_seconds": [
+            1.6468999999999978,
+            1.5314000000000014,
+            1.4557000000000007
+          ],
+          "median_seconds": 1.5314000000000014
+        },
+        {
+          "requested_tokens": 8192,
+          "actual_tokens": [
+            8120,
+            8168,
+            8294
+          ],
+          "prefill_seconds": [
+            5.467299999999999,
+            5.495899999999998,
+            5.6194000000000015
+          ],
+          "median_seconds": 5.495899999999998
+        },
+        {
+          "requested_tokens": 32768,
+          "actual_tokens": [
+            32717,
+            32754,
+            32708
+          ],
+          "prefill_seconds": [
+            26.342699999999997,
+            25.992400000000007,
+            25.798699999999997
+          ],
+          "median_seconds": 25.992400000000007
+        }
+      ],
+      "sources": {
+        "raw/deepseek-w4/refresh/default/config.json": "0f765bf81bf7edfa00329558bef1a7634b44a34aee347d04f1165e650afc8f9e",
+        "raw/deepseek-w4/refresh/default/prefill.json": "8b441f10aa5f12b92faaaa0efb1d394994d47d3cc26812245c09325be42fb49f",
+        "raw/deepseek-w4/refresh/default/prefill.log.command.json": "1aaccd0e0af0b6eb036e21cf5a0e9c49364b5fee2dac79edf9041b169a82c7cc"
+      }
+    },
+    {
+      "deployment": "deepseek-1m-w4",
+      "kv_capacity": 1048576,
+      "validated_launch": false,
+      "groups": [
+        {
+          "requested_tokens": 2048,
+          "actual_tokens": [
+            2051,
+            2085,
+            2064
+          ],
+          "prefill_seconds": [
+            1.7236999999999971,
+            1.824,
+            1.7524000000000015
+          ],
+          "median_seconds": 1.7524000000000015
+        },
+        {
+          "requested_tokens": 8192,
+          "actual_tokens": [
+            8200,
+            8246,
+            8366
+          ],
+          "prefill_seconds": [
+            7.4014000000000015,
+            7.678299999999996,
+            7.778
+          ],
+          "median_seconds": 7.678299999999996
+        },
+        {
+          "requested_tokens": 32768,
+          "actual_tokens": [
+            33032,
+            33090,
+            33029
+          ],
+          "prefill_seconds": [
+            50.644800000000004,
+            50.56470000000001,
+            50.169599999999974
+          ],
+          "median_seconds": 50.56470000000001
+        }
+      ],
+      "sources": {
+        "raw/deepseek-1m-w4/refresh/default/config.json": "0edcb281d823d7662c3aecba9f2e0da390f10b6611e46fed51b3885bd8a31bfd",
+        "raw/deepseek-1m-w4/refresh/default/prefill.json": "b37436068bfef220403e5d8554754d5769fe0dd88ca0ea422516a3c9338669f4",
+        "raw/deepseek-1m-w4/refresh/default/prefill.log.command.json": "5cfdf0edd8083aff4170255e9a28ed1ff2fd9aae92ecdc723f0ef6a4d61a155d"
+      }
+    }
+  ],
+  "source_lead": {
+    "source_commit": "0b10cbeaed1b7c51d854ec2f3a23729cb7b91c35",
+    "path": "src/models/dsv41/csa2_layer.cu",
+    "layout_line": 57,
+    "prefill_loop_line": 578,
+    "description": "tile_cap is fixed at construction from max_cache_tokens, while GEMM uses actual padded_n. A larger KV allocation can reduce prefill query batch size at the same input length. Not yet profiled or causally quantified."
+  },
+  "next": "Finish current campaign; preserve measurements. This is separate from the fixed GLM prefill paths and issue96. No code or benchmark settings changed."
+}

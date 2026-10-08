@@ -1,0 +1,5 @@
+2026-10-06 22:57:11.600 === SIGINT rank 0 (2610572) — the stop record releases the peers
+2026-10-06 22:57:13.601 === op-stream identity (every rank)
+2026-10-06 22:57:13.601 d2f2f1b492061eef97742ec29f453175  /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen-autoround-prefill-w1/refresh/mtp4/server/serve_rank0.ops
+2026-10-06 22:57:13.601 op streams: identical across 1 ranks
+2026-10-06 22:57:13.601 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen-autoround-prefill-w1/refresh/mtp4/server

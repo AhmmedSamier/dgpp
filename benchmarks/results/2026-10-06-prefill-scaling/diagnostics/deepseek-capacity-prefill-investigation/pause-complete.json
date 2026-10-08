@@ -1,0 +1,10 @@
+{
+  "at": "2026-10-07T06:06:40.165437+00:00",
+  "baseline_binary": "/tmp/dgpp-before-csa2-capacity-fix-dgpp-serve",
+  "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+  "archive": "benchmarks/results/2026-10-06-prefill-scaling/attempts/deepseek-1m-w4/default-before-capacity-investigation-20261007",
+  "memory_check_passed": true,
+  "rank_identity_passed": true,
+  "clean_shutdown": true,
+  "reason": "User-requested pause after completed64K client. Wholepartialdefault archived; not final benchmark results. context64 receipt was interrupted before it could record childexit0; client-boundary.json independently records its observed exit0 and3samples."
+}

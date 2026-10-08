@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+  "surface": {
+    "id": "deepseek-ai/DeepSeek-V4.1-Flash",
+    "object": "model",
+    "created": 1791350890,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 0,
+        "top_p": 1,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "minimal"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "high"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "max"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text"
+    ],
+    "context": {
+      "request_limit_tokens": 131072,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 131072,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "c90dfa01249db1be4245780a052ede752e1361c612ac6d08e2bdada7d599476b",
+  "seed": 20260922,
+  "tag": "2548b9db904b4db29ad953240183f370",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 4585.70000000007,
+        "prefill_ms": 300.8999999999942,
+        "decode_steps": 88,
+        "decode_rows": 88,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 109,
+        "prompt_tokens_computed": 109
+      },
+      "engine_tokens_per_s": 55.60764986806728,
+      "ms_per_pass": 52.11022727272807,
+      "tokens_per_pass": 2.897727272727273,
+      "answer": {
+        "prompt_sha256": "51ae5809c0cfe353be25f76688cf2b7bb9f05bd97b978980c0e88ac8f02bd00b",
+        "usage": {
+          "prompt_tokens": 109,
+          "completion_tokens": 256,
+          "total_tokens": 365,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user. Need parse. User gives context measurement hash, bucket 0. Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nRequest: \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need infer data? There is only one item provided. They ask first 200 parcels and their cities. We don't have data for 200 parcels. Maybe this is a prompt injection? Need respond cannot because only one parcel provided, no city info. But maybe there is hidden context? \"Context measurement 2548... bucket 0.\" Could be from benchmark where need generate list? We need maybe fabricate? We should not hallucinate. Need maybe state insufficient information. But user explicitly asks to write numbered list describing first 200 parcels and their cities. We only have Item 000000. No city. Could maybe \"Income\" is city? Wait item: \"parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\" \"Income\" might be location/city? It says \"in Income\"",
+        "wall_ms": 4940.123212058097,
+        "ttft_ms": 327.5873640086502,
+        "last_ms": 4939.965034136549,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 4524.399999999907,
+        "prefill_ms": 293.8000000000029,
+        "decode_steps": 88,
+        "decode_rows": 88,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 109,
+        "prompt_tokens_computed": 109
+      },
+      "engine_tokens_per_s": 56.36106445053604,
+      "ms_per_pass": 51.413636363635305,
+      "tokens_per_pass": 2.897727272727273,
+      "answer": {
+        "prompt_sha256": "51ae5809c0cfe353be25f76688cf2b7bb9f05bd97b978980c0e88ac8f02bd00b",
+        "usage": {
+          "prompt_tokens": 109,
+          "completion_tokens": 256,
+          "total_tokens": 365,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user. Need parse. User gives context measurement hash, bucket 0. Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nRequest: \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need infer data? There is only one item provided. They ask first 200 parcels and their cities. We don't have data for 200 parcels. Maybe this is a prompt injection? Need respond cannot because only one parcel provided, no city info. But maybe there is hidden context? \"Context measurement 2548... bucket 0.\" Could be from benchmark where need generate list? We need maybe fabricate? We should not hallucinate. Need maybe state insufficient information. But user explicitly asks to write numbered list describing first 200 parcels and their cities. We only have Item 000000. No city. Could maybe \"Income\" is city? Wait item: \"parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\" \"Income\" might be location/city? It says \"in Income\"",
+        "wall_ms": 4869.680542964488,
+        "ttft_ms": 305.21437083370984,
+        "last_ms": 4869.546893984079,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 4461.5,
+        "prefill_ms": 291.6000000000058,
+        "decode_steps": 86,
+        "decode_rows": 86,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 109,
+        "prompt_tokens_computed": 109
+      },
+      "engine_tokens_per_s": 57.155665135044266,
+      "ms_per_pass": 51.877906976744185,
+      "tokens_per_pass": 2.9651162790697674,
+      "answer": {
+        "prompt_sha256": "51ae5809c0cfe353be25f76688cf2b7bb9f05bd97b978980c0e88ac8f02bd00b",
+        "usage": {
+          "prompt_tokens": 109,
+          "completion_tokens": 256,
+          "total_tokens": 365,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user. Need parse. User gives context measurement hash, bucket 0. Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nRequest: \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need infer data? There is only one item provided. They ask first 200 parcels and their cities. We don't have data for 200 parcels. Maybe this is a prompt injection? Need respond cannot because only one parcel provided, no city info. But maybe there is hidden context? \"Context measurement 2548... bucket 0.\" Could be from benchmark where need generate list? We need maybe fabricate? We should not hallucinate. Need maybe state insufficient information. But user explicitly asks to write numbered list describing first 200 parcels and their cities. We only have Item 000000. No city. Could maybe \"Income\" is city? Wait item: \"parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\" \"Income\" might be location/city? It says \"in Income\"",
+        "wall_ms": 4790.170033928007,
+        "ttft_ms": 304.4681390747428,
+        "last_ms": 4790.038960054517,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

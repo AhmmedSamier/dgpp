@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+  "surface": {
+    "id": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+    "object": "model",
+    "created": 1791378751,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 0,
+        "top_p": 0.95,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true
+        },
+        "low": {
+          "enable_thinking": true
+        },
+        "medium": {
+          "enable_thinking": true
+        },
+        "high": {
+          "enable_thinking": true
+        },
+        "xhigh": {
+          "enable_thinking": true
+        },
+        "max": {
+          "enable_thinking": true
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 262144,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "ff15eb925890d6b71b5160de4b846fbd13178438ab463b38ecc953e8cd1dcb3e",
+  "seed": 20260922,
+  "tag": "42597e3b3c4e4679a8edb206494e4293",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 5926.800000000047,
+        "prefill_ms": 538.0999999999767,
+        "decode_steps": 141,
+        "decode_rows": 141,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 113,
+        "prompt_tokens_computed": 113
+      },
+      "engine_tokens_per_s": 43.024903826685225,
+      "ms_per_pass": 42.03404255319182,
+      "tokens_per_pass": 1.8085106382978724,
+      "answer": {
+        "prompt_sha256": "d56cdea857572d287e776dadd622931ff533e77cd95499db88309e759fc95c3f",
+        "usage": {
+          "prompt_tokens": 113,
+          "completion_tokens": 256,
+          "total_tokens": 369,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 117
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list of 200 parcels and their cities. However, the context provided only contains information about a single parcel (PX-0757343) with details about its weight, location (Income), gate, shift, and status. There is no information about 200 parcels or their cities.\n\nI should not fabricate data. I need to let the user know that the provided context only contains information about one parcel, and I don't have data about 200 parcels or their cities.I appreciate the request, but I'm unable to fulfill it. The context you provided contains information about only **one** parcel:\n\n1. **PX-0757343** \u2014 weighed 4.1825 kg, Income, gate 1, shift C, status sealed.\n\nThere is no data in the provided context about 200 parcels, nor is there any mention of cities associated with any parcels. I cannot fabricate or invent the remaining 199 entries.\n\nIf you have additional context or a larger dataset containing the full list of 200 parcels and their associated cities, please share it and I'll be happy to format it into",
+        "wall_ms": 6475.228258175775,
+        "ttft_ms": 585.1690149866045,
+        "last_ms": 6475.0700811855495,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 5931.599999999977,
+        "prefill_ms": 533.9000000000233,
+        "decode_steps": 141,
+        "decode_rows": 141,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 113,
+        "prompt_tokens_computed": 113
+      },
+      "engine_tokens_per_s": 42.99008699170561,
+      "ms_per_pass": 42.06808510638281,
+      "tokens_per_pass": 1.8085106382978724,
+      "answer": {
+        "prompt_sha256": "d56cdea857572d287e776dadd622931ff533e77cd95499db88309e759fc95c3f",
+        "usage": {
+          "prompt_tokens": 113,
+          "completion_tokens": 256,
+          "total_tokens": 369,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 117
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list of 200 parcels and their cities. However, the context provided only contains information about a single parcel (PX-0757343) with details about its weight, location (Income), gate, shift, and status. There is no information about 200 parcels or their cities.\n\nI should not fabricate data. I need to let the user know that the provided context only contains information about one parcel, and I don't have data about 200 parcels or their cities.I appreciate the request, but I'm unable to fulfill it. The context you provided contains information about only **one** parcel:\n\n1. **PX-0757343** \u2014 weighed 4.1825 kg, Income, gate 1, shift C, status sealed.\n\nThere is no data in the provided context about 200 parcels, nor is there any mention of cities associated with any parcels. I cannot fabricate or invent the remaining 199 entries.\n\nIf you have additional context or a larger dataset containing the full list of 200 parcels and their associated cities, please share it and I'll be happy to format it into",
+        "wall_ms": 6494.435287080705,
+        "ttft_ms": 583.6771458853036,
+        "last_ms": 6494.271413888782,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 5910.300000000047,
+        "prefill_ms": 530.1999999999825,
+        "decode_steps": 141,
+        "decode_rows": 141,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 113,
+        "prompt_tokens_computed": 113
+      },
+      "engine_tokens_per_s": 43.14501801938954,
+      "ms_per_pass": 41.917021276596074,
+      "tokens_per_pass": 1.8085106382978724,
+      "answer": {
+        "prompt_sha256": "d56cdea857572d287e776dadd622931ff533e77cd95499db88309e759fc95c3f",
+        "usage": {
+          "prompt_tokens": 113,
+          "completion_tokens": 256,
+          "total_tokens": 369,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 117
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list of 200 parcels and their cities. However, the context provided only contains information about a single parcel (PX-0757343) with details about its weight, location (Income), gate, shift, and status. There is no information about 200 parcels or their cities.\n\nI should not fabricate data. I need to let the user know that the provided context only contains information about one parcel, and I don't have data about 200 parcels or their cities.I appreciate the request, but I'm unable to fulfill it. The context you provided contains information about only **one** parcel:\n\n1. **PX-0757343** \u2014 weighed 4.1825 kg, Income, gate 1, shift C, status sealed.\n\nThere is no data in the provided context about 200 parcels, nor is there any mention of cities associated with any parcels. I cannot fabricate or invent the remaining 199 entries.\n\nIf you have additional context or a larger dataset containing the full list of 200 parcels and their associated cities, please share it and I'll be happy to format it into",
+        "wall_ms": 6464.0044760890305,
+        "ttft_ms": 585.0623790174723,
+        "last_ms": 6463.852314976975,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

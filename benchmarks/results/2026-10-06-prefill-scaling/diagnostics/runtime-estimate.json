@@ -1,0 +1,224 @@
+{
+  "estimated_at": "2026-10-06T16:36:02.762033+00:00",
+  "purpose": "Scheduling estimate only; these projected values must never populate benchmark tables.",
+  "assumptions": "Historical throughput extrapolated to C1/C2/C4/C8; quadratic cold-prefill projections for unmeasured contexts; 65 seconds per launch. Full GLM prefills use an unverified speedup assumption; DeepSeek and MiMo 512K timings remain uncertain.",
+  "remaining": [
+    {
+      "deployment": "glm-flash-hybrid-256k-w2",
+      "family": "GLM Flash",
+      "estimated_hours": 0.4698341625207297,
+      "serving_modes_hours": 0.0,
+      "prefill_context_hours": 0.45177860696517413,
+      "launch_hours": 0.018055555555555554
+    },
+    {
+      "deployment": "glm-flash-fp8-w4",
+      "family": "GLM Flash",
+      "estimated_hours": 0.218889245014245,
+      "serving_modes_hours": 0.0,
+      "prefill_context_hours": 0.20083368945868946,
+      "launch_hours": 0.018055555555555554
+    },
+    {
+      "deployment": "glm-flash-fp8-512k-w4",
+      "family": "GLM Flash",
+      "estimated_hours": 0.6649908499110464,
+      "serving_modes_hours": 0.07663693253212904,
+      "prefill_context_hours": 0.5161316951566951,
+      "launch_hours": 0.07222222222222222
+    },
+    {
+      "deployment": "qwen-nvfp4-w1",
+      "family": "Qwen Flash-Next",
+      "estimated_hours": 0.5757500257167888,
+      "serving_modes_hours": 0.2818725136787485,
+      "prefill_context_hours": 0.221655289815818,
+      "launch_hours": 0.07222222222222222
+    },
+    {
+      "deployment": "qwen-nvfp4-bf16-w1",
+      "family": "Qwen Flash-Next",
+      "estimated_hours": 0.6226194255010672,
+      "serving_modes_hours": 0.33332429492514715,
+      "prefill_context_hours": 0.21707290835369786,
+      "launch_hours": 0.07222222222222222
+    },
+    {
+      "deployment": "qwen-nvfp4-w2",
+      "family": "Qwen Flash-Next",
+      "estimated_hours": 0.41397911509190094,
+      "serving_modes_hours": 0.18925439302541866,
+      "prefill_context_hours": 0.15250249984426004,
+      "launch_hours": 0.07222222222222222
+    },
+    {
+      "deployment": "qwen-yarn-w2",
+      "family": "Qwen Flash-Next",
+      "estimated_hours": 0.627756337255546,
+      "serving_modes_hours": 0.21421246145673867,
+      "prefill_context_hours": 0.341321653576585,
+      "launch_hours": 0.07222222222222222
+    },
+    {
+      "deployment": "qwen-radixark-w1",
+      "family": "Qwen Flash-Next",
+      "estimated_hours": 0.5757500257167888,
+      "serving_modes_hours": 0.2818725136787485,
+      "prefill_context_hours": 0.221655289815818,
+      "launch_hours": 0.07222222222222222
+    },
+    {
+      "deployment": "qwen-radixark-w2",
+      "family": "Qwen Flash-Next",
+      "estimated_hours": 0.4482316256199217,
+      "serving_modes_hours": 0.20545134799788387,
+      "prefill_context_hours": 0.15250249984426004,
+      "launch_hours": 0.09027777777777778
+    },
+    {
+      "deployment": "qwen-fp8-w2",
+      "family": "Qwen Flash-Next",
+      "estimated_hours": 0.49476862888089596,
+      "serving_modes_hours": 0.26241644660198,
+      "prefill_context_hours": 0.16012996005669372,
+      "launch_hours": 0.07222222222222222
+    },
+    {
+      "deployment": "qwen-fp8-w4",
+      "family": "Qwen Flash-Next",
+      "estimated_hours": 0.37597737584350166,
+      "serving_modes_hours": 0.16931316835422852,
+      "prefill_context_hours": 0.13444198526705087,
+      "launch_hours": 0.07222222222222222
+    },
+    {
+      "deployment": "qwen-autoround-w1",
+      "family": "Qwen Flash-Next",
+      "estimated_hours": 0.49563776826267175,
+      "serving_modes_hours": 0.26973975318036447,
+      "prefill_context_hours": 0.1356202373045295,
+      "launch_hours": 0.09027777777777778
+    },
+    {
+      "deployment": "qwen-autoround-prefill-w1",
+      "family": "Qwen Flash-Next",
+      "estimated_hours": 0.49095576165134164,
+      "serving_modes_hours": 0.270004045697411,
+      "prefill_context_hours": 0.13067393817615283,
+      "launch_hours": 0.09027777777777778
+    },
+    {
+      "deployment": "glm53-w4",
+      "family": "Full GLM",
+      "estimated_hours": 0.8593967581443634,
+      "serving_modes_hours": 0.494646810602745,
+      "prefill_context_hours": 0.292527725319396,
+      "launch_hours": 0.07222222222222222
+    },
+    {
+      "deployment": "glm53-fp8kv-w4",
+      "family": "Full GLM",
+      "estimated_hours": 1.0955699548851159,
+      "serving_modes_hours": 0.4895753848927393,
+      "prefill_context_hours": 0.5337723477701543,
+      "launch_hours": 0.07222222222222222
+    },
+    {
+      "deployment": "glm53-fp8kv-256k-w4",
+      "family": "Full GLM",
+      "estimated_hours": 1.683905876364056,
+      "serving_modes_hours": 0.4895753848927393,
+      "prefill_context_hours": 1.1221082692490945,
+      "launch_hours": 0.07222222222222222
+    },
+    {
+      "deployment": "deepseek-w4",
+      "family": "DeepSeek",
+      "estimated_hours": 0.5342764695192184,
+      "serving_modes_hours": 0.28857650868293844,
+      "prefill_context_hours": 0.13736662750294656,
+      "launch_hours": 0.10833333333333334
+    },
+    {
+      "deployment": "deepseek-1m-w4",
+      "family": "DeepSeek",
+      "estimated_hours": 1.6007923429827209,
+      "serving_modes_hours": 0.28857650868293844,
+      "prefill_context_hours": 1.2038825009664493,
+      "launch_hours": 0.10833333333333334
+    },
+    {
+      "deployment": "dsv4-w2",
+      "family": "DeepSeek",
+      "estimated_hours": 2.1058803148589216,
+      "serving_modes_hours": 0.3171293577223204,
+      "prefill_context_hours": 1.6804176238032678,
+      "launch_hours": 0.10833333333333334
+    },
+    {
+      "deployment": "dsv4-w4",
+      "family": "DeepSeek",
+      "estimated_hours": 1.5274818486479556,
+      "serving_modes_hours": 0.18485921618831128,
+      "prefill_context_hours": 1.2342892991263108,
+      "launch_hours": 0.10833333333333334
+    },
+    {
+      "deployment": "mimo-w2",
+      "family": "MiMo",
+      "estimated_hours": 0.6136159724475085,
+      "serving_modes_hours": 0.31399093695148855,
+      "prefill_context_hours": 0.22740281327379788,
+      "launch_hours": 0.07222222222222222
+    },
+    {
+      "deployment": "mimo-w2-fp8kv",
+      "family": "MiMo",
+      "estimated_hours": 0.9057112569119615,
+      "serving_modes_hours": 0.3149751731122579,
+      "prefill_context_hours": 0.5185138615774814,
+      "launch_hours": 0.07222222222222222
+    },
+    {
+      "deployment": "mimo-w4",
+      "family": "MiMo",
+      "estimated_hours": 0.3616947727412122,
+      "serving_modes_hours": 0.17510781291732283,
+      "prefill_context_hours": 0.11436473760166714,
+      "launch_hours": 0.07222222222222222
+    },
+    {
+      "deployment": "mimo-1m-w4",
+      "family": "MiMo",
+      "estimated_hours": 0.9418940590884516,
+      "serving_modes_hours": 0.17510781291732283,
+      "prefill_context_hours": 0.6945640239489065,
+      "launch_hours": 0.07222222222222222
+    },
+    {
+      "deployment": "qwen27b-fp8-w1",
+      "family": "Qwen 27B",
+      "estimated_hours": 1.0415864659698422,
+      "serving_modes_hours": 0.5381183360019748,
+      "prefill_context_hours": 0.395134796634534,
+      "launch_hours": 0.10833333333333334
+    },
+    {
+      "deployment": "qwen27b-fp8-w2",
+      "family": "Qwen 27B",
+      "estimated_hours": 0.6679372341034944,
+      "serving_modes_hours": 0.29663876899418024,
+      "prefill_context_hours": 0.2629651317759808,
+      "launch_hours": 0.10833333333333334
+    },
+    {
+      "deployment": "qwen27b-fp8-w4",
+      "family": "Qwen 27B",
+      "estimated_hours": 0.4875589835812702,
+      "serving_modes_hours": 0.18544470763287807,
+      "prefill_context_hours": 0.19378094261505877,
+      "launch_hours": 0.10833333333333334
+    }
+  ],
+  "estimated_hours": 20.902442657232537
+}

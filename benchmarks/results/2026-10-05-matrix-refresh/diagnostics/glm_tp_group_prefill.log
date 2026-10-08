@@ -1,0 +1,15 @@
+2026-10-06 03:01:00.391 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-06 03:01:00.397 INFO  rank 0 boot phases: digest 0.0 s (0.00 GiB hashed), globals 0.0 s, layers 0.0 s
+2026-10-06 03:01:00.734 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-06 03:01:00.740 INFO  rank 0 boot phases: digest 0.0 s (0.00 GiB hashed), globals 0.0 s, layers 0.0 s
+2026-10-06 03:01:01.131 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-06 03:01:01.136 INFO  rank 0 boot phases: digest 0.0 s (0.00 GiB hashed), globals 0.0 s, layers 0.0 s
+2026-10-06 03:01:01.152 INFO  group prefill (9 + 13 rows) vs the prefills alone: relative l2 0.000e+00 / 0.000e+00, top-1 equal / equal
+2026-10-06 03:01:01.160 INFO  decode off the group's cache: 4 steps, worst relative l2 0.000e+00 against the solo decode
+fixture written: 463 tensors, 23.54 MB payload
+[ .. ] 20 + 24 rows: every site bitwise (13 sites), logits bitwise / bitwise
+[ .. ] 9 + 13 rows: every site bitwise (13 sites), logits bitwise / bitwise
+[ OK ] glm_tp_group_prefill_is_bitwise_the_prefills_alone_site_by_site
+fixture written: 463 tensors, 23.54 MB payload
+[ OK ] glm_tp_group_prefill_matches_prefills_alone
+2 tests, 0 failed

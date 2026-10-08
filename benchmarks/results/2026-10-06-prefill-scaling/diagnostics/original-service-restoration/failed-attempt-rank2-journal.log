@@ -1,0 +1,197 @@
+2026-10-07T18:45:35+00:00 spark-a289 kernel: NVRM: nvCheckOkFailedNoLog: Check failed: Out of memory [NV_ERR_NO_MEMORY] (0x00000051) returned from _memdescAllocInternal(pMemDesc) @ mem_desc.c:1359
+2026-10-07T18:45:40+00:00 spark-a289 kernel: NVRM: nvCheckOkFailedNoLog: Check failed: Out of memory [NV_ERR_NO_MEMORY] (0x00000051) returned from _memdescAllocInternal(pMemDesc) @ mem_desc.c:1359
+2026-10-07T18:45:42+00:00 spark-a289 sshd[1388461]: Received disconnect from 192.168.88.11 port 47424:11: disconnected by user
+2026-10-07T18:45:42+00:00 spark-a289 sshd[1388461]: Disconnected from user stephen 192.168.88.11 port 47424
+2026-10-07T18:45:42+00:00 spark-a289 sshd[1388098]: pam_unix(sshd:session): session closed for user stephen
+2026-10-07T18:45:42+00:00 spark-a289 sshd[1388460]: Received disconnect from 192.168.88.11 port 47438:11: disconnected by user
+2026-10-07T18:45:42+00:00 spark-a289 sshd[1388460]: Disconnected from user stephen 192.168.88.11 port 47438
+2026-10-07T18:45:42+00:00 spark-a289 sshd[1388099]: pam_unix(sshd:session): session closed for user stephen
+2026-10-07T18:45:42+00:00 spark-a289 systemd-logind[1507]: Session 54558 logged out. Waiting for processes to exit.
+2026-10-07T18:45:42+00:00 spark-a289 systemd-logind[1507]: Session 54559 logged out. Waiting for processes to exit.
+2026-10-07T18:45:42+00:00 spark-a289 sudo[1388464]: pam_unix(sudo:session): session closed for user root
+2026-10-07T18:45:42+00:00 spark-a289 systemd[1]: session-54559.scope: Deactivated successfully.
+2026-10-07T18:45:42+00:00 spark-a289 systemd-logind[1507]: Removed session 54559.
+2026-10-07T18:45:42+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178522 path=/MediaEndpoint/A2DPSource/ldac
+2026-10-07T18:45:42+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178522 path=/MediaEndpoint/A2DPSource/aptx_hd
+2026-10-07T18:45:42+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178522 path=/MediaEndpoint/A2DPSource/aptx
+2026-10-07T18:45:42+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178522 path=/MediaEndpoint/A2DPSource/sbc
+2026-10-07T18:45:42+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178522 path=/MediaEndpoint/A2DPSource/sbc_xq
+2026-10-07T18:45:42+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178522 path=/MediaEndpoint/A2DPSource/aptx_ll_1
+2026-10-07T18:45:42+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178522 path=/MediaEndpoint/A2DPSource/aptx_ll_0
+2026-10-07T18:45:42+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178522 path=/MediaEndpoint/A2DPSource/aptx_ll_duplex_1
+2026-10-07T18:45:42+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178522 path=/MediaEndpoint/A2DPSource/aptx_ll_duplex_0
+2026-10-07T18:45:42+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178522 path=/MediaEndpoint/A2DPSource/faststream
+2026-10-07T18:45:42+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178522 path=/MediaEndpoint/A2DPSource/faststream_duplex
+2026-10-07T18:45:42+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178522 path=/MediaEndpoint/A2DPSource/opus_05
+2026-10-07T18:45:42+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178522 path=/MediaEndpoint/A2DPSource/opus_05_duplex
+2026-10-07T18:45:43+00:00 spark-a289 systemd[1]: session-54558.scope: Deactivated successfully.
+2026-10-07T18:45:43+00:00 spark-a289 systemd-logind[1507]: Removed session 54558.
+2026-10-07T18:45:47+00:00 spark-a289 sshd[1391385]: Accepted publickey for stephen from 192.168.88.11 port 40470 ssh2: ED25519 SHA256:2jHpqvnNMqcZXYLIdlo/P0lfjeJ+2AWyxqu1/yRTY64
+2026-10-07T18:45:47+00:00 spark-a289 sshd[1391385]: pam_unix(sshd:session): session opened for user stephen(uid=1000) by stephen(uid=0)
+2026-10-07T18:45:47+00:00 spark-a289 systemd-logind[1507]: New session 54570 of user stephen.
+2026-10-07T18:45:47+00:00 spark-a289 systemd[1]: Started session-54570.scope - Session 54570 of User stephen.
+2026-10-07T18:45:47+00:00 spark-a289 bluetoothd[1456]: src/profile.c:register_profile() :1.178544 tried to register 0000111f-0000-1000-8000-00805f9b34fb which is already registered
+2026-10-07T18:45:47+00:00 spark-a289 bluetoothd[1456]: src/profile.c:register_profile() :1.178544 tried to register 0000111e-0000-1000-8000-00805f9b34fb which is already registered
+2026-10-07T18:45:47+00:00 spark-a289 wireplumber[1388118]: RegisterProfile() failed: org.bluez.Error.NotPermitted
+2026-10-07T18:45:47+00:00 spark-a289 wireplumber[1388118]: RegisterProfile() failed: org.bluez.Error.NotPermitted
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint registered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/ldac
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint registered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/aptx_hd
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint registered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/aptx
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint registered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/sbc
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint registered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/sbc_xq
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint registered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/aptx_ll_1
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint registered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/aptx_ll_0
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint registered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/aptx_ll_duplex_1
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint registered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/aptx_ll_duplex_0
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint registered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/faststream
+2026-10-07T18:45:48+00:00 spark-a289 sshd[1391556]: Received disconnect from 192.168.88.11 port 40470:11: disconnected by user
+2026-10-07T18:45:48+00:00 spark-a289 sshd[1391556]: Disconnected from user stephen 192.168.88.11 port 40470
+2026-10-07T18:45:48+00:00 spark-a289 sshd[1391385]: pam_unix(sshd:session): session closed for user stephen
+2026-10-07T18:45:48+00:00 spark-a289 systemd[1]: session-54570.scope: Deactivated successfully.
+2026-10-07T18:45:48+00:00 spark-a289 systemd-logind[1507]: Session 54570 logged out. Waiting for processes to exit.
+2026-10-07T18:45:48+00:00 spark-a289 systemd-logind[1507]: Removed session 54570.
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint registered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/faststream_duplex
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint registered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/opus_05
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint registered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/opus_05_duplex
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/ldac
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/aptx_hd
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/aptx
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/sbc
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/sbc_xq
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/aptx_ll_1
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/aptx_ll_0
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/aptx_ll_duplex_1
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/aptx_ll_duplex_0
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/faststream
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/faststream_duplex
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/opus_05
+2026-10-07T18:45:48+00:00 spark-a289 bluetoothd[1456]: Endpoint unregistered: sender=:1.178544 path=/MediaEndpoint/A2DPSource/opus_05_duplex
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1]: Stopping user@1000.service - User Manager for UID 1000...
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Activating special unit exit.target...
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Stopping run-r54abe08d250e4ef39ddac28640280881.scope - /tmp/bus4/deployments/a911a2d7c4b3be6a/./dgpp-serve --config /tmp/bus4/deployments/a911a2d7c4b3be6a/cluster.json --rank 2...
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Stopped target default.target - Main User Target.
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Stopping dbus.service - D-Bus User Message Bus...
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Stopping filter-chain.service - PipeWire filter chain daemon...
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Stopping pipewire-pulse.service - PipeWire PulseAudio...
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Stopped dbus.service - D-Bus User Message Bus.
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Stopped filter-chain.service - PipeWire filter chain daemon.
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Stopped pipewire-pulse.service - PipeWire PulseAudio.
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Stopping wireplumber.service - Multimedia Service Session Manager...
+2026-10-07T18:45:58+00:00 spark-a289 wireplumber[1388118]: stopped by signal: Terminated
+2026-10-07T18:45:58+00:00 spark-a289 wireplumber[1388118]: disconnected from pipewire
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Stopped wireplumber.service - Multimedia Service Session Manager.
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Stopping pipewire.service - PipeWire Multimedia Service...
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Stopped pipewire.service - PipeWire Multimedia Service.
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Removed slice session.slice - User Core Session Slice.
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Stopped target basic.target - Basic System.
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Stopped target paths.target - Paths.
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Stopped ubuntu-report.path - Pending report trigger for Ubuntu Report.
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Stopped target sockets.target - Sockets.
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Stopped target timers.target - Timers.
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Stopped launchpadlib-cache-clean.timer - Clean up old files in the Launchpadlib cache.
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Closed dbus.socket - D-Bus User Message Bus Socket.
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Closed dirmngr.socket - GnuPG network certificate management daemon.
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Closed gcr-ssh-agent.socket - GCR ssh-agent wrapper.
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Closed gnome-keyring-daemon.socket - GNOME Keyring daemon.
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Closed gpg-agent-browser.socket - GnuPG cryptographic agent and passphrase cache (access for web browsers).
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Closed gpg-agent-extra.socket - GnuPG cryptographic agent and passphrase cache (restricted).
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Stopping gpg-agent-ssh.socket - GnuPG cryptographic agent (ssh-agent emulation)...
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Closed gpg-agent.socket - GnuPG cryptographic agent and passphrase cache.
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Closed keyboxd.socket - GnuPG public key management service.
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Closed pipewire-pulse.socket - PipeWire PulseAudio.
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Closed pipewire.socket - PipeWire Multimedia System Sockets.
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Closed pk-debconf-helper.socket - debconf communication socket.
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Closed snapd.session-agent.socket - REST API socket for snapd user session agent.
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Closed speech-dispatcher.socket - Speech Dispatcher Socket.
+2026-10-07T18:45:58+00:00 spark-a289 systemd[1388104]: Closed gpg-agent-ssh.socket - GnuPG cryptographic agent (ssh-agent emulation).
+2026-10-07T18:46:03+00:00 spark-a289 systemd[1]: user@1000.service: State 'stop-sigterm' timed out. Killing.
+2026-10-07T18:46:03+00:00 spark-a289 systemd[1]: user@1000.service: Killing process 1388104 (systemd) with signal SIGKILL.
+2026-10-07T18:46:03+00:00 spark-a289 systemd[1]: user@1000.service: Killing process 1389627 (dgpp-serve) with signal SIGKILL.
+2026-10-07T18:46:03+00:00 spark-a289 systemd[1]: user@1000.service: Main process exited, code=killed, status=9/KILL
+2026-10-07T18:46:03+00:00 spark-a289 systemd[1]: user@1000.service: Failed with result 'timeout'.
+2026-10-07T18:46:03+00:00 spark-a289 systemd[1]: Stopped user@1000.service - User Manager for UID 1000.
+2026-10-07T18:46:03+00:00 spark-a289 systemd[1]: user@1000.service: Consumed 44.157s CPU time, 4.2G memory peak, 0B memory swap peak.
+2026-10-07T18:46:03+00:00 spark-a289 systemd[1]: Stopping user-runtime-dir@1000.service - User Runtime Directory /run/user/1000...
+2026-10-07T18:46:03+00:00 spark-a289 systemd[1]: run-user-1000.mount: Deactivated successfully.
+2026-10-07T18:46:03+00:00 spark-a289 systemd[1]: user-runtime-dir@1000.service: Deactivated successfully.
+2026-10-07T18:46:03+00:00 spark-a289 systemd[1]: Stopped user-runtime-dir@1000.service - User Runtime Directory /run/user/1000.
+2026-10-07T18:46:03+00:00 spark-a289 systemd[1]: Removed slice user-1000.slice - User Slice of UID 1000.
+2026-10-07T18:46:03+00:00 spark-a289 systemd[1]: user-1000.slice: Consumed 47.533s CPU time, 4.3G memory peak, 4.0K memory swap peak.
+2026-10-07T18:46:19+00:00 spark-a289 sshd[1391573]: Accepted publickey for stephen from 192.168.88.11 port 60714 ssh2: ED25519 SHA256:2jHpqvnNMqcZXYLIdlo/P0lfjeJ+2AWyxqu1/yRTY64
+2026-10-07T18:46:19+00:00 spark-a289 sshd[1391573]: pam_unix(sshd:session): session opened for user stephen(uid=1000) by stephen(uid=0)
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1]: Created slice user-1000.slice - User Slice of UID 1000.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1]: Starting user-runtime-dir@1000.service - User Runtime Directory /run/user/1000...
+2026-10-07T18:46:19+00:00 spark-a289 systemd-logind[1507]: New session 54571 of user stephen.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1]: Finished user-runtime-dir@1000.service - User Runtime Directory /run/user/1000.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1]: Starting user@1000.service - User Manager for UID 1000...
+2026-10-07T18:46:19+00:00 spark-a289 (systemd)[1391577]: pam_unix(systemd-user:session): session opened for user stephen(uid=1000) by stephen(uid=0)
+2026-10-07T18:46:19+00:00 spark-a289 systemd-xdg-autostart-generator[1391582]: Configuration file /home/stephen/.config/autostart/dgx-desktop-init.desktop is marked executable. Please remove executable permission bits. Proceeding anyway.
+2026-10-07T18:46:19+00:00 spark-a289 systemd-xdg-autostart-generator[1391582]: Configuration file /home/stephen/.config/autostart/spark.desktop is marked executable. Please remove executable permission bits. Proceeding anyway.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Queued start job for default target default.target.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Created slice app.slice - User Application Slice.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Created slice session.slice - User Core Session Slice.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Started ubuntu-report.path - Pending report trigger for Ubuntu Report.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Started launchpadlib-cache-clean.timer - Clean up old files in the Launchpadlib cache.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Reached target paths.target - Paths.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Reached target timers.target - Timers.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Starting dbus.socket - D-Bus User Message Bus Socket...
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Listening on dirmngr.socket - GnuPG network certificate management daemon.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Listening on gcr-ssh-agent.socket - GCR ssh-agent wrapper.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Listening on gnome-keyring-daemon.socket - GNOME Keyring daemon.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Listening on gpg-agent-browser.socket - GnuPG cryptographic agent and passphrase cache (access for web browsers).
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Listening on gpg-agent-extra.socket - GnuPG cryptographic agent and passphrase cache (restricted).
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Starting gpg-agent-ssh.socket - GnuPG cryptographic agent (ssh-agent emulation)...
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Listening on gpg-agent.socket - GnuPG cryptographic agent and passphrase cache.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Listening on keyboxd.socket - GnuPG public key management service.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Listening on pipewire-pulse.socket - PipeWire PulseAudio.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Listening on pipewire.socket - PipeWire Multimedia System Sockets.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Listening on pk-debconf-helper.socket - debconf communication socket.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Listening on snapd.session-agent.socket - REST API socket for snapd user session agent.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Listening on speech-dispatcher.socket - Speech Dispatcher Socket.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Listening on dbus.socket - D-Bus User Message Bus Socket.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Listening on gpg-agent-ssh.socket - GnuPG cryptographic agent (ssh-agent emulation).
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Reached target sockets.target - Sockets.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Reached target basic.target - Basic System.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: gnome-initial-setup-copy-worker.service - GNOME Initial Setup Copy Worker was skipped because of an unmet condition check (ConditionPathExists=!/home/stephen/.config/gnome-initial-setup-done).
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1]: Started user@1000.service - User Manager for UID 1000.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1]: Started session-54571.scope - Session 54571 of User stephen.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Started pipewire.service - PipeWire Multimedia Service.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Started filter-chain.service - PipeWire filter chain daemon.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Started wireplumber.service - Multimedia Service Session Manager.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Started pipewire-pulse.service - PipeWire PulseAudio.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Reached target default.target - Main User Target.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Startup finished in 173ms.
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Starting dbus.service - D-Bus User Message Bus...
+2026-10-07T18:46:19+00:00 spark-a289 dbus-daemon[1391611]: [session uid=1000 pid=1391611] AppArmor D-Bus mediation is enabled
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1391577]: Started dbus.service - D-Bus User Message Bus.
+2026-10-07T18:46:19+00:00 spark-a289 rtkit-daemon[13575]: Supervising 0 threads of 0 processes of 0 users.
+2026-10-07T18:46:19+00:00 spark-a289 rtkit-daemon[13575]: Supervising 0 threads of 0 processes of 0 users.
+2026-10-07T18:46:19+00:00 spark-a289 rtkit-daemon[13575]: Supervising 0 threads of 0 processes of 0 users.
+2026-10-07T18:46:19+00:00 spark-a289 rtkit-daemon[13575]: Supervising 0 threads of 0 processes of 0 users.
+2026-10-07T18:46:19+00:00 spark-a289 rtkit-daemon[13575]: Supervising 0 threads of 0 processes of 0 users.
+2026-10-07T18:46:19+00:00 spark-a289 rtkit-daemon[13575]: Supervising 0 threads of 0 processes of 0 users.
+2026-10-07T18:46:19+00:00 spark-a289 rtkit-daemon[13575]: Supervising 0 threads of 0 processes of 0 users.
+2026-10-07T18:46:19+00:00 spark-a289 rtkit-daemon[13575]: Supervising 0 threads of 0 processes of 0 users.
+2026-10-07T18:46:19+00:00 spark-a289 rtkit-daemon[13575]: Supervising 0 threads of 0 processes of 0 users.
+2026-10-07T18:46:19+00:00 spark-a289 rtkit-daemon[13575]: Supervising 0 threads of 0 processes of 0 users.
+2026-10-07T18:46:19+00:00 spark-a289 rtkit-daemon[13575]: Supervising 0 threads of 0 processes of 0 users.
+2026-10-07T18:46:19+00:00 spark-a289 rtkit-daemon[13575]: Supervising 0 threads of 0 processes of 0 users.
+2026-10-07T18:46:19+00:00 spark-a289 pipewire[1391589]: mod.jackdbus-detect: Failed to receive jackdbus reply: org.freedesktop.DBus.Error.ServiceUnknown: The name org.jackaudio.service was not provided by any .service files
+2026-10-07T18:46:19+00:00 spark-a289 wireplumber[1391593]: SPA handle 'api.libcamera.enum.manager' could not be loaded; is it installed?
+2026-10-07T18:46:19+00:00 spark-a289 wireplumber[1391593]: PipeWire's libcamera SPA missing or broken. libcamera not supported.
+2026-10-07T18:46:19+00:00 spark-a289 bluetoothd[1456]: src/profile.c:register_profile() :1.178553 tried to register 0000111f-0000-1000-8000-00805f9b34fb which is already registered
+2026-10-07T18:46:19+00:00 spark-a289 bluetoothd[1456]: src/profile.c:register_profile() :1.178553 tried to register 0000111e-0000-1000-8000-00805f9b34fb which is already registered
+2026-10-07T18:46:19+00:00 spark-a289 wireplumber[1391593]: RegisterProfile() failed: org.bluez.Error.NotPermitted
+2026-10-07T18:46:19+00:00 spark-a289 wireplumber[1391593]: RegisterProfile() failed: org.bluez.Error.NotPermitted
+2026-10-07T18:46:19+00:00 spark-a289 sshd[1391773]: Received disconnect from 192.168.88.11 port 60714:11: disconnected by user
+2026-10-07T18:46:19+00:00 spark-a289 sshd[1391773]: Disconnected from user stephen 192.168.88.11 port 60714
+2026-10-07T18:46:19+00:00 spark-a289 sshd[1391573]: pam_unix(sshd:session): session closed for user stephen
+2026-10-07T18:46:19+00:00 spark-a289 systemd[1]: session-54571.scope: Deactivated successfully.
+2026-10-07T18:46:19+00:00 spark-a289 systemd-logind[1507]: Session 54571 logged out. Waiting for processes to exit.
+2026-10-07T18:46:19+00:00 spark-a289 systemd-logind[1507]: Removed session 54571.
+2026-10-07T18:46:19+00:00 spark-a289 bluetoothd[1456]: Endpoint registered: sender=:1.178553 path=/MediaEndpoint/A2DPSource/ldac
+2026-10-07T18:46:19+00:00 spark-a289 bluetoothd[1456]: Endpoint registered: sender=:1.178553 path=/MediaEndpoint/A2DPSource/aptx_hd
+2026-10-07T18:46:19+00:00 spark-a289 bluetoothd[1456]: Endpoint registered: sender=:1.178553 path=/MediaEndpoint/A2DPSource/aptx
+2026-10-07T18:46:19+00:00 spark-a289 bluetoothd[1456]: Endpoint registered: sender=:1.178553 path=/MediaEndpoint/A2DPSource/sbc
+2026-10-07T18:46:19+00:00 spark-a289 bluetoothd[1456]: Endpoint registered: sender=:1.178553 path=/MediaEndpoint/A2DPSource/sbc_xq
+2026-10-07T18:46:19+00:00 spark-a289 bluetoothd[1456]: Endpoint registered: sender=:1.178553 path=/MediaEndpoint/A2DPSource/aptx_ll_1

@@ -1,0 +1,14 @@
+{
+  "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8": {
+    "revision": "17b8d4d83e33e836e9549d7e1a8d25b5117203c1",
+    "config_sha256": "6e5ce9da8e0213611b2061d1f100fd677a33a1814ee2b391acb5f5a8f26f1f6e"
+  },
+  "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64": {
+    "revision": "147684fbad20c1e283ddff46fd07cb9d4ccbb3da",
+    "config_sha256": "7a0b77ab5e9ff29105a45edb1419794480e6a875a82de5d47424134e898c61f9"
+  },
+  "XiaomiMiMo/MiMo-V2.6-Flash-RL": {
+    "revision": "5711b268169967567844e1e560e8a3966da959b1",
+    "config_sha256": "61bea4a0f7a0dd8969f8cae528761e26b697dd12ff63e98804c3f0945492e621"
+  }
+}

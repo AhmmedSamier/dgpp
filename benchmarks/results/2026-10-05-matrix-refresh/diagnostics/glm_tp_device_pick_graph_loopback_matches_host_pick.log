@@ -1,0 +1,253 @@
+2026-10-06 03:01:03.112 INFO  bus: globaltimer offset 9979677361 ns (+-2 us)
+2026-10-06 03:01:03.114 INFO  bus: globaltimer offset 9979677284 ns (+-2 us)
+2026-10-06 03:01:03.116 INFO  bus: globaltimer offset 9979677342 ns (+-2 us)
+2026-10-06 03:01:03.116 INFO  bus: globaltimer offset 9979676885 ns (+-2 us)
+2026-10-06 03:01:03.124 INFO  verbs: device roceP2p1s0f0 port 1 gid_index 3
+2026-10-06 03:01:03.126 INFO  verbs: device roceP2p1s0f0 port 1 gid_index 3
+2026-10-06 03:01:03.126 INFO  verbs: device roceP2p1s0f0 port 1 gid_index 3
+2026-10-06 03:01:03.126 INFO  verbs: device roceP2p1s0f0 port 1 gid_index 3
+2026-10-06 03:01:03.127 INFO  verbs: device rocep1s0f0 port 1 gid_index 3
+2026-10-06 03:01:03.135 INFO  verbs: device rocep1s0f0 port 1 gid_index 3
+2026-10-06 03:01:03.135 INFO  verbs: device rocep1s0f0 port 1 gid_index 3
+2026-10-06 03:01:03.135 INFO  verbs: device rocep1s0f0 port 1 gid_index 3
+2026-10-06 03:01:03.228 INFO  bus: rank 0 rendezvous listening on port 29919
+2026-10-06 03:01:03.257 INFO  bus: rank 2 up — 3 peer(s) x 2 lane(s), lat 8x8192B, bulk 8x262144B, bulk pace 28.3 Gb/s per QP, window 4 per lane
+2026-10-06 03:01:03.257 INFO  bus: rank 3 up — 3 peer(s) x 2 lane(s), lat 8x8192B, bulk 8x262144B, bulk pace 28.3 Gb/s per QP, window 4 per lane
+2026-10-06 03:01:03.257 INFO  bus: rank 1 up — 3 peer(s) x 2 lane(s), lat 8x8192B, bulk 8x262144B, bulk pace 28.3 Gb/s per QP, window 4 per lane
+2026-10-06 03:01:03.258 INFO  bus: rank 0 up — 3 peer(s) x 2 lane(s), lat 8x8192B, bulk 8x262144B, bulk pace 28.3 Gb/s per QP, window 4 per lane
+2026-10-06 03:01:03.258 INFO  bus engine: rank 2 pinned to cpu 19
+2026-10-06 03:01:03.258 INFO  bus engine: rank 0 pinned to cpu 18
+2026-10-06 03:01:03.258 INFO  bus engine: rank 1 pinned to cpu 17
+2026-10-06 03:01:03.258 INFO  bus engine: rank 3 pinned to cpu 16
+2026-10-06 03:01:03.711 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-06 03:01:03.712 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-06 03:01:03.712 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-06 03:01:03.712 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-06 03:01:03.733 INFO  rank 0 boot phases: digest 0.0 s (0.00 GiB hashed), globals 0.0 s, layers 0.0 s
+2026-10-06 03:01:03.734 INFO  rank 2 boot phases: digest 0.0 s (0.00 GiB hashed), globals 0.0 s, layers 0.0 s
+2026-10-06 03:01:03.734 INFO  rank 3 boot phases: digest 0.0 s (0.00 GiB hashed), globals 0.0 s, layers 0.0 s
+2026-10-06 03:01:03.734 INFO  rank 1 boot phases: digest 0.0 s (0.00 GiB hashed), globals 0.0 s, layers 0.0 s
+2026-10-06 03:01:03.735 INFO  glm loader: rank 0 resident footprint 0.0 GiB; device free 114.4 of 121.6 GiB, host available 114.8 GiB
+2026-10-06 03:01:03.736 INFO  glm loader: rank 2 resident footprint 0.0 GiB; device free 114.4 of 121.6 GiB, host available 114.8 GiB
+2026-10-06 03:01:03.736 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-06 03:01:03.738 INFO  glm loader: rank 1 resident footprint 0.0 GiB; device free 114.4 of 121.6 GiB, host available 114.8 GiB
+2026-10-06 03:01:03.738 INFO  glm loader: rank 3 resident footprint 0.0 GiB; device free 114.4 of 121.6 GiB, host available 114.8 GiB
+2026-10-06 03:01:03.738 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-06 03:01:03.745 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-06 03:01:03.749 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-06 03:01:03.765 INFO  glm loader: rank 0 resident load complete — released 1 shard mappings (0.0 GiB) and evicted their page cache; image: 0 layers restored, 0 captured
+2026-10-06 03:01:03.765 INFO  rank 0 boot phases: digest 0.0 s (0.00 GiB hashed), globals 0.0 s, layers 0.0 s
+2026-10-06 03:01:03.774 INFO  glm loader: rank 1 resident load complete — released 1 shard mappings (0.0 GiB) and evicted their page cache; image: 0 layers restored, 0 captured
+2026-10-06 03:01:03.774 INFO  rank 1 boot phases: digest 0.0 s (0.00 GiB hashed), globals 0.0 s, layers 0.0 s
+2026-10-06 03:01:03.775 INFO  glm loader: rank 2 resident load complete — released 1 shard mappings (0.0 GiB) and evicted their page cache; image: 0 layers restored, 0 captured
+2026-10-06 03:01:03.775 INFO  rank 2 boot phases: digest 0.0 s (0.00 GiB hashed), globals 0.0 s, layers 0.0 s
+2026-10-06 03:01:03.777 INFO  glm loader: rank 3 resident load complete — released 1 shard mappings (0.0 GiB) and evicted their page cache; image: 0 layers restored, 0 captured
+2026-10-06 03:01:03.777 INFO  rank 3 boot phases: digest 0.0 s (0.00 GiB hashed), globals 0.0 s, layers 0.0 s
+2026-10-06 03:01:04.098 INFO  allreduce: device clock rate 2418000 kHz (stamps conversion)
+2026-10-06 03:01:04.098 INFO  allreduce: rank 0 seq 1 launched (3 peers)
+2026-10-06 03:01:04.098 INFO  allreduce: rank 0 seq 1 ready after 31.5us
+2026-10-06 03:01:04.099 INFO  allreduce: device clock rate 2418000 kHz (stamps conversion)
+2026-10-06 03:01:04.099 INFO  allreduce: rank 2 seq 1 launched (3 peers)
+2026-10-06 03:01:04.099 INFO  allreduce: rank 2 seq 1 ready after 11.8us
+2026-10-06 03:01:04.101 INFO  allreduce: device clock rate 2418000 kHz (stamps conversion)
+2026-10-06 03:01:04.101 INFO  allreduce: rank 1 seq 1 launched (3 peers)
+2026-10-06 03:01:04.101 INFO  allreduce: rank 1 seq 1 ready after 12.2us
+2026-10-06 03:01:04.101 INFO  allreduce: device clock rate 2418000 kHz (stamps conversion)
+2026-10-06 03:01:04.101 INFO  allreduce: rank 3 seq 1 launched (3 peers)
+2026-10-06 03:01:04.101 INFO  allreduce: rank 3 seq 1 ready after 12.1us
+2026-10-06 03:01:04.101 INFO  allreduce: rank 0 seq 1 done status=0 after 3150.8us
+2026-10-06 03:01:04.101 INFO  allreduce: rank 1 seq 1 done status=0 after 427.2us
+2026-10-06 03:01:04.101 INFO  allreduce: rank 2 seq 1 done status=0 after 2390.6us
+2026-10-06 03:01:04.101 INFO  allreduce: rank 3 seq 1 done status=0 after 68.8us
+2026-10-06 03:01:04.101 INFO  allreduce: rank 0 seq 2 launched (3 peers)
+2026-10-06 03:01:04.101 INFO  allreduce: rank 0 seq 2 ready after 14.3us
+2026-10-06 03:01:04.102 INFO  allreduce: rank 1 seq 2 launched (3 peers)
+2026-10-06 03:01:04.102 INFO  allreduce: rank 1 seq 2 ready after 9.1us
+2026-10-06 03:01:04.102 INFO  allreduce: rank 3 seq 2 launched (3 peers)
+2026-10-06 03:01:04.102 INFO  allreduce: rank 2 seq 2 launched (3 peers)
+2026-10-06 03:01:04.102 INFO  allreduce: rank 3 seq 2 ready after 12.0us
+2026-10-06 03:01:04.102 INFO  allreduce: rank 2 seq 2 ready after 12.6us
+2026-10-06 03:01:04.102 INFO  allreduce: rank 0 seq 2 done status=0 after 400.0us
+2026-10-06 03:01:04.102 INFO  allreduce: rank 1 seq 2 done status=0 after 79.6us
+2026-10-06 03:01:04.102 INFO  allreduce: rank 3 seq 2 done status=0 after 37.7us
+2026-10-06 03:01:04.102 INFO  allreduce: rank 2 seq 2 done status=0 after 37.6us
+2026-10-06 03:01:04.102 INFO  allreduce: rank 0 seq 3 launched (3 peers)
+2026-10-06 03:01:04.102 INFO  allreduce: rank 0 seq 3 ready after 6.2us
+2026-10-06 03:01:04.102 INFO  allreduce: rank 1 seq 3 launched (3 peers)
+2026-10-06 03:01:04.102 INFO  allreduce: rank 1 seq 3 ready after 5.1us
+2026-10-06 03:01:04.102 INFO  allreduce: rank 3 seq 3 launched (3 peers)
+2026-10-06 03:01:04.102 INFO  allreduce: rank 3 seq 3 ready after 5.8us
+2026-10-06 03:01:04.102 INFO  allreduce: rank 2 seq 3 launched (3 peers)
+2026-10-06 03:01:04.102 INFO  allreduce: rank 2 seq 3 ready after 5.6us
+2026-10-06 03:01:04.102 INFO  allreduce: rank 0 seq 3 done status=0 after 154.7us
+2026-10-06 03:01:04.102 INFO  allreduce: rank 1 seq 3 done status=0 after 98.7us
+2026-10-06 03:01:04.102 INFO  allreduce: rank 2 seq 3 done status=0 after 28.2us
+2026-10-06 03:01:04.102 INFO  allreduce: rank 3 seq 3 done status=0 after 52.1us
+2026-10-06 03:01:04.102 INFO  allreduce: rank 0 seq 4 launched (3 peers)
+2026-10-06 03:01:04.102 INFO  allreduce: rank 0 seq 4 ready after 6.0us
+2026-10-06 03:01:04.102 INFO  allreduce: rank 3 seq 4 launched (3 peers)
+2026-10-06 03:01:04.102 INFO  allreduce: rank 3 seq 4 ready after 7.4us
+2026-10-06 03:01:04.102 INFO  allreduce: rank 1 seq 4 launched (3 peers)
+2026-10-06 03:01:04.102 INFO  allreduce: rank 1 seq 4 ready after 114.2us
+2026-10-06 03:01:04.102 INFO  allreduce: rank 2 seq 4 launched (3 peers)
+2026-10-06 03:01:04.102 INFO  allreduce: rank 2 seq 4 ready after 197.1us
+2026-10-06 03:01:04.102 INFO  allreduce: rank 2 seq 4 done status=0 after 206.0us
+2026-10-06 03:01:04.102 INFO  allreduce: rank 0 seq 4 done status=0 after 262.3us
+2026-10-06 03:01:04.102 INFO  allreduce: rank 1 seq 4 done status=0 after 222.8us
+2026-10-06 03:01:04.102 INFO  allreduce: rank 3 seq 4 done status=0 after 234.6us
+2026-10-06 03:01:04.107 INFO  allreduce: rank 0 seq 5 launched (3 peers)
+2026-10-06 03:01:04.107 INFO  allreduce: rank 0 seq 5 ready after 10.6us
+2026-10-06 03:01:04.107 INFO  allreduce: rank 1 seq 5 launched (3 peers)
+2026-10-06 03:01:04.107 INFO  allreduce: rank 1 seq 5 ready after 6.4us
+2026-10-06 03:01:04.108 INFO  allreduce: rank 3 seq 5 launched (3 peers)
+2026-10-06 03:01:04.108 INFO  allreduce: rank 3 seq 5 ready after 10.9us
+2026-10-06 03:01:04.109 INFO  allreduce: rank 2 seq 5 launched (3 peers)
+2026-10-06 03:01:04.109 INFO  allreduce: rank 2 seq 5 ready after 8.7us
+2026-10-06 03:01:04.109 INFO  allreduce: rank 0 seq 5 done status=0 after 1826.5us
+2026-10-06 03:01:04.109 INFO  allreduce: rank 1 seq 5 done status=0 after 1229.3us
+2026-10-06 03:01:04.109 INFO  allreduce: rank 3 seq 5 done status=0 after 248.6us
+2026-10-06 03:01:04.109 INFO  allreduce: rank 2 seq 5 done status=0 after 32.9us
+2026-10-06 03:01:04.109 INFO  allreduce: rank 3 seq 6 launched (3 peers)
+2026-10-06 03:01:04.109 INFO  allreduce: rank 3 seq 6 ready after 11.5us
+2026-10-06 03:01:04.109 INFO  allreduce: rank 1 seq 6 launched (3 peers)
+2026-10-06 03:01:04.109 INFO  allreduce: rank 1 seq 6 ready after 8.0us
+2026-10-06 03:01:04.109 INFO  allreduce: rank 0 seq 6 launched (3 peers)
+2026-10-06 03:01:04.109 INFO  allreduce: rank 0 seq 6 ready after 6.5us
+2026-10-06 03:01:04.109 INFO  allreduce: rank 2 seq 6 launched (3 peers)
+2026-10-06 03:01:04.109 INFO  allreduce: rank 2 seq 6 ready after 9.8us
+2026-10-06 03:01:04.109 INFO  allreduce: rank 0 seq 6 done status=0 after 54.0us
+2026-10-06 03:01:04.109 INFO  allreduce: rank 3 seq 6 done status=0 after 164.8us
+2026-10-06 03:01:04.109 INFO  allreduce: rank 1 seq 6 done status=0 after 148.5us
+2026-10-06 03:01:04.109 INFO  allreduce: rank 2 seq 6 done status=0 after 33.9us
+2026-10-06 03:01:04.116 INFO  allreduce: rank 3 seq 7 launched (3 peers)
+2026-10-06 03:01:04.116 INFO  allreduce: rank 3 seq 7 ready after 7.4us
+2026-10-06 03:01:04.116 INFO  allreduce: rank 0 seq 7 launched (3 peers)
+2026-10-06 03:01:04.116 INFO  allreduce: rank 2 seq 7 launched (3 peers)
+2026-10-06 03:01:04.116 INFO  allreduce: rank 0 seq 7 ready after 4.7us
+2026-10-06 03:01:04.116 INFO  allreduce: rank 2 seq 7 ready after 6.5us
+2026-10-06 03:01:04.116 INFO  allreduce: rank 1 seq 7 launched (3 peers)
+2026-10-06 03:01:04.116 INFO  allreduce: rank 1 seq 7 ready after 5.2us
+2026-10-06 03:01:04.116 INFO  allreduce: rank 0 seq 7 done status=0 after 69.5us
+2026-10-06 03:01:04.116 INFO  allreduce: rank 3 seq 7 done status=0 after 125.8us
+2026-10-06 03:01:04.116 INFO  allreduce: rank 2 seq 7 done status=0 after 69.3us
+2026-10-06 03:01:04.116 INFO  allreduce: rank 1 seq 7 done status=0 after 27.5us
+2026-10-06 03:01:04.116 INFO  allreduce: rank 0 seq 8 launched (3 peers)
+2026-10-06 03:01:04.116 INFO  allreduce: rank 0 seq 8 ready after 5.9us
+2026-10-06 03:01:04.116 INFO  allreduce: rank 1 seq 8 launched (3 peers)
+2026-10-06 03:01:04.116 INFO  allreduce: rank 1 seq 8 ready after 6.7us
+2026-10-06 03:01:04.116 INFO  allreduce: rank 2 seq 8 launched (3 peers)
+2026-10-06 03:01:04.116 INFO  allreduce: rank 3 seq 8 launched (3 peers)
+2026-10-06 03:01:04.116 INFO  allreduce: rank 2 seq 8 ready after 5.5us
+2026-10-06 03:01:04.116 INFO  allreduce: rank 3 seq 8 ready after 5.7us
+2026-10-06 03:01:04.116 INFO  allreduce: rank 0 seq 8 done status=0 after 51.1us
+2026-10-06 03:01:04.116 INFO  allreduce: rank 1 seq 8 done status=0 after 37.4us
+2026-10-06 03:01:04.116 INFO  allreduce: rank 2 seq 8 done status=0 after 28.6us
+2026-10-06 03:01:04.116 INFO  allreduce: rank 3 seq 8 done status=0 after 27.8us
+2026-10-06 03:01:04.118 INFO  allreduce: rank 0 seq 9 launched (3 peers)
+2026-10-06 03:01:04.118 INFO  allreduce: rank 0 seq 9 ready after 6.8us
+2026-10-06 03:01:04.118 INFO  allreduce: rank 3 seq 9 launched (3 peers)
+2026-10-06 03:01:04.118 INFO  allreduce: rank 1 seq 9 launched (3 peers)
+2026-10-06 03:01:04.118 INFO  allreduce: rank 3 seq 9 ready after 7.9us
+2026-10-06 03:01:04.118 INFO  allreduce: rank 1 seq 9 ready after 6.8us
+2026-10-06 03:01:04.118 INFO  allreduce: rank 2 seq 9 launched (3 peers)
+2026-10-06 03:01:04.118 INFO  allreduce: rank 2 seq 9 ready after 7.6us
+2026-10-06 03:01:04.118 INFO  allreduce: rank 0 seq 9 done status=0 after 141.8us
+2026-10-06 03:01:04.118 INFO  allreduce: rank 1 seq 9 done status=0 after 92.4us
+2026-10-06 03:01:04.118 INFO  allreduce: rank 2 seq 9 done status=0 after 30.9us
+2026-10-06 03:01:04.118 INFO  allreduce: rank 3 seq 9 done status=0 after 94.9us
+2026-10-06 03:01:04.118 INFO  allreduce: rank 0 seq 10 launched (3 peers)
+2026-10-06 03:01:04.118 INFO  allreduce: rank 0 seq 10 ready after 4.2us
+2026-10-06 03:01:04.119 INFO  allreduce: rank 2 seq 10 launched (3 peers)
+2026-10-06 03:01:04.119 INFO  allreduce: rank 2 seq 10 ready after 5.6us
+2026-10-06 03:01:04.119 INFO  allreduce: rank 3 seq 10 launched (3 peers)
+2026-10-06 03:01:04.119 INFO  allreduce: rank 1 seq 10 launched (3 peers)
+2026-10-06 03:01:04.119 INFO  allreduce: rank 3 seq 10 ready after 5.3us
+2026-10-06 03:01:04.119 INFO  allreduce: rank 1 seq 10 ready after 5.7us
+2026-10-06 03:01:04.119 INFO  allreduce: rank 0 seq 10 done status=0 after 65.5us
+2026-10-06 03:01:04.119 INFO  allreduce: rank 3 seq 10 done status=0 after 28.3us
+2026-10-06 03:01:04.119 INFO  allreduce: rank 2 seq 10 done status=0 after 36.4us
+2026-10-06 03:01:04.119 INFO  allreduce: rank 1 seq 10 done status=0 after 27.6us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 3 seq 11 launched (3 peers)
+2026-10-06 03:01:04.121 INFO  allreduce: rank 3 seq 11 ready after 6.2us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 0 seq 11 launched (3 peers)
+2026-10-06 03:01:04.121 INFO  allreduce: rank 0 seq 11 ready after 6.5us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 2 seq 11 launched (3 peers)
+2026-10-06 03:01:04.121 INFO  allreduce: rank 2 seq 11 ready after 6.1us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 1 seq 11 launched (3 peers)
+2026-10-06 03:01:04.121 INFO  allreduce: rank 1 seq 11 ready after 4.9us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 0 seq 11 done status=0 after 66.5us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 3 seq 11 done status=0 after 95.7us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 2 seq 11 done status=0 after 57.2us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 1 seq 11 done status=0 after 26.7us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 3 seq 12 launched (3 peers)
+2026-10-06 03:01:04.121 INFO  allreduce: rank 3 seq 12 ready after 4.5us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 1 seq 12 launched (3 peers)
+2026-10-06 03:01:04.121 INFO  allreduce: rank 1 seq 12 ready after 5.8us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 2 seq 12 launched (3 peers)
+2026-10-06 03:01:04.121 INFO  allreduce: rank 2 seq 12 ready after 6.7us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 0 seq 12 launched (3 peers)
+2026-10-06 03:01:04.121 INFO  allreduce: rank 0 seq 12 ready after 5.2us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 2 seq 12 done status=0 after 129.8us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 3 seq 12 done status=0 after 145.8us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 1 seq 12 done status=0 after 136.4us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 0 seq 12 done status=0 after 27.0us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 0 seq 13 launched (3 peers)
+2026-10-06 03:01:04.121 INFO  allreduce: rank 2 seq 13 launched (3 peers)
+2026-10-06 03:01:04.121 INFO  allreduce: rank 1 seq 13 launched (3 peers)
+2026-10-06 03:01:04.121 INFO  allreduce: rank 3 seq 13 launched (3 peers)
+2026-10-06 03:01:04.121 INFO  allreduce: rank 1 seq 13 ready after 12.1us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 2 seq 13 ready after 15.0us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 3 seq 13 ready after 13.5us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 0 seq 13 ready after 16.2us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 3 seq 13 done status=0 after 39.6us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 1 seq 13 done status=0 after 40.4us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 3 seq 14 launched (3 peers)
+2026-10-06 03:01:04.121 INFO  allreduce: rank 3 seq 14 ready after 4.4us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 1 seq 14 launched (3 peers)
+2026-10-06 03:01:04.121 INFO  allreduce: rank 1 seq 14 ready after 3.7us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 2 seq 13 done status=0 after 42.7us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 0 seq 13 done status=0 after 44.9us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 0 seq 14 launched (3 peers)
+2026-10-06 03:01:04.121 INFO  allreduce: rank 0 seq 14 ready after 5.5us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 2 seq 14 launched (3 peers)
+2026-10-06 03:01:04.121 INFO  allreduce: rank 2 seq 14 ready after 3.7us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 0 seq 14 done status=0 after 27.8us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 1 seq 14 done status=0 after 143.1us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 3 seq 14 done status=0 after 148.9us
+2026-10-06 03:01:04.121 INFO  allreduce: rank 2 seq 14 done status=0 after 25.1us
+2026-10-06 03:01:04.122 INFO  allreduce: rank 0 seq 15 launched (3 peers)
+2026-10-06 03:01:04.122 INFO  allreduce: rank 0 seq 15 ready after 9.2us
+2026-10-06 03:01:04.122 INFO  allreduce: rank 1 seq 15 launched (3 peers)
+2026-10-06 03:01:04.122 INFO  allreduce: rank 1 seq 15 ready after 5.2us
+2026-10-06 03:01:04.122 INFO  allreduce: rank 3 seq 15 launched (3 peers)
+2026-10-06 03:01:04.122 INFO  allreduce: rank 2 seq 15 launched (3 peers)
+2026-10-06 03:01:04.122 INFO  allreduce: rank 3 seq 15 ready after 5.8us
+2026-10-06 03:01:04.122 INFO  allreduce: rank 2 seq 15 ready after 5.5us
+2026-10-06 03:01:04.122 INFO  allreduce: rank 0 seq 15 done status=0 after 45.5us
+2026-10-06 03:01:04.122 INFO  allreduce: rank 1 seq 15 done status=0 after 36.1us
+2026-10-06 03:01:04.122 INFO  allreduce: rank 3 seq 15 done status=0 after 27.3us
+2026-10-06 03:01:04.122 INFO  allreduce: rank 2 seq 15 done status=0 after 26.3us
+2026-10-06 03:01:04.122 INFO  allreduce: rank 1 seq 16 launched (3 peers)
+2026-10-06 03:01:04.122 INFO  allreduce: rank 1 seq 16 ready after 4.6us
+2026-10-06 03:01:04.122 INFO  allreduce: rank 0 seq 16 launched (3 peers)
+2026-10-06 03:01:04.122 INFO  allreduce: rank 0 seq 16 ready after 8.8us
+2026-10-06 03:01:04.122 INFO  allreduce: rank 3 seq 16 launched (3 peers)
+2026-10-06 03:01:04.122 INFO  allreduce: rank 2 seq 16 launched (3 peers)
+2026-10-06 03:01:04.122 INFO  allreduce: rank 3 seq 16 ready after 5.8us
+2026-10-06 03:01:04.122 INFO  allreduce: rank 2 seq 16 ready after 5.6us
+2026-10-06 03:01:04.122 INFO  allreduce: rank 0 seq 16 done status=0 after 50.8us
+2026-10-06 03:01:04.122 INFO  allreduce: rank 1 seq 16 done status=0 after 52.5us
+2026-10-06 03:01:04.122 INFO  allreduce: rank 3 seq 16 done status=0 after 27.2us
+2026-10-06 03:01:04.122 INFO  allreduce: rank 2 seq 16 done status=0 after 26.4us
+2026-10-06 03:01:04.169 INFO  bus graph era: variant 0 recorded with 13 collective node(s)
+2026-10-06 03:01:04.169 INFO  rank 0: device-pick graph shape: 173 nodes, 213 edges: kernel 173 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-10-06 03:01:04.173 INFO  bus graph era: variant 0 recorded with 13 collective node(s)
+2026-10-06 03:01:04.173 INFO  rank 2: device-pick graph shape: 173 nodes, 213 edges: kernel 173 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-10-06 03:01:04.173 INFO  bus graph era: variant 0 recorded with 13 collective node(s)
+2026-10-06 03:01:04.173 INFO  rank 1: device-pick graph shape: 173 nodes, 213 edges: kernel 173 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-10-06 03:01:04.175 INFO  bus graph era: variant 0 recorded with 13 collective node(s)
+2026-10-06 03:01:04.175 INFO  rank 3: device-pick graph shape: 173 nodes, 213 edges: kernel 173 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-10-06 03:01:04.218 INFO  device pick graph w4: 12 steps for 12 tokens; device verdicts == host picks every step, transcript == plain
+fixture written: 463 tensors, 23.54 MB payload
+[ OK ] glm_tp_device_pick_graph_loopback_matches_host_pick
+1 tests, 0 failed

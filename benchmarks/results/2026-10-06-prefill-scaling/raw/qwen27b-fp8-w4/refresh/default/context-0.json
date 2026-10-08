@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "model": "Qwen/Qwen3.8-27B-FP8",
+  "surface": {
+    "id": "Qwen/Qwen3.8-27B-FP8",
+    "object": "model",
+    "created": 1791390786,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 262144,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+  "seed": 20260922,
+  "tag": "a6839a140f3e42feaa40e6508fc798e9",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 2311.2000000000116,
+        "prefill_ms": 227.8000000000029,
+        "decode_steps": 49,
+        "decode_rows": 49,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 158,
+        "prompt_tokens_computed": 158
+      },
+      "engine_tokens_per_s": 110.33229491173361,
+      "ms_per_pass": 47.16734693877575,
+      "tokens_per_pass": 5.204081632653061,
+      "answer": {
+        "prompt_sha256": "410af984cdd06786156b7a0b3f44ae6c295bfdaceaeb437be5b152e2887246bb",
+        "usage": {
+          "prompt_tokens": 158,
+          "completion_tokens": 256,
+          "total_tokens": 414,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. Context: \"Context measurement a6839a140f3e42feaa40e6508fc798e9, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe only have one item? Need infer? Maybe this is a data generation task? We need list first 200 parcels and cities. We only know item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed. Need describe first 200 parcels and their cities. Could be asking to generate 200 entries? But no data for 1-199. Maybe need use context measurement? It might be a benchmark where hidden data? We need",
+        "wall_ms": 2555.1720270887017,
+        "ttft_ms": 255.98777201958,
+        "last_ms": 2555.060634156689,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 2375.2999999999884,
+        "prefill_ms": 223.09999999999127,
+        "decode_steps": 50,
+        "decode_rows": 50,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 158,
+        "prompt_tokens_computed": 158
+      },
+      "engine_tokens_per_s": 107.35486043868195,
+      "ms_per_pass": 47.505999999999766,
+      "tokens_per_pass": 5.1,
+      "answer": {
+        "prompt_sha256": "410af984cdd06786156b7a0b3f44ae6c295bfdaceaeb437be5b152e2887246bb",
+        "usage": {
+          "prompt_tokens": 158,
+          "completion_tokens": 256,
+          "total_tokens": 414,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. Context: \"Context measurement a6839a140f3e42feaa40e6508fc798e9, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe only have one item? Need infer? Maybe this is a data generation task? We need list first 200 parcels and cities. We only know item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed. Need describe first 200 parcels and their cities. Could be asking to generate 200 entries? But no data for 1-199. Maybe need use context measurement? It might be a benchmark where hidden data? We need",
+        "wall_ms": 2626.278890063986,
+        "ttft_ms": 255.8403650764376,
+        "last_ms": 2626.182346139103,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 2367.7000000000116,
+        "prefill_ms": 230.1999999999971,
+        "decode_steps": 50,
+        "decode_rows": 50,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 158,
+        "prompt_tokens_computed": 158
+      },
+      "engine_tokens_per_s": 107.69945516746156,
+      "ms_per_pass": 47.354000000000234,
+      "tokens_per_pass": 5.1,
+      "answer": {
+        "prompt_sha256": "410af984cdd06786156b7a0b3f44ae6c295bfdaceaeb437be5b152e2887246bb",
+        "usage": {
+          "prompt_tokens": 158,
+          "completion_tokens": 256,
+          "total_tokens": 414,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. Context: \"Context measurement a6839a140f3e42feaa40e6508fc798e9, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe only have one item? Need infer? Maybe this is a data generation task? We need list first 200 parcels and cities. We only know item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed. Need describe first 200 parcels and their cities. Could be asking to generate 200 entries? But no data for 1-199. Maybe need use context measurement? It might be a benchmark where hidden data? We need",
+        "wall_ms": 2631.1659750062972,
+        "ttft_ms": 255.70875289849937,
+        "last_ms": 2631.0766940005124,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

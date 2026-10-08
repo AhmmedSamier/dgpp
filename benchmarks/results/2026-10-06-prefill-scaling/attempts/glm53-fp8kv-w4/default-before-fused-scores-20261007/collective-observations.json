@@ -1,0 +1,34 @@
+{
+  "recorded_at": "2026-10-07T00:27:57.224267+00:00",
+  "scope": "Warnings after each rank's last warm-capture completion.",
+  "ranks": [
+    {
+      "rank": 0,
+      "warnings_after_warm_capture": 0,
+      "source": "server/serve_r0.log",
+      "source_sha256": "472221ce838cb57b67e75f61dfa076f476ecfe652f16c8f45c6e9faa61cf332f",
+      "warnings": []
+    },
+    {
+      "rank": 1,
+      "warnings_after_warm_capture": 0,
+      "source": "server/serve_r1.log",
+      "source_sha256": "23f61f8c648bffcec22fecbbec757f353b652f89af8b61153555d297292c4fbe",
+      "warnings": []
+    },
+    {
+      "rank": 2,
+      "warnings_after_warm_capture": 0,
+      "source": "server/serve_r2.log",
+      "source_sha256": "edc67fa419a7c871756705812e36916b1b9d79b2eef2f7047be7bf71ed3432fe",
+      "warnings": []
+    },
+    {
+      "rank": 3,
+      "warnings_after_warm_capture": 0,
+      "source": "server/serve_r3.log",
+      "source_sha256": "7a11c6c2dee89cdf5c5920c1942659dc8b8ca1a46cca3cf4383f8993ba0b00bd",
+      "warnings": []
+    }
+  ]
+}

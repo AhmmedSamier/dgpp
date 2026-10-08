@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "model": "Qwen/Qwen3.8-27B-FP8",
+  "surface": {
+    "id": "Qwen/Qwen3.8-27B-FP8",
+    "object": "model",
+    "created": 1791388959,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 262144,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+  "seed": 20260922,
+  "tag": "3eadb96ed36747b2a49e22450a67dbe7",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 4258.599999999977,
+        "prefill_ms": 395.8000000000029,
+        "decode_steps": 54,
+        "decode_rows": 54,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 157,
+        "prompt_tokens_computed": 157
+      },
+      "engine_tokens_per_s": 59.878833419433946,
+      "ms_per_pass": 78.86296296296253,
+      "tokens_per_pass": 4.722222222222222,
+      "answer": {
+        "prompt_sha256": "bf0d64c32e69efe6a55d6fb8e1c47508471598233ef7ec4379269c635f09fcb6",
+        "usage": {
+          "prompt_tokens": 157,
+          "completion_tokens": 256,
+          "total_tokens": 413,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. Context: \"Context measurement 3eadb96ed36747b2a49e22450a67dbe7, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe only have one item: Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed. Need first 200 parcels and their cities. But no data for 199 others. Need infer? Maybe this is a synthetic task where context measurement/bucket/item indicates only one item? User asks list first 200 parcels and cities. We have only one parcel. Need maybe generate 200? But cannot fabricate? Need likely answer with only available",
+        "wall_ms": 4697.342122904956,
+        "ttft_ms": 406.8677017930895,
+        "last_ms": 4671.7947269789875,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 4038.7000000000116,
+        "prefill_ms": 394.40000000000873,
+        "decode_steps": 51,
+        "decode_rows": 51,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 157,
+        "prompt_tokens_computed": 157
+      },
+      "engine_tokens_per_s": 63.139128927625045,
+      "ms_per_pass": 79.1901960784316,
+      "tokens_per_pass": 5.0,
+      "answer": {
+        "prompt_sha256": "bf0d64c32e69efe6a55d6fb8e1c47508471598233ef7ec4379269c635f09fcb6",
+        "usage": {
+          "prompt_tokens": 157,
+          "completion_tokens": 256,
+          "total_tokens": 413,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. Context: \"Context measurement 3eadb96ed36747b2a49e22450a67dbe7, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe only have one item: Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed. Need first 200 parcels and their cities. But no data for 199 others. Need infer? Maybe this is a synthetic task where context measurement/bucket/item indicates only one item? User asks list first 200 parcels and cities. We have only one parcel. Need maybe generate 200? But cannot fabricate? Need likely answer with only available",
+        "wall_ms": 4470.2275700401515,
+        "ttft_ms": 406.1061851680279,
+        "last_ms": 4444.743247004226,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 4045.600000000035,
+        "prefill_ms": 392.0,
+        "decode_steps": 51,
+        "decode_rows": 51,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 157,
+        "prompt_tokens_computed": 157
+      },
+      "engine_tokens_per_s": 63.03144156614539,
+      "ms_per_pass": 79.32549019607912,
+      "tokens_per_pass": 5.0,
+      "answer": {
+        "prompt_sha256": "bf0d64c32e69efe6a55d6fb8e1c47508471598233ef7ec4379269c635f09fcb6",
+        "usage": {
+          "prompt_tokens": 157,
+          "completion_tokens": 256,
+          "total_tokens": 413,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. Context: \"Context measurement 3eadb96ed36747b2a49e22450a67dbe7, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe only have one item: Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed. Need first 200 parcels and their cities. But no data for 199 others. Need infer? Maybe this is a synthetic task where context measurement/bucket/item indicates only one item? User asks list first 200 parcels and cities. We have only one parcel. Need maybe generate 200? But cannot fabricate? Need likely answer with only available",
+        "wall_ms": 4470.1595599763095,
+        "ttft_ms": 407.42253605276346,
+        "last_ms": 4470.046823145822,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

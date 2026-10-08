@@ -1,0 +1,27 @@
+Generating SQLite file /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/diagnostics/full-glm-prefill-investigation/baseline-full-256k.sqlite from /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/diagnostics/full-glm-prefill-investigation/baseline-full-256k.nsys-rep
+Processing [/home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/diagnostics/full-glm-prefill-investigation/baseline-full-256k.sqlite] with [/opt/nvidia/nsight-systems/2025.3.2/host-linux-armv8/reports/cuda_gpu_kern_sum.py]... 
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+40.3,458796960,1024,448043.9,445712.0,438432,895776,20329.9,nvjet_sm121_qqsss_mma_192x160x128_2_48x80x128_tmaAB_bz_TNNN
+31.8,361679040,1024,353202.2,352608.0,307712,449440,4740.9,"void dgpp::<unnamed>::prefill_score_keys_kernel<(bool)1>(const float *, long, const float *, const float *, const long *, long, int, int, unsigned long *)"
+15.1,172057791,6144,28004.2,16576.0,16192,133472,24161.5,"dgpp::<unnamed>::prefill_merge_keys_kernel(unsigned long *, const long *, int, int, int, int, int, int *, int *)"
+9.7,110758720,1024,108162.8,107840.0,102432,183392,3766.9,"dgpp::<unnamed>::prefill_select_keys_kernel(const unsigned long *, long, const long *, long, int, int, int, int *, int *, int, unsigned long *)"
+2.5,27907840,16,1744240.0,1746224.0,1654624,1922560,60680.2,"void dgpp::<unnamed>::attn_flash_kernel<(int)512, (int)576, (bool)1, (dgpp::LatentFormat)0>(const unsigned short *, const unsigned char *, const float *, const int *, const long *, const int *, int, const int *, int, int, int, int, const int *, int, float, float *, float *, float *)"
+0.1,1115616,1,1115616.0,1115616.0,1115616,1115616,0.0,nvjet_sm121_tst_mma_192x144x64_2_48x72x64_tmaAB_bz_TNNN
+0.1,1024160,16,64010.0,58880.0,57600,110176,13201.8,"dgpp::<unnamed>::attn_combine_kernel(const float *, const float *, const float *, int, int, int, float *)"
+0.1,953824,16,59614.0,56864.0,56096,86368,8309.7,"dgpp::vout_mma_kernel(const float *, const unsigned short *, unsigned short *, int, int, int, int, int)"
+0.1,774464,1,774464.0,774464.0,774464,774464,0.0,nvjet_sm121_tst_mma_128x128x64_3_32x64x64_tmaAB_bz_TNNN
+0.1,762240,2,381120.0,381120.0,376320,385920,6788.2,nvjet_sm121_tst_mma_192x160x64_2_48x80x64_tmaAB_bz_TNNN
+0.1,722304,16,45144.0,45376.0,41728,47520,1340.3,"dgpp::absorb_q_mma_kernel(const unsigned short *, const unsigned short *, unsigned short *, int, int, int, int, int, int)"
+0.0,485664,1,485664.0,485664.0,485664,485664,0.0,"dgpp::<unnamed>::gather_index_pools_kernel(const int *, int, const unsigned char *, const float *, long, unsigned char *, float *, int)"
+0.0,268512,1,268512.0,268512.0,268512,268512,0.0,"dgpp::<unnamed>::fwht_quant_rows_kernel(const unsigned short *, unsigned char *, float *)"
+0.0,259904,2,129952.0,129952.0,125760,134144,5928.4,nvjet_sm121_tst_mma_64x128x64_4_64x32x64_tmaAB_bz_TNNN
+0.0,188256,1,188256.0,188256.0,188256,188256,0.0,"<unnamed>::seed_prefill_history(unsigned char *, float *, long, int)"
+0.0,114016,1,114016.0,114016.0,114016,114016,0.0,void cutlass::Kernel2<cutlass_80_wmma_tensorop_s161616gemm_bf16_32x32_128x1_tn_align8>(T1::Params)
+0.0,88864,4,22216.0,16304.0,2848,53408,23412.1,"dgpp::<unnamed>::rope_interleave_kernel(const unsigned short *, long, long, int, int, const long *, const unsigned short *, long, unsigned short *, long, long, long)"
+0.0,72864,1,72864.0,72864.0,72864,72864,0.0,"dgpp::<unnamed>::fused_qkv_rmsnorm_kernel(const unsigned short *, long, unsigned short *, unsigned short *, int, int, const unsigned short *, const unsigned short *, float)"
+0.0,29792,1,29792.0,29792.0,29792,29792,0.0,"dgpp::<unnamed>::kpool_compress_write_kernel(const unsigned short *, long, const unsigned short *, long, const float *, const int *, int, long, int, unsigned char *, float *, int, int)"
+0.0,16608,1,16608.0,16608.0,16608,16608,0.0,"dgpp::<unnamed>::latent_append_kernel(const unsigned short *, const int *, const long *, const int *, int, int, unsigned char *, int, unsigned long, const unsigned short *, int)"
+0.0,6176,1,6176.0,6176.0,6176,6176,0.0,"dgpp::<unnamed>::k_layernorm_kernel(const unsigned short *, long, const unsigned short *, const unsigned short *, unsigned short *, int, float)"
+0.0,5472,1,5472.0,5472.0,5472,5472,0.0,"dgpp::<unnamed>::kpool_tail_seed_kernel(const unsigned short *, long, const unsigned short *, long, const int *, const long *, long, unsigned short *, int, int)"
+0.0,3648,1,3648.0,3648.0,3648,3648,0.0,"dgpp::<unnamed>::fold_weights_kernel(const float *, const float *, float *, long, float)"
+

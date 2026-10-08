@@ -1,0 +1,69 @@
+[
+  {
+    "rank": 0,
+    "filter": "log timestamp >= 2026-10-06 05:34:00; peer log files append older launches",
+    "warning_lines": 17,
+    "max_logged_wait_ms": 1508,
+    "sequences": [
+      1133670,
+      1133684,
+      1133701,
+      1134783,
+      1134800,
+      1135683,
+      1135697,
+      1136454,
+      1136468,
+      1137138,
+      1137155,
+      1137738
+    ]
+  },
+  {
+    "rank": 1,
+    "filter": "log timestamp >= 2026-10-06 05:34:00; peer log files append older launches",
+    "warning_lines": 0,
+    "max_logged_wait_ms": 0,
+    "sequences": []
+  },
+  {
+    "rank": 2,
+    "filter": "log timestamp >= 2026-10-06 05:34:00; peer log files append older launches",
+    "warning_lines": 17,
+    "max_logged_wait_ms": 1505,
+    "sequences": [
+      1133670,
+      1133684,
+      1133701,
+      1134783,
+      1134800,
+      1135683,
+      1135697,
+      1136454,
+      1136468,
+      1137138,
+      1137155,
+      1137738
+    ]
+  },
+  {
+    "rank": 3,
+    "filter": "log timestamp >= 2026-10-06 05:34:00; peer log files append older launches",
+    "warning_lines": 17,
+    "max_logged_wait_ms": 1506,
+    "sequences": [
+      1133670,
+      1133684,
+      1133701,
+      1134783,
+      1134800,
+      1135683,
+      1135697,
+      1136454,
+      1136468,
+      1137138,
+      1137155,
+      1137738
+    ]
+  }
+]

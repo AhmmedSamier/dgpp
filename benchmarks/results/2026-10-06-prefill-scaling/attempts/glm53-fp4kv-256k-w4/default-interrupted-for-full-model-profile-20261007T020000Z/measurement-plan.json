@@ -1,0 +1,18 @@
+{
+  "jobs": [
+    "greedy",
+    "prefill",
+    "context-0",
+    "context-32768",
+    "context-65536",
+    "context-131072",
+    "context-262144",
+    "context-524288"
+  ],
+  "prefill_lengths": [
+    2048,
+    8192,
+    32768
+  ],
+  "retained_sources": {}
+}

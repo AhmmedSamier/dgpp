@@ -1,0 +1,180 @@
+{
+  "schema_version": 1,
+  "model": "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
+  "surface": {
+    "id": "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
+    "object": "model",
+    "created": 1791347172,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "minimal": {
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "reasoning_effort": "high"
+        },
+        "high": {
+          "reasoning_effort": "high"
+        },
+        "xhigh": {
+          "reasoning_effort": "max"
+        },
+        "max": {
+          "reasoning_effort": "max"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 262144,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
+  "seed": 20260922,
+  "tag": "4e618199e3e0454f8c348c4ed021265d",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 8845.199999999953,
+        "prefill_ms": 851.2999999999884,
+        "decode_steps": 138,
+        "decode_rows": 138,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 99,
+        "prompt_tokens_computed": 99
+      },
+      "engine_tokens_per_s": 28.829195495862315,
+      "ms_per_pass": 64.09565217391271,
+      "tokens_per_pass": 1.8478260869565217,
+      "answer": {
+        "prompt_sha256": "09594aad343f8fc209b2a0be7e562d3a5d6eee9abdca2efdb08a6f6be68e626d",
+        "usage": {
+          "prompt_tokens": 99,
+          "completion_tokens": 256,
+          "total_tokens": 355,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing \"the first 200 parcels and their cities.\" They've given me a context that mentions one parcel: PX-0757343, weighed 4.1825 kilograms, in \"Income\" (probably a location), gate 1, shift C, status sealed.\n\nThe problem here is that I only have information about ONE parcel. The user is asking me to list 200 parcels and their cities, but I don't have data for 200 parcels. This appears to be a request that would require me to fabricate/hallucinate data for 199 parcels that don't exist in my context.\n\nThis looks like it could be a test of whether I'll hallucinate information. The context only contains one parcel record. I cannot invent 199 additional parcels with fake IDs, weights, and cities \u2014 that would be fabricating data.\n\nThe appropriate response is to explain that I only have information about one parcel in the provided context, and I cannot generate the other 199 parcels because that data wasn't provided. I should list the one parcel I do have information about, and note that I'd need the actual data for the remaining parcels.\n\nLet me think about whether there's any legitimate interpretation where I should",
+        "wall_ms": 9718.868362018839,
+        "ttft_ms": 865.1244139764458,
+        "last_ms": 9718.686760170385,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 8853.90000000014,
+        "prefill_ms": 846.0,
+        "decode_steps": 138,
+        "decode_rows": 138,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 99,
+        "prompt_tokens_computed": 99
+      },
+      "engine_tokens_per_s": 28.80086741435932,
+      "ms_per_pass": 64.15869565217493,
+      "tokens_per_pass": 1.8478260869565217,
+      "answer": {
+        "prompt_sha256": "09594aad343f8fc209b2a0be7e562d3a5d6eee9abdca2efdb08a6f6be68e626d",
+        "usage": {
+          "prompt_tokens": 99,
+          "completion_tokens": 256,
+          "total_tokens": 355,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing \"the first 200 parcels and their cities.\" They've given me a context that mentions one parcel: PX-0757343, weighed 4.1825 kilograms, in \"Income\" (probably a location), gate 1, shift C, status sealed.\n\nThe problem here is that I only have information about ONE parcel. The user is asking me to list 200 parcels and their cities, but I don't have data for 200 parcels. This appears to be a request that would require me to fabricate/hallucinate data for 199 parcels that don't exist in my context.\n\nThis looks like it could be a test of whether I'll hallucinate information. The context only contains one parcel record. I cannot invent 199 additional parcels with fake IDs, weights, and cities \u2014 that would be fabricating data.\n\nThe appropriate response is to explain that I only have information about one parcel in the provided context, and I cannot generate the other 199 parcels because that data wasn't provided. I should list the one parcel I do have information about, and note that I'd need the actual data for the remaining parcels.\n\nLet me think about whether there's any legitimate interpretation where I should",
+        "wall_ms": 9712.7399740275,
+        "ttft_ms": 862.7134950365871,
+        "last_ms": 9712.578723905608,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 8846.5,
+        "prefill_ms": 847.9000000000233,
+        "decode_steps": 138,
+        "decode_rows": 138,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 99,
+        "prompt_tokens_computed": 99
+      },
+      "engine_tokens_per_s": 28.824959023342565,
+      "ms_per_pass": 64.10507246376811,
+      "tokens_per_pass": 1.8478260869565217,
+      "answer": {
+        "prompt_sha256": "09594aad343f8fc209b2a0be7e562d3a5d6eee9abdca2efdb08a6f6be68e626d",
+        "usage": {
+          "prompt_tokens": 99,
+          "completion_tokens": 256,
+          "total_tokens": 355,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing \"the first 200 parcels and their cities.\" They've given me a context that mentions one parcel: PX-0757343, weighed 4.1825 kilograms, in \"Income\" (probably a location), gate 1, shift C, status sealed.\n\nThe problem here is that I only have information about ONE parcel. The user is asking me to list 200 parcels and their cities, but I don't have data for 200 parcels. This appears to be a request that would require me to fabricate/hallucinate data for 199 parcels that don't exist in my context.\n\nThis looks like it could be a test of whether I'll hallucinate information. The context only contains one parcel record. I cannot invent 199 additional parcels with fake IDs, weights, and cities \u2014 that would be fabricating data.\n\nThe appropriate response is to explain that I only have information about one parcel in the provided context, and I cannot generate the other 199 parcels because that data wasn't provided. I should list the one parcel I do have information about, and note that I'd need the actual data for the remaining parcels.\n\nLet me think about whether there's any legitimate interpretation where I should",
+        "wall_ms": 9719.344925135374,
+        "ttft_ms": 863.6418310925364,
+        "last_ms": 9719.20589893125,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

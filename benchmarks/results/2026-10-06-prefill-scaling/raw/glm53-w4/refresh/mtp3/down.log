@@ -1,0 +1,9 @@
+2026-10-06 23:41:29.507 === SIGINT rank 0 (2701785) — the stop record releases the peers
+2026-10-06 23:41:31.508 === waiting for the peers to drain
+2026-10-06 23:41:35.607 === op-stream identity (every rank)
+2026-10-06 23:41:35.608 1ec9a00bb4cb6ee24405ca05af06343e  /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-w4/refresh/mtp3/server/serve_rank0.ops
+2026-10-06 23:41:35.608 1ec9a00bb4cb6ee24405ca05af06343e  /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-w4/refresh/mtp3/server/serve_rank1.ops
+2026-10-06 23:41:35.608 1ec9a00bb4cb6ee24405ca05af06343e  /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-w4/refresh/mtp3/server/serve_rank2.ops
+2026-10-06 23:41:35.609 1ec9a00bb4cb6ee24405ca05af06343e  /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-w4/refresh/mtp3/server/serve_rank3.ops
+2026-10-06 23:41:35.609 op streams: identical across 4 ranks
+2026-10-06 23:41:35.609 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-w4/refresh/mtp3/server

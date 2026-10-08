@@ -1,0 +1,44 @@
+{
+  "recorded_at": "2026-10-06T20:35:15.538440+00:00",
+  "measurement_started_at": "2026-10-06T20:34:04.493412+00:00",
+  "startup_warning_count": 60,
+  "startup_max_observed_wait_ms": 29001,
+  "startup_sequences": [
+    1,
+    99
+  ],
+  "milestones": [
+    "2026-10-06 20:34:02.522 INFO  rank 0: warm capture complete \u2014 4 scalar variants and the row batches for 2 slots, 3 slots, 4 slots recorded before the first request",
+    "2026-10-06 20:34:02.522 INFO  rank 0: graph variants warm-captured in 112.56s",
+    "2026-10-06 20:34:02.665 INFO  serve: listening on :18080 \u2014 RadixArk/Qwen3.8-Flash-Next-NVFP4 (boot 122.3s) [fabric rank 0]; endpoints: POST /v1/chat/completions, POST /v1/completions, GET /v1/models, GET /health, GET /metrics, GET /v1/metrics"
+  ],
+  "peer_observation": {
+    "root_time": "2026-10-06 20:34:01 UTC",
+    "peer_time": "2026-10-06T20:35:21.904791+00:00",
+    "process_state": "D (disk sleep)",
+    "process_swap_KiB": 0,
+    "resident_cache_allocated_GiB": 34.054691314697266,
+    "resident_cache_mtime_age_s": 0.13474273681640625
+  },
+  "interpretation": "The startup waits occurred before graph warmup completed and before HTTP readiness. The observed peer was still writing its resident cache; its clock was about 81 seconds ahead of rank zero. Do not compare raw timestamps across hosts without accounting for this offset. Timed measurements start after all these warnings. Final frozen logs show no collective stall warnings after graph warmup on either rank.",
+  "validated_at": "2026-10-06T20:55:43.351349+00:00",
+  "launch_memory_passed": true,
+  "ranks": [
+    {
+      "rank": 0,
+      "warm_capture_completed_at_local_clock": "2026-10-06 20:34:02.522",
+      "startup_warning_count": 60,
+      "warnings_after_warm_capture": 0,
+      "source": "server/serve_r0.log",
+      "source_sha256": "c5de40955fc18b45cc36a5df132ddb8782f1a535369400bf65028e264c407426"
+    },
+    {
+      "rank": 1,
+      "warm_capture_completed_at_local_clock": "2026-10-06 20:35:23.037",
+      "startup_warning_count": 0,
+      "warnings_after_warm_capture": 0,
+      "source": "server/serve_r1.log",
+      "source_sha256": "e467058008289720b99d776c63370e988db5a5188f63065d7efb45f8ee93ae28"
+    }
+  ]
+}

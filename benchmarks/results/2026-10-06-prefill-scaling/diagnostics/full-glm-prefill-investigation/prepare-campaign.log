@@ -1,0 +1,61 @@
+{
+  "retained_modes": 59,
+  "excluded": [
+    {
+      "deployment": "glm53-w4",
+      "job": "prefill",
+      "length": 2048,
+      "max_prompt_tokens": 2054
+    },
+    {
+      "deployment": "glm53-w4",
+      "job": "prefill",
+      "length": 8192,
+      "max_prompt_tokens": 8191
+    },
+    {
+      "deployment": "glm53-w4",
+      "job": "prefill",
+      "length": 32768,
+      "max_prompt_tokens": 32248
+    },
+    {
+      "deployment": "glm53-w4",
+      "job": "context-32768",
+      "max_prompt_tokens": 32237
+    },
+    {
+      "deployment": "glm53-w4",
+      "job": "context-65536",
+      "max_prompt_tokens": 65010
+    },
+    {
+      "deployment": "glm53-fp8kv-w4",
+      "job": "prefill",
+      "length": 8192,
+      "max_prompt_tokens": 8160
+    },
+    {
+      "deployment": "glm53-fp8kv-w4",
+      "job": "prefill",
+      "length": 32768,
+      "max_prompt_tokens": 32119
+    },
+    {
+      "deployment": "glm53-fp8kv-w4",
+      "job": "context-32768",
+      "max_prompt_tokens": 32237
+    },
+    {
+      "deployment": "glm53-fp8kv-w4",
+      "job": "context-65536",
+      "max_prompt_tokens": 65008
+    },
+    {
+      "deployment": "glm53-fp8kv-w4",
+      "job": "context-131072",
+      "max_prompt_tokens": 130540
+    }
+  ],
+  "binary_sha256": "a9b605c0e22cc6eaf869b3c1eef0f4967a354913f71842a500a65103b14294a9"
+}

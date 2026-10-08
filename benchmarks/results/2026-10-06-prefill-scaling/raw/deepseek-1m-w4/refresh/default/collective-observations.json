@@ -1,0 +1,26 @@
+{
+  "at": "2026-10-07T07:59:12.064935+00:00",
+  "scope": "Entire saved logs; zero warnings does not establish zero collective wait time.",
+  "logs": [
+    {
+      "path": "server/serve_r0.log",
+      "sha256": "e41160e51f7735ce716d5bf47e688ed960f077383bf321af56865bdaefce8400",
+      "stall_warning_lines": 0
+    },
+    {
+      "path": "server/serve_r1.log",
+      "sha256": "54a3c358bbbef43fdc22c52a5abbe450282e6080c57faadd10ee127ed31c50df",
+      "stall_warning_lines": 0
+    },
+    {
+      "path": "server/serve_r2.log",
+      "sha256": "4eacb0d5e14021a6f34941f5e5fd6839f0b25ab751ab8f8ce007d564929d212d",
+      "stall_warning_lines": 0
+    },
+    {
+      "path": "server/serve_r3.log",
+      "sha256": "f2ded27c063ffb84d15692fb78b2436990d946029fb61f35f2dfc73cfc843cca",
+      "stall_warning_lines": 0
+    }
+  ]
+}

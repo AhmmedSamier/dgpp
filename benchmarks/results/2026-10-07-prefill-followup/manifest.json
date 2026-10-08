@@ -1,0 +1,10 @@
+{
+  "started_at": "2026-10-07T21:40:10.414855+00:00",
+  "commit": "90ebbf1bcc2976ebaa94e0b4cf8779caed52f3db",
+  "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+  "benchmark_environment": {
+    "DGPP_NO_SWAP": "1",
+    "CUDA_DEVICE_MAX_CONNECTIONS": "32"
+  },
+  "purpose": "Investigate GLM Flash TP2, full GLM TP4, and MiMo TP2 cold-prefill performance; configuration comparisons use the identical fixed binary."
+}

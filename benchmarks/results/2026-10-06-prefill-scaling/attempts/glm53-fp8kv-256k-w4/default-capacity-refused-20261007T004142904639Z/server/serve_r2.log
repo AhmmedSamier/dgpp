@@ -1,0 +1,47 @@
+2026-10-07 00:38:07.612 INFO  dgpp-serve 0.1.0+g8f1c4cbcc1e9.dirty (git 8f1c4cbcc1e9)
+2026-10-07 00:38:07.612 INFO  config /tmp/bus4/deployments/876895516d704212/cluster.json: model HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64, world 4, rank 2, http :18080, fabric :29970, journal :29971
+2026-10-07 00:38:07.612 INFO  model HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64 -> /home/stephen/.cache/huggingface/hub/models--HawkBearPig--GLM-5.3-Int4-Int8Mix-RTN-g64/snapshots/147684fbad20c1e283ddff46fd07cb9d4ccbb3da
+2026-10-07 00:38:07.613 INFO  journal: connected to rank 0 at 192.168.88.11:29971 (120000 attempt window)
+2026-10-07 00:38:07.614 INFO  rank 2: settings from rank 0: model=HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64 world=4 fabric=29970 journal=29971 conc=8 kv=262144 kvdt=fp8 ngt=resident dw=checkpoint mtpef=fp8 bfw=bf12 fp8head=gemv pf=bounded emsh=vocab maxtok=32768 queue=8 eos=1 graph=1 compact=0 mtp=1 mtpd=1 mss=0 msrow=8 msbase=28 mslam=0 msmin=1 msad=1 msss=0.93 mdr=auto mdt=1 mvf=token dbr=0 batchmin=2 cand=128 pcgib=1.5 adm=full win=256 pfbudget=-1 pfidle=0 pmin=1024 phead=1 pace=-1 inflight=-1 reasoning_in_content=0 rs=off dflash=off dfw=checkpoint
+2026-10-07 00:38:07.614 INFO  config: model=HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64 world=4 fabric=29970 journal=29971 conc=8 kv=262144 kvdt=fp8 ngt=resident dw=checkpoint mtpef=fp8 bfw=bf12 fp8head=gemv pf=bounded emsh=vocab maxtok=32768 queue=8 eos=1 graph=1 compact=0 mtp=1 mtpd=1 mss=0 msrow=8 msbase=28 mslam=0 msmin=1 msad=1 msss=0.93 mdr=auto mdt=1 mvf=token dbr=0 batchmin=2 cand=128 pcgib=1.5 adm=full win=256 pfbudget=-1 pfidle=0 pmin=1024 phead=1 pace=-1 inflight=-1 reasoning_in_content=0 rs=off dflash=off dfw=checkpoint (digest 95fbc9fcb72daedb)
+2026-10-07 00:38:07.744 INFO  serve: model family glm_moe_dsa (/home/stephen/.cache/huggingface/hub/models--HawkBearPig--GLM-5.3-Int4-Int8Mix-RTN-g64/snapshots/147684fbad20c1e283ddff46fd07cb9d4ccbb3da)
+2026-10-07 00:38:07.744 INFO  serve: decode rows 16 (8 slot(s) x 2 row(s) per request, floor 8, the glm_moe_dsa family's cap 16)
+2026-10-07 00:38:07.744 WARN  generation config /home/stephen/.cache/huggingface/hub/models--HawkBearPig--GLM-5.3-Int4-Int8Mix-RTN-g64/snapshots/147684fbad20c1e283ddff46fd07cb9d4ccbb3da/generation_config.json omits top_k, min_p, repetition_penalty; using greedy-safe/neutral fallbacks for those fields
+2026-10-07 00:38:07.744 INFO  generation defaults: temperature=1 top_p=0.95 top_k=0 min_p=0 repetition_penalty=1
+2026-10-07 00:38:07.744 INFO  serve: sampling defaults temperature 1 top_p 0.95 top_k 0 min_p 0 repetition_penalty 1 (from generation_config.json; overrides: none)
+2026-10-07 00:38:07.744 INFO  serve: request context limit 262144 tokens (the 262144-token K/V pool from engine.kv_capacity 262144; this family states no positional ceiling of its own)
+2026-10-07 00:38:07.744 INFO  rank 2: prefix cache plan — 1.5 GiB budget, 4096 slots of 0.012 MiB, 0.047 GiB allocated; cached K/V blocks share the 262144-token pool
+2026-10-07 00:38:07.911 INFO  tokenizer: loaded vocab 154820 merges 321649 added 36 (revision 0x700b4469fc43f23b; glm pattern, no normalizer, ignore_merges true)
+2026-10-07 00:38:07.920 INFO  serve: grammar vocabulary built (154880 ids, tool markers present, call-turn EOS 154829)
+2026-10-07 00:38:08.023 INFO  serve: JSON grammar tables built in 0.10 s
+2026-10-07 00:38:08.256 INFO  bus: globaltimer offset 10191298097 ns (+-2 us)
+2026-10-07 00:38:08.261 INFO  verbs: device roceP2p1s0f0 port 1 gid_index 3
+2026-10-07 00:38:08.265 INFO  verbs: device rocep1s0f0 port 1 gid_index 3
+2026-10-07 00:38:08.925 INFO  bus: rank 2 up — 3 peer(s) x 2 lane(s), lat 8x196608B, bulk 8x262144B, bulk pace 28.3 Gb/s per QP, window 4 per lane
+2026-10-07 00:38:08.925 INFO  rank 2: boundary reducer host-driven
+2026-10-07 00:38:08.959 INFO  bus engine: rank 2 pinned to cpu 19
+2026-10-07 00:38:09.066 INFO  rank 2: process memory locked (mlockall MCL_CURRENT, 14546 MiB)
+2026-10-07 00:38:09.066 INFO  rank 2: resident image cache at /home/stephen/.cache/dgpp/resident
+2026-10-07 00:38:09.199 INFO  rank 2: memory plan for a 262144-token context — model weights (resident, packed bf16 matrices released) 96.32 GiB; bf16 decode packing (12-bit companions) 1.27 GiB; bf16 prefill expansion scratch 0.05 GiB; gemm workspace (at least) 0.06 GiB; dsa cache pool (latent fp8 + rope keys on every layer, fp8 index caches on the indexed layers) 13.13 GiB; dsa scratch (projections, selection, attention, the prefill dot tiles) 0.27 GiB; rotary table (bf16 cos/sin per position) 0.03 GiB; activations (session core, residual, block io, dense scratch, route staging) 0.14 GiB (0.01 GiB pinned); moe scratch (routed slots, shared expert, graph tables) 0.75 GiB (0.01 GiB pinned); draft block (gathered hidden, the fused input, its residual, the sharded embedding's rows) 0.12 GiB; prefix cache 0.05 GiB; engine 0.08 GiB
+2026-10-07 00:38:09.199 INFO  rank 2: memory plan total 112.27 GiB (112.13 GiB device + 0.14 GiB pinned) + 4.00 GiB headroom against 116.45 GiB free (device free 113.83 GiB of 121.69 GiB, host available 116.45 GiB)
+2026-10-07 00:38:09.200 INFO  memory ledger: rank 2 after the plan check — rss 1.19 GiB (anon 0.42, shmem 0.11, file 0.67; locked 14.21); device free 113.83 GiB, node available 116.45 GiB
+2026-10-07 00:38:09.200 INFO  memory ledger: rank 2 after the bus — rss 1.19 GiB (anon 0.42, shmem 0.11, file 0.67; locked 14.21); device free 113.83 GiB, node available 116.45 GiB
+2026-10-07 00:38:09.721 INFO  glm_dsa loader: rank 2 resident footprint 98.0 GiB; device free 113.7 of 121.7 GiB, host available 116.4 GiB
+2026-10-07 00:38:10.512 INFO  glm_dsa loader: rank 2 resident image /home/stephen/.cache/dgpp/resident/a4f128845248d27f.img — 79/79 layers present, direct I/O
+2026-10-07 00:38:10.524 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-07 00:38:10.524 INFO  memory ledger: glm_dsa: loader opened — rss 2.76 GiB (anon 0.49, shmem 1.57, file 0.69; locked 14.21); device free 111.80 GiB, node available 114.43 GiB
+2026-10-07 00:38:11.410 INFO  memory ledger: glm_dsa: globals resident — rss 3.65 GiB (anon 0.49, shmem 1.57, file 1.58; locked 14.21); device free 110.47 GiB, node available 113.98 GiB
+2026-10-07 00:38:26.137 INFO  rank 2 bf12: 89 decode matrices packed (1.65 GiB of bf16 -> 1.24 GiB, 165420 escapes, widest row 12, 0 rows kept raw; 0 matrices kept bf16) in 0.9 s
+2026-10-07 00:38:26.137 INFO  rank 2 bf12: 89 of them released their bf16 bytes (1.71 GiB returned; prefill expands through a 48 MiB scratch)
+2026-10-07 00:38:26.448 INFO  glm_dsa loader: rank 2 resident load complete — released 79 shard mappings (398.1 GiB) and evicted their page cache, freed the 1.46 GiB pinned staging mirror; image: 79 layers restored, 0 captured
+2026-10-07 00:38:26.491 INFO  memory ledger: glm_dsa: layers resident, sources released — rss 1.26 GiB (anon 0.48, shmem 0.11, file 0.67; locked 14.19); device free 13.79 GiB, node available 16.38 GiB
+2026-10-07 00:38:26.948 INFO  memory ledger: glm_dsa: arena, pool and scratch — rss 1.26 GiB (anon 0.48, shmem 0.11, file 0.67; locked 14.19); device free 1.77 GiB, node available 3.80 GiB
+2026-10-07 00:38:27.060 INFO  memory ledger: rank 2 after the model — rss 1.27 GiB (anon 0.48, shmem 0.12, file 0.67; locked 14.19); device free 1.47 GiB, node available 3.50 GiB
+2026-10-07 00:38:27.060 INFO  rank 2: model constructed in 17.9s (resident, 8 request slots, 262144-token pool in fp8, 2048-row forwards)
+2026-10-07 00:38:27.060 INFO  rank 2: prefix cache on — 4096 snapshot slot(s) of 0.0 MiB (1.50 GiB asked)
+2026-10-07 00:38:27.065 INFO  rank 2: graph engine samples on the device — 128 candidates per rank (16 rows x 4 ranks in a 196608-byte latency slot; the planned width is 128); constrained decoding available
+2026-10-07 00:38:27.065 INFO  rank 2: prefill budget 0 tokens/tick (0 = full prompt), 0 with nothing decoding
+2026-10-07 00:38:27.065 INFO  rank 2: sampled requests draft a draw from the draft's distribution under the ratio verify (engine.mtp_draft auto)
+2026-10-07 00:38:27.065 INFO  journal: rank 0's stream ended before the warm record — exiting
+2026-10-07 00:38:27.065 INFO  rank 2: graph engine sampling summary — 0 sampled decode steps, 0 served by the exact gather fallback (0.0%), 128 candidates per rank
+2026-10-07 00:38:28.236 INFO  rank 2: exited cleanly

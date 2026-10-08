@@ -1,0 +1,31 @@
+Internal ctest changing into directory: /home/stephen/workspace/dgpp/build-release
+Test project /home/stephen/workspace/dgpp/build-release
+      Start 82: dsv41_forward_fixture
+ 1/11 Test #82: dsv41_forward_fixture ....................   Passed    0.66 sec
+      Start 83: dsv41_forward_smoke
+ 2/11 Test #83: dsv41_forward_smoke ......................   Passed    1.80 sec
+      Start 84: dsv41_forward_generate
+ 3/11 Test #84: dsv41_forward_generate ...................   Passed    0.71 sec
+      Start 85: dsv41_forward_test_e2e
+ 4/11 Test #85: dsv41_forward_test_e2e ...................   Passed    1.78 sec
+      Start 86: dsv41_forward_generate_teacher
+ 5/11 Test #86: dsv41_forward_generate_teacher ...........   Passed    0.64 sec
+      Start 87: dsv41_forward_test
+ 6/11 Test #87: dsv41_forward_test .......................   Passed    1.76 sec
+      Start 88: dsv41_forward_generate_bounded
+ 7/11 Test #88: dsv41_forward_generate_bounded ...........   Passed    0.68 sec
+      Start 89: dsv41_forward_test_bounded_e2e
+ 8/11 Test #89: dsv41_forward_test_bounded_e2e ...........   Passed    1.78 sec
+      Start 90: dsv41_forward_generate_teacher_bounded
+ 9/11 Test #90: dsv41_forward_generate_teacher_bounded ...   Passed    0.63 sec
+      Start 91: dsv41_forward_test_bounded
+10/11 Test #91: dsv41_forward_test_bounded ...............   Passed    1.71 sec
+      Start 92: dsv41_decode_test
+11/11 Test #92: dsv41_decode_test ........................   Passed    4.13 sec
+
+100% tests passed, 0 tests failed out of 11
+
+Label Time Summary:
+gpu    =  16.28 sec*proc (11 tests)
+
+Total Test time (real) =  16.29 sec

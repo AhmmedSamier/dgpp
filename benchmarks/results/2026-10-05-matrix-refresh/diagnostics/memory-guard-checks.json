@@ -1,0 +1,26 @@
+[
+  {
+    "case": "zero",
+    "accepted": true
+  },
+  {
+    "case": "swap",
+    "accepted": false
+  },
+  {
+    "case": "missing",
+    "accepted": false
+  },
+  {
+    "case": "gap",
+    "accepted": false
+  },
+  {
+    "case": "error",
+    "accepted": false
+  },
+  {
+    "case": "stopped",
+    "accepted": false
+  }
+]

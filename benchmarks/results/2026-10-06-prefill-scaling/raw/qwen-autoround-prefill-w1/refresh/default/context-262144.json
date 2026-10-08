@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "model": "Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN",
+  "surface": {
+    "id": "Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN",
+    "object": "model",
+    "created": 1791326714,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": 262144,
+      "kv_pool_tokens": 262144,
+      "limited_by": "position-ceiling"
+    }
+  },
+  "tokenizer_sha256": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+  "seed": 20260922,
+  "tag": "d5f6fbe960f1449a9fc3f740a80123ec",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 262144,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 4961.900000000023,
+        "prefill_ms": 191960.7,
+        "decode_steps": 79,
+        "decode_rows": 79,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 261658,
+        "prompt_tokens_computed": 261658
+      },
+      "engine_tokens_per_s": 51.39160402265237,
+      "ms_per_pass": 62.80886075949397,
+      "tokens_per_pass": 3.2278481012658227,
+      "answer": {
+        "prompt_sha256": "ceef0e3cfb3185ae47bc478419064cb3f129724c5126e7a83a4352086d65b32f",
+        "usage": {
+          "prompt_tokens": 261658,
+          "completion_tokens": 256,
+          "total_tokens": 261914,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided huge context with items 000000 to 005831. Need list first 200 parcels and their cities. Likely item 000000 through 000199? \"first 200 parcels\" from context. Need numbered list 1-200? \"describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Need likely include parcel ID and city. Need ensure first 200 items: Item 000000 to Item 000199 inclusive. Need output numbered list. Need be accurate. Need parse first 200 lines. Let's extract carefully.\n\nWe need list:\n1. PX-0757343, Income\n2. PX-0081436, Jamesport\n3. PX-0126529, Dunmore\n4. PX-0226532, Dunmore\n5. PX-0538039,",
+        "wall_ms": 197047.05275292508,
+        "ttft_ms": 192060.17211987637,
+        "last_ms": 197046.90575995483,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 262144,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 4942.20000000007,
+        "prefill_ms": 81.5,
+        "decode_steps": 79,
+        "decode_rows": 79,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 261658,
+        "prompt_tokens_computed": 6
+      },
+      "engine_tokens_per_s": 51.59645502003084,
+      "ms_per_pass": 62.55949367088696,
+      "tokens_per_pass": 3.2278481012658227,
+      "answer": {
+        "prompt_sha256": "ceef0e3cfb3185ae47bc478419064cb3f129724c5126e7a83a4352086d65b32f",
+        "usage": {
+          "prompt_tokens": 261658,
+          "completion_tokens": 256,
+          "total_tokens": 261914,
+          "prompt_tokens_details": {
+            "cached_tokens": 261652
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided huge context with items 000000 to 005831. Need list first 200 parcels and their cities. Likely item 000000 through 000199? \"first 200 parcels\" from context. Need numbered list 1-200? \"describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Need likely include parcel ID and city. Need ensure first 200 items: Item 000000 to Item 000199 inclusive. Need output numbered list. Need be accurate. Need parse first 200 lines. Let's extract carefully.\n\nWe need list:\n1. PX-0757343, Income\n2. PX-0081436, Jamesport\n3. PX-0126529, Dunmore\n4. PX-0226532, Dunmore\n5. PX-0538039,",
+        "wall_ms": 5144.183153053746,
+        "ttft_ms": 182.67093412578106,
+        "last_ms": 5144.03454400599,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 262144,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 4967.0,
+        "prefill_ms": 81.39999999996508,
+        "decode_steps": 79,
+        "decode_rows": 79,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 261658,
+        "prompt_tokens_computed": 6
+      },
+      "engine_tokens_per_s": 51.33883631971009,
+      "ms_per_pass": 62.87341772151899,
+      "tokens_per_pass": 3.2278481012658227,
+      "answer": {
+        "prompt_sha256": "ceef0e3cfb3185ae47bc478419064cb3f129724c5126e7a83a4352086d65b32f",
+        "usage": {
+          "prompt_tokens": 261658,
+          "completion_tokens": 256,
+          "total_tokens": 261914,
+          "prompt_tokens_details": {
+            "cached_tokens": 261652
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided huge context with items 000000 to 005831. Need list first 200 parcels and their cities. Likely item 000000 through 000199? \"first 200 parcels\" from context. Need numbered list 1-200? \"describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Need likely include parcel ID and city. Need ensure first 200 items: Item 000000 to Item 000199 inclusive. Need output numbered list. Need be accurate. Need parse first 200 lines. Let's extract carefully.\n\nWe need list:\n1. PX-0757343, Income\n2. PX-0081436, Jamesport\n3. PX-0126529, Dunmore\n4. PX-0226532, Dunmore\n5. PX-0538039,",
+        "wall_ms": 5147.140162065625,
+        "ttft_ms": 158.48988411016762,
+        "last_ms": 5146.947440924123,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "model": "RadixArk/Qwen3.8-Flash-Next-NVFP4",
+  "surface": {
+    "id": "RadixArk/Qwen3.8-Flash-Next-NVFP4",
+    "object": "model",
+    "created": 1791319742,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": 262144,
+      "kv_pool_tokens": 524288,
+      "limited_by": "position-ceiling"
+    }
+  },
+  "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+  "seed": 20260922,
+  "tag": "d78c150478be4296b72be88f4edc3c0f",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 262144,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 4256.70000000007,
+        "prefill_ms": 312402.7,
+        "decode_steps": 74,
+        "decode_rows": 74,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 261659,
+        "prompt_tokens_computed": 261659
+      },
+      "engine_tokens_per_s": 59.90556064556953,
+      "ms_per_pass": 57.52297297297392,
+      "tokens_per_pass": 3.445945945945946,
+      "answer": {
+        "prompt_sha256": "eec908b4721fa9ed1fd15d0858b36dcf1d658e9edbb43ac370db0ea5f51b03e8",
+        "usage": {
+          "prompt_tokens": 261659,
+          "completion_tokens": 256,
+          "total_tokens": 261915,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. User provided huge context with parcel items 000000 to 005830? They ask: \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Need likely list first 200 parcels (items 000000 through 000199?) and their cities. Need numbered list 1-200? \"first 200 parcels\" likely Item 000000 to Item 000199. Need describe parcel and city. Could include parcel ID and city. Need ensure all 200. Need parse from context. Need be careful. Need produce numbered list. Could format: 1. Item 000000: PX-0757343 \u2014 Income. Need first 200 items. Let's extract items 000000-000199. Need verify each city. Let's list from context.\n\nNeed maybe \"first 200 parcels\" means first 200 entries in context, numbered 1 to 2",
+        "wall_ms": 316825.51644416526,
+        "ttft_ms": 312539.1506149899,
+        "last_ms": 316799.9943390023,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 262144,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 4054.899999999907,
+        "prefill_ms": 90.59999999997672,
+        "decode_steps": 74,
+        "decode_rows": 74,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 261659,
+        "prompt_tokens_computed": 7
+      },
+      "engine_tokens_per_s": 62.88687760487456,
+      "ms_per_pass": 54.79594594594469,
+      "tokens_per_pass": 3.445945945945946,
+      "answer": {
+        "prompt_sha256": "eec908b4721fa9ed1fd15d0858b36dcf1d658e9edbb43ac370db0ea5f51b03e8",
+        "usage": {
+          "prompt_tokens": 261659,
+          "completion_tokens": 256,
+          "total_tokens": 261915,
+          "prompt_tokens_details": {
+            "cached_tokens": 261652
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. User provided huge context with parcel items 000000 to 005830? They ask: \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Need likely list first 200 parcels (items 000000 through 000199?) and their cities. Need numbered list 1-200? \"first 200 parcels\" likely Item 000000 to Item 000199. Need describe parcel and city. Could include parcel ID and city. Need ensure all 200. Need parse from context. Need be careful. Need produce numbered list. Could format: 1. Item 000000: PX-0757343 \u2014 Income. Need first 200 items. Let's extract items 000000-000199. Need verify each city. Let's list from context.\n\nNeed maybe \"first 200 parcels\" means first 200 entries in context, numbered 1 to 2",
+        "wall_ms": 4264.491951093078,
+        "ttft_ms": 211.49418107233942,
+        "last_ms": 4264.335534069687,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 262144,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 4045.70000000007,
+        "prefill_ms": 83.30000000004657,
+        "decode_steps": 74,
+        "decode_rows": 74,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 261659,
+        "prompt_tokens_computed": 7
+      },
+      "engine_tokens_per_s": 63.029883580096296,
+      "ms_per_pass": 54.67162162162256,
+      "tokens_per_pass": 3.445945945945946,
+      "answer": {
+        "prompt_sha256": "eec908b4721fa9ed1fd15d0858b36dcf1d658e9edbb43ac370db0ea5f51b03e8",
+        "usage": {
+          "prompt_tokens": 261659,
+          "completion_tokens": 256,
+          "total_tokens": 261915,
+          "prompt_tokens_details": {
+            "cached_tokens": 261652
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. User provided huge context with parcel items 000000 to 005830? They ask: \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Need likely list first 200 parcels (items 000000 through 000199?) and their cities. Need numbered list 1-200? \"first 200 parcels\" likely Item 000000 to Item 000199. Need describe parcel and city. Could include parcel ID and city. Need ensure all 200. Need parse from context. Need be careful. Need produce numbered list. Could format: 1. Item 000000: PX-0757343 \u2014 Income. Need first 200 items. Let's extract items 000000-000199. Need verify each city. Let's list from context.\n\nNeed maybe \"first 200 parcels\" means first 200 entries in context, numbered 1 to 2",
+        "wall_ms": 4247.002518968657,
+        "ttft_ms": 186.59091391600668,
+        "last_ms": 4246.901685837656,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

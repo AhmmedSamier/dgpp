@@ -1,0 +1,118 @@
+{
+  "recorded_at": "2026-10-06T08:21:12.722829+00:00",
+  "request": "chatcmpl-e8f0bdc656a2db8b",
+  "phase": "512K cold prefill in progress",
+  "ranks": [
+    {
+      "rank": 0,
+      "process_samples": 9895,
+      "max_process_swap_KiB": 0,
+      "latest_process": {
+        "pid": 442843,
+        "VmRSS_KiB": 4136964,
+        "VmData_KiB": 1264288,
+        "VmSwap_KiB": 0,
+        "RssAnon_KiB": 1187008,
+        "RssFile_KiB": 707648,
+        "RssShmem_KiB": 2242308
+      },
+      "available_KiB": 3709580,
+      "latest_memory_pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=7088937935\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=7055556588",
+      "latest_gpu": {
+        "at": "2026-10-06T08:21:07.818805+00:00",
+        "kind": "gpu",
+        "returncode": 0,
+        "data": "56, 21.65 W, 2561 MHz, Not Active, Not Active",
+        "error": ""
+      },
+      "host_vmstat_deltas": {
+        "pswpin": 956,
+        "pswpout": 119
+      }
+    },
+    {
+      "rank": 1,
+      "process_samples": 9894,
+      "max_process_swap_KiB": 0,
+      "latest_process": {
+        "pid": 1956678,
+        "VmRSS_KiB": 3868108,
+        "VmData_KiB": 1094020,
+        "VmSwap_KiB": 0,
+        "RssAnon_KiB": 1046008,
+        "RssFile_KiB": 706768,
+        "RssShmem_KiB": 2115332
+      },
+      "available_KiB": 5386920,
+      "latest_memory_pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=130729779\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=130417570",
+      "latest_gpu": {
+        "at": "2026-10-06T08:22:30.945605+00:00",
+        "kind": "gpu",
+        "returncode": 0,
+        "data": "51, 19.18 W, 2483 MHz, Not Active, Not Active",
+        "error": ""
+      },
+      "host_vmstat_deltas": {
+        "pswpin": 1249,
+        "pswpout": 0
+      }
+    },
+    {
+      "rank": 2,
+      "process_samples": 9897,
+      "max_process_swap_KiB": 0,
+      "latest_process": {
+        "pid": 3419449,
+        "VmRSS_KiB": 3873172,
+        "VmData_KiB": 1094528,
+        "VmSwap_KiB": 0,
+        "RssAnon_KiB": 1046496,
+        "RssFile_KiB": 711344,
+        "RssShmem_KiB": 2115332
+      },
+      "available_KiB": 5261200,
+      "latest_memory_pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=29821868\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=29800794",
+      "latest_gpu": {
+        "at": "2026-10-06T08:21:08.961619+00:00",
+        "kind": "gpu",
+        "returncode": 0,
+        "data": "53, 19.82 W, 2515 MHz, Not Active, Not Active",
+        "error": ""
+      },
+      "host_vmstat_deltas": {
+        "pswpin": 238,
+        "pswpout": 0
+      }
+    },
+    {
+      "rank": 3,
+      "process_samples": 9886,
+      "max_process_swap_KiB": 0,
+      "latest_process": {
+        "pid": 3831358,
+        "VmRSS_KiB": 3872688,
+        "VmData_KiB": 1094024,
+        "VmSwap_KiB": 0,
+        "RssAnon_KiB": 1046012,
+        "RssFile_KiB": 711344,
+        "RssShmem_KiB": 2115332
+      },
+      "available_KiB": 5218868,
+      "latest_memory_pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=29173716\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=29141062",
+      "latest_gpu": {
+        "at": "2026-10-06T08:21:05.053417+00:00",
+        "kind": "gpu",
+        "returncode": 0,
+        "data": "53, 18.92 W, 2541 MHz, Not Active, Not Active",
+        "error": ""
+      },
+      "host_vmstat_deltas": {
+        "pswpin": 916,
+        "pswpout": 0
+      }
+    }
+  ],
+  "root_collective_warning_lines": 603,
+  "root_max_logged_collective_wait_ms": 2506.0,
+  "interpretation": "Process VmSwap remains zero on all ranks. Host swap counters include other OS processes and do not identify the owner of those pages. Collective waits are observed; their cause is not established. This snapshot does not replace end-of-launch validation."
+}

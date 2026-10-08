@@ -1,0 +1,138 @@
+[ OK ] dsa_fwht_quant_matches_host_reference
+[ OK ] dsa_kpool_compress_matches_host_reference
+[ OK ] dsa_tail_seed_matches_reference_rule
+[ OK ] dsa_decode_update_ring_continuation_matches_host
+[ OK ] dsa_fused_prefill_score_matches_gemm
+ACCURACY {"pools":2053,"seed":0,"mode":0,"relu":0,"differing_keys":1281,"old_nrmse":8.65444195837e-08,"fused_nrmse":1.10092342868e-07,"old_max_abs":7.98341728725e-07,"fused_max_abs":1.18968751828e-06,"old_max_scaled":1.00703007696e-07,"fused_max_scaled":1.00703007696e-07,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":2053,"seed":0,"mode":0,"relu":1,"differing_keys":1244,"old_nrmse":8.86314484218e-08,"fused_nrmse":1.04993282031e-07,"old_max_abs":7.54557405003e-07,"fused_max_abs":7.67627652998e-07,"old_max_scaled":6.32696475089e-08,"fused_max_scaled":6.59888602876e-08,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":2053,"seed":0,"mode":1,"relu":0,"differing_keys":1435,"old_nrmse":8.66556308844e-08,"fused_nrmse":1.25342567846e-07,"old_max_abs":0.000812759746623,"fused_max_abs":0.000879765507307,"old_max_scaled":9.84596079835e-08,"fused_max_scaled":1.05089841244e-07,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":2053,"seed":0,"mode":1,"relu":1,"differing_keys":1383,"old_nrmse":8.05989193814e-08,"fused_nrmse":1.30517691207e-07,"old_max_abs":0.000327861512233,"fused_max_abs":0.000669629007461,"old_max_scaled":7.96697193681e-08,"fused_max_scaled":8.90000836335e-08,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":2053,"seed":0,"mode":2,"relu":0,"differing_keys":0,"old_nrmse":0,"fused_nrmse":0,"old_max_abs":0,"fused_max_abs":0,"old_max_scaled":0,"fused_max_scaled":0,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":2053,"seed":0,"mode":2,"relu":1,"differing_keys":0,"old_nrmse":0,"fused_nrmse":0,"old_max_abs":0,"fused_max_abs":0,"old_max_scaled":0,"fused_max_scaled":0,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":2053,"seed":1,"mode":0,"relu":0,"differing_keys":1240,"old_nrmse":9.34132450186e-08,"fused_nrmse":1.14075521721e-07,"old_max_abs":8.03447079534e-07,"fused_max_abs":9.01851556989e-07,"old_max_scaled":9.37476570293e-08,"fused_max_scaled":1.04737247912e-07,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":2053,"seed":1,"mode":0,"relu":1,"differing_keys":1104,"old_nrmse":8.45173726694e-08,"fused_nrmse":1.21747865331e-07,"old_max_abs":6.38008180509e-07,"fused_max_abs":1.29797064385e-06,"old_max_scaled":7.60533445943e-08,"fused_max_scaled":1.20351975124e-07,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":2053,"seed":1,"mode":1,"relu":0,"differing_keys":1382,"old_nrmse":9.8546680269e-08,"fused_nrmse":1.23130367715e-07,"old_max_abs":0.000607110267083,"fused_max_abs":0.000607110267083,"old_max_scaled":8.893350842e-08,"fused_max_scaled":1.23580507465e-07,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":2053,"seed":1,"mode":1,"relu":1,"differing_keys":1244,"old_nrmse":7.92515820433e-08,"fused_nrmse":1.11305179737e-07,"old_max_abs":0.000315322846745,"fused_max_abs":0.000373358328488,"old_max_scaled":6.79182722905e-08,"fused_max_scaled":8.39958838119e-08,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":2053,"seed":2,"mode":0,"relu":0,"differing_keys":1364,"old_nrmse":8.70103154766e-08,"fused_nrmse":1.19441331003e-07,"old_max_abs":3.32380955204e-07,"fused_max_abs":5.19468970062e-07,"old_max_scaled":4.66396754737e-08,"fused_max_scaled":6.82281351312e-08,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":2053,"seed":2,"mode":0,"relu":1,"differing_keys":1232,"old_nrmse":9.75309206032e-08,"fused_nrmse":1.22039433973e-07,"old_max_abs":2.35288285411e-07,"fused_max_abs":3.64445329248e-07,"old_max_scaled":4.59612298057e-08,"fused_max_scaled":4.59612298057e-08,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":2053,"seed":2,"mode":1,"relu":0,"differing_keys":1458,"old_nrmse":9.50814899907e-08,"fused_nrmse":1.22289595441e-07,"old_max_abs":0.000315610407597,"fused_max_abs":0.000443061464011,"old_max_scaled":6.1636241623e-08,"fused_max_scaled":8.68040465804e-08,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":2053,"seed":2,"mode":1,"relu":1,"differing_keys":1434,"old_nrmse":1.08340659118e-07,"fused_nrmse":1.40113711683e-07,"old_max_abs":0.00027104539663,"fused_max_abs":0.00028765756646,"old_max_scaled":5.97469210234e-08,"fused_max_scaled":6.15687634619e-08,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":8192,"seed":0,"mode":0,"relu":0,"differing_keys":0,"old_nrmse":1.11531121094e-07,"fused_nrmse":1.11531121094e-07,"old_max_abs":1.69376820658e-06,"fused_max_abs":1.69376820658e-06,"old_max_scaled":1.03879627778e-07,"fused_max_scaled":1.03879627778e-07,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":8192,"seed":0,"mode":0,"relu":1,"differing_keys":0,"old_nrmse":1.11458833359e-07,"fused_nrmse":1.11458833359e-07,"old_max_abs":2.23177833192e-06,"fused_max_abs":2.23177833192e-06,"old_max_scaled":7.89966669086e-08,"fused_max_scaled":7.89966669086e-08,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":8192,"seed":0,"mode":1,"relu":0,"differing_keys":0,"old_nrmse":1.30059511004e-07,"fused_nrmse":1.30059511004e-07,"old_max_abs":0.00155462243856,"fused_max_abs":0.00155462243856,"old_max_scaled":1.39944982208e-07,"fused_max_scaled":1.39944982208e-07,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":8192,"seed":0,"mode":1,"relu":1,"differing_keys":0,"old_nrmse":1.33424889672e-07,"fused_nrmse":1.33424889672e-07,"old_max_abs":0.00108029645071,"fused_max_abs":0.00108029645071,"old_max_scaled":1.10248013021e-07,"fused_max_scaled":1.10248013021e-07,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":8192,"seed":0,"mode":2,"relu":0,"differing_keys":0,"old_nrmse":0,"fused_nrmse":0,"old_max_abs":0,"fused_max_abs":0,"old_max_scaled":0,"fused_max_scaled":0,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":8192,"seed":0,"mode":2,"relu":1,"differing_keys":0,"old_nrmse":0,"fused_nrmse":0,"old_max_abs":0,"fused_max_abs":0,"old_max_scaled":0,"fused_max_scaled":0,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":8192,"seed":1,"mode":0,"relu":0,"differing_keys":0,"old_nrmse":1.15714601278e-07,"fused_nrmse":1.15714601278e-07,"old_max_abs":9.01851556989e-07,"fused_max_abs":9.01851556989e-07,"old_max_scaled":1.20988821474e-07,"fused_max_scaled":1.20988821474e-07,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":8192,"seed":1,"mode":0,"relu":1,"differing_keys":0,"old_nrmse":1.14215176658e-07,"fused_nrmse":1.14215176658e-07,"old_max_abs":1.29797064385e-06,"fused_max_abs":1.29797064385e-06,"old_max_scaled":1.25904699465e-07,"fused_max_scaled":1.25904699465e-07,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":8192,"seed":1,"mode":1,"relu":0,"differing_keys":0,"old_nrmse":1.3355386078e-07,"fused_nrmse":1.3355386078e-07,"old_max_abs":0.000952906716975,"fused_max_abs":0.000952906716975,"old_max_scaled":1.28983730908e-07,"fused_max_scaled":1.28983730908e-07,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":8192,"seed":1,"mode":1,"relu":1,"differing_keys":0,"old_nrmse":1.18919298478e-07,"fused_nrmse":1.18919298478e-07,"old_max_abs":0.000680827597535,"fused_max_abs":0.000680827597535,"old_max_scaled":8.9201098008e-08,"fused_max_scaled":8.9201098008e-08,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":8192,"seed":2,"mode":0,"relu":0,"differing_keys":0,"old_nrmse":1.09066135773e-07,"fused_nrmse":1.09066135773e-07,"old_max_abs":6.56391986986e-07,"fused_max_abs":6.56391986986e-07,"old_max_scaled":8.55637632005e-08,"fused_max_scaled":8.55637632005e-08,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":8192,"seed":2,"mode":0,"relu":1,"differing_keys":0,"old_nrmse":1.19478375052e-07,"fused_nrmse":1.19478375052e-07,"old_max_abs":5.33895665455e-07,"fused_max_abs":5.33895665455e-07,"old_max_scaled":6.41586169605e-08,"fused_max_scaled":6.41586169605e-08,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":8192,"seed":2,"mode":1,"relu":0,"differing_keys":0,"old_nrmse":1.311348173e-07,"fused_nrmse":1.311348173e-07,"old_max_abs":0.000598827596605,"fused_max_abs":0.000598827596605,"old_max_scaled":8.70375421112e-08,"fused_max_scaled":8.70375421112e-08,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":8192,"seed":2,"mode":1,"relu":1,"differing_keys":0,"old_nrmse":1.36172464746e-07,"fused_nrmse":1.36172464746e-07,"old_max_abs":0.000515270112828,"fused_max_abs":0.000515270112828,"old_max_scaled":7.05315208657e-08,"fused_max_scaled":7.05315208657e-08,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":65539,"seed":0,"mode":0,"relu":0,"differing_keys":0,"old_nrmse":1.12452164355e-07,"fused_nrmse":1.12452164355e-07,"old_max_abs":1.99242429844e-06,"fused_max_abs":1.99242429844e-06,"old_max_scaled":1.27070769954e-07,"fused_max_scaled":1.27070769954e-07,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":65539,"seed":0,"mode":0,"relu":1,"differing_keys":0,"old_nrmse":1.1375216422e-07,"fused_nrmse":1.1375216422e-07,"old_max_abs":2.23177833192e-06,"fused_max_abs":2.23177833192e-06,"old_max_scaled":1.02494846505e-07,"fused_max_scaled":1.02494846505e-07,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":65539,"seed":0,"mode":1,"relu":0,"differing_keys":0,"old_nrmse":1.31880951333e-07,"fused_nrmse":1.31880951333e-07,"old_max_abs":0.00194149088202,"fused_max_abs":0.00194149088202,"old_max_scaled":1.66682500068e-07,"fused_max_scaled":1.66682500068e-07,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":65539,"seed":0,"mode":1,"relu":1,"differing_keys":0,"old_nrmse":1.3816236926e-07,"fused_nrmse":1.3816236926e-07,"old_max_abs":0.00145997302752,"fused_max_abs":0.00145997302752,"old_max_scaled":1.10248013021e-07,"fused_max_scaled":1.10248013021e-07,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":65539,"seed":1,"mode":0,"relu":0,"differing_keys":0,"old_nrmse":1.1025520764e-07,"fused_nrmse":1.1025520764e-07,"old_max_abs":9.99741853303e-07,"fused_max_abs":9.99741853303e-07,"old_max_scaled":1.21094121737e-07,"fused_max_scaled":1.21094121737e-07,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":65539,"seed":1,"mode":0,"relu":1,"differing_keys":0,"old_nrmse":1.04468318946e-07,"fused_nrmse":1.04468318946e-07,"old_max_abs":1.29797064385e-06,"fused_max_abs":1.29797064385e-06,"old_max_scaled":1.25904699465e-07,"fused_max_scaled":1.25904699465e-07,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":65539,"seed":1,"mode":1,"relu":0,"differing_keys":0,"old_nrmse":1.26718865148e-07,"fused_nrmse":1.26718865148e-07,"old_max_abs":0.000952906716975,"fused_max_abs":0.000952906716975,"old_max_scaled":1.38831921829e-07,"fused_max_scaled":1.38831921829e-07,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":65539,"seed":1,"mode":1,"relu":1,"differing_keys":0,"old_nrmse":1.17838622893e-07,"fused_nrmse":1.17838622893e-07,"old_max_abs":0.000680827597535,"fused_max_abs":0.000680827597535,"old_max_scaled":1.32795428952e-07,"fused_max_scaled":1.32795428952e-07,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":65539,"seed":2,"mode":0,"relu":0,"differing_keys":0,"old_nrmse":1.10402625447e-07,"fused_nrmse":1.10402625447e-07,"old_max_abs":1.28515023423e-06,"fused_max_abs":1.28515023423e-06,"old_max_scaled":9.42396275603e-08,"fused_max_scaled":9.42396275603e-08,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":65539,"seed":2,"mode":0,"relu":1,"differing_keys":0,"old_nrmse":1.18203908243e-07,"fused_nrmse":1.18203908243e-07,"old_max_abs":8.16266436221e-07,"fused_max_abs":8.16266436221e-07,"old_max_scaled":7.5243480858e-08,"fused_max_scaled":7.5243480858e-08,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":65539,"seed":2,"mode":1,"relu":0,"differing_keys":0,"old_nrmse":1.35548201814e-07,"fused_nrmse":1.35548201814e-07,"old_max_abs":0.000965017185081,"fused_max_abs":0.000965017185081,"old_max_scaled":1.18062422799e-07,"fused_max_scaled":1.18062422799e-07,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":65539,"seed":2,"mode":1,"relu":1,"differing_keys":0,"old_nrmse":1.39414243341e-07,"fused_nrmse":1.39414243341e-07,"old_max_abs":0.000705153712715,"fused_max_abs":0.000705153712715,"old_max_scaled":7.08209378608e-08,"fused_max_scaled":7.08209378608e-08,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":262144,"seed":0,"mode":0,"relu":0,"differing_keys":0,"old_nrmse":1.10434558383e-07,"fused_nrmse":1.10434558383e-07,"old_max_abs":2.76668513521e-06,"fused_max_abs":2.76668513521e-06,"old_max_scaled":1.4158786553e-07,"fused_max_scaled":1.4158786553e-07,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":262144,"seed":0,"mode":0,"relu":1,"differing_keys":0,"old_nrmse":1.13905938658e-07,"fused_nrmse":1.13905938658e-07,"old_max_abs":2.23203150362e-06,"fused_max_abs":2.23203150362e-06,"old_max_scaled":1.10787025134e-07,"fused_max_scaled":1.10787025134e-07,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":262144,"seed":0,"mode":1,"relu":0,"differing_keys":0,"old_nrmse":1.33092831247e-07,"fused_nrmse":1.33092831247e-07,"old_max_abs":0.00312054609458,"fused_max_abs":0.00312054609458,"old_max_scaled":1.66682500068e-07,"fused_max_scaled":1.66682500068e-07,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+ACCURACY {"pools":262144,"seed":0,"mode":1,"relu":1,"differing_keys":0,"old_nrmse":1.3787841861e-07,"fused_nrmse":1.3787841861e-07,"old_max_abs":0.001628092803,"fused_max_abs":0.001628092803,"old_max_scaled":1.24990448533e-07,"fused_max_scaled":1.24990448533e-07,"old_swaps":0,"fused_swaps":0,"old_boundary_gap":0,"fused_boundary_gap":0}
+[ OK ] dsa_fused_single_query_fp64_accuracy
+[ OK ] dsa_select_prefill_radix_long_context_exact
+[ OK ] dsa_select_prefill_partition_shapes_and_tails
+[ OK ] dsa_select_prefill_bitwise_fuzz
+[ OK ] dsa_select_decode_fused_bitwise
+[ OK ] dsa_absorbed_attention_matches_host_reference
+[ OK ] projections mma heads=64: absorb l2_rel 0 max_rel 0 mismatches 0/1343488; vout l2_rel 8.6e-05 max_rel 0.293 mismatches 46/671744
+[ OK ] projections mma heads=16: absorb l2_rel 0 max_rel 0 mismatches 0/335872; vout l2_rel 9.26e-05 max_rel 0.272 mismatches 9/167936
+[ OK ] dsa_absorb_and_vout_mma_match_the_warp_kernels
+[ OK ] row batches heads=64 rope=0: absorb and vout bitwise the rows alone at 1..16 rows
+[ OK ] row batches heads=64 rope=64: absorb and vout bitwise the rows alone at 1..16 rows
+[ OK ] row batches heads=16 rope=0: absorb and vout bitwise the rows alone at 1..16 rows
+[ OK ] row batches heads=16 rope=64: absorb and vout bitwise the rows alone at 1..16 rows
+[ OK ] dsa_absorb_and_vout_row_batches_match_the_rows_alone
+[ OK ] listed attention heads=64 kv=512: c vs split kernel l2_rel 2.84e-05
+[ OK ] listed attention heads=16 kv=512: c vs split kernel l2_rel 3.59e-05
+[ OK ] listed attention heads=16 kv=256: c vs split kernel l2_rel 3.63e-05
+[ OK ] dsa_listed_attention_matches_split_kernel_and_reference
+[ OK ] dense attention heads=64 kv=512: c vs split kernel l2_rel 7.48e2026-10-07 03:20:25.357 INFO  graph captured key=0x1 label=dsa-decode nodes=20 (total captures=1)
+-07 (n_split 4), 0.000152 (n_split 1)
+[ OK ] dense attention heads=16 kv=512: c vs split kernel l2_rel 5.46e-07 (n_split 4), 0.000149 (n_split 1)
+[ OK ] dense attention heads=16 kv=256: c vs split kernel l2_rel 5.16e-07 (n_split 4), 0.00018 (n_split 1)
+[ OK ] dsa_dense_attention_matches_split_kernel_and_reference
+[ OK ] dsa_select_decode_mtp_rows_and_short_context
+[ OK ] dsa_select_decode_row_groups
+[ OK ] dsa_select_decode_64_heads_release_shape
+[ OK ] dsa_select_decode_grid_invariance
+[ OK ] dsa_select_decode_long_context_multitile
+[ OK ] dsa_select_prefill_multi_row
+[ OK ] dsa_select_exact_ties_break_to_lower_pool
+[ OK ] dsa_latent_append_and_gather_roundtrip
+[ OK ] dsa_elementwise_norms_and_fold
+[ OK ] dsa_decode_update_multi_request_and_padding
+[ OK ] dsa_attention_tp1_headgroups_and_empty_row
+[ OK ] dsa_select_decode_graph_replay
+[ OK ] dsa_kpool2_compress_and_ring_smoke
+[ OK ] dsa_state_pool_block_allocation_and_accounting
+[INFO] layer prefill (fp8 projections): 1/29 sparse rows flipped (1 audited as near ties, max certified row l2 0.4716; kept-row max l2 5.96e-03; unaudited max l2 0.0000)
+[INFO] layer prefill (fp8 projections) near-tie audit: 1 rows / 1 swaps certified, max boundary gap 7.727e-02 (0.9x noise)
+[INFO] layer prefill (bridge form): 1/29 sparse rows flipped (1 audited as near ties, max certified row l2 0.4716; kept-row max l2 5.96e-03; unaudited max l2 0.0000)
+[INFO] layer prefill (bridge form) near-tie audit: 1 rows / 1 swaps certified, max boundary gap 7.727e-02 (0.9x noise)
+[ OK ] dsa_layer_prefill_fp8_projections_match_reference
+[ OK ] dsa_layer_prefill_dot_budget_preserves_selection_and_output
+[ OK ] dsa_layer_fused_prefill_preserves_gemm_selection
+[INFO] layer prefill: 2/29 sparse rows flipped (2 audited as near ties, max certified row l2 0.5736; kept-row max l2 3.86e-03; unaudited max l2 0.0000)
+[INFO] layer prefill near-tie audit: 2 rows / 2 swaps certified, max boundary gap 2.948e+00 (4.1x noise)
+[ OK ] dsa_layer_prefill_matches_reference
+[INFO] layer chunked+decode: 6/103 sparse rows flipped (6 audited as near ties, max certified row l2 0.6798; kept-row max l2 3.72e-03; unaudited max l2 0.0000)
+[INFO] layer chunked+decode near-tie audit: 6 rows / 6 swaps certified, max boundary gap 1.253e+00 (2.1x noise)
+[ OK ] dsa_layer_chunked_prefill_and_decode_match_reference
+[INFO] layer chunked+decode select8: 8/135 sparse rows flipped (8 audited as near ties, max certified row l2 1.0066; kept-row max l2 3.82e-03; unaudited max l2 0.0000)
+[INFO] layer chunked+decode select8 near-tie audit: 8 rows / 8 swaps certified, max boundary gap 2.644e+00 (3.1x noise)
+[ OK ] dsa_layer_chunked_prefill_and_decode_select8
+[ OK ] dsa_layer_decode_graph_replay_matches_eager
+[ OK ] dsa_layer_decode_padding_row_is_zero_and_leaves_live_rows_bitwise
+[ OK ] dsa_layer_tp2_head_slice_matches_tp1
+[ OK ] dsa_layer_real_geometry_chunked_prefill_decode_smoke
+[ OK ] dsa_latent_append_quantized_matches_host_codec
+[ OK ] dsa_attention_quantized_cache_matches_dequantized_oracle
+[INFO] layer chunked+decode on an fp8 cache: 6/103 sparse rows flipped (6 audited as near ties, max certified row l2 0.6853; kept-row max l2 4.25e-03; unaudited max l2 0.0000)
+[INFO] layer chunked+decode on an fp8 cache near-tie audit: 6 rows / 6 swaps certified, max boundary gap 1.253e+00 (2.1x noise)
+[INFO] layer chunked+decode on an fp4 cache: 6/103 sparse rows flipped (6 audited as near ties, max certified row l2 0.8042; kept-row max l2 4.10e-03; unaudited max l2 0.0000)
+[INFO] layer chunked+decode on an fp4 cache near-tie audit: 6 rows / 6 swaps certified, max boundary gap 1.253e+00 (2.1x noise)
+[ OK ] dsa_layer_quantized_cache_matches_reference
+[ OK ] dsa_rope_interleave_matches_host_table
+[ OK ] dsa_state_pool_index_ordinals_and_full_geometry_bytes
+[INFO] full layer prefill: 0/80 sparse rows flipped (0 audited as near ties, max certified row l2 0.0000; kept-row max l2 3.16e-03; unaudited max l2 0.0000)
+[INFO] full layer prefill near-tie audit: 0 rows / 0 swaps certified, max boundary gap 0.000e+00 (0.0x noise)
+[ OK ] dsa_layer_full_prefill_matches_reference
+[INFO] full layer chunked+decode: 0/154 sparse rows flipped (0 audited as near ties, max certified row l2 0.0000; kept-row max l2 4.21e-03; unaudited max l2 0.0000)
+[INFO] full layer chunked+decode near-tie audit: 0 rows / 0 swaps certified, max boundary gap 0.000e+00 (0.0x noise)
+[INFO] full layer chunked+decode on an fp8 cache: 0/154 sparse rows flipped (0 audited as near ties, max certified row l2 0.0000; kept-row max l2 3.38e-03; unaudited max l2 0.0000)
+[INFO] full layer chunked+decode on an fp8 cache near-tie audit: 0 rows / 0 swaps certified, max boundary gap 0.000e+00 (0.0x noise)
+[INFO] full layer chunked+decode on an fp4 cache: 0/154 sparse rows flipped (0 audited as near ties, max certified row l2 0.0000; kept-row max l2 3.93e-03; unaudited max l2 0.0000)
+[INFO] full layer chunked+decode on an fp4 cache near-tie audit: 0 rows / 0 swaps certified, max boundary gap 0.000e+00 (0.0x noise)
+[ OK ] dsa_layer_full_chunked_prefill_and_decode_match_reference
+[INFO] full layer prefill (packed projections): 0/80 sparse rows flipped (0 audited as near ties, max certified row l2 0.0000; kept-row max l2 3.95e-03; unaudited max l2 0.0000)
+[INFO] full layer prefill (packed projections) near-tie audit: 0 rows / 0 swaps certified, max boundary gap 0.000e+00 (0.0x noise)
+[INFO] full layer prefill (bridge form): 0/80 sparse rows flipped (0 audited as near ties, max certified row l2 0.0000; kept-row max l2 3.95e-03; unaudited max l2 0.0000)
+[INFO] full layer prefill (bridge form) near-tie audit: 0 rows / 0 swaps certified, max boundary gap 0.000e+00 (0.0x noise)
+[ OK ] dsa_layer_full_packed_projections_match_reference
+[INFO] shared selection: layer 0: 0/84 sparse rows flipped (0 audited as near ties, max certified row l2 0.0000; kept-row max l2 1.41e-02; unaudited max l2 0.0000)
+[INFO] shared selection: layer 1: 0/84 sparse rows flipped (0 audited as near ties, max certified row l2 0.0000; kept-row max l2 3.77e-03; unaudited max l2 0.0000)
+[INFO] shared selection near-tie audit: 0 rows / 0 swaps certified, max boundary gap 0.000e+00 (0.0x noise)
+[ OK ] dsa_layer_full_shared_selection_matches_reference
+[ OK ] dsa_layer_full_tp2_head_slice_matches_tp1
+[ OK ] dsa_select_kpool1_select2048_bitwise
+[ OK ] dsa_layer_full_real_geometry_smoke
+51 tests, 0 failed

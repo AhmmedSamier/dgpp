@@ -1,0 +1,6 @@
+fused score key mismatch: rows=1 pools=2053 mode=0 relu=0 count=1281
+fused score key mismatch: rows=1 pools=2053 mode=0 relu=1 count=1244
+fused score key mismatch: rows=1 pools=2053 mode=1 relu=0 count=1435
+fused score key mismatch: rows=1 pools=2053 mode=1 relu=1 count=1383
+[FAIL] dsa_fused_prefill_score_matches_gemm: fused score key mismatched cases=4
+1 tests, 1 failed

@@ -32,9 +32,10 @@
 // with grid-stride loops over device-visible counts, so the whole decode
 // path is CUDA-graph capturable.
 //
-// Prefill materializes per-(row,head) fp8 dots through the IGemm interface
-// (FP8 x FP8 -> F32, unit scales) into a bounded dot buffer and runs the
-// same streaming selection over it per row.
+// Full GLM long prefill fuses FP8 dots with the head reduction, writing
+// compact score keys into the bounded workspace. Flash and short contexts
+// keep the IGemm FP8 -> F32 dot path. Both use
+// the same exact key selection, merge and token expansion.
 #include <cstddef>
 #include <cstdint>
 
@@ -271,16 +272,38 @@ void dsa_select_decode(const void* q_fp8, const float* w_folded,
                        int grid_blocks, cudaStream_t stream,
                        bool relu = false);
 
-// Prefill select: one block per row over the materialized dot buffer.
+// Prefill select over the materialized dot buffer. Optional workspace:
+// dsa_select_prefill_workspace_bytes(rows, dot_stride, select_k) bytes,
+// aligned for uint64_t, permits
+// parallel coalesced scoring followed by exact radix selection at long
+// contexts. Without workspace, use the streaming selection oracle.
 //   dot: fp32 [rows * heads, dot_stride] (row r head h at
 //   dot[r*heads + h]); k_scale: fp32 [n_pools] contiguous (gathered);
 //   pos: [rows]; visible per row is derived on device.
+size_t dsa_select_prefill_workspace_bytes(int rows, int64_t dot_stride, int select_k);
+// Fused FP8 dot/head reduction. Q is [rows,32,128], K is [pools,128];
+// keys is [rows,stride] with stride >= pools. The tensor-core reduction
+// may differ by FP32 rounding from a small single-query cuBLAS plan;
+// accuracy is checked against FP64, including selection boundaries.
+void dsa_prefill_score_keys(const uint8_t* q, const uint8_t* k,
+                            const float* w_folded, const float* k_scale,
+                            const int64_t* pos, int rows, int64_t pools,
+                            int64_t stride, int select_k, int kpool,
+                            uint64_t* keys, cudaStream_t stream, bool relu);
+// Select from reduced keys. partials holds 192 * select_k uint64_t values;
+// it must not overlap keys, which has rows * stride values.
+void dsa_select_prefill_keys(const uint64_t* keys, int64_t stride,
+                             const int64_t* pos, int rows, int64_t pools,
+                             int select_k, int kpool, int max_selected,
+                             int32_t* topk_out, int32_t* out_counts,
+                             uint64_t* partials, cudaStream_t stream);
 void dsa_select_prefill(const float* dot, int64_t dot_stride,
                         const float* w_folded, const float* k_scale,
                         const int64_t* pos, int rows, int64_t n_pools,
                         int heads, int select_k, int kpool, int max_selected,
                         int32_t* topk_out, int32_t* out_counts,
-                        cudaStream_t stream, bool relu = false);
+                        cudaStream_t stream, bool relu = false,
+                        void* workspace = nullptr);
 
 // ---- MLA absorbed attention -------------------------------------------
 

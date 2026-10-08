@@ -1,0 +1,93 @@
+{
+  "started_at": "2026-10-06T00:03:47.921105+00:00",
+  "commit": "50309fdcf51d35dcfb0b75b99551b187302da820",
+  "version": "dgpp-serve 0.1.0+g50309fdcf51d (git 50309fdcf51d, cuda 13.0)",
+  "binary_sha256": "bff491a291470bc7a1ebaccaba06dcdae5ceb521c0d74bb65bb0b9b21c7a73e4",
+  "benchmark_environment": {
+    "CUDA_DEVICE_MAX_CONNECTIONS": "32"
+  },
+  "scope": "rank 0; peer processes retain their login environment",
+  "source_changes": "Benchmark clients and documentation only; no engine changes.",
+  "concurrency": [
+    1,
+    2,
+    4,
+    8
+  ],
+  "repeat": 3,
+  "max_tokens": 256,
+  "clients": {
+    "scripts/timed_load.py": "e38328d44f4719b5bfcb110fe0d5737df96aebf61ed8dc467bf3850217c5e12f",
+    "scripts/serve_load.py": "f6b6eacb7e3cf93b5f1ef9095a4217b299e0c3c34776d00f1f3e05b1aa18adea",
+    "scripts/serve_prefill_probe.py": "0e7443e6e48e34a1fbfc6311e8f1396b48bbae7e22225c8db8d98f1d4290d783",
+    "scripts/serve_context_matrix.py": "ba657bc82c5f15148be2d08563f677e2498fcb3c7e681f8376e70f70b10a5310",
+    "scripts/qwen_yarn_release_check.py": "d7820882c35ae8d45320b347dd99f202bd6d73145d85147cbfa147c04da14ff8"
+  },
+  "environment": "environment.json",
+  "checkpoint_inventory_before_restore": "checkpoint-inventory.json",
+  "telemetry": {
+    "scope": "four-node launches",
+    "memory_interval_s": 1,
+    "gpu_interval_s": 5,
+    "kernel_journal_rank": 2,
+    "management_transport": "configured SSH nodes"
+  },
+  "storage": {
+    "free_space_minimum_gib": 40,
+    "initial_resident_inventory": "resident-inventory-before-new-models.json",
+    "log": "storage.jsonl",
+    "cleanup": "Only session downloads absent from the initial inventory; all configurations, modes, context buckets and clean shutdown checks must pass before removal."
+  },
+  "checkpoint_revisions": {
+    "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8": "17b8d4d83e33e836e9549d7e1a8d25b5117203c1",
+    "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64": "147684fbad20c1e283ddff46fd07cb9d4ccbb3da",
+    "Qwen/Qwen3.8-27B-FP8": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+    "Qwen/Qwen3.8-Flash-Next-FP8": "236dfdf285828023ca3bcd3f37366c58a3469b13",
+    "RadixArk/Qwen3.8-Flash-Next-NVFP4": "7b719225242aacd3dbd3f9407468c2ee9a9d2594",
+    "Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN": "19f9710c8f6600a32e15fb98bc77613ee8ec369b",
+    "XiaomiMiMo/MiMo-V2.6-Flash-RL": "5711b268169967567844e1e560e8a3966da959b1",
+    "deepseek-ai/DeepSeek-V4-Flash-0731": "7872f01b1d1fe23eabc4c98b48bffcef5a386062",
+    "deepseek-ai/DeepSeek-V4.1-Flash": "dba1be0a40aa45a94ad051997016db3960a90277",
+    "nvidia/Qwen3.8-Flash-Next-NVFP4": "fc694b54fb0174e0913e6adf86691ef85a4ead47",
+    "unsloth/GLM-5.3-Flash-FP8": "a160e2291674d9e3e92e98fd82faa2544a2867a3",
+    "z-lab/Qwen3.8-27B-DFlash2": "50307d4c4cde6860d4eee73e2547cd786fe8e8a4"
+  },
+  "tokenizers_version": "0.23.2",
+  "benchmark_model_aliases": [
+    {
+      "deployment": "qwen-radixark-w1",
+      "template_alias": "Qwen3.8-Flash-Next",
+      "benchmark_alias": "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+    },
+    {
+      "deployment": "qwen-radixark-w2",
+      "template_alias": "Qwen3.8-Flash-Next",
+      "benchmark_alias": "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+    },
+    {
+      "deployment": "qwen-autoround-w1",
+      "template_alias": "qwen",
+      "benchmark_alias": "Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN"
+    },
+    {
+      "deployment": "qwen-autoround-prefill-w1",
+      "template_alias": "qwen",
+      "benchmark_alias": "Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN"
+    },
+    {
+      "deployment": "qwen27b-fp8-w1",
+      "template_alias": "Qwen3.8-27B",
+      "benchmark_alias": "Qwen/Qwen3.8-27B-FP8"
+    },
+    {
+      "deployment": "qwen27b-fp8-w2",
+      "template_alias": "Qwen3.8-27B",
+      "benchmark_alias": "Qwen/Qwen3.8-27B-FP8"
+    },
+    {
+      "deployment": "qwen27b-fp8-w4",
+      "template_alias": "Qwen3.8-27B",
+      "benchmark_alias": "Qwen/Qwen3.8-27B-FP8"
+    }
+  ]
+}

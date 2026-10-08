@@ -1,0 +1,79 @@
+diff --git a/src/models/dsv41/csa2_layer.cu b/src/models/dsv41/csa2_layer.cu
+index 80e2465..26c1404 100644
+--- a/src/models/dsv41/csa2_layer.cu
++++ b/src/models/dsv41/csa2_layer.cu
+@@ -575,8 +575,17 @@ void Csa2Layer::enqueue_prefill(const void* hidden_in, Csa2StatePool& pool, int
+       if (n_gather > 0)
+         dsa_gather_index_pools(pool.block_tables() + size_t(req) * pool.total_blocks(), epb, pool.index_k(ord),
+                                pool.index_scale(ord), n_gather, gather_k_, gather_scale_, kCsa2IndexDim, stream);
+-      for (int row0 = 0; row0 < tokens; row0 += tile_cap_) {
+-        const int rows = std::min(tile_cap_, tokens - row0);
++      // The allocation holds tile_cap_ queries at max_entries_, but the
++      // GEMM and logits use only padded_n entries at this context. Reuse
++      // that space for more queries instead of forcing a 1M cache's
++      // single-query tiles on every shorter prompt. Both buffers have
++      // the same query/entry capacity; no workspace allocation changes.
++      const int tile_rows = padded_n > 0
++          ? int(std::min<size_t>(size_t(tokens),
++                                size_t(tile_cap_) * size_t(max_entries_) / size_t(padded_n)))
++          : tokens;
++      for (int row0 = 0; row0 < tokens; row0 += tile_rows) {
++        const int rows = std::min(tile_rows, tokens - row0);
+         if (padded_n > 0) {
+           gemm_.matmul(q_fp8_ + size_t(row0) * cfg_.index_heads * kCsa2IndexDim, gather_k_, dot_, rows * cfg_.index_heads,
+                        int(padded_n), kCsa2IndexDim, DType::F8_E4M3, GemmOut::F32, size_t(kCsa2IndexDim), gemm_ws_,
+diff --git a/tests/cuda/csa2_layer_test.cu b/tests/cuda/csa2_layer_test.cu
+index f133291..1936e61 100644
+--- a/tests/cuda/csa2_layer_test.cu
++++ b/tests/cuda/csa2_layer_test.cu
+@@ -459,7 +459,8 @@ struct Scenario {
+   int flips = 0;  // certified near-tie selection flips
+   std::vector<std::vector<float>> hidden;  // per request, per position: [hidden] rows (all positions ever generated)
+ 
+-  explicit Scenario(int tp, const std::string& tag_) : tag(tag_) {
++  explicit Scenario(int tp, const std::string& tag_, int64_t cache_tokens = 512,
++                    size_t dot_budget = 64ull << 20) : max_cache(cache_tokens), tag(tag_) {
+     cfg.hidden = 256; cfg.q_lora = 64; cfg.o_lora = 32; cfg.num_heads = 16; cfg.o_groups = 4;
+     cfg.index_topk = 16; cfg.candidate_block = 8; cfg.candidate_blocks = 4; cfg.window = 32; cfg.ring_slots = 48;
+     cfg.block_tokens = 32; cfg.tp = tp;
+@@ -526,11 +527,12 @@ struct Scenario {
+     shape.layers = int(layers.size()); shape.cache_ratio = ratios; shape.tail_ordinals = 1; shape.max_requests = max_requests;
+     shape.token_slots = max_cache; shape.block_tokens = cfg.block_tokens; shape.ring_slots = cfg.ring_slots;
+     pool.init(shape);
+-    const size_t sb = dgpp::Csa2Layer::scratch_bytes(cfg, max_tokens, max_cache, 16, 8);
++    const size_t sb = dgpp::Csa2Layer::scratch_bytes(cfg, max_tokens, max_cache, 16, 8, dot_budget);
+     scratch = DevBuf(sb);
+     gemm_ws = DevBuf(64u << 20);
+     gemm.set_decode_rows(16);
+-    layer = std::make_unique<dgpp::Csa2Layer>(gemm, cfg, max_tokens, max_cache, scratch.p, sb, gemm_ws.p, 64u << 20, 16, 8);
++    layer = std::make_unique<dgpp::Csa2Layer>(gemm, cfg, max_tokens, max_cache, scratch.p, sb, gemm_ws.p,
++                                           64u << 20, 16, 8, dot_budget);
+     layer->rebind(layers[0].w, 0);
+     require(layer->prepare(max_tokens) && layer->prepare(16), "gemm plans");
+     hidden.assign(size_t(max_requests), {});
+@@ -698,4 +700,25 @@ DGPP_TEST(csa2_layer_matches_the_oracle_over_prefill_decode_and_rollback) {
+   }
+ }
+ 
++DGPP_TEST(csa2_prefill_reuses_score_workspace_at_shorter_contexts) {
++  for (const int tp : {1, 4}) {
++    for (const int64_t capacity : {512, 4096}) {
++      // Both allocations fit only one query at their maximum context.
++      // A 32-token prompt uses far fewer entries and must batch queries
++      // within that same allocation. The oracle checks ratio-1/ratio-2
++      // sources, restricted selection and selection reuse at both TP sizes.
++      Scenario s(tp, "workspace-tp" + std::to_string(tp) + "-cap" + std::to_string(capacity),
++                 capacity, 64ull << 10);
++      s.prefill(0, 0, 32);
++      require(s.layer->debug_logits_rows() > 1,
++              "prefill still tiles queries for the allocated capacity instead of the visible history");
++      s.prefill(0, 32, 32);
++      s.prefill(0, 64, 17);  // partial query tile and an odd compressor tail
++      s.decode({{0, 81, 3}});
++      require(s.layer->index_violations() == 0, s.tag + ": index-key exactness violations");
++      std::printf("[INFO] %s: %d selection flips, every one certified as a near tie\n", s.tag.c_str(), s.flips);
++    }
++  }
++}
++
+ int main() { return dgpp::test::run_all(); }

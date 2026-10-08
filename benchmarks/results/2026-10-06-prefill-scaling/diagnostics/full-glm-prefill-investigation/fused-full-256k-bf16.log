@@ -1,0 +1,4 @@
+DSA M3 benchmark (iters=3 warmup=1 ctx=262144); planning floor 230 GB/s
+
+== prefill tail: family=full-glm KV=bf16 TP=4 context=262144 capacity=262144 chunk=2048 ==
+prefill tail                   mean= 350.921 ms min= 349.444 max= 352.705      5836 tok/s  (one indexed attention layer; excludes MoE and collectives)

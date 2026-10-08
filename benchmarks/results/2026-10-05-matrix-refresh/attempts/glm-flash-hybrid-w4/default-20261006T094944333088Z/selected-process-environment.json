@@ -1,0 +1,62 @@
+[
+  {
+    "rank": 0,
+    "processes": [
+      {
+        "pid": "442843",
+        "selected_environment": {
+          "CUDA_DEVICE_MAX_CONNECTIONS": "32",
+          "CUDA_MODULE_LOADING": null,
+          "CUDA_VISIBLE_DEVICES": null,
+          "DGPP_BUS_ENGINE_CPU": null,
+          "DGPP_DENSE_GEMV_ROWS": null
+        }
+      }
+    ]
+  },
+  {
+    "rank": 1,
+    "processes": [
+      {
+        "pid": "1956678",
+        "selected_environment": {
+          "CUDA_DEVICE_MAX_CONNECTIONS": null,
+          "CUDA_MODULE_LOADING": null,
+          "CUDA_VISIBLE_DEVICES": null,
+          "DGPP_BUS_ENGINE_CPU": null,
+          "DGPP_DENSE_GEMV_ROWS": null
+        }
+      }
+    ]
+  },
+  {
+    "rank": 2,
+    "processes": [
+      {
+        "pid": "3419449",
+        "selected_environment": {
+          "CUDA_DEVICE_MAX_CONNECTIONS": null,
+          "CUDA_MODULE_LOADING": null,
+          "CUDA_VISIBLE_DEVICES": null,
+          "DGPP_BUS_ENGINE_CPU": null,
+          "DGPP_DENSE_GEMV_ROWS": null
+        }
+      }
+    ]
+  },
+  {
+    "rank": 3,
+    "processes": [
+      {
+        "pid": "3831358",
+        "selected_environment": {
+          "CUDA_DEVICE_MAX_CONNECTIONS": null,
+          "CUDA_MODULE_LOADING": null,
+          "CUDA_VISIBLE_DEVICES": null,
+          "DGPP_BUS_ENGINE_CPU": null,
+          "DGPP_DENSE_GEMV_ROWS": null
+        }
+      }
+    ]
+  }
+]

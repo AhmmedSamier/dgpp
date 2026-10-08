@@ -1,0 +1,21 @@
+[  7%] Built target dgpp_core
+[ 15%] Built target dgpp_rope_scaling
+[ 23%] Built target dgpp_loaders
+[ 23%] Building CUDA object CMakeFiles/dgpp_kernels.dir/src/kernels/dsa.cu.o
+[ 23%] Linking CXX static library libdgpp_kernels.a
+[ 84%] Built target dgpp_kernels
+[ 92%] Built target dgpp_models_kda
+[ 92%] Building CUDA object CMakeFiles/dgpp_models_dsa.dir/src/models/dsa_layer.cu.o
+[100%] Linking CXX static library libdgpp_models_dsa.a
+[100%] Built target dgpp_models_dsa
+[100%] Building CUDA object CMakeFiles/dsa_test.dir/tests/cuda/dsa_test.cu.o
+[100%] Building CXX object CMakeFiles/dsa_test.dir/tests/cuda/dsa_dump_parity.cpp.o
+[100%] Linking CXX executable dsa_test
+[100%] Built target dsa_test
+[  8%] Built target dgpp_rope_scaling
+[ 16%] Built target dgpp_core
+[ 83%] Built target dgpp_kernels
+[ 91%] Built target dgpp_models_dsa
+[ 91%] Building CUDA object CMakeFiles/dsa_bench.dir/benchmarks/micro/dsa_bench.cu.o
+[100%] Linking CXX executable dsa_bench
+[100%] Built target dsa_bench

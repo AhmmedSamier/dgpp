@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+  "surface": {
+    "id": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+    "object": "model",
+    "created": 1791419528,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "minimal": {
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "reasoning_effort": "high"
+        },
+        "high": {
+          "reasoning_effort": "high"
+        },
+        "xhigh": {
+          "reasoning_effort": "max"
+        },
+        "max": {
+          "reasoning_effort": "max"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 262144,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
+  "seed": 20260922,
+  "tag": "completion-glm-flash-hybrid-256k-w2",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 7494.5,
+        "prefill_ms": 388.6000000000058,
+        "decode_steps": 136,
+        "decode_rows": 136,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 86,
+        "prompt_tokens_computed": 86
+      },
+      "engine_tokens_per_s": 34.02495163119621,
+      "ms_per_pass": 55.106617647058826,
+      "tokens_per_pass": 1.875,
+      "answer": {
+        "prompt_sha256": "92604069babbf4074a394a605c081814a769e25026f9630be3d566a1b7b22c76",
+        "usage": {
+          "prompt_tokens": 86,
+          "completion_tokens": 256,
+          "total_tokens": 342,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing the first 200 parcels and their cities. However, looking at the context provided, I only have information about ONE parcel:\n\n- Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nThe context mentions \"bucket 0\" and only provides data for item 000000. There is no data for parcels 1 through 199 (or items 000001 through 000199). The user is asking me to list 200 parcels and their cities, but I only have information about one parcel.\n\nI should not fabricate or hallucinate data for the other 199 parcels. I only have real information about parcel PX-0757343 in \"Income\" (which appears to be the city/location name).\n\nWait, let me re-read the prompt. \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nThe context only contains one item (Item 000000). I cannot list 200 parcels because I only have data for one. I should be honest about this limitation rather than making up fake data.\n\nActually, let me reconsider.",
+        "wall_ms": 7900.749472901225,
+        "ttft_ms": 405.76819190755486,
+        "last_ms": 7900.606657844037,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 7481.700000000186,
+        "prefill_ms": 386.3999999999942,
+        "decode_steps": 136,
+        "decode_rows": 136,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 86,
+        "prompt_tokens_computed": 86
+      },
+      "engine_tokens_per_s": 34.083162917517896,
+      "ms_per_pass": 55.01250000000137,
+      "tokens_per_pass": 1.875,
+      "answer": {
+        "prompt_sha256": "92604069babbf4074a394a605c081814a769e25026f9630be3d566a1b7b22c76",
+        "usage": {
+          "prompt_tokens": 86,
+          "completion_tokens": 256,
+          "total_tokens": 342,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing the first 200 parcels and their cities. However, looking at the context provided, I only have information about ONE parcel:\n\n- Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nThe context mentions \"bucket 0\" and only provides data for item 000000. There is no data for parcels 1 through 199 (or items 000001 through 000199). The user is asking me to list 200 parcels and their cities, but I only have information about one parcel.\n\nI should not fabricate or hallucinate data for the other 199 parcels. I only have real information about parcel PX-0757343 in \"Income\" (which appears to be the city/location name).\n\nWait, let me re-read the prompt. \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nThe context only contains one item (Item 000000). I cannot list 200 parcels because I only have data for one. I should be honest about this limitation rather than making up fake data.\n\nActually, let me reconsider.",
+        "wall_ms": 7902.602195041254,
+        "ttft_ms": 404.1898681316525,
+        "last_ms": 7902.475059963763,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 7492.09999999986,
+        "prefill_ms": 384.5,
+        "decode_steps": 136,
+        "decode_rows": 136,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 86,
+        "prompt_tokens_computed": 86
+      },
+      "engine_tokens_per_s": 34.03585109648893,
+      "ms_per_pass": 55.08897058823427,
+      "tokens_per_pass": 1.875,
+      "answer": {
+        "prompt_sha256": "92604069babbf4074a394a605c081814a769e25026f9630be3d566a1b7b22c76",
+        "usage": {
+          "prompt_tokens": 86,
+          "completion_tokens": 256,
+          "total_tokens": 342,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing the first 200 parcels and their cities. However, looking at the context provided, I only have information about ONE parcel:\n\n- Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nThe context mentions \"bucket 0\" and only provides data for item 000000. There is no data for parcels 1 through 199 (or items 000001 through 000199). The user is asking me to list 200 parcels and their cities, but I only have information about one parcel.\n\nI should not fabricate or hallucinate data for the other 199 parcels. I only have real information about parcel PX-0757343 in \"Income\" (which appears to be the city/location name).\n\nWait, let me re-read the prompt. \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nThe context only contains one item (Item 000000). I cannot list 200 parcels because I only have data for one. I should be honest about this limitation rather than making up fake data.\n\nActually, let me reconsider.",
+        "wall_ms": 7891.763391206041,
+        "ttft_ms": 408.88333320617676,
+        "last_ms": 7891.579728107899,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

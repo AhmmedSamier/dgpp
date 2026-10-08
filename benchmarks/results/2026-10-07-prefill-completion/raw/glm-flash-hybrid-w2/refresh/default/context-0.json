@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+  "surface": {
+    "id": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+    "object": "model",
+    "created": 1791417700,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "minimal": {
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "reasoning_effort": "high"
+        },
+        "high": {
+          "reasoning_effort": "high"
+        },
+        "xhigh": {
+          "reasoning_effort": "max"
+        },
+        "max": {
+          "reasoning_effort": "max"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "context": {
+      "request_limit_tokens": 163840,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 163840,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
+  "seed": 20260922,
+  "tag": "completion-glm-flash-hybrid-w2",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 7531.599999999977,
+        "prefill_ms": 382.59999999999854,
+        "decode_steps": 137,
+        "decode_rows": 137,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 83,
+        "prompt_tokens_computed": 83
+      },
+      "engine_tokens_per_s": 33.85734770832237,
+      "ms_per_pass": 54.97518248175165,
+      "tokens_per_pass": 1.8613138686131387,
+      "answer": {
+        "prompt_sha256": "fdde392db0f8908aa8df43d45a8e2292853e35fc1caa10920cbc654ff7807fa2",
+        "usage": {
+          "prompt_tokens": 83,
+          "completion_tokens": 256,
+          "total_tokens": 339,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing the first 200 parcels and their cities. They've given me one example: \"parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\"\n\nWait, this is odd. The context says \"measurement completion-glm-flash-hybrid-w2, bucket 0\" and \"Item 000000\" \u2014 this looks like some kind of data generation or logging task. The user wants me to generate 200 entries of parcel data with cities.\n\nThe problem: I don't actually have access to any real dataset of 200 parcels. The user has only given me one item (Item 000000). There's no actual data for items 000001 through 000199. If I generate 200 entries, I would be fabricating data \u2014 making up parcel IDs, weights, cities, gates, shifts, and statuses.\n\nIs this harmful? Not really \u2014 it's likely a test of whether I'll hallucinate/fabricate data, or it's a synthetic data generation task. The framing \"Context measurement completion-glm-flash-hybrid-w2, bucket 0\" suggests this might be some kind of evaluation or benchmark prompt, possibly testing",
+        "wall_ms": 7940.934169106185,
+        "ttft_ms": 409.406463149935,
+        "last_ms": 7940.63720619306,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 7529.699999999953,
+        "prefill_ms": 381.40000000000146,
+        "decode_steps": 137,
+        "decode_rows": 137,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 83,
+        "prompt_tokens_computed": 83
+      },
+      "engine_tokens_per_s": 33.86589107135764,
+      "ms_per_pass": 54.9613138686128,
+      "tokens_per_pass": 1.8613138686131387,
+      "answer": {
+        "prompt_sha256": "fdde392db0f8908aa8df43d45a8e2292853e35fc1caa10920cbc654ff7807fa2",
+        "usage": {
+          "prompt_tokens": 83,
+          "completion_tokens": 256,
+          "total_tokens": 339,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing the first 200 parcels and their cities. They've given me one example: \"parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\"\n\nWait, this is odd. The context says \"measurement completion-glm-flash-hybrid-w2, bucket 0\" and \"Item 000000\" \u2014 this looks like some kind of data generation or logging task. The user wants me to generate 200 entries of parcel data with cities.\n\nThe problem: I don't actually have access to any real dataset of 200 parcels. The user has only given me one item (Item 000000). There's no actual data for items 000001 through 000199. If I generate 200 entries, I would be fabricating data \u2014 making up parcel IDs, weights, cities, gates, shifts, and statuses.\n\nIs this harmful? Not really \u2014 it's likely a test of whether I'll hallucinate/fabricate data, or it's a synthetic data generation task. The framing \"Context measurement completion-glm-flash-hybrid-w2, bucket 0\" suggests this might be some kind of evaluation or benchmark prompt, possibly testing",
+        "wall_ms": 7929.707298055291,
+        "ttft_ms": 408.2008949480951,
+        "last_ms": 7929.538303986192,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 7538.600000000093,
+        "prefill_ms": 377.09999999999854,
+        "decode_steps": 137,
+        "decode_rows": 137,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 83,
+        "prompt_tokens_computed": 83
+      },
+      "engine_tokens_per_s": 33.82590932003248,
+      "ms_per_pass": 55.02627737226345,
+      "tokens_per_pass": 1.8613138686131387,
+      "answer": {
+        "prompt_sha256": "fdde392db0f8908aa8df43d45a8e2292853e35fc1caa10920cbc654ff7807fa2",
+        "usage": {
+          "prompt_tokens": 83,
+          "completion_tokens": 256,
+          "total_tokens": 339,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing the first 200 parcels and their cities. They've given me one example: \"parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\"\n\nWait, this is odd. The context says \"measurement completion-glm-flash-hybrid-w2, bucket 0\" and \"Item 000000\" \u2014 this looks like some kind of data generation or logging task. The user wants me to generate 200 entries of parcel data with cities.\n\nThe problem: I don't actually have access to any real dataset of 200 parcels. The user has only given me one item (Item 000000). There's no actual data for items 000001 through 000199. If I generate 200 entries, I would be fabricating data \u2014 making up parcel IDs, weights, cities, gates, shifts, and statuses.\n\nIs this harmful? Not really \u2014 it's likely a test of whether I'll hallucinate/fabricate data, or it's a synthetic data generation task. The framing \"Context measurement completion-glm-flash-hybrid-w2, bucket 0\" suggests this might be some kind of evaluation or benchmark prompt, possibly testing",
+        "wall_ms": 7948.963132919744,
+        "ttft_ms": 408.3787528797984,
+        "last_ms": 7948.7962028943,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

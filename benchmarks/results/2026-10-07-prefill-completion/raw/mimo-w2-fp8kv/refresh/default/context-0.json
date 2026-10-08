@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+  "surface": {
+    "id": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+    "object": "model",
+    "created": 1791426145,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 0,
+        "top_p": 0.95,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true
+        },
+        "low": {
+          "enable_thinking": true
+        },
+        "medium": {
+          "enable_thinking": true
+        },
+        "high": {
+          "enable_thinking": true
+        },
+        "xhigh": {
+          "enable_thinking": true
+        },
+        "max": {
+          "enable_thinking": true
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 262144,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "ff15eb925890d6b71b5160de4b846fbd13178438ab463b38ecc953e8cd1dcb3e",
+  "seed": 20260922,
+  "tag": "completion-mimo-w2-fp8kv",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 5622.099999999977,
+        "prefill_ms": 463.90000000000146,
+        "decode_steps": 134,
+        "decode_rows": 134,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 91,
+        "prompt_tokens_computed": 91
+      },
+      "engine_tokens_per_s": 45.35671724088883,
+      "ms_per_pass": 41.95597014925356,
+      "tokens_per_pass": 1.9029850746268657,
+      "answer": {
+        "prompt_sha256": "f15ebf31a3bafe200050440764492226ea494417d0fc54e35f7739d2bfd5120f",
+        "usage": {
+          "prompt_tokens": 91,
+          "completion_tokens": 256,
+          "total_tokens": 347,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 203
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list of 200 parcels and their cities. However, the only information provided is about a single parcel (PX-0757343). I don't have data about 200 parcels or their cities. I should not fabricate this data.\n\nLet me re-read the prompt. It says \"Context measurement completion-mimo-w2-fp8kv, bucket 0. Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\"\n\nThen it asks me to \"Write a numbered list describing the first 200 parcels and their cities.\"\n\nI only have information about one parcel, and it doesn't even mention a city. I should not fabricate data for 200 parcels. I'll provide what I have and explain that I don't have the remaining data.I only have information about **one** parcel from the context provided, and it does not include a city. I cannot fabricate data for 200 parcels. Here is everything I actually have:\n\n1. **PX-0757343",
+        "wall_ms": 6115.726419957355,
+        "ttft_ms": 536.2749549094588,
+        "last_ms": 6115.583681967109,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 5629.79999999993,
+        "prefill_ms": 462.59999999999854,
+        "decode_steps": 134,
+        "decode_rows": 134,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 91,
+        "prompt_tokens_computed": 91
+      },
+      "engine_tokens_per_s": 45.29468187147024,
+      "ms_per_pass": 42.013432835820375,
+      "tokens_per_pass": 1.9029850746268657,
+      "answer": {
+        "prompt_sha256": "f15ebf31a3bafe200050440764492226ea494417d0fc54e35f7739d2bfd5120f",
+        "usage": {
+          "prompt_tokens": 91,
+          "completion_tokens": 256,
+          "total_tokens": 347,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 203
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list of 200 parcels and their cities. However, the only information provided is about a single parcel (PX-0757343). I don't have data about 200 parcels or their cities. I should not fabricate this data.\n\nLet me re-read the prompt. It says \"Context measurement completion-mimo-w2-fp8kv, bucket 0. Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\"\n\nThen it asks me to \"Write a numbered list describing the first 200 parcels and their cities.\"\n\nI only have information about one parcel, and it doesn't even mention a city. I should not fabricate data for 200 parcels. I'll provide what I have and explain that I don't have the remaining data.I only have information about **one** parcel from the context provided, and it does not include a city. I cannot fabricate data for 200 parcels. Here is everything I actually have:\n\n1. **PX-0757343",
+        "wall_ms": 6107.467544963583,
+        "ttft_ms": 509.8431131336838,
+        "last_ms": 6107.323863077909,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 5626.400000000023,
+        "prefill_ms": 458.8000000000029,
+        "decode_steps": 134,
+        "decode_rows": 134,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 91,
+        "prompt_tokens_computed": 91
+      },
+      "engine_tokens_per_s": 45.32205317787554,
+      "ms_per_pass": 41.98805970149271,
+      "tokens_per_pass": 1.9029850746268657,
+      "answer": {
+        "prompt_sha256": "f15ebf31a3bafe200050440764492226ea494417d0fc54e35f7739d2bfd5120f",
+        "usage": {
+          "prompt_tokens": 91,
+          "completion_tokens": 256,
+          "total_tokens": 347,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 203
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list of 200 parcels and their cities. However, the only information provided is about a single parcel (PX-0757343). I don't have data about 200 parcels or their cities. I should not fabricate this data.\n\nLet me re-read the prompt. It says \"Context measurement completion-mimo-w2-fp8kv, bucket 0. Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\"\n\nThen it asks me to \"Write a numbered list describing the first 200 parcels and their cities.\"\n\nI only have information about one parcel, and it doesn't even mention a city. I should not fabricate data for 200 parcels. I'll provide what I have and explain that I don't have the remaining data.I only have information about **one** parcel from the context provided, and it does not include a city. I cannot fabricate data for 200 parcels. Here is everything I actually have:\n\n1. **PX-0757343",
+        "wall_ms": 6101.962314918637,
+        "ttft_ms": 509.6065339166671,
+        "last_ms": 6101.8367619253695,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

@@ -1,0 +1,19 @@
+{
+  "at": "2026-10-07T22:49:47.586872+00:00",
+  "removed": [
+    {
+      "host": "192.168.88.11",
+      "paths": [
+        "/home/stephen/.cache/huggingface/hub/models--XiaomiMiMo--MiMo-V2.6-Flash-RL",
+        "/home/stephen/.cache/dgpp/prefill-followup-2026-10-07"
+      ]
+    },
+    {
+      "host": "192.168.88.12",
+      "paths": [
+        "/home/stephen/.cache/huggingface/hub/models--XiaomiMiMo--MiMo-V2.6-Flash-RL",
+        "/home/stephen/.cache/dgpp/prefill-followup-2026-10-07"
+      ]
+    }
+  ]
+}

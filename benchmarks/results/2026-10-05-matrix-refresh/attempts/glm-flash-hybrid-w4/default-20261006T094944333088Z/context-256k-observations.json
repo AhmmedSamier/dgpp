@@ -1,0 +1,18 @@
+{
+  "samples": 3,
+  "prompt_tokens": [
+    261630,
+    261630,
+    261630
+  ],
+  "cached_tokens": [
+    0,
+    261628,
+    261628
+  ],
+  "cold_prefill_s": 1638.3877,
+  "median_ms_per_pass": 38.97938931297745,
+  "median_engine_tokens_per_s": 49.93831149756138,
+  "rank0_collective_warning_lines": 152,
+  "rank0_max_logged_wait_ms": 2505
+}

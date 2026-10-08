@@ -1,0 +1,24 @@
+Generating SQLite file benchmarks/results/2026-10-05-matrix-refresh/diagnostics/prefill-scaling/baseline-512k.sqlite from benchmarks/results/2026-10-05-matrix-refresh/diagnostics/prefill-scaling/baseline-512k.nsys-rep
+Processing [benchmarks/results/2026-10-05-matrix-refresh/diagnostics/prefill-scaling/baseline-512k.sqlite] with [/opt/nvidia/nsight-systems/2025.3.2/host-linux-armv8/reports/cuda_gpu_kern_sum.py]... 
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+97.9,10229821472,683,14977776.7,15015680.0,14644608,15949504,178591.2,"void dgpp::<unnamed>::select_prefill_kernel<(bool)0, (int)2048>(const float *, long, const float *, const float *, const long *, int, long, int, int, int, int, int *, int *)"
+1.8,188134336,683,275452.9,275104.0,196608,353696,5572.9,nvjet_sm121_qqsss_mma_192x160x128_2_48x80x128_tmaAB_bz_TNNN
+0.2,25391520,16,1586970.0,1607936.0,1468352,1842304,88365.5,"void dgpp::<unnamed>::attn_flash_kernel<(int)512, (int)512, (bool)1, (dgpp::LatentFormat)0>(const unsigned short *, const unsigned char *, const float *, const int *, const long *, const int *, int, const int *, int, int, int, int, const int *, int, float, float *, float *, float *)"
+0.0,1076544,16,67284.0,56432.0,54848,209696,38248.0,"dgpp::vout_mma_kernel(const float *, const unsigned short *, unsigned short *, int, int, int, int, int)"
+0.0,970560,16,60660.0,58656.0,53856,75392,6190.6,"dgpp::<unnamed>::attn_combine_kernel(const float *, const float *, const float *, int, int, int, float *)"
+0.0,716672,1,716672.0,716672.0,716672,716672,0.0,nvjet_sm121_tst_mma_192x144x64_2_48x72x64_tmaAB_bz_TNNN
+0.0,712224,16,44514.0,44624.0,41472,47104,1364.8,"dgpp::absorb_q_mma_kernel(const unsigned short *, const unsigned short *, unsigned short *, int, int, int, int, int, int)"
+0.0,573536,2,286768.0,286768.0,284384,289152,3371.5,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8>(T1::Params)
+0.0,373760,1,373760.0,373760.0,373760,373760,0.0,nvjet_sm121_tst_mma_128x176x64_2_32x88x64_tmaAB_bz_TNNN
+0.0,284320,1,284320.0,284320.0,284320,284320,0.0,"dgpp::<unnamed>::fwht_quant_rows_kernel(const unsigned short *, unsigned char *, float *)"
+0.0,257888,1,257888.0,257888.0,257888,257888,0.0,"dgpp::<unnamed>::gather_index_pools_kernel(const int *, int, const unsigned char *, const float *, long, unsigned char *, float *, int)"
+0.0,161120,2,80560.0,80560.0,79136,81984,2013.8,nvjet_sm121_tst_mma_64x128x64_4_64x32x64_tmaAB_bz_TNNN
+0.0,98240,1,98240.0,98240.0,98240,98240,0.0,"<unnamed>::seed_prefill_history(unsigned char *, float *, long, int)"
+0.0,66784,1,66784.0,66784.0,66784,66784,0.0,void cutlass::Kernel2<cutlass_80_wmma_tensorop_s161616gemm_bf16_32x32_128x1_tn_align8>(T1::Params)
+0.0,56864,1,56864.0,56864.0,56864,56864,0.0,"dgpp::<unnamed>::fused_qkv_rmsnorm_kernel(const unsigned short *, long, unsigned short *, unsigned short *, int, int, const unsigned short *, const unsigned short *, float)"
+0.0,21472,1,21472.0,21472.0,21472,21472,0.0,"dgpp::<unnamed>::kpool_compress_write_kernel(const unsigned short *, long, const unsigned short *, long, const float *, const int *, int, long, int, unsigned char *, float *, int, int)"
+0.0,14432,1,14432.0,14432.0,14432,14432,0.0,"dgpp::<unnamed>::latent_append_kernel(const unsigned short *, const int *, const long *, const int *, int, int, unsigned char *, int, unsigned long, const unsigned short *, int)"
+0.0,6336,1,6336.0,6336.0,6336,6336,0.0,"dgpp::<unnamed>::kpool_tail_seed_kernel(const unsigned short *, long, const unsigned short *, long, const int *, const long *, long, unsigned short *, int, int)"
+0.0,6272,1,6272.0,6272.0,6272,6272,0.0,"dgpp::<unnamed>::k_layernorm_kernel(const unsigned short *, long, const unsigned short *, const unsigned short *, unsigned short *, int, float)"
+0.0,4192,1,4192.0,4192.0,4192,4192,0.0,"dgpp::<unnamed>::fold_weights_kernel(const float *, const float *, float *, long, float)"
+

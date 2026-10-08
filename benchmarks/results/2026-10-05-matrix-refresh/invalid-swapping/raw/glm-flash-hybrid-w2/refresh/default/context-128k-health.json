@@ -1,0 +1,27 @@
+{
+  "time": "2026-10-06T00:40:58.530151+00:00",
+  "nodes": [
+    {
+      "host": "192.168.88.11",
+      "memory": [
+        "MemAvailable:     904716 kB",
+        "SwapTotal:      16777212 kB",
+        "SwapFree:       14197884 kB"
+      ],
+      "pressure": "some avg10=0.36 avg60=0.54 avg300=0.35 total=7070122300\nfull avg10=0.36 avg60=0.54 avg300=0.35 total=7036745811\n",
+      "gpu": "temperature.gpu, clocks.current.sm [MHz], power.draw [W], power.limit [W], clocks_event_reasons.active\n67, 2535 MHz, 41.16 W, [N/A], 0x0000000000000000\n",
+      "gpu_error": ""
+    },
+    {
+      "host": "192.168.88.12",
+      "memory": [
+        "MemAvailable:     649364 kB",
+        "SwapTotal:      16777212 kB",
+        "SwapFree:       15716248 kB"
+      ],
+      "pressure": "some avg10=0.01 avg60=0.32 avg300=0.14 total=118602601\nfull avg10=0.01 avg60=0.32 avg300=0.14 total=118296508\n",
+      "gpu": "temperature.gpu, clocks.current.sm [MHz], power.draw [W], power.limit [W], clocks_event_reasons.active\n66, 2444 MHz, 32.75 W, [N/A], 0x0000000000000000\n",
+      "gpu_error": ""
+    }
+  ]
+}

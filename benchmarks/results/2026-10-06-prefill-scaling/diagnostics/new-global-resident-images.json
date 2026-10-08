@@ -1,0 +1,41 @@
+{
+  "recorded_at": "2026-10-06T21:04:13.319295+00:00",
+  "nodes": [
+    {
+      "host": "192.168.88.11",
+      "free_bytes": 359061995520,
+      "new_images": {
+        "c32e837b61a08351.img": {
+          "path": "/home/stephen/.cache/dgpp/resident/c32e837b61a08351.img",
+          "device": 66306,
+          "inode": 106065079,
+          "logical_bytes": 66168551936,
+          "allocated_bytes": 66168561664
+        }
+      }
+    },
+    {
+      "host": "192.168.88.12",
+      "free_bytes": 564839747584,
+      "new_images": {
+        "5ce134a9599eba1c.img": {
+          "path": "/home/stephen/.cache/dgpp/resident/5ce134a9599eba1c.img",
+          "device": 66306,
+          "inode": 38404201,
+          "logical_bytes": 66168551936,
+          "allocated_bytes": 66168561664
+        }
+      }
+    },
+    {
+      "host": "192.168.88.13",
+      "free_bytes": 611356545024,
+      "new_images": {}
+    },
+    {
+      "host": "192.168.88.14",
+      "free_bytes": 679250907136,
+      "new_images": {}
+    }
+  ]
+}

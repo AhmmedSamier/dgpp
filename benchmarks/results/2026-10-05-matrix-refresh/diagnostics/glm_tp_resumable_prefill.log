@@ -1,0 +1,17 @@
+2026-10-06 03:00:56.892 INFO  glm loader: rank 0 resident footprint 0.0 GiB; device free 115.6 of 121.6 GiB, host available 116.1 GiB
+2026-10-06 03:00:57.286 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-06 03:00:57.298 INFO  glm loader: rank 0 resident load complete — released 1 shard mappings (0.0 GiB) and evicted their page cache; image: 0 layers restored, 0 captured
+2026-10-06 03:00:57.298 INFO  rank 0 boot phases: digest 0.0 s (0.00 GiB hashed), globals 0.0 s, layers 0.0 s
+2026-10-06 03:00:57.299 INFO  glm loader: rank 0 resident footprint 0.0 GiB; device free 114.7 of 121.6 GiB, host available 115.2 GiB
+2026-10-06 03:00:57.302 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-06 03:00:57.336 INFO  glm loader: rank 0 resident load complete — released 1 shard mappings (0.0 GiB) and evicted their page cache; image: 0 layers restored, 0 captured
+2026-10-06 03:00:57.336 INFO  rank 0 boot phases: digest 0.0 s (0.00 GiB hashed), globals 0.0 s, layers 0.0 s
+2026-10-06 03:00:58.038 INFO  glm loader: rank 0 resident footprint 0.0 GiB; device free 114.4 of 121.6 GiB, host available 114.9 GiB
+2026-10-06 03:00:58.041 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-06 03:00:58.054 INFO  glm loader: rank 0 resident load complete — released 1 shard mappings (0.0 GiB) and evicted their page cache; image: 0 layers restored, 0 captured
+2026-10-06 03:00:58.054 INFO  rank 0 boot phases: digest 0.0 s (0.00 GiB hashed), globals 0.0 s, layers 0.0 s
+fixture written: 463 tensors, 23.54 MB payload
+[ OK ] glm_tp_resumable_prefill_matches_main_draft_and_interleaved_decode
+fixture written: 463 tensors, 23.54 MB payload
+[ OK ] glm_tp_resumable_prefill_snapshots_and_close_catchup
+2 tests, 0 failed

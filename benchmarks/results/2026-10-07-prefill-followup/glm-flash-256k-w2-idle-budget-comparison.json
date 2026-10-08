@@ -1,0 +1,54 @@
+{
+  "complete": true,
+  "comparison": "Only engine.prefill_idle_budget_tokens changes from resolved 256 to explicit 2048. Both fresh launches use identical tag, seed and prompt workload.",
+  "samples": [
+    {
+      "target": 2048,
+      "repeat": 0,
+      "before_s": 4.6455,
+      "after_s": 1.8274,
+      "same_prompt_and_output": true,
+      "different_fields": []
+    },
+    {
+      "target": 2048,
+      "repeat": 1,
+      "before_s": 4.9296999999999995,
+      "after_s": 2.124,
+      "same_prompt_and_output": true,
+      "different_fields": []
+    },
+    {
+      "target": 8192,
+      "repeat": 0,
+      "before_s": 19.420800000000003,
+      "after_s": 8.3018,
+      "same_prompt_and_output": true,
+      "different_fields": []
+    },
+    {
+      "target": 8192,
+      "repeat": 1,
+      "before_s": 19.213999999999995,
+      "after_s": 8.053900000000002,
+      "same_prompt_and_output": true,
+      "different_fields": []
+    }
+  ],
+  "summary": [
+    {
+      "target": 2048,
+      "before_s": 4.787599999999999,
+      "after_s": 1.9757,
+      "speedup": 2.4232423951004702
+    },
+    {
+      "target": 8192,
+      "before_s": 19.3174,
+      "after_s": 8.177850000000001,
+      "speedup": 2.362161203739369
+    }
+  ],
+  "all_prompts_and_outputs_match": true,
+  "memory_and_rank_identity_passed": true
+}

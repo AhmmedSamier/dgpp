@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+  "surface": {
+    "id": "deepseek-ai/DeepSeek-V4.1-Flash",
+    "object": "model",
+    "created": 1791354100,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 0,
+        "top_p": 1,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "minimal"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "high"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "max"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text"
+    ],
+    "context": {
+      "request_limit_tokens": 131072,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 131072,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "c90dfa01249db1be4245780a052ede752e1361c612ac6d08e2bdada7d599476b",
+  "seed": 20260922,
+  "tag": "a33c2029d9e64f6bbdd19f8e8ca45e7e",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 131072,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 5283.200000000001,
+        "prefill_ms": 126329.4,
+        "decode_steps": 92,
+        "decode_rows": 92,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 130567,
+        "prompt_tokens_computed": 130567
+      },
+      "engine_tokens_per_s": 48.26620230163537,
+      "ms_per_pass": 57.42608695652175,
+      "tokens_per_pass": 2.7717391304347827,
+      "answer": {
+        "prompt_sha256": "efc58646cf51a2089782927c4d08661ed693c3cc8fa7bfa36ad1ca69bfdd7752",
+        "usage": {
+          "prompt_tokens": 130567,
+          "completion_tokens": 256,
+          "total_tokens": 130823,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user. Need parse request. They provided huge context measurement with items 000000...003893? Actually many. User asks: \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Need produce numbered list for first 200 parcels (Item 000000 through 000199) describing parcel and city. Need likely include parcel ID and city. \"describing the first 200 parcels and their cities.\" Could include weight? \"describing\" maybe parcel PX and city. Need list 1-200. Need ensure first 200 parcels = items 000000 to 000199 inclusive. We need extract parcel ID and city for each. Could format \"1. PX-0757343 \u2014 Income\" etc. Need maybe include all details? The prompt says \"describing the first 200 parcels and their cities.\" It might expect parcel and city. We can include parcel ID and city. Need continue until all 200. We have data. Need be accurate.\n\nLet's extract first 200 items. Need map item number to parcel and city. Let's carefully compile. Items 000000-000199. I'll list.\n\nFrom context:\n000000 parcel PX-",
+        "wall_ms": 131721.8541780021,
+        "ttft_ms": 126397.56062603556,
+        "last_ms": 131696.1172260344,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 131072,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 5116.799999999996,
+        "prefill_ms": 127.59999999997672,
+        "decode_steps": 92,
+        "decode_rows": 92,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 130567,
+        "prompt_tokens_computed": 7
+      },
+      "engine_tokens_per_s": 49.835834896810546,
+      "ms_per_pass": 55.61739130434778,
+      "tokens_per_pass": 2.7717391304347827,
+      "answer": {
+        "prompt_sha256": "efc58646cf51a2089782927c4d08661ed693c3cc8fa7bfa36ad1ca69bfdd7752",
+        "usage": {
+          "prompt_tokens": 130567,
+          "completion_tokens": 256,
+          "total_tokens": 130823,
+          "prompt_tokens_details": {
+            "cached_tokens": 130560
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user. Need parse request. They provided huge context measurement with items 000000...003893? Actually many. User asks: \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Need produce numbered list for first 200 parcels (Item 000000 through 000199) describing parcel and city. Need likely include parcel ID and city. \"describing the first 200 parcels and their cities.\" Could include weight? \"describing\" maybe parcel PX and city. Need list 1-200. Need ensure first 200 parcels = items 000000 to 000199 inclusive. We need extract parcel ID and city for each. Could format \"1. PX-0757343 \u2014 Income\" etc. Need maybe include all details? The prompt says \"describing the first 200 parcels and their cities.\" It might expect parcel and city. We can include parcel ID and city. Need continue until all 200. We have data. Need be accurate.\n\nLet's extract first 200 items. Need map item number to parcel and city. Let's carefully compile. Items 000000-000199. I'll list.\n\nFrom context:\n000000 parcel PX-",
+        "wall_ms": 5352.910228073597,
+        "ttft_ms": 217.12771989405155,
+        "last_ms": 5352.749970043078,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 131072,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 5119.5,
+        "prefill_ms": 125.30000000004657,
+        "decode_steps": 92,
+        "decode_rows": 92,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 130567,
+        "prompt_tokens_computed": 7
+      },
+      "engine_tokens_per_s": 49.809551714034576,
+      "ms_per_pass": 55.64673913043478,
+      "tokens_per_pass": 2.7717391304347827,
+      "answer": {
+        "prompt_sha256": "efc58646cf51a2089782927c4d08661ed693c3cc8fa7bfa36ad1ca69bfdd7752",
+        "usage": {
+          "prompt_tokens": 130567,
+          "completion_tokens": 256,
+          "total_tokens": 130823,
+          "prompt_tokens_details": {
+            "cached_tokens": 130560
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user. Need parse request. They provided huge context measurement with items 000000...003893? Actually many. User asks: \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Need produce numbered list for first 200 parcels (Item 000000 through 000199) describing parcel and city. Need likely include parcel ID and city. \"describing the first 200 parcels and their cities.\" Could include weight? \"describing\" maybe parcel PX and city. Need list 1-200. Need ensure first 200 parcels = items 000000 to 000199 inclusive. We need extract parcel ID and city for each. Could format \"1. PX-0757343 \u2014 Income\" etc. Need maybe include all details? The prompt says \"describing the first 200 parcels and their cities.\" It might expect parcel and city. We can include parcel ID and city. Need continue until all 200. We have data. Need be accurate.\n\nLet's extract first 200 items. Need map item number to parcel and city. Let's carefully compile. Items 000000-000199. I'll list.\n\nFrom context:\n000000 parcel PX-",
+        "wall_ms": 5355.3103290032595,
+        "ttft_ms": 217.0375098939985,
+        "last_ms": 5355.216504074633,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

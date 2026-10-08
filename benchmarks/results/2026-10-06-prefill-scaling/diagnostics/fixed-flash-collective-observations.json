@@ -1,0 +1,130 @@
+{
+  "scope": "Five completed fixed-binary GLM Flash default launches only. Log timestamps filtered by their launch and shutdown receipts. A zero count means no logged STALLED warning, not zero collective wait time.",
+  "launches": [
+    {
+      "deployment": "glm-flash-fp8-512k-w4",
+      "started_at": "2026-10-06T17:10:48.037205+00:00",
+      "finished_at": "2026-10-06T17:38:45.580233+00:00",
+      "memory_passed": true,
+      "rank_identity_passed": true,
+      "ranks": [
+        {
+          "log": "raw/glm-flash-fp8-512k-w4/refresh/default/server/serve_r0.log",
+          "stall_warning_lines": 0,
+          "lines": []
+        },
+        {
+          "log": "raw/glm-flash-fp8-512k-w4/refresh/default/server/serve_r1.log",
+          "stall_warning_lines": 0,
+          "lines": []
+        },
+        {
+          "log": "raw/glm-flash-fp8-512k-w4/refresh/default/server/serve_r2.log",
+          "stall_warning_lines": 0,
+          "lines": []
+        },
+        {
+          "log": "raw/glm-flash-fp8-512k-w4/refresh/default/server/serve_r3.log",
+          "stall_warning_lines": 0,
+          "lines": []
+        }
+      ]
+    },
+    {
+      "deployment": "glm-flash-fp8-w4",
+      "started_at": "2026-10-06T16:58:46.017850+00:00",
+      "finished_at": "2026-10-06T17:10:46.098409+00:00",
+      "memory_passed": true,
+      "rank_identity_passed": true,
+      "ranks": [
+        {
+          "log": "raw/glm-flash-fp8-w4/refresh/default/server/serve_r0.log",
+          "stall_warning_lines": 0,
+          "lines": []
+        },
+        {
+          "log": "raw/glm-flash-fp8-w4/refresh/default/server/serve_r1.log",
+          "stall_warning_lines": 0,
+          "lines": []
+        },
+        {
+          "log": "raw/glm-flash-fp8-w4/refresh/default/server/serve_r2.log",
+          "stall_warning_lines": 0,
+          "lines": []
+        },
+        {
+          "log": "raw/glm-flash-fp8-w4/refresh/default/server/serve_r3.log",
+          "stall_warning_lines": 0,
+          "lines": []
+        }
+      ]
+    },
+    {
+      "deployment": "glm-flash-hybrid-256k-w2",
+      "started_at": "2026-10-06T16:32:37.515708+00:00",
+      "finished_at": "2026-10-06T16:58:42.165560+00:00",
+      "memory_passed": true,
+      "rank_identity_passed": true,
+      "ranks": [
+        {
+          "log": "raw/glm-flash-hybrid-256k-w2/refresh/default/server/serve_r0.log",
+          "stall_warning_lines": 0,
+          "lines": []
+        },
+        {
+          "log": "raw/glm-flash-hybrid-256k-w2/refresh/default/server/serve_r1.log",
+          "stall_warning_lines": 0,
+          "lines": []
+        }
+      ]
+    },
+    {
+      "deployment": "glm-flash-hybrid-w2",
+      "started_at": "2026-10-06T16:18:07.969042+00:00",
+      "finished_at": "2026-10-06T16:32:35.557558+00:00",
+      "memory_passed": true,
+      "rank_identity_passed": true,
+      "ranks": [
+        {
+          "log": "raw/glm-flash-hybrid-w2/refresh/default/server/serve_r0.log",
+          "stall_warning_lines": 0,
+          "lines": []
+        },
+        {
+          "log": "raw/glm-flash-hybrid-w2/refresh/default/server/serve_r1.log",
+          "stall_warning_lines": 0,
+          "lines": []
+        }
+      ]
+    },
+    {
+      "deployment": "glm-flash-hybrid-w4",
+      "started_at": "2026-10-06T15:39:52.333419+00:00",
+      "finished_at": "2026-10-06T16:17:00.912505+00:00",
+      "memory_passed": true,
+      "rank_identity_passed": true,
+      "ranks": [
+        {
+          "log": "raw/glm-flash-hybrid-w4/refresh/default/server/serve_r0.log",
+          "stall_warning_lines": 0,
+          "lines": []
+        },
+        {
+          "log": "raw/glm-flash-hybrid-w4/refresh/default/server/serve_r1.log",
+          "stall_warning_lines": 0,
+          "lines": []
+        },
+        {
+          "log": "raw/glm-flash-hybrid-w4/refresh/default/server/serve_r2.log",
+          "stall_warning_lines": 0,
+          "lines": []
+        },
+        {
+          "log": "raw/glm-flash-hybrid-w4/refresh/default/server/serve_r3.log",
+          "stall_warning_lines": 0,
+          "lines": []
+        }
+      ]
+    }
+  ]
+}

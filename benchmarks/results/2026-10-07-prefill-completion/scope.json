@@ -1,0 +1,27 @@
+{
+  "source_revision": "90ebbf1bcc2976ebaa94e0b4cf8779caed52f3db plus the recorded fixes",
+  "method": "Source-path review of the documented default configurations, supplemented by the prior kernel and model comparisons. This is not a new performance run of unchanged families.",
+  "affected": {
+    "glm_flash_tp2": "Both presets had 256-token idle prefill budgets. Their updated configurations use 2048; throughput and long-context prefill are refreshed.",
+    "glm53_fp4_kv": "LatentTile<kFp4> conversion changed. Both prefill and decode performance are refreshed, including plain/MTP2/MTP3.",
+    "mimo": "The explicit 128x128 FP8 scale-grid path above 128 rows now uses fp8w_gemm. All four documented deployments receive serving and context reruns."
+  },
+  "unchanged": {
+    "glm_flash_tp4": "Already used the larger idle budget. BF16 KV does not use the changed FP4 loader; GLM has no launch_scale_gemm_grid callers.",
+    "glm53_bf16_fp8_kv": "These cache formats do not use LatentTile<kFp4>; GLM has no launch_scale_gemm_grid callers.",
+    "qwen": "No launch_scale_gemm_grid callers; does not use the changed DSA FP4 cache loader.",
+    "deepseek_v41": "Explicit scale-grid callers use rs=cs=5, outside the new rs=cs=7 branch. Its block-format cache loader is unchanged.",
+    "deepseek_v4": "Prefill dense projections use grouped MMA tiles (Dsv4AttnLayer::dense). Remaining grid calls, including draft_first, select decode_mma with supported aligned shapes before the changed dispatcher; mma_gemv_shape_ok has no upper row-count limit. Its cache loader is unchanged."
+  },
+  "reviewed_paths": [
+    "src/kernels/dsa.cu",
+    "src/kernels/scale_gemm.cu",
+    "src/kernels/mma_gemv.cu",
+    "src/models/mimo/layers.cpp",
+    "src/models/dsv41/csa2_layer.cu",
+    "src/models/dsv41/engram_layer.cpp",
+    "src/models/dsv41/model.cpp",
+    "src/models/dsv4/attn_layer.cu",
+    "src/models/dsv4/model.cpp"
+  ]
+}

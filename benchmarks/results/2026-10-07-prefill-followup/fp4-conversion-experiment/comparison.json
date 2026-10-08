@@ -1,0 +1,47 @@
+{
+  "rows": [
+    {
+      "context": 8192,
+      "format": "bf16",
+      "baseline_ms": 32.061,
+      "native_ms": 31.906,
+      "speedup": 1.004858020435028
+    },
+    {
+      "context": 8192,
+      "format": "fp8",
+      "baseline_ms": 34.993,
+      "native_ms": 34.931,
+      "speedup": 1.0017749277146375
+    },
+    {
+      "context": 8192,
+      "format": "fp4",
+      "baseline_ms": 50.971,
+      "native_ms": 34.825,
+      "speedup": 1.4636324479540557
+    },
+    {
+      "context": 32768,
+      "format": "bf16",
+      "baseline_ms": 51.835,
+      "native_ms": 51.439,
+      "speedup": 1.007698438927662
+    },
+    {
+      "context": 32768,
+      "format": "fp8",
+      "baseline_ms": 53.692,
+      "native_ms": 53.578,
+      "speedup": 1.0021277389973495
+    },
+    {
+      "context": 32768,
+      "format": "fp4",
+      "baseline_ms": 69.234,
+      "native_ms": 53.141,
+      "speedup": 1.3028358517905194
+    }
+  ],
+  "scope": "Synthetic single indexed layer, TP4, identical 262144 capacity and 2048 chunk; excludes MoE and collectives. No claim of full-model speedup."
+}

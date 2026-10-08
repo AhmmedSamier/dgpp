@@ -1,0 +1,46 @@
+{
+  "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+  "release": "",
+  "engine": {
+    "max_concurrency": 4,
+    "kv_capacity": 1048576,
+    "default_max_tokens": 32768,
+    "queue_limit": 8,
+    "max_connections": 64,
+    "decode_graph": true,
+    "mtp": true,
+    "mtp_depth": 5,
+    "mtp_schedule": true,
+    "mtp_schedule_row_ms": 7.2,
+    "mtp_schedule_base_ms": 31.2,
+    "prefix_cache_gib": 8,
+    "admission": "full",
+    "admission_window": 256,
+    "sampling_candidates": 128,
+    "stats_interval_s": 10
+  },
+  "paths": {
+    "resident_cache": "~/.cache/dgpp/matrix-2026-10-05/deepseek-ai--DeepSeek-V4-Flash-0731",
+    "log_dir": "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/dsv4-w2/refresh/default/server",
+    "stage_dir": "/tmp/bus4/deployments/f1e443d0e79a6dac",
+    "release_dir": "~/dgpp/releases"
+  },
+  "http": {
+    "bind_host": "127.0.0.1",
+    "port": 18080
+  },
+  "nodes": [
+    "192.168.88.11",
+    "192.168.88.12"
+  ],
+  "ssh_user": "stephen",
+  "ports": {
+    "http": 18080,
+    "fabric": 29970,
+    "journal": 29971
+  },
+  "node_env": [
+    {},
+    {}
+  ]
+}
