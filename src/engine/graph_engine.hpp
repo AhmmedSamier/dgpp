@@ -278,13 +278,23 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     // context-lookup tail (engine.lookup_tail): extra verify rows past the
     // MTP block (a pinned serving mode — fewer batch slots for a longer
     // block while copying). The device chain spans the full width as
-    // deeper MTP drafts; a strong lookup match fuses over it instead.
+    // deeper MTP drafts; a strong lookup match fuses over it instead. Capped
+    // by the device picker's kSlots (one slot per draft).
     if (mtp_depth < 1 || 1 + mtp_depth > kSpecRows)
       throw std::invalid_argument("graph engine: mtp depth must be in [1, " +
                                   std::to_string(kSpecRows - 1) + "]");
     if (lookup_tail < 0 || 1 + mtp_depth + lookup_tail > kSpecRows)
       throw std::invalid_argument("graph engine: lookup tail must satisfy 1 + mtp_depth + tail <= " +
                                   std::to_string(kSpecRows));
+    // The device picker arms one slot per chain row (slot 0 = the main verdict,
+    // 1..depth_ = each draft); DevicePicker::kSlots caps the chain at kSlots-1.
+    // The tail positions ride the host feed (lookup history), so only mtp_depth
+    // device picks are needed when lookup is on — but the capture loop still
+    // arms one slot per draft. Cap the total to keep both paths safe.
+    if (!block_ && model_->mtp_enabled() &&
+        1 + mtp_depth + lookup_tail > DevicePicker::kSlots)
+      throw std::invalid_argument("graph engine: the verify block (1 + mtp_depth + lookup_tail) must fit the " +
+                                  std::to_string(DevicePicker::kSlots) + "-slot device picker");
     // The DFlash2 block drafter (2026-10-04): every step verifies the
     // pending token plus the block's drafts, one recorded block forward
     // proposing them all (no draft picks); mtp_depth does not apply.
