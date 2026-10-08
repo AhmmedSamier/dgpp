@@ -192,6 +192,8 @@ struct RankOutcome {
   std::vector<int32_t> ga;           // the graph engine, scalar
   std::vector<int32_t> ba, bb, bc;   // the graph engine, batched
   std::vector<int32_t> ma, mb, mc;   // the MTP graph engine: scalar A, batched B and C
+  std::vector<int32_t> la, lb, lc;  // the lookup MTP graph engine: scalar A, batched B/C
+  uint64_t fused = 0;                // lookup-fused steps this rank served
   int mtp_steps_a = 0;               // scalar MTP steps A took (< kSteps: drafts stood)
 };
 
@@ -1413,6 +1415,153 @@ DGPP_TEST(qwen_compact_logits_preserve_cache_concurrency_and_mtp) {
             "compact logits changed graph/cache transcripts at MTP depth " + std::to_string(depth));
     std::printf("[ .. ] compact/full logits: four slots, cache reuse, retirement and MTP depth %d exact\n", depth);
   }
+}
+
+// Context-lookup drafting through the recorded MTP path (engine.lookup_draft):
+// the same repeating prompts with the gate off and on. The fused drafts ride
+// the ordinary verify/commit/rollback, so the transcripts must be identical;
+// the fused-step counter must be nonzero (otherwise the test is vacuous on
+// random weights, which never copy). Scalar A plus a two-slot batch B.
+void rank_work_mtp_lookup(int r, const QwenTextConfig& cfg, const std::string& dir,
+                          const std::vector<int64_t>& A, const std::vector<int64_t>& B,
+                          CollectiveBus* bus, ConstructBarrier* barrier, RankOutcome* out, bool lookup,
+                          int tail = 0) {
+  bool arrived = false;
+  const auto arrive_once = [&] {
+    if (arrived) return;
+    arrived = true;
+    barrier->arrive_and_wait();
+  };
+  uint16_t* scratch = nullptr;
+  try {
+    BusBoundaryReducer reducer(*bus, wait_timeout_ms());
+    QwenModel mtp(cfg, dir, kMaxTokens, kCache, QwenResidency::Resident, &reducer, r, kWorld, kSlots, /*mtp=*/true);
+    DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&scratch),
+                               sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld), cudaHostAllocDefault));
+    arrive_once();
+    GraphEngineAdapter<QwenModel> eng(
+        &mtp, bus, r, kWorld, scratch, cfg.vocab_size, wait_timeout_ms(),
+        /*batch_min_live=*/2, /*prefix_scratch=*/nullptr,
+        /*gather_scratch=*/nullptr, /*candidates=*/0, /*grammar=*/nullptr,
+        /*prefix_slots=*/0, /*mtp_depth=*/1, test_compaction(), tail);
+    if (lookup) eng.set_lookup_drafts(true, /*nmin=*/2, /*nstrong=*/4, /*agree=*/2);
+    out->la.push_back(eng.prefill(0, A));
+    eng.reserve(0, static_cast<int64_t>(A.size()) + kSteps + 3);
+    while (out->la.size() < static_cast<size_t>(kSteps) + 1) {
+      const std::vector<int32_t> t = eng.step(0);
+      require(!t.empty() && t.size() <= static_cast<size_t>(2 + tail), "lookup scalar step shape");
+      out->la.insert(out->la.end(), t.begin(), t.end());
+    }
+    out->la.resize(static_cast<size_t>(kSteps) + 1);
+    eng.close(0);
+    out->lb.push_back(eng.prefill(0, B));
+    eng.reserve(0, static_cast<int64_t>(B.size()) + kSteps + 3);
+    out->lc.push_back(eng.prefill(1, B));
+    eng.reserve(1, static_cast<int64_t>(B.size()) + kSteps + 3);
+    while (out->lb.size() <= static_cast<size_t>(kSteps) || out->lc.size() <= static_cast<size_t>(kSteps)) {
+      const auto t = eng.step_batch({0, 1});
+      require(t.size() == 2, "lookup batch step shape");
+      out->lb.insert(out->lb.end(), t[0].begin(), t[0].end());
+      out->lc.insert(out->lc.end(), t[1].begin(), t[1].end());
+    }
+    out->lb.resize(static_cast<size_t>(kSteps) + 1);
+    out->lc.resize(static_cast<size_t>(kSteps) + 1);
+    eng.close(0);
+    eng.close(1);
+    eng.drain();
+    out->fused = eng.lookup_fused_steps();
+    cudaFreeHost(scratch);
+  } catch (const std::exception& e) {
+    if (scratch) cudaFreeHost(scratch);
+    out->error = "rank " + std::to_string(r) + ": " + e.what();
+    arrive_once();
+  }
+}
+
+DGPP_TEST(qwen_engines_loopback_world_2_lookup_draft_matches_mtp_decode) {
+  const QwenTextConfig cfg = qwenfx::test_config();
+  const std::string dir = "qwen_engine_fixture";
+  qwenfx::write_fixture_for(cfg, dir);
+  // Repeating blocks (vocab 512, eos 1 — both avoided): the history carries
+  // a strong match from the prefill on, so fusion must fire.
+  const std::vector<int64_t> block_a = {10, 20, 30, 40, 50, 60, 70, 80};
+  const std::vector<int64_t> block_b = {15, 25, 35, 45, 55, 65, 75, 85};
+  std::vector<int64_t> A, B;
+  for (int i = 0; i < 4; ++i) {
+    A.insert(A.end(), block_a.begin(), block_a.end());
+    B.insert(B.end(), block_b.begin(), block_b.end());
+  }
+  std::vector<RankOutcome> off(kWorld), on(kWorld);
+  for (int pass = 0; pass < 2; ++pass) {
+    std::vector<std::unique_ptr<CollectiveBus>> buses =
+        start_world(kWorld, static_cast<uint16_t>(kPort + 30 + pass));
+    require(!buses.empty(), "the loopback bus world failed to start");
+    std::vector<RankOutcome>& outs = pass == 0 ? off : on;
+    ConstructBarrier barrier(kWorld);
+    std::vector<std::thread> workers;
+    for (int r = 0; r < kWorld; ++r)
+      workers.emplace_back(rank_work_mtp_lookup, r, std::cref(cfg), std::cref(dir), std::cref(A),
+                           std::cref(B), buses[static_cast<size_t>(r)].get(), &barrier,
+                           &outs[static_cast<size_t>(r)], /*lookup=*/pass == 1, /*tail=*/0);
+    for (auto& t : workers) t.join();
+    for (int r = 0; r < kWorld; ++r) require(outs[static_cast<size_t>(r)].error.empty(), outs[static_cast<size_t>(r)].error);
+  }
+  for (int r = 0; r < kWorld; ++r) {
+    require(off[static_cast<size_t>(r)].la == on[static_cast<size_t>(r)].la, "lookup scalar transcript differs");
+    require(off[static_cast<size_t>(r)].lb == on[static_cast<size_t>(r)].lb, "lookup batch transcript differs (slot 0)");
+    require(off[static_cast<size_t>(r)].lc == on[static_cast<size_t>(r)].lc, "lookup batch transcript differs (slot 1)");
+  }
+  for (int r = 1; r < kWorld; ++r)
+    require(on[static_cast<size_t>(r)].la == on[0].la && on[static_cast<size_t>(r)].lb == on[0].lb &&
+                on[static_cast<size_t>(r)].lc == on[0].lc,
+            "the ranks' lookup transcripts differ");
+  require(on[0].fused > 0, "lookup never fired on a repeating prompt");
+  DGPP_LOG_INFO("world 2 lookup draft: A {} | B {}, fused {} steps",
+                ids_text(on[0].la), ids_text(on[0].lb), on[0].fused);
+}
+
+// The lookup tail (engine.lookup_tail): a wider verify block with the MTP
+// chain spanning it and lookup fusing over the whole width. Same repeating
+// prompts, MTP depth 1 alone vs depth 1 + 3 tail rows: identical transcripts
+// (exact at any width), and the tail must fire.
+DGPP_TEST(qwen_engines_loopback_world_2_lookup_tail_matches_mtp_decode) {
+  const QwenTextConfig cfg = qwenfx::test_config();
+  const std::string dir = "qwen_engine_fixture";
+  qwenfx::write_fixture_for(cfg, dir);
+  const std::vector<int64_t> block_a = {10, 20, 30, 40, 50, 60, 70, 80};
+  const std::vector<int64_t> block_b = {15, 25, 35, 45, 55, 65, 75, 85};
+  std::vector<int64_t> A, B;
+  for (int i = 0; i < 4; ++i) {
+    A.insert(A.end(), block_a.begin(), block_a.end());
+    B.insert(B.end(), block_b.begin(), block_b.end());
+  }
+  std::vector<RankOutcome> off(kWorld), on(kWorld);
+  for (int pass = 0; pass < 2; ++pass) {
+    std::vector<std::unique_ptr<CollectiveBus>> buses =
+        start_world(kWorld, static_cast<uint16_t>(kPort + 32 + pass));
+    require(!buses.empty(), "the loopback bus world failed to start");
+    std::vector<RankOutcome>& outs = pass == 0 ? off : on;
+    ConstructBarrier barrier(kWorld);
+    std::vector<std::thread> workers;
+    for (int r = 0; r < kWorld; ++r)
+      workers.emplace_back(rank_work_mtp_lookup, r, std::cref(cfg), std::cref(dir), std::cref(A),
+                           std::cref(B), buses[static_cast<size_t>(r)].get(), &barrier,
+                           &outs[static_cast<size_t>(r)], /*lookup=*/pass == 1, /*tail=*/pass == 1 ? 3 : 0);
+    for (auto& t : workers) t.join();
+    for (int r = 0; r < kWorld; ++r) require(outs[static_cast<size_t>(r)].error.empty(), outs[static_cast<size_t>(r)].error);
+  }
+  for (int r = 0; r < kWorld; ++r) {
+    require(off[static_cast<size_t>(r)].la == on[static_cast<size_t>(r)].la, "lookup-tail scalar differs");
+    require(off[static_cast<size_t>(r)].lb == on[static_cast<size_t>(r)].lb, "lookup-tail batch differs (slot 0)");
+    require(off[static_cast<size_t>(r)].lc == on[static_cast<size_t>(r)].lc, "lookup-tail batch differs (slot 1)");
+  }
+  for (int r = 1; r < kWorld; ++r)
+    require(on[static_cast<size_t>(r)].la == on[0].la && on[static_cast<size_t>(r)].lb == on[0].lb &&
+                on[static_cast<size_t>(r)].lc == on[0].lc,
+            "the ranks' lookup-tail transcripts differ");
+  require(on[0].fused > 0, "the lookup tail never fired on a repeating prompt");
+  DGPP_LOG_INFO("world 2 lookup tail: A {} | B {}, fused {} steps",
+                ids_text(on[0].la), ids_text(on[0].lb), on[0].fused);
 }
 
 int main() {
