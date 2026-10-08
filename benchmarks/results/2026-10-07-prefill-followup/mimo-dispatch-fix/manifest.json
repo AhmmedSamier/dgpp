@@ -1,0 +1,10 @@
+{
+  "baseline_binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+  "candidate_binary_sha256": "616d35a9d3f1a4d61b53622aa7a7a2f0389ffa1f3ab1bbd1d97abe0395bd0f6d",
+  "candidate_binary": "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/mimo-dispatch-fix/native/dgpp-serve",
+  "scope": "FP8 explicit 128x128 scale-grid prefill dispatch; candidate also contains validated FP4 attention conversion, unused by MiMo.",
+  "test_binaries": {
+    "scale_gemm_test": "2ac0d11309046741a25ebe473752cbcefb72c8eaf57cdc4783256c3582d957e4",
+    "fp8w_gemm_test": "512ed397a6b3e3ddb8ea86738587852a37c8e8822c1ba002be58e62eec303ac2"
+  }
+}

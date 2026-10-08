@@ -1,0 +1,10 @@
+{
+  "command": [
+    "ssh",
+    "-o",
+    "BatchMode=yes",
+    "stephen@192.168.88.13",
+    "systemd-run --user --scope --quiet --property=MemorySwapMax=0 -- /tmp/dgpp-prefill-followup/dsa_bench --prefill-only --full-glm --kv-dtype bf16 --tp 4 --ctx 8192 --capacity 262144 --chunk 2048 --warmup 3 --iters 10"
+  ],
+  "returncode": 0
+}

@@ -1,0 +1,310 @@
+{
+  "schema_version": 1,
+  "records": {
+    "config.json": {
+      "model": "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
+      "world_size": 4,
+      "release": "",
+      "engine": {
+        "max_concurrency": 8,
+        "kv_capacity": 212992,
+        "kv_dtype": "fp8",
+        "bf16_weights": "bf12",
+        "embed_sharding": "vocab",
+        "default_max_tokens": 32768,
+        "queue_limit": 8,
+        "max_connections": 64,
+        "decode_graph": true,
+        "mtp": true,
+        "mtp_depth": 1,
+        "prefix_cache_gib": 1.5,
+        "admission": "full",
+        "admission_window": 256,
+        "sampling_candidates": 128,
+        "stats_interval_s": 10
+      },
+      "paths": {
+        "resident_cache": ""
+      },
+      "http": {
+        "bind_host": "127.0.0.1",
+        "port": 18080
+      }
+    },
+    "manifest.json": {
+      "started_at": "2026-10-07T21:40:10.414855+00:00",
+      "commit": "90ebbf1bcc2976ebaa94e0b4cf8779caed52f3db",
+      "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+      "benchmark_environment": {
+        "DGPP_NO_SWAP": "1",
+        "CUDA_DEVICE_MAX_CONNECTIONS": "32"
+      },
+      "purpose": "Investigate GLM Flash TP2, full GLM TP4, and MiMo TP2 cold-prefill performance; configuration comparisons use the identical fixed binary."
+    },
+    "plan.json": {
+      "deployment": "glm53-fp8kv-w4",
+      "variant": "profile-8k",
+      "overrides": {},
+      "lengths": [
+        8192
+      ],
+      "repeat": 1,
+      "profiled": true,
+      "purpose": "Diagnostic A/B; published matrix remains unchanged."
+    },
+    "complete.json": {
+      "at": "2026-10-07T21:53:22.965271+00:00",
+      "passed": true
+    },
+    "memory-check.json": {
+      "passed": true,
+      "ranks": [
+        {
+          "rank": 0,
+          "samples": 57,
+          "max_swap_KiB": 0,
+          "swap_policy_required": true,
+          "swap_policy_passed": true,
+          "max_sample_gap_s": 1.103135742014274,
+          "violations": [],
+          "errors": []
+        },
+        {
+          "rank": 1,
+          "samples": 56,
+          "max_swap_KiB": 0,
+          "swap_policy_required": true,
+          "swap_policy_passed": true,
+          "max_sample_gap_s": 1.0445865560323,
+          "violations": [],
+          "errors": []
+        },
+        {
+          "rank": 2,
+          "samples": 56,
+          "max_swap_KiB": 0,
+          "swap_policy_required": true,
+          "swap_policy_passed": true,
+          "max_sample_gap_s": 1.065359802916646,
+          "violations": [],
+          "errors": []
+        },
+        {
+          "rank": 3,
+          "samples": 56,
+          "max_swap_KiB": 0,
+          "swap_policy_required": true,
+          "swap_policy_passed": true,
+          "max_sample_gap_s": 1.070121237076819,
+          "violations": [],
+          "errors": []
+        }
+      ]
+    },
+    "rank-identity.json": {
+      "expected_ranks": 4,
+      "md5": {
+        "serve_rank0.ops": "6efc79ff68c9c9f5791f9bedc3b021c8",
+        "serve_rank2.ops": "6efc79ff68c9c9f5791f9bedc3b021c8",
+        "serve_rank1.ops": "6efc79ff68c9c9f5791f9bedc3b021c8",
+        "serve_rank3.ops": "6efc79ff68c9c9f5791f9bedc3b021c8"
+      },
+      "passed": true
+    },
+    "models.json": {
+      "object": "list",
+      "data": [
+        {
+          "id": "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
+          "object": "model",
+          "created": 1791409971,
+          "owned_by": "dgpp",
+          "sampling": {
+            "available": true,
+            "defaults": {
+              "temperature": 1,
+              "top_p": 0.95,
+              "top_k": 0,
+              "min_p": 0,
+              "repetition_penalty": 1
+            }
+          },
+          "tools": {
+            "available": true,
+            "constrained": true
+          },
+          "response_format": {
+            "json_object": true,
+            "json_schema": true
+          },
+          "reasoning": {
+            "in_content": false,
+            "effort_mapping": {
+              "minimal": {
+                "reasoning_effort": "low"
+              },
+              "low": {
+                "reasoning_effort": "low"
+              },
+              "medium": {
+                "reasoning_effort": "high"
+              },
+              "high": {
+                "reasoning_effort": "high"
+              },
+              "xhigh": {
+                "reasoning_effort": "max"
+              },
+              "max": {
+                "reasoning_effort": "max"
+              }
+            }
+          },
+          "default_chat_template_kwargs": {},
+          "input_modalities": [
+            "text"
+          ],
+          "context": {
+            "request_limit_tokens": 212992,
+            "position_ceiling_tokens": null,
+            "kv_pool_tokens": 212992,
+            "limited_by": "kv-pool"
+          }
+        }
+      ]
+    },
+    "up.log.command.json": {
+      "command": [
+        "/usr/bin/python3",
+        "/home/stephen/workspace/dgpp/scripts/dgpp-cluster",
+        "up",
+        "--config",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/raw/glm53-fp8kv-w4/prefill/profile-8k/config.json",
+        "--bin",
+        "/home/stephen/workspace/dgpp/build-release/dgpp-serve",
+        "--log-dir",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/raw/glm53-fp8kv-w4/prefill/profile-8k/server",
+        "--head-wrap",
+        "nsys profile --trace=cuda --sample=none --cpuctxsw=none --cuda-graph-trace=graph --output /home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/raw/glm53-fp8kv-w4/prefill/profile-8k/r0"
+      ],
+      "cwd": "/home/stephen/workspace/dgpp",
+      "started_at": "2026-10-07T21:52:05.866172+00:00",
+      "returncode": 0,
+      "finished_at": "2026-10-07T21:52:51.168893+00:00"
+    },
+    "prefill.log.command.json": {
+      "command": [
+        "/usr/bin/python3",
+        "/home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py",
+        "127.0.0.1",
+        "18080",
+        "8192",
+        "--repeat",
+        "1",
+        "--seed",
+        "7",
+        "--tag",
+        "followup-glm53-fp8kv-w4",
+        "--interval",
+        "1",
+        "--json-out",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/raw/glm53-fp8kv-w4/prefill/profile-8k/prefill.json"
+      ],
+      "cwd": "/home/stephen/workspace/dgpp",
+      "started_at": "2026-10-07T21:52:51.183512+00:00",
+      "returncode": 0,
+      "finished_at": "2026-10-07T21:53:11.816895+00:00"
+    },
+    "down.log.command.json": {
+      "command": [
+        "/usr/bin/python3",
+        "/home/stephen/workspace/dgpp/scripts/dgpp-cluster",
+        "down",
+        "--config",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/raw/glm53-fp8kv-w4/prefill/profile-8k/config.json",
+        "--log-dir",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/raw/glm53-fp8kv-w4/prefill/profile-8k/server"
+      ],
+      "cwd": "/home/stephen/workspace/dgpp",
+      "started_at": "2026-10-07T21:53:11.817242+00:00",
+      "returncode": 0,
+      "finished_at": "2026-10-07T21:53:22.954751+00:00"
+    },
+    "server/cluster.resolved.json": {
+      "model": "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
+      "release": "",
+      "engine": {
+        "max_concurrency": 8,
+        "kv_capacity": 212992,
+        "kv_dtype": "fp8",
+        "bf16_weights": "bf12",
+        "embed_sharding": "vocab",
+        "default_max_tokens": 32768,
+        "queue_limit": 8,
+        "max_connections": 64,
+        "decode_graph": true,
+        "mtp": true,
+        "mtp_depth": 1,
+        "prefix_cache_gib": 1.5,
+        "admission": "full",
+        "admission_window": 256,
+        "sampling_candidates": 128,
+        "stats_interval_s": 10
+      },
+      "paths": {
+        "resident_cache": "",
+        "log_dir": "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/raw/glm53-fp8kv-w4/prefill/profile-8k/server",
+        "stage_dir": "/tmp/bus4/deployments/9236199f4ad60040",
+        "release_dir": "~/dgpp/releases"
+      },
+      "http": {
+        "bind_host": "127.0.0.1",
+        "port": 18080
+      },
+      "nodes": [
+        "192.168.88.11",
+        "192.168.88.12",
+        "192.168.88.13",
+        "192.168.88.14"
+      ],
+      "ssh_user": "stephen",
+      "ports": {
+        "http": 18080,
+        "fabric": 29970,
+        "journal": 29971
+      },
+      "node_env": [
+        {},
+        {},
+        {},
+        {}
+      ]
+    }
+  },
+  "evidence_sha256": {
+    "prefill.json": "b0b32a770b626b5e5905ec4cd7cec91e0152bc1eb8c9944344a587a243b197b1",
+    "profile-summary.json": "aca93e1818287c7f52f21fa2b307ff0cca8a9f57df54e5fa528388e0a90cee8c"
+  },
+  "local_telemetry": [
+    {
+      "file": "node0-telemetry.jsonl",
+      "bytes": 101619,
+      "sha256": "969d04354a58a097babead9aec26a22f182940ef2d68f1484f55b6da40462d4a"
+    },
+    {
+      "file": "node1-telemetry.jsonl",
+      "bytes": 99450,
+      "sha256": "957af7dd60b145fabd558488bdf064d54fc53115459792a5f1edc15be14ca4e3"
+    },
+    {
+      "file": "node2-telemetry.jsonl",
+      "bytes": 97648,
+      "sha256": "1bff38de0cfdec1cdff0b29c8f498a985bf7d1b169bba7f31f554a0c278487af"
+    },
+    {
+      "file": "node3-telemetry.jsonl",
+      "bytes": 97270,
+      "sha256": "ca9d780ffe7fa65de8691f84b4067822751ae779081a1c765b72ab81b1dc314a"
+    }
+  ]
+}

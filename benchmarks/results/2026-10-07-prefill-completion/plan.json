@@ -1,0 +1,108 @@
+[
+  {
+    "deployment": "glm-flash-hybrid-w2",
+    "mode": "default",
+    "jobs": [
+      "greedy",
+      "context-0",
+      "context-32768",
+      "context-65536",
+      "context-131072"
+    ]
+  },
+  {
+    "deployment": "glm-flash-hybrid-256k-w2",
+    "mode": "default",
+    "jobs": [
+      "greedy",
+      "prefill",
+      "context-0",
+      "context-32768",
+      "context-65536",
+      "context-131072",
+      "context-262144"
+    ]
+  },
+  {
+    "deployment": "glm53-fp4kv-256k-w4",
+    "mode": "default",
+    "jobs": [
+      "greedy",
+      "context-0",
+      "context-32768",
+      "context-65536",
+      "context-131072",
+      "context-262144"
+    ]
+  },
+  {
+    "deployment": "glm53-fp4kv-256k-w4",
+    "mode": "plain",
+    "jobs": [
+      "greedy"
+    ]
+  },
+  {
+    "deployment": "glm53-fp4kv-256k-w4",
+    "mode": "mtp2",
+    "jobs": [
+      "greedy"
+    ]
+  },
+  {
+    "deployment": "glm53-fp4kv-256k-w4",
+    "mode": "mtp3",
+    "jobs": [
+      "greedy"
+    ]
+  },
+  {
+    "deployment": "mimo-w2",
+    "mode": "default",
+    "jobs": [
+      "greedy",
+      "context-0",
+      "context-32768",
+      "context-65536",
+      "context-131072"
+    ]
+  },
+  {
+    "deployment": "mimo-w2-fp8kv",
+    "mode": "default",
+    "jobs": [
+      "greedy",
+      "context-0",
+      "context-32768",
+      "context-65536",
+      "context-131072",
+      "context-262144"
+    ]
+  },
+  {
+    "deployment": "mimo-w4",
+    "mode": "default",
+    "jobs": [
+      "greedy",
+      "prefill",
+      "context-0",
+      "context-32768",
+      "context-65536",
+      "context-131072"
+    ]
+  },
+  {
+    "deployment": "mimo-1m-w4",
+    "mode": "default",
+    "jobs": [
+      "greedy",
+      "prefill",
+      "context-0",
+      "context-32768",
+      "context-65536",
+      "context-131072",
+      "context-262144",
+      "context-524288"
+    ]
+  }
+]

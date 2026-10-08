@@ -1,0 +1,17 @@
+{
+  "fp4_scalar_attention_decode": {
+    "commit": "2b7a6c6e3f241c3ee32fc56f031fdab9f97bfaf2",
+    "date": "2026-09-06",
+    "note": "FP4 cache attention loader used scalar software e2m1 decode from its introduction; not introduced by the recent prefill score-fusion changes."
+  },
+  "glm_flash_auto_prefill_budget": {
+    "commit": "a20b0a20",
+    "date": "2026-09-23",
+    "note": "Default cancellable prefill resolves supported engines to a 256-token budget; TP2 template has no explicit idle override, unlike TP4. Configuration tuning issue, not an allocation or swapping issue."
+  },
+  "mimo_fp8_dispatch_gap": {
+    "commit": "7944975bb25320950005f03cc03142218ecdd5c2",
+    "date": "2026-10-04",
+    "note": "The optimized per-weight FP8 GEMM was wired into the ordinary large-row dispatcher, but the explicit-grid dispatcher used by MiMo retained the old 16-row tile kernel. This is a missed optimization, not a slowdown introduced by the recent score-fusion fixes."
+  }
+}

@@ -1,0 +1,418 @@
+{
+  "scope": "All samples in each validated launch, including startup and shutdown. GPU states are sampled approximately every five seconds; an inactive sample does not rule out an event between samples. Host UTC clocks differ; timestamps below use each node's own clock.",
+  "launches": {
+    "raw/glm-flash-hybrid-256k-w2/refresh/default": {
+      "node0-telemetry.jsonl": {
+        "sha256": "25f037f4470e33ff0255f73829f6558b859639f9a9b5b7817047bf81602cccad",
+        "serving_memory_samples": 2207,
+        "minimum_available_gib": 7.793979644775391,
+        "gpu_samples": 443,
+        "maximum_temperature_c": 88,
+        "sm_mhz_range": [
+          208,
+          2535
+        ],
+        "thermal_slowdown_samples": []
+      },
+      "node1-telemetry.jsonl": {
+        "sha256": "a4c86ee2d2cc58afaa6a774c0f684e4535a7a3325e3737fa43a6be07b7dfd55d",
+        "serving_memory_samples": 2204,
+        "minimum_available_gib": 9.14376449584961,
+        "gpu_samples": 443,
+        "maximum_temperature_c": 86,
+        "sm_mhz_range": [
+          208,
+          2444
+        ],
+        "thermal_slowdown_samples": []
+      }
+    },
+    "raw/glm-flash-hybrid-w2/refresh/default": {
+      "node0-telemetry.jsonl": {
+        "sha256": "90c7ed64779ba9e658fd7ba869577bb124f6eeb39c028f46346d8a79ba7b13e0",
+        "serving_memory_samples": 1484,
+        "minimum_available_gib": 4.639900207519531,
+        "gpu_samples": 297,
+        "maximum_temperature_c": 88,
+        "sm_mhz_range": [
+          208,
+          2561
+        ],
+        "thermal_slowdown_samples": [
+          {
+            "at": "2026-10-08T00:06:33.200183+00:00",
+            "temperature_c": 82,
+            "power_w": 73.61,
+            "sm_mhz": 2476,
+            "software_thermal_slowdown": "Active",
+            "hardware_thermal_slowdown": "Not Active"
+          }
+        ]
+      },
+      "node1-telemetry.jsonl": {
+        "sha256": "9fd2f197ed9e19d785bc6b5941759c9c57696ddd112ddef8f2d0e23cefb7bb69",
+        "serving_memory_samples": 1486,
+        "minimum_available_gib": 5.916019439697266,
+        "gpu_samples": 299,
+        "maximum_temperature_c": 86,
+        "sm_mhz_range": [
+          208,
+          2463
+        ],
+        "thermal_slowdown_samples": []
+      }
+    },
+    "raw/glm53-fp4kv-256k-w4/refresh/default": {
+      "node0-telemetry.jsonl": {
+        "sha256": "95a94093d621334a1cb4a27a610a7236c06cc5499c78b2cfce3193d27d3064f0",
+        "serving_memory_samples": 2919,
+        "minimum_available_gib": 3.6515960693359375,
+        "gpu_samples": 587,
+        "maximum_temperature_c": 88,
+        "sm_mhz_range": [
+          208,
+          2535
+        ],
+        "thermal_slowdown_samples": []
+      },
+      "node1-telemetry.jsonl": {
+        "sha256": "d561b8d98736731f56dbf3ee4ed6b6d70fd070eeb417ab0d85f9b52986bec066",
+        "serving_memory_samples": 2919,
+        "minimum_available_gib": 5.180824279785156,
+        "gpu_samples": 588,
+        "maximum_temperature_c": 85,
+        "sm_mhz_range": [
+          208,
+          2437
+        ],
+        "thermal_slowdown_samples": []
+      },
+      "node2-telemetry.jsonl": {
+        "sha256": "113f07af8f23ed69bf63ab07ecfbaed07791ac77a81614d324cd7b9c3dfa7f4b",
+        "serving_memory_samples": 2918,
+        "minimum_available_gib": 5.156574249267578,
+        "gpu_samples": 587,
+        "maximum_temperature_c": 82,
+        "sm_mhz_range": [
+          208,
+          2489
+        ],
+        "thermal_slowdown_samples": []
+      },
+      "node3-telemetry.jsonl": {
+        "sha256": "ce01e1040729a1c967f307cd4fd92459e24fe3037b3dd4c0f1c54ddef39fcaaa",
+        "serving_memory_samples": 2918,
+        "minimum_available_gib": 5.443340301513672,
+        "gpu_samples": 587,
+        "maximum_temperature_c": 80,
+        "sm_mhz_range": [
+          208,
+          2561
+        ],
+        "thermal_slowdown_samples": []
+      }
+    },
+    "raw/glm53-fp4kv-256k-w4/refresh/mtp2": {
+      "node0-telemetry.jsonl": {
+        "sha256": "1888cd7d153ff273b885d1252abee1cd43fc8d57afe4060261abbe9c76c942ab",
+        "serving_memory_samples": 169,
+        "minimum_available_gib": 3.9439849853515625,
+        "gpu_samples": 37,
+        "maximum_temperature_c": 79,
+        "sm_mhz_range": [
+          208,
+          2535
+        ],
+        "thermal_slowdown_samples": []
+      },
+      "node1-telemetry.jsonl": {
+        "sha256": "5b5441ba6e6f39de72a31bc4df583d23e535cc5e35dd0e4b619e5930e6bd3ba2",
+        "serving_memory_samples": 166,
+        "minimum_available_gib": 5.521980285644531,
+        "gpu_samples": 37,
+        "maximum_temperature_c": 73,
+        "sm_mhz_range": [
+          208,
+          2437
+        ],
+        "thermal_slowdown_samples": []
+      },
+      "node2-telemetry.jsonl": {
+        "sha256": "92360e53de1c7dc4c5d7629a05c935d02afa4d50370aa05ed46d914715f800f0",
+        "serving_memory_samples": 166,
+        "minimum_available_gib": 5.295528411865234,
+        "gpu_samples": 37,
+        "maximum_temperature_c": 78,
+        "sm_mhz_range": [
+          208,
+          2470
+        ],
+        "thermal_slowdown_samples": []
+      },
+      "node3-telemetry.jsonl": {
+        "sha256": "08faf351dbaa6c5656123b8f9eb556241b3f698d58abe5dc3404c8c324fce5dd",
+        "serving_memory_samples": 166,
+        "minimum_available_gib": 5.118705749511719,
+        "gpu_samples": 37,
+        "maximum_temperature_c": 74,
+        "sm_mhz_range": [
+          208,
+          2515
+        ],
+        "thermal_slowdown_samples": []
+      }
+    },
+    "raw/glm53-fp4kv-256k-w4/refresh/mtp3": {
+      "node0-telemetry.jsonl": {
+        "sha256": "cb4799668b408cc4a60136bfae99989b54bd2cf5e53e1b4e0a9fdc5475e6c2f2",
+        "serving_memory_samples": 175,
+        "minimum_available_gib": 4.03125,
+        "gpu_samples": 38,
+        "maximum_temperature_c": 79,
+        "sm_mhz_range": [
+          208,
+          2528
+        ],
+        "thermal_slowdown_samples": []
+      },
+      "node1-telemetry.jsonl": {
+        "sha256": "a2b684c9d61ac1db4301d5b0fb0f9afb926f4e54ceceb1441236c80cd7905ee4",
+        "serving_memory_samples": 173,
+        "minimum_available_gib": 5.689327239990234,
+        "gpu_samples": 38,
+        "maximum_temperature_c": 74,
+        "sm_mhz_range": [
+          208,
+          2437
+        ],
+        "thermal_slowdown_samples": []
+      },
+      "node2-telemetry.jsonl": {
+        "sha256": "b0d71b75a929cea70889ea9dc7772af34eee768a8727ef86158af2c6690d7cec",
+        "serving_memory_samples": 173,
+        "minimum_available_gib": 5.569637298583984,
+        "gpu_samples": 38,
+        "maximum_temperature_c": 79,
+        "sm_mhz_range": [
+          208,
+          2470
+        ],
+        "thermal_slowdown_samples": []
+      },
+      "node3-telemetry.jsonl": {
+        "sha256": "76f5877938b95d1efd7fa55a350f5c9579cdc8016f77165893dd8c68aadd2fcb",
+        "serving_memory_samples": 173,
+        "minimum_available_gib": 5.411125183105469,
+        "gpu_samples": 38,
+        "maximum_temperature_c": 75,
+        "sm_mhz_range": [
+          208,
+          2515
+        ],
+        "thermal_slowdown_samples": []
+      }
+    },
+    "raw/glm53-fp4kv-256k-w4/refresh/plain": {
+      "node0-telemetry.jsonl": {
+        "sha256": "276ee117b364cb9da066d0c65f53ab10cb972e672b307d4d49e9b1c66c332d8a",
+        "serving_memory_samples": 236,
+        "minimum_available_gib": 6.2153167724609375,
+        "gpu_samples": 50,
+        "maximum_temperature_c": 75,
+        "sm_mhz_range": [
+          208,
+          2561
+        ],
+        "thermal_slowdown_samples": []
+      },
+      "node1-telemetry.jsonl": {
+        "sha256": "ac840acbade5e2ec48fcf5ba494deb879c63350998cdaed9fdf02003f84e68ef",
+        "serving_memory_samples": 233,
+        "minimum_available_gib": 6.829193115234375,
+        "gpu_samples": 50,
+        "maximum_temperature_c": 72,
+        "sm_mhz_range": [
+          208,
+          2463
+        ],
+        "thermal_slowdown_samples": []
+      },
+      "node2-telemetry.jsonl": {
+        "sha256": "abcc364c82fdd04c3eb1d2751faf0a92ede92a6e41dbf0746894cb36a643d7fc",
+        "serving_memory_samples": 233,
+        "minimum_available_gib": 7.250301361083984,
+        "gpu_samples": 50,
+        "maximum_temperature_c": 78,
+        "sm_mhz_range": [
+          208,
+          2476
+        ],
+        "thermal_slowdown_samples": []
+      },
+      "node3-telemetry.jsonl": {
+        "sha256": "55ea8cac7e33fe969870079af5588a649592aadb5df7bed64f573795a4543e2f",
+        "serving_memory_samples": 233,
+        "minimum_available_gib": 7.249942779541016,
+        "gpu_samples": 50,
+        "maximum_temperature_c": 77,
+        "sm_mhz_range": [
+          208,
+          2541
+        ],
+        "thermal_slowdown_samples": []
+      }
+    },
+    "raw/mimo-1m-w4/refresh/default": {
+      "node0-telemetry.jsonl": {
+        "sha256": "dcd614236f78dd00bb5241e9c3e812230c3eaf5063854b7b9bd5c2821b3e8014",
+        "serving_memory_samples": 2304,
+        "minimum_available_gib": 14.272205352783203,
+        "gpu_samples": 464,
+        "maximum_temperature_c": 81,
+        "sm_mhz_range": [
+          208,
+          2535
+        ],
+        "thermal_slowdown_samples": []
+      },
+      "node1-telemetry.jsonl": {
+        "sha256": "ab442b508a235ef91cbb2cf5e729f6653913dd244cbe1f03ddbbd6c7421dd5f5",
+        "serving_memory_samples": 2303,
+        "minimum_available_gib": 16.06063461303711,
+        "gpu_samples": 464,
+        "maximum_temperature_c": 79,
+        "sm_mhz_range": [
+          208,
+          2444
+        ],
+        "thermal_slowdown_samples": []
+      },
+      "node2-telemetry.jsonl": {
+        "sha256": "515a40c464293c30c459f42eaaa6c0c6272fee0a6f2e6b1c0edc56a72847713a",
+        "serving_memory_samples": 2304,
+        "minimum_available_gib": 15.866230010986328,
+        "gpu_samples": 464,
+        "maximum_temperature_c": 80,
+        "sm_mhz_range": [
+          208,
+          2476
+        ],
+        "thermal_slowdown_samples": []
+      },
+      "node3-telemetry.jsonl": {
+        "sha256": "a69aee917a2a78b1b2947c292a69869a606d724aa25eb7fc6b67d68def0f8eea",
+        "serving_memory_samples": 2303,
+        "minimum_available_gib": 15.863391876220703,
+        "gpu_samples": 464,
+        "maximum_temperature_c": 78,
+        "sm_mhz_range": [
+          208,
+          2522
+        ],
+        "thermal_slowdown_samples": []
+      }
+    },
+    "raw/mimo-w2/refresh/default": {
+      "node0-telemetry.jsonl": {
+        "sha256": "77d07ce28181c71d9919758befb87b8709551355e9a73d7bed9db9bc8bfc1bd5",
+        "serving_memory_samples": 1343,
+        "minimum_available_gib": 16.153213500976562,
+        "gpu_samples": 270,
+        "maximum_temperature_c": 84,
+        "sm_mhz_range": [
+          208,
+          2561
+        ],
+        "thermal_slowdown_samples": []
+      },
+      "node1-telemetry.jsonl": {
+        "sha256": "e2839e63cc2af83f62108e6bd98a54a6a4a7e03b75b64320f02fbbc211d84fb6",
+        "serving_memory_samples": 1341,
+        "minimum_available_gib": 17.03191375732422,
+        "gpu_samples": 270,
+        "maximum_temperature_c": 83,
+        "sm_mhz_range": [
+          208,
+          2463
+        ],
+        "thermal_slowdown_samples": []
+      }
+    },
+    "raw/mimo-w2-fp8kv/refresh/default": {
+      "node0-telemetry.jsonl": {
+        "sha256": "8616ecce7beeaacaa834e4c002accba0a9bcc1e21cb24cea91f6ac8aee8ba8e6",
+        "serving_memory_samples": 1993,
+        "minimum_available_gib": 16.006759643554688,
+        "gpu_samples": 400,
+        "maximum_temperature_c": 83,
+        "sm_mhz_range": [
+          208,
+          2535
+        ],
+        "thermal_slowdown_samples": []
+      },
+      "node1-telemetry.jsonl": {
+        "sha256": "ad001e959d05e462fc5a3bda50387b6bff1717b90efe790afda0edbba0a6780b",
+        "serving_memory_samples": 1992,
+        "minimum_available_gib": 17.67510223388672,
+        "gpu_samples": 400,
+        "maximum_temperature_c": 83,
+        "sm_mhz_range": [
+          208,
+          2444
+        ],
+        "thermal_slowdown_samples": []
+      }
+    },
+    "raw/mimo-w4/refresh/default": {
+      "node0-telemetry.jsonl": {
+        "sha256": "66b736668e628814cb7d4c5e3cebc3384feabc33df0be29fd4cf61d62ce4c149",
+        "serving_memory_samples": 907,
+        "minimum_available_gib": 63.45867156982422,
+        "gpu_samples": 184,
+        "maximum_temperature_c": 80,
+        "sm_mhz_range": [
+          208,
+          2554
+        ],
+        "thermal_slowdown_samples": []
+      },
+      "node1-telemetry.jsonl": {
+        "sha256": "3a3810a03dcd7599976d001b787de82013a456aa532f25a4fa27de8b5ad4d791",
+        "serving_memory_samples": 904,
+        "minimum_available_gib": 65.25603103637695,
+        "gpu_samples": 184,
+        "maximum_temperature_c": 79,
+        "sm_mhz_range": [
+          208,
+          2483
+        ],
+        "thermal_slowdown_samples": []
+      },
+      "node2-telemetry.jsonl": {
+        "sha256": "4ba6e0a5ba6c0a3c1e9058f4c1278554067d5b607e5e2a78648a73dbf8759de0",
+        "serving_memory_samples": 905,
+        "minimum_available_gib": 64.65584564208984,
+        "gpu_samples": 185,
+        "maximum_temperature_c": 80,
+        "sm_mhz_range": [
+          208,
+          2515
+        ],
+        "thermal_slowdown_samples": []
+      },
+      "node3-telemetry.jsonl": {
+        "sha256": "bec1187884d6afa1a2c3b0ebfd4fdc035ffe185a8cd11410c0a5b7b4dd2b82a9",
+        "serving_memory_samples": 905,
+        "minimum_available_gib": 65.18338775634766,
+        "gpu_samples": 185,
+        "maximum_temperature_c": 77,
+        "sm_mhz_range": [
+          208,
+          2574
+        ],
+        "thermal_slowdown_samples": []
+      }
+    }
+  }
+}

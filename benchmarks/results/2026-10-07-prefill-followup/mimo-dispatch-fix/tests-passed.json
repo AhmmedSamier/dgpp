@@ -1,0 +1,17 @@
+{
+  "passed": true,
+  "host": "192.168.88.13",
+  "at": "2026-10-07T22:43:18.435724+00:00",
+  "scoped_swap_max": 0,
+  "tests": [
+    "scale_gemm_test",
+    "fp8w_gemm_test"
+  ],
+  "scale_gemm_test_count": 20,
+  "source_sha256": {
+    "src/kernels/scale_gemm.cu": "b3675795b10a0d1486daa98d7cb034cf7967ad6477aa4a0bf35399895dd18663",
+    "src/kernels/scale_gemm.hpp": "39d13b34d049943eebd4a31c875981f736fe2f60942d93d824bac9dd45bfcbca",
+    "tests/cuda/scale_gemm_test.cu": "ac1e3f66216aade9c1ad4fc68b1d8fe4220d6e3d65b3e1e01a6502495b5847a6"
+  },
+  "source_note": "After the tested build, header and caller comments were updated to describe the dispatch; executable code is unchanged."
+}

@@ -1,0 +1,20 @@
+{
+  "at": "2026-10-07T23:42:41.277208+00:00",
+  "passed": true,
+  "revision": "5711b268169967567844e1e560e8a3966da959b1",
+  "snapshot": "/home/stephen/.cache/huggingface/hub/models--XiaomiMiMo--MiMo-V2.6-Flash-RL/snapshots/5711b268169967567844e1e560e8a3966da959b1",
+  "copies": [
+    {
+      "host": "192.168.88.12",
+      "returncode": 0
+    },
+    {
+      "host": "192.168.88.13",
+      "returncode": 0
+    },
+    {
+      "host": "192.168.88.14",
+      "returncode": 0
+    }
+  ]
+}

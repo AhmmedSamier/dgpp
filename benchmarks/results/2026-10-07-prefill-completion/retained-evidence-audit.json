@@ -1,0 +1,6 @@
+{
+  "passed": true,
+  "launches": 10,
+  "measurement_groups": 46,
+  "scope": "Validated all new reports, rerendered the document, and reproduced diagnostic comparisons using only the retained package and tracked historical helpers."
+}

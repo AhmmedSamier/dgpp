@@ -1,0 +1,5 @@
+{
+  "at": "2026-10-07T22:08:45.994837+00:00",
+  "reason": "Rank 0 startup memory guard refused allocation while checkpoint downloader was active. No benchmark requests or measurements. Stopped launcher and cleaned up cluster; repeat after downloader exits.",
+  "valid_measurements": false
+}

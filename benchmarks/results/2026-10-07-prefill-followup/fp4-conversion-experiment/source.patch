@@ -1,0 +1,128 @@
+diff --git a/src/kernels/dsa.cu b/src/kernels/dsa.cu
+index 3f587ad8..7f8281fb 100644
+--- a/src/kernels/dsa.cu
++++ b/src/kernels/dsa.cu
+@@ -19,0 +20 @@
++#include <cuda_fp4.h>
+@@ -143,0 +145,12 @@ struct LatentTile<LatentFormat::kFp4> {
++  // Both e2m1 values and finite e4m3 block scales fit exactly in fp16.
++  // Decode pairs in hardware, preserving the codec's two fp32 multiplies
++  // and final bf16 rounding. Scalar software conversion inside every
++  // gathered tile was a substantial full-GLM prefill cost.
++  static __device__ __forceinline__ uint32_t decode2(uint8_t codes, float s) {
++    const __half2_raw h = __nv_cvt_fp4x2_to_halfraw2(codes, __NV_E2M1);
++    const float2 v = __half22float2(__half2(h));
++    return pack_bf16x2(float_to_bf16_bits(v.x * s), float_to_bf16_bits(v.y * s));
++  }
++  static __device__ __forceinline__ float block_scale(uint8_t code, float s) {
++    return fp8x2_to_float2(code).x * s;
++  }
+@@ -153 +166 @@ struct LatentTile<LatentFormat::kFp4> {
+-    const float S = latent_fp4_block_scale(
++    const float S = block_scale(
+@@ -155,4 +167,0 @@ struct LatentTile<LatentFormat::kFp4> {
+-    uint16_t v[8];
+-#pragma unroll
+-    for (int j = 0; j < 8; ++j)
+-      v[j] = latent_fp4_decode_bf16(static_cast<uint8_t>((raw >> (4 * j)) & 0xFu), S);
+@@ -160,4 +169,4 @@ struct LatentTile<LatentFormat::kFp4> {
+-    out.x = pack_bf16x2(v[0], v[1]);
+-    out.y = pack_bf16x2(v[2], v[3]);
+-    out.z = pack_bf16x2(v[4], v[5]);
+-    out.w = pack_bf16x2(v[6], v[7]);
++    out.x = decode2(static_cast<uint8_t>(raw), S);
++    out.y = decode2(static_cast<uint8_t>(raw >> 8), S);
++    out.z = decode2(static_cast<uint8_t>(raw >> 16), S);
++    out.w = decode2(static_cast<uint8_t>(raw >> 24), S);
+@@ -174 +183 @@ struct LatentTile<LatentFormat::kFp4> {
+-    const float S = latent_fp4_block_scale(
++    const float S = block_scale(
+@@ -177,2 +186,2 @@ struct LatentTile<LatentFormat::kFp4> {
+-    return latent_fp4_decode_bf16(
+-        static_cast<uint8_t>((e & 1) ? (byte >> 4) : (byte & 0xFu)), S);
++    const uint32_t pair = decode2(byte, S);
++    return static_cast<uint16_t>((e & 1) ? (pair >> 16) : pair);
+diff --git a/tests/cuda/dsa_test.cu b/tests/cuda/dsa_test.cu
+index 86ecae7e..879840ee 100644
+--- a/tests/cuda/dsa_test.cu
++++ b/tests/cuda/dsa_test.cu
+@@ -4329,0 +4330,79 @@ DGPP_TEST(dsa_attention_quantized_cache_matches_dequantized_oracle) {
++// Exercise every finite nonnegative e4m3 block-scale code and every e2m1
++// value through the actual attention loaders. The host codec supplies an
++// equivalent bf16 cache, so both kernels must produce identical partials.
++DGPP_TEST(dsa_fp4_attention_loaders_match_bf16_for_all_codes) {
++  constexpr int rows = 127, heads = 16, latent = 512, rope = 64;
++  constexpr int width = latent + rope, block = 128, splits = 1;
++  const size_t packed_stride = latent_row_bytes(LatentFormat::kFp4, latent) + rope * 2;
++  std::vector<uint8_t> packed(block * packed_stride);
++  std::vector<uint16_t> plain(block * width), query(rows * heads * width, 0);
++  std::vector<float> scales(block, 0);
++  std::vector<int32_t> req(rows, 0), tokens(rows), counts(rows, 1);
++  std::vector<int64_t> positions(rows);
++  for (int r = 0; r < rows; ++r) {
++    // Include zero and scales on both sides of unity, with non-power-of-two
++    // mantissas so final bf16 rounding is exercised as well.
++    scales[r] = r == 0 ? 0.0f : std::ldexp(1.00390625f + (r % 7) * 0.03125f, r % 25 - 12);
++    tokens[r] = r;
++    positions[r] = r;
++    auto* p = packed.data() + r * packed_stride;
++    for (int e = 0; e < latent; ++e) {
++      const uint8_t code = e % 16;
++      const uint8_t scale_code = (r + e / kLatentFp4Block) % 127;
++      p[e / 2] |= static_cast<uint8_t>(code << ((e & 1) * 4));
++      p[latent_fp4_scale_offset(latent) + e / kLatentFp4Block] = scale_code;
++      plain[r * width + e] = latent_fp4_decode_bf16(code,
++          latent_fp4_block_scale(scale_code, scales[r]));
++    }
++    for (int e = 0; e < rope; ++e) {
++      const uint16_t v = float_to_bf16_bits((e - 32) * 0.03125f);
++      std::memcpy(p + latent_row_bytes(LatentFormat::kFp4, latent) + e * 2, &v, 2);
++      plain[r * width + latent + e] = v;
++    }
++  }
++  DevBuf dp(packed.size()), db(plain.size() * 2), dq(query.size() * 2),
++      ds(scales.size() * 4), dr(req.size() * 4), dt(tokens.size() * 4),
++      dn(counts.size() * 4), dpos(positions.size() * 8), dbt(4),
++      dm(rows * heads * 4), dl(rows * heads * 4), dc(rows * heads * latent * 4);
++  dp.upload(packed.data(), packed.size()); db.upload(plain.data(), plain.size() * 2);
++  dq.upload(query.data(), query.size() * 2); ds.upload(scales.data(), scales.size() * 4);
++  dr.upload(req.data(), req.size() * 4); dt.upload(tokens.data(), tokens.size() * 4);
++  dn.upload(counts.data(), counts.size() * 4); dpos.upload(positions.data(), positions.size() * 8);
++  const int32_t zero = 0; dbt.upload(&zero, 4);
++  for (int kernel = 0; kernel < 3; ++kernel) {
++    std::vector<float> reference, got;
++    for (LatentFormat fmt : {LatentFormat::kBf16, LatentFormat::kFp4}) {
++      const void* cache = fmt == LatentFormat::kBf16 ? db.p : dp.p;
++      const float* scale = fmt == LatentFormat::kBf16 ? nullptr : static_cast<const float*>(ds.p);
++      bool accepted = true;
++      if (kernel == 0) {
++        dsa_attn_partial(dq.p, cache, static_cast<const int32_t*>(dr.p),
++            static_cast<const int32_t*>(dt.p), 1, static_cast<const int32_t*>(dn.p),
++            rows, splits, heads, latent, block, static_cast<const int32_t*>(dbt.p),
++            1, 1.0f, static_cast<float*>(dm.p), static_cast<float*>(dl.p),
++            static_cast<float*>(dc.p), 0, fmt, scale, rope);
++      } else if (kernel == 1) {
++        accepted = dsa_attn_listed(dq.p, cache, static_cast<const int32_t*>(dr.p),
++            static_cast<const int32_t*>(dt.p), 1, static_cast<const int32_t*>(dn.p),
++            rows, splits, heads, latent, block, static_cast<const int32_t*>(dbt.p),
++            1, 1.0f, static_cast<float*>(dm.p), static_cast<float*>(dl.p),
++            static_cast<float*>(dc.p), 0, fmt, scale, rope);
++      } else {
++        accepted = dsa_attn_dense(dq.p, cache, static_cast<const int32_t*>(dr.p),
++            static_cast<const int64_t*>(dpos.p), rows, splits, heads, latent, block,
++            static_cast<const int32_t*>(dbt.p), 1, 1.0f, static_cast<float*>(dm.p),
++            static_cast<float*>(dl.p), static_cast<float*>(dc.p), 0, fmt, scale, rope);
++      }
++      if (!accepted) throw std::runtime_error("fp4 code coverage: attention kernel declined geometry");
++      DGPP_CUDA_OK(cudaDeviceSynchronize());
++      auto& out = fmt == LatentFormat::kBf16 ? reference : got;
++      out.resize(rows * heads * (latent + 2));
++      dm.download(out.data(), rows * heads * 4);
++      dl.download(out.data() + rows * heads, rows * heads * 4);
++      dc.download(out.data() + 2 * rows * heads, rows * heads * latent * 4);
++    }
++    require_bitwise("fp4 all-code attention kernel " + std::to_string(kernel),
++        got.data(), reference.data(), got.size() * sizeof(float));
++  }
++}
++

@@ -1,0 +1,31 @@
+{
+  "started_at": "2026-10-07T23:10:42.657935+00:00",
+  "commit": "90ebbf1bcc2976ebaa94e0b4cf8779caed52f3db",
+  "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+  "candidate_binary": "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/mimo-dispatch-fix/native/dgpp-serve",
+  "candidate_binary_sha256": "616d35a9d3f1a4d61b53622aa7a7a2f0389ffa1f3ab1bbd1d97abe0395bd0f6d",
+  "purpose": "Complete all measurements affected by the idle-budget, FP4 conversion and FP8 projection-dispatch fixes.",
+  "benchmark_environment": {
+    "DGPP_NO_SWAP": "1",
+    "CUDA_DEVICE_MAX_CONNECTIONS": "32"
+  },
+  "model_revision": "5711b268169967567844e1e560e8a3966da959b1",
+  "source_sha256": {
+    "src/kernels/dsa.cu": "deae7b318970c402ccc1506700d81dc373b81dece2f6b16a70a53ec6d0bac45c",
+    "src/kernels/scale_gemm.cu": "b3675795b10a0d1486daa98d7cb034cf7967ad6477aa4a0bf35399895dd18663",
+    "tests/cuda/dsa_test.cu": "6a4d96a614323f1c8cfaa83e1619ebf30da1d195889e6f45e18cad4c73a1f44b",
+    "tests/cuda/scale_gemm_test.cu": "ac1e3f66216aade9c1ad4fc68b1d8fe4220d6e3d65b3e1e01a6502495b5847a6"
+  },
+  "binary_role": "binary_sha256 guards the preserved release executable; every measured launch uses candidate_binary_sha256 and records that hash as its binary_sha256.",
+  "harness_sha256": {
+    "run.py": "5cecc45e6fcdf3316d839692d31edd366a41269300d4a31572a373edcaa79632",
+    "results.py": "f49ac58284478a252885916791ba8c1426da1045003cfcb6195f3617801016de",
+    "update_document.py": "9d0713f327703e2592fbd8527e50f80ffb0f179fb25ab7db2a4397e0ca3c09ab",
+    "node_telemetry.py": "345928df413d63db36502018eac0931dd7113c2564c73c81e1d0a1cf55895d23"
+  },
+  "clients_sha256": {
+    "scripts/timed_load.py": "e38328d44f4719b5bfcb110fe0d5737df96aebf61ed8dc467bf3850217c5e12f",
+    "scripts/serve_prefill_probe.py": "0e7443e6e48e34a1fbfc6311e8f1396b48bbae7e22225c8db8d98f1d4290d783",
+    "scripts/serve_context_matrix.py": "ba657bc82c5f15148be2d08563f677e2498fcb3c7e681f8376e70f70b10a5310"
+  }
+}

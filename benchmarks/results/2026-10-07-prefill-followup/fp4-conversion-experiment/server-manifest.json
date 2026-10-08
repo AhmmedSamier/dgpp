@@ -1,0 +1,5 @@
+{
+  "binary": "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/fp4-conversion-experiment/native/dgpp-serve",
+  "binary_sha256": "c9f25e2ead9e4f14dfbffe2c7a9361ea057a2fce74c1635e3203947ceabf8d0d",
+  "baseline_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34"
+}

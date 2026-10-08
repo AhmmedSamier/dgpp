@@ -1,0 +1,13 @@
+           vs the tile kernel: 0 f32 and 0 bf16 outputs differ
+per-weight m=300 n=200 k=192: worst relative error 1.26e-06 (of |ref| + rms 2.45)
+per-group  m=300 n=200 k=192: worst relative error 1.00e-06 (of |ref| + rms 2.5)
+           vs the tile kernel: 0 f32 and 0 bf16 outputs differ
+per-weight m=137 n=384 k=128: worst relative error 9.76e-07 (of |ref| + rms 1.91)
+per-group  m=137 n=384 k=128: worst relative error 7.94e-07 (of |ref| + rms 1.99)
+           vs the tile kernel: 0 f32 and 0 bf16 outputs differ
+per-weight m=1100 n=256 k=2048: worst relative error 9.63e-06 (of |ref| + rms 7.78)
+per-group  m=1100 n=256 k=2048: worst relative error 9.62e-07 (of |ref| + rms 7.37)
+           vs the tile kernel: 0 f32 and 0 bf16 outputs differ
+per-weight m=33 n=1024 k=5120: worst relative error 2.37e-05 (of |ref| + rms 12.8)
+per-group  m=33 n=1024 k=5120: worst relative error 8.07e-07 (of |ref| + rms 12.6)
+fp8w_gemm_test: OK
