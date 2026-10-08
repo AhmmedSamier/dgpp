@@ -1,0 +1,4 @@
+{
+  "reason": "Candidate head executable basename did not match the serving-process telemetry filter; cgroup swap prevention applied but head process telemetry absent. Discard all timings; repeat using native/dgpp-serve basename.",
+  "valid_measurements": false
+}

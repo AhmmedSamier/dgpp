@@ -1,0 +1,108 @@
+{
+  "passed": true,
+  "scope": "Unprofiled matched fresh-server runs; same config/prompt hashes; only serving binary changes. MTP1, 256K FP4 KV, 8 slots, TP4. Two cold probes per target and two deterministic 256-token decode checks.",
+  "before_binary": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+  "after_binary": "c9f25e2ead9e4f14dfbffe2c7a9361ea057a2fce74c1635e3203947ceabf8d0d",
+  "prefill_checks": [
+    {
+      "target": 2048,
+      "repeat": 0,
+      "differences": []
+    },
+    {
+      "target": 2048,
+      "repeat": 1,
+      "differences": []
+    },
+    {
+      "target": 8192,
+      "repeat": 0,
+      "differences": []
+    },
+    {
+      "target": 8192,
+      "repeat": 1,
+      "differences": []
+    },
+    {
+      "target": 32768,
+      "repeat": 0,
+      "differences": []
+    },
+    {
+      "target": 32768,
+      "repeat": 1,
+      "differences": []
+    }
+  ],
+  "decode_checks": [
+    {
+      "same_request": true,
+      "same_choices": true,
+      "same_usage": true,
+      "completion_tokens": 256
+    },
+    {
+      "same_request": true,
+      "same_choices": true,
+      "same_usage": true,
+      "completion_tokens": 256
+    }
+  ],
+  "rows": [
+    {
+      "target": 2048,
+      "before": {
+        "target": 2048,
+        "samples": 2,
+        "median_actual_tokens": 2061.0,
+        "median_prefill_s": 4.3466000000000005,
+        "median_ms_per_token": 2.108213898259116
+      },
+      "after": {
+        "target": 2048,
+        "samples": 2,
+        "median_actual_tokens": 2061.0,
+        "median_prefill_s": 3.7702999999999998,
+        "median_ms_per_token": 1.8286209804553082
+      },
+      "speedup": 1.1528525581518714
+    },
+    {
+      "target": 8192,
+      "before": {
+        "target": 8192,
+        "samples": 2,
+        "median_actual_tokens": 8158.0,
+        "median_prefill_s": 24.499000000000002,
+        "median_ms_per_token": 3.0030740293794644
+      },
+      "after": {
+        "target": 8192,
+        "samples": 2,
+        "median_actual_tokens": 8158.0,
+        "median_prefill_s": 17.1798,
+        "median_ms_per_token": 2.1058985698775623
+      },
+      "speedup": 1.426035227418247
+    },
+    {
+      "target": 32768,
+      "before": {
+        "target": 32768,
+        "samples": 2,
+        "median_actual_tokens": 32748.0,
+        "median_prefill_s": 110.25434999999999,
+        "median_ms_per_token": 3.366738743793925
+      },
+      "after": {
+        "target": 32768,
+        "samples": 2,
+        "median_actual_tokens": 32748.0,
+        "median_prefill_s": 74.98774999999999,
+        "median_ms_per_token": 2.289836523432118
+      },
+      "speedup": 1.4702981486976205
+    }
+  ]
+}

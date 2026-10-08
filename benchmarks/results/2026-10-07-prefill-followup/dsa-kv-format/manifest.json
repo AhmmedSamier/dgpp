@@ -1,0 +1,6 @@
+{
+  "at": "2026-10-07T21:56:41.372946+00:00",
+  "host": "192.168.88.13",
+  "binary_sha256": "e8e31748e96bb2806f69a19eb0fb526390b6d957f886c434c29fca786aa7d5dd",
+  "scope": "Synthetic indexed attention layer, full GLM geometry, TP4 slice. Same 262144-token capacity and 2048-row chunk across formats. Does not include MoE or collectives; separate idle GPU from the checkpoint download."
+}

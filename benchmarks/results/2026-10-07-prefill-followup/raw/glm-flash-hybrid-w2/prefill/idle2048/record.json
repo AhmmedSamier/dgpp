@@ -1,0 +1,276 @@
+{
+  "schema_version": 1,
+  "records": {
+    "config.json": {
+      "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+      "world_size": 2,
+      "release": "",
+      "engine": {
+        "max_concurrency": 4,
+        "kv_capacity": 163840,
+        "kv_dtype": "fp8",
+        "bf16_weights": "bf12",
+        "default_max_tokens": 32768,
+        "queue_limit": 8,
+        "max_connections": 64,
+        "decode_graph": true,
+        "mtp": true,
+        "prefix_cache_gib": 4.5,
+        "admission": "full",
+        "admission_window": 256,
+        "sampling_candidates": 128,
+        "stats_interval_s": 10,
+        "prefill_idle_budget_tokens": 2048
+      },
+      "paths": {
+        "resident_cache": ""
+      },
+      "http": {
+        "bind_host": "127.0.0.1",
+        "port": 18080
+      }
+    },
+    "manifest.json": {
+      "started_at": "2026-10-07T21:40:10.414855+00:00",
+      "commit": "90ebbf1bcc2976ebaa94e0b4cf8779caed52f3db",
+      "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+      "benchmark_environment": {
+        "DGPP_NO_SWAP": "1",
+        "CUDA_DEVICE_MAX_CONNECTIONS": "32"
+      },
+      "purpose": "Investigate GLM Flash TP2, full GLM TP4, and MiMo TP2 cold-prefill performance; configuration comparisons use the identical fixed binary."
+    },
+    "plan.json": {
+      "deployment": "glm-flash-hybrid-w2",
+      "variant": "idle2048",
+      "overrides": {
+        "prefill_idle_budget_tokens": 2048
+      },
+      "lengths": [
+        2048,
+        8192,
+        32768
+      ],
+      "repeat": 2,
+      "profiled": false,
+      "purpose": "Diagnostic A/B; published matrix remains unchanged."
+    },
+    "complete.json": {
+      "at": "2026-10-07T21:48:03.867922+00:00",
+      "passed": true
+    },
+    "memory-check.json": {
+      "passed": true,
+      "ranks": [
+        {
+          "rank": 0,
+          "samples": 132,
+          "max_swap_KiB": 0,
+          "swap_policy_required": true,
+          "swap_policy_passed": true,
+          "max_sample_gap_s": 1.0794428780209273,
+          "violations": [],
+          "errors": []
+        },
+        {
+          "rank": 1,
+          "samples": 130,
+          "max_swap_KiB": 0,
+          "swap_policy_required": true,
+          "swap_policy_passed": true,
+          "max_sample_gap_s": 1.0557064211461693,
+          "violations": [],
+          "errors": []
+        }
+      ]
+    },
+    "rank-identity.json": {
+      "expected_ranks": 2,
+      "md5": {
+        "serve_rank0.ops": "dfd2a85b018b9d2ed5ae282fd80a0232",
+        "serve_rank1.ops": "dfd2a85b018b9d2ed5ae282fd80a0232"
+      },
+      "passed": true
+    },
+    "models.json": {
+      "object": "list",
+      "data": [
+        {
+          "id": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+          "object": "model",
+          "created": 1791409586,
+          "owned_by": "dgpp",
+          "sampling": {
+            "available": true,
+            "defaults": {
+              "temperature": 1,
+              "top_p": 0.95,
+              "top_k": 0,
+              "min_p": 0,
+              "repetition_penalty": 1
+            }
+          },
+          "tools": {
+            "available": true,
+            "constrained": true
+          },
+          "response_format": {
+            "json_object": true,
+            "json_schema": true
+          },
+          "reasoning": {
+            "in_content": false,
+            "effort_mapping": {
+              "minimal": {
+                "reasoning_effort": "low"
+              },
+              "low": {
+                "reasoning_effort": "low"
+              },
+              "medium": {
+                "reasoning_effort": "high"
+              },
+              "high": {
+                "reasoning_effort": "high"
+              },
+              "xhigh": {
+                "reasoning_effort": "max"
+              },
+              "max": {
+                "reasoning_effort": "max"
+              }
+            }
+          },
+          "default_chat_template_kwargs": {},
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context": {
+            "request_limit_tokens": 163840,
+            "position_ceiling_tokens": null,
+            "kv_pool_tokens": 163840,
+            "limited_by": "kv-pool"
+          }
+        }
+      ]
+    },
+    "up.log.command.json": {
+      "command": [
+        "/usr/bin/python3",
+        "/home/stephen/workspace/dgpp/scripts/dgpp-cluster",
+        "up",
+        "--config",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/raw/glm-flash-hybrid-w2/prefill/idle2048/config.json",
+        "--bin",
+        "/home/stephen/workspace/dgpp/build-release/dgpp-serve",
+        "--log-dir",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/raw/glm-flash-hybrid-w2/prefill/idle2048/server"
+      ],
+      "cwd": "/home/stephen/workspace/dgpp",
+      "started_at": "2026-10-07T21:45:44.539173+00:00",
+      "returncode": 0,
+      "finished_at": "2026-10-07T21:46:26.684761+00:00"
+    },
+    "prefill.log.command.json": {
+      "command": [
+        "/usr/bin/python3",
+        "/home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py",
+        "127.0.0.1",
+        "18080",
+        "2048",
+        "8192",
+        "32768",
+        "--repeat",
+        "2",
+        "--seed",
+        "7",
+        "--tag",
+        "followup-glm-flash-hybrid-w2",
+        "--interval",
+        "0",
+        "--json-out",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/raw/glm-flash-hybrid-w2/prefill/idle2048/prefill.json"
+      ],
+      "cwd": "/home/stephen/workspace/dgpp",
+      "started_at": "2026-10-07T21:46:26.699580+00:00",
+      "returncode": 0,
+      "finished_at": "2026-10-07T21:47:59.171431+00:00"
+    },
+    "down.log.command.json": {
+      "command": [
+        "/usr/bin/python3",
+        "/home/stephen/workspace/dgpp/scripts/dgpp-cluster",
+        "down",
+        "--config",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/raw/glm-flash-hybrid-w2/prefill/idle2048/config.json",
+        "--log-dir",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/raw/glm-flash-hybrid-w2/prefill/idle2048/server"
+      ],
+      "cwd": "/home/stephen/workspace/dgpp",
+      "started_at": "2026-10-07T21:47:59.171779+00:00",
+      "returncode": 0,
+      "finished_at": "2026-10-07T21:48:03.860683+00:00"
+    },
+    "server/cluster.resolved.json": {
+      "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+      "release": "",
+      "engine": {
+        "max_concurrency": 4,
+        "kv_capacity": 163840,
+        "kv_dtype": "fp8",
+        "bf16_weights": "bf12",
+        "default_max_tokens": 32768,
+        "queue_limit": 8,
+        "max_connections": 64,
+        "decode_graph": true,
+        "mtp": true,
+        "prefix_cache_gib": 4.5,
+        "admission": "full",
+        "admission_window": 256,
+        "sampling_candidates": 128,
+        "stats_interval_s": 10,
+        "prefill_idle_budget_tokens": 2048
+      },
+      "paths": {
+        "resident_cache": "",
+        "log_dir": "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/raw/glm-flash-hybrid-w2/prefill/idle2048/server",
+        "stage_dir": "/tmp/bus4/deployments/fe0a14a042876fe0",
+        "release_dir": "~/dgpp/releases"
+      },
+      "http": {
+        "bind_host": "127.0.0.1",
+        "port": 18080
+      },
+      "nodes": [
+        "192.168.88.11",
+        "192.168.88.12"
+      ],
+      "ssh_user": "stephen",
+      "ports": {
+        "http": 18080,
+        "fabric": 29970,
+        "journal": 29971
+      },
+      "node_env": [
+        {},
+        {}
+      ]
+    }
+  },
+  "evidence_sha256": {
+    "prefill.json": "f4577f8fcc1b4116360a866a4cb770ccfa47d3bdfa4b542c3fa48aa3a32ff079"
+  },
+  "local_telemetry": [
+    {
+      "file": "node0-telemetry.jsonl",
+      "bytes": 191300,
+      "sha256": "006eb024d129240bb91bba2a13b669b3a0bc7eed2a3c4d4a9b2b8265f9ee6f63"
+    },
+    {
+      "file": "node1-telemetry.jsonl",
+      "bytes": 187313,
+      "sha256": "e1d14bc6797d8981abd4205503021808a34b362133c09bd8c035782892116d85"
+    }
+  ]
+}

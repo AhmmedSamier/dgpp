@@ -1,0 +1,33 @@
+{
+  "at": "2026-10-08T03:36:39.369243+00:00",
+  "removed": [
+    {
+      "host": "192.168.88.11",
+      "paths": [
+        "/home/stephen/.cache/huggingface/hub/models--XiaomiMiMo--MiMo-V2.6-Flash-RL",
+        "/home/stephen/.cache/dgpp/prefill-completion-2026-10-07"
+      ]
+    },
+    {
+      "host": "192.168.88.12",
+      "paths": [
+        "/home/stephen/.cache/huggingface/hub/models--XiaomiMiMo--MiMo-V2.6-Flash-RL",
+        "/home/stephen/.cache/dgpp/prefill-completion-2026-10-07"
+      ]
+    },
+    {
+      "host": "192.168.88.13",
+      "paths": [
+        "/home/stephen/.cache/huggingface/hub/models--XiaomiMiMo--MiMo-V2.6-Flash-RL",
+        "/home/stephen/.cache/dgpp/prefill-completion-2026-10-07"
+      ]
+    },
+    {
+      "host": "192.168.88.14",
+      "paths": [
+        "/home/stephen/.cache/huggingface/hub/models--XiaomiMiMo--MiMo-V2.6-Flash-RL",
+        "/home/stephen/.cache/dgpp/prefill-completion-2026-10-07"
+      ]
+    }
+  ]
+}

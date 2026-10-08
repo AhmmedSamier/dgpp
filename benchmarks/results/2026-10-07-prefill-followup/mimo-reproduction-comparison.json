@@ -1,0 +1,186 @@
+{
+  "passed": true,
+  "note": "New prompts differ from published probes; compare normalized per-token times and profiles, not exact latency ratios.",
+  "rows": [
+    {
+      "deployment": "mimo-w2",
+      "current": {
+        "target": 2048,
+        "samples": 2,
+        "median_actual_tokens": 2087.0,
+        "median_prefill_s": 3.41675,
+        "median_ms_per_token": 1.6371550622100264
+      },
+      "published": {
+        "deployment": "mimo-w2",
+        "target": 2048,
+        "median_actual_tokens": 2019,
+        "median_prefill_s": 3.1815999999999987,
+        "median_ms_per_actual_token": 1.57582961862308,
+        "sources": [
+          {
+            "path": "raw/mimo-w2/refresh/default/prefill.json",
+            "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+            "reused": false,
+            "lengths": [
+              2048,
+              8192,
+              32768
+            ]
+          }
+        ]
+      },
+      "ms_per_token_ratio_to_published": 1.0389162907348644
+    },
+    {
+      "deployment": "mimo-w2",
+      "current": {
+        "target": 8192,
+        "samples": 2,
+        "median_actual_tokens": 8268.5,
+        "median_prefill_s": 12.932699999999999,
+        "median_ms_per_token": 1.564057688405624
+      },
+      "published": {
+        "deployment": "mimo-w2",
+        "target": 8192,
+        "median_actual_tokens": 7936,
+        "median_prefill_s": 12.2585,
+        "median_ms_per_actual_token": 1.541868731750667,
+        "sources": [
+          {
+            "path": "raw/mimo-w2/refresh/default/prefill.json",
+            "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+            "reused": false,
+            "lengths": [
+              2048,
+              8192,
+              32768
+            ]
+          }
+        ]
+      },
+      "ms_per_token_ratio_to_published": 1.0143909505381585
+    },
+    {
+      "deployment": "mimo-w2",
+      "current": {
+        "target": 32768,
+        "samples": 2,
+        "median_actual_tokens": 33225.0,
+        "median_prefill_s": 55.93345,
+        "median_ms_per_token": 1.683472047723394
+      },
+      "published": {
+        "deployment": "mimo-w2",
+        "target": 32768,
+        "median_actual_tokens": 31743,
+        "median_prefill_s": 52.963900000000024,
+        "median_ms_per_actual_token": 1.6685221938695152,
+        "sources": [
+          {
+            "path": "raw/mimo-w2/refresh/default/prefill.json",
+            "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+            "reused": false,
+            "lengths": [
+              2048,
+              8192,
+              32768
+            ]
+          }
+        ]
+      },
+      "ms_per_token_ratio_to_published": 1.008959937068148
+    },
+    {
+      "deployment": "mimo-w2-fp8kv",
+      "current": {
+        "target": 2048,
+        "samples": 2,
+        "median_actual_tokens": 2075.5,
+        "median_prefill_s": 3.4181,
+        "median_ms_per_token": 1.6468819671750587
+      },
+      "published": {
+        "deployment": "mimo-w2-fp8kv",
+        "target": 2048,
+        "median_actual_tokens": 2029,
+        "median_prefill_s": 3.2219000000000015,
+        "median_ms_per_actual_token": 1.5842751842751843,
+        "sources": [
+          {
+            "path": "raw/mimo-w2-fp8kv/refresh/default/prefill.json",
+            "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+            "reused": false,
+            "lengths": [
+              2048,
+              8192,
+              32768
+            ]
+          }
+        ]
+      },
+      "ms_per_token_ratio_to_published": 1.0395176188589468
+    },
+    {
+      "deployment": "mimo-w2-fp8kv",
+      "current": {
+        "target": 8192,
+        "samples": 2,
+        "median_actual_tokens": 8206.5,
+        "median_prefill_s": 12.9672,
+        "median_ms_per_token": 1.580042947840714
+      },
+      "published": {
+        "deployment": "mimo-w2-fp8kv",
+        "target": 8192,
+        "median_actual_tokens": 7980,
+        "median_prefill_s": 12.6135,
+        "median_ms_per_actual_token": 1.580639097744361,
+        "sources": [
+          {
+            "path": "raw/mimo-w2-fp8kv/refresh/default/prefill.json",
+            "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+            "reused": false,
+            "lengths": [
+              2048,
+              8192,
+              32768
+            ]
+          }
+        ]
+      },
+      "ms_per_token_ratio_to_published": 0.9996228424916873
+    },
+    {
+      "deployment": "mimo-w2-fp8kv",
+      "current": {
+        "target": 32768,
+        "samples": 2,
+        "median_actual_tokens": 32961.5,
+        "median_prefill_s": 57.896249999999995,
+        "median_ms_per_token": 1.756481675997373
+      },
+      "published": {
+        "deployment": "mimo-w2-fp8kv",
+        "target": 32768,
+        "median_actual_tokens": 31912,
+        "median_prefill_s": 55.841100000000004,
+        "median_ms_per_actual_token": 1.749846452745049,
+        "sources": [
+          {
+            "path": "raw/mimo-w2-fp8kv/refresh/default/prefill.json",
+            "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+            "reused": false,
+            "lengths": [
+              2048,
+              8192,
+              32768
+            ]
+          }
+        ]
+      },
+      "ms_per_token_ratio_to_published": 1.0037918888493989
+    }
+  ]
+}

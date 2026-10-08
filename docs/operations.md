@@ -518,8 +518,8 @@ model and snapshot boundaries still split the work. Qwen retains its internal
 4,096-token limit and reports token progress after each completed chunk.
 The resolved budget is logged at startup and carried in rank 0's warm record.
 The single-Spark NVIDIA and RadixArk Qwen NVFP4 templates explicitly select
-4,096-token busy and idle budgets. The four-rank GLM-5.3-Flash deployment
-explicitly selects 256-token busy and 2,048-token idle budgets.
+4,096-token busy and idle budgets. The two- and four-rank GLM-5.3-Flash
+NVFP4/FP8 templates select 256-token busy and 2,048-token idle budgets.
 A positive budget executes one aligned prefill chunk per tick, followed by
 a decode pass for active requests. Try 256 or 512 tokens; the budget must
 be a multiple of the snapshot alignment and fit the prefill scratch limit.

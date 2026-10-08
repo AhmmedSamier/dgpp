@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+  "surface": {
+    "id": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+    "object": "model",
+    "created": 1791428023,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 0,
+        "top_p": 0.95,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true
+        },
+        "low": {
+          "enable_thinking": true
+        },
+        "medium": {
+          "enable_thinking": true
+        },
+        "high": {
+          "enable_thinking": true
+        },
+        "xhigh": {
+          "enable_thinking": true
+        },
+        "max": {
+          "enable_thinking": true
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text"
+    ],
+    "context": {
+      "request_limit_tokens": 131072,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 131072,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "ff15eb925890d6b71b5160de4b846fbd13178438ab463b38ecc953e8cd1dcb3e",
+  "seed": 20260922,
+  "tag": "completion-mimo-w4",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 3204.5,
+        "prefill_ms": 222.59999999999127,
+        "decode_steps": 136,
+        "decode_rows": 136,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 87,
+        "prompt_tokens_computed": 87
+      },
+      "engine_tokens_per_s": 79.57559681697613,
+      "ms_per_pass": 23.5625,
+      "tokens_per_pass": 1.875,
+      "answer": {
+        "prompt_sha256": "830ebf19b937e2b28bdbce10dd67338659c8c079deb1f2010d51fc626f60b463",
+        "usage": {
+          "prompt_tokens": 87,
+          "completion_tokens": 256,
+          "total_tokens": 343,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 211
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to list 200 parcels and their cities. However, the context only provides information about a single parcel (PX-0757343). I don't have data about 200 parcels or their cities. I should not fabricate this information.\n\nLet me re-read the prompt. It says \"Context measurement completion-mimo-w4, bucket 0. Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\"\n\nThis appears to be some kind of test or evaluation prompt. The context only contains one item (Item 000000), and it doesn't mention any cities. I should not make up 200 parcels and cities that don't exist in the provided context.\n\nI'll explain that the provided context only contains information about one parcel and does not include city information or data for 200 parcels.I'm unable to fulfill this request. The provided context contains information about only **one** parcel:\n\n1. **PX-0757343** \u2014 weighed 4.1825 kg, Income",
+        "wall_ms": 3463.9197839424014,
+        "ttft_ms": 254.86547499895096,
+        "last_ms": 3438.3206360507756,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 3216.7000000000116,
+        "prefill_ms": 222.40000000000873,
+        "decode_steps": 136,
+        "decode_rows": 136,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 87,
+        "prompt_tokens_computed": 87
+      },
+      "engine_tokens_per_s": 79.27378990891258,
+      "ms_per_pass": 23.652205882353027,
+      "tokens_per_pass": 1.875,
+      "answer": {
+        "prompt_sha256": "830ebf19b937e2b28bdbce10dd67338659c8c079deb1f2010d51fc626f60b463",
+        "usage": {
+          "prompt_tokens": 87,
+          "completion_tokens": 256,
+          "total_tokens": 343,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 211
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to list 200 parcels and their cities. However, the context only provides information about a single parcel (PX-0757343). I don't have data about 200 parcels or their cities. I should not fabricate this information.\n\nLet me re-read the prompt. It says \"Context measurement completion-mimo-w4, bucket 0. Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\"\n\nThis appears to be some kind of test or evaluation prompt. The context only contains one item (Item 000000), and it doesn't mention any cities. I should not make up 200 parcels and cities that don't exist in the provided context.\n\nI'll explain that the provided context only contains information about one parcel and does not include city information or data for 200 parcels.I'm unable to fulfill this request. The provided context contains information about only **one** parcel:\n\n1. **PX-0757343** \u2014 weighed 4.1825 kg, Income",
+        "wall_ms": 3468.765172874555,
+        "ttft_ms": 255.4964090231806,
+        "last_ms": 3468.6643229797482,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 3215.4000000000233,
+        "prefill_ms": 221.39999999999418,
+        "decode_steps": 136,
+        "decode_rows": 136,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 87,
+        "prompt_tokens_computed": 87
+      },
+      "engine_tokens_per_s": 79.30584064191024,
+      "ms_per_pass": 23.6426470588237,
+      "tokens_per_pass": 1.875,
+      "answer": {
+        "prompt_sha256": "830ebf19b937e2b28bdbce10dd67338659c8c079deb1f2010d51fc626f60b463",
+        "usage": {
+          "prompt_tokens": 87,
+          "completion_tokens": 256,
+          "total_tokens": 343,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 211
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to list 200 parcels and their cities. However, the context only provides information about a single parcel (PX-0757343). I don't have data about 200 parcels or their cities. I should not fabricate this information.\n\nLet me re-read the prompt. It says \"Context measurement completion-mimo-w4, bucket 0. Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\"\n\nThis appears to be some kind of test or evaluation prompt. The context only contains one item (Item 000000), and it doesn't mention any cities. I should not make up 200 parcels and cities that don't exist in the provided context.\n\nI'll explain that the provided context only contains information about one parcel and does not include city information or data for 200 parcels.I'm unable to fulfill this request. The provided context contains information about only **one** parcel:\n\n1. **PX-0757343** \u2014 weighed 4.1825 kg, Income",
+        "wall_ms": 3468.6691449023783,
+        "ttft_ms": 255.46846888028085,
+        "last_ms": 3468.5769679490477,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

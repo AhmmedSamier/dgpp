@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+  "surface": {
+    "id": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+    "object": "model",
+    "created": 1791424941,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 0,
+        "top_p": 0.95,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true
+        },
+        "low": {
+          "enable_thinking": true
+        },
+        "medium": {
+          "enable_thinking": true
+        },
+        "high": {
+          "enable_thinking": true
+        },
+        "xhigh": {
+          "enable_thinking": true
+        },
+        "max": {
+          "enable_thinking": true
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text"
+    ],
+    "context": {
+      "request_limit_tokens": 131072,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 131072,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "ff15eb925890d6b71b5160de4b846fbd13178438ab463b38ecc953e8cd1dcb3e",
+  "seed": 20260922,
+  "tag": "completion-mimo-w2",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 5395.599999999977,
+        "prefill_ms": 449.90000000000146,
+        "decode_steps": 131,
+        "decode_rows": 131,
+        "tokens_generated": 240,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 87,
+        "prompt_tokens_computed": 87
+      },
+      "engine_tokens_per_s": 44.29535176810754,
+      "ms_per_pass": 41.18778625954181,
+      "tokens_per_pass": 1.8244274809160306,
+      "answer": {
+        "prompt_sha256": "f953aabb41f29ebaa3d7db3b490e2607f0f67dee45f589b78da3f0955b519829",
+        "usage": {
+          "prompt_tokens": 87,
+          "completion_tokens": 240,
+          "total_tokens": 327,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 102
+          }
+        },
+        "finish": "stop",
+        "text": "The user is asking me to write a numbered list of 200 parcels and their cities. However, I only have information about one parcel (PX-0757343) from the context provided. I don't have data about 200 parcels or their cities.\n\nI should not fabricate data. I need to let the user know that I only have information about one parcel and cannot generate a list of 200 parcels and their cities without that data.I'm unable to fulfill this request. The context provided contains information about only **one** parcel:\n\n1. **PX-0757343** \u2014 weighed 4.1825 kg, Income, Gate 1, Shift C, status sealed.\n\nThere is no data available for parcels 2\u2013200, nor is any city information provided for any parcel. Generating a list of 200 parcels and their cities would require fabricating data, which I won't do.\n\nIf you have a dataset or additional context containing the remaining parcel records (including their cities), please share it and I'll be happy to compile the full numbered list.",
+        "wall_ms": 5865.331391105428,
+        "ttft_ms": 509.32286912575364,
+        "last_ms": 5865.157084073871,
+        "tokens": 240
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 5392.099999999977,
+        "prefill_ms": 447.40000000000146,
+        "decode_steps": 131,
+        "decode_rows": 131,
+        "tokens_generated": 240,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 87,
+        "prompt_tokens_computed": 87
+      },
+      "engine_tokens_per_s": 44.32410378145825,
+      "ms_per_pass": 41.161068702289896,
+      "tokens_per_pass": 1.8244274809160306,
+      "answer": {
+        "prompt_sha256": "f953aabb41f29ebaa3d7db3b490e2607f0f67dee45f589b78da3f0955b519829",
+        "usage": {
+          "prompt_tokens": 87,
+          "completion_tokens": 240,
+          "total_tokens": 327,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 102
+          }
+        },
+        "finish": "stop",
+        "text": "The user is asking me to write a numbered list of 200 parcels and their cities. However, I only have information about one parcel (PX-0757343) from the context provided. I don't have data about 200 parcels or their cities.\n\nI should not fabricate data. I need to let the user know that I only have information about one parcel and cannot generate a list of 200 parcels and their cities without that data.I'm unable to fulfill this request. The context provided contains information about only **one** parcel:\n\n1. **PX-0757343** \u2014 weighed 4.1825 kg, Income, Gate 1, Shift C, status sealed.\n\nThere is no data available for parcels 2\u2013200, nor is any city information provided for any parcel. Generating a list of 200 parcels and their cities would require fabricating data, which I won't do.\n\nIf you have a dataset or additional context containing the remaining parcel records (including their cities), please share it and I'll be happy to compile the full numbered list.",
+        "wall_ms": 5850.544326938689,
+        "ttft_ms": 504.28983103483915,
+        "last_ms": 5850.409877020866,
+        "tokens": 240
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 5398.400000000023,
+        "prefill_ms": 448.0,
+        "decode_steps": 131,
+        "decode_rows": 131,
+        "tokens_generated": 240,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 87,
+        "prompt_tokens_computed": 87
+      },
+      "engine_tokens_per_s": 44.27237700059258,
+      "ms_per_pass": 41.20916030534369,
+      "tokens_per_pass": 1.8244274809160306,
+      "answer": {
+        "prompt_sha256": "f953aabb41f29ebaa3d7db3b490e2607f0f67dee45f589b78da3f0955b519829",
+        "usage": {
+          "prompt_tokens": 87,
+          "completion_tokens": 240,
+          "total_tokens": 327,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 102
+          }
+        },
+        "finish": "stop",
+        "text": "The user is asking me to write a numbered list of 200 parcels and their cities. However, I only have information about one parcel (PX-0757343) from the context provided. I don't have data about 200 parcels or their cities.\n\nI should not fabricate data. I need to let the user know that I only have information about one parcel and cannot generate a list of 200 parcels and their cities without that data.I'm unable to fulfill this request. The context provided contains information about only **one** parcel:\n\n1. **PX-0757343** \u2014 weighed 4.1825 kg, Income, Gate 1, Shift C, status sealed.\n\nThere is no data available for parcels 2\u2013200, nor is any city information provided for any parcel. Generating a list of 200 parcels and their cities would require fabricating data, which I won't do.\n\nIf you have a dataset or additional context containing the remaining parcel records (including their cities), please share it and I'll be happy to compile the full numbered list.",
+        "wall_ms": 5876.353239873424,
+        "ttft_ms": 504.9546230584383,
+        "last_ms": 5876.186134060845,
+        "tokens": 240
+      }
+    }
+  ],
+  "skipped": []
+}

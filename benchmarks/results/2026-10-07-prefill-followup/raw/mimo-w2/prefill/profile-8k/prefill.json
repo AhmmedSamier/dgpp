@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+  "tag": "followup-mimo-w2",
+  "seed": 7,
+  "thinking": false,
+  "interval_s": 1.0,
+  "data_sha256": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14",
+  "calibration": {
+    "prompt_sha256": "aab5c801a24cdaaf9cc2dd31740d7cd369c54a672f678b55d7a276726e889ee9",
+    "usage": {
+      "prompt_tokens": 546,
+      "completion_tokens": 1,
+      "total_tokens": 547,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "finish": "length",
+    "text": "This",
+    "wall_ms": 1486.865489045158,
+    "ttft_ms": 1486.8193760048598
+  },
+  "samples": [
+    {
+      "prompt_sha256": "84517c3fc5cdc3609a61a2c1401c44d05944793845f5e1be7e6ad153bbc81ce8",
+      "usage": {
+        "prompt_tokens": 8400,
+        "completion_tokens": 1,
+        "total_tokens": 8401,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "finish": "length",
+      "text": "This",
+      "wall_ms": 13250.930759124458,
+      "ttft_ms": 13250.88087003678,
+      "prompt_tokens": 8400,
+      "cached_tokens": 0,
+      "computed_tokens": 8400,
+      "prefill_ms": 13214.3,
+      "prefill_ms_per_token": 1.5731309523809522,
+      "requested_tokens": 8192,
+      "repeat": 0
+    }
+  ]
+}

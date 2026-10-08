@@ -1,0 +1,27 @@
+{
+  "passed": true,
+  "validated_launch_count": 17,
+  "validated_launches": [
+    "raw/glm-flash-hybrid-256k-w2/prefill/default",
+    "raw/glm-flash-hybrid-256k-w2/prefill/idle2048",
+    "raw/glm-flash-hybrid-w2/prefill/default",
+    "raw/glm-flash-hybrid-w2/prefill/idle2048",
+    "raw/glm53-fp4kv-256k-w4/prefill/baseline-native-clean",
+    "raw/glm53-fp4kv-256k-w4/prefill/native-conversion-clean",
+    "raw/glm53-fp4kv-256k-w4/prefill/profile-8k",
+    "raw/glm53-fp8kv-w4/prefill/profile-8k",
+    "raw/glm53-w4/prefill/profile-8k",
+    "raw/mimo-w2/prefill/fp8-dispatch-fix",
+    "raw/mimo-w2/prefill/fp8-dispatch-profile",
+    "raw/mimo-w2/prefill/profile-8k",
+    "raw/mimo-w2/prefill/reproduction",
+    "raw/mimo-w2-fp8kv/prefill/fp8-dispatch-fix",
+    "raw/mimo-w2-fp8kv/prefill/fp8-dispatch-profile",
+    "raw/mimo-w2-fp8kv/prefill/profile-8k",
+    "raw/mimo-w2-fp8kv/prefill/reproduction"
+  ],
+  "excluded": [
+    "raw/glm53-fp4kv-256k-w4/prefill/native-conversion",
+    "raw/glm53-fp4kv-256k-w4/prefill/baseline-native-comparison"
+  ]
+}

@@ -1,0 +1,76 @@
+{
+  "complete": true,
+  "comparison": "Only engine.prefill_idle_budget_tokens changes from resolved 256 to explicit 2048. Both fresh launches use identical tag, seed and prompt workload.",
+  "samples": [
+    {
+      "target": 2048,
+      "repeat": 0,
+      "before_s": 4.766100000000001,
+      "after_s": 1.9906000000000001,
+      "same_prompt_and_output": true,
+      "different_fields": []
+    },
+    {
+      "target": 2048,
+      "repeat": 1,
+      "before_s": 4.888999999999999,
+      "after_s": 2.1240999999999994,
+      "same_prompt_and_output": true,
+      "different_fields": []
+    },
+    {
+      "target": 8192,
+      "repeat": 0,
+      "before_s": 19.4876,
+      "after_s": 8.4941,
+      "same_prompt_and_output": true,
+      "different_fields": []
+    },
+    {
+      "target": 8192,
+      "repeat": 1,
+      "before_s": 19.3526,
+      "after_s": 8.274599999999998,
+      "same_prompt_and_output": true,
+      "different_fields": []
+    },
+    {
+      "target": 32768,
+      "repeat": 0,
+      "before_s": 78.8505,
+      "after_s": 35.462,
+      "same_prompt_and_output": true,
+      "different_fields": []
+    },
+    {
+      "target": 32768,
+      "repeat": 1,
+      "before_s": 78.93570000000001,
+      "after_s": 35.16250000000001,
+      "same_prompt_and_output": true,
+      "different_fields": []
+    }
+  ],
+  "summary": [
+    {
+      "target": 2048,
+      "before_s": 4.8275500000000005,
+      "after_s": 2.0573499999999996,
+      "speedup": 2.346489415996307
+    },
+    {
+      "target": 8192,
+      "before_s": 19.420099999999998,
+      "after_s": 8.384349999999998,
+      "speedup": 2.316232027527477
+    },
+    {
+      "target": 32768,
+      "before_s": 78.8931,
+      "after_s": 35.312250000000006,
+      "speedup": 2.2341567019943502
+    }
+  ],
+  "all_prompts_and_outputs_match": true,
+  "memory_and_rank_identity_passed": true
+}

@@ -1,0 +1,20 @@
+{
+  "original_changed_files": 579,
+  "original_bytes": 12404575,
+  "excluded_from_git_files": 491,
+  "excluded_from_git_bytes": 12076131,
+  "excluded_by_extension": {
+    ".log": 154,
+    ".json": 251,
+    ".py": 26,
+    ".patch": 1,
+    ".jsonl": 56,
+    ".txt": 3
+  },
+  "retained_files_including_this_report": 109,
+  "policy": {
+    "retained": "Raw measurements, bundled launch/configuration/provenance/validation records, profile summaries, matched comparisons, source patches, final test logs, reproduction tools, and cleanup/restoration audits.",
+    "local_only": "Full telemetry, runtime/build/download logs, duplicate metadata and monitor scripts, one-off orchestration, model configuration dumps, and excluded-run runtime files. Files remain locally; none were deleted.",
+    "telemetry_audit": "record.json retains the original per-rank audit and hashes of local telemetry. Raw telemetry is not part of the Git evidence set."
+  }
+}
