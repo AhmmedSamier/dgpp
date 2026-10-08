@@ -340,12 +340,15 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   // The mirror the recorded draft of slot `req` publishes (readable once
   // the replay's end event has passed).
   const int32_t* block_drafts_host(int req) const {
+    if (dflash1_)
+      return df1_mirror_h_ + static_cast<size_t>(req) * static_cast<size_t>(df1cfg_.drafts());
     return df_mirror_h_ + static_cast<size_t>(req) * static_cast<size_t>(dfcfg_.drafts());
   }
   // The mask rows' top-k candidate ids the recorded draft walked
   // ([drafts][block_candidates()] per slot; the engine's acceptance
-  // diagnostics rank the verify's correction among them).
-  int block_candidates() const { return dfcfg_.selector_top_k; }
+  // diagnostics rank the verify's correction among them). v1 publishes no
+  // candidate tables (top-1 proposals only) — 0 skips the read.
+  int block_candidates() const { return dflash1_ ? 0 : dfcfg_.selector_top_k; }
   const int32_t* block_candidates_host(int req) const {
     return df_cands_h_ + static_cast<size_t>(req) * static_cast<size_t>(dfcfg_.drafts()) *
                             static_cast<size_t>(dfcfg_.selector_top_k);
