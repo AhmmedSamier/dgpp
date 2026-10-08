@@ -152,7 +152,8 @@ void MimoAttentionLayer::enqueue(const uint16_t* x, int tokens, const MimoAttnRo
   const int Q = lh_ * kMimoQkDim, O = lh_ * kMimoVDim;
   // The fused projection, fp32 out (the finish rounds once): decode rows
   // on the streaming tensor-core GEMM (a row's chain the same whatever
-  // rows share the launch), prefill chunks on the GEMV chunks / tile kernel.
+  // rows share the launch), large prefill chunks on the exact pipelined
+  // fp8-weight GEMM; small tails retain the GEMV chunks.
   const int64_t n = static_cast<int64_t>(w_.chunks - 1) * w_.chunk_stride + w_.chunk_rows;
   launch_scale_gemm_grid_f32(x, static_cast<size_t>(H), w_.qkv.payload, w_.qkv.scales, qkv_, tokens,
                              static_cast<int>(n), H, stream, static_cast<size_t>(qkv_cols_), 7, 7,

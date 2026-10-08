@@ -17,6 +17,7 @@
 
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
+#include <cuda_fp4.h>
 #include <cuda_runtime.h>
 
 #include "common/cuda_check.hpp"
@@ -141,6 +142,18 @@ struct LatentTile<LatentFormat::kFp8> {
 
 template <>
 struct LatentTile<LatentFormat::kFp4> {
+  // Both e2m1 values and finite e4m3 block scales fit exactly in fp16.
+  // Decode pairs in hardware, preserving the codec's two fp32 multiplies
+  // and final bf16 rounding. Scalar software conversion inside every
+  // gathered tile was a substantial full-GLM prefill cost.
+  static __device__ __forceinline__ uint32_t decode2(uint8_t codes, float s) {
+    const __half2_raw h = __nv_cvt_fp4x2_to_halfraw2(codes, __NV_E2M1);
+    const float2 v = __half22float2(__half2(h));
+    return pack_bf16x2(float_to_bf16_bits(v.x * s), float_to_bf16_bits(v.y * s));
+  }
+  static __device__ __forceinline__ float block_scale(uint8_t code, float s) {
+    return fp8x2_to_float2(code).x * s;
+  }
   static __device__ __forceinline__ uint4 load8(const uint8_t* cache,
                                                 const float* scales,
                                                 int64_t phys, size_t row_bytes,
@@ -150,17 +163,13 @@ struct LatentTile<LatentFormat::kFp4> {
       return *reinterpret_cast<const uint4*>(
           row + latent_row_bytes(LatentFormat::kFp4, kv_lora) + (e - kv_lora) * 2);
     const uint32_t raw = *reinterpret_cast<const uint32_t*>(row + (e >> 1));
-    const float S = latent_fp4_block_scale(
+    const float S = block_scale(
         row[latent_fp4_scale_offset(kv_lora) + (e / kLatentFp4Block)], scales[phys]);
-    uint16_t v[8];
-#pragma unroll
-    for (int j = 0; j < 8; ++j)
-      v[j] = latent_fp4_decode_bf16(static_cast<uint8_t>((raw >> (4 * j)) & 0xFu), S);
     uint4 out;
-    out.x = pack_bf16x2(v[0], v[1]);
-    out.y = pack_bf16x2(v[2], v[3]);
-    out.z = pack_bf16x2(v[4], v[5]);
-    out.w = pack_bf16x2(v[6], v[7]);
+    out.x = decode2(static_cast<uint8_t>(raw), S);
+    out.y = decode2(static_cast<uint8_t>(raw >> 8), S);
+    out.z = decode2(static_cast<uint8_t>(raw >> 16), S);
+    out.w = decode2(static_cast<uint8_t>(raw >> 24), S);
     return out;
   }
   static __device__ __forceinline__ uint16_t load1(const uint8_t* cache,
@@ -171,11 +180,11 @@ struct LatentTile<LatentFormat::kFp4> {
     if (e >= kv_lora)
       return *reinterpret_cast<const uint16_t*>(
           row + latent_row_bytes(LatentFormat::kFp4, kv_lora) + (e - kv_lora) * 2);
-    const float S = latent_fp4_block_scale(
+    const float S = block_scale(
         row[latent_fp4_scale_offset(kv_lora) + (e / kLatentFp4Block)], scales[phys]);
     const uint8_t byte = row[e >> 1];
-    return latent_fp4_decode_bf16(
-        static_cast<uint8_t>((e & 1) ? (byte >> 4) : (byte & 0xFu)), S);
+    const uint32_t pair = decode2(byte, S);
+    return static_cast<uint16_t>((e & 1) ? (pair >> 16) : pair);
   }
 };
 

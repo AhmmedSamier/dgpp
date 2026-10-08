@@ -18,6 +18,7 @@
 #include "kernels/bf16_gemv.hpp"
 #include "kernels/scale_gemm.hpp"
 #include "scale_gemm_test_helpers.hpp"
+#include "kda_test_helpers.hpp"
 
 namespace {
 
@@ -256,6 +257,74 @@ DGPP_TEST(scale_gemm_large_m_route_is_bitwise_the_tile_kernel) {
   require(std::memcmp(routed.data(), tile.data(), routed.size() * 2) == 0,
           "large-m route bitwise the tile kernel");
   check_both_oracles(p, routed, "large-m M300xN200xK512");
+}
+
+DGPP_TEST(scale_gemm_explicit_grid_large_m_dispatch_and_bits) {
+  using dgpp::kda_test::DevBuf;
+  // MiMo's 128x128 grid should reach the existing fast kernel. Smaller
+  // scale grids and unsupported K must retain the tile path. Compare
+  // both output types, including padding, against the original kernel.
+  for (int rs : {5, 6, 7}) for (int cs : {5, 6, 7}) for (int k : {144, 192}) {
+    constexpr int m = 129, n = 200;
+    const size_t as = k + 8, os = n + 16;
+    Rng rng(0x12800 + rs * 100 + cs * 10 + k);
+    std::vector<uint16_t> act(m * as), out16(m * os, 0xBEEF), ref16 = out16;
+    std::vector<uint8_t> weights(n * k);
+    std::vector<float> scales(((n + (1 << rs) - 1) >> rs) * ((k + (1 << cs) - 1) >> cs));
+    std::vector<float> out32(m * os, -12345.f), ref32 = out32;
+    fill_act(rng, act); fill_payload(rng, weights); fill_scales(rng, scales);
+    DevBuf da(act.size() * 2), dw(weights.size()), ds(scales.size() * 4),
+        d16(out16.size() * 2), r16(ref16.size() * 2), d32(out32.size() * 4), r32(ref32.size() * 4);
+    da.upload(act.data(), act.size() * 2); dw.upload(weights.data(), weights.size());
+    ds.upload(scales.data(), scales.size() * 4);
+    d16.upload(out16.data(), out16.size() * 2); r16.upload(ref16.data(), ref16.size() * 2);
+    d32.upload(out32.data(), out32.size() * 4); r32.upload(ref32.data(), ref32.size() * 4);
+    auto* a = static_cast<const uint16_t*>(da.p);
+    auto* w = static_cast<const uint8_t*>(dw.p);
+    auto* s = static_cast<const float*>(ds.p);
+    cudaStream_t stream = nullptr;
+    cudaGraph_t graph = nullptr;
+    cudaGraphExec_t executable = nullptr;
+    DGPP_CUDA_OK(cudaStreamCreate(&stream));
+    DGPP_CUDA_OK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+    dgpp::launch_scale_gemm_grid_f32(a, as, w, s, static_cast<float*>(d32.p),
+        m, n, k, stream, os, rs, cs);
+    DGPP_CUDA_OK(cudaStreamEndCapture(stream, &graph));
+    size_t count = 0;
+    DGPP_CUDA_OK(cudaGraphGetNodes(graph, nullptr, &count));
+    require(count == 1, "explicit-grid GEMM must launch one kernel");
+    cudaGraphNode_t node;
+    DGPP_CUDA_OK(cudaGraphGetNodes(graph, &node, &count));
+    cudaKernelNodeParams params{};
+    DGPP_CUDA_OK(cudaGraphKernelNodeGetParams(node, &params));
+    const char* name = nullptr;
+    DGPP_CUDA_OK(cudaFuncGetName(&name, params.func));
+    const bool fast = std::string(name).find("fp8w_gemm_kernel") != std::string::npos;
+    require(fast == (rs == 7 && cs == 7 && k % 64 == 0),
+            "explicit-grid GEMM selected the wrong path");
+    DGPP_CUDA_OK(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0));
+    DGPP_CUDA_OK(cudaGraphLaunch(executable, stream));
+    dgpp::launch_scale_gemm_grid_bf16(a, as, w, s, static_cast<uint16_t*>(d16.p),
+        m, n, k, stream, os, rs, cs);
+    dgpp::launch_scale_gemm_tile_f32(a, as, w, s, static_cast<float*>(r32.p),
+        m, n, k, stream, rs, cs);
+    dgpp::launch_scale_gemm_tile_bf16(a, as, w, s, static_cast<uint16_t*>(r16.p),
+        m, n, k, stream, rs, cs);
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+    d16.download(out16.data(), out16.size() * 2); r16.download(ref16.data(), ref16.size() * 2);
+    d32.download(out32.data(), out32.size() * 4); r32.download(ref32.data(), ref32.size() * 4);
+    for (int row = 0; row < m; ++row) {
+      require(std::memcmp(out16.data() + row * os, ref16.data() + row * n, n * 2) == 0 &&
+              std::memcmp(out32.data() + row * os, ref32.data() + row * n, n * 4) == 0,
+              "explicit-grid GEMM differs from the original tile");
+      for (size_t col = n; col < os; ++col)
+        require(out16[row * os + col] == 0xBEEF && out32[row * os + col] == -12345.f,
+                "explicit-grid GEMM overwrites output padding");
+    }
+    DGPP_CUDA_OK(cudaGraphExecDestroy(executable));
+    DGPP_CUDA_OK(cudaGraphDestroy(graph));
+    DGPP_CUDA_OK(cudaStreamDestroy(stream));
+  }
 }
 
 DGPP_TEST(scale_gemm_last_row_preserves_full_product_bits_and_output_bounds) {
