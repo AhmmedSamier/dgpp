@@ -1,0 +1,20 @@
+
+=== 22:07:56 production down (final29)
+2026-10-05 22:08:04.893 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 22:08:04 w1 eager engine with the drafter up (mtp_schedule off)
+2026-10-05 22:08:21.178 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /tmp/claude-1000/-home-stephen-workspace-dgpp/cb0c821d-8834-47e0-869d-81a0e620a1d4/scratchpad/w1_eager.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final29/w1-eager-drafter/server)
+graph variants instantiated: 0
+2026-10-05 22:08:05.215 INFO  dflash2 drafter -> /home/stephen/.cache/huggingface/hub/models--z-lab--Qwen3.8-27B-DFlash2/snapshots/50307d4c4cde6860d4eee73e2547c
+
+=== 22:08:21 w1 eager drafter transcripts
+json   256 tokens    6.81 s    26.6 ms/token (wall, prefill included) length | We need to respond to user: "Return a JSON array of 8 object
+32.2 tok/s, 30.3 ms/tok, 144.7 ms/step
+
+=== 22:09:07 down
+2026-10-05 22:09:10.390 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final29/w1-eager-drafter/server
+
+=== 22:09:10 production up
+2026-10-05 22:09:48.916 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+FINAL29_DONE 22:09:48

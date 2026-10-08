@@ -1,0 +1,49 @@
+{
+  "jobs": [
+    "prefill",
+    "context-32768",
+    "context-65536"
+  ],
+  "prefill_lengths": [
+    2048,
+    8192,
+    32768
+  ],
+  "retained_sources": {
+    "greedy": [
+      {
+        "path": "attempts/glm53-w4/default-before-fused-scores-20261007/greedy.json",
+        "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+        "reused": true
+      }
+    ],
+    "context-0": [
+      {
+        "path": "attempts/glm53-w4/default-before-fused-scores-20261007/context-0.json",
+        "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+        "reused": true
+      }
+    ],
+    "context-131072": [
+      {
+        "path": "attempts/glm53-w4/default-before-fused-scores-20261007/context-131072.json",
+        "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+        "reused": true
+      }
+    ],
+    "context-262144": [
+      {
+        "path": "attempts/glm53-w4/default-before-fused-scores-20261007/context-262144.json",
+        "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+        "reused": true
+      }
+    ],
+    "context-524288": [
+      {
+        "path": "attempts/glm53-w4/default-before-fused-scores-20261007/context-524288.json",
+        "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+        "reused": true
+      }
+    ]
+  }
+}

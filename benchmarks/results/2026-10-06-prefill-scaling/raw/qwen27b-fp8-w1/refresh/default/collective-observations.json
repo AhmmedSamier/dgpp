@@ -1,0 +1,14 @@
+{
+  "at": "2026-10-07T15:30:51.166064+00:00",
+  "scope": "Each rank uses its own warm-capture-complete log marker, avoiding host clock skew. Startup warnings precede measurement. Zero warning lines do not establish zero collective wait time.",
+  "first_measurement": "2026-10-07T14:59:31.480130+00:00",
+  "logs": [
+    {
+      "path": "server/serve_r0.log",
+      "sha256": "7d6d5553382f90be4ec94dffb05b74255d85036d61a0ceaca811aa9a4659199a",
+      "warm_capture_complete": "2026-10-07 14:59:31.070 INFO  rank 0: warm capture complete \u2014 8 scalar variants and the row batches for 2 slots, 3 slots, 4 slots, 6 slots, 8 slots and 3 reduced-depth variants per slot recorded before the first request",
+      "startup_stall_warning_lines": 0,
+      "post_warm_capture_stall_warning_lines": 0
+    }
+  ]
+}

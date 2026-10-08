@@ -154,8 +154,8 @@ MimoModel::MimoModel(const MimoTextConfig& cfg, const std::string& checkpoint_di
     h_route_biased_ = pinned_alloc<float>(layers * static_cast<size_t>(max_decode_rows_) *
                                           static_cast<size_t>(cfg_.n_routed_experts));
     // The boundary windows' budget: 20 MB as the GLM-4.7 walk's;
-    // DGPP_L2_PREFETCH_MB overrides.
-    prefetch_window_bytes_ = std::getenv("DGPP_L2_PREFETCH_MB") ? 0 : (size_t{20} << 20);
+    // engine.l2_prefetch_boundary_window_mib sets it.
+    prefetch_window_bytes_ = l2_prefetch_settings().boundary_window_bytes;
     // The early projection prefetch experiment (plan §7.1, REJECTED on the
     // fabric 2026-09-22: +7-10 % per step at 8 and 16 MiB — the window runs
     // through the expert stream at the Light rate and competes there, and

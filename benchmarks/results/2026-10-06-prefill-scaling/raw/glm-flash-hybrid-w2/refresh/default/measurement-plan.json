@@ -1,0 +1,29 @@
+{
+  "jobs": [
+    "prefill",
+    "context-32768",
+    "context-65536",
+    "context-131072",
+    "context-262144",
+    "context-524288"
+  ],
+  "prefill_lengths": [
+    32768
+  ],
+  "retained_sources": {
+    "greedy": [
+      {
+        "path": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/default/greedy.json",
+        "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+        "reused": true
+      }
+    ],
+    "context-0": [
+      {
+        "path": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/default/context-0.json",
+        "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+        "reused": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,76 @@
+
+=== 18:33:06 production down (verify13)
+2026-10-05 18:33:14.580 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 18:33:14 build
+BUILD_EXIT=0
+
+=== 18:34:33 tiny tests and gates
+[ OK ] qwen35_decode_rows_invariance
+[FAIL] group: 2 group sizes differ from the solo prefill
+[ .. ] a group of 2: prompt 0's prefill logits and first step bitwise its solo walk
+[ !! ] a group of 4: prompt 0's prefill logits 512 of 512 differ (max |d| 0.137), first step 512 differ (max |d| 0.0312)
+[ .. ] a group of 8 (296 rows) against the group of 4 (148 rows), both past the 128-row bound: prompt 0's prefill logits bitwise
+[ !! ] a group of 8: prompt 0's prefill logits 512 of 512 differ (max |d| 0.137), first step 512 differ (max |d| 0.0312)
+bf16_gemv_test       11 tests, 0 failed
+scale_gemm_test      19 tests, 0 failed
+unit_tests           316 tests, 0 failed
+100% tests passed, 0 tests failed out of 76
+
+=== 18:39:48 w1 template up (--no-prefill-group)
+2026-10-05 18:40:12.532 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/verify13/w1-nogroup/server)
+2026-10-05 18:40:04.149 INFO  serve: cold prompts prefill one per walk (engine.prefill_group false)
+[w1-nogroup] solo vs solo again: IDENTICAL
+[w1-nogroup] solo vs beside 7 others (started at once): IDENTICAL
+[w1-nogroup] solo vs solo again: IDENTICAL
+[w1-nogroup] solo vs beside 7 others (started at once): IDENTICAL
+[w1-nogroup] solo vs solo again: IDENTICAL
+[w1-nogroup] solo vs beside 7 others (joining after 6 s): IDENTICAL
+
+=== 18:42:40 w1 burst TTFT without grouping
+[nogroup] burst of 8 x 8 tokens: first-token times (s) min -1789846417.79 median -1789846416.40 max -1789846415.25; wall 3.19 s
+[nogroup] burst of 8 x 8 tokens: first-token times (s) min -1789846417.72 median -1789846416.38 max -1789846415.25; wall 3.20 s
+
+=== 18:42:46 w1 down
+2026-10-05 18:42:48.805 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/verify13/w1-nogroup/server
+
+=== 18:42:50 w1 template up (grouping, the default)
+2026-10-05 18:43:13.133 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/verify13/w1-template/server)
+
+=== 18:43:13 w1 burst TTFT with grouping
+[group] burst of 8 x 8 tokens: first-token times (s) min -1789846416.73 median -1789846416.73 max -1789846416.73; wall 2.15 s
+[group] burst of 8 x 8 tokens: first-token times (s) min -1789846416.76 median -1789846416.75 max -1789846416.75; wall 2.16 s
+[w1] solo vs solo again: IDENTICAL
+[w1] solo vs beside 7 others (started at once): DIFFERENT at char 966 of 1461/1461 (256/256 tokens)
+
+=== 18:44:03 w1 C1 all classes x2 (vs 20.1/32.8/45.5/35.1/19.6 at 142.0 ms)
+| prose | 20.1 | | code | 33.3 | | json | 45.9 | | math | 37.9 | | chat | 19.7 | 
+  prose: 140.6 ms 2.87 tok/step | code: 140.8 ms 4.81 tok/step | json: 141.1 ms 6.71 tok/step | math: 141.0 ms 5.54 tok/step | chat: 140.6 ms 2.80 tok/step
+
+=== 18:45:39 w1 MT-Bench greedy nothink accepted tokens per pass (vs 3.53 this morning)
+  stem         n=10  tokens  2560  tok/pass  4.00  ms/pass  141.0  ->  28.4 tok/s
+  writing      n=10  tokens  2312  tok/pass  2.90  ms/pass  200.0  ->  14.5 tok/s
+  ALL          n=80  tokens 20040  tok/pass  3.87
+
+=== 18:56:19 w1 down
+2026-10-05 18:56:22.803 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/verify13/w1-template/server
+
+=== 18:56:22 w4 template up
+2026-10-05 18:56:51.250 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w4_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/verify13/w4-template/server)
+
+=== 18:56:51 w4 C1 all classes x2 (vs 60.0/92.7/125.1/105.3/48.8 at 47.5 ms)
+| prose | 59.0 | | code | 92.3 | | json | 125.2 | | math | 97.7 | | chat | 48.8 | 
+  prose: 47.5 ms 2.90 tok/step | code: 48.1 ms 4.72 tok/step | json: 48.1 ms 6.54 tok/step | math: 48.4 ms 5.10 tok/step | chat: 47.0 ms 2.36 tok/step
+
+=== 18:57:26 w4 MT-Bench greedy nothink accepted tokens per pass
+  stem         n= 8  tokens  2048  tok/pass  3.26  ms/pass   48.0  ->  67.9 tok/s
+  writing      n=10  tokens  2368  tok/pass  3.96  ms/pass   48.0  ->  82.4 tok/s
+  ALL          n=68  tokens 17216  tok/pass  3.96
+
+=== 19:01:14 w4 down
+2026-10-05 19:01:21.684 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/verify13/w4-template/server
+
+=== 19:01:21 production up
+2026-10-05 19:02:02.026 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+VERIFY13_DONE 19:02:02

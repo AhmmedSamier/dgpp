@@ -239,7 +239,7 @@ void launch_bf16_gemv_multi(const Bf16GemvProblem* problems, int n_problems,
 
 void launch_bf16_gemv_multi_rows(const Bf16GemvProblem* problems, int n_problems, bool out_f32, int m, int k,
                                  cudaStream_t stream) {
-  if (m < 1 || m > kBf16GemvMultiMaxRows) throw std::invalid_argument("bf16_gemv_multi_rows: m outside 1..64");
+  if (m < 1 || m > kBf16GemvMultiMaxRows) throw std::invalid_argument("bf16_gemv_multi_rows: m outside the grid");
   if (n_problems <= 0 || n_problems > kBf16GemvMaxProblems || problems == nullptr)
     throw std::invalid_argument("bf16_gemv_multi_rows: 1..4 problems");
   const int full = m / 4, tail = m % 4;

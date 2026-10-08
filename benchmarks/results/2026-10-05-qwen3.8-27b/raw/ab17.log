@@ -1,0 +1,46 @@
+
+=== 19:41:14 old-pf up (build-release/dgpp-serve, --no-dflash)
+2026-10-05 19:41:29.006 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /tmp/claude-1000/-home-stephen-workspace-dgpp/cb0c821d-8834-47e0-869d-81a0e620a1d4/scratchpad/w1_old.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/ab17/old-pf/server)
+2026-10-05 19:41:15.891 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+
+=== 19:41:29 old-pf plain T=1 prose,code x2
+| prose | 8.8 | | code | 8.8 | 
+8.9 tok/s, 112.7 ms/tok, 112.7 ms/step
+
+=== 19:43:32 old-pf down
+2026-10-05 19:43:35.658 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/ab17/old-pf/server
+
+=== 19:43:35 old-nopf up (build-release/dgpp-serve, --no-dflash )
+2026-10-05 19:43:49.977 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /tmp/claude-1000/-home-stephen-workspace-dgpp/cb0c821d-8834-47e0-869d-81a0e620a1d4/scratchpad/w1_old.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/ab17/old-nopf/server)
+2026-10-05 19:43:36.928 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+
+=== 19:43:49 old-nopf plain T=1 prose,code x2
+| prose | 8.8 | | code | 8.9 | 
+8.9 tok/s, 112.6 ms/tok, 112.6 ms/step
+
+=== 19:45:53 old-nopf down
+2026-10-05 19:45:55.458 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/ab17/old-nopf/server
+
+=== 19:45:57 new-pf up (build-ci/dgpp-serve, --no-dflash)
+2026-10-05 19:46:13.813 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/ab17/new-pf/server)
+2026-10-05 19:45:58.672 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+
+=== 19:46:13 new-pf plain T=1 prose,code x2
+| prose | 8.2 | | code | 8.2 | 
+8.3 tok/s, 121.2 ms/tok, 121.2 ms/step
+
+=== 19:48:26 new-pf down
+2026-10-05 19:48:28.089 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/ab17/new-pf/server
+
+=== 19:48:30 new-nopf up (build-ci/dgpp-serve, --no-dflash )
+2026-10-05 19:48:44.402 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/ab17/new-nopf/server)
+2026-10-05 19:48:31.205 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+
+=== 19:48:44 new-nopf plain T=1 prose,code x2
+| prose | 8.2 | | code | 8.2 | 
+8.2 tok/s, 121.2 ms/tok, 121.2 ms/step
+
+=== 19:50:56 new-nopf down
+2026-10-05 19:50:58.762 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/ab17/new-nopf/server
+
+AB17_DONE 19:50:58

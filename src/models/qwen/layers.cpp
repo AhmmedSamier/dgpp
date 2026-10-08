@@ -481,12 +481,14 @@ void QwenGdnLayer::in_projections(const uint16_t* x, int tokens, cudaStream_t st
     }
     if (tokens <= kBf16GemvMultiMaxRows && bf16_gemv_accepts(w_.in_proj_a, 4, H) &&
         bf16_gemv_accepts(w_.in_proj_b, 4, H)) {
-      // 1..64 decode rows: the GEMV core in row groups of four (a 1..3-row
-      // tail its own launch) — each row's chain is the group's own, so a
-      // request's rows are bitwise the same alone, at any verify depth and
-      // in an eight-slot batch — where cuBLASLt's tiny-tile kernel took 34
-      // us per [48 x 5120] matrix (3.3 ms of a one-node 157 ms pass) and,
-      // above 8 rows, a different chain.
+      // Every row count, decode and prefill: the GEMV core in row groups of
+      // four (a 1..3-row tail its own launch) — each row's chain is the
+      // group's own, so a request's rows are bitwise the same alone, at any
+      // verify depth, in an eight-slot batch, and a prompt's the same alone
+      // or as a span of a group walk — where cuBLASLt's tiny-tile kernel
+      // took 34 us per [48 x 5120] matrix at decode (3.3 ms of a one-node
+      // 157 ms pass) and its prefill kernels change with the row count. The
+      // matrices are [lv x H] (0.5 MB): a 2K-row prefill is one launch.
       Bf16GemvProblem p[2];
       p[0].act = x; p[0].act_row_stride = static_cast<size_t>(H); p[0].weight = w_.in_proj_a; p[0].out = a_; p[0].n = lv_;
       p[1].act = x; p[1].act_row_stride = static_cast<size_t>(H); p[1].weight = w_.in_proj_b; p[1].out = b_; p[1].n = lv_;
@@ -743,25 +745,11 @@ void QwenQsaLayer::enqueue(const uint16_t* x, int tokens, const QwenQsaRows& row
   const int64_t* d_pos = rows.pos;
 
   // Projections.
-  if (w_.q_proj_fp8.payload && T <= std::min(8, g_.gemv_rows)) {
-    // The FP8 form at decode rows: the projections as one multi-problem
-    // fp8 GEMV — the four of them, or q / k / v alone when the indexer's
-    // projection ships in BF16 (the AutoRound hybrid: as shipped, D4), which
-    // then takes the dense path. Every problem's rows are bitwise the
-    // single launch's, whatever the count.
-    Fp8GemvProblem p[4];
-    p[0].payload = w_.q_proj_fp8.payload; p[0].scales = w_.q_proj_fp8.scales; p[0].out = q_; p[0].n = QW;
-    p[1].payload = w_.k_proj_fp8.payload; p[1].scales = w_.k_proj_fp8.scales; p[1].out = k_; p[1].n = KW;
-    p[2].payload = w_.v_proj_fp8.payload; p[2].scales = w_.v_proj_fp8.scales; p[2].out = v_; p[2].n = KW;
-    int np = 3;
-    if (w_.index_qk_proj_fp8.payload) {
-      p[3].payload = w_.index_qk_proj_fp8.payload; p[3].scales = w_.index_qk_proj_fp8.scales; p[3].out = idx_; p[3].n = IW;
-      np = 4;
-    }
-    launch_scale_gemv_multi_bf16(p, np, x, static_cast<size_t>(H), T, H, stream);
-    if (np == 3)
-      gemm_dense(g_, x, H, w_.index_qk_proj, w_.index_qk_proj_fp8, idx_, GemmOut::BF16, T, IW, H, stream);
-  } else {
+  {
+    // Every decode row count through the dense lowering (2026-10-05, as the
+    // full-attention layer's): the multi-problem fp8 GEMV the rows up to
+    // dense_gemv_rows (4) took was a different chain from the MMA above
+    // them, so a batched or deeper-verified request's text moved.
     gemm_dense(g_, x, H, w_.q_proj, w_.q_proj_fp8, q_, GemmOut::BF16, T, QW, H, stream);
     gemm_dense(g_, x, H, w_.k_proj, w_.k_proj_fp8, k_, GemmOut::BF16, T, KW, H, stream);
     gemm_dense(g_, x, H, w_.v_proj, w_.v_proj_fp8, v_, GemmOut::BF16, T, KW, H, stream);

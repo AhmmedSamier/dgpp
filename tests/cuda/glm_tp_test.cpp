@@ -5525,6 +5525,63 @@ DGPP_TEST(glm_tp_bf16_residency_modes_are_bitwise_the_checkpoint) {
   }
 }
 
+DGPP_TEST(glm_tp_route_traces_off_bounds_prefill_outputs_without_changing_tokens) {
+  const auto cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  GlmDiagnosticModel traced(cfg, dir, 64, 1024, nullptr, 0, 1,
+      GlmResidency::Resident, GlmHeadSharding::Full, 2, true);
+  GlmDiagnosticModel serving(cfg, dir, 64, 1024, nullptr, 0, 1,
+      GlmResidency::Resident, GlmHeadSharding::Full, 2, true);
+  serving.set_decode_route_traces(false);
+  const auto prompt = make_tokens(43, cfg.vocab_size);
+  auto expected = traced.session_prefill_begin(0, prompt, 64, 8);
+  auto actual = serving.session_prefill_begin(0, prompt, 64, 8);
+  bool done = false;
+  while (!done) {
+    done = traced.session_prefill_advance(expected);
+    require(serving.session_prefill_advance(actual) == done, "trace switch preserves chunk progress");
+    require(!expected.output.routes.empty() && !expected.output.route_biased.empty(),
+            "diagnostic prefill retains routing evidence");
+    require(actual.output.routes.empty() && actual.output.route_biased.empty(),
+            "serving prefill must not accumulate prompt-sized diagnostic routes");
+    require(actual.output.logits == expected.output.logits &&
+                actual.output.final_hidden_bits == expected.output.final_hidden_bits,
+            "trace switch preserves every chunk's outputs bitwise");
+  }
+  const auto token = local_max(expected.output.logits.data(), expected.output.lm_vocab_count,
+                               expected.output.lm_vocab_begin).id;
+  require(serving.session_draft(0, {token}).logits == traced.session_draft(0, {token}).logits,
+          "trace switch preserves draft state");
+  const auto expected_step = traced.session_step(0, token);
+  const auto actual_step = serving.session_step(0, token);
+  require(actual_step.logits == expected_step.logits &&
+              actual_step.final_hidden_bits == expected_step.final_hidden_bits,
+          "trace switch preserves subsequent decode bitwise");
+  require(actual_step.routes.empty() && actual_step.route_biased.empty(), "decode traces stay off");
+  traced.session_close(0);
+  serving.session_close(0);
+
+  const auto short_a = make_tokens(13, cfg.vocab_size);
+  const auto short_b = make_tokens(19, cfg.vocab_size);
+  const auto expected_group = traced.session_prefill_group({0, 1}, {&short_a, &short_b});
+  const auto actual_group = serving.session_prefill_group({0, 1}, {&short_a, &short_b});
+  require(!expected_group[0].routes.empty(), "diagnostic grouped prefill retains routing evidence");
+  for (int req : {0, 1}) {
+    require(actual_group[req].routes.empty() && actual_group[req].route_biased.empty(),
+            "grouped serving prefill must not retain diagnostic routes");
+    require(actual_group[req].logits == expected_group[req].logits &&
+                actual_group[req].final_hidden_bits == expected_group[req].final_hidden_bits,
+            "trace switch preserves grouped prefill bitwise");
+    traced.session_close(req);
+    serving.session_close(req);
+  }
+  serving.set_decode_route_traces(true);
+  const auto reenabled = serving.session_prefill(0, short_a);
+  require(!reenabled.routes.empty() && !reenabled.route_biased.empty(),
+          "diagnostic traces can be reenabled after serving");
+}
+
 DGPP_TEST(glm_tp_resumable_prefill_matches_main_draft_and_interleaved_decode) {
   const auto cfg = glm_tp_test_config();
   const std::string dir = "glm_tp_fixture";

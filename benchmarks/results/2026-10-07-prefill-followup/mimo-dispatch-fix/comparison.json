@@ -1,0 +1,122 @@
+{
+  "passed": true,
+  "rows": [
+    {
+      "deployment": "mimo-w2",
+      "target": 2048,
+      "baseline_s": 3.41675,
+      "fixed_s": 1.56745,
+      "speedup": 2.1798143481450762
+    },
+    {
+      "deployment": "mimo-w2",
+      "target": 8192,
+      "baseline_s": 12.932699999999999,
+      "fixed_s": 5.51215,
+      "speedup": 2.346216993369193
+    },
+    {
+      "deployment": "mimo-w2",
+      "target": 32768,
+      "baseline_s": 55.93345,
+      "fixed_s": 25.824800000000003,
+      "speedup": 2.1658812459341408
+    },
+    {
+      "deployment": "mimo-w2-fp8kv",
+      "target": 2048,
+      "baseline_s": 3.4181,
+      "fixed_s": 1.5592,
+      "speedup": 2.1922139558748075
+    },
+    {
+      "deployment": "mimo-w2-fp8kv",
+      "target": 8192,
+      "baseline_s": 12.9672,
+      "fixed_s": 5.5732,
+      "speedup": 2.3267063805354193
+    },
+    {
+      "deployment": "mimo-w2-fp8kv",
+      "target": 32768,
+      "baseline_s": 57.896249999999995,
+      "fixed_s": 27.944750000000003,
+      "speedup": 2.0718113420230986
+    }
+  ],
+  "checks": [
+    {
+      "deployment": "mimo-w2",
+      "target": 2048,
+      "repeat": 0,
+      "differences": []
+    },
+    {
+      "deployment": "mimo-w2",
+      "target": 2048,
+      "repeat": 1,
+      "differences": []
+    },
+    {
+      "deployment": "mimo-w2",
+      "target": 8192,
+      "repeat": 0,
+      "differences": []
+    },
+    {
+      "deployment": "mimo-w2",
+      "target": 8192,
+      "repeat": 1,
+      "differences": []
+    },
+    {
+      "deployment": "mimo-w2",
+      "target": 32768,
+      "repeat": 0,
+      "differences": []
+    },
+    {
+      "deployment": "mimo-w2",
+      "target": 32768,
+      "repeat": 1,
+      "differences": []
+    },
+    {
+      "deployment": "mimo-w2-fp8kv",
+      "target": 2048,
+      "repeat": 0,
+      "differences": []
+    },
+    {
+      "deployment": "mimo-w2-fp8kv",
+      "target": 2048,
+      "repeat": 1,
+      "differences": []
+    },
+    {
+      "deployment": "mimo-w2-fp8kv",
+      "target": 8192,
+      "repeat": 0,
+      "differences": []
+    },
+    {
+      "deployment": "mimo-w2-fp8kv",
+      "target": 8192,
+      "repeat": 1,
+      "differences": []
+    },
+    {
+      "deployment": "mimo-w2-fp8kv",
+      "target": 32768,
+      "repeat": 0,
+      "differences": []
+    },
+    {
+      "deployment": "mimo-w2-fp8kv",
+      "target": 32768,
+      "repeat": 1,
+      "differences": []
+    }
+  ],
+  "scope": "Unprofiled fresh-server comparisons, identical prompt hashes/configurations. TP2, MTP1, four slots; 128K BF16 KV or 256K FP8 KV. Two probes per target; no allocation changes."
+}

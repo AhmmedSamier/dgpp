@@ -296,6 +296,11 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
   // launches that re-read the weights per row (mirrors QwenModel).
   gemm_.set_decode_rows(std::min(max_decode_rows_, dense_gemv_rows()));
   gw_.gemv_rows = dense_gemv_rows();
+  // The prefill-shaped bf16 Lt products (the dequant bridge above the
+  // scale GEMM's 128-row lowering) take one algorithm — the heuristic's for
+  // the walk's widest row count — at every width, so a prompt's reduction
+  // is the same alone and as a span of a group walk (2026-10-05).
+  gemm_.set_pinned_rows(max_tokens_);
   // NOTE: dense_gemv_rows() defaults to 4, and the FP8 GEMV row loop
   // re-reads weights per ≤4-row chunk (and per single row when smem can't
   // stage more, e.g. down-proj k=17408). Every decode row count takes the
@@ -419,9 +424,9 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
     DGPP_CUDA_OK(cudaMalloc(&mtp_h_, M * H * 2));
   }
   // The boundary prefetch windows' budget (run_rows): the measured default
-  // (the 2026-10-04 sweep on the fabric); DGPP_L2_PREFETCH_MB overrides
-  // through the prefetcher's own default for an A/B.
-  prefetch_window_bytes_ = std::getenv("DGPP_L2_PREFETCH_MB") ? 0 : (size_t{20} << 20);
+  // (the 2026-10-04 sweep on the fabric), engine.l2_prefetch_boundary_window_mib
+  // (0 takes the prefetcher's window budget).
+  prefetch_window_bytes_ = l2_prefetch_settings().boundary_window_bytes;
   if (dflash2_) {
     // Weights (bf16, replicated; the shared embed/lm head ride globals_)
     // and the fp32 1/theta^(2i/128) rope table.

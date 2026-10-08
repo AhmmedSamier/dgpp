@@ -1,0 +1,61 @@
+{
+  "checked_at": "2026-10-06T16:18:49.053583+00:00",
+  "deployment": "glm-flash-hybrid-w4",
+  "scope": "One uncached context request per length; all requests generated 256 tokens. Both complete launches passed zero process/cgroup swap, rank identity and shutdown checks.",
+  "before_binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+  "after_binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+  "before_directory": "2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/refresh/default",
+  "after_directory": "2026-10-06-prefill-scaling/raw/glm-flash-hybrid-w4/refresh/default",
+  "samples": [
+    {
+      "context_bucket": 32768,
+      "before_prompt_tokens": 32235,
+      "after_prompt_tokens": 32239,
+      "before_prefill_s": 24.3125,
+      "after_prefill_s": 21.7995,
+      "speedup": 1.115277873345719,
+      "before_decode_ms_per_pass": 33.616153846153665,
+      "after_decode_ms_per_pass": 33.54615384615385
+    },
+    {
+      "context_bucket": 65536,
+      "before_prompt_tokens": 65012,
+      "after_prompt_tokens": 65014,
+      "before_prefill_s": 66.7644,
+      "after_prefill_s": 48.171899999999994,
+      "speedup": 1.385961525287564,
+      "before_decode_ms_per_pass": 34.2906976744186,
+      "after_decode_ms_per_pass": 34.33076923076923
+    },
+    {
+      "context_bucket": 131072,
+      "before_prompt_tokens": 130539,
+      "after_prompt_tokens": 130538,
+      "before_prefill_s": 262.9626,
+      "after_prefill_s": 114.09290000000003,
+      "speedup": 2.3048112546880652,
+      "before_decode_ms_per_pass": 35.92977099236677,
+      "after_decode_ms_per_pass": 35.958015267175576
+    },
+    {
+      "context_bucket": 262144,
+      "before_prompt_tokens": 261629,
+      "after_prompt_tokens": 261629,
+      "before_prefill_s": 1527.7343,
+      "after_prefill_s": 303.27080000000007,
+      "speedup": 5.0375252084935305,
+      "before_decode_ms_per_pass": 39.463846153845616,
+      "after_decode_ms_per_pass": 39.15
+    },
+    {
+      "context_bucket": 524288,
+      "before_prompt_tokens": 523781,
+      "after_prompt_tokens": 523783,
+      "before_prefill_s": 11384.872599999999,
+      "after_prefill_s": 925.2813000000001,
+      "speedup": 12.304228562708442,
+      "before_decode_ms_per_pass": 45.24728682170561,
+      "after_decode_ms_per_pass": 45.51550387596899
+    }
+  ]
+}

@@ -1,0 +1,58 @@
+
+=== 18:08:34 production down (the lambda legs)
+2026-10-05 18:08:42.714 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 18:08:42 sweep up ()
+2026-10-05 18:09:07.185 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w4_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/lam11/sweep/server)
+
+=== 18:09:07 sweep timed_load greedy C1 x3 (prose,code,json,math,chat)
+| prose | 60.1 | | code | 93.1 | | json | 125.3 | | math | 105.8 | | chat | 48.8 | 
+  prose: 47.3 ms/step 2.93 tok/step | code: 47.8 ms/step 4.72 tok/step | json: 48.0 ms/step 6.48 tok/step | math: 48.4 ms/step 5.54 tok/step | chat: 47.3 ms/step 2.37 tok/step
+
+=== 18:09:58 sweep down
+2026-10-05 18:10:06.129 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/lam11/sweep/server
+
+=== 18:10:06 reversed up ()
+2026-10-05 18:10:30.669 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w4_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/lam11/reversed/server)
+
+=== 18:10:30 reversed timed_load greedy C1 x3 (chat,math,json,code,prose)
+| chat | 49.0 | | math | 104.7 | | json | 122.8 | | code | 90.9 | | prose | 60.0 | 
+  chat: 47.4 ms/step 2.38 tok/step | math: 48.5 ms/step 5.54 tok/step | json: 48.2 ms/step 6.43 tok/step | code: 47.9 ms/step 4.66 tok/step | prose: 47.7 ms/step 2.93 tok/step
+
+=== 18:11:22 reversed down
+2026-10-05 18:11:29.727 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/lam11/reversed/server
+
+=== 18:11:29 chat-alone up ()
+2026-10-05 18:11:55.752 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w4_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/lam11/chat-alone/server)
+
+=== 18:11:55 chat-alone timed_load greedy C1 x3 (chat)
+| chat | 49.1 | 
+  chat: 47.4 ms/step 2.38 tok/step
+
+=== 18:12:12 chat-alone down
+2026-10-05 18:12:20.071 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/lam11/chat-alone/server
+
+=== 18:12:20 sweep-fixed up (--mtp-schedule-fixed-lambda)
+2026-10-05 18:12:45.991 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w4_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/lam11/sweep-fixed/server)
+
+=== 18:12:46 sweep-fixed timed_load greedy C1 x3 (prose,code,json,math,chat)
+| prose | 59.3 | | code | 91.7 | | json | 124.2 | | math | 105.0 | | chat | 48.3 | 
+  prose: 48.0 ms/step 2.93 tok/step | code: 48.4 ms/step 4.72 tok/step | json: 48.6 ms/step 6.54 tok/step | math: 48.7 ms/step 5.54 tok/step | chat: 48.1 ms/step 2.38 tok/step
+
+=== 18:13:38 sweep-fixed down
+2026-10-05 18:13:45.276 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/lam11/sweep-fixed/server
+
+=== 18:13:45 chat-whole up ()
+2026-10-05 18:14:09.171 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /tmp/claude-1000/-home-stephen-workspace-dgpp/cb0c821d-8834-47e0-869d-81a0e620a1d4/scratchpad/w4_nosched.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/lam11/chat-whole/server)
+
+=== 18:14:09 chat-whole timed_load greedy C1 x3 (chat)
+| chat | 47.9 | 
+  chat: 48.5 ms/step 2.38 tok/step
+
+=== 18:14:26 chat-whole down
+2026-10-05 18:14:33.805 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/lam11/chat-whole/server
+
+=== 18:14:33 production up
+2026-10-05 18:15:14.858 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+LAM11_DONE 18:15:14

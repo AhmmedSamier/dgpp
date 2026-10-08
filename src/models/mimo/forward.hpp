@@ -258,7 +258,7 @@ class MimoModel : public SessionModel<MimoModel> {
   float* h_route_biased_ = nullptr;
 
   // The L2 weight prefetcher (the boundary windows, bit-identical on or
-  // off; DGPP_L2_PREFETCH=off A/Bs).
+  // off; engine.l2_prefetch false A/Bs).
   WeightPrefetcher prefetch_;
   size_t prefetch_window_bytes_ = 0;
   // The persisting L2 set-aside the next layer's projection is prefetched

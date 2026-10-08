@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "model": "Qwen/Qwen3.8-Flash-Next-FP8",
+  "surface": {
+    "id": "Qwen/Qwen3.8-Flash-Next-FP8",
+    "object": "model",
+    "created": 1791323356,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": 262144,
+      "kv_pool_tokens": 262144,
+      "limited_by": "position-ceiling"
+    }
+  },
+  "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+  "seed": 20260922,
+  "tag": "c638a1332dea4172afac34df8399c48d",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 131072,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 3624.5999999999767,
+        "prefill_ms": 112921.70000000001,
+        "decode_steps": 137,
+        "decode_rows": 137,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 130572,
+        "prompt_tokens_computed": 130572
+      },
+      "engine_tokens_per_s": 70.35259063069074,
+      "ms_per_pass": 26.456934306569174,
+      "tokens_per_pass": 1.8613138686131387,
+      "answer": {
+        "prompt_sha256": "189ff98467f407e9021a0b83046de1da6fe809eeeeb42133580bad5c24c3806a",
+        "usage": {
+          "prompt_tokens": 130572,
+          "completion_tokens": 256,
+          "total_tokens": 130828,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided huge context with items 000000 to 002909. Need list first 200 parcels and their cities. Likely items 000000 through 001999? \"first 200 parcels\" could mean first 200 items in context: Item 000000 to Item 001999? Wait first 200 parcels: if counting from 0, first 200 are 000000-001999? No, 0 to 199 inclusive is 200. But phrase \"Continue until you have listed all 200.\" They likely want first 200 parcels (items 000000 through 001999? Actually first 200 entries are 000000 to 001999? Let's count: 000000 is first, 000199 is 200th. But",
+        "wall_ms": 116654.82383803464,
+        "ttft_ms": 113024.54532403499,
+        "last_ms": 116654.7017719131,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 131072,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 3631.2999999999884,
+        "prefill_ms": 71.59999999997672,
+        "decode_steps": 137,
+        "decode_rows": 137,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 130572,
+        "prompt_tokens_computed": 8
+      },
+      "engine_tokens_per_s": 70.22278522843081,
+      "ms_per_pass": 26.505839416058308,
+      "tokens_per_pass": 1.8613138686131387,
+      "answer": {
+        "prompt_sha256": "189ff98467f407e9021a0b83046de1da6fe809eeeeb42133580bad5c24c3806a",
+        "usage": {
+          "prompt_tokens": 130572,
+          "completion_tokens": 256,
+          "total_tokens": 130828,
+          "prompt_tokens_details": {
+            "cached_tokens": 130564
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided huge context with items 000000 to 002909. Need list first 200 parcels and their cities. Likely items 000000 through 001999? \"first 200 parcels\" could mean first 200 items in context: Item 000000 to Item 001999? Wait first 200 parcels: if counting from 0, first 200 are 000000-001999? No, 0 to 199 inclusive is 200. But phrase \"Continue until you have listed all 200.\" They likely want first 200 parcels (items 000000 through 001999? Actually first 200 entries are 000000 to 001999? Let's count: 000000 is first, 000199 is 200th. But",
+        "wall_ms": 3776.8573788926005,
+        "ttft_ms": 152.80983690172434,
+        "last_ms": 3776.703824987635,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 131072,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 3634.0,
+        "prefill_ms": 68.79999999998836,
+        "decode_steps": 137,
+        "decode_rows": 137,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 130572,
+        "prompt_tokens_computed": 8
+      },
+      "engine_tokens_per_s": 70.17061089708311,
+      "ms_per_pass": 26.525547445255473,
+      "tokens_per_pass": 1.8613138686131387,
+      "answer": {
+        "prompt_sha256": "189ff98467f407e9021a0b83046de1da6fe809eeeeb42133580bad5c24c3806a",
+        "usage": {
+          "prompt_tokens": 130572,
+          "completion_tokens": 256,
+          "total_tokens": 130828,
+          "prompt_tokens_details": {
+            "cached_tokens": 130564
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided huge context with items 000000 to 002909. Need list first 200 parcels and their cities. Likely items 000000 through 001999? \"first 200 parcels\" could mean first 200 items in context: Item 000000 to Item 001999? Wait first 200 parcels: if counting from 0, first 200 are 000000-001999? No, 0 to 199 inclusive is 200. But phrase \"Continue until you have listed all 200.\" They likely want first 200 parcels (items 000000 through 001999? Actually first 200 entries are 000000 to 001999? Let's count: 000000 is first, 000199 is 200th. But",
+        "wall_ms": 3804.2196391616017,
+        "ttft_ms": 152.9018529690802,
+        "last_ms": 3778.6712259985507,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

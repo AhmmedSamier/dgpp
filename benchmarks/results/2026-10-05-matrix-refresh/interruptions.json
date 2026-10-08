@@ -1,0 +1,39 @@
+[
+  {
+    "time": "2026-10-06T00:46:55+00:00",
+    "reason": "Deliberately interrupted the runner with SIGINT to load the expanded 28-configuration matrix. Default and plain measurements were complete; the unfinished MTP2 sweep is rerun, with partial client records preserved as attempts.",
+    "shutdown": {
+      "command": [
+        "/usr/bin/python3",
+        "/home/stephen/workspace/dgpp/scripts/dgpp-cluster",
+        "down",
+        "--config",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/mtp2/config.json",
+        "--log-dir",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/mtp2/server"
+      ],
+      "cwd": "/home/stephen/workspace/dgpp",
+      "started_at": "2026-10-06T00:46:55.918813+00:00",
+      "returncode": 0,
+      "finished_at": "2026-10-06T00:46:59.655888+00:00"
+    },
+    "rank_identity_after_stop": {
+      "expected_ranks": 2,
+      "md5": {
+        "serve_rank0.ops": "2c1f4e3c6484fbfdfc9a61f5c5d763bb",
+        "serve_rank1.ops": "2c1f4e3c6484fbfdfc9a61f5c5d763bb"
+      },
+      "passed": true
+    }
+  },
+  {
+    "time": "2026-10-06T02:47:27.714207+00:00",
+    "entry": "glm-flash-hybrid-w4",
+    "mode": "default",
+    "stage": "context-262144",
+    "reason": "Active swap growth in serving processes during long-context prefill; interrupted for memory-pressure investigation. Do not treat affected results as clean performance baselines.",
+    "runner_pid": 4090721,
+    "client_pid": 72000,
+    "signal": "SIGINT to benchmark process group 4090720"
+  }
+]

@@ -1,0 +1,658 @@
+[
+  {
+    "deployment": "glm53-w4",
+    "mode": "default",
+    "jobs": [
+      "prefill",
+      "context-32768",
+      "context-65536"
+    ],
+    "prefill_lengths": [
+      2048,
+      8192,
+      32768
+    ]
+  },
+  {
+    "deployment": "glm53-fp8kv-w4",
+    "mode": "default",
+    "jobs": [
+      "prefill",
+      "context-32768",
+      "context-65536",
+      "context-131072"
+    ],
+    "prefill_lengths": [
+      8192,
+      32768
+    ]
+  },
+  {
+    "deployment": "glm53-fp4kv-256k-w4",
+    "mode": "default",
+    "jobs": [
+      "greedy",
+      "prefill",
+      "context-0",
+      "context-32768",
+      "context-65536",
+      "context-131072",
+      "context-262144",
+      "context-524288"
+    ],
+    "prefill_lengths": [
+      2048,
+      8192,
+      32768
+    ]
+  },
+  {
+    "deployment": "glm53-fp4kv-256k-w4",
+    "mode": "plain",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "glm53-fp4kv-256k-w4",
+    "mode": "mtp2",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "glm53-fp4kv-256k-w4",
+    "mode": "mtp3",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "deepseek-w4",
+    "mode": "default",
+    "jobs": [
+      "greedy",
+      "prefill",
+      "context-0",
+      "context-32768",
+      "context-65536",
+      "context-131072",
+      "context-262144",
+      "context-524288"
+    ],
+    "prefill_lengths": [
+      2048,
+      8192,
+      32768
+    ]
+  },
+  {
+    "deployment": "deepseek-w4",
+    "mode": "plain",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "deepseek-w4",
+    "mode": "dspark1",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "deepseek-w4",
+    "mode": "dspark2",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "deepseek-w4",
+    "mode": "dspark3",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "deepseek-w4",
+    "mode": "dspark5",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "deepseek-1m-w4",
+    "mode": "default",
+    "jobs": [
+      "greedy",
+      "prefill",
+      "context-0",
+      "context-32768",
+      "context-65536",
+      "context-131072",
+      "context-262144",
+      "context-524288"
+    ],
+    "prefill_lengths": [
+      2048,
+      8192,
+      32768
+    ]
+  },
+  {
+    "deployment": "deepseek-1m-w4",
+    "mode": "plain",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "deepseek-1m-w4",
+    "mode": "dspark1",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "deepseek-1m-w4",
+    "mode": "dspark2",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "deepseek-1m-w4",
+    "mode": "dspark3",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "deepseek-1m-w4",
+    "mode": "dspark5",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "dsv4-w2",
+    "mode": "default",
+    "jobs": [
+      "greedy",
+      "prefill",
+      "context-0",
+      "context-32768",
+      "context-65536",
+      "context-131072",
+      "context-262144",
+      "context-524288"
+    ],
+    "prefill_lengths": [
+      2048,
+      8192,
+      32768
+    ]
+  },
+  {
+    "deployment": "dsv4-w2",
+    "mode": "plain",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "dsv4-w2",
+    "mode": "dspark1",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "dsv4-w2",
+    "mode": "dspark2",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "dsv4-w2",
+    "mode": "dspark3",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "dsv4-w2",
+    "mode": "dspark5",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "dsv4-w4",
+    "mode": "default",
+    "jobs": [
+      "greedy",
+      "prefill",
+      "context-0",
+      "context-32768",
+      "context-65536",
+      "context-131072",
+      "context-262144",
+      "context-524288"
+    ],
+    "prefill_lengths": [
+      2048,
+      8192,
+      32768
+    ]
+  },
+  {
+    "deployment": "dsv4-w4",
+    "mode": "plain",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "dsv4-w4",
+    "mode": "dspark1",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "dsv4-w4",
+    "mode": "dspark2",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "dsv4-w4",
+    "mode": "dspark3",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "dsv4-w4",
+    "mode": "dspark5",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "mimo-w2",
+    "mode": "default",
+    "jobs": [
+      "greedy",
+      "prefill",
+      "context-0",
+      "context-32768",
+      "context-65536",
+      "context-131072",
+      "context-262144",
+      "context-524288"
+    ],
+    "prefill_lengths": [
+      2048,
+      8192,
+      32768
+    ]
+  },
+  {
+    "deployment": "mimo-w2",
+    "mode": "plain",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "mimo-w2",
+    "mode": "mtp2",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "mimo-w2",
+    "mode": "mtp3",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "mimo-w2-fp8kv",
+    "mode": "default",
+    "jobs": [
+      "greedy",
+      "prefill",
+      "context-0",
+      "context-32768",
+      "context-65536",
+      "context-131072",
+      "context-262144",
+      "context-524288"
+    ],
+    "prefill_lengths": [
+      2048,
+      8192,
+      32768
+    ]
+  },
+  {
+    "deployment": "mimo-w2-fp8kv",
+    "mode": "plain",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "mimo-w2-fp8kv",
+    "mode": "mtp2",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "mimo-w2-fp8kv",
+    "mode": "mtp3",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "mimo-w4",
+    "mode": "default",
+    "jobs": [
+      "greedy",
+      "prefill",
+      "context-0",
+      "context-32768",
+      "context-65536",
+      "context-131072",
+      "context-262144",
+      "context-524288"
+    ],
+    "prefill_lengths": [
+      2048,
+      8192,
+      32768
+    ]
+  },
+  {
+    "deployment": "mimo-w4",
+    "mode": "plain",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "mimo-w4",
+    "mode": "mtp2",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "mimo-w4",
+    "mode": "mtp3",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "mimo-1m-w4",
+    "mode": "default",
+    "jobs": [
+      "greedy",
+      "prefill",
+      "context-0",
+      "context-32768",
+      "context-65536",
+      "context-131072",
+      "context-262144",
+      "context-524288"
+    ],
+    "prefill_lengths": [
+      2048,
+      8192,
+      32768
+    ]
+  },
+  {
+    "deployment": "mimo-1m-w4",
+    "mode": "plain",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "mimo-1m-w4",
+    "mode": "mtp2",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "mimo-1m-w4",
+    "mode": "mtp3",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "qwen27b-fp8-w1",
+    "mode": "default",
+    "jobs": [
+      "greedy",
+      "prefill",
+      "context-0",
+      "context-32768",
+      "context-65536",
+      "context-131072",
+      "context-262144",
+      "context-524288"
+    ],
+    "prefill_lengths": [
+      2048,
+      8192,
+      32768
+    ]
+  },
+  {
+    "deployment": "qwen27b-fp8-w1",
+    "mode": "plain",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "qwen27b-fp8-w1",
+    "mode": "mtp1",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "qwen27b-fp8-w1",
+    "mode": "mtp2",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "qwen27b-fp8-w1",
+    "mode": "mtp3",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "qwen27b-fp8-w1",
+    "mode": "dflash2-fixed",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "qwen27b-fp8-w2",
+    "mode": "default",
+    "jobs": [
+      "greedy",
+      "prefill",
+      "context-0",
+      "context-32768",
+      "context-65536",
+      "context-131072",
+      "context-262144",
+      "context-524288"
+    ],
+    "prefill_lengths": [
+      2048,
+      8192,
+      32768
+    ]
+  },
+  {
+    "deployment": "qwen27b-fp8-w2",
+    "mode": "plain",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "qwen27b-fp8-w2",
+    "mode": "mtp1",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "qwen27b-fp8-w2",
+    "mode": "mtp2",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "qwen27b-fp8-w2",
+    "mode": "mtp3",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "qwen27b-fp8-w2",
+    "mode": "dflash2-fixed",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "qwen27b-fp8-w4",
+    "mode": "default",
+    "jobs": [
+      "greedy",
+      "prefill",
+      "context-0",
+      "context-32768",
+      "context-65536",
+      "context-131072",
+      "context-262144",
+      "context-524288"
+    ],
+    "prefill_lengths": [
+      2048,
+      8192,
+      32768
+    ]
+  },
+  {
+    "deployment": "qwen27b-fp8-w4",
+    "mode": "plain",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "qwen27b-fp8-w4",
+    "mode": "mtp1",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "qwen27b-fp8-w4",
+    "mode": "mtp2",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "qwen27b-fp8-w4",
+    "mode": "mtp3",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  },
+  {
+    "deployment": "qwen27b-fp8-w4",
+    "mode": "dflash2-fixed",
+    "jobs": [
+      "greedy"
+    ],
+    "prefill_lengths": []
+  }
+]

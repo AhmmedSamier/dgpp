@@ -1,0 +1,7 @@
+[  9%] Built target dgpp_rope_scaling
+[ 18%] Built target dgpp_core
+[ 90%] Built target dgpp_kernels
+[ 90%] Built target dgpp_models_csa2
+[100%] Building CUDA object CMakeFiles/csa2_layer_test.dir/tests/cuda/csa2_layer_test.cu.o
+[100%] Linking CXX executable csa2_layer_test
+[100%] Built target csa2_layer_test

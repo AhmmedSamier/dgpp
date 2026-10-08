@@ -1,0 +1,44 @@
+
+=== 20:59:24 full build (expected a no-op)
+build exit 0
+0
+
+=== 20:59:24 production down (gates25)
+2026-10-05 20:59:32.028 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+[N/A], [N/A]
+
+=== 20:59:32 head check x3 on the free node (mma mode; the diagnostic names the kernels on a mismatch)
+run 1 exit=0
+device free 113.5 of 121.6 GiB
+run 2 exit=0
+device free 113.2 of 121.6 GiB
+run 3 exit=0
+device free 113.1 of 121.6 GiB
+
+=== 20:59:35 the head check through ctest (compare fix) + the decode head tests
+1/5 Test  #21: qwen_decode_rows_invariance ............   Passed    0.79 sec
+2/5 Test  #22: qwen_decode_fp8_head ...................   Passed    5.05 sec
+3/5 Test  #23: qwen_decode_fp8_head_row_independent ...   Passed    4.59 sec
+4/5 Test #166: qwen_head_check_fixture ................   Passed    1.89 sec
+5/5 Test #167: qwen_compact_check_fixture .............   Passed    3.26 sec
+100% tests passed, 0 tests failed out of 5
+
+=== 20:59:50 the ctest subset
+34/86 Test  #64: qwen_head_compare_test .....................***Failed    1.48 sec
+99% tests passed, 1 tests failed out of 86
+	 64 - qwen_head_compare_test (Failed)
+
+=== 21:05:08 fn-recipe up (nothing else on the node)
+2026-10-05 21:05:37.693 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/gates25/fn-recipe/server)
+
+=== 21:05:37 fn-recipe C1 prose,code x2 (fn18 clean: 40.9/47.6 at 39.4 ms/step; gates24 perturbed: 36.3/41.4 at 46.1)
+| prose | 41.1 | | code | 47.8 | 
+44.4 tok/s, 22.1 ms/tok, 39.4 ms/step | mtp 1.78 tok/step/req, accept p1 78 % 
+
+=== 21:06:02 fn-recipe down
+2026-10-05 21:06:04.580 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/gates25/fn-recipe/server
+
+=== 21:06:06 production up
+2026-10-05 21:06:44.930 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+GATES25_DONE 21:06:44

@@ -1,0 +1,159 @@
+{
+  "at": "2026-10-08T03:41:46.979840+00:00",
+  "overview_sha256": "1e7f1759ff199d2a3cb4bfcc0e343f5b8f1326d7b5758dc196a3c07e3ec7211b",
+  "tables": [
+    {
+      "line": 5,
+      "columns": 4,
+      "data_rows": 11
+    },
+    {
+      "line": 25,
+      "columns": 2,
+      "data_rows": 3
+    },
+    {
+      "line": 37,
+      "columns": 9,
+      "data_rows": 29
+    },
+    {
+      "line": 75,
+      "columns": 3,
+      "data_rows": 5
+    },
+    {
+      "line": 89,
+      "columns": 2,
+      "data_rows": 17
+    },
+    {
+      "line": 115,
+      "columns": 10,
+      "data_rows": 29
+    },
+    {
+      "line": 149,
+      "columns": 2,
+      "data_rows": 12
+    },
+    {
+      "line": 166,
+      "columns": 3,
+      "data_rows": 10
+    },
+    {
+      "line": 191,
+      "columns": 8,
+      "data_rows": 29
+    },
+    {
+      "line": 235,
+      "columns": 9,
+      "data_rows": 18
+    },
+    {
+      "line": 258,
+      "columns": 9,
+      "data_rows": 4
+    },
+    {
+      "line": 267,
+      "columns": 10,
+      "data_rows": 4
+    },
+    {
+      "line": 276,
+      "columns": 10,
+      "data_rows": 3
+    },
+    {
+      "line": 288,
+      "columns": 2,
+      "data_rows": 8
+    },
+    {
+      "line": 299,
+      "columns": 7,
+      "data_rows": 23
+    },
+    {
+      "line": 327,
+      "columns": 6,
+      "data_rows": 22
+    },
+    {
+      "line": 352,
+      "columns": 2,
+      "data_rows": 3
+    },
+    {
+      "line": 362,
+      "columns": 3,
+      "data_rows": 6
+    },
+    {
+      "line": 379,
+      "columns": 3,
+      "data_rows": 4
+    },
+    {
+      "line": 388,
+      "columns": 2,
+      "data_rows": 6
+    },
+    {
+      "line": 401,
+      "columns": 3,
+      "data_rows": 3
+    },
+    {
+      "line": 408,
+      "columns": 2,
+      "data_rows": 6
+    },
+    {
+      "line": 419,
+      "columns": 17,
+      "data_rows": 29
+    },
+    {
+      "line": 457,
+      "columns": 9,
+      "data_rows": 29
+    },
+    {
+      "line": 495,
+      "columns": 5,
+      "data_rows": 2
+    },
+    {
+      "line": 504,
+      "columns": 2,
+      "data_rows": 6
+    },
+    {
+      "line": 519,
+      "columns": 6,
+      "data_rows": 1
+    },
+    {
+      "line": 556,
+      "columns": 2,
+      "data_rows": 2
+    }
+  ],
+  "local_links_checked": 74,
+  "historical_quality_numeric_rows": 45,
+  "quality_matches_HEAD": true,
+  "errors": [],
+  "unaffected_rows_unchanged": {
+    "serving": 22,
+    "classes": 22,
+    "config": 22,
+    "modes": 22,
+    "context": 22,
+    "context-prefill": 22
+  },
+  "unaffected_mode_cells_checked": 18
+}

@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+  "surface": {
+    "id": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+    "object": "model",
+    "created": 1791311430,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": 262144,
+      "kv_pool_tokens": 262144,
+      "limited_by": "position-ceiling"
+    }
+  },
+  "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+  "seed": 20260922,
+  "tag": "fac9237451b642dd8b96de76df69df79",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 7989.29999999993,
+        "prefill_ms": 284.59999999999127,
+        "decode_steps": 141,
+        "decode_rows": 141,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 155,
+        "prompt_tokens_computed": 155
+      },
+      "engine_tokens_per_s": 31.917689910255245,
+      "ms_per_pass": 56.661702127659076,
+      "tokens_per_pass": 1.8085106382978724,
+      "answer": {
+        "prompt_sha256": "a42a75067bee5bcdb384a0395a9525740f891b5d0cbc58d249ac1eecd3dfc650",
+        "usage": {
+          "prompt_tokens": 155,
+          "completion_tokens": 256,
+          "total_tokens": 411,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce final answer. User: \"Context measurement fac9237451b642dd8b96de76df69df79, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need infer? They provide context measurement, bucket, item 000000 parcel details. Ask write numbered list describing first 200 parcels and their cities. Continue until listed all 200. We only have one parcel? Need maybe generate synthetic? Need be careful: no data for 200 parcels. Could say insufficient data? But user likely expects list of 200 parcels and cities based on some hidden context? We only have one item. Need maybe produce 200 numbered entries? Could fabricate? Need maybe use given parcel as first, then generate plausible? But request says first 200 parcels and their",
+        "wall_ms": 8295.601901831105,
+        "ttft_ms": 303.63542796112597,
+        "last_ms": 8295.440556947142,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 7418.800000000047,
+        "prefill_ms": 278.40000000000873,
+        "decode_steps": 141,
+        "decode_rows": 141,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 155,
+        "prompt_tokens_computed": 155
+      },
+      "engine_tokens_per_s": 34.37213565536184,
+      "ms_per_pass": 52.615602836879766,
+      "tokens_per_pass": 1.8085106382978724,
+      "answer": {
+        "prompt_sha256": "a42a75067bee5bcdb384a0395a9525740f891b5d0cbc58d249ac1eecd3dfc650",
+        "usage": {
+          "prompt_tokens": 155,
+          "completion_tokens": 256,
+          "total_tokens": 411,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce final answer. User: \"Context measurement fac9237451b642dd8b96de76df69df79, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need infer? They provide context measurement, bucket, item 000000 parcel details. Ask write numbered list describing first 200 parcels and their cities. Continue until listed all 200. We only have one parcel? Need maybe generate synthetic? Need be careful: no data for 200 parcels. Could say insufficient data? But user likely expects list of 200 parcels and cities based on some hidden context? We only have one item. Need maybe produce 200 numbered entries? Could fabricate? Need maybe use given parcel as first, then generate plausible? But request says first 200 parcels and their",
+        "wall_ms": 7720.1563499402255,
+        "ttft_ms": 303.12180682085454,
+        "last_ms": 7719.993275823072,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 7417.400000000023,
+        "prefill_ms": 278.8999999999942,
+        "decode_steps": 141,
+        "decode_rows": 141,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 155,
+        "prompt_tokens_computed": 155
+      },
+      "engine_tokens_per_s": 34.37862323725284,
+      "ms_per_pass": 52.605673758865414,
+      "tokens_per_pass": 1.8085106382978724,
+      "answer": {
+        "prompt_sha256": "a42a75067bee5bcdb384a0395a9525740f891b5d0cbc58d249ac1eecd3dfc650",
+        "usage": {
+          "prompt_tokens": 155,
+          "completion_tokens": 256,
+          "total_tokens": 411,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce final answer. User: \"Context measurement fac9237451b642dd8b96de76df69df79, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need infer? They provide context measurement, bucket, item 000000 parcel details. Ask write numbered list describing first 200 parcels and their cities. Continue until listed all 200. We only have one parcel? Need maybe generate synthetic? Need be careful: no data for 200 parcels. Could say insufficient data? But user likely expects list of 200 parcels and cities based on some hidden context? We only have one item. Need maybe produce 200 numbered entries? Could fabricate? Need maybe use given parcel as first, then generate plausible? But request says first 200 parcels and their",
+        "wall_ms": 7718.605419853702,
+        "ttft_ms": 303.1402549240738,
+        "last_ms": 7718.445674981922,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

@@ -1,0 +1,11 @@
+{
+  "pid": 3081038,
+  "start_ticks": "149569419",
+  "argv": [
+    "python3",
+    "benchmarks/results/2026-10-06-prefill-scaling/run.py"
+  ],
+  "at": "2026-10-07T03:13:20.614852+00:00",
+  "reason": "User requested an accuracy-based assessment of single-query fusion; pause between cleanly completed model launches for GPU diagnostics.",
+  "validated_launch": "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-w4/refresh/default"
+}

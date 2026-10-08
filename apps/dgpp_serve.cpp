@@ -62,6 +62,7 @@
 #include "common/cuda_check.hpp"
 #include "common/log.hpp"
 #include "common/process_memory.hpp"
+#include "kernels/l2_prefetch.hpp"
 #include "kernels/bf12_companions.hpp"
 #include "kernels/latent_format.hpp"
 #include "loaders/hf_cache.hpp"
@@ -252,6 +253,8 @@ struct ServeGraphEngine {
   virtual void configure_block_rows_budget(int budget) = 0;
   // engine.mtp_schedule_sampled_scale, before the warm capture.
   virtual void set_sampled_schedule_scale(float scale) = 0;
+  // engine.prefill_group: several cold prompts as the spans of one walk.
+  virtual void set_prefill_group(bool on) = 0;
 };
 
 template <class Model>
@@ -270,6 +273,7 @@ struct ServeGraphEngineOf final : ServeGraphEngine {
   void set_block_verify(bool on) override { eng.set_block_verify(on); }
   void configure_block_rows_budget(int budget) override { eng.configure_block_rows_budget(budget); }
   void set_sampled_schedule_scale(float scale) override { eng.set_sampled_schedule_scale(scale); }
+  void set_prefill_group(bool on) override { eng.set_prefill_group(on); }
 };
 
 struct ServeFamily {
@@ -384,6 +388,8 @@ struct GlmFamily final : ServeFamily {
         fabric ? dgpp::GlmResidency::Resident : dgpp::GlmResidency::Streaming,
         fabric ? dgpp::GlmHeadSharding::VocabSharded : dgpp::GlmHeadSharding::Full, slots,
         fabric && mtp, kv_format, /*serving_logits=*/true);
+    // Neither the eager nor graph serving path consumes diagnostic routes.
+    model->set_decode_route_traces(false);
   }
   void destroy_model() override { model.reset(); }
   size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
@@ -1379,6 +1385,10 @@ int main(int argc, char** argv) {
       "    [--dflash-model DIR_OR_ID]  DFlash2 block drafter checkpoint (replaces --mtp; past world 1 on the decode graph)\n"
       "    [--no-dflash]  run plain from a drafter template on the decode graph (the A/B knob; add --mtp for the MTP world)\n"
       "    [--no-dflash-verify-graph]  the multi-slot verify as an eager batch (engine.dflash_verify_graph)\n"
+      "    [--no-prefill-group]  one cold prompt per prefill walk (engine.prefill_group false)\n"
+      "    [--no-l2-prefetch] [--l2-prefetch-form load|lines|touch] [--l2-prefetch-window-mib N]\n"
+      "    [--l2-prefetch-boundary-window-mib N] [--l2-prefetch-boundary-rate off|light|full]\n"
+      "    [--l2-prefetch-layer-rate off|light|full] [--no-l2-prefetch-merge]  the L2 weight prefetcher (engine.l2_prefetch*)\n"
       "    [--no-dflash-draft-batch]  one block forward per slot (engine.dflash_draft_batch)\n"
       "    [--dflash-depth N]  verify only the first N drafts per step, 0 = the block (engine.dflash_depth)\n"
       "    [--mtp-schedule]  the confidence-scheduled verify depth (DeepSeek-V4.1's\n"
@@ -1429,6 +1439,10 @@ int main(int argc, char** argv) {
 
   std::string ckpt, model_id, peer, dflash_model;
   bool dflash_verify_graph = true, dflash_draft_batch = true;
+  bool prefill_group = true;  // engine.prefill_group: several cold prompts as one walk
+  bool l2_prefetch = true, l2_prefetch_merge = true;  // engine.l2_prefetch*
+  std::string l2_prefetch_form = "load", l2_prefetch_boundary_rate = "light", l2_prefetch_layer_rate = "light";
+  int l2_prefetch_window_mib = 12, l2_prefetch_boundary_window_mib = 20;
   int dflash_depth = 0;
   std::string dflash_weights = "checkpoint";  // engine.dflash_weights: checkpoint | fp8
   uint16_t port = 8080, fabric_port = 29970, journal_port = 29971;
@@ -1579,6 +1593,14 @@ int main(int argc, char** argv) {
     mtp = e.mtp;
     if (dflash_model.empty()) dflash_model = e.dflash_model;  // the flag wins
     dflash_verify_graph = e.dflash_verify_graph;
+    prefill_group = e.prefill_group;
+    l2_prefetch = e.l2_prefetch;
+    l2_prefetch_form = e.l2_prefetch_form;
+    l2_prefetch_window_mib = e.l2_prefetch_window_mib;
+    l2_prefetch_boundary_window_mib = e.l2_prefetch_boundary_window_mib;
+    l2_prefetch_boundary_rate = e.l2_prefetch_boundary_rate;
+    l2_prefetch_layer_rate = e.l2_prefetch_layer_rate;
+    l2_prefetch_merge = e.l2_prefetch_merge;
     dflash_draft_batch = e.dflash_draft_batch;
     dflash_depth = e.dflash_depth;
     dflash_weights = e.dflash_weights;
@@ -1691,6 +1713,14 @@ int main(int argc, char** argv) {
       no_dflash_cli = true;
     }
     else if (a == "--no-dflash-verify-graph") dflash_verify_graph = false;
+    else if (a == "--no-prefill-group") prefill_group = false;
+    else if (a == "--no-l2-prefetch") l2_prefetch = false;
+    else if (a == "--l2-prefetch-form") l2_prefetch_form = next();
+    else if (a == "--l2-prefetch-window-mib") l2_prefetch_window_mib = std::stoi(next());
+    else if (a == "--l2-prefetch-boundary-window-mib") l2_prefetch_boundary_window_mib = std::stoi(next());
+    else if (a == "--l2-prefetch-boundary-rate") l2_prefetch_boundary_rate = next();
+    else if (a == "--l2-prefetch-layer-rate") l2_prefetch_layer_rate = next();
+    else if (a == "--no-l2-prefetch-merge") l2_prefetch_merge = false;
     else if (a == "--no-dflash-draft-batch") dflash_draft_batch = false;
     else if (a == "--dflash-depth") dflash_depth = std::stoi(next());
     else if (a == "--dflash-weights") dflash_weights = next();
@@ -1920,6 +1950,14 @@ int main(int argc, char** argv) {
         ws.prefill_fp8_per_tensor = prefill_fp8_per_tensor;
         ws.dflash_model = dflash_model;
         ws.dflash_verify_graph = dflash_verify_graph;
+        ws.prefill_group = prefill_group;
+        ws.l2_prefetch = l2_prefetch;
+        ws.l2_prefetch_form = l2_prefetch_form;
+        ws.l2_prefetch_window_mib = l2_prefetch_window_mib;
+        ws.l2_prefetch_boundary_window_mib = l2_prefetch_boundary_window_mib;
+        ws.l2_prefetch_boundary_rate = l2_prefetch_boundary_rate;
+        ws.l2_prefetch_layer_rate = l2_prefetch_layer_rate;
+        ws.l2_prefetch_merge = l2_prefetch_merge;
         ws.dflash_draft_batch = dflash_draft_batch;
         ws.dflash_depth = dflash_depth;
         ws.dflash_weights = dflash_weights;
@@ -1996,6 +2034,14 @@ int main(int argc, char** argv) {
         prefill_fp8_per_tensor = ws.prefill_fp8_per_tensor;
         dflash_model = ws.dflash_model;
         dflash_verify_graph = ws.dflash_verify_graph;
+        prefill_group = ws.prefill_group;
+        l2_prefetch = ws.l2_prefetch;
+        l2_prefetch_form = ws.l2_prefetch_form;
+        l2_prefetch_window_mib = ws.l2_prefetch_window_mib;
+        l2_prefetch_boundary_window_mib = ws.l2_prefetch_boundary_window_mib;
+        l2_prefetch_boundary_rate = ws.l2_prefetch_boundary_rate;
+        l2_prefetch_layer_rate = ws.l2_prefetch_layer_rate;
+        l2_prefetch_merge = ws.l2_prefetch_merge;
         dflash_draft_batch = ws.dflash_draft_batch;
         dflash_depth = ws.dflash_depth;
         dflash_weights = ws.dflash_weights;
@@ -2136,6 +2182,30 @@ int main(int argc, char** argv) {
   // The DeepSeek-V4.1 prefill mode: every model built from here on takes it.
   dgpp::Dsv41Model::set_default_prefill_bounded(prefill == "bounded");
   dgpp::QwenLayerStream::set_dense_weights_fp8(dense_weights == "fp8");
+  {
+    // The L2 weight prefetcher's settings, before any model builds its prefetcher.
+    if (l2_prefetch_window_mib < 1 || l2_prefetch_window_mib > 64 || l2_prefetch_boundary_window_mib < 0 ||
+        l2_prefetch_boundary_window_mib > 64) {
+      DGPP_LOG_ERROR("--l2-prefetch-window-mib must be 1..64 and --l2-prefetch-boundary-window-mib 0..64 (got {}, {})",
+                     l2_prefetch_window_mib, l2_prefetch_boundary_window_mib);
+      return 2;
+    }
+    dgpp::L2PrefetchSettings l2;
+    l2.enabled = l2_prefetch;
+    l2.merge = l2_prefetch_merge;
+
+    l2.window_bytes = static_cast<size_t>(l2_prefetch_window_mib) << 20;
+    l2.boundary_window_bytes = static_cast<size_t>(l2_prefetch_boundary_window_mib) << 20;
+    try {
+      l2.form = dgpp::l2_prefetch_form(l2_prefetch_form);
+      l2.boundary_rate = dgpp::l2_prefetch_rate(l2_prefetch_boundary_rate);
+      l2.layer_rate = dgpp::l2_prefetch_rate(l2_prefetch_layer_rate);
+      dgpp::l2_prefetch_configure(l2);
+    } catch (const std::exception& e) {
+      DGPP_LOG_ERROR("engine.l2_prefetch*: {}", e.what());
+      return 2;
+    }
+  }
   // The opt-in prefill levers (2026-09-30): each default off, never
   // bitwise the default chain; a deployment turns one on in its config.
   if (prefill_fp8_gemm && dense_weights != "fp8") {
@@ -2808,6 +2878,8 @@ int main(int argc, char** argv) {
                         graph_engine->engine()->prefill_group_advance() ? "; in-flight prompts share one walk" : "");
           graph_engine->set_proposal_temperature_scale(static_cast<float>(mtp_draft_temperature));
           graph_engine->set_block_verify(mtp_verify == "block");
+          graph_engine->set_prefill_group(prefill_group);
+          if (!prefill_group) DGPP_LOG_INFO("serve: cold prompts prefill one per walk (engine.prefill_group false)");
           if (!dflash_dir.empty()) graph_engine->configure_block_rows_budget(dflash_batch_rows);
           if (mtp_verify == "block")
             DGPP_LOG_INFO("rank {}: sampled chains decided by block verification (engine.mtp_verify block)", rank);

@@ -1,0 +1,18 @@
+{
+  "recorded_at": "2026-10-07T02:38:44.891985+00:00",
+  "base_commit": "a3ebc21a7c245eb736cc799fcf87a2c97ed8f7c9",
+  "source_sha256": {
+    "src/kernels/dsa.cu": "d247e752168801bb068413f3cdb05ae0d8e18a64fab07113e7e4bd29d39741f7",
+    "src/kernels/dsa.hpp": "578fc50b48e5acfe147c621e7919a49473cda05f8ddb2f2bfa66f494c286f552",
+    "src/models/dsa_layer.cu": "26c3ae60ff1ac349bad03a46b2bc041ce9efa2b3af434f9e00d678df82f723e6",
+    "src/models/dsa_layer.hpp": "25721a7d7a6d1de79b7cd98db57ba45ee37b17fb24398ab9ee54e7106f71014c",
+    "tests/cuda/dsa_test.cu": "3ebc04719031f6d7ac2549b3a87357db2d5a7fd004bfd73d918878ee3cd78563",
+    "benchmarks/micro/dsa_bench.cu": "00343c3673f2c9431600c2972e6f719cbabb0d6f11ea055db06b43ea109dbd32"
+  },
+  "patch_sha256": "3173218b1711c4086a65d02a00df22da137c5c79fb34daad0dcc84375a57b493",
+  "binaries": {
+    "build-release/dsa_test": "4600bbc4c4ceb55b6b4d16add8496e47375d94fc471ba5d909bd1298a0433bda",
+    "build-release/dsa_bench": "47191c8c0a2c4734cf8e15f7c907f6446197b3fa53760724a4245ac695b50be2"
+  },
+  "scope": "Full GLM unpooled indexer only. Original GEMM single-query tiles/tails are preserved. KV allocation and decode unchanged."
+}

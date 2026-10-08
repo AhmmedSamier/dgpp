@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+  "surface": {
+    "id": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+    "object": "model",
+    "created": 1791280900,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "minimal": {
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "reasoning_effort": "high"
+        },
+        "high": {
+          "reasoning_effort": "high"
+        },
+        "xhigh": {
+          "reasoning_effort": "max"
+        },
+        "max": {
+          "reasoning_effort": "max"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "context": {
+      "request_limit_tokens": 786432,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 786432,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
+  "seed": 20260922,
+  "tag": "b00718c9757b443986a0f4a5599f40f9",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 4338.29999999993,
+        "prefill_ms": 236.40000000000873,
+        "decode_steps": 136,
+        "decode_rows": 136,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 99,
+        "prompt_tokens_computed": 99
+      },
+      "engine_tokens_per_s": 58.77878431643826,
+      "ms_per_pass": 31.89926470588184,
+      "tokens_per_pass": 1.875,
+      "answer": {
+        "prompt_sha256": "09f9eea384c923b8f477db0769903a2834832013f514e891db62b4189646e6ef",
+        "usage": {
+          "prompt_tokens": 99,
+          "completion_tokens": 256,
+          "total_tokens": 355,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing the first 200 parcels and their cities. However, the context provided only contains one item (Item 000000: parcel PX-0757343). There's no data about 200 parcels or their cities.\n\nThis appears to be a request to fabricate data. The context only gives me one parcel: PX-0757343, weighed 4.1825 kilograms, in \"Income\" (which seems like a location/department name), gate 1, shift C, status sealed. No city is mentioned.\n\nI should not hallucinate/fabricate 200 parcels with cities that don't exist in the provided data. The honest response is to point out that only one parcel is provided in the context, and I cannot list 200 parcels and their cities because that information doesn't exist in what was shared.\n\nI could offer to list what I actually have, or ask the user to provide the full dataset. Fabricating 200 entries would be dishonest and potentially harmful if this data is being used for some operational purpose (the context looks like some kind of logistics/measurement system log).\n\nLet me write a helpful response explaining this. I can list the one item I have, noting that no",
+        "wall_ms": 4593.665041029453,
+        "ttft_ms": 252.9929589945823,
+        "last_ms": 4593.500128015876,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 4344.600000000093,
+        "prefill_ms": 235.1999999999971,
+        "decode_steps": 136,
+        "decode_rows": 136,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 99,
+        "prompt_tokens_computed": 99
+      },
+      "engine_tokens_per_s": 58.693550614554745,
+      "ms_per_pass": 31.945588235294803,
+      "tokens_per_pass": 1.875,
+      "answer": {
+        "prompt_sha256": "09f9eea384c923b8f477db0769903a2834832013f514e891db62b4189646e6ef",
+        "usage": {
+          "prompt_tokens": 99,
+          "completion_tokens": 256,
+          "total_tokens": 355,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing the first 200 parcels and their cities. However, the context provided only contains one item (Item 000000: parcel PX-0757343). There's no data about 200 parcels or their cities.\n\nThis appears to be a request to fabricate data. The context only gives me one parcel: PX-0757343, weighed 4.1825 kilograms, in \"Income\" (which seems like a location/department name), gate 1, shift C, status sealed. No city is mentioned.\n\nI should not hallucinate/fabricate 200 parcels with cities that don't exist in the provided data. The honest response is to point out that only one parcel is provided in the context, and I cannot list 200 parcels and their cities because that information doesn't exist in what was shared.\n\nI could offer to list what I actually have, or ask the user to provide the full dataset. Fabricating 200 entries would be dishonest and potentially harmful if this data is being used for some operational purpose (the context looks like some kind of logistics/measurement system log).\n\nLet me write a helpful response explaining this. I can list the one item I have, noting that no",
+        "wall_ms": 4612.784035969526,
+        "ttft_ms": 252.11526895873249,
+        "last_ms": 4612.628706963733,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 4335.79999999993,
+        "prefill_ms": 237.59999999999127,
+        "decode_steps": 136,
+        "decode_rows": 136,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 99,
+        "prompt_tokens_computed": 99
+      },
+      "engine_tokens_per_s": 58.81267586143367,
+      "ms_per_pass": 31.880882352940663,
+      "tokens_per_pass": 1.875,
+      "answer": {
+        "prompt_sha256": "09f9eea384c923b8f477db0769903a2834832013f514e891db62b4189646e6ef",
+        "usage": {
+          "prompt_tokens": 99,
+          "completion_tokens": 256,
+          "total_tokens": 355,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing the first 200 parcels and their cities. However, the context provided only contains one item (Item 000000: parcel PX-0757343). There's no data about 200 parcels or their cities.\n\nThis appears to be a request to fabricate data. The context only gives me one parcel: PX-0757343, weighed 4.1825 kilograms, in \"Income\" (which seems like a location/department name), gate 1, shift C, status sealed. No city is mentioned.\n\nI should not hallucinate/fabricate 200 parcels with cities that don't exist in the provided data. The honest response is to point out that only one parcel is provided in the context, and I cannot list 200 parcels and their cities because that information doesn't exist in what was shared.\n\nI could offer to list what I actually have, or ask the user to provide the full dataset. Fabricating 200 entries would be dishonest and potentially harmful if this data is being used for some operational purpose (the context looks like some kind of logistics/measurement system log).\n\nLet me write a helpful response explaining this. I can list the one item I have, noting that no",
+        "wall_ms": 4590.516109019518,
+        "ttft_ms": 252.91420496068895,
+        "last_ms": 4590.386299882084,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

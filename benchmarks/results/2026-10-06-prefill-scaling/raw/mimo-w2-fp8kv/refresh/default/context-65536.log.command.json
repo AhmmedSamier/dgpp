@@ -1,0 +1,20 @@
+{
+  "command": [
+    "/home/stephen/workspace/dgpp/.venv/bin/python",
+    "/home/stephen/workspace/dgpp/scripts/serve_context_matrix.py",
+    "127.0.0.1",
+    "18080",
+    "--model",
+    "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+    "--tag",
+    "b5f938b007ea4820b6b3f245c99472c4",
+    "--lengths",
+    "65536",
+    "--json-out",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/mimo-w2-fp8kv/refresh/default/context-65536.json"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-10-07T13:14:06.915117+00:00",
+  "returncode": 0,
+  "finished_at": "2026-10-07T13:16:41.117550+00:00"
+}

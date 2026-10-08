@@ -1,0 +1,451 @@
+{
+  "created_at": "2026-10-06T15:51:15.463833+00:00",
+  "reason": "Targeted reuse requested after the DSA prefill fix. Only GLM Flash inputs at or below 8192 tokens are eligible. Longer prefills are rerun; every reused source requires completed request receipts, passing whole-launch memory/rank checks and clean shutdown.",
+  "source_binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+  "modes": {
+    "glm-flash-hybrid-w2/default": {
+      "directory": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/default",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68,
+          "max_total_tokens": 324
+        },
+        "context-0": {
+          "max_total_tokens": 350
+        },
+        "prefill": {
+          "lengths": [
+            2048,
+            8192
+          ],
+          "max_prompt_tokens": 8174
+        }
+      },
+      "files_sha256": {
+        "memory-check.json": "9755e1605d5831e8d1042c48391226f31b95725a393cb85b53835a486c8f05ca",
+        "rank-identity.json": "78d6f018e3fd61da24e03734199c259094f1e7b1dae1f3e75639c077d9bcf1fe",
+        "down.log.command.json": "cdb51d946a753bd1bb40324f76e0356abfbd11498d43019f8cfb9820c0d73984",
+        "manifest.json": "6507d35c478e65c20841b58509bb6c5fc19b8e2b3ea5d1fff9ec19e02e7a4c10",
+        "config.json": "ac6b3739ef51d10a81a60e3ed1641ea4862631c26c3ce9fff7d6c7deb9a30f54",
+        "greedy.json": "b4eabe0eb276cc21b179e415ac4ecac3e41b1200982dd3e204901e5dceba109f",
+        "greedy.log.command.json": "aa0c6024537f8fd704317a11cb413803e0c573b0c058d8fc3242a4570a0eb23f",
+        "context-0.json": "f8e0a5bce8c66f378c6f984767ef5b008876259454b1b6fb9f97ba5ca43be1dd",
+        "context-0.log.command.json": "3c8f6bfdee5d421d8f69d7e28e11b2b099a8784b9545697b383a48ec047a6caf",
+        "prefill.json": "f1e43580cd8e597e65233fed219ad0c3333981cac4fa6f51cc2b23a68d2c3acb",
+        "prefill.log.command.json": "e56ff4e3f2b70c4b0625abd2f54845e96da815464b0fd28165134addb1d585fe"
+      },
+      "target_config": {
+        "path": "configs/glm-flash-hybrid-w2.json",
+        "sha256": "ac6b3739ef51d10a81a60e3ed1641ea4862631c26c3ce9fff7d6c7deb9a30f54"
+      }
+    },
+    "glm-flash-hybrid-w2/plain": {
+      "directory": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/plain",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68,
+          "max_total_tokens": 324
+        }
+      },
+      "files_sha256": {
+        "memory-check.json": "955c227dc6ecc4c1e71d4428dcd06016420e7a1381981a9fbcf9af628b795851",
+        "rank-identity.json": "ece36cbb196b28a7974034fe370b29562e9b1a217bd624079e1897947810298d",
+        "down.log.command.json": "30b0c0db82c2ef81026a6a7d55352b53a8585d21af8d8de29d3a077733478948",
+        "manifest.json": "6507d35c478e65c20841b58509bb6c5fc19b8e2b3ea5d1fff9ec19e02e7a4c10",
+        "config.json": "8f30a3bf19bc9ea4dc38b27d2017367d18d1796c87298a8882f03dd633f43be3",
+        "greedy.json": "34f8a3235f677ba77ec68087415d03d78b55aaa8bae4099034f522868050a7ee",
+        "greedy.log.command.json": "9581b1a0099233107e2ef07af3629d9a484b902af757c0d640f86041be931507"
+      },
+      "target_config": {
+        "path": "configs/glm-flash-hybrid-w2.json",
+        "sha256": "ac6b3739ef51d10a81a60e3ed1641ea4862631c26c3ce9fff7d6c7deb9a30f54"
+      }
+    },
+    "glm-flash-hybrid-w2/mtp2": {
+      "directory": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/mtp2",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68,
+          "max_total_tokens": 324
+        }
+      },
+      "files_sha256": {
+        "memory-check.json": "9fa4227853006fb3a24330d97106ae2f32bd5640458a8fe0db28172377a0275e",
+        "rank-identity.json": "5d7294d732710b40b27fe8c753de60d7e810292d4fe92b14942a001979032d0d",
+        "down.log.command.json": "4a187b7d94eb1c4d43224d9f5bc625d4e5203fc57870ca669727b4612e2f7040",
+        "manifest.json": "6507d35c478e65c20841b58509bb6c5fc19b8e2b3ea5d1fff9ec19e02e7a4c10",
+        "config.json": "b1503379afb3bd1951b82fafe8d00b91ea04544a8e80fa23477389caa8bbb0a8",
+        "greedy.json": "6565ac8d9f75595702032cca27f96fa9d5b87238a7a9e085f31c76e69a9eca3f",
+        "greedy.log.command.json": "4ca74b13e71a532d4cfe053053e3b47fe2e8a513de133721bf5f2646aacad30b"
+      },
+      "target_config": {
+        "path": "configs/glm-flash-hybrid-w2.json",
+        "sha256": "ac6b3739ef51d10a81a60e3ed1641ea4862631c26c3ce9fff7d6c7deb9a30f54"
+      }
+    },
+    "glm-flash-hybrid-w2/mtp3": {
+      "directory": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/mtp3",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68,
+          "max_total_tokens": 324
+        }
+      },
+      "files_sha256": {
+        "memory-check.json": "aa1a41805a7e3d65bbc90a026eb75a2864df656872fea9cf1ba53968f7d9c0f2",
+        "rank-identity.json": "9e649f222e24a8fb274d3213c3b49ced162e5569933a30396398eb7cf439ebbc",
+        "down.log.command.json": "3bf1b9fa1ebb7e6eae0398e747faf44d81285afd4e16b541afbe60e7e610d752",
+        "manifest.json": "6507d35c478e65c20841b58509bb6c5fc19b8e2b3ea5d1fff9ec19e02e7a4c10",
+        "config.json": "673a327a3ec875500d8526e5c8936d531804508e768678591a9bd0c6bc1dffa5",
+        "greedy.json": "a656f5877d1d375fa6555942e0d0b600f20877354d597274dd82df6ee4d8b55a",
+        "greedy.log.command.json": "a76c09c3159cee4329428f448b55659e02cc403de8a3fe00523948ecc6548dee"
+      },
+      "target_config": {
+        "path": "configs/glm-flash-hybrid-w2.json",
+        "sha256": "ac6b3739ef51d10a81a60e3ed1641ea4862631c26c3ce9fff7d6c7deb9a30f54"
+      }
+    },
+    "glm-flash-hybrid-256k-w2/default": {
+      "directory": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/default",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68,
+          "max_total_tokens": 324
+        },
+        "context-0": {
+          "max_total_tokens": 353
+        },
+        "prefill": {
+          "lengths": [
+            2048,
+            8192
+          ],
+          "max_prompt_tokens": 8191
+        }
+      },
+      "files_sha256": {
+        "memory-check.json": "81b0ab98101202b9dc672e3186850ae4ed0730bea4622078a94b98112fae5421",
+        "rank-identity.json": "71b8b50a7634f3c154f9f31c2a403ca601bb1bbac58617c74a6183e4d24a4229",
+        "down.log.command.json": "ef932332d9e3f42c9be2ce6696d02bad6e8b905380920cd24a20ff1f7efa4074",
+        "manifest.json": "6507d35c478e65c20841b58509bb6c5fc19b8e2b3ea5d1fff9ec19e02e7a4c10",
+        "config.json": "9618fe26f1bb54a580aa4ab732ed36c4660329a1a5fc3da130390665a29b2136",
+        "greedy.json": "4e72903f0751043189e088ea8c8ccd2f36f157f9683e423d0a06a8a446717574",
+        "greedy.log.command.json": "19f8b70693640d67e41f413342a6ed14d389f3756f76d710b23c67928f513c24",
+        "context-0.json": "75f398b71e1bcc470aae6ff0b5eb157c2c838e168cd12de30a30ccd4e749d36e",
+        "context-0.log.command.json": "7a861ff2101fb8e8e1094cd4a14e181f56ab6d7904e3d0aa58a8a5807281ef2a",
+        "prefill.json": "6226531e5182ce7a4a6292d7ce12ba5e3b5ed438cb3dae73a0fa34b6af81b564",
+        "prefill.log.command.json": "3db39752abe51cf5eecc98fdc13d9ae6739333f3dbc143a7d58cfc38337c992f"
+      },
+      "target_config": {
+        "path": "configs/glm-flash-hybrid-256k-w2.json",
+        "sha256": "9618fe26f1bb54a580aa4ab732ed36c4660329a1a5fc3da130390665a29b2136"
+      }
+    },
+    "glm-flash-hybrid-256k-w2/plain": {
+      "directory": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/plain",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68,
+          "max_total_tokens": 324
+        }
+      },
+      "files_sha256": {
+        "memory-check.json": "16801dbe9363bc2d462e042095ebffd2fd7185512d893815d82e278d106d89aa",
+        "rank-identity.json": "58d7cd9ce31f13d5eb39db2a4cbd579c9a3a396dd8c29567e423e02ba1829bbe",
+        "down.log.command.json": "556d4ef7eb9bfdbabf9f84f53cbaa11049ea29bd5b50b8332592ccd62aea9412",
+        "manifest.json": "9bd1626a5a1c786a6500c48da92471467787c8ea7685fa26a76d86465c34d5d7",
+        "config.json": "4f0e2eefbf1be4415797a4aeb60e762f8feba6bae0cf4c1ec65f645551b9653f",
+        "greedy.json": "ec69ab50da791dfc088ffdaac677447da35acdce174426ba24520397108eea0c",
+        "greedy.log.command.json": "5a1c5f0254a13df9d377b6013e122c8607d5011820e078f8fa03d6c26b5c09fc"
+      },
+      "target_config": {
+        "path": "configs/glm-flash-hybrid-256k-w2.json",
+        "sha256": "9618fe26f1bb54a580aa4ab732ed36c4660329a1a5fc3da130390665a29b2136"
+      }
+    },
+    "glm-flash-hybrid-256k-w2/mtp2": {
+      "directory": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/mtp2",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68,
+          "max_total_tokens": 324
+        }
+      },
+      "files_sha256": {
+        "memory-check.json": "3710c364f2dc556d436a4b15d7667ae6d4fdc5ea0d9243bb278a9dbb02aaff48",
+        "rank-identity.json": "658cf0212115cd39b28ceedc0fcfb245ab6e1ddda64c00a0c4b947aa274574ac",
+        "down.log.command.json": "0f2b5c98df7e1783be5682f1fdd40bcf383220d30c399fe540ef2aea453c6610",
+        "manifest.json": "9bd1626a5a1c786a6500c48da92471467787c8ea7685fa26a76d86465c34d5d7",
+        "config.json": "ed2801da9a70751344d3e7f191c9895941c6d9b4f295a793835f831f2a8bb9b6",
+        "greedy.json": "c1e4b6382297c5bd4315bac1d714b649e592def0a5d12ca8f884446314b22773",
+        "greedy.log.command.json": "039c2f1b077c089ec03f1c71559c570fa875e9e7d171099408188f7ce4b4c8e3"
+      },
+      "target_config": {
+        "path": "configs/glm-flash-hybrid-256k-w2.json",
+        "sha256": "9618fe26f1bb54a580aa4ab732ed36c4660329a1a5fc3da130390665a29b2136"
+      }
+    },
+    "glm-flash-hybrid-256k-w2/mtp3": {
+      "directory": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/mtp3",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68,
+          "max_total_tokens": 324
+        }
+      },
+      "files_sha256": {
+        "memory-check.json": "91977bb58d9a963e79ea2272aa7c60315d54624b5e74d5ee0c492afd02e47539",
+        "rank-identity.json": "372fa9c7255faa184b9d7c7dd0a73a222f79f15e3dbb1088f4071ad3825ac300",
+        "down.log.command.json": "12bdc17c8d99feb08c9a43fe3f13dd97e84fccc98761e11cbd2cb4832cf12144",
+        "manifest.json": "9bd1626a5a1c786a6500c48da92471467787c8ea7685fa26a76d86465c34d5d7",
+        "config.json": "3923de171f166c33d2661b64643e979476d60109b5ae84221e27341812f1aed4",
+        "greedy.json": "ad1887ae4168f8f186f4dcf2eb0bc35f65a0923220561b22a296240df7cc4b64",
+        "greedy.log.command.json": "b4df07e6ce74542af2a5f04bdd296fd3a7ce02eb30a183fb9bcde9662047130e"
+      },
+      "target_config": {
+        "path": "configs/glm-flash-hybrid-256k-w2.json",
+        "sha256": "9618fe26f1bb54a580aa4ab732ed36c4660329a1a5fc3da130390665a29b2136"
+      }
+    },
+    "glm-flash-hybrid-w4/default": {
+      "directory": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/refresh/default",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68,
+          "max_total_tokens": 324
+        },
+        "context-0": {
+          "max_total_tokens": 355
+        },
+        "prefill": {
+          "lengths": [
+            2048,
+            8192
+          ],
+          "max_prompt_tokens": 8160
+        }
+      },
+      "files_sha256": {
+        "memory-check.json": "6a842b0eb193b3a55ea2efca0916f8855d81c7c23bb705304094c718d89bcdcc",
+        "rank-identity.json": "e311e24a8b1ac9e1482817f5764adf4a517f7dcdc2b2e3d44898d4b37049469e",
+        "down.log.command.json": "84432ea0fda4f6d2b79207c17cfd427f1c8e7693a224738776bc0248e409a1f7",
+        "manifest.json": "d4a3e0a939c8e370dee763f759b974b5823c8b98d0170e07964850644c227f6c",
+        "config.json": "c0cf6a46aecd32f34d5f84ac8dc839e3738d4eb495c9c08ab240d2415b89336b",
+        "greedy.json": "9965ceb592df58b89d2728a645d7bc1e5c399efa3eee914a5fcc2e415e28eda7",
+        "greedy.log.command.json": "97575b4aa7f8a4502e56bf6eddaa7fd28899f77d884037fbc97d1f4c92851172",
+        "context-0.json": "7a7e0eb76116171c69873fdf59de421799bad696991757c0775ca7234048aa5d",
+        "context-0.log.command.json": "8dbb31079524f3d19b500b9f41cca888ec5c9079997535da70d7e62044192285",
+        "prefill.json": "3124e92548f6e845684e90a650cef7c8a2bd65a9db03b14932a1a53376ee8063",
+        "prefill.log.command.json": "bdecf948ae8b564aa14b1ca8f636f6b046db5e5300a72e0a62232f7ab33778b9"
+      },
+      "target_config": {
+        "path": "configs/glm-flash-hybrid-w4.json",
+        "sha256": "c0cf6a46aecd32f34d5f84ac8dc839e3738d4eb495c9c08ab240d2415b89336b"
+      }
+    },
+    "glm-flash-hybrid-w4/plain": {
+      "directory": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/refresh/plain",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68,
+          "max_total_tokens": 324
+        }
+      },
+      "files_sha256": {
+        "memory-check.json": "2eb37a164b1b44d92a1cc3bc085acc788944a0a3f69c2e3ebac2861ee3711d49",
+        "rank-identity.json": "74480f94f1791d138d3a2d27a40b5146a21e663fc27ae94208bc56f81a85c583",
+        "down.log.command.json": "743be52b868004145e32a61a6f288a9e622b926a23fb330616e2f865dec01827",
+        "manifest.json": "d4a3e0a939c8e370dee763f759b974b5823c8b98d0170e07964850644c227f6c",
+        "config.json": "a831386dd642a7aa254896224f1b3c60cb27236180a3f9aad880de8aeb8175e9",
+        "greedy.json": "e3f8906fc8e86b231ad3920eb1fd6ed9ffa6186f9d8aa5a755008c36cc2c1f50",
+        "greedy.log.command.json": "95153d473cab858410de7bb4293624dbb0b75638e91ad17abd635860f09bbbda"
+      },
+      "target_config": {
+        "path": "configs/glm-flash-hybrid-w4.json",
+        "sha256": "c0cf6a46aecd32f34d5f84ac8dc839e3738d4eb495c9c08ab240d2415b89336b"
+      }
+    },
+    "glm-flash-hybrid-w4/mtp2": {
+      "directory": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/refresh/mtp2",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68,
+          "max_total_tokens": 324
+        }
+      },
+      "files_sha256": {
+        "memory-check.json": "e55146a8e8a1782b34d2350094c92c38478a66521980843dad8478271158f431",
+        "rank-identity.json": "600de6fd61589d980dd26255f62f97a6795748c3346d88bffb62c84c006d90d8",
+        "down.log.command.json": "43504cd9918116842ca861ef066aa4dda2070fa22a3893155e94ccd93cd2f043",
+        "manifest.json": "d4a3e0a939c8e370dee763f759b974b5823c8b98d0170e07964850644c227f6c",
+        "config.json": "cbbdf9843fd57e84f49ab8318d9fa84a3f4b6e41abea418ab6c054e83dc93462",
+        "greedy.json": "4e4d2562248e6234d5bb6e56fcf2a4800375c11bca7bd134a8c4dd3b724a4659",
+        "greedy.log.command.json": "3b595c5c7e7d6ba267b88f95a1447cb781ca1edb9e2d249ba97d9850918ecdad"
+      },
+      "target_config": {
+        "path": "configs/glm-flash-hybrid-w4.json",
+        "sha256": "c0cf6a46aecd32f34d5f84ac8dc839e3738d4eb495c9c08ab240d2415b89336b"
+      }
+    },
+    "glm-flash-hybrid-w4/mtp3": {
+      "directory": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/refresh/mtp3",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68,
+          "max_total_tokens": 324
+        }
+      },
+      "files_sha256": {
+        "memory-check.json": "f746042c92b392c36ac6c9fae60d2f777b17c88bb09f933de1eb5031b81c2862",
+        "rank-identity.json": "82e74372d4740702651ea398e765ee5a315fe46b90f16e296b76631d0e18e9a4",
+        "down.log.command.json": "113d472a97241ddc69e520a9cc79c1e436dd20e7c5c702728b2a0dff7548f51d",
+        "manifest.json": "d4a3e0a939c8e370dee763f759b974b5823c8b98d0170e07964850644c227f6c",
+        "config.json": "bf237484948853843a6452f07a885500b8a53d6425b017429cd401ab9edc05ac",
+        "greedy.json": "db1067231ac4d771f7bec9d498c122328dd36f9edd1faad4f42aeb6ce1f35c56",
+        "greedy.log.command.json": "95c1565d84670281b61cb090df4ab9b34396e47c8c24c5b48a0dfc2c747d3ce6"
+      },
+      "target_config": {
+        "path": "configs/glm-flash-hybrid-w4.json",
+        "sha256": "c0cf6a46aecd32f34d5f84ac8dc839e3738d4eb495c9c08ab240d2415b89336b"
+      }
+    },
+    "glm-flash-fp8-w4/default": {
+      "directory": "../2026-10-05-matrix-refresh/raw/glm-flash-fp8-w4/refresh/default",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68,
+          "max_total_tokens": 324
+        },
+        "context-0": {
+          "max_total_tokens": 355
+        },
+        "prefill": {
+          "lengths": [
+            2048,
+            8192
+          ],
+          "max_prompt_tokens": 8174
+        }
+      },
+      "files_sha256": {
+        "memory-check.json": "cbac3f638f415793833a5b38b27823ce13e7c3f689f1161ea0594d417e556e0a",
+        "rank-identity.json": "e269fc5cd5107f7b9b93140d53b40de661f639e0f58c4dbd4092cae5fcaf3a10",
+        "down.log.command.json": "d54014346dd071149d19743d22e2413a199c075e5d6fddff137c180d321d71e1",
+        "manifest.json": "d4a3e0a939c8e370dee763f759b974b5823c8b98d0170e07964850644c227f6c",
+        "config.json": "70d2880d83b26a664f7a82f831daae979549b275adcb1f39a88a97923fabde4a",
+        "greedy.json": "29cbbeefa1b1d754a4f96c5867be27c9212c0101873523b18259b9464b2e0bd1",
+        "greedy.log.command.json": "443021abd48be263c4c487a97fd76be0760d3b6b890cc870179d08bad4bcb3d4",
+        "context-0.json": "0848c247d7a3c8580ba7f0649eda0114fb915d45df40ea254b3ac50f00cb0d2d",
+        "context-0.log.command.json": "38c70fb8463e4a0d111c59dfb19a449974869a7d4956c88af584e1d0b598aaf7",
+        "prefill.json": "36fafc69033ffeb2bed9a9135ad009924a5aa288989834708a077e8a27d9d8b8",
+        "prefill.log.command.json": "b2795f4afe834581225504eb2a65a1839a4700517de4810a5b2d75be439f1423"
+      },
+      "target_config": {
+        "path": "configs/glm-flash-fp8-w4.json",
+        "sha256": "70d2880d83b26a664f7a82f831daae979549b275adcb1f39a88a97923fabde4a"
+      }
+    },
+    "glm-flash-fp8-w4/plain": {
+      "directory": "../2026-10-05-matrix-refresh/raw/glm-flash-fp8-w4/refresh/plain",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68,
+          "max_total_tokens": 324
+        }
+      },
+      "files_sha256": {
+        "memory-check.json": "e025dfd783112cebd57988f19240bee941d9576ad4e13f9dd3c3f40ef494e3f0",
+        "rank-identity.json": "35d4bf9ba692a9b85ad26358027995f9ad48cfbd9f6369d8fb82a908e134c6fd",
+        "down.log.command.json": "f281e50b14a92bb94b1edaed84e51fd5f0776c110207dacae0863f5dd9e612eb",
+        "manifest.json": "d4a3e0a939c8e370dee763f759b974b5823c8b98d0170e07964850644c227f6c",
+        "config.json": "e6491418470bdef92f6aa16450b6f18d210d4f9bc0698bb97fd65da8cad98d43",
+        "greedy.json": "ea59b593056d3af11d146a7b7fd765ba52096595630f92ceeb29344ee343f329",
+        "greedy.log.command.json": "e6fa3363b2bf183f6ccd519cafbb4de5f11e9afcc253e22e13f570b9e43abe29"
+      },
+      "target_config": {
+        "path": "configs/glm-flash-fp8-w4.json",
+        "sha256": "70d2880d83b26a664f7a82f831daae979549b275adcb1f39a88a97923fabde4a"
+      }
+    },
+    "glm-flash-fp8-w4/mtp2": {
+      "directory": "../2026-10-05-matrix-refresh/raw/glm-flash-fp8-w4/refresh/mtp2",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68,
+          "max_total_tokens": 324
+        }
+      },
+      "files_sha256": {
+        "memory-check.json": "433ec0d731d6e1fe9f709da4f54f062c2d95d24f110891fd11880b5ddd04e59e",
+        "rank-identity.json": "c29347a89a378fb7fcb530ee60b35f6a8cd890d112a88748e1462f29b1419b1d",
+        "down.log.command.json": "6329ef3d08c4d16dd66e9587fa84d9a752db337c84910fc26032c27c4f577640",
+        "manifest.json": "d4a3e0a939c8e370dee763f759b974b5823c8b98d0170e07964850644c227f6c",
+        "config.json": "618d4e57975a72a110b09ed22effba8ff0ff89998bc696e6ec5e2d098550197c",
+        "greedy.json": "e54cad7bc347d333bd03fc20e16f5425cea38a09d98505edc4ec144127d8db99",
+        "greedy.log.command.json": "48ddf5a4d6a5037dcad7ba7c7daf0eb756bf1b31018b0dc3b091d6a9fc2d84da"
+      },
+      "target_config": {
+        "path": "configs/glm-flash-fp8-w4.json",
+        "sha256": "70d2880d83b26a664f7a82f831daae979549b275adcb1f39a88a97923fabde4a"
+      }
+    },
+    "glm-flash-fp8-w4/mtp3": {
+      "directory": "../2026-10-05-matrix-refresh/raw/glm-flash-fp8-w4/refresh/mtp3",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68,
+          "max_total_tokens": 324
+        }
+      },
+      "files_sha256": {
+        "memory-check.json": "12804fffffe07a44b850a05cd8ae6346bb40e9e1bff16f23180e249845165252",
+        "rank-identity.json": "25965da64364ba592a3e29347052935607507420b44c23be974817ea3a163115",
+        "down.log.command.json": "9e821ef312cf0a27bbbee3043585e6d14a1bcd36c15bb0c549db2579ae383969",
+        "manifest.json": "d4a3e0a939c8e370dee763f759b974b5823c8b98d0170e07964850644c227f6c",
+        "config.json": "e38de071564634c5dffd99fcaa5e4ef004e80dcdfdc88131ca3e529950fec31f",
+        "greedy.json": "b02a01495c0180c64706c79d5147b057e06e4310c96757e7854b9c6435840897",
+        "greedy.log.command.json": "182576f287b76e53ad3c042530a0738d2a6b4021d7fbbe544337b96dae686b26"
+      },
+      "target_config": {
+        "path": "configs/glm-flash-fp8-w4.json",
+        "sha256": "70d2880d83b26a664f7a82f831daae979549b275adcb1f39a88a97923fabde4a"
+      }
+    },
+    "glm-flash-fp8-512k-w4/default": {
+      "directory": "../2026-10-05-matrix-refresh/raw/glm-flash-fp8-512k-w4/refresh/default",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68,
+          "max_total_tokens": 324
+        },
+        "context-0": {
+          "max_total_tokens": 352
+        },
+        "prefill": {
+          "lengths": [
+            2048,
+            8192
+          ],
+          "max_prompt_tokens": 8147
+        }
+      },
+      "files_sha256": {
+        "memory-check.json": "5d0d4d46d0363a9b5c667a44777796c1aac3be685303705392ed954258de0f05",
+        "rank-identity.json": "70cc336d2099d37a112055e077537feacf660e838e63f5ff27c2942b1074ec20",
+        "down.log.command.json": "b7480d48f70e6af1b8faa72992eab55e03d33ae5cb35c17963bdafc25530adca",
+        "manifest.json": "d4a3e0a939c8e370dee763f759b974b5823c8b98d0170e07964850644c227f6c",
+        "config.json": "43260125e95905f16fbccf361865e221c707ac32d5853730d3ea1c3fa1a633f5",
+        "greedy.json": "4dbdc23222e1aa1192c5168e964fee7621430e847901d72c230859d2f733fe46",
+        "greedy.log.command.json": "d90e71284e3b1dd882230edfd034cdc179e61640cf5548774e12ce8dfecdca74",
+        "context-0.json": "62bc168cbbae9a9380fd746764bc5fc5430d2aa1b3de9df5e17f79ec126d014e",
+        "context-0.log.command.json": "dd32bad4ab16c360e5a58e5b8a430b0795b7e5bcc677c8cb574591d69dcd7fe6",
+        "prefill.json": "6b40d81041d4487bf4c139bdbd05ee5a8ee1dd684b8bd50d53784a703d5043ed",
+        "prefill.log.command.json": "af9acda3d91cdfd94ee134a37aa333e421b43cd27de814e254c16f3faf9ce64a"
+      },
+      "target_config": {
+        "path": "configs/glm-flash-fp8-512k-w4.json",
+        "sha256": "43260125e95905f16fbccf361865e221c707ac32d5853730d3ea1c3fa1a633f5"
+      }
+    }
+  }
+}

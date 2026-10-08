@@ -1,0 +1,63 @@
+
+=== 20:23:41 production down (pf21)
+2026-10-05 20:23:51.655 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 20:23:51 off up (--no-dflash --no-l2-prefetch)
+2026-10-05 20:24:09.985 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/pf21/off/server)
+2026-10-05 20:23:52.964 INFO  l2 prefetch: off (engine.l2_prefetch false)
+
+=== 20:24:10 off plain T=1 prose,code x2
+| prose | 8.2 | | code | 8.2 | 
+8.2 tok/s, 121.4 ms/tok, 121.4 ms/step
+
+=== 20:26:22 off down
+2026-10-05 20:26:25.501 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/pf21/off/server
+
+=== 20:26:25 load up (--no-dflash )
+2026-10-05 20:26:39.831 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/pf21/load/server)
+2026-10-05 20:26:26.616 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+
+=== 20:26:39 load plain T=1 prose,code x2
+| prose | 8.2 | | code | 8.2 | 
+8.3 tok/s, 121.1 ms/tok, 121.1 ms/step
+
+=== 20:28:51 load down
+2026-10-05 20:28:53.995 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/pf21/load/server
+
+=== 20:28:56 lines up (--no-dflash --l2-prefetch-form lines)
+2026-10-05 20:29:10.309 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/pf21/lines/server)
+2026-10-05 20:28:57.137 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+
+=== 20:29:10 lines plain T=1 prose,code x2
+| prose | 8.2 | | code | 8.2 | 
+8.3 tok/s, 121.1 ms/tok, 121.1 ms/step
+
+=== 20:31:22 lines down
+2026-10-05 20:31:25.576 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/pf21/lines/server
+
+=== 20:31:25 touch up (--no-dflash --l2-prefetch-form touch)
+2026-10-05 20:31:41.876 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/pf21/touch/server)
+2026-10-05 20:31:26.661 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+
+=== 20:31:41 touch plain T=1 prose,code x2
+| prose | 8.2 | | code | 8.2 | 
+8.2 tok/s, 121.4 ms/tok, 121.4 ms/step
+
+=== 20:33:53 touch down
+2026-10-05 20:33:56.030 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/pf21/touch/server
+
+=== 20:33:58 touch48 up (--no-dflash --l2-prefetch-form touch --l2-prefetch-window-mib 48 --l2-prefetch-boundary-window-mib 48)
+2026-10-05 20:34:14.387 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/pf21/touch48/server)
+2026-10-05 20:33:59.351 INFO  l2 prefetch: on, window budget 48 MiB, boundary rate light, layer rate light
+
+=== 20:34:14 touch48 plain T=1 prose,code x2
+| prose | 8.2 | | code | 8.2 | 
+8.3 tok/s, 121.1 ms/tok, 121.1 ms/step
+
+=== 20:36:26 touch48 down
+2026-10-05 20:36:28.825 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/pf21/touch48/server
+
+=== 20:36:30 production up
+2026-10-05 20:37:09.527 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+PF21_DONE 20:37:09

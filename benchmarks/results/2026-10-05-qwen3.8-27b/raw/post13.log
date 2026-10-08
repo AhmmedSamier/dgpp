@@ -1,0 +1,75 @@
+
+=== 19:02:05 production down (post13)
+2026-10-05 19:02:13.691 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+flash-next recipe: deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.json
+
+=== 19:02:13 fn-recipe up ()
+2026-10-05 19:02:44.568 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/post13/fn-recipe/server)
+
+=== 19:02:44 fn-recipe C1 prose,code x2
+
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+FileNotFoundError: [Errno 2] No such file or directory: 'benchmarks/results/2026-10-05-qwen3.8-27b/raw/post13/fn-recipe/greedy.json'
+
+=== 19:02:44 fn-recipe down
+2026-10-05 19:02:46.740 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/post13/fn-recipe/server
+
+=== 19:02:48 fn-plain up (--no-mtp)
+2026-10-05 19:03:17.492 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/post13/fn-plain/server)
+
+=== 19:03:17 fn-plain C1 prose,code x2
+
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+FileNotFoundError: [Errno 2] No such file or directory: 'benchmarks/results/2026-10-05-qwen3.8-27b/raw/post13/fn-plain/greedy.json'
+
+=== 19:03:17 fn-plain down
+2026-10-05 19:03:19.661 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/post13/fn-plain/server
+
+=== 19:03:21 mma_gemv cold timing (the one-row streaming form against the GEMV chunks)
+[ .. ] mma_gemv fp8 m=30 n=1024 k=512: max rel err vs the double oracle 7.987e-07
+[ .. ] mma_gemv fp8 m=200 (128 + 72 rows) n=512 k=1024: max rel err 1.184e-06
+[ .. ] fp8 [5120 x 5120] cold, us per product: m  gemv-chunks  mma-stream
+[ .. ]   m= 1     120.2 us     122.9 us  (213 GB/s of weights on the mma stream)
+[ .. ]   m= 2     122.3 us     130.5 us  (201 GB/s of weights on the mma stream)
+[ .. ]   m= 3     129.7 us     123.5 us  (212 GB/s of weights on the mma stream)
+[ .. ]   m= 4     141.3 us     125.6 us  (209 GB/s of weights on the mma stream)
+[ .. ]   m= 6     218.9 us     128.6 us  (204 GB/s of weights on the mma stream)
+[ .. ]   m=16     427.0 us     125.0 us  (210 GB/s of weights on the mma stream)
+[ .. ]   m=30     786.4 us     163.5 us  (160 GB/s of weights on the mma stream)
+[ .. ] fp8 [5120 x 5120] cold, us per product: m  chunks/tile  mma-forms
+[ .. ]   fp8 [576 x 6144] m=  1  chunks     10.9 us  mma w8     38.9  w4     28.6  w2     28.7  w1     34.6  rule     28.8
+[ .. ]   fp8 [576 x 6144] m= 16  chunks     57.3 us  mma w8     43.1  w4     30.9  w2     32.0  w1     37.0  rule     31.8
+[ .. ]   fp8 [2048 x 6144] m=  1  chunks     64.4 us  mma w8     53.5  w4     53.2  w2     81.6  w1    111.4  rule     52.9
+[ .. ]   fp8 [2048 x 6144] m= 16  chunks    162.8 us  mma w8     56.6  w4     59.7  w2     80.0  w1    120.9  rule     59.1
+[ .. ]   fp8 [4096 x 2048] m=  1  chunks     32.3 us  mma w8     35.4  w4     36.1  w2     46.1  w1     89.2  rule     34.8
+[ .. ]   fp8 [4096 x 2048] m= 16  chunks    101.2 us  mma w8     36.2  w4     38.7  w2     50.5  w1     94.5  rule     36.3
+[ .. ]   fp8 [5120 x 5120] m=  1  chunks    111.9 us  mma w8    112.4  w4    115.0  w2    132.6  w1    224.9  rule    112.7
+[ .. ]   fp8 [5120 x 5120] m= 16  chunks    382.6 us  mma w8    126.6  w4    122.2  w2    148.2  w1    240.5  rule    116.6
+[ .. ]   fp8 [6144 x 4096] m=  1  chunks    111.3 us  mma w8    107.4  w4    109.8  w2    123.8  w1    216.9  rule    107.5
+[ .. ]   fp8 [6144 x 4096] m= 16  chunks    342.3 us  mma w8    110.8  w4    109.2  w2    127.5  w1    227.0  rule    110.8
+[ .. ]   fp8 [12288 x 5120] m=  1  chunks    265.9 us  mma w8    276.4  w4    272.2  w2    284.0  w1    532.4  rule    275.3
+[ .. ]   fp8 [12288 x 5120] m= 16  chunks   1157.3 us  mma w8    284.7  w4    302.4  w2    317.1  w1    546.8  rule    278.4
+[ .. ]   fp8 [32320 x 5120] m=  1  chunks    701.0 us  mma w8    757.5  w4    753.5  w2    736.9  w1   1358.5  rule    745.7
+[ .. ]   fp8 [32320 x 5120] m= 16  chunks   2958.9 us  mma w8    738.0  w4    725.7  w2    855.1  w1   1419.2  rule    733.8
+[ .. ]   non-grid scale GEMM vs mma  m= 128     2713.3 us      276.0 us
+[ .. ]   non-grid scale GEMM vs mma  m= 256      249.3 us      404.2 us
+[ .. ]   non-grid scale GEMM vs mma  m= 512      464.1 us      911.8 us
+[ .. ]   non-grid scale GEMM vs mma  m=2048     1612.0 us     3123.1 us
+[ .. ]   m= 128    3044.4 us     207.9 us  (32.3 TFLOP/s on the mma forms)
+[ .. ]   m= 256    3628.3 us     405.8 us  (33.1 TFLOP/s on the mma forms)
+[ .. ]   m=2048   23564.5 us    3320.4 us  (32.3 TFLOP/s on the mma forms)
+[ .. ] bf16 head [32320 x 5120] cold, us per full product: m  gemv-chunks  mma-stream
+[ .. ]   m= 1    1573.8 us    1451.0 us
+[ .. ]   m= 6    2818.8 us    1420.9 us
+[ .. ]   m=16    5561.3 us    1422.9 us
+[ .. ]   m=30   11165.3 us    1726.5 us
+[ OK ] mma_gemv_cold_timing_beside_the_gemv_cores
+[ OK ] mma_gemv split-K fp8 [320 x 10240]: oracle 4.793e-07, deterministic, m-invariant, bf16 == bf16(f32)
+[ OK ] mma_gemv split-K fp8 [320 x 2560]: oracle 1.956e-07, deterministic, m-invariant, bf16 == bf16(f32)
+
+=== 19:03:26 production up
+2026-10-05 19:04:07.420 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+POST13_DONE 19:04:07

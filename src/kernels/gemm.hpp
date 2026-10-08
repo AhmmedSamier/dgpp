@@ -192,6 +192,16 @@ class CublasLtGemm : public IGemm {
   // row's reduction does not depend on the block it rode in: the blocks are
   // then bitwise the chunk (gemm_split_test). The caller resets it.
   void set_plan_rows(int rows);
+  // bf16 Lt calls above the decode lowering (the prefill-shaped products:
+  // the dequant bridge's, the chunked prefill's) take the algorithm the
+  // heuristic picks for `rows` whatever their own row count, so a prompt's
+  // reduction does not depend on the walk it rode in — alone, as a span of
+  // a group walk, or as a chunk (2026-10-05: cuBLASLt's heuristic changes
+  // its kernel with m, and a group of four prompts read different bits
+  // from the same prompt alone). 0: each call's own algorithm. The pinned
+  // algorithm is checked for the call's shape; a shape it cannot take
+  // falls back to its own (logged once).
+  void set_pinned_rows(int rows);
   void register_bf12(const void* weight, const Bf12Matrix& packed);
   // The companions' five-to-eight-row launches: on only while the caller's
   // rows are a DECODE batch. The interface cannot tell a decode call from a

@@ -133,7 +133,26 @@ void capture(Graph& graph, dgpp::QwenModel& model, dgpp::net::CollectiveBus* bus
     if (std::string(name).find("mma_gemv_kernel") != std::string::npos &&
         *static_cast<void**>(params.kernelParams[4]) == model.device_logits()) ++heads;
   }
-  const bool mma = model.fp8_head_mma() && requests * rows > dgpp::dense_gemv_rows();
+  // engine.fp8_head mma: the streaming head at every decode row count inside
+  // the envelope (2026-10-05); the GEMV chunks were the rows up to
+  // dense_gemv_rows before.
+  const bool mma = model.fp8_head_mma() && requests * rows <= model.max_decode_rows();
+  if (heads != int(mma)) {
+    // Name every kernel node before failing: which head family the capture
+    // took is the whole question this gate asks.
+    std::fprintf(stderr, "capture requests=%d rows=%d: %d streaming head(s), expected %d; kernels:\n", requests,
+                 rows, heads, int(mma));
+    for (auto node : nodes) {
+      cudaGraphNodeType type;
+      DGPP_CUDA_OK(cudaGraphNodeGetType(node, &type));
+      if (type != cudaGraphNodeTypeKernel) continue;
+      cudaKernelNodeParams params{};
+      if (cudaGraphKernelNodeGetParams(node, &params) != cudaSuccess) { (void)cudaGetLastError(); continue; }
+      const char* name = nullptr;
+      DGPP_CUDA_OK(cudaFuncGetName(&name, params.func));
+      std::fprintf(stderr, "  %s\n", name);
+    }
+  }
   require(heads == int(mma), "captured vocabulary head does not match requested dispatch");
   DGPP_CUDA_OK(cudaGraphInstantiate(&graph.exec, recorded, nullptr, nullptr, 0));
   DGPP_CUDA_OK(cudaGraphDestroy(recorded));

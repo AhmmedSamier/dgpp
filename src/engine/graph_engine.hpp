@@ -1352,7 +1352,12 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   // The group prefill: several cold prompts as the spans of one forward
   // (session_prefill_group), each slot's opening work per request around
   // it. A family without span support prefills them one by one.
+  // engine.prefill_group: off, the scheduler prefills one cold prompt per
+  // walk (the span limit reads 0), so a prompt's prefill never rides a
+  // walk whose row count another prompt set.
+  void set_prefill_group(bool on) { prefill_group_ = on; }
   int64_t prefill_group_span_limit() const override {
+    if (!prefill_group_) return 0;
     if constexpr (requires { model_->prefill_group_span_limit(); })
       return model_->prefill_group_span_limit();
     else
@@ -1928,6 +1933,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   float proposal_temp_scale_ = 1.0f;
   bool block_verify_ = false;  // engine.mtp_verify block
   int block_rows_budget_ = 0;  // engine.dflash_batch_rows (0: the whole block for every family)
+  bool prefill_group_ = true;  // engine.prefill_group
   // The deepest option whose rows times the family's slots fit the budget.
   int block_depth_option(int requests) const {
     int di = 0;

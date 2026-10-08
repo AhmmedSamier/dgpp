@@ -1,0 +1,171 @@
+{
+  "recorded_at": "2026-10-06T05:16:56.757375+00:00",
+  "source": "Pinned local checkpoint config.json files; deployment KV capacity and explicit RoPE overrides are recorded separately in the benchmark configuration files.",
+  "models": [
+    {
+      "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+      "snapshot_revision": "17b8d4d83e33e836e9549d7e1a8d25b5117203c1",
+      "config_sha256": "6e5ce9da8e0213611b2061d1f100fd677a33a1814ee2b391acb5f5a8f26f1f6e",
+      "max_position_embeddings": 1048576,
+      "rope": {}
+    },
+    {
+      "model": "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
+      "snapshot_revision": "147684fbad20c1e283ddff46fd07cb9d4ccbb3da",
+      "config_sha256": "7a0b77ab5e9ff29105a45edb1419794480e6a875a82de5d47424134e898c61f9",
+      "max_position_embeddings": 1048576,
+      "rope": {
+        "rope_parameters": {
+          "rope_theta": 8000000,
+          "rope_type": "default"
+        }
+      }
+    },
+    {
+      "model": "Qwen/Qwen3.8-27B-FP8",
+      "snapshot_revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+      "config_sha256": "74227dd615bf1ea975aa676bdf355a0379858c12f394b5365cd9dfa5fc2c70bc",
+      "max_position_embeddings": 262144,
+      "rope": {
+        "rope_parameters": {
+          "mrope_interleaved": true,
+          "mrope_section": [
+            11,
+            11,
+            10
+          ],
+          "partial_rotary_factor": 0.25,
+          "rope_theta": 10000000,
+          "rope_type": "default"
+        }
+      }
+    },
+    {
+      "model": "Qwen/Qwen3.8-Flash-Next-FP8",
+      "snapshot_revision": "236dfdf285828023ca3bcd3f37366c58a3469b13",
+      "config_sha256": "c22eb0a053eed62e18f0184d3ca62d3798f208c3e00b9feee939fc3dbacdc8ca",
+      "max_position_embeddings": 262144,
+      "rope": {
+        "rope_parameters": {
+          "mrope_interleaved": true,
+          "mrope_section": [
+            11,
+            11,
+            10
+          ],
+          "partial_rotary_factor": 0.25,
+          "rope_theta": 10000000,
+          "rope_type": "default"
+        }
+      }
+    },
+    {
+      "model": "RadixArk/Qwen3.8-Flash-Next-NVFP4",
+      "snapshot_revision": "7b719225242aacd3dbd3f9407468c2ee9a9d2594",
+      "config_sha256": "e765305daba0951974308f4d32c075b52a6a45974730d273f2216718a994d624",
+      "max_position_embeddings": 262144,
+      "rope": {
+        "rope_parameters": {
+          "mrope_interleaved": true,
+          "mrope_section": [
+            11,
+            11,
+            10
+          ],
+          "partial_rotary_factor": 0.25,
+          "rope_theta": 10000000,
+          "rope_type": "default"
+        }
+      }
+    },
+    {
+      "model": "Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN",
+      "snapshot_revision": "19f9710c8f6600a32e15fb98bc77613ee8ec369b",
+      "config_sha256": "f87b6d87a4ee12156dbbbb7e8d1d86be315de956e6c7956da701accdbb1f1344",
+      "max_position_embeddings": 262144,
+      "rope": {
+        "rope_parameters": {
+          "mrope_interleaved": true,
+          "mrope_section": [
+            11,
+            11,
+            10
+          ],
+          "partial_rotary_factor": 0.25,
+          "rope_theta": 10000000,
+          "rope_type": "default"
+        }
+      }
+    },
+    {
+      "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+      "snapshot_revision": "5711b268169967567844e1e560e8a3966da959b1",
+      "config_sha256": "61bea4a0f7a0dd8969f8cae528761e26b697dd12ff63e98804c3f0945492e621",
+      "max_position_embeddings": 1048576,
+      "rope": {
+        "rope_parameters": {
+          "partial_rotary_factor": 0.334,
+          "rope_theta": 10000000.0,
+          "rope_type": "default",
+          "type": "default"
+        }
+      }
+    },
+    {
+      "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+      "snapshot_revision": "7872f01b1d1fe23eabc4c98b48bffcef5a386062",
+      "config_sha256": "6c8f3d2d3b48707541b88f32f22ef3f0f8a6b57d8523281e2b8d3cdb0ae9a023",
+      "max_position_embeddings": 1048576,
+      "rope": {
+        "rope_scaling": {
+          "beta_fast": 32,
+          "beta_slow": 1,
+          "factor": 16,
+          "original_max_position_embeddings": 65536,
+          "type": "yarn"
+        }
+      }
+    },
+    {
+      "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+      "snapshot_revision": "dba1be0a40aa45a94ad051997016db3960a90277",
+      "config_sha256": "8be45ce0476004a3f529fd896115a4a2e800a129ad2d3ec05b16050f52e21879",
+      "max_position_embeddings": 1048576,
+      "rope": {
+        "rope_scaling": {
+          "rope_type": "yarn",
+          "factor": 16,
+          "beta_fast": 32,
+          "beta_slow": 1,
+          "original_max_position_embeddings": 65536
+        }
+      }
+    },
+    {
+      "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+      "snapshot_revision": "fc694b54fb0174e0913e6adf86691ef85a4ead47",
+      "config_sha256": "deef67a61f3311faf051b23dc4192f442c7fee4f9cd2f38cbcbe4da55c763a80",
+      "max_position_embeddings": 262144,
+      "rope": {
+        "rope_parameters": {
+          "mrope_interleaved": true,
+          "mrope_section": [
+            11,
+            11,
+            10
+          ],
+          "partial_rotary_factor": 0.25,
+          "rope_theta": 10000000,
+          "rope_type": "default"
+        }
+      }
+    },
+    {
+      "model": "unsloth/GLM-5.3-Flash-FP8",
+      "snapshot_revision": "a160e2291674d9e3e92e98fd82faa2544a2867a3",
+      "config_sha256": "bb8f01c42cb92a52ca72e65afb4d5bd8d11aef083cd210e8de25dfb904f23e9f",
+      "max_position_embeddings": 1048576,
+      "rope": {}
+    }
+  ]
+}

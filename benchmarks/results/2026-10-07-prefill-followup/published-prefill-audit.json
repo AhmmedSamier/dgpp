@@ -1,0 +1,557 @@
+[
+  {
+    "deployment": "glm-flash-hybrid-w2",
+    "target": 2048,
+    "median_actual_tokens": 2026,
+    "median_prefill_s": 4.5920999999999985,
+    "median_ms_per_actual_token": 2.255182625863771,
+    "sources": [
+      {
+        "path": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/default/prefill.json",
+        "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+        "reused": true,
+        "lengths": [
+          2048,
+          8192
+        ]
+      },
+      {
+        "path": "raw/glm-flash-hybrid-w2/refresh/default/prefill.json",
+        "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+        "reused": true,
+        "lengths": [
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "glm-flash-hybrid-w2",
+    "target": 8192,
+    "median_actual_tokens": 8038,
+    "median_prefill_s": 18.92,
+    "median_ms_per_actual_token": 2.3531054345103932,
+    "sources": [
+      {
+        "path": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/default/prefill.json",
+        "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+        "reused": true,
+        "lengths": [
+          2048,
+          8192
+        ]
+      },
+      {
+        "path": "raw/glm-flash-hybrid-w2/refresh/default/prefill.json",
+        "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+        "reused": true,
+        "lengths": [
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "glm-flash-hybrid-w2",
+    "target": 32768,
+    "median_actual_tokens": 32101,
+    "median_prefill_s": 76.15449999999998,
+    "median_ms_per_actual_token": 2.3723404255319145,
+    "sources": [
+      {
+        "path": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/default/prefill.json",
+        "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+        "reused": true,
+        "lengths": [
+          2048,
+          8192
+        ]
+      },
+      {
+        "path": "raw/glm-flash-hybrid-w2/refresh/default/prefill.json",
+        "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+        "reused": true,
+        "lengths": [
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "glm-flash-hybrid-256k-w2",
+    "target": 2048,
+    "median_actual_tokens": 2029,
+    "median_prefill_s": 4.647400000000001,
+    "median_ms_per_actual_token": 2.2902629016553053,
+    "sources": [
+      {
+        "path": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/default/prefill.json",
+        "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+        "reused": true,
+        "lengths": [
+          2048,
+          8192
+        ]
+      },
+      {
+        "path": "raw/glm-flash-hybrid-256k-w2/refresh/default/prefill.json",
+        "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+        "reused": true,
+        "lengths": [
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "glm-flash-hybrid-256k-w2",
+    "target": 8192,
+    "median_actual_tokens": 8052,
+    "median_prefill_s": 18.967,
+    "median_ms_per_actual_token": 2.3549362659335165,
+    "sources": [
+      {
+        "path": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/default/prefill.json",
+        "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+        "reused": true,
+        "lengths": [
+          2048,
+          8192
+        ]
+      },
+      {
+        "path": "raw/glm-flash-hybrid-256k-w2/refresh/default/prefill.json",
+        "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+        "reused": true,
+        "lengths": [
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "glm-flash-hybrid-256k-w2",
+    "target": 32768,
+    "median_actual_tokens": 32168,
+    "median_prefill_s": 76.14120000000001,
+    "median_ms_per_actual_token": 2.368826805214199,
+    "sources": [
+      {
+        "path": "../2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/default/prefill.json",
+        "binary_sha256": "2e9ba349da621df05d0df7a9c16db4874ebee98919bfb41ef5630bd4f4e0a175",
+        "reused": true,
+        "lengths": [
+          2048,
+          8192
+        ]
+      },
+      {
+        "path": "raw/glm-flash-hybrid-256k-w2/refresh/default/prefill.json",
+        "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+        "reused": true,
+        "lengths": [
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "glm-flash-hybrid-w4",
+    "target": 2048,
+    "median_actual_tokens": 2021,
+    "median_prefill_s": 1.1821000000000021,
+    "median_ms_per_actual_token": 0.5849084611578438,
+    "sources": [
+      {
+        "path": "raw/glm-flash-hybrid-w4/refresh/default/prefill.json",
+        "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+        "reused": true,
+        "lengths": [
+          2048,
+          8192,
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "glm-flash-hybrid-w4",
+    "target": 8192,
+    "median_actual_tokens": 8008,
+    "median_prefill_s": 5.075200000000001,
+    "median_ms_per_actual_token": 0.6337662337662339,
+    "sources": [
+      {
+        "path": "raw/glm-flash-hybrid-w4/refresh/default/prefill.json",
+        "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+        "reused": true,
+        "lengths": [
+          2048,
+          8192,
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "glm-flash-hybrid-w4",
+    "target": 32768,
+    "median_actual_tokens": 32029,
+    "median_prefill_s": 21.843399999999995,
+    "median_ms_per_actual_token": 0.6820946789907567,
+    "sources": [
+      {
+        "path": "raw/glm-flash-hybrid-w4/refresh/default/prefill.json",
+        "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+        "reused": true,
+        "lengths": [
+          2048,
+          8192,
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "glm53-w4",
+    "target": 2048,
+    "median_actual_tokens": 2015,
+    "median_prefill_s": 3.4926000000000004,
+    "median_ms_per_actual_token": 1.7160297766749375,
+    "sources": [
+      {
+        "path": "raw/glm53-w4/refresh/default/prefill.json",
+        "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+        "reused": true,
+        "lengths": [
+          2048,
+          8192,
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "glm53-w4",
+    "target": 8192,
+    "median_actual_tokens": 7979,
+    "median_prefill_s": 16.219399999999997,
+    "median_ms_per_actual_token": 2.032760997618749,
+    "sources": [
+      {
+        "path": "raw/glm53-w4/refresh/default/prefill.json",
+        "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+        "reused": true,
+        "lengths": [
+          2048,
+          8192,
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "glm53-w4",
+    "target": 32768,
+    "median_actual_tokens": 31907,
+    "median_prefill_s": 70.24940000000002,
+    "median_ms_per_actual_token": 2.2005104917005953,
+    "sources": [
+      {
+        "path": "raw/glm53-w4/refresh/default/prefill.json",
+        "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+        "reused": true,
+        "lengths": [
+          2048,
+          8192,
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "glm53-fp8kv-w4",
+    "target": 2048,
+    "median_actual_tokens": 2024,
+    "median_prefill_s": 3.555,
+    "median_ms_per_actual_token": 1.7564229249011858,
+    "sources": [
+      {
+        "path": "raw/glm53-fp8kv-w4/refresh/default/prefill.json",
+        "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+        "reused": true,
+        "lengths": [
+          2048,
+          8192,
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "glm53-fp8kv-w4",
+    "target": 8192,
+    "median_actual_tokens": 8025,
+    "median_prefill_s": 17.1879,
+    "median_ms_per_actual_token": 2.130428921568628,
+    "sources": [
+      {
+        "path": "raw/glm53-fp8kv-w4/refresh/default/prefill.json",
+        "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+        "reused": true,
+        "lengths": [
+          2048,
+          8192,
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "glm53-fp8kv-w4",
+    "target": 32768,
+    "median_actual_tokens": 32090,
+    "median_prefill_s": 74.26969999999999,
+    "median_ms_per_actual_token": 2.3123291509698305,
+    "sources": [
+      {
+        "path": "raw/glm53-fp8kv-w4/refresh/default/prefill.json",
+        "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+        "reused": true,
+        "lengths": [
+          2048,
+          8192,
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "glm53-fp4kv-256k-w4",
+    "target": 2048,
+    "median_actual_tokens": 2029,
+    "median_prefill_s": 4.1208999999999945,
+    "median_ms_per_actual_token": 2.0390400791687253,
+    "sources": [
+      {
+        "path": "raw/glm53-fp4kv-256k-w4/refresh/default/prefill.json",
+        "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+        "reused": true,
+        "lengths": [
+          2048,
+          8192,
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "glm53-fp4kv-256k-w4",
+    "target": 8192,
+    "median_actual_tokens": 8052,
+    "median_prefill_s": 24.36420000000001,
+    "median_ms_per_actual_token": 3.025856929955292,
+    "sources": [
+      {
+        "path": "raw/glm53-fp4kv-256k-w4/refresh/default/prefill.json",
+        "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+        "reused": true,
+        "lengths": [
+          2048,
+          8192,
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "glm53-fp4kv-256k-w4",
+    "target": 32768,
+    "median_actual_tokens": 32214,
+    "median_prefill_s": 108.084,
+    "median_ms_per_actual_token": 3.35518718569566,
+    "sources": [
+      {
+        "path": "raw/glm53-fp4kv-256k-w4/refresh/default/prefill.json",
+        "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+        "reused": true,
+        "lengths": [
+          2048,
+          8192,
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "mimo-w2",
+    "target": 2048,
+    "median_actual_tokens": 2019,
+    "median_prefill_s": 3.1815999999999987,
+    "median_ms_per_actual_token": 1.57582961862308,
+    "sources": [
+      {
+        "path": "raw/mimo-w2/refresh/default/prefill.json",
+        "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+        "reused": false,
+        "lengths": [
+          2048,
+          8192,
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "mimo-w2",
+    "target": 8192,
+    "median_actual_tokens": 7936,
+    "median_prefill_s": 12.2585,
+    "median_ms_per_actual_token": 1.541868731750667,
+    "sources": [
+      {
+        "path": "raw/mimo-w2/refresh/default/prefill.json",
+        "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+        "reused": false,
+        "lengths": [
+          2048,
+          8192,
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "mimo-w2",
+    "target": 32768,
+    "median_actual_tokens": 31743,
+    "median_prefill_s": 52.963900000000024,
+    "median_ms_per_actual_token": 1.6685221938695152,
+    "sources": [
+      {
+        "path": "raw/mimo-w2/refresh/default/prefill.json",
+        "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+        "reused": false,
+        "lengths": [
+          2048,
+          8192,
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "mimo-w2-fp8kv",
+    "target": 2048,
+    "median_actual_tokens": 2029,
+    "median_prefill_s": 3.2219000000000015,
+    "median_ms_per_actual_token": 1.5842751842751843,
+    "sources": [
+      {
+        "path": "raw/mimo-w2-fp8kv/refresh/default/prefill.json",
+        "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+        "reused": false,
+        "lengths": [
+          2048,
+          8192,
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "mimo-w2-fp8kv",
+    "target": 8192,
+    "median_actual_tokens": 7980,
+    "median_prefill_s": 12.6135,
+    "median_ms_per_actual_token": 1.580639097744361,
+    "sources": [
+      {
+        "path": "raw/mimo-w2-fp8kv/refresh/default/prefill.json",
+        "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+        "reused": false,
+        "lengths": [
+          2048,
+          8192,
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "mimo-w2-fp8kv",
+    "target": 32768,
+    "median_actual_tokens": 31912,
+    "median_prefill_s": 55.841100000000004,
+    "median_ms_per_actual_token": 1.749846452745049,
+    "sources": [
+      {
+        "path": "raw/mimo-w2-fp8kv/refresh/default/prefill.json",
+        "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+        "reused": false,
+        "lengths": [
+          2048,
+          8192,
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "mimo-w4",
+    "target": 2048,
+    "median_actual_tokens": 2019,
+    "median_prefill_s": 1.6286000000000023,
+    "median_ms_per_actual_token": 0.8071499013806696,
+    "sources": [
+      {
+        "path": "raw/mimo-w4/refresh/default/prefill.json",
+        "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+        "reused": false,
+        "lengths": [
+          2048,
+          8192,
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "mimo-w4",
+    "target": 8192,
+    "median_actual_tokens": 7936,
+    "median_prefill_s": 6.2611000000000026,
+    "median_ms_per_actual_token": 0.7905151064883602,
+    "sources": [
+      {
+        "path": "raw/mimo-w4/refresh/default/prefill.json",
+        "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+        "reused": false,
+        "lengths": [
+          2048,
+          8192,
+          32768
+        ]
+      }
+    ]
+  },
+  {
+    "deployment": "mimo-w4",
+    "target": 32768,
+    "median_actual_tokens": 31743,
+    "median_prefill_s": 27.115899999999993,
+    "median_ms_per_actual_token": 0.8537346816620989,
+    "sources": [
+      {
+        "path": "raw/mimo-w4/refresh/default/prefill.json",
+        "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+        "reused": false,
+        "lengths": [
+          2048,
+          8192,
+          32768
+        ]
+      }
+    ]
+  }
+]

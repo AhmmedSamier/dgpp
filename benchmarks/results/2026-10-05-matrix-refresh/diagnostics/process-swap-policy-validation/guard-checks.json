@@ -1,0 +1,37 @@
+[
+  {
+    "case": "valid",
+    "accepted": true,
+    "expected": true
+  },
+  {
+    "case": "no_policy",
+    "accepted": false,
+    "expected": true
+  },
+  {
+    "case": "process_swap",
+    "accepted": false,
+    "expected": true
+  },
+  {
+    "case": "group_swap",
+    "accepted": false,
+    "expected": true
+  },
+  {
+    "case": "gap",
+    "accepted": false,
+    "expected": true
+  },
+  {
+    "case": "probe_error",
+    "accepted": false,
+    "expected": true
+  },
+  {
+    "case": "dead_monitor",
+    "accepted": false,
+    "expected": true
+  }
+]

@@ -1,0 +1,20 @@
+{
+  "command": [
+    "/home/stephen/workspace/dgpp/.venv/bin/python",
+    "/home/stephen/workspace/dgpp/scripts/serve_context_matrix.py",
+    "127.0.0.1",
+    "18080",
+    "--model",
+    "nvidia/Qwen3.8-Flash-Next-NVFP4",
+    "--tag",
+    "4b700351e14c46ed8be9984166092a93",
+    "--lengths",
+    "32768",
+    "--json-out",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen-yarn-w2/refresh/default/context-32768.json"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-10-06T19:33:10.853686+00:00",
+  "returncode": 0,
+  "finished_at": "2026-10-06T19:33:53.748339+00:00"
+}

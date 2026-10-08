@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+  "surface": {
+    "id": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+    "object": "model",
+    "created": 1791253358,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "minimal": {
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "reasoning_effort": "high"
+        },
+        "high": {
+          "reasoning_effort": "high"
+        },
+        "xhigh": {
+          "reasoning_effort": "max"
+        },
+        "max": {
+          "reasoning_effort": "max"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "context": {
+      "request_limit_tokens": 786432,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 786432,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
+  "seed": 20260922,
+  "tag": "bb515697f60244a68223aa556436ed48",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 4370.800000000047,
+        "prefill_ms": 229.5,
+        "decode_steps": 137,
+        "decode_rows": 137,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 95,
+        "prompt_tokens_computed": 95
+      },
+      "engine_tokens_per_s": 58.341722339159254,
+      "ms_per_pass": 31.903649635036835,
+      "tokens_per_pass": 1.8613138686131387,
+      "answer": {
+        "prompt_sha256": "5a0898ea4d49841beee7393d97dbe0ff7d52e1898ef2216ece16666b38f64992",
+        "usage": {
+          "prompt_tokens": 95,
+          "completion_tokens": 256,
+          "total_tokens": 351,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing the first 200 parcels and their cities. However, the context only provides information about one parcel: Item 000000, parcel PX-0757343, weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nThere's no data provided for parcels 1 through 199 (or items 000001 through 000199). I cannot fabricate data that doesn't exist. The user seems to think there's a dataset of 200 parcels, but only one item was provided in the context.\n\nI should point out that I only have information about one parcel (Item 000000) and cannot list 200 parcels without the actual data. I shouldn't hallucinate/fabricate 199 additional parcels with made-up cities, weights, etc.\n\nLet me be helpful by:\n1. Explaining that only one parcel's data was provided\n2. Listing the one parcel I do have information about\n3. Offering to continue if they provide the remaining data\n\nThe one parcel I have:\n- Item 000000: parcel PX-0757343, weight 4.1825 kg, city/location \"Income\", gate 1, shift C,",
+        "wall_ms": 4614.475834881887,
+        "ttft_ms": 252.34886398538947,
+        "last_ms": 4614.299144828692,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 4366.899999999907,
+        "prefill_ms": 225.3000000000029,
+        "decode_steps": 137,
+        "decode_rows": 137,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 95,
+        "prompt_tokens_computed": 95
+      },
+      "engine_tokens_per_s": 58.39382628409294,
+      "ms_per_pass": 31.875182481751146,
+      "tokens_per_pass": 1.8613138686131387,
+      "answer": {
+        "prompt_sha256": "5a0898ea4d49841beee7393d97dbe0ff7d52e1898ef2216ece16666b38f64992",
+        "usage": {
+          "prompt_tokens": 95,
+          "completion_tokens": 256,
+          "total_tokens": 351,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing the first 200 parcels and their cities. However, the context only provides information about one parcel: Item 000000, parcel PX-0757343, weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nThere's no data provided for parcels 1 through 199 (or items 000001 through 000199). I cannot fabricate data that doesn't exist. The user seems to think there's a dataset of 200 parcels, but only one item was provided in the context.\n\nI should point out that I only have information about one parcel (Item 000000) and cannot list 200 parcels without the actual data. I shouldn't hallucinate/fabricate 199 additional parcels with made-up cities, weights, etc.\n\nLet me be helpful by:\n1. Explaining that only one parcel's data was provided\n2. Listing the one parcel I do have information about\n3. Offering to continue if they provide the remaining data\n\nThe one parcel I have:\n- Item 000000: parcel PX-0757343, weight 4.1825 kg, city/location \"Income\", gate 1, shift C,",
+        "wall_ms": 4621.005966793746,
+        "ttft_ms": 254.0624989196658,
+        "last_ms": 4620.836699847132,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 5041.0,
+        "prefill_ms": 291.3000000000029,
+        "decode_steps": 137,
+        "decode_rows": 137,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 95,
+        "prompt_tokens_computed": 95
+      },
+      "engine_tokens_per_s": 50.5852013489387,
+      "ms_per_pass": 36.7956204379562,
+      "tokens_per_pass": 1.8613138686131387,
+      "answer": {
+        "prompt_sha256": "5a0898ea4d49841beee7393d97dbe0ff7d52e1898ef2216ece16666b38f64992",
+        "usage": {
+          "prompt_tokens": 95,
+          "completion_tokens": 256,
+          "total_tokens": 351,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing the first 200 parcels and their cities. However, the context only provides information about one parcel: Item 000000, parcel PX-0757343, weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nThere's no data provided for parcels 1 through 199 (or items 000001 through 000199). I cannot fabricate data that doesn't exist. The user seems to think there's a dataset of 200 parcels, but only one item was provided in the context.\n\nI should point out that I only have information about one parcel (Item 000000) and cannot list 200 parcels without the actual data. I shouldn't hallucinate/fabricate 199 additional parcels with made-up cities, weights, etc.\n\nLet me be helpful by:\n1. Explaining that only one parcel's data was provided\n2. Listing the one parcel I do have information about\n3. Offering to continue if they provide the remaining data\n\nThe one parcel I have:\n- Item 000000: parcel PX-0757343, weight 4.1825 kg, city/location \"Income\", gate 1, shift C,",
+        "wall_ms": 5355.1560051273555,
+        "ttft_ms": 304.87879808060825,
+        "last_ms": 5354.992754990235,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

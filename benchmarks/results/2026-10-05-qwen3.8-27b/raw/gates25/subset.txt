@@ -1,0 +1,203 @@
+Test project /home/stephen/workspace/dgpp/build-ci
+      Start   1: qwen_forward_fixture
+ 1/86 Test   #1: qwen_forward_fixture .......................   Passed    0.17 sec
+      Start   2: qwen_plan_check
+ 2/86 Test   #2: qwen_plan_check ............................   Passed    0.07 sec
+      Start   3: qwen_w4a4_plan_default
+ 3/86 Test   #3: qwen_w4a4_plan_default .....................   Passed    0.07 sec
+      Start   4: qwen_w4a4_plan_mode_0
+ 4/86 Test   #4: qwen_w4a4_plan_mode_0 ......................   Passed    0.07 sec
+      Start   5: qwen_w4a4_plan_mode_1
+ 5/86 Test   #5: qwen_w4a4_plan_mode_1 ......................   Passed    0.07 sec
+      Start   6: qwen_w4a4_plan_mode_empty
+ 6/86 Test   #6: qwen_w4a4_plan_mode_empty ..................   Passed    0.07 sec
+      Start   7: qwen_w4a4_plan_mode_invalid
+ 7/86 Test   #7: qwen_w4a4_plan_mode_invalid ................   Passed    0.07 sec
+      Start   8: qwen_forward_smoke
+ 8/86 Test   #8: qwen_forward_smoke .........................   Passed    1.09 sec
+      Start   9: qwen_qsa_prefill
+ 9/86 Test   #9: qwen_qsa_prefill ...........................   Passed    5.26 sec
+      Start  10: qwen_qsa_prefill_nvfp4_dense_0
+10/86 Test  #10: qwen_qsa_prefill_nvfp4_dense_0 .............   Passed    5.22 sec
+      Start  11: qwen_qsa_prefill_nvfp4_dense_1
+11/86 Test  #11: qwen_qsa_prefill_nvfp4_dense_1 .............   Passed    5.48 sec
+      Start  12: qwen_forward_smoke_yarn
+12/86 Test  #12: qwen_forward_smoke_yarn ....................   Passed    1.22 sec
+      Start  13: qwen_forward_cross_limit
+13/86 Test  #13: qwen_forward_cross_limit ...................   Passed    1.22 sec
+      Start  14: qwen_forward_generate
+14/86 Test  #14: qwen_forward_generate ......................   Passed   18.64 sec
+      Start  15: qwen_forward_test
+15/86 Test  #15: qwen_forward_test ..........................   Passed    1.30 sec
+      Start  16: qwen_gptq_fixture
+16/86 Test  #16: qwen_gptq_fixture ..........................   Passed    0.20 sec
+      Start  17: qwen_gptq_smoke
+17/86 Test  #17: qwen_gptq_smoke ............................   Passed    1.02 sec
+      Start  18: qwen_gptq_generate
+18/86 Test  #18: qwen_gptq_generate .........................   Passed   23.33 sec
+      Start  19: qwen_gptq_forward_test
+19/86 Test  #19: qwen_gptq_forward_test .....................   Passed    1.30 sec
+      Start  20: qwen_decode_test
+20/86 Test  #20: qwen_decode_test ...........................   Passed    4.47 sec
+      Start  21: qwen_decode_rows_invariance
+21/86 Test  #21: qwen_decode_rows_invariance ................   Passed    0.81 sec
+      Start  22: qwen_decode_fp8_head
+22/86 Test  #22: qwen_decode_fp8_head .......................   Passed    5.25 sec
+      Start  23: qwen_decode_fp8_head_row_independent
+23/86 Test  #23: qwen_decode_fp8_head_row_independent .......   Passed    4.31 sec
+      Start  24: qwen_gptq_decode_test
+24/86 Test  #24: qwen_gptq_decode_test ......................   Passed    3.68 sec
+      Start  25: qwen_gptq_prefill_head
+25/86 Test  #25: qwen_gptq_prefill_head .....................   Passed    2.21 sec
+      Start  26: qwen_prefill_head
+26/86 Test  #26: qwen_prefill_head ..........................   Passed    2.98 sec
+      Start  27: qwen_prefill_head_all_rows
+27/86 Test  #27: qwen_prefill_head_all_rows .................   Passed    3.10 sec
+      Start  28: qwen_image_prefill_test
+28/86 Test  #28: qwen_image_prefill_test ....................   Passed    1.74 sec
+      Start  33: qwen_yarn_fixture_test
+29/86 Test  #33: qwen_yarn_fixture_test .....................   Passed    0.01 sec
+      Start  35: qwen_tokenizer_test
+30/86 Test  #35: qwen_tokenizer_test ........................   Passed    0.13 sec
+      Start  44: qwen_chat_template_test
+31/86 Test  #44: qwen_chat_template_test ....................   Passed    1.45 sec
+      Start  53: engine_watchdog_test
+32/86 Test  #53: engine_watchdog_test .......................   Passed    5.15 sec
+      Start  63: qwen_yarn_release_check_test
+33/86 Test  #63: qwen_yarn_release_check_test ...............   Passed    0.16 sec
+      Start  64: qwen_head_compare_test
+34/86 Test  #64: qwen_head_compare_test .....................***Failed    1.48 sec
+.......F............
+======================================================================
+FAIL: test_dispatch_control_drift (__main__.HeadCompareTest.test_dispatch_control_drift)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/stephen/workspace/dgpp/tests/python/qwen_head_compare_test.py", line 112, in test_dispatch_control_drift
+    with self.assertRaisesRegex(ValueError, "dispatch control changed"):
+AssertionError: ValueError not raised
+
+----------------------------------------------------------------------
+Ran 20 tests in 1.440s
+
+FAILED (failures=1)
+
+      Start  72: qwen_gr_test
+35/86 Test  #72: qwen_gr_test ...............................   Passed    0.49 sec
+      Start  73: qwen_norm_test
+36/86 Test  #73: qwen_norm_test .............................   Passed    0.39 sec
+      Start  77: qwen_ple_test
+37/86 Test  #77: qwen_ple_test ..............................   Passed    0.73 sec
+      Start  94: qwen_moe_test
+38/86 Test  #94: qwen_moe_test ..............................   Passed    2.69 sec
+      Start  95: qwen_loader_test
+39/86 Test  #95: qwen_loader_test ...........................   Passed    7.13 sec
+      Start  98: qwen_full_attn_test
+40/86 Test  #98: qwen_full_attn_test ........................   Passed    0.48 sec
+      Start  99: qwen35_forward_fixture
+41/86 Test  #99: qwen35_forward_fixture .....................   Passed    0.08 sec
+      Start 100: qwen35_forward_smoke
+42/86 Test #100: qwen35_forward_smoke .......................   Passed    0.75 sec
+      Start 101: qwen35_decode_rows_invariance
+43/86 Test #101: qwen35_decode_rows_invariance ..............   Passed    0.69 sec
+      Start 102: qwen35_prefill_group_invariance
+44/86 Test #102: qwen35_prefill_group_invariance ............   Passed    1.00 sec
+      Start 103: qwen35_forward_generate
+45/86 Test #103: qwen35_forward_generate ....................   Passed    0.38 sec
+      Start 104: qwen35_forward_test_e2e
+46/86 Test #104: qwen35_forward_test_e2e ....................   Passed    1.18 sec
+      Start 105: qwen35_forward_generate_teacher
+47/86 Test #105: qwen35_forward_generate_teacher ............   Passed    0.32 sec
+      Start 106: qwen35_forward_test
+48/86 Test #106: qwen35_forward_test ........................   Passed    1.19 sec
+      Start 107: qwen35_tp_test
+49/86 Test #107: qwen35_tp_test .............................   Passed    3.61 sec
+      Start 131: glm_dsa_engine_test
+50/86 Test #131: glm_dsa_engine_test ........................   Passed    6.95 sec
+      Start 134: glm4_engine_test
+51/86 Test #134: glm4_engine_test ...........................   Passed    3.89 sec
+      Start 137: mimo_engine_test
+52/86 Test #137: mimo_engine_test ...........................   Passed    5.30 sec
+      Start 141: dsv41_engine_test
+53/86 Test #141: dsv41_engine_test ..........................   Passed    8.48 sec
+      Start 145: dsv4_engine_test
+54/86 Test #145: dsv4_engine_test ...........................   Passed   10.88 sec
+      Start 146: qwen_tp_test
+55/86 Test #146: qwen_tp_test ...............................   Passed    4.02 sec
+      Start 147: qwen_engine_test
+56/86 Test #147: qwen_engine_test ...........................   Passed   16.29 sec
+      Start 148: qwen_engine_row_independent
+57/86 Test #148: qwen_engine_row_independent ................   Passed    3.50 sec
+      Start 149: qwen_engine_bf12
+58/86 Test #149: qwen_engine_bf12 ...........................   Passed   17.05 sec
+      Start 150: qwen_engine_fp8_head_4
+59/86 Test #150: qwen_engine_fp8_head_4 .....................   Passed    2.83 sec
+      Start 151: qwen_engine_fp8_head_256
+60/86 Test #151: qwen_engine_fp8_head_256 ...................   Passed    3.31 sec
+      Start 152: qwen_engine_gptq
+61/86 Test #152: qwen_engine_gptq ...........................   Passed   10.60 sec
+      Start 153: qwen_engine_nvfp4_dense_0
+62/86 Test #153: qwen_engine_nvfp4_dense_0 ..................   Passed    3.27 sec
+      Start 154: qwen_engine_nvfp4_dense_1
+63/86 Test #154: qwen_engine_nvfp4_dense_1 ..................   Passed    3.28 sec
+      Start 155: qwen_engine_fp8_wide
+64/86 Test #155: qwen_engine_fp8_wide .......................   Passed    3.33 sec
+      Start 156: qwen_engine_fp8_mtp3_rows32
+65/86 Test #156: qwen_engine_fp8_mtp3_rows32 ................   Passed    3.55 sec
+      Start 157: qwen_engine_mtp3_rows32_row_independent
+66/86 Test #157: qwen_engine_mtp3_rows32_row_independent ....   Passed    2.98 sec
+      Start 158: qwen_engine_fp8_mtp3_rows64
+67/86 Test #158: qwen_engine_fp8_mtp3_rows64 ................   Passed    3.92 sec
+      Start 159: qwen_engine_mtp3_rows64_row_independent
+68/86 Test #159: qwen_engine_mtp3_rows64_row_independent ....   Passed    3.85 sec
+      Start 160: qwen_engine_compaction_disabled
+69/86 Test #160: qwen_engine_compaction_disabled ............   Passed   17.12 sec
+      Start 161: qwen_engine_compact_sampling_1
+70/86 Test #161: qwen_engine_compact_sampling_1 .............   Passed    3.65 sec
+      Start 162: qwen_engine_compact_sampling_32
+71/86 Test #162: qwen_engine_compact_sampling_32 ............   Passed    3.64 sec
+      Start 163: qwen_engine_compact_fallback_0
+72/86 Test #163: qwen_engine_compact_fallback_0 .............   Passed    3.67 sec
+      Start 164: qwen_engine_compact_fallback_1
+73/86 Test #164: qwen_engine_compact_fallback_1 .............   Passed    3.68 sec
+      Start 165: qwen_engine_compact_fallback_mtp3_rows64
+74/86 Test #165: qwen_engine_compact_fallback_mtp3_rows64 ...   Passed    4.00 sec
+      Start 166: qwen_head_check_fixture
+75/86 Test #166: qwen_head_check_fixture ....................   Passed    1.90 sec
+      Start 167: qwen_compact_check_fixture
+76/86 Test #167: qwen_compact_check_fixture .................   Passed    3.17 sec
+      Start 169: bf16_gemv_test
+77/86 Test #169: bf16_gemv_test .............................   Passed   16.61 sec
+      Start 170: bf12_gemv_test
+78/86 Test #170: bf12_gemv_test .............................   Passed    1.50 sec
+      Start 171: mma_gemv_test
+79/86 Test #171: mma_gemv_test ..............................   Passed    5.30 sec
+      Start 172: fp4_gemv_test
+80/86 Test #172: fp4_gemv_test ..............................   Passed    0.53 sec
+      Start 173: packq_gemv_test
+81/86 Test #173: packq_gemv_test ............................   Passed    0.62 sec
+      Start 175: packq_gemm_test
+82/86 Test #175: packq_gemm_test ............................   Passed    0.83 sec
+      Start 176: fp8_gemm_test
+83/86 Test #176: fp8_gemm_test ..............................   Passed    2.70 sec
+      Start 177: fp8w_gemm_test
+84/86 Test #177: fp8w_gemm_test .............................   Passed    2.87 sec
+      Start 178: scale_gemm_test
+85/86 Test #178: scale_gemm_test ............................   Passed    4.80 sec
+      Start 203: qwen_vision_test
+86/86 Test #203: qwen_vision_test ...........................   Passed    0.40 sec
+
+99% tests passed, 1 tests failed out of 86
+
+Label Time Summary:
+checkpoint    =   1.58 sec*proc (2 tests)
+fixture       =  18.81 sec*proc (2 tests)
+gpu           = 290.62 sec*proc (73 tests)
+host          =   8.73 sec*proc (11 tests)
+python        =   1.64 sec*proc (2 tests)
+rdma          =  99.72 sec*proc (17 tests)
+
+Total Test time (real) = 318.20 sec
+
+The following tests FAILED:
+	 64 - qwen_head_compare_test (Failed)
+Errors while running CTest

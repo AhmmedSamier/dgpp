@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+  "surface": {
+    "id": "deepseek-ai/DeepSeek-V4-Flash-0731",
+    "object": "model",
+    "created": 1791369221,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 1,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "minimal"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "high"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "max"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text"
+    ],
+    "context": {
+      "request_limit_tokens": 1048576,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 1048576,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c8633cf",
+  "seed": 20260922,
+  "tag": "95fff1c6d7b24e0390974c774891482e",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 2986.7999999999884,
+        "prefill_ms": 189.89999999999418,
+        "decode_steps": 84,
+        "decode_rows": 84,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 85,
+        "prompt_tokens_computed": 85
+      },
+      "engine_tokens_per_s": 85.37565287263995,
+      "ms_per_pass": 35.55714285714272,
+      "tokens_per_pass": 3.0357142857142856,
+      "answer": {
+        "prompt_sha256": "66a155efb487d686f7c71d40452cecda043a61a22ac80a798504df49844b8471",
+        "usage": {
+          "prompt_tokens": 85,
+          "completion_tokens": 256,
+          "total_tokens": 341,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 230
+          }
+        },
+        "finish": "length",
+        "text": "1.  The user asks for a numbered list describing the first 200 parcels and their cities, based on the context provided. However, the context only gives one parcel: Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed. There is no information about cities for this parcel, nor any other parcels. The context measurement is just a hash and bucket. The user wants a list of 200 parcels and their cities, but I have no data. I must respond appropriately, stating that I cannot fulfill the request due to lack of information. I should not fabricate data. I will explain that only one parcel is provided and no city is mentioned. I will ask for more details or clarify. Since the instruction says \"Continue until you have listed all 200\", but I cannot, I will state the limitation. I will produce a numbered list but only for the one known parcel, and then explain that the rest cannot be determined. Alternatively, I can say I cannot list 200 because only one is given. I'll be honest.I cannot provide a numbered list of 200 parcels and their cities because the provided context contains information for only **one** parcel (",
+        "wall_ms": 3217.642192961648,
+        "ttft_ms": 203.75427487306297,
+        "last_ms": 3217.5271508749574,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 3038.5999999999767,
+        "prefill_ms": 188.1999999999971,
+        "decode_steps": 84,
+        "decode_rows": 84,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 85,
+        "prompt_tokens_computed": 85
+      },
+      "engine_tokens_per_s": 83.92022642006252,
+      "ms_per_pass": 36.17380952380925,
+      "tokens_per_pass": 3.0357142857142856,
+      "answer": {
+        "prompt_sha256": "66a155efb487d686f7c71d40452cecda043a61a22ac80a798504df49844b8471",
+        "usage": {
+          "prompt_tokens": 85,
+          "completion_tokens": 256,
+          "total_tokens": 341,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 230
+          }
+        },
+        "finish": "length",
+        "text": "1.  The user asks for a numbered list describing the first 200 parcels and their cities, based on the context provided. However, the context only gives one parcel: Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed. There is no information about cities for this parcel, nor any other parcels. The context measurement is just a hash and bucket. The user wants a list of 200 parcels and their cities, but I have no data. I must respond appropriately, stating that I cannot fulfill the request due to lack of information. I should not fabricate data. I will explain that only one parcel is provided and no city is mentioned. I will ask for more details or clarify. Since the instruction says \"Continue until you have listed all 200\", but I cannot, I will state the limitation. I will produce a numbered list but only for the one known parcel, and then explain that the rest cannot be determined. Alternatively, I can say I cannot list 200 because only one is given. I'll be honest.I cannot provide a numbered list of 200 parcels and their cities because the provided context contains information for only **one** parcel (",
+        "wall_ms": 3282.657387899235,
+        "ttft_ms": 202.31851586140692,
+        "last_ms": 3257.421317975968,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 3038.7000000000116,
+        "prefill_ms": 188.10000000000582,
+        "decode_steps": 83,
+        "decode_rows": 83,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 85,
+        "prompt_tokens_computed": 85
+      },
+      "engine_tokens_per_s": 83.91746470530128,
+      "ms_per_pass": 36.61084337349411,
+      "tokens_per_pass": 3.072289156626506,
+      "answer": {
+        "prompt_sha256": "66a155efb487d686f7c71d40452cecda043a61a22ac80a798504df49844b8471",
+        "usage": {
+          "prompt_tokens": 85,
+          "completion_tokens": 256,
+          "total_tokens": 341,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 230
+          }
+        },
+        "finish": "length",
+        "text": "1.  The user asks for a numbered list describing the first 200 parcels and their cities, based on the context provided. However, the context only gives one parcel: Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed. There is no information about cities for this parcel, nor any other parcels. The context measurement is just a hash and bucket. The user wants a list of 200 parcels and their cities, but I have no data. I must respond appropriately, stating that I cannot fulfill the request due to lack of information. I should not fabricate data. I will explain that only one parcel is provided and no city is mentioned. I will ask for more details or clarify. Since the instruction says \"Continue until you have listed all 200\", but I cannot, I will state the limitation. I will produce a numbered list but only for the one known parcel, and then explain that the rest cannot be determined. Alternatively, I can say I cannot list 200 because only one is given. I'll be honest.I cannot provide a numbered list of 200 parcels and their cities because the provided context contains information for only **one** parcel (",
+        "wall_ms": 3274.9957819469273,
+        "ttft_ms": 202.1773459855467,
+        "last_ms": 3274.895461043343,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

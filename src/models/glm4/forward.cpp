@@ -113,8 +113,8 @@ Glm4Model::Glm4Model(const Glm4TextConfig& cfg, const std::string& checkpoint_di
     h_route_ids_ = pinned_alloc<int32_t>(layers * M * K);
     h_route_weights_ = pinned_alloc<float>(layers * M * K);
     // The boundary windows' budget: 20 MB as the Qwen walk's (the fabric
-    // sweep of 2026-09-09); DGPP_L2_PREFETCH_MB overrides.
-    prefetch_window_bytes_ = std::getenv("DGPP_L2_PREFETCH_MB") ? 0 : (size_t{20} << 20);
+    // sweep of 2026-09-09); engine.l2_prefetch_boundary_window_mib sets it.
+    prefetch_window_bytes_ = l2_prefetch_settings().boundary_window_bytes;
   }
   if (mtp_) {
     mtp_h_ = dev_alloc<uint16_t>(M * H);

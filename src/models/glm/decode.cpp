@@ -1372,7 +1372,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   if (!capture_mode) debug_sync("embed", -1, decode_row);
 
   Outputs out;
-  out.routes.reserve(static_cast<size_t>(cfg_.num_hidden_layers));
+  if (decode_route_traces_) out.routes.reserve(static_cast<size_t>(cfg_.num_hidden_layers));
   uint16_t* cur = streams_[0];
   uint16_t* nxt = streams_[1];
   int dsa_ordinal = 0;
@@ -1690,13 +1690,19 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
         trace.ids = moe_prefill_trace_ids_ + lay * mt * moe_cfg_.top_k;
         trace.weights = moe_prefill_trace_weights_ + lay * mt * moe_cfg_.top_k;
         trace.biased = moe_prefill_trace_biased_ + lay * mt * moe_cfg_.n_experts;
-        moe_->enqueue_prefill(normed_, ffn_out, T, &trace, stream_);
-        GlmRouteTraceLayer route;
-        route.layer_idx = static_cast<uint32_t>(layer);
-        route.top_k = static_cast<uint32_t>(moe_cfg_.top_k);
-        route.tokens = static_cast<uint64_t>(T);
-        out.routes.push_back(std::move(route));  // ids/weights: post-sync
-        out.route_biased.emplace_back();
+        // Serving needs logits and hidden states only. Retaining these
+        // diagnostic scores across chunks costs ~50 KiB per prompt token
+        // on Flash: over 12 GiB per rank at 256K, outside the KV budget.
+        moe_->enqueue_prefill(normed_, ffn_out, T,
+                              decode_route_traces_ ? &trace : nullptr, stream_);
+        if (decode_route_traces_) {
+          GlmRouteTraceLayer route;
+          route.layer_idx = static_cast<uint32_t>(layer);
+          route.top_k = static_cast<uint32_t>(moe_cfg_.top_k);
+          route.tokens = static_cast<uint64_t>(T);
+          out.routes.push_back(std::move(route));  // ids/weights: post-sync
+          out.route_biased.emplace_back();
+        }
         ++moe_prefill_calls;
       }
     }

@@ -1,0 +1,15 @@
+{
+  "command": [
+    "/usr/bin/python3",
+    "/home/stephen/workspace/dgpp/scripts/dgpp-cluster",
+    "down",
+    "--config",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/diagnostics/deepseek-capacity-prefill-investigation/comparison/raw/deepseek-w4/validation/default/config.json",
+    "--log-dir",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/diagnostics/deepseek-capacity-prefill-investigation/comparison/raw/deepseek-w4/validation/default/server"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-10-07T06:24:05.160873+00:00",
+  "returncode": 0,
+  "finished_at": "2026-10-07T06:24:12.235382+00:00"
+}

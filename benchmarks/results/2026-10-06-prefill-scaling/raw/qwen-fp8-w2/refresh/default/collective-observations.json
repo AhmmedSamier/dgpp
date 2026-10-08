@@ -1,0 +1,22 @@
+{
+  "recorded_at": "2026-10-06T21:31:13.117236+00:00",
+  "scope": "Warnings within this launch, separated at each rank's final startup warm-capture completion; node clocks are not assumed synchronized.",
+  "ranks": [
+    {
+      "rank": 0,
+      "warm_capture_completed_at_local_clock": "2026-10-06 21:04:07.187",
+      "warnings_after_warm_capture": 0,
+      "max_observed_wait_after_warm_capture_ms": 0,
+      "source": "server/serve_r0.log",
+      "source_sha256": "0acd63816219209030b0ad3dd33d179758ee169bd42bb6ed6ad0870827f1a40e"
+    },
+    {
+      "rank": 1,
+      "warm_capture_completed_at_local_clock": "2026-10-06 21:05:27.800",
+      "warnings_after_warm_capture": 0,
+      "max_observed_wait_after_warm_capture_ms": 0,
+      "source": "server/serve_r1.log",
+      "source_sha256": "579b55f8ccdf0739145c57291bcc3db66bc9d8b1e8535468ba6ff866f0745240"
+    }
+  ]
+}

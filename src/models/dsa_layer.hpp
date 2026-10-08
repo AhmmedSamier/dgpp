@@ -109,8 +109,9 @@ class DsaLayer {
   // gather buffer); `max_decode_rows` (<= 16, the decode batch's cap; the
   // select runs them in groups of eight) and `decode_n_split` shape the
   // decode attention split. `dot_budget`
-  // bounds the prefill dot buffer; query tiles use the current visible
+  // bounds the prefill dot/key buffer; query tiles use the current visible
   // context to fill that allocation, shrinking as the context grows.
+  // Full GLM's fused scores use 64-bit keys in place of 32 FP32 head dots.
   DsaLayer(IGemm& gemm, const DsaLayerWeights& w, const DsaConfig& cfg,
            int max_tokens, int64_t max_cache_tokens, void* scratch,
            size_t scratch_capacity, void* gemm_workspace,

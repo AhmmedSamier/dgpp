@@ -1,0 +1,102 @@
+
+=== 18:21:05 production down
+2026-10-05 18:21:15.336 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+
+=== 18:21:15 tiny tests
+[ OK ] qwen35_decode_rows_invariance
+[FAIL] group: 2 group sizes differ from the solo prefill
+[ .. ] a group of 2: prompt 0's prefill logits and first step bitwise its solo walk
+[ !! ] a group of 4: prompt 0's prefill logits 512 of 512 differ (max |d| 0.137), first step 512 differ (max |d| 0.0312)
+[ .. ] a group of 8 (296 rows) against the group of 4 (148 rows), both past the 128-row bound: prompt 0's prefill logits bitwise
+[ !! ] a group of 8: prompt 0's prefill logits 512 of 512 differ (max |d| 0.137), first step 512 differ (max |d| 0.0312)
+3/3 Test #21: qwen_decode_rows_invariance ......***Failed    1.12 sec
+[FAIL] rows: 7 row counts differ from the eight-row verify
+[ !! ] a 1-row verify's row 0 differs from the eight-row verify's
+[ !! ] a 2-row verify's row 0 differs from the eight-row verify's
+[ !! ] a 3-row verify's row 0 differs from the eight-row verify's
+[ !! ] a 4-row verify's row 0 differs from the eight-row verify's
+
+=== 18:21:23 w4-whole-fp8 up ()
+2026-10-05 18:21:49.838 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /tmp/claude-1000/-home-stephen-workspace-dgpp/cb0c821d-8834-47e0-869d-81a0e620a1d4/scratchpad/w4_nosched.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/ab12/w4-whole-fp8/server)
+
+=== 18:21:49 w4-whole-fp8 chat x3
+| chat | 48.0 | 
+  chat: 48.4 ms 2.38 tok/step
+
+=== 18:22:07 w4-whole-fp8 all classes x2
+| prose | 58.1 | | code | 91.7 | | json | 124.2 | | math | 104.8 | | chat | 47.9 | 
+  prose: 48.4 ms 2.90 tok/step | code: 48.5 ms 4.72 tok/step | json: 48.7 ms 6.54 tok/step | math: 48.7 ms 5.54 tok/step | chat: 48.5 ms 2.38 tok/step
+
+=== 18:22:42 w4-whole-fp8 down
+2026-10-05 18:22:50.184 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/ab12/w4-whole-fp8/server
+
+=== 18:22:50 w4-whole-ckpt up (--dflash-weights checkpoint)
+2026-10-05 18:23:16.330 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /tmp/claude-1000/-home-stephen-workspace-dgpp/cb0c821d-8834-47e0-869d-81a0e620a1d4/scratchpad/w4_nosched.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/ab12/w4-whole-ckpt/server)
+
+=== 18:23:16 w4-whole-ckpt chat x3
+| chat | 46.5 | 
+  chat: 49.9 ms 2.38 tok/step
+
+=== 18:23:34 w4-whole-ckpt all classes x2
+| prose | 57.4 | | code | 88.4 | | json | 122.9 | | math | 99.7 | | chat | 46.3 | 
+  prose: 50.0 ms 2.97 tok/step | code: 50.1 ms 4.72 tok/step | json: 50.1 ms 6.71 tok/step | math: 50.2 ms 5.43 tok/step | chat: 50.1 ms 2.38 tok/step
+
+=== 18:24:11 w4-whole-ckpt down
+2026-10-05 18:24:18.175 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/ab12/w4-whole-ckpt/server
+
+=== 18:24:18 w4-sched-ckpt up (--dflash-weights checkpoint)
+2026-10-05 18:24:42.836 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w4_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/ab12/w4-sched-ckpt/server)
+
+=== 18:24:42 w4-sched-ckpt chat x3
+| chat | 47.5 | 
+  chat: 48.8 ms 2.38 tok/step
+
+=== 18:25:00 w4-sched-ckpt all classes x2
+| prose | 58.6 | | code | 89.9 | | json | 124.0 | | math | 100.1 | | chat | 48.0 | 
+  prose: 48.9 ms 2.97 tok/step | code: 49.5 ms 4.72 tok/step | json: 49.7 ms 6.71 tok/step | math: 49.8 ms 5.43 tok/step | chat: 48.3 ms 2.38 tok/step
+
+=== 18:25:36 w4-sched-ckpt down
+2026-10-05 18:25:43.696 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/ab12/w4-sched-ckpt/server
+
+=== 18:25:43 w1 template up (the cuBLASLt pin)
+2026-10-05 18:26:07.989 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/ab12/w1-template/server)
+[w1] solo vs solo again: IDENTICAL
+[w1] solo vs beside 7 others (started at once): DIFFERENT at char 966 of 1461/1461 (256/256 tokens)
+[w1] solo vs solo again: IDENTICAL
+[w1] solo vs beside 7 others (started at once): DIFFERENT at char 966 of 1461/1461 (256/256 tokens)
+
+=== 18:27:40 w1 prefill probe (512 / 2048 / 8192; the pin's cost)
+[n2048 r2] prompt 2002 tok, computed 2002 in 2222 ms = 1.11 ms/token; ttft 2235 ms
+[n2048] median: 1.11 ms/token; prefill 2208 ms; wall 2235 ms
+[n8192 r0] prompt 7704 tok, computed 7704 in 6722 ms = 0.87 ms/token; ttft 6752 ms
+[n8192 r1] prompt 7742 tok, computed 7742 in 6741 ms = 0.87 ms/token; ttft 6776 ms
+[n8192 r2] prompt 7708 tok, computed 7708 in 6717 ms = 0.87 ms/token; ttft 6749 ms
+[n8192] median: 0.87 ms/token; prefill 6722 ms; wall 6752 ms
+
+=== 18:28:11 w1 template down
+2026-10-05 18:28:13.247 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/ab12/w1-template/server
+
+=== 18:28:15 w1-whole-fp8 up ()
+2026-10-05 18:28:37.556 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /tmp/claude-1000/-home-stephen-workspace-dgpp/cb0c821d-8834-47e0-869d-81a0e620a1d4/scratchpad/w1_nosched.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/ab12/w1-whole-fp8/server)
+
+=== 18:28:37 w1-whole-fp8 all classes x2
+| prose | 20.1 | | code | 33.3 | | json | 45.9 | | math | 37.8 | | chat | 19.7 | 
+  prose: 140.6 ms 2.87 tok/step | code: 140.9 ms 4.81 tok/step | json: 140.7 ms 6.71 tok/step | math: 140.9 ms 5.54 tok/step | chat: 140.7 ms 2.80 tok/step
+
+=== 18:30:13 w1-whole-fp8 down
+2026-10-05 18:30:15.051 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/ab12/w1-whole-fp8/server
+
+=== 18:30:17 w1-whole-ckpt up (--dflash-weights checkpoint)
+2026-10-05 18:30:43.369 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /tmp/claude-1000/-home-stephen-workspace-dgpp/cb0c821d-8834-47e0-869d-81a0e620a1d4/scratchpad/w1_nosched.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/ab12/w1-whole-ckpt/server)
+
+=== 18:30:43 w1-whole-ckpt all classes x2
+| prose | 19.7 | | code | 32.3 | | json | 44.7 | | math | 36.8 | | chat | 19.1 | 
+  prose: 145.1 ms 2.90 tok/step | code: 145.1 ms 4.81 tok/step | json: 144.8 ms 6.71 tok/step | math: 145.0 ms 5.54 tok/step | chat: 145.1 ms 2.80 tok/step
+
+=== 18:32:21 w1-whole-ckpt down
+2026-10-05 18:32:23.380 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/ab12/w1-whole-ckpt/server
+
+=== 18:32:25 production up
+2026-10-05 18:33:04.177 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+AB12_DONE 18:33:04

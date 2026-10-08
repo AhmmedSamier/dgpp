@@ -363,8 +363,8 @@ void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
 // The routed launcher on a stated scale grid (2026-09-13, the DeepSeek-V4.1
 // release's 32 x 32 fp8 grid; rs / cs the log2 block sizes, 5..7): small
 // m through the GEMV rows (the core reads the grid), larger m through the
-// tile kernel (one scale column per 32-deep stage at cs >= 5). The 128-row
-// dense form knows the 128 grid only and is not taken here.
+// tile kernel (one scale column per 32-deep stage at cs >= 5). The 128x128
+// grid can use the same exact fp8-weight GEMM as the ordinary launcher.
 template <typename OutT>
 void launch_scale_gemm_grid(const uint16_t* act, size_t act_row_stride_elems,
                             const uint8_t* w_payload, const float* w_scales,
@@ -390,6 +390,16 @@ void launch_scale_gemm_grid(const uint16_t* act, size_t act_row_stride_elems,
                              stream, rs, cs);
       row0 += rows;
     }
+    return;
+  }
+  // MiMo's fused QKV and dense MLP projections use this explicit-grid
+  // entry point even though their scales are 128x128. Preserve the tile's
+  // per-weight bf16 rounding and ascending-k16 accumulation while sharing
+  // the ordinary launcher's pipelined large-M kernel. Other grids retain
+  // their existing path; the optimized kernel cannot interpret them.
+  if (m > kGemvMaxM && rs == 7 && cs == 7 &&
+      fp8w_gemm_shape_ok(act, act_row_stride_elems, k)) {
+    launch_fp8w(act, act_row_stride_elems, w_payload, w_scales, out, m, n, k, out_stride, stream);
     return;
   }
   const dim3 grid((n + BN - 1) / BN, (m + BM - 1) / BM);

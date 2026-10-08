@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+  "surface": {
+    "id": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+    "object": "model",
+    "created": 1791311557,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": 262144,
+      "kv_pool_tokens": 262144,
+      "limited_by": "position-ceiling"
+    }
+  },
+  "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+  "seed": 20260922,
+  "tag": "559f21497fe04bafba791031dab5a9e4",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 131072,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 7696.599999999977,
+        "prefill_ms": 85029.1,
+        "decode_steps": 135,
+        "decode_rows": 135,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 130574,
+        "prompt_tokens_computed": 130574
+      },
+      "engine_tokens_per_s": 33.131512615960396,
+      "ms_per_pass": 57.01185185185168,
+      "tokens_per_pass": 1.8888888888888888,
+      "answer": {
+        "prompt_sha256": "ca49c0d20ce623d9719f675e07f81f392e57044e99294fa503cc1ec5d4ded684",
+        "usage": {
+          "prompt_tokens": 130574,
+          "completion_tokens": 256,
+          "total_tokens": 130830,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided huge context measurement with items 000000 to 002909. Need list first 200 parcels and their cities. Likely items 000000 through 001999? \"first 200 parcels\" could mean first 200 items? But says \"Continue until you have listed all 200.\" Need infer: first 200 parcels and their cities. Could be first 200 parcel IDs? The context has items 000000 to 002909. \"first 200 parcels\" likely items 000000-000199? But \"Continue until you have listed all 200\" maybe they want 200 entries. Need decide. They say \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Could mean list first 200 parcels (items 000000 to 000199)",
+        "wall_ms": 92783.08702702634,
+        "ttft_ms": 85088.79025210626,
+        "last_ms": 92782.95052913018,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 131072,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 7729.29999999993,
+        "prefill_ms": 93.30000000001746,
+        "decode_steps": 135,
+        "decode_rows": 135,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 130574,
+        "prompt_tokens_computed": 6
+      },
+      "engine_tokens_per_s": 32.991344623704904,
+      "ms_per_pass": 57.25407407407356,
+      "tokens_per_pass": 1.8888888888888888,
+      "answer": {
+        "prompt_sha256": "ca49c0d20ce623d9719f675e07f81f392e57044e99294fa503cc1ec5d4ded684",
+        "usage": {
+          "prompt_tokens": 130574,
+          "completion_tokens": 256,
+          "total_tokens": 130830,
+          "prompt_tokens_details": {
+            "cached_tokens": 130568
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided huge context measurement with items 000000 to 002909. Need list first 200 parcels and their cities. Likely items 000000 through 001999? \"first 200 parcels\" could mean first 200 items? But says \"Continue until you have listed all 200.\" Need infer: first 200 parcels and their cities. Could be first 200 parcel IDs? The context has items 000000 to 002909. \"first 200 parcels\" likely items 000000-000199? But \"Continue until you have listed all 200\" maybe they want 200 entries. Need decide. They say \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Could mean list first 200 parcels (items 000000 to 000199)",
+        "wall_ms": 7889.569556107745,
+        "ttft_ms": 132.162197958678,
+        "last_ms": 7889.404003042728,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 131072,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 7678.70000000007,
+        "prefill_ms": 91.59999999997672,
+        "decode_steps": 135,
+        "decode_rows": 135,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 130574,
+        "prompt_tokens_computed": 6
+      },
+      "engine_tokens_per_s": 33.20874627215514,
+      "ms_per_pass": 56.879259259259776,
+      "tokens_per_pass": 1.8888888888888888,
+      "answer": {
+        "prompt_sha256": "ca49c0d20ce623d9719f675e07f81f392e57044e99294fa503cc1ec5d4ded684",
+        "usage": {
+          "prompt_tokens": 130574,
+          "completion_tokens": 256,
+          "total_tokens": 130830,
+          "prompt_tokens_details": {
+            "cached_tokens": 130568
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided huge context measurement with items 000000 to 002909. Need list first 200 parcels and their cities. Likely items 000000 through 001999? \"first 200 parcels\" could mean first 200 items? But says \"Continue until you have listed all 200.\" Need infer: first 200 parcels and their cities. Could be first 200 parcel IDs? The context has items 000000 to 002909. \"first 200 parcels\" likely items 000000-000199? But \"Continue until you have listed all 200\" maybe they want 200 entries. Need decide. They say \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Could mean list first 200 parcels (items 000000 to 000199)",
+        "wall_ms": 7865.347567945719,
+        "ttft_ms": 154.04353383928537,
+        "last_ms": 7839.755747001618,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

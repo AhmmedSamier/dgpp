@@ -1,0 +1,465 @@
+{
+  "profile": "benchmarks/results/2026-10-07-prefill-followup/raw/glm53-w4/prefill/profile-8k/r0.sqlite",
+  "scope": "Last kernel burst after >100ms gap; startup/calibration excluded; includes one-token output. Profiled diagnostic, not a published timing.",
+  "wall_ms": 17292.568672,
+  "summed_kernel_ms": 17081.226400000007,
+  "categories_ms": {
+    "other": 1805.4309440000204,
+    "collectives": 2723.4115520000055,
+    "index_scores_and_selection": 535.4131839999997,
+    "attention": 6166.003264000053,
+    "packed_gemm": 5850.967455999994
+  },
+  "kernels": [
+    {
+      "name": "void dgpp::<unnamed>::attn_flash_kernel<(int)512, (int)576, (bool)1, (dgpp::LatentFormat)0>(const unsigned short *, const unsigned char *, const float *, const int *, const long *, const int *, int, const int *, int, int, int, int, const int *, int, float, float *, float *, float *)",
+      "ms": 4967.234368000001,
+      "calls": 4030
+    },
+    {
+      "name": "dgpp::net::<unnamed>::bus_bulk_collective_kernel(dgpp::net::BusAllReduceView, int, int, const __nv_bfloat16 *, __nv_bfloat16 *, dgpp::net::BusBulkSegPlan, unsigned long *, unsigned long *, unsigned int, dgpp::net::BusAllReduceCtl *, unsigned long, dgpp::net::BusBulkScratch *)",
+      "ms": 2711.7931520000047,
+      "calls": 8000
+    },
+    {
+      "name": "void dgpp::<unnamed>::packq_gemm_kernel<(int)8, unsigned short, (bool)0, (int)0, (bool)0>(const unsigned short *, unsigned long, const unsigned char *, const unsigned short *, const dgpp::MoeSegment *, const dgpp::MoeExpertView *, int, const int *, T2 *, unsigned long, int, int, int, int, bool)",
+      "ms": 2068.530623999999,
+      "calls": 1125
+    },
+    {
+      "name": "void dgpp::<unnamed>::packq_gemm_wide_kernel<unsigned short, (bool)1, (int)0, (int)2, (bool)0, (bool)0, (int)8>(const unsigned short *, unsigned long, const unsigned char *, const unsigned short *, const dgpp::MoeSegment *, const dgpp::MoeExpertView *, int, const int *, T1 *, unsigned long, int, int, int, int, bool, const dgpp::MoeTile *, const int *, int, T1 *, int)",
+      "ms": 1998.1238720000006,
+      "calls": 760
+    },
+    {
+      "name": "void dgpp::<unnamed>::packq_gemm_wide_kernel<float, (bool)1, (int)0, (int)2, (bool)0, (bool)0, (int)8>(const unsigned short *, unsigned long, const unsigned char *, const unsigned short *, const dgpp::MoeSegment *, const dgpp::MoeExpertView *, int, const int *, T1 *, unsigned long, int, int, int, int, bool, const dgpp::MoeTile *, const int *, int, T1 *, int)",
+      "ms": 1386.8534400000003,
+      "calls": 380
+    },
+    {
+      "name": "void dgpp::<unnamed>::moe_accum_ordered_kernel<unsigned short, float>(T1 *, const T2 *, unsigned long, const int *, const int *, const float *, int, int, int, int)",
+      "ms": 652.0702399999999,
+      "calls": 456
+    },
+    {
+      "name": "void dgpp::<unnamed>::attn_flash_kernel<(int)512, (int)576, (bool)0, (dgpp::LatentFormat)0>(const unsigned short *, const unsigned char *, const float *, const int *, const long *, const int *, int, const int *, int, int, int, int, const int *, int, float, float *, float *, float *)",
+      "ms": 490.61318400000084,
+      "calls": 1264
+    },
+    {
+      "name": "dgpp::vout_mma_kernel(const float *, const unsigned short *, unsigned short *, int, int, int, int, int)",
+      "ms": 318.20671999999837,
+      "calls": 5214
+    },
+    {
+      "name": "void dgpp::<unnamed>::moe_router_dots_tiled_kernel<(int)0>(const unsigned short *, const unsigned short *, const float *, float *, float *, int, int, int)",
+      "ms": 283.8274560000001,
+      "calls": 380
+    },
+    {
+      "name": "void dgpp::<unnamed>::packq_gemm_kernel<(int)8, unsigned short, (bool)1, (int)0, (bool)0>(const unsigned short *, unsigned long, const unsigned char *, const unsigned short *, const dgpp::MoeSegment *, const dgpp::MoeExpertView *, int, const int *, T2 *, unsigned long, int, int, int, int, bool)",
+      "ms": 261.76608000000004,
+      "calls": 760
+    },
+    {
+      "name": "dgpp::absorb_q_mma_kernel(const unsigned short *, const unsigned short *, unsigned short *, int, int, int, int, int, int)",
+      "ms": 244.50153600000084,
+      "calls": 5214
+    },
+    {
+      "name": "void dgpp::<unnamed>::select_prefill_kernel<(bool)1, (int)4096>(const float *, long, const float *, const float *, const long *, int, long, int, int, int, int, int *, int *)",
+      "ms": 211.05504000000002,
+      "calls": 198
+    },
+    {
+      "name": "dgpp::<unnamed>::glm_residual_add_kernel(unsigned short *, const unsigned short *, long)",
+      "ms": 201.05910400000022,
+      "calls": 950
+    },
+    {
+      "name": "dgpp::<unnamed>::prefill_select_keys_kernel(const unsigned long *, long, const long *, long, int, int, int, int *, int *, int, unsigned long *)",
+      "ms": 177.60022400000005,
+      "calls": 198
+    },
+    {
+      "name": "dgpp::<unnamed>::glm_rmsnorm_kernel(const unsigned short *, const unsigned short *, unsigned short *, int, float)",
+      "ms": 156.89862400000035,
+      "calls": 957
+    },
+    {
+      "name": "dgpp::<unnamed>::attn_combine_kernel(const float *, const float *, const float *, int, int, int, float *)",
+      "ms": 142.38748800000033,
+      "calls": 5294
+    },
+    {
+      "name": "void dgpp::<unnamed>::prefill_fused_score_keys_kernel<(bool)1>(const unsigned char *, const unsigned char *, const float *, const float *, const long *, int, long, long, int, int, unsigned long *)",
+      "ms": 138.35699200000016,
+      "calls": 198
+    },
+    {
+      "name": "void dgpp::<unnamed>::packq_gemm_kernel<(int)8, float, (bool)1, (int)0, (bool)0>(const unsigned short *, unsigned long, const unsigned char *, const unsigned short *, const dgpp::MoeSegment *, const dgpp::MoeExpertView *, int, const int *, T2 *, unsigned long, int, int, int, int, bool)",
+      "ms": 135.6934400000001,
+      "calls": 380
+    },
+    {
+      "name": "nvjet_sm121_tst_mma_192x144x64_2_48x72x64_tmaAB_bz_TNNN",
+      "ms": 69.044864,
+      "calls": 64
+    },
+    {
+      "name": "dgpp::<unnamed>::moe_swiglu_clamp_kernel(const unsigned short *, const unsigned short *, unsigned short *, long, float)",
+      "ms": 68.88892800000018,
+      "calls": 456
+    },
+    {
+      "name": "sm89_xmma_gemm_e4m3f32_e4m3f32_f32_tn_n_tilesize128x128x64_stage3_warpsize2x2x1_tensor16x8x32_execute_kernel__5x_cublas",
+      "ms": 53.59241599999999,
+      "calls": 198
+    },
+    {
+      "name": "nvjet_sm121_tst_mma_192x160x64_2_48x80x64_tmaAB_bz_TNNN",
+      "ms": 41.67769599999998,
+      "calls": 104
+    },
+    {
+      "name": "void dgpp::<unnamed>::bf12_expand_kernel<(int)2>(const unsigned char *, const unsigned int *, const unsigned int *, const unsigned short *, unsigned short *, int, int, int, unsigned long)",
+      "ms": 36.902688,
+      "calls": 493
+    },
+    {
+      "name": "dgpp::<unnamed>::fwht_quant_rows_kernel(const unsigned short *, unsigned char *, float *)",
+      "ms": 24.066655999999988,
+      "calls": 133
+    },
+    {
+      "name": "void dgpp::<unnamed>::<unnamed>::moe_grouped_gemv_packq_kernel<(int)4, (int)6144, (int)0, unsigned short>(const unsigned short *, unsigned long, const dgpp::MoeSegment *, const dgpp::MoeExpertView *, int, T4 *, unsigned long, int, int)",
+      "ms": 21.81382399999999,
+      "calls": 152
+    },
+    {
+      "name": "dgpp::<unnamed>::fused_qkv_rmsnorm_kernel(const unsigned short *, long, unsigned short *, unsigned short *, int, int, const unsigned short *, const unsigned short *, float)",
+      "ms": 20.872032000000008,
+      "calls": 475
+    },
+    {
+      "name": "dgpp::<unnamed>::rope_interleave_kernel(const unsigned short *, long, long, int, int, const long *, const unsigned short *, long, unsigned short *, long, long, long)",
+      "ms": 16.73747200000002,
+      "calls": 1216
+    },
+    {
+      "name": "nvjet_sm121_tst_mma_64x128x64_4_64x32x64_tmaAB_bz_TNNN",
+      "ms": 15.396927999999999,
+      "calls": 88
+    },
+    {
+      "name": "nvjet_sm121_tst_mma_128x128x64_3_32x64x64_tmaAB_bz_TNNN",
+      "ms": 14.09696,
+      "calls": 16
+    },
+    {
+      "name": "void dgpp::<unnamed>::bf12_expand_kernel<(int)4>(const unsigned char *, const unsigned int *, const unsigned int *, const unsigned short *, unsigned short *, int, int, int, unsigned long)",
+      "ms": 13.04896,
+      "calls": 72
+    },
+    {
+      "name": "void dgpp::<unnamed>::packq_gemv_kernel<(int)8, (int)4096, (int)2, (int)0, unsigned short>(const unsigned short *, unsigned long, const unsigned char *, const unsigned short *, T5 *, int)",
+      "ms": 12.391072,
+      "calls": 75
+    },
+    {
+      "name": "dgpp::<unnamed>::moe_segment_place_kernel(const int *, int, int, int *, int *, const dgpp::MoeSegment *)",
+      "ms": 11.65891200000001,
+      "calls": 456
+    },
+    {
+      "name": "dgpp::net::<unnamed>::bus_allreduce_kernel(dgpp::net::BusAllReduceView, int, const __nv_bfloat16 *, __nv_bfloat16 *, unsigned int, unsigned int, dgpp::net::BusAllReduceCtl *, unsigned long)",
+      "ms": 11.618400000000005,
+      "calls": 166
+    },
+    {
+      "name": "void cutlass::Kernel2<cutlass_80_wmma_tensorop_s161616gemm_bf16_32x32_128x1_tn_align8>(T1::Params)",
+      "ms": 11.401152000000002,
+      "calls": 88
+    },
+    {
+      "name": "void dgpp::<unnamed>::bf12_gemv_kernel<(int)1, (bool)1, (int)2>(const unsigned short *, unsigned long, const unsigned char *, const unsigned int *, const unsigned int *, const unsigned short *, void *, int, int, unsigned long)",
+      "ms": 10.415040000000001,
+      "calls": 9
+    },
+    {
+      "name": "void dgpp::<unnamed>::<unnamed>::moe_grouped_gemv_packq_kernel<(int)4, (int)512, (int)0, float>(const unsigned short *, unsigned long, const dgpp::MoeSegment *, const dgpp::MoeExpertView *, int, T4 *, unsigned long, int, int)",
+      "ms": 10.274048000000004,
+      "calls": 76
+    },
+    {
+      "name": "dgpp::<unnamed>::latent_append_kernel(const unsigned short *, const int *, const long *, const int *, int, int, unsigned char *, int, unsigned long, const unsigned short *, int)",
+      "ms": 8.819263999999976,
+      "calls": 475
+    },
+    {
+      "name": "void dgpp::<unnamed>::moe_router_select_kernel<(int)0>(const float *, const float *, int *, float *, int, int, int, float, int)",
+      "ms": 8.225375999999997,
+      "calls": 456
+    },
+    {
+      "name": "nvjet_sm121_tst_mma_128x96x64_3_64x24x64_tmaAB_bz_TNNN",
+      "ms": 5.783007999999998,
+      "calls": 70
+    },
+    {
+      "name": "void dgpp::<unnamed>::packq_gemv_kernel<(int)8, (int)6144, (int)2, (int)0, unsigned short>(const unsigned short *, unsigned long, const unsigned char *, const unsigned short *, T5 *, int)",
+      "ms": 5.730816000000001,
+      "calls": 75
+    },
+    {
+      "name": "void dgpp::<unnamed>::bf12_gemv_kernel<(int)2, (bool)0, (int)2>(const unsigned short *, unsigned long, const unsigned char *, const unsigned int *, const unsigned int *, const unsigned short *, void *, int, int, unsigned long)",
+      "ms": 3.5171199999999976,
+      "calls": 57
+    },
+    {
+      "name": "void dgpp::<unnamed>::<unnamed>::moe_grouped_gemv_packq_kernel<(int)8, (int)6144, (int)0, unsigned short>(const unsigned short *, unsigned long, const dgpp::MoeSegment *, const dgpp::MoeExpertView *, int, T4 *, unsigned long, int, int)",
+      "ms": 3.437152000000001,
+      "calls": 152
+    },
+    {
+      "name": "void dgpp::<unnamed>::packq_gemv_kernel<(int)8, (int)2048, (int)2, (int)0, unsigned short>(const unsigned short *, unsigned long, const unsigned char *, const unsigned short *, T5 *, int)",
+      "ms": 3.4030720000000003,
+      "calls": 75
+    },
+    {
+      "name": "nvjet_sm121_tst_mma_192x104x64_2_32x104x64_tmaAB_bz_TNNN",
+      "ms": 2.5041600000000006,
+      "calls": 52
+    },
+    {
+      "name": "dgpp::<unnamed>::gather_index_pools_kernel(const int *, int, const unsigned char *, const float *, long, unsigned char *, float *, int)",
+      "ms": 2.351775999999999,
+      "calls": 132
+    },
+    {
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_64x3_tn_align8>(T1::Params)",
+      "ms": 2.0936,
+      "calls": 39
+    },
+    {
+      "name": "dgpp::<unnamed>::glm_mtp_input_kernel(const unsigned short *, const long *, const unsigned short *, long, const int *, const long *, long, const unsigned short *, const unsigned short *, unsigned short *, int, float)",
+      "ms": 1.9799680000000002,
+      "calls": 7
+    },
+    {
+      "name": "dgpp::<unnamed>::moe_segment_scan_kernel(int, int, int, int *, dgpp::MoeSegment *)",
+      "ms": 1.9316799999999967,
+      "calls": 456
+    },
+    {
+      "name": "dgpp::<unnamed>::prefill_merge_keys_kernel(unsigned long *, const long *, int, int, int, int, int, int *, int *)",
+      "ms": 1.837408,
+      "calls": 22
+    },
+    {
+      "name": "dgpp::<unnamed>::swiglu_limit_kernel(const unsigned short *, const unsigned short *, unsigned short *, long, float)",
+      "ms": 1.8184960000000001,
+      "calls": 18
+    },
+    {
+      "name": "dgpp::<unnamed>::kpool_compress_write_kernel(const unsigned short *, long, const unsigned short *, long, const float *, const int *, int, long, int, unsigned char *, float *, int, int)",
+      "ms": 1.7443840000000008,
+      "calls": 132
+    },
+    {
+      "name": "dgpp::<unnamed>::moe_segment_count_kernel(const int *, int, dgpp::MoeSegment *)",
+      "ms": 1.6783040000000042,
+      "calls": 456
+    },
+    {
+      "name": "dgpp::<unnamed>::vout_rows_kernel(const float *, const unsigned short *, unsigned short *, int, int, int, int, int)",
+      "ms": 1.5337599999999998,
+      "calls": 78
+    },
+    {
+      "name": "void dgpp::<unnamed>::absorb_q_rows_kernel<(int)2>(const unsigned short *, const unsigned short *, unsigned short *, int, int, int, int, int, int)",
+      "ms": 1.4822080000000004,
+      "calls": 78
+    },
+    {
+      "name": "void dgpp::<unnamed>::<unnamed>::moe_grouped_gemv_packq_kernel<(int)8, (int)512, (int)0, float>(const unsigned short *, unsigned long, const dgpp::MoeSegment *, const dgpp::MoeExpertView *, int, T4 *, unsigned long, int, int)",
+      "ms": 1.4127359999999995,
+      "calls": 76
+    },
+    {
+      "name": "void dgpp::<unnamed>::moe_router_dots_kernel<(int)0>(const unsigned short *, const unsigned short *, const float *, float *, float *, int, int, int, int, int *, float *, int, float, int, int *)",
+      "ms": 1.366112,
+      "calls": 77
+    },
+    {
+      "name": "void dgpp::<unnamed>::bf12_gemv_kernel<(int)1, (bool)0, (int)4>(const unsigned short *, unsigned long, const unsigned char *, const unsigned int *, const unsigned int *, const unsigned short *, void *, int, int, unsigned long)",
+      "ms": 1.3508799999999999,
+      "calls": 4
+    },
+    {
+      "name": "dgpp::<unnamed>::embed_gather_sliced_kernel(const unsigned short *, const long *, unsigned short *, int, long, long)",
+      "ms": 1.300384,
+      "calls": 13
+    },
+    {
+      "name": "dgpp::<unnamed>::k_layernorm_kernel(const unsigned short *, long, const unsigned short *, const unsigned short *, unsigned short *, int, float)",
+      "ms": 0.9545600000000004,
+      "calls": 133
+    },
+    {
+      "name": "void dgpp::<unnamed>::bf12_gemv_kernel<(int)2, (bool)0, (int)4>(const unsigned short *, unsigned long, const unsigned char *, const unsigned int *, const unsigned int *, const unsigned short *, void *, int, int, unsigned long)",
+      "ms": 0.735616,
+      "calls": 3
+    },
+    {
+      "name": "dgpp::<unnamed>::moe_tile_list_kernel(const dgpp::MoeSegment *, int, int, dgpp::MoeTile *, int *)",
+      "ms": 0.6301119999999981,
+      "calls": 380
+    },
+    {
+      "name": "void dgpp::<unnamed>::bf12_gemv_kernel<(int)1, (bool)0, (int)2>(const unsigned short *, unsigned long, const unsigned char *, const unsigned int *, const unsigned int *, const unsigned short *, void *, int, int, unsigned long)",
+      "ms": 0.45484800000000003,
+      "calls": 8
+    },
+    {
+      "name": "void dgpp::<unnamed>::l2_prefetch_kernel<(int)2>(const uint4 *, unsigned long)",
+      "ms": 0.410528,
+      "calls": 7
+    },
+    {
+      "name": "dgpp::<unnamed>::kpool_tail_seed_kernel(const unsigned short *, long, const unsigned short *, long, const int *, const long *, long, unsigned short *, int, int)",
+      "ms": 0.4046719999999998,
+      "calls": 132
+    },
+    {
+      "name": "nvjet_sm121_tst_mma_32x64x64_8_32x16x64_tmaAB_splitK_TNNN",
+      "ms": 0.32643199999999994,
+      "calls": 22
+    },
+    {
+      "name": "dgpp::<unnamed>::fold_weights_kernel(const float *, const float *, float *, long, float)",
+      "ms": 0.25148800000000016,
+      "calls": 133
+    },
+    {
+      "name": "void dgpp::<unnamed>::bf12_gemv_kernel<(int)2, (bool)1, (int)2>(const unsigned short *, unsigned long, const unsigned char *, const unsigned int *, const unsigned int *, const unsigned short *, void *, int, int, unsigned long)",
+      "ms": 0.23872,
+      "calls": 21
+    },
+    {
+      "name": "dgpp::<unnamed>::moe_gather_rows_kernel(const unsigned short *, const int *, unsigned short *, long, int)",
+      "ms": 0.17599999999999988,
+      "calls": 76
+    },
+    {
+      "name": "void dgpp::<unnamed>::<unnamed>::moe_slot_gate_up_swiglu_packq_kernel<(int)4, (int)6144, (int)0>(const unsigned short *, unsigned long, const int *, const int *, const dgpp::MoeExpertView *, int, int, unsigned short *, int, int, int, float, int)",
+      "ms": 0.17104,
+      "calls": 1
+    },
+    {
+      "name": "void dgpp::<unnamed>::select_decode_kernel<(bool)1, (int)1>(const unsigned char *, const float *, const int *, const long *, int, const int *, int, const unsigned char *, const float *, int, int, int, int, int, int *, int *, unsigned long *, long, int *, int *)",
+      "ms": 0.170464,
+      "calls": 1
+    },
+    {
+      "name": "nvjet_sm121_tss_mma_32x64x64_8_32x16x64_tmaAB_splitK_TNNN",
+      "ms": 0.13561600000000001,
+      "calls": 22
+    },
+    {
+      "name": "dgpp::<unnamed>::hidden_store_kernel(const unsigned short *, const int *, const long *, unsigned short *, long, int, int)",
+      "ms": 0.076832,
+      "calls": 6
+    },
+    {
+      "name": "void dgpp::<unnamed>::<unnamed>::moe_slot_down_packq_kernel<(int)4, (int)512, (int)0>(const unsigned short *, unsigned long, const int *, const int *, const dgpp::MoeExpertView *, int, int, float *, int, int, int, int)",
+      "ms": 0.06944,
+      "calls": 1
+    },
+    {
+      "name": "dgpp::<unnamed>::copy_rows_kernel(unsigned short *, const unsigned short *, int)",
+      "ms": 0.060896,
+      "calls": 3
+    },
+    {
+      "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __nv_bfloat16, float, __nv_bfloat16, (bool)0, float, __nv_bfloat16, __nv_bfloat16, (bool)1, (bool)0, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)",
+      "ms": 0.04195199999999999,
+      "calls": 22
+    },
+    {
+      "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, float, float, float, (bool)0, float, float, float, (bool)1, (bool)0, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)",
+      "ms": 0.03760000000000001,
+      "calls": 22
+    },
+    {
+      "name": "dgpp::<unnamed>::vout_gemm_kernel(const float *, const unsigned short *, unsigned short *, int, int, int, int)",
+      "ms": 0.023264,
+      "calls": 2
+    },
+    {
+      "name": "dgpp::<unnamed>::sample_verdict_kernel(const unsigned short *, int, int, int, int, dgpp::SampleSpec *, int, const long *, const long *, int, int *, const unsigned int *, int, dgpp::PickVerdict *, dgpp::PickVerdict *, dgpp::SampleOutcome *, const dgpp::DraftProposal *, dgpp::DraftProposal *, dgpp::DraftProposal *, int, const int *, int)",
+      "ms": 0.022432,
+      "calls": 1
+    },
+    {
+      "name": "dgpp::<unnamed>::absorb_q_kernel(const unsigned short *, const unsigned short *, unsigned short *, int, int, int, int, int)",
+      "ms": 0.020735999999999997,
+      "calls": 2
+    },
+    {
+      "name": "dgpp::<unnamed>::hidden_gather_kernel(const unsigned short *, long, int, const int *, const long *, unsigned short *, int)",
+      "ms": 0.011872,
+      "calls": 1
+    },
+    {
+      "name": "dgpp::<unnamed>::sample_local_kernel(const float *, int, int, int, int, int, int, const dgpp::SampleSpec *, int, const long *, int, const unsigned int *, int, const double *, const double *, int, const unsigned long *, unsigned short *, dgpp::PickLocal *, const dgpp::PickVerdict *, int, const int *)",
+      "ms": 0.005184,
+      "calls": 1
+    },
+    {
+      "name": "dgpp::<unnamed>::select_counter_reset_kernel(int *, int *, int)",
+      "ms": 0.005088,
+      "calls": 1
+    },
+    {
+      "name": "dgpp::<unnamed>::sample_prepare_kernel(float *, int, int, int, const dgpp::SampleSpec *, int, const long *, const long *, int, const int *, const float *, const unsigned int *, int, double *, const dgpp::PickVerdict *, int, const int *)",
+      "ms": 0.004864,
+      "calls": 1
+    },
+    {
+      "name": "dgpp::<unnamed>::kpool_decode_update_kernel(const unsigned short *, long, const unsigned short *, long, const float *, const int *, const long *, const int *, const int *, int, unsigned short *, unsigned char *, float *, int, int, int, unsigned short *)",
+      "ms": 0.004384,
+      "calls": 1
+    },
+    {
+      "name": "dgpp::<unnamed>::sample_digest_kernel(const unsigned short *, int, int, int, int, dgpp::PickVerdict *, dgpp::PickVerdict *, unsigned long *)",
+      "ms": 0.002272,
+      "calls": 1
+    },
+    {
+      "name": "void dgpp::<unnamed>::upload_words_kernel<int>(const T1 *, T1 *, int)",
+      "ms": 0.00224,
+      "calls": 2
+    },
+    {
+      "name": "void dgpp::<unnamed>::upload_words_kernel<long>(const T1 *, T1 *, int)",
+      "ms": 0.002176,
+      "calls": 2
+    },
+    {
+      "name": "dgpp::<unnamed>::moe_slot_accum_kernel(unsigned short *, const float *, const float *, long, int, int)",
+      "ms": 0.001632,
+      "calls": 1
+    },
+    {
+      "name": "dgpp::<unnamed>::sample_partials_kernel(const float *, int, const dgpp::SampleSpec *, int, const long *, int, const unsigned int *, int, const double *, double *, const dgpp::PickVerdict *, int, const int *)",
+      "ms": 0.001152,
+      "calls": 1
+    },
+    {
+      "name": "dgpp::dsa_zero_padding_rows_kernel(const long *, unsigned short *, int)",
+      "ms": 0.000992,
+      "calls": 1
+    }
+  ]
+}

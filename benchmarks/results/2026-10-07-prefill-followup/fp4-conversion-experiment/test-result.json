@@ -1,0 +1,22 @@
+{
+  "passed": true,
+  "tests": 52,
+  "log": "dsa_test-allcodes.log",
+  "new_case": "dsa_fp4_attention_loaders_match_bf16_for_all_codes",
+  "test_binary_sha256": "6fda11df6f12d7f6a4e5d078206017a65390e9dbf63643d7d34c3a70f1c4de1a",
+  "coverage": "All valid finite nonnegative e4m3 scale codes and all e2m1 codes through partial/listed/dense attention; bitwise partials against host-dequantized BF16 cache; full existing DSA suite including chunked prefill/decode.",
+  "source_sha256": {
+    "src/kernels/dsa.cu": "deae7b318970c402ccc1506700d81dc373b81dece2f6b16a70a53ec6d0bac45c",
+    "tests/cuda/dsa_test.cu": "6a4d96a614323f1c8cfaa83e1619ebf30da1d195889e6f45e18cad4c73a1f44b"
+  },
+  "host": "192.168.88.13",
+  "command": [
+    "systemd-run",
+    "--user",
+    "--scope",
+    "--quiet",
+    "--property=MemorySwapMax=0",
+    "--",
+    "/tmp/dgpp-prefill-followup/dsa_test-allcodes"
+  ]
+}

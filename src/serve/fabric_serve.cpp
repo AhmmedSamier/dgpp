@@ -402,6 +402,15 @@ std::string encode_journal_settings(const WorldSettings& s) {
                      s.dflash_draft_batch ? 1 : 0, s.dflash_depth);
   out += ",\"dfw\":";
   append_json_string(&out, s.dflash_weights);
+  out += std::format(",\"pfg\":{}", s.prefill_group ? 1 : 0);
+  out += std::format(",\"l2p\":{},\"l2m\":{},\"l2w\":{},\"l2bw\":{}", s.l2_prefetch ? 1 : 0, s.l2_prefetch_merge ? 1 : 0,
+                     s.l2_prefetch_window_mib, s.l2_prefetch_boundary_window_mib);
+  out += ",\"l2f\":";
+  append_json_string(&out, s.l2_prefetch_form);
+  out += ",\"l2b\":";
+  append_json_string(&out, s.l2_prefetch_boundary_rate);
+  out += ",\"l2l\":";
+  append_json_string(&out, s.l2_prefetch_layer_rate);
   out += ",\"xgemm\":";
   append_json_string(&out, s.expert_gemm);
   out += std::format(",\"xpf\":{},\"xtl\":{},\"xpair\":{},\"npre\":{}", s.expert_gemm_prefetch,
@@ -607,6 +616,15 @@ JournalRecord decode_journal_line(std::string_view line) {
     if (const dgpp::minijson::Value* dfw = v.find("dfw")) s.dflash_weights = std::string(dfw->as_string());
     if (s.dflash_weights != "checkpoint" && s.dflash_weights != "fp8")
       throw std::runtime_error("worker settings: dfw must be checkpoint or fp8");
+    if (v.find("pfg")) s.prefill_group = flag("pfg");  // records before 2026-10-05: grouped
+    // The L2 prefetcher (2026-10-05); records before it carry the defaults.
+    if (v.find("l2p")) s.l2_prefetch = flag("l2p");
+    if (v.find("l2m")) s.l2_prefetch_merge = flag("l2m");
+    if (const dgpp::minijson::Value* w = v.find("l2w")) s.l2_prefetch_window_mib = static_cast<int>(w->as_int());
+    if (const dgpp::minijson::Value* w = v.find("l2bw")) s.l2_prefetch_boundary_window_mib = static_cast<int>(w->as_int());
+    if (const dgpp::minijson::Value* f = v.find("l2f")) s.l2_prefetch_form = std::string(f->as_string());
+    if (const dgpp::minijson::Value* r = v.find("l2b")) s.l2_prefetch_boundary_rate = std::string(r->as_string());
+    if (const dgpp::minijson::Value* r = v.find("l2l")) s.l2_prefetch_layer_rate = std::string(r->as_string());
     // The expert GEMM's form and companions (2026-09-30): records before them carry the defaults.
     if (const dgpp::minijson::Value* xg = v.find("xgemm")) s.expert_gemm = std::string(xg->as_string());
     if (const dgpp::minijson::Value* xpf = v.find("xpf")) s.expert_gemm_prefetch = static_cast<int>(xpf->as_int());

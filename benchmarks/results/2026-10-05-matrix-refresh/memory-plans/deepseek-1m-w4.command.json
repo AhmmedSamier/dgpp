@@ -1,0 +1,11 @@
+{
+  "command": [
+    "ssh",
+    "-o",
+    "BatchMode=yes",
+    "stephen@192.168.88.13",
+    "/tmp/dgpp-matrix-plan-serve --config /tmp/dgpp-plan-deepseek-1m-w4.json --rank 2 --memory-plan"
+  ],
+  "returncode": 0,
+  "time": "2026-10-06T00:17:50.765177+00:00"
+}

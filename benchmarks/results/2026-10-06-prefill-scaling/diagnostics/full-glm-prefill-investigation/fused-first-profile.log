@@ -1,0 +1,9 @@
+DSA M3 benchmark (iters=1 warmup=0 ctx=262144); planning floor 230 GB/s
+
+== prefill tail: family=full-glm KV=bf16 TP=4 context=262144 capacity=262144 chunk=2048 ==
+prefill tail                   mean= 358.240 ms min= 358.240 max= 358.240      5717 tok/s  (one indexed attention layer; excludes MoE and collectives)
+Collecting data...
+Generating '/tmp/nsys-report-3a63.qdstrm'
+[1/1] [0%                          ] fused-first-profile.nsys-rep[1/1] [0%                          ] fused-first-profile.nsys-rep[1/1] [==========49%               ] fused-first-profile.nsys-rep[1/1] [================69%         ] fused-first-profile.nsys-rep[1/1] [======================90%   ] fused-first-profile.nsys-rep[1/1] [======================91%   ] fused-first-profile.nsys-rep[1/1] [========================100%] fused-first-profile.nsys-rep[1/1] [========================100%] fused-first-profile.nsys-rep
+Generated:
+	/home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/diagnostics/full-glm-prefill-investigation/fused-first-profile.nsys-rep

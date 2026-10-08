@@ -1,0 +1,22 @@
+[  0%] Built target dgpp_device_ranges
+[  3%] Built target dgpp_rope_scaling
+[  7%] Built target dgpp_core
+[ 26%] Built target pcre2-8-static
+[ 30%] Built target dgpp_loaders
+[ 30%] Built target dgpp_net
+[ 38%] Built target dgpp_text
+[ 46%] Built target dgpp_bus
+[ 80%] Built target dgpp_kernels
+[ 80%] Built target dgpp_sched
+[ 84%] Built target dgpp_models_dsa
+[ 84%] Built target dgpp_models_kda
+[ 88%] Built target dgpp_models_glm
+[ 92%] Built target dgpp_models_moe
+[ 96%] Building CXX object CMakeFiles/dgpp_models_glm_loader.dir/src/models/glm/forward.cpp.o
+[ 96%] Building CXX object CMakeFiles/dgpp_models_glm_loader.dir/src/models/glm/mtp.cpp.o
+[ 96%] Building CXX object CMakeFiles/dgpp_models_glm_loader.dir/src/models/glm/decode.cpp.o
+[100%] Linking CXX static library libdgpp_models_glm_loader.a
+[100%] Built target dgpp_models_glm_loader
+[100%] Building CXX object CMakeFiles/glm_tp_test.dir/tests/cuda/glm_tp_test.cpp.o
+[100%] Linking CXX executable glm_tp_test
+[100%] Built target glm_tp_test

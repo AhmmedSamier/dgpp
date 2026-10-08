@@ -1,0 +1,27 @@
+{
+  "completed_at": "2026-10-07T19:00:11.719951+00:00",
+  "deployments_complete": 29,
+  "validated_reports": 336,
+  "pending_reports": 0,
+  "document_sha256": "15f9bad5f77decce6da88fcf5ecc2089f9f25f72dd48f478d21090d05a959a5a",
+  "historical_quality_rows_preserved": 45,
+  "prefill_budget_records": 29,
+  "session_model_cleanup_complete": true,
+  "original_files_preserved": true,
+  "original_service_restored": true,
+  "os_swap_unchanged": true,
+  "service_user_linger_enabled_on_all_nodes": true,
+  "head_and_origin_master": "07a32fb912a264de1ea52801ffee127d8bc05235",
+  "open_performance_followup": "https://github.com/HawkBearPig/dgpp/issues/96",
+  "evidence": {
+    "diagnostics/measurement-audit.json": "0a63b92299da71c593141f986c3164f468753d35bf706ab92ab45afc7fde1688",
+    "diagnostics/document-audit.json": "07633855439dddac6cbd2d9e9d0254d4154f5dcd3d7c094ed3928a7f80cf6990",
+    "diagnostics/resolved-prefill-budgets.json": "ad5f47c0bb890fba64f35df5e365db6e84a54f821de627264ceac5e08cd5b288",
+    "diagnostics/storage-preservation-audit.json": "28771661b531738a64735d6946c58c792da23397d501e5d89e9a797a90f09e12",
+    "diagnostics/original-service-restoration/restored.json": "2cf9f3f43432ba7dff98c6596bb0851ec55876832d973bc69644528f819f724d",
+    "diagnostics/original-service-restoration/attempt-2/memory-check.json": "7e98ce236cfec9cc629fd6128e5d3a39c2331354b824b90d0253aea991574623",
+    "diagnostics/original-service-restoration/attempt-2/processes-after-logout.json": "a399df8daf91f1f671e7cf218b31e1785e698c6c7c069a0850a15cae224d0730",
+    "diagnostics/original-service-restoration/user-service-persistence.json": "bad88ee04dd0e995badf2242041eae33936692d6807f0257ad25ee71bea6b154"
+  },
+  "docs_results_and_swap_launcher_uncommitted_at_completion": true
+}

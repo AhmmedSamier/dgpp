@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "model": "RadixArk/Qwen3.8-Flash-Next-NVFP4",
+  "surface": {
+    "id": "RadixArk/Qwen3.8-Flash-Next-NVFP4",
+    "object": "model",
+    "created": 1791319591,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": 262144,
+      "kv_pool_tokens": 524288,
+      "limited_by": "position-ceiling"
+    }
+  },
+  "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+  "seed": 20260922,
+  "tag": "df66a8b7c13348218f73a82970971a2c",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 131072,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 3784.6999999999534,
+        "prefill_ms": 137790.7,
+        "decode_steps": 69,
+        "decode_rows": 69,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 130576,
+        "prompt_tokens_computed": 130576
+      },
+      "engine_tokens_per_s": 67.37654239437819,
+      "ms_per_pass": 54.850724637680486,
+      "tokens_per_pass": 3.6956521739130435,
+      "answer": {
+        "prompt_sha256": "245d2981bc49ef0bf5173f9b7acff885d49d2a87582499eafe3e496860435108",
+        "usage": {
+          "prompt_tokens": 130576,
+          "completion_tokens": 256,
+          "total_tokens": 130832,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided huge context with items 000000 to 002909. Need list first 200 parcels and their cities. \"first 200 parcels\" likely items 000000 through 001999? Or first 200 listed? They say \"Continue until you have listed all 200.\" Need numbered list describing first 200 parcels and their cities. Could mean parcel IDs and cities for items 000000-000199? But \"first 200 parcels\" ambiguous: first 200 items in context (000000-000199) or first 200 parcels by item number? They say \"Item 000000... Item 000001...\" and \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Likely they want 200 entries, numbered 1 to 200, each parcel",
+        "wall_ms": 141661.163975019,
+        "ttft_ms": 137852.26157307625,
+        "last_ms": 141635.74937311932,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 131072,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 3600.5,
+        "prefill_ms": 80.20000000001164,
+        "decode_steps": 69,
+        "decode_rows": 69,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 130576,
+        "prompt_tokens_computed": 8
+      },
+      "engine_tokens_per_s": 70.82349673656437,
+      "ms_per_pass": 52.18115942028985,
+      "tokens_per_pass": 3.6956521739130435,
+      "answer": {
+        "prompt_sha256": "245d2981bc49ef0bf5173f9b7acff885d49d2a87582499eafe3e496860435108",
+        "usage": {
+          "prompt_tokens": 130576,
+          "completion_tokens": 256,
+          "total_tokens": 130832,
+          "prompt_tokens_details": {
+            "cached_tokens": 130568
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided huge context with items 000000 to 002909. Need list first 200 parcels and their cities. \"first 200 parcels\" likely items 000000 through 001999? Or first 200 listed? They say \"Continue until you have listed all 200.\" Need numbered list describing first 200 parcels and their cities. Could mean parcel IDs and cities for items 000000-000199? But \"first 200 parcels\" ambiguous: first 200 items in context (000000-000199) or first 200 parcels by item number? They say \"Item 000000... Item 000001...\" and \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Likely they want 200 entries, numbered 1 to 200, each parcel",
+        "wall_ms": 3780.172368977219,
+        "ttft_ms": 154.0992429945618,
+        "last_ms": 3754.6979431062937,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 131072,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 3607.5,
+        "prefill_ms": 77.89999999996508,
+        "decode_steps": 69,
+        "decode_rows": 69,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 130576,
+        "prompt_tokens_computed": 8
+      },
+      "engine_tokens_per_s": 70.68607068607069,
+      "ms_per_pass": 52.28260869565217,
+      "tokens_per_pass": 3.6956521739130435,
+      "answer": {
+        "prompt_sha256": "245d2981bc49ef0bf5173f9b7acff885d49d2a87582499eafe3e496860435108",
+        "usage": {
+          "prompt_tokens": 130576,
+          "completion_tokens": 256,
+          "total_tokens": 130832,
+          "prompt_tokens_details": {
+            "cached_tokens": 130568
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided huge context with items 000000 to 002909. Need list first 200 parcels and their cities. \"first 200 parcels\" likely items 000000 through 001999? Or first 200 listed? They say \"Continue until you have listed all 200.\" Need numbered list describing first 200 parcels and their cities. Could mean parcel IDs and cities for items 000000-000199? But \"first 200 parcels\" ambiguous: first 200 items in context (000000-000199) or first 200 parcels by item number? They say \"Item 000000... Item 000001...\" and \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Likely they want 200 entries, numbered 1 to 200, each parcel",
+        "wall_ms": 3777.466320898384,
+        "ttft_ms": 153.87203986756504,
+        "last_ms": 3777.3610400035977,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

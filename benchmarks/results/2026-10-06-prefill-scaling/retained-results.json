@@ -1,0 +1,1700 @@
+{
+  "created_at": "2026-10-07T02:42:09.146204+00:00",
+  "source_binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+  "modes": {
+    "glm-flash-hybrid-w2/default": {
+      "directory": "raw/glm-flash-hybrid-w2/refresh/default",
+      "jobs": {
+        "prefill": {
+          "lengths": [
+            32768
+          ]
+        },
+        "context-32768": {},
+        "context-65536": {},
+        "context-131072": {},
+        "context-262144": {},
+        "context-524288": {}
+      },
+      "target_config": {
+        "path": "configs/glm-flash-hybrid-w2.json",
+        "sha256": "ac6b3739ef51d10a81a60e3ed1641ea4862631c26c3ce9fff7d6c7deb9a30f54"
+      },
+      "files_sha256": {
+        "config.json": "ac6b3739ef51d10a81a60e3ed1641ea4862631c26c3ce9fff7d6c7deb9a30f54",
+        "context-131072.json": "5b2fcf14420e286f1fddb2e7b1c7e98e3e05e118f7f1c8b6acb051a40bb4bbde",
+        "context-131072.log.command.json": "1c68cc7e0c0d6e51e40a51a7e9c8fb684c9803b118e850438faa802e597c5b79",
+        "context-262144.json": "c18ce65065fd025fe507dca9dea7d884070cef79b9bf93a54519d1f751997ab8",
+        "context-262144.log.command.json": "fcf2fce65618c6c70ec1f35cd998044172be6ed3e59eda90e0afe3855b0a9c52",
+        "context-32768.json": "aabc9e5a590b460a0a601b5598eabd176a70f16b5973293801a4de7eef8b37f5",
+        "context-32768.log.command.json": "30bab311f22ca5cf5c0d7f0678ff6ed69e4a34710af16b11e169b691940135e7",
+        "context-524288.json": "7b246e202b4adda64a5a0acbd8367731eb7ab2b9dfe64b7968b5355b377a7f11",
+        "context-524288.log.command.json": "930ae87c8b7cbde39fcbba8fadbf79eab6975c106df1c4f5a40abb627749106f",
+        "context-65536.json": "0a089ea66214aae5ba473b12a43d358f1d1dfae85d197703ae7ce9d8a05a4d11",
+        "context-65536.log.command.json": "e63211e64d5793c5d6780d194d433b2f36aa5203b21e88ccb973aa1d3245ba57",
+        "down.log.command.json": "e935a1fff8a64a70211dd525320b0d09dbf939b2ea6e6b4acd07ee6cc2f6ddcb",
+        "manifest.json": "f7c8f0c07fde7812d32393efaecaa47154cf9e5229fbaaeeae98c48a0e5b5b57",
+        "memory-check.json": "4fcda8191b2f65f1ce090172ae80867444323659b8a18e8217ac2ec644dbc665",
+        "prefill.json": "50e5051699e121ee4386191bc4aae65e731c537c53752087e56efe231bb677c3",
+        "prefill.log.command.json": "7d1addc86b1f082f32c9209723ec35448eb3eed496df20bc5d2b0bf136706de2",
+        "rank-identity.json": "f8fba99938b47dc6ec947180c9ebdb2e997a4a2b31ffc3bcb27e11e6879aa493"
+      }
+    },
+    "glm-flash-hybrid-256k-w2/default": {
+      "directory": "raw/glm-flash-hybrid-256k-w2/refresh/default",
+      "jobs": {
+        "prefill": {
+          "lengths": [
+            32768
+          ]
+        },
+        "context-32768": {},
+        "context-65536": {},
+        "context-131072": {},
+        "context-262144": {},
+        "context-524288": {}
+      },
+      "target_config": {
+        "path": "configs/glm-flash-hybrid-256k-w2.json",
+        "sha256": "9618fe26f1bb54a580aa4ab732ed36c4660329a1a5fc3da130390665a29b2136"
+      },
+      "files_sha256": {
+        "config.json": "9618fe26f1bb54a580aa4ab732ed36c4660329a1a5fc3da130390665a29b2136",
+        "context-131072.json": "25a524be538cbab1370fbc3040d0de0939cc9ac9b133dfb2320014bbdeef5519",
+        "context-131072.log.command.json": "0cb7135a6377ff0a3cc8a71ec32a786c1dcf32073d2d7adc0a20f2894cebffb6",
+        "context-262144.json": "c71f2f57eb390b0aadb203460d30e186fe9fad42fb41e15468fb9367d1b1e0d4",
+        "context-262144.log.command.json": "1027036f9d3ccaedecaa5242a7f533c907d27057836a79b875082dac1ce2e18e",
+        "context-32768.json": "8d3df32bbcb315363fa18cc95eeacb978f45ea32819f11431b18c7c7625fd937",
+        "context-32768.log.command.json": "54b96c8765d34faa8a58ca983108a5feb74e2ed6d86191d68876ecdbcaff12d7",
+        "context-524288.json": "be595e9e88485bf40962c6c9b3a7c7296b1399f8f0d1eaf1c309807543dbdcda",
+        "context-524288.log.command.json": "9e4944eb1aece75fa86ed88e2a355227d0bc336a5c9717133beb43a45f9687bf",
+        "context-65536.json": "a1873ec5a5d1d9367c9071eccc473a1188da869c87e11f436970c2c66f46ddaf",
+        "context-65536.log.command.json": "177697ca4af1f0d9cff4b90806b7131f21ac09a7abc5cbf1c9077a1de9533c11",
+        "down.log.command.json": "9a576794a5e53fbfff0fae01460c968d64c4010a796ddaa6dd1d1571695b2adc",
+        "manifest.json": "15d582c57ac19f55751fcf7845a53d48bd8644d3cc0e37f86b45d9d619bedd67",
+        "memory-check.json": "adfb750d754f70957237d11656ca5f61301cba735a85006bec1a362bdbc1ff2e",
+        "prefill.json": "a948ac06df11e0c435fa2c691811a1f5b3cd8fe2fe0dbfc69427b4bcba4f2d0c",
+        "prefill.log.command.json": "99c735bc4dd0ec7c1b320200bf0abb8763f873fc585b7bf1462c35ace4fd8c08",
+        "rank-identity.json": "90ad43a53558a6dffac521ef5dac7746b25bc77aaecbfd3f7a04715aacf016fc"
+      }
+    },
+    "glm-flash-hybrid-w4/default": {
+      "directory": "raw/glm-flash-hybrid-w4/refresh/default",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68
+        },
+        "prefill": {
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        },
+        "context-0": {},
+        "context-32768": {},
+        "context-65536": {},
+        "context-131072": {},
+        "context-262144": {},
+        "context-524288": {}
+      },
+      "target_config": {
+        "path": "configs/glm-flash-hybrid-w4.json",
+        "sha256": "c0cf6a46aecd32f34d5f84ac8dc839e3738d4eb495c9c08ab240d2415b89336b"
+      },
+      "files_sha256": {
+        "config.json": "c0cf6a46aecd32f34d5f84ac8dc839e3738d4eb495c9c08ab240d2415b89336b",
+        "context-0.json": "3df21559bf94ace8fa11410874ed187b0c86e9ddb65df1682e1edaf5185b0b2c",
+        "context-0.log.command.json": "5c30bab502e897692d0132861ef6e0c6e8b5418ca41f1787492a18b16a568e2c",
+        "context-131072.json": "b38aa584d7e12d5f71e233687431d257dd417852e1d639dd155e69f6d189f131",
+        "context-131072.log.command.json": "37e1dbec690703cc2e28db01f2035ba5f231893619b8ae3d998364e978353606",
+        "context-262144.json": "84f1bd2af1496ac93a96eb443d8c84e20f5c5573b437f23e069e2b53057b7899",
+        "context-262144.log.command.json": "562270113f049807d04e10f1ba1899cd497a841b4d5173fc8992dca0a530e414",
+        "context-32768.json": "13bb2abccbbf9d074255aed5fae8222065541d8a572074cbac2f638758507ec1",
+        "context-32768.log.command.json": "9632a27605737c1f1573055c3e9aace4363be6b6824bb040eed818a284c8285b",
+        "context-524288.json": "1dabc852702664516efe6baff142da7b7cea6540fcb9fbbced020d4eb7f519ed",
+        "context-524288.log.command.json": "43511f8dc8a504af7df7382c90cae862af9249688e25c09603678c2e94df7cde",
+        "context-65536.json": "fe0a61e0515dd1137844f4443e41582855d1caeea013f5ea8bc85c91a27be7c1",
+        "context-65536.log.command.json": "44fe746ca02b4f564f5c03315b601f52aeaf41f9bb654bba1332a47085507e30",
+        "down.log.command.json": "f46ead9f95f83c138be818a0775bdb39334fa04869abfa9898818dbf03f302a7",
+        "greedy.json": "95a989f5a42268d0d5db78194012563186b362171275390fa1a299533df2a63a",
+        "greedy.log.command.json": "0a2125edf27b12647388ad2d91b15ad97e0d6e970019084510e778d095e22b9f",
+        "manifest.json": "433f41edc3f3487f1141e92e610f6d62ec5b09e07d2d4a552e558519efb4a37e",
+        "memory-check.json": "67ba9361c167b68a697a78192afcf66f6a1c3a569609a57306f294fe4e03c4e4",
+        "prefill.json": "0f04ecd1f97d81e307b9209467f5762bece3b15fa22789c9d594f4e79b09c08b",
+        "prefill.log.command.json": "cd02554b86e1b1801dba3c26d779f780367fdf9046bb2af16dece9cd723c5bf7",
+        "rank-identity.json": "b30d37d80c52ed6b9413081ed5b576e12c81cc1e723fe24408559df6feb3b889"
+      }
+    },
+    "glm-flash-fp8-w4/default": {
+      "directory": "raw/glm-flash-fp8-w4/refresh/default",
+      "jobs": {
+        "prefill": {
+          "lengths": [
+            32768
+          ]
+        },
+        "context-32768": {},
+        "context-65536": {},
+        "context-131072": {},
+        "context-262144": {},
+        "context-524288": {}
+      },
+      "target_config": {
+        "path": "configs/glm-flash-fp8-w4.json",
+        "sha256": "70d2880d83b26a664f7a82f831daae979549b275adcb1f39a88a97923fabde4a"
+      },
+      "files_sha256": {
+        "config.json": "70d2880d83b26a664f7a82f831daae979549b275adcb1f39a88a97923fabde4a",
+        "context-131072.json": "3c2b05b1c1d1995fed5afac6c69c85f7e5350041d939d911f1f4f1c663ae5f80",
+        "context-131072.log.command.json": "4c71925eb6a4bb6d672e7ab957510fc4516361f32dfb34c2f081f24830dca1e8",
+        "context-262144.json": "1bb866244b877bdc279173c8e5ed939da8bb81ca0783f1759a46f103b4c60059",
+        "context-262144.log.command.json": "2b6e7fb4b8ac1844bc69ce262bbbdc654eee9e3415604af9b206e0a43855bc98",
+        "context-32768.json": "d75cbc9f0c7bd27d6c56991fc39fe28167a964fe545999320149ec2b43c9fb8c",
+        "context-32768.log.command.json": "971f5f85e56704120acc2d457ea93aad08e4fd9f12a61350902953ce00993610",
+        "context-524288.json": "ad8702b06d7b73b5b468fe2915ee7d135fbdf1d52edf4cf752c1e5899c3fb473",
+        "context-524288.log.command.json": "870f229ea1280be34de19a88bac6d9e162da3d9ecfd303f00ec5078d6e585098",
+        "context-65536.json": "3c1f562e54eb1cdbc08cbad67a0e1d6bd64b688db2ca1611a2c55e8799d2a8c5",
+        "context-65536.log.command.json": "3ca1d19ef1c6d1f99d67da09906a4a9e0a047d6fbe91487bb3b7be8fd6e5d63a",
+        "down.log.command.json": "8721167248942f0c57c7f5e901766b066d50f9e10c327921e7ec4acaa6d23142",
+        "manifest.json": "15d582c57ac19f55751fcf7845a53d48bd8644d3cc0e37f86b45d9d619bedd67",
+        "memory-check.json": "e44f0e838b53b39eaaa14ffb0cacd71a0a4fc6bdbc877e150cb2cbec2785473c",
+        "prefill.json": "78795c1e987b2ee2cfc438404fc168d8afabc005f6a7898ec00bd160986ee166",
+        "prefill.log.command.json": "caa4b61a9280f574ee47dd5ea2a6e5661f166d07edcc6c8c49c1277c45da6a48",
+        "rank-identity.json": "109c23e750aab8fff34a9691b2ef899bca0480506dfa9eec6b3e0588e819407d"
+      }
+    },
+    "glm-flash-fp8-512k-w4/default": {
+      "directory": "raw/glm-flash-fp8-512k-w4/refresh/default",
+      "jobs": {
+        "prefill": {
+          "lengths": [
+            32768
+          ]
+        },
+        "context-32768": {},
+        "context-65536": {},
+        "context-131072": {},
+        "context-262144": {},
+        "context-524288": {}
+      },
+      "target_config": {
+        "path": "configs/glm-flash-fp8-512k-w4.json",
+        "sha256": "43260125e95905f16fbccf361865e221c707ac32d5853730d3ea1c3fa1a633f5"
+      },
+      "files_sha256": {
+        "config.json": "43260125e95905f16fbccf361865e221c707ac32d5853730d3ea1c3fa1a633f5",
+        "context-131072.json": "a40f1788eba2958aa40ac20aee85d888ae35451ab2b365df8b20e9e254992cb6",
+        "context-131072.log.command.json": "9bdd437c55fcdb6562fd9525d036930fafed7c2bcb4d2c380305691ad147bf63",
+        "context-262144.json": "57af9e7a6b7ca6d27e706e8f2bfabb62cca37b936eabaf298b059880b784b8cd",
+        "context-262144.log.command.json": "1c7b89af6cbd22a62b83175fa5be6d60783bcf9a6d4e6cf8f4814981c44e7d8f",
+        "context-32768.json": "1cb03dad6203288525e40b71b562ab580135039217efe55bbdb7de75331390d6",
+        "context-32768.log.command.json": "14a208442538ed423451fdef67b642eca9164a81154f5ebcf072257897428ccb",
+        "context-524288.json": "e7c023fa5412daa5b7427d3f265590cb68b1951a99ddb7a9cbbbe8510e4ec95b",
+        "context-524288.log.command.json": "1f46fcfcf1ed039aaf409bdc0ab772c398e8f44449de2da63130b5b4abb69940",
+        "context-65536.json": "7d4469eea32c4612b49bb071aa255d4ab4f9e65bd2464f6af3ae47d60d7c3c65",
+        "context-65536.log.command.json": "ce0573a3e0dd9d8b690a7b63e86c54d2a84bcb7d83add126eb35bb6876f0c3f7",
+        "down.log.command.json": "d908a6c2310bafaa0579b31e859c263fb4be282e068f65188257dbede10aa638",
+        "manifest.json": "15d582c57ac19f55751fcf7845a53d48bd8644d3cc0e37f86b45d9d619bedd67",
+        "memory-check.json": "a62489a48bf307e64176ff1956d51d944d774270cd71579272eb8e65d714bca2",
+        "prefill.json": "7afd52a82108f12bccc5e85803d61b9bb6bea754401dc68ea729d47a92884035",
+        "prefill.log.command.json": "61a3cc9faadd842684eb1eaf5dc4262f399d5c3708dfb9f87c8cac085017ac8b",
+        "rank-identity.json": "77e90c987f1e1f31eaa9732fb084ce9e3d9cba67974e482a980dbf7f8de155ba"
+      }
+    },
+    "glm-flash-fp8-512k-w4/plain": {
+      "directory": "raw/glm-flash-fp8-512k-w4/refresh/plain",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68
+        }
+      },
+      "target_config": {
+        "path": "configs/glm-flash-fp8-512k-w4.json",
+        "sha256": "43260125e95905f16fbccf361865e221c707ac32d5853730d3ea1c3fa1a633f5"
+      },
+      "files_sha256": {
+        "config.json": "e431e66ed2075038072e48c1dca198dd91ce3522e1afba03787eeeb4efd51dcf",
+        "down.log.command.json": "ac18f989fd81e71562e5bafd2d073d9031b125f27b65044751c547b9daa6e0b0",
+        "greedy.json": "e10b4f108d03ab589300bd6dd2954f97ffd8bf4c8a26be5cfdbf3ff03a813cd7",
+        "greedy.log.command.json": "f32245d0737d240b2481fc936cd4ebce1d677c066cb51ddfb4251bd99bf3ab35",
+        "manifest.json": "15d582c57ac19f55751fcf7845a53d48bd8644d3cc0e37f86b45d9d619bedd67",
+        "memory-check.json": "3e005acd7733a16889edcda6712a6084e448b126efe4bfb1a69a463e69e8f700",
+        "rank-identity.json": "9e966131d28dc3ee711424e47e6531366da33ca23efb115e35f1baee89f99e57"
+      }
+    },
+    "glm-flash-fp8-512k-w4/mtp2": {
+      "directory": "raw/glm-flash-fp8-512k-w4/refresh/mtp2",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68
+        }
+      },
+      "target_config": {
+        "path": "configs/glm-flash-fp8-512k-w4.json",
+        "sha256": "43260125e95905f16fbccf361865e221c707ac32d5853730d3ea1c3fa1a633f5"
+      },
+      "files_sha256": {
+        "config.json": "18abf7dce99b5697aa63932f70634ece5069dab14d0599bf80bf8d2417e7051e",
+        "down.log.command.json": "9516532024e47200a69163e0ffea992a3f63a5c9385c3ce831fd9891efb8e17f",
+        "greedy.json": "bbcbfccfb772aaba4e7d6572e0ef5c26a5fc7f77b12490b3f7a085ed69484a40",
+        "greedy.log.command.json": "2d8e7938ea607743cd540cec15885374d7aa9fea2450bd0caffad78380aff1d8",
+        "manifest.json": "15d582c57ac19f55751fcf7845a53d48bd8644d3cc0e37f86b45d9d619bedd67",
+        "memory-check.json": "449cc2fc257bf70a62673155cb264630639e9a003d707b2d9195732fea08f0cd",
+        "rank-identity.json": "ebe601764273a0316b60fc8b8f1045d2565c1613ebd161c8cd7103a6f743a03c"
+      }
+    },
+    "glm-flash-fp8-512k-w4/mtp3": {
+      "directory": "raw/glm-flash-fp8-512k-w4/refresh/mtp3",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68
+        }
+      },
+      "target_config": {
+        "path": "configs/glm-flash-fp8-512k-w4.json",
+        "sha256": "43260125e95905f16fbccf361865e221c707ac32d5853730d3ea1c3fa1a633f5"
+      },
+      "files_sha256": {
+        "config.json": "dfd0461bd070014e6f367575b4b67d671aceae69ec255e37e0212b05fe8e208a",
+        "down.log.command.json": "9926700881f07675a8034102dd2b6bfc2a68fbf22eeffa3ba202d5439d6c500b",
+        "greedy.json": "802de01566dc4fbf3e31832f8ac873ca5a8050118795372f7a53651a0ede2a2b",
+        "greedy.log.command.json": "aaf807f0cce03f254f7ddbf6017cb542fe63caca71cd55f09778f4708119e9d7",
+        "manifest.json": "15d582c57ac19f55751fcf7845a53d48bd8644d3cc0e37f86b45d9d619bedd67",
+        "memory-check.json": "ea8443a16902f06c2aa35a1ce5b980e38f85a6fb54fa50d3a9b32bea5432cbb9",
+        "rank-identity.json": "063dccd316de29e85b6e17ce26f43048e707ca00b736d8c2bbe140410e8f85c1"
+      }
+    },
+    "qwen-nvfp4-w1/default": {
+      "directory": "raw/qwen-nvfp4-w1/refresh/default",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        },
+        "prefill": {
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        },
+        "context-0": {},
+        "context-32768": {},
+        "context-65536": {},
+        "context-131072": {},
+        "context-262144": {},
+        "context-524288": {}
+      },
+      "target_config": {
+        "path": "configs/qwen-nvfp4-w1.json",
+        "sha256": "36286c8cb83a06a79546c6851ef9cb7f4e9566eacd7fd17c347054ea6b8be453"
+      },
+      "files_sha256": {
+        "config.json": "36286c8cb83a06a79546c6851ef9cb7f4e9566eacd7fd17c347054ea6b8be453",
+        "context-0.json": "c6ec1cf536bb18c22a720ba606d46dc0f0718d8c7f70e76c8a329f684e8c6962",
+        "context-0.log.command.json": "242293466c2584c66667445f03aae70fb14d5752bb850c11d0ac8da3dc496bae",
+        "context-131072.json": "61193e65d828cea2f2fb66f463db36509cf02e055428769996236daad9510073",
+        "context-131072.log.command.json": "92459dfb7a73ef3913f747eb689b825551017c2bdc48e11da01d68283d141bdf",
+        "context-262144.json": "143c42aa0f0825947f7f352e5dc4913cdc4c56043f5e3617b315613c8c14ef55",
+        "context-262144.log.command.json": "353af371b3d183197b6215767b039ac96e6c2cc1b07a8842b83f3b700e85c4f0",
+        "context-32768.json": "2a30b92bcdbf62ecdebdd97ed5fc2525723184b0a0f0d3817c2e5ad2962d09f1",
+        "context-32768.log.command.json": "8ec0191c0548cf3e5b4f5485479deb56d47d099a97382ff7a7f508a9546e86b3",
+        "context-524288.json": "960341266ec2015e4d70716b327770dc0d995af2ed9f00ff7b0b1ebdba13f64b",
+        "context-524288.log.command.json": "b011817ea5a3b012d88f9cf2b7bf50896043df0e022bf2a3944fd92b8b9160e5",
+        "context-65536.json": "164e98e77ccbb25aa968b52adee7906b376f4f4fa5c6a7047fa2929c9995642f",
+        "context-65536.log.command.json": "641c7480a1a0d96a47efd4516c87af8eb563445d1064537a4a4890b43da6c9d0",
+        "down.log.command.json": "8391031bd3fe4402b2f952dd9fd402f8594f934bb3e101a31186156697991b2e",
+        "greedy.json": "3cca5fcad7894157b90acddddaecbefe3b137075283f8f7ebe7bab0b45b75be9",
+        "greedy.log.command.json": "b100073ce7123bdbad616ac1100c689e2e248ce6c2664b3abafac5a8a9448132",
+        "manifest.json": "15d582c57ac19f55751fcf7845a53d48bd8644d3cc0e37f86b45d9d619bedd67",
+        "memory-check.json": "040e601ccf6b516405d10fc42e9a1d85b10e4bbcb43f38798d186f57d63d5753",
+        "prefill.json": "8a63fd07d5f406ff5de90394045ea1478498c5ac7d90e5591c927ce9940a01b9",
+        "prefill.log.command.json": "f7cc7a82b6a6beb92368d556bec497073345e74abd8aaa604acc5df51222e33c",
+        "rank-identity.json": "8a337f4c70a67016e26f6de24d95522673ffd48fbecc5ffdfc0c7264fff8a436"
+      }
+    },
+    "qwen-nvfp4-w1/plain": {
+      "directory": "raw/qwen-nvfp4-w1/refresh/plain",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-nvfp4-w1.json",
+        "sha256": "36286c8cb83a06a79546c6851ef9cb7f4e9566eacd7fd17c347054ea6b8be453"
+      },
+      "files_sha256": {
+        "config.json": "3c9e6510a1b8dcd9ed47fa2df6a2731f53c6f674ec7800763c702678bbf21284",
+        "down.log.command.json": "114bffb92bb07045078d30ae3b22836e869c94389d1099eaa4d244fa59eea126",
+        "greedy.json": "c53ff183feda075cf9692dc91c5fc9314ed4398c59659c372a237c0ede6f0653",
+        "greedy.log.command.json": "2361af1530b5716daad7101046fa60bc83b191f7e99d634e89e2b2e733ccf881",
+        "manifest.json": "15d582c57ac19f55751fcf7845a53d48bd8644d3cc0e37f86b45d9d619bedd67",
+        "memory-check.json": "fc16a1503db934708e0d168fc7f5937085c55eb8179ec9e172e27b1394d91781",
+        "rank-identity.json": "dfeca0c119250839817c368bc7ab236a0b64f16c8b3d65f0efeefa10022af5b7"
+      }
+    },
+    "qwen-nvfp4-w1/mtp2": {
+      "directory": "raw/qwen-nvfp4-w1/refresh/mtp2",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-nvfp4-w1.json",
+        "sha256": "36286c8cb83a06a79546c6851ef9cb7f4e9566eacd7fd17c347054ea6b8be453"
+      },
+      "files_sha256": {
+        "config.json": "1c960463847ed995e7341cf49793538681c4666f8231beefe7c0ff229f8cba62",
+        "down.log.command.json": "9cdddeb030d90ad981481b4bd9cee56d7eacbe72daf65f45440130c07b025902",
+        "greedy.json": "e129eea3a2885ee2637cdf6d90cbfc19ff4e2539b77fc2b46cc047dbdb66bb4d",
+        "greedy.log.command.json": "897b5cf42d897e096c54b3f592db84c777d494c4587178cbb066aec3c8a9313a",
+        "manifest.json": "15d582c57ac19f55751fcf7845a53d48bd8644d3cc0e37f86b45d9d619bedd67",
+        "memory-check.json": "e52febbe39d9b2dd0a83fd5f72ed81372055e707a255284387af6fe249fc0bf0",
+        "rank-identity.json": "f70c86fdd90d06c539736750e39ba5ae932d86a138f4f4fb0f9068814249ea2e"
+      }
+    },
+    "qwen-nvfp4-w1/mtp3": {
+      "directory": "raw/qwen-nvfp4-w1/refresh/mtp3",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-nvfp4-w1.json",
+        "sha256": "36286c8cb83a06a79546c6851ef9cb7f4e9566eacd7fd17c347054ea6b8be453"
+      },
+      "files_sha256": {
+        "config.json": "3328f9eb075424f98a0903c0c4cd72878c64b3d01e77eed4907bd02288886bd4",
+        "down.log.command.json": "fa0ee05360209db66afa76593266a2a892b741aa7a36281e8ff50687afa87a78",
+        "greedy.json": "9ec7932c147aea8392deb0d6cf917f3835040c57db675d8e11041ad31febf874",
+        "greedy.log.command.json": "6461ec5cb93521242b779938677a5957ef74f822d9ab8fbecbb984bb65ba921f",
+        "manifest.json": "15d582c57ac19f55751fcf7845a53d48bd8644d3cc0e37f86b45d9d619bedd67",
+        "memory-check.json": "a32e19a3229e7a8b953851825753b4e17d15d628bc308a9416413c54af8fb06f",
+        "rank-identity.json": "ba3e657af287d48dfaaad170be7d156a80fdbb10dd329d36443a99a1316a9c32"
+      }
+    },
+    "qwen-nvfp4-bf16-w1/default": {
+      "directory": "raw/qwen-nvfp4-bf16-w1/refresh/default",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        },
+        "prefill": {
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        },
+        "context-0": {},
+        "context-32768": {},
+        "context-65536": {},
+        "context-131072": {},
+        "context-262144": {},
+        "context-524288": {}
+      },
+      "target_config": {
+        "path": "configs/qwen-nvfp4-bf16-w1.json",
+        "sha256": "03cf79daf97a64eb3450394fa08a335c3faad6567b8f03b58aef60519491ce18"
+      },
+      "files_sha256": {
+        "config.json": "03cf79daf97a64eb3450394fa08a335c3faad6567b8f03b58aef60519491ce18",
+        "context-0.json": "9faf5ebc704acae28bfbd4a5024e2f71d617da83bfc82f321c3bd34b8984a5fc",
+        "context-0.log.command.json": "8305103d172d5c3fac46174380280cdd3a1361153a6414065c1ac7a680521730",
+        "context-131072.json": "41338f09ab0ff7bf44ea1a4c1caa7179b729546e6c4cb2d7eb140eaa733d3577",
+        "context-131072.log.command.json": "c0c561027c0a5f1f29bea53d732302c61176e65aead935f7d83709e9a0aad680",
+        "context-262144.json": "69e8879a36479945f98895f1adab8ec979158ca653a0f1bc362f42eeeae606b8",
+        "context-262144.log.command.json": "ecac7131b3384cdcaaee14503c2511aa69e32679232b3e06ef06a70016b3314e",
+        "context-32768.json": "0db9c11f1f38c2000f07d9a9d392463a02fc8a9667da708db4a16f687abdc0ea",
+        "context-32768.log.command.json": "1ad83c7d9d95b5e468ff7377284846b025d7fd6d1e9bc13d0b3249b53634423f",
+        "context-524288.json": "f6f37c655787cdf8366b7cbd71afd4cc9ec46e1a155682824168af584efd9f94",
+        "context-524288.log.command.json": "0c842c6139a9e74e31d09c1cd16b9b4bc3bda2a50e0846a174af01a14b0f2868",
+        "context-65536.json": "20511bb8bc573a9b838a67fdd1d88120312b74bb0ea1089845d1d02c0daa19e3",
+        "context-65536.log.command.json": "3b63050f451a8f56f25cc3d0e24c99228b83eb46577727a6250da53431692147",
+        "down.log.command.json": "97a7955af7d1497befeb22bfc3eaa79778cb3ab27e0878571aa95e66e5fa2083",
+        "greedy.json": "ec48fd181d41d6317a547bbda482ce974a5d20b70132bd6cba60aab74f56e41a",
+        "greedy.log.command.json": "b444fe4e320689c7c1a749a2b47f3affa06d61afb617b03f3c8b0d51edaa5274",
+        "manifest.json": "15d582c57ac19f55751fcf7845a53d48bd8644d3cc0e37f86b45d9d619bedd67",
+        "memory-check.json": "c1660977b39717271d7c027bafd96cf3a20fa21c83cf09010e5acd7bdc0a3eef",
+        "prefill.json": "82028af97ac192fe5ef7a0aa1b9fb7ae801cd04c368b25e343c4b155b0f22f51",
+        "prefill.log.command.json": "89abc61176b80b90791523344d8e7241c3a1b5af679cd7a046767742c0a9a5c3",
+        "rank-identity.json": "be1e9621467b7c334e87f607e706240ee78440057934e19e770c4879c0120c6f"
+      }
+    },
+    "qwen-nvfp4-bf16-w1/plain": {
+      "directory": "raw/qwen-nvfp4-bf16-w1/refresh/plain",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-nvfp4-bf16-w1.json",
+        "sha256": "03cf79daf97a64eb3450394fa08a335c3faad6567b8f03b58aef60519491ce18"
+      },
+      "files_sha256": {
+        "config.json": "1bae38367c25b259a52d71c41515a34649fb77750cf6a67723ca75f91ae68054",
+        "down.log.command.json": "ac27e33287341b9765baab1aceb81a569b6494693b330395ec9110da1a9c0a1e",
+        "greedy.json": "cd15e2193153d3aad38b86af8dc5ff2b0f84cb865a963a60e66fe28e4350bee8",
+        "greedy.log.command.json": "0c22e1ecf29f0b1f15e36a37353ba3bd2a356f6e8710eb0c064cbc52b1e0b992",
+        "manifest.json": "15d582c57ac19f55751fcf7845a53d48bd8644d3cc0e37f86b45d9d619bedd67",
+        "memory-check.json": "37060c9c7fae5014ff2aa6f172560b0ad8ea1fb176830dfc3db05f5ca3fbfaa7",
+        "rank-identity.json": "68b9c059f65efccbc888da024da72e099fcd40391f8dbdc1398aa77824b404af"
+      }
+    },
+    "qwen-nvfp4-bf16-w1/mtp2": {
+      "directory": "raw/qwen-nvfp4-bf16-w1/refresh/mtp2",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-nvfp4-bf16-w1.json",
+        "sha256": "03cf79daf97a64eb3450394fa08a335c3faad6567b8f03b58aef60519491ce18"
+      },
+      "files_sha256": {
+        "config.json": "9fb54acb01c93b0f5c6ffe6284b6b92bf8f4ae58fe82a801a1f7969d21de4110",
+        "down.log.command.json": "ed5ba17eae1c0d75a8e40d7e45c44fd237e457164ea45d190b3f59a535740316",
+        "greedy.json": "ed533abcd2f1fe31f2626ae7577b31047434b3a19dea6ad903394db15313693d",
+        "greedy.log.command.json": "5a5be784924e1d9756c45e93b5982117e36d3e0ba4a30433cc5b7efd1d8f686f",
+        "manifest.json": "15d582c57ac19f55751fcf7845a53d48bd8644d3cc0e37f86b45d9d619bedd67",
+        "memory-check.json": "b651c4cea8f5f0025b0038fdc05b632250a3a5f17f7d0f60e560daec855eb853",
+        "rank-identity.json": "ac458b0f7163846e914a3fbe406af23e60d304d3901330a6ba3db22527f89b55"
+      }
+    },
+    "qwen-nvfp4-bf16-w1/mtp3": {
+      "directory": "raw/qwen-nvfp4-bf16-w1/refresh/mtp3",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-nvfp4-bf16-w1.json",
+        "sha256": "03cf79daf97a64eb3450394fa08a335c3faad6567b8f03b58aef60519491ce18"
+      },
+      "files_sha256": {
+        "config.json": "3334e7be9bd33d76fa0024381cf7c553622f48aa9d196680e7c7c870d2216b20",
+        "down.log.command.json": "7a6cc8ff53aa5aef41d72dad182a1b51d2c7c7dedd3fad95947ec2caad5a11b0",
+        "greedy.json": "1e33e5d5870ebf86299bd8fad7788f9dd3fd5bba62ce2ba19ed2795bb75f4ca1",
+        "greedy.log.command.json": "a7a7b7786b984c08f3fb2263f6a8011c521b7823295123c1e86f12fc1eaa25c4",
+        "manifest.json": "15d582c57ac19f55751fcf7845a53d48bd8644d3cc0e37f86b45d9d619bedd67",
+        "memory-check.json": "c0e1e991dfdc747c9bc8f747fbe550f194672e1a8200093ecc43cabd26aa6ef9",
+        "rank-identity.json": "57ee469a5c35f26df6ebbeb3c2f596e243dd2f40e54de08f9863c6f8865e029d"
+      }
+    },
+    "qwen-nvfp4-w2/default": {
+      "directory": "raw/qwen-nvfp4-w2/refresh/default",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        },
+        "prefill": {
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        },
+        "context-0": {},
+        "context-32768": {},
+        "context-65536": {},
+        "context-131072": {},
+        "context-262144": {},
+        "context-524288": {}
+      },
+      "target_config": {
+        "path": "configs/qwen-nvfp4-w2.json",
+        "sha256": "b90623d70ba0df6637f69c7657b97219c9055c4eb81f21c3ba8dad3f8b9600fd"
+      },
+      "files_sha256": {
+        "config.json": "b90623d70ba0df6637f69c7657b97219c9055c4eb81f21c3ba8dad3f8b9600fd",
+        "context-0.json": "d1bb136725434832954e9591c176b92fdad50dd5d25db258bbfbb7d830ffc0c1",
+        "context-0.log.command.json": "356a05d18c145431a9395ae8ef822c9aed8ed5568eecf91b4776775e6c7f190b",
+        "context-131072.json": "4ad9512f20ae7f3d64f5e4fe61403909adf2b36cc7635cccbcb173bf60e332fd",
+        "context-131072.log.command.json": "e4fe47818831f6d644412540addf598e11f6c811c434c671d0e9e761ec1960c7",
+        "context-262144.json": "d1c3998f38b6600476925b243a514772873e350000e687c3a545f07efd3c6932",
+        "context-262144.log.command.json": "f61bc6411fa8370d0fcefd214825c8bc914b523cbd0906202ef68a099a912b60",
+        "context-32768.json": "1ac2499c3a0f14ab2fd79fc3ef3c62b069dba95c962b39dbaeab6bd415d287e5",
+        "context-32768.log.command.json": "8e4a30d29d63b678f62f0fceb907f403b5686b9f7b15bb9f3cf47475bde13a11",
+        "context-524288.json": "fd0da208b0f930d2278a033860cc2280e9e1ef22a993e577f3411848f688fa3b",
+        "context-524288.log.command.json": "bb02904698fd2f2ca82e788c2a6457ebb4d3ab8bfc7e7716131e55a707f0fe0c",
+        "context-65536.json": "f10c6eff55ebe49be867961f5b7033e64c4de4fc1311beab15e2738d827bb577",
+        "context-65536.log.command.json": "81bf11f9e01aff4a7502e99ab0e8d6f9307ac8794dbc2ebe46dcc161e5fe7811",
+        "down.log.command.json": "ac8f4e318e96c4a8265a76e7afd2f290b9082bf98ef5a3bfea96a40a6c033218",
+        "greedy.json": "66159d00eef6633371a212b5e0cf3b60fa501464f6c3109146d268aa5f025ff7",
+        "greedy.log.command.json": "56b1debfde86136ff6adb32be8e1be7440e0615ba92108772b3a6f05eca382ac",
+        "manifest.json": "15d582c57ac19f55751fcf7845a53d48bd8644d3cc0e37f86b45d9d619bedd67",
+        "memory-check.json": "e7e390f114c49032ff13a4c7c277f508705bddb2bd4b1ca9bcec4fdff57c2f17",
+        "prefill.json": "8a8c39bbae621df0a1445664322c89b62d3bc2058feca7b60de101cca121262e",
+        "prefill.log.command.json": "01a54a1bd53754677e50b36d06a7674345c319a92c468c3331242c476f8dbe0d",
+        "rank-identity.json": "c2968511984e0d44f31d65243aceb72110e1da1fb79530fd4da269cc4152cd37"
+      }
+    },
+    "qwen-nvfp4-w2/plain": {
+      "directory": "raw/qwen-nvfp4-w2/refresh/plain",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-nvfp4-w2.json",
+        "sha256": "b90623d70ba0df6637f69c7657b97219c9055c4eb81f21c3ba8dad3f8b9600fd"
+      },
+      "files_sha256": {
+        "config.json": "af907bb28dcc79a607db934b360a103362855b4b60bdfbbe0339993350a34234",
+        "down.log.command.json": "02b70beffe716e61d617ec08b862d292f2db7b04da5f1394d6173f38fae58bd7",
+        "greedy.json": "3c81606440fee2505bdb19abe39cef3eaa1761c2f0d8ee55eb22d1b8fe11ad0b",
+        "greedy.log.command.json": "03870db2090001863b1dc2d64a35332dd7a0b82ffab28234d8df5fa674da5ff3",
+        "manifest.json": "2394312400dc9ed759dce89722c59fa8c2f50a72eb79f646e3cb8d44bd75f583",
+        "memory-check.json": "afd95b437e87d2949d357c372c278b944cf83e8e96a42d8fe1dbf82385c12b83",
+        "rank-identity.json": "1e729964c23ea17662af1810839acd106f59eededacdaa98f96936e818b18167"
+      }
+    },
+    "qwen-nvfp4-w2/mtp2": {
+      "directory": "raw/qwen-nvfp4-w2/refresh/mtp2",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-nvfp4-w2.json",
+        "sha256": "b90623d70ba0df6637f69c7657b97219c9055c4eb81f21c3ba8dad3f8b9600fd"
+      },
+      "files_sha256": {
+        "config.json": "4765f9a3791f22b0bf036a83e348291e9ea5731866715431db26112fbe900a3c",
+        "down.log.command.json": "15070cbcf8aff2099b700b14994d53a73cc61da5f7183b3a7dc94be5cc3bf4f3",
+        "greedy.json": "e5e81ab9ca833a413f803fd043873a6c4e5e63d191d97e3fcdbbb3876dde466d",
+        "greedy.log.command.json": "ca018a598c10bb292ebe7224d446adb37e821eabe3b7204e65574c23d1161d11",
+        "manifest.json": "2394312400dc9ed759dce89722c59fa8c2f50a72eb79f646e3cb8d44bd75f583",
+        "memory-check.json": "4cca2767a2af766a552540262407a4980640e58e0af19f84d68e32126f2ea09c",
+        "rank-identity.json": "3cf67f49732d7cf5c660d4ee93804f637696b68b5f2247f1d36146992d1a068e"
+      }
+    },
+    "qwen-nvfp4-w2/mtp3": {
+      "directory": "raw/qwen-nvfp4-w2/refresh/mtp3",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-nvfp4-w2.json",
+        "sha256": "b90623d70ba0df6637f69c7657b97219c9055c4eb81f21c3ba8dad3f8b9600fd"
+      },
+      "files_sha256": {
+        "config.json": "7df47ec50da6f095fd6e64a41f49da6eb38de2dbf96b309e2e0faefce0cc74e9",
+        "down.log.command.json": "2fa95df8f67379bba8e07ce2129871ed173872e438f489374af0dee3b6f9a159",
+        "greedy.json": "404e521a598bf36a96113d626b84ec20d82bd92503f890385f13987a1a8e9e4f",
+        "greedy.log.command.json": "62c055ee9e2e2e4d23ce8b3f57568c7e4bf054853f52bded92f2d39d8d01fcad",
+        "manifest.json": "2394312400dc9ed759dce89722c59fa8c2f50a72eb79f646e3cb8d44bd75f583",
+        "memory-check.json": "b6264a7bce303c2d168b26a18b05bc2623f3db3fc17013a58b6814ed4b588060",
+        "rank-identity.json": "00155631adfabe83fa1c5db4b17d135413acd61824e3a9c08932e654defcda27"
+      }
+    },
+    "qwen-yarn-w2/default": {
+      "directory": "raw/qwen-yarn-w2/refresh/default",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        },
+        "prefill": {
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        },
+        "context-0": {},
+        "context-32768": {},
+        "context-65536": {},
+        "context-131072": {},
+        "context-262144": {},
+        "context-524288": {}
+      },
+      "target_config": {
+        "path": "configs/qwen-yarn-w2.json",
+        "sha256": "18a94580845f6c43958ee3e7989801573b797ee5bd6299e4dc09119116696967"
+      },
+      "files_sha256": {
+        "config.json": "18a94580845f6c43958ee3e7989801573b797ee5bd6299e4dc09119116696967",
+        "context-0.json": "7b598eadc7c572be5df4fee9452561a6ca587d7d2857d2081ec8e4935d891543",
+        "context-0.log.command.json": "2d7c2d21b8f958edc8a131ea3eaa5d3029747331114c7e20d2607df532dec64f",
+        "context-131072.json": "8321bb92f33a1511fafac5d3b1296a15c8ea6583c14302e8069a79c6421888cb",
+        "context-131072.log.command.json": "fea57cb93b2e97bd1dba397b0b9a54b90357267db87fbbdc6458e1aeed22eb7b",
+        "context-262144.json": "27aa0bf1dfab28c1144da24c11cfe90ea1f8bbb7ec62f9d2d37699752ca52b67",
+        "context-262144.log.command.json": "c23cfb150d43ce8ea153cf63074b44235093819e27a62b08e8655500fbd2c733",
+        "context-32768.json": "a3d6f1b4df30276210223ce68a906c6c9aa0bd5b9d6b46aa656697e60782258e",
+        "context-32768.log.command.json": "179d49eea72218cc2a32ae73532544136d991604376d4a0a686c6e9c4102e220",
+        "context-524288.json": "c9370366234204a018074ecbd54fb88eaf611b4797f94d1a08be14b9db06a906",
+        "context-524288.log.command.json": "56e09f971ed11054264d9264667af5c52c262364ce21a7a2fb1ce0084e9fb9c7",
+        "context-65536.json": "8f475ccb11344c684a48e10ada33c0a5b9bd4545eea5f3977918c95d105bda88",
+        "context-65536.log.command.json": "97dfdc10c3c87407f17eaa091d7b6b873b8603b6f9cfa9a468e7f81d161bb666",
+        "down.log.command.json": "21f1f5dd9ab5bd10cac722004c4b1a4d520c95a759df5a7a0ba7c141cf711afe",
+        "greedy.json": "89fcde8a1a0abd09a542c86811c99362de93655ce0fcb4e071655b74a056e10a",
+        "greedy.log.command.json": "47b58b094c45b9be5f8e92ac1b20703bd13e77315bf481c8592988edde3760d4",
+        "manifest.json": "2394312400dc9ed759dce89722c59fa8c2f50a72eb79f646e3cb8d44bd75f583",
+        "memory-check.json": "e2fc8fd9f1955368c0f7de0c443990c90c891fc00ea4077f4cb81d645793c803",
+        "prefill.json": "72f99a87f2e4a0dabf4d2bcfca31790c84ddf70635ca0a1cf33d39eb7203bad0",
+        "prefill.log.command.json": "8ec943985e4612e9e4f5b10d85cfecd3b9b5198449a29001fe1437ccf4de1ff2",
+        "rank-identity.json": "2e3646a301d8733f8cd246955d977668c22925043adcfac4cc22f6f637e08769"
+      }
+    },
+    "qwen-yarn-w2/plain": {
+      "directory": "raw/qwen-yarn-w2/refresh/plain",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-yarn-w2.json",
+        "sha256": "18a94580845f6c43958ee3e7989801573b797ee5bd6299e4dc09119116696967"
+      },
+      "files_sha256": {
+        "config.json": "bc2e647a1d8ac54c50ea08e093782ec8a3014affc56e27cdad80b83ce1d0bb47",
+        "down.log.command.json": "aa7115b445ba8e247a8055e4e7ffca85ca13bbb7106232d683c4c5f08919224b",
+        "greedy.json": "b9c77a1d3edcdb38558f64ababf60eb344ba3cf1c1401892d52acf8950b9f241",
+        "greedy.log.command.json": "db2dbe9b53a688054f7e46205cab52298370e6abd4eb05165cf1a042a38da612",
+        "manifest.json": "2394312400dc9ed759dce89722c59fa8c2f50a72eb79f646e3cb8d44bd75f583",
+        "memory-check.json": "bfd682cc835e6c68bfd5a74c71db617f51e8d948f7476cda007da0ede26140e6",
+        "rank-identity.json": "146f62238820f81c282fa67be5ca79a95285aca2e56c3c565d8c65a292504146"
+      }
+    },
+    "qwen-yarn-w2/mtp2": {
+      "directory": "raw/qwen-yarn-w2/refresh/mtp2",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-yarn-w2.json",
+        "sha256": "18a94580845f6c43958ee3e7989801573b797ee5bd6299e4dc09119116696967"
+      },
+      "files_sha256": {
+        "config.json": "dbf0a18c8c4ce893a1861555861b1f0aa0bda4d4611674adf0d41f032ea25410",
+        "down.log.command.json": "d8d4c304048b46f735a20ab950dd715af33e3a0f931cd67cdcf162487789161e",
+        "greedy.json": "e61d4cbc55f65d3779bdd95f4518da6a88798f79f8c35007e358944adecf874b",
+        "greedy.log.command.json": "367ba6265fa4ca5f2a509b1bb7a2ab7dd66e8111b0cae104ce1993e5829fc2fc",
+        "manifest.json": "2394312400dc9ed759dce89722c59fa8c2f50a72eb79f646e3cb8d44bd75f583",
+        "memory-check.json": "25f108ca34d22fceba2622b9550415fbdb9f64b5a65a4a4673ab5317a75e2da8",
+        "rank-identity.json": "5236b84baadae75a0de8b83d72abbc085461d161fade7ecbb0aeeec8260b307b"
+      }
+    },
+    "qwen-yarn-w2/mtp3": {
+      "directory": "raw/qwen-yarn-w2/refresh/mtp3",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-yarn-w2.json",
+        "sha256": "18a94580845f6c43958ee3e7989801573b797ee5bd6299e4dc09119116696967"
+      },
+      "files_sha256": {
+        "config.json": "98951b9469fc28cd5e3b1972029da591e1305a80b718e6d7a527684171ab8d52",
+        "down.log.command.json": "6505a67ac0ceac6ad1bdfa34cc091ab732ab0caafe6bfc16d419ac13643d801b",
+        "greedy.json": "a02e04821f080b4818aef95ff1b78d3ccb34268e0caab7d63c8aa4914165911a",
+        "greedy.log.command.json": "6add8b3194e03522eb2ea7a0934d7eae59355c633c5ad2b72a0ee669c8fa7b45",
+        "manifest.json": "2394312400dc9ed759dce89722c59fa8c2f50a72eb79f646e3cb8d44bd75f583",
+        "memory-check.json": "4b7da19056a1b916044a34e4a30d2c3524e34675cb506393bc5a71b4a032d2f9",
+        "rank-identity.json": "ef8e23f9a99ae873879bc992d6744a704db715e70582445f0af2d90c8a31248a"
+      }
+    },
+    "qwen-radixark-w1/default": {
+      "directory": "raw/qwen-radixark-w1/refresh/default",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        },
+        "prefill": {
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        },
+        "context-0": {},
+        "context-32768": {},
+        "context-65536": {},
+        "context-131072": {},
+        "context-262144": {},
+        "context-524288": {}
+      },
+      "target_config": {
+        "path": "configs/qwen-radixark-w1.json",
+        "sha256": "17dba039a455938994a53f019e2c445d7da303651fc6da5df79a6247cbd69c10"
+      },
+      "files_sha256": {
+        "config.json": "17dba039a455938994a53f019e2c445d7da303651fc6da5df79a6247cbd69c10",
+        "context-0.json": "d8a8953f53052aa01aa7a0db8e9ceef26a338cf06745f9fca32b0afec6933253",
+        "context-0.log.command.json": "d364c9540349f46515f7883ce6001afbc9de6a1645eec44ad23ee912f4886125",
+        "context-131072.json": "537111bff34235041386f6e4bd68d288541f4a64b2c86bf9e20996ad18a05c66",
+        "context-131072.log.command.json": "6190814934b26afdec3d6cad1f0aa871fdd9d890259e52cc782d94e87b906f63",
+        "context-262144.json": "edfc340f3774cfb563a9fb5233268552d0178d97b0cd2e7a48e7633045c5e9c7",
+        "context-262144.log.command.json": "450ae095bb195bf3a91756a16dc66b46560769ecc27119d39f572f097ea601c5",
+        "context-32768.json": "653c6984557ea63c4927bc3c7aa8e6706aeb81eae615949af1f9d4a1ca50e9a6",
+        "context-32768.log.command.json": "7e3e65207c716049f5b157fa88f8607d3402d0ad8a4f50526b42b7ffdd948206",
+        "context-524288.json": "da650376b84ed8f482f8ee690f33086fd519a14d5b74d88bb2dcc42ecd0735cb",
+        "context-524288.log.command.json": "7bb5323bc988ec8863dc6306cb2ddfa5a179521fe4e03afd546c41ee5c6178b9",
+        "context-65536.json": "fb84e07c79abca01e6e5f704204bc9df7fcdb535d7f5b7be10aa7622336c571a",
+        "context-65536.log.command.json": "8f48ede044d22f290f38b78e6bab2535eba14feaebdc56e782fe25392b63f740",
+        "down.log.command.json": "217afe2ef250c7227afa43af68932218e1d22a1e3657da2e598a32967f6297fd",
+        "greedy.json": "0d47627880baf8f43c9adaea25f5503053755f0279fdfd146cfd397daea703e2",
+        "greedy.log.command.json": "53081d0cf6634936a759e0d9bc89103d26ed8f08eb7709f9e7de831f6d8ea4bf",
+        "manifest.json": "2394312400dc9ed759dce89722c59fa8c2f50a72eb79f646e3cb8d44bd75f583",
+        "memory-check.json": "739ad1aebe8f4483b9692491e4313c69f9ada7e54db5c3fdcb3f3b924108dcaf",
+        "prefill.json": "356f4b74731704e9c1db18c0d88972876855ca051569a539bc8d7da20bcf3cfe",
+        "prefill.log.command.json": "18f0aaae9c9d28c8a59a82077bb071dd3fbb0f4e85afb8c19c84dd733b7f7a92",
+        "rank-identity.json": "637ed59ad6423a1ccb0814dbd06750f68edb116911059a9cb9e045cf704379cd"
+      }
+    },
+    "qwen-radixark-w1/plain": {
+      "directory": "raw/qwen-radixark-w1/refresh/plain",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-radixark-w1.json",
+        "sha256": "17dba039a455938994a53f019e2c445d7da303651fc6da5df79a6247cbd69c10"
+      },
+      "files_sha256": {
+        "config.json": "8a7b8981416853169403bd65486649d4290142b1632eb50ab020dc9f5fcb0502",
+        "down.log.command.json": "7e29a99f3f2321b14fb2ce16960cc1e3cb6fe1d498eb5e2ab3b2685132836eb1",
+        "greedy.json": "7cc0d5ba5d355154fee19640b274aacd557bd611db8a25f9a7ec10785cb6619d",
+        "greedy.log.command.json": "27f8230aa06bb00a71bad5b1d1cd304b3e0fe63017d4a3ecb20ac86d63c3305d",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "ea58285e7ec70822a5c4fcf983e517f51833698470bc60f6f432940cca8d0934",
+        "rank-identity.json": "4e3a01389e3553133c9483d8557e1e0fd1fedd23544626fb29b33cff377172e4"
+      }
+    },
+    "qwen-radixark-w1/mtp1": {
+      "directory": "raw/qwen-radixark-w1/refresh/mtp1",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-radixark-w1.json",
+        "sha256": "17dba039a455938994a53f019e2c445d7da303651fc6da5df79a6247cbd69c10"
+      },
+      "files_sha256": {
+        "config.json": "592f81605b14cfb1595e9343d673fb62052948533d304d7791be9b5a8c00ac27",
+        "down.log.command.json": "5a39a5a04d3edca92fe5d3b882f4f235170cd59305a5686c818d7f65deb3b1b3",
+        "greedy.json": "21904752308568b0989f1a6a45872057b32bb49039f1da14654f12126026d5c8",
+        "greedy.log.command.json": "bc8b9a4747d748f219700463d2db3de9fb86694aaa223c76399b05769dbd636d",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "f4170c97224bb8e63ed4f7d3ea66d704161916ac92e64a69e1acffb308b730f7",
+        "rank-identity.json": "dd207c9c0de38e02b44f3337f8f64db4e40d764733e541a1c964aef2b0a38da6"
+      }
+    },
+    "qwen-radixark-w1/mtp3": {
+      "directory": "raw/qwen-radixark-w1/refresh/mtp3",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-radixark-w1.json",
+        "sha256": "17dba039a455938994a53f019e2c445d7da303651fc6da5df79a6247cbd69c10"
+      },
+      "files_sha256": {
+        "config.json": "f6075e1e6f2b9cad71fb6990c68956736820c7a8b3f0bf2e9f4c95413d71301e",
+        "down.log.command.json": "ed3e1c8eb9047d1bee7fb14cd78aca47145b037fce902e370d4a97a38aaac7f6",
+        "greedy.json": "6bd26e83855b65494c2d4cd3982d58bea94a741ee96771c641402cdb12d7995c",
+        "greedy.log.command.json": "eeb7213a2d301314438a3bfaa9f885c0e60aa92b5779f583dfe78d3e2d8c6123",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "16dea424c76cb847db2d703f5e0ca5d6486f1009d0020c1a81ccf131d4075619",
+        "rank-identity.json": "df73e605fb258c5fc148a256d0fc024c4bba98e272a8acaa7e1b11fd8ad91591"
+      }
+    },
+    "qwen-radixark-w2/default": {
+      "directory": "raw/qwen-radixark-w2/refresh/default",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        },
+        "prefill": {
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        },
+        "context-0": {},
+        "context-32768": {},
+        "context-65536": {},
+        "context-131072": {},
+        "context-262144": {},
+        "context-524288": {}
+      },
+      "target_config": {
+        "path": "configs/qwen-radixark-w2.json",
+        "sha256": "003ee61dd5e09acded5bbf9e256ec2e6b8b0c8ccc49b8de35e510f476333694c"
+      },
+      "files_sha256": {
+        "config.json": "003ee61dd5e09acded5bbf9e256ec2e6b8b0c8ccc49b8de35e510f476333694c",
+        "context-0.json": "2a251ed3a9e0fcfd0580cc077a4e8d691d96f99d8c8bbcb6b4ce6517f505b4cc",
+        "context-0.log.command.json": "e8ab8df9fa34d1eb39d2fd1fa9f68c472c36ccffaf31e720405b156adf75a422",
+        "context-131072.json": "92e2553d6e1c7ddc5166c706eadd0da97d5215669fb683b83fa59975eae558d7",
+        "context-131072.log.command.json": "a06a371cc7fe898ff473b334ea7fa0d107629db077dd6371f4bc3e63ca63a5c4",
+        "context-262144.json": "3b9581f32f2dea4dd74ca64a63d84988e930dfd5aa5d5c96373d9ba6f1d156a5",
+        "context-262144.log.command.json": "3ffa963aee9d567afa5e3f4ca9e6e5f6be833ffad23c544aa3524bdce8edecf9",
+        "context-32768.json": "ed8d3248c84ca4ef51599bd386c2a495e0f0f611cd4c44925e769d079a82cadc",
+        "context-32768.log.command.json": "3dec885279378a7496869943e16fd09ed08636a07bd47b491e451859b1111026",
+        "context-524288.json": "459f6b4551d2f5a0e0f5e71948593a2f8d9d95c5d42e8a47f39b61049e1a66f9",
+        "context-524288.log.command.json": "8822fcb354bb464f3dee4fcf999274909426e39741e0b4ec5b20bb492918220d",
+        "context-65536.json": "129a2b993c6e4e51580f8054463a56d9e2ac8f39925c0dc97448fb995e85f196",
+        "context-65536.log.command.json": "a2449044b45b712643b556c74473fd743a1200196f4f0400c026ddad75136e2b",
+        "down.log.command.json": "5139427a61f55daa133f6fc06cd5b7d45029ed5a4cf75a155c2d9041c3058078",
+        "greedy.json": "b4335bbc5dda3842b0a846f92711a7d3d68f892c6e7884a3fdaa1628274f8aac",
+        "greedy.log.command.json": "49bdb9c5fb63be69e0ce461a2bf2f6d81992675e1d4a8d9c6cbfdf3123e8ec85",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "46de11ffc0199748d8e219d83b9128d94e737563580d4b7ccf5571efb8494d0d",
+        "prefill.json": "8be6a7a0f91aed24a9de0535fcc2f86b05ab39ce31ce4e10f35051d0468c832e",
+        "prefill.log.command.json": "dfa803aed52b81916e704cffaed59421e9d6cc80196de7ba5e96f7956acc8073",
+        "rank-identity.json": "002762d5a80534a5ea40c0f225d218742466a584a4b60ecc18b6422ac5f90f7c"
+      }
+    },
+    "qwen-radixark-w2/plain": {
+      "directory": "raw/qwen-radixark-w2/refresh/plain",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-radixark-w2.json",
+        "sha256": "003ee61dd5e09acded5bbf9e256ec2e6b8b0c8ccc49b8de35e510f476333694c"
+      },
+      "files_sha256": {
+        "config.json": "68d7d2ed5cf57d128891db3472e03b7f99b9cdd05ffabb91c1cb891b7a166989",
+        "down.log.command.json": "415deda4ec0186e779016922938bff31639e186965a8f0917ba443c365893704",
+        "greedy.json": "686b023604055e5ed4ca7fd3552114e78fa88277185a599dfeb5e0e7f8425f77",
+        "greedy.log.command.json": "6b90873766c91fc036587214c2a31ea41d4cad95a68611984a0114a3dfd1456c",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "b5ea79d6fb3af61b7eb9ee3ddd64717aa5f277f7b310c80dd86ff650f6d0d881",
+        "rank-identity.json": "f619bcfdaa4617edf726669233b0a0869c4bd6fe1aa7fe5879be51cd9b0fb82c"
+      }
+    },
+    "qwen-radixark-w2/mtp1": {
+      "directory": "raw/qwen-radixark-w2/refresh/mtp1",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-radixark-w2.json",
+        "sha256": "003ee61dd5e09acded5bbf9e256ec2e6b8b0c8ccc49b8de35e510f476333694c"
+      },
+      "files_sha256": {
+        "config.json": "47e07a041cfd6a78a4bcad4015080670233706609a7b9813626db6951cd7084b",
+        "down.log.command.json": "366dfd2344becfcd58be42abc70b74db7f6d1b552f57a805bbb4cae4e8ee522b",
+        "greedy.json": "abef408eb4af2d705a95a1a519565814256be07fc90798ab3189211d07a96951",
+        "greedy.log.command.json": "d3cdf7bd5232e4337b4399ccbb5e13e2fc6197c6e847bb061ba9d0cd5b887a14",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "4553026b3f30ed3f220cd7ac1f3a4e1791523c8d64adfe6cd0dff5329a52ee5f",
+        "rank-identity.json": "cf21dc8da5ce4c81d0d3fd258f00efde0ac6e2b76916f449cc73b056b82c1a38"
+      }
+    },
+    "qwen-radixark-w2/mtp2": {
+      "directory": "raw/qwen-radixark-w2/refresh/mtp2",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-radixark-w2.json",
+        "sha256": "003ee61dd5e09acded5bbf9e256ec2e6b8b0c8ccc49b8de35e510f476333694c"
+      },
+      "files_sha256": {
+        "config.json": "1a1acef119dd5fedbd7ad938ae794ae1b1eb16af7faf66a3252cd7189b0f3d40",
+        "down.log.command.json": "f5b6d22f772d1a6e2dc824c225b8947050efa0be11bf32f026c93dc81f94bf6d",
+        "greedy.json": "86f99ae537e8ebe620b0e70a9c063d97bbb5d14939bd8bdf7773d30ea288c0c3",
+        "greedy.log.command.json": "e061e212b7e1608f4b9aa9219fc4d5e0dccc516eba8140869ee3955fa55ef354",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "2bcab5346ca244a7e94c6ccbcd708cf9f2e6501bf73158a56b9030f528bf7384",
+        "rank-identity.json": "4493538a6de64077b4ce90eab5cf7ef45bbeee9978f56c5023eb1b7fb7fe6d7c"
+      }
+    },
+    "qwen-radixark-w2/mtp3": {
+      "directory": "raw/qwen-radixark-w2/refresh/mtp3",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-radixark-w2.json",
+        "sha256": "003ee61dd5e09acded5bbf9e256ec2e6b8b0c8ccc49b8de35e510f476333694c"
+      },
+      "files_sha256": {
+        "config.json": "a2bb304f680c7d709d77e21258d3ea9d68ccd73e9cdca5d7da72f7f9fca13f23",
+        "down.log.command.json": "9c811cd1acc5c0b65f409cb308f7526a21542276cf00278bb2b34034a9474287",
+        "greedy.json": "9ccd488beef42cad5ad8cad25e9bb3e3f7fed5b7780ba8769f23c5ca48441c7a",
+        "greedy.log.command.json": "c91dda2704ace2c6cfdd16652a8d636d5a04228d494af33c10f831cd26b98374",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "8c8e5c7dcfb04c18290c6b8d6f8f3d21a4206300fdc8e11e25226009f4ba77fa",
+        "rank-identity.json": "e82569201c013382cce695f4a6e937db30d32c8f88053c1114d4f58e90f1d2ff"
+      }
+    },
+    "qwen-fp8-w2/default": {
+      "directory": "raw/qwen-fp8-w2/refresh/default",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        },
+        "prefill": {
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        },
+        "context-0": {},
+        "context-32768": {},
+        "context-65536": {},
+        "context-131072": {},
+        "context-262144": {},
+        "context-524288": {}
+      },
+      "target_config": {
+        "path": "configs/qwen-fp8-w2.json",
+        "sha256": "8c6187cd1d98a446777a9178408ca41a4443277d8d1e4d5545f9f1f6fdd68544"
+      },
+      "files_sha256": {
+        "config.json": "8c6187cd1d98a446777a9178408ca41a4443277d8d1e4d5545f9f1f6fdd68544",
+        "context-0.json": "001a1be5c300da799bac64f9800e859bf821f67a9ba18d483a243312f42acf46",
+        "context-0.log.command.json": "afa64be3244feb4266bcfb6f83af1d5ee588f045df3e09451cac0cd122a4fe7c",
+        "context-131072.json": "d87468216008b662717a92a9991fc60432c8ea02f83c6b33d2a1f1a53fe4efef",
+        "context-131072.log.command.json": "13a9c317084136db7998e6bc68197eac0a49485f903e494a54b625745310d808",
+        "context-262144.json": "b7367514c34a2b3dab0f4f003826198a08d17267a05d069ec353a56024c58f41",
+        "context-262144.log.command.json": "5d97d4bcad93f856ec0399e224d525ba96bd2e486d07df8ff7261dbda7b25356",
+        "context-32768.json": "7cf675cbcc8f95e001db71faa27719376c274e417292829e7773fcd7eba93366",
+        "context-32768.log.command.json": "7fd677aec0df373c37f0b535232dc807017f3d067cb98cc9a6a342ef73979e03",
+        "context-524288.json": "62d739fe86813408f315846bd5c77868d7ecfca316823899f2ffffa8973ea468",
+        "context-524288.log.command.json": "df2cc9efc860ee89c37a3844093fdc12b21b205c74ff752327d6ce4ffed14b6b",
+        "context-65536.json": "3399da1e68c925af6bf2979df73ba3fea59f95b3d2bb1304653b9967e6347ee3",
+        "context-65536.log.command.json": "761c419b995117e4e18cecd66595509d712bcef54dc8363413e7dada5cc862ae",
+        "down.log.command.json": "f835409ad8b3f6075b5098dd659cb260256117cefc62a8aa0c243c20165cb744",
+        "greedy.json": "677badbdb0315fd8c79b58843abc768aef3f3c56b881dd3819ff4e81521a1a0a",
+        "greedy.log.command.json": "7276db0298106bd1209b592cb0d6a60431c32720abbe9d6caef4fb1d015520fb",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "9e8130e32e67686e7515ef621871b9fae6dbb5fc256bccfce08ff10cd84123ae",
+        "prefill.json": "efed758b7a3922f55cd7d651400bb25cb38ecc8a84b7057f313d70c3124efc85",
+        "prefill.log.command.json": "119225f193828b1f44975291b7acf782d0154ecdb6f7c43c6d71868b7ba2b855",
+        "rank-identity.json": "3ee7cb788f815ebc6bf24490e3e93af12de5c9316d50bc126a6a05e75b5918cd"
+      }
+    },
+    "qwen-fp8-w2/plain": {
+      "directory": "raw/qwen-fp8-w2/refresh/plain",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-fp8-w2.json",
+        "sha256": "8c6187cd1d98a446777a9178408ca41a4443277d8d1e4d5545f9f1f6fdd68544"
+      },
+      "files_sha256": {
+        "config.json": "55f66fa3c71e7c6435eb83b490ea75cc2a656d5c38129b4cf377efcdad8920aa",
+        "down.log.command.json": "5b0b3ddb4e5c4899c3ee4ad7d28a6c7e3692441e44de4ea2ca7befb295040dac",
+        "greedy.json": "6c47528be1f5ceb1bce60e52449011ee7bb261634da933f6a2f2f1ed1c8b399c",
+        "greedy.log.command.json": "ecb9d0cbb1738f38a11957baad832addf0f492ce376d7a484d3bfbfa01b768bb",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "d425127bd95c9b479e31c881b16c5213985f478b7b991df2941a47f46fad4002",
+        "rank-identity.json": "e89b06dcb609f0362f5461c801cfe113af391fa9e6b720c4bcbe662ae4612fd9"
+      }
+    },
+    "qwen-fp8-w2/mtp2": {
+      "directory": "raw/qwen-fp8-w2/refresh/mtp2",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-fp8-w2.json",
+        "sha256": "8c6187cd1d98a446777a9178408ca41a4443277d8d1e4d5545f9f1f6fdd68544"
+      },
+      "files_sha256": {
+        "config.json": "9ad9c3ddea4b2ad6cdcad164461c99de0a3def308b43330cdec6f2a45dcb7340",
+        "down.log.command.json": "1193ca11233b9d5f3446591d0197d75333baae013381819fe01c5c5c2269031b",
+        "greedy.json": "ac2432dbc6109dec92fb9099316b2c34d80fc5104035b9927c2e7946f770a46f",
+        "greedy.log.command.json": "d20ca23bcbc40f77348ec8c776311b62c770e3b40ec4d715f850c1ec38541ef6",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "c5106464393be0c57a139246baea0e873502b406fe084f12fd7d92e54a7bc8a0",
+        "rank-identity.json": "84e9b0d0e0ca115b4a4defd90462dda963b46b8e042f0a1f5cf96a85b88a5fba"
+      }
+    },
+    "qwen-fp8-w2/mtp3": {
+      "directory": "raw/qwen-fp8-w2/refresh/mtp3",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-fp8-w2.json",
+        "sha256": "8c6187cd1d98a446777a9178408ca41a4443277d8d1e4d5545f9f1f6fdd68544"
+      },
+      "files_sha256": {
+        "config.json": "5b25006defcbaba86231ae0ec50d204cdfe195056183d40ff8d925e7c988bacd",
+        "down.log.command.json": "60e291b3edd2b94246242752d2eb5e93b2bc25c1349199edf989798ff9df45f4",
+        "greedy.json": "fb2e3e4456af4e23bdbdf3eecb411266d96f932ab70919722a977cd119080262",
+        "greedy.log.command.json": "4635691a6cd9545c2c146059648f7a4beda73fbd15eaf1d17a1f2e64fb665dc2",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "7caa84825cdeafee9e185cc8ad221f3a08c4c3ae6575914d54e924429a333335",
+        "rank-identity.json": "acb7f4bb054c2e1948ef27f31c3d07d7cfe4228721d3d0a14f24a453e04e7197"
+      }
+    },
+    "qwen-fp8-w4/default": {
+      "directory": "raw/qwen-fp8-w4/refresh/default",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        },
+        "prefill": {
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        },
+        "context-0": {},
+        "context-32768": {},
+        "context-65536": {},
+        "context-131072": {},
+        "context-262144": {},
+        "context-524288": {}
+      },
+      "target_config": {
+        "path": "configs/qwen-fp8-w4.json",
+        "sha256": "7195c3b834550ef7e75988fbf360608984deb1b8f2a219b7d6963124a4e55e46"
+      },
+      "files_sha256": {
+        "config.json": "7195c3b834550ef7e75988fbf360608984deb1b8f2a219b7d6963124a4e55e46",
+        "context-0.json": "5846981d5073193e39f2bfbee40b471903ac539bf9d2e89e2264cebca3822d6a",
+        "context-0.log.command.json": "887b663ac59f8387d6195818f610385e93678a5c41d95faf1ab81b65c6cc5cf3",
+        "context-131072.json": "fe13a106d3e81e61404b8c42b79f3d350cfc261e63f80e8c53cb0e2d72e1f921",
+        "context-131072.log.command.json": "93829f3b0ebae9639aa1abdc71fe67333583aba43d4a22d2c97c2dba3808f315",
+        "context-262144.json": "d049742179a9db9bf051ae192d8e340f5d8e2792cefd4f36c92e76a24dd9bfcf",
+        "context-262144.log.command.json": "acc4b0ab7a2a7af708637c1306a5056b4329caa865884d2a13b4e2c745e98040",
+        "context-32768.json": "55e8435475d78faff278b3262f7cda61a57aa15facf2fbfeaad505e2b8632b99",
+        "context-32768.log.command.json": "d724073de98732ce3f75da4046e0539a5e3e7506a6e14ba356ee97de0b318687",
+        "context-524288.json": "ae5af020d6f701b58b949a759fc38390ac17f95eff4efb8b93e1a1fcf9d8a8de",
+        "context-524288.log.command.json": "d84e4ef0f3bc867b7c66b953861c21c92d1d853cd7d0ea49b670b6420b21c954",
+        "context-65536.json": "690f55e6ed268b93dda477b090975a1bf33b6fec31a3cb2e5c74cf41f6af96e8",
+        "context-65536.log.command.json": "5feaa9128fd0d7e6e08a9d4989cf48324f4f476a0e020e635721d5ae4e441a7e",
+        "down.log.command.json": "2381dc9b90a9793b63286c27a7d2e5d152f947282823aa3b5c6f215945d7bf76",
+        "greedy.json": "ca971aa2bc24ed48171990e552b2e3a9783c66ad6f3aaf24e4efc15590d50394",
+        "greedy.log.command.json": "44a1933bca165d3cc10da4b336a37e4b1e8d674d352401545bbeedfdce3b5b46",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "0851f64d2b0a028aa86c3953f729ab93ffb5824e69184c78864908eae2ab8f58",
+        "prefill.json": "366ef3355f6d27d10ce72ad4b493f54a599ca650eed22ec43779cf8228821d06",
+        "prefill.log.command.json": "580b7958377b8c58bb7c622b122dc80f7bdb71570cec8ddcbc1ee272ecf66d7f",
+        "rank-identity.json": "47cb831fd40d2335cc2a3d52200628c3852194741d1bde5729e5a18953b2e93f"
+      }
+    },
+    "qwen-fp8-w4/plain": {
+      "directory": "raw/qwen-fp8-w4/refresh/plain",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-fp8-w4.json",
+        "sha256": "7195c3b834550ef7e75988fbf360608984deb1b8f2a219b7d6963124a4e55e46"
+      },
+      "files_sha256": {
+        "config.json": "a50d3182ad20d87e3bf85bda6277f3ab8a0b059b788ef82586fb71979fb8bba4",
+        "down.log.command.json": "ed749d1f32792ab7bc46f4720a2b47b29a532e358a9fad3e7c704f338bbf654c",
+        "greedy.json": "88e109bdcd01d75c376eee72c4583bac4a9f241ae787fd2cae3ec32f72c87bae",
+        "greedy.log.command.json": "752c75c54cd3c8a7f573a7c2747ea0792a535e245b388b1c6a0ab205621508ca",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "919a1bdda21d73ff39fe638fecdf0d728642b919ae404cfc9917f498d700aa62",
+        "rank-identity.json": "244877c6d39e2a15eaa1c3835ad2ecb89b8b20580d960709ec2089a972edd6e7"
+      }
+    },
+    "qwen-fp8-w4/mtp2": {
+      "directory": "raw/qwen-fp8-w4/refresh/mtp2",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-fp8-w4.json",
+        "sha256": "7195c3b834550ef7e75988fbf360608984deb1b8f2a219b7d6963124a4e55e46"
+      },
+      "files_sha256": {
+        "config.json": "ad721ebdfaa5934a3bbb7179989b05f98db51f2c54788d9116c9e8b9cf9fc924",
+        "down.log.command.json": "f05e81b60c5b558a7b5a5643715b8276f8dac641a74be23387bbf4a12fe69017",
+        "greedy.json": "de12e05b9ca91d9e9e04983b8b607ac9ec1e3f76b6a03b71827350583b582c1b",
+        "greedy.log.command.json": "54ca4c7c6d41edb9567db20422a1a6ff89649a27dd9a1bfe17d3949cfa9bab68",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "671195e6d72b6cde976a29a12e1808e3ef52b627a18b2a37aa7656c90d1d104e",
+        "rank-identity.json": "145729880ed16a7ccf9e02e00d2f1f2fbcc2282d31c5bf7ab76120f1168aff84"
+      }
+    },
+    "qwen-fp8-w4/mtp3": {
+      "directory": "raw/qwen-fp8-w4/refresh/mtp3",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-fp8-w4.json",
+        "sha256": "7195c3b834550ef7e75988fbf360608984deb1b8f2a219b7d6963124a4e55e46"
+      },
+      "files_sha256": {
+        "config.json": "58b2bf79e18591d428339d38d738599528fabf6fc7f0a2d729034867a08724f7",
+        "down.log.command.json": "a26362d6680d8fcd6067f31d93869fda70d76362ae458ab0c3ae8fffffa5bafe",
+        "greedy.json": "0cfce59567bd07626e487a7aea9bba3b00dba0501dcc2ced37040a438047ae0d",
+        "greedy.log.command.json": "10ed22f0d621d54eafb38b79f3aa98b7d35b2e78463a39138ec3bfff0191821d",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "4df13d09a73125714417239a8447aa7fae584d525a7105912d064a50727c9de2",
+        "rank-identity.json": "a57cafae62c0c1a8c9da72d584a91e698db20d0bf56c58dc0eee072654db0257"
+      }
+    },
+    "qwen-autoround-w1/default": {
+      "directory": "raw/qwen-autoround-w1/refresh/default",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        },
+        "prefill": {
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        },
+        "context-0": {},
+        "context-32768": {},
+        "context-65536": {},
+        "context-131072": {},
+        "context-262144": {},
+        "context-524288": {}
+      },
+      "target_config": {
+        "path": "configs/qwen-autoround-w1.json",
+        "sha256": "0286acb4ad8563099dfa7960c402d9998ac2ec5bcef89566092ffc75f8bed237"
+      },
+      "files_sha256": {
+        "config.json": "0286acb4ad8563099dfa7960c402d9998ac2ec5bcef89566092ffc75f8bed237",
+        "context-0.json": "3bd31e064960180597c7e35edb4ac9a9a82f3f871f559e71bbd56df77ade53f6",
+        "context-0.log.command.json": "3d8f431e1127fe9028f998e04a9e0d7bd5520f07187cb4a2ad1f8c83b2851ec4",
+        "context-131072.json": "cb40e4c19a252b268eaa540fa04b7166be2880da263dd884c6b8957ec0cce561",
+        "context-131072.log.command.json": "b350146b1a22a6674a1c88c8158db7d2668271607c4b41f91e3c2d52f920cd02",
+        "context-262144.json": "56fb99a150b81b008569cc2093e19b7f5c5943ebbaf8e5ccd5bf8d4cf8f4b6a7",
+        "context-262144.log.command.json": "b2b06b77f976191f49b2c31543e16a308d8b000e81dc6215cb2deaa9236e956b",
+        "context-32768.json": "82447c928491a7e7b0aaaa64f8adb5c177b1678125b49e25a73c6106f8020897",
+        "context-32768.log.command.json": "763d312e7327e65134871a5cc09d6171017b4ffec89eb3fe94bd60789bd527d2",
+        "context-524288.json": "557af0257050cf41bc7a4ced5c04929371e24a15f78d32888d4a9508661f2908",
+        "context-524288.log.command.json": "76e8d3b5a770ea391c57810db025d4d49f783b32a7f4d86713686c30c53c9724",
+        "context-65536.json": "20e8a182349ff4e38deb5002de87517e0e60d1bcdcfc3bd5c0eb6449c54fa96a",
+        "context-65536.log.command.json": "e8964eca5cbb9f28e4abe74bf753861f8ddb0bc1fad841339d565c599d52d1fb",
+        "down.log.command.json": "e957b97fdfd34d1f038ff0c3e2f0d8133dfb2fa03c70115a80771ffed0357f83",
+        "greedy.json": "35e7a538628149c51c8d938a671aaf1d44d4b19839e079a64f8d5aec131d682b",
+        "greedy.log.command.json": "ff3c1e799b3df316fa2a6906117220b23e9eceaa848c570497bde52e8ab76582",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "daab48b9e44410201d484e67baf4055b551dab6b9dcf208fff08fa03ef90d8bc",
+        "prefill.json": "aba14bdc218080d6e912ef8849b97272834063c6800b77544d0d1e6be86a4846",
+        "prefill.log.command.json": "8eb1566394f7408e30aad44c6a39470beecee8a3e1390c5812064b4e3dadb0f9",
+        "rank-identity.json": "3c9b3b02a42ca88b172018486951e020c83f0789c3f8d9673b3b810a5d0355b6"
+      }
+    },
+    "qwen-autoround-w1/plain": {
+      "directory": "raw/qwen-autoround-w1/refresh/plain",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-autoround-w1.json",
+        "sha256": "0286acb4ad8563099dfa7960c402d9998ac2ec5bcef89566092ffc75f8bed237"
+      },
+      "files_sha256": {
+        "config.json": "3dd58c2fc3fb52366a2afbc4bfeb85ca6e1062ecbc6c2eb398f2081245e96c63",
+        "down.log.command.json": "960335d2cad34ff5b56cd256ddeda13b28ffdd575e03cc68ccc338630b435955",
+        "greedy.json": "81e170914a8059c2c0a2a1fed2004c149ae16bbec17145f56cbc00777cd0db64",
+        "greedy.log.command.json": "09e3fe7ec9a449b4af93cf56fdeddb607b3d97d10051887cb1505f69565a315b",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "20e3be8cdae8c3b43750636767f62ae9956e5b8cb25d8217ef6040bd1186a408",
+        "rank-identity.json": "1e2509ef44c255dc22337d6c8edb9da846189f1dc57e25a8f6cff2930c68cfac"
+      }
+    },
+    "qwen-autoround-w1/mtp1": {
+      "directory": "raw/qwen-autoround-w1/refresh/mtp1",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-autoround-w1.json",
+        "sha256": "0286acb4ad8563099dfa7960c402d9998ac2ec5bcef89566092ffc75f8bed237"
+      },
+      "files_sha256": {
+        "config.json": "b63103829fc8e5fcfc95455aecb5723647db4e53867c11aa676d4a300697bdfa",
+        "down.log.command.json": "106b80d258ebc65ee43fc53102e838db5c19ff7eb3356f810cf2ea588f5f97af",
+        "greedy.json": "27c3a902a44e5fc30dc65ec38dee18523cc00fc0a1b10dc249c1e0d2abb2cdd2",
+        "greedy.log.command.json": "5a68a70f1f06f0ddd140402c3596d4681ff8a555df0bacdbfbc03b656e25e763",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "4ffaf8c63adec0110386bd90abedbcf46202061a2ea105aab8578e3b8fdb4d34",
+        "rank-identity.json": "aea1febf1e5735ece6889ee0657f669745ae4f429224dd1012e0bf5855ccb474"
+      }
+    },
+    "qwen-autoround-w1/mtp2": {
+      "directory": "raw/qwen-autoround-w1/refresh/mtp2",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-autoround-w1.json",
+        "sha256": "0286acb4ad8563099dfa7960c402d9998ac2ec5bcef89566092ffc75f8bed237"
+      },
+      "files_sha256": {
+        "config.json": "8c809664d8044506e40369c59df88972c0d01f76b457e55504d8f2b96f07b346",
+        "down.log.command.json": "8f60c36446e52e584a9148605ecc1c5892d1ab39ad346fcc2d01f8d1877d3260",
+        "greedy.json": "0cbe7b0a11a8d26956ccb496a0f3d43f66b3bfcb20ad699f2f38e9442ceb7750",
+        "greedy.log.command.json": "ed38b8f3447357a1bd2410e25a218dd1dbb486fe0166e2dee247bf1a37feb987",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "63f52c4266c4452fb3c2dcaa7c0abad7aea3218bcc9f95b0a12d7e7b5cd92462",
+        "rank-identity.json": "cc9ed7b0ebaea7ee60c7ab6db7786fa52ca9bad061991305bd6916244aa3af6f"
+      }
+    },
+    "qwen-autoround-w1/mtp4": {
+      "directory": "raw/qwen-autoround-w1/refresh/mtp4",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-autoround-w1.json",
+        "sha256": "0286acb4ad8563099dfa7960c402d9998ac2ec5bcef89566092ffc75f8bed237"
+      },
+      "files_sha256": {
+        "config.json": "9760a4e440208f07677d7bfab0ed457730065db0a7a6447759336a8cd2c5d52c",
+        "down.log.command.json": "68aa2c53aa84c84a8aa3911534fd640bb5251a688a32058dcefb2d2f85914b05",
+        "greedy.json": "5487df47e6a8617acc45b66c541ed77a8299ec798ce3cea23b44e12355812c9f",
+        "greedy.log.command.json": "82412e5ea578189d534b2a493a44a92fab764d6bab41b4b7de0cbaeca7239098",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "2e048754de218e7f373a4642ef519a471cb779645e54a5da16a7cd0b5402dc70",
+        "rank-identity.json": "ac5b4c2c30966157f9191984d286336a6befecb077ad0b341660debe3d4c217f"
+      }
+    },
+    "qwen-autoround-prefill-w1/default": {
+      "directory": "raw/qwen-autoround-prefill-w1/refresh/default",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        },
+        "prefill": {
+          "lengths": [
+            2048,
+            8192,
+            32768
+          ]
+        },
+        "context-0": {},
+        "context-32768": {},
+        "context-65536": {},
+        "context-131072": {},
+        "context-262144": {},
+        "context-524288": {}
+      },
+      "target_config": {
+        "path": "configs/qwen-autoround-prefill-w1.json",
+        "sha256": "fa20a7a2f1176cee0ccf6b164f90283486c6a74c5b14cb554a8a2cc9822de346"
+      },
+      "files_sha256": {
+        "config.json": "fa20a7a2f1176cee0ccf6b164f90283486c6a74c5b14cb554a8a2cc9822de346",
+        "context-0.json": "2f28c2419d150fd90c3e854ea0a8d4eac0843013a3c861b7dc0b32e7dfd1afbd",
+        "context-0.log.command.json": "ed5d304e35eff18c8baa87a861af982b5427af8580eaac0998c4d789462a7d38",
+        "context-131072.json": "64e600be1baa3b3965714a44ce37e51ecf0dcb2118c64d722a729ef011fdd1d5",
+        "context-131072.log.command.json": "be76a5002563dc8361fbbc5d46b8d175fe049c7a7776b84b8b679880d043e5ab",
+        "context-262144.json": "2f2eee2fb22eb3f5d3596cd9ead9f53d8bc9df0559bfdb71a2f3410e087c6c8f",
+        "context-262144.log.command.json": "99ba2c3a8330d1745ffa1bdfd8573ffb73256ac8595a6bf788c559d9a23eb273",
+        "context-32768.json": "ed2e3af62b65fee5e2ccab735ea3bd97d4cccb9f4ecaec3cd57d5adab23178c0",
+        "context-32768.log.command.json": "caaaa2b019fce0081c1e1be58a80aebb1a051fc4a04df74297a9dc8d6714cafd",
+        "context-524288.json": "86dcc599748fb85dbd76bfda7f7a2c5cbca3a650f96d30f7d9693c436ff25d78",
+        "context-524288.log.command.json": "1791a1f11c5e64d20373ff06b23f2f1543d85ac984038d39d88f3ac0533ed14d",
+        "context-65536.json": "2b43ee988da17f3810ed9d26cad5ffabf477bea6001107251f1796c230e0b294",
+        "context-65536.log.command.json": "c59ad02da49c1b47957ab8ec00df98d65d322f6a77559dfd5845a366306b4429",
+        "down.log.command.json": "3dee070a7d9a300deaaeec08016f822330390fa990f65d03119454d6b9440f95",
+        "greedy.json": "78614c13c31d5fd8608afafbfc0e3db59407eb84445f47a960966c524cd67c61",
+        "greedy.log.command.json": "b32a7038446daa73e5b636ca15e4076525d0781291816356b1ac610313927399",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "7619d65c4e02aff5c7e476060b4dba968414476f09afe4f2a7a329ad401dc65d",
+        "prefill.json": "78cbdb79798b076dd0b9b669ab4f5aa3fef22f1b06e06d9a38e799368ea3b8ac",
+        "prefill.log.command.json": "d6fbf0a00ae9e4953cea49ba5329b3efb44916efb4f037c58933cd23c5d27ff0",
+        "rank-identity.json": "397191187daa2f491255bdce6dc5eaed965490f06af9ecccd020bca790f8778d"
+      }
+    },
+    "qwen-autoround-prefill-w1/plain": {
+      "directory": "raw/qwen-autoround-prefill-w1/refresh/plain",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-autoround-prefill-w1.json",
+        "sha256": "fa20a7a2f1176cee0ccf6b164f90283486c6a74c5b14cb554a8a2cc9822de346"
+      },
+      "files_sha256": {
+        "config.json": "0d7351a0da5e34f6d520583bfa8253c4e09643086e94b5907a7501600dfc1465",
+        "down.log.command.json": "80aed49165c4bc8ebcce2d6b0184f61b54fe4689e9171b2bf94d8d40b38f2784",
+        "greedy.json": "200cf77eb3a85473d9ef3a5fb3f8a343fce6d2765c89defe3d59ca2c3dd28efc",
+        "greedy.log.command.json": "00a6f4d7a727469d20c79e5a7da4bf9419b939afb76327df7265ab6490930d9d",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "88703322154e7826536f99cda192d210d71e1a28af9b6bb6efa94395fe4a4410",
+        "rank-identity.json": "b214414828d657bfdf45e63cee95a004b0e6d79614db3ad4ef31750038f50aae"
+      }
+    },
+    "qwen-autoround-prefill-w1/mtp1": {
+      "directory": "raw/qwen-autoround-prefill-w1/refresh/mtp1",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-autoround-prefill-w1.json",
+        "sha256": "fa20a7a2f1176cee0ccf6b164f90283486c6a74c5b14cb554a8a2cc9822de346"
+      },
+      "files_sha256": {
+        "config.json": "baaa582135197d05f41d1900427642199f681c6306482a1d1672a28a9b466bd8",
+        "down.log.command.json": "27d5076cb0b35e72f61db5e71134535eceb52ba5894b1f8aa5047d7330ee64d0",
+        "greedy.json": "47bc891d4cf3f9b2cb45b87f73ba3ef71165d0edfdedc7db75f09d3b25ae6062",
+        "greedy.log.command.json": "4f989ca13e462a29a177f454cdecf05a308edcca161ee4ef4710facf7235277b",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "00e4589448091aec1be0350765d8ab9accb56a0889abe73fecd200bd9968b305",
+        "rank-identity.json": "2e6f8730ecea29e22e3bd56eafd1cd01e0dd4bd59c3190eeb9c52bc35493e7ed"
+      }
+    },
+    "qwen-autoround-prefill-w1/mtp2": {
+      "directory": "raw/qwen-autoround-prefill-w1/refresh/mtp2",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-autoround-prefill-w1.json",
+        "sha256": "fa20a7a2f1176cee0ccf6b164f90283486c6a74c5b14cb554a8a2cc9822de346"
+      },
+      "files_sha256": {
+        "config.json": "eac199722e25d9349328b1d0db8e9f7404613055c8873aad21872cb125558c7e",
+        "down.log.command.json": "517eff5da61691339a5faf91b0987a4e46266fc99aaf9ddfaa45e04d6733faac",
+        "greedy.json": "b1334cf2961e3423e1c9720eb3b2bf95738ce418412b0660d375fecd8c813236",
+        "greedy.log.command.json": "f100459f04126d9ed59f808645a79bf0202165e702ed9c94d7a197228647d3ea",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "27f9ef3e9905a0cbcb6070f3f62f7ba8f027988fcc019a96043cbe6601ba03f6",
+        "rank-identity.json": "c9bfd8c64458b3a6d7f8f638f9021cb94236c5de4edadd5667468b182a0edac7"
+      }
+    },
+    "qwen-autoround-prefill-w1/mtp4": {
+      "directory": "raw/qwen-autoround-prefill-w1/refresh/mtp4",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 73
+        }
+      },
+      "target_config": {
+        "path": "configs/qwen-autoround-prefill-w1.json",
+        "sha256": "fa20a7a2f1176cee0ccf6b164f90283486c6a74c5b14cb554a8a2cc9822de346"
+      },
+      "files_sha256": {
+        "config.json": "4727cb84704445aaa44a52f282628c47b4ec2a4077e4c762b3226044f195dd83",
+        "down.log.command.json": "d113c93eebc5939a26d9f73ec2de8ce4c7c32a12fbf4c08756739d1af42a44f4",
+        "greedy.json": "9bd86786b02f65daaee276f8b405d2df2668a23a42491cbd788d678fff6285eb",
+        "greedy.log.command.json": "a765f5b6d33ec1fcff283c9da3b7b16a1c504db176440c5a16330e8b3ac4bb1e",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "5ac7d4b9aa13630c0a2828b7cac3363c469de2fb555268076f4a3b715e43eabe",
+        "rank-identity.json": "4d209725d60a75f75cc5b684d69dc41ad6bd98004ce5571d40951a1166dc421a"
+      }
+    },
+    "glm53-w4/default": {
+      "directory": "attempts/glm53-w4/default-before-fused-scores-20261007",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68
+        },
+        "context-0": {
+          "max_prompt_tokens": 94
+        },
+        "context-131072": {},
+        "context-262144": {},
+        "context-524288": {}
+      },
+      "target_config": {
+        "path": "configs/glm53-w4.json",
+        "sha256": "9ec797af48d0a607e925cc6923556554a2e6440ce00a5b66ec4e2ab8ba899b3b"
+      },
+      "files_sha256": {
+        "config.json": "9ec797af48d0a607e925cc6923556554a2e6440ce00a5b66ec4e2ab8ba899b3b",
+        "context-0.json": "80667cb16a2da93881ec9dfdf72319d21153918cd697ac704effcb7365da6c06",
+        "context-0.log.command.json": "57876546e2e07ea6717f909c868e64b5384925306c32891b541f5f307e688cce",
+        "context-131072.json": "8bea893264931432e8c18700f69a01ad01366ce5d4cd532602d731ad4093014c",
+        "context-131072.log.command.json": "155ea89e75d0f8d0eb7c604883714bdd07d4320f8be48978ed030011571212ee",
+        "context-262144.json": "dbcf9da0bf2bf712fe05eb92852eeef10526f195249ba00fed69d68ebca71842",
+        "context-262144.log.command.json": "6fc24475cd4871f02d3fd5a551d1a09265338bcd936f1fcb5a0eaeed3531034d",
+        "context-524288.json": "fd251312aa3f9491244d8cfb0df752e2e492abb6cb1de46be4d0cb77dee803c7",
+        "context-524288.log.command.json": "5b3bb8f07677bdc77caa095bf19dc64a7bcb19cffe73520db351f8ed531ff9fb",
+        "down.log.command.json": "a85a1bb445bef799b7d21d4a904c5d18473aed145b6ee5bb4f9a52e26c8e681a",
+        "greedy.json": "361e0da471b81bed7155ac4fd61ddb13485eaf5867d269e6ee6094eb6ba4d092",
+        "greedy.log.command.json": "6ebdfffffa006ce3a2593a3babecc4e0ffb57097e60a74eb361c1c11d8863be6",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "e09aa17c2434e3357b2b6040444a9fe714326b67c7b08bb2244bc846c4ec42ad",
+        "rank-identity.json": "54e7f0353d5a31a432a09f40f1d5ea8f7461a34edc3fc6ae7d4255d9fe179857"
+      }
+    },
+    "glm53-w4/plain": {
+      "directory": "raw/glm53-w4/refresh/plain",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68
+        }
+      },
+      "target_config": {
+        "path": "configs/glm53-w4.json",
+        "sha256": "9ec797af48d0a607e925cc6923556554a2e6440ce00a5b66ec4e2ab8ba899b3b"
+      },
+      "files_sha256": {
+        "config.json": "40e7e42a341e0ff8afacba3d143d5cb025dd529bc46a1e8b77c0f6c1153cd1d1",
+        "down.log.command.json": "fef23262ae9f081b4c7794004b82384c966705a90edce46a23704cced1b82119",
+        "greedy.json": "0cce30db06f06674de17cfc1b5b5495bc8b80f49276a51eb1c908ce1937dbf44",
+        "greedy.log.command.json": "c3170cc6053f6505afa30ef4a25bb44328a23fda061f6f253ae2772cee3e72fa",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "1afd52e2ae7d1ab0e787ca7d1c7cdf561cc36237ac6ef28d7d812bc6eca47407",
+        "rank-identity.json": "73e2e45b3109d586ebfec264ce2cdc1ed36ad64e73fdc44c986864c8a7d30441"
+      }
+    },
+    "glm53-w4/mtp2": {
+      "directory": "raw/glm53-w4/refresh/mtp2",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68
+        }
+      },
+      "target_config": {
+        "path": "configs/glm53-w4.json",
+        "sha256": "9ec797af48d0a607e925cc6923556554a2e6440ce00a5b66ec4e2ab8ba899b3b"
+      },
+      "files_sha256": {
+        "config.json": "d7f766b351abc53e668225a6be2b93fe469d16ee5033baf7529d4c5a7820dab9",
+        "down.log.command.json": "92f058ecbc78d3b69ccc41abfe6c61b6f36a00ab2294a8d1ceb7610876bd53ae",
+        "greedy.json": "abe5e9458f50981544c406cc071d7d4e0b7f054c86271bacd1ba7ef3bba5975e",
+        "greedy.log.command.json": "df8dd4d1de6c9173a0313373b8f386d99160f5d4458f9e8eff7073181c2d5cf4",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "993674ab94fdcf191a7c0dc76f50b0c1a6a04b24d2b003a12a8d9bcc08110dbc",
+        "rank-identity.json": "1324c79f0dda591bb3e57b72bfca97090909b58ff69c563da8d40c8634f5d067"
+      }
+    },
+    "glm53-w4/mtp3": {
+      "directory": "raw/glm53-w4/refresh/mtp3",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68
+        }
+      },
+      "target_config": {
+        "path": "configs/glm53-w4.json",
+        "sha256": "9ec797af48d0a607e925cc6923556554a2e6440ce00a5b66ec4e2ab8ba899b3b"
+      },
+      "files_sha256": {
+        "config.json": "761210d9734625e7b77f748283dfdb3caae504c1d90c10f20f0b6ff52c293440",
+        "down.log.command.json": "2bc0dab372c2b78ef4188d6cf08e4b2cfec8ca2477a656cd6fdff5f36c5720b1",
+        "greedy.json": "bf547f707bd9fa2de70b1d1a0198b05f36474b10b464a9c8192cea4c087b74e3",
+        "greedy.log.command.json": "b061adce4944912877c0098123c7cfa4b788789715e93dec1d9ac1e17aea7956",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "e9c9fee5544475acc9f6c720d80f3ee25a2082bfe0035ba60ea90d6200f6329f",
+        "rank-identity.json": "b536f3b52a74839279175c3114516b0b6b95da422331fd2c93a4a437fed6351e"
+      }
+    },
+    "glm53-fp8kv-w4/default": {
+      "directory": "attempts/glm53-fp8kv-w4/default-before-fused-scores-20261007",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68
+        },
+        "prefill": {
+          "lengths": [
+            2048
+          ]
+        },
+        "context-0": {
+          "max_prompt_tokens": 97
+        },
+        "context-262144": {},
+        "context-524288": {}
+      },
+      "target_config": {
+        "path": "configs/glm53-fp8kv-w4.json",
+        "sha256": "ac1093e5bb80a63f043f3d21c1bfe54df3faddd95cc34586052bfb1267ebba84"
+      },
+      "files_sha256": {
+        "config.json": "ac1093e5bb80a63f043f3d21c1bfe54df3faddd95cc34586052bfb1267ebba84",
+        "context-0.json": "2167cfc6a0f34fc58f611dcbf9199bdc61950856907e8c7485979cd0978e1cd1",
+        "context-0.log.command.json": "a530d0565ced05bbe26949a11cd6ae107a951187ebc4c9aa3eef31870f12ad4d",
+        "context-262144.json": "4c3803ac077b4b8e912c608ee9dfcdedb2ea43f1c4222c1968c56737d7b4402a",
+        "context-262144.log.command.json": "6fa77b7b1b512cbf3707d5958f52b25533fe461b1cef0a0d6bd1fb73404645d7",
+        "context-524288.json": "818c9d2abaad5c1d621a20f0bd3d4f2897cd69b884a02ec2d0cc8484b9fd8d4c",
+        "context-524288.log.command.json": "0cc067dd9cd7e2ed63411fff01aeec89b776dc027583cc739ce84e16e0fa2043",
+        "down.log.command.json": "7ffb00c409b88262de0177cb9d414ee06475d78731481f5da729bd122dd1d2cb",
+        "greedy.json": "c953f74dfaf526ba75a44653f3c47626c08bd6c051e7e228c938a87e14292c00",
+        "greedy.log.command.json": "e462536996eb895f1e73c59d98fb10e0c59f608a8307f5dee9835e04d1aaca15",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "c9890e70a2cb1d14543cdd9b1e5b92530b51f3db7d87cd77f08491074312cf31",
+        "prefill.json": "eaa61db4c1b262a55420cff34c61b6231a16a0fbc3e010d7a96277d0e6118658",
+        "prefill.log.command.json": "42da587c7dcff41704a9a5a6df762802bafbc6854181c62ceb0a2e99099cbc3c",
+        "rank-identity.json": "1da9e0e874a7fd2d5e3cfbbe42f830856f25cff92acc75913f913811a892fedb"
+      }
+    },
+    "glm53-fp8kv-w4/plain": {
+      "directory": "raw/glm53-fp8kv-w4/refresh/plain",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68
+        }
+      },
+      "target_config": {
+        "path": "configs/glm53-fp8kv-w4.json",
+        "sha256": "ac1093e5bb80a63f043f3d21c1bfe54df3faddd95cc34586052bfb1267ebba84"
+      },
+      "files_sha256": {
+        "config.json": "06741940a85305f862b1b1a2cfb6fc3efc92cec356c8cd1da0c4ab702d1dc3c7",
+        "down.log.command.json": "52ca0292319be3dc226fc7399c329082d57d3ae7155962045d982ddd13c908fd",
+        "greedy.json": "cd281627f18b6694344514c0b43437c5c0d21ca035a4d486e953fb6d1f36ccde",
+        "greedy.log.command.json": "9037f6789291c6bad9f11cf45d63dd4753972b55948a27f8649b024a86ee9276",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "c12726418c48044762f1571b88e3f69a036bc078b719d44e39764c40d7831e69",
+        "rank-identity.json": "c0346d73d850b8697e13589c53b74458009ec87faeeacb09156b6889d2b01892"
+      }
+    },
+    "glm53-fp8kv-w4/mtp2": {
+      "directory": "raw/glm53-fp8kv-w4/refresh/mtp2",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68
+        }
+      },
+      "target_config": {
+        "path": "configs/glm53-fp8kv-w4.json",
+        "sha256": "ac1093e5bb80a63f043f3d21c1bfe54df3faddd95cc34586052bfb1267ebba84"
+      },
+      "files_sha256": {
+        "config.json": "a7625bb4ae1f4fc226ff7dd4a572372ad1409ce4ff03ec119e547fdc49571e52",
+        "down.log.command.json": "8a6587544613ead2d5581805fc73b3426edc6e0525a22789657beb0f2be27060",
+        "greedy.json": "66afc8affe43ecbd0968b542ee40ad2038a9be235a8a0ba5a258e681c0ba3881",
+        "greedy.log.command.json": "8bfa54de9a9a3e6499a509895eabacf29630811ac4533fa31ba91e9365565b05",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "5934f0cd03ecbf917737c2d6153dcda659e19e8062f2a18eb02191da94be76c1",
+        "rank-identity.json": "b08c42545191a49c7f70bbdc8b0b7314b11ca3502168dae1cd4eef5dce8b3efa"
+      }
+    },
+    "glm53-fp8kv-w4/mtp3": {
+      "directory": "raw/glm53-fp8kv-w4/refresh/mtp3",
+      "jobs": {
+        "greedy": {
+          "max_prompt_tokens": 68
+        }
+      },
+      "target_config": {
+        "path": "configs/glm53-fp8kv-w4.json",
+        "sha256": "ac1093e5bb80a63f043f3d21c1bfe54df3faddd95cc34586052bfb1267ebba84"
+      },
+      "files_sha256": {
+        "config.json": "eb1c5feeccf1a111ab00f1e4f5b0adad9a75f4149b6cda39a020257d1874e059",
+        "down.log.command.json": "41653ca1426a08bb3749628427a6e7e4f0a72591949ab80e045c5c15ed9007ce",
+        "greedy.json": "133f4d3a77f6382d093098fb6eee87d1095a32d78e782bcbdbaa396647f8123a",
+        "greedy.log.command.json": "e9c4eba47d69923e7a64efedb77c6618818bfad111f64ae546faf25712c99186",
+        "manifest.json": "12b2331d4405cb9baf07c2fb4cdadd3b995ced5aa553df040961cb9cd8eeaec4",
+        "memory-check.json": "0eeacbe7f8c35d19553cc0a78d848420d9ea3fab98021accc3f3ab1ad836d6c8",
+        "rank-identity.json": "4b3fccb8f2b4df4c0218bfe8d930f542745b3f6dff48910e2ad5852b37d52715"
+      }
+    }
+  },
+  "reason": "The fused score change is gated to full GLM unpooled prefill beyond 2048 pools. Retain other families, full GLM short prompts, and capacity skips. Every retained length has three completed repetitions and unchanged configuration. Affected full GLM prefill/context requests must be measured with the new binary.",
+  "excluded_affected_groups": [
+    {
+      "deployment": "glm53-w4",
+      "job": "prefill",
+      "length": 2048,
+      "max_prompt_tokens": 2054
+    },
+    {
+      "deployment": "glm53-w4",
+      "job": "prefill",
+      "length": 8192,
+      "max_prompt_tokens": 8191
+    },
+    {
+      "deployment": "glm53-w4",
+      "job": "prefill",
+      "length": 32768,
+      "max_prompt_tokens": 32248
+    },
+    {
+      "deployment": "glm53-w4",
+      "job": "context-32768",
+      "max_prompt_tokens": 32237
+    },
+    {
+      "deployment": "glm53-w4",
+      "job": "context-65536",
+      "max_prompt_tokens": 65010
+    },
+    {
+      "deployment": "glm53-fp8kv-w4",
+      "job": "prefill",
+      "length": 8192,
+      "max_prompt_tokens": 8160
+    },
+    {
+      "deployment": "glm53-fp8kv-w4",
+      "job": "prefill",
+      "length": 32768,
+      "max_prompt_tokens": 32119
+    },
+    {
+      "deployment": "glm53-fp8kv-w4",
+      "job": "context-32768",
+      "max_prompt_tokens": 32237
+    },
+    {
+      "deployment": "glm53-fp8kv-w4",
+      "job": "context-65536",
+      "max_prompt_tokens": 65008
+    },
+    {
+      "deployment": "glm53-fp8kv-w4",
+      "job": "context-131072",
+      "max_prompt_tokens": 130540
+    }
+  ]
+}

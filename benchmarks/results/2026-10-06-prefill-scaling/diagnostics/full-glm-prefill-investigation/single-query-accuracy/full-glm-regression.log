@@ -1,0 +1,21 @@
+Internal ctest changing into directory: /home/stephen/workspace/dgpp/build-release
+Test project /home/stephen/workspace/dgpp/build-release
+    Start 123: glm_dsa_forward_smoke
+1/6 Test #123: glm_dsa_forward_smoke ............   Passed    0.91 sec
+    Start 125: glm_dsa_forward_test
+2/6 Test #125: glm_dsa_forward_test .............   Passed    0.90 sec
+    Start 128: glm_dsa_prefill_test
+3/6 Test #128: glm_dsa_prefill_test .............   Passed    0.95 sec
+    Start 129: glm_dsa_decode_test
+4/6 Test #129: glm_dsa_decode_test ..............   Passed    1.35 sec
+    Start 130: glm_dsa_tp_test
+5/6 Test #130: glm_dsa_tp_test ..................   Passed    3.75 sec
+    Start 131: glm_dsa_engine_test
+6/6 Test #131: glm_dsa_engine_test ..............   Passed    6.01 sec
+
+100% tests passed, 0 tests failed out of 6
+
+Label Time Summary:
+gpu    =  13.86 sec*proc (6 tests)
+
+Total Test time (real) =  13.87 sec

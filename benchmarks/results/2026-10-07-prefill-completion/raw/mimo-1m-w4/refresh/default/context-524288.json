@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+  "surface": {
+    "id": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+    "object": "model",
+    "created": 1791429393,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 0,
+        "top_p": 0.95,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true
+        },
+        "low": {
+          "enable_thinking": true
+        },
+        "medium": {
+          "enable_thinking": true
+        },
+        "high": {
+          "enable_thinking": true
+        },
+        "xhigh": {
+          "enable_thinking": true
+        },
+        "max": {
+          "enable_thinking": true
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text"
+    ],
+    "context": {
+      "request_limit_tokens": 1048576,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 1048576,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "ff15eb925890d6b71b5160de4b846fbd13178438ab463b38ecc953e8cd1dcb3e",
+  "seed": 20260922,
+  "tag": "completion-mimo-1m-w4",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 524288,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 7469.599999999977,
+        "prefill_ms": 1160846.8,
+        "decode_steps": 128,
+        "decode_rows": 128,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 523773,
+        "prompt_tokens_computed": 523773
+      },
+      "engine_tokens_per_s": 34.13837421013184,
+      "ms_per_pass": 58.35624999999982,
+      "tokens_per_pass": 1.9921875,
+      "answer": {
+        "prompt_sha256": "a54c277e944ba8eb2c02f8e9fdd2672562a30c9b2d61fb132dfbe979ef66b67c",
+        "usage": {
+          "prompt_tokens": 523773,
+          "completion_tokens": 256,
+          "total_tokens": 524029,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 20
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list of the first 200 parcels and their cities.1. PX-0757343 \u2014 Income\n2. PX-0081436 \u2014 Jamesport\n3. PX-0126529 \u2014 Dunmore\n4. PX-0226532 \u2014 Dunmore\n5. PX-0538039 \u2014 Belvedere\n6. PX-0133958 \u2014 Glencarr\n7. PX-0510348 \u2014 Fenwick\n8. PX-0381529 \u2014 Jamesport\n9. PX-0284743 \u2014 Calder\n10. PX-0428050 \u2014 Eastvale\n11. PX-0735655 \u2014 Arcadia\n12. PX-0712386 \u2014 Belvedere\n13. PX-0688270 \u2014 Calder\n14. PX-0441960 \u2014 Calder\n15. PX-0809310 \u2014 Belvedere\n16. PX-",
+        "wall_ms": 1168550.577170914,
+        "ttft_ms": 1161091.6848590132,
+        "last_ms": 1168550.395760918,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 524288,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 7475.700000000012,
+        "prefill_ms": 1271.1999999999534,
+        "decode_steps": 128,
+        "decode_rows": 128,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 523773,
+        "prompt_tokens_computed": 3
+      },
+      "engine_tokens_per_s": 34.11051807857453,
+      "ms_per_pass": 58.40390625000009,
+      "tokens_per_pass": 1.9921875,
+      "answer": {
+        "prompt_sha256": "a54c277e944ba8eb2c02f8e9fdd2672562a30c9b2d61fb132dfbe979ef66b67c",
+        "usage": {
+          "prompt_tokens": 523773,
+          "completion_tokens": 256,
+          "total_tokens": 524029,
+          "prompt_tokens_details": {
+            "cached_tokens": 523770
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 20
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list of the first 200 parcels and their cities.1. PX-0757343 \u2014 Income\n2. PX-0081436 \u2014 Jamesport\n3. PX-0126529 \u2014 Dunmore\n4. PX-0226532 \u2014 Dunmore\n5. PX-0538039 \u2014 Belvedere\n6. PX-0133958 \u2014 Glencarr\n7. PX-0510348 \u2014 Fenwick\n8. PX-0381529 \u2014 Jamesport\n9. PX-0284743 \u2014 Calder\n10. PX-0428050 \u2014 Eastvale\n11. PX-0735655 \u2014 Arcadia\n12. PX-0712386 \u2014 Belvedere\n13. PX-0688270 \u2014 Calder\n14. PX-0441960 \u2014 Calder\n15. PX-0809310 \u2014 Belvedere\n16. PX-",
+        "wall_ms": 8996.154338121414,
+        "ttft_ms": 1513.2951140403748,
+        "last_ms": 8970.848539145663,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 524288,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 7485.099999999977,
+        "prefill_ms": 1258.0,
+        "decode_steps": 128,
+        "decode_rows": 128,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 523773,
+        "prompt_tokens_computed": 3
+      },
+      "engine_tokens_per_s": 34.06768112650476,
+      "ms_per_pass": 58.47734374999982,
+      "tokens_per_pass": 1.9921875,
+      "answer": {
+        "prompt_sha256": "a54c277e944ba8eb2c02f8e9fdd2672562a30c9b2d61fb132dfbe979ef66b67c",
+        "usage": {
+          "prompt_tokens": 523773,
+          "completion_tokens": 256,
+          "total_tokens": 524029,
+          "prompt_tokens_details": {
+            "cached_tokens": 523770
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 20
+          }
+        },
+        "finish": "length",
+        "text": "The user wants a numbered list of the first 200 parcels and their cities.1. PX-0757343 \u2014 Income\n2. PX-0081436 \u2014 Jamesport\n3. PX-0126529 \u2014 Dunmore\n4. PX-0226532 \u2014 Dunmore\n5. PX-0538039 \u2014 Belvedere\n6. PX-0133958 \u2014 Glencarr\n7. PX-0510348 \u2014 Fenwick\n8. PX-0381529 \u2014 Jamesport\n9. PX-0284743 \u2014 Calder\n10. PX-0428050 \u2014 Eastvale\n11. PX-0735655 \u2014 Arcadia\n12. PX-0712386 \u2014 Belvedere\n13. PX-0688270 \u2014 Calder\n14. PX-0441960 \u2014 Calder\n15. PX-0809310 \u2014 Belvedere\n16. PX-",
+        "wall_ms": 8960.400025127456,
+        "ttft_ms": 1491.5031581185758,
+        "last_ms": 8960.111206164584,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

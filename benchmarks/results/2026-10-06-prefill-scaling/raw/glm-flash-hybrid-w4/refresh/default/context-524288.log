@@ -1,0 +1,3 @@
+524288 r0: 523783 prompt tokens, 0 cached, prefill 925.281s, decode 43.50 tok/s, 45.45 ms/pass
+524288 r1: 523783 prompt tokens, 523780 cached, prefill 0.116s, decode 43.43 tok/s, 45.52 ms/pass
+524288 r2: 523783 prompt tokens, 523780 cached, prefill 0.128s, decode 43.36 tok/s, 45.58 ms/pass

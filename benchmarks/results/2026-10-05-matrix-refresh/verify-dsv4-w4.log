@@ -1,0 +1,5 @@
+Verified on rank 0: deepseek-ai/DeepSeek-V4-Flash-0731, revision 7872f01b1d1fe23eabc4c98b48bffcef5a386062, 155.4 GiB of indexed weights
+Verified rank 1 (192.168.88.12): revision 7872f01b1d1fe23eabc4c98b48bffcef5a386062
+Verified rank 2 (192.168.88.13): revision 7872f01b1d1fe23eabc4c98b48bffcef5a386062
+Verified rank 3 (192.168.88.14): revision 7872f01b1d1fe23eabc4c98b48bffcef5a386062
+Snapshot validation checks metadata and shard lengths; transfers use rsync content checksums.

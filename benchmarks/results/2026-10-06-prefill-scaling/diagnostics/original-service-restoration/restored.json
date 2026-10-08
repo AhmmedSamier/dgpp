@@ -1,0 +1,16 @@
+{
+  "at": "2026-10-07T18:56:54.202729+00:00",
+  "passed": true,
+  "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+  "world_size": 4,
+  "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+  "original_config_matches": true,
+  "api_model_check": true,
+  "inference_smoke_check": true,
+  "all_ranks_alive": true,
+  "zero_process_and_cgroup_swap": true,
+  "service_left_running": true,
+  "os_swap_unchanged": true,
+  "logout_persistence_check_seconds": 45,
+  "linger_enabled_on_all_nodes": true
+}

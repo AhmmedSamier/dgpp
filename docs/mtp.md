@@ -306,7 +306,10 @@ its walk never wrote. A request joined by co-tenants now reads the same text
 as alone on one, two and four Sparks, from the first request after boot,
 and a scheduled request's text is the same at every depth mix tried (the
 template, min-depth 3, a forced-shallow schedule: 4/4 against whole
-blocks); prompts started together still differ (the group prefill, open).
+blocks); prompts started together read the
+same above the 128-row lowering bound (one pinned cuBLASLt algorithm per
+shape, the GDN a / b GEMV at every row count) and, for shorter prompts,
+under `engine.prefill_group: false` (one prompt per walk).
 The drafter templates are level (W1 C1 20.1 / 32.8 / 45.5 / 35.1 / 19.6
 tok/s at 142.0 ms, C8 195.2 ms a step; W4 C1 60.0 / 92.7 / 125.1 / 105.3 /
 48.8 at 47.5, C8 205.3 / 299.2 / 356.7 / 310.7 / 218.9 at 91.5; W2 C1 32.6

@@ -8,6 +8,8 @@ All values below are calculated by `summarize.py` from this directory's raw resu
 
 [Reference harness, HumanEval fences and the reference cross-check](notes.md)
 
+The tables below are the campaign morning's record. The closing per-world decode numbers after the day's exactness work (binary `dc52f66`: C1, C8, plain T=1, the probes and the transcript oracles) are in [the notes' closing section](notes.md#the-closing-numbers-final26-binary-dc52f66-21201144) and are the cells [docs/benchmarks.md](../../../docs/benchmarks.md) carries.
+
 Deployments follow the [overview](../../../docs/benchmarks.md) order: model family, node count, then configuration options. KV labels describe the shared key/value-cache token pool (K = 1,024 tokens); slots are the configured concurrent-request limit.
 
 ## Qwen3.8-27B FP8 · 1 node · DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots

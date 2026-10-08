@@ -1,0 +1,35 @@
+{
+  "at": "2026-10-07T14:04:54.081285+00:00",
+  "scope": "Each rank uses its own warm-capture-complete log marker, avoiding host clock skew. Startup warnings precede measurement. Zero warning lines do not establish zero collective wait time.",
+  "first_measurement": "2026-10-07T13:49:41.557399+00:00",
+  "logs": [
+    {
+      "path": "server/serve_r0.log",
+      "sha256": "375a34949dabd23cdfbbabd4a48a86e7d4b749235461bef6cdc03d36a9ecb4fb",
+      "warm_capture_complete": "2026-10-07 13:49:39.530 INFO  rank 0: warm capture complete \u2014 4 scalar variants and the row batches for 2 slots, 3 slots, 4 slots recorded before the first request",
+      "startup_stall_warning_lines": 123,
+      "post_warm_capture_stall_warning_lines": 0
+    },
+    {
+      "path": "server/serve_r1.log",
+      "sha256": "613627ec621131e405afa0f097bdde359324dba8a0b07346649ed04ff652d7b4",
+      "warm_capture_complete": "2026-10-07 13:51:03.401 INFO  rank 1: warm capture complete \u2014 4 scalar variants and the row batches for 2 slots, 3 slots, 4 slots recorded before the first request",
+      "startup_stall_warning_lines": 29,
+      "post_warm_capture_stall_warning_lines": 0
+    },
+    {
+      "path": "server/serve_r2.log",
+      "sha256": "3da4e1183e638e7988a984335cbf5f8062fc1fe61f973f860d5a9db3d1e6b5ba",
+      "warm_capture_complete": "2026-10-07 13:49:39.433 INFO  rank 2: warm capture complete \u2014 4 scalar variants and the row batches for 2 slots, 3 slots, 4 slots recorded before the first request",
+      "startup_stall_warning_lines": 16,
+      "post_warm_capture_stall_warning_lines": 0
+    },
+    {
+      "path": "server/serve_r3.log",
+      "sha256": "ba376c52d94b0fcd5164188839c0fcc9816ce7da79b10852fe073e98cbb463e5",
+      "warm_capture_complete": "2026-10-07 13:49:32.983 INFO  rank 3: warm capture complete \u2014 4 scalar variants and the row batches for 2 slots, 3 slots, 4 slots recorded before the first request",
+      "startup_stall_warning_lines": 39,
+      "post_warm_capture_stall_warning_lines": 0
+    }
+  ]
+}

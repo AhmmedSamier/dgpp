@@ -1,0 +1,27 @@
+
+=== 19:51:09 fn-recipe up ()
+2026-10-05 19:51:40.350 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/fn18/fn-recipe/server)
+
+=== 19:51:40 fn-recipe C1 prose,code x2 (the recorded one-node FP8-dense C1 range 42.3–50.0 tok/s)
+| prose | 40.9 | | code | 47.6 | 
+  prose: 39.3 ms 1.65 tok/step | code: 39.6 ms 1.95 tok/step
+43.9 tok/s, 22.4 ms/tok, 39.4 ms/step
+
+=== 19:52:05 fn-recipe down
+2026-10-05 19:52:07.349 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/fn18/fn-recipe/server
+
+=== 19:52:09 fn-plain up (--no-mtp)
+2026-10-05 19:52:36.160 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/fn18/fn-plain/server)
+
+=== 19:52:36 fn-plain C1 prose,code x2 (the recorded one-node FP8-dense C1 range 42.3–50.0 tok/s)
+| prose | 31.5 | | code | 31.4 | 
+  prose: 31.3 ms 1.00 tok/step | code: 31.3 ms 1.00 tok/step
+31.5 tok/s, 31.2 ms/tok, 31.3 ms/step
+
+=== 19:53:10 fn-plain down
+2026-10-05 19:53:12.994 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/fn18/fn-plain/server
+
+=== 19:53:15 production up
+2026-10-05 19:53:53.576 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+FN18_DONE 19:53:53

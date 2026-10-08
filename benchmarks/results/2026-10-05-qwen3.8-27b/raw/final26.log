@@ -1,0 +1,111 @@
+
+=== 21:20:34 production down (final26)
+2026-10-05 21:20:42.917 === logs in /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a
+binary: dc52f66 built 20:45:44
+
+=== 21:20:42 w1 drafter up (the site recipe, 8 slots)
+2026-10-05 21:21:09.221 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final26/w1-drafter/server)
+[w1] solo vs solo again: IDENTICAL
+[w1] solo vs beside 0 others (started at once): IDENTICAL
+[w1] solo vs solo again: IDENTICAL
+[w1] solo vs beside 7 others (joining after 6 s): IDENTICAL
+[w1] solo vs solo again: IDENTICAL
+[w1] solo vs beside 7 others (started at once): DIFFERENT at char 966 of 1461/1461 (256/256 tokens)
+
+=== 21:23:26 w1 drafter transcripts vs the campaign reference
+identical transcripts: 0 of 4
+
+=== 21:24:06 w1 drafter C1 x3, all classes
+| prose | 20.1 | | code | 33.4 | | json | 46.0 | | math | 37.9 | | chat | 19.7 | 
+C1: 140.5 ms/step 4.02 tok/step
+
+=== 21:26:27 w1 drafter C8 x2, all classes
+| prose | 92.7 | | code | 164.4 | | json | 182.0 | | math | 179.0 | | chat | 97.6 | 
+C8: 193.6 ms/step 27.49 tok/step
+
+=== 21:29:07 w1 drafter down
+2026-10-05 21:29:10.619 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final26/w1-drafter/server
+
+=== 21:29:10 w1 plain up (--no-dflash)
+2026-10-05 21:29:26.963 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w1_graph_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final26/w1-plain/server)
+
+=== 21:29:26 w1 plain T=1 prose,code x2
+| prose | 8.2 | | code | 8.2 | 
+C1: 121.1 ms/step 1.00 tok/step
+8.3 tok/s, 121.0 ms/tok, 121.0 ms/step
+
+=== 21:31:39 w1 plain down
+2026-10-05 21:31:42.080 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final26/w1-plain/server
+
+=== 21:31:42 w2 drafter up (the site recipe, 8 slots)
+2026-10-05 21:32:04.232 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w2_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final26/w2-drafter/server)
+[w2] solo vs solo again: IDENTICAL
+[w2] solo vs beside 0 others (started at once): IDENTICAL
+[w2] solo vs solo again: IDENTICAL
+[w2] solo vs beside 7 others (joining after 6 s): IDENTICAL
+[w2] solo vs solo again: IDENTICAL
+[w2] solo vs beside 7 others (started at once): DIFFERENT at char 966 of 1461/1461 (256/256 tokens)
+
+=== 21:33:27 w2 drafter transcripts vs the campaign reference
+no reference benchmarks/results/2026-10-05-qwen3.8-27b/raw/drafter-tp/w2-dflash2-v2/transcripts.json
+
+=== 21:33:27 w2 drafter C1 x3, all classes
+| prose | 32.4 | | code | 57.3 | | json | 78.9 | | math | 65.2 | | chat | 34.5 | 
+C1: 79.5 ms/step 3.91 tok/step
+
+=== 21:34:51 w2 drafter C8 x2, all classes
+| prose | 144.5 | | code | 237.9 | | json | 273.8 | | math | 240.7 | | chat | 161.8 | 
+C8: 121.7 ms/step 26.19 tok/step
+
+=== 21:36:36 w2 drafter down
+2026-10-05 21:36:39.942 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final26/w2-drafter/server
+
+=== 21:36:39 w2 plain up (--no-dflash)
+2026-10-05 21:36:55.608 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w2_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final26/w2-plain/server)
+
+=== 21:36:55 w2 plain T=1 prose,code x2
+| prose | 15.1 | | code | 15.1 | 
+C1: 65.9 ms/step 1.00 tok/step
+15.2 tok/s, 65.9 ms/tok, 65.9 ms/step
+
+=== 21:38:07 w2 plain down
+2026-10-05 21:38:11.429 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final26/w2-plain/server
+
+=== 21:38:11 w4 drafter up (the site recipe, 8 slots)
+2026-10-05 21:38:38.400 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w4_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final26/w4-drafter/server)
+[w4] solo vs solo again: IDENTICAL
+[w4] solo vs beside 0 others (started at once): IDENTICAL
+[w4] solo vs solo again: IDENTICAL
+[w4] solo vs beside 7 others (joining after 6 s): IDENTICAL
+[w4] solo vs solo again: IDENTICAL
+[w4] solo vs beside 7 others (started at once): DIFFERENT at char 966 of 1461/1461 (256/256 tokens)
+
+=== 21:39:36 w4 drafter transcripts vs the campaign reference
+identical transcripts: 1 of 4
+
+=== 21:39:51 w4 drafter C1 x3, all classes
+| prose | 59.1 | | code | 92.4 | | json | 124.2 | | math | 96.8 | | chat | 48.9 | 
+C1: 47.9 ms/step 3.76 tok/step
+
+=== 21:40:44 w4 drafter C8 x2, all classes
+| prose | 204.2 | | code | 302.5 | | json | 353.5 | | math | 310.9 | | chat | 218.1 | 
+C8: 91.4 ms/step 25.99 tok/step
+
+=== 21:42:02 w4 drafter down
+2026-10-05 21:42:10.086 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final26/w4-drafter/server
+
+=== 21:42:10 w4 plain up (--no-dflash)
+2026-10-05 21:42:27.978 READY — curl http://192.168.88.11:8000/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_qwen3.8-27b_fp8_w4_dflash2.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final26/w4-plain/server)
+
+=== 21:42:27 w4 plain T=1 prose,code x2
+| prose | 28.1 | | code | 28.1 | 
+C1: 35.4 ms/step 1.00 tok/step
+28.0 tok/s, 35.3 ms/tok, 35.4 ms/step
+
+=== 21:43:06 w4 plain down
+2026-10-05 21:43:14.108 === logs in /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-qwen3.8-27b/raw/final26/w4-plain/server
+
+=== 21:43:14 production up
+2026-10-05 21:43:56.763 READY — curl http://192.168.88.11:18080/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --log-dir /home/stephen/dgpp/log/deployments/a911a2d7c4b3be6a)
+
+FINAL26_DONE 21:43:56

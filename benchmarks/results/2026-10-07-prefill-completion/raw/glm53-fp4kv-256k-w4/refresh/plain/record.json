@@ -1,0 +1,348 @@
+{
+  "schema_version": 1,
+  "records": {
+    "config.json": {
+      "model": "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
+      "world_size": 4,
+      "release": "",
+      "engine": {
+        "max_concurrency": 8,
+        "kv_capacity": 262144,
+        "kv_dtype": "fp4",
+        "bf16_weights": "bf12",
+        "embed_sharding": "vocab",
+        "default_max_tokens": 32768,
+        "queue_limit": 8,
+        "max_connections": 64,
+        "decode_graph": true,
+        "mtp": false,
+        "mtp_depth": 1,
+        "prefix_cache_gib": 1.5,
+        "admission": "full",
+        "admission_window": 256,
+        "sampling_candidates": 128,
+        "stats_interval_s": 10,
+        "dflash_model": "",
+        "mtp_schedule": false
+      },
+      "paths": {
+        "resident_cache": ""
+      },
+      "http": {
+        "bind_host": "127.0.0.1",
+        "port": 18080
+      }
+    },
+    "manifest.json": {
+      "started_at": "2026-10-07T23:10:42.657935+00:00",
+      "commit": "90ebbf1bcc2976ebaa94e0b4cf8779caed52f3db",
+      "binary_sha256": "616d35a9d3f1a4d61b53622aa7a7a2f0389ffa1f3ab1bbd1d97abe0395bd0f6d",
+      "candidate_binary": "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/mimo-dispatch-fix/native/dgpp-serve",
+      "candidate_binary_sha256": "616d35a9d3f1a4d61b53622aa7a7a2f0389ffa1f3ab1bbd1d97abe0395bd0f6d",
+      "purpose": "Complete all measurements affected by the idle-budget, FP4 conversion and FP8 projection-dispatch fixes.",
+      "benchmark_environment": {
+        "DGPP_NO_SWAP": "1",
+        "CUDA_DEVICE_MAX_CONNECTIONS": "32"
+      },
+      "model_revision": "5711b268169967567844e1e560e8a3966da959b1",
+      "source_sha256": {
+        "src/kernels/dsa.cu": "deae7b318970c402ccc1506700d81dc373b81dece2f6b16a70a53ec6d0bac45c",
+        "src/kernels/scale_gemm.cu": "b3675795b10a0d1486daa98d7cb034cf7967ad6477aa4a0bf35399895dd18663",
+        "tests/cuda/dsa_test.cu": "6a4d96a614323f1c8cfaa83e1619ebf30da1d195889e6f45e18cad4c73a1f44b",
+        "tests/cuda/scale_gemm_test.cu": "ac1e3f66216aade9c1ad4fc68b1d8fe4220d6e3d65b3e1e01a6502495b5847a6"
+      },
+      "binary_role": "binary_sha256 guards the preserved release executable; every measured launch uses candidate_binary_sha256 and records that hash as its binary_sha256.",
+      "harness_sha256": {
+        "run.py": "5cecc45e6fcdf3316d839692d31edd366a41269300d4a31572a373edcaa79632",
+        "results.py": "f49ac58284478a252885916791ba8c1426da1045003cfcb6195f3617801016de",
+        "update_document.py": "9d0713f327703e2592fbd8527e50f80ffb0f179fb25ab7db2a4397e0ca3c09ab",
+        "node_telemetry.py": "345928df413d63db36502018eac0931dd7113c2564c73c81e1d0a1cf55895d23"
+      },
+      "clients_sha256": {
+        "scripts/timed_load.py": "e38328d44f4719b5bfcb110fe0d5737df96aebf61ed8dc467bf3850217c5e12f",
+        "scripts/serve_prefill_probe.py": "0e7443e6e48e34a1fbfc6311e8f1396b48bbae7e22225c8db8d98f1d4290d783",
+        "scripts/serve_context_matrix.py": "ba657bc82c5f15148be2d08563f677e2498fcb3c7e681f8376e70f70b10a5310"
+      },
+      "baseline_binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34"
+    },
+    "measurement-plan.json": {
+      "jobs": [
+        "greedy"
+      ],
+      "mode": "plain",
+      "deployment": "glm53-fp4kv-256k-w4",
+      "profiled": false,
+      "storage_before": [
+        {
+          "host": "192.168.88.11",
+          "free_bytes": 588671795200
+        },
+        {
+          "host": "192.168.88.12",
+          "free_bytes": 788944805888
+        },
+        {
+          "host": "192.168.88.13",
+          "free_bytes": 772664901632
+        },
+        {
+          "host": "192.168.88.14",
+          "free_bytes": 840631336960
+        }
+      ]
+    },
+    "complete.json": {
+      "at": "2026-10-08T01:39:09.583206+00:00",
+      "passed": true
+    },
+    "memory-check.json": {
+      "passed": true,
+      "ranks": [
+        {
+          "rank": 0,
+          "samples": 236,
+          "max_swap_KiB": 0,
+          "swap_policy_required": true,
+          "swap_policy_passed": true,
+          "max_sample_gap_s": 1.0596566579770297,
+          "violations": [],
+          "errors": []
+        },
+        {
+          "rank": 1,
+          "samples": 233,
+          "max_swap_KiB": 0,
+          "swap_policy_required": true,
+          "swap_policy_passed": true,
+          "max_sample_gap_s": 1.0589019588660449,
+          "violations": [],
+          "errors": []
+        },
+        {
+          "rank": 2,
+          "samples": 233,
+          "max_swap_KiB": 0,
+          "swap_policy_required": true,
+          "swap_policy_passed": true,
+          "max_sample_gap_s": 1.069936617044732,
+          "violations": [],
+          "errors": []
+        },
+        {
+          "rank": 3,
+          "samples": 233,
+          "max_swap_KiB": 0,
+          "swap_policy_required": true,
+          "swap_policy_passed": true,
+          "max_sample_gap_s": 1.0685935309156775,
+          "violations": [],
+          "errors": []
+        }
+      ]
+    },
+    "rank-identity.json": {
+      "expected_ranks": 4,
+      "md5": {
+        "serve_rank0.ops": "0c1e62df84523c084d34ed6f4a9caf3a",
+        "serve_rank2.ops": "0c1e62df84523c084d34ed6f4a9caf3a",
+        "serve_rank1.ops": "0c1e62df84523c084d34ed6f4a9caf3a",
+        "serve_rank3.ops": "0c1e62df84523c084d34ed6f4a9caf3a"
+      },
+      "passed": true
+    },
+    "models.json": {
+      "object": "list",
+      "data": [
+        {
+          "id": "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
+          "object": "model",
+          "created": 1791423339,
+          "owned_by": "dgpp",
+          "sampling": {
+            "available": true,
+            "defaults": {
+              "temperature": 1,
+              "top_p": 0.95,
+              "top_k": 0,
+              "min_p": 0,
+              "repetition_penalty": 1
+            }
+          },
+          "tools": {
+            "available": true,
+            "constrained": true
+          },
+          "response_format": {
+            "json_object": true,
+            "json_schema": true
+          },
+          "reasoning": {
+            "in_content": false,
+            "effort_mapping": {
+              "minimal": {
+                "reasoning_effort": "low"
+              },
+              "low": {
+                "reasoning_effort": "low"
+              },
+              "medium": {
+                "reasoning_effort": "high"
+              },
+              "high": {
+                "reasoning_effort": "high"
+              },
+              "xhigh": {
+                "reasoning_effort": "max"
+              },
+              "max": {
+                "reasoning_effort": "max"
+              }
+            }
+          },
+          "default_chat_template_kwargs": {},
+          "input_modalities": [
+            "text"
+          ],
+          "context": {
+            "request_limit_tokens": 262144,
+            "position_ceiling_tokens": null,
+            "kv_pool_tokens": 262144,
+            "limited_by": "kv-pool"
+          }
+        }
+      ]
+    },
+    "server/cluster.resolved.json": {
+      "model": "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
+      "release": "",
+      "engine": {
+        "max_concurrency": 8,
+        "kv_capacity": 262144,
+        "kv_dtype": "fp4",
+        "bf16_weights": "bf12",
+        "embed_sharding": "vocab",
+        "default_max_tokens": 32768,
+        "queue_limit": 8,
+        "max_connections": 64,
+        "decode_graph": true,
+        "mtp": false,
+        "mtp_depth": 1,
+        "prefix_cache_gib": 1.5,
+        "admission": "full",
+        "admission_window": 256,
+        "sampling_candidates": 128,
+        "stats_interval_s": 10,
+        "dflash_model": "",
+        "mtp_schedule": false
+      },
+      "paths": {
+        "resident_cache": "",
+        "log_dir": "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-completion/raw/glm53-fp4kv-256k-w4/refresh/plain/server",
+        "stage_dir": "/tmp/bus4/deployments/bfe9fefc30173304",
+        "release_dir": "~/dgpp/releases"
+      },
+      "http": {
+        "bind_host": "127.0.0.1",
+        "port": 18080
+      },
+      "nodes": [
+        "192.168.88.11",
+        "192.168.88.12",
+        "192.168.88.13",
+        "192.168.88.14"
+      ],
+      "ssh_user": "stephen",
+      "ports": {
+        "http": 18080,
+        "fabric": 29970,
+        "journal": 29971
+      },
+      "node_env": [
+        {},
+        {},
+        {},
+        {}
+      ]
+    },
+    "up.log.command.json": {
+      "command": [
+        "/usr/bin/python3",
+        "/home/stephen/workspace/dgpp/scripts/dgpp-cluster",
+        "up",
+        "--config",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-completion/raw/glm53-fp4kv-256k-w4/refresh/plain/config.json",
+        "--bin",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/mimo-dispatch-fix/native/dgpp-serve",
+        "--log-dir",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-completion/raw/glm53-fp4kv-256k-w4/refresh/plain/server"
+      ],
+      "cwd": "/home/stephen/workspace/dgpp",
+      "started_at": "2026-10-08T01:34:56.317437+00:00",
+      "returncode": 0,
+      "finished_at": "2026-10-08T01:35:39.565151+00:00"
+    },
+    "down.log.command.json": {
+      "command": [
+        "/usr/bin/python3",
+        "/home/stephen/workspace/dgpp/scripts/dgpp-cluster",
+        "down",
+        "--config",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-completion/raw/glm53-fp4kv-256k-w4/refresh/plain/config.json",
+        "--log-dir",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-completion/raw/glm53-fp4kv-256k-w4/refresh/plain/server"
+      ],
+      "cwd": "/home/stephen/workspace/dgpp",
+      "started_at": "2026-10-08T01:39:02.327587+00:00",
+      "returncode": 0,
+      "finished_at": "2026-10-08T01:39:09.562137+00:00"
+    },
+    "greedy.log.command.json": {
+      "command": [
+        "/usr/bin/python3",
+        "/home/stephen/workspace/dgpp/scripts/timed_load.py",
+        "127.0.0.1",
+        "18080",
+        "--concurrency",
+        "1",
+        "--classes",
+        "all",
+        "--repeat",
+        "3",
+        "--max-tokens",
+        "256",
+        "--json-out",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-completion/raw/glm53-fp4kv-256k-w4/refresh/plain/greedy.json",
+        "--think"
+      ],
+      "cwd": "/home/stephen/workspace/dgpp",
+      "started_at": "2026-10-08T01:35:39.566750+00:00",
+      "returncode": 0,
+      "finished_at": "2026-10-08T01:39:02.327113+00:00"
+    }
+  },
+  "evidence_sha256": {
+    "greedy.json": "9620faf2cc2e972c420f7acb43a1903c0d77f974696db58bee508e8907590038"
+  },
+  "local_telemetry": [
+    {
+      "file": "node0-telemetry.jsonl",
+      "bytes": 345325,
+      "sha256": "276ee117b364cb9da066d0c65f53ab10cb972e672b307d4d49e9b1c66c332d8a"
+    },
+    {
+      "file": "node1-telemetry.jsonl",
+      "bytes": 338889,
+      "sha256": "ac840acbade5e2ec48fcf5ba494deb879c63350998cdaed9fdf02003f84e68ef"
+    },
+    {
+      "file": "node2-telemetry.jsonl",
+      "bytes": 335895,
+      "sha256": "abcc364c82fdd04c3eb1d2751faf0a92ede92a6e41dbf0746894cb36a643d7fc"
+    },
+    {
+      "file": "node3-telemetry.jsonl",
+      "bytes": 334884,
+      "sha256": "55ea8cac7e33fe969870079af5588a649592aadb5df7bed64f573795a4543e2f"
+    }
+  ]
+}

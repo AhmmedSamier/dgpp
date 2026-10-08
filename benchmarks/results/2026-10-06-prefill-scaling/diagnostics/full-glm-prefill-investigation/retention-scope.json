@@ -1,0 +1,11 @@
+{
+  "scope": "The fused score dispatch is in DsaLayer::enqueue_prefill, gated to index_kpool=1, rope_dim=64, index_topk=2048, padded pools>2048, with legacy single-query arithmetic retained. Only full GLM meets this dispatch among the campaign models. Flash uses kpool4/rope0; Qwen, MiMo and DeepSeek do not call this DSA prefill layer. Decode code is unchanged.",
+  "source_sha256": {
+    "src/models/dsa_layer.cu": "26c3ae60ff1ac349bad03a46b2bc041ce9efa2b3af434f9e00d678df82f723e6",
+    "src/models/glm/forward.cpp": "c88a58274ebb2412a1ced2b2763085b519983016c4d4b73b5afa8edeadc3d0c5",
+    "src/models/glm/decode.cpp": "c6e78e1f18047f16a386b483f1779a88a968258d0b85a12dce05d550ee9af2fe",
+    "src/models/glm_dsa/model.cpp": "821aaac819d7edc85696f9ddda581c91b45441b3f1b6f548c776999aa61d1ea2"
+  },
+  "retention_catalog_sha256": "c71a8dced16ff4ac76341c8046f31ba75715f18fb1ce5b73515c2b1468455731",
+  "catalog_jobs": 164
+}

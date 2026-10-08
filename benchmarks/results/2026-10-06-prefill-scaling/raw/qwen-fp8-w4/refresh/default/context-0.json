@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "model": "Qwen/Qwen3.8-Flash-Next-FP8",
+  "surface": {
+    "id": "Qwen/Qwen3.8-Flash-Next-FP8",
+    "object": "model",
+    "created": 1791323246,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": 262144,
+      "kv_pool_tokens": 262144,
+      "limited_by": "position-ceiling"
+    }
+  },
+  "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+  "seed": 20260922,
+  "tag": "dee876e13ef948e18cecb85d98a7a994",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 3265.600000000035,
+        "prefill_ms": 157.79999999998836,
+        "decode_steps": 138,
+        "decode_rows": 138,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 156,
+        "prompt_tokens_computed": 156
+      },
+      "engine_tokens_per_s": 78.08672219500161,
+      "ms_per_pass": 23.663768115942283,
+      "tokens_per_pass": 1.8478260869565217,
+      "answer": {
+        "prompt_sha256": "1b50e1514a6e80b1a46d7888cad32c148a9a744d695adc92be2ef2c109d2dfe7",
+        "usage": {
+          "prompt_tokens": 156,
+          "completion_tokens": 256,
+          "total_tokens": 412,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce final answer. User: \"Context measurement dee876e13ef948e18cecb85d98a7a994, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need infer? They provide context measurement, bucket, item 000000 parcel details. Ask write numbered list describing first 200 parcels and their cities. Continue until listed all 200. We only have one parcel? Need maybe generate 200 parcels and cities? Could be a test of following instructions? Need maybe list 1-200 with parcel IDs and cities. But no data for cities. We need maybe say insufficient data? But user explicitly asks continue until all 200. Could be from some hidden context? We only have item 000000. Need maybe produce 20",
+        "wall_ms": 3435.845182975754,
+        "ttft_ms": 180.4603929631412,
+        "last_ms": 3435.6184280477464,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 3245.0,
+        "prefill_ms": 152.90000000000873,
+        "decode_steps": 138,
+        "decode_rows": 138,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 156,
+        "prompt_tokens_computed": 156
+      },
+      "engine_tokens_per_s": 78.58243451463791,
+      "ms_per_pass": 23.514492753623188,
+      "tokens_per_pass": 1.8478260869565217,
+      "answer": {
+        "prompt_sha256": "1b50e1514a6e80b1a46d7888cad32c148a9a744d695adc92be2ef2c109d2dfe7",
+        "usage": {
+          "prompt_tokens": 156,
+          "completion_tokens": 256,
+          "total_tokens": 412,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce final answer. User: \"Context measurement dee876e13ef948e18cecb85d98a7a994, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need infer? They provide context measurement, bucket, item 000000 parcel details. Ask write numbered list describing first 200 parcels and their cities. Continue until listed all 200. We only have one parcel? Need maybe generate 200 parcels and cities? Could be a test of following instructions? Need maybe list 1-200 with parcel IDs and cities. But no data for cities. We need maybe say insufficient data? But user explicitly asks continue until all 200. Could be from some hidden context? We only have item 000000. Need maybe produce 20",
+        "wall_ms": 3426.7764328978956,
+        "ttft_ms": 179.45933807641268,
+        "last_ms": 3426.5668620355427,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 3250.399999999965,
+        "prefill_ms": 166.89999999999418,
+        "decode_steps": 138,
+        "decode_rows": 138,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 156,
+        "prompt_tokens_computed": 156
+      },
+      "engine_tokens_per_s": 78.45188284518913,
+      "ms_per_pass": 23.553623188405545,
+      "tokens_per_pass": 1.8478260869565217,
+      "answer": {
+        "prompt_sha256": "1b50e1514a6e80b1a46d7888cad32c148a9a744d695adc92be2ef2c109d2dfe7",
+        "usage": {
+          "prompt_tokens": 156,
+          "completion_tokens": 256,
+          "total_tokens": 412,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce final answer. User: \"Context measurement dee876e13ef948e18cecb85d98a7a994, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need infer? They provide context measurement, bucket, item 000000 parcel details. Ask write numbered list describing first 200 parcels and their cities. Continue until listed all 200. We only have one parcel? Need maybe generate 200 parcels and cities? Could be a test of following instructions? Need maybe list 1-200 with parcel IDs and cities. But no data for cities. We need maybe say insufficient data? But user explicitly asks continue until all 200. Could be from some hidden context? We only have item 000000. Need maybe produce 20",
+        "wall_ms": 3439.592447131872,
+        "ttft_ms": 178.81049495190382,
+        "last_ms": 3439.404939999804,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

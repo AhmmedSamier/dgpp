@@ -147,6 +147,10 @@ class QwenModel : public SessionModel<QwenModel> {
   // The cold diagnostic forward: one request on slot 0 (which must be
   // closed), fresh state, every row's logits; the slot is closed after.
   Outputs forward(const std::vector<int64_t>& token_ids, bool capture_layers = false);
+  // Test gate: eager decode walks copy every layer's output residual into
+  // Outputs::layer_states (the row-count invariance test's bisection).
+  static void set_session_capture_layers(bool on) { session_capture_layers_ = on; }
+  inline static bool session_capture_layers_ = false;
   // The draft block over a prompt (the parity gate's surface): the cold
   // forward, then the draft rows q = 0 .. T-2 (token q+1, the hyper state
   // at q) with the head on every row — logits [T-1, count], the mixer's
@@ -370,7 +374,7 @@ class QwenModel : public SessionModel<QwenModel> {
   // collectives per step at 28-57 us each, DRAM idle through every one).
   // Decode rows open a window before each fold with the other side's
   // first weights in consumption order (GLM's boundary windows); the
-  // side stream rejoins before the walk's end. DGPP_L2_PREFETCH=off A/Bs.
+  // side stream rejoins before the walk's end. engine.l2_prefetch false A/Bs.
   // The bf16 decode weights' lossless 12-bit companions (engine.bf16_weights;
   // kernels/bf12_companions.hpp): the GDN and QSA projections, the draft
   // block's, the head — packed as each layer lands in graph_prepare. The GR
@@ -384,7 +388,7 @@ class QwenModel : public SessionModel<QwenModel> {
   double bf12_s_ = 0.0;
   int walk_rows_ = 1;  // the rows of the walk in flight (the prefetch windows' view)
   WeightPrefetcher prefetch_;
-  size_t prefetch_window_bytes_ = 0;  // 0 = the prefetcher's default (the DGPP_L2_PREFETCH_MB knob)
+  size_t prefetch_window_bytes_ = 0;  // 0 = the prefetcher's window budget (engine.l2_prefetch_boundary_window_mib)
   void prefetch_gr(const QwenGrResident& g, bool inject);
   void prefetch_ffn_side(const QwenLayerResident& r);
   void prefetch_attention_side(int layer);

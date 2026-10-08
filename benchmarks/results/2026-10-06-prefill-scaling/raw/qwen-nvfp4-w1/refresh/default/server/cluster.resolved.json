@@ -1,0 +1,47 @@
+{
+  "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+  "engine": {
+    "max_concurrency": 4,
+    "kv_capacity": 262144,
+    "kv_dtype": "bf16",
+    "bf16_weights": "bf12+bf16",
+    "ngram_table": "mmap",
+    "default_max_tokens": 32768,
+    "queue_limit": 8,
+    "max_connections": 64,
+    "decode_graph": true,
+    "mtp": true,
+    "mtp_depth": 1,
+    "prefix_cache_gib": 3,
+    "admission": "full",
+    "admission_window": 256,
+    "sampling_candidates": 128,
+    "stats_interval_s": 10,
+    "dense_weights": "fp8",
+    "fp8_head": "mma",
+    "prefill_budget_tokens": 4096,
+    "prefill_idle_budget_tokens": 4096
+  },
+  "paths": {
+    "resident_cache": "",
+    "log_dir": "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen-nvfp4-w1/refresh/default/server",
+    "stage_dir": "/tmp/bus4/deployments/19c827a886d449fe",
+    "release_dir": "~/dgpp/releases"
+  },
+  "http": {
+    "bind_host": "127.0.0.1",
+    "port": 18080
+  },
+  "nodes": [
+    "192.168.88.11"
+  ],
+  "ssh_user": "stephen",
+  "ports": {
+    "http": 18080,
+    "fabric": 29970,
+    "journal": 29971
+  },
+  "node_env": [
+    {}
+  ]
+}

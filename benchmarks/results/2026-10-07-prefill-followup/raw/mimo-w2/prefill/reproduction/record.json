@@ -1,0 +1,277 @@
+{
+  "schema_version": 1,
+  "records": {
+    "config.json": {
+      "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+      "world_size": 2,
+      "release": "",
+      "engine": {
+        "max_concurrency": 4,
+        "kv_capacity": 131072,
+        "kv_dtype": "bf16",
+        "bf16_weights": "bf12",
+        "default_max_tokens": 32768,
+        "queue_limit": 8,
+        "max_connections": 64,
+        "decode_graph": true,
+        "mtp": true,
+        "mtp_depth": 1,
+        "prefix_cache_gib": 1.5,
+        "admission": "full",
+        "admission_window": 256,
+        "sampling_candidates": 128,
+        "stats_interval_s": 10
+      },
+      "paths": {
+        "resident_cache": "~/.cache/dgpp/prefill-followup-2026-10-07/XiaomiMiMo--MiMo-V2.6-Flash-RL"
+      },
+      "http": {
+        "bind_host": "127.0.0.1",
+        "port": 18080
+      }
+    },
+    "manifest.json": {
+      "started_at": "2026-10-07T21:40:10.414855+00:00",
+      "commit": "90ebbf1bcc2976ebaa94e0b4cf8779caed52f3db",
+      "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+      "benchmark_environment": {
+        "DGPP_NO_SWAP": "1",
+        "CUDA_DEVICE_MAX_CONNECTIONS": "32"
+      },
+      "purpose": "Investigate GLM Flash TP2, full GLM TP4, and MiMo TP2 cold-prefill performance; configuration comparisons use the identical fixed binary."
+    },
+    "plan.json": {
+      "deployment": "mimo-w2",
+      "variant": "reproduction",
+      "overrides": {},
+      "lengths": [
+        2048,
+        8192,
+        32768
+      ],
+      "repeat": 2,
+      "profiled": false,
+      "purpose": "Diagnostic A/B; published matrix remains unchanged."
+    },
+    "complete.json": {
+      "at": "2026-10-07T22:38:15.764263+00:00",
+      "passed": true
+    },
+    "memory-check.json": {
+      "passed": true,
+      "ranks": [
+        {
+          "rank": 0,
+          "samples": 333,
+          "max_swap_KiB": 0,
+          "swap_policy_required": true,
+          "swap_policy_passed": true,
+          "max_sample_gap_s": 1.0431870920583606,
+          "violations": [],
+          "errors": []
+        },
+        {
+          "rank": 1,
+          "samples": 331,
+          "max_swap_KiB": 0,
+          "swap_policy_required": true,
+          "swap_policy_passed": true,
+          "max_sample_gap_s": 1.0481236779596657,
+          "violations": [],
+          "errors": []
+        }
+      ]
+    },
+    "rank-identity.json": {
+      "expected_ranks": 2,
+      "md5": {
+        "serve_rank0.ops": "ed07de4c8cba6c730ec1a3b2d78b799b",
+        "serve_rank1.ops": "ed07de4c8cba6c730ec1a3b2d78b799b"
+      },
+      "passed": true
+    },
+    "models.json": {
+      "object": "list",
+      "data": [
+        {
+          "id": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+          "object": "model",
+          "created": 1791412545,
+          "owned_by": "dgpp",
+          "sampling": {
+            "available": true,
+            "defaults": {
+              "temperature": 0,
+              "top_p": 0.95,
+              "top_k": 0,
+              "min_p": 0,
+              "repetition_penalty": 1
+            }
+          },
+          "tools": {
+            "available": true,
+            "constrained": true
+          },
+          "response_format": {
+            "json_object": true,
+            "json_schema": true
+          },
+          "reasoning": {
+            "in_content": false,
+            "effort_mapping": {
+              "none": {
+                "enable_thinking": false
+              },
+              "minimal": {
+                "enable_thinking": true
+              },
+              "low": {
+                "enable_thinking": true
+              },
+              "medium": {
+                "enable_thinking": true
+              },
+              "high": {
+                "enable_thinking": true
+              },
+              "xhigh": {
+                "enable_thinking": true
+              },
+              "max": {
+                "enable_thinking": true
+              }
+            }
+          },
+          "default_chat_template_kwargs": {},
+          "input_modalities": [
+            "text"
+          ],
+          "context": {
+            "request_limit_tokens": 131072,
+            "position_ceiling_tokens": null,
+            "kv_pool_tokens": 131072,
+            "limited_by": "kv-pool"
+          }
+        }
+      ]
+    },
+    "up.log.command.json": {
+      "command": [
+        "/usr/bin/python3",
+        "/home/stephen/workspace/dgpp/scripts/dgpp-cluster",
+        "up",
+        "--config",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/raw/mimo-w2/prefill/reproduction/config.json",
+        "--bin",
+        "/home/stephen/workspace/dgpp/build-release/dgpp-serve",
+        "--log-dir",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/raw/mimo-w2/prefill/reproduction/server"
+      ],
+      "cwd": "/home/stephen/workspace/dgpp",
+      "started_at": "2026-10-07T22:32:33.966063+00:00",
+      "returncode": 0,
+      "finished_at": "2026-10-07T22:35:45.773612+00:00"
+    },
+    "prefill.log.command.json": {
+      "command": [
+        "/usr/bin/python3",
+        "/home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py",
+        "127.0.0.1",
+        "18080",
+        "2048",
+        "8192",
+        "32768",
+        "--repeat",
+        "2",
+        "--no-think",
+        "--seed",
+        "7",
+        "--tag",
+        "followup-mimo-w2",
+        "--interval",
+        "0",
+        "--json-out",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/raw/mimo-w2/prefill/reproduction/prefill.json"
+      ],
+      "cwd": "/home/stephen/workspace/dgpp",
+      "started_at": "2026-10-07T22:35:45.788044+00:00",
+      "returncode": 0,
+      "finished_at": "2026-10-07T22:38:12.013192+00:00"
+    },
+    "down.log.command.json": {
+      "command": [
+        "/usr/bin/python3",
+        "/home/stephen/workspace/dgpp/scripts/dgpp-cluster",
+        "down",
+        "--config",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/raw/mimo-w2/prefill/reproduction/config.json",
+        "--log-dir",
+        "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/raw/mimo-w2/prefill/reproduction/server"
+      ],
+      "cwd": "/home/stephen/workspace/dgpp",
+      "started_at": "2026-10-07T22:38:12.013590+00:00",
+      "returncode": 0,
+      "finished_at": "2026-10-07T22:38:15.755824+00:00"
+    },
+    "server/cluster.resolved.json": {
+      "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+      "release": "",
+      "engine": {
+        "max_concurrency": 4,
+        "kv_capacity": 131072,
+        "kv_dtype": "bf16",
+        "bf16_weights": "bf12",
+        "default_max_tokens": 32768,
+        "queue_limit": 8,
+        "max_connections": 64,
+        "decode_graph": true,
+        "mtp": true,
+        "mtp_depth": 1,
+        "prefix_cache_gib": 1.5,
+        "admission": "full",
+        "admission_window": 256,
+        "sampling_candidates": 128,
+        "stats_interval_s": 10
+      },
+      "paths": {
+        "resident_cache": "~/.cache/dgpp/prefill-followup-2026-10-07/XiaomiMiMo--MiMo-V2.6-Flash-RL",
+        "log_dir": "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-07-prefill-followup/raw/mimo-w2/prefill/reproduction/server",
+        "stage_dir": "/tmp/bus4/deployments/94337b61f44d2d23",
+        "release_dir": "~/dgpp/releases"
+      },
+      "http": {
+        "bind_host": "127.0.0.1",
+        "port": 18080
+      },
+      "nodes": [
+        "192.168.88.11",
+        "192.168.88.12"
+      ],
+      "ssh_user": "stephen",
+      "ports": {
+        "http": 18080,
+        "fabric": 29970,
+        "journal": 29971
+      },
+      "node_env": [
+        {},
+        {}
+      ]
+    }
+  },
+  "evidence_sha256": {
+    "prefill.json": "880b1d534cc5882f2c0b5a63122ee06d82abda2c898761ee52a29d19e90c7464"
+  },
+  "local_telemetry": [
+    {
+      "file": "node0-telemetry.jsonl",
+      "bytes": 472890,
+      "sha256": "e1945f594c045b9dc6d4645590edfc28538d98835e407a1fe57793dd2c17b8b7"
+    },
+    {
+      "file": "node1-telemetry.jsonl",
+      "bytes": 463067,
+      "sha256": "d270768145045a66e151d4f80119bc8cc245fd988ef441efcc330c32cb101370"
+    }
+  ]
+}

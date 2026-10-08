@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "model": "Qwen/Qwen3.8-27B-FP8",
+  "surface": {
+    "id": "Qwen/Qwen3.8-27B-FP8",
+    "object": "model",
+    "created": 1791386422,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 262144,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+  "seed": 20260922,
+  "tag": "b50ff3da4da04cf498a073717cefdb86",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 262144,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 15844.70000000007,
+        "prefill_ms": 512812.9,
+        "decode_steps": 65,
+        "decode_rows": 65,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 261655,
+        "prompt_tokens_computed": 261655
+      },
+      "engine_tokens_per_s": 16.093709568499175,
+      "ms_per_pass": 243.76461538461646,
+      "tokens_per_pass": 3.923076923076923,
+      "answer": {
+        "prompt_sha256": "111ef010e34da8bbc1d631571b93005dcaa2864bea1500ab978e6ae48a7dbd3b",
+        "usage": {
+          "prompt_tokens": 261655,
+          "completion_tokens": 256,
+          "total_tokens": 261911,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. Context: measurement ... bucket 262144. Items 000000 to 000199? User says first 200 parcels. Need list all 200. Need likely format: \"1. Parcel PX-... in Income\" etc. Need ensure first 200 items: Item 000000 through Item 000199 inclusive = 200. Need extract parcel IDs and cities. Need be careful. We can manually transcribe from provided list. Need final only numbered list. Need maybe include weight? User says describing the first 200 parcels and their cities. Could be \"Parcel PX-... weighed ... in City\". But asks parcels and their cities. To be safe include parcel ID and city, maybe weight? \"describing\" maybe just parcel and city. Need all 200. Need avoid mistakes. Let's parse items 0-199.\n\nI'll list from context:\n000000: PX-0757343 Income\n0000",
+        "wall_ms": 528768.7064539641,
+        "ttft_ms": 512897.9236220475,
+        "last_ms": 528768.5118271038,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 262144,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 15835.5,
+        "prefill_ms": 586.5,
+        "decode_steps": 65,
+        "decode_rows": 65,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 261655,
+        "prompt_tokens_computed": 5
+      },
+      "engine_tokens_per_s": 16.10305958132045,
+      "ms_per_pass": 243.62307692307692,
+      "tokens_per_pass": 3.923076923076923,
+      "answer": {
+        "prompt_sha256": "111ef010e34da8bbc1d631571b93005dcaa2864bea1500ab978e6ae48a7dbd3b",
+        "usage": {
+          "prompt_tokens": 261655,
+          "completion_tokens": 256,
+          "total_tokens": 261911,
+          "prompt_tokens_details": {
+            "cached_tokens": 261650
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. Context: measurement ... bucket 262144. Items 000000 to 000199? User says first 200 parcels. Need list all 200. Need likely format: \"1. Parcel PX-... in Income\" etc. Need ensure first 200 items: Item 000000 through Item 000199 inclusive = 200. Need extract parcel IDs and cities. Need be careful. We can manually transcribe from provided list. Need final only numbered list. Need maybe include weight? User says describing the first 200 parcels and their cities. Could be \"Parcel PX-... weighed ... in City\". But asks parcels and their cities. To be safe include parcel ID and city, maybe weight? \"describing\" maybe just parcel and city. Need all 200. Need avoid mistakes. Let's parse items 0-199.\n\nI'll list from context:\n000000: PX-0757343 Income\n0000",
+        "wall_ms": 16555.81131693907,
+        "ttft_ms": 686.6285149008036,
+        "last_ms": 16529.953558929265,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 262144,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 15837.400000000023,
+        "prefill_ms": 587.2999999999302,
+        "decode_steps": 65,
+        "decode_rows": 65,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 261655,
+        "prompt_tokens_computed": 5
+      },
+      "engine_tokens_per_s": 16.101127710356476,
+      "ms_per_pass": 243.65230769230806,
+      "tokens_per_pass": 3.923076923076923,
+      "answer": {
+        "prompt_sha256": "111ef010e34da8bbc1d631571b93005dcaa2864bea1500ab978e6ae48a7dbd3b",
+        "usage": {
+          "prompt_tokens": 261655,
+          "completion_tokens": 256,
+          "total_tokens": 261911,
+          "prompt_tokens_details": {
+            "cached_tokens": 261650
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. Context: measurement ... bucket 262144. Items 000000 to 000199? User says first 200 parcels. Need list all 200. Need likely format: \"1. Parcel PX-... in Income\" etc. Need ensure first 200 items: Item 000000 through Item 000199 inclusive = 200. Need extract parcel IDs and cities. Need be careful. We can manually transcribe from provided list. Need final only numbered list. Need maybe include weight? User says describing the first 200 parcels and their cities. Could be \"Parcel PX-... weighed ... in City\". But asks parcels and their cities. To be safe include parcel ID and city, maybe weight? \"describing\" maybe just parcel and city. Need all 200. Need avoid mistakes. Let's parse items 0-199.\n\nI'll list from context:\n000000: PX-0757343 Income\n0000",
+        "wall_ms": 16534.086876083165,
+        "ttft_ms": 663.8939520344138,
+        "last_ms": 16533.798519987613,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

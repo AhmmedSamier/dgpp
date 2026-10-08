@@ -1,0 +1,18 @@
+Test project /home/stephen/workspace/dgpp/build-ci
+    Start  21: qwen_decode_rows_invariance
+1/5 Test  #21: qwen_decode_rows_invariance ............   Passed    0.79 sec
+    Start  22: qwen_decode_fp8_head
+2/5 Test  #22: qwen_decode_fp8_head ...................   Passed    5.05 sec
+    Start  23: qwen_decode_fp8_head_row_independent
+3/5 Test  #23: qwen_decode_fp8_head_row_independent ...   Passed    4.59 sec
+    Start 166: qwen_head_check_fixture
+4/5 Test #166: qwen_head_check_fixture ................   Passed    1.89 sec
+    Start 167: qwen_compact_check_fixture
+5/5 Test #167: qwen_compact_check_fixture .............   Passed    3.26 sec
+
+100% tests passed, 0 tests failed out of 5
+
+Label Time Summary:
+gpu    =  15.59 sec*proc (5 tests)
+
+Total Test time (real) =  15.60 sec

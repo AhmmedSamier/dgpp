@@ -1,0 +1,30 @@
+[
+  {
+    "host": "192.168.88.11",
+    "exists": {
+      "/home/stephen/.cache/huggingface/hub/models--RadixArk--Qwen3.8-Flash-Next-NVFP4": false,
+      "/home/stephen/.cache/dgpp/matrix-2026-10-05/RadixArk--Qwen3.8-Flash-Next-NVFP4": false
+    }
+  },
+  {
+    "host": "192.168.88.12",
+    "exists": {
+      "/home/stephen/.cache/huggingface/hub/models--RadixArk--Qwen3.8-Flash-Next-NVFP4": false,
+      "/home/stephen/.cache/dgpp/matrix-2026-10-05/RadixArk--Qwen3.8-Flash-Next-NVFP4": false
+    }
+  },
+  {
+    "host": "192.168.88.13",
+    "exists": {
+      "/home/stephen/.cache/huggingface/hub/models--RadixArk--Qwen3.8-Flash-Next-NVFP4": false,
+      "/home/stephen/.cache/dgpp/matrix-2026-10-05/RadixArk--Qwen3.8-Flash-Next-NVFP4": false
+    }
+  },
+  {
+    "host": "192.168.88.14",
+    "exists": {
+      "/home/stephen/.cache/huggingface/hub/models--RadixArk--Qwen3.8-Flash-Next-NVFP4": false,
+      "/home/stephen/.cache/dgpp/matrix-2026-10-05/RadixArk--Qwen3.8-Flash-Next-NVFP4": false
+    }
+  }
+]

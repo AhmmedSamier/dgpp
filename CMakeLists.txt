@@ -548,6 +548,12 @@ target_link_libraries(qwen_decode_test PRIVATE dgpp_models_qwen_layers dgpp_mode
 dgpp_set_common(qwen_decode_test)
 add_test(NAME qwen_decode_test COMMAND qwen_decode_test --fixture ${QWEN_FORWARD_FIXTURE})
 set_tests_properties(qwen_decode_test PROPERTIES DEPENDS qwen_forward_fixture)
+# Qwen3.8-Flash-Next's decode step is one chain across row counts under the
+# shipped FP8-dense recipe (2026-10-05: the fp8 head and the dense sites on
+# the streaming form from one row, the QSA projections through the dense
+# lowering): a 1..15-row verify bitwise the sixteen-row verify's rows.
+add_test(NAME qwen_decode_rows_invariance COMMAND qwen_decode_test --fixture ${QWEN_FORWARD_FIXTURE} --rows-invariance)
+set_tests_properties(qwen_decode_rows_invariance PROPERTIES DEPENDS qwen_forward_fixture)
 add_test(NAME qwen_decode_fp8_head
   COMMAND ${CMAKE_COMMAND} -E env DGPP_DENSE_GEMV_ROWS=4
           $<TARGET_FILE:qwen_decode_test> --fixture ${QWEN_FORWARD_FIXTURE} --fp8-head)
@@ -1240,6 +1246,8 @@ add_test(NAME qwen35_forward_smoke COMMAND qwen35_forward_test --smoke ${QWEN35_
 set_tests_properties(qwen35_forward_smoke PROPERTIES DEPENDS qwen35_forward_fixture)
 add_test(NAME qwen35_decode_rows_invariance COMMAND qwen35_forward_test --rows-invariance ${QWEN35_FORWARD_FIXTURE})
 set_tests_properties(qwen35_decode_rows_invariance PROPERTIES DEPENDS qwen35_forward_fixture)
+add_test(NAME qwen35_prefill_group_invariance COMMAND qwen35_forward_test --group-invariance ${QWEN35_FORWARD_FIXTURE})
+set_tests_properties(qwen35_prefill_group_invariance PROPERTIES DEPENDS qwen35_forward_fixture)
 add_test(NAME qwen35_forward_generate
   COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/qwen35_reference_dump.py
           gen-pure --checkpoint-dir ${QWEN35_FORWARD_FIXTURE}

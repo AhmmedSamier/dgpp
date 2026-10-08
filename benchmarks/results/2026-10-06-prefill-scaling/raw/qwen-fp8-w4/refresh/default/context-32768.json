@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "model": "Qwen/Qwen3.8-Flash-Next-FP8",
+  "surface": {
+    "id": "Qwen/Qwen3.8-Flash-Next-FP8",
+    "object": "model",
+    "created": 1791323257,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": 262144,
+      "kv_pool_tokens": 262144,
+      "limited_by": "position-ceiling"
+    }
+  },
+  "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+  "seed": 20260922,
+  "tag": "15c9e8e6e883417d8beac5c6ee169533",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 32768,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 3498.100000000035,
+        "prefill_ms": 24076.699999999997,
+        "decode_steps": 138,
+        "decode_rows": 138,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 32286,
+        "prompt_tokens_computed": 32286
+      },
+      "engine_tokens_per_s": 72.896715359766,
+      "ms_per_pass": 25.348550724637935,
+      "tokens_per_pass": 1.8478260869565217,
+      "answer": {
+        "prompt_sha256": "b5da2ba1452e29dabd3e635cecead88caf12b1deb3ff308dbc2e772197a8815d",
+        "usage": {
+          "prompt_tokens": 32286,
+          "completion_tokens": 256,
+          "total_tokens": 32542,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided items 000000 to 000717. Need first 200 parcels likely items 000000 through 000199 inclusive? \"first 200 parcels\" and \"Continue until you have listed all 200.\" Need numbered list. Need likely include parcel ID and city? \"describing the first 200 parcels and their cities.\" Could be \"1. PX-0757343 - Income\" etc. Need ensure 200 entries. Need be careful count. Could include item number? They ask numbered list describing first 200 parcels and their cities. Probably number 1-200 corresponding to items 000000-000199. Need list parcel ID and city. Maybe include weight? \"describing ... and their cities\" likely just parcel and city. Need not include all details. Need ensure exactly 200. Need extract from items 000000 to 000199. Let's parse carefully.",
+        "wall_ms": 27640.5047820881,
+        "ttft_ms": 24112.197254085913,
+        "last_ms": 27640.346956206486,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 32768,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 3482.5,
+        "prefill_ms": 59.10000000000582,
+        "decode_steps": 138,
+        "decode_rows": 138,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 32286,
+        "prompt_tokens_computed": 6
+      },
+      "engine_tokens_per_s": 73.22325915290739,
+      "ms_per_pass": 25.235507246376812,
+      "tokens_per_pass": 1.8478260869565217,
+      "answer": {
+        "prompt_sha256": "b5da2ba1452e29dabd3e635cecead88caf12b1deb3ff308dbc2e772197a8815d",
+        "usage": {
+          "prompt_tokens": 32286,
+          "completion_tokens": 256,
+          "total_tokens": 32542,
+          "prompt_tokens_details": {
+            "cached_tokens": 32280
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided items 000000 to 000717. Need first 200 parcels likely items 000000 through 000199 inclusive? \"first 200 parcels\" and \"Continue until you have listed all 200.\" Need numbered list. Need likely include parcel ID and city? \"describing the first 200 parcels and their cities.\" Could be \"1. PX-0757343 - Income\" etc. Need ensure 200 entries. Need be careful count. Could include item number? They ask numbered list describing first 200 parcels and their cities. Probably number 1-200 corresponding to items 000000-000199. Need list parcel ID and city. Maybe include weight? \"describing ... and their cities\" likely just parcel and city. Need not include all details. Need ensure exactly 200. Need extract from items 000000 to 000199. Let's parse carefully.",
+        "wall_ms": 3585.4279710911214,
+        "ttft_ms": 89.5293999928981,
+        "last_ms": 3585.237745195627,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 32768,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 3661.2999999999884,
+        "prefill_ms": 57.0,
+        "decode_steps": 138,
+        "decode_rows": 138,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 32286,
+        "prompt_tokens_computed": 6
+      },
+      "engine_tokens_per_s": 69.64739300248567,
+      "ms_per_pass": 26.53115942028977,
+      "tokens_per_pass": 1.8478260869565217,
+      "answer": {
+        "prompt_sha256": "b5da2ba1452e29dabd3e635cecead88caf12b1deb3ff308dbc2e772197a8815d",
+        "usage": {
+          "prompt_tokens": 32286,
+          "completion_tokens": 256,
+          "total_tokens": 32542,
+          "prompt_tokens_details": {
+            "cached_tokens": 32280
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. User provided items 000000 to 000717. Need first 200 parcels likely items 000000 through 000199 inclusive? \"first 200 parcels\" and \"Continue until you have listed all 200.\" Need numbered list. Need likely include parcel ID and city? \"describing the first 200 parcels and their cities.\" Could be \"1. PX-0757343 - Income\" etc. Need ensure 200 entries. Need be careful count. Could include item number? They ask numbered list describing first 200 parcels and their cities. Probably number 1-200 corresponding to items 000000-000199. Need list parcel ID and city. Maybe include weight? \"describing ... and their cities\" likely just parcel and city. Need not include all details. Need ensure exactly 200. Need extract from items 000000 to 000199. Let's parse carefully.",
+        "wall_ms": 3768.8587340526283,
+        "ttft_ms": 89.59028008393943,
+        "last_ms": 3768.6819641385227,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

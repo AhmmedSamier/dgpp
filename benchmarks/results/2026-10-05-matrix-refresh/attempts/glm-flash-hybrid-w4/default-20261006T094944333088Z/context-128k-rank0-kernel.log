@@ -1,0 +1,2 @@
+2026-10-06T05:33:49+00:00 edgexpert-409e kernel: audit: type=1400 audit(1791264829.049:1830): apparmor="DENIED" operation="capable" class="cap" profile="ubuntu_pro_esm_cache_systemd_detect_virt" pid=416202 comm="systemd-detect-" capability=38  capname="perfmon"
+2026-10-06T05:33:49+00:00 edgexpert-409e kernel: audit: type=1400 audit(1791264829.052:1831): apparmor="DENIED" operation="capable" class="cap" profile="ubuntu_pro_esm_cache//cloud_id" pid=416198 comm="cloud-id" capability=38  capname="perfmon"

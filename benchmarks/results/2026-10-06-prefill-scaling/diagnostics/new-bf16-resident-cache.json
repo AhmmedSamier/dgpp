@@ -1,0 +1,35 @@
+{
+  "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+  "configuration": "qwen-nvfp4-bf16-w1",
+  "host": "192.168.88.11",
+  "path": "/home/stephen/.cache/dgpp/resident/bcfa8c74c88d99b7.img",
+  "absent_from_original_inventory": true,
+  "logical_bytes": 77965576704,
+  "allocated_bytes": 77965586432,
+  "device": 66306,
+  "inode": 106065075,
+  "first_observed_at": "2026-10-06T18:17:30.652547+00:00",
+  "startup_log": "raw/qwen-nvfp4-bf16-w1/refresh/default/server/serve_r0.log",
+  "action": "Remove this generated cache only after all BF16-dense configuration measurements and launch validations pass, and after confirming no process uses it. Preserve original checkpoint and all files from initial resident inventory.",
+  "removed_at": "2026-10-06T18:47:18.948879+00:00",
+  "removed": [
+    {
+      "path": "/home/stephen/.cache/dgpp/resident/bcfa8c74c88d99b7.img",
+      "allocated_bytes": 77965586432
+    }
+  ],
+  "unused_check": {
+    "command": [
+      "sudo",
+      "-n",
+      "lsof",
+      "-nP",
+      "-t",
+      "--",
+      "/home/stephen/.cache/dgpp/resident/bcfa8c74c88d99b7.img"
+    ],
+    "returncode": 1
+  },
+  "free_before": 212127264768,
+  "free_after": 290092851200
+}

@@ -1,0 +1,20 @@
+{
+  "command": [
+    "/home/stephen/workspace/dgpp/.venv/bin/python",
+    "/home/stephen/workspace/dgpp/scripts/serve_context_matrix.py",
+    "127.0.0.1",
+    "18080",
+    "--model",
+    "unsloth/GLM-5.3-Flash-FP8",
+    "--tag",
+    "89139f4181354a54b4b1bd6a84674736",
+    "--lengths",
+    "524288",
+    "--json-out",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-fp8-w4/refresh/default/context-524288.json"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-10-06T14:34:42.117339+00:00",
+  "returncode": 0,
+  "finished_at": "2026-10-06T14:34:42.533516+00:00"
+}

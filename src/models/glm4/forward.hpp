@@ -214,7 +214,7 @@ class Glm4Model : public SessionModel<Glm4Model> {
   float* h_route_weights_ = nullptr;
 
   // The L2 weight prefetcher (the boundary windows, bit-identical on or
-  // off; DGPP_L2_PREFETCH=off A/Bs).
+  // off; engine.l2_prefetch false A/Bs).
   WeightPrefetcher prefetch_;
   size_t prefetch_window_bytes_ = 0;
   void prefetch_ffn_side(const Glm4LayerResident& r);
