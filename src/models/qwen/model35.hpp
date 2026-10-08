@@ -144,6 +144,11 @@ void qwen35_swiglu_bf16(const uint16_t* gate, const uint16_t* up, uint16_t* out,
 void qwen35_mtp_concat_bf16(const uint16_t* e, const uint16_t* h, uint16_t* out, int64_t rows,
                             int64_t hidden, cudaStream_t stream);
 
+// The v1 draft's column-0 gather (model35_kernels.cu): tok[j] = ids[(j + 1) * stride]
+// (mask rows 1.., skipping the anchor row's column 0). One kernel, so the
+// captured draft stays kernels-only (no per-draft D2D nodes).
+void df1_collect_top1(const int32_t* ids, int stride, int32_t* tok, int n, cudaStream_t stream);
+
 class Qwen35Model : public SessionModel<Qwen35Model> {
  public:
   using Base = SessionModel<Qwen35Model>;
@@ -576,13 +581,15 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   int64_t* df1_pos_ = nullptr;   // [query_rows] device
   int64_t* df1_tokens_ = nullptr;  // [query_rows] device
   int64_t* df1_io64_h_ = nullptr;  // pinned: query_rows positions then tokens
+  int32_t* df1_tok_ = nullptr;     // [drafts] device (the captured proposal rows)
   int32_t* df1_tok_h_ = nullptr;   // pinned [drafts]: the proposed drafts
+  int32_t* df1_mirror_h_ = nullptr;  // pinned [max_requests, drafts]: the recorded drafts
   float* df1_inv_freq_ = nullptr;  // [head_dim/2] F32 rope table
   // The v1 block forward + mask proposal (eager, one slot): stages
   // [bonus, mask x D], runs the six layers over the draft planes, and
   // top-1s each mask row off the shared head.
   bool dflash1_draft(int req, int64_t bonus, std::vector<int32_t>* drafts);
-  void df1_block_layers(int req, cudaStream_t stream);
+  void df1_block_layers(int req, cudaStream_t stream, bool capture);
   void df1_store_features(int T, const int32_t* d_req, const int64_t* d_pos);
   // The captured verify's replay state (one static 32-row graph): the
   // pool tables pointer the capture baked in (a mismatch means the pool

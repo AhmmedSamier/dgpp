@@ -269,13 +269,12 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
     }
   }
   if (dflash1_) {
-    // v1 stage-2 scope: exact BF16, eager C1 (no fp8 recipe, no capture
-    // yet) — refused by name, not silently degraded. Batching loops the
-    // singular draft (no stacked scratch yet).
+    // v1 stage-3b scope: exact BF16, scalar graph capture (multi-slot
+    // batch capture stays eager via the breakage latch) — refused by
+    // name, not silently degraded. Batch drafting loops the singular
+    // draft (no stacked scratch yet).
     if (dflash2_fp8_)
       throw std::invalid_argument("Qwen35Model: engine.dflash_weights=fp8 is the DFlash2 block recipe; the v1 drafter serves BF16");
-    if (dflash_verify_graph_)
-      throw std::invalid_argument("Qwen35Model: the v1 drafter serves the eager engine (engine.dflash_verify_graph=false in stage 2)");
   }
   for (int l = 0; l < cfg_.num_hidden_layers; ++l) {
     if (cfg_.layers[l] == Qwen35LayerKind::Gdn)
@@ -655,7 +654,9 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
     DGPP_CUDA_OK(cudaMalloc(&df1_pos_, static_cast<size_t>(QR1) * 8));
     DGPP_CUDA_OK(cudaMalloc(&df1_tokens_, static_cast<size_t>(QR1) * 8));
     DGPP_CUDA_OK(cudaMallocHost(&df1_io64_h_, static_cast<size_t>(2) * QR1 * 8));
+    DGPP_CUDA_OK(cudaMalloc(&df1_tok_, static_cast<size_t>(D1) * 4));
     DGPP_CUDA_OK(cudaMallocHost(&df1_tok_h_, static_cast<size_t>(D1) * 4));
+    DGPP_CUDA_OK(cudaMallocHost(&df1_mirror_h_, static_cast<size_t>(max_requests) * D1 * 4));
     DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   }
   DGPP_CUDA_OK(cudaMalloc(&gdn_rec_base_, static_cast<size_t>(max_requests) * num_gdn_ * rec_elems_ * 4));
@@ -787,8 +788,10 @@ Qwen35Model::~Qwen35Model() {
   cudaFree(df1_zero_);
   cudaFree(df1_pos_);
   cudaFree(df1_tokens_);
+  cudaFree(df1_tok_);
   cudaFreeHost(df1_io64_h_);
   cudaFreeHost(df1_tok_h_);
+  cudaFreeHost(df1_mirror_h_);
   cudaFree(df1_inv_freq_);
   cudaFreeHost(df_mirror_h_);
   cudaFreeHost(df_cands_h_);
@@ -2241,7 +2244,7 @@ void Qwen35Model::df1_store_features(int T, const int32_t* d_req, const int64_t*
   }
 }
 
-void Qwen35Model::df1_block_layers(int req, cudaStream_t stream) {
+void Qwen35Model::df1_block_layers(int req, cudaStream_t stream, bool capture) {
   const int H = cfg_.hidden_size;
   const int QR = df1cfg_.query_rows();
   const int L = df1cfg_.num_hidden_layers;
@@ -2256,13 +2259,18 @@ void Qwen35Model::df1_block_layers(int req, cudaStream_t stream) {
   const float scale = 1.0f / std::sqrt(static_cast<float>(HD));
   const int32_t* table = tables + static_cast<size_t>(req) * pool_.total_blocks();
   const auto stage = [&](uint16_t* fallback, int width) -> uint16_t* {
-    if (!boundary_) return fallback;
+    // World 1 folds nothing (the partial is the whole); wider worlds fold
+    // in 8-row halves — a 16-row fold does not fit the latency slot.
+    if (!boundary_ || world_ == 1) return fallback;
     uint16_t* s = boundary_->stage(QR, width);
+    if (s == nullptr && capture)
+      throw std::runtime_error("dflash v1 draft: a capture fold does not fit the recorder's staged buffer");
     return s ? s : fallback;
   };
   const auto fold = [&](uint16_t* buf, int width) {
-    if (!boundary_) return;
-    boundary_->reduce(buf, QR, width);
+    if (!boundary_ || world_ == 1) return;
+    boundary_->reduce(buf, QR / 2, width);
+    boundary_->reduce(buf + static_cast<size_t>(QR / 2) * width, QR - QR / 2, width);
   };
   for (int l = 0; l < L; ++l) {
     const DFlashLayerWeights& w = df1w_.layers[l];
@@ -2325,7 +2333,7 @@ bool Qwen35Model::dflash1_draft(int req, int64_t bonus, std::vector<int32_t>* dr
   DGPP_CUDA_OK(cudaMemcpyAsync(df1_tokens_, df1_io64_h_ + QR, QR * 8, cudaMemcpyHostToDevice, stream_));
   embed_gather_bf16(globals_.embed, df1_tokens_, df1_resid_, QR, H, stream_);
   configure_gemm_rows(QR, true);
-  df1_block_layers(req, stream_);
+  df1_block_layers(req, stream_, /*capture=*/false);
   // Only the verifiable prefix needs head rows (per-row independent: top-1
   // of row j reads no other row's logits — skipping rows N+1..15 is
   // bitwise-identical for proposals 1..N, and saves (15-N) full-vocab
@@ -2345,12 +2353,14 @@ bool Qwen35Model::dflash1_draft(int req, int64_t bonus, std::vector<int32_t>* dr
     dflash2_topk_merge(table, HR, 16, world_, df1_ids_, df1_sc_, stream_);
   }
   // Mask rows 1..N propose their column 0; the anchor row's entry goes unread.
-  std::vector<int32_t> ids(static_cast<size_t>(HR) * 16);
-  DGPP_CUDA_OK(cudaMemcpyAsync(ids.data(), df1_ids_, static_cast<size_t>(HR) * 16 * 4,
+  // One gather kernel (kernels-only under capture); the eager path reads
+  // the N device ints home.
+  df1_collect_top1(df1_ids_, 16, df1_tok_, N, stream_);
+  std::vector<int32_t> ids(N);
+  DGPP_CUDA_OK(cudaMemcpyAsync(ids.data(), df1_tok_, static_cast<size_t>(N) * 4,
                                cudaMemcpyDeviceToHost, stream_));
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
-  drafts->resize(N);
-  for (int j = 0; j < N; ++j) (*drafts)[j] = ids[static_cast<size_t>(j + 1) * 16];
+  drafts->assign(ids.begin(), ids.end());
   return true;
 }
 void Qwen35Model::df_block_layers(int slots, const int* reqs, bool capture) {
@@ -2508,11 +2518,35 @@ void Qwen35Model::df_block_select(int slots, const int* reqs, bool capture) {
 }
 
 void Qwen35Model::session_graph_capture_block_draft(int req, const PickVerdict* verdict) {
-  if (!dflash2_) throw std::logic_error("session_graph_capture_block_draft: no drafter loaded");
+  if (!dflash2_ && !dflash1_) throw std::logic_error("session_graph_capture_block_draft: no drafter loaded");
   if (req < 0 || req >= max_requests_) throw std::invalid_argument("session_graph_capture_block_draft: request");
   if (verdict == nullptr) throw std::invalid_argument("session_graph_capture_block_draft: null verdict");
   if (!graph_device_positions_ || !graph_device_tokens_)
     throw std::logic_error("session_graph_capture_block_draft: the step must be captured with device positions and tokens");
+  if (dflash1_) {
+    // v1 scalar capture (C1 scope): the feed is the verifiable prefix
+    // [next + N drafts], but the block runs all 16 rows (later masks read
+    // earlier rows' keys) — staged past the feed with fresh masks.
+    const int H = cfg_.hidden_size;
+    const int QR = df1cfg_.query_rows(), N = dflash2_drafts();
+    if ((graph_feed_rows_ > 0 ? graph_feed_rows_ : decode_rows_) != 1 + N)
+      throw std::logic_error("session_graph_capture_block_draft: the v1 feed is [next, N drafts]");
+    dflash2_stage_block(verdict, d_session_pos_ + req, df1cfg_.mask_token_id, QR,
+                        max_context(), df1_pos_, df1_tokens_, stream_);
+    embed_gather_bf16(globals_.embed, df1_tokens_, df1_resid_, QR, H, stream_);
+    configure_gemm_rows(QR, true);
+    df1_block_layers(req, stream_, /*capture=*/true);
+    // Head rows for the verifiable prefix only (bitwise the eager prefix).
+    head_gemv(df1_h_, df1_logits_, 1 + N, stream_);
+    dflash2_topk_f32(df1_logits_, df1_ids_, df1_sc_, lm_vocab_count_, 1 + N, 16, stream_,
+                     df1_topk_ws_, df1_topk_ws_bytes_);
+    // Column 0 of rows 1..N into the device drafts (no host round-trip).
+    df1_collect_top1(df1_ids_, 16, df1_tok_, N, stream_);
+    dflash2_block_feed(verdict, df1_tok_, N, step_tokens_, stream_);
+    dflash2_publish_drafts(df1_tok_, df1_mirror_h_ + static_cast<size_t>(req) * df1cfg_.drafts(), N,
+                           stream_);
+    return;
+  }
   const int H = cfg_.hidden_size;
   const int QR = dfcfg_.query_rows(), D = dfcfg_.drafts();
   if ((graph_feed_rows_ > 0 ? graph_feed_rows_ : decode_rows_) != QR)
@@ -2535,7 +2569,9 @@ void Qwen35Model::session_graph_capture_block_draft(int req, const PickVerdict* 
 }
 
 void Qwen35Model::session_graph_capture_block_draft_batch(const PickVerdict* verdicts, int requests) {
-  if (!dflash2_) throw std::logic_error("session_graph_capture_block_draft_batch: no drafter loaded");
+  if (!dflash2_ && !dflash1_) throw std::logic_error("session_graph_capture_block_draft_batch: no drafter loaded");
+  if (dflash1_)
+    throw std::logic_error("session_graph_capture_block_draft_batch: the v1 batch capture is stage 3c (scalar capture only; the breakage latch keeps multi-slot eager)");
   if (verdicts == nullptr) throw std::invalid_argument("session_graph_capture_block_draft_batch: null verdicts");
   if (requests < 1 || requests > max_requests_ || requests > df_batch_)
     throw std::invalid_argument("session_graph_capture_block_draft_batch: requests exceed the slots or the stacked scratch");
