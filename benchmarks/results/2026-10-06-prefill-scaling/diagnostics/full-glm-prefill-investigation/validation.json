@@ -1,0 +1,47 @@
+{
+  "recorded_at": "2026-10-07T02:47:50.417702+00:00",
+  "checks": [
+    {
+      "log": "fused-dsa-suite.log",
+      "scope": "DSA suite before tail integration; 49 passed",
+      "sha256": "423ac5c7607563b760af197a4853a633c2d7eaa49804e0131313a8657fd893a9"
+    },
+    {
+      "log": "production-shape-parity.log",
+      "scope": "Expanded score-key parity; final kernel",
+      "sha256": "d6ced34cf87ede6df9819e9cad9eb10c71aa98d43edf3020dd3c80a44c214660"
+    },
+    {
+      "log": "tail-integration.log",
+      "scope": "Final layer integration; exact original GEMM selection",
+      "sha256": "6e7fd1de85740ce2eae485299d51bdcfd3db7948f6454c8aad36b157239d736b"
+    },
+    {
+      "log": "fused-memcheck.log",
+      "scope": "Expanded score parity under CUDA memcheck",
+      "sha256": "45193d7088d8dbc0c6ec72488524e724e249e077b2140cee139f3f251be56a24"
+    },
+    {
+      "log": "tail-integration-memcheck.log",
+      "scope": "Final layer integration under CUDA memcheck",
+      "sha256": "d3d0f6a0ff65206082d6e0bf38bd38cf667da66231a938fbfdca59bc143fdfd8"
+    },
+    {
+      "log": "fused-synccheck-barriers64.log",
+      "scope": "Expanded score parity under synccheck --num-cuda-barriers 64",
+      "sha256": "45193d7088d8dbc0c6ec72488524e724e249e077b2140cee139f3f251be56a24"
+    },
+    {
+      "log": "full-glm-regression.log",
+      "scope": "Full-GLM forward, prefill, decode, TP, graph; 10 CTests",
+      "sha256": "ebd37102e76f7d770b48d527f0b7abd7ca1301a805bba4094f7a46b597d6353f"
+    },
+    {
+      "log": "result-sources-tests.log",
+      "scope": "Three-generation evidence resolution, invalid evidence rejected; 14 tests",
+      "sha256": "a36435e8b0acbdb4ba4a34ca6401451332e28c6854e3ee41093717379b597bdc"
+    }
+  ],
+  "source_manifest": "fused-tail-preserving-candidate.json",
+  "serving_binary_sha256": "a9b605c0e22cc6eaf869b3c1eef0f4967a354913f71842a500a65103b14294a9"
+}

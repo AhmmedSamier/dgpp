@@ -1,0 +1,31 @@
+{
+  "command": [
+    "systemd-run",
+    "--user",
+    "--scope",
+    "--quiet",
+    "--property=MemorySwapMax=0",
+    "--",
+    "/home/stephen/workspace/dgpp/build-release/dsa_bench",
+    "--prefill-only",
+    "--full-glm",
+    "--kv-dtype",
+    "bf16",
+    "--tp",
+    "4",
+    "--ctx",
+    "262144",
+    "--capacity",
+    "262144",
+    "--chunk",
+    "2048",
+    "--warmup",
+    "1",
+    "--iters",
+    "3"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-10-07T02:05:13.266713+00:00",
+  "returncode": 0,
+  "finished_at": "2026-10-07T02:05:19.126489+00:00"
+}

@@ -1,0 +1,8 @@
+{
+  "expected_ranks": 2,
+  "md5": {
+    "serve_rank0.ops": "637cbf353a7663d1c31b680187a1fab3",
+    "serve_rank1.ops": "637cbf353a7663d1c31b680187a1fab3"
+  },
+  "passed": true
+}

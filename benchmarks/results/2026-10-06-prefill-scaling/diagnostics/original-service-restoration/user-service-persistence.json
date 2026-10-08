@@ -1,0 +1,26 @@
+{
+  "at": "2026-10-07T18:54:21.257189+00:00",
+  "reason": "Keep the zero-swap systemd user scope running after the last SSH session disconnects. Rank 2 was killed by user@1000.service logout teardown, with zero DGPP swap.",
+  "nodes": [
+    {
+      "host": "192.168.88.11",
+      "before": "Linger=no",
+      "after": "Linger=yes"
+    },
+    {
+      "host": "192.168.88.12",
+      "before": "Linger=no",
+      "after": "Linger=yes"
+    },
+    {
+      "host": "192.168.88.13",
+      "before": "Linger=no",
+      "after": "Linger=yes"
+    },
+    {
+      "host": "192.168.88.14",
+      "before": "Linger=no",
+      "after": "Linger=yes"
+    }
+  ]
+}

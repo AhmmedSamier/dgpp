@@ -1,0 +1,20 @@
+{
+  "base_commit": "21b91a39f999cef0c94579a3240b62b07854a80b",
+  "binary_sha256": "a983cebe9fc1c6fa4623a45cf7ba76eaf4fb7cdb5270179c0e48acba9b482883",
+  "patch_sha256": "b21a94ccb5949c0eb1ae21f95d658e01bf10f0749d2175ce3abfbb0c11b2833d",
+  "source_sha256": {
+    "src/kernels/dsa.cu": "aa0c24b045995934897fe4876878a95445caa490eb01a172aa1de9b4712a348a",
+    "src/kernels/dsa.hpp": "6aeb5eadd4518aa92894531ba54ff7efd06d62126cc59bfee5d568d58af1d38b",
+    "src/models/dsa_layer.cu": "7be9f3a33bdd0a3f97ae3ae496c9c9738a9b91cbc182ca9d25aa49722d83af89",
+    "src/models/dsa_layer.hpp": "27413ddbfd98ef1e554580d39e5357e7b0e75e7ba8c4fb970fc67420f4d5fab1",
+    "tests/cuda/dsa_test.cu": "593b61d48cb2627501202858ecfb1531ce64dc32f2bf611a4458d614931009fc"
+  },
+  "checked_at": "2026-10-07T03:28:14.207270+00:00",
+  "tests": {
+    "unrestricted-dsa-suite.log": "f5cc7e0dcc35ad65f2dd40b563543221e432a6fab046b13b1baf0ab34ee55351",
+    "single-query-memcheck.log": "45193d7088d8dbc0c6ec72488524e724e249e077b2140cee139f3f251be56a24",
+    "tail-memcheck.log": "d3d0f6a0ff65206082d6e0bf38bd38cf667da66231a938fbfdca59bc143fdfd8",
+    "single-query-synccheck.log": "45193d7088d8dbc0c6ec72488524e724e249e077b2140cee139f3f251be56a24",
+    "full-glm-regression.log": "eec093645d9cff5cc4d2e58ec73842f17958aff0ed38d4fa22e9e36e0b98d19d"
+  }
+}

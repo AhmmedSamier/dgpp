@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+  "surface": {
+    "id": "deepseek-ai/DeepSeek-V4.1-Flash",
+    "object": "model",
+    "created": 1791357535,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 0,
+        "top_p": 1,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "minimal"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "high"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "max"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text"
+    ],
+    "context": {
+      "request_limit_tokens": 1048576,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 1048576,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "c90dfa01249db1be4245780a052ede752e1361c612ac6d08e2bdada7d599476b",
+  "seed": 20260922,
+  "tag": "45665395bf27407280936296c31d9837",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 262144,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 5671.0,
+        "prefill_ms": 367554.10000000003,
+        "decode_steps": 91,
+        "decode_rows": 91,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 261647,
+        "prompt_tokens_computed": 261647
+      },
+      "engine_tokens_per_s": 44.965614530065245,
+      "ms_per_pass": 62.31868131868132,
+      "tokens_per_pass": 2.802197802197802,
+      "answer": {
+        "prompt_sha256": "c11823450c78636452ad20cd6ed6dbd1cfddc521f6a203d18980debcf6640e24",
+        "usage": {
+          "prompt_tokens": 261647,
+          "completion_tokens": 256,
+          "total_tokens": 261903,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user. Need parse request. They provided huge list of parcels items 000000 to 007804? Actually many. They ask: \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Need output numbered list for first 200 parcels (Item 000000 through 000199) describing parcel and city. Need likely include parcel ID and city. \"describing the first 200 parcels and their cities\" Could include item number, parcel, city. Need list 1-200. Need ensure first 200 parcels = items 000000 to 000199 inclusive. We need extract parcel ID and city for each. We can format numbered list 1. PX-... \u2014 City. Maybe include \"Item 000000: parcel PX-0757343 in Income\" etc. Need all 200. Need be accurate.\n\nLet's parse first 200 from prompt. Need list 1-200. Let's extract carefully.\n\nItems 000000-000199:\n\n000000 PX-0757343 Income\n000001 PX-0081436 Jamesport\n000002 PX-0126529 Dunmore\n000003 PX-0226532 Dunmore",
+        "wall_ms": 373372.02754593454,
+        "ttft_ms": 367677.5165030267,
+        "last_ms": 373371.919977013,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 262144,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 5505.900000000023,
+        "prefill_ms": 227.5,
+        "decode_steps": 92,
+        "decode_rows": 92,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 261647,
+        "prompt_tokens_computed": 15
+      },
+      "engine_tokens_per_s": 46.31395412194172,
+      "ms_per_pass": 59.84673913043503,
+      "tokens_per_pass": 2.7717391304347827,
+      "answer": {
+        "prompt_sha256": "c11823450c78636452ad20cd6ed6dbd1cfddc521f6a203d18980debcf6640e24",
+        "usage": {
+          "prompt_tokens": 261647,
+          "completion_tokens": 256,
+          "total_tokens": 261903,
+          "prompt_tokens_details": {
+            "cached_tokens": 261632
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user. Need parse request. They provided huge list of parcels items 000000 to 007804? Actually many. They ask: \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Need output numbered list for first 200 parcels (Item 000000 through 000199) describing parcel and city. Need likely include parcel ID and city. \"describing the first 200 parcels and their cities\" Could include item number, parcel, city. Need list 1-200. Need ensure first 200 parcels = items 000000 to 000199 inclusive. We need extract parcel ID and city for each. We can format numbered list 1. PX-... \u2014 City. Maybe include \"Item 000000: parcel PX-0757343 in Income\" etc. Need all 200. Need be accurate.\n\nLet's parse first 200 from prompt. Need list 1-200. Let's extract carefully.\n\nItems 000000-000199:\n\n000000 PX-0757343 Income\n000001 PX-0081436 Jamesport\n000002 PX-0126529 Dunmore\n000003 PX-0226532 Dunmore",
+        "wall_ms": 5914.121482986957,
+        "ttft_ms": 369.5841860026121,
+        "last_ms": 5888.831298099831,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 262144,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 5492.5,
+        "prefill_ms": 219.0,
+        "decode_steps": 92,
+        "decode_rows": 92,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 261647,
+        "prompt_tokens_computed": 15
+      },
+      "engine_tokens_per_s": 46.42694583522986,
+      "ms_per_pass": 59.70108695652174,
+      "tokens_per_pass": 2.7717391304347827,
+      "answer": {
+        "prompt_sha256": "c11823450c78636452ad20cd6ed6dbd1cfddc521f6a203d18980debcf6640e24",
+        "usage": {
+          "prompt_tokens": 261647,
+          "completion_tokens": 256,
+          "total_tokens": 261903,
+          "prompt_tokens_details": {
+            "cached_tokens": 261632
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user. Need parse request. They provided huge list of parcels items 000000 to 007804? Actually many. They ask: \"Write a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\" Need output numbered list for first 200 parcels (Item 000000 through 000199) describing parcel and city. Need likely include parcel ID and city. \"describing the first 200 parcels and their cities\" Could include item number, parcel, city. Need list 1-200. Need ensure first 200 parcels = items 000000 to 000199 inclusive. We need extract parcel ID and city for each. We can format numbered list 1. PX-... \u2014 City. Maybe include \"Item 000000: parcel PX-0757343 in Income\" etc. Need all 200. Need be accurate.\n\nLet's parse first 200 from prompt. Need list 1-200. Let's extract carefully.\n\nItems 000000-000199:\n\n000000 PX-0757343 Income\n000001 PX-0081436 Jamesport\n000002 PX-0126529 Dunmore\n000003 PX-0226532 Dunmore",
+        "wall_ms": 5854.281532811001,
+        "ttft_ms": 330.1571428310126,
+        "last_ms": 5829.235670855269,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

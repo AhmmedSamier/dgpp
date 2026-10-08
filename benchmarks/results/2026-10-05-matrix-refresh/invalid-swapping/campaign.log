@@ -1,0 +1,195 @@
+/usr/bin/python3: can't open file '/home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/checkpoint_storage.py': [Errno 2] No such file or directory
+Traceback (most recent call last):
+  File "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/run.py", line 132, in <module>
+    main()
+  File "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/run.py", line 113, in main
+    subprocess.run([sys.executable, str(HERE / "checkpoint_storage.py"), "--check"], check=True)
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/usr/bin/python3', '/home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/checkpoint_storage.py', '--check']' returned non-zero exit status 2.
+DISK 192.168.88.11: 271.8 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 465.2 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 570.9 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 634.0 GiB free; removed 0 completed session downloads
+2026-10-06T00:04:20.971855+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/default/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/default/server
+2026-10-06T00:05:07.027205+00:00 EXIT 0 raw/glm-flash-hybrid-w2/refresh/default/up.log
+2026-10-06T00:05:07.051898+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,2,4,8 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/default/greedy.json
+2026-10-06T00:23:22.270755+00:00 EXIT 0 raw/glm-flash-hybrid-w2/refresh/default/greedy.log
+2026-10-06T00:23:22.271152+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py 127.0.0.1 18080 2048 8192 32768 --repeat 3 --seed 7 --tag matrix-5acbce32cf57459f83210c0e33ea4712 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/default/prefill.json
+2026-10-06T00:28:41.549188+00:00 EXIT 0 raw/glm-flash-hybrid-w2/refresh/default/prefill.log
+2026-10-06T00:28:41.549607+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 --tag f7d3c54c02fb46bdb194ba942034c342 --lengths 0 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/default/context-0.json
+2026-10-06T00:29:06.568467+00:00 EXIT 0 raw/glm-flash-hybrid-w2/refresh/default/context-0.log
+2026-10-06T00:29:06.568862+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 --tag 4a4990afc1e0412eb019e37aefe23dcd --lengths 32768 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/default/context-32768.json
+2026-10-06T00:30:45.180446+00:00 EXIT 0 raw/glm-flash-hybrid-w2/refresh/default/context-32768.log
+2026-10-06T00:30:45.180708+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 --tag 00ccdd92389f48779375bd3fac6ef74d --lengths 65536 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/default/context-65536.json
+2026-10-06T00:33:55.531157+00:00 EXIT 0 raw/glm-flash-hybrid-w2/refresh/default/context-65536.log
+2026-10-06T00:33:55.531529+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 --tag 9300fabe672a40f781ec894094bd09ea --lengths 131072 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/default/context-131072.json
+2026-10-06T00:41:53.668360+00:00 EXIT 0 raw/glm-flash-hybrid-w2/refresh/default/context-131072.log
+2026-10-06T00:41:53.668778+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 --tag 7abff086a1124bc392334d8b6e43cc88 --lengths 262144 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/default/context-262144.json
+2026-10-06T00:41:54.086575+00:00 EXIT 0 raw/glm-flash-hybrid-w2/refresh/default/context-262144.log
+2026-10-06T00:41:54.087011+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 --tag 3b50b660f7dc4c52a337f72abd2ec42d --lengths 524288 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/default/context-524288.json
+2026-10-06T00:41:54.504388+00:00 EXIT 0 raw/glm-flash-hybrid-w2/refresh/default/context-524288.log
+2026-10-06T00:41:54.506734+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/default/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/default/server
+2026-10-06T00:42:00.578365+00:00 EXIT 0 raw/glm-flash-hybrid-w2/refresh/default/down.log
+Rendered overview; 319 outstanding measurement groups
+2026-10-06T00:42:00.761725+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/plain/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/plain/server
+2026-10-06T00:42:42.993412+00:00 EXIT 0 raw/glm-flash-hybrid-w2/refresh/plain/up.log
+2026-10-06T00:42:42.994628+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/plain/greedy.json
+2026-10-06T00:45:28.425738+00:00 EXIT 0 raw/glm-flash-hybrid-w2/refresh/plain/greedy.log
+2026-10-06T00:45:28.425948+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/plain/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/plain/server
+2026-10-06T00:45:32.169952+00:00 EXIT 0 raw/glm-flash-hybrid-w2/refresh/plain/down.log
+Rendered overview; 318 outstanding measurement groups
+2026-10-06T00:45:32.301787+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/mtp2/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/mtp2/server
+2026-10-06T00:46:14.333572+00:00 EXIT 0 raw/glm-flash-hybrid-w2/refresh/mtp2/up.log
+2026-10-06T00:46:14.334320+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/mtp2/greedy.json
+2026-10-06T00:46:55.919108+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/mtp2/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/mtp2/server
+2026-10-06T00:46:59.656034+00:00 EXIT 0 raw/glm-flash-hybrid-w2/refresh/mtp2/down.log
+Rendered overview; 318 outstanding measurement groups
+Traceback (most recent call last):
+  File "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/run.py", line 132, in <module>
+    main()
+  File "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/run.py", line 117, in main
+    measure(entry, mode, args.stages if mode == "default" else ["greedy"])
+  File "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/run.py", line 67, in measure
+    if not campaign.run(command, directory / f"{job}.log", timeout=43200):
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/run.py", line 111, in run
+    proc = subprocess.run(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 550, in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 1209, in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 2141, in _communicate
+    self.wait(timeout=self._remaining_time(endtime))
+  File "/usr/lib/python3.12/subprocess.py", line 1264, in wait
+    return self._wait(timeout=timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 2047, in _wait
+    time.sleep(delay)
+KeyboardInterrupt
+DISK 192.168.88.11: 271.7 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 464.9 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 570.9 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 634.0 GiB free; removed 0 completed session downloads
+SKIP glm-flash-hybrid-w2 default
+Rendered overview; 318 outstanding measurement groups
+SKIP glm-flash-hybrid-w2 plain
+Rendered overview; 318 outstanding measurement groups
+2026-10-06T00:47:06.751992+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/mtp2/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/mtp2/server
+2026-10-06T00:47:48.921767+00:00 EXIT 0 raw/glm-flash-hybrid-w2/refresh/mtp2/up.log
+2026-10-06T00:47:48.936280+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/mtp2/greedy.json
+2026-10-06T00:49:41.128217+00:00 EXIT 0 raw/glm-flash-hybrid-w2/refresh/mtp2/greedy.log
+2026-10-06T00:49:41.128596+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/mtp2/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/mtp2/server
+2026-10-06T00:49:44.868962+00:00 EXIT 0 raw/glm-flash-hybrid-w2/refresh/mtp2/down.log
+Rendered overview; 317 outstanding measurement groups
+2026-10-06T00:49:45.014132+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/mtp3/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/mtp3/server
+2026-10-06T00:50:27.011076+00:00 EXIT 0 raw/glm-flash-hybrid-w2/refresh/mtp3/up.log
+2026-10-06T00:50:27.012411+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/mtp3/greedy.json
+2026-10-06T00:52:31.931731+00:00 EXIT 0 raw/glm-flash-hybrid-w2/refresh/mtp3/greedy.log
+2026-10-06T00:52:31.932058+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/mtp3/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w2/refresh/mtp3/server
+2026-10-06T00:52:35.630574+00:00 EXIT 0 raw/glm-flash-hybrid-w2/refresh/mtp3/down.log
+Rendered overview; 316 outstanding measurement groups
+DISK 192.168.88.11: 271.7 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 464.9 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 570.9 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 634.0 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 271.7 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 464.9 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 570.9 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 634.0 GiB free; removed 0 completed session downloads
+2026-10-06T00:52:36.620334+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/default/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/default/server
+2026-10-06T00:53:18.607488+00:00 EXIT 0 raw/glm-flash-hybrid-256k-w2/refresh/default/up.log
+2026-10-06T00:53:18.608265+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,2,4,8 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/default/greedy.json
+2026-10-06T01:14:52.747948+00:00 EXIT 0 raw/glm-flash-hybrid-256k-w2/refresh/default/greedy.log
+2026-10-06T01:14:52.748324+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py 127.0.0.1 18080 2048 8192 32768 --repeat 3 --seed 7 --tag matrix-3946adb9bb7646899e388e87e7ec61a5 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/default/prefill.json
+2026-10-06T01:20:02.567677+00:00 EXIT 0 raw/glm-flash-hybrid-256k-w2/refresh/default/prefill.log
+2026-10-06T01:20:02.568046+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 --tag 5f04fbc50e02458da3c23c73734a56bd --lengths 0 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/default/context-0.json
+2026-10-06T01:20:26.775038+00:00 EXIT 0 raw/glm-flash-hybrid-256k-w2/refresh/default/context-0.log
+2026-10-06T01:20:26.775437+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 --tag 31aebcc92453401ebf9da582c21412fd --lengths 32768 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/default/context-32768.json
+2026-10-06T01:22:02.708372+00:00 EXIT 0 raw/glm-flash-hybrid-256k-w2/refresh/default/context-32768.log
+2026-10-06T01:22:02.708765+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 --tag c4082e1c19064547b976ef75afef5219 --lengths 65536 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/default/context-65536.json
+2026-10-06T01:25:06.805484+00:00 EXIT 0 raw/glm-flash-hybrid-256k-w2/refresh/default/context-65536.log
+2026-10-06T01:25:06.805722+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 --tag 8283d460a9214d88be9bc4bb5fa6efc5 --lengths 131072 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/default/context-131072.json
+2026-10-06T01:32:33.322456+00:00 EXIT 0 raw/glm-flash-hybrid-256k-w2/refresh/default/context-131072.log
+2026-10-06T01:32:33.322836+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 --tag 025aea696fbf44e38d7ef10828a013eb --lengths 262144 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/default/context-262144.json
+2026-10-06T02:00:27.676946+00:00 EXIT 0 raw/glm-flash-hybrid-256k-w2/refresh/default/context-262144.log
+2026-10-06T02:00:27.687798+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 --tag 1ffa1fcc32fc4961b7f8c74471e9a872 --lengths 524288 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/default/context-524288.json
+2026-10-06T02:00:28.160723+00:00 EXIT 0 raw/glm-flash-hybrid-256k-w2/refresh/default/context-524288.log
+2026-10-06T02:00:28.161171+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/default/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/default/server
+2026-10-06T02:00:33.999507+00:00 EXIT 0 raw/glm-flash-hybrid-256k-w2/refresh/default/down.log
+Rendered overview; 308 outstanding measurement groups
+2026-10-06T02:00:34.165535+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/plain/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/plain/server
+2026-10-06T02:01:14.310453+00:00 EXIT 0 raw/glm-flash-hybrid-256k-w2/refresh/plain/up.log
+2026-10-06T02:01:14.326352+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/plain/greedy.json
+2026-10-06T02:04:00.227650+00:00 EXIT 0 raw/glm-flash-hybrid-256k-w2/refresh/plain/greedy.log
+2026-10-06T02:04:00.227971+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/plain/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/plain/server
+2026-10-06T02:04:03.973461+00:00 EXIT 0 raw/glm-flash-hybrid-256k-w2/refresh/plain/down.log
+Rendered overview; 307 outstanding measurement groups
+2026-10-06T02:04:04.154870+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/mtp2/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/mtp2/server
+2026-10-06T02:04:46.328255+00:00 EXIT 0 raw/glm-flash-hybrid-256k-w2/refresh/mtp2/up.log
+2026-10-06T02:04:46.330960+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/mtp2/greedy.json
+2026-10-06T02:06:38.607621+00:00 EXIT 0 raw/glm-flash-hybrid-256k-w2/refresh/mtp2/greedy.log
+2026-10-06T02:06:38.608495+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/mtp2/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/mtp2/server
+2026-10-06T02:06:42.312182+00:00 EXIT 0 raw/glm-flash-hybrid-256k-w2/refresh/mtp2/down.log
+Rendered overview; 306 outstanding measurement groups
+2026-10-06T02:06:42.477867+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/mtp3/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/mtp3/server
+2026-10-06T02:07:24.554127+00:00 EXIT 0 raw/glm-flash-hybrid-256k-w2/refresh/mtp3/up.log
+2026-10-06T02:07:24.555060+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/mtp3/greedy.json
+2026-10-06T02:09:29.393073+00:00 EXIT 0 raw/glm-flash-hybrid-256k-w2/refresh/mtp3/greedy.log
+2026-10-06T02:09:29.393370+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/mtp3/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-256k-w2/refresh/mtp3/server
+2026-10-06T02:09:33.272594+00:00 EXIT 0 raw/glm-flash-hybrid-256k-w2/refresh/mtp3/down.log
+Rendered overview; 305 outstanding measurement groups
+DISK 192.168.88.11: 271.7 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 464.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 570.9 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 634.0 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 271.7 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 464.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 570.9 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 634.0 GiB free; removed 0 completed session downloads
+2026-10-06T02:09:34.172435+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/refresh/default/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/refresh/default/server
+2026-10-06T02:10:10.620333+00:00 EXIT 0 raw/glm-flash-hybrid-w4/refresh/default/up.log
+2026-10-06T02:10:10.621793+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/timed_load.py 127.0.0.1 18080 --concurrency 1,2,4,8 --classes all --repeat 3 --max-tokens 256 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/refresh/default/greedy.json
+2026-10-06T02:20:54.466783+00:00 EXIT 0 raw/glm-flash-hybrid-w4/refresh/default/greedy.log
+2026-10-06T02:20:54.467648+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py 127.0.0.1 18080 2048 8192 32768 --repeat 3 --seed 7 --tag matrix-095e5331778d41de966b4a82824a02bf --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/refresh/default/prefill.json
+2026-10-06T02:22:37.653451+00:00 EXIT 0 raw/glm-flash-hybrid-w4/refresh/default/prefill.log
+2026-10-06T02:22:37.654097+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 --tag bb515697f60244a68223aa556436ed48 --lengths 0 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/refresh/default/context-0.json
+2026-10-06T02:22:52.683501+00:00 EXIT 0 raw/glm-flash-hybrid-w4/refresh/default/context-0.log
+2026-10-06T02:22:52.683732+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 --tag 9d05e1a4133c4d68af754235ec7a3ea8 --lengths 32768 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/refresh/default/context-32768.json
+2026-10-06T02:23:33.107503+00:00 EXIT 0 raw/glm-flash-hybrid-w4/refresh/default/context-32768.log
+2026-10-06T02:23:33.107989+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 --tag f5d59ce2812f4d118755802d96edd3ba --lengths 65536 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/refresh/default/context-65536.json
+2026-10-06T02:25:00.384798+00:00 EXIT 0 raw/glm-flash-hybrid-w4/refresh/default/context-65536.log
+2026-10-06T02:25:00.389178+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 --tag f0c01f5efa2f4e249064ceadb7a06ec0 --lengths 131072 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/refresh/default/context-131072.json
+2026-10-06T02:30:23.999349+00:00 EXIT 0 raw/glm-flash-hybrid-w4/refresh/default/context-131072.log
+2026-10-06T02:30:24.008511+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 --tag ded5d717a4d34916a899abd2e6c72dbc --lengths 262144 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/refresh/default/context-262144.json
+2026-10-06T02:47:27.987757+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/refresh/default/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/refresh/default/server
+2026-10-06T02:47:46.564325+00:00 EXIT 0 raw/glm-flash-hybrid-w4/refresh/default/down.log
+Rendered overview; 298 outstanding measurement groups
+Traceback (most recent call last):
+  File "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/run.py", line 132, in <module>
+    main()
+  File "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/run.py", line 117, in main
+    measure(entry, mode, args.stages if mode == "default" else ["greedy"])
+  File "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/run.py", line 67, in measure
+    if not campaign.run(command, directory / f"{job}.log", timeout=43200):
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/stephen/workspace/dgpp/benchmarks/results/2026-09-22-current/run.py", line 111, in run
+    proc = subprocess.run(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 550, in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 1209, in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 2141, in _communicate
+    self.wait(timeout=self._remaining_time(endtime))
+  File "/usr/lib/python3.12/subprocess.py", line 1264, in wait
+    return self._wait(timeout=timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 2047, in _wait
+    time.sleep(delay)
+KeyboardInterrupt

@@ -1,0 +1,12 @@
+{
+  "source_base_commit": "0b10cbeaed1b7c51d854ec2f3a23729cb7b91c35",
+  "source_sha256": {
+    "src/models/dsv41/csa2_layer.cu": "b0a44edc95973e0f55e7285542b7fb09dd24246d88b2c4c9158449a42a335136",
+    "tests/cuda/csa2_layer_test.cu": "88de302f2daf3e4e77083866812412cef78cf2643023822646deb5b9ab14bb0b"
+  },
+  "patch_sha256": "5032933564d29ce13410dc2e20201aedfd42d065b182bd34bcb7eb2764eefc34",
+  "binary_sha256": "2bb443de41dbc0a2a804557a0126e4497fddb28ad0aec3e040cdceccc6c2cf34",
+  "scope": "Only DeepSeek-V4.1 CSA2 prefill query tiling; all cache/workspace allocations and decode paths unchanged.",
+  "introduced_by": "d942e92ce61cfb8931ccbe39ae131367e33719b1",
+  "introduced_at": "2026-09-14T16:20:00+00:00"
+}

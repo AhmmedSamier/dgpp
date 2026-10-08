@@ -1,0 +1,20 @@
+{
+  "command": [
+    "/home/stephen/workspace/dgpp/.venv/bin/python",
+    "/home/stephen/workspace/dgpp/scripts/serve_context_matrix.py",
+    "127.0.0.1",
+    "18080",
+    "--model",
+    "RadixArk/Qwen3.8-Flash-Next-NVFP4",
+    "--tag",
+    "df66a8b7c13348218f73a82970971a2c",
+    "--lengths",
+    "131072",
+    "--json-out",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/qwen-radixark-w2/refresh/default/context-131072.json"
+  ],
+  "cwd": "/home/stephen/workspace/dgpp",
+  "started_at": "2026-10-06T20:46:30.664581+00:00",
+  "returncode": 0,
+  "finished_at": "2026-10-06T20:49:01.778903+00:00"
+}

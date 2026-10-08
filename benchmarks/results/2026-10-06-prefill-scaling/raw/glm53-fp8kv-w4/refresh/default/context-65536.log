@@ -1,0 +1,3 @@
+65536 r0: 65008 prompt tokens, 0 cached, prefill 161.000s, decode 24.20 tok/s, 81.06 ms/pass
+65536 r1: 65008 prompt tokens, 65006 cached, prefill 0.138s, decode 24.21 tok/s, 81.02 ms/pass
+65536 r2: 65008 prompt tokens, 65006 cached, prefill 0.140s, decode 24.18 tok/s, 81.11 ms/pass

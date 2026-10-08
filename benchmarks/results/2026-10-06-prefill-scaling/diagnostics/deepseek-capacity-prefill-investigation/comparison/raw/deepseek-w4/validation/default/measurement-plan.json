@@ -1,0 +1,10 @@
+{
+  "jobs": [
+    "prefill",
+    "context-32768",
+    "context-65536",
+    "context-131072"
+  ],
+  "baseline": "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/deepseek-w4/refresh/default",
+  "reason": "Same configuration, tags, seeds and prompts; only CSA2 query tiling changed."
+}

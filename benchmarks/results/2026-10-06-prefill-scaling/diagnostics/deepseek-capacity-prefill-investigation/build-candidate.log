@@ -1,0 +1,132 @@
+[  9%] Built target dgpp_rope_scaling
+[ 18%] Built target dgpp_core
+[ 90%] Built target dgpp_kernels
+[ 90%] Building CUDA object CMakeFiles/dgpp_models_csa2.dir/src/models/dsv41/csa2_layer.cu.o
+[ 90%] Linking CXX static library libdgpp_models_csa2.a
+[ 90%] Built target dgpp_models_csa2
+[ 90%] Linking CXX executable csa2_layer_test
+[100%] Built target csa2_layer_test
+[  9%] Built target dgpp_rope_scaling
+[ 18%] Built target dgpp_core
+[ 90%] Built target dgpp_kernels
+[100%] Built target dgpp_models_dsa
+[100%] Building CUDA object CMakeFiles/csa2_test.dir/tests/cuda/csa2_test.cu.o
+[100%] Linking CXX executable csa2_test
+[100%] Built target csa2_test
+[  2%] Built target dgpp_core
+[ 15%] Built target pcre2-8-static
+[ 20%] Built target dgpp_device_ranges
+[ 20%] Built target dgpp_rope_scaling
+[ 23%] stamping dgpp_version.hpp
+[ 23%] Built target dgpp_net
+[ 25%] Built target dgpp_loaders
+[ 28%] Built target dgpp_text
+[ 30%] Built target dgpp_bus
+[ 51%] Built target dgpp_kernels
+[ 51%] Built target dgpp_models_glm4
+[ 53%] Built target dgpp_models_glm_dsa
+[ 56%] Built target dgpp_models_mimo
+[ 58%] Built target dgpp_models_dsv41
+[ 58%] Built target dgpp_models_csa2
+[ 58%] Built target dgpp_models_dsv4
+[ 64%] Built target dgpp_models_qwen
+[ 66%] Built target dgpp_models_kda
+[ 69%] Built target dgpp_models_dsa
+[ 69%] Built target dgpp_sched
+[ 71%] Built target dgpp_models_mimo_loader
+[ 71%] Built target dgpp_models_glm4_loader
+[ 74%] Built target dgpp_models_glm_dsa_loader
+[ 76%] Built target dgpp_models_dsv41_loader
+[ 79%] Built target dgpp_models_dsv4_loader
+[ 82%] Built target dgpp_models_qwen_loader
+[ 84%] Built target dgpp_models_glm
+[ 84%] Built target dgpp_models_moe
+[ 84%] Built target dgpp_models_dsv4_attn
+[ 89%] Built target dgpp_serve
+[ 89%] Built target dgpp_models_mimo_layers
+[ 92%] Built target dgpp_models_glm4_layers
+[ 92%] Built target dgpp_models_glm_dsa_layers
+[ 92%] Built target dgpp_models_dsv41_layers
+[ 92%] Built target dgpp_models_dsv4_layers
+[ 97%] Built target dgpp_models_qwen_layers
+[ 97%] Built target dgpp_models_glm_loader
+[ 97%] Built target dgpp_version
+[100%] Building CXX object CMakeFiles/dgpp_serve_app.dir/apps/dgpp_serve.cpp.o
+[100%] Linking CXX executable dgpp-serve
+[100%] Built target dgpp_serve_app
+[  4%] Built target dgpp_rope_scaling
+[  8%] Built target dgpp_core
+[ 30%] Built target pcre2-8-static
+[ 34%] Built target dgpp_device_ranges
+[ 34%] Built target dgpp_net
+[ 39%] Built target dgpp_loaders
+[ 43%] Built target dgpp_bus
+[ 47%] Built target dgpp_models_dsv41
+[ 52%] Built target dgpp_text
+[ 86%] Built target dgpp_kernels
+[ 91%] Built target dgpp_models_dsv41_loader
+[ 91%] Built target dgpp_sched
+[ 91%] Built target dgpp_models_csa2
+[ 95%] Built target dgpp_models_glm
+[ 95%] Built target dgpp_models_moe
+[ 95%] Built target dgpp_models_dsv41_layers
+[100%] Building CXX object CMakeFiles/dsv41_forward_test.dir/tests/cuda/dsv41_forward_test.cpp.o
+[100%] Linking CXX executable dsv41_forward_test
+[100%] Built target dsv41_forward_test
+[  4%] Built target dgpp_device_ranges
+[  9%] Built target dgpp_rope_scaling
+[ 13%] Built target dgpp_core
+[ 36%] Built target pcre2-8-static
+[ 36%] Built target dgpp_net
+[ 40%] Built target dgpp_loaders
+[ 45%] Built target dgpp_bus
+[ 81%] Built target dgpp_kernels
+[ 86%] Built target dgpp_models_dsv41
+[ 90%] Built target dgpp_text
+[ 95%] Built target dgpp_models_dsv41_loader
+[ 95%] Built target dgpp_models_csa2
+[ 95%] Built target dgpp_sched
+[100%] Built target dgpp_models_glm
+[100%] Built target dgpp_models_moe
+[100%] Built target dgpp_models_dsv41_layers
+[100%] Building CXX object CMakeFiles/dsv41_decode_test.dir/tests/cuda/dsv41_decode_test.cpp.o
+[100%] Linking CXX executable dsv41_decode_test
+[100%] Built target dsv41_decode_test
+[  4%] Built target dgpp_device_ranges
+[  9%] Built target dgpp_core
+[ 13%] Built target dgpp_rope_scaling
+[ 36%] Built target pcre2-8-static
+[ 40%] Built target dgpp_loaders
+[ 40%] Built target dgpp_net
+[ 45%] Built target dgpp_models_dsv41
+[ 50%] Built target dgpp_bus
+[ 86%] Built target dgpp_kernels
+[ 90%] Built target dgpp_text
+[ 90%] Built target dgpp_sched
+[ 90%] Built target dgpp_models_csa2
+[ 95%] Built target dgpp_models_dsv41_loader
+[100%] Built target dgpp_models_glm
+[100%] Built target dgpp_models_moe
+[100%] Built target dgpp_models_dsv41_layers
+[100%] Building CXX object CMakeFiles/dsv41_tp_test.dir/tests/cuda/dsv41_tp_test.cpp.o
+[100%] Linking CXX executable dsv41_tp_test
+[100%] Built target dsv41_tp_test
+[  4%] Built target dgpp_rope_scaling
+[  9%] Built target dgpp_device_ranges
+[ 31%] Built target pcre2-8-static
+[ 36%] Built target dgpp_core
+[ 40%] Built target dgpp_loaders
+[ 40%] Built target dgpp_net
+[ 45%] Built target dgpp_text
+[ 50%] Built target dgpp_bus
+[ 54%] Built target dgpp_models_dsv41
+[ 90%] Built target dgpp_kernels
+[ 90%] Built target dgpp_sched
+[ 95%] Built target dgpp_models_dsv41_loader
+[ 95%] Built target dgpp_models_csa2
+[100%] Built target dgpp_models_glm
+[100%] Built target dgpp_models_moe
+[100%] Built target dgpp_models_dsv41_layers
+[100%] Building CXX object CMakeFiles/dsv41_engine_test.dir/tests/cuda/dsv41_engine_test.cpp.o
+[100%] Linking CXX executable dsv41_engine_test
+[100%] Built target dsv41_engine_test

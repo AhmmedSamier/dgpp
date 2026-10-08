@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+  "surface": {
+    "id": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+    "object": "model",
+    "created": 1791381545,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 0,
+        "top_p": 0.95,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true
+        },
+        "low": {
+          "enable_thinking": true
+        },
+        "medium": {
+          "enable_thinking": true
+        },
+        "high": {
+          "enable_thinking": true
+        },
+        "xhigh": {
+          "enable_thinking": true
+        },
+        "max": {
+          "enable_thinking": true
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text"
+    ],
+    "context": {
+      "request_limit_tokens": 131072,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 131072,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "ff15eb925890d6b71b5160de4b846fbd13178438ab463b38ecc953e8cd1dcb3e",
+  "seed": 20260922,
+  "tag": "cf8a00c259ce43bcb03270bd02b01501",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 3314.899999999965,
+        "prefill_ms": 249.39999999999418,
+        "decode_steps": 141,
+        "decode_rows": 141,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 110,
+        "prompt_tokens_computed": 110
+      },
+      "engine_tokens_per_s": 76.92539744788762,
+      "ms_per_pass": 23.509929078013936,
+      "tokens_per_pass": 1.8085106382978724,
+      "answer": {
+        "prompt_sha256": "637f455a914f559fbe4e5a2891cf72d67c4aba030f75f1d8f960026123fb7503",
+        "usage": {
+          "prompt_tokens": 110,
+          "completion_tokens": 256,
+          "total_tokens": 366,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 100
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list of 200 parcels and their cities. However, the context only provides information about a single parcel (PX-0757343) with no mention of cities or any other parcels. I don't have data about 200 parcels or their cities.\n\nI should let the user know that the provided context only contains information about one parcel and doesn't include data about 200 parcels or their cities.I appreciate the request, but I'm unable to fulfill it. The context you've provided contains information about only **one** parcel:\n\n- **Item 000000:** Parcel PX-0757343, weighing 4.1825 kg, in Income, gate 1, shift C, status sealed.\n\nThere is no data in this context about:\n\n- **200 parcels** (only 1 is listed)\n- **Any cities** (no city information is included)\n\nI cannot fabricate or invent 199 additional parcels or assign cities to them, as that would be generating false data rather than working from the provided context.\n\nIf you have a larger dataset or additional context that includes the full list of ",
+        "wall_ms": 3591.1401819903404,
+        "ttft_ms": 280.69379599764943,
+        "last_ms": 3591.0260849632323,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 3329.9000000000233,
+        "prefill_ms": 250.10000000000582,
+        "decode_steps": 141,
+        "decode_rows": 141,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 110,
+        "prompt_tokens_computed": 110
+      },
+      "engine_tokens_per_s": 76.57887624252928,
+      "ms_per_pass": 23.616312056737755,
+      "tokens_per_pass": 1.8085106382978724,
+      "answer": {
+        "prompt_sha256": "637f455a914f559fbe4e5a2891cf72d67c4aba030f75f1d8f960026123fb7503",
+        "usage": {
+          "prompt_tokens": 110,
+          "completion_tokens": 256,
+          "total_tokens": 366,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 100
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list of 200 parcels and their cities. However, the context only provides information about a single parcel (PX-0757343) with no mention of cities or any other parcels. I don't have data about 200 parcels or their cities.\n\nI should let the user know that the provided context only contains information about one parcel and doesn't include data about 200 parcels or their cities.I appreciate the request, but I'm unable to fulfill it. The context you've provided contains information about only **one** parcel:\n\n- **Item 000000:** Parcel PX-0757343, weighing 4.1825 kg, in Income, gate 1, shift C, status sealed.\n\nThere is no data in this context about:\n\n- **200 parcels** (only 1 is listed)\n- **Any cities** (no city information is included)\n\nI cannot fabricate or invent 199 additional parcels or assign cities to them, as that would be generating false data rather than working from the provided context.\n\nIf you have a larger dataset or additional context that includes the full list of ",
+        "wall_ms": 3594.480457948521,
+        "ttft_ms": 281.1122329439968,
+        "last_ms": 3594.3769209552556,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 3328.2000000000116,
+        "prefill_ms": 247.5,
+        "decode_steps": 141,
+        "decode_rows": 141,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 110,
+        "prompt_tokens_computed": 110
+      },
+      "engine_tokens_per_s": 76.61799170722887,
+      "ms_per_pass": 23.60425531914902,
+      "tokens_per_pass": 1.8085106382978724,
+      "answer": {
+        "prompt_sha256": "637f455a914f559fbe4e5a2891cf72d67c4aba030f75f1d8f960026123fb7503",
+        "usage": {
+          "prompt_tokens": 110,
+          "completion_tokens": 256,
+          "total_tokens": 366,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 100
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list of 200 parcels and their cities. However, the context only provides information about a single parcel (PX-0757343) with no mention of cities or any other parcels. I don't have data about 200 parcels or their cities.\n\nI should let the user know that the provided context only contains information about one parcel and doesn't include data about 200 parcels or their cities.I appreciate the request, but I'm unable to fulfill it. The context you've provided contains information about only **one** parcel:\n\n- **Item 000000:** Parcel PX-0757343, weighing 4.1825 kg, in Income, gate 1, shift C, status sealed.\n\nThere is no data in this context about:\n\n- **200 parcels** (only 1 is listed)\n- **Any cities** (no city information is included)\n\nI cannot fabricate or invent 199 additional parcels or assign cities to them, as that would be generating false data rather than working from the provided context.\n\nIf you have a larger dataset or additional context that includes the full list of ",
+        "wall_ms": 3589.826714945957,
+        "ttft_ms": 280.038750031963,
+        "last_ms": 3589.670520974323,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

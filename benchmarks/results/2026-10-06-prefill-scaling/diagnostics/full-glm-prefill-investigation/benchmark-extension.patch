@@ -1,0 +1,139 @@
+diff --git a/benchmarks/micro/dsa_bench.cu b/benchmarks/micro/dsa_bench.cu
+index 653e1c0..efcb362 100644
+--- a/benchmarks/micro/dsa_bench.cu
++++ b/benchmarks/micro/dsa_bench.cu
+@@ -11,6 +11,8 @@
+ //          multiple of block_tokens).
+ //   --prefill-only --ctx N --capacity N --chunk N: time one prefill chunk
+ //          ending at ctx, with synthetic history and the specified KV pool.
++//   --full-glm: full GLM-5.3 indexed-layer geometry (prefill-only).
++//   --kv-dtype bf16|fp8|fp4: latent-cache format (prefill-only).
+ #include <cuda_runtime.h>
+ 
+ #include <algorithm>
+@@ -132,7 +134,7 @@ struct BenchWeights {
+   DsaLayerWeights views;
+   std::vector<DevBuf> dev;
+ 
+-  BenchWeights(const DsaConfig& cfg, uint64_t seed) {
++  BenchWeights(const DsaConfig& cfg, uint64_t seed, int64_t rope_positions = 0) {
+     const DsaGeometry g = DsaGeometry::from_config(cfg);
+     const int heads = cfg.index_n_heads;
+     const int dim = cfg.index_head_dim;
+@@ -150,7 +152,7 @@ struct BenchWeights {
+     views.k_norm_b = up(random_bf16_bits(seed ^ 0xF6, dim, -2, 0));
+     views.qkv_a = up(random_bf16_bits(
+         seed ^ 0x179,
+-        int64_t(cfg.q_lora_rank + cfg.kv_lora_rank) * cfg.hidden, -6, -3));
++        int64_t(cfg.q_lora_rank + cfg.kv_lora_rank + cfg.qk_rope_head_dim) * cfg.hidden, -6, -3));
+     views.q_aln = up(random_bf16_bits(seed ^ 0x28A, cfg.q_lora_rank, -2, 0));
+     views.kv_aln = up(random_bf16_bits(seed ^ 0x39B, cfg.kv_lora_rank, -2, 0));
+     views.q_b = up(random_bf16_bits(
+@@ -169,6 +171,13 @@ struct BenchWeights {
+     dev.emplace_back(ape.size() * 4);
+     dev.back().upload(ape.data(), ape.size() * 4);
+     views.ape = dev.back().as<float>();
++    if (cfg.qk_rope_head_dim > 0) {
++      if (rope_positions <= 0) throw std::invalid_argument("RoPE positions required");
++      std::vector<uint16_t> table(size_t(rope_positions) * cfg.qk_rope_head_dim);
++      dgpp::dsa_rope_table_host(8e6, cfg.qk_rope_head_dim, rope_positions, table.data());
++      views.rope_table = up(table);
++      views.rope_table_positions = rope_positions;
++    }
+   }
+ };
+ 
+@@ -308,10 +317,10 @@ void bench_prefill(int warmup, int iters, const DsaConfig& cfg, int tokens,
+   const DsaGeometry g = DsaGeometry::from_config(cfg);
+   cudaStream_t s;
+   DGPP_CUDA_OK(cudaStreamCreate(&s));
+-  BenchWeights bw(cfg, 41);
+   context = std::max<int64_t>(context, tokens);
+   capacity = std::max(capacity, context);
+   capacity = (capacity + cfg.block_tokens - 1) / cfg.block_tokens * cfg.block_tokens;
++  BenchWeights bw(cfg, 41, capacity);
+   dgpp::Arena arena;
+   dgpp::Arena::Config ac;
+   ac.persistent_hot =
+@@ -344,15 +353,21 @@ void bench_prefill(int warmup, int iters, const DsaConfig& cfg, int tokens,
+     DGPP_CUDA_OK(cudaGetLastError());
+     DGPP_CUDA_OK(cudaMemsetAsync(pool.latent(0), 0,
+                                  size_t(context) * g.latent_bytes_per_token, s));
++    if (pool.latent_scale(0)) {
++      std::vector<float> scales(size_t(context), 1.0f);
++      DGPP_CUDA_OK(cudaMemcpyAsync(pool.latent_scale(0), scales.data(),
++                                   scales.size() * sizeof(float), cudaMemcpyHostToDevice, s));
++      DGPP_CUDA_OK(cudaStreamSynchronize(s));
++    }
+   }
+   auto step = [&] { layer.enqueue_prefill(din.p, pool, 0, 0, start, tokens, dout.p, s); };
+   for (int i = 0; i < warmup; ++i) step();
+   DGPP_CUDA_OK(cudaStreamSynchronize(s));
+   const Timing t = time_loop(iters, step, s);
+   std::printf("%-30s mean=%8.3f ms min=%8.3f max=%8.3f  %8.0f tok/s  "
+-              "(x11 layers ~= %5.1f ms/chunk)\n",
++              "(one indexed attention layer; excludes MoE and collectives)\n",
+               label, t.mean_ms, t.min_ms, t.max_ms,
+-              tokens / (t.mean_ms * 1e-3), t.mean_ms * cfg.num_dsa_layers);
++              tokens / (t.mean_ms * 1e-3));
+   DGPP_CUDA_OK(cudaStreamDestroy(s));
+ }
+ 
+@@ -364,6 +379,8 @@ int main(int argc, char** argv) {
+   int64_t capacity = 0;
+   int chunk = 2048;
+   bool prefill_only = false;
++  bool full_glm = false;
++  dgpp::LatentFormat kv_format = dgpp::LatentFormat::kBf16;
+   for (int i = 1; i < argc; ++i) {
+     if (std::strcmp(argv[i], "--iters") == 0 && i + 1 < argc)
+       iters = std::atoi(argv[++i]);
+@@ -379,6 +396,22 @@ int main(int argc, char** argv) {
+       chunk = std::atoi(argv[++i]);
+     else if (std::strcmp(argv[i], "--prefill-only") == 0)
+       prefill_only = true;
++    else if (std::strcmp(argv[i], "--full-glm") == 0)
++      full_glm = true;
++    else if (std::strcmp(argv[i], "--kv-dtype") == 0 && i + 1 < argc) {
++      const auto parsed = dgpp::latent_format_from_string(argv[++i]);
++      if (!parsed || (*parsed != dgpp::LatentFormat::kBf16 &&
++                      *parsed != dgpp::LatentFormat::kFp8 &&
++                      *parsed != dgpp::LatentFormat::kFp4)) {
++        std::fprintf(stderr, "--kv-dtype must be bf16, fp8 or fp4\n");
++        return 1;
++      }
++      kv_format = *parsed;
++    }
++  }
++  if (!prefill_only && (full_glm || kv_format != dgpp::LatentFormat::kBf16)) {
++    std::fprintf(stderr, "--full-glm and quantized KV require --prefill-only\n");
++    return 1;
+   }
+   int devices = 0;
+   if (cudaGetDeviceCount(&devices) != cudaSuccess || devices < 1) {
+@@ -396,13 +429,24 @@ int main(int argc, char** argv) {
+ 
+   DsaConfig cfg{};  // real GLM-5.3-Flash geometry; --tp N for a rank's slice
+   cfg.tp_size = tp;
++  cfg.latent_format = kv_format;
++  if (full_glm) {
++    cfg.hidden = 6144;
++    cfg.q_lora_rank = 2048;
++    cfg.qk_nope_head_dim = 192;
++    cfg.qk_rope_head_dim = 64;
++    cfg.index_kpool = 1;
++    cfg.index_relu = 1;
++    cfg.num_dsa_layers = 1;  // isolate one indexed layer, not the whole stack
++  }
+   if (prefill_only) {
+     if (chunk <= 0 || chunk > ctx || chunk % cfg.block_tokens ||
+         (capacity && capacity < ctx) || iters <= 0 || warmup < 0) {
+       std::fprintf(stderr, "invalid prefill chunk, capacity, or iteration count\n");
+       return 1;
+     }
+-    std::printf("== prefill tail: TP=%d context=%lld capacity=%lld chunk=%d ==\n",
++    std::printf("== prefill tail: family=%s KV=%s TP=%d context=%lld capacity=%lld chunk=%d ==\n",
++                full_glm ? "full-glm" : "glm-flash", dgpp::latent_format_name(kv_format),
+                 tp, (long long)ctx, (long long)std::max(ctx, capacity), chunk);
+     bench_prefill(warmup, iters, cfg, chunk, "prefill tail", ctx, capacity);
+     return 0;

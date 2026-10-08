@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "model": "Qwen/Qwen3.8-27B-FP8",
+  "surface": {
+    "id": "Qwen/Qwen3.8-27B-FP8",
+    "object": "model",
+    "created": 1791386026,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 262144,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+  "seed": 20260922,
+  "tag": "42678a61f4a448efbce15d5df64a40bf",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 7463.199999999953,
+        "prefill_ms": 692.1999999999825,
+        "decode_steps": 53,
+        "decode_rows": 53,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 158,
+        "prompt_tokens_computed": 158
+      },
+      "engine_tokens_per_s": 34.16764926573073,
+      "ms_per_pass": 140.81509433962177,
+      "tokens_per_pass": 4.811320754716981,
+      "answer": {
+        "prompt_sha256": "209bba9a570f0f6584c9f05e517c88e392c1e0d531214c90eaec6de7f875aff6",
+        "usage": {
+          "prompt_tokens": 158,
+          "completion_tokens": 256,
+          "total_tokens": 414,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. Context: \"measurement 42678a61f4a448efbce15d5df64a40bf, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe only have one item? Need infer? This looks like a data generation task? Maybe they expect list of 200 parcels and cities, but only provided item 000000. Need maybe generate deterministic? We need satisfy: numbered list describing first 200 parcels and their cities. We have only one known parcel: PX-0757343 in Income. Need list all 200. Could be from hidden context? Maybe measurement/bucket/item indicates a synthetic dataset where item 000000 is first of 200? We need",
+        "wall_ms": 8180.940801044926,
+        "ttft_ms": 714.8617228958756,
+        "last_ms": 8180.72914890945,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 7472.300000000047,
+        "prefill_ms": 692.1000000000058,
+        "decode_steps": 53,
+        "decode_rows": 53,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 158,
+        "prompt_tokens_computed": 158
+      },
+      "engine_tokens_per_s": 34.126038836770256,
+      "ms_per_pass": 140.98679245283105,
+      "tokens_per_pass": 4.811320754716981,
+      "answer": {
+        "prompt_sha256": "209bba9a570f0f6584c9f05e517c88e392c1e0d531214c90eaec6de7f875aff6",
+        "usage": {
+          "prompt_tokens": 158,
+          "completion_tokens": 256,
+          "total_tokens": 414,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. Context: \"measurement 42678a61f4a448efbce15d5df64a40bf, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe only have one item? Need infer? This looks like a data generation task? Maybe they expect list of 200 parcels and cities, but only provided item 000000. Need maybe generate deterministic? We need satisfy: numbered list describing first 200 parcels and their cities. We have only one known parcel: PX-0757343 in Income. Need list all 200. Could be from hidden context? Maybe measurement/bucket/item indicates a synthetic dataset where item 000000 is first of 200? We need",
+        "wall_ms": 8210.635761963204,
+        "ttft_ms": 711.1298388335854,
+        "last_ms": 8184.760208008811,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 7470.699999999953,
+        "prefill_ms": 696.8000000000175,
+        "decode_steps": 53,
+        "decode_rows": 53,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 158,
+        "prompt_tokens_computed": 158
+      },
+      "engine_tokens_per_s": 34.13334761133516,
+      "ms_per_pass": 140.95660377358402,
+      "tokens_per_pass": 4.811320754716981,
+      "answer": {
+        "prompt_sha256": "209bba9a570f0f6584c9f05e517c88e392c1e0d531214c90eaec6de7f875aff6",
+        "usage": {
+          "prompt_tokens": 158,
+          "completion_tokens": 256,
+          "total_tokens": 414,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce numbered list describing first 200 parcels and their cities. Context: \"measurement 42678a61f4a448efbce15d5df64a40bf, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe only have one item? Need infer? This looks like a data generation task? Maybe they expect list of 200 parcels and cities, but only provided item 000000. Need maybe generate deterministic? We need satisfy: numbered list describing first 200 parcels and their cities. We have only one known parcel: PX-0757343 in Income. Need list all 200. Could be from hidden context? Maybe measurement/bucket/item indicates a synthetic dataset where item 000000 is first of 200? We need",
+        "wall_ms": 8197.279111947864,
+        "ttft_ms": 710.7364870607853,
+        "last_ms": 8197.115588001907,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

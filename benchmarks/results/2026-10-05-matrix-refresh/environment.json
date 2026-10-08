@@ -1,0 +1,26 @@
+[
+  {
+    "host": "192.168.88.11",
+    "returncode": 0,
+    "stdout": "Linux edgexpert-409e 6.17.0-1026-nvidia #26-Ubuntu SMP PREEMPT_DYNAMIC Thu Jun 25 00:57:17 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux\nNVIDIA GB10, 580.173.02\n               total        used        free      shared  buff/cache   available\nMem:          124546        8231       73254           0       44178      116314\nSwap:          16383         231       16152\nFilesystem      Size  Used Avail Use% Mounted on\n/dev/nvme0n1p2  3.6T  2.8T  680G  81% /\n",
+    "stderr": ""
+  },
+  {
+    "host": "192.168.88.12",
+    "returncode": 0,
+    "stdout": "Linux gx10-e9cd 6.17.0-1026-nvidia #26-Ubuntu SMP PREEMPT_DYNAMIC Thu Jun 25 00:57:17 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux\nNVIDIA GB10, 580.173.02\n               total        used        free      shared  buff/cache   available\nMem:          124610        4247      116184           0        5208      120362\nSwap:          16383         212       16171\nFilesystem      Size  Used Avail Use% Mounted on\n/dev/nvme0n1p2  3.6T  2.6T  913G  74% /\n",
+    "stderr": ""
+  },
+  {
+    "host": "192.168.88.13",
+    "returncode": 0,
+    "stdout": "Linux spark-a289 6.17.0-1026-nvidia #26-Ubuntu SMP PREEMPT_DYNAMIC Thu Jun 25 00:57:17 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux\nNVIDIA GB10, 580.173.02\n               total        used        free      shared  buff/cache   available\nMem:          124610        4305      116184           0        5180      120305\nSwap:          16383          80       16303\nFilesystem      Size  Used Avail Use% Mounted on\n/dev/nvme0n1p2  3.7T  2.7T  892G  75% /\n",
+    "stderr": ""
+  },
+  {
+    "host": "192.168.88.14",
+    "returncode": 0,
+    "stdout": "Linux aitopatom-4b80 6.17.0-1026-nvidia #26-Ubuntu SMP PREEMPT_DYNAMIC Thu Jun 25 00:57:17 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux\nNVIDIA GB10, 580.173.02\n               total        used        free      shared  buff/cache   available\nMem:          124610        4439      116106           0        5262      120171\nSwap:          16383          72       16311\nFilesystem      Size  Used Avail Use% Mounted on\n/dev/nvme0n1p2  3.7T  2.6T  956G  74% /\n",
+    "stderr": ""
+  }
+]

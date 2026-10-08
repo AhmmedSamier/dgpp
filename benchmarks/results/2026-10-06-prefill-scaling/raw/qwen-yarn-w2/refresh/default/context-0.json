@@ -1,0 +1,202 @@
+{
+  "schema_version": 1,
+  "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+  "surface": {
+    "id": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+    "object": "model",
+    "created": 1791315179,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "rope_scaling": {
+      "rope_type": "yarn",
+      "factor": 2,
+      "original_max_position_embeddings": 262144,
+      "beta_fast": 32,
+      "beta_slow": 1,
+      "attn_factor": 1,
+      "mrope_cache_factor": 4,
+      "mscale": 1.0693147,
+      "correction_max_position_embeddings": 1048576,
+      "scaled_max_position_embeddings": 524288
+    },
+    "context": {
+      "request_limit_tokens": 524288,
+      "position_ceiling_tokens": 524288,
+      "kv_pool_tokens": 565248,
+      "limited_by": "position-ceiling"
+    }
+  },
+  "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+  "seed": 20260922,
+  "tag": "4e25203be86444b091900b15b6753ff4",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 3705.0999999999767,
+        "prefill_ms": 210.10000000000582,
+        "decode_steps": 137,
+        "decode_rows": 137,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 160,
+        "prompt_tokens_computed": 160
+      },
+      "engine_tokens_per_s": 68.8240533318943,
+      "ms_per_pass": 27.044525547445087,
+      "tokens_per_pass": 1.8613138686131387,
+      "answer": {
+        "prompt_sha256": "894bc4d6c27aa11162d27cc688616600d14d5741a2ba7eaf8fba0bf89a11d7a9",
+        "usage": {
+          "prompt_tokens": 160,
+          "completion_tokens": 256,
+          "total_tokens": 416,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need parse. User: \"Context measurement 4e25203be86444b091900b15b6753ff4, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need produce numbered list first 200 parcels and their cities. But only one parcel given: PX-0757343, city? \"in Income\" maybe city Income? Need infer? They ask first 200 parcels and their cities. We only have item 000000. Need maybe generate? Could be a test of hallucination? Need likely say insufficient data? But user explicitly asks continue until listed all 200. We need maybe produce 200 entries based on pattern? Need think.\n\nContext measurement hash, bucket 0, item 000000: parcel",
+        "wall_ms": 3934.0303889475763,
+        "ttft_ms": 227.43810107931495,
+        "last_ms": 3933.8890109211206,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 3618.20000000007,
+        "prefill_ms": 202.89999999999418,
+        "decode_steps": 137,
+        "decode_rows": 137,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 160,
+        "prompt_tokens_computed": 160
+      },
+      "engine_tokens_per_s": 70.4770327787284,
+      "ms_per_pass": 26.410218978102698,
+      "tokens_per_pass": 1.8613138686131387,
+      "answer": {
+        "prompt_sha256": "894bc4d6c27aa11162d27cc688616600d14d5741a2ba7eaf8fba0bf89a11d7a9",
+        "usage": {
+          "prompt_tokens": 160,
+          "completion_tokens": 256,
+          "total_tokens": 416,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need parse. User: \"Context measurement 4e25203be86444b091900b15b6753ff4, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need produce numbered list first 200 parcels and their cities. But only one parcel given: PX-0757343, city? \"in Income\" maybe city Income? Need infer? They ask first 200 parcels and their cities. We only have item 000000. Need maybe generate? Could be a test of hallucination? Need likely say insufficient data? But user explicitly asks continue until listed all 200. We need maybe produce 200 entries based on pattern? Need think.\n\nContext measurement hash, bucket 0, item 000000: parcel",
+        "wall_ms": 3859.2657779809088,
+        "ttft_ms": 227.39774989895523,
+        "last_ms": 3834.091427968815,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 3620.6999999999534,
+        "prefill_ms": 203.80000000001746,
+        "decode_steps": 137,
+        "decode_rows": 137,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 160,
+        "prompt_tokens_computed": 160
+      },
+      "engine_tokens_per_s": 70.42837020465747,
+      "ms_per_pass": 26.42846715328433,
+      "tokens_per_pass": 1.8613138686131387,
+      "answer": {
+        "prompt_sha256": "894bc4d6c27aa11162d27cc688616600d14d5741a2ba7eaf8fba0bf89a11d7a9",
+        "usage": {
+          "prompt_tokens": 160,
+          "completion_tokens": 256,
+          "total_tokens": 416,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need parse. User: \"Context measurement 4e25203be86444b091900b15b6753ff4, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need produce numbered list first 200 parcels and their cities. But only one parcel given: PX-0757343, city? \"in Income\" maybe city Income? Need infer? They ask first 200 parcels and their cities. We only have item 000000. Need maybe generate? Could be a test of hallucination? Need likely say insufficient data? But user explicitly asks continue until listed all 200. We need maybe produce 200 entries based on pattern? Need think.\n\nContext measurement hash, bucket 0, item 000000: parcel",
+        "wall_ms": 3833.6324440315366,
+        "ttft_ms": 227.4493018630892,
+        "last_ms": 3833.5167630575597,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

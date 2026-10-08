@@ -1,0 +1,16 @@
+2026-10-07T03:28:14.425114+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-fp8kv-w4/refresh/default/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-fp8kv-w4/refresh/default/server
+2026-10-07T03:28:58.212209+00:00 EXIT 0 raw/glm53-fp8kv-w4/refresh/default/up.log
+2026-10-07T03:28:58.227116+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py 127.0.0.1 18080 2048 8192 32768 --repeat 3 --seed 7 --tag matrix-2d0fb8b3a9134eeeab5012bc23ee07b0 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-fp8kv-w4/refresh/default/prefill.json
+2026-10-07T03:33:44.613660+00:00 EXIT 0 raw/glm53-fp8kv-w4/refresh/default/prefill.log
+PARITY prefill: prompt hashes, output text, finish and token usage match
+2026-10-07T03:33:44.615963+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64 --tag b5c694bbf9ad4b1da2cab4dbf3b758ab --lengths 32768 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-fp8kv-w4/refresh/default/context-32768.json
+2026-10-07T03:35:30.772415+00:00 EXIT 0 raw/glm53-fp8kv-w4/refresh/default/context-32768.log
+PARITY context-32768: prompt hashes, output text, finish and token usage match
+2026-10-07T03:35:30.773555+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64 --tag 5dc87a58ea9148bdb515433702683520 --lengths 65536 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-fp8kv-w4/refresh/default/context-65536.json
+2026-10-07T03:38:45.111563+00:00 EXIT 0 raw/glm53-fp8kv-w4/refresh/default/context-65536.log
+PARITY context-65536: prompt hashes, output text, finish and token usage match
+2026-10-07T03:38:45.112256+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64 --tag 7f1dd8eed3ee486eb1e46f8bc0c3f72b --lengths 131072 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-fp8kv-w4/refresh/default/context-131072.json
+2026-10-07T03:45:29.538356+00:00 EXIT 0 raw/glm53-fp8kv-w4/refresh/default/context-131072.log
+PARITY context-131072: prompt hashes, output text, finish and token usage match
+2026-10-07T03:45:29.539447+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-fp8kv-w4/refresh/default/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-fp8kv-w4/refresh/default/server
+2026-10-07T03:45:36.722733+00:00 EXIT 0 raw/glm53-fp8kv-w4/refresh/default/down.log

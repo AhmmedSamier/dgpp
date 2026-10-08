@@ -1,0 +1,109 @@
+{
+  "audited_at": "2026-10-07T03:54:50.885730+00:00",
+  "fix_commit": "0b10cbeaed1b7c51d854ec2f3a23729cb7b91c35",
+  "gate": "full GLM: index_kpool==1, qk_rope_head_dim==64, index_topk==2048, padded pools>2048. Single-query fallback removed only inside this gate.",
+  "unaffected_families": "Flash keeps index_kpool=4. Qwen, MiMo and DeepSeek use separate model implementations. The non-fused tiling loop is equivalent to the previous loop.",
+  "catalog_sha256": {
+    "reused-results.json": "6ab78f2ff426eb39553acd80ea4a74f7adef5b2d374c42d8bcc1eb22de01f834",
+    "retained-results.json": "c71a8dced16ff4ac76341c8046f31ba75715f18fb1ce5b73515c2b1468455731"
+  },
+  "full_glm_retained_reports": [
+    {
+      "mode": "glm53-w4/default",
+      "job": "greedy",
+      "max_retained_prompt_tokens": 68,
+      "reason": "fusion gate is inactive at <=2048 pools"
+    },
+    {
+      "mode": "glm53-w4/default",
+      "job": "context-0",
+      "max_retained_prompt_tokens": 94,
+      "reason": "fusion gate is inactive at <=2048 pools"
+    },
+    {
+      "mode": "glm53-w4/default",
+      "job": "context-131072",
+      "max_retained_prompt_tokens": null,
+      "reason": "above-limit skip; no model request"
+    },
+    {
+      "mode": "glm53-w4/default",
+      "job": "context-262144",
+      "max_retained_prompt_tokens": null,
+      "reason": "above-limit skip; no model request"
+    },
+    {
+      "mode": "glm53-w4/default",
+      "job": "context-524288",
+      "max_retained_prompt_tokens": null,
+      "reason": "above-limit skip; no model request"
+    },
+    {
+      "mode": "glm53-w4/plain",
+      "job": "greedy",
+      "max_retained_prompt_tokens": 68,
+      "reason": "fusion gate is inactive at <=2048 pools"
+    },
+    {
+      "mode": "glm53-w4/mtp2",
+      "job": "greedy",
+      "max_retained_prompt_tokens": 68,
+      "reason": "fusion gate is inactive at <=2048 pools"
+    },
+    {
+      "mode": "glm53-w4/mtp3",
+      "job": "greedy",
+      "max_retained_prompt_tokens": 68,
+      "reason": "fusion gate is inactive at <=2048 pools"
+    },
+    {
+      "mode": "glm53-fp8kv-w4/default",
+      "job": "greedy",
+      "max_retained_prompt_tokens": 68,
+      "reason": "fusion gate is inactive at <=2048 pools"
+    },
+    {
+      "mode": "glm53-fp8kv-w4/default",
+      "job": "prefill",
+      "max_retained_prompt_tokens": 2047,
+      "reason": "fusion gate is inactive at <=2048 pools"
+    },
+    {
+      "mode": "glm53-fp8kv-w4/default",
+      "job": "context-0",
+      "max_retained_prompt_tokens": 97,
+      "reason": "fusion gate is inactive at <=2048 pools"
+    },
+    {
+      "mode": "glm53-fp8kv-w4/default",
+      "job": "context-262144",
+      "max_retained_prompt_tokens": null,
+      "reason": "above-limit skip; no model request"
+    },
+    {
+      "mode": "glm53-fp8kv-w4/default",
+      "job": "context-524288",
+      "max_retained_prompt_tokens": null,
+      "reason": "above-limit skip; no model request"
+    },
+    {
+      "mode": "glm53-fp8kv-w4/plain",
+      "job": "greedy",
+      "max_retained_prompt_tokens": 68,
+      "reason": "fusion gate is inactive at <=2048 pools"
+    },
+    {
+      "mode": "glm53-fp8kv-w4/mtp2",
+      "job": "greedy",
+      "max_retained_prompt_tokens": 68,
+      "reason": "fusion gate is inactive at <=2048 pools"
+    },
+    {
+      "mode": "glm53-fp8kv-w4/mtp3",
+      "job": "greedy",
+      "max_retained_prompt_tokens": 68,
+      "reason": "fusion gate is inactive at <=2048 pools"
+    }
+  ],
+  "reruns": "Both full-GLM default prefill/context groups from the initial fusion binary are archived; final measurements use a983cebe. No a9b605 measurements are retained in the resolver."
+}

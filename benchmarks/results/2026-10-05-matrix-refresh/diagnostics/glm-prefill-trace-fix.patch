@@ -1,0 +1,144 @@
+diff --git a/apps/dgpp_serve.cpp b/apps/dgpp_serve.cpp
+index 295a755..1bd2966 100644
+--- a/apps/dgpp_serve.cpp
++++ b/apps/dgpp_serve.cpp
+@@ -388,6 +388,8 @@ struct GlmFamily final : ServeFamily {
+         fabric ? dgpp::GlmResidency::Resident : dgpp::GlmResidency::Streaming,
+         fabric ? dgpp::GlmHeadSharding::VocabSharded : dgpp::GlmHeadSharding::Full, slots,
+         fabric && mtp, kv_format, /*serving_logits=*/true);
++    // Neither the eager nor graph serving path consumes diagnostic routes.
++    model->set_decode_route_traces(false);
+   }
+   void destroy_model() override { model.reset(); }
+   size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
+diff --git a/src/models/glm/decode.cpp b/src/models/glm/decode.cpp
+index 44a5fb2..e26c63f 100644
+--- a/src/models/glm/decode.cpp
++++ b/src/models/glm/decode.cpp
+@@ -1372,7 +1372,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
+   if (!capture_mode) debug_sync("embed", -1, decode_row);
+ 
+   Outputs out;
+-  out.routes.reserve(static_cast<size_t>(cfg_.num_hidden_layers));
++  if (decode_route_traces_) out.routes.reserve(static_cast<size_t>(cfg_.num_hidden_layers));
+   uint16_t* cur = streams_[0];
+   uint16_t* nxt = streams_[1];
+   int dsa_ordinal = 0;
+@@ -1690,13 +1690,19 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
+         trace.ids = moe_prefill_trace_ids_ + lay * mt * moe_cfg_.top_k;
+         trace.weights = moe_prefill_trace_weights_ + lay * mt * moe_cfg_.top_k;
+         trace.biased = moe_prefill_trace_biased_ + lay * mt * moe_cfg_.n_experts;
+-        moe_->enqueue_prefill(normed_, ffn_out, T, &trace, stream_);
+-        GlmRouteTraceLayer route;
+-        route.layer_idx = static_cast<uint32_t>(layer);
+-        route.top_k = static_cast<uint32_t>(moe_cfg_.top_k);
+-        route.tokens = static_cast<uint64_t>(T);
+-        out.routes.push_back(std::move(route));  // ids/weights: post-sync
+-        out.route_biased.emplace_back();
++        // Serving needs logits and hidden states only. Retaining these
++        // diagnostic scores across chunks costs ~50 KiB per prompt token
++        // on Flash: over 12 GiB per rank at 256K, outside the KV budget.
++        moe_->enqueue_prefill(normed_, ffn_out, T,
++                              decode_route_traces_ ? &trace : nullptr, stream_);
++        if (decode_route_traces_) {
++          GlmRouteTraceLayer route;
++          route.layer_idx = static_cast<uint32_t>(layer);
++          route.top_k = static_cast<uint32_t>(moe_cfg_.top_k);
++          route.tokens = static_cast<uint64_t>(T);
++          out.routes.push_back(std::move(route));  // ids/weights: post-sync
++          out.route_biased.emplace_back();
++        }
+         ++moe_prefill_calls;
+       }
+     }
+diff --git a/src/models/glm/forward.hpp b/src/models/glm/forward.hpp
+index 910a063..10bf008 100644
+--- a/src/models/glm/forward.hpp
++++ b/src/models/glm/forward.hpp
+@@ -619,12 +619,13 @@ class GlmDiagnosticModel : public PrefillReporting {
+   int graph_batch_requests() const { return graph_batch_requests_; }
+   int graph_rows_per_request() const { return graph_rows_per_request_; }
+ 
+-  // Decode-step route traces (Outputs.routes / route_biased): the per-MoE-
++  // Route traces for prefill and decode (Outputs.routes / route_biased): the per-MoE-
+   // layer ids, weights and biased scores the parity gates and the near-tie
+-  // audit read. They cost three D2H nodes per MoE layer per step (126 per
+-  // token here), which a serving loop that only wants logits should not
+-  // pay. Default on; the serving apps turn them off. Takes effect at the
+-  // next capture / eager step.
++  // audit read. Decode adds three D2H nodes per MoE layer per step;
++  // prefill also accumulates scores for the entire prompt on the host.
++  // Default on for diagnostics; serving disables both. The setter keeps
++  // its existing name, matching SessionModel. Takes effect at the next
++  // capture / eager forward.
+   void set_decode_route_traces(bool on) { decode_route_traces_ = on; }
+   // Q0 measurement knob (2026-09-09): after the attention-site fold of the
+   // first N layers of every decode row, issue boundary_->probe(T, 10240) —
+diff --git a/tests/cuda/glm_tp_test.cpp b/tests/cuda/glm_tp_test.cpp
+index 5011a15..2757b5f 100644
+--- a/tests/cuda/glm_tp_test.cpp
++++ b/tests/cuda/glm_tp_test.cpp
+@@ -5525,6 +5525,63 @@ DGPP_TEST(glm_tp_bf16_residency_modes_are_bitwise_the_checkpoint) {
+   }
+ }
+ 
++DGPP_TEST(glm_tp_route_traces_off_bounds_prefill_outputs_without_changing_tokens) {
++  const auto cfg = glm_tp_test_config();
++  const std::string dir = "glm_tp_fixture";
++  glm_tp_write_fixture(dir);
++  GlmDiagnosticModel traced(cfg, dir, 64, 1024, nullptr, 0, 1,
++      GlmResidency::Resident, GlmHeadSharding::Full, 2, true);
++  GlmDiagnosticModel serving(cfg, dir, 64, 1024, nullptr, 0, 1,
++      GlmResidency::Resident, GlmHeadSharding::Full, 2, true);
++  serving.set_decode_route_traces(false);
++  const auto prompt = make_tokens(43, cfg.vocab_size);
++  auto expected = traced.session_prefill_begin(0, prompt, 64, 8);
++  auto actual = serving.session_prefill_begin(0, prompt, 64, 8);
++  bool done = false;
++  while (!done) {
++    done = traced.session_prefill_advance(expected);
++    require(serving.session_prefill_advance(actual) == done, "trace switch preserves chunk progress");
++    require(!expected.output.routes.empty() && !expected.output.route_biased.empty(),
++            "diagnostic prefill retains routing evidence");
++    require(actual.output.routes.empty() && actual.output.route_biased.empty(),
++            "serving prefill must not accumulate prompt-sized diagnostic routes");
++    require(actual.output.logits == expected.output.logits &&
++                actual.output.final_hidden_bits == expected.output.final_hidden_bits,
++            "trace switch preserves every chunk's outputs bitwise");
++  }
++  const auto token = local_max(expected.output.logits.data(), expected.output.lm_vocab_count,
++                               expected.output.lm_vocab_begin).id;
++  require(serving.session_draft(0, {token}).logits == traced.session_draft(0, {token}).logits,
++          "trace switch preserves draft state");
++  const auto expected_step = traced.session_step(0, token);
++  const auto actual_step = serving.session_step(0, token);
++  require(actual_step.logits == expected_step.logits &&
++              actual_step.final_hidden_bits == expected_step.final_hidden_bits,
++          "trace switch preserves subsequent decode bitwise");
++  require(actual_step.routes.empty() && actual_step.route_biased.empty(), "decode traces stay off");
++  traced.session_close(0);
++  serving.session_close(0);
++
++  const auto short_a = make_tokens(13, cfg.vocab_size);
++  const auto short_b = make_tokens(19, cfg.vocab_size);
++  const auto expected_group = traced.session_prefill_group({0, 1}, {&short_a, &short_b});
++  const auto actual_group = serving.session_prefill_group({0, 1}, {&short_a, &short_b});
++  require(!expected_group[0].routes.empty(), "diagnostic grouped prefill retains routing evidence");
++  for (int req : {0, 1}) {
++    require(actual_group[req].routes.empty() && actual_group[req].route_biased.empty(),
++            "grouped serving prefill must not retain diagnostic routes");
++    require(actual_group[req].logits == expected_group[req].logits &&
++                actual_group[req].final_hidden_bits == expected_group[req].final_hidden_bits,
++            "trace switch preserves grouped prefill bitwise");
++    traced.session_close(req);
++    serving.session_close(req);
++  }
++  serving.set_decode_route_traces(true);
++  const auto reenabled = serving.session_prefill(0, short_a);
++  require(!reenabled.routes.empty() && !reenabled.route_biased.empty(),
++          "diagnostic traces can be reenabled after serving");
++}
++
+ DGPP_TEST(glm_tp_resumable_prefill_matches_main_draft_and_interleaved_decode) {
+   const auto cfg = glm_tp_test_config();
+   const std::string dir = "glm_tp_fixture";

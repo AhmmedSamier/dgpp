@@ -1,0 +1,8 @@
+========= COMPUTE-SANITIZER
+[INFO] workspace-tp1-cap512: 0 selection flips, every one certified as a near tie
+[INFO] workspace-tp1-cap4096: 0 selection flips, every one certified as a near tie
+[INFO] workspace-tp4-cap512: 0 selection flips, every one certified as a near tie
+[INFO] workspace-tp4-cap4096: 0 selection flips, every one certified as a near tie
+[ OK ] csa2_prefill_reuses_score_workspace_at_shorter_contexts
+1 tests, 0 failed
+========= ERROR SUMMARY: 0 errors

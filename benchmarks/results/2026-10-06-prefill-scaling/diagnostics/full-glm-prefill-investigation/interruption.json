@@ -1,0 +1,64 @@
+{
+  "at": "2026-10-07T02:00:06.884378+00:00",
+  "reason": "User challenged 22+ minute full GLM256K prefill. Stop current attempt to profile full-model geometry; prior performance profiling covered Flash geometry only. Preserve completed records and zero-swap evidence. No new root cause established yet.",
+  "controller_pid": 2824535,
+  "controller_start_ticks": 148731510,
+  "signal": "SIGINT",
+  "active_directory": "raw/glm53-fp4kv-256k-w4/refresh/default",
+  "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+  "followup": {
+    "at": "2026-10-07T02:03:02.685009+00:00",
+    "reason": "Interrupted default shutdown rank mismatch raised RuntimeError over KeyboardInterrupt, so controller continued to plain. SIGSTOP held it before explicit shutdown. Terminate controller and client; telemetry remains active through cluster down.",
+    "children": [
+      {
+        "pid": 2965855,
+        "pgid": 2965855,
+        "start_ticks": "149202740",
+        "cmdline": "/usr/bin/python3 /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-fp4kv-256k-w4/refresh/plain/node_telemetry.py "
+      },
+      {
+        "pid": 2965856,
+        "pgid": 2965856,
+        "start_ticks": "149202741",
+        "cmdline": "ssh -o BatchMode=yes -o ConnectTimeout=8 stephen@192.168.88.12 python3 - "
+      },
+      {
+        "pid": 2965857,
+        "pgid": 2965857,
+        "start_ticks": "149202741",
+        "cmdline": "ssh -o BatchMode=yes -o ConnectTimeout=8 stephen@192.168.88.13 python3 - "
+      },
+      {
+        "pid": 2965858,
+        "pgid": 2965858,
+        "start_ticks": "149202741",
+        "cmdline": "ssh -o BatchMode=yes -o ConnectTimeout=8 stephen@192.168.88.14 python3 - "
+      },
+      {
+        "pid": 2965859,
+        "pgid": 2965859,
+        "start_ticks": "149202741",
+        "cmdline": "ssh -o BatchMode=yes -o ConnectTimeout=8 stephen@192.168.88.13 sudo -n journalctl -k -f -n 0 -o short-iso "
+      },
+      {
+        "pid": 2968266,
+        "pgid": 2824534,
+        "start_ticks": "149207097",
+        "cmdline": ""
+      }
+    ],
+    "telemetry_stopped": [
+      2965855,
+      2965856,
+      2965857,
+      2965858,
+      2965859
+    ]
+  },
+  "controller_exit_code": 143,
+  "ranks_stopped_at": "2026-10-07T02:03:33.921467+00:00",
+  "archives": {
+    "default": "attempts/glm53-fp4kv-256k-w4/default-interrupted-for-full-model-profile-20261007T020000Z",
+    "plain": "attempts/glm53-fp4kv-256k-w4/plain-interrupted-for-full-model-profile-20261007T020000Z"
+  }
+}

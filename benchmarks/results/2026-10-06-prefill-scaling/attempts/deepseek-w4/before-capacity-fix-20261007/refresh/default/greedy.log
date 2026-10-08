@@ -1,0 +1,475 @@
+model deepseek-ai/DeepSeek-V4.1-Flash
+warm 0: status 200 tokens 64
+== prose concurrency 1: 05:14:30.369 .. 05:14:36.950  wall 6.6 s
+   req 0: status 200 finish=length tokens 256 chunks 255 ttft 153 ms  client update pace 25.31 ms/update
+   aggregate wall: 256 tokens in 6.58 s = 38.90 tok/s (prefill included)
+   legacy output-span aggregate: 39.82778334536811 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 39.914 tok/s
+== prose concurrency 1: 05:14:36.951 .. 05:14:43.312  wall 6.4 s
+   req 0: status 200 finish=length tokens 256 chunks 255 ttft 153 ms  client update pace 24.34 ms/update
+   aggregate wall: 256 tokens in 6.36 s = 40.24 tok/s (prefill included)
+   legacy output-span aggregate: 41.40752282745458 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 41.403 tok/s
+== prose concurrency 1: 05:14:43.313 .. 05:14:49.641  wall 6.3 s
+   req 0: status 200 finish=length tokens 256 chunks 255 ttft 153 ms  client update pace 24.31 ms/update
+   aggregate wall: 256 tokens in 6.33 s = 40.45 tok/s (prefill included)
+   legacy output-span aggregate: 41.45668641041133 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 41.586 tok/s
+== prose concurrency 2: 05:14:49.643 .. 05:14:57.886  wall 8.2 s
+   req 0: status 200 finish=length tokens 256 chunks 257 ttft 255 ms  client update pace 31.20 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 254 ms  client update pace 30.23 ms/update
+   aggregate wall: 512 tokens in 8.24 s = 62.11 tok/s (prefill included)
+   legacy output-span aggregate: 64.09858997672659 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 64.257 tok/s
+== prose concurrency 2: 05:14:57.887 .. 05:15:06.127  wall 8.2 s
+   req 0: status 200 finish=length tokens 256 chunks 257 ttft 229 ms  client update pace 31.29 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 229 ms  client update pace 30.81 ms/update
+   aggregate wall: 512 tokens in 8.24 s = 62.14 tok/s (prefill included)
+   legacy output-span aggregate: 63.921172187877 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 64.155 tok/s
+== prose concurrency 2: 05:15:06.128 .. 05:15:14.521  wall 8.4 s
+   req 0: status 200 finish=length tokens 256 chunks 257 ttft 230 ms  client update pace 31.88 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 229 ms  client update pace 30.02 ms/update
+   aggregate wall: 512 tokens in 8.39 s = 61.00 tok/s (prefill included)
+   legacy output-span aggregate: 62.72850799402896 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 62.931 tok/s
+== prose concurrency 4: 05:15:14.524 .. 05:15:27.815  wall 13.3 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 332 ms  client update pace 49.33 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 255 ttft 331 ms  client update pace 47.03 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 253 ttft 331 ms  client update pace 51.43 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 254 ttft 331 ms  client update pace 47.91 ms/update
+   aggregate wall: 1024 tokens in 13.29 s = 77.04 tok/s (prefill included)
+   legacy output-span aggregate: 79.0162273927494 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 79.459 tok/s
+== prose concurrency 4: 05:15:27.816 .. 05:15:40.961  wall 13.1 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 306 ms  client update pace 49.94 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 255 ttft 306 ms  client update pace 48.14 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 253 ttft 306 ms  client update pace 50.94 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 254 ttft 305 ms  client update pace 50.04 ms/update
+   aggregate wall: 1024 tokens in 13.14 s = 77.90 tok/s (prefill included)
+   legacy output-span aggregate: 79.7642327130324 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 80.304 tok/s
+== prose concurrency 4: 05:15:40.961 .. 05:15:53.994  wall 13.0 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 305 ms  client update pace 49.01 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 255 ttft 305 ms  client update pace 46.70 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 253 ttft 305 ms  client update pace 50.51 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 254 ttft 304 ms  client update pace 48.80 ms/update
+   aggregate wall: 1024 tokens in 13.03 s = 78.57 tok/s (prefill included)
+   legacy output-span aggregate: 80.45648945368349 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 80.964 tok/s
+== prose concurrency 8: 05:15:54.001 .. 05:16:23.589  wall 29.6 s
+   req 0: status 200 finish=length tokens 256 chunks 255 ttft 384 ms  client update pace 68.77 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 255 ttft 384 ms  client update pace 69.27 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 255 ttft 384 ms  client update pace 65.86 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 254 ttft 383 ms  client update pace 74.35 ms/update
+   req 4: status 200 finish=length tokens 256 chunks 255 ttft 383 ms  client update pace 66.87 ms/update
+   req 5: status 200 finish=length tokens 256 chunks 253 ttft 383 ms  client update pace 68.91 ms/update
+   req 6: status 200 finish=length tokens 256 chunks 253 ttft 17520 ms  client update pace 46.77 ms/update
+   req 7: status 200 finish=length tokens 256 chunks 254 ttft 17265 ms  client update pace 48.70 ms/update
+   aggregate wall: 2048 tokens in 29.59 s = 69.22 tok/s (prefill included)
+   legacy output-span aggregate: 70.12848012468827 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 71.250 tok/s
+== prose concurrency 8: 05:16:23.590 .. 05:16:54.344  wall 30.8 s
+   req 0: status 200 finish=length tokens 256 chunks 255 ttft 383 ms  client update pace 66.67 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 255 ttft 16323 ms  client update pace 56.71 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 255 ttft 384 ms  client update pace 63.15 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 254 ttft 384 ms  client update pace 70.25 ms/update
+   req 4: status 200 finish=length tokens 256 chunks 255 ttft 383 ms  client update pace 64.55 ms/update
+   req 5: status 200 finish=length tokens 256 chunks 253 ttft 382 ms  client update pace 66.38 ms/update
+   req 6: status 200 finish=length tokens 256 chunks 253 ttft 383 ms  client update pace 62.74 ms/update
+   req 7: status 200 finish=length tokens 256 chunks 254 ttft 16576 ms  client update pace 56.03 ms/update
+   aggregate wall: 2048 tokens in 30.75 s = 66.59 tok/s (prefill included)
+   legacy output-span aggregate: 67.43466489464446 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 68.392 tok/s
+== prose concurrency 8: 05:16:54.345 .. 05:17:25.105  wall 30.8 s
+   req 0: status 200 finish=length tokens 256 chunks 255 ttft 16015 ms  client update pace 56.75 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 255 ttft 382 ms  client update pace 66.04 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 255 ttft 382 ms  client update pace 62.74 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 254 ttft 381 ms  client update pace 69.61 ms/update
+   req 4: status 200 finish=length tokens 256 chunks 255 ttft 381 ms  client update pace 63.64 ms/update
+   req 5: status 200 finish=length tokens 256 chunks 253 ttft 381 ms  client update pace 65.05 ms/update
+   req 6: status 200 finish=length tokens 256 chunks 253 ttft 381 ms  client update pace 61.43 ms/update
+   req 7: status 200 finish=length tokens 256 chunks 254 ttft 16444 ms  client update pace 56.57 ms/update
+   aggregate wall: 2048 tokens in 30.76 s = 66.58 tok/s (prefill included)
+   legacy output-span aggregate: 67.41976292493075 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 68.388 tok/s
+== code concurrency 1: 05:17:25.117 .. 05:17:29.473  wall 4.4 s
+   req 0: status 200 finish=length tokens 256 chunks 248 ttft 229 ms  client update pace 16.70 ms/update
+   aggregate wall: 256 tokens in 4.36 s = 58.78 tok/s (prefill included)
+   legacy output-span aggregate: 62.04781153152466 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 62.198 tok/s
+== code concurrency 1: 05:17:29.474 .. 05:17:33.613  wall 4.1 s
+   req 0: status 200 finish=length tokens 256 chunks 248 ttft 179 ms  client update pace 16.03 ms/update
+   aggregate wall: 256 tokens in 4.14 s = 61.84 tok/s (prefill included)
+   legacy output-span aggregate: 64.64336021273539 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 64.818 tok/s
+== code concurrency 1: 05:17:33.614 .. 05:17:37.749  wall 4.1 s
+   req 0: status 200 finish=length tokens 256 chunks 248 ttft 179 ms  client update pace 16.01 ms/update
+   aggregate wall: 256 tokens in 4.13 s = 61.91 tok/s (prefill included)
+   legacy output-span aggregate: 64.71864572929171 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 65.242 tok/s
+== code concurrency 2: 05:17:37.763 .. 05:17:44.405  wall 6.6 s
+   req 0: status 200 finish=length tokens 256 chunks 242 ttft 280 ms  client update pace 25.76 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 244 ttft 280 ms  client update pace 26.18 ms/update
+   aggregate wall: 512 tokens in 6.64 s = 77.08 tok/s (prefill included)
+   legacy output-span aggregate: 80.47962707642755 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 81.143 tok/s
+== code concurrency 2: 05:17:44.406 .. 05:17:51.172  wall 6.8 s
+   req 0: status 200 finish=length tokens 256 chunks 242 ttft 254 ms  client update pace 27.02 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 244 ttft 254 ms  client update pace 26.59 ms/update
+   aggregate wall: 512 tokens in 6.77 s = 75.67 tok/s (prefill included)
+   legacy output-span aggregate: 78.62668700739502 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 79.087 tok/s
+== code concurrency 2: 05:17:51.173 .. 05:17:58.064  wall 6.9 s
+   req 0: status 200 finish=length tokens 256 chunks 242 ttft 254 ms  client update pace 26.16 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 244 ttft 254 ms  client update pace 27.20 ms/update
+   aggregate wall: 512 tokens in 6.89 s = 74.31 tok/s (prefill included)
+   legacy output-span aggregate: 77.45499786504072 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 77.808 tok/s
+== code concurrency 4: 05:17:58.078 .. 05:18:08.474  wall 10.4 s
+   req 0: status 200 finish=length tokens 256 chunks 246 ttft 334 ms  client update pace 41.06 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 251 ttft 334 ms  client update pace 39.93 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 247 ttft 334 ms  client update pace 40.58 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 250 ttft 334 ms  client update pace 40.09 ms/update
+   aggregate wall: 1024 tokens in 10.40 s = 98.50 tok/s (prefill included)
+   legacy output-span aggregate: 101.78344900886172 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 102.575 tok/s
+== code concurrency 4: 05:18:08.475 .. 05:18:18.808  wall 10.3 s
+   req 0: status 200 finish=length tokens 256 chunks 246 ttft 332 ms  client update pace 40.82 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 251 ttft 332 ms  client update pace 39.70 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 247 ttft 332 ms  client update pace 40.45 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 250 ttft 331 ms  client update pace 38.73 ms/update
+   aggregate wall: 1024 tokens in 10.33 s = 99.09 tok/s (prefill included)
+   legacy output-span aggregate: 102.38482298521943 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 103.221 tok/s
+== code concurrency 4: 05:18:18.809 .. 05:18:28.890  wall 10.1 s
+   req 0: status 200 finish=length tokens 256 chunks 246 ttft 332 ms  client update pace 39.48 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 251 ttft 332 ms  client update pace 38.69 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 247 ttft 332 ms  client update pace 39.63 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 250 ttft 332 ms  client update pace 38.22 ms/update
+   aggregate wall: 1024 tokens in 10.08 s = 101.58 tok/s (prefill included)
+   legacy output-span aggregate: 105.04723193729026 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 105.973 tok/s
+== code concurrency 8: 05:18:28.908 .. 05:18:54.130  wall 25.2 s
+   req 0: status 200 finish=length tokens 256 chunks 243 ttft 383 ms  client update pace 55.24 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 250 ttft 14587 ms  client update pace 42.71 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 248 ttft 382 ms  client update pace 56.90 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 243 ttft 382 ms  client update pace 58.07 ms/update
+   req 4: status 200 finish=length tokens 256 chunks 249 ttft 382 ms  client update pace 56.67 ms/update
+   req 5: status 200 finish=length tokens 256 chunks 245 ttft 381 ms  client update pace 59.25 ms/update
+   req 6: status 200 finish=length tokens 256 chunks 248 ttft 381 ms  client update pace 58.53 ms/update
+   req 7: status 200 finish=length tokens 256 chunks 238 ttft 13900 ms  client update pace 46.56 ms/update
+   aggregate wall: 2048 tokens in 25.22 s = 81.20 tok/s (prefill included)
+   legacy output-span aggregate: 82.44995030417046 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 83.979 tok/s
+== code concurrency 8: 05:18:54.132 .. 05:19:17.994  wall 23.9 s
+   req 0: status 200 finish=length tokens 256 chunks 243 ttft 382 ms  client update pace 52.50 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 250 ttft 12961 ms  client update pace 43.47 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 248 ttft 383 ms  client update pace 57.29 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 243 ttft 382 ms  client update pace 55.85 ms/update
+   req 4: status 200 finish=length tokens 256 chunks 249 ttft 13238 ms  client update pace 42.83 ms/update
+   req 5: status 200 finish=length tokens 256 chunks 245 ttft 382 ms  client update pace 56.95 ms/update
+   req 6: status 200 finish=length tokens 256 chunks 248 ttft 382 ms  client update pace 57.29 ms/update
+   req 7: status 200 finish=length tokens 256 chunks 238 ttft 381 ms  client update pace 52.42 ms/update
+   aggregate wall: 2048 tokens in 23.86 s = 85.83 tok/s (prefill included)
+   legacy output-span aggregate: 87.22475363719735 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 88.942 tok/s
+== code concurrency 8: 05:19:17.995 .. 05:19:40.494  wall 22.5 s
+   req 0: status 200 finish=length tokens 256 chunks 243 ttft 383 ms  client update pace 52.09 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 250 ttft 13140 ms  client update pace 37.58 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 248 ttft 383 ms  client update pace 54.93 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 243 ttft 384 ms  client update pace 55.43 ms/update
+   req 4: status 200 finish=length tokens 256 chunks 249 ttft 383 ms  client update pace 52.66 ms/update
+   req 5: status 200 finish=length tokens 256 chunks 245 ttft 382 ms  client update pace 58.61 ms/update
+   req 6: status 200 finish=length tokens 256 chunks 248 ttft 382 ms  client update pace 57.28 ms/update
+   req 7: status 200 finish=length tokens 256 chunks 238 ttft 13566 ms  client update pace 37.35 ms/update
+   aggregate wall: 2048 tokens in 22.50 s = 91.02 tok/s (prefill included)
+   legacy output-span aggregate: 92.60526426536467 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 94.611 tok/s
+== json concurrency 1: 05:19:40.519 .. 05:19:44.070  wall 3.6 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 204 ms  client update pace 13.12 ms/update
+   aggregate wall: 256 tokens in 3.55 s = 72.09 tok/s (prefill included)
+   legacy output-span aggregate: 76.50875705564012 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 76.687 tok/s
+== json concurrency 1: 05:19:44.071 .. 05:19:47.547  wall 3.5 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 178 ms  client update pace 12.83 ms/update
+   aggregate wall: 256 tokens in 3.48 s = 73.64 tok/s (prefill included)
+   legacy output-span aggregate: 78.21819307994332 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 78.367 tok/s
+== json concurrency 1: 05:19:47.548 .. 05:19:51.026  wall 3.5 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 178 ms  client update pace 12.94 ms/update
+   aggregate wall: 256 tokens in 3.48 s = 73.61 tok/s (prefill included)
+   legacy output-span aggregate: 77.58446892599525 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 78.252 tok/s
+== json concurrency 2: 05:19:51.051 .. 05:19:56.088  wall 5.0 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 253 ms  client update pace 18.76 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 253 ms  client update pace 18.07 ms/update
+   aggregate wall: 512 tokens in 5.04 s = 101.64 tok/s (prefill included)
+   legacy output-span aggregate: 107.01965953393831 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 108.156 tok/s
+== json concurrency 2: 05:19:56.089 .. 05:20:01.157  wall 5.1 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 253 ms  client update pace 18.87 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 253 ms  client update pace 17.98 ms/update
+   aggregate wall: 512 tokens in 5.07 s = 101.04 tok/s (prefill included)
+   legacy output-span aggregate: 106.37725353896688 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 107.271 tok/s
+== json concurrency 2: 05:20:01.158 .. 05:20:06.177  wall 5.0 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 254 ms  client update pace 18.59 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 254 ms  client update pace 18.19 ms/update
+   aggregate wall: 512 tokens in 5.02 s = 102.01 tok/s (prefill included)
+   legacy output-span aggregate: 108.02977436262104 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 108.686 tok/s
+== json concurrency 4: 05:20:06.203 .. 05:20:15.959  wall 9.8 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 355 ms  client update pace 32.41 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 354 ms  client update pace 32.81 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 256 ttft 354 ms  client update pace 31.03 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 256 ttft 354 ms  client update pace 36.87 ms/update
+   aggregate wall: 1024 tokens in 9.76 s = 104.96 tok/s (prefill included)
+   legacy output-span aggregate: 108.9230008066585 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 109.958 tok/s
+== json concurrency 4: 05:20:15.960 .. 05:20:25.158  wall 9.2 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 357 ms  client update pace 30.91 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 357 ms  client update pace 30.81 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 256 ttft 357 ms  client update pace 30.21 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 256 ttft 357 ms  client update pace 34.67 ms/update
+   aggregate wall: 1024 tokens in 9.20 s = 111.33 tok/s (prefill included)
+   legacy output-span aggregate: 115.83169206108556 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 116.806 tok/s
+== json concurrency 4: 05:20:25.159 .. 05:20:34.352  wall 9.2 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 357 ms  client update pace 29.96 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 357 ms  client update pace 30.36 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 256 ttft 356 ms  client update pace 28.96 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 256 ttft 356 ms  client update pace 34.65 ms/update
+   aggregate wall: 1024 tokens in 9.19 s = 111.38 tok/s (prefill included)
+   legacy output-span aggregate: 115.89076289694529 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 116.948 tok/s
+== json concurrency 8: 05:20:34.384 .. 05:20:56.872  wall 22.5 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 381 ms  client update pace 44.46 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 381 ms  client update pace 46.65 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 256 ttft 381 ms  client update pace 46.75 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 256 ttft 380 ms  client update pace 50.33 ms/update
+   req 4: status 200 finish=length tokens 256 chunks 256 ttft 380 ms  client update pace 48.73 ms/update
+   req 5: status 200 finish=length tokens 256 chunks 256 ttft 380 ms  client update pace 45.45 ms/update
+   req 6: status 200 finish=length tokens 256 chunks 256 ttft 11867 ms  client update pace 41.64 ms/update
+   req 7: status 200 finish=length tokens 256 chunks 256 ttft 12121 ms  client update pace 40.34 ms/update
+   aggregate wall: 2048 tokens in 22.49 s = 91.07 tok/s (prefill included)
+   legacy output-span aggregate: 92.64152633775286 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 94.656 tok/s
+== json concurrency 8: 05:20:56.873 .. 05:21:15.480  wall 18.6 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 12163 ms  client update pace 24.77 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 384 ms  client update pace 44.50 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 256 ttft 384 ms  client update pace 45.59 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 256 ttft 11883 ms  client update pace 26.36 ms/update
+   req 4: status 200 finish=length tokens 256 chunks 256 ttft 383 ms  client update pace 47.69 ms/update
+   req 5: status 200 finish=length tokens 256 chunks 256 ttft 383 ms  client update pace 45.69 ms/update
+   req 6: status 200 finish=length tokens 256 chunks 256 ttft 383 ms  client update pace 46.99 ms/update
+   req 7: status 200 finish=length tokens 256 chunks 256 ttft 382 ms  client update pace 46.99 ms/update
+   aggregate wall: 2048 tokens in 18.61 s = 110.07 tok/s (prefill included)
+   legacy output-span aggregate: 112.39076993587172 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 115.231 tok/s
+== json concurrency 8: 05:21:15.481 .. 05:21:36.543  wall 21.1 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 384 ms  client update pace 43.82 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 256 ttft 385 ms  client update pace 45.80 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 256 ttft 384 ms  client update pace 42.64 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 256 ttft 384 ms  client update pace 47.09 ms/update
+   req 4: status 200 finish=length tokens 256 chunks 256 ttft 384 ms  client update pace 47.68 ms/update
+   req 5: status 200 finish=length tokens 256 chunks 256 ttft 11684 ms  client update pace 36.77 ms/update
+   req 6: status 200 finish=length tokens 256 chunks 256 ttft 384 ms  client update pace 47.68 ms/update
+   req 7: status 200 finish=length tokens 256 chunks 256 ttft 11405 ms  client update pace 36.96 ms/update
+   aggregate wall: 2048 tokens in 21.06 s = 97.24 tok/s (prefill included)
+   legacy output-span aggregate: 99.04781624751148 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 101.196 tok/s
+== math concurrency 1: 05:21:36.580 .. 05:21:40.939  wall 4.4 s
+   req 0: status 200 finish=length tokens 256 chunks 252 ttft 228 ms  client update pace 16.46 ms/update
+   aggregate wall: 256 tokens in 4.36 s = 58.73 tok/s (prefill included)
+   legacy output-span aggregate: 61.97941122858575 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 61.973 tok/s
+== math concurrency 1: 05:21:40.940 .. 05:21:45.253  wall 4.3 s
+   req 0: status 200 finish=length tokens 256 chunks 252 ttft 202 ms  client update pace 16.37 ms/update
+   aggregate wall: 256 tokens in 4.31 s = 59.37 tok/s (prefill included)
+   legacy output-span aggregate: 62.293117257096846 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 62.661 tok/s
+== math concurrency 1: 05:21:45.254 .. 05:21:49.472  wall 4.2 s
+   req 0: status 200 finish=length tokens 256 chunks 252 ttft 202 ms  client update pace 16.00 ms/update
+   aggregate wall: 256 tokens in 4.22 s = 60.68 tok/s (prefill included)
+   legacy output-span aggregate: 63.74889047735529 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 64.227 tok/s
+== math concurrency 2: 05:21:49.510 .. 05:21:55.016  wall 5.5 s
+   req 0: status 200 finish=length tokens 256 chunks 255 ttft 303 ms  client update pace 19.78 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 243 ttft 303 ms  client update pace 21.49 ms/update
+   aggregate wall: 512 tokens in 5.51 s = 93.00 tok/s (prefill included)
+   legacy output-span aggregate: 98.43570365352566 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 99.222 tok/s
+== math concurrency 2: 05:21:55.017 .. 05:22:00.469  wall 5.5 s
+   req 0: status 200 finish=length tokens 256 chunks 255 ttft 302 ms  client update pace 20.07 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 243 ttft 302 ms  client update pace 21.28 ms/update
+   aggregate wall: 512 tokens in 5.45 s = 93.91 tok/s (prefill included)
+   legacy output-span aggregate: 99.42545816370554 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 99.943 tok/s
+== math concurrency 2: 05:22:00.469 .. 05:22:06.146  wall 5.7 s
+   req 0: status 200 finish=length tokens 256 chunks 255 ttft 304 ms  client update pace 20.45 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 243 ttft 304 ms  client update pace 22.09 ms/update
+   aggregate wall: 512 tokens in 5.68 s = 90.19 tok/s (prefill included)
+   legacy output-span aggregate: 95.7528154240038 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 96.096 tok/s
+== math concurrency 4: 05:22:06.170 .. 05:22:16.305  wall 10.1 s
+   req 0: status 200 finish=length tokens 256 chunks 255 ttft 380 ms  client update pace 38.10 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 253 ttft 380 ms  client update pace 38.10 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 249 ttft 380 ms  client update pace 39.33 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 250 ttft 380 ms  client update pace 38.46 ms/update
+   aggregate wall: 1024 tokens in 10.14 s = 101.04 tok/s (prefill included)
+   legacy output-span aggregate: 104.98064242421185 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 105.790 tok/s
+== math concurrency 4: 05:22:16.306 .. 05:22:26.555  wall 10.2 s
+   req 0: status 200 finish=length tokens 256 chunks 255 ttft 357 ms  client update pace 38.94 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 253 ttft 357 ms  client update pace 39.25 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 249 ttft 357 ms  client update pace 39.17 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 250 ttft 356 ms  client update pace 38.30 ms/update
+   aggregate wall: 1024 tokens in 10.25 s = 99.91 tok/s (prefill included)
+   legacy output-span aggregate: 103.5182188413592 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 104.523 tok/s
+== math concurrency 4: 05:22:26.555 .. 05:22:36.593  wall 10.0 s
+   req 0: status 200 finish=length tokens 256 chunks 255 ttft 355 ms  client update pace 38.12 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 253 ttft 355 ms  client update pace 38.42 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 249 ttft 355 ms  client update pace 38.22 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 250 ttft 355 ms  client update pace 37.04 ms/update
+   aggregate wall: 1024 tokens in 10.04 s = 102.01 tok/s (prefill included)
+   legacy output-span aggregate: 105.7603283396217 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 106.741 tok/s
+== math concurrency 8: 05:22:36.619 .. 05:23:01.020  wall 24.4 s
+   req 0: status 200 finish=length tokens 256 chunks 250 ttft 431 ms  client update pace 51.44 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 251 ttft 431 ms  client update pace 51.24 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 248 ttft 431 ms  client update pace 54.82 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 241 ttft 431 ms  client update pace 55.27 ms/update
+   req 4: status 200 finish=length tokens 256 chunks 253 ttft 431 ms  client update pace 50.83 ms/update
+   req 5: status 200 finish=length tokens 256 chunks 241 ttft 430 ms  client update pace 52.32 ms/update
+   req 6: status 200 finish=length tokens 256 chunks 253 ttft 13137 ms  client update pace 44.69 ms/update
+   req 7: status 200 finish=length tokens 256 chunks 251 ttft 13390 ms  client update pace 42.02 ms/update
+   aggregate wall: 2048 tokens in 24.40 s = 83.93 tok/s (prefill included)
+   legacy output-span aggregate: 85.44188204332544 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 86.994 tok/s
+== math concurrency 8: 05:23:01.021 .. 05:23:24.842  wall 23.8 s
+   req 0: status 200 finish=length tokens 256 chunks 250 ttft 434 ms  client update pace 48.14 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 251 ttft 435 ms  client update pace 49.78 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 248 ttft 434 ms  client update pace 52.75 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 241 ttft 434 ms  client update pace 55.35 ms/update
+   req 4: status 200 finish=length tokens 256 chunks 253 ttft 434 ms  client update pace 50.29 ms/update
+   req 5: status 200 finish=length tokens 256 chunks 241 ttft 434 ms  client update pace 52.80 ms/update
+   req 6: status 200 finish=length tokens 256 chunks 253 ttft 13031 ms  client update pace 42.81 ms/update
+   req 7: status 200 finish=length tokens 256 chunks 251 ttft 12572 ms  client update pace 42.46 ms/update
+   aggregate wall: 2048 tokens in 23.82 s = 85.97 tok/s (prefill included)
+   legacy output-span aggregate: 87.57179326437249 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 89.247 tok/s
+== math concurrency 8: 05:23:24.843 .. 05:23:45.503  wall 20.7 s
+   req 0: status 200 finish=length tokens 256 chunks 250 ttft 409 ms  client update pace 48.37 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 251 ttft 409 ms  client update pace 50.10 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 248 ttft 409 ms  client update pace 52.45 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 241 ttft 12655 ms  client update pace 33.35 ms/update
+   req 4: status 200 finish=length tokens 256 chunks 253 ttft 409 ms  client update pace 51.41 ms/update
+   req 5: status 200 finish=length tokens 256 chunks 241 ttft 408 ms  client update pace 50.19 ms/update
+   req 6: status 200 finish=length tokens 256 chunks 253 ttft 407 ms  client update pace 54.53 ms/update
+   req 7: status 200 finish=length tokens 256 chunks 251 ttft 12653 ms  client update pace 30.60 ms/update
+   aggregate wall: 2048 tokens in 20.66 s = 99.13 tok/s (prefill included)
+   legacy output-span aggregate: 101.13411280567198 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 103.030 tok/s
+== chat concurrency 1: 05:23:45.532 .. 05:23:51.656  wall 6.1 s
+   req 0: status 200 finish=length tokens 256 chunks 255 ttft 177 ms  client update pace 23.31 ms/update
+   aggregate wall: 256 tokens in 6.12 s = 41.80 tok/s (prefill included)
+   legacy output-span aggregate: 43.239233263450856 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 43.209 tok/s
+== chat concurrency 1: 05:23:51.657 .. 05:23:57.380  wall 5.7 s
+   req 0: status 200 finish=length tokens 256 chunks 255 ttft 177 ms  client update pace 21.83 ms/update
+   aggregate wall: 256 tokens in 5.72 s = 44.73 tok/s (prefill included)
+   legacy output-span aggregate: 46.162156463566824 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 46.198 tok/s
+== chat concurrency 1: 05:23:57.381 .. 05:24:02.977  wall 5.6 s
+   req 0: status 200 finish=length tokens 256 chunks 255 ttft 178 ms  client update pace 21.33 ms/update
+   aggregate wall: 256 tokens in 5.60 s = 45.74 tok/s (prefill included)
+   legacy output-span aggregate: 47.25652616743617 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 47.209 tok/s
+== chat concurrency 2: 05:24:03.005 .. 05:24:11.048  wall 8.0 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 253 ms  client update pace 30.45 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 255 ttft 253 ms  client update pace 28.98 ms/update
+   aggregate wall: 512 tokens in 8.04 s = 63.66 tok/s (prefill included)
+   legacy output-span aggregate: 65.9473605496213 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 65.965 tok/s
+== chat concurrency 2: 05:24:11.050 .. 05:24:18.995  wall 7.9 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 229 ms  client update pace 30.26 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 255 ttft 229 ms  client update pace 28.78 ms/update
+   aggregate wall: 512 tokens in 7.95 s = 64.44 tok/s (prefill included)
+   legacy output-span aggregate: 66.35536671062026 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 66.763 tok/s
+== chat concurrency 2: 05:24:18.996 .. 05:24:26.965  wall 8.0 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 228 ms  client update pace 30.15 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 255 ttft 228 ms  client update pace 30.47 ms/update
+   aggregate wall: 512 tokens in 7.97 s = 64.25 tok/s (prefill included)
+   legacy output-span aggregate: 66.14476506637851 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 66.441 tok/s
+== chat concurrency 4: 05:24:27.015 .. 05:24:39.397  wall 12.4 s
+   req 0: status 200 finish=length tokens 256 chunks 255 ttft 329 ms  client update pace 45.07 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 254 ttft 329 ms  client update pace 44.54 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 253 ttft 329 ms  client update pace 44.72 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 253 ttft 329 ms  client update pace 47.72 ms/update
+   aggregate wall: 1024 tokens in 12.38 s = 82.70 tok/s (prefill included)
+   legacy output-span aggregate: 85.14711730431901 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 85.565 tok/s
+== chat concurrency 4: 05:24:39.398 .. 05:24:52.003  wall 12.6 s
+   req 0: status 200 finish=length tokens 256 chunks 255 ttft 330 ms  client update pace 45.93 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 254 ttft 330 ms  client update pace 46.42 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 253 ttft 330 ms  client update pace 46.30 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 253 ttft 329 ms  client update pace 48.70 ms/update
+   aggregate wall: 1024 tokens in 12.60 s = 81.24 tok/s (prefill included)
+   legacy output-span aggregate: 83.43030571936094 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 83.897 tok/s
+== chat concurrency 4: 05:24:52.004 .. 05:25:04.215  wall 12.2 s
+   req 0: status 200 finish=length tokens 256 chunks 255 ttft 329 ms  client update pace 45.58 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 254 ttft 329 ms  client update pace 45.26 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 253 ttft 329 ms  client update pace 45.44 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 253 ttft 328 ms  client update pace 47.15 ms/update
+   aggregate wall: 1024 tokens in 12.21 s = 83.86 tok/s (prefill included)
+   legacy output-span aggregate: 86.18679441656896 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 86.709 tok/s
+== chat concurrency 8: 05:25:04.267 .. 05:25:33.402  wall 29.1 s
+   req 0: status 200 finish=length tokens 256 chunks 252 ttft 407 ms  client update pace 62.50 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 255 ttft 407 ms  client update pace 65.17 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 253 ttft 406 ms  client update pace 63.46 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 254 ttft 406 ms  client update pace 65.03 ms/update
+   req 4: status 200 finish=length tokens 256 chunks 255 ttft 406 ms  client update pace 64.27 ms/update
+   req 5: status 200 finish=length tokens 256 chunks 253 ttft 406 ms  client update pace 62.25 ms/update
+   req 6: status 200 finish=length tokens 256 chunks 255 ttft 16296 ms  client update pace 50.24 ms/update
+   req 7: status 200 finish=length tokens 256 chunks 254 ttft 16296 ms  client update pace 50.64 ms/update
+   aggregate wall: 2048 tokens in 29.13 s = 70.29 tok/s (prefill included)
+   legacy output-span aggregate: 71.35299874061123 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 72.133 tok/s
+== chat concurrency 8: 05:25:33.402 .. 05:26:01.561  wall 28.2 s
+   req 0: status 200 finish=length tokens 256 chunks 252 ttft 383 ms  client update pace 61.54 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 255 ttft 383 ms  client update pace 62.81 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 253 ttft 383 ms  client update pace 59.78 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 254 ttft 383 ms  client update pace 62.65 ms/update
+   req 4: status 200 finish=length tokens 256 chunks 255 ttft 383 ms  client update pace 60.81 ms/update
+   req 5: status 200 finish=length tokens 256 chunks 253 ttft 382 ms  client update pace 58.07 ms/update
+   req 6: status 200 finish=length tokens 256 chunks 255 ttft 15142 ms  client update pace 50.64 ms/update
+   req 7: status 200 finish=length tokens 256 chunks 254 ttft 15574 ms  client update pace 49.73 ms/update
+   aggregate wall: 2048 tokens in 28.16 s = 72.73 tok/s (prefill included)
+   legacy output-span aggregate: 73.73382688450148 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 74.877 tok/s
+== chat concurrency 8: 05:26:01.563 .. 05:26:29.677  wall 28.1 s
+   req 0: status 200 finish=length tokens 256 chunks 252 ttft 381 ms  client update pace 60.68 ms/update
+   req 1: status 200 finish=length tokens 256 chunks 255 ttft 381 ms  client update pace 61.96 ms/update
+   req 2: status 200 finish=length tokens 256 chunks 253 ttft 15738 ms  client update pace 49.11 ms/update
+   req 3: status 200 finish=length tokens 256 chunks 254 ttft 381 ms  client update pace 62.10 ms/update
+   req 4: status 200 finish=length tokens 256 chunks 255 ttft 381 ms  client update pace 61.95 ms/update
+   req 5: status 200 finish=length tokens 256 chunks 253 ttft 381 ms  client update pace 57.81 ms/update
+   req 6: status 200 finish=length tokens 256 chunks 255 ttft 380 ms  client update pace 59.96 ms/update
+   req 7: status 200 finish=length tokens 256 chunks 254 ttft 15101 ms  client update pace 50.33 ms/update
+   aggregate wall: 2048 tokens in 28.11 s = 72.84 tok/s (prefill included)
+   legacy output-span aggregate: 73.84739343434195 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 74.948 tok/s
+== per-class wall aggregate tokens/s (prefill included), greedy, max_tokens 256
+| class | c=1 | c=2 | c=4 | c=8 |
+|---|---|---|---|---|
+| prose | 40.2 | 62.1 | 77.9 | 66.6 |
+| code | 61.8 | 75.7 | 99.1 | 85.8 |
+| json | 73.6 | 101.6 | 111.3 | 97.2 |
+| math | 59.4 | 93.0 | 101.0 | 86.0 |
+| chat | 44.7 | 64.2 | 82.7 | 72.7 |

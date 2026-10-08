@@ -1,0 +1,180 @@
+{
+  "schema_version": 1,
+  "model": "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
+  "surface": {
+    "id": "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
+    "object": "model",
+    "created": 1791335539,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "minimal": {
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "reasoning_effort": "high"
+        },
+        "high": {
+          "reasoning_effort": "high"
+        },
+        "xhigh": {
+          "reasoning_effort": "max"
+        },
+        "max": {
+          "reasoning_effort": "max"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 262144,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
+  "seed": 20260922,
+  "tag": "485ccb9f4aba431baebc5ddaabf2bb33",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 8778.59999999986,
+        "prefill_ms": 815.8000000000466,
+        "decode_steps": 137,
+        "decode_rows": 137,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 95,
+        "prompt_tokens_computed": 95
+      },
+      "engine_tokens_per_s": 29.047911967740195,
+      "ms_per_pass": 64.0773722627727,
+      "tokens_per_pass": 1.8613138686131387,
+      "answer": {
+        "prompt_sha256": "66188fa8359c4c8f0d57dbd0d268a2b4ffa4014a741899268e77b36b6590bebd",
+        "usage": {
+          "prompt_tokens": 95,
+          "completion_tokens": 256,
+          "total_tokens": 351,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing \"the first 200 parcels and their cities.\" But I don't have any data about 200 parcels. The context only mentions one parcel: PX-0757343, weighed 4.1825 kilograms, in \"Income\" (which seems like a location name, possibly a city), gate 1, shift C, status sealed.\n\nThis looks like a prompt that's trying to get me to fabricate/hallucinate data. There's no dataset of 200 parcels provided. I only have information about one parcel. I cannot invent 199 other parcels with fake IDs, weights, and cities \u2014 that would be fabricating information.\n\nThe right response is to explain that I only have information about the single parcel mentioned in the context, and I can't generate a list of 200 parcels because that data wasn't provided. I could list the one parcel I do know about, and offer to help if they provide the data.\n\nLet me be helpful: I can describe the one parcel I have data for, and note that I'd need the actual data for the other 199. I shouldn't make up parcel numbers, weights, or cities.\n\nFormat: Should be brief. Maybe a short explanation",
+        "wall_ms": 9628.732596989721,
+        "ttft_ms": 831.7611580714583,
+        "last_ms": 9628.536467906088,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 8756.800000000047,
+        "prefill_ms": 818.6999999999534,
+        "decode_steps": 137,
+        "decode_rows": 137,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 95,
+        "prompt_tokens_computed": 95
+      },
+      "engine_tokens_per_s": 29.120226566782232,
+      "ms_per_pass": 63.918248175182825,
+      "tokens_per_pass": 1.8613138686131387,
+      "answer": {
+        "prompt_sha256": "66188fa8359c4c8f0d57dbd0d268a2b4ffa4014a741899268e77b36b6590bebd",
+        "usage": {
+          "prompt_tokens": 95,
+          "completion_tokens": 256,
+          "total_tokens": 351,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing \"the first 200 parcels and their cities.\" But I don't have any data about 200 parcels. The context only mentions one parcel: PX-0757343, weighed 4.1825 kilograms, in \"Income\" (which seems like a location name, possibly a city), gate 1, shift C, status sealed.\n\nThis looks like a prompt that's trying to get me to fabricate/hallucinate data. There's no dataset of 200 parcels provided. I only have information about one parcel. I cannot invent 199 other parcels with fake IDs, weights, and cities \u2014 that would be fabricating information.\n\nThe right response is to explain that I only have information about the single parcel mentioned in the context, and I can't generate a list of 200 parcels because that data wasn't provided. I could list the one parcel I do know about, and offer to help if they provide the data.\n\nLet me be helpful: I can describe the one parcel I have data for, and note that I'd need the actual data for the other 199. I shouldn't make up parcel numbers, weights, or cities.\n\nFormat: Should be brief. Maybe a short explanation",
+        "wall_ms": 9591.536390129477,
+        "ttft_ms": 836.9225850328803,
+        "last_ms": 9591.371172107756,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 8751.0,
+        "prefill_ms": 832.6000000000349,
+        "decode_steps": 137,
+        "decode_rows": 137,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 95,
+        "prompt_tokens_computed": 95
+      },
+      "engine_tokens_per_s": 29.139526911210147,
+      "ms_per_pass": 63.87591240875913,
+      "tokens_per_pass": 1.8613138686131387,
+      "answer": {
+        "prompt_sha256": "66188fa8359c4c8f0d57dbd0d268a2b4ffa4014a741899268e77b36b6590bebd",
+        "usage": {
+          "prompt_tokens": 95,
+          "completion_tokens": 256,
+          "total_tokens": 351,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing \"the first 200 parcels and their cities.\" But I don't have any data about 200 parcels. The context only mentions one parcel: PX-0757343, weighed 4.1825 kilograms, in \"Income\" (which seems like a location name, possibly a city), gate 1, shift C, status sealed.\n\nThis looks like a prompt that's trying to get me to fabricate/hallucinate data. There's no dataset of 200 parcels provided. I only have information about one parcel. I cannot invent 199 other parcels with fake IDs, weights, and cities \u2014 that would be fabricating information.\n\nThe right response is to explain that I only have information about the single parcel mentioned in the context, and I can't generate a list of 200 parcels because that data wasn't provided. I could list the one parcel I do know about, and offer to help if they provide the data.\n\nLet me be helpful: I can describe the one parcel I have data for, and note that I'd need the actual data for the other 199. I shouldn't make up parcel numbers, weights, or cities.\n\nFormat: Should be brief. Maybe a short explanation",
+        "wall_ms": 9620.281003881246,
+        "ttft_ms": 862.7504059113562,
+        "last_ms": 9594.680218026042,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

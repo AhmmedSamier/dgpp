@@ -1,0 +1,958 @@
+[
+  {
+    "id": "glm-flash-hybrid-w2",
+    "label": "GLM-5.3-Flash NVFP4/FP8",
+    "world": 2,
+    "options": "160K FP8 KV, 4 slots",
+    "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+    "config": "configs/glm-flash-hybrid-w2.json",
+    "previous_campaign": "2026-09-22-current",
+    "default_mode": "mtp1",
+    "modes": [
+      "plain",
+      "mtp2",
+      "mtp3"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_glm-5.3-flash_nvfp4-fp8_w2.example.json",
+    "overrides": {}
+  },
+  {
+    "id": "glm-flash-hybrid-256k-w2",
+    "label": "GLM-5.3-Flash NVFP4/FP8",
+    "world": 2,
+    "options": "256K FP8 KV, 2 slots",
+    "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+    "config": "configs/glm-flash-hybrid-256k-w2.json",
+    "previous_campaign": "2026-09-22-current",
+    "default_mode": "mtp1",
+    "modes": [
+      "plain",
+      "mtp2",
+      "mtp3"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_glm-5.3-flash_nvfp4-fp8_w2.example.json",
+    "overrides": {
+      "max_concurrency": 2,
+      "kv_capacity": 262144,
+      "prefix_cache_gib": 2
+    }
+  },
+  {
+    "id": "glm-flash-hybrid-w4",
+    "label": "GLM-5.3-Flash NVFP4/FP8",
+    "world": 4,
+    "options": "768K BF16 KV, 4 slots",
+    "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+    "config": "configs/glm-flash-hybrid-w4.json",
+    "previous_campaign": "2026-09-22-current",
+    "default_mode": "mtp1",
+    "modes": [
+      "plain",
+      "mtp2",
+      "mtp3"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json",
+    "overrides": {}
+  },
+  {
+    "id": "glm-flash-fp8-w4",
+    "label": "GLM-5.3-Flash FP8",
+    "world": 4,
+    "options": "384K BF16 KV, 4 slots",
+    "model": "unsloth/GLM-5.3-Flash-FP8",
+    "config": "configs/glm-flash-fp8-w4.json",
+    "previous_campaign": "2026-09-22-current",
+    "default_mode": "mtp1",
+    "modes": [
+      "plain",
+      "mtp2",
+      "mtp3"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json",
+    "overrides": {
+      "kv_capacity": 393216,
+      "prefix_cache_gib": 8
+    }
+  },
+  {
+    "id": "glm-flash-fp8-512k-w4",
+    "label": "GLM-5.3-Flash FP8",
+    "world": 4,
+    "options": "512K BF16 KV, 4 slots, 2 GiB prefix cache",
+    "model": "unsloth/GLM-5.3-Flash-FP8",
+    "config": "configs/glm-flash-fp8-512k-w4.json",
+    "previous_campaign": "2026-09-22-current",
+    "default_mode": "mtp1",
+    "modes": [
+      "plain",
+      "mtp2",
+      "mtp3"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json",
+    "overrides": {
+      "kv_capacity": 524288,
+      "prefix_cache_gib": 2
+    }
+  },
+  {
+    "id": "qwen-nvfp4-w1",
+    "label": "Qwen3.8-Flash-Next NVFP4",
+    "world": 1,
+    "options": "FP8 dense",
+    "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+    "config": "configs/qwen-nvfp4-w1.json",
+    "previous_campaign": "2026-09-22-current",
+    "default_mode": "mtp1",
+    "modes": [
+      "plain",
+      "mtp2",
+      "mtp3"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.example.json",
+    "overrides": {}
+  },
+  {
+    "id": "qwen-nvfp4-bf16-w1",
+    "label": "Qwen3.8-Flash-Next NVFP4",
+    "world": 1,
+    "options": "BF16 dense",
+    "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+    "config": "configs/qwen-nvfp4-bf16-w1.json",
+    "previous_campaign": "2026-09-22-current",
+    "default_mode": "mtp1",
+    "modes": [
+      "plain",
+      "mtp2",
+      "mtp3"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.example.json",
+    "overrides": {
+      "dense_weights": "checkpoint",
+      "fp8_head": "gemv"
+    }
+  },
+  {
+    "id": "qwen-nvfp4-w2",
+    "label": "Qwen3.8-Flash-Next NVFP4",
+    "world": 2,
+    "options": "FP8 dense",
+    "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+    "config": "configs/qwen-nvfp4-w2.json",
+    "previous_campaign": "2026-09-22-current",
+    "default_mode": "mtp1",
+    "modes": [
+      "plain",
+      "mtp2",
+      "mtp3"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_qwen-3.8-flash-next_nvfp4_w2.example.json",
+    "overrides": {}
+  },
+  {
+    "id": "qwen-yarn-w2",
+    "label": "Qwen3.8-Flash-Next NVFP4",
+    "world": 2,
+    "options": "FP8 dense, YaRN 512K, 2 slots",
+    "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+    "config": "configs/qwen-yarn-w2.json",
+    "previous_campaign": "2026-09-22-current",
+    "default_mode": "mtp1",
+    "modes": [
+      "plain",
+      "mtp2",
+      "mtp3"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_qwen-3.8-flash-next_nvfp4_w2_yarn512k.example.json",
+    "overrides": {}
+  },
+  {
+    "id": "qwen-radixark-w1",
+    "label": "Qwen3.8-Flash-Next NVFP4 (RadixArk)",
+    "world": 1,
+    "options": "FP8 dense, 256K BF16 KV, 4 slots, MTP2",
+    "model": "RadixArk/Qwen3.8-Flash-Next-NVFP4",
+    "config": "configs/qwen-radixark-w1.json",
+    "previous_campaign": null,
+    "default_mode": "mtp2",
+    "modes": [
+      "plain",
+      "mtp1",
+      "mtp3"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "overrides": {
+      "model_alias": "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+    }
+  },
+  {
+    "id": "qwen-radixark-w2",
+    "label": "Qwen3.8-Flash-Next NVFP4 (RadixArk)",
+    "world": 2,
+    "options": "FP8 dense, 512K BF16 KV, 4 slots, MTP4",
+    "model": "RadixArk/Qwen3.8-Flash-Next-NVFP4",
+    "config": "configs/qwen-radixark-w2.json",
+    "previous_campaign": null,
+    "default_mode": "mtp4",
+    "modes": [
+      "plain",
+      "mtp1",
+      "mtp2",
+      "mtp3"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "overrides": {
+      "model_alias": "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+    }
+  },
+  {
+    "id": "qwen-fp8-w2",
+    "label": "Qwen3.8-Flash-Next FP8",
+    "world": 2,
+    "options": "256K BF16 KV, 4 slots",
+    "model": "Qwen/Qwen3.8-Flash-Next-FP8",
+    "config": "configs/qwen-fp8-w2.json",
+    "previous_campaign": "2026-09-22-current",
+    "default_mode": "mtp1",
+    "modes": [
+      "plain",
+      "mtp2",
+      "mtp3"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_qwen-3.8-flash-next_fp8_w2.example.json",
+    "overrides": {}
+  },
+  {
+    "id": "qwen-fp8-w4",
+    "label": "Qwen3.8-Flash-Next FP8",
+    "world": 4,
+    "options": "256K BF16 KV, 4 slots",
+    "model": "Qwen/Qwen3.8-Flash-Next-FP8",
+    "config": "configs/qwen-fp8-w4.json",
+    "previous_campaign": "2026-09-22-current",
+    "default_mode": "mtp1",
+    "modes": [
+      "plain",
+      "mtp2",
+      "mtp3"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_qwen-3.8-flash-next_fp8_w4.example.json",
+    "overrides": {}
+  },
+  {
+    "id": "qwen-autoround-w1",
+    "label": "Qwen3.8-Flash-Next AutoRound int4/int8",
+    "world": 1,
+    "options": "256K BF16 KV, 4 slots, MTP3",
+    "model": "Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN",
+    "config": "configs/qwen-autoround-w1.json",
+    "previous_campaign": "2026-09-28-qwen-autoround-int4",
+    "default_mode": "mtp3",
+    "modes": [
+      "plain",
+      "mtp1",
+      "mtp2",
+      "mtp4"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "overrides": {
+      "model_alias": "Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN"
+    }
+  },
+  {
+    "id": "qwen-autoround-prefill-w1",
+    "label": "Qwen3.8-Flash-Next AutoRound int4/int8",
+    "world": 1,
+    "options": "256K BF16 KV, 4 slots, MTP3, prefill optimizations on",
+    "model": "Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN",
+    "config": "configs/qwen-autoround-prefill-w1.json",
+    "previous_campaign": "2026-09-28-qwen-autoround-int4",
+    "default_mode": "mtp3",
+    "modes": [
+      "plain",
+      "mtp1",
+      "mtp2",
+      "mtp4"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "overrides": {
+      "model_alias": "Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN"
+    }
+  },
+  {
+    "id": "glm53-w4",
+    "label": "GLM-5.3 int4/int8",
+    "world": 4,
+    "options": "120K BF16 KV, 8 slots",
+    "model": "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
+    "config": "configs/glm53-w4.json",
+    "previous_campaign": "2026-09-22-current",
+    "default_mode": "mtp1",
+    "modes": [
+      "plain",
+      "mtp2",
+      "mtp3"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_glm-5.3_int4-int8_w4.example.json",
+    "overrides": {}
+  },
+  {
+    "id": "glm53-fp8kv-w4",
+    "label": "GLM-5.3 int4/int8",
+    "world": 4,
+    "options": "208K FP8 KV, 8 slots",
+    "model": "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
+    "config": "configs/glm53-fp8kv-w4.json",
+    "previous_campaign": "2026-09-22-current",
+    "default_mode": "mtp1",
+    "modes": [
+      "plain",
+      "mtp2",
+      "mtp3"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_glm-5.3_int4-int8_w4.example.json",
+    "overrides": {
+      "kv_dtype": "fp8",
+      "kv_capacity": 212992,
+      "prefix_cache_gib": 1.5
+    }
+  },
+  {
+    "id": "glm53-fp4kv-256k-w4",
+    "label": "GLM-5.3 int4/int8",
+    "world": 4,
+    "options": "256K FP4 KV, 8 slots",
+    "model": "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
+    "config": "configs/glm53-fp4kv-256k-w4.json",
+    "previous_campaign": "2026-09-22-current",
+    "default_mode": "mtp1",
+    "modes": [
+      "plain",
+      "mtp2",
+      "mtp3"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_glm-5.3_int4-int8_w4.example.json",
+    "overrides": {
+      "kv_dtype": "fp4",
+      "kv_capacity": 262144,
+      "prefix_cache_gib": 1.5
+    },
+    "added_for": "Fill the 256K context bucket. FP8 normal startup was refused by the unchanged 4 GiB memory guard; FP4 reduces the planned allocation by 4.32 GiB. All modes and concurrency levels must pass full launch and zero-swap validation."
+  },
+  {
+    "id": "deepseek-w4",
+    "label": "DeepSeek-V4.1-Flash MXFP4/FP8",
+    "world": 4,
+    "options": "128K compressed KV, 6 slots",
+    "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+    "config": "configs/deepseek-w4.json",
+    "previous_campaign": "2026-09-22-current",
+    "default_mode": "dspark-adaptive",
+    "modes": [
+      "plain",
+      "dspark1",
+      "dspark2",
+      "dspark3",
+      "dspark5"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json",
+    "overrides": {}
+  },
+  {
+    "id": "deepseek-1m-w4",
+    "label": "DeepSeek-V4.1-Flash MXFP4/FP8",
+    "world": 4,
+    "options": "1M compressed KV, 6 slots",
+    "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+    "config": "configs/deepseek-1m-w4.json",
+    "previous_campaign": "2026-09-22-current",
+    "default_mode": "dspark-adaptive",
+    "modes": [
+      "plain",
+      "dspark1",
+      "dspark2",
+      "dspark3",
+      "dspark5"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json",
+    "overrides": {
+      "kv_capacity": 1048576
+    }
+  },
+  {
+    "id": "dsv4-w2",
+    "label": "DeepSeek-V4-Flash MXFP4/FP8",
+    "world": 2,
+    "options": "1M BF16 KV, 4 slots",
+    "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+    "config": "configs/dsv4-w2.json",
+    "previous_campaign": "2026-10-01-deepseek-v4-flash",
+    "default_mode": "dspark-adaptive",
+    "modes": [
+      "plain",
+      "dspark1",
+      "dspark2",
+      "dspark3",
+      "dspark5"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_deepseek-v4-flash_mxfp4-fp8_w2.example.json",
+    "overrides": {}
+  },
+  {
+    "id": "dsv4-w4",
+    "label": "DeepSeek-V4-Flash MXFP4/FP8",
+    "world": 4,
+    "options": "1M BF16 KV, 6 slots",
+    "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+    "config": "configs/dsv4-w4.json",
+    "previous_campaign": "2026-10-01-deepseek-v4-flash",
+    "default_mode": "dspark-adaptive",
+    "modes": [
+      "plain",
+      "dspark1",
+      "dspark2",
+      "dspark3",
+      "dspark5"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_deepseek-v4-flash_mxfp4-fp8_w4.example.json",
+    "overrides": {}
+  },
+  {
+    "id": "mimo-w2",
+    "label": "MiMo-V2.6-Flash MXFP4/FP8",
+    "world": 2,
+    "options": "128K BF16 KV, 4 slots",
+    "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+    "config": "configs/mimo-w2.json",
+    "previous_campaign": "2026-09-22-mimo-v26-flash-opt",
+    "default_mode": "mtp1",
+    "modes": [
+      "plain",
+      "mtp2",
+      "mtp3"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_mimo-v2.6-flash_mxfp4-fp8_w2.example.json",
+    "overrides": {
+      "kv_dtype": "bf16",
+      "kv_capacity": 131072
+    }
+  },
+  {
+    "id": "mimo-w2-fp8kv",
+    "label": "MiMo-V2.6-Flash MXFP4/FP8",
+    "world": 2,
+    "options": "256K FP8 KV, 4 slots",
+    "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+    "config": "configs/mimo-w2-fp8kv.json",
+    "previous_campaign": "2026-09-22-mimo-v26-flash-opt",
+    "default_mode": "mtp1",
+    "modes": [
+      "plain",
+      "mtp2",
+      "mtp3"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_mimo-v2.6-flash_mxfp4-fp8_w2.example.json",
+    "overrides": {}
+  },
+  {
+    "id": "mimo-w4",
+    "label": "MiMo-V2.6-Flash MXFP4/FP8",
+    "world": 4,
+    "options": "128K BF16 KV, 4 slots",
+    "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+    "config": "configs/mimo-w4.json",
+    "previous_campaign": "2026-09-22-mimo-v26-flash-opt",
+    "default_mode": "mtp1",
+    "modes": [
+      "plain",
+      "mtp2",
+      "mtp3"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_mimo-v2.6-flash_mxfp4-fp8_w4.example.json",
+    "overrides": {}
+  },
+  {
+    "id": "mimo-1m-w4",
+    "label": "MiMo-V2.6-Flash MXFP4/FP8",
+    "world": 4,
+    "options": "1M BF16 KV, 4 slots",
+    "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+    "config": "configs/mimo-1m-w4.json",
+    "previous_campaign": "2026-09-22-mimo-v26-flash-opt",
+    "default_mode": "mtp1",
+    "modes": [
+      "plain",
+      "mtp2",
+      "mtp3"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_mimo-v2.6-flash_mxfp4-fp8_w4.example.json",
+    "overrides": {
+      "kv_capacity": 1048576,
+      "kv_dtype": "bf16"
+    }
+  },
+  {
+    "id": "qwen27b-fp8-w1",
+    "label": "Qwen3.8-27B FP8",
+    "world": 1,
+    "options": "DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots",
+    "model": "Qwen/Qwen3.8-27B-FP8",
+    "config": "configs/qwen27b-fp8-w1.json",
+    "previous_campaign": "2026-10-05-qwen3.8-27b",
+    "default_mode": "dflash2",
+    "modes": [
+      "plain",
+      "mtp1",
+      "mtp2",
+      "mtp3",
+      "dflash2-fixed"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_qwen3.8-27b_fp8_w1.example.json",
+    "overrides": {
+      "model_alias": "Qwen/Qwen3.8-27B-FP8"
+    }
+  },
+  {
+    "id": "qwen27b-fp8-w2",
+    "label": "Qwen3.8-27B FP8",
+    "world": 2,
+    "options": "DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots",
+    "model": "Qwen/Qwen3.8-27B-FP8",
+    "config": "configs/qwen27b-fp8-w2.json",
+    "previous_campaign": "2026-10-05-qwen3.8-27b",
+    "default_mode": "dflash2",
+    "modes": [
+      "plain",
+      "mtp1",
+      "mtp2",
+      "mtp3",
+      "dflash2-fixed"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_qwen3.8-27b_fp8_w2.example.json",
+    "overrides": {
+      "model_alias": "Qwen/Qwen3.8-27B-FP8"
+    }
+  },
+  {
+    "id": "qwen27b-fp8-w4",
+    "label": "Qwen3.8-27B FP8",
+    "world": 4,
+    "options": "DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots",
+    "model": "Qwen/Qwen3.8-27B-FP8",
+    "config": "configs/qwen27b-fp8-w4.json",
+    "previous_campaign": "2026-10-05-qwen3.8-27b",
+    "default_mode": "dflash2",
+    "modes": [
+      "plain",
+      "mtp1",
+      "mtp2",
+      "mtp3",
+      "dflash2-fixed"
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "context_targets": [
+      0,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288
+    ],
+    "template": "deploy/cluster_qwen3.8-27b_fp8_w4.example.json",
+    "overrides": {
+      "model_alias": "Qwen/Qwen3.8-27B-FP8"
+    }
+  }
+]

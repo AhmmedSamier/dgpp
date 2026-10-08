@@ -1,0 +1,245 @@
+2026-10-06 03:05:03.267 INFO  dgpp-serve 0.1.0+g50309fdcf51d.dirty (git 50309fdcf51d)
+2026-10-06 03:05:03.268 INFO  config /tmp/bus4/deployments/ff5f267e51bbf7b3/cluster.json: model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8, world 4, rank 1, http :18080, fabric :29970, journal :29971
+2026-10-06 03:05:03.268 INFO  model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 -> /home/stephen/.cache/huggingface/hub/models--HawkBearPig--GLM-5.3-Flash-NVFP4-FP8/snapshots/17b8d4d83e33e836e9549d7e1a8d25b5117203c1
+2026-10-06 03:05:03.269 INFO  journal: connected to rank 0 at 192.168.88.11:29971 (120000 attempt window)
+2026-10-06 03:05:03.271 INFO  rank 1: settings from rank 0: model=HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 world=4 fabric=29970 journal=29971 conc=4 kv=786432 kvdt=bf16 ngt=resident dw=checkpoint mtpef=fp8 bfw=bf12+bf16 fp8head=gemv pf=bounded emsh=replicated maxtok=32768 queue=8 eos=1 graph=1 compact=0 mtp=1 mtpd=1 mss=0 msrow=8 msbase=28 mslam=0 msmin=1 msad=1 msss=0.93 mdr=auto mdt=1 mvf=token dbr=0 batchmin=2 cand=128 pcgib=22 adm=full win=256 pfbudget=256 pfidle=2048 pmin=1024 phead=1 pace=-1 inflight=-1 reasoning_in_content=0 rs=off dflash=off dfw=checkpoint
+2026-10-06 03:05:03.271 INFO  config: model=HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 world=4 fabric=29970 journal=29971 conc=4 kv=786432 kvdt=bf16 ngt=resident dw=checkpoint mtpef=fp8 bfw=bf12+bf16 fp8head=gemv pf=bounded emsh=replicated maxtok=32768 queue=8 eos=1 graph=1 compact=0 mtp=1 mtpd=1 mss=0 msrow=8 msbase=28 mslam=0 msmin=1 msad=1 msss=0.93 mdr=auto mdt=1 mvf=token dbr=0 batchmin=2 cand=128 pcgib=22 adm=full win=256 pfbudget=256 pfidle=2048 pmin=1024 phead=1 pace=-1 inflight=-1 reasoning_in_content=0 rs=off dflash=off dfw=checkpoint (digest 097d971bd42aadb8)
+2026-10-06 03:05:03.405 INFO  serve: model family glm5 (/home/stephen/.cache/huggingface/hub/models--HawkBearPig--GLM-5.3-Flash-NVFP4-FP8/snapshots/17b8d4d83e33e836e9549d7e1a8d25b5117203c1)
+2026-10-06 03:05:03.405 INFO  serve: decode rows 8 (4 slot(s) x 2 row(s) per request, floor 8, the glm5 family's cap 8)
+2026-10-06 03:05:03.406 WARN  generation config /home/stephen/.cache/huggingface/hub/models--HawkBearPig--GLM-5.3-Flash-NVFP4-FP8/snapshots/17b8d4d83e33e836e9549d7e1a8d25b5117203c1/generation_config.json omits top_k, min_p, repetition_penalty; using greedy-safe/neutral fallbacks for those fields
+2026-10-06 03:05:03.406 INFO  generation defaults: temperature=1 top_p=0.95 top_k=0 min_p=0 repetition_penalty=1
+2026-10-06 03:05:03.406 INFO  serve: sampling defaults temperature 1 top_p 0.95 top_k 0 min_p 0 repetition_penalty 1 (from generation_config.json; overrides: none)
+2026-10-06 03:05:03.406 INFO  serve: request context limit 786432 tokens (the 786432-token K/V pool from engine.kv_capacity 786432; this family states no positional ceiling of its own)
+2026-10-06 03:05:03.406 INFO  rank 1: prefix cache plan — 22 GiB budget, 639 slots of 35.227 MiB, 21.982 GiB allocated; cached K/V blocks share the 786432-token pool
+2026-10-06 03:05:03.561 INFO  tokenizer: loaded vocab 154820 merges 321649 added 36 (revision 0x700b4469fc43f23b; glm pattern, no normalizer, ignore_merges true)
+2026-10-06 03:05:03.570 INFO  serve: grammar vocabulary built (154880 ids, tool markers present, call-turn EOS 154829)
+2026-10-06 03:05:03.671 INFO  serve: JSON grammar tables built in 0.10 s
+2026-10-06 03:05:03.925 INFO  bus: globaltimer offset -59329951909 ns (+-2 us)
+2026-10-06 03:05:03.954 INFO  verbs: device roceP2p1s0f0 port 1 gid_index 3
+2026-10-06 03:05:03.961 INFO  verbs: device rocep1s0f0 port 1 gid_index 3
+2026-10-06 03:05:05.054 INFO  bus: rank 1 up — 3 peer(s) x 2 lane(s), lat 8x65536B, bulk 8x262144B, bulk pace 28.3 Gb/s per QP, window 4 per lane
+2026-10-06 03:05:05.054 INFO  rank 1: boundary reducer host-driven
+2026-10-06 03:05:05.085 INFO  bus engine: rank 1 pinned to cpu 19
+2026-10-06 03:05:05.900 INFO  rank 1: process memory locked (mlockall MCL_CURRENT, 14546 MiB)
+2026-10-06 03:05:05.900 INFO  rank 1: resident image cache at /home/stephen/.cache/dgpp/resident
+2026-10-06 03:05:05.956 INFO  rank 1: memory plan for a 786432-token context — vision weights (replicated) 1.05 GiB; vision workspace (bounded image prefill) 0.33 GiB; model weights (resident) 48.27 GiB (1.81 GiB pinned); tensor-parallel slice views 0.67 GiB; bf16 decode packing (12-bit companions) 1.96 GiB; gemm workspace (at least) 0.06 GiB; kda scratch 0.08 GiB; kv cache pool (bf16) 9.29 GiB; dsa scratch 0.23 GiB; moe scratch 0.68 GiB (0.00 GiB pinned); kda state (request slots) 0.14 GiB; kda speculative snapshots 0.27 GiB; draft hidden cache (per position) 24.00 GiB; draft activations 0.05 GiB; activations (per-forward rows) 0.32 GiB (0.00 GiB pinned); route-trace staging 0.10 GiB (0.10 GiB pinned); prefix cache 21.98 GiB; engine 0.08 GiB
+2026-10-06 03:05:05.956 INFO  rank 1: memory plan total 109.55 GiB (85.58 GiB device + 23.97 GiB pinned) + 4.00 GiB headroom against 116.77 GiB free (device free 116.69 GiB of 121.69 GiB, host available 116.77 GiB)
+2026-10-06 03:05:05.956 INFO  memory ledger: rank 1 after the plan check — rss 1.18 GiB (anon 0.42, shmem 0.09, file 0.67; locked 14.21); device free 116.69 GiB, node available 116.77 GiB
+2026-10-06 03:05:05.957 INFO  memory ledger: rank 1 after the bus — rss 1.18 GiB (anon 0.42, shmem 0.09, file 0.67; locked 14.21); device free 116.69 GiB, node available 116.77 GiB
+2026-10-06 03:05:06.302 INFO  glm loader: rank 1 resident footprint 46.5 GiB; device free 116.6 of 121.7 GiB, host available 116.7 GiB
+2026-10-06 03:05:07.289 INFO  glm loader: rank 1 resident image /home/stephen/.cache/dgpp/resident/44076e8b908aed4a.img — 46/46 layers present, direct I/O
+2026-10-06 03:05:07.333 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-06 03:05:07.334 INFO  glm loader: rank 1 boot digest from the resident image (713 tensors, 2.91 GiB)
+2026-10-06 03:05:17.510 INFO  glm loader: rank 1 resident load complete — released 40 shard mappings (181.7 GiB) and evicted their page cache; image: 46 layers restored, 0 captured
+2026-10-06 03:05:17.894 INFO  rank 1 bf12: 70 decode matrices packed (2.55 GiB of bf16 -> 1.92 GiB, 213419 escapes, widest row 64, 3 rows kept raw; 0 matrices kept bf16) in 1.4 s
+2026-10-06 03:05:22.908 INFO  rank 1 boot phases: digest 0.0 s (3.96 GiB hashed), globals 1.3 s, layers 13.0 s
+2026-10-06 03:05:22.908 INFO  memory ledger: rank 1 after the model — rss 3.09 GiB (anon 0.41, shmem 2.01, file 0.67; locked 14.19); device free 27.82 GiB, node available 27.89 GiB
+2026-10-06 03:05:22.908 INFO  rank 1: model constructed in 17.0s (resident, 4 request slots, 786432-token pool in bf16, 2048-row forwards)
+2026-10-06 03:05:22.908 INFO  rank 1: prefix cache on — 639 snapshot slot(s) of 35.2 MiB (22.00 GiB asked)
+2026-10-06 03:05:23.665 INFO  rank 1: graph engine samples on the device — 112 candidates per rank (8 rows x 4 ranks in a 65536-byte latency slot; the planned width is 128); constrained decoding available
+2026-10-06 03:05:23.665 INFO  rank 1: prefill budget 256 tokens/tick (0 = full prompt), 2048 with nothing decoding
+2026-10-06 03:05:23.665 INFO  rank 1: sampled requests draft a draw from the draft's distribution under the ratio verify (engine.mtp_draft auto)
+2026-10-06 03:05:27.352 INFO  memory ledger: rank 1 after the graph engine — rss 3.10 GiB (anon 0.41, shmem 2.02, file 0.67; locked 14.19); device free 5.59 GiB, node available 5.65 GiB
+2026-10-06 03:05:27.851 INFO  allreduce: device clock rate 2418000 kHz (stamps conversion)
+2026-10-06 03:05:27.851 INFO  allreduce: rank 1 seq 1 launched (3 peers)
+2026-10-06 03:05:27.851 INFO  allreduce: rank 1 seq 1 ready after 37.4us
+2026-10-06 03:05:27.866 INFO  allreduce: rank 1 seq 1 done status=0 after 14681.3us
+2026-10-06 03:05:27.913 INFO  allreduce: rank 1 seq 2 launched (3 peers)
+2026-10-06 03:05:27.913 INFO  allreduce: rank 1 seq 2 ready after 11.4us
+2026-10-06 03:05:27.913 INFO  allreduce: rank 1 seq 2 done status=0 after 49.7us
+2026-10-06 03:05:27.913 INFO  allreduce: rank 1 seq 3 launched (3 peers)
+2026-10-06 03:05:27.913 INFO  allreduce: rank 1 seq 3 ready after 11.2us
+2026-10-06 03:05:27.913 INFO  allreduce: rank 1 seq 3 done status=0 after 77.5us
+2026-10-06 03:05:27.914 INFO  allreduce: rank 1 seq 4 launched (3 peers)
+2026-10-06 03:05:27.914 INFO  allreduce: rank 1 seq 4 ready after 11.3us
+2026-10-06 03:05:27.914 INFO  allreduce: rank 1 seq 4 done status=0 after 49.3us
+2026-10-06 03:05:27.914 INFO  allreduce: rank 1 seq 5 launched (3 peers)
+2026-10-06 03:05:27.914 INFO  allreduce: rank 1 seq 5 ready after 11.4us
+2026-10-06 03:05:27.914 INFO  allreduce: rank 1 seq 5 done status=0 after 59.0us
+2026-10-06 03:05:27.915 INFO  allreduce: rank 1 seq 6 launched (3 peers)
+2026-10-06 03:05:27.915 INFO  allreduce: rank 1 seq 6 ready after 11.2us
+2026-10-06 03:05:27.915 INFO  allreduce: rank 1 seq 6 done status=0 after 54.7us
+2026-10-06 03:05:27.918 INFO  allreduce: rank 1 seq 7 launched (3 peers)
+2026-10-06 03:05:27.918 INFO  allreduce: rank 1 seq 7 ready after 13.9us
+2026-10-06 03:05:27.918 INFO  allreduce: rank 1 seq 7 done status=0 after 155.4us
+2026-10-06 03:05:27.919 INFO  allreduce: rank 1 seq 8 launched (3 peers)
+2026-10-06 03:05:27.919 INFO  allreduce: rank 1 seq 8 ready after 11.5us
+2026-10-06 03:05:27.919 INFO  allreduce: rank 1 seq 8 done status=0 after 50.2us
+2026-10-06 03:05:27.919 INFO  allreduce: rank 1 seq 9 launched (3 peers)
+2026-10-06 03:05:27.919 INFO  allreduce: rank 1 seq 9 ready after 10.7us
+2026-10-06 03:05:27.919 INFO  allreduce: rank 1 seq 9 done status=0 after 62.9us
+2026-10-06 03:05:27.920 INFO  allreduce: rank 1 seq 10 launched (3 peers)
+2026-10-06 03:05:27.920 INFO  allreduce: rank 1 seq 10 ready after 10.8us
+2026-10-06 03:05:27.920 INFO  allreduce: rank 1 seq 10 done status=0 after 56.1us
+2026-10-06 03:05:27.920 INFO  allreduce: rank 1 seq 11 launched (3 peers)
+2026-10-06 03:05:27.920 INFO  allreduce: rank 1 seq 11 ready after 10.9us
+2026-10-06 03:05:27.920 INFO  allreduce: rank 1 seq 11 done status=0 after 76.4us
+2026-10-06 03:05:27.921 INFO  allreduce: rank 1 seq 12 launched (3 peers)
+2026-10-06 03:05:27.921 INFO  allreduce: rank 1 seq 12 ready after 15.4us
+2026-10-06 03:05:27.921 INFO  allreduce: rank 1 seq 12 done status=0 after 54.2us
+2026-10-06 03:05:27.922 INFO  allreduce: rank 1 seq 13 launched (3 peers)
+2026-10-06 03:05:27.922 INFO  allreduce: rank 1 seq 13 ready after 10.9us
+2026-10-06 03:05:27.922 INFO  allreduce: rank 1 seq 13 done status=0 after 58.0us
+2026-10-06 03:05:27.922 INFO  allreduce: rank 1 seq 14 launched (3 peers)
+2026-10-06 03:05:27.922 INFO  allreduce: rank 1 seq 14 ready after 13.3us
+2026-10-06 03:05:27.922 INFO  allreduce: rank 1 seq 14 done status=0 after 53.5us
+2026-10-06 03:05:27.923 INFO  allreduce: rank 1 seq 15 launched (3 peers)
+2026-10-06 03:05:27.923 INFO  allreduce: rank 1 seq 15 ready after 9.0us
+2026-10-06 03:05:27.923 INFO  allreduce: rank 1 seq 15 done status=0 after 43.8us
+2026-10-06 03:05:27.924 INFO  allreduce: rank 1 seq 16 launched (3 peers)
+2026-10-06 03:05:27.924 INFO  allreduce: rank 1 seq 16 ready after 8.9us
+2026-10-06 03:05:27.924 INFO  allreduce: rank 1 seq 16 done status=0 after 44.2us
+2026-10-06 03:05:27.996 INFO  bus graph era: variant 0 recorded with 94 collective node(s)
+2026-10-06 03:05:27.996 INFO  rank 1: graph variant 0 shape: 1297 nodes, 1612 edges: kernel 1297 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-10-06 03:05:28.000 INFO  rank 1: graph variant 0 instantiated — 22.8 MiB of device memory (4.9 GiB free)
+2026-10-06 03:05:28.001 INFO  bus graph era: variant 1 recorded with 94 collective node(s)
+2026-10-06 03:05:28.001 INFO  rank 1: graph variant 1 shape: 1297 nodes, 1612 edges: kernel 1297 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-10-06 03:05:28.006 INFO  rank 1: graph variant 1 instantiated — 24.1 MiB of device memory (4.9 GiB free)
+2026-10-06 03:05:28.006 INFO  rank 1: serving scalar graph variants 0/1 captured for request slot 0 (2 rows, MTP)
+2026-10-06 03:05:28.008 INFO  bus graph era: variant 8 recorded with 94 collective node(s)
+2026-10-06 03:05:28.008 INFO  rank 1: graph variant 8 shape: 1299 nodes, 1614 edges: kernel 1299 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-10-06 03:05:28.014 INFO  rank 1: graph variant 8 instantiated — 33.2 MiB of device memory (4.8 GiB free)
+2026-10-06 03:05:28.015 INFO  bus graph era: variant 9 recorded with 94 collective node(s)
+2026-10-06 03:05:28.016 INFO  rank 1: graph variant 9 shape: 1299 nodes, 1614 edges: kernel 1299 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-10-06 03:05:28.023 INFO  rank 1: graph variant 9 instantiated — 34.1 MiB of device memory (4.8 GiB free)
+2026-10-06 03:05:28.023 INFO  rank 1: serving row-batched graph variants 8/9 captured for 2 slots x 2 rows = 4 fixed rows, MTP (a batch is selected at 2+ live requests, the smallest that covers the live slots)
+2026-10-06 03:05:28.036 INFO  bus graph era: variant 10 recorded with 94 collective node(s)
+2026-10-06 03:05:28.036 INFO  rank 1: graph variant 10 shape: 1359 nodes, 1674 edges: kernel 1359 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-10-06 03:05:28.043 INFO  rank 1: graph variant 10 instantiated — 28.9 MiB of device memory (4.8 GiB free)
+2026-10-06 03:05:28.045 INFO  bus graph era: variant 11 recorded with 94 collective node(s)
+2026-10-06 03:05:28.045 INFO  rank 1: graph variant 11 shape: 1359 nodes, 1674 edges: kernel 1359 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-10-06 03:05:28.052 INFO  rank 1: graph variant 11 instantiated — 31.6 MiB of device memory (4.7 GiB free)
+2026-10-06 03:05:28.052 INFO  rank 1: serving row-batched graph variants 10/11 captured for 3 slots x 2 rows = 6 fixed rows, MTP (a batch is selected at 2+ live requests, the smallest that covers the live slots)
+2026-10-06 03:05:28.053 INFO  bus graph era: variant 12 recorded with 94 collective node(s)
+2026-10-06 03:05:28.053 INFO  rank 1: graph variant 12 shape: 1361 nodes, 1676 edges: kernel 1361 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-10-06 03:05:28.061 INFO  rank 1: graph variant 12 instantiated — 34.9 MiB of device memory (4.7 GiB free)
+2026-10-06 03:05:28.062 INFO  bus graph era: variant 13 recorded with 94 collective node(s)
+2026-10-06 03:05:28.062 INFO  rank 1: graph variant 13 shape: 1361 nodes, 1676 edges: kernel 1361 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-10-06 03:05:28.069 INFO  rank 1: graph variant 13 instantiated — 31.1 MiB of device memory (4.7 GiB free)
+2026-10-06 03:05:28.069 INFO  rank 1: serving row-batched graph variants 12/13 captured for 4 slots x 2 rows = 8 fixed rows, MTP (a batch is selected at 2+ live requests, the smallest that covers the live slots)
+2026-10-06 03:05:28.134 INFO  bus graph era: variant 2 recorded with 94 collective node(s)
+2026-10-06 03:05:28.134 INFO  rank 1: graph variant 2 shape: 1297 nodes, 1612 edges: kernel 1297 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-10-06 03:05:28.141 INFO  rank 1: graph variant 2 instantiated — 32.5 MiB of device memory (4.6 GiB free)
+2026-10-06 03:05:28.142 INFO  bus graph era: variant 3 recorded with 94 collective node(s)
+2026-10-06 03:05:28.142 INFO  rank 1: graph variant 3 shape: 1297 nodes, 1612 edges: kernel 1297 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-10-06 03:05:28.150 INFO  rank 1: graph variant 3 instantiated — 34.2 MiB of device memory (4.6 GiB free)
+2026-10-06 03:05:28.150 INFO  rank 1: serving scalar graph variants 2/3 captured for request slot 1 (2 rows, MTP)
+2026-10-06 03:05:28.218 INFO  bus graph era: variant 4 recorded with 94 collective node(s)
+2026-10-06 03:05:28.218 INFO  rank 1: graph variant 4 shape: 1297 nodes, 1612 edges: kernel 1297 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-10-06 03:05:28.225 INFO  rank 1: graph variant 4 instantiated — 32.3 MiB of device memory (4.6 GiB free)
+2026-10-06 03:05:28.226 INFO  bus graph era: variant 5 recorded with 94 collective node(s)
+2026-10-06 03:05:28.226 INFO  rank 1: graph variant 5 shape: 1297 nodes, 1612 edges: kernel 1297 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-10-06 03:05:28.235 INFO  rank 1: graph variant 5 instantiated — 37.2 MiB of device memory (4.5 GiB free)
+2026-10-06 03:05:28.235 INFO  rank 1: serving scalar graph variants 4/5 captured for request slot 2 (2 rows, MTP)
+2026-10-06 03:05:28.300 INFO  bus graph era: variant 6 recorded with 94 collective node(s)
+2026-10-06 03:05:28.300 INFO  rank 1: graph variant 6 shape: 1297 nodes, 1612 edges: kernel 1297 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-10-06 03:05:28.308 INFO  rank 1: graph variant 6 instantiated — 33.7 MiB of device memory (4.5 GiB free)
+2026-10-06 03:05:28.309 INFO  bus graph era: variant 7 recorded with 94 collective node(s)
+2026-10-06 03:05:28.309 INFO  rank 1: graph variant 7 shape: 1297 nodes, 1612 edges: kernel 1297 empty 0 memcpy 0 memset 0 host 0 event 0 other 0; max in-degree 2
+2026-10-06 03:05:28.316 INFO  rank 1: graph variant 7 instantiated — 33.2 MiB of device memory (4.5 GiB free)
+2026-10-06 03:05:28.316 INFO  rank 1: serving scalar graph variants 6/7 captured for request slot 3 (2 rows, MTP)
+2026-10-06 03:05:28.316 INFO  rank 1: warm capture complete — 4 scalar variants and the row batches for 2 slots, 3 slots, 4 slots recorded before the first request
+2026-10-06 03:05:28.316 INFO  memory ledger: rank 1 after the warm capture — rss 3.60 GiB (anon 0.91, shmem 2.02, file 0.68; locked 14.19); device free 4.46 GiB, node available 4.68 GiB
+2026-10-06 03:05:28.316 INFO  rank 1: graph variants warm-captured in 0.96s
+2026-10-06 03:05:28.316 INFO  rank 1: following rank 0's journal (admission full, window 256)
+2026-10-06 03:05:34.180 INFO  sched: request 'chatcmpl-e97edbaa97883d7a' starting prefill in slot 0 (261614 prompt tokens)
+2026-10-06 03:05:34.180 INFO  sched: request 'chatcmpl-e97edbaa97883d7a' prefix cache miss — 129 cut(s), the cache is empty
+2026-10-06 03:05:34.181 INFO  sched: request 'chatcmpl-e97edbaa97883d7a' prefilling in slot 0 (2048 tokens/tick)
+2026-10-06 03:05:39.204 INFO  stats: rank 1 | 10.7 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 8192 tok, 766 tok/s, 0.61 ms/tok (47 % of wall), 0 tok cached (0/1 hit) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:05:49.577 INFO  stats: rank 1 | 10.4 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 14336 tok, 1382 tok/s, 0.72 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:06:00.548 INFO  stats: rank 1 | 11.0 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 12288 tok, 1120 tok/s, 0.89 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:06:11.541 INFO  stats: rank 1 | 11.0 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 10240 tok, 932 tok/s, 1.07 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:06:21.951 INFO  stats: rank 1 | 10.4 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 8192 tok, 787 tok/s, 1.27 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:06:34.135 INFO  stats: rank 1 | 12.2 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 8192 tok, 672 tok/s, 1.49 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:06:44.372 INFO  stats: rank 1 | 10.2 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 6144 tok, 600 tok/s, 1.67 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:06:55.904 INFO  stats: rank 1 | 11.5 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 6144 tok, 533 tok/s, 1.88 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:07:08.610 INFO  stats: rank 1 | 12.7 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 6144 tok, 484 tok/s, 2.07 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:07:22.642 INFO  stats: rank 1 | 14.0 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 6144 tok, 438 tok/s, 2.28 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:07:32.933 INFO  stats: rank 1 | 10.3 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 4096 tok, 398 tok/s, 2.51 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:07:43.711 INFO  stats: rank 1 | 10.8 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 4096 tok, 380 tok/s, 2.63 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:07:55.168 INFO  stats: rank 1 | 11.5 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 4096 tok, 358 tok/s, 2.80 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:08:07.512 INFO  stats: rank 1 | 12.3 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 4096 tok, 332 tok/s, 3.01 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:08:20.515 INFO  stats: rank 1 | 13.0 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 4096 tok, 315 tok/s, 3.17 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:08:34.258 INFO  stats: rank 1 | 13.7 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 4096 tok, 298 tok/s, 3.36 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:08:49.545 INFO  stats: rank 1 | 15.3 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 4096 tok, 268 tok/s, 3.73 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:09:05.008 INFO  stats: rank 1 | 15.5 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 4096 tok, 265 tok/s, 3.77 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:09:21.342 INFO  stats: rank 1 | 16.3 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 4096 tok, 251 tok/s, 3.99 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:09:38.772 INFO  stats: rank 1 | 17.4 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 4096 tok, 235 tok/s, 4.26 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:09:56.578 INFO  stats: rank 1 | 17.8 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 4096 tok, 230 tok/s, 4.35 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:10:16.309 INFO  stats: rank 1 | 19.7 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 4096 tok, 208 tok/s, 4.82 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:10:26.337 INFO  stats: rank 1 | 10.0 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 204 tok/s, 4.90 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:10:36.489 INFO  stats: rank 1 | 10.2 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 202 tok/s, 4.96 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:10:46.699 INFO  stats: rank 1 | 10.2 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 201 tok/s, 4.99 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:10:58.067 INFO  stats: rank 1 | 11.4 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 180 tok/s, 5.55 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:11:09.465 INFO  stats: rank 1 | 11.4 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 180 tok/s, 5.57 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:11:20.947 INFO  stats: rank 1 | 11.5 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 178 tok/s, 5.61 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:11:32.617 INFO  stats: rank 1 | 11.7 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 175 tok/s, 5.70 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:11:44.486 INFO  stats: rank 1 | 11.9 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 173 tok/s, 5.80 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:11:56.370 INFO  stats: rank 1 | 11.9 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 172 tok/s, 5.80 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:12:08.362 INFO  stats: rank 1 | 12.0 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 171 tok/s, 5.86 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:12:21.597 INFO  stats: rank 1 | 13.2 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 155 tok/s, 6.46 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:12:34.992 INFO  stats: rank 1 | 13.4 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 153 tok/s, 6.54 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:12:48.581 INFO  stats: rank 1 | 13.6 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 151 tok/s, 6.64 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:13:02.434 INFO  stats: rank 1 | 13.9 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 148 tok/s, 6.76 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:13:16.414 INFO  stats: rank 1 | 14.0 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 146 tok/s, 6.83 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:13:30.637 INFO  stats: rank 1 | 14.2 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 144 tok/s, 6.94 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:13:44.827 INFO  stats: rank 1 | 14.2 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 144 tok/s, 6.93 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:13:59.246 INFO  stats: rank 1 | 14.4 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 142 tok/s, 7.04 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:14:13.775 INFO  stats: rank 1 | 14.5 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 141 tok/s, 7.09 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:14:30.014 INFO  stats: rank 1 | 16.2 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 126 tok/s, 7.93 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:14:46.647 INFO  stats: rank 1 | 16.6 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 123 tok/s, 8.12 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:15:03.306 INFO  stats: rank 1 | 16.7 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 123 tok/s, 8.13 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:15:20.233 INFO  stats: rank 1 | 16.9 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 121 tok/s, 8.27 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:15:37.069 INFO  stats: rank 1 | 16.8 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 122 tok/s, 8.22 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:15:54.420 INFO  stats: rank 1 | 17.4 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 118 tok/s, 8.47 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:16:12.074 INFO  stats: rank 1 | 17.7 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 116 tok/s, 8.62 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:16:29.805 INFO  stats: rank 1 | 17.7 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 116 tok/s, 8.66 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:16:47.582 INFO  stats: rank 1 | 17.8 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 115 tok/s, 8.68 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:17:05.261 INFO  stats: rank 1 | 17.7 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 116 tok/s, 8.63 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:17:23.442 INFO  stats: rank 1 | 18.2 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 113 tok/s, 8.88 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:17:43.729 INFO  stats: rank 1 | 20.3 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 101 tok/s, 9.91 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:18:04.245 INFO  stats: rank 1 | 20.5 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 100 tok/s, 10.02 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:18:24.976 INFO  stats: rank 1 | 20.7 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 99 tok/s, 10.12 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:18:45.902 INFO  stats: rank 1 | 20.9 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 98 tok/s, 10.22 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:19:07.006 INFO  stats: rank 1 | 21.1 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 97 tok/s, 10.30 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:19:28.322 INFO  stats: rank 1 | 21.3 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 96 tok/s, 10.41 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:19:50.203 INFO  stats: rank 1 | 21.9 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 94 tok/s, 10.68 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:20:11.988 INFO  stats: rank 1 | 21.8 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 94 tok/s, 10.64 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:20:33.996 INFO  stats: rank 1 | 22.0 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 93 tok/s, 10.75 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:20:56.071 INFO  stats: rank 1 | 22.1 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 93 tok/s, 10.78 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:21:18.628 INFO  stats: rank 1 | 22.6 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 91 tok/s, 11.01 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:21:41.237 INFO  stats: rank 1 | 22.6 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 91 tok/s, 11.04 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:22:03.913 INFO  stats: rank 1 | 22.7 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 90 tok/s, 11.07 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:22:30.155 INFO  stats: rank 1 | 26.2 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 78 tok/s, 12.81 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:22:56.869 INFO  stats: rank 1 | 26.7 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 77 tok/s, 13.04 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:23:23.624 INFO  stats: rank 1 | 26.8 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 77 tok/s, 13.06 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:23:50.885 INFO  stats: rank 1 | 27.3 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 75 tok/s, 13.31 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:24:18.045 INFO  stats: rank 1 | 27.2 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 75 tok/s, 13.26 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:24:45.773 INFO  stats: rank 1 | 27.7 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 74 tok/s, 13.54 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:25:14.153 INFO  stats: rank 1 | 28.4 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 72 tok/s, 13.86 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:25:42.052 INFO  stats: rank 1 | 27.9 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 73 tok/s, 13.62 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:26:10.295 INFO  stats: rank 1 | 28.2 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 73 tok/s, 13.79 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:26:38.535 INFO  stats: rank 1 | 28.2 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 73 tok/s, 13.79 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:27:07.277 INFO  stats: rank 1 | 28.7 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 71 tok/s, 14.03 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:27:36.036 INFO  stats: rank 1 | 28.8 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 71 tok/s, 14.04 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:28:05.396 INFO  stats: rank 1 | 29.4 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 70 tok/s, 14.34 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:28:34.664 INFO  stats: rank 1 | 29.3 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 70 tok/s, 14.29 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:29:05.182 INFO  stats: rank 1 | 30.5 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 67 tok/s, 14.90 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:29:34.696 INFO  stats: rank 1 | 29.5 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 69 tok/s, 14.41 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:30:04.454 INFO  stats: rank 1 | 29.8 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 69 tok/s, 14.53 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:30:34.545 INFO  stats: rank 1 | 30.1 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 2048 tok, 68 tok/s, 14.69 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2046/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:30:57.525 INFO  stats: rank 1 | 23.0 s | decode 0.0 tok/s, 0.0 ms/tok, 0.0 ms/step (0 steps / 0 tok, 0 % of wall) | prefill 0 prompts / 1516 tok, 66 tok/s, 15.16 ms/tok (100 % of wall), 0 tok cached (0/0 hits) | live 1, queued 0 | pool 2047/6144 blocks (33 %) | prefix cache 0/639 entries | 1 prefilling
+2026-10-06 03:30:57.668 INFO  sched: request 'chatcmpl-e97edbaa97883d7a' admitted to slot 0 (reserve 2046 blocks; pool 2047/6144 blocks in use) — first token 785
+2026-10-06 03:31:02.743 INFO  sched: request 'chatcmpl-e97edbaa97883d7a' retired (steps): 256 tok in 1528.6 s — prefill 261614 tok (0 cached) in 1523445 ms; decode 255 tok / 130 passes in 5.1 s: 49.8 tok/s, 20.1 ms/tok, 39 ms/pass, 1.96 tok/pass, accept p1 96 %
+2026-10-06 03:31:02.844 INFO  sched: request 'chatcmpl-e97edbaa97883d7b' starting prefill in slot 0 (261614 prompt tokens)
+2026-10-06 03:31:02.845 INFO  sched: request 'chatcmpl-e97edbaa97883d7b' prefilling in slot 0 (2048 tokens/tick)
+2026-10-06 03:31:02.987 INFO  sched: request 'chatcmpl-e97edbaa97883d7b' admitted to slot 0 (reserve 2046 blocks; pool 2050/6144 blocks in use) — first token 785
+2026-10-06 03:31:07.556 INFO  stats: rank 1 | 10.0 s | decode 48.4 tok/s, 19.8 ms/tok, 38.9 ms/step (247 steps / 486 tok, 96 % of wall) | mtp 1.97 tok/step/req, accept p1 96 % | prefill 2 prompts / 4 tok, 0 tok/s, 70.68 ms/tok, 141 ms avg (3 % of wall), 261612 tok cached (1/1 hit) | live 1, queued 0 | pool 2051/6144 blocks (33 %) | prefix cache 3/639 entries
+2026-10-06 03:31:08.068 INFO  sched: request 'chatcmpl-e97edbaa97883d7b' retired (steps): 256 tok in 5.2 s — prefill 261614 tok (261612 cached) in 143 ms; decode 255 tok / 130 passes in 5.1 s: 50.2 tok/s, 19.9 ms/tok, 39 ms/pass, 1.96 tok/pass, accept p1 96 %
+2026-10-06 03:31:08.178 INFO  sched: request 'chatcmpl-e97edbaa97883d7c' starting prefill in slot 0 (261614 prompt tokens)
+2026-10-06 03:31:08.179 INFO  sched: request 'chatcmpl-e97edbaa97883d7c' prefilling in slot 0 (2048 tokens/tick)
+2026-10-06 03:31:08.322 INFO  sched: request 'chatcmpl-e97edbaa97883d7c' admitted to slot 0 (reserve 2046 blocks; pool 2050/6144 blocks in use) — first token 785
+2026-10-06 03:31:13.399 INFO  sched: request 'chatcmpl-e97edbaa97883d7c' retired (steps): 256 tok in 5.2 s — prefill 261614 tok (261612 cached) in 144 ms; decode 255 tok / 130 passes in 5.1 s: 50.2 tok/s, 19.9 ms/tok, 39 ms/pass, 1.96 tok/pass, accept p1 96 %
+2026-10-06 03:31:14.493 INFO  journal: stop record — exiting
+2026-10-06 03:31:14.526 INFO  rank 1: graph engine sampling summary — 0 sampled decode steps, 0 served by the exact gather fallback (0.0%), 112 candidates per rank
+2026-10-06 03:31:16.058 INFO  rank 1: exited cleanly

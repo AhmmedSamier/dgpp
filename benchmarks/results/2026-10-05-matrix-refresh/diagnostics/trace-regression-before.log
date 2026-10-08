@@ -1,0 +1,11 @@
+2026-10-06 02:55:09.101 INFO  glm loader: rank 0 resident footprint 0.0 GiB; device free 116.1 of 121.6 GiB, host available 116.1 GiB
+2026-10-06 02:55:09.597 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-06 02:55:09.619 INFO  glm loader: rank 0 resident load complete — released 1 shard mappings (0.0 GiB) and evicted their page cache; image: 0 layers restored, 0 captured
+2026-10-06 02:55:09.619 INFO  rank 0 boot phases: digest 0.0 s (0.00 GiB hashed), globals 0.0 s, layers 0.0 s
+2026-10-06 02:55:09.620 INFO  glm loader: rank 0 resident footprint 0.0 GiB; device free 115.2 of 121.6 GiB, host available 115.2 GiB
+2026-10-06 02:55:09.623 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-06 02:55:09.658 INFO  glm loader: rank 0 resident load complete — released 1 shard mappings (0.0 GiB) and evicted their page cache; image: 0 layers restored, 0 captured
+2026-10-06 02:55:09.658 INFO  rank 0 boot phases: digest 0.0 s (0.00 GiB hashed), globals 0.0 s, layers 0.0 s
+fixture written: 463 tensors, 23.54 MB payload
+[FAIL] glm_tp_route_traces_off_bounds_prefill_outputs_without_changing_tokens: serving prefill must not accumulate prompt-sized diagnostic routes
+1 tests, 1 failed

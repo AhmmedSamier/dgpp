@@ -1,0 +1,262 @@
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+SKIP glm-flash-hybrid-w2 default
+Rendered overview; 150 outstanding measurement groups
+SKIP glm-flash-hybrid-w2 plain
+Rendered overview; 150 outstanding measurement groups
+SKIP glm-flash-hybrid-w2 mtp2
+Rendered overview; 150 outstanding measurement groups
+SKIP glm-flash-hybrid-w2 mtp3
+Rendered overview; 150 outstanding measurement groups
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+SKIP glm-flash-hybrid-256k-w2 default
+Rendered overview; 150 outstanding measurement groups
+SKIP glm-flash-hybrid-256k-w2 plain
+Rendered overview; 150 outstanding measurement groups
+SKIP glm-flash-hybrid-256k-w2 mtp2
+Rendered overview; 150 outstanding measurement groups
+SKIP glm-flash-hybrid-256k-w2 mtp3
+Rendered overview; 150 outstanding measurement groups
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+SKIP glm-flash-hybrid-w4 default
+Rendered overview; 150 outstanding measurement groups
+SKIP glm-flash-hybrid-w4 plain
+Rendered overview; 150 outstanding measurement groups
+SKIP glm-flash-hybrid-w4 mtp2
+Rendered overview; 150 outstanding measurement groups
+SKIP glm-flash-hybrid-w4 mtp3
+Rendered overview; 150 outstanding measurement groups
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+SKIP glm-flash-fp8-w4 default
+Rendered overview; 150 outstanding measurement groups
+SKIP glm-flash-fp8-w4 plain
+Rendered overview; 150 outstanding measurement groups
+SKIP glm-flash-fp8-w4 mtp2
+Rendered overview; 150 outstanding measurement groups
+SKIP glm-flash-fp8-w4 mtp3
+Rendered overview; 150 outstanding measurement groups
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+SKIP glm-flash-fp8-512k-w4 default
+Rendered overview; 150 outstanding measurement groups
+SKIP glm-flash-fp8-512k-w4 plain
+Rendered overview; 150 outstanding measurement groups
+SKIP glm-flash-fp8-512k-w4 mtp2
+Rendered overview; 150 outstanding measurement groups
+SKIP glm-flash-fp8-512k-w4 mtp3
+Rendered overview; 150 outstanding measurement groups
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+SKIP qwen-nvfp4-w1 default
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-nvfp4-w1 plain
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-nvfp4-w1 mtp2
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-nvfp4-w1 mtp3
+Rendered overview; 150 outstanding measurement groups
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+SKIP qwen-nvfp4-bf16-w1 default
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-nvfp4-bf16-w1 plain
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-nvfp4-bf16-w1 mtp2
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-nvfp4-bf16-w1 mtp3
+Rendered overview; 150 outstanding measurement groups
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+SKIP qwen-nvfp4-w2 default
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-nvfp4-w2 plain
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-nvfp4-w2 mtp2
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-nvfp4-w2 mtp3
+Rendered overview; 150 outstanding measurement groups
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+SKIP qwen-yarn-w2 default
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-yarn-w2 plain
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-yarn-w2 mtp2
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-yarn-w2 mtp3
+Rendered overview; 150 outstanding measurement groups
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+SKIP qwen-radixark-w1 default
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-radixark-w1 plain
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-radixark-w1 mtp1
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-radixark-w1 mtp3
+Rendered overview; 150 outstanding measurement groups
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+SKIP qwen-radixark-w2 default
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-radixark-w2 plain
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-radixark-w2 mtp1
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-radixark-w2 mtp2
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-radixark-w2 mtp3
+Rendered overview; 150 outstanding measurement groups
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+SKIP qwen-fp8-w2 default
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-fp8-w2 plain
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-fp8-w2 mtp2
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-fp8-w2 mtp3
+Rendered overview; 150 outstanding measurement groups
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+SKIP qwen-fp8-w4 default
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-fp8-w4 plain
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-fp8-w4 mtp2
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-fp8-w4 mtp3
+Rendered overview; 150 outstanding measurement groups
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+SKIP qwen-autoround-w1 default
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-autoround-w1 plain
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-autoround-w1 mtp1
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-autoround-w1 mtp2
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-autoround-w1 mtp4
+Rendered overview; 150 outstanding measurement groups
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+SKIP qwen-autoround-prefill-w1 default
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-autoround-prefill-w1 plain
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-autoround-prefill-w1 mtp1
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-autoround-prefill-w1 mtp2
+Rendered overview; 150 outstanding measurement groups
+SKIP qwen-autoround-prefill-w1 mtp4
+Rendered overview; 150 outstanding measurement groups
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+DISK 192.168.88.11: 395.5 GiB free; removed 0 completed session downloads
+DISK 192.168.88.12: 586.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.13: 568.1 GiB free; removed 0 completed session downloads
+DISK 192.168.88.14: 631.3 GiB free; removed 0 completed session downloads
+PLAN glm53-w4 default: {"jobs": ["prefill", "context-32768", "context-65536"], "prefill_lengths": [2048, 8192, 32768], "retained_sources": {"greedy": [{"path": "attempts/glm53-w4/default-before-fused-scores-20261007/greedy.json", "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342", "reused": true}], "context-0": [{"path": "attempts/glm53-w4/default-before-fused-scores-20261007/context-0.json", "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342", "reused": true}], "context-131072": [{"path": "attempts/glm53-w4/default-before-fused-scores-20261007/context-131072.json", "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342", "reused": true}], "context-262144": [{"path": "attempts/glm53-w4/default-before-fused-scores-20261007/context-262144.json", "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342", "reused": true}], "context-524288": [{"path": "attempts/glm53-w4/default-before-fused-scores-20261007/context-524288.json", "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342", "reused": true}]}}
+2026-10-07T03:03:04.724361+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-w4/refresh/default/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-w4/refresh/default/server
+2026-10-07T03:03:50.334905+00:00 EXIT 0 raw/glm53-w4/refresh/default/up.log
+2026-10-07T03:03:50.349121+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/serve_prefill_probe.py 127.0.0.1 18080 2048 8192 32768 --repeat 3 --seed 7 --tag matrix-092f45869d964618a47f1ab42ff8040b --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-w4/refresh/default/prefill.json
+2026-10-07T03:08:24.121997+00:00 EXIT 0 raw/glm53-w4/refresh/default/prefill.log
+2026-10-07T03:08:24.122967+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64 --tag 8c708ec8ee0c4e55a03df896b6e2039e --lengths 32768 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-w4/refresh/default/context-32768.json
+2026-10-07T03:10:06.121158+00:00 EXIT 0 raw/glm53-w4/refresh/default/context-32768.log
+2026-10-07T03:10:06.121971+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64 --tag 872f9b9120d844dcac07f9887e7f6c91 --lengths 65536 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-w4/refresh/default/context-65536.json
+2026-10-07T03:13:13.395627+00:00 EXIT 0 raw/glm53-w4/refresh/default/context-65536.log
+2026-10-07T03:13:13.396396+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-w4/refresh/default/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-06-prefill-scaling/raw/glm53-w4/refresh/default/server
+2026-10-07T03:13:20.569997+00:00 EXIT 0 raw/glm53-w4/refresh/default/down.log
+Rendered overview; 147 outstanding measurement groups

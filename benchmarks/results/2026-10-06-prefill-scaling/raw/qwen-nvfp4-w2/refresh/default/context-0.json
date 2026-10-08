@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+  "surface": {
+    "id": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+    "object": "model",
+    "created": 1791312990,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": 262144,
+      "kv_pool_tokens": 262144,
+      "limited_by": "position-ceiling"
+    }
+  },
+  "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+  "seed": 20260922,
+  "tag": "e474b3f6aafb4b56b81db5d30caba5c0",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 3662.6999999999534,
+        "prefill_ms": 210.20000000001164,
+        "decode_steps": 135,
+        "decode_rows": 135,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 156,
+        "prompt_tokens_computed": 156
+      },
+      "engine_tokens_per_s": 69.62077156196337,
+      "ms_per_pass": 27.131111111110766,
+      "tokens_per_pass": 1.8888888888888888,
+      "answer": {
+        "prompt_sha256": "b48d58c403bfc9d3544f58d5138a955861e8d460e9273f066143011565eddf6a",
+        "usage": {
+          "prompt_tokens": 156,
+          "completion_tokens": 256,
+          "total_tokens": 412,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce final answer. User: \"Context measurement e474b3f6aafb4b56b81db5d30caba5c0, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need infer? They provide context measurement and one item. Ask write numbered list describing first 200 parcels and their cities. Continue until listed all 200. We only have one parcel? Need maybe generate 200 parcels and cities? Could be a test of following instruction? Need maybe say insufficient data? But likely they expect synthetic list of 200 parcels and cities. Need decide.\n\nWe have context measurement ID, bucket 0, item 000000: parcel PX-0757343 weighed 4.1825 kg in Income, gate 1, shift C, status sealed",
+        "wall_ms": 3896.633251802996,
+        "ttft_ms": 228.22896298021078,
+        "last_ms": 3896.4787379372865,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 3583.7000000000116,
+        "prefill_ms": 201.39999999999418,
+        "decode_steps": 135,
+        "decode_rows": 135,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 156,
+        "prompt_tokens_computed": 156
+      },
+      "engine_tokens_per_s": 71.15550966877785,
+      "ms_per_pass": 26.545925925926014,
+      "tokens_per_pass": 1.8888888888888888,
+      "answer": {
+        "prompt_sha256": "b48d58c403bfc9d3544f58d5138a955861e8d460e9273f066143011565eddf6a",
+        "usage": {
+          "prompt_tokens": 156,
+          "completion_tokens": 256,
+          "total_tokens": 412,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce final answer. User: \"Context measurement e474b3f6aafb4b56b81db5d30caba5c0, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need infer? They provide context measurement and one item. Ask write numbered list describing first 200 parcels and their cities. Continue until listed all 200. We only have one parcel? Need maybe generate 200 parcels and cities? Could be a test of following instruction? Need maybe say insufficient data? But likely they expect synthetic list of 200 parcels and cities. Need decide.\n\nWe have context measurement ID, bucket 0, item 000000: parcel PX-0757343 weighed 4.1825 kg in Income, gate 1, shift C, status sealed",
+        "wall_ms": 3807.1757939178497,
+        "ttft_ms": 228.20415999740362,
+        "last_ms": 3807.031983975321,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 3710.7999999999884,
+        "prefill_ms": 207.60000000000582,
+        "decode_steps": 135,
+        "decode_rows": 135,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 156,
+        "prompt_tokens_computed": 156
+      },
+      "engine_tokens_per_s": 68.71833566885869,
+      "ms_per_pass": 27.48740740740732,
+      "tokens_per_pass": 1.8888888888888888,
+      "answer": {
+        "prompt_sha256": "b48d58c403bfc9d3544f58d5138a955861e8d460e9273f066143011565eddf6a",
+        "usage": {
+          "prompt_tokens": 156,
+          "completion_tokens": 256,
+          "total_tokens": 412,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce final answer. User: \"Context measurement e474b3f6aafb4b56b81db5d30caba5c0, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need infer? They provide context measurement and one item. Ask write numbered list describing first 200 parcels and their cities. Continue until listed all 200. We only have one parcel? Need maybe generate 200 parcels and cities? Could be a test of following instruction? Need maybe say insufficient data? But likely they expect synthetic list of 200 parcels and cities. Need decide.\n\nWe have context measurement ID, bucket 0, item 000000: parcel PX-0757343 weighed 4.1825 kg in Income, gate 1, shift C, status sealed",
+        "wall_ms": 3931.575297145173,
+        "ttft_ms": 227.36243600957096,
+        "last_ms": 3931.4256000798196,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

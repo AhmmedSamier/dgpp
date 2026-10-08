@@ -463,8 +463,8 @@ check their allocations before loading:
   fits the device's free memory remains as the second line and fails
   immediately with a clear message — never three minutes into a load;
 - the loader reads each source tensor exactly once (prefetch, copy, drop),
-  so the page cache stays under ~10 GB during the load and the box never
-  reaches its memory watermark; the checkpoint's mmaps are released the
+  keeping the checkpoint page cache bounded during loading; the checkpoint's
+  mmaps are released the
   moment the last layer is on the device (`GlmLayerStream::release_sources`);
 - the process *tries* to lock its memory (`mlockall(MCL_CURRENT)`, before
   the model is constructed) as a safety net against swap-in faults in the
@@ -473,6 +473,31 @@ check their allocations before loading:
   1000 steps). A finite `RLIMIT_MEMLOCK` is logged, not warned about;
   `DGPP_MLOCK=off` skips the attempt. RDMA registration still requires a
   sufficient memlock limit with this optional pin disabled.
+
+To prevent swap for every serving rank launched by `dgpp-cluster`, use:
+
+```bash
+DGPP_NO_SWAP=1 scripts/dgpp-cluster up --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json
+```
+
+The launcher runs each rank, and its preflight/status version probes, in a
+systemd user scope with `MemorySwapMax=0`.
+This requires a working systemd user manager and the cgroup v2 memory
+controller on every node. Enable lingering for the serving account on each
+node so its user manager, and the serving scope, survive SSH logout:
+
+```bash
+sudo loginctl enable-linger "$USER"
+loginctl show-user "$USER" -p Linger  # must report Linger=yes
+```
+
+A failed scope creation does not fall back to
+an unprotected launch. OS swap remains enabled for other processes.
+
+The initial `MCL_CURRENT` pin covers only mappings present before model
+construction. Later host allocations can still be swapped during reclaim,
+even without a growing heap. The scope limit covers those allocations too.
+It does not replace the memory plan or its headroom requirement.
 
 **GLM-5.3-FP8 context memory.** With per-forward activations sized to the
 prefill chunk (2,048 rows) rather than the context, the memory that grows

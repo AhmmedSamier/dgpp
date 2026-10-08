@@ -1,0 +1,180 @@
+{
+  "schema_version": 1,
+  "model": "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
+  "surface": {
+    "id": "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64",
+    "object": "model",
+    "created": 1791331717,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "minimal": {
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "reasoning_effort": "high"
+        },
+        "high": {
+          "reasoning_effort": "high"
+        },
+        "xhigh": {
+          "reasoning_effort": "max"
+        },
+        "max": {
+          "reasoning_effort": "max"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text"
+    ],
+    "context": {
+      "request_limit_tokens": 212992,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 212992,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
+  "seed": 20260922,
+  "tag": "9bc6093873e4408db4bef0dff97271d4",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 8724.399999999907,
+        "prefill_ms": 840.3999999999651,
+        "decode_steps": 136,
+        "decode_rows": 136,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 97,
+        "prompt_tokens_computed": 97
+      },
+      "engine_tokens_per_s": 29.228371005456275,
+      "ms_per_pass": 64.14999999999931,
+      "tokens_per_pass": 1.875,
+      "answer": {
+        "prompt_sha256": "cbec8f404abca4c5c3ef18d0e804517b4ff9d179318e74aadc857571195efb78",
+        "usage": {
+          "prompt_tokens": 97,
+          "completion_tokens": 256,
+          "total_tokens": 353,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing \"the first 200 parcels and their cities.\" They've given me a context with one parcel: PX-0757343, 4.1825 kg, in \"Income\" (probably a location?), gate 1, shift C, status sealed.\n\nThe problem here: I don't have access to any database of parcels. The context only contains one item (Item 000000). The user wants me to list 200 parcels and their cities, but I only have data for one parcel. I cannot fabricate 199 additional parcels with made-up weights, cities, and statuses \u2014 that would be hallucination.\n\nWait, let me re-read. \"Context measurement 9bc6093873e4408db4bef0dff97271d4, bucket 0. Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\"\n\nThis looks like some kind of data retrieval context \u2014 like a RAG system or a database query result. The context contains only one item. The user asks for the first 200 parcels and their cities.\n\nThe honest answer: I only have",
+        "wall_ms": 9591.747821774334,
+        "ttft_ms": 863.604768877849,
+        "last_ms": 9591.596732847393,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 8731.200000000186,
+        "prefill_ms": 828.4000000000233,
+        "decode_steps": 136,
+        "decode_rows": 136,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 97,
+        "prompt_tokens_computed": 97
+      },
+      "engine_tokens_per_s": 29.205607476634892,
+      "ms_per_pass": 64.20000000000137,
+      "tokens_per_pass": 1.875,
+      "answer": {
+        "prompt_sha256": "cbec8f404abca4c5c3ef18d0e804517b4ff9d179318e74aadc857571195efb78",
+        "usage": {
+          "prompt_tokens": 97,
+          "completion_tokens": 256,
+          "total_tokens": 353,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing \"the first 200 parcels and their cities.\" They've given me a context with one parcel: PX-0757343, 4.1825 kg, in \"Income\" (probably a location?), gate 1, shift C, status sealed.\n\nThe problem here: I don't have access to any database of parcels. The context only contains one item (Item 000000). The user wants me to list 200 parcels and their cities, but I only have data for one parcel. I cannot fabricate 199 additional parcels with made-up weights, cities, and statuses \u2014 that would be hallucination.\n\nWait, let me re-read. \"Context measurement 9bc6093873e4408db4bef0dff97271d4, bucket 0. Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\"\n\nThis looks like some kind of data retrieval context \u2014 like a RAG system or a database query result. The context contains only one item. The user asks for the first 200 parcels and their cities.\n\nThe honest answer: I only have",
+        "wall_ms": 9596.028750063851,
+        "ttft_ms": 837.9405050072819,
+        "last_ms": 9595.81668395549,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 8728.09999999986,
+        "prefill_ms": 832.0999999999767,
+        "decode_steps": 136,
+        "decode_rows": 136,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 97,
+        "prompt_tokens_computed": 97
+      },
+      "engine_tokens_per_s": 29.215980568509078,
+      "ms_per_pass": 64.17720588235191,
+      "tokens_per_pass": 1.875,
+      "answer": {
+        "prompt_sha256": "cbec8f404abca4c5c3ef18d0e804517b4ff9d179318e74aadc857571195efb78",
+        "usage": {
+          "prompt_tokens": 97,
+          "completion_tokens": 256,
+          "total_tokens": 353,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing \"the first 200 parcels and their cities.\" They've given me a context with one parcel: PX-0757343, 4.1825 kg, in \"Income\" (probably a location?), gate 1, shift C, status sealed.\n\nThe problem here: I don't have access to any database of parcels. The context only contains one item (Item 000000). The user wants me to list 200 parcels and their cities, but I only have data for one parcel. I cannot fabricate 199 additional parcels with made-up weights, cities, and statuses \u2014 that would be hallucination.\n\nWait, let me re-read. \"Context measurement 9bc6093873e4408db4bef0dff97271d4, bucket 0. Item 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\"\n\nThis looks like some kind of data retrieval context \u2014 like a RAG system or a database query result. The context contains only one item. The user asks for the first 200 parcels and their cities.\n\nThe honest answer: I only have",
+        "wall_ms": 9590.727107133716,
+        "ttft_ms": 840.054834028706,
+        "last_ms": 9590.560530079529,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

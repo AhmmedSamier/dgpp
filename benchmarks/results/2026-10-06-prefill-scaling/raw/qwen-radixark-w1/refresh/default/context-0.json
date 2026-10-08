@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "model": "RadixArk/Qwen3.8-Flash-Next-NVFP4",
+  "surface": {
+    "id": "RadixArk/Qwen3.8-Flash-Next-NVFP4",
+    "object": "model",
+    "created": 1791317884,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": 262144,
+      "kv_pool_tokens": 262144,
+      "limited_by": "position-ceiling"
+    }
+  },
+  "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+  "seed": 20260922,
+  "tag": "10e2457f9fdf49acbce612d37518b166",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 4974.400000000023,
+        "prefill_ms": 344.6999999999971,
+        "decode_steps": 102,
+        "decode_rows": 102,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 157,
+        "prompt_tokens_computed": 157
+      },
+      "engine_tokens_per_s": 51.262463814731184,
+      "ms_per_pass": 48.768627450980624,
+      "tokens_per_pass": 2.5,
+      "answer": {
+        "prompt_sha256": "2d8a3c309d9bd0c0732a6ee7285b6f0d94ff108fcb77a65f327b1fdb17f55148",
+        "usage": {
+          "prompt_tokens": 157,
+          "completion_tokens": 256,
+          "total_tokens": 413,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce final answer. User: \"Context measurement 10e2457f9fdf49acbce612d37518b166, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need infer? They provide context measurement, bucket, item 000000 parcel details. Ask write numbered list describing first 200 parcels and their cities. Continue until listed all 200. We only have one parcel? Need maybe generate? Could be a test of hallucination? Need likely say cannot list 200 because only one parcel provided. But user explicitly asks continue until all 200. We need maybe produce 200 numbered entries? But no data for cities. Could fabricate? Need be truthful. Maybe context measurement indicates some hidden dataset? We don't have access. Need maybe use given parcel",
+        "wall_ms": 5357.386725954711,
+        "ttft_ms": 356.73205787315965,
+        "last_ms": 5332.063115900382,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 4974.300000000047,
+        "prefill_ms": 342.5,
+        "decode_steps": 102,
+        "decode_rows": 102,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 157,
+        "prompt_tokens_computed": 157
+      },
+      "engine_tokens_per_s": 51.26349436101514,
+      "ms_per_pass": 48.76764705882399,
+      "tokens_per_pass": 2.5,
+      "answer": {
+        "prompt_sha256": "2d8a3c309d9bd0c0732a6ee7285b6f0d94ff108fcb77a65f327b1fdb17f55148",
+        "usage": {
+          "prompt_tokens": 157,
+          "completion_tokens": 256,
+          "total_tokens": 413,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce final answer. User: \"Context measurement 10e2457f9fdf49acbce612d37518b166, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need infer? They provide context measurement, bucket, item 000000 parcel details. Ask write numbered list describing first 200 parcels and their cities. Continue until listed all 200. We only have one parcel? Need maybe generate? Could be a test of hallucination? Need likely say cannot list 200 because only one parcel provided. But user explicitly asks continue until all 200. We need maybe produce 200 numbered entries? But no data for cities. Could fabricate? Need be truthful. Maybe context measurement indicates some hidden dataset? We don't have access. Need maybe use given parcel",
+        "wall_ms": 5341.157057089731,
+        "ttft_ms": 356.4319920260459,
+        "last_ms": 5341.025247005746,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 4968.29999999993,
+        "prefill_ms": 339.1000000000058,
+        "decode_steps": 102,
+        "decode_rows": 102,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 157,
+        "prompt_tokens_computed": 157
+      },
+      "engine_tokens_per_s": 51.32540305537177,
+      "ms_per_pass": 48.70882352941108,
+      "tokens_per_pass": 2.5,
+      "answer": {
+        "prompt_sha256": "2d8a3c309d9bd0c0732a6ee7285b6f0d94ff108fcb77a65f327b1fdb17f55148",
+        "usage": {
+          "prompt_tokens": 157,
+          "completion_tokens": 256,
+          "total_tokens": 413,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need produce final answer. User: \"Context measurement 10e2457f9fdf49acbce612d37518b166, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe need infer? They provide context measurement, bucket, item 000000 parcel details. Ask write numbered list describing first 200 parcels and their cities. Continue until listed all 200. We only have one parcel? Need maybe generate? Could be a test of hallucination? Need likely say cannot list 200 because only one parcel provided. But user explicitly asks continue until all 200. We need maybe produce 200 numbered entries? But no data for cities. Could fabricate? Need be truthful. Maybe context measurement indicates some hidden dataset? We don't have access. Need maybe use given parcel",
+        "wall_ms": 5328.358924947679,
+        "ttft_ms": 356.86876391991973,
+        "last_ms": 5328.228570986539,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

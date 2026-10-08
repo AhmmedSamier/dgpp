@@ -1,0 +1,12 @@
+2026-10-06T03:03:34.319572+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster up --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/memory-validation/default/config.json --bin /home/stephen/workspace/dgpp/build-release/dgpp-serve --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/memory-validation/default/server
+2026-10-06T03:04:13.161918+00:00 EXIT 0 raw/glm-flash-hybrid-w4/memory-validation/default/up.log
+2026-10-06T03:04:13.186013+00:00 RUN /home/stephen/workspace/dgpp/.venv/bin/python /home/stephen/workspace/dgpp/scripts/serve_context_matrix.py 127.0.0.1 18080 --model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 --tag trace-fix-256k-validation --lengths 262144 --json-out /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/memory-validation/default/context-262144.json
+2026-10-06T03:29:56.283213+00:00 EXIT 0 raw/glm-flash-hybrid-w4/memory-validation/default/context-262144.log
+2026-10-06T03:29:56.283563+00:00 RUN /usr/bin/python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/memory-validation/default/config.json --log-dir /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/memory-validation/default/server
+2026-10-06T03:30:03.463693+00:00 EXIT 0 raw/glm-flash-hybrid-w4/memory-validation/default/down.log
+Traceback (most recent call last):
+  File "<stdin>", line 14, in <module>
+  File "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/run.py", line 76, in check_memory
+    gaps = [b - a for a, b in zip(times, times[1:])]
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+runner.MemoryViolation: serving-process swap check failed: /home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/raw/glm-flash-hybrid-w4/memory-validation/default

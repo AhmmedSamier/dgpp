@@ -1,0 +1,4 @@
+DSA M3 benchmark (iters=3 warmup=1 ctx=524288); planning floor 230 GB/s
+
+== prefill tail: TP=4 context=524288 capacity=786432 chunk=2048 ==
+prefill tail                   mean= 648.963 ms min= 648.744 max= 649.353      3156 tok/s  (x11 layers ~= 7138.6 ms/chunk)

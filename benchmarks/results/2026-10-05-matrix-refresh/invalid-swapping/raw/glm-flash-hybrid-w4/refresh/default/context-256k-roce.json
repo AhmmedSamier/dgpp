@@ -1,0 +1,195 @@
+{
+  "source": "scripts/roce_counters.sh snapshot",
+  "before_file": "context-256k-roce-before.txt",
+  "after_file": "context-256k-roce-after.txt",
+  "interval_seconds": 57.53766226768494,
+  "nodes": [
+    {
+      "host": "192.168.88.11",
+      "device": "roceP2p1s0f0",
+      "deltas": {
+        "xmit_data": 754179923,
+        "packet_seq_err": 1,
+        "out_of_sequence": 7,
+        "roce_adp_retrans": 0,
+        "roce_adp_retrans_to": 0,
+        "local_ack_timeout_err": 0,
+        "rnr_nak_retry_err": 0,
+        "implied_nak_seq_err": 0,
+        "np_cnp_sent": 9,
+        "rp_cnp_handled": 1,
+        "np_ecn_marked_roce_packets": 0,
+        "rx_icrc_encapsulated": 0,
+        "rx_discards_phy": 0,
+        "rx_buffer_passed_thres_phy": 0,
+        "tx_pause_ctrl_phy": 0,
+        "rx_pause_ctrl_phy": 0
+      }
+    },
+    {
+      "host": "192.168.88.11",
+      "device": "rocep1s0f0",
+      "deltas": {
+        "xmit_data": 754177896,
+        "packet_seq_err": 1,
+        "out_of_sequence": 8,
+        "roce_adp_retrans": 0,
+        "roce_adp_retrans_to": 0,
+        "local_ack_timeout_err": 0,
+        "rnr_nak_retry_err": 0,
+        "implied_nak_seq_err": 0,
+        "np_cnp_sent": 9,
+        "rp_cnp_handled": 1,
+        "np_ecn_marked_roce_packets": 0,
+        "rx_icrc_encapsulated": 0,
+        "rx_discards_phy": 0,
+        "rx_buffer_passed_thres_phy": 0,
+        "tx_pause_ctrl_phy": 0,
+        "rx_pause_ctrl_phy": 0
+      }
+    },
+    {
+      "host": "192.168.88.12",
+      "device": "roceP2p1s0f0",
+      "deltas": {
+        "xmit_data": 754224926,
+        "packet_seq_err": 2,
+        "out_of_sequence": 3,
+        "roce_adp_retrans": 0,
+        "roce_adp_retrans_to": 0,
+        "local_ack_timeout_err": 0,
+        "rnr_nak_retry_err": 0,
+        "implied_nak_seq_err": 0,
+        "np_cnp_sent": 2,
+        "rp_cnp_handled": 3,
+        "np_ecn_marked_roce_packets": 0,
+        "rx_icrc_encapsulated": 0,
+        "rx_discards_phy": 0,
+        "rx_buffer_passed_thres_phy": 0,
+        "tx_pause_ctrl_phy": 0,
+        "rx_pause_ctrl_phy": 0
+      }
+    },
+    {
+      "host": "192.168.88.12",
+      "device": "rocep1s0f0",
+      "deltas": {
+        "xmit_data": 754250717,
+        "packet_seq_err": 3,
+        "out_of_sequence": 3,
+        "roce_adp_retrans": 0,
+        "roce_adp_retrans_to": 0,
+        "local_ack_timeout_err": 0,
+        "rnr_nak_retry_err": 0,
+        "implied_nak_seq_err": 0,
+        "np_cnp_sent": 2,
+        "rp_cnp_handled": 3,
+        "np_ecn_marked_roce_packets": 0,
+        "rx_icrc_encapsulated": 0,
+        "rx_discards_phy": 0,
+        "rx_buffer_passed_thres_phy": 0,
+        "tx_pause_ctrl_phy": 0,
+        "rx_pause_ctrl_phy": 0
+      }
+    },
+    {
+      "host": "192.168.88.13",
+      "device": "roceP2p1s0f0",
+      "deltas": {
+        "xmit_data": 754260201,
+        "packet_seq_err": 3,
+        "out_of_sequence": 0,
+        "roce_adp_retrans": 0,
+        "roce_adp_retrans_to": 0,
+        "local_ack_timeout_err": 0,
+        "rnr_nak_retry_err": 0,
+        "implied_nak_seq_err": 0,
+        "np_cnp_sent": 0,
+        "rp_cnp_handled": 4,
+        "np_ecn_marked_roce_packets": 0,
+        "rx_icrc_encapsulated": 0,
+        "rx_discards_phy": 0,
+        "rx_buffer_passed_thres_phy": 0,
+        "tx_pause_ctrl_phy": 0,
+        "rx_pause_ctrl_phy": 0
+      }
+    },
+    {
+      "host": "192.168.88.13",
+      "device": "rocep1s0f0",
+      "deltas": {
+        "xmit_data": 754299430,
+        "packet_seq_err": 4,
+        "out_of_sequence": 0,
+        "roce_adp_retrans": 0,
+        "roce_adp_retrans_to": 0,
+        "local_ack_timeout_err": 0,
+        "rnr_nak_retry_err": 0,
+        "implied_nak_seq_err": 0,
+        "np_cnp_sent": 0,
+        "rp_cnp_handled": 4,
+        "np_ecn_marked_roce_packets": 0,
+        "rx_icrc_encapsulated": 0,
+        "rx_discards_phy": 0,
+        "rx_buffer_passed_thres_phy": 0,
+        "tx_pause_ctrl_phy": 0,
+        "rx_pause_ctrl_phy": 0
+      }
+    },
+    {
+      "host": "192.168.88.14",
+      "device": "roceP2p1s0f0",
+      "deltas": {
+        "xmit_data": 754248219,
+        "packet_seq_err": 4,
+        "out_of_sequence": 0,
+        "roce_adp_retrans": 0,
+        "roce_adp_retrans_to": 0,
+        "local_ack_timeout_err": 0,
+        "rnr_nak_retry_err": 0,
+        "implied_nak_seq_err": 0,
+        "np_cnp_sent": 0,
+        "rp_cnp_handled": 3,
+        "np_ecn_marked_roce_packets": 0,
+        "rx_icrc_encapsulated": 0,
+        "rx_discards_phy": 0,
+        "rx_buffer_passed_thres_phy": 0,
+        "tx_pause_ctrl_phy": 0,
+        "rx_pause_ctrl_phy": 0
+      }
+    },
+    {
+      "host": "192.168.88.14",
+      "device": "rocep1s0f0",
+      "deltas": {
+        "xmit_data": 754224876,
+        "packet_seq_err": 3,
+        "out_of_sequence": 0,
+        "roce_adp_retrans": 0,
+        "roce_adp_retrans_to": 0,
+        "local_ack_timeout_err": 0,
+        "rnr_nak_retry_err": 0,
+        "implied_nak_seq_err": 0,
+        "np_cnp_sent": 0,
+        "rp_cnp_handled": 3,
+        "np_ecn_marked_roce_packets": 0,
+        "rx_icrc_encapsulated": 0,
+        "rx_discards_phy": 0,
+        "rx_buffer_passed_thres_phy": 0,
+        "tx_pause_ctrl_phy": 0,
+        "rx_pause_ctrl_phy": 0
+      }
+    }
+  ],
+  "snapshot_completion_times_utc": [
+    "2026-10-06 02:44:37",
+    "2026-10-06 02:45:34"
+  ],
+  "rank0_slow_collective_messages_between_snapshot_completion_times": [
+    "2026-10-06 02:44:56.225 INFO  allreduce: rank 0 seq 1189456 bulk RS seg 1/4 STALLED 507ms launched=true tx_retired=2394270/2394270 ctl(done=0 status=0 gate_redos=0)",
+    "2026-10-06 02:45:17.783 INFO  allreduce: rank 0 seq 1189613 bulk RS seg 1/4 STALLED 506ms launched=true tx_retired=2402910/2402910 ctl(done=0 status=0 gate_redos=0)",
+    "2026-10-06 02:45:20.337 INFO  allreduce: rank 0 seq 1189627 bulk RS seg 1/4 STALLED 505ms launched=true tx_retired=2403678/2403678 ctl(done=0 status=0 gate_redos=0)",
+    "2026-10-06 02:45:26.563 INFO  allreduce: rank 0 seq 1189669 bulk RS seg 1/4 STALLED 505ms launched=true tx_retired=2405982/2405982 ctl(done=0 status=0 gate_redos=0)"
+  ],
+  "interpretation": "Small packet-sequence and congestion counter increases; no sampled retransmission, retransmission-timeout, acknowledgment-timeout, CRC or ingress-discard increases. This interval does not establish the cause of slow collectives."
+}

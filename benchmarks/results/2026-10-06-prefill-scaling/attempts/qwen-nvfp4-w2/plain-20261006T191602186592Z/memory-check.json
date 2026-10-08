@@ -1,0 +1,41 @@
+{
+  "passed": false,
+  "ranks": [
+    {
+      "rank": 0,
+      "samples": 1,
+      "max_swap_KiB": 0,
+      "swap_policy_required": true,
+      "swap_policy_passed": false,
+      "max_sample_gap_s": 1.033319829031825,
+      "violations": [
+        {
+          "at": "2026-10-06T19:06:55.800231+00:00",
+          "kind": "violation",
+          "reason": "dgpp lacks its zero-swap cgroup policy",
+          "pid": 1999582,
+          "VmRSS_KiB": 149324,
+          "VmData_KiB": 211328,
+          "VmSwap_KiB": 0,
+          "RssAnon_KiB": 89288,
+          "RssFile_KiB": 60036,
+          "RssShmem_KiB": 0,
+          "cgroup": "/user.slice/user-1000.slice/session-7172.scope",
+          "swap_limit_bytes": "max",
+          "cgroup_swap_bytes": 207003648
+        }
+      ],
+      "errors": []
+    },
+    {
+      "rank": 1,
+      "samples": 0,
+      "max_swap_KiB": null,
+      "swap_policy_required": true,
+      "swap_policy_passed": true,
+      "max_sample_gap_s": 1.0386367819737643,
+      "violations": [],
+      "errors": []
+    }
+  ]
+}

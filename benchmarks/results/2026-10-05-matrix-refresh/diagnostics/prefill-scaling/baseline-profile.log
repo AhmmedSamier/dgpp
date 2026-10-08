@@ -1,0 +1,9 @@
+DSA M3 benchmark (iters=1 warmup=0 ctx=524288); planning floor 230 GB/s
+
+== prefill tail: TP=4 context=524288 capacity=786432 chunk=2048 ==
+prefill tail                   mean=10454.812 ms min=10454.812 max=10454.812       196 tok/s  (x11 layers ~= 115002.9 ms/chunk)
+Collecting data...
+Generating '/tmp/nsys-report-cdf8.qdstrm'
+[1/1] [0%                          ] baseline-512k.nsys-rep[1/1] [0%                          ] baseline-512k.nsys-rep[1/1] [=============59%            ] baseline-512k.nsys-rep[1/1] [================69%         ] baseline-512k.nsys-rep[1/1] [===================79%      ] baseline-512k.nsys-rep[1/1] [===================80%      ] baseline-512k.nsys-rep[1/1] [===================81%      ] baseline-512k.nsys-rep[1/1] [===================82%      ] baseline-512k.nsys-rep[1/1] [====================83%     ] baseline-512k.nsys-rep[1/1] [====================84%     ] baseline-512k.nsys-rep[1/1] [====================85%     ] baseline-512k.nsys-rep[1/1] [========================100%] baseline-512k.nsys-rep[1/1] [========================100%] baseline-512k.nsys-rep
+Generated:
+	/home/stephen/workspace/dgpp/benchmarks/results/2026-10-05-matrix-refresh/diagnostics/prefill-scaling/baseline-512k.nsys-rep

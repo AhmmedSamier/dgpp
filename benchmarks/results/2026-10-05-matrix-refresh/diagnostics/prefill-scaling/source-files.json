@@ -1,0 +1,15 @@
+{
+  "recorded_at": "2026-10-06T15:35:45.067869+00:00",
+  "base_commit": "8f1c4cbcc1e98bb6e506c41a27e71126c2e6bed8",
+  "files": {
+    "src/kernels/dsa.cu": "e5c84247a090e1131c398ec45058777cfda23a8e1178728f03d03d866df8e55e",
+    "src/kernels/dsa.hpp": "57a95b3a5175c0d8646f394f356e75a07899c650aa96e306cacde620cbc559c2",
+    "src/models/dsa_layer.cu": "bcb8d90533c862cb3b48302fafbad9b08393d0b9cc673674402bbfada870bb5c",
+    "benchmarks/micro/dsa_bench.cu": "168a6e8778ea294d80013c6222d69f133be84f5b2a245610e3baaf1607f9cefd",
+    "tests/cuda/dsa_test.cu": "4493accc2730b72e96a36377bd28cab3c088ec9938c205e19e35dbe2a4b42ae0"
+  },
+  "source_patch_sha256": "010d2e734590ee1b62e678436302a1c7b6784d788f79b9258f2a784d4ee8963d",
+  "binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+  "bench_sha256": "2bca3e60f9e83414a85d6ee5419a5ab28b63b8f5b8671af1464001de076c26da",
+  "version": "dgpp-serve 0.1.0+g8f1c4cbcc1e9.dirty (git 8f1c4cbcc1e9, cuda 13.0)"
+}

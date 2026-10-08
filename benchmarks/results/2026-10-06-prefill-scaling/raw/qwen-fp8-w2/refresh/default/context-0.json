@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "model": "Qwen/Qwen3.8-Flash-Next-FP8",
+  "surface": {
+    "id": "Qwen/Qwen3.8-Flash-Next-FP8",
+    "object": "model",
+    "created": 1791321490,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "none": {
+          "enable_thinking": false
+        },
+        "minimal": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "enable_thinking": true,
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "enable_thinking": true,
+          "reasoning_effort": "medium"
+        },
+        "high": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "xhigh": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        },
+        "max": {
+          "enable_thinking": true,
+          "reasoning_effort": "xhigh"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "context": {
+      "request_limit_tokens": 262144,
+      "position_ceiling_tokens": 262144,
+      "kv_pool_tokens": 262144,
+      "limited_by": "position-ceiling"
+    }
+  },
+  "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+  "seed": 20260922,
+  "tag": "add850ee681045d6913308108a519183",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 5037.300000000047,
+        "prefill_ms": 228.60000000000582,
+        "decode_steps": 134,
+        "decode_rows": 134,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 158,
+        "prompt_tokens_computed": 158
+      },
+      "engine_tokens_per_s": 50.622357215174326,
+      "ms_per_pass": 37.591791044776464,
+      "tokens_per_pass": 1.9029850746268657,
+      "answer": {
+        "prompt_sha256": "16c5584b949b0892521a241fba73e81aaf8e958d1e0069f762f6c6ff1ce51131",
+        "usage": {
+          "prompt_tokens": 158,
+          "completion_tokens": 256,
+          "total_tokens": 414,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need parse: \"Context measurement add850ee681045d6913308108a519183, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe only have one item? Need likely generate 200 parcels and cities? Maybe from context? There is no data for 200. Need maybe infer? The user asks to write numbered list describing first 200 parcels and their cities. We only know item 000000 parcel PX-0757343 in Income? \"Income\" maybe city? gate shift status. Need list first 200 parcels and their cities. Could be a test of hallucination? We should not fabricate? But request says continue until listed all 200. We lack data. Need maybe say cannot because only one parcel provided",
+        "wall_ms": 5296.8546689953655,
+        "ttft_ms": 252.97756004147232,
+        "last_ms": 5296.584314899519,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 5038.099999999977,
+        "prefill_ms": 225.29999999998836,
+        "decode_steps": 134,
+        "decode_rows": 134,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 158,
+        "prompt_tokens_computed": 158
+      },
+      "engine_tokens_per_s": 50.614318890057994,
+      "ms_per_pass": 37.59776119402968,
+      "tokens_per_pass": 1.9029850746268657,
+      "answer": {
+        "prompt_sha256": "16c5584b949b0892521a241fba73e81aaf8e958d1e0069f762f6c6ff1ce51131",
+        "usage": {
+          "prompt_tokens": 158,
+          "completion_tokens": 256,
+          "total_tokens": 414,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need parse: \"Context measurement add850ee681045d6913308108a519183, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe only have one item? Need likely generate 200 parcels and cities? Maybe from context? There is no data for 200. Need maybe infer? The user asks to write numbered list describing first 200 parcels and their cities. We only know item 000000 parcel PX-0757343 in Income? \"Income\" maybe city? gate shift status. Need list first 200 parcels and their cities. Could be a test of hallucination? We should not fabricate? But request says continue until listed all 200. We lack data. Need maybe say cannot because only one parcel provided",
+        "wall_ms": 5296.33118910715,
+        "ttft_ms": 252.8807760681957,
+        "last_ms": 5296.158211072907,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 5039.800000000047,
+        "prefill_ms": 225.39999999999418,
+        "decode_steps": 134,
+        "decode_rows": 134,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 158,
+        "prompt_tokens_computed": 158
+      },
+      "engine_tokens_per_s": 50.59724592245677,
+      "ms_per_pass": 37.61044776119438,
+      "tokens_per_pass": 1.9029850746268657,
+      "answer": {
+        "prompt_sha256": "16c5584b949b0892521a241fba73e81aaf8e958d1e0069f762f6c6ff1ce51131",
+        "usage": {
+          "prompt_tokens": 158,
+          "completion_tokens": 256,
+          "total_tokens": 414,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "We need answer user's request. Need parse: \"Context measurement add850ee681045d6913308108a519183, bucket 0.\nItem 000000: parcel PX-0757343 weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nWrite a numbered list describing the first 200 parcels and their cities. Continue until you have listed all 200.\"\n\nWe only have one item? Need likely generate 200 parcels and cities? Maybe from context? There is no data for 200. Need maybe infer? The user asks to write numbered list describing first 200 parcels and their cities. We only know item 000000 parcel PX-0757343 in Income? \"Income\" maybe city? gate shift status. Need list first 200 parcels and their cities. Could be a test of hallucination? We should not fabricate? But request says continue until listed all 200. We lack data. Need maybe say cannot because only one parcel provided",
+        "wall_ms": 5297.115050023422,
+        "ttft_ms": 252.60208500549197,
+        "last_ms": 5296.891078818589,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

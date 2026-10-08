@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+  "surface": {
+    "id": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+    "object": "model",
+    "created": 1791265618,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "minimal": {
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "reasoning_effort": "high"
+        },
+        "high": {
+          "reasoning_effort": "high"
+        },
+        "xhigh": {
+          "reasoning_effort": "max"
+        },
+        "max": {
+          "reasoning_effort": "max"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "context": {
+      "request_limit_tokens": 786432,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 786432,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
+  "seed": 20260922,
+  "tag": "d562aed2b5cb453ba5907e92f7e593c9",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 4441.400000000023,
+        "prefill_ms": 231.3000000000029,
+        "decode_steps": 139,
+        "decode_rows": 139,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 98,
+        "prompt_tokens_computed": 98
+      },
+      "engine_tokens_per_s": 57.414328815238136,
+      "ms_per_pass": 31.952517985611678,
+      "tokens_per_pass": 1.8345323741007193,
+      "answer": {
+        "prompt_sha256": "0f13bd3c65b724d6c0c63bbbfc0b8cab2cb6cc1b6a5ddfafaf81bd93eaaaba38",
+        "usage": {
+          "prompt_tokens": 98,
+          "completion_tokens": 256,
+          "total_tokens": 354,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing the first 200 parcels and their cities. However, the context provided only contains one item (Item 000000: parcel PX-0757343). There's no data about 200 parcels or their cities.\n\nThis looks like it could be a prompt injection attempt or a test to see if I'll hallucinate/fabricate data. The context only gives me one parcel with no city information at all. I cannot fabricate 199 additional parcels with cities that don't exist in the provided data.\n\nThe honest response is to point out that I only have information about one parcel (PX-0757343), and that parcel doesn't even have a city associated with it. I should not fabricate 200 entries.\n\nLet me think about what I actually have:\n- Context measurement d562aed2b5cb453ba5907e92f7e593c9, bucket 0\n- Item 000000: parcel PX-0757343, weighed 4.1825 kilograms, in Income, gate 1, shift C, status sealed\n\nThat's it. One item. No city mentioned. No items 000001 through 000199",
+        "wall_ms": 4709.800885990262,
+        "ttft_ms": 255.31059689819813,
+        "last_ms": 4684.415910858661,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 4440.699999999953,
+        "prefill_ms": 231.39999999999418,
+        "decode_steps": 139,
+        "decode_rows": 139,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 98,
+        "prompt_tokens_computed": 98
+      },
+      "engine_tokens_per_s": 57.423379196974054,
+      "ms_per_pass": 31.947482014388154,
+      "tokens_per_pass": 1.8345323741007193,
+      "answer": {
+        "prompt_sha256": "0f13bd3c65b724d6c0c63bbbfc0b8cab2cb6cc1b6a5ddfafaf81bd93eaaaba38",
+        "usage": {
+          "prompt_tokens": 98,
+          "completion_tokens": 256,
+          "total_tokens": 354,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing the first 200 parcels and their cities. However, the context provided only contains one item (Item 000000: parcel PX-0757343). There's no data about 200 parcels or their cities.\n\nThis looks like it could be a prompt injection attempt or a test to see if I'll hallucinate/fabricate data. The context only gives me one parcel with no city information at all. I cannot fabricate 199 additional parcels with cities that don't exist in the provided data.\n\nThe honest response is to point out that I only have information about one parcel (PX-0757343), and that parcel doesn't even have a city associated with it. I should not fabricate 200 entries.\n\nLet me think about what I actually have:\n- Context measurement d562aed2b5cb453ba5907e92f7e593c9, bucket 0\n- Item 000000: parcel PX-0757343, weighed 4.1825 kilograms, in Income, gate 1, shift C, status sealed\n\nThat's it. One item. No city mentioned. No items 000001 through 000199",
+        "wall_ms": 4687.5206851400435,
+        "ttft_ms": 256.0303171630949,
+        "last_ms": 4687.359723029658,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 4443.5,
+        "prefill_ms": 233.3000000000029,
+        "decode_steps": 139,
+        "decode_rows": 139,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 98,
+        "prompt_tokens_computed": 98
+      },
+      "engine_tokens_per_s": 57.38719477889052,
+      "ms_per_pass": 31.967625899280577,
+      "tokens_per_pass": 1.8345323741007193,
+      "answer": {
+        "prompt_sha256": "0f13bd3c65b724d6c0c63bbbfc0b8cab2cb6cc1b6a5ddfafaf81bd93eaaaba38",
+        "usage": {
+          "prompt_tokens": 98,
+          "completion_tokens": 256,
+          "total_tokens": 354,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing the first 200 parcels and their cities. However, the context provided only contains one item (Item 000000: parcel PX-0757343). There's no data about 200 parcels or their cities.\n\nThis looks like it could be a prompt injection attempt or a test to see if I'll hallucinate/fabricate data. The context only gives me one parcel with no city information at all. I cannot fabricate 199 additional parcels with cities that don't exist in the provided data.\n\nThe honest response is to point out that I only have information about one parcel (PX-0757343), and that parcel doesn't even have a city associated with it. I should not fabricate 200 entries.\n\nLet me think about what I actually have:\n- Context measurement d562aed2b5cb453ba5907e92f7e593c9, bucket 0\n- Item 000000: parcel PX-0757343, weighed 4.1825 kilograms, in Income, gate 1, shift C, status sealed\n\nThat's it. One item. No city mentioned. No items 000001 through 000199",
+        "wall_ms": 4690.934755839407,
+        "ttft_ms": 254.6052448451519,
+        "last_ms": 4690.78141101636,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

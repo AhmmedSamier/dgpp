@@ -1,0 +1,130 @@
+[
+  {
+    "deployment": "glm-flash-hybrid-w2",
+    "mode": "default",
+    "nodes": [
+      {
+        "node": "node0-telemetry",
+        "host_swap_out_pages": 0,
+        "process_max_swap_KiB": 0
+      },
+      {
+        "node": "node1-telemetry",
+        "host_swap_out_pages": 0,
+        "process_max_swap_KiB": 0
+      }
+    ]
+  },
+  {
+    "deployment": "glm-flash-hybrid-w2",
+    "mode": "mtp2",
+    "nodes": [
+      {
+        "node": "node0-telemetry",
+        "host_swap_out_pages": 0,
+        "process_max_swap_KiB": 0
+      },
+      {
+        "node": "node1-telemetry",
+        "host_swap_out_pages": 0,
+        "process_max_swap_KiB": 0
+      }
+    ]
+  },
+  {
+    "deployment": "glm-flash-hybrid-w2",
+    "mode": "mtp3",
+    "nodes": [
+      {
+        "node": "node0-telemetry",
+        "host_swap_out_pages": 0,
+        "process_max_swap_KiB": 0
+      },
+      {
+        "node": "node1-telemetry",
+        "host_swap_out_pages": 0,
+        "process_max_swap_KiB": 0
+      }
+    ]
+  },
+  {
+    "deployment": "glm-flash-hybrid-w2",
+    "mode": "plain",
+    "nodes": [
+      {
+        "node": "node0-telemetry",
+        "host_swap_out_pages": 0,
+        "process_max_swap_KiB": 0
+      },
+      {
+        "node": "node1-telemetry",
+        "host_swap_out_pages": 0,
+        "process_max_swap_KiB": 0
+      }
+    ]
+  },
+  {
+    "deployment": "glm-flash-hybrid-256k-w2",
+    "mode": "default",
+    "nodes": [
+      {
+        "node": "node0-telemetry",
+        "host_swap_out_pages": 0,
+        "process_max_swap_KiB": 0
+      },
+      {
+        "node": "node1-telemetry",
+        "host_swap_out_pages": 0,
+        "process_max_swap_KiB": 0
+      }
+    ]
+  },
+  {
+    "deployment": "glm-flash-hybrid-256k-w2",
+    "mode": "mtp2",
+    "nodes": [
+      {
+        "node": "node0-telemetry",
+        "host_swap_out_pages": 0,
+        "process_max_swap_KiB": 0
+      },
+      {
+        "node": "node1-telemetry",
+        "host_swap_out_pages": 0,
+        "process_max_swap_KiB": 0
+      }
+    ]
+  },
+  {
+    "deployment": "glm-flash-hybrid-256k-w2",
+    "mode": "mtp3",
+    "nodes": [
+      {
+        "node": "node0-telemetry",
+        "host_swap_out_pages": 0,
+        "process_max_swap_KiB": 0
+      },
+      {
+        "node": "node1-telemetry",
+        "host_swap_out_pages": 0,
+        "process_max_swap_KiB": 0
+      }
+    ]
+  },
+  {
+    "deployment": "glm-flash-hybrid-256k-w2",
+    "mode": "plain",
+    "nodes": [
+      {
+        "node": "node0-telemetry",
+        "host_swap_out_pages": 0,
+        "process_max_swap_KiB": 0
+      },
+      {
+        "node": "node1-telemetry",
+        "host_swap_out_pages": 0,
+        "process_max_swap_KiB": 0
+      }
+    ]
+  }
+]

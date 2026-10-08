@@ -1,0 +1,25 @@
+{
+  "passed": true,
+  "ranks": [
+    {
+      "rank": 0,
+      "samples": 107,
+      "max_swap_KiB": 0,
+      "swap_policy_required": true,
+      "swap_policy_passed": true,
+      "max_sample_gap_s": 1.5093733679968864,
+      "violations": [],
+      "errors": []
+    },
+    {
+      "rank": 1,
+      "samples": 104,
+      "max_swap_KiB": 0,
+      "swap_policy_required": true,
+      "swap_policy_passed": true,
+      "max_sample_gap_s": 1.642503468086943,
+      "violations": [],
+      "errors": []
+    }
+  ]
+}

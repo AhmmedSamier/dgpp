@@ -1,0 +1,169 @@
+{
+  "started_at": "2026-10-06T15:38:58.652016+00:00",
+  "commit": "8f1c4cbcc1e98bb6e506c41a27e71126c2e6bed8",
+  "version": "dgpp-serve 0.1.0+ga3ebc21a7c24.dirty (git a3ebc21a7c24, cuda 13.0)",
+  "binary_sha256": "a9b605c0e22cc6eaf869b3c1eef0f4967a354913f71842a500a65103b14294a9",
+  "benchmark_environment": {
+    "CUDA_DEVICE_MAX_CONNECTIONS": "32",
+    "DGPP_NO_SWAP": "1"
+  },
+  "scope": "CUDA_DEVICE_MAX_CONNECTIONS=32 on rank 0 only; DGPP_NO_SWAP=1 reaches every rank through the cluster launcher.",
+  "source_changes": "Exact partitioned radix selection and coalesced scoring for DSA prefill. Shared by GLM-5.3-Flash and full GLM-5.3. The route-trace leak fix is included in the base commit. KV capacity, prefix cache, and slots unchanged.",
+  "concurrency": [
+    1,
+    2,
+    4,
+    8
+  ],
+  "repeat": 3,
+  "max_tokens": 256,
+  "clients": {
+    "scripts/timed_load.py": "e38328d44f4719b5bfcb110fe0d5737df96aebf61ed8dc467bf3850217c5e12f",
+    "scripts/serve_load.py": "f6b6eacb7e3cf93b5f1ef9095a4217b299e0c3c34776d00f1f3e05b1aa18adea",
+    "scripts/serve_prefill_probe.py": "0e7443e6e48e34a1fbfc6311e8f1396b48bbae7e22225c8db8d98f1d4290d783",
+    "scripts/serve_context_matrix.py": "ba657bc82c5f15148be2d08563f677e2498fcb3c7e681f8376e70f70b10a5310",
+    "scripts/qwen_yarn_release_check.py": "d7820882c35ae8d45320b347dd99f202bd6d73145d85147cbfa147c04da14ff8"
+  },
+  "environment": "environment.json",
+  "checkpoint_inventory_before_restore": "checkpoint-inventory.json",
+  "telemetry": {
+    "scope": "all serving ranks, from before startup through shutdown",
+    "memory_interval_s": 1,
+    "gpu_interval_s": 5,
+    "kernel_journal_rank": 2,
+    "management_transport": "configured SSH nodes",
+    "process_swap_policy": "Each new serving process must be in a cgroup with memory.swap.max=0; both process VmSwap and cgroup memory.swap.current must stay zero. Missing protection or nonzero swap sends SIGINT and halts the campaign. OS swap stays enabled.",
+    "maximum_sample_gap_s": 10,
+    "clock_note": "Host wall clocks differ; sample continuity uses each probe's monotonic clock."
+  },
+  "storage": {
+    "free_space_minimum_gib": 40,
+    "initial_resident_inventory": "resident-inventory-before-new-models.json",
+    "log": "storage.jsonl",
+    "cleanup": "Only session downloads absent from the initial inventory; all configurations, modes, context buckets and clean shutdown checks must pass before removal."
+  },
+  "checkpoint_revisions": {
+    "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8": "17b8d4d83e33e836e9549d7e1a8d25b5117203c1",
+    "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64": "147684fbad20c1e283ddff46fd07cb9d4ccbb3da",
+    "Qwen/Qwen3.8-27B-FP8": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+    "Qwen/Qwen3.8-Flash-Next-FP8": "236dfdf285828023ca3bcd3f37366c58a3469b13",
+    "RadixArk/Qwen3.8-Flash-Next-NVFP4": "7b719225242aacd3dbd3f9407468c2ee9a9d2594",
+    "Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN": "19f9710c8f6600a32e15fb98bc77613ee8ec369b",
+    "XiaomiMiMo/MiMo-V2.6-Flash-RL": "5711b268169967567844e1e560e8a3966da959b1",
+    "deepseek-ai/DeepSeek-V4-Flash-0731": "7872f01b1d1fe23eabc4c98b48bffcef5a386062",
+    "deepseek-ai/DeepSeek-V4.1-Flash": "dba1be0a40aa45a94ad051997016db3960a90277",
+    "nvidia/Qwen3.8-Flash-Next-NVFP4": "fc694b54fb0174e0913e6adf86691ef85a4ead47",
+    "unsloth/GLM-5.3-Flash-FP8": "a160e2291674d9e3e92e98fd82faa2544a2867a3",
+    "z-lab/Qwen3.8-27B-DFlash2": "50307d4c4cde6860d4eee73e2547cd786fe8e8a4"
+  },
+  "tokenizers_version": "0.23.2",
+  "benchmark_model_aliases": [
+    {
+      "deployment": "qwen-radixark-w1",
+      "template_alias": "Qwen3.8-Flash-Next",
+      "benchmark_alias": "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+    },
+    {
+      "deployment": "qwen-radixark-w2",
+      "template_alias": "Qwen3.8-Flash-Next",
+      "benchmark_alias": "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+    },
+    {
+      "deployment": "qwen-autoround-w1",
+      "template_alias": "qwen",
+      "benchmark_alias": "Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN"
+    },
+    {
+      "deployment": "qwen-autoround-prefill-w1",
+      "template_alias": "qwen",
+      "benchmark_alias": "Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN"
+    },
+    {
+      "deployment": "qwen27b-fp8-w1",
+      "template_alias": "Qwen3.8-27B",
+      "benchmark_alias": "Qwen/Qwen3.8-27B-FP8"
+    },
+    {
+      "deployment": "qwen27b-fp8-w2",
+      "template_alias": "Qwen3.8-27B",
+      "benchmark_alias": "Qwen/Qwen3.8-27B-FP8"
+    },
+    {
+      "deployment": "qwen27b-fp8-w4",
+      "template_alias": "Qwen3.8-27B",
+      "benchmark_alias": "Qwen/Qwen3.8-27B-FP8"
+    }
+  ],
+  "source_patch": {
+    "path": "diagnostics/dsa-prefill-scaling.patch",
+    "sha256": "010d2e734590ee1b62e678436302a1c7b6784d788f79b9258f2a784d4ee8963d"
+  },
+  "harness_sha256": {
+    "run.py": "4e574ab17a3136ba4954d35b0b272a22a8cee2a1c64fbc8651bde724c37739ea",
+    "node_telemetry.py": "345928df413d63db36502018eac0931dd7113c2564c73c81e1d0a1cf55895d23",
+    "checkpoint_storage.py": "031b01b42e0c55dbec38a68c14e192982d75b53c379f64d2951b4cbfd075360a",
+    "summarize.py": "ab7f0aa145491d97ea07dac580047646dedda6341d258d2da92a94cb15a6abcd",
+    "result_sources.py": "89f0282dbb824b66c5ea0c826f857a2b05193b14ba3baf72bf2c6d7d109f064f",
+    "result_sources_test.py": "dd7267457670c21491a0404ff7ef30bed4a5af7d0170fbb84be6ae00deaacc3a",
+    "reused-results.json": "6ab78f2ff426eb39553acd80ea4a74f7adef5b2d374c42d8bcc1eb22de01f834",
+    "retained-results.json": "c71a8dced16ff4ac76341c8046f31ba75715f18fb1ce5b73515c2b1468455731"
+  },
+  "matrix_deployments": 29,
+  "fix_commit": "8f1c4cbcc1e98bb6e506c41a27e71126c2e6bed8",
+  "build_provenance": "Built from 8f1c4cbcc1e98bb6e506c41a27e71126c2e6bed8 plus source_patch. See diagnostics/source-files.json. This campaign starts with a new binary; all previous measurements remain in ../2026-10-05-matrix-refresh/. The identical serving source was subsequently committed and pushed as a3ebc21a7c245eb736cc799fcf87a2c97ed8f7c9; the running binary was not rebuilt. Candidate fusion build is documented under fused_prefill; saved launch manifests remain immutable.",
+  "process_swap_policy": {
+    "launcher_environment": "DGPP_NO_SWAP=1",
+    "mechanism": "systemd user scope, MemorySwapMax=0, established before the serving command runs",
+    "os_swap": "unchanged and enabled",
+    "required": "Every serving process and cgroup has zero swap on every sample; all ranks monitored from before launch through shutdown.",
+    "version_probes": "Preflight and status version probes now also enter MemorySwapMax=0 scopes. Previously the monitor could stop a short version probe outside a protected scope. No serving binary, measurement client, or deployment settings changed."
+  },
+  "launcher_sha256": {
+    "scripts/cluster_process.py": "e855da00fbc40e3392effef87a5ba83420a971c8e511b05d66aae08bfb3b25d9",
+    "scripts/dgpp-cluster": "26e3b1377bf7d5b6b158412a08ac8fee0752e27acb9609073df1916606607a7b",
+    "scripts/cluster_doctor.py": "e1c34a31d1b656c6680a6f2db41fbcb03cd8aafa0a8998f2ed2718c656d4c211"
+  },
+  "launcher_patch": {
+    "path": "diagnostics/launcher-process-swap.patch",
+    "sha256": "b650c107da78aef35f50ebe2d5f22e52afe115c3ea6127e058b208a41538fea9"
+  },
+  "prior_campaign": "../2026-10-05-matrix-refresh/",
+  "initial_inventory_provenance": "checkpoint-inventory.json and resident-inventory-before-new-models.json are copied unchanged from the original session inventory. Models downloaded earlier in this session remain eligible for cleanup only after all their new measurements pass.",
+  "validation_provenance": "../2026-10-05-matrix-refresh/diagnostics/prefill-scaling/",
+  "prefill_scaling_fix_commit": "a3ebc21a7c245eb736cc799fcf87a2c97ed8f7c9",
+  "targeted_reuse": {
+    "updated_at": "2026-10-06T16:04:13.075017+00:00",
+    "catalog": "reused-results.json",
+    "provenance": "result-provenance.json",
+    "scope": "Only audited GLM Flash serving, decode modes, context-0 and 2K/8K cold prefill; no affected long prefill reused.",
+    "configuration_check": "All 17 source mode configs exactly match the intended mode overrides; current base configs and original evidence are hash-bound.",
+    "initial_validation_harness": "diagnostics/initial-harness/",
+    "initial_validation_note": "The first hybrid four-node launch used the original full measurement job list. Its exact run.py and saved manifest are preserved; subsequent launches use targeted reuse."
+  },
+  "launcher_updated_at": "2026-10-06T19:15:47.233262+00:00",
+  "renderer_updated_at": "2026-10-06T20:20:12.888907+00:00",
+  "renderer_change": "Expose resolved busy/idle prefill token budgets from startup logs in the configuration table. Measurement clients, engine, deployment settings, and saved launch manifests unchanged. Prior renderer and manifest preserved in diagnostics/renderer-prefill-budgets/.",
+  "matrix_updated_at": "2026-10-07T00:41:42.904654+00:00",
+  "matrix_sha256": "73b7d1f2eff316aa7a5b21bf61839337f215da2fe6cf95f192bac4e763b6263d",
+  "matrix_change": {
+    "replacement": {
+      "from": "glm53-fp8kv-256k-w4",
+      "to": "glm53-fp4kv-256k-w4"
+    },
+    "reason": "FP8 full launch refused by memory guard before requests; use separately labeled FP4 KV for 256K. No change to binary, measurements, other deployments, memory reserve, slots, or swap policy.",
+    "prior_matrix": "diagnostics/full-glm-256k-capacity/matrix-before.json",
+    "prior_manifest": "diagnostics/full-glm-256k-capacity/manifest-before.json",
+    "refused_launch": "attempts/glm53-fp8kv-256k-w4/default-capacity-refused-20261007T004142904639Z",
+    "new_config_sha256": "45469e74e949c8df986192ae08909e6518121510aa2d9bec46e899038dce29a6"
+  },
+  "fused_prefill": {
+    "registered_at": "2026-10-07T02:42:09.146204+00:00",
+    "source_base_commit": "a3ebc21a7c245eb736cc799fcf87a2c97ed8f7c9",
+    "patch": "diagnostics/full-glm-prefill-investigation/fused-tail-preserving-candidate.patch",
+    "patch_sha256": "3173218b1711c4086a65d02a00df22da137c5c79fb34daad0dcc84375a57b493",
+    "source_manifest": "diagnostics/full-glm-prefill-investigation/fused-tail-preserving-candidate.json",
+    "previous_binary_sha256": "ac939277f24752f2b57d889b2a19b2e2fc930cc15732c946b1c4b27e58187342",
+    "retention_catalog": "retained-results.json",
+    "scope": "Full GLM only: fused FP8 dots/head reduction, preserving legacy single-query arithmetic. No cache, slot, prefix, memory-reserve, decode or other-family algorithm changes."
+  }
+}

@@ -1,0 +1,8 @@
+2026-10-07 18:55:57.435 === HawkBearPig/GLM-5.3-Flash-NVFP4-FP8 on 4 node(s) [a911a2d7c4b3be6a] (deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json)
+2026-10-07 18:55:57.512 binary: /home/stephen/workspace/dgpp/build-release/dgpp-serve — dgpp-serve 0.1.0+g0b10cbeaed1b.dirty (git 0b10cbeaed1b, cuda 13.0)
+2026-10-07 18:55:57.512 rank 0 (192.168.88.11): alive (692133)
+  2026-10-07 18:55:55.800 INFO  sched: request 'chatcmpl-a1f27de36b8c64ea' admitted to slot 0 (reserve 1 blocks; pool 1/6144 blocks in use) — first token 785
+  2026-10-07 18:55:56.360 INFO  sched: request 'chatcmpl-a1f27de36b8c64ea' retired (steps): 32 tok in 0.7 s — prefill 17 tok (0 cached) in 143 ms; decode 31 tok / 16 passes in 0.6 s: 55.3 tok/s, 18.1 ms
+2026-10-07 18:55:57.513 rank 1 (192.168.88.12): alive (554708)
+2026-10-07 18:55:57.513 rank 2 (192.168.88.13): alive (1398801)
+2026-10-07 18:55:57.513 rank 3 (192.168.88.14): alive (911442)

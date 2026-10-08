@@ -1,0 +1,3 @@
+32768 r0: 32282 prompt tokens, 0 cached, prefill 17.514s, decode 50.74 tok/s, 58.44 ms/pass
+32768 r1: 32282 prompt tokens, 32276 cached, prefill 0.078s, decode 51.10 tok/s, 58.03 ms/pass
+32768 r2: 32282 prompt tokens, 32276 cached, prefill 0.077s, decode 51.05 tok/s, 58.08 ms/pass

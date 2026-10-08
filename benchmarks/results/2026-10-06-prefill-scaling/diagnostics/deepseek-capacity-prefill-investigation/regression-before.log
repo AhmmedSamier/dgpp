@@ -1,0 +1,2 @@
+[FAIL] csa2_prefill_reuses_score_workspace_at_shorter_contexts: prefill still tiles queries for the allocated capacity instead of the visible history
+1 tests, 1 failed

@@ -1,0 +1,27 @@
+model HawkBearPig/GLM-5.3-Flash-NVFP4-FP8
+warm 0: status 200 tokens 64
+== prose concurrency 1: 00:46:16.587 .. 00:46:24.348  wall 7.8 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 305 ms  client update pace 29.13 ms/update
+   aggregate wall: 256 tokens in 7.76 s = 32.99 tok/s (prefill included)
+   legacy output-span aggregate: 34.45807372799155 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 34.232 tok/s
+== prose concurrency 1: 00:46:24.348 .. 00:46:32.107  wall 7.8 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 306 ms  client update pace 29.23 ms/update
+   aggregate wall: 256 tokens in 7.76 s = 32.99 tok/s (prefill included)
+   legacy output-span aggregate: 34.351195416778374 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 34.222 tok/s
+== prose concurrency 1: 00:46:32.108 .. 00:46:39.871  wall 7.8 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 305 ms  client update pace 29.25 ms/update
+   aggregate wall: 256 tokens in 7.76 s = 32.98 tok/s (prefill included)
+   legacy output-span aggregate: 34.32697059384631 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 34.207 tok/s
+== code concurrency 1: 00:46:39.872 .. 00:46:46.494  wall 6.6 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 356 ms  client update pace 24.57 ms/update
+   aggregate wall: 256 tokens in 6.62 s = 38.66 tok/s (prefill included)
+   legacy output-span aggregate: 40.860670997249734 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 40.634 tok/s
+== code concurrency 1: 00:46:46.495 .. 00:46:53.115  wall 6.6 s
+   req 0: status 200 finish=length tokens 256 chunks 256 ttft 331 ms  client update pace 24.66 ms/update
+   aggregate wall: 256 tokens in 6.62 s = 38.67 tok/s (prefill included)
+   legacy output-span aggregate: 40.709543269300426 tok/s (initial TTFT excluded; later admissions included)
+   engine decode: 40.676 tok/s

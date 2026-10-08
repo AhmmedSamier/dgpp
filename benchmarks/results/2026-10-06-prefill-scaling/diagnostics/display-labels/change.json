@@ -1,0 +1,72 @@
+{
+  "at": "2026-10-07T03:52:06.312960+00:00",
+  "scope": "Display-only options labels. Model IDs, configurations, modes, concurrency and context targets are identical. No benchmark settings changed.",
+  "changes": [
+    {
+      "deployment": "qwen-fp8-w2",
+      "before": "Default",
+      "after": "256K BF16 KV, 4 slots"
+    },
+    {
+      "deployment": "qwen-fp8-w4",
+      "before": "Default",
+      "after": "256K BF16 KV, 4 slots"
+    },
+    {
+      "deployment": "qwen-autoround-w1",
+      "before": "256K BF16 KV, 4 slots, MTP depth 3",
+      "after": "256K BF16 KV, 4 slots, MTP3"
+    },
+    {
+      "deployment": "qwen-autoround-prefill-w1",
+      "before": "256K BF16 KV, 4 slots, MTP depth 3, prefill optimizations on",
+      "after": "256K BF16 KV, 4 slots, MTP3, prefill optimizations on"
+    },
+    {
+      "deployment": "glm53-w4",
+      "before": "120K BF16 KV",
+      "after": "120K BF16 KV, 8 slots"
+    },
+    {
+      "deployment": "glm53-fp8kv-w4",
+      "before": "208K FP8 KV",
+      "after": "208K FP8 KV, 8 slots"
+    },
+    {
+      "deployment": "deepseek-w4",
+      "before": "Default",
+      "after": "128K compressed KV, 6 slots"
+    }
+  ],
+  "before_sha256": "73b7d1f2eff316aa7a5b21bf61839337f215da2fe6cf95f192bac4e763b6263d",
+  "after_sha256": "8b61cfc2463158147f49ab531e16bc0f2bcda443673f999e60e7834b7b379fd8",
+  "historical_label_verification": {
+    "scope": "The same explicit Qwen FP8 and DeepSeek-V4.1 capacity/slot labels also match the original performance and quality configurations. Quality numbers are unchanged. MTP depth 3 is spelled MTP3 throughout.",
+    "sources": [
+      {
+        "path": "benchmarks/results/2026-09-22-current/raw/qwen-fp8-w2/performance/default/config.json",
+        "sha256": "4aabe1aa59847a58ff6f2145547604dfc380442cefc75027785a767c173629bd"
+      },
+      {
+        "path": "benchmarks/results/2026-09-22-current/raw/qwen-fp8-w2/quality/default/config.json",
+        "sha256": "4aabe1aa59847a58ff6f2145547604dfc380442cefc75027785a767c173629bd"
+      },
+      {
+        "path": "benchmarks/results/2026-09-22-current/raw/qwen-fp8-w4/performance/default/config.json",
+        "sha256": "fb5303ef28915e6941fa5ccd36e134535a182e1ab4b2b0b2d1f429246f414546"
+      },
+      {
+        "path": "benchmarks/results/2026-09-22-current/raw/qwen-fp8-w4/quality/default/config.json",
+        "sha256": "fb5303ef28915e6941fa5ccd36e134535a182e1ab4b2b0b2d1f429246f414546"
+      },
+      {
+        "path": "benchmarks/results/2026-09-22-current/raw/deepseek-w4/performance/default/config.json",
+        "sha256": "4da3465a82368c9e1e48ed3581593e8dc74f7a6717771bf6c457bd77115513ea"
+      },
+      {
+        "path": "benchmarks/results/2026-09-22-current/raw/deepseek-w4/quality/default/config.json",
+        "sha256": "4da3465a82368c9e1e48ed3581593e8dc74f7a6717771bf6c457bd77115513ea"
+      }
+    ]
+  }
+}

@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+  "surface": {
+    "id": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+    "object": "model",
+    "created": 1791246521,
+    "owned_by": "dgpp",
+    "sampling": {
+      "available": true,
+      "defaults": {
+        "temperature": 1,
+        "top_p": 0.95,
+        "top_k": 0,
+        "min_p": 0,
+        "repetition_penalty": 1
+      }
+    },
+    "tools": {
+      "available": true,
+      "constrained": true
+    },
+    "response_format": {
+      "json_object": true,
+      "json_schema": true
+    },
+    "reasoning": {
+      "in_content": false,
+      "effort_mapping": {
+        "minimal": {
+          "reasoning_effort": "low"
+        },
+        "low": {
+          "reasoning_effort": "low"
+        },
+        "medium": {
+          "reasoning_effort": "high"
+        },
+        "high": {
+          "reasoning_effort": "high"
+        },
+        "xhigh": {
+          "reasoning_effort": "max"
+        },
+        "max": {
+          "reasoning_effort": "max"
+        }
+      }
+    },
+    "default_chat_template_kwargs": {},
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "context": {
+      "request_limit_tokens": 163840,
+      "position_ceiling_tokens": null,
+      "kv_pool_tokens": 163840,
+      "limited_by": "kv-pool"
+    }
+  },
+  "tokenizer_sha256": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
+  "seed": 20260922,
+  "tag": "f7d3c54c02fb46bdb194ba942034c342",
+  "max_tokens": 256,
+  "thinking": "server_default",
+  "samples": [
+    {
+      "requested_tokens": 0,
+      "repeat": 0,
+      "engine": {
+        "step_ms": 7748.800000000047,
+        "prefill_ms": 403.70000000001164,
+        "decode_steps": 141,
+        "decode_rows": 141,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 96,
+        "prompt_tokens_computed": 96
+      },
+      "engine_tokens_per_s": 32.90832128845737,
+      "ms_per_pass": 54.956028368794655,
+      "tokens_per_pass": 1.8085106382978724,
+      "answer": {
+        "prompt_sha256": "39658d693f888c9b42873a7ec63a98ef6b4661a219fe98647496d8d0f434e27b",
+        "usage": {
+          "prompt_tokens": 96,
+          "completion_tokens": 256,
+          "total_tokens": 352,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing the first 200 parcels and their cities. But wait \u2014 the context only provides information about ONE parcel: Item 000000, parcel PX-0757343, weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nThere is no data about parcels 1 through 199 (or items 000001 through 000199). The context only contains Item 000000. I cannot fabricate data about 199 parcels that don't exist in the provided context. That would be hallucination \u2014 making up parcel IDs, weights, cities, gates, shifts, and statuses that were never provided.\n\nThe honest response is to explain that the context only contains one item (Item 000000), so I can only list that one parcel, and I cannot continue to 200 because no data exists for the rest. I should not invent cities or parcel details.\n\nLet me write a helpful response: acknowledge the request, provide the one item I have, and explain that the remaining 199 items aren't in the context, so I can't list them without fabricating data. I could offer to continue if they provide the remaining data.\n\nFormat: Should be fairly short. A",
+        "wall_ms": 8178.586221998557,
+        "ttft_ms": 433.21336014196277,
+        "last_ms": 8178.40497312136,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 1,
+      "engine": {
+        "step_ms": 7741.299999999814,
+        "prefill_ms": 402.29999999998836,
+        "decode_steps": 141,
+        "decode_rows": 141,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 96,
+        "prompt_tokens_computed": 96
+      },
+      "engine_tokens_per_s": 32.9402038417328,
+      "ms_per_pass": 54.902836879431305,
+      "tokens_per_pass": 1.8085106382978724,
+      "answer": {
+        "prompt_sha256": "39658d693f888c9b42873a7ec63a98ef6b4661a219fe98647496d8d0f434e27b",
+        "usage": {
+          "prompt_tokens": 96,
+          "completion_tokens": 256,
+          "total_tokens": 352,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing the first 200 parcels and their cities. But wait \u2014 the context only provides information about ONE parcel: Item 000000, parcel PX-0757343, weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nThere is no data about parcels 1 through 199 (or items 000001 through 000199). The context only contains Item 000000. I cannot fabricate data about 199 parcels that don't exist in the provided context. That would be hallucination \u2014 making up parcel IDs, weights, cities, gates, shifts, and statuses that were never provided.\n\nThe honest response is to explain that the context only contains one item (Item 000000), so I can only list that one parcel, and I cannot continue to 200 because no data exists for the rest. I should not invent cities or parcel details.\n\nLet me write a helpful response: acknowledge the request, provide the one item I have, and explain that the remaining 199 items aren't in the context, so I can't list them without fabricating data. I could offer to continue if they provide the remaining data.\n\nFormat: Should be fairly short. A",
+        "wall_ms": 8169.556186068803,
+        "ttft_ms": 407.63142285868526,
+        "last_ms": 8169.390824856237,
+        "tokens": 256
+      }
+    },
+    {
+      "requested_tokens": 0,
+      "repeat": 2,
+      "engine": {
+        "step_ms": 7735.800000000047,
+        "prefill_ms": 410.20000000001164,
+        "decode_steps": 141,
+        "decode_rows": 141,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 96,
+        "prompt_tokens_computed": 96
+      },
+      "engine_tokens_per_s": 32.96362367175967,
+      "ms_per_pass": 54.86382978723437,
+      "tokens_per_pass": 1.8085106382978724,
+      "answer": {
+        "prompt_sha256": "39658d693f888c9b42873a7ec63a98ef6b4661a219fe98647496d8d0f434e27b",
+        "usage": {
+          "prompt_tokens": 96,
+          "completion_tokens": 256,
+          "total_tokens": 352,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 256
+          }
+        },
+        "finish": "length",
+        "text": "The user is asking me to write a numbered list describing the first 200 parcels and their cities. But wait \u2014 the context only provides information about ONE parcel: Item 000000, parcel PX-0757343, weighed 4.1825 kilograms in Income, gate 1, shift C, status sealed.\n\nThere is no data about parcels 1 through 199 (or items 000001 through 000199). The context only contains Item 000000. I cannot fabricate data about 199 parcels that don't exist in the provided context. That would be hallucination \u2014 making up parcel IDs, weights, cities, gates, shifts, and statuses that were never provided.\n\nThe honest response is to explain that the context only contains one item (Item 000000), so I can only list that one parcel, and I cannot continue to 200 because no data exists for the rest. I should not invent cities or parcel details.\n\nLet me write a helpful response: acknowledge the request, provide the one item I have, and explain that the remaining 199 items aren't in the context, so I can't list them without fabricating data. I could offer to continue if they provide the remaining data.\n\nFormat: Should be fairly short. A",
+        "wall_ms": 8168.474402977154,
+        "ttft_ms": 429.55836607143283,
+        "last_ms": 8168.312274152413,
+        "tokens": 256
+      }
+    }
+  ],
+  "skipped": []
+}

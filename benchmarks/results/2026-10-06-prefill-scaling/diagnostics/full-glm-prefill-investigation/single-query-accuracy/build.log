@@ -1,0 +1,9 @@
+[  7%] Built target dgpp_rope_scaling
+[ 15%] Built target dgpp_core
+[ 23%] Built target dgpp_loaders
+[ 84%] Built target dgpp_kernels
+[ 92%] Built target dgpp_models_kda
+[100%] Built target dgpp_models_dsa
+[100%] Building CUDA object CMakeFiles/dsa_test.dir/tests/cuda/dsa_test.cu.o
+[100%] Linking CXX executable dsa_test
+[100%] Built target dsa_test
