@@ -38,7 +38,7 @@ DEFAULTS = {
     "DGPP_HTTP_PORT": "18080", "DGPP_FABRIC_PORT": "29970",
     "DGPP_JOURNAL_PORT": "29971", "DGPP_LOG_DIR": "~/dgpp/log",
     "DGPP_STAGE_DIR": "/tmp/bus4", "DGPP_RELEASE_DIR": "~/dgpp/releases",
-    "DGPP_HTTP_BIND": "127.0.0.1",
+    "DGPP_HTTP_BIND": "0.0.0.0",
 }
 
 

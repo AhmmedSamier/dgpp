@@ -303,7 +303,9 @@ Add `--start` to launch after all checks pass:
 ./scripts/setup.sh --start
 ```
 
-The API defaults to localhost and has no authentication or TLS. Wait for `READY`
+The API defaults to `0.0.0.0:18080` (all IPv4 interfaces). Setup asks for the
+HTTP bind address; `--http-bind 127.0.0.1` selects local-only access. The server
+has no authentication or TLS. Wait for `READY`
 before sending requests. For unattended setup, read-only checks, offline cache
 sync and the manual walkthrough, see [Getting started](docs/getting-started.md).
 Use `./scripts/setup.sh --help` for all options.
@@ -382,7 +384,7 @@ scripts' environment and generated server config.
 | `DGPP_SSH_USER` | Peer login for binary staging, process control, diagnostics and checkpoint sync. Needs SSH-key access and write access to the configured directories. | current login when empty or absent |
 | `DGPP_CLUSTER_CONFIG` | Default deployment filename, saved by guided setup. An explicit `--config` takes precedence. | legacy four-node Flash hybrid filename |
 | `DGPP_HTTP_PORT` | Default client-facing API TCP port on rank 0; deployment `http.port` overrides it. | 18080 |
-| `DGPP_HTTP_BIND` | Default IPv4 listening address on rank 0; deployment `http.bind_host` overrides it. Keep localhost unless you have arranged access protection. | `127.0.0.1` |
+| `DGPP_HTTP_BIND` | Default IPv4 listening address on rank 0; deployment `http.bind_host` overrides it. Setup prompts for it; `--http-bind` sets it unattended. | `0.0.0.0` |
 | `DGPP_FABRIC_PORT` | Rank-0 TCP rendezvous listener used to establish the inter-node transport. Peers must reach it; clients do not use it. Keep it private to the cluster. | 29970 |
 | `DGPP_JOURNAL_PORT` | Rank-0 TCP listener that distributes ordered scheduler operations to peers. Must differ from the fabric/API ports; keep it private to the cluster. | 29971 |
 | `DGPP_LOG_DIR` | Base directory on rank 0 for logs, process records and collected peer logs. The launcher adds a deployment-specific subdirectory. | `~/dgpp/log` |
@@ -408,6 +410,10 @@ Log and staging directories are namespaced by deployment-file path;
 is used as-is. `up` refuses an existing deployment unless `--replace` is given;
 `down` without `--config` stops every recorded deployment that is running;
 cleanup uses recorded process identity, never a binary-name kill.
+During startup, the launcher prints the rank 0 log path and reports elapsed
+time and the latest log line every ten seconds while waiting for readiness.
+If rank 0 exits, it reports the exit status and full trailing log lines
+within the two-second polling interval, then cleans up the deployment's peers.
 
 The launcher resolves the deployment and site settings into
 `<log_dir>/cluster.resolved.json` when starting the service. Both the head
@@ -435,7 +441,7 @@ templates set their serving options explicitly.
 |---|---|---|---|
 | `model` | yes | Exact Hugging Face repository ID, such as `HawkBearPig/GLM-5.3-Flash-NVFP4-FP8`. Selects the checkpoint tensors, tokenizer and chat template. It is not a local filesystem path or a generic quant name. | — |
 | `world_size` | yes | Number of participating nodes/ranks: 1, 2 or 4. Uses the first N entries of `DGPP_NODES`; each rank stores its tensor-parallel share in memory. Choose a supported model/world pair, not an arbitrary smaller number to save machines. | — |
-| `http.bind_host` | no | IPv4 address on rank 0 that accepts API connections. `127.0.0.1` is local-only; a LAN address exposes that interface; `0.0.0.0` exposes all IPv4 interfaces. The server has no authentication/TLS. Does not select the RoCE interface. | `DGPP_HTTP_BIND`, otherwise `127.0.0.1` |
+| `http.bind_host` | no | IPv4 address on rank 0 that accepts API connections. `127.0.0.1` is local-only; a LAN address exposes that interface; `0.0.0.0` exposes all IPv4 interfaces. The server has no authentication/TLS. Does not select the RoCE interface. | `DGPP_HTTP_BIND`, otherwise `0.0.0.0` |
 | `http.port` | no | TCP port clients use for the API, in 1–65535. Change it if the default is occupied, then update client URLs. Overrides the site HTTP port and must differ from fabric/journal ports in a multi-node deployment. | `DGPP_HTTP_PORT`, otherwise 18080 |
 | `http.max_body_bytes` | no | Maximum serialized HTTP request body in bytes, as a positive integer. Allows large document prefills and agent histories; independent of the model's token/KV capacity. Oversized requests receive HTTP 413 based on Content-Length, before tokenization. Buffers grow with received data, so this does not preallocate the limit per connection. The binary flag `--http-max-body-bytes` overrides it. | 268435456 (256 MiB) |
 | `http.sse_ping_interval` | no | Whole seconds of stream silence before sending an SSE keep-alive comment. Accepts 1–2147483647; `-1` disables pings. Covers queued requests, prefill and gaps between output chunks on rank 0. `--sse-ping-interval` overrides the file; request `sse_ping_interval` overrides the server setting. Engine deadlines are unchanged. | 30 |

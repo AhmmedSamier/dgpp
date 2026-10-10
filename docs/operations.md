@@ -59,7 +59,8 @@ shorter prefills retain their existing kernels in both modes.
 ## Configure and start
 
 For a new machine, follow [Getting started](getting-started.md),
-including dependency installation. HTTP defaults to localhost; deployment
+including dependency installation. HTTP defaults to all IPv4 interfaces
+(`0.0.0.0`); setup's bind-address prompt or `--http-bind` sets the site default. Deployment
 `http.bind_host` and `http.port` override `.env` defaults. The service has no
 TLS or authentication; see [networking](networking.md) before exposing it.
 
@@ -244,6 +245,19 @@ binary. It starts rank 0, waits for its rendezvous listener, starts peers
 through SSH and waits for `serve: listening`. That log line indicates
 HTTP readiness. Warm GLM-FP8 resident images took 15–25 s to reach it in
 the recorded deployment; the first checkpoint load took about 4.5 minutes.
+While waiting, the launcher prints rank 0's log path and reports elapsed
+time, process liveness and the latest log line every ten seconds. It checks
+the head process every two seconds; an exit reports its status and ten
+untruncated trailing log lines, then triggers peer cleanup. A living process
+that does not become ready still reaches the journal or HTTP timeout.
+
+`engine.kv_capacity` is one shared token pool across request slots, not a
+per-slot allocation multiplied by `engine.max_concurrency`. Four simultaneous
+262,144-token requests need 1,048,576 tokens plus prefix-snapshot bookkeeping
+space. The four-node Qwen FP8 template uses 1,052,672 tokens and four slots,
+with a 40 GiB prefix arena. Each request's context includes both its prompt
+and generated tokens. Full admission reserves that lifetime token budget;
+unused prefix entries can be evicted to free pool blocks for new requests.
 
 Use a separate config for each checkpoint. For example, a site-local
 `deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json` can select the composed

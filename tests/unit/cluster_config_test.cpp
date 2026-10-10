@@ -247,7 +247,7 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
   const dgpp::serve::ClusterConfig one =
       dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"]})", "t");
   require(one.world() == 1 && one.http_port == 18080, "a one-node world");
-  require(one.http_bind == "127.0.0.1", "HTTP defaults to loopback");
+  require(one.http_bind == "0.0.0.0", "HTTP defaults to all IPv4 interfaces");
   require(one.http_max_body_bytes == 256ll * 1024 * 1024, "HTTP body default supports large prefills");
 }
 
@@ -307,6 +307,9 @@ DGPP_TEST(cluster_config_http_override_is_order_independent) {
   require(c.http_bind == "0.0.0.0" && c.http_port == 8080, "deployment HTTP wins over legacy ports");
   require(c.http_max_body_bytes == 5368709120ll, "body limit retains a 64-bit byte count");
   require(c.node_env.at(0).at("HF_HUB_CACHE") == "~/cache", "node cache retained");
+  const auto local = dgpp::serve::parse_cluster_config(
+      R"({"model":"m","nodes":["h"],"http":{"bind_host":"127.0.0.1"}})", "t");
+  require(local.http_bind == "127.0.0.1", "explicit loopback binding is preserved");
   require(!refusal(R"({"model":"m","nodes":["h"],"http":{"bind_host":"localhost"}})").empty(), "bind must be IPv4");
   require(!refusal(R"({"model":"m","nodes":["h"],"node_env":[{"HF_TOKEN":"x"}]})").empty(), "credentials disallowed");
 }

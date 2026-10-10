@@ -137,7 +137,7 @@ class SiteEnvTest(unittest.TestCase):
         resolved = site_env.resolve_config(self.config, self.values())
         self.assertEqual(resolved["http"]["max_body_bytes"], 5 * 1024**3)
         self.assertEqual(resolved["http"]["port"], 18888)
-        self.assertEqual(resolved["http"]["bind_host"], "127.0.0.1")
+        self.assertEqual(resolved["http"]["bind_host"], "0.0.0.0")
 
     def test_invalid_http_body_limits_fail(self):
         cfg = json.loads(self.config.read_text())

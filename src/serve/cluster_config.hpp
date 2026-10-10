@@ -34,7 +34,7 @@ struct ClusterConfig {
   std::string ssh_user;            // empty: the launcher's own user
   std::string release;             // the installed release the launcher runs (launcher-only; empty: the development binary)
   int http_port = 18080;
-  std::string http_bind = "127.0.0.1";
+  std::string http_bind = "0.0.0.0";
   int64_t http_max_body_bytes = kDefaultHttpMaxBodyBytes;
   int sse_ping_interval = kDefaultSsePingInterval;
   // Local paths and device names may differ by rank; no credentials belong here.

@@ -157,7 +157,7 @@ struct ServeKnobs {
   dgpp::serve::FileInputConfig file_inputs;
   int world = 1;  // dgpp_build_info's world_size
   uint16_t http_port = 8080;
-  std::string http_bind = "127.0.0.1";
+  std::string http_bind = "0.0.0.0";
   int64_t http_max_body_bytes = dgpp::serve::kDefaultHttpMaxBodyBytes;
   int sse_ping_interval = dgpp::serve::kDefaultSsePingInterval;
   int max_connections = 64;
@@ -1331,7 +1331,7 @@ int main(int argc, char** argv) {
       "    the world (the node list), this rank's peer, the ports and every\n"
       "    engine knob below; flags given after it override\n"
       "  [--port N (default 18080; rank 0 only)]\n"
-      "  [--bind-host IPV4 (default 127.0.0.1; rank 0 only)]\n"
+      "  [--bind-host IPV4 (default 0.0.0.0; rank 0 only)]\n"
       "  [--metrics-port N (default 0 = off; ranks > 0 only)]: the peer's\n"
       "    dgpp_rank_* metrics listener (GET /metrics/prometheus); config ports.metrics\n"
       "  [--metrics-bind HOST (default: this rank's node address; resolves to IPv4; ranks > 0 only)]\n"
@@ -1526,7 +1526,7 @@ int main(int argc, char** argv) {
   // The cluster config: found first, whatever its position,
   // because the flags after it override what it sets.
   std::string config_path;
-  std::string http_bind = "127.0.0.1";
+  std::string http_bind = "0.0.0.0";
   int config_rank = 0;
   bool memory_plan_only = false;  // --memory-plan: the check alone, then exit
   for (int i = 1; i + 1 < argc; ++i) {
