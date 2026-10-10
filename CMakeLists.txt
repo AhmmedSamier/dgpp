@@ -1298,6 +1298,28 @@ add_test(NAME qwen35_mixed_test
   COMMAND qwen35_forward_test --checkpoint-dir ${QWEN35_MIXED_FIXTURE}
           --dump-file ${CMAKE_CURRENT_BINARY_DIR}/qwen35_mixed_teacher.q35dump)
 set_tests_properties(qwen35_mixed_test PROPERTIES DEPENDS qwen35_mixed_generate_teacher)
+# Exercise the FP4 prefill dispatch at the 1024-row prefix-cache boundary.
+# The short mixed fixture above stays on the decode/short-prefill kernel.
+add_test(NAME qwen35_mixed_prefill_generate
+  COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/qwen35_reference_dump.py
+          gen-pure --checkpoint-dir ${QWEN35_MIXED_FIXTURE} --tokens 1024 --no-mtp
+          --out ${CMAKE_CURRENT_BINARY_DIR}/qwen35_mixed_prefill_ref.q35dump)
+set_tests_properties(qwen35_mixed_prefill_generate PROPERTIES DEPENDS qwen35_mixed_fixture)
+add_test(NAME qwen35_mixed_prefill_e2e
+  COMMAND qwen35_forward_test --checkpoint-dir ${QWEN35_MIXED_FIXTURE}
+          --dump-file ${CMAKE_CURRENT_BINARY_DIR}/qwen35_mixed_prefill_ref.q35dump --relaxed
+          --engine-states ${CMAKE_CURRENT_BINARY_DIR}/qwen35_mixed_prefill_states.bin)
+set_tests_properties(qwen35_mixed_prefill_e2e PROPERTIES DEPENDS qwen35_mixed_prefill_generate)
+add_test(NAME qwen35_mixed_prefill_generate_teacher
+  COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/qwen35_reference_dump.py
+          gen-pure --checkpoint-dir ${QWEN35_MIXED_FIXTURE} --tokens 1024 --no-mtp
+          --out ${CMAKE_CURRENT_BINARY_DIR}/qwen35_mixed_prefill_teacher.q35dump
+          --teacher ${CMAKE_CURRENT_BINARY_DIR}/qwen35_mixed_prefill_states.bin)
+set_tests_properties(qwen35_mixed_prefill_generate_teacher PROPERTIES DEPENDS qwen35_mixed_prefill_e2e)
+add_test(NAME qwen35_mixed_prefill_test
+  COMMAND qwen35_forward_test --checkpoint-dir ${QWEN35_MIXED_FIXTURE}
+          --dump-file ${CMAKE_CURRENT_BINARY_DIR}/qwen35_mixed_prefill_teacher.q35dump)
+set_tests_properties(qwen35_mixed_prefill_test PROPERTIES DEPENDS qwen35_mixed_prefill_generate_teacher)
 # The 27B TP forwards (#86): loopback worlds of 2 and 4 over the tiny
 # fixture against the world-1 forward (ports 29950, 29951).
 add_executable(qwen35_tp_test tests/cuda/qwen35_tp_test.cpp)

@@ -935,16 +935,16 @@ void Qwen35Model::dense_mlp(const uint16_t* x, uint16_t* out, int tokens,
   }
   // ---- mixed-release forms (the loader binds one form per layer) -------------
   if (m.gate_fp4.payload) {
-    // The NVFP4 MLP: the fp4w prefill GEMM above 1024 rows, the production
-    // ldmatrix kernel at and below (one chain everywhere at <= 1024 rows;
+    // The NVFP4 MLP: the fp4w prefill GEMM from 1024 rows, the production
+    // ldmatrix kernel below (one chain everywhere at < 1024 rows;
     // tolerance-equal, never bitwise, across the boundary — a different
-    // fp32 summation order). The prefill form streams weights once per
-    // 8-m-tile group instead of re-reading them per 64-row tile (measured
-    // faster from ~1024 rows up, slower below: gate/up m=448 lose 11%,
-    // m=1024/2048/4096 win 12/14/47%); the decode form keeps the
+    // fp32 summation order). The 256-row tile amortizes weight decoding
+    // over more rows. Include exactly 1024: prefix-cache cuts produce
+    // chunks of that size, and the wider tile wins there at TP 1/2/4.
+    // Smaller ragged tiles are not consistently faster. Decode keeps the
     // solo-vs-batch bitwise chain the gates pin.
     if (tokens <= 0) return;
-    if (tokens > 1024) {
+    if (tokens >= 1024) {
       launch_fp4w_gemm_bf16(x, static_cast<size_t>(H), m.gate_fp4, gate_tmp_, tokens,
                             static_cast<int>(I), H, stream);
       launch_fp4w_gemm_bf16(x, static_cast<size_t>(H), m.up_fp4, up_tmp_, tokens,

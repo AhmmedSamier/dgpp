@@ -14,24 +14,24 @@
 namespace dgpp {
 namespace {
 
-// 128 x 128 x 64 block tiles on sixteen warps (4 x 4: a 32 x 32 warp tile
-// of two m16 by four n8 mma tiles), four warps a scheduler so one warp's
-// decode latency hides under the others' mma. The activation tile rides a
-// three-stage cp.async pipeline (bf16 rows at a 144-byte stride, ldmatrix
-// conflict-free). The weight tile's e2m1 pairs are loaded into registers
-// two steps ahead (8 payload bytes plus the step's four e4m3 scale bytes
-// a thread) and placed into the bf16 tile pair by pair — the decode of
-// step s+1 interleaved into step s's mma loop; ldmatrix feeds mma
-// m16n8k16 bf16 with fp32 accumulation in ascending k order. The placed
-// words carry their e4m3 scale already (converted once per row-step),
-// and the F32 global divides the finished dot once in the epilogue, as
-// the fp4 GEMV core does. One barrier per step.
-constexpr int kBM = 128, kBN = 128, kBK = 64;
+// 256 x 128 x 64 tiles on sixteen warps (4 x 4, each covering 64 x 32).
+// The wider M tile amortizes each weight decode over twice as many rows.
+// Two cp.async activation stages and two weight tiles fit in 96 KiB:
+// shared rows use an XOR swizzle instead of padding. Each 8-bf16 vector
+// stays aligned, while ldmatrix's eight rows address distinct banks.
+// The dot keeps the original ascending-k FP32 accumulation and divides
+// by the global scale once in the epilogue.
+constexpr int kBM = 256, kBN = 128, kBK = 64;
 constexpr int kThreads = 512;
-constexpr int kStages = 3;                        // activation stages
-constexpr int kStride = kBK * 2 + 16;             // smem row bytes (bf16 tile)
-constexpr int kTileBytes = kBM * kStride;         // 18,432: one bf16 tile
-constexpr int kSmem = (kStages + 2) * kTileBytes;  // 92,160: A stages + two W tiles
+constexpr int kStages = 2;
+constexpr int kStride = kBK * 2;
+constexpr int kTileBytes = kBM * kStride;
+constexpr int kWeightTileBytes = kBN * kStride;
+constexpr int kSmem = kStages * kTileBytes + 2 * kWeightTileBytes;
+
+__device__ __forceinline__ int swizzled_col(int row, int col) {
+  return col ^ ((row & 7) * 8);
+}
 
 __device__ __forceinline__ void cp16(void* dst, const void* src, bool valid) {
   const unsigned address = static_cast<unsigned>(__cvta_generic_to_shared(dst));
@@ -72,7 +72,7 @@ __global__ __launch_bounds__(kThreads, 1) void fp4w_gemm_kernel(
   // The tile order: groups of kGroupM m-tiles walked n-tile by n-tile (a
   // wave's blocks share kGroupM activation tiles from L2 while each weight
   // tile streams once per group).
-  constexpr int kGroupM = 8;
+  constexpr int kGroupM = 4;
   const int m_tiles = (m + kBM - 1) / kBM, n_tiles = (n + kBN - 1) / kBN;
   const int bid = static_cast<int>(blockIdx.x);
   const int group = bid / (kGroupM * n_tiles);
@@ -81,16 +81,16 @@ __global__ __launch_bounds__(kThreads, 1) void fp4w_gemm_kernel(
   const int in_group = bid - group * kGroupM * n_tiles;
   const int m0 = (first_m + in_group % group_rows) * kBM;
   const int n0 = (in_group / group_rows) * kBN;
-  const int row_base = (warp / 4) * 32, col_base = (warp % 4) * 32;
+  const int row_base = (warp / 4) * 64, col_base = (warp % 4) * 32;
   const int steps = k / kBK;
   const size_t payload_stride = static_cast<size_t>(k) / 2;
-  // The activation copy map: 128 rows x 8 16-byte chunks = 1024 chunks,
-  // two a thread: chunk c = tid + i * 512 -> row c / 8, piece c % 8.
-  const uint16_t* a_src[2];
-  bool a_ok[2];
-  int a_row[2], a_piece[2];
+  // The activation copy map: 256 rows x 8 16-byte chunks = 2048 chunks,
+  // four per thread: chunk c = tid + i * 512 -> row c / 8, piece c % 8.
+  const uint16_t* a_src[4];
+  bool a_ok[4];
+  int a_row[4], a_piece[4];
 #pragma unroll
-  for (int i = 0; i < 2; ++i) {
+  for (int i = 0; i < 4; ++i) {
     const int c = tid + i * kThreads;
     a_row[i] = c / 8;
     a_piece[i] = (c % 8) * 8;  // elements
@@ -101,7 +101,9 @@ __global__ __launch_bounds__(kThreads, 1) void fp4w_gemm_kernel(
     uint8_t* as = sa + slot * kTileBytes;
     const int koff = step * kBK;
 #pragma unroll
-    for (int i = 0; i < 2; ++i) cp16(as + a_row[i] * kStride + a_piece[i] * 2, a_src[i] + koff, a_ok[i]);
+    for (int i = 0; i < 4; ++i)
+      cp16(as + a_row[i] * kStride + swizzled_col(a_row[i], a_piece[i]) * 2,
+           a_src[i] + koff, a_ok[i]);
   };
   // The weight row this thread places: n-row tid / 4, 16 consecutive codes
   // at (tid % 4) * 16 — one 8-byte payload load plus the step's four scale
@@ -135,11 +137,12 @@ __global__ __launch_bounds__(kThreads, 1) void fp4w_gemm_kernel(
     p[1] = decode_pair_bf16_w((word >> 8) & 0xFFu, s2);
     p[2] = decode_pair_bf16_w((word >> 16) & 0xFFu, s2);
     p[3] = decode_pair_bf16_w((word >> 24) & 0xFFu, s2);
-    uint8_t* dst = sw + (step & 1) * kTileBytes + wrow * kStride + (wk + h * 8) * 2;
+    uint8_t* dst = sw + (step & 1) * kWeightTileBytes + wrow * kStride +
+                   swizzled_col(wrow, wk + h * 8) * 2;
     *reinterpret_cast<uint4*>(dst) = make_uint4(p[0], p[1], p[2], p[3]);
   };
 
-  float acc[2][4][4] = {};
+  float acc[4][4][4] = {};
 #pragma unroll
   for (int s = 0; s < kStages - 1; ++s) {
     if (s < steps) issue(s, s);
@@ -160,13 +163,15 @@ __global__ __launch_bounds__(kThreads, 1) void fp4w_gemm_kernel(
     if (step + 2 < steps) fetch(step + 2, cur);
     const bool place_next = step + 1 < steps;
     const uint8_t* as = sa + (step % kStages) * kTileBytes;
-    const uint8_t* ws = sw + (step & 1) * kTileBytes;
+    const uint8_t* ws = sw + (step & 1) * kWeightTileBytes;
 #pragma unroll
     for (int kk = 0; kk < kBK; kk += 16) {
-      uint32_t af[2][4];
+      uint32_t af[4][4];
 #pragma unroll
-      for (int i = 0; i < 2; ++i)
-        ldsm_x4(af[i], as + (row_base + i * 16 + lane % 16) * kStride + (kk + (lane / 16) * 8) * 2);
+      for (int i = 0; i < 4; ++i)
+        ldsm_x4(af[i], as + (row_base + i * 16 + lane % 16) * kStride +
+                           swizzled_col(row_base + i * 16 + lane % 16,
+                                        kk + (lane / 16) * 8) * 2);
       uint32_t bf[4][2];
 #pragma unroll
       for (int jj = 0; jj < 2; ++jj) {
@@ -174,14 +179,14 @@ __global__ __launch_bounds__(kThreads, 1) void fp4w_gemm_kernel(
         const int tile = col_base + jj * 16 + (lane / 16) * 8 + lane % 8;
         const int kb = kk + ((lane / 8) % 2) * 8;
         uint32_t q4[4];
-        ldsm_x4(q4, ws + tile * kStride + kb * 2);
+        ldsm_x4(q4, ws + tile * kStride + swizzled_col(tile, kb) * 2);
         bf[jj * 2][0] = q4[0];
         bf[jj * 2][1] = q4[1];
         bf[jj * 2 + 1][0] = q4[2];
         bf[jj * 2 + 1][1] = q4[3];
       }
 #pragma unroll
-      for (int i = 0; i < 2; ++i)
+      for (int i = 0; i < 4; ++i)
 #pragma unroll
         for (int j = 0; j < 4; ++j)
           asm volatile(
@@ -199,7 +204,7 @@ __global__ __launch_bounds__(kThreads, 1) void fp4w_gemm_kernel(
   }
   const int r = lane / 4, cc = (lane % 4) * 2;
 #pragma unroll
-  for (int i = 0; i < 2; ++i)
+  for (int i = 0; i < 4; ++i)
 #pragma unroll
     for (int j = 0; j < 4; ++j)
 #pragma unroll
