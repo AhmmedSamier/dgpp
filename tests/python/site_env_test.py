@@ -357,6 +357,38 @@ class SiteEnvTest(unittest.TestCase):
                     self.assertEqual((assignments["DGPP_LOG_LEVEL"], assignments["DGPP_MLOCK"]),
                                      expected[1])
 
+    def test_persistent_swap_policy_reaches_every_serving_rank(self):
+        self.env_file.write_text(self.env_file.read_text() + 'DGPP_NO_SWAP=1\n')
+        module = runpy.run_path(str(ROOT / "scripts/dgpp-cluster"))
+        args = argparse.Namespace(config=str(self.config), log_dir=str(self.root / "logs"), knobs="")
+        with patch.dict(os.environ, self.environ, clear=True):
+            cluster = module["Cluster"](args)
+            self.assertTrue(all(env["DGPP_NO_SWAP"] == "1" for env in cluster.cfg["node_env"]))
+            Path(cluster.log_dir).mkdir(parents=True, exist_ok=True)
+            with patch.object(cluster, "ssh", return_value=True), patch.object(cluster, "scp_to", return_value=True):
+                self.assertTrue(cluster.stage())
+            staged = json.loads(Path(cluster.config_path).read_text())
+            self.assertTrue(all("DGPP_NO_SWAP" not in env for env in staged["node_env"]))
+            self.assertEqual(staged["engine"], cluster.cfg["engine"])
+            with patch.object(module["cluster_process"], "launch") as launch:
+                launch.return_value.pid = 12345
+                cluster.boot_head()
+                self.assertEqual(launch.call_args.args[4]["DGPP_NO_SWAP"], "1")
+            with patch.object(module["subprocess"], "run") as remote:
+                remote.return_value.returncode = 0
+                cluster.spawn_peer(1, "peer1")
+                words = shlex.split(remote.call_args.args[0][-1])
+                self.assertIn("DGPP_NO_SWAP=1", words[:words.index("python3")])
+        with patch.dict(os.environ, {**self.environ, "DGPP_NO_SWAP": "yes"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "DGPP_NO_SWAP.*must be 0 or 1"):
+                module["Cluster"](args)
+        for command in ([sys.executable, str(ROOT / "scripts/dgpp-cluster"), "resolve", "--config", str(self.config)],
+                        [sys.executable, str(ROOT / "scripts/site_env.py"), "resolve", "--config", str(self.config)]):
+            with self.subTest(command=command):
+                result = subprocess.run(command, env=self.environ, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(all("DGPP_NO_SWAP" not in env for env in json.loads(result.stdout)["node_env"]))
+
     def test_operational_wrappers_stop_on_invalid_env_before_running(self):
         scripts = [p for p in (ROOT / "scripts").glob("*.sh")
                    if p.name != "cluster_env.sh" and 'cluster_env.sh" || exit 1' in p.read_text()]
