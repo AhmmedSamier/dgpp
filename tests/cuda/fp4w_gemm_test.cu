@@ -194,9 +194,9 @@ void check_sparse_vs_grouped(int m, int n, int k) {
 
 // The vector store must preserve row padding and work through unaligned
 // output views. Odd N also leaves a final scalar column in an aligned row.
-void check_output_layouts() {
+void check_output_layouts(int k = 256) {
   using namespace dgpp;
-  const Case c = make_case(3073, 137, 256, 1.7f, 51);
+  const Case c = make_case(3073, 137, k, 1.7f, 51);
   const auto ref = run_fp4w(c);
   Dev d = upload(c);
   const GlmFp4Matrix w{d.payload, d.scales, d.global, c.n, c.k, kFp4Group};
@@ -228,9 +228,28 @@ void check_output_layouts() {
   }
 }
 
+// Identical input rows must keep the same bits when the long TP2 shape
+// selects sixteen warps instead of eight. Exercise both actual shard shapes.
+void check_long_dispatch(int n, int k) {
+  Case c = make_case(3073, n, k, 1.7f, 53);
+  const auto wide = run_fp4w(c);
+  c.m = 3071;
+  const auto short_rows = run_fp4w(c);
+  bool same = true;
+  for (size_t i = 0; i < short_rows.size(); ++i) same &= wide[i] == short_rows[i];
+  EXPECT_TRUE(same, "long TP2 warp dispatch must preserve each output dot bitwise");
+}
+
 }  // namespace
 
 int main() {
+  // Both sides of the long TP2 dispatch, including partial M/N tiles and
+  // guarded scalar output stores in the sixteen-warp specialization.
+  check_sparse_vs_grouped(3073, 137, 8704);
+  check_sparse_vs_grouped(3072, 8704, 128);
+  check_output_layouts(8704);
+  check_long_dispatch(8704, 5120);
+  check_long_dispatch(5120, 8704);
   check_oracle(144, 512, 512, 3200.f, 42, "oracle ragged tiles");
   check_oracle(512, 512, 1024, 3200.f, 43, "oracle full tiles");
   check_oracle(256, 1024, 5120, 6400.f, 44, "oracle gate-K slice");

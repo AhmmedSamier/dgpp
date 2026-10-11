@@ -14,7 +14,8 @@
 namespace dgpp {
 namespace {
 
-// 256 x 128 x 64 tiles on eight warps (4 x 2, each covering 64 x 64).
+// 256 x 128 x 64 tiles, normally on eight 64 x 64 warps. Long TP2
+// products use sixteen 64 x 32 warps to hide more of the pipeline latency.
 // The wider M tile amortizes each weight decode over twice as many rows.
 // Two cp.async activation stages and two weight tiles fit in 96 KiB:
 // shared rows use an XOR swizzle instead of padding. Each 8-bf16 vector
@@ -22,12 +23,12 @@ namespace {
 // The dot keeps the original ascending-k FP32 accumulation and divides
 // by the global scale once in the epilogue.
 constexpr int kBM = 256, kBN = 128, kBK = 64;
-constexpr int kThreads = 256;
 constexpr int kStages = 2;
 constexpr int kStride = kBK * 2;
 constexpr int kTileBytes = kBM * kStride;
 constexpr int kWeightTileBytes = kBN * kStride;
 constexpr int kSmem = kStages * kTileBytes + 2 * kWeightTileBytes;
+constexpr int thread_count(int warp_n) { return (kBM / 64) * (kBN / warp_n) * 32; }
 
 __device__ __forceinline__ int swizzled_col(int row, int col) {
   return col ^ ((row & 7) * 8);
@@ -59,12 +60,15 @@ __device__ __forceinline__ uint32_t decode_pair_bf16_w(uint32_t byte, __half2 s2
   return *reinterpret_cast<const uint32_t*>(&b);
 }
 
-template <typename OutT, int kGroupM>
-__global__ __launch_bounds__(kThreads, 1) void fp4w_gemm_kernel(
+template <typename OutT, int kGroupM, int kWarpN>
+__global__ __launch_bounds__(thread_count(kWarpN), 1) void fp4w_gemm_kernel(
     const uint16_t* __restrict__ act, size_t act_stride, const uint8_t* __restrict__ payload,
     const uint8_t* __restrict__ scales, size_t scale_stride, const float* __restrict__ global,
     OutT* __restrict__ out, int m, int n, int k, size_t out_stride) {
   extern __shared__ __align__(128) uint8_t smem[];
+  static_assert(kWarpN == 32 || kWarpN == 64);
+  constexpr int kThreads = thread_count(kWarpN);
+  constexpr int kCopies = kBM * kBK / (kThreads * 8);
   uint8_t* sa = smem;
   uint8_t* sw = smem + kStages * kTileBytes;  // two W tiles
   const int tid = threadIdx.x, warp = tid / 32, lane = tid % 32;
@@ -80,16 +84,17 @@ __global__ __launch_bounds__(kThreads, 1) void fp4w_gemm_kernel(
   const int in_group = bid - group * kGroupM * n_tiles;
   const int m0 = (first_m + in_group % group_rows) * kBM;
   const int n0 = (in_group / group_rows) * kBN;
-  const int row_base = (warp / 2) * 64, col_base = (warp % 2) * 64;
+  const int row_base = (warp / (kBN / kWarpN)) * 64;
+  const int col_base = (warp % (kBN / kWarpN)) * kWarpN;
   const int steps = k / kBK;
   const size_t payload_stride = static_cast<size_t>(k) / 2;
   // The activation copy map: 256 rows x 8 16-byte chunks = 2048 chunks,
-  // eight per thread: chunk c = tid + i * 256 -> row c / 8, piece c % 8.
-  const uint16_t* a_src[8];
-  bool a_ok[8];
-  int a_row[8], a_piece[8];
+  // kCopies per thread: chunk c = tid + i * kThreads -> row c / 8, piece c % 8.
+  const uint16_t* a_src[kCopies];
+  bool a_ok[kCopies];
+  int a_row[kCopies], a_piece[kCopies];
 #pragma unroll
-  for (int i = 0; i < 8; ++i) {
+  for (int i = 0; i < kCopies; ++i) {
     const int c = tid + i * kThreads;
     a_row[i] = c / 8;
     a_piece[i] = (c % 8) * 8;  // elements
@@ -100,14 +105,14 @@ __global__ __launch_bounds__(kThreads, 1) void fp4w_gemm_kernel(
     uint8_t* as = sa + slot * kTileBytes;
     const int koff = step * kBK;
 #pragma unroll
-    for (int i = 0; i < 8; ++i)
+    for (int i = 0; i < kCopies; ++i)
       cp16(as + a_row[i] * kStride + swizzled_col(a_row[i], a_piece[i]) * 2,
            a_src[i] + koff, a_ok[i]);
   };
   // Two threads place one weight row: 32 codes each, fetched in one
   // 16-byte vector. Each half uses its own 16-code scale group.
   const int wrow = tid / 2, wk = (tid % 2) * 32;
-  const bool w_ok = n0 + wrow < n;
+  const bool w_ok = n0 + wrow < n && (kWarpN == 64 || tid < 256);
   const uint8_t* wsrc =
       payload + static_cast<size_t>(w_ok ? n0 + wrow : 0) * payload_stride + static_cast<size_t>(wk) / 2;
   const uint8_t* ssrc = scales + static_cast<size_t>(w_ok ? n0 + wrow : 0) * scale_stride;
@@ -123,6 +128,9 @@ __global__ __launch_bounds__(kThreads, 1) void fp4w_gemm_kernel(
   };
   // Half h places sixteen codes as two swizzled eight-BF16 vectors.
   auto place_half = [&](int step, const Raw& r, int h) {
+    if constexpr (kWarpN == 32) {
+      if (tid >= 256) return;
+    }
     const uint32_t sb = (r.sc >> (8 * ((wk + h * 16) / 16))) & 0xFFu;
     const __half2 s2 = __half2half2(
         __half(__nv_cvt_fp8_to_halfraw(static_cast<__nv_fp8_storage_t>(sb), __NV_E4M3)));
@@ -140,7 +148,7 @@ __global__ __launch_bounds__(kThreads, 1) void fp4w_gemm_kernel(
     }
   };
 
-  float acc[4][8][4] = {};
+  float acc[4][kWarpN / 8][4] = {};
 #pragma unroll
   for (int s = 0; s < kStages - 1; ++s) {
     if (s < steps) issue(s, s);
@@ -170,9 +178,9 @@ __global__ __launch_bounds__(kThreads, 1) void fp4w_gemm_kernel(
         ldsm_x4(af[i], as + (row_base + i * 16 + lane % 16) * kStride +
                            swizzled_col(row_base + i * 16 + lane % 16,
                                         kk + (lane / 16) * 8) * 2);
-      uint32_t bf[8][2];
+      uint32_t bf[kWarpN / 8][2];
 #pragma unroll
-      for (int jj = 0; jj < 4; ++jj) {
+      for (int jj = 0; jj < kWarpN / 16; ++jj) {
         // Matrices 0/1 = n8 tile 2jj at k kk..kk+7 / kk+8..kk+15, 2/3 = tile 2jj+1.
         const int tile = col_base + jj * 16 + (lane / 16) * 8 + lane % 8;
         const int kb = kk + ((lane / 8) % 2) * 8;
@@ -186,7 +194,7 @@ __global__ __launch_bounds__(kThreads, 1) void fp4w_gemm_kernel(
 #pragma unroll
       for (int i = 0; i < 4; ++i)
 #pragma unroll
-        for (int j = 0; j < 8; ++j)
+        for (int j = 0; j < kWarpN / 8; ++j)
           asm volatile(
               "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
               "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
@@ -207,7 +215,7 @@ __global__ __launch_bounds__(kThreads, 1) void fp4w_gemm_kernel(
 #pragma unroll
   for (int i = 0; i < 4; ++i)
 #pragma unroll
-    for (int j = 0; j < 8; ++j)
+    for (int j = 0; j < kWarpN / 8; ++j)
 #pragma unroll
       for (int pair = 0; pair < 2; ++pair) {
         const int row = m0 + row_base + i * 16 + r + pair * 8;
@@ -232,17 +240,17 @@ __global__ __launch_bounds__(kThreads, 1) void fp4w_gemm_kernel(
       }
 }
 
-template <typename OutT, int kGroupM>
+template <typename OutT, int kGroupM, int kWarpN = 64>
 void launch_tiles(const uint16_t* act, size_t act_stride, const GlmFp4Matrix& w, OutT* out, int m,
                   int n, int k, cudaStream_t stream, size_t out_stride) {
-  static bool attr_set = false;  // once per instantiation
-  if (!attr_set) {
-    DGPP_CUDA_OK(cudaFuncSetAttribute(fp4w_gemm_kernel<OutT, kGroupM>,
+  static const bool initialized = [] {
+    DGPP_CUDA_OK(cudaFuncSetAttribute(fp4w_gemm_kernel<OutT, kGroupM, kWarpN>,
                                       cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
-    attr_set = true;
-  }
+    return true;
+  }();
+  (void)initialized;
   const dim3 grid(static_cast<unsigned>(((n + kBN - 1) / kBN) * ((m + kBM - 1) / kBM)));
-  fp4w_gemm_kernel<OutT, kGroupM><<<grid, kThreads, kSmem, stream>>>(
+  fp4w_gemm_kernel<OutT, kGroupM, kWarpN><<<grid, thread_count(kWarpN), kSmem, stream>>>(
       act, act_stride, w.payload, w.scales, static_cast<size_t>(k) / 16, w.global_scale, out, m, n,
       k, out_stride);
   DGPP_CUDA_OK(cudaGetLastError());
@@ -261,7 +269,11 @@ void launch(const uint16_t* act, size_t act_stride, const GlmFp4Matrix& w, OutT*
   if (out_stride < static_cast<size_t>(n)) throw std::invalid_argument("fp4w gemm: output row stride narrower than n");
   // Three M tiles per cache group improve the long-prefill shapes. Shorter
   // walks retain four; changing the block order does not reassociate a dot.
-  if (m >= 3072)
+  // The 8704-wide TP2 gate/up and down shards benefit from more resident
+  // warps on long walks. The tile and each output's dot order are identical.
+  if (m >= 3072 && (n == 8704 || k == 8704))
+    launch_tiles<OutT, 3, 32>(act, act_stride, w, out, m, n, k, stream, out_stride);
+  else if (m >= 3072)
     launch_tiles<OutT, 3>(act, act_stride, w, out, m, n, k, stream, out_stride);
   else
     launch_tiles<OutT, 4>(act, act_stride, w, out, m, n, k, stream, out_stride);
