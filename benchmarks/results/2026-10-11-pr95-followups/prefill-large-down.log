@@ -1,0 +1,40 @@
+==WARNING== Note: Running with uncontrolled GPU caches. Profiling results may be inconsistent.
+==WARNING== Note: Running with unmodified GPU clocks. If not controlled otherwise, profiling results may be inconsistent.
+==PROF== Connected to process 2448154 (/home/stephen/dgpp/pr95-followups-20261011/prefill_ncu_probe)
+==PROF== Profiling "void dgpp::<unnamed>::fp4w_gemm_kernel<unsigned short, (int)3, (int)32>(const unsigned short *, unsigned long, const unsigned char *, const unsigned char *, unsigned long, const float *, T1 *, int, int, int, unsigned long)": Application replay pass 1
+==PROF== Disconnected from process 2448154
+==PROF== Connected to process 2448174 (/home/stephen/dgpp/pr95-followups-20261011/prefill_ncu_probe)
+==PROF== Profiling "void dgpp::<unnamed>::fp4w_gemm_kernel<unsigned short, (int)3, (int)32>(const unsigned short *, unsigned long, const unsigned char *, const unsigned char *, unsigned long, const float *, T1 *, int, int, int, unsigned long)": Application replay pass 2
+==PROF== Disconnected from process 2448174
+==PROF== Connected to process 2448189 (/home/stephen/dgpp/pr95-followups-20261011/prefill_ncu_probe)
+==PROF== Profiling "void dgpp::<unnamed>::fp4w_gemm_kernel<unsigned short, (int)3, (int)32>(const unsigned short *, unsigned long, const unsigned char *, const unsigned char *, unsigned long, const float *, T1 *, int, int, int, unsigned long)": Application replay pass 3
+==PROF== Disconnected from process 2448189
+==PROF== Connected to process 2448896 (/home/stephen/dgpp/pr95-followups-20261011/prefill_ncu_probe)
+==PROF== Profiling "void dgpp::<unnamed>::fp4w_gemm_kernel<unsigned short, (int)3, (int)32>(const unsigned short *, unsigned long, const unsigned char *, const unsigned char *, unsigned long, const float *, T1 *, int, int, int, unsigned long)": Application replay pass 4
+==PROF== Disconnected from process 2448896
+==PROF== Connected to process 2448914 (/home/stephen/dgpp/pr95-followups-20261011/prefill_ncu_probe)
+==PROF== Profiling "void dgpp::<unnamed>::fp4w_gemm_kernel<unsigned short, (int)3, (int)32>(const unsigned short *, unsigned long, const unsigned char *, const unsigned char *, unsigned long, const float *, T1 *, int, int, int, unsigned long)": Application replay pass 5
+==PROF== Disconnected from process 2448914
+==PROF== Connected to process 2448928 (/home/stephen/dgpp/pr95-followups-20261011/prefill_ncu_probe)
+==PROF== Profiling "void dgpp::<unnamed>::fp4w_gemm_kernel<unsigned short, (int)3, (int)32>(const unsigned short *, unsigned long, const unsigned char *, const unsigned char *, unsigned long, const float *, T1 *, int, int, int, unsigned long)": Application replay pass 6
+==PROF== Disconnected from process 2448928
+==PROF== Connected to process 2448949 (/home/stephen/dgpp/pr95-followups-20261011/prefill_ncu_probe)
+==PROF== Profiling "void dgpp::<unnamed>::fp4w_gemm_kernel<unsigned short, (int)3, (int)32>(const unsigned short *, unsigned long, const unsigned char *, const unsigned char *, unsigned long, const float *, T1 *, int, int, int, unsigned long)": Application replay pass 7
+==PROF== Disconnected from process 2448949
+==PROF== Connected to process 2448964 (/home/stephen/dgpp/pr95-followups-20261011/prefill_ncu_probe)
+==PROF== Profiling "void dgpp::<unnamed>::fp4w_gemm_kernel<unsigned short, (int)3, (int)32>(const unsigned short *, unsigned long, const unsigned char *, const unsigned char *, unsigned long, const float *, T1 *, int, int, int, unsigned long)": Application replay pass 8
+==PROF== Disconnected from process 2448964
+==PROF== Connected to process 2448984 (/home/stephen/dgpp/pr95-followups-20261011/prefill_ncu_probe)
+==PROF== Profiling "void dgpp::<unnamed>::fp4w_gemm_kernel<unsigned short, (int)3, (int)32>(const unsigned short *, unsigned long, const unsigned char *, const unsigned char *, unsigned long, const float *, T1 *, int, int, int, unsigned long)": Application replay pass 9
+==PROF== Disconnected from process 2448984
+==PROF== Connected to process 2448998 (/home/stephen/dgpp/pr95-followups-20261011/prefill_ncu_probe)
+==PROF== Profiling "void dgpp::<unnamed>::fp4w_gemm_kernel<unsigned short, (int)3, (int)32>(const unsigned short *, unsigned long, const unsigned char *, const unsigned char *, unsigned long, const float *, T1 *, int, int, int, unsigned long)": Application replay pass 10
+==PROF== Disconnected from process 2448998
+==PROF== Connected to process 2449012 (/home/stephen/dgpp/pr95-followups-20261011/prefill_ncu_probe)
+==PROF== Profiling "void dgpp::<unnamed>::fp4w_gemm_kernel<unsigned short, (int)3, (int)32>(const unsigned short *, unsigned long, const unsigned char *, const unsigned char *, unsigned long, const float *, T1 *, int, int, int, unsigned long)": Application replay pass 11
+==PROF== Disconnected from process 2449012
+==PROF== Connected to process 2449026 (/home/stephen/dgpp/pr95-followups-20261011/prefill_ncu_probe)
+==PROF== Profiling "void dgpp::<unnamed>::fp4w_gemm_kernel<unsigned short, (int)3, (int)32>(const unsigned short *, unsigned long, const unsigned char *, const unsigned char *, unsigned long, const float *, T1 *, int, int, int, unsigned long)": Application replay pass 12
+==PROF== Disconnected from process 2449026
+==PROF== Creating report from application replay data: 0%..............100%
+==PROF== Report: /home/stephen/dgpp/pr95-followups-20261011/prefill-large-down.ncu-rep

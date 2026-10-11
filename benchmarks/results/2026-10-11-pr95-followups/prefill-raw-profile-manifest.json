@@ -1,0 +1,115 @@
+{
+  "date": "2026-10-11T11:56:51.352025+00:00",
+  "local_root": "/home/stephen/dgpp/pr95-followups-20261011",
+  "profiles": [
+    {
+      "path": "prefill-gap-profile-fp8/rank0.nsys-rep",
+      "bytes": 23984521,
+      "sha256": "07ffb62f856379f87ce18b8da9415183313f216220b387b8a9edf2c079181d66",
+      "binary_sha256": "981d9dd764c4612c3c74f5903d7c42b47e1121733d69b1ad7a45ab345d13ac8f"
+    },
+    {
+      "path": "prefill-gap-profile-fp8/rank0.sqlite",
+      "bytes": 61431808,
+      "sha256": "9ade36eec70ed303a7361c7cfa54896e6345bfa9451e21f1fa96a0fd524a51d7",
+      "binary_sha256": "981d9dd764c4612c3c74f5903d7c42b47e1121733d69b1ad7a45ab345d13ac8f"
+    },
+    {
+      "path": "prefill-gap-profile-fp8/rank1.nsys-rep",
+      "bytes": 24081200,
+      "sha256": "0b0410cbde016767bdfa3b958826c6003e0e92eacc6b4973656e218f7aa0eca1",
+      "binary_sha256": "981d9dd764c4612c3c74f5903d7c42b47e1121733d69b1ad7a45ab345d13ac8f"
+    },
+    {
+      "path": "prefill-gap-profile-fp8/rank1.sqlite",
+      "bytes": 61857792,
+      "sha256": "a98479561692641bd2c21c2d14e47f812a7702f712feef99c3f9d485d89fc609",
+      "binary_sha256": "981d9dd764c4612c3c74f5903d7c42b47e1121733d69b1ad7a45ab345d13ac8f"
+    },
+    {
+      "path": "prefill-gap-profile-nvfp4/rank0.nsys-rep",
+      "bytes": 23221549,
+      "sha256": "8db4e02b35787b59e9a47ef785fee620cf7f4266634259c232c28fbed9e7fc51",
+      "binary_sha256": "981d9dd764c4612c3c74f5903d7c42b47e1121733d69b1ad7a45ab345d13ac8f"
+    },
+    {
+      "path": "prefill-gap-profile-nvfp4/rank0.sqlite",
+      "bytes": 59371520,
+      "sha256": "5eb24ee4cdf96cb10caf4bfd0c7d37f1afa2cf7100c54b031fea7022d16c8c28",
+      "binary_sha256": "981d9dd764c4612c3c74f5903d7c42b47e1121733d69b1ad7a45ab345d13ac8f"
+    },
+    {
+      "path": "prefill-gap-profile-nvfp4/rank1.nsys-rep",
+      "bytes": 23119439,
+      "sha256": "b09558cadd2bc6b7ab6eecc47b1427108d938257b69c84dc16563acc61f5d96c",
+      "binary_sha256": "981d9dd764c4612c3c74f5903d7c42b47e1121733d69b1ad7a45ab345d13ac8f"
+    },
+    {
+      "path": "prefill-gap-profile-nvfp4/rank1.sqlite",
+      "bytes": 59789312,
+      "sha256": "81f765840b53fc0b98cf1f36d7c7e83bd96301015621f5c1136b58bd27503950",
+      "binary_sha256": "981d9dd764c4612c3c74f5903d7c42b47e1121733d69b1ad7a45ab345d13ac8f"
+    },
+    {
+      "path": "prefill-tail-profile-fp8/rank0.nsys-rep",
+      "bytes": 33805306,
+      "sha256": "a7a683fda92bacb52904e1a47f68581dd8da48bfe8602d3c7a3b160b756fe50c",
+      "binary_sha256": "005c0242b8c7d5aba5330ab17dd8cfd6380a6840313763a93ebc906e725e66f0"
+    },
+    {
+      "path": "prefill-tail-profile-fp8/rank0.sqlite",
+      "bytes": 89849856,
+      "sha256": "60f71b737759bc9e1e9f4c179ddc9fdd0487ac60d60d48ad183867ca4b7d57bc",
+      "binary_sha256": "005c0242b8c7d5aba5330ab17dd8cfd6380a6840313763a93ebc906e725e66f0"
+    },
+    {
+      "path": "prefill-tail-profile-fp8/rank1.nsys-rep",
+      "bytes": 33661568,
+      "sha256": "c284840c0d25305392150d28c2402677811ee392b1056df9e97fa391bb2a423c",
+      "binary_sha256": "005c0242b8c7d5aba5330ab17dd8cfd6380a6840313763a93ebc906e725e66f0"
+    },
+    {
+      "path": "prefill-tail-profile-fp8/rank1.sqlite",
+      "bytes": 89362432,
+      "sha256": "67ebdd5df3710cbc1ce7a57b8f53f3d7b2d395504c50920ca963cde4ed032fa6",
+      "binary_sha256": "005c0242b8c7d5aba5330ab17dd8cfd6380a6840313763a93ebc906e725e66f0"
+    },
+    {
+      "path": "prefill-tail-profile-nvfp4/rank0.nsys-rep",
+      "bytes": 32837400,
+      "sha256": "92668179c493ec1295a83f278536fb1edd185b990129605993a4476cf198cb2c",
+      "binary_sha256": "005c0242b8c7d5aba5330ab17dd8cfd6380a6840313763a93ebc906e725e66f0"
+    },
+    {
+      "path": "prefill-tail-profile-nvfp4/rank0.sqlite",
+      "bytes": 86925312,
+      "sha256": "8c799b3207df07bc553a4e7c8c2317d5d279e68eff89c589178b81e4a254cfd6",
+      "binary_sha256": "005c0242b8c7d5aba5330ab17dd8cfd6380a6840313763a93ebc906e725e66f0"
+    },
+    {
+      "path": "prefill-tail-profile-nvfp4/rank1.nsys-rep",
+      "bytes": 32738131,
+      "sha256": "0e35e9b866943a2e070c3f96f7503c56bbe85202e2dfc082e9ae9fcffa079ad7",
+      "binary_sha256": "005c0242b8c7d5aba5330ab17dd8cfd6380a6840313763a93ebc906e725e66f0"
+    },
+    {
+      "path": "prefill-tail-profile-nvfp4/rank1.sqlite",
+      "bytes": 87052288,
+      "sha256": "78b2a73aff77e25bab337fcaec6dc65f0487466456c77499d73743b5ec7a8079",
+      "binary_sha256": "005c0242b8c7d5aba5330ab17dd8cfd6380a6840313763a93ebc906e725e66f0"
+    },
+    {
+      "path": "prefill-large-down.ncu-rep",
+      "bytes": 405983,
+      "sha256": "4f3524285b1f00b51223347ff5c2c2e6a6741c66bfb719f9f98c567affa412ab"
+    },
+    {
+      "path": "prefill-large-gate.ncu-rep",
+      "bytes": 405982,
+      "sha256": "cb9613e2e6ba4348e6990e979bfae4d879a4e02494d11346b1f0f8880016cda6"
+    }
+  ],
+  "nsys_version": "NVIDIA Nsight Systems version 2025.3.2.474-253236389321v0",
+  "ncu_version": "NVIDIA (R) Nsight Compute Command Line Profiler\nCopyright (c) 2018-2025 NVIDIA Corporation\nVersion 2025.3.1.0 (build 36398880) (public-release)",
+  "note": "Raw captures and exported databases remain local. Gap exploratory prompts differ from the final matched prompts. Tail profiles use the original matched prompts at f5a517c1 on both TP2 ranks. Large NCU reports are synthetic microprobes with application replay, not serving performance results."
+}

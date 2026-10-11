@@ -1,0 +1,18 @@
+{
+  "command": [
+    "python3",
+    "/home/stephen/dgpp/pr95-followups-20261011/hash_profile_cluster.py",
+    "up",
+    "--config",
+    "/home/stephen/dgpp/pr95-followups-20261011/decode-hash-profile-fp8/deployment.json",
+    "--bin",
+    "/home/stephen/dgpp/pr95-followups-20261011/dgpp-serve-release-final",
+    "--log-dir",
+    "/home/stephen/dgpp/pr95-followups-20261011/decode-hash-profile-fp8/world",
+    "--head-wrap",
+    "/usr/local/cuda/bin/nsys profile -t cuda --sample=none --cuda-graph-trace=node --force-overwrite=true -o /home/stephen/dgpp/pr95-followups-20261011/decode-hash-profile-fp8/rank0"
+  ],
+  "started": "2026-10-11T07:46:50.735208+00:00",
+  "returncode": 0,
+  "finished": "2026-10-11T07:47:17.935665+00:00"
+}

@@ -2439,13 +2439,31 @@ void GenerationService::route_metrics_prometheus(HttpResponseWriter& w) {
   out.raw(
       "# HELP spec_decode_num_draft_tokens_total Cumulative MTP draft tokens verified.\n"
       "# TYPE spec_decode_num_draft_tokens_total counter\n"
-      "spec_decode_num_draft_tokens_total " + std::to_string(drafted) +
+      "spec_decode_num_draft_tokens_total " +
+      std::to_string(drafted) +
       "\n# HELP spec_decode_num_accepted_tokens_total Cumulative accepted draft tokens.\n"
       "# TYPE spec_decode_num_accepted_tokens_total counter\n"
-      "spec_decode_num_accepted_tokens_total " + std::to_string(accepted) +
+      "spec_decode_num_accepted_tokens_total " +
+      std::to_string(accepted) +
       "\n# HELP spec_decode_num_drafts_total Cumulative verification rounds.\n"
       "# TYPE spec_decode_num_drafts_total counter\n"
-      "spec_decode_num_drafts_total " + std::to_string(m.mtp.attempts[0]) + "\n");
+      "spec_decode_num_drafts_total " +
+      std::to_string(m.mtp.attempts[0]) +
+      "\n# HELP spec_decode_num_lookup_fused_total Cumulative steps whose drafts a prompt-history "
+      "match replaced.\n"
+      "# TYPE spec_decode_num_lookup_fused_total counter\n"
+      "spec_decode_num_lookup_fused_total " +
+      std::to_string(m.mtp.lookup_fused) +
+      "\n# HELP spec_decode_num_lookup_agree_fused_total Cumulative fused steps taken below "
+      "nstrong, on device-pick agreement.\n"
+      "# TYPE spec_decode_num_lookup_agree_fused_total counter\n"
+      "spec_decode_num_lookup_agree_fused_total " +
+      std::to_string(m.mtp.lookup_agree_fused) +
+      "\n# HELP spec_decode_num_lookup_sampled_fused_total Sampled lookup fusion is disabled; this "
+      "counter stays zero.\n"
+      "# TYPE spec_decode_num_lookup_sampled_fused_total counter\n"
+      "spec_decode_num_lookup_sampled_fused_total " +
+      std::to_string(m.mtp.lookup_sampled_fused) + "\n");
 
   const auto& policy = sched_.admission_policy();
   out.gauge("dgpp_build_info", "The server's build and world; the value is always 1.", int64_t{1},
@@ -2540,6 +2558,13 @@ void GenerationService::route_metrics_prometheus(HttpResponseWriter& w) {
   out.counter("dgpp_spec_decode_num_drafts_total", "Request verification rounds.", m.mtp.attempts[0]);
   out.counter("dgpp_spec_decode_num_draft_tokens_total", "Draft tokens verified.", drafted);
   out.counter("dgpp_spec_decode_num_accepted_tokens_total", "Draft tokens accepted.", accepted);
+  out.counter("dgpp_spec_decode_num_lookup_fused_total", "Steps whose drafts a prompt-history match replaced.",
+              m.mtp.lookup_fused);
+  out.counter("dgpp_spec_decode_num_lookup_agree_fused_total",
+              "Fused steps taken below nstrong, on device-pick agreement.", m.mtp.lookup_agree_fused);
+  out.counter("dgpp_spec_decode_num_lookup_sampled_fused_total",
+              "Sampled lookup fusion is disabled; this counter stays zero.",
+              m.mtp.lookup_sampled_fused);
   for (int p = 0; p < m.mtp.depth && p < 8; ++p)
     out.counter("dgpp_spec_decode_num_draft_tokens_per_pos_total", "Draft tokens verified at each draft position.",
                 m.mtp.attempts[p], "position=\"" + std::to_string(p) + "\"");
@@ -2571,6 +2596,12 @@ void GenerationService::route_metrics_prometheus(HttpResponseWriter& w) {
               m.prefix_skipped_no_block);
   out.counter("dgpp_prefix_cache_skipped_no_slot_total", "Snapshots skipped for want of an arena slot.",
               m.prefix_skipped);
+  out.counter("dgpp_prefix_cache_skipped_hop_fallback_total",
+              "Hops passed by sampled fallback after snapshot capture was skipped.",
+              m.prefix_skipped_hop_fallback);
+  out.counter("dgpp_prefix_cache_skipped_hop_mismatch_total",
+              "Hop snapshots dropped for inconsistent outcomes or arena contents.",
+              m.prefix_skipped_hop_mismatch);
   out.counter("dgpp_prefix_cache_skipped_image_bytes_total", "Snapshots skipped over the image-bytes bound.",
               m.prefix_skipped_image_bytes);
   out.counter("dgpp_prefix_cache_arena_snapshots_total", "Arena snapshot copies.", pe.snapshots);
@@ -2698,7 +2729,13 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {  Scheduler::Meter
     if (p) out.push_back(',');
     append_json_int(&out, m.mtp.accepts[p]);
   }
-  out.append("]}");
+  out.append("],\"num_lookup_fused_total\":");
+  append_json_int(&out, m.mtp.lookup_fused);
+  out.append(",\"num_lookup_agree_fused_total\":");
+  append_json_int(&out, m.mtp.lookup_agree_fused);
+  out.append(",\"num_lookup_sampled_fused_total\":");
+  append_json_int(&out, m.mtp.lookup_sampled_fused);
+  out.append("}");
   {
     char tbuf[192];
     std::snprintf(tbuf, sizeof(tbuf), ",\"prefill_ms\":%.1f,\"prefill_request_ms\":%.1f,\"step_ms\":%.1f",
@@ -2782,6 +2819,10 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {  Scheduler::Meter
   append_json_int(&out, m.prefix_skipped_no_block);
   out.append(",\"skipped_no_slot\":");
   append_json_int(&out, m.prefix_skipped);
+  out.append(",\"skipped_hop_fallback\":");
+  append_json_int(&out, m.prefix_skipped_hop_fallback);
+  out.append(",\"skipped_hop_mismatch\":");
+  append_json_int(&out, m.prefix_skipped_hop_mismatch);
   out.append(",\"skipped_image_bytes\":");
   append_json_int(&out, m.prefix_skipped_image_bytes);
   out.append(",\"image_bytes\":");

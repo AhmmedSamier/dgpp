@@ -1,0 +1,64 @@
+[
+  {
+    "log": "prefill-pair-tests.log",
+    "command": [
+      "ctest",
+      "--test-dir",
+      "build-pr95",
+      "--output-on-failure",
+      "-j",
+      "1",
+      "-R",
+      "^(qwen35_|fp4w_gemm_test$|glm_moe_test$)"
+    ],
+    "start": "2026-10-11T11:12:36.924401+00:00",
+    "returncode": 0,
+    "end": "2026-10-11T11:14:34.377616+00:00"
+  },
+  {
+    "log": "prefill-pair-memcheck.log",
+    "command": [
+      "/usr/local/cuda/bin/compute-sanitizer",
+      "--tool",
+      "memcheck",
+      "--error-exitcode",
+      "99",
+      "--kernel-name",
+      "regex=fp4w_gemm_kernel.*Lb1E",
+      "--launch-count",
+      "7",
+      "build-pr95/qwen35_fp4_prefill_test"
+    ],
+    "start": "2026-10-11T11:14:34.378049+00:00",
+    "returncode": 0,
+    "end": "2026-10-11T11:14:38.787337+00:00"
+  },
+  {
+    "log": "prefill-pair-racecheck.log",
+    "command": [
+      "/usr/local/cuda/bin/compute-sanitizer",
+      "--tool",
+      "racecheck",
+      "--error-exitcode",
+      "99",
+      "--kernel-name",
+      "regex=fp4w_gemm_kernel.*Lb1E",
+      "--launch-count",
+      "7",
+      "build-pr95/qwen35_fp4_prefill_test"
+    ],
+    "start": "2026-10-11T11:14:38.787699+00:00",
+    "returncode": 0,
+    "end": "2026-10-11T11:14:43.528610+00:00"
+  },
+  {
+    "log": "prefill-pair-numerical-controller.log",
+    "command": [
+      "python3",
+      "/home/stephen/dgpp/pr95-followups-20261011/run_prefill_pair_numerical.py"
+    ],
+    "start": "2026-10-11T11:14:43.528940+00:00",
+    "returncode": 0,
+    "end": "2026-10-11T11:16:26.869001+00:00"
+  }
+]

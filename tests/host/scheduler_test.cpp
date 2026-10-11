@@ -175,10 +175,17 @@ class FakeEngine : public SchedulerEngine {
   void prefix_arm_hop(int req, int slot, int64_t position) override {
     require(live_.count(req) != 0, "fake: hop armed on an unopened slot");
     hop_armed_[req] = {slot, position};
+    hop_results_[req] = {PrefixHopStatus::kNone, slot, position};
+  }
+  PrefixHopResult take_prefix_hop_result(int req) override {
+    const auto result = hop_results_[req];
+    hop_results_.erase(req);
+    return result;
   }
   int step_tokens_max_ = 1;
   bool prefill_lookahead_ = false;
   std::map<int, std::pair<int, int64_t>> hop_armed_;
+  std::map<int, PrefixHopResult> hop_results_;
   int32_t prefill_cached(int req, const std::vector<int64_t>& prompt,
                          dgpp::sched::SchedulerEngine::PrefixPrefill* plan) override {
     require(plan != nullptr && plan->boundaries != nullptr, "fake: plan");
@@ -316,6 +323,7 @@ class FakeEngine : public SchedulerEngine {
     if (hop_armed_.count(req) != 0) {
       const auto [slot, position] = hop_armed_[req];
       hop_armed_.erase(req);
+      hop_results_[req].status = PrefixHopStatus::kNotTaken;
       if (out.size() >= 2) {
         require(position == live.prompt_tokens + static_cast<int64_t>(live.returned),
                 "fake: hop position " + std::to_string(position) +
@@ -323,6 +331,7 @@ class FakeEngine : public SchedulerEngine {
                     std::to_string(live.prompt_tokens + static_cast<int64_t>(live.returned)) + ")");
         if (pinned_.count(slot) != 0) pinned_.erase(slot);
         pin(slot, position);
+        hop_results_[req].status = PrefixHopStatus::kStored;
         ops_.push_back("H:" + std::to_string(req) + ":" + std::to_string(position) +
                        "@" + std::to_string(slot));
       }
@@ -347,6 +356,8 @@ class FakeEngine : public SchedulerEngine {
             "fake: close with no reservation on slot " +
                 std::to_string(req) + " (double close?)");
     live_.erase(req);
+    hop_armed_.erase(req);
+    hop_results_.erase(req);
     ops_.push_back("C:" + std::to_string(req));
   }
 
@@ -2574,6 +2585,7 @@ DGPP_TEST(scheduler_prefixCache_skippedHopNeverPublishesAnEmptyOrReplacedSlot) {
         // PrefixArena releases the old snapshot before attempting its
         // replacement. Model the full-pool return with the slot empty.
         prefix_release(it->second.first);
+        hop_results_[req].status = PrefixHopStatus::kNoBlock;
         hop_armed_.erase(it);
       }
       return FakeEngine::step(req);
@@ -2607,6 +2619,95 @@ DGPP_TEST(scheduler_prefixCache_skippedHopNeverPublishesAnEmptyOrReplacedSlot) {
             "the next request attaches to the valid prefill entry, not the skipped hop");
     require(sched.meters().prefix_snapshots == 2,
             "the returned rolling slot is reusable by the next prefill");
+  }
+}
+
+DGPP_TEST(scheduler_prefixCache_sampledFallbackPreservesOnlyThePreviousSnapshot) {
+  class FallbackEngine : public FakeEngine {
+   public:
+    explicit FallbackEngine(int64_t skip) : FakeEngine(1, 100, 64), skip_(skip) {}
+    std::vector<int32_t> step(int req) override {
+      const auto it = hop_armed_.find(req);
+      if (it != hop_armed_.end() && it->second.second == skip_) {
+        // The device accepted one row: no capture, the previous slot is
+        // untouched. Sampled host fallback then accepts another token.
+        hop_results_[req].status = PrefixHopStatus::kNotTaken;
+        hop_armed_.erase(it);
+      }
+      return FakeEngine::step(req);
+    }
+   private:
+    int64_t skip_;
+  };
+  for (int64_t skip : {24, 28}) {
+    FallbackEngine engine(skip);
+    engine.set_partial_pins(true);
+    engine.set_prefix_arena(4, 4);
+    engine.set_step_tokens_max(2);
+    const int cap = skip == 24 ? 6 : 8;
+    engine.arm_batches(0, 31, {{32, 33}, {34, 35}, {36, 37}, {38, 39}}, cap);
+    engine.arm(0, {41}, 1);
+    Scheduler sched(&engine, {kEos});
+    auto prompt = counted_prompt(21);
+    sched.submit(make_cached_request("fallback", prompt, {12}, cap));
+    sched.run_to_completion();
+    const auto m = sched.meters();
+    require(m.prefix_hops == (skip == 24 ? 0 : 1) && m.prefix_skipped_hop_fallback == 1 &&
+                m.prefix_skipped_no_block == 0 && m.prefix_skipped_hop_mismatch == 0,
+            "an untaken hop is not a successful hop or a pool failure");
+    require(m.prefix_close_entries == (skip == 24 ? 0 : 1),
+            "only an existing snapshot becomes a close entry");
+    require(engine.take_prefix_hop_result(0).status == SchedulerEngine::PrefixHopStatus::kNone,
+            "retired slots cannot return a stale outcome");
+    prompt.insert(prompt.end(), {31, 32, 33, 34, 35, 36, 37, 38, 39});
+    sched.submit(make_cached_request("reuse", prompt, {12, 24}, 1));
+    sched.run_to_completion();
+    require(sched.meters().prefix_tokens_saved == (skip == 24 ? 12 : 24),
+            "the next turn attaches to the known valid snapshot");
+  }
+}
+
+DGPP_TEST(scheduler_prefixCache_inconsistentHopOutcomesReleaseTheRollingSlot) {
+  class BrokenEngine : public FakeEngine {
+   public:
+    explicit BrokenEngine(int mode) : FakeEngine(1, 100, 64), mode_(mode) {}
+    std::vector<int32_t> step(int req) override {
+      const auto it = hop_armed_.find(req);
+      const int slot = it != hop_armed_.end() && it->second.second == 28 ? it->second.first : -1;
+      auto tokens = FakeEngine::step(req);
+      if (slot >= 0) {
+        switch (mode_) {
+          case 0: pinned_positions_[slot] = 26; break;  // stored at the wrong position
+          case 1: hop_results_[req].status = PrefixHopStatus::kNotTaken; break;  // slot changed anyway
+          case 2: hop_results_[req].status = PrefixHopStatus::kNoBlock; break;  // still filled
+          case 3: hop_results_[req] = {}; break;  // missing outcome
+          case 4: ++hop_results_[req].slot; break;  // another slot's outcome
+        }
+      }
+      return tokens;
+    }
+   private:
+    int mode_;
+  };
+  for (int mode = 0; mode < 5; ++mode) {
+    BrokenEngine engine(mode);
+    engine.set_partial_pins(true);
+    engine.set_prefix_arena(2, 4);
+    engine.set_step_tokens_max(2);
+    engine.arm_batches(0, 31, {{32, 33}, {34, 35}, {36, 37}, {38, 39}}, 8);
+    engine.arm(0, {41}, 1);
+    Scheduler sched(&engine, {kEos});
+    auto prompt = counted_prompt(21);
+    sched.submit(make_cached_request("bad", prompt, {12}, 8));
+    sched.run_to_completion();
+    require(sched.meters().prefix_hops == 1 && sched.meters().prefix_skipped_hop_mismatch == 1 &&
+                sched.meters().prefix_close_entries == 0 && engine.pinned_blocks() == 1,
+            "inconsistent metadata drops only the rolling snapshot without leaking blocks");
+    prompt.insert(prompt.end(), {31, 32, 33, 34, 35, 36, 37, 38, 39});
+    sched.submit(make_cached_request("reuse", prompt, {12, 24}, 1));
+    sched.run_to_completion();
+    require(sched.meters().prefix_tokens_saved == 12 && sched.meters().prefix_snapshots == 2,
+            "the surviving entry and the released arena slot remain usable");
   }
 }
 

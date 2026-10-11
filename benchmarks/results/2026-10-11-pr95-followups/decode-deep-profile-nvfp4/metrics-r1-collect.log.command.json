@@ -1,0 +1,11 @@
+{
+  "command": [
+    "scp",
+    "-q",
+    "stephen@192.168.88.12:/tmp/bus4/deployments/b0531e6a5c6970e1/metrics-r1.nsys-rep",
+    "/home/stephen/dgpp/pr95-followups-20261011/decode-deep-profile-nvfp4/metrics-r1.nsys-rep"
+  ],
+  "started": "2026-10-11T06:28:06.142174+00:00",
+  "returncode": 0,
+  "finished": "2026-10-11T06:28:06.561183+00:00"
+}

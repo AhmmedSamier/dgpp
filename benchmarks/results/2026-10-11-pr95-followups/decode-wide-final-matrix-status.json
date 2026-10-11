@@ -1,0 +1,131 @@
+[
+  {
+    "label": "decode-wide-final-w4-fp8a",
+    "command": [
+      "python3",
+      "/home/stephen/dgpp/pr95-followups-20261011/campaign.py",
+      "fp8",
+      "4",
+      "decode-wide-final-w4-fp8a",
+      "--final",
+      "--decode-context"
+    ],
+    "start": "2026-10-11T07:49:21.219723+00:00",
+    "returncode": 0,
+    "end": "2026-10-11T07:58:58.081428+00:00"
+  },
+  {
+    "label": "decode-wide-final-w4-nvfp4",
+    "command": [
+      "python3",
+      "/home/stephen/dgpp/pr95-followups-20261011/campaign.py",
+      "nvfp4",
+      "4",
+      "decode-wide-final-w4-nvfp4",
+      "--final",
+      "--decode-context"
+    ],
+    "start": "2026-10-11T07:58:58.081659+00:00",
+    "returncode": 0,
+    "end": "2026-10-11T08:07:45.114262+00:00"
+  },
+  {
+    "label": "decode-wide-final-w4-fp8b",
+    "command": [
+      "python3",
+      "/home/stephen/dgpp/pr95-followups-20261011/campaign.py",
+      "fp8",
+      "4",
+      "decode-wide-final-w4-fp8b",
+      "--final",
+      "--decode-context"
+    ],
+    "start": "2026-10-11T08:07:45.114536+00:00",
+    "returncode": 0,
+    "end": "2026-10-11T08:17:23.244781+00:00"
+  },
+  {
+    "label": "decode-wide-final-w1-fp8a",
+    "command": [
+      "python3",
+      "/home/stephen/dgpp/pr95-followups-20261011/campaign.py",
+      "fp8",
+      "1",
+      "decode-wide-final-w1-fp8a",
+      "--final"
+    ],
+    "start": "2026-10-11T08:17:23.244969+00:00",
+    "returncode": 0,
+    "end": "2026-10-11T08:33:09.959604+00:00"
+  },
+  {
+    "label": "decode-wide-final-w1-nvfp4",
+    "command": [
+      "python3",
+      "/home/stephen/dgpp/pr95-followups-20261011/campaign.py",
+      "nvfp4",
+      "1",
+      "decode-wide-final-w1-nvfp4",
+      "--final"
+    ],
+    "start": "2026-10-11T08:33:09.959895+00:00",
+    "returncode": 0,
+    "end": "2026-10-11T08:46:36.196322+00:00"
+  },
+  {
+    "label": "decode-wide-final-w1-fp8b",
+    "command": [
+      "python3",
+      "/home/stephen/dgpp/pr95-followups-20261011/campaign.py",
+      "fp8",
+      "1",
+      "decode-wide-final-w1-fp8b",
+      "--final"
+    ],
+    "start": "2026-10-11T08:46:36.196640+00:00",
+    "returncode": 0,
+    "end": "2026-10-11T09:02:23.538149+00:00"
+  },
+  {
+    "label": "decode-wide-final-w2-fp8a",
+    "command": [
+      "python3",
+      "/home/stephen/dgpp/pr95-followups-20261011/campaign.py",
+      "fp8",
+      "2",
+      "decode-wide-final-w2-fp8a",
+      "--final"
+    ],
+    "start": "2026-10-11T09:02:23.538404+00:00",
+    "returncode": 0,
+    "end": "2026-10-11T09:12:17.352060+00:00"
+  },
+  {
+    "label": "decode-wide-final-w2-nvfp4",
+    "command": [
+      "python3",
+      "/home/stephen/dgpp/pr95-followups-20261011/campaign.py",
+      "nvfp4",
+      "2",
+      "decode-wide-final-w2-nvfp4",
+      "--final"
+    ],
+    "start": "2026-10-11T09:12:17.352386+00:00",
+    "returncode": 0,
+    "end": "2026-10-11T09:21:06.750575+00:00"
+  },
+  {
+    "label": "decode-wide-final-w2-fp8b",
+    "command": [
+      "python3",
+      "/home/stephen/dgpp/pr95-followups-20261011/campaign.py",
+      "fp8",
+      "2",
+      "decode-wide-final-w2-fp8b",
+      "--final"
+    ],
+    "start": "2026-10-11T09:21:06.750992+00:00",
+    "returncode": 0,
+    "end": "2026-10-11T09:30:59.199144+00:00"
+  }
+]

@@ -4489,7 +4489,7 @@ DGPP_TEST(glm_tp_serving_mtp_depth3_graph_matches_plain_and_eager_feed) {
   run_mtp_depth_gate(3, 29934);
 }
 
-static void run_mtp_depth_sampling_gate(int depth, int port) {
+static void run_mtp_depth_sampling_gate(int depth, int port, bool prefix_cache = false) {
   const GlmTextConfig cfg = glm_tp_test_config();
   const std::string dir = "glm_tp_fixture";
   glm_tp_write_fixture(dir);
@@ -4497,7 +4497,7 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
   constexpr int kWorld = 2;
   constexpr int kSlots = 2;
   constexpr int kCap = 24;
-  const int max_tokens = static_cast<int>(prompt.size()) + 16;
+  const int max_tokens = static_cast<int>(prompt.size()) + (prefix_cache ? 72 : 16);
   dgpp::sample::Params params;
   params.temperature = 1.0f;
   params.top_p = 0.95f;
@@ -4509,7 +4509,9 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
     uint64_t seed;
   };
   // The solo seed accepts drafts after the capped candidate prefix falls back.
-  const std::vector<std::vector<Spec>> phases{{{"solo", 7, 814480}}, {{"a", 7, 11}, {"b", 6, 13}}};
+  const std::vector<std::vector<Spec>> phases = prefix_cache
+      ? std::vector<std::vector<Spec>>{{{"solo", 64, 814480}}, {{"a", 64, 11}, {"b", 61, 13}}}
+      : std::vector<std::vector<Spec>>{{{"solo", 7, 814480}}, {{"a", 7, 11}, {"b", 6, 13}}};
 
   std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, port);
   require(!buses.empty(), "tp bus world failed to start");
@@ -4517,6 +4519,8 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
   std::vector<std::vector<std::vector<int64_t>>> graph_seqs(kWorld);
   std::vector<uint64_t> fallbacks(kWorld, 0);
   std::vector<int> replays(kWorld, 0);
+  std::vector<uint64_t> prefix_digests(kWorld);
+  std::vector<int64_t> hop_fallbacks(kWorld);
   ConstructBarrier barrier(kWorld);
   std::vector<std::thread> workers;
   for (int r = 0; r < kWorld; ++r) {
@@ -4541,11 +4545,11 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
         GlmBusBoundaryReducer reducer(bus, test_wait_timeout_ms());
         // Both depths co-admit two requests. Depth 1 batches their verify;
         // depth 2 uses scalar graphs because GLM has no batched draft chain.
-        GlmDiagnosticModel eager(cfg, dir, max_tokens, 256, &reducer, r,
+        GlmDiagnosticModel eager(cfg, dir, max_tokens, prefix_cache ? 2048 : 256, &reducer, r,
                                  kWorld, GlmResidency::Streaming,
                                  GlmHeadSharding::VocabSharded, kSlots,
                                  /*mtp=*/true);
-        GlmDiagnosticModel graph(cfg, dir, max_tokens, 256, &reducer, r,
+        GlmDiagnosticModel graph(cfg, dir, max_tokens, prefix_cache ? 2048 : 256, &reducer, r,
                                  kWorld, GlmResidency::Resident,
                                  GlmHeadSharding::VocabSharded, kSlots,
                                  /*mtp=*/true);
@@ -4575,12 +4579,18 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
         dgpp::GlmGraphEngineAdapter engine(
             &graph, &bus, r, kWorld, scratch, cfg.vocab_size,
             test_wait_timeout_ms(), /*batch_min_live=*/kSlots, prefix_scratch,
-            gather_scratch, kCap, nullptr, /*prefix_slots=*/0, depth);
+            gather_scratch, kCap, nullptr, /*prefix_slots=*/prefix_cache ? 4 : 0, depth);
         if (!engine.supports_sampling() || engine.sampling_candidates() != kCap)
           throw std::runtime_error("the MTP graph engine did not arm the "
                                    "device sampler at the capped width");
         dgpp::sched::Scheduler sched(&engine, /*eos=*/{});
-        MtpSamplingTrace trace;
+        class HopTrace : public MtpSamplingTrace {
+         public:
+          int retained = 0;
+          void on_prefix(const std::string&, const char* op, int64_t position, int) override {
+            if (std::string(op) == "hop_fallback" && position >= 0) ++retained;
+          }
+        } trace;
         sched.set_observer(&trace);
 
         dgpp::sched::SchedulerEngine::MtpAcceptance expected;
@@ -4691,6 +4701,17 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
         require((batch.replays_by_slots[kSlots] > 0) == (depth == 1),
                 "depth 1 batches; depth 2 is the true scalar co-admission control");
         fallbacks[static_cast<size_t>(r)] = engine.fallbacks();
+        if (prefix_cache) {
+          const auto m = sched.meters();
+          require(trace.retained > 0 && m.prefix_skipped_hop_fallback > 0,
+                  "must retain an old snapshot when row-zero fallback accepts another token");
+          require(m.prefix_skipped_hop_mismatch == 0 && m.prefix_skipped_no_block == 0,
+                  "normal fallback is neither corruption nor pool exhaustion");
+          prefix_digests[r] = sched.prefix_digest();
+          hop_fallbacks[r] = m.prefix_skipped_hop_fallback;
+          DGPP_LOG_INFO("prefix hop sampling depth {} rank {}: {} fallback skips, {} old snapshots retained",
+                        depth, r, m.prefix_skipped_hop_fallback, trace.retained);
+        }
         release();
       } catch (const std::exception& e) {
         release();
@@ -4707,6 +4728,8 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
   for (int r = 1; r < kWorld; ++r) {
     require(graph_seqs[static_cast<size_t>(r)] == graph_seqs[0],
             "MTP graph sampling transcripts differ across ranks");
+    require(prefix_digests[r] == prefix_digests[0] && hop_fallbacks[r] == hop_fallbacks[0],
+            "prefix outcomes differ across ranks");
     require(fallbacks[static_cast<size_t>(r)] == fallbacks[0],
             "fallback counts differ across ranks");
   }
@@ -4714,6 +4737,14 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
   DGPP_LOG_INFO("MTP graph sampling at depth {} w2: {} replays, {} fallbacks; "
                 "transcripts == the eager sampled speculator's on every rank",
                 depth, replays[0], fallbacks[0]);
+}
+
+DGPP_TEST(glm_tp_prefix_hop_sampled_fallback_depth1) {
+  run_mtp_depth_sampling_gate(1, 30011, true);
+}
+
+DGPP_TEST(glm_tp_prefix_hop_sampled_fallback_depth2) {
+  run_mtp_depth_sampling_gate(2, 30012, true);
 }
 
 DGPP_TEST(glm_tp_serving_mtp_depth1_graph_sampling_counts_fallback) {

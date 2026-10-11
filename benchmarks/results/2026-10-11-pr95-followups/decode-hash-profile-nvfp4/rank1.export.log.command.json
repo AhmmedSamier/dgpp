@@ -1,0 +1,15 @@
+{
+  "command": [
+    "/usr/local/cuda/bin/nsys",
+    "export",
+    "--type",
+    "sqlite",
+    "--force-overwrite=true",
+    "-o",
+    "/home/stephen/dgpp/pr95-followups-20261011/decode-hash-profile-nvfp4/rank1.sqlite",
+    "/home/stephen/dgpp/pr95-followups-20261011/decode-hash-profile-nvfp4/rank1.nsys-rep"
+  ],
+  "started": "2026-10-11T07:49:01.702039+00:00",
+  "returncode": 0,
+  "finished": "2026-10-11T07:49:03.585127+00:00"
+}

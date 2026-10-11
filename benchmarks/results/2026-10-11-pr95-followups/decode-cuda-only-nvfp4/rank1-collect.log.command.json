@@ -1,0 +1,11 @@
+{
+  "command": [
+    "scp",
+    "-q",
+    "stephen@192.168.88.12:/tmp/bus4/deployments/088a6a5a0224a76f/rank1.nsys-rep",
+    "/home/stephen/dgpp/pr95-followups-20261011/decode-cuda-only-nvfp4/rank1.nsys-rep"
+  ],
+  "started": "2026-10-11T06:33:43.071543+00:00",
+  "returncode": 0,
+  "finished": "2026-10-11T06:33:43.589815+00:00"
+}

@@ -146,6 +146,12 @@ class SchedulerEngine {
     // (r+1)-th candidate, miss_rank[kMissRanks] those outside the list.
     static constexpr int kMissRanks = 16;
     uint64_t miss_rank[kMissRanks + 1] = {};
+    // Context-lookup drafting (engine.lookup_draft): steps whose drafts a
+    // prompt-history match replaced (engine-wide since construction), of
+    // which agree_fused took a below-strong match on device-pick agreement.
+    uint64_t lookup_fused = 0;
+    uint64_t lookup_agree_fused = 0;
+    uint64_t lookup_sampled_fused = 0;
   };
   // Last launched decode graph, retained while idle; counters since startup.
   struct DecodeBatchStats {
@@ -245,14 +251,26 @@ class SchedulerEngine {
   // commit past `position` (= its committed count + 1, pool-aligned) without
   // stopping there; if it commits two tokens, the engine attempts to save the state
   // after the step's first row — the state at `position` — into arena slot
-  // `slot` before returning from that step (check prefix_position afterwards).
-  // A one-token step lands ON the
-  // position and the scheduler's rolling snapshot follows at the next tick.
+  // `slot` before returning from that step. Capture is decided before sampled
+  // fallback: the final token count does NOT say whether it happened.
   // The arm holds until the slot's next step (or its close).
+  enum class PrefixHopStatus { kNone, kNotTaken, kStored, kNoBlock };
+  struct PrefixHopResult {
+    PrefixHopStatus status = PrefixHopStatus::kNone;
+    int slot = -1;
+    int64_t position = -1;  // the armed position, not an older stored position
+  };
   virtual void prefix_arm_hop(int req, int slot, int64_t position) {
     (void)req;
     (void)slot;
     (void)position;
+  }
+  // Consume the last armed step's outcome. kNotTaken leaves the arena
+  // untouched; kNoBlock releases any previous snapshot and leaves it empty.
+  // Arming and closing clear previous outcomes; kNone means no result.
+  virtual PrefixHopResult take_prefix_hop_result(int req) {
+    (void)req;
+    return {};
   }
   // The position actually stored in an arena slot, or -1 if it is empty.
   // A multi-token step may skip its armed hop when the cache pool is full;
@@ -511,6 +529,8 @@ class Scheduler {
     int64_t prefix_duplicates = 0;
     int64_t prefix_skipped = 0;
     int64_t prefix_skipped_no_block = 0;
+    int64_t prefix_skipped_hop_fallback = 0;
+    int64_t prefix_skipped_hop_mismatch = 0;
     int64_t prefix_skipped_image_bytes = 0;
     int64_t prefix_image_bytes = 0;
     int64_t prefix_blocks_pinned = 0;
@@ -853,9 +873,13 @@ class SchedulerObserver {
   // an entry at `position`, arena `slot`), "snapshot" (an entry taken at a
   // prefill cut), "rolling" (a live request's rolling snapshot), "close"
   // (a rolling snapshot became an entry at retire), "evict" (an entry
-  // freed; `id` is the request whose admission needed the slot or blocks)
-  // or "drop" (a rolling slot released without becoming an entry). Rank-
-  // identical state: the op stream records every one.
+  // freed; `id` is the request whose admission needed the slot or blocks),
+  // "drop" (a rolling slot released without becoming an entry), "hop"
+  // (a snapshot captured inside an MTP step), "hop_fallback" (capture was
+  // skipped before sampled fallback passed the hop; `position` is the old
+  // snapshot or -1), or "hop_mismatch" (inconsistent snapshot dropped;
+  // `position` is what the arena reported). Rank-identical state: the op
+  // stream records every one.
   virtual void on_prefix(const std::string& id, const char* op,
                          int64_t position, int slot) {
     (void)id;

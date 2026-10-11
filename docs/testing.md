@@ -10,6 +10,19 @@ propagation of non-pool errors. Build it with `qwen_forward_test` and
 including replacements of older snapshots, and that skipped prefill slots and
 the `skipped_no_block` counter are handled correctly.
 
+The sampled-fallback hop regression (#103) runs with
+`DGPP_TEST_FILTER=prefix_hop_sampled_fallback` in `glm_tp_test` (MTP depths
+1 and 2) and `qwen_engine_test` (depths 1 and 3). These are two-rank GPU
+tests: GLM checks the exact eager sampled oracle and requires an older
+snapshot to survive a skipped capture; Qwen compares growing conversations
+with the cache disabled and enabled at matching prefill cuts, including
+concurrent requests, retirement and slot reuse. Both require the skipped-hop
+event to occur and the ranks' prefix decisions to agree. Run GLM with
+`DGPP_PIPELINE=0` as well
+to cover the synchronous path. `scheduler_test` covers first-hop skips,
+preserved older snapshots and their later attachment, failed replacements,
+and inconsistent or missing outcomes releasing the rolling slot.
+
 The long-document prefix-cache regression is covered by `scheduler_test`
 (changed tails, lookahead identity, small arenas and cleanup), `qwen_decode_test`
 and `glm_tp_test` (two snapshots, resumed target/draft logits and budget changes).

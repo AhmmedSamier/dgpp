@@ -1956,6 +1956,73 @@ DGPP_TEST(moe_grouped_mma_fp4_is_bitwise_the_dense_form_per_segment) {
   }
 }
 
+DGPP_TEST(dense_nvfp4_decode_pair_is_bitwise_the_reference) {
+  // Ragged output tiles, the actual TP1/2/4 shapes, dispatch boundaries,
+  // and unaligned activation rows. Gate and up have independent weights
+  // and globals; sentinels catch stores into inactive rows or past n.
+  constexpr int max_rows = 17;
+  for (auto [H, I] : std::vector<std::pair<int, int>>{{128, 144},
+                                                      {384, 208},
+                                                      {5120, 4352},
+                                                      {4352, 5120},
+                                                      {5120, 8704},
+                                                      {5120, 17408},
+                                                      {128, 17536},
+                                                      {208, 320}}) {
+    SmallCase c = make_small_case(1, H, I, 1, max_rows, 0xF4DEC0DE + H + I, true);
+    c.alloc();
+    dgpp::MoeSegment* seg = nullptr;
+    dgpp::MoeExpertView* views = nullptr;
+    DGPP_CUDA_OK(cudaMallocManaged(&seg, sizeof(*seg)));
+    DGPP_CUDA_OK(cudaMallocManaged(&views, 3 * sizeof(*views)));
+    for (int i = 0; i < 3; ++i) views[i] = dgpp::MoeExpertView::of(c.expert_mats_fp4[i]);
+    const size_t count = static_cast<size_t>(max_rows) * std::max(H, I) + 32;
+    uint16_t *gate = nullptr, *up = nullptr, *ref = nullptr, *unaligned = nullptr;
+    for (auto** p : {&gate, &up, &ref}) DGPP_CUDA_OK(cudaMallocManaged(p, count * 2));
+    const size_t stride = static_cast<size_t>(std::max(H, I)) + 3;
+    DGPP_CUDA_OK(cudaMallocManaged(&unaligned, (max_rows * stride + 1) * 2));
+    Rng rng(0xA114F4);
+    for (size_t i = 0; i < max_rows * stride + 1; ++i)
+      unaligned[i] = float_to_bf16_bits(static_cast<float>(rng.unit()) - 0.5f);
+    for (const int rows : {1, 4, 8, 15, 16, 17}) {
+      *seg = dgpp::MoeSegment{0, rows, 0};
+      for (const bool padded : {false, true}) {
+        const uint16_t* act = padded ? unaligned + 1 : c.d_hidden;
+        const size_t act_stride = padded ? stride : H;
+        for (auto* p : {gate, up, ref}) std::fill(p, p + count, uint16_t{0xA55A});
+        dgpp::launch_dense_mma_fp4_gate_up_bf16(act, act_stride, seg, views, gate + 1, up + 1, rows,
+                                                I, H, nullptr);
+        for (const int which : {0, 1}) {
+          dgpp::launch_moe_grouped_mma_fp4_ref_bf16(act, act_stride, seg, 1, rows, 0, views, which,
+                                                    ref + 1, I, I, H, nullptr);
+          DGPP_CUDA_OK(cudaDeviceSynchronize());
+          require(std::memcmp(which == 0 ? gate : up, ref, count * 2) == 0,
+                  "paired dense NVFP4 projection and sentinels are bitwise reference");
+        }
+        // The public single-projection dispatch must use the same chain.
+        std::fill(ref, ref + count, uint16_t{0xA55A});
+        dgpp::launch_dense_mma_fp4_prod_bf16(act, act_stride, seg, views, 0, ref + 1, rows, I, H,
+                                             nullptr);
+        DGPP_CUDA_OK(cudaDeviceSynchronize());
+        require(std::memcmp(gate, ref, count * 2) == 0,
+                "single and paired dense NVFP4 launches are bitwise");
+      }
+      for (auto* p : {gate, ref}) std::fill(p, p + count, uint16_t{0xA55A});
+      dgpp::launch_dense_mma_fp4_prod_bf16(unaligned + 1, stride, seg, views, 2, gate + 1, rows, H,
+                                           I, nullptr);
+      dgpp::launch_moe_grouped_mma_fp4_ref_bf16(unaligned + 1, stride, seg, 1, rows, 0, views, 2,
+                                                ref + 1, H, H, I, nullptr);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      require(std::memcmp(gate, ref, count * 2) == 0,
+              "dense NVFP4 down projection and sentinels are bitwise reference");
+    }
+    for (auto* p : {gate, up, ref, unaligned}) DGPP_CUDA_OK(cudaFree(p));
+    DGPP_CUDA_OK(cudaFree(seg));
+    DGPP_CUDA_OK(cudaFree(views));
+    c.free_all();
+  }
+}
+
 DGPP_TEST(moe_expert_path_mma_matches_oracle_small_geometry_nvfp4) {
   // The prefill's fp4 tensor-core kernel through the whole layer against
   // the double oracle (gate 4), within the expert-path budget and bitwise

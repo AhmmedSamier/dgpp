@@ -1,0 +1,18 @@
+[
+  "sudo",
+  "-n",
+  "/usr/local/cuda/bin/nsys",
+  "profile",
+  "--sample=system-wide",
+  "--gpu-metrics-devices=all",
+  "--gpu-metrics-set=gb20b",
+  "--gpu-metrics-frequency=10000",
+  "-t",
+  "none",
+  "--duration=24",
+  "--force-overwrite=true",
+  "-o",
+  "/home/stephen/dgpp/pr95-followups-20261011/decode-deep-profile-nvfp4/metrics-r0",
+  "/usr/bin/sleep",
+  "24"
+]
