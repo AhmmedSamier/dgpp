@@ -1,0 +1,16 @@
+{
+  "command": [
+    "python3",
+    "scripts/dgpp-cluster",
+    "up",
+    "--config",
+    "/home/stephen/dgpp/pr95-followups-20261011/decode-metrics-only-fp8/deployment.json",
+    "--bin",
+    "/home/stephen/dgpp/pr95-followups-20261011/dgpp-serve-decode-final",
+    "--log-dir",
+    "/home/stephen/dgpp/pr95-followups-20261011/decode-metrics-only-fp8/world"
+  ],
+  "started": "2026-10-11T06:47:00.217737+00:00",
+  "returncode": 0,
+  "finished": "2026-10-11T06:47:25.554058+00:00"
+}

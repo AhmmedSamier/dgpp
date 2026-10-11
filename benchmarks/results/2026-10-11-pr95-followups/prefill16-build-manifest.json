@@ -1,0 +1,13 @@
+{
+  "date": "2026-10-11T10:00:23.103158+00:00",
+  "source_commit": "f5a517c1bdd57e1988ff04f546063978178635d2",
+  "binary_sha256": "005c0242b8c7d5aba5330ab17dd8cfd6380a6840313763a93ebc906e725e66f0",
+  "runtime_source_clean": true,
+  "build_type": "Release",
+  "cuda": "13.0.88",
+  "tests_passed": 25,
+  "memcheck_errors": 0,
+  "racecheck_hazards": 0,
+  "sanitizer_scope": "First nine launches matching fp4w_gemm_kernel.*Li32E: sparse ragged/full tiles and all six output stride/alignment layouts. Entire test executable also completes.",
+  "note": "Only the TP2 long-prefill specialization and thread-safe host attribute initialization changed since d12e7e9f; documentation remains in progress."
+}

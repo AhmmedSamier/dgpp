@@ -1,0 +1,4 @@
+========= COMPUTE-SANITIZER
+[ OK ] dense_nvfp4_decode_pair_is_bitwise_the_reference
+1 tests, 0 failed
+========= ERROR SUMMARY: 0 errors

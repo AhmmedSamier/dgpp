@@ -292,6 +292,43 @@ __device__ inline void block_copy_row(const uint32_t* src, uint32_t* dst,
   }
 }
 
+// Snapshot and compute the placement hash from the same device reads. The
+// engine can post the ready row without scanning its pinned bytes on the CPU.
+// `words` counts u32s; bus_fold64 hashes only the complete u64 words.
+template <int Threads>
+__device__ inline uint64_t block_copy_row_hash(const uint32_t* src, uint32_t* dst, uint32_t words,
+                                               uint64_t* s_hash) {
+  uint64_t h = 0;
+  if ((words & 3) == 0 && aligned16(src) && aligned16(dst)) {
+    for (uint32_t j = threadIdx.x; j < words / 4; j += Threads) {
+      const uint4 v = reinterpret_cast<const uint4*>(src)[j];
+      reinterpret_cast<uint4*>(dst)[j] = v;
+      const uint64_t w0 = static_cast<uint64_t>(v.x) | (static_cast<uint64_t>(v.y) << 32);
+      const uint64_t w1 = static_cast<uint64_t>(v.z) | (static_cast<uint64_t>(v.w) << 32);
+      h ^= (w0 + 2 * j + 1) * kFoldMultiplier;
+      h ^= (w1 + 2 * j + 2) * kFoldMultiplier;
+    }
+  } else {
+    for (uint32_t j = threadIdx.x; j < (words + 1) / 2; j += Threads) {
+      const uint32_t lo = src[2 * j];
+      dst[2 * j] = lo;
+      if (2 * j + 1 < words) {
+        const uint32_t hi = src[2 * j + 1];
+        dst[2 * j + 1] = hi;
+        h ^= ((static_cast<uint64_t>(hi) << 32 | lo) + j + 1) * kFoldMultiplier;
+      }
+    }
+  }
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) h ^= __shfl_xor_sync(0xffffffffu, h, o);
+  if ((threadIdx.x & 31) == 0) s_hash[threadIdx.x / 32] = h;
+  __syncthreads();
+  uint64_t total = 0;
+#pragma unroll
+  for (int w = 0; w < Threads / 32; ++w) total ^= s_hash[w];
+  return total;
+}
+
 // The canonical fold: dst[i] = bf16(((0 + v_0[i]) + v_1[i]) + ...) over
 // global ranks in ascending order, fp32 — every rank computes the same
 // chain, so all destinations agree bitwise (and the host oracle computes
@@ -890,13 +927,14 @@ __global__ __launch_bounds__(Threads) void bus_allreduce_graph_kernel(
   // Same contract as the eager kernel's phase 1: the fold overwrites src
   // in place, so the row holds a copy taken BEFORE the fold.
   const uint32_t words = elems / 2;
-  block_copy_row<Threads>(reinterpret_cast<const uint32_t*>(src),
-                 reinterpret_cast<uint32_t*>(
-                     const_cast<uint16_t*>(v.stage_row_base + row_off)),
-                 words);
+  const uint64_t stage_hash = block_copy_row_hash<Threads>(
+      reinterpret_cast<const uint32_t*>(src),
+      reinterpret_cast<uint32_t*>(const_cast<uint16_t*>(v.stage_row_base + row_off)), words,
+      s_hash);
   __threadfence_system();
   __syncthreads();
   if (threadIdx.x == 0) {
+    ctl->stage_hash = stage_hash;
     ctl->stamp_stage = clock64();
     ctl->gt_stage = globaltimer_ns();
     SysRef ready(ctl->ready_bits);

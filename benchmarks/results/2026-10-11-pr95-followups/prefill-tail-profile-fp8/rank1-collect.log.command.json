@@ -1,0 +1,11 @@
+{
+  "command": [
+    "scp",
+    "-q",
+    "stephen@192.168.88.12:/tmp/bus4/deployments/782e32a7dd1f8857/rank1.nsys-rep",
+    "/home/stephen/dgpp/pr95-followups-20261011/prefill-tail-profile-fp8/rank1.nsys-rep"
+  ],
+  "started": "2026-10-11T10:13:43.239223+00:00",
+  "returncode": 0,
+  "finished": "2026-10-11T10:13:43.708001+00:00"
+}

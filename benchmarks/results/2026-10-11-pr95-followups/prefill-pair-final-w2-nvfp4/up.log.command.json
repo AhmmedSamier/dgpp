@@ -1,0 +1,16 @@
+{
+  "command": [
+    "python3",
+    "scripts/dgpp-cluster",
+    "up",
+    "--config",
+    "/home/stephen/dgpp/pr95-followups-20261011/prefill-pair-final-w2-nvfp4/deployment.json",
+    "--bin",
+    "/home/stephen/dgpp/pr95-followups-20261011/dgpp-serve-prefill-pair-final",
+    "--log-dir",
+    "/home/stephen/dgpp/pr95-followups-20261011/prefill-pair-final-w2-nvfp4/world"
+  ],
+  "started": "2026-10-11T11:24:30.021659+00:00",
+  "returncode": 0,
+  "finished": "2026-10-11T11:24:49.553507+00:00"
+}

@@ -1,0 +1,21 @@
+{
+  "command": [
+    "python3",
+    "scripts/timed_load.py",
+    "127.0.0.1",
+    "18081",
+    "--concurrency",
+    "1",
+    "--classes",
+    "prose",
+    "--max-tokens",
+    "256",
+    "--repeat",
+    "3",
+    "--json-out",
+    "/home/stephen/dgpp/pr95-followups-20261011/prefill-pair-final-w4-nvfp4/decode.json"
+  ],
+  "started": "2026-10-11T11:48:22.377348+00:00",
+  "returncode": 0,
+  "finished": "2026-10-11T11:48:35.999572+00:00"
+}

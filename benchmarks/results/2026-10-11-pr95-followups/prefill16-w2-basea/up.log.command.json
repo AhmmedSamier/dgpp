@@ -1,0 +1,16 @@
+{
+  "command": [
+    "python3",
+    "scripts/dgpp-cluster",
+    "up",
+    "--config",
+    "/home/stephen/dgpp/pr95-followups-20261011/prefill16-w2-basea/deployment.json",
+    "--bin",
+    "/home/stephen/dgpp/pr95-followups-20261011/dgpp-serve-release-final",
+    "--log-dir",
+    "/home/stephen/dgpp/pr95-followups-20261011/prefill16-w2-basea/world"
+  ],
+  "started": "2026-10-11T09:45:01.095159+00:00",
+  "returncode": 0,
+  "finished": "2026-10-11T09:45:22.590130+00:00"
+}

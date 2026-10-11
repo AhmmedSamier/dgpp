@@ -1,0 +1,5 @@
+[
+  "ssh",
+  "stephen@192.168.88.14",
+  "sudo -n /usr/local/cuda/bin/nsys profile --sample=system-wide --sampling-period=16000000 --gpu-metrics-devices=all --gpu-metrics-set=gb20b --gpu-metrics-frequency=1000 -t none --duration=24 --force-overwrite=true -o /tmp/bus4/deployments/4f17fa4eacc3234f/metrics-only-r3 /usr/bin/sleep 24"
+]

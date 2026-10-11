@@ -1667,6 +1667,64 @@ void scenario_allreduce_graph() {
   DGPP_LOG_INFO("scenario allreduce_graph: {} total failures", g_failures);
 }
 
+void scenario_graph_snapshot_hash() {
+  // Independent CPU hash oracle, including u32 tails, non-vector-aligned
+  // sources, staging-ring wrap, and all three graph block sizes. No fabric
+  // is needed to exercise the producer's snapshot/publication contract.
+  using dgpp::net::BusAllReduceCtl;
+  using dgpp::net::BusAllReduceGraphView;
+  for (const uint32_t elems : {2u, 4u, 6u, 8u, 510u, 5120u, 20480u, 40960u, 65536u}) {
+    for (const uint32_t offset : {0u, 2u}) {
+      uint16_t* device = nullptr;
+      uint16_t* stage = nullptr;
+      BusAllReduceCtl* cell = nullptr;
+      const uint32_t row_bytes = (elems * 2 + 63) / 64 * 64;
+      if (cudaMalloc(&device, (elems + offset) * 2) != cudaSuccess ||
+          cudaMallocHost(&stage, row_bytes * 2) != cudaSuccess ||
+          cudaMallocHost(&cell, sizeof(*cell)) != cudaSuccess) {
+        CHECK(false, "snapshot hash allocation failed");
+        cudaFree(device);
+        cudaFreeHost(stage);
+        cudaFreeHost(cell);
+        return;
+      }
+      BusAllReduceGraphView view{};
+      view.stage_row_base = stage;
+      view.stage_ring = 2;
+      view.stage_row_bytes = row_bytes;
+      for (uint64_t gen = 1; gen <= 3; ++gen) {
+        std::vector<uint16_t> source(elems);
+        for (uint32_t i = 0; i < elems; ++i)
+          source[i] = static_cast<uint16_t>(0x3800 + ((i * 73 + gen * 101) & 0x7ff));
+        std::vector<uint64_t> words(elems / 4);
+        if (!words.empty())
+          std::memcpy(words.data(), source.data(), words.size() * sizeof(uint64_t));
+        const uint64_t want = dgpp::net::bus_fold64(words.data(), words.size());
+        *cell = {};
+        cell->gen_seq = gen;
+        cell->stage_hash = ~want;
+        CHECK(cudaMemcpy(device + offset, source.data(), elems * 2, cudaMemcpyHostToDevice) ==
+                  cudaSuccess,
+              "snapshot hash source upload failed");
+        auto* src = reinterpret_cast<__nv_bfloat16*>(device + offset);
+        CHECK(dgpp::net::launch_bus_allreduce_graph(view, 0, src, src, elems, cell,
+                                                    dgpp::net::bus_consumer_deadline_cycles(5),
+                                                    nullptr) == cudaSuccess,
+              "snapshot hash kernel launch failed");
+        CHECK(cudaDeviceSynchronize() == cudaSuccess, "snapshot hash kernel failed");
+        CHECK(cell->done_seq == gen && cell->status == 0, "snapshot hash did not complete");
+        CHECK(cell->stage_hash == want, "snapshot hash differs from CPU bus_fold64");
+        CHECK(std::memcmp(stage + ((gen - 1) % 2) * row_bytes / 2, source.data(), elems * 2) == 0,
+              "snapshot bytes differ from source");
+      }
+      cudaFree(device);
+      cudaFreeHost(stage);
+      cudaFreeHost(cell);
+    }
+  }
+  DGPP_LOG_INFO("scenario graph_snapshot_hash: {} total failures", g_failures);
+}
+
 void scenario_allreduce_graph_rows() {
   // Staged and unstaged folds, both sides of the wider-block thresholds,
   // a non-vector-aligned row, and DeepSeek's 30-row hidden/Engram shapes.
@@ -2079,6 +2137,9 @@ int main() {
   // DGPP_TEST_FILTER=world_of_one: the world-of-one gate alone (no lanes,
   // no loopback fabric needed).
   if (const char* f = std::getenv("DGPP_TEST_FILTER"); f && std::string(f) == "world_of_one")
+    return g_failures == 0 ? 0 : 1;
+  scenario_graph_snapshot_hash();
+  if (const char* f = std::getenv("DGPP_TEST_FILTER"); f && std::string(f) == "graph_snapshot_hash")
     return g_failures == 0 ? 0 : 1;
   if (const char* f = std::getenv("DGPP_TEST_FILTER");
       f && std::string(f) == "allreduce_graph_rows") {

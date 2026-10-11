@@ -1,0 +1,16 @@
+{
+  "command": [
+    "python3",
+    "scripts/dgpp-cluster",
+    "up",
+    "--config",
+    "/home/stephen/dgpp/pr95-followups-20261011/prefill16-w2-candidate/deployment.json",
+    "--bin",
+    "/home/stephen/dgpp/pr95-followups-20261011/dgpp-serve-prefill16-trial",
+    "--log-dir",
+    "/home/stephen/dgpp/pr95-followups-20261011/prefill16-w2-candidate/world"
+  ],
+  "started": "2026-10-11T09:47:04.417169+00:00",
+  "returncode": 0,
+  "finished": "2026-10-11T09:47:24.047652+00:00"
+}

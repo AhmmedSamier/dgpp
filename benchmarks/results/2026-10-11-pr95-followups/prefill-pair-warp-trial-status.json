@@ -1,0 +1,44 @@
+[
+  {
+    "label": "prefill-pair-warp-w2-basea",
+    "start": "2026-10-11T11:04:02.940851+00:00",
+    "command": [
+      "python3",
+      "/home/stephen/dgpp/pr95-followups-20261011/campaign.py",
+      "nvfp4",
+      "2",
+      "prefill-pair-warp-w2-basea",
+      "--prefill-only"
+    ],
+    "returncode": 0,
+    "end": "2026-10-11T11:06:03.867023+00:00"
+  },
+  {
+    "label": "prefill-pair-warp-w2-candidate",
+    "start": "2026-10-11T11:06:03.867309+00:00",
+    "command": [
+      "python3",
+      "/home/stephen/dgpp/pr95-followups-20261011/campaign.py",
+      "nvfp4",
+      "2",
+      "prefill-pair-warp-w2-candidate",
+      "--prefill-only"
+    ],
+    "returncode": 0,
+    "end": "2026-10-11T11:08:04.027000+00:00"
+  },
+  {
+    "label": "prefill-pair-warp-w2-baseb",
+    "start": "2026-10-11T11:08:04.027324+00:00",
+    "command": [
+      "python3",
+      "/home/stephen/dgpp/pr95-followups-20261011/campaign.py",
+      "nvfp4",
+      "2",
+      "prefill-pair-warp-w2-baseb",
+      "--prefill-only"
+    ],
+    "returncode": 0,
+    "end": "2026-10-11T11:10:05.908403+00:00"
+  }
+]

@@ -1,0 +1,18 @@
+{
+  "command": [
+    "python3",
+    "/home/stephen/dgpp/pr95-followups-20261011/prefill_tail_cluster.py",
+    "up",
+    "--config",
+    "/home/stephen/dgpp/pr95-followups-20261011/prefill-tail-profile-nvfp4/deployment.json",
+    "--bin",
+    "/home/stephen/dgpp/pr95-followups-20261011/dgpp-serve-prefill-final",
+    "--log-dir",
+    "/home/stephen/dgpp/pr95-followups-20261011/prefill-tail-profile-nvfp4/world",
+    "--head-wrap",
+    "/usr/local/cuda/bin/nsys profile -t cuda --sample=none --cuda-graph-trace=node --force-overwrite=true -o /home/stephen/dgpp/pr95-followups-20261011/prefill-tail-profile-nvfp4/rank0"
+  ],
+  "started": "2026-10-11T10:13:46.861336+00:00",
+  "returncode": 0,
+  "finished": "2026-10-11T10:14:08.347326+00:00"
+}

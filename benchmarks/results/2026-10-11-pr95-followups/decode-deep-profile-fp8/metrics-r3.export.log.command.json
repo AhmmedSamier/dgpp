@@ -1,0 +1,15 @@
+{
+  "command": [
+    "/usr/local/cuda/bin/nsys",
+    "export",
+    "--type",
+    "sqlite",
+    "--force-overwrite=true",
+    "-o",
+    "/home/stephen/dgpp/pr95-followups-20261011/decode-deep-profile-fp8/metrics-r3.sqlite",
+    "/home/stephen/dgpp/pr95-followups-20261011/decode-deep-profile-fp8/metrics-r3.nsys-rep"
+  ],
+  "started": "2026-10-11T06:26:26.228843+00:00",
+  "returncode": 0,
+  "finished": "2026-10-11T06:26:28.014568+00:00"
+}

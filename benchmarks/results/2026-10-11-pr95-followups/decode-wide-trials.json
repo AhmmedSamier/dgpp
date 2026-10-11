@@ -1,0 +1,122 @@
+[
+  {
+    "label": "decode-wide-probe-w1-basea",
+    "returncode": 0,
+    "rates": [
+      21.369311991955083,
+      21.353028361845904,
+      21.28974084958589
+    ],
+    "steps": [
+      104,
+      104,
+      104
+    ],
+    "median": 21.353028361845904,
+    "text_sha256": [
+      "ce182dea25af6d4cdae2d1591c04b6ab2afde2e278d228c3a722854f1e1f2eb6",
+      "ce182dea25af6d4cdae2d1591c04b6ab2afde2e278d228c3a722854f1e1f2eb6",
+      "ce182dea25af6d4cdae2d1591c04b6ab2afde2e278d228c3a722854f1e1f2eb6"
+    ]
+  },
+  {
+    "label": "decode-wide-probe-w1-wide",
+    "returncode": 0,
+    "rates": [
+      21.962878429008224,
+      21.950589653094603,
+      21.94360064367896
+    ],
+    "steps": [
+      104,
+      104,
+      104
+    ],
+    "median": 21.950589653094603,
+    "text_sha256": [
+      "ce182dea25af6d4cdae2d1591c04b6ab2afde2e278d228c3a722854f1e1f2eb6",
+      "ce182dea25af6d4cdae2d1591c04b6ab2afde2e278d228c3a722854f1e1f2eb6",
+      "ce182dea25af6d4cdae2d1591c04b6ab2afde2e278d228c3a722854f1e1f2eb6"
+    ]
+  },
+  {
+    "label": "decode-wide-probe-w1-baseb",
+    "returncode": 0,
+    "rates": [
+      21.253010843202787,
+      21.277128338631755,
+      21.246812978053292
+    ],
+    "steps": [
+      104,
+      104,
+      104
+    ],
+    "median": 21.253010843202787,
+    "text_sha256": [
+      "ce182dea25af6d4cdae2d1591c04b6ab2afde2e278d228c3a722854f1e1f2eb6",
+      "ce182dea25af6d4cdae2d1591c04b6ab2afde2e278d228c3a722854f1e1f2eb6",
+      "ce182dea25af6d4cdae2d1591c04b6ab2afde2e278d228c3a722854f1e1f2eb6"
+    ]
+  },
+  {
+    "label": "decode-wide-probe-w2-basea",
+    "returncode": 0,
+    "rates": [
+      36.68431349982736,
+      36.644249008449734,
+      36.67587159130134
+    ],
+    "steps": [
+      105,
+      105,
+      105
+    ],
+    "median": 36.67587159130134,
+    "text_sha256": [
+      "ce182dea25af6d4cdae2d1591c04b6ab2afde2e278d228c3a722854f1e1f2eb6",
+      "ce182dea25af6d4cdae2d1591c04b6ab2afde2e278d228c3a722854f1e1f2eb6",
+      "ce182dea25af6d4cdae2d1591c04b6ab2afde2e278d228c3a722854f1e1f2eb6"
+    ]
+  },
+  {
+    "label": "decode-wide-probe-w2-wide",
+    "returncode": 0,
+    "rates": [
+      38.70145244274461,
+      38.68325242718446,
+      38.61647030317715
+    ],
+    "steps": [
+      105,
+      105,
+      105
+    ],
+    "median": 38.68325242718446,
+    "text_sha256": [
+      "ce182dea25af6d4cdae2d1591c04b6ab2afde2e278d228c3a722854f1e1f2eb6",
+      "ce182dea25af6d4cdae2d1591c04b6ab2afde2e278d228c3a722854f1e1f2eb6",
+      "ce182dea25af6d4cdae2d1591c04b6ab2afde2e278d228c3a722854f1e1f2eb6"
+    ]
+  },
+  {
+    "label": "decode-wide-probe-w2-baseb",
+    "returncode": 0,
+    "rates": [
+      36.617412656700985,
+      36.63740463499087,
+      36.62056783421654
+    ],
+    "steps": [
+      105,
+      105,
+      105
+    ],
+    "median": 36.62056783421654,
+    "text_sha256": [
+      "ce182dea25af6d4cdae2d1591c04b6ab2afde2e278d228c3a722854f1e1f2eb6",
+      "ce182dea25af6d4cdae2d1591c04b6ab2afde2e278d228c3a722854f1e1f2eb6",
+      "ce182dea25af6d4cdae2d1591c04b6ab2afde2e278d228c3a722854f1e1f2eb6"
+    ]
+  }
+]

@@ -1,0 +1,16 @@
+{
+  "command": [
+    "python3",
+    "scripts/dgpp-cluster",
+    "up",
+    "--config",
+    "/home/stephen/dgpp/pr95-followups-20261011/prefill-pair-warp-w2-candidate/deployment.json",
+    "--bin",
+    "/home/stephen/dgpp/pr95-followups-20261011/dgpp-serve-prefill-pair-warp-trial",
+    "--log-dir",
+    "/home/stephen/dgpp/pr95-followups-20261011/prefill-pair-warp-w2-candidate/world"
+  ],
+  "started": "2026-10-11T11:06:03.998293+00:00",
+  "returncode": 0,
+  "finished": "2026-10-11T11:06:23.539568+00:00"
+}

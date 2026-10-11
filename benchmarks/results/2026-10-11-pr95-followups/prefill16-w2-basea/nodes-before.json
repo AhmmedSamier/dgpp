@@ -1,0 +1,24 @@
+[
+  {
+    "rank": 0,
+    "host": "192.168.88.11",
+    "pid": 2383478,
+    "binary_sha256": "981d9dd764c4612c3c74f5903d7c42b47e1121733d69b1ad7a45ab345d13ac8f",
+    "vm_swap_kib": 0,
+    "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-rb1bfb667a9634f6ebfa0039d6db29b15.scope",
+    "cgroup_swap_current": "0",
+    "cgroup_swap_max": "0",
+    "gpu": "NVIDIA GB10, GPU-0543a403-d834-9f2c-14fc-d0efa6059dfb, 46, 2398 MHz, [N/A], 10.97 W"
+  },
+  {
+    "rank": 1,
+    "host": "192.168.88.12",
+    "pid": 2483451,
+    "binary_sha256": "981d9dd764c4612c3c74f5903d7c42b47e1121733d69b1ad7a45ab345d13ac8f",
+    "vm_swap_kib": 0,
+    "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-raba43f163cc945b7a74f4d905aa937ea.scope",
+    "cgroup_swap_current": "0",
+    "cgroup_swap_max": "0",
+    "gpu": "NVIDIA GB10, GPU-51b36bbf-563e-ed8f-7403-185cc867257a, 42, 2405 MHz, [N/A], 12.17 W"
+  }
+]

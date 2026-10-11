@@ -1,0 +1,65 @@
+Internal ctest changing into directory: /home/stephen/workspace/dgpp/build-pr95
+Test project /home/stephen/workspace/dgpp/build-pr95
+      Start  99: qwen35_forward_fixture
+ 1/28 Test  #99: qwen35_forward_fixture .......................   Passed    0.09 sec
+      Start 100: qwen35_forward_smoke
+ 2/28 Test #100: qwen35_forward_smoke .........................   Passed    1.67 sec
+      Start 101: qwen35_decode_rows_invariance
+ 3/28 Test #101: qwen35_decode_rows_invariance ................   Passed    1.55 sec
+      Start 102: qwen35_prefill_group_invariance
+ 4/28 Test #102: qwen35_prefill_group_invariance ..............   Passed    1.84 sec
+      Start 103: qwen35_forward_generate
+ 5/28 Test #103: qwen35_forward_generate ......................   Passed    0.37 sec
+      Start 104: qwen35_forward_test_e2e
+ 6/28 Test #104: qwen35_forward_test_e2e ......................   Passed    2.01 sec
+      Start 105: qwen35_forward_generate_teacher
+ 7/28 Test #105: qwen35_forward_generate_teacher ..............   Passed    0.32 sec
+      Start 106: qwen35_forward_test
+ 8/28 Test #106: qwen35_forward_test ..........................   Passed    2.01 sec
+      Start 107: qwen35_mixed_fixture
+ 9/28 Test #107: qwen35_mixed_fixture .........................   Passed    0.09 sec
+      Start 108: qwen35_mixed_smoke
+10/28 Test #108: qwen35_mixed_smoke ...........................   Passed    1.57 sec
+      Start 109: qwen35_mixed_resident_mtp
+11/28 Test #109: qwen35_mixed_resident_mtp ....................   Passed    1.64 sec
+      Start 110: qwen35_mixed_rows_invariance
+12/28 Test #110: qwen35_mixed_rows_invariance .................   Passed    1.57 sec
+      Start 111: qwen35_mixed_generate
+13/28 Test #111: qwen35_mixed_generate ........................   Passed    0.33 sec
+      Start 112: qwen35_mixed_e2e
+14/28 Test #112: qwen35_mixed_e2e .............................   Passed    1.92 sec
+      Start 113: qwen35_mixed_generate_teacher
+15/28 Test #113: qwen35_mixed_generate_teacher ................   Passed    0.29 sec
+      Start 114: qwen35_mixed_test
+16/28 Test #114: qwen35_mixed_test ............................   Passed    1.99 sec
+      Start 115: qwen35_mixed_prefill_generate
+17/28 Test #115: qwen35_mixed_prefill_generate ................   Passed    1.81 sec
+      Start 116: qwen35_mixed_prefill_e2e
+18/28 Test #116: qwen35_mixed_prefill_e2e .....................   Passed    1.77 sec
+      Start 117: qwen35_mixed_prefill_generate_teacher
+19/28 Test #117: qwen35_mixed_prefill_generate_teacher ........   Passed    1.91 sec
+      Start 118: qwen35_mixed_prefill_test
+20/28 Test #118: qwen35_mixed_prefill_test ....................   Passed    1.72 sec
+      Start 119: qwen35_mixed_long_prefill_generate
+21/28 Test #119: qwen35_mixed_long_prefill_generate ...........   Passed    8.67 sec
+      Start 120: qwen35_mixed_long_prefill_e2e
+22/28 Test #120: qwen35_mixed_long_prefill_e2e ................   Passed    1.89 sec
+      Start 121: qwen35_mixed_long_prefill_generate_teacher
+23/28 Test #121: qwen35_mixed_long_prefill_generate_teacher ...   Passed    8.62 sec
+      Start 122: qwen35_mixed_long_prefill_test
+24/28 Test #122: qwen35_mixed_long_prefill_test ...............   Passed    1.85 sec
+      Start 123: qwen35_tp_test
+25/28 Test #123: qwen35_tp_test ...............................   Passed   12.75 sec
+      Start 202: fp4w_gemm_test
+26/28 Test #202: fp4w_gemm_test ...............................   Passed   12.13 sec
+      Start 203: qwen35_fp4_prefill_test
+27/28 Test #203: qwen35_fp4_prefill_test ......................   Passed    2.03 sec
+      Start 216: glm_moe_test
+28/28 Test #216: glm_moe_test .................................   Passed   43.00 sec
+
+100% tests passed, 0 tests failed out of 28
+
+Label Time Summary:
+gpu    = 117.42 sec*proc (28 tests)
+
+Total Test time (real) = 117.44 sec
