@@ -1,0 +1,400 @@
+[
+  {
+    "command": [
+      "python3",
+      "scripts/dgpp-cluster",
+      "down",
+      "--config",
+      "deploy/cluster_qwen-3.8-flash-next_fp8_w4.example.json"
+    ],
+    "started": "2026-10-11T22:37:00.225695+00:00",
+    "returncode": 0,
+    "finished": "2026-10-11T22:37:07.452789+00:00",
+    "receipt": "production-down.log.command.json"
+  },
+  {
+    "command": [
+      "python3",
+      "scripts/dgpp-cluster",
+      "up",
+      "--config",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-256-early0/deployment.json",
+      "--bin",
+      "/home/stephen/workspace/dgpp/build-pr105-utilization/dgpp-serve-packed",
+      "--log-dir",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-256-early0/world",
+      "--head-wrap",
+      "nsys launch --session-new=dgpp-profile-w1-256-early0 --trace=cuda --cuda-graph-trace=node"
+    ],
+    "started": "2026-10-11T22:37:07.514761+00:00",
+    "returncode": 0,
+    "finished": "2026-10-11T22:37:38.408797+00:00",
+    "receipt": "profile-w1-256-early0/up.log.command.json"
+  },
+  {
+    "command": [
+      "nsys",
+      "start",
+      "--session",
+      "dgpp-profile-w1-256-early0",
+      "--sample=none",
+      "--cpuctxsw=none",
+      "--output",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-256-early0/r0"
+    ],
+    "started": "2026-10-11T22:37:38.965922+00:00",
+    "returncode": 0,
+    "finished": "2026-10-11T22:37:39.332075+00:00",
+    "receipt": "profile-w1-256-early0/profile-start.log.command.json"
+  },
+  {
+    "command": [
+      "nsys",
+      "stop",
+      "--session",
+      "dgpp-profile-w1-256-early0"
+    ],
+    "started": "2026-10-11T22:38:00.439097+00:00",
+    "returncode": 0,
+    "finished": "2026-10-11T22:38:03.717100+00:00",
+    "receipt": "profile-w1-256-early0/profile-stop.log.command.json"
+  },
+  {
+    "command": [
+      "python3",
+      "scripts/dgpp-cluster",
+      "down",
+      "--config",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-256-early0/deployment.json",
+      "--log-dir",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-256-early0/world"
+    ],
+    "started": "2026-10-11T22:38:03.717312+00:00",
+    "returncode": 0,
+    "finished": "2026-10-11T22:38:06.796364+00:00",
+    "receipt": "profile-w1-256-early0/down.log.command.json"
+  },
+  {
+    "command": [
+      "nsys",
+      "shutdown",
+      "--session",
+      "dgpp-profile-w1-256-early0",
+      "--kill=none"
+    ],
+    "started": "2026-10-11T22:38:06.796570+00:00",
+    "returncode": 1,
+    "finished": "2026-10-11T22:38:06.861501+00:00",
+    "receipt": "profile-w1-256-early0/profile-shutdown.log.command.json",
+    "note": "Session already ended when the application shut down; nsys reported no active sessions."
+  },
+  {
+    "command": [
+      "nsys",
+      "export",
+      "--type=sqlite",
+      "--output",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-256-early0/r0.sqlite",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-256-early0/r0.nsys-rep"
+    ],
+    "started": "2026-10-11T22:38:06.861653+00:00",
+    "returncode": 0,
+    "finished": "2026-10-11T22:38:07.783283+00:00",
+    "receipt": "profile-w1-256-early0/export.log.command.json"
+  },
+  {
+    "command": [
+      "python3",
+      "scripts/dgpp-cluster",
+      "up",
+      "--config",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-256-early1/deployment.json",
+      "--bin",
+      "/home/stephen/workspace/dgpp/build-pr105-utilization/dgpp-serve-packed",
+      "--log-dir",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-256-early1/world",
+      "--head-wrap",
+      "nsys launch --session-new=dgpp-profile-w1-256-early1 --trace=cuda --cuda-graph-trace=node"
+    ],
+    "started": "2026-10-11T22:38:07.830864+00:00",
+    "returncode": 0,
+    "finished": "2026-10-11T22:38:38.635189+00:00",
+    "receipt": "profile-w1-256-early1/up.log.command.json"
+  },
+  {
+    "command": [
+      "nsys",
+      "start",
+      "--session",
+      "dgpp-profile-w1-256-early1",
+      "--sample=none",
+      "--cpuctxsw=none",
+      "--output",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-256-early1/r0"
+    ],
+    "started": "2026-10-11T22:38:39.196709+00:00",
+    "returncode": 0,
+    "finished": "2026-10-11T22:38:39.563453+00:00",
+    "receipt": "profile-w1-256-early1/profile-start.log.command.json"
+  },
+  {
+    "command": [
+      "nsys",
+      "stop",
+      "--session",
+      "dgpp-profile-w1-256-early1"
+    ],
+    "started": "2026-10-11T22:39:04.127451+00:00",
+    "returncode": 0,
+    "finished": "2026-10-11T22:39:07.505652+00:00",
+    "receipt": "profile-w1-256-early1/profile-stop.log.command.json"
+  },
+  {
+    "command": [
+      "python3",
+      "scripts/dgpp-cluster",
+      "down",
+      "--config",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-256-early1/deployment.json",
+      "--log-dir",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-256-early1/world"
+    ],
+    "started": "2026-10-11T22:39:07.505865+00:00",
+    "returncode": 0,
+    "finished": "2026-10-11T22:39:10.588179+00:00",
+    "receipt": "profile-w1-256-early1/down.log.command.json"
+  },
+  {
+    "command": [
+      "nsys",
+      "shutdown",
+      "--session",
+      "dgpp-profile-w1-256-early1",
+      "--kill=none"
+    ],
+    "started": "2026-10-11T22:39:10.588412+00:00",
+    "returncode": 1,
+    "finished": "2026-10-11T22:39:10.652419+00:00",
+    "receipt": "profile-w1-256-early1/profile-shutdown.log.command.json",
+    "note": "Session already ended when the application shut down; nsys reported no active sessions."
+  },
+  {
+    "command": [
+      "nsys",
+      "export",
+      "--type=sqlite",
+      "--output",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-256-early1/r0.sqlite",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-256-early1/r0.nsys-rep"
+    ],
+    "started": "2026-10-11T22:39:10.652530+00:00",
+    "returncode": 0,
+    "finished": "2026-10-11T22:39:11.721318+00:00",
+    "receipt": "profile-w1-256-early1/export.log.command.json"
+  },
+  {
+    "command": [
+      "python3",
+      "scripts/dgpp-cluster",
+      "up",
+      "--config",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-2048-early1/deployment.json",
+      "--bin",
+      "/home/stephen/workspace/dgpp/build-pr105-utilization/dgpp-serve-packed",
+      "--log-dir",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-2048-early1/world",
+      "--head-wrap",
+      "nsys launch --session-new=dgpp-profile-w1-2048-early1 --trace=cuda --cuda-graph-trace=node"
+    ],
+    "started": "2026-10-11T22:39:11.769948+00:00",
+    "returncode": 0,
+    "finished": "2026-10-11T22:39:42.564413+00:00",
+    "receipt": "profile-w1-2048-early1/up.log.command.json"
+  },
+  {
+    "command": [
+      "nsys",
+      "start",
+      "--session",
+      "dgpp-profile-w1-2048-early1",
+      "--sample=none",
+      "--cpuctxsw=none",
+      "--output",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-2048-early1/r0"
+    ],
+    "started": "2026-10-11T22:39:43.126621+00:00",
+    "returncode": 0,
+    "finished": "2026-10-11T22:39:43.442127+00:00",
+    "receipt": "profile-w1-2048-early1/profile-start.log.command.json"
+  },
+  {
+    "command": [
+      "nsys",
+      "stop",
+      "--session",
+      "dgpp-profile-w1-2048-early1"
+    ],
+    "started": "2026-10-11T22:40:05.556727+00:00",
+    "returncode": 0,
+    "finished": "2026-10-11T22:40:08.632491+00:00",
+    "receipt": "profile-w1-2048-early1/profile-stop.log.command.json"
+  },
+  {
+    "command": [
+      "python3",
+      "scripts/dgpp-cluster",
+      "down",
+      "--config",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-2048-early1/deployment.json",
+      "--log-dir",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-2048-early1/world"
+    ],
+    "started": "2026-10-11T22:40:08.632753+00:00",
+    "returncode": 0,
+    "finished": "2026-10-11T22:40:11.722000+00:00",
+    "receipt": "profile-w1-2048-early1/down.log.command.json"
+  },
+  {
+    "command": [
+      "nsys",
+      "shutdown",
+      "--session",
+      "dgpp-profile-w1-2048-early1",
+      "--kill=none"
+    ],
+    "started": "2026-10-11T22:40:11.722256+00:00",
+    "returncode": 1,
+    "finished": "2026-10-11T22:40:11.787421+00:00",
+    "receipt": "profile-w1-2048-early1/profile-shutdown.log.command.json",
+    "note": "Session already ended when the application shut down; nsys reported no active sessions."
+  },
+  {
+    "command": [
+      "nsys",
+      "export",
+      "--type=sqlite",
+      "--output",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-2048-early1/r0.sqlite",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-2048-early1/r0.nsys-rep"
+    ],
+    "started": "2026-10-11T22:40:11.787701+00:00",
+    "returncode": 0,
+    "finished": "2026-10-11T22:40:12.709533+00:00",
+    "receipt": "profile-w1-2048-early1/export.log.command.json"
+  },
+  {
+    "command": [
+      "python3",
+      "scripts/dgpp-cluster",
+      "up",
+      "--config",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-2048-early0/deployment.json",
+      "--bin",
+      "/home/stephen/workspace/dgpp/build-pr105-utilization/dgpp-serve-packed",
+      "--log-dir",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-2048-early0/world",
+      "--head-wrap",
+      "nsys launch --session-new=dgpp-profile-w1-2048-early0 --trace=cuda --cuda-graph-trace=node"
+    ],
+    "started": "2026-10-11T22:40:12.771631+00:00",
+    "returncode": 0,
+    "finished": "2026-10-11T22:40:41.609316+00:00",
+    "receipt": "profile-w1-2048-early0/up.log.command.json"
+  },
+  {
+    "command": [
+      "nsys",
+      "start",
+      "--session",
+      "dgpp-profile-w1-2048-early0",
+      "--sample=none",
+      "--cpuctxsw=none",
+      "--output",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-2048-early0/r0"
+    ],
+    "started": "2026-10-11T22:40:42.172078+00:00",
+    "returncode": 0,
+    "finished": "2026-10-11T22:40:42.487737+00:00",
+    "receipt": "profile-w1-2048-early0/profile-start.log.command.json"
+  },
+  {
+    "command": [
+      "nsys",
+      "stop",
+      "--session",
+      "dgpp-profile-w1-2048-early0"
+    ],
+    "started": "2026-10-11T22:40:56.728523+00:00",
+    "returncode": 0,
+    "finished": "2026-10-11T22:40:58.507415+00:00",
+    "receipt": "profile-w1-2048-early0/profile-stop.log.command.json"
+  },
+  {
+    "command": [
+      "python3",
+      "scripts/dgpp-cluster",
+      "down",
+      "--config",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-2048-early0/deployment.json",
+      "--log-dir",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-2048-early0/world"
+    ],
+    "started": "2026-10-11T22:40:58.507701+00:00",
+    "returncode": 0,
+    "finished": "2026-10-11T22:41:01.553195+00:00",
+    "receipt": "profile-w1-2048-early0/down.log.command.json"
+  },
+  {
+    "command": [
+      "nsys",
+      "shutdown",
+      "--session",
+      "dgpp-profile-w1-2048-early0",
+      "--kill=none"
+    ],
+    "started": "2026-10-11T22:41:01.553436+00:00",
+    "returncode": 1,
+    "finished": "2026-10-11T22:41:01.617533+00:00",
+    "receipt": "profile-w1-2048-early0/profile-shutdown.log.command.json",
+    "note": "Session already ended when the application shut down; nsys reported no active sessions."
+  },
+  {
+    "command": [
+      "nsys",
+      "export",
+      "--type=sqlite",
+      "--output",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-2048-early0/r0.sqlite",
+      "/home/stephen/workspace/dgpp/build-pr104-shared/profile-w1-2048-early0/r0.nsys-rep"
+    ],
+    "started": "2026-10-11T22:41:01.617742+00:00",
+    "returncode": 0,
+    "finished": "2026-10-11T22:41:02.134400+00:00",
+    "receipt": "profile-w1-2048-early0/export.log.command.json"
+  },
+  {
+    "command": [
+      "python3",
+      "scripts/dgpp-cluster",
+      "up",
+      "--config",
+      "deploy/cluster_qwen-3.8-flash-next_fp8_w4.example.json",
+      "--bin",
+      "build-release/dgpp-serve"
+    ],
+    "started": "2026-10-11T22:41:02.134648+00:00",
+    "returncode": 0,
+    "finished": "2026-10-11T22:41:45.353751+00:00",
+    "receipt": "production-restore.log.command.json"
+  },
+  {
+    "command": [
+      "python3",
+      "build-pr105-utilization/verify_restore.py"
+    ],
+    "started": "2026-10-11T22:41:45.353983+00:00",
+    "returncode": 0,
+    "finished": "2026-10-11T22:41:46.022944+00:00",
+    "receipt": "production-verify.log.command.json"
+  }
+]
