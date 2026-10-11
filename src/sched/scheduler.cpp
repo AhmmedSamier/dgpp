@@ -747,6 +747,10 @@ void Scheduler::begin_prefill(int arrival, int64_t budget) {
       free_arena_slot(r.prefill_body_slot);
       r.prefill_body_slot = -1;
     }
+    if (r.prefill_head_slot >= 0) {
+      free_arena_slot(r.prefill_head_slot);
+      r.prefill_head_slot = -1;
+    }
     throw;
   }
   r.prefill_ms = std::chrono::duration<double, std::milli>(

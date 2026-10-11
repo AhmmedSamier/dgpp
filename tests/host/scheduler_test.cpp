@@ -4091,6 +4091,40 @@ DGPP_TEST(scheduler_queuedText_injected_begin_failure_cleanup) {
   require(sched.find("reuse")->generated == std::vector<int64_t>({30}), "slot and arena reusable after explicit fault");
 }
 
+DGPP_TEST(scheduler_queuedText_failed_begin_releases_head_snapshot_immediately) {
+  ReservationEngine engine(1000);
+  engine.set_prefix_arena(3, 2);
+  engine.arm(0, {10, 11}, 2);
+  engine.arm(1, {20, 21}, 2);
+  engine.arm(0, {30}, 1);
+  dgpp::sched::AdmissionPolicy policy;
+  policy.prefill_budget_tokens = 8;
+  policy.prefix_head_snapshots = true;
+  Scheduler sched(&engine, {}, 0, policy);
+  sched.submit(make_request("long", 127, 2));
+  sched.tick();
+  const auto held = engine.pool_blocks_in_use();
+  sched.submit(make_cached_request("joined", counted_prompt(7), {2, 6}, 2));
+  engine.fail_begin = 1;
+  bool threw = false;
+  try { sched.tick(); }
+  catch (const std::runtime_error& e) {
+    require(std::string(e.what()) == "injected begin failure after reservation", "original fault propagates");
+    threw = true;
+  }
+  require(threw && engine.op_stream().find("H:1:2@") != std::string::npos,
+          "failure occurred after acquiring the head snapshot");
+  require(engine.pool_blocks_in_use() == held && engine.pinned_blocks() == 0,
+          "failed begin must unwind the head snapshot before cancellation or retry");
+  require(sched.cancel("joined") && sched.cancel("long"), "cancel both requests");
+  sched.run_to_completion();
+  engine.fail_begin = -1;
+  sched.submit(make_cached_request("reuse", counted_prompt(7), {2, 6}, 1));
+  sched.run_to_completion();
+  require(sched.meters().prefix_head_snapshots == 1 && sched.find("reuse")->steps_done == 1,
+          "the failed begin's head arena slot can be reused");
+}
+
 DGPP_TEST(scheduler_queuedText_cancel_and_advance_failure_release_joined_snapshot) {
   for (const bool fail : {false, true}) {
     AdmissionFairEngine engine;
