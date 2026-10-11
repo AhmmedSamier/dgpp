@@ -2596,6 +2596,12 @@ void GenerationService::route_metrics_prometheus(HttpResponseWriter& w) {
               m.prefix_skipped_no_block);
   out.counter("dgpp_prefix_cache_skipped_no_slot_total", "Snapshots skipped for want of an arena slot.",
               m.prefix_skipped);
+  out.counter("dgpp_prefix_cache_skipped_hop_fallback_total",
+              "Hops passed by sampled fallback after snapshot capture was skipped.",
+              m.prefix_skipped_hop_fallback);
+  out.counter("dgpp_prefix_cache_skipped_hop_mismatch_total",
+              "Hop snapshots dropped for inconsistent outcomes or arena contents.",
+              m.prefix_skipped_hop_mismatch);
   out.counter("dgpp_prefix_cache_skipped_image_bytes_total", "Snapshots skipped over the image-bytes bound.",
               m.prefix_skipped_image_bytes);
   out.counter("dgpp_prefix_cache_arena_snapshots_total", "Arena snapshot copies.", pe.snapshots);
@@ -2813,6 +2819,10 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {  Scheduler::Meter
   append_json_int(&out, m.prefix_skipped_no_block);
   out.append(",\"skipped_no_slot\":");
   append_json_int(&out, m.prefix_skipped);
+  out.append(",\"skipped_hop_fallback\":");
+  append_json_int(&out, m.prefix_skipped_hop_fallback);
+  out.append(",\"skipped_hop_mismatch\":");
+  append_json_int(&out, m.prefix_skipped_hop_mismatch);
   out.append(",\"skipped_image_bytes\":");
   append_json_int(&out, m.prefix_skipped_image_bytes);
   out.append(",\"image_bytes\":");
