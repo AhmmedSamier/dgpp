@@ -131,7 +131,29 @@ between chunks.
   output reservations, cache-attached short totals and histories, and
   joined-prefill cancellation and engine failures. A fake with MTP trailing
   rows checks reservation forwarding and unwind, not physical GPU safety.
+- Tail redistribution regressions cover multiple donors and recipients,
+  all readers finishing together, twenty consecutive short arrivals, and
+  preservation of decode progress and the total allocated budget. Begin
+  failures release every private snapshot, including the head cut, before
+  cancellation or retry. These scheduler cases also run under ASan/UBSan.
 - Live: c1/c2/c4 @ d0/d4k/d8k benchy sweep; TTFT of request #2 must drop;
   per-request tok/s must not regress at c1.
 - Item 2 additionally: c4 deep-context soak, KV pool metrics sane, no
   `validate_batch` / digest mismatches in logs.
+
+The reproducible admission comparison is
+`python3 scripts/serve_admission_bench.py --url http://127.0.0.1:18081
+--label COMMIT-CONFIG --out RESULTS.json`. Run matched baseline/candidate
+processes in alternating order on reserved hardware, using the same prompts,
+output limits and configuration. Compare equal busy/idle budgets as well as
+256/2048 to expose the budget-transition trade-off. Its seven scenarios cover
+isolated prefill/decode, a short arrival with short or long output, sustained
+arrivals with and without an existing decoder, and cancellation/recovery.
+The first arrival must be dispatched while the long response's matching
+native prefill ID is still present. Requests, usage, update times, output
+hashes and before/after metrics are retained; unrelated traffic invalidates
+a run. Aggregate rates include the full scenario wall time and client update
+gaps are not per-token kernel latency. Cached conversations, image paths,
+physical KV boundaries, semantic checks and multi-rank operation-stream
+agreement remain separate live gates. Host passes do not establish GPU
+throughput equivalence.

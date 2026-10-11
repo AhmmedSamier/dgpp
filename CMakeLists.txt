@@ -1032,7 +1032,6 @@ add_test(NAME timed_load_test
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/timed_load_test.py)
 add_test(NAME serve_admission_bench_test
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/serve_admission_bench_test.py)
-set_tests_properties(serve_admission_bench_test PROPERTIES LABELS "host;python")
 add_test(NAME qwen_yarn_release_check_test
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/qwen_yarn_release_check_test.py)
 add_test(NAME qwen_head_compare_test
@@ -2194,7 +2193,7 @@ set_tests_properties(unit unit_tests http_server_test serve_test fabric_serve_te
   qwen_yarn_fixture_test qwen_w4a4_plan_default qwen_w4a4_plan_mode_0 qwen_w4a4_plan_mode_1
   qwen_w4a4_plan_mode_empty qwen_w4a4_plan_mode_invalid PROPERTIES LABELS "host")
 set_tests_properties(checkpoint_audit_test route_trace_test sampling_profile_test
-  site_env_test script_reports_test timed_load_test qwen_yarn_release_check_test qwen_head_compare_test portability_test spark_cross_test setup_tools_test bootstrap_test launcher_test PROPERTIES LABELS "host;python")
+  site_env_test script_reports_test timed_load_test serve_admission_bench_test qwen_yarn_release_check_test qwen_head_compare_test portability_test spark_cross_test setup_tools_test bootstrap_test launcher_test PROPERTIES LABELS "host;python")
 if(TARGET dgpp_serve_app)
   set_tests_properties(serve_startup_test PROPERTIES LABELS "host;python" TIMEOUT 180)
 endif()
