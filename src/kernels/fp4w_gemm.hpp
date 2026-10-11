@@ -1,4 +1,4 @@
-// The dense NVFP4 prefill GEMM: 256 x 128 x 64 tiles, sixteen warps,
+// The dense NVFP4 prefill GEMM: 256 x 128 x 64 tiles, eight warps,
 // two cp.async activation stages and two XOR-swizzled weight tiles in
 // 96 KiB of shared memory. Each e2m1/e4m3 weight product is exactly
 // representable in BF16. The dot accumulates in FP32 in ascending k order,

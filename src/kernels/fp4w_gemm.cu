@@ -14,7 +14,7 @@
 namespace dgpp {
 namespace {
 
-// 256 x 128 x 64 tiles on sixteen warps (4 x 4, each covering 64 x 32).
+// 256 x 128 x 64 tiles on eight warps (4 x 2, each covering 64 x 64).
 // The wider M tile amortizes each weight decode over twice as many rows.
 // Two cp.async activation stages and two weight tiles fit in 96 KiB:
 // shared rows use an XOR swizzle instead of padding. Each 8-bf16 vector
@@ -22,7 +22,7 @@ namespace {
 // The dot keeps the original ascending-k FP32 accumulation and divides
 // by the global scale once in the epilogue.
 constexpr int kBM = 256, kBN = 128, kBK = 64;
-constexpr int kThreads = 512;
+constexpr int kThreads = 256;
 constexpr int kStages = 2;
 constexpr int kStride = kBK * 2;
 constexpr int kTileBytes = kBM * kStride;
@@ -81,16 +81,16 @@ __global__ __launch_bounds__(kThreads, 1) void fp4w_gemm_kernel(
   const int in_group = bid - group * kGroupM * n_tiles;
   const int m0 = (first_m + in_group % group_rows) * kBM;
   const int n0 = (in_group / group_rows) * kBN;
-  const int row_base = (warp / 4) * 64, col_base = (warp % 4) * 32;
+  const int row_base = (warp / 2) * 64, col_base = (warp % 2) * 64;
   const int steps = k / kBK;
   const size_t payload_stride = static_cast<size_t>(k) / 2;
   // The activation copy map: 256 rows x 8 16-byte chunks = 2048 chunks,
-  // four per thread: chunk c = tid + i * 512 -> row c / 8, piece c % 8.
-  const uint16_t* a_src[4];
-  bool a_ok[4];
-  int a_row[4], a_piece[4];
+  // eight per thread: chunk c = tid + i * 256 -> row c / 8, piece c % 8.
+  const uint16_t* a_src[8];
+  bool a_ok[8];
+  int a_row[8], a_piece[8];
 #pragma unroll
-  for (int i = 0; i < 4; ++i) {
+  for (int i = 0; i < 8; ++i) {
     const int c = tid + i * kThreads;
     a_row[i] = c / 8;
     a_piece[i] = (c % 8) * 8;  // elements
@@ -101,48 +101,47 @@ __global__ __launch_bounds__(kThreads, 1) void fp4w_gemm_kernel(
     uint8_t* as = sa + slot * kTileBytes;
     const int koff = step * kBK;
 #pragma unroll
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < 8; ++i)
       cp16(as + a_row[i] * kStride + swizzled_col(a_row[i], a_piece[i]) * 2,
            a_src[i] + koff, a_ok[i]);
   };
-  // The weight row this thread places: n-row tid / 4, 16 consecutive codes
-  // at (tid % 4) * 16 — one 8-byte payload load plus the step's four scale
-  // bytes (one word) a step, two register sets.
-  const int wrow = tid / 4, wk = (tid % 4) * 16;
+  // Two threads place one weight row: 32 codes each, fetched in one
+  // 16-byte vector. Each half uses its own 16-code scale group.
+  const int wrow = tid / 2, wk = (tid % 2) * 32;
   const bool w_ok = n0 + wrow < n;
   const uint8_t* wsrc =
       payload + static_cast<size_t>(w_ok ? n0 + wrow : 0) * payload_stride + static_cast<size_t>(wk) / 2;
   const uint8_t* ssrc = scales + static_cast<size_t>(w_ok ? n0 + wrow : 0) * scale_stride;
   struct Raw {
-    uint2 codes;
+    uint4 codes;
     uint32_t sc;
   };
   Raw raw0, raw1;
   auto fetch = [&](int step, Raw& r) {
-    r.codes = w_ok ? *reinterpret_cast<const uint2*>(wsrc + step * (kBK / 2)) : make_uint2(0u, 0u);
+    r.codes = w_ok ? *reinterpret_cast<const uint4*>(wsrc + step * (kBK / 2))
+                   : make_uint4(0u, 0u, 0u, 0u);
     r.sc = w_ok ? *reinterpret_cast<const uint32_t*>(ssrc + step * (kBK / 16)) : 0u;
   };
-  // Half h of a step's placement: codes wk+h*8 .. wk+h*8+8. Eight
-  // consecutive codes from a multiple of 8 always sit inside one 16-code
-  // scale group, so the half takes a single scale byte: (wk + h * 8) / 16
-  // is tid % 4 for both halves (wk = (tid % 4) * 16).
+  // Half h places sixteen codes as two swizzled eight-BF16 vectors.
   auto place_half = [&](int step, const Raw& r, int h) {
-    uint32_t p[4];
-    const uint32_t sb = (r.sc >> (8 * (wk / 16))) & 0xFFu;
-    const __half2 s2 = __half2half2(__half(
-        __nv_cvt_fp8_to_halfraw(static_cast<__nv_fp8_storage_t>(sb), __NV_E4M3)));
-    // Bytes 0..3 in order.
-    const uint32_t word = h ? r.codes.y : r.codes.x;
-    p[0] = decode_pair_bf16_w(word & 0xFFu, s2);
-    p[1] = decode_pair_bf16_w((word >> 8) & 0xFFu, s2);
-    p[2] = decode_pair_bf16_w((word >> 16) & 0xFFu, s2);
-    p[3] = decode_pair_bf16_w((word >> 24) & 0xFFu, s2);
-    uint8_t* dst = sw + (step & 1) * kWeightTileBytes + wrow * kStride +
-                   swizzled_col(wrow, wk + h * 8) * 2;
-    *reinterpret_cast<uint4*>(dst) = make_uint4(p[0], p[1], p[2], p[3]);
+    const uint32_t sb = (r.sc >> (8 * ((wk + h * 16) / 16))) & 0xFFu;
+    const __half2 s2 = __half2half2(
+        __half(__nv_cvt_fp8_to_halfraw(static_cast<__nv_fp8_storage_t>(sb), __NV_E4M3)));
+    uint32_t word[2] = {h ? r.codes.z : r.codes.x, h ? r.codes.w : r.codes.y};
+#pragma unroll
+    for (int part = 0; part < 2; part++) {
+      uint32_t p[4];
+      p[0] = decode_pair_bf16_w(word[part] & 0xFFu, s2);
+      p[1] = decode_pair_bf16_w((word[part] >> 8) & 0xFFu, s2);
+      p[2] = decode_pair_bf16_w((word[part] >> 16) & 0xFFu, s2);
+      p[3] = decode_pair_bf16_w((word[part] >> 24) & 0xFFu, s2);
+      uint8_t* dst = sw + (step & 1) * kWeightTileBytes + wrow * kStride +
+                     swizzled_col(wrow, wk + h * 16 + part * 8) * 2;
+      *reinterpret_cast<uint4*>(dst) = make_uint4(p[0], p[1], p[2], p[3]);
+    }
   };
 
-  float acc[4][4][4] = {};
+  float acc[4][8][4] = {};
 #pragma unroll
   for (int s = 0; s < kStages - 1; ++s) {
     if (s < steps) issue(s, s);
@@ -172,9 +171,9 @@ __global__ __launch_bounds__(kThreads, 1) void fp4w_gemm_kernel(
         ldsm_x4(af[i], as + (row_base + i * 16 + lane % 16) * kStride +
                            swizzled_col(row_base + i * 16 + lane % 16,
                                         kk + (lane / 16) * 8) * 2);
-      uint32_t bf[4][2];
+      uint32_t bf[8][2];
 #pragma unroll
-      for (int jj = 0; jj < 2; ++jj) {
+      for (int jj = 0; jj < 4; ++jj) {
         // Matrices 0/1 = n8 tile 2jj at k kk..kk+7 / kk+8..kk+15, 2/3 = tile 2jj+1.
         const int tile = col_base + jj * 16 + (lane / 16) * 8 + lane % 8;
         const int kb = kk + ((lane / 8) % 2) * 8;
@@ -188,7 +187,7 @@ __global__ __launch_bounds__(kThreads, 1) void fp4w_gemm_kernel(
 #pragma unroll
       for (int i = 0; i < 4; ++i)
 #pragma unroll
-        for (int j = 0; j < 4; ++j)
+        for (int j = 0; j < 8; ++j)
           asm volatile(
               "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
               "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
@@ -206,7 +205,7 @@ __global__ __launch_bounds__(kThreads, 1) void fp4w_gemm_kernel(
 #pragma unroll
   for (int i = 0; i < 4; ++i)
 #pragma unroll
-    for (int j = 0; j < 4; ++j)
+    for (int j = 0; j < 8; ++j)
 #pragma unroll
       for (int v = 0; v < 4; ++v) {
         const int row = m0 + row_base + i * 16 + r + (v / 2) * 8;

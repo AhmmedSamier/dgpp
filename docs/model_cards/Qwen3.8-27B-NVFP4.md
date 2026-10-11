@@ -6,15 +6,15 @@ records only how DGPP serves this checkpoint and what was measured here.
 
 Same 27B Qwen3.8 hybrid stack as
 [Qwen3.8-27B-FP8](Qwen3.8-27B-FP8.md): gated-delta-net + full-attention
-layers, 5120 hidden, 64 layers (63 + the MTP draft layer), 256K vocab,
+layers, 5120 hidden, 64 main layers plus an optional MTP draft layer, 256K vocab,
 bf16 by default. The release is mixed-precision and DGPP reads its
 `config.json` `quantization_config` (compressed-tensors `config_groups`):
 
 | Module | Format | DGPP path |
 |---|---|---|
-| MLP `gate|up|down_proj` (layers 0..55) | NVFP4 (packed fp4, group 16, fp8-e4m3 block scales, divided once by the F32 weight global; the input global is the W4A4 activation-side factor, unused under exact activations) | production ldmatrix kernel via `launch_dense_mma_fp4_prod_*` (one form, every row count) |
+| MLP `gate|up|down_proj` (layers 0..55) | NVFP4 (packed fp4, group 16, fp8-e4m3 block scales, divided once by the F32 weight global; the input global is the W4A4 activation-side factor, unused under exact activations) | production ldmatrix kernel below 1024 rows; fused `launch_fp4w_gemm_bf16` prefill at 1024 rows and above |
 | Attention `q|k|v|o_proj`, GDN in/out, `lm_head`, `layers.56..63.mlp.*` | FP8 e4m3, channelwise (group = full row) | dequant-to-bf16 bridge for wide rows, streaming fp8 GEMV for decode |
-| `mtp.*`, embeddings, norms, router | BF16 | bf16 |
+| `mtp.*`, embeddings, norms | BF16 | bf16 |
 
 ## Formats in DGPP
 

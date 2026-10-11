@@ -939,8 +939,7 @@ void Qwen35Model::dense_mlp(const uint16_t* x, uint16_t* out, int tokens,
     // ldmatrix kernel below (one chain everywhere at < 1024 rows;
     // tolerance-equal, never bitwise, across the boundary — a different
     // fp32 summation order). The 256-row tile amortizes weight decoding
-    // over more rows. Include exactly 1024: prefix-cache cuts produce
-    // chunks of that size, and the wider tile wins there at TP 1/2/4.
+    // over more rows and wins at the 1024-row boundary at TP 1/2/4.
     // Smaller ragged tiles are not consistently faster. Decode keeps the
     // solo-vs-batch bitwise chain the gates pin.
     if (tokens <= 0) return;
