@@ -60,6 +60,8 @@ class PrefixCache {
     int64_t duplicates = 0;     // an entry already existed at the position
     int64_t skipped_no_slot = 0;  // a snapshot wanted, no slot free or evictable
     int64_t skipped_no_block = 0;  // a snapshot wanted, no pool block for its partial copy
+    int64_t skipped_hop_fallback = 0;  // fallback passed the hop after capture was skipped
+    int64_t skipped_hop_mismatch = 0;  // inconsistent hop outcome or arena contents, dropped
     int64_t skipped_image_bytes = 0;
   };
 

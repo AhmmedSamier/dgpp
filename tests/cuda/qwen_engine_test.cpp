@@ -1612,6 +1612,128 @@ DGPP_TEST(qwen_engines_loopback_world_2_lookup_tail_matches_mtp_decode) {
                 ids_text(on[0].la), ids_text(on[0].lb), on[0].fused);
 }
 
+// Sampled fallback and prefix caching must agree even when the host accepts
+// more rows than the device's provisional verdict. Run the same growing
+// conversations cold and cached, with retirement and slot reuse on both ranks.
+// Reuse a prefill cut with matching four-row chunks in both runs. Replaying
+// generated history as prefill need not reproduce decode's floating-point
+// arithmetic; attachment to retained rolling state is covered separately.
+static void prefix_hop_sampling_gate(int depth, uint16_t port) {
+  std::string json = qwenfx::tiny_text_json();
+  const auto at = json.find("\"vocab_size\": 512");
+  require(at != std::string::npos, "fixture vocabulary anchor");
+  json.replace(at, std::strlen("\"vocab_size\": 512"), "\"vocab_size\": 64");
+  const auto text = dgpp::minijson::parse(json);
+  const auto quant = dgpp::minijson::parse(qwenfx::tiny_quant_json());
+  const auto cfg = QwenTextConfig::parse(text.root, &quant.root);
+  const std::string dir = "qwen_engine_prefix_fixture";
+  qwenfx::write_fixture(cfg, dir, json.c_str());
+  std::vector<uint64_t> digests(kWorld);
+  std::vector<std::vector<std::vector<int64_t>>> sequences(kWorld);
+  // A bus owns the graph variants, so each engine needs a fresh world.
+  for (bool cached : {false, true}) {
+    auto buses = start_world(kWorld, port);
+    require(!buses.empty(), "prefix sampling bus world");
+    ConstructBarrier barrier(kWorld);
+    std::vector<std::string> errors(kWorld);
+    std::vector<std::thread> workers;
+    for (int rank = 0; rank < kWorld; ++rank) workers.emplace_back([&, rank] {
+      bool arrived = false;
+      uint16_t *scratch = nullptr, *prefix_scratch = nullptr, *gather_scratch = nullptr;
+      try {
+        auto* bus = buses[rank].get();
+        BusBoundaryReducer reducer(*bus, wait_timeout_ms());
+        DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&scratch),
+            sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld), cudaHostAllocDefault));
+        DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&prefix_scratch),
+            sizeof(uint16_t) * dgpp::fabric_sampling_prefix_scratch_elems(kWorld), cudaHostAllocDefault));
+        DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&gather_scratch),
+            sizeof(uint16_t) * dgpp::sampling_gather_scratch_elems(cfg.vocab_size), cudaHostAllocDefault));
+        arrived = true;
+        barrier.arrive_and_wait();
+        {
+          QwenModel model(cfg, dir, 512, 2048, QwenResidency::Resident, &reducer, rank, kWorld,
+                          /*max_requests=*/2, /*mtp=*/true, /*max_decode_rows=*/8);
+          std::vector<std::vector<int64_t>> got;
+          {
+            GraphEngineAdapter<QwenModel> engine(&model, bus, rank, kWorld, scratch, cfg.vocab_size,
+                wait_timeout_ms(), /*batch_min_live=*/2, prefix_scratch, gather_scratch,
+                /*sampling_candidates=*/8, nullptr, /*prefix_slots=*/cached ? 6 : 0, depth,
+                test_compaction());
+            dgpp::sched::AdmissionPolicy policy;
+            policy.prefill_budget_tokens = 4;
+            dgpp::sched::Scheduler sched(&engine, {}, 0, policy);
+            std::vector<std::vector<int64_t>> prompts{smoke_tokens(cfg, 13, 789), smoke_tokens(cfg, 15, 790)};
+            size_t result = 0;
+            for (int turn = 0; turn < 6; ++turn) {
+              const int live = turn == 0 ? 1 : 2;
+              for (int q = 0; q < live; ++q) {
+                dgpp::sched::SchedulerRequest req;
+                req.id = std::to_string(turn) + ":" + std::to_string(q);
+                req.prompt = prompts[q];
+                req.boundaries = {4, 8, 12};
+                req.max_steps = q == 0 ? 48 : 45;
+                req.seed = 4567 + turn * 2 + q;
+                req.sampling.temperature = 1.f;
+                req.sampling.top_p = .95f;
+                sched.submit(std::move(req));
+              }
+              sched.run_to_completion();
+              for (int q = 0; q < live; ++q) {
+                const auto& tokens = sched.results().at(result++).generated;
+                got.push_back(tokens);
+                prompts[q].insert(prompts[q].end(), tokens.begin(), tokens.end());
+                prompts[q].insert(prompts[q].end(), {7, 8, 9});
+              }
+            }
+            require(engine.fallbacks() > 0, "sampled fixture must exercise fallback");
+            if (cached) {
+              require(got.size() == sequences[rank].size(), "Qwen request count differs");
+              for (size_t i = 0; i < got.size(); ++i) {
+                require(got[i].size() == sequences[rank][i].size(), "Qwen transcript length differs");
+                size_t token = 0;
+                while (token < got[i].size() && got[i][token] == sequences[rank][i][token]) ++token;
+                require(token == got[i].size(), "prefix cache changed sampled Qwen transcript " +
+                    std::to_string(i) + " at token " + std::to_string(token));
+              }
+              require(sched.meters().prefix_hits > 0, "growing conversations must attach");
+              require(sched.meters().prefix_skipped_hop_fallback > 0 &&
+                          sched.meters().prefix_skipped_hop_mismatch == 0,
+                      "sampled Qwen must exercise the skipped-hop path without mismatches");
+              DGPP_LOG_INFO("Qwen prefix depth {} rank {}: {} fallback skips, {} cache hits",
+                            depth, rank, sched.meters().prefix_skipped_hop_fallback,
+                            sched.meters().prefix_hits);
+              digests[rank] = sched.prefix_digest();
+            } else sequences[rank] = got;
+            engine.drain();
+          }
+          require(model.kv_blocks_in_use() == 0, "prefix sampling leaked cache blocks");
+        }
+      } catch (const std::exception& e) {
+        errors[rank] = e.what();
+        if (!arrived) barrier.arrive_and_wait();
+      }
+      if (scratch) cudaFreeHost(scratch);
+      if (prefix_scratch) cudaFreeHost(prefix_scratch);
+      if (gather_scratch) cudaFreeHost(gather_scratch);
+    });
+    for (auto& worker : workers) worker.join();
+    for (const auto& error : errors) require(error.empty(), error);
+  }
+  for (int rank = 1; rank < kWorld; ++rank) {
+    require(sequences[rank] == sequences[0], "sampled Qwen ranks disagree");
+    require(digests[rank] == digests[0], "prefix decisions differ across ranks");
+  }
+}
+
+DGPP_TEST(qwen_engines_prefix_hop_sampled_fallback_depth1) {
+  prefix_hop_sampling_gate(1, 30013);
+}
+
+DGPP_TEST(qwen_engines_prefix_hop_sampled_fallback_depth3) {
+  prefix_hop_sampling_gate(3, 30014);
+}
+
 DGPP_TEST(qwen_engines_loopback_world_2_lookup_skips_sampled_slots) {
   const QwenTextConfig cfg = qwenfx::tiny_config();
   const std::string dir = "qwen_engine_lookup_fixture";

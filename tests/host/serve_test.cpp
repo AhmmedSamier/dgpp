@@ -1357,6 +1357,9 @@ DGPP_TEST(serve_modelsHealthMetrics_theOpsSurface) {
           "metrics sections: " + met.substr(0, 200));
   const auto first = dgpp::minijson::parse(std::string_view(met).substr(met.find("\r\n\r\n") + 4));
   const auto second = dgpp::minijson::parse(std::string_view(legacy_met).substr(legacy_met.find("\r\n\r\n") + 4));
+  for (const char* key : {"skipped_hop_fallback", "skipped_hop_mismatch"})
+    require(first.root.at("prefix_cache").at(key).as_int() == 0,
+            std::string("idle prefix counter: ") + key);
   for (const char* key : {"service", "prefix_cache", "prefill"})
     require(json_of(first.root.at(key)) == json_of(second.root.at(key)), "metrics aliases agree");
   for (const auto& m : first.root.at("scheduler").members())
@@ -1416,7 +1419,9 @@ DGPP_TEST(serve_prometheusExposition_countersAndDistributions) {
           "size buckets");
   for (const char* family : {"dgpp_time_to_first_token_seconds", "dgpp_inter_token_latency_seconds",
                              "dgpp_decode_step_duration_seconds", "dgpp_spec_decode_depth",
-                             "dgpp_decode_batch_replays_by_slots_total", "dgpp_prefix_cache_skipped_no_block_total"}) {
+                             "dgpp_decode_batch_replays_by_slots_total", "dgpp_prefix_cache_skipped_no_block_total",
+                             "dgpp_prefix_cache_skipped_hop_fallback_total",
+                             "dgpp_prefix_cache_skipped_hop_mismatch_total"}) {
     const std::string header = std::string("# TYPE ") + family + " ";
     const size_t first = r.find(header);
     require(first != std::string::npos && r.find(header, first + 1) == std::string::npos,

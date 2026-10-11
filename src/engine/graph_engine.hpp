@@ -494,6 +494,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     fed_frozen_.assign(static_cast<size_t>(slots_), 0);
     hop_slot_.assign(static_cast<size_t>(slots_), -1);
     hop_position_.assign(static_cast<size_t>(slots_), 0);
+    hop_results_.resize(static_cast<size_t>(slots_));
     live_.assign(static_cast<size_t>(slots_), false);
     reserved_.assign(static_cast<size_t>(slots_), false);
     scalar_execs_.assign(static_cast<size_t>(slots_), {{nullptr, nullptr}});
@@ -1537,6 +1538,11 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     check_live(req, "prefix_arm_hop");
     hop_slot_[static_cast<size_t>(req)] = slot;
     hop_position_[static_cast<size_t>(req)] = position;
+    hop_results_[static_cast<size_t>(req)] = {PrefixHopStatus::kNone, slot, position};
+  }
+  PrefixHopResult take_prefix_hop_result(int req) override {
+    check_req(req);
+    return std::exchange(hop_results_[static_cast<size_t>(req)], PrefixHopResult{});
   }
   void prefix_release(int slot) override { arena_.release(slot); }
   int64_t prefix_position(int slot) const override {
@@ -1862,6 +1868,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     if (!lookup_hist_.empty()) lookup_hist_[static_cast<size_t>(req)].clear();
     if (!fed_frozen_.empty()) fed_frozen_[static_cast<size_t>(req)] = 0;
     hop_slot_[static_cast<size_t>(req)] = -1;
+    hop_results_[static_cast<size_t>(req)] = {};
     if (schedule_) conf_stale_[static_cast<size_t>(req)] = true;
     // A reopened slot is greedy until the scheduler arms it again — on the
     // device too, so a padded replay of this slot never draws.
@@ -2964,12 +2971,14 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     // The prefix cache's hop snapshot (M7 under the multi-row step): armed
     // by the scheduler for the aligned position row 1 sat on; taken from
     // the state after row 0 when row 1 stood — here, before another slot's
-    // scalar step can reuse the spec snapshot rows. A one-row verdict
-    // landed ON the position; the scheduler's rolling snapshot follows.
+    // scalar step can reuse the spec snapshot rows. A one-row provisional
+    // verdict skips capture; sampled fallback below can still pass the hop.
     if (hop_slot_[static_cast<size_t>(req)] >= 0) {
       const int slot = hop_slot_[static_cast<size_t>(req)];
       const int64_t hop = hop_position_[static_cast<size_t>(req)];
       hop_slot_[static_cast<size_t>(req)] = -1;
+      auto& result = hop_results_[static_cast<size_t>(req)];
+      result.status = PrefixHopStatus::kNotTaken;
       if (verify.accepted >= 2) {
         const int rows_after = verify.accepted - 1;
         if (model_->session_position(req) != hop + rows_after)
@@ -2978,7 +2987,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
               std::to_string(model_->session_position(req)) + " after a " +
               std::to_string(verify.accepted) + "-row step, the armed hop expects " +
               std::to_string(hop + rows_after));
-        arena_.snapshot_post_row0(req, slot, hop, batched ? verdict_request * rows : 0, rows_after);
+        const bool stored = arena_.snapshot_post_row0(
+            req, slot, hop, batched ? verdict_request * rows : 0, rows_after);
+        result.status = stored ? PrefixHopStatus::kStored : PrefixHopStatus::kNoBlock;
       }
     }
 
@@ -3704,6 +3715,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   std::vector<char> fed_frozen_;
   std::vector<int> hop_slot_;          // per slot: the armed hop's arena slot, -1 none
   std::vector<int64_t> hop_position_;  // per slot: the armed hop's position
+  std::vector<PrefixHopResult> hop_results_;  // consumed once, independently of final token counts
   int batch_min_live_ = 1;
   int last_mode_ = -1;  // 0 scalar variants, 1 + family for a row batch
   DecodePick prefill_pick_;

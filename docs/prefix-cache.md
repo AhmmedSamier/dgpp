@@ -143,6 +143,23 @@ Inspect `/v1/metrics` and the boot/retire logs before changing a budget:
   A miss naming a changed MTP lookahead token correctly rejects stale draft
   state. Neither is resolved by a larger arena.
 
+MTP hop snapshots are captured before the exact sampled fallback runs. When
+that fallback accepts additional tokens, it can pass an aligned position
+whose snapshot was never taken. The engine reports the capture outcome
+explicitly: the scheduler retains an unchanged older snapshot at its original
+position, or keeps the slot empty if there was no previous snapshot. It does
+not count either case as a new hop snapshot.
+
+`prefix_cache.skipped_hop_fallback` counts those skipped captures;
+`skipped_hop_mismatch` counts inconsistent outcomes or stored positions that
+caused an optional snapshot to be dropped, with a warning. Prometheus exposes
+them as `dgpp_prefix_cache_skipped_hop_fallback_total` and
+`dgpp_prefix_cache_skipped_hop_mismatch_total`. A fallback skip is distinct
+from `skipped_no_block`, which records pool pressure. If a hop replacement
+runs out of pool blocks, the previous snapshot has also been released and
+cannot become a close entry. Model-position checks and non-pool engine errors
+still propagate.
+
 Resolve the site configuration before running a recipe's plan:
 
 ```bash

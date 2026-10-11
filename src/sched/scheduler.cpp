@@ -1007,20 +1007,30 @@ void Scheduler::step_batch(const std::vector<int>& arrivals) {
   }
 
   cursor_ = arrivals.back();
-  // The prefix cache's hops (M7): an armed request whose step committed two
-  // tokens may have saved its state at the armed position inside the step.
-  // Check the arena before recording it, so a retire in this pass finds
-  // the rolling slot at the position the close entry wants. A
-  // one-token step landed ON the position: the next tick's rolling
-  // snapshot (or the retire-time one) takes it.
+  // Publish hop outcomes before tokens can retire any request in this pass.
+  // The engine captures before sampled fallback. A provisional one-row
+  // verdict leaves the old snapshot alone, even if fallback later accepts
+  // more rows; a failed replacement instead releases that old snapshot.
   for (size_t i = 0; i < arrivals.size(); ++i) {
     Request& r = requests_[static_cast<size_t>(arrivals[i])];
     if (r.hop_armed < 0) continue;
     const int64_t hop = r.hop_armed;
     r.hop_armed = -1;
-    if (batches[i].size() < 2) continue;
+    const auto outcome = engine_->take_prefix_hop_result(r.slot);
     const int64_t position = engine_->prefix_position(r.rolling_slot);
-    if (position < 0) {
+    const bool matches_arm = outcome.slot == r.rolling_slot && outcome.position == hop;
+    using Hop = SchedulerEngine::PrefixHopStatus;
+    if (matches_arm && outcome.status == Hop::kNotTaken && position == r.rolling_position) {
+      if (batches[i].size() >= 2) {
+        ++cache_.stats().skipped_hop_fallback;
+        cache_.note(7, static_cast<uint64_t>(hop), static_cast<uint64_t>(r.rolling_slot));
+        // A position of -1 means this was the first hop: there is no old
+        // snapshot to keep. Neither case is a pool failure or a new hop.
+        emit_prefix(r.spec.id, "hop_fallback", position, r.rolling_slot);
+      }
+      continue;
+    }
+    if (matches_arm && outcome.status == Hop::kNoBlock && position < 0) {
       // A failed replacement released the previous snapshot too. Forget
       // its position so retirement cannot publish an empty slot, and the
       // next attempt reserves a fresh partial block rather than reusing it.
@@ -1028,8 +1038,25 @@ void Scheduler::step_batch(const std::vector<int>& arrivals) {
       ++cache_.stats().skipped_no_block;
       continue;
     }
-    if (position != hop)
-      throw std::logic_error("Scheduler: the hop snapshot's position differs from the armed position");
+    if (!matches_arm || outcome.status != Hop::kStored || position != hop || batches[i].size() < 2) {
+      // Unexpected cache metadata must not be published under a guessed
+      // prefix. Drop this request's optional snapshot, preserving the
+      // model's own position checks and all non-cache engine failures.
+      const int slot = r.rolling_slot;
+      const int64_t previous = r.rolling_position;
+      free_arena_slot(slot);
+      r.rolling_slot = -1;
+      r.rolling_position = -1;
+      ++cache_.stats().skipped_hop_mismatch;
+      cache_.note(8, static_cast<uint64_t>(hop), static_cast<uint64_t>(slot));
+      emit_prefix(r.spec.id, "hop_mismatch", position, slot);
+      DGPP_LOG_WARN(
+          "sched: request '{}' dropped inconsistent hop snapshot: armed {} in slot {}, "
+          "previous {}, stored {}, outcome {} at {} in slot {}",
+          r.spec.id, hop, slot, previous, position, static_cast<int>(outcome.status),
+          outcome.position, outcome.slot);
+      continue;
+    }
     r.rolling_position = hop;
     ++cache_.stats().rolling;
     ++cache_.stats().hops;
@@ -1604,6 +1631,8 @@ Scheduler::Meters Scheduler::meters() const {
   m.prefix_duplicates = cache_.stats().duplicates;
   m.prefix_skipped = cache_.stats().skipped_no_slot;
   m.prefix_skipped_no_block = cache_.stats().skipped_no_block;
+  m.prefix_skipped_hop_fallback = cache_.stats().skipped_hop_fallback;
+  m.prefix_skipped_hop_mismatch = cache_.stats().skipped_hop_mismatch;
   m.prefix_skipped_image_bytes = cache_.stats().skipped_image_bytes;
   m.prefix_image_bytes = static_cast<int64_t>(cache_.image_bytes());
   m.prefix_blocks_pinned = cache_.blocks_pinned(prefix_info_.block_tokens);
