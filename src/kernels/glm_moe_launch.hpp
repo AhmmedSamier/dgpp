@@ -342,6 +342,18 @@ void launch_dense_mma_fp4_prod_bf16(const uint16_t* act, size_t act_stride,
                                     int which, uint16_t* out, int m, int n, int k,
                                     cudaStream_t stream, int fp4_group = kFp4Group);
 
+// Small dense NVFP4 shards use a 16-row tile and can launch gate/up in one
+// grid. Both projections retain the production kernel's exact dot chain.
+// The paired launcher falls back to separate production launches otherwise.
+bool dense_fp4_decode_shape(int m, int n, int k, int fp4_group = kFp4Group);
+bool try_dense_fp4_decode_bf16(const uint16_t* act, size_t act_stride, const MoeSegment* seg,
+                               const MoeExpertView* views, int which, uint16_t* out, int m, int n,
+                               int k, cudaStream_t stream, int fp4_group = kFp4Group);
+void launch_dense_mma_fp4_gate_up_bf16(const uint16_t* act, size_t act_stride,
+                                       const MoeSegment* seg, const MoeExpertView* views,
+                                       uint16_t* gate, uint16_t* up, int m, int n, int k,
+                                       cudaStream_t stream, int fp4_group = kFp4Group);
+
 // fp4_group (2026-09-13): 16 = NVFP4 view tables (e4m3 scales + globals),
 // 32 = MXFP4 tables (e8m0 scales, no globals — DeepSeek-V4.1-Flash,
 // docs/deepseek_v41_flash_plan.md D2); the routed k must be in the group's

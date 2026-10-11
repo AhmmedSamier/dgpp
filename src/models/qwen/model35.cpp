@@ -969,12 +969,9 @@ void Qwen35Model::dense_mlp(const uint16_t* x, uint16_t* out, int tokens,
       views = fp4_views_;
     }
     const MoeSegment* seg = fp4_segs_ + (tokens - 1);
-    launch_dense_mma_fp4_prod_bf16(x, static_cast<size_t>(H), seg, views, /*which=*/0,
-                                   gate_tmp_, tokens, static_cast<int>(I), H, stream,
-                                   m.gate_fp4.scale_group);
-    launch_dense_mma_fp4_prod_bf16(x, static_cast<size_t>(H), seg, views, /*which=*/1,
-                                   up_tmp_, tokens, static_cast<int>(I), H, stream,
-                                   m.up_fp4.scale_group);
+    launch_dense_mma_fp4_gate_up_bf16(x, static_cast<size_t>(H), seg, views, gate_tmp_, up_tmp_,
+                                      tokens, static_cast<int>(I), H, stream,
+                                      m.gate_fp4.scale_group);
     qwen35_swiglu_bf16(gate_tmp_, up_tmp_, gate_tmp_, static_cast<int64_t>(tokens) * I, stream);
     launch_dense_mma_fp4_prod_bf16(gate_tmp_, static_cast<size_t>(I), seg, views,
                                    /*which=*/2, out, tokens, H, static_cast<int>(I), stream,
@@ -1213,7 +1210,9 @@ MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens,
   // Blockwise-FP8 lm head (engine.dense_weights = fp8, Resident only): half
   // the bytes per decode row.
   if (dense_weights_fp8_ && residency == LoaderResidency::Resident) {
-    const size_t Vv = static_cast<size_t>(cfg.vocab_size), Hh = static_cast<size_t>(cfg.hidden_size);
+    const size_t Vv = static_cast<size_t>(
+        Qwen35LocalGeometry::from_config(cfg, rank, world, head).lm_vocab_count);
+    const size_t Hh = static_cast<size_t>(cfg.hidden_size);
     plan.add("blockwise fp8 lm head (E4M3 + scales)", Vv * Hh + ((Vv + 127) / 128) * ((Hh + 127) / 128) * 4);
   }
   if (mtp) {
@@ -1828,9 +1827,23 @@ void Qwen35Model::prefetch_fp8(const GlmQuantMatrix& q) {
 void Qwen35Model::prefetch_ffn_side(const Qwen35LayerResident& r) {
   if (!prefetch_.enabled() || world_ < 2) return;
   const size_t H = static_cast<size_t>(cfg_.hidden_size);
-  prefetch_.open_window(stream_, prefetch_window_bytes_, prefetch_.boundary_rate());
   const Qwen35DenseMlpResident& m = r.mlp;
-  if (m.gate_fp8.payload) {
+  const bool small_fp4 =
+      m.gate_fp4.payload &&
+      dense_fp4_decode_shape(walk_rows_, m.gate_fp4.rows, m.gate_fp4.cols, m.gate_fp4.scale_group);
+  // The paired small-row kernel benefits from a warm gate. Reading into
+  // up as well competes with the live attention weights and the gate's
+  // first reads. Keep the existing window for the other matrix forms.
+  const size_t budget = small_fp4 ? std::min(prefetch_window_bytes_,
+                                             m.gate_fp4.payload_bytes() + m.gate_fp4.scale_bytes())
+                                  : prefetch_window_bytes_;
+  prefetch_.open_window(stream_, budget, prefetch_.boundary_rate());
+  if (m.gate_fp4.payload) {
+    if (small_fp4) {
+      prefetch_add(m.gate_fp4.payload, m.gate_fp4.payload_bytes());
+      prefetch_add(m.gate_fp4.scales, m.gate_fp4.scale_bytes());
+    }
+  } else if (m.gate_fp8.payload) {
     prefetch_fp8(m.gate_fp8);
     prefetch_fp8(m.up_fp8);
     prefetch_fp8(m.down_fp8);

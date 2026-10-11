@@ -180,6 +180,24 @@ Stats compare_bf16(const uint16_t* got, const uint16_t* want, size_t n, int soft
 
 int run_smoke(const std::string& dir) {
   const Qwen35TextConfig cfg = Qwen35TextConfig::from_json_file((fs::path(dir) / "config.json").string());
+  if (cfg.quant_kind == dgpp::Qwen35QuantKind::Fp8Block) {
+    const bool saved = Qwen35Model::dense_weights_fp8();
+    Qwen35Model::set_dense_weights_fp8(true);
+    size_t whole_head = 0;
+    for (int world : {1, 2, 4}) {
+      size_t sum = 0;
+      for (int rank = 0; rank < world; ++rank) {
+        const auto plan = Qwen35Model::plan_memory(cfg, 72, 256, rank, world,
+                                                   dgpp::LoaderResidency::Resident, 1, false);
+        for (const auto& item : plan.items)
+          if (item.name == "blockwise fp8 lm head (E4M3 + scales)") sum += item.device;
+      }
+      if (world == 1) whole_head = sum;
+      require(sum > 0 && sum == whole_head,
+              "FP8 head memory is partitioned across ranks, not replicated");
+    }
+    Qwen35Model::set_dense_weights_fp8(saved);
+  }
   const int T = 72;  // past two 32-token attention tiles
   const std::vector<int64_t> tokens = smoke_tokens(cfg, T);
   Qwen35Model model = make_model(cfg, dir, T, false);

@@ -180,6 +180,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/bf12_companions.cpp
   src/kernels/mma_gemv.cu
   src/kernels/dense_mma_bf16w.cu
+  src/kernels/dense_fp4_decode.cu
   src/kernels/l2_prefetch.cu
   src/kernels/glm_mhc.cu
   src/kernels/glm_moe.cu

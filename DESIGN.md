@@ -1501,10 +1501,16 @@ GLM-FP8 T=1 run on 2026-09-03 took 31.3 ms/token against an estimated
 24.5 ms weight-read floor at TP=4. See
 [benchmarks](docs/benchmarks.md) for subsequent measurements.
 
-**Dense mixed NVFP4 prefill.** Qwen3.8-27B's mixed checkpoint keeps
+**Dense mixed NVFP4 MLPs.** Qwen3.8-27B's mixed checkpoint keeps
 channel-scaled FP8 attention/head tensors and its late MLP layers in their
-native format. NVFP4 MLPs use the production grouped kernel for decode and
-short prefills. At 1024 rows and above, `fp4w_gemm` uses 256×128×64 tiles
+native format. Small-row dense products (at most 16 rows and 17408 columns
+along either matrix axis, with K divisible by 128) use a 16×128×128 decode tile.
+Its three raw-weight/activation stages occupy 46 KiB, and gate/up share
+one grid to fill otherwise idle SMs. On multi-node walks the attention
+fold prefetches at most the gate's payload and scales. These changes keep
+the same ascending-k16 FP32 dot and single global-scale division as the
+production grouped kernel, which handles other short shapes. At 1024
+rows and above, `fp4w_gemm` uses 256×128×64 tiles
 on eight warps, two activation stages and two swizzled weight tiles in
 96 KiB of shared memory. Each warp reuses its activation fragments across
 64 output columns. E2M1 × E4M3 products are exact in BF16; the dot keeps

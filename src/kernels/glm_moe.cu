@@ -4579,6 +4579,9 @@ void launch_dense_mma_fp4_prod_bf16(const uint16_t* act, size_t act_stride,
   if (m <= 0 || n <= 0) return;
   if (!act || !seg || !views || !out)
     throw std::invalid_argument("dense mma fp4 prod: null pointer");
+  if (try_dense_fp4_decode_bf16(act, act_stride, seg, views, which, out, m, n, k, stream,
+                                fp4_group))
+    return;
   launch_moe_grouped_mma_fp4<uint16_t>(act, act_stride, nullptr, seg, /*n_segs=*/1,
                                        /*max_rows=*/m, /*rows_per_block=*/0, views, which,
                                        out, static_cast<size_t>(n), n, k, stream, fp4_group);
