@@ -68,9 +68,9 @@ chain the solo-vs-batch bitwise gates require.
 Serve A/B against the FP8 release (same prompts, temp 0, identical
 transcripts and drafter acceptance): short prompt 29.1 vs 24.5 tok/s
 (119 vs 141 ms/pass), pp448 prefill 720-748 vs 931 ms. The NVFP4
-release now leads on both — there is no performance case left for a
-lossy dense-W4A4 path, so none is built (see the MoE-side
-`DGPP_MOE_W4A4` gate, still issue-#68-blocked).
+release led on both in that measurement. The broader workload comparison
+below has one decode exception. No lossy dense-W4A4 path is built (see the
+MoE-side `DGPP_MOE_W4A4` gate, still issue-#68-blocked).
 
 ## Original dense NVFP4 prefill GEMM (2026-10-06)
 
@@ -105,3 +105,12 @@ tensor-parallel forwards, output-layout guards and CUDA sanitizers cover
 the changed path. Resident view initialization now omits the optional MTP
 layer when MTP is disabled, saving 710 MiB at world 1 with DFlash2.
 The linked record retains rejected alternatives and the validation scope.
+
+The matched FP8/NVFP4/FP8 campaign at worlds 1, 2 and 4 measured faster
+NVFP4 cold prefills in all twelve buckets, with reductions of 0.08–15.45%.
+Long-prompt margins are small. Decode improved in 59 of 60 cells; four-node
+single-request prose remained 6.3% slower because DFlash2 accepted fewer
+drafts despite faster individual steps. The strict all-cells performance
+gate remains open. The 100-case GSM8K sample scored 95/100 for NVFP4 and
+96/100 for FP8; both scored 100/100 on extraction. These samples do not
+establish broad quality equivalence.
