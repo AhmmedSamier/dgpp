@@ -48,6 +48,15 @@ and [test/data preparation](../docs/testing.md).
 For exact arguments, read the usage header or use `--help` where supported.
 Some older scripts start work immediately and do not implement `--help`.
 
+`serve_admission_bench.py --url http://127.0.0.1:18081 --label COMMIT-CONFIG
+--out RESULTS.json` measures isolated decode/prefill, short arrivals, sustained
+arrivals and cancellation. Use identical arguments on fresh baseline and
+candidate servers in alternating order, with both equal and different busy/idle
+budgets. It records exact request hashes and output counts, correlates the long
+response with native prefill progress, and rejects unrelated traffic. Output
+hashes are evidence for separate numerical review, not a quality score; SSE
+update gaps are client observations, not per-token kernel timings.
+
 ## Build, configuration, and deployment
 
 | File | What it does | When to use it |
