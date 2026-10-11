@@ -191,13 +191,13 @@ class SessionModel : public PrefillReporting {
     const int64_t* ids = nullptr;
     int64_t start = 0, end = 0, next = 0;
     int64_t budget_tokens = 0;
-    // Families that preserve state across arbitrary aligned chunks may
-    // spend the cap from next rather than stopping at global budget grids.
-    bool relative_budget = false;
     std::vector<int64_t> cuts;
     size_t cut_index = 0;
     bool span_start = true;
     bool suspended = false;
+    // Families that preserve state across arbitrary aligned chunks may
+    // spend the cap from next rather than stopping at global budget grids.
+    bool relative_budget = false;
     SnapshotRequest* snap = nullptr;
     Outputs output;
   };
