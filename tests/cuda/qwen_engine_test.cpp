@@ -980,6 +980,7 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
         // Its aligned tail donates capacity to the older reader in that tick.
         const int64_t align = graph.prefill_chunk_alignment();
         dgpp::sched::AdmissionPolicy policy;
+        policy.prefill_early_admission = true;
         policy.prefill_budget_tokens = static_cast<int>(8 * align);
         policy.prefill_idle_budget_tokens = policy.prefill_budget_tokens;
         std::vector<dgpp::sched::SchedulerRequest> requests(2);
@@ -1003,10 +1004,10 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
         }
         dgpp::sched::Scheduler concurrent(&graph, {}, 0, policy, /*prefix_slots=*/0);
         concurrent.submit(requests[0]);
-        // Reach 24 * align, also a boundary of the donated 6 * align
-        // share. A real cursor stops at its global grid/model cuts, so
-        // an arbitrary current position need not consume its whole cap.
-        for (int tick = 0; tick < 3; ++tick) concurrent.tick();
+        // Reach 16 * align, off the donated 6 * align grid. The cursor
+        // must spend the work budget from its actual position, not stop
+        // early at an unrelated global multiple of the new allocation.
+        for (int tick = 0; tick < 2; ++tick) concurrent.tick();
         require(concurrent.meters().prefilling == 1, "long graph prefill must still be in flight");
         concurrent.submit(requests[1]);
         const auto before = concurrent.meters();

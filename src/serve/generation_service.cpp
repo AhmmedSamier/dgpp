@@ -2480,6 +2480,8 @@ void GenerationService::route_metrics_prometheus(HttpResponseWriter& w) {
             int64_t{policy.prefill_budget_tokens});
   out.gauge("dgpp_admission_prefill_idle_budget_tokens", "Prefill tokens per tick without active decode.",
             int64_t{policy.prefill_idle_budget_tokens});
+  out.gauge("dgpp_admission_prefill_early_admission", "Queued short text may join an in-flight prefill.",
+            int64_t{policy.prefill_early_admission ? 1 : 0});
 
   // Occupancy.
   out.gauge("dgpp_num_requests_running", "Requests holding an engine slot (prefilling included).", int64_t{m.active});
@@ -2768,6 +2770,8 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {  Scheduler::Meter
   append_json_int(&out, sched_.admission_policy().prefill_budget_tokens);
   out.append(",\"prefill_idle_budget_tokens\":");
   append_json_int(&out, sched_.admission_policy().prefill_idle_budget_tokens);
+  out.append(",\"prefill_early_admission\":");
+  out.append(sched_.admission_policy().prefill_early_admission ? "true" : "false");
   out.append("}");
   out.append(",\"tokens_out\":");
   append_json_int(&out, static_cast<int64_t>(st.tokens_out));

@@ -400,6 +400,7 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
         else if (p.key == "prefill_budget_tokens") e.prefill_budget_tokens = static_cast<int>(integer(x, ek, what, -1, 1 << 30));
         else if (p.key == "model_alias") e.model_alias = text(p.value, ek, what);
         else if (p.key == "prefill_idle_budget_tokens") e.prefill_idle_budget_tokens = static_cast<int>(integer(x, ek, what, 0, 1 << 30));
+        else if (p.key == "prefill_early_admission") e.prefill_early_admission = boolean(x, ek, what);
         else if (p.key == "bulk_pace_gbps") e.bulk_pace_gbps = number(x, ek, what);
         else if (p.key == "bulk_inflight") e.bulk_inflight = static_cast<int>(integer(x, ek, what, -1, 1 << 20));
         else if (p.key == "rendezvous_timeout_ms") e.rendezvous_timeout_ms = static_cast<int>(integer(x, ek, what, 1, 1 << 30));

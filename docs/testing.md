@@ -7,6 +7,11 @@ contains the real-cluster recipe and latency/throughput trade-offs. The schedule
 suite covers short-reader admission, aligned-share donation, global chunk-grid
 tails and failure cleanup; `qwen_engine_test` exercises admission and donation
 with a real two-rank engine, including MTP3 and row-independent transcript parity.
+Early-admission cases explicitly enable the opt-in; a separate host regression
+checks the default deferral policy. `qwen_decode_test` also checks a donated
+share followed by full work budgets across automatic model-grid boundaries,
+with a retained structural snapshot and exact target/draft state against the
+same explicit chunk cuts.
 
 `prefix_snapshot_test` forces a four-block K/V pool full at snapshot time in
 Qwen and GLM. It covers monolithic and resumable prefill, unchanged target/draft

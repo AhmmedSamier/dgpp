@@ -3517,6 +3517,7 @@ DGPP_TEST(scheduler_multiAdmission_no_group_after_inflight_exhausts_budget) {
   engine.arm(1, {20, 21, 22}, 3);
   engine.arm(2, {30, 31, 32}, 3);
   dgpp::sched::AdmissionPolicy policy;
+  policy.prefill_early_admission = true;
   policy.prefill_budget_tokens = 4;
   Scheduler sched(&engine, {}, 0, policy);
   sched.submit(make_request("long", 15, 3));
@@ -3573,6 +3574,33 @@ class AdmissionFairEngine : public ChunkFakeEngine {
   }
 };
 
+DGPP_TEST(scheduler_early_admission_is_opt_in) {
+  require(!dgpp::sched::AdmissionPolicy{}.prefill_early_admission,
+          "default admission preserves throughput-oriented batching");
+  for (const bool early : {false, true}) {
+    AdmissionFairEngine engine(10000);
+    engine.arm(0, {10, 11}, 2);
+    engine.arm(early ? 1 : 0, std::vector<int32_t>(128, 20), 128);
+    dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_budget_tokens = 256;
+    policy.prefill_early_admission = early;
+    Scheduler sched(&engine, {}, 0, policy);
+    sched.submit(make_request("long", 8192, 2));
+    sched.tick();
+    sched.submit(make_request("arrival", 23, 128));
+    const auto computed = sched.meters().prompt_tokens_computed;
+    sched.tick();
+    require((sched.meters().tokens_generated > 0) == early,
+            "only explicit early admission starts the arriving decoder during prefill");
+    require(sched.meters().prompt_tokens_computed - computed == (early ? 255 : 256),
+            "default keeps the full long-reader share; opt-in donation stays within the cap");
+    sched.run_to_completion();
+    require(sched.find("arrival")->steps_done == 128 &&
+                sched.meters().prompt_tokens_computed == 8215 && engine.pool_blocks_in_use() == 0,
+            "both admission modes finish the same work and release reservations");
+  }
+}
+
 DGPP_TEST(scheduler_lone_prefill_preserves_global_grid_at_the_final_tail) {
   struct GridEngine : AdmissionFairEngine {
     std::map<int, int64_t> positions;
@@ -3590,6 +3618,7 @@ DGPP_TEST(scheduler_lone_prefill_preserves_global_grid_at_the_final_tail) {
     engine.arm(0, {10, 11}, 2);
     if (paired) engine.arm(1, {20, 21}, 2);
     dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_early_admission = true;
     policy.prefill_budget_tokens = 32;
     Scheduler sched(&engine, {}, 0, policy);
     sched.submit(make_request("first", 155, 2));
@@ -3619,6 +3648,7 @@ DGPP_TEST(scheduler_queuedText_boundary_sizes_join_busy_and_idle_fair_shares) {
       engine.arm(long_slot, {20, 21}, 2);
       engine.arm(peer_slot, {30, 31}, 2);
       dgpp::sched::AdmissionPolicy policy;
+      policy.prefill_early_admission = true;
       policy.prefill_budget_tokens = 256;
       policy.prefill_idle_budget_tokens = 2048;
       Scheduler sched(&engine, {}, 0, policy);
@@ -3665,6 +3695,7 @@ DGPP_TEST(scheduler_queuedText_redistributes_multiple_aligned_tails) {
   AdmissionFairEngine engine(10000);
   for (int slot = 0; slot < 4; ++slot) engine.arm(slot, {10 + slot, 20 + slot}, 2);
   dgpp::sched::AdmissionPolicy policy;
+  policy.prefill_early_admission = true;
   policy.prefill_budget_tokens = 32;
   Scheduler sched(&engine, {}, 0, policy);
   sched.submit(make_request("long", 4096, 2));
@@ -3695,6 +3726,7 @@ DGPP_TEST(scheduler_queuedText_short_stream_preserves_long_and_decode_progress) 
   engine.arm(1, {20, 21}, 2);
   for (int i = 0; i < 20; ++i) engine.arm(2, {30, 31}, 2);
   dgpp::sched::AdmissionPolicy policy;
+  policy.prefill_early_admission = true;
   policy.prefill_budget_tokens = 256;
   Scheduler sched(&engine, {}, 0, policy);
   sched.submit(make_request("decoder", 1, 100));
@@ -3723,6 +3755,7 @@ DGPP_TEST(scheduler_queuedText_all_short_tails_finish_without_extra_admission) {
   engine.arm(1, {20, 21}, 2);
   engine.arm(0, {30, 31}, 2);
   dgpp::sched::AdmissionPolicy policy;
+  policy.prefill_early_admission = true;
   policy.prefill_budget_tokens = 32;
   Scheduler sched(&engine, {}, 0, policy);
   sched.submit(make_request("tail", 33, 2));
@@ -3745,6 +3778,7 @@ DGPP_TEST(scheduler_queuedText_oldest_first_one_begin_with_four_requests) {
   engine.arm(2, std::vector<int32_t>(40, 30), 40);
   engine.arm(3, std::vector<int32_t>(40, 40), 40);
   dgpp::sched::AdmissionPolicy policy;
+  policy.prefill_early_admission = true;
   policy.prefill_budget_tokens = 16;
   Scheduler sched(&engine, {}, 0, policy);
   sched.submit(make_request("decode", 1, 40));
@@ -3793,6 +3827,7 @@ DGPP_TEST(scheduler_queuedText_full_reservation_slot_and_aligned_share_guards) {
         engine.arm(0, {10, 11}, 2);
         engine.arm(1, {20, 21, 22}, 3);
         dgpp::sched::AdmissionPolicy policy;
+        policy.prefill_early_admission = true;
         policy.prefill_budget_tokens = budget;
         Scheduler sched(&engine, {}, 0, policy);
         sched.submit(make_request("long", 31, 2));  // 17 blocks, full lifetime
@@ -3815,6 +3850,7 @@ DGPP_TEST(scheduler_queuedText_full_reservation_slot_and_aligned_share_guards) {
   engine.arm(0, {10, 11}, 2);
   engine.arm(1, {30}, 1);
   dgpp::sched::AdmissionPolicy policy;
+  policy.prefill_early_admission = true;
   policy.prefill_budget_tokens = 8;
   Scheduler sched(&engine, {}, 0, policy);
   sched.submit(make_request("long", 31, 2));
@@ -3839,6 +3875,7 @@ DGPP_TEST(scheduler_queuedText_cached_small_total_and_long_history_attach) {
     engine.arm(0, {20, 21}, 2);
     engine.arm(1, {30, 31}, 2);
     dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_early_admission = true;
     policy.prefill_budget_tokens = 8;
     Scheduler sched(&engine, {}, 0, policy);
     auto cached = make_cached_request("seed", counted_prompt(length), {length - 1}, 1);
@@ -3876,6 +3913,7 @@ DGPP_TEST(scheduler_queuedText_keeps_image_and_group_advance_eligibility) {
     engine.group = group;
     engine.arm(0, {10, 11}, 2);
     dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_early_admission = true;
     policy.prefill_budget_tokens = 8;
     Scheduler sched(&engine, {}, 0, policy);
     sched.submit(make_request("long", 127, 2));
@@ -3946,6 +3984,7 @@ DGPP_TEST(scheduler_queuedText_mtp_physical_boundary_must_complete) {
     engine.arm(0, {20, 21, 22}, 3);  // deferred until slot 0 retires
     engine.arm(1, {20, 21, 22}, 3);  // sufficient physical headroom
     dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_early_admission = true;
     policy.prefill_budget_tokens = 8;
     Scheduler sched(&engine, {}, 0, policy);
     sched.submit(make_request("long", 31, 2));
@@ -3984,6 +4023,7 @@ DGPP_TEST(scheduler_reservation_depth_clamp_and_synchronous_admission) {
             engine.arm(0, std::vector<int32_t>(steps, 20), steps);
             engine.arm(1, std::vector<int32_t>(steps, 20), steps);
             dgpp::sched::AdmissionPolicy policy;
+            policy.prefill_early_admission = true;
             policy.prefill_budget_tokens = budget;
             Scheduler sched(&engine, {}, 0, policy);
             sched.submit(make_request("long", 29, 4));
@@ -4032,6 +4072,7 @@ DGPP_TEST(scheduler_queuedText_mtp_cached_attach_and_clamp_fit) {
     const int steps = context == 34 ? 26 : 3;
     engine.arm(1, std::vector<int32_t>(steps, 20), steps);
     dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_early_admission = true;
     policy.prefill_budget_tokens = 8;
     Scheduler sched(&engine, {}, 0, policy);
     auto cached = make_cached_request("seed", counted_prompt(4), {3}, 1);
@@ -4077,6 +4118,7 @@ DGPP_TEST(scheduler_queuedText_mtp_snapshot_copy_headroom) {
     engine.arm(0, {10, 11}, 2);
     engine.arm(1, {20}, 1);
     dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_early_admission = true;
     policy.prefill_budget_tokens = 8;
     Scheduler sched(&engine, {}, 0, policy);
     sched.submit(make_request("long", 31, 2));
@@ -4101,6 +4143,7 @@ DGPP_TEST(scheduler_queuedText_injected_begin_failure_cleanup) {
   engine.arm(1, {20, 21}, 2);
   engine.arm(0, {30}, 1);
   dgpp::sched::AdmissionPolicy policy;
+  policy.prefill_early_admission = true;
   policy.prefill_budget_tokens = 8;
   Scheduler sched(&engine, {}, 0, policy);
   sched.submit(make_request("long", 127, 2));
@@ -4132,6 +4175,7 @@ DGPP_TEST(scheduler_queuedText_failed_begin_releases_head_snapshot_immediately) 
   engine.arm(1, {20, 21}, 2);
   engine.arm(0, {30}, 1);
   dgpp::sched::AdmissionPolicy policy;
+  policy.prefill_early_admission = true;
   policy.prefill_budget_tokens = 8;
   policy.prefix_head_snapshots = true;
   Scheduler sched(&engine, {}, 0, policy);
@@ -4167,6 +4211,7 @@ DGPP_TEST(scheduler_queuedText_cancel_and_advance_failure_release_joined_snapsho
     engine.arm(1, {20, 21}, 2);
     engine.arm(0, {30}, 1);
     dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_early_admission = true;
     policy.prefill_budget_tokens = 8;
     Scheduler sched(&engine, {}, 0, policy);
     sched.submit(make_request("long", 127, 2));
@@ -4214,6 +4259,7 @@ DGPP_TEST(scheduler_fairShare_busy_budget_rotates_and_survives_compaction) {
       for (int slot = 1; slot < 4; ++slot) engine.arm(slot, {20, 21}, 2);
       for (int slot = 0; slot < 4; ++slot) engine.arm(slot, {90, 91}, 2);
       dgpp::sched::AdmissionPolicy policy;
+      policy.prefill_early_admission = true;
       policy.prefill_budget_tokens = busy_budget;
       policy.prefill_idle_budget_tokens = 8;
       Scheduler sched(&engine, {}, 0, policy);

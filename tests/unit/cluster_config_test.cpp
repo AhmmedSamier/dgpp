@@ -87,6 +87,23 @@ DGPP_TEST(cluster_config_parses_engine_rope_scaling) {
           "only yarn");
 }
 
+DGPP_TEST(cluster_config_early_prefill_admission_is_explicit) {
+  require(!dgpp::serve::parse_cluster_config(engine_json("{}"), "t").engine.prefill_early_admission,
+          "early prefill admission is off by default");
+  require(!dgpp::serve::parse_cluster_config(engine_json(R"({"prefill_early_admission":false})"), "t")
+               .engine.prefill_early_admission,
+          "early prefill admission can be explicitly disabled");
+  for (const std::string value : {"1", "\"true\"", "null"}) {
+    bool rejected = false;
+    try {
+      (void)dgpp::serve::parse_cluster_config(engine_json("{\"prefill_early_admission\":" + value + "}"), "t");
+    } catch (const std::exception&) {
+      rejected = true;
+    }
+    require(rejected, "early prefill admission requires a JSON boolean");
+  }
+}
+
 DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
   const std::string json = R"({
     "model": "org/name",
@@ -97,6 +114,7 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
     "engine": {"max_concurrency": 2, "decode_graph": true, "prefix_cache_gib": 0.5,
                "admission": "grow", "stats_interval_s": 0, "mtp_depth": 2, "prefill": "exact",
                "prefill_budget_tokens": 256, "prefill_idle_budget_tokens": 2048,
+               "prefill_early_admission": true,
                "prefix_min_tokens": 512, "prefix_head_snapshots": false, "mtp_draft": "greedy",
                "mtp_schedule_sampled_scale": 0.5, "mtp_draft_temperature": 0.7, "mtp_verify": "block",
                "dflash_batch_rows": 32, "dflash_weights": "fp8", "prefill_group": false,
@@ -117,6 +135,7 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
               c.engine.mtp_depth == 2 && c.engine.prefix_cache_gib == 0.5 &&
               c.engine.admission == "grow" && c.engine.stats_interval_s == 0.0 && c.engine.prefill == "exact" &&
               c.engine.prefill_budget_tokens == 256 && c.engine.prefill_idle_budget_tokens == 2048 &&
+              c.engine.prefill_early_admission &&
               c.engine.prefix_min_tokens == 512 && !c.engine.prefix_head_snapshots &&
               c.engine.mtp_draft == "greedy" && c.engine.mtp_schedule_sampled_scale == 0.5 &&
               c.engine.mtp_draft_temperature == 0.7 && c.engine.mtp_verify == "block" &&

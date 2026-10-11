@@ -551,8 +551,10 @@ The single-Spark NVIDIA and RadixArk Qwen NVFP4 templates explicitly select
 NVFP4/FP8 templates select 256-token busy and 2,048-token idle budgets.
 A positive budget bounds aligned prefill work before each decode pass.
 On non-group-advance engines, an unfinished prefill shares that budget with
-at most one new oldest-fitting queued text request per tick, even if that
-text would otherwise fit in a single pass. Slot and KV reservation limits
+at most one new oldest-fitting request needing chunking per tick. Enabling
+`engine.prefill_early_admission` (`--prefill-early-admission`, default off)
+also admits text that would fit in a single pass and redistributes unused
+aligned shares. Slot and KV reservation limits
 still apply; images and group-advance engines retain their existing paths.
 Earlier short-text decoding can reduce later ticks to the busy budget and
 increase the long prompt's completion time. Try 256 or 512 tokens; the budget must
@@ -566,12 +568,14 @@ uses larger chunks when no request is actively decoding. It must be at least
 the enabled busy budget, use the same alignment and fit the prefill scratch
 limit. Zero keeps the fixed-budget behavior. The scheduler checks for active
 decode after cancellations and before each chunk, so a long prompt can speed
-up after its decoding peer retires. Required model and snapshot cuts still
-split chunks. Short cold prompts can group up to the selected budget.
+up after its decoding peer retires. Required snapshot and structural cuts still
+split chunks. Qwen fills each resumable work budget from the cursor position;
+other model families retain their chunk grids. Short cold prompts can group up
+to the selected budget.
 Larger idle chunks also increase the maximum wait for cancellation or a newly
 arriving request; they do not preempt a chunk already running.
 
-Earlier admission can also reduce aggregate throughput during a burst: a
+Early admission is opt-in because it can reduce aggregate throughput during a burst: a
 long prefill holds a slot while the new decoders run in smaller batches,
 and their arrival ends an idle-budget boost. Equal busy and idle budgets
 remove that budget-switch component, while preserving the batch-packing

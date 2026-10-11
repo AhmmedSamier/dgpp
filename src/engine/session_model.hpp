@@ -195,6 +195,9 @@ class SessionModel : public PrefillReporting {
     size_t cut_index = 0;
     bool span_start = true;
     bool suspended = false;
+    // Families that preserve state across arbitrary aligned chunks may
+    // spend the cap from next rather than stopping at global budget grids.
+    bool relative_budget = false;
     SnapshotRequest* snap = nullptr;
     Outputs output;
   };
@@ -873,8 +876,10 @@ void SessionModel<D>::prefill_chunk(PrefillCursor& cursor, int64_t budget) {
   int64_t c1 = cursor.cut_index < cursor.cuts.size() ? cursor.cuts[cursor.cut_index] : end;
   // Keep model/snapshot cuts separate from the scheduling grid. A larger
   // budget can coalesce future work without crossing a required snapshot.
-  // Global grid boundaries preserve the original fixed-budget chunk shapes.
-  if (budget > 0) c1 = std::min(c1, (c0 / budget + 1) * budget);
+  // Legacy families preserve fixed-budget global grids. A cursor opting
+  // into work budgets can fill its cap from its actual current position.
+  if (budget > 0) c1 = cursor.relative_budget ? c0 + std::min(c1 - c0, budget)
+                                            : std::min(c1, (c0 / budget + 1) * budget);
   if (cursor.cut_index < cursor.cuts.size() && c1 == cursor.cuts[cursor.cut_index]) ++cursor.cut_index;
   if (c1 - c0 > max_tokens_)
     throw std::invalid_argument("session_prefill: a chunk of " + std::to_string(c1 - c0) +
@@ -897,7 +902,8 @@ void SessionModel<D>::prefill_chunk(PrefillCursor& cursor, int64_t budget) {
   if (c1 < end) {
     // The chunk after this one on the same grid and cuts.
     int64_t c2 = cursor.cut_index < cursor.cuts.size() ? cursor.cuts[cursor.cut_index] : end;
-    if (budget > 0) c2 = std::min(c2, (c1 / budget + 1) * budget);
+    if (budget > 0) c2 = cursor.relative_budget ? c1 + std::min(c2 - c1, budget)
+                                              : std::min(c2, (c1 / budget + 1) * budget);
     if (c2 > c1 && c2 - c1 <= max_tokens_) {
       run.next_ids = ids + (c1 - start);
       run.next_T = static_cast<int>(c2 - c1);

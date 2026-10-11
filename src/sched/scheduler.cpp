@@ -1425,10 +1425,10 @@ bool Scheduler::quantum() {
       for (size_t i = 0; i < requests_.size(); ++i) {
         if (open_slots <= 0 || inflight.size() + begins.size() >= max_advances) break;
         if (requests_[i].state != State::kQueued) continue;
-        // While a non-group prefill is in flight, text of any size can
-        // join its fair shares; a one-shot must not wait for leftovers.
+        // With early admission enabled, text of any size can join an
+        // in-flight non-group prefill's shares instead of waiting for leftovers.
         // Keep image and group-advance eligibility on their existing paths.
-        if ((group_advance || !requests_[i].spec.images.empty()) &&
+        if ((!policy_.prefill_early_admission || group_advance || !requests_[i].spec.images.empty()) &&
             !needs_chunked_prefill(static_cast<int>(i), budget)) continue;
         const int64_t need = new_blocks(requests_[i], plan_prefix(requests_[i]));
         if (need > free_blocks) continue;
@@ -1502,6 +1502,10 @@ bool Scheduler::quantum() {
         advance_prefill_group(members, budgets);
       else
         advance_prefill(members.at(0), budgets.at(0));
+    } else if (!policy_.prefill_early_admission) {
+      // Preserve the throughput-oriented policy, including its original
+      // aligned shares. Early admission and donation are an explicit opt-in.
+      for (const int a : inflight) advance_prefill(a, share);
     } else if (inflight.size() == 1) {
       // Keep a lone reader on its original chunk grid. Shrinking its last
       // budget cannot help a peer and can split the tail into extra GPU walks.

@@ -75,27 +75,28 @@ admits fitting one-shots/groups into the align-down leftover (never a new
 chunked start — chunked read-ins stay one at a time). Order derives from
 arrival order and the last-advanced prefill only, so every rank agrees.
 
-For non-group-advance engines, queued text of any total prompt length can
-join these shares. The original rule admitted only prompts classified as
-needing chunking; a fitting shorter prompt could wait until the long prefill
-finished because the align-down leftover was zero. The issue #104 follow-up
-removes that size exclusion without adding a short-request priority or a
-second budget. Image and group-advance eligibility, monolithic mode and
+By default, non-group-advance engines admit only prompts classified as needing
+chunking into these shares. Shorter prompts use the leftovers and may wait for
+the long prefill to finish. This preserves throughput-oriented decode batching.
+`engine.prefill_early_admission=true` opts into issue #104's policy: queued text
+of any total prompt length can join, without a short-request priority or a
+second budget. The early policy is off by default because cluster measurements
+found substantial burst-throughput regressions. Image and group-advance eligibility, monolithic mode and
 admission without an in-flight prefill retain their existing paths.
 
 The new reader still needs a free slot and its reservation under the existing
 KV policy. Cached text attaches through the same prefix plan and computes
-only its suffix. A short tail keeps its rounded-up aligned allocation and
+only its suffix. With early admission enabled, a short tail keeps its rounded-up aligned allocation and
 donates the rest of its share to unfinished readers, split equally in
 aligned units with arrival-order ties. This happens before the advances,
 uses replicated positions and stays inside the original tick budget. When
 all readers finish, unused capacity does not create another admission lane.
-These allocations are caps: model chunk grids and required snapshot cuts
-can end an actual GPU advance earlier, so allocated budget is not a
-measurement of computed-token throughput. A lone reader keeps its original
-budget, including its final tail, to preserve its global chunk grid. The
-same applies when every reader fits its original share: without a recipient,
-shrinking those shares only risks extra advances.
+These allocations are caps: required snapshot/structural cuts can end a GPU
+advance earlier. Qwen spends the cap from the cursor's current position and
+omits redundant automatic chunk-grid cuts; this avoids splitting work again
+after a share changes. Other families retain their chunk-grid contracts.
+A lone reader, or a set of readers that all fit their original shares, keeps
+those shares unchanged, including its final tails.
 Early decoding may switch later ticks to the smaller busy budget,
 delaying long-prompt completion; this policy does not promise unchanged
 completion latency or starvation freedom under sustained KV pressure.
