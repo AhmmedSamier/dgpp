@@ -34,12 +34,13 @@ class PortabilityTest(unittest.TestCase):
                     "DGPP_CLUSTER_CONFIG": str(self.config)}
         self.values = site_env.settings(self.env)
 
-    def test_localhost_and_deployment_http_override(self):
+    def test_default_binding_and_deployment_http_override(self):
         resolved = site_env.resolve_config(self.config, self.values)
-        self.assertEqual(resolved["http"], {"bind_host": "127.0.0.1", "port": 18080})
+        self.assertEqual(resolved["http"], {"bind_host": "0.0.0.0", "port": 18080})
         self.config.write_text(json.dumps({"model": "org/model", "world_size": 1,
-                                         "http": {"bind_host": "0.0.0.0", "port": 8080}}))
+                                         "http": {"bind_host": "127.0.0.1", "port": 8080}}))
         resolved = site_env.resolve_config(self.config, self.values)
+        self.assertEqual(resolved["http"], {"bind_host": "127.0.0.1", "port": 8080})
         self.assertEqual(resolved["ports"]["http"], 8080)
         with patch.dict(os.environ, self.env, clear=True):
             self.assertEqual(site_env.default_host(), "127.0.0.1")
@@ -197,6 +198,8 @@ class PortabilityTest(unittest.TestCase):
         models = {
             "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8": "glm-5.3-flash_nvfp4-fp8",
             "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64": "glm-5.3_int4-int8",
+            "HawkBearPig/GLM-5.3-NF4I8-GPTQ-H32-g128": "glm-5.3_nf4i8",
+            "HawkBearPig/GLM-5.3-Mixed346-GPTQ-H32-A8-g128": "glm-5.3_mixed346",
             "nvidia/GLM-4.7-NVFP4": "glm-4.7_nvfp4",
             "Qwen/Qwen3.8-Flash-Next-FP8": "qwen-3.8-flash-next_fp8",
             "nvidia/Qwen3.8-Flash-Next-NVFP4": "qwen-3.8-flash-next_nvfp4",
