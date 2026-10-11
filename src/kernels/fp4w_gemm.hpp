@@ -26,4 +26,13 @@ void launch_fp4w_gemm_bf16(const uint16_t* act, size_t act_stride, const GlmFp4M
 
 bool fp4w_gemm_shape_ok(const void* act, size_t act_stride, int k);
 
+// Paired dense projections with the Qwen SwiGLU epilogue. Each completed
+// gate/up dot is rounded to BF16 before SiLU(gate) * up, just as in the
+// separate projection/activation calls. Only the final activation is stored.
+// Supports the same activation and output layouts as launch_fp4w_gemm_bf16.
+void launch_fp4w_gate_up_swiglu_bf16(const uint16_t* act, size_t act_stride,
+                                     const GlmFp4Matrix& gate, const GlmFp4Matrix& up,
+                                     uint16_t* out, int m, int n, int k, cudaStream_t stream,
+                                     size_t out_stride = 0);
+
 }  // namespace dgpp

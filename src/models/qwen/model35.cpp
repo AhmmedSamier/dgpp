@@ -940,15 +940,13 @@ void Qwen35Model::dense_mlp(const uint16_t* x, uint16_t* out, int tokens,
     // tolerance-equal, never bitwise, across the boundary — a different
     // fp32 summation order). The 256-row tile amortizes weight decoding
     // over more rows and wins at the 1024-row boundary at TP 1/2/4.
+    // Gate/up share one tile and retain both BF16 roundings before SwiGLU.
     // Smaller ragged tiles are not consistently faster. Decode keeps the
     // solo-vs-batch bitwise chain the gates pin.
     if (tokens <= 0) return;
     if (tokens >= 1024) {
-      launch_fp4w_gemm_bf16(x, static_cast<size_t>(H), m.gate_fp4, gate_tmp_, tokens,
-                            static_cast<int>(I), H, stream);
-      launch_fp4w_gemm_bf16(x, static_cast<size_t>(H), m.up_fp4, up_tmp_, tokens,
-                            static_cast<int>(I), H, stream);
-      qwen35_swiglu_bf16(gate_tmp_, up_tmp_, gate_tmp_, static_cast<int64_t>(tokens) * I, stream);
+      launch_fp4w_gate_up_swiglu_bf16(x, static_cast<size_t>(H), m.gate_fp4, m.up_fp4,
+                                    gate_tmp_, tokens, static_cast<int>(I), H, stream);
       launch_fp4w_gemm_bf16(gate_tmp_, static_cast<size_t>(I), m.down_fp4, out, tokens, H,
                             static_cast<int>(I), stream);
       return;

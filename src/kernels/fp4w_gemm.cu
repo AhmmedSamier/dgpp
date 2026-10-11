@@ -1,15 +1,14 @@
 // The NVFP4-weight GEMM — see fp4w_gemm.hpp.
-#include "kernels/fp4w_gemm.hpp"
+#include <stdexcept>
+#include <type_traits>
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp4.h>
 
-#include <stdexcept>
-#include <type_traits>
-
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
+#include "kernels/fp4w_gemm.hpp"
 
 namespace dgpp {
 namespace {
@@ -21,14 +20,18 @@ namespace {
 // shared rows use an XOR swizzle instead of padding. Each 8-bf16 vector
 // stays aligned, while ldmatrix's eight rows address distinct banks.
 // The dot keeps the original ascending-k FP32 accumulation and divides
-// by the global scale once in the epilogue.
+// by the global scale once in the epilogue. A paired tile uses 64 gate
+// columns and 64 up columns. Each warp owns 16 of each, allowing SwiGLU
+// to consume both BF16-rounded dots directly without an intermediate store.
 constexpr int kBM = 256, kBN = 128, kBK = 64;
 constexpr int kStages = 2;
 constexpr int kStride = kBK * 2;
 constexpr int kTileBytes = kBM * kStride;
 constexpr int kWeightTileBytes = kBN * kStride;
 constexpr int kSmem = kStages * kTileBytes + 2 * kWeightTileBytes;
-constexpr int thread_count(int warp_n) { return (kBM / 64) * (kBN / warp_n) * 32; }
+constexpr int thread_count(int warp_n) {
+  return (kBM / 64) * (kBN / warp_n) * 32;
+}
 
 __device__ __forceinline__ int swizzled_col(int row, int col) {
   return col ^ ((row & 7) * 8);
@@ -36,9 +39,12 @@ __device__ __forceinline__ int swizzled_col(int row, int col) {
 
 __device__ __forceinline__ void cp16(void* dst, const void* src, bool valid) {
   const unsigned address = static_cast<unsigned>(__cvta_generic_to_shared(dst));
-  asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;" ::"r"(address), "l"(src), "r"(valid ? 16 : 0));
+  asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;" ::"r"(address), "l"(src),
+               "r"(valid ? 16 : 0));
 }
-__device__ __forceinline__ void commit() { asm volatile("cp.async.commit_group;" ::); }
+__device__ __forceinline__ void commit() {
+  asm volatile("cp.async.commit_group;" ::);
+}
 template <int N>
 __device__ __forceinline__ void wait_pending() {
   asm volatile("cp.async.wait_group %0;" ::"n"(N));
@@ -60,11 +66,12 @@ __device__ __forceinline__ uint32_t decode_pair_bf16_w(uint32_t byte, __half2 s2
   return *reinterpret_cast<const uint32_t*>(&b);
 }
 
-template <typename OutT, int kGroupM, int kWarpN>
+template <typename OutT, int kGroupM, int kWarpN, bool Pair = false>
 __global__ __launch_bounds__(thread_count(kWarpN), 1) void fp4w_gemm_kernel(
     const uint16_t* __restrict__ act, size_t act_stride, const uint8_t* __restrict__ payload,
     const uint8_t* __restrict__ scales, size_t scale_stride, const float* __restrict__ global,
-    OutT* __restrict__ out, int m, int n, int k, size_t out_stride) {
+    OutT* __restrict__ out, int m, int n, int k, size_t out_stride, const uint8_t* up_payload,
+    const uint8_t* up_scales, const float* up_global) {
   extern __shared__ __align__(128) uint8_t smem[];
   static_assert(kWarpN == 32 || kWarpN == 64);
   constexpr int kThreads = thread_count(kWarpN);
@@ -72,20 +79,22 @@ __global__ __launch_bounds__(thread_count(kWarpN), 1) void fp4w_gemm_kernel(
   uint8_t* sa = smem;
   uint8_t* sw = smem + kStages * kTileBytes;  // two W tiles
   const int tid = threadIdx.x, warp = tid / 32, lane = tid % 32;
-  const float g = *global;  // one broadcast read: the whole grid's divisor
+  // A paired tile holds 64 gate columns followed by 64 up columns.
+  constexpr int OutputBN = Pair ? 64 : kBN;
+  const float g = *global;
   // The tile order: groups of kGroupM m-tiles walked n-tile by n-tile (a
   // wave's blocks share kGroupM activation tiles from L2 while each weight
   // tile streams once per group).
-  const int m_tiles = (m + kBM - 1) / kBM, n_tiles = (n + kBN - 1) / kBN;
+  const int m_tiles = (m + kBM - 1) / kBM, n_tiles = (n + OutputBN - 1) / OutputBN;
   const int bid = static_cast<int>(blockIdx.x);
   const int group = bid / (kGroupM * n_tiles);
   const int first_m = group * kGroupM;
   const int group_rows = min(kGroupM, m_tiles - first_m);
   const int in_group = bid - group * kGroupM * n_tiles;
   const int m0 = (first_m + in_group % group_rows) * kBM;
-  const int n0 = (in_group / group_rows) * kBN;
+  const int n0 = (in_group / group_rows) * OutputBN;
   const int row_base = (warp / (kBN / kWarpN)) * 64;
-  const int col_base = (warp % (kBN / kWarpN)) * kWarpN;
+  const int col_base = (warp % (kBN / kWarpN)) * (Pair ? kWarpN / 2 : kWarpN);
   const int steps = k / kBK;
   const size_t payload_stride = static_cast<size_t>(k) / 2;
   // The activation copy map: 256 rows x 8 16-byte chunks = 2048 chunks,
@@ -106,16 +115,21 @@ __global__ __launch_bounds__(thread_count(kWarpN), 1) void fp4w_gemm_kernel(
     const int koff = step * kBK;
 #pragma unroll
     for (int i = 0; i < kCopies; ++i)
-      cp16(as + a_row[i] * kStride + swizzled_col(a_row[i], a_piece[i]) * 2,
-           a_src[i] + koff, a_ok[i]);
+      cp16(as + a_row[i] * kStride + swizzled_col(a_row[i], a_piece[i]) * 2, a_src[i] + koff,
+           a_ok[i]);
   };
   // Two threads place one weight row: 32 codes each, fetched in one
   // 16-byte vector. Each half uses its own 16-code scale group.
   const int wrow = tid / 2, wk = (tid % 2) * 32;
-  const bool w_ok = n0 + wrow < n && (kWarpN == 64 || tid < 256);
-  const uint8_t* wsrc =
-      payload + static_cast<size_t>(w_ok ? n0 + wrow : 0) * payload_stride + static_cast<size_t>(wk) / 2;
-  const uint8_t* ssrc = scales + static_cast<size_t>(w_ok ? n0 + wrow : 0) * scale_stride;
+  const int weight_row = Pair ? wrow % 64 : wrow;
+  const uint8_t* weight_payload = Pair && wrow >= 64 ? up_payload : payload;
+  const uint8_t* weight_scales = Pair && wrow >= 64 ? up_scales : scales;
+  const bool w_ok = n0 + weight_row < n && (kWarpN == 64 || tid < 256);
+  const uint8_t* wsrc = weight_payload +
+                        static_cast<size_t>(w_ok ? n0 + weight_row : 0) * payload_stride +
+                        static_cast<size_t>(wk) / 2;
+  const uint8_t* ssrc =
+      weight_scales + static_cast<size_t>(w_ok ? n0 + weight_row : 0) * scale_stride;
   struct Raw {
     uint4 codes;
     uint32_t sc;
@@ -176,13 +190,13 @@ __global__ __launch_bounds__(thread_count(kWarpN), 1) void fp4w_gemm_kernel(
 #pragma unroll
       for (int i = 0; i < 4; ++i)
         ldsm_x4(af[i], as + (row_base + i * 16 + lane % 16) * kStride +
-                           swizzled_col(row_base + i * 16 + lane % 16,
-                                        kk + (lane / 16) * 8) * 2);
+                           swizzled_col(row_base + i * 16 + lane % 16, kk + (lane / 16) * 8) * 2);
       uint32_t bf[kWarpN / 8][2];
 #pragma unroll
       for (int jj = 0; jj < kWarpN / 16; ++jj) {
         // Matrices 0/1 = n8 tile 2jj at k kk..kk+7 / kk+8..kk+15, 2/3 = tile 2jj+1.
-        const int tile = col_base + jj * 16 + (lane / 16) * 8 + lane % 8;
+        // In a paired tile, jj=0 reads gate and jj=1 reads the corresponding up columns.
+        const int tile = col_base + jj * (Pair ? 64 : 16) + (lane / 16) * 8 + lane % 8;
         const int kb = kk + ((lane / 8) % 2) * 8;
         uint32_t q4[4];
         ldsm_x4(q4, ws + tile * kStride + swizzled_col(tile, kb) * 2);
@@ -199,7 +213,8 @@ __global__ __launch_bounds__(thread_count(kWarpN), 1) void fp4w_gemm_kernel(
               "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
               "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
               : "+f"(acc[i][j][0]), "+f"(acc[i][j][1]), "+f"(acc[i][j][2]), "+f"(acc[i][j][3])
-              : "r"(af[i][0]), "r"(af[i][1]), "r"(af[i][2]), "r"(af[i][3]), "r"(bf[j][0]), "r"(bf[j][1]));
+              : "r"(af[i][0]), "r"(af[i][1]), "r"(af[i][2]), "r"(af[i][3]), "r"(bf[j][0]),
+                "r"(bf[j][1]));
       // The next step's W tile, a half per two k16 steps, into the other tile.
       if (place_next && (kk % 32) == 16) place_half(step + 1, nxt_raw, kk / 32);
     }
@@ -208,65 +223,107 @@ __global__ __launch_bounds__(thread_count(kWarpN), 1) void fp4w_gemm_kernel(
     body(step, raw0, raw1);
     if (step + 1 < steps) body(step + 1, raw1, raw0);
   }
-  const int r = lane / 4, cc = (lane % 4) * 2;
-  // Adjacent columns share one BF16 conversion and aligned 32-bit store.
-  // Odd strides, unaligned output views and a final odd column stay scalar.
-  const bool packed = (reinterpret_cast<uintptr_t>(out) & 3u) == 0 && (out_stride & 1u) == 0;
+  if constexpr (Pair) {
+    static_assert(std::is_same_v<OutT, uint16_t> && kWarpN == 32);
+    // Preserve the two projection roundings and Qwen's expf/div/mul
+    // sequence. No fast sigmoid or global-scale reassociation is used.
+    const float up_g = *up_global;
+    const int r = lane / 4, cc = (lane % 4) * 2;
+    const bool packed = (reinterpret_cast<uintptr_t>(out) & 3u) == 0 && (out_stride & 1u) == 0;
 #pragma unroll
-  for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < 4; i++)
 #pragma unroll
-    for (int j = 0; j < kWarpN / 8; ++j)
+      for (int j = 0; j < 2; j++)
 #pragma unroll
-      for (int pair = 0; pair < 2; ++pair) {
-        const int row = m0 + row_base + i * 16 + r + pair * 8;
-        const int col = n0 + col_base + j * 8 + cc;
-        if (row < m && col < n) {
-          const size_t index = static_cast<size_t>(row) * out_stride + col;
-          const float x = __fdiv_rn(acc[i][j][pair * 2], g);
-          const float y = __fdiv_rn(acc[i][j][pair * 2 + 1], g);
-          if constexpr (std::is_same_v<OutT, float>) {
-            out[index] = x;
-            if (col + 1 < n) out[index + 1] = y;
-          } else {
-            if (packed && col + 1 < n) {
-              const __nv_bfloat162 p = __floats2bfloat162_rn(x, y);
-              *reinterpret_cast<uint32_t*>(out + index) = *reinterpret_cast<const uint32_t*>(&p);
-            } else {
-              out[index] = __bfloat16_as_ushort(__float2bfloat16_rn(x));
-              if (col + 1 < n) out[index + 1] = __bfloat16_as_ushort(__float2bfloat16_rn(y));
+        for (int pair = 0; pair < 2; pair++) {
+          const int row = row_base + i * 16 + r + pair * 8;
+          const int col = col_base + j * 8 + cc;
+          if (m0 + row < m && n0 + col < n) {
+            const float gx = bf16_bits_to_float(
+                __bfloat16_as_ushort(__float2bfloat16_rn(__fdiv_rn(acc[i][j][pair * 2], g))));
+            const float gy = bf16_bits_to_float(
+                __bfloat16_as_ushort(__float2bfloat16_rn(__fdiv_rn(acc[i][j][pair * 2 + 1], g))));
+            const float ux = bf16_bits_to_float(__bfloat16_as_ushort(
+                __float2bfloat16_rn(__fdiv_rn(acc[i][j + 2][pair * 2], up_g))));
+            const float uy = bf16_bits_to_float(__bfloat16_as_ushort(
+                __float2bfloat16_rn(__fdiv_rn(acc[i][j + 2][pair * 2 + 1], up_g))));
+            const uint16_t ox = float_to_bf16_bits((gx / (1.0f + expf(-gx))) * ux);
+            const uint16_t oy = float_to_bf16_bits((gy / (1.0f + expf(-gy))) * uy);
+            OutT* dest = out + size_t(m0 + row) * out_stride + n0 + col;
+            if (packed && n0 + col + 1 < n)
+              *reinterpret_cast<uint32_t*>(dest) = uint32_t(ox) | (uint32_t(oy) << 16);
+            else {
+              dest[0] = ox;
+              if (n0 + col + 1 < n) dest[1] = oy;
             }
           }
         }
-      }
+  } else {
+    const int r = lane / 4, cc = (lane % 4) * 2;
+    // Adjacent columns share one BF16 conversion and aligned 32-bit store.
+    // Odd strides, unaligned output views and a final odd column stay scalar.
+    const bool packed = (reinterpret_cast<uintptr_t>(out) & 3u) == 0 && (out_stride & 1u) == 0;
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+#pragma unroll
+      for (int j = 0; j < kWarpN / 8; ++j)
+#pragma unroll
+        for (int pair = 0; pair < 2; ++pair) {
+          const int row = m0 + row_base + i * 16 + r + pair * 8;
+          const int col = n0 + col_base + j * 8 + cc;
+          if (row < m && col < n) {
+            const size_t index = static_cast<size_t>(row) * out_stride + col;
+            const float x = __fdiv_rn(acc[i][j][pair * 2], g);
+            const float y = __fdiv_rn(acc[i][j][pair * 2 + 1], g);
+            if constexpr (std::is_same_v<OutT, float>) {
+              out[index] = x;
+              if (col + 1 < n) out[index + 1] = y;
+            } else {
+              if (packed && col + 1 < n) {
+                const __nv_bfloat162 p = __floats2bfloat162_rn(x, y);
+                *reinterpret_cast<uint32_t*>(out + index) = *reinterpret_cast<const uint32_t*>(&p);
+              } else {
+                out[index] = __bfloat16_as_ushort(__float2bfloat16_rn(x));
+                if (col + 1 < n) out[index + 1] = __bfloat16_as_ushort(__float2bfloat16_rn(y));
+              }
+            }
+          }
+        }
+  }
 }
 
-template <typename OutT, int kGroupM, int kWarpN = 64>
+template <typename OutT, int kGroupM, int kWarpN = 64, bool Pair = false>
 void launch_tiles(const uint16_t* act, size_t act_stride, const GlmFp4Matrix& w, OutT* out, int m,
-                  int n, int k, cudaStream_t stream, size_t out_stride) {
+                  int n, int k, cudaStream_t stream, size_t out_stride,
+                  const GlmFp4Matrix* up = nullptr) {
   static const bool initialized = [] {
-    DGPP_CUDA_OK(cudaFuncSetAttribute(fp4w_gemm_kernel<OutT, kGroupM, kWarpN>,
+    DGPP_CUDA_OK(cudaFuncSetAttribute(fp4w_gemm_kernel<OutT, kGroupM, kWarpN, Pair>,
                                       cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
     return true;
   }();
   (void)initialized;
-  const dim3 grid(static_cast<unsigned>(((n + kBN - 1) / kBN) * ((m + kBM - 1) / kBM)));
-  fp4w_gemm_kernel<OutT, kGroupM, kWarpN><<<grid, thread_count(kWarpN), kSmem, stream>>>(
+  constexpr int OutputBN = Pair ? 64 : kBN;
+  const dim3 grid(static_cast<unsigned>(((n + OutputBN - 1) / OutputBN) * ((m + kBM - 1) / kBM)));
+  fp4w_gemm_kernel<OutT, kGroupM, kWarpN, Pair><<<grid, thread_count(kWarpN), kSmem, stream>>>(
       act, act_stride, w.payload, w.scales, static_cast<size_t>(k) / 16, w.global_scale, out, m, n,
-      k, out_stride);
+      k, out_stride, up ? up->payload : nullptr, up ? up->scales : nullptr,
+      up ? up->global_scale : nullptr);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
 template <typename OutT>
-void launch(const uint16_t* act, size_t act_stride, const GlmFp4Matrix& w, OutT* out, int m,
-            int n, int k, cudaStream_t stream, size_t out_stride) {
+void launch(const uint16_t* act, size_t act_stride, const GlmFp4Matrix& w, OutT* out, int m, int n,
+            int k, cudaStream_t stream, size_t out_stride) {
   if (m <= 0 || n <= 0) return;
   if (!act || !w.payload || !w.scales || !w.global_scale || !out)
     throw std::invalid_argument("fp4w gemm: null pointer");
   if (w.rows < n || w.cols != k) throw std::invalid_argument("fp4w gemm: view/shape mismatch");
   if (!fp4w_gemm_shape_ok(act, act_stride, k))
-    throw std::invalid_argument("fp4w gemm: k a positive multiple of 64, 16-byte aligned activation rows");
+    throw std::invalid_argument(
+        "fp4w gemm: k a positive multiple of 64, 16-byte aligned activation rows");
   if (out_stride == 0) out_stride = static_cast<size_t>(n);
-  if (out_stride < static_cast<size_t>(n)) throw std::invalid_argument("fp4w gemm: output row stride narrower than n");
+  if (out_stride < static_cast<size_t>(n))
+    throw std::invalid_argument("fp4w gemm: output row stride narrower than n");
   // Three M tiles per cache group improve the long-prefill shapes. Shorter
   // walks retain four; changing the block order does not reassociate a dot.
   // The 8704-wide TP2 gate/up and down shards benefit from more resident
@@ -290,6 +347,25 @@ void launch_fp4w_gemm_bf16(const uint16_t* act, size_t act_stride, const GlmFp4M
                            uint16_t* out, int m, int n, int k, cudaStream_t stream,
                            size_t out_stride) {
   launch<uint16_t>(act, act_stride, w, out, m, n, k, stream, out_stride);
+}
+
+void launch_fp4w_gate_up_swiglu_bf16(const uint16_t* act, size_t act_stride,
+                                     const GlmFp4Matrix& gate, const GlmFp4Matrix& up,
+                                     uint16_t* out, int m, int n, int k, cudaStream_t stream,
+                                     size_t out_stride) {
+  if (m <= 0 || n <= 0) return;
+  if (!act || !out || !gate.payload || !gate.scales || !gate.global_scale || !up.payload ||
+      !up.scales || !up.global_scale)
+    throw std::invalid_argument("fp4w gate/up: null pointer");
+  if (gate.rows < n || up.rows < n || gate.cols != k || up.cols != k || gate.scale_group != 16 ||
+      up.scale_group != 16)
+    throw std::invalid_argument("fp4w gate/up: view/shape mismatch");
+  if (!fp4w_gemm_shape_ok(act, act_stride, k))
+    throw std::invalid_argument("fp4w gate/up: invalid activation layout");
+  if (out_stride == 0) out_stride = static_cast<size_t>(n);
+  if (out_stride < static_cast<size_t>(n))
+    throw std::invalid_argument("fp4w gate/up: output row stride narrower than n");
+  launch_tiles<uint16_t, 3, 32, true>(act, act_stride, gate, out, m, n, k, stream, out_stride, &up);
 }
 
 }  // namespace dgpp

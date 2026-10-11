@@ -1860,6 +1860,12 @@ target_include_directories(fp4w_gemm_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/sr
 target_link_libraries(fp4w_gemm_test PRIVATE dgpp_kernels CUDA::cudart)
 dgpp_set_common(fp4w_gemm_test)
 add_test(NAME fp4w_gemm_test COMMAND fp4w_gemm_test)
+
+add_executable(qwen35_fp4_prefill_test tests/cuda/qwen35_fp4_prefill_test.cu)
+target_include_directories(qwen35_fp4_prefill_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(qwen35_fp4_prefill_test PRIVATE dgpp_models_qwen_layers dgpp_kernels CUDA::cudart)
+dgpp_set_common(qwen35_fp4_prefill_test)
+add_test(NAME qwen35_fp4_prefill_test COMMAND qwen35_fp4_prefill_test)
 add_executable(fp4_gemv_test tests/cuda/fp4_gemv_test.cu tests/cuda/fp4_gemv_checkpoint.cpp)
 target_include_directories(fp4_gemv_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(fp4_gemv_test PRIVATE dgpp_kernels dgpp_loaders CUDA::cudart)
