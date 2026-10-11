@@ -61,7 +61,7 @@ class Bench:
             time.sleep(.05)
         raise TimeoutError("server did not drain")
 
-    def stream(self, name, prompt, tokens, ready=None, cancel=False):
+    def stream(self, name, prompt, tokens, ready=None, cancel=False, dispatched=None):
         body = json.dumps({"model": self.model, "prompt": prompt,
                            "max_tokens": tokens, "temperature": 0,
                            "ignore_eos": True, "prefix_cache": False,
@@ -74,6 +74,8 @@ class Bench:
         done = False
         with closing(self.connection()) as conn:
             conn.request("POST", "/v1/completions", body, {"Content-Type": "application/json"})
+            if dispatched:
+                dispatched.set()
             response = conn.getresponse()
             if response.status != 200:
                 raise RuntimeError(f"{name}: HTTP {response.status}: {response.read()!r}")
@@ -154,7 +156,8 @@ class Bench:
                     metrics = self.get("/metrics")
                     readers = metrics["prefill"]["requests"]
                     if readers:
-                        observed = [{"observed_at": time.monotonic(), **r} for r in readers]
+                        observed = [{"phase": "before_arrival", "observed_at": time.monotonic(), **r}
+                                    for r in readers]
                         break
                     if long.done():
                         long.result()
@@ -169,9 +172,19 @@ class Bench:
                         time.sleep(self.args.interval)
                     # Retain prompt variation and dispatch timing in the record.
                     tokens = 8 if scenario == "mixed_short" else self.args.arrival_tokens
-                    futures.append(pool.submit(self.stream, f"arrival-{i}",
-                                               f"Task {i}. {short_prompt}", tokens,
-                                               cancel=scenario == "cancel"))
+                    dispatched = threading.Event()
+                    arrival = pool.submit(self.stream, f"arrival-{i}",
+                                          f"Task {i}. {short_prompt}", tokens,
+                                          cancel=scenario == "cancel", dispatched=dispatched)
+                    futures.append(arrival)
+                    if i == 0:
+                        if not dispatched.wait(self.args.timeout):
+                            raise TimeoutError("first arrival was not dispatched")
+                        readers = self.get("/metrics")["prefill"]["requests"]
+                        if not ({r["id"] for r in readers} & {r["id"] for r in observed}):
+                            raise RuntimeError("long native prefill ended before the first arrival was dispatched")
+                        observed.extend({"phase": "after_first_dispatch", "observed_at": time.monotonic(), **r}
+                                        for r in readers)
             records = [future.result() for future in futures]
         after = self.idle()
         ended = time.monotonic()

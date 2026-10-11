@@ -105,6 +105,8 @@ class AdmissionBenchmarkTest(unittest.TestCase):
         self.assertEqual(len(result["requests"]), 3)
         long = next(r for r in result["requests"] if r["name"] == "long")
         self.assertEqual(result["native_prefill_observation"][0]["id"], long["id"])
+        self.assertTrue(any(r["phase"] == "after_first_dispatch" and r["id"] == long["id"]
+                            for r in result["native_prefill_observation"]))
         self.assertEqual(result["generated_tokens"], 137)
         self.assertEqual(result["computed_prompt_tokens"], 48)
 
