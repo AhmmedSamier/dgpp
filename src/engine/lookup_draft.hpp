@@ -122,17 +122,6 @@ inline LookupDraft lookup_fuse(const std::vector<int32_t>& mtp, const LookupDraf
   return out;
 }
 
-// Positions where a fused block differs from the drafter's own — the rows
-// a sampled slot must re-price as point masses (proposal n = 0).
-inline std::vector<int> lookup_fused_positions(const std::vector<int32_t>& mtp,
-                                              const std::vector<int32_t>& fused) {
-  std::vector<int> out;
-  const size_t n = mtp.size() < fused.size() ? mtp.size() : fused.size();
-  for (size_t i = 0; i < n; ++i)
-    if (fused[i] != mtp[i]) out.push_back(static_cast<int>(i));
-  return out;
-}
-
 // Schedules the long verify block only while a copy is running: each extra
 // verify row costs attention over the full context, so the long block is
 // worth it only when steps saturate. A single saturated step happens inside

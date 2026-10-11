@@ -734,8 +734,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   // match (match_len >= nstrong) is taken on its own; a weak one only
   // when its first `agree` tokens equal the device's own picks (see
   // maybe_fuse_lookup). Same verify rows — throughput only, never the
-  // output: lookup drafts are point masses (sampled slots re-price fused
-  // rows at Q = 1). A firing step reseeds the
+  // output on greedy slots. Sampled slots retain their MTP proposals:
+  // choosing a lookup based on agreement changes the proposal distribution.
+  // A firing step reseeds the
   // slot's persistent feed (stream-ordered, no drain); silent steps cost
   // a host scan. May be set any time before serving (drains first).
   void set_lookup_drafts(bool on, int nmin = 6, int nstrong = 8, int agree = 2) {
@@ -2900,8 +2901,8 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     DGPP_CUDA_OK(cudaStreamSynchronize(model_->stream()));
   }
 
-  // Fuse a context-lookup match into drafts_[req] (greedy and sampled MTP
-  // slots). The mirror already ends at the
+  // Fuse a context-lookup match into drafts_[req] on greedy MTP slots.
+  // The mirror already ends at the
   // pending token: collect_verdict's `decided` is the accepted row winners
   // in order, whose last entry is the new pending (verify.next reads the
   // same row), so the matched suffix ends at the pending with no extra
@@ -2921,7 +2922,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   // and the pipeline's settle cadence is unchanged. Point masses only —
   // the commit rule never sees the draft source.
   void maybe_fuse_lookup(int req, const std::vector<int32_t>& extra = {}) {
-    if (!lookup_on_ || block_ || !model_->mtp_enabled()) return;
+    if (!lookup_on_ || block_ || !model_->mtp_enabled() || sampled_slot(req)) return;
     if (grammar_[static_cast<size_t>(req)] && grammar_[static_cast<size_t>(req)]->active())
       return;  // v1: staged grammar masks follow the mirror's picks, not fused rows
     if (depth_ < 1 || pending_[static_cast<size_t>(req)] < 0) return;
@@ -2939,33 +2940,12 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     if (fused == drafts) return;  // declined: neither strong nor agreeing
     DGPP_LOG_DEBUG("rank {}: lookup slot {} fires (match {} at {}, {} drafts{})", rank_, req, lu.match_len,
                    lu.match_end, lu.drafts.size(), lu.strong ? "" : " on agree");
-    const bool stochastic = sampled_slot(req);
-    const std::vector<int> repriced = stochastic ? lookup_fused_positions(drafts, fused) : std::vector<int>{};
     drafts = fused;
-    for (int i : repriced) {
-      // A fused row is a point mass: its proposal says "none" (n = 0), so
-      // the verify prices it at Q = 1 under either rule — the token rule's
-      // plain P(draft), the block rule's point-mass price — exact for any
-      // draft. Unfused rows keep the draws' proposals and the ratio rule.
-      // Same stream as the replay tail that wrote the draws (enqueued at
-      // launch, before this), and the seed below syncs it before the next
-      // replay reads them.
-      if (d_proposals_ == nullptr || i < 0 || i >= kSampleProposalSlots) continue;
-      DraftProposal* d = d_proposals_ + static_cast<size_t>(req) * kSampleProposalSlots + i;
-      DGPP_CUDA_OK(cudaMemsetAsync(&d->n, 0, sizeof(int32_t), model_->stream()));
-      DGPP_CUDA_OK(cudaMemcpyAsync(&d->token, &fused[static_cast<size_t>(i)], sizeof(int32_t),
-                                   cudaMemcpyHostToDevice, model_->stream()));
-      if (h_proposals_ != nullptr) {
-        h_proposals_[static_cast<size_t>(req) * kSampleProposalSlots + i].n = 0;
-        h_proposals_[static_cast<size_t>(req) * kSampleProposalSlots + i].token = fused[static_cast<size_t>(i)];
-      }
-    }
     fed_drafts_[static_cast<size_t>(req)] = drafts;
     fed_frozen_[static_cast<size_t>(req)] = 1;
     model_->session_graph_seed_feed(req, feed_of(req));
     ++lookup_fused_steps_;
     if (!lu.strong) ++lookup_agree_fused_steps_;
-    if (stochastic) ++lookup_sampled_fused_steps_;
   }
 
   // `rows`: the verify's rows this replay decided (rows_per_request_, or a
@@ -3152,7 +3132,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       // The mirror follows the decided transcript, whose last entry is the
       // new pending (verify.next reads the same row) — fused against it in
       // place, no extra append. Every slot's mirror stays complete so the
-      // gate cannot desync ranks; greedy and sampled MTP slots fuse (see helper).
+      // gate cannot desync ranks; only greedy MTP slots fuse (see helper).
       std::vector<int64_t>& lh = lookup_hist_[static_cast<size_t>(req)];
       for (int32_t t : decided) lh.push_back(t);
       if (rows > 1) maybe_fuse_lookup(req);
@@ -3716,7 +3696,8 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   std::vector<std::vector<int64_t>> lookup_hist_;
   uint64_t lookup_fused_steps_ = 0;
   uint64_t lookup_agree_fused_steps_ = 0;  // the fused steps taken below nstrong, on agreement
-  uint64_t lookup_sampled_fused_steps_ = 0;  // the fused steps on sampled slots (re-priced point masses)
+  uint64_t lookup_sampled_fused_steps_ =
+      0;  // reserved for sampled lookup support; currently always zero
   // A fused slot's fed_drafts_ holds its seeded rows until the next
   // snapshot point, which consumes (clears) the flag instead of copying
   // the mirror's one-step-stale picks over them.

@@ -2439,22 +2439,31 @@ void GenerationService::route_metrics_prometheus(HttpResponseWriter& w) {
   out.raw(
       "# HELP spec_decode_num_draft_tokens_total Cumulative MTP draft tokens verified.\n"
       "# TYPE spec_decode_num_draft_tokens_total counter\n"
-      "spec_decode_num_draft_tokens_total " + std::to_string(drafted) +
+      "spec_decode_num_draft_tokens_total " +
+      std::to_string(drafted) +
       "\n# HELP spec_decode_num_accepted_tokens_total Cumulative accepted draft tokens.\n"
       "# TYPE spec_decode_num_accepted_tokens_total counter\n"
-      "spec_decode_num_accepted_tokens_total " + std::to_string(accepted) +
+      "spec_decode_num_accepted_tokens_total " +
+      std::to_string(accepted) +
       "\n# HELP spec_decode_num_drafts_total Cumulative verification rounds.\n"
       "# TYPE spec_decode_num_drafts_total counter\n"
-      "spec_decode_num_drafts_total " + std::to_string(m.mtp.attempts[0]) +
-      "\n# HELP spec_decode_num_lookup_fused_total Cumulative steps whose drafts a prompt-history match replaced.\n"
+      "spec_decode_num_drafts_total " +
+      std::to_string(m.mtp.attempts[0]) +
+      "\n# HELP spec_decode_num_lookup_fused_total Cumulative steps whose drafts a prompt-history "
+      "match replaced.\n"
       "# TYPE spec_decode_num_lookup_fused_total counter\n"
-      "spec_decode_num_lookup_fused_total " + std::to_string(m.mtp.lookup_fused) +
-      "\n# HELP spec_decode_num_lookup_agree_fused_total Cumulative fused steps taken below nstrong, on device-pick agreement.\n"
+      "spec_decode_num_lookup_fused_total " +
+      std::to_string(m.mtp.lookup_fused) +
+      "\n# HELP spec_decode_num_lookup_agree_fused_total Cumulative fused steps taken below "
+      "nstrong, on device-pick agreement.\n"
       "# TYPE spec_decode_num_lookup_agree_fused_total counter\n"
-      "spec_decode_num_lookup_agree_fused_total " + std::to_string(m.mtp.lookup_agree_fused) +
-      "\n# HELP spec_decode_num_lookup_sampled_fused_total Cumulative fused steps on sampled slots (re-priced point masses).\n"
+      "spec_decode_num_lookup_agree_fused_total " +
+      std::to_string(m.mtp.lookup_agree_fused) +
+      "\n# HELP spec_decode_num_lookup_sampled_fused_total Sampled lookup fusion is disabled; this "
+      "counter stays zero.\n"
       "# TYPE spec_decode_num_lookup_sampled_fused_total counter\n"
-      "spec_decode_num_lookup_sampled_fused_total " + std::to_string(m.mtp.lookup_sampled_fused) + "\n");
+      "spec_decode_num_lookup_sampled_fused_total " +
+      std::to_string(m.mtp.lookup_sampled_fused) + "\n");
 
   const auto& policy = sched_.admission_policy();
   out.gauge("dgpp_build_info", "The server's build and world; the value is always 1.", int64_t{1},
@@ -2554,7 +2563,8 @@ void GenerationService::route_metrics_prometheus(HttpResponseWriter& w) {
   out.counter("dgpp_spec_decode_num_lookup_agree_fused_total",
               "Fused steps taken below nstrong, on device-pick agreement.", m.mtp.lookup_agree_fused);
   out.counter("dgpp_spec_decode_num_lookup_sampled_fused_total",
-              "Fused steps on sampled slots (re-priced point masses).", m.mtp.lookup_sampled_fused);
+              "Sampled lookup fusion is disabled; this counter stays zero.",
+              m.mtp.lookup_sampled_fused);
   for (int p = 0; p < m.mtp.depth && p < 8; ++p)
     out.counter("dgpp_spec_decode_num_draft_tokens_per_pos_total", "Draft tokens verified at each draft position.",
                 m.mtp.attempts[p], "position=\"" + std::to_string(p) + "\"");
