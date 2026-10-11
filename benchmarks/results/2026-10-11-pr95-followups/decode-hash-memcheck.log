@@ -1,0 +1,6 @@
+========= COMPUTE-SANITIZER
+2026-10-11 06:55:16.839 INFO  scenario: a world of one
+2026-10-11 06:55:17.079 INFO  bus: a world of one — no lanes, every collective the identity
+2026-10-11 06:55:17.081 INFO  scenario: a world of one OK
+2026-10-11 06:55:17.223 INFO  scenario graph_snapshot_hash: 0 total failures
+========= ERROR SUMMARY: 0 errors

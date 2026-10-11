@@ -1,0 +1,14 @@
+{
+  "command": [
+    "python3",
+    "scripts/dgpp-cluster",
+    "down",
+    "--config",
+    "/home/stephen/dgpp/pr95-followups-20261011/prefill-pair-w2-baseb/deployment.json",
+    "--log-dir",
+    "/home/stephen/dgpp/pr95-followups-20261011/prefill-pair-w2-baseb/world"
+  ],
+  "started": "2026-10-11T10:59:24.295940+00:00",
+  "returncode": 0,
+  "finished": "2026-10-11T10:59:28.040925+00:00"
+}

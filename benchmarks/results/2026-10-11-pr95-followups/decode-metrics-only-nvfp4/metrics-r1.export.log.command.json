@@ -1,0 +1,15 @@
+{
+  "command": [
+    "/usr/local/cuda/bin/nsys",
+    "export",
+    "--type",
+    "sqlite",
+    "--force-overwrite=true",
+    "-o",
+    "/home/stephen/dgpp/pr95-followups-20261011/decode-metrics-only-nvfp4/metrics-r1.sqlite",
+    "/home/stephen/dgpp/pr95-followups-20261011/decode-metrics-only-nvfp4/metrics-r1.nsys-rep"
+  ],
+  "started": "2026-10-11T06:50:31.921533+00:00",
+  "returncode": 0,
+  "finished": "2026-10-11T06:50:32.136796+00:00"
+}

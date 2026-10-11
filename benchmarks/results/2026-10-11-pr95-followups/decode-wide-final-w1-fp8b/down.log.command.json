@@ -1,0 +1,14 @@
+{
+  "command": [
+    "python3",
+    "scripts/dgpp-cluster",
+    "down",
+    "--config",
+    "/home/stephen/dgpp/pr95-followups-20261011/decode-wide-final-w1-fp8b/deployment.json",
+    "--log-dir",
+    "/home/stephen/dgpp/pr95-followups-20261011/decode-wide-final-w1-fp8b/world"
+  ],
+  "started": "2026-10-11T09:02:20.401187+00:00",
+  "returncode": 0,
+  "finished": "2026-10-11T09:02:23.483894+00:00"
+}

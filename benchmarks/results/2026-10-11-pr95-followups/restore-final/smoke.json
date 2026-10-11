@@ -1,0 +1,57 @@
+{
+  "request": {
+    "model": "Qwen/Qwen3.8-Flash-Next-FP8",
+    "messages": [
+      {
+        "role": "user",
+        "content": "What is 2 + 2? Reply with just the number."
+      }
+    ],
+    "max_tokens": 32,
+    "temperature": 0,
+    "chat_template_kwargs": {
+      "enable_thinking": false
+    }
+  },
+  "response": {
+    "id": "chatcmpl-aea6f418812f8fd1",
+    "object": "chat.completion",
+    "created": 1791719807,
+    "model": "Qwen/Qwen3.8-Flash-Next-FP8",
+    "system_fingerprint": null,
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "4",
+          "refusal": null
+        },
+        "logprobs": null,
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 26,
+      "completion_tokens": 2,
+      "total_tokens": 28,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "timings": {
+      "prompt_n": 26,
+      "cache_n": 0,
+      "predicted_n": 2,
+      "prompt_ms": 311.261707,
+      "prompt_per_token_ms": 11.971604115384615,
+      "prompt_per_second": 83.53099470729306,
+      "predicted_ms": 24.401699,
+      "predicted_per_token_ms": 24.401699,
+      "predicted_per_second": 40.98075302051714
+    }
+  }
+}

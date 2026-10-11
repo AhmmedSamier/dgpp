@@ -1,0 +1,14 @@
+{
+  "command": [
+    "python3",
+    "scripts/dgpp-cluster",
+    "down",
+    "--config",
+    "/home/stephen/dgpp/pr95-followups-20261011/prefill-fusion-w2-candidate/deployment.json",
+    "--log-dir",
+    "/home/stephen/dgpp/pr95-followups-20261011/prefill-fusion-w2-candidate/world"
+  ],
+  "started": "2026-10-11T10:45:06.329749+00:00",
+  "returncode": 0,
+  "finished": "2026-10-11T10:45:10.068739+00:00"
+}

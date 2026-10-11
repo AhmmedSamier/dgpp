@@ -1,0 +1,14 @@
+{
+  "command": [
+    "python3",
+    "scripts/dgpp-cluster",
+    "down",
+    "--config",
+    "/home/stephen/dgpp/pr95-followups-20261011/decode-hash-profile-fp8/deployment.json",
+    "--log-dir",
+    "/home/stephen/dgpp/pr95-followups-20261011/decode-hash-profile-fp8/world"
+  ],
+  "started": "2026-10-11T07:47:36.117104+00:00",
+  "returncode": 0,
+  "finished": "2026-10-11T07:47:50.244366+00:00"
+}

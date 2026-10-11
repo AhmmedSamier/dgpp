@@ -1,0 +1,12 @@
+{
+  "command": [
+    "python3",
+    "/home/stephen/dgpp/pr95-followups-20261011/decode_context_probe.py",
+    "127.0.0.1",
+    "18081",
+    "/home/stephen/dgpp/pr95-followups-20261011/decode-wide-final-w4-fp8a/decode-context.json"
+  ],
+  "started": "2026-10-11T07:56:24.360945+00:00",
+  "returncode": 0,
+  "finished": "2026-10-11T07:58:50.429202+00:00"
+}

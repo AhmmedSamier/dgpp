@@ -1,0 +1,11 @@
+{
+  "command": [
+    "scp",
+    "-q",
+    "stephen@192.168.88.12:/tmp/bus4/deployments/eb31dd384c3e69d0/rank1.nsys-rep",
+    "/home/stephen/dgpp/pr95-followups-20261011/decode-hash-profile-fp8/rank1.nsys-rep"
+  ],
+  "started": "2026-10-11T07:47:50.245059+00:00",
+  "returncode": 0,
+  "finished": "2026-10-11T07:47:50.713633+00:00"
+}

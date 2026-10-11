@@ -1,0 +1,143 @@
+{
+  "schema_version": 1,
+  "model": "Qwen3.8-27B",
+  "max_tokens": 256,
+  "temperature": 0.0,
+  "thinking": false,
+  "phases": [
+    {
+      "class": "prose",
+      "concurrency": 1,
+      "started_at": "10:09:33.754",
+      "metrics": {
+        "completion_tokens": 256,
+        "wall_s": 7.723398889880627,
+        "wall_tokens_per_s": 33.1460285361432,
+        "legacy_output_span_s": 7.569432840915397,
+        "legacy_output_span_tokens_per_s": 33.82023533074125
+      },
+      "requests": [
+        {
+          "status": 200,
+          "finish": "length",
+          "usage": {
+            "prompt_tokens": 37,
+            "completion_tokens": 256,
+            "total_tokens": 293,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "tokens": 256,
+          "prompt_sha256": "10db2bb9231f395effeff731fca10ca2459a0ed2f8419b1998c0adb6ffbfdffa",
+          "text_sha256": "359bdc91641556bc311c40ed39d032188cb4817857819ab389af4d96088007b3"
+        }
+      ],
+      "engine": {
+        "step_ms": 7545.599999999999,
+        "prefill_ms": 141.10000000000582,
+        "decode_steps": 97,
+        "decode_rows": 97,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 37,
+        "prompt_tokens_computed": 37,
+        "decode_tokens": 255,
+        "tokens_per_s": 33.79452926208651
+      }
+    },
+    {
+      "class": "prose",
+      "concurrency": 1,
+      "started_at": "10:09:41.479",
+      "metrics": {
+        "completion_tokens": 256,
+        "wall_s": 7.696295575005934,
+        "wall_tokens_per_s": 33.26275576413301,
+        "legacy_output_span_s": 7.542586382012814,
+        "legacy_output_span_tokens_per_s": 33.940612282611184
+      },
+      "requests": [
+        {
+          "status": 200,
+          "finish": "length",
+          "usage": {
+            "prompt_tokens": 37,
+            "completion_tokens": 256,
+            "total_tokens": 293,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "tokens": 256,
+          "prompt_sha256": "10db2bb9231f395effeff731fca10ca2459a0ed2f8419b1998c0adb6ffbfdffa",
+          "text_sha256": "359bdc91641556bc311c40ed39d032188cb4817857819ab389af4d96088007b3"
+        }
+      ],
+      "engine": {
+        "step_ms": 7524.700000000001,
+        "prefill_ms": 140.79999999998836,
+        "decode_steps": 97,
+        "decode_rows": 97,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 37,
+        "prompt_tokens_computed": 37,
+        "decode_tokens": 255,
+        "tokens_per_s": 33.888394221696544
+      }
+    },
+    {
+      "class": "prose",
+      "concurrency": 1,
+      "started_at": "10:09:49.176",
+      "metrics": {
+        "completion_tokens": 256,
+        "wall_s": 7.689934122841805,
+        "wall_tokens_per_s": 33.29027218056265,
+        "legacy_output_span_s": 7.536317818099633,
+        "legacy_output_span_tokens_per_s": 33.96884342976837
+      },
+      "requests": [
+        {
+          "status": 200,
+          "finish": "length",
+          "usage": {
+            "prompt_tokens": 37,
+            "completion_tokens": 256,
+            "total_tokens": 293,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "tokens": 256,
+          "prompt_sha256": "10db2bb9231f395effeff731fca10ca2459a0ed2f8419b1998c0adb6ffbfdffa",
+          "text_sha256": "359bdc91641556bc311c40ed39d032188cb4817857819ab389af4d96088007b3"
+        }
+      ],
+      "engine": {
+        "step_ms": 7532.5999999999985,
+        "prefill_ms": 139.10000000000582,
+        "decode_steps": 97,
+        "decode_rows": 97,
+        "tokens_generated": 256,
+        "prompts_prefilled": 1,
+        "prompt_tokens": 37,
+        "prompt_tokens_computed": 37,
+        "decode_tokens": 255,
+        "tokens_per_s": 33.852852932586366
+      }
+    }
+  ],
+  "source_sha256": "b83f169f021fe2d7dd64bbe1bb30867f59903811037ba69bbc3ed9cc6a1cdc58",
+  "record_note": "Per-token timing arrays and response text omitted; full source JSON retained locally."
+}

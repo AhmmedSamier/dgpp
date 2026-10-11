@@ -1,0 +1,9 @@
+{
+  "date": "2026-10-11T07:44:05.231027+00:00",
+  "source_commit": "d12e7e9fcb8197ad9d91a897a167f5b0df1b6f54",
+  "binary_sha256": "981d9dd764c4612c3c74f5903d7c42b47e1121733d69b1ad7a45ab345d13ac8f",
+  "source_clean": true,
+  "build_type": "Release",
+  "cuda": "13.0.88",
+  "note": "Full 241-entry suite and sanitizers ran on a6f3c939 before a host-only thread-safe launcher initialization fix and formatting. Relevant tests repeated on this final committed-source build."
+}

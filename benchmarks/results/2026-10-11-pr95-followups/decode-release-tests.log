@@ -1,0 +1,75 @@
+Internal ctest changing into directory: /home/stephen/workspace/dgpp/build-pr95
+Test project /home/stephen/workspace/dgpp/build-pr95
+      Start  29: nic_regress_selftest
+ 1/32 Test  #29: nic_regress_selftest .........................   Passed    1.30 sec
+      Start  99: qwen35_forward_fixture
+ 2/32 Test  #99: qwen35_forward_fixture .......................   Passed    0.09 sec
+      Start 100: qwen35_forward_smoke
+ 3/32 Test #100: qwen35_forward_smoke .........................   Passed    1.60 sec
+      Start 101: qwen35_decode_rows_invariance
+ 4/32 Test #101: qwen35_decode_rows_invariance ................   Passed    1.45 sec
+      Start 102: qwen35_prefill_group_invariance
+ 5/32 Test #102: qwen35_prefill_group_invariance ..............   Passed    1.81 sec
+      Start 103: qwen35_forward_generate
+ 6/32 Test #103: qwen35_forward_generate ......................   Passed    0.38 sec
+      Start 104: qwen35_forward_test_e2e
+ 7/32 Test #104: qwen35_forward_test_e2e ......................   Passed    1.93 sec
+      Start 105: qwen35_forward_generate_teacher
+ 8/32 Test #105: qwen35_forward_generate_teacher ..............   Passed    0.33 sec
+      Start 106: qwen35_forward_test
+ 9/32 Test #106: qwen35_forward_test ..........................   Passed    2.01 sec
+      Start 107: qwen35_mixed_fixture
+10/32 Test #107: qwen35_mixed_fixture .........................   Passed    0.09 sec
+      Start 108: qwen35_mixed_smoke
+11/32 Test #108: qwen35_mixed_smoke ...........................   Passed    1.53 sec
+      Start 109: qwen35_mixed_resident_mtp
+12/32 Test #109: qwen35_mixed_resident_mtp ....................   Passed    1.66 sec
+      Start 110: qwen35_mixed_rows_invariance
+13/32 Test #110: qwen35_mixed_rows_invariance .................   Passed    1.56 sec
+      Start 111: qwen35_mixed_generate
+14/32 Test #111: qwen35_mixed_generate ........................   Passed    0.28 sec
+      Start 112: qwen35_mixed_e2e
+15/32 Test #112: qwen35_mixed_e2e .............................   Passed    1.96 sec
+      Start 113: qwen35_mixed_generate_teacher
+16/32 Test #113: qwen35_mixed_generate_teacher ................   Passed    0.32 sec
+      Start 114: qwen35_mixed_test
+17/32 Test #114: qwen35_mixed_test ............................   Passed    1.97 sec
+      Start 115: qwen35_mixed_prefill_generate
+18/32 Test #115: qwen35_mixed_prefill_generate ................   Passed    1.91 sec
+      Start 116: qwen35_mixed_prefill_e2e
+19/32 Test #116: qwen35_mixed_prefill_e2e .....................   Passed    1.79 sec
+      Start 117: qwen35_mixed_prefill_generate_teacher
+20/32 Test #117: qwen35_mixed_prefill_generate_teacher ........   Passed    1.88 sec
+      Start 118: qwen35_mixed_prefill_test
+21/32 Test #118: qwen35_mixed_prefill_test ....................   Passed    1.75 sec
+      Start 119: qwen35_mixed_long_prefill_generate
+22/32 Test #119: qwen35_mixed_long_prefill_generate ...........   Passed    8.75 sec
+      Start 120: qwen35_mixed_long_prefill_e2e
+23/32 Test #120: qwen35_mixed_long_prefill_e2e ................   Passed    1.88 sec
+      Start 121: qwen35_mixed_long_prefill_generate_teacher
+24/32 Test #121: qwen35_mixed_long_prefill_generate_teacher ...   Passed    9.36 sec
+      Start 122: qwen35_mixed_long_prefill_test
+25/32 Test #122: qwen35_mixed_long_prefill_test ...............   Passed    1.84 sec
+      Start 123: qwen35_tp_test
+26/32 Test #123: qwen35_tp_test ...............................   Passed   11.37 sec
+      Start 202: fp4w_gemm_test
+27/32 Test #202: fp4w_gemm_test ...............................   Passed    9.93 sec
+      Start 215: glm_moe_test
+28/32 Test #215: glm_moe_test .................................   Passed   42.36 sec
+      Start 229: doll_selftest
+29/32 Test #229: doll_selftest ................................   Passed    1.61 sec
+      Start 231: roster_selftest
+30/32 Test #231: roster_selftest ..............................   Passed    0.04 sec
+      Start 232: bus_test
+31/32 Test #232: bus_test .....................................   Passed   39.82 sec
+      Start 233: bus_selftest
+32/32 Test #233: bus_selftest .................................   Passed    2.55 sec
+
+100% tests passed, 0 tests failed out of 32
+
+Label Time Summary:
+gpu     = 157.08 sec*proc (31 tests)
+host    =   0.04 sec*proc (1 test)
+rdma    =  43.68 sec*proc (3 tests)
+
+Total Test time (real) = 157.14 sec

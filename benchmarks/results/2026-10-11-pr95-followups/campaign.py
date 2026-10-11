@@ -3,7 +3,6 @@ import argparse, datetime, hashlib, json, os, pathlib, subprocess, sys
 from node_snapshot import capture
 ROOT=pathlib.Path(__file__).resolve().parents[3]
 OUT=pathlib.Path(os.environ.get('PR95_OUT',str(pathlib.Path(__file__).parent)))
-OUT.mkdir(parents=True,exist_ok=True)
 ENV={**os.environ,'CUDA_DEVICE_MAX_CONNECTIONS':'32','DGPP_NO_SWAP':'1'}
 # Loopback tests use two local NICs; serving uses the persisted per-node site settings.
 for key in ('DGPP_ROCE_DEVICES','DGPP_ROCE_GID_INDICES'):
@@ -24,6 +23,7 @@ def run(args,path,timeout=1800,check=True):
     return receipt['returncode']
 def main():
     ap=argparse.ArgumentParser();ap.add_argument('quant',choices=['fp8','nvfp4']);ap.add_argument('world',type=int,choices=[1,2,4]);ap.add_argument('label');ap.add_argument('--lite',action='store_true');ap.add_argument('--final',action='store_true');ap.add_argument('--prefill-only',action='store_true');ap.add_argument('--profile',action='store_true');ap.add_argument('--prefill-profile',action='store_true');ap.add_argument('--tune',action='store_true');ap.add_argument('--plain',action='store_true');ap.add_argument('--idle-budget',type=int);ap.add_argument('--base-ms',type=float);ap.add_argument('--row-ms',type=float);ap.add_argument('--block-budget',type=int);ap.add_argument('--schedule-off',action='store_true');ap.add_argument('--fixed-depth',type=int);ap.add_argument('--draft-weights',choices=['fp8','checkpoint']);ap.add_argument('--prefetch-window',type=int);ap.add_argument('--prefetch-rate');ap.add_argument('--prefetch-form');ap.add_argument('--draft-probe',action='store_true');ap.add_argument('--probe-classes',default='prose');ap.add_argument('--probe-concurrency',default='1');ap.add_argument('--probe-repeat',type=int,default=3);ap.add_argument('--quality',action='store_true');ap.add_argument('--quality-limit',type=int,default=100)
+    ap.add_argument('--decode-context',action='store_true')
     a=ap.parse_args();d=OUT/a.label;d.mkdir(exist_ok=False)
     c=json.loads((ROOT/f'deploy/cluster_qwen3.8-27b_{a.quant}_w{a.world}.example.json').read_text())
     c['http']={'bind_host':'127.0.0.1','port':18081};c['engine']['lookup_draft']=False
@@ -52,7 +52,7 @@ def main():
             capture(d,'before')
         run(['python3','scripts/serve_bench.py','127.0.0.1','18081','32','warm'],d/'warm.log')
         if a.profile:
-            run(['python3','scripts/timed_load.py','127.0.0.1','18081','--concurrency','1','--classes','code','--max-tokens','400','--repeat','1','--json-out',d/'decode.json'],d/'decode.log')
+            run(['python3','scripts/timed_load.py','127.0.0.1','18081','--concurrency','1','--classes',a.probe_classes,'--max-tokens','256','--repeat','1','--json-out',d/'decode.json'],d/'decode.log')
         elif a.prefill_profile:
             run(['python3','scripts/serve_prefill_probe.py','127.0.0.1','18081','8192','--repeat','1','--no-think','--tag','pr95-profile','--interval','1','--json-out',d/'prefill.json'],d/'prefill.log')
         elif a.draft_probe:
@@ -70,6 +70,8 @@ def main():
                     run(['python3','scripts/serve_api_check.py','127.0.0.1','18081'],d/'api.log')
             if a.quality:
                 run(['python3','scripts/serve_eval.py','127.0.0.1','18081','--out',d/'quality','--tasks','gsm8k,extract','--limit',str(a.quality_limit),'--concurrency','4','--max-tokens','4096','--no-think','--seed','20261010'],d/'quality.log')
+        if a.decode_context:
+            run(['python3',pathlib.Path(__file__).parent/'decode_context_probe.py','127.0.0.1','18081',d/'decode-context.json'],d/'decode-context.log')
         if not (a.profile or a.prefill_profile):capture(d,'after')
     finally:
         run(['python3','scripts/dgpp-cluster','down','--config',config,'--log-dir',d/'world'],d/'down.log',check=False)

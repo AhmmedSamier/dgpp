@@ -1,0 +1,15 @@
+{
+  "command": [
+    "/usr/local/cuda/bin/nsys",
+    "export",
+    "--type",
+    "sqlite",
+    "--force-overwrite=true",
+    "-o",
+    "/home/stephen/dgpp/pr95-followups-20261011/prefill-tail-profile-nvfp4/rank1.sqlite",
+    "/home/stephen/dgpp/pr95-followups-20261011/prefill-tail-profile-nvfp4/rank1.nsys-rep"
+  ],
+  "started": "2026-10-11T10:16:13.503306+00:00",
+  "returncode": 0,
+  "finished": "2026-10-11T10:16:14.973105+00:00"
+}

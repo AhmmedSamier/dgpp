@@ -24,7 +24,7 @@
         "complete": true
       }
     ],
-    "free_bytes": 307083964416,
+    "free_bytes": 295905001472,
     "note": "Final indexed-shard/header/length verification; content checksums were verified during the original cache transfer."
   },
   {
@@ -52,7 +52,7 @@
         "complete": true
       }
     ],
-    "free_bytes": 525925842944,
+    "free_bytes": 516836474880,
     "note": "Final indexed-shard/header/length verification; content checksums were verified during the original cache transfer."
   },
   {
@@ -80,7 +80,7 @@
         "complete": true
       }
     ],
-    "free_bytes": 785455562752,
+    "free_bytes": 779507175424,
     "note": "Final indexed-shard/header/length verification; content checksums were verified during the original cache transfer."
   },
   {
@@ -108,7 +108,7 @@
         "complete": true
       }
     ],
-    "free_bytes": 853823336448,
+    "free_bytes": 847921750016,
     "note": "Final indexed-shard/header/length verification; content checksums were verified during the original cache transfer."
   }
 ]

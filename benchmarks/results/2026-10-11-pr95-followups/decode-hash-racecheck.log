@@ -1,0 +1,6 @@
+========= COMPUTE-SANITIZER
+2026-10-11 06:55:17.546 INFO  scenario: a world of one
+2026-10-11 06:55:17.915 INFO  bus: a world of one — no lanes, every collective the identity
+2026-10-11 06:55:17.916 INFO  scenario: a world of one OK
+2026-10-11 06:55:18.393 INFO  scenario graph_snapshot_hash: 0 total failures
+========= RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)
