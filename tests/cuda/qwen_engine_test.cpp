@@ -975,6 +975,51 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
         }
         require(graph.pool_blocks_in_use() == 0, "concurrent graph prefill leaks KV reservations");
       }
+      {
+        // A below-budget request must join an already running real prefill.
+        // Its aligned tail donates capacity to the older reader in that tick.
+        const int64_t align = graph.prefill_chunk_alignment();
+        dgpp::sched::AdmissionPolicy policy;
+        policy.prefill_budget_tokens = static_cast<int>(8 * align);
+        policy.prefill_idle_budget_tokens = policy.prefill_budget_tokens;
+        std::vector<dgpp::sched::SchedulerRequest> requests(2);
+        std::vector<std::vector<int64_t>> expected;
+        for (int i = 0; i < 2; ++i) {
+          requests[i].id = "join-" + std::to_string(i);
+          requests[i].prompt = smoke_tokens(cfg, i == 0 ? 40 * align + 1 : align + 1, 6500 + i);
+          requests[i].max_steps = 12;
+          dgpp::sched::Scheduler solo_sched(&graph, {}, 0, policy, /*prefix_slots=*/0);
+          solo_sched.submit(requests[i]);
+          solo_sched.run_to_completion();
+          expected.push_back(solo_sched.find(requests[i].id)->generated);
+        }
+        dgpp::sched::Scheduler concurrent(&graph, {}, 0, policy, /*prefix_slots=*/0);
+        concurrent.submit(requests[0]);
+        // Reach 24 * align, also a boundary of the donated 6 * align
+        // share. A real cursor stops at its global grid/model cuts, so
+        // an arbitrary current position need not consume its whole cap.
+        for (int tick = 0; tick < 3; ++tick) concurrent.tick();
+        require(concurrent.meters().prefilling == 1, "long graph prefill must still be in flight");
+        concurrent.submit(requests[1]);
+        const auto before = concurrent.meters();
+        concurrent.tick();
+        require(concurrent.meters().tokens_generated > before.tokens_generated,
+                "short graph request must produce output on its first eligible tick");
+        require(concurrent.meters().prefilling == 1,
+                "short graph output must precede the long prefill completion");
+        const auto computed = concurrent.meters().prompt_tokens_computed - before.prompt_tokens_computed;
+        require(computed == 7 * align + 1,
+                "real graph prefill must consume the donated aligned tail within the budget: got " +
+                    std::to_string(computed) + ", expected " + std::to_string(7 * align + 1));
+        concurrent.run_to_completion();
+        for (size_t i = 0; i < requests.size(); ++i) {
+          const auto* result = concurrent.find(requests[i].id);
+          require(result->steps_done == 12, "joined graph transcript is complete");
+          if (row_independent)
+            require(result->generated == expected[i], "joined graph prefill changes the solo transcript");
+        }
+        require(graph.pool_blocks_in_use() == 0, "joined graph prefill leaks KV reservations");
+      }
       if (sample_cap) {
         std::vector<std::vector<int32_t>> reference;
         const std::vector<std::vector<int>> maps{{0, 1}, {slots - 1, 3}, {1, 0}};
