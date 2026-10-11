@@ -19,7 +19,7 @@ spec.loader.exec_module(bench_module)
 
 @contextmanager
 def server(fault=None):
-    state = {"requests": 0, "active": 0, "tokens": 0, "prompt": 0, "prefills": {}}
+    state = {"requests": 0, "active": 0, "tokens": 0, "prompt": 0, "prefills": {}, "terminal": 0}
     lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
@@ -42,6 +42,7 @@ def server(fault=None):
                            for rid in state["prefills"]]
                 self.send_json({"service": {"engine_failed": False, "requests_total": state["requests"]},
                                 "scheduler": {"active": state["active"], "queued": 0,
+                                              "records": state["active"], "terminal": state["terminal"],
                                               "tokens_generated": state["tokens"],
                                               "pool_blocks_in_use": state["requests"] if fault == "kv_leak" else 0,
                                               "prompt_tokens_computed": state["prompt"]},
@@ -82,8 +83,14 @@ def server(fault=None):
                     state["active"] -= 1
                     state["prompt"] += 16
                     state["tokens"] += body["max_tokens"]
+                    if fault != "snapshot_lag":
+                        state["terminal"] += 1
                     if fault == "traffic":
                         state["requests"] += 1
+                if fault == "snapshot_lag":
+                    time.sleep(.1)
+                    with lock:
+                        state["terminal"] += 1
 
     http = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=http.serve_forever)
@@ -125,6 +132,11 @@ class AdmissionBenchmarkTest(unittest.TestCase):
         with server("kv_leak") as bench:
             with self.assertRaisesRegex(RuntimeError, "retained KV blocks"):
                 bench.run("solo_decode", 0)
+
+    def test_drain_waits_for_the_final_engine_metrics_publication(self):
+        with server("snapshot_lag") as bench:
+            result = bench.run("solo_prefill", 0)
+        self.assertEqual(result["after"]["scheduler"]["terminal"], 1)
 
     def test_usage_output_length_and_cache_evidence_are_required(self):
         for fault, message in (("usage", "incomplete"), ("length", "output length"), ("cache", "cache hit")):

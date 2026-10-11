@@ -50,13 +50,18 @@ class Bench:
                 raise RuntimeError(f"GET {path}: {response.status} {response.read()!r}")
             return json.load(response)
 
-    def idle(self):
+    def idle(self, min_terminal=0):
         deadline = time.monotonic() + self.args.timeout
         while time.monotonic() < deadline:
             metrics = self.get("/metrics")
             if metrics["service"]["engine_failed"]:
                 raise RuntimeError("the engine failed")
-            if not metrics["scheduler"]["active"] and not metrics["scheduler"]["queued"]:
+            scheduler = metrics["scheduler"]
+            # Active/queued are live service counts; the remaining counters
+            # are published after an engine pass. Wait for that publication
+            # before interpreting throughput or released reservations.
+            if (not scheduler["active"] and not scheduler["queued"] and not scheduler["records"]
+                    and scheduler["terminal"] >= min_terminal):
                 return metrics
             time.sleep(.05)
         raise TimeoutError("server did not drain")
@@ -186,10 +191,12 @@ class Bench:
                         observed.extend({"phase": "after_first_dispatch", "observed_at": time.monotonic(), **r}
                                         for r in readers)
             records = [future.result() for future in futures]
-        after = self.idle()
+        after = self.idle(min_terminal=before["scheduler"]["terminal"] + len(records))
         ended = time.monotonic()
         if after["service"]["requests_total"] - before["service"]["requests_total"] != len(records):
             raise RuntimeError("unrelated traffic contaminated the benchmark")
+        if after["scheduler"]["terminal"] - before["scheduler"]["terminal"] != len(records):
+            raise RuntimeError("unexpected retirements or a stale initial metrics snapshot")
         if after["scheduler"]["pool_blocks_in_use"] > before["scheduler"]["pool_blocks_in_use"]:
             raise RuntimeError("cache-disabled requests retained KV blocks after drain")
         if observed:
@@ -228,8 +235,9 @@ def main():
     if args.interval < 0 or args.timeout <= 0:
         parser.error("interval must be nonnegative and timeout positive")
     bench = Bench(args)
-    bench.idle()
+    initial = bench.idle()
     bench.stream("warmup", "Continue counting: 1, 2, 3,", 32)
+    bench.idle(min_terminal=initial["scheduler"]["terminal"] + 1)
     report = {"label": args.label, "model": bench.model,
               "arguments": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
               "runs": []}
