@@ -50,7 +50,7 @@ __device__ __forceinline__ void ldsm_x4(uint32_t (&r)[4], const void* p) {
 }
 
 // Two e2m1 codes (one byte) times the group's scale (f16, exact) as a
-// bf16x2 word: the products carry <= 5 significant bits, so f16, f32 and
+// bf16x2 word: the products carry <= 6 significant bits, so f16, f32 and
 // bf16 all hold them exactly.
 __device__ __forceinline__ uint32_t decode_pair_bf16_w(uint32_t byte, __half2 s2) {
   const __half2 h(__nv_cvt_fp4x2_to_halfraw2(static_cast<__nv_fp4x2_storage_t>(byte), __NV_E2M1));
