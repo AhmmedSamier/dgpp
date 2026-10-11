@@ -1276,6 +1276,8 @@ set(QWEN35_MIXED_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/qwen35_mixed_fixture)
 add_test(NAME qwen35_mixed_fixture COMMAND qwen35_forward_test --write-fixture-mixed ${QWEN35_MIXED_FIXTURE})
 add_test(NAME qwen35_mixed_smoke COMMAND qwen35_forward_test --smoke ${QWEN35_MIXED_FIXTURE})
 set_tests_properties(qwen35_mixed_smoke PROPERTIES DEPENDS qwen35_mixed_fixture)
+add_test(NAME qwen35_mixed_resident_mtp COMMAND qwen35_forward_test --resident-mtp ${QWEN35_MIXED_FIXTURE})
+set_tests_properties(qwen35_mixed_resident_mtp PROPERTIES DEPENDS qwen35_mixed_fixture)
 add_test(NAME qwen35_mixed_rows_invariance COMMAND qwen35_forward_test --rows-invariance ${QWEN35_MIXED_FIXTURE})
 set_tests_properties(qwen35_mixed_rows_invariance PROPERTIES DEPENDS qwen35_mixed_fixture)
 add_test(NAME qwen35_mixed_generate

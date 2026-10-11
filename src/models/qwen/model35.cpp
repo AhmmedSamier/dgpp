@@ -354,7 +354,7 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
     // Resident: harvest every layer's [gate,up,down] views once — the
     // resident bumps are stable, so the tables stay valid for the process
     // lifetime (and the decode graph stays kernels-only).
-    fp4_view_layers_ = cfg_.num_hidden_layers + (cfg_.mtp_layer() >= 0 ? 1 : 0);
+    fp4_view_layers_ = cfg_.num_hidden_layers + (mtp_ ? 1 : 0);
     DGPP_CUDA_OK(cudaMalloc(&fp4_views_,
                             static_cast<size_t>(fp4_view_layers_) * 3 * sizeof(MoeExpertView)));
     std::vector<MoeExpertView> views(static_cast<size_t>(fp4_view_layers_) * 3);
@@ -1172,13 +1172,13 @@ MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens,
   // {0, m, 0} segment per row count plus the view tables (per-layer on
   // resident mixed-release stacks, one 3-entry staging slot elsewhere —
   // the ctor's split).
-  plan.add("nvfp4 dense segment/view tables",
-           M * sizeof(MoeSegment) +
-               (residency == LoaderResidency::Resident &&
-                                cfg.quant_kind == Qwen35QuantKind::Nvfp4Mixed
-                            ? (static_cast<size_t>(cfg.num_hidden_layers) + 1) *
-                                  3 * sizeof(MoeExpertView)
-                            : 3 * sizeof(MoeExpertView)));
+  plan.add(
+      "nvfp4 dense segment/view tables",
+      M * sizeof(MoeSegment) +
+          (residency == LoaderResidency::Resident && cfg.quant_kind == Qwen35QuantKind::Nvfp4Mixed
+               ? (static_cast<size_t>(cfg.num_hidden_layers) + (mtp ? 1 : 0)) * 3 *
+                     sizeof(MoeExpertView)
+               : 3 * sizeof(MoeExpertView)));
   // Dense FP8 prefill bridge: the largest dense matrix dequantized to BF16.
   plan.add("dense fp8 prefill bridge (largest dense matrix in BF16)",
            qwen35_dense_bridge_bytes(cfg));

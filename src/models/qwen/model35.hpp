@@ -206,6 +206,9 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
                                 const std::string& dflash2_dir = "");
 
   const Qwen35TextConfig& config() const { return cfg_; }
+  // Actual resident layer allocation, for comparing initialization with the
+  // memory plan. An unmaterialized or streamed layer contributes zero bytes.
+  size_t resident_layer_bytes(int layer) const { return loader_.resident_layer_span(layer).second; }
 
   // ---- the session core's hooks (engine/session_model.hpp) --------------------
   typename Base::Outputs run_rows(const typename Base::RowRun& run);

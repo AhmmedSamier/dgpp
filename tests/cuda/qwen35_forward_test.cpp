@@ -520,7 +520,7 @@ int run_group_invariance(const std::string& dir) {
 }
 
 int main(int argc, char** argv) {
-  std::string fixture, fixture_mixed, smoke, rows, group, checkpoint, dump, states;
+  std::string fixture, fixture_mixed, smoke, rows, group, checkpoint, dump, states, resident_mtp;
   bool relaxed = false, bf16_head = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -529,6 +529,8 @@ int main(int argc, char** argv) {
     else if (a == "--smoke" && i + 1 < argc) smoke = argv[++i];
     else if (a == "--rows-invariance" && i + 1 < argc) rows = argv[++i];
     else if (a == "--group-invariance" && i + 1 < argc) group = argv[++i];
+    else if (a == "--resident-mtp" && i + 1 < argc)
+      resident_mtp = argv[++i];
     else if (a == "--bf16-head") bf16_head = true;
     else if (a == "--checkpoint-dir" && i + 1 < argc) checkpoint = argv[++i];
     else if (a == "--dump-file" && i + 1 < argc) dump = argv[++i];
@@ -545,6 +547,23 @@ int main(int argc, char** argv) {
     if (!fixture_mixed.empty()) {
       qwen35fx::write_fixture(fixture_mixed, /*mixed=*/true);
       std::printf("[ OK ] wrote the mixed fixture to %s\n", fixture_mixed.c_str());
+      return 0;
+    }
+    if (!resident_mtp.empty()) {
+      const auto cfg = Qwen35TextConfig::from_json_file(resident_mtp + "/config.json");
+      require(cfg.mtp_layer() >= 0, "resident fixture must contain an MTP layer");
+      for (bool mtp : {false, true}) {
+        auto model = make_model(cfg, resident_mtp, 256, mtp, dgpp::LoaderResidency::Resident);
+        for (int layer = 0; layer < cfg.num_hidden_layers; ++layer)
+          require(
+              model.resident_layer_bytes(layer) == dgpp::Qwen35LayerStream::layer_bytes(cfg, layer),
+              "resident main layer allocation agrees with the memory plan");
+        const size_t expected =
+            mtp ? dgpp::Qwen35LayerStream::layer_bytes(cfg, cfg.mtp_layer()) : 0;
+        require(model.resident_layer_bytes(cfg.mtp_layer()) == expected,
+                "disabled MTP must not materialize a resident draft layer");
+      }
+      std::printf("[ OK ] mixed resident MTP allocation follows the serving option\n");
       return 0;
     }
     if (!smoke.empty()) return run_smoke(smoke);
