@@ -1,0 +1,11 @@
+soak: 2 min against 127.0.0.1:18081, 239 records
+status counts (kind:http:code): burst:200:=7, burst:503:overloaded=7, cancel:200:=26, long:200:=6, short:200:=192
+bursts: fired 14 served 7 shed 7
+-- short: per 10-min window: n, TTFT p50/p95/p99 ms, pace p50/p95/p99 ms/token
+   w0: n=192 ttft 253/822/1566  pace 28/36/45
+-- long: per 10-min window: n, TTFT p50/p95/p99 ms, pace p50/p95/p99 ms/token
+   w0: n=6 ttft 230/581/581  pace 41/44/44
+-- cancel: per 10-min window: n, TTFT p50/p95/p99 ms, pace p50/p95/p99 ms/token
+   w0: n=26 ttft 356/960/1301  pace 21/31/36
+metrics at the end: requests_total 196 shed 0 cancelled 18 failed 0 engine_failed False tokens_out 17388 pool 54/2048 blocks; prefix cache entries 2 hits 1 misses 127 tokens_saved 2184 evictions 0 hops 18 skipped_no_block 0 attach 0.70 ms snapshot 0.79 ms ttft hit 60 ms / miss 2553 ms
+pool blocks in use / cache entries over time: 0m 37/2, 1m 54/2, 1m 54/2

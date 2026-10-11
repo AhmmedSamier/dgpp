@@ -3,7 +3,9 @@
 Historical record: these measurements use the runtime revisions below, when
 early admission was the default. The subsequent throughput follow-up makes
 `engine.prefill_early_admission` opt-in; current defaults do not reproduce this
-policy. Use the recorded revisions when reproducing these results.
+policy. See the [throughput follow-up](../2026-10-11-prefill-utilization/README.md)
+for the subsequent correction. Use the recorded revisions when reproducing
+these results.
 
 [PR 105](https://github.com/HawkBearPig/dgpp/pull/105) addresses
 [issue 104](https://github.com/HawkBearPig/dgpp/issues/104): a newly queued text

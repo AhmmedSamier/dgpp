@@ -1,0 +1,233 @@
+final-host.log
+Internal ctest changing into directory: /home/stephen/workspace/dgpp/build-pr95
+Test project /home/stephen/workspace/dgpp/build-pr95
+    Start 48: http_server_test
+1/7 Test #48: http_server_test .................   Passed    6.27 sec
+    Start 49: serve_test
+2/7 Test #49: serve_test .......................   Passed  161.57 sec
+    Start 50: fabric_serve_test
+3/7 Test #50: fabric_serve_test ................   Passed    3.23 sec
+    Start 51: scheduler_test
+4/7 Test #51: scheduler_test ...................   Passed    0.01 sec
+    Start 60: script_reports_test
+5/7 Test #60: script_reports_test ..............   Passed    0.57 sec
+    Start 63: serve_admission_bench_test
+6/7 Test #63: serve_admission_bench_test .......   Passed    5.24 sec
+    Start 70: serve_startup_test
+7/7 Test #70: serve_startup_test ...............   Passed    3.16 sec
+
+100% tests passed, 0 tests failed out of 7
+
+Label Time Summary:
+host      = 180.05 sec*proc (7 tests)
+python    =   8.97 sec*proc (3 tests)
+
+Total Test time (real) = 180.05 sec
+
+final-gpu.log
+Internal ctest changing into directory: /home/stephen/workspace/dgpp/build-pr95
+Test project /home/stephen/workspace/dgpp/build-pr95
+    Start  20: qwen_decode_test
+1/6 Test  #20: qwen_decode_test ..........................   Passed    5.56 sec
+    Start  28: qwen_image_prefill_test
+2/6 Test  #28: qwen_image_prefill_test ...................   Passed    2.52 sec
+    Start 179: qwen_engine_row_independent
+3/6 Test #179: qwen_engine_row_independent ...............   Passed    3.76 sec
+    Start 185: qwen_engine_nvfp4_dense_1
+4/6 Test #185: qwen_engine_nvfp4_dense_1 .................   Passed    3.61 sec
+    Start 188: qwen_engine_mtp3_rows32_row_independent
+5/6 Test #188: qwen_engine_mtp3_rows32_row_independent ...   Passed    3.86 sec
+    Start 224: prefix_snapshot_test
+6/6 Test #224: prefix_snapshot_test ......................   Passed    2.15 sec
+
+100% tests passed, 0 tests failed out of 6
+
+Label Time Summary:
+gpu     =  21.47 sec*proc (6 tests)
+rdma    =  11.24 sec*proc (3 tests)
+
+Total Test time (real) =  21.47 sec
+
+packed-gpu.log
+Internal ctest changing into directory: /home/stephen/workspace/dgpp/build-pr95
+Test project /home/stephen/workspace/dgpp/build-pr95
+    Start  20: qwen_decode_test
+1/6 Test  #20: qwen_decode_test ..........................   Passed    5.15 sec
+    Start  28: qwen_image_prefill_test
+2/6 Test  #28: qwen_image_prefill_test ...................   Passed    1.71 sec
+    Start 179: qwen_engine_row_independent
+3/6 Test #179: qwen_engine_row_independent ...............   Passed    3.56 sec
+    Start 185: qwen_engine_nvfp4_dense_1
+4/6 Test #185: qwen_engine_nvfp4_dense_1 .................   Passed    2.79 sec
+    Start 188: qwen_engine_mtp3_rows32_row_independent
+5/6 Test #188: qwen_engine_mtp3_rows32_row_independent ...   Passed    3.64 sec
+    Start 224: prefix_snapshot_test
+6/6 Test #224: prefix_snapshot_test ......................   Passed    1.37 sec
+
+100% tests passed, 0 tests failed out of 6
+
+Label Time Summary:
+gpu     =  18.22 sec*proc (6 tests)
+rdma    =   9.99 sec*proc (3 tests)
+
+Total Test time (real) =  18.23 sec
+
+sanitized.log
+[ OK ] scheduler_serving_auto_prefill_budget_respects_engine_geometry_and_opt_out
+[ OK ] scheduler_chunked_prefill_bounds_work_and_keeps_decode_running
+[ OK ] scheduler_group_advance_reads_co_arrivals_in_through_one_walk_per_tick
+[ OK ] scheduler_chunked_images_keep_decode_running_and_cancel_cleanly
+[ OK ] scheduler_chunked_prefill_yields_reservation_to_older_decode
+[ OK ] scheduler_prefill_cuts_only_where_a_snapshot_can_stand
+[ OK ] scheduler_chunked_prefill_cancel_at_each_yield_releases_cache_and_reservations
+[ OK ] scheduler_chunked_prefill_group_respects_the_total_tick_budget
+[ OK ] scheduler_idle_prefill_budget_tracks_decode_retirement
+[ OK ] scheduler_idle_prefill_budget_applies_to_first_chunk_and_groups
+[ OK ] scheduler_chunked_prefill_budget_rejects_unsupported_and_unaligned_configs
+[ OK ] scheduler_groupPrefill_admitsQueuedShortPromptsTogether
+[ OK ] scheduler_strictAlternation_pinnedOpSequence
+[ OK ] scheduler_batchEngine_stepsRoundRobinSliceInOnePass
+[ OK ] scheduler_meters_countPromptsStepsAndRowsForTheThroughputLine
+[ OK ] scheduler_batchEngine_capacityBelowActive_rotatesFairly
+[ OK ] scheduler_poolBudget_defersAdmissionUntilPeerRetires
+[ OK ] scheduler_capacityBelowSmallestReservation_throwsDeadlock
+[ OK ] scheduler_eosOnPrefillPick_retiresImmediatelyThenPeerAdmits
+[ OK ] scheduler_cancellation_isolatedPeerTranscriptUnchanged
+[ OK ] scheduler_sameScenarioTwice_identicalOpStreams
+[ OK ] scheduler_eosMidRun_retiresBeforeStepsCap
+[ OK ] scheduler_oneTokenCap_retiresOnPrefillWithoutDecode
+[ OK ] scheduler_multiTokenStep_eosInMiddleDropsSuffix
+[ OK ] scheduler_multiTokenStep_capOvershootDropsSuffix
+[ OK ] scheduler_submit_rejectsManifestErrorsLoudly
+[ OK ] scheduler_tickLoop_matchesRunToCompletion_exactly
+[ OK ] scheduler_dynamicArrival_transcriptsMatchSolo
+[ OK ] scheduler_boundedQueue_shedsWhenFullThenAdmits
+[ OK ] scheduler_externalCancel_retiresAtNextTickWithoutExtraStep
+[ OK ] scheduler_externalCancel_queuedRequestNeverAdmits
+[ OK ] scheduler_observer_eventsInFireOrderWithLifecycle
+[ OK ] scheduler_meters_trackQueueActiveTerminalAndTokens
+[ OK ] scheduler_retire_releasesEverythingButTheTombstoneAndResult
+[ OK ] scheduler_keepRetiredOff_compactsEveryTickAndMovesNoOp
+[ OK ] scheduler_growOnDemand_admitsEarlyGrowsAtTickTopAndShedsTheYoungest
+[ OK ] scheduler_growOnDemand_aLoneRequestShedsItselfAndAWindowNeverBelowTheStepWidth
+[ OK ] scheduler_sampling_specArmsTheSlotBeforeItsPrefillPick
+[ OK ] scheduler_sampling_refusalsAreManifestErrors
+[ OK ] scheduler_logprobs_rideWithEveryTokenWhenAsked
+[ OK ] scheduler_prefixCache_secondIdenticalPromptAttachesAtTheDeepestCut
+[ OK ] scheduler_prefixCache_reusesLongDocumentWithChangedTail
+[ OK ] scheduler_prefixCache_documentPolicyUnderArenaPressure
+[ OK ] scheduler_prefixCache_documentPolicyLeavesShortAndOptedOutPromptsAlone
+[ OK ] scheduler_prefixCache_documentContinuationPublishesBothSnapshots
+[ OK ] scheduler_prefixCache_mtpLookaheadRejectsAnEditExactlyAtTheCut
+[ OK ] prefixCache_lookaheadAndRollingEntriesDedupeSafely
+[ OK ] scheduler_prefixCache_documentContinuationCancelAndFailureReleaseBothSlots
+[ OK ] scheduler_prefixCache_syncFailureAfterBodySnapshotReleasesItsBlocks
+[ OK ] prefixCache_nearestNamesWhereAMissedPromptDiverges
+[ OK ] scheduler_prefixCache_twoInterleavedConversationsKeepHittingUnderATightArena
+[ OK ] scheduler_prefixCache_rollingSnapshotBecomesTheCloseEntryTheNextTurnAttachesTo
+[ OK ] scheduler_prefixCache_retireAtAnAlignedPositionSnapshotsTheLiveState
+[ OK ] scheduler_prefixCache_aStepCutShortByTheCapTakesNoRetireSnapshot
+[ OK ] scheduler_prefixCache_twoTokenStepsHopOverAnAlignedPositionAndSnapshotIt
+[ OK ] scheduler_prefixCache_skippedHopNeverPublishesAnEmptyOrReplacedSlot
+[ OK ] scheduler_prefixCache_sampledFallbackPreservesOnlyThePreviousSnapshot
+[ OK ] scheduler_prefixCache_inconsistentHopOutcomesReleaseTheRollingSlot
+[ OK ] scheduler_prefixCache_untakenPrefillReturnsSlotsAndCountsBlockSkips
+[ OK ] scheduler_prefixCache_admissionCountsTheSnapshotCopiesAgainstThePool
+[ OK ] scheduler_prefixCache_theAttachTargetSurvivesTheSnapshotSlotsEviction
+[ OK ] scheduler_prefixCache_optOutAndNoArenaKeepThePlainOpStream
+[ OK ] scheduler_prefixCache_evictsTheLeastRecentlyUsedUnattachedEntry
+[ OK ] scheduler_prefixCache_entriesGiveTheirBlocksToARequestThatNeedsThem
+[ OK ] scheduler_prefixCache_attachedEntriesAreNeverEvicted
+[ OK ] scheduler_prefixCache_sameStreamTwice_identicalOpsAndDigests
+[ OK ] scheduler_stop_retiresAtTheNextSweepAsDoneWithReasonStop
+[ OK ] scheduler_logitBias_armsTheEngineAfterTheGrammarAndIsRefusedWithoutSupport
+[ OK ] scheduler_prefixCache_entryFloorKeepsShortPromptsOutOfTheArena
+[ OK ] scheduler_prefixCache_headCutServesTheNextConversationUnderTheSameSystemPrompt
+[ OK ] scheduler_prefixCache_headCutYieldsToTheDeepestCutWhenSlotsAreScarce
+[ OK ] scheduler_prefixCache_headCutThroughChunkedPrefill
+[ OK ] scheduler_images_bypass_token_cache_and_grouping
+[ OK ] prefix_cache_image_identity_and_partial_prefixes
+[ OK ] scheduler_images_reuse_prefill_and_generated_continuations
+[ OK ] prefix_cache_image_byte_budget_shares_identity_and_preserves_entries
+[ OK ] scheduler_multiAdmission_admitsFittingOneShotsInOneTick
+[ OK ] scheduler_fairShare_interleavesConcurrentChunkedPrefills
+[ OK ] scheduler_multiAdmission_stops_groups_at_exhausted_budget
+[ OK ] scheduler_multiAdmission_defers_chunked_start_after_one_shot
+[ OK ] scheduler_multiAdmission_oversized_images_keep_one_monolithic_prefill_per_tick
+[ OK ] scheduler_multiAdmission_no_group_after_inflight_exhausts_budget
+[ OK ] scheduler_early_admission_is_opt_in
+[ OK ] scheduler_lone_prefill_preserves_global_grid_at_the_final_tail
+[ OK ] scheduler_queuedText_boundary_sizes_join_busy_and_idle_fair_shares
+[ OK ] scheduler_queuedText_redistributes_multiple_aligned_tails
+[ OK ] scheduler_queuedText_short_stream_preserves_long_and_decode_progress
+[ OK ] scheduler_queuedText_all_short_tails_finish_without_extra_admission
+[ OK ] scheduler_queuedText_oldest_first_one_begin_with_four_requests
+[ OK ] scheduler_queuedText_full_reservation_slot_and_aligned_share_guards
+[ OK ] scheduler_queuedText_cached_small_total_and_long_history_attach
+[ OK ] scheduler_queuedText_keeps_image_and_group_advance_eligibility
+[ OK ] scheduler_queuedText_mtp_physical_boundary_must_complete
+[ OK ] scheduler_reservation_depth_clamp_and_synchronous_admission
+[ OK ] scheduler_reservation_grow_uses_physical_deltas
+[ OK ] scheduler_queuedText_mtp_cached_attach_and_clamp_fit
+[ OK ] scheduler_queuedText_mtp_snapshot_copy_headroom
+[ OK ] scheduler_queuedText_injected_begin_failure_cleanup
+[ OK ] scheduler_queuedText_failed_begin_releases_head_snapshot_immediately
+[ OK ] scheduler_queuedText_cancel_and_advance_failure_release_joined_snapshot
+[ OK ] scheduler_fairShare_busy_budget_rotates_and_survives_compaction
+101 tests, 0 failed
+
+cluster-config.log
+[ OK ] cluster_config_parses_engine_rope_scaling
+[ OK ] cluster_config_early_prefill_admission_is_explicit
+[ OK ] cluster_config_parses_fills_defaults_and_derives_the_world
+[ OK ] cluster_config_sse_ping_interval_defaults_overrides_and_validation
+[ OK ] cluster_config_world_size_one_runs_locally
+[ OK ] cluster_config_world_size_requires_resolved_peer_addresses
+[ OK ] cluster_config_world_size_and_nodes_are_mutually_exclusive
+[ OK ] cluster_config_http_override_is_order_independent
+[ OK ] cluster_config_accepts_per_rank_registration_diagnostics
+[ OK ] cluster_config_fileInputLimitsAndPaths
+[ OK ] cluster_config_refusesUnknownKeysAndBadValuesByName
+[ OK ] cluster_config_theResolvedFileParsesAndTheDigestIsStable
+[ OK ] cluster_config_the_yarn512k_template_is_a_deployment_the_engine_reads
+[ OK ] cluster_config_prefill_defaults_to_auto_with_explicit_opt_out
+14 tests, 0 failed
+
+final-equal-a/api.log
+baseline: '\n\nRed\nYellow\nBlue' ({'prompt_tokens': 52, 'completion_tokens': 49, 'total_tokens': 101, 'prompt_tokens_details': {'cached_tokens': 0}, 'completion_tokens_details': {'reasoning_tokens': 42}})
+ok   stop one-shot: stop='Yellow' content='\n\nRed\n' finish=stop usage={'prompt_tokens': 52, 'completion_tokens': 46, 'total_tokens': 98, 'prompt_tokens_details': {'cached_tokens': 0}, 'completion_tokens_details': {'reasoning_tokens': 42}}
+ok   stop stream: joined='\n\nRed\n' finish=stop usage=[{'prompt_tokens': 52, 'completion_tokens': 46, 'total_tokens': 98, 'prompt_tokens_details': {'cached_tokens': 0}, 'completion_tokens_details': {'reasoning_tokens': 42}}]
+ok   n=2 one-shot: indices=[0, 1] usage={'prompt_tokens': 52, 'completion_tokens': 144, 'total_tokens': 196, 'prompt_tokens_details': {'cached_tokens': 0}, 'completion_tokens_details': {'reasoning_tokens': 137}} texts=['The user wants three primary colors, one', '\n\nRed\nYellow\nBlue']
+ok   n=2 stream: choice0='The user wants three primary colors, one' choice1='The user wants three primary colors, one' finishes={1: 'stop', 0: 'length'} usage=[{'prompt_tokens': 52, 'completion_tokens': 144, 'total_tokens': 196, 'prompt_tokens_details': {'cached_tokens': 0}, 'completion_tokens_details': {'reasoning_tokens': 137}}]
+ok   logit_bias force: tokens=['�', '�', '�', '�', '�', '�'] text='������'
+ok   logit_bias ban: a ban on an unused token changes nothing: '\n\nRed\nYellow\nBlue'
+ok   logit_bias refused by name: status=400 error={'message': "logit_bias keys must be token ids (decimal strings); got 'x'", 'type': 'invalid_request_error', 'param': 'logit_bias', 'code': None}
+ok   usage cached_tokens: cold={'cached_tokens': 0} hot={'cached_tokens': 2184}
+ok   usage reasoning_tokens: {'reasoning_tokens': 63} of 96 completion tokens
+ALL OK []
+
+final-w4-a/api.log
+baseline: '\n\nRed\nYellow\nBlue' ({'prompt_tokens': 52, 'completion_tokens': 41, 'total_tokens': 93, 'prompt_tokens_details': {'cached_tokens': 0}, 'completion_tokens_details': {'reasoning_tokens': 34}})
+ok   stop one-shot: stop='Yellow' content='\n\nRed\n' finish=stop usage={'prompt_tokens': 52, 'completion_tokens': 38, 'total_tokens': 90, 'prompt_tokens_details': {'cached_tokens': 0}, 'completion_tokens_details': {'reasoning_tokens': 34}}
+ok   stop stream: joined='\n\nRed\n' finish=stop usage=[{'prompt_tokens': 52, 'completion_tokens': 38, 'total_tokens': 90, 'prompt_tokens_details': {'cached_tokens': 0}, 'completion_tokens_details': {'reasoning_tokens': 34}}]
+ok   n=2 one-shot: indices=[0, 1] usage={'prompt_tokens': 52, 'completion_tokens': 89, 'total_tokens': 141, 'prompt_tokens_details': {'cached_tokens': 0}, 'completion_tokens_details': {'reasoning_tokens': 75}} texts=['\n\nRed\nYellow\nBlue', '\n\nRed\nYellow\nBlue']
+ok   n=2 stream: choice0='The user wants three primary colors, one' choice1='The user wants three primary colors, one' finishes={1: 'stop', 0: 'stop'} usage=[{'prompt_tokens': 52, 'completion_tokens': 126, 'total_tokens': 178, 'prompt_tokens_details': {'cached_tokens': 0}, 'completion_tokens_details': {'reasoning_tokens': 112}}]
+ok   logit_bias force: tokens=['�', '�', '�', '�', '�', '�'] text='������'
+ok   logit_bias ban: a ban on an unused token changes nothing: '\n\nRed\nYellow\nBlue'
+ok   logit_bias refused by name: status=400 error={'message': "logit_bias keys must be token ids (decimal strings); got 'x'", 'type': 'invalid_request_error', 'param': 'logit_bias', 'code': None}
+ok   usage cached_tokens: cold={'cached_tokens': 0} hot={'cached_tokens': 2184}
+ok   usage reasoning_tokens: {'reasoning_tokens': 81} of 96 completion tokens
+ALL OK []
+
+packed-w4-a/api.log
+baseline: '\n\nRed\nYellow\nBlue' ({'prompt_tokens': 52, 'completion_tokens': 41, 'total_tokens': 93, 'prompt_tokens_details': {'cached_tokens': 0}, 'completion_tokens_details': {'reasoning_tokens': 34}})
+ok   stop one-shot: stop='Yellow' content='\n\nRed\n' finish=stop usage={'prompt_tokens': 52, 'completion_tokens': 38, 'total_tokens': 90, 'prompt_tokens_details': {'cached_tokens': 0}, 'completion_tokens_details': {'reasoning_tokens': 34}}
+ok   stop stream: joined='\n\nRed\n' finish=stop usage=[{'prompt_tokens': 52, 'completion_tokens': 38, 'total_tokens': 90, 'prompt_tokens_details': {'cached_tokens': 0}, 'completion_tokens_details': {'reasoning_tokens': 34}}]
+ok   n=2 one-shot: indices=[0, 1] usage={'prompt_tokens': 52, 'completion_tokens': 90, 'total_tokens': 142, 'prompt_tokens_details': {'cached_tokens': 0}, 'completion_tokens_details': {'reasoning_tokens': 76}} texts=['\n\nRed\nYellow\nBlue', '\n\nRed\nYellow\nBlue']
+ok   n=2 stream: choice0='The user wants three primary colors, one' choice1='The user wants three primary colors, one' finishes={0: 'stop', 1: 'stop'} usage=[{'prompt_tokens': 52, 'completion_tokens': 89, 'total_tokens': 141, 'prompt_tokens_details': {'cached_tokens': 0}, 'completion_tokens_details': {'reasoning_tokens': 75}}]
+ok   logit_bias force: tokens=['�', '�', '�', '�', '�', '�'] text='������'
+ok   logit_bias ban: a ban on an unused token changes nothing: '\n\nRed\nYellow\nBlue'
+ok   logit_bias refused by name: status=400 error={'message': "logit_bias keys must be token ids (decimal strings); got 'x'", 'type': 'invalid_request_error', 'param': 'logit_bias', 'code': None}
+ok   usage cached_tokens: cold={'cached_tokens': 0} hot={'cached_tokens': 2184}
+ok   usage reasoning_tokens: {'reasoning_tokens': 67} of 96 completion tokens
+ALL OK []
