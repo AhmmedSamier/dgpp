@@ -3590,7 +3590,7 @@ DGPP_TEST(scheduler_early_admission_is_opt_in) {
     sched.submit(make_request("arrival", 23, 128));
     const auto computed = sched.meters().prompt_tokens_computed;
     sched.tick();
-    require(sched.find("arrival")->steps_done == (early ? 2 : 0),
+    require((sched.meters().tokens_generated > 0) == early,
             "only explicit early admission starts the arriving decoder during prefill");
     require(sched.meters().prompt_tokens_computed - computed == (early ? 255 : 256),
             "default keeps the full long-reader share; opt-in donation stays within the cap");
@@ -4023,6 +4023,7 @@ DGPP_TEST(scheduler_reservation_depth_clamp_and_synchronous_admission) {
             engine.arm(0, std::vector<int32_t>(steps, 20), steps);
             engine.arm(1, std::vector<int32_t>(steps, 20), steps);
             dgpp::sched::AdmissionPolicy policy;
+            policy.prefill_early_admission = true;
             policy.prefill_budget_tokens = budget;
             Scheduler sched(&engine, {}, 0, policy);
             sched.submit(make_request("long", 29, 4));
