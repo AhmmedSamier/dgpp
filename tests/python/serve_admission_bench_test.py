@@ -43,6 +43,7 @@ def server(fault=None):
                 self.send_json({"service": {"engine_failed": False, "requests_total": state["requests"]},
                                 "scheduler": {"active": state["active"], "queued": 0,
                                               "tokens_generated": state["tokens"],
+                                              "pool_blocks_in_use": state["requests"] if fault == "kv_leak" else 0,
                                               "prompt_tokens_computed": state["prompt"]},
                                 "prefill": {"requests": readers}})
 
@@ -118,6 +119,11 @@ class AdmissionBenchmarkTest(unittest.TestCase):
     def test_unrelated_traffic_invalidates_the_run(self):
         with server("traffic") as bench:
             with self.assertRaisesRegex(RuntimeError, "unrelated traffic"):
+                bench.run("solo_decode", 0)
+
+    def test_drained_requests_must_release_kv_reservations(self):
+        with server("kv_leak") as bench:
+            with self.assertRaisesRegex(RuntimeError, "retained KV blocks"):
                 bench.run("solo_decode", 0)
 
     def test_usage_output_length_and_cache_evidence_are_required(self):

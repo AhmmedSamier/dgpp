@@ -190,6 +190,8 @@ class Bench:
         ended = time.monotonic()
         if after["service"]["requests_total"] - before["service"]["requests_total"] != len(records):
             raise RuntimeError("unrelated traffic contaminated the benchmark")
+        if after["scheduler"]["pool_blocks_in_use"] > before["scheduler"]["pool_blocks_in_use"]:
+            raise RuntimeError("cache-disabled requests retained KV blocks after drain")
         if observed:
             long_record = next(r for r in records if r["name"] == "long")
             if long_record["id"] not in {r["id"] for r in observed}:
