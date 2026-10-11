@@ -348,6 +348,7 @@ std::string encode_journal_warm(const dgpp::sched::AdmissionPolicy& policy,
   // its own before serving; a config-less rank 0 writes none.
   if (policy.prefill_budget_tokens > 0) out += ",\"pfbudget\":" + std::to_string(policy.prefill_budget_tokens);
   if (policy.prefill_idle_budget_tokens > 0) out += ",\"pfidle\":" + std::to_string(policy.prefill_idle_budget_tokens);
+  if (policy.prefill_early_admission) out += ",\"pfearly\":1";
   if (policy.prefix_min_tokens > 0) out += ",\"pmin\":" + std::to_string(policy.prefix_min_tokens);
   if (policy.prefix_head_snapshots) out += ",\"phead\":1";
   if (!config_digest.empty()) {
@@ -375,6 +376,7 @@ std::string encode_journal_settings(const WorldSettings& s) {
   append_json_string(&out, s.admission);
   if (s.prefill_budget_tokens != 0) out += ",\"pfbudget\":" + std::to_string(s.prefill_budget_tokens);
   if (s.prefill_idle_budget_tokens > 0) out += ",\"pfidle\":" + std::to_string(s.prefill_idle_budget_tokens);
+  if (s.prefill_early_admission) out += ",\"pfearly\":1";
   if (s.prefix_min_tokens > 0) out += ",\"pmin\":" + std::to_string(s.prefix_min_tokens);
   if (s.prefix_head_snapshots) out += ",\"phead\":1";
   out += std::format(",\"win\":{},\"pace\":{:.17g},\"inflight\":{},\"rdv\":{},\"stats\":{:.17g},\"ric\":{},\"kvdt\":",
@@ -580,6 +582,7 @@ JournalRecord decode_journal_line(std::string_view line) {
         throw std::runtime_error("journal: settings record with a bad idle prefill budget");
       s.prefill_idle_budget_tokens = static_cast<int>(budget->as_int());
     }
+    if (v.find("pfearly")) s.prefill_early_admission = flag("pfearly");
     // The prefix cache's entry policy (2026-09-28): records before it carry
     // neither key — no floor, no head cut, what such a rank 0 ran.
     if (const auto* pmin = v.find("pmin")) {
@@ -740,6 +743,11 @@ JournalRecord decode_journal_line(std::string_view line) {
         if (!budget->is_number() || budget->as_int() < 0 || budget->as_int() > (1 << 30))
           throw std::runtime_error("journal: warm record with a bad idle prefill budget");
         rec.admission.prefill_idle_budget_tokens = static_cast<int>(budget->as_int());
+      }
+      if (const auto* early = v.find("pfearly")) {
+        if (!early->is_number() || (early->as_int() != 0 && early->as_int() != 1))
+          throw std::runtime_error("journal: warm record with a bad early-prefill-admission flag");
+        rec.admission.prefill_early_admission = early->as_int() == 1;
       }
       if (const auto* pmin = v.find("pmin")) {
         if (!pmin->is_number() || pmin->as_int() < 0 || pmin->as_int() > (1 << 30))

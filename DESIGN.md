@@ -2354,17 +2354,23 @@ requests can therefore delay a large request.
 
 With a positive prefill budget, non-group-advance engines divide the tick's
 budget into equal aligned shares among unfinished prefills. While a prefill
-is in flight, at most one oldest-fitting queued text request joins those
-shares, regardless of total prompt length or cached suffix length. It needs
+is in flight, at most one oldest-fitting request needing chunked prefill joins
+those shares. `engine.prefill_early_admission=true` opts into admitting queued
+text regardless of total prompt or cached suffix length; the default is false
+to preserve throughput-oriented decode batching. It needs
 a free slot, an aligned share and its existing full reservation; this scan
 does not evict cached entries to make it fit. Short text therefore need not
-wait for leftover budget behind a long prefill. A short suffix takes only
+wait for leftover budget behind a long prefill when the opt-in is enabled.
+In that mode, a short suffix takes only
 its aligned tail; unused whole chunks from its share are divided among
 unfinished readers before their advances. Sub-alignment tails and the
 original align-down leftover keep their existing treatment. A lone reader,
 or readers that all fit their original shares, keep those shares: changing
 the budget without a recipient can introduce extra global-grid cuts.
-Actual advances can stop at model or snapshot cuts before using their caps.
+Qwen's resumable cursor spends its cap from its current position and retains
+structural/snapshot cuts, without redundant automatic model-grid cuts.
+Other families retain their existing grid contracts. Required cuts can still
+end an advance before it uses the entire cap.
 If the busy budget cannot cover all readers, the
 existing rotation gives them bounded turns.
 

@@ -452,9 +452,13 @@ struct AdmissionPolicy {
   // prompt, or the turn after a client compacted its history, attaches.
   int prefix_min_tokens = 0;
   bool prefix_head_snapshots = false;
+  // Opt-in: let short text join in-flight non-group prefills. Starting
+  // decoders earlier can fragment decode batches and select the busy cap.
+  bool prefill_early_admission = false;
   bool operator==(const AdmissionPolicy& o) const {
     return mode == o.mode && window_tokens == o.window_tokens && prefill_budget_tokens == o.prefill_budget_tokens &&
            prefill_idle_budget_tokens == o.prefill_idle_budget_tokens &&
+           prefill_early_admission == o.prefill_early_admission &&
            prefix_min_tokens == o.prefix_min_tokens && prefix_head_snapshots == o.prefix_head_snapshots;
   }
   bool operator!=(const AdmissionPolicy& o) const { return !(*this == o); }

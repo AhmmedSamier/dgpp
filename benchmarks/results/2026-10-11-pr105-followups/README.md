@@ -1,5 +1,10 @@
 # PR 105: admission correctness and throughput verification
 
+Historical record: these measurements use the runtime revisions below, when
+early admission was the default. The subsequent throughput follow-up makes
+`engine.prefill_early_admission` opt-in; current defaults do not reproduce this
+policy. Use the recorded revisions when reproducing these results.
+
 [PR 105](https://github.com/HawkBearPig/dgpp/pull/105) addresses
 [issue 104](https://github.com/HawkBearPig/dgpp/issues/104): a newly queued text
 request can join a running non-group prefill even when the aligned fair shares

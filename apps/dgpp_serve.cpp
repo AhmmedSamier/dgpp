@@ -1422,6 +1422,8 @@ int main(int argc, char** argv) {
       "disables\n"
       "  [--prefill-idle-budget-tokens N (default 0)]: larger budget without active decode; 0 uses "
       "the busy budget\n"
+      "  [--prefill-early-admission | --no-prefill-early-admission (default off)]: let queued\n"
+      "    short text join an in-flight prefill; can reduce mixed-load throughput\n"
       "  [--prefix-min-tokens N (default 1024)]: no prefix-cache entry below this position; a\n"
       "    short prompt attaches to what exists but never takes a snapshot slot\n"
       "  [--prefix-head-snapshots | --no-prefix-head-snapshots (default on)]: a cold prompt\n"
@@ -1495,6 +1497,7 @@ int main(int argc, char** argv) {
   int admission_window = 256;
   int prefill_budget_tokens = -1;
   int prefill_idle_budget_tokens = 0;
+  bool prefill_early_admission = false;
   // The prefix cache's entry policy (2026-09-28): no entry below the floor,
   // and a cold prompt keeps the cut at its first structural boundary.
   int prefix_min_tokens = 1024;
@@ -1644,6 +1647,7 @@ int main(int argc, char** argv) {
     model_alias = e.model_alias;
     prefill_budget_tokens = e.prefill_budget_tokens;
     prefill_idle_budget_tokens = e.prefill_idle_budget_tokens;
+    prefill_early_admission = e.prefill_early_admission;
     prefix_min_tokens = e.prefix_min_tokens;
     prefix_head_snapshots = e.prefix_head_snapshots;
     bulk_pace_gbps = e.bulk_pace_gbps;
@@ -1781,6 +1785,8 @@ int main(int argc, char** argv) {
     else if (a == "--admission-window") admission_window = std::stoi(next());
     else if (a == "--prefill-budget-tokens") prefill_budget_tokens = std::stoi(next());
     else if (a == "--prefill-idle-budget-tokens") prefill_idle_budget_tokens = std::stoi(next());
+    else if (a == "--prefill-early-admission") prefill_early_admission = true;
+    else if (a == "--no-prefill-early-admission") prefill_early_admission = false;
     else if (a == "--prefix-min-tokens") prefix_min_tokens = std::stoi(next());
     else if (a == "--prefix-head-snapshots") prefix_head_snapshots = true;
     else if (a == "--no-prefix-head-snapshots") prefix_head_snapshots = false;
@@ -1920,7 +1926,7 @@ int main(int argc, char** argv) {
         "eos={} graph={} compact={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} "
         "msad={} msss={} mdr={} mdt={} mvf={} dbr={} "
         "batchmin={} cand={} "
-        "pcgib={} adm={} win={} pfbudget={} pfidle={} pmin={} phead={} pace={} inflight={} "
+        "pcgib={} adm={} win={} pfbudget={} pfidle={} pfearly={} pmin={} phead={} pace={} inflight={} "
         "reasoning_in_content={} "
         "rs={} dflash={} dfw={} lk={} lkn={} lks={} lka={} lkt={}",
         model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port, max_concurrency,
@@ -1932,6 +1938,7 @@ int main(int argc, char** argv) {
         mtp_verify, dflash_batch_rows, effective_batch_min_live,
         sampling_candidates, prefix_cache_gib,
         admission_mode, admission_window, prefill_budget_tokens, prefill_idle_budget_tokens,
+        prefill_early_admission ? 1 : 0,
         prefix_min_tokens, prefix_head_snapshots ? 1 : 0,
         bulk_pace_gbps, bulk_inflight, reasoning_in_content ? 1 : 0,
         rope_scaling ? std::format("yarn:{}:{}:{}:{}:{}:{}", rope_scaling->factor,
@@ -2028,6 +2035,7 @@ int main(int argc, char** argv) {
         ws.admission_window = admission_window;
         ws.prefill_budget_tokens = prefill_budget_tokens;
         ws.prefill_idle_budget_tokens = prefill_idle_budget_tokens;
+        ws.prefill_early_admission = prefill_early_admission;
         ws.prefix_min_tokens = prefix_min_tokens;
         ws.prefix_head_snapshots = prefix_head_snapshots;
         ws.bulk_pace_gbps = bulk_pace_gbps;
@@ -2119,6 +2127,7 @@ int main(int argc, char** argv) {
         admission_window = ws.admission_window;
         prefill_budget_tokens = ws.prefill_budget_tokens;
         prefill_idle_budget_tokens = ws.prefill_idle_budget_tokens;
+        prefill_early_admission = ws.prefill_early_admission;
         prefix_min_tokens = ws.prefix_min_tokens;
         prefix_head_snapshots = ws.prefix_head_snapshots;
         bulk_pace_gbps = ws.bulk_pace_gbps;
@@ -2809,6 +2818,7 @@ int main(int argc, char** argv) {
     knobs.admission.window_tokens = admission_window;
     knobs.admission.prefill_budget_tokens = prefill_budget_tokens;
     knobs.admission.prefill_idle_budget_tokens = prefill_idle_budget_tokens;
+    knobs.admission.prefill_early_admission = prefill_early_admission;
     knobs.admission.prefix_min_tokens = prefix_min_tokens;
     knobs.admission.prefix_head_snapshots = prefix_head_snapshots;
     knobs.default_max_tokens = default_max_tokens;

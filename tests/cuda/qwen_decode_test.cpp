@@ -760,6 +760,37 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
     reference.session_close(0);
     std::printf("[ OK ] resumable prefill: target/draft logits, interleaving and cancellation\n");
   }
+  // A donated share shifts the cursor off the model's original grid.
+  // Subsequent work fills its cap except at a real structural/snapshot cut.
+  {
+    QwenModel reference(cfg, dir, 256, 512, QwenResidency::Resident, nullptr, 0, 1, 2, true);
+    QwenModel yielded(cfg, dir, 32, 512, QwenResidency::Resident, nullptr, 0, 1, 2, true);
+    std::vector<int64_t> prompt;
+    for (int i = 0; i < 155; ++i) prompt.push_back(A[static_cast<size_t>(i) % A.size()]);
+    const auto expected = reference.session_prefill(0, prompt, {32, 56, 80, 112, 144});
+    uint8_t* arena = nullptr;
+    DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&arena), yielded.session_snapshot_bytes()));
+    QwenModel::SessionSnapshotMeta meta;
+    QwenModel::SnapshotRequest snap{80, arena, &meta};
+    auto cursor = yielded.session_prefill_begin(0, prompt, 192, 32, {80}, &snap);
+    for (const auto& [budget, position] :
+         std::vector<std::pair<int64_t, int64_t>>{{32, 32}, {24, 56}, {32, 80}, {32, 112}, {32, 144}, {32, 155}}) {
+      const bool done = yielded.session_prefill_advance(cursor, budget);
+      require(cursor.next == position && done == (position == 155),
+              "work budget must not split again at an automatic model grid");
+    }
+    require(snap.taken && bitwise(cursor.output.logits, expected.logits),
+            "work-budget continuation preserves the snapshot and target state");
+    const int64_t token = argmax(expected.logits.data(), V);
+    require(bitwise(reference.session_draft(0, {token}).logits, yielded.session_draft(0, {token}).logits),
+            "work-budget continuation preserves draft state");
+    yielded.session_release_snapshot(meta);
+    yielded.session_close(0);
+    reference.session_close(0);
+    require(yielded.kv_blocks_in_use() == 0, "work-budget cursor releases every KV reference");
+    DGPP_CUDA_OK(cudaFree(arena));
+    std::printf("[ OK ] work-budget prefill: full shares, structural cuts, snapshot and target/draft parity\n");
+  }
   // Change the budget in both directions while preserving a snapshot that
   // was legal only on the original budget grid. The oracle uses the actual
   // resulting cuts, so this checks continuation state rather than GEMM drift.

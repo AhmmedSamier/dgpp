@@ -286,6 +286,7 @@ struct ClusterConfig {
     int prefill_budget_tokens = -1;  // automatic on engines with resumable prefill
     std::string model_alias = "";  // override the served model name (display only)
     int prefill_idle_budget_tokens = 0;
+    bool prefill_early_admission = false;
     double bulk_pace_gbps = -1.0;  // derived from the port rate
     int bulk_inflight = -1;
     int rendezvous_timeout_ms = 120000;

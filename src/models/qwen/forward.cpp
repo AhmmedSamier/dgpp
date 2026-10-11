@@ -1783,6 +1783,19 @@ QwenModel::PrefillCursor QwenModel::session_prefill_begin(
   ImagePrefillScope scope(*this, req, images);
   auto cursor = Base::session_prefill_begin(req, prompt, reserve_tokens, chunk_tokens, boundaries,
                                             snap, attach_position);
+  cursor.relative_budget = true;
+  // The work budget already bounds a walk to max_tokens. Fixed-size grid
+  // cuts would split a donated share again on the following advance.
+  // Retain structural cuts and every validated snapshot position.
+  cursor.cuts.clear();
+  for (const int64_t boundary : boundaries) {
+    const int64_t cut = boundary / snapshot_align_ * snapshot_align_;
+    if (cut > cursor.start && cut < cursor.end) cursor.cuts.push_back(cut);
+  }
+  for (auto* at = snap; at != nullptr; at = at->next)
+    if (at->position > cursor.start && at->position < cursor.end) cursor.cuts.push_back(at->position);
+  std::sort(cursor.cuts.begin(), cursor.cuts.end());
+  cursor.cuts.erase(std::unique(cursor.cuts.begin(), cursor.cuts.end()), cursor.cuts.end());
   return PrefillCursor{std::move(cursor), has_images ? images : nullptr};
 }
 
