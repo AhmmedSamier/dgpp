@@ -3573,6 +3573,40 @@ class AdmissionFairEngine : public ChunkFakeEngine {
   }
 };
 
+DGPP_TEST(scheduler_lone_prefill_preserves_global_grid_at_the_final_tail) {
+  struct GridEngine : AdmissionFairEngine {
+    std::map<int, int64_t> positions;
+    std::map<int, int> advances;
+    PrefillProgress advance_prefill(int req, int64_t budget) override {
+      ++advances[req];
+      // Match the real non-group cursor's next global budget boundary.
+      const auto progress = AdmissionFairEngine::advance_prefill(req, budget - positions[req] % budget);
+      positions[req] += progress.computed_tokens;
+      return progress;
+    }
+  };
+  for (const bool paired : {false, true}) {
+    GridEngine engine;
+    engine.arm(0, {10, 11}, 2);
+    if (paired) engine.arm(1, {20, 21}, 2);
+    dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_budget_tokens = 32;
+    Scheduler sched(&engine, {}, 0, policy);
+    sched.submit(make_request("first", 155, 2));
+    if (paired) {
+      sched.tick();
+      sched.submit(make_request("second", 123, 2));
+    }
+    sched.run_to_completion();
+    require(engine.advances[0] == (paired ? 9 : 5) && engine.positions[0] == 155,
+            "a tail with no recipient keeps its grid and requires no extra prefill walks");
+    if (paired)
+      require(engine.advances[1] == 8 && engine.positions[1] == 123,
+              "two simultaneous tails preserve both global grids");
+    require(engine.pool_blocks_in_use() == 0, "tail reservations released");
+  }
+}
+
 DGPP_TEST(scheduler_queuedText_boundary_sizes_join_busy_and_idle_fair_shares) {
   // No short-prompt threshold: below/at/above alignment, common short
   // lengths and both busy/idle budget boundaries all join the same path.
@@ -3697,7 +3731,7 @@ DGPP_TEST(scheduler_queuedText_all_short_tails_finish_without_extra_admission) {
   sched.submit(make_request("second", 1, 2));
   engine.reset_tick();
   sched.tick();
-  require(engine.allocated == 8 && engine.advanced.at(0) == 1 && engine.advanced.at(1) == 1 &&
+  require(engine.allocated == 32 && engine.advanced.at(0) == 1 && engine.advanced.at(1) == 1 &&
               sched.meters().queued == 1,
           "with no unfinished recipient, tail donation stops and preserves the one-begin policy");
   sched.run_to_completion();

@@ -1502,6 +1502,10 @@ bool Scheduler::quantum() {
         advance_prefill_group(members, budgets);
       else
         advance_prefill(members.at(0), budgets.at(0));
+    } else if (inflight.size() == 1) {
+      // Keep a lone reader on its original chunk grid. Shrinking its last
+      // budget cannot help a peer and can split the tail into extra GPU walks.
+      advance_prefill(inflight.front(), share);
     } else {
       // A short suffix only needs its aligned tail. Donate the rest of its
       // share to unfinished readers before executing any walk, so admitting
@@ -1510,6 +1514,7 @@ bool Scheduler::quantum() {
       // All decisions use replicated positions, never measured GPU time.
       std::vector<int64_t> shares(inflight.size(), share), limits;
       int64_t donated = 0;
+      bool can_receive = false;
       for (size_t i = 0; i < inflight.size(); ++i) {
         const Request& r = requests_[static_cast<size_t>(inflight[i])];
         const int64_t remaining = static_cast<int64_t>(r.spec.prompt.size()) -
@@ -1518,8 +1523,15 @@ bool Scheduler::quantum() {
         const int64_t limit = remaining >= budget ? budget :
             ((remaining - 1) / align + 1) * align;
         limits.push_back(limit);
+        can_receive |= limit > share;
         shares[i] = std::min(share, limit);
         donated += share - shares[i];
+      }
+      // If every reader fits its original share, no donation can help.
+      // Preserve their grids instead of creating extra partial-tail walks.
+      if (!can_receive) {
+        std::fill(shares.begin(), shares.end(), share);
+        donated = 0;
       }
       while (donated >= align) {
         int64_t readers = 0;

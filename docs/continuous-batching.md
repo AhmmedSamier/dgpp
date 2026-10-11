@@ -92,7 +92,10 @@ uses replicated positions and stays inside the original tick budget. When
 all readers finish, unused capacity does not create another admission lane.
 These allocations are caps: model chunk grids and required snapshot cuts
 can end an actual GPU advance earlier, so allocated budget is not a
-measurement of computed-token throughput.
+measurement of computed-token throughput. A lone reader keeps its original
+budget, including its final tail, to preserve its global chunk grid. The
+same applies when every reader fits its original share: without a recipient,
+shrinking those shares only risks extra advances.
 Early decoding may switch later ticks to the smaller busy budget,
 delaying long-prompt completion; this policy does not promise unchanged
 completion latency or starvation freedom under sustained KV pressure.

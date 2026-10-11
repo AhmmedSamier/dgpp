@@ -986,11 +986,19 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
         std::vector<std::vector<int64_t>> expected;
         for (int i = 0; i < 2; ++i) {
           requests[i].id = "join-" + std::to_string(i);
-          requests[i].prompt = smoke_tokens(cfg, i == 0 ? 40 * align + 1 : align + 1, 6500 + i);
+          requests[i].prompt = smoke_tokens(cfg, i == 0 ? 40 * align - 5 : align + 1, 6500 + i);
           requests[i].max_steps = 12;
           dgpp::sched::Scheduler solo_sched(&graph, {}, 0, policy, /*prefix_slots=*/0);
           solo_sched.submit(requests[i]);
-          solo_sched.run_to_completion();
+          int prefill_advances = 0;
+          while (solo_sched.has_pending()) {
+            const auto before = solo_sched.meters().prompt_tokens_computed;
+            solo_sched.tick();
+            prefill_advances += solo_sched.meters().prompt_tokens_computed > before;
+          }
+          require(prefill_advances == (static_cast<int64_t>(requests[i].prompt.size()) + 8 * align - 1) /
+                                         (8 * align),
+                  "a solo graph tail must not add walks by shrinking its final budget");
           expected.push_back(solo_sched.find(requests[i].id)->generated);
         }
         dgpp::sched::Scheduler concurrent(&graph, {}, 0, policy, /*prefix_slots=*/0);
