@@ -85,10 +85,23 @@ admission without an in-flight prefill retain their existing paths.
 
 The new reader still needs a free slot and its reservation under the existing
 KV policy. Cached text attaches through the same prefix plan and computes
-only its suffix. A short tail does not donate its unused share to other
-readers. Early decoding may switch later ticks to the smaller busy budget,
+only its suffix. A short tail keeps its rounded-up aligned allocation and
+donates the rest of its share to unfinished readers, split equally in
+aligned units with arrival-order ties. This happens before the advances,
+uses replicated positions and stays inside the original tick budget. When
+all readers finish, unused capacity does not create another admission lane.
+Early decoding may switch later ticks to the smaller busy budget,
 delaying long-prompt completion; this policy does not promise unchanged
 completion latency or starvation freedom under sustained KV pressure.
+
+For example, with a 256-token budget and four-token alignment, a 23-token
+arrival beside one long reader gets 24 allocated tokens and the long reader
+gets 232, computing 255 tokens in total. The equal-share-only version gave
+each 128 and computed 151. This saves scheduled capacity; GPU throughput
+still depends on chunk shapes, additional walks and active decode width.
+Deployments that need the same prefill cap before and after admission can
+choose equal busy and idle budgets. Larger busy budgets can increase gaps
+between decode updates, so select them with mixed-load measurements.
 
 When the budget drops from idle to busy, the in-flight count can exceed
 `budget / align`. Advance only that many prefills, rotating through arrival

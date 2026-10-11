@@ -2358,8 +2358,11 @@ is in flight, at most one oldest-fitting queued text request joins those
 shares, regardless of total prompt length or cached suffix length. It needs
 a free slot, an aligned share and its existing full reservation; this scan
 does not evict cached entries to make it fit. Short text therefore need not
-wait for leftover budget behind a long prefill. Unused short-tail capacity
-is not redistributed. If the busy budget cannot cover all readers, the
+wait for leftover budget behind a long prefill. A short suffix takes only
+its aligned tail; unused whole chunks from its share are divided among
+unfinished readers before their advances. Sub-alignment tails and the
+original align-down leftover keep their existing treatment. If the busy
+budget cannot cover all readers, the
 existing rotation gives them bounded turns.
 
 This changes admission during an unfinished non-group prefill, not image or

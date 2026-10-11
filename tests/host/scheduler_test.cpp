@@ -3601,9 +3601,10 @@ DGPP_TEST(scheduler_queuedText_boundary_sizes_join_busy_and_idle_fair_shares) {
       const int cap = decoding ? 256 : 2048;
       require(engine.begins == std::vector<int>{peer_slot},
               "queued text joins at length " + std::to_string(length));
-      require(engine.allocated == cap && engine.advanced.at(long_slot) == cap / 2 &&
+      const int peer_share = std::min((length + 3) / 4 * 4, cap / 2);
+      require(engine.allocated == cap && engine.advanced.at(long_slot) == cap - peer_share &&
                   engine.advanced.at(peer_slot) == std::min(length, cap / 2),
-              "old and new readers receive equal shares, including a short tail");
+              "short aligned tails donate unused capacity to the long reader");
       require(sched.meters().prompt_tokens_computed - before.prompt_tokens_computed <= cap,
               "computed work respects the same tick cap");
       if (decoding) require(engine.decoded[0] == 3, "existing decoder advances");
@@ -3624,6 +3625,83 @@ DGPP_TEST(scheduler_queuedText_boundary_sizes_join_busy_and_idle_fair_shares) {
               "both transcripts survive interleaving");
     }
   }
+}
+
+DGPP_TEST(scheduler_queuedText_redistributes_multiple_aligned_tails) {
+  AdmissionFairEngine engine(10000);
+  for (int slot = 0; slot < 4; ++slot) engine.arm(slot, {10 + slot, 20 + slot}, 2);
+  dgpp::sched::AdmissionPolicy policy;
+  policy.prefill_budget_tokens = 32;
+  Scheduler sched(&engine, {}, 0, policy);
+  sched.submit(make_request("long", 4096, 2));
+  sched.tick();
+  sched.submit(make_request("medium", 49, 2));
+  sched.tick();
+  sched.submit(make_request("tail", 17, 2));
+  sched.tick();
+  sched.tick();
+  sched.submit(make_request("tiny", 1, 2));
+  engine.reset_tick();
+  sched.tick();
+  require(engine.advanced == std::map<int, int64_t>{{0, 12}, {1, 12}, {2, 1}, {3, 1}} &&
+              engine.allocated == 32,
+          "two rounded tails donate equally to both unfinished readers within the original cap");
+  engine.reset_tick();
+  sched.tick();
+  require(engine.advanced == std::map<int, int64_t>{{0, 24}, {1, 5}} && engine.allocated == 32,
+          "the next partial tail returns its aligned capacity to the long prompt");
+  require(sched.cancel("long"), "cancel the remaining long reader");
+  sched.run_to_completion();
+  require(engine.pool_blocks_in_use() == 0, "all four reservations released");
+}
+
+DGPP_TEST(scheduler_queuedText_short_stream_preserves_long_and_decode_progress) {
+  AdmissionFairEngine engine(10000);
+  engine.arm(0, std::vector<int32_t>(100, 10), 100);
+  engine.arm(1, {20, 21}, 2);
+  for (int i = 0; i < 20; ++i) engine.arm(2, {30, 31}, 2);
+  dgpp::sched::AdmissionPolicy policy;
+  policy.prefill_budget_tokens = 256;
+  Scheduler sched(&engine, {}, 0, policy);
+  sched.submit(make_request("decoder", 1, 100));
+  sched.tick();
+  sched.submit(make_request("long", 8192, 2));
+  sched.tick();
+  for (int i = 0; i < 20; ++i) {
+    const auto id = "short-" + std::to_string(i);
+    sched.submit(make_request(id, 23, 2));
+    engine.reset_tick();
+    const int decoded = engine.decoded[0];
+    sched.tick();
+    require(engine.advanced.at(1) == 232 && engine.advanced.at(2) == 23 && engine.allocated == 256,
+            "every short arrival costs 24 aligned tokens rather than half the long reader's quantum");
+    require(engine.decoded[0] == decoded + 1 && sched.find(id)->steps_done == 2,
+            "existing decode and newly admitted short requests progress every tick");
+  }
+  sched.run_to_completion();
+  require(sched.find("long")->steps_done == 2 && sched.find("decoder")->steps_done == 100 &&
+              engine.pool_blocks_in_use() == 0, "finite mixed load completes without leaks");
+}
+
+DGPP_TEST(scheduler_queuedText_all_short_tails_finish_without_extra_admission) {
+  AdmissionFairEngine engine;
+  engine.arm(0, {10, 11}, 2);
+  engine.arm(1, {20, 21}, 2);
+  engine.arm(0, {30, 31}, 2);
+  dgpp::sched::AdmissionPolicy policy;
+  policy.prefill_budget_tokens = 32;
+  Scheduler sched(&engine, {}, 0, policy);
+  sched.submit(make_request("tail", 33, 2));
+  sched.tick();
+  sched.submit(make_request("first", 1, 2));
+  sched.submit(make_request("second", 1, 2));
+  engine.reset_tick();
+  sched.tick();
+  require(engine.allocated == 8 && engine.advanced.at(0) == 1 && engine.advanced.at(1) == 1 &&
+              sched.meters().queued == 1,
+          "with no unfinished recipient, tail donation stops and preserves the one-begin policy");
+  sched.run_to_completion();
+  require(engine.pool_blocks_in_use() == 0, "all-tail completion drains");
 }
 
 DGPP_TEST(scheduler_queuedText_oldest_first_one_begin_with_four_requests) {

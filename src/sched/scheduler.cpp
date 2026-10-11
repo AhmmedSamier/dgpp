@@ -1499,7 +1499,37 @@ bool Scheduler::quantum() {
       else
         advance_prefill(members.at(0), budgets.at(0));
     } else {
-      for (const int a : inflight) advance_prefill(a, share);
+      // A short suffix only needs its aligned tail. Donate the rest of its
+      // share to unfinished readers before executing any walk, so admitting
+      // a tiny prompt does not discard half of a long prompt's quantum.
+      // Keep the original align-down leftover for one-shot admission below.
+      // All decisions use replicated positions, never measured GPU time.
+      std::vector<int64_t> shares(inflight.size(), share), limits;
+      int64_t donated = 0;
+      for (size_t i = 0; i < inflight.size(); ++i) {
+        const Request& r = requests_[static_cast<size_t>(inflight[i])];
+        const int64_t remaining = static_cast<int64_t>(r.spec.prompt.size()) -
+                                  r.attached_tokens - r.prefill_computed;
+        // Cap before rounding: no reader can consume more than this tick.
+        const int64_t limit = remaining >= budget ? budget :
+            ((remaining - 1) / align + 1) * align;
+        limits.push_back(limit);
+        shares[i] = std::min(share, limit);
+        donated += share - shares[i];
+      }
+      while (donated >= align) {
+        int64_t readers = 0;
+        for (size_t i = 0; i < shares.size(); ++i)
+          readers += shares[i] < limits[i];
+        if (readers == 0) break;
+        const int64_t extra = std::max<int64_t>(align, donated / readers / align * align);
+        for (size_t i = 0; i < shares.size() && donated >= align; ++i) {
+          const int64_t grant = std::min({extra, limits[i] - shares[i], donated});
+          shares[i] += grant;
+          donated -= grant;
+        }
+      }
+      for (size_t i = 0; i < inflight.size(); ++i) advance_prefill(inflight[i], shares[i]);
     }
     progressed = true;
     // The align-down leftover still admits fitting one-shots/groups — but
