@@ -69,7 +69,24 @@ identical deployed binary hashes and zero process swap on all four nodes.
 The 8K median is 4594 ms, still 0.3% above the preceding FP8 measurement;
 this preliminary run does not establish the final performance gate.
 See [request measurements](eight-warp-w4/prefill.json).
-A fresh matched comparison and base-branch integration are still required.
+This was followed by the paired-write candidate and base integration below;
+the final matched serving matrix remains the merge gate.
+
+## Paired output writes
+
+The next candidate packs adjacent BF16 columns into one conversion and
+one aligned 32-bit store. Unaligned views, odd row strides and a final odd
+column keep scalar stores. A sentinel test exercises those cases across
+3073 rows, including the last partial M tile. For walks of at least 3072
+rows, three M tiles per cache group replace four; shorter walks retain
+four. This changes only block order and output writes, not a dot's
+arithmetic.
+
+All 18 targeted mixed-reference, tensor-parallel and FP4 kernel entries
+passed after integrating the current base branch. The same 19,456 real
+checkpoint positions and the 4096-position process repeat still match the
+original kernel's full-vocabulary hashes exactly; see the
+[paired-write comparison](numerical-paired-comparison.json).
 
 ## Operational evidence
 
@@ -77,3 +94,27 @@ Raw logs, executable hashes, per-request JSON, numerical TSVs and rejected
 experiments are retained locally in
 `/home/stephen/dgpp/pr95-followups-20261011/`. The earlier review and cache
 cleanup audit are in `/home/stephen/dgpp/pr95-review-20261010/`.
+
+## Base integration and full validation
+
+The branch includes master at `38d3af69485158a926eefb7eb46fbac475295df4`,
+including the shared GLM kernel changes and startup diagnostics. The full
+Release build completed before the serial 241-entry CTest run. It recorded
+234 passes, six absent-checkpoint tokenizer/template skips and one stale
+HTTP-default assertion inherited from master. That assertion now checks
+`0.0.0.0` by default and an explicit localhost override. All three affected
+Python suites passed on retest: 235 passing entries, six skips and no
+unresolved failures. See [suite log](merged-suite.log),
+[retest](binding-retest.log) and [resolution](full-suite-resolution.json).
+The FP4 memcheck and racecheck runs also reported zero errors/hazards.
+
+The paired-write four-node smoke measured median cold-prefill latencies
+of 367.6 / 1261.7 / 4545.5 / 18955.6 ms at approximately 512 / 2K / 8K /
+32K tokens. The preceding same-prompt FP8 medians were 415.8 / 1292.8 /
+4566.0 / 19046.4 ms. These are preliminary comparisons: the small long-
+prompt margin needs confirmation by the final matrix. All four paired-
+write rank operation streams matched, deployed executable hashes agreed,
+and process/cgroup swap stayed zero at the before/after checks.
+See [NVFP4 requests](paired-w4/prefill.json),
+[FP8 requests](eight-warp-fp8-w4/prefill.json) and
+[rank streams](paired-w4/opstreams.json).

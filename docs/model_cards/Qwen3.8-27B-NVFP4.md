@@ -40,11 +40,10 @@ against the FP8 sibling release's per-layer RMS, 2026-10-06).
 
 The four-node TP legs of the FP8 card's table have NVFP4 siblings
 (`--weights nvfp4`); the weight bytes per rank are smaller, the draft
-layer and BF16 islands are unchanged. Measured GB10 campaign numbers
-will be recorded here when the w1/w2/w4 legs are rerun on this release;
-none are claimed yet.
+layer and BF16 islands are unchanged. The independent [PR review and follow-ups](../../benchmarks/results/2026-10-11-pr95-followups/README.md)
+record the current kernel, numerical checks and measured serving comparisons.
 
-## Dense NVFP4 production kernel (2026-10-06)
+## Original dense NVFP4 production kernel (2026-10-06)
 
 The MLP used to run gate/up on the CUDA-core `fp4_gemv` at <= 128 rows
 and everything else on the synchronous `dense_mma_fp4` reference tile.
@@ -73,7 +72,7 @@ release now leads on both — there is no performance case left for a
 lossy dense-W4A4 path, so none is built (see the MoE-side
 `DGPP_MOE_W4A4` gate, still issue-#68-blocked).
 
-## Dense NVFP4 prefill GEMM (2026-10-06)
+## Original dense NVFP4 prefill GEMM (2026-10-06)
 
 Above 1024 rows the MLP runs a purpose-built fp4w prefill GEMM
 (`launch_fp4w_gemm_*`: `fp8w_gemm`'s 128x128x64 tiles, sixteen warps
@@ -87,3 +86,22 @@ chain (decode, all tests) is untouched. Microbench crossover: slower
 below ~1024 rows (gate m=448 loses 11%), faster above (m=1024/2048/4096
 win 12-17/14-20/45-90%). Serve: pp2080 prefill 2445-2460 ms vs 2568
 (~5%), pp448 and decode unchanged.
+
+## Prefill follow-ups (2026-10-11)
+
+The current prefill kernel uses 256x128x64 tiles and eight warps. Each
+warp reuses activation fragments over 64 output columns; two activation
+stages and two swizzled weight tiles occupy 96 KiB of shared memory.
+Adjacent BF16 outputs share an aligned 32-bit store, with scalar stores
+for odd tails or unaligned views. Long walks use three M tiles per cache
+group. These changes preserve the ascending-K FP32 dot and final global
+scale division. Dispatch starts at 1024 rows; smaller rows retain the
+production decode kernel.
+
+The optimized path matched the earlier kernel's full-vocabulary logit
+hashes at all 19,456 scored real-checkpoint positions, with a bitwise
+4096-position repeat in a fresh process. Long synthetic reference cases,
+tensor-parallel forwards, output-layout guards and CUDA sanitizers cover
+the changed path. Resident view initialization now omits the optional MTP
+layer when MTP is disabled, saving 710 MiB at world 1 with DFlash2.
+The linked record retains rejected alternatives and the validation scope.

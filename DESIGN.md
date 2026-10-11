@@ -1509,8 +1509,11 @@ on eight warps, two activation stages and two swizzled weight tiles in
 96 KiB of shared memory. Each warp reuses its activation fragments across
 64 output columns. E2M1 × E4M3 products are exact in BF16; the dot keeps
 ascending-K FP32 accumulation and divides by the global scale before the
-final BF16 rounding. Resident view tables include the MTP layer only when
-MTP is enabled, matching the loader's memory plan.
+final BF16 rounding. Adjacent output columns share an aligned 32-bit
+store, with a scalar fallback for unaligned views or odd tails. Long walks
+use three M tiles per cache group; shorter walks use four. Resident view
+tables include the MTP layer only when MTP is enabled, matching the loader's
+memory plan.
 
 **Row-independent GEMV.** The BF16 and FP8 cores use a warp per weight
 row and vectorized loads. Small row batches preserve each row's scalar

@@ -192,6 +192,42 @@ void check_sparse_vs_grouped(int m, int n, int k) {
   EXPECT_TRUE(same, msg);
 }
 
+// The vector store must preserve row padding and work through unaligned
+// output views. Odd N also leaves a final scalar column in an aligned row.
+void check_output_layouts() {
+  using namespace dgpp;
+  const Case c = make_case(3073, 137, 256, 1.7f, 51);
+  const auto ref = run_fp4w(c);
+  Dev d = upload(c);
+  const GlmFp4Matrix w{d.payload, d.scales, d.global, c.n, c.k, kFp4Group};
+  constexpr uint16_t sentinel = 0xA55A;
+  for (int stride : {c.n, c.n + 1, c.n + 3}) {
+    for (int offset : {0, 1}) {
+      const size_t count = static_cast<size_t>(c.m) * stride + 16;
+      std::vector<uint16_t> host(count, sentinel);
+      uint16_t* allocation = nullptr;
+      CHECK_CUDA(cudaMalloc(&allocation, count * sizeof(uint16_t)));
+      CHECK_CUDA(
+          cudaMemcpy(allocation, host.data(), count * sizeof(uint16_t), cudaMemcpyHostToDevice));
+      auto* output = allocation + 4 + offset;
+      launch_fp4w_gemm_bf16(d.act, c.k, w, output, c.m, c.n, c.k, d.s, stride);
+      CHECK_CUDA(cudaStreamSynchronize(d.s));
+      CHECK_CUDA(
+          cudaMemcpy(host.data(), allocation, count * sizeof(uint16_t), cudaMemcpyDeviceToHost));
+      bool same = true;
+      for (size_t index = 0; index < count; ++index) {
+        const int64_t relative = static_cast<int64_t>(index) - 4 - offset;
+        uint16_t expected = sentinel;
+        if (relative >= 0 && relative / stride < c.m && relative % stride < c.n)
+          expected = ref[static_cast<size_t>(relative / stride) * c.n + relative % stride];
+        same &= host[index] == expected;
+      }
+      EXPECT_TRUE(same, "strided/unaligned output and guard values must match");
+      CHECK_CUDA(cudaFree(allocation));
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -212,6 +248,8 @@ int main() {
   // cancellation floor; this also crosses the model's 1024-row dispatch.
   check_oracle(1025, 136, 256, 1.7f, 49, "oracle wide tile and column tails");
   check_oracle(1024, 136, 256, 1.7f, 50, "oracle prefill dispatch boundary");
+  check_oracle(3073, 137, 256, 1.7f, 51, "oracle long prefill and odd column tail");
+  check_output_layouts();
   check_sparse_vs_grouped(1152, 512, 256);
   check_vs_grouped(1152, 5120, 17408, 48, "vs grouped multi-group");
   if (failures == 0) std::printf("fp4w_gemm_test: all passed\n");
