@@ -211,8 +211,10 @@ no request is actively decoding, including after a decoding peer retires.
 Queued text of any size now joins existing fair shares while a non-group
 prefill is in flight (issue #104), with one new reader per tick and unchanged
 slot, KV and token budgets. Host scheduler regressions cover admission,
-cache attachment and cancellation/failure cleanup; real-model latency and
-MTP block-boundary validation remain separate acceptance gates.
+cache attachment and cancellation/failure cleanup. The
+[PR 105 verification record](benchmarks/results/2026-10-11-pr105-followups/README.md)
+covers one/four-node serving, MTP reservation boundaries and the measured
+mixed-load throughput trade-offs.
 Extending this to other families and grouped continuations remains work
 for latency under mixed prompt lengths. Prefix entries
 are process-local, and grow-on-demand admission ends the youngest request
