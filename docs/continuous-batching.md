@@ -102,8 +102,9 @@ completion latency or starvation freedom under sustained KV pressure.
 
 For example, with a 256-token budget and four-token alignment, a 23-token
 arrival beside one long reader gets 24 allocated tokens and the long reader
-gets 232, computing 255 tokens in total. The equal-share-only version gave
-each 128 and computed 151. This saves scheduled capacity; GPU throughput
+gets 232. An engine consuming those caps computes 255 tokens in total;
+equal shares offer at most 151 in that tick. This saves scheduled capacity;
+GPU throughput
 still depends on chunk shapes, additional walks and active decode width.
 Deployments that need the same prefill cap before and after admission can
 choose equal busy and idle budgets. Larger busy budgets can increase gaps

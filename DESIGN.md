@@ -2361,8 +2361,11 @@ does not evict cached entries to make it fit. Short text therefore need not
 wait for leftover budget behind a long prefill. A short suffix takes only
 its aligned tail; unused whole chunks from its share are divided among
 unfinished readers before their advances. Sub-alignment tails and the
-original align-down leftover keep their existing treatment. If the busy
-budget cannot cover all readers, the
+original align-down leftover keep their existing treatment. A lone reader,
+or readers that all fit their original shares, keep those shares: changing
+the budget without a recipient can introduce extra global-grid cuts.
+Actual advances can stop at model or snapshot cuts before using their caps.
+If the busy budget cannot cover all readers, the
 existing rotation gives them bounded turns.
 
 This changes admission during an unfinished non-group prefill, not image or
