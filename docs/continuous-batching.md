@@ -1,6 +1,9 @@
 # Towards continuous batching: multi-admission + fair-share prefill
 
-Status: items 1 and 2 implemented in `Scheduler::quantum()`; soak-tested live.
+Status: original items 1 and 2 implemented in `Scheduler::quantum()` and
+soak-tested live. The size-neutral queued-text follow-up for issue #104 is
+host-tested; real-model latency and MTP boundary validation remain separate
+acceptance gates, not established by the original soak.
 
 ## Problem
 
@@ -63,7 +66,7 @@ except:
 
 **Rule**: the `prefill_arrival >= 0 → admit_arrival = -1` gate is gone.
 Each tick with a prefill in flight now: collects the in-flight prefills in
-arrival order, begins at most one new chunked read-in (oldest fitting,
+arrival order, begins at most one new read-in (oldest fitting,
 skip-fit, no eviction dance — a begin must not disturb the pool the
 in-flight prefills hold), gated so every share keeps at least one aligned
 chunk (`(n+1)*align <= budget`); splits the tick budget into equal
@@ -71,6 +74,41 @@ align-down shares and advances the selected prefills on their shares; then
 admits fitting one-shots/groups into the align-down leftover (never a new
 chunked start — chunked read-ins stay one at a time). Order derives from
 arrival order and the last-advanced prefill only, so every rank agrees.
+
+For non-group-advance engines, queued text of any total prompt length can
+join these shares. The original rule admitted only prompts classified as
+needing chunking; a fitting shorter prompt could wait until the long prefill
+finished because the align-down leftover was zero. The issue #104 follow-up
+removes that size exclusion without adding a short-request priority or a
+second budget. Image and group-advance eligibility, monolithic mode and
+admission without an in-flight prefill retain their existing paths.
+
+The new reader still needs a free slot and its reservation under the existing
+KV policy. Cached text attaches through the same prefix plan and computes
+only its suffix. A short tail keeps its rounded-up aligned allocation and
+donates the rest of its share to unfinished readers, split equally in
+aligned units with arrival-order ties. This happens before the advances,
+uses replicated positions and stays inside the original tick budget. When
+all readers finish, unused capacity does not create another admission lane.
+These allocations are caps: model chunk grids and required snapshot cuts
+can end an actual GPU advance earlier, so allocated budget is not a
+measurement of computed-token throughput. A lone reader keeps its original
+budget, including its final tail, to preserve its global chunk grid. The
+same applies when every reader fits its original share: without a recipient,
+shrinking those shares only risks extra advances.
+Early decoding may switch later ticks to the smaller busy budget,
+delaying long-prompt completion; this policy does not promise unchanged
+completion latency or starvation freedom under sustained KV pressure.
+
+For example, with a 256-token budget and four-token alignment, a 23-token
+arrival beside one long reader gets 24 allocated tokens and the long reader
+gets 232. An engine consuming those caps computes 255 tokens in total;
+equal shares offer at most 151 in that tick. This saves scheduled capacity;
+GPU throughput
+still depends on chunk shapes, additional walks and active decode width.
+Deployments that need the same prefill cap before and after admission can
+choose equal busy and idle budgets. Larger busy budgets can increase gaps
+between decode updates, so select them with mixed-load measurements.
 
 When the budget drops from idle to busy, the in-flight count can exceed
 `budget / align`. Advance only that many prefills, rotating through arrival
@@ -95,7 +133,34 @@ between chunks.
 - Scheduler regressions cover exhausted group budgets, chunked starts
   after one-shots, monolithic image fallback, idle-to-busy budget changes,
   fair rotation, cancellation, slot reuse and compaction determinism.
+- Queued-text regressions additionally cover alignment and busy/idle budget
+  boundaries, oldest-fitting order, three/four concurrent requests, full
+  output reservations, cache-attached short totals and histories, and
+  joined-prefill cancellation and engine failures. A fake with MTP trailing
+  rows checks reservation forwarding and unwind, not physical GPU safety.
+- Tail redistribution regressions cover multiple donors and recipients,
+  all readers finishing together, twenty consecutive short arrivals, and
+  preservation of decode progress and the total allocated budget. Begin
+  failures release every private snapshot, including the head cut, before
+  cancellation or retry. These scheduler cases also run under ASan/UBSan.
 - Live: c1/c2/c4 @ d0/d4k/d8k benchy sweep; TTFT of request #2 must drop;
   per-request tok/s must not regress at c1.
 - Item 2 additionally: c4 deep-context soak, KV pool metrics sane, no
   `validate_batch` / digest mismatches in logs.
+
+The reproducible admission comparison is
+`python3 scripts/serve_admission_bench.py --url http://127.0.0.1:18081
+--label COMMIT-CONFIG --out RESULTS.json`. Run matched baseline/candidate
+processes in alternating order on reserved hardware, using the same prompts,
+output limits and configuration. Compare equal busy/idle budgets as well as
+256/2048 to expose the budget-transition trade-off. Its seven scenarios cover
+isolated prefill/decode, a short arrival with short or long output, sustained
+arrivals with and without an existing decoder, and cancellation/recovery.
+The first arrival must be dispatched while the long response's matching
+native prefill ID is still present. Requests, usage, update times, output
+hashes and before/after metrics are retained; unrelated traffic invalidates
+a run. Aggregate rates include the full scenario wall time and client update
+gaps are not per-token kernel latency. Cached conversations, image paths,
+physical KV boundaries, semantic checks and multi-rank operation-stream
+agreement remain separate live gates. Host passes do not establish GPU
+throughput equivalence.

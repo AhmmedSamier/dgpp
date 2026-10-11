@@ -1,5 +1,13 @@
 # Tests
 
+`serve_admission_bench_test` checks the HTTP/SSE admission benchmark's transport,
+native-overlap assertions, published-counter drain barrier and KV cleanup gate.
+The [PR 105 record](../benchmarks/results/2026-10-11-pr105-followups/README.md)
+contains the real-cluster recipe and latency/throughput trade-offs. The scheduler
+suite covers short-reader admission, aligned-share donation, global chunk-grid
+tails and failure cleanup; `qwen_engine_test` exercises admission and donation
+with a real two-rank engine, including MTP3 and row-independent transcript parity.
+
 `prefix_snapshot_test` forces a four-block K/V pool full at snapshot time in
 Qwen and GLM. It covers monolithic and resumable prefill, unchanged target/draft
 logits, full-block pin cleanup, skipped hop replacements, timer/slot reuse, and

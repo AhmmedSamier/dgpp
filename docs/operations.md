@@ -549,8 +549,13 @@ The resolved budget is logged at startup and carried in rank 0's warm record.
 The single-Spark NVIDIA and RadixArk Qwen NVFP4 templates explicitly select
 4,096-token busy and idle budgets. The two- and four-rank GLM-5.3-Flash
 NVFP4/FP8 templates select 256-token busy and 2,048-token idle budgets.
-A positive budget executes one aligned prefill chunk per tick, followed by
-a decode pass for active requests. Try 256 or 512 tokens; the budget must
+A positive budget bounds aligned prefill work before each decode pass.
+On non-group-advance engines, an unfinished prefill shares that budget with
+at most one new oldest-fitting queued text request per tick, even if that
+text would otherwise fit in a single pass. Slot and KV reservation limits
+still apply; images and group-advance engines retain their existing paths.
+Earlier short-text decoding can reduce later ticks to the busy budget and
+increase the long prompt's completion time. Try 256 or 512 tokens; the budget must
 be a multiple of the snapshot alignment and fit the prefill scratch limit.
 Smaller chunks trade prefill throughput and TTFT for shorter pauses in
 other streams. Request reservations are held before the first yield, and
@@ -566,12 +571,20 @@ split chunks. Short cold prompts can group up to the selected budget.
 Larger idle chunks also increase the maximum wait for cancellation or a newly
 arriving request; they do not preempt a chunk already running.
 
+Earlier admission can also reduce aggregate throughput during a burst: a
+long prefill holds a slot while the new decoders run in smaller batches,
+and their arrival ends an idle-budget boost. Equal busy and idle budgets
+remove that budget-switch component, while preserving the batch-packing
+trade-off. Compare fixed-work mixed loads with
+`scripts/serve_admission_bench.py`; isolated token rates alone do not measure
+this cost.
+
 `engine.prefix_min_tokens` (`--prefix-min-tokens`, default 1024) is the prefix
 cache's entry floor. A cold prefill cuts at a prompt's structural boundaries
 only where a snapshot can stand — the cache on and the boundary at or past
-the floor — so a prompt under the floor is one walk, the same walk it gets
-as a span of a group admission, and its greedy transcript does not depend on
-what arrived beside it. No snapshot of any kind — prefill cut, head or body cut,
+the floor. Prompts below the floor avoid those structural prefix cuts;
+the prefill budget can still split them across GPU advances. No snapshot
+of any kind — prefill cut, head or body cut,
 rolling or close entry — is taken below that position. A shorter prompt still
 attaches to a matching entry; it just never takes a slot, so a stream of
 health probes or tiny side requests cannot push a long conversation's entries
@@ -584,21 +597,23 @@ to every peer; `/v1/metrics` shows them under `prefix_cache` as `min_tokens`
 and `head_cuts`, with `head_snapshots` counting the head entries taken. See
 [the sizing guide](prefix-cache.md).
 
-One long prefill progresses at a time in arrival order. Short prompts can
-still prefill together when the group fits the budget. Snapshots from an
+Unfinished prefills share the selected budget in deterministic arrival order,
+with rotation when the budget cannot cover them all. Short prompts can
+prefill together when a group admission fits the budget. Snapshots from an
 unfinished prefill remain private until completion. The settings and warm
 journal records carry both budgets; every rank follows the same token cuts.
 `/v1/metrics` reports `prefilling`, `prefill_ms` (execution counted once),
 and `prefill_request_ms` (summed request waits, including waits between
 chunks). Logical and computed prompt-token counters advance with each chunk,
 including cancelled partial work; their difference counts attached cache
-tokens. Other model families retain full-prompt admission.
+tokens. Families without resumable prefill retain full-prompt admission.
 
 Client disconnects are counted when the HTTP connection closes; retirement
 occurs at the next scheduler boundary. With full-prompt admission enabled,
 that boundary may be minutes away. Automatic chunking bounds the work between
 cancellation checks in tokens, not elapsed time. It interleaves existing decode
-requests, but a second queued prompt still waits behind the unfinished prefill.
+requests and eligible queued text. Admission still requires a free slot,
+the physical KV reservation and an aligned share of the selected budget.
 The `starting prefill` log precedes model work; `admitted to slot` marks its first
 token, after prefill has completed.
 

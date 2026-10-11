@@ -132,7 +132,7 @@ int64_t Scheduler::initial_reserve_tokens(const SchedulerRequest& spec) const {
 }
 
 int64_t Scheduler::reserve_blocks(const Request& r) const {
-  return engine_->blocks_for_tokens(initial_reserve_tokens(r.spec));
+  return engine_->reservation_blocks(initial_reserve_tokens(r.spec));
 }
 
 int Scheduler::youngest_active_after(int arrival) const {
@@ -156,12 +156,12 @@ void Scheduler::grow_reservations() {
     if (need <= r.reserved_tokens) continue;
     int64_t target = std::min<int64_t>(
         full, std::max<int64_t>(need, r.reserved_tokens + policy_.window_tokens));
-    const int64_t held = engine_->blocks_for_tokens(r.reserved_tokens);
+    const int64_t held = engine_->reservation_blocks(r.reserved_tokens);
     for (;;) {
       const int64_t free_blocks =
           engine_->pool_blocks_total() - engine_->pool_blocks_in_use();
-      if (engine_->blocks_for_tokens(target) - held <= free_blocks) break;
-      if (engine_->blocks_for_tokens(need) - held <= free_blocks) {
+      if (engine_->reservation_blocks(target) - held <= free_blocks) break;
+      if (engine_->reservation_blocks(need) - held <= free_blocks) {
         target = need;  // the minimum, rather than shedding for a full window
         break;
       }
@@ -188,7 +188,7 @@ void Scheduler::grow_reservations() {
     DGPP_LOG_INFO(
         "sched: request '{}' reservation grown to {} tokens ({} blocks; pool "
         "{}/{} blocks in use)",
-        r.spec.id, target, engine_->blocks_for_tokens(target),
+        r.spec.id, target, engine_->reservation_blocks(target),
         engine_->pool_blocks_in_use(), engine_->pool_blocks_total());
   }
 }
@@ -746,6 +746,10 @@ void Scheduler::begin_prefill(int arrival, int64_t budget) {
     if (r.prefill_body_slot >= 0) {
       free_arena_slot(r.prefill_body_slot);
       r.prefill_body_slot = -1;
+    }
+    if (r.prefill_head_slot >= 0) {
+      free_arena_slot(r.prefill_head_slot);
+      r.prefill_head_slot = -1;
     }
     throw;
   }
@@ -1400,14 +1404,14 @@ bool Scheduler::quantum() {
   if (chunk_tick) {
     // A chunked prefill is in flight: advance a fair slice on equal aligned
     // shares of the tick's budget (all prefills when they fit), begin at most
-    // one new chunked read-in, and admit fitting one-shots/groups into the
+    // one new read-in, and admit fitting one-shots/groups into the
     // align-down leftover. Order derives from arrival order only, so every
     // rank agrees.
     for (size_t i = 0; i < requests_.size(); ++i)
       if (requests_[i].state == State::kPrefilling) inflight.push_back(static_cast<int>(i));
     align = engine_->prefill_chunk_alignment();
     max_advances = static_cast<size_t>(budget / align);
-    // The one new begin, when any: the oldest fitting chunked-needing
+    // The one new begin, when any: the oldest fitting eligible
     // request (skip-fit, no eviction dance — a begin must not disturb the
     // pool the in-flight prefills hold), gated so every share keeps at
     // least one aligned chunk.
@@ -1421,7 +1425,11 @@ bool Scheduler::quantum() {
       for (size_t i = 0; i < requests_.size(); ++i) {
         if (open_slots <= 0 || inflight.size() + begins.size() >= max_advances) break;
         if (requests_[i].state != State::kQueued) continue;
-        if (!needs_chunked_prefill(static_cast<int>(i), budget)) continue;
+        // While a non-group prefill is in flight, text of any size can
+        // join its fair shares; a one-shot must not wait for leftovers.
+        // Keep image and group-advance eligibility on their existing paths.
+        if ((group_advance || !requests_[i].spec.images.empty()) &&
+            !needs_chunked_prefill(static_cast<int>(i), budget)) continue;
         const int64_t need = new_blocks(requests_[i], plan_prefix(requests_[i]));
         if (need > free_blocks) continue;
         begins.push_back(static_cast<int>(i));
@@ -1494,8 +1502,50 @@ bool Scheduler::quantum() {
         advance_prefill_group(members, budgets);
       else
         advance_prefill(members.at(0), budgets.at(0));
+    } else if (inflight.size() == 1) {
+      // Keep a lone reader on its original chunk grid. Shrinking its last
+      // budget cannot help a peer and can split the tail into extra GPU walks.
+      advance_prefill(inflight.front(), share);
     } else {
-      for (const int a : inflight) advance_prefill(a, share);
+      // A short suffix only needs its aligned tail. Donate the rest of its
+      // share to unfinished readers before executing any walk, so admitting
+      // a tiny prompt does not discard half of a long prompt's quantum.
+      // Keep the original align-down leftover for one-shot admission below.
+      // All decisions use replicated positions, never measured GPU time.
+      std::vector<int64_t> shares(inflight.size(), share), limits;
+      int64_t donated = 0;
+      bool can_receive = false;
+      for (size_t i = 0; i < inflight.size(); ++i) {
+        const Request& r = requests_[static_cast<size_t>(inflight[i])];
+        const int64_t remaining = static_cast<int64_t>(r.spec.prompt.size()) -
+                                  r.attached_tokens - r.prefill_computed;
+        // Cap before rounding: no reader can consume more than this tick.
+        const int64_t limit = remaining >= budget ? budget :
+            ((remaining - 1) / align + 1) * align;
+        limits.push_back(limit);
+        can_receive |= limit > share;
+        shares[i] = std::min(share, limit);
+        donated += share - shares[i];
+      }
+      // If every reader fits its original share, no donation can help.
+      // Preserve their grids instead of creating extra partial-tail walks.
+      if (!can_receive) {
+        std::fill(shares.begin(), shares.end(), share);
+        donated = 0;
+      }
+      while (donated >= align) {
+        int64_t readers = 0;
+        for (size_t i = 0; i < shares.size(); ++i)
+          readers += shares[i] < limits[i];
+        if (readers == 0) break;
+        const int64_t extra = std::max<int64_t>(align, donated / readers / align * align);
+        for (size_t i = 0; i < shares.size() && donated >= align; ++i) {
+          const int64_t grant = std::min({extra, limits[i] - shares[i], donated});
+          shares[i] += grant;
+          donated -= grant;
+        }
+      }
+      for (size_t i = 0; i < inflight.size(); ++i) advance_prefill(inflight[i], shares[i]);
     }
     progressed = true;
     // The align-down leftover still admits fitting one-shots/groups — but
