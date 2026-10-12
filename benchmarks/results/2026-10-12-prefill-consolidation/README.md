@@ -32,6 +32,7 @@ baseline, not against the source before all early-admission work began.
 | Candidate with mixed phase bounds and four-format validation | `d357c65b` | `62f5adfa724d9b94cdb7266e2986ec7ff3f1c1f3299b6e0fb776a0bbfac540c0` |
 | Candidate with MiMo native decoder recipes | `15d1dfd3` | `321c11d27f9951ab77073055cae3e5d69596b693ff98c64515c4e79f7a1bc0c8` |
 | Candidate with shared short-tail grouping and batched reader experts | `384bc260` | `e61a6180634587abb61ec9fc59e6493b8d5d0a6a83d7eed2feeaba249253e45e` |
+| Candidate preserving reader budgets and GLM-DSA arithmetic | `01caf6f7` | `4c349a798a5e20452c007939591d3ee301bddc343f95437a025f8ef85465b978` |
 | Earlier candidate, before compact mapping | `26e61c9f55f068673eb771a1daa90d09c18d6978` | `0080af5401a43e91d2a5e76cf79f39db9de60442f24042147195add7f5e0a9c5` |
 
 Builds use Release optimization with debug symbols disabled. Harness-only
@@ -301,8 +302,17 @@ visible in the evidence and are not counted as exact passes.
   in both V4 and V4.1: a 256-token budget advances 128 tokens because the
   planner subtracts decoder rows before aligning, despite spare scratch.
   The [investigation receipt](evidence/dsv4-small-budget-investigation-v31.json)
-  preserves those failures. A shared accounting correction and capacity
-  check are being validated; the checkpoint remains available for retesting.
+  preserves those failures. Candidate `01caf6f7` keeps reader budgets intact
+  when decoder rows fit spare scratch, while trimming at physical capacity.
+  The budget and capacity assertions pass. Fuller reader chunks expose a
+  GLM-DSA dense-arithmetic mismatch in the shared fixture (relative L2
+  0.010548934, above the unchanged 0.01 bound). The common row-grouping
+  helper now preserves its dense and packed expert recipes and native
+  decoder arithmetic. All eighteen shared cases pass; a wider short-reader
+  check is exact at both layers in BF16 and BF12. Nine affected shared cases
+  also pass memcheck with zero errors or leaked bytes. Real-checkpoint
+  performance and cached-continuation retests are pending; the DeepSeek
+  checkpoint remains available.
 
 These probes identify dependence on execution shape; they are not a general
 model-quality or teacher-forced numerical equivalence result.

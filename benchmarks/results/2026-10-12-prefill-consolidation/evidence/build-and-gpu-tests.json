@@ -363,6 +363,188 @@
         "DGPP_DENSE_GEMV_ROWS": "256",
         "DGPP_TEST_FILTER": "shared_prefill_glm4"
       }
+    },
+    {
+      "file": "budget-regression-v31/regression.log",
+      "sha256": "e348a607c28fe71e20fdd66233ece14cdf00f3bc8047df8c3a9932c91bbfa2fb",
+      "results": [
+        "mixed reader budget: advanced=128 expected=256 alignment=128",
+        "[FAIL] shared_prefill_dsv4: decoder rows consume the reader budget despite spare physical capacity",
+        "mixed reader budget: advanced=128 expected=256 alignment=128",
+        "[FAIL] shared_prefill_dsv41: decoder rows consume the reader budget despite spare physical capacity",
+        "6 tests, 2 failed"
+      ],
+      "expected_failure": true
+    },
+    {
+      "file": "reader-budget-v32-check/build.log",
+      "sha256": "afc9d2658c4560451139d14ae6fa4e7da111fe2b067d58e9b8fa9a19e0dea096",
+      "results": [
+        "/home/stephen/workspace/dgpp/tests/cuda/shared_prefill_test.cpp:620:43: error: no matching function for call to \u2018dgpp::Dsv4Model::session_prefill_verify_group(<brace-enclosed initializer list>, <brace-enclosed initializer list>, <brace-enclosed initializer list>, <brace-enclosed initializer list>)\u2019"
+      ],
+      "status": "Initial new capacity test had an initializer-list deduction error; corrected with an explicit cursor vector."
+    },
+    {
+      "file": "reader-budget-v32-fixed-check/tests.log",
+      "sha256": "9a7ecb6e5ffd8db9fea5d3d512f7ef8e9ddd6c0547d3daf662cc84a1e9d85cab",
+      "results": [
+        "1/6 Test  #32: unit_tests .......................   Passed   10.43 sec",
+        "2/6 Test  #82: dsv41_model_test .................   Passed    3.78 sec",
+        "3/6 Test #174: dsv4_model_test ..................   Passed    6.45 sec",
+        "4/6 Test #176: dsv4_engine_test .................   Passed   11.20 sec",
+        "5/6 Test #178: qwen_engine_test .................   Passed   32.24 sec",
+        "mixed reader budget: advanced=16 expected=16 alignment=4",
+        "mixed reader budget: advanced=16 expected=16 alignment=4",
+        "mixed reader budget: advanced=16 expected=16 alignment=4",
+        "mixed reader budget: advanced=16 expected=16 alignment=4",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "  mixed reader: relative L2 0.010548934",
+        "[FAIL] shared_prefill_glm_dsa: mixed reader",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 a2026-10-12 16:23:58.683 INFO  top-1 near-tie certification [mixed reader]: 0/1 misses, all certified (worst margin 0.0x noise)",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "83% tests passed, 1 tests failed out of 6"
+      ],
+      "status": "Budget tests and five targets pass; GLM-DSA reader arithmetic exceeds unchanged L2 bound. Resolved in v33."
+    },
+    {
+      "file": "reader-budget-v33-check/tests.log",
+      "sha256": "8ac333174b9e9fb90f9cf9b802b492869a87089bd5ba15fa97094b072a89e0cd",
+      "results": [
+        "1/3 Test #161: glm_dsa_tp_test ..................   Passed    7.33 sec",
+        "2/3 Test #162: glm_dsa_engine_test ..............   Passed    8.68 sec",
+        "3/3 Test #244: shared_prefill_test ..............   Passed   29.84 sec",
+        "100% tests passed, 0 tests failed out of 3"
+      ]
+    },
+    {
+      "file": "reader-budget-v33-check/ctest-details.log",
+      "sha256": "6bcf9c69ac2b19d0c705917056a78274cff2144334390b92c62db228dd597e7e",
+      "results": [
+        "1 tests, 0 failed",
+        "Test Passed.",
+        "6 tests, 0 failed",
+        "Test Passed.",
+        "mixed reader budget: advanced=16 expected=16 alignment=4",
+        "mixed reader budget: advanced=16 expected=16 alignment=4",
+        "mixed reader budget: advanced=16 expected=16 alignment=4",
+        "mixed reader budget: advanced=16 expected=16 alignment=4",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "GLM-DSA short reader residency=checkpoint layer=0: 0/6144 changed",
+        "GLM-DSA short reader residency=checkpoint layer=1: 0/6144 changed",
+        "GLM-DSA short reader residency=bf12 layer=0: 0/6144 changed",
+        "GLM-DSA short reader residency=bf12 layer=1: 0/6144 changed",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=162026-10-12 16:33:03.033 INFO  top-1 near-tie certification [mixed reader]: 0/1 misses, all certified (worst margin 0.0x noise)",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "18 tests, 0 failed",
+        "Test Passed."
+      ]
+    },
+    {
+      "file": "reader-budget-v33-check/sanitizer.log",
+      "sha256": "972d6a96cd9e61c0b5d94d018b3cfc205c7973edc3fbd1851b935e2aa44da5b7",
+      "results": [
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "mixed reader budget: advanced=256 expected=256 alignment=128",
+        "7 tests, 0 failed",
+        "========= LEAK SUMMARY: 0 bytes leaked in 0 allocations",
+        "========= ERROR SUMMARY: 0 errors"
+      ],
+      "environment": {
+        "DGPP_DENSE_GEMV_ROWS": "256",
+        "DGPP_TEST_FILTER": "shared_prefill_dsv"
+      }
+    },
+    {
+      "file": "reader-budget-v33-check/glm-dsa-sanitizer.log",
+      "sha256": "58ad921c1938e3cd9e54fbff8ab1cab4640883b666bf84b324858c159f7d52c7",
+      "results": [
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "mixed reader budget: advanced=16 expected=16 alignment=1",
+        "GLM-DSA short reader residency=checkpoint layer=0: 0/6144 changed",
+        "GLM-DSA short reader residency=checkpoint layer=1: 0/6144 changed",
+        "GLM-DSA short reader residency=bf12 layer=0: 0/6144 changed",
+        "GLM-DSA short reader residency=bf12 layer=1: 0/6144 changed",
+        "2 tests, 0 failed",
+        "========= LEAK SUMMARY: 0 bytes leaked in 0 allocations",
+        "========= ERROR SUMMARY: 0 errors"
+      ],
+      "environment": {
+        "DGPP_DENSE_GEMV_ROWS": "256",
+        "DGPP_TEST_FILTER": "glm_dsa"
+      }
     }
   ],
   "additional_candidates": [
@@ -402,5 +584,11 @@
     "patch_sha256": "ff012f97128c4ed01e8f70b73f379ab339d674134bc30c9bba7d336a3725648a",
     "binary_sha256": "e61a6180634587abb61ec9fc59e6493b8d5d0a6a83d7eed2feeaba249253e45e",
     "committed_source": "384bc260530bae7f331a1c85fefed54105bb21c8"
+  },
+  "reader_budget_candidate": {
+    "parent": "951a154e4fa0c8afbb89946a86219872384a6720",
+    "patch_sha256": "7db7c314e6bf155593183113c3d84fe2cff46341b651135744a0ecf7613b0b2d",
+    "binary_sha256": "4c349a798a5e20452c007939591d3ee301bddc343f95437a025f8ef85465b978",
+    "committed_source": "01caf6f75ea1e460b196a1501130873d4e54467d"
   }
 }
