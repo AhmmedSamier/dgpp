@@ -43,6 +43,8 @@
 #include "../common/utf8.hpp"
 #include "sched/scheduler.hpp"
 #include "serve/generation_service.hpp"
+#include "common/base64.hpp"
+#include "serve/audio_inputs.hpp"
 #include "serve/image_inputs.hpp"
 #include "serve/http_server.hpp"
 #include "serve/prefill_policy.hpp"
@@ -120,6 +122,16 @@ class FakeEngine : public SchedulerEngine {
   int32_t prefill_images(int req, const std::vector<int64_t>& prompt, const std::vector<dgpp::ImageInput>& images) override {
     require(!images.empty() && images[0].rgb.size() == 112 * 112 * 3, "decoded image reaches the engine");
     ++image_prefills;
+    return prefill(req, prompt);
+  }
+  std::atomic<bool> audios_available{false};
+  std::atomic<int> audio_prefills{0};
+  bool supports_audios() const override { return audios_available; }
+  int32_t prefill_audios(int req, const std::vector<int64_t>& prompt,
+                         const std::vector<dgpp::AudioInput>& audios) override {
+    require(!audios.empty() && audios[0].tokens == 13 && audios[0].pcm.size() == 16000,
+            "decoded audio reaches the engine with its trained span");
+    ++audio_prefills;
     return prefill(req, prompt);
   }
 
@@ -444,6 +456,8 @@ class FakeFrontend : public ModelFrontend {
  public:
   std::atomic<bool> images_available{false};
   bool supports_images() const override { return images_available; }
+  std::atomic<bool> audios_available{false};
+  bool supports_audios() const override { return audios_available; }
   ChatInput prepare_chat(const dgpp::minijson::Value& globals) const override {
     auto input = ModelFrontend::prepare_chat(globals);
     const auto& messages = globals.at("messages").items();
@@ -451,13 +465,22 @@ class FakeFrontend : public ModelFrontend {
       const auto* content = messages[i].find("content");
       if (!content || !content->is_array()) continue;
       for (size_t j = 0; j < content->items().size(); ++j) {
-        const auto* image = content->items()[j].find("image_url");
-        if (!image) continue;
-        auto im = dgpp::serve::prepare_glm_image(*image,
-            "messages[" + std::to_string(i) + "].content[" + std::to_string(j) + "].image_url");
-        im.offset = input.tokens.size();
-        input.tokens.insert(input.tokens.end(), im.tokens, 154854);
-        input.images.push_back(std::move(im));
+        const auto& part = content->items()[j];
+        const auto* image = part.find("image_url");
+        const auto* audio = part.find("input_audio");
+        if (image) {
+          auto im = dgpp::serve::prepare_glm_image(*image,
+              "messages[" + std::to_string(i) + "].content[" + std::to_string(j) + "].image_url");
+          im.offset = input.tokens.size();
+          input.tokens.insert(input.tokens.end(), im.tokens, 154854);
+          input.images.push_back(std::move(im));
+        } else if (audio) {
+          auto au = dgpp::serve::prepare_audio(part,
+              "messages[" + std::to_string(i) + "].content[" + std::to_string(j) + "].input_audio");
+          au.offset = input.tokens.size();
+          input.tokens.insert(input.tokens.end(), au.tokens, 151676);
+          input.audios.push_back(std::move(au));
+        }
       }
     }
     return input;
@@ -1868,6 +1891,9 @@ DGPP_TEST(serve_api_developerAndUnsupportedMedia) {
           "developer instructions reach the checkpoint's system role");
   expect_invalid_request(post_chat(rig, "{\"model\":\"" + kModel +
       R"(","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.invalid/image"}}]}]})", "\"param\""),
+      "messages[0].content[0].type");
+  expect_invalid_request(post_chat(rig, "{\"model\":\"" + kModel +
+      R"(","messages":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"AAAA","format":"wav"}}]}]})", "\"param\""),
       "messages[0].content[0].type");
 }
 
@@ -4867,6 +4893,52 @@ DGPP_TEST(serve_images_capability_validation_and_streaming) {
   response = post_chat(rig, body("data:image/png;base64,AAAA", false), "invalid_image");
   require(response.find("messages[0].content[1].image_url.url") != std::string::npos,
           "invalid image names the precise field");
+}
+
+DGPP_TEST(serve_audio_admission_and_engine_handoff) {
+  // A 1 s 16 kHz mono int16 sine WAV: 100 mel frames -> 13 encoder tokens.
+  auto one_second_wav_b64 = [] {
+    std::string pcm;
+    for (int i = 0; i < 16000; ++i) {
+      const auto v = static_cast<int16_t>(12000.0 * std::sin(0.02 * i));
+      pcm += static_cast<char>(v & 0xff);
+      pcm += static_cast<char>(static_cast<unsigned>(v) >> 8);
+    }
+    const auto u32 = [](uint32_t v) {
+      return std::string{char(v), char(v >> 8), char(v >> 16), char(v >> 24)};
+    };
+    const auto u16 = [](uint16_t v) { return std::string{char(v), char(v >> 8)}; };
+    return dgpp::encode_base64("RIFF" + u32(36 + pcm.size()) + "WAVEfmt " + u32(16) + u16(1) +
+                               u16(1) + u32(16000) + u32(32000) + u16(2) + u16(16) + "data" +
+                               u32(static_cast<uint32_t>(pcm.size())) + pcm);
+  };
+  const std::string wav = one_second_wav_b64();
+  ServiceRig rig;
+  const auto body = [&](const std::string& data, bool stream) {
+    return "{\"model\":\"glm-5.3-flash-fp8\",\"max_tokens\":1,\"stream\":" +
+           std::string(stream ? "true" : "false") +
+           ",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":"
+           "\"describe\"},{\"type\":\"input_audio\",\"input_audio\":{\"data\":\"" +
+           data + "\",\"format\":\"wav\"}}]}]}";
+  };
+  auto response = post_chat(rig, body(wav, false), "unsupported_content_type");
+  require(response.find("400 Bad Request") != std::string::npos,
+          "text-only frontend refuses audio");
+  rig.frontend.audios_available = true;
+  response = post_chat(rig, body(wav, false), "unsupported_content_type");
+  require(response.find("400 Bad Request") != std::string::npos, "text-only engine refuses audio");
+  rig.engine.audios_available = true;
+  response = post_chat(rig, body(wav, false), "usage");
+  require(response.find("200 OK") != std::string::npos &&
+              response.find("\"prompt_tokens\":21") != std::string::npos,
+          "audio expansion counted in usage: " + response);
+  response = post_chat(rig, body(wav, true), "[DONE]");
+  require(response.find("200 OK") != std::string::npos && response.find("[DONE]") != std::string::npos,
+          "audio SSE completes");
+  require(rig.engine.audio_prefills == 2, "audio payload reached both prefills");
+  response = post_chat(rig, body("AAAA", false), "invalid_audio");
+  require(response.find("messages[0].content[1].input_audio") != std::string::npos,
+          "invalid audio names the precise field");
 }
 
 DGPP_TEST(serve_models_reports_the_active_rope_and_the_effective_limit) {

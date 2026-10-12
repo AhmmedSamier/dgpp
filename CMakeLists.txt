@@ -259,6 +259,16 @@ add_library(dgpp_text STATIC
 target_link_libraries(dgpp_text PUBLIC dgpp_loaders dgpp_pcre2)
 dgpp_set_common(dgpp_text)
 
+# Audio admission DSP (docs/audio.md): container decode and the host log-mel
+# frontend, deterministic and CUDA-free so the frontend that admits a request
+# and the tower's oracle compute identical features.
+add_library(dgpp_audio STATIC
+  src/audio/wav_decode.cpp
+  src/audio/mel_frontend.cpp)
+target_include_directories(dgpp_audio PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_audio PUBLIC dgpp_common)
+dgpp_set_common(dgpp_audio)
+
 add_library(dgpp_sched STATIC
   src/sched/prefix_cache.cpp
   src/sched/scheduler.cpp)
@@ -804,6 +814,7 @@ endif()
 
 enable_testing()
 add_executable(unit_tests
+  tests/unit/audio_frontend_test.cpp
   tests/unit/image_inputs_test.cpp
   tests/unit/file_inputs_test.cpp
   tests/unit/log_test.cpp
@@ -957,6 +968,8 @@ set_tests_properties(mimo_chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
 # engine and frontend, no model cache). Stage 4b adds the admission
 # journal (fabric_serve.cpp over the host-only dgpp_net TCP primitives).
 add_library(dgpp_serve STATIC
+  src/serve/audio_inputs.cpp
+  src/serve/audio_frontend.cpp
   src/serve/image_inputs.cpp
   src/serve/vision_frontend.cpp
   src/serve/glm_vision_frontend.cpp
@@ -970,7 +983,7 @@ add_library(dgpp_serve STATIC
   src/serve/prometheus.cpp
   src/serve/rank_metrics.cpp)
 target_link_libraries(dgpp_serve
-  PUBLIC dgpp_core dgpp_models_glm dgpp_loaders dgpp_net Threads::Threads)
+  PUBLIC dgpp_core dgpp_audio dgpp_models_glm dgpp_loaders dgpp_net Threads::Threads)
 dgpp_set_common(dgpp_serve)
 
 add_executable(http_server_test tests/host/http_server_test.cpp)

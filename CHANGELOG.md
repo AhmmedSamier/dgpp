@@ -173,6 +173,20 @@ project procedures and design guidance live in `docs/`.
   `benchmarks/results/` are no longer tracked. The measured
   latency/throughput tradeoffs are in
   [PR #112](https://github.com/HawkBearPig/dgpp/pull/112).
+- **Audio admission (Qwen3-ASR, phase 1)**: chat content parts
+  `input_audio`/`audio_url` decode inline base64 WAV (PCM 8/16/24/32-bit,
+  IEEE float, stereo, any rate) to 16 kHz hop-aligned mono at admission
+  (`src/audio/`, `src/serve/audio_inputs.cpp`), and the frontend rewrites
+  each clip to the trained `...`+pad*N+`...` span before the
+  template renders (`src/serve/audio_frontend.cpp`, docs/audio.md) - the
+  `VisionFrontend` pattern with the HF processor's exact geometry (13
+  tokens per 100-frame chunk). The host log-mel frontend (400/160 center
+  STFT with torch's reflect edge, 201x128 Slaney bank, per-clip max-8 dB
+  floor, (x+4)/4) is pinned to `Qwen3ASRFeatureExtractor` by
+  `tools/qwen3_asr_feature_goldens.py` within 1e-4. The scheduler carries
+  `AudioInput` spans end to end (monolithic prefills; no chunked or cached
+  audio yet). No served model has the tower loaded yet, so every frontend
+  still refuses audio parts until the ASR family lands.
 - **Qwen3.8-27B NVFP4: fp4w prefill GEMM** (2026-10-06):
   `launch_fp4w_gemm_*` (new): `fp8w_gemm`'s 128x128x64 tiles and
   three-stage pipeline with an e2m1 W-side (8 payload bytes + the
