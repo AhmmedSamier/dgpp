@@ -75,7 +75,8 @@ admits fitting one-shots/groups into the align-down leftover (never a new
 chunked start — chunked read-ins stay one at a time). Order derives from
 arrival order and the last-advanced prefill only, so every rank agrees.
 
-Qwen graph serving without DFlash enables early text admission by default: queued text of
+Serving enables early text admission by default when the engine supports mixed
+prefill and decode execution: queued text of
 any size can join, including prompts shorter than one alignment unit. New
 readers share a bounded grouped prefill and share their dense and expert
 projections with active decoder verification.
@@ -83,10 +84,23 @@ Each decoder retains its own recurrent state, speculative rollback rows,
 MTP drafts and sampling state. It receives at most one decode pass per tick.
 
 `engine.prefill_early_admission=false` restores admission through leftovers.
-Other execution backends retain their previous default; explicitly enabling
-early admission there does not provide Qwen's shared execution path. Images
+The launcher does not inspect model architecture or drafter names. It carries
+an automatic/on/off setting through the settings handshake, resolves it after
+engine construction, and publishes the concrete policy in the warm record.
+Backends without mixed execution retain their previous default; explicitly
+enabling admission does not implement shared execution. Images
 retain their existing eligibility and execution paths. Monolithic mode is
 unchanged.
+
+The common `SessionModel` implements mixed-row planning, budget accounting,
+positions, prefix snapshots, MTP catch-up, output slicing, and cursor suspension.
+The layer executor supplies `RowRun::decode_spans` state/rollback/output handling
+under the `MixedPrefillModel` contract. This includes any features its configured
+drafter needs; a drafter's name is not an eligibility rule. The graph adapter
+checks actual slot, row-capacity, context, and graph-variant limits per batch.
+Currently the Qwen4Exp executor implements that contract. Other executors,
+including the Qwen35 executor used with DFlash, still need mixed layer execution
+and validation. This structural refactor does not claim universal backend coverage.
 
 The new reader still needs a free slot and its reservation under the existing
 KV policy. Cached text attaches through the same prefix plan and computes
@@ -96,9 +110,9 @@ aligned units with arrival-order ties. This happens before the advances,
 uses replicated positions and stays inside the original tick budget. When
 all readers finish, unused capacity does not create another admission lane.
 These allocations are caps: required snapshot/structural cuts can end a GPU
-advance earlier. Qwen spends the cap from the cursor's current position and
-omits redundant automatic chunk-grid cuts; this avoids splitting work again
-after a share changes. Other families retain their chunk-grid contracts.
+advance earlier. Executors that declare split-invariant prefill spend the cap
+from the cursor's current position and omit redundant automatic chunk-grid
+cuts; other executors retain their chunk-grid contracts.
 A lone reader, or a set of readers that all fit their original shares, keeps
 those shares unchanged, including its final tails.
 The busy budget continues to protect decoders that started before a reader.

@@ -538,6 +538,29 @@ void test_journal_codec() {
       require(decoded.world_settings.prefix_min_tokens == 0 && !decoded.world_settings.prefix_head_snapshots,
               "codec: absent entry policy decodes to off");
     }
+    for (const std::optional<bool> early : {std::optional<bool>{}, std::optional<bool>{false},
+                                            std::optional<bool>{true}}) {
+      auto settings = ws;
+      settings.prefill_early_admission = early;
+      const auto line = dgpp::serve::encode_journal_settings(settings);
+      const auto decoded = dgpp::serve::decode_journal_line(line);
+      require(decoded.world_settings == settings,
+              "automatic/on/off admission survives the settings handshake exactly");
+      if (early == std::optional<bool>{false}) {
+        require(line.find("\"pfearly\"") == std::string::npos,
+                "absent legacy settings remain explicitly disabled, not automatic");
+      }
+    }
+    for (const std::string value : {"-2", "2", "0.5", "true", "null", "\"auto\""}) {
+      auto line = dgpp::serve::encode_journal_settings(ws);
+      const auto at = line.find("\"pfearly\":1");
+      require(at != std::string::npos, "test settings include early admission");
+      line.replace(at, std::string("\"pfearly\":1").size(), "\"pfearly\":" + value);
+      bool refused = false;
+      try { (void)dgpp::serve::decode_journal_line(line); }
+      catch (const std::exception&) { refused = true; }
+      require(refused, "invalid early-admission settings are refused");
+    }
     for (int budget : {-1, 0, 256}) {
       auto settings = ws;
       settings.prefill_budget_tokens = budget;

@@ -30,6 +30,7 @@
 #include "engine/graph_check.hpp"
 #include "engine/image_prefill.hpp"
 #include "engine/lookup_draft.hpp"
+#include "engine/mixed_prefill.hpp"
 #include "engine/prefix_arena.hpp"
 #include "engine/speculative.hpp"
 #include "engine/step_timing.hpp"
@@ -1351,9 +1352,12 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       throw;
     }
   }
+  bool supports_mixed_prefill() const override {
+    return MixedPrefillModel<Model> && prefill_chunk_alignment() > 0;
+  }
   bool can_mix_prefill(int req, const std::vector<int>& decoders) const override {
-    if constexpr (requires { model_->prepare_mixed_verify(1); }) {
-      if (req < 0 || req >= slots_ || decoders.empty() || block_) return false;
+    if constexpr (MixedPrefillModel<Model>) {
+      if (!supports_mixed_prefill() || req < 0 || req >= slots_ || decoders.empty()) return false;
       const auto& task = prefills_[static_cast<size_t>(req)];
       if (!task || !task->images.empty()) return false;
       for (const int decoder : decoders)
@@ -1381,7 +1385,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   sched::SchedulerEngine::MixedGroupProgress advance_prefill_group_and_step(
       const std::vector<int>& readers, const std::vector<int64_t>& budgets,
       const std::vector<int>& decoders) override {
-    if constexpr (requires { model_->prepare_mixed_verify(1); }) {
+    if constexpr (MixedPrefillModel<Model>) {
       if (readers.size() != budgets.size() || !can_mix_prefill_group(readers, decoders))
         throw std::logic_error("graph engine: unsupported mixed walk");
       validate_batch(decoders);
@@ -1420,8 +1424,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     return false;
   }
   bool prefill_budget_per_reader() const override {
-    if constexpr (requires { Model::kPrefillBudgetPerReader; }) return Model::kPrefillBudgetPerReader;
-    return true;
+    // Shared verification and prefill spend one physical row budget. Keep
+    // the legacy per-reader limit for executors without that contract.
+    return !MixedPrefillModel<Model>;
   }
   std::vector<sched::SchedulerEngine::PrefillProgress> advance_prefill_group(
       const std::vector<int>& reqs, const std::vector<int64_t>& budgets) override {
@@ -1873,7 +1878,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     if (capped && rows > fam.max_rows)
       throw std::logic_error("graph engine: a depth-capped batch family selected past its rows");
     if (!prefill_reqs.empty()) {
-      if constexpr (requires { model_->prepare_mixed_verify(1); }) {
+      if constexpr (MixedPrefillModel<Model>) {
         fam.mixed_execs.resize(std::max<size_t>(1, depth_options_.size()));
         auto& execs = fam.mixed_execs[static_cast<size_t>(std::max(0, di))];
         if (execs[0] == nullptr) {
@@ -1897,7 +1902,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     model_->session_graph_use_batch_contract(rows, fam.requests);
     model_->session_graph_stage_batch();
     if (!prefill_reqs.empty()) {
-      if constexpr (requires { model_->prepare_mixed_verify(1); }) {
+      if constexpr (MixedPrefillModel<Model>) {
         drain();
         std::vector<int> physical;
         std::vector<std::vector<int64_t>> feeds;

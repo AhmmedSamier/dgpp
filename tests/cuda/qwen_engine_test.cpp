@@ -44,6 +44,7 @@
 #include "models/qwen/loader.hpp"
 #include "net/collective_bus.hpp"
 #include "qwen_fixture.hpp"
+#include "serve/prefill_policy.hpp"
 
 namespace fs = std::filesystem;
 using dgpp::BusBoundaryReducer;
@@ -740,9 +741,10 @@ static void check_mixed_prefill_engine(bool scheduled) {
         }
         for (; forced_depth <= (scheduled ? 3 : 1); ++forced_depth) {
           dgpp::sched::AdmissionPolicy policy;
-          policy.prefill_early_admission = true;
           policy.prefill_budget_tokens = 32;
           policy.prefill_idle_budget_tokens = 64;
+          policy = dgpp::serve::resolve_prefill_policy(policy, engine, std::nullopt);
+          require(policy.prefill_early_admission, "mixed executor resolves automatic admission before requests exist");
           std::vector<dgpp::sched::SchedulerRequest> requests(3);
           std::vector<std::vector<int64_t>> expected;
           for (int q = 0; q < 3; ++q) {

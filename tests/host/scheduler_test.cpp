@@ -540,6 +540,29 @@ DGPP_TEST(scheduler_serving_auto_prefill_budget_respects_engine_geometry_and_opt
           "an explicit idle budget survives");
 }
 
+DGPP_TEST(scheduler_serving_auto_admission_uses_execution_capabilities) {
+  struct ExecutionEngine : ChunkFakeEngine {
+    bool shared = false;
+    bool supports_mixed_prefill() const override { return shared; }
+  } engine;
+  dgpp::sched::AdmissionPolicy policy;
+  policy.prefill_budget_tokens = -1;
+  const auto resolve = [&](std::optional<bool> requested = std::nullopt) {
+    return dgpp::serve::resolve_prefill_policy(policy, engine, requested);
+  };
+  require(!resolve().prefill_early_admission, "chunking alone does not promise shared execution");
+  engine.shared = true;
+  require(resolve().prefill_early_admission, "an unnamed shared executor enables automatic admission");
+  require(!resolve(false).prefill_early_admission, "explicit false overrides execution support");
+  policy.prefill_budget_tokens = 4;
+  require(resolve().prefill_early_admission, "an explicit budget still resolves automatic admission");
+  policy.prefill_budget_tokens = 0;
+  require(!resolve().prefill_early_admission, "monolithic admission has no early-admission default");
+  policy.prefill_budget_tokens = 4;
+  engine.shared = false;
+  require(resolve(true).prefill_early_admission, "explicit policy remains available without shared execution");
+}
+
 DGPP_TEST(scheduler_chunked_prefill_bounds_work_and_keeps_decode_running) {
   ChunkFakeEngine engine;
   engine.arm(0, {10, 11, 12, 13, 14, 15, 16, 17}, 8);

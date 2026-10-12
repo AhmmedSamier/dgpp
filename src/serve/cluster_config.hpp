@@ -286,8 +286,8 @@ struct ClusterConfig {
     int prefill_budget_tokens = -1;  // automatic on engines with resumable prefill
     std::string model_alias = "";  // override the served model name (display only)
     int prefill_idle_budget_tokens = 0;
-    // Omitted: enabled for Qwen's shared prefill/decode graph backend.
-    // The settings journal carries the resolved boolean, including for peers.
+    // Omitted: resolve from the constructed engine's mixed-execution support.
+    // Settings retain auto/on/off; the warm journal carries the resolved bool.
     std::optional<bool> prefill_early_admission;
     double bulk_pace_gbps = -1.0;  // derived from the port rate
     int bulk_inflight = -1;

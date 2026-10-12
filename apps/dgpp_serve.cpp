@@ -1423,7 +1423,7 @@ int main(int argc, char** argv) {
       "  [--prefill-idle-budget-tokens N (default 0)]: larger budget without active decode; 0 uses "
       "the busy budget\n"
       "  [--prefill-early-admission | --no-prefill-early-admission]: let queued\n"
-      "    short text join an in-flight prefill (default on for Qwen graph serving)\n"
+      "    short text join an in-flight prefill (default follows engine mixed-execution support)\n"
       "  [--prefix-min-tokens N (default 1024)]: no prefix-cache entry below this position; a\n"
       "    short prompt attaches to what exists but never takes a snapshot slot\n"
       "  [--prefix-head-snapshots | --no-prefix-head-snapshots (default on)]: a cold prompt\n"
@@ -1497,7 +1497,6 @@ int main(int argc, char** argv) {
   int admission_window = 256;
   int prefill_budget_tokens = -1;
   int prefill_idle_budget_tokens = 0;
-  bool prefill_early_admission = false;
   std::optional<bool> prefill_early_admission_override;
   // The prefix cache's entry policy (2026-09-28): no entry below the floor,
   // and a cold prompt keeps the cut at its first structural boundary.
@@ -1905,16 +1904,8 @@ int main(int argc, char** argv) {
       DGPP_LOG_INFO("serve: --mtp without --mtp-depth on DeepSeek-V4: the DSpark block's {} drafts", mtp_depth);
     }
   }
-  // Resolve the admission default before publishing the settings record.
-  // Qwen's graph backend shares prefill and verification work; other
-  // backends retain their existing default until they implement that path.
-  if (prefill_early_admission_override.has_value()) {
-    prefill_early_admission = *prefill_early_admission_override;
-  } else if (!ckpt.empty()) {
-    prefill_early_admission = decode_graph && dflash_dir.empty() &&
-        dgpp::detect_architecture_file((fs::path(ckpt) / "config.json").string()) ==
-            dgpp::ModelArchitecture::Qwen4Exp;
-  }
+  // Admission remains automatic/on/off through the settings handshake.
+  // Resolve it from the constructed engine before publishing the warm record.
   // ---- the fabric's first handshake: the head pushes the
   // world's shape. Rank 0 opens the journal and accepts the full world
   // before building anything; the peers connect (retrying within the
@@ -1949,7 +1940,7 @@ int main(int argc, char** argv) {
         mtp_verify, dflash_batch_rows, effective_batch_min_live,
         sampling_candidates, prefix_cache_gib,
         admission_mode, admission_window, prefill_budget_tokens, prefill_idle_budget_tokens,
-        prefill_early_admission ? 1 : 0,
+        prefill_early_admission_override.has_value() ? (*prefill_early_admission_override ? 1 : 0) : -1,
         prefix_min_tokens, prefix_head_snapshots ? 1 : 0,
         bulk_pace_gbps, bulk_inflight, reasoning_in_content ? 1 : 0,
         rope_scaling ? std::format("yarn:{}:{}:{}:{}:{}:{}", rope_scaling->factor,
@@ -2046,7 +2037,7 @@ int main(int argc, char** argv) {
         ws.admission_window = admission_window;
         ws.prefill_budget_tokens = prefill_budget_tokens;
         ws.prefill_idle_budget_tokens = prefill_idle_budget_tokens;
-        ws.prefill_early_admission = prefill_early_admission;
+        ws.prefill_early_admission = prefill_early_admission_override;
         ws.prefix_min_tokens = prefix_min_tokens;
         ws.prefix_head_snapshots = prefix_head_snapshots;
         ws.bulk_pace_gbps = bulk_pace_gbps;
@@ -2138,7 +2129,7 @@ int main(int argc, char** argv) {
         admission_window = ws.admission_window;
         prefill_budget_tokens = ws.prefill_budget_tokens;
         prefill_idle_budget_tokens = ws.prefill_idle_budget_tokens;
-        prefill_early_admission = ws.prefill_early_admission;
+        prefill_early_admission_override = ws.prefill_early_admission;
         prefix_min_tokens = ws.prefix_min_tokens;
         prefix_head_snapshots = ws.prefix_head_snapshots;
         bulk_pace_gbps = ws.bulk_pace_gbps;
@@ -2829,7 +2820,6 @@ int main(int argc, char** argv) {
     knobs.admission.window_tokens = admission_window;
     knobs.admission.prefill_budget_tokens = prefill_budget_tokens;
     knobs.admission.prefill_idle_budget_tokens = prefill_idle_budget_tokens;
-    knobs.admission.prefill_early_admission = prefill_early_admission;
     knobs.admission.prefix_min_tokens = prefix_min_tokens;
     knobs.admission.prefix_head_snapshots = prefix_head_snapshots;
     knobs.default_max_tokens = default_max_tokens;
@@ -2954,7 +2944,8 @@ int main(int argc, char** argv) {
               family->make_graph_engine(bus.get(), rank, world, pick_scratch, graph_batch_min_live,
                                         sample_prefix.data, sample_gather.data, sampling_candidates,
                                         &grammar_vocab, prefix_slots, mtp_depth, compact_batches, lookup_tail);
-          knobs.admission = dgpp::serve::resolve_prefill_policy(knobs.admission, *graph_engine->engine());
+          knobs.admission = dgpp::serve::resolve_prefill_policy(
+              knobs.admission, *graph_engine->engine(), prefill_early_admission_override);
           peer_policy = knobs.admission;
           DGPP_LOG_INFO("rank {}: prefill budget {} tokens/tick (0 = full prompt), {} with nothing decoding{}",
                         rank, knobs.admission.prefill_budget_tokens,
@@ -3049,7 +3040,8 @@ int main(int argc, char** argv) {
               dgpp::make_fabric_sample(bus.get(), rank, world, sample_prefix.data, sample_gather.data,
                                        family->vocab_size()),
               &grammar_vocab, prefix_slots);
-          knobs.admission = dgpp::serve::resolve_prefill_policy(knobs.admission, *engine);
+          knobs.admission = dgpp::serve::resolve_prefill_policy(
+              knobs.admission, *engine, prefill_early_admission_override);
           peer_policy = knobs.admission;
           // The eager fabric path exchanges the warm record too: it
           // carries the admission policy (no capture to start here).
@@ -3189,7 +3181,8 @@ int main(int argc, char** argv) {
     std::unique_ptr<dgpp::sched::SchedulerEngine> engine = family->make_eager_engine(
         max_concurrency, dgpp::make_w1_pick(family->vocab_size()), dgpp::make_w1_sample(family->vocab_size()),
         &grammar_vocab, prefix_slots);
-    knobs.admission = dgpp::serve::resolve_prefill_policy(knobs.admission, *engine);
+    knobs.admission = dgpp::serve::resolve_prefill_policy(
+        knobs.admission, *engine, prefill_early_admission_override);
     const int rc = serve_openai(engine.get(), family->vocab_size(), generation_eos, ckpt,
                                 model_display, knobs, no_eos, boot_s(), /*journal=*/nullptr,
                                 /*oplog=*/nullptr, family->name());

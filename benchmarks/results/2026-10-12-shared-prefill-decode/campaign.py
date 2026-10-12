@@ -45,6 +45,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--candidate', type=Path, required=True)
     ap.add_argument('--control', type=Path, required=True)
+    ap.add_argument('--control-early', action='store_true',
+                    help='Use automatic early admission in the control too (refactor regression comparison).')
     ap.add_argument('--out', type=Path, required=True)
     ap.add_argument('--production-config', type=Path, required=True)
     ap.add_argument('--production-bin', type=Path, required=True)
@@ -77,7 +79,7 @@ def main():
         pair = 0
         for world in args.worlds:
             for idle in args.idle_budgets:
-                labels = [('control', args.control, False), ('candidate', args.candidate, True)]
+                labels = [('control', args.control, args.control_early), ('candidate', args.candidate, True)]
                 if bool(pair % 2) != args.candidate_first:
                     labels.reverse()
                 pair += 1
