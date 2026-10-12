@@ -254,8 +254,20 @@ visible in the evidence and are not counted as exact passes.
   reasoning only, so it has no returned visible-token probabilities. Both
   builds retain 36 KV blocks through load, repeat and isolated recovery.
   All four operation streams agree within each build. The checkpoint is
-  retained for profiling and probability diagnostics; this is not an
-  accepted performance or numerical result.
+  retained for profiling and probability diagnostics.
+  The [numerical diagnostic](evidence/glm4-numerics-v31.json) resolves the
+  changed decode: the control changes all four requests' probabilities
+  when batched and changes Task 0's token at index 111. All twelve
+  candidate batched responses match the control's isolated references
+  exactly at all 128 positions. The candidate also preserves those
+  probabilities with the previous graph/admission layout, supporting the
+  shared short-reader recipe fix rather than implicating graph compaction.
+  The [CUDA profiles](evidence/glm4-profile-v31.json) do not reproduce
+  the initial slowdown. Isolated prefill preserves kernel counts except
+  three unnecessary intermediate vocabulary-head GEMVs, which the
+  candidate omits. The profiled timings are diagnostic evidence only;
+  an unprofiled three-trial control-first pair is in progress before
+  accepting the performance result.
 
 These probes identify dependence on execution shape; they are not a general
 model-quality or teacher-forced numerical equivalence result.

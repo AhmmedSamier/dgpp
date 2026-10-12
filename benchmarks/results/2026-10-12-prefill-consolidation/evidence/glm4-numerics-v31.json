@@ -1,0 +1,490 @@
+{
+  "conclusion": "The previous executable changes all four requests' probabilities under grouped prefill and changes Task 0's token at index 111 in each diagnostic trial. Candidate batched responses match the previous executable's isolated references exactly at all 128 positions, with both default and previous graph/admission layouts. This supports the shared short-reader recipe correction; the changed initial response hash is not a newly introduced decode defect.",
+  "comparisons": {
+    "candidate": [
+      {
+        "trial": 0,
+        "name": "batch-0",
+        "input_sha256": "557d87540c40bd86e64e9610b84616540af6db24a0e6a1533989a9ff147c9934",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": true,
+        "changed_probability_positions": 0,
+        "first_changed_probability": null,
+        "first_changed_token": null
+      },
+      {
+        "trial": 0,
+        "name": "batch-1",
+        "input_sha256": "613b9e5d79bf36defe38205153254d3d3a914841c62be08a7cf7fc7eec02a573",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": true,
+        "changed_probability_positions": 0,
+        "first_changed_probability": null,
+        "first_changed_token": null
+      },
+      {
+        "trial": 0,
+        "name": "batch-2",
+        "input_sha256": "bc571bbcd98ba5bc698a114a28c45132625462f18f65348f3e94b12403f0a268",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": true,
+        "changed_probability_positions": 0,
+        "first_changed_probability": null,
+        "first_changed_token": null
+      },
+      {
+        "trial": 0,
+        "name": "batch-3",
+        "input_sha256": "53db81a79c2bb5e8c532d424d611df880f5578e4ffd1aa0c0cf8ad2a0578fd53",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": true,
+        "changed_probability_positions": 0,
+        "first_changed_probability": null,
+        "first_changed_token": null
+      },
+      {
+        "trial": 1,
+        "name": "batch-0",
+        "input_sha256": "557d87540c40bd86e64e9610b84616540af6db24a0e6a1533989a9ff147c9934",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": true,
+        "changed_probability_positions": 0,
+        "first_changed_probability": null,
+        "first_changed_token": null
+      },
+      {
+        "trial": 1,
+        "name": "batch-1",
+        "input_sha256": "613b9e5d79bf36defe38205153254d3d3a914841c62be08a7cf7fc7eec02a573",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": true,
+        "changed_probability_positions": 0,
+        "first_changed_probability": null,
+        "first_changed_token": null
+      },
+      {
+        "trial": 1,
+        "name": "batch-2",
+        "input_sha256": "bc571bbcd98ba5bc698a114a28c45132625462f18f65348f3e94b12403f0a268",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": true,
+        "changed_probability_positions": 0,
+        "first_changed_probability": null,
+        "first_changed_token": null
+      },
+      {
+        "trial": 1,
+        "name": "batch-3",
+        "input_sha256": "53db81a79c2bb5e8c532d424d611df880f5578e4ffd1aa0c0cf8ad2a0578fd53",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": true,
+        "changed_probability_positions": 0,
+        "first_changed_probability": null,
+        "first_changed_token": null
+      },
+      {
+        "trial": 2,
+        "name": "batch-0",
+        "input_sha256": "557d87540c40bd86e64e9610b84616540af6db24a0e6a1533989a9ff147c9934",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": true,
+        "changed_probability_positions": 0,
+        "first_changed_probability": null,
+        "first_changed_token": null
+      },
+      {
+        "trial": 2,
+        "name": "batch-1",
+        "input_sha256": "613b9e5d79bf36defe38205153254d3d3a914841c62be08a7cf7fc7eec02a573",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": true,
+        "changed_probability_positions": 0,
+        "first_changed_probability": null,
+        "first_changed_token": null
+      },
+      {
+        "trial": 2,
+        "name": "batch-2",
+        "input_sha256": "bc571bbcd98ba5bc698a114a28c45132625462f18f65348f3e94b12403f0a268",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": true,
+        "changed_probability_positions": 0,
+        "first_changed_probability": null,
+        "first_changed_token": null
+      },
+      {
+        "trial": 2,
+        "name": "batch-3",
+        "input_sha256": "53db81a79c2bb5e8c532d424d611df880f5578e4ffd1aa0c0cf8ad2a0578fd53",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": true,
+        "changed_probability_positions": 0,
+        "first_changed_probability": null,
+        "first_changed_token": null
+      }
+    ],
+    "control": [
+      {
+        "trial": 0,
+        "name": "batch-0",
+        "input_sha256": "557d87540c40bd86e64e9610b84616540af6db24a0e6a1533989a9ff147c9934",
+        "tokens": 128,
+        "text_matches": false,
+        "probabilities_match": false,
+        "changed_probability_positions": 128,
+        "first_changed_probability": 0,
+        "first_changed_token": 111,
+        "isolated_at_first_change": {
+          "token": " ",
+          "logprob": -0.00089263916,
+          "top_logprobs": {
+            " ": -0.00089263916,
+            " ...\n\n": -7.9526844,
+            " ...\n": -8.072672,
+            " ...": -9.290213,
+            "39": -9.720955
+          }
+        },
+        "batch_at_first_change": {
+          "token": " the",
+          "logprob": -0.4811573,
+          "top_logprobs": {
+            " the": -0.4811573,
+            " ": -1.010107,
+            " ...": -4.957512,
+            " them": -5.1636124,
+            " positive": -6.2399273
+          }
+        }
+      },
+      {
+        "trial": 0,
+        "name": "batch-1",
+        "input_sha256": "613b9e5d79bf36defe38205153254d3d3a914841c62be08a7cf7fc7eec02a573",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": false,
+        "changed_probability_positions": 128,
+        "first_changed_probability": 0,
+        "first_changed_token": null
+      },
+      {
+        "trial": 0,
+        "name": "batch-2",
+        "input_sha256": "bc571bbcd98ba5bc698a114a28c45132625462f18f65348f3e94b12403f0a268",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": false,
+        "changed_probability_positions": 128,
+        "first_changed_probability": 0,
+        "first_changed_token": null
+      },
+      {
+        "trial": 0,
+        "name": "batch-3",
+        "input_sha256": "53db81a79c2bb5e8c532d424d611df880f5578e4ffd1aa0c0cf8ad2a0578fd53",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": false,
+        "changed_probability_positions": 128,
+        "first_changed_probability": 0,
+        "first_changed_token": null
+      },
+      {
+        "trial": 1,
+        "name": "batch-0",
+        "input_sha256": "557d87540c40bd86e64e9610b84616540af6db24a0e6a1533989a9ff147c9934",
+        "tokens": 128,
+        "text_matches": false,
+        "probabilities_match": false,
+        "changed_probability_positions": 128,
+        "first_changed_probability": 0,
+        "first_changed_token": 111,
+        "isolated_at_first_change": {
+          "token": " ",
+          "logprob": -0.00089263916,
+          "top_logprobs": {
+            " ": -0.00089263916,
+            " ...\n\n": -7.9526844,
+            " ...\n": -8.072672,
+            " ...": -9.290213,
+            "39": -9.720955
+          }
+        },
+        "batch_at_first_change": {
+          "token": " the",
+          "logprob": -0.4811573,
+          "top_logprobs": {
+            " the": -0.4811573,
+            " ": -1.010107,
+            " ...": -4.957512,
+            " them": -5.1636124,
+            " positive": -6.2399273
+          }
+        }
+      },
+      {
+        "trial": 1,
+        "name": "batch-1",
+        "input_sha256": "613b9e5d79bf36defe38205153254d3d3a914841c62be08a7cf7fc7eec02a573",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": false,
+        "changed_probability_positions": 128,
+        "first_changed_probability": 0,
+        "first_changed_token": null
+      },
+      {
+        "trial": 1,
+        "name": "batch-2",
+        "input_sha256": "bc571bbcd98ba5bc698a114a28c45132625462f18f65348f3e94b12403f0a268",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": false,
+        "changed_probability_positions": 128,
+        "first_changed_probability": 0,
+        "first_changed_token": null
+      },
+      {
+        "trial": 1,
+        "name": "batch-3",
+        "input_sha256": "53db81a79c2bb5e8c532d424d611df880f5578e4ffd1aa0c0cf8ad2a0578fd53",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": false,
+        "changed_probability_positions": 128,
+        "first_changed_probability": 0,
+        "first_changed_token": null
+      },
+      {
+        "trial": 2,
+        "name": "batch-0",
+        "input_sha256": "557d87540c40bd86e64e9610b84616540af6db24a0e6a1533989a9ff147c9934",
+        "tokens": 128,
+        "text_matches": false,
+        "probabilities_match": false,
+        "changed_probability_positions": 128,
+        "first_changed_probability": 0,
+        "first_changed_token": 111,
+        "isolated_at_first_change": {
+          "token": " ",
+          "logprob": -0.00089263916,
+          "top_logprobs": {
+            " ": -0.00089263916,
+            " ...\n\n": -7.9526844,
+            " ...\n": -8.072672,
+            " ...": -9.290213,
+            "39": -9.720955
+          }
+        },
+        "batch_at_first_change": {
+          "token": " the",
+          "logprob": -0.4811573,
+          "top_logprobs": {
+            " the": -0.4811573,
+            " ": -1.010107,
+            " ...": -4.957512,
+            " them": -5.1636124,
+            " positive": -6.2399273
+          }
+        }
+      },
+      {
+        "trial": 2,
+        "name": "batch-1",
+        "input_sha256": "613b9e5d79bf36defe38205153254d3d3a914841c62be08a7cf7fc7eec02a573",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": false,
+        "changed_probability_positions": 128,
+        "first_changed_probability": 0,
+        "first_changed_token": null
+      },
+      {
+        "trial": 2,
+        "name": "batch-2",
+        "input_sha256": "bc571bbcd98ba5bc698a114a28c45132625462f18f65348f3e94b12403f0a268",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": false,
+        "changed_probability_positions": 128,
+        "first_changed_probability": 0,
+        "first_changed_token": null
+      },
+      {
+        "trial": 2,
+        "name": "batch-3",
+        "input_sha256": "53db81a79c2bb5e8c532d424d611df880f5578e4ffd1aa0c0cf8ad2a0578fd53",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": false,
+        "changed_probability_positions": 128,
+        "first_changed_probability": 0,
+        "first_changed_token": null
+      }
+    ],
+    "candidate-old-layout": [
+      {
+        "trial": 0,
+        "name": "batch-0",
+        "input_sha256": "557d87540c40bd86e64e9610b84616540af6db24a0e6a1533989a9ff147c9934",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": true,
+        "changed_probability_positions": 0,
+        "first_changed_probability": null,
+        "first_changed_token": null
+      },
+      {
+        "trial": 0,
+        "name": "batch-1",
+        "input_sha256": "613b9e5d79bf36defe38205153254d3d3a914841c62be08a7cf7fc7eec02a573",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": true,
+        "changed_probability_positions": 0,
+        "first_changed_probability": null,
+        "first_changed_token": null
+      },
+      {
+        "trial": 0,
+        "name": "batch-2",
+        "input_sha256": "bc571bbcd98ba5bc698a114a28c45132625462f18f65348f3e94b12403f0a268",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": true,
+        "changed_probability_positions": 0,
+        "first_changed_probability": null,
+        "first_changed_token": null
+      },
+      {
+        "trial": 0,
+        "name": "batch-3",
+        "input_sha256": "53db81a79c2bb5e8c532d424d611df880f5578e4ffd1aa0c0cf8ad2a0578fd53",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": true,
+        "changed_probability_positions": 0,
+        "first_changed_probability": null,
+        "first_changed_token": null
+      },
+      {
+        "trial": 1,
+        "name": "batch-0",
+        "input_sha256": "557d87540c40bd86e64e9610b84616540af6db24a0e6a1533989a9ff147c9934",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": true,
+        "changed_probability_positions": 0,
+        "first_changed_probability": null,
+        "first_changed_token": null
+      },
+      {
+        "trial": 1,
+        "name": "batch-1",
+        "input_sha256": "613b9e5d79bf36defe38205153254d3d3a914841c62be08a7cf7fc7eec02a573",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": true,
+        "changed_probability_positions": 0,
+        "first_changed_probability": null,
+        "first_changed_token": null
+      },
+      {
+        "trial": 1,
+        "name": "batch-2",
+        "input_sha256": "bc571bbcd98ba5bc698a114a28c45132625462f18f65348f3e94b12403f0a268",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": true,
+        "changed_probability_positions": 0,
+        "first_changed_probability": null,
+        "first_changed_token": null
+      },
+      {
+        "trial": 1,
+        "name": "batch-3",
+        "input_sha256": "53db81a79c2bb5e8c532d424d611df880f5578e4ffd1aa0c0cf8ad2a0578fd53",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": true,
+        "changed_probability_positions": 0,
+        "first_changed_probability": null,
+        "first_changed_token": null
+      },
+      {
+        "trial": 2,
+        "name": "batch-0",
+        "input_sha256": "557d87540c40bd86e64e9610b84616540af6db24a0e6a1533989a9ff147c9934",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": true,
+        "changed_probability_positions": 0,
+        "first_changed_probability": null,
+        "first_changed_token": null
+      },
+      {
+        "trial": 2,
+        "name": "batch-1",
+        "input_sha256": "613b9e5d79bf36defe38205153254d3d3a914841c62be08a7cf7fc7eec02a573",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": true,
+        "changed_probability_positions": 0,
+        "first_changed_probability": null,
+        "first_changed_token": null
+      },
+      {
+        "trial": 2,
+        "name": "batch-2",
+        "input_sha256": "bc571bbcd98ba5bc698a114a28c45132625462f18f65348f3e94b12403f0a268",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": true,
+        "changed_probability_positions": 0,
+        "first_changed_probability": null,
+        "first_changed_token": null
+      },
+      {
+        "trial": 2,
+        "name": "batch-3",
+        "input_sha256": "53db81a79c2bb5e8c532d424d611df880f5578e4ffd1aa0c0cf8ad2a0578fd53",
+        "tokens": 128,
+        "text_matches": true,
+        "probabilities_match": true,
+        "changed_probability_positions": 0,
+        "first_changed_probability": null,
+        "first_changed_token": null
+      }
+    ]
+  },
+  "note": "The isolated-reference preamble was added to the diagnostic client after the default candidate arm. Control and candidate-old-layout include those extra reference runs; the compared batched request bodies are identical in all arms.",
+  "files": {
+    "production-verified.json": "2f7fcd04a14896288f5feb5291e9e351c065262033ae9af272430ef5cb3d8777",
+    "harness.py": "10fa254857c34d64d6eee8483901d6efbb0abc046ab3827602fa9ac23a60e226",
+    "candidate/binary.sha256": "455104cf66854b77f544384466ec5b0cbfa96fb86cf676430334f9ac30db3283",
+    "candidate/probe.py": "dbcfd5773b691ec6b7f4ac41f3461de59cbb5e3c66d6b31ef10dfcc51240ee82",
+    "candidate/probabilities.json": "e4012425eec6d5bbb734e538082c2b851f809cd39036b12e033c59b83174a6c9",
+    "candidate/deployment.json": "18ec575f3bb9269fadf630fbb0b0f05afdd34e3bb40fb753473a5acdd988ef3c",
+    "control/binary.sha256": "9edf73d68fd44ef91459d88c3c555b966bf89f88d219df8ab6390a09aa926f61",
+    "control/probe.py": "d11b75f160347116f9af79b863bff2fcaf45d5f316c4a93adf156885518547d5",
+    "control/probabilities.json": "c2f5615b847d32357cd23e1e31731669ac80303ce44d5b8ceb27073588c76674",
+    "control/deployment.json": "18ec575f3bb9269fadf630fbb0b0f05afdd34e3bb40fb753473a5acdd988ef3c",
+    "candidate-old-layout/binary.sha256": "455104cf66854b77f544384466ec5b0cbfa96fb86cf676430334f9ac30db3283",
+    "candidate-old-layout/probe.py": "d11b75f160347116f9af79b863bff2fcaf45d5f316c4a93adf156885518547d5",
+    "candidate-old-layout/probabilities.json": "deeb9362a50f46f93f1aad55c157027a2c5e1371c0d022c143c95527b332e1cb",
+    "candidate-old-layout/deployment.json": "0f8c2bc96cc5fd1a65b1d81cc4eec5be11bff9eb1c632af3767301779a3cd7eb"
+  }
+}

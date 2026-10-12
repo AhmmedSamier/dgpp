@@ -1,0 +1,245 @@
+{
+  "note": "Diagnostic CUDA traces only; these are not throughput acceptance measurements. The initial slow prefills did not recur. Isolated prefill preserves all kernel counts except three unused intermediate vocabulary-head GEMVs, which the candidate omits. A separate unprofiled control-first three-trial pair is running.",
+  "pairs": [
+    {
+      "index": 0,
+      "phase": "warmup",
+      "scenario": "solo_prefill",
+      "candidate_profiled_wall_s": 12.544024131027982,
+      "control_profiled_wall_s": 12.341326970839873,
+      "candidate_kernel_count": 20784,
+      "control_kernel_count": 20787,
+      "kernel_count_changes": [
+        {
+          "name": "void dgpp::<unnamed>::bf12_gemv_kernel<(int)1, (bool)1, (int)2>(const unsigned short *, unsigned long, const unsigned char *, const unsigned int *, const unsigned int *, const unsigned short *, void *, int, int, unsigned long)",
+          "control": 8,
+          "candidate": 5
+        }
+      ],
+      "largest_candidate_kernel_times": [
+        {
+          "name": "dgpp::<unnamed>::attn_partial_kernel(const unsigned short *, long, const unsigned short *, const unsigned short *, const int *, const long *, int, int, int, int, const int *, int, float, float *, float *, float *)",
+          "calls": 373,
+          "seconds": 5.111725184
+        },
+        {
+          "name": "dgpp::net::<unnamed>::bus_bulk_collective_kernel(dgpp::net::BusAllReduceView, int, int, const __nv_bfloat16 *, __nv_bfloat16 *, dgpp::net::BusBulkSegPlan, unsigned long *, unsigned long *, unsigned int, dgpp::net::BusAllReduceCtl *, unsigned long, dgpp::net::BusBulkScratch *)",
+          "calls": 11904,
+          "seconds": 2.852439456
+        },
+        {
+          "name": "void dgpp::<unnamed>::moe_grouped_mma_fp4_ldm_kernel<unsigned short, (int)16>(const unsigned short *, unsigned long, int, const int *, const dgpp::MoeSegment *, const dgpp::MoeExpertView *, int, T1 *, unsigned long, int, int, int)",
+          "calls": 1440,
+          "seconds": 1.052658688
+        },
+        {
+          "name": "void dgpp::<unnamed>::moe_grouped_mma_fp4_ldm_kernel<float, (int)16>(const unsigned short *, unsigned long, int, const int *, const dgpp::MoeSegment *, const dgpp::MoeExpertView *, int, T1 *, unsigned long, int, int, int)",
+          "calls": 720,
+          "seconds": 0.936490688
+        },
+        {
+          "name": "void dgpp::<unnamed>::moe_accum_ordered_kernel<unsigned short, float>(T1 *, const T2 *, unsigned long, const int *, const int *, const float *, int, int, int, int)",
+          "calls": 360,
+          "seconds": 0.502283488
+        }
+      ]
+    },
+    {
+      "index": 1,
+      "phase": "warmup",
+      "scenario": "solo_prefill",
+      "candidate_profiled_wall_s": 11.711542387027293,
+      "control_profiled_wall_s": 11.68607689300552,
+      "candidate_kernel_count": 20784,
+      "control_kernel_count": 20787,
+      "kernel_count_changes": [
+        {
+          "name": "void dgpp::<unnamed>::bf12_gemv_kernel<(int)1, (bool)1, (int)2>(const unsigned short *, unsigned long, const unsigned char *, const unsigned int *, const unsigned int *, const unsigned short *, void *, int, int, unsigned long)",
+          "control": 8,
+          "candidate": 5
+        }
+      ],
+      "largest_candidate_kernel_times": [
+        {
+          "name": "dgpp::<unnamed>::attn_partial_kernel(const unsigned short *, long, const unsigned short *, const unsigned short *, const int *, const long *, int, int, int, int, const int *, int, float, float *, float *, float *)",
+          "calls": 373,
+          "seconds": 4.999881728
+        },
+        {
+          "name": "dgpp::net::<unnamed>::bus_bulk_collective_kernel(dgpp::net::BusAllReduceView, int, int, const __nv_bfloat16 *, __nv_bfloat16 *, dgpp::net::BusBulkSegPlan, unsigned long *, unsigned long *, unsigned int, dgpp::net::BusAllReduceCtl *, unsigned long, dgpp::net::BusBulkScratch *)",
+          "calls": 11904,
+          "seconds": 2.806290816
+        },
+        {
+          "name": "void dgpp::<unnamed>::moe_grouped_mma_fp4_ldm_kernel<unsigned short, (int)16>(const unsigned short *, unsigned long, int, const int *, const dgpp::MoeSegment *, const dgpp::MoeExpertView *, int, T1 *, unsigned long, int, int, int)",
+          "calls": 1440,
+          "seconds": 1.050694624
+        },
+        {
+          "name": "void dgpp::<unnamed>::moe_grouped_mma_fp4_ldm_kernel<float, (int)16>(const unsigned short *, unsigned long, int, const int *, const dgpp::MoeSegment *, const dgpp::MoeExpertView *, int, T1 *, unsigned long, int, int, int)",
+          "calls": 720,
+          "seconds": 0.924667808
+        },
+        {
+          "name": "void dgpp::<unnamed>::moe_accum_ordered_kernel<unsigned short, float>(T1 *, const T2 *, unsigned long, const int *, const int *, const float *, int, int, int, int)",
+          "calls": 360,
+          "seconds": 0.496626688
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "phase": "probe",
+      "scenario": "solo_decode",
+      "candidate_profiled_wall_s": 3.7454807308968157,
+      "control_profiled_wall_s": 3.7630480150692165,
+      "candidate_kernel_count": 141304,
+      "control_kernel_count": 141304
+    },
+    {
+      "index": 3,
+      "phase": "probe",
+      "scenario": "solo_prefill",
+      "candidate_profiled_wall_s": 11.96392157394439,
+      "control_profiled_wall_s": 11.943949716864154,
+      "candidate_kernel_count": 20784,
+      "control_kernel_count": 20787,
+      "kernel_count_changes": [
+        {
+          "name": "void dgpp::<unnamed>::bf12_gemv_kernel<(int)1, (bool)1, (int)2>(const unsigned short *, unsigned long, const unsigned char *, const unsigned int *, const unsigned int *, const unsigned short *, void *, int, int, unsigned long)",
+          "control": 8,
+          "candidate": 5
+        }
+      ],
+      "largest_candidate_kernel_times": [
+        {
+          "name": "dgpp::<unnamed>::attn_partial_kernel(const unsigned short *, long, const unsigned short *, const unsigned short *, const int *, const long *, int, int, int, int, const int *, int, float, float *, float *, float *)",
+          "calls": 373,
+          "seconds": 5.19897264
+        },
+        {
+          "name": "dgpp::net::<unnamed>::bus_bulk_collective_kernel(dgpp::net::BusAllReduceView, int, int, const __nv_bfloat16 *, __nv_bfloat16 *, dgpp::net::BusBulkSegPlan, unsigned long *, unsigned long *, unsigned int, dgpp::net::BusAllReduceCtl *, unsigned long, dgpp::net::BusBulkScratch *)",
+          "calls": 11904,
+          "seconds": 2.82139568
+        },
+        {
+          "name": "void dgpp::<unnamed>::moe_grouped_mma_fp4_ldm_kernel<unsigned short, (int)16>(const unsigned short *, unsigned long, int, const int *, const dgpp::MoeSegment *, const dgpp::MoeExpertView *, int, T1 *, unsigned long, int, int, int)",
+          "calls": 1440,
+          "seconds": 1.068423264
+        },
+        {
+          "name": "void dgpp::<unnamed>::moe_grouped_mma_fp4_ldm_kernel<float, (int)16>(const unsigned short *, unsigned long, int, const int *, const dgpp::MoeSegment *, const dgpp::MoeExpertView *, int, T1 *, unsigned long, int, int, int)",
+          "calls": 720,
+          "seconds": 0.941706368
+        },
+        {
+          "name": "void dgpp::<unnamed>::moe_accum_ordered_kernel<unsigned short, float>(T1 *, const T2 *, unsigned long, const int *, const int *, const float *, int, int, int, int)",
+          "calls": 360,
+          "seconds": 0.503019968
+        }
+      ]
+    },
+    {
+      "index": 4,
+      "phase": "probe",
+      "scenario": "solo_decode",
+      "candidate_profiled_wall_s": 3.7356014498509467,
+      "control_profiled_wall_s": 3.733197859954089,
+      "candidate_kernel_count": 141304,
+      "control_kernel_count": 141304
+    },
+    {
+      "index": 5,
+      "phase": "probe",
+      "scenario": "solo_prefill",
+      "candidate_profiled_wall_s": 11.986696044914424,
+      "control_profiled_wall_s": 11.980170071823522,
+      "candidate_kernel_count": 20784,
+      "control_kernel_count": 20787,
+      "kernel_count_changes": [
+        {
+          "name": "void dgpp::<unnamed>::bf12_gemv_kernel<(int)1, (bool)1, (int)2>(const unsigned short *, unsigned long, const unsigned char *, const unsigned int *, const unsigned int *, const unsigned short *, void *, int, int, unsigned long)",
+          "control": 8,
+          "candidate": 5
+        }
+      ],
+      "largest_candidate_kernel_times": [
+        {
+          "name": "dgpp::<unnamed>::attn_partial_kernel(const unsigned short *, long, const unsigned short *, const unsigned short *, const int *, const long *, int, int, int, int, const int *, int, float, float *, float *, float *)",
+          "calls": 373,
+          "seconds": 5.218972448
+        },
+        {
+          "name": "dgpp::net::<unnamed>::bus_bulk_collective_kernel(dgpp::net::BusAllReduceView, int, int, const __nv_bfloat16 *, __nv_bfloat16 *, dgpp::net::BusBulkSegPlan, unsigned long *, unsigned long *, unsigned int, dgpp::net::BusAllReduceCtl *, unsigned long, dgpp::net::BusBulkScratch *)",
+          "calls": 11904,
+          "seconds": 2.82594992
+        },
+        {
+          "name": "void dgpp::<unnamed>::moe_grouped_mma_fp4_ldm_kernel<unsigned short, (int)16>(const unsigned short *, unsigned long, int, const int *, const dgpp::MoeSegment *, const dgpp::MoeExpertView *, int, T1 *, unsigned long, int, int, int)",
+          "calls": 1440,
+          "seconds": 1.065463488
+        },
+        {
+          "name": "void dgpp::<unnamed>::moe_grouped_mma_fp4_ldm_kernel<float, (int)16>(const unsigned short *, unsigned long, int, const int *, const dgpp::MoeSegment *, const dgpp::MoeExpertView *, int, T1 *, unsigned long, int, int, int)",
+          "calls": 720,
+          "seconds": 0.938552224
+        },
+        {
+          "name": "void dgpp::<unnamed>::moe_accum_ordered_kernel<unsigned short, float>(T1 *, const T2 *, unsigned long, const int *, const int *, const float *, int, int, int, int)",
+          "calls": 360,
+          "seconds": 0.504740768
+        }
+      ]
+    },
+    {
+      "index": 6,
+      "phase": "probe",
+      "scenario": "batch_decode",
+      "candidate_profiled_wall_s": 6.279525640187785,
+      "control_profiled_wall_s": 6.637169257970527,
+      "candidate_kernel_count": 144875,
+      "control_kernel_count": 144464
+    },
+    {
+      "index": 7,
+      "phase": "probe",
+      "scenario": "batch_prefill",
+      "candidate_profiled_wall_s": 47.31039413786493,
+      "control_profiled_wall_s": 47.95146740088239,
+      "candidate_kernel_count": 77624,
+      "control_kernel_count": 83148
+    },
+    {
+      "index": 8,
+      "phase": "probe",
+      "scenario": "mixed_long",
+      "candidate_profiled_wall_s": 16.431029591010883,
+      "control_profiled_wall_s": 16.502529121004045,
+      "candidate_kernel_count": 159417,
+      "control_kernel_count": 164931
+    },
+    {
+      "index": 9,
+      "phase": "probe",
+      "scenario": "sustained_idle",
+      "candidate_profiled_wall_s": 14.7300953080412,
+      "control_profiled_wall_s": 14.975927619962022,
+      "candidate_kernel_count": 91517,
+      "control_kernel_count": 95503
+    }
+  ],
+  "files": {
+    "production-verified.json": "2f7fcd04a14896288f5feb5291e9e351c065262033ae9af272430ef5cb3d8777",
+    "harness.py": "10fa254857c34d64d6eee8483901d6efbb0abc046ab3827602fa9ac23a60e226",
+    "candidate/binary.sha256": "455104cf66854b77f544384466ec5b0cbfa96fb86cf676430334f9ac30db3283",
+    "candidate/kernel-summary.json": "46430a0df131384c1b87745e74aa06cf33883301f33420ca6118c1aec959f288",
+    "candidate/requests.json": "3af90de859737e7c4244aee67f6d84e96adb7f82f2243e22519bf5ae0d1feba7",
+    "candidate/deployment.json": "18ec575f3bb9269fadf630fbb0b0f05afdd34e3bb40fb753473a5acdd988ef3c",
+    "control/binary.sha256": "9edf73d68fd44ef91459d88c3c555b966bf89f88d219df8ab6390a09aa926f61",
+    "control/kernel-summary.json": "60f324381dc231cad26ee4402ae9264fab03b9becde7e2bd0c4e38bc23e6c0dd",
+    "control/requests.json": "b549a3da48f98501143d2e2669b487fee5eb4b7683342938e4294c9b80e00390",
+    "control/deployment.json": "18ec575f3bb9269fadf630fbb0b0f05afdd34e3bb40fb753473a5acdd988ef3c",
+    "candidate-old-layout/binary.sha256": "455104cf66854b77f544384466ec5b0cbfa96fb86cf676430334f9ac30db3283",
+    "candidate-old-layout/deployment.json": "0f8c2bc96cc5fd1a65b1d81cc4eec5be11bff9eb1c632af3767301779a3cd7eb"
+  }
+}

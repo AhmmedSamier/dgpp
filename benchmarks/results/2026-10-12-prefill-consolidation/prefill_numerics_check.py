@@ -48,6 +48,16 @@ def completion(prompt):
 
 
 results = []
+if 'batch_decode' in args.scenarios:
+    before = bench.idle()
+    responses = [bench.stream(f'batch-{n}',
+        f'Task {n}. List the positive integers in order:\n1,', args.decode_tokens)
+        for n in range(4)]
+    after = bench.idle(before['scheduler']['terminal'] + len(responses))
+    results.append(dict(scenario='isolated_batch_decode', trial=0,
+                        requests=responses, before=before, after=after))
+    args.out.write_text(json.dumps(results, indent=2) + '\n')
+    print('isolated_batch_decode', [r['output_text'] for r in responses], flush=True)
 for trial in range(args.trials):
     rng = random.Random(args.seed + trial)
     vocabulary = 'amber birch cobalt dune ember fjord granite harbor indigo juniper quartz willow'.split()
