@@ -327,7 +327,13 @@ visible in the evidence and are not counted as exact passes.
   captured layer outputs. Candidate `d4e80be8` preserves native BF16
   reduction settings in mixed attention projections and the output head.
   Its exact regression, all eighteen shared cases, model/engine tests and
-  seven DeepSeek memchecks pass. Real-checkpoint retesting is in progress.
+  seven DeepSeek memchecks pass. The [real-checkpoint retest](evidence/dsv4-small-budget-v34-summary.json)
+  preserves all 21 timing outputs and four chats. The [cache probability check](evidence/dsv4-cache-v34-verified.json)
+  is exact at all 128 positions across isolated, loaded, repeated and recovery
+  execution on both builds, and across builds. Each stage retains 16 blocks.
+  The correctness finding is resolved in this probe. Matched mixed elapsed
+  time remains 7.426 → 7.837 seconds (+5.54%), while repeated arrivals improve
+  0.52%; the performance finding remains open.
   The [CUDA profiles](evidence/dsv4-profile-v33.json) also identify duplicated
   expert work: decoder rows enter the grouped reader chain before being
   recomputed natively. Grouped MXFP4 kernel time increases about 0.28 seconds
