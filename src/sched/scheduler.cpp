@@ -762,6 +762,7 @@ void Scheduler::begin_prefill(int arrival, int64_t budget) {
   r.slot = slot;
   r.state = State::kPrefilling;
   r.prefill_epoch = ++execution_epoch_;
+  r.prefill_tick = ticks_;
   slots_[static_cast<size_t>(slot)] = arrival;
   DGPP_LOG_INFO("sched: request '{}' prefilling in slot {} ({} tokens/tick)",
                 r.spec.id, slot, budget);
@@ -1548,19 +1549,22 @@ bool Scheduler::quantum() {
       // One walk for all of them: the budget in aligned units, by need.
       // With more than two ticks of work outstanding the split is max-min
       // fair (a short prompt finishes and is not held behind a long one;
-      // what it leaves goes to the others). Within two ticks of the end
-      // the units go to the longest remainders first, so the prompts come
-      // level and finish in the same walk — prompts that arrived together
-      // start decoding together instead of one decoding against the
-      // others' read-in at the busy budget.
+      // what it leaves goes to the others). Readers begun together may
+      // level their remainders within two ticks of the end, so they start
+      // decoding together. A later arrival keeps its fair share even near
+      // the end; leveling it against an older reader would defer its first
+      // token until that reader finishes.
       std::vector<int64_t> rem, shares(inflight.size(), 0);
       int64_t outstanding = 0;
+      const uint64_t begin_tick = requests_[static_cast<size_t>(inflight.front())].prefill_tick;
+      bool began_together = true;
       for (const int a : inflight) {
         const Request& r = requests_[static_cast<size_t>(a)];
+        began_together &= r.prefill_tick == begin_tick;
         rem.push_back(static_cast<int64_t>(r.spec.prompt.size()) - r.attached_tokens - r.prefill_computed);
         outstanding += rem.back();
       }
-      const bool level = outstanding <= 2 * budget;
+      const bool level = began_together && outstanding <= 2 * budget;
       for (int64_t units = budget / align; units > 0; --units) {
         int pick = -1;
         for (size_t i = 0; i < inflight.size(); ++i) {

@@ -3599,6 +3599,51 @@ class AdmissionFairEngine : public ChunkFakeEngine {
   }
 };
 
+DGPP_TEST(scheduler_group_advance_late_short_reader_is_not_held_for_an_older_reader) {
+  struct GroupEngine : AdmissionFairEngine {
+    bool prefill_group_advance() const override { return true; }
+    bool prefill_budget_per_reader() const override { return false; }
+  };
+  for (const bool incumbent : {false, true}) {
+    GroupEngine engine;
+    const int long_slot = incumbent ? 1 : 0;
+    const int short_slot = long_slot + 1;
+    if (incumbent) engine.arm(0, std::vector<int32_t>(16, 10), 16);
+    engine.arm(long_slot, {20, 21, 22}, 3);
+    engine.arm(short_slot, {30, 31, 32}, 3);
+    dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_early_admission = true;
+    policy.prefill_budget_tokens = policy.prefill_idle_budget_tokens = 32;
+    Scheduler sched(&engine, {}, 0, policy);
+    RecordingObserver observer;
+    sched.set_observer(&observer);
+    if (incumbent) {
+      sched.submit(make_request("decoder", 1, 16));
+      sched.tick();
+    }
+    sched.submit(make_request("long", 95, 3));
+    sched.tick();
+    // The older reader has 63 tokens left. Together with the new one-token
+    // reader this is exactly two budgets, but they did not begin together.
+    // Leveling their remainders would give the new reader no work this tick.
+    sched.submit(make_request("short", 1, 3));
+    engine.reset_tick();
+    const auto computed = sched.meters().prompt_tokens_computed;
+    sched.tick();
+    require(count_kind(observer, "tok", "short") >= 1 && count_kind(observer, "tok", "long") == 0,
+            "a later short reader must produce output before the older reader finishes");
+    require(engine.allocated == 32 && engine.advanced.at(long_slot) == 28 &&
+                engine.advanced.at(short_slot) == 1 &&
+                sched.meters().prompt_tokens_computed - computed == 29,
+            "the late short tail receives one aligned unit and donates the rest within the cap");
+    sched.run_to_completion();
+    require(sched.find("long")->generated == std::vector<int64_t>({20, 21, 22}) &&
+                sched.find("short")->generated == std::vector<int64_t>({30, 31, 32}) &&
+                engine.pool_blocks_in_use() == 0,
+            "late grouped admission preserves transcripts and releases reservations");
+  }
+}
+
 DGPP_TEST(scheduler_mixed_prefill_decodes_each_live_request_once_per_tick) {
   struct MixedEngine : AdmissionFairEngine {
     std::map<int, int> tick_steps;

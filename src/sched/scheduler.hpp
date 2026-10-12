@@ -661,6 +661,7 @@ class Scheduler {
     SchedulerRequest spec;
     State state = State::kQueued;
     uint64_t prefill_epoch = 0;
+    uint64_t prefill_tick = 0;  // readers begun together may finish as one group
     uint64_t decode_epoch = 0;
     int slot = -1;
     int steps_done = 0;
