@@ -7,6 +7,9 @@
 
 namespace dgpp::serve {
 
+inline constexpr int64_t kDefaultPrefillBudgetTokens = 256;
+inline constexpr int64_t kDefaultPrefillIdleBudgetTokens = 4096;
+
 // -1 is the serving default. Resolve it before publishing the warm record:
 // every rank must run the same concrete budget, independent of HTTP timing.
 inline sched::AdmissionPolicy resolve_prefill_policy(
@@ -16,20 +19,19 @@ inline sched::AdmissionPolicy resolve_prefill_policy(
   const int64_t limit = engine.prefill_chunk_limit();
   policy.prefill_budget_tokens = 0;
   if (align > 0 && limit >= align) {
-    // Amortize a physical layer walk and its weight conversions across the
-    // engine's native work chunk. A fixed small quantum can repeat those
-    // conversions many times for the same prompt. Explicit smaller budgets
-    // remain available when a shorter interruption bound is preferred.
-    int64_t budget = limit;
+    // Keep decode opportunities close together while a reader is active.
+    // These are shared starting values, adjusted only for execution geometry;
+    // deployments can explicitly choose larger chunks to favor prefill rate.
+    int64_t budget = std::min(limit, std::max(kDefaultPrefillBudgetTokens, align));
     if (policy.prefill_idle_budget_tokens > 0)
       budget = std::min<int64_t>(budget, policy.prefill_idle_budget_tokens);
     policy.prefill_budget_tokens = budget / align * align;
-    // An engine that reads its in-flight prompts in as one walk shares a
-    // tick's budget among them at no cost in walks: with nothing decoding,
-    // the tick takes the whole forward (prompts that arrive together are
-    // read in together, at the one-shot's rate).
+    // Grouped readers share a larger walk when no established decoder needs
+    // the busy bound. Cap the automatic idle size too: an arriving request
+    // or cancellation still has to wait for this chunk to finish.
     if (policy.prefill_idle_budget_tokens == 0 && engine.prefill_group_advance())
-      policy.prefill_idle_budget_tokens = static_cast<int>(limit / align * align);
+      policy.prefill_idle_budget_tokens = static_cast<int>(
+          std::min(limit, std::max(kDefaultPrefillIdleBudgetTokens, align)) / align * align);
   }
   return policy;
 }

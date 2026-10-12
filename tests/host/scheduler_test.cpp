@@ -508,13 +508,14 @@ DGPP_TEST(scheduler_serving_auto_prefill_budget_respects_engine_geometry_and_opt
   dgpp::sched::AdmissionPolicy policy;
   policy.prefill_budget_tokens = -1;
   const auto resolved = [&] { return dgpp::serve::resolve_prefill_policy(policy, engine); };
-  require(resolved().prefill_budget_tokens == 2048, "automatic budget amortizes a native work chunk");
+  require(resolved().prefill_budget_tokens == 256, "automatic busy budget bounds decoder interruptions");
   engine.limit = 128;
   require(resolved().prefill_budget_tokens == 128, "small forward limit caps the budget");
   engine.align = 512;
-  engine.limit = 2048;
   engine.limit = 2200;
-  require(resolved().prefill_budget_tokens == 2048, "automatic chunk rounds down to alignment");
+  require(resolved().prefill_budget_tokens == 512, "automatic busy budget holds at least one aligned chunk");
+  engine.align = 192;
+  require(resolved().prefill_budget_tokens == 192, "automatic busy budget rounds down to alignment");
   engine.limit = 2048;
   engine.align = 128;
   policy.prefill_idle_budget_tokens = 128;
@@ -528,18 +529,31 @@ DGPP_TEST(scheduler_serving_auto_prefill_budget_respects_engine_geometry_and_opt
   engine.align = engine.limit = 0;
   require(resolved().prefill_budget_tokens == 0, "unsupported engine keeps synchronous prefill");
   // An engine that advances its in-flight prompts as one walk: the idle
-  // budget defaults to the whole forward; an explicit one survives.
+  // budget defaults to a capped large forward; an explicit one survives.
   struct GroupGeometry : GeometryEngine {
     bool prefill_group_advance() const override { return true; }
   } grouped;
   grouped.limit = 4096;
   const auto regrouped = [&] { return dgpp::serve::resolve_prefill_policy(policy, grouped); };
-  require(regrouped().prefill_budget_tokens == 4096 && regrouped().prefill_idle_budget_tokens == 4096,
-          "a group-advance engine shares the full work chunk");
+  require(regrouped().prefill_budget_tokens == 256 && regrouped().prefill_idle_budget_tokens == 4096,
+          "grouped readers use the shared busy and idle starting values");
+  grouped.limit = 8192;
+  require(regrouped().prefill_idle_budget_tokens == 4096, "automatic idle work stays bounded on larger engines");
+  grouped.limit = 2200;
+  require(regrouped().prefill_idle_budget_tokens == 2176, "idle budget respects capacity and alignment");
+  grouped.align = grouped.limit = 8192;
+  require(regrouped().prefill_budget_tokens == 8192 && regrouped().prefill_idle_budget_tokens == 8192,
+          "an engine requiring larger aligned chunks remains supported");
+  grouped.align = 128;
+  grouped.limit = 4096;
   require(resolved().prefill_idle_budget_tokens == 0, "other engines keep one budget");
   policy.prefill_idle_budget_tokens = 1024;
-  require(regrouped().prefill_budget_tokens == 1024 && regrouped().prefill_idle_budget_tokens == 1024,
+  require(regrouped().prefill_budget_tokens == 256 && regrouped().prefill_idle_budget_tokens == 1024,
           "an explicit idle budget survives");
+  policy.prefill_budget_tokens = 1024;
+  policy.prefill_idle_budget_tokens = 0;
+  require(regrouped().prefill_budget_tokens == 1024 && regrouped().prefill_idle_budget_tokens == 0,
+          "an explicit busy budget retains fixed-budget behavior when idle is zero");
 }
 
 DGPP_TEST(scheduler_serving_auto_admission_uses_execution_capabilities) {

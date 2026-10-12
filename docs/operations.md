@@ -540,17 +540,41 @@ cache format and arena size. Use the startup plan for the configured limit.
 **Budgeted prefill** (`engine.prefill_budget_tokens`, `--prefill-budget-tokens`)
 is shared by the eager and graph engines for every serving model family.
 Qwen4Exp and GLM-5.3-Flash also retain their resumable image paths.
-The default, -1, selects the engine's prefill work limit, rounded down to its
-alignment and capped by an explicitly configured idle budget. This amortizes
-weight streaming and conversion across a full work chunk. Smaller explicit
-budgets shorten the maximum pause between decode steps, at a throughput cost
-when they require more weight conversions or layer walks.
+The default, -1, starts with 256 tokens while an established request is decoding.
+It rounds down to the engine's alignment, allowing at least one aligned chunk,
+and caps the result by the engine's work limit and any explicit idle budget.
+For engines that advance grouped readers, the automatic idle budget starts at
+4,096 tokens, with the same capacity and alignment rules. These are shared
+starting values independent of model and quantization, resolved once at startup;
+they do not adapt to measured latency. A 2,048-token engine therefore starts
+at 256 busy / 2,048 idle; a 4,096-token engine starts at 256 / 4,096.
+Larger explicit busy budgets amortize weight streaming and conversion across
+more tokens but can increase the pause between decode steps.
 The budget counts reader tokens. Decoder rows share remaining scratch;
 reader chunks shrink only when the combined rows exceed physical capacity.
 An explicit zero preserves full-prompt admission within a scheduler pass;
 model and snapshot boundaries still split the work. Qwen retains its internal
 4,096-token limit and reports token progress after each completed chunk.
-The resolved budget is logged at startup and carried in rank 0's warm record.
+Both budgets are cluster-level configuration under `engine`, with CLI overrides:
+
+```json
+{
+  "engine": {
+    "prefill_budget_tokens": 256,
+    "prefill_idle_budget_tokens": 4096
+  }
+}
+```
+
+Use an idle value within the selected engine's capacity (for example 2048 for
+a 2K engine), or omit both fields to select the automatic values. Explicit
+positive values are validated, not silently rounded. A deployment can override
+them at its next start with
+`--knobs "--prefill-budget-tokens 256 --prefill-idle-budget-tokens 4096"`.
+The resolved values are logged at startup, reported in service admission
+metrics and carried in rank 0's warm record to every worker. Changing the
+cluster configuration requires a restart. Existing explicit settings retain
+their values.
 The single-Spark NVIDIA and RadixArk Qwen NVFP4 templates explicitly select
 4,096-token busy and idle budgets. The two- and four-rank GLM-5.3-Flash
 NVFP4/FP8 templates select 256-token busy and 2,048-token idle budgets.
@@ -576,7 +600,9 @@ cancellation releases the unfinished slot and its prefix references.
 `engine.prefill_idle_budget_tokens` (`--prefill-idle-budget-tokens`) optionally
 uses larger chunks when no request is actively decoding. It must be at least
 the enabled busy budget, use the same alignment and fit the prefill scratch
-limit. Zero keeps the fixed-budget behavior. The scheduler checks for active
+limit. Zero keeps fixed-budget behavior when the busy budget is explicit;
+with automatic busy budgeting, grouped prefill resolves it as described above.
+The scheduler checks for active
 decode after cancellations and before each chunk, so a long prompt can speed
 up after its decoding peer retires. Required snapshot and structural cuts still
 split chunks. Executors whose state permits arbitrary aligned cuts fill each

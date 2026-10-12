@@ -283,9 +283,9 @@ struct ClusterConfig {
     bool prefix_head_snapshots = true;  // a cold prompt also keeps its first structural cut (the system prompt's end)
     std::string admission = "full";
     int admission_window = 256;
-    int prefill_budget_tokens = -1;  // automatic on engines with resumable prefill
+    int prefill_budget_tokens = -1;  // automatic: 256 tokens, adjusted to engine geometry
     std::string model_alias = "";  // override the served model name (display only)
-    int prefill_idle_budget_tokens = 0;
+    int prefill_idle_budget_tokens = 0;  // auto busy: up to 4096 for grouped prefill; explicit busy: same budget
     // Omitted: resolve from the constructed engine's mixed-execution support.
     // Settings retain auto/on/off; the warm journal carries the resolved bool.
     std::optional<bool> prefill_early_admission;
