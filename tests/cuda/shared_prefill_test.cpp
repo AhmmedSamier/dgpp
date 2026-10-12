@@ -309,7 +309,8 @@ template <class Model, class Factory> void check(Factory make, int vocab, int al
   }
 }
 template <class Model>
-void check_decoder_mhc_recipe(Model& model, Model& reference, int vocab, int hidden, const std::string& prefix) {
+void check_decoder_mhc_recipe(Model& model, Model& reference, int vocab, int hidden, const std::string& prefix,
+                              bool native_attention = false) {
   const auto decode_env = prefix + "_CAPTURE_DECODE";
   const auto prefill_env = prefix + "_CAPTURE_PREFILL";
   const auto peer = tokens(17, vocab, 3);
@@ -323,9 +324,10 @@ void check_decoder_mhc_recipe(Model& model, Model& reference, int vocab, int hid
   // Engram, so identical embeddings must keep the decoder's mHC recipe.
   setenv(decode_env.c_str(), "1", 1);
   setenv(prefill_env.c_str(), "1", 1);
+  typename Model::Outputs expected_output, actual_output;
   try {
-    (void)reference.session_verify(2, feeds);
-    (void)model.session_prefill_verify(reader, 128, {2}, {feeds});
+    expected_output = reference.session_verify(2, feeds);
+    actual_output = model.session_prefill_verify(reader, 128, {2}, {feeds}).front();
   } catch (...) {
     unsetenv(decode_env.c_str());
     unsetenv(prefill_env.c_str());
@@ -355,12 +357,18 @@ void check_decoder_mhc_recipe(Model& model, Model& reference, int vocab, int hid
   for (size_t layer = 0; layer < reference.debug_sites().size(); ++layer) {
     const auto& a = model.debug_sites().at(layer);
     const auto& b = reference.debug_sites()[layer];
+    require(a.x_attn.size() >= b.x_attn.size() && a.attn_out.size() >= b.attn_out.size(),
+            "mixed attention decoder prefix shape");
+    if (native_attention && std::equal(b.x_attn.begin(), b.x_attn.end(), a.x_attn.begin()))
+      require(std::equal(b.attn_out.begin(), b.attn_out.end(), a.attn_out.begin()),
+              "identical decoder attention inputs must retain the native attention output");
     require(a.x_ffn.size() >= b.x_ffn.size() && a.ffn_out.size() >= b.ffn_out.size(),
             "mixed expert decoder prefix shape");
     if (std::equal(b.x_ffn.begin(), b.x_ffn.end(), a.x_ffn.begin()))
       require(std::equal(b.ffn_out.begin(), b.ffn_out.end(), a.ffn_out.begin()),
               "identical decoder expert inputs must retain the native expert output");
   }
+  if (native_attention) exact(actual_output, expected_output, "mixed decoder preserves native projections and head");
   const auto& actual = model.debug_sites().front().x_attn;
   const auto& expected = reference.debug_sites().front().x_attn;
   require(expected.size() == feeds.size() * hidden && actual.size() >= expected.size(),
@@ -700,7 +708,7 @@ DGPP_TEST(shared_prefill_dsv4_decoder_mhc_recipe) {
   dsv4fx::write_fixture(cfg, dir, config_json.c_str());
   Dsv4Model model(cfg, dir, 512, 4096, Dsv4Residency::Resident, nullptr, 0, 1, 3, false, 16);
   Dsv4Model reference(cfg, dir, 512, 4096, Dsv4Residency::Resident, nullptr, 0, 1, 3, false, 16);
-  check_decoder_mhc_recipe(model, reference, cfg.vocab_size, cfg.hidden_size, "DGPP_DSV4");
+  check_decoder_mhc_recipe(model, reference, cfg.vocab_size, cfg.hidden_size, "DGPP_DSV4", true);
 }
 DGPP_TEST(shared_prefill_dsv41_decoder_mhc_recipe) {
   // Wider reductions expose rounding differences hidden by the 256-wide

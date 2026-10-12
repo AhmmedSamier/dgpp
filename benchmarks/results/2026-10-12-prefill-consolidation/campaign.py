@@ -96,6 +96,8 @@ def main():
                     help='Record probabilities in cache diagnostics, outside the timing runs.')
     ap.add_argument('--cache-no-thinking', action='store_true',
                     help='Use the checkpoint template’s no-thinking counting response for the cache gate.')
+    ap.add_argument('--cache-rendered-prompt-file', type=Path,
+                    help='Also probe the exact rendered cache prompt through completions with token probabilities.')
     ap.add_argument('--explicit-budget-check', action='store_true',
                     help='After timing, also boot the candidate with an explicit 256-token budget.')
     ap.add_argument('--profile', action='store_true', help='CUDA trace on one node; not a throughput measurement.')
@@ -155,6 +157,24 @@ def main():
         if args.require_cache_parity:
             data = json.loads((directory / 'cache-repeat.json').read_text())
             assert data['transcript_matches'], 'Isolated/loaded cache response changed: ' + label
+        if args.cache_rendered_prompt_file:
+            rendered = directory / 'cache-rendered-prompt.txt'
+            rendered.write_bytes(args.cache_rendered_prompt_file.read_bytes())
+            run(['python3', cache_script, '--out', directory / 'cache-raw.json',
+                 '--rendered-prompt-file', rendered, '--tokens', '128', '--logprobs',
+                 '--diagnostic', '--repeat-load'], directory / 'cache-raw.log', test=True)
+            raw = json.loads((directory / 'cache-raw.json').read_text())
+            chat = json.loads((directory / 'cache-repeat.json').read_text())
+            a, b = raw['reference']['response'], chat['reference']['response']
+            message = b['choices'][0]['message']
+            assert a['usage']['prompt_tokens'] == b['usage']['prompt_tokens']
+            assert a['usage']['prompt_tokens_details'] == b['usage']['prompt_tokens_details']
+            assert a['choices'][0]['message']['content'] == message['reasoning_content'] + message['content']
+            if args.require_cache_parity:
+                def probabilities(record):
+                    return [row for block in record['response']['choices'][0]['logprobs']
+                            for row in zip(block['tokens'], block['token_logprobs'], block['top_logprobs'])]
+                assert probabilities(raw['mixed']) == probabilities(raw['reference']), label + ': mixed token probabilities changed'
 
     with urllib.request.urlopen('http://127.0.0.1:18080/metrics', timeout=15) as response:
         initial = json.load(response)

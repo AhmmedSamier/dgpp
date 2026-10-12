@@ -1358,8 +1358,8 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     return false;
   }
   bool prefill_budget_per_reader() const override {
-    // Shared verification and prefill spend one physical row budget. Keep
-    // the legacy per-reader limit for executors without that contract.
+    // Mixed executors share one reader budget, with verification rows
+    // consuming spare physical capacity. Other executors retain a per-reader limit.
     return !MixedPrefillModel<Model>;
   }
   std::vector<sched::SchedulerEngine::PrefillProgress> advance_prefill_group(

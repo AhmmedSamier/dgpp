@@ -965,10 +965,12 @@ void Dsv4Model::enqueue_layer_overlap(const Dsv4LayerResident& r, int layer, int
       const int lo = std::max(span0, r0), hi = std::min(span0 + len, r0 + n);
       if (hi > lo) {
         if (!attn_->prepare(hi - lo)) throw std::runtime_error("run_rows: attention GEMM plans unavailable");
-        if (sp < rows.decode_spans)
+        if (sp < rows.decode_spans) {
+          gemm_.set_decode_split_k(true);
           attn_->enqueue_decode(x_ + static_cast<size_t>(lo) * H, pool_, rows.req_ids + lo,
                                  rows.pos + lo, hi - lo, attn_out + static_cast<size_t>(lo) * H, stream_);
-        else
+          gemm_.set_decode_split_k(false);
+        } else
           attn_->enqueue_prefill(x_ + static_cast<size_t>(lo) * H, pool_, rows.span_reqs[sp],
                                  rows.span_pos0[sp] + (lo - span0), hi - lo, attn_out + static_cast<size_t>(lo) * H,
                                  stream_);
@@ -1061,7 +1063,11 @@ void Dsv4Model::enqueue_layer(const Dsv4LayerResident& r, int layer, int T, cons
     if (rows.decode_spans) {
       for (int s = 0; s < rows.decode_spans; ++s) row0 += rows.span_lens[s];
       if (!attn_->prepare(row0)) throw std::runtime_error("mixed attention GEMM plans unavailable");
+      // BF16 indexer and compressor projections keep the decode reduction,
+      // just as the FP8 attention projections keep their native row recipe.
+      gemm_.set_decode_split_k(true);
       attn_->enqueue_decode(x_, pool_, rows.req_ids, rows.pos, row0, attn_out, stream_);
+      gemm_.set_decode_split_k(false);
     }
     for (int s = rows.decode_spans; s < rows.num_spans; ++s) {
       const int len = rows.span_lens[s];
@@ -1284,6 +1290,7 @@ Dsv4Model::Outputs Dsv4Model::run_rows(const RowRun& run) {
     csa2_rmsnorm_bf16(collapsed_, H, globals_.final_norm, h_, H, T, H, cfg_.rms_norm_eps, stream_);
     if (packed_logits) {
       project_head_rows(run, [&](int input_row, int output_row, int count) {
+        gemm_.set_decode_split_k(run.decode || input_row < run.decode_rows());
         gemm_.matmul(h_ + static_cast<size_t>(input_row) * H, globals_.lm_head,
                      logits_ + static_cast<size_t>(output_row) * lm_vocab_count_, count, lm_vocab_count_, H,
                      DType::BF16, GemmOut::F32, static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);

@@ -15,6 +15,8 @@ from serve_admission_bench import Bench
 
 ap = argparse.ArgumentParser(description=__doc__)
 ap.add_argument('--url', default='http://127.0.0.1:18081')
+ap.add_argument('--rendered-prompt-file', type=Path,
+                help='Send this exact rendered prompt through completions to expose every token probability')
 ap.add_argument('--out', type=Path, required=True)
 ap.add_argument('--diagnostic', action='store_true', help='record transcript/overlap differences without accepting the gate')
 ap.add_argument('--no-thinking', action='store_true')
@@ -30,18 +32,27 @@ if args.decoder_only and not args.diagnostic:
 args.timeout = 600
 bench = Bench(args)
 probe_arguments = {k: getattr(args, k) for k in ('diagnostic', 'no_thinking', 'logprobs', 'decoder_only', 'tokens', 'repeat_load')}
+probe_arguments['rendered_prompt_file'] = str(args.rendered_prompt_file) if args.rendered_prompt_file else None
 
 
 def cached(prompt):
     body = {'model': bench.model, 'messages': [{'role': 'user', 'content': prompt}], 'max_tokens': args.tokens,
             'temperature': 0, 'ignore_eos': True, 'prefix_cache': True, 'stream': True, 'stream_options': {'include_usage': True}}
+    endpoint = '/v1/chat/completions'
+    if args.rendered_prompt_file:
+        body.pop('messages')
+        body['prompt'] = args.rendered_prompt_file.read_text()
+        endpoint = '/v1/completions'
     if args.no_thinking:
         body['chat_template_kwargs'] = {'enable_thinking': False}
     if args.logprobs:
-        body.update(logprobs=True, top_logprobs=5)
+        if args.rendered_prompt_file:
+            body['logprobs'] = 5
+        else:
+            body.update(logprobs=True, top_logprobs=5)
     started = time.monotonic()
     with closing(bench.connection()) as connection:
-        connection.request('POST', '/v1/chat/completions', json.dumps(body), {'Content-Type': 'application/json'})
+        connection.request('POST', endpoint, json.dumps(body), {'Content-Type': 'application/json'})
         response = connection.getresponse()
         assert response.status == 200, (response.status, response.read())
         data = {'choices': [{'message': {'role': 'assistant', 'content': '', 'reasoning_content': ''}}]}
@@ -66,6 +77,8 @@ def cached(prompt):
                 if choice.get('logprobs'):
                     data['choices'][0].setdefault('logprobs', []).append(choice['logprobs'])
                 delta = choice.get('delta', {})
+                if args.rendered_prompt_file:
+                    delta = {'content': choice.get('text', '')}
                 for field in ('content', 'reasoning_content'):
                     text = delta.get(field) or ''
                     if text:
