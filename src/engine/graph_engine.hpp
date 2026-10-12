@@ -209,7 +209,8 @@ inline SpecRow0 make_fabric_spec_row0(
 // 1 and pay four rows; a hole from churn (slots 0 and 2) falls to the next
 // family up. Each family has its own two parities, end events, stage and
 // verdict indices (slots_ + family) and bus variants (2 * slots_ + 2 *
-// family + parity). A single live request never touches a batch.
+// family + parity). Ordinary single-request decode uses its scalar graph;
+// mixed prefill may use a one-request compact batch for the decoder tail.
 // SAMPLING (M6 6b, the device path): with both sampler scratch tables the
 // plain (T=1) graphs carry the on-device sampling pick
 // (kernels/glm_sample_pick.hpp) — per-slot device specs and count tables,
@@ -365,6 +366,21 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
         capped.requests = slots_;
         capped.max_rows = max_rows_ / slots_;
         families_.push_back(capped);
+      }
+      // A mixed walk can have just one decoder. Give compatible compact
+      // mappings a one-request family so that its native layer and draft
+      // work do not include an empty second request. Preserve the number
+      // of scheduled depths that fit the bus's variant capacity.
+      bool singleton = this->compact_batches();
+      if constexpr (requires { Model::compact_batch_compatible(0, 0); })
+        singleton = singleton && Model::compact_batch_compatible(2 * rows_per_request_, rows_per_request_);
+      const int families_and_slots = slots_ + static_cast<int>(families_.size());
+      if (singleton &&
+          std::min(depth_, net::kBusMaxGraphVariants / (2 * families_and_slots)) ==
+              std::min(depth_, net::kBusMaxGraphVariants / (2 * (families_and_slots + 1)))) {
+        BatchFamily one;
+        one.requests = 1;
+        families_.insert(families_.begin(), one);
       }
       family_steps_.assign(families_.size(), 0);
     }
@@ -2301,8 +2317,10 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     int top = 0;
     for (const int req : reqs) top = std::max(top, req);
     int physical = -1;
+    // The singleton is only for compact mappings. Keep the original
+    // physical-prefix shape as the numerical compatibility reference.
     for (size_t f = 0; f < families_.size(); ++f)
-      if (families_[f].requests > top && family_usable(f)) {
+      if (families_[f].requests > 1 && families_[f].requests > top && family_usable(f)) {
         physical = static_cast<int>(f);
         break;
       }

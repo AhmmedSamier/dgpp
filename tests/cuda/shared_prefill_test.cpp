@@ -115,9 +115,13 @@ template <class Model> void check_graph(Model& model, Model& reference, int voca
       int64_t progress = 0;
       std::vector<int64_t> cuts;
       for (;;) {
+        const auto before = engine.decode_batch_stats();
         const auto result = engine.advance_prefill_and_step(0, 2 * unit, {decoder});
-        if (compact)
-          require(engine.decode_batch_stats().slots == 2, "mixed graph must map the high decoder slot into the smallest bucket");
+        if (compact) {
+          const auto after = engine.decode_batch_stats();
+          require(after.slots == 1, "mixed graph must map the high decoder slot into a one-request bucket");
+          require(after.padded_rows == before.padded_rows, "one live decoder must not execute padded rows");
+        }
         require(result.decoded.size() == 1 && !result.decoded[0].empty(), "mixed graph decoder progresses");
         for (const auto token : result.decoded[0]) {
           const auto next = reference.session_step(decoder, pending);
