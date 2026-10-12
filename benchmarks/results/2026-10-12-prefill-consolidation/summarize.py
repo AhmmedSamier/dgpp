@@ -32,6 +32,11 @@ def main():
                 control_output_sha256=before['output_sha256'], candidate_output_sha256=after['output_sha256'],
                 output_matches=before['output_sha256'] == after['output_sha256'],
                 control_ttft_s=before['ttft_s'], candidate_ttft_s=after['ttft_s'],
+                control_wall_s=before['wall_s'], candidate_wall_s=after['wall_s'],
+                control_update_gap_max_s=before.get('update_gap_max_s'),
+                candidate_update_gap_max_s=after.get('update_gap_max_s'),
+                control_update_gap_p95_s=before.get('update_gap_p95_s'),
+                candidate_update_gap_p95_s=after.get('update_gap_p95_s'),
                 control_usage=before.get('usage'), candidate_usage=after.get('usage')))
         assert baseline['computed_prompt_tokens'] == candidate['computed_prompt_tokens'], 'prompt work differs'
         records.append(dict(scenario=key[0], trial=key[1], control_wall_s=baseline['wall_s'],

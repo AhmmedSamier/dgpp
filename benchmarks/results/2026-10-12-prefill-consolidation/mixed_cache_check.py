@@ -96,11 +96,14 @@ with ThreadPoolExecutor(max_workers=3) as pool:
     long_record, decoder_record = long.result(), decoder.result()
 after = bench.idle(min_terminal=before['scheduler']['terminal'] + 3)
 same = actual['response']['choices'][0]['message'] == reference['response']['choices'][0]['message']
-overlap = actual['end'] < long_record['updates'][0]
+# A one-token cold probe may return only a special token, with no visible
+# update. Its completed stream still bounds when prefill finished.
+cold_output = long_record['updates'][0] if long_record['updates'] else long_record['end']
+overlap = actual['end'] < cold_output
 # Admission bounds time to first output. A 128-token reply can legitimately
 # outlast a cold prefill that now completes faster; retain that measurement
 # separately instead of treating completion order as evidence of deferral.
-first_token_during_prefill = actual['first_token'] < long_record['updates'][0]
+first_token_during_prefill = actual['first_token'] < cold_output
 args.out.write_text(json.dumps({'warm': warm, 'reference': reference, 'mixed': actual,
     'long': long_record, 'decoder': decoder_record, 'observed': observed,
     'before': before, 'after': after, 'transcript_matches': same, 'finishes_during_prefill': overlap, 'first_token_during_prefill': first_token_during_prefill}, indent=2) + '\n')

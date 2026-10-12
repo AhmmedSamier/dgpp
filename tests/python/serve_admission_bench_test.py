@@ -66,7 +66,8 @@ def server(fault=None):
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
                 for i in range(body["max_tokens"]):
-                    self.wfile.write(("data: " + json.dumps({"id": rid, "choices": [{"text": str(i)}]})
+                    text = "" if fault == "special_token" else str(i)
+                    self.wfile.write(("data: " + json.dumps({"id": rid, "choices": [{"text": text}]})
                                       + "\n\n").encode())
                     self.wfile.flush()
                     time.sleep(.002)
@@ -143,6 +144,21 @@ class AdmissionBenchmarkTest(unittest.TestCase):
             with self.subTest(fault=fault), server(fault) as bench:
                 with self.assertRaisesRegex(RuntimeError, message):
                     bench.stream("probe", "hello", 4)
+
+    def test_one_special_token_is_valid_prefill_work_without_first_text(self):
+        with server("special_token") as bench:
+            result = bench.run("solo_prefill", 0)
+        record = result["requests"][0]
+        self.assertEqual(record["usage"]["completion_tokens"], 1)
+        self.assertEqual(result["generated_tokens"], 1)
+        self.assertEqual(record["updates"], [])
+        self.assertIsNone(record["ttft_s"])
+        self.assertGreater(record["wall_s"], 0)
+
+    def test_empty_decode_still_fails_sanity_check(self):
+        with server("special_token") as bench:
+            with self.assertRaisesRegex(RuntimeError, "no output updates"):
+                bench.stream("decoder", "hello", 4)
 
     def test_cancellation_drains_before_the_next_run(self):
         with server() as bench:

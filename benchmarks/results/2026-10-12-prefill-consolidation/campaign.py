@@ -100,6 +100,7 @@ def main():
     args.out = args.out.resolve()
     args.out.mkdir(parents=True, exist_ok=False)
     (args.out / 'harness.py').write_bytes(Path(__file__).read_bytes())
+    (args.out / 'benchmark-client.py').write_bytes((ROOT / 'scripts/serve_admission_bench.py').read_bytes())
     environment = {**os.environ, 'CUDA_DEVICE_MAX_CONNECTIONS': '32', 'DGPP_NO_SWAP': '1'}
     for key in ('DGPP_ROCE_DEVICES', 'DGPP_ROCE_GID_INDICES'):
         environment.pop(key, None)

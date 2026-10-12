@@ -124,9 +124,12 @@ class Bench:
             if record["usage"].get("prompt_tokens_details", {}).get("cached_tokens", 0):
                 raise RuntimeError(f"{name}: unexpected cache hit")
         updates = record["updates"]
-        if not updates:
+        if not updates and tokens != 1:
             raise RuntimeError(f"{name}: no output updates")
-        record["ttft_s"] = updates[0] - record["start"]
+        # Prefill probes request one token. It can be a special token that
+        # renders no text; the complete stream and exact usage above still
+        # certify the work. Do not invent a first-text timestamp for it.
+        record["ttft_s"] = updates[0] - record["start"] if updates else None
         record["wall_s"] = record["end"] - record["start"]
         gaps = [b - a for a, b in zip(updates, updates[1:])]
         record["update_gap_p95_s"] = percentile(gaps, .95)
