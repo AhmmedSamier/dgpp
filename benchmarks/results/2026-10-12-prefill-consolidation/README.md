@@ -244,6 +244,19 @@ visible in the evidence and are not counted as exact passes.
   budget reproduces the candidate's transcripts. Repeat-under-load and
   isolated recovery checks distinguish this behavior from state leakage.
 
+- GLM-4.7's [initial real-checkpoint pair](evidence/glm4-initial-v31-summary.json)
+  fails the current gate. Batched decode improves 5.07%, but scenario means
+  for solo prefill, batched prefill, mixed work and repeated arrivals are
+  8.72–18.46% slower. Both candidate warmup prefills match control timing;
+  the measured candidate runs contain intermittent slower prefills. One of
+  34 timing responses changes late in a batched counting decode. All four
+  chats and both cache checks match; the 128-token cache probe contains
+  reasoning only, so it has no returned visible-token probabilities. Both
+  builds retain 36 KV blocks through load, repeat and isolated recovery.
+  All four operation streams agree within each build. The checkpoint is
+  retained for profiling and probability diagnostics; this is not an
+  accepted performance or numerical result.
+
 These probes identify dependence on execution shape; they are not a general
 model-quality or teacher-forced numerical equivalence result.
 
@@ -252,7 +265,8 @@ model-quality or teacher-forced numerical equivalence result.
 MiMo-V2.6-Flash-RL, GLM-4.7-NVFP4 and DeepSeek-V4-Flash-0731 were absent from
 the saved initial inventories. MiMo has completed its final download, sync
 and testing; its weights and dedicated download cache have been removed
-from all four nodes. GLM-4.7 is downloading; DeepSeek-V4 is next. Downloads are pinned to checkpoint revisions and performed one
+from all four nodes. GLM-4.7 is downloaded and verified on every rank;
+its failed initial gate is under investigation. DeepSeek-V4 remains queued. Downloads are pinned to checkpoint revisions and performed one
 model at a time after stopping production. No download runs alongside a
 benchmark. Test-only resident images are disabled for these campaigns.
 The optional `--parallel-peer-sync` helper downloads on the head first,

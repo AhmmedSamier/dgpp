@@ -1,4 +1,4 @@
-"""Record top-five first-token probabilities for the campaign's long prompts."""
+"""Record top-five token probabilities for selected campaign workloads."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
@@ -10,7 +10,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'scripts'))
-from serve_admission_bench import Bench
+from campaign import Checks
 
 ap = argparse.ArgumentParser(description=__doc__)
 ap.add_argument('--url', default='http://127.0.0.1:18081')
@@ -28,7 +28,7 @@ args.arrivals = 3
 args.interval = .25
 args.record_text = True
 args.logprobs = True
-bench = Bench(args)
+bench = Checks(args)
 
 
 def completion(prompt):
@@ -53,6 +53,11 @@ for trial in range(args.trials):
     vocabulary = 'amber birch cobalt dune ember fjord granite harbor indigo juniper quartz willow'.split()
     prompt = 'Document:\n' + ' '.join(rng.choice(vocabulary) for _ in range(args.words)) + '\nSummary:'
     for name in args.scenarios:
+        if name == 'batch_decode':
+            results.append(bench.batch(name, trial))
+            args.out.write_text(json.dumps(results, indent=2) + '\n')
+            print(name, trial, [r['output_text'] for r in results[-1]['requests']], flush=True)
+            continue
         if name == 'decoder_pair':
             before = bench.idle()
             short = 'List the positive integers in order, starting with one:\n1,'
