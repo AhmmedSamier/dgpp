@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 
@@ -792,16 +793,27 @@ void Dsv41Model::gather_embedding(const int64_t* tokens, int T, bool capture) {
 // One mHC site: the coefficients of this site (pre_nxt_, post, comb) from
 // the streams, the collapse with the coefficients in use (pre_cur_), the
 // sublayer's one-rounding norm into x_.
-void Dsv41Model::mhc_site(const uint16_t* streams, const GlmMhcWeights& w, const uint16_t* ln, int T, bool decode) {
-  MhcSinglePass sp;
-  sp.pre_in = pre_cur_;
-  sp.pre_out = pre_nxt_;
-  sp.post_f32 = post_f32_;
-  sp.comb_f32 = comb_f32_;
-  // Decode rows stay on the per-coefficient form at any count (a batched
-  // row bitwise the row alone; the >= 16-token prefill forms are not).
-  (void)launch_mhc_compute_normed(streams, w, mhc_cfg_, collapsed_, post_bf16_, comb_bf16_, mhc_logits_, nullptr, nullptr,
-                                  cfg_.rms_norm_eps, T, stream_, nullptr, false, &sp, decode);
+void Dsv41Model::mhc_site(const uint16_t* streams, const GlmMhcWeights& w, const uint16_t* ln, int T, bool decode,
+                          int decode_prefix) {
+  const size_t H = static_cast<size_t>(cfg_.hidden_size);
+  const int dec = decode ? T : decode_prefix;
+  const auto compute = [&](int first, int count, bool decoder) {
+    if (!count) return;
+    const size_t r = static_cast<size_t>(first);
+    MhcSinglePass sp;
+    sp.pre_in = pre_cur_ + r * 4;
+    sp.pre_out = pre_nxt_ + r * 4;
+    sp.post_f32 = post_f32_ + r * 4;
+    sp.comb_f32 = comb_f32_ + r * 16;
+    // A mixed decoder keeps the same per-coefficient reduction as its
+    // isolated decode. Only reader rows use the prefill GEMM recipe.
+    (void)launch_mhc_compute_normed(streams + r * 4 * H, w, mhc_cfg_, collapsed_ + r * H,
+                                    post_bf16_ + r * 4, comb_bf16_ + r * 16,
+                                    mhc_logits_ + r * mhc_cfg_.coeff_rows(), nullptr, nullptr,
+                                    cfg_.rms_norm_eps, count, stream_, nullptr, false, &sp, decoder);
+  };
+  compute(0, dec, true);
+  compute(dec, T - dec, false);
   csa2_rmsnorm_bf16(collapsed_, cfg_.hidden_size, ln, x_, cfg_.hidden_size, T, cfg_.hidden_size, cfg_.rms_norm_eps, stream_);
   pre_cur_ = pre_nxt_;
   pre_nxt_ = pre_cur_ == pre_a_ ? pre_b_ : pre_a_;
@@ -814,6 +826,8 @@ void Dsv41Model::stream_update(const uint16_t* sublayer_out, int T) {
 
 void Dsv41Model::enqueue_layer(const Dsv41LayerResident& r, int layer, int T, const WalkRows& rows) {
   const int H = cfg_.hidden_size;
+  const int decode_prefix = rows.decode_spans
+      ? std::accumulate(rows.span_lens, rows.span_lens + rows.decode_spans, 0) : 0;
   build_layer_objects(r);
   // Engram: the hashed rows (staged at the walk's start) gate the streams
   // before this layer's coefficients read them.
@@ -839,7 +853,7 @@ void Dsv41Model::enqueue_layer(const Dsv41LayerResident& r, int layer, int T, co
   aw.fn = r.mhc.attn_fn;
   aw.base = r.mhc.attn_base;
   aw.scale = r.mhc.attn_scale;
-  mhc_site(cur_, aw, r.attn_norm, T, rows.decode);
+  mhc_site(cur_, aw, r.attn_norm, T, rows.decode, decode_prefix);
   const auto grab = [&](const uint16_t* p, size_t n) {
     std::vector<uint16_t> v(n);
     DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
@@ -885,7 +899,7 @@ void Dsv41Model::enqueue_layer(const Dsv41LayerResident& r, int layer, int T, co
   fw.fn = r.mhc.ffn_fn;
   fw.base = r.mhc.ffn_base;
   fw.scale = r.mhc.ffn_scale;
-  mhc_site(cur_, fw, r.ffn_norm, T, rows.decode);
+  mhc_site(cur_, fw, r.ffn_norm, T, rows.decode, decode_prefix);
   if (debug_capture_) cap.x_ffn = grab(x_, static_cast<size_t>(T) * H);
   uint16_t* ffn_out = stage(y_, T, H, rows.capture);
   if (draft)
@@ -1063,7 +1077,7 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
         aw.fn = r.mhc.attn_fn;
         aw.base = r.mhc.attn_base;
         aw.scale = r.mhc.attn_scale;
-        mhc_site(cur_, aw, r.attn_norm, T, rows.decode);
+        mhc_site(cur_, aw, r.attn_norm, T, rows.decode, run.decode_rows());
         pre_cur_ = pc;
         pre_nxt_ = pn;
       }

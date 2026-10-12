@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <stdexcept>
@@ -298,6 +299,60 @@ template <class Model, class Factory> void check(Factory make, int vocab, int al
 #endif
   }
 }
+template <class Model>
+void check_decoder_mhc_recipe(Model& model, Model& reference, int vocab, int hidden, const std::string& prefix) {
+  const auto decode_env = prefix + "_CAPTURE_DECODE";
+  const auto prefill_env = prefix + "_CAPTURE_PREFILL";
+  const auto peer = tokens(17, vocab, 3);
+  const auto prompt = tokens(259, vocab, 13);
+  const auto feeds = tokens(4, vocab, 7);
+  (void)model.session_prefill(2, peer);
+  (void)reference.session_prefill(2, peer);
+  auto reader = model.session_prefill_begin(0, prompt, 768, 128);
+  // Compare the first sublayer input, before attention or expert routing
+  // can introduce their own numerical differences. Layer zero has no
+  // Engram, so identical embeddings must keep the decoder's mHC recipe.
+  setenv(decode_env.c_str(), "1", 1);
+  setenv(prefill_env.c_str(), "1", 1);
+  try {
+    (void)reference.session_verify(2, feeds);
+    (void)model.session_prefill_verify(reader, 128, {2}, {feeds});
+  } catch (...) {
+    unsetenv(decode_env.c_str());
+    unsetenv(prefill_env.c_str());
+    throw;
+  }
+  unsetenv(decode_env.c_str());
+  unsetenv(prefill_env.c_str());
+  require(!model.debug_sites().empty() && !reference.debug_sites().empty(), "mHC site capture exists");
+  const auto& actual = model.debug_sites().front().x_attn;
+  const auto& expected = reference.debug_sites().front().x_attn;
+  require(expected.size() == feeds.size() * hidden && actual.size() >= expected.size(),
+          "mHC decoder prefix shape");
+  require(std::equal(expected.begin(), expected.end(), actual.begin()),
+          "mixed decoder mHC input must equal its isolated decode recipe");
+  if constexpr (requires { model.debug_sites().front().post_attn; }) {
+    const auto& actual_post = model.debug_sites().front().post_attn;
+    const auto& expected_post = reference.debug_sites().front().post_attn;
+    require(expected_post.size() == feeds.size() * 4 && actual_post.size() >= expected_post.size(),
+            "mHC decoder post coefficient shape");
+    require(std::equal(expected_post.begin(), expected_post.end(), actual_post.begin()),
+            "mixed decoder mHC post coefficients must equal its isolated decode recipe");
+  }
+  if constexpr (requires { model.debug_layer_pre(); }) {
+    // V4.1 collapses with the preceding site's coefficients, so its first
+    // attention input alone cannot expose a changed coefficient recipe.
+    // The first layer's FFN coefficients are captured before MoE output
+    // changes the stream; compare their fp32 values without BF16 masking.
+    require(!model.debug_layer_pre().empty() && !reference.debug_layer_pre().empty(), "mHC coefficient capture exists");
+    const auto& actual_pre = model.debug_layer_pre().front();
+    const auto& expected_pre = reference.debug_layer_pre().front();
+    require(expected_pre.size() == feeds.size() * 4 && actual_pre.size() >= expected_pre.size(),
+            "mHC decoder coefficient shape");
+    require(std::equal(expected_pre.begin(), expected_pre.end(), actual_pre.begin()),
+            "mixed decoder mHC coefficients must equal its isolated decode recipe");
+  }
+}
 }  // namespace
 
 DGPP_TEST(shared_prefill_glm) {
@@ -458,6 +513,36 @@ DGPP_TEST(shared_prefill_dsv41_continuations) {
     exact(model.session_draft(1, {7}), expected, "DSpark grouped draft reads another request");
     model.session_close(0); model.session_close(1);
     require(model.kv_blocks_in_use() == 0, "bounded continuations release all KV");
+  }
+}
+DGPP_TEST(shared_prefill_dsv4_decoder_mhc_recipe) {
+  // Wider reductions expose rounding differences hidden by the 256-wide
+  // smoke fixture; the layer schedule and cache geometry stay small.
+  std::string config_json = dsv4fx::tiny_config_json();
+  const std::string hidden = "\"hidden_size\": 256";
+  config_json.replace(config_json.find(hidden), hidden.size(), "\"hidden_size\": 2048");
+  const auto cfg = Dsv4Config::parse(minijson::parse(config_json).root);
+  const std::string dir = "shared_dsv4_mhc_fixture";
+  dsv4fx::write_fixture(cfg, dir, config_json.c_str());
+  Dsv4Model model(cfg, dir, 512, 4096, Dsv4Residency::Resident, nullptr, 0, 1, 3, false, 16);
+  Dsv4Model reference(cfg, dir, 512, 4096, Dsv4Residency::Resident, nullptr, 0, 1, 3, false, 16);
+  check_decoder_mhc_recipe(model, reference, cfg.vocab_size, cfg.hidden_size, "DGPP_DSV4");
+}
+DGPP_TEST(shared_prefill_dsv41_decoder_mhc_recipe) {
+  // Wider reductions expose rounding differences hidden by the 256-wide
+  // smoke fixture; the layer schedule and cache geometry stay small.
+  std::string config_json = dsv41fx::tiny_config_json();
+  const std::string hidden = "\"hidden_size\": 256";
+  config_json.replace(config_json.find(hidden), hidden.size(), "\"hidden_size\": 2048");
+  const auto cfg = Dsv41TextConfig::parse(minijson::parse(config_json).root);
+  const std::string dir = "shared_dsv41_mhc_fixture";
+  dsv41fx::write_fixture(cfg, dir, config_json.c_str());
+  (void)dsv41fx::fixture_sidecar(cfg, dir);
+  for (bool bounded : {false, true}) {
+    Dsv41Model model(cfg, dir, 512, 4096, Dsv41Residency::Resident, nullptr, 0, 1, 3, false, 16);
+    Dsv41Model reference(cfg, dir, 512, 4096, Dsv41Residency::Resident, nullptr, 0, 1, 3, false, 16);
+    model.set_prefill_bounded(bounded); reference.set_prefill_bounded(bounded);
+    check_decoder_mhc_recipe(model, reference, cfg.vocab_size, cfg.hidden_size, "DGPP_DSV41");
   }
 }
 DGPP_TEST(shared_prefill_dsv41_workspace) {

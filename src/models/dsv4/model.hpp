@@ -154,6 +154,7 @@ class Dsv4Model : public SessionModel<Dsv4Model> {
   // attention update, the MoE site's input and output.
   struct SiteCapture {
     std::vector<uint16_t> x_attn, attn_out, streams_after_attn, x_ffn, ffn_out;
+    std::vector<float> post_attn;
   };
   const std::vector<SiteCapture>& debug_sites() const { return debug_sites_; }
   // The indexed layers' selections of a capture_layers walk ride
@@ -202,9 +203,10 @@ class Dsv4Model : public SessionModel<Dsv4Model> {
   GlmMoeWeights moe_view(const Dsv4MoeResident& m) const;
   // The layer over the streams (cur -> next, swapped), the two folds.
   void enqueue_layer(const Dsv4LayerResident& r, int layer, int T, const WalkRows& rows);
-  void mhc_site(const uint16_t* streams, const GlmMhcWeights& w, const uint16_t* ln, int T, bool decode);
+  void mhc_site(const uint16_t* streams, const GlmMhcWeights& w, const uint16_t* ln, int T, bool decode,
+                int decode_prefix = 0);
   // The head's collapse of the live streams into `out` [T, H] (pre-norm).
-  void hc_head(const Dsv4HcHeadResident& w, uint16_t* out, int T, bool decode);
+  void hc_head(const Dsv4HcHeadResident& w, uint16_t* out, int T, bool decode, int decode_prefix = 0);
   void stream_update(const uint16_t* sublayer_out, int T);
   // ---- the prefill's fold overlap (2026-10-02) ---------------------------------
   // A prefill walk (a request's chunk or a group's spans) of at least
@@ -219,7 +221,8 @@ class Dsv4Model : public SessionModel<Dsv4Model> {
   // and the folds per row): bitwise.
   static constexpr int kFoldOverlapMinRows = 512;
   void enqueue_layer_overlap(const Dsv4LayerResident& r, int layer, int T, int TA, const WalkRows& rows, bool flush);
-  void mhc_site_rows(const uint16_t* streams, const GlmMhcWeights& w, const uint16_t* ln, int r0, int rows);
+  void mhc_site_rows(const uint16_t* streams, const GlmMhcWeights& w, const uint16_t* ln, int r0, int rows,
+                     int decode_prefix = 0);
   void update_rows(const uint16_t* sublayer_out, int r0, int rows);
   // (TRIED 2026-10-02 and reverted: the update and the next site in row
   // tiles so a tile's streams stay in L2 for the site's two passes. 128-row
