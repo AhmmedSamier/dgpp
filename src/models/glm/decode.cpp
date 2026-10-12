@@ -8,6 +8,7 @@
 #include "common/cuda_check.hpp"
 #include "common/log.hpp"
 #include "engine/pool_exhausted.hpp"
+#include "engine/graph_batch_mapping.hpp"
 #include "kernels/dsa.hpp"
 #include "kernels/glm_mhc_launch.hpp"
 #include "kernels/glm_moe_launch.hpp"
@@ -1085,19 +1086,8 @@ void GlmDiagnosticModel::session_graph_capture_batch_inputs(int rows_per_request
   graph_batch_requests_ = requests;
   graph_rows_per_request_ = rows_per_request;
   graph_feed_rows_ = 0;
-  step_tokens_ = d_tokens_ + kDecodeRows;  // the fixed batch: every slot's feed rows
   decode_rows_ = rows;
-  for (int q = 0; q < requests; ++q) {
-    h_req_spans_[2 * q] = q * rows_per_request;
-    h_req_spans_[2 * q + 1] = rows_per_request;
-    for (int r = 0; r < rows_per_request; ++r)
-      h_req_ids_[q * rows_per_request + r] = q;
-  }
-  // Kernel uploads, never memcpy nodes (docs/batched_mtp_graph_stall.md).
-  glm_upload_i32(h_req_ids_, d_req_ids_, rows, stream_);
-  glm_upload_i32(h_req_spans_, d_req_spans_, 2 * requests, stream_);
-  glm_spec_positions_batched(d_session_pos_, d_req_ids_, rows,
-                             rows_per_request, max_context_, d_step_pos_, stream_);
+  GraphBatchMapping<GlmDiagnosticModel>::inputs(*this, requests, rows_per_request, rows_per_request);
 
 }
 
@@ -1167,11 +1157,7 @@ void GlmDiagnosticModel::session_graph_capture_commit_batch(
   if (device_verdicts == nullptr)
     throw std::invalid_argument(
         "session_graph_capture_commit_batch: null verdicts");
-  for (int req = 0; req < graph_batch_requests_; ++req) {
-    const int row0 = req * graph_rows_per_request_;
-    glm_spec_commit(device_verdicts + req, graph_rows_per_request_,
-                    spec_segments(req, row0), d_session_pos_ + req, stream_);
-  }
+  GraphBatchMapping<GlmDiagnosticModel>::commit(*this, device_verdicts, graph_batch_requests_, graph_rows_per_request_);
 }
 
 void GlmDiagnosticModel::session_graph_capture_verify_next_tokens_batch(
@@ -1182,7 +1168,8 @@ void GlmDiagnosticModel::session_graph_capture_verify_next_tokens_batch(
         "T=1 fixed graph");
   glm_spec_verify_next_tokens_batched(
       verify_verdicts, graph_batch_requests_, graph_rows_per_request_,
-      step_tokens_, stream_);
+      graph_batch_map_source_ ? d_tokens_ + kDecodeRows : step_tokens_, stream_,
+      graph_batch_map_source_ ? d_batch_map_ : nullptr);
 }
 
 void GlmDiagnosticModel::session_reserve_blocks(int req, int64_t tokens) {

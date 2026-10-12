@@ -2278,7 +2278,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   }
   bool compact_batches() const {
     if constexpr (requires { Model::kCompactBatches; }) {
-      return Model::kCompactBatches && compact_batches_ && !schedule_;
+      return Model::kCompactBatches && compact_batches_ && slots_ > 1 && !schedule_ && !block_;
     }
     return false;
   }

@@ -217,6 +217,7 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg, const std::stri
   // Decode-session row metadata is shared by DSA, request-indexed KDA, and
   // the Phase-2 position/pick kernels. Allocate it even on a KDA-only
   // configuration; it is lifetime-stable because CUDA graphs bake it.
+  d_batch_map_ = static_cast<int32_t*>(alloc_device(sizeof(int32_t) * max_requests_));
   d_req_ids_ = static_cast<int32_t*>(
       alloc_device(sizeof(int32_t) * kDecodeRows));
   d_step_pos_ = static_cast<int64_t*>(
@@ -603,6 +604,7 @@ GlmDiagnosticModel::~GlmDiagnosticModel() {
   vision_.reset();
   cudaFree(gemm_ws_);
   cudaFree(dsa_scratch_);
+  cudaFree(d_batch_map_);
   cudaFree(d_req_ids_);
   cudaFree(d_step_pos_);
   cudaFree(d_req_spans_);

@@ -17,7 +17,10 @@ same explicit chunk cuts.
 across GLM, GLM4, GLM-DSA, MiMo, Qwen35, DeepSeek V4 and V4.1. It covers eager
 and graph adapters, MTP on/off, compact batches and output storage, cancellation
 and slot reuse, snapshot attachment, stale cursors, decoder rollback, and
-bitwise isolation when a neighboring reader changes. Qwen35 includes FP8,
+bitwise isolation when a neighboring reader changes. Sparse graph checks assert
+that compact execution selects the smaller bucket, then compare its tokens
+against an independent decoder; setting a flag alone is not coverage of the
+mapping. Qwen35 includes FP8,
 mixed NVFP4 and per-tensor FP8; V4.1 includes exact and bounded prefill with
 retained tails larger than a grouped walk's workspace. Cross-shape comparisons
 use the existing session numerical tier and certify changed argmax near ties;

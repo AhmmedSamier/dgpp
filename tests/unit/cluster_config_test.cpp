@@ -194,7 +194,7 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
   // The engine defaults are the binary's flag defaults — one set of defaults.
   require(c.engine.kv_capacity == 8192 && c.engine.default_max_tokens == 256 &&
               c.engine.queue_limit == 64 && c.engine.max_connections == 64 &&
-              !c.engine.compact_batches && !c.engine.no_eos && c.engine.graph_batch_min_live == 0 &&
+              c.engine.compact_batches && !c.engine.no_eos && c.engine.graph_batch_min_live == 0 &&
               c.engine.sampling_candidates == 128 && c.engine.admission_window == 256 &&
               c.engine.bulk_pace_gbps == -1.0 && c.engine.bulk_inflight == -1 &&
               c.engine.rendezvous_timeout_ms == 120000 && !c.engine.reasoning_in_content &&
@@ -233,7 +233,10 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
           "the dflash keys parse");
   const auto compact = dgpp::serve::parse_cluster_config(
       R"({"model":"m","nodes":["h"],"engine":{"compact_batches":true}})", "t");
-  require(compact.engine.compact_batches, "compact_batches opt-in");
+  require(compact.engine.compact_batches, "compact_batches enabled");
+  const auto fixed = dgpp::serve::parse_cluster_config(
+      R"({"model":"m","nodes":["h"],"engine":{"compact_batches":false}})", "t");
+  require(!fixed.engine.compact_batches, "compact_batches explicit override");
   for (const std::string mode : {"gemv", "mma"}) {
     const auto head = dgpp::serve::parse_cluster_config(
         R"({"model":"m","nodes":["h"],"engine":{"fp8_head":")" + mode + R"("}})", "t");

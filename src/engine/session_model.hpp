@@ -54,6 +54,7 @@
 #include "engine/logits_storage.hpp"
 #include "engine/pool_exhausted.hpp"
 #include "engine/prefill_batch.hpp"
+#include "engine/graph_batch_mapping.hpp"
 #include "engine/prefill_cursor.hpp"
 #include "kernels/gemm.hpp"
 #include "kernels/glm_spec.hpp"
@@ -176,6 +177,7 @@ class SessionModel : public PrefillReporting {
   // tick), and the weights stream once for all of them. Returns each
   // cursor's "done".
   static constexpr bool kPrefillGroupAdvance = true;
+  static constexpr bool kCompactBatches = true;
   // RowRun::decode_spans is a layer-execution contract; the session layer
   // owns the shared request bookkeeping. Every executor implements mixed
   // state/rollback/output handling as part of its layer-walk contract.
@@ -388,6 +390,7 @@ class SessionModel : public PrefillReporting {
 
  protected:
   template <class> friend struct PrefillBatch;
+  template <class> friend struct GraphBatchMapping;
   int64_t prefill_vocab_size() const { return vocab_size_; }
   int prefill_hidden_size() const { return hidden_; }
   Derived& derived() { return static_cast<Derived&>(*this); }
@@ -1765,34 +1768,9 @@ void SessionModel<D>::session_graph_capture_batch_inputs(int rows_per_request, i
   graph_batch_requests_ = requests;
   graph_rows_per_request_ = rows_per_request;
   graph_feed_rows_ = feed_rows > rows_per_request ? feed_rows : 0;
-  step_tokens_ = d_tokens_ + static_cast<size_t>(max_decode_rows_);  // the fixed batch: every slot's feed rows
-  if (graph_batch_map_source_)
-    glm_upload_i32(graph_batch_map_source_, d_batch_map_, requests, stream_);
-  if (graph_feed_rows_ > 0 || graph_batch_map_source_) {
-    // The reduced-depth batch: the first rows_per_request rows of every
-    // slot's feed, compacted into the front scratch (free during a replay),
-    // so the walk's rows stay contiguous per request; the next-tokens write
-    // at the end of the replay lands in the feeds themselves.
-    glm_spec_gather_feed(d_tokens_ + static_cast<size_t>(max_decode_rows_), requests,
-                         graph_feed_rows_ > 0 ? graph_feed_rows_ : rows_per_request,
-                         rows_per_request, d_tokens_, stream_,
-                         graph_batch_map_source_ ? d_batch_map_ : nullptr);
-    step_tokens_ = d_tokens_;
-  }
   decode_rows_ = rows;
-  for (int q = 0; q < requests; ++q) {
-    h_req_spans_[2 * q] = q * rows_per_request;
-    h_req_spans_[2 * q + 1] = rows_per_request;
-    for (int r = 0; r < rows_per_request; ++r) h_req_ids_[q * rows_per_request + r] = q;
-  }
-  if (graph_batch_map_source_)
-    glm_batch_rows(d_batch_map_, requests, rows_per_request, d_req_ids_, d_req_spans_, stream_);
-  else {
-    glm_upload_i32(h_req_ids_, d_req_ids_, rows, stream_);
-    glm_upload_i32(h_req_spans_, d_req_spans_, 2 * requests, stream_);
-  }
-  glm_spec_positions_batched(d_session_pos_, d_req_ids_, rows, rows_per_request, max_context_,
-                             d_step_pos_, stream_);
+  GraphBatchMapping<SessionModel<D>>::inputs(*this, requests, rows_per_request,
+      graph_feed_rows_ > 0 ? graph_feed_rows_ : rows_per_request);
 }
 
 template <class D>
@@ -1845,40 +1823,7 @@ void SessionModel<D>::session_graph_capture_commit_batch(const PickVerdict* devi
   if (graph_batch_requests_ <= 0 || graph_rows_per_request_ <= 0)
     throw std::logic_error("session_graph_capture_commit_batch: no fixed batch was captured");
   if (device_verdicts == nullptr) throw std::invalid_argument("session_graph_capture_commit_batch: null verdicts");
-  for (int req = 0; req < graph_batch_requests_; ++req) {
-    const int row0 = req * graph_rows_per_request_;
-    if (graph_batch_map_source_) {
-      if (max_requests_ < 2)
-        throw std::logic_error("compact commit: stride requires at least two request slots");
-      auto segments = derived().spec_segments(0, row0);
-      const auto next = derived().spec_segments(1, row0);
-      for (int i = 0; i < segments.count; ++i)
-        segments.seg[i].request_stride_bytes = reinterpret_cast<uintptr_t>(next.seg[i].dst) -
-                                               reinterpret_cast<uintptr_t>(segments.seg[i].dst);
-      if (segments.replay_dst != nullptr)
-        segments.replay_request_stride_bytes = reinterpret_cast<uintptr_t>(next.replay_dst) -
-                                               reinterpret_cast<uintptr_t>(segments.replay_dst);
-#ifndef NDEBUG
-      // Mapped commits require each destination to be affine in the physical request ID.
-      for (int q = 0; q < max_requests_; ++q) {
-        const auto actual = derived().spec_segments(q, row0);
-        if (actual.count != segments.count)
-          throw std::logic_error("compact commit: segment count differs by request");
-        for (int i = 0; i < segments.count; ++i) {
-          const auto expected = reinterpret_cast<uintptr_t>(segments.seg[i].dst) +
-                                q * segments.seg[i].request_stride_bytes;
-          if (reinterpret_cast<uintptr_t>(actual.seg[i].dst) != expected)
-            throw std::logic_error("compact commit: nonuniform request destination stride");
-        }
-      }
-#endif
-      glm_spec_commit(device_verdicts + req, graph_rows_per_request_, segments, d_session_pos_,
-                      stream_, d_batch_map_, req);
-    } else {
-      glm_spec_commit(device_verdicts + req, graph_rows_per_request_,
-                      derived().spec_segments(req, row0), d_session_pos_ + req, stream_);
-    }
-  }
+  GraphBatchMapping<SessionModel<D>>::commit(*this, device_verdicts, graph_batch_requests_, graph_rows_per_request_);
 }
 
 template <class D>

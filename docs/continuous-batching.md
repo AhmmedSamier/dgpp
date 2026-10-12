@@ -100,6 +100,7 @@ The shared execution components have separate responsibilities:
 | `PrefillContinuation` | Tracks logical cuts, work budgets, progress and suspension across yields. |
 | `PrefillBatch` | Plans mixed rows, charges physical work, commits positions and snapshots, catches up draft state and slices outputs. |
 | `RowRun` | Describes request spans, the decoder prefix and selected output rows for a layer walk. |
+| `GraphBatchMapping` | Maps compact graph rows to persistent request slots for feeds, positions and speculative commits. |
 | `SessionModel` | Owns session positions, cache reservations, rollback, draft history and graph staging. |
 | Layer executor | Applies its attention, recurrence, projections and draft implementation to those rows. |
 

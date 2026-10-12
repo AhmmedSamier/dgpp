@@ -1487,7 +1487,7 @@ int main(int argc, char** argv) {
   std::string attention_weights = "checkpoint";  // the full GLM-5.3 attention projections: checkpoint | int4
   int max_concurrency = 8, queue_limit = 64, default_max_tokens = 256, admission_gather_ms = 3;
   dgpp::serve::FileInputConfig file_inputs;
-  bool compact_batches = false;
+  bool compact_batches = true;
   int graph_batch_min_live = 0;  // 0 = min(2, max_concurrency) (the batch family, 2026-09-07)
   // The sampled pick's candidate width per rank on the graph engines (the
   // planned 128; narrower forces the exact gather fallback more often —

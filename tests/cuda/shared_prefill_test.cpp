@@ -80,7 +80,7 @@ template <class Model> void check_graph(Model& model, Model& reference, int voca
   try {
     {
       GraphEngineAdapter<Model> engine(&model, &bus, 0, 1, scratch, vocab, 60000,
-          model.max_session_requests(), nullptr, nullptr, 1, nullptr, 0, model.mtp_enabled() && Model::kBatchedDraftChain ? 3 : 1, compact);
+          2, nullptr, nullptr, 1, nullptr, 0, model.mtp_enabled() && Model::kBatchedDraftChain ? 3 : 1, compact);
       sched::AdmissionPolicy policy;
       policy.prefill_budget_tokens = 2 * unit;
       policy = serve::resolve_prefill_policy(policy, engine, std::nullopt);
@@ -94,6 +94,8 @@ template <class Model> void check_graph(Model& model, Model& reference, int voca
       engine.reserve(0, 768);
       for (int i = 0; i < 12; ++i) {
         const auto baseline = engine.step_batch({0, decoder});
+        if (compact)
+          require(engine.decode_batch_stats().slots == 2, "compact graph must skip holes between live requests");
         for (const auto token : baseline.back()) {
           const auto next = reference.session_step(decoder, pending);
           const auto wanted = std::max_element(next.logits.begin(), next.logits.end()) - next.logits.begin();
@@ -112,6 +114,8 @@ template <class Model> void check_graph(Model& model, Model& reference, int voca
       std::vector<int64_t> cuts;
       for (;;) {
         const auto result = engine.advance_prefill_and_step(0, 2 * unit, {decoder});
+        if (compact)
+          require(engine.decode_batch_stats().slots == 2, "mixed graph must map the high decoder slot into the smallest bucket");
         require(result.decoded.size() == 1 && !result.decoded[0].empty(), "mixed graph decoder progresses");
         for (const auto token : result.decoded[0]) {
           const auto next = reference.session_step(decoder, pending);

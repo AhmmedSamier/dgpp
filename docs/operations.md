@@ -1092,11 +1092,17 @@ drafts and padded rows measure different work.
 | rank 0 log, pid and op stream | `<log_dir>/serve_r0.log`, `<log_dir>/r0.pid`, `<log_dir>/serve_rank0.ops`, written as the run records it (flushed at every retire) |
 | exit statuses | 0 orderly stop; 1 a startup or contract error (a configuration that differs from rank 0's included); 2 rank 0 after an engine failure or any rank after forced shutdown; 3 a peer released by its in-tick watch |
 
-### Compact Qwen batch mappings
+### Compact graph batch mappings
 
-With `engine.compact_batches: true`, fixed-depth Qwen graph serving places active
-requests in the smallest bucket that preserves the physical graph's numerical
-dispatch range. Graphs of at most sixteen verification rows retain their width.
+`engine.compact_batches` defaults to true. Fixed-depth native graph execution
+places active requests in the smallest available bucket permitted by the layer
+executor's numerical contract. The shared session core and legacy GLM facade
+use `GraphBatchMapping` for feed gathering, request-row metadata and speculative
+commits. A finished reader can leave a hole between live decoder slots without
+forcing subsequent decode to execute that empty slot.
+
+Qwen4Exp's numerical contract preserves its physical dispatch range:
+graphs of at most sixteen verification rows retain their width.
 Wider graphs can shrink within the 17–32-row or above-32-row range, preserving
 the FP8 split-K reduction boundary. For example, two live requests in slots 0
 and 15 at MTP depth 3 use twelve groups (48 rows) instead of sixteen groups
@@ -1108,7 +1114,8 @@ are staged. Sampling RNG/counts/bias/proposals remain indexed by physical
 request ID. Graph masks and verdicts are indexed by compact batch group.
 The mapping is double-buffered per graph family for pipelined replays.
 
-The setting defaults to false, retaining the physical-prefix policy. Rank 0 journals the setting
+Setting it to false retains the physical-prefix policy. Rank 0 journals the setting
 and peers adopt it before graph construction; it is not read from the
-environment. Confidence-scheduled verify depth and other model families currently use the previous policy.
+environment. Confidence-scheduled verify depth and block-draft graphs retain
+physical mappings; their draft/schedule protocols do not support mapped rows.
 This changes neither model capacity nor the set of graph bucket sizes.

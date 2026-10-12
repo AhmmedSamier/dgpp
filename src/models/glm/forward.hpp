@@ -333,6 +333,7 @@ class GlmDiagnosticModel : public PrefillReporting {
   // per-position hidden cache, scalar): past depth 1 the graph engine
   // serves scalar replays.
   static constexpr bool kBatchedDraftChain = false;
+  static constexpr bool kCompactBatches = true;
   // No confidence head: the graph engine never schedules this family's
   // verify depth.
   static constexpr bool kVerifyConfidence = false;
@@ -633,6 +634,8 @@ class GlmDiagnosticModel : public PrefillReporting {
   // the adapter calls this before every replay; the recorded H2D nodes then
   // publish the restored map without changing graph structure.
   void session_graph_stage_batch();
+  void session_graph_batch_map_source(const int32_t* source) { graph_batch_map_source_ = source; }
+  const int32_t* device_batch_map() const { return d_batch_map_; }
   void session_graph_capture_commit_batch(
       const PickVerdict* device_verdicts);
   void session_graph_capture_draft_batch(
@@ -750,6 +753,7 @@ class GlmDiagnosticModel : public PrefillReporting {
 
  private:
   template <class> friend struct PrefillBatch;
+  template <class> friend struct GraphBatchMapping;
   GlmDiagnosticModel& derived() { return *this; }
   int64_t prefill_vocab_size() const { return cfg_.vocab_size; }
   int prefill_hidden_size() const { return cfg_.hidden_size; }
@@ -1025,6 +1029,8 @@ class GlmDiagnosticModel : public PrefillReporting {
   bool graph_device_positions_ = false;  // the captured graph's mode
   bool graph_device_tokens_ = false;     // no token upload node
   bool graph_has_draft_ = false;         // the draft block is in the graph
+  int32_t* d_batch_map_ = nullptr;
+  const int32_t* graph_batch_map_source_ = nullptr;
   int graph_batch_requests_ = 0;         // 0 = scalar graph contract
   int graph_rows_per_request_ = 0;
   int graph_feed_rows_ = 0;              // a scalar capture's feed rows (>= its verified rows)
