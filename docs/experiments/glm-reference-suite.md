@@ -4,6 +4,9 @@ The suite contains three reference comparisons using tokenized prompts
 and one engine-only trace case. Generate reference dumps where the
 checkpoint is available. Each dump is 30–100 MB and is cached locally:
 
+Run the following commands from the repository root. Keep dumps and traces
+in ignored local storage or external artifacts.
+
 ```
 CKPT=/path/to/checkpoint/snapshot
 OUT=/path/to/reference/dumps
@@ -37,7 +40,7 @@ done
     --trace-out real.trace [--layers N]
 ```
 
-`smoke` (the first case) uses the hand-picked id list in ids/smoke.ids — a
+`smoke` (the first case) uses `benchmarks/glm-suite/ids/smoke.ids` — a
 mid-conversation chat prefix. Dumps generated before the M4 close-out
 lack the `router_biased` tensor (the per-flip certification inputs) and are
 rejected by the runner — regenerate them with a current

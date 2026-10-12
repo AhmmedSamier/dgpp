@@ -155,6 +155,10 @@ torch-backed reference modes do.
 
 ## Evaluation data and prefill fixtures
 
+The [GLM reference-suite guide](experiments/glm-reference-suite.md) describes
+reference dump generation, reduced-layer comparisons and route certification.
+Keep generated dumps and traces outside the tracked documentation.
+
 Datasets are not bundled and benchmarks never download them implicitly:
 
 ```bash
