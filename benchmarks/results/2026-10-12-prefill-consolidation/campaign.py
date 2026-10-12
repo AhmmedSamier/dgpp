@@ -94,6 +94,7 @@ def main():
     ap.add_argument('--profile', action='store_true', help='CUDA trace on one node; not a throughput measurement.')
     ap.add_argument('--download-python', type=Path,
                     help='Download/sync this deployment with this venv after stopping production.')
+    ap.add_argument('--download-revision', help='Pin a temporary checkpoint download to this revision.')
     ap.add_argument('--scenarios', nargs='+', default=['solo_decode', 'solo_prefill', 'batch_decode',
                                                      'batch_prefill', 'mixed_long', 'sustained_idle'])
     args = ap.parse_args()
@@ -138,8 +139,10 @@ def main():
     try:
         run(['python3', 'scripts/dgpp-cluster', 'down', '--config', args.production_config], args.out / 'production-down.log')
         if args.download_python:
-            run([args.download_python, 'scripts/download_model.py', '--config', args.deployment],
-                args.out / 'download.log', test=True, timeout=7200)
+            command = [args.download_python, 'scripts/download_model.py', '--config', args.deployment]
+            if args.download_revision:
+                command += ['--revision', args.download_revision, '--activate']
+            run(command, args.out / 'download.log', test=True, timeout=7200)
         for label, binary in labels:
             directory = args.out / label
             directory.mkdir()
