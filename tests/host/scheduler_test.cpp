@@ -3574,6 +3574,153 @@ class AdmissionFairEngine : public ChunkFakeEngine {
   }
 };
 
+DGPP_TEST(scheduler_mixed_prefill_decodes_each_live_request_once_per_tick) {
+  struct MixedEngine : AdmissionFairEngine {
+    std::map<int, int> tick_steps;
+    int mixed = 0, completed_while_mixed = 0;
+    bool can_mix_prefill(int, const std::vector<int>& reqs) const override { return !reqs.empty(); }
+    std::vector<int32_t> step(int req) override {
+      require(++tick_steps[req] == 1, "a request decoded twice in one scheduler quantum");
+      return AdmissionFairEngine::step(req);
+    }
+    MixedProgress advance_prefill_and_step(int req, int64_t budget, const std::vector<int>& reqs) override {
+      ++mixed;
+      MixedProgress result;
+      result.prefill = advance_prefill(req, budget);
+      completed_while_mixed += result.prefill.first_token >= 0;
+      result.decoded = step_batch(reqs);
+      return result;
+    }
+  } engine;
+  engine.arm(0, std::vector<int32_t>(32, 10), 32);
+  engine.arm(1, std::vector<int32_t>(4, 20), 4);
+  engine.arm(2, std::vector<int32_t>(4, 30), 4);
+  dgpp::sched::AdmissionPolicy policy;
+  policy.prefill_early_admission = true;
+  policy.prefill_budget_tokens = 32;
+  Scheduler sched(&engine, {}, 0, policy);
+  const auto tick = [&] {
+    engine.tick_steps.clear();
+    const auto before = sched.meters().prompt_tokens_computed;
+    sched.tick();
+    require(sched.meters().prompt_tokens_computed - before <= 32, "mixed walk exceeds the prefill cap");
+  };
+  sched.submit(make_request("decoder", 5, 32));
+  tick();
+  sched.submit(make_request("long", 95, 4));
+  tick();
+  sched.submit(make_request("short", 5, 4));
+  tick();
+  require(sched.meters().prefilling == 1 && sched.meters().queued == 0,
+          "short request produces its first token during the long prefill");
+  while (sched.has_pending()) tick();
+  require(engine.mixed > 0 && engine.completed_while_mixed > 0, "exercise completion during a mixed pass");
+  require(sched.meters().mixed_steps == engine.mixed &&
+              sched.meters().mixed_ms <= sched.meters().prefill_ms &&
+              sched.meters().mixed_ms <= sched.meters().step_ms,
+          "mixed time is exposed as the overlap of prefill and decode time");
+  require(sched.find("decoder")->generated == std::vector<int64_t>(32, 10) &&
+              sched.find("long")->generated == std::vector<int64_t>(4, 20) &&
+              sched.find("short")->generated == std::vector<int64_t>(4, 30), "mixed transcripts");
+  require(sched.meters().prompt_tokens_computed == 105 && engine.pool_blocks_in_use() == 0,
+          "mixed requests finish all work and release reservations");
+}
+
+DGPP_TEST(scheduler_mixed_group_shares_one_decode_step_and_preserves_all_prefills) {
+  struct MixedEngine : AdmissionFairEngine {
+    std::map<int, int> tick_steps;
+    int mixed_groups = 0;
+    bool prefill_group_advance() const override { return true; }
+    bool prefill_budget_per_reader() const override { return false; }
+    bool can_mix_prefill_group(const std::vector<int>& readers, const std::vector<int>& decoders) const override {
+      return readers.size() >= 2 && !decoders.empty();
+    }
+    std::vector<int32_t> step(int req) override {
+      require(++tick_steps[req] == 1, "mixed group decoded a slot twice");
+      return AdmissionFairEngine::step(req);
+    }
+    MixedGroupProgress advance_prefill_group_and_step(const std::vector<int>& readers,
+        const std::vector<int64_t>& budgets, const std::vector<int>& decoders) override {
+      ++mixed_groups;
+      return {advance_prefill_group(readers, budgets), step_batch(decoders)};
+    }
+  } engine;
+  for (int q = 0; q < 4; ++q) engine.arm(q, std::vector<int32_t>(24, 10 + q), 24);
+  dgpp::sched::AdmissionPolicy policy;
+  policy.prefill_early_admission = true;
+  policy.prefill_budget_tokens = 32;
+  Scheduler sched(&engine, {}, 0, policy);
+  const auto tick = [&] {
+    engine.tick_steps.clear();
+    const auto before = sched.meters().prompt_tokens_computed;
+    sched.tick();
+    require(sched.meters().prompt_tokens_computed - before <= 32, "mixed group exceeded the global prefill cap");
+  };
+  sched.submit(make_request("decoder", 1, 24));
+  tick();
+  sched.submit(make_request("long", 95, 24));
+  sched.submit(make_request("short", 1, 24));
+  sched.submit(make_request("medium", 47, 24));
+  tick();
+  require(engine.mixed_groups == 1 && sched.meters().prefilling == 2 && sched.meters().queued == 0,
+          "three readers and the decoder share the admission tick");
+  while (sched.has_pending()) tick();
+  for (const auto& [name, token] : std::vector<std::pair<std::string, int>>{
+           {"decoder", 10}, {"long", 11}, {"short", 12}, {"medium", 13}})
+    require(sched.find(name)->generated == std::vector<int64_t>(24, token), "mixed group transcript");
+  require(sched.meters().mixed_steps == engine.mixed_groups &&
+              sched.meters().prompt_tokens_computed == 144 && engine.pool_blocks_in_use() == 0,
+          "mixed group completed every prompt and released its reservations");
+}
+
+DGPP_TEST(scheduler_mixed_budget_protects_incumbents_and_preserves_reader_progress) {
+  struct MixedEngine : AdmissionFairEngine {
+    MixedEngine() : AdmissionFairEngine(10000) {}
+    bool can_mix_prefill(int, const std::vector<int>& reqs) const override { return !reqs.empty(); }
+    MixedProgress advance_prefill_and_step(int req, int64_t budget, const std::vector<int>& reqs) override {
+      const auto progress = advance_prefill(req, budget);
+      return {progress, step_batch(reqs)};
+    }
+  };
+  for (const bool incumbent : {false, true}) {
+    MixedEngine engine;
+    if (incumbent) engine.arm(0, std::vector<int32_t>(32, 10), 32);
+    engine.arm(incumbent ? 1 : 0, {20}, 1);
+    engine.arm(incumbent ? 2 : 1, std::vector<int32_t>(32, 30), 32);
+    dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_early_admission = true;
+    policy.prefill_budget_tokens = 32;
+    policy.prefill_idle_budget_tokens = 128;
+    Scheduler sched(&engine, {}, 0, policy);
+    const auto tick = [&] { engine.reset_tick(); sched.tick(); };
+    if (incumbent) { sched.submit(make_request("incumbent", 5, 32)); tick(); }
+    sched.submit(make_request("long", 1025, 1));
+    tick();
+    sched.submit(make_request("short", 5, 32));
+    tick();
+    tick();
+    require(engine.allocated == (incumbent ? 32 : 128),
+            "existing decoders keep the busy bound; an early decoder shares the reader's idle budget");
+    if (incumbent) {
+      sched.cancel("incumbent");
+      tick();
+      require(engine.allocated == 128,
+              "reader recovers the idle budget after the incumbent retires, despite the early decoder");
+    }
+    // A reader admitted after the short request started decoding must
+    // protect that request too, even though it joined the earlier reader.
+    engine.arm(incumbent ? 0 : 2, {40}, 1);
+    sched.submit(make_request("later-long", 1025, 1));
+    tick();
+    tick();
+    require(engine.allocated == 32, "new readers protect every decoder already running when they begin");
+    sched.run_to_completion();
+    require(engine.pool_blocks_in_use() == 0 && sched.find("short")->steps_done == 32 &&
+                sched.find("long")->steps_done == 1 && sched.find("later-long")->steps_done == 1,
+            "both reader generations and early decoding finish without reservation leaks");
+  }
+}
+
 DGPP_TEST(scheduler_early_admission_is_opt_in) {
   require(!dgpp::sched::AdmissionPolicy{}.prefill_early_admission,
           "default admission preserves throughput-oriented batching");
@@ -3902,7 +4049,7 @@ DGPP_TEST(scheduler_queuedText_cached_small_total_and_long_history_attach) {
   }
 }
 
-DGPP_TEST(scheduler_queuedText_keeps_image_and_group_advance_eligibility) {
+DGPP_TEST(scheduler_queuedText_admits_subalignment_groups_and_keeps_image_eligibility) {
   struct Engine : AdmissionFairEngine {
     bool group = false;
     bool supports_images() const override { return true; }
@@ -3912,6 +4059,7 @@ DGPP_TEST(scheduler_queuedText_keeps_image_and_group_advance_eligibility) {
     Engine engine;
     engine.group = group;
     engine.arm(0, {10, 11}, 2);
+    engine.arm(1, {20, 21}, 2);
     dgpp::sched::AdmissionPolicy policy;
     policy.prefill_early_admission = true;
     policy.prefill_budget_tokens = 8;
@@ -3923,9 +4071,16 @@ DGPP_TEST(scheduler_queuedText_keeps_image_and_group_advance_eligibility) {
     sched.submit(peer);
     engine.reset_tick();
     sched.tick();
-    require(engine.begins.empty() && sched.meters().queued == 1 && engine.advanced.at(0) == 8,
-            "short images and group-advance one-shots keep their original eligibility");
-    require(sched.cancel("peer") && sched.cancel("long"), "cancel guard fixtures");
+    if (group) {
+      require(engine.begins == std::vector<int>{1} && sched.meters().queued == 0 &&
+                  engine.advanced.at(0) > 0 && engine.advanced.at(1) == 1,
+              "a one-token text request joins a grouped prefill while the long reader progresses");
+    } else {
+      require(engine.begins.empty() && sched.meters().queued == 1 && engine.advanced.at(0) == 8,
+              "short images retain their original eligibility");
+      require(sched.cancel("peer"), "cancel image guard fixture");
+    }
+    require(sched.cancel("long"), "cancel long guard fixture");
     sched.run_to_completion();
     require(engine.pool_blocks_in_use() == 0, "guard fixtures release reservations");
   }

@@ -146,6 +146,12 @@ class SessionModel : public PrefillReporting {
     const int64_t* span_pos0 = nullptr;
     const int32_t* span_lens = nullptr;
     int num_spans = 0;
+    // Mixed walks put speculative decode spans first, followed by prefill
+    // spans. Decode spans retain every row's logits and rollback state;
+    // prefill spans retain their last row. Only families implementing this
+    // contract may set this field.
+    int decode_spans = 0;
+    bool device_decode_outputs = false;  // mixed verify is consumed by a device pick
     // The scalar prefill's following chunk (host ids, rows, first
     // position; next_T 0 when this is the last), for a family that can
     // stage the next chunk's inputs while this one runs.
@@ -336,6 +342,7 @@ class SessionModel : public PrefillReporting {
   // writes the next step's full-width feeds back. 0: the feed is
   // rows_per_request rows, as every capture before.
   void session_graph_capture_batch(int rows_per_request, int requests = 0, int feed_rows = 0);
+  void session_graph_capture_batch_inputs(int rows_per_request, int requests = 0, int feed_rows = 0);
   void session_graph_stage_batch();
   // Capture-time source: a pinned map owned by the graph family/parity.
   void session_graph_batch_map_source(const int32_t* source) { graph_batch_map_source_ = source; }
@@ -423,7 +430,7 @@ class SessionModel : public PrefillReporting {
   // A walk's staged inputs (the decode rows' token upload included) and
   // its results (the tail mirrors, the host copies).
   RowInputs begin_run(const RowRun& run);
-  Outputs finish_run(const RowRun& run, Outputs&& out, bool packed_logits = false);
+  Outputs finish_run(const RowRun& run, Outputs&& out, bool packed_logits = false, int last_packed_row = -1);
   // The family projects each selected input row into consecutive logits rows.
   // Hidden states remain in place for MTP and the host output mirrors.
   bool packed_prefill_logits(const RowRun& run) const {
@@ -455,7 +462,7 @@ class SessionModel : public PrefillReporting {
   void write_snapshot(int req, void* dst, int spec_row);
   SessionSnapshotMeta pin_blocks_at(int req, int64_t pos, const char* what);
   // The draft block's rows.
-  void mtp_prefill_rows(int req, int64_t row0, int64_t row1, const int64_t* tokens);
+  void mtp_prefill_rows(int req, int64_t row0, int64_t row1, const int64_t* tokens, int hidden_row = 0);
   void mtp_decode_host_prep(int req, const std::vector<int64_t>& tokens, bool upload);
   // The draft block's input window per slot ([R][max_decode_rows_][draft_width]).
   uint16_t* mtp_window(int req) const {
@@ -620,7 +627,7 @@ void SessionModel<D>::init_session(const SessionParams& p) {
   step_tokens_ = d_tokens_;
   d_prefill_pos_ = dev_alloc<int64_t>(M);
   d_prefill_req_ = dev_alloc<int32_t>(M);
-  d_prefill_spans_ = dev_alloc<int32_t>(2 * static_cast<size_t>(std::max(1, max_requests_)));
+  d_prefill_spans_ = dev_alloc<int32_t>(4 * static_cast<size_t>(max_requests_));
   h_token_ = pinned_alloc<int64_t>(token_rows);
   h_req_ids_ = pinned_alloc<int32_t>(rows);
   h_step_pos_ = pinned_alloc<int64_t>(rows);
@@ -724,7 +731,8 @@ void SessionModel<D>::stage_prefill_meta(int req, int64_t pos0, int T) {
 // request id, and the spans as (first row, rows).
 template <class D>
 void SessionModel<D>::stage_prefill_group_meta(const RowRun& run) {
-  if (run.num_spans > max_requests_) throw std::invalid_argument("run_rows: more group spans than request slots");
+  if (run.num_spans > max_requests_ * (run.decode_spans > 0 ? 2 : 1))
+    throw std::invalid_argument("run_rows: more group spans than request slots");
   std::vector<int64_t> pos(static_cast<size_t>(run.T));
   std::vector<int32_t> reqs(static_cast<size_t>(run.T));
   std::vector<int32_t> spans(static_cast<size_t>(run.num_spans) * 2);
@@ -735,7 +743,7 @@ void SessionModel<D>::stage_prefill_group_meta(const RowRun& run) {
     spans[static_cast<size_t>(s) * 2] = at;
     spans[static_cast<size_t>(s) * 2 + 1] = len;
     for (int i = 0; i < len; ++i) {
-      pos[static_cast<size_t>(at + i)] = run.span_pos0[s] + i;
+      pos[static_cast<size_t>(at + i)] = run.span_pos0[s] < 0 ? -1 : run.span_pos0[s] + i;
       reqs[static_cast<size_t>(at + i)] = run.span_reqs[s];
     }
     at += len;
@@ -783,15 +791,20 @@ typename SessionModel<D>::RowInputs SessionModel<D>::begin_run(const RowRun& run
 }
 
 template <class D>
-typename SessionModel<D>::Outputs SessionModel<D>::finish_run(const RowRun& run, Outputs&& out, bool packed_logits) {
+typename SessionModel<D>::Outputs SessionModel<D>::finish_run(const RowRun& run, Outputs&& out,
+                                                            bool packed_logits, int last_packed_row) {
   const int T = run.T;
   const size_t H = static_cast<size_t>(hidden_);
   // The decode tail's rows into the pinned mirrors: eager rows always
   // (they sync right below); a capture records the copies only while the
   // mirrors are on (the kernels-only decode graph turns them off).
-  const bool every_row = run.all_rows || run.decode;
+  const bool every_row = (run.all_rows || run.decode) && last_packed_row < 0;
   const bool group = !run.decode && !run.all_rows && run.num_spans > 0;
-  const size_t rows_out = every_row ? static_cast<size_t>(T) : group ? static_cast<size_t>(run.num_spans) : 1;
+  size_t rows_out = every_row ? static_cast<size_t>(T) : group ? static_cast<size_t>(run.num_spans) : 1;
+  if (group) {
+    if (run.device_decode_outputs) rows_out -= run.decode_spans;
+    else for (int s = 0; s < run.decode_spans; ++s) rows_out += run.span_lens[s] - 1;
+  }
   const size_t first = every_row ? 0 : static_cast<size_t>(T - 1);
   if (run.decode && (!run.capture || decode_tail_mirrors_)) {
     DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_logits_, logits_, rows_out * lm_vocab_count_ * sizeof(float),
@@ -808,20 +821,28 @@ typename SessionModel<D>::Outputs SessionModel<D>::finish_run(const RowRun& run,
     std::copy(h_tail_logits_, h_tail_logits_ + out.logits.size(), out.logits.begin());
     std::copy(h_tail_hidden_, h_tail_hidden_ + out.final_hidden_bits.size(), out.final_hidden_bits.begin());
   } else if (group) {
-    // Each span's last row.
-    int at = 0;
+    // Every speculative row, then each prefill span's last row.
+    int at = 0, output = 0;
     for (int s = 0; s < run.num_spans; ++s) {
-      const size_t last = static_cast<size_t>(at + run.span_lens[s] - 1);
-      DGPP_CUDA_OK(cudaMemcpy(out.final_hidden_bits.data() + static_cast<size_t>(s) * H, h_ + last * H, H * 2,
-                              cudaMemcpyDeviceToHost));
-      DGPP_CUDA_OK(cudaMemcpy(out.logits.data() + static_cast<size_t>(s) * lm_vocab_count_, logits_ + (packed_logits ? static_cast<size_t>(s) : last) * lm_vocab_count_,
-                              static_cast<size_t>(lm_vocab_count_) * 4, cudaMemcpyDeviceToHost));
+      if (run.device_decode_outputs && s < run.decode_spans) {
+        at += run.span_lens[s];
+        continue;
+      }
+      const int first_row = s < run.decode_spans ? 0 : run.span_lens[s] - 1;
+      for (int r = first_row; r < run.span_lens[s]; ++r, ++output) {
+        const size_t last = static_cast<size_t>(at + r);
+        DGPP_CUDA_OK(cudaMemcpy(out.final_hidden_bits.data() + static_cast<size_t>(output) * H,
+                                h_ + last * H, H * 2, cudaMemcpyDeviceToHost));
+        DGPP_CUDA_OK(cudaMemcpy(out.logits.data() + static_cast<size_t>(output) * lm_vocab_count_,
+                                logits_ + (packed_logits ? static_cast<size_t>(output + std::max(0, last_packed_row)) : last) * lm_vocab_count_,
+                                static_cast<size_t>(lm_vocab_count_) * 4, cudaMemcpyDeviceToHost));
+      }
       at += run.span_lens[s];
     }
   } else {
     DGPP_CUDA_OK(cudaMemcpy(out.final_hidden_bits.data(), h_ + first * H, out.final_hidden_bits.size() * 2,
                             cudaMemcpyDeviceToHost));
-    DGPP_CUDA_OK(cudaMemcpy(out.logits.data(), logits_ + (packed_logits ? 0 : first) * lm_vocab_count_, out.logits.size() * 4,
+    DGPP_CUDA_OK(cudaMemcpy(out.logits.data(), logits_ + (packed_logits ? std::max(0, last_packed_row) : first) * lm_vocab_count_, out.logits.size() * 4,
                             cudaMemcpyDeviceToHost));
   }
   return std::move(out);
@@ -1094,6 +1115,7 @@ std::vector<bool> SessionModel<D>::session_prefill_advance_group(const std::vect
   Outputs all = derived().run_rows(run);
   const size_t H = static_cast<size_t>(hidden_);
   std::vector<bool> done(static_cast<size_t>(n));
+  int hidden_row = 0;
   for (int s = 0; s < n; ++s) {
     PrefillCursor& c = *cursors[static_cast<size_t>(s)];
     const int req = c.req;
@@ -1111,7 +1133,7 @@ std::vector<bool> SessionModel<D>::session_prefill_advance_group(const std::vect
     if (mtp_) {
       // The draft block over this chunk's rows (row q embeds tok_{q+1}).
       const int64_t r1 = std::min<int64_t>(c1, c.end - 1);
-      if (r1 > c0) mtp_prefill_rows(req, c0, r1, c.ids + (c0 + 1 - c.start));
+      if (r1 > c0) mtp_prefill_rows(req, c0, r1, c.ids + (c0 + 1 - c.start), hidden_row);
       mtp_pos_[static_cast<size_t>(req)] = std::max<int64_t>(mtp_pos_[static_cast<size_t>(req)], r1);
       push_mtp_position(req);
     }
@@ -1129,6 +1151,7 @@ std::vector<bool> SessionModel<D>::session_prefill_advance_group(const std::vect
     }
     c.span_start = closed;
     c.next = c1;
+    hidden_row += static_cast<int>(c1 - c0);
     report_prefill_progress(req, c1);
     done[static_cast<size_t>(s)] = c1 == c.end;
     if (c1 != c.end) {
@@ -1210,7 +1233,7 @@ std::vector<typename SessionModel<D>::Outputs> SessionModel<D>::session_prefill_
     push_position(req);
     if (mtp_) {
       // The draft block over the span's rows (row q embeds tok_{q+1}).
-      if (P - 1 > 0) mtp_prefill_rows(req, 0, P - 1, ids.data() + at + 1);
+      if (P - 1 > 0) mtp_prefill_rows(req, 0, P - 1, ids.data() + at + 1, static_cast<int>(at));
       mtp_pos_[static_cast<size_t>(req)] = std::max<int64_t>(P - 1, 0);
       push_mtp_position(req);
     }
@@ -1752,7 +1775,7 @@ void SessionModel<D>::session_graph_seed_feed(int req, const std::vector<int64_t
 }
 
 template <class D>
-void SessionModel<D>::session_graph_capture_batch(int rows_per_request, int requests_arg, int feed_rows) {
+void SessionModel<D>::session_graph_capture_batch_inputs(int rows_per_request, int requests_arg, int feed_rows) {
   const int requests = requests_arg > 0 ? requests_arg : max_requests_;
   if (rows_per_request < 1 || rows_per_request > kSpecRows || requests < 1 || requests > max_requests_ ||
       requests * rows_per_request > max_decode_rows_)
@@ -1802,6 +1825,13 @@ void SessionModel<D>::session_graph_capture_batch(int rows_per_request, int requ
   }
   glm_spec_positions_batched(d_session_pos_, d_req_ids_, rows, rows_per_request, max_context_,
                              d_step_pos_, stream_);
+}
+
+template <class D>
+void SessionModel<D>::session_graph_capture_batch(int rows_per_request, int requests_arg, int feed_rows) {
+  session_graph_capture_batch_inputs(rows_per_request, requests_arg, feed_rows);
+  const int requests = graph_batch_requests_;
+  const int rows = requests * rows_per_request;
   const std::vector<int64_t> shape(static_cast<size_t>(rows), 0);
   RowRun run;
   run.req = 0;
@@ -1896,15 +1926,18 @@ void SessionModel<D>::session_graph_capture_verify_next_tokens_batch(const PickV
 // ---- the MTP draft block ------------------------------------------------------
 
 template <class D>
-void SessionModel<D>::mtp_prefill_rows(int req, int64_t row0, int64_t row1, const int64_t* tokens) {
+void SessionModel<D>::mtp_prefill_rows(int req, int64_t row0, int64_t row1, const int64_t* tokens, int hidden_row) {
   const int64_t n = row1 - row0;
   if (n <= 0) return;
   if (n > max_tokens_) throw std::invalid_argument("mtp_prefill_rows: chunk too long");
   DGPP_CUDA_OK(cudaMemcpyAsync(d_tokens_, tokens, static_cast<size_t>(n) * 8, cudaMemcpyHostToDevice, stream_));
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   if constexpr (requires { derived().mtp_select_block(0); }) derived().mtp_select_block(0);
-  derived().mtp_run_rows(req, d_tokens_, row0, static_cast<int>(n), /*decode_row=*/false, /*capture=*/false,
-                         /*head_rows=*/0, /*batch_requests=*/0);
+  if constexpr (requires { derived().mtp_run_rows(req, d_tokens_, row0, static_cast<int>(n), false, false, 0, 0, hidden_row); })
+    derived().mtp_run_rows(req, d_tokens_, row0, static_cast<int>(n), false, false, 0, 0, hidden_row);
+  else
+    derived().mtp_run_rows(req, d_tokens_, row0, static_cast<int>(n), /*decode_row=*/false, /*capture=*/false,
+                           /*head_rows=*/0, /*batch_requests=*/0);
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
 }
 

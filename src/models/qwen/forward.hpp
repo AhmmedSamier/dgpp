@@ -79,6 +79,8 @@ class QwenModel : public SessionModel<QwenModel> {
   using Outputs = Base::Outputs;
   using SessionSnapshotMeta = Base::SessionSnapshotMeta;
   using SnapshotRequest = Base::SnapshotRequest;
+  static constexpr bool kPrefillGroupAdvance = true;
+  static constexpr bool kPrefillBudgetPerReader = false;
   // DGPP_QWEN_HEAD_DUMP=<file>: append every decode-shaped head input row
   // (the draft's and the verify's hyper-state mixes) after each settled pass
   // — the head bit-plane study's data (2026-09-29). A debug hook: the flush
@@ -217,9 +219,28 @@ class QwenModel : public SessionModel<QwenModel> {
                                       SnapshotRequest* snap = nullptr, int64_t attach_position = 0,
                                       const std::vector<ImageInput>* images = nullptr);
   bool session_prefill_advance(PrefillCursor& cursor, int64_t chunk_tokens = 0);
+  std::vector<bool> session_prefill_advance_group(const std::vector<PrefillCursor*>& cursors,
+                                                const std::vector<int64_t>& budgets);
+  // One text-prefill chunk and eager speculative verifies share the dense
+  // and expert work. Each decode result contains all of its verified rows;
+  // rollback uses the corresponding prefix offset, as in verify_batch.
+  std::vector<Outputs> session_prefill_verify(PrefillCursor& cursor, int64_t budget,
+      const std::vector<int>& reqs, const std::vector<std::vector<int64_t>>& feeds,
+      int graph_rows = 0);
+  std::vector<Outputs> session_prefill_verify_group(const std::vector<PrefillCursor*>& cursors,
+      const std::vector<int64_t>& budgets, const std::vector<int>& reqs,
+      const std::vector<std::vector<int64_t>>& feeds, int graph_rows = 0);
+  void prepare_mixed_verify(int rows) { gdn_replay_rows_used_ = rows; }
+  void finish_mixed_prefill(PrefillCursor& cursor) {
+    if (cursor.next == cursor.end && cursor.suspended) {
+      push_position(cursor.req);
+      if (mtp_) push_mtp_position(cursor.req);
+      cursor.suspended = false;
+    }
+  }
   void graph_prepare();
   void mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode_row,
-                    bool capture, int head_rows, int batch_requests);
+                    bool capture, int head_rows, int batch_requests, int hidden_row = 0);
   void snapshot_draft_state(int req);
   void restore_draft_state(int req);
   // Depth >= 2: the chain rows run the draft block forward
@@ -241,6 +262,7 @@ class QwenModel : public SessionModel<QwenModel> {
   const bool fp8_head_mma_;
   static constexpr int kBlockTokens = 64;
   static constexpr int kPrefillChunkTokens = 4096;
+  int32_t* mixed_single_spans_ = nullptr;  // [kSpecRows][0, length]
 
   // The images of the prefill currently running (null outside one), plus the
   // staged rows covering [image_window_first_, image_window_end_). The engine

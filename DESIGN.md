@@ -2355,12 +2355,13 @@ requests can therefore delay a large request.
 With a positive prefill budget, non-group-advance engines divide the tick's
 budget into equal aligned shares among unfinished prefills. While a prefill
 is in flight, at most one oldest-fitting request needing chunked prefill joins
-those shares. `engine.prefill_early_admission=true` opts into admitting queued
-text regardless of total prompt or cached suffix length; the default is false
-to preserve throughput-oriented decode batching. It needs
+those shares. Early admission admits queued text regardless of total prompt or
+cached suffix length. Qwen graph serving enables it by default and shares
+prefill projections with decoder verification; other backends retain their
+previous default. `engine.prefill_early_admission` overrides the default. It needs
 a free slot, an aligned share and its existing full reservation; this scan
 does not evict cached entries to make it fit. Short text therefore need not
-wait for leftover budget behind a long prefill when the opt-in is enabled.
+wait for leftover budget behind a long prefill when early admission is enabled.
 In that mode, a short suffix takes only
 its aligned tail; unused whole chunks from its share are divided among
 unfinished readers before their advances. Sub-alignment tails and the

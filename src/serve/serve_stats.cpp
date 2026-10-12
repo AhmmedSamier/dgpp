@@ -76,6 +76,9 @@ std::string ThroughputLog::format(int rank, double seconds, const Meters& prev,
       rank, seconds, rate(generated), per(step_ms, generated),
       per(step_ms, steps), steps, steps == 1 ? "" : "s", generated,
       share(step_ms));
+  if (cur.mixed_steps > prev.mixed_steps)
+    out += std::format(" | mixed {} steps, {:.1f} ms (included in both prefill and decode time)",
+                       cur.mixed_steps - prev.mixed_steps, cur.mixed_ms - prev.mixed_ms);
   if (mtp && rows > 0) {
     // The yield, then the measured acceptance of each draft position over
     // the interval (2026-09-06: the engine counts them; depth 1 has p1).

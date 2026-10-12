@@ -112,6 +112,6 @@ void qwen_ple_conv_rows_bf16(const uint16_t* un, const uint16_t* gv, uint16_t* s
                              const uint16_t* residual, uint16_t* out, const int32_t* req_ids,
                              const int64_t* pos, const int32_t* req_spans, int num_requests,
                              int channels, int width, int dilation, cudaStream_t stream,
-                             uint16_t* snapshots = nullptr);
+                             uint16_t* snapshots = nullptr, int snapshot_rows = -1);
 
 }  // namespace dgpp

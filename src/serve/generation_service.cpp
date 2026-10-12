@@ -2539,6 +2539,9 @@ void GenerationService::route_metrics_prometheus(HttpResponseWriter& w) {
   out.counter("dgpp_decode_steps_total", "Decode passes.", m.decode_steps);
   out.counter("dgpp_decode_rows_total", "Request-rows the decode passes carried.", m.decode_rows);
   out.counter("dgpp_decode_step_seconds_total", "Wall time inside the engine's decode steps.", m.step_ms / 1000.0);
+  out.counter("dgpp_mixed_steps_total", "Decode passes sharing a walk with prefill.", m.mixed_steps);
+  out.counter("dgpp_mixed_seconds_total", "Shared wall time included in both prefill and decode seconds; subtract once when summing.",
+              m.mixed_ms / 1000.0);
 
   // Decode graph batches (docs/operations.md, decode graph batch counters).
   out.gauge("dgpp_decode_batch_last_slots", "Capacity of the last launched decode graph.",
@@ -2682,6 +2685,8 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {  Scheduler::Meter
   append_json_int(&out, m.prompt_tokens_computed);
   out.append(",\"decode_steps\":");
   append_json_int(&out, m.decode_steps);
+  out.append(",\"mixed_steps\":");
+  append_json_int(&out, m.mixed_steps);
   out.append(",\"decode_rows\":");
   append_json_int(&out, m.decode_rows);
   out.append(",\"decode_batch\":{\"last_slots\":");
@@ -2740,8 +2745,8 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {  Scheduler::Meter
   out.append("}");
   {
     char tbuf[192];
-    std::snprintf(tbuf, sizeof(tbuf), ",\"prefill_ms\":%.1f,\"prefill_request_ms\":%.1f,\"step_ms\":%.1f",
-                  m.prefill_ms, m.prefill_request_ms, m.step_ms);
+    std::snprintf(tbuf, sizeof(tbuf), ",\"prefill_ms\":%.1f,\"prefill_request_ms\":%.1f,\"step_ms\":%.1f,\"mixed_ms\":%.1f",
+                  m.prefill_ms, m.prefill_request_ms, m.step_ms, m.mixed_ms);
     out.append(tbuf);
   }
   out.append("}");

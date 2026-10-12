@@ -232,6 +232,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   struct Replay {
     int req = -1;             // the scalar slot, or -1 for the batch
     bool batched = false;
+    bool mixed = false;       // verify ran eagerly with a prefill; replay its pick/draft tail
     int family = -1;          // the batch family (batched only)
     int parity = 0;
     std::vector<int> reqs;    // the live slots the replay decided for
@@ -610,6 +611,10 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     for (BatchFamily& f : families_)
       for (cudaGraphExec_t exec : f.execs)
         if (exec != nullptr) cudaGraphExecDestroy(exec);
+    for (BatchFamily& f : families_)
+      for (const auto& execs : f.mixed_execs)
+        for (cudaGraphExec_t exec : execs)
+          if (exec != nullptr) cudaGraphExecDestroy(exec);
     for (std::array<cudaEvent_t, 2>& events : end_events_)
       for (cudaEvent_t ev : events)
         if (ev != nullptr) cudaEventDestroy(ev);
@@ -1341,17 +1346,70 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       if (progress.first_token >= 0) task.reset();
       return progress;
     } catch (...) {
-      if (task->snap.taken && !task->plan.snap_taken) arena_.commit(task->plan.snap_slot, task->snap);
-      if (task->body_snap.taken && !task->plan.body_snap_taken)
-        arena_.commit(task->plan.body_snap_slot, task->body_snap);
-      if (task->head_snap.taken && !task->plan.head_snap_taken)
-        arena_.commit(task->plan.head_snap_slot, task->head_snap);
-      task.reset();
-      close_failed_slot(req);
-      reseed_live_feeds();
+      cleanup_failed_prefill(req);
       throw;
     }
   }
+  bool can_mix_prefill(int req, const std::vector<int>& decoders) const override {
+    if constexpr (requires { model_->prepare_mixed_verify(1); }) {
+      if (req < 0 || req >= slots_ || decoders.empty() || block_) return false;
+      const auto& task = prefills_[static_cast<size_t>(req)];
+      if (!task || !task->images.empty()) return false;
+      for (const int decoder : decoders)
+        if (model_->session_position(decoder) + rows_per_request_ > model_->max_context()) return false;
+      const int family = family_for(decoders);
+      return family >= 0 && families_[family].max_rows == 0 &&
+             families_[family].requests * rows_per_request_ + prefill_chunk_alignment() <= model_->max_tokens() &&
+             mixed_variant(family, std::max(0, full_depth_option()), 1) < net::kBusMaxGraphVariants;
+    }
+    return false;
+  }
+
+  bool can_mix_prefill_group(const std::vector<int>& readers, const std::vector<int>& decoders) const override {
+    if (readers.empty() || decoders.empty()) return false;
+    for (const int req : readers) if (!can_mix_prefill(req, decoders)) return false;
+    const int family = family_for(decoders);
+    return families_[family].requests * rows_per_request_ +
+               static_cast<int64_t>(readers.size()) * prefill_chunk_alignment() <= model_->max_tokens();
+  }
+  sched::SchedulerEngine::MixedProgress advance_prefill_and_step(
+      int req, int64_t budget, const std::vector<int>& decoders) override {
+    auto result = advance_prefill_group_and_step({req}, {budget}, decoders);
+    return {result.prefills.front(), std::move(result.decoded)};
+  }
+  sched::SchedulerEngine::MixedGroupProgress advance_prefill_group_and_step(
+      const std::vector<int>& readers, const std::vector<int64_t>& budgets,
+      const std::vector<int>& decoders) override {
+    if constexpr (requires { model_->prepare_mixed_verify(1); }) {
+      if (readers.size() != budgets.size() || !can_mix_prefill_group(readers, decoders))
+        throw std::logic_error("graph engine: unsupported mixed walk");
+      validate_batch(decoders);
+      drain();
+      std::vector<int64_t> starts;
+      for (const int req : readers)
+        starts.push_back(static_cast<typename Model::PrefillCursor*>(prefills_[req]->cursor.get())->next);
+      try {
+        sched::SchedulerEngine::MixedGroupProgress result;
+        result.decoded = step_family(decoders, family_for(decoders), readers, budgets);
+        drain();
+        for (size_t i = 0; i < readers.size(); ++i) {
+          auto& task = prefills_[readers[i]];
+          auto* cursor = static_cast<typename Model::PrefillCursor*>(task->cursor.get());
+          model_->finish_mixed_prefill(*cursor);
+          result.prefills.push_back(task->after(starts[i], cursor->next == cursor->end));
+        }
+        reseed_live_feeds();
+        for (size_t i = 0; i < readers.size(); ++i)
+          if (result.prefills[i].first_token >= 0) prefills_[readers[i]].reset();
+        return result;
+      } catch (...) {
+        for (const int req : readers) cleanup_failed_prefill(req);
+        throw;
+      }
+    }
+    throw std::logic_error("graph engine: this model has no mixed walk");
+  }
+
   // Several unfinished prefills' next chunks as one walk (a family
   // advertising kPrefillGroupAdvance); otherwise one advance per request.
   bool prefill_group_advance() const override {
@@ -1359,6 +1417,10 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       if constexpr (Model::kPrefillGroupAdvance) return prefill_chunk_alignment() > 0;
     }
     return false;
+  }
+  bool prefill_budget_per_reader() const override {
+    if constexpr (requires { Model::kPrefillBudgetPerReader; }) return Model::kPrefillBudgetPerReader;
+    return true;
   }
   std::vector<sched::SchedulerEngine::PrefillProgress> advance_prefill_group(
       const std::vector<int>& reqs, const std::vector<int64_t>& budgets) override {
@@ -1601,6 +1663,17 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
                                                      m.prompt_leaves_thinking_to_model(prompt));
     }
   }
+  void cleanup_failed_prefill(int req) {
+    auto& task = prefills_[static_cast<size_t>(req)];
+    if (task->snap.taken && !task->plan.snap_taken) arena_.commit(task->plan.snap_slot, task->snap);
+    if (task->body_snap.taken && !task->plan.body_snap_taken)
+      arena_.commit(task->plan.body_snap_slot, task->body_snap);
+    if (task->head_snap.taken && !task->plan.head_snap_taken)
+      arena_.commit(task->plan.head_snap_slot, task->head_snap);
+    task.reset();
+    close_failed_slot(req);
+    reseed_live_feeds();
+  }
   // session_prefill opens the slot before any later pick/draft can fail:
   // a failed admission is made recoverable rather than leaking its blocks.
   void close_failed_slot(int req) {
@@ -1768,7 +1841,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   // One row-batched replay of `reqs` on batch family `family` (every slot
   // of `reqs` under the family's width; a live slot past it is the
   // caller's to step alone).
-  std::vector<std::vector<int32_t>> step_family(const std::vector<int>& reqs, int family) {
+  std::vector<std::vector<int32_t>> step_family(const std::vector<int>& reqs, int family,
+                                               const std::vector<int>& prefill_reqs = {},
+                                               const std::vector<int64_t>& prefill_budgets = {}) {
     BatchFamily& fam = families_[static_cast<size_t>(family)];
     const bool capped = fam.max_rows > 0;
     if (!capped) ensure_batch_graph(family);
@@ -1796,6 +1871,23 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     }
     if (capped && rows > fam.max_rows)
       throw std::logic_error("graph engine: a depth-capped batch family selected past its rows");
+    if (!prefill_reqs.empty()) {
+      if constexpr (requires { model_->prepare_mixed_verify(1); }) {
+        fam.mixed_execs.resize(std::max<size_t>(1, depth_options_.size()));
+        auto& execs = fam.mixed_execs[static_cast<size_t>(std::max(0, di))];
+        if (execs[0] == nullptr) {
+          model_->prepare_mixed_verify(rows);
+          for (int parity = 0; parity < 2; ++parity) {
+            set_batch_map_source(compact_batches() ? fam.request_maps[parity] : nullptr);
+            execs[parity] = capture_variant(mixed_variant(family, std::max(0, di), parity),
+                [&] {
+                  if (spec_enabled()) record_batch_mtp(family, rows, false);
+                  else record_batch_plain(family, false);
+                });
+          }
+        }
+      }
+    }
     if (compact_batches()) {
       auto* map = fam.request_maps[static_cast<size_t>(fam.parity)];
       for (int q = 0; q < fam.requests; ++q)
@@ -1803,11 +1895,37 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     }
     model_->session_graph_use_batch_contract(rows, fam.requests);
     model_->session_graph_stage_batch();
+    if (!prefill_reqs.empty()) {
+      if constexpr (requires { model_->prepare_mixed_verify(1); }) {
+        drain();
+        std::vector<int> physical;
+        std::vector<std::vector<int64_t>> feeds;
+        for (int q = 0; q < fam.requests; ++q) {
+          const int req = compact_batches() ? (q < static_cast<int>(reqs.size()) ? reqs[q] : -1) : q;
+          physical.push_back(req);
+          feeds.push_back(std::find(reqs.begin(), reqs.end(), req) != reqs.end() ? feed_of(req) : std::vector<int64_t>{});
+          if (!feeds.back().empty()) feeds.back().resize(static_cast<size_t>(rows));
+        }
+        set_batch_map_source(compact_batches() ? fam.request_maps[fam.parity] : nullptr);
+        // The eager head may inspect the compact request map (the packed
+        // argmax head). Publish it before the shared walk, too.
+        model_->session_graph_capture_batch_inputs(rows, fam.requests, rows != rows_per_request_ ? rows_per_request_ : 0);
+        std::vector<typename Model::PrefillCursor*> cursors;
+        for (const int req : prefill_reqs)
+          cursors.push_back(static_cast<typename Model::PrefillCursor*>(prefills_[req]->cursor.get()));
+        (void)model_->session_prefill_verify_group(cursors, prefill_budgets, physical, feeds, rows);
+        model_->session_graph_use_batch_contract(rows, fam.requests);
+        // Eager prefill uses the token buffer as scratch. Restore the
+        // persistent feeds before the tail reads them and produces drafts.
+        reseed_live_feeds();
+      }
+    }
     // Launch first (the window armed behind whatever runs), settle the
     // older replay while this one runs, stage the pick's masks for it,
     // then wait for its verdict.
     Replay r;
     r.batched = true;
+    r.mixed = !prefill_reqs.empty();
     r.family = family;
     r.parity = fam.parity;
     fam.parity ^= 1;
@@ -2193,6 +2311,11 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   int batch_variant(int family, int parity) const {
     return 2 * slots_ + 2 * family + parity;
   }
+  int mixed_variant(int family, int depth_option, int parity) const {
+    const int depths = std::max(1, static_cast<int>(depth_options_.size()));
+    return 2 * (slots_ + static_cast<int>(families_.size())) * depths +
+           2 * (family * depths + depth_option) + parity;
+  }
   // The reduced-depth scalar variants (the scheduled verify depth), after
   // every scalar and batch variant: option `di` of slot `req` (the last
   // option, the full block, is the slot's scalar variant itself).
@@ -2554,13 +2677,16 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   // slot (rows_per_request_ for the full block, fewer for a reduced-depth
   // variant: the feeds compacted, the draft over those rows, the block's
   // full width drafted and fed back, every slot's confidence published).
-  void record_batch_mtp(int family, int rows) {
+  void record_batch_mtp(int family, int rows, bool verify = true) {
     BatchFamily& fam = families_.at(static_cast<size_t>(family));
     const int k = fam.requests;
     const int index = batch_index(family);
     const bool reduced = rows != rows_per_request_;
     const int total = k * rows;
-    model_->session_graph_capture_batch(rows, k, reduced ? rows_per_request_ : 0);
+    if (verify) model_->session_graph_capture_batch(rows, k, reduced ? rows_per_request_ : 0);
+    else if constexpr (requires { model_->session_graph_capture_batch_inputs(rows, k, 0); })
+      model_->session_graph_capture_batch_inputs(rows, k, reduced ? rows_per_request_ : 0);
+    else throw std::logic_error("graph engine: mixed verify has no batch inputs");
     record_stage_gate(index, 0, total);
     picker_->record(model_->stream(), verify_pick_inputs(k, rows));
     glm_publish_seq(d_verdict_seq_ + index, h_verdict_seq_ + index,
@@ -2622,13 +2748,27 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
         fam.requests, rows, rows - 1, depth_);
   }
 
+  void record_batch_plain(int family, bool verify = true) {
+    const int k = families_.at(static_cast<size_t>(family)).requests;
+    const int rows = k * rows_per_request_;
+    const int index = batch_index(family);
+    if (verify) model_->session_graph_capture_batch(rows_per_request_, k);
+    else if constexpr (requires { model_->session_graph_capture_batch_inputs(rows_per_request_, k); })
+      model_->session_graph_capture_batch_inputs(rows_per_request_, k);
+    else throw std::logic_error("graph engine: mixed verify has no batch inputs");
+    record_stage_gate(index, 0, rows);
+    picker_->record(model_->stream(), verify_pick_inputs(k));
+    glm_publish_seq(d_verdict_seq_ + index, h_verdict_seq_ + index, model_->stream());
+    model_->session_graph_capture_commit_batch(picker_->device_verdict(0));
+    model_->session_graph_capture_verify_next_tokens_batch(picker_->device_verdict(0));
+  }
+
   void ensure_batch_graph(int family) {
     BatchFamily& fam = families_.at(static_cast<size_t>(family));
     if (fam.execs[0] != nullptr) return;
     const bool mtp = spec_enabled();
     const int k = fam.requests;
     const int rows = k * rows_per_request_;
-    const int index = batch_index(family);
     if (compact_batches()) {
       for (auto*& map : fam.request_maps) {
         DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&map), k * sizeof(int32_t),
@@ -2643,14 +2783,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
         record_batch_mtp(family, rows_per_request_);
         return;
       }
-      model_->session_graph_capture_batch(rows_per_request_, k);
-      record_stage_gate(index, 0, rows);
-      picker_->record(model_->stream(), verify_pick_inputs(k));
-      glm_publish_seq(d_verdict_seq_ + index, h_verdict_seq_ + index,
-                      model_->stream());
-      model_->session_graph_capture_commit_batch(picker_->device_verdict(0));
-      model_->session_graph_capture_verify_next_tokens_batch(
-          picker_->device_verdict(0));
+      record_batch_plain(family);
     };
     for (int parity = 0; parity < 2; ++parity)
       fam.execs[static_cast<size_t>(parity)] = capture_variant(
@@ -2697,12 +2830,12 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     while (inflight_.size() >= 2) settle_front();
     const bool reduced =
         r.depth_option >= 0 && r.depth_option < full_depth_option();
-    const int variant =
+    const int variant = r.mixed ? mixed_variant(r.family, std::max(0, r.depth_option), r.parity) :
         r.batched ? (reduced ? sched_batch_variant(r.family, r.depth_option, r.parity)
                              : batch_variant(r.family, r.parity))
         : reduced ? sched_variant(r.req, r.depth_option, r.parity)
                   : scalar_variant(r.req, r.parity);
-    cudaGraphExec_t exec =
+    cudaGraphExec_t exec = r.mixed ? families_[static_cast<size_t>(r.family)].mixed_execs[static_cast<size_t>(std::max(0, r.depth_option))][static_cast<size_t>(r.parity)] :
         r.batched ? (reduced ? families_[static_cast<size_t>(r.family)]
                                    .sched_execs[static_cast<size_t>(r.depth_option)]
                                                [static_cast<size_t>(r.parity)]
@@ -3750,6 +3883,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     // variant. 0: the full block fits.
     int max_rows = 0;
     std::array<cudaGraphExec_t, 2> execs{{nullptr, nullptr}};
+    std::vector<std::array<cudaGraphExec_t, 2>> mixed_execs;  // [verify depth][parity]
     std::array<cudaEvent_t, 2> end_events{{nullptr, nullptr}};
     std::array<int32_t*, 2> request_maps{};
     int parity = 0;

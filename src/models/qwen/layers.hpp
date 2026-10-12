@@ -196,6 +196,17 @@ class QwenGdnLayer {
                     const KdaRequestRows& requests, cudaStream_t stream,
                     const KdaStateSnapshots& rec_snap = {},
                     const KdaConvSnapshots& conv_snap = {}, const KdaReplay& replay = {});
+  struct Span {
+    int rows = 0;
+    float* recurrent = nullptr;  // null denotes padding
+    uint16_t* conv = nullptr;
+    KdaStateSnapshots rec_snap;
+    KdaConvSnapshots conv_snap;
+    KdaReplay replay;
+  };
+  // Shared projections, with each span's recurrence and rollback sinks.
+  void enqueue_spans(const uint16_t* x, uint16_t* out, int tokens,
+                     const std::vector<Span>& spans, cudaStream_t stream);
   // The replay form's materialize: the recurrent state as it stands after
   // `replay`'s rows (in place, or into replay.dst), no rows of its own.
   void materialize(float* recurrent_state, const KdaReplay& replay, cudaStream_t stream);
@@ -278,6 +289,10 @@ class QwenQsaLayer {
   // and the listed attention per row, the gated output projection.
   void enqueue(const uint16_t* x, int tokens, const QwenQsaRows& rows, QwenQsaCache& cache,
                uint16_t* out, cudaStream_t stream);
+  struct Span { int rows; QwenQsaRows map; };
+  void enqueue_spans(const uint16_t* x, int tokens, const QwenQsaRows& rows,
+                     const std::vector<Span>& spans, QwenQsaCache& cache,
+                     uint16_t* out, cudaStream_t stream);
 
   static size_t scratch_bytes(const QwenTextConfig& cfg, int local_heads, int local_kv_heads,
                               int max_tokens, int64_t max_pools);
@@ -288,6 +303,12 @@ class QwenQsaLayer {
   int max_selected() const { return max_selected_; }
 
  private:
+  void validate_rows(int tokens, const QwenQsaRows& rows, const QwenQsaCache& cache) const;
+  void project_rows(const uint16_t* x, int tokens, const QwenQsaRows& rows,
+                    QwenQsaCache& cache, cudaStream_t stream);
+  void attend_rows(int tokens, const QwenQsaRows& rows, QwenQsaCache& cache,
+                   int offset, cudaStream_t stream);
+  void project_output(uint16_t* out, int tokens, cudaStream_t stream);
   QwenQsaResident w_;
   QwenGemmWorkspace g_;
   int hidden_, lh_, lkv_, dim_, rotary_, idx_heads_, idx_dim_, kpool_, select_k_, max_selected_;
@@ -441,7 +462,7 @@ class QwenPleLayer {
   void project_value(uint16_t* val_dst, int rows, cudaStream_t stream);
   void finish(uint16_t* r, const uint16_t* value, uint16_t* states, int64_t state_stride,
               const int32_t* req_ids, const int64_t* pos, const int32_t* req_spans, int num_requests,
-              int rows, cudaStream_t stream, uint16_t* snapshots = nullptr);
+              int rows, cudaStream_t stream, uint16_t* snapshots = nullptr, int snapshot_rows = -1);
   static size_t scratch_bytes(const QwenTextConfig& cfg, int hash_heads, int max_tokens);
   uint16_t* key_partial() { return key_; }
   uint16_t* value_partial() { return val_; }

@@ -252,7 +252,7 @@ __global__ void conv_rows_kernel(const uint16_t* __restrict__ un, const uint16_t
                                  const int32_t* __restrict__ req_ids,
                                  const int64_t* __restrict__ pos,
                                  const int32_t* __restrict__ spans, int channels,
-                                 uint16_t* __restrict__ snapshots) {
+                                 uint16_t* __restrict__ snapshots, int snapshot_rows) {
   constexpr int S = (W - 1) * D;
   const int c = blockIdx.x * blockDim.x + threadIdx.x;
   if (c >= channels) return;
@@ -263,7 +263,7 @@ __global__ void conv_rows_kernel(const uint16_t* __restrict__ un, const uint16_t
     for (int t = s; t < s + len; ++t) {
       const int64_t at = static_cast<int64_t>(t) * channels + c;
       out[at] = residual ? residual[at] : static_cast<uint16_t>(0);
-      if (snapshots)
+      if (snapshots && (snapshot_rows < 0 || t < snapshot_rows))
         for (int j = 0; j < S; ++j) snapshots[at * S + j] = 0;
     }
     return;
@@ -295,7 +295,7 @@ __global__ void conv_rows_kernel(const uint16_t* __restrict__ un, const uint16_t
     } else {
       out[at] = residual ? residual[at] : static_cast<uint16_t>(0);
     }
-    if (snapshots) {
+    if (snapshots && (snapshot_rows < 0 || t < snapshot_rows)) {
       uint16_t* snap = snapshots + static_cast<int64_t>(t) * channels * S + static_cast<int64_t>(c) * S;
 #pragma unroll
       for (int j = 0; j < S; ++j) snap[j] = float_to_bf16_bits(hist[j]);
@@ -347,7 +347,7 @@ void qwen_ple_conv_rows_bf16(const uint16_t* un, const uint16_t* gv, uint16_t* s
                              const uint16_t* residual, uint16_t* out, const int32_t* req_ids,
                              const int64_t* pos, const int32_t* req_spans, int num_requests,
                              int channels, int width, int dilation, cudaStream_t stream,
-                             uint16_t* snapshots) {
+                             uint16_t* snapshots, int snapshot_rows) {
   if (num_requests <= 0) return;
   if (!un || !gv || !states || !weight || !out || !req_ids || !pos || !req_spans)
     throw std::invalid_argument("qwen_ple_conv_rows: null pointer");
@@ -357,7 +357,7 @@ void qwen_ple_conv_rows_bf16(const uint16_t* un, const uint16_t* gv, uint16_t* s
     throw std::invalid_argument("qwen_ple_conv_rows: bad geometry");
   const dim3 grid((channels + 255) / 256, static_cast<unsigned>(num_requests));
   conv_rows_kernel<4, 3><<<grid, 256, 0, stream>>>(un, gv, states, state_stride, weight, residual,
-                                                   out, req_ids, pos, req_spans, channels, snapshots);
+                                                   out, req_ids, pos, req_spans, channels, snapshots, snapshot_rows);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
