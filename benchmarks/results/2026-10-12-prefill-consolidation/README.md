@@ -284,6 +284,26 @@ visible in the evidence and are not counted as exact passes.
   not an explanation or proof of absence for those outliers. See the
   [review receipt](evidence/glm4-final-v31-reviewed.json).
 
+- DeepSeek V4's [default pair](evidence/dsv4-initial-v31-summary.json) matches
+  all 34 timing responses, four chats and both cache checks. Its six scenario
+  means range from 30.77% faster to 0.07% faster. The automatic busy budget
+  changes from 256 to 4096: mixed decoder gaps rise from about 0.328 to
+  2.45 seconds, and the one-token cached stress probe's first-token wait rises
+  from 0.687 to 8.052 seconds. A [three-trial matched-budget pair](evidence/dsv4-small-budget-v31-summary.json)
+  preserves busy 256 / idle 4096 on both sides. Decoder gaps return to about
+  0.28–0.30 seconds and the one-token cache wait improves from 0.713 to
+  0.585 seconds, but mixed elapsed time regresses 17.44% (7.403 → 8.694
+  seconds). All 21 timing outputs and four chats match; the 128-token loaded
+  cache transcript changes, while repeat and isolated recovery remain exact
+  with 16 retained blocks. Its output is reasoning only, so the API supplies
+  no visible-token probabilities. These are open findings, not accepted
+  small-budget results. A shared fixture reproduces wasted reader budget
+  in both V4 and V4.1: a 256-token budget advances 128 tokens because the
+  planner subtracts decoder rows before aligning, despite spare scratch.
+  The [investigation receipt](evidence/dsv4-small-budget-investigation-v31.json)
+  preserves those failures. A shared accounting correction and capacity
+  check are being validated; the checkpoint remains available for retesting.
+
 These probes identify dependence on execution shape; they are not a general
 model-quality or teacher-forced numerical equivalence result.
 
@@ -293,8 +313,8 @@ MiMo-V2.6-Flash-RL, GLM-4.7-NVFP4 and DeepSeek-V4-Flash-0731 were absent from
 the saved initial inventories. MiMo has completed its final download, sync
 and testing; its weights and dedicated download cache have been removed
 from all four nodes. GLM-4.7 has also completed its final comparison and
-[cleanup](evidence/glm4-downloaded-v31-cleanup.json). DeepSeek-V4 is now
-downloading for the final missing-model campaign. Downloads are pinned to
+[cleanup](evidence/glm4-downloaded-v31-cleanup.json). DeepSeek-V4 is downloaded and verified on all four nodes. Its matched-budget
+regression is under investigation, so its checkpoint is retained. Downloads are pinned to
 checkpoint revisions and performed one
 model at a time after stopping production. No download runs alongside a
 benchmark. Test-only resident images are disabled for these campaigns.

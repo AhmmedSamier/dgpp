@@ -1,0 +1,19 @@
+{
+  "runtime_source": "384bc260530bae7f331a1c85fefed54105bb21c8",
+  "default": "All 34 response hashes, four chats and cache lifecycle checks match. All six default scenario means are faster.",
+  "matched": "Busy256/idle4096: 21/21 response hashes and four chats match, but mixed time is 17.44% slower and the 128-token loaded cached transcript changes; exact repeat and isolated recovery are preserved.",
+  "regression": {
+    "expected_failure": true,
+    "returncode": 1,
+    "reason": "Mixed decoder prefix cuts an aligned reader below its explicit budget despite spare scratch capacity"
+  },
+  "regression_log_sha256": "e348a607c28fe71e20fdd66233ece14cdf00f3bc8047df8c3a9932c91bbfa2fb",
+  "regression_lines": [
+    "mixed reader budget: advanced=128 expected=256 alignment=128",
+    "[FAIL] shared_prefill_dsv4: decoder rows consume the reader budget despite spare physical capacity",
+    "mixed reader budget: advanced=128 expected=256 alignment=128",
+    "[FAIL] shared_prefill_dsv41: decoder rows consume the reader budget despite spare physical capacity"
+  ],
+  "checkpoint_retained": true,
+  "status": "Shared planner correction and capacity regression test being validated; neither small-budget throughput nor loaded cache numerics is resolved yet."
+}
