@@ -81,6 +81,7 @@ def main():
     ap.add_argument('--production-bin', type=Path, required=True)
     ap.add_argument('--out', type=Path, required=True)
     ap.add_argument('--trials', type=int, default=2)
+    ap.add_argument('--logprobs', action='store_true', help='diagnostic probabilities; not a normal throughput run')
     ap.add_argument('--words', type=int, default=8192)
     ap.add_argument('--decode-tokens', type=int, default=128)
     ap.add_argument('--candidate-first', action='store_true')
@@ -165,7 +166,7 @@ def main():
                 run(command, directory / 'up.log', test=True)
                 options = argparse.Namespace(url='http://127.0.0.1:18081', timeout=600, seed=104,
                     prompt_words=args.words, decode_tokens=args.decode_tokens, arrival_tokens=64,
-                    arrivals=3, interval=.25, record_text=True)
+                    arrivals=3, interval=.25, record_text=True, logprobs=args.logprobs)
                 bench = Checks(options)
                 start = bench.idle()
                 if label == 'candidate':

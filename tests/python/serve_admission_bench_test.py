@@ -67,7 +67,11 @@ def server(fault=None):
                 self.end_headers()
                 for i in range(body["max_tokens"]):
                     text = "" if fault == "special_token" else str(i)
-                    self.wfile.write(("data: " + json.dumps({"id": rid, "choices": [{"text": text}]})
+                    choice = {"text": text}
+                    if body.get("logprobs") == 5:
+                        choice["logprobs"] = {"tokens": [text], "token_logprobs": [-.2],
+                                               "top_logprobs": [{text: -.2, "other": -1.8}]}
+                    self.wfile.write(("data: " + json.dumps({"id": rid, "choices": [choice]})
                                       + "\n\n").encode())
                     self.wfile.flush()
                     time.sleep(.002)
@@ -108,6 +112,13 @@ def server(fault=None):
 
 
 class AdmissionBenchmarkTest(unittest.TestCase):
+    def test_diagnostic_probabilities_are_requested_and_retained(self):
+        with server() as bench:
+            bench.args.logprobs = True
+            result = bench.stream("probe", "hello", 2)
+        self.assertEqual(len(result["logprobs"]), 2)
+        self.assertEqual(result["logprobs"][1]["top_logprobs"], [{"1": -.2, "other": -1.8}])
+
     def test_native_overlap_and_fixed_work_are_recorded(self):
         with server() as bench:
             result = bench.run("mixed_short", 0)

@@ -45,6 +45,16 @@ def main():
             computed_prompt_tokens=baseline['computed_prompt_tokens'],
             control_generated_tokens=baseline['generated_tokens'], candidate_generated_tokens=candidate['generated_tokens'],
             requests=requests))
+        for label, run in [('control', baseline), ('candidate', candidate)]:
+            before, after = run['before']['scheduler'], run['after']['scheduler']
+            records[-1][label + '_engine_work'] = dict(
+                decode_steps=after['decode_steps'] - before['decode_steps'],
+                mixed_steps=after['mixed_steps'] - before['mixed_steps'],
+                prefill_ms=after['prefill_ms'] - before['prefill_ms'],
+                decode_ms=after['step_ms'] - before['step_ms'],
+                mixed_ms=after['mixed_ms'] - before['mixed_ms'],
+                physical_decode_rows=after['decode_batch']['rows'] - before['decode_batch']['rows'],
+                padded_decode_rows=after['decode_batch']['padded_rows'] - before['decode_batch']['padded_rows'])
     means = []
     for scenario in sorted({r['scenario'] for r in records}):
         selected = [r for r in records if r['scenario'] == scenario]

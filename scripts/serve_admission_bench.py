@@ -67,11 +67,13 @@ class Bench:
         raise TimeoutError("server did not drain")
 
     def stream(self, name, prompt, tokens, ready=None, cancel=False, dispatched=None):
-        body = json.dumps({"model": self.model, "prompt": prompt,
+        request = {"model": self.model, "prompt": prompt,
                            "max_tokens": tokens, "temperature": 0,
                            "ignore_eos": True, "prefix_cache": False,
-                           "stream": True, "stream_options": {"include_usage": True}},
-                          separators=(",", ":")).encode()
+                           "stream": True, "stream_options": {"include_usage": True}}
+        if getattr(self.args, "logprobs", False):
+            request["logprobs"] = 5
+        body = json.dumps(request, separators=(",", ":")).encode()
         record = {"name": name, "body_sha256": hashlib.sha256(body).hexdigest(),
                   "requested_tokens": tokens, "start": time.monotonic(),
                   "updates": [], "cancelled": False}
@@ -100,6 +102,9 @@ class Bench:
                     record["usage"] = event["usage"]
                 if event.get("timings"):
                     record["timings"] = event["timings"]
+                for choice in event.get("choices", []):
+                    if choice.get("logprobs"):
+                        record.setdefault("logprobs", []).append(choice["logprobs"])
                 chunks = [c.get("text", "") for c in event.get("choices", [])]
                 if any(chunks):
                     record["updates"].append(time.monotonic())
@@ -238,6 +243,7 @@ def main():
     parser.add_argument("--timeout", type=float, default=600)
     parser.add_argument("--seed", type=int, default=104)
     parser.add_argument("--record-text", action="store_true", help="retain generated text for output-difference diagnosis")
+    parser.add_argument("--logprobs", action="store_true", help="diagnostic top-five probabilities; adds work and can change head dispatch")
     args = parser.parse_args()
     if min(args.trials, args.prompt_words, args.decode_tokens, args.arrival_tokens, args.arrivals) < 1:
         parser.error("counts must be positive")
