@@ -146,6 +146,9 @@ class SessionModel : public PrefillReporting {
     const int64_t* span_pos0 = nullptr;
     const int32_t* span_lens = nullptr;
     int num_spans = 0;
+    // Optional host mask: one last-row output per prefill span (or one for
+    // a scalar prefill). Serving cursors only need it at prompt completion.
+    const uint8_t* output_spans = nullptr;
     // Mixed walks put speculative decode spans first, followed by prefill
     // spans. Decode spans retain every row's logits and rollback state;
     // prefill spans retain their last row. Only families implementing this
@@ -193,6 +196,7 @@ class SessionModel : public PrefillReporting {
   // chunks with other requests; some families carry shared span scratch.
   static constexpr bool kResumablePrefill = false;
   struct PrefillCursor {
+    bool final_output_only = false;  // diagnostic cursors retain every chunk's output
     int req = -1;
     const int64_t* ids = nullptr;
     int64_t start = 0, end = 0, next = 0;
@@ -815,6 +819,11 @@ typename SessionModel<D>::Outputs SessionModel<D>::finish_run(const RowRun& run,
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   out.lm_vocab_begin = lm_vocab_begin_;
   out.lm_vocab_count = lm_vocab_count_;
+  if (!run.decode && !group && run.output_spans && !run.output_spans[0]) return std::move(out);
+  if (group && run.output_spans &&
+      std::none_of(run.output_spans + (run.device_decode_outputs ? run.decode_spans : 0),
+                   run.output_spans + run.num_spans, [](uint8_t keep) { return keep != 0; }))
+    return std::move(out);
   out.final_hidden_bits.resize(rows_out * H);
   out.logits.resize(rows_out * lm_vocab_count_);
   if (run.decode) {
@@ -830,6 +839,7 @@ typename SessionModel<D>::Outputs SessionModel<D>::finish_run(const RowRun& run,
       }
       const int first_row = s < run.decode_spans ? 0 : run.span_lens[s] - 1;
       for (int r = first_row; r < run.span_lens[s]; ++r, ++output) {
+        if (run.output_spans && !run.output_spans[s]) continue;
         const size_t last = static_cast<size_t>(at + r);
         DGPP_CUDA_OK(cudaMemcpy(out.final_hidden_bits.data() + static_cast<size_t>(output) * H,
                                 h_ + last * H, H * 2, cudaMemcpyDeviceToHost));
@@ -912,6 +922,8 @@ void SessionModel<D>::prefill_chunk(PrefillCursor& cursor, int64_t budget) {
   run.pos0 = c0;
   run.decode = false;
   run.all_rows = false;
+  const uint8_t output = !cursor.final_output_only || c1 == end;
+  run.output_spans = &output;
   // Preserve logical span boundaries across yields. In particular, the
   // bounded DeepSeek decoder runs only at a span's last chunk, and a
   // snapshot must close the span before its state can be published.
@@ -1070,6 +1082,7 @@ std::vector<bool> SessionModel<D>::session_prefill_advance_group(const std::vect
   if (n == 0) return {};
   std::vector<int64_t> ids, span_pos0, ends;
   std::vector<int32_t> span_reqs, span_lens;
+  std::vector<uint8_t> outputs;
   for (int s = 0; s < n; ++s) {
     PrefillCursor& c = *cursors[static_cast<size_t>(s)];
     check_req(c.req, "session_prefill_advance_group");
@@ -1090,6 +1103,7 @@ std::vector<bool> SessionModel<D>::session_prefill_advance_group(const std::vect
     span_pos0.push_back(c0);
     span_lens.push_back(static_cast<int32_t>(c1 - c0));
     ends.push_back(c1);
+    outputs.push_back(!c.final_output_only || c1 == c.end);
   }
   if (static_cast<int64_t>(ids.size()) > max_tokens_)
     throw std::invalid_argument("session_prefill_advance_group: the group's chunks exceed max_tokens");
@@ -1112,6 +1126,8 @@ std::vector<bool> SessionModel<D>::session_prefill_advance_group(const std::vect
   run.span_pos0 = span_pos0.data();
   run.span_lens = span_lens.data();
   run.num_spans = n;
+  if (std::any_of(cursors.begin(), cursors.end(), [](const auto* c) { return c->final_output_only; }))
+    run.output_spans = outputs.data();
   Outputs all = derived().run_rows(run);
   const size_t H = static_cast<size_t>(hidden_);
   std::vector<bool> done(static_cast<size_t>(n));
@@ -1124,10 +1140,15 @@ std::vector<bool> SessionModel<D>::session_prefill_advance_group(const std::vect
     Outputs& o = c.output;
     o.lm_vocab_begin = all.lm_vocab_begin;
     o.lm_vocab_count = all.lm_vocab_count;
-    o.logits.assign(all.logits.begin() + static_cast<std::ptrdiff_t>(s) * lm_vocab_count_,
-                    all.logits.begin() + static_cast<std::ptrdiff_t>(s + 1) * lm_vocab_count_);
-    o.final_hidden_bits.assign(all.final_hidden_bits.begin() + static_cast<std::ptrdiff_t>(s) * static_cast<std::ptrdiff_t>(H),
-                               all.final_hidden_bits.begin() + static_cast<std::ptrdiff_t>(s + 1) * static_cast<std::ptrdiff_t>(H));
+    if (outputs[static_cast<size_t>(s)]) {
+      o.logits.assign(all.logits.begin() + static_cast<std::ptrdiff_t>(s) * lm_vocab_count_,
+                      all.logits.begin() + static_cast<std::ptrdiff_t>(s + 1) * lm_vocab_count_);
+      o.final_hidden_bits.assign(all.final_hidden_bits.begin() + static_cast<std::ptrdiff_t>(s) * static_cast<std::ptrdiff_t>(H),
+                                 all.final_hidden_bits.begin() + static_cast<std::ptrdiff_t>(s + 1) * static_cast<std::ptrdiff_t>(H));
+    } else {
+      o.logits.clear();
+      o.final_hidden_bits.clear();
+    }
     session_pos_[static_cast<size_t>(req)] = c1;
     push_position(req);
     if (mtp_) {

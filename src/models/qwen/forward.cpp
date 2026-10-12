@@ -1224,7 +1224,7 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
                              (globals_.lm_head_fp8.payload != nullptr || globals_.lm_head_packed.packed != nullptr) &&
                              !mma_envelope && !head_all_rows;
   head_req_ = req;
-  const bool packed_logits = mixed || packed_prefill_logits(run);
+  const bool packed_logits = mixed || (run.output_spans && run.num_spans > 0) || packed_prefill_logits(run);
   if (mixed) {
     // The speculative prefix shares one head product. Projecting each
     // decoder row separately would stream the vocabulary weights again.
@@ -1235,7 +1235,9 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
     int end = spec_rows, output = spec_rows;
     for (int s = run.decode_spans; s < run.num_spans; ++s) {
       end += run.span_lens[s];
-      lm_head_logits(h_, T, stream_, false, end - 1, output++);
+      if (!run.output_spans || run.output_spans[s])
+        lm_head_logits(h_, T, stream_, false, end - 1, output);
+      ++output;
     }
   } else if (packed_logits) {
     // FP8 and packed heads preserve the full product's dispatch. BF16
@@ -1243,12 +1245,12 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
     if (run.decode || run.all_rows) throw std::logic_error("Qwen compact head: invalid row run");
     int end = 0, output = 0;
     for (int s = 0; s < std::max(1, run.num_spans); ++s) {
-      const int start = end;
       end += run.num_spans > 0 ? run.span_lens[s] : T;
-      for (int row = s < run.decode_spans ? start : end - 1; row < end; ++row)
-        lm_head_logits(h_, T, stream_, false, row, output++);
+      if (!run.output_spans || run.output_spans[s])
+        lm_head_logits(h_, T, stream_, false, end - 1, output);
+      ++output;
     }
-  } else {
+  } else if (!run.output_spans || run.output_spans[0]) {
     lm_head_logits(h_, T, stream_, last_row_only);
   }
   // The draft block's input: the last rows' hyper states into the slots'
@@ -1931,6 +1933,7 @@ std::vector<QwenModel::Outputs> QwenModel::session_prefill_verify_group(
   std::vector<int64_t> ids, positions;
   std::vector<int32_t> spans, lengths;
   std::vector<int> offsets;
+  std::vector<uint8_t> outputs(reqs.size(), 1);
   for (size_t s = 0; s < reqs.size(); ++s) {
     const int req = reqs[s];
     const bool padded = graph_rows > 0 && feeds[s].empty();
@@ -1978,6 +1981,7 @@ std::vector<QwenModel::Outputs> QwenModel::session_prefill_verify_group(
     spans.push_back(cursor.req);
     positions.push_back(cursor.next);
     lengths.push_back(static_cast<int32_t>(counts[s]));
+    outputs.push_back(!cursor.final_output_only || cursor.next + counts[s] == cursor.end);
   }
   for (size_t s = 0; s < reqs.size(); ++s)
     if (positions[s] >= 0 && has_pool() && !pool_.ensure_request_blocks(reqs[s], positions[s] + lengths[s], stream_))
@@ -1996,6 +2000,7 @@ std::vector<QwenModel::Outputs> QwenModel::session_prefill_verify_group(
   run.span_pos0 = positions.data();
   run.span_lens = lengths.data();
   run.num_spans = static_cast<int>(spans.size());
+  run.output_spans = outputs.data();
   run.decode_spans = static_cast<int>(reqs.size());
   run.device_decode_outputs = graph_rows > 0;
   run.snapshots = true;
@@ -2024,7 +2029,8 @@ std::vector<QwenModel::Outputs> QwenModel::session_prefill_verify_group(
   for (size_t s = 0; s < cursors.size(); ++s) {
     auto& cursor = *cursors[s];
     const int64_t c0 = cursor.next, c1 = c0 + counts[s];
-    cursor.output = slice((graph_rows > 0 ? 0 : decode_rows) + static_cast<int>(s), 1);
+    cursor.output = outputs[reqs.size() + s] ?
+        slice((graph_rows > 0 ? 0 : decode_rows) + static_cast<int>(s), 1) : Outputs{};
     session_pos_[cursor.req] = c1;
     push_position(cursor.req);
     if (mtp_) {

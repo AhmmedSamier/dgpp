@@ -1296,6 +1296,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
                 task->boundaries, snap, plan.attach_position);
           }
         }());
+        if constexpr (requires { model_->prepare_mixed_verify(1); }) cursor->final_output_only = true;
         task->cursor = cursor;
         task->advance = [this, cursor, task = task.get()](int64_t budget) {
           const int64_t start = cursor->next;

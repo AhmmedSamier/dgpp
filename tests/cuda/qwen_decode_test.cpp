@@ -841,9 +841,12 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
     QwenModel::SessionSnapshotMeta meta;
     QwenModel::SnapshotRequest snap{80, arena, &meta};
     auto cursor = yielded.session_prefill_begin(0, prompt, 192, 32, {80}, &snap);
+    cursor.final_output_only = true;
     for (const auto& [budget, position] :
          std::vector<std::pair<int64_t, int64_t>>{{32, 32}, {24, 56}, {32, 80}, {32, 112}, {32, 144}, {32, 155}}) {
       const bool done = yielded.session_prefill_advance(cursor, budget);
+      require(done || (cursor.output.logits.empty() && cursor.output.final_hidden_bits.empty()),
+              "serving continuation must defer unused intermediate outputs");
       require(cursor.next == position && done == (position == 155),
               "work budget must not split again at an automatic model grid");
     }
