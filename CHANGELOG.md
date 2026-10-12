@@ -6,6 +6,15 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Shared resumable prefill and mixed execution** (2026-10-12): eager and
+  graph serving use common request ownership, continuation, row planning,
+  snapshot and speculative-state handling across all eight model executors.
+  Early text admission is enabled with automatic budgets, including DFlash.
+  Automatic budgets use the aligned native work limit; explicit smaller
+  budgets retain their shorter decode-interruption bound. Native fixed-depth
+  graph execution shares compact request mappings to avoid empty-slot work.
+  See the [validation record](benchmarks/results/2026-10-12-prefill-consolidation/README.md)
+  for measured throughput, numerical differences and coverage.
 - **Qwen3.8-27B NVFP4: fp4w prefill GEMM** (2026-10-06):
   `launch_fp4w_gemm_*` (new): `fp8w_gemm`'s 128x128x64 tiles and
   three-stage pipeline with an e2m1 W-side (8 payload bytes + the

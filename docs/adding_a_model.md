@@ -53,7 +53,25 @@ Implement the model over the shared layer kernels and the shared engine
 machinery — packed decode batching, the decode graph, chunked resumable
 prefill, K/V and linear-attention state snapshots, prefix caching, the
 speculative-decode framework — rather than beside them. Constraints the
-engines enforce and ports have tripped on:
+engines enforce apply to every family.
+
+Use `SessionModel` for session positions, reservations, snapshots and draft
+history. Implement the architecture's layer walk over `RowRun`; use
+`PrefillContinuation` and `PrefillBatch` for resumable and mixed execution.
+`PrefillTask` owns yielded request data in both eager and graph serving, and
+`GraphBatchMapping` maps compact graph rows back to persistent request slots.
+The legacy GLM facade also uses these shared components. Do not add another
+model-specific scheduler, cursor lifecycle or batching policy. The component
+contracts are described in [continuous-batching.md](continuous-batching.md).
+
+Declare physical constraints through the executor's row capacity, alignment,
+continuation workspace and numerical dispatch checks. Model names and
+quantization labels are not admission rules. Exercise the common
+`shared_prefill_test` contract with the new fixture, including suspended
+readers, sparse decoder slots, cancellation, snapshots and speculative
+rollback. Architecture-specific state still needs its own reference tests.
+
+Constraints ports have tripped on:
 
 - **Chunk invariance.** The state a request leaves must not depend on how its
   prompt was chunked: a cold prefill and a resume from a snapshot run the same

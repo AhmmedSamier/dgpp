@@ -83,7 +83,7 @@ operations to its peers. Every rank checks the operation-stream digest.
 | family | implemented paths | deployment constraints |
 |---|---|---|
 | GLM-5.3-Flash | KDA and DSA attention, mHC, FP8 and hybrid NVFP4 experts, resident loading, graph decode, prefix cache and MTP | The full model needs four Sparks for resident serving. Batched decode has an eight-row limit; MTP depths 2–3 use scalar graphs |
-| Qwen3.8-Flash-Next | GDN, QSA, gated residuals, PLE n-gram embeddings, FP8, NVFP4 and AutoRound int4 (GPTQ g128) experts with the int8 g128 head, optional FP8 dense projections, graph decode, prefix cache and MTP | FP8 deployment templates use two or four nodes. Single-node NVFP4 serving maps the n-gram table from NVMe. Batched decode supports 64 rows, including sixteen slots at MTP depth 3 with scheduled verification disabled; opt-in fixed-depth compaction reduces wide graphs within their numerical dispatch range, with scalar fallback when no physical family fits. Compaction defaults off; without it deeper MTP uses fitting physical slot prefixes or scalar graphs. Opt-in prefill continuation gives decode a turn between chunks |
+| Qwen3.8-Flash-Next | GDN, QSA, gated residuals, PLE n-gram embeddings, FP8, NVFP4 and AutoRound int4 (GPTQ g128) experts with the int8 g128 head, optional FP8 dense projections, graph decode, prefix cache and MTP | FP8 deployment templates use two or four nodes. Single-node NVFP4 serving maps the n-gram table from NVMe. Batched decode supports 64 rows, including sixteen slots at MTP depth 3 with scheduled verification disabled; default fixed-depth compaction reduces wide graphs within their numerical dispatch range, with scalar fallback when no physical family fits. Shared prefill continuation gives decode a turn between chunks, with early text admission enabled by default |
 | GLM-4.7 | Paged GQA, partial RoPE, NVFP4 dense and expert weights, draft-layer requantization, graph decode, prefix cache and MTP | Four-node serving is measured. The engine supports up to 32 batched decode rows, including deeper MTP; the supplied default recipe uses depth 1 |
 | GLM-5.3 (full) | MLA with decoupled RoPE and per-token DSA selection shared across layers, int4/int8 pack-quantized experts and attention, draft-layer requantization, graph decode, prefix cache and MTP | Four nodes at 99.3 GiB of weights per rank (48K bf16 / 96K fp8 latent cache at four slots); served 2026-09-12: T=1 51 ms/step, MTP 68–76 ms/pass at 1.8–2.0 tokens/pass, gsm8k 59/60, HumanEval 40/40. Batched decode up to sixteen rows (eight request slots at MTP depth 1, five at depth 2; the select in row groups of eight); packed experts and attention use tensor-core prefill from 128 rows; shorter prompts retain GEMV to preserve measured C1/MTP behavior |
 | DeepSeek-V4.1-Flash | CED encoder/decoder, CSA2 sliding-window + compressed-KV attention with a two-level indexer, single-pass hyper-connections, Engram n-gram tables mapped from NVMe, the DSpark block draft (five drafts per pass), the MXFP4/FP8 checkpoint as shipped, graph decode, prefix cache and a bounded (SWA-replay) prefill | Four nodes at 72.94 GiB of weights per rank (128K context at two slots); served 2026-09-14: 76 ms/pass at 2.33 tokens/pass (32.5 ms/token), bounded prefill 1.6–2.4 ms/token, gsm8k 60/60, HumanEval 40/40, extract 30/30. `engine.prefill` chooses bounded (the default) or the exact 40-layer parity mode. Prefix caching is whole-block, so prompts shorter than 128 tokens are not cached yet |
@@ -204,23 +204,25 @@ Compiler versions are printed at build time. The follow-up based on upstream
 `c5a6913` passed the two-Spark API and operation-stream checks recorded there;
 four-node and full-suite hardware coverage remain separate gates.
 
-Qwen graph serving can interleave prefill chunks with decode using
-`engine.prefill_budget_tokens`; zero preserves monolithic admission.
-An optional `engine.prefill_idle_budget_tokens` increases chunk size when
-no request is actively decoding, including after a decoding peer retires.
-Qwen graph serving enables early text admission by default (issue #104).
-Queued short prompts join grouped prefill work; active decoder verification
-shares the reader's projections while preserving per-request state and rollback.
-Older decoders retain the busy-budget bound. New decoders can share the larger
-idle-budget chunks so their admission does not multiply reader passes.
-`engine.prefill_early_admission=false` restores the former policy. Other model
-backends retain their previous default. The earlier
+Eager and graph serving share resumable prefill and mixed execution across
+all eight layer executors, including Qwen35 with DFlash. Automatic budgets
+select the aligned native work limit; explicit smaller budgets retain their
+decode-interruption bound. Early text admission resolves from the execution
+contract and is enabled with automatic budgets on every serving family.
+Queued readers share physical rows with decoder verification. Request-owned
+continuations, snapshots, draft state and compact graph mappings use common
+components described in [continuous batching](docs/continuous-batching.md).
+
+The [consolidation validation record](benchmarks/results/2026-10-12-prefill-consolidation/README.md)
+tracks before/after throughput, cache lifecycle checks and numerical output
+differences. It compares against the pre-consolidation master, which already
+includes earlier admission work. The earlier
 [PR 105 verification record](benchmarks/results/2026-10-11-pr105-followups/README.md)
-documents why scheduler-only early admission was insufficient; the shared
-execution follow-up requires its own throughput and correctness verification.
-Qwen's cursor preserves required structural/snapshot cuts. Prefix entries
-are process-local, and grow-on-demand admission ends the youngest request
-when the pool is exhausted; it does not preempt and recompute it.
+remains the historical admission investigation. Larger automatic chunks trade
+longer decode pauses for fewer layer walks; explicit deployed budgets remain
+unchanged. Prefix entries are process-local, and grow-on-demand admission
+ends the youngest request when the pool is exhausted; it does not preempt
+and recompute it.
 
 The [Qwen expert prefill investigation](benchmarks/results/2026-09-15-qwen-moe-prefill.md)
 tested smaller tiles, compact grids and persistent blocks without finding a

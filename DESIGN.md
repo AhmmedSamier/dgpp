@@ -2356,9 +2356,9 @@ With a positive prefill budget, non-group-advance engines divide the tick's
 budget into equal aligned shares among unfinished prefills. While a prefill
 is in flight, at most one oldest-fitting request needing chunked prefill joins
 those shares. Early admission admits queued text regardless of total prompt or
-cached suffix length. Qwen graph serving enables it by default and shares
-prefill projections with decoder verification; other backends retain their
-previous default. `engine.prefill_early_admission` overrides the default. It needs
+cached suffix length. Eager and graph serving enable it with automatic budgets
+on every serving family and share prefill work with decoder verification.
+`engine.prefill_early_admission` overrides the default. It needs
 a free slot, an aligned share and its existing full reservation; this scan
 does not evict cached entries to make it fit. Short text therefore need not
 wait for leftover budget behind a long prefill when early admission is enabled.
@@ -2514,22 +2514,27 @@ digest exits with an error. The stop record is handled between ticks.
 
 `src/engine/eager_engine.hpp` wraps model calls and pick callbacks.
 `src/engine/graph_engine.hpp` records scalar graphs per request slot
-and a family of batched variants. The graph engine uses the smallest
-available batch covering the active slot IDs once the live-request count
-reaches `graph_batch_min_live`; the default threshold is
-`min(2, max_concurrency)`. For Qwen at fixed MTP depth with `engine.compact_batches: true`, a compact
-group-to-request map selects by live count within the physical graph's numerical
-dispatch range and keeps KV/recurrent state in its original physical slots.
-Graphs of at most sixteen verification rows keep their width; wider graphs
-may shrink only to another width above sixteen rows. If no physical family
-fits, scalar fallback is retained. This avoids crossing shape-dependent
-GEMV/Lt reduction boundaries while still reducing wide sparse batches.
-The setting defaults off and is journaled by rank 0 before graph construction.
+and a family of batched variants. Both adapters use `PrefillTask` to own
+yielded prompt, image and snapshot data. `PrefillContinuation` tracks cuts
+and progress, `PrefillBatch` plans mixed rows and commits reader state, and
+`RowRun` describes the layer walk. `SessionModel` supplies the common session
+implementation; legacy GLM shares these helpers through its existing facade.
+The executor owns architecture-specific attention, recurrence and projections.
+
+The graph engine starts batching at `graph_batch_min_live`, defaulting to
+`min(2, max_concurrency)`. `engine.compact_batches` defaults to true and is
+journaled before graph construction. Native fixed-depth execution uses the
+shared `GraphBatchMapping` to select the smallest compatible bucket by live
+count while keeping KV/recurrent state in its original physical slots.
+Qwen's numerical dispatch contract retains widths of at most sixteen
+verification rows and permits larger widths to shrink within the 17–32-row
+or above-32-row range. Other executors retain their capacity constraints.
+If no physical family fits, scalar fallback remains available.
 Each captured parity has a separate pinned map, uploaded at
 replay entry; tokens are gathered to compact rows and the verdict, draft
 feeds, sampling state and cache-hop snapshots map back to physical slots.
-The host can stage the next map while the previous replay finishes. Other
-models and confidence-scheduled depth retain physical-prefix selection,
+The host can stage the next map while the previous replay finishes. Block
+drafters and confidence-scheduled depth retain physical-prefix selection,
 where sparse occupancy can require a wider batch. Closed/padded groups
 use inactive positions; compact padding also has request ID -1.
 

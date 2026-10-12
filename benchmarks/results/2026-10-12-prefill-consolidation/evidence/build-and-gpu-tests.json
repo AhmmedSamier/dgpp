@@ -1,0 +1,133 @@
+{
+  "candidate": {
+    "parent": "f80e1149f07c22bda6e74cf316bcd518dfe22309",
+    "patch_sha256": "d4bf865ceef0d9cc9f82c77b12ef19532f02a08063688b130742bfe13e0e679a",
+    "binary_sha256": "726ad15e6c9e56ae4d55d5a2f72ea457e2c5dc224cef638428be71a644f38268",
+    "committed_source": "df5b3c9b513ef896e5f7725c18632df03d12c1db"
+  },
+  "previous_candidate": {
+    "parent": "d19b394577f5157ceb094ede2fe0a9bea478e4aa",
+    "patch_sha256": "038db0f12d8712e485a88c92dfa58cfa42e95c52c11e1827bd5749ce6056148f",
+    "binary_sha256": "0080af5401a43e91d2a5e76cf79f39db9de60442f24042147195add7f5e0a9c5",
+    "committed_source": "26e61c9f55f068673eb771a1daa90d09c18d6978"
+  },
+  "control": {
+    "source": "3877e12e8f5a40b311efddd680c97f9dc1d45d41",
+    "master_equivalent": "8e6909ad",
+    "binary_sha256": "9da56c960ee034f75bbc7219439f1f705f041f61136eeaf66928b808baed45b2"
+  },
+  "tests": [
+    {
+      "file": "compact-v25-check.log",
+      "sha256": "bdd4d0961fd3f6acf4466ece990927038dfa61731fc63efc7bb99ec70ac90665",
+      "results": [
+        "1/2 Test  #32: unit_tests .......................   Passed   10.08 sec",
+        "2/2 Test #244: shared_prefill_test ..............   Passed   23.55 sec",
+        "100% tests passed, 0 tests failed out of 2",
+        "Production restored: original configuration, original live binary on all four ranks, healthy HTTP."
+      ]
+    },
+    {
+      "file": "compact-v25-sanitizer.log",
+      "sha256": "53360a18bcbfbe793a8e2ebd8ba3f7e6929442198757f02e5db09f224db04123",
+      "results": [
+        "[ OK ] shared_prefill_glm",
+        "[ OK ] shared_prefill_glm4",
+        "[ OK ] shared_prefill_glm_dsa",
+        "[ OK ] shared_prefill_mimo",
+        "[ OK ] shared_prefill_qwen35",
+        "[ OK ] shared_prefill_qwen35_per_tensor",
+        "[ OK ] shared_prefill_qwen35_large_projection_groups",
+        "[ OK ] shared_prefill_dsv4",
+        "[ OK ] shared_prefill_dsv41",
+        "[ OK ] shared_prefill_dsv41_continuations",
+        "[ OK ] shared_prefill_dsv41_workspace",
+        "========= LEAK SUMMARY: 0 bytes leaked in 0 allocations",
+        "========= ERROR SUMMARY: 0 errors",
+        "Production restored: original configuration, original live binary on all four ranks, healthy HTTP."
+      ]
+    },
+    {
+      "file": "image-task-v19.log",
+      "sha256": "4ee0ee125e45cf9eaf7e3068bc2ea62662e095093653a2d80bda2a1b125e8ab4",
+      "results": [
+        "1/3 Test  #28: qwen_image_prefill_test ..........   Passed    2.18 sec",
+        "2/3 Test #240: glm_vision_stream_test ...........   Passed   23.90 sec",
+        "3/3 Test #241: glm_vision_frontend_test .........   Passed    0.30 sec",
+        "100% tests passed, 0 tests failed out of 3",
+        "[ OK ] qwen_image_prefill_shared_task_lifetime",
+        "========= LEAK SUMMARY: 0 bytes leaked in 0 allocations",
+        "========= ERROR SUMMARY: 0 errors",
+        "Production restored: original configuration, original live binary on all four ranks, healthy HTTP."
+      ]
+    },
+    {
+      "file": "qwen35-projections-v17-check.log",
+      "sha256": "5f7ad9f14282a09522322491757dd8db658532bbb5aa6092b02084c207161ed9",
+      "results": [
+        "1/9 Test  #51: scheduler_test ....................   Passed    0.01 sec",
+        "2/9 Test #100: qwen35_forward_fixture ............   Passed    0.12 sec",
+        "3/9 Test #102: qwen35_decode_rows_invariance .....   Passed    0.75 sec",
+        "4/9 Test #103: qwen35_prefill_group_invariance ...   Passed    0.78 sec",
+        "5/9 Test #108: qwen35_mixed_fixture ..............   Passed    0.10 sec",
+        "6/9 Test #110: qwen35_mixed_resident_mtp .........   Passed    0.92 sec",
+        "7/9 Test #111: qwen35_mixed_rows_invariance ......   Passed    0.74 sec",
+        "8/9 Test #178: qwen_engine_test ..................   Passed   33.79 sec",
+        "9/9 Test #244: shared_prefill_test ...............   Passed   25.89 sec",
+        "100% tests passed, 0 tests failed out of 9",
+        "Production restored: original configuration, original live binary on all four ranks, healthy HTTP."
+      ]
+    },
+    {
+      "file": "qwen35-sanitizer-v18.log",
+      "sha256": "b4e05dd2d203902679cc77c5458624859042a57c55b94c66473d0610b5b5823a",
+      "results": [
+        "1/2 Test #49: serve_test .......................   Passed  161.94 sec",
+        "2/2 Test #50: fabric_serve_test ................   Passed    3.24 sec",
+        "100% tests passed, 0 tests failed out of 2",
+        "[ OK ] shared_prefill_qwen35",
+        "[ OK ] shared_prefill_qwen35_per_tensor",
+        "[ OK ] shared_prefill_qwen35_large_projection_groups",
+        "========= LEAK SUMMARY: 0 bytes leaked in 0 allocations",
+        "========= ERROR SUMMARY: 0 errors",
+        "Production restored: original configuration, original live binary on all four ranks, healthy HTTP."
+      ]
+    },
+    {
+      "file": "sanitizer-v14.log",
+      "sha256": "8df0d92e6f24ae23308b2d2830d4de73df79c5f7cdca8404c64ecf2069c62a04",
+      "results": [
+        "1/6 Test  #32: unit_tests .......................   Passed   10.24 sec",
+        "2/6 Test  #94: dsv41_engram_test ................   Passed    0.39 sec",
+        "3/6 Test #178: qwen_engine_test .................   Passed   34.89 sec",
+        "4/6 Test #244: shared_prefill_test ..............   Passed   23.42 sec",
+        "5/6 Test #245: compact_head_test ................   Passed    3.94 sec",
+        "6/6 Test #246: compact_head_all_rows ............   Passed    3.91 sec",
+        "100% tests passed, 0 tests failed out of 6",
+        "[ OK ] shared_prefill_glm",
+        "[ OK ] shared_prefill_glm4",
+        "[ OK ] shared_prefill_glm_dsa",
+        "[ OK ] shared_prefill_mimo",
+        "[ OK ] shared_prefill_qwen35",
+        "[ OK ] shared_prefill_qwen35_per_tensor",
+        "[ OK ] shared_prefill_dsv4",
+        "[ OK ] shared_prefill_dsv41",
+        "[ OK ] shared_prefill_dsv41_continuations",
+        "[ OK ] shared_prefill_dsv41_workspace",
+        "========= LEAK SUMMARY: 0 bytes leaked in 0 allocations",
+        "========= ERROR SUMMARY: 0 errors",
+        "[ OK ] engram hash: 12 rows x 2 layers x 12 entries match the reference hash",
+        "[ OK ] dsv41_engram_hash_rows_match_the_reference_hash",
+        "[ OK ] engram context rows: per-row snapshots and the in-place advance",
+        "[ OK ] dsv41_engram_context_rows_advance_per_real_row",
+        "[ OK ] dsv41_engram_negative_request_padding_never_reads_context",
+        "[ OK ] engram staged gather: 7 x 12 rows exact (one NaN block propagated)",
+        "[ OK ] dsv41_engram_staged_gather_is_exact",
+        "[ OK ] engram gate: 5 rows x 4 streams within budget (max 0.00 ulps)",
+        "[ OK ] dsv41_engram_gate_matches_double_oracle",
+        "========= ERROR SUMMARY: 0 errors",
+        "Production restored: original configuration, original live binary on all four ranks, healthy HTTP."
+      ]
+    }
+  ]
+}
