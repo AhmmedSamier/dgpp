@@ -1,0 +1,747 @@
+{
+  "comparisons": {
+    "candidate": [
+      {
+        "scenario": "solo_prefill",
+        "key": "3fbd44f0b1a8ff0d70b2740537a7523ebfcae5c7742d68fe24c844aceed1cd74",
+        "text_matches": true,
+        "probabilities_match": true
+      },
+      {
+        "scenario": "batch_prefill",
+        "key": "ef25e4f46e42cda4c6284f416b91365a192eaf55308b894319fb05bcf4e7de76",
+        "text_matches": true,
+        "probabilities_match": true
+      },
+      {
+        "scenario": "batch_prefill",
+        "key": "ee150305ef57d51a30011fc8956037c912e7059c8cb53129d9762b0c7251b3f7",
+        "text_matches": true,
+        "probabilities_match": false
+      },
+      {
+        "scenario": "batch_prefill",
+        "key": "3848c7d1179f749dc6bc7ed4274b5a708675c1bf301b299796ff1dda87c017b0",
+        "text_matches": true,
+        "probabilities_match": false
+      },
+      {
+        "scenario": "batch_prefill",
+        "key": "be1e052316086307eb161a101f45a127a55571b692c6a9ee85b140134f074061",
+        "text_matches": true,
+        "probabilities_match": false
+      },
+      {
+        "scenario": "mixed_long",
+        "key": "decoder",
+        "text_matches": true,
+        "probabilities_match": true
+      },
+      {
+        "scenario": "mixed_long",
+        "key": "long",
+        "text_matches": false,
+        "probabilities_match": false
+      },
+      {
+        "scenario": "mixed_long",
+        "key": "arrival-0",
+        "text_matches": true,
+        "probabilities_match": true
+      }
+    ],
+    "candidate-monolithic": [
+      {
+        "scenario": "solo_prefill",
+        "key": "3fbd44f0b1a8ff0d70b2740537a7523ebfcae5c7742d68fe24c844aceed1cd74",
+        "text_matches": true,
+        "probabilities_match": true
+      },
+      {
+        "scenario": "batch_prefill",
+        "key": "ef25e4f46e42cda4c6284f416b91365a192eaf55308b894319fb05bcf4e7de76",
+        "text_matches": true,
+        "probabilities_match": true
+      },
+      {
+        "scenario": "batch_prefill",
+        "key": "ee150305ef57d51a30011fc8956037c912e7059c8cb53129d9762b0c7251b3f7",
+        "text_matches": true,
+        "probabilities_match": true
+      },
+      {
+        "scenario": "batch_prefill",
+        "key": "3848c7d1179f749dc6bc7ed4274b5a708675c1bf301b299796ff1dda87c017b0",
+        "text_matches": true,
+        "probabilities_match": true
+      },
+      {
+        "scenario": "batch_prefill",
+        "key": "be1e052316086307eb161a101f45a127a55571b692c6a9ee85b140134f074061",
+        "text_matches": true,
+        "probabilities_match": true
+      },
+      {
+        "scenario": "mixed_long",
+        "key": "decoder",
+        "text_matches": true,
+        "probabilities_match": true
+      },
+      {
+        "scenario": "mixed_long",
+        "key": "long",
+        "text_matches": true,
+        "probabilities_match": true
+      },
+      {
+        "scenario": "mixed_long",
+        "key": "arrival-0",
+        "text_matches": true,
+        "probabilities_match": true
+      }
+    ]
+  },
+  "records": {
+    "candidate": [
+      {
+        "scenario": "solo_prefill",
+        "key": "3fbd44f0b1a8ff0d70b2740537a7523ebfcae5c7742d68fe24c844aceed1cd74",
+        "text": " ",
+        "tokens": [
+          [
+            " ",
+            -1.9605694,
+            {
+              " ": -1.9605694,
+              " The": -2.0090466,
+              " \n": -2.2774105,
+              " This": -2.668785,
+              " harbor": -3.7258224
+            }
+          ]
+        ],
+        "token_count": 1
+      },
+      {
+        "scenario": "batch_prefill",
+        "key": "ef25e4f46e42cda4c6284f416b91365a192eaf55308b894319fb05bcf4e7de76",
+        "text": " The",
+        "tokens": [
+          [
+            " The",
+            -1.9440956,
+            {
+              " The": -1.9440956,
+              " will": -2.0235004,
+              " \n": -2.2116623,
+              " ": -2.5374937,
+              " This": -2.6725674
+            }
+          ]
+        ],
+        "token_count": 1
+      },
+      {
+        "scenario": "batch_prefill",
+        "key": "ee150305ef57d51a30011fc8956037c912e7059c8cb53129d9762b0c7251b3f7",
+        "text": " The",
+        "tokens": [
+          [
+            " The",
+            -1.535387,
+            {
+              " The": -1.535387,
+              " \n": -1.7547321,
+              " This": -2.9335852,
+              " will": -3.0692158,
+              " harbor": -3.130416
+            }
+          ]
+        ],
+        "token_count": 1
+      },
+      {
+        "scenario": "batch_prefill",
+        "key": "3848c7d1179f749dc6bc7ed4274b5a708675c1bf301b299796ff1dda87c017b0",
+        "text": " \n",
+        "tokens": [
+          [
+            " \n",
+            -1.5836744,
+            {
+              " \n": -1.5836744,
+              " The": -1.8082991,
+              " will": -2.4827843,
+              " This": -2.933545,
+              " ": -3.4309483
+            }
+          ]
+        ],
+        "token_count": 1
+      },
+      {
+        "scenario": "batch_prefill",
+        "key": "be1e052316086307eb161a101f45a127a55571b692c6a9ee85b140134f074061",
+        "text": " \n",
+        "tokens": [
+          [
+            " \n",
+            -1.5192995,
+            {
+              " \n": -1.5192995,
+              " The": -1.8195572,
+              " will": -2.9024105,
+              " ": -3.1274252,
+              " harbor": -3.451806
+            }
+          ]
+        ],
+        "token_count": 1
+      },
+      {
+        "scenario": "mixed_long",
+        "key": "decoder",
+        "text": " 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35,",
+        "token_count": 128
+      },
+      {
+        "scenario": "mixed_long",
+        "key": "long",
+        "text": " The",
+        "tokens": [
+          [
+            " The",
+            -1.8298616,
+            {
+              " The": -1.8298616,
+              " \n": -2.1161594,
+              " ": -2.4063234,
+              " This": -2.7705708,
+              " ind": -3.771637
+            }
+          ]
+        ],
+        "token_count": 1
+      },
+      {
+        "scenario": "mixed_long",
+        "key": "arrival-0",
+        "text": " 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,",
+        "token_count": 64
+      }
+    ],
+    "control-default": [
+      {
+        "scenario": "solo_prefill",
+        "key": "3fbd44f0b1a8ff0d70b2740537a7523ebfcae5c7742d68fe24c844aceed1cd74",
+        "text": " ",
+        "tokens": [
+          [
+            " ",
+            -1.9605694,
+            {
+              " ": -1.9605694,
+              " The": -2.0090466,
+              " \n": -2.2774105,
+              " This": -2.668785,
+              " harbor": -3.7258224
+            }
+          ]
+        ],
+        "token_count": 1
+      },
+      {
+        "scenario": "batch_prefill",
+        "key": "ef25e4f46e42cda4c6284f416b91365a192eaf55308b894319fb05bcf4e7de76",
+        "text": " The",
+        "tokens": [
+          [
+            " The",
+            -1.9440956,
+            {
+              " The": -1.9440956,
+              " will": -2.0235004,
+              " \n": -2.2116623,
+              " ": -2.5374937,
+              " This": -2.6725674
+            }
+          ]
+        ],
+        "token_count": 1
+      },
+      {
+        "scenario": "batch_prefill",
+        "key": "ee150305ef57d51a30011fc8956037c912e7059c8cb53129d9762b0c7251b3f7",
+        "text": " The",
+        "tokens": [
+          [
+            " The",
+            -1.5418644,
+            {
+              " The": -1.5418644,
+              " \n": -1.6658182,
+              " will": -2.9442053,
+              " This": -3.0550213,
+              " harbor": -3.1752586
+            }
+          ]
+        ],
+        "token_count": 1
+      },
+      {
+        "scenario": "batch_prefill",
+        "key": "3848c7d1179f749dc6bc7ed4274b5a708675c1bf301b299796ff1dda87c017b0",
+        "text": " \n",
+        "tokens": [
+          [
+            " \n",
+            -1.4804211,
+            {
+              " \n": -1.4804211,
+              " The": -1.841322,
+              " will": -2.5229044,
+              " This": -3.396307,
+              " ": -3.4166508
+            }
+          ]
+        ],
+        "token_count": 1
+      },
+      {
+        "scenario": "batch_prefill",
+        "key": "be1e052316086307eb161a101f45a127a55571b692c6a9ee85b140134f074061",
+        "text": " \n",
+        "tokens": [
+          [
+            " \n",
+            -1.6379213,
+            {
+              " \n": -1.6379213,
+              " The": -1.8786507,
+              " will": -2.9127884,
+              " ": -3.2384949,
+              " harbor": -3.3837967
+            }
+          ]
+        ],
+        "token_count": 1
+      },
+      {
+        "scenario": "mixed_long",
+        "key": "decoder",
+        "text": " 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35,",
+        "token_count": 128
+      },
+      {
+        "scenario": "mixed_long",
+        "key": "long",
+        "text": " ",
+        "tokens": [
+          [
+            " ",
+            -1.9605694,
+            {
+              " ": -1.9605694,
+              " The": -2.0090466,
+              " \n": -2.2774105,
+              " This": -2.668785,
+              " harbor": -3.7258224
+            }
+          ]
+        ],
+        "token_count": 1
+      },
+      {
+        "scenario": "mixed_long",
+        "key": "arrival-0",
+        "text": " 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,",
+        "token_count": 64
+      }
+    ],
+    "candidate-monolithic": [
+      {
+        "scenario": "solo_prefill",
+        "key": "3fbd44f0b1a8ff0d70b2740537a7523ebfcae5c7742d68fe24c844aceed1cd74",
+        "text": " ",
+        "tokens": [
+          [
+            " ",
+            -1.9605694,
+            {
+              " ": -1.9605694,
+              " The": -2.0090466,
+              " \n": -2.2774105,
+              " This": -2.668785,
+              " harbor": -3.7258224
+            }
+          ]
+        ],
+        "token_count": 1
+      },
+      {
+        "scenario": "batch_prefill",
+        "key": "ef25e4f46e42cda4c6284f416b91365a192eaf55308b894319fb05bcf4e7de76",
+        "text": " The",
+        "tokens": [
+          [
+            " The",
+            -1.9440956,
+            {
+              " The": -1.9440956,
+              " will": -2.0235004,
+              " \n": -2.2116623,
+              " ": -2.5374937,
+              " This": -2.6725674
+            }
+          ]
+        ],
+        "token_count": 1
+      },
+      {
+        "scenario": "batch_prefill",
+        "key": "ee150305ef57d51a30011fc8956037c912e7059c8cb53129d9762b0c7251b3f7",
+        "text": " The",
+        "tokens": [
+          [
+            " The",
+            -1.5418644,
+            {
+              " The": -1.5418644,
+              " \n": -1.6658182,
+              " will": -2.9442053,
+              " This": -3.0550213,
+              " harbor": -3.1752586
+            }
+          ]
+        ],
+        "token_count": 1
+      },
+      {
+        "scenario": "batch_prefill",
+        "key": "3848c7d1179f749dc6bc7ed4274b5a708675c1bf301b299796ff1dda87c017b0",
+        "text": " \n",
+        "tokens": [
+          [
+            " \n",
+            -1.4804211,
+            {
+              " \n": -1.4804211,
+              " The": -1.841322,
+              " will": -2.5229044,
+              " This": -3.396307,
+              " ": -3.4166508
+            }
+          ]
+        ],
+        "token_count": 1
+      },
+      {
+        "scenario": "batch_prefill",
+        "key": "be1e052316086307eb161a101f45a127a55571b692c6a9ee85b140134f074061",
+        "text": " \n",
+        "tokens": [
+          [
+            " \n",
+            -1.6379213,
+            {
+              " \n": -1.6379213,
+              " The": -1.8786507,
+              " will": -2.9127884,
+              " ": -3.2384949,
+              " harbor": -3.3837967
+            }
+          ]
+        ],
+        "token_count": 1
+      },
+      {
+        "scenario": "mixed_long",
+        "key": "decoder",
+        "text": " 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35,",
+        "token_count": 128
+      },
+      {
+        "scenario": "mixed_long",
+        "key": "long",
+        "text": " ",
+        "tokens": [
+          [
+            " ",
+            -1.9605694,
+            {
+              " ": -1.9605694,
+              " The": -2.0090466,
+              " \n": -2.2774105,
+              " This": -2.668785,
+              " harbor": -3.7258224
+            }
+          ]
+        ],
+        "token_count": 1
+      },
+      {
+        "scenario": "mixed_long",
+        "key": "arrival-0",
+        "text": " 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,",
+        "token_count": 64
+      }
+    ]
+  },
+  "files": {
+    "probe.py": "c84e9079b60c3257e8546f61c1a45acb319eaaaec2d2d0e76bcc2e5571a32ae5",
+    "harness.py": "86115b2f51bf8094fcf0a03d44521b35f2645afb2fcdea4e80fb624e281b4e83",
+    "candidate/binary.sha256": "455104cf66854b77f544384466ec5b0cbfa96fb86cf676430334f9ac30db3283",
+    "candidate/probabilities.json": "6a736eb5f5b613500c8b4d53e64071519b585ec638e161c6497d6e95481f7837",
+    "candidate/deployment.json": "57fceea0e23362b25b8b716e9dc5ebbc5dacd044ff8a86b0913e49c722b354a2",
+    "candidate-monolithic/binary.sha256": "455104cf66854b77f544384466ec5b0cbfa96fb86cf676430334f9ac30db3283",
+    "candidate-monolithic/probabilities.json": "7ef37bfdac6cfb4cf335ce53dec26475ba45a01557f8ea1e3fe299972fca4425",
+    "candidate-monolithic/deployment.json": "da6e79e2d9c5afbb8c33a7223be6ad9d5756d16ee79b8d1fea451265c3493687",
+    "control-default/binary.sha256": "9edf73d68fd44ef91459d88c3c555b966bf89f88d219df8ab6390a09aa926f61",
+    "control-default/probabilities.json": "610c5e43b96e9016ed4af52bc51a3dcedcc0b2404f4f69270219d88a97f636c4",
+    "control-default/deployment.json": "57fceea0e23362b25b8b716e9dc5ebbc5dacd044ff8a86b0913e49c722b354a2",
+    "production-verified.json": "cf844357f3768d007bab940eb9fe117fde662ea422cfbba4e6ac51801b702979",
+    "production-verified.log": "12e9589e80af0ae239f71e5745f1fcb724a882f24048d0712f0119a37827c80d",
+    "production-restore.log": "73cd9eec81fcedf10171d3af2c7b7fb5ac1c853f8091a9b24c9881620a235dd0",
+    "production-retry-up.log": "ae0d568eba65ac75766259482ba6eee3b639741700407b3bec20993b5e4e868b"
+  },
+  "note": "All eight diagnostic responses match control text and probabilities at the previous monolithic execution shape. With default mixed execution, incumbent and arrival probabilities remain exact; the long reader changes its first token. The baseline top-two log-probability gap is 0.0484772 nat. Batched prefill probabilities are also shape dependent; the one changed batched token in the timing run did not recur in this diagnostic. This is not general model-quality equivalence.",
+  "production_restore": "The diagnostic wrapper incorrectly propagated test-only DGPP_RESIDENT_CACHE=off into production restoration. The original production executable failed during startup. A separate retry removes that test override and verifies the original deployment; see the restoration receipt.",
+  "production_restore_verified": {
+    "config_unchanged": true,
+    "binary_sha256": "5b457ffed0f6290344c68609370e4b58ae893f52b4713ae39362babefea15542",
+    "nodes": [
+      {
+        "rank": 0,
+        "pid": 2502801,
+        "binary_sha256": "5b457ffed0f6290344c68609370e4b58ae893f52b4713ae39362babefea15542",
+        "vm_swap_kib": 0,
+        "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r30de34a3632146d8a3381f163a07815b.scope",
+        "cgroup_swap_current": "0",
+        "cgroup_swap_max": "0",
+        "gpu": "NVIDIA GB10, GPU-0543a403-d834-9f2c-14fc-d0efa6059dfb, 47, 2398 MHz, [N/A], 11.48 W"
+      },
+      {
+        "rank": 1,
+        "pid": 1203545,
+        "binary_sha256": "5b457ffed0f6290344c68609370e4b58ae893f52b4713ae39362babefea15542",
+        "vm_swap_kib": 0,
+        "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r52169f7bf8f146518e00a796ae960e2f.scope",
+        "cgroup_swap_current": "0",
+        "cgroup_swap_max": "0",
+        "gpu": "NVIDIA GB10, GPU-51b36bbf-563e-ed8f-7403-185cc867257a, 44, 2405 MHz, [N/A], 12.26 W"
+      },
+      {
+        "rank": 2,
+        "pid": 288371,
+        "binary_sha256": "5b457ffed0f6290344c68609370e4b58ae893f52b4713ae39362babefea15542",
+        "vm_swap_kib": 0,
+        "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r9e689b24bb4d42caaf8ad2e9cc851b05.scope",
+        "cgroup_swap_current": "0",
+        "cgroup_swap_max": "0",
+        "gpu": "NVIDIA GB10, GPU-b9c2d00b-b885-7710-284e-b11e92ecad49, 47, 2411 MHz, [N/A], 11.67 W"
+      },
+      {
+        "rank": 3,
+        "pid": 1503923,
+        "binary_sha256": "5b457ffed0f6290344c68609370e4b58ae893f52b4713ae39362babefea15542",
+        "vm_swap_kib": 0,
+        "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r506f868ebc064f1081177e12709d9552.scope",
+        "cgroup_swap_current": "0",
+        "cgroup_swap_max": "0",
+        "gpu": "NVIDIA GB10, GPU-387ca2dc-acdc-3b69-3320-36c0256ea75f, 47, 2411 MHz, [N/A], 10.71 W"
+      }
+    ],
+    "models": {
+      "object": "list",
+      "data": [
+        {
+          "id": "Qwen/Qwen3.8-Flash-Next-FP8",
+          "object": "model",
+          "created": 1791812045,
+          "owned_by": "dgpp",
+          "sampling": {
+            "available": true,
+            "defaults": {
+              "temperature": 1,
+              "top_p": 0.95,
+              "top_k": 20,
+              "min_p": 0,
+              "repetition_penalty": 1
+            }
+          },
+          "tools": {
+            "available": true,
+            "constrained": true
+          },
+          "response_format": {
+            "json_object": true,
+            "json_schema": true
+          },
+          "reasoning": {
+            "in_content": false,
+            "effort_mapping": {
+              "none": {
+                "enable_thinking": false
+              },
+              "minimal": {
+                "enable_thinking": true,
+                "reasoning_effort": "low"
+              },
+              "low": {
+                "enable_thinking": true,
+                "reasoning_effort": "low"
+              },
+              "medium": {
+                "enable_thinking": true,
+                "reasoning_effort": "medium"
+              },
+              "high": {
+                "enable_thinking": true,
+                "reasoning_effort": "xhigh"
+              },
+              "xhigh": {
+                "enable_thinking": true,
+                "reasoning_effort": "xhigh"
+              },
+              "max": {
+                "enable_thinking": true,
+                "reasoning_effort": "xhigh"
+              }
+            }
+          },
+          "default_chat_template_kwargs": {},
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context": {
+            "request_limit_tokens": 262144,
+            "position_ceiling_tokens": 262144,
+            "kv_pool_tokens": 1052672,
+            "limited_by": "position-ceiling"
+          }
+        }
+      ]
+    },
+    "metrics": {
+      "scheduler": {
+        "active": 0,
+        "queued": 0,
+        "terminal": 0,
+        "records": 0,
+        "record_tokens": 0,
+        "pool_blocks_total": 16448,
+        "pool_blocks_in_use": 0,
+        "prefilling": 0,
+        "tokens_generated": 0,
+        "snapshot_age_ms": 0.012592,
+        "prompts_prefilled": 0,
+        "prompt_tokens": 0,
+        "prompt_tokens_computed": 0,
+        "decode_steps": 0,
+        "decode_rows": 0,
+        "decode_batch": {
+          "last_slots": 0,
+          "last_active": 0,
+          "last_rows_per_request": 0,
+          "replays": 0,
+          "rows": 0,
+          "padded_rows": 0,
+          "replays_by_slots": {
+            "1": 0,
+            "2": 0,
+            "3": 0,
+            "4": 0,
+            "5": 0,
+            "6": 0,
+            "7": 0,
+            "8": 0,
+            "9": 0,
+            "10": 0,
+            "11": 0,
+            "12": 0,
+            "13": 0,
+            "14": 0,
+            "15": 0,
+            "16": 0
+          }
+        },
+        "spec_decode": {
+          "depth": 1,
+          "num_drafts_total": 0,
+          "num_draft_tokens_total": 0,
+          "num_accepted_tokens_total": 0,
+          "num_draft_tokens_per_pos_total": [
+            0
+          ],
+          "num_accepted_tokens_per_pos_total": [
+            0
+          ]
+        },
+        "prefill_ms": 0.0,
+        "prefill_request_ms": 0.0,
+        "step_ms": 0.0
+      },
+      "service": {
+        "requests_total": 0,
+        "requests_shed": 0,
+        "pending_admissions": 0,
+        "pending_cancellations": 0,
+        "requests_cancelled": 0,
+        "requests_shed_pool": 0,
+        "requests_failed": 0,
+        "engine_failed": false,
+        "reservations_grown": 0,
+        "admission": {
+          "mode": "full",
+          "window": 256,
+          "prefill_budget_tokens": 256,
+          "prefill_idle_budget_tokens": 0
+        },
+        "tokens_out": 0,
+        "rejects_bad": 0,
+        "tool_calls_out": 0
+      },
+      "prefix_cache": {
+        "enabled": true,
+        "slots": 1476,
+        "min_tokens": 1024,
+        "head_cuts": true,
+        "entries": 0,
+        "hits": 0,
+        "misses": 0,
+        "tokens_saved": 0,
+        "snapshots": 0,
+        "head_snapshots": 0,
+        "close_entries": 0,
+        "rolling_snapshots": 0,
+        "hop_snapshots": 0,
+        "evictions": 0,
+        "duplicates": 0,
+        "skipped_no_block": 0,
+        "skipped_no_slot": 0,
+        "skipped_image_bytes": 0,
+        "image_bytes": 0,
+        "blocks_pinned": 0,
+        "snapshot_bytes": 29082640,
+        "arena_snapshots": 0,
+        "snapshot_ms_avg": 0.0,
+        "arena_attaches": 0,
+        "attach_ms_avg": 0.0,
+        "ttft_hit_count": 0,
+        "ttft_hit_ms_avg": 0.0,
+        "ttft_miss_count": 0,
+        "ttft_miss_ms_avg": 0.0,
+        "key": "tok:53952643d9dcd76d tpl:f1e3dcaebbfd5341 ckpt:236dfdf285828023ca3bcd3f37366c58a3469b13"
+      },
+      "prefill": {
+        "requests": [],
+        "prompt_tokens": 0,
+        "processed_tokens": 0,
+        "cached_tokens": 0,
+        "computed_tokens": 0,
+        "remaining_tokens": 0
+      }
+    }
+  }
+}

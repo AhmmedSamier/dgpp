@@ -1,0 +1,39 @@
+[
+  {
+    "rank": 0,
+    "host": "192.168.88.11",
+    "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+    "removed": [
+      "/home/stephen/.cache/huggingface/hub/models--XiaomiMiMo--MiMo-V2.6-Flash-RL",
+      "/home/stephen/.cache/huggingface/hub/.locks/models--XiaomiMiMo--MiMo-V2.6-Flash-RL"
+    ],
+    "free_bytes": 256873582592
+  },
+  {
+    "rank": 1,
+    "host": "192.168.88.12",
+    "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+    "removed": [
+      "/home/stephen/.cache/huggingface/hub/models--XiaomiMiMo--MiMo-V2.6-Flash-RL"
+    ],
+    "free_bytes": 476583329792
+  },
+  {
+    "rank": 2,
+    "host": "192.168.88.13",
+    "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+    "removed": [
+      "/home/stephen/.cache/huggingface/hub/models--XiaomiMiMo--MiMo-V2.6-Flash-RL"
+    ],
+    "free_bytes": 739138408448
+  },
+  {
+    "rank": 3,
+    "host": "192.168.88.14",
+    "model": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+    "removed": [
+      "/home/stephen/.cache/huggingface/hub/models--XiaomiMiMo--MiMo-V2.6-Flash-RL"
+    ],
+    "free_bytes": 807632343040
+  }
+]

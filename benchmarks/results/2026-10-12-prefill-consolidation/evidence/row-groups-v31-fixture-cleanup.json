@@ -1,0 +1,27 @@
+[
+  {
+    "path": "shared_glm4_fixture",
+    "files": 2,
+    "bytes": 8705040
+  },
+  {
+    "path": "shared_glm4_tail_fixture",
+    "files": 2,
+    "bytes": 27913925
+  },
+  {
+    "path": "shared_mimo_dense_fixture",
+    "files": 2,
+    "bytes": 40439793
+  },
+  {
+    "path": "shared_mimo_fixture",
+    "files": 2,
+    "bytes": 10122288
+  },
+  {
+    "path": "shared_mimo_tail_fixture",
+    "files": 2,
+    "bytes": 40439793
+  }
+]

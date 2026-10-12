@@ -44,7 +44,8 @@ Source receipts and selected test results are in
 `campaign.py` serializes candidate and control deployments on the same GB10
 hardware, with identical weights, prompts, output lengths, KV format and
 speculation settings. Each configuration has four request slots, 65,536 KV
-tokens and a 1 GiB prefix cache. Prompt seeds are 104 and 105. Scenarios
+tokens and a 1 GiB prefix cache. Prompt seeds are 104 and 105; the final
+MiMo pair adds seed 106 for a third trial. Scenarios
 exercise isolated decode, isolated prefill, four simultaneous decoders, four
 simultaneous prefills, a long reader arriving behind an incumbent decoder,
 and repeated short arrivals during prefill. Decode requests generate 128
@@ -126,6 +127,7 @@ is faster. Each link retains the underlying timings and request metrics.
 | [Qwen FP8, matched 256 budget](evidence/qwen4-matched-budget-final-v25-summary.json) | -0.64% | -0.34% | +0.93% | -0.30% | -0.01% | -0.36% |
 | [GLM Flash](evidence/glm-final-v25-summary.json) | +0.52% | -35.63% | -0.64% | -67.62% | -21.70% | -23.52% |
 | [GLM-DSA²](evidence/glm-dsa-compact-v25-summary.json) | — | — | — | — | -1.39% | -2.53% |
+| [MiMo-V2.6-Flash-RL⁴](evidence/mimo-final-v31-summary.json) | +0.13% | +0.11% | -3.67% | -1.74% | +0.35% | -0.64% |
 | [DeepSeek V4.1³](evidence/dsv41-final-v27-summary.json) | -0.94% | -0.07% | -0.58% | -2.29% | +0.56% | -1.58% |
 
 ¹ Earlier candidate before compact mapping. These block-drafter/eager paths
@@ -134,6 +136,10 @@ scenarios; earlier full-family coverage remains in the evidence. ³ Candidate
 `beeaf952` preserves native mixed decoder mHC and expert recipes; all 34
 responses and four chat transcripts match. Mixed elapsed time is
 5.835 → 5.867 seconds; this sub-percent difference is based on two trials.
+⁴ Three trials at candidate `384bc260`. All chats and longer timing responses
+match; three of 51 timing responses change a single prefill token. Cache
+checks precede timing in both arms, and all 111 returned visible cache-token
+probabilities match across builds, under repeated load and after recovery.
 
 At the matched 256-token Qwen budget, mixed elapsed time is 7.676 → 7.675
 seconds. Arrival first-token latency remains 0.33–0.36 seconds and maximum
@@ -213,7 +219,21 @@ visible in the evidence and are not counted as exact passes.
   `384bc260` batches compatible reader expert work while preserving projection
   recipes, and applies the same shared grouping to GLM-4.7. Both families
   pass the exact short-tail fixture and memcheck with BF16/BF12 residency.
-  Three-trial real-checkpoint timing for that refinement is in progress.
+  The three-trial refinement removes the repeated-arrival slowdown:
+  4.308 → 4.280 seconds (0.64% faster); no scenario mean is more than 0.36%
+  slower. All chats and longer responses match. Three randomized one-token
+  prefill outputs change in the added seed: two are the same long prompt
+  under load, and one is a batched variant. A separate
+  [probability diagnostic](evidence/mimo-prefill-diagnostic-v31.json) finds
+  exact text and probabilities for all eight responses at the previous
+  execution shape. Default mixed execution preserves all incumbent and
+  arrival token probabilities exactly but changes the long reader
+  from a space to ` The`; the baseline top-two margin is 0.0484772 nat.
+  The changed batched token does not recur in that diagnostic, although
+  batched probabilities remain shape dependent. This establishes chunk-shape
+  dependence, not general numerical or model-quality equivalence.
+  The [acceptance receipt](evidence/mimo-final-v31-accepted.json) retains
+  these limitations separately from the exact cache and decoder checks.
   Five focused targets pass, including fifteen shared-prefill cases.
   The short-tail fixture is exact with BF16 and BF12 weights and passes
   memcheck at ordinary settings. The graph oracle also passes memcheck
@@ -230,8 +250,9 @@ model-quality or teacher-forced numerical equivalence result.
 ## Temporary weights and cleanup
 
 MiMo-V2.6-Flash-RL, GLM-4.7-NVFP4 and DeepSeek-V4-Flash-0731 were absent from
-the saved initial inventories. Their final download, sync, testing and cleanup
-are in progress, beginning with MiMo. Downloads are pinned to checkpoint revisions and performed one
+the saved initial inventories. MiMo has completed its final download, sync
+and testing; its weights and dedicated download cache have been removed
+from all four nodes. GLM-4.7 is downloading; DeepSeek-V4 is next. Downloads are pinned to checkpoint revisions and performed one
 model at a time after stopping production. No download runs alongside a
 benchmark. Test-only resident images are disabled for these campaigns.
 The optional `--parallel-peer-sync` helper downloads on the head first,
