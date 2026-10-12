@@ -31,9 +31,6 @@ controls. These capacity and scheduling settings differ from the saved
 256K-per-request, MTP3 deployment. Use identical settings between upstream
 and these ports; report comparison with the saved implementation separately.
 
-Raw evidence and deployment restoration records live in
-`/mnt/benchmarks/dgpp-mimo-upstream-20260923/`.
-
 ## Tool-call compatibility
 
 The pure upstream baseline returned malformed XML as content on the first
