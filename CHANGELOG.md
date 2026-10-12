@@ -1563,6 +1563,18 @@ project procedures and design guidance live in `docs/`.
   Serving throughput remains unmeasured under the current benchmark
   protocol; no performance comparison is claimed for these templates.
 
+- **Qwen3-ASR audio tower: fp32 oracle** (`dgpp_models_qwen_asr`, new):
+  the checkpoint's encoder - three stride-2 (freq, time) convs + 7680-wide
+  conv_out + 13-row sinusoidal positions per 100-frame chunk, 24 LN-GELU
+  prenorm blocks of 16-head bidirectional attention windowed to 104 packed
+  rows (8 chunks), LN, the 1024-1024-2048 projector - as the CUDA gate's
+  CPU reference, weights loaded by checkpoint key (the projector ships as
+  `thinker.audio_tower.proj1/2`). Pinned to a torch-fp32 replay of the
+  real checkpoint (`tools/qwen3_asr_tower_goldens.py`, 133/39/481 rows
+  incl. a segmented 37 s clip crossing the window boundary): worst row
+  |delta| 2.4e-05. One window-loop bug found by exactly that parity (the
+  per-window attention buffer reset clobbered earlier windows).
+
 - **Audio admission (Qwen3-ASR, phase 1)**: chat content parts
   `input_audio`/`audio_url` decode inline base64 WAV (PCM 8/16/24/32-bit,
   IEEE float, stereo, any rate) to 16 kHz hop-aligned mono at admission

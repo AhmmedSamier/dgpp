@@ -281,6 +281,14 @@ target_include_directories(dgpp_audio PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(dgpp_audio PUBLIC dgpp_common)
 dgpp_set_common(dgpp_audio)
 
+# The Qwen3-ASR tower (docs/audio.md): host-only config and the fp32 CPU
+# oracle. The CUDA encoder will link against the oracle as its gate.
+add_library(dgpp_models_qwen_asr STATIC
+  src/models/qwen_asr/audio_tower_reference.cpp)
+target_include_directories(dgpp_models_qwen_asr PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_qwen_asr PUBLIC dgpp_loaders dgpp_common)
+dgpp_set_common(dgpp_models_qwen_asr)
+
 add_library(dgpp_sched STATIC
   src/sched/disk_cache.cpp
   src/sched/prefix_cache.cpp
@@ -2833,6 +2841,15 @@ target_link_libraries(glm_vision_frontend_test PRIVATE dgpp_serve)
 dgpp_set_common(glm_vision_frontend_test)
 add_test(NAME glm_vision_frontend_test COMMAND glm_vision_frontend_test)
 set_tests_properties(glm_vision_frontend_test PROPERTIES LABELS "host;checkpoint" SKIP_RETURN_CODE 2)
+
+# Qwen3-ASR tower: config always; the fp32 oracle-vs-checkpoint replay when
+# the ASR snapshot is in the model cache (docs/audio.md).
+add_executable(qwen_asr_tower_test tests/host/qwen_asr_tower_test.cpp)
+target_link_libraries(qwen_asr_tower_test PRIVATE dgpp_models_qwen_asr)
+target_compile_definitions(qwen_asr_tower_test PRIVATE DGPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+dgpp_set_common(qwen_asr_tower_test)
+add_test(NAME qwen_asr_tower_test COMMAND qwen_asr_tower_test)
+set_tests_properties(qwen_asr_tower_test PROPERTIES LABELS "host;checkpoint" SKIP_RETURN_CODE 2)
 
 # Isolated upstream-port regression: paged BF16/FP8 history and head rows.
 add_executable(mimo_port_test tests/cuda/mimo_port_test.cpp)

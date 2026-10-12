@@ -7,11 +7,12 @@ admission, its encoder token count is trained into the prompt as a delimiter
 span, and the tower re-featurizes the PCM identically on every rank. No URL
 fetching and no Python runtime are involved.
 
-The audio tower itself (the conv frontend, the 24 encoder layers, the
-embedding splice) is a separate milestone; until a served model reports it,
-every frontend refuses audio parts with `unsupported_content_type`, and
-`GET /v1/models` lists `"audio"` in `input_modalities` only for models whose
-engine carries the tower.
+The tower's fp32 CPU oracle is in (`models/qwen_asr/audio_tower_reference`,
+pinned to a torch replay of the checkpoint's own encoder within 2.4e-05,
+docs below); the CUDA encoder and the language-model family are the open
+milestones. Until a served model reports them, every frontend refuses audio
+parts with `unsupported_content_type`, and `GET /v1/models` lists `"audio"`
+in `input_modalities` only for models whose engine carries the tower.
 
 ## Request format
 
@@ -51,6 +52,7 @@ message text are rejected as conflicting with the decoded audio.
 | Content-part admission | `src/serve/audio_inputs.{hpp,cpp}` |
 | Prompt rewrite (delimiter span) | `src/serve/audio_frontend.{hpp,cpp}` |
 | Request/queue/engine seams | `src/sched/scheduler.hpp`, `src/engine/*_engine.hpp` |
+| Tower config + fp32 oracle (CUDA gate) | `src/models/qwen_asr/` |
 
 The frontend mirrors `Qwen3ASRFeatureExtractor` exactly (center-padded
 400/160 STFT with a periodic Hann, torch's reflect edge; the 201x128 Slaney
