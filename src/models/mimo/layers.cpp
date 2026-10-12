@@ -283,7 +283,18 @@ size_t MimoDenseMlp::scratch_bytes(const MimoTextConfig&, int64_t local_inter, i
   return 3 * static_cast<size_t>(std::max(max_tokens, 0)) * static_cast<size_t>(local_inter) * 2;
 }
 
-void MimoDenseMlp::enqueue(const uint16_t* x, int tokens, uint16_t* out, cudaStream_t stream) {
+void MimoDenseMlp::enqueue(const uint16_t* x, int tokens, uint16_t* out, cudaStream_t stream,
+                           int decode_prefix) {
+  if (decode_prefix < 0 || decode_prefix > std::max(0, tokens) || decode_prefix > decode_rows_)
+    throw std::invalid_argument("MimoDenseMlp: mixed decoder prefix exceeds row capacity");
+  if (decode_prefix && decode_prefix < tokens) {
+    if (tokens > max_tokens_ || !x || !out)
+      throw std::invalid_argument("MimoDenseMlp: invalid mixed rows");
+    enqueue(x, decode_prefix, out, stream);
+    const size_t offset = static_cast<size_t>(decode_prefix) * hidden_;
+    enqueue(x + offset, tokens - decode_prefix, out + offset, stream);
+    return;
+  }
   if (tokens <= 0) return;
   if (tokens > max_tokens_) throw std::invalid_argument("MimoDenseMlp: tokens exceed max_tokens");
   if (!x || !out) throw std::invalid_argument("MimoDenseMlp: null pointer");

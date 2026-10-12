@@ -531,10 +531,11 @@ const uint16_t* MimoModel::enqueue_layer(const MimoLayerResident& r, int pool_la
       moe_->enqueue_decode_f32(x_, moe_acc_, T, rows.trace, stream_, rows.moe_table_slot);
     else
       moe_->enqueue_prefill_f32(x_, moe_acc_, T, rows.trace, stream_,
-                                moe_->mma_takes_grid() ? MoeExpertKernel::kMma : MoeExpertKernel::kGemv);
+                                moe_->mma_takes_grid() ? MoeExpertKernel::kMma : MoeExpertKernel::kGemv,
+                                rows.decode_prefix);
     launch_moe_round_bf16(ffn_out, moe_acc_, static_cast<int64_t>(T) * H, stream_);
   } else {
-    dense_->enqueue(x_, T, ffn_out, stream_);
+    dense_->enqueue(x_, T, ffn_out, stream_, rows.decode_prefix);
   }
   if (rows.decode) prefetch_attention_side(r.layer + 1);
   fold(ffn_out, T, H, rows.capture);  // block boundary 2: the sliced down projections

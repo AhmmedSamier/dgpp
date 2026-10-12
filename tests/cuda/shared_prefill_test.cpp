@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "common/test.hpp"
+#include "common/cuda_check.hpp"
 #include "engine/eager_engine.hpp"
 #ifdef DGPP_TEST_HAS_BUS
 #include "engine/graph_engine.hpp"
@@ -417,6 +418,39 @@ DGPP_TEST(shared_prefill_mimo) {
     return std::make_unique<MimoModel>(cfg, dir, 256, 2048, MimoResidency::Resident,
                                       nullptr, 0, 1, 4, mtp, 16, LatentFormat::kBf16, compact);
   }, cfg.vocab_size);
+}
+DGPP_TEST(shared_mimo_dense_preserves_decoder_recipe) {
+  auto cfg = mimofx::tiny_config(2, false);
+  cfg.hidden_size = 2048;
+  cfg.intermediate_size = 2048;
+  const std::string dir = "shared_mimo_dense_fixture";
+  mimofx::write_fixture(cfg, dir);
+  MimoLayerStream weights(cfg, dir);
+  const auto& layer = weights.load_layer(0);
+  constexpr int M = 67, D = 4;
+  const int H = cfg.hidden_size;
+  uint16_t *input = nullptr, *output = nullptr;
+  DGPP_CUDA_OK(cudaMallocManaged(&input, M * H * sizeof(uint16_t)));
+  DGPP_CUDA_OK(cudaMallocManaged(&output, M * H * sizeof(uint16_t)));
+  for (int i = 0; i < M * H; ++i)
+    input[i] = float_to_bf16_bits(std::sin(float(i) * 0.17f));
+  for (bool mma : {false, true}) {
+    MimoDenseMlp mlp(layer.dense, cfg, M, D, mma);
+    std::vector<uint16_t> expected(M * H);
+    mlp.enqueue(input, D, output, nullptr);
+    mlp.enqueue(input + D * H, M - D, output + D * H, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    std::memcpy(expected.data(), output, M * H * sizeof(uint16_t));
+    for (int total : {D, M}) {
+      DGPP_CUDA_OK(cudaMemset(output, 0x7F, M * H * sizeof(uint16_t)));
+      mlp.enqueue(input, total, output, nullptr, D);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      require(std::memcmp(expected.data(), output, total * H * sizeof(uint16_t)) == 0,
+              "mixed dense rows preserve native decoder and reader arithmetic");
+    }
+  }
+  cudaFree(input);
+  cudaFree(output);
 }
 DGPP_TEST(shared_prefill_qwen35) {
   for (bool mixed_quant : {false, true}) {

@@ -334,6 +334,21 @@ void GlmMoeLayer::route(const uint16_t* hidden, int tokens, cudaStream_t stream,
                            stream);
 }
 
+void GlmMoeLayer::copy_route_trace(MoeTraceStaging* trace, int tokens, cudaStream_t stream) {
+  if (!trace) return;
+  if (!trace->ids || !trace->weights)
+    throw std::invalid_argument("GlmMoeLayer: incomplete trace staging");
+  const size_t tk = static_cast<size_t>(tokens) * cfg_.top_k;
+  DGPP_CUDA_OK(cudaMemcpyAsync(trace->ids, d_ids_, tk * sizeof(int32_t),
+                              cudaMemcpyDeviceToHost, stream));
+  DGPP_CUDA_OK(cudaMemcpyAsync(trace->weights, d_weights_, tk * sizeof(float),
+                              cudaMemcpyDeviceToHost, stream));
+  if (trace->biased)
+    DGPP_CUDA_OK(cudaMemcpyAsync(trace->biased, d_biased_,
+        static_cast<size_t>(tokens) * cfg_.n_experts * sizeof(float),
+        cudaMemcpyDeviceToHost, stream));
+}
+
 void GlmMoeLayer::check_expert_geometry() const {
   const int H = cfg_.hidden, E = cfg_.n_experts;
   if (w_.routed_input_transform != kMoeInputPlain && w_.routed_input_transform != kMoeInputHadamard32 &&
@@ -674,19 +689,7 @@ void GlmMoeLayer::enqueue_prefill(const uint16_t* hidden, uint16_t* out,
     enqueue_decode(hidden, out, decode_prefix, nullptr, stream);
     // Prefill staging permits omitted biased scores. Update the prefix
     // after native routing without changing the decode staging contract.
-    if (trace) {
-      if (!trace->ids || !trace->weights)
-        throw std::invalid_argument("GlmMoeLayer: incomplete trace staging");
-      const size_t tk = static_cast<size_t>(decode_prefix) * cfg_.top_k;
-      DGPP_CUDA_OK(cudaMemcpyAsync(trace->ids, d_ids_, tk * sizeof(int32_t),
-                                  cudaMemcpyDeviceToHost, stream));
-      DGPP_CUDA_OK(cudaMemcpyAsync(trace->weights, d_weights_, tk * sizeof(float),
-                                  cudaMemcpyDeviceToHost, stream));
-      if (trace->biased)
-        DGPP_CUDA_OK(cudaMemcpyAsync(trace->biased, d_biased_,
-            static_cast<size_t>(decode_prefix) * cfg_.n_experts * sizeof(float),
-            cudaMemcpyDeviceToHost, stream));
-    }
+    copy_route_trace(trace, decode_prefix, stream);
     return;
   }
   step_timing::Scope tick(step_timing::kMoe);
@@ -699,27 +702,14 @@ void GlmMoeLayer::enqueue_prefill(const uint16_t* hidden, uint16_t* out,
     throw std::invalid_argument("GlmMoeLayer: tokens exceed max_tokens");
   if (!hidden || !out)
     throw std::invalid_argument("GlmMoeLayer: null pointer");
-  const int E = cfg_.n_experts, K = cfg_.top_k;
+  const int K = cfg_.top_k;
   check_expert_geometry();
   const size_t tk = static_cast<size_t>(tokens) * K;
 
   // 1. Router; the traces ride async copies into the caller's pinned
   //    staging (no round trip).
   route(hidden, tokens, stream);
-  if (trace) {
-    // ids and weights ride async copies into the pinned staging; the biased
-    // scores only when the caller stages them (GLM-5.3 does, GLM-4.7 not).
-    if (!trace->ids || !trace->weights)
-      throw std::invalid_argument("GlmMoeLayer: incomplete trace staging");
-    DGPP_CUDA_OK(cudaMemcpyAsync(trace->ids, d_ids_, tk * 4,
-                                 cudaMemcpyDeviceToHost, stream));
-    DGPP_CUDA_OK(cudaMemcpyAsync(trace->weights, d_weights_, tk * 4,
-                                 cudaMemcpyDeviceToHost, stream));
-    if (trace->biased)
-      DGPP_CUDA_OK(cudaMemcpyAsync(trace->biased, d_biased_,
-                                   static_cast<size_t>(tokens) * E * 4,
-                                   cudaMemcpyDeviceToHost, stream));
-  }
+  copy_route_trace(trace, tokens, stream);
 
   prefill_chain(hidden, tokens, stream);
   accumulate_grouped(out, nullptr, static_cast<int>(tk), tokens, stream);
@@ -822,7 +812,17 @@ bool GlmMoeLayer::mma_takes_grid() const {
 
 void GlmMoeLayer::enqueue_prefill_f32(const uint16_t* hidden, float* out, int tokens,
                                       MoeTraceStaging* trace, cudaStream_t stream,
-                                      MoeExpertKernel kernel) {
+                                      MoeExpertKernel kernel, int decode_prefix) {
+  if (decode_prefix < 0 || decode_prefix > std::max(0, tokens) ||
+      decode_prefix > decode_slots_)
+    throw std::invalid_argument("GlmMoeLayer: mixed decoder prefix exceeds row capacity");
+  if (decode_prefix) {
+    if (tokens > max_tokens_) throw std::invalid_argument("GlmMoeLayer: tokens exceed max_tokens");
+    if (decode_prefix < tokens) enqueue_prefill_f32(hidden, out, tokens, trace, stream, kernel);
+    enqueue_decode_f32(hidden, out, decode_prefix, nullptr, stream);
+    copy_route_trace(trace, decode_prefix, stream);
+    return;
+  }
   step_timing::Scope tick(step_timing::kMoe);
   if (tokens <= 0) return;
   if (tokens > max_tokens_)
@@ -833,20 +833,7 @@ void GlmMoeLayer::enqueue_prefill_f32(const uint16_t* hidden, float* out, int to
   check_expert_geometry();
   const size_t tk = static_cast<size_t>(tokens) * K;
   route(hidden, tokens, stream);
-  if (trace) {
-    // ids and weights ride async copies into the pinned staging; the biased
-    // scores only when the caller stages them (the Qwen model does not).
-    if (!trace->ids || !trace->weights)
-      throw std::invalid_argument("GlmMoeLayer: incomplete trace staging");
-    DGPP_CUDA_OK(cudaMemcpyAsync(trace->ids, d_ids_, tk * 4,
-                                 cudaMemcpyDeviceToHost, stream));
-    DGPP_CUDA_OK(cudaMemcpyAsync(trace->weights, d_weights_, tk * 4,
-                                 cudaMemcpyDeviceToHost, stream));
-    if (trace->biased)
-      DGPP_CUDA_OK(cudaMemcpyAsync(trace->biased, d_biased_,
-                                   static_cast<size_t>(tokens) * E * 4,
-                                   cudaMemcpyDeviceToHost, stream));
-  }
+  copy_route_trace(trace, tokens, stream);
   launch_moe_segment(d_ids_, tokens, K, E, d_rows_, d_slot_row_, d_segs_,
                      stream);
   upload_expert_views(d_views_prefill_, /*with_shared=*/false, stream);
@@ -1320,19 +1307,9 @@ void GlmMoeLayer::enqueue_decode_impl(const uint16_t* hidden, uint16_t* out_bf16
   // 2. Route traces ride ASYNC copies into the caller's pinned staging;
   //    the caller materializes them after its next stream sync (the
   //    decode step's final sync). No round-trip on the hot path.
-  if (trace) {
-    if (!trace->ids || !trace->weights || !trace->biased)
-      throw std::invalid_argument("GlmMoeLayer: incomplete trace staging");
-    DGPP_CUDA_OK(cudaMemcpyAsync(trace->ids, d_ids_,
-                                  static_cast<size_t>(tokens) * K * 4,
-                                  cudaMemcpyDeviceToHost, stream));
-    DGPP_CUDA_OK(cudaMemcpyAsync(trace->weights, d_weights_,
-                                  static_cast<size_t>(tokens) * K * 4,
-                                  cudaMemcpyDeviceToHost, stream));
-    DGPP_CUDA_OK(cudaMemcpyAsync(trace->biased, d_biased_,
-                                  static_cast<size_t>(tokens) * E * 4,
-                                  cudaMemcpyDeviceToHost, stream));
-  }
+  if (trace && !trace->biased)
+    throw std::invalid_argument("GlmMoeLayer: incomplete trace staging");
+  copy_route_trace(trace, tokens, stream);
 
   // 3. The slot chain. Slot layout: tokens*(K+1); slot t*(K+1)+j is row
   //    t's routed expert j (ascending id — the router's contract) and

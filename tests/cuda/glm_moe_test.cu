@@ -1218,6 +1218,30 @@ DGPP_TEST(moe_mixed_rows_preserve_decode_and_reader_recipes) {
                   "phased mixed expert rows preserve both recipes across split boundaries");
         }
       }
+      // The float accumulator path is used by families with a separate
+      // block-boundary rounding step, including MiMo's MXFP4 experts.
+      float* out_f32 = nullptr;
+      DGPP_CUDA_OK(cudaMallocManaged(&out_f32, M * H * sizeof(float)));
+      std::vector<float> expected_f32(M * H);
+      layer.enqueue_prefill_f32(c.d_hidden, out_f32, M, &trace, nullptr);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      std::memcpy(expected_f32.data(), out_f32, M * H * sizeof(float));
+      layer.enqueue_decode_f32(c.d_hidden, out_f32, D, nullptr, nullptr);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      std::memcpy(expected_f32.data(), out_f32, D * H * sizeof(float));
+      for (int total : {D, M}) {
+        DGPP_CUDA_OK(cudaMemset(out_f32, 0x7F, M * H * sizeof(float)));
+        layer.enqueue_prefill_f32(c.d_hidden, out_f32, total, &trace, nullptr,
+                                  dgpp::MoeExpertKernel::kMma, D);
+        DGPP_CUDA_OK(cudaDeviceSynchronize());
+        require(std::memcmp(expected_f32.data(), out_f32, total * H * sizeof(float)) == 0,
+                "float mixed expert rows preserve native decoder and grouped reader outputs");
+        require(std::equal(expected_ids.begin(), expected_ids.begin() + total * K, ids),
+                "float mixed expert traces preserve route ids");
+        require(std::equal(expected_weights.begin(), expected_weights.begin() + total * K, weights),
+                "float mixed expert traces preserve route weights");
+      }
+      cudaFree(out_f32);
       cudaFreeHost(ids);
       cudaFreeHost(weights);
     }

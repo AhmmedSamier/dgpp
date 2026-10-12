@@ -108,7 +108,8 @@ class MimoDenseMlp {
   MimoDenseMlp& operator=(const MimoDenseMlp&) = delete;
   void rebind(const MimoDenseMlpResident& w);
   // out[T, H] = down(silu(gate(x)) * up(x)) (a partial at world > 1).
-  void enqueue(const uint16_t* x, int tokens, uint16_t* out, cudaStream_t stream);
+  void enqueue(const uint16_t* x, int tokens, uint16_t* out, cudaStream_t stream,
+               int decode_prefix = 0);
   static size_t scratch_bytes(const MimoTextConfig& cfg, int64_t local_inter, int max_tokens);
 
  private:

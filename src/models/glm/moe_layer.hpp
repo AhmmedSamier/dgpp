@@ -119,7 +119,8 @@ class GlmMoeLayer {
   // in fp32 — the Qwen prefill (its BF16 shared expert follows).
   void enqueue_prefill_f32(const uint16_t* hidden, float* out, int tokens,
                            MoeTraceStaging* trace, cudaStream_t stream,
-                           MoeExpertKernel kernel = MoeExpertKernel::kMma);
+                           MoeExpertKernel kernel = MoeExpertKernel::kMma,
+                           int decode_prefix = 0);
   // Whether the tensor-core expert kernel takes this layer's fp8 scale grid:
   // the checkpoint's 128 x 128, or a re-blocked TP slice grid of 32/64 with
   // hidden and the slice both multiples of 32 (the ldmatrix tile kernel,
@@ -218,6 +219,7 @@ class GlmMoeLayer {
 
  private:
   void check_expert_geometry() const;
+  void copy_route_trace(MoeTraceStaging* trace, int tokens, cudaStream_t stream);
   // enqueue()/enqueue_f32(): exactly one of out_bf16 / out_f32 is set.
   void enqueue_host(const uint16_t* hidden, uint16_t* out_bf16, float* out_f32,
                     int tokens, cudaStream_t stream, MoeExpertKernel kernel);
