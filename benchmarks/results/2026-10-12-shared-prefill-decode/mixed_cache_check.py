@@ -2,7 +2,6 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
-import hashlib
 import json
 from pathlib import Path
 import random
@@ -17,17 +16,24 @@ from serve_admission_bench import Bench
 ap = argparse.ArgumentParser(description=__doc__)
 ap.add_argument('--url', default='http://127.0.0.1:18081')
 ap.add_argument('--out', type=Path, required=True)
+ap.add_argument('--diagnostic', action='store_true', help='record transcript/overlap differences without accepting the gate')
+ap.add_argument('--no-thinking', action='store_true')
+ap.add_argument('--logprobs', action='store_true')
 args = ap.parse_args()
 args.timeout = 600
 bench = Bench(args)
 
 
 def cached(prompt):
-    body = {'model': bench.model, 'prompt': prompt, 'max_tokens': 16,
+    body = {'model': bench.model, 'messages': [{'role': 'user', 'content': prompt}], 'max_tokens': 128,
             'temperature': 0, 'ignore_eos': True, 'prefix_cache': True, 'stream': False}
+    if args.no_thinking:
+        body['chat_template_kwargs'] = {'enable_thinking': False}
+    if args.logprobs:
+        body.update(logprobs=True, top_logprobs=5)
     started = time.monotonic()
     with closing(bench.connection()) as connection:
-        connection.request('POST', '/v1/completions', json.dumps(body), {'Content-Type': 'application/json'})
+        connection.request('POST', '/v1/chat/completions', json.dumps(body), {'Content-Type': 'application/json'})
         response = connection.getresponse()
         assert response.status == 200, (response.status, response.read())
         data = json.load(response)
@@ -39,6 +45,7 @@ prompt = 'Reference notes: ' + 'Alpha beta gamma delta. ' * 400
 prompt += '\nList the positive integers in order, starting with one:\n1,'
 warm = cached(prompt)
 reference = cached(prompt)
+args.out.write_text(json.dumps({'warm': warm, 'reference': reference}, indent=2) + '\n')
 assert reference['response']['usage']['prompt_tokens_details']['cached_tokens'] > 0
 before = bench.idle(min_terminal=initial['scheduler']['terminal'] + 2)
 rng = random.Random(104)
@@ -61,14 +68,22 @@ with ThreadPoolExecutor(max_workers=3) as pool:
     actual = cached(prompt)
     long_record, decoder_record = long.result(), decoder.result()
 after = bench.idle(min_terminal=before['scheduler']['terminal'] + 3)
-assert actual['response']['choices'][0]['text'] == reference['response']['choices'][0]['text']
-assert actual['response']['usage']['completion_tokens'] == 16
-assert actual['response']['usage']['prompt_tokens_details']['cached_tokens'] > 0
-assert actual['end'] < long_record['updates'][0], 'cached request waited for the entire cold prefill'
-assert long_record['id'] in {r['id'] for r in observed}
-assert after['service']['requests_total'] - before['service']['requests_total'] == 3
-assert after['scheduler']['pool_blocks_in_use'] == after['prefix_cache']['blocks_pinned']
+same = actual['response']['choices'][0]['message'] == reference['response']['choices'][0]['message']
+overlap = actual['end'] < long_record['updates'][0]
 args.out.write_text(json.dumps({'warm': warm, 'reference': reference, 'mixed': actual,
     'long': long_record, 'decoder': decoder_record, 'observed': observed,
-    'before': before, 'after': after}, indent=2) + '\n')
-print('Cached request finished during cold prefill; transcript matches; idle pool equals pinned prefix blocks')
+    'before': before, 'after': after, 'transcript_matches': same, 'finishes_during_prefill': overlap}, indent=2) + '\n')
+assert actual['response']['usage']['completion_tokens'] == 128
+assert actual['response']['usage']['prompt_tokens_details']['cached_tokens'] > 0
+assert long_record['id'] in {r['id'] for r in observed}
+assert after['service']['requests_total'] - before['service']['requests_total'] == 3
+# The entry meter sums references: two snapshots may pin the same physical
+# blocks. This exact repeat must return to its warmed physical-block count.
+assert after['scheduler']['pool_blocks_in_use'] == before['scheduler']['pool_blocks_in_use']
+assert after['scheduler']['pool_blocks_in_use'] <= after['prefix_cache']['blocks_pinned']
+if args.diagnostic:
+    print('DIAGNOSTIC ONLY: transcript_matches =', same, '; finishes_during_prefill =', overlap)
+    sys.exit(0)
+assert same, 'cached transcript differs under load'
+assert overlap, 'cached request waited for the entire cold prefill'
+print('Cached request finished during cold prefill; transcript matches; warmed physical KV usage unchanged')

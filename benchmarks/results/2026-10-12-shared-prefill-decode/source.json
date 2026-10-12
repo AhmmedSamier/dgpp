@@ -2,5 +2,7 @@
   "runtime_commit": "e17cf1eb33426263533a08aec83d99898da60515",
   "candidate_binary_sha256": "71a482c20fda639d6324865ed201d934e97a7185aadfa07855403bde1403b43a",
   "control_binary_sha256": "fc677569137b13586254c9823c500baac2b98450d78bdb536bb920ecb3f11399",
-  "runtime_diff": ""
+  "runtime_diff": "",
+  "snapshot_restoration_test_commit": "9334bba4",
+  "build_type": "Release"
 }

@@ -1,0 +1,29 @@
+diff --git a/src/models/glm/moe_layer.hpp b/src/models/glm/moe_layer.hpp
+index 806f575a..87938502 100644
+--- a/src/models/glm/moe_layer.hpp
++++ b/src/models/glm/moe_layer.hpp
+@@ -145,6 +145,7 @@ class GlmMoeLayer {
+   // for a consumer that folds the accumulation itself (accumulate = false).
+   const float* decode_slot_down() const { return d_slot_down_; }
+   const float* decode_weights() const { return d_weights_; }
++  const int32_t* diagnostic_route_ids() const { return d_ids_; }
+ 
+   // The Mixed346 contract's expert-input codes (cfg.routed_int8_activations;
+   // null otherwise): a caller that produces the token rows' codes and
+diff --git a/src/models/qwen/forward.cpp b/src/models/qwen/forward.cpp
+index b08ee801..56240d27 100644
+--- a/src/models/qwen/forward.cpp
++++ b/src/models/qwen/forward.cpp
+@@ -600,8 +600,10 @@ void QwenModel::head_dump_record(const uint16_t* hidden, int rows, cudaStream_t
+   const size_t slot_elems = static_cast<size_t>(max_decode_rows_) * H;
+   const int slot = head_dump_next_++ % kHeadDumpSlots;
+   // Kernel nodes only: the captured decode graph refuses copy-engine nodes.
+-  glm_device_copy(head_dump_ring_ + static_cast<size_t>(slot) * slot_elems, hidden,
+-                  static_cast<size_t>(rows) * H * 2, stream);
++  // DIAGNOSTIC BUILD ONLY: final-layer routes replace the head vectors.
++  glm_device_copy(head_dump_ring_ + static_cast<size_t>(slot) * slot_elems,
++                  moe_->routed().diagnostic_route_ids(),
++                  ((static_cast<size_t>(rows) * cfg_.num_experts_per_tok * sizeof(int32_t) + 15) / 16) * 16, stream);
+   glm_device_store_u8x2(head_dump_meta_ + static_cast<size_t>(slot) * 2, static_cast<uint8_t>(rows),
+                         static_cast<uint8_t>(head_dump_site_), stream);
+ }

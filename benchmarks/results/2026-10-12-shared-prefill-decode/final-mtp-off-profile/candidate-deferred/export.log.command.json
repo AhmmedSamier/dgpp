@@ -1,0 +1,13 @@
+{
+  "command": [
+    "nsys",
+    "export",
+    "--type=sqlite",
+    "--output",
+    "build-pr104-shared/final-mtp-off-profile/candidate-deferred/r0.sqlite",
+    "build-pr104-shared/final-mtp-off-profile/candidate-deferred/r0.nsys-rep"
+  ],
+  "started": "2026-10-12T03:07:40.514649+00:00",
+  "returncode": 0,
+  "finished": "2026-10-12T03:07:41.382923+00:00"
+}

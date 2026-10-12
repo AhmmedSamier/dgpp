@@ -75,7 +75,7 @@ admits fitting one-shots/groups into the align-down leftover (never a new
 chunked start — chunked read-ins stay one at a time). Order derives from
 arrival order and the last-advanced prefill only, so every rank agrees.
 
-Qwen graph serving enables early text admission by default: queued text of
+Qwen graph serving without DFlash enables early text admission by default: queued text of
 any size can join, including prompts shorter than one alignment unit. New
 readers share a bounded grouped prefill and share their dense and expert
 projections with active decoder verification.

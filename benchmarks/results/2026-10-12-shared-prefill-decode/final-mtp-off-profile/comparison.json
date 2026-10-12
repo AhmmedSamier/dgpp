@@ -1,0 +1,71 @@
+{
+  "scope": "CUDA graph kernels; sums include overlapping streams, not wall time",
+  "modes": {
+    "candidate-deferred": {
+      "prefetch": {
+        "calls": 50038,
+        "total_ms": 3011.456128
+      },
+      "moe_slot_gate_up_swiglu_fp4": {
+        "calls": 12192,
+        "total_ms": 1864.847263
+      },
+      "mma": {
+        "calls": 65532,
+        "total_ms": 4170.477759
+      },
+      "other": {
+        "calls": 196850,
+        "total_ms": 3399.0121920000006
+      },
+      "moe_slot_down_fp4": {
+        "calls": 12192,
+        "total_ms": 743.202624
+      }
+    },
+    "candidate": {
+      "prefetch": {
+        "calls": 50038,
+        "total_ms": 2994.416672
+      },
+      "moe_slot_gate_up_swiglu_fp4": {
+        "calls": 12192,
+        "total_ms": 2407.58304
+      },
+      "mma": {
+        "calls": 65518,
+        "total_ms": 4163.633472
+      },
+      "moe_slot_down_fp4": {
+        "calls": 12192,
+        "total_ms": 1017.6956799999999
+      },
+      "other": {
+        "calls": 196613,
+        "total_ms": 3356.863647999998
+      }
+    },
+    "control": {
+      "prefetch": {
+        "calls": 50038,
+        "total_ms": 2950.087072
+      },
+      "moe_slot_gate_up_swiglu_fp4": {
+        "calls": 12192,
+        "total_ms": 1891.600672
+      },
+      "mma": {
+        "calls": 65532,
+        "total_ms": 4169.344959999999
+      },
+      "other": {
+        "calls": 196850,
+        "total_ms": 3373.2596479999993
+      },
+      "moe_slot_down_fp4": {
+        "calls": 12192,
+        "total_ms": 746.186208
+      }
+    }
+  }
+}

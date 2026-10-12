@@ -16,6 +16,7 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'scripts'))
 from serve_admission_bench import Bench, SCENARIOS
+from arrival_bench import ArrivalBench
 sys.path.insert(0, str(ROOT / 'benchmarks/results/2026-10-11-pr95-followups'))
 from node_snapshot import capture
 
@@ -56,11 +57,16 @@ def main():
     ap.add_argument('--compact', action='store_true')
     ap.add_argument('--words', type=int, default=8192)
     ap.add_argument('--decode-tokens', type=int, default=512)
+    ap.add_argument('--arrival-pattern', choices=['counting', 'varied'], default='counting')
     ap.add_argument('--checks', action='store_true')
     ap.add_argument('--same-binary-control', action='store_true')
+    ap.add_argument('--labels', nargs='+', choices=['control', 'candidate', 'candidate-deferred'])
     ap.add_argument('--candidate-first', action='store_true')
+    ap.add_argument('--resume', action='store_true')
     args = ap.parse_args()
-    args.out.mkdir(parents=True, exist_ok=False)
+    if args.resume and args.checks:
+        raise ValueError('resume is for timing-only campaigns; run remaining functional checks separately')
+    args.out.mkdir(parents=True, exist_ok=args.resume)
     with urllib.request.urlopen('http://127.0.0.1:18080/metrics', timeout=15) as response:
         initial = json.load(response)
     assert initial['scheduler']['active'] == initial['scheduler']['queued'] == initial['service']['pending_admissions'] == 0
@@ -77,8 +83,20 @@ def main():
                 pair += 1
                 if args.same_binary_control:
                     labels.append(('candidate-deferred', args.candidate, False))
+                if args.labels:
+                    labels = [entry for entry in labels if entry[0] in args.labels]
+                    if not labels:
+                        raise ValueError('no deployment labels selected; candidate-deferred requires --same-binary-control')
                 for label, binary, early in labels:
                     directory = args.out / f'w{world}-i{idle}-{label}'
+                    if args.resume and (directory / 'admission.json').exists():
+                        previous = json.loads((directory / 'admission.json').read_text())['runs']
+                        count = 3 if label == 'candidate-deferred' else args.trials * len(args.scenarios)
+                        streams = directory / 'opstreams.json'
+                        if len(previous) == count and streams.exists() and json.loads(streams.read_text())['match']:
+                            print('keep completed timing', directory, flush=True)
+                            continue
+                        raise RuntimeError(f'{directory}: incomplete timing data; choose a fresh output directory')
                     directory.mkdir()
                     config = json.loads(json.dumps(base))
                     config['world_size'] = world
@@ -99,8 +117,8 @@ def main():
                              '--bin', binary, '--log-dir', directory / 'world'], directory / 'up.log')
                         bench_args = argparse.Namespace(url='http://127.0.0.1:18081', timeout=600,
                             seed=104, prompt_words=args.words, decode_tokens=args.decode_tokens,
-                            arrival_tokens=128, arrivals=8, interval=.25)
-                        bench = Bench(bench_args)
+                            arrival_tokens=128, arrivals=8, interval=.25, arrival_pattern=args.arrival_pattern)
+                        bench = ArrivalBench(bench_args)
                         start = bench.idle()
                         assert start['service']['admission']['prefill_early_admission'] == early
                         bench.stream('warmup', 'Continue counting: 1, 2, 3,', 32)

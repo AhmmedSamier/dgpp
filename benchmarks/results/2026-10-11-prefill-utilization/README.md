@@ -1,5 +1,7 @@
 # Prefill budget utilization and throughput follow-up
 
+Historical checkpoint: the active follow-up is [shared prefill/decode execution](../2026-10-12-shared-prefill-decode/README.md). Defaults and acceptance conclusions below describe the revisions measured here.
+
 This follow-up to [PR 105](https://github.com/HawkBearPig/dgpp/pull/105) restores
 throughput-oriented admission by default and fixes a separate Qwen prefill
 budget inefficiency. It **does not make early admission throughput-neutral**.

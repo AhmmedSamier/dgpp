@@ -1,0 +1,296 @@
+{
+  "completed_scenarios": 124,
+  "completed_requests": 588,
+  "paired_requests": 288,
+  "output_mismatches": [],
+  "comparisons": [
+    {
+      "configuration": "w1-i2048",
+      "scenario": "cancel",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 21.290932136937045,
+      "reference_wall_s": 22.480256260489114,
+      "throughput_change_pct": null
+    },
+    {
+      "configuration": "w1-i2048",
+      "scenario": "mixed_long",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 21.52429623901844,
+      "reference_wall_s": 23.07059552660212,
+      "throughput_change_pct": 7.183971407997092
+    },
+    {
+      "configuration": "w1-i2048",
+      "scenario": "mixed_short",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 21.284543240559287,
+      "reference_wall_s": 22.427644924027845,
+      "throughput_change_pct": 5.370571830220405
+    },
+    {
+      "configuration": "w1-i2048",
+      "scenario": "solo_decode",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 7.834371632547118,
+      "reference_wall_s": 7.814189643366262,
+      "throughput_change_pct": -0.257608269398546
+    },
+    {
+      "configuration": "w1-i2048",
+      "scenario": "solo_prefill",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 7.616256817476824,
+      "reference_wall_s": 7.696483847917989,
+      "throughput_change_pct": 1.0533656146818782
+    },
+    {
+      "configuration": "w1-i2048",
+      "scenario": "sustained_busy",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 24.76721946906764,
+      "reference_wall_s": 27.879978999961168,
+      "throughput_change_pct": 12.568062130596157
+    },
+    {
+      "configuration": "w1-i2048",
+      "scenario": "sustained_idle",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 14.256927833077498,
+      "reference_wall_s": 14.320310570532456,
+      "throughput_change_pct": 0.44457500379502246
+    },
+    {
+      "configuration": "w1-i2048",
+      "scenario": "sustained_idle",
+      "reference": "candidate-deferred",
+      "trials": 2,
+      "candidate_wall_s": 14.256927833077498,
+      "reference_wall_s": 13.672406252473593,
+      "throughput_change_pct": -4.099912600018618
+    },
+    {
+      "configuration": "w1-i256",
+      "scenario": "cancel",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 21.341750574531034,
+      "reference_wall_s": 22.44677701406181,
+      "throughput_change_pct": null
+    },
+    {
+      "configuration": "w1-i256",
+      "scenario": "mixed_long",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 21.563291522441432,
+      "reference_wall_s": 23.04690882959403,
+      "throughput_change_pct": 6.880291469456612
+    },
+    {
+      "configuration": "w1-i256",
+      "scenario": "mixed_short",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 21.315951003460214,
+      "reference_wall_s": 22.37727423897013,
+      "throughput_change_pct": 4.9790095470646945
+    },
+    {
+      "configuration": "w1-i256",
+      "scenario": "solo_decode",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 7.8565045919967815,
+      "reference_wall_s": 7.863033876521513,
+      "throughput_change_pct": 0.08310673593168172
+    },
+    {
+      "configuration": "w1-i256",
+      "scenario": "solo_prefill",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 14.133827873505652,
+      "reference_wall_s": 14.277155545540154,
+      "throughput_change_pct": 1.0140754034734911
+    },
+    {
+      "configuration": "w1-i256",
+      "scenario": "sustained_busy",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 24.83805150189437,
+      "reference_wall_s": 27.86400781047996,
+      "throughput_change_pct": 12.182744320160555
+    },
+    {
+      "configuration": "w1-i256",
+      "scenario": "sustained_idle",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 21.35745595942717,
+      "reference_wall_s": 20.796833669533953,
+      "throughput_change_pct": -2.6249488279794786
+    },
+    {
+      "configuration": "w1-i256",
+      "scenario": "sustained_idle",
+      "reference": "candidate-deferred",
+      "trials": 2,
+      "candidate_wall_s": 21.35745595942717,
+      "reference_wall_s": 20.21788930008188,
+      "throughput_change_pct": -5.335685399563184
+    },
+    {
+      "configuration": "w4-i2048",
+      "scenario": "cancel",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 12.436108011985198,
+      "reference_wall_s": 13.178347684559412,
+      "throughput_change_pct": null
+    },
+    {
+      "configuration": "w4-i2048",
+      "scenario": "mixed_long",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 12.457344806403853,
+      "reference_wall_s": 13.599504754994996,
+      "throughput_change_pct": 9.168566547214784
+    },
+    {
+      "configuration": "w4-i2048",
+      "scenario": "mixed_short",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 12.385775278438814,
+      "reference_wall_s": 13.147080111550167,
+      "throughput_change_pct": 6.146606215572437
+    },
+    {
+      "configuration": "w4-i2048",
+      "scenario": "solo_decode",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 4.112164185498841,
+      "reference_wall_s": 4.122464278480038,
+      "throughput_change_pct": 0.25047864133245223
+    },
+    {
+      "configuration": "w4-i2048",
+      "scenario": "solo_prefill",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 6.015035970369354,
+      "reference_wall_s": 5.950636705034412,
+      "throughput_change_pct": -1.0706380751865585
+    },
+    {
+      "configuration": "w4-i2048",
+      "scenario": "sustained_busy",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 14.603508451487869,
+      "reference_wall_s": 16.496867435518652,
+      "throughput_change_pct": 12.965096643182882
+    },
+    {
+      "configuration": "w4-i2048",
+      "scenario": "sustained_idle",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 9.756847748882137,
+      "reference_wall_s": 9.776176412589848,
+      "throughput_change_pct": 0.19810356997653766
+    },
+    {
+      "configuration": "w4-i2048",
+      "scenario": "sustained_idle",
+      "reference": "candidate-deferred",
+      "trials": 2,
+      "candidate_wall_s": 9.756847748882137,
+      "reference_wall_s": 9.509192720986903,
+      "throughput_change_pct": -2.5382688576196077
+    },
+    {
+      "configuration": "w4-i256",
+      "scenario": "cancel",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 12.429534321883693,
+      "reference_wall_s": 13.223239798448049,
+      "throughput_change_pct": null
+    },
+    {
+      "configuration": "w4-i256",
+      "scenario": "mixed_long",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 12.517967823892832,
+      "reference_wall_s": 13.608095602481626,
+      "throughput_change_pct": 8.708504398837702
+    },
+    {
+      "configuration": "w4-i256",
+      "scenario": "mixed_short",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 12.442536285030656,
+      "reference_wall_s": 13.179295596084557,
+      "throughput_change_pct": 5.921295258268855
+    },
+    {
+      "configuration": "w4-i256",
+      "scenario": "solo_decode",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 4.10815072490368,
+      "reference_wall_s": 4.093729570391588,
+      "throughput_change_pct": -0.3510376195467013
+    },
+    {
+      "configuration": "w4-i256",
+      "scenario": "solo_prefill",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 8.975104236393236,
+      "reference_wall_s": 9.016434486024082,
+      "throughput_change_pct": 0.4604988258883447
+    },
+    {
+      "configuration": "w4-i256",
+      "scenario": "sustained_busy",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 14.633737839991227,
+      "reference_wall_s": 16.491277131601237,
+      "throughput_change_pct": 12.693539490188943
+    },
+    {
+      "configuration": "w4-i256",
+      "scenario": "sustained_idle",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 12.634681802010164,
+      "reference_wall_s": 12.809942579944618,
+      "throughput_change_pct": 1.3871404177869362
+    },
+    {
+      "configuration": "w4-i256",
+      "scenario": "sustained_idle",
+      "reference": "candidate-deferred",
+      "trials": 2,
+      "candidate_wall_s": 12.634681802010164,
+      "reference_wall_s": 12.581216748454608,
+      "throughput_change_pct": -0.4231610609065739
+    }
+  ]
+}

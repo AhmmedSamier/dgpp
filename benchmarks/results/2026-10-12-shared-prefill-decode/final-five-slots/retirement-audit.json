@@ -1,0 +1,82 @@
+[
+  {
+    "label": "candidate",
+    "scenario": "mixed_short",
+    "trial": 0,
+    "long_prompt_tokens": 25909,
+    "incumbent_retires_during_prefill": true,
+    "arrival_ttft_s": 0.7658493928611279,
+    "arrival_wall_s": 1.3557534259743989,
+    "arrival_finishes_during_prefill": true
+  },
+  {
+    "label": "candidate",
+    "scenario": "mixed_long",
+    "trial": 0,
+    "long_prompt_tokens": 25909,
+    "incumbent_retires_during_prefill": true,
+    "arrival_ttft_s": 0.634163451148197,
+    "arrival_wall_s": 18.67014253209345,
+    "arrival_finishes_during_prefill": false
+  },
+  {
+    "label": "candidate",
+    "scenario": "mixed_long",
+    "trial": 1,
+    "long_prompt_tokens": 25938,
+    "incumbent_retires_during_prefill": true,
+    "arrival_ttft_s": 0.6351250880397856,
+    "arrival_wall_s": 18.658184873173013,
+    "arrival_finishes_during_prefill": false
+  },
+  {
+    "label": "candidate",
+    "scenario": "mixed_short",
+    "trial": 1,
+    "long_prompt_tokens": 25938,
+    "incumbent_retires_during_prefill": true,
+    "arrival_ttft_s": 0.6381323558744043,
+    "arrival_wall_s": 1.2470505740493536,
+    "arrival_finishes_during_prefill": true
+  },
+  {
+    "label": "control",
+    "scenario": "mixed_short",
+    "trial": 0,
+    "long_prompt_tokens": 25909,
+    "incumbent_retires_during_prefill": true,
+    "arrival_ttft_s": 18.191471209051087,
+    "arrival_wall_s": 18.318166963988915,
+    "arrival_finishes_during_prefill": false
+  },
+  {
+    "label": "control",
+    "scenario": "mixed_long",
+    "trial": 0,
+    "long_prompt_tokens": 25909,
+    "incumbent_retires_during_prefill": true,
+    "arrival_ttft_s": 18.11785510298796,
+    "arrival_wall_s": 19.995729902992025,
+    "arrival_finishes_during_prefill": false
+  },
+  {
+    "label": "control",
+    "scenario": "mixed_long",
+    "trial": 1,
+    "long_prompt_tokens": 25938,
+    "incumbent_retires_during_prefill": true,
+    "arrival_ttft_s": 18.12195931794122,
+    "arrival_wall_s": 20.010860984912142,
+    "arrival_finishes_during_prefill": false
+  },
+  {
+    "label": "control",
+    "scenario": "mixed_short",
+    "trial": 1,
+    "long_prompt_tokens": 25938,
+    "incumbent_retires_during_prefill": true,
+    "arrival_ttft_s": 18.12983840587549,
+    "arrival_wall_s": 18.256796912057325,
+    "arrival_finishes_during_prefill": false
+  }
+]

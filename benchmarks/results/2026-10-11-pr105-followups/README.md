@@ -1,5 +1,7 @@
 # PR 105: admission correctness and throughput verification
 
+Historical checkpoint: the active follow-up is [shared prefill/decode execution](../2026-10-12-shared-prefill-decode/README.md). Defaults and acceptance conclusions below describe the revisions measured here.
+
 Historical record: these measurements use the runtime revisions below, when
 early admission was the default. The subsequent throughput follow-up makes
 `engine.prefill_early_admission` opt-in; current defaults do not reproduce this

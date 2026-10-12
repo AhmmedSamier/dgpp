@@ -1,0 +1,15 @@
+{
+  "command": [
+    "nsys",
+    "start",
+    "--session",
+    "dgpp-final-mtp-off-candidate",
+    "--sample=none",
+    "--cpuctxsw=none",
+    "--output",
+    "build-pr104-shared/final-mtp-off-profile/candidate/r0"
+  ],
+  "started": "2026-10-12T03:08:30.230601+00:00",
+  "returncode": 0,
+  "finished": "2026-10-12T03:08:30.545980+00:00"
+}

@@ -1,0 +1,10 @@
+{
+  "command": [
+    "python3",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-12-shared-prefill-decode/reservation_check.py",
+    "build-pr104-shared/final-checks-w1/reservation.json"
+  ],
+  "started": "2026-10-12T02:38:01.639953+00:00",
+  "returncode": 0,
+  "finished": "2026-10-12T02:38:03.210380+00:00"
+}

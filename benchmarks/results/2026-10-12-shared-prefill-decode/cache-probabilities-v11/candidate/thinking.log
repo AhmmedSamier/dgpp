@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-12-shared-prefill-decode/mixed_cache_check.py", line 80, in <module>
+    assert after['scheduler']['pool_blocks_in_use'] == after['prefix_cache']['blocks_pinned']
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError

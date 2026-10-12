@@ -1,0 +1,11 @@
+{
+  "command": [
+    "nsys",
+    "stop",
+    "--session",
+    "dgpp-final-mtp-off-candidate-deferred"
+  ],
+  "started": "2026-10-12T03:07:34.527300+00:00",
+  "returncode": 0,
+  "finished": "2026-10-12T03:07:37.152103+00:00"
+}

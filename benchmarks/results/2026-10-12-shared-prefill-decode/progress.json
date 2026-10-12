@@ -1,5 +1,5 @@
 {
-  "status": "in progress; not ready to merge",
+  "status": "correctness and final configurations passed; residual throughput diagnosis in progress",
   "baseline_commit": "9593c48eda1816de3ac90286b4337a8f4ef36bb4",
   "sampling_diagnosis": {
     "seed": 4567,
@@ -23,17 +23,22 @@
     "rebuilt_v11_host": "4/4 passed (174.25 s)",
     "rebuilt_v11_gpu": "9/9 passed (38.78 s)",
     "rebuilt_v11_memcheck": "zero errors",
-    "rebuilt_v11_gdn_snapshots": "passed"
+    "rebuilt_v11_gdn_snapshots": "passed",
+    "mixed_snapshot_restore": "bitwise across slot reuse, all acceptance lengths 1-4, both snapshot forms; memcheck zero errors",
+    "main_timing": "124 scenarios, 588 requests, 288 exact paired responses; source e17cf1eb",
+    "canonical_transcripts": "chat/code/math/json match pre-PR on one and four nodes",
+    "serving_api_and_reservation": "passed on one and four nodes",
+    "cache_stress": "world1: 144 successes, 40 hits, 148 evictions, 403 hops; world4: 222 successes + 6 overload rejections, 61 hits, 219 evictions, 674 hops; recovery and rank streams pass",
+    "additional_timing": "5 slots/compact MTP3, compact MTP off, 4-node MTP1 complete: 36 scenarios, 168 requests, 84 exact pairs"
   },
   "remaining": [
-    "Further equal-budget throughput improvement and final matched acceptance",
-    "Final one- and four-node verification of committed binary",
-    "API, cache, reservation, cancellation, and sustained-load final checks"
+    "Attribute MTP-off idle-burst cost and measure varied prompts",
+    "Publish final acceptance record and assess remaining measured throughput cost before merging"
   ],
   "checkpoint_commits": [
     "b1b54df5",
     "eb9365b9",
     "e17cf1eb"
   ],
-  "active_campaign": "build-pr104-shared/final-v11: one/four nodes, equal/split budgets, same-binary deferred control, API/cache/reservation/soak"
+  "active_campaign": "final-route-diagnosis-fixed: separate instrumented executable; timings use immutable e17cf1eb binary"
 }

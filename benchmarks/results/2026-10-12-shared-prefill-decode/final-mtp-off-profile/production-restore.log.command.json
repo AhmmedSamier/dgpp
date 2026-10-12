@@ -1,0 +1,14 @@
+{
+  "command": [
+    "python3",
+    "scripts/dgpp-cluster",
+    "up",
+    "--config",
+    "/home/stephen/workspace/dgpp/deploy/cluster_qwen-3.8-flash-next_fp8_w4.example.json",
+    "--bin",
+    "build-release/dgpp-serve"
+  ],
+  "started": "2026-10-12T03:10:10.338989+00:00",
+  "returncode": 0,
+  "finished": "2026-10-12T03:10:53.281815+00:00"
+}

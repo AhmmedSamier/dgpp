@@ -1,0 +1,16 @@
+{
+  "command": [
+    "python3",
+    "scripts/dgpp-cluster",
+    "up",
+    "--config",
+    "build-pr104-shared/final-cache-stress-w4/deployment.json",
+    "--bin",
+    "build-pr104-shared/shared-v11/dgpp-serve",
+    "--log-dir",
+    "build-pr104-shared/final-cache-stress-w4/world"
+  ],
+  "started": "2026-10-12T02:59:42.593248+00:00",
+  "returncode": 0,
+  "finished": "2026-10-12T03:00:11.577857+00:00"
+}

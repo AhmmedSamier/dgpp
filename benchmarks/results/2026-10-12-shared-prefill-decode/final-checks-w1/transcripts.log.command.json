@@ -1,0 +1,15 @@
+{
+  "command": [
+    "python3",
+    "scripts/serve_greedy_transcript.py",
+    "127.0.0.1",
+    "18081",
+    "--max-tokens",
+    "128",
+    "--out",
+    "build-pr104-shared/final-checks-w1/transcripts.json"
+  ],
+  "started": "2026-10-12T02:38:18.115320+00:00",
+  "returncode": 0,
+  "finished": "2026-10-12T02:38:29.216119+00:00"
+}

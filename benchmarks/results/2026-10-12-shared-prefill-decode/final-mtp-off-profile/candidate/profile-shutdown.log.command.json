@@ -1,0 +1,12 @@
+{
+  "command": [
+    "nsys",
+    "shutdown",
+    "--session",
+    "dgpp-final-mtp-off-candidate",
+    "--kill=none"
+  ],
+  "started": "2026-10-12T03:08:55.578928+00:00",
+  "returncode": 1,
+  "finished": "2026-10-12T03:08:55.643803+00:00"
+}

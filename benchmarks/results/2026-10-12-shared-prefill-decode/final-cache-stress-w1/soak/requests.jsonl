@@ -1,0 +1,145 @@
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 465.5728689394891, "tokens": 43, "wall_ms": 1824.4914549868554, "pace_ms": 31.754350189917854, "code": null, "t": 1.825}
+{"kind": "cancel", "status": 200, "ttft_ms": 2106.98149795644, "tokens": 24, "wall_ms": 2775.294540915638, "pace_ms": 29.051831002225693, "code": null, "abandon_after": 24, "t": 2.778}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 464.8033678531647, "tokens": 64, "wall_ms": 2905.189235927537, "pace_ms": 38.73195693946429, "code": null, "t": 2.907}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 464.9413861334324, "tokens": 64, "wall_ms": 2905.0198250915855, "pace_ms": 38.72839371407671, "code": null, "t": 2.907}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 1589.7980169393122, "tokens": 40, "wall_ms": 2978.1012770254165, "pace_ms": 32.298241974785924, "code": null, "t": 5.885}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 2031.4902011305094, "tokens": 62, "wall_ms": 4575.407437048852, "pace_ms": 41.698299508663965, "code": null, "t": 6.4}
+{"kind": "cancel", "status": 200, "ttft_ms": 1058.415950043127, "tokens": 14, "wall_ms": 1650.4301119130105, "pace_ms": 45.53119261534168, "code": null, "abandon_after": 14, "t": 6.762}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 1435.851386981085, "tokens": 64, "wall_ms": 4496.6166040394455, "pace_ms": 48.581178887702876, "code": null, "t": 7.403}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 1518.4913750272244, "tokens": 32, "wall_ms": 3084.446747088805, "pace_ms": 49.66633003054848, "code": null, "t": 8.969}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 1464.8159460630268, "tokens": 32, "wall_ms": 2800.939059117809, "pace_ms": 42.25599502904281, "code": null, "t": 9.201}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 949.1383810527623, "tokens": 63, "wall_ms": 3722.594544989988, "pace_ms": 44.30740975564526, "code": null, "t": 11.126}
+{"kind": "cancel", "status": 200, "ttft_ms": 345.18854692578316, "tokens": 24, "wall_ms": 1013.7024079449475, "pace_ms": 29.061379650121797, "code": null, "abandon_after": 24, "t": 12.189}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 359.914236003533, "tokens": 64, "wall_ms": 3275.5340631119907, "pace_ms": 46.27720914441087, "code": null, "t": 12.728}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 438.4764521382749, "tokens": 59, "wall_ms": 2966.238551074639, "pace_ms": 43.14758044523026, "code": null, "t": 12.858}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 1183.4927259478718, "tokens": 63, "wall_ms": 4222.209804924205, "pace_ms": 46.952976852715494, "code": null, "t": 15.664}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 1001.6959859058261, "tokens": 64, "wall_ms": 3682.677205884829, "pace_ms": 42.54741403126409, "code": null, "t": 16.411}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 1204.2249720543623, "tokens": 59, "wall_ms": 3708.7076648604125, "pace_ms": 43.178784050818145, "code": null, "t": 16.567}
+{"kind": "cancel", "status": 200, "ttft_ms": 876.681077061221, "tokens": 18, "wall_ms": 1495.8834231365472, "pace_ms": 36.40398140722776, "code": null, "abandon_after": 18, "t": 16.567}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 1565.5404040589929, "tokens": 64, "wall_ms": 4291.65144613944, "pace_ms": 42.85639977925236, "code": null, "t": 19.956}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 1119.5767289027572, "tokens": 64, "wall_ms": 3847.4469240754843, "pace_ms": 43.297153779320304, "code": null, "t": 20.415}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 1122.7392151486129, "tokens": 64, "wall_ms": 4003.5441152285784, "pace_ms": 45.725193174023715, "code": null, "t": 20.415}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 1548.6482370179147, "tokens": 37, "wall_ms": 3157.943160040304, "pace_ms": 43.998016691249276, "code": null, "t": 23.114}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 522.9552388191223, "tokens": 44, "wall_ms": 1979.0581460110843, "pace_ms": 33.86127279508253, "code": null, "t": 23.114}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 711.6450569592416, "tokens": 45, "wall_ms": 2321.373635903001, "pace_ms": 36.583255680108614, "code": null, "t": 23.114}
+{"kind": "cancel", "status": 200, "ttft_ms": 1994.615277973935, "tokens": 32, "wall_ms": 3454.5649299398065, "pace_ms": 47.09162845486595, "code": null, "abandon_after": 32, "t": 24.831}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 1283.815650967881, "tokens": 60, "wall_ms": 3729.523890186101, "pace_ms": 39.29186005429444, "code": null, "t": 26.844}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 1283.7006729096174, "tokens": 64, "wall_ms": 3729.5717468950897, "pace_ms": 38.82148038108079, "code": null, "t": 26.844}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 1451.7050459980965, "tokens": 60, "wall_ms": 3999.413086101413, "pace_ms": 41.02727916817796, "code": null, "t": 27.811}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 1120.4236058983952, "tokens": 37, "wall_ms": 2662.1053519193083, "pace_ms": 42.120480502489954, "code": null, "t": 29.506}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 859.7424339968711, "tokens": 47, "wall_ms": 2568.768242141232, "pace_ms": 37.147525829546474, "code": null, "t": 30.38}
+{"kind": "cancel", "status": 200, "ttft_ms": 1271.2191040627658, "tokens": 29, "wall_ms": 2424.136060057208, "pace_ms": 41.17259463860786, "code": null, "abandon_after": 29, "t": 30.941}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 1120.1112971175462, "tokens": 63, "wall_ms": 4248.20871418342, "pace_ms": 50.45169275704651, "code": null, "t": 31.092}
+{"kind": "long", "status": 200, "ttft_ms": 464.51650001108646, "tokens": 512, "wall_ms": 32617.480002809316, "pace_ms": 62.87209239903174, "code": null, "t": 32.619}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 989.5570371299982, "tokens": 33, "wall_ms": 2442.030710168183, "pace_ms": 41.444052127189934, "code": null, "t": 32.822}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 1135.9644790645689, "tokens": 64, "wall_ms": 3915.848903125152, "pace_ms": 43.723514303565025, "code": null, "t": 34.326}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 328.69562902487814, "tokens": 64, "wall_ms": 3346.4239458553493, "pace_ms": 47.49825545808389, "code": null, "t": 35.184}
+{"kind": "cancel", "status": 200, "ttft_ms": 809.2272060457617, "tokens": 29, "wall_ms": 2070.362245896831, "pace_ms": 45.0380702469764, "code": null, "abandon_after": 29, "t": 35.891}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 403.79994502291083, "tokens": 63, "wall_ms": 3847.491232911125, "pace_ms": 55.13953366091535, "code": null, "t": 37.05}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 1564.6556271240115, "tokens": 40, "wall_ms": 3280.081151984632, "pace_ms": 43.983002766393696, "code": null, "t": 37.606}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 1512.9042728804052, "tokens": 62, "wall_ms": 4047.549946932122, "pace_ms": 39.48682414932696, "code": null, "t": 39.231}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 555.8307350147516, "tokens": 43, "wall_ms": 2181.3479780685157, "pace_ms": 38.70125357172496, "code": null, "t": 39.231}
+{"kind": "cancel", "status": 200, "ttft_ms": 708.9185530785471, "tokens": 25, "wall_ms": 1640.741010196507, "pace_ms": 38.8222016626969, "code": null, "abandon_after": 25, "t": 40.442}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 807.6883659232408, "tokens": 64, "wall_ms": 4625.269112875685, "pace_ms": 60.19004103210237, "code": null, "t": 42.231}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 882.632328895852, "tokens": 57, "wall_ms": 3579.6762979589403, "pace_ms": 45.908524446921156, "code": null, "t": 42.811}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 2647.1404258627445, "tokens": 64, "wall_ms": 5361.540807876736, "pace_ms": 42.67392241366444, "code": null, "t": 44.593}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 329.57024802453816, "tokens": 43, "wall_ms": 1975.753973936662, "pace_ms": 39.191576663316006, "code": null, "t": 45.432}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 349.389195907861, "tokens": 64, "wall_ms": 3779.424676904455, "pace_ms": 54.44318233501343, "code": null, "t": 46.938}
+{"kind": "cancel", "status": 200, "ttft_ms": 910.9106338582933, "tokens": 9, "wall_ms": 1114.108784822747, "pace_ms": 25.38675462710671, "code": null, "abandon_after": 9, "t": 47.446}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 379.7116989735514, "tokens": 64, "wall_ms": 3608.418304938823, "pace_ms": 51.247808191600065, "code": null, "t": 48.434}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 1495.3384911641479, "tokens": 39, "wall_ms": 3034.257749095559, "pace_ms": 40.49451263180297, "code": null, "t": 49.973}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 605.9445450082421, "tokens": 64, "wall_ms": 4540.636488934979, "pace_ms": 62.04621164896895, "code": null, "t": 49.973}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 530.5157450493425, "tokens": 21, "wall_ms": 1439.8498539812863, "pace_ms": 44.16172745404765, "code": null, "t": 51.413}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 858.1499718129635, "tokens": 21, "wall_ms": 1670.1633809134364, "pace_ms": 39.32030090363696, "code": null, "t": 51.644}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 807.8398709185421, "tokens": 62, "wall_ms": 3541.641710093245, "pace_ms": 44.812763197591806, "code": null, "t": 51.976}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 633.3521520718932, "tokens": 45, "wall_ms": 2262.0668651070446, "pace_ms": 36.44759790569713, "code": null, "t": 54.479}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 594.1118060145527, "tokens": 62, "wall_ms": 3039.5051969680935, "pace_ms": 39.6748714599392, "code": null, "t": 55.016}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 709.9907691590488, "tokens": 63, "wall_ms": 3582.644743146375, "pace_ms": 45.92312843493757, "code": null, "t": 55.898}
+{"kind": "cancel", "status": 200, "ttft_ms": 1813.8925090897828, "tokens": 33, "wall_ms": 3308.6216980591416, "pace_ms": 46.707843626791146, "code": null, "abandon_after": 33, "t": 56.256}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 384.15891700424254, "tokens": 43, "wall_ms": 2497.12726008147, "pace_ms": 46.66183459838586, "code": null, "t": 58.267}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 1171.8423240818083, "tokens": 60, "wall_ms": 3788.1870470009744, "pace_ms": 43.89895610037749, "code": null, "t": 58.267}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 1324.4652540888637, "tokens": 47, "wall_ms": 3153.448624070734, "pace_ms": 39.75799147788759, "code": null, "t": 59.052}
+{"kind": "cancel", "status": 200, "ttft_ms": 767.0547680463642, "tokens": 39, "wall_ms": 2132.301131961867, "pace_ms": 35.92397710063348, "code": null, "abandon_after": 39, "t": 60.878}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 632.1912659332156, "tokens": 57, "wall_ms": 3496.3227729313076, "pace_ms": 47.99944734051159, "code": null, "t": 61.763}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 1066.0822719801217, "tokens": 63, "wall_ms": 3900.385237997398, "pace_ms": 45.30684719417965, "code": null, "t": 62.168}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 2711.7070290260017, "tokens": 58, "wall_ms": 5816.34796387516, "pace_ms": 54.02036205244561, "code": null, "t": 64.868}
+{"kind": "burst", "status": 200, "tokens": 16, "wall_ms": 2651.851945091039, "code": null, "t": 67.967}
+{"kind": "burst", "status": 200, "tokens": 16, "wall_ms": 3048.504719045013, "code": null, "t": 67.967}
+{"kind": "burst", "status": 200, "tokens": 16, "wall_ms": 3553.0601430218667, "code": null, "t": 67.967}
+{"kind": "burst", "status": 200, "tokens": 16, "wall_ms": 4056.9483039435, "code": null, "t": 67.967}
+{"kind": "burst", "status": 200, "tokens": 16, "wall_ms": 4460.135962814093, "code": null, "t": 67.967}
+{"kind": "burst", "status": 200, "tokens": 16, "wall_ms": 5900.919641833752, "code": null, "t": 67.967}
+{"kind": "burst", "status": 200, "tokens": 16, "wall_ms": 5522.080139955506, "code": null, "t": 67.967}
+{"kind": "burst", "status": 200, "tokens": 16, "wall_ms": 5123.238282976672, "code": null, "t": 67.967}
+{"kind": "burst", "status": 200, "tokens": 16, "wall_ms": 6177.31842212379, "code": null, "t": 67.967}
+{"kind": "burst", "status": 200, "tokens": 16, "wall_ms": 6580.449560889974, "code": null, "t": 67.967}
+{"kind": "burst", "status": 200, "tokens": 16, "wall_ms": 6958.578038960695, "code": null, "t": 67.967}
+{"kind": "burst", "status": 200, "tokens": 16, "wall_ms": 7235.652972944081, "code": null, "t": 67.967}
+{"kind": "burst", "status": 200, "tokens": 16, "wall_ms": 7563.150587957352, "code": null, "t": 67.967}
+{"kind": "burst", "status": 200, "tokens": 16, "wall_ms": 7941.717934096232, "code": null, "t": 67.967}
+{"kind": "burst_summary", "fired": 14, "served": 14, "shed": 0, "t": 67.967}
+{"kind": "long", "status": 200, "ttft_ms": 588.2701508235186, "tokens": 512, "wall_ms": 35302.500046789646, "pace_ms": 67.88498277497094, "code": null, "t": 68.497}
+{"kind": "cancel", "status": 200, "ttft_ms": 3454.1605128906667, "tokens": 35, "wall_ms": 4614.298358093947, "pace_ms": 34.119394443490926, "code": null, "abandon_after": 35, "t": 69.43}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 4974.637939129025, "tokens": 64, "wall_ms": 8032.482241047546, "pace_ms": 48.13302460215276, "code": null, "t": 70.924}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 5824.615074088797, "tokens": 63, "wall_ms": 9892.862532055005, "pace_ms": 65.61539046496394, "code": null, "t": 71.656}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 3358.2069859839976, "tokens": 64, "wall_ms": 6240.168716059998, "pace_ms": 45.744095252649416, "code": null, "t": 71.656}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 859.1298090759665, "tokens": 61, "wall_ms": 3242.748604156077, "pace_ms": 39.302481384947896, "code": null, "t": 74.167}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 774.717265041545, "tokens": 64, "wall_ms": 3142.1042361762375, "pace_ms": 37.57441079332715, "code": null, "t": 74.798}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 404.8044220544398, "tokens": 62, "wall_ms": 2999.9788210261613, "pace_ms": 40.07016393340758, "code": null, "t": 75.43}
+{"kind": "cancel", "status": 200, "ttft_ms": 356.6055968403816, "tokens": 23, "wall_ms": 1315.316571854055, "pace_ms": 43.57347623656758, "code": null, "abandon_after": 23, "t": 75.43}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 1566.394557012245, "tokens": 27, "wall_ms": 2726.1113421991467, "pace_ms": 43.623688962095635, "code": null, "t": 76.893}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 656.6263281274587, "tokens": 63, "wall_ms": 3233.7320121005177, "pace_ms": 41.56339588394809, "code": null, "t": 78.664}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 354.4644499197602, "tokens": 43, "wall_ms": 2045.9765729028732, "pace_ms": 40.27014190796763, "code": null, "t": 79.22}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 1615.1761431246996, "tokens": 63, "wall_ms": 4549.873209092766, "pace_ms": 46.92442820692855, "code": null, "t": 79.348}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 556.4120039343834, "tokens": 43, "wall_ms": 2419.7178829926997, "pace_ms": 43.749485979788005, "code": null, "t": 81.084}
+{"kind": "cancel", "status": 200, "ttft_ms": 414.50801910832524, "tokens": 10, "wall_ms": 717.2855651006103, "pace_ms": 33.62448609227108, "code": null, "abandon_after": 10, "t": 82.066}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 753.6905109882355, "tokens": 62, "wall_ms": 3274.561963044107, "pace_ms": 41.323222197042625, "code": null, "t": 82.495}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 555.9976249933243, "tokens": 64, "wall_ms": 3709.0367290657014, "pace_ms": 49.64005800023202, "code": null, "t": 83.329}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 1010.2348090149462, "tokens": 44, "wall_ms": 3080.3179261274636, "pace_ms": 48.13736060439327, "code": null, "t": 84.566}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 606.139977928251, "tokens": 35, "wall_ms": 2197.8348470292985, "pace_ms": 43.0528946179787, "code": null, "t": 84.693}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 758.7794200517237, "tokens": 24, "wall_ms": 1635.4030780494213, "pace_ms": 37.019611558998406, "code": null, "t": 86.201}
+{"kind": "cancel", "status": 200, "ttft_ms": 630.8132710400969, "tokens": 38, "wall_ms": 2063.6212760582566, "pace_ms": 38.71727570564159, "code": null, "abandon_after": 38, "t": 86.934}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 808.0268849153072, "tokens": 62, "wall_ms": 3605.0203000195324, "pace_ms": 43.78292093542023, "code": null, "t": 86.934}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 1565.6048750970513, "tokens": 20, "wall_ms": 2322.106783045456, "pace_ms": 38.45692262984812, "code": null, "t": 88.524}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 1109.7240219824016, "tokens": 33, "wall_ms": 2245.122953085229, "pace_ms": 34.68556547159096, "code": null, "t": 89.179}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 835.1103719323874, "tokens": 64, "wall_ms": 4377.105141989887, "pace_ms": 56.22054527084979, "code": null, "t": 90.022}
+{"kind": "cancel", "status": 200, "ttft_ms": 658.2564481068403, "tokens": 40, "wall_ms": 1868.3939990587533, "pace_ms": 31.02715604771406, "code": null, "abandon_after": 40, "t": 91.511}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 369.7146219201386, "tokens": 46, "wall_ms": 2262.6705940347165, "pace_ms": 42.06268555588193, "code": null, "t": 91.638}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 523.2864019926637, "tokens": 64, "wall_ms": 3803.5487590823323, "pace_ms": 51.65762531881531, "code": null, "t": 93.302}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 1184.6658850554377, "tokens": 63, "wall_ms": 3606.3030548393726, "pace_ms": 38.646962805350704, "code": null, "t": 95.244}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 2927.165945060551, "tokens": 63, "wall_ms": 5752.533263061196, "pace_ms": 45.56874380702333, "code": null, "t": 95.775}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 757.5639840215445, "tokens": 59, "wall_ms": 3294.3439760711044, "pace_ms": 43.30161172527306, "code": null, "t": 96.597}
+{"kind": "cancel", "status": 200, "ttft_ms": 632.9251150600612, "tokens": 25, "wall_ms": 1313.6809030547738, "pace_ms": 28.3587744149069, "code": null, "abandon_after": 25, "t": 97.581}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 884.0673980303109, "tokens": 63, "wall_ms": 3421.1216690018773, "pace_ms": 40.91689877227069, "code": null, "t": 98.666}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 695.9143220447004, "tokens": 61, "wall_ms": 3238.886437844485, "pace_ms": 42.38140484861409, "code": null, "t": 99.014}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 1614.8606659844518, "tokens": 32, "wall_ms": 3228.42860291712, "pace_ms": 51.227975163548706, "code": null, "t": 99.825}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 329.22537601552904, "tokens": 39, "wall_ms": 1846.1853680200875, "pace_ms": 39.252577894857446, "code": null, "t": 101.115}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 359.0945841278881, "tokens": 63, "wall_ms": 3264.3817940261215, "pace_ms": 46.45171193330879, "code": null, "t": 102.226}
+{"kind": "cancel", "status": 200, "ttft_ms": 1036.6808550897986, "tokens": 40, "wall_ms": 2526.6116310376674, "pace_ms": 38.20106602058961, "code": null, "abandon_after": 40, "t": 102.91}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 1465.2889198623598, "tokens": 31, "wall_ms": 3106.8951738998294, "pace_ms": 54.716148134320974, "code": null, "t": 104.222}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 389.3853141926229, "tokens": 64, "wall_ms": 4507.472921162844, "pace_ms": 65.36479272864877, "code": null, "t": 104.88}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 1354.4311048462987, "tokens": 23, "wall_ms": 2211.193004855886, "pace_ms": 38.9324927342717, "code": null, "t": 106.434}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 1667.7434560842812, "tokens": 55, "wall_ms": 4207.614663057029, "pace_ms": 46.56505851609701, "code": null, "t": 106.434}
+{"kind": "cancel", "status": 200, "ttft_ms": 1716.326197842136, "tokens": 9, "wall_ms": 2034.3435839749873, "pace_ms": 39.74225514684804, "code": null, "abandon_after": 9, "t": 107.056}
+{"kind": "long", "status": 200, "ttft_ms": 379.25352388992906, "tokens": 512, "wall_ms": 37369.630043860525, "pace_ms": 72.33812209216917, "code": null, "t": 107.788}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 1050.8111538365483, "tokens": 51, "wall_ms": 2816.974113928154, "pace_ms": 35.318788420408964, "code": null, "t": 109.251}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 999.5764249470085, "tokens": 64, "wall_ms": 4371.073712827638, "pace_ms": 53.51338777617212, "code": null, "t": 109.251}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 884.3460700009018, "tokens": 43, "wall_ms": 2473.8951488398015, "pace_ms": 35.44541804807349, "code": null, "t": 109.251}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 663.41039002873, "tokens": 23, "wall_ms": 1696.5353470295668, "pace_ms": 45.80162168184126, "code": null, "t": 110.948}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 1343.9254281111062, "tokens": 35, "wall_ms": 2817.0564190950245, "pace_ms": 39.613265907117984, "code": null, "t": 112.068}
+{"kind": "cancel", "status": 200, "ttft_ms": 607.3290470521897, "tokens": 13, "wall_ms": 937.4308970291167, "pace_ms": 27.50040074655165, "code": null, "abandon_after": 13, "t": 112.701}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 581.8634529132396, "tokens": 39, "wall_ms": 2283.217882970348, "pace_ms": 44.10300628698774, "code": null, "t": 113.231}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 807.4949199799448, "tokens": 63, "wall_ms": 3721.9507419504225, "pace_ms": 46.59062749781315, "code": null, "t": 113.359}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 506.8433550186455, "tokens": 62, "wall_ms": 3175.4232000093907, "pace_ms": 41.65925369139944, "code": null, "t": 115.799}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 1189.7927760146558, "tokens": 47, "wall_ms": 3039.194953162223, "pace_ms": 40.20079510772358, "code": null, "t": 116.398}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 605.6923728901893, "tokens": 63, "wall_ms": 3653.164445888251, "pace_ms": 48.745607968509916, "code": null, "t": 117.138}
+{"kind": "cancel", "status": 200, "ttft_ms": 843.57442217879, "tokens": 13, "wall_ms": 1276.1893190909177, "pace_ms": 36.033853073604405, "code": null, "abandon_after": 13, "t": 117.138}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 598.3162778429687, "tokens": 25, "wall_ms": 1874.351381789893, "pace_ms": 53.16106254273715, "code": null, "t": 117.674}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 839.3303579650819, "tokens": 25, "wall_ms": 1756.1135690193623, "pace_ms": 32.890486831699185, "code": null, "t": 119.43}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 689.0842691063881, "tokens": 48, "wall_ms": 2522.0303169917315, "pace_ms": 36.27369357173906, "code": null, "t": 119.66}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 1072.2849080339074, "tokens": 63, "wall_ms": 3834.433384006843, "pace_ms": 44.54874158311154, "code": null, "t": 120.232}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 826.5319359488785, "tokens": 40, "wall_ms": 1973.9947819616646, "pace_ms": 26.822108279865905, "code": null, "t": 121.634}
+{"kind": "short", "turn": 1, "status": 200, "ttft_ms": 560.8883139211684, "tokens": 43, "wall_ms": 1911.166116828099, "pace_ms": 32.14526649874946, "code": null, "t": 121.837}
+{"kind": "short", "turn": 2, "status": 200, "ttft_ms": 554.8347069416195, "tokens": 63, "wall_ms": 2566.6624680161476, "pace_ms": 32.029224176620765, "code": null, "t": 124.404}
+{"kind": "short", "turn": 3, "status": 200, "ttft_ms": 713.7816529721022, "tokens": 64, "wall_ms": 2729.2063699569553, "pace_ms": 31.988272665157204, "code": null, "t": 127.134}
+{"kind": "long", "status": 200, "ttft_ms": 569.7289342060685, "tokens": 512, "wall_ms": 23066.937832161784, "pace_ms": 43.975971612273746, "code": null, "t": 132.412}

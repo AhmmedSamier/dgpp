@@ -1,0 +1,73 @@
+2026-10-12 02:28:28.033 === starting Qwen/Qwen3.8-Flash-Next-FP8 on 4 node(s) [world] (build-pr104-shared/cache-probabilities-v11/control/deployment.json)
+2026-10-12 02:28:28.033 === checking for existing rank processes
+2026-10-12 02:28:28.979 === checking deployment readiness on all nodes
+OK   rank 0 (192.168.88.11) platform: Linux aarch64; supported target is Linux/aarch64 GB10
+OK   rank 0 (192.168.88.11) Python: 3.12.3; Python 3.10+ is required
+OK   rank 0 (192.168.88.11) commands: python3, timeout, ldd, ssh, scp, curl, jq
+OK   rank 0 (192.168.88.11) node address: rank 0 address 192.168.88.11 belongs to this host
+OK   rank 0 (192.168.88.11) GPU: NVIDIA GB10, 12.1, [N/A]
+OK   rank 0 (192.168.88.11) logs/staging: /home/stephen/workspace/dgpp/build-pr104-shared/cache-probabilities-v11/control/world: parent /home/stephen/workspace/dgpp/build-pr104-shared/cache-probabilities-v11/control/world, 242.1 GiB free
+OK   rank 0 (192.168.88.11) resident cache: ~/.cache/dgpp/resident: parent /home/stephen/.cache/dgpp/resident, 242.1 GiB free
+OK   rank 0 (192.168.88.11) model cache: /home/stephen/.cache/huggingface/hub: parent /home/stephen/.cache/huggingface/hub, 242.1 GiB free
+OK   rank 0 (192.168.88.11) checkpoint: /home/stephen/.cache/huggingface/hub/models--Qwen--Qwen3.8-Flash-Next-FP8/snapshots/236dfdf285828023ca3bcd3f37366c58a3469b13: 172.8 GiB; all indexed shards have consistent lengths (not a content hash check)
+OK   rank 0 (192.168.88.11) available memory: 116.9 GiB; startup enforces the exact model memory plan
+OK   rank 0 (192.168.88.11) HTTP port: 127.0.0.1:18081 is available
+OK   rank 0 (192.168.88.11) fabric port: 0.0.0.0:29970 is available
+OK   rank 0 (192.168.88.11) journal port: 0.0.0.0:29971 is available
+OK   rank 0 (192.168.88.11) RoCE rocep1s0f0: port 1, routable v2 GIDs: [('3', '0000:0000:0000:0000:0000:ffff:c0a8:580b')]; verify these subnets connect corresponding lanes on every node
+OK   rank 0 (192.168.88.11) runtime libraries: all binary dependencies resolve
+OK   rank 0 (192.168.88.11) server version: dgpp-serve 0.1.0+g3426204f065a (git 3426204f065a, cuda 13.0)
+OK   rank 1 (192.168.88.12) platform: Linux aarch64; supported target is Linux/aarch64 GB10
+OK   rank 1 (192.168.88.12) Python: 3.12.3; Python 3.10+ is required
+OK   rank 1 (192.168.88.12) commands: python3, timeout, ldd
+OK   rank 1 (192.168.88.12) node address: rank 1 address 192.168.88.12 belongs to this host
+OK   rank 1 (192.168.88.12) GPU: NVIDIA GB10, 12.1, [N/A]
+OK   rank 1 (192.168.88.12) logs/staging: /tmp/bus4/deployments/7c13c1ee81de30ec: parent /tmp/bus4/deployments, 449.1 GiB free
+OK   rank 1 (192.168.88.12) resident cache: ~/.cache/dgpp/resident: parent /home/stephen/.cache/dgpp/resident, 449.1 GiB free
+OK   rank 1 (192.168.88.12) model cache: /home/stephen/.cache/huggingface/hub: parent /home/stephen/.cache/huggingface/hub, 449.1 GiB free
+OK   rank 1 (192.168.88.12) checkpoint: /home/stephen/.cache/huggingface/hub/models--Qwen--Qwen3.8-Flash-Next-FP8/snapshots/236dfdf285828023ca3bcd3f37366c58a3469b13: 172.8 GiB; all indexed shards have consistent lengths (not a content hash check)
+OK   rank 1 (192.168.88.12) available memory: 117.5 GiB; startup enforces the exact model memory plan
+OK   rank 1 (192.168.88.12) RoCE rocep1s0f0: port 1, routable v2 GIDs: [('3', '0000:0000:0000:0000:0000:ffff:c0a8:580c')]; verify these subnets connect corresponding lanes on every node
+OK   rank 1 (192.168.88.12) peer runtime libraries: libibverbs.so, libcudart.so.13, libcublasLt.so.13, libstdc++.so
+WARN rank 1 (192.168.88.12) peer binary: development binary will be staged; verify identical OS/compiler runtime compatibility
+OK   rank 2 (192.168.88.13) platform: Linux aarch64; supported target is Linux/aarch64 GB10
+OK   rank 2 (192.168.88.13) Python: 3.12.3; Python 3.10+ is required
+OK   rank 2 (192.168.88.13) commands: python3, timeout, ldd
+OK   rank 2 (192.168.88.13) node address: rank 2 address 192.168.88.13 belongs to this host
+OK   rank 2 (192.168.88.13) GPU: NVIDIA GB10, 12.1, [N/A]
+OK   rank 2 (192.168.88.13) logs/staging: /tmp/bus4/deployments/7c13c1ee81de30ec: parent /tmp/bus4/deployments, 693.7 GiB free
+OK   rank 2 (192.168.88.13) resident cache: ~/.cache/dgpp/resident: parent /home/stephen/.cache/dgpp/resident, 693.7 GiB free
+OK   rank 2 (192.168.88.13) model cache: /home/stephen/.cache/huggingface/hub: parent /home/stephen/.cache/huggingface/hub, 693.7 GiB free
+OK   rank 2 (192.168.88.13) checkpoint: /home/stephen/.cache/huggingface/hub/models--Qwen--Qwen3.8-Flash-Next-FP8/snapshots/236dfdf285828023ca3bcd3f37366c58a3469b13: 172.8 GiB; all indexed shards have consistent lengths (not a content hash check)
+OK   rank 2 (192.168.88.13) available memory: 116.8 GiB; startup enforces the exact model memory plan
+OK   rank 2 (192.168.88.13) RoCE rocep1s0f0: port 1, routable v2 GIDs: [('3', '0000:0000:0000:0000:0000:ffff:c0a8:580d')]; verify these subnets connect corresponding lanes on every node
+OK   rank 2 (192.168.88.13) peer runtime libraries: libibverbs.so, libcudart.so.13, libcublasLt.so.13, libstdc++.so
+WARN rank 2 (192.168.88.13) peer binary: development binary will be staged; verify identical OS/compiler runtime compatibility
+OK   rank 3 (192.168.88.14) platform: Linux aarch64; supported target is Linux/aarch64 GB10
+OK   rank 3 (192.168.88.14) Python: 3.12.3; Python 3.10+ is required
+OK   rank 3 (192.168.88.14) commands: python3, timeout, ldd
+OK   rank 3 (192.168.88.14) node address: rank 3 address 192.168.88.14 belongs to this host
+OK   rank 3 (192.168.88.14) GPU: NVIDIA GB10, 12.1, [N/A]
+OK   rank 3 (192.168.88.14) logs/staging: /tmp/bus4/deployments/7c13c1ee81de30ec: parent /tmp/bus4/deployments, 757.4 GiB free
+OK   rank 3 (192.168.88.14) resident cache: ~/.cache/dgpp/resident: parent /home/stephen/.cache/dgpp/resident, 757.4 GiB free
+OK   rank 3 (192.168.88.14) model cache: /home/stephen/.cache/huggingface/hub: parent /home/stephen/.cache/huggingface/hub, 757.4 GiB free
+OK   rank 3 (192.168.88.14) checkpoint: /home/stephen/.cache/huggingface/hub/models--Qwen--Qwen3.8-Flash-Next-FP8/snapshots/236dfdf285828023ca3bcd3f37366c58a3469b13: 172.8 GiB; all indexed shards have consistent lengths (not a content hash check)
+OK   rank 3 (192.168.88.14) available memory: 117.4 GiB; startup enforces the exact model memory plan
+OK   rank 3 (192.168.88.14) RoCE rocep1s0f0: port 1, routable v2 GIDs: [('3', '0000:0000:0000:0000:0000:ffff:c0a8:580e')]; verify these subnets connect corresponding lanes on every node
+OK   rank 3 (192.168.88.14) peer runtime libraries: libibverbs.so, libcudart.so.13, libcublasLt.so.13, libstdc++.so
+WARN rank 3 (192.168.88.14) peer binary: development binary will be staged; verify identical OS/compiler runtime compatibility
+Preflight: 0 failed check(s). No files were installed and no services were started or stopped.
+2026-10-12 02:28:32.610 === staging dgpp-serve and the config to the peers
+2026-10-12 02:28:32.610 staging rank 1 on 192.168.88.12
+2026-10-12 02:28:34.193 staging rank 2 on 192.168.88.13
+2026-10-12 02:28:35.783 staging rank 3 on 192.168.88.14
+2026-10-12 02:28:37.370 === rank 0 on 192.168.88.11 (HTTP 127.0.0.1:18081, fabric :29970, journal :29971)
+2026-10-12 02:28:37.371 head pid 522995
+2026-10-12 02:28:37.371 === waiting for journal listening (up to 90s); rank 0 log: /home/stephen/workspace/dgpp/build-pr104-shared/cache-probabilities-v11/control/world/serve_r0.log
+2026-10-12 02:28:39.371 journal listening: ok (2s)
+2026-10-12 02:28:39.372 === peers 192.168.88.12 192.168.88.13 192.168.88.14
+2026-10-12 02:28:40.773 === waiting for rank 0 serving (up to 600s); rank 0 log: /home/stephen/workspace/dgpp/build-pr104-shared/cache-probabilities-v11/control/world/serve_r0.log
+2026-10-12 02:28:50.775 waiting for rank 0 serving: 10s elapsed; rank 0 pid 522995 still running
+2026-10-12 02:28:50.775 latest rank 0 log: 2026-10-12 02:28:47.512 INFO  memory ledger: rank 0 after the graph engine — rss 4.36 GiB (anon 0.53, shmem 1.61, file 2.23; locked 14.17); device free 103.81 GiB, node available 107.74 GiB
+2026-10-12 02:28:56.776 rank 0 serving: ok (16s)
+2026-10-12 02:28:56.777 READY — curl http://127.0.0.1:18081/v1/models  (stop: python3 /home/stephen/workspace/dgpp/scripts/dgpp-cluster down --config /home/stephen/workspace/dgpp/build-pr104-shared/cache-probabilities-v11/control/deployment.json --log-dir /home/stephen/workspace/dgpp/build-pr104-shared/cache-probabilities-v11/control/world)
