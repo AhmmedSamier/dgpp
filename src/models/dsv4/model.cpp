@@ -968,7 +968,7 @@ void Dsv4Model::enqueue_layer_overlap(const Dsv4LayerResident& r, int layer, int
         if (sp < rows.decode_spans) {
           gemm_.set_decode_split_k(true);
           attn_->enqueue_decode(x_ + static_cast<size_t>(lo) * H, pool_, rows.req_ids + lo,
-                                 rows.pos + lo, hi - lo, attn_out + static_cast<size_t>(lo) * H, stream_);
+                                 rows.pos + lo, hi - lo, attn_out + static_cast<size_t>(lo) * H, stream_, /*prefetch=*/false);
           gemm_.set_decode_split_k(false);
         } else
           attn_->enqueue_prefill(x_ + static_cast<size_t>(lo) * H, pool_, rows.span_reqs[sp],
@@ -1066,7 +1066,7 @@ void Dsv4Model::enqueue_layer(const Dsv4LayerResident& r, int layer, int T, cons
       // BF16 indexer and compressor projections keep the decode reduction,
       // just as the FP8 attention projections keep their native row recipe.
       gemm_.set_decode_split_k(true);
-      attn_->enqueue_decode(x_, pool_, rows.req_ids, rows.pos, row0, attn_out, stream_);
+      attn_->enqueue_decode(x_, pool_, rows.req_ids, rows.pos, row0, attn_out, stream_, /*prefetch=*/false);
       gemm_.set_decode_split_k(false);
     }
     for (int s = rows.decode_spans; s < rows.num_spans; ++s) {
