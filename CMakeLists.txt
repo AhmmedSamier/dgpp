@@ -2069,7 +2069,7 @@ set_tests_properties(flag_protocol_test PROPERTIES SKIP_RETURN_CODE 2)
 # M5 data plane: deep loopback scenarios (verbs + consumers + contention)
 # and the app-level smoke. Both skip without a visible device.
 if(DGPP_ENABLE_IBV)
-  add_executable(bus_test tests/cuda/bus_test.cu)
+  add_executable(bus_test tests/cuda/bus_test.cu tests/cuda/bus_boundary_fixture.cpp)
   target_link_libraries(bus_test PRIVATE dgpp_bus)
   dgpp_set_common(bus_test)
   add_test(NAME bus_test COMMAND bus_test)

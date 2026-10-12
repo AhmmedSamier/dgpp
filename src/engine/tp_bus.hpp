@@ -239,7 +239,19 @@ class BusStreamReducer final : public BoundaryReducer {
     // result for the host and the stream alike).
     settle();
     DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
-    host_driven(partial, total);
+    // A few extra mixed-batch rows can spill a full bulk segment into a
+    // second reduce-scatter/allgather wave. Fold a latency-sized remainder
+    // on the model stream instead. Both machines sum each element in the
+    // same rank order; the completed bulk prefix and stream-ordered tail
+    // are ready before the next model kernel consumes them.
+    const size_t segment = bus_.bulk_segment_bytes() / 2;
+    const size_t tail = segment ? total % segment : 0;
+    if (total > segment && tail > 0 && tail <= max_elems_) {
+      host_driven(partial, total - tail);
+      issue(partial + total - tail, tail);
+    } else {
+      host_driven(partial, total);
+    }
   }
 
   void settle() override {
