@@ -506,37 +506,56 @@ const uint16_t* MimoModel::enqueue_layer(const MimoLayerResident& r, int pool_la
   const int H = cfg_.hidden_size;
   const float eps = cfg_.rms_norm_eps;
   build_layer_objects(r);
+  const auto groups = [&](auto&& enqueue) {
+    if (rows.run)
+      rows.run->for_each_kernel_group([](int count, int next) {
+        return count > 128 && next > 128;
+      }, enqueue);
+    else
+      enqueue(0, T, rows.decode, 0);
+  };
   // ---- the attention block --------------------------------------------------
   add_rmsnorm_bf16(resid, pending, r.input_norm, x_, T, H, eps, stream_);
   uint16_t* attn_out = stage(y_, T, H, rows.capture);
-  {
+  groups([&](int row0, int count, bool decode, int) {
     MimoAttnRows arows;
-    arows.req_ids = rows.req_ids;
-    arows.pos = rows.pos;
-    arows.decode = rows.decode;
-    arows.decode_prefix = rows.decode_prefix;
-    attn_->enqueue(x_, T, arows, pool_.view(pool_layer), attn_out, stream_);
-  }
+    arows.req_ids = rows.req_ids + row0;
+    arows.pos = rows.pos + row0;
+    arows.decode = decode;
+    gemm_.set_bf12_wide(decode);
+    const size_t offset = static_cast<size_t>(row0) * H;
+    attn_->enqueue(x_ + offset, count, arows, pool_.view(pool_layer), attn_out + offset, stream_);
+  });
+  gemm_.set_bf12_wide(rows.decode);
   if (rows.decode) prefetch_ffn_side(r);
   fold(attn_out, T, H, rows.capture);  // block boundary 1: o_proj's partial
   // ---- the MLP / MoE block ----------------------------------------------------
   add_rmsnorm_bf16(resid, attn_out, r.post_norm, x_, T, H, eps, stream_);
   uint16_t* ffn_out = stage(y_, T, H, rows.capture);
-  if (r.moe) {
-    // The routed chain alone (no shared expert): the fp32 sum in ascending
-    // expert order, rounded once here (the Qwen MoE's contract with the
-    // shared layer; GLM's enqueue_decode / enqueue_prefill fold their
-    // shared expert into the chain and refuse without one).
-    if (rows.decode)
-      moe_->enqueue_decode_f32(x_, moe_acc_, T, rows.trace, stream_, rows.moe_table_slot);
-    else
-      moe_->enqueue_prefill_f32(x_, moe_acc_, T, rows.trace, stream_,
-                                moe_->mma_takes_grid() ? MoeExpertKernel::kMma : MoeExpertKernel::kGemv,
-                                rows.decode_prefix);
+  groups([&](int row0, int count, bool decode, int) {
+    const size_t offset = static_cast<size_t>(row0) * H;
+    if (r.moe) {
+      MoeTraceStaging trace;
+      if (rows.trace) {
+        trace.ids = rows.trace->ids + static_cast<size_t>(row0) * cfg_.num_experts_per_tok;
+        trace.weights = rows.trace->weights + static_cast<size_t>(row0) * cfg_.num_experts_per_tok;
+        trace.biased = rows.trace->biased
+            ? rows.trace->biased + static_cast<size_t>(row0) * cfg_.n_routed_experts : nullptr;
+      }
+      if (rows.decode)
+        moe_->enqueue_decode_f32(x_ + offset, moe_acc_ + offset, count, rows.trace, stream_,
+                                  rows.moe_table_slot);
+      else
+        moe_->enqueue_prefill_f32(x_ + offset, moe_acc_ + offset, count,
+                                  rows.trace ? &trace : nullptr, stream_,
+                                  moe_->mma_takes_grid() ? MoeExpertKernel::kMma : MoeExpertKernel::kGemv,
+                                  decode ? count : 0);
+    } else {
+      dense_->enqueue(x_ + offset, count, ffn_out + offset, stream_, decode ? count : 0);
+    }
+  });
+  if (r.moe)
     launch_moe_round_bf16(ffn_out, moe_acc_, static_cast<int64_t>(T) * H, stream_);
-  } else {
-    dense_->enqueue(x_, T, ffn_out, stream_, rows.decode_prefix);
-  }
   if (rows.decode) prefetch_attention_side(r.layer + 1);
   fold(ffn_out, T, H, rows.capture);  // block boundary 2: the sliced down projections
   return ffn_out;                      // pending: the next norm adds it
@@ -564,7 +583,7 @@ MimoModel::Outputs MimoModel::run_rows(const RowRun& run) {
   const size_t K = static_cast<size_t>(cfg_.num_experts_per_tok);
   const size_t E = static_cast<size_t>(cfg_.n_routed_experts);
   WalkRows rows;
-  rows.decode_prefix = run.decode_rows();
+  rows.run = &run;
   rows.req_ids = in.req_ids;
   rows.pos = in.pos;
   rows.req = req;
@@ -610,6 +629,7 @@ MimoModel::Outputs MimoModel::run_rows(const RowRun& run) {
                                ? T - 1
                                : 0;
   const bool packed_logits = project_head_rows(run, [&](int input_row, int output_row, int rows) {
+    gemm_.set_bf12_wide(run.decode || input_row < run.decode_rows());
     gemm_.matmul(h_ + static_cast<size_t>(input_row + legacy_first) * H, globals_.lm_head,
                  logits_ + static_cast<size_t>(output_row + legacy_first) * lm_vocab_count_,
                  rows - legacy_first, lm_vocab_count_, H, DType::BF16, GemmOut::F32,

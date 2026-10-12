@@ -419,6 +419,58 @@ DGPP_TEST(shared_prefill_mimo) {
                                       nullptr, 0, 1, 4, mtp, 16, LatentFormat::kBf16, compact);
   }, cfg.vocab_size);
 }
+DGPP_TEST(shared_mimo_short_reader_keeps_its_prefill_recipe) {
+  auto cfg = mimofx::tiny_config(2, false);
+  cfg.hidden_size = 2048;
+  cfg.intermediate_size = 2048;
+  const std::string dir = "shared_mimo_tail_fixture";
+  mimofx::write_fixture(cfg, dir);
+  for (auto residency : {Bf16Residency::Checkpoint, Bf16Residency::Bf12}) {
+    set_bf16_residency(residency);
+    MimoModel model(cfg, dir, 256, 512, MimoResidency::Resident, nullptr, 0, 1, 2, false);
+    MimoModel reference(cfg, dir, 256, 512, MimoResidency::Resident, nullptr, 0, 1, 2, false);
+    model.session_graph_prepare();
+    reference.session_graph_prepare();
+    const auto prompt = tokens(16, cfg.vocab_size, 3);
+    (void)model.session_prefill(0, prompt);
+    (void)model.session_prefill(1, prompt);
+    (void)reference.session_prefill(0, prompt);
+    for (int req : {0, 1}) model.session_reserve_blocks(req, 256);
+    reference.session_reserve_blocks(0, 256);
+    const auto tail = tokens(3, cfg.vocab_size, 9);
+    const auto reader = tokens(129, cfg.vocab_size, 17);
+    RowRun isolated;
+    isolated.req = 0;
+    isolated.ids = tail.data();
+    isolated.T = tail.size();
+    isolated.pos0 = prompt.size();
+    isolated.capture_layers = true;
+    const auto expected = reference.run_rows(isolated);
+    std::vector<int64_t> both = tail;
+    both.insert(both.end(), reader.begin(), reader.end());
+    const int32_t reqs[] = {0, 1}, lengths[] = {3, 129};
+    const int64_t positions[] = {16, 16};
+    RowRun grouped = isolated;
+    grouped.ids = both.data();
+    grouped.T = both.size();
+    grouped.num_spans = 2;
+    grouped.span_reqs = reqs;
+    grouped.span_lens = lengths;
+    grouped.span_pos0 = positions;
+    const auto actual = model.run_rows(grouped);
+    require(actual.layer_states.size() == expected.layer_states.size(), "short reader layer count");
+    for (size_t layer = 0; layer < expected.layer_states.size(); ++layer) {
+      const auto& a = actual.layer_states[layer];
+      const auto& e = expected.layer_states[layer];
+      size_t changed = 0;
+      for (size_t i = 0; i < e.size(); ++i) changed += a[i] != e[i];
+      std::printf("MiMo short reader residency=%s layer=%zu: %zu/%zu changed\n",
+                  bf16_residency_name(residency), layer, changed, e.size());
+      require(changed == 0, "short reader must retain its isolated prefill arithmetic");
+    }
+  }
+  set_bf16_residency(Bf16Residency::Checkpoint);
+}
 DGPP_TEST(shared_mimo_dense_preserves_decoder_recipe) {
   auto cfg = mimofx::tiny_config(2, false);
   cfg.hidden_size = 2048;

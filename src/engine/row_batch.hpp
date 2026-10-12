@@ -42,6 +42,29 @@ struct RowRun {
     return decode_spans ? std::accumulate(span_lens, span_lens + decode_spans, 0) : 0;
   }
 
+  // Preserve the decoder prefix and request-owned short-tail recipes.
+  // A layer may combine adjacent readers only when its arithmetic is
+  // invariant under that grouping. The visitor receives the source offset,
+  // row count, decode flag and first source span.
+  template <class Compatible, class Visit>
+  void for_each_kernel_group(Compatible&& compatible, Visit&& visit) const {
+    if (!num_spans) { visit(0, T, decode, 0); return; }
+    int row0 = 0;
+    const int prefix = decode_rows();
+    if (prefix) {
+      visit(0, prefix, true, 0);
+      row0 = prefix;
+    }
+    for (int span = decode_spans; span < num_spans;) {
+      const int first = span;
+      int count = span_lens[span++];
+      while (span < num_spans && compatible(count, span_lens[span]))
+        count += span_lens[span++];
+      visit(row0, count, false, first);
+      row0 += count;
+    }
+  }
+
   int output_rows() const {
     return decode || all_rows ? T : decode_rows() + std::max(1, num_spans) - decode_spans;
   }

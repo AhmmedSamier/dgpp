@@ -1810,26 +1810,16 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
       // Retain the decoder's projection chain. Small reader tails also
       // retain their streaming-MMA recipe when a large neighbor uses the
       // dequant bridge. Per-tensor scales remain request-owned.
-      int row0 = 0;
-      if (mixed) {
-        configure_gemm_rows(decode_rows, true);
-        dense_mlp(x_, mo, decode_rows, r.mlp, stream_, layer, false);
-        row0 = decode_rows;
-      }
-      for (int sp = run.decode_spans; sp < run.num_spans;) {
-        const int first = sp;
-        int len = run.span_lens[sp++];
-        const int prefill_from = r.mlp.gate_fp4.payload ? 1024 : 129;
-        const bool prefill = len >= prefill_from;
-        if (!pt_enabled_)
-          while (sp < run.num_spans && (run.span_lens[sp] >= prefill_from) == prefill &&
-                 (prefill || len + run.span_lens[sp] < prefill_from))
-            len += run.span_lens[sp++];
-        configure_gemm_rows(len, false);
+      const int prefill_from = r.mlp.gate_fp4.payload ? 1024 : 129;
+      run.for_each_kernel_group([&](int count, int next) {
+        const bool prefill = count >= prefill_from;
+        return !pt_enabled_ && (next >= prefill_from) == prefill &&
+               (prefill || count + next < prefill_from);
+      }, [&](int row0, int count, bool decode, int first) {
+        configure_gemm_rows(count, decode);
         dense_mlp(x_ + static_cast<size_t>(row0) * H, mo + static_cast<size_t>(row0) * H,
-                  len, r.mlp, stream_, layer, run.span_pos0[first] > 0);
-        row0 += len;
-      }
+                  count, r.mlp, stream_, layer, !decode && run.span_pos0[first] > 0);
+      });
       configure_gemm_rows(T, run.decode);
     } else {
       dense_mlp(x_, mo, T, r.mlp, stream_, layer, !run.decode && run.pos0 > 0);
