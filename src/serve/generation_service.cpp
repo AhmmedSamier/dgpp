@@ -1,4 +1,5 @@
 #include "serve/generation_service.hpp"
+#include "serve/audio_inputs.hpp"
 #include "serve/image_inputs.hpp"
 #include "text/dsv41_prompt.hpp"
 
@@ -410,7 +411,8 @@ std::string model_object(const ServiceConfig& scfg, const std::string& model_id,
                          int64_t created, bool sampling_available,
                          const sample::Params& d, bool tools_available,
                          bool constraints_available,
-                         bool reasoning_in_content, const ModelFrontend& frontend, bool images_available) {
+                         bool reasoning_in_content, const ModelFrontend& frontend, bool images_available,
+                         bool audios_available) {
   std::string out;
   out.append("{\"id\":");
   append_json_string(&out, model_id);
@@ -463,6 +465,7 @@ std::string model_object(const ServiceConfig& scfg, const std::string& model_id,
   out.append(scfg.default_chat_template_kwargs);
   out.append(",\"input_modalities\":[\"text\"");
   if (images_available) out.append(",\"image\"");
+  if (audios_available) out.append(",\"audio\"");
   out.append("]");
   // The rope ramp in force, under the names the deployment JSON uses, so
   // what an operator set is what a client reads, plus the three values the
@@ -1682,6 +1685,17 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
           parts.push_back(part);
           continue;
         }
+        if (type->as_string() == "input_audio" || type->as_string() == "audio_url") {
+          const std::string_view key = type->as_string() == "input_audio" ? "input_audio" : "audio_url";
+          if (r != "user") return refuse("audio requires a user message", at + ".type", "unsupported_content_type");
+          if (!frontend_->supports_audios() || !engine_->supports_audios())
+            return refuse("the served model does not support audio inputs", at + ".type", "unsupported_content_type");
+          const auto* audio = part.find(key);
+          if (!audio || !audio->is_object())
+            return refuse(std::string(key) + " must be an object", at + "." + std::string(key));
+          parts.push_back(part);
+          continue;
+        }
         const bool is_refusal = r == "assistant" && type->as_string() == "refusal";
         if (is_refusal && content->items().size() != 1)
           return refuse("a refusal part must be the only content part", at);
@@ -2318,13 +2332,19 @@ void GenerationService::prepare_chat_completions(const HttpRequest& req,
   // scheduler request and masks the pick on every rank (M6 6g).
   std::vector<int64_t> prompt;
   std::vector<ImageInput> images;
+  std::vector<AudioInput> audios;
   try {
     auto input = frontend_->prepare_chat(plan.globals);
     prompt = std::move(input.tokens);
     images = std::move(input.images);
+    audios = std::move(input.audios);
     validate_image_inputs(images, prompt.size());
+    validate_audio_inputs(audios, prompt.size());
   } catch (const ImageInputError& e) {
     respond_error(w, 400, e.what(), "invalid_request_error", e.param, "invalid_image");
+    return;
+  } catch (const AudioInputError& e) {
+    respond_error(w, 400, e.what(), "invalid_request_error", e.param, "invalid_audio");
     return;
   } catch (const std::exception& e) {
     respond_error(w, 400,
@@ -2440,6 +2460,7 @@ void GenerationService::prepare_chat_completions(const HttpRequest& req,
     sr.no_cache = !prefix_cache;
     sr.cache_key = prompt_cache_key;
     sr.images = images;
+    sr.audios = audios;
     sr.prompt = prompt;
     sr.max_steps = steps;
     sr.ignore_eos = ignore_eos;
@@ -2660,7 +2681,8 @@ void GenerationService::route_models(const HttpRequest& req,
                   model_object(cfg_, cfg_.model_id, created, sampling_available_,
                                cfg_.sampling_defaults, tool_calls_available(),
                                constraints_available(),
-                               cfg_.reasoning_in_content, *frontend_, frontend_->supports_images() && engine_->supports_images()) +
+                               cfg_.reasoning_in_content, *frontend_, frontend_->supports_images() && engine_->supports_images(),
+                               frontend_->supports_audios() && engine_->supports_audios()) +
                   "]}");
     return;
   }
@@ -2669,7 +2691,8 @@ void GenerationService::route_models(const HttpRequest& req,
     w.respond(200, "application/json",
               model_object(cfg_, id, created, sampling_available_,
                            cfg_.sampling_defaults, tool_calls_available(),
-                           constraints_available(), cfg_.reasoning_in_content, *frontend_, frontend_->supports_images() && engine_->supports_images()));
+                           constraints_available(), cfg_.reasoning_in_content, *frontend_, frontend_->supports_images() && engine_->supports_images(),
+                           frontend_->supports_audios() && engine_->supports_audios()));
     return;
   }
   respond_error(w, 404, "the model '" + id + "' does not exist",

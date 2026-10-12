@@ -1,6 +1,7 @@
 #pragma once
 #include <future>
 #include <optional>
+#include "common/audio_input.hpp"
 #include "serve/file_inputs.hpp"
 
 #include "kernels/rope_scaling.hpp"  // ServiceConfig's rope surface (what /v1/models reports)
@@ -131,10 +132,12 @@ class ModelFrontend {
   struct ChatInput {
     std::vector<int64_t> tokens;
     std::vector<ImageInput> images;
+    std::vector<AudioInput> audios;
   };
   virtual bool supports_images() const { return false; }
+  virtual bool supports_audios() const { return false; }
   virtual ChatInput prepare_chat(const minijson::Value& globals) const {
-    return {encode_text(render_chat(globals)), {}};
+    return {encode_text(render_chat(globals)), {}, {}};
   }
 
   // The template's marker tokens (DESIGN §11): the reasoning split and

@@ -155,6 +155,21 @@ class EagerEngineAdapter : public sched::SchedulerEngine {
                        [&] { return model_->session_prefill_images(req, prompt, images); });
     return sched::SchedulerEngine::prefill_images(req, prompt, images);
   }
+  bool supports_audios() const override {
+    if constexpr (requires { model_->supports_audios(); }) return model_->supports_audios();
+    return false;
+  }
+  AudioTokens audio_token_ids() const override {
+    if constexpr (requires { model_->audio_tokens(); }) return model_->audio_tokens();
+    return {};
+  }
+  int32_t prefill_audios(int req, const std::vector<int64_t>& prompt,
+                         const std::vector<AudioInput>& audios) override {
+    if constexpr (requires { model_->session_prefill_audios(req, prompt, audios); })
+      return open_slot(req, prompt,
+                       [&] { return model_->session_prefill_audios(req, prompt, audios); });
+    return sched::SchedulerEngine::prefill_audios(req, prompt, audios);
+  }
 
   int64_t prefill_chunk_alignment() const override {
     if constexpr (requires { Model::kResumablePrefill; })
