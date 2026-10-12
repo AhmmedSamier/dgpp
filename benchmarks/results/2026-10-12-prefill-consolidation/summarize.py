@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 import statistics
 
 
@@ -58,10 +59,15 @@ def main():
         directory = args.campaign / label
         metadata[label] = dict(binary_sha256=(directory / 'binary.sha256').read_text().strip(),
             config=read(directory / 'deployment.json'), arguments=data[label]['arguments'],
+            resolved_admission=data[label]['runs'][0]['before']['service']['admission'],
             opstreams=read(directory / 'opstreams.json'),
             nodes_before=read(directory / 'nodes-before.json'), nodes_after=read(directory / 'nodes-after.json'),
             transcripts=read(directory / 'transcripts.json'),
             evidence_sha256=hashlib.sha256((directory / 'admission.json').read_bytes()).hexdigest())
+        log = directory / 'world/serve_r0.log'
+        metadata[label]['checkpoint_receipts'] = [line.split('INFO  ', 1)[1]
+            for line in log.read_text().splitlines()
+            if re.search(r'INFO  (?:model [^ ]+|dflash2 drafter) -> ', line)]
         assert metadata[label]['opstreams']['match'], 'rank operation streams differ'
         cache_path = directory / 'mixed-cache.json'
         if cache_path.exists():
