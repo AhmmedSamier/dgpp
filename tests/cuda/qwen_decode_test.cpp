@@ -783,17 +783,26 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
   // offsets, every acceptance length, a QSA pool boundary and resumed chunks.
   for (int accepted = 1; accepted <= 4; ++accepted) {
     QwenModel reference(cfg, dir, 128, 1024, QwenResidency::Resident, nullptr, 0, 1, 3, true);
-    QwenModel mixed(cfg, dir, 128, 1024, QwenResidency::Resident, nullptr, 0, 1, 3, true);
+    QwenModel mixed(cfg, dir, 128, 1024, QwenResidency::Resident, nullptr, 0, 1, 4, true);
+    QwenModel restored(cfg, dir, 128, 1024, QwenResidency::Resident, nullptr, 0, 1, 4, true);
+    void* arena = nullptr;
+    DGPP_CUDA_OK(cudaMalloc(&arena, restored.session_snapshot_bytes()));
+    QwenModel::SessionSnapshotMeta meta;
+    QwenModel::SnapshotRequest snapshot{48, arena, &meta, false};
     const auto prompt = smoke_tokens(cfg, 95, 104);
     const std::vector<int64_t> cuts{16, 48, 80};
     auto expected_cursor = reference.session_prefill_begin(0, prompt, 128, 32, cuts);
     auto cursor = mixed.session_prefill_begin(0, prompt, 128, 32, cuts);
+    auto restored_cursor = restored.session_prefill_begin(0, prompt, 128, 32, cuts, &snapshot);
+    bool attached = false;
     std::vector<std::vector<int64_t>> feeds{{1, 2, 3, 4}, {5, 6, 7, 8}};
     for (int req = 1; req <= 2; ++req) {
       (void)reference.session_prefill(req, req == 1 ? A : B);
       (void)mixed.session_prefill(req, req == 1 ? A : B);
+      (void)restored.session_prefill(req, req == 1 ? A : B);
       reference.session_reserve_blocks(req, 128);
       mixed.session_reserve_blocks(req, 128);
+      restored.session_reserve_blocks(req, 128);
     }
     const auto compare = [&](const QwenModel::Outputs& got, const QwenModel::Outputs& want, const char* label) {
       require(got.logits.size() == want.logits.size(), std::string(label) + ": output rows");
@@ -807,27 +816,52 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
       (void)reference.session_prefill_advance(expected_cursor, 24);  // eight decode rows share the 32-row walk
       const auto expected = reference.session_verify_batch({1, 2}, feeds);
       const auto actual = mixed.session_prefill_verify(cursor, 32, {1, 2}, feeds);
+      const auto resumed = restored.session_prefill_verify(restored_cursor, 32, {1, 2}, feeds);
       require(cursor.next == expected_cursor.next, "mixed prefill preserves cuts and work budget");
+      require(restored_cursor.next == cursor.next &&
+                  bitwise(restored_cursor.output.logits, cursor.output.logits),
+              "mixed snapshot restore: prefill logits differ at the same execution shape");
       compare(cursor.output, expected_cursor.output, "mixed prefill");
       for (int s = 0; s < 2; ++s) {
         compare(actual[s], expected[s], "mixed verify");
+        require(bitwise(resumed[s].logits, actual[s].logits),
+                "mixed snapshot restore changed a peer's verify logits");
         reference.session_rollback(s + 1, accepted, 4, s * 4);
         mixed.session_rollback(s + 1, accepted, 4, s * 4);
+        restored.session_rollback(s + 1, accepted, 4, s * 4);
         require(mixed.session_position(s + 1) == reference.session_position(s + 1), "mixed rollback position");
       }
       for (int s = 0; s < 2; ++s) {
         const auto next = reference.session_step(s + 1, 9);
-        compare(mixed.session_step(s + 1, 9), next, "mixed rollback continuation");
+        const auto mixed_next = mixed.session_step(s + 1, 9);
+        compare(mixed_next, next, "mixed rollback continuation");
+        require(bitwise(restored.session_step(s + 1, 9).logits, mixed_next.logits),
+                "mixed snapshot restore changed a peer's rollback continuation");
+      }
+      if (!attached && cursor.next == 48) {
+        require(snapshot.taken && meta.position == 48, "mixed prefill snapshot was taken");
+        restored.session_close(0);
+        restored.session_attach(3, arena, meta);
+        restored_cursor = restored.session_prefill_begin(3, prompt, 128, 32, cuts, nullptr, 48);
+        attached = true;
       }
     }
-    compare(mixed.session_draft(0, {10}), reference.session_draft(0, {10}), "mixed prefill draft");
+    require(attached, "mixed snapshot restore was exercised in a different request slot");
+    const auto draft = mixed.session_draft(0, {10});
+    compare(draft, reference.session_draft(0, {10}), "mixed prefill draft");
+    require(bitwise(restored.session_draft(3, {10}).logits, draft.logits),
+            "mixed snapshot restore changed the resumed MTP logits");
     for (int req = 0; req < 3; ++req) {
       mixed.session_close(req);
       reference.session_close(req);
     }
+    for (int req = 1; req <= 3; ++req) restored.session_close(req);
+    restored.session_release_snapshot(meta);
+    DGPP_CUDA_OK(cudaFree(arena));
     require(mixed.kv_blocks_in_use() == 0, "mixed prefill releases every reservation");
+    require(restored.kv_blocks_in_use() == 0, "mixed snapshot restore releases every KV reference");
   }
-  std::printf("[ OK ] mixed prefill/verify: chunk cuts, logits, MTP and rollback at every acceptance length\n");
+  std::printf("[ OK ] mixed prefill/verify: chunk cuts, logits, MTP, rollback and bitwise snapshot restoration in another slot\n");
   // A donated share shifts the cursor off the model's original grid.
   // Subsequent work fills its cap except at a real structural/snapshot cut.
   {
