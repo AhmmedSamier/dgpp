@@ -30,6 +30,8 @@ baseline, not against the source before all early-admission work began.
 | Candidate with shared compact mapping | `df5b3c9b513ef896e5f7725c18632df03d12c1db` | `726ad15e6c9e56ae4d55d5a2f72ea457e2c5dc224cef638428be71a644f38268` |
 | Candidate with native mixed decoder mHC and expert recipes | `beeaf952` | `c4980ec3563b23472b93ebe119a700ad3c706e53ab7032beb683947a58e29d82` |
 | Candidate with mixed phase bounds and four-format validation | `d357c65b` | `62f5adfa724d9b94cdb7266e2986ec7ff3f1c1f3299b6e0fb776a0bbfac540c0` |
+| Candidate with MiMo native decoder recipes | `15d1dfd3` | `321c11d27f9951ab77073055cae3e5d69596b693ff98c64515c4e79f7a1bc0c8` |
+| Candidate with shared short-tail grouping and batched reader experts | `384bc260` | `e61a6180634587abb61ec9fc59e6493b8d5d0a6a83d7eed2feeaba249253e45e` |
 | Earlier candidate, before compact mapping | `26e61c9f55f068673eb771a1daa90d09c18d6978` | `0080af5401a43e91d2a5e76cf79f39db9de60442f24042147195add7f5e0a9c5` |
 
 Builds use Release optimization with debug symbols disabled. Harness-only
@@ -195,6 +197,28 @@ visible in the evidence and are not counted as exact passes.
   A subsequent 38-case MoE run and thirteen-case shared-prefill run pass,
   including a new split-boundary check over FP8, NVFP4, MXFP4 and packed
   int4. That check also passes memcheck with zero errors and leaked bytes.
+- MiMo's [initial pair](evidence/mimo-initial-v28-summary.json) matches
+  all 34 timing responses and four chats, but changes a cached continuation
+  under mixed load while the control preserves it. Native decoder dense
+  and expert recipes alone do not resolve that difference; the
+  [intermediate probability diagnostic](evidence/mimo-numerics-v29.json)
+  records the remaining change. A wide short-reader fixture reproduces
+  2,250 changed first-layer values out of 6,144 when a three-token tail
+  joins a large reader. Shared compatible-row grouping preserves that
+  tail's projection recipe. Candidate `87cc3b54` restores the cached text
+  and all returned token probabilities exactly against the baseline,
+  including repeat-under-load and isolated recovery; see the
+  [corrected cache diagnostic](evidence/mimo-numerics-v30.json).
+  That intermediate pair leaves a 3.32% repeated-arrival slowdown. Candidate
+  `384bc260` batches compatible reader expert work while preserving projection
+  recipes, and applies the same shared grouping to GLM-4.7. Both families
+  pass the exact short-tail fixture and memcheck with BF16/BF12 residency.
+  Three-trial real-checkpoint timing for that refinement is in progress.
+  Five focused targets pass, including fifteen shared-prefill cases.
+  The short-tail fixture is exact with BF16 and BF12 weights and passes
+  memcheck at ordinary settings. The graph oracle also passes memcheck
+  with its documented CTest GEMV setting; the evidence records an earlier
+  invocation that omitted this setting and failed an exact-shape assertion.
 - Qwen NVFP4 reasoning continuations can differ between isolated and loaded
   execution in both old and new binaries. The old binary at the candidate's
   budget reproduces the candidate's transcripts. Repeat-under-load and

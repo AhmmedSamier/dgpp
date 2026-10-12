@@ -90,6 +90,8 @@ def main():
     ap.add_argument('--candidate-idle-budget', type=int, help='Experimental candidate idle budget override.')
     ap.add_argument('--no-resident-cache', action='store_true')
     ap.add_argument('--cache-check', action='store_true')
+    ap.add_argument('--require-cache-parity', action='store_true',
+                    help='Run cache checks before timing and require isolated/loaded text parity.')
     ap.add_argument('--cache-logprobs', action='store_true',
                     help='Record probabilities in cache diagnostics, outside the timing runs.')
     ap.add_argument('--cache-no-thinking', action='store_true',
@@ -105,6 +107,8 @@ def main():
     ap.add_argument('--scenarios', nargs='+', default=['solo_decode', 'solo_prefill', 'batch_decode',
                                                      'batch_prefill', 'mixed_long', 'sustained_idle'])
     args = ap.parse_args()
+    if args.require_cache_parity and not args.cache_check:
+        ap.error('--require-cache-parity requires --cache-check')
     args.out = args.out.resolve()
     args.out.mkdir(parents=True, exist_ok=False)
     (args.out / 'harness.py').write_bytes(Path(__file__).read_bytes())
@@ -129,6 +133,28 @@ def main():
             json.dumps(dict(command=list(map(str, command)), returncode=result.returncode), indent=2) + '\n')
         if check:
             result.check_returncode()
+
+    def check_cache(directory, label):
+        cache_script = ROOT / 'benchmarks/results/2026-10-12-prefill-consolidation/mixed_cache_check.py'
+        (directory / 'mixed-cache-script.py').write_bytes(cache_script.read_bytes())
+        command = ['python3', cache_script,
+                   '--out', directory / 'mixed-cache.json', '--tokens', '1']
+        if args.cache_logprobs:
+            command.append('--logprobs')
+        if args.cache_no_thinking:
+            command.append('--no-thinking')
+        if label == 'control':
+            command.append('--diagnostic')  # the old executor may defer admission
+        run(command, directory / 'mixed-cache.log', test=True)
+        command = ['python3', cache_script, '--out', directory / 'cache-repeat.json', '--repeat-load']
+        if args.cache_logprobs:
+            command.append('--logprobs')
+        if label == 'control':
+            command.append('--diagnostic')  # the previous executor may defer admission
+        run(command, directory / 'cache-repeat.log', test=True)
+        if args.require_cache_parity:
+            data = json.loads((directory / 'cache-repeat.json').read_text())
+            assert data['transcript_matches'], 'Isolated/loaded cache response changed: ' + label
 
     with urllib.request.urlopen('http://127.0.0.1:18080/metrics', timeout=15) as response:
         initial = json.load(response)
@@ -179,6 +205,9 @@ def main():
                 start = bench.idle()
                 if label == 'candidate':
                     assert start['service']['admission']['prefill_early_admission'] is True
+                if args.require_cache_parity:
+                    check_cache(directory, label)
+                    start = bench.idle()
                 bench.stream('warmup', 'Continue counting: 1, 2, 3,', 32)
                 bench.idle(start['scheduler']['terminal'] + 1)
                 if not args.profile:
@@ -202,24 +231,8 @@ def main():
                 if not args.profile:
                     run(['python3', 'scripts/serve_greedy_transcript.py', '127.0.0.1', '18081',
                          '--max-tokens', '64', '--out', directory / 'transcripts.json'], directory / 'transcripts.log', test=True)
-                if args.cache_check:
-                    cache_script = ROOT / 'benchmarks/results/2026-10-12-prefill-consolidation/mixed_cache_check.py'
-                    (directory / 'mixed-cache-script.py').write_bytes(cache_script.read_bytes())
-                    command = ['python3', cache_script,
-                               '--out', directory / 'mixed-cache.json', '--tokens', '1']
-                    if args.cache_logprobs:
-                        command.append('--logprobs')
-                    if args.cache_no_thinking:
-                        command.append('--no-thinking')
-                    if label == 'control':
-                        command.append('--diagnostic')  # the old executor may defer admission
-                    run(command, directory / 'mixed-cache.log', test=True)
-                    command = ['python3', cache_script, '--out', directory / 'cache-repeat.json', '--repeat-load']
-                    if args.cache_logprobs:
-                        command.append('--logprobs')
-                    if label == 'control':
-                        command.append('--diagnostic')  # the previous executor may defer admission
-                    run(command, directory / 'cache-repeat.log', test=True)
+                if args.cache_check and not args.require_cache_parity:
+                    check_cache(directory, label)
                 bench.idle()
             finally:
                 run(['python3', 'scripts/dgpp-cluster', 'down', '--config', path,

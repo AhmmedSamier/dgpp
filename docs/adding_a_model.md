@@ -89,6 +89,12 @@ Constraints ports have tripped on:
   phased accumulation around communication. Compare identical sublayer
   inputs and outputs; a rounded hidden-state check can miss changed fp32
   coefficients that affect later layers.
+- **Short reader arithmetic.** A prefix-cache hit can leave only a few
+  prefill tokens. Use `RowRun::for_each_kernel_group` to preserve a layer's
+  short-tail recipe and combine only compatible adjacent reader spans.
+  Compatibility is per operation: projections may need separate small
+  tails while routed expert rows can share a batch. Check the same short
+  reader alone and alongside a large reader, including packed BF16 weights.
 - **Speculative steps return exactly the tokens decided that step.** On the
   plain path that is the verify's next token; a speculator that also returns
   the fed token duplicates the first token of every transcript and drops the

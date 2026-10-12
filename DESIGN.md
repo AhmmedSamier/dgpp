@@ -2520,6 +2520,10 @@ and progress, `PrefillBatch` plans mixed rows and commits reader state, and
 `RowRun` describes the layer walk. `SessionModel` supplies the common session
 implementation; legacy GLM shares these helpers through its existing facade.
 The executor owns architecture-specific attention, recurrence and projections.
+`RowRun::for_each_kernel_group` keeps the decoder prefix separate and groups
+compatible reader spans. Each operation supplies its compatibility rule, so
+short cached tails retain their projection arithmetic while expert work can
+still share a batch.
 
 The graph engine starts batching at `graph_batch_min_live`, defaulting to
 `min(2, max_concurrency)`. `engine.compact_batches` defaults to true and is

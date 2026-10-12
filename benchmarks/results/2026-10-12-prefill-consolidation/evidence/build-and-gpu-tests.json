@@ -245,6 +245,124 @@
       "results": [
         "Production restored: original configuration, original live binary on all four ranks, healthy HTTP."
       ]
+    },
+    {
+      "file": "mimo-v29-check/tests.log",
+      "sha256": "c7dcfe16440fcbf7f4d78531bd9883565e5e10b367aab5258b8e8f597156e7e2",
+      "results": [
+        "1/4 Test #167: mimo_tp_test .....................   Passed    2.16 sec",
+        "2/4 Test #168: mimo_engine_test .................   Passed    4.37 sec",
+        "3/4 Test #219: glm_moe_test .....................   Passed   42.27 sec",
+        "[FAIL] shared_mimo_dense_preserves_decoder_recipe: MiMo-V2 config.moe_layer_freq: no MoE layer",
+        "14 tests, 1 failed",
+        "75% tests passed, 1 tests failed out of 4"
+      ]
+    },
+    {
+      "file": "mimo-v29-check2/tests.log",
+      "sha256": "6e890770c035a7a6679ee234ce75a6370e33ad6b6e7804f4fa1068f2312d9441",
+      "results": [
+        "1/1 Test #244: shared_prefill_test ..............   Passed   29.00 sec",
+        "100% tests passed, 0 tests failed out of 1"
+      ]
+    },
+    {
+      "file": "mimo-v29-check2/sanitizer.log",
+      "sha256": "bad140646eac1679b7f3908f6de928b72a0ea814062fa34871650c0011cec39d",
+      "results": [
+        "1 tests, 0 failed",
+        "========= LEAK SUMMARY: 0 bytes leaked in 0 allocations",
+        "========= ERROR SUMMARY: 0 errors"
+      ]
+    },
+    {
+      "file": "mimo-v29-check2/dense-sanitizer.log",
+      "sha256": "9fbdf407c8f16ed23e2e9c0e5acc3fd0db15cce3bd03e40abc48edf000c847e6",
+      "results": [
+        "1 tests, 0 failed",
+        "========= LEAK SUMMARY: 0 bytes leaked in 0 allocations",
+        "========= ERROR SUMMARY: 0 errors"
+      ]
+    },
+    {
+      "file": "mimo-v30-check/tests.log",
+      "sha256": "c34b1cb9f03a42b458d0472db3dafeb6a7e948de407f1f93db668a56b5f34b5d",
+      "results": [
+        "1/5 Test #167: mimo_tp_test .....................   Passed    1.64 sec",
+        "2/5 Test #168: mimo_engine_test .................   Passed    4.92 sec",
+        "3/5 Test #178: qwen_engine_test .................   Passed   34.12 sec",
+        "4/5 Test #219: glm_moe_test .....................   Passed   41.61 sec",
+        "5/5 Test #244: shared_prefill_test ..............   Passed   30.16 sec",
+        "100% tests passed, 0 tests failed out of 5"
+      ]
+    },
+    {
+      "file": "mimo-v30-check/sanitizer.log",
+      "sha256": "bf98a3ef4475194ffb9c1503c2ff9a6f57a3eb9f48e9d889045a9ecb5f74abf6",
+      "results": [
+        "[FAIL] shared_prefill_mimo: ordinary graph speculative verdict differs from plain oracle",
+        "MiMo short reader residency=checkpoint layer=0: 0/6144 changed",
+        "MiMo short reader residency=checkpoint layer=1: 0/6144 changed",
+        "MiMo short reader residency=bf12 layer=0: 0/6144 changed",
+        "MiMo short reader residency=bf12 layer=1: 0/6144 changed",
+        "3 tests, 1 failed",
+        "========= LEAK SUMMARY: 0 bytes leaked in 0 allocations",
+        "========= ERROR SUMMARY: 0 errors"
+      ],
+      "note": "The graph fixture was invoked without CTest\u2019s DGPP_DENSE_GEMV_ROWS=256 and failed its exact scalar/batch assertion. The two new numerical tests passed at ordinary settings. The next receipt reruns the graph fixture with its intended configuration."
+    },
+    {
+      "file": "mimo-v30-check2/sanitizer.log",
+      "sha256": "b92f170ae0b1678b5a421dc3aa4c2b257e6698a786ecd4b61688abc594d83c48",
+      "results": [
+        "1 tests, 0 failed",
+        "========= LEAK SUMMARY: 0 bytes leaked in 0 allocations",
+        "========= ERROR SUMMARY: 0 errors"
+      ],
+      "environment": {
+        "DGPP_DENSE_GEMV_ROWS": "256",
+        "DGPP_TEST_FILTER": "shared_prefill_mimo"
+      }
+    },
+    {
+      "file": "row-groups-v31-check/tests.log",
+      "sha256": "6cbf26de0537b875e83eb57e61a79c789299bb085c9a04bd38ce37c9fd5ad475",
+      "results": [
+        "1/3 Test #164: glm4_tp_test .....................   Passed    2.59 sec",
+        "2/3 Test #165: glm4_engine_test .................   Passed    3.37 sec",
+        "3/3 Test #244: shared_prefill_test ..............   Passed   30.49 sec",
+        "100% tests passed, 0 tests failed out of 3"
+      ]
+    },
+    {
+      "file": "row-groups-v31-check/short-tails-sanitizer.log",
+      "sha256": "59774e3979f1f300f9888dd2308aa05c9f3f48b49a7c357ddddbefedf82df4eb",
+      "results": [
+        "MiMo short reader residency=checkpoint layer=0: 0/6144 changed",
+        "MiMo short reader residency=checkpoint layer=1: 0/6144 changed",
+        "MiMo short reader residency=bf12 layer=0: 0/6144 changed",
+        "MiMo short reader residency=bf12 layer=1: 0/6144 changed",
+        "GLM4 short reader residency=checkpoint layer=0: 0/6144 changed",
+        "GLM4 short reader residency=checkpoint layer=1: 0/6144 changed",
+        "GLM4 short reader residency=bf12 layer=0: 0/6144 changed",
+        "GLM4 short reader residency=bf12 layer=1: 0/6144 changed",
+        "2 tests, 0 failed",
+        "========= LEAK SUMMARY: 0 bytes leaked in 0 allocations",
+        "========= ERROR SUMMARY: 0 errors"
+      ]
+    },
+    {
+      "file": "row-groups-v31-check/glm4-sanitizer.log",
+      "sha256": "aa38cc9ead39081739a343d73fb61dfeddded4e695c78b879df169aa51487d53",
+      "results": [
+        "1 tests, 0 failed",
+        "========= LEAK SUMMARY: 0 bytes leaked in 0 allocations",
+        "========= ERROR SUMMARY: 0 errors"
+      ],
+      "environment": {
+        "DGPP_DENSE_GEMV_ROWS": "256",
+        "DGPP_TEST_FILTER": "shared_prefill_glm4"
+      }
     }
   ],
   "additional_candidates": [
@@ -266,5 +384,23 @@
       "binary_sha256": "62f5adfa724d9b94cdb7266e2986ec7ff3f1c1f3299b6e0fb776a0bbfac540c0",
       "committed_source": "d357c65b48bd199e1aef7589ae8a8d1162b26b4b"
     }
-  ]
+  ],
+  "mimo_decoder_candidate": {
+    "parent": "db2618bebbb29372919bbe4e317e7ca3da7f09c0",
+    "patch_sha256": "148b2c9eeaefe8da8f99d0cc4786151e61d3996353d48c208b633d70127da714",
+    "binary_sha256": "321c11d27f9951ab77073055cae3e5d69596b693ff98c64515c4e79f7a1bc0c8",
+    "committed_source": "15d1dfd3abb61295d59b60141f81a0ed8658354f"
+  },
+  "compatible_row_groups_candidate": {
+    "parent": "15d1dfd3abb61295d59b60141f81a0ed8658354f",
+    "patch_sha256": "f1cc41853db5862ee3fbdf87e8fed5275eac65f049f4e893aacd728c9fab026d",
+    "binary_sha256": "bd3214d465b93de27779bbfea2c66ec6fd70c2dc9b179fd92acb85d22a386dca",
+    "committed_source": "87cc3b542b4127eb8d577393465b6572dced9ef9"
+  },
+  "reader_expert_groups_candidate": {
+    "parent": "87cc3b542b4127eb8d577393465b6572dced9ef9",
+    "patch_sha256": "ff012f97128c4ed01e8f70b73f379ab339d674134bc30c9bba7d336a3725648a",
+    "binary_sha256": "e61a6180634587abb61ec9fc59e6493b8d5d0a6a83d7eed2feeaba249253e45e",
+    "committed_source": "384bc260530bae7f331a1c85fefed54105bb21c8"
+  }
 }
