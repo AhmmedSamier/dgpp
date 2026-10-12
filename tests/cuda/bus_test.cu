@@ -1067,8 +1067,10 @@ void scenario_allreduce_bulk() {
   for (const int world : {2, 4}) {
     const uint16_t port = world == 2 ? 29904 : 29905;
     for (const size_t elems : {static_cast<size_t>(2), size_t{4}, size_t{6}, size_t{8},
-                               size_t{2048}, 2 * stripe + 100,
+                               size_t{2048}, size_t{4094}, size_t{4096}, size_t{4098},
+                               size_t{8190}, size_t{8192}, size_t{8194}, 2 * stripe + 100,
                                segment, segment + 2, segment + 6, segment + 4096, segment + 4098,
+                               segment + 8192, segment + 8194,
                                41 * stripe - 32}) {
       std::vector<std::unique_ptr<CollectiveBus>> world_buses =
           start_world(world, port, one_lane);

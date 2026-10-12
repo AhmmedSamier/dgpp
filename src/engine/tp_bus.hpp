@@ -230,8 +230,11 @@ class BusStreamReducer final : public BoundaryReducer {
       host_driven(partial, total);
       return;
     }
-    if (total <= max_elems_) {
-      issue(partial, total);
+    // Keep short mixed walks on the model stream when a decoder pushes
+    // a reader just past one latency slot. Like the host boundary reducer,
+    // use bulk only beyond two slots; each chunk keeps canonical rank order.
+    if (total <= 2 * max_elems_) {
+      issue_pair(partial, total);
       return;
     }
     // Prefill-class boundary: the stream's folds settle, the stream
@@ -246,9 +249,9 @@ class BusStreamReducer final : public BoundaryReducer {
     // are ready before the next model kernel consumes them.
     const size_t segment = bus_.bulk_segment_bytes() / 2;
     const size_t tail = segment ? total % segment : 0;
-    if (total > segment && tail > 0 && tail <= max_elems_) {
+    if (total > segment && tail > 0 && tail <= 2 * max_elems_) {
       host_driven(partial, total - tail);
-      issue(partial + total - tail, tail);
+      issue_pair(partial + total - tail, tail);
     } else {
       host_driven(partial, total);
     }
@@ -289,6 +292,11 @@ class BusStreamReducer final : public BoundaryReducer {
     std::string err;
     if (bus_.allreduce_stream(stream_, at, at, elems, &err) == 0)
       throw std::runtime_error("boundary reduce: stream collective rejected: " + err);
+  }
+  void issue_pair(uint16_t* at, size_t elems) {
+    const size_t first = std::min(elems, max_elems_);
+    issue(at, first);
+    if (elems > first) issue(at + first, elems - first);
   }
   void host_driven(uint16_t* partial, size_t total) {
     std::string err;
