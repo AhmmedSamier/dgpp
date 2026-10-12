@@ -150,6 +150,121 @@
         "15/15 Test #70: serve_startup_test ...............   Passed    3.15 sec",
         "100% tests passed, 0 tests failed out of 15"
       ]
+    },
+    {
+      "file": "mhc-v26-check/tests.log",
+      "sha256": "05471c249f1d443bf2e4f500d189a3c93db56b2623e8d60e27bd5d445db8b7a7",
+      "results": [
+        "1/5 Test  #82: dsv41_model_test .................   Passed    3.91 sec",
+        "2/5 Test #171: dsv41_tp_test ....................   Passed    6.73 sec",
+        "3/5 Test #174: dsv4_model_test ..................   Passed    6.30 sec",
+        "4/5 Test #175: dsv4_tp_test .....................   Passed    9.54 sec",
+        "5/5 Test #244: shared_prefill_test ..............   Passed   29.58 sec",
+        "100% tests passed, 0 tests failed out of 5"
+      ]
+    },
+    {
+      "file": "mhc-v26-check/sanitizer.log",
+      "sha256": "39a70d400a15274c33760224b5d39ecd75a381b483ca9173684d01d49cb98a66",
+      "results": [
+        "[ OK ] shared_prefill_dsv4",
+        "[ OK ] shared_prefill_dsv41",
+        "[ OK ] shared_prefill_dsv41_continuations",
+        "[ OK ] shared_prefill_dsv4_decoder_mhc_recipe",
+        "[ OK ] shared_prefill_dsv41_decoder_mhc_recipe",
+        "[ OK ] shared_prefill_dsv41_workspace",
+        "6 tests, 0 failed",
+        "========= LEAK SUMMARY: 0 bytes leaked in 0 allocations",
+        "========= ERROR SUMMARY: 0 errors"
+      ]
+    },
+    {
+      "file": "mhc-v26-check/production-verified.log",
+      "sha256": "12e9589e80af0ae239f71e5745f1fcb724a882f24048d0712f0119a37827c80d",
+      "results": [
+        "Production restored: original configuration, original live binary on all four ranks, healthy HTTP."
+      ]
+    },
+    {
+      "file": "moe-v27-check/tests.log",
+      "sha256": "57cf9a92f795f47fd4c72c628c31614720406d6efedca4fbf048ee9e598323c7",
+      "results": [
+        "1/6 Test  #82: dsv41_model_test .................   Passed    3.88 sec",
+        "2/6 Test #171: dsv41_tp_test ....................   Passed    7.74 sec",
+        "3/6 Test #174: dsv4_model_test ..................   Passed    6.13 sec",
+        "4/6 Test #175: dsv4_tp_test .....................   Passed    8.84 sec",
+        "5/6 Test #219: glm_moe_test .....................   Passed   41.51 sec",
+        "6/6 Test #244: shared_prefill_test ..............   Passed   29.85 sec",
+        "100% tests passed, 0 tests failed out of 6"
+      ]
+    },
+    {
+      "file": "moe-v27-check/sanitizer.log",
+      "sha256": "28f11229b52dc988d0f8955d8e04fa40b9ca920ed76811713e64e44f25146f1e",
+      "results": [
+        "[ OK ] shared_prefill_dsv4",
+        "[ OK ] shared_prefill_dsv41",
+        "[ OK ] shared_prefill_dsv41_continuations",
+        "[ OK ] shared_prefill_dsv4_decoder_mhc_recipe",
+        "[ OK ] shared_prefill_dsv41_decoder_mhc_recipe",
+        "[ OK ] shared_prefill_dsv41_workspace",
+        "6 tests, 0 failed",
+        "========= LEAK SUMMARY: 0 bytes leaked in 0 allocations",
+        "========= ERROR SUMMARY: 0 errors"
+      ]
+    },
+    {
+      "file": "moe-v27-check/production-verified.log",
+      "sha256": "12e9589e80af0ae239f71e5745f1fcb724a882f24048d0712f0119a37827c80d",
+      "results": [
+        "Production restored: original configuration, original live binary on all four ranks, healthy HTTP."
+      ]
+    },
+    {
+      "file": "moe-v28-check/tests.log",
+      "sha256": "fce0a648c7f48d151d179cf52841aa126af49c273abe9c56be59b2c5fcb8aed7",
+      "results": [
+        "1/2 Test #219: glm_moe_test .....................   Passed   41.62 sec",
+        "2/2 Test #244: shared_prefill_test ..............   Passed   29.45 sec",
+        "100% tests passed, 0 tests failed out of 2"
+      ]
+    },
+    {
+      "file": "moe-v28-check/sanitizer.log",
+      "sha256": "bad140646eac1679b7f3908f6de928b72a0ea814062fa34871650c0011cec39d",
+      "results": [
+        "[ OK ] moe_mixed_rows_preserve_decode_and_reader_recipes",
+        "1 tests, 0 failed",
+        "========= LEAK SUMMARY: 0 bytes leaked in 0 allocations",
+        "========= ERROR SUMMARY: 0 errors"
+      ]
+    },
+    {
+      "file": "moe-v28-check/production-verified.log",
+      "sha256": "12e9589e80af0ae239f71e5745f1fcb724a882f24048d0712f0119a37827c80d",
+      "results": [
+        "Production restored: original configuration, original live binary on all four ranks, healthy HTTP."
+      ]
+    }
+  ],
+  "additional_candidates": [
+    {
+      "parent": "d283ec0e7abcca7fa53f4ae256d11792d818ec6a",
+      "patch_sha256": "1094093eb1cd4b4f43d5d17c227b52c4c138cabd05c0c745f1d93f2623214d4d",
+      "binary_sha256": "96ef98b8ea29be24655a62dea1cdb4761b5b314b4f07f3be35bac4b7bbf31377",
+      "committed_source": "0fdadaac7be04af79035e880c671f9e2f637c797"
+    },
+    {
+      "parent": "0fdadaac7be04af79035e880c671f9e2f637c797",
+      "patch_sha256": "1f0c40476409df8f72f6807fe8d1f3adb739b180245315045df35976bcd9df28",
+      "binary_sha256": "c4980ec3563b23472b93ebe119a700ad3c706e53ab7032beb683947a58e29d82",
+      "committed_source": "beeaf95202ea98b846b2799cc5937d9da6924791"
+    },
+    {
+      "parent": "beeaf95202ea98b846b2799cc5937d9da6924791",
+      "patch_sha256": "7c0b3ce5139f6b8ffcf5adbb1b8c6b23db9956a94bf6caf5d48fad20b81612a4",
+      "binary_sha256": "62f5adfa724d9b94cdb7266e2986ec7ff3f1c1f3299b6e0fb776a0bbfac540c0",
+      "committed_source": "d357c65b48bd199e1aef7589ae8a8d1162b26b4b"
     }
   ]
 }

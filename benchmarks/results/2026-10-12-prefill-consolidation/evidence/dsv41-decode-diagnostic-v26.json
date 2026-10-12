@@ -1,0 +1,228 @@
+{
+  "sources": {
+    "candidate": "/home/stephen/workspace/dgpp/build-pr104-shared/consolidation/dsv41-decode-diagnostic-v26/candidate/probabilities.json",
+    "candidate-monolithic": "/home/stephen/workspace/dgpp/build-pr104-shared/consolidation/dsv41-decode-diagnostic-v25/candidate-monolithic/probabilities.json",
+    "control-default": "/home/stephen/workspace/dgpp/build-pr104-shared/consolidation/dsv41-decode-diagnostic-v25/control-default/probabilities.json"
+  },
+  "candidate_versus_control": {
+    "solo_decode/0/decoder": {
+      "text_matches": true,
+      "probabilities_match": true,
+      "reference_tokens": 128,
+      "candidate_tokens": 128,
+      "first_changed_token": null
+    },
+    "decoder_pair/0/decoder-0": {
+      "text_matches": true,
+      "probabilities_match": true,
+      "reference_tokens": 128,
+      "candidate_tokens": 128,
+      "first_changed_token": null
+    },
+    "decoder_pair/0/decoder-1": {
+      "text_matches": true,
+      "probabilities_match": true,
+      "reference_tokens": 128,
+      "candidate_tokens": 128,
+      "first_changed_token": null
+    },
+    "mixed_long/0/decoder": {
+      "text_matches": false,
+      "probabilities_match": false,
+      "reference_tokens": 128,
+      "candidate_tokens": 128,
+      "first_changed_token": {
+        "index": 93,
+        "reference": {
+          "token": " second",
+          "logprob": -0.6282387,
+          "top": {
+            " second": -0.6282387,
+            " next": -0.89837456,
+            " first": -3.084299,
+            " number": -4.9294815,
+            " ": -5.869606
+          }
+        },
+        "candidate": {
+          "token": " next",
+          "logprob": -0.58637047,
+          "top": {
+            " next": -0.58637047,
+            " second": -0.9758034,
+            " first": -2.896494,
+            " number": -5.1572247,
+            " ": -6.0563335
+          }
+        },
+        "reference_top_two_gap": 0.27013586
+      }
+    },
+    "mixed_long/0/long": {
+      "text_matches": true,
+      "probabilities_match": true,
+      "reference_tokens": 1,
+      "candidate_tokens": 1,
+      "first_changed_token": null
+    },
+    "mixed_long/0/arrival-0": {
+      "text_matches": true,
+      "probabilities_match": false,
+      "reference_tokens": 64,
+      "candidate_tokens": 64,
+      "first_changed_token": null
+    }
+  },
+  "candidate-monolithic_versus_control": {
+    "solo_decode/0/decoder": {
+      "text_matches": true,
+      "probabilities_match": true,
+      "reference_tokens": 128,
+      "candidate_tokens": 128,
+      "first_changed_token": null
+    },
+    "decoder_pair/0/decoder-0": {
+      "text_matches": true,
+      "probabilities_match": true,
+      "reference_tokens": 128,
+      "candidate_tokens": 128,
+      "first_changed_token": null
+    },
+    "decoder_pair/0/decoder-1": {
+      "text_matches": true,
+      "probabilities_match": true,
+      "reference_tokens": 128,
+      "candidate_tokens": 128,
+      "first_changed_token": null
+    },
+    "mixed_long/0/decoder": {
+      "text_matches": true,
+      "probabilities_match": true,
+      "reference_tokens": 128,
+      "candidate_tokens": 128,
+      "first_changed_token": null
+    },
+    "mixed_long/0/long": {
+      "text_matches": true,
+      "probabilities_match": true,
+      "reference_tokens": 1,
+      "candidate_tokens": 1,
+      "first_changed_token": null
+    },
+    "mixed_long/0/arrival-0": {
+      "text_matches": true,
+      "probabilities_match": true,
+      "reference_tokens": 64,
+      "candidate_tokens": 64,
+      "first_changed_token": null
+    }
+  },
+  "candidate_shape_comparison": {
+    "pair_0": {
+      "text_matches": true,
+      "probabilities_match": true,
+      "reference_tokens": 128,
+      "candidate_tokens": 128,
+      "first_changed_token": null
+    },
+    "pair_1": {
+      "text_matches": true,
+      "probabilities_match": true,
+      "reference_tokens": 128,
+      "candidate_tokens": 128,
+      "first_changed_token": null
+    },
+    "mixed": {
+      "text_matches": false,
+      "probabilities_match": false,
+      "reference_tokens": 128,
+      "candidate_tokens": 128,
+      "first_changed_token": {
+        "index": 93,
+        "reference": {
+          "token": " second",
+          "logprob": -0.6282387,
+          "top": {
+            " second": -0.6282387,
+            " next": -0.89837456,
+            " first": -3.084299,
+            " number": -4.9294815,
+            " ": -5.869606
+          }
+        },
+        "candidate": {
+          "token": " next",
+          "logprob": -0.58637047,
+          "top": {
+            " next": -0.58637047,
+            " second": -0.9758034,
+            " first": -2.896494,
+            " number": -5.1572247,
+            " ": -6.0563335
+          }
+        },
+        "reference_top_two_gap": 0.27013586
+      }
+    }
+  },
+  "candidate-monolithic_shape_comparison": {
+    "pair_0": {
+      "text_matches": true,
+      "probabilities_match": true,
+      "reference_tokens": 128,
+      "candidate_tokens": 128,
+      "first_changed_token": null
+    },
+    "pair_1": {
+      "text_matches": true,
+      "probabilities_match": true,
+      "reference_tokens": 128,
+      "candidate_tokens": 128,
+      "first_changed_token": null
+    },
+    "mixed": {
+      "text_matches": true,
+      "probabilities_match": true,
+      "reference_tokens": 128,
+      "candidate_tokens": 128,
+      "first_changed_token": null
+    }
+  },
+  "control-default_shape_comparison": {
+    "pair_0": {
+      "text_matches": true,
+      "probabilities_match": true,
+      "reference_tokens": 128,
+      "candidate_tokens": 128,
+      "first_changed_token": null
+    },
+    "pair_1": {
+      "text_matches": true,
+      "probabilities_match": true,
+      "reference_tokens": 128,
+      "candidate_tokens": 128,
+      "first_changed_token": null
+    },
+    "mixed": {
+      "text_matches": true,
+      "probabilities_match": true,
+      "reference_tokens": 128,
+      "candidate_tokens": 128,
+      "first_changed_token": null
+    }
+  },
+  "candidate_source": {
+    "parent": "d283ec0e7abcca7fa53f4ae256d11792d818ec6a",
+    "patch_sha256": "1094093eb1cd4b4f43d5d17c227b52c4c138cabd05c0c745f1d93f2623214d4d",
+    "binary_sha256": "96ef98b8ea29be24655a62dea1cdb4761b5b314b4f07f3be35bac4b7bbf31377",
+    "committed_source": "0fdadaac7be04af79035e880c671f9e2f637c797"
+  },
+  "opstreams": {
+    "candidate": {
+      "serve_rank0.ops": "f0fc54073a72a8af702204d2227083000b54ced5fd13a36f9267b7737535cc51",
+      "serve_rank2.ops": "f0fc54073a72a8af702204d2227083000b54ced5fd13a36f9267b7737535cc51",
+      "serve_rank1.ops": "f0fc54073a72a8af702204d2227083000b54ced5fd13a36f9267b7737535cc51",
+      "serve_rank3.ops": "f0fc54073a72a8af702204d2227083000b54ced5fd13a36f9267b7737535cc51"
+    }
+  }
+}

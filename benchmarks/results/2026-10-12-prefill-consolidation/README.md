@@ -28,6 +28,8 @@ baseline, not against the source before all early-admission work began.
 | --- | --- | --- |
 | Control | `3877e12e8f5a40b311efddd680c97f9dc1d45d41`, serving sources identical to `8e6909ad` | `9da56c960ee034f75bbc7219439f1f705f041f61136eeaf66928b808baed45b2` |
 | Candidate with shared compact mapping | `df5b3c9b513ef896e5f7725c18632df03d12c1db` | `726ad15e6c9e56ae4d55d5a2f72ea457e2c5dc224cef638428be71a644f38268` |
+| Candidate with native mixed decoder mHC and expert recipes | `beeaf952` | `c4980ec3563b23472b93ebe119a700ad3c706e53ab7032beb683947a58e29d82` |
+| Candidate with mixed phase bounds and four-format validation | `d357c65b` | `62f5adfa724d9b94cdb7266e2986ec7ff3f1c1f3299b6e0fb776a0bbfac540c0` |
 | Earlier candidate, before compact mapping | `26e61c9f55f068673eb771a1daa90d09c18d6978` | `0080af5401a43e91d2a5e76cf79f39db9de60442f24042147195add7f5e0a9c5` |
 
 Builds use Release optimization with debug symbols disabled. Harness-only
@@ -122,12 +124,14 @@ is faster. Each link retains the underlying timings and request metrics.
 | [Qwen FP8, matched 256 budget](evidence/qwen4-matched-budget-final-v25-summary.json) | -0.64% | -0.34% | +0.93% | -0.30% | -0.01% | -0.36% |
 | [GLM Flash](evidence/glm-final-v25-summary.json) | +0.52% | -35.63% | -0.64% | -67.62% | -21.70% | -23.52% |
 | [GLM-DSA²](evidence/glm-dsa-compact-v25-summary.json) | — | — | — | — | -1.39% | -2.53% |
-| [DeepSeek V4.1³](evidence/dsv41-final-v25-summary.json) | -1.18% | +0.07% | -0.43% | -1.94% | -5.30% | -0.94% |
+| [DeepSeek V4.1³](evidence/dsv41-final-v27-summary.json) | -0.94% | -0.07% | -0.58% | -2.29% | +0.56% | -1.58% |
 
 ¹ Earlier candidate before compact mapping. These block-drafter/eager paths
 are unaffected by that mapping change. ² Three trials of the affected
-scenarios; earlier full-family coverage remains in the evidence. ³ Numerical
-investigation and decoder dispatch checks remain open.
+scenarios; earlier full-family coverage remains in the evidence. ³ Candidate
+`beeaf952` preserves native mixed decoder mHC and expert recipes; all 34
+responses and four chat transcripts match. Mixed elapsed time is
+5.835 → 5.867 seconds; this sub-percent difference is based on two trials.
 
 At the matched 256-token Qwen budget, mixed elapsed time is 7.676 → 7.675
 seconds. Arrival first-token latency remains 0.33–0.36 seconds and maximum
@@ -163,8 +167,34 @@ visible in the evidence and are not counted as exact passes.
   shape have exactly matching text and probabilities for all three
   requests. See [the GLM-DSA diagnostic](evidence/glm-dsa-prefill-diagnostic-v25.json).
 - DeepSeek V4.1's mixed incumbent changes its 128-token counting response
-  in both trials. Isolated decode and the four chat transcripts match.
-  Additional identical-prompt and probability probes are pending.
+  in both trials. Identical isolated and paired decoders have exact text and
+  probabilities across builds; the candidate at the previous monolithic
+  execution shape also matches the control exactly for all six probe
+  responses. The mixed incumbent first changes token 48, at a control
+  top-two gap of 0.00554 nat, but its probability shift is larger. See
+  [the probability diagnostic](evidence/dsv41-decode-diagnostic-v25.json).
+  A wider fixture reproduces the underlying mHC dispatch defect: mixed
+  decoder rows were using the reader's coefficient reduction. V4 has the
+  same issue, detectable in its fp32 post coefficients. The retained
+  [regression receipts](evidence/mhc-regressions.json) include the original
+  passing tiny checks, the wider V4.1 failure, and the V4 failure after its
+  coefficient diagnostic was added. The mHC correction alone left a later
+  changed token at a 0.27014-nat baseline margin; see
+  [that intermediate probe](evidence/dsv41-decode-diagnostic-v26.json).
+  Layer tracing then found differing expert outputs for identical decoder
+  inputs. Preserving the native expert recipe through the shared executor
+  resolves this probe: all six responses now match the baseline's text and
+  token probabilities exactly, including the mixed incumbent and arrival.
+  See [the corrected probe](evidence/dsv41-decode-diagnostic-v27.json).
+  Six test targets pass, including thirteen shared-prefill cases and the
+  37-case MoE suite; all six affected shared cases also pass memcheck with
+  zero errors and leaks. The corrected candidate's paired performance and
+  cache checks pass; its measurements appear in the table above. The earlier
+  [V4.1 timing result](evidence/dsv41-final-v25-summary.json) is retained as
+  investigation history, not as the corrected candidate's performance.
+  A subsequent 38-case MoE run and thirteen-case shared-prefill run pass,
+  including a new split-boundary check over FP8, NVFP4, MXFP4 and packed
+  int4. That check also passes memcheck with zero errors and leaked bytes.
 - Qwen NVFP4 reasoning continuations can differ between isolated and loaded
   execution in both old and new binaries. The old binary at the candidate's
   budget reproduces the candidate's transcripts. Repeat-under-load and
@@ -176,8 +206,8 @@ model-quality or teacher-forced numerical equivalence result.
 ## Temporary weights and cleanup
 
 MiMo-V2.6-Flash-RL, GLM-4.7-NVFP4 and DeepSeek-V4-Flash-0731 were absent from
-the saved initial inventories. Their download, sync, testing and cleanup
-are pending. Downloads are pinned to checkpoint revisions and performed one
+the saved initial inventories. Their final download, sync, testing and cleanup
+are in progress, beginning with MiMo. Downloads are pinned to checkpoint revisions and performed one
 model at a time after stopping production. No download runs alongside a
 benchmark. Test-only resident images are disabled for these campaigns.
 

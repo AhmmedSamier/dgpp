@@ -82,6 +82,13 @@ Constraints ports have tripped on:
   gives the engine (the `glm_tp_test` gates fail otherwise), and shared-system-
   prompt head snapshots exist so the next conversation attaches at the head —
   a per-family cost complaint is a keyed decision, not a scheduler rule.
+- **Mixed decoder arithmetic.** A reader's presence must not silently select
+  its numerical recipe for incumbent decoder rows. Carry `RowRun`'s decoder
+  prefix into shape-dependent sites. The shared MoE executor can preserve
+  native decoder outputs while retaining grouped reader execution, including
+  phased accumulation around communication. Compare identical sublayer
+  inputs and outputs; a rounded hidden-state check can miss changed fp32
+  coefficients that affect later layers.
 - **Speculative steps return exactly the tokens decided that step.** On the
   plain path that is the verify's next token; a speculator that also returns
   the fed token duplicates the first token of every transcript and drops the

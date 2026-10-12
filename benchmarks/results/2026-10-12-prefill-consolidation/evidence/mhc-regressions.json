@@ -1,0 +1,35 @@
+[
+  {
+    "directory": "mhc-before-fix-v25",
+    "patch_sha256": "52af0a1b9ee65b7fd8f1d146821b36f88a8970a7c91c4eeb89c090f830c1e36a",
+    "returncode": 0,
+    "test_binary_sha256": "49a50b303c721ba4a309b494c3a13eb6b0f3340bc8ff4c8b47fd39759e9e91e0",
+    "results": [
+      "[ OK ] shared_prefill_dsv4_decoder_mhc_recipe",
+      "[ OK ] shared_prefill_dsv41_decoder_mhc_recipe",
+      "2 tests, 0 failed"
+    ]
+  },
+  {
+    "directory": "mhc-wide-before-fix-v25",
+    "patch_sha256": "92ccba77cf9d2bb59477f1c5019fd79d0a6cc6d23c556a9e64eb5c4012ec4caf",
+    "returncode": 1,
+    "test_binary_sha256": "32f593a4b3dd00f5495cdcb7d0d0f7aff987f26034f65891070b8be8f24d103b",
+    "results": [
+      "[ OK ] shared_prefill_dsv4_decoder_mhc_recipe",
+      "[FAIL] shared_prefill_dsv41_decoder_mhc_recipe: mixed decoder mHC coefficients must equal its isolated decode recipe",
+      "2 tests, 1 failed"
+    ]
+  },
+  {
+    "directory": "mhc-dsv41-fix-v26a",
+    "patch_sha256": "57fe0f485596308befcf7a56750b44c3c92d24c989b3bf1f69a3b4ea7f7e1d6e",
+    "returncode": 1,
+    "test_binary_sha256": "eafe008916cd6dde0045962ea3bf10bcc1a744ba83d33ed4903e95b7a9c6e572",
+    "results": [
+      "[FAIL] shared_prefill_dsv4_decoder_mhc_recipe: mixed decoder mHC post coefficients must equal its isolated decode recipe",
+      "[ OK ] shared_prefill_dsv41_decoder_mhc_recipe",
+      "2 tests, 1 failed"
+    ]
+  }
+]
