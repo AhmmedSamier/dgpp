@@ -380,7 +380,15 @@ Qwen35TextConfig Qwen35TextConfig::from_json_file(const std::string& path) {
   const auto parsed = minijson::parse(json);
   const minijson::Value* tc = parsed.root.find("text_config");
   if (!tc) throw std::runtime_error("config " + path + ": missing text_config object");
-  return parse(*tc, parsed.root.find("quantization_config"));
+  Qwen35TextConfig c = parse(*tc, parsed.root.find("quantization_config"));
+  // The visual tower (both 27B releases carry one): parsed and validated
+  // now, consumed when the tower lands. Absent stays nullopt — the loader
+  // counts model.visual.* as vision either way, and serving is text-only
+  // until the tower exists.
+  if (const minijson::Value* vc = parsed.root.find("vision_config");
+      vc && !vc->is_null())
+    c.vision = QwenVisionConfig::parse(parsed.root, c.hidden_size);
+  return c;
 }
 
 int Qwen35TextConfig::num_gdn_layers() const {

@@ -13,10 +13,13 @@
 // ignored (image requests stay refused until the tower lands).
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "kernels/rope_scaling.hpp"
 #include "loaders/minijson.hpp"
+#include "models/qwen/vision_config.hpp"
 
 namespace dgpp {
 
@@ -82,10 +85,26 @@ struct Qwen35TextConfig {
   // --- MTP ------------------------------------------------------------------
   int mtp_num_layers = 1;  // 0 or 1; the draft layer is a Full layer
 
+  // --- positional ceiling ----------------------------------------------------
+  // The opt-in YaRN ramp (engine.rope_scaling), unset until the serving
+  // stack supports it for this family: the checkpoint parser never fills
+  // it, so every table and every ceiling is what it was before the knob
+  // existed. Carried into the qwen4_exp layer view by qwen35_text_adapter
+  // (the 16 Full layers already honor it there); the DFlash2 draft table
+  // and the serving knob stay off until the release recipe lands.
+  std::optional<RopeScaling> rope_scaling;
+
   // --- weight formats -------------------------------------------------------
   Qwen35QuantKind quant_kind = Qwen35QuantKind::Fp8Block;
   // Nvfp4Mixed only: the parsed config_groups (null for Fp8Block).
   std::shared_ptr<const Qwen35QuantGroups> quant_groups;
+
+  // --- visual tower ----------------------------------------------------------
+  // Parsed when the checkpoint carries one (both 27B releases do), consumed
+  // when the tower lands; a text-only export stays nullopt and serves
+  // exactly as before. Geometry is validated now so a foreign tower fails
+  // at load, not at the first image.
+  std::optional<QwenVisionConfig> vision;
 
   static Qwen35TextConfig parse(const minijson::Value& text_config,
                                 const minijson::Value* quantization_config);
