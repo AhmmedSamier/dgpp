@@ -13,10 +13,13 @@
 // ignored (image requests stay refused until the tower lands).
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "kernels/rope_scaling.hpp"
 #include "loaders/minijson.hpp"
+#include "models/qwen/config.hpp"
 
 namespace dgpp {
 
@@ -100,9 +103,21 @@ struct Qwen35TextConfig {
   // BF16. Only meaningful with quant_kind == Nvfp4Mixed (the Fp8Block
   // binding needs no per-matrix resolution).
   Qwen35TensorQuant tensor_quant(const std::string& module) const;
+  // The opt-in YaRN ramp (engine.rope_scaling), unset until the serving
+  // stack supports it for this family.
+  std::optional<RopeScaling> rope_scaling;
   // Layer index of the MTP draft layer (num_hidden_layers), -1 when absent.
   int mtp_layer() const { return mtp_num_layers == 1 ? num_hidden_layers : -1; }
-  int64_t context_limit() const { return static_cast<int64_t>(max_position_embeddings); }
+  // The request-context ceiling: the checkpoint's own positions, or the
+  // ramp's when the serving stack sets one.
+  int64_t context_limit() const {
+    return rope_scaling.has_value() ? rope_scaling->context_limit()
+                                    : static_cast<int64_t>(max_position_embeddings);
+  }
 };
+
+// The qwen4_exp layer ctors take QwenTextConfig: adapt the fields they read,
+// including the (currently unset) rope ramp.
+QwenTextConfig qwen35_text_adapter(const Qwen35TextConfig& c);
 
 }  // namespace dgpp

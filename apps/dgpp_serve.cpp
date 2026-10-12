@@ -904,14 +904,42 @@ struct Qwen35Family final : ServeFamily {
   std::string dflash;  // the DFlash2 drafter's checkpoint dir (empty: off)
   std::vector<int64_t> eos_;
   std::unique_ptr<dgpp::Qwen35Model> model;
-  Qwen35Family(const std::string& checkpoint)
+  Qwen35Family(const std::string& checkpoint,
+               const std::optional<dgpp::RopeScaling>& rope_scaling = std::nullopt)
       : cfg(dgpp::Qwen35TextConfig::from_json_file((fs::path(checkpoint) / "config.json").string())),
         ckpt(checkpoint) {
     if (cfg.eos_token_ids.empty())
       throw std::invalid_argument("Qwen3.5: the config names no EOS token");
     for (int64_t id : cfg.eos_token_ids) eos_.push_back(id);
+    // The engine's opt-in YaRN ramp (engine.rope_scaling): it rides the
+    // parsed config, so the Full layers' tables, the drafter's table, the
+    // session's max_context() and the memory plan's context line all take
+    // it from one place. The band parameters are the Qwen3.8-Flash-Next
+    // recipe's until the 27B release check signs its own (identical rope
+    // geometry: 64 rotary dims, theta 1e7, mrope [11,11,10]).
+    if (rope_scaling.has_value()) {
+      rope_scaling->validate("engine.rope_scaling");
+      cfg.rope_scaling = *rope_scaling;
+      if (rope_scaling->original_max_position_embeddings != cfg.max_position_embeddings)
+        DGPP_LOG_WARN(
+            "engine.rope_scaling: original_max_position_embeddings {} differs from the "
+            "checkpoint's max_position_embeddings {} — the ramp band is computed from the "
+            "knob's value",
+            rope_scaling->original_max_position_embeddings, cfg.max_position_embeddings);
+      DGPP_LOG_INFO(
+          "qwen3_5: YaRN rope on — factor {}, original {} positions, correction band from {} "
+          "(mrope cache x{}), beta_fast {} beta_slow {}, attention factor {:.10g} (mscale {:.10g}); "
+          "context cap {}",
+          rope_scaling->factor, rope_scaling->original_max_position_embeddings,
+          rope_scaling->correction_max_position(), rope_scaling->mrope_cache_factor,
+          rope_scaling->beta_fast, rope_scaling->beta_slow, rope_scaling->attn_factor,
+          static_cast<double>(rope_scaling->mscale()), cfg.context_limit());
+    }
   }
   const char* name() const override { return "qwen3_5"; }
+  // The request-context ceiling: native positions today (the ramp pins it
+  // higher once the serving stack supports rope_scaling for this family).
+  int64_t position_limit() const override { return cfg.context_limit(); }
   int64_t vocab_size() const override { return cfg.vocab_size; }
   const std::vector<int64_t>& eos_token_ids() const override { return eos_; }
   int64_t block_tokens() const override { return dgpp::Qwen35Model::kv_block_tokens_static(); }
@@ -976,7 +1004,8 @@ std::unique_ptr<ServeFamily> make_family(const std::string& ckpt, int world,
   if (arch == dgpp::ModelArchitecture::MimoV2) return std::make_unique<MimoFamily>(ckpt, kv_format);
   if (arch == dgpp::ModelArchitecture::Qwen4Exp)
     return std::make_unique<QwenFamily>(ckpt, rope_scaling, fp8_head_mma);
-  if (arch == dgpp::ModelArchitecture::Qwen3_5) return std::make_unique<Qwen35Family>(ckpt);
+  if (arch == dgpp::ModelArchitecture::Qwen3_5)
+    return std::make_unique<Qwen35Family>(ckpt, rope_scaling);
   if (arch == dgpp::ModelArchitecture::Glm4Moe) return std::make_unique<Glm4Family>(ckpt);
   if (arch == dgpp::ModelArchitecture::GlmMoeDsa) return std::make_unique<GlmDsaFamily>(ckpt, world, kv_format);
   return std::make_unique<GlmFamily>(ckpt, world, kv_format);
@@ -2493,18 +2522,22 @@ int main(int argc, char** argv) {
       DGPP_LOG_ERROR("engine.fp8_head mma requires the Qwen family and engine.dense_weights fp8");
       return 1;
     }
-    if (rope_scaling.has_value() && std::string(family->name()) != "qwen4_exp") {
+    const std::string family_name = std::string(family->name());
+    if (rope_scaling.has_value() && family_name != "qwen4_exp" && family_name != "qwen3_5") {
       // A refused start, not a warning (review item 8, 2026-09-18): a WARN
       // scrolls past in a boot log and the world then serves with a knob the
       // operator asked for left unapplied — the same config digest on every
       // rank (the ramp rides the settings record), a memory plan sized for the
       // YaRN ceiling and a rope that never reached it. The knob is built for
-      // the Qwen QSA rope table and no other family's, so the only honest
+      // the Qwen QSA rope table and the Qwen3.8-27B full-attention rope table
+      // (same geometry) and no other family's, so the only honest
       // answer here is to stop and name what to change.
       DGPP_LOG_ERROR(
           "engine.rope_scaling is set but the loaded model is the {} family; this override "
-          "currently supports the Qwen3.8-Flash-Next family (qwen4_exp) only. Remove "
-          "engine.rope_scaling, or point --checkpoint at a Qwen3.8-Flash-Next checkpoint.",
+          "currently supports the Qwen3.8-Flash-Next (qwen4_exp) and Qwen3.8-27B (qwen3_5) "
+          "families only. Remove "
+          "engine.rope_scaling, or point --checkpoint at a Qwen3.8-Flash-Next or Qwen3.8-27B "
+          "checkpoint.",
           family->name());
       return 1;
     }
