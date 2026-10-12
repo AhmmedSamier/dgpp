@@ -307,7 +307,7 @@ with a fixed `max_entries` row stride across graph replays and batch sizes.
 The old eight-part candidate buffer is gone: six slots with depth-four MTP
 save 3.75 MiB per rank. No per-step allocation or additional global histogram
 is needed. The September 13 records below describe the original implementation;
-the [September 21 record](../benchmarks/results/2026-09-21-deepseek-selection/README.md)
+the September 21 record
 documents the replacement and its exactness and performance checks.
 
 ### 1.4 The window ring and rollback
@@ -1560,7 +1560,7 @@ prompt through bounded prefill). Regression: `fabric_glm_regression.sh`
 bitwise, Qwen / GLM-4.7 / full GLM-5.3 transcripts identical to their
 records, `ctest` green. Records: `docs/benchmarks.md` §3–§7 rows, a
 "DeepSeek-V4.1-Flash on four nodes" section in `docs/measurements.md`, a
-dated `benchmarks/results/` entry, the CHANGELOG line, PLAN.md's serving
+dated local run artifacts entry, the CHANGELOG line, PLAN.md's serving
 row and link, `deploy/README.md`'s table, the model card, §7 of this
 document filled in.
 
@@ -2048,7 +2048,7 @@ instead, so `cluster_doctor.checkpoint_size` now accepts either. `--model`
 with `--mtp` and no depth resolved the family's default (5) before the
 snapshot was resolved; fixed (`apps/dgpp_serve.cpp`, `resolve_model`
 before the depth default). Served numbers (`build-ci/fabric-runs/
-dsv41_serve_2026-09-13/`, `benchmarks/results/2026-09-14-dsv41-flash.md`):
+dsv41_serve_2026-09-13/`, the 2026-09-14-dsv41-flash measurements):
 single stream 76 ms/pass at 2.33 tok/pass (32.5 ms/token), the class
 sweep 20.7–38.2 ms/token wall with DSpark acceptance p1 55–92 % (json
 92, math 82, code 72, prose 67, chat 55); bounded prefill 2.35 / 1.85 /
@@ -2071,8 +2071,7 @@ graph-engine port (reduced-row variants per slot, the confidence
 publication, the per-step choice; `dsv41_engine_test` on 29964: forced
 depths 1,4,2,5,3,… reproduce the plain eager transcript, both ranks
 identical), the server knobs journaled to every rank, full suite 99/99.
-Fabric (three worlds from one binary; `benchmarks/results/
-2026-09-14-dsv41-flash.md`): baseline reproduces the window-split
+Fabric (three worlds from one binary; the 2026-09-14-dsv41-flash measurements): baseline reproduces the window-split
 transcripts (the default path unchanged); scheduled at λ 0.045 — chat 33.4
 → 24.6, prose 27.4 → 22.7, code 21.9 → 18.9, json 21.9 → 19.1, math 21.8 →
 19.8 ms/token, transcripts identical, op streams identical across the
@@ -2164,7 +2163,7 @@ fixture's snapshots pass at the block alignment. Until then
   checkpoint retired. The NVFP4 re-packs are not downloaded.
 
 *Record (2026-09-16, communication width, scheduled depths and prefill chunks).*
-The [four-node inference study](../benchmarks/results/2026-09-16-dsv41-perf/README.md)
+The four-node inference study
 profiles the current six-slot service and tests alternatives without changing
 weight or KV precision. The retained graph consumer uses 256/512/1,024 threads
 according to payload size, and bounded prefill uses 4,096-token chunks.

@@ -102,9 +102,9 @@ carry it), the n-gram table mmap'ed with the next chunk's rows staged
 ahead, a 4,096-token prefill budget so decodes keep moving under a long
 prompt, and the two prefill levers that paid without a measurable quality
 cost. Its rows in [benchmarks](benchmarks.md) show the default chain and
-the levers-on configuration separately; the [dated
-record](../benchmarks/results/2026-09-28-qwen-autoround-int4/README.md)
-holds every A/B behind those choices, including the ones that lost.
+the levers-on configuration separately. The
+[Qwen int4 plan](qwen38_autoround_int4_plan.md) explains the selected
+optimizations and rejected experiments.
 
 ## 4. Where the floor is
 

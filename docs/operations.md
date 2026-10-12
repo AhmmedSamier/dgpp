@@ -43,10 +43,10 @@ numerical tolerances and top-1 checks rather than a universal bitwise claim.
 
 Native MTP3 improves acceptance on the measured code, JSON and arithmetic
 probes, but slows the prose probe relative to MTP1. Use the
-[reproduction procedure](../benchmarks/mimo_upstream/README.md) to compare
-representative traffic. [Native-head measurements](../benchmarks/results/2026-09-23-mimo-native-mtp.md)
-and [prefill measurements](../benchmarks/results/2026-09-23-mimo-upstream-ports.md)
-record the configurations and limitations separately.
+[reproduction procedure](experiments/mimo-benchmarking.md) to compare
+representative traffic. The [native MTP experiment](experiments/mimo-native-mtp.md)
+and [prefill experiment](experiments/mimo-upstream-ports.md) describe the
+configurations and limitations.
 
 ## Qwen sparse prefill attention
 
@@ -125,8 +125,8 @@ control table residency and optional FP8 encoding of dense projections.
 The Qwen NVFP4 templates, including YaRN, set `engine.fp8_head: "mma"`.
 With `dense_weights: "fp8"`, this uses streaming MMA above the dense GEMV
 threshold and within the configured decode capacity, including short prefills
-in that interval. Matched one- and two-Spark teacher-forced checks passed;
-see the [numerical results and scope](../benchmarks/results/2026-09-21-qwen-fp8-head-numerics.md).
+in that interval. Matched one- and two-Spark teacher-forced checks passed.
+
 The interface default remains `"gemv"` for configurations that omit the key.
 
 The service rejects unsupported `fp8_head` values. MMA requires Qwen and FP8
@@ -193,9 +193,8 @@ of 64 and at most 16384; other shapes and decode use W4A16. Memory plans
 include the activation workspace only when opted in (28.2 MiB per rank for
 standard Qwen chunks).
 
-The [single-node guide](qwen38_single_spark.md) covers the one-Spark memory
-plan, and the [two-node benchmark](../benchmarks/results/2026-09-16-qwen-nvfp4-w2.md)
-records the resident-versus-mapped placement decision.
+The [single-node guide](qwen38_single_spark.md) covers memory planning and
+resident-versus-mapped placement.
 
 ```bash
 scripts/dgpp-cluster up --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json
@@ -483,14 +482,14 @@ check their allocations before loading:
   exits 0 or 1. A standalone run reads about 0.6 GiB more free memory than a
   boot does, because a booting rank locks its pinned memory before it plans;
   leave that much slack when sizing `kv_capacity` from one, or read the
-  ceiling out of a refusal;
+  ceiling out of a refusal.
 - the loader's own check that the resident footprint (+ 4 GiB headroom)
   fits the device's free memory remains as the second line and fails
-  immediately with a clear message — never three minutes into a load;
+  immediately with a clear message — never three minutes into a load.
 - the loader reads each source tensor exactly once (prefetch, copy, drop),
   keeping the checkpoint page cache bounded during loading; the checkpoint's
   mmaps are released the
-  moment the last layer is on the device (`GlmLayerStream::release_sources`);
+  moment the last layer is on the device (`GlmLayerStream::release_sources`).
 - the process *tries* to lock its memory (`mlockall(MCL_CURRENT)`, before
   the model is constructed) as a safety net against swap-in faults in the
   decode loop. This is optional: with the one-pass loader a rank with the
@@ -858,7 +857,6 @@ the peers in ~155 s on the hybrid). `dgpp-serve`'s first collective has a
 consumer exited on deadline` while the peers are still building — their
 images are still written. Boot again (the images restore in ~15 s), or
 run `glm_gen_check` once on the fabric first, whose rendezvous waits.
-
 
 ```
 DGPP_RESIDENT_CACHE=off            disable (always build from the checkpoint)

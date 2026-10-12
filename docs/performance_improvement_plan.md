@@ -5,26 +5,25 @@ Baseline: [dgpp-benchmark-comparison.md](../dgpp-benchmark-comparison.md),
 the dated measurements, deployment templates, and the implementation.
 The analysis below describes that baseline. Implementation now includes
 the measurement tools, Qwen's 16-row decode path, fitting batch families,
-and opt-in Qwen prefill continuation. See the [implementation report](../benchmarks/results/2026-09-15-qwen-batching-prefill.md)
-for correctness gates and fabric measurements. Sections 1–9 retain the
+and opt-in Qwen prefill continuation. Sections 1–9 retain the
 original proposal; the follow-ups below and section 10 update delivery
 status and remaining priorities.
-The [C1 analysis](../benchmarks/results/2026-09-15-c1-analysis.md) puts the
+The C1 analysis puts the
 default Qwen shift at about -0.25%, below this campaign's between-session
 variation; the zero-threshold screen does not establish a material causal
 regression. Section 10 updates priorities using the implementation results.
-The [idle-prefill follow-up](../benchmarks/results/2026-09-15-qwen-idle-prefill.md)
+The idle-prefill follow-up
 adds a larger budget when no request is decoding. It reduces the measured
 32K idle prefill from 40.0 to 24.7 seconds versus fixed 256-token chunks,
 and the short-peer transition workload from 29.8 to 20.3 seconds. Qwen C1
 shifts fit the measured unchanged-build variation; both budgets remain opt-in.
-The [expert-kernel investigation](../benchmarks/results/2026-09-15-qwen-moe-prefill.md)
+The expert-kernel investigation
 rejects smaller tiles, compact grids and persistent blocks for Qwen's small
 prefill chunks. None established a useful service win. Recorded-route memory
 counters are close to one read of the selected weights; production kernels
 remain unchanged. Section 10 moves full GLM's missing packed prefill GEMM
 ahead of further Qwen tile sweeps. The subsequent
-[full-GLM implementation](../benchmarks/results/2026-09-15-glm-packed-prefill.md)
+full-GLM implementation
 adds packed tensor-core prefill and independent FP64/likelihood checks.
 It retains short-prompt GEMV because an earlier switch changed MTP acceptance
 and reduced measured C1 throughput, despite passing the likelihood gates.
@@ -264,7 +263,7 @@ regression at C1/C2. Capacity increases alone do not satisfy this gate.
 | Packed int4/int8 GEMM | [packq_gemv.cu](../src/kernels/packq_gemv.cu), [glm_moe.cu](../src/kernels/glm_moe.cu), [full GLM model](../src/models/glm_dsa/model.cpp): dense and grouped expert tile kernels that unpack each weight tile once and use tensor cores across prompt rows | The documented 7–9.5 ms/token full-GLM prefill is a specific missing-kernel case. Preserve offset-code/group-scale semantics; test dequantization, accumulations, logits and task quality |
 | Broaden stream-ordered folds | [tp_bus.hpp](../src/engine/tp_bus.hpp), [dgpp_serve.cpp](../apps/dgpp_serve.cpp): A/B the existing stream reducer on Qwen/GLM families | It is currently selected only for DeepSeek. Boundaries larger than one latency slot still synchronize and use host-driven bulk, so this primarily targets short/chunked prefill |
 | Stream-ordered bulk collectives | [collective_bus.cpp](../src/net/collective_bus.cpp), [bus_kernel.cu](../src/net/bus_kernel.cu): remove host round trips at large boundaries, retain canonical reduction order and buffer lifetime | Measure network wait versus copy/fold/host time first. The current small-message reducer does not implement this |
-| Expert prefill tiles | [glm_moe.cu](../src/kernels/glm_moe.cu): require evidence of avoidable traffic or instruction cost before another tile sweep; measure FP8 and FP4 separately | The [small-chunk FP8 investigation](../benchmarks/results/2026-09-15-qwen-moe-prefill.md) rejected three variants. Recorded median-route gate/down memory fills were within about 1% of one selected-weight payload. The earlier 8K-chunk experiment bought only 3.6% for 17 GiB/rank |
+| Expert prefill tiles | [glm_moe.cu](../src/kernels/glm_moe.cu): require evidence of avoidable traffic or instruction cost before another tile sweep; measure FP8 and FP4 separately | The small-chunk FP8 investigation rejected three variants. Recorded median-route gate/down memory fills were within about 1% of one selected-weight payload. The earlier 8K-chunk experiment bought only 3.6% for 17 GiB/rank |
 | Attention/recurrence | Qwen QSA and GDN, GLM-4.7 GQA: tiled attention and a chunk-parallel recurrence only where a new profile justifies them | Larger numerical projects; validate state continuation and target decisions, not only isolated kernel time |
 
 Only after stream-ordered bulk works, test overlap of a row block's fold
@@ -581,18 +580,18 @@ Matched service profiles now point to routed-expert matrix multiplies as the
 main small-chunk penalty: 1.38 seconds unbudgeted versus 4.68 seconds with a
 256-token budget for the same profiled 8,281-token prompt. QSA attention is
 also a substantial large-chunk cost. The subsequent
-[expert-kernel investigation](../benchmarks/results/2026-09-15-qwen-moe-prefill.md)
+expert-kernel investigation
 tested smaller tiles, compact grids and persistent blocks. All were rejected:
 the compact prototype moved service prefill by only 0.16–1.05%, while other
 routing patterns regressed. The recorded median-route memory fills were
 already close to a single read of the selected weights. Further Qwen tile
 sweeps need a more specific source of avoidable work. The remaining priorities
 below are proposed work, not measured wins. Full GLM's packed GEMM has since
-been implemented; its [dated report](../benchmarks/results/2026-09-15-glm-packed-prefill.md)
-records cold-service, C1 and quality evidence. It reuses packed tiles across
+been implemented and checked for cold-service, C1 and quality behavior.
+It reuses packed tiles across
 prompt rows without rounding the dequantized weights to BF16.
 
-The subsequent [QSA prefill change](../benchmarks/results/2026-09-15-qwen-qsa-prefill.md)
+The subsequent QSA prefill change
 shares each KV tile across twelve query heads and computes probabilities
 cooperatively within a warp. It retains the original partial arithmetic and
 the decode/verification kernels. Cold TP2 service prefill takes 8–14% less

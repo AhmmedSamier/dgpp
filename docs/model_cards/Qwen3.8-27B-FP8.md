@@ -110,7 +110,7 @@ The serving numbers — single-request engine rates by prompt class,
 concurrency sweeps, cold prefill at 2K / 8K / 32K, the decode modes and the
 full HumanEval / GSM8K / schema evaluation — are the
 [benchmarks page](../benchmarks.md)'s Qwen3.8-27B rows, from the
-[2026-10-05 campaign](../../benchmarks/results/2026-10-05-qwen3.8-27b/README.md).
+2026-10-05 campaign.
 Physics on one GB10 (248 GB/s): a T=1 step streams 27 GB — 105 ms — and
 measures 114; at world 2 a rank streams 12.2 GB (49 ms) plus the head's
 reads and measures 63 T=1 / 74.5 an MTP pass, GPU-busy 98.9 % with the 135

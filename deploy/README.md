@@ -70,7 +70,7 @@ a template does not name are knobs appended at boot:
 | [cluster_qwen3.8-27b_fp8_w4.example.json](cluster_qwen3.8-27b_fp8_w4.example.json) | Qwen3.8-27B-FP8 on four Sparks (tensor parallel: the GDN and attention heads — one kv head a rank — the MLP and the lm head split across the ranks, two boundary folds a layer) with the DFlash2 block drafter on the decode graph (as the two-node template), 256K context, eight request slots, the FP8 lm head. Greedy C1 57 / 88 / 122 / 102 / 53 tok/s (prose / code / JSON / math / chat) at 50 ms a pass in the 2026-10-05 campaign against MTP depth 3's 58 / 69 / 78 / 72 / 51 at 45: ahead on code / JSON / math by 29–56 %, level on prose, 6 % ahead on chat, and ahead on sampled traffic with the drawn proposals. The verify depth is scheduled a step at a time from the selector walk's confidence (`mtp_schedule`, 2.0 ms a row over a 34 ms pass): eight slots 205 / 301 / 352 / 310 / 216 tok/s at 92 ms a step since the one-chain split-K (184 / 273 / 326 / 284 / 196 at 106 before it; 154 / 270 / 320 / 260 / 170 at 117 for whole blocks), C1 level; a request's text is the same alone or beside co-tenants that join it | plain decode: `--no-dflash`; MTP depth 3 (the template until 2026-10-05): `--no-dflash --mtp --mtp-depth 3`; the argmax walk for sampled requests: `--mtp-draft greedy`; the checkpoint's BF16 head: `--dense-weights checkpoint` |
 
 The Qwen NVFP4 templates use `engine.fp8_head: "mma"` after matched
-[real-checkpoint numerical checks](../benchmarks/results/2026-09-21-qwen-fp8-head-numerics.md)
+real-checkpoint numerical checks
 on one and two Sparks, including the YaRN recipe. Streaming MMA applies above
 the dense GEMV threshold and up to the configured decode-row capacity; short
 prefills in that interval use it too. Pass `--knobs "--fp8-head gemv"` to
@@ -156,8 +156,7 @@ one-node Qwen templates are the exception: their n-gram table is mmap'ed, and
 the memory they leave free is the page cache that keeps fresh-text prefill at
 full speed, so they stay at 3 GiB (27 snapshots). The
 [sizing guide](../docs/prefix-cache.md) has every template's slot count and the
-entry policy's keys. See the [single-GB10 observations](../benchmarks/results/2026-09-27-qwen-nvfp4-w1-prefill.md)
-for measured prefill performance, concurrent-stream effects and setup limits.
+entry policy's keys.
 
 ## The 512K YaRN template (`engine.rope_scaling`)
 

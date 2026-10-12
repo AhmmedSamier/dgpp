@@ -118,7 +118,7 @@ They do not establish model quality, large-context GPU performance, or
 multi-rank deployment behavior. No live OpenCode request or production
 deployment was exercised in this review.
 
-The subsequent [combined integration check](../benchmarks/results/2026-09-18-api-vision-integration.md)
+The subsequent combined integration check
 passed the complete 107-test suite and live two-node release checks for
 file inputs, custom tools, structured output and image inputs.
 

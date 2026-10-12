@@ -18,7 +18,6 @@ included in the distribution is a just-in-time compiler that can be used to
 optimize pattern matching. This is an optional feature that can be omitted when
 the library is built.
 
-
 COPYRIGHT
 ---------
 
@@ -60,7 +59,6 @@ has never required a Contributor Licensing Agreement, or other copyright
 assignment agreement, all contributions have copyright retained by each
 original contributor or their employer.
 
-
 THE "BSD" LICENCE
 -----------------
 
@@ -89,7 +87,6 @@ INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
 CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
-
 
 EXEMPTION FOR BINARY LIBRARY-LIKE PACKAGES
 ------------------------------------------

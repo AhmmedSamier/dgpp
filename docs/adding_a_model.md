@@ -179,10 +179,11 @@ the op-stream digest at `down`. A duplicate launcher fails
 - Fabric evidence for anything on the path the ranks execute together: boot
   the world with `scripts/dgpp-cluster`, run the check, `down`, compare the
   op-stream md5s across ranks (CONTRIBUTING §What a change needs).
-- A dated campaign under `benchmarks/results/` with the standard classes and
-  concurrencies before quoting any number, reusing the campaign harness and
-  `timed_load`; a change that moves a published number re-runs its procedure
-  from [benchmarks.md](benchmarks.md) §9 and updates the row.
+- A PR validation summary with the standard classes and concurrencies before
+  quoting any number. Use `timed_load` and the maintained serving clients; a
+  change that moves a published number re-runs its procedure from
+  [benchmarks.md](benchmarks.md#reproduce) and updates the row. Keep raw runs
+  outside the tracked documentation.
 
 ## 9. Docs landing
 

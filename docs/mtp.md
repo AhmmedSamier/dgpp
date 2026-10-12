@@ -319,7 +319,7 @@ campaign's 8.9 at 112.7; W4 28.0 at 35.3 against 31.0 at 32) — the one-row
 form's rate, about 215 against the GEMV core's 240 GB/s and worse at the
 four-node shard widths, is the next kernel item.
 
-Measured 2026-10-04 (`benchmarks/results/2026-10-04-qwen3.8-27b/raw/drafter-tp`
+Measured 2026-10-04 (the 2026-10-04-qwen3.8-27b / raw / drafter-tp measurements
 and `raw/prefetch`, the repository's `timed_load` workload, greedy C1, the
 pass time from the engine's counters), prose / code / json / math / chat:
 

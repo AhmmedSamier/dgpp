@@ -649,7 +649,7 @@ families on the same build: `fabric_glm_regression.sh` bitwise its
 baseline, Qwen and GLM-4.7 transcripts identical to their last records,
 `ctest` all green. Records: the rows in `docs/benchmarks.md` §3–§7, a
 "GLM-5.3 on four nodes" section in `docs/measurements.md`, a dated entry in
-`benchmarks/results/`, the CHANGELOG line, the PLAN.md serving table row and
+local run artifacts, the CHANGELOG line, the PLAN.md serving table row and
 "Additional model work" link, `deploy/README.md`'s template table, the
 model card copied into `docs/model_cards/` with the measured numbers and
 the memory plan, and §6 of this document filled in.
@@ -806,7 +806,7 @@ implemented and green, G6 in progress, nothing committed yet:
   `range(n)` needed the interpreter's one-argument form) registered as
   `glm_dsa_{tokenizer,chat_template}_test`. **The fabric (2026-09-12
   evening, `scripts/fabric_glm_dsa_serve.sh`, record
-  `benchmarks/results/2026-09-12-glm53-full.md`):** boot 405 s the first
+  the 2026-09-12-glm53-full measurements):** boot 405 s the first
   time (the resident image captured on every rank), 30 s after; T=1 51.1
   ms/step; MTP depth 1 68–76 ms/pass at 1.77–1.97 tokens/pass (acceptance
   chat 77 %, code 97 %, prose 92 %, json 96 %, math 93 %), 36–42 ms/token

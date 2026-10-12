@@ -39,7 +39,7 @@ over RoCE. Each quant links to its specific Hugging Face model card.
 
 The Qwen NVFP4 templates select streaming MMA for the FP8 vocabulary head
 with `engine.fp8_head: "mma"`, following matched one- and two-Spark
-[real-checkpoint numerical validation](benchmarks/results/2026-09-21-qwen-fp8-head-numerics.md),
+real-checkpoint numerical validation,
 including the YaRN template. `--fp8-head gemv` restores the previous head
 path. See [operation and numerical constraints](docs/operations.md).
 
@@ -51,7 +51,7 @@ decode throughput and 2.9% of resident prefill time in the matched campaign.
 Use `--dense-weights checkpoint --fp8-head gemv` to retain the checkpoint's
 BF16 dense stack.
 See the [single-node guide](docs/qwen38_single_spark.md) and
-[two-node benchmark](benchmarks/results/2026-09-16-qwen-nvfp4-w2.md).
+two-node benchmark.
 
 The GLM-5.3 hybrid takes the main-stack routed experts from
 [dabsLabs](https://huggingface.co/dabsLabs/GLM-5.3-Flash-NVFP4) and the
@@ -123,8 +123,7 @@ record the modes measured for each deployment.
 - **Faster DeepSeek decoder selection**: parallel scoring and exact radix
   selection reduce the time spent choosing attention entries, especially at
   long context. Scores, tie rules and selected entries are preserved; existing
-  recipes use the improvement automatically. See the
-  [comparison and validation](benchmarks/results/2026-09-21-deepseek-selection/README.md).
+  recipes use the improvement automatically.
 - **Row-aware tensor-core execution and grouped prefill**: dense kernels select
   their lowering from the active row count, and queued cold prompts can share a
   forward pass while retaining request-local attention and state.
@@ -144,7 +143,7 @@ record the modes measured for each deployment.
   45–72 tok/s single-stream and 77–119 tok/s at four requests, prefill
   0.55 ms per token from 8K to 32K on the exact chain and 0.52–0.53 with
   the template's two prefill levers, with the decode step flat from 3K
-  context up. See the [record](benchmarks/results/2026-09-28-qwen-autoround-int4/README.md).
+  context up.
 - **Model-specific prefill paths**: packed int4/int8 tensor-core prefill for
   full GLM-5.3, tiled QSA prefill for Qwen (W4A4 expert prefill is opt-in
   pending the gate in issue #68),
@@ -153,8 +152,7 @@ record the modes measured for each deployment.
 - **Opt-in 512K context for Qwen3.8-Flash-Next** with `engine.rope_scaling`
   (YaRN): the [two-Spark NVFP4 template](deploy/cluster_qwen-3.8-flash-next_nvfp4_w2_yarn512k.example.json)
   supports a 524288-token request ceiling, with 5/5 retrieval probes passing
-  at both 261K and 522K prompt tokens. See the [validation record](benchmarks/results/2026-09-20-qwen-yarn512k.md)
-  and [release-check procedure](docs/qwen_yarn_release_check.md).
+  at both 261K and 522K prompt tokens. See the [release-check procedure](docs/qwen_yarn_release_check.md).
 - **Adaptive DSpark verification**: DeepSeek uses confidence-scheduled draft
   depth, including a batch-aware rule and an adaptive value of decode time.
 - **Exact prefix caching**: matching token prefixes can reuse a stored
@@ -186,8 +184,7 @@ record the modes measured for each deployment.
   with BF16, FP8 or FP4 latent storage for GLM-5.3.
   All families size serving logits for decode and MTP verification, projecting
   only prefill tails. At a 2048-row prefill budget this saves about 301 MiB per
-  rank for GLM-5.3-Flash on four nodes; see the
-  [numerical validation](benchmarks/results/2026-10-01-compact-serving-heads.md).
+  rank for GLM-5.3-Flash on four nodes.
 
 ## Accuracy and correctness
 
@@ -505,7 +502,7 @@ kernel, a lever or a threshold.
 | `engine.prefill` | no | DeepSeek prefill mode: `bounded` runs every prompt row through the encoder and only the final window through the decoder; `exact` runs every layer over every row for parity work. Other families ignore it. | `bounded` |
 | `engine.ngram_table` | no | Qwen n-gram embedding-table placement. `resident` keeps it in device-accessible memory; `mmap` leaves it on local NVMe and fetches needed rows through the host page cache. The Qwen NVFP4 templates use `mmap`; the two-Spark campaign measured at most 3.6% lower decode throughput for 23.84 GiB less planned model memory per rank. DeepSeek's Engram tables use their own mapped checkpoint sidecar. | `resident` |
 | `engine.dense_weights` | no | Qwen dense-projection storage. `checkpoint` retains the checkpoint's BF16 form; `fp8` converts dense projections at load time to reduce their memory footprint, with quantization error. Does not select another HF repository or change the expert quant; other families ignore it. On Qwen3.8-27B, whose projections ship as FP8, `fp8` requantizes the BF16 lm head to block FP8 (half its bytes per decode row: MTP depth-2 C1 151 → 132 ms/step at the same acceptance, HumanEval/GSM8K 39/40 each; greedy transcripts move within the first tokens). The Qwen3.8-27B templates ship it; `checkpoint` restores the BF16 head. | `checkpoint` |
-| `engine.fp8_head` | no | Qwen FP8 vocabulary-head dispatch. `mma` takes the streaming tensor-core form at every width — one chain, so a request's logits are the same alone, at any verify depth, in a batch, and for a prompt's last row whatever the prompt's length (since 2026-10-05; before, the GEMV chunks below five rows and above the decode capacity were two more chains). Requires `dense_weights: "fp8"`; the NVFP4 templates select it after [matched numerical validation](benchmarks/results/2026-09-21-qwen-fp8-head-numerics.md). `gemv` keeps the row-chunked GEMV core. | `gemv` (NVFP4 templates: `mma`) |
+| `engine.fp8_head` | no | Qwen FP8 vocabulary-head dispatch. `mma` takes the streaming tensor-core form at every width — one chain, so a request's logits are the same alone, at any verify depth, in a batch, and for a prompt's last row whatever the prompt's length (since 2026-10-05; before, the GEMV chunks below five rows and above the decode capacity were two more chains). Requires `dense_weights: "fp8"`; the NVFP4 templates select it after matched numerical validation. `gemv` keeps the row-chunked GEMV core. | `gemv` (NVFP4 templates: `mma`) |
 | `engine.bf16_weights` | no | Resident form of the BF16 weights that decode streams (attention/linear-attention projections, the LM head; on Qwen3.8-27B the DFlash2 drafter's layers and fc taps, the MTP fc and a BF16 head, whose BF16 bytes stay resident under either packed mode). `checkpoint` keeps the BF16 bytes alone. `bf12` and `bf12+bf16` add a **lossless** 12-bit form of each matrix (sign+mantissa byte plus a 4-bit exponent code; exact side tables for the rare outliers): decode launches of up to eight rows read 0.75 of the bytes and produce bit-identical results, so transcripts do not change. This is a storage format, not quantization. `bf12+bf16` keeps both forms resident: prefill is untouched and the 12-bit copies cost about 0.75× those matrices in additional memory (GLM-5.3-Flash: +2.0 GiB/rank at four Sparks, +3.8 at two; GLM-4.7: +4.9). `bf12` keeps the 12-bit form **alone**: each matrix's BF16 bytes are returned to the node as its layer loads, the footprint drops below `checkpoint`'s (GLM-5.3-Flash −0.5 GiB/rank at four Sparks, −1.0 at two; GLM-4.7 −1.4), and a prefill GEMM expands the rows it reads into a small scratch first — the same bits, so the same results, for about 10 ms per prefill chunk on four-node GLM-5.3-Flash (+1–2% on 8K–32K prompts, +25–40 ms to a short prompt's first token). The memory plan includes either. Measured single-stream decode: GLM-5.3-Flash +6–7%, GLM-4.7 +11–12%, full GLM-5.3 +5–6.5%, Qwen3.8-Flash-Next-FP8 +6.4% on four Sparks and +9.0% on two ([benchmarks](docs/benchmarks.md)). On Qwen it packs the GDN/QSA projections and the head of the FP8 checkpoint and always keeps both forms resident (every Qwen recipe has the room); under `dense_weights: "fp8"` those matrices are already FP8 and nothing is packed. DeepSeek accepts the key and currently packs nothing. Templates with memory to spare ship `bf12+bf16`; the two sized to their nodes' memory (two-node GLM-5.3-Flash, full GLM-5.3) ship `bf12`. | `checkpoint` |
 | `engine.draft_vocab` | no | Qwen3.8 AutoRound hybrid only: path to a one-dimensional int32/int64 `.npy` of token ids. The MTP draft head then scores only those rows of the head (every other id is `-inf` for the draft), so each draft step reads that slice instead of the whole head. The target verifies every draft, so outputs are unchanged; only the draft acceptance can move (a token outside the set is never proposed). `tools/build_draft_vocab.py TOKENIZER.json OUT.npy --size 65536` builds a set from the tokenizer's alphabet, added tokens and most frequent merges. Off by default; headline numbers are measured without it. | empty (whole vocabulary) |
 | `engine.prefill_bf16_partials` | no | Qwen3.8 AutoRound hybrid prefill lever: the packed expert chain's down projection is written in bf16 and its per-expert partials summed from bf16 (half the bytes a prefill chunk writes and reads back; the reference stack's form). Not bitwise the default fp32 chain: served transcripts can differ within the quantized model's tolerance. Off by default; the AutoRound template turns it on (−3 to −7 % cold prefill, evals inside the default chain's band; [benchmarks](docs/benchmarks.md) list both rows). | false |
@@ -579,7 +576,7 @@ tools keep their names (`glm_gen_check`, `glm_forward_check`, …).
 
 `tools/` holds the Python checkpoint and reference tooling the tests use;
 `scripts/` the fabric and serving operations; `apps/` the binaries;
-`benchmarks/` the probes and the engineering record; `deploy/` the cluster
+`deploy/` the cluster
 config.
 
 ## Documentation
@@ -606,7 +603,7 @@ config.
 | `docs/performance_improvement_plan.md` | current performance findings, completed changes and next measured targets |
 | `DESIGN.md` | architecture and implementation contracts |
 | `PLAN.md` | the milestones, their exit gates and status |
-| `benchmarks/README.md`, `benchmarks/results/` | benchmark probes, dated results and reproduction commands |
+| [Benchmark procedures](docs/benchmarking.md), [serving measurements](docs/benchmarks.md) | benchmark methods, summarized results and reproduction commands |
 | `CHANGELOG.md` | the history by milestone |
 
 ## Contributing

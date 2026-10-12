@@ -94,7 +94,7 @@ and, with each request's prompt processing time subtracted
 two, five and ten concurrent requests (ten queue behind the six slots).
 See
 [the benchmark tables](../benchmarks.md) for the current numbers and
-[the campaign record](../../benchmarks/results/2026-10-01-deepseek-v4-flash/README.md)
+the campaign record
 for the evidence. The forward pass is cross-checked layer by layer against
 the release's own `inference/model.py` on the real checkpoint
 (`tools/dsv4_torch_reference.py`).

@@ -1,21 +1,14 @@
 # DGPP Benchmarks
 
-This directory contains platform, kernel and transport probes. Run
+These procedures cover the optional platform, kernel and transport probes. Run
 high-bandwidth tests in a maintenance window: they can consume both RoCE
 lanes and more than 25 GB/s of shared memory bandwidth.
 
 For serving throughput by model, world size, concurrency and prompt class,
-see [the serving benchmarks](../docs/benchmarks.md). Exact configurations,
-commands and request-level measurements are in the
-[current campaign record](results/2026-09-22-current/README.md).
-
-The original DGX Spark platform baseline is in
-[`2026-08-27-dgx-spark.md`](results/2026-08-27-dgx-spark.md). Curated platform
-conclusions also appear in [`docs/measurements.md`](../docs/measurements.md).
-
-The [tool-eval-bench baseline](results/2026-09-17-tool-eval-bench/README.md)
-records all 69 standard agent/tool scenarios against GLM-5.3-Flash, including
-full traces and the pre-fix structured-output API failures.
+see [the serving benchmarks](benchmarks.md). Platform conclusions appear in
+[measurements](measurements.md). Keep raw measurements, traces and run logs in
+ignored local storage or external artifacts; publish concise findings and
+validation limitations in the PR.
 
 ## Build
 
@@ -68,8 +61,7 @@ CPU→GPU→CPU flag round trip:
 CPU writers touch separate buffers and are only memory-pressure proxies; the
 benchmark intentionally avoids racing CPU writes with GPU reads of the same
 object. For the production margin, repeat the pinned-read measurement while
-real remote `ib_write_bw` streams target the node, as shown in the dated
-result record.
+real remote `ib_write_bw` streams target the node, using the transport commands below.
 
 ## GEMM heuristic sweep
 
@@ -123,8 +115,7 @@ partial. Run it on idle hardware:
 
 The default geometry is TP2: twelve query heads and one KV head. The
 benchmark invokes both kernels explicitly; serving retains the old kernel
-for decode, verification and prefills below 128 rows. See the
-[service results and C1 limits](results/2026-09-15-qwen-qsa-prefill.md).
+for decode, verification and prefills below 128 rows.
 
 Against an otherwise idle server, `scripts/serve_c1_probe.py HOST PORT
 --repeat 5 --json-out c1-engine.json` brackets each request with scheduler
@@ -138,14 +129,13 @@ when investigating small differences.
 `moe_prefill_bench` compares the production FP8 expert kernel with three
 experimental variants linked only into this benchmark: `small` (16 × 64
 tiles), `compact` (64-row down-projection blocks) and `persistent` (a fixed
-number of down-projection blocks). None cleared the service performance gate;
-see the [investigation and raw results](results/2026-09-15-qwen-moe-prefill.md).
+number of down-projection blocks). None cleared the service performance gate.
 
 ```bash
 "$BUILD/moe_prefill_bench" --variant small --distribution uniform
 "$BUILD/moe_prefill_bench" --variant compact --distribution hot
 "$BUILD/moe_prefill_bench" --variant persistent \
-  --segments-file benchmarks/results/2026-09-15-qwen-moe-routes-p50.txt
+  --segments-file /path/to/segments.txt
 ```
 
 Run on idle hardware. Defaults reproduce TP2 geometry: 256 tokens, 512
@@ -168,8 +158,8 @@ recurrent-kernel-only decode state traffic across all 34 layers (TP=1 and
 the TP=4 rank share), and the full layer's decode step and 2048-token
 prefill chunk. Reports effective bytes/s against the 230 GB/s planning
 floor. The decode recurrence is latency-bound at M2 (few blocks, 34
-sequential launches) — see `benchmarks/results/2026-08-27-kda-m2.md` for
-the numbers and the documented optimization path. This is profiling
+sequential launches); see [platform measurements](measurements.md) for the
+numbers and optimization history. This is profiling
 evidence for the M2 exit criterion, not a production throughput claim.
 
 ## DSA operator benchmark
@@ -185,8 +175,7 @@ index cache + gathered latents) against the 230 GB/s planning floor. The
 decode projection GEMMs stream 238 MiB of weights at the memory floor; the
 remaining custom-kernel time and the profiled optimization log (native
 hardware fp8/bf16 conversions, split-KV widening, bank-conflict-padded smem
-strides, split-32 bitonic keys) are recorded in
-`benchmarks/results/2026-08-28-dsa-m3-layer.md`. Profiling evidence, not a
+strides, split-32 bitonic keys) are summarized in [platform measurements](measurements.md). Profiling evidence, not a
 production throughput claim.
 
 ## KDA reference dumps (correctness, not bandwidth)
@@ -260,13 +249,13 @@ python3 tools/glm_reference_dump.py gen-torch --model-dir MODEL_DIR \
     --checkpoint-dir MODEL_DIR --suite FILE [--layers N]
 ```
 
-The curated suite (`benchmarks/glm-suite/`: three real-prompt cases + one
+The optional GLM reference suite (three real-prompt cases and one
 engine-only trace case) compares ISOLATED per layer — every layer starts
 from the reference trajectory — with kept-row l2 floors, per-flip route
 certification (engine vs reference biased router scores, noise measured
 per token over the unswapped experts), and near-tie-certified top-1
-agreement; see the suite README for the discipline and the reduced-budget
-workflow. Engine-only route traces (`--trace-ids-file`) feed
+agreement. Supply a suite file with the token IDs and oracle dumps for
+each case. Engine-only route traces (`--trace-ids-file`) feed
 `tools/route_trace_traffic.py`. Run these on the box that holds the
 checkpoint; dumps are tens of MB and are not stored in the repo.
 
@@ -278,11 +267,11 @@ fetch every rank's log, then analyze the directories together:
 
 ```bash
 scripts/fabric_run.sh --fetch-logs \
-    --stage-file benchmarks/teacher_text.txt --log-dir /tmp/mass-quick -- \
+    --stage-file /path/to/teacher.txt --log-dir /tmp/mass-quick -- \
     --model unsloth/GLM-5.3-Flash-FP8 --text "Encyclopedia article." \
-    --teacher-file benchmarks/teacher_text.txt --sampling-profile \
+    --teacher-file /path/to/teacher.txt --sampling-profile \
     --decode-graph
-# Repeat for teacher_text_hard.txt and teacher_text_memorized.txt.
+# Repeat with fixed hard and memorized teacher passages.
 python3 scripts/fabric_sampling_profile.py \
     /tmp/mass-quick /tmp/mass-hard /tmp/mass-memorized
 ```
@@ -430,11 +419,11 @@ when their measurement intervals overlap.
 
 Record at least:
 
-- source commit or base commit plus dirty-tree identifier;
-- node model, kernel, CUDA, driver, mlx5 firmware, and perftest versions;
-- interface, GID, MTU, negotiated speed, and PCIe link state;
-- exact command and direction;
-- warmups, duration/iterations, all runs or variability—not only the best;
-- concurrent workloads and whether a model server was resident;
+- source commit or base commit plus dirty-tree identifier.
+- node model, kernel, CUDA, driver, mlx5 firmware, and perftest versions.
+- interface, GID, MTU, negotiated speed, and PCIe link state.
+- exact command and direction.
+- warmups, duration/iterations, all runs or variability—not only the best.
+- concurrent workloads and whether a model server was resident.
 - when diagnosing a congestion symptom, pause, discard, retry, and
   out-of-buffer counter deltas over the affected interval.

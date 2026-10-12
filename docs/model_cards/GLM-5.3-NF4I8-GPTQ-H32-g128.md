@@ -68,7 +68,7 @@ written), 30 s after.
 (0 ulps at every row count, decode and prefill), the synthetic-checkpoint forward/decode/TP/
 engine gates, the binding of the landed checkpoint (every tensor), op streams identical
 across the four ranks; on the real weights the teacher-forced score of
-`benchmarks/teacher_text_hard.txt` (7,308 tokens): mean NLL 2.3276 nat/token (perplexity
+`/path/to/teacher-hard.txt` (7,308 tokens): mean NLL 2.3276 nat/token (perplexity
 10.25, top-1 50.3 %) against the Int4/Int8 checkpoint's 2.3295 (10.27, 50.3 %) through the
 same kernels — a 0.0019 nat difference inside its 0.0043 standard error; gsm8k 59/60,
 HumanEval 40/40, schema extraction 30/30 at `reasoning_effort` low (the Int4/Int8 record's

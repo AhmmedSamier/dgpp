@@ -166,6 +166,3 @@ Resolve the site configuration before running a recipe's plan:
 python3 scripts/dgpp-cluster resolve --config deploy/cluster_qwen-3.8-flash-next_nvfp4_w2_yarn512k.example.json > /tmp/qwen-resolved.json
 build-release/dgpp-serve --config /tmp/qwen-resolved.json --rank 0 --memory-plan
 ```
-
-See the [implementation and validation record](../benchmarks/results/2026-09-21-prefix-document-reuse.md)
-for the measured reuse, capacity and correctness checks.

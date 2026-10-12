@@ -2,8 +2,7 @@
 
 `serve_admission_bench_test` checks the HTTP/SSE admission benchmark's transport,
 native-overlap assertions, published-counter drain barrier and KV cleanup gate.
-The [PR 105 record](../benchmarks/results/2026-10-11-pr105-followups/README.md)
-contains the real-cluster recipe and latency/throughput trade-offs. The scheduler
+The [benchmark guide](benchmarks.md#reproduce) describes serving measurements. The scheduler
 suite covers short-reader admission, aligned-share donation, global chunk-grid
 tails and failure cleanup; `qwen_engine_test` exercises admission and donation
 with a real two-rank engine, including MTP3 and row-independent transcript parity.
@@ -32,35 +31,27 @@ buffers after starting a shared `PrefillTask`. Its yielded execution must retain
 the target and MTP results, snapshot chain and KV cleanup behavior. Run it with
 `glm_vision_stream_test` and `glm_vision_frontend_test` when changing that lifetime.
 
-The [shared-prefill campaign](../benchmarks/results/2026-10-12-prefill-consolidation/campaign.py)
-compares previous and candidate serving executables using the same deployment,
-weights, deterministic prompts and output lengths. It warms long prompts before
-timing isolated and concurrent decode, prefill, mixed work and repeated arrivals.
-`--cache-check` checks a cached first token against isolation, output during cold
-prefill, and retained KV usage. A separate long-output probe repeats the same
-loaded workload, requires an exact repeated transcript without further KV
-retention, then checks that the original isolated cached response is intact.
-The isolated-versus-loaded long-output comparison remains in the results, even
-when those shapes differ numerically. Summaries retain both total work time and stream update
-gaps: a throughput improvement must not hide a longer decode interruption.
-A single special token can render no text; that prefill probe records a complete
-response and token usage, with no first-text latency measurement.
-An isolated-versus-loaded transcript difference needs investigation: row shapes
-can change numerical reductions. The cache probe's diagnostic mode can record
-decoder-only comparisons and token probabilities; hidden reasoning must be
-folded into content to expose those probabilities through the chat API. Preserve
-the failed case and compare both binaries at matching budgets. A no-thinking
-counting probe is available as a separate cache lifecycle check; its arguments
-are recorded and it does not replace the original diagnostic evidence.
+For serving comparisons, use the same deployment, checkpoint revisions, prompts
+and output lengths for the previous and candidate executable. Warm long prompts
+before measuring solo and concurrent decode, prefill, mixed traffic and repeated
+arrivals. Record total elapsed time, first-token latency and decode update gaps.
+Keep probability tracing separate from throughput measurements.
 
-Run campaigns serially on idle hardware. Each campaign stops production and
-restores its original configuration and executable in `finally`, verifying all
-ranks and HTTP health. For missing checkpoints, `--download-python` names a venv
-with the download dependencies; download and peer synchronization finish before
-serving starts. Save cache inventories before downloading. After testing, use
-`cleanup_weights.py` in the same directory to remove only checkpoints absent
-from every node's original inventory. Use `--no-resident-cache` for temporary
-checkpoints so their tests do not leave additional resident weight images.
+Check cached continuations against isolated execution, repeat the loaded
+workload, and verify isolated recovery and retained KV usage. Investigate changed
+transcripts with token probabilities and matching execution shapes; do not treat
+temperature zero as a guarantee of identical floating-point reductions.
+A one-token completion can contain only a special token; record completion and
+usage without inventing a first-visible-token timestamp.
+
+Run GPU and fabric checks serially on idle hardware, then restore and verify the
+original configuration and executable on every rank. Inventory checkpoint and
+resident caches before downloading missing weights. Finish downloads and peer
+synchronization before benchmarking, and remove only test-created files after
+their checks finish. Keep raw results and profiles in ignored local storage or
+external artifacts; summarize coverage, measurements and limitations in the PR.
+See [benchmark procedures](benchmarking.md) and the maintained serving clients
+in [the benchmark guide](benchmarks.md#reproduce).
 
 `prefix_snapshot_test` forces a four-block K/V pool full at snapshot time in
 Qwen and GLM. It covers monolithic and resumable prefill, unchanged target/draft
@@ -92,8 +83,8 @@ The entry floor and the head cut (2026-09-28) are covered by `scheduler_test`
 (`entryFloorKeepsShortPromptsOutOfTheArena`, `headCutServesTheNextConversation…`,
 `headCutYieldsToTheDeepestCutWhenSlotsAreScarce`, `headCutThroughChunkedPrefill`),
 `cluster_config_test` (the keys) and `fabric_serve_test` (the journal records).
-The [fabric record](../benchmarks/results/2026-09-21-prefix-document-reuse.md)
-covers real 32K/260K prompts, KV sharing and the recipe memory-plan audit.
+Real-checkpoint checks also cover 32K/260K prompts, KV sharing and the recipe
+memory plan.
 
 `serve_test` covers assistant thinking history with the
 `DGPP_TEST_FILTER=serve_thinkingParts_` cases: mixed visible and reasoning
@@ -237,7 +228,7 @@ build. The suites cover:
   accepted; far-rank, zero-noise, own-scores-inconsistent, and duplicate-id
   divergences rejected), and the TCP/roster control plane (seal, epoch
   bumps, eviction by death and by deadline, rejection reasons, coordinator
-  loss);
+  loss).
 - the M6 host suites: the tokenizer (55 byte-exact goldens per family,
   hash-keyed — GLM-5.3, Qwen3.8-Flash-Next and GLM-4.7 corpora), the chat
   template (26 / 20 / 26 goldens + 8 refusal negatives, the tool-call
@@ -245,15 +236,15 @@ build. The suites cover:
   (isolation, determinism, cancellation, bounded queue, tick ≡
   run_to_completion), the HTTP server's limit ladder, the OpenAI shapes
   over real HTTP with a fake engine, and the admission journal with two
-  real peer loops over localhost;
-- synthetic CUDA graph/eager parity;
+  real peer loops over localhost.
+- synthetic CUDA graph/eager parity.
 - QSA warp prefill against one-, three- and eight-split references in
   `qsa_test`, including tile edges and empty lists. `qwen_qsa_prefill` runs
   separate warp-on/off processes on a synthetic model with twelve query heads
   per KV head and an indexer budget of 2048. It compares every logit at
   127/128/129/256/513/1024 rows, checks exact repeats and the unchanged short
   path, and exercises session prefill followed by decode. This is numerical
-  regression coverage, not real-checkpoint quality or performance evidence;
+  regression coverage, not real-checkpoint quality or performance evidence.
 - the second and third families on the shared cores (2026-09-09/10): the
   Qwen3.8-Flash-Next chain (config/binding units, the loader, GDN/QSA/GR/
   PLE/MoE kernel oracles, the fixture forward against the pure-python
@@ -374,11 +365,11 @@ build. The suites cover:
   against the release's own `inference/model.py`, layer by layer, with
   `tools/dsv4_torch_reference.py`); the fp4 GEMV
   core at every compiled K (the MXFP4 set 2048 / 4096 included) and the
-  MoE layer's NVFP4 shared expert;
+  MoE layer's NVFP4 shared expert.
 - the KDA operator suite: conv/recurrent kernel parity against host
   fp32/fp64 references, chunked-vs-unchunked bitwise equivalence, decode
   graph replay, snapshot round-trip, head-slice TP readiness, and
-  reference-dump parity against the pure-python oracle;
+  reference-dump parity against the pure-python oracle.
 - the DSA suite (M3): pool compression and tail-ring continuation verified
   bitwise via hard-max gates (including multi-token decode == single-token),
   a 1,100-case bitwise pooled top-k fuzz around pool boundaries plus
@@ -398,14 +389,14 @@ build. The suites cover:
   prefill/decode parity against the oracle with selection-aware near-tie
   certification (at select_k=16 and select_k=8), decode graph replay
   bitwise across positions, TP2 head-slice vs TP1, and a real-geometry
-  chunked prefill + decode smoke;
+  chunked prefill + decode smoke.
 - DSA reference-dump parity: a pure-python oracle dump (bit-exact fp8 codec
   cross-checked against the C++ encoder) exercised through the full layer —
   latent cache bitwise, index cache within one e4m3 ulp, top-k exact — plus
   the torch backend against real checkpoint slices (executed on this box at
   32 and 2,052 tokens, the latter crossing the top-k horizon with zero
   flips); any flipped row is certified as a measured boundary near tie by
-  the audit, never absorbed by tolerance;
+  the audit, never absorbed by tolerance.
 - the M4 assembly suites: the mHC stream module (Sinkhorn mixing, stream
   update, final mean vs the double oracle), the MoE router/expert/shared
   path (sigmoid router with the noaux tie rule, swiglu asymmetries, bf16
@@ -414,15 +405,15 @@ build. The suites cover:
   block edges, and the assembled-forward chain: a synthetic mini-checkpoint
   written on disk, a full-stack pure-python reference over the same
   weights, then the engine compared (hidden ulp budgets, top-k exact, route
-  ids/weights, determinism);
+  ids/weights, determinism).
 - CUDA system-scope flag ordering, payload visibility, inactivity watchdog,
-  and post-watchdog recovery;
+  and post-watchdog recovery.
 - the M5 CollectiveBus data plane (needs the fabric + ibverbs): loopback
   scenarios with real RC QPs — payload integrity via fold-hash, credit
   recycling, dual-lane striping asserted on both sides, latency under bulk
   contention, watchdog failures, config-mismatch rejection, the graph era
   with the mixed-era interlude, the bulk RS+AG machine, and orderly stop —
-  plus the app-level smoke;
+  plus the app-level smoke.
 - the TP forward over loopback buses (`glm_tp_test`): per-layer isolated
   parity vs the world=1 oracle at worlds 2 and 4, decode sessions, the
   greedy generation loop, the device pick, the one-graph MTP step in
@@ -439,7 +430,7 @@ build. The suites cover:
   host oracles, the T=2 and T=3 sampled verdict chains included
   (`glm_pick_test`); the bus's graph era including two replay windows
   armed at once (`bus_test`); the GEMV cores (`bf16_gemv_test`) and the
-  loader's resident-image round trip (`glm_loader_test`);
+  loader's resident-image round trip (`glm_loader_test`).
 - Python checkpoint classification, exact expert-occupancy tests, and the
   route-trace traffic-model contract.
 
@@ -466,7 +457,7 @@ that pass by scheduling luck, undersized test buffers that made a graph test
 pass vacuously) are pinned in `DESIGN.md` §12.
 
 Cross-node RoCE and NIC→GPU checks are intentionally manual/deployment tests;
-they require a peer and are documented under `benchmarks/README.md`. The same
+they require a peer and are documented in [benchmark procedures](benchmarking.md). The same
 holds for the release checks: long, real-checkpoint cluster runs that no CI job
 starts, each behind an explicit acknowledgement — today
 `scripts/qwen_yarn_release_check.py` (`docs/qwen_yarn_release_check.md`), the
@@ -483,5 +474,5 @@ inspect backend changes before updating them. Run the CUDA tests with the existi
 `bf16_gemv_test` after rebuilding the targets. Checkpoint-level validation uses
 `tools/glm_vision_reference.py`; its default CUDA eager gate applies to the full
 encoder as well as isolated stages. The pinned 30-case runner additionally
-requires bitwise equality. Its reproducible procedure and
-measured bounds are in the [numerical record](../benchmarks/results/2026-09-18-glm-vision-numerics.md).
+requires bitwise equality. Follow the [vision oracle procedure](vision.md)
+for reference settings and numerical bounds.

@@ -35,15 +35,15 @@ except:
 
 - a request needing chunked prefill **ends** the loop (starts chunking only
   if nothing was admitted yet this tick — chunked read-ins stay one at a
-  time; see item 2);
+  time; see item 2).
 - the loop stops before grouping or admission when the tick's positive
   prefill budget is exhausted; zero remaining tokens must not be passed
-  to the group planner, where zero means monolithic mode;
+  to the group planner, where zero means monolithic mode.
 - with a zero policy budget, exactly one admission event (possibly a
-  group) runs per tick, preserving the original monolithic policy;
+  group) runs per tick, preserving the original monolithic policy.
 - an oversized image on an engine without image chunking retains its
   monolithic fallback as the tick's only prefill admission. It waits if
-  any prefill work already ran that tick, then consumes the whole cap;
+  any prefill work already ran that tick, then consumes the whole cap.
 - `next_admissible()` returning -1 (no fitting request / no free slot) ends
   the loop as before.
 

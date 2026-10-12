@@ -89,7 +89,7 @@ one:
   top-2 logit margin there in bf16 ulps. A flip at ≤ 1-2 ulp is a near-tie;
   a flip at a wide margin is a defect.
 - `scripts/fabric_logprob.py NEW_DIR REF_DIR` — the quantitative gate. Run
-  both builds with `--teacher-file benchmarks/teacher_text.txt` (the app
+  both builds with `--teacher-file /path/to/teacher.txt` (the app
   scores the text's own tokens instead of generating; `--stage-file` puts the
   text on every rank), and the tool joins the ranks' vocabulary slices into
   log p(token) per position and reports the text's perplexity, the per-token
@@ -97,9 +97,9 @@ one:
   (default 0.02 nat ≈ 2% of perplexity):
 
   ```
-  scripts/fabric_run.sh --stage-file benchmarks/teacher_text.txt -- \
+  scripts/fabric_run.sh --stage-file /path/to/teacher.txt -- \
       --model unsloth/GLM-5.3-Flash-FP8 --text "Encyclopedia article." \
-      --teacher-file benchmarks/teacher_text.txt --decode-graph
+      --teacher-file /path/to/teacher.txt --decode-graph
   scripts/fabric_logprob.py /path/to/new_logs /path/to/ref_logs
   ```
 
@@ -130,10 +130,10 @@ one:
   ```bash
   DGPP_CLUSTER_CONFIG=deploy/cluster_glm-5.3_int4-int8_w4.json \
   scripts/fabric_run.sh --app build-ci/glm_dsa_forward_check --fetch-logs \
-      --stage-file benchmarks/teacher_text.txt --log-dir /tmp/prefill-new -- \
+      --stage-file /path/to/teacher.txt --log-dir /tmp/prefill-new -- \
       --model HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64 --resident \
       --image-dir /path/to/resident-cache \
-      --teacher-file benchmarks/teacher_text.txt
+      --teacher-file /path/to/teacher.txt
   python3 scripts/fabric_logprob.py /tmp/prefill-new /tmp/prefill-ref --prefill
   ```
 
@@ -150,9 +150,9 @@ one:
 
   ```
   scripts/fabric_run.sh --fetch-logs \
-      --stage-file benchmarks/teacher_text.txt --log-dir /tmp/mass-quick -- \
+      --stage-file /path/to/teacher.txt --log-dir /tmp/mass-quick -- \
       --model unsloth/GLM-5.3-Flash-FP8 --text "Encyclopedia article." \
-      --teacher-file benchmarks/teacher_text.txt --sampling-profile \
+      --teacher-file /path/to/teacher.txt --sampling-profile \
       --decode-graph
   # Repeat as /tmp/mass-hard and /tmp/mass-memorized with the other texts.
   python3 scripts/fabric_sampling_profile.py \
@@ -189,9 +189,9 @@ vocabulary scores consumed by the existing logprob analyzer:
 
 ```bash
 scripts/fabric_run.sh --app build-ci/serving_head_check --fetch-logs \
-    --stage-file benchmarks/teacher_text_hard.txt --log-dir /tmp/head-full -- \
+    --stage-file /path/to/teacher-hard.txt --log-dir /tmp/head-full -- \
     --model nvidia/GLM-4.7-NVFP4 \
-    --teacher-file benchmarks/teacher_text_hard.txt --full --trials 256
+    --teacher-file /path/to/teacher-hard.txt --full --trials 256
 # Repeat with --log-dir /tmp/head-compact and --compact.
 python3 scripts/fabric_logprob.py /tmp/head-compact /tmp/head-full --prefill \
     --max-mean-nll-delta 0.0001 --big-delta 0.001 --max-big-delta-rate 0

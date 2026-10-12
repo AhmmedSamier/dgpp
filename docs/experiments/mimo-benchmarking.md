@@ -35,13 +35,12 @@ before replacing a deployment, since log locations may be reused.
 Record the exact Git commit, dirty diff (if any), binary SHA256, deployment
 JSON and rank environment alongside the results. Keep startup and warmup
 outside timings. Launch configurations using the normal
-[operations procedure](../../docs/operations.md#mimo-native-mtp-and-prefill-options),
+[operations procedure](../operations.md#mimo-native-mtp-and-prefill-options),
 stopping the old world before changing settings. Disable resident images
 with `DGPP_RESIDENT_CACHE=off` if disk capacity cannot hold each layout.
 
 Use identical C2, BF16 KV, BF12 weight residency, shared 131072-token capacity
-and 1.5 GiB prefix budget across controls. The historical configuration is in
-[config.json](../results/2026-09-23-mimo-native-mtp/config.json).
+and 1.5 GiB prefix budget across controls.
 Set depth and environment explicitly for each fresh tag:
 
 | Tag | Depth | Native MTP | Final-row head | One-head cache-only |
@@ -92,5 +91,5 @@ serially while serving is stopped. Relevant targets include
 `mimo_engine_test`, and the Qwen, GLM-4.7 and DeepSeek engine suites. Run
 `mimo_engine_test` both normally and with the three MiMo flags enabled;
 run the history test under Compute Sanitizer. Loopback worlds on two machines
-do not establish four-node physical fabric coverage. Keep all failed,
-skipped and completed attempts in the dated result record.
+do not establish four-node physical fabric coverage. Retain failed, skipped and completed attempts in local or external artifacts,
+and summarize them in the PR.
