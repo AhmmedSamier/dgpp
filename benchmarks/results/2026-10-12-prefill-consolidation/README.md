@@ -34,6 +34,7 @@ baseline, not against the source before all early-admission work began.
 | Candidate with shared short-tail grouping and batched reader experts | `384bc260` | `e61a6180634587abb61ec9fc59e6493b8d5d0a6a83d7eed2feeaba249253e45e` |
 | Candidate preserving reader budgets and GLM-DSA arithmetic | `01caf6f7` | `4c349a798a5e20452c007939591d3ee301bddc343f95437a025f8ef85465b978` |
 | Candidate preserving DeepSeek mixed decoder BF16 projections | `d4e80be8` | `7298adade2e17f5bc83cb6339a58a2f38d95add13e9fe15087639e49625b0486` |
+| Candidate excluding decoder rows from grouped expert prefills | `e1b4b708` | `33fc0338ba27a070abbdcf06edf6b28f1e1bd93bdf8b597563c5ada23566164b` |
 | Earlier candidate, before compact mapping | `26e61c9f55f068673eb771a1daa90d09c18d6978` | `0080af5401a43e91d2a5e76cf79f39db9de60442f24042147195add7f5e0a9c5` |
 
 Builds use Release optimization with debug symbols disabled. Harness-only
@@ -338,7 +339,14 @@ visible in the evidence and are not counted as exact passes.
   expert work: decoder rows enter the grouped reader chain before being
   recomputed natively. Grouped MXFP4 kernel time increases about 0.28 seconds
   in the profiled mixed workload; these profiles are diagnostic, not the
-  acceptance timing. Removing this duplicated work is the next refinement.
+  acceptance timing. Candidate `e1b4b708` excludes decoder rows from the shared
+  grouped expert chain. Tests cover FP8, NVFP4, MXFP4 and packed int4 weights;
+  three row counts cross tile and arithmetic thresholds; ordinary and
+  token-based routing check trace offsets, BF16/F32 outputs and phased
+  accumulations against separate native decoder and reader executions.
+  All six GPU targets pass (including eighteen shared cases), and both the
+  seven-case DeepSeek and expanded expert memchecks report zero errors and
+  leaks. The paired performance retest is in progress.
 
 These probes identify dependence on execution shape; they are not a general
 model-quality or teacher-forced numerical equivalence result.
