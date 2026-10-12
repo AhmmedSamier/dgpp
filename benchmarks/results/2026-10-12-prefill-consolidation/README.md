@@ -310,9 +310,13 @@ visible in the evidence and are not counted as exact passes.
   helper now preserves its dense and packed expert recipes and native
   decoder arithmetic. All eighteen shared cases pass; a wider short-reader
   check is exact at both layers in BF16 and BF12. Nine affected shared cases
-  also pass memcheck with zero errors or leaked bytes. Real-checkpoint
-  performance and cached-continuation retests are pending; the DeepSeek
-  checkpoint remains available.
+  also pass memcheck with zero errors or leaked bytes. The [three-trial matched-budget retest](evidence/dsv4-small-budget-v33-summary.json)
+  reduces mixed elapsed time from the initial 17.44% regression to 5.52%
+  (control 7.379 → candidate 7.786 seconds); repeated arrivals improve 0.53%.
+  All 21 timing outputs and four chats match. The 128-token cached
+  continuation still differs under load, while repeat and isolated recovery
+  remain exact. These remaining findings are under CUDA profiling and
+  probability diagnosis; the DeepSeek checkpoint remains available.
 
 These probes identify dependence on execution shape; they are not a general
 model-quality or teacher-forced numerical equivalence result.
