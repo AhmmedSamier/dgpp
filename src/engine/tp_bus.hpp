@@ -190,9 +190,9 @@ struct BusBoundaryReducer final : BoundaryReducer {
 // the fold, no engine launch on the collective stream, no host notice of
 // the finish before the model may continue; the kernel form is the replay's
 // (bitwise the eager machine's). The model skips the drain
-// (stream_ordered) and calls settle() once per pass. Boundaries above one
-// latency slot keep the host-driven bulk path (the stream is drained for
-// them: settle, then the bulk collective, then its wait).
+// (stream_ordered) and calls settle() once per pass. Short boundaries use
+// up to two latency slots. Larger boundaries drain the stream and fold
+// their bulk prefix through the host, then queue any short tail.
 // ---------------------------------------------------------------------------
 class BusStreamReducer final : public BoundaryReducer {
  public:
@@ -243,10 +243,10 @@ class BusStreamReducer final : public BoundaryReducer {
     settle();
     DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
     // A few extra mixed-batch rows can spill a full bulk segment into a
-    // second reduce-scatter/allgather wave. Fold a latency-sized remainder
-    // on the model stream instead. Both machines sum each element in the
-    // same rank order; the completed bulk prefix and stream-ordered tail
-    // are ready before the next model kernel consumes them.
+    // second reduce-scatter/allgather wave. Fold a remainder of up to two
+    // latency slots on the model stream instead. Both machines sum each
+    // element in the same rank order; the completed bulk prefix and
+    // stream-ordered tail are ready before the next model kernel consumes them.
     const size_t segment = bus_.bulk_segment_bytes() / 2;
     const size_t tail = segment ? total % segment : 0;
     if (total > segment && tail > 0 && tail <= 2 * max_elems_) {

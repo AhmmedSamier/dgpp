@@ -1452,6 +1452,11 @@ __device__ inline void bulk_store_tail(uint16_t* p, uint4 v, uint32_t elems) {
   if (elems >= 4) w[1] = v.y;
   if (elems >= 6) w[2] = v.z;
 }
+__device__ inline void bulk_accumulate_tail(float (&acc)[6], uint4 v, uint32_t elems) {
+#pragma unroll
+  for (int e = 0; e < 6; ++e)
+    if (e < elems) acc[e] += bf16_to_f32(bulk_elem(v, e));
+}
 
 // The block's per-peer hash partials XORed into the stripe's accumulators
 // (all threads; two barriers).
@@ -1638,7 +1643,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
             bulk_store(d, vi, al, x);
             h ^= bulk_hash_vec(x, 2 * static_cast<uint64_t>(vi));
           }
-          if (ti + 1 == nt && threadIdx.x == 0) {
+          if (ti + 1 == nt && threadIdx.x == 0 && (bytes & 15u) != 0) {
             const uint32_t tail = static_cast<uint32_t>(bytes / 2) - nvec * 8;
             const uint4 v = bulk_load_tail<false>(s + nvec * 8, tail);
             bulk_store_tail(d + nvec * 8, v, tail);
@@ -1957,24 +1962,30 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
                    make_uint4(bulk_pack2(res[0], res[1]), bulk_pack2(res[2], res[3]),
                               bulk_pack2(res[4], res[5]), bulk_pack2(res[6], res[7])));
       }
-      if (ti + 1 == nt && threadIdx.x == 0) {
+      if (ti + 1 == nt && threadIdx.x == 0 && (bytes & 15u) != 0) {
         const uint32_t offset = nvec * 8;
         const uint32_t tail = static_cast<uint32_t>(bytes / 2) - offset;
         const uint4 mine = bulk_load_tail<false>(local + offset, tail);
-        uint4 y[kBusMaxPeersSized];
-        for (int p = 0; p < peers; ++p) {
-          y[p] = bulk_load_tail<true>(pp[p] + offset, tail);
-          h[p] ^= bulk_hash_tail(y[p], tail, static_cast<uint64_t>(nvec) * 2);
-        }
-        for (uint32_t e = 0; e < tail; ++e) {
-          float acc = 0.0f;
-          for (int rank = 0; rank <= peers; ++rank) {
-            const uint16_t bits = rank == my_rank ? bulk_elem(mine, e)
-                : bulk_elem(y[rank < my_rank ? rank : rank - 1], e);
-            acc += bf16_to_f32(bits);
+        float acc[6]{};
+        bool mine_in = false;
+        // Consume each loaded peer vector immediately in canonical rank
+        // order, keeping only six accumulators instead of a peer array.
+#pragma unroll
+        for (int p = 0; p < kBusMaxPeersSized; ++p) {
+          if (p == my_rank) {
+            bulk_accumulate_tail(acc, mine, tail);
+            mine_in = true;
           }
-          out[offset + e] = __bfloat16_as_ushort(__float2bfloat16(acc));
+          if (p < peers) {
+            const uint4 v = bulk_load_tail<true>(pp[p] + offset, tail);
+            h[p] ^= bulk_hash_tail(v, tail, static_cast<uint64_t>(nvec) * 2);
+            bulk_accumulate_tail(acc, v, tail);
+          }
         }
+        if (!mine_in) bulk_accumulate_tail(acc, mine, tail);
+#pragma unroll
+        for (int e = 0; e < 6; ++e)
+          if (e < tail) out[offset + e] = __bfloat16_as_ushort(__float2bfloat16(acc[e]));
       }
       bulk_commit_hashes(h, peers, s_h, sc, k);
     };
@@ -1994,7 +2005,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
         h ^= bulk_hash_vec(y, 2 * static_cast<uint64_t>(vi));
         bulk_store(out, vi, al, y);
       }
-      if (ti + 1 == nt && threadIdx.x == 0) {
+      if (ti + 1 == nt && threadIdx.x == 0 && (len & 15u) != 0) {
         const uint32_t tail = len / 2 - nvec * 8;
         const uint4 v = bulk_load_tail<true>(payload + nvec * 8, tail);
         bulk_store_tail(out + nvec * 8, v, tail);
