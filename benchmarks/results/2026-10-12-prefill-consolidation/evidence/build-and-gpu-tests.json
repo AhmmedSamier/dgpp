@@ -128,6 +128,28 @@
         "========= ERROR SUMMARY: 0 errors",
         "Production restored: original configuration, original live binary on all four ranks, healthy HTTP."
       ]
+    },
+    {
+      "file": "final-host-python.log",
+      "sha256": "b1e0a1342d2040764afe216301628fe6617a65f43d48e63695a36114952aa202",
+      "results": [
+        " 1/15 Test #56: checkpoint_audit_test ............   Passed    0.03 sec",
+        " 2/15 Test #57: route_trace_test .................   Passed    0.11 sec",
+        " 3/15 Test #58: sampling_profile_test ............   Passed    0.03 sec",
+        " 4/15 Test #59: site_env_test ....................   Passed    2.20 sec",
+        " 5/15 Test #60: script_reports_test ..............   Passed    0.58 sec",
+        " 6/15 Test #61: portability_test .................   Passed    0.33 sec",
+        " 7/15 Test #62: timed_load_test ..................   Passed    0.73 sec",
+        " 8/15 Test #63: serve_admission_bench_test .......   Passed    7.28 sec",
+        " 9/15 Test #64: qwen_yarn_release_check_test .....   Passed    0.14 sec",
+        "10/15 Test #65: qwen_head_compare_test ...........   Passed    1.55 sec",
+        "11/15 Test #66: spark_cross_test .................   Passed    1.11 sec",
+        "12/15 Test #67: setup_tools_test .................   Passed    2.34 sec",
+        "13/15 Test #68: bootstrap_test ...................   Passed    0.15 sec",
+        "14/15 Test #69: launcher_test ....................   Passed   11.76 sec",
+        "15/15 Test #70: serve_startup_test ...............   Passed    3.15 sec",
+        "100% tests passed, 0 tests failed out of 15"
+      ]
     }
   ]
 }

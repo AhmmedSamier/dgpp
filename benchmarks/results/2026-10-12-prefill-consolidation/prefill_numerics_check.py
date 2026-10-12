@@ -53,6 +53,18 @@ for trial in range(args.trials):
     vocabulary = 'amber birch cobalt dune ember fjord granite harbor indigo juniper quartz willow'.split()
     prompt = 'Document:\n' + ' '.join(rng.choice(vocabulary) for _ in range(args.words)) + '\nSummary:'
     for name in args.scenarios:
+        if name == 'decoder_pair':
+            before = bench.idle()
+            short = 'List the positive integers in order, starting with one:\n1,'
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                responses = list(pool.map(lambda n: bench.stream(f'decoder-{n}', short, args.decode_tokens), range(2)))
+            after = bench.idle(before['scheduler']['terminal'] + 2)
+            assert after['service']['requests_total'] - before['service']['requests_total'] == 2
+            assert after['scheduler']['pool_blocks_in_use'] <= before['scheduler']['pool_blocks_in_use']
+            results.append(dict(scenario=name, trial=trial, requests=responses, before=before, after=after))
+            args.out.write_text(json.dumps(results, indent=2) + '\n')
+            print(name, trial, [r['output_text'] for r in responses], flush=True)
+            continue
         if name not in ('solo_prefill', 'batch_prefill'):
             results.append(bench.run(name, trial))
             args.out.write_text(json.dumps(results, indent=2) + '\n')

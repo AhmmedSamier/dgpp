@@ -71,7 +71,9 @@ numerical checks require finite logits, relative L2 below 0.01 and the
 repository's top-1 certification. Tiny fixture coverage does not establish
 real-checkpoint numerical equivalence by itself.
 
-The final shared fixture and unit suites pass. Compute Sanitizer reports
+All fifteen host Python suites pass, including benchmark transport and
+server startup settings. The shared fixture and unit suites pass at the
+recorded compact-mapping candidate. Compute Sanitizer reports
 zero errors and zero leaked bytes across all eleven shared-prefill cases.
 Image checks destroy the caller's prompt/image buffers after beginning a
 shared task, then verify yielded execution, snapshots and draft state.
@@ -106,6 +108,33 @@ mapping reduces that case to four padded rows. A three-trial follow-up
 measures mixed elapsed time at 19.178 → 18.911 seconds (1.39% faster) and
 repeated arrivals at 17.844 → 17.392 seconds (2.53% faster). The residual
 padding comes from the smallest available two-request graph bucket.
+
+Completed paired measurements below report elapsed-time change; negative
+is faster. Each link retains the underlying timings and request metrics.
+
+| Configuration | Solo decode | Solo prefill | Batch decode | Batch prefill | Mixed | Repeated arrivals |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| [Qwen35 FP8 + DFlash, graph¹](evidence/qwen35-reverse-v17-summary.json) | +0.06% | -0.53% | +0.22% | -3.15% | +0.68% | -0.63% |
+| [Qwen35 FP8 + DFlash, eager¹](evidence/qwen35-eager-v18-summary.json) | +0.36% | -0.73% | -18.09% | -1.95% | +0.95% | -5.91% |
+| [Qwen35 NVFP4](evidence/qwen35-nvfp4-final-v25-summary.json) | +0.19% | -0.96% | +0.62% | -0.59% | +0.64% | -1.81% |
+| [Qwen NVFP4](evidence/qwen4-nvfp4-final-v25-summary.json) | -0.12% | -0.29% | -0.50% | +0.13% | -28.87% | -0.25% |
+| [Qwen FP8, automatic budget](evidence/qwen4-final-v25-summary.json) | -0.32% | -0.01% | -0.03% | -0.16% | -10.46% | -0.01% |
+| [Qwen FP8, matched 256 budget](evidence/qwen4-matched-budget-final-v25-summary.json) | -0.64% | -0.34% | +0.93% | -0.30% | -0.01% | -0.36% |
+| [GLM Flash](evidence/glm-final-v25-summary.json) | +0.52% | -35.63% | -0.64% | -67.62% | -21.70% | -23.52% |
+| [GLM-DSA²](evidence/glm-dsa-compact-v25-summary.json) | — | — | — | — | -1.39% | -2.53% |
+| [DeepSeek V4.1³](evidence/dsv41-final-v25-summary.json) | -1.18% | +0.07% | -0.43% | -1.94% | -5.30% | -0.94% |
+
+¹ Earlier candidate before compact mapping. These block-drafter/eager paths
+are unaffected by that mapping change. ² Three trials of the affected
+scenarios; earlier full-family coverage remains in the evidence. ³ Numerical
+investigation and decoder dispatch checks remain open.
+
+At the matched 256-token Qwen budget, mixed elapsed time is 7.676 → 7.675
+seconds. Arrival first-token latency remains 0.33–0.36 seconds and maximum
+decoder gaps remain 0.18–0.19 seconds. All 34 responses and four chat
+transcripts match in that pair. The automatic-budget Qwen pair changes two
+one-token randomized prefill outputs; its longer responses and chat
+transcripts match.
 
 Final candidate measurements and temporary-model results are still being
 collected. Preserve individual request latency alongside aggregate timings:
