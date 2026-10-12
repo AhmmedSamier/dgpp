@@ -665,7 +665,26 @@ int GlmMoeLayer::routed_seg_max_rows(const MoeSegment* d_segs, int n_segs,
 
 void GlmMoeLayer::enqueue_prefill(const uint16_t* hidden, uint16_t* out,
                                   int tokens, MoeTraceStaging* trace,
-                                  cudaStream_t stream) {
+                                  cudaStream_t stream, int decode_prefix) {
+  if (decode_prefix < 0 || decode_prefix > tokens || decode_prefix > decode_slots_)
+    throw std::invalid_argument("GlmMoeLayer: mixed decoder prefix exceeds row capacity");
+  if (decode_prefix) {
+    if (decode_prefix < tokens) enqueue_prefill(hidden, out, tokens, trace, stream);
+    enqueue_decode(hidden, out, decode_prefix, nullptr, stream);
+    // Prefill staging permits omitted biased scores. Update the prefix
+    // after native routing without changing the decode staging contract.
+    if (trace) {
+      if (!trace->ids || !trace->weights)
+        throw std::invalid_argument("GlmMoeLayer: incomplete trace staging");
+      const size_t tk = static_cast<size_t>(decode_prefix) * cfg_.top_k;
+      DGPP_CUDA_OK(cudaMemcpyAsync(trace->ids, d_ids_, tk * sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
+      DGPP_CUDA_OK(cudaMemcpyAsync(trace->weights, d_weights_, tk * sizeof(float), cudaMemcpyDeviceToHost, stream));
+      if (trace->biased)
+        DGPP_CUDA_OK(cudaMemcpyAsync(trace->biased, d_biased_,
+            static_cast<size_t>(decode_prefix) * cfg_.n_experts * sizeof(float), cudaMemcpyDeviceToHost, stream));
+    }
+    return;
+  }
   step_timing::Scope tick(step_timing::kMoe);
   if (tokens <= 0) return;
   if (!has_shared())
@@ -713,7 +732,18 @@ void GlmMoeLayer::route_prefill_rows(const uint16_t* hidden, int r0, int rows, c
                            hash_vocab_, rows, stream);
 }
 
-void GlmMoeLayer::enqueue_prefill_phased(const uint16_t* hidden, int tokens, cudaStream_t stream) {
+void GlmMoeLayer::enqueue_prefill_phased(const uint16_t* hidden, int tokens, cudaStream_t stream,
+                                       int decode_prefix, uint16_t* out) {
+  if (decode_prefix < 0 || decode_prefix > tokens || decode_prefix > decode_slots_ || (decode_prefix && !out))
+    throw std::invalid_argument("GlmMoeLayer: phased mixed decoder prefix");
+  if (decode_prefix) {
+    if (decode_prefix < tokens) enqueue_prefill_phased(hidden, tokens, stream);
+    // Slot down rows and grouped down rows have separate storage. Native
+    // routing changes only the prefix; reader maps and weights stay valid
+    // for the later per-block accumulations.
+    enqueue_decode(hidden, out, decode_prefix, nullptr, stream);
+    return;
+  }
   step_timing::Scope tick(step_timing::kMoe);
   if (tokens <= 0) return;
   if (!has_shared()) throw std::logic_error("GlmMoeLayer: the phased prefill takes a shared expert");
@@ -724,7 +754,13 @@ void GlmMoeLayer::enqueue_prefill_phased(const uint16_t* hidden, int tokens, cud
   prefill_chain(hidden, tokens, stream);
 }
 
-void GlmMoeLayer::accumulate_prefill_rows(uint16_t* out, int tokens, int r0, int rows, cudaStream_t stream) {
+void GlmMoeLayer::accumulate_prefill_rows(uint16_t* out, int tokens, int r0, int rows, cudaStream_t stream,
+                                         int decode_prefix) {
+  if (decode_prefix < 0 || decode_prefix > tokens)
+    throw std::invalid_argument("GlmMoeLayer: accumulation decoder prefix");
+  const int skip = std::min(rows, std::max(0, decode_prefix - r0));
+  r0 += skip;
+  rows -= skip;
   if (rows <= 0) return;
   if (!out || r0 < 0 || r0 + rows > tokens) throw std::invalid_argument("GlmMoeLayer: accumulation rows");
   const size_t H = cfg_.hidden, K = static_cast<size_t>(cfg_.top_k), R = static_cast<size_t>(r0);

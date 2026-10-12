@@ -87,7 +87,11 @@ class GlmMoeLayer {
   // takes the kernel as an argument — kGemv by default (the decode pin),
   // kMma to serve as the prefill path's bitwise reference.
   void enqueue_prefill(const uint16_t* hidden, uint16_t* out, int tokens,
-                       MoeTraceStaging* trace, cudaStream_t stream);
+                       MoeTraceStaging* trace, cudaStream_t stream, int decode_prefix = 0);
+  // Mixed rows retain the native slot recipe for the decoder prefix. The
+  // reader chain keeps its grouped geometry; its provisional prefix is
+  // replaced before the caller folds the output. A decoder-only bounded
+  // phase bypasses the grouped chain entirely.
   // The prefill in phases, for a caller that overlaps its boundary folds
   // with the per-row ends of the layer (the DeepSeek-V4 walk, 2026-10-02):
   // the router over a row block ahead of the chain (route_prefill_rows on
@@ -95,8 +99,10 @@ class GlmMoeLayer {
   // accumulation, the accumulation per row block. The same kernels per
   // row as enqueue_prefill: bitwise its output.
   void route_prefill_rows(const uint16_t* hidden, int r0, int rows, cudaStream_t stream);
-  void enqueue_prefill_phased(const uint16_t* hidden, int tokens, cudaStream_t stream);
-  void accumulate_prefill_rows(uint16_t* out, int tokens, int r0, int rows, cudaStream_t stream);
+  void enqueue_prefill_phased(const uint16_t* hidden, int tokens, cudaStream_t stream,
+                             int decode_prefix = 0, uint16_t* out = nullptr);
+  void accumulate_prefill_rows(uint16_t* out, int tokens, int r0, int rows, cudaStream_t stream,
+                               int decode_prefix = 0);
   void enqueue(const uint16_t* hidden, uint16_t* out, int tokens,
                cudaStream_t stream,
                MoeExpertKernel kernel = MoeExpertKernel::kGemv);

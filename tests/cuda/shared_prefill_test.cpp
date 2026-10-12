@@ -325,6 +325,33 @@ void check_decoder_mhc_recipe(Model& model, Model& reference, int vocab, int hid
   unsetenv(decode_env.c_str());
   unsetenv(prefill_env.c_str());
   require(!model.debug_sites().empty() && !reference.debug_sites().empty(), "mHC site capture exists");
+  if (std::getenv("DGPP_PREFILL_COMPARE_SITES")) {
+    using Site = typename Model::SiteCapture;
+    for (size_t layer = 0; layer < reference.debug_sites().size(); ++layer) {
+      require(layer < model.debug_sites().size(), "mixed site capture layer count");
+      for (const auto& [name, member] : {
+          std::pair{"attention input", &Site::x_attn}, std::pair{"attention result", &Site::attn_out},
+          std::pair{"attention streams", &Site::streams_after_attn}, std::pair{"expert input", &Site::x_ffn},
+          std::pair{"expert result", &Site::ffn_out}}) {
+        const auto& a = model.debug_sites()[layer].*member;
+        const auto& b = reference.debug_sites()[layer].*member;
+        require(a.size() >= b.size(), "mixed site capture prefix shape");
+        size_t changed = 0;
+        for (size_t i = 0; i < b.size(); ++i) changed += a[i] != b[i];
+        std::printf("mixed site trace %s layer %zu %s: %zu/%zu changed\n",
+                    prefix.c_str(), layer, name, changed, b.size());
+      }
+    }
+  }
+  for (size_t layer = 0; layer < reference.debug_sites().size(); ++layer) {
+    const auto& a = model.debug_sites().at(layer);
+    const auto& b = reference.debug_sites()[layer];
+    require(a.x_ffn.size() >= b.x_ffn.size() && a.ffn_out.size() >= b.ffn_out.size(),
+            "mixed expert decoder prefix shape");
+    if (std::equal(b.x_ffn.begin(), b.x_ffn.end(), a.x_ffn.begin()))
+      require(std::equal(b.ffn_out.begin(), b.ffn_out.end(), a.ffn_out.begin()),
+              "identical decoder expert inputs must retain the native expert output");
+  }
   const auto& actual = model.debug_sites().front().x_attn;
   const auto& expected = reference.debug_sites().front().x_attn;
   require(expected.size() == feeds.size() * hidden && actual.size() >= expected.size(),

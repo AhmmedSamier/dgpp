@@ -1002,11 +1002,11 @@ void Dsv4Model::enqueue_layer_overlap(const Dsv4LayerResident& r, int layer, int
   // The expert chain over every row (its cost is the weights it decodes);
   // then the accumulation per block, so block B's runs under A's fold.
   uint16_t* ffn_out = y_;
-  moe_->enqueue_prefill_phased(x_, T, stream_);
+  moe_->enqueue_prefill_phased(x_, T, stream_, decode_prefix, ffn_out);
   moe_->set_hash_routing(nullptr, nullptr, 0);
-  moe_->accumulate_prefill_rows(ffn_out, T, 0, TA, stream_);
+  moe_->accumulate_prefill_rows(ffn_out, T, 0, TA, stream_, decode_prefix);
   const bool ffn_a = begin_fold(ffn_out, 0, TA);
-  moe_->accumulate_prefill_rows(ffn_out, T, TA, TB, stream_);
+  moe_->accumulate_prefill_rows(ffn_out, T, TA, TB, stream_, decode_prefix);
   end_fold(ffn_a);
   // Block A's update; block B's fold under the next layer's site and
   // attention of A (or landed here: the walk's last layer, a DSpark
@@ -1092,7 +1092,7 @@ void Dsv4Model::enqueue_layer(const Dsv4LayerResident& r, int layer, int T, cons
   if (rows.decode)
     moe_->enqueue_decode(x_, ffn_out, T, nullptr, stream_, rows.moe_table_slot);
   else
-    moe_->enqueue_prefill(x_, ffn_out, T, rows.trace, stream_);
+    moe_->enqueue_prefill(x_, ffn_out, T, rows.trace, stream_, decode_prefix);
   moe_->set_hash_routing(nullptr, nullptr, 0);
   if (pf) {
     // The next layer of the walk: a backbone layer's successor, a draft
