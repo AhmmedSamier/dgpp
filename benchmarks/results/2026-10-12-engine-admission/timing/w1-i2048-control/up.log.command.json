@@ -1,0 +1,16 @@
+{
+  "command": [
+    "python3",
+    "scripts/dgpp-cluster",
+    "up",
+    "--config",
+    "build-pr104-shared/engine-refactor/timing/w1-i2048-control/deployment.json",
+    "--bin",
+    "build-pr104-shared/shared-v11/dgpp-serve",
+    "--log-dir",
+    "build-pr104-shared/engine-refactor/timing/w1-i2048-control/world"
+  ],
+  "started": "2026-10-12T04:14:05.378415+00:00",
+  "returncode": 0,
+  "finished": "2026-10-12T04:14:36.202934+00:00"
+}

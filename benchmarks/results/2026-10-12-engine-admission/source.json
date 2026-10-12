@@ -1,0 +1,15 @@
+{
+  "runtime_source": "3877e12e8f5a40b311efddd680c97f9dc1d45d41",
+  "comparison": "structural refactor vs merged runtime; early admission automatically enabled in both",
+  "candidate": {
+    "path": "build-pr104-shared/engine-refactor/dgpp-serve",
+    "sha256": "9da56c960ee034f75bbc7219439f1f705f041f61136eeaf66928b808baed45b2"
+  },
+  "control": {
+    "path": "build-pr104-shared/shared-v11/dgpp-serve",
+    "runtime_source": "e17cf1eb33426263533a08aec83d99898da60515",
+    "merged_master": "5503c1896c1a5e99b697a724f5a0479f556b8668",
+    "sha256": "71a482c20fda639d6324865ed201d934e97a7185aadfa07855403bde1403b43a"
+  },
+  "build_note": "Built from these runtime sources before the refactor commit; embedded version is the parent with a dirty suffix."
+}

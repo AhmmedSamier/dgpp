@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <optional>
 
 #include "sched/scheduler.hpp"
 
@@ -26,6 +27,18 @@ inline sched::AdmissionPolicy resolve_prefill_policy(
     if (policy.prefill_idle_budget_tokens == 0 && engine.prefill_group_advance())
       policy.prefill_idle_budget_tokens = static_cast<int>(limit / align * align);
   }
+  return policy;
+}
+
+// Configuration carries automatic/on/off until the engine exists. Resolve
+// from execution support, never checkpoint architecture or drafter names.
+// The warm record carries the resulting boolean to every rank.
+inline sched::AdmissionPolicy resolve_prefill_policy(
+    sched::AdmissionPolicy policy, const sched::SchedulerEngine& engine,
+    std::optional<bool> early_admission) {
+  policy = resolve_prefill_policy(policy, engine);
+  policy.prefill_early_admission = early_admission.value_or(
+      policy.prefill_budget_tokens > 0 && engine.supports_mixed_prefill());
   return policy;
 }
 

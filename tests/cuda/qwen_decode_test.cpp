@@ -804,6 +804,15 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
       mixed.session_reserve_blocks(req, 128);
       restored.session_reserve_blocks(req, 128);
     }
+    for (int rows : {-1, dgpp::kSpecRows + 1}) {
+      bool refused = false;
+      try { (void)mixed.session_prefill_verify(cursor, 32, {1, 2}, feeds, rows); }
+      catch (const std::invalid_argument&) { refused = true; }
+      require(refused && cursor.next == 0 && mixed.session_position(0) == 0 &&
+                  mixed.session_position(1) == static_cast<int64_t>(A.size()) &&
+                  mixed.session_position(2) == static_cast<int64_t>(B.size()),
+              "invalid mixed graph geometry must fail before advancing any request");
+    }
     const auto compare = [&](const QwenModel::Outputs& got, const QwenModel::Outputs& want, const char* label) {
       require(got.logits.size() == want.logits.size(), std::string(label) + ": output rows");
       for (size_t at = 0; at < got.logits.size(); at += V) {

@@ -326,6 +326,9 @@ class SchedulerEngine {
     PrefillProgress prefill;
     std::vector<std::vector<int32_t>> decoded;
   };
+  // Engine capability, available before any request is admitted. Per-batch
+  // eligibility (slots, row capacity, images) is checked by can_mix_prefill.
+  virtual bool supports_mixed_prefill() const { return false; }
   virtual bool can_mix_prefill(int, const std::vector<int>&) const { return false; }
   virtual MixedProgress advance_prefill_and_step(int, int64_t, const std::vector<int>&) {
     throw std::logic_error("SchedulerEngine: mixed prefill/decode is unavailable");
@@ -470,8 +473,8 @@ struct AdmissionPolicy {
   // prompt, or the turn after a client compacted its history, attaches.
   int prefix_min_tokens = 0;
   bool prefix_head_snapshots = false;
-  // Resolved admission policy. Qwen graph serving enables this by default;
-  // callers and old journal records retain false unless explicitly resolved.
+  // Resolved admission policy. Serving resolves automatic admission from the
+  // engine's execution capabilities; old journal records retain false.
   // Engines without a shared walk can pay for additional decode passes.
   bool prefill_early_admission = false;
   bool operator==(const AdmissionPolicy& o) const {

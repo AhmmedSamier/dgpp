@@ -1,0 +1,5 @@
+2026-10-12 04:16:19.267 === SIGINT rank 0 (838124) — the stop record releases the peers
+2026-10-12 04:16:21.268 === op-stream identity (every rank)
+2026-10-12 04:16:21.268 1bd9db93d40c43c45a3cef5618d53061  /home/stephen/workspace/dgpp/build-pr104-shared/engine-refactor/timing/w1-i2048-control/world/serve_rank0.ops
+2026-10-12 04:16:21.268 op streams: identical across 1 ranks
+2026-10-12 04:16:21.268 === logs in /home/stephen/workspace/dgpp/build-pr104-shared/engine-refactor/timing/w1-i2048-control/world

@@ -550,15 +550,18 @@ The single-Spark NVIDIA and RadixArk Qwen NVFP4 templates explicitly select
 4,096-token busy and idle budgets. The two- and four-rank GLM-5.3-Flash
 NVFP4/FP8 templates select 256-token busy and 2,048-token idle budgets.
 A positive budget bounds aligned prefill work before each decode pass.
-Qwen graph serving without DFlash enables early text admission by default. Queued text shares
+Engines with mixed prefill/decode execution enable early text admission by default. Queued text shares
 bounded prefill work, and decoder verification shares projections with an
 unfinished reader. Decoders that preceded a reader retain the busy-budget
 interruption bound. Decoders admitted during its prefill may share the larger
 idle-budget chunks, preserving reader progress with longer update gaps for
 those new streams. Slot and KV reservation limits still apply.
 `engine.prefill_early_admission=false` (`--no-prefill-early-admission`) restores
-the former leftover-only admission. Other backends retain their old default;
-explicitly enabling this policy there does not add Qwen's shared execution.
+the former leftover-only admission. Automatic admission resolves from engine
+capabilities after construction; it does not inspect model or drafter names.
+The current mixed executor is Qwen4Exp; other executors retain their old default
+until their layer execution implements the shared contract. Explicitly enabling
+this policy there does not add mixed execution.
 The budget must be a multiple of the snapshot alignment and fit prefill scratch.
 Smaller chunks trade prefill throughput and TTFT for shorter pauses in
 other streams. Request reservations are held before the first yield, and

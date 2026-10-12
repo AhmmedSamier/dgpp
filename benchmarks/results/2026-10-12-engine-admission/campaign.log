@@ -1,0 +1,42 @@
+2026-10-12T04:13:57.807718+00:00 build-pr104-shared/engine-refactor/timing/production-down.log
+2026-10-12T04:14:05.378415+00:00 build-pr104-shared/engine-refactor/timing/w1-i2048-control/up.log
+1 2048 control 0 solo_decode 7.787
+1 2048 control 0 solo_prefill 7.659
+1 2048 control 0 mixed_short 21.402
+1 2048 control 0 sustained_idle 14.281
+1 2048 control 1 sustained_idle 14.233
+1 2048 control 1 mixed_short 21.333
+1 2048 control 1 solo_prefill 7.589
+1 2048 control 1 solo_decode 7.84
+2026-10-12T04:16:19.233229+00:00 build-pr104-shared/engine-refactor/timing/w1-i2048-control/down.log
+2026-10-12T04:16:21.375066+00:00 build-pr104-shared/engine-refactor/timing/w1-i2048-candidate/up.log
+1 2048 candidate 0 solo_decode 7.829
+1 2048 candidate 0 solo_prefill 7.689
+1 2048 candidate 0 mixed_short 21.323
+1 2048 candidate 0 sustained_idle 14.26
+1 2048 candidate 1 sustained_idle 14.233
+1 2048 candidate 1 mixed_short 21.22
+1 2048 candidate 1 solo_prefill 7.575
+1 2048 candidate 1 solo_decode 7.83
+2026-10-12T04:18:33.101152+00:00 build-pr104-shared/engine-refactor/timing/w1-i2048-candidate/down.log
+2026-10-12T04:18:35.222587+00:00 build-pr104-shared/engine-refactor/timing/w4-i2048-candidate/up.log
+4 2048 candidate 0 solo_decode 4.133
+4 2048 candidate 0 solo_prefill 6.077
+4 2048 candidate 0 mixed_short 12.402
+4 2048 candidate 0 sustained_idle 9.764
+4 2048 candidate 1 sustained_idle 9.737
+4 2048 candidate 1 mixed_short 12.403
+4 2048 candidate 1 solo_prefill 5.921
+4 2048 candidate 1 solo_decode 4.108
+2026-10-12T04:20:10.626452+00:00 build-pr104-shared/engine-refactor/timing/w4-i2048-candidate/down.log
+2026-10-12T04:20:17.902942+00:00 build-pr104-shared/engine-refactor/timing/w4-i2048-control/up.log
+4 2048 control 0 solo_decode 4.105
+4 2048 control 0 solo_prefill 6.023
+4 2048 control 0 mixed_short 12.421
+4 2048 control 0 sustained_idle 9.768
+4 2048 control 1 sustained_idle 9.699
+4 2048 control 1 mixed_short 12.419
+4 2048 control 1 solo_prefill 5.918
+4 2048 control 1 solo_decode 4.105
+2026-10-12T04:21:52.527754+00:00 build-pr104-shared/engine-refactor/timing/w4-i2048-control/down.log
+2026-10-12T04:21:59.761405+00:00 build-pr104-shared/engine-refactor/timing/production-restore.log
