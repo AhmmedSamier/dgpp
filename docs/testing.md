@@ -25,6 +25,25 @@ same-shape isolation and graph token comparisons remain exact. Qwen4Exp retains
 its two-rank `qwen_engine_test` coverage. Run GPU checks serially with production
 stopped, then restore and verify the original deployment.
 
+The [shared-prefill campaign](../benchmarks/results/2026-10-12-prefill-consolidation/campaign.py)
+compares previous and candidate serving executables using the same deployment,
+weights, deterministic prompts and output lengths. It warms long prompts before
+timing isolated and concurrent decode, prefill, mixed work and repeated arrivals.
+`--cache-check` also checks cached transcript parity, output during cold prefill,
+and retained KV usage. Summaries retain both total work time and stream update
+gaps: a throughput improvement must not hide a longer decode interruption.
+A single special token can render no text; that prefill probe records a complete
+response and token usage, with no first-text latency measurement.
+
+Run campaigns serially on idle hardware. Each campaign stops production and
+restores its original configuration and executable in `finally`, verifying all
+ranks and HTTP health. For missing checkpoints, `--download-python` names a venv
+with the download dependencies; download and peer synchronization finish before
+serving starts. Save cache inventories before downloading. After testing, use
+`cleanup_weights.py` in the same directory to remove only checkpoints absent
+from every node's original inventory. Use `--no-resident-cache` for temporary
+checkpoints so their tests do not leave additional resident weight images.
+
 `prefix_snapshot_test` forces a four-block K/V pool full at snapshot time in
 Qwen and GLM. It covers monolithic and resumable prefill, unchanged target/draft
 logits, full-block pin cleanup, skipped hop replacements, timer/slot reuse, and

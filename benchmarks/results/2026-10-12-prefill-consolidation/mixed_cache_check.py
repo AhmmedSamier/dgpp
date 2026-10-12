@@ -113,11 +113,16 @@ assert long_record['id'] in {r['id'] for r in observed}
 assert after['service']['requests_total'] - before['service']['requests_total'] == 3
 # The entry meter sums references: two snapshots may pin the same physical
 # blocks. This exact repeat must return to its warmed physical-block count.
-assert after['scheduler']['pool_blocks_in_use'] == before['scheduler']['pool_blocks_in_use']
 assert after['scheduler']['pool_blocks_in_use'] <= after['prefix_cache']['blocks_pinned']
 if args.diagnostic:
-    print('DIAGNOSTIC ONLY: transcript_matches =', same, '; finishes_during_prefill =', overlap)
+    # A baseline transcript change can create a distinct cached continuation.
+    # Record its additional retained blocks rather than calling them a leak
+    # or preventing the candidate comparison from running.
+    print('DIAGNOSTIC ONLY: transcript_matches =', same, '; finishes_during_prefill =', overlap,
+          '; retained blocks =', before['scheduler']['pool_blocks_in_use'], '->',
+          after['scheduler']['pool_blocks_in_use'])
     sys.exit(0)
+assert after['scheduler']['pool_blocks_in_use'] == before['scheduler']['pool_blocks_in_use']
 assert same, 'cached transcript differs under load'
 assert first_token_during_prefill, 'cached request waited for the entire cold prefill'
 print('Cached request produced output during cold prefill; transcript matches; warmed physical KV usage unchanged; full response finished during prefill:', overlap)

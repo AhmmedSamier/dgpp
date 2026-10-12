@@ -367,8 +367,8 @@ Send PNG/JPEG/WebP data URIs in user `image_url` content parts; the
 The startup plan reserves 1.05 GiB of vision weights and 0.33 GiB of workspace
 per rank, including for text traffic. Account for this when sizing KV capacity.
 Image requests reuse prefixes with matching processed pixels and geometry,
-including generated continuations. With a configured prefill budget, the GLM
-graph engine yields between image-prefill chunks so active decodes continue.
+including generated continuations. With a configured prefill budget, the
+engine yields between image-prefill chunks so active decodes continue.
 Image requests bypass grouped prefill. Before changing a serving deployment, run
 `python3 scripts/vision_api_check.py --url http://127.0.0.1:18080` on idle test
 hardware, then compare rank operation streams after shutdown.
@@ -622,7 +622,7 @@ journal records carry both budgets; every rank follows the same token cuts.
 and `prefill_request_ms` (summed request waits, including waits between
 chunks). Logical and computed prompt-token counters advance with each chunk,
 including cancelled partial work; their difference counts attached cache
-tokens. Families without resumable prefill retain full-prompt admission.
+tokens.
 
 Client disconnects are counted when the HTTP connection closes; retirement
 occurs at the next scheduler boundary. With full-prompt admission enabled,
