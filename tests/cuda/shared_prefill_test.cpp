@@ -356,6 +356,47 @@ DGPP_TEST(shared_prefill_qwen35_per_tensor) {
                                         nullptr, 0, 1, 4, 16, mtp);
   }, cfg.vocab_size);
 }
+
+DGPP_TEST(shared_prefill_qwen35_large_projection_groups) {
+  for (bool mixed_quant : {false, true}) for (bool mtp : {false, true}) {
+    const auto cfg = qwen35fx::tiny_config(mixed_quant);
+    const std::string dir = mixed_quant ? "shared_qwen35_large_mixed_fixture" : "shared_qwen35_large_fixture";
+    qwen35fx::write_fixture(dir, mixed_quant);
+    Qwen35Model model(cfg, dir, 512, 2048, LoaderResidency::Resident, nullptr, 0, 1, 4, 16, mtp);
+    Qwen35Model reference(cfg, dir, 512, 2048, LoaderResidency::Resident, nullptr, 0, 1, 4, 16, mtp);
+    const auto a = tokens(301, cfg.vocab_size, 3), b = tokens(293, cfg.vocab_size, 5);
+    const auto changed = tokens(a.size(), cfg.vocab_size, 9), decoder = tokens(53, cfg.vocab_size, 7);
+    auto run = [&](const std::vector<int64_t>& first) {
+      (void)model.session_prefill(2, decoder);
+      (void)reference.session_prefill(2, decoder);
+      auto ca = model.session_prefill_begin(0, first, 768, 192);
+      auto cb = model.session_prefill_begin(1, b, 768, 192);
+      const std::vector<Qwen35Model::PrefillCursor*> readers{&ca, &cb};
+      std::vector<int64_t> cuts_a, cuts_b;
+      while (ca.next != ca.end || cb.next != cb.end) {
+        const auto out = model.session_prefill_verify_group(readers, {192, 192}, {2}, {{7, 8, 9, 10}});
+        const auto wanted = reference.session_verify(2, {7, 8, 9, 10});
+        close(out[0], wanted, "large reader projections preserve verifier");
+        model.session_rollback(2, 4, 4);
+        reference.session_rollback(2, 4, 4);
+        if (ca.next != ca.end) cuts_a.push_back(ca.next);
+        if (cb.next != cb.end) cuts_b.push_back(cb.next);
+      }
+      close(ca.output, reference.session_prefill(0, first, cuts_a), "large first reader at matching cuts");
+      close(cb.output, reference.session_prefill(1, b, cuts_b), "large second reader at matching cuts");
+      if (mtp) close(model.session_draft(1, {7}), reference.session_draft(1, {7}),
+                     "large shared projections preserve draft history");
+      auto output = cb.output;
+      for (int req : {0, 1, 2}) { model.session_close(req); reference.session_close(req); }
+      return output;
+    };
+    const auto before = run(a);
+    const auto after = run(changed);
+    exact(before, after, "large shared projections read another request");
+    require(model.kv_blocks_in_use() == 0 && reference.kv_blocks_in_use() == 0,
+            "large grouped prefills release reservations");
+  }
+}
 DGPP_TEST(shared_prefill_dsv4) {
   const auto cfg = dsv4fx::tiny_config();
   const std::string dir = "shared_dsv4_fixture";

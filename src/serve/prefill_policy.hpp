@@ -16,7 +16,11 @@ inline sched::AdmissionPolicy resolve_prefill_policy(
   const int64_t limit = engine.prefill_chunk_limit();
   policy.prefill_budget_tokens = 0;
   if (align > 0 && limit >= align) {
-    int64_t budget = std::min(limit, std::max<int64_t>(256, align));
+    // Amortize a physical layer walk and its weight conversions across the
+    // engine's native work chunk. A fixed small quantum can repeat those
+    // conversions many times for the same prompt. Explicit smaller budgets
+    // remain available when a shorter interruption bound is preferred.
+    int64_t budget = limit;
     if (policy.prefill_idle_budget_tokens > 0)
       budget = std::min<int64_t>(budget, policy.prefill_idle_budget_tokens);
     policy.prefill_budget_tokens = budget / align * align;

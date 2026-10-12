@@ -1031,6 +1031,34 @@ void QwenFullAttnLayer::rebind(const QwenFullAttnResident& w) {
 void QwenFullAttnLayer::enqueue(const uint16_t* x, int tokens, const QwenQsaRows& rows,
                                 QwenFullAttnCache& cache, uint16_t* out, cudaStream_t stream) {
   if (tokens <= 0) return;
+  validate_rows(tokens, rows, cache);
+  project_rows(x, tokens, rows, cache, stream);
+  attend_rows(tokens, rows, cache, 0, stream);
+  project_output(out, tokens, !rows.decode && rows.pos0 > 0, stream);
+}
+
+void QwenFullAttnLayer::enqueue_spans(const uint16_t* x, int tokens, const QwenQsaRows& rows,
+                                      const std::vector<Span>& spans, QwenFullAttnCache& cache,
+                                      uint16_t* out, cudaStream_t stream) {
+  int total = 0;
+  for (const auto& span : spans) {
+    if (span.rows <= 0) throw std::invalid_argument("QwenFullAttnLayer: empty mixed span");
+    validate_rows(span.rows, span.map, cache);
+    total += span.rows;
+  }
+  if (total != tokens || tokens <= 0 || tokens > max_tokens_ || pt_.enabled)
+    throw std::invalid_argument("QwenFullAttnLayer: invalid shared projections");
+  project_rows(x, tokens, rows, cache, stream);
+  int at = 0;
+  for (const auto& span : spans) {
+    attend_rows(span.rows, span.map, cache, at, stream);
+    at += span.rows;
+  }
+  project_output(out, tokens, false, stream);
+}
+
+void QwenFullAttnLayer::validate_rows(int tokens, const QwenQsaRows& rows,
+                                      const QwenFullAttnCache& cache) const {
   if (tokens > max_tokens_) throw std::invalid_argument("QwenFullAttnLayer: tokens exceed max_tokens");
   if (!rows.req_ids || !rows.pos) throw std::invalid_argument("QwenFullAttnLayer: null row metadata");
   if (rows.decode) {
@@ -1047,6 +1075,10 @@ void QwenFullAttnLayer::enqueue(const uint16_t* x, int tokens, const QwenQsaRows
       !(w_.v_proj || w_.v_proj_fp8.payload) || !(w_.o_proj || w_.o_proj_fp8.payload) || !w_.q_norm ||
       !w_.k_norm)
     throw std::invalid_argument("QwenFullAttnLayer: null weights");
+}
+
+void QwenFullAttnLayer::project_rows(const uint16_t* x, int tokens, const QwenQsaRows& rows,
+                                     QwenFullAttnCache& cache, cudaStream_t stream) {
   const int H = hidden_, D = dim_, T = tokens;
   const int QW = lh_ * 2 * D, KW = lkv_ * D;
   const int32_t* d_req = rows.req_ids;
@@ -1079,19 +1111,31 @@ void QwenFullAttnLayer::enqueue(const uint16_t* x, int tokens, const QwenQsaRows
   // The caches: K/V rows (no compressed keys, no ring).
   qsa_kv_append(kn_, KW, v_, KW, d_req, d_pos, T, cache.block_tables, cache.blocks_per_request,
                 cache.block_tokens, lkv_, D, cache.k_cache, cache.v_cache, stream);
+}
+
+void QwenFullAttnLayer::attend_rows(int T, const QwenQsaRows& rows, QwenFullAttnCache& cache,
+                                    int row0, cudaStream_t stream) {
+  const int D = dim_;
+  const int32_t* d_req = rows.req_ids;
+  const int64_t* d_pos = rows.pos;
+  const size_t offset = static_cast<size_t>(row0) * lh_ * D;
   // Dense causal attention over [0, pos] per row (kernels/full_attn.cu):
   // decode rows (arbitrary requests) through the split row walk, a prefill
   // chunk (one request, consecutive rows) through the query-tiled form.
   if (rows.decode) {
-    full_attn_decode(qn_, static_cast<int64_t>(lh_) * D, cache.k_cache, cache.v_cache, d_req, d_pos, T, lh_,
-                     lkv_, cache.block_tokens, cache.block_tables, cache.blocks_per_request, scale_, c_out_,
+    full_attn_decode(qn_ + offset, static_cast<int64_t>(lh_) * D, cache.k_cache, cache.v_cache, d_req, d_pos, T, lh_,
+                     lkv_, cache.block_tokens, cache.block_tables, cache.blocks_per_request, scale_, c_out_ + offset,
                      T <= kPartRows ? part_ : nullptr, stream);
   } else {
-    full_attn_prefill(qn_, static_cast<int64_t>(lh_) * D, cache.k_cache, cache.v_cache,
+    full_attn_prefill(qn_ + offset, static_cast<int64_t>(lh_) * D, cache.k_cache, cache.v_cache,
                       cache.block_tables + static_cast<int64_t>(rows.request) * cache.blocks_per_request, d_req,
                       d_pos, T, lh_, lkv_, cache.block_tokens, cache.block_tables, cache.blocks_per_request,
-                      scale_, c_out_, stream);
+                      scale_, c_out_ + offset, stream);
   }
+}
+
+void QwenFullAttnLayer::project_output(uint16_t* out, int T, bool resume, cudaStream_t stream) {
+  const int H = hidden_, D = dim_, QW = lh_ * 2 * D;
   qsa_gate_out(c_out_, q_ + D, QW, 2 * D, o_, T, lh_, D, stream);
   if (pt_.enabled && (T > 128 || resume)) {
     pt_quant_input(pt_, o_, T, lh_ * D, stream);

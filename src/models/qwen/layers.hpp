@@ -373,12 +373,24 @@ class QwenFullAttnLayer {
   void enqueue(const uint16_t* x, int tokens, const QwenQsaRows& rows, QwenFullAttnCache& cache,
                uint16_t* out, cudaStream_t stream);
 
+  using Span = QwenQsaLayer::Span;
+  void enqueue_spans(const uint16_t* x, int tokens, const QwenQsaRows& rows,
+                     const std::vector<Span>& spans, QwenFullAttnCache& cache,
+                     uint16_t* out, cudaStream_t stream);
+
   static size_t scratch_bytes(const QwenTextConfig& cfg, int local_heads, int local_kv_heads,
                               int max_tokens);
   int local_heads() const { return lh_; }
   int local_kv_heads() const { return lkv_; }
 
  private:
+  void validate_rows(int tokens, const QwenQsaRows& rows, const QwenFullAttnCache& cache) const;
+  void project_rows(const uint16_t* x, int tokens, const QwenQsaRows& rows,
+                    QwenFullAttnCache& cache, cudaStream_t stream);
+  void attend_rows(int tokens, const QwenQsaRows& rows, QwenFullAttnCache& cache,
+                   int row0, cudaStream_t stream);
+  void project_output(uint16_t* out, int tokens, bool resume, cudaStream_t stream);
+
   QwenPtAttnView pt_;  // disabled unless the model binds per-tensor weights
   QwenFullAttnResident w_;
   QwenGemmWorkspace g_;

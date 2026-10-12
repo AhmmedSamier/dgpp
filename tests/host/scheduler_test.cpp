@@ -508,12 +508,14 @@ DGPP_TEST(scheduler_serving_auto_prefill_budget_respects_engine_geometry_and_opt
   dgpp::sched::AdmissionPolicy policy;
   policy.prefill_budget_tokens = -1;
   const auto resolved = [&] { return dgpp::serve::resolve_prefill_policy(policy, engine); };
-  require(resolved().prefill_budget_tokens == 256, "automatic budget yields after 256 tokens");
+  require(resolved().prefill_budget_tokens == 2048, "automatic budget amortizes a native work chunk");
   engine.limit = 128;
   require(resolved().prefill_budget_tokens == 128, "small forward limit caps the budget");
   engine.align = 512;
   engine.limit = 2048;
-  require(resolved().prefill_budget_tokens == 512, "alignment wider than the default is honored");
+  engine.limit = 2200;
+  require(resolved().prefill_budget_tokens == 2048, "automatic chunk rounds down to alignment");
+  engine.limit = 2048;
   engine.align = 128;
   policy.prefill_idle_budget_tokens = 128;
   require(resolved().prefill_budget_tokens == 128, "explicit idle budget can bound the automatic busy budget");
@@ -532,11 +534,11 @@ DGPP_TEST(scheduler_serving_auto_prefill_budget_respects_engine_geometry_and_opt
   } grouped;
   grouped.limit = 4096;
   const auto regrouped = [&] { return dgpp::serve::resolve_prefill_policy(policy, grouped); };
-  require(regrouped().prefill_budget_tokens == 256 && regrouped().prefill_idle_budget_tokens == 4096,
-          "a group-advance engine takes the whole forward when nothing decodes");
+  require(regrouped().prefill_budget_tokens == 4096 && regrouped().prefill_idle_budget_tokens == 4096,
+          "a group-advance engine shares the full work chunk");
   require(resolved().prefill_idle_budget_tokens == 0, "other engines keep one budget");
   policy.prefill_idle_budget_tokens = 1024;
-  require(regrouped().prefill_budget_tokens == 256 && regrouped().prefill_idle_budget_tokens == 1024,
+  require(regrouped().prefill_budget_tokens == 1024 && regrouped().prefill_idle_budget_tokens == 1024,
           "an explicit idle budget survives");
 }
 

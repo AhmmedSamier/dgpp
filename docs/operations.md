@@ -541,8 +541,11 @@ cache format and arena size. Use the startup plan for the configured limit.
 **Budgeted prefill** (`engine.prefill_budget_tokens`, `--prefill-budget-tokens`)
 is shared by the eager and graph engines for every serving model family.
 Qwen4Exp and GLM-5.3-Flash also retain their resumable image paths.
-The default, -1, selects 256 tokens rounded down to the engine
-alignment and capped by its prefill limit (at least one aligned unit).
+The default, -1, selects the engine's prefill work limit, rounded down to its
+alignment and capped by an explicitly configured idle budget. This amortizes
+weight streaming and conversion across a full work chunk. Smaller explicit
+budgets shorten the maximum pause between decode steps, at a throughput cost
+when they require more weight conversions or layer walks.
 An explicit zero preserves full-prompt admission within a scheduler pass;
 model and snapshot boundaries still split the work. Qwen retains its internal
 4,096-token limit and reports token progress after each completed chunk.

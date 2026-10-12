@@ -1664,6 +1664,7 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
       } else if (run.num_spans > 0) {
         int64_t row0 = 0;
         if (mixed) {
+          configure_gemm_rows(decode_rows, true);
           KdaRequestRows requests;
           requests.request_ids = d_req;
           requests.positions = d_pos;
@@ -1677,10 +1678,33 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
           gdn_->enqueue_rows(x_, gdn_rec(0, gdn_ord), static_cast<int64_t>(num_gdn_) * rec_elems_,
                               gdn_conv(0, gdn_ord), static_cast<int64_t>(num_gdn_) * conv_elems_,
                               ao, decode_rows, requests, stream_, rec_snap, conv_snap, replay);
+          configure_gemm_rows(T, false);
           row0 = decode_rows;
         }
         for (int sp = run.decode_spans; sp < run.num_spans; ++sp) {
           const int len = run.span_lens[sp], sreq = run.span_reqs[sp];
+          // Large readers share the projection and weight conversion;
+          // each span still scans only its own recurrent and conv state.
+          // Small tails retain their original projection recipe, and a
+          // per-tensor scale cannot be shared across readers.
+          if (!pt_enabled_ && len > 128 && sp + 1 < run.num_spans && run.span_lens[sp + 1] > 128) {
+            std::vector<QwenGdnLayer::Span> spans;
+            int count = 0;
+            do {
+              QwenGdnLayer::Span span;
+              span.rows = run.span_lens[sp];
+              span.recurrent = gdn_rec(run.span_reqs[sp], gdn_ord);
+              span.conv = gdn_conv(run.span_reqs[sp], gdn_ord);
+              count += span.rows;
+              spans.push_back(span);
+              ++sp;
+            } while (sp < run.num_spans && run.span_lens[sp] > 128);
+            --sp;
+            gdn_->enqueue_spans(x_ + static_cast<size_t>(row0) * H, ao + static_cast<size_t>(row0) * H,
+                                 count, spans, stream_);
+            row0 += count;
+            continue;
+          }
           gdn_->enqueue(x_ + static_cast<size_t>(row0) * H, gdn_rec(sreq, gdn_ord),
                         gdn_conv(sreq, gdn_ord), ao + static_cast<size_t>(row0) * H, len, stream_,
                         KdaStateSnapshots{}, KdaConvSnapshots{}, KdaReplay{},
@@ -1732,14 +1756,37 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
       if (run.num_spans > 0) {
         int64_t row0 = 0;
         if (mixed) {
+          configure_gemm_rows(decode_rows, true);
           auto prefix = qrows;
           prefix.decode = true;
           prefix.num_requests = run.decode_spans;
           full_->enqueue(x_, decode_rows, prefix, cache, ao, stream_);
+          configure_gemm_rows(T, false);
           row0 = decode_rows;
         }
         for (int sp = run.decode_spans; sp < run.num_spans; ++sp) {
           const int len = run.span_lens[sp];
+          if (!pt_enabled_ && len > 128 && sp + 1 < run.num_spans && run.span_lens[sp + 1] > 128) {
+            std::vector<QwenFullAttnLayer::Span> spans;
+            int count = 0;
+            do {
+              QwenFullAttnLayer::Span span;
+              span.rows = run.span_lens[sp];
+              span.map = qrows;
+              span.map.req_ids = d_req + row0 + count;
+              span.map.pos = d_pos + row0 + count;
+              span.map.request = run.span_reqs[sp];
+              span.map.pos0 = run.span_pos0[sp];
+              count += span.rows;
+              spans.push_back(span);
+              ++sp;
+            } while (sp < run.num_spans && run.span_lens[sp] > 128);
+            --sp;
+            full_->enqueue_spans(x_ + static_cast<size_t>(row0) * H, count, spans.front().map, spans,
+                                   cache, ao + static_cast<size_t>(row0) * H, stream_);
+            row0 += count;
+            continue;
+          }
           QwenQsaRows srows = qrows;
           srows.req_ids = d_req + row0;
           srows.pos = d_pos + row0;
@@ -1759,21 +1806,28 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
     // Fused residual-add + post norm (bitwise the pair): one launch.
     qwen_add_rmsnorm_bf16(resid_, ao, r.post_norm, x_, T, H, eps, stream_);
     uint16_t* mo = stage(mlp_out_, H);
-    if (pt_enabled_ && run.num_spans > 0) {
-      // A per-tensor activation scale belongs to one reader. Sharing it
-      // across requests would let a neighbor change that reader's logits,
-      // and would also switch the decoder prefix to the prefill recipe.
+    if (run.num_spans > 0) {
+      // Retain the decoder's projection chain. Small reader tails also
+      // retain their streaming-MMA recipe when a large neighbor uses the
+      // dequant bridge. Per-tensor scales remain request-owned.
       int row0 = 0;
       if (mixed) {
         configure_gemm_rows(decode_rows, true);
         dense_mlp(x_, mo, decode_rows, r.mlp, stream_, layer, false);
         row0 = decode_rows;
       }
-      for (int sp = run.decode_spans; sp < run.num_spans; ++sp) {
-        const int len = run.span_lens[sp];
+      for (int sp = run.decode_spans; sp < run.num_spans;) {
+        const int first = sp;
+        int len = run.span_lens[sp++];
+        const int prefill_from = r.mlp.gate_fp4.payload ? 1024 : 129;
+        const bool prefill = len >= prefill_from;
+        if (!pt_enabled_)
+          while (sp < run.num_spans && (run.span_lens[sp] >= prefill_from) == prefill &&
+                 (prefill || len + run.span_lens[sp] < prefill_from))
+            len += run.span_lens[sp++];
         configure_gemm_rows(len, false);
         dense_mlp(x_ + static_cast<size_t>(row0) * H, mo + static_cast<size_t>(row0) * H,
-                  len, r.mlp, stream_, layer, run.span_pos0[sp] > 0);
+                  len, r.mlp, stream_, layer, run.span_pos0[first] > 0);
         row0 += len;
       }
       configure_gemm_rows(T, run.decode);
@@ -1797,8 +1851,18 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
     // into fp32 instead of one, tolerance-identical).
     if (dflash2_ && df_tap_[layer] >= 0) {
       const uint16_t* fc_t = dfw_.fc + static_cast<size_t>(df_tap_[layer]) * H * H;
-      gemm_.matmul(resid_, fc_t, df_t32_, T, H, H, DType::BF16, GemmOut::F32,
+      int row0 = 0;
+      if (mixed) {
+        configure_gemm_rows(decode_rows, true);
+        gemm_.matmul(resid_, fc_t, df_t32_, decode_rows, H, H, DType::BF16, GemmOut::F32,
+                     static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
+        row0 = decode_rows;
+        configure_gemm_rows(T - row0, false);
+      }
+      gemm_.matmul(resid_ + static_cast<size_t>(row0) * H, fc_t,
+                   df_t32_ + static_cast<size_t>(row0) * H, T - row0, H, H, DType::BF16, GemmOut::F32,
                    static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
+      configure_gemm_rows(T, run.decode);
       dflash2_acc_f32(df_acc_, df_t32_, static_cast<int64_t>(T) * H,
                       df_tap_[layer] == 0 ? 0 : 1, stream_);
     }
