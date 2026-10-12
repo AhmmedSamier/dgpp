@@ -98,12 +98,17 @@ def main():
     ap.add_argument('--download-python', type=Path,
                     help='Download/sync this deployment with this venv after stopping production.')
     ap.add_argument('--download-revision', help='Pin a temporary checkpoint download to this revision.')
+    ap.add_argument('--parallel-peer-sync', action='store_true',
+                    help='Copy the downloaded checkpoint to independent peers concurrently.')
     ap.add_argument('--scenarios', nargs='+', default=['solo_decode', 'solo_prefill', 'batch_decode',
                                                      'batch_prefill', 'mixed_long', 'sustained_idle'])
     args = ap.parse_args()
     args.out = args.out.resolve()
     args.out.mkdir(parents=True, exist_ok=False)
     (args.out / 'harness.py').write_bytes(Path(__file__).read_bytes())
+    if args.parallel_peer_sync:
+        (args.out / 'download-checkpoint.py').write_bytes(
+            Path(__file__).with_name('download_checkpoint.py').read_bytes())
     (args.out / 'benchmark-client.py').write_bytes((ROOT / 'scripts/serve_admission_bench.py').read_bytes())
     environment = {**os.environ, 'CUDA_DEVICE_MAX_CONNECTIONS': '32', 'DGPP_NO_SWAP': '1'}
     for key in ('DGPP_ROCE_DEVICES', 'DGPP_ROCE_GID_INDICES'):
@@ -142,7 +147,8 @@ def main():
     try:
         run(['python3', 'scripts/dgpp-cluster', 'down', '--config', args.production_config], args.out / 'production-down.log')
         if args.download_python:
-            command = [args.download_python, 'scripts/download_model.py', '--config', args.deployment]
+            helper = Path(__file__).with_name('download_checkpoint.py') if args.parallel_peer_sync else 'scripts/download_model.py'
+            command = [args.download_python, helper, '--config', args.deployment]
             if args.download_revision:
                 command += ['--revision', args.download_revision, '--activate']
             run(command, args.out / 'download.log', test=True, timeout=7200)

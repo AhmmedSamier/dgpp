@@ -210,6 +210,10 @@ the saved initial inventories. Their final download, sync, testing and cleanup
 are in progress, beginning with MiMo. Downloads are pinned to checkpoint revisions and performed one
 model at a time after stopping production. No download runs alongside a
 benchmark. Test-only resident images are disabled for these campaigns.
+The optional `--parallel-peer-sync` helper downloads on the head first,
+then copies to independent peers concurrently using the existing checksum
+and snapshot-validation helper. All transfer workers drain, including after
+a failure, before the campaign can deploy or restore a server.
 
 `cleanup_weights.py` verifies absence in every node's initial inventory
 before removing that model's cache and lock directory. `audit_cleanup.py`
