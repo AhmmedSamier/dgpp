@@ -1,8 +1,9 @@
 # Shared prefill and decode execution
 
 Follow-up for issue #104 and PR #108. **The scheduled correctness, configuration and performance checks are complete.
-The remaining burst throughput costs need acceptance before this becomes a
-merge record.**
+On 2026-10-12 the maintainer accepted this tested implementation for merge,
+with the remaining measured throughput costs documented below. Further
+performance investigation continues after this checkpoint.**
 
 ## What changed
 
@@ -290,7 +291,16 @@ Nevertheless, that case remains 2.62% slower, and the compact MTP-off counting
 burst loses 4.64%. Against the stronger same-binary deferred controls, the
 largest measured loss is 5.34%. Strict throughput neutrality is not achieved.
 
-PR #108 remains a draft and issue #104 remains open pending a decision on
-these explicit tradeoffs. Required thank-you/follow-up comments and merge/close
-actions have not been posted prematurely. Production restoration is checked
-against the original configuration and executable on all four ranks.
+The maintainer accepted PR #108 for merge on 2026-10-12, enabling the supported
+Qwen behavior by default while retaining the measured limitations. This
+acceptance does not claim strict throughput neutrality. Production restoration
+has been checked against the original configuration and executable on all four
+ranks.
+
+The old-runtime comparisons in this record use `3426204f`, the runtime after
+PR #107. The intended release comparison for continued optimization is the
+latest implementation with early admission enabled against `6fe7f2db`, before
+PR #105 and all early-admission work. Historical measurements from that original
+runtime exist, but a fresh matched comparison remains follow-up work. The
+same-binary deferred comparisons isolate scheduling costs; they are diagnostic
+controls rather than the original product baseline.

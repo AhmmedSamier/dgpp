@@ -1,5 +1,5 @@
 {
-  "status": "scheduled verification complete; performance acceptance pending",
+  "status": "scheduled verification complete; accepted for merge with documented performance tradeoffs on 2026-10-12",
   "baseline_commit": "9593c48eda1816de3ac90286b4337a8f4ef36bb4",
   "sampling_diagnosis": {
     "seed": 4567,
@@ -34,13 +34,14 @@
     "expert_diagnosis": "same graph kernel counts; +817 ms NVFP4 expert time; final-layer mean distinct experts 20.094 early vs 13.035 deferred"
   },
   "remaining": [
-    "Decide whether measured counting-burst throughput losses meet the acceptance bar (up to 4.64% vs old control, 5.34% vs same-binary deferred)",
-    "If accepted, thank the reporter on issue 104 and PR 105, merge follow-up PR 108, and close issue 104"
+    "Run a fresh matched comparison of current early admission enabled against pre-PR105 runtime 6fe7f2db",
+    "Investigate and improve remaining workload-dependent burst throughput regressions"
   ],
   "checkpoint_commits": [
     "b1b54df5",
     "eb9365b9",
     "e17cf1eb"
   ],
-  "active_campaign": null
+  "active_campaign": null,
+  "release_baseline_commit": "6fe7f2db619c0e01ae8ad1ccc49060346a1faa69"
 }
