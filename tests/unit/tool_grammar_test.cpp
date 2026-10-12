@@ -447,8 +447,7 @@ DGPP_TEST(tool_grammar_mimo_modelOpensThinkingAndStraddledTerminator) {
 // A schema that declares properties and does not opt out with an explicit
 // `additionalProperties: true` closes the parameter names: an open name slot
 // is free text, which is what lets the model write an undeclared or a
-// repeated name (the wire evidence in
-// benchmarks/results/2026-09-19-tool-key-closure.md).
+// repeated name.
 DGPP_TEST(tool_grammar_open_schema_closes_the_parameter_names) {
   const GrammarVocab vocab = qwen_vocab();
   const dgpp::minijson::ParseResult def = dgpp::minijson::parse(

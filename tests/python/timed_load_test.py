@@ -234,9 +234,8 @@ class TimedLoadCliTest(unittest.TestCase):
             self.assertEqual([p["class"] for p in report["phases"]], ["mixed", "mixed"])
             self.assertEqual([p["engine"]["tokens_per_s"] for p in report["phases"]], [500, 500])
 
-    def test_warmup_isolation_repeated_classes_and_legacy_entry_preserve_work(self):
-        scripts = [ROOT / "scripts/serve_load.py", ROOT / "scripts/timed_load.py",
-                   ROOT / "benchmarks/results/2026-09-16-dsv41-perf/timed_load.py"]
+    def test_warmup_isolation_repeated_classes_preserve_work(self):
+        scripts = [ROOT / "scripts/serve_load.py", ROOT / "scripts/timed_load.py"]
         runs = []
         with tempfile.TemporaryDirectory(prefix="dgpp timed load ") as directory:
             for script in scripts:
@@ -260,7 +259,6 @@ class TimedLoadCliTest(unittest.TestCase):
                     # Arrival order across worker threads is intentionally unconstrained.
                     runs.append(sorted(json.dumps(r, sort_keys=True) for r in state["requests"]))
             self.assertEqual(runs[0], runs[1])
-            self.assertEqual(runs[0], runs[2])
 
 
 if __name__ == "__main__":
