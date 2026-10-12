@@ -241,12 +241,18 @@ class JournalWriter {
   uint16_t port() const { return listener_.port(); }
 
   // Accepts world-1 peer connections in any order and reads each one's
-  // hello ("hello <rank>\n" — the one thing a peer ever writes), so the
+  // hello ("hello <rank>\n"), so the
   // connections are known by rank. Throws when the full world fails to
   // land within accept_timeout_ms — a short world cannot serve, and
   // pretending otherwise would wedge every request at its first
   // collective.
   void accept_peers(int world, int accept_timeout_ms);
+
+  // Every peer announces readiness after constructing its model and engine.
+  // Hold the warm record until all have arrived, using the startup timeout,
+  // so cold loading cannot spend the first collective's execution deadline.
+  // Returns false on shutdown; throws on a missing, closed or malformed peer.
+  bool wait_peers_ready(int timeout_ms, const std::function<bool()>& should_stop);
 
   // One line to every peer. A peer that cannot take it is a dead
   // member of a live-serving world — the fabric is broken, and this
@@ -286,10 +292,12 @@ class JournalReader {
   // (a race measured in tens of milliseconds), and a single-shot
   // connect loses it. Throws once the whole window expires — startup
   // is exceptional and the peer wants the reason in its log. Sends the
-  // hello ("hello <rank>\n") that names the connection to rank 0 — the
-  // only bytes a peer ever writes.
+  // hello ("hello <rank>\n") that names the connection to rank 0.
   JournalReader(const std::string& host, uint16_t port,
                 int connect_timeout_ms, int rank);
+
+  // Called after settings and model construction, before waiting for warm.
+  void send_ready();
 
   // The next complete record (newline stripped). false when rank 0's
   // journal closed (clean stop or crash — EOF either way) or the

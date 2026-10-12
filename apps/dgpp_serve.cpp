@@ -2934,6 +2934,24 @@ int main(int argc, char** argv) {
           engine.reset();
           family->destroy_model();
         };
+        const auto start_warm = [&] {
+          // Any rank can be last out of cold checkpoint loading. Wait on TCP
+          // before launching collectives, whose deadlines bound execution,
+          // not disk I/O on a peer. Apply the same hold to graph and eager serving.
+          if (rank == 0) {
+            if (journal) {
+              if (!journal->wait_peers_ready(rendezvous_timeout_ms,
+                                             [rank] { return peer_should_stop(rank); })) return false;
+              journal->broadcast(dgpp::serve::encode_journal_warm(
+                  knobs.admission, prefix_slots, config_digest));
+            }
+            return true;
+          }
+          reader->send_ready();
+          return dgpp::serve::wait_journal_warm(
+              &*reader, [rank] { return peer_should_stop(rank); },
+              &peer_policy, &peer_prefix_slots, &rank0_config);
+        };
         if (decode_graph) {
           std::unique_ptr<ServeGraphEngine> graph_engine =
               family->make_graph_engine(bus.get(), rank, world, pick_scratch, graph_batch_min_live,
@@ -2999,17 +3017,9 @@ int main(int argc, char** argv) {
           }
           // Record every graph variant now, on every rank at this same
           // point, so no capture pauses a live stream later. The warm-up
-          // is a run of collectives, so it starts on the journal's clock:
-          // rank 0 announces it with the warm record once its (slower)
-          // construction is done; a peer holds at that record rather than
-          // spinning its first collective in stall diagnostics.
-          if (rank == 0) {
-            if (journal)
-              journal->broadcast(dgpp::serve::encode_journal_warm(
-                  knobs.admission, prefix_slots, config_digest));
-          } else if (!dgpp::serve::wait_journal_warm(
-                         &*reader, [rank] { return peer_should_stop(rank); },
-                         &peer_policy, &peer_prefix_slots, &rank0_config)) {
+          // is a run of collectives, so the journal releases it only after
+          // every rank has finished constructing its model and engine.
+          if (!start_warm()) {
             graph_engine.reset();
             family->destroy_model();
             cudaFreeHost(pick_scratch);
@@ -3040,13 +3050,7 @@ int main(int argc, char** argv) {
           peer_policy = knobs.admission;
           // The eager fabric path exchanges the warm record too: it
           // carries the admission policy (no capture to start here).
-          if (rank == 0) {
-            if (journal)
-              journal->broadcast(dgpp::serve::encode_journal_warm(
-                  knobs.admission, prefix_slots, config_digest));
-          } else if (!dgpp::serve::wait_journal_warm(
-                         &*reader, [rank] { return peer_should_stop(rank); },
-                         &peer_policy, &peer_prefix_slots, &rank0_config)) {
+          if (!start_warm()) {
             engine_release();
             cudaFreeHost(pick_scratch);
             bus->stop();

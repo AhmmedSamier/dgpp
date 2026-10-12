@@ -247,6 +247,13 @@ settings received from rank 0. Every rank then checks the effective
 configuration digest. The journal's settings record also rejects mixed
 binary versions.
 
+After model and engine construction, each peer reports readiness over the
+journal connection. Rank 0 waits for all peers before releasing graph warm-up
+or eager serving. This wait uses `engine.rendezvous_timeout_ms`; a missing peer
+fails startup with its rank in the error. Slow checkpoint loading therefore
+does not consume the first collective's execution timeout. Collective watchdogs
+retain their normal limits once execution begins.
+
 For development runs, `up` stages the binary and config to peers. For an
 installed release, it stages the config and runs each node's installed
 binary. It starts rank 0, waits for its rendezvous listener, starts peers

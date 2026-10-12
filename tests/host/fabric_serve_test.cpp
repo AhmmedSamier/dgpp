@@ -1702,6 +1702,73 @@ DGPP_TEST(journal_image_history_exceeds_old_count_and_token_caps) {
   }
 }
 
+DGPP_TEST(journal_model_readiness_holds_warm_for_the_slowest_peer) {
+  dgpp::serve::JournalWriter journal(0);
+  dgpp::serve::JournalReader fast("127.0.0.1", journal.port(), 5000, 1);
+  dgpp::serve::JournalReader slow("127.0.0.1", journal.port(), 5000, 2);
+  journal.accept_peers(3, 5000);
+  fast.send_ready();
+  std::string error;
+  std::jthread leader([&] {
+    try {
+      require(journal.wait_peers_ready(5000, [] { return false; }), "readiness unexpectedly interrupted");
+      dgpp::sched::AdmissionPolicy policy;
+      policy.prefill_budget_tokens = 256;
+      policy.prefill_idle_budget_tokens = 4096;
+      journal.broadcast(dgpp::serve::encode_journal_warm(policy));
+    } catch (const std::exception& e) { error = e.what(); }
+  });
+  const auto hold_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+  std::string line;
+  const bool released_early = fast.read_line(
+      [&] { return std::chrono::steady_clock::now() >= hold_until; }, &line);
+  slow.send_ready();
+  leader.join();
+  require(error.empty(), error);
+  require(!released_early, "warm-up started while a peer was still loading its model");
+  for (auto* peer : {&fast, &slow}) {
+    dgpp::sched::AdmissionPolicy policy;
+    require(dgpp::serve::wait_journal_warm(peer, [] { return false; }, &policy), "missing warm record");
+    require(policy.prefill_budget_tokens == 256 && policy.prefill_idle_budget_tokens == 4096,
+            "all ranks must receive the same concrete budgets after readiness");
+  }
+  slow.close();
+  require(journal.dead_peer() == 2, "readiness bytes must not hide a subsequent peer death");
+}
+
+DGPP_TEST(journal_model_readiness_bounds_missing_dead_and_malformed_peers) {
+  for (const std::string mode : {"timeout", "closed", "malformed", "stop", "fragmented"}) {
+    dgpp::serve::JournalWriter journal(0);
+    auto peer = dgpp::net::TcpConn::connect("127.0.0.1", journal.port(), 5000);
+    constexpr std::string_view hello = "hello 1\n";
+    require(peer.write_all(hello.data(), hello.size()), "hello write");
+    journal.accept_peers(2, 5000);
+    if (mode == "closed") peer.close();
+    if (mode == "malformed") require(peer.write_all("wrong\n", 6), "malformed write");
+    std::jthread fragment;
+    if (mode == "fragmented") {
+      require(peer.write_all("rea", 3), "readiness prefix write");
+      fragment = std::jthread([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        (void)peer.write_all("dy\n", 3);
+      });
+    }
+    std::string error;
+    bool ready = false;
+    try { ready = journal.wait_peers_ready(mode == "timeout" ? 20 : 5000, [&] { return mode == "stop"; }); }
+    catch (const std::exception& e) { error = e.what(); }
+    if (mode == "fragmented") require(ready && error.empty(), "fragmented readiness must complete");
+    else if (mode == "stop") require(!ready && error.empty(), "shutdown must interrupt readiness cleanly");
+    else {
+      require(!ready && !error.empty(), "an incomplete world must never start warm-up");
+      require(error.find(mode == "timeout" ? "rank(s) 1" : "rank 1") != std::string::npos,
+              "readiness failure must identify the affected rank");
+    }
+  }
+  dgpp::serve::JournalWriter solo(0);
+  require(solo.wait_peers_ready(20, [] { return false; }), "a world of one has no peers to wait for");
+}
+
 DGPP_TEST(journal_large_fragmented_record_scans_linearly_and_preserves_following_lines) {
   auto listener = dgpp::net::TcpListener::bind(0);
   const std::string payload(64ull << 20, 'x');
