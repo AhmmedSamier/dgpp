@@ -117,7 +117,8 @@ def main():
                              '--bin', binary, '--log-dir', directory / 'world'], directory / 'up.log')
                         bench_args = argparse.Namespace(url='http://127.0.0.1:18081', timeout=600,
                             seed=104, prompt_words=args.words, decode_tokens=args.decode_tokens,
-                            arrival_tokens=128, arrivals=8, interval=.25, arrival_pattern=args.arrival_pattern)
+                            arrival_tokens=128, arrivals=8, interval=.25, arrival_pattern=args.arrival_pattern,
+                            record_text=args.arrival_pattern == 'varied')
                         bench = ArrivalBench(bench_args)
                         start = bench.idle()
                         assert start['service']['admission']['prefill_early_admission'] == early

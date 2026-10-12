@@ -1,0 +1,54 @@
+{
+  "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+  "engine": {
+    "max_concurrency": 4,
+    "kv_capacity": 131072,
+    "kv_dtype": "bf16",
+    "bf16_weights": "bf12+bf16",
+    "ngram_table": "mmap",
+    "default_max_tokens": 32768,
+    "queue_limit": 16,
+    "max_connections": 64,
+    "decode_graph": true,
+    "mtp": true,
+    "mtp_depth": 3,
+    "prefix_cache_gib": 1,
+    "admission": "full",
+    "admission_window": 256,
+    "sampling_candidates": 128,
+    "stats_interval_s": 10,
+    "dense_weights": "fp8",
+    "fp8_head": "mma",
+    "prefill_budget_tokens": 256,
+    "prefill_idle_budget_tokens": 2048,
+    "compact_batches": false,
+    "prefill_early_admission": false
+  },
+  "paths": {
+    "resident_cache": "",
+    "log_dir": "build-pr104-shared/final-varied-mtp3/w1-i2048-control/world",
+    "stage_dir": "/tmp/bus4/deployments/2a526f2448708f77",
+    "release_dir": "~/dgpp/releases"
+  },
+  "http": {
+    "bind_host": "127.0.0.1",
+    "port": 18081
+  },
+  "nodes": [
+    "192.168.88.11"
+  ],
+  "ssh_user": "stephen",
+  "ports": {
+    "http": 18081,
+    "fabric": 29970,
+    "journal": 29971
+  },
+  "node_env": [
+    {
+      "HF_HUB_CACHE": "~/.cache/huggingface/hub",
+      "DGPP_RESIDENT_CACHE_DIR": "~/.cache/dgpp/resident",
+      "DGPP_ROCE_DEVICES": "rocep1s0f0",
+      "DGPP_ROCE_GID_INDICES": "3"
+    }
+  ]
+}

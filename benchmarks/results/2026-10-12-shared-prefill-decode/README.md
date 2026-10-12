@@ -1,7 +1,8 @@
 # Shared prefill and decode execution
 
-Follow-up for issue #104 and PR #108. **Correctness and configuration checks are complete; performance diagnosis
-continues, so this is not yet a merge acceptance record.**
+Follow-up for issue #104 and PR #108. **The scheduled correctness, configuration and performance checks are complete.
+The remaining burst throughput costs need acceptance before this becomes a
+merge record.**
 
 ## What changed
 
@@ -119,7 +120,35 @@ The diagnostic patch only redirects an existing dump buffer to expert IDs;
 it is not part of the serving candidate. See [routing evidence](final-route-diagnosis-fixed/summary.json).
 This samples one layer, not all model routing or DRAM traffic. The kernel trace
 and routing observation together support reduced reuse as the cause of this
-workload's expert-cost increase. A varied-prompt companion is being measured.
+workload's expert-cost increase. The varied-prompt companion below tests a different routing distribution.
+
+### Varied-prompt companion
+
+The same single-node idle-burst arrival schedule uses eight fixed prompts:
+Python, rain formation, JSON, translation, a story, data structures, arithmetic
+and a recipe. All use raw completions, ignore EOS and return exactly 128 tokens;
+the long prefill still returns one. Three trials per mode use split budgets.
+
+| Mode | Early enabled, s | Old control, s | Same binary deferred, s | Early vs old | Early vs deferred |
+|---|---:|---:|---:|---:|---:|
+| Compact MTP off | 21.591 | 21.719 | 21.530 | +0.59% | -0.28% |
+| MTP3 | 17.943 | 18.926 | 18.716 | +5.48% | +4.31% |
+
+The MTP-off result is effectively neutral at this measurement scale. Together
+with the expert trace, it supports a workload-dependent reuse explanation for
+the repeated-counting penalty; it does not erase that penalty or establish
+neutrality for every prompt distribution. These add 18 scenarios and 162
+fixed-length responses. See each `final-varied-mtp*/varied-summary.json`.
+
+These are **performance comparisons, not exact-output correctness passes**.
+The strict auditor reports prose hash differences across execution shapes.
+The old control and same-binary deferred mode also differ on some prompts;
+the difference counts are retained in the summaries. MTP3 records include
+full generated text and verified text hashes. Most observed divergences start
+in wording after a common prefix; raw completions with forced lengths also
+continue beyond natural answer boundaries. No model-quality conclusion is
+inferred from this throughput benchmark. The separate numerical/state tests
+and canonical transcript checks below are the correctness evidence.
 
 ### Method and integrity
 
@@ -250,3 +279,18 @@ c++ -std=c++20 -O2 -Isrc benchmarks/results/2026-10-12-shared-prefill-decode/rep
 executable/configuration in `finally`. `checks.py` runs separate serving checks;
 `cache_diagnosis.py` preserves the reasoning/counting comparison and optional
 probabilities. `audit.py` validates accounting and matched request records.
+
+## Acceptance status
+
+The change is enabled by default for supported Qwen graph serving; it is not
+hidden behind an opt-in switch. Compared with the old runtime, measured busy
+mixed workloads improve roughly 12–13%, and the original single-node equal-
+budget burst improves from the earlier 21.70 / 20.99 seconds to 21.357 / 20.797.
+Nevertheless, that case remains 2.62% slower, and the compact MTP-off counting
+burst loses 4.64%. Against the stronger same-binary deferred controls, the
+largest measured loss is 5.34%. Strict throughput neutrality is not achieved.
+
+PR #108 remains a draft and issue #104 remains open pending a decision on
+these explicit tradeoffs. Required thank-you/follow-up comments and merge/close
+actions have not been posted prematurely. Production restoration is checked
+against the original configuration and executable on all four ranks.

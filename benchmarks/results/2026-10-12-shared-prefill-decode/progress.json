@@ -1,5 +1,5 @@
 {
-  "status": "correctness and final configurations passed; residual throughput diagnosis in progress",
+  "status": "scheduled verification complete; performance acceptance pending",
   "baseline_commit": "9593c48eda1816de3ac90286b4337a8f4ef36bb4",
   "sampling_diagnosis": {
     "seed": 4567,
@@ -29,16 +29,18 @@
     "canonical_transcripts": "chat/code/math/json match pre-PR on one and four nodes",
     "serving_api_and_reservation": "passed on one and four nodes",
     "cache_stress": "world1: 144 successes, 40 hits, 148 evictions, 403 hops; world4: 222 successes + 6 overload rejections, 61 hits, 219 evictions, 674 hops; recovery and rank streams pass",
-    "additional_timing": "5 slots/compact MTP3, compact MTP off, 4-node MTP1 complete: 36 scenarios, 168 requests, 84 exact pairs"
+    "additional_timing": "5 slots/compact MTP3, compact MTP off, 4-node MTP1 complete: 36 scenarios, 168 requests, 84 exact pairs",
+    "varied_prompt_timing": "18 cases / 162 responses: MTP off +0.59% vs old, -0.28% vs same-binary deferred; MTP3 +5.48% / +4.31%; prose differences retained, not exact-output passes",
+    "expert_diagnosis": "same graph kernel counts; +817 ms NVFP4 expert time; final-layer mean distinct experts 20.094 early vs 13.035 deferred"
   },
   "remaining": [
-    "Attribute MTP-off idle-burst cost and measure varied prompts",
-    "Publish final acceptance record and assess remaining measured throughput cost before merging"
+    "Decide whether measured counting-burst throughput losses meet the acceptance bar (up to 4.64% vs old control, 5.34% vs same-binary deferred)",
+    "If accepted, thank the reporter on issue 104 and PR 105, merge follow-up PR 108, and close issue 104"
   ],
   "checkpoint_commits": [
     "b1b54df5",
     "eb9365b9",
     "e17cf1eb"
   ],
-  "active_campaign": "final-route-diagnosis-fixed: separate instrumented executable; timings use immutable e17cf1eb binary"
+  "active_campaign": null
 }
