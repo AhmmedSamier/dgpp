@@ -33,6 +33,7 @@ baseline, not against the source before all early-admission work began.
 | Candidate with MiMo native decoder recipes | `15d1dfd3` | `321c11d27f9951ab77073055cae3e5d69596b693ff98c64515c4e79f7a1bc0c8` |
 | Candidate with shared short-tail grouping and batched reader experts | `384bc260` | `e61a6180634587abb61ec9fc59e6493b8d5d0a6a83d7eed2feeaba249253e45e` |
 | Candidate preserving reader budgets and GLM-DSA arithmetic | `01caf6f7` | `4c349a798a5e20452c007939591d3ee301bddc343f95437a025f8ef85465b978` |
+| Candidate preserving DeepSeek mixed decoder BF16 projections | `d4e80be8` | `7298adade2e17f5bc83cb6339a58a2f38d95add13e9fe15087639e49625b0486` |
 | Earlier candidate, before compact mapping | `26e61c9f55f068673eb771a1daa90d09c18d6978` | `0080af5401a43e91d2a5e76cf79f39db9de60442f24042147195add7f5e0a9c5` |
 
 Builds use Release optimization with debug symbols disabled. Harness-only
@@ -316,7 +317,22 @@ visible in the evidence and are not counted as exact passes.
   All 21 timing outputs and four chats match. The 128-token cached
   continuation still differs under load, while repeat and isolated recovery
   remain exact. These remaining findings are under CUDA profiling and
-  probability diagnosis; the DeepSeek checkpoint remains available.
+  probability diagnosis; the DeepSeek checkpoint remains available. The
+  [raw completion diagnostic](evidence/dsv4-numerics-v33.json) verifies the
+  same 2021-token rendered chat prompt and 1920-token cached prefix, exposing
+  all 128 probabilities. Decoder-only batching is exact; mixed load first
+  changes probabilities at index 7 and text at index 34. Repeated mixed load
+  and isolated recovery remain exact, as does the control's loaded response.
+  A wider fixture catches mixed decoder logits differing despite identical
+  captured layer outputs. Candidate `d4e80be8` preserves native BF16
+  reduction settings in mixed attention projections and the output head.
+  Its exact regression, all eighteen shared cases, model/engine tests and
+  seven DeepSeek memchecks pass. Real-checkpoint retesting is in progress.
+  The [CUDA profiles](evidence/dsv4-profile-v33.json) also identify duplicated
+  expert work: decoder rows enter the grouped reader chain before being
+  recomputed natively. Grouped MXFP4 kernel time increases about 0.28 seconds
+  in the profiled mixed workload; these profiles are diagnostic, not the
+  acceptance timing. Removing this duplicated work is the next refinement.
 
 These probes identify dependence on execution shape; they are not a general
 model-quality or teacher-forced numerical equivalence result.

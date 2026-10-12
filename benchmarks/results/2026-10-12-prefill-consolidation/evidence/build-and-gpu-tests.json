@@ -545,6 +545,97 @@
         "DGPP_DENSE_GEMV_ROWS": "256",
         "DGPP_TEST_FILTER": "glm_dsa"
       }
+    },
+    {
+      "file": "dsv4-projection-regression-v33/regression.log",
+      "sha256": "627ced86e4c241d617edae83a7a573bb98a9723374532ed6b788e072d3cf15c6",
+      "results": [
+        "[FAIL] shared_prefill_dsv4_decoder_mhc_recipe: mixed decoder preserves native projections and head",
+        "1 tests, 1 failed"
+      ]
+    },
+    {
+      "file": "dsv4-projection-v34-check/tests.log",
+      "sha256": "10ef0d3148636fa297af3e7bac51639dd9ed527f357478992895f0f6aace3da6",
+      "results": [
+        "1/3 Test #174: dsv4_model_test ..................   Passed    6.36 sec",
+        "2/3 Test #176: dsv4_engine_test .................   Passed   10.09 sec",
+        "3/3 Test #244: shared_prefill_test ..............   Passed   29.39 sec",
+        "100% tests passed, 0 tests failed out of 3"
+      ]
+    },
+    {
+      "file": "dsv4-projection-v34-check/ctest-details.log",
+      "sha256": "8a30a1777904eeb3167750194af2e8d7f575dbe30f9f096c1e6f04c4e404371c",
+      "results": [
+        "[ OK ] dsv4_model_forward_prefill_decode_and_rollback_at_world_1",
+        "[ OK ] interleaved slots and a reopened slot: bitwise the slots alone over 20 steps",
+        "[ OK ] dsv4_model_interleaved_slots_and_reopen_are_bitwise",
+        "[ OK ] prefix snapshots: hot == cold bitwise at a cut, on a second suffix and mid-decode",
+        "[ OK ] dsv4_model_chunked_prefill_and_prefix_snapshots",
+        "[ OK ] group prefill of 141 + 37 + 11 rows: last rows and first steps bitwise the prefills alone",
+        "[ OK ] dsv4_model_group_prefill_is_bitwise_the_prefills_alone",
+        "[ OK ] 700 + 300 + 141 rows read in over 6 ticks (up to 3 prompts a walk, a peer decoding between): logits, first drafts and first steps bitwise the one-shot prefills",
+        "[ OK ] a cancelled cursor's slot reopens clean; one cursor at 256-token chunks bitwise the one-shot",
+        "[ OK ] dsv4_model_resumable_prefill_and_group_advance_are_bitwise_the_one_shot",
+        "[ OK ] dsv4_model_dspark_draft_rows_and_chain_at_world_1",
+        "[ OK ] dsv4_model_screened_draft_head_picks_are_the_bf16_heads",
+        "7 tests, 0 failed",
+        "Test Passed.",
+        "[ OK ] dsv4_engines_loopback_world_2_dspark_block_matches_plain_decode",
+        "[ OK ] dsv4_engines_loopback_world_2_dspark_depth_2_matches_plain_decode",
+        "[ OK ] dsv4_engines_loopback_world_2_scheduled_verify_depth_is_exact",
+        "[ OK ] dsv4_engines_loopback_world_2_sampled_slot_follows_the_schedule",
+        "[ OK ] dsv4_engines_loopback_world_2_six_slots_at_depth_4_batched_scheduled_is_exact",
+        "[ OK ] dsv4_engines_loopback_world_2_six_slots_at_depth_5_ride_the_depth_capped_family_exactly",
+        "[ OK ] dsv4_engines_loopback_world_2_six_slots_at_fixed_depth_5_split_past_the_widest_family_is_exact",
+        "[ OK ] dsv4_engines_loopback_world_2_graph_matches_eager",
+        "8 tests, 0 failed",
+        "Test Passed.",
+        "[ OK ] shared_prefill_glm",
+        "[ OK ] shared_prefill_glm4",
+        "[ OK ] shared_prefill_glm_dsa",
+        "[ OK ] shared_prefill_mimo",
+        "[ OK ] shared_mimo_short_reader_keeps_its_prefill_recipe",
+        "[ OK ] shared_glm_dsa_short_reader_keeps_its_prefill_recipe",
+        "[ OK ] shared_glm4_short_reader_keeps_its_prefill_recipe",
+        "[ OK ] shared_mimo_dense_preserves_decoder_recipe",
+        "[ OK ] shared_prefill_qwen35",
+        "[ OK ] shared_prefill_qwen35_per_tensor",
+        "[ OK ] shared_prefill_qwen35_large_projection_groups",
+        "[ OK ] shared_prefill_dsv4",
+        "[ OK ] shared_prefill_dsv4_budget_capacity",
+        "[ OK ] shared_prefill_dsv41",
+        "[ OK ] shared_prefill_dsv41_continuations",
+        "[ OK ] shared_prefill_dsv4_decoder_mhc_recipe",
+        "[ OK ] shared_prefill_dsv41_decoder_mhc_recipe",
+        "[ OK ] shared_prefill_dsv41_workspace",
+        "18 tests, 0 failed",
+        "Test Passed."
+      ]
+    },
+    {
+      "file": "dsv4-projection-v34-check/sanitizer.log",
+      "sha256": "9e157f430963f4af22c3434c8f00da31e764671454adcc81b8935189ab0d5c2d",
+      "results": [
+        "[ OK ] shared_prefill_dsv4",
+        "[ OK ] shared_prefill_dsv4_budget_capacity",
+        "[ OK ] shared_prefill_dsv41",
+        "[ OK ] shared_prefill_dsv41_continuations",
+        "[ OK ] shared_prefill_dsv4_decoder_mhc_recipe",
+        "[ OK ] shared_prefill_dsv41_decoder_mhc_recipe",
+        "[ OK ] shared_prefill_dsv41_workspace",
+        "7 tests, 0 failed",
+        "========= LEAK SUMMARY: 0 bytes leaked in 0 allocations",
+        "========= ERROR SUMMARY: 0 errors"
+      ]
+    },
+    {
+      "file": "dsv4-projection-v34-check/production-verified.log",
+      "sha256": "12e9589e80af0ae239f71e5745f1fcb724a882f24048d0712f0119a37827c80d",
+      "results": [
+        "Production restored: original configuration, original live binary on all four ranks, healthy HTTP."
+      ]
     }
   ],
   "additional_candidates": [
@@ -590,5 +681,11 @@
     "patch_sha256": "7db7c314e6bf155593183113c3d84fe2cff46341b651135744a0ecf7613b0b2d",
     "binary_sha256": "4c349a798a5e20452c007939591d3ee301bddc343f95437a025f8ef85465b978",
     "committed_source": "01caf6f75ea1e460b196a1501130873d4e54467d"
+  },
+  "dsv4_projection_v34": {
+    "parent": "8723b911d31f91fda6a35d97d72878df5008e3b7",
+    "patch_sha256": "06d8adb8ef4d672f2a8742fbf2219a93bf119d4ea2739324f0d59235e34507a2",
+    "binary_sha256": "7298adade2e17f5bc83cb6339a58a2f38d95add13e9fe15087639e49625b0486",
+    "committed_source": "d4e80be8b93e3feb34aba8e6761cefbb0ffdbcbe"
   }
 }
