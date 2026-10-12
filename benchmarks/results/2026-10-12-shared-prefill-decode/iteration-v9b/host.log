@@ -1,0 +1,11 @@
+Internal ctest changing into directory: /home/stephen/workspace/dgpp/build-pr95
+Test project /home/stephen/workspace/dgpp/build-pr95
+    Start 51: scheduler_test
+1/1 Test #51: scheduler_test ...................   Passed    0.01 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Label Time Summary:
+host    =   0.01 sec*proc (1 test)
+
+Total Test time (real) =   0.01 sec

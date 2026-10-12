@@ -1,0 +1,39 @@
+{
+  "status": "in progress; not ready to merge",
+  "baseline_commit": "9593c48eda1816de3ac90286b4337a8f4ef36bb4",
+  "sampling_diagnosis": {
+    "seed": 4567,
+    "counter_before_first_token": 0,
+    "solo_first_token": 452,
+    "interleaved_first_token": 405,
+    "logit_relative_l2": 0.001548177017483359,
+    "probability_total_variation_temperature_100": 5.055937913708841e-06,
+    "host_sampler_reproduces_both_tokens": true,
+    "unchanged_revision_reproduces_both_complete_sequences": true,
+    "mixed_execution_disabled_reproduces_same_interleaved_sequence": true,
+    "sampling_oracle": "Use temperature .7 / top-k 7 / top-p .9 for cross-chunk transcript comparison; require exact gather fallback to occur. Keep full-vocabulary temperature-100 physical-remapping checks at matching prefill shapes."
+  },
+  "checks": {
+    "scheduler_service_fabric": "passed (162.56 s)",
+    "unit_tests": "passed (10.86 s)",
+    "mixed_plain_scheduled_and_sampling": "9/9 passed on iteration v10, including rebuilt model tests",
+    "model_and_image": "2/2 passed",
+    "cuda_memcheck": "qwen_decode_test, zero errors",
+    "sanitizers": "104 scheduler tests passed under ASan/UBSan",
+    "rebuilt_v11_host": "4/4 passed (174.25 s)",
+    "rebuilt_v11_gpu": "9/9 passed (38.78 s)",
+    "rebuilt_v11_memcheck": "zero errors",
+    "rebuilt_v11_gdn_snapshots": "passed"
+  },
+  "remaining": [
+    "Further equal-budget throughput improvement and final matched acceptance",
+    "Final one- and four-node verification of committed binary",
+    "API, cache, reservation, cancellation, and sustained-load final checks"
+  ],
+  "checkpoint_commits": [
+    "b1b54df5",
+    "eb9365b9",
+    "e17cf1eb"
+  ],
+  "active_campaign": "build-pr104-shared/final-v11: one/four nodes, equal/split budgets, same-binary deferred control, API/cache/reservation/soak"
+}

@@ -1,0 +1,17 @@
+Internal ctest changing into directory: /home/stephen/workspace/dgpp/build-pr95
+Test project /home/stephen/workspace/dgpp/build-pr95
+    Start 32: unit_tests
+1/4 Test #32: unit_tests .......................   Passed   10.95 sec
+    Start 49: serve_test
+2/4 Test #49: serve_test .......................   Passed  160.17 sec
+    Start 50: fabric_serve_test
+3/4 Test #50: fabric_serve_test ................   Passed    3.11 sec
+    Start 51: scheduler_test
+4/4 Test #51: scheduler_test ...................   Passed    0.01 sec
+
+100% tests passed, 0 tests failed out of 4
+
+Label Time Summary:
+host    = 174.24 sec*proc (4 tests)
+
+Total Test time (real) = 174.25 sec
