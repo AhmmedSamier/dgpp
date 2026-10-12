@@ -2040,7 +2040,7 @@ set_tests_properties(dsa_dump_test PROPERTIES
 
 # Reference-dump parity: generate a pure-python oracle dump, then run the
 # layer against it. The torch backend (real checkpoint slices) is a manual
-# deployment test documented in benchmarks/README.md.
+# deployment test documented in docs/benchmarking.md.
 add_test(NAME kda_dump_generate
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_SOURCE_DIR}/tools/kda_reference_dump.py
