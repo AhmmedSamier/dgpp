@@ -326,25 +326,26 @@ void GlmMoeLayer::prepare_graph_table(int table_slot, cudaStream_t stream) {
 // Every expert triple must share the routed geometry (the loader's
 // contract: one slice width per rank); the shared triple has its own inter
 // but the same hidden. Checked once per enqueue — the views can rebind.
-void GlmMoeLayer::route(const uint16_t* hidden, int tokens, cudaStream_t stream, int* counters) {
+void GlmMoeLayer::route(const uint16_t* hidden, int tokens, cudaStream_t stream, int* counters, int token_row) {
   launch_moe_router(hidden, w_.router_gate, w_.router_bias, d_ids_, d_weights_, d_scores_, d_biased_, cfg_,
                     tokens, stream, counters);
   if (hash_tid2eid_ != nullptr)
-    launch_moe_hash_routes(hash_tokens_, hash_tid2eid_, d_scores_, d_ids_, d_weights_, cfg_, hash_vocab_, tokens,
+    launch_moe_hash_routes(hash_tokens_ + token_row, hash_tid2eid_, d_scores_, d_ids_, d_weights_, cfg_, hash_vocab_, tokens,
                            stream);
 }
 
-void GlmMoeLayer::copy_route_trace(MoeTraceStaging* trace, int tokens, cudaStream_t stream) {
+void GlmMoeLayer::copy_route_trace(MoeTraceStaging* trace, int tokens, cudaStream_t stream, int output_row) {
   if (!trace) return;
   if (!trace->ids || !trace->weights)
     throw std::invalid_argument("GlmMoeLayer: incomplete trace staging");
   const size_t tk = static_cast<size_t>(tokens) * cfg_.top_k;
-  DGPP_CUDA_OK(cudaMemcpyAsync(trace->ids, d_ids_, tk * sizeof(int32_t),
+  const size_t offset = static_cast<size_t>(output_row) * cfg_.top_k;
+  DGPP_CUDA_OK(cudaMemcpyAsync(trace->ids + offset, d_ids_, tk * sizeof(int32_t),
                               cudaMemcpyDeviceToHost, stream));
-  DGPP_CUDA_OK(cudaMemcpyAsync(trace->weights, d_weights_, tk * sizeof(float),
+  DGPP_CUDA_OK(cudaMemcpyAsync(trace->weights + offset, d_weights_, tk * sizeof(float),
                               cudaMemcpyDeviceToHost, stream));
   if (trace->biased)
-    DGPP_CUDA_OK(cudaMemcpyAsync(trace->biased, d_biased_,
+    DGPP_CUDA_OK(cudaMemcpyAsync(trace->biased + static_cast<size_t>(output_row) * cfg_.n_experts, d_biased_,
         static_cast<size_t>(tokens) * cfg_.n_experts * sizeof(float),
         cudaMemcpyDeviceToHost, stream));
 }
@@ -683,16 +684,14 @@ void GlmMoeLayer::enqueue_prefill(const uint16_t* hidden, uint16_t* out,
                                   cudaStream_t stream, int decode_prefix) {
   if (decode_prefix < 0 || decode_prefix > std::max(0, tokens) || decode_prefix > decode_slots_)
     throw std::invalid_argument("GlmMoeLayer: mixed decoder prefix exceeds row capacity");
-  if (decode_prefix) {
+  if (decode_prefix == tokens && decode_prefix) {
     if (tokens > max_tokens_) throw std::invalid_argument("GlmMoeLayer: tokens exceed max_tokens");
-    if (decode_prefix < tokens) enqueue_prefill(hidden, out, tokens, trace, stream);
     enqueue_decode(hidden, out, decode_prefix, nullptr, stream);
     // Prefill staging permits omitted biased scores. Update the prefix
     // after native routing without changing the decode staging contract.
     copy_route_trace(trace, decode_prefix, stream);
     return;
   }
-  step_timing::Scope tick(step_timing::kMoe);
   if (tokens <= 0) return;
   if (!has_shared())
     throw std::logic_error(
@@ -702,17 +701,26 @@ void GlmMoeLayer::enqueue_prefill(const uint16_t* hidden, uint16_t* out,
     throw std::invalid_argument("GlmMoeLayer: tokens exceed max_tokens");
   if (!hidden || !out)
     throw std::invalid_argument("GlmMoeLayer: null pointer");
-  const int K = cfg_.top_k;
+  const int K = cfg_.top_k, readers = tokens - decode_prefix;
   check_expert_geometry();
-  const size_t tk = static_cast<size_t>(tokens) * K;
+  const size_t offset = static_cast<size_t>(decode_prefix) * cfg_.hidden;
+  const auto* reader_hidden = hidden + offset;
+  const size_t tk = static_cast<size_t>(readers) * K;
 
-  // 1. Router; the traces ride async copies into the caller's pinned
-  //    staging (no round trip).
-  route(hidden, tokens, stream);
-  copy_route_trace(trace, tokens, stream);
-
-  prefill_chain(hidden, tokens, stream);
-  accumulate_grouped(out, nullptr, static_cast<int>(tk), tokens, stream);
+  {
+    step_timing::Scope tick(step_timing::kMoe);
+    route(reader_hidden, readers, stream, nullptr, decode_prefix);
+    copy_route_trace(trace, readers, stream, decode_prefix);
+    // Fused codes, when supplied, start at the original decoder prefix.
+    // Rebuild for the shifted reader input instead of reading those codes.
+    if (decode_prefix) hidden_codes_ready_ = false;
+    prefill_chain(reader_hidden, readers, stream);
+    accumulate_grouped(out + offset, nullptr, static_cast<int>(tk), readers, stream);
+  }
+  if (decode_prefix) {
+    enqueue_decode(hidden, out, decode_prefix, nullptr, stream);
+    copy_route_trace(trace, decode_prefix, stream);
+  }
 }
 
 void GlmMoeLayer::route_prefill_rows(const uint16_t* hidden, int r0, int rows, cudaStream_t stream) {
@@ -733,7 +741,15 @@ void GlmMoeLayer::enqueue_prefill_phased(const uint16_t* hidden, int tokens, cud
     throw std::invalid_argument("GlmMoeLayer: phased mixed decoder prefix");
   if (decode_prefix) {
     if (tokens > max_tokens_) throw std::invalid_argument("GlmMoeLayer: tokens exceed max_tokens");
-    if (decode_prefix < tokens) enqueue_prefill_phased(hidden, tokens, stream);
+    if (decode_prefix < tokens) {
+      step_timing::Scope tick(step_timing::kMoe);
+      if (!hidden) throw std::invalid_argument("GlmMoeLayer: null pointer");
+      if (!has_shared() || down_bf16_) throw std::logic_error("GlmMoeLayer: phased prefill requires fp32 shared rows");
+      check_expert_geometry();
+      hidden_codes_ready_ = false;
+      prefill_chain(hidden + static_cast<size_t>(decode_prefix) * cfg_.hidden,
+                    tokens - decode_prefix, stream, decode_prefix);
+    }
     // Slot down rows and grouped down rows have separate storage. Native
     // routing changes only the prefix; reader maps and weights stay valid
     // for the later per-block accumulations.
@@ -762,19 +778,21 @@ void GlmMoeLayer::accumulate_prefill_rows(uint16_t* out, int tokens, int r0, int
   if (rows <= 0) return;
   const size_t H = cfg_.hidden, K = static_cast<size_t>(cfg_.top_k), R = static_cast<size_t>(r0);
   launch_moe_accum_ordered(out + R * H, d_down_, H, d_slot_row_ + R * K, d_ids_ + R * K, d_weights_ + R * K,
-                           static_cast<int>(static_cast<size_t>(tokens) * K) + r0, rows, static_cast<int>(K),
+                           static_cast<int>(static_cast<size_t>(tokens - decode_prefix) * K) + r0 - decode_prefix,
+                           rows, static_cast<int>(K),
                            static_cast<int>(H), stream);
 }
 
 // The chain behind the router: the segmentation, the expert views, the
 // grouped kernels over every segment (the down rows left for the caller's
 // accumulation).
-void GlmMoeLayer::prefill_chain(const uint16_t* hidden, int tokens, cudaStream_t stream) {
+void GlmMoeLayer::prefill_chain(const uint16_t* hidden, int tokens, cudaStream_t stream, int route_row) {
   const int E = cfg_.n_experts, K = cfg_.top_k;
   const size_t tk = static_cast<size_t>(tokens) * K;
   // 2. Segmentation on the device: rows, slot map, segment table (every
   //    expert, empty ones included; the shared segment last).
-  launch_moe_segment(d_ids_, tokens, K, E, d_rows_, d_slot_row_, d_segs_,
+  const size_t route_offset = static_cast<size_t>(route_row) * K;
+  launch_moe_segment(d_ids_ + route_offset, tokens, K, E, d_rows_, d_slot_row_ + route_offset, d_segs_,
                      stream);
   // The expert views: the same table the host path uploads, from the
   // upload ring (the host runs ahead of the stream here — no per-layer
@@ -816,36 +834,41 @@ void GlmMoeLayer::enqueue_prefill_f32(const uint16_t* hidden, float* out, int to
   if (decode_prefix < 0 || decode_prefix > std::max(0, tokens) ||
       decode_prefix > decode_slots_)
     throw std::invalid_argument("GlmMoeLayer: mixed decoder prefix exceeds row capacity");
-  if (decode_prefix) {
+  if (decode_prefix == tokens && decode_prefix) {
     if (tokens > max_tokens_) throw std::invalid_argument("GlmMoeLayer: tokens exceed max_tokens");
-    if (decode_prefix < tokens) enqueue_prefill_f32(hidden, out, tokens, trace, stream, kernel);
     enqueue_decode_f32(hidden, out, decode_prefix, nullptr, stream);
     copy_route_trace(trace, decode_prefix, stream);
     return;
   }
-  step_timing::Scope tick(step_timing::kMoe);
   if (tokens <= 0) return;
   if (tokens > max_tokens_)
     throw std::invalid_argument("GlmMoeLayer: tokens exceed max_tokens");
   if (!hidden || !out)
     throw std::invalid_argument("GlmMoeLayer: null pointer");
-  const int E = cfg_.n_experts, K = cfg_.top_k;
+  const int E = cfg_.n_experts, K = cfg_.top_k, readers = tokens - decode_prefix;
   check_expert_geometry();
-  const size_t tk = static_cast<size_t>(tokens) * K;
-  route(hidden, tokens, stream);
-  copy_route_trace(trace, tokens, stream);
-  launch_moe_segment(d_ids_, tokens, K, E, d_rows_, d_slot_row_, d_segs_,
-                     stream);
-  upload_expert_views(d_views_prefill_, /*with_shared=*/false, stream);
-  // The routed chain alone (no shared segment) on the tensor-core kernel,
-  // the fp32 chain handed back unrounded (shared_row0 < 0).
-  const int tile_cap = tile_list_for(kernel, E, static_cast<int>(tk), stream);
-  grouped_expert_chain(kernel, hidden, d_segs_, E,
-                       tile_cap ? std::max(tokens, 1)
-                                : routed_seg_max_rows(d_segs_, E, std::max(tokens, 1), stream),
-                       /*shared_seg=*/nullptr, tokens, tk, stream, tile_cap ? d_tiles_ : nullptr,
-                       d_tile_count_, tile_cap);
-  accumulate_grouped(nullptr, out, /*shared_row0=*/-1, tokens, stream);
+  const size_t tk = static_cast<size_t>(readers) * K;
+  const size_t offset = static_cast<size_t>(decode_prefix) * cfg_.hidden;
+  const auto* reader_hidden = hidden + offset;
+  {
+    step_timing::Scope tick(step_timing::kMoe);
+    route(reader_hidden, readers, stream, nullptr, decode_prefix);
+    copy_route_trace(trace, readers, stream, decode_prefix);
+    if (decode_prefix) hidden_codes_ready_ = false;
+    launch_moe_segment(d_ids_, readers, K, E, d_rows_, d_slot_row_, d_segs_, stream);
+    upload_expert_views(d_views_prefill_, /*with_shared=*/false, stream);
+    // The routed chain alone (no shared segment), returned unrounded.
+    const int tile_cap = tile_list_for(kernel, E, static_cast<int>(tk), stream);
+    grouped_expert_chain(kernel, reader_hidden, d_segs_, E,
+                         tile_cap ? readers : routed_seg_max_rows(d_segs_, E, readers, stream),
+                         /*shared_seg=*/nullptr, readers, tk, stream, tile_cap ? d_tiles_ : nullptr,
+                         d_tile_count_, tile_cap);
+    accumulate_grouped(nullptr, out + offset, /*shared_row0=*/-1, readers, stream);
+  }
+  if (decode_prefix) {
+    enqueue_decode_f32(hidden, out, decode_prefix, nullptr, stream);
+    copy_route_trace(trace, decode_prefix, stream);
+  }
 }
 
 void GlmMoeLayer::ensure_w4a4(size_t rows, int k) {

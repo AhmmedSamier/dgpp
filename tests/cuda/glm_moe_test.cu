@@ -1171,26 +1171,43 @@ DGPP_TEST(moe_enqueue_prefill_is_bitwise_the_host_path) {
 }  // namespace
 
 DGPP_TEST(moe_mixed_rows_preserve_decode_and_reader_recipes) {
-  constexpr int M = 67, D = 4, H = 512, K = 4, E = 8;
-  for (int format = 0; format < 4; ++format) {
+  constexpr int D = 4, H = 512, K = 4, E = 8;
+  for (int format = 0; format < 4; ++format) for (int M : {67, 131, 260}) for (bool hashed : {false, true}) {
     SmallCase c = make_small_case(E, H, 256, K, M, 0xDEC0DE + format,
         /*nvfp4=*/format == 1 || format == 2, /*shared_nvfp4=*/format == 1,
         /*packq_bits=*/format == 3 ? 4 : 0, /*fp4_group=*/format == 2 ? 32 : 16);
     c.cfg.shared_mma_aside = format == 2;  // native shared expert on side streams
     c.alloc();
+    int64_t* hash_tokens = nullptr;
+    int32_t* hash_table = nullptr;
+    const int vocab = M + 3;
+    if (hashed) {
+      DGPP_CUDA_OK(cudaMallocManaged(&hash_tokens, M * sizeof(int64_t)));
+      DGPP_CUDA_OK(cudaMallocManaged(&hash_table, vocab * K * sizeof(int32_t)));
+      for (int t = 0; t < M; ++t) hash_tokens[t] = (t * 7 + 3) % vocab;
+      for (int t = 0; t < vocab; ++t)
+        for (int k = 0; k < K; ++k) hash_table[t * K + k] = (t * 3 + k) % E;
+    }
     {
       GlmMoeLayer layer(c.dev_w, c.cfg, M, D);
+      layer.set_hash_routing(hash_table, hash_tokens, vocab);
       std::vector<uint16_t> expected(static_cast<size_t>(M) * H);
       int32_t* ids = nullptr;
-      float* weights = nullptr;
+      float *weights = nullptr, *biased = nullptr;
       DGPP_CUDA_OK(cudaHostAlloc(&ids, M * K * sizeof(int32_t), cudaHostAllocDefault));
       DGPP_CUDA_OK(cudaHostAlloc(&weights, M * K * sizeof(float), cudaHostAllocDefault));
-      dgpp::MoeTraceStaging trace{ids, weights, nullptr};
+      if (hashed) DGPP_CUDA_OK(cudaHostAlloc(&biased, M * E * sizeof(float), cudaHostAllocDefault));
+      dgpp::MoeTraceStaging trace{ids, weights, biased};
       layer.enqueue_prefill(c.d_hidden, c.d_out, M, &trace, nullptr);
       DGPP_CUDA_OK(cudaDeviceSynchronize());
-      std::memcpy(expected.data(), c.d_out, expected.size() * sizeof(uint16_t));
       const std::vector<int32_t> expected_ids(ids, ids + M * K);
       const std::vector<float> expected_weights(weights, weights + M * K);
+      const std::vector<float> expected_biased = biased ? std::vector<float>(biased, biased + M * E) : std::vector<float>{};
+      layer.set_hash_routing(hash_table, hashed ? hash_tokens + D : nullptr, vocab);
+      layer.enqueue_prefill(c.d_hidden + D * H, c.d_out + D * H, M - D, nullptr, nullptr);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      std::memcpy(expected.data() + D * H, c.d_out + D * H, (M - D) * H * sizeof(uint16_t));
+      layer.set_hash_routing(hash_table, hash_tokens, vocab);
       layer.enqueue_decode(c.d_hidden, c.d_out, D, nullptr, nullptr);
       DGPP_CUDA_OK(cudaDeviceSynchronize());
       std::memcpy(expected.data(), c.d_out, D * H * sizeof(uint16_t));
@@ -1204,6 +1221,9 @@ DGPP_TEST(moe_mixed_rows_preserve_decode_and_reader_recipes) {
                 "mixed expert traces preserve route ids with optional biased staging");
         require(std::equal(expected_weights.begin(), expected_weights.begin() + total * K, weights),
                 "mixed expert traces preserve route weights");
+        if (biased)
+          require(std::equal(expected_biased.begin(), expected_biased.begin() + total * E, biased),
+                  "mixed expert traces preserve biased scores");
         // Boundaries before, within and after the decoder prefix; reverse
         // accumulation order also exercises the overlap caller's contract.
         for (int split : {1, D - 1, D, total}) {
@@ -1223,9 +1243,11 @@ DGPP_TEST(moe_mixed_rows_preserve_decode_and_reader_recipes) {
       float* out_f32 = nullptr;
       DGPP_CUDA_OK(cudaMallocManaged(&out_f32, M * H * sizeof(float)));
       std::vector<float> expected_f32(M * H);
-      layer.enqueue_prefill_f32(c.d_hidden, out_f32, M, &trace, nullptr);
+      layer.set_hash_routing(hash_table, hashed ? hash_tokens + D : nullptr, vocab);
+      layer.enqueue_prefill_f32(c.d_hidden + D * H, out_f32 + D * H, M - D, nullptr, nullptr);
       DGPP_CUDA_OK(cudaDeviceSynchronize());
-      std::memcpy(expected_f32.data(), out_f32, M * H * sizeof(float));
+      std::memcpy(expected_f32.data() + D * H, out_f32 + D * H, (M - D) * H * sizeof(float));
+      layer.set_hash_routing(hash_table, hash_tokens, vocab);
       layer.enqueue_decode_f32(c.d_hidden, out_f32, D, nullptr, nullptr);
       DGPP_CUDA_OK(cudaDeviceSynchronize());
       std::memcpy(expected_f32.data(), out_f32, D * H * sizeof(float));
@@ -1240,11 +1262,17 @@ DGPP_TEST(moe_mixed_rows_preserve_decode_and_reader_recipes) {
                 "float mixed expert traces preserve route ids");
         require(std::equal(expected_weights.begin(), expected_weights.begin() + total * K, weights),
                 "float mixed expert traces preserve route weights");
+        if (biased)
+          require(std::equal(expected_biased.begin(), expected_biased.begin() + total * E, biased),
+                  "float mixed expert traces preserve biased scores");
       }
       cudaFree(out_f32);
       cudaFreeHost(ids);
       cudaFreeHost(weights);
+      cudaFreeHost(biased);
     }
+    cudaFree(hash_tokens);
+    cudaFree(hash_table);
     c.free_all();
   }
 }

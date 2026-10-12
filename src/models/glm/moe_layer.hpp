@@ -86,10 +86,9 @@ class GlmMoeLayer {
   // (MoeExpertKernel::kMma); enqueue(), the host-orchestrated reference,
   // takes the kernel as an argument — kGemv by default (the decode pin),
   // kMma to serve as the prefill path's bitwise reference.
-  // Mixed rows retain the native slot recipe for the decoder prefix. The
-  // reader chain keeps its grouped geometry; its provisional prefix is
-  // replaced before the caller folds the output. A decoder-only bounded
-  // phase bypasses the grouped chain entirely.
+  // Mixed rows retain the native slot recipe for the decoder prefix. Only
+  // readers enter the grouped chain; each row is computed once. A decoder-only
+  // bounded phase bypasses the grouped chain entirely.
   void enqueue_prefill(const uint16_t* hidden, uint16_t* out, int tokens,
                        MoeTraceStaging* trace, cudaStream_t stream, int decode_prefix = 0);
   // The prefill in phases, for a caller that overlaps its boundary folds
@@ -219,7 +218,7 @@ class GlmMoeLayer {
 
  private:
   void check_expert_geometry() const;
-  void copy_route_trace(MoeTraceStaging* trace, int tokens, cudaStream_t stream);
+  void copy_route_trace(MoeTraceStaging* trace, int tokens, cudaStream_t stream, int output_row = 0);
   // enqueue()/enqueue_f32(): exactly one of out_bf16 / out_f32 is set.
   void enqueue_host(const uint16_t* hidden, uint16_t* out_bf16, float* out_f32,
                     int tokens, cudaStream_t stream, MoeExpertKernel kernel);
@@ -262,8 +261,9 @@ class GlmMoeLayer {
                           cudaStream_t stream);
 
   // The router, then (hash routing) the routes replaced from the table.
-  void route(const uint16_t* hidden, int tokens, cudaStream_t stream, int* counters = nullptr);
-  void prefill_chain(const uint16_t* hidden, int tokens, cudaStream_t stream);
+  void route(const uint16_t* hidden, int tokens, cudaStream_t stream, int* counters = nullptr,
+             int token_row = 0);
+  void prefill_chain(const uint16_t* hidden, int tokens, cudaStream_t stream, int route_row = 0);
   bool shared_aside_takes(bool with_shared, int tokens) const;
   const int32_t* hash_tid2eid_ = nullptr;
   const int64_t* hash_tokens_ = nullptr;
