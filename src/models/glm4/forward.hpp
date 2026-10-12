@@ -69,6 +69,7 @@ class Glm4Model : public SessionModel<Glm4Model> {
   // own request's cache only; every span within max_tokens.
   int64_t prefill_group_span_limit() const { return max_tokens_; }
   using Base = SessionModel<Glm4Model>;
+  static constexpr bool kPrefillChunkGrid = false;
   using Outputs = Base::Outputs;
   using SessionSnapshotMeta = Base::SessionSnapshotMeta;
   using SnapshotRequest = Base::SnapshotRequest;
@@ -135,7 +136,7 @@ class Glm4Model : public SessionModel<Glm4Model> {
   const Glm4KvPool& pool() const { return pool_; }
   void graph_prepare();
   void mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode_row,
-                    bool capture, int head_rows, int batch_requests);
+                    bool capture, int head_rows, int batch_requests, int hidden_row = 0);
   void snapshot_draft_state(int) {}
   void restore_draft_state(int) {}
   // Depth >= 2: the chain rows take the block's output residual (pre
@@ -164,6 +165,7 @@ class Glm4Model : public SessionModel<Glm4Model> {
   // The layer's two blocks over `resid` (the residual, updated in place):
   // the attention block and the MLP/MoE block with their folds.
   struct WalkRows {
+    int decode_prefix = 0;
     const int32_t* req_ids = nullptr;
     const int64_t* pos = nullptr;
     int req = 0;

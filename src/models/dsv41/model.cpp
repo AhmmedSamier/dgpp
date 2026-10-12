@@ -243,8 +243,10 @@ Dsv41Model::Dsv41Model(const Dsv41TextConfig& cfg, const std::string& checkpoint
   {
     // The bounded prefill's tail and segment coefficients (window rows).
     const size_t win = static_cast<size_t>(cfg_.sliding_window);
-    tail_streams_ = dev_alloc<uint16_t>(win * 4 * H);
-    tail_pre_ = dev_alloc<float>(win * 4);
+    tail_streams_ = dev_alloc<uint16_t>(R * win * 4 * H);
+    tail_move_ = dev_alloc<uint16_t>(win * 4 * H);
+    tail_pre_ = dev_alloc<float>(R * win * 4);
+    prefill_tails_.resize(R);
     seg_pre_ = dev_alloc<float>(win * 4);
     if (cfg_.sliding_window > max_tokens_)
       throw std::invalid_argument("Dsv41Model: max_tokens must cover the sliding window (the bounded prefill's segment)");
@@ -307,6 +309,7 @@ Dsv41Model::~Dsv41Model() {
   cudaFree(spec_ctx_);
   cudaFree(spec_tails_);
   cudaFree(tail_streams_);
+  cudaFree(tail_move_);
   cudaFree(tail_pre_);
   cudaFree(seg_pre_);
   cudaFree(main_hidden_);
@@ -386,7 +389,8 @@ Dsv41Model::MemoryPlan Dsv41Model::plan_memory(const Dsv41TextConfig& cfg, int m
     if (!cfg.engram_layer_ids.empty()) act += M * 5 * H * 2 + R * 16 + std::max(M, static_cast<size_t>(rows)) * 16;
     act += static_cast<size_t>(shape.tail_ordinals) * static_cast<size_t>(rows) * 2 * kCsa2Latent * 4;
     // The bounded prefill's tail streams and the tail/segment coefficients.
-    act += static_cast<size_t>(cfg.sliding_window) * 4 * H * 2 + 2 * static_cast<size_t>(cfg.sliding_window) * 4 * 4;
+    act += (R + 1) * static_cast<size_t>(cfg.sliding_window) * 4 * H * 2 +
+           (R + 1) * static_cast<size_t>(cfg.sliding_window) * 4 * 4;
     plan.add("activations (session core, the four residual streams, block io, mHC coefficients, route staging)", act,
              core_pin + static_cast<size_t>(cfg.num_hidden_layers) * M * K * 8);
   }
@@ -600,7 +604,7 @@ void Dsv41Model::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos,
     // nothing; the session names its chunk's rows, which start before the
     // segment or, after a tail, inside it). A skipped bounded chunk has no
     // rows.
-    const auto [seg_pos0, seg_rows] = segment_of(req);
+    const auto [seg_pos0, seg_rows, row0] = segment_of(req);
     const int64_t hi = std::min<int64_t>(first_pos + T, seg_pos0 + seg_rows);
     if (hi <= seg_pos0) return;
     first_pos = seg_pos0;
@@ -631,11 +635,12 @@ void Dsv41Model::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos,
     d_pos = d_draft_pos_;
     d_req = d_draft_req_;
   }
-  draft_first(req, tokens, d_pos, d_req, T, decode_row, capture, head_rows, batch_requests);
+  draft_first(req, tokens, d_pos, d_req, T, decode_row, capture, head_rows, batch_requests,
+               decode_row ? 0 : segment_of(req).row0);
 }
 
 void Dsv41Model::draft_first(int req, const int64_t* tokens, const int64_t* d_pos, const int32_t* d_req, int T,
-                             bool decode_row, bool capture, int head_rows, int batch_requests) {
+                             bool decode_row, bool capture, int head_rows, int batch_requests, int source_row) {
   const int H = cfg_.hidden_size;
   const int W = targets_ * H;
   const int block = cfg_.dspark_block_size;
@@ -648,7 +653,7 @@ void Dsv41Model::draft_first(int req, const int64_t* tokens, const int64_t* d_po
   // them to the walk's segment). (A streamed stack holds
   // one layer at a time: every stage's tensors are used right after its
   // load.)
-  const uint16_t* src = main_hidden_;
+  const uint16_t* src = main_hidden_ + static_cast<size_t>(source_row) * W;
   if (decode_row) {
     gather_draft_hidden(d_req, d_pos, main_gather_, T);
     src = main_gather_;
@@ -853,8 +858,15 @@ void Dsv41Model::enqueue_layer(const Dsv41LayerResident& r, int layer, int T, co
                           (rows.snapshots && tail >= 0) ? spec_tails(tail, 0) : nullptr);
   } else if (rows.num_spans > 0) {
     int row0 = 0;
-    for (int s = 0; s < rows.num_spans; ++s) {
+    if (rows.decode_spans) {
+      for (int s = 0; s < rows.decode_spans; ++s) row0 += rows.span_lens[s];
+      if (!csa2_->prepare(row0)) throw std::runtime_error("mixed CSA2 plans unavailable");
+      csa2_->enqueue_decode(x_, pool_, rows.req_ids, rows.pos, rows.spans, rows.decode_spans,
+                            row0, attn_out, stream_, (rows.snapshots && tail >= 0) ? spec_tails(tail, 0) : nullptr);
+    }
+    for (int s = rows.decode_spans; s < rows.num_spans; ++s) {
       const int len = rows.span_lens[s];
+      if (!len) continue;
       if (!csa2_->prepare(len)) throw std::runtime_error("run_rows: CSA2 GEMM plans unavailable");
       const int64_t floor = rows.span_floor ? rows.span_floor[s] : rows.window_floor;
       csa2_->enqueue_prefill(x_ + static_cast<size_t>(row0) * H, pool_, rows.span_reqs[s], rows.span_pos0[s], len,
@@ -888,6 +900,18 @@ void Dsv41Model::enqueue_layer(const Dsv41LayerResident& r, int layer, int T, co
   if (debug_capture_) debug_sites_.push_back(std::move(cap));
 }
 
+bool Dsv41Model::prefill_batch_fits(const RowRun& run) const {
+  if (!prefill_bounded_ || !run.num_spans) return true;
+  int rows = run.decode_rows();
+  for (int sp = run.decode_spans; sp < run.num_spans; ++sp) {
+    if (run.span_last_chunk && !run.span_last_chunk[sp]) continue;
+    const int carried = !run.span_first_chunk || run.span_first_chunk[sp] ? 0
+        : prefill_tails_.at(static_cast<size_t>(run.span_reqs[sp])).rows;
+    rows += std::min(cfg_.sliding_window, carried + run.span_lens[sp]);
+  }
+  return rows <= max_tokens_;
+}
+
 Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
   const int T = run.T, req = run.req;
   if (run.capture && loader_.residency() != Dsv41Residency::Resident)
@@ -912,6 +936,7 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
   const bool traces = !run.decode && route_traces_;
   const size_t K = static_cast<size_t>(cfg_.num_experts_per_tok);
   WalkRows rows;
+  rows.decode_spans = run.decode_spans;
   rows.tokens = in.tokens;
   rows.req_ids = in.req_ids;
   rows.pos = in.pos;
@@ -921,7 +946,7 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
   rows.pos0 = run.pos0;
   rows.decode = run.decode;
   rows.capture = run.capture;
-  rows.snapshots = run.decode && run.snapshots;
+  rows.snapshots = (run.decode || run.decode_spans > 0) && run.snapshots;
   rows.span_reqs = run.span_reqs;
   rows.span_pos0 = run.span_pos0;
   rows.span_lens = run.span_lens;
@@ -929,7 +954,7 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
   // The group prefill: several requests' cold prompts as the spans of one
   // walk. The dense sites, the MoE, the norms, the Engram and the head are
   // per row; the CSA2 attention and the kv publication run per span; each
-  // span is its own draft segment. Not captured, positions from 0. Under
+  // reader retains its own tail and draft segment across yields. Under
   // the bounded prefill the decoder walks each span's last window rows
   // (its replay segment), packed span after span; a span within one
   // window is whole and floors at 0.
@@ -941,14 +966,14 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
   std::vector<int> dec_row0;
   if (group) {
     if (run.decode || run.capture) throw std::logic_error("run_rows: a group prefill is neither a decode nor a capture");
-    if (!run.first_chunk || !run.last_chunk) throw std::logic_error("run_rows: a group prefill is one chunk per span");
+    if (!prefill_batch_fits(run)) throw std::invalid_argument("bounded decoder rows exceed workspace");
     int at = 0;
     for (int s = 0; s < run.num_spans; ++s) {
       const int len = run.span_lens[s];
       if (len <= 0 || len > prefill_group_span_limit())
         throw std::invalid_argument("run_rows: a group prefill span of " + std::to_string(len) +
                                     " rows exceeds the span limit " + std::to_string(prefill_group_span_limit()));
-      if (run.span_pos0[s] != 0) throw std::invalid_argument("run_rows: a group prefill takes cold prompts (position 0)");
+      if (s >= run.decode_spans && run.span_pos0[s] < 0) throw std::invalid_argument("negative prefill position");
       span_row0.push_back(at);
       at += len;
     }
@@ -979,19 +1004,20 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
   const bool bounded = prefill_bounded_ && !run.decode;
   const int dec0 = cfg_.decoder_first_layer();
   const int win = cfg_.sliding_window;
+  auto& tail = prefill_tails_.at(static_cast<size_t>(req));
+  auto* tail_streams = tail_streams_ + static_cast<size_t>(req) * win * 4 * H;
+  auto* tail_pre = tail_pre_ + static_cast<size_t>(req) * win * 4;
   int walk_rows = T;
   int row_off = 0;
   if (bounded) {
     if (run.capture) throw std::logic_error("run_rows: the bounded prefill is never captured");
     for (int e : cfg_.engram_layer_ids)
       if (e >= dec0) throw std::logic_error("run_rows: the bounded prefill needs the Engram layers inside the encoder");
-    if (group) {
-      // Every span is whole and within a window: no tail, the segment is the walk.
-    } else if (run.first_chunk) {
-      tail_rows_ = 0;
-      tail_end_ = run.pos0;
-      call_pos0_ = run.pos0;
-    } else if (tail_end_ != run.pos0) {
+    if (!group && run.first_chunk) {
+      tail.rows = 0;
+      tail.end = run.pos0;
+      tail.start = run.pos0;
+    } else if (!group && tail.end != run.pos0) {
       throw std::logic_error("run_rows: a bounded chunk must follow its call's previous chunk");
     }
   }
@@ -1043,35 +1069,64 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
       }
       if (!csa2_->prepare(T)) throw std::runtime_error("run_rows: CSA2 GEMM plans unavailable");
       if (group) {
-        // Every span's rows published; then each span's segment — its last
-        // `window` rows (the whole span when it fits) — packed into the
-        // free streams buffer with its collapse coefficients: the decoder
-        // walks the packed rows, span by span, never publishing again; a
-        // span wider than a window floors its window at the segment's
-        // start (the rows before it stand in the ring), a whole span at 0.
-        for (int s = 0; s < run.num_spans; ++s) {
-          if (!csa2_->prepare(run.span_lens[s])) throw std::runtime_error("run_rows: CSA2 GEMM plans unavailable");
-          csa2_->publish_prefill(x_ + static_cast<size_t>(span_row0[static_cast<size_t>(s)]) * H, pool_, run.span_reqs[s],
-                                 run.span_pos0[s], run.span_lens[s], stream_);
-        }
-        // The packed segments' coefficients go to the free rotating
-        // buffer (seg_pre_ holds one window; a group's segments hold up to
-        // a walk's rows).
         float* const packed_pre = pre_cur_ == pre_a_ ? pre_b_ : pre_a_;
         int packed = 0;
-        for (int s = 0; s < run.num_spans; ++s) {
-          const int len = run.span_lens[s], take = std::min(len, win);
-          const int from = span_row0[static_cast<size_t>(s)] + len - take;
-          rows_d2d(nxt_ + static_cast<size_t>(packed) * 4 * H, cur_ + static_cast<size_t>(from) * 4 * H,
-                   static_cast<size_t>(take), sb);
-          rows_d2d(packed_pre + static_cast<size_t>(packed) * 4, pre_cur_ + static_cast<size_t>(from) * 4,
-                   static_cast<size_t>(take), pb);
-          dec_lens.push_back(take);
-          dec_pos0.push_back(run.span_pos0[s] + len - take);
+        for (int sp = 0; sp < run.num_spans; ++sp) {
+          const int original = span_row0[sp], len = run.span_lens[sp], request = run.span_reqs[sp];
           dec_row0.push_back(packed);
-          span_floor[static_cast<size_t>(s)] = take < len ? dec_pos0.back() : 0;
-          packed += take;
+          if (sp < run.decode_spans) {
+            rows_d2d(nxt_ + static_cast<size_t>(packed) * 4 * H,
+                     cur_ + static_cast<size_t>(original) * 4 * H, len, sb);
+            rows_d2d(packed_pre + static_cast<size_t>(packed) * 4,
+                     pre_cur_ + static_cast<size_t>(original) * 4, len, pb);
+            dec_lens.push_back(len); dec_pos0.push_back(run.span_pos0[sp]);
+            packed += len;
+            continue;
+          }
+          auto& carry = prefill_tails_[request];
+          auto* saved = tail_streams_ + static_cast<size_t>(request) * win * 4 * H;
+          auto* coefficients = tail_pre_ + static_cast<size_t>(request) * win * 4;
+          if (!run.span_first_chunk || run.span_first_chunk[sp]) {
+            carry.rows = 0; carry.start = carry.end = run.span_pos0[sp];
+          } else if (carry.end != run.span_pos0[sp]) {
+            throw std::logic_error("bounded continuation is not contiguous");
+          }
+          if (!csa2_->prepare(len)) throw std::runtime_error("bounded publish plans unavailable");
+          csa2_->publish_prefill(x_ + static_cast<size_t>(original) * H, pool_, request, run.span_pos0[sp], len, stream_);
+          const int take = std::min(len, win), keep = std::min(carry.rows, win - take);
+          const int previous = carry.rows - keep;
+          const bool last = !run.span_last_chunk || run.span_last_chunk[sp];
+          if (!last) {
+            // The source and destination can overlap. Shared temporary
+            // scratch holds the retained prefix until the move completes.
+            rows_d2d(tail_move_, saved + static_cast<size_t>(previous) * 4 * H, keep, sb);
+            rows_d2d(saved, tail_move_, keep, sb);
+            rows_d2d(seg_pre_, coefficients + static_cast<size_t>(previous) * 4, keep, pb);
+            rows_d2d(coefficients, seg_pre_, keep, pb);
+            rows_d2d(saved + static_cast<size_t>(keep) * 4 * H,
+                     cur_ + static_cast<size_t>(original + len - take) * 4 * H, take, sb);
+            rows_d2d(coefficients + static_cast<size_t>(keep) * 4,
+                     pre_cur_ + static_cast<size_t>(original + len - take) * 4, take, pb);
+            carry.rows = keep + take; carry.end = run.span_pos0[sp] + len;
+            dec_lens.push_back(0); dec_pos0.push_back(run.span_pos0[sp]);
+            segment_of(request) = {run.span_pos0[sp], 0, 0};
+            continue;
+          }
+          rows_d2d(nxt_ + static_cast<size_t>(packed) * 4 * H,
+                   saved + static_cast<size_t>(previous) * 4 * H, keep, sb);
+          rows_d2d(packed_pre + static_cast<size_t>(packed) * 4,
+                   coefficients + static_cast<size_t>(previous) * 4, keep, pb);
+          rows_d2d(nxt_ + static_cast<size_t>(packed + keep) * 4 * H,
+                   cur_ + static_cast<size_t>(original + len - take) * 4 * H, take, sb);
+          rows_d2d(packed_pre + static_cast<size_t>(packed + keep) * 4,
+                   pre_cur_ + static_cast<size_t>(original + len - take) * 4, take, pb);
+          dec_lens.push_back(keep + take);
+          dec_pos0.push_back(run.span_pos0[sp] + len - keep - take);
+          span_floor[sp] = dec_pos0.back() > carry.start ? dec_pos0.back() : 0;
+          packed += keep + take;
+          carry.rows = 0;
         }
+        if (packed == 0) { head = false; break; }
         std::swap(cur_, nxt_);
         pre_cur_ = packed_pre;
         pre_nxt_ = packed_pre == pre_a_ ? pre_b_ : pre_a_;
@@ -1081,7 +1136,6 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
         rows.span_pos0 = dec_pos0.data();
         rows.window_floor = 0;
         rows.publish = false;
-        tail_rows_ = 0;
       } else {
       csa2_->publish_prefill(x_, pool_, req, run.pos0, T, stream_);
       const int take = std::min(T, win);
@@ -1089,20 +1143,20 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
         // The tail: the last `window` rows of (old tail, this chunk) — the
         // encoder output and its collapse coefficients — for the call's last
         // chunk. No decoder, no head: this chunk's logits are unspecified.
-        const int keep = std::min(tail_rows_, win - take);
-        const int from = tail_rows_ - keep;
+        const int keep = std::min(tail.rows, win - take);
+        const int from = tail.rows - keep;
         if (keep > 0 && from > 0) {
-          rows_d2d(nxt_, tail_streams_ + static_cast<size_t>(from) * 4 * H, static_cast<size_t>(keep), sb);
-          rows_d2d(tail_streams_, nxt_, static_cast<size_t>(keep), sb);
-          rows_d2d(seg_pre_, tail_pre_ + static_cast<size_t>(from) * 4, static_cast<size_t>(keep), pb);
-          rows_d2d(tail_pre_, seg_pre_, static_cast<size_t>(keep), pb);
+          rows_d2d(nxt_, tail_streams + static_cast<size_t>(from) * 4 * H, static_cast<size_t>(keep), sb);
+          rows_d2d(tail_streams, nxt_, static_cast<size_t>(keep), sb);
+          rows_d2d(seg_pre_, tail_pre + static_cast<size_t>(from) * 4, static_cast<size_t>(keep), pb);
+          rows_d2d(tail_pre, seg_pre_, static_cast<size_t>(keep), pb);
         }
-        rows_d2d(tail_streams_ + static_cast<size_t>(keep) * 4 * H, cur_ + static_cast<size_t>(T - take) * 4 * H,
+        rows_d2d(tail_streams + static_cast<size_t>(keep) * 4 * H, cur_ + static_cast<size_t>(T - take) * 4 * H,
                  static_cast<size_t>(take), sb);
-        rows_d2d(tail_pre_ + static_cast<size_t>(keep) * 4, pre_cur_ + static_cast<size_t>(T - take) * 4,
+        rows_d2d(tail_pre + static_cast<size_t>(keep) * 4, pre_cur_ + static_cast<size_t>(T - take) * 4,
                  static_cast<size_t>(take), pb);
-        tail_rows_ = keep + take;
-        tail_end_ = run.pos0 + T;
+        tail.rows = keep + take;
+        tail.end = run.pos0 + T;
         seg_rows_ = 0;
         segment_of(req) = {run.pos0, 0};
         head = false;
@@ -1113,10 +1167,10 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
       // into seg_pre_. The window floors at the segment's start unless the
       // segment holds every row of the call (then the rows before it stand
       // in the ring: the previous call's segment or decode wrote them).
-      const int from_tail = std::min(tail_rows_, win - take);
+      const int from_tail = std::min(tail.rows, win - take);
       const int R = from_tail + take;
-      rows_d2d(nxt_, tail_streams_ + static_cast<size_t>(tail_rows_ - from_tail) * 4 * H, static_cast<size_t>(from_tail), sb);
-      rows_d2d(seg_pre_, tail_pre_ + static_cast<size_t>(tail_rows_ - from_tail) * 4, static_cast<size_t>(from_tail), pb);
+      rows_d2d(nxt_, tail_streams + static_cast<size_t>(tail.rows - from_tail) * 4 * H, static_cast<size_t>(from_tail), sb);
+      rows_d2d(seg_pre_, tail_pre + static_cast<size_t>(tail.rows - from_tail) * 4, static_cast<size_t>(from_tail), pb);
       rows_d2d(nxt_ + static_cast<size_t>(from_tail) * 4 * H, cur_ + static_cast<size_t>(T - take) * 4 * H,
                static_cast<size_t>(take), sb);
       rows_d2d(seg_pre_ + static_cast<size_t>(from_tail) * 4, pre_cur_ + static_cast<size_t>(T - take) * 4,
@@ -1130,9 +1184,9 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
       // at the original prompt-row offset after the head has consumed it.
       row_off = std::max(0, T - R);
       rows.pos0 = run.pos0 + T - R;
-      rows.window_floor = rows.pos0 > call_pos0_ ? rows.pos0 : 0;
+      rows.window_floor = rows.pos0 > tail.start ? rows.pos0 : 0;
       rows.publish = false;
-      tail_rows_ = 0;
+      tail.rows = 0;
       }  // !group
     }
     MoeTraceStaging trace;
@@ -1185,7 +1239,18 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
       }
     }
   }
-  const bool packed_logits = packed_prefill_logits(run);
+  const bool packed_logits = packed_prefill_logits(run) || (bounded && group);
+  std::vector<int> output_hidden_rows;
+  if (bounded && group) {
+    for (int sp = 0; sp < run.num_spans; ++sp) {
+      if (sp < run.decode_spans) {
+        if (!run.device_decode_outputs)
+          for (int row = 0; row < run.span_lens[sp]; ++row) output_hidden_rows.push_back(span_row0[sp] + row);
+      } else {
+        output_hidden_rows.push_back(dec_lens[sp] ? dec_row0[sp] + dec_lens[sp] - 1 : -1);
+      }
+    }
+  }
   if (head) {
     // The head: the weighted collapse with the last site's pre, the final
     // norm, the lm head on every walked row (bounded: the segment's rows,
@@ -1201,12 +1266,19 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
     csa2_rmsnorm_bf16(collapsed_ + static_cast<size_t>(row_off) * H, H, globals_.final_norm,
                       h_ + static_cast<size_t>(row_off) * H, H, walk_rows, H, cfg_.rms_norm_eps, stream_);
     if (packed_logits) {
-      project_head_rows(run, [&](int input_row, int output_row, int count) {
-        // Bounded grouped prefill stores hidden rows in decoder space.
-        const int source = group && !dec_row0.empty()
-                               ? dec_row0[output_row] + dec_lens[output_row] - 1
-                           : bounded ? row_off + walk_rows - 1
-                                     : input_row;
+      auto selected = run;
+      std::vector<uint8_t> keep;
+      if (bounded && group) {
+        keep.assign(run.num_spans, 1);
+        for (int sp = run.decode_spans; sp < run.num_spans; ++sp)
+          keep[sp] = dec_lens[sp] > 0 && (!run.output_spans || run.output_spans[sp]);
+        selected.output_spans = keep.data();
+      }
+      project_head_rows(selected, [&](int input_row, int output_row, int count) {
+        const int sp = run.decode_spans + output_row - run.decode_rows();
+        const int source = input_row < run.decode_rows() ? input_row
+                           : group && !dec_row0.empty() ? dec_row0[sp] + dec_lens[sp] - 1
+                           : bounded ? row_off + walk_rows - 1 : input_row;
         gemm_.matmul(h_ + static_cast<size_t>(source) * H, globals_.lm_head,
                      logits_ + static_cast<size_t>(output_row) * lm_vocab_count_, count,
                      lm_vocab_count_, H, DType::BF16, GemmOut::F32, static_cast<size_t>(H),
@@ -1226,21 +1298,6 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
                  static_cast<size_t>(lm_vocab_count_) * sizeof(float));
       rows_d2d(h_ + dst * H, h_ + src * H, 1, static_cast<size_t>(H) * 2);
     }
-    if (group && !dec_row0.empty()) {
-      // The packed decoder's last row of each span into the row the
-      // session core reads (the span's last prompt row), last span first:
-      // every destination sits at or past its source and past the earlier
-      // spans' sources.
-      for (int s = run.num_spans - 1; s >= 0; --s) {
-        const size_t src = static_cast<size_t>(dec_row0[static_cast<size_t>(s)] + dec_lens[static_cast<size_t>(s)] - 1);
-        const size_t dst = static_cast<size_t>(span_row0[static_cast<size_t>(s)] + run.span_lens[s] - 1);
-        if (src == dst) continue;
-        if (!packed_logits)
-          rows_d2d(logits_ + dst * lm_vocab_count_, logits_ + src * lm_vocab_count_, 1,
-                   static_cast<size_t>(lm_vocab_count_) * sizeof(float));
-        rows_d2d(h_ + dst * H, h_ + src * H, 1, static_cast<size_t>(H) * 2);
-      }
-    }
     // DSpark: the last rows' target hidden into the slots' windows by
     // position (the draft gathers its accepted rows' from there); a
     // prefill's walked rows are the draft's rows (mtp_run_rows).
@@ -1255,6 +1312,7 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
           const int walked = dec_row0.empty() ? span_row0[static_cast<size_t>(s)] : dec_row0[static_cast<size_t>(s)];
           const int wlen = dec_row0.empty() ? len : dec_lens[static_cast<size_t>(s)];
           const int nn = std::min(n, wlen);
+          if (!nn) continue;
           const int last_walked = walked + wlen - nn;
           const int last_orig = span_row0[static_cast<size_t>(s)] + run.span_lens[s] - nn;
           store_draft_hidden(main_hidden_ + static_cast<size_t>(last_walked) * W, in.req_ids + last_orig,
@@ -1275,10 +1333,10 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
       seg_pos0_ = rows.pos0;
       seg_rows_ = walk_rows;
       if (group) {
-        for (int s = 0; s < run.num_spans; ++s)
+        for (int s = run.decode_spans; s < run.num_spans; ++s)
           segment_of(run.span_reqs[s]) = dec_row0.empty()
-                                             ? std::pair<int64_t, int>{run.span_pos0[s], run.span_lens[s]}
-                                             : std::pair<int64_t, int>{dec_pos0[static_cast<size_t>(s)], dec_lens[static_cast<size_t>(s)]};
+                                             ? WalkSegment{run.span_pos0[s], run.span_lens[s], span_row0[static_cast<size_t>(s)]}
+                                             : WalkSegment{dec_pos0[static_cast<size_t>(s)], dec_lens[static_cast<size_t>(s)], dec_row0[static_cast<size_t>(s)]};
       } else {
         segment_of(req) = {rows.pos0, walk_rows};
       }
@@ -1287,7 +1345,8 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
   // The stream-ordered reducer's verdict for this pass's folds (a failed
   // collective is an error here, not a wrong number read later).
   if (!run.capture && boundary_) boundary_->settle();
-  out = finish_run(run, std::move(out), packed_logits);
+  out = finish_run(run, std::move(out), packed_logits, -1,
+                   output_hidden_rows.empty() ? nullptr : &output_hidden_rows);
   if (!run.capture && traces) {
     for (size_t l = 0; l < out.route_ids.size(); ++l) {
       const size_t slot = l * static_cast<size_t>(max_tokens_) * K;

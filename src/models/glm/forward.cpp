@@ -382,10 +382,10 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg, const std::stri
       alloc_device(static_cast<size_t>(logits_capacity_rows_) * lm_vocab_count_ * sizeof(float)));
   DGPP_CUDA_OK(cudaHostAlloc(
       reinterpret_cast<void**>(&h_tail_logits_),
-      static_cast<size_t>(kDecodeRows) * lm_vocab_count_ * sizeof(float),
+      static_cast<size_t>(mixed_output_rows(kDecodeRows, max_requests)) * lm_vocab_count_ * sizeof(float),
       cudaHostAllocDefault));
   DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_tail_hidden_),
-                             static_cast<size_t>(kDecodeRows) * H * 2,
+                             static_cast<size_t>(mixed_output_rows(kDecodeRows, max_requests)) * H * 2,
                              cudaHostAllocDefault));
   DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_graph_start_gt_),
                              sizeof(uint64_t), cudaHostAllocDefault));
@@ -587,8 +587,7 @@ GlmDiagnosticModel::MemoryPlan GlmDiagnosticModel::plan_memory(
            V * 4;
     act += R * 8 * 3 + static_cast<size_t>(kDecodeRows) * (4 + 8 + 8);
     plan.add("activations (per-forward rows)", act,
-             static_cast<size_t>(kDecodeRows) * V * 4 +
-                 static_cast<size_t>(kDecodeRows) * H * 2);
+             static_cast<size_t>(mixed_output_rows(kDecodeRows, max_requests)) * (V * 4 + H * 2));
   }
   if (n_moe > 0) {
     const size_t K = static_cast<size_t>(moe_cfg.top_k);

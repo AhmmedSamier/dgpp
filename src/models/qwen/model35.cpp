@@ -1424,7 +1424,7 @@ void Qwen35Model::graph_prepare() {
 // in place (h_); decode rows gather theirs from the slots' windows by
 // position. head_rows == 0 fills the draft K/V only (prefill cache fill).
 void Qwen35Model::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T,
-                               bool decode_row, bool capture, int head_rows, int batch_requests) {
+                               bool decode_row, bool capture, int head_rows, int batch_requests, int hidden_row) {
   configure_gemm_rows(T, decode_row);
   if (!mtp_) throw std::logic_error("mtp_run_rows: MTP is not enabled");
   if (T <= 0 || T > max_tokens_) throw std::invalid_argument("mtp_run_rows: rows");
@@ -1443,7 +1443,7 @@ void Qwen35Model::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos
   // ---- the input fusion --------------------------------------------------
   // The reference (vLLM Qwen3_5MultiTokenPredictor): e = pre_fc_norm_embedding
   // (embed(tok)), h = pre_fc_norm_hidden(main hidden), cat([e, h]) -> fc.
-  const uint16_t* hin = h_;
+  const uint16_t* hin = prefill_hidden_span(h_, H, hidden_row, T);
   if (decode_row) {
     gather_draft_hidden(d_req, d_pos, mtp_hin_, T);
     hin = mtp_hin_;
@@ -1574,6 +1574,8 @@ Qwen35Model::Outputs Qwen35Model::mtp_forward(const std::vector<int64_t>& token_
 
 Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
   const int T = run.T, req = run.req;
+  const bool mixed = run.decode_spans > 0;
+  const int decode_rows = run.decode_rows();
   if (run.capture && loader_.residency() != LoaderResidency::Resident)
     throw std::logic_error("run_rows: a capture needs a resident stack");
   // The DFlash2 target verify captures (the batched verify graph); only
@@ -1617,10 +1619,10 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
   // the recurrent state replays (gdn_replay_) and a prefill walk reads it
   // as it stands: the pending rows are materialized first (a no-op kernel
   // when none are pending).
-  const bool snapshots = run.decode && run.snapshots;
+  const bool snapshots = (run.decode || mixed) && run.snapshots;
   if (gdn_replay_ && !run.decode) {
     if (run.num_spans > 0) {
-      for (int sp = 0; sp < run.num_spans; ++sp) materialize_gdn(run.span_reqs[sp]);
+      for (int sp = run.decode_spans; sp < run.num_spans; ++sp) materialize_gdn(run.span_reqs[sp]);
     } else {
       materialize_gdn(req);
     }
@@ -1661,7 +1663,23 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
                            rec_snap, conv_snap, replay);
       } else if (run.num_spans > 0) {
         int64_t row0 = 0;
-        for (int sp = 0; sp < run.num_spans; ++sp) {
+        if (mixed) {
+          KdaRequestRows requests;
+          requests.request_ids = d_req;
+          requests.positions = d_pos;
+          requests.spans = d_spans;
+          requests.num_requests = run.decode_spans;
+          if (gdn_replay_) {
+            replay = gdn_replay_view(0, gdn_ord, true);
+            for (int sp = 0; sp < run.decode_spans; ++sp)
+              gdn_replay_rows_used_ = std::max(gdn_replay_rows_used_, run.span_lens[sp]);
+          }
+          gdn_->enqueue_rows(x_, gdn_rec(0, gdn_ord), static_cast<int64_t>(num_gdn_) * rec_elems_,
+                              gdn_conv(0, gdn_ord), static_cast<int64_t>(num_gdn_) * conv_elems_,
+                              ao, decode_rows, requests, stream_, rec_snap, conv_snap, replay);
+          row0 = decode_rows;
+        }
+        for (int sp = run.decode_spans; sp < run.num_spans; ++sp) {
           const int len = run.span_lens[sp], sreq = run.span_reqs[sp];
           gdn_->enqueue(x_ + static_cast<size_t>(row0) * H, gdn_rec(sreq, gdn_ord),
                         gdn_conv(sreq, gdn_ord), ao + static_cast<size_t>(row0) * H, len, stream_,
@@ -1713,7 +1731,14 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
       qrows.num_requests = num_requests;
       if (run.num_spans > 0) {
         int64_t row0 = 0;
-        for (int sp = 0; sp < run.num_spans; ++sp) {
+        if (mixed) {
+          auto prefix = qrows;
+          prefix.decode = true;
+          prefix.num_requests = run.decode_spans;
+          full_->enqueue(x_, decode_rows, prefix, cache, ao, stream_);
+          row0 = decode_rows;
+        }
+        for (int sp = run.decode_spans; sp < run.num_spans; ++sp) {
           const int len = run.span_lens[sp];
           QwenQsaRows srows = qrows;
           srows.req_ids = d_req + row0;
@@ -1733,20 +1758,28 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
     fold(ao, H);
     // Fused residual-add + post norm (bitwise the pair): one launch.
     qwen_add_rmsnorm_bf16(resid_, ao, r.post_norm, x_, T, H, eps, stream_);
-    // A resume chunk's short tail takes the per-tensor MLP like the
-    // attention resume above; group spans start at pos0 (resume false).
-    // Decode/verify walks (run.decode) keep their exact GEMV dispatch.
-    bool mlp_resume = false;
-    if (!run.decode) {
-      if (run.num_spans > 0) {
-        for (int sp = 0; sp < run.num_spans; ++sp)
-          mlp_resume = mlp_resume || run.span_pos0[sp] > 0;
-      } else {
-        mlp_resume = run.pos0 > 0;
-      }
-    }
     uint16_t* mo = stage(mlp_out_, H);
-    dense_mlp(x_, mo, T, r.mlp, stream_, layer, mlp_resume);
+    if (pt_enabled_ && run.num_spans > 0) {
+      // A per-tensor activation scale belongs to one reader. Sharing it
+      // across requests would let a neighbor change that reader's logits,
+      // and would also switch the decoder prefix to the prefill recipe.
+      int row0 = 0;
+      if (mixed) {
+        configure_gemm_rows(decode_rows, true);
+        dense_mlp(x_, mo, decode_rows, r.mlp, stream_, layer, false);
+        row0 = decode_rows;
+      }
+      for (int sp = run.decode_spans; sp < run.num_spans; ++sp) {
+        const int len = run.span_lens[sp];
+        configure_gemm_rows(len, false);
+        dense_mlp(x_ + static_cast<size_t>(row0) * H, mo + static_cast<size_t>(row0) * H,
+                  len, r.mlp, stream_, layer, run.span_pos0[sp] > 0);
+        row0 += len;
+      }
+      configure_gemm_rows(T, run.decode);
+    } else {
+      dense_mlp(x_, mo, T, r.mlp, stream_, layer, !run.decode && run.pos0 > 0);
+    }
     if (run.decode) prefetch_attention_side(layer + 1);  // the next layer's input side (or the head)
     fold(mo, H);
     add_inplace_bf16(resid_, mo, static_cast<size_t>(T) * H, stream_);
@@ -1772,17 +1805,23 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
   }
   // Final norm + lm head.
   qwen_rmsnorm_bf16(resid_, globals_.final_norm, h_, T, H, eps, stream_);
-  const int first = (run.decode || run.all_rows || run.num_spans > 0) ? 0 : T - 1;
-  const int rows = T - first;
-  head_gemv(h_ + static_cast<size_t>(first) * H, logits_ + static_cast<size_t>(first) * lm_vocab_count_,
-            rows, stream_);
+  const bool packed_logits = packed_prefill_logits(run);
+  if (packed_logits) {
+    project_head_rows(run, [&](int input, int output, int count) {
+      configure_gemm_rows(count, mixed && input == 0);
+      head_gemv(h_ + static_cast<size_t>(input) * H,
+                 logits_ + static_cast<size_t>(output) * lm_vocab_count_, count, stream_);
+    });
+    configure_gemm_rows(T, run.decode);
+  } else {
+    const int first = (run.decode || run.all_rows || run.num_spans > 0) ? 0 : T - 1;
+    head_gemv(h_ + static_cast<size_t>(first) * H, logits_ + static_cast<size_t>(first) * lm_vocab_count_,
+               T - first, stream_);
+  }
   // The draft block's input: the last rows' final hidden into the slots'
   // windows by position (the last window rows of a prefill chunk, every
   // decode row — distinct slots within one launch).
-  if (mtp_) {
-    const int n = run.num_spans > 0 ? T : std::min(T, max_decode_rows_);
-    store_draft_hidden(h_ + static_cast<size_t>(T - n) * H, d_req + (T - n), d_pos + (T - n), n);
-  }
+  store_run_draft_hidden(run, in, h_);
   // Every run's rows become the drafter's context K/V at their positions
   // (rejected verify rows included: they land past the committed end and
   // the next draft's position mask hides them — no rollback). Inside a
@@ -1793,7 +1832,7 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
   // exact but starved the drafter).
   if (dflash2_) dflash2_store_features(T, d_req, d_pos);
   if (run.decode) prefetch_.join(stream_);  // every forked prefetch back on the main stream
-  out = finish_run(run, std::move(out));
+  out = finish_run(run, std::move(out), packed_logits);
   return out;
 }
 

@@ -514,6 +514,7 @@ const uint16_t* MimoModel::enqueue_layer(const MimoLayerResident& r, int pool_la
     arows.req_ids = rows.req_ids;
     arows.pos = rows.pos;
     arows.decode = rows.decode;
+    arows.decode_prefix = rows.decode_prefix;
     attn_->enqueue(x_, T, arows, pool_.view(pool_layer), attn_out, stream_);
   }
   if (rows.decode) prefetch_ffn_side(r);
@@ -562,6 +563,7 @@ MimoModel::Outputs MimoModel::run_rows(const RowRun& run) {
   const size_t K = static_cast<size_t>(cfg_.num_experts_per_tok);
   const size_t E = static_cast<size_t>(cfg_.n_routed_experts);
   WalkRows rows;
+  rows.decode_prefix = run.decode_rows();
   rows.req_ids = in.req_ids;
   rows.pos = in.pos;
   rows.req = req;
@@ -619,10 +621,7 @@ MimoModel::Outputs MimoModel::run_rows(const RowRun& run) {
   // within one launch). A group prefill (several requests' spans in one
   // walk) stores every row: each span's last window rows land in its own
   // slot.
-  if (mtp_) {
-    const int n = run.num_spans > 0 ? T : std::min(T, max_decode_rows_);
-    store_draft_hidden(h_ + static_cast<size_t>(T - n) * H, in.req_ids + (T - n), in.pos + (T - n), n);
-  }
+  store_run_draft_hidden(run, in, h_);
   if (run.decode) prefetch_.join(stream_);
   out = finish_run(run, std::move(out), packed_logits);
   if (!run.capture && traces) {
@@ -726,12 +725,12 @@ void MimoModel::finish_companions() {
 // final_layernorm, the shared head.
 // ---------------------------------------------------------------------------
 void MimoModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode_row,
-                             bool capture, int head_rows, int batch_requests) {
+                             bool capture, int head_rows, int batch_requests, int hidden_row) {
   if (head_rows > logits_capacity_rows_)
     throw std::invalid_argument("draft head exceeds logits capacity");
   if (!mtp_) throw std::logic_error("mtp_run_rows: MTP is not enabled");
   if (native_mtp()) {
-    native_mtp_rows(req, tokens, first_pos, T, decode_row, capture, head_rows);
+    native_mtp_rows(req, tokens, first_pos, T, decode_row, capture, head_rows, hidden_row);
     return;
   }
   if (T <= 0 || T > max_tokens_) throw std::invalid_argument("mtp_run_rows: rows");
@@ -751,7 +750,7 @@ void MimoModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, 
   // prefill rows read the main chunk's rows in place (h_, the chunk's
   // post-final-norm hidden at rows 0 .. T-1; the head below overwrites
   // h_ only after the fusion has read it — stream order).
-  const uint16_t* hin = h_;
+  const uint16_t* hin = prefill_hidden_span(h_, H, hidden_row, T);
   if (decode_row) {
     gather_draft_hidden(d_req, d_pos, mtp_h_, T);
     hin = mtp_h_;
@@ -832,7 +831,7 @@ void MimoModel::read_draft_snapshot(int req, const uint8_t* src) {
                   draft_state_bytes(), stream_);
 }
 void MimoModel::native_mtp_rows(int req, const int64_t* tokens, int64_t first_pos, int T,
-                                bool decode, bool capture, int head_rows) {
+                                bool decode, bool capture, int head_rows, int hidden_row) {
   if (head_rows > logits_capacity_rows_)
     throw std::invalid_argument("draft head exceeds logits capacity");
   if (T <= 0 || T > max_tokens_ || head_rows < 0 || head_rows > T)
@@ -848,7 +847,7 @@ void MimoModel::native_mtp_rows(int req, const int64_t* tokens, int64_t first_po
     // Graph entry points snapshot before capture; eager drafting needs its
     // own pre-call history for session_draft_rollback and prefix cuts.
     if (decode && !capture) snapshot_draft_state(req);
-    const uint16_t* hidden = h_;
+    const uint16_t* hidden = prefill_hidden_span(h_, H, hidden_row, T);
     if (decode) {
       gather_draft_hidden(ids, pos, mtp_h_, T);
       hidden = mtp_h_;

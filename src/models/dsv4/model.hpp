@@ -105,8 +105,7 @@ class Dsv4Model : public SessionModel<Dsv4Model> {
   // stands at any cut on the block grid, and an unfinished slot is inert
   // to a decode replay), and several unfinished prompts' next chunks ride
   // one walk as its spans.
-  static constexpr bool kResumablePrefill = true;
-  static constexpr bool kPrefillGroupAdvance = true;
+  static constexpr bool kPrefillChunkGrid = false;
   static size_t session_snapshot_bytes(const Dsv4Config& cfg, int tp_world, bool mtp);
   using Base::session_snapshot_bytes;
   static Dsv4AttnConfig attn_config(const Dsv4Config& cfg, int tp_world);
@@ -179,6 +178,7 @@ class Dsv4Model : public SessionModel<Dsv4Model> {
   static constexpr int kRingSlots = 160;
 
   struct WalkRows {
+    int decode_spans = 0;
     const int64_t* tokens = nullptr;
     const int32_t* req_ids = nullptr;
     const int64_t* pos = nullptr;

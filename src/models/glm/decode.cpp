@@ -248,8 +248,7 @@ void GlmDiagnosticModel::prefill_chunk(PrefillCursor& cursor, int64_t budget) {
   const int64_t start = cursor.start, end = cursor.end, c0 = cursor.next;
   auto* snap = cursor.snap;
   auto& out = cursor.output;
-  int64_t c1 = cursor.cut_index < cursor.cuts.size() ? cursor.cuts[cursor.cut_index] : end;
-  if (budget > 0) c1 = std::min(c1, (c0 / budget + 1) * budget);
+  const int64_t c1 = cursor.next_end(budget);
   if (cursor.cut_index < cursor.cuts.size() && c1 == cursor.cuts[cursor.cut_index]) ++cursor.cut_index;
   if (c1 <= c0 || c1 - c0 > max_tokens_)
     throw std::invalid_argument("session_prefill: chunk outside the model's row capacity");
@@ -266,9 +265,14 @@ void GlmDiagnosticModel::prefill_chunk(PrefillCursor& cursor, int64_t budget) {
     (void)session_draft(req, {ids[0]});
     cursor.catchup = false;
   }
-  Outputs chunk = session_run_rows(
-      req, std::vector<int64_t>(ids + (c0 - start), ids + (c1 - start)), c0,
-      /*decode_row=*/false);
+  RowRun run;
+  run.req = req;
+  run.ids = ids + c0 - start;
+  run.T = static_cast<int>(c1 - c0);
+  run.pos0 = c0;
+  const uint8_t keep = !cursor.final_output_only || c1 == end;
+  run.output_spans = &keep;
+  Outputs chunk = run_rows(run);
   out.logits = std::move(chunk.logits);
   out.final_hidden_bits = std::move(chunk.final_hidden_bits);
   out.lm_vocab_begin = chunk.lm_vocab_begin;
@@ -880,11 +884,13 @@ size_t GlmDiagnosticModel::spec_tail_ring_elems() const {
   return static_cast<size_t>(2) * dsa_cfg_.index_kpool * dsa_cfg_.index_head_dim;
 }
 
-void GlmDiagnosticModel::session_rollback(int req, int accepted) {
+void GlmDiagnosticModel::session_rollback(int req, int accepted, int total_rows, int snapshot_row0) {
   if (req < 0 || req >= max_requests_)
     throw std::out_of_range("session_rollback: request slot " +
                             std::to_string(req));
-  const int T = decode_rows_;
+  const int T = total_rows > 0 ? total_rows : decode_rows_;
+  if (snapshot_row0 < 0 || snapshot_row0 + T > decode_rows_)
+    throw std::invalid_argument("rollback outside the verified row batch");
   if (accepted < 1 || accepted > T)
     throw std::invalid_argument("session_rollback: accepted rows must be in "
                                 "[1, " + std::to_string(T) + "]");
@@ -896,7 +902,7 @@ void GlmDiagnosticModel::session_rollback(int req, int accepted) {
   // The state after row `accepted-1` lives in snapshot row accepted-1;
   // the request's committed layer slots are contiguous, so each state
   // family rolls back in one copy (the DSA rings per layer).
-  const size_t row = static_cast<size_t>(accepted - 1);
+  const size_t row = static_cast<size_t>(snapshot_row0 + accepted - 1);
   if (kda_cfg_.num_kda_layers > 0) {
     const size_t layers = static_cast<size_t>(kda_cfg_.num_kda_layers);
     DGPP_CUDA_OK(cudaMemcpyAsync(
@@ -1054,7 +1060,7 @@ void GlmDiagnosticModel::session_graph_capture_step(
   (void)out;  // empty by contract; the caller instantiates the graph
 }
 
-void GlmDiagnosticModel::session_graph_capture_batch(int rows_per_request, int requests_arg, int feed_rows) {
+void GlmDiagnosticModel::session_graph_capture_batch_inputs(int rows_per_request, int requests_arg, int feed_rows) {
   if (feed_rows != 0 && feed_rows != rows_per_request)
     throw std::invalid_argument("session_graph_capture_batch: this family has no reduced-depth feed");
   const int requests = requests_arg > 0 ? requests_arg : max_requests_;
@@ -1093,6 +1099,11 @@ void GlmDiagnosticModel::session_graph_capture_batch(int rows_per_request, int r
   glm_spec_positions_batched(d_session_pos_, d_req_ids_, rows,
                              rows_per_request, max_context_, d_step_pos_, stream_);
 
+}
+
+void GlmDiagnosticModel::session_graph_capture_batch(int rows_per_request, int requests_arg, int feed_rows) {
+  session_graph_capture_batch_inputs(rows_per_request, requests_arg, feed_rows);
+  const int requests = graph_batch_requests_, rows = requests * rows_per_request;
   // Device tokens persist from one replay to the next; inactive groups were
   // zero-initialized and admissions seed their group before a replay.
   const std::vector<int64_t> shape(static_cast<size_t>(rows), 0);
@@ -1332,6 +1343,47 @@ void GlmDiagnosticModel::debug_sync(const char* what, int layer, bool decode_row
                              "): " + cudaGetErrorString(e));
 }
 
+GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_rows(const RowRun& run) {
+  if (run.num_spans < 0 || run.decode || run.capture || run.all_rows ||
+      run.T <= 0 || run.T > max_tokens_ || !prefill_batch_fits(run))
+    throw std::invalid_argument("GLM row batch exceeds execution capacity");
+  const int decoded = run.decode_rows();
+  if (decoded > kDecodeRows) throw std::invalid_argument("GLM speculative prefix exceeds capacity");
+  int row = 0;
+  for (int sp = 0; sp < run.decode_spans; ++sp) {
+    h_req_spans_[2 * sp] = row;
+    h_req_spans_[2 * sp + 1] = run.span_lens[sp];
+    for (int i = 0; i < run.span_lens[sp]; ++i, ++row) {
+      h_req_ids_[row] = run.span_reqs[sp];
+      h_step_pos_[row] = run.span_pos0[sp] < 0 ? -1 : run.span_pos0[sp] + i;
+    }
+  }
+  if (decoded) {
+    glm_upload_i32(h_req_ids_, d_req_ids_, decoded, stream_);
+    glm_upload_i64(h_step_pos_, d_step_pos_, decoded, stream_);
+    glm_upload_i32(h_req_spans_, d_req_spans_, 2 * run.decode_spans, stream_);
+  }
+  struct Reset {
+    GlmDiagnosticModel& model;
+    ~Reset() {
+      model.group_span_reqs_ = model.group_span_lens_ = nullptr;
+      model.group_span_pos0_ = nullptr;
+      model.group_num_spans_ = model.group_decode_spans_ = model.group_decode_rows_ = 0;
+      model.group_device_outputs_ = false;
+      model.prefill_run_ = nullptr;
+    }
+  } reset{*this};
+  prefill_run_ = &run;
+  group_span_reqs_ = run.span_reqs;
+  group_span_lens_ = run.span_lens;
+  group_span_pos0_ = run.span_pos0;
+  group_num_spans_ = run.num_spans;
+  group_decode_spans_ = run.decode_spans;
+  group_decode_rows_ = decoded;
+  group_device_outputs_ = run.device_decode_outputs;
+  return session_run_rows(run.req, std::vector<int64_t>(run.ids, run.ids + run.T), run.pos0, false);
+}
+
 GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
     int req, const std::vector<int64_t>& ids, int64_t token_start,
     bool decode_row, bool capture_mode, int batch_requests) {
@@ -1340,9 +1392,15 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   const float eps = cfg_.rms_norm_eps;
   const bool batched = batch_requests > 0;
 
+  RowRun fallback;
+  fallback.T = T;
+  fallback.decode = decode_row;
+  fallback.num_spans = group_num_spans_;
+  fallback.span_lens = group_span_lens_;
+  const RowRun& output_plan = prefill_run_ ? *prefill_run_ : fallback;
   // Prefill projects at most four selected rows per launch; decode uses
   // its complete verify batch. Prepare only a shape this walk can execute.
-  const int planned_head_rows = decode_row ? T : std::min(4, std::max(1, group_num_spans_));
+  const int planned_head_rows = decode_row ? T : std::min(4, output_plan.output_rows());
   if (!gemm_.ensure_plan(planned_head_rows, lm_vocab_count_, H, DType::BF16, GemmOut::F32, H))
     throw std::runtime_error("session: lm head GEMM plan unavailable");
 
@@ -1502,7 +1560,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
       // rows (decode, T > 1) also leave post-row snapshots for
       // session_rollback; the snapshot row stride spans every KDA layer.
       KdaSpeculativeSinks spec;
-      if (decode_row && (T > 1 || batched)) {
+      if ((decode_row && (T > 1 || batched)) || group_decode_spans_ > 0) {
         const size_t layers = static_cast<size_t>(kda_cfg_.num_kda_layers);
         spec.recurrent.states =
             spec_rec_ + static_cast<size_t>(kda_ordinal) * kda_geo_.recurrent_elems;
@@ -1528,7 +1586,21 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
         // A group prefill (2026-09-14): each span's rows scan its own
         // request's recurrent and conv state (the pointers step by rows).
         int64_t row0 = 0;
-        for (int sp = 0; sp < group_num_spans_; ++sp) {
+        if (group_decode_spans_ > 0) {
+          batch.rows.request_ids = d_req_ids_;
+          batch.rows.positions = d_step_pos_;
+          batch.rows.spans = d_req_spans_;
+          batch.rows.num_requests = group_decode_spans_;
+          batch.recurrent_request_stride_elems = static_cast<int64_t>(kda_cfg_.num_kda_layers) * kda_geo_.recurrent_elems;
+          batch.conv_request_stride_elems = static_cast<int64_t>(kda_cfg_.num_kda_layers) * conv_elems;
+          if (!kda_->prepare(group_decode_rows_)) throw std::runtime_error("mixed KDA plans unavailable");
+          auto* decoder_rec = kda_rec_ + static_cast<size_t>(kda_ordinal) * kda_geo_.recurrent_elems;
+          auto* decoder_conv = kda_conv_ + static_cast<size_t>(kda_ordinal) * conv_elems;
+          kda_->enqueue(normed_, decoder_rec, decoder_conv, kda_geo_.conv_hist, attn_out,
+                         group_decode_rows_, stream_, nullptr, spec, batch);
+          row0 = group_decode_rows_;
+        }
+        for (int sp = group_decode_spans_; sp < group_num_spans_; ++sp) {
           const int len = group_span_lens_[sp];
           const size_t sreq = static_cast<size_t>(group_span_reqs_[sp]);
           float* srec = kda_rec_ + (sreq * kda_cfg_.num_kda_layers + static_cast<size_t>(kda_ordinal)) *
@@ -1584,11 +1656,18 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
         // A group prefill: each span attends over and publishes to its own
         // request's cache, its selection at its rows' offset in the scratch.
         int64_t row0 = 0;
-        for (int sp = 0; sp < group_num_spans_; ++sp) {
+        if (group_decode_spans_ > 0) {
+          if (!dsa_->prepare(group_decode_rows_)) throw std::runtime_error("mixed DSA plans unavailable");
+          auto* tail_snaps = spec_tail_ + static_cast<size_t>(dsa_ordinal) * kDecodeRows * spec_tail_ring_elems();
+          dsa_->enqueue_decode(normed_, pool_, dsa_ordinal, d_req_ids_, d_step_pos_, d_req_spans_,
+                               group_decode_spans_, group_decode_rows_, attn_out, stream_, nullptr, tail_snaps);
+          row0 = group_decode_rows_;
+        }
+        for (int sp = group_decode_spans_; sp < group_num_spans_; ++sp) {
           const int len = group_span_lens_[sp];
           if (!dsa_->prepare(len)) throw std::runtime_error("session: DSA GEMM plans unavailable");
           dsa_->enqueue_prefill(normed_ + static_cast<size_t>(row0) * H, pool_, dsa_ordinal, group_span_reqs_[sp],
-                                /*token_start=*/0, len, attn_out + static_cast<size_t>(row0) * H, stream_,
+                                group_span_pos0_ ? group_span_pos0_[sp] : 0, len, attn_out + static_cast<size_t>(row0) * H, stream_,
                                 static_cast<int>(row0));
           row0 += len;
         }
@@ -1761,10 +1840,14 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
       glm_rows_scatter_bf16(collapsed_, d_step_pos_, mtp_hidden_cache(req), T,
                             H, stream_);
     } else if (group_num_spans_ > 0) {
-      int64_t row0 = 0;
-      for (int sp = 0; sp < group_num_spans_; ++sp) {
+      int64_t row0 = group_decode_rows_;
+      if (group_decode_rows_)
+        glm_rows_scatter_bf16_batched(collapsed_, d_req_ids_, d_step_pos_, mtp_hidden_,
+                                      static_cast<int64_t>(max_context_) * H, group_decode_rows_, H, stream_);
+      for (int sp = group_decode_spans_; sp < group_num_spans_; ++sp) {
         const int len = group_span_lens_[sp];
-        DGPP_CUDA_OK(cudaMemcpyAsync(mtp_hidden_cache(group_span_reqs_[sp]), collapsed_ + static_cast<size_t>(row0) * H,
+        DGPP_CUDA_OK(cudaMemcpyAsync(mtp_hidden_cache(group_span_reqs_[sp]) +
+                                     static_cast<size_t>(group_span_pos0_ ? group_span_pos0_[sp] : 0) * H, collapsed_ + static_cast<size_t>(row0) * H,
                                      static_cast<size_t>(len) * H * 2, cudaMemcpyDeviceToDevice, stream_));
         row0 += len;
       }
@@ -1783,20 +1866,16 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   // prefill alone (cuBLASLt's per-row-count algorithm choice and tile
   // placement are not), and the prompt-sized logits matrix is never
   // computed. Decode rows keep their batch-wide head.
-  int head_rows = T;
+  const int head_rows = output_plan.output_rows();
   if (!decode_row) {
-    head_rows = group_num_spans_ > 0 ? group_num_spans_ : 1;
-    if (head_rows > kDecodeRows)
-      throw std::invalid_argument("session: a group walk of more spans than the tail's rows");
-    int64_t row0 = 0;
-    for (int r = 0; r < head_rows; ++r) {
-      const int64_t last = group_num_spans_ > 0 ? row0 + group_span_lens_[r] - 1 : T - 1;
-      if (last != r)
-        DGPP_CUDA_OK(cudaMemcpyAsync(collapsed_ + static_cast<size_t>(r) * H,
-                                     collapsed_ + static_cast<size_t>(last) * H, static_cast<size_t>(H) * 2,
-                                     cudaMemcpyDeviceToDevice, stream_));
-      if (group_num_spans_ > 0) row0 += group_span_lens_[r];
-    }
+    if (head_rows > mixed_output_rows(kDecodeRows, max_requests_))
+      throw std::invalid_argument("session: selected outputs exceed tail capacity");
+    output_plan.for_each_output([&](int input, int output, int count) {
+      if (input != output)
+        DGPP_CUDA_OK(cudaMemcpyAsync(collapsed_ + static_cast<size_t>(output) * H,
+                                     collapsed_ + static_cast<size_t>(input) * H,
+                                     static_cast<size_t>(count) * H * 2, cudaMemcpyDeviceToDevice, stream_));
+    });
   }
   if (head_rows > logits_capacity_rows_)
     throw std::invalid_argument("session: output exceeds logits capacity");
@@ -1809,10 +1888,12 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   } else {
     // In the GEMV lowering's row chunks (four rows a launch, the form the
     // decode head takes), never a per-row-count GEMM algorithm.
-    for (int r0 = 0; r0 < head_rows; r0 += 4)
-      gemm_.matmul(normed_ + static_cast<size_t>(r0) * H, globals_.lm_head,
-                   logits_ + static_cast<size_t>(r0) * lm_vocab_count_, std::min(4, head_rows - r0),
-                   lm_vocab_count_, H, DType::BF16, GemmOut::F32, H, gemm_ws_, gemm_ws_bytes_, stream_);
+    output_plan.for_each_output_range([&](int output, int count) {
+      for (int r0 = output; r0 < output + count; r0 += 4)
+        gemm_.matmul(normed_ + static_cast<size_t>(r0) * H, globals_.lm_head,
+                     logits_ + static_cast<size_t>(r0) * lm_vocab_count_, std::min(4, output + count - r0),
+                     lm_vocab_count_, H, DType::BF16, GemmOut::F32, H, gemm_ws_, gemm_ws_bytes_, stream_);
+    });
   }
   // The prefetch side stream rejoins here: a capture must end with every
   // forked stream joined, and the eager tail's sync below should cover
@@ -1826,18 +1907,24 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   // them only while the mirrors are on, and a device-pick consumer turns
   // them off (session_graph_outputs then copies eagerly after a replay).
   // An eager step always mirrors — it syncs right below.
+  bool mirrored = false;
   if (!decode_row || decode_tail_mirrors_ || !capture_mode) {
-    // Decode rows: all T rows (T <= kDecodeRows). Prefill chunks: the
-    // LAST row only, into mirror row 0 (a prompt-sized logits matrix is
-    // 100s of MB; greedy needs one row).
-    // Decode rows: all T rows. Prefill chunks: the head ran over the
-    // mirrored rows only, gathered to the front (one row, or one per span
-    // of a group walk, span-major).
-    const size_t rows = static_cast<size_t>(head_rows);
-    DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_logits_, logits_, rows * lm_vocab_count_ * sizeof(float),
-                                 cudaMemcpyDeviceToHost, stream_));
-    DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_hidden_, normed_, rows * H * 2, cudaMemcpyDeviceToHost,
-                                 stream_));
+    output_plan.for_each_output_range([&](int output, int count) {
+      if (group_device_outputs_ && output < group_decode_rows_) {
+        const int skip = std::min(count, group_decode_rows_ - output);
+        output += skip;
+        count -= skip;
+      }
+      if (!count) return;
+      DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_logits_ + static_cast<size_t>(output) * lm_vocab_count_,
+                                   logits_ + static_cast<size_t>(output) * lm_vocab_count_,
+                                   static_cast<size_t>(count) * lm_vocab_count_ * sizeof(float),
+                                   cudaMemcpyDeviceToHost, stream_));
+      DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_hidden_ + static_cast<size_t>(output) * H,
+                                   normed_ + static_cast<size_t>(output) * H, static_cast<size_t>(count) * H * 2,
+                                   cudaMemcpyDeviceToHost, stream_));
+      mirrored = true;
+    });
   }
 
   // Capture ends HERE: nothing executed, so there is nothing to sync
@@ -1874,13 +1961,27 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
     }
   }
 
-  // Last row only (see the runner's header note) — from the pinned
-  // mirrors' row 0, which the D2H above filled with row T-1.
-  const size_t tail_rows = (!decode_row && group_num_spans_ > 0) ? static_cast<size_t>(group_num_spans_) : 1;
-  out.final_hidden_bits.assign(h_tail_hidden_, h_tail_hidden_ + tail_rows * H);
-  out.logits.assign(h_tail_logits_, h_tail_logits_ + tail_rows * lm_vocab_count_);
+  // Stable packed outputs: all eager decoder rows and each selected reader
+  // completion. Device-picked decoder rows stay on the device.
   out.lm_vocab_begin = lm_vocab_begin_;
   out.lm_vocab_count = lm_vocab_count_;
+  if (!mirrored) return out;
+  const int first_output = group_device_outputs_ ? group_decode_rows_ : 0;
+  out.final_hidden_bits.resize(static_cast<size_t>(head_rows - first_output) * H);
+  out.logits.resize(static_cast<size_t>(head_rows - first_output) * lm_vocab_count_);
+  output_plan.for_each_output_range([&](int output, int count) {
+    if (output < first_output) {
+      const int skip = std::min(count, first_output - output);
+      output += skip;
+      count -= skip;
+    }
+    if (!count) return;
+    std::copy_n(h_tail_hidden_ + static_cast<size_t>(output) * H, static_cast<size_t>(count) * H,
+                 out.final_hidden_bits.begin() + static_cast<size_t>(output - first_output) * H);
+    std::copy_n(h_tail_logits_ + static_cast<size_t>(output) * lm_vocab_count_,
+                 static_cast<size_t>(count) * lm_vocab_count_,
+                 out.logits.begin() + static_cast<size_t>(output - first_output) * lm_vocab_count_);
+  });
   return out;
 }
 

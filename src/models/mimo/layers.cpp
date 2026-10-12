@@ -147,6 +147,8 @@ void MimoAttentionLayer::enqueue(const uint16_t* x, int tokens, const MimoAttnRo
     throw std::invalid_argument("MimoAttentionLayer: the cache layer's kv heads differ from the weights'");
   if (cache.fp8() != (cache.k_scale != nullptr && cache.v_scale != nullptr))
     throw std::invalid_argument("MimoAttentionLayer: an fp8 cache carries its scale planes");
+  if (rows.split(x, tokens, hidden_, out, [&](const uint16_t* input, int n,
+      const auto& map, uint16_t* output) { enqueue(input, n, map, cache, output, stream); })) return;
   const int H = hidden_;
   const int lkv = w_.local_kv_heads;
   const int Q = lh_ * kMimoQkDim, O = lh_ * kMimoVDim;

@@ -92,15 +92,31 @@ enabling admission does not implement shared execution. Images
 retain their existing eligibility and execution paths. Monolithic mode is
 unchanged.
 
-The common `SessionModel` implements mixed-row planning, budget accounting,
-positions, prefix snapshots, MTP catch-up, output slicing, and cursor suspension.
-The layer executor supplies `RowRun::decode_spans` state/rollback/output handling
-under the `MixedPrefillModel` contract. This includes any features its configured
-drafter needs; a drafter's name is not an eligibility rule. The graph adapter
-checks actual slot, row-capacity, context, and graph-variant limits per batch.
-Currently the Qwen4Exp executor implements that contract. Other executors,
-including the Qwen35 executor used with DFlash, still need mixed layer execution
-and validation. This structural refactor does not claim universal backend coverage.
+The shared execution components have separate responsibilities:
+
+| Component | Responsibility |
+| --- | --- |
+| `PrefillTask` | Owns the prompt, images, snapshot plan and cursor for either adapter. |
+| `PrefillContinuation` | Tracks logical cuts, work budgets, progress and suspension across yields. |
+| `PrefillBatch` | Plans mixed rows, charges physical work, commits positions and snapshots, catches up draft state and slices outputs. |
+| `RowRun` | Describes request spans, the decoder prefix and selected output rows for a layer walk. |
+| `SessionModel` | Owns session positions, cache reservations, rollback, draft history and graph staging. |
+| Layer executor | Applies its attention, recurrence, projections and draft implementation to those rows. |
+
+Legacy GLM uses the same task, continuation, batch and row components through
+its existing session facade. Every serving executor implements the
+`MixedPrefillModel` contract: Qwen4Exp, Qwen35 (including DFlash), GLM, GLM4,
+GLM-DSA, MiMo, DeepSeek V4 and V4.1. A drafter's name is not an eligibility
+rule. The adapters check actual slot, row-capacity, context, continuation
+workspace and graph-variant limits per batch.
+
+Persistent reader state belongs to its request. In particular, V4.1's bounded
+decoder retains each reader's tail separately and falls back to sequential
+reader advancement when their combined final tails exceed scratch capacity.
+Per-tensor activation scales also stay within a request. Decoder prefixes keep
+their decode attention and recurrence paths, including speculative snapshots;
+the rest of the layer walk can share projections where the numerical contract
+permits it. Unfinished readers do not project or mirror unused logits.
 
 The new reader still needs a free slot and its reservation under the existing
 KV policy. Cached text attaches through the same prefix plan and computes

@@ -144,6 +144,9 @@ void qwen35_mtp_concat_bf16(const uint16_t* e, const uint16_t* h, uint16_t* out,
 class Qwen35Model : public SessionModel<Qwen35Model> {
  public:
   using Base = SessionModel<Qwen35Model>;
+  static constexpr bool kPrefillChunkGrid = false;
+  void prepare_mixed_verify(int rows) { gdn_replay_rows_used_ = rows; }
+
   // `dflash2_dir` (a directory holding the drafter's config.json + shards)
   // replaces the MTP draft with the DFlash2 block drafter: mutually
   // exclusive with `mtp`. The target verify captures (the static
@@ -240,7 +243,7 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   const Qwen35KvPool& pool() const { return pool_; }
   void graph_prepare();
   void mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode_row,
-                    bool capture, int head_rows, int batch_requests);
+                    bool capture, int head_rows, int batch_requests, int hidden_row = 0);
   Outputs mtp_forward(const std::vector<int64_t>& token_ids);
   // The cold diagnostic forward (the fixture gates): slot 0, fresh state,
   // every row's logits and final hidden; capture_layers leaves every

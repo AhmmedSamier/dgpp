@@ -7,11 +7,23 @@ contains the real-cluster recipe and latency/throughput trade-offs. The schedule
 suite covers short-reader admission, aligned-share donation, global chunk-grid
 tails and failure cleanup; `qwen_engine_test` exercises admission and donation
 with a real two-rank engine, including MTP3 and row-independent transcript parity.
-Early-admission cases explicitly enable the opt-in; a separate host regression
-checks the default deferral policy. `qwen_decode_test` also checks a donated
+Host policy checks cover automatic admission and explicit overrides.
+`qwen_decode_test` also checks a donated
 share followed by full work budgets across automatic model-grid boundaries,
 with a retained structural snapshot and exact target/draft state against the
 same explicit chunk cuts.
+
+`shared_prefill_test` checks the common continuation and mixed-row contract
+across GLM, GLM4, GLM-DSA, MiMo, Qwen35, DeepSeek V4 and V4.1. It covers eager
+and graph adapters, MTP on/off, compact batches and output storage, cancellation
+and slot reuse, snapshot attachment, stale cursors, decoder rollback, and
+bitwise isolation when a neighboring reader changes. Qwen35 includes FP8,
+mixed NVFP4 and per-tensor FP8; V4.1 includes exact and bounded prefill with
+retained tails larger than a grouped walk's workspace. Cross-shape comparisons
+use the existing session numerical tier and certify changed argmax near ties;
+same-shape isolation and graph token comparisons remain exact. Qwen4Exp retains
+its two-rank `qwen_engine_test` coverage. Run GPU checks serially with production
+stopped, then restore and verify the original deployment.
 
 `prefix_snapshot_test` forces a four-block K/V pool full at snapshot time in
 Qwen and GLM. It covers monolithic and resumable prefill, unchanged target/draft

@@ -1,4 +1,5 @@
 #pragma once
+#include "common/paged_attention_rows.hpp"
 // MiMo-V2.6-Flash layers composed from CUDA kernels, with shape-specific
 // scratch and rebindable weight views. Decode uses fixed grids without
 // host readbacks, allowing graph capture; streaming mode rebinds the
@@ -39,12 +40,7 @@ struct MimoGemmWorkspace {
 // positions (a padding row has pos < 0), and whether they are decode rows
 // (every row's own split geometry, kernels-only) or a prefill chunk of one
 // request (positions pos0 .. pos0 + T - 1, one split).
-struct MimoAttnRows {
-  const int32_t* req_ids = nullptr;
-  const int64_t* pos = nullptr;
-  bool decode = false;
-  bool cache_only = false;  // append K/V without attention or the output projection
-};
+using MimoAttnRows = PagedAttentionRows;
 
 class MimoAttentionLayer {
  public:

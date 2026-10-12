@@ -397,6 +397,7 @@ void Glm4Model::enqueue_layer(const Glm4LayerResident& r, int pool_layer, uint16
     arows.req_ids = rows.req_ids;
     arows.pos = rows.pos;
     arows.decode = rows.decode;
+    arows.decode_prefix = rows.decode_prefix;
     attn_->enqueue(x_, T, arows, pool_.view(pool_layer), attn_out, stream_);
   }
   if (rows.decode) prefetch_ffn_side(r);
@@ -433,6 +434,7 @@ Glm4Model::Outputs Glm4Model::run_rows(const RowRun& run) {
   const bool traces = !run.decode && route_traces_;
   const size_t K = static_cast<size_t>(cfg_.num_experts_per_tok);
   WalkRows rows;
+  rows.decode_prefix = run.decode_rows();
   rows.req_ids = in.req_ids;
   rows.pos = in.pos;
   rows.req = req;
@@ -481,10 +483,7 @@ Glm4Model::Outputs Glm4Model::run_rows(const RowRun& run) {
   // decode row — distinct slots within one launch).
   // A group prefill (several requests' spans in one walk, 2026-09-14)
   // stores every row: each span's last window rows land in its own slot.
-  if (mtp_) {
-    const int n = run.num_spans > 0 ? T : std::min(T, max_decode_rows_);
-    store_draft_hidden(h_ + static_cast<size_t>(T - n) * H, in.req_ids + (T - n), in.pos + (T - n), n);
-  }
+  store_run_draft_hidden(run, in, h_);
   if (run.decode) prefetch_.join(stream_);
   out = finish_run(run, std::move(out), packed_logits);
   if (!run.capture && traces) {
@@ -591,7 +590,7 @@ void Glm4Model::finish_companions() {
 // one full layer (its own pool layer), shared_head.norm, the shared head.
 // ---------------------------------------------------------------------------
 void Glm4Model::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode_row,
-                             bool capture, int head_rows, int batch_requests) {
+                             bool capture, int head_rows, int batch_requests, int hidden_row) {
   if (head_rows > logits_capacity_rows_)
     throw std::invalid_argument("draft head exceeds logits capacity");
   if (!mtp_) throw std::logic_error("mtp_run_rows: MTP is not enabled");
@@ -612,7 +611,7 @@ void Glm4Model::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, 
   // prefill rows read the main chunk's rows in place (h_, the chunk's
   // post-final-norm hidden at rows 0 .. T-1; the head below overwrites
   // h_ only after the fusion has read it — stream order).
-  const uint16_t* hin = h_;
+  const uint16_t* hin = prefill_hidden_span(h_, H, hidden_row, T);
   if (decode_row) {
     gather_draft_hidden(d_req, d_pos, mtp_h_, T);
     hin = mtp_h_;

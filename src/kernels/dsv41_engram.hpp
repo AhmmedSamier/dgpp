@@ -50,8 +50,9 @@ constexpr int kDsv41EngramCtx = 4;  // int32 context words per request (max_ngra
 // not reached that far — a reset request holds pad_class everywhere.
 // tokens: int64 [rows]. ids: int32 [rows, layers, (max_ngram - 1) * heads],
 // row r's entry (l, (n - 2) * heads + h) the table row of layer l's
-// n-gram, head h. A padding row hashes its (valid) token like any other;
-// nothing reads the result.
+// n-gram, head h. Padding in a valid request hashes its valid token;
+// a negative request id hashes pad_class without reading tokens or context.
+// Both produce valid gather indices; neither result is committed.
 void dsv41_engram_hash_ids_rows(const int64_t* tokens, int rows, const int32_t* req_ids,
                                 const int64_t* pos, const int32_t* req_spans, int num_requests,
                                 const int32_t* ctx, const Dsv41EngramHash& h, int32_t* ids,
@@ -60,7 +61,8 @@ void dsv41_engram_hash_ids_rows(const int64_t* tokens, int rows, const int32_t* 
 // compressed ids of that token and the ones before it) — the per-row
 // snapshots a rollback copies back (row accepted-1); the span's last real
 // row's context lands in the request's ctx IN PLACE. A padding row repeats
-// the context as it stands. Enqueue after the hash (which reads the
+// the context as it stands; a negative request id emits zero snapshot rows
+// without accessing any request. Enqueue after the hash (which reads the
 // incoming context).
 void dsv41_engram_context_rows(const int64_t* tokens, int rows, const int32_t* req_ids,
                                const int64_t* pos, const int32_t* req_spans, int num_requests,

@@ -539,8 +539,9 @@ node, available context also depends on draft weights, request slots,
 cache format and arena size. Use the startup plan for the configured limit.
 
 **Budgeted prefill** (`engine.prefill_budget_tokens`, `--prefill-budget-tokens`)
-is supported on Qwen and GLM-5.3-Flash graph engines, including GLM image
-requests. The default, -1, selects 256 tokens rounded down to the engine
+is shared by the eager and graph engines for every serving model family.
+Qwen4Exp and GLM-5.3-Flash also retain their resumable image paths.
+The default, -1, selects 256 tokens rounded down to the engine
 alignment and capped by its prefill limit (at least one aligned unit).
 An explicit zero preserves full-prompt admission within a scheduler pass;
 model and snapshot boundaries still split the work. Qwen retains its internal
@@ -559,9 +560,10 @@ those new streams. Slot and KV reservation limits still apply.
 `engine.prefill_early_admission=false` (`--no-prefill-early-admission`) restores
 the former leftover-only admission. Automatic admission resolves from engine
 capabilities after construction; it does not inspect model or drafter names.
-The current mixed executor is Qwen4Exp; other executors retain their old default
-until their layer execution implements the shared contract. Explicitly enabling
-this policy there does not add mixed execution.
+All serving layer executors implement the mixed-row contract, including the
+Qwen35 executor with DFlash. The adapter checks each batch's row capacity,
+context and continuation workspace before mixing it. Image readers retain
+their existing separate execution paths.
 The budget must be a multiple of the snapshot alignment and fit prefill scratch.
 Smaller chunks trade prefill throughput and TTFT for shorter pauses in
 other streams. Request reservations are held before the first yield, and
@@ -573,8 +575,9 @@ the enabled busy budget, use the same alignment and fit the prefill scratch
 limit. Zero keeps the fixed-budget behavior. The scheduler checks for active
 decode after cancellations and before each chunk, so a long prompt can speed
 up after its decoding peer retires. Required snapshot and structural cuts still
-split chunks. Qwen fills each resumable work budget from the cursor position;
-other model families retain their chunk grids. Short cold prompts can group up
+split chunks. Executors whose state permits arbitrary aligned cuts fill each
+work budget from the cursor position; fixed-grid executors preserve their
+required boundaries. Short cold prompts can group up
 to the selected budget.
 Larger idle chunks also increase the maximum wait for cancellation or a newly
 arriving request; they do not preempt a chunk already running.

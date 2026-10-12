@@ -1484,7 +1484,7 @@ DGPP_TEST(qwen_compact_logits_preserve_cache_concurrency_and_mtp) {
       const int rows = 4 * (depth + 1);
       QwenModel model(cfg, dir, 128, 2048, QwenResidency::Resident, nullptr, 0, 1,
                       4, true, rows, true, compact);
-      require(model.logits_capacity_rows() == (compact ? rows + 1 : 128), "compact decode capacity");
+      require(model.logits_capacity_rows() == (compact ? rows + 3 : 128), "compact decode plus three reader outputs");
       uint16_t* scratch = nullptr;
       DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&scratch),
                                  sizeof(uint16_t) * dgpp::kPickScratchElems(1), cudaHostAllocDefault));

@@ -949,9 +949,13 @@ void Dsv4Model::enqueue_layer_overlap(const Dsv4LayerResident& r, int layer, int
       const int lo = std::max(span0, r0), hi = std::min(span0 + len, r0 + n);
       if (hi > lo) {
         if (!attn_->prepare(hi - lo)) throw std::runtime_error("run_rows: attention GEMM plans unavailable");
-        attn_->enqueue_prefill(x_ + static_cast<size_t>(lo) * H, pool_, rows.span_reqs[sp],
-                               rows.span_pos0[sp] + (lo - span0), hi - lo, attn_out + static_cast<size_t>(lo) * H,
-                               stream_);
+        if (sp < rows.decode_spans)
+          attn_->enqueue_decode(x_ + static_cast<size_t>(lo) * H, pool_, rows.req_ids + lo,
+                                 rows.pos + lo, hi - lo, attn_out + static_cast<size_t>(lo) * H, stream_);
+        else
+          attn_->enqueue_prefill(x_ + static_cast<size_t>(lo) * H, pool_, rows.span_reqs[sp],
+                                 rows.span_pos0[sp] + (lo - span0), hi - lo, attn_out + static_cast<size_t>(lo) * H,
+                                 stream_);
       }
       span0 += len;
     }
@@ -1031,7 +1035,12 @@ void Dsv4Model::enqueue_layer(const Dsv4LayerResident& r, int layer, int T, cons
     attn_->enqueue_decode(x_, pool_, rows.req_ids, rows.pos, T, attn_out, stream_);
   } else if (rows.num_spans > 0) {
     int row0 = 0;
-    for (int s = 0; s < rows.num_spans; ++s) {
+    if (rows.decode_spans) {
+      for (int s = 0; s < rows.decode_spans; ++s) row0 += rows.span_lens[s];
+      if (!attn_->prepare(row0)) throw std::runtime_error("mixed attention GEMM plans unavailable");
+      attn_->enqueue_decode(x_, pool_, rows.req_ids, rows.pos, row0, attn_out, stream_);
+    }
+    for (int s = rows.decode_spans; s < rows.num_spans; ++s) {
       const int len = rows.span_lens[s];
       if (!attn_->prepare(len)) throw std::runtime_error("run_rows: attention GEMM plans unavailable");
       attn_->enqueue_prefill(x_ + static_cast<size_t>(row0) * H, pool_, rows.span_reqs[s], rows.span_pos0[s], len,
@@ -1107,6 +1116,7 @@ Dsv4Model::Outputs Dsv4Model::run_rows(const RowRun& run) {
   const bool traces = !run.decode && route_traces_;
   const size_t K = static_cast<size_t>(cfg_.num_experts_per_tok);
   WalkRows rows;
+  rows.decode_spans = run.decode_spans;
   rows.tokens = in.tokens;
   rows.req_ids = in.req_ids;
   rows.pos = in.pos;
@@ -1135,7 +1145,7 @@ Dsv4Model::Outputs Dsv4Model::run_rows(const RowRun& run) {
       if (len <= 0 || len > prefill_group_span_limit())
         throw std::invalid_argument("run_rows: a group prefill span of " + std::to_string(len) +
                                     " rows exceeds the span limit " + std::to_string(prefill_group_span_limit()));
-      if (run.span_pos0[s] < 0) throw std::invalid_argument("run_rows: a group prefill span at a negative position");
+      if (s >= run.decode_spans && run.span_pos0[s] < 0) throw std::invalid_argument("run_rows: a group prefill span at a negative position");
       span_row0.push_back(at);
       at += len;
     }
@@ -1278,7 +1288,7 @@ Dsv4Model::Outputs Dsv4Model::run_rows(const RowRun& run) {
     }
     if (!run.decode) {
       if (group) {
-        for (int s = 0; s < run.num_spans; ++s)
+        for (int s = run.decode_spans; s < run.num_spans; ++s)
           segment_of(run.span_reqs[s]) = {run.span_pos0[s], run.span_lens[s], span_row0[static_cast<size_t>(s)]};
       } else {
         segment_of(req) = {run.pos0, T, 0};
