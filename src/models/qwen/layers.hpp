@@ -203,6 +203,8 @@ class QwenGdnLayer {
     KdaStateSnapshots rec_snap;
     KdaConvSnapshots conv_snap;
     KdaReplay replay;
+    KdaRequestRows requests;  // a batched decoder prefix; empty for one prefill
+    int64_t rec_stride = 0, conv_stride = 0;
   };
   // Shared projections, with each span's recurrence and rollback sinks.
   void enqueue_spans(const uint16_t* x, uint16_t* out, int tokens,

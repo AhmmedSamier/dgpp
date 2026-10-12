@@ -672,7 +672,13 @@ void QwenGdnLayer::enqueue_spans(const uint16_t* x, uint16_t* out, int tokens,
     const size_t qoff = static_cast<size_t>(at) * C;
     const size_t goff = static_cast<size_t>(at) * lv_;
     uint16_t* core = core_ + static_cast<size_t>(at) * LV;
-    if (!span.recurrent) {
+    if (span.requests.num_requests > 0) {
+      kda_causal_conv_silu_bf16_batched(qkv_ + qoff, C, w_.conv, span.conv, span.conv_stride,
+          conv_width_ - 1, qkvc_ + qoff, span.rows, C, conv_width_, span.requests, stream, span.conv_snap);
+      gdn_recurrent_fwd_batched(qkvc_ + qoff, a_ + goff, lv_, b_ + goff, lv_, w_.a_log, w_.dt_bias,
+          span.recurrent, span.rec_stride, core, span.rows, lv_, lv_ / lk_, k_dim_, v_dim_, scale_,
+          span.requests, stream, span.rec_snap, span.replay);
+    } else if (!span.recurrent) {
       DGPP_CUDA_OK(cudaMemsetAsync(core, 0, static_cast<size_t>(span.rows) * LV * 2, stream));
     } else {
       kda_causal_conv_silu_bf16(qkv_ + qoff, C, w_.conv, span.conv, conv_width_ - 1,

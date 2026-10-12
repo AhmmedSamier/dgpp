@@ -99,10 +99,6 @@ QwenModel::QwenModel(const QwenTextConfig& cfg, const std::string& checkpoint_di
     sp.draft_width = W;
     sp.eos = static_cast<int32_t>(cfg_.eos_token_ids[0]);
     init_session(sp);
-    std::array<int32_t, 2 * kSpecRows> spans{};
-    for (int i = 0; i < kSpecRows; ++i) spans[2 * i + 1] = i + 1;
-    mixed_single_spans_ = dev_alloc<int32_t>(spans.size());
-    DGPP_CUDA_OK(cudaMemcpy(mixed_single_spans_, spans.data(), sizeof(spans), cudaMemcpyHostToDevice));
   }
   gemm_ws_bytes_ = std::max<size_t>(64u << 20, gemm_.query_workspace_bytes(max_tokens_, lm_vocab_count_, H, DType::BF16));
   gemm_ws_ = dev_alloc<char>(gemm_ws_bytes_);
@@ -404,7 +400,6 @@ QwenModel::MemoryPlan QwenModel::plan_memory(const QwenTextConfig& cfg, int max_
 }
 
 QwenModel::~QwenModel() {
-  cudaFree(mixed_single_spans_);
   cudaFree(gdn_rec_);
   cudaFree(gdn_conv_);
   cudaFree(ple_conv_state_);
@@ -1094,36 +1089,32 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
       } else if (run.num_spans > 0) {
         // A group prefill (2026-09-14): each span's rows scan its own
         // request's recurrent and conv state (the pointers step by rows).
-        int64_t row0 = 0;
         std::vector<QwenGdnLayer::Span> shared_spans;
-        for (int sp = 0; sp < run.num_spans; ++sp) {
+        if (mixed) {
+          QwenGdnLayer::Span prefix;
+          prefix.rows = spec_rows;
+          prefix.recurrent = gdn_rec(0, gdn_ordinal);
+          prefix.conv = gdn_conv(0, gdn_ordinal);
+          prefix.rec_stride = static_cast<int64_t>(num_gdn_) * gdn_rec_elems_;
+          prefix.conv_stride = static_cast<int64_t>(num_gdn_) * gdn_conv_elems_;
+          prefix.rec_snap = rec_snap;
+          prefix.conv_snap = conv_snap;
+          prefix.requests = rows;
+          prefix.requests.num_requests = run.decode_spans;
+          if (gdn_replay_) {
+            prefix.replay = gdn_replay_view(0, gdn_ordinal, true);
+            for (int sp = 0; sp < run.decode_spans; ++sp)
+              gdn_replay_rows_used_ = std::max(gdn_replay_rows_used_, run.span_lens[sp]);
+          }
+          shared_spans.push_back(prefix);
+        }
+        for (int sp = run.decode_spans; sp < run.num_spans; ++sp) {
           const int len = run.span_lens[sp], sreq = run.span_reqs[sp];
-          if (run.span_pos0[sp] < 0) {
-            QwenGdnLayer::Span padding{};
-            padding.rows = len;
-            shared_spans.push_back(padding);
-            row0 += len;
-            continue;
-          }
-          KdaStateSnapshots span_rec;
-          KdaConvSnapshots span_conv;
-          KdaReplay span_replay;
-          if (sp < run.decode_spans) {
-            if (snapshots) {
-              span_rec = rec_snap;
-              span_conv = conv_snap;
-              if (span_rec.states) span_rec.states += row0 * span_rec.stride_elems;
-              if (span_conv.states)
-                span_conv.states = static_cast<uint16_t*>(span_conv.states) + row0 * span_conv.stride_elems;
-            }
-            if (gdn_replay_) {
-              span_replay = gdn_replay_view(sreq, gdn_ordinal, false);
-              gdn_replay_rows_used_ = std::max(gdn_replay_rows_used_, len);
-            }
-          }
-          shared_spans.push_back({len, gdn_rec(sreq, gdn_ordinal), gdn_conv(sreq, gdn_ordinal),
-                                 span_rec, span_conv, span_replay});
-          row0 += len;
+          QwenGdnLayer::Span reader;
+          reader.rows = len;
+          reader.recurrent = gdn_rec(sreq, gdn_ordinal);
+          reader.conv = gdn_conv(sreq, gdn_ordinal);
+          shared_spans.push_back(reader);
         }
         gdn_->enqueue_spans(x_, attn_out, T, shared_spans, stream_);
       } else {
@@ -1148,19 +1139,21 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
         // and writes its pools and ring (the row metadata steps with the rows).
         int64_t row0 = 0;
         std::vector<QwenQsaLayer::Span> shared_spans;
-        for (int sp = 0; sp < run.num_spans; ++sp) {
+        if (mixed) {
+          QwenQsaRows prefix = qrows;
+          prefix.decode = true;
+          prefix.num_requests = run.decode_spans;
+          shared_spans.push_back({spec_rows, prefix});
+          row0 = spec_rows;
+        }
+        for (int sp = run.decode_spans; sp < run.num_spans; ++sp) {
           const int len = run.span_lens[sp];
           QwenQsaRows srows = qrows;
           srows.req_ids = d_req + row0;
           srows.pos = d_pos + row0;
           srows.request = run.span_reqs[sp];
           srows.pos0 = run.span_pos0[sp];
-          srows.decode = sp < run.decode_spans;
-          srows.ring_snapshots = snapshots && srows.decode ? qrows.ring_snapshots + row0 * ring_elems() : nullptr;
-          if (srows.decode) {
-            srows.spans = mixed_single_spans_ + 2 * (len - 1);
-            srows.num_requests = 1;
-          }
+          srows.ring_snapshots = nullptr;
           shared_spans.push_back({len, srows});
           row0 += len;
         }

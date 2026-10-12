@@ -262,7 +262,6 @@ class QwenModel : public SessionModel<QwenModel> {
   const bool fp8_head_mma_;
   static constexpr int kBlockTokens = 64;
   static constexpr int kPrefillChunkTokens = 4096;
-  int32_t* mixed_single_spans_ = nullptr;  // [kSpecRows][0, length]
 
   // The images of the prefill currently running (null outside one), plus the
   // staged rows covering [image_window_first_, image_window_end_). The engine
