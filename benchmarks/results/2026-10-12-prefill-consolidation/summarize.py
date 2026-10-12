@@ -68,7 +68,10 @@ def main():
         metadata[label]['checkpoint_receipts'] = [line.split('INFO  ', 1)[1]
             for line in log.read_text().splitlines()
             if re.search(r'INFO  (?:model [^ ]+|dflash2 drafter) -> ', line)]
-        assert metadata[label]['opstreams']['match'], 'rank operation streams differ'
+        streams = metadata[label]['opstreams']
+        config = metadata[label]['config']
+        single_eager = config['world_size'] == 1 and not config['engine'].get('decode_graph', True)
+        assert streams['match'] is True or (single_eager and not streams['hashes']), 'rank operation streams differ'
         cache_path = directory / 'mixed-cache.json'
         if cache_path.exists():
             cache = read(cache_path)

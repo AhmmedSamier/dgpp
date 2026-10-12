@@ -202,9 +202,13 @@ def main():
                      '--log-dir', directory / 'world'], directory / 'down.log', test=True, check=False)
                 hashes = {p.name: hashlib.file_digest(p.open('rb'), 'sha256').hexdigest()
                           for p in sorted((directory / 'world').glob('serve_rank*.ops'))}
+                single_eager = base['world_size'] == 1 and not base['engine'].get('decode_graph', True)
                 match = len(hashes) == base['world_size'] and len(set(hashes.values())) == 1
-                (directory / 'opstreams.json').write_text(json.dumps(dict(hashes=hashes, match=match), indent=2) + '\n')
-            assert match, directory
+                if single_eager and not hashes:
+                    match = None  # no fabric operation journal in the local eager path
+                (directory / 'opstreams.json').write_text(json.dumps(dict(
+                    hashes=hashes, match=match, required=not single_eager), indent=2) + '\n')
+            assert match is True or (single_eager and not hashes), directory
             if args.profile:
                 run(['/usr/local/cuda/bin/nsys', 'export', '--type', 'sqlite', '--force-overwrite=true',
                      '-o', directory / 'rank0.sqlite', directory / 'rank0.nsys-rep'], directory / 'export.log')
