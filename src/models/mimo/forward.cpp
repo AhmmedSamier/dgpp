@@ -506,10 +506,10 @@ const uint16_t* MimoModel::enqueue_layer(const MimoLayerResident& r, int pool_la
   const int H = cfg_.hidden_size;
   const float eps = cfg_.rms_norm_eps;
   build_layer_objects(r);
-  const auto groups = [&](auto&& enqueue) {
+  const auto groups = [&](bool combine_readers, auto&& enqueue) {
     if (rows.run)
-      rows.run->for_each_kernel_group([](int count, int next) {
-        return count > 128 && next > 128;
+      rows.run->for_each_kernel_group([&](int count, int next) {
+        return combine_readers || (count > 128 && next > 128);
       }, enqueue);
     else
       enqueue(0, T, rows.decode, 0);
@@ -517,7 +517,7 @@ const uint16_t* MimoModel::enqueue_layer(const MimoLayerResident& r, int pool_la
   // ---- the attention block --------------------------------------------------
   add_rmsnorm_bf16(resid, pending, r.input_norm, x_, T, H, eps, stream_);
   uint16_t* attn_out = stage(y_, T, H, rows.capture);
-  groups([&](int row0, int count, bool decode, int) {
+  groups(false, [&](int row0, int count, bool decode, int) {
     MimoAttnRows arows;
     arows.req_ids = rows.req_ids + row0;
     arows.pos = rows.pos + row0;
@@ -532,7 +532,7 @@ const uint16_t* MimoModel::enqueue_layer(const MimoLayerResident& r, int pool_la
   // ---- the MLP / MoE block ----------------------------------------------------
   add_rmsnorm_bf16(resid, attn_out, r.post_norm, x_, T, H, eps, stream_);
   uint16_t* ffn_out = stage(y_, T, H, rows.capture);
-  groups([&](int row0, int count, bool decode, int) {
+  groups(r.moe, [&](int row0, int count, bool decode, int) {
     const size_t offset = static_cast<size_t>(row0) * H;
     if (r.moe) {
       MoeTraceStaging trace;

@@ -389,31 +389,53 @@ void Glm4Model::enqueue_layer(const Glm4LayerResident& r, int pool_layer, uint16
   const float eps = cfg_.rms_norm_eps;
   const int64_t n = static_cast<int64_t>(T) * H;
   build_layer_objects(r);
+  const auto groups = [&](bool combine_readers, auto&& enqueue) {
+    if (rows.run)
+      rows.run->for_each_kernel_group([&](int count, int next) {
+        return combine_readers || (count > 128 && next > 128);
+      }, enqueue);
+    else
+      enqueue(0, T, rows.decode, 0);
+  };
   // ---- the attention block --------------------------------------------------
   glm_rmsnorm_bf16(resid, r.input_norm, x_, T, H, eps, stream_);
   uint16_t* attn_out = stage(y_, T, H, rows.capture);
-  {
+  groups(false, [&](int row0, int count, bool decode, int) {
     Glm4AttnRows arows;
-    arows.req_ids = rows.req_ids;
-    arows.pos = rows.pos;
-    arows.decode = rows.decode;
-    arows.decode_prefix = rows.decode_prefix;
-    attn_->enqueue(x_, T, arows, pool_.view(pool_layer), attn_out, stream_);
-  }
+    arows.req_ids = rows.req_ids + row0;
+    arows.pos = rows.pos + row0;
+    arows.decode = decode;
+    gemm_.set_bf12_wide(decode);
+    const size_t offset = static_cast<size_t>(row0) * H;
+    attn_->enqueue(x_ + offset, count, arows, pool_.view(pool_layer), attn_out + offset, stream_);
+  });
+  gemm_.set_bf12_wide(rows.decode);
   if (rows.decode) prefetch_ffn_side(r);
   fold(attn_out, T, H, rows.capture);  // block boundary 1: o_proj's partial
   glm_residual_add_bf16(resid, attn_out, n, stream_);
   // ---- the MLP / MoE block ----------------------------------------------------
   glm_rmsnorm_bf16(resid, r.post_norm, x_, T, H, eps, stream_);
   uint16_t* ffn_out = stage(y_, T, H, rows.capture);
-  if (r.moe) {
-    if (rows.decode)
-      moe_->enqueue_decode(x_, ffn_out, T, nullptr, stream_, rows.moe_table_slot);
-    else
-      moe_->enqueue_prefill(x_, ffn_out, T, rows.trace, stream_);
-  } else {
-    dense_->enqueue(x_, T, ffn_out, stream_);
-  }
+  groups(r.moe, [&](int row0, int count, bool decode, int) {
+    const size_t offset = static_cast<size_t>(row0) * H;
+    if (r.moe) {
+      MoeTraceStaging trace;
+      if (rows.trace) {
+        trace.ids = rows.trace->ids + static_cast<size_t>(row0) * cfg_.num_experts_per_tok;
+        trace.weights = rows.trace->weights + static_cast<size_t>(row0) * cfg_.num_experts_per_tok;
+        trace.biased = rows.trace->biased
+            ? rows.trace->biased + static_cast<size_t>(row0) * cfg_.n_routed_experts : nullptr;
+      }
+      if (rows.decode)
+        moe_->enqueue_decode(x_ + offset, ffn_out + offset, count, nullptr, stream_,
+                              rows.moe_table_slot);
+      else
+        moe_->enqueue_prefill(x_ + offset, ffn_out + offset, count,
+                               rows.trace ? &trace : nullptr, stream_, decode ? count : 0);
+    } else {
+      dense_->enqueue(x_ + offset, count, ffn_out + offset, stream_);
+    }
+  });
   if (rows.decode) prefetch_attention_side(r.layer + 1);
   fold(ffn_out, T, H, rows.capture);  // block boundary 2: the sliced down projections
   glm_residual_add_bf16(resid, ffn_out, n, stream_);
@@ -434,7 +456,7 @@ Glm4Model::Outputs Glm4Model::run_rows(const RowRun& run) {
   const bool traces = !run.decode && route_traces_;
   const size_t K = static_cast<size_t>(cfg_.num_experts_per_tok);
   WalkRows rows;
-  rows.decode_prefix = run.decode_rows();
+  rows.run = &run;
   rows.req_ids = in.req_ids;
   rows.pos = in.pos;
   rows.req = req;
@@ -470,6 +492,7 @@ Glm4Model::Outputs Glm4Model::run_rows(const RowRun& run) {
   // prefill row. All-row diagnostics and decode keep their full head.
   glm_rmsnorm_bf16(resid_, globals_.final_norm, h_, T, H, cfg_.rms_norm_eps, stream_);
   const bool packed_logits = project_head_rows(run, [&](int input_row, int output_row, int rows) {
+    gemm_.set_bf12_wide(run.decode || input_row < run.decode_rows());
     gemm_.matmul(h_ + static_cast<size_t>(input_row) * H, globals_.lm_head,
                  logits_ + static_cast<size_t>(output_row) * lm_vocab_count_, rows, lm_vocab_count_,
                  H, DType::BF16, GemmOut::F32, static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_,
