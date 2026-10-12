@@ -1170,6 +1170,61 @@ DGPP_TEST(moe_enqueue_prefill_is_bitwise_the_host_path) {
 
 }  // namespace
 
+DGPP_TEST(moe_mixed_rows_preserve_decode_and_reader_recipes) {
+  constexpr int M = 67, D = 4, H = 512, K = 4, E = 8;
+  for (int format = 0; format < 4; ++format) {
+    SmallCase c = make_small_case(E, H, 256, K, M, 0xDEC0DE + format,
+        /*nvfp4=*/format == 1 || format == 2, /*shared_nvfp4=*/format == 1,
+        /*packq_bits=*/format == 3 ? 4 : 0, /*fp4_group=*/format == 2 ? 32 : 16);
+    c.cfg.shared_mma_aside = format == 2;  // native shared expert on side streams
+    c.alloc();
+    {
+      GlmMoeLayer layer(c.dev_w, c.cfg, M, D);
+      std::vector<uint16_t> expected(static_cast<size_t>(M) * H);
+      int32_t* ids = nullptr;
+      float* weights = nullptr;
+      DGPP_CUDA_OK(cudaHostAlloc(&ids, M * K * sizeof(int32_t), cudaHostAllocDefault));
+      DGPP_CUDA_OK(cudaHostAlloc(&weights, M * K * sizeof(float), cudaHostAllocDefault));
+      dgpp::MoeTraceStaging trace{ids, weights, nullptr};
+      layer.enqueue_prefill(c.d_hidden, c.d_out, M, &trace, nullptr);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      std::memcpy(expected.data(), c.d_out, expected.size() * sizeof(uint16_t));
+      const std::vector<int32_t> expected_ids(ids, ids + M * K);
+      const std::vector<float> expected_weights(weights, weights + M * K);
+      layer.enqueue_decode(c.d_hidden, c.d_out, D, nullptr, nullptr);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      std::memcpy(expected.data(), c.d_out, D * H * sizeof(uint16_t));
+      for (int total : {D, M}) {
+        DGPP_CUDA_OK(cudaMemset(c.d_out, 0x7F, expected.size() * sizeof(uint16_t)));
+        layer.enqueue_prefill(c.d_hidden, c.d_out, total, &trace, nullptr, D);
+        DGPP_CUDA_OK(cudaDeviceSynchronize());
+        require(std::memcmp(expected.data(), c.d_out, total * H * sizeof(uint16_t)) == 0,
+                "mixed expert rows preserve native decoder and grouped reader outputs");
+        require(std::equal(expected_ids.begin(), expected_ids.begin() + total * K, ids),
+                "mixed expert traces preserve route ids with optional biased staging");
+        require(std::equal(expected_weights.begin(), expected_weights.begin() + total * K, weights),
+                "mixed expert traces preserve route weights");
+        // Boundaries before, within and after the decoder prefix; reverse
+        // accumulation order also exercises the overlap caller's contract.
+        for (int split : {1, D - 1, D, total}) {
+          DGPP_CUDA_OK(cudaMemset(c.d_out, 0x7F, expected.size() * sizeof(uint16_t)));
+          layer.route_prefill_rows(c.d_hidden, 0, split, nullptr);
+          layer.route_prefill_rows(c.d_hidden, split, total - split, nullptr);
+          layer.enqueue_prefill_phased(c.d_hidden, total, nullptr, D, c.d_out);
+          layer.accumulate_prefill_rows(c.d_out, total, split, total - split, nullptr, D);
+          layer.accumulate_prefill_rows(c.d_out, total, 0, split, nullptr, D);
+          DGPP_CUDA_OK(cudaDeviceSynchronize());
+          require(std::memcmp(expected.data(), c.d_out, total * H * sizeof(uint16_t)) == 0,
+                  "phased mixed expert rows preserve both recipes across split boundaries");
+        }
+      }
+      cudaFreeHost(ids);
+      cudaFreeHost(weights);
+    }
+    c.free_all();
+  }
+}
+
 DGPP_TEST(moe_router_tiled_dots_are_bitwise_the_warp_form) {
   // The prefill router's tiled dots (16 tokens x 16 experts per block,
   // operands staged in shared memory) against the warp-per-(token, expert)

@@ -666,9 +666,10 @@ int GlmMoeLayer::routed_seg_max_rows(const MoeSegment* d_segs, int n_segs,
 void GlmMoeLayer::enqueue_prefill(const uint16_t* hidden, uint16_t* out,
                                   int tokens, MoeTraceStaging* trace,
                                   cudaStream_t stream, int decode_prefix) {
-  if (decode_prefix < 0 || decode_prefix > tokens || decode_prefix > decode_slots_)
+  if (decode_prefix < 0 || decode_prefix > std::max(0, tokens) || decode_prefix > decode_slots_)
     throw std::invalid_argument("GlmMoeLayer: mixed decoder prefix exceeds row capacity");
   if (decode_prefix) {
+    if (tokens > max_tokens_) throw std::invalid_argument("GlmMoeLayer: tokens exceed max_tokens");
     if (decode_prefix < tokens) enqueue_prefill(hidden, out, tokens, trace, stream);
     enqueue_decode(hidden, out, decode_prefix, nullptr, stream);
     // Prefill staging permits omitted biased scores. Update the prefix
@@ -677,11 +678,14 @@ void GlmMoeLayer::enqueue_prefill(const uint16_t* hidden, uint16_t* out,
       if (!trace->ids || !trace->weights)
         throw std::invalid_argument("GlmMoeLayer: incomplete trace staging");
       const size_t tk = static_cast<size_t>(decode_prefix) * cfg_.top_k;
-      DGPP_CUDA_OK(cudaMemcpyAsync(trace->ids, d_ids_, tk * sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
-      DGPP_CUDA_OK(cudaMemcpyAsync(trace->weights, d_weights_, tk * sizeof(float), cudaMemcpyDeviceToHost, stream));
+      DGPP_CUDA_OK(cudaMemcpyAsync(trace->ids, d_ids_, tk * sizeof(int32_t),
+                                  cudaMemcpyDeviceToHost, stream));
+      DGPP_CUDA_OK(cudaMemcpyAsync(trace->weights, d_weights_, tk * sizeof(float),
+                                  cudaMemcpyDeviceToHost, stream));
       if (trace->biased)
         DGPP_CUDA_OK(cudaMemcpyAsync(trace->biased, d_biased_,
-            static_cast<size_t>(decode_prefix) * cfg_.n_experts * sizeof(float), cudaMemcpyDeviceToHost, stream));
+            static_cast<size_t>(decode_prefix) * cfg_.n_experts * sizeof(float),
+            cudaMemcpyDeviceToHost, stream));
     }
     return;
   }
@@ -734,9 +738,11 @@ void GlmMoeLayer::route_prefill_rows(const uint16_t* hidden, int r0, int rows, c
 
 void GlmMoeLayer::enqueue_prefill_phased(const uint16_t* hidden, int tokens, cudaStream_t stream,
                                        int decode_prefix, uint16_t* out) {
-  if (decode_prefix < 0 || decode_prefix > tokens || decode_prefix > decode_slots_ || (decode_prefix && !out))
+  if (decode_prefix < 0 || decode_prefix > std::max(0, tokens) ||
+      decode_prefix > decode_slots_ || (decode_prefix && !out))
     throw std::invalid_argument("GlmMoeLayer: phased mixed decoder prefix");
   if (decode_prefix) {
+    if (tokens > max_tokens_) throw std::invalid_argument("GlmMoeLayer: tokens exceed max_tokens");
     if (decode_prefix < tokens) enqueue_prefill_phased(hidden, tokens, stream);
     // Slot down rows and grouped down rows have separate storage. Native
     // routing changes only the prefix; reader maps and weights stay valid
@@ -756,13 +762,14 @@ void GlmMoeLayer::enqueue_prefill_phased(const uint16_t* hidden, int tokens, cud
 
 void GlmMoeLayer::accumulate_prefill_rows(uint16_t* out, int tokens, int r0, int rows, cudaStream_t stream,
                                          int decode_prefix) {
-  if (decode_prefix < 0 || decode_prefix > tokens)
+  if (decode_prefix < 0 || decode_prefix > std::max(0, tokens))
     throw std::invalid_argument("GlmMoeLayer: accumulation decoder prefix");
+  if (rows <= 0) return;
+  if (!out || r0 < 0 || r0 + rows > tokens) throw std::invalid_argument("GlmMoeLayer: accumulation rows");
   const int skip = std::min(rows, std::max(0, decode_prefix - r0));
   r0 += skip;
   rows -= skip;
   if (rows <= 0) return;
-  if (!out || r0 < 0 || r0 + rows > tokens) throw std::invalid_argument("GlmMoeLayer: accumulation rows");
   const size_t H = cfg_.hidden, K = static_cast<size_t>(cfg_.top_k), R = static_cast<size_t>(r0);
   launch_moe_accum_ordered(out + R * H, d_down_, H, d_slot_row_ + R * K, d_ids_ + R * K, d_weights_ + R * K,
                            static_cast<int>(static_cast<size_t>(tokens) * K) + r0, rows, static_cast<int>(K),
