@@ -44,6 +44,12 @@ temperature zero as a guarantee of identical floating-point reductions.
 A one-token completion can contain only a special token; record completion and
 usage without inventing a first-visible-token timestamp.
 
+When defaults change, report both default-versus-default and matched-budget
+comparisons. Matched budgets mean explicitly setting the same busy and idle
+prefill limits on both builds; this is a benchmark control, not a separate
+serving mode. Record the resolved admission policy as well. Equal token budgets
+alone do not guarantee identical physical row batches or admission timing.
+
 Run GPU and fabric checks serially on idle hardware, then restore and verify the
 original configuration and executable on every rank. Inventory checkpoint and
 resident caches before downloading missing weights. Finish downloads and peer
@@ -196,6 +202,31 @@ one-shot between passes. `dsv41_tp_test`'s group-prefill gate runs the
 walk through both reducers (`BusBoundaryReducer`, `BusStreamReducer`) and
 requires every layer's rows and the logits bitwise between them, at 12
 and 51 rows (the wide group's folds take the bulk path under both).
+
+For bulk, latency-tail and stream-reducer memcheck coverage, run `bus_test`
+with one rank per GPU on separate nodes. Start the following on every rank,
+replacing `RANK` with 0 through `WORLD-1` and `HEAD` with rank 0's address:
+
+```bash
+/usr/local/cuda/bin/compute-sanitizer --tool memcheck \
+  --error-exitcode 86 --leak-check full "$BUILD/bus_test" \
+  --bulk-rank RANK --world WORLD --peer HEAD --port 29924
+```
+
+Use the same binary, world, port and lane selection on every rank. Run worlds
+2 and 4, each with and without `--one-lane`. Each run checks 20 sizes, including
+short words and partial segment tails, through bulk, latency-chunked and stream
+reduction against the canonical BF16 chain. The normal collective watchdogs
+remain enabled. Require every process to exit successfully and report zero
+sanitizer errors and leaks.
+
+The normal `DGPP_TEST_FILTER=allreduce_bulk` loopback matrix still exercises
+multiple ranks in one process. On the tested CUDA 13.0 / Compute Sanitizer
+2025.3.1 stack, that shared-context memcheck run stalls at phase transitions;
+moving allocations and pinning readback buffers did not resolve it. Separate
+GPUs complete the same matrix under memcheck. A timed-out loopback run is not
+a sanitizer pass, and its absence of memory-error reports is not sufficient
+validation.
 
 ## The near-tie rule of the batched engine gates (2026-09-14)
 

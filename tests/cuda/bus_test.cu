@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1051,6 +1052,51 @@ int allreduce_bulk_rank_work(CollectiveBus& bus, int world, int my_rank,
   return failures;
 }
 
+std::vector<size_t> bulk_case_sizes(bool one_lane) {
+  const size_t stripe = 262144 / 2;
+  const size_t segment = stripe * 8 * (one_lane ? 1 : 2);
+  return {2, 4, 6, 8, 2048, 4094, 4096, 4098, 8190, 8192, 8194, 2 * stripe + 100,
+          segment, segment + 2, segment + 6, segment + 4096, segment + 4098,
+          segment + 8192, segment + 8194, 41 * stripe - 32};
+}
+
+// One process per GPU, as in serving. This also lets Compute Sanitizer check
+// the real distributed bulk/latency/stream composition without placing every
+// rank's spinning kernels in the same instrumented CUDA context.
+int distributed_bulk_cases(int rank, int world, const std::string& peer,
+                           uint16_t port, bool one_lane) {
+  auto options = base_options(rank, port);
+  options.world_size = world;
+  options.rendezvous_host = rank == 0 ? "" : peer;
+  options.launch_consumers = false;
+  if (one_lane) options.lane_devices.resize(1);
+  CollectiveBus bus(options);
+  std::string error;
+  if (!bus.start(&error)) {
+    DGPP_LOG_ERROR("distributed bulk rank {}: {}", rank, error);
+    return 1;
+  }
+  int failures = 0;
+  for (const size_t elems : bulk_case_sizes(one_lane)) {
+    std::vector<std::vector<uint16_t>> sources(static_cast<size_t>(world));
+    for (int r = 0; r < world; ++r) fill_rank_bf16(&sources[static_cast<size_t>(r)], elems, r);
+    std::vector<uint16_t> want(elems);
+    for (size_t i = 0; i < elems; ++i) {
+      float value = 0;
+      for (int r = 0; r < world; ++r) value += dgpp::net::bf16_to_f32(sources[static_cast<size_t>(r)][i]);
+      want[i] = dgpp::net::bf16_from_f32_rne(value);
+    }
+    const int bad = allreduce_bulk_rank_work(bus, world, rank, elems, 2, &want);
+    failures += bad;
+    DGPP_LOG_INFO("distributed bulk rank={} world={} lanes={} elems={}: {} failures",
+                  rank, world, bus.lane_count(), elems, bad);
+    if (bad) break;
+  }
+  bus.quiesce();
+  bus.stop();
+  return failures == 0 ? 0 : 1;
+}
+
 void scenario_allreduce_bulk() {
   // The prefill class (§6.3): segment-quantized reduce-scatter + allgather
   // over the bulk pool. Sizes chosen to exercise the degenerate geometry:
@@ -1060,18 +1106,11 @@ void scenario_allreduce_bulk() {
   // chain and against the latency-chunked path (identical chains).
   // DGPP_BULK_ONE_LANE=1 bisects lane-dependent failures (bring-up).
   int failures = 0;
-  const size_t stripe = 262144 / 2;  // loopback option bulk_slot_bytes/2
   const bool one_lane = std::getenv("DGPP_BULK_ONE_LANE") != nullptr;
-  const size_t segment = stripe * 8 * (one_lane ? 1 : 2);
 
   for (const int world : {2, 4}) {
     const uint16_t port = world == 2 ? 29904 : 29905;
-    for (const size_t elems : {static_cast<size_t>(2), size_t{4}, size_t{6}, size_t{8},
-                               size_t{2048}, size_t{4094}, size_t{4096}, size_t{4098},
-                               size_t{8190}, size_t{8192}, size_t{8194}, 2 * stripe + 100,
-                               segment, segment + 2, segment + 6, segment + 4096, segment + 4098,
-                               segment + 8192, segment + 8194,
-                               41 * stripe - 32}) {
+    for (const size_t elems : bulk_case_sizes(one_lane)) {
       std::vector<std::unique_ptr<CollectiveBus>> world_buses =
           start_world(world, port, one_lane);
       if (world_buses.empty()) {
@@ -2153,7 +2192,7 @@ void scenario_world_of_one() {
   DGPP_LOG_INFO("scenario: a world of one OK");
 }
 
-int main() {
+int main(int argc, char** argv) {
   dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");
   // One process, several ranks, each with kernels that spin on a peer's
   // doorbell: CUDA's default LAZY module loading deadlocks that shape (a
@@ -2168,6 +2207,32 @@ int main() {
   if (err != cudaSuccess || devices == 0) {
     DGPP_LOG_INFO("no CUDA device visible; skipping bus_test");
     return 2;
+  }
+
+  if (argc > 1) {
+    int rank = -1, world = 0, port = 29924;
+    std::string peer;
+    bool one_lane = false;
+    try {
+      for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--one-lane") { one_lane = true; continue; }
+        if (i + 1 >= argc) throw std::invalid_argument("missing value for " + arg);
+        const std::string value = argv[++i];
+        if (arg == "--bulk-rank") rank = std::stoi(value);
+        else if (arg == "--world") world = std::stoi(value);
+        else if (arg == "--peer") peer = value;
+        else if (arg == "--port") port = std::stoi(value);
+        else throw std::invalid_argument("unknown option " + arg);
+      }
+      if ((world != 2 && world != 4) || rank < 0 || rank >= world ||
+          (rank != 0 && peer.empty()) || port < 1 || port > 65535)
+        throw std::invalid_argument("use --bulk-rank R --world 2|4 --peer HOST [--port N] [--one-lane]");
+      return distributed_bulk_cases(rank, world, peer, static_cast<uint16_t>(port), one_lane);
+    } catch (const std::exception& e) {
+      DGPP_LOG_ERROR("distributed bulk: {}", e.what());
+      return 2;
+    }
   }
 
   scenario_world_of_one();
