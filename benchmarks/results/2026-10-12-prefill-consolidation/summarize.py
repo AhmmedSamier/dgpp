@@ -77,6 +77,7 @@ def main():
             cache = read(cache_path)
             actual = cache['mixed']
             metadata[label]['cache_check'] = dict(
+                arguments=cache.get('arguments', {}),
                 transcript_matches=cache['transcript_matches'],
                 first_token_during_prefill=cache.get('first_token_during_prefill'),
                 finishes_during_prefill=cache['finishes_during_prefill'],

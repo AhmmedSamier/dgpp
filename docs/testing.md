@@ -24,6 +24,10 @@ use the existing session numerical tier and certify changed argmax near ties;
 same-shape isolation and graph token comparisons remain exact. Qwen4Exp retains
 its two-rank `qwen_engine_test` coverage. Run GPU checks serially with production
 stopped, then restore and verify the original deployment.
+`qwen_image_prefill_test` also destroys the caller's prompt, image and boundary
+buffers after starting a shared `PrefillTask`. Its yielded execution must retain
+the target and MTP results, snapshot chain and KV cleanup behavior. Run it with
+`glm_vision_stream_test` and `glm_vision_frontend_test` when changing that lifetime.
 
 The [shared-prefill campaign](../benchmarks/results/2026-10-12-prefill-consolidation/campaign.py)
 compares previous and candidate serving executables using the same deployment,
@@ -34,6 +38,13 @@ and retained KV usage. Summaries retain both total work time and stream update
 gaps: a throughput improvement must not hide a longer decode interruption.
 A single special token can render no text; that prefill probe records a complete
 response and token usage, with no first-text latency measurement.
+An isolated-versus-loaded transcript difference needs investigation: row shapes
+can change numerical reductions. The cache probe's diagnostic mode can record
+decoder-only comparisons and token probabilities; hidden reasoning must be
+folded into content to expose those probabilities through the chat API. Preserve
+the failed case and compare both binaries at matching budgets. A no-thinking
+counting probe is available as a separate cache lifecycle check; its arguments
+are recorded and it does not replace the original diagnostic evidence.
 
 Run campaigns serially on idle hardware. Each campaign stops production and
 restores its original configuration and executable in `finally`, verifying all

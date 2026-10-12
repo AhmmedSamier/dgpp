@@ -89,6 +89,8 @@ def main():
     ap.add_argument('--candidate-idle-budget', type=int, help='Experimental candidate idle budget override.')
     ap.add_argument('--no-resident-cache', action='store_true')
     ap.add_argument('--cache-check', action='store_true')
+    ap.add_argument('--cache-no-thinking', action='store_true',
+                    help='Use the checkpoint template’s no-thinking counting response for the cache gate.')
     ap.add_argument('--explicit-budget-check', action='store_true',
                     help='After timing, also boot the candidate with an explicit 256-token budget.')
     ap.add_argument('--profile', action='store_true', help='CUDA trace on one node; not a throughput measurement.')
@@ -196,6 +198,8 @@ def main():
                     (directory / 'mixed-cache-script.py').write_bytes(cache_script.read_bytes())
                     command = ['python3', cache_script,
                                '--out', directory / 'mixed-cache.json']
+                    if args.cache_no_thinking:
+                        command.append('--no-thinking')
                     if label == 'control':
                         command.append('--diagnostic')  # the old executor may defer admission
                     run(command, directory / 'mixed-cache.log', test=True)
