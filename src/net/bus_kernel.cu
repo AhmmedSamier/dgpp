@@ -1063,7 +1063,6 @@ __global__ __launch_bounds__(Threads) void bus_allreduce_graph_kernel(
       const uint64_t* bases[kBusMaxPeers];
       uint64_t* stages[kBusMaxPeers];
       size_t nwords[kBusMaxPeers];
-      bool half_words[kBusMaxPeers]{};
       for (size_t p = 0; p < kBusMaxPeers; ++p) {
         bases[p] = nullptr;
         stages[p] = nullptr;
@@ -1075,7 +1074,6 @@ __global__ __launch_bounds__(Threads) void bus_allreduce_graph_kernel(
         const BusRecvView& rv = v.recv[view_idx];
         bases[p] = rv.payload_lat + static_cast<size_t>(slot) * (rv.lat_slot_bytes / 8);
         nwords[p] = s_words[p];
-        half_words[p] = s_half_words[p];
         stages[p] = (stage_words != 0 && (stage_words & 1) == 0 && (s_words[p] + s_half_words[p]) <= stage_words)
                         ? stage_smem + p * stage_words
                         : nullptr;
@@ -1097,9 +1095,9 @@ __global__ __launch_bounds__(Threads) void bus_allreduce_graph_kernel(
         if (open == 1) {
           // A lone claim: the sequential gate's pass (four loads in flight).
           for (size_t p = 0; p < kBusMaxPeers; ++p) totals[p] = 0;
-          totals[only] = block_fold_payload<Threads>(bases[only], nwords[only], s_hash, stages[only], half_words[only]);
+          totals[only] = block_fold_payload<Threads>(bases[only], nwords[only], s_hash, stages[only], s_half_words[only]);
         } else {
-          block_fold_payloads<Threads>(bases, nwords, stages, pending, s_hash_multi, totals, half_words);
+          block_fold_payloads<Threads>(bases, nwords, stages, pending, s_hash_multi, totals, s_half_words);
         }
         if (threadIdx.x == 0) {
           int left = 0;
