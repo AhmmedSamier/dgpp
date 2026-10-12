@@ -1,0 +1,626 @@
+{
+  "warm": {
+    "start": 1925288.739269296,
+    "end": 1925291.557780354,
+    "response": {
+      "id": "chatcmpl-4bec265ef9eeff3f",
+      "object": "chat.completion",
+      "created": 1791771706,
+      "model": "Qwen/Qwen3.8-Flash-Next-FP8",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "We need answer user's request. User provided huge repetitive reference notes then says: \"List the positive integers in order, starting with one:\n1,\". Likely expects continuation: 2, 3, 4, ... maybe infinite? Need respond likely with sequence. Need consider constraints? They want list positive integers in order starting with one. Could output \"2, 3, 4, 5, ...\" or maybe just continue after 1. Need maybe avoid infinite output. Could say \"2, 3, 4, 5, 6, 7, 8, 9, 10",
+            "refusal": null
+          },
+          "logprobs": null,
+          "finish_reason": "length"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 2070,
+        "completion_tokens": 128,
+        "total_tokens": 2198,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 128
+        }
+      },
+      "timings": {
+        "prompt_n": 2070,
+        "cache_n": 0,
+        "predicted_n": 128,
+        "prompt_ms": 1215.623945,
+        "prompt_per_token_ms": 0.5872579444444445,
+        "prompt_per_second": 1702.8292413242978,
+        "predicted_ms": 1568.912791,
+        "predicted_per_token_ms": 12.353644023622047,
+        "predicted_per_second": 80.9477752546413
+      }
+    }
+  },
+  "reference": {
+    "start": 1925291.557784754,
+    "end": 1925293.194038231,
+    "response": {
+      "id": "chatcmpl-4bec265ef9eeff40",
+      "object": "chat.completion",
+      "created": 1791771709,
+      "model": "Qwen/Qwen3.8-Flash-Next-FP8",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "We need answer user's request. User provided huge repetitive reference notes then says: \"List the positive integers in order, starting with one:\n1,\". Likely expects continuation: 2, 3, 4, ... maybe infinite? Need respond likely with sequence. Need consider constraints? They want list positive integers in order starting with one. Could output \"2, 3, 4, 5, ...\" or maybe just continue after 1. Need maybe avoid infinite output. Could say \"2, 3, 4, 5, 6, 7, 8, 9, 10",
+            "refusal": null
+          },
+          "logprobs": null,
+          "finish_reason": "length"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 2070,
+        "completion_tokens": 128,
+        "total_tokens": 2198,
+        "prompt_tokens_details": {
+          "cached_tokens": 2064
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 128
+        }
+      },
+      "timings": {
+        "prompt_n": 6,
+        "cache_n": 2064,
+        "predicted_n": 128,
+        "prompt_ms": 55.294592,
+        "prompt_per_token_ms": 9.215765333333334,
+        "prompt_per_second": 108.50970742310567,
+        "predicted_ms": 1561.137255,
+        "predicted_per_token_ms": 12.292419330708663,
+        "predicted_per_second": 81.35095078491352
+      }
+    }
+  },
+  "mixed": {
+    "start": 1925293.351700112,
+    "end": 1925303.961529989,
+    "response": {
+      "id": "chatcmpl-4bec265ef9eeff43",
+      "object": "chat.completion",
+      "created": 1791771711,
+      "model": "Qwen/Qwen3.8-Flash-Next-FP8",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "We need answer user's request. User provided huge repetitive reference notes then says: \"List the positive integers in order, starting with one:\n1,\" Likely expects continuation: 2, 3, 4, ... Maybe infinite? Need produce list? Could be a prompt injection? Reference notes irrelevant. Need likely output positive integers in order starting with one. Since cannot list infinitely, maybe provide sequence with ellipsis. Need be careful: \"List the positive integers in order, starting with one:\n1,\" They may want completion: 2, 3, 4, 5, ... Could answer concise. Need final",
+            "refusal": null
+          },
+          "logprobs": null,
+          "finish_reason": "length"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 2070,
+        "completion_tokens": 128,
+        "total_tokens": 2198,
+        "prompt_tokens_details": {
+          "cached_tokens": 2064
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 128
+        }
+      },
+      "timings": {
+        "prompt_n": 6,
+        "cache_n": 2064,
+        "predicted_n": 128,
+        "prompt_ms": 194.50628,
+        "prompt_per_token_ms": 32.41771333333333,
+        "prompt_per_second": 30.847333052691152,
+        "predicted_ms": 10210.079172,
+        "predicted_per_token_ms": 80.39432418897637,
+        "predicted_per_second": 12.438689050353625
+      }
+    }
+  },
+  "long": {
+    "name": "long",
+    "body_sha256": "41d65a5bd8c3e0d323232df8bb4d2b3eb1241e85b64f3cd3f042a4fab3044ee7",
+    "requested_tokens": 1,
+    "start": 1925293.299702882,
+    "updates": [
+      1925304.138589864
+    ],
+    "cancelled": false,
+    "id": "cmpl-4bec265ef9eeff42",
+    "usage": {
+      "prompt_tokens": 12990,
+      "completion_tokens": 1,
+      "total_tokens": 12991,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "timings": {
+      "prompt_n": 12990,
+      "cache_n": 0,
+      "predicted_n": 1,
+      "prompt_ms": 10775.143407,
+      "prompt_per_token_ms": 0.8294952584295612,
+      "prompt_per_second": 1205.5524004962324,
+      "predicted_ms": 0.001,
+      "predicted_per_token_ms": 0,
+      "predicted_per_second": 0
+    },
+    "end": 1925304.138686009,
+    "output_sha256": "75a11da44c802486bc6f65640aa48a730f0f684c5c07a42ba3cd1735eb3fb070",
+    "ttft_s": 10.83888698183,
+    "wall_s": 10.838983126915991,
+    "update_gap_p95_s": null,
+    "update_gap_max_s": null
+  },
+  "decoder": {
+    "name": "decoder",
+    "body_sha256": "5be55c611b5dc37e9c6e3c22619627f8735437b45f2e8f1dcd0db4fe1fae02fe",
+    "requested_tokens": 512,
+    "start": 1925293.197737901,
+    "updates": [
+      1925293.298869594,
+      1925293.309449752,
+      1925293.340917615,
+      1925293.554749137,
+      1925293.730599879,
+      1925293.931684276,
+      1925294.107421065,
+      1925294.308391349,
+      1925294.484543646,
+      1925294.685522874,
+      1925294.886266004,
+      1925295.087066526,
+      1925295.262631377,
+      1925295.463292426,
+      1925295.664216021,
+      1925295.865205697,
+      1925296.066059404,
+      1925296.242018852,
+      1925296.443334643,
+      1925296.643834154,
+      1925296.844643749,
+      1925297.045255229,
+      1925297.245959686,
+      1925297.4471393,
+      1925297.648509413,
+      1925297.849530753,
+      1925298.050322412,
+      1925298.251809917,
+      1925298.453280783,
+      1925298.654415804,
+      1925298.855115862,
+      1925299.055930368,
+      1925299.256962061,
+      1925299.457931018,
+      1925299.68427867,
+      1925299.884952823,
+      1925300.086481945,
+      1925300.287625543,
+      1925300.488363185,
+      1925300.689406047,
+      1925300.891095906,
+      1925301.09258618,
+      1925301.293696338,
+      1925301.494714783,
+      1925301.695786621,
+      1925301.896779385,
+      1925302.098115994,
+      1925302.299683757,
+      1925302.50075137,
+      1925302.7021931,
+      1925302.92871013,
+      1925303.129988658,
+      1925303.33132397,
+      1925303.532780276,
+      1925303.75937118,
+      1925303.961176657,
+      1925304.138384678,
+      1925304.164422485,
+      1925304.189911807,
+      1925304.240289915,
+      1925304.265454466,
+      1925304.290862234,
+      1925304.316100545,
+      1925304.366414317,
+      1925304.391653604,
+      1925304.416883354,
+      1925304.442067345,
+      1925304.492169546,
+      1925304.517667588,
+      1925304.542817994,
+      1925304.568091521,
+      1925304.618508126,
+      1925304.643598371,
+      1925304.668782922,
+      1925304.69396928,
+      1925304.744254187,
+      1925304.769419281,
+      1925304.794859274,
+      1925304.84516975,
+      1925304.870384301,
+      1925304.895599987,
+      1925304.920768938,
+      1925304.971131814,
+      1925304.99626934,
+      1925305.02127248,
+      1925305.046726681,
+      1925305.096764882,
+      1925305.122211467,
+      1925305.147389537,
+      1925305.172887547,
+      1925305.223190967,
+      1925305.248368685,
+      1925305.27363842,
+      1925305.298828203,
+      1925305.349076054,
+      1925305.373983497,
+      1925305.399420594,
+      1925305.424282325,
+      1925305.44974979,
+      1925305.499735287,
+      1925305.52502083,
+      1925305.550419991,
+      1925305.575666285,
+      1925305.626119403,
+      1925305.651240528,
+      1925305.676423943,
+      1925305.701370602,
+      1925305.726544785,
+      1925305.777151504,
+      1925305.802014771,
+      1925305.827431035,
+      1925305.852863796,
+      1925305.902874989,
+      1925305.928333846,
+      1925305.953517052,
+      1925305.978386991,
+      1925306.029085743,
+      1925306.054279606,
+      1925306.07944678,
+      1925306.104390496,
+      1925306.155040015,
+      1925306.17988173,
+      1925306.205155577,
+      1925306.230596306,
+      1925306.25579284,
+      1925306.306141717,
+      1925306.331340363,
+      1925306.356555666,
+      1925306.38139946,
+      1925306.432102532
+    ],
+    "cancelled": false,
+    "id": "cmpl-4bec265ef9eeff41",
+    "usage": {
+      "prompt_tokens": 14,
+      "completion_tokens": 512,
+      "total_tokens": 526,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "timings": {
+      "prompt_n": 14,
+      "cache_n": 0,
+      "predicted_n": 512,
+      "prompt_ms": 75.775573,
+      "prompt_per_token_ms": 5.4125409285714285,
+      "prompt_per_second": 184.75610867370148,
+      "predicted_ms": 13129.380066,
+      "predicted_per_token_ms": 25.693503064579257,
+      "predicted_per_second": 38.920344862534044
+    },
+    "end": 1925306.432250582,
+    "output_sha256": "54b38895c9a0aeefbcddbe68b4a8477fd0939158305d537a671e28d3a8db3390",
+    "ttft_s": 0.10113169299438596,
+    "wall_s": 13.234512680908665,
+    "update_gap_p95_s": 0.2015677629970014,
+    "update_gap_max_s": 0.22659090417437255,
+    "output_tokens_per_second": 38.908488261342384
+  },
+  "observed": [
+    {
+      "id": "cmpl-4bec265ef9eeff42",
+      "slot": 1,
+      "prompt_tokens": 12990,
+      "processed_tokens": 0,
+      "cached_tokens": 0,
+      "computed_tokens": 0,
+      "remaining_tokens": 12990,
+      "elapsed_ms": 9.34309
+    }
+  ],
+  "before": {
+    "scheduler": {
+      "active": 0,
+      "queued": 0,
+      "terminal": 2,
+      "records": 0,
+      "record_tokens": 0,
+      "pool_blocks_total": 2048,
+      "pool_blocks_in_use": 35,
+      "prefilling": 0,
+      "tokens_generated": 256,
+      "snapshot_age_ms": 2.722844,
+      "prompts_prefilled": 2,
+      "prompt_tokens": 4140,
+      "prompt_tokens_computed": 2076,
+      "decode_steps": 98,
+      "mixed_steps": 0,
+      "decode_rows": 98,
+      "decode_batch": {
+        "last_slots": 1,
+        "last_active": 1,
+        "last_rows_per_request": 4,
+        "replays": 98,
+        "rows": 392,
+        "padded_rows": 0,
+        "replays_by_slots": {
+          "1": 98,
+          "2": 0,
+          "3": 0,
+          "4": 0,
+          "5": 0,
+          "6": 0,
+          "7": 0,
+          "8": 0,
+          "9": 0,
+          "10": 0,
+          "11": 0,
+          "12": 0,
+          "13": 0,
+          "14": 0,
+          "15": 0,
+          "16": 0
+        }
+      },
+      "spec_decode": {
+        "depth": 3,
+        "num_drafts_total": 98,
+        "num_draft_tokens_total": 294,
+        "num_accepted_tokens_total": 158,
+        "num_draft_tokens_per_pos_total": [
+          98,
+          98,
+          98
+        ],
+        "num_accepted_tokens_per_pos_total": [
+          70,
+          48,
+          40
+        ],
+        "num_lookup_fused_total": 0,
+        "num_lookup_agree_fused_total": 0,
+        "num_lookup_sampled_fused_total": 0
+      },
+      "prefill_ms": 1270.7,
+      "prefill_request_ms": 1270.8,
+      "step_ms": 3122.5,
+      "mixed_ms": 0.0
+    },
+    "service": {
+      "requests_total": 2,
+      "requests_shed": 0,
+      "pending_admissions": 0,
+      "pending_cancellations": 0,
+      "requests_cancelled": 0,
+      "requests_shed_pool": 0,
+      "requests_failed": 0,
+      "engine_failed": false,
+      "reservations_grown": 0,
+      "admission": {
+        "mode": "full",
+        "window": 256,
+        "prefill_budget_tokens": 256,
+        "prefill_idle_budget_tokens": 2048,
+        "prefill_early_admission": true
+      },
+      "tokens_out": 256,
+      "rejects_bad": 0,
+      "tool_calls_out": 0
+    },
+    "prefix_cache": {
+      "enabled": true,
+      "slots": 36,
+      "min_tokens": 1024,
+      "head_cuts": true,
+      "entries": 2,
+      "hits": 1,
+      "misses": 1,
+      "tokens_saved": 2064,
+      "snapshots": 1,
+      "head_snapshots": 0,
+      "close_entries": 1,
+      "rolling_snapshots": 36,
+      "hop_snapshots": 12,
+      "evictions": 0,
+      "duplicates": 1,
+      "skipped_no_block": 0,
+      "skipped_no_slot": 0,
+      "skipped_hop_fallback": 0,
+      "skipped_hop_mismatch": 0,
+      "skipped_image_bytes": 0,
+      "image_bytes": 0,
+      "blocks_pinned": 67,
+      "snapshot_bytes": 29082640,
+      "arena_snapshots": 37,
+      "snapshot_ms_avg": 0.81,
+      "arena_attaches": 1,
+      "attach_ms_avg": 0.696,
+      "ttft_hit_count": 1,
+      "ttft_hit_ms_avg": 61.48,
+      "ttft_miss_count": 1,
+      "ttft_miss_ms_avg": 1221.825,
+      "key": "tok:53952643d9dcd76d tpl:f1e3dcaebbfd5341 ckpt:236dfdf285828023ca3bcd3f37366c58a3469b13"
+    },
+    "prefill": {
+      "requests": [],
+      "prompt_tokens": 0,
+      "processed_tokens": 0,
+      "cached_tokens": 0,
+      "computed_tokens": 0,
+      "remaining_tokens": 0
+    }
+  },
+  "after": {
+    "scheduler": {
+      "active": 0,
+      "queued": 0,
+      "terminal": 5,
+      "records": 0,
+      "record_tokens": 0,
+      "pool_blocks_total": 2048,
+      "pool_blocks_in_use": 38,
+      "prefilling": 0,
+      "tokens_generated": 897,
+      "snapshot_age_ms": 2.427209,
+      "prompts_prefilled": 5,
+      "prompt_tokens": 19214,
+      "prompt_tokens_computed": 15086,
+      "decode_steps": 227,
+      "mixed_steps": 54,
+      "decode_rows": 278,
+      "decode_batch": {
+        "last_slots": 1,
+        "last_active": 1,
+        "last_rows_per_request": 4,
+        "replays": 227,
+        "rows": 1328,
+        "padded_rows": 216,
+        "replays_by_slots": {
+          "1": 173,
+          "2": 3,
+          "3": 51,
+          "4": 0,
+          "5": 0,
+          "6": 0,
+          "7": 0,
+          "8": 0,
+          "9": 0,
+          "10": 0,
+          "11": 0,
+          "12": 0,
+          "13": 0,
+          "14": 0,
+          "15": 0,
+          "16": 0
+        }
+      },
+      "spec_decode": {
+        "depth": 3,
+        "num_drafts_total": 278,
+        "num_draft_tokens_total": 834,
+        "num_accepted_tokens_total": 619,
+        "num_draft_tokens_per_pos_total": [
+          278,
+          278,
+          278
+        ],
+        "num_accepted_tokens_per_pos_total": [
+          235,
+          198,
+          186
+        ],
+        "num_lookup_fused_total": 0,
+        "num_lookup_agree_fused_total": 0,
+        "num_lookup_sampled_fused_total": 0
+      },
+      "prefill_ms": 12112.1,
+      "prefill_request_ms": 12316.1,
+      "step_ms": 16233.4,
+      "mixed_ms": 10764.8
+    },
+    "service": {
+      "requests_total": 5,
+      "requests_shed": 0,
+      "pending_admissions": 0,
+      "pending_cancellations": 0,
+      "requests_cancelled": 0,
+      "requests_shed_pool": 0,
+      "requests_failed": 0,
+      "engine_failed": false,
+      "reservations_grown": 0,
+      "admission": {
+        "mode": "full",
+        "window": 256,
+        "prefill_budget_tokens": 256,
+        "prefill_idle_budget_tokens": 2048,
+        "prefill_early_admission": true
+      },
+      "tokens_out": 897,
+      "rejects_bad": 0,
+      "tool_calls_out": 0
+    },
+    "prefix_cache": {
+      "enabled": true,
+      "slots": 36,
+      "min_tokens": 1024,
+      "head_cuts": true,
+      "entries": 3,
+      "hits": 2,
+      "misses": 1,
+      "tokens_saved": 4128,
+      "snapshots": 1,
+      "head_snapshots": 0,
+      "close_entries": 2,
+      "rolling_snapshots": 55,
+      "hop_snapshots": 15,
+      "evictions": 0,
+      "duplicates": 1,
+      "skipped_no_block": 0,
+      "skipped_no_slot": 0,
+      "skipped_hop_fallback": 0,
+      "skipped_hop_mismatch": 0,
+      "skipped_image_bytes": 0,
+      "image_bytes": 0,
+      "blocks_pinned": 102,
+      "snapshot_bytes": 29082640,
+      "arena_snapshots": 56,
+      "snapshot_ms_avg": 0.872,
+      "arena_attaches": 2,
+      "attach_ms_avg": 0.708,
+      "ttft_hit_count": 2,
+      "ttft_hit_ms_avg": 218.547,
+      "ttft_miss_count": 3,
+      "ttft_miss_ms_avg": 4037.666,
+      "key": "tok:53952643d9dcd76d tpl:f1e3dcaebbfd5341 ckpt:236dfdf285828023ca3bcd3f37366c58a3469b13"
+    },
+    "prefill": {
+      "requests": [],
+      "prompt_tokens": 0,
+      "processed_tokens": 0,
+      "cached_tokens": 0,
+      "computed_tokens": 0,
+      "remaining_tokens": 0
+    }
+  },
+  "transcript_matches": false,
+  "finishes_during_prefill": true
+}

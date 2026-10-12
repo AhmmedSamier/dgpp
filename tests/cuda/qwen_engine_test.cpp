@@ -711,6 +711,91 @@ DGPP_TEST(qwen_wide_compaction_fp8_preserves_projection_bits) {
   }
 }
 
+static void check_mixed_prefill_engine(bool scheduled) {
+  const auto cfg = qwenfx::tiny_config();
+  const std::string dir = "qwen_engine_fixture/mixed_plain";
+  qwenfx::write_fixture(cfg, dir);
+  for (const bool compact : {false, true}) {
+    auto buses = start_world(1, kPort + 31 + compact);
+    require(buses.size() == 1, "mixed plain: world-of-one bus");
+    QwenModel model(cfg, dir, 256, 1024, QwenResidency::Resident, nullptr, 0, 1,
+                    3, scheduled, 16, true, true);
+    uint16_t *scratch = nullptr, *prefix_scratch = nullptr, *gather_scratch = nullptr;
+    DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&scratch),
+                               sizeof(uint16_t) * dgpp::kPickScratchElems(1), cudaHostAllocDefault));
+    if (scheduled) {
+      DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&prefix_scratch),
+                                 2 * dgpp::fabric_sampling_prefix_scratch_elems(1), cudaHostAllocDefault));
+      DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&gather_scratch),
+                                 2 * dgpp::sampling_gather_scratch_elems(cfg.vocab_size), cudaHostAllocDefault));
+    }
+    try {
+      {
+        GraphEngineAdapter<QwenModel> engine(&model, buses[0].get(), 0, 1, scratch, cfg.vocab_size,
+            wait_timeout_ms(), 2, prefix_scratch, gather_scratch, 1, nullptr, 0, scheduled ? 3 : 1, compact);
+        int forced_depth = 1;
+        if (scheduled) {
+          engine.configure_verify_schedule(true, 1.f, .5f);
+          engine.set_verify_depth_hook([&](int, int, const float*, int) { return forced_depth; });
+        }
+        for (; forced_depth <= (scheduled ? 3 : 1); ++forced_depth) {
+          dgpp::sched::AdmissionPolicy policy;
+          policy.prefill_early_admission = true;
+          policy.prefill_budget_tokens = 32;
+          policy.prefill_idle_budget_tokens = 64;
+          std::vector<dgpp::sched::SchedulerRequest> requests(3);
+          std::vector<std::vector<int64_t>> expected;
+          for (int q = 0; q < 3; ++q) {
+            auto& request = requests[q];
+            request.id = "mixed-plain-" + std::to_string(q);
+            request.prompt = smoke_tokens(cfg, q == 0 ? 17 : q == 1 ? 193 : 1, 1040 + q);
+            request.max_steps = q == 0 ? 24 : q == 1 ? 2 : 12;
+            request.no_cache = true;
+            dgpp::sched::Scheduler solo(&engine, {}, 0, policy, 0);
+            solo.submit(request);
+            solo.run_to_completion();
+            expected.push_back(solo.find(request.id)->generated);
+          }
+          dgpp::sched::Scheduler concurrent(&engine, {}, 0, policy, 0);
+          concurrent.submit(requests[0]);
+          concurrent.tick();
+          concurrent.submit(requests[1]);
+          concurrent.tick();
+          require(engine.can_mix_prefill(1, {0}), "plain decoder supports the shared walk");
+          concurrent.submit(requests[2]);
+          const auto mixed_before = concurrent.meters().mixed_steps;
+          concurrent.tick();
+          require(concurrent.meters().mixed_steps == mixed_before + 1,
+                  "both prefills and the incumbent decode share the admission walk");
+          require(concurrent.meters().prefilling == 1 && concurrent.meters().queued == 0,
+                  "plain short admission precedes long prefill completion");
+          concurrent.run_to_completion();
+          for (int q = 0; q < 3; ++q) {
+            const auto* result = concurrent.find(requests[q].id);
+            require(result && result->steps_done == requests[q].max_steps, "plain mixed completion");
+            if (dgpp::dense_gemv_rows() >= 256)
+              require(result->generated == expected[q], "plain mixed transcript differs from solo");
+          }
+          engine.drain();
+          require(concurrent.meters().mixed_steps > 0, "shared walk was exercised");
+        }
+      }
+      require(model.kv_blocks_in_use() == 0, "plain mixed reservations leaked");
+    } catch (...) {
+      cudaFreeHost(scratch);
+      if (prefix_scratch) cudaFreeHost(prefix_scratch);
+      if (gather_scratch) cudaFreeHost(gather_scratch);
+      throw;
+    }
+    DGPP_CUDA_OK(cudaFreeHost(scratch));
+    if (prefix_scratch) DGPP_CUDA_OK(cudaFreeHost(prefix_scratch));
+    if (gather_scratch) DGPP_CUDA_OK(cudaFreeHost(gather_scratch));
+  }
+}
+
+DGPP_TEST(qwen_engines_mixed_prefill_without_mtp) { check_mixed_prefill_engine(false); }
+DGPP_TEST(qwen_engines_mixed_prefill_scheduled_verify) { check_mixed_prefill_engine(true); }
+
 DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
   const int sample_cap = std::getenv("DGPP_TEST_COMPACT_SAMPLING")
                              ? std::atoi(std::getenv("DGPP_TEST_COMPACT_SAMPLING"))
@@ -989,6 +1074,19 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
           requests[i].id = "join-" + std::to_string(i);
           requests[i].prompt = smoke_tokens(cfg, i == 0 ? 40 * align - 5 : align + 1, 6500 + i);
           requests[i].max_steps = 12;
+          if (sample_cap) {
+            // A stable top-k oracle across prefill chunk boundaries. With
+            // one candidate per rank it still exercises the exact gather
+            // fallback (asserted below). The full-vocabulary temperature-100
+            // lane below compares identical prefill shapes: changing chunk
+            // shapes perturbs near-tied logits and can permute its CDF even
+            // on the pre-shared-execution implementation.
+            requests[i].sampling.temperature = .7f;
+            requests[i].sampling.top_k = 7;
+            requests[i].sampling.top_p = .9f;
+            requests[i].sampling.presence_penalty = .2f;
+            requests[i].seed = 4567 + i;
+          }
           dgpp::sched::Scheduler solo_sched(&graph, {}, 0, policy, /*prefix_slots=*/0);
           solo_sched.submit(requests[i]);
           int prefill_advances = 0;
@@ -1003,6 +1101,7 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
           expected.push_back(solo_sched.find(requests[i].id)->generated);
         }
         dgpp::sched::Scheduler concurrent(&graph, {}, 0, policy, /*prefix_slots=*/0);
+        const auto fallbacks_before_join = graph.fallbacks();
         concurrent.submit(requests[0]);
         // Reach 16 * align, off the donated 6 * align grid. The cursor
         // must spend the work budget from its actual position, not stop
@@ -1020,13 +1119,22 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
         require(computed == 7 * align + 1,
                 "real graph prefill must consume the donated aligned tail within the budget: got " +
                     std::to_string(computed) + ", expected " + std::to_string(7 * align + 1));
-        concurrent.run_to_completion();
+        while (concurrent.has_pending()) {
+          concurrent.tick();
+          graph.drain();
+          for (int slot = 0; slot < slots; ++slot)
+            require(model.session_draft_position(slot) == model.session_position(slot),
+                    "shared replay must advance the host MTP counter with its target counter");
+        }
         for (size_t i = 0; i < requests.size(); ++i) {
           const auto* result = concurrent.find(requests[i].id);
           require(result->steps_done == 12, "joined graph transcript is complete");
           if (row_independent)
             require(result->generated == expected[i], "joined graph prefill changes the solo transcript");
         }
+        if (force_fallback)
+          require(graph.fallbacks() > fallbacks_before_join,
+                  "joined sampled requests must exercise the exact gather fallback");
         require(graph.pool_blocks_in_use() == 0, "joined graph prefill leaks KV reservations");
       }
       if (sample_cap) {
@@ -1374,7 +1482,7 @@ DGPP_TEST(qwen_compact_logits_preserve_cache_concurrency_and_mtp) {
       const int rows = 4 * (depth + 1);
       QwenModel model(cfg, dir, 128, 2048, QwenResidency::Resident, nullptr, 0, 1,
                       4, true, rows, true, compact);
-      require(model.logits_capacity_rows() == (compact ? rows : 128), "compact decode capacity");
+      require(model.logits_capacity_rows() == (compact ? rows + 1 : 128), "compact decode capacity");
       uint16_t* scratch = nullptr;
       DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&scratch),
                                  sizeof(uint16_t) * dgpp::kPickScratchElems(1), cudaHostAllocDefault));

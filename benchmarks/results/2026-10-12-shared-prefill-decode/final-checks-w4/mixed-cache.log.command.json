@@ -1,0 +1,11 @@
+{
+  "command": [
+    "python3",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-12-shared-prefill-decode/mixed_cache_check.py",
+    "--out",
+    "build-pr104-shared/final-checks-w4/mixed-cache.json"
+  ],
+  "started": "2026-10-12T02:18:37.670368+00:00",
+  "returncode": 1,
+  "finished": "2026-10-12T02:18:55.448693+00:00"
+}

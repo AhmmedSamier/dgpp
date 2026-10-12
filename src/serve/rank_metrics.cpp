@@ -44,6 +44,9 @@ void write_rank_metrics(prom::Writer& w, const RankIdentity& id,
           snapshot_age_s, rank);
   if (ticks >= 0) w.counter("dgpp_rank_ticks_total", "Journal records this rank applied.", ticks, rank);
   w.counter("dgpp_rank_decode_steps_total", "Decode passes this rank ran.", m.decode_steps, rank);
+  w.counter("dgpp_rank_mixed_steps_total", "This rank's decode passes sharing a walk with prefill.", m.mixed_steps, rank);
+  w.counter("dgpp_rank_mixed_seconds_total", "Shared time included in both prefill and decode seconds on this rank.",
+            m.mixed_ms / 1000.0, rank);
   w.counter("dgpp_rank_decode_step_seconds_total",
             "This rank's wall time inside decode steps, collective waits included.", m.step_ms / 1000.0, rank);
   w.counter("dgpp_rank_prefill_seconds_total",

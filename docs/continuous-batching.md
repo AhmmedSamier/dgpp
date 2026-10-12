@@ -75,14 +75,18 @@ admits fitting one-shots/groups into the align-down leftover (never a new
 chunked start — chunked read-ins stay one at a time). Order derives from
 arrival order and the last-advanced prefill only, so every rank agrees.
 
-By default, non-group-advance engines admit only prompts classified as needing
-chunking into these shares. Shorter prompts use the leftovers and may wait for
-the long prefill to finish. This preserves throughput-oriented decode batching.
-`engine.prefill_early_admission=true` opts into issue #104's policy: queued text
-of any total prompt length can join, without a short-request priority or a
-second budget. The early policy is off by default because cluster measurements
-found substantial burst-throughput regressions. Image and group-advance eligibility, monolithic mode and
-admission without an in-flight prefill retain their existing paths.
+Qwen graph serving without DFlash enables early text admission by default: queued text of
+any size can join, including prompts shorter than one alignment unit. New
+readers share a bounded grouped prefill and share their dense and expert
+projections with active decoder verification.
+Each decoder retains its own recurrent state, speculative rollback rows,
+MTP drafts and sampling state. It receives at most one decode pass per tick.
+
+`engine.prefill_early_admission=false` restores admission through leftovers.
+Other execution backends retain their previous default; explicitly enabling
+early admission there does not provide Qwen's shared execution path. Images
+retain their existing eligibility and execution paths. Monolithic mode is
+unchanged.
 
 The new reader still needs a free slot and its reservation under the existing
 KV policy. Cached text attaches through the same prefix plan and computes
@@ -97,9 +101,14 @@ omits redundant automatic chunk-grid cuts; this avoids splitting work again
 after a share changes. Other families retain their chunk-grid contracts.
 A lone reader, or a set of readers that all fit their original shares, keeps
 those shares unchanged, including its final tails.
-Early decoding may switch later ticks to the smaller busy budget,
-delaying long-prompt completion; this policy does not promise unchanged
-completion latency or starvation freedom under sustained KV pressure.
+The busy budget continues to protect decoders that started before a reader.
+When every active decoder joined after all unfinished readers, and the engine
+can share their execution, those readers retain the configured idle budget.
+This avoids multiplying their weight-streaming passes because a short request
+was admitted. Newly admitted streams can consequently have longer update gaps
+while sharing those larger chunks. The budget remains bounded; slot and KV
+pressure can still delay admission. Required cuts and decode rows can leave
+less than the full prefill allowance in a shared walk.
 
 For example, with a 256-token budget and four-token alignment, a 23-token
 arrival beside one long reader gets 24 allocated tokens and the long reader
@@ -165,3 +174,13 @@ gaps are not per-token kernel latency. Cached conversations, image paths,
 physical KV boundaries, semantic checks and multi-rank operation-stream
 agreement remain separate live gates. Host passes do not establish GPU
 throughput equivalence.
+
+### Shared execution timing
+
+`mixed_steps` counts decode passes that also advance prefill. Their elapsed
+`mixed_ms` is included in both `prefill_ms` and `step_ms`, because both logical
+operations occupy that interval. Total engine time is therefore
+`prefill_ms + step_ms - mixed_ms`; phase times are not independent throughput
+measurements. Prometheus exposes the same overlap as `dgpp_mixed_seconds_total`
+and `dgpp_mixed_steps_total`, including per-rank equivalents. Compare completed
+work over wall time when evaluating mixed workloads.

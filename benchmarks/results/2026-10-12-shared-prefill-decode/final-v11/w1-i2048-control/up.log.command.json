@@ -1,0 +1,16 @@
+{
+  "command": [
+    "python3",
+    "scripts/dgpp-cluster",
+    "up",
+    "--config",
+    "build-pr104-shared/final-v11/w1-i2048-control/deployment.json",
+    "--bin",
+    "build-pr105-utilization/dgpp-serve-packed",
+    "--log-dir",
+    "build-pr104-shared/final-v11/w1-i2048-control/world"
+  ],
+  "started": "2026-10-12T01:59:17.014605+00:00",
+  "returncode": 0,
+  "finished": "2026-10-12T01:59:45.840446+00:00"
+}

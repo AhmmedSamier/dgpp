@@ -1,0 +1,14 @@
+{
+  "command": [
+    "python3",
+    "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-12-shared-prefill-decode/mixed_cache_check.py",
+    "--diagnostic",
+    "--no-thinking",
+    "--logprobs",
+    "--out",
+    "build-pr104-shared/cache-probabilities-v11/candidate-deferred/no-thinking.json"
+  ],
+  "started": "2026-10-12T02:28:03.150541+00:00",
+  "returncode": 1,
+  "finished": "2026-10-12T02:28:20.119756+00:00"
+}

@@ -1789,6 +1789,17 @@ add_test(NAME qwen_engine_compaction_disabled
 set_tests_properties(qwen_engine_compaction_disabled
   PROPERTIES RESOURCE_LOCK qwen_engine_world LABELS "gpu;rdma" RUN_SERIAL TRUE)
 
+add_test(NAME qwen_engine_mixed_prefill_without_mtp
+  COMMAND ${CMAKE_COMMAND} -E env DGPP_DENSE_GEMV_ROWS=256 DGPP_TEST_FILTER=mixed_prefill_without_mtp
+          $<TARGET_FILE:qwen_engine_test>)
+set_tests_properties(qwen_engine_mixed_prefill_without_mtp
+  PROPERTIES RESOURCE_LOCK qwen_engine_world LABELS "gpu;rdma" RUN_SERIAL TRUE)
+add_test(NAME qwen_engine_mixed_prefill_scheduled_verify
+  COMMAND ${CMAKE_COMMAND} -E env DGPP_DENSE_GEMV_ROWS=256 DGPP_TEST_FILTER=mixed_prefill_scheduled_verify
+          $<TARGET_FILE:qwen_engine_test>)
+set_tests_properties(qwen_engine_mixed_prefill_scheduled_verify
+  PROPERTIES RESOURCE_LOCK qwen_engine_world LABELS "gpu;rdma" RUN_SERIAL TRUE)
+
 foreach(compact_candidates IN ITEMS 1 32)
   add_test(NAME qwen_engine_compact_sampling_${compact_candidates}
     COMMAND ${CMAKE_COMMAND} -E env DGPP_DENSE_GEMV_ROWS=256 DGPP_TEST_COMPACT_BATCH=1

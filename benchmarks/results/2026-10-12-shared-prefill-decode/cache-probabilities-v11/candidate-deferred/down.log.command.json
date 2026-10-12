@@ -1,0 +1,14 @@
+{
+  "command": [
+    "python3",
+    "scripts/dgpp-cluster",
+    "down",
+    "--config",
+    "build-pr104-shared/cache-probabilities-v11/candidate-deferred/deployment.json",
+    "--log-dir",
+    "build-pr104-shared/cache-probabilities-v11/candidate-deferred/world"
+  ],
+  "started": "2026-10-12T02:28:20.766384+00:00",
+  "returncode": 0,
+  "finished": "2026-10-12T02:28:27.946696+00:00"
+}

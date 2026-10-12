@@ -87,11 +87,11 @@ DGPP_TEST(cluster_config_parses_engine_rope_scaling) {
           "only yarn");
 }
 
-DGPP_TEST(cluster_config_early_prefill_admission_is_explicit) {
-  require(!dgpp::serve::parse_cluster_config(engine_json("{}"), "t").engine.prefill_early_admission,
-          "early prefill admission is off by default");
-  require(!dgpp::serve::parse_cluster_config(engine_json(R"({"prefill_early_admission":false})"), "t")
-               .engine.prefill_early_admission,
+DGPP_TEST(cluster_config_early_prefill_admission_preserves_automatic_and_explicit_values) {
+  require(!dgpp::serve::parse_cluster_config(engine_json("{}"), "t").engine.prefill_early_admission.has_value(),
+          "omitted admission policy is resolved from the execution backend");
+  require(dgpp::serve::parse_cluster_config(engine_json(R"({"prefill_early_admission":false})"), "t")
+               .engine.prefill_early_admission == std::optional<bool>(false),
           "early prefill admission can be explicitly disabled");
   for (const std::string value : {"1", "\"true\"", "null"}) {
     bool rejected = false;
@@ -135,7 +135,7 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
               c.engine.mtp_depth == 2 && c.engine.prefix_cache_gib == 0.5 &&
               c.engine.admission == "grow" && c.engine.stats_interval_s == 0.0 && c.engine.prefill == "exact" &&
               c.engine.prefill_budget_tokens == 256 && c.engine.prefill_idle_budget_tokens == 2048 &&
-              c.engine.prefill_early_admission &&
+              c.engine.prefill_early_admission == std::optional<bool>(true) &&
               c.engine.prefix_min_tokens == 512 && !c.engine.prefix_head_snapshots &&
               c.engine.mtp_draft == "greedy" && c.engine.mtp_schedule_sampled_scale == 0.5 &&
               c.engine.mtp_draft_temperature == 0.7 && c.engine.mtp_verify == "block" &&

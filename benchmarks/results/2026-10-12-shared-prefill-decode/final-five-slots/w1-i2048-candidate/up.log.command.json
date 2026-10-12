@@ -1,0 +1,16 @@
+{
+  "command": [
+    "python3",
+    "scripts/dgpp-cluster",
+    "up",
+    "--config",
+    "build-pr104-shared/final-five-slots/w1-i2048-candidate/deployment.json",
+    "--bin",
+    "build-pr104-shared/shared-v11/dgpp-serve",
+    "--log-dir",
+    "build-pr104-shared/final-five-slots/w1-i2048-candidate/world"
+  ],
+  "started": "2026-10-12T02:45:12.972141+00:00",
+  "returncode": 0,
+  "finished": "2026-10-12T02:45:43.767697+00:00"
+}

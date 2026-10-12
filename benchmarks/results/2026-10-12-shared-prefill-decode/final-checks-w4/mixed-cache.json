@@ -1,0 +1,94 @@
+{
+  "warm": {
+    "start": 1925099.721460234,
+    "end": 1925102.496407256,
+    "response": {
+      "id": "chatcmpl-ef4457395ef8b3bf",
+      "object": "chat.completion",
+      "created": 1791771517,
+      "model": "Qwen/Qwen3.8-Flash-Next-FP8",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "We need answer user's request. User provided huge repetitive reference notes then says: \"List the positive integers in order, starting with one:\n1,\". Likely expects continuation: 2, 3, 4, ... maybe infinite? Need respond likely with sequence. Need consider constraints? They want list positive integers in order starting with one. Could output \"2, 3, 4, 5, ...\" or maybe just continue after 1. Need maybe avoid infinite output. Could say \"2, 3, 4, 5, 6, 7, 8, 9, 10",
+            "refusal": null
+          },
+          "logprobs": null,
+          "finish_reason": "length"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 2070,
+        "completion_tokens": 128,
+        "total_tokens": 2198,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 128
+        }
+      },
+      "timings": {
+        "prompt_n": 2070,
+        "cache_n": 0,
+        "predicted_n": 128,
+        "prompt_ms": 1170.632094,
+        "prompt_per_token_ms": 0.5655227507246378,
+        "prompt_per_second": 1768.2754561485651,
+        "predicted_ms": 1592.15805,
+        "predicted_per_token_ms": 12.536677559055118,
+        "predicted_per_second": 79.76595037157271
+      }
+    }
+  },
+  "reference": {
+    "start": 1925102.496411896,
+    "end": 1925104.132408703,
+    "response": {
+      "id": "chatcmpl-ef4457395ef8b3c0",
+      "object": "chat.completion",
+      "created": 1791771520,
+      "model": "Qwen/Qwen3.8-Flash-Next-FP8",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "We need answer user's request. User provided huge repetitive reference notes then says: \"List the positive integers in order, starting with one:\n1,\". Likely expects continuation: 2, 3, 4, ... maybe infinite? Need respond likely with sequence. Need consider constraints? They want list positive integers in order starting with one. Could output \"2, 3, 4, 5, ...\" or maybe just continue after 1. Need maybe avoid infinite output. Could say \"2, 3, 4, 5, 6, 7, 8, 9, 10",
+            "refusal": null
+          },
+          "logprobs": null,
+          "finish_reason": "length"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 2070,
+        "completion_tokens": 128,
+        "total_tokens": 2198,
+        "prompt_tokens_details": {
+          "cached_tokens": 2064
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 128
+        }
+      },
+      "timings": {
+        "prompt_n": 6,
+        "cache_n": 2064,
+        "predicted_n": 128,
+        "prompt_ms": 53.495687,
+        "prompt_per_token_ms": 8.915947833333332,
+        "prompt_per_second": 112.15857457817114,
+        "predicted_ms": 1553.002241,
+        "predicted_per_token_ms": 12.228364102362203,
+        "predicted_per_second": 81.77708740344309
+      }
+    }
+  }
+}

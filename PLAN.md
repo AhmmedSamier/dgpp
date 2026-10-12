@@ -208,17 +208,17 @@ Qwen graph serving can interleave prefill chunks with decode using
 `engine.prefill_budget_tokens`; zero preserves monolithic admission.
 An optional `engine.prefill_idle_budget_tokens` increases chunk size when
 no request is actively decoding, including after a decoding peer retires.
-With `engine.prefill_early_admission=true`, queued text of any size joins existing
-fair shares while a non-group prefill is in flight (issue #104), with one new reader per tick and unchanged
-slot, KV and token budgets. Host scheduler regressions cover admission,
-cache attachment and cancellation/failure cleanup. The
+Qwen graph serving enables early text admission by default (issue #104).
+Queued short prompts join grouped prefill work; active decoder verification
+shares the reader's projections while preserving per-request state and rollback.
+Older decoders retain the busy-budget bound. New decoders can share the larger
+idle-budget chunks so their admission does not multiply reader passes.
+`engine.prefill_early_admission=false` restores the former policy. Other model
+backends retain their previous default. The earlier
 [PR 105 verification record](benchmarks/results/2026-10-11-pr105-followups/README.md)
-covers one/four-node serving, MTP reservation boundaries and the measured
-mixed-load throughput trade-offs. The early policy is off by default because
-of those regressions. Qwen's resumable cursor now fills its work budget across
-redundant automatic chunk-grid cuts while preserving structural/snapshot cuts.
-Extending this to other families and grouped continuations remains work
-for latency under mixed prompt lengths. Prefix entries
+documents why scheduler-only early admission was insufficient; the shared
+execution follow-up requires its own throughput and correctness verification.
+Qwen's cursor preserves required structural/snapshot cuts. Prefix entries
 are process-local, and grow-on-demand admission ends the youngest request
 when the pool is exhausted; it does not preempt and recompute it.
 

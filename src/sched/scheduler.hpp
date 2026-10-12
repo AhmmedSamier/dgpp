@@ -322,6 +322,23 @@ class SchedulerEngine {
   virtual PrefillProgress advance_prefill(int, int64_t = 0) {
     throw std::logic_error("SchedulerEngine: resumable prefill is unavailable");
   }
+  struct MixedProgress {
+    PrefillProgress prefill;
+    std::vector<std::vector<int32_t>> decoded;
+  };
+  virtual bool can_mix_prefill(int, const std::vector<int>&) const { return false; }
+  virtual MixedProgress advance_prefill_and_step(int, int64_t, const std::vector<int>&) {
+    throw std::logic_error("SchedulerEngine: mixed prefill/decode is unavailable");
+  }
+  struct MixedGroupProgress {
+    std::vector<PrefillProgress> prefills;
+    std::vector<std::vector<int32_t>> decoded;
+  };
+  virtual bool can_mix_prefill_group(const std::vector<int>&, const std::vector<int>&) const { return false; }
+  virtual MixedGroupProgress advance_prefill_group_and_step(
+      const std::vector<int>&, const std::vector<int64_t>&, const std::vector<int>&) {
+    throw std::logic_error("SchedulerEngine: mixed group prefill/decode is unavailable");
+  }
   // Several in-flight prefills' next chunks, request i within budgets[i] tokens.
   // An engine with prefill_group_advance() runs them as ONE physical walk
   // (the weights stream once for all of them) — the scheduler then reads
@@ -329,6 +346,7 @@ class SchedulerEngine {
   // as many per tick as the budget has aligned shares, so prompts that
   // arrive together are read in together. The default advances one by one.
   virtual bool prefill_group_advance() const { return false; }
+  virtual bool prefill_budget_per_reader() const { return true; }
   virtual std::vector<PrefillProgress> advance_prefill_group(const std::vector<int>& reqs,
                                                              const std::vector<int64_t>& budgets) {
     std::vector<PrefillProgress> out;
@@ -452,8 +470,9 @@ struct AdmissionPolicy {
   // prompt, or the turn after a client compacted its history, attaches.
   int prefix_min_tokens = 0;
   bool prefix_head_snapshots = false;
-  // Opt-in: let short text join in-flight non-group prefills. Starting
-  // decoders earlier can fragment decode batches and select the busy cap.
+  // Resolved admission policy. Qwen graph serving enables this by default;
+  // callers and old journal records retain false unless explicitly resolved.
+  // Engines without a shared walk can pay for additional decode passes.
   bool prefill_early_admission = false;
   bool operator==(const AdmissionPolicy& o) const {
     return mode == o.mode && window_tokens == o.window_tokens && prefill_budget_tokens == o.prefill_budget_tokens &&
@@ -508,6 +527,8 @@ class Scheduler {
     int64_t prompt_tokens_computed = 0;
     int64_t decode_steps = 0;
     int64_t decode_rows = 0;
+    int64_t mixed_steps = 0;  // subset of decode_steps that also advanced prefill
+    double mixed_ms = 0.0;    // included in BOTH prefill_ms and step_ms; subtract once when summing
     double prefill_ms = 0.0;
     double prefill_request_ms = 0.0;  // summed per-request waits (a group credits each member)
     double step_ms = 0.0;
@@ -636,6 +657,8 @@ class Scheduler {
   struct Request {
     SchedulerRequest spec;
     State state = State::kQueued;
+    uint64_t prefill_epoch = 0;
+    uint64_t decode_epoch = 0;
     int slot = -1;
     int steps_done = 0;
     // Tokens of the current step's batch still unapplied when a token is
@@ -778,6 +801,7 @@ class Scheduler {
   // retains one monolithic admission event per tick.
   bool admit_fitting(int64_t& tick_cap, int64_t budget, bool first_prefill);
   void step_batch(const std::vector<int>& arrivals);
+  void apply_step_batch(const std::vector<int>& arrivals, const std::vector<std::vector<int32_t>>& batches);
   // Appends one token and applies terminal conditions in their canonical
   // order. Returns true when the request retired. `logprobs` (optional)
   // rides to the observer with it.
@@ -811,6 +835,7 @@ class Scheduler {
   std::vector<Result> results_;     // parallel to requests_
   int cursor_ = -1;                // last-stepped arrival (round-robin)
   int prefill_cursor_ = -1;        // last-advanced prefill (round-robin when the budget shrinks)
+  std::vector<int> mixed_stepped_; // arrivals already decoded in this quantum's shared walk
   int deferred_logged_ = -1;       // arrival of the current deferral log
   SchedulerObserver* observer_ = nullptr;
   bool keep_retired_ = true;       // the batch contract (set_keep_retired)
@@ -826,12 +851,15 @@ class Scheduler {
   int64_t prompt_tokens_computed_ = 0;
   int64_t decode_steps_ = 0;
   int64_t decode_rows_ = 0;
+  int64_t mixed_steps_ = 0;
+  double mixed_ms_ = 0.0;
   double prefill_ms_ = 0.0;
   double prefill_request_ms_ = 0.0;
   double step_ms_ = 0.0;
   PrefixCache cache_;              // the prefix cache's index (M7)
   SchedulerEngine::PrefixInfo prefix_info_;
   uint64_t ticks_ = 0;             // the LRU clock
+  uint64_t execution_epoch_ = 0;   // replicated ordering of prefill/decode starts
 };
 
 // Streaming lifecycle events for the service (SSE). Fired inline on the

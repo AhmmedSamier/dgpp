@@ -1,0 +1,37 @@
+{
+ "model": "Qwen/Qwen3.8-Flash-Next-FP8",
+ "results": {
+  "chat": {
+   "reasoning": "We need answer user: \"Explain, in a few paragraphs, why a CUDA graph replay can be faster than launching the same kernels eagerly, and what it costs.\" Need produce final with few paragraphs. Need explain CUDA graph replay faster: capture sequence of kernel launches/memcpy etc into graph, instantiate, replay. Reduces CPU launch overhead, driver overhead, validation, command buffer construction, dependency resolution maybe precomputed. GPU can start kernels sooner, less gaps, better pipelining, lower latency, especially many small kernels. Also can reduce synchronization overhead? Graph nodes dependencies known, can schedule. Costs: capture/instantiation overhead",
+   "content": "",
+   "finish": "length",
+   "completion_tokens": 128,
+   "prompt_tokens": 80,
+   "wall_s": 1.9133486899081618
+  },
+  "code": {
+   "reasoning": "We need answer user: \"Write a Python function that parses an ISO-8601 timestamp without external libraries, with docstring and three doctests.\"\n\nNeed produce final answer likely code. Need think about requirements. Python function parses ISO-8601 timestamp without external libraries. Need docstring and three doctests. Could use datetime? \"without external libraries\" likely standard library okay? But maybe they want no external libraries, can use datetime? But parsing ISO-8601 manually? They say without external libraries, maybe no dateutil. Could use datetime.datetime.fromisoformat? But that's standard",
+   "content": "",
+   "finish": "length",
+   "completion_tokens": 128,
+   "prompt_tokens": 79,
+   "wall_s": 1.6104878319893032
+  },
+  "math": {
+   "reasoning": "We need answer math problem step by step. Need solve carefully. Train A leaves city A at 60 km/h. Another leaves city B, 450 km away, at 90 km/h toward it 30 minutes later. Need when and where meet. Interpret: first train leaves A at time 0. Second leaves B 30 min later (0.5 h) toward A. Distance 450 km. Need meeting time relative to first departure? and location from A likely. Let's compute.\n\nLet t = hours after first train leaves. First train distance from A = 6",
+   "content": "",
+   "finish": "length",
+   "completion_tokens": 128,
+   "prompt_tokens": 101,
+   "wall_s": 1.4842974739149213
+  },
+  "json": {
+   "reasoning": "We need to respond to user: \"Return a JSON array of 8 objects, each with the fields country, capital and population_millions. Output only the JSON.\"\n\nNeed output only JSON. Need likely valid JSON array 8 objects. Fields country, capital, population_millions. Need maybe numeric population millions. Ensure only JSON no markdown. Need final only JSON.\n\nNeed choose 8 countries. Could use approximate populations in millions. Ensure valid JSON. Maybe:\n[\n {\"country\":\"China\",\"capital\":\"Beijing\",\"population_millions\":1411},\n {\"country\":\"India\",\"capital\":\"New Delhi\",\"",
+   "content": "",
+   "finish": "length",
+   "completion_tokens": 128,
+   "prompt_tokens": 78,
+   "wall_s": 1.561198155861348
+  }
+ }
+}

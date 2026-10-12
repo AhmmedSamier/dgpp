@@ -1,0 +1,13 @@
+[
+  {
+    "rank": 0,
+    "host": "192.168.88.11",
+    "pid": 579909,
+    "binary_sha256": "71a482c20fda639d6324865ed201d934e97a7185aadfa07855403bde1403b43a",
+    "vm_swap_kib": 0,
+    "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r8513c9c9cee04e68ab9c521750cf272e.scope",
+    "cgroup_swap_current": "0",
+    "cgroup_swap_max": "0",
+    "gpu": "NVIDIA GB10, GPU-0543a403-d834-9f2c-14fc-d0efa6059dfb, 53, 2411 MHz, [N/A], 12.30 W"
+  }
+]

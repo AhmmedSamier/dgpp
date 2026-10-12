@@ -1,0 +1,14 @@
+{
+  "command": [
+    "python3",
+    "scripts/dgpp-cluster",
+    "down",
+    "--config",
+    "build-pr104-shared/final-mtp-off-profile/control/deployment.json",
+    "--log-dir",
+    "build-pr104-shared/final-mtp-off-profile/control/world"
+  ],
+  "started": "2026-10-12T03:10:05.864026+00:00",
+  "returncode": 0,
+  "finished": "2026-10-12T03:10:08.943390+00:00"
+}

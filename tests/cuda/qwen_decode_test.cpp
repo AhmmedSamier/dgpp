@@ -174,12 +174,12 @@ int run_prefill_head(const std::string& dir) {
       QwenModel compact(cfg, dir, 4096, 8192, QwenResidency::Resident, nullptr, 0, 1, 2, false, 16, mma, true);
       const char* all = std::getenv("DGPP_PREFILL_HEAD_ALL_ROWS");
       const bool packed = !(all && all[0] == '1');
-      require(compact.logits_capacity_rows() == (packed ? 16 : 4096), "compact head capacity");
+      require(compact.logits_capacity_rows() == (packed ? 17 : 4096), "compact head capacity");
       const auto plan_full = QwenModel::plan_memory(cfg, 4096, 8192, 0, 1, QwenResidency::Resident, 2, false, 16);
       const auto plan_compact = QwenModel::plan_memory(cfg, 4096, 8192, 0, 1, QwenResidency::Resident, 2, false, 16, true);
       const int vocab = model.lm_vocab_count();
       require(plan_full.total_bytes() - plan_compact.total_bytes() ==
-              (packed ? size_t{4096 - 16} * vocab * sizeof(float) : 0), "compact head memory plan");
+              (packed ? size_t{4096 - 17} * vocab * sizeof(float) : 0), "compact head memory plan");
       for (const int length : {1, 4, 5, 8, 9, 16, 17, 127, 128, 129, 257, 1024, 4096}) {
         const auto prompt = smoke_tokens(cfg, length, 0x4300 + length);
         const auto full = model.forward(prompt);
@@ -760,6 +760,108 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
     reference.session_close(0);
     std::printf("[ OK ] resumable prefill: target/draft logits, interleaving and cancellation\n");
   }
+  // The second grouped prompt's MTP input starts after the first span,
+  // and a prompt longer than the hidden window must retain its final rows.
+  {
+    QwenModel reference(cfg, dir, 128, 512, QwenResidency::Resident, nullptr, 0, 1, 2, true);
+    QwenModel grouped(cfg, dir, 128, 512, QwenResidency::Resident, nullptr, 0, 1, 2, true);
+    const auto long_b = smoke_tokens(cfg, 95, 107);
+    (void)reference.session_prefill(1, long_b);
+    const auto expected = reference.session_draft(1, {10});
+    (void)grouped.session_prefill_group({0, 1}, {&A, &long_b});
+    const auto got = grouped.session_draft(1, {10});
+    const auto c = compare_row(got.logits.data(), expected.logits.data(), V);
+    require(c.l2 < 2e-2 && (c.top1_equal || c.near_tie), "group MTP reads its own span and final window rows");
+    grouped.session_close(0);
+    grouped.session_close(1);
+    reference.session_close(1);
+    require(grouped.kv_blocks_in_use() == 0, "group MTP releases reservations");
+    std::printf("[ OK ] grouped MTP: second span and wrapped hidden window\n");
+  }
+  // A mixed walk keeps every decoder's rollback rows even though a prefill
+  // span follows them and then runs its MTP block. Exercise nonzero snapshot
+  // offsets, every acceptance length, a QSA pool boundary and resumed chunks.
+  for (int accepted = 1; accepted <= 4; ++accepted) {
+    QwenModel reference(cfg, dir, 128, 1024, QwenResidency::Resident, nullptr, 0, 1, 3, true);
+    QwenModel mixed(cfg, dir, 128, 1024, QwenResidency::Resident, nullptr, 0, 1, 4, true);
+    QwenModel restored(cfg, dir, 128, 1024, QwenResidency::Resident, nullptr, 0, 1, 4, true);
+    void* arena = nullptr;
+    DGPP_CUDA_OK(cudaMalloc(&arena, restored.session_snapshot_bytes()));
+    QwenModel::SessionSnapshotMeta meta;
+    QwenModel::SnapshotRequest snapshot{48, arena, &meta, false};
+    const auto prompt = smoke_tokens(cfg, 95, 104);
+    const std::vector<int64_t> cuts{16, 48, 80};
+    auto expected_cursor = reference.session_prefill_begin(0, prompt, 128, 32, cuts);
+    auto cursor = mixed.session_prefill_begin(0, prompt, 128, 32, cuts);
+    auto restored_cursor = restored.session_prefill_begin(0, prompt, 128, 32, cuts, &snapshot);
+    bool attached = false;
+    std::vector<std::vector<int64_t>> feeds{{1, 2, 3, 4}, {5, 6, 7, 8}};
+    for (int req = 1; req <= 2; ++req) {
+      (void)reference.session_prefill(req, req == 1 ? A : B);
+      (void)mixed.session_prefill(req, req == 1 ? A : B);
+      (void)restored.session_prefill(req, req == 1 ? A : B);
+      reference.session_reserve_blocks(req, 128);
+      mixed.session_reserve_blocks(req, 128);
+      restored.session_reserve_blocks(req, 128);
+    }
+    const auto compare = [&](const QwenModel::Outputs& got, const QwenModel::Outputs& want, const char* label) {
+      require(got.logits.size() == want.logits.size(), std::string(label) + ": output rows");
+      for (size_t at = 0; at < got.logits.size(); at += V) {
+        const auto c = compare_row(got.logits.data() + at, want.logits.data() + at, V);
+        require(c.l2 < 2e-2 && (c.top1_equal || c.near_tie),
+                std::string(label) + ": l2=" + std::to_string(c.l2));
+      }
+    };
+    while (cursor.next < cursor.end) {
+      (void)reference.session_prefill_advance(expected_cursor, 24);  // eight decode rows share the 32-row walk
+      const auto expected = reference.session_verify_batch({1, 2}, feeds);
+      const auto actual = mixed.session_prefill_verify(cursor, 32, {1, 2}, feeds);
+      const auto resumed = restored.session_prefill_verify(restored_cursor, 32, {1, 2}, feeds);
+      require(cursor.next == expected_cursor.next, "mixed prefill preserves cuts and work budget");
+      require(restored_cursor.next == cursor.next &&
+                  bitwise(restored_cursor.output.logits, cursor.output.logits),
+              "mixed snapshot restore: prefill logits differ at the same execution shape");
+      compare(cursor.output, expected_cursor.output, "mixed prefill");
+      for (int s = 0; s < 2; ++s) {
+        compare(actual[s], expected[s], "mixed verify");
+        require(bitwise(resumed[s].logits, actual[s].logits),
+                "mixed snapshot restore changed a peer's verify logits");
+        reference.session_rollback(s + 1, accepted, 4, s * 4);
+        mixed.session_rollback(s + 1, accepted, 4, s * 4);
+        restored.session_rollback(s + 1, accepted, 4, s * 4);
+        require(mixed.session_position(s + 1) == reference.session_position(s + 1), "mixed rollback position");
+      }
+      for (int s = 0; s < 2; ++s) {
+        const auto next = reference.session_step(s + 1, 9);
+        const auto mixed_next = mixed.session_step(s + 1, 9);
+        compare(mixed_next, next, "mixed rollback continuation");
+        require(bitwise(restored.session_step(s + 1, 9).logits, mixed_next.logits),
+                "mixed snapshot restore changed a peer's rollback continuation");
+      }
+      if (!attached && cursor.next == 48) {
+        require(snapshot.taken && meta.position == 48, "mixed prefill snapshot was taken");
+        restored.session_close(0);
+        restored.session_attach(3, arena, meta);
+        restored_cursor = restored.session_prefill_begin(3, prompt, 128, 32, cuts, nullptr, 48);
+        attached = true;
+      }
+    }
+    require(attached, "mixed snapshot restore was exercised in a different request slot");
+    const auto draft = mixed.session_draft(0, {10});
+    compare(draft, reference.session_draft(0, {10}), "mixed prefill draft");
+    require(bitwise(restored.session_draft(3, {10}).logits, draft.logits),
+            "mixed snapshot restore changed the resumed MTP logits");
+    for (int req = 0; req < 3; ++req) {
+      mixed.session_close(req);
+      reference.session_close(req);
+    }
+    for (int req = 1; req <= 3; ++req) restored.session_close(req);
+    restored.session_release_snapshot(meta);
+    DGPP_CUDA_OK(cudaFree(arena));
+    require(mixed.kv_blocks_in_use() == 0, "mixed prefill releases every reservation");
+    require(restored.kv_blocks_in_use() == 0, "mixed snapshot restore releases every KV reference");
+  }
+  std::printf("[ OK ] mixed prefill/verify: chunk cuts, logits, MTP, rollback and bitwise snapshot restoration in another slot\n");
   // A donated share shifts the cursor off the model's original grid.
   // Subsequent work fills its cap except at a real structural/snapshot cut.
   {
@@ -773,9 +875,12 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
     QwenModel::SessionSnapshotMeta meta;
     QwenModel::SnapshotRequest snap{80, arena, &meta};
     auto cursor = yielded.session_prefill_begin(0, prompt, 192, 32, {80}, &snap);
+    cursor.final_output_only = true;
     for (const auto& [budget, position] :
          std::vector<std::pair<int64_t, int64_t>>{{32, 32}, {24, 56}, {32, 80}, {32, 112}, {32, 144}, {32, 155}}) {
       const bool done = yielded.session_prefill_advance(cursor, budget);
+      require(done || (cursor.output.logits.empty() && cursor.output.final_hidden_bits.empty()),
+              "serving continuation must defer unused intermediate outputs");
       require(cursor.next == position && done == (position == 155),
               "work budget must not split again at an automatic model grid");
     }

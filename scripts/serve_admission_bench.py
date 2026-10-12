@@ -76,6 +76,7 @@ class Bench:
                   "requested_tokens": tokens, "start": time.monotonic(),
                   "updates": [], "cancelled": False}
         output = hashlib.sha256()
+        output_text = [] if getattr(self.args, "record_text", False) else None
         done = False
         with closing(self.connection()) as conn:
             conn.request("POST", "/v1/completions", body, {"Content-Type": "application/json"})
@@ -104,6 +105,8 @@ class Bench:
                     record["updates"].append(time.monotonic())
                     for chunk in chunks:
                         output.update(chunk.encode())
+                        if output_text is not None:
+                            output_text.append(chunk)
                     if ready:
                         ready.set()
                     if cancel and len(record["updates"]) >= 3:
@@ -111,6 +114,8 @@ class Bench:
                         break
         record["end"] = time.monotonic()
         record["output_sha256"] = output.hexdigest()
+        if output_text is not None:
+            record["output_text"] = "".join(output_text)
         if not record["cancelled"]:
             if not done or "usage" not in record:
                 raise RuntimeError(f"{name}: incomplete stream")
@@ -229,6 +234,7 @@ def main():
     parser.add_argument("--interval", type=float, default=.25)
     parser.add_argument("--timeout", type=float, default=600)
     parser.add_argument("--seed", type=int, default=104)
+    parser.add_argument("--record-text", action="store_true", help="retain generated text for output-difference diagnosis")
     args = parser.parse_args()
     if min(args.trials, args.prompt_words, args.decode_tokens, args.arrival_tokens, args.arrivals) < 1:
         parser.error("counts must be positive")

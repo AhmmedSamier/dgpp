@@ -761,6 +761,7 @@ void Scheduler::begin_prefill(int arrival, int64_t budget) {
   r.admitted = true;
   r.slot = slot;
   r.state = State::kPrefilling;
+  r.prefill_epoch = ++execution_epoch_;
   slots_[static_cast<size_t>(slot)] = arrival;
   DGPP_LOG_INFO("sched: request '{}' prefilling in slot {} ({} tokens/tick)",
                 r.spec.id, slot, budget);
@@ -768,6 +769,33 @@ void Scheduler::begin_prefill(int arrival, int64_t budget) {
 
 void Scheduler::advance_prefill(int arrival, int64_t budget) {
   Request& r = requests_[static_cast<size_t>(arrival)];
+  std::vector<int> decoders, slots;
+  if (policy_.prefill_early_admission && mixed_stepped_.empty()) {
+    for (int off = 1; off <= static_cast<int>(requests_.size()) &&
+         static_cast<int>(decoders.size()) < decode_batch_capacity_; ++off) {
+      const int i = (cursor_ + off) % static_cast<int>(requests_.size());
+      if (requests_[i].state != State::kActive) continue;
+      decoders.push_back(i);
+      slots.push_back(requests_[i].slot);
+    }
+  }
+  if (!decoders.empty() && engine_->can_mix_prefill(r.slot, slots)) {
+    rolling_snapshots();
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = engine_->advance_prefill_and_step(r.slot, budget, slots);
+    const double ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    // Both logical operations occupied this interval. Expose the overlap
+    // explicitly so phase rates and decode-latency histograms remain honest.
+    prefill_ms_ += ms;
+    step_ms_ += ms;
+    mixed_ms_ += ms;
+    ++mixed_steps_;
+    apply_prefill_progress(arrival, result.prefill, budget, ms);
+    apply_step_batch(decoders, result.decoded);
+    mixed_stepped_.insert(mixed_stepped_.end(), decoders.begin(), decoders.end());
+    return;
+  }
   const auto started = std::chrono::steady_clock::now();
   const auto progress = engine_->advance_prefill(r.slot, budget);
   const double ms = std::chrono::duration<double, std::milli>(
@@ -779,6 +807,34 @@ void Scheduler::advance_prefill(int arrival, int64_t budget) {
 void Scheduler::advance_prefill_group(const std::vector<int>& arrivals, const std::vector<int64_t>& budgets) {
   std::vector<int> slots;
   for (const int a : arrivals) slots.push_back(requests_[static_cast<size_t>(a)].slot);
+  std::vector<int> decoders, decode_slots;
+  if (policy_.prefill_early_admission && mixed_stepped_.empty()) {
+    for (int off = 1; off <= static_cast<int>(requests_.size()) &&
+         static_cast<int>(decoders.size()) < decode_batch_capacity_; ++off) {
+      const int i = (cursor_ + off) % static_cast<int>(requests_.size());
+      if (requests_[i].state != State::kActive) continue;
+      decoders.push_back(i);
+      decode_slots.push_back(requests_[i].slot);
+    }
+  }
+  if (engine_->can_mix_prefill_group(slots, decode_slots)) {
+    rolling_snapshots();
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = engine_->advance_prefill_group_and_step(slots, budgets, decode_slots);
+    const double ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    if (result.prefills.size() != arrivals.size())
+      throw std::runtime_error("Scheduler: mixed group returned the wrong number of prefills");
+    prefill_ms_ += ms;
+    step_ms_ += ms;
+    mixed_ms_ += ms;
+    ++mixed_steps_;
+    for (size_t i = 0; i < arrivals.size(); ++i)
+      apply_prefill_progress(arrivals[i], result.prefills[i], budgets[i], ms);
+    apply_step_batch(decoders, result.decoded);
+    mixed_stepped_.insert(mixed_stepped_.end(), decoders.begin(), decoders.end());
+    return;
+  }
   const auto started = std::chrono::steady_clock::now();
   const auto progress = engine_->advance_prefill_group(slots, budgets);
   const double ms = std::chrono::duration<double, std::milli>(
@@ -825,7 +881,9 @@ bool Scheduler::needs_chunked_prefill(int arrival, int64_t budget) const {
   // prompt past one aligned chunk in through its cursor: a later arrival
   // then joins the walk at the next tick instead of waiting behind a
   // one-shot of the whole prompt.
-  const int64_t over = engine_->prefill_group_advance()
+  const bool group = engine_->prefill_group_advance() &&
+                     (policy_.prefill_early_admission || engine_->prefill_budget_per_reader());
+  const int64_t over = group
       ? std::min<int64_t>(budget, engine_->prefill_chunk_alignment()) : budget;
   return budget > 0 &&
          (r.spec.images.empty() || engine_->supports_image_chunked_prefill()) &&
@@ -942,6 +1000,7 @@ void Scheduler::admit_finish(int arrival, int slot, int32_t token, double prefil
   }
   r.reserved_tokens = reserved;
   r.state = State::kActive;
+  r.decode_epoch = ++execution_epoch_;
   r.slot = slot;
   slots_[static_cast<size_t>(slot)] = arrival;
   if (arrival == deferred_logged_) deferred_logged_ = -1;
@@ -989,8 +1048,13 @@ void Scheduler::step_batch(const std::vector<int>& arrivals) {
   step_ms_ += std::chrono::duration<double, std::milli>(
                   std::chrono::steady_clock::now() - t_step)
                   .count();
+  apply_step_batch(arrivals, batches);
+}
+
+void Scheduler::apply_step_batch(const std::vector<int>& arrivals,
+                                const std::vector<std::vector<int32_t>>& batches) {
   ++decode_steps_;
-  decode_rows_ += static_cast<int64_t>(slots.size());
+  decode_rows_ += static_cast<int64_t>(arrivals.size());
   for (const int arrival : arrivals)
     ++requests_[static_cast<size_t>(arrival)].decode_passes;
   if (batches.size() != arrivals.size())
@@ -1071,7 +1135,7 @@ void Scheduler::step_batch(const std::vector<int>& arrivals) {
     const int arrival = arrivals[i];
     const std::vector<int32_t>& tokens = batches[i];
     const std::vector<sample::Result> lps =
-        collect_logprobs(arrival, slots[i], tokens.size());
+        collect_logprobs(arrival, requests_[static_cast<size_t>(arrival)].slot, tokens.size());
     for (size_t t = 0; t < tokens.size(); ++t) {
       // A speculative pass can have advanced farther than the public request
       // survives. EOS/cap/cancel retires the slot and deliberately drops the
@@ -1346,6 +1410,7 @@ bool Scheduler::quantum() {
   // admission or step — the step below never writes past a reservation,
   // and every rank grows or sheds the same requests at the same quantum.
   grow_reservations();
+  mixed_stepped_.clear();
 
   const bool any_active = std::any_of(
       requests_.begin(), requests_.end(),
@@ -1369,8 +1434,26 @@ bool Scheduler::quantum() {
   // This choice depends only on replicated scheduler state. Reevaluate at
   // every yield so an unfinished prompt speeds up when its decoding peer retires.
   const auto prefill_budget = [&]() -> int64_t {
-    return !any_active && policy_.prefill_idle_budget_tokens > 0
-        ? policy_.prefill_idle_budget_tokens : policy_.prefill_budget_tokens;
+    const int64_t busy = policy_.prefill_budget_tokens;
+    const int64_t idle = policy_.prefill_idle_budget_tokens;
+    if (idle <= 0) return busy;
+    if (!any_active) return idle;
+    if (!policy_.prefill_early_admission || !prefill_in_flight) return busy;
+    std::vector<int> decoders;
+    for (const auto& r : requests_)
+      if (r.state == State::kActive) decoders.push_back(r.slot);
+    // Preserve the interruption bound of decoders that preceded a reader.
+    // Newly admitted decoders may share an existing reader's larger walk:
+    // their arrival must not multiply the reader's weight-streaming passes.
+    // Use this only when the engine can execute the shared walk itself.
+    for (const auto& reader : requests_) {
+      if (reader.state != State::kPrefilling) continue;
+      if (!engine_->can_mix_prefill(reader.slot, decoders)) return busy;
+      for (const auto& decoder : requests_)
+        if (decoder.state == State::kActive && decoder.decode_epoch < reader.prefill_epoch)
+          return busy;
+    }
+    return idle;
   };
   int64_t budget = prefill_budget();
   // An engine that advances its in-flight prefills as one walk takes the
@@ -1379,7 +1462,8 @@ bool Scheduler::quantum() {
   // reading prompt: a tick serves every request once — the decoding ones a
   // pass, each reading one its quantum — and the walk they share costs one
   // stream of the weights however many they are.
-  const bool group_advance = policy_.prefill_budget_tokens > 0 && engine_->prefill_group_advance();
+  const bool group_advance = policy_.prefill_budget_tokens > 0 && engine_->prefill_group_advance() &&
+                            (policy_.prefill_early_admission || engine_->prefill_budget_per_reader());
   bool chunk_tick = prefill_in_flight;
   if (group_advance) {
     int64_t readers = 0;
@@ -1394,7 +1478,7 @@ bool Scheduler::quantum() {
       }
     }
     const int64_t align = engine_->prefill_chunk_alignment();
-    if (any_active && readers > 1)
+    if (any_active && readers > 1 && engine_->prefill_budget_per_reader())
       budget = std::min<int64_t>(engine_->prefill_chunk_limit() / align * align, budget * readers);
     chunk_tick = readers > 0;
   }
@@ -1425,10 +1509,10 @@ bool Scheduler::quantum() {
       for (size_t i = 0; i < requests_.size(); ++i) {
         if (open_slots <= 0 || inflight.size() + begins.size() >= max_advances) break;
         if (requests_[i].state != State::kQueued) continue;
-        // With early admission enabled, text of any size can join an
-        // in-flight non-group prefill's shares instead of waiting for leftovers.
-        // Keep image and group-advance eligibility on their existing paths.
-        if ((!policy_.prefill_early_admission || group_advance || !requests_[i].spec.images.empty()) &&
+        // Text of any size can join an early-admission walk, including
+        // prompts shorter than one alignment unit. Images retain their
+        // existing eligibility rules.
+        if ((!policy_.prefill_early_admission || !requests_[i].spec.images.empty()) &&
             !needs_chunked_prefill(static_cast<int>(i), budget)) continue;
         const int64_t need = new_blocks(requests_[i], plan_prefix(requests_[i]));
         if (need > free_blocks) continue;
@@ -1598,10 +1682,13 @@ bool Scheduler::quantum() {
   // Scalar engines advertise capacity one and retain the original policy
   // bit-for-bit. A batched graph normally advertises the slot count, so this
   // slice contains every active request exactly once.
+  // A shared walk already decoded its live set. A prefill that completed
+  // afterward published its first token and joins decode on the next tick;
+  // replaying the physical family now would step its peers twice.
   std::vector<int> step_arrivals;
   step_arrivals.reserve(static_cast<size_t>(decode_batch_capacity_));
   for (int off = 1;
-       off <= static_cast<int>(requests_.size()) &&
+       mixed_stepped_.empty() && off <= static_cast<int>(requests_.size()) &&
        static_cast<int>(step_arrivals.size()) < decode_batch_capacity_;
        ++off) {
     const int i = (cursor_ + off) % static_cast<int>(requests_.size());
@@ -1666,6 +1753,8 @@ Scheduler::Meters Scheduler::meters() const {
   m.prompt_tokens_computed = prompt_tokens_computed_;
   m.decode_steps = decode_steps_;
   m.decode_rows = decode_rows_;
+  m.mixed_steps = mixed_steps_;
+  m.mixed_ms = mixed_ms_;
   m.prefill_ms = prefill_ms_;
   m.prefill_request_ms = prefill_request_ms_;
   m.step_ms = step_ms_;
@@ -1702,6 +1791,7 @@ void Scheduler::rolling_snapshots() {
   for (size_t i = 0; i < requests_.size(); ++i) {  // arrival order
     Request& r = requests_[i];
     if (r.state != State::kActive || !cache_on(r)) continue;
+    if (std::find(mixed_stepped_.begin(), mixed_stepped_.end(), static_cast<int>(i)) != mixed_stepped_.end()) continue;
     // Committed tokens: the prompt plus every generated token but the last
     // (pending — the next step writes it).
     const int64_t committed =

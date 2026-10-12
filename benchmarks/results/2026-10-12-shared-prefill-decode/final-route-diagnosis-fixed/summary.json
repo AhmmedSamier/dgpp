@@ -1,0 +1,17 @@
+{
+  "candidate": {
+    "layer": "last main-model MoE layer",
+    "top_k": 10,
+    "four_row_batches": 254,
+    "mean_unique_experts": 20.094488188976378,
+    "unique_expert_visits": 5104
+  },
+  "candidate-deferred": {
+    "layer": "last main-model MoE layer",
+    "top_k": 10,
+    "four_row_batches": 254,
+    "mean_unique_experts": 13.035433070866143,
+    "unique_expert_visits": 3311
+  },
+  "scope": "Diagnostic patched binary, MTP off. Only final main-model layer routes; instrumented wall times are not performance measurements."
+}

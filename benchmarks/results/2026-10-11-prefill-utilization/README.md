@@ -1,5 +1,7 @@
 # Prefill budget utilization and throughput follow-up
 
+Historical checkpoint: the active follow-up is [shared prefill/decode execution](../2026-10-12-shared-prefill-decode/README.md). Defaults and acceptance conclusions below describe the revisions measured here.
+
 This follow-up to [PR 105](https://github.com/HawkBearPig/dgpp/pull/105) restores
 throughput-oriented admission by default and fixes a separate Qwen prefill
 budget inefficiency. It **does not make early admission throughput-neutral**.
@@ -210,7 +212,9 @@ snapshot cleanup fixes remain enabled.
 The cursor fix is a useful independent optimization, but it does not remove
 the scheduling cost of 30 extra decode passes or the busy-budget switch. A
 throughput-neutral solution to the original responsiveness request remains
-unproven. Future work must measure total completion time and incumbent decoder
+unproven. Issue 104 has been reopened; the subsequent
+[execution profiles](../2026-10-11-prefill-execution-profile/README.md) locate
+the extra GPU work and record why the opt-in policy is not a resolution. Future work must measure total completion time and incumbent decoder
 latency as well as the first arriving request's TTFT. Increasing configured
 concurrency or prefill caps would change the comparison and is not counted as
 a fix here.

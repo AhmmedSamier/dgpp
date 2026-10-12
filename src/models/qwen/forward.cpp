@@ -7,10 +7,12 @@
 #include "kernels/scale_gemm.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 
@@ -85,6 +87,7 @@ QwenModel::QwenModel(const QwenTextConfig& cfg, const std::string& checkpoint_di
     sp.max_requests = max_requests;
     sp.decode_rows = decode_rows;
     sp.logits_rows = compact_logits_rows(serving_logits, decode_rows, max_requests);
+    if (sp.logits_rows > 0 && max_requests > 1) sp.logits_rows += max_requests - 1;  // each mixed prefill's last row
     sp.mtp = mtp;
     sp.vocab_size = cfg_.vocab_size;
     sp.hidden = H;
@@ -347,7 +350,8 @@ QwenModel::MemoryPlan QwenModel::plan_memory(const QwenTextConfig& cfg, int max_
   }
   // Activations and the token rows.
   const size_t logits_rows =
-      serving_logits_capacity(max_tokens, serving_logits, decode_rows, max_requests);
+      serving_logits_capacity(max_tokens, serving_logits, decode_rows, max_requests) +
+      (compact_logits_rows(serving_logits, decode_rows, max_requests) > 0 && max_requests > 1 ? max_requests - 1 : 0);
   const size_t token_rows = std::max(M, rows + R * static_cast<size_t>(kSpecRows));
   plan.add("activations (hyper state, rows, head)",
            token_rows * 8 + M * 12 + 8 + M * W * 2 + 3 * M * H * 2 + logits_rows * V * 4 + rows * 64,
@@ -933,6 +937,21 @@ void QwenModel::prefetch_ple_value_side(const QwenLayerResident& r) {
 
 QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
   const int T = run.T, req = run.req;
+  const bool mixed = run.decode_spans > 0;
+  int spec_rows = 0;
+  if (mixed) {
+    if (run.decode || run.capture || run.batch_requests || run.all_rows ||
+        run.decode_spans >= run.num_spans)
+      throw std::invalid_argument("Qwen mixed walk: expected decode spans followed by prefill spans");
+    for (int s = 0; s < run.decode_spans; ++s) {
+      if (run.span_lens[s] < 1 || run.span_lens[s] > kSpecRows)
+        throw std::invalid_argument("Qwen mixed walk: invalid speculative span");
+      spec_rows += run.span_lens[s];
+    }
+    if (spec_rows > max_decode_rows_ ||
+        (compact_logits_ && spec_rows + run.num_spans - run.decode_spans > logits_capacity_rows_))
+      throw std::invalid_argument("Qwen mixed walk: speculative outputs exceed storage");
+  }
   if (run.all_rows && T > logits_capacity_rows_)
     throw std::invalid_argument("Qwen serving head: use full diagnostic storage for an all-row forward");
   walk_rows_ = T;
@@ -952,7 +971,7 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
   // are materialized first (a no-op kernel when none are pending).
   if (gdn_replay_ && !run.decode) {
     if (run.num_spans > 0) {
-      for (int sp = 0; sp < run.num_spans; ++sp) materialize_gdn(run.span_reqs[sp]);
+      for (int sp = run.decode_spans; sp < run.num_spans; ++sp) materialize_gdn(run.span_reqs[sp]);
     } else {
       materialize_gdn(req);
     }
@@ -977,7 +996,7 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
   }
 
   // The state families' per-row snapshots (the rollback's source).
-  const bool snapshots = run.decode && run.snapshots;
+  const bool snapshots = (run.decode || mixed) && run.snapshots;
   KdaRequestRows rows;
   rows.request_ids = d_req;
   rows.positions = d_pos;
@@ -1040,7 +1059,7 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
       if (run.decode) prefetch_ple_value_side(r);
       fold(value, H);
       ple_->finish(r_, value, ple_conv_state_, ple_conv_elems_, d_req, d_pos, d_spans, num_requests, T,
-                   stream_, snapshots ? spec_ple_ : nullptr);
+                   stream_, snapshots ? spec_ple_ : nullptr, mixed ? spec_rows : -1);
     }
     attn_gr_->mix(r_, x_, T, stream_, &pend);
     pend = {};
@@ -1070,13 +1089,34 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
       } else if (run.num_spans > 0) {
         // A group prefill (2026-09-14): each span's rows scan its own
         // request's recurrent and conv state (the pointers step by rows).
-        int64_t row0 = 0;
-        for (int sp = 0; sp < run.num_spans; ++sp) {
-          const int len = run.span_lens[sp], sreq = run.span_reqs[sp];
-          gdn_->enqueue(x_ + static_cast<size_t>(row0) * H, gdn_rec(sreq, gdn_ordinal), gdn_conv(sreq, gdn_ordinal),
-                        attn_out + static_cast<size_t>(row0) * H, len, stream_);
-          row0 += len;
+        std::vector<QwenGdnLayer::Span> shared_spans;
+        if (mixed) {
+          QwenGdnLayer::Span prefix;
+          prefix.rows = spec_rows;
+          prefix.recurrent = gdn_rec(0, gdn_ordinal);
+          prefix.conv = gdn_conv(0, gdn_ordinal);
+          prefix.rec_stride = static_cast<int64_t>(num_gdn_) * gdn_rec_elems_;
+          prefix.conv_stride = static_cast<int64_t>(num_gdn_) * gdn_conv_elems_;
+          prefix.rec_snap = rec_snap;
+          prefix.conv_snap = conv_snap;
+          prefix.requests = rows;
+          prefix.requests.num_requests = run.decode_spans;
+          if (gdn_replay_) {
+            prefix.replay = gdn_replay_view(0, gdn_ordinal, true);
+            for (int sp = 0; sp < run.decode_spans; ++sp)
+              gdn_replay_rows_used_ = std::max(gdn_replay_rows_used_, run.span_lens[sp]);
+          }
+          shared_spans.push_back(prefix);
         }
+        for (int sp = run.decode_spans; sp < run.num_spans; ++sp) {
+          const int len = run.span_lens[sp], sreq = run.span_reqs[sp];
+          QwenGdnLayer::Span reader;
+          reader.rows = len;
+          reader.recurrent = gdn_rec(sreq, gdn_ordinal);
+          reader.conv = gdn_conv(sreq, gdn_ordinal);
+          shared_spans.push_back(reader);
+        }
+        gdn_->enqueue_spans(x_, attn_out, T, shared_spans, stream_);
       } else {
         gdn_->enqueue(x_, gdn_rec(req, gdn_ordinal), gdn_conv(req, gdn_ordinal), attn_out, T, stream_,
                       rec_snap, conv_snap, replay);
@@ -1098,16 +1138,26 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
         // A group prefill: each span attends over its own request's cache
         // and writes its pools and ring (the row metadata steps with the rows).
         int64_t row0 = 0;
-        for (int sp = 0; sp < run.num_spans; ++sp) {
+        std::vector<QwenQsaLayer::Span> shared_spans;
+        if (mixed) {
+          QwenQsaRows prefix = qrows;
+          prefix.decode = true;
+          prefix.num_requests = run.decode_spans;
+          shared_spans.push_back({spec_rows, prefix});
+          row0 = spec_rows;
+        }
+        for (int sp = run.decode_spans; sp < run.num_spans; ++sp) {
           const int len = run.span_lens[sp];
           QwenQsaRows srows = qrows;
           srows.req_ids = d_req + row0;
           srows.pos = d_pos + row0;
           srows.request = run.span_reqs[sp];
           srows.pos0 = run.span_pos0[sp];
-          qsa_->enqueue(x_ + static_cast<size_t>(row0) * H, len, srows, cache, attn_out + static_cast<size_t>(row0) * H, stream_);
+          srows.ring_snapshots = nullptr;
+          shared_spans.push_back({len, srows});
           row0 += len;
         }
+        qsa_->enqueue_spans(x_, T, qrows, shared_spans, cache, attn_out, stream_);
       } else {
         qsa_->enqueue(x_, T, qrows, cache, attn_out, stream_);
       }
@@ -1174,25 +1224,52 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
                              (globals_.lm_head_fp8.payload != nullptr || globals_.lm_head_packed.packed != nullptr) &&
                              !mma_envelope && !head_all_rows;
   head_req_ = req;
-  const bool packed_logits = packed_prefill_logits(run);
-  if (packed_logits) {
+  const bool packed_logits = mixed || (run.output_spans && run.num_spans > 0) || packed_prefill_logits(run);
+  if (mixed) {
+    // The speculative prefix shares one head product. Projecting each
+    // decoder row separately would stream the vocabulary weights again.
+    qwen_configure_gemm_rows(gemm_, spec_rows, true);
+    head_req_ = 0;
+    lm_head_logits(h_, spec_rows, stream_, false);
+    qwen_configure_gemm_rows(gemm_, T, false);
+    int end = spec_rows, output = spec_rows;
+    for (int s = run.decode_spans; s < run.num_spans; ++s) {
+      end += run.span_lens[s];
+      if (!run.output_spans || run.output_spans[s])
+        lm_head_logits(h_, T, stream_, false, end - 1, output);
+      ++output;
+    }
+  } else if (packed_logits) {
     // FP8 and packed heads preserve the full product's dispatch. BF16
     // heads use a single-row projection; hidden rows stay in place for MTP.
     if (run.decode || run.all_rows) throw std::logic_error("Qwen compact head: invalid row run");
-    int end = 0;
+    int end = 0, output = 0;
     for (int s = 0; s < std::max(1, run.num_spans); ++s) {
       end += run.num_spans > 0 ? run.span_lens[s] : T;
-      lm_head_logits(h_, T, stream_, false, end - 1, s);
+      if (!run.output_spans || run.output_spans[s])
+        lm_head_logits(h_, T, stream_, false, end - 1, output);
+      ++output;
     }
-  } else {
+  } else if (!run.output_spans || run.output_spans[0]) {
     lm_head_logits(h_, T, stream_, last_row_only);
   }
   // The draft block's input: the last rows' hyper states into the slots'
   // windows by position (the last window rows of a prefill chunk, every
   // decode row — distinct slots within one launch).
   if (mtp_) {
-    const int n = run.num_spans > 0 ? T : std::min(T, max_decode_rows_);  // a group prefill stores every row
-    store_draft_hidden(r_ + static_cast<size_t>(T - n) * W, d_req + (T - n), d_pos + (T - n), n);
+    // Each slot's window keeps its own tail. Storing an entire long span
+    // concurrently races rows that wrap onto the same window position.
+    if (run.num_spans > 0) {
+      int end = 0;
+      for (int s = 0; s < run.num_spans; ++s) {
+        end += run.span_lens[s];
+        const int n = std::min(run.span_lens[s], max_decode_rows_);
+        store_draft_hidden(r_ + static_cast<size_t>(end - n) * W, d_req + end - n, d_pos + end - n, n);
+      }
+    } else {
+      const int n = std::min(T, max_decode_rows_);
+      store_draft_hidden(r_ + static_cast<size_t>(T - n) * W, d_req + T - n, d_pos + T - n, n);
+    }
   }
   // The prefetch side stream rejoins here: a capture must end with every
   // forked stream joined, and the eager tail's sync (finish_run) covers
@@ -1200,7 +1277,7 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
   if (run.decode) prefetch_.join(stream_);
   // The tail mirrors, the sync and the host copies are the core's; the
   // route traces of the device-segmented prefill materialize after it.
-  out = finish_run(run, std::move(out), packed_logits);
+  out = finish_run(run, std::move(out), packed_logits, run.device_decode_outputs ? spec_rows : -1);
   // An eager walk has synced: a staging that failed on the host surfaces
   // here rather than as a silent embedding.
   if (has_ple_ && table_.mmap && !run.capture) ple_->check_staged();
@@ -1548,7 +1625,7 @@ size_t QwenModel::bf12_plan_bytes(const QwenTextConfig& cfg, const QwenLocalGeom
 // then its own mixer and the shared head.
 // ---------------------------------------------------------------------------
 void QwenModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode_row,
-                             bool capture, int head_rows, int batch_requests) {
+                             bool capture, int head_rows, int batch_requests, int hidden_row) {
   walk_rows_ = T;
   // The hidden projection has T * hc matrix rows: a shipped 6/8-token
   // walk must not enter the wide guard just because hc expands it to 24/32.
@@ -1568,7 +1645,9 @@ void QwenModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, 
   // ---- the input fusion --------------------------------------------------
   // Decode rows gather their hyper states from the slots' windows by
   // position; prefill rows read the main chunk's rows in place (r_).
-  const uint16_t* hin = r_;
+  if (hidden_row < 0 || hidden_row + T > max_tokens_)
+    throw std::invalid_argument("mtp_run_rows: hidden span outside the main walk");
+  const uint16_t* hin = r_ + static_cast<size_t>(hidden_row) * W;
   if (decode_row) {
     gather_draft_hidden(d_req, d_pos, mtp_hin_, T);
     hin = mtp_hin_;
@@ -1804,6 +1883,184 @@ bool QwenModel::session_prefill_advance(PrefillCursor& cursor, int64_t chunk_tok
   const bool done = Base::session_prefill_advance(cursor, chunk_tokens);
   if (done) cursor.images = nullptr;
   return done;
+}
+
+std::vector<bool> QwenModel::session_prefill_advance_group(const std::vector<PrefillCursor*>& cursors,
+                                                        const std::vector<int64_t>& budgets) {
+  if (cursors.size() != budgets.size()) throw std::invalid_argument("Qwen group prefill: one budget per cursor");
+  if (std::any_of(cursors.begin(), cursors.end(), [](const auto* c) { return c->images && !c->images->empty(); })) {
+    std::vector<bool> done;
+    for (size_t i = 0; i < cursors.size(); ++i) done.push_back(session_prefill_advance(*cursors[i], budgets[i]));
+    return done;
+  }
+  std::vector<Base::PrefillCursor*> spans(cursors.begin(), cursors.end());
+  return Base::session_prefill_advance_group(spans, budgets);
+}
+
+std::vector<QwenModel::Outputs> QwenModel::session_prefill_verify(
+    PrefillCursor& cursor, int64_t budget, const std::vector<int>& reqs,
+    const std::vector<std::vector<int64_t>>& feeds, int graph_rows) {
+  return session_prefill_verify_group({&cursor}, {budget}, reqs, feeds, graph_rows);
+}
+
+std::vector<QwenModel::Outputs> QwenModel::session_prefill_verify_group(
+    const std::vector<PrefillCursor*>& cursors, const std::vector<int64_t>& budgets,
+    const std::vector<int>& reqs, const std::vector<std::vector<int64_t>>& feeds, int graph_rows) {
+  if (cursors.empty() || cursors.size() != budgets.size())
+    throw std::invalid_argument("session_prefill_verify: one budget per prefill cursor");
+  if (reqs.empty() || reqs.size() != feeds.size())
+    throw std::invalid_argument("session_prefill_verify: one feed per decoding request");
+  std::vector<int> readers;
+  std::vector<int64_t> counts;
+  int64_t total_budget = 0;
+  for (size_t s = 0; s < cursors.size(); ++s) {
+    const auto& cursor = *cursors[s];
+    check_req(cursor.req, "session_prefill_verify");
+    if (cursor.images && !cursor.images->empty())
+      throw std::invalid_argument("session_prefill_verify: image spans require their own walk");
+    if (cursor.next >= cursor.end || session_pos_[cursor.req] != cursor.next)
+      throw std::logic_error("session_prefill_verify: completed or stale cursor");
+    if (std::find(readers.begin(), readers.end(), cursor.req) != readers.end())
+      throw std::invalid_argument("session_prefill_verify: duplicate reader");
+    readers.push_back(cursor.req);
+    const int64_t budget = budgets[s] == 0 ? cursor.budget_tokens : budgets[s];
+    if (budget < snapshot_align_ || budget > max_tokens_ || budget % snapshot_align_ != 0)
+      throw std::invalid_argument("session_prefill_verify: invalid prefill budget");
+    total_budget += budget;
+    const int64_t end = cursor.cut_index < cursor.cuts.size() ? cursor.cuts[cursor.cut_index] : cursor.end;
+    counts.push_back(std::min(end - cursor.next, budget));
+  }
+  std::vector<int64_t> ids, positions;
+  std::vector<int32_t> spans, lengths;
+  std::vector<int> offsets;
+  std::vector<uint8_t> outputs(reqs.size(), 1);
+  for (size_t s = 0; s < reqs.size(); ++s) {
+    const int req = reqs[s];
+    const bool padded = graph_rows > 0 && feeds[s].empty();
+    if (!padded) check_req(req, "session_prefill_verify");
+    if (!padded && (std::find(readers.begin(), readers.end(), req) != readers.end() ||
+                    std::find(reqs.begin(), reqs.begin() + s, req) != reqs.begin() + s))
+      throw std::invalid_argument("session_prefill_verify: duplicate request");
+    const int n = padded ? graph_rows : static_cast<int>(feeds[s].size());
+    const int64_t pos = padded ? -1 : session_pos_[req];
+    if (n < 1 || n > kSpecRows || (!padded && (pos <= 0 || pos + n > max_context_)) ||
+        (graph_rows > 0 && n != graph_rows))
+      throw std::invalid_argument("session_prefill_verify: decode outside session bounds");
+    for (const int64_t id : feeds[s])
+      if (id < 0 || id >= vocab_size_)
+        throw std::invalid_argument("session_prefill_verify: invalid token");
+    offsets.push_back(static_cast<int>(ids.size()));
+    if (padded) ids.insert(ids.end(), n, 0);
+    else ids.insert(ids.end(), feeds[s].begin(), feeds[s].end());
+    spans.push_back(padded ? -1 : req);
+    positions.push_back(pos);
+    lengths.push_back(n);
+  }
+  const int decode_rows = static_cast<int>(ids.size());
+  const size_t live_decoders = std::count_if(feeds.begin(), feeds.end(), [](const auto& f) { return !f.empty(); });
+  if (decode_rows > max_decode_rows_ || live_decoders + cursors.size() > static_cast<size_t>(max_requests_))
+    throw std::invalid_argument("session_prefill_verify: too many decode rows or spans");
+  // Charge the speculative prefix to the same tiles as the prefills. Short
+  // tails donate their unused shares before reducing any reader's progress.
+  int64_t prefill_rows = std::accumulate(counts.begin(), counts.end(), int64_t{0});
+  const int64_t target = std::min<int64_t>(total_budget, max_tokens_) - decode_rows;
+  while (prefill_rows > target) {
+    auto largest = std::max_element(counts.begin(), counts.end());
+    if (*largest <= snapshot_align_) break;
+    const int64_t remainder = *largest % snapshot_align_;
+    const int64_t take = remainder > 0 ? remainder : snapshot_align_;
+    *largest -= take;
+    prefill_rows -= take;
+  }
+  if (prefill_rows + decode_rows > max_tokens_)
+    throw std::invalid_argument("session_prefill_verify: no room for prefill rows");
+  for (size_t s = 0; s < cursors.size(); ++s) {
+    const auto& cursor = *cursors[s];
+    ids.insert(ids.end(), cursor.ids + cursor.next - cursor.start,
+                         cursor.ids + cursor.next + counts[s] - cursor.start);
+    spans.push_back(cursor.req);
+    positions.push_back(cursor.next);
+    lengths.push_back(static_cast<int32_t>(counts[s]));
+    outputs.push_back(!cursor.final_output_only || cursor.next + counts[s] == cursor.end);
+  }
+  for (size_t s = 0; s < reqs.size(); ++s)
+    if (positions[s] >= 0 && has_pool() && !pool_.ensure_request_blocks(reqs[s], positions[s] + lengths[s], stream_))
+      throw std::runtime_error("session_prefill_verify: cache pool exhausted");
+  for (auto* cursor : cursors) {
+    if (!cursor->suspended) continue;
+    push_position(cursor->req);
+    if (mtp_) push_mtp_position(cursor->req);
+    cursor->suspended = false;
+  }
+  RowRun run;
+  run.req = cursors.front()->req;
+  run.ids = ids.data();
+  run.T = static_cast<int>(ids.size());
+  run.span_reqs = spans.data();
+  run.span_pos0 = positions.data();
+  run.span_lens = lengths.data();
+  run.num_spans = static_cast<int>(spans.size());
+  run.output_spans = outputs.data();
+  run.decode_spans = static_cast<int>(reqs.size());
+  run.device_decode_outputs = graph_rows > 0;
+  run.snapshots = true;
+  gdn_replay_rows_used_ = 0;
+  Outputs all = run_rows(run);
+  const auto slice = [&](int first, int count) {
+    Outputs out;
+    out.lm_vocab_begin = all.lm_vocab_begin;
+    out.lm_vocab_count = all.lm_vocab_count;
+    out.logits.assign(all.logits.begin() + static_cast<size_t>(first) * lm_vocab_count_,
+                       all.logits.begin() + static_cast<size_t>(first + count) * lm_vocab_count_);
+    out.final_hidden_bits.assign(all.final_hidden_bits.begin() + static_cast<size_t>(first) * hidden_,
+                                all.final_hidden_bits.begin() + static_cast<size_t>(first + count) * hidden_);
+    return out;
+  };
+  std::vector<Outputs> out;
+  for (size_t s = 0; s < reqs.size(); ++s) {
+    if (graph_rows == 0) {
+      out.push_back(slice(offsets[s], lengths[s]));
+      session_pos_[reqs[s]] += lengths[s];
+      push_position(reqs[s]);
+    }
+  }
+  decode_rows_ = decode_rows;
+  int hidden_offset = decode_rows;
+  for (size_t s = 0; s < cursors.size(); ++s) {
+    auto& cursor = *cursors[s];
+    const int64_t c0 = cursor.next, c1 = c0 + counts[s];
+    cursor.output = outputs[reqs.size() + s] ?
+        slice((graph_rows > 0 ? 0 : decode_rows) + static_cast<int>(s), 1) : Outputs{};
+    session_pos_[cursor.req] = c1;
+    push_position(cursor.req);
+    if (mtp_) {
+      const int64_t r1 = std::min(c1, cursor.end - 1);
+      if (r1 > c0)
+        mtp_prefill_rows(cursor.req, c0, r1, cursor.ids + c0 + 1 - cursor.start, hidden_offset);
+      mtp_pos_[cursor.req] = std::max(mtp_pos_[cursor.req], r1);
+      push_mtp_position(cursor.req);
+    }
+    for (auto* snap = cursor.snap; snap; snap = snap->next) {
+      if (snap->taken || snap->position != c1) continue;
+      try {
+        *snap->meta = session_snapshot(cursor.req, snap->dst);
+        snap->taken = true;
+      } catch (const CachePoolExhausted& e) {
+        DGPP_LOG_WARN("prefix cache: snapshot at {} skipped for slot {}: {}", c1, cursor.req, e.what());
+      }
+    }
+    if (cursor.cut_index < cursor.cuts.size() && cursor.cuts[cursor.cut_index] == c1) ++cursor.cut_index;
+    cursor.next = c1;
+    if (c1 != cursor.end || graph_rows > 0) {
+      DGPP_CUDA_OK(cudaMemsetAsync(d_session_pos_ + cursor.req, 0xff, sizeof(int64_t), stream_));
+      if (mtp_) DGPP_CUDA_OK(cudaMemsetAsync(d_mtp_pos_ + cursor.req, 0xff, sizeof(int64_t), stream_));
+      cursor.suspended = true;
+    }
+    hidden_offset += static_cast<int>(counts[s]);
+    report_prefill_progress(cursor.req, c1);
+  }
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  return out;
 }
 
 QwenModel::Outputs QwenModel::session_prefill_with_images(

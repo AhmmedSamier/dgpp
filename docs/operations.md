@@ -550,15 +550,16 @@ The single-Spark NVIDIA and RadixArk Qwen NVFP4 templates explicitly select
 4,096-token busy and idle budgets. The two- and four-rank GLM-5.3-Flash
 NVFP4/FP8 templates select 256-token busy and 2,048-token idle budgets.
 A positive budget bounds aligned prefill work before each decode pass.
-On non-group-advance engines, an unfinished prefill shares that budget with
-at most one new oldest-fitting request needing chunking per tick. Enabling
-`engine.prefill_early_admission` (`--prefill-early-admission`, default off)
-also admits text that would fit in a single pass and redistributes unused
-aligned shares. Slot and KV reservation limits
-still apply; images and group-advance engines retain their existing paths.
-Earlier short-text decoding can reduce later ticks to the busy budget and
-increase the long prompt's completion time. Try 256 or 512 tokens; the budget must
-be a multiple of the snapshot alignment and fit the prefill scratch limit.
+Qwen graph serving without DFlash enables early text admission by default. Queued text shares
+bounded prefill work, and decoder verification shares projections with an
+unfinished reader. Decoders that preceded a reader retain the busy-budget
+interruption bound. Decoders admitted during its prefill may share the larger
+idle-budget chunks, preserving reader progress with longer update gaps for
+those new streams. Slot and KV reservation limits still apply.
+`engine.prefill_early_admission=false` (`--no-prefill-early-admission`) restores
+the former leftover-only admission. Other backends retain their old default;
+explicitly enabling this policy there does not add Qwen's shared execution.
+The budget must be a multiple of the snapshot alignment and fit prefill scratch.
 Smaller chunks trade prefill throughput and TTFT for shorter pauses in
 other streams. Request reservations are held before the first yield, and
 cancellation releases the unfinished slot and its prefix references.
@@ -575,13 +576,15 @@ to the selected budget.
 Larger idle chunks also increase the maximum wait for cancellation or a newly
 arriving request; they do not preempt a chunk already running.
 
-Early admission is opt-in because it can reduce aggregate throughput during a burst: a
-long prefill holds a slot while the new decoders run in smaller batches,
-and their arrival ends an idle-budget boost. Equal busy and idle budgets
-remove that budget-switch component, while preserving the batch-packing
-trade-off. Compare fixed-work mixed loads with
+Shared execution reduces the extra model walks caused by early admission,
+but does not guarantee identical throughput for every workload. A long
+prefill still holds a slot while newly admitted requests decode, and required
+cuts, padded decode rows and batch shapes affect how much work fits each
+walk. For MoE models, which tokens decode together also changes reuse of
+expert weights; repeated identical answers can favor synchronized batches. Compare fixed-work mixed loads with
 `scripts/serve_admission_bench.py`; isolated token rates alone do not measure
-this cost.
+this cost. Include both the previous executable and the same executable with
+early admission disabled when evaluating a deployment.
 
 `engine.prefix_min_tokens` (`--prefix-min-tokens`, default 1024) is the prefix
 cache's entry floor. A cold prefill cuts at a prompt's structural boundaries

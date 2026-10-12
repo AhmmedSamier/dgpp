@@ -1,0 +1,13 @@
+Internal ctest changing into directory: /home/stephen/workspace/dgpp/build-pr95
+Test project /home/stephen/workspace/dgpp/build-pr95
+    Start 20: qwen_decode_test
+1/2 Test #20: qwen_decode_test .................   Passed    7.74 sec
+    Start 28: qwen_image_prefill_test
+2/2 Test #28: qwen_image_prefill_test ..........   Passed    2.47 sec
+
+100% tests passed, 0 tests failed out of 2
+
+Label Time Summary:
+gpu    =  10.21 sec*proc (2 tests)
+
+Total Test time (real) =  10.22 sec

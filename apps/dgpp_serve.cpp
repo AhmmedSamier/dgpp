@@ -1422,8 +1422,8 @@ int main(int argc, char** argv) {
       "disables\n"
       "  [--prefill-idle-budget-tokens N (default 0)]: larger budget without active decode; 0 uses "
       "the busy budget\n"
-      "  [--prefill-early-admission | --no-prefill-early-admission (default off)]: let queued\n"
-      "    short text join an in-flight prefill; can reduce mixed-load throughput\n"
+      "  [--prefill-early-admission | --no-prefill-early-admission]: let queued\n"
+      "    short text join an in-flight prefill (default on for Qwen graph serving)\n"
       "  [--prefix-min-tokens N (default 1024)]: no prefix-cache entry below this position; a\n"
       "    short prompt attaches to what exists but never takes a snapshot slot\n"
       "  [--prefix-head-snapshots | --no-prefix-head-snapshots (default on)]: a cold prompt\n"
@@ -1498,6 +1498,7 @@ int main(int argc, char** argv) {
   int prefill_budget_tokens = -1;
   int prefill_idle_budget_tokens = 0;
   bool prefill_early_admission = false;
+  std::optional<bool> prefill_early_admission_override;
   // The prefix cache's entry policy (2026-09-28): no entry below the floor,
   // and a cold prompt keeps the cut at its first structural boundary.
   int prefix_min_tokens = 1024;
@@ -1647,7 +1648,7 @@ int main(int argc, char** argv) {
     model_alias = e.model_alias;
     prefill_budget_tokens = e.prefill_budget_tokens;
     prefill_idle_budget_tokens = e.prefill_idle_budget_tokens;
-    prefill_early_admission = e.prefill_early_admission;
+    prefill_early_admission_override = e.prefill_early_admission;
     prefix_min_tokens = e.prefix_min_tokens;
     prefix_head_snapshots = e.prefix_head_snapshots;
     bulk_pace_gbps = e.bulk_pace_gbps;
@@ -1785,8 +1786,8 @@ int main(int argc, char** argv) {
     else if (a == "--admission-window") admission_window = std::stoi(next());
     else if (a == "--prefill-budget-tokens") prefill_budget_tokens = std::stoi(next());
     else if (a == "--prefill-idle-budget-tokens") prefill_idle_budget_tokens = std::stoi(next());
-    else if (a == "--prefill-early-admission") prefill_early_admission = true;
-    else if (a == "--no-prefill-early-admission") prefill_early_admission = false;
+    else if (a == "--prefill-early-admission") prefill_early_admission_override = true;
+    else if (a == "--no-prefill-early-admission") prefill_early_admission_override = false;
     else if (a == "--prefix-min-tokens") prefix_min_tokens = std::stoi(next());
     else if (a == "--prefix-head-snapshots") prefix_head_snapshots = true;
     else if (a == "--no-prefix-head-snapshots") prefix_head_snapshots = false;
@@ -1903,6 +1904,16 @@ int main(int argc, char** argv) {
       mtp_depth = dgpp::Dsv4Config::from_json_file((fs::path(ckpt) / "config.json").string()).dspark_block_size;
       DGPP_LOG_INFO("serve: --mtp without --mtp-depth on DeepSeek-V4: the DSpark block's {} drafts", mtp_depth);
     }
+  }
+  // Resolve the admission default before publishing the settings record.
+  // Qwen's graph backend shares prefill and verification work; other
+  // backends retain their existing default until they implement that path.
+  if (prefill_early_admission_override.has_value()) {
+    prefill_early_admission = *prefill_early_admission_override;
+  } else if (!ckpt.empty()) {
+    prefill_early_admission = decode_graph && dflash_dir.empty() &&
+        dgpp::detect_architecture_file((fs::path(ckpt) / "config.json").string()) ==
+            dgpp::ModelArchitecture::Qwen4Exp;
   }
   // ---- the fabric's first handshake: the head pushes the
   // world's shape. Rank 0 opens the journal and accepts the full world

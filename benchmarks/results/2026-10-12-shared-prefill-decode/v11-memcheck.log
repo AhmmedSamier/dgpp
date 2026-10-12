@@ -1,0 +1,104 @@
+========= COMPUTE-SANITIZER
+2026-10-12 01:30:58.195 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 111.4 of 121.6 GiB, host available 115.2 GiB
+2026-10-12 01:30:58.325 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:30:58.332 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:30:59.742 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 110.3 of 121.6 GiB, host available 114.2 GiB
+2026-10-12 01:30:59.861 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:30:59.867 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:31:00.503 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 110.4 of 121.6 GiB, host available 114.2 GiB
+2026-10-12 01:31:00.629 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:31:00.637 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:31:01.352 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 110.4 of 121.6 GiB, host available 114.3 GiB
+2026-10-12 01:31:01.473 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:31:01.481 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:31:02.039 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 110.7 of 121.6 GiB, host available 114.5 GiB
+2026-10-12 01:31:02.178 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:31:02.184 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:31:02.189 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 110.3 of 121.6 GiB, host available 114.2 GiB
+2026-10-12 01:31:02.306 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:31:02.309 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:31:18.290 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 110.9 of 121.6 GiB, host available 114.7 GiB
+2026-10-12 01:31:18.441 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:31:18.448 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:31:18.450 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 110.5 of 121.6 GiB, host available 114.4 GiB
+2026-10-12 01:31:18.583 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:31:18.587 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:31:19.346 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 110.9 of 121.6 GiB, host available 114.8 GiB
+2026-10-12 01:31:19.490 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:31:19.496 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:31:19.498 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 110.9 of 121.6 GiB, host available 114.7 GiB
+2026-10-12 01:31:19.639 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:31:19.643 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:31:20.007 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 111.2 of 121.6 GiB, host available 115.1 GiB
+2026-10-12 01:31:20.118 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:31:20.124 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:31:20.127 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 110.9 of 121.6 GiB, host available 114.7 GiB
+2026-10-12 01:31:20.255 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:31:20.259 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:31:21.514 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 111.2 of 121.6 GiB, host available 115.1 GiB
+2026-10-12 01:31:21.631 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:31:21.637 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:31:21.639 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 110.9 of 121.6 GiB, host available 114.7 GiB
+2026-10-12 01:31:21.751 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:31:21.754 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:31:23.024 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 111.3 of 121.6 GiB, host available 115.2 GiB
+2026-10-12 01:31:23.141 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:31:23.147 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:31:23.150 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 111.0 of 121.6 GiB, host available 114.8 GiB
+2026-10-12 01:31:23.290 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:31:23.293 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:31:24.563 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 111.3 of 121.6 GiB, host available 115.1 GiB
+2026-10-12 01:31:24.690 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:31:24.696 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:31:24.698 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 111.0 of 121.6 GiB, host available 114.8 GiB
+2026-10-12 01:31:24.825 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:31:24.829 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:31:26.115 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 111.3 of 121.6 GiB, host available 115.2 GiB
+2026-10-12 01:31:26.228 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:31:26.234 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:31:26.236 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 111.0 of 121.6 GiB, host available 114.8 GiB
+2026-10-12 01:31:26.357 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:31:26.360 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:31:27.003 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 111.3 of 121.6 GiB, host available 115.2 GiB
+2026-10-12 01:31:27.136 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:31:27.143 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:31:27.145 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 111.0 of 121.6 GiB, host available 114.8 GiB
+2026-10-12 01:31:27.297 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:31:27.301 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:31:27.892 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 111.1 of 121.6 GiB, host available 115.0 GiB
+2026-10-12 01:31:28.030 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:31:28.037 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:31:28.069 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 110.9 of 121.6 GiB, host available 114.8 GiB
+2026-10-12 01:31:28.213 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:31:28.220 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:31:28.282 INFO  rank 0 bf12: 28 decode matrices packed (0.01 GiB of bf16 -> 0.01 GiB, 624 escapes, widest row 3, 0 rows kept raw; 0 matrices kept bf16) in 0.0 s
+2026-10-12 01:31:28.283 INFO  qwen loader: rank 0 resident footprint 0.0 GiB; device free 110.5 of 121.6 GiB, host available 114.3 GiB
+2026-10-12 01:31:28.405 INFO  l2 prefetch: on, window budget 12 MiB, boundary rate light, layer rate light
+2026-10-12 01:31:28.412 INFO  qwen loader: rank 0 n-gram table rows [0, 1626) resident (0.00 GiB, scale 0.020019531)
+2026-10-12 01:31:28.477 INFO  rank 0 bf12: 28 decode matrices packed (0.01 GiB of bf16 -> 0.01 GiB, 624 escapes, widest row 3, 0 rows kept raw; 0 matrices kept bf16) in 0.0 s
+2026-10-12 01:31:28.477 INFO  rank 0 bf12: this family keeps the bf16 bytes beside the companions (its loader grants nothing aside): engine.bf16_weights = bf12 serves as bf12+bf16 here
+[ OK ] prefill last row bitwise the cold forward (23 tokens)
+[ .. ] group prefill (23 + 17 rows) vs the prefills alone: relative l2 0.00239 / 0.00253, top-1 equal / equal
+[ .. ] decode after the group prefill: 9 rows vs the re-forward — worst relative l2 0.00253, top-1 hard 0 near-tie 0 (per row: 0.0025 0.0016 0.0018 0.0016 0.0018 0.0012 0.0022 0.0021 0.0021)
+[ OK ] group prefill: the spans' rows and an 8-step decode off the group's cache (0 near ties)
+[ .. ] decode 12 steps: 13 rows vs the re-forward — worst relative l2 0.00253, top-1 hard 0 near-tie 0 (per row: 0.0024 0.0025 0.0021 0.002 0.0021 0.0025 0.0018 0.002 0.0018 0.0019 0.0021 0.0018 0.0023)
+[ OK ] incremental decode matches the re-forward (0 near ties); ids 458,44,149,35,100,459,233,18,38,331,424,163,289
+[ OK ] two interleaved slots reproduce their solo transcripts bitwise
+[ .. ] chunked prefill (8-row chunks): relative l2 0.00249, top-1 equal
+[ .. ] decode after the chunked prefill: 7 rows vs the re-forward — worst relative l2 0.00279, top-1 hard 0 near-tie 0 (per row: 0.0024 0.0028 0.0023 0.0023 0.0027 0.0026 0.0025)
+[ OK ] chunked prefill and its decode agree with the one-shot walk
+[ OK ] close/reopen restarts bitwise; pool accounting; forward guarded
+[ OK ] prefix snapshots: hot == cold bitwise at a cut and mid-decode
+[ OK ] two prefill snapshots: changed tails and identical repeats, target/draft bitwise
+[ .. ] mtp round 0: 12 steps for 13 tokens, 1 drafts accepted (the forced one included)
+[ .. ] mtp round 1: 12 steps for 13 tokens, 1 drafts accepted (the forced one included)
+[ OK ] the eager speculator reproduces the greedy transcript through the draft block
+[ .. ] wide teacher-forced target: 368 rows, worst l2 0.009175, 3 near ties, mean NLL delta 8.97058e-05
+[ OK ] resumable prefill: target/draft logits, interleaving and cancellation
+[ OK ] grouped MTP: second span and wrapped hidden window
+[ OK ] mixed prefill/verify: chunk cuts, logits, MTP and rollback at every acceptance length
+[ OK ] work-budget prefill: full shares, structural cuts, snapshot and target/draft parity
+[ OK ] resized prefill: target/draft logits, required snapshot and attach
+[ OK ] bf16_weights: 28 matrices packed; prefill, draft and decode bitwise the bf16 build
+[ OK ] qwen_decode_test
+========= ERROR SUMMARY: 0 errors

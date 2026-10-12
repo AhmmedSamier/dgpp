@@ -1,0 +1,23 @@
+Internal ctest changing into directory: /home/stephen/workspace/dgpp/build-pr95
+Test project /home/stephen/workspace/dgpp/build-pr95
+    Start 192: qwen_engine_mixed_prefill_without_mtp
+1/7 Test #192: qwen_engine_mixed_prefill_without_mtp ........   Passed    2.36 sec
+    Start 193: qwen_engine_mixed_prefill_scheduled_verify
+2/7 Test #193: qwen_engine_mixed_prefill_scheduled_verify ...   Passed    2.80 sec
+    Start 194: qwen_engine_compact_sampling_1
+3/7 Test #194: qwen_engine_compact_sampling_1 ...............   Passed    4.66 sec
+    Start 195: qwen_engine_compact_sampling_32
+4/7 Test #195: qwen_engine_compact_sampling_32 ..............   Passed    4.01 sec
+    Start 196: qwen_engine_compact_fallback_0
+5/7 Test #196: qwen_engine_compact_fallback_0 ...............   Passed    4.56 sec
+    Start 197: qwen_engine_compact_fallback_1
+6/7 Test #197: qwen_engine_compact_fallback_1 ...............   Passed    4.55 sec
+    Start 198: qwen_engine_compact_fallback_mtp3_rows64
+7/7 Test #198: qwen_engine_compact_fallback_mtp3_rows64 .....   Passed    5.47 sec
+
+100% tests passed, 0 tests failed out of 7
+
+Label Time Summary:
+gpu    =  28.41 sec*proc (7 tests)
+
+Total Test time (real) =  28.42 sec

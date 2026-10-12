@@ -655,6 +655,55 @@ void QwenGdnLayer::enqueue_rows(const uint16_t* x, float* rec_states, int64_t re
   }
 }
 
+void QwenGdnLayer::enqueue_spans(const uint16_t* x, uint16_t* out, int tokens,
+                                const std::vector<Span>& spans, cudaStream_t stream) {
+  int total = 0;
+  for (const auto& span : spans) {
+    if (span.rows <= 0 || (span.recurrent && !span.conv))
+      throw std::invalid_argument("QwenGdnLayer: invalid mixed span");
+    total += span.rows;
+  }
+  if (total != tokens || tokens <= 0 || tokens > max_tokens_ || pt_.enabled)
+    throw std::invalid_argument("QwenGdnLayer: invalid mixed walk");
+  const int C = static_cast<int>(conv_channels_), LV = lv_ * v_dim_;
+  in_projections(x, tokens, stream, false);
+  int at = 0;
+  for (const auto& span : spans) {
+    const size_t qoff = static_cast<size_t>(at) * C;
+    const size_t goff = static_cast<size_t>(at) * lv_;
+    uint16_t* core = core_ + static_cast<size_t>(at) * LV;
+    if (span.requests.num_requests > 0) {
+      kda_causal_conv_silu_bf16_batched(qkv_ + qoff, C, w_.conv, span.conv, span.conv_stride,
+          conv_width_ - 1, qkvc_ + qoff, span.rows, C, conv_width_, span.requests, stream, span.conv_snap);
+      gdn_recurrent_fwd_batched(qkvc_ + qoff, a_ + goff, lv_, b_ + goff, lv_, w_.a_log, w_.dt_bias,
+          span.recurrent, span.rec_stride, core, span.rows, lv_, lv_ / lk_, k_dim_, v_dim_, scale_,
+          span.requests, stream, span.rec_snap, span.replay);
+    } else if (!span.recurrent) {
+      DGPP_CUDA_OK(cudaMemsetAsync(core, 0, static_cast<size_t>(span.rows) * LV * 2, stream));
+    } else {
+      kda_causal_conv_silu_bf16(qkv_ + qoff, C, w_.conv, span.conv, conv_width_ - 1,
+                               qkvc_ + qoff, span.rows, C, conv_width_, stream, span.conv_snap);
+      if (use_chunked_gdn(span.rows, k_dim_, v_dim_) && !span.rec_snap.states && !span.replay.in)
+        gdn_chunked_fwd(qkvc_ + qoff, a_ + goff, lv_, b_ + goff, lv_, w_.a_log, w_.dt_bias,
+                       span.recurrent, core, span.rows, lv_, lv_ / lk_, k_dim_, v_dim_, scale_,
+                       chunked_ws_, chunked_ws_bytes_, stream);
+      else
+        gdn_recurrent_fwd(qkvc_ + qoff, a_ + goff, lv_, b_ + goff, lv_, w_.a_log, w_.dt_bias,
+                         span.recurrent, core, span.rows, lv_, lv_ / lk_, k_dim_, v_dim_, scale_,
+                         stream, span.rec_snap, span.replay);
+    }
+    at += span.rows;
+  }
+  if (swish_gate_)
+    gdn_gated_rmsnorm_swish_bf16(core_, z_, w_.norm, normed_, static_cast<int64_t>(tokens) * lv_,
+                                v_dim_, eps_, stream);
+  else
+    gdn_gated_rmsnorm_bf16(core_, z_, w_.norm, normed_, static_cast<int64_t>(tokens) * lv_,
+                          v_dim_, eps_, stream);
+  gemm_dense(g_, normed_, LV, w_.out_proj, w_.out_proj_fp8, out, GemmOut::BF16, tokens,
+             hidden_, LV, stream);
+}
+
 void QwenGdnLayer::materialize(float* recurrent_state, const KdaReplay& replay, cudaStream_t stream) {
   if (!w_.a_log || !w_.dt_bias) throw std::invalid_argument("QwenGdnLayer: null weights");
   if (replay.in == nullptr || !replay.materialize || (replay.materialize_rows < 0 && replay.count == nullptr))
@@ -757,6 +806,33 @@ void QwenQsaLayer::rebind(const QwenQsaResident& w) {
 void QwenQsaLayer::enqueue(const uint16_t* x, int tokens, const QwenQsaRows& rows,
                            QwenQsaCache& cache, uint16_t* out, cudaStream_t stream) {
   if (tokens <= 0) return;
+  validate_rows(tokens, rows, cache);
+  project_rows(x, tokens, rows, cache, stream);
+  attend_rows(tokens, rows, cache, 0, stream);
+  project_output(out, tokens, stream);
+}
+
+void QwenQsaLayer::enqueue_spans(const uint16_t* x, int tokens, const QwenQsaRows& rows,
+                                const std::vector<Span>& spans, QwenQsaCache& cache,
+                                uint16_t* out, cudaStream_t stream) {
+  int total = 0;
+  for (const auto& span : spans) {
+    if (span.rows <= 0) throw std::invalid_argument("QwenQsaLayer: empty mixed span");
+    validate_rows(span.rows, span.map, cache);
+    total += span.rows;
+  }
+  if (total != tokens || tokens <= 0 || tokens > max_tokens_)
+    throw std::invalid_argument("QwenQsaLayer: invalid mixed walk");
+  project_rows(x, tokens, rows, cache, stream);
+  int at = 0;
+  for (const auto& span : spans) {
+    attend_rows(span.rows, span.map, cache, at, stream);
+    at += span.rows;
+  }
+  project_output(out, tokens, stream);
+}
+
+void QwenQsaLayer::validate_rows(int tokens, const QwenQsaRows& rows, const QwenQsaCache& cache) const {
   if (tokens > max_tokens_) throw std::invalid_argument("QwenQsaLayer: tokens exceed max_tokens");
   if (!rows.req_ids || !rows.pos) throw std::invalid_argument("QwenQsaLayer: null row metadata");
   if (rows.decode) {
@@ -776,6 +852,10 @@ void QwenQsaLayer::enqueue(const uint16_t* x, int tokens, const QwenQsaRows& row
       !(w_.v_proj || w_.v_proj_fp8.payload) || !(w_.o_proj || w_.o_proj_fp8.payload) || !w_.q_norm || !w_.k_norm ||
       !(w_.index_qk_proj || w_.index_qk_proj_fp8.payload) || !w_.index_q_norm || !w_.index_k_norm)
     throw std::invalid_argument("QwenQsaLayer: null weights");
+}
+
+void QwenQsaLayer::project_rows(const uint16_t* x, int tokens, const QwenQsaRows& rows,
+                               QwenQsaCache& cache, cudaStream_t stream) {
   const int H = hidden_, D = dim_, Di = idx_dim_, T = tokens;
   const int QW = lh_ * 2 * D, KW = lkv_ * D, IW = (idx_heads_ + 1) * Di;
   const int32_t* d_req = rows.req_ids;
@@ -803,8 +883,18 @@ void QwenQsaLayer::enqueue(const uint16_t* x, int tokens, const QwenQsaRows& row
   // The caches: K/V rows, then the compressed keys and the ring.
   qsa_kv_append(kn_, KW, v_, KW, d_req, d_pos, T, cache.block_tables, cache.blocks_per_request,
                 cache.block_tokens, lkv_, D, cache.k_cache, cache.v_cache, stream);
+}
+
+void QwenQsaLayer::attend_rows(int tokens, const QwenQsaRows& rows, QwenQsaCache& cache,
+                              int offset, cudaStream_t stream) {
+  const int D = dim_, Di = idx_dim_, T = tokens, IW = (idx_heads_ + 1) * Di;
+  const int32_t* d_req = rows.req_ids;
+  const int64_t* d_pos = rows.pos;
+  const uint16_t* query = qn_ + static_cast<size_t>(offset) * lh_ * D;
+  const uint16_t* index_query = qi_ + static_cast<size_t>(offset) * idx_heads_ * Di;
+  float* attended = c_out_ + static_cast<size_t>(offset) * lh_ * D;
   const int pools_per_block = cache.block_tokens / kpool_;
-  const uint16_t* raw_k = idx_ + static_cast<int64_t>(idx_heads_) * Di;
+  const uint16_t* raw_k = idx_ + static_cast<size_t>(offset) * IW + static_cast<int64_t>(idx_heads_) * Di;
   if (rows.decode) {
     qsa_index_decode_update(raw_k, IW, w_.index_k_norm, d_inv_freq_, d_req, d_pos, rows.spans,
                             rows.num_requests, cache.block_tables, cache.blocks_per_request,
@@ -820,7 +910,7 @@ void QwenQsaLayer::enqueue(const uint16_t* x, int tokens, const QwenQsaRows& row
   }
   // Score only rows that need a selection, then expand pools and attend.
   // Prefill positions are fixed here; decode graph positions can grow on replay.
-  qsa_index_score(qi_, static_cast<int64_t>(idx_heads_) * Di, d_req, d_pos, T, cache.block_tables,
+  qsa_index_score(index_query, static_cast<int64_t>(idx_heads_) * Di, d_req, d_pos, T, cache.block_tables,
                   cache.blocks_per_request, cache.index_cache, pools_per_block, idx_heads_, Di,
                   kpool_, keys_ws_, max_pools_, stream, rows.decode ? -1 : (rows.pos0 + T) / kpool_,
                   select_k_);
@@ -837,16 +927,20 @@ void QwenQsaLayer::enqueue(const uint16_t* x, int tokens, const QwenQsaRows& row
     return !(e != nullptr && e[0] == '0');
   }();
   if (warp_attn && !rows.decode && T >= 128 && qsa_warp_supported(D, lh_, lkv_)) {
-    qsa_attn_prefill_warp(qn_, static_cast<int64_t>(lh_) * D, cache.k_cache, cache.v_cache, d_req, topk_,
+    qsa_attn_prefill_warp(query, static_cast<int64_t>(lh_) * D, cache.k_cache, cache.v_cache, d_req, topk_,
                           max_selected_, counts_, T, lh_, lkv_, cache.block_tokens, cache.block_tables,
-                          cache.blocks_per_request, scale_, c_out_, stream);
+                          cache.blocks_per_request, scale_, attended, stream);
   } else {
     const auto attend = !rows.decode && T >= 128 ? qsa_attn_prefill_partial : qsa_attn_partial;
-    attend(qn_, static_cast<int64_t>(lh_) * D, cache.k_cache, cache.v_cache, d_req, topk_,
+    attend(query, static_cast<int64_t>(lh_) * D, cache.k_cache, cache.v_cache, d_req, topk_,
            max_selected_, counts_, T, n_split_, lh_, lkv_, D, cache.block_tokens,
            cache.block_tables, cache.blocks_per_request, scale_, m_ws_, l_ws_, c_ws_, stream);
-    dsa_attn_combine(m_ws_, l_ws_, c_ws_, T, n_split_, lh_, D, c_out_, stream);
+    dsa_attn_combine(m_ws_, l_ws_, c_ws_, T, n_split_, lh_, D, attended, stream);
   }
+}
+
+void QwenQsaLayer::project_output(uint16_t* out, int tokens, cudaStream_t stream) {
+  const int H = hidden_, D = dim_, T = tokens, QW = lh_ * 2 * D;
   qsa_gate_out(c_out_, q_ + D, QW, 2 * D, o_, T, lh_, D, stream);
   gemm_dense(g_, o_, static_cast<int64_t>(lh_) * D, w_.o_proj, w_.o_proj_fp8, out, GemmOut::BF16, T, H,
              lh_ * D, stream);
@@ -1478,7 +1572,7 @@ void QwenPleLayer::project_value(uint16_t* val_dst, int rows, cudaStream_t strea
 
 void QwenPleLayer::finish(uint16_t* r, const uint16_t* value, uint16_t* states, int64_t state_stride,
                           const int32_t* req_ids, const int64_t* pos, const int32_t* req_spans,
-                          int num_requests, int rows, cudaStream_t stream, uint16_t* snapshots) {
+                          int num_requests, int rows, cudaStream_t stream, uint16_t* snapshots, int snapshot_rows) {
   if (rows <= 0) return;
   if (!w_.norm_query || !w_.norm_conv || !w_.conv)
     throw std::invalid_argument("QwenPleLayer: null weights");
@@ -1487,7 +1581,7 @@ void QwenPleLayer::finish(uint16_t* r, const uint16_t* value, uint16_t* states, 
   qwen_ple_gate_bf16(kn_, qn_, value, gv_, T, hc_, H, stream);
   qwen_group_rmsnorm_bf16(gv_, w_.norm_conv, un_, T, hc_, H, eps_, stream);
   qwen_ple_conv_rows_bf16(un_, gv_, states, state_stride, w_.conv, r, r, req_ids, pos, req_spans,
-                          num_requests, W, width_, dilation_, stream, snapshots);
+                          num_requests, W, width_, dilation_, stream, snapshots, snapshot_rows);
 }
 
 }  // namespace dgpp

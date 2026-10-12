@@ -1,0 +1,26 @@
+{
+  "completed_scenarios": 8,
+  "completed_requests": 24,
+  "paired_requests": 12,
+  "output_mismatches": [],
+  "comparisons": [
+    {
+      "configuration": "w1-i2048",
+      "scenario": "mixed_long",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 18.84083799342625,
+      "reference_wall_s": 20.176311803516,
+      "throughput_change_pct": 7.088186897821158
+    },
+    {
+      "configuration": "w1-i2048",
+      "scenario": "mixed_short",
+      "reference": "control",
+      "trials": 2,
+      "candidate_wall_s": 17.931089753401466,
+      "reference_wall_s": 18.46252611000091,
+      "throughput_change_pct": 2.963770545505362
+    }
+  ]
+}
