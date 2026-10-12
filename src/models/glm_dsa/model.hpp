@@ -194,6 +194,7 @@ class GlmDsaModel : public SessionModel<GlmDsaModel> {
   // The layer's two blocks over `resid` (the residual, updated in place):
   // the attention block and the MLP/MoE block with their folds.
   struct WalkRows {
+    const RowRun* run = nullptr;
     int decode_spans = 0;
     const int32_t* req_ids = nullptr;
     const int64_t* pos = nullptr;

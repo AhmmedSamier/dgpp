@@ -546,6 +546,8 @@ alignment and capped by an explicitly configured idle budget. This amortizes
 weight streaming and conversion across a full work chunk. Smaller explicit
 budgets shorten the maximum pause between decode steps, at a throughput cost
 when they require more weight conversions or layer walks.
+The budget counts reader tokens. Decoder rows share remaining scratch;
+reader chunks shrink only when the combined rows exceed physical capacity.
 An explicit zero preserves full-prompt admission within a scheduler pass;
 model and snapshot boundaries still split the work. Qwen retains its internal
 4,096-token limit and reports token progress after each completed chunk.

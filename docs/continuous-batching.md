@@ -98,7 +98,7 @@ The shared execution components have separate responsibilities:
 | --- | --- |
 | `PrefillTask` | Owns the prompt, images, snapshot plan and cursor for either adapter. |
 | `PrefillContinuation` | Tracks logical cuts, work budgets, progress and suspension across yields. |
-| `PrefillBatch` | Plans mixed rows, charges physical work, commits positions and snapshots, catches up draft state and slices outputs. |
+| `PrefillBatch` | Plans mixed rows, bounds physical work, commits positions and snapshots, catches up draft state and slices outputs. |
 | `RowRun` | Describes request spans, the decoder prefix and selected output rows for a layer walk. |
 | `GraphBatchMapping` | Maps compact graph rows to persistent request slots for feeds, positions and speculative commits. |
 | `SessionModel` | Owns session positions, cache reservations, rollback, draft history and graph staging. |
@@ -110,6 +110,11 @@ its existing session facade. Every serving executor implements the
 GLM-DSA, MiMo, DeepSeek V4 and V4.1. A drafter's name is not an eligibility
 rule. The adapters check actual slot, row-capacity, context, continuation
 workspace and graph-variant limits per batch.
+
+The configured prefill budget bounds reader work. Decoder rows use spare
+physical capacity without reducing that reader budget. When their combined
+rows exceed the executor's scratch capacity, the planner trims readers at
+their required alignment; short tails contribute their unused shares first.
 
 Persistent reader state belongs to its request. In particular, V4.1's bounded
 decoder retains each reader's tail separately and falls back to sequential

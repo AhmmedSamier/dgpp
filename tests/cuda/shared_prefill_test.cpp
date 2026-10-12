@@ -189,7 +189,15 @@ template <class Model, class Factory> void check(Factory make, int vocab, int al
     oracle.relative_budget = true;  // follow the mixed walk's actual cuts
     int iteration = 0;
     while (cursor.next < cursor.end) {
+      const bool full_reader_chunk_fits = iteration == 0 &&
+          model->max_tokens() >= 2 * unit + 4 && cursor.span_end() >= 2 * unit;
       const auto outputs = model->session_prefill_verify(cursor, 2 * unit, {1}, {{7, 8, 9, 10}});
+      if (full_reader_chunk_fits) {
+        std::printf("mixed reader budget: advanced=%ld expected=%d alignment=%d\n",
+                    cursor.next, 2 * unit, alignment);
+        require(cursor.next == 2 * unit,
+                "decoder rows consume the reader budget despite spare physical capacity");
+      }
       (void)reference->session_prefill_advance(oracle,
           (cursor.next - oracle.next + alignment - 1) / alignment * alignment);
       const auto verification = reference->session_verify(1, {7, 8, 9, 10});
@@ -481,6 +489,17 @@ DGPP_TEST(shared_mimo_short_reader_keeps_its_prefill_recipe) {
                                        nullptr, 0, 1, 2, false);
   }, cfg.vocab_size, "MiMo");
 }
+DGPP_TEST(shared_glm_dsa_short_reader_keeps_its_prefill_recipe) {
+  auto cfg = glmdsafx::tiny_config(2, 1, false);
+  cfg.hidden_size = 2048;
+  cfg.intermediate_size = 2048;
+  const std::string dir = "shared_glm_dsa_tail_fixture";
+  glmdsafx::write_fixture(cfg, dir);
+  check_short_reader_recipe([&] {
+    return std::make_unique<GlmDsaModel>(cfg, dir, 256, 512, GlmDsaResidency::Resident,
+                                        nullptr, 0, 1, 2, false);
+  }, cfg.vocab_size, "GLM-DSA");
+}
 DGPP_TEST(shared_glm4_short_reader_keeps_its_prefill_recipe) {
   auto cfg = glm4fx::tiny_config(2, 1, false);
   cfg.hidden_size = 2048;
@@ -598,6 +617,27 @@ DGPP_TEST(shared_prefill_dsv4) {
     return std::make_unique<Dsv4Model>(cfg, dir, 512, 2048, Dsv4Residency::Resident,
                                       nullptr, 0, 1, 4, mtp, 32, compact);
   }, cfg.vocab_size, 128);
+}
+DGPP_TEST(shared_prefill_dsv4_budget_capacity) {
+  const auto cfg = dsv4fx::tiny_config();
+  const std::string dir = "shared_dsv4_fixture";
+  dsv4fx::write_fixture(cfg, dir);
+  Dsv4Model model(cfg, dir, 512, 4096, Dsv4Residency::Resident,
+                  nullptr, 0, 1, 4, false, 32);
+  const auto reader = tokens(385, cfg.vocab_size, 3);
+  (void)model.session_prefill(2, tokens(53, cfg.vocab_size, 5));
+  auto first = model.session_prefill_begin(0, reader, 768, 256);
+  auto second = model.session_prefill_begin(1, reader, 768, 256);
+  const std::vector<Dsv4Model::PrefillCursor*> readers{&first, &second};
+  (void)model.session_prefill_verify_group(readers, {256, 256},
+                                          {2}, {{7, 8, 9, 10}});
+  require(first.next > 0 && second.next > 0, "full batch advances both readers");
+  require(first.next + second.next + 4 <= model.max_tokens(),
+          "reader budgets must not overrun physical capacity with decoder rows");
+  require(first.next % 128 == 0 && second.next % 128 == 0,
+          "capacity trimming preserves reader alignment");
+  for (int req : {0, 1, 2}) model.session_close(req);
+  require(model.kv_blocks_in_use() == 0, "budget capacity check releases reservations");
 }
 DGPP_TEST(shared_prefill_dsv41) {
   const auto cfg = dsv41fx::tiny_config();

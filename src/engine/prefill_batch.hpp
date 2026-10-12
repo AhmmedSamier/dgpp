@@ -87,10 +87,12 @@ struct PrefillBatch {
     const size_t live_decoders = std::count_if(feeds.begin(), feeds.end(), [](const auto& f) { return !f.empty(); });
     if (decode_rows > max_decode_rows_ || live_decoders + cursors.size() > static_cast<size_t>(max_requests_))
       throw std::invalid_argument("session_prefill_verify: too many decode rows or spans");
-    // Charge the speculative prefix to the same tiles as the prefills. Short
-    // tails donate their unused shares before reducing any reader's progress.
+    // Budgets bound reader work; scratch bounds the entire physical walk.
+    // Subtracting the decoder prefix from a smaller reader budget can waste
+    // an aligned block even when that block still fits in scratch. Short
+    // tails donate their unused shares before physical capacity trims a reader.
     int64_t prefill_rows = std::accumulate(counts.begin(), counts.end(), int64_t{0});
-    const int64_t target = std::min<int64_t>(total_budget, max_tokens_) - decode_rows;
+    const int64_t target = std::min<int64_t>(total_budget, max_tokens_ - decode_rows);
     while (prefill_rows > target) {
       auto largest = std::max_element(counts.begin(), counts.end());
       if (*largest <= snapshot_align_) break;
