@@ -81,11 +81,27 @@ def main():
                 transcript_matches=cache['transcript_matches'],
                 first_token_during_prefill=cache.get('first_token_during_prefill'),
                 finishes_during_prefill=cache['finishes_during_prefill'],
-                cached_ttft_s=(actual['first_token'] - actual['start']) if 'first_token' in actual else None,
+                cached_ttft_s=(actual['first_token'] - actual['start']) if actual.get('first_token') is not None else None,
                 cached_wall_s=actual['end'] - actual['start'], cold_ttft_s=cache['long']['ttft_s'],
                 decoder_wall_s=cache['decoder']['wall_s'],
                 pool_blocks_before=cache['before']['scheduler']['pool_blocks_in_use'],
                 pool_blocks_after=cache['after']['scheduler']['pool_blocks_in_use'])
+        repeat_path = directory / 'cache-repeat.json'
+        if repeat_path.exists():
+            cache = read(repeat_path)
+            repeated = cache.get('repeat', {})
+            metadata[label]['cache_repeat_check'] = dict(
+                arguments=cache.get('arguments', {}),
+                isolated_loaded_transcript_matches=cache.get('transcript_matches'),
+                repeated_transcript_matches=cache.get('repeated_transcript_matches'),
+                recovery_transcript_matches=cache.get('recovery_transcript_matches'),
+                first_token_during_prefill=cache.get('first_token_during_prefill'),
+                repeated_first_token_during_prefill=repeated.get('first_token_during_prefill'),
+                pool_blocks_before=cache['before']['scheduler']['pool_blocks_in_use'],
+                pool_blocks_after=cache['after']['scheduler']['pool_blocks_in_use'],
+                pool_blocks_repeated=repeated.get('after', {}).get('scheduler', {}).get('pool_blocks_in_use'),
+                pool_blocks_recovered=cache.get('recovery_after', {}).get('scheduler', {}).get('pool_blocks_in_use'),
+                evidence_sha256=hashlib.sha256(repeat_path.read_bytes()).hexdigest())
     chat = {}
     for label, before in metadata['control']['transcripts']['results'].items():
         after = metadata['candidate']['transcripts']['results'][label]

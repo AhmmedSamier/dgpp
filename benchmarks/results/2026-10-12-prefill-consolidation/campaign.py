@@ -197,12 +197,16 @@ def main():
                     cache_script = ROOT / 'benchmarks/results/2026-10-12-prefill-consolidation/mixed_cache_check.py'
                     (directory / 'mixed-cache-script.py').write_bytes(cache_script.read_bytes())
                     command = ['python3', cache_script,
-                               '--out', directory / 'mixed-cache.json']
+                               '--out', directory / 'mixed-cache.json', '--tokens', '1']
                     if args.cache_no_thinking:
                         command.append('--no-thinking')
                     if label == 'control':
                         command.append('--diagnostic')  # the old executor may defer admission
                     run(command, directory / 'mixed-cache.log', test=True)
+                    command = ['python3', cache_script, '--out', directory / 'cache-repeat.json', '--repeat-load']
+                    if label == 'control':
+                        command.append('--diagnostic')  # the previous executor may defer admission
+                    run(command, directory / 'cache-repeat.log', test=True)
                 bench.idle()
             finally:
                 run(['python3', 'scripts/dgpp-cluster', 'down', '--config', path,

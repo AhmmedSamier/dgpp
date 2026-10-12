@@ -33,8 +33,12 @@ The [shared-prefill campaign](../benchmarks/results/2026-10-12-prefill-consolida
 compares previous and candidate serving executables using the same deployment,
 weights, deterministic prompts and output lengths. It warms long prompts before
 timing isolated and concurrent decode, prefill, mixed work and repeated arrivals.
-`--cache-check` also checks cached transcript parity, output during cold prefill,
-and retained KV usage. Summaries retain both total work time and stream update
+`--cache-check` checks a cached first token against isolation, output during cold
+prefill, and retained KV usage. A separate long-output probe repeats the same
+loaded workload, requires an exact repeated transcript without further KV
+retention, then checks that the original isolated cached response is intact.
+The isolated-versus-loaded long-output comparison remains in the results, even
+when those shapes differ numerically. Summaries retain both total work time and stream update
 gaps: a throughput improvement must not hide a longer decode interruption.
 A single special token can render no text; that prefill probe records a complete
 response and token usage, with no first-text latency measurement.
