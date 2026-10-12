@@ -1,0 +1,182 @@
+{
+  "source": {
+    "parent": "87cc3b542b4127eb8d577393465b6572dced9ef9",
+    "patch_sha256": "ff012f97128c4ed01e8f70b73f379ab339d674134bc30c9bba7d336a3725648a",
+    "binary_sha256": "e61a6180634587abb61ec9fc59e6493b8d5d0a6a83d7eed2feeaba249253e45e",
+    "committed_source": "384bc260530bae7f331a1c85fefed54105bb21c8"
+  },
+  "matching_timing_responses": 48,
+  "total_timing_responses": 51,
+  "matching_chats": 4,
+  "changed_timing_responses": [
+    {
+      "scenario": "batch_decode",
+      "trial": 0,
+      "name": "batch-0"
+    },
+    {
+      "scenario": "batch_decode",
+      "trial": 1,
+      "name": "batch-0"
+    },
+    {
+      "scenario": "batch_decode",
+      "trial": 2,
+      "name": "batch-0"
+    }
+  ],
+  "batched_candidate_vs_old_isolated": [
+    {
+      "trial": 0,
+      "name": "batch-0",
+      "isolated_reference_matches": true
+    },
+    {
+      "trial": 0,
+      "name": "batch-1",
+      "isolated_reference_matches": true
+    },
+    {
+      "trial": 0,
+      "name": "batch-2",
+      "isolated_reference_matches": true
+    },
+    {
+      "trial": 0,
+      "name": "batch-3",
+      "isolated_reference_matches": true
+    },
+    {
+      "trial": 1,
+      "name": "batch-0",
+      "isolated_reference_matches": true
+    },
+    {
+      "trial": 1,
+      "name": "batch-1",
+      "isolated_reference_matches": true
+    },
+    {
+      "trial": 1,
+      "name": "batch-2",
+      "isolated_reference_matches": true
+    },
+    {
+      "trial": 1,
+      "name": "batch-3",
+      "isolated_reference_matches": true
+    },
+    {
+      "trial": 2,
+      "name": "batch-0",
+      "isolated_reference_matches": true
+    },
+    {
+      "trial": 2,
+      "name": "batch-1",
+      "isolated_reference_matches": true
+    },
+    {
+      "trial": 2,
+      "name": "batch-2",
+      "isolated_reference_matches": true
+    },
+    {
+      "trial": 2,
+      "name": "batch-3",
+      "isolated_reference_matches": true
+    }
+  ],
+  "diagnostic": "glm4-numerics-v31.json: both candidate layouts match all 128 probabilities for all 12 batched responses against old isolated references",
+  "cache": "Both builds preserve isolated, loaded, repeated and recovered text and 36 retained blocks. The 128-token response contains only hidden reasoning, so visible-token logprobs are unavailable.",
+  "initial_means": [
+    {
+      "scenario": "batch_decode",
+      "trials": 2,
+      "control_wall_s": 6.5299493204802275,
+      "candidate_wall_s": 6.198971614474431,
+      "wall_change_percent": -5.068610639407778
+    },
+    {
+      "scenario": "batch_prefill",
+      "trials": 2,
+      "control_wall_s": 47.512064758571796,
+      "candidate_wall_s": 51.65342282538768,
+      "wall_change_percent": 8.716434631624237
+    },
+    {
+      "scenario": "mixed_long",
+      "trials": 2,
+      "control_wall_s": 16.351284160627984,
+      "candidate_wall_s": 18.467454958939925,
+      "wall_change_percent": 12.941924178698084
+    },
+    {
+      "scenario": "solo_decode",
+      "trials": 2,
+      "control_wall_s": 3.7054117979714647,
+      "candidate_wall_s": 3.69221043610014,
+      "wall_change_percent": -0.35627246284883896
+    },
+    {
+      "scenario": "solo_prefill",
+      "trials": 2,
+      "control_wall_s": 11.867313454858959,
+      "candidate_wall_s": 13.630459008389153,
+      "wall_change_percent": 14.857158363911683
+    },
+    {
+      "scenario": "sustained_idle",
+      "trials": 2,
+      "control_wall_s": 14.9149335634429,
+      "candidate_wall_s": 17.66863997397013,
+      "wall_change_percent": 18.462746741806967
+    }
+  ],
+  "repeat_means": [
+    {
+      "scenario": "batch_decode",
+      "trials": 3,
+      "control_wall_s": 6.629557427639763,
+      "candidate_wall_s": 6.265583998446043,
+      "wall_change_percent": -5.490161796868254
+    },
+    {
+      "scenario": "batch_prefill",
+      "trials": 3,
+      "control_wall_s": 47.820520645317934,
+      "candidate_wall_s": 47.08838494339337,
+      "wall_change_percent": -1.5310073835347215
+    },
+    {
+      "scenario": "mixed_long",
+      "trials": 3,
+      "control_wall_s": 16.433851156306144,
+      "candidate_wall_s": 16.300668052009616,
+      "wall_change_percent": -0.8104193169926721
+    },
+    {
+      "scenario": "solo_decode",
+      "trials": 3,
+      "control_wall_s": 3.7226845409410694,
+      "candidate_wall_s": 3.720724401374658,
+      "wall_change_percent": -0.05265392608087005
+    },
+    {
+      "scenario": "solo_prefill",
+      "trials": 3,
+      "control_wall_s": 11.93189451789173,
+      "candidate_wall_s": 11.937819577986374,
+      "wall_change_percent": 0.04965732881530016
+    },
+    {
+      "scenario": "sustained_idle",
+      "trials": 3,
+      "control_wall_s": 14.925789466981465,
+      "candidate_wall_s": 14.650650245292733,
+      "wall_change_percent": -1.8433813655042486
+    }
+  ],
+  "performance_limitation": "The initial candidate-first pair contained intermittent prefill slowdowns of 8.72\u201318.46% in scenario means. No runtime code changed afterward. They did not recur during CUDA profiling or this unprofiled control-first three-trial pair; their cause remains unproven. The repeat supports no sustained slowdown in the measured scenarios, not an explanation or proof of absence for the initial outliers.",
+  "production_restored": true
+}

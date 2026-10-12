@@ -45,7 +45,7 @@ Source receipts and selected test results are in
 hardware, with identical weights, prompts, output lengths, KV format and
 speculation settings. Each configuration has four request slots, 65,536 KV
 tokens and a 1 GiB prefix cache. Prompt seeds are 104 and 105; the final
-MiMo pair adds seed 106 for a third trial. Scenarios
+MiMo and GLM-4.7 follow-up pairs add seed 106 for a third trial. Scenarios
 exercise isolated decode, isolated prefill, four simultaneous decoders, four
 simultaneous prefills, a long reader arriving behind an incumbent decoder,
 and repeated short arrivals during prefill. Decode requests generate 128
@@ -54,7 +54,7 @@ prefix reuse and ignore EOS so both builds do the requested work.
 
 Long prompts are warmed before measurement. The second trial reverses
 scenario order. Most pairs run candidate first; the Qwen35 DFlash reverse
-pair and GLM-DSA compact follow-up run control first. Two trials are a
+pair, GLM-DSA compact follow-up and GLM-4.7 repeat run control first. Two trials are a
 focused regression check, not a high-confidence estimate of sub-percent
 differences. Probability-gathering diagnostics are separate from throughput
 measurements.
@@ -128,6 +128,7 @@ is faster. Each link retains the underlying timings and request metrics.
 | [GLM Flash](evidence/glm-final-v25-summary.json) | +0.52% | -35.63% | -0.64% | -67.62% | -21.70% | -23.52% |
 | [GLM-DSA²](evidence/glm-dsa-compact-v25-summary.json) | — | — | — | — | -1.39% | -2.53% |
 | [MiMo-V2.6-Flash-RL⁴](evidence/mimo-final-v31-summary.json) | +0.13% | +0.11% | -3.67% | -1.74% | +0.35% | -0.64% |
+| [GLM-4.7⁵](evidence/glm4-reverse-v31-summary.json) | -0.05% | +0.05% | -5.49% | -1.53% | -0.81% | -1.84% |
 | [DeepSeek V4.1³](evidence/dsv41-final-v27-summary.json) | -0.94% | -0.07% | -0.58% | -2.29% | +0.56% | -1.58% |
 
 ¹ Earlier candidate before compact mapping. These block-drafter/eager paths
@@ -140,6 +141,12 @@ responses and four chat transcripts match. Mixed elapsed time is
 match; three of 51 timing responses change a single prefill token. Cache
 checks precede timing in both arms, and all 111 returned visible cache-token
 probabilities match across builds, under repeated load and after recovery.
+
+⁵ Three unprofiled control-first trials at candidate `384bc260`. All four
+chats match. The three changed batched counting responses match the old
+isolated reference; the old batched path diverges. Initial intermittent
+prefill slowdowns did not recur under profiling or in this repeat, but
+their cause remains unproven. See the investigation below.
 
 At the matched 256-token Qwen budget, mixed elapsed time is 7.676 → 7.675
 seconds. Arrival first-token latency remains 0.33–0.36 seconds and maximum
@@ -253,8 +260,7 @@ visible in the evidence and are not counted as exact passes.
   chats and both cache checks match; the 128-token cache probe contains
   reasoning only, so it has no returned visible-token probabilities. Both
   builds retain 36 KV blocks through load, repeat and isolated recovery.
-  All four operation streams agree within each build. The checkpoint is
-  retained for profiling and probability diagnostics.
+  All four operation streams agree within each build. The initial results were retained for profiling and probability diagnostics.
   The [numerical diagnostic](evidence/glm4-numerics-v31.json) resolves the
   changed decode: the control changes all four requests' probabilities
   when batched and changes Task 0's token at index 111. All twelve
@@ -266,8 +272,17 @@ visible in the evidence and are not counted as exact passes.
   the initial slowdown. Isolated prefill preserves kernel counts except
   three unnecessary intermediate vocabulary-head GEMVs, which the
   candidate omits. The profiled timings are diagnostic evidence only;
-  an unprofiled three-trial control-first pair is in progress before
-  accepting the performance result.
+  the unprofiled three-trial control-first repeat measures solo prefill
+  11.932 → 11.938 seconds (+0.05%), batched prefill 47.821 → 47.088
+  (−1.53%), mixed work 16.434 → 16.301 (−0.81%) and repeated arrivals
+  14.926 → 14.651 (−1.84%). Batched decode improves 5.49%; solo decode
+  changes −0.05%. All four chats match. The three changed timing responses
+  are Task 0 in each batched decode; all twelve candidate batched outputs
+  match the old isolated references. No runtime code changed between the
+  initial pair and repeat. The initial timing outliers remain unexplained;
+  this repeat supports no sustained slowdown in the measured scenarios,
+  not an explanation or proof of absence for those outliers. See the
+  [review receipt](evidence/glm4-final-v31-reviewed.json).
 
 These probes identify dependence on execution shape; they are not a general
 model-quality or teacher-forced numerical equivalence result.
@@ -277,8 +292,10 @@ model-quality or teacher-forced numerical equivalence result.
 MiMo-V2.6-Flash-RL, GLM-4.7-NVFP4 and DeepSeek-V4-Flash-0731 were absent from
 the saved initial inventories. MiMo has completed its final download, sync
 and testing; its weights and dedicated download cache have been removed
-from all four nodes. GLM-4.7 is downloaded and verified on every rank;
-its failed initial gate is under investigation. DeepSeek-V4 remains queued. Downloads are pinned to checkpoint revisions and performed one
+from all four nodes. GLM-4.7 has also completed its final comparison and
+[cleanup](evidence/glm4-downloaded-v31-cleanup.json). DeepSeek-V4 is now
+downloading for the final missing-model campaign. Downloads are pinned to
+checkpoint revisions and performed one
 model at a time after stopping production. No download runs alongside a
 benchmark. Test-only resident images are disabled for these campaigns.
 The optional `--parallel-peer-sync` helper downloads on the head first,
