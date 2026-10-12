@@ -1,0 +1,30 @@
+Internal ctest changing into directory: /home/stephen/workspace/dgpp/build-pr95
+Test project /home/stephen/workspace/dgpp/build-pr95
+      Start  20: qwen_decode_test
+ 1/10 Test  #20: qwen_decode_test .............................   Passed    8.58 sec
+      Start  28: qwen_image_prefill_test
+ 2/10 Test  #28: qwen_image_prefill_test ......................   Passed    1.67 sec
+      Start 190: qwen_engine_mtp3_rows64_row_independent
+ 3/10 Test #190: qwen_engine_mtp3_rows64_row_independent ......   Passed    4.03 sec
+      Start 192: qwen_engine_mixed_prefill_without_mtp
+ 4/10 Test #192: qwen_engine_mixed_prefill_without_mtp ........   Passed    1.51 sec
+      Start 193: qwen_engine_mixed_prefill_scheduled_verify
+ 5/10 Test #193: qwen_engine_mixed_prefill_scheduled_verify ...   Passed    1.89 sec
+      Start 194: qwen_engine_compact_sampling_1
+ 6/10 Test #194: qwen_engine_compact_sampling_1 ...............   Passed    3.19 sec
+      Start 195: qwen_engine_compact_sampling_32
+ 7/10 Test #195: qwen_engine_compact_sampling_32 ..............   Passed    3.68 sec
+      Start 196: qwen_engine_compact_fallback_0
+ 8/10 Test #196: qwen_engine_compact_fallback_0 ...............   Passed    3.66 sec
+      Start 197: qwen_engine_compact_fallback_1
+ 9/10 Test #197: qwen_engine_compact_fallback_1 ...............   Passed    3.74 sec
+      Start 198: qwen_engine_compact_fallback_mtp3_rows64
+10/10 Test #198: qwen_engine_compact_fallback_mtp3_rows64 .....   Passed    4.27 sec
+
+100% tests passed, 0 tests failed out of 10
+
+Label Time Summary:
+gpu     =  36.22 sec*proc (10 tests)
+rdma    =   4.03 sec*proc (1 test)
+
+Total Test time (real) =  36.22 sec
