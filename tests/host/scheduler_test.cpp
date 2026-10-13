@@ -24,11 +24,13 @@
 #include <stdexcept>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "common/log.hpp"
 
 #include "common/test.hpp"
+#include "engine/row_batch.hpp"
 #include "sched/scheduler.hpp"
 #include "serve/prefill_policy.hpp"
 
@@ -508,13 +510,19 @@ DGPP_TEST(scheduler_serving_auto_prefill_budget_respects_engine_geometry_and_opt
   dgpp::sched::AdmissionPolicy policy;
   policy.prefill_budget_tokens = -1;
   const auto resolved = [&] { return dgpp::serve::resolve_prefill_policy(policy, engine); };
-  require(resolved().prefill_budget_tokens == 256, "automatic budget yields after 256 tokens");
+  require(resolved().prefill_budget_tokens == 256, "automatic busy budget bounds decoder interruptions");
   engine.limit = 128;
   require(resolved().prefill_budget_tokens == 128, "small forward limit caps the budget");
   engine.align = 512;
+  engine.limit = 2200;
+  require(resolved().prefill_budget_tokens == 512, "automatic busy budget holds at least one aligned chunk");
+  engine.align = 192;
+  require(resolved().prefill_budget_tokens == 192, "automatic busy budget rounds down to alignment");
   engine.limit = 2048;
-  require(resolved().prefill_budget_tokens == 512, "alignment wider than the default is honored");
   engine.align = 128;
+  policy.prefill_latency.initial_tokens = 511;
+  require(resolved().prefill_budget_tokens == 384, "configured initial budget follows engine alignment");
+  policy.prefill_latency.initial_tokens = 256;
   policy.prefill_idle_budget_tokens = 128;
   require(resolved().prefill_budget_tokens == 128, "explicit idle budget can bound the automatic busy budget");
   policy.prefill_idle_budget_tokens = 0;
@@ -526,18 +534,35 @@ DGPP_TEST(scheduler_serving_auto_prefill_budget_respects_engine_geometry_and_opt
   engine.align = engine.limit = 0;
   require(resolved().prefill_budget_tokens == 0, "unsupported engine keeps synchronous prefill");
   // An engine that advances its in-flight prompts as one walk: the idle
-  // budget defaults to the whole forward; an explicit one survives.
+  // budget defaults to a capped large forward; an explicit one survives.
   struct GroupGeometry : GeometryEngine {
     bool prefill_group_advance() const override { return true; }
   } grouped;
   grouped.limit = 4096;
   const auto regrouped = [&] { return dgpp::serve::resolve_prefill_policy(policy, grouped); };
   require(regrouped().prefill_budget_tokens == 256 && regrouped().prefill_idle_budget_tokens == 4096,
-          "a group-advance engine takes the whole forward when nothing decodes");
+          "grouped readers use the shared busy and idle starting values");
+  grouped.limit = 8192;
+  require(regrouped().prefill_idle_budget_tokens == 4096, "automatic idle work stays bounded on larger engines");
+  policy.prefill_latency.initial_tokens = 8192;
+  require(regrouped().prefill_budget_tokens == 4096 && regrouped().prefill_idle_budget_tokens == 4096,
+          "initial budget cannot raise the automatic idle ceiling");
+  policy.prefill_latency.initial_tokens = 256;
+  grouped.limit = 2200;
+  require(regrouped().prefill_idle_budget_tokens == 2176, "idle budget respects capacity and alignment");
+  grouped.align = grouped.limit = 8192;
+  require(regrouped().prefill_budget_tokens == 8192 && regrouped().prefill_idle_budget_tokens == 8192,
+          "an engine requiring larger aligned chunks remains supported");
+  grouped.align = 128;
+  grouped.limit = 4096;
   require(resolved().prefill_idle_budget_tokens == 0, "other engines keep one budget");
   policy.prefill_idle_budget_tokens = 1024;
   require(regrouped().prefill_budget_tokens == 256 && regrouped().prefill_idle_budget_tokens == 1024,
           "an explicit idle budget survives");
+  policy.prefill_budget_tokens = 1024;
+  policy.prefill_idle_budget_tokens = 0;
+  require(regrouped().prefill_budget_tokens == 1024 && regrouped().prefill_idle_budget_tokens == 0,
+          "an explicit busy budget retains fixed-budget behavior when idle is zero");
 }
 
 DGPP_TEST(scheduler_serving_auto_admission_uses_execution_capabilities) {
@@ -604,6 +629,10 @@ DGPP_TEST(scheduler_chunked_prefill_bounds_work_and_keeps_decode_running) {
   require(sched.find("long")->generated == std::vector<int64_t>({20, 21, 22}), "chunked transcript");
   require(sched.meters().prompt_tokens_computed == 13 && sched.meters().pool_blocks_in_use == 0,
           "no double counting or reservation leak");
+  const auto chunks = sched.meters();
+  require(chunks.prefill_chunk_steps == 3 && chunks.prefill_chunk_budget_tokens == 12 &&
+              chunks.prefill_chunk_available_tokens == 11 && chunks.prefill_chunk_computed_tokens == 11,
+          "chunk meters exclude monolithic prompts and distinguish a final short tail from unused work");
 }
 
 // An engine that advances its in-flight prefills as one walk: every prompt
@@ -658,6 +687,10 @@ DGPP_TEST(scheduler_group_advance_reads_co_arrivals_in_through_one_walk_per_tick
   require(count("GA:2:2:4") == 1 && count("PF:0:1") == 1 && count("PF:1:1") == 1 && count("PF:2:3") == 1,
           "the prompts finish together");
   require(sched.meters().prefilling == 0, "all three decode from the same tick");
+  const auto chunks = sched.meters();
+  require(chunks.prefill_chunk_steps == 3 && chunks.prefill_chunk_budget_tokens == 24 &&
+              chunks.prefill_chunk_available_tokens == 21 && chunks.prefill_chunk_computed_tokens == 21,
+          "group chunk meters count three physical advances, without counting each member as a walk");
   sched.run_to_completion();
   require(sched.find("r0")->generated == std::vector<int64_t>({10, 11, 12}) &&
               sched.find("r1")->generated == std::vector<int64_t>({20, 21, 22}) &&
@@ -3597,6 +3630,51 @@ class AdmissionFairEngine : public ChunkFakeEngine {
   }
 };
 
+DGPP_TEST(scheduler_group_advance_late_short_reader_is_not_held_for_an_older_reader) {
+  struct GroupEngine : AdmissionFairEngine {
+    bool prefill_group_advance() const override { return true; }
+    bool prefill_budget_per_reader() const override { return false; }
+  };
+  for (const bool incumbent : {false, true}) {
+    GroupEngine engine;
+    const int long_slot = incumbent ? 1 : 0;
+    const int short_slot = long_slot + 1;
+    if (incumbent) engine.arm(0, std::vector<int32_t>(16, 10), 16);
+    engine.arm(long_slot, {20, 21, 22}, 3);
+    engine.arm(short_slot, {30, 31, 32}, 3);
+    dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_early_admission = true;
+    policy.prefill_budget_tokens = policy.prefill_idle_budget_tokens = 32;
+    Scheduler sched(&engine, {}, 0, policy);
+    RecordingObserver observer;
+    sched.set_observer(&observer);
+    if (incumbent) {
+      sched.submit(make_request("decoder", 1, 16));
+      sched.tick();
+    }
+    sched.submit(make_request("long", 95, 3));
+    sched.tick();
+    // The older reader has 63 tokens left. Together with the new one-token
+    // reader this is exactly two budgets, but they did not begin together.
+    // Leveling their remainders would give the new reader no work this tick.
+    sched.submit(make_request("short", 1, 3));
+    engine.reset_tick();
+    const auto computed = sched.meters().prompt_tokens_computed;
+    sched.tick();
+    require(count_kind(observer, "tok", "short") >= 1 && count_kind(observer, "tok", "long") == 0,
+            "a later short reader must produce output before the older reader finishes");
+    require(engine.allocated == 32 && engine.advanced.at(long_slot) == 28 &&
+                engine.advanced.at(short_slot) == 1 &&
+                sched.meters().prompt_tokens_computed - computed == 29,
+            "the late short tail receives one aligned unit and donates the rest within the cap");
+    sched.run_to_completion();
+    require(sched.find("long")->generated == std::vector<int64_t>({20, 21, 22}) &&
+                sched.find("short")->generated == std::vector<int64_t>({30, 31, 32}) &&
+                engine.pool_blocks_in_use() == 0,
+            "late grouped admission preserves transcripts and releases reservations");
+  }
+}
+
 DGPP_TEST(scheduler_mixed_prefill_decodes_each_live_request_once_per_tick) {
   struct MixedEngine : AdmissionFairEngine {
     std::map<int, int> tick_steps;
@@ -4490,4 +4568,174 @@ DGPP_TEST(scheduler_fairShare_busy_budget_rotates_and_survives_compaction) {
     };
     require(run(true) == run(false), "compaction preserves every engine op and observer event");
   }
+}
+
+DGPP_TEST(row_groups_isolate_readers_without_splitting_ordinary_mixed_batches) {
+  dgpp::RowRun run;
+  const int32_t lengths[] = {4, 4, 248, 6, 17, 4};
+  run.T = 283;
+  run.span_lens = lengths;
+  run.num_spans = 6;
+  run.decode_spans = 2;
+  std::vector<std::vector<int>> groups;
+  const auto collect = [&](int row0, int rows, bool decode, int first) {
+    groups.push_back({row0, rows, decode ? 1 : 0, first});
+  };
+  run.for_each_isolated_reader_group([](int span) { return span == 3 || span == 5; }, collect);
+  require(groups == std::vector<std::vector<int>>{{0, 256, 0, 0}, {256, 6, 0, 3},
+                                                 {262, 17, 0, 4}, {279, 4, 0, 5}},
+          "isolated readers retain original offsets and leave the wide mixed prefix together");
+  groups.clear();
+  run.for_each_isolated_reader_group([](int) { return false; }, collect);
+  require(groups == std::vector<std::vector<int>>{{0, 283, 0, 0}}, "ordinary mixed batch remains one group");
+  groups.clear();
+  run.num_spans = 2;
+  run.T = 8;
+  run.for_each_isolated_reader_group([](int) { return false; }, collect);
+  require(groups == std::vector<std::vector<int>>{{0, 8, 1, 0}}, "decoder-only prefix retains native decode");
+}
+
+DGPP_TEST(prefill_latency_controller_learns_cost_without_cross_rank_clocks) {
+  dgpp::sched::PrefillLatencyController controller;
+  require(controller.limit(1, 500, 256, 4096, 16) == 256, "unknown load starts conservatively");
+  controller.observe(1, 256, 256, 100);
+  require(controller.limit(1, 500, 256, 4096, 16) == 512, "cheap work grows at most twice an observed quantum");
+  controller.observe(1, 512, 512, 200);
+  require(controller.limit(1, 500, 256, 4096, 16) == 1024, "sustained headroom grows useful work");
+  require(controller.limit(4, 500, 256, 4096, 16) == 1024,
+          "an unmeasured decoder load borrows a measured cost rather than restarting at 256");
+  controller.observe(4, 1024, 1024, 6000);
+  require(controller.limit(1, 500, 256, 4096, 16) == 1024,
+          "a measured load retains its own estimate when another load gets expensive");
+  require(controller.limit(2, 500, 256, 4096, 16) == 64,
+          "a new load borrows the most conservative measured cost");
+  controller.observe(1, 512, 512, 1000);
+  const auto slow = controller.limit(1, 500, 256, 4096, 16);
+  require(slow >= 16 && slow <= 224 && slow % 16 == 0, "slowdowns reduce work immediately within alignment");
+  controller.observe(1, 6, 512, 1000);
+  require(controller.limit(1, 500, 256, 4096, 16) == slow, "short final tails do not poison full-quantum estimates");
+  require(controller.limit(1, 1, 256, 4096, 16) == 16, "an infeasible target still allows forward progress");
+  require(controller.limit(1, 0, 256, 4096, 16) == 4096, "no target retains capacity");
+}
+
+DGPP_TEST(scheduler_adaptive_budget_replays_and_preserves_progress_and_explicit_caps) {
+  for (bool automatic : {false, true}) {
+    ChunkFakeEngine leader, peer;
+    for (auto* engine : {&leader, &peer}) {
+      engine->arm(0, {10, 11, 12}, 3);
+      engine->arm(1, {20, 21}, 2);
+    }
+    dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_budget_tokens = 4;
+    policy.prefill_idle_budget_tokens = 16;
+    policy.prefill_budget_automatic = automatic;
+    policy.decode_gap_target_ms = 500;
+    policy.first_token_target_ms = 2000;
+    Scheduler a(&leader, {}, 0, policy), b(&peer, {}, 0, policy);
+    for (auto* sched : {&a, &b}) {
+      sched->submit(make_request("decoder", 2, 3));
+      sched->tick(4);
+      sched->submit(make_request("reader", 23, 2));
+      sched->tick(12);
+    }
+    require(a.meters().prompt_tokens_computed == (automatic ? 14 : 6),
+            "automatic work may grow; an explicit busy budget stays a cap");
+    for (int tick = 0; tick < 30; ++tick) {
+      // Arbitrary but valid leader decisions: peer timing has no influence.
+      const int64_t selected = tick % 2 ? 2 : 16;
+      const bool more = a.tick(selected);
+      require(b.tick(selected) == more && leader.ops() == peer.ops(), "journaled budgets replay identical engine operations");
+      if (!more) break;
+    }
+    require(a.meters().pool_blocks_in_use == 0 && b.meters().pool_blocks_in_use == 0 &&
+                a.find("reader")->generated == std::vector<int64_t>({20, 21}),
+            "changing budgets preserves completion and resource release");
+    for (int64_t invalid : {0, 3, 18}) {
+      bool rejected = false;
+      try { a.tick(invalid); } catch (const std::invalid_argument&) { rejected = true; }
+      require(rejected, "invalid leader budgets fail before executing any work");
+    }
+  }
+}
+
+DGPP_TEST(prefill_latency_tuning_changes_headroom_growth_and_recovery) {
+  dgpp::sched::PrefillLatencyController controller;
+  controller.observe(1, 256, 256, 100);
+  dgpp::sched::PrefillLatencyTuning tuning{15, 4, 100};
+  require(controller.limit(1, 500, 256, 4096, 16, tuning) == 1024, "growth setting permits a larger probe");
+  tuning.headroom_pct = 50;
+  require(controller.limit(1, 500, 256, 4096, 16, tuning) == 512, "extra latency headroom reduces offered work");
+  controller.observe(1, 256, 256, 1000, tuning);
+  controller.observe(1, 256, 256, 100, tuning);
+  require(controller.limit(1, 500, 256, 4096, 16, tuning) == 512, "full recovery weight immediately accepts cheaper work");
+  for (const auto invalid : {dgpp::sched::PrefillLatencyTuning{-1, 2, 25}, {15, 1, 25}, {15, 2, 0}})
+    require(!invalid.valid(), "invalid tuning has no valid controller interpretation");
+}
+
+DGPP_TEST(scheduler_adaptive_short_group_does_not_replace_full_quantum_estimate) {
+  struct GroupEngine : AdmissionFairEngine {
+    bool prefill_group_advance() const override { return true; }
+    bool prefill_budget_per_reader() const override { return false; }
+  };
+  for (const int64_t selected : {32, 1024}) {
+    GroupEngine engine;
+    engine.arm(0, {10}, 1);
+    engine.arm(1, {20}, 1);
+    dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_budget_tokens = 256;
+    policy.prefill_idle_budget_tokens = 1024;
+    policy.prefill_budget_automatic = true;
+    policy.prefill_early_admission = true;
+    policy.first_token_target_ms = 3000;
+    Scheduler sched(&engine, {}, 0, policy);
+    sched.submit(make_request("short-a", 8, 1));
+    sched.submit(make_request("short-b", 8, 1));
+    sched.tick(selected);
+    require(sched.meters().prefill_chunk_computed_tokens == 16 &&
+                sched.meters().prefill_chunk_budget_tokens == 16,
+            "group trims the offered budget to the prompts' remaining work");
+    require(sched.next_prefill_budget() == 256,
+            "small completions leave the full-quantum estimate unmeasured, rather than reducing it to 32 tokens");
+    require(sched.meters().pool_blocks_in_use == 0, "short group releases its slots and KV");
+  }
+}
+
+DGPP_TEST(scheduler_adaptive_idle_arrival_keeps_the_full_first_token_allowance) {
+  struct MeasuredEngine : ChunkFakeEngine {
+    MeasuredEngine() : ChunkFakeEngine(4096) {}
+    int64_t prefill_chunk_limit() const override { return 1024; }
+    PrefillProgress advance_prefill(int req, int64_t budget) override {
+      // Keep the learned limit below the capacity/growth caps so halving
+      // the allowance is observable. Compare decisions, not exact timings.
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      return ChunkFakeEngine::advance_prefill(req, budget);
+    }
+  } engine;
+  engine.arm(0, {10}, 1);
+  engine.arm(0, {20}, 1);
+  dgpp::sched::AdmissionPolicy policy;
+  policy.prefill_budget_tokens = 128;
+  policy.prefill_idle_budget_tokens = 1024;
+  policy.prefill_budget_automatic = true;
+  policy.first_token_target_ms = 20;
+  Scheduler sched(&engine, {}, 0, policy);
+  sched.submit(make_request("calibrate", 512, 1));
+  sched.tick(128);
+  sched.cancel("calibrate");
+  sched.tick();
+  const auto idle_limit = sched.next_prefill_budget();
+  require(idle_limit && *idle_limit > 2, "calibrated limit leaves room to observe a reduction");
+  sched.submit(make_request("fresh", 512, 1));
+  require(sched.next_prefill_budget() == idle_limit,
+          "an arrival on an idle engine has no previous prefill yield to wait behind");
+  sched.tick();
+  const auto reading_limit = sched.next_prefill_budget();
+  sched.submit(make_request("arrival", 2, 1));
+  require(sched.next_prefill_budget() < reading_limit,
+          "a queued arrival during prefill still reserves time for its previous yield wait");
+  sched.cancel("fresh");
+  sched.cancel("arrival");
+  sched.tick();
+  require(!sched.has_pending() && sched.meters().pool_blocks_in_use == 0,
+          "calibration and unfinished readers release resources");
 }

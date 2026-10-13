@@ -77,7 +77,7 @@ class QwenMoeLayer {
   // then the BF16 shared expert and the single rounding — bitwise
   // enqueue() at the same routing. tokens <= decode_slots.
   void enqueue_decode(const uint16_t* hidden, uint16_t* out, int tokens,
-                      cudaStream_t stream, int table_slot = -1);
+                      cudaStream_t stream, int table_slot = -1, MoeTraceStaging* trace = nullptr);
   // The prefill path (Q7): the routed chain device-segmented on the
   // tensor-core kernel (the slice's 32/64 scale grid included, no host
   // round-trip), then the BF16 shared expert and the one rounding.

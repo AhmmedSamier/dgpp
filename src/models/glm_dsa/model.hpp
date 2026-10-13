@@ -81,6 +81,7 @@ class GlmDsaModel : public SessionModel<GlmDsaModel> {
   // dense, MoE and head sites over every row; every span within max_tokens.
   int64_t prefill_group_span_limit() const { return max_tokens_; }
   using Base = SessionModel<GlmDsaModel>;
+  static constexpr bool kPrefillChunkGrid = false;
   using Outputs = Base::Outputs;
   using SessionSnapshotMeta = Base::SessionSnapshotMeta;
   using SnapshotRequest = Base::SnapshotRequest;
@@ -161,7 +162,7 @@ class GlmDsaModel : public SessionModel<GlmDsaModel> {
   const DsaStatePool& pool() const { return pool_; }
   void graph_prepare();
   void mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode_row,
-                    bool capture, int head_rows, int batch_requests);
+                    bool capture, int head_rows, int batch_requests, int hidden_row = 0);
   void snapshot_draft_state(int) {}
   void restore_draft_state(int) {}
   // Depth >= 2: the chain rows take the block's output residual (pre
@@ -193,6 +194,8 @@ class GlmDsaModel : public SessionModel<GlmDsaModel> {
   // The layer's two blocks over `resid` (the residual, updated in place):
   // the attention block and the MLP/MoE block with their folds.
   struct WalkRows {
+    const RowRun* run = nullptr;
+    int decode_spans = 0;
     const int32_t* req_ids = nullptr;
     const int64_t* pos = nullptr;
     const int32_t* spans = nullptr;

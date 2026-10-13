@@ -143,7 +143,7 @@ void QwenMoeLayer::enqueue(const uint16_t* hidden, uint16_t* out, int tokens,
 }
 
 void QwenMoeLayer::enqueue_decode(const uint16_t* hidden, uint16_t* out, int tokens,
-                                  cudaStream_t stream, int table_slot) {
+                                  cudaStream_t stream, int table_slot, MoeTraceStaging* trace) {
   if (tokens <= 0) return;
   if (tokens > max_tokens_)
     throw std::invalid_argument("QwenMoeLayer: tokens exceed max_tokens");
@@ -168,7 +168,7 @@ void QwenMoeLayer::enqueue_decode(const uint16_t* hidden, uint16_t* out, int tok
   // chain, one launch fewer per layer, 2026-09-29); the wide path and the
   // side-stream path take the accumulate kernel's output.
   const bool fold = tokens <= 8 && shared_side_ == nullptr;
-  routed_.enqueue_decode_f32(hidden, d_acc_, tokens, nullptr, stream, table_slot, /*accumulate=*/!fold);
+  routed_.enqueue_decode_f32(hidden, d_acc_, tokens, trace, stream, table_slot, /*accumulate=*/!fold);
   // Preserve the small-row fused tail, including C1 MTP. Wider batches
   // use the dense interface (Lt for BF16, streaming MMA for FP8) so the
   // shared weights are not re-read by another four-row GEMV per chunk.

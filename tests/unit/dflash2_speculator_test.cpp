@@ -115,6 +115,18 @@ DGPP_TEST(dflash2_speculator_capped_reject_stays_exact) {
   require(sp.accepted_drafts() == 1, "one draft accepted");
 }
 
+DGPP_TEST(dflash2_speculator_zero_depth_commits_target_state) {
+  FakeModel model;
+  dgpp::DFlash2Speculator<FakeModel> spec(model, 0, identity_pick());
+  spec.set_depth_policy([](const std::vector<int32_t>&) { return 0; });
+  spec.start(10);
+  require(spec.step() == std::vector<int32_t>{10} && spec.next() == 99, "plain target step");
+  require(model.rollbacks.size() == 1 && model.rollbacks[0].accepted == 1 &&
+              model.rollbacks[0].rows == 1 && model.rollbacks[0].base == 0,
+          "a fully accepted scalar verify still commits replay state");
+  require(spec.accepted_drafts() == 0 && spec.attempts(0) == 0, "no draft was verified");
+}
+
 DGPP_TEST(dflash2_speculator_commit_split_matches_commit) {
   FakeModel a, b;
   dgpp::DFlash2Speculator<FakeModel> sa(a, 0, identity_pick());

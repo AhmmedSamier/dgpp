@@ -1,5 +1,0 @@
-Traceback (most recent call last):
-  File "/home/stephen/workspace/dgpp/benchmarks/results/2026-10-12-shared-prefill-decode/mixed_cache_check.py", line 42, in <module>
-    assert reference['response']['usage']['prompt_tokens_details']['cached_tokens'] > 0
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-AssertionError

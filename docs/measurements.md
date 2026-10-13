@@ -4,18 +4,16 @@ Measurements recorded from 2026-08-27 through 2026-09-15. Compact serving
 summaries use the newest applicable production-path result; the later dated
 sections retain the A/B history. Each section identifies its workload and
 environment; this report is maintained manually.
-Raw commands and the audit-remediation run record are in
-`benchmarks/results/2026-08-27-dgx-spark.md`; the M2 KDA correctness and
-state-traffic record is `benchmarks/results/2026-08-27-kda-m2.md`. The
-generated checkpoint report is `docs/checkpoint_budget.md`.
+See [benchmark procedures](benchmarking.md) for current commands and
+[checkpoint budgets](checkpoint_budget.md) for model storage accounting.
 
 ## Platform baseline environment (2026-08-27)
 
-- source base: `e2db401` plus the audit-remediation working tree;
-- two DGX Spark GB10 nodes, AArch64 Linux `6.17.0-1026-nvidia`;
-- CUDA 13.0 compiler, SM 12.1, 48 SMs, 24 MiB L2;
-- ConnectX-7 firmware `28.45.4028`, RoCEv2, GID index 3;
-- perftest tool version 6.20;
+- source base: `e2db401` plus the audit-remediation working tree.
+- two DGX Spark GB10 nodes, AArch64 Linux `6.17.0-1026-nvidia`.
+- CUDA 13.0 compiler, SM 12.1, 48 SMs, 24 MiB L2.
+- ConnectX-7 firmware `28.45.4028`, RoCEv2, GID index 3.
+- perftest tool version 6.20.
 - model server not resident during the 2026-08-27 remediation measurements.
 
 DGX Spark has one coherent 128 GB LPDDR5x pool, not discrete GPU VRAM plus
@@ -64,9 +62,9 @@ reachability matrix.
 
 Node-visible state on both active interfaces:
 
-- Ethernet pause RX/TX enabled;
-- DCB priority PFC disabled for priorities 0–7;
-- `rx_out_of_buffer=0` at inspection;
+- Ethernet pause RX/TX enabled.
+- DCB priority PFC disabled for priorities 0–7.
+- `rx_out_of_buffer=0` at inspection.
 - cumulative priority-0 discards are nonzero.
 
 The switch PFC/ECN/global-pause policy is not available through node sudo.
@@ -81,12 +79,12 @@ switch configuration. No switch policy is inferred here.
 The audit found unsignaled sends mislabeled as signaled and CQ polls writing
 multiple completions into one `ibv_wc`. `micro_ibv_smoke` now:
 
-- marks the required SENDs `IBV_SEND_SIGNALED`;
-- supplies completion arrays matching every poll count;
-- propagates link-thread, timeout, and sink failures;
-- validates request sizes and socket failures;
-- frees QP, CQ, MR, PD, context, and buffer resources after a connection;
-- maps repeated peer/device arguments by position for two-lane tests;
+- marks the required SENDs `IBV_SEND_SIGNALED`.
+- supplies completion arrays matching every poll count.
+- propagates link-thread, timeout, and sink failures.
+- validates request sizes and socket failures.
+- frees QP, CQ, MR, PD, context, and buffer resources after a connection.
+- maps repeated peer/device arguments by position for two-lane tests.
 - offers `--once` for bounded automation.
 
 Cross-node results:
@@ -172,9 +170,9 @@ useful stress proxies but are no longer the evidence for NIC contention.
 
 `src/kernels/flag_protocol.cuh` now provides:
 
-- system-scope acquire/release operations for sequence words;
-- payload/stamp writes ordered before acknowledgement publication;
-- an inactivity deadline reset after every observed message;
+- system-scope acquire/release operations for sequence words.
+- payload/stamp writes ordered before acknowledgement publication.
+- an inactivity deadline reset after every observed message.
 - a reserved orderly-stop sequence.
 
 CTest covers sequential acknowledgements, payload hashes, traffic continuing
@@ -185,13 +183,13 @@ use. The corrected flag-protocol test passes on GB10 in about 1.3 seconds.
 
 The current generated report validates:
 
-- 328.33 GB / 305.78 GiB, 62 shards, 76,108 tensors;
-- 1.127 GB of vision tensors excluded from text decode;
-- zero unmatched tensor names;
+- 328.33 GB / 305.78 GiB, 62 shards, 76,108 tensors.
+- 1.127 GB of vision tensors excluded from text decode.
+- zero unmatched tensor names.
 - 37,338/37,338 FP8 matrices paired with F32 inverse scales of exact
-  128×128-block geometry;
+  128×128-block geometry.
 - 22.415 GB/token of unique active base-text weights and 23.420 GB/token of
-  aggregate physical traffic after replicated-module reads;
+  aggregate physical traffic after replicated-module reads.
 - TP=4 expected synchronized critical-path traffic 7.457 GB/token and a 32.42 ms
   weight-bandwidth floor at 230 GB/s.
 
@@ -201,7 +199,7 @@ decode prediction. Representative real router traces are an M4 exit gate.
 ## KDA operator state traffic (M2)
 
 `kda_bench` (idle node, 50 timed iterations after 5 warmups; full record in
-`benchmarks/results/2026-08-27-kda-m2.md`):
+the 2026-08-27-kda-m2 measurements):
 
 | case | mean | state bytes/step | effective |
 |---|---:|---:|---:|
@@ -221,14 +219,14 @@ numbers, not performance claims.
 ## Layer streaming and real route traffic (M4)
 
 `glm_stream_check` over the full real checkpoint (full record in
-`benchmarks/results/2026-08-28-glm-m4-assembly.md`; idle node, cold page
+the 2026-08-28-glm-m4-assembly measurements; idle node, cold page
 cache):
 
 - all 46 layers streamed one at a time through the resident loader:
   KDA/dense 408.3 MiB, DSA/MoE 7,275.7 MiB, KDA/MoE 7,204.2 MiB,
   MTP 7,338.3 MiB per layer; peak layer 7.17 GiB, globals 2.363 GiB
   (embed + lm head + final norm) — peak device footprint ≈ 9.6 GiB,
-  so single-node correctness work fits without the TP placement;
+  so single-node correctness work fits without the TP placement.
 - streaming total 316.4 s (per MoE layer ~7 s reading 7.2–7.3 GiB —
   ~1 GB/s from cold disk; loader overhead is not the bottleneck, and
   second passes drop once the page cache holds the shards). The loader's
@@ -321,7 +319,7 @@ l2 0.036 -> 0.0025), and the draft block takes the post-final-norm hidden
 
 `scripts/fabric_glm_dsa_serve.sh deploy/cluster_glm-5.3_int4-int8_w4_{mtp1,plain,mtp1_large-cache}.json`,
 the 754B model at 99.30 GiB of int4/int8 g64 weights per rank (docs/glm53_plan.md G6;
-the dated record `benchmarks/results/2026-09-12-glm53-full.md`).
+the 2026-09-12-glm53-full measurements).
 
 | reading | value |
 |---|---|
@@ -380,7 +378,7 @@ boots on the four nodes with 3 GiB still free. Records:
 
 ### The full GLM-5.3: the bus fold and the L2 prefetch (2026-09-13)
 
-Back-to-back rituals (`benchmarks/results/2026-09-12-glm53-full.md`, the
+Back-to-back rituals (the 2026-09-12-glm53-full measurements, the
 last section). The graph all-reduce's shared-memory staging budget widened
 48 → 80 KB so the depth-1 pass's two-row fold (72 KB from three peers)
 stages like a one-row fold, plus unrolled system loads in the hash and
@@ -399,7 +397,7 @@ ms/pass, transcripts identical. Eight slots at depth 1 (a site config,
 plan 110.42 GiB; the graph engine's new 4- and 6-slot families beside the
 2-, 3- and every-slot ones): c=1 29 tok/s, c=4 41–42 (the four-slot
 template's own 40–43), c=6 46–47, c=8 48–50 aggregate, at 67 / 170 / 220
-/ 278 ms a step. Record: `benchmarks/results/2026-09-12-glm53-full.md`.
+/ 278 ms a step. Record: the 2026-09-12-glm53-full measurements.
 
 ### MTP depth 2 on GLM-4.7 (2026-09-10)
 
@@ -503,7 +501,7 @@ bounded prefill, 128K context. Memory plan 76.55 GiB + 4 GiB headroom
 per rank (72.94 GiB resident weights, read from the NVMe in 137–246 s the
 first time, 22 s from the captured images after). Numbers off the
 service, `build-ci/fabric-runs/dsv41_serve_2026-09-13/` and the dated
-`benchmarks/results/2026-09-14-dsv41-flash.md`.
+the 2026-09-14-dsv41-flash measurements.
 
 Single stream, greedy: 76 ms/pass, 2.33 tok/pass, 32.5 ms/token; ttft
 404 ms on a 64-token prompt. DSpark acceptance per class (p1): json 92,
@@ -523,7 +521,7 @@ scheduled rows are its first item now that acceptance is measured).
 
 **The like-for-like vLLM bench (2026-09-14, later; the recipe's own
 client, prompt set v1, temperature 0, thinking off; the dated
-`benchmarks/results/2026-09-14-dsv41-flash.md` has every table).** The
+the 2026-09-14 DeepSeek V4.1 measurements).** The
 recipe (TP4, DSpark k = 5, CUDA graphs) reports C1 37.95, C2 64.30, C6
 131.86 tok/s aggregate and C1 code 73.8 per stream. dgpp's depth-5
 scheduled two-slot world: C1 47.5 / C2 64.3 aggregate, code 74.1, math
@@ -874,9 +872,7 @@ across builds, with zero prefix-cache attachment.
 
 The short-prompt policy protects measured C1/MTP behavior. Numerical
 validation retains the existing tolerances and adds an independent FP64
-bulk-forward fixture plus real-model prefill likelihood scoring. See the
-[implementation record](../benchmarks/results/2026-09-15-glm-packed-prefill.md)
-for quality, C1, sanitizer results and executable/source hashes.
+bulk-forward fixture plus real-model prefill likelihood scoring.
 The matched concurrency-4 tasks preserve GSM8K 59/60 and extraction 30/30
 with zero truncations and identical per-item correctness outcomes.
 
@@ -898,9 +894,7 @@ monolithic admission:
 
 All paired prompts, outputs, usage and finish reasons match the prior kernel.
 The campaign preserved 59/60 GSM8K and 30/30 extraction, with identical text
-and grading on all 90 paired responses. See the
-[implementation record](../benchmarks/results/2026-09-15-qwen-qsa-prefill.md)
-for profiles, C1 controls and sanitizer results.
+and grading on all 90 paired responses.
 
 ## Build and test validation
 
@@ -924,7 +918,7 @@ passed by scheduling luck, and the vacuous-test buffers above. Details are
 pinned in `DESIGN.md` §12.
 
 DSA layer timing lives in
-`benchmarks/results/2026-08-28-dsa-m3-layer.md`: decode 2.24 ms/layer at
+the 2026-08-28-dsa-m3-layer measurements: decode 2.24 ms/layer at
 65k context (114 GB/s effective; the projection GEMMs alone are ~1.0 ms,
 i.e. at the 230 GB/s floor), prefill 6,443 tok/s at T=2048, and the full
 profiled optimization log from the 13.26 ms starting point.

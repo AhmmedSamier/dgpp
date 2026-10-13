@@ -177,13 +177,13 @@ regular expression limits the traced stages. `--diagnostic` on the oracle
 reports distances without declaring parity; `--attention fp32` preserves the
 initial investigation's different attention contract.
 
-The [numerical investigation](../benchmarks/results/2026-09-18-glm-vision-numerics.md)
+The numerical investigation
 records the fixes and comparisons against the same eager reference. All
 five synthetic cases and 25 pinned diagram cases have bitwise identical final
 embeddings. The diagrams contain 18 distinct images: this is a small
 regression sample, not a guarantee of general vision quality or identical
 outputs across attention backends. The
-[initial validation](../benchmarks/results/2026-09-18-glm-vision.md) also records
+initial validation also records
 input plumbing and controlled answer comparisons.
 
 GLM encoder equations and preprocessing follow the official Transformers
@@ -212,7 +212,7 @@ The Qwen oracle checks the native encoder's BF16 projections and probabilities
 with FP32 attention scores and scaling. Blocks use tanh GELU; the merger uses
 exact GELU. The same 0.5% relative RMS and 0.99998 cosine limits apply, without
 asserting bitwise parity with Transformers attention backends that round scores
-to BF16. The [PR follow-up validation](../benchmarks/results/2026-09-22-pr29-vision-followup.md)
+to BF16. The PR follow-up validation
 records bitwise agreement for four deterministic canvases, including the
 1,024-token ceiling, plus memory and race sanitizer checks. These encoder
 checks do not cover the language-model mRoPE limitation described above.

@@ -47,8 +47,8 @@ Rules that keep the numbers comparable:
 
 | key | moves | trades |
 |---|---|---|
-| `engine.kv_capacity` | the context and request count the KV pool can hold | memory; the startup memory plan (`dgpp-serve --memory-plan`) says what fits before anything is allocated |
-| `engine.kv_dtype` (GLM-5.3 family) | KV bytes per token: `bf16`, `fp8`, `fp4` | the quantized forms change the model's answers; `bf16` is the exact one |
+| `engine.kv_capacity` | the shared token capacity of the KV pool | memory; the startup memory plan (`dgpp-serve --memory-plan`) says what fits before anything is allocated |
+| `engine.kv_dtype` (GLM-5.3 family and MiMo) | KV bytes per token: `bf16`, `fp8`, and GLM-only `fp4` | the quantized forms change the model's answers; `bf16` is the exact one |
 | `engine.bf16_weights` | the resident form of the BF16 matrices decode streams: `checkpoint`, `bf12`, `bf12+bf16` | `bf12` is lossless (the kernels rebuild the exact bits) and both faster and smaller for decode; `bf12` alone slows a prefill chunk slightly, `bf12+bf16` keeps prefill on the BF16 bytes for 0.75 of those matrices' memory more |
 | `engine.dense_weights` (Qwen) | the dense stack's storage: the checkpoint's BF16 or block-FP8 encoded at load | FP8 saves memory and decode bytes; it is a quantization of the dense projections, measured per template in the quality rows |
 | `engine.ngram_table` (Qwen) | the n-gram table resident or mmap'ed from local NVMe | mmap saves its memory; the rows a chunk needs come through the page cache, gathered a chunk ahead |
@@ -70,16 +70,20 @@ Rules that keep the numbers comparable:
 
 | key | moves | trades |
 |---|---|---|
-| `engine.prefill_budget_tokens`, `engine.prefill_idle_budget_tokens` (Qwen) | how many prompt rows a scheduler tick runs before yielding to live decodes | smaller budgets keep decodes moving under a long prompt; larger ones finish the prompt sooner; the idle budget applies when nothing else is live |
-| `engine.admission`, `engine.admission_window` | grouping queued cold prompts into one forward pass | throughput against per-request latency; group admission is bitwise the prompts alone |
+| `engine.prefill_budget_tokens`, `engine.prefill_idle_budget_tokens` | shared reader-work policy for all serving families | automatic budgets learn pass cost; explicit positive values cap work. Smaller chunks yield sooner but repeat model walks. The idle ceiling is bounded by native capacity |
+| `engine.decode_gap_target_ms`, `engine.first_token_target_ms` | soft decode-gap and arrival-to-first-token objectives, both 3000 ms by default | tighter targets can reduce throughput; running chunks, long prompts and slot/KV pressure can exceed them. Both zero select fixed budgeting |
+| `engine.admission`, `engine.admission_window` | when and how much KV space a request reserves | `full` reserves prompt plus requested output; `grow` reserves incrementally and can shed a request on exhaustion. These settings do not select prefill grouping |
+| `engine.prefill_group` | grouping compatible cold prompts into shared execution | amortizes model walks; batch geometry can change floating-point rounding |
 | `engine.prefill` (DeepSeek) | `bounded` (the model's own recipe) or `exact` | about half the prefill work against parity with the full walk |
 | `engine.prefill_bf16_partials` (Qwen AutoRound hybrid) | the packed expert chain's down projection in bf16, partials summed from bf16 | −3 to −7 % cold prefill (2K to 32K); not bitwise the fp32 chain |
 | `engine.prefill_fp8_gemm` (Qwen with `dense_weights` fp8) | the dense stack's prefill GEMMs on the fp8 tensor cores from per-token e4m3 activations | 0 to −3 %; not bitwise the dequantized chain |
 | `engine.prefill_fold_scales` (Qwen AutoRound hybrid) | the expert GEMM's group scales folded into the bf16 weight values | measured no gain (+3 % at 32K); kept for completeness, leave it off |
 
-The three `prefill_*` keys are the accuracy trades described in the
-README's [accuracy and correctness](../README.md#accuracy-and-correctness)
-section: off unless a deployment turns them on. The AutoRound hybrid's
+The numerical knobs `prefill_bf16_partials`, `prefill_fp8_gemm` and
+`prefill_fold_scales` are the accuracy trades described in the README's [accuracy and correctness](../README.md#accuracy-and-correctness)
+section: off unless a deployment turns them on. Scheduler budgets and latency
+targets are separate controls; their [defaults and tuning](operations.md) apply
+to every model family. The AutoRound hybrid's
 template turns on the first two, whose evals stayed within the default
 chain's run-to-run band; the fold is off everywhere.
 
@@ -102,9 +106,9 @@ carry it), the n-gram table mmap'ed with the next chunk's rows staged
 ahead, a 4,096-token prefill budget so decodes keep moving under a long
 prompt, and the two prefill levers that paid without a measurable quality
 cost. Its rows in [benchmarks](benchmarks.md) show the default chain and
-the levers-on configuration separately; the [dated
-record](../benchmarks/results/2026-09-28-qwen-autoround-int4/README.md)
-holds every A/B behind those choices, including the ones that lost.
+the levers-on configuration separately. The
+[Qwen int4 plan](qwen38_autoround_int4_plan.md) explains the selected
+optimizations and rejected experiments.
 
 ## 4. Where the floor is
 

@@ -127,8 +127,17 @@ std::string hex64(uint64_t v) {
 
 }  // namespace
 
+static void append_latency_tuning(std::string& out, const sched::PrefillLatencyTuning& tuning) {
+  const sched::PrefillLatencyTuning defaults;
+  if (tuning.headroom_pct != defaults.headroom_pct) out += ",\"pfhr\":" + std::to_string(tuning.headroom_pct);
+  if (tuning.growth_factor != defaults.growth_factor) out += ",\"pfgrow\":" + std::to_string(tuning.growth_factor);
+  if (tuning.recovery_pct != defaults.recovery_pct) out += ",\"pfrec\":" + std::to_string(tuning.recovery_pct);
+  if (tuning.initial_tokens != defaults.initial_tokens) out += ",\"pfstart\":" + std::to_string(tuning.initial_tokens);
+}
+
 std::string encode_journal_tick(const GenerationService::PassEvents& events) {
   std::string out = "{\"op\":\"tick\"";
+  if (events.prefill_budget) out += ",\"pfmax\":" + std::to_string(*events.prefill_budget);
   if (!events.submits.empty()) {
     out += ",\"s\":[";
     for (size_t i = 0; i < events.submits.size(); ++i) {
@@ -348,6 +357,10 @@ std::string encode_journal_warm(const dgpp::sched::AdmissionPolicy& policy,
   // its own before serving; a config-less rank 0 writes none.
   if (policy.prefill_budget_tokens > 0) out += ",\"pfbudget\":" + std::to_string(policy.prefill_budget_tokens);
   if (policy.prefill_idle_budget_tokens > 0) out += ",\"pfidle\":" + std::to_string(policy.prefill_idle_budget_tokens);
+  if (policy.decode_gap_target_ms > 0) out += ",\"gapms\":" + std::to_string(policy.decode_gap_target_ms);
+  if (policy.first_token_target_ms > 0) out += ",\"ttftms\":" + std::to_string(policy.first_token_target_ms);
+  append_latency_tuning(out, policy.prefill_latency);
+  if (policy.prefill_budget_automatic) out += ",\"pfauto\":1";
   if (policy.prefill_early_admission) out += ",\"pfearly\":1";
   if (policy.prefix_min_tokens > 0) out += ",\"pmin\":" + std::to_string(policy.prefix_min_tokens);
   if (policy.prefix_head_snapshots) out += ",\"phead\":1";
@@ -376,6 +389,9 @@ std::string encode_journal_settings(const WorldSettings& s) {
   append_json_string(&out, s.admission);
   if (s.prefill_budget_tokens != 0) out += ",\"pfbudget\":" + std::to_string(s.prefill_budget_tokens);
   if (s.prefill_idle_budget_tokens > 0) out += ",\"pfidle\":" + std::to_string(s.prefill_idle_budget_tokens);
+  if (s.decode_gap_target_ms > 0) out += ",\"gapms\":" + std::to_string(s.decode_gap_target_ms);
+  if (s.first_token_target_ms > 0) out += ",\"ttftms\":" + std::to_string(s.first_token_target_ms);
+  append_latency_tuning(out, s.prefill_latency);
   if (!s.prefill_early_admission.has_value()) out += ",\"pfearly\":-1";
   else if (*s.prefill_early_admission) out += ",\"pfearly\":1";
   if (s.prefix_min_tokens > 0) out += ",\"pmin\":" + std::to_string(s.prefix_min_tokens);
@@ -522,6 +538,26 @@ const dgpp::minijson::Value& field(const dgpp::minijson::Value& v,
 
 }  // namespace
 
+static int optional_policy_integer(const dgpp::minijson::Value& record, const char* key,
+                                   int minimum, int maximum) {
+  const auto* value = record.find(key);
+  if (!value) return 0;
+  if (!value->is_number() || !std::isfinite(value->as_double()) ||
+      value->as_double() < minimum || value->as_double() > maximum ||
+      std::floor(value->as_double()) != value->as_double())
+    throw std::runtime_error(std::string("journal: invalid policy field ") + key);
+  return static_cast<int>(value->as_int());
+}
+
+static sched::PrefillLatencyTuning read_latency_tuning(const dgpp::minijson::Value& record) {
+  sched::PrefillLatencyTuning tuning;
+  if (record.find("pfhr")) tuning.headroom_pct = optional_policy_integer(record, "pfhr", 0, 50);
+  if (record.find("pfgrow")) tuning.growth_factor = optional_policy_integer(record, "pfgrow", 2, 4);
+  if (record.find("pfrec")) tuning.recovery_pct = optional_policy_integer(record, "pfrec", 1, 100);
+  if (record.find("pfstart")) tuning.initial_tokens = optional_policy_integer(record, "pfstart", 1, 1 << 30);
+  return tuning;
+}
+
 JournalRecord decode_journal_line(std::string_view line) {
   // minijson VIEWS ITS INPUT — ParseResult owns nothing, string
   // members are string_views into the parsed buffer. The buffer must
@@ -573,6 +609,9 @@ JournalRecord decode_journal_line(std::string_view line) {
     s.prefix_cache_gib = num("pcgib").as_double();
     s.admission = std::string(field(v, "adm", "settings").as_string());
     s.admission_window = static_cast<int>(num("win").as_int());
+    s.decode_gap_target_ms = optional_policy_integer(v, "gapms", 0, sched::kMaxLatencyTargetMs);
+    s.first_token_target_ms = optional_policy_integer(v, "ttftms", 0, sched::kMaxLatencyTargetMs);
+    s.prefill_latency = read_latency_tuning(v);
     if (const auto* budget = v.find("pfbudget")) {
       if (!budget->is_number() || budget->as_int() < -1 || budget->as_int() > (1 << 30))
         throw std::runtime_error("journal: settings record with a bad prefill budget");
@@ -740,6 +779,10 @@ JournalRecord decode_journal_line(std::string_view line) {
       rec.admission.mode =
           static_cast<dgpp::sched::AdmissionPolicy::Mode>(adm->as_int());
       rec.admission.window_tokens = static_cast<int>(win.as_int());
+      rec.admission.decode_gap_target_ms = optional_policy_integer(v, "gapms", 0, sched::kMaxLatencyTargetMs);
+      rec.admission.first_token_target_ms = optional_policy_integer(v, "ttftms", 0, sched::kMaxLatencyTargetMs);
+      rec.admission.prefill_latency = read_latency_tuning(v);
+      rec.admission.prefill_budget_automatic = optional_policy_integer(v, "pfauto", 0, 1) != 0;
       if (const auto* budget = v.find("pfbudget")) {
         if (!budget->is_number() || budget->as_int() < 0 || budget->as_int() > (1 << 30))
           throw std::runtime_error("journal: warm record with a bad prefill budget");
@@ -781,6 +824,7 @@ JournalRecord decode_journal_line(std::string_view line) {
   if (op != "tick")
     throw std::runtime_error("journal: unknown op '" + op + "'");
 
+  if (v.find("pfmax")) rec.prefill_budget = optional_policy_integer(v, "pfmax", 1, 1 << 30);
   if (const dgpp::minijson::Value* s = v.find("s")) {
     if (!s->is_array())
       throw std::runtime_error("journal: 's' is not an array");
@@ -1091,9 +1135,8 @@ void JournalWriter::accept_peers(int world, int accept_timeout_ms) {
           std::to_string(peers) + " peers connected within " +
           std::to_string(accept_timeout_ms) +
           "ms — a short world cannot serve (check the peers' logs)");
-    // The peer's hello names the connection by rank; after it a peer never
-    // writes, so a readable connection is a close or a reset (the death
-    // watch's premise).
+    // The peer's hello names the connection by rank. Its readiness message
+    // follows settings and model construction, and is drained before warm.
     std::string hello;
     while (hello.find('\n') == std::string::npos) {
       const int left = static_cast<int>(
@@ -1138,6 +1181,46 @@ void JournalWriter::broadcast(const std::string& line) {
   }
 }
 
+bool JournalWriter::wait_peers_ready(int timeout_ms, const std::function<bool()>& should_stop) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+  std::vector<std::string> received(peers_.size());
+  std::vector<bool> ready(peers_.size(), false);
+  size_t remaining = peers_.size();
+  DGPP_LOG_INFO("journal: waiting for {} peer model(s) to be ready", remaining);
+  while (remaining != 0) {
+    if (should_stop && should_stop()) return false;
+    for (size_t i = 0; i < peers_.size(); ++i) {
+      const std::string name = "journal: rank " + std::to_string(peer_ranks_[i]);
+      if (peers_[i].peer_closed())
+        throw std::runtime_error(name + " closed before model readiness completed");
+      if (ready[i]) continue;
+      if (peers_[i].wait_readable(0)) {
+        char buf[16];
+        const int n = peers_[i].read_some(buf, sizeof buf);
+        if (n <= 0) throw std::runtime_error(name + " closed before model readiness completed");
+        received[i].append(buf, static_cast<size_t>(n));
+        if (!std::string_view("ready\n").starts_with(received[i]))
+          throw std::runtime_error(name + " sent an invalid model readiness message");
+        if (received[i] == "ready\n") {
+          ready[i] = true;
+          --remaining;
+          DGPP_LOG_INFO("journal: rank {} model ready ({} peer(s) remaining)", peer_ranks_[i], remaining);
+        }
+      }
+    }
+    if (remaining == 0) break;
+    if (std::chrono::steady_clock::now() >= deadline) {
+      std::string missing;
+      for (size_t i = 0; i < peers_.size(); ++i)
+        if (!ready[i]) missing += (missing.empty() ? "" : ", ") + std::to_string(peer_ranks_[i]);
+      throw std::runtime_error("journal: model readiness timed out after " + std::to_string(timeout_ms) +
+                               "ms waiting for rank(s) " + missing);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return !(should_stop && should_stop());
+}
+
 int JournalWriter::dead_peer() const {
   for (size_t i = 0; i < peers_.size(); ++i)
     if (peers_[i].peer_closed()) return peer_ranks_[i];
@@ -1180,6 +1263,12 @@ JournalReader::JournalReader(const std::string& host, uint16_t port,
   const std::string hello = "hello " + std::to_string(rank) + "\n";
   if (!conn_.write_all(hello.data(), hello.size()))
     throw std::runtime_error("journal: could not send the hello to rank 0");
+}
+
+void JournalReader::send_ready() {
+  constexpr std::string_view ready = "ready\n";
+  if (!conn_.write_all(ready.data(), ready.size()))
+    throw std::runtime_error("journal: could not send model readiness to rank 0");
 }
 
 bool JournalReader::read_line(const std::function<bool()>& should_stop,
@@ -1340,7 +1429,9 @@ void run_journal_peer(Scheduler* sched, JournalReader* reader,
     for (const std::string& id : rec.stops) sched->stop(id);
     {
       TickScope scope(in_tick);
-      sched->tick();
+      if (sched->adaptive_prefill() != rec.prefill_budget.has_value())
+        throw std::runtime_error("journal: adaptive prefill decision missing or unexpected");
+      sched->tick(rec.prefill_budget);
     }
     ++ticks;
     if (stats || on_tick) {

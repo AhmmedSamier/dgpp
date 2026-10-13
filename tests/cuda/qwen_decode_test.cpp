@@ -822,7 +822,9 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
       }
     };
     while (cursor.next < cursor.end) {
-      (void)reference.session_prefill_advance(expected_cursor, 24);  // eight decode rows share the 32-row walk
+      // The reader keeps its 32-token budget: the eight decode rows ride on
+      // scratch beyond it (prefill_batch.hpp trims readers only past max_tokens).
+      (void)reference.session_prefill_advance(expected_cursor, 32);
       const auto expected = reference.session_verify_batch({1, 2}, feeds);
       const auto actual = mixed.session_prefill_verify(cursor, 32, {1, 2}, feeds);
       const auto resumed = restored.session_prefill_verify(restored_cursor, 32, {1, 2}, feeds);

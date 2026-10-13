@@ -194,7 +194,7 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
   // The engine defaults are the binary's flag defaults — one set of defaults.
   require(c.engine.kv_capacity == 8192 && c.engine.default_max_tokens == 256 &&
               c.engine.queue_limit == 64 && c.engine.max_connections == 64 &&
-              !c.engine.compact_batches && !c.engine.no_eos && c.engine.graph_batch_min_live == 0 &&
+              c.engine.compact_batches && !c.engine.no_eos && c.engine.graph_batch_min_live == 0 &&
               c.engine.sampling_candidates == 128 && c.engine.admission_window == 256 &&
               c.engine.bulk_pace_gbps == -1.0 && c.engine.bulk_inflight == -1 &&
               c.engine.rendezvous_timeout_ms == 120000 && !c.engine.reasoning_in_content &&
@@ -233,7 +233,10 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
           "the dflash keys parse");
   const auto compact = dgpp::serve::parse_cluster_config(
       R"({"model":"m","nodes":["h"],"engine":{"compact_batches":true}})", "t");
-  require(compact.engine.compact_batches, "compact_batches opt-in");
+  require(compact.engine.compact_batches, "compact_batches enabled");
+  const auto fixed = dgpp::serve::parse_cluster_config(
+      R"({"model":"m","nodes":["h"],"engine":{"compact_batches":false}})", "t");
+  require(!fixed.engine.compact_batches, "compact_batches explicit override");
   for (const std::string mode : {"gemv", "mma"}) {
     const auto head = dgpp::serve::parse_cluster_config(
         R"({"model":"m","nodes":["h"],"engine":{"fp8_head":")" + mode + R"("}})", "t");
@@ -558,4 +561,35 @@ DGPP_TEST(cluster_config_prefill_defaults_to_auto_with_explicit_opt_out) {
         engine_json("{\"prefill_budget_tokens\":" + std::to_string(budget) + "}"), "t");
     require(config.engine.prefill_budget_tokens == budget, "explicit budget preserved");
   }
+}
+
+DGPP_TEST(cluster_config_latency_targets_have_serving_defaults_and_strict_overrides) {
+  const auto defaults = dgpp::serve::parse_cluster_config(engine_json("{}"), "t").engine;
+  require(defaults.decode_gap_target_ms == 1000 && defaults.first_token_target_ms == 3000,
+          "model-independent serving latency defaults");
+  const auto fixed = dgpp::serve::parse_cluster_config(
+      engine_json(R"({"decode_gap_target_ms":0,"first_token_target_ms":0})"), "t").engine;
+  require(fixed.decode_gap_target_ms == 0 && fixed.first_token_target_ms == 0, "fixed-budget control remains configurable");
+  const auto custom = dgpp::serve::parse_cluster_config(
+      engine_json(R"({"decode_gap_target_ms":300,"first_token_target_ms":1500})"), "t").engine;
+  require(custom.decode_gap_target_ms == 300 && custom.first_token_target_ms == 1500, "deployment targets survive parsing");
+  for (const std::string key : {"decode_gap_target_ms", "first_token_target_ms"})
+    for (const std::string value : {"-1", "1.5", "3600001", "true", "\"500\"", "null"})
+      require(refusal(engine_json("{\"" + key + "\":" + value + "}")).find(key) != std::string::npos,
+              "bad latency target rejected by name");
+}
+
+DGPP_TEST(cluster_config_latency_tuning_defaults_and_bounds) {
+  const auto defaults = dgpp::serve::parse_cluster_config(engine_json("{}"), "t").engine.prefill_latency;
+  require(defaults == dgpp::sched::PrefillLatencyTuning{15, 2, 25}, "stable controller defaults");
+  const auto custom = dgpp::serve::parse_cluster_config(engine_json(
+      R"({"prefill_latency_headroom_pct":20,"prefill_growth_factor":4,"prefill_cost_recovery_pct":50,"prefill_initial_tokens":512})"), "t");
+  require(custom.engine.prefill_latency == dgpp::sched::PrefillLatencyTuning{20, 4, 50, 512}, "custom controller tuning survives parsing");
+  for (const std::string key : {"prefill_latency_headroom_pct", "prefill_growth_factor", "prefill_cost_recovery_pct"})
+    for (const std::string value : {"-1", "101", "1.5", "true", "null"})
+      require(refusal(engine_json("{\"" + key + "\":" + value + "}")).find(key) != std::string::npos,
+              "invalid controller tuning rejected by name");
+  for (const std::string value : {"-1", "0", "1073741825", "1.5", "true", "null"})
+    require(refusal(engine_json("{\"prefill_initial_tokens\":" + value + "}")).find("prefill_initial_tokens") != std::string::npos,
+            "invalid initial budget rejected by name");
 }

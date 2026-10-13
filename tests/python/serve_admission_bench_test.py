@@ -66,7 +66,12 @@ def server(fault=None):
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
                 for i in range(body["max_tokens"]):
-                    self.wfile.write(("data: " + json.dumps({"id": rid, "choices": [{"text": str(i)}]})
+                    text = "" if fault == "special_token" else str(i)
+                    choice = {"text": text}
+                    if body.get("logprobs") == 5:
+                        choice["logprobs"] = {"tokens": [text], "token_logprobs": [-.2],
+                                               "top_logprobs": [{text: -.2, "other": -1.8}]}
+                    self.wfile.write(("data: " + json.dumps({"id": rid, "choices": [choice]})
                                       + "\n\n").encode())
                     self.wfile.flush()
                     time.sleep(.002)
@@ -107,6 +112,13 @@ def server(fault=None):
 
 
 class AdmissionBenchmarkTest(unittest.TestCase):
+    def test_diagnostic_probabilities_are_requested_and_retained(self):
+        with server() as bench:
+            bench.args.logprobs = True
+            result = bench.stream("probe", "hello", 2)
+        self.assertEqual(len(result["logprobs"]), 2)
+        self.assertEqual(result["logprobs"][1]["top_logprobs"], [{"1": -.2, "other": -1.8}])
+
     def test_native_overlap_and_fixed_work_are_recorded(self):
         with server() as bench:
             result = bench.run("mixed_short", 0)
@@ -143,6 +155,21 @@ class AdmissionBenchmarkTest(unittest.TestCase):
             with self.subTest(fault=fault), server(fault) as bench:
                 with self.assertRaisesRegex(RuntimeError, message):
                     bench.stream("probe", "hello", 4)
+
+    def test_one_special_token_is_valid_prefill_work_without_first_text(self):
+        with server("special_token") as bench:
+            result = bench.run("solo_prefill", 0)
+        record = result["requests"][0]
+        self.assertEqual(record["usage"]["completion_tokens"], 1)
+        self.assertEqual(result["generated_tokens"], 1)
+        self.assertEqual(record["updates"], [])
+        self.assertIsNone(record["ttft_s"])
+        self.assertGreater(record["wall_s"], 0)
+
+    def test_empty_decode_still_fails_sanity_check(self):
+        with server("special_token") as bench:
+            with self.assertRaisesRegex(RuntimeError, "no output updates"):
+                bench.stream("decoder", "hello", 4)
 
     def test_cancellation_drains_before_the_next_run(self):
         with server() as bench:

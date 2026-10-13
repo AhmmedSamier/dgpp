@@ -1,11 +1,16 @@
-# Towards continuous batching: multi-admission + fair-share prefill
+# Continuous batching and shared prefill
 
-Status: original items 1 and 2 implemented in `Scheduler::quantum()` and
-soak-tested live. The size-neutral queued-text follow-up for issue #104 is
-host-tested; real-model latency and MTP boundary validation remain separate
-acceptance gates, not established by the original soak.
+Serving uses one scheduler and shared continuation/mixed-row components across
+all eight executor families. Early text admission and latency-adaptive prefill
+are enabled by default, including with DFlash. Current controls and validation
+procedures are in [operations](operations.md) and [testing](testing.md).
 
-## Problem
+The problem statement and initial rules below record the original
+multi-admission work. The later shared execution and adaptive policy are
+described under [current execution](#current-shared-execution-and-policy);
+the original soak alone did not establish those later changes.
+
+## Original problem
 
 Single-stream dgpp matches or beats vLLM, but per-request throughput collapses
 under concurrency (measured: 45 → 9 tok/s @d8k c4). Root causes in the
@@ -35,15 +40,15 @@ except:
 
 - a request needing chunked prefill **ends** the loop (starts chunking only
   if nothing was admitted yet this tick — chunked read-ins stay one at a
-  time; see item 2);
+  time; see item 2).
 - the loop stops before grouping or admission when the tick's positive
   prefill budget is exhausted; zero remaining tokens must not be passed
-  to the group planner, where zero means monolithic mode;
+  to the group planner, where zero means monolithic mode.
 - with a zero policy budget, exactly one admission event (possibly a
-  group) runs per tick, preserving the original monolithic policy;
+  group) runs per tick, preserving the original monolithic policy.
 - an oversized image on an engine without image chunking retains its
   monolithic fallback as the tick's only prefill admission. It waits if
-  any prefill work already ran that tick, then consumes the whole cap;
+  any prefill work already ran that tick, then consumes the whole cap.
 - `next_admissible()` returning -1 (no fitting request / no free slot) ends
   the loop as before.
 
@@ -75,6 +80,8 @@ admits fitting one-shots/groups into the align-down leftover (never a new
 chunked start — chunked read-ins stay one at a time). Order derives from
 arrival order and the last-advanced prefill only, so every rank agrees.
 
+## Current shared execution and policy
+
 Serving enables early text admission by default when the engine supports mixed
 prefill and decode execution: queued text of
 any size can join, including prompts shorter than one alignment unit. New
@@ -92,15 +99,37 @@ enabling admission does not implement shared execution. Images
 retain their existing eligibility and execution paths. Monolithic mode is
 unchanged.
 
-The common `SessionModel` implements mixed-row planning, budget accounting,
-positions, prefix snapshots, MTP catch-up, output slicing, and cursor suspension.
-The layer executor supplies `RowRun::decode_spans` state/rollback/output handling
-under the `MixedPrefillModel` contract. This includes any features its configured
-drafter needs; a drafter's name is not an eligibility rule. The graph adapter
-checks actual slot, row-capacity, context, and graph-variant limits per batch.
-Currently the Qwen4Exp executor implements that contract. Other executors,
-including the Qwen35 executor used with DFlash, still need mixed layer execution
-and validation. This structural refactor does not claim universal backend coverage.
+The shared execution components have separate responsibilities:
+
+| Component | Responsibility |
+| --- | --- |
+| `PrefillTask` | Owns the prompt, images, snapshot plan and cursor for either adapter. |
+| `PrefillContinuation` | Tracks logical cuts, work budgets, progress and suspension across yields. |
+| `PrefillBatch` | Plans mixed rows, bounds physical work, commits positions and snapshots, catches up draft state and slices outputs. |
+| `RowRun` | Describes request spans, the decoder prefix and selected output rows for a layer walk. |
+| `GraphBatchMapping` | Maps compact graph rows to persistent request slots for feeds, positions and speculative commits. |
+| `SessionModel` | Owns session positions, cache reservations, rollback, draft history and graph staging. |
+| Layer executor | Applies its attention, recurrence, projections and draft implementation to those rows. |
+
+Legacy GLM uses the same task, continuation, batch and row components through
+its existing session facade. Every serving executor implements the
+`MixedPrefillModel` contract: Qwen4Exp, Qwen35 (including DFlash), GLM, GLM4,
+GLM-DSA, MiMo, DeepSeek V4 and V4.1. A drafter's name is not an eligibility
+rule. The adapters check actual slot, row-capacity, context, continuation
+workspace and graph-variant limits per batch.
+
+The configured prefill budget bounds reader work. Decoder rows use spare
+physical capacity without reducing that reader budget. When their combined
+rows exceed the executor's scratch capacity, the planner trims readers at
+their required alignment; short tails contribute their unused shares first.
+
+Persistent reader state belongs to its request. In particular, V4.1's bounded
+decoder retains each reader's tail separately and falls back to sequential
+reader advancement when their combined final tails exceed scratch capacity.
+Per-tensor activation scales also stay within a request. Decoder prefixes keep
+their decode attention and recurrence paths, including speculative snapshots;
+the rest of the layer walk can share projections where the numerical contract
+permits it. Unfinished readers do not project or mirror unused logits.
 
 The new reader still needs a free slot and its reservation under the existing
 KV policy. Cached text attaches through the same prefix plan and computes
@@ -115,8 +144,8 @@ from the cursor's current position and omit redundant automatic chunk-grid
 cuts; other executors retain their chunk-grid contracts.
 A lone reader, or a set of readers that all fit their original shares, keeps
 those shares unchanged, including its final tails.
-The busy budget continues to protect decoders that started before a reader.
-When every active decoder joined after all unfinished readers, and the engine
+With fixed budgeting, the busy cap protects decoders that started before a
+reader. When every active decoder joined after all unfinished readers, and the engine
 can share their execution, those readers retain the configured idle budget.
 This avoids multiplying their weight-streaming passes because a short request
 was admitted. Newly admitted streams can consequently have longer update gaps
@@ -124,15 +153,26 @@ while sharing those larger chunks. The budget remains bounded; slot and KV
 pressure can still delay admission. Required cuts and decode rows can leave
 less than the full prefill allowance in a shared walk.
 
+The default adaptive policy instead learns pass cost by decoder-load range.
+It starts at 256 tokens, grows within the aligned engine/idle ceiling and
+applies the configured decode-gap target to both incumbent and newly admitted
+decoders. Explicit positive budgets remain caps. Rank 0 journals its selected
+limit; peers replay it and never use local timing to schedule. Fresh idle
+arrivals receive the full first-token allowance; an arrival queued during
+ongoing prefill with a free slot reserves half for its previous wait. These
+soft targets do not predict when a slot- or KV-blocked request can start.
+See [policy defaults and metrics](operations.md) for the cost/recovery controls.
+
 For example, with a 256-token budget and four-token alignment, a 23-token
 arrival beside one long reader gets 24 allocated tokens and the long reader
 gets 232. An engine consuming those caps computes 255 tokens in total;
 equal shares offer at most 151 in that tick. This saves scheduled capacity;
 GPU throughput
 still depends on chunk shapes, additional walks and active decode width.
-Deployments that need the same prefill cap before and after admission can
-choose equal busy and idle budgets. Larger busy budgets can increase gaps
-between decode updates, so select them with mixed-load measurements.
+Deployments that need the same fixed prefill cap before and after admission
+can choose equal busy and idle budgets and set both latency targets to zero.
+With adaptive targets enabled, equal caps still allow smaller selected quanta.
+Larger quanta can increase gaps between decode updates, so measure mixed loads.
 
 When the budget drops from idle to busy, the in-flight count can exceed
 `budget / align`. Advance only that many prefills, rotating through arrival

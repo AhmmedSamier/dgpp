@@ -459,11 +459,12 @@ void GlmDiagnosticModel::session_graph_capture_draft_batch(
   if (verify_verdicts == nullptr)
     throw std::invalid_argument(
         "session_graph_capture_draft_batch: null verdicts");
-  for (int req = 0; req < graph_batch_requests_; ++req)
+  for (int req = 0; req < (graph_batch_map_source_ ? max_requests_ : graph_batch_requests_); ++req)
     snapshot_draft_ring(req);
   glm_spec_draft_rows_batched(
       verify_verdicts, graph_batch_requests_, graph_rows_per_request_,
-      d_mtp_pos_, d_step_pos_, step_tokens_, d_next_, stream_);
+      d_mtp_pos_, d_step_pos_, step_tokens_, d_next_, stream_,
+      graph_batch_map_source_ ? d_batch_map_ : nullptr);
   draft_rows_ = decode_rows_;
   mtp_run_rows(/*req=*/0, /*first_pos=*/0, decode_rows_,
                /*decode_row=*/true, /*capture_mode=*/true,
@@ -562,9 +563,13 @@ void GlmDiagnosticModel::session_graph_capture_next_tokens_batch(
   if (draft_verdicts == nullptr)
     throw std::invalid_argument(
         "session_graph_capture_next_tokens_batch: null verdicts");
+  GlmSpecDrafts drafts;
+  drafts.v[0] = draft_verdicts;
+  drafts.count = 1;
   glm_spec_next_tokens_batched(
-      d_next_, draft_verdicts, graph_batch_requests_,
-      graph_rows_per_request_, step_tokens_, stream_);
+      d_next_, drafts, graph_batch_requests_,
+      graph_rows_per_request_, graph_batch_map_source_ ? d_tokens_ + kDecodeRows : step_tokens_, stream_,
+      graph_batch_map_source_ ? d_batch_map_ : nullptr);
 }
 
 void GlmDiagnosticModel::session_graph_seed_tokens(

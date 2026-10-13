@@ -1,8 +1,0 @@
-{
-  "hashes": {
-    "serve_rank0.ops": "420ece727503dd2c660f487625c3fa3f",
-    "serve_rank1.ops": "420ece727503dd2c660f487625c3fa3f"
-  },
-  "expected_ranks": 2,
-  "match": true
-}

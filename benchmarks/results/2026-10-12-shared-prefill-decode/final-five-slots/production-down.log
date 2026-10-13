@@ -1,9 +1,0 @@
-2026-10-12 02:45:06.875 === SIGINT rank 0 (596898) — the stop record releases the peers
-2026-10-12 02:45:08.876 === waiting for the peers to drain
-2026-10-12 02:45:12.890 === op-stream identity (every rank)
-2026-10-12 02:45:12.890 d41d8cd98f00b204e9800998ecf8427e  /home/stephen/dgpp/log/deployments/e6ba8def5a6c5c06/serve_rank0.ops
-2026-10-12 02:45:12.890 d41d8cd98f00b204e9800998ecf8427e  /home/stephen/dgpp/log/deployments/e6ba8def5a6c5c06/serve_rank1.ops
-2026-10-12 02:45:12.890 d41d8cd98f00b204e9800998ecf8427e  /home/stephen/dgpp/log/deployments/e6ba8def5a6c5c06/serve_rank2.ops
-2026-10-12 02:45:12.890 d41d8cd98f00b204e9800998ecf8427e  /home/stephen/dgpp/log/deployments/e6ba8def5a6c5c06/serve_rank3.ops
-2026-10-12 02:45:12.890 op streams: identical across 4 ranks
-2026-10-12 02:45:12.890 === logs in /home/stephen/dgpp/log/deployments/e6ba8def5a6c5c06

@@ -1,11 +1,32 @@
 # Changelog
 
-The history by milestone. The dated engineering record in
-`benchmarks/results/` has every measurement and fix behind these lines;
-`PLAN.md` has the milestones' exit gates.
+The history by milestone. `PLAN.md` has the milestones' exit gates;
+project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **Shared resumable prefill and adaptive serving budgets** (2026-10-12):
+  eager and graph serving use common request ownership, continuation, row
+  planning, snapshot and speculative-state handling across all eight model
+  executors, and early text admission is on by default (DFlash included).
+  The prefill budget now adapts to measured pass cost:
+  `engine.prefill_budget_tokens = -1` starts at
+  `engine.prefill_initial_tokens` (256) and grows within two latency
+  targets, `engine.decode_gap_target_ms` and `engine.first_token_target_ms`
+  (1000 ms and 3000 ms by default; both 0 selects fixed budgets), tuned by
+  `engine.prefill_latency_headroom_pct` (15), `engine.prefill_growth_factor`
+  (2) and `engine.prefill_cost_recovery_pct` (25). The automatic idle
+  ceiling is 4096 tokens (previously the engine's full chunk limit);
+  explicit busy/idle budgets remain caps. Rank 0 journals the selected limit
+  every tick and peers replay it. `engine.compact_batches` now defaults to
+  true on every family: live requests are packed into the smallest
+  compatible graph bucket. The collective placement hash covers a final
+  four-byte word (exchange version 2; older peers are refused), and warm-up
+  waits for every rank's model to be ready. Five deployment examples drop
+  their explicit prefill budgets. Generated benchmark results under
+  `benchmarks/results/` are no longer tracked. The measured
+  latency/throughput tradeoffs are in
+  [PR #112](https://github.com/HawkBearPig/dgpp/pull/112).
 - **Qwen3.8-27B NVFP4: fp4w prefill GEMM** (2026-10-06):
   `launch_fp4w_gemm_*` (new): `fp8w_gemm`'s 128x128x64 tiles and
   three-stage pipeline with an e2m1 W-side (8 payload bytes + the
@@ -245,8 +266,7 @@ The history by milestone. The dated engineering record in
   and exclude the initial admission queue; decode rates exclude the first
   token supplied by each prefill. Existing usage, JSON metrics, Prometheus
   measurements and throughput logs keep their definitions. See
-  [the API contract](docs/openai-compatibility.md#completion-timings-dgpp-extension)
-  and [validation record](benchmarks/results/2026-10-08-completion-timings.md).
+  [the API contract](docs/openai-compatibility.md#completion-timings-dgpp-extension).
 - **Qwen3.8-27B: a request's logits are the same alone, at every verify
   depth and in a batch** (2026-10-05): six row-count dependences in the
   decode step, found after the campaign with the solo-vs-co-tenant probe
@@ -483,7 +503,7 @@ The history by milestone. The dated engineering record in
   are MTP depth 3 (depth 3 leads depth 2 by 6–18 % across the classes at
   world 2), the drafter their mode (below).
   The family's rows on the [benchmarks page](docs/benchmarks.md) come from
-  the 2026-10-04 campaign (`benchmarks/results/2026-10-04-qwen3.8-27b`: the
+  the 2026-10-04 campaign (the 2026-10-04-qwen3.8-27b measurements: the
   runner's performance, modes and quality stages over both templates, the
   MTP depth-2 world as the drafter template's mode); the model card is
   `docs/model_cards/Qwen3.8-27B-FP8.md`.
@@ -655,8 +675,7 @@ The history by milestone. The dated engineering record in
   too, at `engine.mtp_schedule_sampled_scale` (0.93) of the head's
   acceptance — the templates schedule the five-draft block for greedy and
   sampled requests alike. Measurements
-  in [docs/benchmarks.md](docs/benchmarks.md) and the
-  [campaign record](benchmarks/results/2026-10-01-deepseek-v4-flash/README.md);
+  in [docs/benchmarks.md](docs/benchmarks.md) and
   the [model card](docs/model_cards/DeepSeek-V4-Flash.md).
 - **DeepSeek-V4-Flash decode and prefill kernels** (2026-10-01): L2 weight
   prefetch windows at the collectives and inside the attention layer;
@@ -809,7 +828,7 @@ The history by milestone. The dated engineering record in
   are gone; `packq_prefill_bench --prefetch N` sets the distance). The
   remaining environment switches in the tree are the next sweep.
 - **The packed expert GEMM parameterized on its warp count** (2026-09-30,
-  round 21 of the [record](benchmarks/results/2026-09-28-qwen-autoround-int4/README.md),
+  round 21 of the investigation,
   plan §6.16): four-warp forms at 64 x 32 warp tiles (`engine.expert_gemm:
   "wide4"`, the decoded tile; `"wide4r"`, register decode and three stages),
   bitwise the shipped eight-warp kernel and gated so in `packq_gemm_test`.
@@ -820,7 +839,7 @@ The history by milestone. The dated engineering record in
 
 - **The prefill's accuracy trades as deployment keys, off by default**
   (2026-09-30, round 20 of the
-  [record](benchmarks/results/2026-09-28-qwen-autoround-int4/README.md),
+  investigation,
   plan §6.15): `engine.prefill_bf16_partials` (the packed expert chain's
   down projection in bf16, its partials summed from bf16 — the former
   `DGPP_MOE_PACKQ_DOWN_BF16` env knob is gone), `engine.prefill_fold_scales`
@@ -856,7 +875,7 @@ The history by milestone. The dated engineering record in
   them. Missing files under `benchmarks/` no longer block configuration.
 - **The hybrid's prefill: the n-gram rows of the next chunk gathered
   while this one runs** (2026-09-30, round 19 of the
-  [record](benchmarks/results/2026-09-28-qwen-autoround-int4/README.md)):
+  investigation):
   a scalar prefill chunk hashes the following chunk's tokens (its n-gram
   context this chunk's last two) and publishes them on a second staging
   channel the gather thread serves while this chunk's layers run; the next
@@ -879,7 +898,7 @@ The history by milestone. The dated engineering record in
   bitwise, off).
 - **The hybrid's prefill: the expert GEMM's weight stream kept ahead of
   the copies** (2026-09-29, round 18 of the
-  [record](benchmarks/results/2026-09-28-qwen-autoround-int4/README.md)):
+  investigation):
   the wide packed-int expert kernel prefetches each activation row's line
   and each code row's line three k-steps ahead into L2
   (`DGPP_PACKQ_PREFETCH`, default 3) — the two-stage pipeline's one step
@@ -898,7 +917,7 @@ The history by milestone. The dated engineering record in
   8K 4.61 → 4.42, 32K 18.46 → 17.82 (−7 / −4 / −4 %).
 - **The hybrid's decode at the author's protocol: 57 → 54 ms a pass, the
   head in bit planes** (2026-09-29, S6 rounds 4–12 of the
-  [record](benchmarks/results/2026-09-28-qwen-autoround-int4/README.md)):
+  investigation):
   the int8 head is stored as three per-row planes (high nibbles, bits 3..2,
   bits 1..0) and an argmax-only head read — every MTP draft step and the
   greedy verify — takes a pass over the high six bits that gives each row a
@@ -960,8 +979,7 @@ The history by milestone. The dated engineering record in
   the hybrid's fixture: forward parity against the pure-Python reference
   (which dequantizes GPTQ exactly), the decode and prefill-head gates and
   the loopback engines. Performance on the real checkpoint is the next
-  campaign (docs/qwen38_autoround_int4_plan.md, the
-  [record](benchmarks/results/2026-09-28-qwen-autoround-int4/README.md)).
+  campaign described in [the Qwen int4 plan](docs/qwen38_autoround_int4_plan.md).
 
 - **Prefix cache: an entry floor, a head cut, and arenas sized to the node**
   (2026-09-28): `engine.prefix_min_tokens` (default 1024) takes no snapshot
@@ -975,32 +993,27 @@ The history by milestone. The dated engineering record in
   none with the floor. The checked-in recipes now give the arena the memory
   the node has left under the plan's headroom, except the one-node Qwen
   recipes, whose spare memory is the page cache behind the mmap'ed n-gram
-  table. See the [record](benchmarks/results/2026-09-28-prefix-entry-floor-head-cut.md)
-  and the [sizing guide](docs/prefix-cache.md).
-
+  table. See the [sizing guide](docs/prefix-cache.md).
 
 - **Faster batched GLM decode** (2026-09-27): merge the validated row-batched
   attention projections, reusing weights across decode rows while preserving
   each row's bitwise result. The recorded four-Spark full GLM-5.3 comparison
   reduced decode-step time by 1.1% at four concurrent requests and 1.7% at
   eight; single- and two-request performance was unchanged within the
-  measured spread. GLM-5.3-Flash passed a separate regression check. See the
-  [benchmark and integration record](benchmarks/results/2026-09-26-kvb-decode-rows/README.md).
+  measured spread. GLM-5.3-Flash passed a separate regression check.
 
 - **Qwen image prefill** (2026-09-27, PR #62): image embedding staging now
   splits chunks wider than the vision workspace, and image prefills can
   yield between scheduler ticks. Review follow-up scopes image borrows and
   staging buffers to each executing prefill, preserving cold image inputs
   and isolating interleaved cursors. CUDA regressions cover MTP catch-up,
-  cancellation and slot reuse; see the
-  [validation record](benchmarks/results/2026-09-27-qwen-image-prefill.md).
+  cancellation and slot reuse.
 
 - **Lazy SSE preambles** (2026-09-26, PR #57): chat and legacy completion
   preambles wait for the first output, preserving first-event prefill timing.
   Empty completions still receive a preamble before their terminal chunk,
   and truncated UTF-8 output receives one before the replacement character.
-  Each chat choice retains its own preamble. See the
-  [validation record](benchmarks/results/2026-09-26-lazy-sse-preamble.md).
+  Each chat choice retains its own preamble.
 
 - **JSON Unicode and UTF-8 responses** (2026-09-26, issue #59): escaped
   UTF-16 surrogate pairs now decode to the same UTF-8 as raw supplementary
@@ -1016,8 +1029,7 @@ The history by milestone. The dated engineering record in
   prefilling or between output chunks. Cluster `http.sse_ping_interval`,
   `--sse-ping-interval` and request `sse_ping_interval` configure the interval;
   `-1` disables it. Choices share one timer; comments do not change output,
-  usage, finish events or engine deadlines. See the
-  [validation record](benchmarks/results/2026-09-26-sse-keep-alive.md).
+  usage, finish events or engine deadlines.
 
 - **Deployment templates: `engine.default_max_tokens` 256 → 32768**
   (2026-09-25): every template's answer budget for requests that omit
@@ -1032,8 +1044,6 @@ The history by milestone. The dated engineering record in
   still admissible (53.53 GiB per rank against 52.97). The binary's own
   fallback when a configuration omits the key is unchanged at 256; existing
   local deployment files must be edited (or re-copied from the template).
-  Evidence:
-  [record](benchmarks/results/2026-09-25-hermes-default-max-tokens/README.md).
 - **Serve MiMo-V2.6-Flash** (2026-09-22): the sixth family, `mimo_v2`
   (`XiaomiMiMo/MiMo-V2.6-Flash-RL` as shipped: MXFP4 routed experts, fp8
   block-128 dense projections, BF16 o_proj / head / eh_proj packable into
@@ -1046,8 +1056,7 @@ The history by milestone. The dated engineering record in
   compact `<tool_call>` dialect and the model-opened `<think>` flow (confined
   to that dialect), deployment templates for two and four nodes, and the
   MXFP4 GEMV core's K = 2048 / 4096 instantiations. Measurements in
-  [docs/benchmarks.md](docs/benchmarks.md) and the
-  [campaign record](benchmarks/results/2026-09-22-mimo-v26-flash-opt/README.md);
+  [docs/benchmarks.md](docs/benchmarks.md);
   the plan in [docs/mimo_v26_flash_plan.md](docs/mimo_v26_flash_plan.md).
 - **MiMo-V2.6-Flash decode and prefill kernels** (2026-09-22, plan §7):
   the residual add fused into the two-rounding norm that follows it
@@ -1064,8 +1073,7 @@ The history by milestone. The dated engineering record in
   C1 with MTP −1.5 % on four nodes, the plain T=1 step unchanged (the
   in-situ profile, the cold microbench `mimo_step_bench --cold` and the
   rejected experiments — a register cap, an early L2-persisting prefetch
-  of the next layer's projection — are in the plan and the
-  [A/B record](benchmarks/results/2026-09-22-mimo-v26-flash/ab/README.md)).
+  of the next layer's projection — are in the plan).
   `WeightPrefetcher` gains a persisting-window mode and a line release
   (`applypriority.global.L2::evict_normal`) for such experiments.
 
@@ -1073,14 +1081,12 @@ The history by milestone. The dated engineering record in
   graphs to 64 rows and keep wide BF16 projections kernel-only. Preserve
   existing small MTP projection dispatch, including expanded hyper-state
   rows, and reject scheduled verification when graph capacity is insufficient.
-  See the [validation record](benchmarks/results/2026-09-19-qwen-c16-mtp3-upstream.md).
 
 - **Enable streaming MMA in the Qwen NVFP4 recipes** (2026-09-21): matched
   teacher-forced head checks pass on one and two Sparks, including the YaRN
   template, with exact unchanged-mode repeats and no global top-1 changes.
   Add a real-checkpoint scoring tool and strict comparison gate. Recipes
   select `fp8_head: "mma"`; `--fp8-head gemv` restores the previous path.
-  See the [numerical validation record](benchmarks/results/2026-09-21-qwen-fp8-head-numerics.md).
 
 - **Reduce DeepSeek-V4.1-Flash decode latency** (2026-09-21,
   [#28](https://github.com/HawkBearPig/dgpp/issues/28)): parallelize decoder
@@ -1088,69 +1094,61 @@ The history by milestone. The dated engineering record in
   with exact radix selection, and skip scoring when all entries fit. Preserve
   score arithmetic, original-ID ties, newest-block handling and output order.
   Reuse the existing workspace and remove the partial-list buffer, saving
-  3.75 MiB per rank with six slots and depth-four MTP. See the
-  [performance and parity record](benchmarks/results/2026-09-21-deepseek-selection/README.md).
+  3.75 MiB per rank with six slots and depth-four MTP.
 - **Reuse long documents when their question changes** (2026-09-21,
   [#17](https://github.com/HawkBearPig/dgpp/issues/17)): save one earlier
   prefill snapshot alongside the final cut, preserve both through resumable
   prefill, and check MTP's lookahead token before reuse. Report snapshot
   capacity in memory plans and distinguish arena pressure from KV-pool
-  pressure. See the [validation record](benchmarks/results/2026-09-21-prefix-document-reuse.md)
-  and [sizing guide](docs/prefix-cache.md).
+  pressure. See the [sizing guide](docs/prefix-cache.md).
 - **Keep batched MTP fallback decisions isolated** (2026-09-21,
   [#15](https://github.com/HawkBearPig/dgpp/issues/15)): preserve each request's
   verified drafts before another request's fallback publishes new drafts.
   Repair the live sampling oracle, cover grouped and staggered admission,
   slot reuse and disabled pipelining, and test batched fallback counters.
-  See the [validation record](benchmarks/results/2026-09-21-mtp-fallback-isolation.md).
+
 - **Reduce QSA selection cost at long context** (2026-09-21,
   [#19](https://github.com/HawkBearPig/dgpp/issues/19)): use exact radix
   selection above 2048 compressed pools, preserving score arithmetic,
   ties, token order and graph workspace. Add a cold/warm indexer benchmark
   and permanent large-pool, partial-tile and graph-replay correctness gates.
-  See the [performance and parity record](benchmarks/results/2026-09-21-qwen-qsa-select.md).
+
 - **Make the YaRN release check accurate and resumable** (2026-09-21,
   [#16](https://github.com/HawkBearPig/dgpp/issues/16)): allow reasoning in
   retrieval probes, correct decode timing units, repeat the latest cached
   probe, and budget concurrent streams for serialized long prefills.
   Save incremental reports with `--resume`; explain pool headroom when YaRN
   is already enabled. Reject invalid correction-band theta and compare
-  final-position decode logits with the full forward. See the
-  [validation record](benchmarks/results/2026-09-21-yarn-release-check.md).
+  final-position decode logits with the full forward.
 - **Tighten decode metrics bookkeeping and documentation** (2026-09-21,
   [#20](https://github.com/HawkBearPig/dgpp/issues/20)): record each replay's
   end event immediately after its graph launch, before host counter updates.
   Cross-link the batch and speculative-counter references, retain the fixed
   sixteen-bucket histogram contract, and give the depth-one sampled-MTP
-  gate its own port. See the
-  [validation record](benchmarks/results/2026-09-21-metrics-follow-ups.md).
+  gate its own port.
 - **Constrain declared tool argument names by default** (2026-09-21,
   [#11](https://github.com/HawkBearPig/dgpp/issues/11),
   [#12](https://github.com/HawkBearPig/dgpp/pull/12)): top-level argument
   names close to declared `properties` unless `additionalProperties: true`
   explicitly opts out. Repeated Qwen XML parameters become literal content.
   The checkpoint grammar gates cover both the closed default and the opt-out
-  without altering reference renders. See the
-  [validation record](benchmarks/results/2026-09-21-tool-key-closure.md).
+  without altering reference renders.
 - **Reconcile timed benchmark counters** (2026-09-20,
   [#24](https://github.com/HawkBearPig/dgpp/issues/24)): `scripts/timed_load.py`
   waits for published counters to match completed requests under a deadline,
   including warmup and isolation, so late snapshots no longer cause false
   unexpected-traffic failures. Genuine mismatches still fail with expected
-  and observed counts. The dated script path remains compatible. See the
-  [validation record](benchmarks/results/2026-09-20-timed-load-counters.md).
+  and observed counts. The dated script path remains compatible.
 - **Compare effective settings across ranks** (2026-09-20,
   [#18](https://github.com/HawkBearPig/dgpp/issues/18)): automatic graph
   batch thresholds no longer cause false settings-override warnings on
   peers. Genuine threshold and concurrency differences still warn; the
-  engine settings remain unchanged. See the
-  [validation record](benchmarks/results/2026-09-20-rank-settings-default.md).
+  engine settings remain unchanged.
 - **Reject duplicate GLM tool arguments** (2026-09-20,
   [#22](https://github.com/HawkBearPig/dgpp/issues/22)): a repeated argument
   name makes the tool block literal content instead of a structured call
   with duplicate JSON keys. Valid calls retain their argument types and
-  can reuse the same names in later calls. See the
-  [validation record](benchmarks/results/2026-09-20-glm-tool-duplicate-keys.md).
+  can reuse the same names in later calls.
 - **Opt-in 512K YaRN context for Qwen3.8-Flash-Next** (2026-09-20,
   [#3](https://github.com/HawkBearPig/dgpp/pull/3)): `engine.rope_scaling`
   with YaRN factor 2 extends the ceiling to 524288 tokens; omitting it preserves the
@@ -1158,31 +1156,27 @@ The history by milestone. The dated engineering record in
   deployment template and `scripts/qwen_yarn_release_check.py`. Two-Spark
   validation retrieved 5/5 needles at both 261K and 522K prompt tokens:
   cold prefill 0.909 / 1.397 ms per token, decode about 60.7 / 96.0 ms per
-  pass. See the [validation record](benchmarks/results/2026-09-20-qwen-yarn512k.md)
-  for the recipe, measured scope and release-check limitations.
+  pass.
 - **Cross-compile for DGX Spark from x86 Linux** (2026-09-20,
   [#5](https://github.com/HawkBearPig/dgpp/pull/5)): `scripts/spark-cross`
   and the `spark-cross` CMake preset build the ARM64/GB10 server in Docker
   using the release settings. The host needs no GPU or NVIDIA driver;
-  execution checks run on the Spark. See the [cross-compiling guide](docs/cross-compiling.md)
-  and [build and target validation record](benchmarks/results/2026-09-19-spark-cross-build.md).
+  execution checks run on the Spark. See the [cross-compiling guide](docs/cross-compiling.md).
 - **Decode graph batch counters on `/metrics` and `/v1/metrics`**
   (2026-09-20, [#8](https://github.com/HawkBearPig/dgpp/pull/8)):
   `scheduler.decode_batch` reports cumulative graph launches, verification
   rows, padded rows and a launch histogram by graph capacity, plus the
   last launch's capacity, active requests and verification width. See the
-  [counter contract](docs/operations.md#decode-graph-batch-counters) and
-  [validation record](benchmarks/results/2026-09-19-decode-batch-telemetry.md).
+  [counter contract](docs/operations.md#decode-graph-batch-counters).
 - **MTP acceptance counters on `/metrics` and `/v1/metrics`**
   (2026-09-20, [#9](https://github.com/HawkBearPig/dgpp/pull/9)):
   `scheduler.spec_decode` reports verification rounds and total and
   per-position attempted/accepted drafts. Acceptance is counted after
   exact host fallback resolves, including drafts a sampled fallback
   accepts after provisional device rejection; counts precede response
-  stop/length trimming. See the [counter contract](docs/openai-compatibility.md#speculative-decoding-counters)
-  and [validation record](benchmarks/results/2026-09-19-mtp-acceptance-metrics.md).
+  stop/length trimming. See the [counter contract](docs/openai-compatibility.md#speculative-decoding-counters).
 - **Lossless 12-bit weights on Qwen3.8-Flash-Next; format v2** (2026-09-19;
-  round four of `benchmarks/results/2026-09-19-glm-flash-line-rate/`). The
+  round four of the 2026-09-19-glm-flash-line-rate measurements). The
   format no longer needs rows of whole 1024-column super-blocks: the columns
   left over follow the row in units cut by the 256-column steps they hold,
   twelve bits a weight without padding (`kernels/bf12_gemv.cuh`; k = 2560,
@@ -1207,7 +1201,7 @@ The history by milestone. The dated engineering record in
   `"bf12"` on the full GLM-5.3's small indexer matrices.
 - **bf12-only residency: `engine.bf16_weights: "bf12"` now SAVES memory, and
   the two ceiling-bound templates have their contexts back** (2026-09-19;
-  round three of `benchmarks/results/2026-09-19-glm-flash-line-rate/`). The
+  round three of the 2026-09-19-glm-flash-line-rate measurements). The
   12-bit form can now be the only resident one: each packable BF16 matrix
   loads into its own releasable range (the CUDA virtual-memory API —
   `loaders/releasable_range.*`, `LayerBump::alloc_side`), is packed as its
@@ -1247,7 +1241,7 @@ The history by milestone. The dated engineering record in
   canonical fold), transcripts identical, seven-minute soak clean;
   `DGPP_BUS_GATE=sequential` keeps the per-peer gates.
 - **Lossless 12-bit BF16 decode weights, `engine.bf16_weights: "bf12"`**
-  (2026-09-19; `benchmarks/results/2026-09-19-glm-flash-line-rate/`): a second
+  (2026-09-19; the 2026-09-19-glm-flash-line-rate measurements): a second
   resident form of the BF16 matrices the decode GEMV streams — the
   sign+mantissa byte plus a 4-bit exponent code against a per-row window,
   exact side tables for the 1.5e-4 of weights outside it, outlier rows kept
@@ -1314,7 +1308,7 @@ The history by milestone. The dated engineering record in
   Report model input modalities and visual prompt-token usage. Add encoder reference checks, API tests
   and [usage documentation](docs/vision.md). Match the CUDA BF16 eager reference
   bitwise across the pinned regression corpus after correcting rounding and
-  reduction arithmetic; see the [numerical investigation](benchmarks/results/2026-09-18-glm-vision-numerics.md).
+  reduction arithmetic.
 - **Release packaging with bundled PCRE2** (2026-09-18): exclude the dependency's
   standalone install rules from DGPP's runtime package. Server-only builds
   no longer fail packaging because the unused `libpcre2-posix.a` was never
@@ -1379,9 +1373,7 @@ The history by milestone. The dated engineering record in
   projections use a tensor-core kernel to avoid cuBLASLt copy-engine nodes
   in collective graphs. Benchmark scripts now distinguish request-wall
   and legacy output-span rates, require server token usage, and provide
-  repeated C1 comparison and long-prompt interference checks. See the
-  [validation and measurements](benchmarks/results/2026-09-15-qwen-batching-prefill.md)
-  for configuration tradeoffs, the unresolved C1 promotion gate, and remaining work.
+  repeated C1 comparison and long-prompt interference checks.
 - **One deployment template per model, quant and world** (2026-09-14, late;
   `deploy/README.md`): twenty-five templates became eight —
   `cluster_<model>_<quant>_w<n>.example.json`, each with MTP at the depth its

@@ -13,6 +13,7 @@
 #include "kernels/bf12_companions.hpp"
 #include "kernels/dsa.hpp"
 #include "kernels/glm_norm.hpp"
+#include "kernels/packq_gemm.hpp"
 #include "kernels/scale_gemm.hpp"
 #include "kernels/kernels.hpp"
 
@@ -670,7 +671,15 @@ void GlmDsaModel::enqueue_layer(const GlmDsaLayerResident& r, int pool_layer, ui
     // request's cache and publish to it (the DSA layer's scratch is
     // per call; the pointers step by the span's rows).
     int64_t row0 = 0;
-    for (int s = 0; s < rows.num_spans; ++s) {
+    if (rows.decode_spans) {
+      for (int s = 0; s < rows.decode_spans; ++s) row0 += rows.span_lens[s];
+      if (!dsa_->prepare(static_cast<int>(row0))) throw std::runtime_error("mixed DSA plans unavailable");
+      gemm_.set_bf12_wide(true);
+      dsa_->enqueue_decode(x_, pool_, pool_layer, rows.req_ids, rows.pos, rows.spans,
+                           rows.decode_spans, static_cast<int>(row0), attn_out, stream_, nullptr, nullptr);
+      gemm_.set_bf12_wide(false);
+    }
+    for (int s = rows.decode_spans; s < rows.num_spans; ++s) {
       const int len = rows.span_lens[s];
       if (!dsa_->prepare(len)) throw std::runtime_error("run_rows: DSA GEMM plans unavailable");
       dsa_->enqueue_prefill(x_ + static_cast<size_t>(row0) * H, pool_, pool_layer, rows.span_reqs[s], rows.span_pos0[s],
@@ -695,14 +704,36 @@ void GlmDsaModel::enqueue_layer(const GlmDsaLayerResident& r, int pool_layer, ui
     glm_rmsnorm_bf16(resid, r.post_norm, x_, T, H, eps, stream_);
   }
   uint16_t* ffn_out = stage(y_, T, H, rows.capture);
-  if (r.moe) {
-    if (rows.decode)
-      moe_->enqueue_decode(x_, ffn_out, T, nullptr, stream_, rows.moe_table_slot);
-    else
-      moe_->enqueue_prefill(x_, ffn_out, T, rows.trace, stream_);
+  const auto enqueue = [&](int row0, int count, bool decode, int) {
+    const size_t offset = static_cast<size_t>(row0) * H;
+    if (r.moe) {
+      MoeTraceStaging trace;
+      if (rows.trace) {
+        trace.ids = rows.trace->ids + static_cast<size_t>(row0) * cfg_.num_experts_per_tok;
+        trace.weights = rows.trace->weights + static_cast<size_t>(row0) * cfg_.num_experts_per_tok;
+        trace.biased = rows.trace->biased
+            ? rows.trace->biased + static_cast<size_t>(row0) * cfg_.n_routed_experts : nullptr;
+      }
+      if (rows.decode)
+        moe_->enqueue_decode(x_ + offset, ffn_out + offset, count, nullptr, stream_, rows.moe_table_slot);
+      else
+        moe_->enqueue_prefill(x_ + offset, ffn_out + offset, count,
+                              rows.trace ? &trace : nullptr, stream_, decode ? count : 0);
+    } else {
+      gemm_.set_bf12_wide(decode);
+      enqueue_dense(r.dense, x_ + offset, count, ffn_out + offset);
+    }
+  };
+  if (rows.run) {
+    const int combined_from = r.moe ? kPackqMmaFromRows
+                                    : std::min(max_decode_rows_, dense_gemv_rows()) + 1;
+    rows.run->for_each_kernel_group([&](int count, int next) {
+      return count >= combined_from && next >= combined_from;
+    }, enqueue);
   } else {
-    enqueue_dense(r.dense, x_, T, ffn_out);
+    enqueue(0, T, rows.decode, 0);
   }
+  gemm_.set_bf12_wide(rows.decode);
   if (rows.decode) prefetch_attention_side(r.layer + 1);
   fold(ffn_out, T, H, rows.capture);  // block boundary 2: the sliced down projections
   glm_residual_add_bf16(resid, ffn_out, n, stream_);
@@ -723,6 +754,8 @@ GlmDsaModel::Outputs GlmDsaModel::run_rows(const RowRun& run) {
   const bool traces = !run.decode && route_traces_;
   const size_t K = static_cast<size_t>(cfg_.num_experts_per_tok);
   WalkRows rows;
+  rows.run = &run;
+  rows.decode_spans = run.decode_spans;
   rows.req_ids = in.req_ids;
   rows.pos = in.pos;
   rows.spans = in.spans;
@@ -776,6 +809,7 @@ GlmDsaModel::Outputs GlmDsaModel::run_rows(const RowRun& run) {
   // prefill row. All-row diagnostics and decode keep their full head.
   glm_rmsnorm_bf16(resid_, globals_.final_norm, h_, T, H, cfg_.rms_norm_eps, stream_);
   const bool packed_logits = project_head_rows(run, [&](int input_row, int output_row, int rows) {
+    gemm_.set_bf12_wide(run.decode || input_row < run.decode_rows());
     gemm_.matmul(h_ + static_cast<size_t>(input_row) * H, globals_.lm_head,
                  logits_ + static_cast<size_t>(output_row) * lm_vocab_count_, rows, lm_vocab_count_,
                  H, DType::BF16, GemmOut::F32, static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_,
@@ -785,10 +819,7 @@ GlmDsaModel::Outputs GlmDsaModel::run_rows(const RowRun& run) {
   // the slots' windows by position.
   // A group prefill stores every row: each span's last window rows land
   // in its own slot (2026-09-14).
-  if (mtp_) {
-    const int nrows = run.num_spans > 0 ? T : std::min(T, max_decode_rows_);
-    store_draft_hidden(h_ + static_cast<size_t>(T - nrows) * H, in.req_ids + (T - nrows), in.pos + (T - nrows), nrows);
-  }
+  store_run_draft_hidden(run, in, h_);
   if (run.decode) prefetch_.join(stream_);
   out = finish_run(run, std::move(out), packed_logits);
   if (!run.capture && traces) {
@@ -855,7 +886,7 @@ void GlmDsaModel::graph_prepare() {
 // shared head.
 // ---------------------------------------------------------------------------
 void GlmDsaModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode_row,
-                               bool capture, int head_rows, int batch_requests) {
+                               bool capture, int head_rows, int batch_requests, int hidden_row) {
   if (head_rows > logits_capacity_rows_)
     throw std::invalid_argument("draft head exceeds logits capacity");
   if (!mtp_) throw std::logic_error("mtp_run_rows: MTP is not enabled");
@@ -873,7 +904,7 @@ void GlmDsaModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos
   if (!r.enorm || !r.hnorm || !r.eh_proj || !r.shared_head_norm)
     throw std::runtime_error("mtp_run_rows: the draft layer's head tensors are unbound");
   // ---- the input fusion --------------------------------------------------
-  const uint16_t* hin = h_;
+  const uint16_t* hin = prefill_hidden_span(h_, H, hidden_row, T);
   if (decode_row) {
     gather_draft_hidden(d_req, d_pos, mtp_h_, T);
     hin = mtp_h_;

@@ -32,6 +32,7 @@
 #include "engine/lookup_draft.hpp"
 #include "engine/mixed_prefill.hpp"
 #include "engine/prefix_arena.hpp"
+#include "engine/prefill_task.hpp"
 #include "engine/speculative.hpp"
 #include "engine/step_timing.hpp"
 #include "engine/tp_bus.hpp"
@@ -208,7 +209,8 @@ inline SpecRow0 make_fabric_spec_row0(
 // 1 and pay four rows; a hole from churn (slots 0 and 2) falls to the next
 // family up. Each family has its own two parities, end events, stage and
 // verdict indices (slots_ + family) and bus variants (2 * slots_ + 2 *
-// family + parity). A single live request never touches a batch.
+// family + parity). Ordinary single-request decode uses its scalar graph;
+// mixed prefill may use a one-request compact batch for the decoder tail.
 // SAMPLING (M6 6b, the device path): with both sampler scratch tables the
 // plain (T=1) graphs carry the on-device sampling pick
 // (kernels/glm_sample_pick.hpp) — per-slot device specs and count tables,
@@ -364,6 +366,21 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
         capped.requests = slots_;
         capped.max_rows = max_rows_ / slots_;
         families_.push_back(capped);
+      }
+      // A mixed walk can have just one decoder. Give compatible compact
+      // mappings a one-request family so that its native layer and draft
+      // work do not include an empty second request. Preserve the number
+      // of scheduled depths that fit the bus's variant capacity.
+      bool singleton = this->compact_batches();
+      if constexpr (requires { Model::compact_batch_compatible(0, 0); })
+        singleton = singleton && Model::compact_batch_compatible(2 * rows_per_request_, rows_per_request_);
+      const int families_and_slots = slots_ + static_cast<int>(families_.size());
+      if (singleton &&
+          std::min(depth_, net::kBusMaxGraphVariants / (2 * families_and_slots)) ==
+              std::min(depth_, net::kBusMaxGraphVariants / (2 * (families_and_slots + 1)))) {
+        BatchFamily one;
+        one.requests = 1;
+        families_.insert(families_.begin(), one);
       }
       family_steps_.assign(families_.size(), 0);
     }
@@ -1254,81 +1271,11 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       check_req(req);
       if (live_[static_cast<size_t>(req)] || prefills_[static_cast<size_t>(req)])
         throw std::logic_error("graph engine: prefill on an open request");
-      auto task = std::make_unique<PendingPrefill>();
-      task->prompt = prompt;
-      if (plan.boundaries) task->boundaries = *plan.boundaries;
-      task->plan = plan;
-      task->plan.boundaries = &task->boundaries;
-      if (plan.images) task->images = *plan.images;
-      task->plan.images = &task->images;
       try {
         open_slot_grammar(req, prompt);
-        typename Model::SnapshotRequest* snap = nullptr;
-        if (plan.snap_slot >= 0) {
-          task->snap = arena_.request(plan.snap_slot, plan.snap_position);
-          snap = &task->snap;
-        }
-        if (plan.body_snap_slot >= 0) {
-          task->body_snap = arena_.request(plan.body_snap_slot, plan.body_snap_position);
-          task->body_snap.next = snap;
-          snap = &task->body_snap;
-        }
-        if (plan.head_snap_slot >= 0) {
-          task->head_snap = arena_.request(plan.head_snap_slot, plan.head_snap_position);
-          task->head_snap.next = snap;
-          snap = &task->head_snap;
-        }
-        if (plan.attach_slot >= 0) {
-          if (arena_.position(plan.attach_slot) != plan.attach_position)
-            throw std::logic_error("graph engine: attached prefix differs from the plan");
-          arena_.attach(req, plan.attach_slot);
-        }
-        auto cursor = std::make_shared<typename Model::PrefillCursor>([&] {
-          // Use the same physical reservation as the admission quote and
-          // reserve() after completion, including the block drafter's tail.
-          const auto reserved = physical_reserve_tokens(reserve_tokens);
-          if constexpr (requires { model_->session_prefill_begin(req, task->prompt, reserved,
-              chunk_tokens, task->boundaries, snap, plan.attach_position, &task->images); }) {
-            return model_->session_prefill_begin(req, task->prompt, reserved, chunk_tokens,
-                task->boundaries, snap, plan.attach_position, &task->images);
-          } else {
-            if (!task->images.empty()) throw std::logic_error("graph engine: image prefill cannot yield");
-            return model_->session_prefill_begin(req, task->prompt, reserved, chunk_tokens,
-                task->boundaries, snap, plan.attach_position);
-          }
-        }());
-        if constexpr (requires { model_->prepare_mixed_verify(1); }) cursor->final_output_only = true;
-        task->cursor = cursor;
-        task->advance = [this, cursor, task = task.get()](int64_t budget) {
-          const int64_t start = cursor->next;
-          const bool done = model_->session_prefill_advance(*cursor, budget);
-          return task->after(start, done);
-        };
-        // The bookkeeping behind a chunk (this request's alone or its span
-        // of a group walk): the snapshots the chunk took, the progress,
-        // the slot's opening at the last one.
-        task->after = [this, req, cursor, task = task.get()](int64_t start, bool done) {
-          if (task->snap.taken && !task->plan.snap_taken) {
-            arena_.commit(task->plan.snap_slot, task->snap);
-            task->plan.snap_taken = true;
-          }
-          if (task->body_snap.taken && !task->plan.body_snap_taken) {
-            arena_.commit(task->plan.body_snap_slot, task->body_snap);
-            task->plan.body_snap_taken = true;
-          }
-          if (task->head_snap.taken && !task->plan.head_snap_taken) {
-            arena_.commit(task->plan.head_snap_slot, task->head_snap);
-            task->plan.head_snap_taken = true;
-          }
-          sched::SchedulerEngine::PrefillProgress progress;
-          progress.body_snap_taken = task->plan.body_snap_taken;
-          progress.head_snap_taken = task->plan.head_snap_taken;
-          progress.computed_tokens = cursor->next - start;
-          progress.snap_taken = task->plan.snap_taken;
-          if (done) progress.first_token = open_slot_finish(req, task->prompt, cursor->output);
-          return progress;
-        };
-        prefills_[static_cast<size_t>(req)] = std::move(task);
+        prefills_[static_cast<size_t>(req)] = PendingPrefill::begin(
+            *model_, arena_, req, prompt, physical_reserve_tokens(reserve_tokens), chunk_tokens, plan,
+            [this, req](const auto& ids, const auto& out) { return open_slot_finish(req, ids, out); });
       } catch (...) {
         close_failed_slot(req);
         throw;
@@ -1374,6 +1321,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     if (readers.empty() || decoders.empty()) return false;
     for (const int req : readers) if (!can_mix_prefill(req, decoders)) return false;
     const int family = family_for(decoders);
+    if constexpr (requires { model_->max_mixed_prefill_readers(0); })
+      if (readers.size() > static_cast<size_t>(model_->max_mixed_prefill_readers(
+              families_[family].requests * rows_per_request_))) return false;
     return families_[family].requests * rows_per_request_ +
                static_cast<int64_t>(readers.size()) * prefill_chunk_alignment() <= model_->max_tokens();
   }
@@ -1424,8 +1374,8 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     return false;
   }
   bool prefill_budget_per_reader() const override {
-    // Shared verification and prefill spend one physical row budget. Keep
-    // the legacy per-reader limit for executors without that contract.
+    // Mixed executors share one reader budget, with verification rows
+    // consuming spare physical capacity. Other executors retain a per-reader limit.
     return !MixedPrefillModel<Model>;
   }
   std::vector<sched::SchedulerEngine::PrefillProgress> advance_prefill_group(
@@ -1459,11 +1409,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
             for (const int req : reqs) {
               auto& task = prefills_[static_cast<size_t>(req)];
               if (!task) continue;
-              if (task->snap.taken && !task->plan.snap_taken) arena_.commit(task->plan.snap_slot, task->snap);
-              if (task->body_snap.taken && !task->plan.body_snap_taken)
-                arena_.commit(task->plan.body_snap_slot, task->body_snap);
-              if (task->head_snap.taken && !task->plan.head_snap_taken)
-                arena_.commit(task->plan.head_snap_slot, task->head_snap);
+              task->commit(arena_);
               task.reset();
               close_failed_slot(req);
             }
@@ -1671,11 +1617,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   }
   void cleanup_failed_prefill(int req) {
     auto& task = prefills_[static_cast<size_t>(req)];
-    if (task->snap.taken && !task->plan.snap_taken) arena_.commit(task->plan.snap_slot, task->snap);
-    if (task->body_snap.taken && !task->plan.body_snap_taken)
-      arena_.commit(task->plan.body_snap_slot, task->body_snap);
-    if (task->head_snap.taken && !task->plan.head_snap_taken)
-      arena_.commit(task->plan.head_snap_slot, task->head_snap);
+    task->commit(arena_);
     task.reset();
     close_failed_slot(req);
     reseed_live_feeds();
@@ -2030,15 +1972,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   }
 
  private:
-  struct PendingPrefill {
-    std::vector<int64_t> prompt, boundaries;
-    std::vector<ImageInput> images;
-    sched::SchedulerEngine::PrefixPrefill plan;
-    typename Model::SnapshotRequest snap, body_snap, head_snap;
-    std::function<sched::SchedulerEngine::PrefillProgress(int64_t)> advance;
-    std::function<sched::SchedulerEngine::PrefillProgress(int64_t, bool)> after;
-    std::shared_ptr<void> cursor;  // the Model::PrefillCursor (a family with resumable prefill)
-  };
+  using PendingPrefill = PrefillTask<Model>;
   std::vector<std::unique_ptr<PendingPrefill>> prefills_;
 
   void check_req(int req) const {
@@ -2360,7 +2294,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   }
   bool compact_batches() const {
     if constexpr (requires { Model::kCompactBatches; }) {
-      return Model::kCompactBatches && compact_batches_ && !schedule_;
+      return Model::kCompactBatches && compact_batches_ && slots_ > 1 && !schedule_ && !block_;
     }
     return false;
   }
@@ -2383,8 +2317,10 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     int top = 0;
     for (const int req : reqs) top = std::max(top, req);
     int physical = -1;
+    // The singleton is only for compact mappings. Keep the original
+    // physical-prefix shape as the numerical compatibility reference.
     for (size_t f = 0; f < families_.size(); ++f)
-      if (families_[f].requests > top && family_usable(f)) {
+      if (families_[f].requests > 1 && families_[f].requests > top && family_usable(f)) {
         physical = static_cast<int>(f);
         break;
       }

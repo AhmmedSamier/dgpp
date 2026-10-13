@@ -79,8 +79,6 @@ class QwenModel : public SessionModel<QwenModel> {
   using Outputs = Base::Outputs;
   using SessionSnapshotMeta = Base::SessionSnapshotMeta;
   using SnapshotRequest = Base::SnapshotRequest;
-  static constexpr bool kPrefillGroupAdvance = true;
-  static constexpr bool kMixedPrefillVerify = true;
   static constexpr bool kPrefillChunkGrid = false;
   // DGPP_QWEN_HEAD_DUMP=<file>: append every decode-shaped head input row
   // (the draft's and the verify's hyper-state mixes) after each settled pass
@@ -164,7 +162,6 @@ class QwenModel : public SessionModel<QwenModel> {
   int64_t kv_block_tokens() const { return num_qsa_ > 0 ? kBlockTokens : 0; }
   static constexpr int prefill_chunk_tokens() { return kPrefillChunkTokens; }
   static constexpr int decode_rows_cap() { return kDecodeRowsMax; }
-  static constexpr bool kResumablePrefill = true;
   static constexpr bool kCompactBatches = true;
   static constexpr int kv_block_tokens_static() { return kBlockTokens; }
   // The same number for a shape that is not built yet (the memory plan).

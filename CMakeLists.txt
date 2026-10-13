@@ -2040,7 +2040,7 @@ set_tests_properties(dsa_dump_test PROPERTIES
 
 # Reference-dump parity: generate a pure-python oracle dump, then run the
 # layer against it. The torch backend (real checkpoint slices) is a manual
-# deployment test documented in benchmarks/README.md.
+# deployment test documented in docs/benchmarking.md.
 add_test(NAME kda_dump_generate
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_SOURCE_DIR}/tools/kda_reference_dump.py
@@ -2069,7 +2069,7 @@ set_tests_properties(flag_protocol_test PROPERTIES SKIP_RETURN_CODE 2)
 # M5 data plane: deep loopback scenarios (verbs + consumers + contention)
 # and the app-level smoke. Both skip without a visible device.
 if(DGPP_ENABLE_IBV)
-  add_executable(bus_test tests/cuda/bus_test.cu)
+  add_executable(bus_test tests/cuda/bus_test.cu tests/cuda/bus_boundary_fixture.cpp)
   target_link_libraries(bus_test PRIVATE dgpp_bus)
   dgpp_set_common(bus_test)
   add_test(NAME bus_test COMMAND bus_test)
@@ -2278,6 +2278,19 @@ target_link_libraries(mimo_native_mtp_test PRIVATE dgpp_models_mimo_layers dgpp_
 dgpp_set_common(mimo_native_mtp_test)
 add_test(NAME mimo_native_mtp_test COMMAND mimo_native_mtp_test)
 set_tests_properties(mimo_native_mtp_test PROPERTIES LABELS "gpu" RUN_SERIAL TRUE)
+
+# Shared request lifetime and mixed execution across model architectures.
+add_executable(shared_prefill_test tests/cuda/shared_prefill_test.cpp tests/cuda/glm_tp_fixture.cpp)
+target_link_libraries(shared_prefill_test PRIVATE dgpp_models_glm_loader dgpp_models_glm4_layers
+  dgpp_models_glm_dsa_layers dgpp_models_mimo_layers dgpp_models_qwen_layers
+  dgpp_models_dsv4_layers dgpp_models_dsv41_layers dgpp_text CUDA::cudart Threads::Threads)
+dgpp_set_common(shared_prefill_test)
+if(TARGET dgpp_bus)
+  target_link_libraries(shared_prefill_test PRIVATE dgpp_bus dgpp_serve)
+  target_compile_definitions(shared_prefill_test PRIVATE DGPP_TEST_HAS_BUS=1)
+endif()
+add_test(NAME shared_prefill_test COMMAND ${CMAKE_COMMAND} -E env DGPP_DENSE_GEMV_ROWS=256 $<TARGET_FILE:shared_prefill_test>)
+set_tests_properties(shared_prefill_test PROPERTIES LABELS "gpu" RUN_SERIAL TRUE)
 
 # Compact serving heads: allocation, FP64 oracle, groups, cache and drafts.
 add_executable(compact_head_test tests/cuda/compact_head_test.cpp tests/cuda/glm_tp_fixture.cpp)

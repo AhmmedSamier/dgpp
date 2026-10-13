@@ -78,6 +78,7 @@ class MimoModel : public SessionModel<MimoModel> {
   // max_tokens.
   int64_t prefill_group_span_limit() const { return max_tokens_; }
   using Base = SessionModel<MimoModel>;
+  static constexpr bool kPrefillChunkGrid = false;
   using Outputs = Base::Outputs;
   using SessionSnapshotMeta = Base::SessionSnapshotMeta;
   using SnapshotRequest = Base::SnapshotRequest;
@@ -155,7 +156,7 @@ class MimoModel : public SessionModel<MimoModel> {
   const MimoKvPool& pool() const { return pool_; }
   void graph_prepare();
   void mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode_row,
-                    bool capture, int head_rows, int batch_requests);
+                    bool capture, int head_rows, int batch_requests, int hidden_row = 0);
   void snapshot_draft_state(int req);
   void restore_draft_state(int req);
   void mtp_select_block(int index);
@@ -185,6 +186,7 @@ class MimoModel : public SessionModel<MimoModel> {
   // The layer's two blocks over `resid` (the residual, updated in place):
   // the attention block and the MLP/MoE block with their folds.
   struct WalkRows {
+    const RowRun* run = nullptr;
     const int32_t* req_ids = nullptr;
     const int64_t* pos = nullptr;
     int req = 0;
@@ -282,7 +284,7 @@ class MimoModel : public SessionModel<MimoModel> {
   static constexpr int kNativeHistoryRows = kPrefillChunkTokens + 32 + 3;
   bool native_mtp() const { return mtp_ && cfg_.mtp_layers_loaded == 3; }
   void native_mtp_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode,
-                       bool capture, int head_rows);
+                       bool capture, int head_rows, int hidden_row = 0);
   int draft_block_ = 0;
   uint16_t* native_history_ = nullptr;
   uint8_t* native_backup_ = nullptr;

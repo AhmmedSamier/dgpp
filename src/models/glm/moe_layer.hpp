@@ -31,7 +31,8 @@ namespace dgpp {
 // the decode step's D2H copies land here mid-step (stream-ordered, no
 // sync) and the caller reads them after its next stream sync — the
 // session materializes Outputs.routes this way after the step's final
-// sync. All three buffers may be null (the copies are skipped).
+// sync. A null trace skips all copies; a supplied trace requires ids and
+// weights, while biased logits are optional.
 struct MoeTraceStaging {
   int32_t* ids = nullptr;     // [tokens * top_k]
   float* weights = nullptr;  // [tokens * top_k]
@@ -86,17 +87,24 @@ class GlmMoeLayer {
   // (MoeExpertKernel::kMma); enqueue(), the host-orchestrated reference,
   // takes the kernel as an argument — kGemv by default (the decode pin),
   // kMma to serve as the prefill path's bitwise reference.
+  // Mixed rows retain the native slot recipe for the decoder prefix. Only
+  // readers enter the grouped chain; each row is computed once. A decoder-only
+  // bounded phase bypasses the grouped chain entirely.
   void enqueue_prefill(const uint16_t* hidden, uint16_t* out, int tokens,
-                       MoeTraceStaging* trace, cudaStream_t stream);
+                       MoeTraceStaging* trace, cudaStream_t stream, int decode_prefix = 0);
   // The prefill in phases, for a caller that overlaps its boundary folds
   // with the per-row ends of the layer (the DeepSeek-V4 walk, 2026-10-02):
   // the router over a row block ahead of the chain (route_prefill_rows on
   // every row before enqueue_prefill_phased), the chain without its
   // accumulation, the accumulation per row block. The same kernels per
   // row as enqueue_prefill: bitwise its output.
+  // A mixed phase writes its native prefix directly to `out`; every later
+  // accumulation must pass the same prefix so those rows are retained.
   void route_prefill_rows(const uint16_t* hidden, int r0, int rows, cudaStream_t stream);
-  void enqueue_prefill_phased(const uint16_t* hidden, int tokens, cudaStream_t stream);
-  void accumulate_prefill_rows(uint16_t* out, int tokens, int r0, int rows, cudaStream_t stream);
+  void enqueue_prefill_phased(const uint16_t* hidden, int tokens, cudaStream_t stream,
+                             int decode_prefix = 0, uint16_t* out = nullptr);
+  void accumulate_prefill_rows(uint16_t* out, int tokens, int r0, int rows, cudaStream_t stream,
+                               int decode_prefix = 0);
   void enqueue(const uint16_t* hidden, uint16_t* out, int tokens,
                cudaStream_t stream,
                MoeExpertKernel kernel = MoeExpertKernel::kGemv);
@@ -111,7 +119,8 @@ class GlmMoeLayer {
   // in fp32 — the Qwen prefill (its BF16 shared expert follows).
   void enqueue_prefill_f32(const uint16_t* hidden, float* out, int tokens,
                            MoeTraceStaging* trace, cudaStream_t stream,
-                           MoeExpertKernel kernel = MoeExpertKernel::kMma);
+                           MoeExpertKernel kernel = MoeExpertKernel::kMma,
+                           int decode_prefix = 0);
   // Whether the tensor-core expert kernel takes this layer's fp8 scale grid:
   // the checkpoint's 128 x 128, or a re-blocked TP slice grid of 32/64 with
   // hidden and the slice both multiples of 32 (the ldmatrix tile kernel,
@@ -210,6 +219,7 @@ class GlmMoeLayer {
 
  private:
   void check_expert_geometry() const;
+  void copy_route_trace(MoeTraceStaging* trace, int tokens, cudaStream_t stream, int output_row = 0);
   // enqueue()/enqueue_f32(): exactly one of out_bf16 / out_f32 is set.
   void enqueue_host(const uint16_t* hidden, uint16_t* out_bf16, float* out_f32,
                     int tokens, cudaStream_t stream, MoeExpertKernel kernel);
@@ -252,8 +262,9 @@ class GlmMoeLayer {
                           cudaStream_t stream);
 
   // The router, then (hash routing) the routes replaced from the table.
-  void route(const uint16_t* hidden, int tokens, cudaStream_t stream, int* counters = nullptr);
-  void prefill_chain(const uint16_t* hidden, int tokens, cudaStream_t stream);
+  void route(const uint16_t* hidden, int tokens, cudaStream_t stream, int* counters = nullptr,
+             int token_row = 0);
+  void prefill_chain(const uint16_t* hidden, int tokens, cudaStream_t stream, int route_row = 0);
   bool shared_aside_takes(bool with_shared, int tokens) const;
   const int32_t* hash_tid2eid_ = nullptr;
   const int64_t* hash_tokens_ = nullptr;

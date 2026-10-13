@@ -81,6 +81,11 @@ Scheduler::Scheduler(SchedulerEngine* engine,
   if (policy_.window_tokens < 1)
     throw std::invalid_argument(
         "Scheduler: the admission window must be at least one token");
+  if (policy_.decode_gap_target_ms < 0 || policy_.decode_gap_target_ms > kMaxLatencyTargetMs ||
+      policy_.first_token_target_ms < 0 || policy_.first_token_target_ms > kMaxLatencyTargetMs)
+    throw std::invalid_argument("Scheduler: latency targets must be in [0, 3600000] ms");
+  if (!policy_.prefill_latency.valid())
+    throw std::invalid_argument("Scheduler: invalid prefill latency controller tuning");
   if (policy_.prefill_budget_tokens < 0)
     throw std::invalid_argument("Scheduler: prefill budget must be nonnegative");
   if (policy_.prefill_budget_tokens > 0) {
@@ -762,6 +767,7 @@ void Scheduler::begin_prefill(int arrival, int64_t budget) {
   r.slot = slot;
   r.state = State::kPrefilling;
   r.prefill_epoch = ++execution_epoch_;
+  r.prefill_tick = ticks_;
   slots_[static_cast<size_t>(slot)] = arrival;
   DGPP_LOG_INFO("sched: request '{}' prefilling in slot {} ({} tokens/tick)",
                 r.spec.id, slot, budget);
@@ -787,6 +793,7 @@ void Scheduler::advance_prefill(int arrival, int64_t budget) {
         std::chrono::steady_clock::now() - started).count();
     // Both logical operations occupied this interval. Expose the overlap
     // explicitly so phase rates and decode-latency histograms remain honest.
+    ++prefill_chunk_steps_;
     prefill_ms_ += ms;
     step_ms_ += ms;
     mixed_ms_ += ms;
@@ -800,6 +807,7 @@ void Scheduler::advance_prefill(int arrival, int64_t budget) {
   const auto progress = engine_->advance_prefill(r.slot, budget);
   const double ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - started).count();
+  ++prefill_chunk_steps_;
   prefill_ms_ += ms;
   apply_prefill_progress(arrival, progress, budget, ms);
 }
@@ -825,6 +833,7 @@ void Scheduler::advance_prefill_group(const std::vector<int>& arrivals, const st
         std::chrono::steady_clock::now() - started).count();
     if (result.prefills.size() != arrivals.size())
       throw std::runtime_error("Scheduler: mixed group returned the wrong number of prefills");
+    ++prefill_chunk_steps_;
     prefill_ms_ += ms;
     step_ms_ += ms;
     mixed_ms_ += ms;
@@ -842,6 +851,7 @@ void Scheduler::advance_prefill_group(const std::vector<int>& arrivals, const st
   if (progress.size() != arrivals.size())
     throw std::runtime_error("Scheduler: the engine's group advance returned " + std::to_string(progress.size()) +
                              " results for " + std::to_string(arrivals.size()) + " requests");
+  ++prefill_chunk_steps_;
   prefill_ms_ += ms;  // one physical walk, not one execution per member
   for (size_t i = 0; i < arrivals.size(); ++i) apply_prefill_progress(arrivals[i], progress[i], budgets[i], ms);
 }
@@ -852,6 +862,10 @@ void Scheduler::apply_prefill_progress(int arrival, const SchedulerEngine::Prefi
   r.prefill_ms += ms;
   if (progress.computed_tokens <= 0 || progress.computed_tokens > budget)
     throw std::runtime_error("Scheduler: prefill chunk made no progress or exceeded its token budget");
+  prefill_chunk_budget_tokens_ += budget;
+  prefill_chunk_available_tokens_ += std::min<int64_t>(budget,
+      static_cast<int64_t>(r.spec.prompt.size()) - r.attached_tokens - r.prefill_computed);
+  prefill_chunk_computed_tokens_ += progress.computed_tokens;
   prefill_cursor_ = arrival;
   r.prefill_computed += progress.computed_tokens;
   engine_->prefill_monitor()->update(r.slot, r.attached_tokens + r.prefill_computed);
@@ -1341,8 +1355,56 @@ void Scheduler::release_retired(Request& r, Result& res) {
   if (!keep_retired_) std::vector<int64_t>().swap(res.generated);
 }
 
-bool Scheduler::tick() {
-  const bool more = quantum();
+std::optional<int64_t> Scheduler::next_prefill_budget() const {
+  if (!adaptive_prefill()) return std::nullopt;
+  int decoders = 0;
+  for (const auto& r : requests_)
+    if (r.state == State::kActive && !r.cancel_requested && !r.stop_requested) ++decoders;
+  // Use the first-token allowance for an uninterrupted reader. When an
+  // arrival can obtain a slot during an ongoing prefill, reserve half for
+  // time it already spent waiting for this yield. A fresh reader on an idle
+  // engine has no preceding prefill wait to reserve. A full queue behind
+  // occupied slots cannot benefit from smaller reader chunks. Long prompts
+  // and KV pressure may still miss the target.
+  const bool reading = std::any_of(requests_.begin(), requests_.end(),
+      [](const Request& r) { return r.state == State::kPrefilling && !r.cancel_requested && !r.stop_requested; });
+  const bool waiting_arrival = reading && free_slot() >= 0 && std::any_of(requests_.begin(), requests_.end(),
+      [](const Request& r) { return r.state == State::kQueued && !r.cancel_requested && !r.stop_requested; });
+  double target = policy_.first_token_target_ms / (waiting_arrival ? 2.0 : 1.0);
+  if (decoders && policy_.decode_gap_target_ms > 0)
+    target = target > 0 ? std::min(target, double(policy_.decode_gap_target_ms)) : policy_.decode_gap_target_ms;
+  const int64_t cap = std::min<int64_t>(engine_->prefill_chunk_limit(),
+      std::max(policy_.prefill_budget_tokens, policy_.prefill_idle_budget_tokens));
+  const int64_t initial = std::min<int64_t>(policy_.prefill_budget_tokens, policy_.prefill_latency.initial_tokens);
+  return prefill_latency_.limit(decoders, target, initial,
+                                cap, engine_->prefill_chunk_alignment(), policy_.prefill_latency);
+}
+
+bool Scheduler::tick(std::optional<int64_t> prefill_budget) {
+  if (!prefill_budget) prefill_budget = next_prefill_budget();
+  if (prefill_budget && (!adaptive_prefill() || *prefill_budget <= 0 ||
+      *prefill_budget > engine_->prefill_chunk_limit() ||
+      *prefill_budget > std::max(policy_.prefill_budget_tokens, policy_.prefill_idle_budget_tokens) ||
+      *prefill_budget % engine_->prefill_chunk_alignment() != 0))
+    throw std::invalid_argument("Scheduler: invalid adaptive prefill budget");
+  prefill_adaptive_limit_tokens_ = prefill_budget.value_or(0);
+  int decoders = 0;
+  if (prefill_budget)
+    for (const auto& r : requests_)
+      if (r.state == State::kActive && !r.cancel_requested && !r.stop_requested) ++decoders;
+  const auto started = prefill_budget ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+  const int64_t computed = prefill_chunk_computed_tokens_, offered = prefill_chunk_budget_tokens_;
+  prefill_pass_budget_tokens_ = 0;
+  const bool more = quantum(prefill_budget);
+  // A completed group measures final projection/admission work as well as a
+  // possibly short tail. It must not recalibrate the next bulk read-in.
+  const bool reading = prefill_budget && std::any_of(requests_.begin(), requests_.end(),
+      [](const Request& r) { return r.state == State::kPrefilling; });
+  if (prefill_budget && reading)
+    prefill_latency_.observe(decoders, prefill_chunk_computed_tokens_ - computed,
+        std::max(prefill_pass_budget_tokens_, prefill_chunk_budget_tokens_ - offered),
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count(),
+        policy_.prefill_latency);
   compact_retired();
   return more;
 }
@@ -1388,7 +1450,7 @@ void Scheduler::compact_retired() {
   deferred_logged_ = deferred;
 }
 
-bool Scheduler::quantum() {
+bool Scheduler::quantum(std::optional<int64_t> adaptive_budget) {
   ++ticks_;
   // The external-cancel sweep — FIXED POSITION, before any admission
   // or step: a request cancelled BETWEEN ticks never pays another
@@ -1456,6 +1518,9 @@ bool Scheduler::quantum() {
     return idle;
   };
   int64_t budget = prefill_budget();
+  const int64_t fixed_budget = budget;
+  if (adaptive_budget)
+    budget = policy_.prefill_budget_automatic ? *adaptive_budget : std::min(budget, *adaptive_budget);
   // An engine that advances its in-flight prefills as one walk takes the
   // chunked path whenever a prompt waits to be read in (so prompts queued
   // together begin in the same tick), and its busy budget is a quantum PER
@@ -1478,10 +1543,17 @@ bool Scheduler::quantum() {
       }
     }
     const int64_t align = engine_->prefill_chunk_alignment();
-    if (any_active && readers > 1 && engine_->prefill_budget_per_reader())
-      budget = std::min<int64_t>(engine_->prefill_chunk_limit() / align * align, budget * readers);
+    if (any_active && readers > 1 && engine_->prefill_budget_per_reader() &&
+        (!adaptive_budget || !policy_.prefill_budget_automatic)) {
+      budget = std::min<int64_t>(engine_->prefill_chunk_limit() / align * align, fixed_budget * readers);
+      if (adaptive_budget) budget = std::min(budget, *adaptive_budget);
+    }
     chunk_tick = readers > 0;
   }
+  // Reader allocation below trims final tails to their remaining work. Keep
+  // the original quantum for feedback: eight tokens filling an eight-token
+  // trimmed share do not measure the cost of a 1024-token service quantum.
+  prefill_pass_budget_tokens_ = budget;
   std::vector<int> inflight, begins;
   int64_t align = 0;
   size_t max_advances = 0;
@@ -1548,19 +1620,22 @@ bool Scheduler::quantum() {
       // One walk for all of them: the budget in aligned units, by need.
       // With more than two ticks of work outstanding the split is max-min
       // fair (a short prompt finishes and is not held behind a long one;
-      // what it leaves goes to the others). Within two ticks of the end
-      // the units go to the longest remainders first, so the prompts come
-      // level and finish in the same walk — prompts that arrived together
-      // start decoding together instead of one decoding against the
-      // others' read-in at the busy budget.
+      // what it leaves goes to the others). Readers begun together may
+      // level their remainders within two ticks of the end, so they start
+      // decoding together. A later arrival keeps its fair share even near
+      // the end; leveling it against an older reader would defer its first
+      // token until that reader finishes.
       std::vector<int64_t> rem, shares(inflight.size(), 0);
       int64_t outstanding = 0;
+      const uint64_t begin_tick = requests_[static_cast<size_t>(inflight.front())].prefill_tick;
+      bool began_together = true;
       for (const int a : inflight) {
         const Request& r = requests_[static_cast<size_t>(a)];
+        began_together &= r.prefill_tick == begin_tick;
         rem.push_back(static_cast<int64_t>(r.spec.prompt.size()) - r.attached_tokens - r.prefill_computed);
         outstanding += rem.back();
       }
-      const bool level = outstanding <= 2 * budget;
+      const bool level = began_together && outstanding <= 2 * budget;
       for (int64_t units = budget / align; units > 0; --units) {
         int pick = -1;
         for (size_t i = 0; i < inflight.size(); ++i) {
@@ -1753,6 +1828,11 @@ Scheduler::Meters Scheduler::meters() const {
   m.prompt_tokens_computed = prompt_tokens_computed_;
   m.decode_steps = decode_steps_;
   m.decode_rows = decode_rows_;
+  m.prefill_chunk_steps = prefill_chunk_steps_;
+  m.prefill_chunk_budget_tokens = prefill_chunk_budget_tokens_;
+  m.prefill_chunk_available_tokens = prefill_chunk_available_tokens_;
+  m.prefill_chunk_computed_tokens = prefill_chunk_computed_tokens_;
+  m.prefill_adaptive_limit_tokens = prefill_adaptive_limit_tokens_;
   m.mixed_steps = mixed_steps_;
   m.mixed_ms = mixed_ms_;
   m.prefill_ms = prefill_ms_;

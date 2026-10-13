@@ -53,7 +53,25 @@ Implement the model over the shared layer kernels and the shared engine
 machinery — packed decode batching, the decode graph, chunked resumable
 prefill, K/V and linear-attention state snapshots, prefix caching, the
 speculative-decode framework — rather than beside them. Constraints the
-engines enforce and ports have tripped on:
+engines enforce apply to every family.
+
+Use `SessionModel` for session positions, reservations, snapshots and draft
+history. Implement the architecture's layer walk over `RowRun`; use
+`PrefillContinuation` and `PrefillBatch` for resumable and mixed execution.
+`PrefillTask` owns yielded request data in both eager and graph serving, and
+`GraphBatchMapping` maps compact graph rows back to persistent request slots.
+The legacy GLM facade also uses these shared components. Do not add another
+model-specific scheduler, cursor lifecycle or batching policy. The component
+contracts are described in [continuous-batching.md](continuous-batching.md).
+
+Declare physical constraints through the executor's row capacity, alignment,
+continuation workspace and numerical dispatch checks. Model names and
+quantization labels are not admission rules. Exercise the common
+`shared_prefill_test` contract with the new fixture, including suspended
+readers, sparse decoder slots, cancellation, snapshots and speculative
+rollback. Architecture-specific state still needs its own reference tests.
+
+Constraints ports have tripped on:
 
 - **Chunk invariance.** The state a request leaves must not depend on how its
   prompt was chunked: a cold prefill and a resume from a snapshot run the same
@@ -64,6 +82,19 @@ engines enforce and ports have tripped on:
   gives the engine (the `glm_tp_test` gates fail otherwise), and shared-system-
   prompt head snapshots exist so the next conversation attaches at the head —
   a per-family cost complaint is a keyed decision, not a scheduler rule.
+- **Mixed decoder arithmetic.** A reader's presence must not silently select
+  its numerical recipe for incumbent decoder rows. Carry `RowRun`'s decoder
+  prefix into shape-dependent sites. The shared MoE executor can preserve
+  native decoder outputs while retaining grouped reader execution, including
+  phased accumulation around communication. Compare identical sublayer
+  inputs and outputs; a rounded hidden-state check can miss changed fp32
+  coefficients that affect later layers.
+- **Short reader arithmetic.** A prefix-cache hit can leave only a few
+  prefill tokens. Use `RowRun::for_each_kernel_group` to preserve a layer's
+  short-tail recipe and combine only compatible adjacent reader spans.
+  Compatibility is per operation: projections may need separate small
+  tails while routed expert rows can share a batch. Check the same short
+  reader alone and alongside a large reader, including packed BF16 weights.
 - **Speculative steps return exactly the tokens decided that step.** On the
   plain path that is the verify's next token; a speculator that also returns
   the fed token duplicates the first token of every transcript and drops the
@@ -148,10 +179,11 @@ the op-stream digest at `down`. A duplicate launcher fails
 - Fabric evidence for anything on the path the ranks execute together: boot
   the world with `scripts/dgpp-cluster`, run the check, `down`, compare the
   op-stream md5s across ranks (CONTRIBUTING §What a change needs).
-- A dated campaign under `benchmarks/results/` with the standard classes and
-  concurrencies before quoting any number, reusing the campaign harness and
-  `timed_load`; a change that moves a published number re-runs its procedure
-  from [benchmarks.md](benchmarks.md) §9 and updates the row.
+- A PR validation summary with the standard classes and concurrencies before
+  quoting any number. Use `timed_load` and the maintained serving clients; a
+  change that moves a published number re-runs its procedure from
+  [benchmarks.md](benchmarks.md#reproduce) and updates the row. Keep raw runs
+  outside the tracked documentation.
 
 ## 9. Docs landing
 

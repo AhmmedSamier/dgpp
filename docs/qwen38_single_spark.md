@@ -44,7 +44,7 @@ fabric's mode) or `"mmap"`. Under mmap:
 - the loader maps the table's shard(s) read-only with `MADV_RANDOM`
   (`QwenNgramTableMmap`: the 128 parts' file offsets, global row r → part
   r / 2,500,012), keeps the BF16 scale, reports zero table bytes to the
-  memory plan (`ngram_table_bytes`), and never copies a row;
+  memory plan (`ngram_table_bytes`), and never copies a row.
 - the PLE layer stages inside the walk: at the walk's start the device hash
   kernel writes its ids into pinned memory; a host node forked off the
   model's stream (`cudaLaunchHostFunc` on a side stream joined by events)
@@ -56,7 +56,7 @@ fabric's mode) or `"mmap"`. Under mmap:
   own tokens and context, so nothing mirrors them on the host and the
   pipelined replay (the next graph enqueued before the draft block's tail
   settles) keeps working: the drafts the host does not know at launch are
-  read by the graph itself;
+  read by the graph itself.
 - the captured graph carries one host node; the kernels-only census
   (`check_decode_graph`) takes the family's declared count
   (`session_graph_host_nodes()`) — a host node waits on nothing but its
@@ -343,7 +343,7 @@ layer's 512 experts to int4 g128 RTN. The n-gram table is not in the repo.
 `deploy/cluster_qwen-3.8-flash-next_autoround-int4_w1.example.json` serves
 it on one Spark; the plan and the decisions are in
 `docs/qwen38_autoround_int4_plan.md`, the evidence in
-`benchmarks/results/2026-09-28-qwen-autoround-int4/`.
+the 2026-09-28-qwen-autoround-int4 measurements.
 
 **Served as packed, as shipped.** The packed-int cores (`packq_gemv.cuh`,
 the slot kernels, the tile GEMM) take a scale format: bf16 per 64 (full

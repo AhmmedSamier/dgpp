@@ -1,4 +1,7 @@
 #pragma once
+#include "engine/prefill_cursor.hpp"
+#include "engine/prefill_batch.hpp"
+#include "engine/logits_storage.hpp"
 #include "models/glm/vision.hpp"
 // GLM-5.3 text model for diagnostic forward passes and serving sessions.
 // Streaming mode rebinds layer objects to one loaded layer at a time;
@@ -226,25 +229,51 @@ class GlmDiagnosticModel : public PrefillReporting {
     SnapshotRequest* next = nullptr;  // additional cuts, owned by the caller
   };
   static constexpr bool kResumablePrefill = true;
+  static constexpr bool kPrefillGroupAdvance = true;
+  static constexpr bool kMixedPrefillVerify = true;
+  using RowRun = dgpp::RowRun;
   // The engine owns ids/images/snap for the cursor's entire lifetime.
   // No shared GPU scratch or image pointer survives an advance.
-  struct PrefillCursor {
-    int req = -1;
-    const int64_t* ids = nullptr;
+  struct PrefillCursor : PrefillContinuation<Outputs, SnapshotRequest> {
     const std::vector<ImageInput>* images = nullptr;
-    int64_t start = 0, end = 0, next = 0, budget_tokens = 0;
-    uint64_t epoch = 0;
-    std::vector<int64_t> cuts;
-    size_t cut_index = 0;
-    bool suspended = false, catchup = false;
-    SnapshotRequest* snap = nullptr;
-    Outputs output;
+    bool catchup = false;
   };
   PrefillCursor session_prefill_begin(int req, const std::vector<int64_t>& prompt,
       int64_t reserve_tokens, int64_t chunk_tokens, const std::vector<int64_t>& boundaries = {},
       SnapshotRequest* snap = nullptr, int64_t attach_position = 0,
       const std::vector<ImageInput>* images = nullptr);
   bool session_prefill_advance(PrefillCursor& cursor, int64_t chunk_tokens = 0);
+  std::vector<Outputs> session_prefill_verify_group(const std::vector<PrefillCursor*>& cursors,
+      const std::vector<int64_t>& budgets, const std::vector<int>& reqs,
+      const std::vector<std::vector<int64_t>>& feeds, int graph_rows = 0) {
+    return PrefillBatch<GlmDiagnosticModel>::run(*this, cursors, budgets, reqs, feeds, graph_rows);
+  }
+  std::vector<Outputs> session_prefill_verify(PrefillCursor& cursor, int64_t budget,
+      const std::vector<int>& reqs, const std::vector<std::vector<int64_t>>& feeds, int graph_rows = 0) {
+    return session_prefill_verify_group({&cursor}, {budget}, reqs, feeds, graph_rows);
+  }
+  std::vector<bool> session_prefill_advance_group(const std::vector<PrefillCursor*>& cursors,
+      const std::vector<int64_t>& budgets) {
+    if (cursors.empty() && budgets.empty()) return {};
+    (void)PrefillBatch<GlmDiagnosticModel>::run(*this, cursors, budgets, {}, {});
+    std::vector<bool> done;
+    for (const auto* cursor : cursors) done.push_back(cursor->next == cursor->end);
+    return done;
+  }
+  void prepare_mixed_verify(int) {}
+  bool prefill_batch_fits(const RowRun& run) const {
+    return run.num_spans - run.decode_spans <= max_mixed_prefill_readers(run.decode_rows());
+  }
+  int max_mixed_prefill_readers(int decode_rows) const {
+    return std::max(0, std::min({max_requests_, mixed_output_rows(kDecodeRows, max_requests_) - decode_rows, logits_capacity_rows_ - decode_rows}));
+  }
+  void finish_mixed_prefill(PrefillCursor& cursor) {
+    if (cursor.next == cursor.end && cursor.suspended) {
+      push_position(cursor.req);
+      if (mtp_) push_mtp_position(cursor.req);
+      cursor.suspended = false;
+    }
+  }
   Outputs session_prefill(int req, const std::vector<int64_t>& prompt_ids,
                           const std::vector<int64_t>& boundaries,
                           SnapshotRequest* snap = nullptr);
@@ -304,13 +333,14 @@ class GlmDiagnosticModel : public PrefillReporting {
   // per-position hidden cache, scalar): past depth 1 the graph engine
   // serves scalar replays.
   static constexpr bool kBatchedDraftChain = false;
+  static constexpr bool kCompactBatches = true;
   // No confidence head: the graph engine never schedules this family's
   // verify depth.
   static constexpr bool kVerifyConfidence = false;
   // No host nodes in a captured walk (engine/graph_check.hpp).
   size_t session_graph_host_nodes() const { return 0; }
   Outputs session_verify(int req, const std::vector<int64_t>& token_ids);
-  void session_rollback(int req, int accepted);
+  void session_rollback(int req, int accepted, int total_rows = 0, int snapshot_row0 = 0);
   // The draft block's rollback (M6 6b, the sampled one-graph step): the
   // in-graph draft snapshots the block's DSA tail ring BEFORE its rows run
   // (a recorded copy kernel per request), so when a verdict row fell back
@@ -598,11 +628,14 @@ class GlmDiagnosticModel : public PrefillReporting {
   // a 3-slot batch beside the full one and replays the smallest that
   // covers the live slots, so two live requests pay four rows, not eight.
   void session_graph_capture_batch(int rows_per_request, int requests = 0, int feed_rows = 0);
+  void session_graph_capture_batch_inputs(int rows_per_request, int requests = 0, int feed_rows = 0);
   // Restores the immutable slot-major row map in the graph's pinned memcpy
   // sources. Eager prefill/draft operations reuse those staging buffers, so
   // the adapter calls this before every replay; the recorded H2D nodes then
   // publish the restored map without changing graph structure.
   void session_graph_stage_batch();
+  void session_graph_batch_map_source(const int32_t* source) { graph_batch_map_source_ = source; }
+  const int32_t* device_batch_map() const { return d_batch_map_; }
   void session_graph_capture_commit_batch(
       const PickVerdict* device_verdicts);
   void session_graph_capture_draft_batch(
@@ -719,6 +752,29 @@ class GlmDiagnosticModel : public PrefillReporting {
       const std::vector<float>& logits, int64_t rows, int vocab, int k);
 
  private:
+  template <class> friend struct PrefillBatch;
+  template <class> friend struct GraphBatchMapping;
+  GlmDiagnosticModel& derived() { return *this; }
+  int64_t prefill_vocab_size() const { return cfg_.vocab_size; }
+  int prefill_hidden_size() const { return cfg_.hidden_size; }
+  bool has_pool() const { return dsa_cfg_.num_dsa_layers > 0; }
+  DsaStatePool& pool() { return pool_; }
+  void check_req(int req, const char* operation) const {
+    if (req < 0 || req >= max_requests_) throw std::out_of_range(std::string(operation) + ": invalid request");
+  }
+  void validate_prefill_cursor(const PrefillCursor& cursor, const char* operation) const {
+    check_req(cursor.req, operation);
+    if (cursor.epoch != prefill_epochs_[cursor.req] || cursor.next >= cursor.end ||
+        session_pos_[cursor.req] != cursor.next) throw std::logic_error(std::string(operation) + ": stale cursor");
+  }
+  void validate_mixed_prefill_cursor(const PrefillCursor& cursor) const {
+    if (cursor.images && !cursor.images->empty()) throw std::invalid_argument("image prefill cannot share a row walk");
+  }
+  void prepare_prefill_cursor(PrefillCursor& cursor) {
+    if (cursor.catchup) { (void)session_draft(cursor.req, {cursor.ids[0]}); cursor.catchup = false; }
+  }
+  Outputs run_rows(const RowRun& run);
+
   // Produces the layer's weight views — full (world=1, byte-identical to
   // the M4 path) or this rank's slice (GlmTpViews). `dense_mlp` mirrors
   // cfg_.mlps[layer]; exactly one attention and one MLP view is set.
@@ -849,6 +905,10 @@ class GlmDiagnosticModel : public PrefillReporting {
   // mirrors per span); null / 0 otherwise.
   const int32_t* group_span_reqs_ = nullptr;
   const int32_t* group_span_lens_ = nullptr;
+  const int64_t* group_span_pos0_ = nullptr;
+  int group_decode_spans_ = 0, group_decode_rows_ = 0;
+  bool group_device_outputs_ = false;
+  const RowRun* prefill_run_ = nullptr;  // borrowed for one synchronous walk
   int group_num_spans_ = 0;
   int moe_graph_slots() const { return n_moe_layers_ + (mtp_ ? 1 : 0); }
   // The decode tail shared by the eager step and the graph-era collect:
@@ -969,6 +1029,8 @@ class GlmDiagnosticModel : public PrefillReporting {
   bool graph_device_positions_ = false;  // the captured graph's mode
   bool graph_device_tokens_ = false;     // no token upload node
   bool graph_has_draft_ = false;         // the draft block is in the graph
+  int32_t* d_batch_map_ = nullptr;
+  const int32_t* graph_batch_map_source_ = nullptr;
   int graph_batch_requests_ = 0;         // 0 = scalar graph contract
   int graph_rows_per_request_ = 0;
   int graph_feed_rows_ = 0;              // a scalar capture's feed rows (>= its verified rows)
@@ -1055,8 +1117,8 @@ class GlmDiagnosticModel : public PrefillReporting {
   // ride D2H copies (graph memcpy nodes in the replay) into these, and the
   // managed pages stay GPU-resident.
   uint64_t* h_graph_start_gt_ = nullptr;  // pinned: %globaltimer at the step's first node
-  float* h_tail_logits_ = nullptr;      // pinned [kDecodeRows * lm_vocab_count_]
-  uint16_t* h_tail_hidden_ = nullptr;   // pinned [kDecodeRows * H]
+  float* h_tail_logits_ = nullptr;      // pinned [mixed output rows * lm_vocab_count_]
+  uint16_t* h_tail_hidden_ = nullptr;   // pinned [mixed output rows * H]
   uint16_t* streams_[2] = {nullptr, nullptr};  // [T, 4, hidden]
   uint16_t* post_ = nullptr;                   // [T, 4]
   float* mhc_logits_ = nullptr;                // [T, 24] mHC dots scratch

@@ -1,4 +1,0 @@
-PASS: inline text file reaches the model
-PASS: constrained custom regex tool
-PASS: constrained custom lark tool
-PASS: strict schema with pattern and decimal multiple

@@ -25,6 +25,7 @@
 
 #include "kernels/rope_scaling.hpp"
 #include "serve/http_limits.hpp"
+#include "sched/prefill_latency.hpp"
 
 namespace dgpp::serve {
 
@@ -184,7 +185,7 @@ struct ClusterConfig {
     int admission_gather_ms = 3;
     int max_connections = 64;
     bool no_eos = false;
-    bool compact_batches = false;
+    bool compact_batches = true;
     bool decode_graph = false;
     bool mtp = false;
     int mtp_depth = 1;             // draft tokens per step (1..5); needs mtp
@@ -283,9 +284,12 @@ struct ClusterConfig {
     bool prefix_head_snapshots = true;  // a cold prompt also keeps its first structural cut (the system prompt's end)
     std::string admission = "full";
     int admission_window = 256;
-    int prefill_budget_tokens = -1;  // automatic on engines with resumable prefill
+    int prefill_budget_tokens = -1;  // automatic: 256 tokens, adjusted to engine geometry
     std::string model_alias = "";  // override the served model name (display only)
-    int prefill_idle_budget_tokens = 0;
+    int prefill_idle_budget_tokens = 0;  // auto busy: up to 4096 for grouped prefill; explicit busy: same budget
+    int decode_gap_target_ms = sched::kDefaultDecodeGapTargetMs;
+    int first_token_target_ms = sched::kDefaultFirstTokenTargetMs;
+    sched::PrefillLatencyTuning prefill_latency;
     // Omitted: resolve from the constructed engine's mixed-execution support.
     // Settings retain auto/on/off; the warm journal carries the resolved bool.
     std::optional<bool> prefill_early_admission;
