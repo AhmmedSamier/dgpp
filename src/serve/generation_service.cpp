@@ -1,5 +1,6 @@
 #include "serve/generation_service.hpp"
 #include "serve/audio_inputs.hpp"
+#include "serve/audio_transcriptions.hpp"
 #include "serve/image_inputs.hpp"
 #include "text/dsv41_prompt.hpp"
 
@@ -1756,8 +1757,11 @@ void GenerationService::handle(const HttpRequest& req,
       route_completions(req, w);
     return;
   }
-  if (p == "/v1/models" || p.rfind("/v1/models/", 0) == 0) {
-    if (req.method != "GET") {
+  if (p == "/v1/audio/transcriptions") {
+    route_audio_transcriptions(req, w);
+    return;
+  }
+  if (p == "/v1/models" || p.rfind("/v1/models/", 0) == 0) {    if (req.method != "GET") {
       respond_error(w, 405, req.method + " is not allowed here; use GET",
                     "invalid_request_error");
       return;
@@ -1967,6 +1971,12 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
                   "invalid_request_error", "body");
     return;
   }
+  route_chat_completions_parsed(body, w, "");
+}
+
+void GenerationService::route_chat_completions_parsed(const dgpp::minijson::Value& body,
+                                                      HttpResponseWriter& w,
+                                                      const std::string& transcription_format) {
 
   // model — must name the served model.
   const dgpp::minijson::Value* model = body.find("model");
@@ -2163,6 +2173,7 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
     record->model = cfg_.model_id;
     record->created_unix = created;
     record->chat = true;
+    record->transcription_format = transcription_format;
     record->custom_tools = plan.custom_tools;
     record->stream = stream;
     record->include_usage = include_usage;
@@ -2202,6 +2213,41 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
   }
   w.set_stream_tag(tag);
   enqueue_group(std::move(records), std::move(requests));
+}
+
+// ---------------------------------------------------------------------------
+// POST /v1/audio/transcriptions (the OpenAI transcription API, docs/audio.md)
+// ---------------------------------------------------------------------------
+
+void GenerationService::route_audio_transcriptions(const HttpRequest& req,
+                                                  HttpResponseWriter& w) {
+  if (req.method != "POST") {
+    respond_error(w, 405, req.method + " is not allowed here; use POST",
+                  "invalid_request_error");
+    return;
+  }
+  const std::string* content_type = req.header("content-type");
+  std::vector<MultipartPart> parts;
+  try {
+    parts = parse_multipart(content_type != nullptr ? *content_type : "", req.body);
+  } catch (const MultipartError& e) {
+    respond_error(w, 400, e.what(), "invalid_request_error", e.param);
+    return;
+  }
+  TranscriptionRequest treq;
+  try {
+    treq = transcription_chat_body(parts, cfg_.model_id);
+  } catch (const MultipartError& e) {
+    if (e.status == 404)
+      respond_error(w, 404, e.what(), "invalid_request_error", e.param, "model_not_found");
+    else
+      respond_error(w, 400, e.what(), "invalid_request_error", e.param);
+    return;
+  } catch (const AudioInputError& e) {
+    respond_error(w, 400, e.what(), "invalid_request_error", e.param, "invalid_audio");
+    return;
+  }
+  route_chat_completions_parsed(treq.body, w, treq.response_format);
 }
 
 // ---------------------------------------------------------------------------
@@ -3827,7 +3873,23 @@ void GenerationService::pump_records() {
               text_choice_json(r->choice, r->out_text, finish, lp_json);
         }
         if (++g.finished == g.n && !g.ended) {
-          std::string joined;
+          if (!r->transcription_format.empty()) {
+            // The transcription shapes (docs/audio.md): "json" answers
+            // {"text"} and "text" answers the raw transcript. No usage
+            // block and no timings; the per-choice chat assembly above is
+            // discarded (transcriptions always run a single choice).
+            sanitize_utf8(&r->content);
+            if (r->transcription_format == "text") {
+              r->writer->respond(200, "text/plain; charset=utf-8", r->content);
+            } else {
+              std::string response = "{\"text\":";
+              append_json_string(&response, r->content);
+              response.push_back('}');
+              r->writer->respond(200, "application/json", std::move(response));
+            }
+            g.ended = true;
+          } else {
+            std::string joined;
           for (size_t i = 0; i < g.choices.size(); ++i) {
             if (i) joined.push_back(',');
             joined += g.choices[i];
@@ -3848,6 +3910,7 @@ void GenerationService::pump_records() {
           response.push_back('}');
           r->writer->respond(200, "application/json", std::move(response));
           g.ended = true;
+          }
         }
       }
     }

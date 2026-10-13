@@ -986,6 +986,7 @@ set_tests_properties(mimo_chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
 # journal (fabric_serve.cpp over the host-only dgpp_net TCP primitives).
 add_library(dgpp_serve STATIC
   src/serve/audio_inputs.cpp
+  src/serve/audio_transcriptions.cpp
   src/serve/audio_frontend.cpp
   src/serve/qwen_asr_audio_frontend.cpp
   src/serve/image_inputs.cpp

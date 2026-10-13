@@ -427,6 +427,11 @@ class GenerationService : public HttpHandler,
     std::string model;
     int64_t created_unix = 0;
     bool chat = false;       // chat route (the parser path) vs legacy
+    // Transcription route (POST /v1/audio/transcriptions): "" on chat and
+    // legacy records, else the response shape ("json" or "text"). The
+    // record still generates exactly like a one-shot chat choice; only the
+    // final response assembly differs.
+    std::string transcription_format;
     bool stream = false;
     bool include_usage = false;
     bool include_obfuscation = true;
@@ -506,6 +511,13 @@ class GenerationService : public HttpHandler,
   // directly or creates a record + enqueues an admission.
   void route_chat_completions(const HttpRequest& req,
                               HttpResponseWriter& w);
+  // The parsed-body half of route_chat_completions, shared with the
+  // transcription route (which synthesizes its body from multipart parts).
+  // transcription_format is "" for chat, else the /v1/audio/transcriptions
+  // response shape ("json" or "text").
+  void route_chat_completions_parsed(const dgpp::minijson::Value& body, HttpResponseWriter& w,
+                                     const std::string& transcription_format);
+  void route_audio_transcriptions(const HttpRequest& req, HttpResponseWriter& w);
   void route_completions(const HttpRequest& req, HttpResponseWriter& w);
   void route_models(const HttpRequest& req, HttpResponseWriter& w);
   void route_health(HttpResponseWriter& w) const;

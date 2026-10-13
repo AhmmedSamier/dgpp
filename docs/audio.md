@@ -90,6 +90,27 @@ performance changes below (same 49-token transcription throughout). The
 remaining 149 ms is roughly host log-mel (86 ms), device tower (~30 ms)
 and LM walk (~35 ms); the FFT frontend would take the first of those.
 
+## Transcriptions
+
+`POST /v1/audio/transcriptions` speaks the OpenAI transcription API over
+the same engine: multipart/form-data carrying the audio `file` plus
+`model`, `language`, `prompt`, `response_format` (`json` or `text`) and
+`temperature`. The route validates the parts, folds them into the
+chat-completions body the engine already serves (the file as one
+`input_audio` part, the prompt as the system message, a
+duration-proportional `max_tokens`), and answers `{"text": ...}` or the
+raw transcript with no usage block.
+
+Two checkpoint facts shape the semantics. `language` is validated as a
+string and documented, not rendered: the checkpoint auto-detects and
+prefixes its own output with `language <NAME>`, and a live probe showed
+system text does not condition this model. And the raw transcript is
+returned verbatim for both formats: the model glues the language prefix
+straight onto the text with no `<asr_text>` marker to split on. Only
+`json` and `text` are accepted as `response_format`; anything else is a
+400 naming the field, as is an undecodable file (naming `file`) or a
+wrong model (404). Errors reuse the chat contract otherwise.
+
 The first-request tax deserves its own note: the first cublasLt use in a
 process pays lazy library loads and kernel JIT (profiled at 2.6 s on a
 first 96-row forward vs 34 ms warm). The model constructor warms one dummy
