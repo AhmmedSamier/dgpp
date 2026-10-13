@@ -1,10 +1,11 @@
 # GLM-5.3-Flash curated reference suite (M4, DESIGN §7.5)
 
-The original suite used three reference comparisons with tokenized prompts
-and one engine-only trace case. Its input corpus is not bundled with the
-repository. Supply your own `smoke.ids`, `factual.ids`, `code.ids` and
-`trace.ids` files, containing comma-separated token IDs from the checkpoint's
-tokenizer. To tokenize a local text, use
+The suite has three reference comparisons with tokenized prompts and one
+engine-only trace case. Its input corpus is tracked under
+`benchmarks/glm-suite/ids/` (`smoke.ids`, `factual.ids`, `code.ids` and
+`trace.ids`: comma-separated token IDs from the checkpoint's tokenizer), and
+`benchmarks/glm-suite/suite.txt` is the suite-file template. To tokenize
+another text, use
 `python3 scripts/prepare_data.py tokens --model MODEL --text FILE --out FILE`
 with the matching model cached locally. Retain the inputs and tokenizer
 revision alongside the results.
@@ -19,9 +20,9 @@ dump; blank lines and `#` comments are allowed.
 
 ```
 CKPT=/path/to/checkpoint/snapshot
-IDS=/path/to/reference/ids
+IDS=benchmarks/glm-suite/ids
 OUT=/path/to/reference/dumps
-SUITE=/path/to/suite-file
+SUITE=/path/to/suite-file   # a filled-in copy of benchmarks/glm-suite/suite.txt
 mkdir -p "$OUT"
 # Full-depth dumps (~3.3 s/layer measured; 4-10 min/case at 45 layers):
 for c in smoke factual code; do

@@ -1,9 +1,0 @@
-2026-10-12 02:28:21.853 === SIGINT rank 0 (520931) — the stop record releases the peers
-2026-10-12 02:28:23.854 === waiting for the peers to drain
-2026-10-12 02:28:27.898 === op-stream identity (every rank)
-2026-10-12 02:28:27.899 a74771515429c089bfeb0b480c969529  /home/stephen/workspace/dgpp/build-pr104-shared/cache-probabilities-v11/candidate-deferred/world/serve_rank0.ops
-2026-10-12 02:28:27.899 a74771515429c089bfeb0b480c969529  /home/stephen/workspace/dgpp/build-pr104-shared/cache-probabilities-v11/candidate-deferred/world/serve_rank1.ops
-2026-10-12 02:28:27.899 a74771515429c089bfeb0b480c969529  /home/stephen/workspace/dgpp/build-pr104-shared/cache-probabilities-v11/candidate-deferred/world/serve_rank2.ops
-2026-10-12 02:28:27.899 a74771515429c089bfeb0b480c969529  /home/stephen/workspace/dgpp/build-pr104-shared/cache-probabilities-v11/candidate-deferred/world/serve_rank3.ops
-2026-10-12 02:28:27.899 op streams: identical across 4 ranks
-2026-10-12 02:28:27.899 === logs in /home/stephen/workspace/dgpp/build-pr104-shared/cache-probabilities-v11/candidate-deferred/world

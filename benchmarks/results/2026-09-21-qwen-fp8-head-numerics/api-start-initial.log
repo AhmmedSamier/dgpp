@@ -1,1 +1,0 @@
-cluster configuration: move nodes, ssh_user, and ports out of the deployment JSON into .env; use world_size

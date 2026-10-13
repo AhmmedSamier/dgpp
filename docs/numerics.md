@@ -10,12 +10,10 @@ checkpoint, rank count and decode capacity for both modes:
 python3 - <<'PY'
 import json
 from pathlib import Path
-# Supply your own UTF-8 inputs; these corpora are not bundled with the repo.
-corpus = Path("/path/to/teacher-texts")
-texts = [("quick", "quick.txt"), ("hard", "hard.txt"),
-         ("predictable", "predictable.txt")]
+texts = [("quick", "teacher_text.txt"), ("hard", "teacher_text_hard.txt"),
+         ("memorized", "teacher_text_memorized.txt")]
 Path("/tmp/corpora.json").write_text(json.dumps([
-    {"name": name, "text": (corpus / filename).read_text()}
+    {"name": name, "text": (Path("benchmarks") / filename).read_text()}
     for name, filename in texts]) + "\n")
 PY
 scripts/fabric_run.sh --app build-ci/qwen_head_check --fetch-logs \
@@ -91,7 +89,7 @@ one:
   top-2 logit margin there in bf16 ulps. A flip at ≤ 1-2 ulp is a near-tie;
   a flip at a wide margin is a defect.
 - `scripts/fabric_logprob.py NEW_DIR REF_DIR` — the quantitative gate. Run
-  both builds with `--teacher-file /path/to/teacher.txt` (the app
+  both builds with `--teacher-file benchmarks/teacher_text.txt` (the app
   scores the text's own tokens instead of generating; `--stage-file` puts the
   text on every rank), and the tool joins the ranks' vocabulary slices into
   log p(token) per position and reports the text's perplexity, the per-token
@@ -99,9 +97,9 @@ one:
   (default 0.02 nat ≈ 2% of perplexity):
 
   ```
-  scripts/fabric_run.sh --stage-file /path/to/teacher.txt -- \
+  scripts/fabric_run.sh --stage-file benchmarks/teacher_text.txt -- \
       --model unsloth/GLM-5.3-Flash-FP8 --text "Encyclopedia article." \
-      --teacher-file /path/to/teacher.txt --decode-graph
+      --teacher-file benchmarks/teacher_text.txt --decode-graph
   scripts/fabric_logprob.py /path/to/new_logs /path/to/ref_logs
   ```
 
@@ -111,13 +109,12 @@ one:
   The logits are fp32 (the head's accumulators,
   unrounded), but the residual stream feeding the head is bf16, so
   single-token deltas of ~0.1 nat are normal between builds that differ in
-  reduction order; the mean over the text is the signal. The historical GLM
-  checks used
-  a short smoke text, unmemorized technical prose (the sensitive regime) and
-  highly predictable text (the confident regime). Those input files are not
-  shipped. Supply and retain your own texts, tokenizer revision and token
-  counts; use the same inputs on both builds. Expect a handful of positions
-  per thousand
+  reduction order; the mean over the text is the signal. Three
+  texts ship: `teacher_text.txt` (556 tokens, a quick look),
+  `teacher_text_hard.txt` (7,331 tokens of unmemorized technical prose,
+  perplexity ~10.8 — the sensitive one; use it for the verdict) and
+  `teacher_text_memorized.txt` (6,549 tokens of Conan Doyle, perplexity
+  1.04 — the confident regime). Expect a handful of positions per thousand
   to move by more than 1 nat between any two rounding-level builds: a
   router's top-k boundary flipped an expert there. The tool bounds the
   *rate* of those, not the worst one.
@@ -135,10 +132,10 @@ one:
   ```bash
   DGPP_CLUSTER_CONFIG=deploy/cluster_glm-5.3_int4-int8_w4.json \
   scripts/fabric_run.sh --app build-ci/glm_dsa_forward_check --fetch-logs \
-      --stage-file /path/to/teacher.txt --log-dir /tmp/prefill-new -- \
+      --stage-file benchmarks/teacher_text.txt --log-dir /tmp/prefill-new -- \
       --model HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64 --resident \
       --image-dir /path/to/resident-cache \
-      --teacher-file /path/to/teacher.txt
+      --teacher-file benchmarks/teacher_text.txt
   python3 scripts/fabric_logprob.py /tmp/prefill-new /tmp/prefill-ref --prefill
   ```
 
@@ -155,9 +152,9 @@ one:
 
   ```
   scripts/fabric_run.sh --fetch-logs \
-      --stage-file /path/to/teacher.txt --log-dir /tmp/mass-quick -- \
+      --stage-file benchmarks/teacher_text.txt --log-dir /tmp/mass-quick -- \
       --model unsloth/GLM-5.3-Flash-FP8 --text "Encyclopedia article." \
-      --teacher-file /path/to/teacher.txt --sampling-profile \
+      --teacher-file benchmarks/teacher_text.txt --sampling-profile \
       --decode-graph
   # Repeat as /tmp/mass-hard and /tmp/mass-memorized with the other texts.
   python3 scripts/fabric_sampling_profile.py \
@@ -194,9 +191,9 @@ vocabulary scores consumed by the existing logprob analyzer:
 
 ```bash
 scripts/fabric_run.sh --app build-ci/serving_head_check --fetch-logs \
-    --stage-file /path/to/teacher-hard.txt --log-dir /tmp/head-full -- \
+    --stage-file benchmarks/teacher_text_hard.txt --log-dir /tmp/head-full -- \
     --model nvidia/GLM-4.7-NVFP4 \
-    --teacher-file /path/to/teacher-hard.txt --full --trials 256
+    --teacher-file benchmarks/teacher_text_hard.txt --full --trials 256
 # Repeat with --log-dir /tmp/head-compact and --compact.
 python3 scripts/fabric_logprob.py /tmp/head-compact /tmp/head-full --prefill \
     --max-mean-nll-delta 0.0001 --big-delta 0.001 --max-big-delta-rate 0

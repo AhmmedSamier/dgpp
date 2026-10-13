@@ -1,9 +1,0 @@
-{
-  "hashes": {
-    "serve_rank0.ops": "16a6c03ae05f4e3d8854e12c10c41c508e7e66e72f978328876002dbf5211f63",
-    "serve_rank1.ops": "16a6c03ae05f4e3d8854e12c10c41c508e7e66e72f978328876002dbf5211f63",
-    "serve_rank2.ops": "16a6c03ae05f4e3d8854e12c10c41c508e7e66e72f978328876002dbf5211f63",
-    "serve_rank3.ops": "16a6c03ae05f4e3d8854e12c10c41c508e7e66e72f978328876002dbf5211f63"
-  },
-  "match": true
-}

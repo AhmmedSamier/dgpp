@@ -980,8 +980,8 @@ shorter rounds' gain (handshake + skew 55.8 -> 51.9 us) goes back in an
 unstaged fold that re-reads rows whose loads have only just been issued
 (12.3 -> 16.6 us); taking those rows peer by peer inside the pass was worse
 (77.4 us: the first ack waits for all three) and was reverted.
-The local doorbell probe in that campaign confirmed that the GB10 maps an
-mlx5 doorbell page for device access (`cudaHostRegisterIoMemory`), the
+`benchmarks/micro/uar_probe.cpp` records that the GB10 does map an mlx5
+doorbell page for device access (`cudaHostRegisterIoMemory`), the
 precondition of a kernel-rung send doorbell (~3 us of each handshake: the
 engine's notice and post).
 
@@ -2221,7 +2221,7 @@ from its own prior — an undeclared name, or the same one twice, which a
 client cannot tell from a model fault. A schema that declares no
 `properties` at all has nothing to close to and keeps the free key; an
 explicit `additionalProperties: true` keeps it as well, and is noted once
-naming the tool (record).
+naming the tool.
 An explicitly empty `properties: {}` closes to the empty key set. A
 schema-valued `additionalProperties` also closes the declared top-level set
 in non-strict mode; it cannot type arbitrary argument names on this path.

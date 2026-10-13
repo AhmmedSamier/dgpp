@@ -1,10 +1,11 @@
 # Comparing MiMo serving changes
 
-The original MiMo comparison used a local 19-request corpus and helper
-scripts that are not bundled with the repository. Its measurements remain
-historical evidence. For new comparisons, use the maintained serving probes
-below and retain any additional prompts or harness fixtures with your results.
-These scenarios do not reproduce the original panel's measurements.
+The original MiMo comparison used a local 19-request corpus with the probe
+scripts under `benchmarks/mimo_upstream/` (their invocation is in the last
+section). Its raw measurements are not tracked. For new comparisons, use the
+maintained serving probes below and retain any additional prompts or harness
+fixtures with your results. These scenarios do not reproduce the original
+panel's measurements.
 
 Reserve an exclusive server and use a fresh output path for each build and
 configuration. The probes target an already running service. Keep startup and
@@ -95,3 +96,42 @@ three flags enabled, and run the history test under Compute Sanitizer.
 Loopback worlds on two machines do not establish four-node physical fabric
 coverage. Retain failed, skipped and completed attempts in local or external
 artifacts, and summarize the evidence and limitations in the PR.
+
+## Original comparison probes
+
+The probes under `benchmarks/mimo_upstream/` are Python standard-library
+scripts that target an already running server. They never deploy or restart
+it, delete caches, or execute generated tools. Use an exclusive server: the
+probes check idle boundaries and request-counter deltas and refuse to
+overwrite existing results. From the repository root, select an API and an
+output directory, then run the probes for a tag:
+
+```sh
+export DGPP_MIMO_BENCH_URL=http://127.0.0.1:30001/v1
+export DGPP_MIMO_BENCH_ROOT=/path/to/experiment
+python3 benchmarks/mimo_upstream/benchmark.py native-mtp3
+python3 benchmarks/mimo_upstream/acceptance.py native-mtp3
+python3 benchmarks/mimo_upstream/cache_reuse.py native-mtp3
+python3 benchmarks/mimo_upstream/tool_probe.py native-mtp3
+python3 benchmarks/mimo_upstream/quality.py native-mtp3 2800 6000
+python3 benchmarks/mimo_upstream/order_probe.py native-mtp3 --repeats 3
+```
+
+`capture.py live TAG --hosts ...` and `capture.py stopped TAG --hosts ...`
+(SSH targets in rank order) record rank provenance and logs before and after
+the world is stopped; the stopped capture checks that the ranks' operation
+streams match. Record the exact Git commit, binary SHA256, deployment JSON and
+rank environment alongside the results. The original tags were `control-mtp1`
+(depth 1), `recursive-mtp3` (depth 3), `native-mtp3` (depth 3, native MTP),
+`integrated-mtp3` (native MTP with the final-row head and one-head cache-only
+history) and `control-repeat`; `summarize.py --reference control-mtp1
+--output SUMMARY TAG...` compares them. The 19-request timing panel covers
+short solo/concurrent code and JSON, solo prose/maths, cold 7K/31K prompts
+and cold/warm 67K prompts; its client decode rate is
+`(completion_tokens - 1) / seconds_after_first_visible_delta`, not the engine
+counter. `order_probe.py` changes arrival order and is diagnostic only;
+`compare_outputs.py --output variants.json FILE...` groups exact
+content/reasoning variants offline. `tool_probe.py` carries the original
+failing tool request and validates the assembled SSE arguments; the optional
+`harness_replay.py` reproduces the original client path when
+`DGPP_HARNESS_ROOT` points at that client's checkout.

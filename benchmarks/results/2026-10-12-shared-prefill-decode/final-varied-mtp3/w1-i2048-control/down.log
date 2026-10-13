@@ -1,5 +1,0 @@
-2026-10-12 03:31:53.127 === SIGINT rank 0 (733585) — the stop record releases the peers
-2026-10-12 03:31:55.128 === op-stream identity (every rank)
-2026-10-12 03:31:55.128 c4bef7eb21e5098d0bacfdea50d345eb  /home/stephen/workspace/dgpp/build-pr104-shared/final-varied-mtp3/w1-i2048-control/world/serve_rank0.ops
-2026-10-12 03:31:55.128 op streams: identical across 1 ranks
-2026-10-12 03:31:55.128 === logs in /home/stephen/workspace/dgpp/build-pr104-shared/final-varied-mtp3/w1-i2048-control/world

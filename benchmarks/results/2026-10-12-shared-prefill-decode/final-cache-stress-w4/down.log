@@ -1,9 +1,0 @@
-2026-10-12 03:02:36.047 === SIGINT rank 0 (649746) — the stop record releases the peers
-2026-10-12 03:02:38.049 === waiting for the peers to drain
-2026-10-12 03:02:42.121 === op-stream identity (every rank)
-2026-10-12 03:02:42.122 ccd0bc92d8c57cdaca530c1605bb242b  /home/stephen/workspace/dgpp/build-pr104-shared/final-cache-stress-w4/world/serve_rank0.ops
-2026-10-12 03:02:42.124 ccd0bc92d8c57cdaca530c1605bb242b  /home/stephen/workspace/dgpp/build-pr104-shared/final-cache-stress-w4/world/serve_rank1.ops
-2026-10-12 03:02:42.124 ccd0bc92d8c57cdaca530c1605bb242b  /home/stephen/workspace/dgpp/build-pr104-shared/final-cache-stress-w4/world/serve_rank2.ops
-2026-10-12 03:02:42.125 ccd0bc92d8c57cdaca530c1605bb242b  /home/stephen/workspace/dgpp/build-pr104-shared/final-cache-stress-w4/world/serve_rank3.ops
-2026-10-12 03:02:42.125 op streams: identical across 4 ranks
-2026-10-12 03:02:42.125 === logs in /home/stephen/workspace/dgpp/build-pr104-shared/final-cache-stress-w4/world
