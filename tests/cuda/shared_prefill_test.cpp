@@ -412,6 +412,53 @@ DGPP_TEST(shared_prefill_glm) {
         GlmResidency::Resident, GlmHeadSharding::Full, 4, mtp, LatentFormat::kBf16, compact);
   }, cfg.vocab_size, cfg.dsa_config().index_kpool);
 }
+// GLM-5.3-Flash: a decoder's verify rows inside a mixed walk are bitwise its
+// own verify pass. Every site (mHC, KDA/DSA, dense, experts, head) issues
+// the decode pass's launch for the prefix; the readers follow behind it.
+DGPP_TEST(shared_prefill_glm_mixed_decoder_rows_are_native) {
+  const auto cfg = glm_tp_test_config();
+  const std::string dir = "shared_glm_mixed_fixture";
+  glm_tp_write_fixture(dir);
+  const int vocab = cfg.vocab_size, align = cfg.dsa_config().index_kpool;
+  const int64_t budget = std::max(256, 2 * align) / align * align;
+  const auto a = tokens(259, vocab, 13), b = tokens(133, vocab, 17);
+  for (bool mtp : {false, true}) {
+    GlmDiagnosticModel model(cfg, dir, 2048, 4096, nullptr, 0, 1, GlmResidency::Resident,
+                             GlmHeadSharding::Full, 4, mtp, LatentFormat::kBf16, true);
+    GlmDiagnosticModel reference(cfg, dir, 2048, 4096, nullptr, 0, 1, GlmResidency::Resident,
+                                 GlmHeadSharding::Full, 4, mtp, LatentFormat::kBf16, true);
+    for (int decoders : {1, 2}) {  // four and eight (kDecodeRows) verify rows
+      std::vector<int> reqs;
+      std::vector<std::vector<int64_t>> feeds;
+      for (int d = 0; d < decoders; ++d) {
+        const int req = 2 + d;
+        const auto prompt = tokens(17 + 5 * d, vocab, 3 + d);
+        (void)model.session_prefill(req, prompt);
+        (void)reference.session_prefill(req, prompt);
+        reqs.push_back(req);
+        feeds.push_back({7 + d, 8, 9, 10});
+      }
+      auto ca = model.session_prefill_begin(0, a, 768, budget);
+      auto cb = model.session_prefill_begin(1, b, 768, budget);
+      const std::vector<GlmDiagnosticModel::PrefillCursor*> readers{&ca, &cb};
+      const auto mixed = model.session_prefill_verify_group(readers, {budget, budget}, reqs, feeds);
+      // The eager serving path verifies each GLM decoder in its own pass.
+      std::vector<GlmDiagnosticModel::Outputs> solo;
+      for (int d = 0; d < decoders; ++d) solo.push_back(reference.session_verify(reqs[d], feeds[d]));
+      require(mixed.size() == static_cast<size_t>(decoders), "one output per decoder");
+      for (int d = 0; d < decoders; ++d) {
+        std::printf("GLM mixed decoder mtp=%d decoders=%d slot=%d: hidden %s\n", mtp, decoders, reqs[d],
+                    mixed[d].final_hidden_bits == solo[d].final_hidden_bits ? "bitwise" : "DIFFERS");
+        exact(mixed[d], solo[d], "mixed GLM decoder logits differ from its own verify pass");
+        require(mixed[d].final_hidden_bits == solo[d].final_hidden_bits,
+                "mixed GLM decoder hidden state differs from its own verify pass");
+      }
+      for (int req = 0; req < 2 + decoders; ++req) { model.session_close(req); reference.session_close(req); }
+    }
+    require(model.kv_blocks_in_use() == 0 && reference.kv_blocks_in_use() == 0,
+            "mixed GLM check releases KV");
+  }
+}
 DGPP_TEST(shared_prefill_glm4) {
   const auto cfg = glm4fx::tiny_config();
   const std::string dir = "shared_glm4_fixture";

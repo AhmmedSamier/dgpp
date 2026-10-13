@@ -1390,6 +1390,9 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   const int planned_head_rows = decode_row ? T : std::min(4, output_plan.output_rows());
   if (!gemm_.ensure_plan(planned_head_rows, lm_vocab_count_, H, DType::BF16, GemmOut::F32, H))
     throw std::runtime_error("session: lm head GEMM plan unavailable");
+  if (group_decode_rows_ > 0 &&
+      !gemm_.ensure_plan(group_decode_rows_, lm_vocab_count_, H, DType::BF16, GemmOut::F32, H))
+    throw std::runtime_error("session: mixed walk head GEMM plan unavailable");
 
   // The decode rows' token ids ride the PINNED, device-mapped member
   // through a kernel upload — never a memcpy node in a captured graph
@@ -1470,6 +1473,28 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
                              sub_out + static_cast<size_t>(r0) * H, in + static_cast<size_t>(r0) * H4,
                              out_streams + static_cast<size_t>(r0) * H4, mhc_cfg_, rows, stream_);
   };
+  // A mixed walk's site (group_decode_rows_ > 0): the decoder prefix [0, D)
+  // takes the decode pass's own launch — D rows alone choose the fused form
+  // and its deferred comb, exactly as in a verify pass of D rows — and the
+  // reader rows [D, T) the never-deferred prefill form behind it. Returns
+  // whether the prefix comb was deferred (the update then waits mhc_join_).
+  const auto mhc_site_mixed = [&](const uint16_t* streams, const GlmMhcWeights& w, const uint16_t* ln) {
+    const int D = group_decode_rows_;
+    const bool deferred = launch_mhc_compute_normed(streams, w, mhc_cfg_, nullptr, post_, comb_, mhc_logits_, ln,
+                                                    normed_, eps, D, stream_, mhc_counters_, mhc_comb_side_);
+    if (deferred) mhc_comb_fork(w, D);
+    if (T > D) mhc_site_rows(streams, w, ln, D, T - D);
+    return deferred;
+  };
+  // The prefix's projections and head take the packed companions' wide
+  // launches, as the decode pass does (kernels/gemm.hpp set_bf12_wide);
+  // the readers keep the prefill lowering. A throw leaves the flag on, and
+  // the next walk's first line resets it.
+  const auto wide_prefix = [&](auto&& launch) {
+    gemm_.set_bf12_wide(true);
+    launch();
+    gemm_.set_bf12_wide(false);
+  };
   const auto drain = [&] {
     step_timing::Scope tick(step_timing::kFoldDrain);
     DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
@@ -1493,6 +1518,8 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
       mhc_site_rows(nxt, hw, b.ln1, 0, TA);
     } else if (TA > 0) {
       mhc_site_rows(cur, hw, b.ln1, 0, T);
+    } else if (group_decode_rows_ > 0) {
+      attn_comb_deferred = mhc_site_mixed(cur, hw, b.ln1);
     } else {
       attn_comb_deferred = launch_mhc_compute_normed(
           cur, hw, mhc_cfg_, nullptr, post_, comb_, mhc_logits_, b.ln1,
@@ -1583,8 +1610,10 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
           if (!kda_->prepare(group_decode_rows_)) throw std::runtime_error("mixed KDA plans unavailable");
           auto* decoder_rec = kda_rec_ + static_cast<size_t>(kda_ordinal) * kda_geo_.recurrent_elems;
           auto* decoder_conv = kda_conv_ + static_cast<size_t>(kda_ordinal) * conv_elems;
-          kda_->enqueue(normed_, decoder_rec, decoder_conv, kda_geo_.conv_hist, attn_out,
-                         group_decode_rows_, stream_, nullptr, spec, batch);
+          wide_prefix([&] {
+            kda_->enqueue(normed_, decoder_rec, decoder_conv, kda_geo_.conv_hist, attn_out,
+                           group_decode_rows_, stream_, nullptr, spec, batch);
+          });
           row0 = group_decode_rows_;
         }
         for (int sp = group_decode_spans_; sp < group_num_spans_; ++sp) {
@@ -1646,8 +1675,10 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
         if (group_decode_spans_ > 0) {
           if (!dsa_->prepare(group_decode_rows_)) throw std::runtime_error("mixed DSA plans unavailable");
           auto* tail_snaps = spec_tail_ + static_cast<size_t>(dsa_ordinal) * kDecodeRows * spec_tail_ring_elems();
-          dsa_->enqueue_decode(normed_, pool_, dsa_ordinal, d_req_ids_, d_step_pos_, d_req_spans_,
-                               group_decode_spans_, group_decode_rows_, attn_out, stream_, nullptr, tail_snaps);
+          wide_prefix([&] {
+            dsa_->enqueue_decode(normed_, pool_, dsa_ordinal, d_req_ids_, d_step_pos_, d_req_spans_,
+                                 group_decode_spans_, group_decode_rows_, attn_out, stream_, nullptr, tail_snaps);
+          });
           row0 = group_decode_rows_;
         }
         for (int sp = group_decode_spans_; sp < group_num_spans_; ++sp) {
@@ -1701,6 +1732,8 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
     bool ffn_comb_deferred = false;
     if (TA > 0) {
       mhc_site_rows(cur, fw, b.ln2, 0, T);
+    } else if (group_decode_rows_ > 0) {
+      ffn_comb_deferred = mhc_site_mixed(cur, fw, b.ln2);
     } else {
       ffn_comb_deferred = launch_mhc_compute_normed(
           cur, fw, mhc_cfg_, nullptr, post_, comb_, mhc_logits_, b.ln2,
@@ -1712,7 +1745,16 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
       if (uint16_t* staged = boundary_->stage(T, H)) ffn_out = staged;
     }
     if (dense_mlp) {
-      enqueue_dense_mlp(normed_, ffn_out, b.dense, T, stream_);
+      if (group_decode_rows_ > 0 && group_decode_rows_ < T) {
+        // The decoder prefix in its own launches (a launch's row count
+        // picks the dense form), the readers in theirs.
+        const int D = group_decode_rows_;
+        enqueue_dense_mlp(normed_, ffn_out, b.dense, D, stream_);
+        enqueue_dense_mlp(normed_ + static_cast<size_t>(D) * H, ffn_out + static_cast<size_t>(D) * H, b.dense,
+                          T - D, stream_);
+      } else {
+        enqueue_dense_mlp(normed_, ffn_out, b.dense, T, stream_);
+      }
     } else {
       if (!moe_) {
         moe_ = std::make_unique<GlmMoeLayer>(*b.moe, moe_cfg_, max_tokens_,
@@ -1760,7 +1802,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
         // diagnostic scores across chunks costs ~50 KiB per prompt token
         // on Flash: over 12 GiB per rank at 256K, outside the KV budget.
         moe_->enqueue_prefill(normed_, ffn_out, T,
-                              decode_route_traces_ ? &trace : nullptr, stream_);
+                              decode_route_traces_ ? &trace : nullptr, stream_, group_decode_rows_);
         if (decode_route_traces_) {
           GlmRouteTraceLayer route;
           route.layer_idx = static_cast<uint32_t>(layer);
@@ -1873,10 +1915,18 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
                  DType::BF16, GemmOut::F32, H, gemm_ws_, gemm_ws_bytes_,
                  stream_);
   } else {
-    // In the GEMV lowering's row chunks (four rows a launch, the form the
-    // decode head takes), never a per-row-count GEMM algorithm.
+    // A mixed walk's decoder prefix: the decode pass's one launch over its
+    // rows, under the packed wide lowering, as that pass runs it.
+    const int D = group_decode_rows_;
+    if (D > 0)
+      wide_prefix([&] {
+        gemm_.matmul(normed_, globals_.lm_head, logits_, D, lm_vocab_count_, H, DType::BF16, GemmOut::F32, H,
+                     gemm_ws_, gemm_ws_bytes_, stream_);
+      });
+    // The readers: in the GEMV lowering's row chunks (four rows a launch, the
+    // form the decode head takes), never a per-row-count GEMM algorithm.
     output_plan.for_each_output_range([&](int output, int count) {
-      for (int r0 = output; r0 < output + count; r0 += 4)
+      for (int r0 = std::max(output, D); r0 < output + count; r0 += 4)
         gemm_.matmul(normed_ + static_cast<size_t>(r0) * H, globals_.lm_head,
                      logits_ + static_cast<size_t>(r0) * lm_vocab_count_, std::min(4, output + count - r0),
                      lm_vocab_count_, H, DType::BF16, GemmOut::F32, H, gemm_ws_, gemm_ws_bytes_, stream_);
