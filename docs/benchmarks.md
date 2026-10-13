@@ -2,12 +2,16 @@
 
 Serving throughput, decode modes and context scaling on the GB10 cluster. Each row identifies a model, weight format, node count and deployment configuration.
 
-These are measurements of the revisions and configurations listed below,
-including historical defaults. The tables predate the shared adaptive prefill
-policy and are not fresh measurements of current master or the latest PR.
-Current example settings are described in [deployment defaults](../deploy/README.md#shared-scheduler-defaults);
-focused consolidation/controller validation is recorded in [PR #112](https://github.com/HawkBearPig/dgpp/pull/112).
-Keep a benchmark's recorded configuration with its measurements when defaults change.
+Every row was measured at the source revision and with the settings its
+table names. The serving defaults changed on 2026-10-12: the prefill chunk
+now grows to fit the latency targets instead of staying at a fixed token
+budget, and `compact_batches` is on (see
+[deployment defaults](../deploy/README.md#shared-scheduler-defaults)). The
+rows below have not been re-measured since, so they describe deployments
+with the fixed prefill budgets listed per row, not a current default
+deployment. The measurements behind that change are in
+[PR #112](https://github.com/HawkBearPig/dgpp/pull/112). When defaults
+change again, keep each row's recorded configuration with its numbers.
 
 | Measurement set | Date (UTC) | Source revision | Scope |
 |---|---|---|---|
@@ -97,7 +101,8 @@ The cold-prefill follow-up found three avoidable costs. The table above incorpor
 | MiMo, 2 nodes, BF16 KV | Route FP8 projections to the existing optimized GEMM | 12.93 → 5.51 s |
 | MiMo, 2 nodes, FP8 KV | Same projection dispatch fix | 12.97 → 5.57 s |
 
-The two-node GLM Flash example now selects the larger idle budget. The kernel fixes preserve the tested outputs and require no KV allocation reduction. Full-GLM BF16/FP8 paths are unchanged by these fixes; their published timings remain. Their profiles are dominated by attention, packed matrix products and collectives.
+The two-node GLM Flash example no longer sets a fixed idle budget; the adaptive
+policy can grow its chunks to the same 2,048 tokens. The kernel fixes preserve the tested outputs and require no KV allocation reduction. Full-GLM BF16/FP8 paths are unchanged by these fixes; their published timings remain. Their profiles are dominated by attention, packed matrix products and collectives.
 
 The October 7–8 completion campaign added the remaining cold-prefill probes, affected serving and context measurements, and full-GLM FP4 KV decode modes. All 46 measurement groups passed request, rank-identity and zero-swap checks. Native FP8 attention evaluation is tracked in [issue #98](https://github.com/HawkBearPig/dgpp/issues/98).
 
@@ -124,14 +129,15 @@ The October 7–8 completion campaign added the remaining cold-prefill probes, a
 
 The KV pool is shared across requests. Its capacity does not mean every concurrent request can use that many tokens. The table below lists the effective settings for each measured row.
 
-Prefill tokens per tick below are the recorded startup settings for these
-measurement revisions: **busy** applies with an incumbent decoder and **idle**
-without one. **0** recorded monolithic scheduler admission, even when the model
-split its work internally. Current serving instead defaults to cost-adaptive
-quanta within native capacity; these old numbers do not describe that policy.
-For a fixed-budget reproduction on a current binary, explicitly set the recorded
-budgets and disable both latency targets, while recognizing that execution code
-has also changed. Exact historical reproduction requires the recorded revision.
+"Prefill tokens/tick" is the fixed prefill budget each row was measured with:
+**busy** while another request was decoding, **idle** otherwise, and **0** for
+whole-prompt admission. A current binary does not use fixed values by default
+(it grows the chunk to fit the latency targets). To repeat a row on a current
+binary, set `engine.prefill_budget_tokens` and
+`engine.prefill_idle_budget_tokens` to the listed values and set both
+`engine.decode_gap_target_ms` and `engine.first_token_target_ms` to 0; the
+kernels have changed since as well, so only the recorded revision reproduces
+a row exactly.
 
 <!-- BEGIN config -->
 
@@ -216,7 +222,7 @@ Engine tokens/s, greedy; median of three repetitions.
 
 <!-- BEGIN classes -->
 
-| Model / weights | Nodes | Options | Prose | Code | — | Math | Chat |
+| Model / weights | Nodes | Options | Prose | Code | JSON | Math | Chat |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 34.2 | 35.9 | 36.0 | 34.6 | 30.6 |
 | GLM-5.3-Flash NVFP4/FP8 | 2 | 256K FP8 KV, 2 slots | 34.2 | 36.0 | 36.1 | 34.8 | 30.7 |
@@ -546,7 +552,9 @@ The ~4K control retrieved 5/5 codes. Prefix reuse repeats the final probe.
 | Cache conditions | Repeated warm inputs; cold samples evict L2 |
 | Scope | Kernel timing, separate from end-to-end service throughput |
 
-
+The timings from that run stayed with its untracked run record; the benches
+are `benchmarks/micro/qsa_index_bench.cu`, `qsa_prefill_bench.cu` and
+`csa2_select_bench.cu`.
 
 ## Historical external workload
 

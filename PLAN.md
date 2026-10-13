@@ -143,11 +143,11 @@ Their implementation and evaluation records are maintained separately:
 - [DeepSeek-V4.1-Flash architecture and port](docs/deepseek_v41_flash_plan.md):
   the CED/CSA2/Engram/DSpark operators, the quantization decision (serve
   as shipped), the reference and torch cross-checks, the bounded prefill,
-  the tokenizer and DSML tool grammar,.
+  the tokenizer and DSML tool grammar.
 - [MiMo-V2.6-Flash architecture and port](docs/mimo_v26_flash_plan.md):
   the hybrid SWA/GA attention with sinks, the pre-sharded fused projection,
   the MXFP4/fp8 checkpoint as shipped, the fp8 K/V form, the fixture
-  ladder, the two defects met only on the real checkpoint,.
+  ladder, the two defects met only on the real checkpoint.
 
 ## Qwen NVFP4 expert prefill
 

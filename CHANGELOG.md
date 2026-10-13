@@ -5,14 +5,27 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
-- **Shared resumable prefill and mixed execution** (2026-10-12): eager and
-  graph serving use common request ownership, continuation, row planning,
-  snapshot and speculative-state handling across all eight model executors.
-  Early text admission is enabled with automatic budgets, including DFlash.
-  Automatic budgets use the aligned native work limit; explicit smaller
-  budgets retain their shorter decode-interruption bound. Native fixed-depth
-  graph execution shares compact request mappings to avoid empty-slot work.
-  Validation status and remaining performance work are tracked in
+- **Shared resumable prefill and adaptive serving budgets** (2026-10-12):
+  eager and graph serving use common request ownership, continuation, row
+  planning, snapshot and speculative-state handling across all eight model
+  executors, and early text admission is on by default (DFlash included).
+  The prefill budget now adapts to measured pass cost:
+  `engine.prefill_budget_tokens = -1` starts at
+  `engine.prefill_initial_tokens` (256) and grows within two latency
+  targets, `engine.decode_gap_target_ms` and `engine.first_token_target_ms`
+  (both 3000 ms by default; both 0 selects fixed budgets), tuned by
+  `engine.prefill_latency_headroom_pct` (15), `engine.prefill_growth_factor`
+  (2) and `engine.prefill_cost_recovery_pct` (25). The automatic idle
+  ceiling is 4096 tokens (previously the engine's full chunk limit);
+  explicit busy/idle budgets remain caps. Rank 0 journals the selected limit
+  every tick and peers replay it. `engine.compact_batches` now defaults to
+  true on every family: live requests are packed into the smallest
+  compatible graph bucket. The collective placement hash covers a final
+  four-byte word (exchange version 2; older peers are refused), and warm-up
+  waits for every rank's model to be ready. Five deployment examples drop
+  their explicit prefill budgets. Generated benchmark results under
+  `benchmarks/results/` are no longer tracked. The measured
+  latency/throughput tradeoffs are in
   [PR #112](https://github.com/HawkBearPig/dgpp/pull/112).
 - **Qwen3.8-27B NVFP4: fp4w prefill GEMM** (2026-10-06):
   `launch_fp4w_gemm_*` (new): `fp8w_gemm`'s 128x128x64 tiles and
@@ -662,8 +675,7 @@ project procedures and design guidance live in `docs/`.
   too, at `engine.mtp_schedule_sampled_scale` (0.93) of the head's
   acceptance — the templates schedule the five-draft block for greedy and
   sampled requests alike. Measurements
-  in [docs/benchmarks.md](docs/benchmarks.md) and the
-  campaign;
+  in [docs/benchmarks.md](docs/benchmarks.md) and
   the [model card](docs/model_cards/DeepSeek-V4-Flash.md).
 - **DeepSeek-V4-Flash decode and prefill kernels** (2026-10-01): L2 weight
   prefetch windows at the collectives and inside the attention layer;
@@ -1032,8 +1044,6 @@ project procedures and design guidance live in `docs/`.
   still admissible (53.53 GiB per rank against 52.97). The binary's own
   fallback when a configuration omits the key is unchanged at 256; existing
   local deployment files must be edited (or re-copied from the template).
-  Evidence:
-  record.
 - **Serve MiMo-V2.6-Flash** (2026-09-22): the sixth family, `mimo_v2`
   (`XiaomiMiMo/MiMo-V2.6-Flash-RL` as shipped: MXFP4 routed experts, fp8
   block-128 dense projections, BF16 o_proj / head / eh_proj packable into
@@ -1046,8 +1056,7 @@ project procedures and design guidance live in `docs/`.
   compact `<tool_call>` dialect and the model-opened `<think>` flow (confined
   to that dialect), deployment templates for two and four nodes, and the
   MXFP4 GEMV core's K = 2048 / 4096 instantiations. Measurements in
-  [docs/benchmarks.md](docs/benchmarks.md) and the
-  campaign;
+  [docs/benchmarks.md](docs/benchmarks.md);
   the plan in [docs/mimo_v26_flash_plan.md](docs/mimo_v26_flash_plan.md).
 - **MiMo-V2.6-Flash decode and prefill kernels** (2026-09-22, plan §7):
   the residual add fused into the two-rounding norm that follows it
@@ -1064,8 +1073,7 @@ project procedures and design guidance live in `docs/`.
   C1 with MTP −1.5 % on four nodes, the plain T=1 step unchanged (the
   in-situ profile, the cold microbench `mimo_step_bench --cold` and the
   rejected experiments — a register cap, an early L2-persisting prefetch
-  of the next layer's projection — are in the plan and the
-  A/B record).
+  of the next layer's projection — are in the plan).
   `WeightPrefetcher` gains a persisting-window mode and a line release
   (`applypriority.global.L2::evict_normal`) for such experiments.
 

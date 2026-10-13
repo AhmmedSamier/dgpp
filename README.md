@@ -226,7 +226,7 @@ how to measure any change on your own workload, is in
 See [Benchmarks](docs/benchmarks.md) for current serving throughput, cold
 prefill latency, quality scores and long-context measurements. The document
 identifies the measured source revision, hardware, workload and timing scope,
-and links to the raw results and reproduction commands.
+and the reproduction commands.
 
 ## Status
 
