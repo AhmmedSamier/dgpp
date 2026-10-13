@@ -285,7 +285,7 @@ struct ClusterConfig {
     std::string admission = "full";
     int admission_window = 256;
     int prefill_budget_tokens = -1;  // automatic: 256 tokens, adjusted to engine geometry
-    std::string model_alias = "";  // override the served model name (display only)
+    std::string model_alias = "";  // the served model name: listed, reported and required of requests (empty: the model id)
     int prefill_idle_budget_tokens = 0;  // auto busy: up to 4096 for grouped prefill; explicit busy: same budget
     int decode_gap_target_ms = sched::kDefaultDecodeGapTargetMs;
     int first_token_target_ms = sched::kDefaultFirstTokenTargetMs;

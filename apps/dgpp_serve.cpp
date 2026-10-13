@@ -1422,7 +1422,7 @@ int main(int argc, char** argv) {
       "  [--prefill-idle-budget-tokens N (default 0)]: larger budget without active decode; 0 uses "
       "the busy budget\n"
       "    with an explicit busy budget, or up to 4096 for automatic grouped prefill\n"
-      "  [--decode-gap-target-ms N (3000)] [--first-token-target-ms N (3000)]: adaptive\n"
+      "  [--decode-gap-target-ms N (1000)] [--first-token-target-ms N (3000)]: adaptive\n"
       "    prefill latency objectives; zero disables a target, both zero select fixed budgets\n"
       "  [--prefill-latency-headroom-pct N (15)] [--prefill-growth-factor N (2)]\n"
       "  [--prefill-cost-recovery-pct N (25)]: controller safety margin, growth and recovery\n"
