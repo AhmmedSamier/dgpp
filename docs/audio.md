@@ -47,6 +47,33 @@ encoder's chunking - 13 tokens per full 10-second chunk,
 `audio_token_count` in `common/audio_input.hpp`. Markers typed directly into
 message text are rejected as conflicting with the decoded audio.
 
+## Serving it
+
+The snapshot is serve-ready with two generated files beside it (neither
+ships upstream): the `tokenizer.json` dgpp's Tokenizer loads, and the
+`chat_template.jinja` the frontend renders.
+
+```bash
+SNAP=~/.cache/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/<rev>
+Q3=~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/<rev>
+python3 tools/qwen_asr_tokenizer.py --snapshot "$SNAP" \
+    --qwen3-tokenizer "$Q3/tokenizer.json" --out "$SNAP/tokenizer.json"
+python3 -c "import json
+print(json.load(open('$SNAP/chat_template.json'))['chat_template'], end='')" \
+    > "$SNAP/chat_template.jinja"
+./build/dgpp-serve --checkpoint-dir "$SNAP" --port 18081
+```
+
+`GET /v1/models` then lists `"audio"` in `input_modalities`, and a user
+message with an `input_audio` (base64 WAV) or `audio_url` (data URI) part
+transcribes: admission decodes the WAV, the frontend lets the template emit
+its single `<|audio_pad|>` per part and expands it to the clip's encoder
+row count post-encode, the tower splices its rows into the prefill, and the
+decoder generates greedily. Verified end to end against the upstream demo
+clip (15 s English speech → 211 prompt tokens → 49 fluent tokens; prefill
+~25 s, almost all of it the host fp32 tower — the documented cost of the
+oracle path until the CUDA tower lands).
+
 ## Where the work lives
 
 | Piece                                              | File |
