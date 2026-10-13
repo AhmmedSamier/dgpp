@@ -173,6 +173,19 @@ project procedures and design guidance live in `docs/`.
   `benchmarks/results/` are no longer tracked. The measured
   latency/throughput tradeoffs are in
   [PR #112](https://github.com/HawkBearPig/dgpp/pull/112).
+- **Qwen3-ASR prefill performance (tower convs + boot warmup)**: the
+  direct-fused convs profiled at 96% of tower time (2.5 s of 2.6 s in
+  nsys) - each output thread streamed its full 8.6 KB footprint and the
+  34 MB working set thrashed the L2. conv2/3 are im2col+tensor-core GEMM
+  again, in 4-chunk groups bounding the cells buffer at 28 MB (the
+  full-piece cells would need 207 MB). The first cut of that rewrite
+  double-applied GELU to conv3 (a leftover full-buffer call beside the
+  per-group one); the golden replay caught it at 1.7e-01 worst. Separately,
+  the model constructor now warms one dummy tower piece and one 8-token
+  forward, moving the process's one-time cublasLt library loads and kernel
+  JIT (~2.5 s) from the first request to boot. Demo prefill: 25.5 s
+  (host) → 2.8 s (device, cold) → 149 ms (device, warm), transcription
+  byte-identical throughout.
 - **Qwen3-ASR device tower** (`models/qwen_asr/tower.{hpp,cpp}`, kernels
   in `kernels/qwen_asr_tower.{hpp,cu}`): the encoder in BF16 behind the
   oracle's numbers - direct-fused stride-2 convs (one thread per output,

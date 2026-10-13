@@ -16,16 +16,14 @@ constexpr int kTowerDim = 1024;
 __device__ inline float bf(uint16_t v) { return bf16_bits_to_float(v); }
 __device__ inline uint16_t fb(float v) { return float_to_bf16_bits(v); }
 
-// One thread per output element: out[(c*ho*wo + y*wo + x)*co + oc] is the
-// bias plus the fp32 sum over input channels and 3x3 taps (zero past the
-// edges), rounded once to bf16. Taps index the weight's flattened
-// [co, ci*9] rows as (ci*9 + p*3 + q), the checkpoint's [co, ci, 3, 3]
-// row-major order. Input element (c, iy, ix, ch) sits at
-// c*chunk_stride + iy*row_stride + ix (times ci channels for bf16 input).
-template <typename In>
-__global__ void __launch_bounds__(256)
-    conv(const In* in, const uint16_t* weight, const uint16_t* bias, uint16_t* out, int chunks,
-         int ci, int hi, int wi, int ho, int wo, int co, int row_stride, int chunk_stride) {
+// Mel [128, frames] bin-major fp32, chunk c covering frames [c*100,
+// c*100+100), convolved directly: one thread per output element, fp32
+// accumulation over the 9 taps, one bf16 rounding at the store. The single
+// input channel keeps the tap loop trivially short, so the direct kernel
+// (no im2col traffic at all) is the fast path here; profiled at 4 ms for a
+// 30-chunk piece against 2.5 s for the same treatment at 480 channels.
+__global__ void conv_mel(const float* feats, const uint16_t* weight, const uint16_t* bias,
+                         uint16_t* out, int chunks, int frames, int ho, int wo, int co) {
   const int64_t i =
       static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   const int64_t cells_per_chunk = static_cast<int64_t>(ho) * wo;
@@ -36,23 +34,39 @@ __global__ void __launch_bounds__(256)
   const int c = static_cast<int>(cell / cells_per_chunk);
   const int64_t local = cell % cells_per_chunk;
   const int y = static_cast<int>(local / wo), x = static_cast<int>(local % wo);
-  const uint16_t* wrow = weight + static_cast<int64_t>(oc) * ci * 9;
+  const uint16_t* wrow = weight + static_cast<int64_t>(oc) * 9;
   float acc = bf(bias[oc]);
-  for (int ch = 0; ch < ci; ++ch)
-    for (int p = 0; p < 3; ++p)
-      for (int q = 0; q < 3; ++q) {
-        const int iy = y * 2 + p - 1, ix = x * 2 + q - 1;
-        if (iy < 0 || iy >= hi || ix < 0 || ix >= wi) continue;
-        const int64_t at =
-            static_cast<int64_t>(c) * chunk_stride + iy * row_stride + ix;
-        float v;
-        if constexpr (sizeof(In) == 2)
-          v = bf(in[at * ci + ch]);
-        else
-          v = in[at];
-        acc += v * bf(wrow[ch * 9 + p * 3 + q]);
-      }
+  for (int p = 0; p < 3; ++p)
+    for (int q = 0; q < 3; ++q) {
+      const int iy = y * 2 + p - 1, ix = x * 2 + q - 1;
+      if (iy < 0 || iy >= 128 || ix < 0 || ix >= 100) continue;
+      acc += feats[static_cast<int64_t>(iy) * frames + c * 100 + ix] * bf(wrow[p * 3 + q]);
+    }
   out[i] = fb(acc);
+}
+
+// Cell-first acts [chunks, hi*wi, ci] bf16 -> cells [chunks*ho*wo, ci*9]
+// (kernel 3, stride 2, pad 1). One thread per cell element; consecutive
+// threads write consecutive cells, so the gather stays coalesced.
+__global__ void im2col(const uint16_t* act, uint16_t* cells, int chunks, int ci, int hi, int wi,
+                       int ho, int wo) {
+  const int64_t i =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t cells_per_chunk = static_cast<int64_t>(ho) * wo;
+  const int64_t row = static_cast<int64_t>(ci) * 9;
+  const int64_t total = static_cast<int64_t>(chunks) * cells_per_chunk * row;
+  if (i >= total) return;
+  const int64_t f = i % row;
+  const int64_t cell = i / row;
+  const int c = static_cast<int>(cell / cells_per_chunk);
+  const int64_t local = cell % cells_per_chunk;
+  const int y = static_cast<int>(local / wo), x = static_cast<int>(local % wo);
+  const int ch = static_cast<int>(f / 9), tap = static_cast<int>(f % 9);
+  const int iy = y * 2 + tap / 3 - 1, ix = x * 2 + tap % 3 - 1;
+  const uint16_t z = 0x0000;  // +0.0 bf16
+  cells[i] = (iy >= 0 && iy < hi && ix >= 0 && ix < wi)
+                 ? act[(static_cast<int64_t>(c) * hi * wi + iy * wi + ix) * ci + ch]
+                 : z;
 }
 
 __global__ void conv_out_gather(const uint16_t* h3, uint16_t* rows, int chunks) {
@@ -110,19 +124,24 @@ __global__ void to_head_major(const uint16_t* in, uint16_t* out, int rows, int h
 void qwen_asr_conv_mel(const float* feats, const uint16_t* weight, const uint16_t* bias,
                        uint16_t* out, int chunks, int frames, int ho, int wo, int co,
                        cudaStream_t stream) {
-  // Mel is [128, frames] bin-major; chunk c starts at frame c*100.
+  // Mel is [128, frames] bin-major; chunk c starts at frame c*100. The
+  // single input channel keeps the tap loop trivially short, so the direct
+  // kernel (no im2col traffic at all) is the fast path here.
   const int64_t total = static_cast<int64_t>(chunks) * ho * wo * co;
-  DGPP_ASR_LAUNCH((conv<float>), total, stream, feats, weight, bias, out, chunks, 1, 128, 100,
-                  ho, wo, co, frames, 100);
+  DGPP_ASR_LAUNCH(conv_mel, total, stream, feats, weight, bias, out, chunks, frames, ho, wo,
+                  co);
 }
 
-void qwen_asr_conv(const uint16_t* act, const uint16_t* weight, const uint16_t* bias,
-                   uint16_t* out, int chunks, int ci, int hi, int wi, int ho, int wo, int co,
-                   cudaStream_t stream) {
-  // Cell-first acts: chunk c is hi*wi rows of ci at stride hi*wi.
-  const int64_t total = static_cast<int64_t>(chunks) * ho * wo * co;
-  DGPP_ASR_LAUNCH((conv<uint16_t>), total, stream, act, weight, bias, out, chunks, ci, hi, wi,
-                  ho, wo, co, wi, hi * wi);
+void qwen_asr_im2col(const uint16_t* act, uint16_t* cells, int chunks, int chunk_offset, int ci,
+                     int hi, int wi, int ho, int wo, cudaStream_t stream) {
+  // A group of chunks starting at chunk_offset (the tower processes conv2/3
+  // in groups bounding the cells buffer); the group is contiguous in both
+  // layouts, so the offset folds into the base pointers.
+  const int64_t cells_per_chunk = static_cast<int64_t>(ho) * wo;
+  const int64_t total = static_cast<int64_t>(chunks) * cells_per_chunk * ci * 9;
+  DGPP_ASR_LAUNCH(im2col, total, stream,
+                  act + static_cast<int64_t>(chunk_offset) * hi * wi * ci, cells, chunks, ci,
+                  hi, wi, ho, wo);
 }
 
 void qwen_asr_conv_out_gather(const uint16_t* h3, uint16_t* rows, int chunks,

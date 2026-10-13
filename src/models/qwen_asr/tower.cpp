@@ -26,6 +26,9 @@ constexpr int kMaxPieceFrames = 3000;  // the 30 s featurizer window
 constexpr int kMaxChunks = kMaxPieceFrames / kChunkFrames;
 constexpr int kMaxPackedRows = kMaxChunks * QwenAsrAudioConfig::kTimeSteps;
 constexpr int kQueryTile = 128;  // the attention query tile (windows are <= 104 rows)
+// conv2/3 im2col+GEMM group: bounds the cells buffer (a full piece would
+// need 207 MB); 3200-row GEMMs already saturate the tensor cores.
+constexpr int kGroupChunks = 4;
 
 struct Buffer {
   void* p = nullptr;
@@ -68,8 +71,8 @@ struct QwenAsrTowerEncoder::Impl {
   // attention tile, the MLP hidden layer, one piece's projected rows, and
   // the GEMM workspace. Sized for the 30 s / 3000-frame piece; smaller
   // pieces simply use the prefix.
-  Buffer feats, act, act2, conv_rows, x, norm, tmp, q, k, v, attn_win, scores, probs,
-      hidden, rows, work;
+  Buffer feats, act, act2, cells, conv_rows, x, norm, tmp, q, k, v, attn_win, scores,
+      probs, hidden, rows, work;
   Buffer pos, ids;  // the sinusoidal table and the tiny valid/base upload
 
   Impl(const QwenAsrAudioConfig& cfg, const std::string& checkpoint, cudaStream_t s)
@@ -155,6 +158,7 @@ struct QwenAsrTowerEncoder::Impl {
     ids.resize(2 * static_cast<size_t>(kMaxChunks) * sizeof(int32_t));
     act.resize(static_cast<size_t>(kMaxChunks) * 64 * 50 * cc * 2);
     act2.resize(static_cast<size_t>(kMaxChunks) * 32 * 25 * cc * 2);
+    cells.resize(static_cast<size_t>(kGroupChunks) * 32 * 25 * cc * 9 * 2);
     conv_rows.resize(static_cast<size_t>(kMaxChunks) * QwenAsrAudioConfig::kTimeSteps *
                      c.conv_flat() * 2);
     const size_t packed = static_cast<size_t>(kMaxPackedRows) * dm * 2;
@@ -209,14 +213,28 @@ struct QwenAsrTowerEncoder::Impl {
     qwen_asr_conv_mel(feats.f(), w("conv2d1.weight"), w("conv2d1.bias"), act.b(), chunks,
                       frames, 64, 50, cc, stream);
     qwen_vision_gelu_exact(act.b(), static_cast<int64_t>(chunks) * 64 * 50 * cc, stream);
-    qwen_asr_conv(act.b(), w("conv2d2.weight"), w("conv2d2.bias"), act2.b(), chunks, cc,
-                  64, 50, 32, 25, cc, stream);
-    qwen_vision_gelu_exact(act2.b(), static_cast<int64_t>(chunks) * 32 * 25 * cc, stream);
-    qwen_asr_conv(act2.b(), w("conv2d3.weight"), w("conv2d3.bias"), act.b(), chunks, cc, 32,
-                  25, c.freq_bins(), QwenAsrAudioConfig::kTimeSteps, cc, stream);
-    qwen_vision_gelu_exact(act.b(), static_cast<int64_t>(chunks) * c.freq_bins() *
-                                        QwenAsrAudioConfig::kTimeSteps * cc,
-                           stream);
+    // conv2/conv3 run im2col+GEMM in groups of kGroupChunks chunks.
+    for (int g0 = 0; g0 < chunks; g0 += kGroupChunks) {
+      const int gc = std::min(kGroupChunks, chunks - g0);
+      qwen_asr_im2col(act.b(), cells.b(), gc, g0, cc, 64, 50, 32, 25, stream);
+      linear(cells.b(), act2.b() + static_cast<int64_t>(g0) * 32 * 25 * cc, gc * 32 * 25, cc,
+             cc * 9, "conv2d2");
+      qwen_vision_gelu_exact(act2.b() + static_cast<int64_t>(g0) * 32 * 25 * cc,
+                             static_cast<int64_t>(gc) * 32 * 25 * cc, stream);
+    }
+    for (int g0 = 0; g0 < chunks; g0 += kGroupChunks) {
+      const int gc = std::min(kGroupChunks, chunks - g0);
+      qwen_asr_im2col(act2.b(), cells.b(), gc, g0, cc, 32, 25, c.freq_bins(),
+                      QwenAsrAudioConfig::kTimeSteps, stream);
+      linear(cells.b(), act.b() + static_cast<int64_t>(g0) * c.freq_bins() *
+                                QwenAsrAudioConfig::kTimeSteps * cc,
+             gc * c.freq_bins() * QwenAsrAudioConfig::kTimeSteps, cc, cc * 9, "conv2d3");
+      qwen_vision_gelu_exact(act.b() + static_cast<int64_t>(g0) * c.freq_bins() *
+                                             QwenAsrAudioConfig::kTimeSteps * cc,
+                             static_cast<int64_t>(gc) * c.freq_bins() *
+                                 QwenAsrAudioConfig::kTimeSteps * cc,
+                             stream);
+    }
     qwen_asr_conv_out_gather(act.b(), conv_rows.b(), chunks, stream);
     linear(conv_rows.b(), tmp.b(), chunks * QwenAsrAudioConfig::kTimeSteps, dm, c.conv_flat(),
            "conv_out.weight", nullptr);
@@ -306,6 +324,7 @@ size_t QwenAsrTowerEncoder::workspace_bytes(const QwenAsrAudioConfig& cfg) {
   const size_t dm = cfg.d_model, cc = cfg.conv_channels;
   size_t n = static_cast<size_t>(cfg.mel_bins) * kMaxPieceFrames * sizeof(float) +  // feats
              2 * static_cast<size_t>(kMaxChunks) * sizeof(int32_t) +  // valid/base upload
+             static_cast<size_t>(kGroupChunks) * 32 * 25 * cc * 9 * 2 +  // im2col cells
              static_cast<size_t>(kMaxChunks) * 64 * 50 * cc * 2 +  // conv1 acts
              static_cast<size_t>(kMaxChunks) * 32 * 25 * cc * 2 +  // conv2 acts
              static_cast<size_t>(kMaxChunks) * QwenAsrAudioConfig::kTimeSteps * cfg.conv_flat() *

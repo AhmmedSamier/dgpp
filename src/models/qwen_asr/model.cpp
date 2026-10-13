@@ -104,6 +104,22 @@ QwenAsrModel::QwenAsrModel(const QwenAsrConfig& cfg, const std::string& checkpoi
   audio_rows_ = dev_alloc<uint16_t>(std::min<size_t>(M, kMaxAudioTokens) * H);
   tower_ = std::make_unique<QwenAsrTowerEncoder>(cfg_.audio, checkpoint_dir, stream_);
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  // Boot warmup: the first cublasLt use in a process pays lazy library
+  // loads and kernel JIT (profiled at 2.6 s on a first 96-row forward vs
+  // 34 ms warm, plus ~1.3 s of library loads in the tower path). Run one
+  // dummy tower piece and one dummy forward here so the first request
+  // never pays it; per-shape plan queries after that are microseconds.
+  // The dummy forward stays within the compact head's row capacity: it
+  // warms the libraries and the small-shape kernels, which is where the
+  // one-time cost lives.
+  {
+    std::vector<float> silence(static_cast<size_t>(cfg_.audio.mel_bins) * 100, 0.0f);
+    std::vector<int32_t> mask(100, 1);
+    const int rows = tower_->encode_piece(silence.data(), mask.data(), 100, audio_rows_);
+    if (rows != QwenAsrAudioConfig::kTimeSteps)
+      throw std::logic_error("Qwen ASR: warmup tower piece produced no rows");
+    forward(std::vector<int64_t>(8, 1));
+  }
 }
 
 QwenAsrModel::~QwenAsrModel() {
