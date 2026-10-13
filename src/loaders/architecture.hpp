@@ -21,6 +21,7 @@ enum class ModelArchitecture : int {
   DeepseekV4,  // DeepseekV4ForCausalLM / deepseek_v4 (DeepSeek-V4-Flash-0731, 2026-10-01)
   Dory,        // DoryForCausalLM / dory (Dory1.0-4B, 2026-10-16, docs/dory_plan.md)
   Flint,       // FlintForCausalLM / flint (RecursiveSI/flint, the HawkBearPig mixed export, 2026-10-22)
+  Qwen3Asr,    // Qwen3ASRForConditionalGeneration / qwen3_asr (Qwen3-ASR-1.7B, docs/audio.md)
 };
 
 constexpr const char* model_architecture_name(ModelArchitecture a) {
@@ -35,6 +36,7 @@ constexpr const char* model_architecture_name(ModelArchitecture a) {
     case ModelArchitecture::DeepseekV4: return "deepseek_v4";
     case ModelArchitecture::Dory: return "dory";
     case ModelArchitecture::Flint: return "flint";
+    case ModelArchitecture::Qwen3Asr: return "qwen3_asr";
   }
   return "glm5";
 }

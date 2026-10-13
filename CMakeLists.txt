@@ -281,12 +281,18 @@ target_include_directories(dgpp_audio PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(dgpp_audio PUBLIC dgpp_common)
 dgpp_set_common(dgpp_audio)
 
-# The Qwen3-ASR tower (docs/audio.md): host-only config and the fp32 CPU
-# oracle. The CUDA encoder will link against the oracle as its gate.
+# The Qwen3-ASR family (docs/audio.md): tower config + fp32 oracle, the
+# dense Qwen3 LM (models/glm4 attention layers' geometry), and the model
+# that splices the tower rows into the prefill stream.
 add_library(dgpp_models_qwen_asr STATIC
-  src/models/qwen_asr/audio_tower_reference.cpp)
+  src/models/qwen_asr/audio_tower_reference.cpp
+  src/models/qwen_asr/binding.cpp
+  src/models/qwen_asr/loader.cpp
+  src/models/qwen_asr/model.cpp
+  src/models/qwen_asr/asr_kernels.cu)
 target_include_directories(dgpp_models_qwen_asr PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(dgpp_models_qwen_asr PUBLIC dgpp_loaders dgpp_common)
+target_link_libraries(dgpp_models_qwen_asr PUBLIC
+  dgpp_audio dgpp_models_glm4_layers dgpp_models_glm4 dgpp_kernels CUDA::cudart Threads::Threads)
 dgpp_set_common(dgpp_models_qwen_asr)
 
 add_library(dgpp_sched STATIC
@@ -938,6 +944,7 @@ if(DGPP_ENABLE_IBV)
                                              dgpp_models_dsv41_layers dgpp_models_dsv4_layers dgpp_models_mimo_layers
                                              dgpp_models_dory_layers
                                              dgpp_models_flint_layers
+                                             dgpp_models_qwen_asr
                                              dgpp_loaders dgpp_bus
                                              dgpp_serve CUDA::cudart
                                              Threads::Threads)
@@ -1199,6 +1206,7 @@ set_tests_properties(flint_chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
 add_library(dgpp_serve STATIC
   src/serve/audio_inputs.cpp
   src/serve/audio_frontend.cpp
+  src/serve/qwen_asr_audio_frontend.cpp
   src/serve/image_inputs.cpp
   src/serve/vision_frontend.cpp
   src/serve/glm_vision_frontend.cpp
@@ -2850,6 +2858,15 @@ target_compile_definitions(qwen_asr_tower_test PRIVATE DGPP_SOURCE_DIR="${CMAKE_
 dgpp_set_common(qwen_asr_tower_test)
 add_test(NAME qwen_asr_tower_test COMMAND qwen_asr_tower_test)
 set_tests_properties(qwen_asr_tower_test PROPERTIES LABELS "host;checkpoint" SKIP_RETURN_CODE 2)
+
+# Qwen3-ASR language half: config/binding always; the row walk vs the fp32
+# torch replay of the checkpoint's decoder when the cache is present.
+add_executable(qwen_asr_forward_test tests/cuda/qwen_asr_forward_test.cpp)
+target_link_libraries(qwen_asr_forward_test PRIVATE dgpp_models_qwen_asr CUDA::cudart Threads::Threads)
+target_compile_definitions(qwen_asr_forward_test PRIVATE DGPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+dgpp_set_common(qwen_asr_forward_test)
+add_test(NAME qwen_asr_forward_test COMMAND qwen_asr_forward_test)
+set_tests_properties(qwen_asr_forward_test PROPERTIES LABELS "gpu;checkpoint" SKIP_RETURN_CODE 2)
 
 # Isolated upstream-port regression: paged BF16/FP8 history and head rows.
 add_executable(mimo_port_test tests/cuda/mimo_port_test.cpp)
