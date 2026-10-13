@@ -13,7 +13,7 @@ project procedures and design guidance live in `docs/`.
   `engine.prefill_budget_tokens = -1` starts at
   `engine.prefill_initial_tokens` (256) and grows within two latency
   targets, `engine.decode_gap_target_ms` and `engine.first_token_target_ms`
-  (both 3000 ms by default; both 0 selects fixed budgets), tuned by
+  (1000 ms and 3000 ms by default; both 0 selects fixed budgets), tuned by
   `engine.prefill_latency_headroom_pct` (15), `engine.prefill_growth_factor`
   (2) and `engine.prefill_cost_recovery_pct` (25). The automatic idle
   ceiling is 4096 tokens (previously the engine's full chunk limit);

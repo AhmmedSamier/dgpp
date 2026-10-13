@@ -570,7 +570,7 @@ Both budgets are cluster-level configuration under `engine`, with CLI overrides:
   "engine": {
     "prefill_budget_tokens": -1,
     "prefill_idle_budget_tokens": 4096,
-    "decode_gap_target_ms": 3000,
+    "decode_gap_target_ms": 1000,
     "first_token_target_ms": 3000
   }
 }
@@ -586,7 +586,7 @@ metrics and carried in rank 0's warm record to every worker. Changing the
 cluster configuration requires a restart. Existing explicit settings retain
 their values.
 
-The latency targets default to 3,000 ms between token-producing decode passes
+The latency targets default to 1,000 ms between token-producing decode passes
 and 3,000 ms from request arrival to its first token, including queueing. Set
 `engine.decode_gap_target_ms` and `engine.first_token_target_ms`, or their CLI
 forms `--decode-gap-target-ms` and `--first-token-target-ms`, in the range
@@ -594,10 +594,17 @@ forms `--decode-gap-target-ms` and `--first-token-target-ms`, in the range
 budgeting. These are targets, not hard deadlines: a running GPU operation,
 engine alignment, a long prompt, occupied slots or KV pressure can make them
 unattainable. A decode pass may deliver several speculative tokens.
-The 3,000 ms defaults favor throughput during long mixed workloads. Tighter
-targets produce more frequent decode opportunities but can substantially lower
-prefill throughput by repeating weight streaming and launch work over smaller
-chunks. Choose a tighter target when that latency tradeoff suits the service.
+The decode-gap default is the measured knee on the four-node
+Qwen3.8-Flash-Next FP8 example: 1,000 ms kept mixed and sustained elapsed
+within 1 % of a 3,000 ms target while cutting an incumbent decoder's worst
+pause from 1.8 s to 0.5 s and halving an arrival's first-token wait; 500 ms
+cost about 4 % of sustained throughput and 300 ms about 8 %, each delaying
+the long prompt's own first token further. Tighter targets produce more
+frequent decode opportunities but lower prefill throughput by repeating weight
+streaming and launch work over smaller chunks; a looser decode-gap target
+(up to the 3,000 ms first-token target) favors long mixed workloads at the
+cost of longer pauses for whoever is decoding. Choose by the service's
+latency tolerance.
 
 Additional controller settings use the same names under `engine` and hyphenated
 CLI flags:

@@ -131,9 +131,9 @@ tokens, whichever is smaller. The GLM and MiMo examples therefore retain their
 2,048-token ceiling; Qwen and DeepSeek retain 4,096. Removing the old explicit
 256-token busy cap lets the four-node GLM Flash example adapt during decoding.
 
-Decode-gap and first-token targets both default to 3,000 ms. These are soft
-objectives: chunk execution, long prompts, occupied slots and KV pressure can
-cause misses. The shared defaults reserve 15% latency headroom, grow by at most
+The decode-gap target defaults to 1,000 ms and the first-token target to
+3,000 ms. These are soft objectives: chunk execution, long prompts, occupied
+slots and KV pressure can cause misses. The shared defaults reserve 15% latency headroom, grow by at most
 2× observed work and weight cheaper observations by 25% during recovery.
 All are deployment-level configurables; see [budget and latency settings](../docs/operations.md).
 Smaller latency targets can reduce throughput by requiring more model walks.

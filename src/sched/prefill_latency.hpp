@@ -6,7 +6,7 @@
 
 namespace dgpp::sched {
 
-inline constexpr int kDefaultDecodeGapTargetMs = 3000;
+inline constexpr int kDefaultDecodeGapTargetMs = 1000;
 inline constexpr int kDefaultFirstTokenTargetMs = 3000;
 inline constexpr int kMaxLatencyTargetMs = 3600000;
 inline constexpr int64_t kInitialPrefillBudgetTokens = 256;

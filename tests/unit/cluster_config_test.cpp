@@ -565,7 +565,7 @@ DGPP_TEST(cluster_config_prefill_defaults_to_auto_with_explicit_opt_out) {
 
 DGPP_TEST(cluster_config_latency_targets_have_serving_defaults_and_strict_overrides) {
   const auto defaults = dgpp::serve::parse_cluster_config(engine_json("{}"), "t").engine;
-  require(defaults.decode_gap_target_ms == 3000 && defaults.first_token_target_ms == 3000,
+  require(defaults.decode_gap_target_ms == 1000 && defaults.first_token_target_ms == 3000,
           "model-independent serving latency defaults");
   const auto fixed = dgpp::serve::parse_cluster_config(
       engine_json(R"({"decode_gap_target_ms":0,"first_token_target_ms":0})"), "t").engine;
