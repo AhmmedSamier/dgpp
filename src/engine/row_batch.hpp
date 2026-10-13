@@ -65,6 +65,33 @@ struct RowRun {
     }
   }
 
+  // Keep selected reader spans separate while retaining the existing wide
+  // batch around them. The executor must support its prefill arithmetic on
+  // any decoder rows included in a combined group. Request state still
+  // follows the original spans; these groups select projection shapes only.
+  template <class Isolate, class Visit>
+  void for_each_isolated_reader_group(Isolate&& isolate, Visit&& visit) const {
+    if (!num_spans) { visit(0, T, decode, 0); return; }
+    const int prefix = decode_rows();
+    int row0 = 0, count = prefix, first = 0, at = prefix;
+    const auto flush = [&] {
+      if (count) visit(row0, count, prefix > 0 && first == 0 && count == prefix, first);
+      count = 0;
+    };
+    for (int span = decode_spans; span < num_spans; ++span) {
+      const int rows = span_lens[span];
+      if (isolate(span)) {
+        flush();
+        visit(at, rows, false, span);
+      } else {
+        if (!count) { row0 = at; first = span; }
+        count += rows;
+      }
+      at += rows;
+    }
+    flush();
+  }
+
   int output_rows() const {
     return decode || all_rows ? T : decode_rows() + std::max(1, num_spans) - decode_spans;
   }

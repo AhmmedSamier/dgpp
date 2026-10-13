@@ -44,6 +44,10 @@ void write_rank_metrics(prom::Writer& w, const RankIdentity& id,
           snapshot_age_s, rank);
   if (ticks >= 0) w.counter("dgpp_rank_ticks_total", "Journal records this rank applied.", ticks, rank);
   w.counter("dgpp_rank_decode_steps_total", "Decode passes this rank ran.", m.decode_steps, rank);
+  w.counter("dgpp_rank_prefill_chunk_steps_total", "Budgeted prefill advances on this rank; groups count once.", m.prefill_chunk_steps, rank);
+  w.counter("dgpp_rank_prefill_chunk_budget_tokens_total", "Reader budgets offered to this rank's prefill advances.", m.prefill_chunk_budget_tokens, rank);
+  w.counter("dgpp_rank_prefill_chunk_available_tokens_total", "Reader budgets capped by remaining prompt tokens, before structural cuts.", m.prefill_chunk_available_tokens, rank);
+  w.counter("dgpp_rank_prefill_chunk_computed_tokens_total", "Reader tokens computed in this rank's budgeted advances.", m.prefill_chunk_computed_tokens, rank);
   w.counter("dgpp_rank_mixed_steps_total", "This rank's decode passes sharing a walk with prefill.", m.mixed_steps, rank);
   w.counter("dgpp_rank_mixed_seconds_total", "Shared time included in both prefill and decode seconds on this rank.",
             m.mixed_ms / 1000.0, rank);

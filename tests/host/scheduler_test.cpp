@@ -29,6 +29,7 @@
 #include "common/log.hpp"
 
 #include "common/test.hpp"
+#include "engine/row_batch.hpp"
 #include "sched/scheduler.hpp"
 #include "serve/prefill_policy.hpp"
 
@@ -620,6 +621,10 @@ DGPP_TEST(scheduler_chunked_prefill_bounds_work_and_keeps_decode_running) {
   require(sched.find("long")->generated == std::vector<int64_t>({20, 21, 22}), "chunked transcript");
   require(sched.meters().prompt_tokens_computed == 13 && sched.meters().pool_blocks_in_use == 0,
           "no double counting or reservation leak");
+  const auto chunks = sched.meters();
+  require(chunks.prefill_chunk_steps == 3 && chunks.prefill_chunk_budget_tokens == 12 &&
+              chunks.prefill_chunk_available_tokens == 11 && chunks.prefill_chunk_computed_tokens == 11,
+          "chunk meters exclude monolithic prompts and distinguish a final short tail from unused work");
 }
 
 // An engine that advances its in-flight prefills as one walk: every prompt
@@ -674,6 +679,10 @@ DGPP_TEST(scheduler_group_advance_reads_co_arrivals_in_through_one_walk_per_tick
   require(count("GA:2:2:4") == 1 && count("PF:0:1") == 1 && count("PF:1:1") == 1 && count("PF:2:3") == 1,
           "the prompts finish together");
   require(sched.meters().prefilling == 0, "all three decode from the same tick");
+  const auto chunks = sched.meters();
+  require(chunks.prefill_chunk_steps == 3 && chunks.prefill_chunk_budget_tokens == 24 &&
+              chunks.prefill_chunk_available_tokens == 21 && chunks.prefill_chunk_computed_tokens == 21,
+          "group chunk meters count three physical advances, without counting each member as a walk");
   sched.run_to_completion();
   require(sched.find("r0")->generated == std::vector<int64_t>({10, 11, 12}) &&
               sched.find("r1")->generated == std::vector<int64_t>({20, 21, 22}) &&
@@ -4551,4 +4560,29 @@ DGPP_TEST(scheduler_fairShare_busy_budget_rotates_and_survives_compaction) {
     };
     require(run(true) == run(false), "compaction preserves every engine op and observer event");
   }
+}
+
+DGPP_TEST(row_groups_isolate_readers_without_splitting_ordinary_mixed_batches) {
+  dgpp::RowRun run;
+  const int32_t lengths[] = {4, 4, 248, 6, 17, 4};
+  run.T = 283;
+  run.span_lens = lengths;
+  run.num_spans = 6;
+  run.decode_spans = 2;
+  std::vector<std::vector<int>> groups;
+  const auto collect = [&](int row0, int rows, bool decode, int first) {
+    groups.push_back({row0, rows, decode ? 1 : 0, first});
+  };
+  run.for_each_isolated_reader_group([](int span) { return span == 3 || span == 5; }, collect);
+  require(groups == std::vector<std::vector<int>>{{0, 256, 0, 0}, {256, 6, 0, 3},
+                                                 {262, 17, 0, 4}, {279, 4, 0, 5}},
+          "isolated readers retain original offsets and leave the wide mixed prefix together");
+  groups.clear();
+  run.for_each_isolated_reader_group([](int) { return false; }, collect);
+  require(groups == std::vector<std::vector<int>>{{0, 283, 0, 0}}, "ordinary mixed batch remains one group");
+  groups.clear();
+  run.num_spans = 2;
+  run.T = 8;
+  run.for_each_isolated_reader_group([](int) { return false; }, collect);
+  require(groups == std::vector<std::vector<int>>{{0, 8, 1, 0}}, "decoder-only prefix retains native decode");
 }

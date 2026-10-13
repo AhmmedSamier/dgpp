@@ -530,6 +530,11 @@ class Scheduler {
     int64_t prompt_tokens_computed = 0;
     int64_t decode_steps = 0;
     int64_t decode_rows = 0;
+    // Budgeted advances only: groups count once, tokens sum their readers.
+    int64_t prefill_chunk_steps = 0;
+    int64_t prefill_chunk_budget_tokens = 0;
+    int64_t prefill_chunk_available_tokens = 0;  // min(budget, remaining prompt), before structural cuts
+    int64_t prefill_chunk_computed_tokens = 0;
     int64_t mixed_steps = 0;  // subset of decode_steps that also advanced prefill
     double mixed_ms = 0.0;    // included in BOTH prefill_ms and step_ms; subtract once when summing
     double prefill_ms = 0.0;
@@ -855,6 +860,10 @@ class Scheduler {
   int64_t prompt_tokens_computed_ = 0;
   int64_t decode_steps_ = 0;
   int64_t decode_rows_ = 0;
+  int64_t prefill_chunk_steps_ = 0;
+  int64_t prefill_chunk_budget_tokens_ = 0;
+  int64_t prefill_chunk_available_tokens_ = 0;
+  int64_t prefill_chunk_computed_tokens_ = 0;
   int64_t mixed_steps_ = 0;
   double mixed_ms_ = 0.0;
   double prefill_ms_ = 0.0;

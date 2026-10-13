@@ -1330,8 +1330,6 @@ void GlmMoeLayer::enqueue_decode_impl(const uint16_t* hidden, uint16_t* out_bf16
   // 2. Route traces ride ASYNC copies into the caller's pinned staging;
   //    the caller materializes them after its next stream sync (the
   //    decode step's final sync). No round-trip on the hot path.
-  if (trace && !trace->biased)
-    throw std::invalid_argument("GlmMoeLayer: incomplete trace staging");
   copy_route_trace(trace, tokens, stream);
 
   // 3. The slot chain. Slot layout: tokens*(K+1); slot t*(K+1)+j is row

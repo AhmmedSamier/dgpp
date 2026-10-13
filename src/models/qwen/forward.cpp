@@ -1012,6 +1012,36 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
   // A site's combine rides the next site's norm launch on the decode rows
   // (QwenGrSite::defer_combine / mix); any other reader of R applies it first.
   QwenGrSite::PendingCombine pend;
+  // Resumed short outputs retain the isolated continuation's projection
+  // shapes. Unfinished chunks and ordinary mixed batches keep their prefill
+  // recipe; splitting every decoder out repeats expert and weight work each tick.
+  // 128 is the dense FP8 GEMV/large-prefill boundary used by the layer helpers.
+  const auto for_each_kernel_group = [&](auto&& visit) {
+    run.for_each_isolated_reader_group([&](int span) {
+      return run.span_pos0[span] > 0 && run.span_lens[span] <= 128 &&
+             (!run.output_spans || run.output_spans[span]);
+    }, visit);
+  };
+  const auto mix_rows = [&](QwenGrSite& site, uint16_t* output) {
+    if (!run.num_spans) {
+      site.mix(r_, output, T, stream_, &pend);
+      return;
+    }
+    for_each_kernel_group([&](int row0, int count, bool decode, int) {
+      auto pending = pend;
+      if (pending.y) {
+        pending.y += static_cast<size_t>(row0) * H;
+        pending.gates += static_cast<size_t>(row0) * cfg_.hc_count;
+      }
+      qwen_configure_gemm_rows(gemm_, count, decode);
+      if (count == T)
+        site.mix(r_, output, T, stream_, &pending);
+      else
+        site.mix_group(r_ + static_cast<size_t>(row0) * W,
+                       output + static_cast<size_t>(row0) * H, count, row0, stream_, &pending);
+    });
+    qwen_configure_gemm_rows(gemm_, T, run.decode);
+  };
   for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
     const QwenLayerResident& r = loader_.load_layer(layer);
     build_layer_objects(r);
@@ -1035,18 +1065,26 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
       // The K-sliced projections are partial sums (plan D4): each folded
       // before its norm, the key consumed before the value's handout.
       uint16_t* key = stage(ple_->key_partial(), W);
-      ple_->project_key(key == ple_->key_partial() ? nullptr : key, T, stream_);
+      for_each_kernel_group([&](int row0, int count, bool decode, int) {
+        qwen_configure_gemm_rows(gemm_, count, decode);
+        ple_->project_key(key + static_cast<size_t>(row0) * W, count, stream_, row0);
+      });
+      qwen_configure_gemm_rows(gemm_, T, run.decode);
       if (run.decode) prefetch_ple_key_side(r);
       fold(key, W);
       ple_->norm_key(key, T, stream_);
       uint16_t* value = stage(ple_->value_partial(), H);
-      ple_->project_value(value == ple_->value_partial() ? nullptr : value, T, stream_);
+      for_each_kernel_group([&](int row0, int count, bool decode, int) {
+        qwen_configure_gemm_rows(gemm_, count, decode);
+        ple_->project_value(value + static_cast<size_t>(row0) * H, count, stream_, row0);
+      });
+      qwen_configure_gemm_rows(gemm_, T, run.decode);
       if (run.decode) prefetch_ple_value_side(r);
       fold(value, H);
       ple_->finish(r_, value, ple_conv_state_, ple_conv_elems_, d_req, d_pos, d_spans, num_requests, T,
                    stream_, snapshots ? spec_ple_ : nullptr, mixed ? spec_rows : -1);
     }
-    attn_gr_->mix(r_, x_, T, stream_, &pend);
+    mix_rows(*attn_gr_, x_);
     pend = {};
     uint16_t* attn_out = stage(y_, H);
     if (r.kind == QwenLayerKind::Gdn) {
@@ -1101,7 +1139,16 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
           reader.conv = gdn_conv(sreq, gdn_ordinal);
           shared_spans.push_back(reader);
         }
-        gdn_->enqueue_spans(x_, attn_out, T, shared_spans, stream_);
+        for_each_kernel_group([&](int row0, int count, bool decode, int first) {
+          const int begin = first < run.decode_spans ? 0 : first - run.decode_spans + (mixed ? 1 : 0);
+          int end = begin, rows = 0;
+          while (rows < count) rows += shared_spans[end++].rows;
+          const auto group = std::span(shared_spans).subspan(begin, end - begin);
+          qwen_configure_gemm_rows(gemm_, count, decode);
+          gdn_->enqueue_spans(x_ + static_cast<size_t>(row0) * H,
+                              attn_out + static_cast<size_t>(row0) * H, count, group, stream_);
+        });
+        qwen_configure_gemm_rows(gemm_, T, run.decode);
       } else {
         gdn_->enqueue(x_, gdn_rec(req, gdn_ordinal), gdn_conv(req, gdn_ordinal), attn_out, T, stream_,
                       rec_snap, conv_snap, replay);
@@ -1142,7 +1189,16 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
           shared_spans.push_back({len, srows});
           row0 += len;
         }
-        qsa_->enqueue_spans(x_, T, qrows, shared_spans, cache, attn_out, stream_);
+        for_each_kernel_group([&](int row0, int count, bool decode, int first) {
+          const int begin = first < run.decode_spans ? 0 : first - run.decode_spans + (mixed ? 1 : 0);
+          int end = begin, rows = 0;
+          while (rows < count) rows += shared_spans[end++].rows;
+          const auto group = std::span(shared_spans).subspan(begin, end - begin);
+          qwen_configure_gemm_rows(gemm_, count, decode);
+          qsa_->enqueue_spans(x_ + static_cast<size_t>(row0) * H, count, group.front().map,
+                              group, cache, attn_out + static_cast<size_t>(row0) * H, stream_);
+        });
+        qwen_configure_gemm_rows(gemm_, T, run.decode);
       } else {
         qsa_->enqueue(x_, T, qrows, cache, attn_out, stream_);
       }
@@ -1151,7 +1207,7 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
     if (run.decode) prefetch_ffn_side(r);
     fold(attn_out, H);  // block boundary 1: the attention output projection's partial
     pend = attn_gr_->defer_combine(r_, attn_out, T, stream_);
-    mlp_gr_->mix(r_, x_, T, stream_, &pend);
+    mix_rows(*mlp_gr_, x_);
     pend = {};
     uint16_t* ffn_out = stage(y_, H);
     if (run.decode) {
@@ -1172,7 +1228,21 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
       trace.ids = h_route_ids_ + slot;
       trace.weights = h_route_weights_ + slot;
       trace.biased = nullptr;
-      moe_->enqueue_prefill(x_, ffn_out, T, stream_, traces ? &trace : nullptr);
+      for_each_kernel_group([&](int row0, int count, bool decode, int) {
+        qwen_configure_gemm_rows(gemm_, count, decode);
+        auto group_trace = trace;
+        group_trace.ids += static_cast<size_t>(row0) * K;
+        group_trace.weights += static_cast<size_t>(row0) * K;
+        if (decode)
+          moe_->enqueue_decode(x_ + static_cast<size_t>(row0) * H,
+                                ffn_out + static_cast<size_t>(row0) * H, count, stream_, -1,
+                                traces ? &group_trace : nullptr);
+        else
+          moe_->enqueue_prefill(x_ + static_cast<size_t>(row0) * H,
+                                 ffn_out + static_cast<size_t>(row0) * H, count, stream_,
+                                 traces ? &group_trace : nullptr);
+      });
+      qwen_configure_gemm_rows(gemm_, T, run.decode);
       if (traces) {
         out.route_ids.emplace_back();  // filled after the sync
         out.route_weights.emplace_back();
@@ -1198,7 +1268,7 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
   // chunks, BF16 heads (cuBLAS is m-dependent), decode, all-row runs and
   // group prefills keep the full head. DGPP_PREFILL_HEAD_ALL_ROWS=1 keeps
   // it everywhere.
-  mixer_->mix(r_, h_, T, stream_, &pend);  // the last layer's combine rides the mixer's norm
+  mix_rows(*mixer_, h_);  // the last layer's combine rides the mixer's norm
   pend = {};
   static const bool head_all_rows = [] {
     const char* e = std::getenv("DGPP_PREFILL_HEAD_ALL_ROWS");
@@ -1222,7 +1292,12 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
         lm_head_logits(h_, count, stream_, false);
         qwen_configure_gemm_rows(gemm_, T, false);
       } else {
-        lm_head_logits(h_, T, stream_, false, input, output);
+        for_each_kernel_group([&](int row0, int rows, bool decode, int) {
+          if (input < row0 || input >= row0 + rows) return;
+          qwen_configure_gemm_rows(gemm_, rows, decode);
+          lm_head_logits(h_ + static_cast<size_t>(row0) * H, rows, stream_, false, input - row0, output);
+        });
+        qwen_configure_gemm_rows(gemm_, T, run.decode);
       }
     });
   } else if (!run.output_spans || run.output_spans[0]) {

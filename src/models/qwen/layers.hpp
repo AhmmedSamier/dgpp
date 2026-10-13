@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <vector>
 #include <thread>
 #include <string>
@@ -106,6 +107,10 @@ class QwenGrSite {
   // launch on the batched decode rows, as its own launch otherwise.
   void mix(uint16_t* r, uint16_t* x, int tokens, cudaStream_t stream,
            const PendingCombine* pending = nullptr);
+  // A kernel group keeps its scratch at the corresponding physical rows.
+  // Its gates are completed before another group reuses the side-stream events.
+  void mix_group(uint16_t* r, uint16_t* x, int tokens, int row0, cudaStream_t stream,
+                 const PendingCombine* pending = nullptr);
   // R += s(Rn) (x) y, y [T, H]; requires the site's inject weights.
   void combine(uint16_t* r, const uint16_t* y, int tokens, cudaStream_t stream);
   // combine() deferred: when this site's gates were computed by its mix
@@ -136,7 +141,9 @@ class QwenGrSite {
   bool gate_side_only_ = false;  // DGPP_QWEN_GR_GATE_SIDE=side: the batched rows' side stream    // DGPP_QWEN_GR_GATE_SIDE=off puts both back in the chain
   bool gate_forked_ = false;
   bool gates_ready_ = false;  // the mix's down GEMV computed them in its own launch
-  void fork_gate_dots(cudaStream_t main, int tokens);
+  void mix_rows(uint16_t* r, uint16_t* x, int tokens, int row0, cudaStream_t stream,
+                const PendingCombine* pending);
+  void fork_gate_dots(cudaStream_t main, int tokens, int row0 = 0);
   // The inject rows ride the fused mix's down GEMV: they run the same
   // 16-byte-chunked row chain, so the weight must be aligned like the
   // down matrix.
@@ -208,7 +215,7 @@ class QwenGdnLayer {
   };
   // Shared projections, with each span's recurrence and rollback sinks.
   void enqueue_spans(const uint16_t* x, uint16_t* out, int tokens,
-                     const std::vector<Span>& spans, cudaStream_t stream);
+                     std::span<const Span> spans, cudaStream_t stream);
   // The replay form's materialize: the recurrent state as it stands after
   // `replay`'s rows (in place, or into replay.dst), no rows of its own.
   void materialize(float* recurrent_state, const KdaReplay& replay, cudaStream_t stream);
@@ -293,7 +300,7 @@ class QwenQsaLayer {
                uint16_t* out, cudaStream_t stream);
   struct Span { int rows; QwenQsaRows map; };
   void enqueue_spans(const uint16_t* x, int tokens, const QwenQsaRows& rows,
-                     const std::vector<Span>& spans, QwenQsaCache& cache,
+                     std::span<const Span> spans, QwenQsaCache& cache,
                      uint16_t* out, cudaStream_t stream);
 
   static size_t scratch_bytes(const QwenTextConfig& cfg, int local_heads, int local_kv_heads,
@@ -471,9 +478,9 @@ class QwenPleLayer {
   // in the model's context kernel.
   void embed(const int64_t* tokens, int rows, const int32_t* req_ids, const int64_t* pos,
              const int32_t* req_spans, int num_requests, const int32_t* ctx, cudaStream_t stream);
-  void project_key(uint16_t* key_dst, int rows, cudaStream_t stream);
+  void project_key(uint16_t* key_dst, int rows, cudaStream_t stream, int row0 = 0);
   void norm_key(const uint16_t* key, int rows, cudaStream_t stream);
-  void project_value(uint16_t* val_dst, int rows, cudaStream_t stream);
+  void project_value(uint16_t* val_dst, int rows, cudaStream_t stream, int row0 = 0);
   void finish(uint16_t* r, const uint16_t* value, uint16_t* states, int64_t state_stride,
               const int32_t* req_ids, const int64_t* pos, const int32_t* req_spans, int num_requests,
               int rows, cudaStream_t stream, uint16_t* snapshots = nullptr, int snapshot_rows = -1);

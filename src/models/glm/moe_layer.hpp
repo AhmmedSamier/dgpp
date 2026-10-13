@@ -31,7 +31,8 @@ namespace dgpp {
 // the decode step's D2H copies land here mid-step (stream-ordered, no
 // sync) and the caller reads them after its next stream sync — the
 // session materializes Outputs.routes this way after the step's final
-// sync. All three buffers may be null (the copies are skipped).
+// sync. A null trace skips all copies; a supplied trace requires ids and
+// weights, while biased logits are optional.
 struct MoeTraceStaging {
   int32_t* ids = nullptr;     // [tokens * top_k]
   float* weights = nullptr;  // [tokens * top_k]

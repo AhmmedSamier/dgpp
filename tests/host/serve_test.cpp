@@ -4696,12 +4696,18 @@ DGPP_TEST(serve_timings_cachedRequestsPreserveExistingCounters) {
                 scheduler.at("prompt_tokens_computed").as_int() == 12 &&
                 scheduler.at("tokens_generated").as_int() == 6,
             "JSON metrics preserve total/computed/generated definitions");
+    const auto& chunks = scheduler.at("prefill_chunks");
+    require(chunks.at("steps").as_int() == 0 && chunks.at("budget_tokens").as_int() == 0 &&
+                chunks.at("available_tokens").as_int() == 0 && chunks.at("computed_tokens").as_int() == 0,
+            "monolithic prefills are excluded from budget utilization counters");
     Client prometheus(rig.port());
     prometheus.send_all("GET /metrics/prometheus HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
     const auto exposition = prometheus.read_response(3000);
     for (const auto& [name, count] : {
          std::pair{"dgpp_prompt_tokens_total", 16}, {"dgpp_prompt_tokens_computed_total", 12},
-         {"dgpp_prompt_tokens_cached_total", 4}, {"dgpp_generation_tokens_total", 6}}) {
+         {"dgpp_prompt_tokens_cached_total", 4}, {"dgpp_generation_tokens_total", 6},
+         {"dgpp_prefill_chunk_steps_total", 0}, {"dgpp_prefill_chunk_budget_tokens_total", 0},
+         {"dgpp_prefill_chunk_available_tokens_total", 0}, {"dgpp_prefill_chunk_computed_tokens_total", 0}}) {
       require(exposition.find(std::string(name) + "{model_name=\"" + kModel + "\"} " +
                                   std::to_string(count) + "\n") != std::string::npos,
               "Prometheus preserves existing counter " + std::string(name));

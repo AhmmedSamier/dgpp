@@ -2539,6 +2539,10 @@ void GenerationService::route_metrics_prometheus(HttpResponseWriter& w) {
   out.counter("dgpp_decode_steps_total", "Decode passes.", m.decode_steps);
   out.counter("dgpp_decode_rows_total", "Request-rows the decode passes carried.", m.decode_rows);
   out.counter("dgpp_decode_step_seconds_total", "Wall time inside the engine's decode steps.", m.step_ms / 1000.0);
+  out.counter("dgpp_prefill_chunk_steps_total", "Budgeted prefill advances; a grouped walk counts once.", m.prefill_chunk_steps);
+  out.counter("dgpp_prefill_chunk_budget_tokens_total", "Reader token budgets offered to budgeted prefill advances.", m.prefill_chunk_budget_tokens);
+  out.counter("dgpp_prefill_chunk_available_tokens_total", "Reader budgets capped by remaining prompt tokens, before structural cuts.", m.prefill_chunk_available_tokens);
+  out.counter("dgpp_prefill_chunk_computed_tokens_total", "Reader tokens computed in budgeted prefill advances.", m.prefill_chunk_computed_tokens);
   out.counter("dgpp_mixed_steps_total", "Decode passes sharing a walk with prefill.", m.mixed_steps);
   out.counter("dgpp_mixed_seconds_total", "Shared wall time included in both prefill and decode seconds; subtract once when summing.",
               m.mixed_ms / 1000.0);
@@ -2749,6 +2753,15 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {  Scheduler::Meter
                   m.prefill_ms, m.prefill_request_ms, m.step_ms, m.mixed_ms);
     out.append(tbuf);
   }
+  out.append(",\"prefill_chunks\":{\"steps\":");
+  append_json_int(&out, m.prefill_chunk_steps);
+  out.append(",\"budget_tokens\":");
+  append_json_int(&out, m.prefill_chunk_budget_tokens);
+  out.append(",\"available_tokens\":");
+  append_json_int(&out, m.prefill_chunk_available_tokens);
+  out.append(",\"computed_tokens\":");
+  append_json_int(&out, m.prefill_chunk_computed_tokens);
+  out.append("}");
   out.append("}");
   out.append(",\"service\":{\"requests_total\":");
   append_json_int(&out, static_cast<int64_t>(st.requests_total));

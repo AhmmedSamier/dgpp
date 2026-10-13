@@ -582,6 +582,20 @@ The resolved values are logged at startup, reported in service admission
 metrics and carried in rank 0's warm record to every worker. Changing the
 cluster configuration requires a restart. Existing explicit settings retain
 their values.
+
+For budget tuning, JSON metrics expose `scheduler.prefill_chunks`: physical
+advance `steps`, offered reader `budget_tokens`, `available_tokens` capped by
+each reader's remaining prompt, and actual `computed_tokens`. Compare counter
+deltas over the workload. Computed/available measures how much offered work
+was executed after removing unused final-tail capacity; snapshot boundaries,
+alignment and shared scratch can still reduce it. Computed/budget also includes
+capacity left over when prompts finish. These counters cover budgeted advances
+only, count a grouped walk once, and exclude decoder rows and monolithic
+prefills. Prometheus exposes the same counters as
+`dgpp_prefill_chunk_{steps,budget_tokens,available_tokens,computed_tokens}_total`,
+with corresponding `dgpp_rank_prefill_chunk_*` counters on each rank. High token
+utilization alone does not establish good throughput or acceptable decode gaps.
+
 The single-Spark NVIDIA and RadixArk Qwen NVFP4 templates explicitly select
 4,096-token busy and idle budgets. The two- and four-rank GLM-5.3-Flash
 NVFP4/FP8 templates select 256-token busy and 2,048-token idle budgets.

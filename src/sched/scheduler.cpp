@@ -788,6 +788,7 @@ void Scheduler::advance_prefill(int arrival, int64_t budget) {
         std::chrono::steady_clock::now() - started).count();
     // Both logical operations occupied this interval. Expose the overlap
     // explicitly so phase rates and decode-latency histograms remain honest.
+    ++prefill_chunk_steps_;
     prefill_ms_ += ms;
     step_ms_ += ms;
     mixed_ms_ += ms;
@@ -801,6 +802,7 @@ void Scheduler::advance_prefill(int arrival, int64_t budget) {
   const auto progress = engine_->advance_prefill(r.slot, budget);
   const double ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - started).count();
+  ++prefill_chunk_steps_;
   prefill_ms_ += ms;
   apply_prefill_progress(arrival, progress, budget, ms);
 }
@@ -826,6 +828,7 @@ void Scheduler::advance_prefill_group(const std::vector<int>& arrivals, const st
         std::chrono::steady_clock::now() - started).count();
     if (result.prefills.size() != arrivals.size())
       throw std::runtime_error("Scheduler: mixed group returned the wrong number of prefills");
+    ++prefill_chunk_steps_;
     prefill_ms_ += ms;
     step_ms_ += ms;
     mixed_ms_ += ms;
@@ -843,6 +846,7 @@ void Scheduler::advance_prefill_group(const std::vector<int>& arrivals, const st
   if (progress.size() != arrivals.size())
     throw std::runtime_error("Scheduler: the engine's group advance returned " + std::to_string(progress.size()) +
                              " results for " + std::to_string(arrivals.size()) + " requests");
+  ++prefill_chunk_steps_;
   prefill_ms_ += ms;  // one physical walk, not one execution per member
   for (size_t i = 0; i < arrivals.size(); ++i) apply_prefill_progress(arrivals[i], progress[i], budgets[i], ms);
 }
@@ -853,6 +857,10 @@ void Scheduler::apply_prefill_progress(int arrival, const SchedulerEngine::Prefi
   r.prefill_ms += ms;
   if (progress.computed_tokens <= 0 || progress.computed_tokens > budget)
     throw std::runtime_error("Scheduler: prefill chunk made no progress or exceeded its token budget");
+  prefill_chunk_budget_tokens_ += budget;
+  prefill_chunk_available_tokens_ += std::min<int64_t>(budget,
+      static_cast<int64_t>(r.spec.prompt.size()) - r.attached_tokens - r.prefill_computed);
+  prefill_chunk_computed_tokens_ += progress.computed_tokens;
   prefill_cursor_ = arrival;
   r.prefill_computed += progress.computed_tokens;
   engine_->prefill_monitor()->update(r.slot, r.attached_tokens + r.prefill_computed);
@@ -1757,6 +1765,10 @@ Scheduler::Meters Scheduler::meters() const {
   m.prompt_tokens_computed = prompt_tokens_computed_;
   m.decode_steps = decode_steps_;
   m.decode_rows = decode_rows_;
+  m.prefill_chunk_steps = prefill_chunk_steps_;
+  m.prefill_chunk_budget_tokens = prefill_chunk_budget_tokens_;
+  m.prefill_chunk_available_tokens = prefill_chunk_available_tokens_;
+  m.prefill_chunk_computed_tokens = prefill_chunk_computed_tokens_;
   m.mixed_steps = mixed_steps_;
   m.mixed_ms = mixed_ms_;
   m.prefill_ms = prefill_ms_;

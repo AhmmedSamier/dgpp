@@ -795,6 +795,70 @@ static void check_mixed_prefill_engine(bool scheduled) {
   }
 }
 
+DGPP_TEST(qwen_cached_tail_preserves_native_rows_in_mixed_prefill) {
+  struct RestoreDense {
+    bool fp8 = dgpp::QwenLayerStream::dense_weights_fp8();
+    ~RestoreDense() { dgpp::QwenLayerStream::set_dense_weights_fp8(fp8); }
+  } restore;
+  const auto cfg = qwenfx::tiny_config();
+  const std::string dir = "qwen_engine_fixture/cached_tail";
+  qwenfx::write_fixture(cfg, dir);
+  const auto prompt = smoke_tokens(cfg, 22, 741);
+  const std::vector<int64_t> prefix(prompt.begin(), prompt.begin() + 16);
+  const auto cold = smoke_tokens(cfg, 248, 742);
+  const auto decoder = smoke_tokens(cfg, 17, 743);
+  for (bool fp8 : {false, true}) {
+    dgpp::QwenLayerStream::set_dense_weights_fp8(fp8);
+    QwenModel model(cfg, dir, 512, 2048, QwenResidency::Resident, nullptr, 0, 1,
+                    3, false, 16, fp8, true);
+    (void)model.session_prefill(1, decoder);
+    model.session_reserve_blocks(1, 64);
+    const auto native_decode = model.session_verify_batch({1}, {{42, 43, 44, 45}}).front();
+    model.session_close(1);
+    const auto run = [&](int load) {
+      (void)model.session_prefill(0, prefix);
+      auto tail = model.session_prefill_begin(0, prompt, 64, 256, {}, nullptr, 16);
+      tail.final_output_only = true;
+      if (load == 1) {
+        (void)model.session_prefill(1, decoder);
+        model.session_reserve_blocks(1, 64);
+        const auto decoded = model.session_prefill_verify(tail, 256, {1}, {{42, 43, 44, 45}});
+        require(decoded.front().final_hidden_bits == native_decode.final_hidden_bits &&
+                    decoded.front().logits == native_decode.logits,
+                "isolating a reader preserves the native decoder-only group");
+      } else if (load == 2) {
+        (void)model.session_prefill(1, decoder);
+        model.session_reserve_blocks(1, 64);
+        auto reader = model.session_prefill_begin(2, cold, 256, 256);
+        reader.final_output_only = true;
+        const auto decoded = model.session_prefill_verify_group(
+            std::vector<QwenModel::PrefillCursor*>{&reader, &tail}, {256, 256},
+            {1}, {{42, 43, 44, 45}});
+        require(decoded.size() == 1 && decoded.front().logits.size() == 4 * static_cast<size_t>(cfg.vocab_size),
+                "mixed walk retains every decoder output");
+        require(reader.next == reader.end && tail.next == tail.end, "mixed readers completed");
+      } else {
+        require(model.session_prefill_advance(tail), "isolated tail completed");
+      }
+      auto result = tail.output;
+      const auto continuation = model.session_verify(0, {51, 52, 53, 54});
+      result.final_hidden_bits.insert(result.final_hidden_bits.end(),
+          continuation.final_hidden_bits.begin(), continuation.final_hidden_bits.end());
+      result.logits.insert(result.logits.end(), continuation.logits.begin(), continuation.logits.end());
+      for (int slot = 0; slot < 3; ++slot) model.session_close(slot);
+      require(model.kv_blocks_in_use() == 0, "cached-tail comparison leaked KV");
+      return result;
+    };
+    const auto reference = run(0);
+    for (int load : {1, 2}) {
+      const auto loaded = run(load);
+      require(loaded.final_hidden_bits == reference.final_hidden_bits,
+              std::string(fp8 ? "FP8" : "BF16") + " cached tail or subsequent decode hidden changed under load");
+      require(loaded.logits == reference.logits, "cached tail or subsequent decode logits changed under load");
+    }
+  }
+}
+
 DGPP_TEST(qwen_engines_mixed_prefill_without_mtp) { check_mixed_prefill_engine(false); }
 DGPP_TEST(qwen_engines_mixed_prefill_scheduled_verify) { check_mixed_prefill_engine(true); }
 

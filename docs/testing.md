@@ -41,6 +41,13 @@ Check cached continuations against isolated execution, repeat the loaded
 workload, and verify isolated recovery and retained KV usage. Investigate changed
 transcripts with token probabilities and matching execution shapes; do not treat
 temperature zero as a guarantee of identical floating-point reductions.
+The Qwen cached-tail regression compares resumed short-reader hidden states,
+logits and a subsequent forced continuation with isolated execution, in BF16
+and FP8 dense modes. It also checks native verification when the decoder forms
+its own kernel group. The executor isolates requested outputs of resumed readers
+of at most 128 rows for their projection shapes while retaining the established
+wide mixed-batch recipe. This does not impose bitwise equality between arbitrary
+decode batch widths. Keep probability and layer tracing out of throughput measurements.
 A one-token completion can contain only a special token; record completion and
 usage without inventing a first-visible-token timestamp.
 
