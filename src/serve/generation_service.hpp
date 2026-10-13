@@ -470,6 +470,11 @@ class GenerationService : public HttpHandler,
     std::string model;
     int64_t created_unix = 0;
     bool chat = false;       // chat route (the parser path) vs legacy
+    // Transcription route (POST /v1/audio/transcriptions): "" on chat and
+    // legacy records, else the response shape ("json" or "text"). The
+    // record still generates exactly like a one-shot chat choice; only the
+    // final response assembly differs.
+    std::string transcription_format;
     bool stream = false;
     bool include_usage = false;
     bool include_obfuscation = true;
@@ -560,19 +565,32 @@ class GenerationService : public HttpHandler,
     PreparedRequest result;
     HttpResponseWriter* writer = nullptr;  // HTTP only
     bool file_processed = false;
+    // The /v1/audio/transcriptions response shape ("json" or "text");
+    // "" on the chat and completions routes. Carried to the worker so
+    // prepare_chat_completions can stamp it on the records.
+    std::string transcription_format;
     enum class State { queued, running, ready } state = State::queued;
     std::atomic<bool> cancelled{false};
   };
   void enqueue_preparation(const HttpRequest&, HttpResponseWriter&, uint64_t tag = 0,
                            std::chrono::steady_clock::time_point arrived = {},
-                           bool file_processed = false);
+                           bool file_processed = false,
+                           std::string transcription_format = {});
   void preparation_loop();
   void pump_preparations();
   void respond_unavailable(HttpResponseWriter&);
   void stop_preparation();
   bool reserve_preparation_bytes(size_t bytes);
   bool reserve_prepared_payload(PreparedRequest&, size_t bytes);
-  void prepare_chat_completions(const HttpRequest& req, PreparedRequest& w);
+  void prepare_chat_completions(const HttpRequest& req, PreparedRequest& w,
+                                const std::string& transcription_format = {});
+  // The parsed-body half of prepare_chat_completions, shared with the
+  // transcription route (which synthesizes its body from multipart parts).
+  // transcription_format is "" for chat, else the /v1/audio/transcriptions
+  // response shape ("json" or "text").
+  void route_chat_completions_parsed(const dgpp::minijson::Value& body, PreparedRequest& w,
+                                     const std::string& transcription_format);
+  void route_audio_transcriptions(const HttpRequest& req, HttpResponseWriter& w);
   void prepare_completions(const HttpRequest& req, PreparedRequest& w);
   void route_models(const HttpRequest& req, HttpResponseWriter& w);
   void route_health(HttpResponseWriter& w) const;
@@ -626,7 +644,8 @@ class GenerationService : public HttpHandler,
                   ChatPlan* plan);
   void enqueue_file_work(const HttpRequest& req, HttpResponseWriter& writer, bool chat,
                          uint64_t tag = 0,
-                         std::chrono::steady_clock::time_point arrived = {});
+                         std::chrono::steady_clock::time_point arrived = {},
+                         std::string transcription_format = {});
   void pump_file_work();
 
   // The OpenAI error body (never a bare string).
@@ -704,6 +723,7 @@ class GenerationService : public HttpHandler,
     std::chrono::steady_clock::time_point arrived;
     std::future<FileResponse> result;
     std::future<void> worker;  // joins before file_inputs_ is destroyed
+    std::string transcription_format;  // rides the re-enqueued preparation
   };
   std::vector<PendingFileWork> file_work_;  // HTTP thread only; destroyed before file_inputs_
   std::atomic<size_t> pending_file_count_{0};  // observed by shutdown drain

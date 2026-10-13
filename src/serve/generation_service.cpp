@@ -1,5 +1,6 @@
 #include "serve/generation_service.hpp"
 #include "serve/audio_inputs.hpp"
+#include "serve/audio_transcriptions.hpp"
 #include "serve/image_inputs.hpp"
 #include "text/dsv41_prompt.hpp"
 
@@ -684,7 +685,8 @@ bool GenerationService::reserve_prepared_payload(PreparedRequest& result, size_t
 void GenerationService::enqueue_preparation(const HttpRequest& request, HttpResponseWriter& writer,
                                             uint64_t tag,
                                             std::chrono::steady_clock::time_point arrived,
-                                            bool file_processed) {
+                                            bool file_processed,
+                                            std::string transcription_format) {
   const auto queued = std::chrono::steady_clock::now();
   bool stopped;
   {
@@ -717,6 +719,7 @@ void GenerationService::enqueue_preparation(const HttpRequest& request, HttpResp
     job->request = request;
     job->writer = &writer;
     job->file_processed = file_processed;
+    job->transcription_format = std::move(transcription_format);
     job->result.tag = tag ? tag : next_tag_.fetch_add(1, std::memory_order_relaxed);
     job->result.arrived = arrived == std::chrono::steady_clock::time_point{} ? queued : arrived;
     job->result.queued = queued;
@@ -767,7 +770,7 @@ void GenerationService::preparation_loop() {
           if (!job->file_processed && FileInputs::needed(job->request))
             result.needs_file = true;
           else
-            prepare_chat_completions(job->request, result);
+            prepare_chat_completions(job->request, result, job->transcription_format);
         } else
           prepare_completions(job->request, result);
       } catch (const std::exception& e) {
@@ -853,7 +856,8 @@ void GenerationService::pump_preparations() {
                            std::move(result.error->body));
     } else if (result.needs_file) {
       try {
-        enqueue_file_work(job->request, *job->writer, true, result.tag, result.arrived);
+        enqueue_file_work(job->request, *job->writer, true, result.tag, result.arrived,
+                          job->transcription_format);
       } catch (const std::exception& e) {
         respond_error(*job->writer, 500, std::string("file processing failed: ") + e.what(),
                       "server_error", "file", "file_processing_failed");
@@ -2000,6 +2004,10 @@ void GenerationService::handle(const HttpRequest& req,
     enqueue_preparation(req, w);
     return;
   }
+  if (p == "/v1/audio/transcriptions") {
+    route_audio_transcriptions(req, w);
+    return;
+  }
   if (p == "/v1/models" || p.rfind("/v1/models/", 0) == 0) {
     if (req.method != "GET") {
       respond_error(w, 405, req.method + " is not allowed here; use GET",
@@ -2196,7 +2204,8 @@ bool GenerationService::parse_stream_options(const minijson::Value& body, Prepar
 }
 
 void GenerationService::prepare_chat_completions(const HttpRequest& req,
-                                              PreparedRequest& w) {
+                                              PreparedRequest& w,
+                                              const std::string& transcription_format) {
   dgpp::minijson::ParseResult parsed;
   try {
     parsed = dgpp::minijson::parse_document(req.body);
@@ -2211,6 +2220,12 @@ void GenerationService::prepare_chat_completions(const HttpRequest& req,
                   "invalid_request_error", "body");
     return;
   }
+  route_chat_completions_parsed(body, w, transcription_format);
+}
+
+void GenerationService::route_chat_completions_parsed(const dgpp::minijson::Value& body,
+                                                      PreparedRequest& w,
+                                                      const std::string& transcription_format) {
 
   // model — must name the served model.
   const dgpp::minijson::Value* model = body.find("model");
@@ -2435,6 +2450,7 @@ void GenerationService::prepare_chat_completions(const HttpRequest& req,
     record->model = cfg_.model_id;
     record->created_unix = created;
     record->chat = true;
+    record->transcription_format = transcription_format;
     record->custom_tools = plan.custom_tools;
     record->stream = stream;
     record->include_usage = include_usage;
@@ -2475,6 +2491,49 @@ void GenerationService::prepare_chat_completions(const HttpRequest& req,
   w.needs_seed = !seed.has_value();
   w.records = std::move(records);
   w.requests = std::move(requests);
+}
+
+// ---------------------------------------------------------------------------
+// POST /v1/audio/transcriptions (the OpenAI transcription API, docs/audio.md)
+// ---------------------------------------------------------------------------
+
+void GenerationService::route_audio_transcriptions(const HttpRequest& req,
+                                                  HttpResponseWriter& w) {
+  if (req.method != "POST") {
+    respond_error(w, 405, req.method + " is not allowed here; use POST",
+                  "invalid_request_error");
+    return;
+  }
+  const std::string* content_type = req.header("content-type");
+  std::vector<MultipartPart> parts;
+  try {
+    parts = parse_multipart(content_type != nullptr ? *content_type : "", req.body);
+  } catch (const MultipartError& e) {
+    respond_error(w, 400, e.what(), "invalid_request_error", e.param);
+    return;
+  }
+  TranscriptionRequest treq;
+  try {
+    treq = transcription_chat_body(parts, cfg_.model_id);
+  } catch (const MultipartError& e) {
+    if (e.status == 404)
+      respond_error(w, 404, e.what(), "invalid_request_error", e.param, "model_not_found");
+    else
+      respond_error(w, 400, e.what(), "invalid_request_error", e.param);
+    return;
+  } catch (const AudioInputError& e) {
+    respond_error(w, 400, e.what(), "invalid_request_error", e.param, "invalid_audio");
+    return;
+  }
+  // The synthesized chat body rides the preparation pool exactly like a
+  // /v1/chat/completions request: serialize it and enqueue under the chat
+  // path, carrying the response shape to the worker.
+  HttpRequest chat_req;
+  chat_req.method = "POST";
+  chat_req.path = "/v1/chat/completions";
+  chat_req.body = dgpp::text::json_text_of(treq.body);
+  enqueue_preparation(chat_req, w, /*tag=*/0, /*arrived=*/{}, /*file_processed=*/false,
+                      std::move(treq.response_format));
 }
 
 // ---------------------------------------------------------------------------
@@ -3853,7 +3912,8 @@ void GenerationService::on_retire(const std::string& id,
 // ---------------------------------------------------------------------------
 
 void GenerationService::enqueue_file_work(const HttpRequest& req, HttpResponseWriter& writer, bool chat,
-    uint64_t tag, std::chrono::steady_clock::time_point arrived) {
+    uint64_t tag, std::chrono::steady_clock::time_point arrived,
+    std::string transcription_format) {
   if (file_work_.size() >= static_cast<size_t>(cfg_.file_inputs.workers)) {
     respond_error(writer, 503, "file preprocessing is busy; retry later", "server_error", "file", "file_processing_busy");
     return;
@@ -3875,7 +3935,8 @@ void GenerationService::enqueue_file_work(const HttpRequest& req, HttpResponseWr
     // returns. Publish through a separate promise before notifying HTTP.
     wakeup();
   });
-  file_work_.push_back({tag, &writer, chat, arrived, std::move(future), std::move(worker)});
+  file_work_.push_back({tag, &writer, chat, arrived, std::move(future), std::move(worker),
+                        std::move(transcription_format)});
   pending_file_count_.fetch_add(1);
 }
 
@@ -3891,7 +3952,8 @@ void GenerationService::pump_file_work() {
       if (job.chat) {
         HttpRequest request;
         request.method = "POST"; request.path = "/v1/chat/completions"; request.body = std::move(result.body);
-        enqueue_preparation(request, *job.writer, job.tag, job.arrived, true);
+        enqueue_preparation(request, *job.writer, job.tag, job.arrived, true,
+                            job.transcription_format);
       } else job.writer->respond(result.status, result.content_type, std::move(result.body));
     } catch (const FileInputError& e) {
       respond_error(*job.writer, e.status, e.what(), e.status >= 500 ? "server_error" : "invalid_request_error", e.param, e.code);
@@ -4236,7 +4298,23 @@ void GenerationService::pump_records() {
               text_choice_json(r->choice, r->out_text, finish, lp_json);
         }
         if (++g.finished == g.n && !g.ended) {
-          std::string joined;
+          if (!r->transcription_format.empty()) {
+            // The transcription shapes (docs/audio.md): "json" answers
+            // {"text"} and "text" answers the raw transcript. No usage
+            // block and no timings; the per-choice chat assembly above is
+            // discarded (transcriptions always run a single choice).
+            sanitize_utf8(&r->content);
+            if (r->transcription_format == "text") {
+              r->writer->respond(200, "text/plain; charset=utf-8", r->content);
+            } else {
+              std::string response = "{\"text\":";
+              append_json_string(&response, r->content);
+              response.push_back('}');
+              r->writer->respond(200, "application/json", std::move(response));
+            }
+            g.ended = true;
+          } else {
+            std::string joined;
           for (size_t i = 0; i < g.choices.size(); ++i) {
             if (i) joined.push_back(',');
             joined += g.choices[i];
@@ -4257,6 +4335,7 @@ void GenerationService::pump_records() {
           response.push_back('}');
           r->writer->respond(200, "application/json", std::move(response));
           g.ended = true;
+          }
         }
       }
     }

@@ -35,6 +35,27 @@ std::vector<uint8_t> from_data_uri(std::string_view s, const std::string& param)
 }
 }  // namespace
 
+AudioInput prepare_audio_bytes(const uint8_t* bytes, size_t size, const std::string& param) {
+  try {
+    auto wav = audio::decode_wav(bytes, size);
+    if (wav.samples.size() / static_cast<size_t>(wav.channels) >
+        static_cast<size_t>(kMaxAudioSamples) * 25)  // raw-side sanity, before the resize
+      throw AudioInputError("audio clip exceeds the admission bound", param);
+    auto pcm = align_pcm(audio::to_mono_16k(wav));
+    AudioInput au;
+    au.frames = static_cast<int64_t>(pcm.size()) / kAudioHop;
+    au.tokens = audio_token_count(au.frames);
+    if (au.tokens > kMaxAudioTokens)
+      throw AudioInputError("audio yields more encoder tokens than the request limit", param);
+    au.pcm = std::move(pcm);
+    return au;
+  } catch (const AudioInputError&) {
+    throw;
+  } catch (const std::invalid_argument& e) {
+    throw AudioInputError(e.what(), param);
+  }
+}
+
 AudioInput prepare_audio(const minijson::Value& part, const std::string& param) {
   const auto* type = part.find("type");
   std::vector<uint8_t> bytes;
@@ -66,19 +87,7 @@ AudioInput prepare_audio(const minijson::Value& part, const std::string& param) 
                                          return std::vector<uint8_t>(v.begin(), v.end());
                                        }();
     }
-    auto wav = audio::decode_wav(bytes.data(), bytes.size());
-    if (wav.samples.size() / static_cast<size_t>(wav.channels) >
-        static_cast<size_t>(kMaxAudioSamples) * 25)  // raw-side sanity, before the resize
-      throw AudioInputError("audio clip exceeds the admission bound", "input_audio");
-    auto pcm = align_pcm(audio::to_mono_16k(wav));
-    AudioInput au;
-    au.frames = static_cast<int64_t>(pcm.size()) / kAudioHop;
-    au.tokens = audio_token_count(au.frames);
-    if (au.tokens > kMaxAudioTokens)
-      throw AudioInputError("audio yields more encoder tokens than the request limit",
-                            "input_audio");
-    au.pcm = std::move(pcm);
-    return au;
+    return prepare_audio_bytes(bytes.data(), bytes.size(), param);
   } catch (const AudioInputError&) {
     throw;
   } catch (const std::invalid_argument& e) {

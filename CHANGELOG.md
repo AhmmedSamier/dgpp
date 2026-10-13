@@ -1564,6 +1564,19 @@ project procedures and design guidance live in `docs/`.
   Serving throughput remains unmeasured under the current benchmark
   protocol; no performance comparison is claimed for these templates.
 
+- **Qwen3-ASR transcription endpoint (`POST /v1/audio/transcriptions`)**:
+  the OpenAI transcription API over the chat engine - a strict
+  line-scanning multipart parser (no payload substring search, so WAV
+  bytes may contain the boundary), field validation with 400s naming the
+  multipart field, then a synthesized chat-completions body (prompt as the
+  system message, base64 WAV as one `input_audio` part, duration-sniffed
+  `max_tokens`) served through the normal admission/scheduling path with
+  the response shaped afterwards (`{"text"}` for `json`, raw transcript
+  for `text`). `language` is validated but not rendered: the checkpoint
+  auto-detects and prefixes `language <NAME>` itself, and its template
+  drops assistant prefill. `tests/host/serve_test.cpp` pins json/text
+  parity plus every refusal; a served demo clip transcribes identically
+  through both shapes.
 - **Qwen3-ASR prefill performance (tower convs + boot warmup)**: the
   direct-fused convs profiled at 96% of tower time (2.5 s of 2.6 s in
   nsys) - each output thread streamed its full 8.6 KB footprint and the

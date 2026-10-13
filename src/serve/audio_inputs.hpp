@@ -27,4 +27,8 @@ struct AudioInputError : std::invalid_argument {
 // Decoded payloads are capped at 20 MiB base64 (images' cap), and clips at
 // half an hour of 16 kHz audio.
 AudioInput prepare_audio(const minijson::Value& part, const std::string& param);
+
+// Raw container bytes (the transcription endpoint's uploaded file) through
+// the same decode/align/count contract; errors name `param` (e.g. "file").
+AudioInput prepare_audio_bytes(const uint8_t* bytes, size_t size, const std::string& param);
 }  // namespace dgpp::serve

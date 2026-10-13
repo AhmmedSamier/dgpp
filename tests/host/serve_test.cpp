@@ -5434,6 +5434,132 @@ DGPP_TEST(serve_audio_admission_and_engine_handoff) {
           "invalid audio names the precise field");
 }
 
+std::string post_transcriptions(ServiceRig& rig, const std::string& body,
+                                const std::string& content_type, int budget_ms = 8000) {
+  Client c(rig.port());
+  c.send_all("POST /v1/audio/transcriptions HTTP/1.1\r\nHost: t\r\n"
+             "Content-Type: " +
+             content_type + "\r\nContent-Length: " + std::to_string(body.size()) +
+             "\r\n\r\n" + body);
+  return c.read_response(budget_ms);
+}
+
+// Fixed multipart field builders (CRLF framing, like curl and the SDKs).
+std::string multipart_field(const std::string& boundary, const std::string& name,
+                            std::string_view data, const std::string& filename = "",
+                            const std::string& content_type = "") {
+  std::string out = "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + name + "\"";
+  if (!filename.empty()) out += "; filename=\"" + filename + "\"";
+  out += "\r\n";
+  if (!content_type.empty()) out += "Content-Type: " + content_type + "\r\n";
+  out += "\r\n";
+  out.append(data.data(), data.size());
+  out += "\r\n";
+  return out;
+}
+
+std::string one_second_wav_raw() {
+  std::string pcm;
+  for (int i = 0; i < 16000; ++i) {
+    const auto v = static_cast<int16_t>(12000.0 * std::sin(0.02 * i));
+    pcm += static_cast<char>(v & 0xff);
+    pcm += static_cast<char>(static_cast<unsigned>(v) >> 8);
+  }
+  const auto u32 = [](uint32_t v) {
+    return std::string{char(v), char(v >> 8), char(v >> 16), char(v >> 24)};
+  };
+  const auto u16 = [](uint16_t v) { return std::string{char(v), char(v >> 8)}; };
+  return "RIFF" + u32(36 + static_cast<uint32_t>(pcm.size())) + "WAVEfmt " + u32(16) + u16(1) +
+         u16(1) + u32(16000) + u32(32000) + u16(2) + u16(16) + "data" +
+         u32(static_cast<uint32_t>(pcm.size())) + pcm;
+}
+
+std::string response_body_text(const std::string& response) {
+  const size_t split = response.find("\r\n\r\n");
+  require(split != std::string::npos, "complete response headers: " + response.substr(0, 200));
+  return response.substr(split + 4);
+}
+
+DGPP_TEST(serve_audio_transcriptions_json_and_text) {
+  const std::string wav = one_second_wav_raw();
+  const std::string boundary = "------------------------dgpp-test-1";
+  const std::string content_type = "multipart/form-data; boundary=" + boundary;
+  ServiceRig rig;
+  rig.frontend.audios_available = true;
+  rig.engine.audios_available = true;
+  const auto file_field = multipart_field(boundary, "file", wav, "audio.wav", "audio/wav");
+  const auto model_field = multipart_field(boundary, "model", kModel);
+  const std::string close = "--" + boundary + "--\r\n";
+
+  // json (the default): {"text"} with the fake transcript, usage skipped.
+  auto response =
+      post_transcriptions(rig, file_field + model_field + close, content_type);
+  require(response.find("200 OK") != std::string::npos, "transcription accepted: " + response);
+  require(response.find("Content-Type: application/json") != std::string::npos,
+          "json response type: " + response.substr(0, 300));
+  require(response.find("\"usage\"") == std::string::npos, "no usage block in transcription");
+  // NOTE: the body must outlive the parse: minijson borrows unescaped
+  // strings as views, so parsing a temporary's view dangles (stable
+  // length, garbage bytes — the flaky-hash signature this comment
+  // replaces).
+  const std::string json_body = response_body_text(response);
+  const auto parsed = dgpp::minijson::parse(std::string_view(json_body));
+  const auto* text = parsed.root.find("text");
+  require(text != nullptr && text->is_string() && !text->as_string().empty(),
+          "non-empty transcript: " + response_body_text(response));
+  const std::string transcript(text->as_string());
+  require(rig.engine.audio_prefills == 1, "audio reached the engine prefill");
+
+  // text: the same transcript raw, no JSON envelope.
+  const auto text_response = post_transcriptions(
+      rig, file_field + model_field + multipart_field(boundary, "response_format", "text") + close,
+      content_type);
+  require(text_response.find("200 OK") != std::string::npos, "text accepted");
+  require(text_response.find("Content-Type: text/plain") != std::string::npos,
+          "text response type: " + text_response.substr(0, 300));
+  require(response_body_text(text_response) == transcript, "both formats agree");
+
+  // Prompt and language ride along (prompt as the system message; language
+  // validated and documented as auto-detect).
+  response = post_transcriptions(rig,
+                                 file_field + model_field +
+                                     multipart_field(boundary, "prompt", "Transcribe.") +
+                                     multipart_field(boundary, "language", "en") + close,
+                                 content_type);
+  require(response.find("200 OK") != std::string::npos, "prompt+language accepted: " + response);
+
+  // Field faults name their multipart field.
+  expect_invalid_request(post_transcriptions(rig, model_field + close, content_type), "file");
+  auto wrong_model = post_transcriptions(rig, file_field +
+                                                   multipart_field(boundary, "model", "nope") +
+                                                   close,
+                                         content_type);
+  require(wrong_model.find("404 Not Found") != std::string::npos, "unknown model 404s");
+  require(wrong_model.find("model_not_found") != std::string::npos, "404 names the code");
+  expect_invalid_request(post_transcriptions(rig,
+                                             file_field + model_field +
+                                                 multipart_field(boundary, "response_format",
+                                                                 "srt") +
+                                                 close,
+                                             content_type),
+                         "response_format");
+  expect_invalid_request(post_transcriptions(rig,
+                                             file_field + model_field +
+                                                 multipart_field(boundary, "temperature", "hot") +
+                                                 close,
+                                             content_type),
+                         "temperature");
+  // Undecodable bytes are a 400 naming the file, never scheduler work.
+  const int prefills = rig.engine.audio_prefills.load();
+  auto garbage = post_transcriptions(
+      rig, multipart_field(boundary, "file", "not audio at all", "audio.wav") + model_field + close,
+      content_type);
+  require(garbage.find("400 Bad Request") != std::string::npos, "garbage file refused");
+  require(garbage.find("\"file\"") != std::string::npos, "refusal names the file");
+  require(garbage.find("invalid_audio") != std::string::npos, "refusal names the code");
+  require(rig.engine.audio_prefills == prefills, "no engine work for bad audio");
+}
+
 DGPP_TEST(serve_models_reports_the_active_rope_and_the_effective_limit) {
   // The request-context surface (review item 7, 2026-09-18): what ramp is in
   // force, and what one request may actually reach. Both fields are additive —
