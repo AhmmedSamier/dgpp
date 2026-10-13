@@ -173,6 +173,19 @@ project procedures and design guidance live in `docs/`.
   `benchmarks/results/` are no longer tracked. The measured
   latency/throughput tradeoffs are in
   [PR #112](https://github.com/HawkBearPig/dgpp/pull/112).
+- **Qwen3-ASR language half: served** (`models/qwen_asr/model.{hpp,cpp}`,
+  `QwenAsrFamily` in `apps/dgpp_serve.cpp`): the checkpoint's plain Qwen3
+  decoder as a world-1 resident-BF16 `SessionModel` on the shared GLM-4.7
+  attention/pool machinery (GQA 16/8, q/k-norm, full 128-wide rotary, bf16
+  SwiGLU, no MoE/MTP; the tied `thinker.lm_head.weight` aliases the
+  embedding after a byte-windowed copy check). `session_prefill_audios`
+  re-featurizes each clip's PCM through the oracle frontend + fp32 tower
+  and splices the projected rows into the prefill embeddings at the
+  admission span. `tests/cuda/qwen_asr_forward_test` replays a fixed
+  96-token prompt against a torch-fp32 dump of the checkpoint's decoder
+  (`tools/qwen_asr_text_goldens.py`): argmax matches, cosine 0.99999. Three
+  test-idiom bugs found by the gate itself (comma-eating fixture mutants,
+  a doubled `nbytes()` in the tie check, a `sqrt`'d cosine).
 - **Qwen3-ASR audio tower: fp32 oracle** (`dgpp_models_qwen_asr`, new):
   the checkpoint's encoder - three stride-2 (freq, time) convs + 7680-wide
   conv_out + 13-row sinusoidal positions per 100-frame chunk, 24 LN-GELU

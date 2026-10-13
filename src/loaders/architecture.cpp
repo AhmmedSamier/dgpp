@@ -49,9 +49,14 @@ ModelArchitecture detect_architecture(const minijson::Value& root) {
   // (its text_config's type is `qwen3_5_text`).
   if (arch.rfind("Qwen3_5", 0) == 0 || (arch.empty() && type == "qwen3_5"))
     return ModelArchitecture::Qwen3_5;
+  // Qwen3-ASR-1.7B (docs/audio.md): `Qwen3ASRForConditionalGeneration` /
+  // `qwen3_asr` (the LM hides under thinker_config.text_config).
+  if (arch.rfind("Qwen3ASR", 0) == 0 || (arch.empty() && type == "qwen3_asr"))
+    return ModelArchitecture::Qwen3Asr;
   throw std::runtime_error(
-      "config.json: unsupported architecture '" + arch + "' (model_type '" +
-      type + "'); the engine implements Glm5*, Qwen4Exp*, Glm4Moe*, GlmMoeDsa*, DeepseekV41*, DeepseekV4*, MiMoV2* and Qwen3_5*");
+      "config.json: unsupported architecture '" + arch + "' (model_type '" + type +
+      "'); the engine implements Glm5*, Qwen4Exp*, Glm4Moe*, GlmMoeDsa*, DeepseekV41*, "
+      "DeepseekV4*, MiMoV2*, Qwen3_5* and Qwen3ASR*");
 }
 
 ModelArchitecture detect_architecture_file(const std::string& path) {

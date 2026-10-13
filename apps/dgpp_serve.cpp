@@ -86,6 +86,7 @@
 #include "models/qwen/model35.hpp"
 #include "models/glm4/config.hpp"
 #include "models/glm4/forward.hpp"
+#include "models/qwen_asr/model.hpp"
 #include "models/glm_dsa/config.hpp"
 #include "models/dsv41/config.hpp"
 #include "models/dsv41/loader.hpp"
@@ -106,6 +107,8 @@
 #include "serve/generation_service.hpp"
 #include "serve/frontend.hpp"
 #include "serve/glm_vision_frontend.hpp"
+#include "serve/audio_frontend.hpp"
+#include "serve/qwen_asr_audio_frontend.hpp"
 #include "serve/qwen_vision_frontend.hpp"
 #include "serve/http_server.hpp"
 #include "serve/prefill_policy.hpp"
@@ -966,6 +969,65 @@ struct Qwen35Family final : ServeFamily {
   }
 };
 
+// Qwen3-ASR-1.7B (docs/audio.md): the plain dense Qwen3 decoder with the
+// audio tower splicing its rows into prefill. World 1, resident BF16, no
+// draft block; the audio seam is the engine contract's session_prefill_audios.
+struct QwenAsrFamily final : ServeFamily {
+  dgpp::QwenAsrConfig cfg;
+  std::string ckpt;
+  std::unique_ptr<dgpp::QwenAsrModel> model;
+  explicit QwenAsrFamily(const std::string& checkpoint)
+      : cfg(dgpp::QwenAsrConfig::from_json_file((fs::path(checkpoint) / "config.json").string())),
+        ckpt(checkpoint) {}
+  const char* name() const override { return "qwen3_asr"; }
+  int64_t vocab_size() const override { return cfg.lm.vocab_size; }
+  const std::vector<int64_t>& eos_token_ids() const override { return cfg.lm.eos_token_ids; }
+  int64_t block_tokens() const override { return dgpp::QwenAsrModel::kv_block_tokens_static(); }
+  int prefill_chunk_tokens() const override { return dgpp::QwenAsrModel::prefill_chunk_tokens(); }
+  std::string pool_check(int64_t) const override { return ""; }
+  const char* kv_format_name() const override { return "bf16"; }
+  int decode_rows_cap() const override { return dgpp::QwenAsrModel::decode_rows_cap(); }
+  size_t lat_slot_bytes(int decode_rows) const override {
+    return static_cast<size_t>(decode_rows) * static_cast<size_t>(cfg.lm.hidden_size) * 2;
+  }
+  dgpp::MemoryPlan plan(int forward_rows, int64_t context, int, int, bool, int slots, bool,
+                        int decode_rows) const override {
+    return dgpp::QwenAsrModel::plan_memory(cfg, forward_rows, context, slots, decode_rows,
+                                           /*serving_logits=*/true);
+  }
+  size_t snapshot_bytes(int, bool) const override {
+    return dgpp::QwenAsrModel::session_snapshot_bytes(cfg);
+  }
+  void build_model(dgpp::BoundaryReducer*, int, int, bool, int forward_rows, int64_t pool_tokens,
+                   int slots, bool, int decode_rows) override {
+    model = std::make_unique<dgpp::QwenAsrModel>(cfg, ckpt, forward_rows, pool_tokens, slots,
+                                                 decode_rows, /*serving_logits=*/true);
+  }
+  void destroy_model() override { model.reset(); }
+  size_t model_snapshot_bytes() const override {
+    return model ? model->session_snapshot_bytes() : 0;
+  }
+  std::unique_ptr<ServeGraphEngine> make_graph_engine(dgpp::net::CollectiveBus*, int rank, int,
+                                                      uint16_t* pick_scratch, int batch_min_live,
+                                                      uint16_t* prefix_scratch,
+                                                      uint16_t* gather_scratch, int candidates,
+                                                      const dgpp::text::GrammarVocab* grammar,
+                                                      int prefix_slots, int mtp_depth,
+                                                      bool compact_batches,
+                                                      int lookup_tail = 0) override {
+    return std::make_unique<ServeGraphEngineOf<dgpp::QwenAsrModel>>(
+        model.get(), nullptr, rank, 1, pick_scratch, cfg.lm.vocab_size, 60000, batch_min_live,
+        prefix_scratch, gather_scratch, candidates, grammar, prefix_slots, mtp_depth,
+        compact_batches, lookup_tail);
+  }
+  std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
+      int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample,
+      const dgpp::text::GrammarVocab* grammar, int prefix_slots) override {
+    return std::make_unique<dgpp::EagerEngineAdapter<dgpp::QwenAsrModel>>(
+        model.get(), slots, std::move(pick), std::move(sample), grammar, prefix_slots);
+  }
+};
+
 std::unique_ptr<ServeFamily> make_family(const std::string& ckpt, int world,
                                          dgpp::LatentFormat kv_format,
                                          const std::optional<dgpp::RopeScaling>& rope_scaling,
@@ -979,6 +1041,7 @@ std::unique_ptr<ServeFamily> make_family(const std::string& ckpt, int world,
     return std::make_unique<QwenFamily>(ckpt, rope_scaling, fp8_head_mma);
   if (arch == dgpp::ModelArchitecture::Qwen3_5) return std::make_unique<Qwen35Family>(ckpt);
   if (arch == dgpp::ModelArchitecture::Glm4Moe) return std::make_unique<Glm4Family>(ckpt);
+  if (arch == dgpp::ModelArchitecture::Qwen3Asr) return std::make_unique<QwenAsrFamily>(ckpt);
   if (arch == dgpp::ModelArchitecture::GlmMoeDsa) return std::make_unique<GlmDsaFamily>(ckpt, world, kv_format);
   return std::make_unique<GlmFamily>(ckpt, world, kv_format);
 }
@@ -1108,6 +1171,15 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
         vision_frontend = std::make_unique<dgpp::serve::GlmVisionFrontend>(&tok, &*tpl, ids);
       else if (family_name == "qwen4_exp")
         vision_frontend = std::make_unique<dgpp::serve::QwenVisionFrontend>(&tok, &*tpl, ids);
+    } else if (engine->supports_audios() && family_name == "qwen3_asr") {
+      // The ASR family (docs/audio.md): the same template, with each audio
+      // part replaced by the trained delimiters and one pad token per
+      // encoder token; the ids come from the model's own config.
+      vision_frontend =
+          std::make_unique<dgpp::serve::QwenAsrAudioFrontend>(&tok, &*tpl,
+                                                                engine->audio_token_ids());
+      DGPP_LOG_INFO("serve: audio inputs enabled ({} audio tokens per request max)",
+                    dgpp::kMaxAudioTokens);
     }
     frontend = vision_frontend ? std::move(vision_frontend)
                                : std::make_unique<dgpp::serve::TextFrontend>(&tok, &*tpl);

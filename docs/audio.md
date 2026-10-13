@@ -8,11 +8,16 @@ span, and the tower re-featurizes the PCM identically on every rank. No URL
 fetching and no Python runtime are involved.
 
 The tower's fp32 CPU oracle is in (`models/qwen_asr/audio_tower_reference`,
-pinned to a torch replay of the checkpoint's own encoder within 2.4e-05,
-docs below); the CUDA encoder and the language-model family are the open
-milestones. Until a served model reports them, every frontend refuses audio
-parts with `unsupported_content_type`, and `GET /v1/models` lists `"audio"`
-in `input_modalities` only for models whose engine carries the tower.
+pinned to a torch replay of the checkpoint's own encoder within 2.4e-05),
+and the language half is served: `QwenAsrModel` (`models/qwen_asr/`) is the
+checkpoint's plain Qwen3 decoder (28x2048, GQA 16/8, q/k-norm, full 128-wide
+rotary, bf16 SwiGLU, the tied head aliasing the embedding) on the shared
+GLM-4.7 attention/pool machinery, with the tower's projected rows spliced
+into the prefill embeddings at each audio span. `dgpp-serve` detects the
+`Qwen3ASR*` architecture (`qwen3_asr` family) and renders audio parts through
+`QwenAsrAudioFrontend`, so `GET /v1/models` lists `"audio"` for it. The open
+milestones are the CUDA tower (the oracle path runs fp32 on the host today)
+and an FFT frontend (the host DFT is exact and quadratic).
 
 ## Request format
 
@@ -53,6 +58,8 @@ message text are rejected as conflicting with the decoded audio.
 | Prompt rewrite (delimiter span) | `src/serve/audio_frontend.{hpp,cpp}` |
 | Request/queue/engine seams | `src/sched/scheduler.hpp`, `src/engine/*_engine.hpp` |
 | Tower config + fp32 oracle (CUDA gate) | `src/models/qwen_asr/` |
+| Language half (served decoder + audio splice) | `src/models/qwen_asr/model.{hpp,cpp}` |
+| Serve family + audio frontend | `apps/dgpp_serve.cpp`, `src/serve/qwen_asr_audio_frontend.*` |
 
 The frontend mirrors `Qwen3ASRFeatureExtractor` exactly (center-padded
 400/160 STFT with a periodic Hann, torch's reflect edge; the 201x128 Slaney
