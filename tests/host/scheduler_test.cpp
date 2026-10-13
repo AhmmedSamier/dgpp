@@ -24,6 +24,7 @@
 #include <stdexcept>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "common/log.hpp"
@@ -4697,4 +4698,44 @@ DGPP_TEST(scheduler_adaptive_short_group_does_not_replace_full_quantum_estimate)
             "small completions leave the full-quantum estimate unmeasured, rather than reducing it to 32 tokens");
     require(sched.meters().pool_blocks_in_use == 0, "short group releases its slots and KV");
   }
+}
+
+DGPP_TEST(scheduler_adaptive_idle_arrival_keeps_the_full_first_token_allowance) {
+  struct MeasuredEngine : ChunkFakeEngine {
+    MeasuredEngine() : ChunkFakeEngine(4096) {}
+    int64_t prefill_chunk_limit() const override { return 1024; }
+    PrefillProgress advance_prefill(int req, int64_t budget) override {
+      // Keep the learned limit below the capacity/growth caps so halving
+      // the allowance is observable. Compare decisions, not exact timings.
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      return ChunkFakeEngine::advance_prefill(req, budget);
+    }
+  } engine;
+  engine.arm(0, {10}, 1);
+  engine.arm(0, {20}, 1);
+  dgpp::sched::AdmissionPolicy policy;
+  policy.prefill_budget_tokens = 128;
+  policy.prefill_idle_budget_tokens = 1024;
+  policy.prefill_budget_automatic = true;
+  policy.first_token_target_ms = 20;
+  Scheduler sched(&engine, {}, 0, policy);
+  sched.submit(make_request("calibrate", 512, 1));
+  sched.tick(128);
+  sched.cancel("calibrate");
+  sched.tick();
+  const auto idle_limit = sched.next_prefill_budget();
+  require(idle_limit && *idle_limit > 2, "calibrated limit leaves room to observe a reduction");
+  sched.submit(make_request("fresh", 512, 1));
+  require(sched.next_prefill_budget() == idle_limit,
+          "an arrival on an idle engine has no previous prefill yield to wait behind");
+  sched.tick();
+  const auto reading_limit = sched.next_prefill_budget();
+  sched.submit(make_request("arrival", 2, 1));
+  require(sched.next_prefill_budget() < reading_limit,
+          "a queued arrival during prefill still reserves time for its previous yield wait");
+  sched.cancel("fresh");
+  sched.cancel("arrival");
+  sched.tick();
+  require(!sched.has_pending() && sched.meters().pool_blocks_in_use == 0,
+          "calibration and unfinished readers release resources");
 }

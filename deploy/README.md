@@ -122,8 +122,15 @@ fp4); Qwen's and GLM-4.7's K/V caches stay BF16.
 
 The NVIDIA NVFP4 `w1` example uses a 262144-token shared KV pool and sets
 both `prefill_budget_tokens` and `prefill_idle_budget_tokens` to 4096.
-These budgets select the engine's supported 4K prefill chunks both when
-idle and when another request is generating. The profile retains MTP depth 1,
+These explicit budgets cap prefill work at 4K tokens both when idle and when
+another request is generating. The shared latency controller can select a
+smaller chunk; it starts at 256 tokens before learning the deployment's cost.
+The default decode-gap and first-token targets are both 3,000 ms and are soft
+objectives. Set both targets to zero to retain fixed 4K budgeting. Omitting the
+token budgets, or setting `prefill_budget_tokens` to -1 with an automatic idle
+budget, selects the shared automatic policy. See
+[budget and latency settings](../docs/operations.md) for tuning.
+The profile retains MTP depth 1,
 full admission, four request slots and its existing precision settings.
 
 The pool is shared across those slots. It permits a single request to approach

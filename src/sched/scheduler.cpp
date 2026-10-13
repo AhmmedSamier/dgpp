@@ -1361,10 +1361,14 @@ std::optional<int64_t> Scheduler::next_prefill_budget() const {
   for (const auto& r : requests_)
     if (r.state == State::kActive && !r.cancel_requested && !r.stop_requested) ++decoders;
   // Use the first-token allowance for an uninterrupted reader. When an
-  // arrival can obtain a slot, reserve half for time it already spent waiting
-  // for this yield. A full queue behind occupied slots cannot benefit from
-  // smaller reader chunks. Long prompts/KV pressure may still miss the target.
-  const bool waiting_arrival = free_slot() >= 0 && std::any_of(requests_.begin(), requests_.end(),
+  // arrival can obtain a slot during an ongoing prefill, reserve half for
+  // time it already spent waiting for this yield. A fresh reader on an idle
+  // engine has no preceding prefill wait to reserve. A full queue behind
+  // occupied slots cannot benefit from smaller reader chunks. Long prompts
+  // and KV pressure may still miss the target.
+  const bool reading = std::any_of(requests_.begin(), requests_.end(),
+      [](const Request& r) { return r.state == State::kPrefilling && !r.cancel_requested && !r.stop_requested; });
+  const bool waiting_arrival = reading && free_slot() >= 0 && std::any_of(requests_.begin(), requests_.end(),
       [](const Request& r) { return r.state == State::kQueued && !r.cancel_requested && !r.stop_requested; });
   double target = policy_.first_token_target_ms / (waiting_arrival ? 2.0 : 1.0);
   if (decoders && policy_.decode_gap_target_ms > 0)

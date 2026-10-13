@@ -640,10 +640,11 @@ slowdowns reduce the next limit immediately. Short final tails do not distort
 the estimate, including groups whose allocation was trimmed to their final tails.
 Completed groups do not calibrate the next bulk read-in: their final projections
 and admission costs differ from an unfinished reader's next chunk.
-Uninterrupted readers use the first-token time allowance. When a queued arrival
-can obtain a slot, the next quantum uses half that allowance, reserving half
-for time already spent waiting for a yield. It does not predict when a request
-blocked on slots or KV can start. Existing fair reader shares and at least one aligned
+Uninterrupted readers and a fresh reader on an idle engine use the full
+first-token time allowance. When an arrival is queued during an ongoing
+prefill and can obtain a slot, the next quantum uses half that allowance,
+reserving half for time already spent waiting for a yield. It does not predict
+when a request blocked on slots or KV can start. Existing fair reader shares and at least one aligned
 chunk preserve progress. Rank 0 journals each selected limit; workers never
 schedule from their local clocks.
 

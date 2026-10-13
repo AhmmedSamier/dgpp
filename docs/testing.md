@@ -45,11 +45,21 @@ that workers use the leader's limit and reject a missing adaptive decision;
 `qwen_engines_adaptive_prefill_scheduled_verify` exercises changing budgets through
 real continuations, mixed graphs and scheduled verification. Serving tests check
 latency-target misses against queue and token-pass timing.
+`dsv4_engines_adaptive_prefill_mixed_cancel_and_reuse` covers the adaptive policy
+with a different architecture in eager and graph modes: compressor-aligned
+growth, early short-reader output, cancellation of a yielded reader, slot reuse
+and full KV release. It uses a small generated checkpoint.
 For policy-only changes, use representative deployments with different execution
 costs and single-/multi-rank operation, plus an architecture adapter sanity check.
 Repeat the broader checkpoint matrix when an executor, state layout or numerical
 kernel changes. A shared scheduler still encounters different adapter geometry
 and costs; one checkpoint alone does not cover those differences.
+Include cold-controller startup and transitions between light traffic, bursts,
+queue/KV pressure and recovery. Check that fitting requests progress behind a
+KV-blocked reader, overload is reported, cancellations drain and learned budgets
+recover after load subsides. Compare the final candidate directly against the
+PR base in alternating deployment order; a same-binary policy comparison answers
+a separate question about the controller's contribution.
 
 Check cached continuations against isolated execution, repeat the loaded
 workload, and verify isolated recovery and retained KV usage. Investigate changed
