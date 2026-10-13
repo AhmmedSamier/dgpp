@@ -70,8 +70,7 @@ transcribes: admission decodes the WAV, the frontend lets the template emit
 its single `<|audio_pad|>` per part and expands it to the clip's encoder
 row count post-encode, the tower splices its rows into the prefill, and the
 decoder generates greedily. Verified end to end against the upstream demo
-clip (15 s English speech → 211 prompt tokens → 49 fluent tokens; prefill
-2.8 s with the device tower, 9x faster than the 25 s host oracle path).
+clip (15 s English speech → 211 prompt tokens → 49 fluent tokens).
 The device tower (`models/qwen_asr/tower.{hpp,cpp}`, kernels in
 `kernels/qwen_asr_tower.{hpp,cu}`) runs the encoder in BF16: direct-fused
 stride-2 convs, `matmul_linear_bf16` linears, vision-kernel LayerNorm /
@@ -83,6 +82,20 @@ window-crossing clip); the demo transcription is byte-identical between
 the two paths. The remaining prefill cost is the host log-mel frontend
 (exact, quadratic) and the LM walk itself — the FFT frontend is the open
 compute milestone.
+
+## Performance
+
+The demo clip's prefill fell 25.5 s → 2.8 s → 149 ms across the two
+performance changes below (same 49-token transcription throughout). The
+remaining 149 ms is roughly host log-mel (86 ms), device tower (~30 ms)
+and LM walk (~35 ms); the FFT frontend would take the first of those.
+
+The first-request tax deserves its own note: the first cublasLt use in a
+process pays lazy library loads and kernel JIT (profiled at 2.6 s on a
+first 96-row forward vs 34 ms warm). The model constructor warms one dummy
+tower piece and one 8-token forward, moving ~2.5 s from the first request
+to boot (construction 1.6 s → 4.2 s). Per-shape plan queries after that
+are microseconds.
 
 ## Where the work lives
 

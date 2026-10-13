@@ -23,11 +23,12 @@ void qwen_asr_conv_mel(const float* feats, const uint16_t* weight, const uint16_
                        uint16_t* out, int chunks, int frames, int ho, int wo, int co,
                        cudaStream_t stream);
 
-// Cell-first acts [chunks, hi*wi, ci] bf16 -> [(chunks*ho*wo), co] bf16
-// (weight [co, ci*9], bias [co]).
-void qwen_asr_conv(const uint16_t* act, const uint16_t* weight, const uint16_t* bias,
-                   uint16_t* out, int chunks, int ci, int hi, int wi, int ho, int wo, int co,
-                   cudaStream_t stream);
+// Cell-first acts [chunks, hi*wi, ci] bf16 -> cells [chunks*ho*wo, ci*9]
+// (kernel 3, stride 2, pad 1). `chunk_offset` starts the group: the tower
+// processes conv2/3 in groups bounding the cells buffer, and the group is
+// contiguous in both layouts so the offset folds into the base pointers.
+void qwen_asr_im2col(const uint16_t* act, uint16_t* cells, int chunks, int chunk_offset, int ci,
+                     int hi, int wi, int ho, int wo, cudaStream_t stream);
 
 // h3 [chunks, 16*13, 480] cell-first -> conv_out rows [(chunks*13), 7680]:
 // row (c, t) is the [channel, freq] plane flattened channel-major, i.e.

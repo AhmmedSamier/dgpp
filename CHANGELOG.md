@@ -15,6 +15,7 @@ project procedures and design guidance live in `docs/`.
   See [reuse across upgrades](docs/nvme-cache.md#across-restarts).
 
 ## v0.1.0 — 2026-10-28, the first published release (0.1.0+g11fe1807d63d)
+
 - **The README and the repository scaffolding** (2026-10-28): the README
   restructured around what the engine is (Why DGPP, a headline table sourced
   from `docs/benchmarks.md`, the architecture diagram, capability columns in
@@ -1563,6 +1564,19 @@ project procedures and design guidance live in `docs/`.
   Serving throughput remains unmeasured under the current benchmark
   protocol; no performance comparison is claimed for these templates.
 
+- **Qwen3-ASR prefill performance (tower convs + boot warmup)**: the
+  direct-fused convs profiled at 96% of tower time (2.5 s of 2.6 s in
+  nsys) - each output thread streamed its full 8.6 KB footprint and the
+  34 MB working set thrashed the L2. conv2/3 are im2col+tensor-core GEMM
+  again, in 4-chunk groups bounding the cells buffer at 28 MB (the
+  full-piece cells would need 207 MB). The first cut of that rewrite
+  double-applied GELU to conv3 (a leftover full-buffer call beside the
+  per-group one); the golden replay caught it at 1.7e-01 worst. Separately,
+  the model constructor now warms one dummy tower piece and one 8-token
+  forward, moving the process's one-time cublasLt library loads and kernel
+  JIT (~2.5 s) from the first request to boot. Demo prefill: 25.5 s
+  (host) → 2.8 s (device, cold) → 149 ms (device, warm), transcription
+  byte-identical throughout.
 - **Qwen3-ASR device tower** (`models/qwen_asr/tower.{hpp,cpp}`, kernels
   in `kernels/qwen_asr_tower.{hpp,cu}`): the encoder in BF16 behind the
   oracle's numbers - direct-fused stride-2 convs (one thread per output,
