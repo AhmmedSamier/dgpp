@@ -644,9 +644,9 @@ Uninterrupted readers and a fresh reader on an idle engine use the full
 first-token time allowance. When an arrival is queued during an ongoing
 prefill and can obtain a slot, the next quantum uses half that allowance,
 reserving half for time already spent waiting for a yield. It does not predict
-when a request blocked on slots or KV can start. Existing fair reader shares and at least one aligned
-chunk preserve progress. Rank 0 journals each selected limit; workers never
-schedule from their local clocks.
+when a request blocked on slots or KV can start. Existing fair reader shares
+and at least one aligned chunk preserve progress. Rank 0 journals each
+selected limit; workers never schedule from their local clocks.
 
 JSON `service.latency_target_misses` counts `first_token` and `decode_gap`
 misses. Prometheus exposes `dgpp_first_token_target_misses_total` and
@@ -669,10 +669,12 @@ prefills. Prometheus exposes the same counters as
 with corresponding `dgpp_rank_prefill_chunk_*` counters on each rank. High token
 utilization alone does not establish good throughput or acceptable decode gaps.
 
-The single-Spark NVIDIA and RadixArk Qwen NVFP4 templates explicitly select
-4,096-token busy and idle budgets. The two- and four-rank GLM-5.3-Flash
-NVFP4/FP8 templates select 256-token busy and 2,048-token idle budgets.
-A positive budget bounds aligned prefill work before each decode pass.
+All deployment examples inherit automatic budgets and the shared latency
+policy. Their native capacities retain a 2,048-token ceiling for GLM/MiMo and
+4,096 for Qwen/DeepSeek without model-specific scheduler settings. Existing
+local files may still carry positive busy/idle overrides; those remain caps
+until removed or changed. See [deployment defaults](../deploy/README.md#shared-scheduler-defaults).
+A positive explicit budget bounds aligned prefill work before each decode pass.
 Engines with mixed prefill/decode execution enable early text admission by default. Queued text shares
 bounded prefill work, and decoder verification shares projections with an
 unfinished reader. With fixed budgeting, decoders that preceded a reader retain

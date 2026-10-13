@@ -78,8 +78,11 @@ usage without inventing a first-visible-token timestamp.
 When defaults change, report both default-versus-default and matched-budget
 comparisons. Matched budgets mean explicitly setting the same busy and idle
 prefill limits on both builds; this is a benchmark control, not a separate
-serving mode. Record the resolved admission policy as well. Equal token budgets
-alone do not guarantee identical physical row batches or admission timing.
+serving mode. To isolate fixed token budgeting on a build with the adaptive
+controller, also set both latency targets to zero. For an adaptive-policy
+comparison, match and report the targets and controller tuning instead.
+Record the resolved admission policy as well. Equal token caps alone do not
+guarantee identical selected quanta, physical row batches or admission timing.
 
 Run GPU and fabric checks serially on idle hardware, then restore and verify the
 original configuration and executable on every rank. Inventory checkpoint and

@@ -1,16 +1,22 @@
 # DGPP Engine Design
 
 This document describes the implemented serving architecture. The
-shared runtime supports GLM-5.3-Flash, Qwen3.8-Flash-Next and GLM-4.7 with
-resident loading, tensor parallelism, decode graphs, sampling, prefix
-caching and MTP. World size and memory requirements depend on the model
+shared runtime supports the GLM, Qwen, DeepSeek and MiMo architectures listed
+in the [supported-model guide](README.md), with resident loading, tensor
+parallelism, decode graphs, sampling, prefix caching and speculative decoding.
+World size and memory requirements depend on the model
 and configuration.
 
 The attention, weight-placement and state examples below describe
 GLM-5.3-Flash unless another family is named. Qwen's GDN/QSA/GR/PLE
 operators are documented in [its architecture study](docs/qwen38_flash_next_plan.md),
 and GLM-4.7's GQA and NVFP4 layout in [its implementation notes](docs/glm47_plan.md).
-Shared session and engine interfaces live in `src/engine/`.
+Shared session and engine interfaces live in `src/engine/`. A common scheduler
+owns admission, fair reader budgets and request lifecycle. `PrefillTask`,
+`PrefillContinuation`, `PrefillBatch`, `RowRun` and `GraphBatchMapping` share
+resumable prefill and mixed execution across eager and graph adapters; layer
+executors supply architecture-specific math and state. See
+[continuous batching](docs/continuous-batching.md).
 
 Qwen's QSA indexer preserves its FP32 scoring order and deterministic
 score/pool tie rule. Rows whose visible pools fit the selection budget emit
@@ -327,7 +333,11 @@ as fatal to the current batch. As built (M6, §11), rank 0's ownership is
 realized by the admission journal: rank 0 is the sole HTTP ingress, every
 scheduler tick it runs is one journal record the peers apply before
 running the identical tick, and every engine op is a bus collective, so a
-record can never interleave a peer's in-flight tick.
+record can never interleave a peer's in-flight tick. The adaptive prefill
+controller uses completed-pass cost on rank 0 and journals each selected token
+limit. Workers replay that limit; independent GPU timings cannot alter their
+schedule. The [serving policy](docs/operations.md) exposes shared soft latency
+targets, growth/recovery tuning and explicit caps.
 
 ### 5.1 Block-boundary invariant
 
@@ -970,8 +980,8 @@ shorter rounds' gain (handshake + skew 55.8 -> 51.9 us) goes back in an
 unstaged fold that re-reads rows whose loads have only just been issued
 (12.3 -> 16.6 us); taking those rows peer by peer inside the pass was worse
 (77.4 us: the first ack waits for all three) and was reverted.
-`benchmarks/micro/uar_probe.cpp` records that the GB10 does map an mlx5
-doorbell page for device access (`cudaHostRegisterIoMemory`), the
+The local doorbell probe in that campaign confirmed that the GB10 maps an
+mlx5 doorbell page for device access (`cudaHostRegisterIoMemory`), the
 precondition of a kernel-rung send doorbell (~3 us of each handshake: the
 engine's notice and post).
 

@@ -22,8 +22,6 @@
     "admission_window": 256,
     "sampling_candidates": 128,
     "stats_interval_s": 10,
-    "prefill_budget_tokens": 4096,
-    "prefill_idle_budget_tokens": 4096,
     "model_alias": "qwen"
   },
   "paths": {

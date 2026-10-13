@@ -1,47 +1,55 @@
-# Reproducing the MiMo comparisons
+# Comparing MiMo serving changes
 
-These Python standard-library probes target an already running DGPP server.
-They never deploy or restart it, delete caches, or execute generated tools.
-Use an exclusive server: the probes check idle boundaries and request-counter
-deltas, and refuse to overwrite existing results. A failed or interrupted run
-retains its partial evidence; use a fresh tag for another attempt.
+The original MiMo comparison used a local 19-request corpus and helper
+scripts that are not bundled with the repository. Its measurements remain
+historical evidence. For new comparisons, use the maintained serving probes
+below and retain any additional prompts or harness fixtures with your results.
+These scenarios do not reproduce the original panel's measurements.
 
-From the repository root, select an API and an output directory:
-
-```sh
-export DGPP_MIMO_BENCH_URL=http://127.0.0.1:30001/v1
-export DGPP_MIMO_BENCH_ROOT=/path/to/experiment
-python3 benchmarks/mimo_upstream/benchmark.py native-mtp3
-python3 benchmarks/mimo_upstream/acceptance.py native-mtp3
-python3 benchmarks/mimo_upstream/cache_reuse.py native-mtp3
-python3 benchmarks/mimo_upstream/tool_probe.py native-mtp3
-python3 benchmarks/mimo_upstream/quality.py native-mtp3 2800 6000
-python3 benchmarks/mimo_upstream/order_probe.py native-mtp3 --repeats 3
-```
-
-For rank provenance and logs (SSH targets in rank order):
-
-```sh
-python3 benchmarks/mimo_upstream/capture.py live native-mtp3 --hosts user@head user@peer
-# Run the probes, then stop the world with the normal launcher.
-python3 benchmarks/mimo_upstream/capture.py stopped native-mtp3 --hosts user@head user@peer
-```
-
-The stopped capture checks nonempty, identical operation-stream MD5s. Both
-captures refuse overwrite. They record only MiMo, resident-cache and dense-row
-options from process environments, never the full site environment. Capture
-before replacing a deployment, since log locations may be reused.
-
-Record the exact Git commit, dirty diff (if any), binary SHA256, deployment
-JSON and rank environment alongside the results. Keep startup and warmup
-outside timings. Launch configurations using the normal
+Reserve an exclusive server and use a fresh output path for each build and
+configuration. The probes target an already running service. Keep startup and
+warmup outside timings; launch configurations using the normal
 [operations procedure](../operations.md#mimo-native-mtp-and-prefill-options),
-stopping the old world before changing settings. Disable resident images
-with `DGPP_RESIDENT_CACHE=off` if disk capacity cannot hold each layout.
+stopping the old world before changing settings.
 
-Use identical C2, BF16 KV, BF12 weight residency, shared 131072-token capacity
-and 1.5 GiB prefix budget across controls.
-Set depth and environment explicitly for each fresh tag:
+## Maintained serving probes
+
+For a focused solo/mixed-arrival comparison, run from the repository root:
+
+```sh
+python3 scripts/serve_admission_bench.py \
+  --url http://127.0.0.1:18081 \
+  --label COMMIT-CONFIGURATION \
+  --out /path/to/experiment/admission.json \
+  --scenarios solo_decode solo_prefill mixed_short mixed_long --trials 3
+```
+
+This records request timings, usage and before/after metrics. Select only the
+scenarios relevant to the change. Prompt size, output lengths, arrival count
+and spacing are configurable; see `--help` and the
+[focused comparison procedure](../testing.md). Choose a new output filename
+for each run, since the probe replaces that file as results accumulate.
+
+Use [serve_api_check.py](../../scripts/serve_api_check.py) with `HOST PORT` for
+request-field and prefix-cache usage checks. For task quality, use
+[serve_eval.py](../../scripts/serve_eval.py) with an explicit task subset,
+sample count and output directory. Neither substitutes for a saved failing
+tool-call request: retain that request and validate its assembled streaming
+arguments separately. Record generated calls without executing them.
+
+Record the exact Git commit, dirty diff if any, binary SHA256, deployment
+JSON and relevant rank environment alongside the results. Capture metrics,
+startup logs and each rank's final operation-stream hash before replacing the
+deployment. All ranks must agree on the operation stream. Follow the
+[testing guide](../testing.md) for artifact handling and service restoration.
+Disable resident images with `DGPP_RESIDENT_CACHE=off` if disk capacity cannot
+hold each layout.
+
+## Historical experiment controls
+
+The original comparisons held C2, BF16 KV, BF12 weight residency, shared
+131072-token capacity and a 1.5 GiB prefix budget constant. The following
+matrix describes those experiments, not current deployment defaults:
 
 | Tag | Depth | Native MTP | Final-row head | One-head cache-only |
 |---|---:|---:|---:|---:|
@@ -51,45 +59,39 @@ Set depth and environment explicitly for each fresh tag:
 | integrated-mtp3 | 3 | on | on | on |
 | control-repeat | 1 | off | off | off |
 
-Run `benchmark.py` and `acceptance.py` for every tag. For a prefill-only
-isolation, use depth 1 with head-only, cache-only and both, retaining native
-MTP off. Native MTP always performs cache-only history work internally.
+The switches are `DGPP_MIMO_NATIVE_MTP`, `DGPP_MIMO_PREFILL_LAST_HEAD` and
+`DGPP_MIMO_MTP_CACHE_ONLY`; set them consistently on every rank. For a
+prefill-only isolation, use depth 1 with head-only, cache-only and both,
+retaining native MTP off. Native MTP performs cache-only history work
+internally. Current builds also use the shared adaptive scheduler: match its
+targets and tuning between controls, or set both latency targets to zero and
+match explicit busy/idle budgets to isolate fixed budgeting.
 
-```sh
-python3 benchmarks/mimo_upstream/summarize.py \
-  --reference control-mtp1 --output "$DGPP_MIMO_BENCH_ROOT/summary.json" \
-  control-mtp1 recursive-mtp3 native-mtp3 integrated-mtp3 control-repeat
-```
+The original 19-request timing panel included short solo/concurrent code and
+JSON, solo prose/maths, cold 7K/31K prompts, and cold/warm 67K prompts. Its
+client decode rate was `(completion_tokens - 1) / seconds_after_first_visible_delta`,
+where reasoning counted as visible. That differs from the published
+engine-counter metric. Acceptance used **all draft rounds** as denominator.
+Timing outputs capped at 256 tokens could be truncated; retrieval and tool
+probes did not establish broad coding quality.
 
-The 19-request timing panel includes short solo/concurrent code and JSON,
-solo prose/maths, cold 7K/31K prompts, and cold/warm 67K prompts. Client decode
-rate is `(completion_tokens - 1) / seconds_after_first_visible_delta`, where
-reasoning counts as visible. This is not the published engine-counter metric.
-The four separate acceptance probes use **all draft rounds** as denominator.
-The order probe intentionally changes arrival order and is diagnostic, not
-performance evidence; compare both content and reasoning against solo and
-concurrent controls. Use `compare_outputs.py --output variants.json FILE...`
-to group exact content/reasoning variants from saved `results.json` and
-`order-probe.json` files without contacting the server. Temperature zero does not guarantee row-shape-independent
-floating-point results. Add `--delay 0` for back-to-back arrivals or
-`--logprobs` to record top-two token probabilities in a separate diagnostic
-run; probability tracing is excluded from timing comparisons. Fixed retrieval and tool probes are not a broad
-coding-quality evaluation. The 256-token timing outputs may be truncated.
+For arrival-order diagnostics, compare content and reasoning against isolated
+and concurrent controls, then check cancellation, cache reuse and recovery.
+Temperature zero does not guarantee identical floating-point results across
+chunk or batch shapes. The admission probe's `--record-text` retains outputs;
+`--logprobs` adds probability tracing and can change head dispatch, so use it
+in a separate diagnostic run excluded from timing comparisons.
 
-`tool_probe.py` includes the original failing request and validates assembled
-SSE arguments without external dependencies. To also reproduce the original
-client path, install artifact-agent-orchestration's dependencies, set
-`DGPP_HARNESS_ROOT` to that checkout, and invoke `harness_replay.py` using its
-Python environment. This optional check uses its `ChatCompletionsClient` and
-`RecordingTransport`; all endpoint/output/fixture paths are configurable or
-repository-relative. Generated calls are recorded, never executed.
+## Implementation checks
 
-For implementation validation, follow [CONTRIBUTING](../../CONTRIBUTING.md):
-build all selected binaries first, run host tests, then run GPU/RDMA tests
-serially while serving is stopped. Relevant targets include
-`mimo_native_mtp_test`, `mimo_port_test`, `mimo_decode_test`,
-`mimo_engine_test`, and the Qwen, GLM-4.7 and DeepSeek engine suites. Run
-`mimo_engine_test` both normally and with the three MiMo flags enabled;
-run the history test under Compute Sanitizer. Loopback worlds on two machines
-do not establish four-node physical fabric coverage. Retain failed, skipped and completed attempts in local or external artifacts,
-and summarize them in the PR.
+Follow [CONTRIBUTING](../../CONTRIBUTING.md): build the selected binaries
+first, run host tests, then run relevant GPU/RDMA tests serially while serving
+is stopped. MiMo targets include `mimo_native_mtp_test`, `mimo_port_test`,
+`mimo_decode_test` and `mimo_engine_test`. Changes to shared execution also
+need focused coverage from another engine family; choose that coverage based
+on the affected code rather than rerunning every model's benchmark corpus.
+For changes to the MiMo options, run `mimo_engine_test` normally and with all
+three flags enabled, and run the history test under Compute Sanitizer.
+Loopback worlds on two machines do not establish four-node physical fabric
+coverage. Retain failed, skipped and completed attempts in local or external
+artifacts, and summarize the evidence and limitations in the PR.

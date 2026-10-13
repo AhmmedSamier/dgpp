@@ -22,9 +22,7 @@
     "sampling_candidates": 128,
     "stats_interval_s": 1,
     "dense_weights": "fp8",
-    "mtp_expert_format": "bf16_fused",
-    "prefill_idle_budget_tokens": 4096,
-    "prefill_budget_tokens": 4096
+    "mtp_expert_format": "bf16_fused"
   },
   "paths": {
     "resident_cache": ""

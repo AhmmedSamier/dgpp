@@ -10,10 +10,12 @@ checkpoint, rank count and decode capacity for both modes:
 python3 - <<'PY'
 import json
 from pathlib import Path
-texts = [("quick", "teacher_text.txt"), ("hard", "teacher_text_hard.txt"),
-         ("memorized", "teacher_text_memorized.txt")]
+# Supply your own UTF-8 inputs; these corpora are not bundled with the repo.
+corpus = Path("/path/to/teacher-texts")
+texts = [("quick", "quick.txt"), ("hard", "hard.txt"),
+         ("predictable", "predictable.txt")]
 Path("/tmp/corpora.json").write_text(json.dumps([
-    {"name": name, "text": (Path("benchmarks") / filename).read_text()}
+    {"name": name, "text": (corpus / filename).read_text()}
     for name, filename in texts]) + "\n")
 PY
 scripts/fabric_run.sh --app build-ci/qwen_head_check --fetch-logs \
@@ -103,16 +105,19 @@ one:
   scripts/fabric_logprob.py /path/to/new_logs /path/to/ref_logs
   ```
 
-  A run of the same binary twice must show a delta of exactly 0 (the decode
-  path is deterministic). The logits are fp32 (the head's accumulators,
+  Repeats with the same binary, teacher tokens and execution geometry must
+  show a delta of exactly 0. Hold chunk and batch shapes fixed for this control;
+  adaptive scheduling under different load can select different geometry.
+  The logits are fp32 (the head's accumulators,
   unrounded), but the residual stream feeding the head is bf16, so
   single-token deltas of ~0.1 nat are normal between builds that differ in
-  reduction order; the mean over the text is the signal. Three
-  texts ship: `teacher_text.txt` (556 tokens, a quick look),
-  `teacher_text_hard.txt` (7,331 tokens of unmemorized technical prose,
-  perplexity ~10.8 — the sensitive one; use it for the verdict) and
-  `teacher_text_memorized.txt` (6,549 tokens of Conan Doyle, perplexity
-  1.04 — the confident regime). Expect a handful of positions per thousand
+  reduction order; the mean over the text is the signal. The historical GLM
+  checks used
+  a short smoke text, unmemorized technical prose (the sensitive regime) and
+  highly predictable text (the confident regime). Those input files are not
+  shipped. Supply and retain your own texts, tokenizer revision and token
+  counts; use the same inputs on both builds. Expect a handful of positions
+  per thousand
   to move by more than 1 nat between any two rounding-level builds: a
   router's top-k boundary flipped an expert there. The tool bounds the
   *rate* of those, not the worst one.

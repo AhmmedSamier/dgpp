@@ -377,8 +377,9 @@ weight readers.
 ### 4.3 New
 - `src/kernels/packq_repack.{hpp,cu}` only if the CPU transpose is too slow
   (D2 fallback).
-- `benchmarks/micro/moe_slot_bench.cu --format packq` (K 640 / 2560, I 640,
-  H 2560, E 512, top-10) and a head bench row for the packed int8 GEMV / GEMM.
+- Local packed-MoE slot probe (K 640 / 2560, I 640, H 2560, E 512, top-10)
+  and a head benchmark row for packed int8 GEMV / GEMM. These campaign probes
+  are not bundled; retain their source and invocation with any new results.
 - `tools/qwen_gptq_fixture` support inside `tests/cuda/qwen_fixture.hpp`
   (GPTQ-layout tensors with I32 / F16 dtypes) and the GPTQ + F32-fp8 dequant
   in `tools/qwen_reference_dump.py`.

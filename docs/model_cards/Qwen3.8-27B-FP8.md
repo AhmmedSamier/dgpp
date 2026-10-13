@@ -70,11 +70,11 @@ packed lossless 12-bit, the verify depth scheduled a step at a time from
 the selector walk's confidence (`engine.mtp_schedule`: eight slots on four
 Sparks 205 / 301 / 352 / 310 / 216 tok/s at 92 ms a step with the one-chain
 split-K of 2026-10-05, 184 / 273 / 326 / 284 / 196 at 106 before it, 154 /
-270 / 320 / 260 / 170 at 117 for whole blocks; C1 level; a request's text
-the same alone, at every scheduled depth and beside co-tenants that join
-it); 15.0 GiB of weights
+270 / 320 / 260 / 170 at 117 for whole blocks; C1 level; transcripts matched
+across the tested isolated, scheduled-depth and joining-co-tenant cases); 15.0 GiB of weights
 and a 13 GiB KV pool a rank at 256K on two Sparks, eight slots. The MTP
-depth-3 world is each template's mode (`--no-dflash --mtp --mtp-depth 3`),
+depth-3 world is available as an alternative to each template's DFlash
+default (`--no-dflash --mtp --mtp-depth 3`),
 plain decode `--no-dflash`. Greedy C1 by class (prose / code / json / math /
 chat), the 2026-10-05 campaign: the drafter 35.4 / 55.3 / 76.6 / 62.6 / 32.9
 tok/s on two nodes at 82 ms a pass and 57.4 / 88.4 / 122.1 / 101.5 / 53.4 on

@@ -2,6 +2,13 @@
 
 Serving throughput, decode modes and context scaling on the GB10 cluster. Each row identifies a model, weight format, node count and deployment configuration.
 
+These are measurements of the revisions and configurations listed below,
+including historical defaults. The tables predate the shared adaptive prefill
+policy and are not fresh measurements of current master or the latest PR.
+Current example settings are described in [deployment defaults](../deploy/README.md#shared-scheduler-defaults);
+focused consolidation/controller validation is recorded in [PR #112](https://github.com/HawkBearPig/dgpp/pull/112).
+Keep a benchmark's recorded configuration with its measurements when defaults change.
+
 | Measurement set | Date (UTC) | Source revision | Scope |
 |---|---|---|---|
 | Qwen3.8-27B quant comparison | 2026-10-11 | `d12e7e9f` decode / `510542a4` prefill | Matched FP8 / NVFP4 / FP8 at worlds 1/2/4, five classes at C1/C2/C4/C8, cold prefill, all-rank profiling and four-node context decode |
@@ -117,11 +124,18 @@ The October 7–8 completion campaign added the remaining cold-prefill probes, a
 
 The KV pool is shared across requests. Its capacity does not mean every concurrent request can use that many tokens. The table below lists the effective settings for each measured row.
 
-Prefill tokens per tick are the resolved startup settings: **busy** applies while another request is decoding; **idle** applies when none is decoding. **0** means the scheduler submits the full prompt in one tick; the model may split it into internal batches. These settings affect prefill timing.
+Prefill tokens per tick below are the recorded startup settings for these
+measurement revisions: **busy** applies with an incumbent decoder and **idle**
+without one. **0** recorded monolithic scheduler admission, even when the model
+split its work internally. Current serving instead defaults to cost-adaptive
+quanta within native capacity; these old numbers do not describe that policy.
+For a fixed-budget reproduction on a current binary, explicitly set the recorded
+budgets and disable both latency targets, while recognizing that execution code
+has also changed. Exact historical reproduction requires the recorded revision.
 
 <!-- BEGIN config -->
 
-| Model / weights | Nodes | Options | Slots | KV pool tokens | KV format | Prefix cache GiB | Prefill tokens/tick (busy / idle) | Default decode | Current template |
+| Model / weights | Nodes | Options | Slots | KV pool tokens | KV format | Prefix cache GiB | Prefill tokens/tick (busy / idle) | Recorded decode mode | Template at measurement |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 4 | 163,840 | fp8 | 4.5 | 256 / 2,048 | MTP1 | — |
 | GLM-5.3-Flash NVFP4/FP8 | 2 | 256K FP8 KV, 2 slots | 2 | 262,144 | fp8 | 2 | 256 / 2,048 | MTP1 | — |

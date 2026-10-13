@@ -93,7 +93,7 @@ swapped nibbles 1.41):
 | fp4 grouped tensor-core kernel | the prefill kernel: the fp8 tile kernel's structure with an fp4 weight-tile decode (8-byte loads of 16 codes per thread per 64-deep stage, 4 scale bytes per row per stage), bf16 `mma.sync` unchanged |
 | `tests/cuda/fp4_gemv_test.cu` (+ checkpoint-slice mode) | oracle, exactness lemma, saturation and NaN policy, row-count invariance, real hybrid-checkpoint slices |
 | `tests/unit/fp4_test.cpp` | codec table, the exactness lemma over every (code, scale) pair |
-| `benchmarks/micro/moe_slot_bench --format fp4`, `gemv_bw` fp4 mode | the effective-bandwidth proof before integration |
+| Local MoE-slot and GEMV bandwidth probes in FP4 mode (not bundled) | the effective-bandwidth proof before integration |
 | `tools/compose_nvfp4_hybrid.py` | done |
 | `docs/nvfp4_plan.md` | this |
 
