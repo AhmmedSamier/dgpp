@@ -9,10 +9,10 @@
 //   per layer: h += attn(input_norm(h)); h += mlp(post_norm(h))
 //   logits = lm_head(final_norm(h))
 //
-// The tower runs the fp32 CPU reference on the scheduler thread inside
-// session_prefill_audios, its rows staged once into a device buffer the
-// chunk loop splices from; CUDA-izing it is a pure speed-up behind the same
-// numbers. No MTP, no MoE, no TP, resident weights only.
+// The tower runs on the device inside session_prefill_audios (one encode
+// per 30 s piece, fp32 host mel in, bf16 rows out); the fp32 host oracle
+// (models/qwen_asr/audio_tower_reference.hpp) is its parity gate. No MTP,
+// no MoE, no TP, resident weights only.
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -32,6 +32,7 @@
 #include "models/qwen_asr/audio_tower_reference.hpp"
 #include "models/qwen_asr/lm_config.hpp"
 #include "models/qwen_asr/loader.hpp"
+#include "models/qwen_asr/tower.hpp"
 
 namespace dgpp {
 struct QwenAsrConfig {
@@ -142,10 +143,9 @@ class QwenAsrModel : public SessionModel<QwenAsrModel> {
   uint16_t* x_ = nullptr;
   uint16_t* y_ = nullptr;
 
-  qwen_asr_ref::AudioTowerWeights tower_;
+  std::unique_ptr<QwenAsrTowerEncoder> tower_;  // the device tower (the prefill path)
   uint16_t* audio_rows_ = nullptr;  // [<= M rows, H] bf16, device
   std::vector<float> audio_scratch_;
-  std::vector<uint16_t> audio_bf16_;
   const std::vector<AudioInput>* audio_spans_ = nullptr;  // the walk's scope
   std::vector<int64_t> audio_row_base_;                    // parallel to audio_spans_
 };

@@ -1563,6 +1563,19 @@ project procedures and design guidance live in `docs/`.
   Serving throughput remains unmeasured under the current benchmark
   protocol; no performance comparison is claimed for these templates.
 
+- **Qwen3-ASR device tower** (`models/qwen_asr/tower.{hpp,cpp}`, kernels
+  in `kernels/qwen_asr_tower.{hpp,cu}`): the encoder in BF16 behind the
+  oracle's numbers - direct-fused stride-2 convs (one thread per output,
+  fp32 accumulation; im2col+GEMM was tried first and reverted: its cells
+  buffer was sized for conv1 and conv2/3 wrote 70 MB past it, which the
+  golden replay caught at conv3 energy), `matmul_linear_bf16` linears,
+  vision-kernel LayerNorm/exact-GELU/residual/softmax, and 104-row-windowed
+  bidirectional attention through the vision tower's batched-GEMM sequence
+  (per-window key/value offsets and per-window unhead/out-projection - the
+  first cut staged the whole packed sequence through one window buffer).
+  `tests/cuda/qwen_asr_tower_cuda_test` gates BF16-vs-fp32 within 5e-2
+  (measured worst 3.0e-02). Live: the 15 s demo clip's prefill falls from
+  25.5 s to 2.8 s with a byte-identical transcription.
 - **Qwen3-ASR language half: served** (`models/qwen_asr/model.{hpp,cpp}`,
   `QwenAsrFamily` in `apps/dgpp_serve.cpp`): the checkpoint's plain Qwen3
   decoder as a world-1 resident-BF16 `SessionModel` on the shared GLM-4.7

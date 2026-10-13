@@ -102,7 +102,7 @@ QwenAsrModel::QwenAsrModel(const QwenAsrConfig& cfg, const std::string& checkpoi
   x_ = dev_alloc<uint16_t>(M * H);
   y_ = dev_alloc<uint16_t>(M * H);
   audio_rows_ = dev_alloc<uint16_t>(std::min<size_t>(M, kMaxAudioTokens) * H);
-  tower_ = qwen_asr_ref::load_audio_tower(checkpoint_dir);
+  tower_ = std::make_unique<QwenAsrTowerEncoder>(cfg_.audio, checkpoint_dir, stream_);
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
 }
 
@@ -148,8 +148,8 @@ MemoryPlan QwenAsrModel::plan_memory(const QwenAsrConfig& cfg, int max_tokens,
     plan.add("activations (session core, residual, block io)", core_dev + 3 * M * H * 2, core_pin);
   }
   plan.add("audio tower rows (device staging)", std::min<size_t>(M, kMaxAudioTokens) * H * 2);
-  plan.add("audio tower weights (host fp32, untracked)", 0,
-           0);  // qwen_asr_ref::AudioTowerWeights: ~0.6 GB of host RAM
+  plan.add("audio tower weights (device BF16)", QwenAsrTowerEncoder::weight_bytes(cfg.audio));
+  plan.add("audio tower workspace (device)", QwenAsrTowerEncoder::workspace_bytes(cfg.audio));
   {
     Glm4TextConfig g = cfg.lm.glm_geometry();
     plan.add("layer objects (attention, dense MLP scratch)",
@@ -291,7 +291,6 @@ void QwenAsrModel::stage_audio_rows(const std::vector<AudioInput>& audios) {
   if (rows_total > std::min<int64_t>(max_tokens_, kMaxAudioTokens))
     throw std::invalid_argument("Qwen ASR: more audio tokens than the stage holds");
   audio_row_base_.clear();
-  audio_bf16_.resize(static_cast<size_t>(rows_total) * cfg_.lm.hidden_size);
   const int H = cfg_.lm.hidden_size;
   int64_t row = 0;
   for (const auto& au : audios) {
@@ -316,14 +315,10 @@ void QwenAsrModel::stage_audio_rows(const std::vector<AudioInput>& audios) {
               fb.features[static_cast<size_t>(f) * kAudioMelBins + b];
       std::vector<int32_t> mask(padded, 1);
       std::fill(mask.begin() + frames, mask.end(), 0);
-      std::vector<float> rows;
-      qwen_asr_ref::encode_audio(cfg_.audio, tower_, audio_scratch_.data(), mask.data(), padded,
-                                 rows);
-      const int64_t piece = static_cast<int64_t>(rows.size()) / H;
+      const int piece = tower_->encode_piece(audio_scratch_.data(), mask.data(), padded,
+                                             audio_rows_ + row * H);
       if (piece > au.tokens - emitted)
         throw std::logic_error("Qwen ASR: tower row count drifted from the admission");
-      for (size_t i = 0; i < rows.size(); ++i)
-        audio_bf16_[static_cast<size_t>(row) * H + i] = float_to_bf16_bits(rows[i]);
       row += piece;
       emitted += piece;
       if (samples >= static_cast<int64_t>(au.pcm.size())) break;
@@ -331,8 +326,6 @@ void QwenAsrModel::stage_audio_rows(const std::vector<AudioInput>& audios) {
     if (emitted != au.tokens || row - audio_row_base_.back() != au.tokens)
       throw std::logic_error("Qwen ASR: tower produced the wrong row count");
   }
-  DGPP_CUDA_OK(cudaMemcpy(audio_rows_, audio_bf16_.data(), audio_bf16_.size() * 2,
-                          cudaMemcpyHostToDevice));
 }
 
 void QwenAsrModel::apply_audio_embeddings(uint16_t* resid, int64_t pos0, int T) {

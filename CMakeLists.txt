@@ -192,6 +192,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/gdn_chunk.cu
   src/kernels/glm_vision.cu
   src/kernels/qwen_vision.cu
+  src/kernels/qwen_asr_tower.cu
   src/kernels/glm_norm.cu
   src/kernels/pick.cu
   src/kernels/sample_pick.cu
@@ -289,6 +290,7 @@ add_library(dgpp_models_qwen_asr STATIC
   src/models/qwen_asr/binding.cpp
   src/models/qwen_asr/loader.cpp
   src/models/qwen_asr/model.cpp
+  src/models/qwen_asr/tower.cpp
   src/models/qwen_asr/asr_kernels.cu)
 target_include_directories(dgpp_models_qwen_asr PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(dgpp_models_qwen_asr PUBLIC
@@ -2867,6 +2869,15 @@ target_compile_definitions(qwen_asr_forward_test PRIVATE DGPP_SOURCE_DIR="${CMAK
 dgpp_set_common(qwen_asr_forward_test)
 add_test(NAME qwen_asr_forward_test COMMAND qwen_asr_forward_test)
 set_tests_properties(qwen_asr_forward_test PROPERTIES LABELS "gpu;checkpoint" SKIP_RETURN_CODE 2)
+
+# Qwen3-ASR device tower: the BF16 encoder vs the fp32 torch oracle
+# (docs/audio.md). Skipped without the checkpoint or a CUDA device.
+add_executable(qwen_asr_tower_cuda_test tests/cuda/qwen_asr_tower_cuda_test.cpp)
+target_link_libraries(qwen_asr_tower_cuda_test PRIVATE dgpp_models_qwen_asr CUDA::cudart Threads::Threads)
+target_compile_definitions(qwen_asr_tower_cuda_test PRIVATE DGPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+dgpp_set_common(qwen_asr_tower_cuda_test)
+add_test(NAME qwen_asr_tower_cuda_test COMMAND qwen_asr_tower_cuda_test)
+set_tests_properties(qwen_asr_tower_cuda_test PROPERTIES LABELS "gpu;checkpoint" SKIP_RETURN_CODE 2)
 
 # Isolated upstream-port regression: paged BF16/FP8 history and head rows.
 add_executable(mimo_port_test tests/cuda/mimo_port_test.cpp)

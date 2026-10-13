@@ -71,8 +71,18 @@ its single `<|audio_pad|>` per part and expands it to the clip's encoder
 row count post-encode, the tower splices its rows into the prefill, and the
 decoder generates greedily. Verified end to end against the upstream demo
 clip (15 s English speech → 211 prompt tokens → 49 fluent tokens; prefill
-~25 s, almost all of it the host fp32 tower — the documented cost of the
-oracle path until the CUDA tower lands).
+2.8 s with the device tower, 9x faster than the 25 s host oracle path).
+The device tower (`models/qwen_asr/tower.{hpp,cpp}`, kernels in
+`kernels/qwen_asr_tower.{hpp,cu}`) runs the encoder in BF16: direct-fused
+stride-2 convs, `matmul_linear_bf16` linears, vision-kernel LayerNorm /
+exact-erf GELU / residual / softmax, and 104-row-windowed bidirectional
+attention through the same batched-GEMM sequence as the vision tower.
+`tests/cuda/qwen_asr_tower_cuda_test` pins it to the torch oracle within
+5e-2 absolute (measured worst 3.0e-02, mean 2.7e-04 on the 37 s
+window-crossing clip); the demo transcription is byte-identical between
+the two paths. The remaining prefill cost is the host log-mel frontend
+(exact, quadratic) and the LM walk itself — the FFT frontend is the open
+compute milestone.
 
 ## Where the work lives
 
