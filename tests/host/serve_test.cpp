@@ -3427,7 +3427,7 @@ DGPP_TEST(serve_admission_growPolicyShedsTheYoungestWithFinishLength) {
     m.send_all("GET /v1/metrics HTTP/1.1\r\nHost: t\r\n\r\n");
     const std::string metrics = m.read_until("\"admission\"", 2000);
     require(metrics.find("\"requests_shed_pool\":1") != std::string::npos &&
-                metrics.find("\"admission\":{\"mode\":\"grow\",\"window\":8,\"prefill_budget_tokens\":0,\"prefill_idle_budget_tokens\":0,\"prefill_early_admission\":false}") !=
+                metrics.find("\"admission\":{\"mode\":\"grow\",\"window\":8,\"prefill_budget_tokens\":0,\"prefill_idle_budget_tokens\":0,\"prefill_early_admission\":false,\"prefill_budget_automatic\":false,\"decode_gap_target_ms\":0,\"first_token_target_ms\":0,\"prefill_latency_headroom_pct\":15,\"prefill_growth_factor\":2,\"prefill_cost_recovery_pct\":25,\"prefill_initial_tokens\":256}") !=
                     std::string::npos &&
                 metrics.find("\"reservations_grown\":0") == std::string::npos,
             "metrics: the shed, the policy, the growth: " + metrics.substr(0, 500));
@@ -3436,7 +3436,7 @@ DGPP_TEST(serve_admission_growPolicyShedsTheYoungestWithFinishLength) {
   Client m(plain.port());
   m.send_all("GET /v1/metrics HTTP/1.1\r\nHost: t\r\n\r\n");
   require(m.read_until("\"admission\"", 2000).find(
-              "\"admission\":{\"mode\":\"full\",\"window\":256,\"prefill_budget_tokens\":0,\"prefill_idle_budget_tokens\":0,\"prefill_early_admission\":false}") != std::string::npos,
+              "\"admission\":{\"mode\":\"full\",\"window\":256,\"prefill_budget_tokens\":0,\"prefill_idle_budget_tokens\":0,\"prefill_early_admission\":false,\"prefill_budget_automatic\":false,\"decode_gap_target_ms\":0,\"first_token_target_ms\":0,\"prefill_latency_headroom_pct\":15,\"prefill_growth_factor\":2,\"prefill_cost_recovery_pct\":25,\"prefill_initial_tokens\":256}") != std::string::npos,
           "the default policy is full-reserve");
 }
 
@@ -4707,7 +4707,8 @@ DGPP_TEST(serve_timings_cachedRequestsPreserveExistingCounters) {
          std::pair{"dgpp_prompt_tokens_total", 16}, {"dgpp_prompt_tokens_computed_total", 12},
          {"dgpp_prompt_tokens_cached_total", 4}, {"dgpp_generation_tokens_total", 6},
          {"dgpp_prefill_chunk_steps_total", 0}, {"dgpp_prefill_chunk_budget_tokens_total", 0},
-         {"dgpp_prefill_chunk_available_tokens_total", 0}, {"dgpp_prefill_chunk_computed_tokens_total", 0}}) {
+         {"dgpp_prefill_chunk_available_tokens_total", 0}, {"dgpp_prefill_chunk_computed_tokens_total", 0},
+         {"dgpp_first_token_target_misses_total", 0}, {"dgpp_decode_gap_target_misses_total", 0}}) {
       require(exposition.find(std::string(name) + "{model_name=\"" + kModel + "\"} " +
                                   std::to_string(count) + "\n") != std::string::npos,
               "Prometheus preserves existing counter " + std::string(name));
@@ -4718,6 +4719,7 @@ DGPP_TEST(serve_timings_cachedRequestsPreserveExistingCounters) {
 DGPP_TEST(serve_timings_excludeQueueAndPreserveLatencyHistograms) {
   for (bool resumed : {false, true}) {
     dgpp::sched::AdmissionPolicy policy;
+    policy.decode_gap_target_ms = policy.first_token_target_ms = 1;
     if (resumed) policy.prefill_budget_tokens = 8;
     ServiceRig rig(8, dgpp::sample::greedy_params(), false, std::nullopt,
                    false, false, policy, 0, {}, std::nullopt, 0, 0, resumed);
@@ -4735,6 +4737,8 @@ DGPP_TEST(serve_timings_excludeQueueAndPreserveLatencyHistograms) {
     const auto response = client.read_response(5000);
     require_timing_rates(response, 40, 0, 3, 1);
     const auto stats = rig.service.stats();
+    require(stats.first_token_target_misses == 1 && stats.decode_gap_target_misses > 0,
+            "queue delay and delayed token passes record latency target misses");
     const double prompt_ms = json_number(response, "\"prompt_ms\":");
     require(stats.queue_s.count() == 1 && stats.prefill_s.count() == 1 &&
                 stats.ttft_miss_s.count() == 1 && stats.decode_s.count() == 1 &&

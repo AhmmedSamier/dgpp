@@ -421,6 +421,10 @@ void test_journal_codec() {
     dgpp::sched::AdmissionPolicy chunk_policy;
     chunk_policy.prefill_budget_tokens = 256;
     chunk_policy.prefill_idle_budget_tokens = 2048;
+    chunk_policy.decode_gap_target_ms = 300;
+    chunk_policy.first_token_target_ms = 1500;
+    chunk_policy.prefill_latency = {20, 4, 50, 512};
+    chunk_policy.prefill_budget_automatic = true;
     chunk_policy.prefill_early_admission = true;
     const auto chunk_warm = dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_warm(chunk_policy));
     require(chunk_warm.admission == chunk_policy && warm0.admission.prefill_budget_tokens == 0 &&
@@ -502,6 +506,9 @@ void test_journal_codec() {
     ws.admission_window = 512;
     ws.prefill_budget_tokens = 256;
     ws.prefill_idle_budget_tokens = 2048;
+    ws.decode_gap_target_ms = 300;
+    ws.first_token_target_ms = 1500;
+    ws.prefill_latency = {20, 4, 50, 512};
     ws.prefill_early_admission = true;
     ws.prefix_min_tokens = 1024;
     ws.prefix_head_snapshots = true;
@@ -1803,4 +1810,69 @@ DGPP_TEST(journal_large_fragmented_record_scans_linearly_and_preserves_following
   require(complete, "large fragmented journal record exceeded deadline or changed bytes");
   require(sender_error.empty(), sender_error);
   require(empty && following && eof, "journal reader lost buffered lines or accepted a partial EOF record");
+}
+
+DGPP_TEST(fabric_serve_adaptive_prefill_tick_codec) {
+  dgpp::serve::GenerationService::PassEvents events;
+  events.prefill_budget = 768;
+  const auto decoded = dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_tick(events));
+  require(decoded.prefill_budget == 768, "leader budget round-trips exactly");
+  require(!dgpp::serve::decode_journal_line(R"({"op":"tick"})").prefill_budget,
+          "legacy fixed ticks have no adaptive decision");
+  for (const std::string value : {"0", "-1", "1073741825", "1.5", "true", "null", "\"256\""}) {
+    bool rejected = false;
+    try { (void)dgpp::serve::decode_journal_line(R"({"op":"tick","pfmax":)" + value + "}"); }
+    catch (const std::runtime_error&) { rejected = true; }
+    require(rejected, "invalid adaptive decision rejected before execution");
+  }
+  for (const std::string key : {"gapms", "ttftms", "pfauto"})
+    for (const std::string value : {"-1", "3600001", "1.5", "true", "null"}) {
+      bool rejected = false;
+      try { (void)dgpp::serve::decode_journal_line(R"({"op":"warm","adm":0,"win":256,")" + key + "\":" + value + "}"); }
+      catch (const std::runtime_error&) { rejected = true; }
+      require(rejected, "invalid latency policy rejected before warmup");
+    }
+  for (const std::string key : {"pfhr", "pfgrow", "pfrec", "pfstart"})
+    for (const std::string value : {"-1", "1073741825", "1.5", "true", "null"}) {
+      bool rejected = false;
+      try { (void)dgpp::serve::decode_journal_line(R"({"op":"warm","adm":0,"win":256,")" + key + "\":" + value + "}"); }
+      catch (const std::runtime_error&) { rejected = true; }
+      require(rejected, "invalid controller tuning rejected before warmup");
+    }
+}
+
+DGPP_TEST(fabric_serve_peer_requires_and_replays_leader_budget) {
+  struct BudgetEngine : FakeEngine {
+    BudgetEngine() : FakeEngine(2, 100, 4) {}
+    int64_t prefill_chunk_alignment() const override { return 2; }
+    int64_t prefill_chunk_limit() const override { return 16; }
+  };
+  for (bool missing : {false, true}) {
+    BudgetEngine engine;
+    dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_budget_tokens = 4;
+    policy.prefill_idle_budget_tokens = 16;
+    policy.decode_gap_target_ms = 500;
+    policy.first_token_target_ms = 2000;
+    dgpp::sched::Scheduler sched(&engine, {}, 0, policy);
+    require(sched.next_prefill_budget() == 4, "local cold estimate differs from leader's decision");
+    dgpp::serve::JournalWriter writer(0);
+    dgpp::serve::JournalReader reader("127.0.0.1", writer.port(), 5000, 1);
+    writer.accept_peers(2, 5000);
+    dgpp::serve::GenerationService::PassEvents events;
+    if (!missing) events.prefill_budget = 12;
+    writer.broadcast(dgpp::serve::encode_journal_tick(events));
+    writer.broadcast(dgpp::serve::encode_journal_stop());
+    bool rejected = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    try {
+      dgpp::serve::run_journal_peer(&sched, &reader,
+          [&] { return std::chrono::steady_clock::now() >= deadline; });
+    } catch (const std::runtime_error& e) {
+      rejected = std::string(e.what()).find("adaptive prefill decision") != std::string::npos;
+    }
+    require(rejected == missing, "adaptive peers reject missing decisions before executing a tick");
+    require(sched.meters().prefill_adaptive_limit_tokens == (missing ? 0 : 12),
+            "peer executes leader's limit, regardless of its local estimate");
+  }
 }

@@ -182,6 +182,9 @@ struct WorldSettings {
   int admission_window = 0;
   int prefill_budget_tokens = 0;  // settings: -1 = automatic; absent legacy field = disabled
   int prefill_idle_budget_tokens = 0;
+  int decode_gap_target_ms = 0;  // absent legacy fields retain fixed budgeting
+  int first_token_target_ms = 0;
+  sched::PrefillLatencyTuning prefill_latency;
   // Unresolved settings: nullopt = engine capability default. Absent legacy
   // fields remain explicitly false; the warm record is always concrete.
   std::optional<bool> prefill_early_admission = false;
@@ -209,6 +212,7 @@ struct JournalRecord {
   uint64_t prefix_digest = 0;
   bool has_op_digest = false;      // tick: rank 0's op-stream fold rode along
   uint64_t op_digest = 0;
+  std::optional<int64_t> prefill_budget;  // leader's adaptive limit for this tick
   std::vector<dgpp::sched::SchedulerRequest> submits;
   std::vector<std::string> cancels;
   std::vector<std::string> stops;  // the stop-string retires,

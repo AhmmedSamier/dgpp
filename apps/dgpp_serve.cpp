@@ -1417,11 +1417,16 @@ int main(int argc, char** argv) {
       "    tokens, grows at tick top, and sheds the youngest request\n"
       "    (finish_reason length) when the pool runs out; every rank takes\n"
       "    rank 0's policy from the warm record\n"
-      "  [--prefill-budget-tokens N (default -1)]: automatic 256-token busy chunks, adjusted\n"
+      "  [--prefill-budget-tokens N (default -1)]: automatic 256-token starting chunks, adjusted\n"
       "    to engine alignment/capacity; 0 disables budgeted prefill\n"
       "  [--prefill-idle-budget-tokens N (default 0)]: larger budget without active decode; 0 uses "
       "the busy budget\n"
       "    with an explicit busy budget, or up to 4096 for automatic grouped prefill\n"
+      "  [--decode-gap-target-ms N (3000)] [--first-token-target-ms N (3000)]: adaptive\n"
+      "    prefill latency objectives; zero disables a target, both zero select fixed budgets\n"
+      "  [--prefill-latency-headroom-pct N (15)] [--prefill-growth-factor N (2)]\n"
+      "  [--prefill-cost-recovery-pct N (25)]: controller safety margin, growth and recovery\n"
+      "  [--prefill-initial-tokens N (256)]: initial automatic budget, adjusted to engine geometry\n"
       "  [--prefill-early-admission | --no-prefill-early-admission]: let queued\n"
       "    short text join an in-flight prefill (default follows engine mixed-execution support)\n"
       "  [--prefix-min-tokens N (default 1024)]: no prefix-cache entry below this position; a\n"
@@ -1497,6 +1502,9 @@ int main(int argc, char** argv) {
   int admission_window = 256;
   int prefill_budget_tokens = -1;
   int prefill_idle_budget_tokens = 0;
+  int decode_gap_target_ms = dgpp::sched::kDefaultDecodeGapTargetMs;
+  int first_token_target_ms = dgpp::sched::kDefaultFirstTokenTargetMs;
+  dgpp::sched::PrefillLatencyTuning prefill_latency;
   std::optional<bool> prefill_early_admission_override;
   // The prefix cache's entry policy (2026-09-28): no entry below the floor,
   // and a cold prompt keeps the cut at its first structural boundary.
@@ -1647,6 +1655,9 @@ int main(int argc, char** argv) {
     model_alias = e.model_alias;
     prefill_budget_tokens = e.prefill_budget_tokens;
     prefill_idle_budget_tokens = e.prefill_idle_budget_tokens;
+    decode_gap_target_ms = e.decode_gap_target_ms;
+    first_token_target_ms = e.first_token_target_ms;
+    prefill_latency = e.prefill_latency;
     prefill_early_admission_override = e.prefill_early_admission;
     prefix_min_tokens = e.prefix_min_tokens;
     prefix_head_snapshots = e.prefix_head_snapshots;
@@ -1785,6 +1796,28 @@ int main(int argc, char** argv) {
     else if (a == "--admission-window") admission_window = std::stoi(next());
     else if (a == "--prefill-budget-tokens") prefill_budget_tokens = std::stoi(next());
     else if (a == "--prefill-idle-budget-tokens") prefill_idle_budget_tokens = std::stoi(next());
+    else if (a == "--decode-gap-target-ms" || a == "--first-token-target-ms") {
+      const std::string value = next();
+      int& target = a == "--decode-gap-target-ms" ? decode_gap_target_ms : first_token_target_ms;
+      const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), target);
+      if (error != std::errc{} || end != value.data() + value.size() ||
+          target < 0 || target > dgpp::sched::kMaxLatencyTargetMs) {
+        DGPP_LOG_ERROR("{} must be an integer in [0, 3600000] ms", a);
+        return 2;
+      }
+    }
+    else if (a == "--prefill-latency-headroom-pct" || a == "--prefill-growth-factor" ||
+             a == "--prefill-cost-recovery-pct" || a == "--prefill-initial-tokens") {
+      const std::string value = next();
+      int& tuning = a == "--prefill-latency-headroom-pct" ? prefill_latency.headroom_pct
+          : a == "--prefill-growth-factor" ? prefill_latency.growth_factor
+          : a == "--prefill-cost-recovery-pct" ? prefill_latency.recovery_pct : prefill_latency.initial_tokens;
+      const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), tuning);
+      if (error != std::errc{} || end != value.data() + value.size() || !prefill_latency.valid()) {
+        DGPP_LOG_ERROR("Invalid {}: headroom [0,50] percent, growth [2,4], recovery [1,100] percent, initial tokens [1,1073741824]", a);
+        return 2;
+      }
+    }
     else if (a == "--prefill-early-admission") prefill_early_admission_override = true;
     else if (a == "--no-prefill-early-admission") prefill_early_admission_override = false;
     else if (a == "--prefix-min-tokens") prefix_min_tokens = std::stoi(next());
@@ -1928,7 +1961,7 @@ int main(int argc, char** argv) {
         "eos={} graph={} compact={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} "
         "msad={} msss={} mdr={} mdt={} mvf={} dbr={} "
         "batchmin={} cand={} "
-        "pcgib={} adm={} win={} pfbudget={} pfidle={} pfearly={} pmin={} phead={} pace={} inflight={} "
+        "pcgib={} adm={} win={} pfbudget={} pfidle={} gapms={} ttftms={} pfhr={} pfgrow={} pfrec={} pfstart={} pfearly={} pmin={} phead={} pace={} inflight={} "
         "reasoning_in_content={} "
         "rs={} dflash={} dfw={} lk={} lkn={} lks={} lka={} lkt={}",
         model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port, max_concurrency,
@@ -1940,6 +1973,9 @@ int main(int argc, char** argv) {
         mtp_verify, dflash_batch_rows, effective_batch_min_live,
         sampling_candidates, prefix_cache_gib,
         admission_mode, admission_window, prefill_budget_tokens, prefill_idle_budget_tokens,
+        decode_gap_target_ms, first_token_target_ms,
+        prefill_latency.headroom_pct, prefill_latency.growth_factor, prefill_latency.recovery_pct,
+        prefill_latency.initial_tokens,
         prefill_early_admission_override.has_value() ? (*prefill_early_admission_override ? 1 : 0) : -1,
         prefix_min_tokens, prefix_head_snapshots ? 1 : 0,
         bulk_pace_gbps, bulk_inflight, reasoning_in_content ? 1 : 0,
@@ -2037,6 +2073,9 @@ int main(int argc, char** argv) {
         ws.admission_window = admission_window;
         ws.prefill_budget_tokens = prefill_budget_tokens;
         ws.prefill_idle_budget_tokens = prefill_idle_budget_tokens;
+        ws.decode_gap_target_ms = decode_gap_target_ms;
+        ws.first_token_target_ms = first_token_target_ms;
+        ws.prefill_latency = prefill_latency;
         ws.prefill_early_admission = prefill_early_admission_override;
         ws.prefix_min_tokens = prefix_min_tokens;
         ws.prefix_head_snapshots = prefix_head_snapshots;
@@ -2129,6 +2168,9 @@ int main(int argc, char** argv) {
         admission_window = ws.admission_window;
         prefill_budget_tokens = ws.prefill_budget_tokens;
         prefill_idle_budget_tokens = ws.prefill_idle_budget_tokens;
+        decode_gap_target_ms = ws.decode_gap_target_ms;
+        first_token_target_ms = ws.first_token_target_ms;
+        prefill_latency = ws.prefill_latency;
         prefill_early_admission_override = ws.prefill_early_admission;
         prefix_min_tokens = ws.prefix_min_tokens;
         prefix_head_snapshots = ws.prefix_head_snapshots;
@@ -2446,6 +2488,11 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  if (decode_gap_target_ms < 0 || decode_gap_target_ms > dgpp::sched::kMaxLatencyTargetMs ||
+      first_token_target_ms < 0 || first_token_target_ms > dgpp::sched::kMaxLatencyTargetMs) {
+    DGPP_LOG_ERROR("Latency targets must be in [0, 3600000] ms; zero disables that target");
+    return 2;
+  }
   if (prefill_idle_budget_tokens < 0 || prefill_idle_budget_tokens > (1 << 30) ||
       (prefill_idle_budget_tokens > 0 &&
        (prefill_budget_tokens == 0 || prefill_idle_budget_tokens < prefill_budget_tokens))) {
@@ -2815,6 +2862,9 @@ int main(int argc, char** argv) {
     knobs.admission.window_tokens = admission_window;
     knobs.admission.prefill_budget_tokens = prefill_budget_tokens;
     knobs.admission.prefill_idle_budget_tokens = prefill_idle_budget_tokens;
+    knobs.admission.decode_gap_target_ms = decode_gap_target_ms;
+    knobs.admission.first_token_target_ms = first_token_target_ms;
+    knobs.admission.prefill_latency = prefill_latency;
     knobs.admission.prefix_min_tokens = prefix_min_tokens;
     knobs.admission.prefix_head_snapshots = prefix_head_snapshots;
     knobs.default_max_tokens = default_max_tokens;

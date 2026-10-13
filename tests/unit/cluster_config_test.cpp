@@ -562,3 +562,34 @@ DGPP_TEST(cluster_config_prefill_defaults_to_auto_with_explicit_opt_out) {
     require(config.engine.prefill_budget_tokens == budget, "explicit budget preserved");
   }
 }
+
+DGPP_TEST(cluster_config_latency_targets_have_serving_defaults_and_strict_overrides) {
+  const auto defaults = dgpp::serve::parse_cluster_config(engine_json("{}"), "t").engine;
+  require(defaults.decode_gap_target_ms == 3000 && defaults.first_token_target_ms == 3000,
+          "model-independent serving latency defaults");
+  const auto fixed = dgpp::serve::parse_cluster_config(
+      engine_json(R"({"decode_gap_target_ms":0,"first_token_target_ms":0})"), "t").engine;
+  require(fixed.decode_gap_target_ms == 0 && fixed.first_token_target_ms == 0, "fixed-budget control remains configurable");
+  const auto custom = dgpp::serve::parse_cluster_config(
+      engine_json(R"({"decode_gap_target_ms":300,"first_token_target_ms":1500})"), "t").engine;
+  require(custom.decode_gap_target_ms == 300 && custom.first_token_target_ms == 1500, "deployment targets survive parsing");
+  for (const std::string key : {"decode_gap_target_ms", "first_token_target_ms"})
+    for (const std::string value : {"-1", "1.5", "3600001", "true", "\"500\"", "null"})
+      require(refusal(engine_json("{\"" + key + "\":" + value + "}")).find(key) != std::string::npos,
+              "bad latency target rejected by name");
+}
+
+DGPP_TEST(cluster_config_latency_tuning_defaults_and_bounds) {
+  const auto defaults = dgpp::serve::parse_cluster_config(engine_json("{}"), "t").engine.prefill_latency;
+  require(defaults == dgpp::sched::PrefillLatencyTuning{15, 2, 25}, "stable controller defaults");
+  const auto custom = dgpp::serve::parse_cluster_config(engine_json(
+      R"({"prefill_latency_headroom_pct":20,"prefill_growth_factor":4,"prefill_cost_recovery_pct":50,"prefill_initial_tokens":512})"), "t");
+  require(custom.engine.prefill_latency == dgpp::sched::PrefillLatencyTuning{20, 4, 50, 512}, "custom controller tuning survives parsing");
+  for (const std::string key : {"prefill_latency_headroom_pct", "prefill_growth_factor", "prefill_cost_recovery_pct"})
+    for (const std::string value : {"-1", "101", "1.5", "true", "null"})
+      require(refusal(engine_json("{\"" + key + "\":" + value + "}")).find(key) != std::string::npos,
+              "invalid controller tuning rejected by name");
+  for (const std::string value : {"-1", "0", "1073741825", "1.5", "true", "null"})
+    require(refusal(engine_json("{\"prefill_initial_tokens\":" + value + "}")).find("prefill_initial_tokens") != std::string::npos,
+            "invalid initial budget rejected by name");
+}

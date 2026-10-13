@@ -37,6 +37,20 @@ before measuring solo and concurrent decode, prefill, mixed traffic and repeated
 arrivals. Record total elapsed time, first-token latency and decode update gaps.
 Keep probability tracing separate from throughput measurements.
 
+The scheduler latency controller has deterministic cost-feedback tests for growth,
+slowdowns, decoder-load changes, alignment and explicit caps. A regression checks
+that short completed groups cannot replace a full-quantum cost estimate after
+the fair allocator trims their budgets. Journal tests check
+that workers use the leader's limit and reject a missing adaptive decision;
+`qwen_engines_adaptive_prefill_scheduled_verify` exercises changing budgets through
+real continuations, mixed graphs and scheduled verification. Serving tests check
+latency-target misses against queue and token-pass timing.
+For policy-only changes, use representative deployments with different execution
+costs and single-/multi-rank operation, plus an architecture adapter sanity check.
+Repeat the broader checkpoint matrix when an executor, state layout or numerical
+kernel changes. A shared scheduler still encounters different adapter geometry
+and costs; one checkpoint alone does not cover those differences.
+
 Check cached continuations against isolated execution, repeat the loaded
 workload, and verify isolated recovery and retained KV usage. Investigate changed
 transcripts with token probabilities and matching execution shapes; do not treat

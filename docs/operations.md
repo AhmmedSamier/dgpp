@@ -547,14 +547,15 @@ cache format and arena size. Use the startup plan for the configured limit.
 **Budgeted prefill** (`engine.prefill_budget_tokens`, `--prefill-budget-tokens`)
 is shared by the eager and graph engines for every serving model family.
 Qwen4Exp and GLM-5.3-Flash also retain their resumable image paths.
-The default, -1, starts with 256 tokens while an established request is decoding.
+The default, -1, starts with 256 reader tokens before measuring any workload.
 It rounds down to the engine's alignment, allowing at least one aligned chunk,
 and caps the result by the engine's work limit and any explicit idle budget.
 For engines that advance grouped readers, the automatic idle budget starts at
 4,096 tokens, with the same capacity and alignment rules. These are shared
-starting values independent of model and quantization, resolved once at startup;
-they do not adapt to measured latency. A 2,048-token engine therefore starts
-at 256 busy / 2,048 idle; a 4,096-token engine starts at 256 / 4,096.
+starting values independent of model and quantization. The serving policy
+adapts automatic budgets to measured pass duration, using the idle value as
+its ceiling. Explicit token budgets remain limits. A 2,048-token engine therefore
+starts at 256 with a 2,048-token ceiling; a 4,096-token engine has a 4,096-token ceiling.
 Larger explicit busy budgets amortize weight streaming and conversion across
 more tokens but can increase the pause between decode steps.
 The budget counts reader tokens. Decoder rows share remaining scratch;
@@ -567,21 +568,92 @@ Both budgets are cluster-level configuration under `engine`, with CLI overrides:
 ```json
 {
   "engine": {
-    "prefill_budget_tokens": 256,
-    "prefill_idle_budget_tokens": 4096
+    "prefill_budget_tokens": -1,
+    "prefill_idle_budget_tokens": 4096,
+    "decode_gap_target_ms": 3000,
+    "first_token_target_ms": 3000
   }
 }
 ```
 
 Use an idle value within the selected engine's capacity (for example 2048 for
 a 2K engine), or omit both fields to select the automatic values. Explicit
-positive values are validated, not silently rounded. A deployment can override
+positive busy/idle values are validated, not silently rounded. A deployment can override
 them at its next start with
 `--knobs "--prefill-budget-tokens 256 --prefill-idle-budget-tokens 4096"`.
 The resolved values are logged at startup, reported in service admission
 metrics and carried in rank 0's warm record to every worker. Changing the
 cluster configuration requires a restart. Existing explicit settings retain
 their values.
+
+The latency targets default to 3,000 ms between token-producing decode passes
+and 3,000 ms from request arrival to its first token, including queueing. Set
+`engine.decode_gap_target_ms` and `engine.first_token_target_ms`, or their CLI
+forms `--decode-gap-target-ms` and `--first-token-target-ms`, in the range
+0–3,600,000 ms. Zero disables that objective; both zero retain fixed busy/idle
+budgeting. These are targets, not hard deadlines: a running GPU operation,
+engine alignment, a long prompt, occupied slots or KV pressure can make them
+unattainable. A decode pass may deliver several speculative tokens.
+The 3,000 ms defaults favor throughput during long mixed workloads. Tighter
+targets produce more frequent decode opportunities but can substantially lower
+prefill throughput by repeating weight streaming and launch work over smaller
+chunks. Choose a tighter target when that latency tradeoff suits the service.
+
+Additional controller settings use the same names under `engine` and hyphenated
+CLI flags:
+
+| Setting | Default | Range | Effect |
+| --- | ---: | ---: | --- |
+| `prefill_latency_headroom_pct` | 15 | 0–50 | Reserve a fraction of the latency target for variation. |
+| `prefill_growth_factor` | 2 | 2–4 | Bound upward work probes relative to the last representative observation. |
+| `prefill_cost_recovery_pct` | 25 | 1–100 | Weight a cheaper observation when recovering from a high cost estimate. |
+| `prefill_initial_tokens` | 256 | 1–1,073,741,824 | Start automatic budgeting here before measuring work; adjust to engine alignment, capacity and the idle ceiling. |
+
+Slowdowns always update the estimate immediately. Lower recovery weight or more
+headroom favors stability; faster growth explores throughput headroom sooner.
+These settings do not relax token limits or engine geometry. Existing shared
+controls remain `max_concurrency` (default 8), `queue_limit` (64) and
+`admission_gather_ms` (3 ms, only while idle). Deployment templates may override
+them. Raising queue capacity can increase first-token waits; it does not create
+GPU capacity. Fair reader allocation remains mandatory rather than a tuning
+switch; overload can still delay a request that cannot obtain a slot or KV.
+
+Tune concurrency and KV capacity to the deployment first, then choose latency
+targets and a prefill ceiling. Keep the gathering window short for interactive
+traffic; increasing it only helps when idle arrivals can form a useful batch.
+Use the queue limit to bound accepted backlog. The `admission` setting defaults
+to `full`, reserving the prompt and maximum completion before starting. The
+optional `grow` policy uses `admission_window` (256 tokens by default) to grow
+reservations, but may end a request when the pool runs out. It is a memory
+admission tradeoff, not a substitute for a latency target. Adjust the controller
+headroom, growth and recovery only after observing throughput and target misses.
+
+The shared controller learns completed-pass cost separately for decoder-load
+ranges, including the prefill, decode and snapshot work before the next yield.
+By default, the first unmeasured workload starts at 256 tokens, bounded by the
+busy budget and engine geometry. `prefill_initial_tokens` changes this starting
+point while retaining automatic growth. A new decoder-load range borrows the most conservative measured
+rate, then learns its own estimate without changing the other ranges.
+With default tuning, work grows by at most twice an
+observed quantum and uses a small set of aligned sizes, with latency headroom;
+slowdowns reduce the next limit immediately. Short final tails do not distort
+the estimate, including groups whose allocation was trimmed to their final tails.
+Completed groups do not calibrate the next bulk read-in: their final projections
+and admission costs differ from an unfinished reader's next chunk.
+Uninterrupted readers use the first-token time allowance. When a queued arrival
+can obtain a slot, the next quantum uses half that allowance, reserving half
+for time already spent waiting for a yield. It does not predict when a request
+blocked on slots or KV can start. Existing fair reader shares and at least one aligned
+chunk preserve progress. Rank 0 journals each selected limit; workers never
+schedule from their local clocks.
+
+JSON `service.latency_target_misses` counts `first_token` and `decode_gap`
+misses. Prometheus exposes `dgpp_first_token_target_misses_total` and
+`dgpp_decode_gap_target_misses_total`. The selected ceiling appears as
+`scheduler.prefill_chunks.adaptive_limit_tokens` and
+`dgpp_prefill_adaptive_limit_tokens` (zero with fixed budgets), with a
+corresponding rank gauge. Compare throughput and latency distributions as well
+as these counts when choosing targets for the deployment.
 
 For budget tuning, JSON metrics expose `scheduler.prefill_chunks`: physical
 advance `steps`, offered reader `budget_tokens`, `available_tokens` capped by
@@ -602,10 +674,10 @@ NVFP4/FP8 templates select 256-token busy and 2,048-token idle budgets.
 A positive budget bounds aligned prefill work before each decode pass.
 Engines with mixed prefill/decode execution enable early text admission by default. Queued text shares
 bounded prefill work, and decoder verification shares projections with an
-unfinished reader. Decoders that preceded a reader retain the busy-budget
-interruption bound. Decoders admitted during its prefill may share the larger
-idle-budget chunks, preserving reader progress with longer update gaps for
-those new streams. Slot and KV reservation limits still apply.
+unfinished reader. With fixed budgeting, decoders that preceded a reader retain
+the busy-budget interruption bound, while decoders admitted during its prefill
+may share larger idle-budget chunks. Adaptive budgeting applies the decode-gap
+target to both groups. Slot and KV reservation limits still apply.
 `engine.prefill_early_admission=false` (`--no-prefill-early-admission`) restores
 the former leftover-only admission. Automatic admission resolves from engine
 capabilities after construction; it does not inspect model or drafter names.
@@ -621,7 +693,7 @@ cancellation releases the unfinished slot and its prefix references.
 `engine.prefill_idle_budget_tokens` (`--prefill-idle-budget-tokens`) optionally
 uses larger chunks when no request is actively decoding. It must be at least
 the enabled busy budget, use the same alignment and fit the prefill scratch
-limit. Zero keeps fixed-budget behavior when the busy budget is explicit;
+limit. Zero uses the busy value as the ceiling when the busy budget is explicit;
 with automatic busy budgeting, grouped prefill resolves it as described above.
 The scheduler checks for active
 decode after cancellations and before each chunk, so a long prompt can speed

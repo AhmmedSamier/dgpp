@@ -712,7 +712,7 @@ DGPP_TEST(qwen_wide_compaction_fp8_preserves_projection_bits) {
   }
 }
 
-static void check_mixed_prefill_engine(bool scheduled) {
+static void check_mixed_prefill_engine(bool scheduled, bool adaptive = false) {
   const auto cfg = qwenfx::tiny_config();
   const std::string dir = "qwen_engine_fixture/mixed_plain";
   qwenfx::write_fixture(cfg, dir);
@@ -743,6 +743,11 @@ static void check_mixed_prefill_engine(bool scheduled) {
           dgpp::sched::AdmissionPolicy policy;
           policy.prefill_budget_tokens = 32;
           policy.prefill_idle_budget_tokens = 64;
+          if (adaptive) {
+            policy.prefill_budget_automatic = true;
+            policy.decode_gap_target_ms = dgpp::sched::kDefaultDecodeGapTargetMs;
+            policy.first_token_target_ms = dgpp::sched::kDefaultFirstTokenTargetMs;
+          }
           policy = dgpp::serve::resolve_prefill_policy(policy, engine, std::nullopt);
           require(policy.prefill_early_admission, "mixed executor resolves automatic admission before requests exist");
           std::vector<dgpp::sched::SchedulerRequest> requests(3);
@@ -861,6 +866,7 @@ DGPP_TEST(qwen_cached_tail_preserves_native_rows_in_mixed_prefill) {
 
 DGPP_TEST(qwen_engines_mixed_prefill_without_mtp) { check_mixed_prefill_engine(false); }
 DGPP_TEST(qwen_engines_mixed_prefill_scheduled_verify) { check_mixed_prefill_engine(true); }
+DGPP_TEST(qwen_engines_adaptive_prefill_scheduled_verify) { check_mixed_prefill_engine(true, true); }
 
 DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
   const int sample_cap = std::getenv("DGPP_TEST_COMPACT_SAMPLING")

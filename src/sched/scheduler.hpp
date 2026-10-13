@@ -1,9 +1,9 @@
 #pragma once
 // Deterministic admission, decoding and cancellation over a session engine.
 // Every rank applies the same policy to journaled requests and cancellations.
-// Decisions must not depend on clocks, thread arrival order or unordered
-// container iteration: engine operations include collectives whose order
-// must match across ranks.
+// Clock feedback is converted into a token limit by the leader and journaled.
+// Peers never make local timing decisions: engine operations include
+// collectives whose order must match across ranks.
 //
 // Each tick admits fitting queued requests against the tick's prefill
 // budget and performs prefill work, then runs one decode step. Admission chooses the oldest request that fits,
@@ -24,11 +24,13 @@
 // See DESIGN §11 and docs/operations.md for the journal and resource policy.
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "sched/prefix_cache.hpp"
+#include "sched/prefill_latency.hpp"
 #include "common/prefill_progress.hpp"
 #include "common/image_input.hpp"
 #include "sample/sampler.hpp"
@@ -463,6 +465,11 @@ struct AdmissionPolicy {
   int window_tokens = 256;  // grow: the initial headroom and the growth step
   int prefill_budget_tokens = 0;  // 0: monolithic; otherwise total prefill tokens per tick
   int prefill_idle_budget_tokens = 0;  // 0: use the same budget; otherwise larger chunks without active decode
+  // Serving supplies default latency targets; zero retains fixed budgeting.
+  int decode_gap_target_ms = 0;
+  int first_token_target_ms = 0;
+  PrefillLatencyTuning prefill_latency;
+  bool prefill_budget_automatic = false;  // busy is a starting point, idle the adaptive ceiling
   // The prefix cache's entry policy (2026-09-28), rank-identical like the
   // rest of the record. No snapshot below prefix_min_tokens: a 45-token
   // probe's entries must not push a 180K conversation out of the arena
@@ -480,6 +487,9 @@ struct AdmissionPolicy {
   bool operator==(const AdmissionPolicy& o) const {
     return mode == o.mode && window_tokens == o.window_tokens && prefill_budget_tokens == o.prefill_budget_tokens &&
            prefill_idle_budget_tokens == o.prefill_idle_budget_tokens &&
+           decode_gap_target_ms == o.decode_gap_target_ms && first_token_target_ms == o.first_token_target_ms &&
+           prefill_latency == o.prefill_latency &&
+           prefill_budget_automatic == o.prefill_budget_automatic &&
            prefill_early_admission == o.prefill_early_admission &&
            prefix_min_tokens == o.prefix_min_tokens && prefix_head_snapshots == o.prefix_head_snapshots;
   }
@@ -535,6 +545,7 @@ class Scheduler {
     int64_t prefill_chunk_budget_tokens = 0;
     int64_t prefill_chunk_available_tokens = 0;  // min(budget, remaining prompt), before structural cuts
     int64_t prefill_chunk_computed_tokens = 0;
+    int64_t prefill_adaptive_limit_tokens = 0;  // last leader-selected ceiling; 0 = fixed policy
     int64_t mixed_steps = 0;  // subset of decode_steps that also advanced prefill
     double mixed_ms = 0.0;    // included in BOTH prefill_ms and step_ms; subtract once when summing
     double prefill_ms = 0.0;
@@ -581,6 +592,13 @@ class Scheduler {
             int queue_limit = 0, AdmissionPolicy policy = AdmissionPolicy{},
             int prefix_slots = -1);
   const AdmissionPolicy& admission_policy() const { return policy_; }
+  bool adaptive_prefill() const {
+    return policy_.prefill_budget_tokens > 0 &&
+           (policy_.decode_gap_target_ms > 0 || policy_.first_token_target_ms > 0);
+  }
+  // Leader only. Call after applying arrivals/cancellations, then journal the
+  // result and pass it to tick on every rank. Standalone tick selects locally.
+  std::optional<int64_t> next_prefill_budget() const;
   // The prefix cache as configured: its slot count (0 = off) and the
   // running digest of every decision it made (the journal's cross-rank
   // check — identical streams, identical digests).
@@ -617,7 +635,7 @@ class Scheduler {
   // false when nothing is pending AFTER the tick — the final retirement may
   // ride on the false. Throws on admission deadlock exactly like
   // run_to_completion().
-  bool tick();
+  bool tick(std::optional<int64_t> prefill_budget = std::nullopt);
 
   // Any queued or active request remains.
   bool has_pending() const;
@@ -829,7 +847,7 @@ class Scheduler {
   // The retire's release: everything but the tombstone (set_keep_retired).
   void release_retired(Request& r, Result& res);
   // tick()'s body, the quantum; tick() compacts after it.
-  bool quantum();
+  bool quantum(std::optional<int64_t> prefill_budget);
   // Erases the retired records when they are not kept, at the end of every
   // tick: the live requests keep their order, and the slot map, the
   // decode/prefill round-robin cursors and the deferral log follow their
@@ -853,6 +871,9 @@ class Scheduler {
   int decode_batch_capacity_ = 1;  // fixed engine pass width
   int64_t tokens_generated_ = 0;   // cumulative on_token counter
   AdmissionPolicy policy_;
+  PrefillLatencyController prefill_latency_;
+  int64_t prefill_pass_budget_tokens_ = 0;  // before final-tail allocation trims
+  int64_t prefill_adaptive_limit_tokens_ = 0;
   int64_t grows_ = 0;              // growth events (meters)
   int64_t pool_sheds_ = 0;         // requests shed at exhaustion (meters)
   int64_t prompts_prefilled_ = 0;  // the throughput line's counters (meters)

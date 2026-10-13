@@ -2482,6 +2482,24 @@ void GenerationService::route_metrics_prometheus(HttpResponseWriter& w) {
             int64_t{policy.prefill_idle_budget_tokens});
   out.gauge("dgpp_admission_prefill_early_admission", "Queued short text may join an in-flight prefill.",
             int64_t{policy.prefill_early_admission ? 1 : 0});
+  out.gauge("dgpp_admission_decode_gap_target_ms", "Target gap between a request's token-producing passes; 0 disables.",
+            int64_t{policy.decode_gap_target_ms});
+  out.gauge("dgpp_admission_first_token_target_ms", "Target time from request arrival to first token, including queueing; 0 disables.",
+            int64_t{policy.first_token_target_ms});
+  out.gauge("dgpp_admission_prefill_latency_headroom_pct", "Fraction of latency target reserved for cost variation, percent.",
+            int64_t{policy.prefill_latency.headroom_pct});
+  out.gauge("dgpp_admission_prefill_growth_factor", "Maximum upward work probe relative to an observed quantum.",
+            int64_t{policy.prefill_latency.growth_factor});
+  out.gauge("dgpp_admission_prefill_cost_recovery_pct", "Weight of a cheaper observation in cost recovery, percent.",
+            int64_t{policy.prefill_latency.recovery_pct});
+  out.gauge("dgpp_admission_prefill_initial_tokens", "Starting automatic budget before measuring any workload; adjusted to engine geometry.",
+            int64_t{policy.prefill_latency.initial_tokens});
+  out.gauge("dgpp_prefill_adaptive_limit_tokens", "Last leader-selected prefill ceiling; 0 means fixed budgeting.",
+            m.prefill_adaptive_limit_tokens);
+  out.counter("dgpp_first_token_target_misses_total", "Choices whose first token exceeded the configured latency target.",
+              static_cast<int64_t>(st.first_token_target_misses));
+  out.counter("dgpp_decode_gap_target_misses_total", "Token-producing passes exceeding a request's decode gap target.",
+              static_cast<int64_t>(st.decode_gap_target_misses));
 
   // Occupancy.
   out.gauge("dgpp_num_requests_running", "Requests holding an engine slot (prefilling included).", int64_t{m.active});
@@ -2761,6 +2779,8 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {  Scheduler::Meter
   append_json_int(&out, m.prefill_chunk_available_tokens);
   out.append(",\"computed_tokens\":");
   append_json_int(&out, m.prefill_chunk_computed_tokens);
+  out.append(",\"adaptive_limit_tokens\":");
+  append_json_int(&out, m.prefill_adaptive_limit_tokens);
   out.append("}");
   out.append("}");
   out.append(",\"service\":{\"requests_total\":");
@@ -2790,6 +2810,25 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {  Scheduler::Meter
   append_json_int(&out, sched_.admission_policy().prefill_idle_budget_tokens);
   out.append(",\"prefill_early_admission\":");
   out.append(sched_.admission_policy().prefill_early_admission ? "true" : "false");
+  out.append(",\"prefill_budget_automatic\":");
+  out.append(sched_.admission_policy().prefill_budget_automatic ? "true" : "false");
+  out.append(",\"decode_gap_target_ms\":");
+  append_json_int(&out, sched_.admission_policy().decode_gap_target_ms);
+  out.append(",\"first_token_target_ms\":");
+  append_json_int(&out, sched_.admission_policy().first_token_target_ms);
+  out.append(",\"prefill_latency_headroom_pct\":");
+  append_json_int(&out, sched_.admission_policy().prefill_latency.headroom_pct);
+  out.append(",\"prefill_growth_factor\":");
+  append_json_int(&out, sched_.admission_policy().prefill_latency.growth_factor);
+  out.append(",\"prefill_cost_recovery_pct\":");
+  append_json_int(&out, sched_.admission_policy().prefill_latency.recovery_pct);
+  out.append(",\"prefill_initial_tokens\":");
+  append_json_int(&out, sched_.admission_policy().prefill_latency.initial_tokens);
+  out.append("}");
+  out.append(",\"latency_target_misses\":{\"first_token\":");
+  append_json_int(&out, static_cast<int64_t>(st.first_token_target_misses));
+  out.append(",\"decode_gap\":");
+  append_json_int(&out, static_cast<int64_t>(st.decode_gap_target_misses));
   out.append("}");
   out.append(",\"tokens_out\":");
   append_json_int(&out, static_cast<int64_t>(st.tokens_out));
@@ -3081,6 +3120,9 @@ void GenerationService::on_token(const std::string& id, int64_t token,
         // The first token: the time to first token, split by whether the
         // prefix cache served the prompt's head (M7).
         const double ms = std::chrono::duration<double, std::milli>(now - r->arrived).count();
+        if (sched_.admission_policy().first_token_target_ms > 0 &&
+            ms > sched_.admission_policy().first_token_target_ms)
+          ++stats_.first_token_target_misses;
         if (r->prefix_hit) {
           stats_.ttft_hit_count++;
           stats_.ttft_hit_ms += ms;
@@ -3320,7 +3362,11 @@ std::string GenerationService::legacy_logprobs(const StreamRecord& r, size_t fro
 
 void GenerationService::observe_token_pass(StreamRecord& r, std::chrono::steady_clock::time_point now) {
   if (!r.first_token_seen || r.ids.size() <= r.last_pass_tokens) return;
-  stats_.itl_s.observe(std::chrono::duration<double>(now - r.last_pass_at).count());
+  const double gap_s = std::chrono::duration<double>(now - r.last_pass_at).count();
+  stats_.itl_s.observe(gap_s);
+  if (sched_.admission_policy().decode_gap_target_ms > 0 &&
+      gap_s * 1000 > sched_.admission_policy().decode_gap_target_ms)
+    ++stats_.decode_gap_target_misses;
   r.last_pass_at = now;
   r.last_pass_tokens = r.ids.size();
 }
@@ -3899,9 +3945,10 @@ bool GenerationService::engine_pass(const PreTickHook& pre_tick) {
     events.has_op_digest = true;
     events.op_digest = audit_->digest();
   }
+  events.prefill_budget = sched_.next_prefill_budget();
   if (pre_tick) pre_tick(events);
 
-  const bool more = sched_.tick();  // may throw on scheduler contract
+  const bool more = sched_.tick(events.prefill_budget);  // may throw on scheduler contract
                                        // violations — the app treats
                                        // that as fatal (operator class)
 
