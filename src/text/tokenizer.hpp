@@ -68,7 +68,8 @@ class Tokenizer {
   std::string decode(int64_t id, bool skip_special_tokens = true) const;
 
   // FNV-1a-64 over the raw tokenizer.json bytes — the golden corpus's
-  // revision key.
+  // revision key. Checkpoints that ship the slow files instead (no
+  // tokenizer.json upstream) hash the slow inputs in a fixed order.
   uint64_t revision_hash() const { return revision_hash_; }
 
   const std::vector<AddedToken>& added_tokens() const {
@@ -124,6 +125,39 @@ class Tokenizer {
   // probe run crashed on exactly this (a find() walking a dead bucket).
   std::string json_buf_;
   minijson::ParseResult doc_;
+  // The slow path (load_slow): tokenizer.json absent, vocab.json +
+  // merges.txt + tokenizer_config.json present. Same ownership rule —
+  // every view below borrows one of these buffers.
+  std::string slow_vocab_buf_;
+  minijson::ParseResult slow_vocab_doc_;
+  std::string slow_merges_buf_;
+  std::string slow_config_buf_;
+  minijson::ParseResult slow_config_doc_;
+  // One BPE input row from either frontend (tokenizer.json, or the slow
+  // files). The backend builds the maps from these alone, so both
+  // spellings tokenize identically.
+  struct VocabEntry {
+    std::string_view token;
+    int64_t id;
+  };
+  struct MergeEntry {
+    std::string_view first;
+    std::string_view second;
+  };
+  struct AddedEntry {
+    int64_t id;
+    std::string_view content;
+    bool special;
+    bool single_word;
+    bool lstrip;
+    bool rstrip;
+  };
+  // Fills the rows from the slow files in dir. Returns false when any of
+  // them is absent (the caller then rethrows the tokenizer.json error);
+  // malformed-but-present files reject loudly, never silently.
+  bool load_slow(const std::string& dir, std::vector<VocabEntry>* vocab,
+                 std::vector<MergeEntry>* merges,
+                 std::vector<AddedEntry>* added);
   std::unordered_map<std::string_view, int64_t> vocab_;
   std::unordered_map<MergeKey, uint32_t, MergeHash> merge_rank_;
   std::vector<AddedToken> added_tokens_;

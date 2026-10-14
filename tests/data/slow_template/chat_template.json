@@ -1,0 +1,1 @@
+{"chat_template": "{% for message in messages %}{{ message['role'] }}: {{ message['content'] }}\n{% endfor %}"}

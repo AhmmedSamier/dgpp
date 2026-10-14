@@ -1941,9 +1941,34 @@ ChatTemplate ChatTemplate::compile(std::string source) {
 
 ChatTemplate ChatTemplate::load(const std::string& chat_template_path) {
   FILE* f = std::fopen(chat_template_path.c_str(), "rb");
-  if (!f)
+  if (!f) {
+    // No chat_template.jinja upstream (Qwen3-ASR): the snapshot's
+    // chat_template.json envelope carries the same source. Anything else
+    // keeps the original error naming the missing file.
+    const size_t slash = chat_template_path.find_last_of('/');
+    const std::string dir = slash == std::string::npos
+                                ? "."
+                                : chat_template_path.substr(0, slash);
+    FILE* jf = std::fopen((dir + "/chat_template.json").c_str(), "rb");
+    if (jf) {
+      std::string envelope;
+      char buf[65536];
+      size_t n;
+      while ((n = std::fread(buf, 1, sizeof(buf), jf)) > 0)
+        envelope.append(buf, n);
+      std::fclose(jf);
+      const minijson::ParseResult doc = minijson::parse(envelope);
+      const minijson::Value* inner = nullptr;
+      if (doc.root.is_object()) inner = doc.root.find("chat_template");
+      if (!inner || !inner->is_string())
+        throw std::runtime_error(
+            "chat-template: " + dir +
+            "/chat_template.json has no string 'chat_template' field");
+      return compile(std::string(inner->as_string()));
+    }
     throw std::runtime_error("chat-template: cannot open " +
                              chat_template_path);
+  }
   std::string data;
   char buf[65536];
   size_t n;

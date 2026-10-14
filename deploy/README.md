@@ -16,7 +16,7 @@ it. Rank 0 serves metrics on its HTTP endpoint. See the
 
 - Model names are `glm-5.3-flash`, `glm-5.3` (the full model), `glm-4.7`,
   `qwen-3.8-flash-next`, `qwen3.8-27b`, `deepseek-v4-flash`,
-  `deepseek-v4.1-flash` and `mimo-v2.6-flash`.
+  `deepseek-v4.1-flash`, `mimo-v2.6-flash` and `qwen3-asr-1.7b`.
 - The quant names the checkpoint representation: `fp8`, `nvfp4`,
   `nvfp4-fp8` for the custom GLM-5.3-Flash hybrid, `int4-int8` for the full
   GLM-5.3's pack-quantized release (int4 group-64 routed experts, int8
@@ -26,7 +26,8 @@ it. Rank 0 serves metrics on its HTTP endpoint. See the
   experts with int8 activation codes), `mxfp4-fp8` for DeepSeek-V4.1-Flash as it
   ships (MXFP4 experts, FP8 dense and attention, FP8 Engram tables mapped
   from the NVMe) and for MiMo-V2.6-Flash as it ships (MXFP4 experts, FP8
-  fused attention projections and dense MLPs, BF16 o_proj / head). The
+  fused attention projections and dense MLPs, BF16 o_proj / head), and `bf16`
+  for Qwen3-ASR-1.7B as it ships (plain BF16). The
   JSON's `model` field gives the exact Hugging Face repository.
 - `w<n>` gives the participating node count. Nothing restricts that number to
   the counts in use today; a world is refused by the engine's geometry check or
@@ -38,7 +39,10 @@ cache budget that measured at or above every other shape tried — except the
 Qwen3.8-27B templates, which name `engine.dflash_model` instead of MTP: the
 external block drafter replacing the MTP draft (the block proposal
 recorded inside the graph step at every world; one Spark without the
-decode graph runs it on the eager engine). The shapes
+decode graph runs it on the eager engine). The Qwen3-ASR template names
+neither: the checkpoint carries no MTP heads and the family runs eager —
+eight request slots sharing an 8192-token pool, served id
+`Qwen3-ASR-1.7B`. The shapes
 a template does not name are knobs appended at boot:
 `scripts/dgpp-cluster up --config FILE --knobs "FLAGS"`.
 
@@ -57,6 +61,7 @@ a template does not name are knobs appended at boot:
 | [cluster_glm-4.7_nvfp4_w4.example.json](cluster_glm-4.7_nvfp4_w4.example.json) | GLM-4.7 NVFP4 on four nodes: MTP depth 1, 256K context, four request slots | T=1: `--no-mtp`; depth 2: `--mtp-depth 2` (single-stream +4–13 %, measured behind depth 1 under concurrency before the 2026-09-14 lowering) |
 | [cluster_glm-5.3_int4-int8_w4.example.json](cluster_glm-5.3_int4-int8_w4.example.json) | the full GLM-5.3 (int4/int8 RTN) on four nodes: MTP depth 1, eight request slots (sixteen decode rows; c=4 the four-slot shape's 41–42 tok/s, c=8 48–50 aggregate), 120K bf16 context, the embedding vocab-sharded; the BF16 decode weights resident in their 12-bit form alone (`"bf12"`: 110.1 GiB per rank under the 4 GiB headroom — 0.3 GiB under the BF16 plan, where both forms resident stopped at 100K) | both forms resident (100K context): `--bf16-weights bf12+bf16 --kv-capacity 102400`; T=1: `--no-mtp` (144K context with `--kv-capacity 147456`); the fp8 latent cache at 208K: `--kv-dtype fp8 --kv-capacity 212992 --prefix-cache-gib 1.5`; depth 2 at two slots: `--mtp-depth 2 --max-concurrency 2` |
 | [cluster_qwen3.8-27b_nvfp4_w1.example.json](cluster_qwen3.8-27b_nvfp4_w1.example.json) | Qwen3.8-27B NVFP4 (the mixed release: NVFP4 MLPs, channel-FP8 attention and head, BF16 draft layer) on one node, the DFlash2 block drafter in FP8 | the FP8 card's flags carry over; `--dense-weights fp8` is refused (the head is already FP8-resident) |
+| [cluster_qwen3-asr-1.7b_bf16_w1.example.json](cluster_qwen3-asr-1.7b_bf16_w1.example.json) | Qwen3-ASR-1.7B as it ships (BF16) on one node: eight request slots sharing an 8192-token pool, port 8000, served id `Qwen3-ASR-1.7B`; the snapshot needs no preparation (the server reads the upstream slow files directly) | — |
 | [cluster_qwen3.8-27b_nvfp4_w2.example.json](cluster_qwen3.8-27b_nvfp4_w2.example.json) | the same on two nodes | ditto |
 | [cluster_qwen3.8-27b_nvfp4_w4.example.json](cluster_qwen3.8-27b_nvfp4_w4.example.json) | the same on four nodes | ditto |
 | [cluster_glm-5.3_nf4i8_w4.example.json](cluster_glm-5.3_nf4i8_w4.example.json) | the full GLM-5.3 in the NF4I8 GPTQ H32 g128 checkpoint (`HawkBearPig/GLM-5.3-NF4I8-GPTQ-H32-g128`: sixteen-level codebook routed experts, int8 attention and shared expert) on four nodes: MTP depth 1, eight request slots, 272K fp8 context, the embedding vocab-sharded, the BF16 decode weights in their 12-bit form (93.7 GiB of weights per rank) | T=1: `--no-mtp`; depth 2 at two slots: `--mtp-depth 2 --max-concurrency 2` |

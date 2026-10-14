@@ -2673,26 +2673,6 @@ int main(int argc, char** argv) {
       DGPP_LOG_WARN("engine.embed_sharding = vocab applies to the full GLM-5.3 and the DeepSeek families; {} keeps its "
                     "embedding replicated", family->name());
     DGPP_LOG_INFO("serve: model family {} ({})", family->name(), ckpt);
-    if (std::string(family->name()) == "qwen3_asr") {
-      // Upstream Qwen3-ASR snapshots ship neither dgpp-loadable file, so a
-      // raw snapshot (or a --checkpoint-dir pointed at one) fails later in
-      // the generic tokenizer loader with no hint. Name the fix here: the
-      // cluster downloader prepares snapshots itself.
-      std::string missing;
-      if (!fs::exists(fs::path(ckpt) / "tokenizer.json"))
-        missing = "tokenizer.json";
-      else if (!fs::exists(fs::path(ckpt) / "chat_template.jinja"))
-        missing = "chat_template.jinja";
-      if (!missing.empty()) {
-        DGPP_LOG_ERROR(
-            "the qwen3_asr checkpoint {} is missing {}; upstream ships no dgpp-loadable "
-            "tokenizer or template. Run python3 tools/prepare_qwen_asr_checkpoint.py "
-            "--snapshot {} --in-place (or download through scripts/download_model.py "
-            "--config, which prepares Qwen3-ASR snapshots before syncing them).",
-            ckpt, missing, ckpt);
-        return 1;
-      }
-    }
     if (prefill_budget_tokens > 0 && (!decode_graph ||
         (std::string(family->name()) != "qwen4_exp" && std::string(family->name()) != "glm5"))) {
       DGPP_LOG_ERROR("--prefill-budget-tokens requires a Qwen or GLM-5.3-Flash graph engine");

@@ -173,17 +173,25 @@ project procedures and design guidance live in `docs/`.
   `benchmarks/results/` are no longer tracked. The measured
   latency/throughput tradeoffs are in
   [PR #112](https://github.com/HawkBearPig/dgpp/pull/112).
+- **Qwen3-ASR serves raw snapshots**: the prepare step is gone —
+  `Tokenizer::load` reads `vocab.json` + `merges.txt` +
+  `tokenizer_config.json` directly when `tokenizer.json` is absent
+  (gated on the `Qwen2Tokenizer` class; added tokens registered special
+  exactly as the reference builder does — its `add_special_tokens`
+  forces `special=True` over upstream's `False` on 14 control markers,
+  and the slow path replicates that rather than the config), and
+  `ChatTemplate::load` reads the `chat_template.json` envelope when the
+  `.jinja` is absent. No generated files, no network at boot, peers
+  serve the raw synced snapshot. Pinned byte-identical to the
+  reference-built files by `tests/unit/tokenizer_load_test.cpp`
+  (including a decode-with-skip assertion over a control marker, the
+  case that caught the `special` divergence live). The downloader hook
+  and `tools/prepare_qwen_asr_checkpoint.py` are removed.
 - **Qwen3-ASR cluster deployment**: `deploy/cluster_qwen3-asr-1.7b_bf16_w1.example.json`
   serves the model the way the text recipes do — `download_model.py --config`
   then `dgpp-cluster up --config`, port 8000, served id `Qwen3-ASR-1.7B`.
-  The downloader prepares Qwen3-ASR snapshots itself (the two derived files
-  upstream never ships land in the snapshot before validation, so peers sync
-  a serve-ready tree; sync-only stays offline, verify-only stays read-only),
-  the template is pinned by a `parse_cluster_config` unit test, and a boot
-  aimed at a raw snapshot now names the missing file and the command that
-  generates it instead of dying in the generic tokenizer loader.
-  `tools/prepare_qwen_asr_checkpoint.py` grew `--snapshot`/`--in-place` for
-  the same job outside the cluster flow.
+  The template is pinned by a `parse_cluster_config` unit test; the
+  snapshot needs no preparation (see above).
 - **Transcription language tag on its own line**: the checkpoint glues
   `language <NAME>` onto every transcript with no separator; the server
   now splits it above the body (`split_language_tag`, camelCase boundary

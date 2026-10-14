@@ -58,17 +58,44 @@ def cached_snapshot(model, root):
 def checkpoint_size(snapshot):
     """Validate required metadata and safetensors lengths without reading weights."""
     snapshot = Path(snapshot)
-    for name in ("config.json", "tokenizer.json"):
-        if not isinstance(json.loads((snapshot / name).read_text()), dict):
-            raise ValueError(f"{name} must contain a JSON object")
-    # The prompt format: a Jinja template, or a DeepSeek release's own encoder
-    # (V4.1's `encoding/encoding.py`, V4's `encoding/encoding_dsv4.py`; those
-    # checkpoints ship no template).
+    if not isinstance(json.loads((snapshot / "config.json").read_text()), dict):
+        raise ValueError("config.json must contain a JSON object")
+    if (snapshot / "tokenizer.json").is_file():
+        if not isinstance(json.loads((snapshot / "tokenizer.json").read_text()), dict):
+            raise ValueError("tokenizer.json must contain a JSON object")
+    else:
+        # The slow spelling the server loads directly (Qwen3-ASR ships no
+        # tokenizer.json): the same gate as Tokenizer::load_slow, so the
+        # doctor and the boot agree on what serves.
+        vocab = snapshot / "vocab.json"
+        if not vocab.is_file() or not isinstance(json.loads(vocab.read_text()), dict):
+            raise ValueError(f"missing tokenizer.json in {snapshot} and vocab.json is no JSON object")
+        merges = snapshot / "merges.txt"
+        if not merges.is_file() or merges.read_text().splitlines()[:1] != ["#version: 0.2"]:
+            raise ValueError(f"missing tokenizer.json in {snapshot} and merges.txt has no '#version: 0.2' header")
+        config = snapshot / "tokenizer_config.json"
+        try:
+            tokens = json.loads(config.read_text())
+        except (OSError, ValueError):
+            raise ValueError(f"missing tokenizer.json in {snapshot} and tokenizer_config.json is no JSON object")
+        if (not isinstance(tokens, dict) or tokens.get("tokenizer_class") != "Qwen2Tokenizer" or
+                not isinstance(tokens.get("added_tokens_decoder"), dict)):
+            raise ValueError(f"missing tokenizer.json in {snapshot} and the slow files are not a Qwen2 tokenizer")
+    # The prompt format: a Jinja template, its chat_template.json envelope
+    # (which the server reads directly), or a DeepSeek release's own
+    # encoder (V4.1's `encoding/encoding.py`, V4's
+    # `encoding/encoding_dsv4.py`; those checkpoints ship no template).
     encoders = ("encoding.py", "encoding_dsv4.py")
     if not (snapshot / "chat_template.jinja").is_file() and not any(
         (snapshot / "encoding" / name).is_file() for name in encoders
     ):
-        raise ValueError(f"missing chat_template.jinja (or encoding/encoding.py, encoding/encoding_dsv4.py) in {snapshot}")
+        envelope = snapshot / "chat_template.json"
+        try:
+            template = json.loads(envelope.read_text())
+        except (OSError, ValueError):
+            template = None
+        if not isinstance(template, dict) or not isinstance(template.get("chat_template"), str):
+            raise ValueError(f"missing chat_template.jinja (or encoding/encoding.py, encoding/encoding_dsv4.py) in {snapshot}")
     return shard_bytes(snapshot)
 
 

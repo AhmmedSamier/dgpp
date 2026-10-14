@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <utility>
@@ -499,11 +500,159 @@ class Dsv41Scanner {
 // ---------------------------------------------------------------------------
 // Load + validate.
 // ---------------------------------------------------------------------------
+
+// The slow spelling (vocab.json + merges.txt + tokenizer_config.json) for
+// checkpoints that ship no tokenizer.json upstream (Qwen3-ASR). Fills the
+// same rows the tokenizer.json frontend below fills; the backend cannot
+// tell them apart. Returns false when any slow file is absent (the caller
+// rethrows the tokenizer.json error); present-but-malformed files reject.
+bool Tokenizer::load_slow(const std::string& dir,
+                          std::vector<VocabEntry>* vocab,
+                          std::vector<MergeEntry>* merges,
+                          std::vector<AddedEntry>* added) {
+  const auto read_opt = [&](const char* name, std::string* out) {
+    std::FILE* f = std::fopen((dir + "/" + name).c_str(), "rb");
+    if (!f) return false;
+    char buf[65536];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) out->append(buf, n);
+    std::fclose(f);
+    return true;
+  };
+  std::string vocab_txt, merges_txt, config_txt;
+  if (!read_opt("vocab.json", &vocab_txt) ||
+      !read_opt("merges.txt", &merges_txt) ||
+      !read_opt("tokenizer_config.json", &config_txt))
+    return false;
+  // The shape gate: the backend implements the Qwen BPE shape (NFC, the
+  // pinned Qwen2 Split + ByteLevel, ByteLevel decoder, offsets-only post).
+  // Any other tokenizer class keeps the original tokenizer.json error —
+  // supplying that file is still the fix.
+  slow_config_buf_ = std::move(config_txt);
+  slow_config_doc_ = minijson::parse(slow_config_buf_);
+  const minijson::Value& cfg = slow_config_doc_.root;
+  if (!cfg.is_object())
+    reject("slow tokenizer: tokenizer_config.json is not an object");
+  const minijson::Value* cls = cfg.find("tokenizer_class");
+  if (!cls || !cls->is_string() || cls->as_string() != "Qwen2Tokenizer")
+    return false;
+  slow_vocab_buf_ = std::move(vocab_txt);
+  slow_vocab_doc_ = minijson::parse(slow_vocab_buf_);
+  const minijson::Value& vroot = slow_vocab_doc_.root;
+  if (!vroot.is_object())
+    reject("slow tokenizer: vocab.json is not an object");
+  for (const auto& [key, val] : vroot.members()) {
+    if (!val.is_number()) reject("vocab entry id is not a number");
+    vocab->push_back({key, val.as_int()});
+  }
+  slow_merges_buf_ = std::move(merges_txt);
+  std::string_view rest(slow_merges_buf_);
+  bool headed = false;
+  size_t lineno = 0;
+  while (!rest.empty()) {
+    const size_t nl = rest.find('\n');
+    std::string_view line = rest.substr(0, nl);
+    rest = nl == std::string_view::npos ? std::string_view{} : rest.substr(nl + 1);
+    if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+    ++lineno;
+    if (!headed) {
+      headed = true;
+      // The format marker the reference builder asserts (merges.txt's
+      // first line); a headerless file is a different format, not a
+      // default to guess.
+      if (line != "#version: 0.2")
+        reject("slow tokenizer: merges.txt first line is not the "
+               "'#version: 0.2' header");
+      continue;
+    }
+    // One space, ByteLevel symbols never containing one — the same rule
+    // the tokenizer.json frontend applies to string-form merges.
+    const size_t sp = line.find(' ');
+    if (sp == std::string_view::npos || sp == 0 || sp + 1 >= line.size() ||
+        line.find(' ', sp + 1) != std::string_view::npos)
+      reject("slow tokenizer: malformed merge line " +
+             std::to_string(lineno));
+    merges->push_back({line.substr(0, sp), line.substr(sp + 1)});
+  }
+  if (!headed) reject("slow tokenizer: merges.txt is empty");
+  const minijson::Value& dec =
+      field(cfg, "added_tokens_decoder", "added_tokens");
+  if (!dec.is_object())
+    reject("added_tokens: 'added_tokens_decoder' is not an object");
+  std::vector<std::pair<int64_t, const minijson::Value*>> ordered;
+  for (const auto& [key, val] : dec.members()) {
+    char* end = nullptr;
+    const long long id = std::strtoll(key.c_str(), &end, 10);
+    if (end == key.c_str() || *end != '\0')
+      reject("slow tokenizer: added token id is not an integer: " + key);
+    ordered.emplace_back(static_cast<int64_t>(id), &val);
+  }
+  // The reference builder emits added tokens in id order.
+  std::sort(ordered.begin(), ordered.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+  for (const auto& [id, val] : ordered) {
+    if (!val->is_object())
+      reject("added_tokens: added token entry is not an object");
+    AddedEntry a;
+    a.id = id;
+    a.content = want_string(*val, "content", "added_tokens");
+    // Unconditionally special: the reference builder registers every
+    // added token via add_special_tokens, which forces special=True even
+    // where the snapshot config says False (14 of the 62, including the
+    // <asr_text> control marker the model emits). Faithful-to-config
+    // here would keep markers the file path drops on decode — the two
+    // spellings must agree, and the file spelling is the validated one.
+    a.special = true;
+    a.single_word = want_bool(*val, "single_word", "added_tokens");
+    a.lstrip = want_bool(*val, "lstrip", "added_tokens");
+    a.rstrip = want_bool(*val, "rstrip", "added_tokens");
+    added->push_back(a);
+  }
+  return true;
+}
+
 Tokenizer Tokenizer::load(const std::string& path) {
   Tokenizer t;
-  t.json_buf_ = read_file(path);
-  t.revision_hash_ = fnv1a_bytes(t.json_buf_.data(), t.json_buf_.size());
   build_byte_level_maps(t.byte_to_cp_, t.cp_to_byte_);
+
+  // Both frontends fill these rows; the backend below builds the maps
+  // from the rows alone.
+  std::vector<VocabEntry> vocab;
+  std::vector<MergeEntry> merges;
+  std::vector<AddedEntry> added;
+
+  std::string json_error;
+  try {
+    t.json_buf_ = read_file(path);
+  } catch (const std::runtime_error& e) {
+    json_error = e.what();
+  }
+  if (!json_error.empty()) {
+    // No tokenizer.json upstream (Qwen3-ASR): the slow files beside it
+    // describe the same BPE core. Anything else rethrows the original
+    // error naming the missing file.
+    const size_t slash = path.find_last_of('/');
+    const std::string dir =
+        slash == std::string::npos ? "." : path.substr(0, slash);
+    if (!t.load_slow(dir, &vocab, &merges, &added))
+      throw std::runtime_error(json_error);
+    // The slow path is gated on the Qwen2 tokenizer class: the pinned
+    // Qwen2 Split, NFC, and the reference builder's BPE defaults.
+    t.pattern_ = 3;
+    t.nfc_ = true;
+    t.ignore_merges_ = false;
+    uint64_t h = fnv1a_bytes(t.slow_vocab_buf_.data(),
+                             t.slow_vocab_buf_.size());
+    h ^= fnv1a_bytes(t.slow_merges_buf_.data(),
+                     t.slow_merges_buf_.size()) +
+         0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    h ^= fnv1a_bytes(t.slow_config_buf_.data(),
+                     t.slow_config_buf_.size()) +
+         0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    t.revision_hash_ = h;
+  } else {
+    t.revision_hash_ =
+        fnv1a_bytes(t.json_buf_.data(), t.json_buf_.size());
 
   // The parse tree becomes a MEMBER: object keys (Member.key) are
   // tree-owned std::strings, so every view taken below stays valid for
@@ -617,27 +766,21 @@ Tokenizer Tokenizer::load(const std::string& path) {
       reject(std::string("model.") + f + " must be null or empty");
   }
 
-  // --- vocab (dense id coverage validated below) -----------------------
-  const auto& vocab = field(*model, "vocab", "model").members();
-  t.vocab_.reserve(vocab.size());
-  int64_t max_vocab_id = -1;
-  for (const auto& [key, val] : vocab) {
+  // --- vocab rows (the backend validates coverage below) ----------------
+  for (const auto& [key, val] :
+       field(*model, "vocab", "model").members()) {
     if (!val.is_number()) reject("vocab entry id is not a number");
-    const int64_t id = val.as_int();
-    if (!t.vocab_.emplace(key, id).second)
-      reject("duplicate vocab token: " + key);
-    max_vocab_id = std::max(max_vocab_id, id);
+    vocab.push_back({key, val.as_int()});
   }
 
-  // --- merges (rank = list order) ---------------------------------------
-  const auto& merges = field(*model, "merges", "model").items();
-  t.merge_rank_.reserve(merges.size());
-  for (size_t r = 0; r < merges.size(); ++r) {
+  // --- merge rows (rank = list order) ------------------------------------
+  const auto& merges_json = field(*model, "merges", "model").items();
+  for (size_t r = 0; r < merges_json.size(); ++r) {
     // Two formats: ["first", "second"] (GLM's file) or "first second"
     // (Qwen's — one space; ByteLevel symbols never contain a space).
     std::string_view first, second;
-    if (merges[r].is_string()) {
-      const std::string_view m = merges[r].as_string();
+    if (merges_json[r].is_string()) {
+      const std::string_view m = merges_json[r].as_string();
       const size_t sp = m.find(' ');
       if (sp == std::string_view::npos || sp == 0 || sp + 1 >= m.size() ||
           m.find(' ', sp + 1) != std::string_view::npos)
@@ -645,18 +788,49 @@ Tokenizer Tokenizer::load(const std::string& path) {
       first = m.substr(0, sp);
       second = m.substr(sp + 1);
     } else {
-      const auto& pair = merges[r].items();
+      const auto& pair = merges_json[r].items();
       if (pair.size() != 2 || !pair[0].is_string() || !pair[1].is_string())
         reject("malformed merge entry at rank " + std::to_string(r));
       first = pair[0].as_string();
       second = pair[1].as_string();
     }
-    if (!t.merge_rank_.emplace(MergeKey{first, second}, static_cast<uint32_t>(r)).second)
+    merges.push_back({first, second});
+  }
+
+  // --- added-token rows ----------------------------------------------------
+  for (const auto& at : field(root, "added_tokens", "root").items()) {
+    AddedEntry a;
+    a.id = field(at, "id", "added_tokens").as_int();
+    a.content = want_string(at, "content", "added_tokens");
+    a.special = want_bool(at, "special", "added_tokens");
+    a.single_word = want_bool(at, "single_word", "added_tokens");
+    a.lstrip = want_bool(at, "lstrip", "added_tokens");
+    a.rstrip = want_bool(at, "rstrip", "added_tokens");
+    added.push_back(a);
+  }
+  }  // end of the tokenizer.json frontend
+
+  // --- backend: the maps, from either frontend's rows ----------------------
+  // --- vocab (dense id coverage validated below) -----------------------
+  t.vocab_.reserve(vocab.size());
+  int64_t max_vocab_id = -1;
+  for (const auto& [token, id] : vocab) {
+    if (!t.vocab_.emplace(token, id).second)
+      reject("duplicate vocab token: " + std::string(token));
+    max_vocab_id = std::max(max_vocab_id, id);
+  }
+
+  // --- merges (rank = list order) ---------------------------------------
+  t.merge_rank_.reserve(merges.size());
+  for (size_t r = 0; r < merges.size(); ++r) {
+    if (!t.merge_rank_
+             .emplace(MergeKey{merges[r].first, merges[r].second},
+                      static_cast<uint32_t>(r))
+             .second)
       reject("duplicate merge pair at rank " + std::to_string(r));
   }
 
   // --- added tokens: plain matching only -------------------------------
-  const auto& added = field(root, "added_tokens", "root").items();
   const auto fresh_node = [] {
     TrieNode n;
     for (auto& c : n.child) c = -1;
@@ -665,14 +839,16 @@ Tokenizer Tokenizer::load(const std::string& path) {
   t.trie_.clear();
   t.trie_.push_back(fresh_node());  // root = trie_[0]
   t.added_tokens_.reserve(added.size());
-  for (const auto& at : added) {
+  for (const auto& e : added) {
     AddedToken a;
-    a.id = field(at, "id", "added_tokens").as_int();
-    a.content = std::string(want_string(at, "content", "added_tokens"));
-    a.special = want_bool(at, "special", "added_tokens");
-    for (const char* f : {"single_word", "lstrip", "rstrip"}) {
-      if (want_bool(at, f, "added_tokens"))
-        reject("added token with " + std::string(f) +
+    a.id = e.id;
+    a.content = std::string(e.content);
+    a.special = e.special;
+    const bool affixed[3] = {e.single_word, e.lstrip, e.rstrip};
+    const char* names[3] = {"single_word", "lstrip", "rstrip"};
+    for (int k = 0; k < 3; ++k) {
+      if (affixed[k])
+        reject("added token with " + std::string(names[k]) +
                " set (plain matching only): " + a.content);
     }
     t.added_tokens_.push_back(std::move(a));
@@ -698,12 +874,11 @@ Tokenizer Tokenizer::load(const std::string& path) {
 
   // --- reverse id map (decode path) ------------------------------------
   t.token_by_id_.assign(static_cast<size_t>(max_vocab_id) + 1, {});
-  for (const auto& [key, val] : vocab) {
-    const int64_t id = val.as_int();
-    if (id < 0) reject("negative vocab id: " + key);
+  for (const auto& [token, id] : vocab) {
+    if (id < 0) reject("negative vocab id: " + std::string(token));
     auto& slot = t.token_by_id_[static_cast<size_t>(id)];
     if (!slot.empty()) reject("duplicate vocab id: " + std::to_string(id));
-    slot = key;
+    slot = token;
   }
   for (size_t id = 0; id < t.token_by_id_.size(); ++id)
     if (t.token_by_id_[id].empty())
