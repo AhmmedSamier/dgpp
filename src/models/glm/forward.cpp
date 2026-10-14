@@ -412,7 +412,20 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg, const std::stri
                     (1024.0 * 1024.0 * 1024.0),
                 boot_globals_ms_ / 1000.0,
                 ms_between(t_layers, std::chrono::steady_clock::now()) / 1000.0);
+  // The draft head's screen (engine.draft_head): the decode drafts' head
+  // reads; off with a logged reason when the setting or the head's form says so.
+  if (mtp_) draft_head_.init(draft_head_matrix(), kDecodeRows, loader_.rank(), stream_, /*quiet=*/true);
 }
+
+HeadMatrix GlmDiagnosticModel::draft_head_matrix() const {
+  HeadMatrix m;
+  m.bf16 = globals_.lm_head;
+  m.bf12 = gemm_.bf12_lookup(globals_.lm_head);
+  m.n = lm_vocab_count_;
+  m.k = cfg_.hidden_size;
+  return m;
+}
+
 
 // The lossless 12-bit companions of the decode GEMV's bf16 weights
 // (kernels/bf12_gemv.hpp): a resident layer's KDA in/out projections and
@@ -451,6 +464,9 @@ void GlmDiagnosticModel::finish_companions() {
   bf12_.finish(gemm_, kBf12ExpandSlots);
   bf12_ms_ += ms_between(t0, std::chrono::steady_clock::now());
   bf12_.log_summary(loader_.rank(), bf12_ms_ / 1000.0);
+  // The draft head's screen from the companion when the bf16 bytes were
+  // never device-resident (the 12-bit-only residency); a no-op once built.
+  if (mtp_) draft_head_.init(draft_head_matrix(), kDecodeRows, loader_.rank(), stream_);
 }
 
 GlmDiagnosticModel::MemoryPlan GlmDiagnosticModel::plan_memory(
@@ -574,6 +590,8 @@ GlmDiagnosticModel::MemoryPlan GlmDiagnosticModel::plan_memory(
     plan.add("draft hidden cache (per position)",
              R * static_cast<size_t>(max_context) * H * 2);
     plan.add("draft activations", T * 2 * H * 2 + T * H * 2);
+    plan.add("draft head screen (2-bit rotated head copy, scratch)",
+             DraftHead::plan_bytes(GlmLayerStream::lm_vocab_count(cfg, tp_rank, tp_world, head), cfg.hidden_size, kDecodeRows));
   }
   {
     size_t act = T * 8;                                   // d_tokens_

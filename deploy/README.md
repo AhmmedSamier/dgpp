@@ -70,6 +70,33 @@ a template does not name are knobs appended at boot:
 | [cluster_qwen3.8-27b_fp8_w2.example.json](cluster_qwen3.8-27b_fp8_w2.example.json) | Qwen3.8-27B-FP8 on two Sparks (tensor parallel: the GDN and attention heads, the MLP and the lm head split across the ranks, two boundary folds a layer) with the DFlash2 block drafter on the decode graph (the block proposal recorded in the graph step, the drafter sharded across the ranks, its block matrices as block FP8 (`dflash_weights: "fp8"`, lossy for the proposals only), `bf16_weights: "bf12"`; a sampled request's drafts drawn at 0.7 of its temperature under the ratio verify, `mtp_draft_temperature`), 256K context, eight request slots, the FP8 lm head. Greedy C1 35 / 55 / 77 / 63 / 33 tok/s (prose / code / JSON / math / chat) at 82 ms a pass in the 2026-10-05 campaign against MTP depth 3's 34 / 40 / 46 / 42 / 31 at 78; the drafter is the template since 2026-10-05, when its drawn proposals also took the sampled classes; the verify depth scheduled from the selector's confidence (`mtp_schedule`, 2.0 ms a row over a 66 ms pass) | plain decode: `--no-dflash`; MTP depth 3 (the template until 2026-10-05): `--no-dflash --mtp --mtp-depth 3`; the argmax walk for sampled requests: `--mtp-draft greedy`; the checkpoint's BF16 head: `--dense-weights checkpoint` |
 | [cluster_qwen3.8-27b_fp8_w4.example.json](cluster_qwen3.8-27b_fp8_w4.example.json) | Qwen3.8-27B-FP8 on four Sparks (tensor parallel: the GDN and attention heads — one kv head a rank — the MLP and the lm head split across the ranks, two boundary folds a layer) with the DFlash2 block drafter on the decode graph (as the two-node template), 256K context, eight request slots, the FP8 lm head. Greedy C1 57 / 88 / 122 / 102 / 53 tok/s (prose / code / JSON / math / chat) at 50 ms a pass in the 2026-10-05 campaign against MTP depth 3's 58 / 69 / 78 / 72 / 51 at 45: ahead on code / JSON / math by 29–56 %, level on prose, 6 % ahead on chat, and ahead on sampled traffic with the drawn proposals. The verify depth is scheduled a step at a time from the selector walk's confidence (`mtp_schedule`, 2.0 ms a row over a 34 ms pass): eight slots 205 / 301 / 352 / 310 / 216 tok/s at 92 ms a step since the one-chain split-K (184 / 273 / 326 / 284 / 196 at 106 before it; 154 / 270 / 320 / 260 / 170 at 117 for whole blocks), C1 level; transcripts matched across the tested isolated and joining-co-tenant cases | plain decode: `--no-dflash`; MTP depth 3 (the template until 2026-10-05): `--no-dflash --mtp --mtp-depth 3`; the argmax walk for sampled requests: `--mtp-draft greedy`; the checkpoint's BF16 head: `--dense-weights checkpoint` |
 
+The full GLM-5.3 templates keep MTP depth 1 for their eight slots: at
+eight concurrent requests a second verify row costs more than it returns
+(fixed depth 2: 51.7 → 47.2 wall tok/s on prose, −2..−9 % by class;
+the scheduled depth 2, −1..−5 %), while one request gains +4..+11 % at
+fixed depth 2 and +7..+13 % under the schedule (`engine.mtp_depth: 2`,
+`engine.mtp_schedule: true`, `engine.mtp_schedule_min_depth: 1`,
+`engine.mtp_schedule_row_ms: 14`, `engine.mtp_schedule_base_ms: 34`;
+2026-10-14, four nodes, int4-int8). An interactive deployment of the full
+model should set those five keys. GLM-5.3-Flash gains +3..+13 % at one
+request from depth 2 (fixed or scheduled) but serves every concurrent
+request as a scalar replay past depth 1 (no batched draft chain on that
+family yet): four requests fall from 108–114 to 59–67 wall tok/s, so its
+templates keep depth 1.
+
+The Qwen3.8-Flash-Next, GLM-5.3-Flash, full GLM-5.3 and Qwen3.8-27B
+templates set `engine.draft_head: "screen"` (2026-10-13; the AutoRound
+hybrid keeps the exact head): each draft token reads a 2-bit rotated copy
+of the head to find its candidate blocks and only those blocks exactly, so
+greedy transcripts are unchanged and the pass is shorter — Flash-Next on
+one node 39.8 → 38.1 ms at depth 1 and 55.8 → 50.5 at depth 3, on four
+nodes 23.2 → 22.6 and 31.3 → 29.9; GLM-5.3-Flash on four nodes 31.3 → 30.9;
+the full GLM-5.3 (int4-int8) on four nodes 63.5 → 62.5; the 27B NVFP4
+drafter on four nodes 38.6 → 38.0. `--draft-head exact` restores the full
+read. DeepSeek-V4.1's templates keep the exact head: DSpark adds its
+Markov bias after the head read, and the screen's candidate selection does
+not yet see it (measured: fewer accepted drafts). DeepSeek-V4 keeps its own
+screened draft head.
 The Qwen NVFP4 templates use `engine.fp8_head: "mma"` after matched
 real-checkpoint numerical checks
 on one and two Sparks, including the YaRN recipe. Streaming MMA applies above

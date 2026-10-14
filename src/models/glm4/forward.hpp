@@ -50,6 +50,7 @@
 #include "engine/memory_plan.hpp"
 #include "engine/session_model.hpp"
 #include "kernels/bf12_companions.hpp"
+#include "kernels/draft_head.hpp"
 #include "kernels/gemm.hpp"
 #include "kernels/glm_spec.hpp"
 #include "kernels/l2_prefetch.hpp"
@@ -181,6 +182,11 @@ class Glm4Model : public SessionModel<Glm4Model> {
   Glm4TextConfig cfg_;
   Glm4LayerStream loader_;
   CublasLtGemm gemm_;
+  // The draft head's screen (kernels/draft_head.hpp): built from the served
+  // head at construction under engine.draft_head; answers a decode draft's
+  // head call with the masked row or declines (the exact head runs).
+  DraftHead draft_head_;
+  HeadMatrix draft_head_matrix() const;
   // The bf16 decode weights' 12-bit companions (kernels/bf12_companions.hpp)
   // and the rows of the walk in flight (the prefetch windows' view).
   static constexpr int kBf12ExpandSlots = 1;

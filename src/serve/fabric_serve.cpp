@@ -406,6 +406,9 @@ std::string encode_journal_settings(const WorldSettings& s) {
   append_json_string(&out, s.dense_weights);
   out += ",\"fp8_head\":";
   append_json_string(&out, s.fp8_head);
+  out += ",\"dh\":";
+  append_json_string(&out, s.draft_head);
+  out += std::format(",\"dhb\":{}", s.draft_head_blocks);
   out += ",\"mtpef\":";
   append_json_string(&out, s.mtp_expert_format);
   out += ",\"bfw\":";
@@ -648,6 +651,16 @@ JournalRecord decode_journal_line(std::string_view line) {
       if (!head->is_string() || (head->as_string() != "gemv" && head->as_string() != "mma"))
         throw std::runtime_error("journal: engine.fp8_head must be gemv or mma");
       s.fp8_head = std::string(head->as_string());
+    }
+    // The draft head's read (2026-10-13): records before it carry none (exact).
+    if (const auto* dh = v.find("dh")) {
+      if (!dh->is_string() || (dh->as_string() != "exact" && dh->as_string() != "screen"))
+        throw std::runtime_error("journal: engine.draft_head must be exact or screen");
+      s.draft_head = std::string(dh->as_string());
+    }
+    if (const auto* dhb = v.find("dhb")) {
+      if (!dhb->is_number()) throw std::runtime_error("journal: engine.draft_head_blocks must be a number");
+      s.draft_head_blocks = static_cast<int>(dhb->as_int());
     }
     if (const dgpp::minijson::Value* dw = v.find("dw")) s.dense_weights = std::string(dw->as_string());
     if (const dgpp::minijson::Value* mtpef = v.find("mtpef")) s.mtp_expert_format = std::string(mtpef->as_string());

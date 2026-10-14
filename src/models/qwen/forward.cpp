@@ -242,6 +242,11 @@ QwenModel::QwenModel(const QwenTextConfig& cfg, const std::string& checkpoint_di
     head_cand_ = dev_alloc<int32_t>(static_cast<size_t>(lm_vocab_count_));
     head_cand_count_ = dev_alloc<int32_t>(1);
   }
+  // The draft head's screen (engine.draft_head; kernels/draft_head.hpp):
+  // the decode drafts' head reads, unless the opt-in vocabulary slice
+  // (engine.draft_vocab) already replaces the draft head.
+  if (mtp_ && globals_.draft_head_packed.packed == nullptr)
+    draft_head_.init(draft_head_matrix(), max_decode_rows_, loader_.rank(), stream_, /*quiet=*/true);
   if (const char* e = std::getenv("DGPP_QWEN_HEAD_DUMP"); e != nullptr && e[0] != '\0') {
     head_dump_path_ = e;
     const size_t slot = static_cast<size_t>(max_decode_rows_) * static_cast<size_t>(cfg_.hidden_size);
@@ -378,6 +383,9 @@ QwenModel::MemoryPlan QwenModel::plan_memory(const QwenTextConfig& cfg, int max_
   if (cfg.lm_head_gptq_int8)
     plan.add("head argmax bounds and candidate list (four rows x vocab fp32, vocab int32)",
              4 * static_cast<size_t>(geo.lm_vocab_count) * 4 + static_cast<size_t>(geo.lm_vocab_count) * 4 + 64);
+  if (mtp && QwenLayerStream::draft_vocab_count() == 0)
+    plan.add("draft head screen (2-bit rotated head copy, scratch)",
+             DraftHead::plan_bytes(geo.lm_vocab_count, cfg.hidden_size, static_cast<int>(rows)));
   if (cfg.lm_head_gptq_int8 && QwenLayerStream::draft_vocab_count() > 0) {
     const size_t n = static_cast<size_t>(QwenLayerStream::draft_vocab_count());
     plan.add("draft vocabulary slice (int8 head rows, scales, ids)",
@@ -505,6 +513,14 @@ void QwenModel::lm_head_logits(const uint16_t* hidden, int rows, cudaStream_t st
     throw std::invalid_argument("Qwen head: output exceeds logits capacity; use full diagnostic storage");
   const int H = cfg_.hidden_size;
   if (head_dump_ring_ != nullptr && rows >= 1 && rows <= max_decode_rows_) head_dump_record(hidden, rows, stream);
+  // A decode draft's head call through the screen (kernels/draft_head.hpp):
+  // the candidate blocks' logits from the served head, -inf elsewhere; the
+  // pick runs unchanged on the masked row. The verify's calls never come here.
+  if (head_screen_site_ && !last_row_only && compact_row < 0 &&
+      draft_head_.logits(draft_head_matrix(), hidden, static_cast<size_t>(H), rows,
+                         logits_ + static_cast<size_t>(output_row) * lm_vocab_count_,
+                         static_cast<size_t>(lm_vocab_count_), stream))
+    return;
   // Opt in to weight-tile reuse only within the configured decode envelope;
   // this bounds the optimization to verification shapes covered by its gates.
   // Short prefill chunks/tails in that envelope also use MMA, so their logits
@@ -587,6 +603,20 @@ void QwenModel::lm_head_logits(const uint16_t* hidden, int rows, cudaStream_t st
                  selected ? 1 : rows, lm_vocab_count_, H, DType::BF16, GemmOut::F32,
                  static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream);
   }
+}
+
+// The draft head's served form for the shared screen (kernels/draft_head.hpp).
+HeadMatrix QwenModel::draft_head_matrix() const {
+  HeadMatrix m;
+  if (globals_.lm_head_fp8.payload) m.fp8 = &globals_.lm_head_fp8;
+  else if (globals_.lm_head_packed.packed) m.packq = &globals_.lm_head_packed;
+  else {
+    m.bf16 = globals_.lm_head;
+    m.bf12 = gemm_.bf12_lookup(globals_.lm_head);
+  }
+  m.n = lm_vocab_count_;
+  m.k = cfg_.hidden_size;
+  return m;
 }
 
 // The head dump (DGPP_QWEN_HEAD_DUMP): a memcpy node per head call into a
@@ -1626,6 +1656,10 @@ void QwenModel::finish_companions() {
   bf12_.finish(gemm_, /*slots=*/1);
   bf12_s_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   bf12_.log_summary(loader_.rank(), bf12_s_);
+  // The draft head's screen from the companion when the bf16 bytes were
+  // never device-resident (the 12-bit-only residency); a no-op once built.
+  if (mtp_ && globals_.draft_head_packed.packed == nullptr)
+    draft_head_.init(draft_head_matrix(), max_decode_rows_, loader_.rank(), stream_);
 }
 
 // The companions' planned bytes: pack_layer_companions' matrices by formula
@@ -1758,7 +1792,9 @@ void QwenModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, 
   mtp_mixer_->mix(head_in, h_, head_rows, stream_);
   head_dump_site_ = 1;
   head_req_ = req;
+  head_screen_site_ = decode_row && head_rows <= max_decode_rows_;
   lm_head_logits(h_, head_rows, stream_);
+  head_screen_site_ = false;
   head_dump_site_ = 0;
   if (decode_row) prefetch_.join(stream_);  // every forked prefetch back on the main stream
   if (decode_row && (!capture || decode_tail_mirrors_) && head_rows <= max_decode_rows_)

@@ -219,6 +219,14 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           if (e.fp8_head != "gemv" && e.fp8_head != "mma")
             fail(what, "'" + ek + "' must be \"gemv\" or \"mma\"");
         }
+        else if (p.key == "draft_head") {
+          e.draft_head = text(x, ek, what);
+          if (e.draft_head != "exact" && e.draft_head != "screen")
+            fail(what, "'" + ek + "' must be \"exact\" or \"screen\"");
+        }
+        else if (p.key == "draft_head_blocks") {
+          e.draft_head_blocks = static_cast<int>(integer(x, ek, what, 1, 64));
+        }
         else if (p.key == "mtp_expert_format") {
           e.mtp_expert_format = text(x, ek, what);
           if (e.mtp_expert_format != "fp8" && e.mtp_expert_format != "bf16_fused")

@@ -199,7 +199,8 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
               c.engine.bulk_pace_gbps == -1.0 && c.engine.bulk_inflight == -1 &&
               c.engine.rendezvous_timeout_ms == 120000 && !c.engine.reasoning_in_content &&
               c.engine.kv_dtype == "bf16" && c.engine.bf16_weights == "checkpoint" &&
-              c.engine.fp8_head == "gemv" && !c.engine.prefill_bf16_partials && !c.engine.prefill_fold_scales &&
+              c.engine.fp8_head == "gemv" && c.engine.draft_head == "exact" && c.engine.draft_head_blocks == 32 &&
+              !c.engine.prefill_bf16_partials && !c.engine.prefill_fold_scales &&
               !c.engine.prefill_fp8_gemm && !c.engine.prefill_fp8_per_tensor && c.engine.dflash_model.empty() &&
               c.engine.dflash_verify_graph && c.engine.dflash_draft_batch && c.engine.dflash_depth == 0 &&
               c.engine.expert_gemm == "wide" && c.engine.expert_gemm_prefetch == 3 &&
@@ -241,6 +242,12 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
     const auto head = dgpp::serve::parse_cluster_config(
         R"({"model":"m","nodes":["h"],"engine":{"fp8_head":")" + mode + R"("}})", "t");
     require(head.engine.fp8_head == mode, "fp8_head accepts " + mode);
+  }
+  // The draft head's read (2026-10-13): exact | screen, with the screen's candidate cap.
+  for (const std::string mode : {"exact", "screen"}) {
+    const auto dh = dgpp::serve::parse_cluster_config(
+        R"({"model":"m","nodes":["h"],"engine":{"draft_head":")" + mode + R"(","draft_head_blocks":48}})", "t");
+    require(dh.engine.draft_head == mode && dh.engine.draft_head_blocks == 48, "draft_head accepts " + mode);
   }
   // The KV dtype: named by the config, checked by name.
   const dgpp::serve::ClusterConfig fp8 = dgpp::serve::parse_cluster_config(
@@ -447,6 +454,10 @@ DGPP_TEST(cluster_config_refusesUnknownKeysAndBadValuesByName) {
        "'engine.fp8_head' must be \"gemv\" or \"mma\""},
       {R"({"model":"m","nodes":["h"],"engine":{"fp8_head":true}})",
        "'engine.fp8_head' must be a string"},
+      {R"({"model":"m","nodes":["h"],"engine":{"draft_head":"auto"}})",
+       "'engine.draft_head' must be \"exact\" or \"screen\""},
+      {R"({"model":"m","nodes":["h"],"engine":{"draft_head_blocks":0}})",
+       "'engine.draft_head_blocks' must be in [1, 64]"},
       {R"({"model":"m","nodes":["h"],"engine":{"bf16_weights":"fp8"}})",
        "'engine.bf16_weights' must be \"checkpoint\", \"bf12\" or \"bf12+bf16\""},
       {R"({"model":"m","nodes":["h"],"engine":{"bf16_weights":true}})",

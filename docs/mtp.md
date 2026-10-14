@@ -62,6 +62,54 @@ before increasing capacity, and measure tokens per step as well as step
 latency. [Operations](operations.md) describes the depth tradeoff, and
 [benchmarks](benchmarks.md) records the results for each model.
 
+## The draft head's screen (every family)
+
+An MTP draft step ends in the vocabulary head, and on Qwen3.8-Flash-Next
+that read is 636 MB per draft token in the fp8 form, 2.6 ms of a 4 ms draft
+step at one node, once per draft in the chain. The draft needs only the
+head's argmax (or, sampled, the top of its distribution), so
+`engine.draft_head: "screen"` replaces the full read with a screen
+(`src/kernels/head_screen.hpp`):
+
+1. the hidden row is rotated by a fixed random-sign block-128
+   Walsh-Hadamard transform and rounded to int8 (the rotation spreads the
+   hidden state's outlier channels so the rounding noise is Gaussian);
+2. a 2-bit copy of the same rotated head, built once at load with one
+   four-level quantizer per vocab row, is multiplied against it with
+   dp4a, one CTA per 128-row block, and each block reports its
+   approximate maximum;
+3. the blocks whose maximum lies within three noise sigmas of the best
+   block's are candidates, capped at `engine.draft_head_blocks` (32) by
+   value;
+4. the candidate blocks' logits are computed exactly from the served head
+   by the production row chains (fp8, bf16 or the bf12 companion), every
+   other logit is `-inf`, and the pick kernels run unchanged.
+
+The screen is one shared object (`src/kernels/draft_head.hpp`,
+`DraftHead`): a family hands it the head in whatever encoding it serves
+(bf16, the bf12 companion, fp8 with block or channel scales, the int8
+plane form) and calls it at its draft head site; the setting is process-wide
+(`draft_head_configure`), so every family and rank reads the same cap.
+Native MTP (GLM-5.3-Flash, the full GLM-5.3, GLM-4.7, MiMo, Qwen3.8-Flash-Next,
+the 27B's MTP mode), the 27B's DFlash2 block (its mask rows' head) and
+DeepSeek-V4.1's DSpark block all draft through it; DeepSeek-V4 keeps the
+screened head it already had (an fp8 copy with an exact candidate pass
+around its Markov bias). The verify's head calls never take the screen, so a
+greedy transcript is the exact head's whatever the screen proposes, and a
+sampled request's output distribution is exact for any proposal set. What can change is
+which token is drafted: on 5,571 real draft inputs (2026-10-13) the screen
+returned the exact argmax on 99.3 % of draft rows and the remaining rows
+cost 0.001 % of the accepted probability mass; a sampled proposal's
+top-64 mass trailed the exact one by 0.7 points at cap 32. The unit test
+`head_screen_test` pins the build, the prep, the screen and the select to
+a host oracle bit for bit and the rescore to fp64; `qwen_decode_test
+--draft-screen` runs the fixture's speculator through the masked head and
+requires the plain greedy transcript. The AutoRound hybrid's int8 plane
+head is screenable (the rescore reads its planes through
+`kernels/packq_planes.cuh`, the bit-plane read of `kernels/packq_head.hpp`
+restricted to the candidate blocks), but its template keeps the exact head
+until a single-Spark leg measures the screen on it.
+
 ## The DFlash2 block drafter (Qwen3.8-27B)
 
 DFlash2 (`src/models/qwen/dflash2.hpp`, `src/kernels/dflash2.cu`) replaces

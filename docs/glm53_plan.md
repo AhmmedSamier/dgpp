@@ -463,19 +463,19 @@ Flash's per context length and are bounded by the existing dot budget
 design change). `index_kpool_compress` and `always_select_tail` are
 irrelevant at kpool 1 and the parser requires them absent.
 
-**D9 — TP only, text only, decode rows ≤ 16.** No expert parallelism (the
+**D9 — TP only, text only, decode rows ≤ 32.** No expert parallelism (the
 Qwen plan's argument), no vision (the checkpoint has none). The decode batch
 was capped at 8 rows by the fused decode select's shared memory
 (`kSelectMaxRows` = 8: four request slots at depth 1, eight plain, two at
-depth 3); since 2026-09-13 the family's `decode_rows_cap` is 16 — the
-select launches its rows in groups of eight (a group is the same work at
-any grouping: every block scores a stripe of every row's own context), the
-pick kernels verdict sixteen request slots, the DSA layer's attention
-tiles and (row, split) workspace scale with the count, and the absorb/vout
-projections keep their warp kernels for every decode shape (the
-tensor-core forms are tolerance-equal, not bitwise). Eight slots at depth
-1, five at depth 2, four at depth 3; the bus's 32 graph variants bound a
-plain deployment at twelve slots. The graph engine records 4- and 6-slot
+depth 3); from 2026-09-13 the family's `decode_rows_cap` was 16 and since
+2026-10-13 it is 32 (eight slots at depth 3) — the select launches its rows
+in groups of eight over a workspace laid out for 32 (a group is the same
+work at any grouping: every block scores a stripe of every row's own
+context), the pick kernels verdict sixteen request slots, the DSA layer's
+attention tiles and (row, split) workspace scale with the count, and the
+absorb/vout projections keep their warp kernels for every decode shape (the
+tensor-core forms are tolerance-equal, not bitwise). The bus's 128 graph
+variants bound the slot and family count per scheduled depth. The graph engine records 4- and 6-slot
 batch families beside the 2-, 3- and every-slot ones for recipes wider
 than four slots, so four live requests on an eight-slot world ride an
 eight-row batch (41–42 tok/s aggregate, the four-slot template's own)

@@ -5,6 +5,77 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **GLM MTP-step round: graphs, doorbells, the 32-row cap, the scheduled
+  depth on the GLMs** (2026-10-13/14). Bitwise, measured on four nodes
+  against the previous release: the residual add fused into the next norm's
+  first pass (`glm_residual_add_rmsnorm_bf16` and its int8-quant twin; the
+  full GLM-5.3 defers each layer's closing add into the next input norm or
+  the final norm, the Flash, GLM-4.7 and the draft blocks fuse their
+  attention sites) and the DSA projection chain's two to four rope launches
+  issued as one (`dsa_rope_interleave_multi`) take the full GLM-5.3 decode
+  graph from 2,495 to 2,215 nodes; the bus lanes send the 64-byte doorbell
+  and credit cells inline (`IBV_SEND_INLINE`; the NIC grants 124 B). None of
+  it moved the pass: the full GLM-5.3 int4-int8 at depth 1 reads 62.0 vs
+  61.8 ms a step at one request and 239 vs 239 ms at eight, GLM-5.3-Flash
+  30.5 vs 30.6 ms, the Flash's collective 33.7 vs 34.1 µs (handshake 11.9
+  vs 12.6) — those kernels and the doorbell DMA were off the critical path,
+  which is the collective rounds and the DRAM streams. The full GLM-5.3's
+  decode row cap is 32 (was 16): eight slots at depth 2 or 3 boot
+  (`glm_dsa_engine_test_twenty_four_rows`), the memory plan at 24 rows is
+  109.88 vs 109.87 GiB. Measured at eight slots: fixed depth 2 is +4..+11 %
+  at one request (30.0 → 32.5 / 31.3 → 33.7 / 31.2 → 34.6 / 30.0 → 33.1 /
+  28.2 → 29.3 engine tok/s, prose / code / JSON / math / chat) and −2..−9 %
+  at eight (51.7 / 49.8 / 52.5 / 49.9 / 49.2 → 47.2 / 46.9 / 51.4 / 48.8 /
+  45.2 wall tok/s); the scheduled depth (`engine.mtp_schedule`, depth 2,
+  minimum 1, cost model 14 ms a row over 34) is +7..+13 % at one request
+  (33.1 / 33.7 / 35.4 / 33.5 / 30.4) and −1..−5 % at eight (49.3 / 47.9 /
+  51.4 / 48.7 / 47.6); scheduled depth 3 adds nothing over it. The eight-slot
+  templates keep depth 1 (their purpose is the eight-slot rate); the schedule
+  is the interactive deployment's setting. The full GLM-5.3 gained the
+  scheduled-depth exactness gate GLM-4.7 has
+  (`glm_dsa_engines_loopback_world_2_scheduled_verify_depth_from_draft_probabilities_is_exact`);
+  the schedule needs no confidence head on these families — the draft
+  head's own probability of its pick, from the device sampler, drives it.
+  GLM-5.3-Flash at one request: fixed depth 2 is +3..+13 % (61.4 / 63.1 /
+  63.7 / 61.5 / 58.2 → 63.4 / 71.2 / 69.0 / 66.6 / 60.9), the scheduled depth
+  2 (cost model 7 ms a row over 17) +3..+13 % too (65.8 / 71.1 / 70.5 / 67.0
+  / 60.1); but this family has no batched draft chain past depth 1, so four
+  concurrent requests fall from 108–114 wall tok/s at depth 1 to 59–67
+  under the schedule (every live request a scalar replay). Its templates
+  keep depth 1 until that chain exists; the batched chain is the Flash's
+  next MTP item.
+- **Draft-head screen for every drafting family** (2026-10-13): `engine.draft_head:
+  "screen"` reads each draft token's head through a 2-bit rotated copy of the
+  vocabulary head (`kernels/head_screen.hpp`; a quarter of an fp8 head's
+  bytes, an eighth of a bf16 one), finds the 128-row blocks that can hold the
+  draft within three noise sigmas, computes those blocks' logits exactly from
+  the served head in its own encoding (bf16, bf12, fp8 block or channel
+  scales, the int8 plane form) and masks the rest with `-inf` for the pick.
+  One shared object (`kernels/draft_head.hpp`) serves native MTP on
+  GLM-5.3-Flash, the full GLM-5.3, GLM-4.7, MiMo and Qwen3.8-Flash-Next, the
+  Qwen3.8-27B DFlash2 block and DeepSeek-V4.1's DSpark block (DeepSeek-V4 keeps
+  its own screened head). The verify still reads the exact head, so greedy
+  transcripts are unchanged and sampled requests keep their distribution; the
+  study on 5,571 real Flash-Next draft inputs put the draft at the exact
+  argmax on 99.3 % of steps. Cold-L2
+  micro-bench at the Flash-Next head shape: 0.90 / 1.06 / 1.24 ms per draft
+  step at 1 / 4 / 8 rows against 2.7 / 2.8 / 2.9 ms for the exact head.
+  `engine.draft_head_blocks` (default 32) caps the candidates. On the
+  fabric (greedy, 256-token answers, five prompt classes) the screen kept
+  every leg's transcripts, tokens per pass and acceptance identical to the
+  exact head's and cut the pass from 39.8 to 38.1 ms at one node, depth 1
+  (+4.5 % C1 engine tok/s), 55.8 to 50.5 at depth 3 (+11 %), 23.2 to 22.6
+  at four nodes, depth 1 (+2.5 %) and 31.3 to 29.9 at depth 3 (+4.7 %).
+  GLM-5.3-Flash on four nodes: 31.3 to 30.9 ms a pass (+1.4 %); the full
+  GLM-5.3 (int4-int8, the head's 12-bit companion as the build's source) on
+  four nodes: 63.5 to 62.5 ms (+1.4..+1.6 %); the Qwen3.8-27B NVFP4 DFlash2
+  drafter on four nodes: 38.6 to 38.0 ms (+1.4..+3.5 % by class); drafts,
+  acceptance and transcripts identical on every leg. The Qwen3.8-Flash-Next
+  (but the AutoRound hybrid), GLM-5.3-Flash, full GLM-5.3 and Qwen3.8-27B
+  templates set `draft_head: "screen"`; DeepSeek-V4.1's keep
+  `exact` (DSpark's Markov bias is added after the head read and the
+  screen's selection does not see it yet: fewer accepted drafts measured);
+  the engine default stays `exact`.
 - **Shared resumable prefill and adaptive serving budgets** (2026-10-12):
   eager and graph serving use common request ownership, continuation, row
   planning, snapshot and speculative-state handling across all eight model

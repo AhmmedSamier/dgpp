@@ -106,6 +106,18 @@ void dsa_rope_interleave(const void* x, int64_t x_row_stride,
                          int64_t table_positions, void* out,
                          int64_t out_row_stride, int64_t out_head_stride,
                          int64_t rows, cudaStream_t stream);
+// Up to kRopeMaxSegments of the rotation above in one launch (the same
+// rows, positions and table; each segment its own x / out / strides /
+// heads) — bitwise the separate launches (2026-10-13).
+constexpr int kRopeMaxSegments = 4;
+struct DsaRopeSegment {
+  const void* x = nullptr;
+  void* out = nullptr;
+  int64_t x_row_stride = 0, x_head_stride = 0, out_row_stride = 0, out_head_stride = 0;
+  int heads = 0;
+};
+void dsa_rope_interleave_multi(const DsaRopeSegment* segs, int count, int rope_dim, const int64_t* pos,
+                               const void* table, int64_t table_positions, int64_t rows, cudaStream_t stream);
 
 // ---- index cache + tail state machinery ------------------------------
 

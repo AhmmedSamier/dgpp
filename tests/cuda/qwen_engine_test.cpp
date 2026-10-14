@@ -31,6 +31,7 @@
 #include <cuda_runtime.h>
 
 #include "common/cuda_check.hpp"
+#include "kernels/draft_head.hpp"
 #include "common/dtypes.hpp"
 #include "common/log.hpp"
 #include "common/test.hpp"
@@ -2005,5 +2006,10 @@ int main() {
   // the loader's fp8 dense mode is the only one that reads it.
   if (const char* g = std::getenv("DGPP_TEST_QWEN_GPTQ"); g && g[0] == '1')
     dgpp::QwenLayerStream::set_dense_weights_fp8(true);
+  // DGPP_TEST_DRAFT_SCREEN=N: every case drafts through the head screen
+  // (kernels/head_screen.hpp) with an N-block candidate cap — the sharded
+  // head and the pick merge at world 2 behind the masked logits.
+  if (const char* d = std::getenv("DGPP_TEST_DRAFT_SCREEN"); d && d[0] != '\0')
+    dgpp::draft_head_configure(dgpp::DraftHeadSettings{std::atoi(d)});
   return dgpp::test::run_all();
 }

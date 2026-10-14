@@ -63,6 +63,7 @@
 #include "common/log.hpp"
 #include "common/process_memory.hpp"
 #include "kernels/l2_prefetch.hpp"
+#include "kernels/draft_head.hpp"
 #include "kernels/bf12_companions.hpp"
 #include "kernels/latent_format.hpp"
 #include "loaders/hf_cache.hpp"
@@ -1470,6 +1471,8 @@ int main(int argc, char** argv) {
   std::string ngram_table = "resident";  // the Qwen n-gram table: resident | mmap
   std::string ngram_table_model;         // the table's shards from another cached snapshot (engine.ngram_table_model)
   std::string fp8_head = "gemv";
+  std::string draft_head = "exact";         // the MTP draft head's read: exact | screen (engine.draft_head)
+  int draft_head_blocks = 32;               // the screen's candidate cap (engine.draft_head_blocks)
   std::string dense_weights = "checkpoint";  // the Qwen dense stack: checkpoint | fp8
   std::string mtp_expert_format = "fp8";    // the Qwen MTP draft experts: fp8 | bf16_fused
   std::string bf16_weights = "checkpoint";  // the bf16 decode weights' resident form: checkpoint | bf12 | bf12+bf16
@@ -1590,6 +1593,8 @@ int main(int argc, char** argv) {
     ngram_table_model = e.ngram_table_model;
     dense_weights = e.dense_weights;
     fp8_head = e.fp8_head;
+    draft_head = e.draft_head;
+    draft_head_blocks = e.draft_head_blocks;
     mtp_expert_format = e.mtp_expert_format;
     bf16_weights = e.bf16_weights;
     draft_vocab = e.draft_vocab;
@@ -1709,6 +1714,8 @@ int main(int argc, char** argv) {
     else if (a == "--dense-weights") dense_weights = next();
     else if (a == "--fp8-head")
       fp8_head = next();
+    else if (a == "--draft-head") draft_head = next();
+    else if (a == "--draft-head-blocks") draft_head_blocks = std::stoi(next());
     else if (a == "--mtp-expert-format") mtp_expert_format = next();
     else if (a == "--bf16-weights") bf16_weights = next();
     else if (a == "--draft-vocab") draft_vocab = next();
@@ -1956,7 +1963,7 @@ int main(int argc, char** argv) {
         graph_batch_min_live == 0 ? std::min(2, max_concurrency) : graph_batch_min_live;
     return std::format(
         "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} ngt={} dw={} mtpef={} bfw={} "
-        "fp8head={} mtph={} attw={} pf={} "
+        "fp8head={} dh={} dhb={} mtph={} attw={} pf={} "
         "emsh={} maxtok={} queue={} "
         "eos={} graph={} compact={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} "
         "msad={} msss={} mdr={} mdt={} mvf={} dbr={} "
@@ -1965,7 +1972,8 @@ int main(int argc, char** argv) {
         "reasoning_in_content={} "
         "rs={} dflash={} dfw={} lk={} lkn={} lks={} lka={} lkt={}",
         model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port, max_concurrency,
-        kv_capacity, kv_dtype, ngram_table, dense_weights, mtp_expert_format, bf16_weights, fp8_head, mtp_head,
+        kv_capacity, kv_dtype, ngram_table, dense_weights, mtp_expert_format, bf16_weights, fp8_head, draft_head,
+        draft_head_blocks, mtp_head,
         attention_weights, prefill, embed_sharding, default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0,
         compact_batches ? 1 : 0, mtp ? 1 : 0, mtp_depth, mtp_schedule ? 1 : 0, mtp_schedule_row_ms,
         mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth,
@@ -2013,6 +2021,8 @@ int main(int argc, char** argv) {
         ws.ngram_table = ngram_table;
         ws.dense_weights = dense_weights;
         ws.fp8_head = fp8_head;
+        ws.draft_head = draft_head;
+        ws.draft_head_blocks = draft_head_blocks;
         ws.mtp_expert_format = mtp_expert_format;
         ws.bf16_weights = bf16_weights;
         ws.draft_vocab = draft_vocab;
@@ -2108,6 +2118,8 @@ int main(int argc, char** argv) {
         ngram_table = ws.ngram_table;
         dense_weights = ws.dense_weights;
         fp8_head = ws.fp8_head;
+        draft_head = ws.draft_head;
+        draft_head_blocks = ws.draft_head_blocks;
         mtp_expert_format = ws.mtp_expert_format;
         bf16_weights = ws.bf16_weights;
         draft_vocab = ws.draft_vocab;
@@ -2244,6 +2256,15 @@ int main(int argc, char** argv) {
     DGPP_LOG_ERROR("engine.fp8_head mma requires engine.dense_weights fp8");
     return 1;
   }
+  if (draft_head != "exact" && draft_head != "screen") {
+    DGPP_LOG_ERROR("engine.draft_head (--draft-head) must be exact or screen, got '{}'", draft_head);
+    return 1;
+  }
+  if (draft_head_blocks < 1 || draft_head_blocks > dgpp::kHeadScreenMaxBlocks) {
+    DGPP_LOG_ERROR("engine.draft_head_blocks (--draft-head-blocks) must be in [1, {}], got {}",
+                   dgpp::kHeadScreenMaxBlocks, draft_head_blocks);
+    return 1;
+  }
   dgpp::Bf16Residency bf16_mode = dgpp::Bf16Residency::Checkpoint;
   if (!dgpp::parse_bf16_residency(bf16_weights, &bf16_mode)) {
     DGPP_LOG_ERROR("--bf16-weights must be checkpoint, bf12 or bf12+bf16, got '{}'", bf16_weights);
@@ -2369,6 +2390,13 @@ int main(int argc, char** argv) {
   // The RadixArk fusion flag: set before the plan and the load (both read it
   // through QwenLayerStream::mtp_experts_bf16_fused and loader_format()).
   dgpp::QwenLayerStream::set_mtp_expert_format(mtp_expert_format == "bf16_fused");
+  // The draft head's screen (engine.draft_head; kernels/draft_head.hpp): a
+  // process-wide setting every family reads at construction (its memory
+  // plan too) — the decode drafts' head reads through the 2-bit copy.
+  dgpp::draft_head_configure(dgpp::DraftHeadSettings{draft_head == "screen" ? draft_head_blocks : 0});
+  if (draft_head == "screen")
+    DGPP_LOG_INFO("draft head: screen (2-bit rotated copy, cap {} blocks of 128 rows; kernels/head_screen.hpp)",
+                  draft_head_blocks);
   if (embed_sharding != "replicated" && embed_sharding != "vocab") {
     DGPP_LOG_ERROR("--embed-sharding must be replicated or vocab, got '{}'", embed_sharding);
     return 2;

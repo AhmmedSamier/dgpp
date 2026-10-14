@@ -30,6 +30,7 @@
 #include "engine/memory_plan.hpp"
 #include "engine/decode_outputs.hpp"
 #include "kernels/bf12_companions.hpp"
+#include "kernels/draft_head.hpp"
 #include "kernels/gemm.hpp"
 #include "kernels/glm_spec.hpp"
 #include "kernels/l2_prefetch.hpp"
@@ -961,6 +962,10 @@ class GlmDiagnosticModel : public PrefillReporting {
   GlmLayerStream loader_;
   GlmGlobalsResident globals_;
   CublasLtGemm gemm_;
+  // The draft head's screen (kernels/draft_head.hpp): built from the served
+  // head at construction under engine.draft_head.
+  DraftHead draft_head_;
+  HeadMatrix draft_head_matrix() const;
   int dense_mma_from_rows_ = 0;  // the dense MLP's fp8 sites: the streaming form from this row count
   Arena arena_;
   DsaStatePool pool_;

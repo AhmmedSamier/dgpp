@@ -51,6 +51,7 @@
 #include <cuda_runtime.h>
 
 #include "common/bf16_residency.hpp"
+#include "kernels/draft_head.hpp"
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
 #include "common/log.hpp"
@@ -6943,5 +6944,7 @@ int main() {
     DGPP_LOG_INFO("no CUDA device visible; skipping glm_tp_test");
     return 2;
   }
+  if (const char* d = std::getenv("DGPP_TEST_DRAFT_SCREEN"); d && d[0] != '\0')  // the draft head's screen
+    dgpp::draft_head_configure(dgpp::DraftHeadSettings{std::atoi(d)});
   return dgpp::test::run_all();
 }

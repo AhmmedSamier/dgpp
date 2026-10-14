@@ -17,18 +17,15 @@ constexpr int kBlock = 512;
 // intermediate bf16 round of u is semantics, not noise — the reference
 // multiplies the bf16 tensor. Block-wide: every thread of the block takes
 // part; `sx` is a [dim] staging area for the second pass.
-__device__ void rmsnorm_row_two_rounding(const uint16_t* __restrict__ xr,
-                                         const uint16_t* __restrict__ w,
-                                         uint16_t* __restrict__ yr, int dim,
-                                         float eps, float* sx) {
+// The reduction and the second pass over a row whose fp32 values are
+// staged in `sx` and whose per-thread sum of squares is `ssq` (accumulated
+// in the first pass's i = tid, tid + nthreads, ... order). Shared by the
+// plain norm and the residual-fused one below, so both produce the same
+// bits from the same staged row.
+__device__ void rmsnorm_row_finish(const uint16_t* __restrict__ w, uint16_t* __restrict__ yr, int dim,
+                                   float eps, const float* sx, double ssq) {
   const int tid = threadIdx.x;
   const int nthreads = blockDim.x;
-  double ssq = 0.0;
-  for (int i = tid; i < dim; i += nthreads) {
-    const float v = bf16_bits_to_float(xr[i]);
-    sx[i] = v;
-    ssq += static_cast<double>(v) * v;
-  }
   __syncthreads();
   __shared__ double part[kBlock];
   part[tid] = ssq;
@@ -47,6 +44,42 @@ __device__ void rmsnorm_row_two_rounding(const uint16_t* __restrict__ xr,
   }
 }
 
+__device__ void rmsnorm_row_two_rounding(const uint16_t* __restrict__ xr,
+                                         const uint16_t* __restrict__ w,
+                                         uint16_t* __restrict__ yr, int dim,
+                                         float eps, float* sx) {
+  const int tid = threadIdx.x;
+  const int nthreads = blockDim.x;
+  double ssq = 0.0;
+  for (int i = tid; i < dim; i += nthreads) {
+    const float v = bf16_bits_to_float(xr[i]);
+    sx[i] = v;
+    ssq += static_cast<double>(v) * v;
+  }
+  rmsnorm_row_finish(w, yr, dim, eps, sx, ssq);
+}
+
+// The residual add fused into the norm's first pass (2026-10-13): x[i] =
+// bf16(x[i] + y[i]) exactly as glm_residual_add_kernel writes it, the sum
+// staged and squared from that rounded value, then the norm above —
+// bitwise the two kernels, one launch and one read of the row fewer.
+__device__ void residual_add_rmsnorm_row(uint16_t* __restrict__ xr, const uint16_t* __restrict__ add,
+                                         const uint16_t* __restrict__ w, uint16_t* __restrict__ yr,
+                                         int dim, float eps, float* sx) {
+  const int tid = threadIdx.x;
+  const int nthreads = blockDim.x;
+  double ssq = 0.0;
+  for (int i = tid; i < dim; i += nthreads) {
+    const uint16_t xb = float_to_bf16_bits(bf16_bits_to_float(xr[i]) + bf16_bits_to_float(add[i]));
+    xr[i] = xb;
+    const float v = bf16_bits_to_float(xb);
+    sx[i] = v;
+    ssq += static_cast<double>(v) * v;
+  }
+  rmsnorm_row_finish(w, yr, dim, eps, sx, ssq);
+}
+
+
 __global__ void glm_rmsnorm_kernel(const uint16_t* __restrict__ x,
                                    const uint16_t* __restrict__ w,
                                    uint16_t* __restrict__ y, int dim,
@@ -54,6 +87,15 @@ __global__ void glm_rmsnorm_kernel(const uint16_t* __restrict__ x,
   const int row = blockIdx.x;
   extern __shared__ float smem[];  // [dim] staging for the second pass
   rmsnorm_row_two_rounding(x + static_cast<size_t>(row) * dim, w,
+                           y + static_cast<size_t>(row) * dim, dim, eps, smem);
+}
+
+__global__ void glm_residual_add_rmsnorm_kernel(uint16_t* __restrict__ x, const uint16_t* __restrict__ add,
+                                                const uint16_t* __restrict__ w, uint16_t* __restrict__ y,
+                                                int dim, float eps) {
+  const int row = blockIdx.x;
+  extern __shared__ float smem[];
+  residual_add_rmsnorm_row(x + static_cast<size_t>(row) * dim, add + static_cast<size_t>(row) * dim, w,
                            y + static_cast<size_t>(row) * dim, dim, eps, smem);
 }
 
@@ -77,6 +119,67 @@ __global__ void glm_rmsnorm_quant_int8_kernel(const uint16_t* __restrict__ x, co
   double ssq = 0.0;
   for (int i = tid; i < dim; i += nthreads) {
     const float v = bf16_bits_to_float(xr[i]);
+    smem[i] = v;
+    ssq += static_cast<double>(v) * v;
+  }
+  __syncthreads();
+  __shared__ double part[kBlock];
+  part[tid] = ssq;
+  __syncthreads();
+  for (int stride = nthreads / 2; stride > 0; stride >>= 1) {
+    if (tid < stride && tid + stride < blockDim.x) part[tid] += part[tid + stride];
+    __syncthreads();
+  }
+  const float rstd = rsqrtf(static_cast<float>(part[0] / dim) + eps);
+  const int warp = tid >> 5, lane = tid & 31, warps = nthreads >> 5;
+  const int groups = dim / 128;
+  int8_t* cr = codes + static_cast<size_t>(row) * code_stride;
+  for (int g = warp; g < groups; g += warps) {
+    const int c = g * 128;
+    float v[4];
+    float amax = 0.f;
+#pragma unroll
+    for (int b = 0; b < 4; ++b) {
+      const int i = c + b * kHadamard32Block + lane;
+      const uint16_t u = float_to_bf16_bits(smem[i] * rstd);
+      const uint16_t yv = float_to_bf16_bits(bf16_bits_to_float(w[i]) * bf16_bits_to_float(u));
+      yr[i] = yv;
+      v[b] = bf16_bits_to_float(hadamard32_warp_bf16(yv));
+      amax = fmaxf(amax, fabsf(v[b]));
+    }
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFFu, amax, off));
+    const float s = fmaxf(__fdiv_rn(amax, 127.f), 1e-30f);
+#pragma unroll
+    for (int b = 0; b < 4; ++b) {
+      float q = rintf(__fdiv_rn(v[b], s));
+      q = fminf(fmaxf(q, -128.f), 127.f);
+      cr[c + b * kHadamard32Block + lane] = static_cast<int8_t>(static_cast<int>(q));
+    }
+    if (lane == 0) scales[static_cast<size_t>(row) * scale_stride + g] = s;
+  }
+}
+
+// The quant norm with the residual add fused into its first pass (as
+// glm_residual_add_rmsnorm_kernel): bitwise the add kernel followed by the
+// kernel above.
+__global__ void glm_residual_add_rmsnorm_quant_int8_kernel(uint16_t* __restrict__ x, const uint16_t* __restrict__ add,
+                                                           const uint16_t* __restrict__ w, uint16_t* __restrict__ y,
+                                                           int8_t* __restrict__ codes, size_t code_stride,
+                                                           float* __restrict__ scales, size_t scale_stride, int dim,
+                                                           float eps) {
+  const int row = blockIdx.x;
+  extern __shared__ float smem[];
+  uint16_t* xr = x + static_cast<size_t>(row) * dim;
+  const uint16_t* ar = add + static_cast<size_t>(row) * dim;
+  uint16_t* yr = y + static_cast<size_t>(row) * dim;
+  const int tid = threadIdx.x;
+  const int nthreads = blockDim.x;
+  double ssq = 0.0;
+  for (int i = tid; i < dim; i += nthreads) {
+    const uint16_t xb = float_to_bf16_bits(bf16_bits_to_float(xr[i]) + bf16_bits_to_float(ar[i]));
+    xr[i] = xb;
+    const float v = bf16_bits_to_float(xb);
     smem[i] = v;
     ssq += static_cast<double>(v) * v;
   }
@@ -237,6 +340,30 @@ void glm_rmsnorm_bf16(const void* x, const void* weight, void* y, int rows,
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
+void glm_residual_add_rmsnorm_bf16(void* x, const void* add, const void* weight, void* y, int rows, int dim,
+                                   float eps, cudaStream_t stream) {
+  if (rows <= 0) return;
+  if (!x || !add || !weight || !y) throw std::invalid_argument("glm_residual_add_rmsnorm: null buffer");
+  const size_t shmem = sizeof(float) * static_cast<size_t>(dim);
+  static const bool attr_ok = [] {
+    constexpr size_t kWant = 64ull << 10;
+    const cudaError_t e = cudaFuncSetAttribute(glm_residual_add_rmsnorm_kernel,
+                                               cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(kWant));
+    if (e != cudaSuccess) {
+      cudaGetLastError();
+      return false;
+    }
+    return true;
+  }();
+  if (!attr_ok && shmem > 49152)
+    throw std::runtime_error("glm_residual_add_rmsnorm: dynamic smem exceeds driver-accepted limit");
+  cudaGetLastError();
+  glm_residual_add_rmsnorm_kernel<<<rows, kBlock, shmem, stream>>>(
+      static_cast<uint16_t*>(x), static_cast<const uint16_t*>(add), static_cast<const uint16_t*>(weight),
+      static_cast<uint16_t*>(y), dim, eps);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
 void glm_rmsnorm_bf16_quant_int8(const void* x, const void* weight, void* y, int8_t* codes, size_t code_stride,
                                  float* scales, size_t scale_stride, int rows, int dim, float eps,
                                  cudaStream_t stream) {
@@ -261,6 +388,36 @@ void glm_rmsnorm_bf16_quant_int8(const void* x, const void* weight, void* y, int
   glm_rmsnorm_quant_int8_kernel<<<rows, kBlock, shmem, stream>>>(
       static_cast<const uint16_t*>(x), static_cast<const uint16_t*>(weight), static_cast<uint16_t*>(y), codes,
       code_stride, scales, scale_stride, dim, eps);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void glm_residual_add_rmsnorm_bf16_quant_int8(void* x, const void* add, const void* weight, void* y, int8_t* codes,
+                                              size_t code_stride, float* scales, size_t scale_stride, int rows,
+                                              int dim, float eps, cudaStream_t stream) {
+  if (rows <= 0) return;
+  if (!x || !add || !weight || !y || !codes || !scales)
+    throw std::invalid_argument("glm_residual_add_rmsnorm_quant_int8: null buffer");
+  if (dim <= 0 || dim % 128 != 0 || code_stride < static_cast<size_t>(dim) ||
+      scale_stride < static_cast<size_t>(dim / 128))
+    throw std::invalid_argument(
+        "glm_residual_add_rmsnorm_quant_int8: dim must be a multiple of 128 within the code / scale rows");
+  const size_t shmem = sizeof(float) * static_cast<size_t>(dim);
+  static const bool attr_ok = [] {
+    constexpr size_t kWant = 64ull << 10;
+    const cudaError_t e = cudaFuncSetAttribute(glm_residual_add_rmsnorm_quant_int8_kernel,
+                                               cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(kWant));
+    if (e != cudaSuccess) {
+      cudaGetLastError();
+      return false;
+    }
+    return true;
+  }();
+  if (!attr_ok && shmem > 49152)
+    throw std::runtime_error("glm_residual_add_rmsnorm_quant_int8: dynamic smem exceeds the limit");
+  cudaGetLastError();
+  glm_residual_add_rmsnorm_quant_int8_kernel<<<rows, kBlock, shmem, stream>>>(
+      static_cast<uint16_t*>(x), static_cast<const uint16_t*>(add), static_cast<const uint16_t*>(weight),
+      static_cast<uint16_t*>(y), codes, code_stride, scales, scale_stride, dim, eps);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

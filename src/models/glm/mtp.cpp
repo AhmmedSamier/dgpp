@@ -129,11 +129,11 @@ void GlmDiagnosticModel::mtp_run_rows(int req, int64_t first_pos, int T,
   }
   if (!capture_mode) debug_sync("mtp attention", -1, decode_row);
   fold(attn_out);
-  glm_residual_add_bf16(mtp_x_, attn_out, static_cast<int64_t>(T) * H,
-                        stream_);
 
   // ---- feed-forward site --------------------------------------------------
-  glm_rmsnorm_bf16(mtp_x_, b.ln2, normed_, T, H, eps, stream_);
+  // The attention residual add rides the norm's first pass (one kernel,
+  // bitwise the pair; kernels/glm_norm.hpp).
+  glm_residual_add_rmsnorm_bf16(mtp_x_, attn_out, b.ln2, normed_, T, H, eps, stream_);
   uint16_t* ffn_out = staged_or(sub_out_);
   moe_->rebind(*b.moe);
   if (decode_row) {
@@ -158,9 +158,11 @@ void GlmDiagnosticModel::mtp_run_rows(int req, int64_t first_pos, int T,
       mtp_x_ + static_cast<size_t>(T - head_rows) * H;
   glm_rmsnorm_bf16(head_in, r.shared_head_norm, normed_, head_rows, H, eps,
                    stream_);
-  gemm_.matmul(normed_, globals_.lm_head, logits_, head_rows, lm_vocab_count_,
-               H, DType::BF16, GemmOut::F32, H, gemm_ws_, gemm_ws_bytes_,
-               stream_);
+  if (!(decode_row && draft_head_.logits(draft_head_matrix(), normed_, static_cast<size_t>(H), head_rows, logits_,
+                                         static_cast<size_t>(lm_vocab_count_), stream_)))
+    gemm_.matmul(normed_, globals_.lm_head, logits_, head_rows, lm_vocab_count_,
+                 H, DType::BF16, GemmOut::F32, H, gemm_ws_, gemm_ws_bytes_,
+                 stream_);
   // A memcpy NODE only while the mirrors are on (the kernels-only decode
   // graph, docs/batched_mtp_graph_stall.md); an eager draft always mirrors.
   if (decode_tail_mirrors_ || !capture_mode)

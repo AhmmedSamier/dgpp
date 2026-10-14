@@ -189,7 +189,21 @@ MimoModel::MimoModel(const MimoTextConfig& cfg, const std::string& checkpoint_di
     }
   }
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  // The draft head's screen (engine.draft_head): from the served head, for
+  // the decode drafts only; off (with a logged reason) when the setting or
+  // the head's form says so.
+  if (mtp_) draft_head_.init(draft_head_matrix(), max_decode_rows_, loader_.rank(), stream_, /*quiet=*/true);
 }
+
+HeadMatrix MimoModel::draft_head_matrix() const {
+  HeadMatrix m;
+  m.bf16 = globals_.lm_head;
+  m.bf12 = gemm_.bf12_lookup(globals_.lm_head);
+  m.n = lm_vocab_count_;
+  m.k = cfg_.hidden_size;
+  return m;
+}
+
 
 MimoModel::~MimoModel() {
   cudaFree(resid_);
@@ -314,6 +328,7 @@ MimoModel::MemoryPlan MimoModel::plan_memory(const MimoTextConfig& cfg, int max_
              size_t(max_requests) * kNativeHistoryRows * H * 4 + M * (H * 2 + 8));
   }
   if (mtp) plan.add("draft block (gathered hidden, the fused input, its residual)", M * H * 2 + M * 2 * H * 2 + M * H * 2);
+  if (mtp) plan.add("draft head screen (2-bit rotated head copy, scratch)", DraftHead::plan_bytes(static_cast<int>(V), cfg.hidden_size, rows));
   return plan;
 }
 
@@ -738,6 +753,9 @@ void MimoModel::finish_companions() {
   bf12_.finish(gemm_, kBf12ExpandSlots);
   bf12_s_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   bf12_.log_summary(loader_.rank(), bf12_s_);
+  // The draft head's screen from the companion when the bf16 bytes were
+  // never device-resident (the 12-bit-only residency); a no-op once built.
+  if (mtp_) draft_head_.init(draft_head_matrix(), max_decode_rows_, loader_.rank(), stream_);
 }
 
 // ---------------------------------------------------------------------------
@@ -814,8 +832,10 @@ void MimoModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, 
   // ---- head: the draft distribution over the last head_rows rows --------
   const size_t head_off = static_cast<size_t>(T - head_rows) * H;
   add_rmsnorm_bf16(mtp_r_ + head_off, pending + head_off, r.final_norm, h_, head_rows, H, eps, stream_);
-  gemm_.matmul(h_, globals_.lm_head, logits_, head_rows, lm_vocab_count_, H, DType::BF16, GemmOut::F32,
-               static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
+  if (!(decode_row && draft_head_.logits(draft_head_matrix(), h_, static_cast<size_t>(H), head_rows, logits_,
+                                         static_cast<size_t>(lm_vocab_count_), stream_)))
+    gemm_.matmul(h_, globals_.lm_head, logits_, head_rows, lm_vocab_count_, H, DType::BF16, GemmOut::F32,
+                 static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
   if (decode_row) prefetch_.join(stream_);
   if (decode_row && (!capture || decode_tail_mirrors_) && head_rows <= max_decode_rows_)
     DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_logits_, logits_, static_cast<size_t>(head_rows) * lm_vocab_count_ * sizeof(float),
@@ -910,8 +930,10 @@ void MimoModel::native_mtp_rows(int req, const int64_t* tokens, int64_t first_po
     }
   }
   if (head_rows) {
-    gemm_.matmul(native_output_, globals_.lm_head, logits_, head_rows, lm_vocab_count_, H,
-                 DType::BF16, GemmOut::F32, size_t(H), gemm_ws_, gemm_ws_bytes_, stream_);
+    if (!(decode && draft_head_.logits(draft_head_matrix(), native_output_, static_cast<size_t>(H), head_rows, logits_,
+                                       static_cast<size_t>(lm_vocab_count_), stream_)))
+      gemm_.matmul(native_output_, globals_.lm_head, logits_, head_rows, lm_vocab_count_, H,
+                   DType::BF16, GemmOut::F32, size_t(H), gemm_ws_, gemm_ws_bytes_, stream_);
     // Keep the diagnostic mtp_forward hidden-output surface valid.
     glm_device_copy(h_, native_output_, size_t(head_rows) * H * 2, stream_);
   }

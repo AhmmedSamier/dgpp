@@ -56,6 +56,7 @@
 #include "engine/memory_plan.hpp"
 #include "engine/session_model.hpp"
 #include "kernels/bf12_companions.hpp"
+#include "kernels/draft_head.hpp"
 #include "kernels/l2_prefetch.hpp"
 #include "kernels/gemm.hpp"
 #include "kernels/mma_gemv.hpp"
@@ -132,6 +133,10 @@ class QwenModel : public SessionModel<QwenModel> {
             BoundaryReducer* boundary = nullptr, int tp_rank = 0, int tp_world = 1,
             int max_requests = 1, bool mtp = false, int decode_rows = 0, bool fp8_head_mma = false, bool serving_logits = false);
   bool fp8_head_mma() const { return fp8_head_mma_; }
+  // The draft head's screen (kernels/head_screen.hpp): the candidate cap
+  // the model was built with (QwenLayerStream::draft_head_blocks() under
+  // MTP), 0 = every draft reads the exact head.
+  int draft_head_blocks() const { return draft_head_.blocks(); }
   ~QwenModel();
   QwenModel(const QwenModel&) = delete;
   QwenModel& operator=(const QwenModel&) = delete;
@@ -306,6 +311,12 @@ class QwenModel : public SessionModel<QwenModel> {
   uint8_t* head_dump_meta_ = nullptr;    // device [kHeadDumpSlots][2]: rows, site (0 verify, 1 draft)
   int head_dump_next_ = 0;
   int head_dump_site_ = 0;
+  // The draft head's screen (engine.draft_head screen; kernels/head_screen.hpp):
+  // the 2-bit rotated copy of this rank's head slice and the launch
+  // scratch; head_screen_site_ marks a decode draft's head call.
+  DraftHead draft_head_;
+  HeadMatrix draft_head_matrix() const;
+  bool head_screen_site_ = false;
   const uint8_t* head_greedy_verify_ = nullptr;
   const uint8_t* head_greedy_draft_ = nullptr;
   int head_req_ = 0;                 // the request of a single-request head call

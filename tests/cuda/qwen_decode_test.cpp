@@ -31,6 +31,7 @@
 #include "common/bf16_residency.hpp"
 #include "common/dtypes.hpp"
 #include "engine/speculative.hpp"
+#include "kernels/draft_head.hpp"
 #include "kernels/gemm.hpp"
 #include "models/qwen/config.hpp"
 #include "models/qwen/forward.hpp"
@@ -71,19 +72,27 @@ struct RowCompare {
 };
 
 // The re-forward's row `want` against `got`: relative l2, the top-1 with
-// near-tie certification (qwen_forward_test's rule).
+// near-tie certification (qwen_forward_test's rule). A draft row through
+// the head screen (--draft-screen) holds -inf outside its candidate
+// blocks, so both measures run over the columns finite in BOTH rows: the
+// screen of a tolerance-equal input may keep a slightly different block
+// set, and a column one row masked says nothing about the other's value.
+// A row without -inf compares exactly as before.
 RowCompare compare_row(const float* got, const float* want, int n) {
   RowCompare c;
   double d2 = 0, w2 = 0;
+  int a = -1, b = -1;
   for (int i = 0; i < n; ++i) {
+    if (!std::isfinite(got[i]) || !std::isfinite(want[i])) continue;
     const double d = static_cast<double>(got[i]) - want[i];
     d2 += d * d;
     w2 += static_cast<double>(want[i]) * want[i];
+    if (a < 0 || want[i] > want[a]) a = i;
+    if (b < 0 || got[i] > got[b]) b = i;
   }
   c.l2 = std::sqrt(d2) / std::sqrt(w2 + 1e-30);
-  const int32_t a = argmax(want, n), b = argmax(got, n);
   c.top1_equal = a == b;
-  if (!c.top1_equal) {
+  if (!c.top1_equal && a >= 0 && b >= 0) {
     const double v1 = want[a], v2 = want[b];
     c.near_tie = std::fabs(v1 - v2) / (std::fabs(v1) + 1e-30) < 0.02;
   }
@@ -762,9 +771,17 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
   }
   // The second grouped prompt's MTP input starts after the first span,
   // and a prompt longer than the hidden window must retain its final rows.
+  // The observable is the draft's INPUT row through the whole head, so
+  // these two models read the exact head whatever --draft-screen says: a
+  // masked row (the screen's -inf outside its candidate blocks) cannot be
+  // compared by relative l2 to another masked row of a tolerance-equal
+  // input, and the screen's own gates are the bitwise ones above.
   {
+    const dgpp::DraftHeadSettings screen = dgpp::draft_head_settings();
+    dgpp::draft_head_configure(dgpp::DraftHeadSettings{0});
     QwenModel reference(cfg, dir, 128, 512, QwenResidency::Resident, nullptr, 0, 1, 2, true);
     QwenModel grouped(cfg, dir, 128, 512, QwenResidency::Resident, nullptr, 0, 1, 2, true);
+    dgpp::draft_head_configure(screen);
     const auto long_b = smoke_tokens(cfg, 95, 107);
     (void)reference.session_prefill(1, long_b);
     const auto expected = reference.session_draft(1, {10});
@@ -1216,6 +1233,8 @@ int main(int argc, char** argv) {
     if (a == "--fixture" && i + 1 < argc) fixture = argv[++i];
     else if (a == "--fp8-head")
       fp8_head = true;
+    else if (a == "--draft-screen" && i + 1 < argc)  // the draft head's screen with this candidate cap
+      dgpp::draft_head_configure(dgpp::DraftHeadSettings{std::stoi(argv[++i])});
     else if (a == "--prefill-head")
       prefill_head = true;
     else if (a == "--rows-invariance")

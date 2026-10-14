@@ -281,7 +281,21 @@ Dsv41Model::Dsv41Model(const Dsv41TextConfig& cfg, const std::string& checkpoint
   }
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   log_memory_ledger("dsv41: model ready");
+  // The draft head's screen (engine.draft_head): from the served head, for
+  // the decode drafts only; off (with a logged reason) when the setting or
+  // the head's form says so.
+  if (mtp_) draft_head_.init(draft_head_matrix(), max_decode_rows_, loader_.rank(), stream_, /*quiet=*/true);
 }
+
+HeadMatrix Dsv41Model::draft_head_matrix() const {
+  HeadMatrix m;
+  m.bf16 = globals_.lm_head;
+  m.bf12 = gemm_.bf12_lookup(globals_.lm_head);
+  m.n = lm_vocab_count_;
+  m.k = cfg_.hidden_size;
+  return m;
+}
+
 
 Dsv41Model::~Dsv41Model() {
   cudaStreamSynchronize(stream_);
@@ -407,6 +421,7 @@ Dsv41Model::MemoryPlan Dsv41Model::plan_memory(const Dsv41TextConfig& cfg, int m
       size_t draft_pinned = 0;
       const size_t draft_dev = GlmMoeLayer::scratch_bytes(draft_cfg, max_tokens, rows, draft_slots, &draft_pinned);
       plan.add("dspark moe scratch (the draft stages' routed chain)", draft_dev, draft_pinned);
+      plan.add("draft head screen (2-bit rotated head copy, scratch)", DraftHead::plan_bytes(static_cast<int>(V), cfg.hidden_size, rows));
     }
   }
   if (!cfg.engram_layer_ids.empty())
@@ -718,8 +733,10 @@ void Dsv41Model::draft_first(int req, const int64_t* tokens, const int64_t* d_po
     throw std::runtime_error("mtp_run_rows: the DSpark head tensors are unbound");
   launch_mhc_collapse_normed(cur_, pre_cur_, nullptr, eps, collapsed_, nullptr, mhc_cfg_, rows, stream_);
   csa2_rmsnorm_bf16(collapsed_, H, dl.norm, h_, H, rows, H, eps, stream_);
-  gemm_.matmul(h_, globals_.lm_head, base_logits_, rows, lm_vocab_count_, H, DType::BF16, GemmOut::F32,
-               static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
+  if (!(decode_row && draft_head_.logits(draft_head_matrix(), h_, static_cast<size_t>(H), rows, base_logits_,
+                                         static_cast<size_t>(lm_vocab_count_), stream_)))
+    gemm_.matmul(h_, globals_.lm_head, base_logits_, rows, lm_vocab_count_, H, DType::BF16, GemmOut::F32,
+                 static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
   // ---- block row 0, biased by the Markov head of `next`, into the head rows ----
   const int rows_out = head_rows / groups;
   dsv41_dspark_markov_bias(base_logits_, static_cast<int64_t>(block) * lm_vocab_count_, 0, dl.markov_embed, dl.markov_head,

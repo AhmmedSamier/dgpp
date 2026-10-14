@@ -265,6 +265,8 @@ void test_settings_handshake() {
   sent.lookup_agree = 1;
   sent.lookup_tail = 2;
   sent.fp8_head = "mma";
+  sent.draft_head = "screen";
+  sent.draft_head_blocks = 48;
   sent.sampling_candidates = 128;
   sent.prefix_cache_gib = 1.5;
   sent.admission = "full";
@@ -288,6 +290,7 @@ void test_settings_handshake() {
     peer.join();
     require(ok && got == sent, "the peer's first read is rank 0's settings, whole");
     require(got.fp8_head == "mma", "rank 0 overrides the peer default head mode");
+    require(got.draft_head == "screen" && got.draft_head_blocks == 48, "the draft head's read travels with the settings");
     require(got.mtp_draft == "greedy", "the sampled requests' draft rule travels with the settings");
     require(got.mtp_schedule && got.mtp_schedule_sampled_scale == 0.9,
             "the sampled requests' schedule scale travels with the settings");
@@ -582,6 +585,25 @@ void test_journal_codec() {
       const auto decoded =
           dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_settings(head));
       require(decoded.world_settings.fp8_head == mode, "codec: head mode round-trips");
+    }
+    for (const std::string mode : {"exact", "screen"}) {
+      auto dh = ws;
+      dh.draft_head = mode;
+      dh.draft_head_blocks = 40;
+      const auto decoded = dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_settings(dh));
+      require(decoded.world_settings.draft_head == mode && decoded.world_settings.draft_head_blocks == 40,
+              "codec: the draft head's read round-trips");
+    }
+    {
+      std::string legacy = dgpp::serve::encode_journal_settings(ws);
+      for (const char* key : {",\"dh\":\"exact\"", ",\"dhb\":32"}) {
+        const std::string k(key);
+        const auto pos = legacy.find(k);
+        require(pos != std::string::npos, "codec: the draft head keys are emitted");
+        legacy.erase(pos, k.size());
+      }
+      const auto d = dgpp::serve::decode_journal_line(legacy).world_settings;
+      require(d.draft_head == "exact" && d.draft_head_blocks == 32, "codec: absent draft head keys default to exact / 32");
     }
     {
       std::string legacy = dgpp::serve::encode_journal_settings(ws);

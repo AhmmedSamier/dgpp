@@ -25,6 +25,7 @@
 #include "engine/session_model.hpp"
 #include "models/glm/moe.hpp"
 #include "kernels/bf12_companions.hpp"
+#include "kernels/draft_head.hpp"
 #include "kernels/gemm.hpp"
 #include "kernels/glm_moe_launch.hpp"
 #include "kernels/glm_spec.hpp"
@@ -392,7 +393,9 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   int walk_rows_ = 1;                 // the rows of the walk in flight (the companions' view)
   // The lm head over `rows` activation rows into F32 logits: the blockwise
   // FP8 head under engine.dense_weights = fp8 (Resident), else the BF16 matmul.
-  void head_gemv(const uint16_t* act, float* out, int rows, cudaStream_t stream);
+  // draft: a decode draft's read (the MTP head, the DFlash2 block's mask
+  // rows) — through the draft head's screen when it is on.
+  void head_gemv(const uint16_t* act, float* out, int rows, cudaStream_t stream, bool draft = false);
   // Per-tensor FP8 boot requant of one layer's MLP into PT slot `layer`
   // (num_hidden_layers addresses the MTP draft layer).
   void requant_mlp_pt(int slot, const Qwen35DenseMlpResident& m, cudaStream_t stream);
@@ -419,6 +422,11 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   Qwen35TextConfig cfg_;
   Qwen35LayerStream loader_;
   CublasLtGemm gemm_;
+  // The draft head's screen (kernels/draft_head.hpp): built from the served
+  // head at construction under engine.draft_head.
+  DraftHead draft_head_;
+  HeadMatrix draft_head_matrix() const;
+  GlmQuantMatrix head_fp8_view_;  // the boot fp8 head copy as a matrix view (head_fp8_ / head_scales_)
   // The bf16 decode weights' 12-bit companions (engine.bf16_weights, #88):
   // the DFlash2 drafter's layers and fc taps, the MTP fc, the bf16 lm head.
   // This family keeps the bf16 bytes beside them under either packed mode

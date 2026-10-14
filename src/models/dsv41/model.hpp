@@ -58,6 +58,7 @@
 #include "engine/memory_plan.hpp"
 #include "engine/session_model.hpp"
 #include "kernels/gemm.hpp"
+#include "kernels/draft_head.hpp"
 #include "kernels/glm_mhc_launch.hpp"
 #include "kernels/glm_spec.hpp"
 #include "models/dsv41/config.hpp"
@@ -280,6 +281,11 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
   Dsv41TextConfig cfg_;
   Dsv41LayerStream loader_;
   CublasLtGemm gemm_;
+  // The draft head's screen (kernels/draft_head.hpp): built from the served
+  // head at construction under engine.draft_head; answers a decode draft's
+  // head call with the masked row or declines (the exact head runs).
+  DraftHead draft_head_;
+  HeadMatrix draft_head_matrix() const;
   bool dense_mma_ = true;  // the dense projections' and head's decode form (DGPP_DSV41_DENSE_GEMV=1: the GEMV chunks)
   void* gemm_ws_ = nullptr;
   size_t gemm_ws_bytes_ = 0;

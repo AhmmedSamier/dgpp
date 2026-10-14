@@ -457,6 +457,10 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
     DGPP_CUDA_OK(cudaMemcpy(head_fp8_, payload.data(), payload.size(), cudaMemcpyHostToDevice));
     DGPP_CUDA_OK(
         cudaMemcpy(head_scales_, scales.data(), scales.size() * 4, cudaMemcpyHostToDevice));
+    head_fp8_view_.payload = head_fp8_;
+    head_fp8_view_.scales = head_scales_;
+    head_fp8_view_.rows = static_cast<int64_t>(V);
+    head_fp8_view_.cols = static_cast<int64_t>(Hh);
   }
   if (mtp_) {
     DGPP_CUDA_OK(cudaMalloc(&mtp_e_, M * H * 2));
@@ -571,7 +575,25 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
     DGPP_CUDA_OK(cudaMemset(gdn_pending_, 0, static_cast<size_t>(max_requests) * 4));
   }
   if (Bf12Companions::enabled()) pack_companions();
+  // The draft head's screen (engine.draft_head): the MTP draft's head and
+  // the DFlash2 block's mask rows read through it; off with a logged reason
+  // when the setting or the head's form says so.
+  if (mtp_ || dflash2_) draft_head_.init(draft_head_matrix(), max_decode_rows_, rank_, stream_, /*quiet=*/true);
 }
+
+HeadMatrix Qwen35Model::draft_head_matrix() const {
+  HeadMatrix m;
+  if (globals_.lm_head_fp8.payload) m.fp8 = &globals_.lm_head_fp8;         // the mixed release's channel-fp8 head
+  else if (head_fp8_enabled_ && head_fp8_ != nullptr) m.fp8 = &head_fp8_view_;  // the boot block-fp8 copy
+  else {
+    m.bf16 = globals_.lm_head;
+    m.bf12 = gemm_.bf12_lookup(globals_.lm_head);
+  }
+  m.n = lm_vocab_count_;
+  m.k = cfg_.hidden_size;
+  return m;
+}
+
 
 // The bf16 matrices a decode pass streams through CublasLtGemm's GEMV
 // lowering, packed to their 12-bit companions (kernels/bf12_companions):
@@ -609,6 +631,9 @@ void Qwen35Model::pack_companions() {
   bf12_.finish(gemm_, 1);
   bf12_s_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   bf12_.log_summary(rank_, bf12_s_);
+  // The draft head's screen from the companion when the bf16 bytes were
+  // never device-resident (the 12-bit-only residency); a no-op once built.
+  if (mtp_ || dflash2_) draft_head_.init(draft_head_matrix(), max_decode_rows_, rank_, stream_);
 }
 
 Qwen35Model::~Qwen35Model() {
@@ -855,9 +880,13 @@ void Qwen35Model::requant_mlp_pt(int slot, const Qwen35DenseMlpResident& m, cuda
 // The lm head over `rows` activation rows into F32 logits: the boot
 // blockwise-FP8 head (half the bytes) when enabled, else the BF16 matmul.
 // Boot-fixed addresses, so the branch replays under CUDA graphs.
-void Qwen35Model::head_gemv(const uint16_t* act, float* out, int rows, cudaStream_t stream) {
+void Qwen35Model::head_gemv(const uint16_t* act, float* out, int rows, cudaStream_t stream, bool draft) {
   const int H = cfg_.hidden_size;
   const int64_t V = lm_vocab_count_;
+  // A decode draft's read through the screen (kernels/draft_head.hpp): the
+  // candidate blocks exact, -inf elsewhere; the top-K / pick run unchanged.
+  if (draft && draft_head_.logits(draft_head_matrix(), act, static_cast<size_t>(H), rows, out, static_cast<size_t>(V), stream))
+    return;
   // The mixed release's native head: FP8-channel, read through the channel
   // grid's streaming form (the lm_head BF16 pointer is null there). Past
   // 128 rows it rides the bridge's channel dequant (a wide-head call is a
@@ -1126,6 +1155,10 @@ MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens,
   const size_t M = static_cast<size_t>(max_tokens);
   const size_t H = static_cast<size_t>(cfg.hidden_size);
   const size_t I = static_cast<size_t>(cfg.intermediate_size);
+  if (mtp || !dflash2_dir.empty())
+    plan.add("draft head screen (2-bit rotated head copy, scratch)",
+             DraftHead::plan_bytes(Qwen35LocalGeometry::from_config(cfg, rank, world, head).lm_vocab_count,
+                                   cfg.hidden_size, std::max({kDecodeRows, decode_rows, max_requests})));
   if (residency == LoaderResidency::Resident) {
     plan.add("model weights (resident)",
              Qwen35LayerStream::resident_bytes(cfg, rank, world, head, mtp));
@@ -1500,7 +1533,7 @@ void Qwen35Model::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos
   qwen_rmsnorm_bf16(mtp_r_, globals_.mtp_norm, mtp_h_, T, H, eps, stream_);
   const uint16_t* head_in = mtp_h_ + static_cast<size_t>(T - head_rows) * H;
   const int64_t V = lm_vocab_count_;
-  head_gemv(head_in, logits_, head_rows, stream_);
+  head_gemv(head_in, logits_, head_rows, stream_, /*draft=*/decode_row);
   if (decode_row && (!capture || decode_tail_mirrors_) && head_rows <= max_decode_rows_)
     DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_logits_, logits_,
                                  static_cast<size_t>(head_rows) * V * sizeof(float),
@@ -2185,7 +2218,7 @@ void Qwen35Model::df_block_select(int slots, const int* reqs, bool capture) {
   // One head stream for every slot's rows (the mask rows of slot k are rows
   // k*QR + 1 .. k*QR + D; the anchor rows' logits and top-K go unread).
   const int R = slots * QR;
-  head_gemv(df_h_, df_logits_, R, stream_);
+  head_gemv(df_h_, df_logits_, R, stream_, /*draft=*/true);
   dflash2_topk_f32(df_logits_, df_ids_, df_sc_, V, R, topk, stream_, df_topk_ws_, df_topk_ws_bytes_);
   if (world_ > 1) {
     const int rows = R;

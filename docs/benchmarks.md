@@ -46,6 +46,8 @@ Client concurrency and request slots are different. A C8 test on a two-slot depl
 
 The seven configurations affected by the latest prefill fixes have updated serving and context measurements. Cold-prefill medians use three uncached probes, with two exceptions: the diagnostic follow-up rows listed below use two, and the GLM Flash 256K row uses two at ~2K/~8K and three at ~32K. Both two-node GLM Flash configurations use a 2,048-token idle budget.
 
+Five rows were refreshed on 2026-10-13 with the draft-head screen (`engine.draft_head: "screen"`, now set in those templates; the drafts read a 2-bit copy of the vocabulary head and only the candidate blocks exactly, the verify reads the exact head, greedy transcripts matched the exact-head legs 4/4 and acceptance per class was identical): the C1 engine and wall cells, the class table and the default MTP1 column for Qwen3.8-Flash-Next NVFP4 on one node (FP8 dense), Qwen3.8-Flash-Next FP8 on four nodes, GLM-5.3-Flash NVFP4/FP8 on four nodes (768K), GLM-5.3 int4/int8 on four nodes (120K BF16 KV) and Qwen3.8-27B NVFP4 on four nodes, plus the MTP2 and MTP3 columns of the two Flash-Next rows. C2–C8, cold prefill (the screen does not touch prefill) and every other row keep their earlier evidence; the other templates that set the screen were not re-measured.
+
 The Qwen3.8-27B rows were refreshed on 2026-10-11 using the decode/collective campaign and all-world prefill follow-up. All non-prefill CUDA machine instructions match exactly; the combined audit names both builds. The displayed FP8 rows use the first baseline; the audit compares NVFP4 against the stronger of both FP8 brackets in every cell. NVFP4 wins 12/12 cold-prefill buckets, 60/60 decode cells and 3/3 four-node context-decode buckets. Four-node single-request prose measures 63.33 versus 62.39 engine tok/s (+1.49%). All final serving rates are uninstrumented. Cold probes have matching prompt hashes and actual token counts, with zero cached tokens. Small margins are measured differences, not universal guarantees. Historical decode-mode, quality and parcel-context rows keep their original evidence; the new context probes are reported separately.
 
 <!-- BEGIN serving -->
@@ -54,20 +56,20 @@ The Qwen3.8-27B rows were refreshed on 2026-10-11 using the decode/collective ca
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 30.6–36.0 | 29.6–34.5 | 43.0–46.8 | 55.3–61.2 | 56.4–61.8 | 2.057 / 8.384 / 35.312 |
 | GLM-5.3-Flash NVFP4/FP8 | 2 | 256K FP8 KV, 2 slots | 30.7–36.1 | 29.6–34.6 | 43.1–46.9 | 44.7–48.1 | 44.5–47.2 | 1.976 / 8.178 / 35.025 |
-| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 56.8–62.2 | 54.8–59.7 | 79.5–85.4 | 106.2–117.7 | 105.7–116.0 | 1.182 / 5.075 / 21.843 |
+| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 58.1–63.7 | 56.0–61.1 | 79.5–85.4 | 106.2–117.7 | 105.7–116.0 | 1.182 / 5.075 / 21.843 |
 | GLM-5.3-Flash FP8 | 4 | 384K BF16 KV, 4 slots | 46.7–51.5 | 44.8–49.2 | 60.1–64.4 | 77.5–86.2 | 77.6–84.9 | 1.334 / 5.686 / 24.491 |
 | GLM-5.3-Flash FP8 | 4 | 512K BF16 KV, 4 slots, 2 GiB prefix cache | 46.8–51.6 | 44.9–49.3 | 60.2–64.4 | 77.8–86.3 | 77.5–85.8 | 1.356 / 5.716 / 24.507 |
-| Qwen3.8-Flash-Next NVFP4 | 1 | FP8 dense | 41.7–49.6 | 40.7–48.1 | 62.1–73.1 | 86.5–97.7 | 84.3–98.9 | 1.363 / 4.522 / 18.054 |
+| Qwen3.8-Flash-Next NVFP4 | 1 | FP8 dense | 43.5–51.9 | 42.4–50.1 | 62.1–73.1 | 86.5–97.7 | 84.3–98.9 | 1.363 / 4.522 / 18.054 |
 | Qwen3.8-Flash-Next NVFP4 | 1 | BF16 dense | 31.2–38.0 | 30.6–37.1 | 52.0–60.9 | 74.2–84.8 | 73.5–85.6 | 1.392 / 6.116 / 19.055 |
 | Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense | 62.3–74.9 | 60.5–72.5 | 93.3–109.3 | 126.1–146.1 | 124.9–147.3 | 2.130 / 7.873 / 28.829 |
 | Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense, YaRN 512K, 2 slots | 65.0–75.9 | 63.0–73.0 | 94.5–110.2 | 94.7–111.2 | 93.0–109.6 | 1.830 / 7.145 / 28.795 |
 | Qwen3.8-Flash-Next NVFP4 (RadixArk) | 1 | FP8 dense, 256K BF16 KV, 4 slots, MTP2 | 44.2–61.0 | 42.9–58.4 | 56.1–76.8 | 80.6–106.3 | 78.3–107.9 | 1.358 / 4.602 / 18.234 |
 | Qwen3.8-Flash-Next NVFP4 (RadixArk) | 2 | FP8 dense, 512K BF16 KV, 4 slots, MTP4 | 52.1–96.9 | 50.6–92.3 | 71.9–136.4 | 100.8–161.5 | 95.0–177.6 | 1.870 / 7.179 / 28.922 |
 | Qwen3.8-Flash-Next FP8 | 2 | 256K BF16 KV, 4 slots | 44.0–52.9 | 43.0–51.3 | 68.2–81.3 | 90.6–103.0 | 81.0–100.3 | 2.027 / 8.061 / 33.457 |
-| Qwen3.8-Flash-Next FP8 | 4 | 256K BF16 KV, 4 slots | 70.8–84.5 | 68.7–81.1 | 110.6–128.3 | 141.5–162.2 | 139.8–164.1 | 1.582 / 5.614 / 23.039 |
+| Qwen3.8-Flash-Next FP8 | 4 | 256K BF16 KV, 4 slots | 73.1–86.9 | 70.8–83.5 | 110.6–128.3 | 141.5–162.2 | 139.8–164.1 | 1.582 / 5.614 / 23.039 |
 | Qwen3.8-Flash-Next AutoRound int4/int8 | 1 | 256K BF16 KV, 4 slots, MTP3 | 43.4–69.8 | 42.3–66.9 | 57.6–90.3 | 76.5–115.7 | 76.0–124.8 | 1.276 / 4.356 / 17.159 |
 | Qwen3.8-Flash-Next AutoRound int4/int8 | 1 | 256K BF16 KV, 4 slots, MTP3, prefill optimizations on | 43.1–69.0 | 42.1–66.0 | 55.6–91.8 | 78.9–120.1 | 77.1–124.4 | 1.182 / 4.077 / 16.682 |
-| GLM-5.3 int4/int8 | 4 | 120K BF16 KV, 8 slots | 27.4–30.5 | 26.1–28.8 | 35.7–38.4 | 46.1–49.7 | 52.9–55.7 | 3.493 / 16.219 / 70.249 |
+| GLM-5.3 int4/int8 | 4 | 120K BF16 KV, 8 slots | 28.3–31.4 | 26.9–29.5 | 35.7–38.4 | 46.1–49.7 | 52.9–55.7 | 3.493 / 16.219 / 70.249 |
 | GLM-5.3 int4/int8 | 4 | 208K FP8 KV, 8 slots | 27.0–30.4 | 25.8–28.7 | 36.0–38.5 | 46.0–49.3 | 53.2–56.6 | 3.555 / 17.188 / 74.270 |
 | GLM-5.3 int4/int8 | 4 | 256K FP4 KV, 8 slots | 27.4–30.5 | 26.1–28.8 | 36.4–37.7 | 45.4–49.6 | 52.4–56.9 | 3.770 / 17.180 / 74.988 |
 | GLM-5.3 NF4I8 H32 g128 | 4 | 272K FP8 KV, 8 slots | 27.1–30.6 | 25.9–28.9 | 36.4–39.0 | 46.2–49.3 | 52.6–56.4 | 3.872 / 17.915 / 76.522 |
@@ -85,7 +87,7 @@ The Qwen3.8-27B rows were refreshed on 2026-10-11 using the decode/collective ca
 | Qwen3.8-27B FP8 | 2 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 34.1–84.1 | 33.4–79.6 | 56.7–131.9 | 98.7–182.5 | 156.3–295.1 | 1.665 / 5.639 / 24.192 |
 | Qwen3.8-27B NVFP4 | 2 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 38.6–101.1 | 37.8–95.5 | 69.0–166.4 | 115.7–208.2 | 177.6–321.2 | 1.561 / 5.543 / 23.734 |
 | Qwen3.8-27B FP8 | 4 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 51.2–135.1 | 49.8–124.5 | 88.2–199.5 | 152.0–263.7 | 225.9–379.2 | 1.298 / 4.589 / 19.081 |
-| Qwen3.8-27B NVFP4 | 4 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 63.3–163.0 | 61.4–148.2 | 106.6–239.3 | 164.7–285.5 | 244.0–402.9 | 1.258 / 4.517 / 18.832 |
+| Qwen3.8-27B NVFP4 | 4 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 64.2–165.0 | 62.3–151.3 | 106.6–239.3 | 164.7–285.5 | 244.0–402.9 | 1.258 / 4.517 / 18.832 |
 
 <!-- END serving -->
 
@@ -226,20 +228,20 @@ Engine tokens/s, greedy; median of three repetitions.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 34.2 | 35.9 | 36.0 | 34.6 | 30.6 |
 | GLM-5.3-Flash NVFP4/FP8 | 2 | 256K FP8 KV, 2 slots | 34.2 | 36.0 | 36.1 | 34.8 | 30.7 |
-| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 60.3 | 61.6 | 62.2 | 60.0 | 56.8 |
+| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 61.4 | 63.1 | 63.7 | 61.4 | 58.1 |
 | GLM-5.3-Flash FP8 | 4 | 384K BF16 KV, 4 slots | 49.6 | 50.6 | 51.5 | 50.1 | 46.7 |
 | GLM-5.3-Flash FP8 | 4 | 512K BF16 KV, 4 slots, 2 GiB prefix cache | 49.5 | 50.7 | 51.6 | 50.2 | 46.8 |
-| Qwen3.8-Flash-Next NVFP4 | 1 | FP8 dense | 41.7 | 49.0 | 49.6 | 47.0 | 44.0 |
+| Qwen3.8-Flash-Next NVFP4 | 1 | FP8 dense | 43.5 | 51.1 | 51.9 | 49.1 | 45.9 |
 | Qwen3.8-Flash-Next NVFP4 | 1 | BF16 dense | 33.9 | 37.3 | 38.0 | 36.1 | 31.2 |
 | Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense | 67.5 | 73.6 | 74.9 | 72.3 | 62.3 |
 | Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense, YaRN 512K, 2 slots | 65.0 | 74.4 | 75.9 | 72.3 | 65.0 |
 | Qwen3.8-Flash-Next NVFP4 (RadixArk) | 1 | FP8 dense, 256K BF16 KV, 4 slots, MTP2 | 47.5 | 59.5 | 61.0 | 54.7 | 44.2 |
 | Qwen3.8-Flash-Next NVFP4 (RadixArk) | 2 | FP8 dense, 512K BF16 KV, 4 slots, MTP4 | 52.1 | 90.2 | 96.9 | 79.7 | 53.1 |
 | Qwen3.8-Flash-Next FP8 | 2 | 256K BF16 KV, 4 slots | 45.9 | 51.8 | 52.9 | 49.8 | 44.0 |
-| Qwen3.8-Flash-Next FP8 | 4 | 256K BF16 KV, 4 slots | 74.2 | 83.8 | 84.5 | 79.3 | 70.8 |
+| Qwen3.8-Flash-Next FP8 | 4 | 256K BF16 KV, 4 slots | 76.7 | 86.7 | 86.9 | 81.7 | 73.1 |
 | Qwen3.8-Flash-Next AutoRound int4/int8 | 1 | 256K BF16 KV, 4 slots, MTP3 | 43.4 | 59.7 | 69.8 | 60.9 | 45.6 |
 | Qwen3.8-Flash-Next AutoRound int4/int8 | 1 | 256K BF16 KV, 4 slots, MTP3, prefill optimizations on | 43.1 | 58.3 | 69.0 | 59.3 | 45.6 |
-| GLM-5.3 int4/int8 | 4 | 120K BF16 KV, 8 slots | 29.5 | 30.5 | 30.5 | 29.3 | 27.4 |
+| GLM-5.3 int4/int8 | 4 | 120K BF16 KV, 8 slots | 30.1 | 31.4 | 31.3 | 30.0 | 28.3 |
 | GLM-5.3 int4/int8 | 4 | 208K FP8 KV, 8 slots | 30.1 | 30.4 | 30.4 | 29.8 | 27.0 |
 | GLM-5.3 int4/int8 | 4 | 256K FP4 KV, 8 slots | 29.9 | 29.2 | 30.5 | 29.6 | 27.4 |
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | 128K compressed KV, 6 slots | 42.1 | 64.9 | 77.9 | 62.8 | 46.4 |
@@ -255,7 +257,7 @@ Engine tokens/s, greedy; median of three repetitions.
 | Qwen3.8-27B FP8 | 2 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 34.1 | 60.8 | 84.1 | 71.1 | 36.2 |
 | Qwen3.8-27B NVFP4 | 2 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 38.6 | 75.1 | 101.1 | 84.2 | 43.7 |
 | Qwen3.8-27B FP8 | 4 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 62.4 | 98.3 | 135.1 | 107.9 | 51.2 |
-| Qwen3.8-27B NVFP4 | 4 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 63.3 | 120.4 | 163.0 | 133.5 | 72.0 |
+| Qwen3.8-27B NVFP4 | 4 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 64.2 | 131.2 | 165.0 | 137.9 | 73.0 |
 
 <!-- END classes -->
 
@@ -273,20 +275,20 @@ C1 engine tokens/s; each range spans the five class medians. **MTP1**, **MTP2** 
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | MTP1 | 24.2–24.3 | 30.6–36.0 | 31.6–40.0 | 27.6–37.8 | Not swept |
 | GLM-5.3-Flash NVFP4/FP8 | 2 | 256K FP8 KV, 2 slots | MTP1 | 23.9–24.0 | 30.7–36.1 | 31.6–40.6 | 27.4–37.8 | Not swept |
-| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | MTP1 | 39.6–39.7 | 56.8–62.2 | 58.8–68.9 | 53.2–66.3 | Not swept |
+| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | MTP1 | 39.6–39.7 | 58.1–63.7 | 58.8–68.9 | 53.2–66.3 | Not swept |
 | GLM-5.3-Flash FP8 | 4 | 384K BF16 KV, 4 slots | MTP1 | 34.6–34.7 | 46.7–51.5 | 44.9–55.0 | 39.9–50.0 | Not swept |
 | GLM-5.3-Flash FP8 | 4 | 512K BF16 KV, 4 slots, 2 GiB prefix cache | MTP1 | 34.3–34.4 | 46.8–51.6 | 44.9–55.0 | 39.9–50.1 | Not swept |
-| Qwen3.8-Flash-Next NVFP4 | 1 | FP8 dense | MTP1 | 31.8–31.9 | 41.7–49.6 | 42.1–61.0 | 39.9–66.8 | Not swept |
+| Qwen3.8-Flash-Next NVFP4 | 1 | FP8 dense | MTP1 | 31.8–31.9 | 43.5–51.9 | 45.5–66.1 | 44.2–73.8 | Not swept |
 | Qwen3.8-Flash-Next NVFP4 | 1 | BF16 dense | MTP1 | 24.2 | 31.2–38.0 | 36.1–47.7 | 33.0–54.6 | Not swept |
 | Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense | MTP1 | 46.5–48.0 | 62.3–74.9 | 65.5–91.1 | 61.2–100.5 | Not swept |
 | Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense, YaRN 512K, 2 slots | MTP1 | 47.9–48.0 | 65.0–75.9 | 66.2–91.4 | 61.2–100.5 | Not swept |
 | Qwen3.8-Flash-Next NVFP4 (RadixArk) | 1 | FP8 dense, 256K BF16 KV, 4 slots, MTP2 | MTP2 | 32.0–32.1 | 42.4–50.2 | 44.2–61.0 | 40.5–67.7 | Not swept |
 | Qwen3.8-Flash-Next NVFP4 (RadixArk) | 2 | FP8 dense, 512K BF16 KV, 4 slots, MTP4 | MTP4 | 46.8–47.5 | 64.1–76.3 | 66.7–91.2 | 64.6–102.7 | 52.1–96.9 |
 | Qwen3.8-Flash-Next FP8 | 2 | 256K BF16 KV, 4 slots | MTP1 | 34.6–35.3 | 44.0–52.9 | 46.4–62.7 | 43.4–72.9 | Not swept |
-| Qwen3.8-Flash-Next FP8 | 4 | 256K BF16 KV, 4 slots | MTP1 | 51.2–51.5 | 70.8–84.5 | 77.4–108.3 | 74.5–119.3 | Not swept |
+| Qwen3.8-Flash-Next FP8 | 4 | 256K BF16 KV, 4 slots | MTP1 | 51.2–51.5 | 73.1–86.9 | 81.2–113.6 | 79.3–126.6 | Not swept |
 | Qwen3.8-Flash-Next AutoRound int4/int8 | 1 | 256K BF16 KV, 4 slots, MTP3 | MTP3 | 30.2–30.3 | 42.1–48.9 | 45.3–61.1 | 43.4–69.8 | 35.7–66.5 |
 | Qwen3.8-Flash-Next AutoRound int4/int8 | 1 | 256K BF16 KV, 4 slots, MTP3, prefill optimizations on | MTP3 | 30.2 | 41.2–48.6 | 43.2–61.1 | 43.1–69.0 | 35.2–66.5 |
-| GLM-5.3 int4/int8 | 4 | 120K BF16 KV, 8 slots | MTP1 | 19.7–20.0 | 27.4–30.5 | 28.9–33.6 | 26.3–33.1 | Not swept |
+| GLM-5.3 int4/int8 | 4 | 120K BF16 KV, 8 slots | MTP1 | 19.7–20.0 | 28.3–31.4 | 28.9–33.6 | 26.3–33.1 | Not swept |
 | GLM-5.3 int4/int8 | 4 | 208K FP8 KV, 8 slots | MTP1 | 20.0–20.1 | 27.0–30.4 | 25.8–34.9 | 23.8–33.1 | Not swept |
 | GLM-5.3 int4/int8 | 4 | 256K FP4 KV, 8 slots | MTP1 | 20.0–20.1 | 27.4–30.5 | 27.0–34.3 | 23.2–34.1 | Not swept |
 

@@ -85,6 +85,13 @@ struct ClusterConfig {
     // docs/qwen38_single_spark.md).
     std::string dense_weights = "checkpoint";
     std::string fp8_head = "gemv";  // Qwen head: gemv | mma (opt-in)
+    // The MTP draft head's read (2026-10-13; kernels/head_screen.hpp):
+    // "exact" streams the whole head per draft token; "screen" finds the
+    // candidate 128-row blocks through a 2-bit rotated copy and computes
+    // only those exactly — output-exact, only which token is drafted can
+    // differ. draft_head_blocks: the candidate cap, 1..64.
+    std::string draft_head = "exact";
+    int draft_head_blocks = 32;
     // The MTP draft layer's routed-expert layout: "fp8" (the default:
     // per-expert FP8 tensors as the NVIDIA release ships) or "bf16_fused"
     // (the RadixArk release: all 512 experts stacked as fused BF16
