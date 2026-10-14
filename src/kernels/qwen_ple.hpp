@@ -78,6 +78,25 @@ void qwen_ple_gather_bf16(const uint8_t* table, int64_t row_begin, int64_t rows,
 // so out is bitwise the device gather's. `staged` may be pinned host memory.
 void qwen_ple_gather_staged_bf16(const uint8_t* staged, float scale, int n, int heads_local,
                                  int head_dim, uint16_t* out, cudaStream_t stream);
+// The NVFP4 table (the QAD export, config ngram_table_nvfp4): a row is
+// head_dim / 2 code bytes (e2m1 pairs, low nibble the even element) in
+// `codes` [rows, head_dim/2] with head_dim / 16 e4m3 block scales in
+// `scales` [rows, head_dim/16] and one F32 `global` for the whole table.
+// out = bf16((e2m1(code) x e4m3(scale)) x global): the e2m1 x e4m3 product
+// exact in fp32, the global's one fp32 rounding, the one bf16 rounding —
+// modelopt's dequant in its order. head_dim % 16 == 0 and head_dim <= 512
+// (a warp's 32 lanes, one 16-group each).
+void qwen_ple_gather_fp4_bf16(const uint8_t* codes, const uint8_t* scales, int64_t row_begin,
+                              int64_t rows, float global, const int32_t* ids, int n, int heads,
+                              int head_begin, int heads_local, int head_dim, uint16_t* out,
+                              cudaStream_t stream);
+// The staged form of the NVFP4 gather: the host gathered codes [n,
+// heads_local, head_dim/2] and scales [n, heads_local, head_dim/16]
+// (pinned), converted with the same per-element arithmetic — bitwise the
+// device gather's.
+void qwen_ple_gather_staged_fp4_bf16(const uint8_t* staged_codes, const uint8_t* staged_scales,
+                                     float global, int n, int heads_local, int head_dim, uint16_t* out,
+                                     cudaStream_t stream);
 // The staging handshake's device half (2026-09-29): after the hash kernel,
 // publishes the walk's row count and a sequence number to pinned words the
 // gather thread polls (the ids are already in pinned memory). One thread:

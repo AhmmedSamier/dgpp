@@ -27,6 +27,7 @@ over RoCE. Each quant links to its specific Hugging Face model card.
 | Qwen3.8-Flash-Next | [nvidia/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4) | 1, 2 | [One node](deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.example.json) (256K shared KV pool, 4K busy/idle prefill), [two nodes](deploy/cluster_qwen-3.8-flash-next_nvfp4_w2.example.json) (mapped n-gram table, dense projections FP8 at load) |
 | Qwen3.8-Flash-Next | [Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN](https://huggingface.co/Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN) | 1 | [One node](deploy/cluster_qwen-3.8-flash-next_autoround-int4_w1.example.json) (AutoRound int4 g128 experts and an int8 g128 head served in their packed form, the n-gram table from the FP8 release's shards via `engine.ngram_table_model`; the template turns on the `prefill_bf16_partials` and `prefill_fp8_gemm` levers, whose measured quality cost is inside the default chain's band — see [accuracy and correctness](#accuracy-and-correctness)) |
 | Qwen3.8-Flash-Next | [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4) | 1, 2 | [One node](deploy/cluster_qwen-3.8-flash-next_nvfp4-radixark_w1.example.json) (tuned: 4K prefill chunks with matching prefill budgets, MTP depth 2), [two nodes](deploy/cluster_qwen-3.8-flash-next_nvfp4-radixark_w2.example.json) (same NVFP4 format and engine configuration as the NVIDIA release) |
+| Qwen3.8-Flash-Next | [local-inference-lab/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/local-inference-lab/Qwen3.8-Flash-Next-NVFP4) | 1 | [One node](deploy/cluster_qwen-3.8-flash-next_nvfp4-qad_w1.example.json) (the quantization-aware-distilled export served in its shipped forms: the MXFP8 dense stack and shared experts, the NVFP4 n-gram table resident on the Spark, F32 norms and weight-only NVFP4 draft experts; [card](docs/model_cards/Qwen3.8-Flash-Next-NVFP4-QAD.md)) |
 | GLM-4.7 | [nvidia/GLM-4.7-NVFP4](https://huggingface.co/nvidia/GLM-4.7-NVFP4) | 4 | [Four nodes](deploy/cluster_glm-4.7_nvfp4_w4.example.json) |
 | GLM-5.3 | [HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64](https://huggingface.co/HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64) | 4 | [Four nodes](deploy/cluster_glm-5.3_int4-int8_w4.example.json) |
 | GLM-5.3 | [HawkBearPig/GLM-5.3-NF4I8-GPTQ-H32-g128](https://huggingface.co/HawkBearPig/GLM-5.3-NF4I8-GPTQ-H32-g128) | 4 | [Four nodes](deploy/cluster_glm-5.3_nf4i8_w4.example.json) (272K FP8 K/V pool) |
@@ -49,7 +50,10 @@ and `engine.dense_weights: "fp8"` to encode dense projections at load. On two
 Sparks, mapping saves 23.84 GiB per rank while staying within 3.6% of resident
 decode throughput and 2.9% of resident prefill time in the matched campaign.
 Use `--dense-weights checkpoint --fp8-head gemv` to retain the checkpoint's
-BF16 dense stack.
+BF16 dense stack. The quantization-aware-distilled export's template keeps
+its 26.8 GiB NVFP4 n-gram table resident instead (`engine.ngram_table:
+"resident"`, a 128K pool): its dense stack ships as MXFP8 and is served as
+shipped, so `engine.dense_weights` reaches only the BF16 remainder there.
 See the [single-node guide](docs/qwen38_single_spark.md) and
 two-node benchmark.
 

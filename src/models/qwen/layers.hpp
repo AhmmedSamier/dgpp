@@ -499,8 +499,16 @@ class QwenPleLayer {
   float eps_;
   struct StageArgs;
   static void stage_callback(void* user);
+  // The staged row's stored form (the FP8 table's head_dim codes, or the
+  // NVFP4 table's head_dim / 2 codes with head_dim / 16 scales in a second
+  // region of the same staging), and the conversion that reads it.
+  size_t stage_code_bytes() const;
+  size_t stage_scale_bytes() const;
+  size_t stage_row_bytes() const;
+  uint8_t* stage_scales(uint8_t* staging) const;
+  void gather_staged(uint8_t* staging, int rows, cudaStream_t stream);
   int32_t* h_ids_ = nullptr;      // mmap: the pinned ids (ids_ their device alias)
-  uint8_t* staged_ = nullptr;     // mmap: pinned [M, hash_heads, head_dim]
+  uint8_t* staged_ = nullptr;     // mmap: pinned [M, hash_heads, codes] (+ [M, hash_heads, scales] for NVFP4)
   cudaStream_t side_ = nullptr;   // mmap: the host node's branch (DGPP_QWEN_PLE_HOST_NODE=1)
   cudaEvent_t fork_ = nullptr, join_ = nullptr;
   std::vector<std::unique_ptr<StageArgs>> stage_args_;  // one per capture, two eager

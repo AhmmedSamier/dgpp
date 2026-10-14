@@ -39,6 +39,7 @@ struct QwenMoeWeights {
   const GlmPackedMatrix* experts_packed = nullptr;  // the packed-int form (the AutoRound hybrid); exactly one of the three is set
   float act_scale_w13 = 0.0f, act_scale_w2 = 0.0f;  // W4A4 activation scales (0: dynamic)
   const float* act_scales_dev = nullptr;             // [2] on the device, from the layer image
+  bool experts_weight_only = false;                  // W4A16_NVFP4 (the QAD export's draft experts): no W4A4
 };
 
 class QwenMoeLayer {
@@ -105,6 +106,10 @@ class QwenMoeLayer {
  private:
   static GlmMoeWeights routed_view(const QwenMoeWeights& w);
   void check_weights() const;
+  // The shared expert's fp8 scale grid (log2 block rows / cols) and whether
+  // it is the 128 x 128 form the block launchers take.
+  void shared_grid(int& rs, int& cs) const;
+  bool shared_block128() const;
   // The chain's tail after the routed experts left d_acc_: the BF16 shared
   // expert, its sigmoid weight, the last fma and the one rounding.
   void shared_tail(const uint16_t* hidden, uint16_t* out, int tokens, cudaStream_t stream);

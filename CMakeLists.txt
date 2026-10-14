@@ -547,6 +547,25 @@ add_test(NAME qwen_gptq_forward_test
           --dump-file ${CMAKE_CURRENT_BINARY_DIR}/qwen_gptq_ref.qwndump)
 set_tests_properties(qwen_gptq_forward_test PROPERTIES DEPENDS qwen_gptq_generate)
 
+# The QAD export's twin (issue #113, local-inference-lab/Qwen3.8-Flash-Next-
+# NVFP4): the MXFP8 dense stack on the 1 x 32 grid, the NVFP4 n-gram table,
+# F32 norms and weight-only NVFP4 draft experts through the same fixture
+# chain — the Python reference dequantizes every form exactly (power-of-two
+# scales, the e2m1 x e4m3 x global chain in modelopt's order).
+set(QWEN_QAD_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/qwen_qad_fixture)
+add_test(NAME qwen_qad_fixture COMMAND qwen_forward_test --write-fixture ${QWEN_QAD_FIXTURE} --qad)
+add_test(NAME qwen_qad_smoke COMMAND qwen_forward_test --smoke ${QWEN_QAD_FIXTURE})
+set_tests_properties(qwen_qad_smoke PROPERTIES DEPENDS qwen_qad_fixture)
+add_test(NAME qwen_qad_generate
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/qwen_reference_dump.py
+          gen-pure --checkpoint-dir ${QWEN_QAD_FIXTURE}
+          --out ${CMAKE_CURRENT_BINARY_DIR}/qwen_qad_ref.qwndump)
+set_tests_properties(qwen_qad_generate PROPERTIES DEPENDS qwen_qad_fixture)
+add_test(NAME qwen_qad_forward_test
+  COMMAND qwen_forward_test --checkpoint-dir ${QWEN_QAD_FIXTURE}
+          --dump-file ${CMAKE_CURRENT_BINARY_DIR}/qwen_qad_ref.qwndump)
+set_tests_properties(qwen_qad_forward_test PROPERTIES DEPENDS qwen_qad_generate)
+
 # The Qwen session surface (Q6 stage A): incremental decode vs the re-forward.
 add_executable(qwen_decode_test tests/cuda/qwen_decode_test.cpp)
 target_include_directories(qwen_decode_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
@@ -579,6 +598,8 @@ add_test(NAME qwen_decode_draft_screen_fp8_head
 set_tests_properties(qwen_decode_draft_screen qwen_decode_draft_screen_fp8_head
   PROPERTIES DEPENDS qwen_forward_fixture RUN_SERIAL TRUE)
 add_test(NAME qwen_gptq_decode_test COMMAND qwen_decode_test --fixture ${QWEN_GPTQ_FIXTURE})
+add_test(NAME qwen_qad_decode_test COMMAND qwen_decode_test --fixture ${QWEN_QAD_FIXTURE})
+set_tests_properties(qwen_qad_decode_test PROPERTIES DEPENDS qwen_qad_fixture)
 add_test(NAME qwen_gptq_prefill_head COMMAND qwen_decode_test --fixture ${QWEN_GPTQ_FIXTURE} --prefill-head)
 set_tests_properties(qwen_gptq_decode_test qwen_gptq_prefill_head PROPERTIES DEPENDS qwen_gptq_fixture)
 add_test(NAME qwen_prefill_head

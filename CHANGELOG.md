@@ -5,6 +5,37 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **The quantization-aware-distilled Qwen3.8-Flash-Next export served as
+  shipped** (2026-10-14, issue #113). `local-inference-lab/Qwen3.8-Flash-Next-NVFP4`
+  carries modelopt's `MIXED_PRECISION` block and four forms the NVIDIA release
+  does not: the dense stack and shared experts as MXFP8 (e4m3 with one e8m0
+  byte per 32 columns), the n-gram table as NVFP4 with one F32 global, the
+  draft layer's experts as weight-only NVFP4, and the hyper-connection and
+  PLE norms in F32. The config parser detects the block and requires the
+  complete declared set; the binding table expects every form by name; the
+  loader widens the e8m0 bytes to F32 on a 1 x 32 scale grid the fp8 cores
+  already read (the grid launcher now takes any per-row grid on its GEMV
+  rows), decodes the GDN a/b rows to BF16 exactly, keeps the F32 norms (the
+  group norm and the fused GR norm kernels read either dtype), loads the
+  NVFP4 table resident or mapped with its scale rows gathered alongside (two
+  gather kernels), and skips the activation scale on the weight-only draft
+  experts (no W4A4 on that layer). The shared-expert decode kernels take the
+  scale grid as parameters. The Python reference dequantizes MXFP8, NVFP4
+  experts and the NVFP4 table, and the fixture chain gains the QAD twin
+  (`qwen_qad_*`); the real snapshot binds every tensor and loads at world 1
+  (98.44 GiB with the table resident). The attention-side MXFP8 matrices
+  keep their e8m0 bytes resident: the streaming MMA and the dequant bridge
+  take the scale grid's element type (`scale_at`: the float whose exponent
+  field is the byte), bitwise the F32 grid and a quarter of its traffic —
+  the F32-widened grid cost 2.6 ms of a 34.4 ms T=1 step at world 1 (an
+  attribution bench on the dense shapes), the bytes 1.1 (32.9 ms measured;
+  the NVIDIA release 31.6–32.0 on the same build). One-node template (the
+  26.8 GiB NVFP4 table resident, a 128K pool), a model card with the
+  measured decode, prefill, MTP acceptance and eval numbers, and the
+  deployment's rows in `docs/benchmarks.md` (C1–C8, cold prefill, decode
+  modes, 0–128K context, quality; the first rows measured with the
+  adaptive prefill defaults).
+
 - **GLM-5.3-Flash: the batched draft chain, and the wide GEMV chunk that
   makes every decode batch bitwise** (2026-10-14). The Flash's fixed batch
   now carries the MTP chain past depth 1

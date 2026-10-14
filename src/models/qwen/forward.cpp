@@ -102,9 +102,10 @@ QwenModel::QwenModel(const QwenTextConfig& cfg, const std::string& checkpoint_di
   gemm_ws_bytes_ = std::max<size_t>(64u << 20, gemm_.query_workspace_bytes(max_tokens_, lm_vocab_count_, H, DType::BF16));
   gemm_ws_ = dev_alloc<char>(gemm_ws_bytes_);
   gw_ = QwenGemmWorkspace{&gemm_, gemm_ws_, gemm_ws_bytes_};
-  if (QwenLayerStream::dense_weights_fp8()) {
+  if (QwenLayerStream::dense_weights_fp8() || cfg_.dense_mxfp8_shipped) {
     // The FP8 dense stack's prefill bridge: the largest dense matrix of
-    // this rank's slice, in BF16.
+    // this rank's slice, in BF16 (the at-load fp8 form, or the QAD export's
+    // shipped MXFP8, whose prefill-shaped products take the bridge too).
     dense_bridge_bytes_ = dense_bridge_bytes(cfg_, loader_.geometry());
     gw_.dequant = dev_alloc<uint16_t>(dense_bridge_bytes_ / 2);
     gw_.dequant_bytes = dense_bridge_bytes_;
@@ -217,7 +218,7 @@ QwenModel::QwenModel(const QwenTextConfig& cfg, const std::string& checkpoint_di
   for (int req = 0; req < max_requests_; ++req) push_context(req, eos_, eos_);
   if (mtp_) {
     if (!globals_.mtp_fc_embedding || !globals_.mtp_fc_hidden || !globals_.mtp_pre_fc_norm_embedding ||
-        !globals_.mtp_pre_fc_norm_hidden || !globals_.mtp_mixer.hc_norm)
+        !globals_.mtp_pre_fc_norm_hidden || !(globals_.mtp_mixer.hc_norm || globals_.mtp_mixer.hc_norm_f32))
       throw std::runtime_error("QwenModel: the draft head's globals are unbound");
     mtp_ring_snapshot_ = dev_alloc<uint16_t>(R * ring_elems());
     mtp_chain_ring_ = dev_alloc<uint16_t>(R * ring_elems());
@@ -308,7 +309,7 @@ QwenModel::MemoryPlan QwenModel::plan_memory(const QwenTextConfig& cfg, int max_
     if (packed > 0) plan.add("bf16 decode packing (12-bit companions)", packed);
   }
   plan.add("gemm workspace (at least)", size_t{64} << 20);
-  if (QwenLayerStream::dense_weights_fp8())
+  if (QwenLayerStream::dense_weights_fp8() || cfg.dense_mxfp8_shipped)
     plan.add("dense fp8 prefill bridge (the largest dense matrix in BF16)",
              dense_bridge_bytes(cfg, QwenLocalGeometry::from_config(cfg, tp_rank, tp_world, head)));
   if (QwenLayerStream::dense_weights_fp8() && QwenLayerStream::prefill_fp8_gemm())
@@ -460,6 +461,7 @@ QwenMoeWeights QwenModel::moe_view(const QwenMoeResident& m) {
   w.act_scale_w13 = m.act_scale_w13;
   w.act_scale_w2 = m.act_scale_w2;
   w.act_scales_dev = m.act_scales;
+  w.experts_weight_only = m.experts_weight_only;
   return w;
 }
 
@@ -858,7 +860,9 @@ void QwenModel::prefetch_bf16(const char* what, const uint16_t* w, size_t bytes)
 void QwenModel::prefetch_fp8(const char* what, const GlmQuantMatrix& q) {
   if (!q.payload) return;
   prefetch_add(what, q.payload, static_cast<size_t>(q.rows) * static_cast<size_t>(q.cols));
-  prefetch_add(what, q.scales, static_cast<size_t>(q.scale_rows()) * static_cast<size_t>(q.scale_cols()) * 4);
+  const size_t grid = static_cast<size_t>(q.scale_rows()) * static_cast<size_t>(q.scale_cols());
+  if (q.scales) prefetch_add(what, q.scales, grid * 4);
+  if (q.scales_e8m0) prefetch_add(what, q.scales_e8m0, grid);
 }
 
 void QwenModel::prefetch_gr(const QwenGrResident& g, bool inject) {
@@ -867,6 +871,7 @@ void QwenModel::prefetch_gr(const QwenGrResident& g, bool inject) {
   const size_t hc = static_cast<size_t>(cfg_.hc_count);
   if (inject && g.inject) prefetch_add("g.inject", g.inject, hc * W * 2);
   if (g.hc_norm) prefetch_add("g.hc_norm", g.hc_norm, W * 2);
+  if (g.hc_norm_f32) prefetch_add("g.hc_norm", g.hc_norm_f32, W * 4);
   if (g.down) prefetch_add("g.down", g.down, r * W * 2);
   else prefetch_fp8("g.down_fp8", g.down_fp8);
   if (g.up) prefetch_add("g.up", g.up, W * r * 2);
@@ -950,6 +955,7 @@ void QwenModel::prefetch_ple_key_side(const QwenLayerResident& r) {
   const size_t cols = static_cast<size_t>(cfg_.ple_embed_dim / world_);
   prefetch_.open_window(stream_, prefetch_window_bytes_, prefetch_.boundary_rate());
   if (r.ple.norm_key) prefetch_add("r.ple.norm_key", r.ple.norm_key, W * 2);
+  if (r.ple.norm_key_f32) prefetch_add("r.ple.norm_key", r.ple.norm_key_f32, W * 4);
   if (r.ple.value_proj) prefetch_add("r.ple.value_proj", r.ple.value_proj, H * cols * 2);
   else prefetch_fp8("r.ple.value_proj_fp8", r.ple.value_proj_fp8);
 }
@@ -959,6 +965,7 @@ void QwenModel::prefetch_ple_value_side(const QwenLayerResident& r) {
   const size_t W = static_cast<size_t>(cfg_.hyper_width());
   prefetch_.open_window(stream_, prefetch_window_bytes_, prefetch_.boundary_rate());
   if (r.ple.norm_conv) prefetch_add("r.ple.norm_conv", r.ple.norm_conv, W * 2);
+  if (r.ple.norm_conv_f32) prefetch_add("r.ple.norm_conv", r.ple.norm_conv_f32, W * 4);
   if (r.ple.conv) prefetch_add("r.ple.conv", r.ple.conv, W * static_cast<size_t>(cfg_.ple_conv_kernel_size) * 2);
   prefetch_gr(r.attn_gr, /*inject=*/true);
 }

@@ -87,6 +87,7 @@ its node.
 | `cluster_qwen-3.8-flash-next_fp8_w{2,4}.example.json` | Qwen FP8 with MTP depth 1, four or two nodes |
 | `cluster_qwen-3.8-flash-next_nvfp4_w{1,2}.example.json` | Qwen NVFP4 on one or two Sparks, MTP depth 1, dense projections FP8 at load, mapped n-gram table; the single-Spark example selects a 256K shared pool and 4K busy/idle prefill |
 | `cluster_qwen-3.8-flash-next_nvfp4-radixark_w{1,2}.example.json` | RadixArk Qwen NVFP4 on one or two Sparks; the single-Spark recipe selects MTP depth 2, grow admission and 4K busy/idle prefill |
+| `cluster_qwen-3.8-flash-next_nvfp4-qad_w1.example.json` | the QAD export of Qwen3.8-Flash-Next (local-inference-lab) on one Spark: MXFP8 dense stack and shared experts as shipped, the NVFP4 n-gram table resident, MTP depth 1, 128K shared pool |
 | `cluster_glm-4.7_nvfp4_w4.example.json` | GLM-4.7 NVFP4, four nodes, MTP depth 1 |
 | `cluster_glm-5.3_int4-int8_w4.example.json` | the full GLM-5.3 (int4/int8 RTN), four nodes, MTP depth 1, eight request slots, 100K bf16 context (120K with `--bf16-weights checkpoint --kv-capacity 122880`), the embedding vocab-sharded |
 | `cluster_glm-5.3_nf4i8_w4.example.json` | the full GLM-5.3 in the NF4I8 GPTQ H32 g128 checkpoint (codebook experts, int8 attention and shared expert), four nodes, MTP depth 1, eight request slots, 272K fp8 context, the embedding vocab-sharded |

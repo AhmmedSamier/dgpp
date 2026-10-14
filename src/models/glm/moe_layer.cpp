@@ -976,8 +976,8 @@ void GlmMoeLayer::grouped_expert_chain(MoeExpertKernel kernel,
   hidden_codes_ready_ = false;
   const int fp4_group = fp4 ? w_.experts_fp4[0].scale_group : kFp4Group;
   const size_t I_max = static_cast<size_t>(std::max(I_r, I_s));
-  const bool w4a4 = fp4 && !packq && fp4_group == kFp4Group && kernel == MoeExpertKernel::kMma &&
-                    moe_w4a4_eligible(H, I_r, rows_total);
+  const bool w4a4 = fp4 && !packq && !w_.weight_only_fp4 && fp4_group == kFp4Group &&
+                    kernel == MoeExpertKernel::kMma && moe_w4a4_eligible(H, I_r, rows_total);
   // The W4A4 chain's down rows in bf16 (half the write and the ordered
   // accumulation's read; SGLang's CUTLASS MoE keeps a bf16 intermediate too)
   // unless DGPP_MOE_W4A4_F32_DOWN=1; only without a shared segment, whose

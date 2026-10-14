@@ -58,6 +58,7 @@ glm_dsa_loader_fixture*/
 qwen_loader_fixture/
 qwen_loader_gptq_fixture/
 qwen_loader_nvfp4_fixture/
+qwen_loader_qad_fixture/
 glm_dsa_loader_fixture/
 mimo_loader_fixture/
 mimo_loader_image_cache/

@@ -26,9 +26,12 @@ void qwen_add_rmsnorm_bf16(void* resid, const void* add, const void* weight, voi
 // The grouped form over a row of `groups` x `group_dim` (the 4-branch hyper
 // state, group_dim = hidden): every group normalized on its own, the weight
 // [groups * group_dim] indexed by the flat position. bf16 io.
+// weight_f32: the weight vector in F32 (the QAD export's trained norms)
+// instead of BF16; the arithmetic is the same (1 + w) multiply.
 void qwen_group_rmsnorm_bf16(const void* x, const void* weight, void* y,
                              int64_t rows, int groups, int group_dim, float eps,
-                             cudaStream_t stream);
+                             cudaStream_t stream,
+                             bool weight_f32 = false);
 
 // The GDN output norm: y = bf16(bf16(bf16(x * rstd) * w) * sigmoid(gate)),
 // one row per (token, head) of width dim; w is the plain weight (init 1).

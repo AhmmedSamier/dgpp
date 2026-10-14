@@ -437,6 +437,16 @@ struct QwenFamily final : ServeFamily {
     // engine config or CLI before the family is built); it must be on the
     // config before the binding table and the loader see it.
     cfg.mtp_experts_bf16_fused = dgpp::QwenLayerStream::mtp_experts_bf16_fused();
+    // The QAD export ships its draft experts as weight-only NVFP4: the
+    // RadixArk release's fused-BF16 reading of them is a different checkpoint.
+    if (cfg.mtp_experts_nvfp4 && cfg.mtp_experts_bf16_fused)
+      throw std::runtime_error(
+          "engine.mtp_expert_format bf16_fused is the RadixArk release's layout; this checkpoint ships NVFP4 "
+          "draft experts (leave the key at its default fp8)");
+    if (cfg.dense_mxfp8_shipped)
+      DGPP_LOG_INFO("qwen: the checkpoint ships its dense stack as MXFP8 (served as shipped; engine.dense_weights "
+                    "applies to the BF16 remainder), its n-gram table {}, its draft experts {}",
+                    cfg.ngram_table_nvfp4 ? "as NVFP4" : "as e4m3", cfg.mtp_experts_nvfp4 ? "as weight-only NVFP4" : "as block FP8");
     // The AutoRound hybrid ships its dense stack as block FP8: the fp8 dense
     // mode is the only one that reads it, so it is selected here whatever
     // the recipe says (docs/qwen38_autoround_int4_plan.md D4).
