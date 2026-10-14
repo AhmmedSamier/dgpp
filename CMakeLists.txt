@@ -2921,8 +2921,8 @@ set_tests_properties(compact_head_test compact_head_all_rows PROPERTIES LABELS "
 
 if(TARGET dgpp_bus)
   add_executable(serving_head_check apps/serving_head_check.cpp)
-  target_link_libraries(serving_head_check PRIVATE dgpp_models_glm_loader dgpp_models_glm4_layers
-    dgpp_models_glm_dsa_layers dgpp_models_mimo_layers dgpp_models_dsv41_layers dgpp_models_qwen_layers
+  target_link_libraries(serving_head_check PRIVATE dgpp_models_glm_loader dgpp_models_qwen_layers dgpp_models_glm4_layers
+    dgpp_models_glm_dsa_layers dgpp_models_mimo_layers dgpp_models_dsv41_layers dgpp_models_llama_layers
     dgpp_bus dgpp_text CUDA::cudart Threads::Threads)
   dgpp_set_common(serving_head_check)
 endif()

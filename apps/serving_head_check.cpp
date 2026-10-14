@@ -21,6 +21,8 @@
 #include "models/glm_dsa/model.hpp"
 #include "models/mimo/forward.hpp"
 #include "models/qwen/forward.hpp"
+#include "models/llama/forward.hpp"
+#include "models/llama/loader.hpp"
 #include "net/collective_bus.hpp"
 #include "text/tokenizer.hpp"
 
@@ -180,6 +182,14 @@ int main(int argc, char** argv) {
                                  GlmResidency::Resident,
                                  world > 1 ? GlmHeadSharding::VocabSharded : GlmHeadSharding::Full,
                                  1, false, LatentFormat::kBf16, compact);
+        run(model);
+        break;
+      }
+      case ModelArchitecture::Llama: {
+        auto cfg = LlamaTextConfig::from_json_file(config);
+        LlamaLayerStream::set_resident_image_dir(image_dir);
+        LlamaModel model(cfg, checkpoint, 1024, 2048, LlamaResidency::Resident, reducer.get(),
+                         rank, world, 1, false, 8, /*serving_logits=*/true);
         run(model);
         break;
       }
