@@ -89,7 +89,7 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg, const std::stri
                                        GlmBoundaryReducer* boundary, int tp_rank, int tp_world,
                                        GlmResidency residency, GlmHeadSharding head,
                                        int max_requests, bool mtp, LatentFormat kv_format,
-                                       bool serving_logits)
+                                       bool serving_logits, int decode_rows)
     : cfg_(cfg),
       kda_cfg_(with_tp(cfg.kda_config(), tp_world)),
       dsa_cfg_(with_tp(cfg.dsa_config(), tp_world)),
@@ -114,12 +114,36 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg, const std::stri
   // The latent cache's format (validated against the geometry: the
   // quantized rows' alignment pins).
   dsa_cfg_.latent_format = kv_format;
+  // The fixed decode batch's rows (2026-10-14, the runtime shape the
+  // session-core families have had since 2026-09-10): the serving app's
+  // max_concurrency x (1 + mtp depth), floored at kDecodeRows — the eager
+  // draft, verify and chain use rows [0, kDecodeRows) of the token buffer
+  // as scratch — and bounded by the DSA layer's select bound.
+  max_decode_rows_ = decode_rows <= 0 ? kDecodeRows : decode_rows;
+  if (max_decode_rows_ < kDecodeRows || max_decode_rows_ > decode_rows_cap())
+    throw std::invalid_argument("GlmDiagnosticModel: decode_rows outside [" + std::to_string(kDecodeRows) +
+                                ", " + std::to_string(decode_rows_cap()) + "] (got " +
+                                std::to_string(decode_rows) + ")");
   // The dense sites' lowering (kernels/gemm.hpp dense_gemv_rows): the GEMV
   // chunks to the bound, cuBLASLt's algorithm (bf16) or the streaming
   // tensor-core GEMM (fp8: the DSA projections, the dense MLP) above it.
-  dsa_cfg_.gemm_mma_from_rows = dense_gemv_rows() + 1;
-  dense_mma_from_rows_ = dense_gemv_rows() + 1;
-  gemm_.set_decode_rows(std::min(kDecodeRows, dense_gemv_rows()));
+  // The decode batch's rows take the row-independent GEMV chunks (the
+  // wide chunk, gemv_wide.hpp: one weight read to eight rows), bf16 and
+  // fp8 alike, so a batched row is bitwise the row alone at every batch
+  // this family serves (2026-10-14; the bound was dense_gemv_rows() = 4
+  // and a wider batch took cuBLASLt / the streaming fp8 GEMM, whose
+  // reduction order follows m). A batch past eight rows reads the dense
+  // weights once per eight-row chunk: the byte cost of that exactness.
+  // The bound covers prefill rows too: a prompt (or chunk) of at most
+  // max_decode_rows_ tokens takes the GEMV chunks, bitwise alone and as a
+  // mixed walk's decode prefix, while the same tokens inside a longer group
+  // walk take cuBLASLt / the streaming GEMM — the standing property of
+  // prompts under the GEMV bound (four rows before), now up to the recipe's
+  // rows. Two models compare bitwise only at the same rows (the twelve-row
+  // gate's oracle, tests/cuda/glm_tp_test.cpp).
+  dsa_cfg_.gemm_mma_from_rows = max_decode_rows_ + 1;
+  dense_mma_from_rows_ = max_decode_rows_ + 1;
+  gemm_.set_decode_rows(max_decode_rows_);
   DsaConfig::validate_config(dsa_cfg_);
   if (max_cache_tokens < max_tokens_)
     max_cache_tokens = max_tokens_;
@@ -209,7 +233,7 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg, const std::stri
     pool_.init(arena_, dsa_cfg_, max_requests_, dsa_slots);
     dsa_scratch_ = static_cast<uint8_t*>(
         alloc_device(DsaLayer::scratch_bytes(dsa_cfg_, max_tokens_,
-                                              dsa_slots)));
+                                              dsa_slots, max_decode_rows_)));
   } else {
     arena_.init(ac);
   }
@@ -219,11 +243,11 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg, const std::stri
   // configuration; it is lifetime-stable because CUDA graphs bake it.
   d_batch_map_ = static_cast<int32_t*>(alloc_device(sizeof(int32_t) * max_requests_));
   d_req_ids_ = static_cast<int32_t*>(
-      alloc_device(sizeof(int32_t) * kDecodeRows));
+      alloc_device(sizeof(int32_t) * max_decode_rows_));
   d_step_pos_ = static_cast<int64_t*>(
-      alloc_device(sizeof(int64_t) * kDecodeRows));
+      alloc_device(sizeof(int64_t) * max_decode_rows_));
   d_req_spans_ = static_cast<int32_t*>(
-      alloc_device(sizeof(int32_t) * 2 * kDecodeRows));
+      alloc_device(sizeof(int32_t) * 2 * max_decode_rows_));
 
   // The decode path's H2D upload sources, PINNED at construction
   // (pageable async copies stream-sync before initiating — a per-step
@@ -235,19 +259,19 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg, const std::stri
   // stall (docs/batched_mtp_graph_stall.md). Under UVA the host pointer
   // IS the device pointer; the check below pins that.
   DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_req_ids_),
-                             sizeof(int32_t) * kDecodeRows,
+                             sizeof(int32_t) * max_decode_rows_,
                              cudaHostAllocMapped));
   DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_step_pos_),
-                             sizeof(int64_t) * kDecodeRows,
+                             sizeof(int64_t) * max_decode_rows_,
                              cudaHostAllocMapped));
   DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_req_spans_),
-                             sizeof(int32_t) * 2 * kDecodeRows,
+                             sizeof(int32_t) * 2 * max_decode_rows_,
                              cudaHostAllocMapped));
   // The pinned token rows: the decode rows, or every slot's feed rows
   // (session_graph_seed_feed) when those are more.
   DGPP_CUDA_OK(cudaHostAlloc(
       reinterpret_cast<void**>(&h_token_),
-      sizeof(int64_t) * (static_cast<size_t>(kDecodeRows) +
+      sizeof(int64_t) * (static_cast<size_t>(max_decode_rows_) +
                          static_cast<size_t>(max_requests_) *
                              static_cast<size_t>(kSpecRows)),
       cudaHostAllocMapped));
@@ -293,13 +317,13 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg, const std::stri
   if (kda_cfg_.num_kda_layers > 0) {
     const size_t per_row = static_cast<size_t>(kda_cfg_.num_kda_layers);
     spec_rec_ = static_cast<float*>(
-        alloc_device(kDecodeRows * per_row * kda_geo_.recurrent_bytes));
+        alloc_device(max_decode_rows_ * per_row * kda_geo_.recurrent_bytes));
     spec_conv_ = static_cast<uint16_t*>(alloc_device(
-        kDecodeRows * per_row * kda_geo_.conv_committed_bytes));
+        max_decode_rows_ * per_row * kda_geo_.conv_committed_bytes));
   }
   if (main_dsa_layers_ > 0)
     spec_tail_ = static_cast<uint16_t*>(
-        alloc_device(static_cast<size_t>(main_dsa_layers_) * kDecodeRows *
+        alloc_device(static_cast<size_t>(main_dsa_layers_) * max_decode_rows_ *
                      spec_tail_ring_elems() * 2));
   if (mtp_) {
     const size_t H = static_cast<size_t>(cfg_.hidden_size);
@@ -332,7 +356,7 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg, const std::stri
       cfg_.mlps.begin(), cfg_.mlps.end(),
       [](GlmMlpKind k) { return k == GlmMlpKind::Moe; }));
   if (n_moe_layers_ > 0) {
-    const size_t rows = static_cast<size_t>(n_moe_layers_) * kDecodeRows;
+    const size_t rows = static_cast<size_t>(n_moe_layers_) * max_decode_rows_;
     DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&moe_trace_ids_),
                                rows * moe_cfg_.top_k * sizeof(int32_t),
                                cudaHostAllocDefault));
@@ -378,15 +402,15 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg, const std::stri
     dense_act_ = static_cast<uint16_t*>(alloc_device(T * I * 2));
   }
   logits_capacity_rows_ =
-      serving_logits_capacity(max_tokens_, serving_logits, kDecodeRows, max_requests);
+      serving_logits_capacity(max_tokens_, serving_logits, max_decode_rows_, max_requests);
   logits_ = static_cast<float*>(
       alloc_device(static_cast<size_t>(logits_capacity_rows_) * lm_vocab_count_ * sizeof(float)));
   DGPP_CUDA_OK(cudaHostAlloc(
       reinterpret_cast<void**>(&h_tail_logits_),
-      static_cast<size_t>(mixed_output_rows(kDecodeRows, max_requests)) * lm_vocab_count_ * sizeof(float),
+      static_cast<size_t>(mixed_output_rows(max_decode_rows_, max_requests)) * lm_vocab_count_ * sizeof(float),
       cudaHostAllocDefault));
   DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_tail_hidden_),
-                             static_cast<size_t>(mixed_output_rows(kDecodeRows, max_requests)) * H * 2,
+                             static_cast<size_t>(mixed_output_rows(max_decode_rows_, max_requests)) * H * 2,
                              cudaHostAllocDefault));
   DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_graph_start_gt_),
                              sizeof(uint64_t), cudaHostAllocDefault));
@@ -414,7 +438,7 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg, const std::stri
                 ms_between(t_layers, std::chrono::steady_clock::now()) / 1000.0);
   // The draft head's screen (engine.draft_head): the decode drafts' head
   // reads; off with a logged reason when the setting or the head's form says so.
-  if (mtp_) draft_head_.init(draft_head_matrix(), kDecodeRows, loader_.rank(), stream_, /*quiet=*/true);
+  if (mtp_) draft_head_.init(draft_head_matrix(), max_decode_rows_, loader_.rank(), stream_, /*quiet=*/true);
 }
 
 HeadMatrix GlmDiagnosticModel::draft_head_matrix() const {
@@ -466,17 +490,22 @@ void GlmDiagnosticModel::finish_companions() {
   bf12_.log_summary(loader_.rank(), bf12_ms_ / 1000.0);
   // The draft head's screen from the companion when the bf16 bytes were
   // never device-resident (the 12-bit-only residency); a no-op once built.
-  if (mtp_) draft_head_.init(draft_head_matrix(), kDecodeRows, loader_.rank(), stream_);
+  if (mtp_) draft_head_.init(draft_head_matrix(), max_decode_rows_, loader_.rank(), stream_);
 }
 
 GlmDiagnosticModel::MemoryPlan GlmDiagnosticModel::plan_memory(
     const GlmTextConfig& cfg, int max_tokens, int64_t max_cache_tokens, int tp_rank, int tp_world,
     GlmResidency residency, GlmHeadSharding head, int max_requests, bool mtp,
-    LatentFormat kv_format, bool serving_logits) {
+    LatentFormat kv_format, bool serving_logits, int decode_rows) {
   if (max_tokens <= 0)
     throw std::invalid_argument("plan_memory: max_tokens must be positive");
   if (max_requests <= 0)
     throw std::invalid_argument("plan_memory: max_requests must be positive");
+  // The decode rows as the constructor derives them (its floor and bound).
+  decode_rows = decode_rows <= 0 ? kDecodeRows : decode_rows;
+  if (decode_rows < kDecodeRows || decode_rows > decode_rows_cap())
+    throw std::invalid_argument("plan_memory: decode_rows outside [" + std::to_string(kDecodeRows) + ", " +
+                                std::to_string(decode_rows_cap()) + "]");
   MemoryPlan plan;
   if (cfg.vision) {
     plan.add("vision weights (replicated)", cfg.vision->weight_bytes());
@@ -558,11 +587,11 @@ GlmDiagnosticModel::MemoryPlan GlmDiagnosticModel::plan_memory(
   if (dsa_cfg.num_dsa_layers > 0) {
     plan.add(std::string("kv cache pool (") + latent_format_name(kv_format) + ")",
              DsaStatePool::cache_bytes(dsa_cfg, max_requests, dsa_slots));
-    plan.add("dsa scratch", DsaLayer::scratch_bytes(dsa_cfg, max_tokens, dsa_slots));
+    plan.add("dsa scratch", DsaLayer::scratch_bytes(dsa_cfg, max_tokens, dsa_slots, decode_rows));
   }
   if (n_moe > 0) {
     size_t pinned = 0;
-    const size_t dev = GlmMoeLayer::scratch_bytes(moe_cfg, max_tokens, kDecodeRows,
+    const size_t dev = GlmMoeLayer::scratch_bytes(moe_cfg, max_tokens, decode_rows,
                                                   n_moe + (mtp ? 1 : 0), &pinned);
     plan.add("moe scratch", dev, pinned);
     if (cfg.routed_expert_format == GlmExpertFormat::Nvfp4Group16) {
@@ -577,12 +606,12 @@ GlmDiagnosticModel::MemoryPlan GlmDiagnosticModel::plan_memory(
     const size_t per_slot =
         layers * (kda_geo.recurrent_bytes + kda_geo.conv_committed_bytes);
     plan.add("kda state (request slots)", R * per_slot);
-    plan.add("kda speculative snapshots", static_cast<size_t>(kDecodeRows) * per_slot);
+    plan.add("kda speculative snapshots", static_cast<size_t>(decode_rows) * per_slot);
   }
   if (main_dsa_layers > 0) {
     const size_t ring =
         static_cast<size_t>(2) * dsa_cfg.index_kpool * dsa_cfg.index_head_dim * 2;
-    size_t bytes = static_cast<size_t>(main_dsa_layers) * kDecodeRows * ring;
+    size_t bytes = static_cast<size_t>(main_dsa_layers) * decode_rows * ring;
     if (mtp) bytes += R * ring;
     plan.add("dsa tail-ring snapshots", bytes);
   }
@@ -591,7 +620,7 @@ GlmDiagnosticModel::MemoryPlan GlmDiagnosticModel::plan_memory(
              R * static_cast<size_t>(max_context) * H * 2);
     plan.add("draft activations", T * 2 * H * 2 + T * H * 2);
     plan.add("draft head screen (2-bit rotated head copy, scratch)",
-             DraftHead::plan_bytes(GlmLayerStream::lm_vocab_count(cfg, tp_rank, tp_world, head), cfg.hidden_size, kDecodeRows));
+             DraftHead::plan_bytes(GlmLayerStream::lm_vocab_count(cfg, tp_rank, tp_world, head), cfg.hidden_size, decode_rows));
   }
   {
     size_t act = T * 8;                                   // d_tokens_
@@ -602,18 +631,18 @@ GlmDiagnosticModel::MemoryPlan GlmDiagnosticModel::plan_memory(
     if (cfg.first_k_dense_replace > 0)
       act += 3 * (T * static_cast<size_t>(cfg.intermediate_size) * 2);
     act += static_cast<size_t>(
-               serving_logits_capacity(max_tokens, serving_logits, kDecodeRows, max_requests)) *
+               serving_logits_capacity(max_tokens, serving_logits, decode_rows, max_requests)) *
            V * 4;
-    act += R * 8 * 3 + static_cast<size_t>(kDecodeRows) * (4 + 8 + 8);
+    act += R * 8 * 3 + static_cast<size_t>(decode_rows) * (4 + 8 + 8);
     plan.add("activations (per-forward rows)", act,
-             static_cast<size_t>(mixed_output_rows(kDecodeRows, max_requests)) * (V * 4 + H * 2));
+             static_cast<size_t>(mixed_output_rows(decode_rows, max_requests)) * (V * 4 + H * 2));
   }
   if (n_moe > 0) {
     const size_t K = static_cast<size_t>(moe_cfg.top_k);
     const size_t E = static_cast<size_t>(moe_cfg.n_experts);
     const size_t per_row = K * 4 * 2 + E * 4;
     plan.add("route-trace staging", 0,
-             static_cast<size_t>(n_moe) * (static_cast<size_t>(kDecodeRows) + T) * per_row);
+             static_cast<size_t>(n_moe) * (static_cast<size_t>(decode_rows) + T) * per_row);
   }
   return plan;
 }
@@ -777,18 +806,18 @@ void GlmDiagnosticModel::preconstruct_layers() {
           gemm_, *b.dsa, dsa_cfg_, max_tokens_, pool_.max_token_slots(),
           dsa_scratch_,
           DsaLayer::scratch_bytes(dsa_cfg_, max_tokens_,
-                                  pool_.max_token_slots()),
-          gemm_ws_, gemm_ws_bytes_);
+                                  pool_.max_token_slots(), max_decode_rows_),
+          gemm_ws_, gemm_ws_bytes_, max_decode_rows_);
       need_dsa = false;
     }
     if (need_moe && !moe_ && cfg_.mlps[layer] == GlmMlpKind::Moe) {
-      // kDecodeRows: the decode fast path's physical row bound (scalar
+      // max_decode_rows_: the decode fast path's physical row bound (scalar
       // session_step rows or the Phase-2 fixed batch). The graph
       // table slots (one per MoE layer) provision the capture path's
       // per-layer pinned expert-table sources unconditionally — a few
       // hundred KB of pinned memory; the eager path never touches them.
       moe_ = std::make_unique<GlmMoeLayer>(*b.moe, moe_cfg_, max_tokens_,
-                                           kDecodeRows, moe_graph_slots());
+                                           max_decode_rows_, moe_graph_slots());
       need_moe = false;
     }
     if (pack) pack_layer_companions(layer, r);
@@ -966,8 +995,8 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
             gemm_, *b.dsa, dsa_cfg_, max_tokens_,
             pool_.max_token_slots(), dsa_scratch_,
             DsaLayer::scratch_bytes(dsa_cfg_, max_tokens_,
-                                    pool_.max_token_slots()),
-            gemm_ws_, gemm_ws_bytes_);
+                                    pool_.max_token_slots(), max_decode_rows_),
+            gemm_ws_, gemm_ws_bytes_, max_decode_rows_);
       } else {
         dsa_->rebind(*b.dsa);
       }

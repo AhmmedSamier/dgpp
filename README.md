@@ -564,10 +564,11 @@ documented separately in [operations](docs/operations.md).
 | `engine.no_eos` | no | Ignore the model's end-of-sequence token so measurement runs continue to their token budget. Leave false for normal serving, where a model should be allowed to finish its answer. | false |
 
 The application allows up to sixteen request slots. A speculative request uses
-`1 + mtp_depth` physical decode rows. GLM-5.3-Flash supports eight batched
-rows; full GLM-5.3, GLM-4.7 and DeepSeek support thirty-two (full GLM-5.3:
-eight requests at MTP depth 3, since 2026-10-13); Qwen supports sixty-four
-(sixteen requests at MTP depth 3). Graph families capture the slot prefixes that fit, with scalar
+`1 + mtp_depth` physical decode rows. GLM-5.3-Flash, full GLM-5.3, GLM-4.7
+and DeepSeek support thirty-two (full GLM-5.3: eight requests at MTP depth 3,
+since 2026-10-13; GLM-5.3-Flash since 2026-10-14, eight before — four
+requests at MTP depth 2 now batch as one twelve-row family); Qwen supports
+sixty-four (sixteen requests at MTP depth 3). Graph families capture the slot prefixes that fit, with scalar
 fallback for an unsupported active shape. The startup log reports the selected
 capacity and rejects a configuration that cannot fit its required rows.
 Qwen's 17-64-token decode walks use kernel-only BF16 lowering, including

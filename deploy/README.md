@@ -78,11 +78,16 @@ fixed depth 2 and +7..+13 % under the schedule (`engine.mtp_depth: 2`,
 `engine.mtp_schedule: true`, `engine.mtp_schedule_min_depth: 1`,
 `engine.mtp_schedule_row_ms: 14`, `engine.mtp_schedule_base_ms: 34`;
 2026-10-14, four nodes, int4-int8). An interactive deployment of the full
-model should set those five keys. GLM-5.3-Flash gains +3..+13 % at one
-request from depth 2 (fixed or scheduled) but serves every concurrent
-request as a scalar replay past depth 1 (no batched draft chain on that
-family yet): four requests fall from 108–114 to 59–67 wall tok/s, so its
-templates keep depth 1.
+model should set those five keys. GLM-5.3-Flash batches its requests
+past depth 1 since 2026-10-14 (the batched draft chain and the runtime
+decode rows: four slots at depth 2 are one twelve-row family) and gains
++5..+13 % at one request from fixed depth 2 and +3..+12 % under the
+schedule, but four requests still trail depth 1 — 91–104 wall tok/s at
+fixed depth 2 and 99–105 under the schedule against 107–112 at depth 1
+(NVFP4/FP8, four nodes) — so its templates keep depth 1; an interactive
+Flash deployment sets `engine.mtp_depth: 2`, `engine.mtp_schedule: true`,
+`engine.mtp_schedule_min_depth: 1`, `engine.mtp_schedule_row_ms: 7` and
+`engine.mtp_schedule_base_ms: 17`.
 
 The Qwen3.8-Flash-Next, GLM-5.3-Flash, full GLM-5.3 and Qwen3.8-27B
 templates set `engine.draft_head: "screen"` (2026-10-13; the AutoRound

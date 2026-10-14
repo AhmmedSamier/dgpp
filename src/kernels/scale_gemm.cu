@@ -193,6 +193,20 @@ void launch_scale_gemv(const uint16_t* act, size_t act_stride,
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
+// The wide chunk's opt-in (gemv_wide.hpp): one row-count instantiation's
+// dynamic-smem ceiling, both output dtypes.
+template <int kRows>
+bool scale_gemv_opt_in_rows() {
+  const int bytes = static_cast<int>(gemv::kWideSmemBytes);
+  for (const void* f : {reinterpret_cast<const void*>(scale_gemv_kernel<kRows, uint16_t>),
+                        reinterpret_cast<const void*>(scale_gemv_kernel<kRows, float>)})
+    if (cudaFuncSetAttribute(f, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) != cudaSuccess) {
+      (void)cudaGetLastError();
+      return false;
+    }
+  return true;
+}
+
 template <typename OutT>
 void launch_scale_gemv_rows(const uint16_t* act, size_t act_stride,
                             const uint8_t* w, const float* scales, OutT* out,
@@ -215,8 +229,20 @@ void launch_scale_gemv_rows(const uint16_t* act, size_t act_stride,
       launch_scale_gemv<4, OutT>(act, act_stride, w, scales, out, n, k,
                                  out_stride, stream, rs, cs);
       return;
+    case 5:
+      launch_scale_gemv<5, OutT>(act, act_stride, w, scales, out, n, k, out_stride, stream, rs, cs);
+      return;
+    case 6:
+      launch_scale_gemv<6, OutT>(act, act_stride, w, scales, out, n, k, out_stride, stream, rs, cs);
+      return;
+    case 7:
+      launch_scale_gemv<7, OutT>(act, act_stride, w, scales, out, n, k, out_stride, stream, rs, cs);
+      return;
+    case 8:
+      launch_scale_gemv<8, OutT>(act, act_stride, w, scales, out, n, k, out_stride, stream, rs, cs);
+      return;
     default:
-      throw std::invalid_argument("scale_gemv: rows outside [1,4]");
+      throw std::invalid_argument("scale_gemv: rows outside [1,8]");
   }
 }
 
@@ -323,7 +349,7 @@ void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
       }
     }
     for (int row0 = 0; row0 < m;) {
-      int rows = std::min(fp8_gemv::kMaxRows, m - row0);
+      int rows = std::min(gemv::kWideRows, m - row0);  // the wide chunk (gemv_wide.hpp): one weight read to eight rows
       while (!fp8_gemv::shape_ok(w_payload, rows, k)) --rows;
       launch_scale_gemv_rows(
           act + static_cast<size_t>(row0) * act_row_stride_elems,
@@ -392,7 +418,7 @@ void launch_scale_gemm_grid(const uint16_t* act, size_t act_row_stride_elems,
     throw std::invalid_argument("scale_gemm_grid: k must be a positive multiple of 16");
   if ((m <= kGemvMaxM || channel) && fp8_gemv::shape_ok(w_payload, /*rows=*/1, k)) {
     for (int row0 = 0; row0 < m;) {
-      int rows = std::min(fp8_gemv::kMaxRows, m - row0);
+      int rows = std::min(gemv::kWideRows, m - row0);
       while (!fp8_gemv::shape_ok(w_payload, rows, k)) --rows;
       launch_scale_gemv_rows(act + static_cast<size_t>(row0) * act_row_stride_elems,
                              act_row_stride_elems, w_payload, w_scales,
@@ -421,6 +447,13 @@ void launch_scale_gemm_grid(const uint16_t* act, size_t act_row_stride_elems,
 }
 
 }  // namespace
+
+// The five-to-eight-row scale GEMV instantiations' opt-in (gemv_wide.hpp,
+// from gemv::enable_wide_rows at process start).
+bool scale_gemv_opt_in_wide() {
+  return scale_gemv_opt_in_rows<5>() && scale_gemv_opt_in_rows<6>() && scale_gemv_opt_in_rows<7>() &&
+         scale_gemv_opt_in_rows<8>();
+}
 
 void launch_scale_gemm_grid_bf16(const uint16_t* act, size_t act_row_stride_elems,
                                  const uint8_t* w_payload, const float* w_scales,

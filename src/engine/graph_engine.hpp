@@ -3089,6 +3089,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     // The drafts this step fed (the verify's rows after the first); the
     // slot's drafts are replaced below by the block's new ones.
     const std::vector<int32_t>& fed_drafts = fed_drafts_[static_cast<size_t>(req)];
+    DGPP_LOG_DEBUG("rank {}: slot {} verdict: rows {} accepted {} next {} fed drafts {}/{} (batched {})", rank_, req,
+                   rows, verify.accepted, verify.next, fed_drafts.empty() ? -1 : fed_drafts[0],
+                   fed_drafts.size() > 1 ? fed_drafts[1] : -1, batched);
     if (block_cands_ > 0 && verify.accepted < rows && next >= 0) {
       // The first rejected draft: where does the target's correction sit
       // among the candidates the walk scored at that position?

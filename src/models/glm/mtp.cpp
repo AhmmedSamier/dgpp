@@ -453,11 +453,11 @@ void GlmDiagnosticModel::session_graph_capture_draft_batch(
     const PickVerdict* verify_verdicts) {
   if (!mtp_)
     throw std::logic_error("session_graph_capture_draft_batch: no MTP");
-  if (graph_batch_requests_ <= 0 || graph_rows_per_request_ != 2 ||
+  if (graph_batch_requests_ <= 0 || graph_rows_per_request_ < 2 ||
       !graph_device_positions_ || !graph_device_tokens_)
     throw std::logic_error(
-        "session_graph_capture_draft_batch: requires a device-driven T=2 "
-        "fixed batch");
+        "session_graph_capture_draft_batch: requires a device-driven fixed "
+        "batch of 1 + depth rows per request");
   if (verify_verdicts == nullptr)
     throw std::invalid_argument(
         "session_graph_capture_draft_batch: null verdicts");
@@ -557,21 +557,71 @@ void GlmDiagnosticModel::session_graph_capture_next_tokens(
 
 void GlmDiagnosticModel::session_graph_capture_next_tokens_batch(
     const PickVerdict* draft_verdicts) {
+  session_graph_capture_next_tokens_batch(std::vector<const PickVerdict*>{draft_verdicts});
+}
+
+void GlmDiagnosticModel::session_graph_capture_next_tokens_batch(
+    const std::vector<const PickVerdict*>& draft_verdicts) {
   if (!graph_device_tokens_ || !graph_has_draft_ ||
-      graph_batch_requests_ <= 0 || graph_rows_per_request_ != 2)
+      graph_batch_requests_ <= 0 || graph_rows_per_request_ < 2)
     throw std::logic_error(
-        "session_graph_capture_next_tokens_batch: requires the fixed T=2 "
-        "draft graph");
-  if (draft_verdicts == nullptr)
-    throw std::invalid_argument(
-        "session_graph_capture_next_tokens_batch: null verdicts");
+        "session_graph_capture_next_tokens_batch: requires the fixed draft "
+        "graph");
+  // The feeds carry every draft of the block whatever the verify's rows
+  // (a reduced-depth batch verified a prefix off the compacted copy and
+  // the block's full width was drafted).
+  const int feed_rows = graph_feed_rows_ > 0 ? graph_feed_rows_ : graph_rows_per_request_;
+  if (draft_verdicts.empty() || draft_verdicts.size() > static_cast<size_t>(kSpecMaxDrafts) ||
+      feed_rows != 1 + static_cast<int>(draft_verdicts.size()))
+    throw std::logic_error(
+        "session_graph_capture_next_tokens_batch: the token feed is [next, "
+        "draft_1 .. draft_n] per request (T = 1 + n)");
   GlmSpecDrafts drafts;
-  drafts.v[0] = draft_verdicts;
-  drafts.count = 1;
-  glm_spec_next_tokens_batched(
-      d_next_, drafts, graph_batch_requests_,
-      graph_rows_per_request_, graph_batch_map_source_ ? d_tokens_ + kDecodeRows : step_tokens_, stream_,
-      graph_batch_map_source_ ? d_batch_map_ : nullptr);
+  drafts.count = static_cast<int>(draft_verdicts.size());
+  for (int c = 0; c < drafts.count; ++c) {
+    if (draft_verdicts[static_cast<size_t>(c)] == nullptr)
+      throw std::invalid_argument(
+          "session_graph_capture_next_tokens_batch: null verdicts");
+    drafts.v[c] = draft_verdicts[static_cast<size_t>(c)];
+  }
+  int64_t* feeds = (graph_feed_rows_ > 0 || graph_batch_map_source_)
+                       ? d_tokens_ + static_cast<size_t>(max_decode_rows_)
+                       : step_tokens_;
+  glm_spec_next_tokens_batched(d_next_, drafts, graph_batch_requests_, feed_rows, feeds, stream_,
+                               graph_batch_map_source_ ? d_batch_map_ : nullptr);
+}
+
+void GlmDiagnosticModel::session_graph_capture_draft_chain_batch(
+    const PickVerdict* verify_verdicts, const PickVerdict* draft_verdicts,
+    int index, bool first, bool last) {
+  if (!mtp_) throw std::logic_error("session_graph_capture_draft_chain_batch: no MTP");
+  if (graph_batch_requests_ <= 0 || graph_rows_per_request_ < 2 ||
+      !graph_device_positions_ || !graph_device_tokens_ || !graph_has_draft_)
+    throw std::logic_error(
+        "session_graph_capture_draft_chain_batch: needs the fixed batch with "
+        "the draft in the graph");
+  if (verify_verdicts == nullptr || draft_verdicts == nullptr)
+    throw std::invalid_argument("session_graph_capture_draft_chain_batch: null verdicts");
+  if (index < 0 || index >= kSpecRows - 1)
+    throw std::invalid_argument("session_graph_capture_draft_chain_batch: chain index");
+  const int k = graph_batch_requests_;
+  const int slots = graph_batch_map_source_ ? max_requests_ : k;
+  if (first)
+    for (int q = 0; q < slots; ++q) chain_ring_copy(q, /*restore=*/false);
+  // Every slot's chain row into the compact one-row-per-request layout:
+  // the per-position hidden cache is the slot's window of max_context rows
+  // (row pos % max_context = pos), its stride one slot's cache.
+  const int H = cfg_.hidden_size;
+  glm_spec_chain_rows_batched(
+      verify_verdicts, draft_verdicts, k, graph_rows_per_request_, mtp_x_, H,
+      mtp_hidden_, static_cast<int>(max_context_),
+      static_cast<size_t>(max_context_) * static_cast<size_t>(H), d_mtp_pos_, index,
+      static_cast<int64_t>(max_context_), d_step_pos_, step_tokens_, d_req_ids_, d_req_spans_,
+      stream_, graph_batch_map_source_ ? d_batch_map_ : nullptr);
+  mtp_run_rows(/*req=*/0, /*first_pos=*/0, /*T=*/k, /*decode_row=*/true,
+               /*capture_mode=*/true, /*head_rows=*/k, /*batch_requests=*/k);
+  if (last)
+    for (int q = 0; q < slots; ++q) chain_ring_copy(q, /*restore=*/true);
 }
 
 void GlmDiagnosticModel::session_graph_seed_tokens(
@@ -593,7 +643,7 @@ void GlmDiagnosticModel::session_graph_seed_tokens(
   // copy would try to synchronize with its capturing stream.
   // The slot's feed rows (device_feed): the batch's and the scalar
   // variant's alike.
-  const size_t row0 = static_cast<size_t>(kDecodeRows) +
+  const size_t row0 = static_cast<size_t>(max_decode_rows_) +
                       static_cast<size_t>(req) * rows_per_request;
   for (size_t i = 0; i < ids.size(); ++i) h_token_[row0 + i] = ids[i];
   DGPP_CUDA_OK(cudaMemcpyAsync(d_tokens_ + row0, h_token_ + row0,
@@ -631,7 +681,7 @@ void GlmDiagnosticModel::session_graph_seed_feed(
   // The slot's own pinned rows (a later seed of another slot must not
   // rewrite a copy's source before it ran) and its device feed rows; on
   // the model's stream, never the legacy stream.
-  const size_t row0 = static_cast<size_t>(kDecodeRows) +
+  const size_t row0 = static_cast<size_t>(max_decode_rows_) +
                       static_cast<size_t>(req) * ids.size();
   for (size_t i = 0; i < ids.size(); ++i) h_token_[row0 + i] = ids[i];
   DGPP_CUDA_OK(cudaMemcpyAsync(d_tokens_ + row0, h_token_ + row0,

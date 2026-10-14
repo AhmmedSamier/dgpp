@@ -108,7 +108,7 @@ class GlmDiagnosticModel : public PrefillReporting {
                      GlmResidency residency = GlmResidency::Streaming,
                      GlmHeadSharding head = GlmHeadSharding::Full, int max_requests = 1,
                      bool mtp = false, LatentFormat kv_format = LatentFormat::kBf16,
-                     bool serving_logits = false);
+                     bool serving_logits = false, int decode_rows = 0);
 
   // ---- the memory plan ----------------------------------------
   // Every byte the constructor (and its layer objects) will allocate for a
@@ -126,7 +126,7 @@ class GlmDiagnosticModel : public PrefillReporting {
                                 GlmResidency residency = GlmResidency::Streaming,
                                 GlmHeadSharding head = GlmHeadSharding::Full, int max_requests = 1,
                                 bool mtp = false, LatentFormat kv_format = LatentFormat::kBf16,
-                                bool serving_logits = false);
+                                bool serving_logits = false, int decode_rows = 0);
   ~GlmDiagnosticModel();
   GlmDiagnosticModel(const GlmDiagnosticModel&) = delete;
   GlmDiagnosticModel& operator=(const GlmDiagnosticModel&) = delete;
@@ -186,7 +186,7 @@ class GlmDiagnosticModel : public PrefillReporting {
   // Several cold prompts as the spans of one walk (2026-09-14): the
   // engine's group prefill (graph_engine.hpp prefill_group) when the
   // family exposes the span limit — every span within max_tokens, the
-  // group within max_tokens and kDecodeRows spans. Per span: its last
+  // group within max_tokens and max_decode_rows_ spans. Per span: its last
   // row's logits and hidden; the walk's route traces on the first.
   std::vector<Outputs> session_prefill_group(const std::vector<int>& reqs,
                                              const std::vector<const std::vector<int64_t>*>& prompts);
@@ -266,7 +266,7 @@ class GlmDiagnosticModel : public PrefillReporting {
     return run.num_spans - run.decode_spans <= max_mixed_prefill_readers(run.decode_rows());
   }
   int max_mixed_prefill_readers(int decode_rows) const {
-    return std::max(0, std::min({max_requests_, mixed_output_rows(kDecodeRows, max_requests_) - decode_rows, logits_capacity_rows_ - decode_rows}));
+    return std::max(0, std::min({max_requests_, mixed_output_rows(max_decode_rows_, max_requests_) - decode_rows, logits_capacity_rows_ - decode_rows}));
   }
   void finish_mixed_prefill(PrefillCursor& cursor) {
     if (cursor.next == cursor.end && cursor.suspended) {
@@ -324,16 +324,25 @@ class GlmDiagnosticModel : public PrefillReporting {
   // T >= 5 would fall to cuBLASLt and break the equality above.
   static constexpr int kSpecRows = dgpp::kSpecRows;
   // Phase-2 physical decode ceiling. A captured batch is request-slot major
-  // and must satisfy requests * spec_rows <= this bound. This model keeps
-  // the build-time 8 (the session-core families derive theirs at runtime,
-  // engine/decode_outputs.hpp); the engines read it through
-  // max_decode_rows().
+  // and must satisfy requests * spec_rows <= this bound. Since 2026-10-14 a
+  // runtime shape like the session-core families' (engine/decode_outputs.hpp):
+  // the constructor's `decode_rows` — the serving app's max_concurrency x
+  // (1 + mtp depth) — floored at kDecodeRows (the eager draft, verify and
+  // chain use rows [0, kDecodeRows) of the token buffer as scratch) and
+  // bounded by decode_rows_cap(), the DSA layer's select bound. The engines
+  // read it through max_decode_rows(); every dense site lowers to the
+  // row-independent GEMV chunks up to it (the constructor), so a batched
+  // row is bitwise the row alone at every batch this family serves.
   static constexpr int kDecodeRows = dgpp::kDecodeRows;
-  int max_decode_rows() const { return kDecodeRows; }
-  // No batched depth >= 2 chain on this family (its chain rows run on the
-  // per-position hidden cache, scalar): past depth 1 the graph engine
-  // serves scalar replays.
-  static constexpr bool kBatchedDraftChain = false;
+  static constexpr int decode_rows_cap() { return 32; }  // DsaLayer's bound (models/dsa_layer.cu)
+  int max_decode_rows() const { return max_decode_rows_; }
+  // The fixed batch's chain past depth 1 (2026-10-14): the graph engine
+  // records session_graph_capture_draft_chain_batch — one chain row per
+  // request slot, its hidden the block's own previous output row landed in
+  // the slot's per-position cache (the batched draft's input kernel reads
+  // it there). Until then every live request was a scalar replay past
+  // depth 1 (four requests: 108–114 → 59–67 wall tok/s on the fabric).
+  static constexpr bool kBatchedDraftChain = true;
   static constexpr bool kCompactBatches = true;
   // No confidence head: the graph engine never schedules this family's
   // verify depth.
@@ -425,6 +434,18 @@ class GlmDiagnosticModel : public PrefillReporting {
   // bitwise group-vs-solo gate reads (tests/cuda/glm_tp_test.cpp).
   void set_walk_capture(std::vector<std::vector<uint16_t>>* capture) { walk_capture_ = capture; }
   int64_t session_position(int req) const;
+  // Test-facing: the draft block's per-position hidden cache of slot `req`
+  // (bf16 [max_context, hidden]; the main stack's pre-final-norm hidden at
+  // every position the slot has verified) — the gates compare it between
+  // an eager and a graph model.
+  const uint16_t* debug_draft_hidden(int req) const { return mtp_hidden_cache(req); }
+  int64_t debug_mtp_position(int req) const { return mtp_pos_[static_cast<size_t>(req)]; }
+  // Test-facing: a digest of slot `req`'s live main-stack state (every KDA
+  // layer's recurrent and conv state, every DSA layer's tail ring) — the
+  // gates compare an eager and a graph model step by step.
+  uint64_t debug_state_digest(int req);
+  // The same per state family: [kda rec, kda conv, dsa tail layer 0, 1, ...].
+  std::vector<uint64_t> debug_state_digests(int req);
 
   // ---- the graph era (DESIGN §6.2, the decode step) --------------------
   // The decode step is a fixed launch sequence, so it records ONCE into
@@ -488,12 +509,12 @@ class GlmDiagnosticModel : public PrefillReporting {
   // the scalar variant of the slot and the fixed batch alike read their
   // fed tokens there and write the next replay's, so a slot's feed
   // survives the other slots' replays and a mode switch. Eager decode
-  // work (the eager draft, verify and chain) uses rows [0, kDecodeRows)
+  // work (the eager draft, verify and chain) uses rows [0, max_decode_rows_)
   // as scratch, so the feeds start past them; a prefill writes its chunk
   // over everything and the engine reseeds every live slot's feed after
   // it.
   const int64_t* device_feed(int req, int rows) const {
-    return d_tokens_ + kDecodeRows +
+    return d_tokens_ + max_decode_rows_ +
            static_cast<size_t>(req) * static_cast<size_t>(rows);
   }
   const int64_t* device_positions() const { return d_step_pos_; }
@@ -645,6 +666,19 @@ class GlmDiagnosticModel : public PrefillReporting {
       const PickVerdict* verify_verdicts);
   void session_graph_capture_next_tokens_batch(
       const PickVerdict* draft_verdicts);
+  // The feed with every draft of the block per request, [next, draft_1 ..
+  // draft_n] (T = 1 + n): the batched chain's end.
+  void session_graph_capture_next_tokens_batch(const std::vector<const PickVerdict*>& draft_verdicts);
+  // The fixed batch's chain row `index` (depth >= 2, 2026-10-14): every
+  // slot's row at block_pos + index off the slots' draft verdicts, the
+  // hidden the block's previous output row (the batched draft run's last
+  // accepted row of the slot for index 0, the previous chain run's row q
+  // after) copied into the slot's position cache, the request ids and spans
+  // rewritten to one row per request; the block over the k rows with the
+  // head on each (the picks read rows 0 .. k-1). `first` snapshots every
+  // slot's tail ring, `last` restores it (the scalar chain's guard).
+  void session_graph_capture_draft_chain_batch(const PickVerdict* verify_verdicts, const PickVerdict* draft_verdicts,
+                                               int index, bool first, bool last);
   // Restores the host-side validation/staging contract after capturing a
   // scalar variant beside an already-recorded fixed batch. CUDA graph nodes
   // have their own baked arguments; these fields govern replay-side helpers.
@@ -1023,9 +1057,12 @@ class GlmDiagnosticModel : public PrefillReporting {
   // caller-owned device buffers — allocation happens at construction,
   // never mid-session; the synchronizing-call discipline applies between
   // collectives). Scalar calls stage one request's rows; the Phase-2 graph
-  // stages every configured request slot. kDecodeRows=8 is both DsaLayer's
-  // select-kernel bound and the fixed graph's physical row ceiling.
+  // stages every configured request slot. max_decode_rows_ (kDecodeRows
+  // unless the constructor was given more, decode_rows_cap() at most) is
+  // both DsaLayer's select-kernel bound and the fixed graph's physical
+  // row ceiling.
   int max_requests_ = 1;
+  int max_decode_rows_ = kDecodeRows;
   std::vector<int64_t> session_pos_;  // [max_requests]; 0 = closed slot
   std::vector<uint64_t> prefill_epochs_;  // invalidate cursors on close/reopen
   int64_t* d_session_pos_ = nullptr;  // device [max_requests] — the
@@ -1042,18 +1079,18 @@ class GlmDiagnosticModel : public PrefillReporting {
   bool decode_tail_mirrors_ = true;
   int64_t* d_next_ = nullptr;  // device [max_requests]: the verify's next
                                // token, parked for the token feed
-  int32_t* d_req_ids_ = nullptr;      // device [kDecodeRows]
-  int64_t* d_step_pos_ = nullptr;     // device [kDecodeRows]
-  int32_t* d_req_spans_ = nullptr;    // device [kDecodeRows, 2]
+  int32_t* d_req_ids_ = nullptr;      // device [max_decode_rows_]
+  int64_t* d_step_pos_ = nullptr;     // device [max_decode_rows_]
+  int32_t* d_req_spans_ = nullptr;    // device [max_decode_rows_, 2]
   // The H2D upload sources, PINNED (pageable async copies stream-sync
   // before initiating — a per-step pipeline drain; and CUDA-graph
   // memcpy nodes REQUIRE page-locked host sources). Stable addresses
   // for the graph's lifetime: the replay's memcpy nodes re-read these
   // after session_graph_stage refreshes their contents.
-  int32_t* h_req_ids_ = nullptr;      // pinned [kDecodeRows]
-  int64_t* h_step_pos_ = nullptr;     // pinned [kDecodeRows]
-  int32_t* h_req_spans_ = nullptr;    // pinned [kDecodeRows, 2]
-  int64_t* h_token_ = nullptr;       // pinned [kDecodeRows] — the step's
+  int32_t* h_req_ids_ = nullptr;      // pinned [max_decode_rows_]
+  int64_t* h_step_pos_ = nullptr;     // pinned [max_decode_rows_]
+  int32_t* h_req_spans_ = nullptr;    // pinned [max_decode_rows_, 2]
+  int64_t* h_token_ = nullptr;       // pinned [max_decode_rows_] — the step's
                                      // token id (the decode walk's H2D
                                      // source; a memcpy node's baked
                                      // address)
@@ -1066,9 +1103,9 @@ class GlmDiagnosticModel : public PrefillReporting {
   int decode_rows_ = 1;
   // Speculative post-row state snapshots (kernels/kda.hpp
   // KdaStateSnapshots, dsa.hpp tail_snapshots), one in-flight verify:
-  //   spec_rec_  [kDecodeRows][num_kda_layers][rec elems]  fp32
-  //   spec_conv_ [kDecodeRows][num_kda_layers][conv elems] bf16
-  //   spec_tail_ [num_dsa_layers][kDecodeRows][2, kpool, dim] bf16
+  //   spec_rec_  [max_decode_rows_][num_kda_layers][rec elems]  fp32
+  //   spec_conv_ [max_decode_rows_][num_kda_layers][conv elems] bf16
+  //   spec_tail_ [num_dsa_layers][max_decode_rows_][2, kpool, dim] bf16
   // Row-major over the layers so rolling every KDA layer back is one
   // memcpy from row a-1 onto the request's contiguous layer slots.
   float* spec_rec_ = nullptr;
@@ -1103,9 +1140,9 @@ class GlmDiagnosticModel : public PrefillReporting {
   // Outputs.routes after the step's final sync (the copies are
   // stream-ordered; the sync joins them). Allocated at construction.
   int n_moe_layers_ = 0;
-  int32_t* moe_trace_ids_ = nullptr;    // [n_moe_layers_ * kDecodeRows * K]
+  int32_t* moe_trace_ids_ = nullptr;    // [n_moe_layers_ * max_decode_rows_ * K]
   float* moe_trace_weights_ = nullptr;  // same shape
-  float* moe_trace_biased_ = nullptr;   // [n_moe_layers_ * kDecodeRows * E]
+  float* moe_trace_biased_ = nullptr;   // [n_moe_layers_ * max_decode_rows_ * E]
   // The prefill's route-trace staging (2026-09-04): the same shapes over
   // max_tokens rows, filled by async D2H during the chunk and materialized
   // after its final sync — the prefill runs with no per-layer host sync.

@@ -407,9 +407,13 @@ DGPP_TEST(shared_prefill_glm) {
   const auto cfg = glm_tp_test_config();
   const std::string dir = "shared_glm_fixture";
   glm_tp_write_fixture(dir);
+  // The graph check drives an MTP model at depth 3 (the Flash has the
+  // batched draft chain since 2026-10-14): four slots x four rows, the
+  // runtime decode rows past the build-time eight.
   check<GlmDiagnosticModel>([&](bool mtp, bool compact) {
     return std::make_unique<GlmDiagnosticModel>(cfg, dir, 2048, 4096, nullptr, 0, 1,
-        GlmResidency::Resident, GlmHeadSharding::Full, 4, mtp, LatentFormat::kBf16, compact);
+        GlmResidency::Resident, GlmHeadSharding::Full, 4, mtp, LatentFormat::kBf16, compact,
+        /*decode_rows=*/mtp ? 16 : 0);
   }, cfg.vocab_size, cfg.dsa_config().index_kpool);
 }
 // GLM-5.3-Flash: a decoder's verify rows inside a mixed walk are bitwise its

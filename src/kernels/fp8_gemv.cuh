@@ -48,7 +48,7 @@ using gemv::stage_activations;
 // 16-byte-aligned payload.
 __host__ inline bool shape_ok(const void* payload, int rows, int k) {
   return k > 0 && (k % kChunkBytes) == 0 && gemv::aligned16(payload) &&
-         gemv::smem_fits(rows, k);
+         rows >= 1 && rows <= gemv::kWideRows && gemv::smem_fits_wide(rows, k);
 }
 
 // e4m3 -> f32, exact (every finite e4m3 value is an fp16 value; the two

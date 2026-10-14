@@ -354,7 +354,12 @@ struct GraphRecordReducer final : BoundaryReducer {
     if (cudaMalloc(reinterpret_cast<void**>(&probe_stable_), max_elems_ * 2) !=
         cudaSuccess)
       throw std::runtime_error("graph record reducer: probe buffer alloc failed");
-    DGPP_CUDA_OK(cudaMemset(probe_stable_, 0, max_elems_ * 2));
+    // Stream-ordered, never the legacy stream: a peer rank in the same
+    // process (the loopback worlds) may already be capturing, and a
+    // legacy-stream memset would try to synchronize with its capturing
+    // stream (cudaErrorStreamCaptureImplicit, 2026-10-14).
+    DGPP_CUDA_OK(cudaMemsetAsync(probe_stable_, 0, max_elems_ * 2, stream_));
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   }
   ~GraphRecordReducer() override {
     if (stable_) cudaFree(stable_);

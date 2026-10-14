@@ -302,8 +302,8 @@ struct ServeFamily {
   virtual int64_t position_limit() const { return 0; }
   // The decode rows the family serves in one fixed batch at most (2026-09-10,
   // engine/decode_outputs.hpp): the session-core families take the derived
-  // shape up to kDecodeRowsMax; GLM-5.3-Flash keeps its build-time 8, and
-  // Qwen3.8-Flash-Next and full GLM currently support sixteen rows.
+  // shape up to kDecodeRowsMax; GLM-5.3-Flash takes it up to 32 since
+  // 2026-10-14 (its build-time 8 before), as do the full GLM and GLM-4.7.
   virtual int decode_rows_cap() const = 0;
   // The MTP depth when neither the flag nor the file names one: one draft,
   // or the DSpark block's five (DeepSeek-V4.1).
@@ -373,28 +373,28 @@ struct GlmFamily final : ServeFamily {
     return "";
   }
   const char* kv_format_name() const override { return dgpp::latent_format_name(kv_format); }
-  int decode_rows_cap() const override { return dgpp::GlmDiagnosticModel::kDecodeRows; }
-  size_t lat_slot_bytes(int) const override {
-    return static_cast<size_t>(dgpp::GlmDiagnosticModel::kDecodeRows) * static_cast<size_t>(cfg.hidden_size) * 2;
+  int decode_rows_cap() const override { return dgpp::GlmDiagnosticModel::decode_rows_cap(); }
+  size_t lat_slot_bytes(int decode_rows) const override {
+    return static_cast<size_t>(decode_rows) * static_cast<size_t>(cfg.hidden_size) * 2;
   }
   dgpp::MemoryPlan plan(int forward_rows, int64_t context, int rank, int world_, bool fabric, int slots,
-                        bool mtp, int) const override {
+                        bool mtp, int decode_rows) const override {
     return dgpp::GlmDiagnosticModel::plan_memory(
         cfg, forward_rows, context, fabric ? rank : 0, fabric ? world_ : 1,
         fabric ? dgpp::GlmResidency::Resident : dgpp::GlmResidency::Streaming,
         fabric ? dgpp::GlmHeadSharding::VocabSharded : dgpp::GlmHeadSharding::Full, slots,
-        fabric && mtp, kv_format, /*serving_logits=*/true);
+        fabric && mtp, kv_format, /*serving_logits=*/true, decode_rows);
   }
   size_t snapshot_bytes(int world_, bool mtp) const override {
     return dgpp::GlmDiagnosticModel::session_snapshot_bytes(cfg, world_, mtp);
   }
   void build_model(dgpp::BoundaryReducer* reducer, int rank, int world_, bool fabric, int forward_rows,
-                   int64_t pool_tokens, int slots, bool mtp, int) override {
+                   int64_t pool_tokens, int slots, bool mtp, int decode_rows) override {
     model = std::make_unique<dgpp::GlmDiagnosticModel>(
         cfg, ckpt, forward_rows, pool_tokens, reducer, fabric ? rank : 0, fabric ? world_ : 1,
         fabric ? dgpp::GlmResidency::Resident : dgpp::GlmResidency::Streaming,
         fabric ? dgpp::GlmHeadSharding::VocabSharded : dgpp::GlmHeadSharding::Full, slots,
-        fabric && mtp, kv_format, /*serving_logits=*/true);
+        fabric && mtp, kv_format, /*serving_logits=*/true, decode_rows);
     // Neither the eager nor graph serving path consumes diagnostic routes.
     model->set_decode_route_traces(false);
   }
@@ -2605,8 +2605,8 @@ int main(int argc, char** argv) {
     // batch holds every slot's verify rows — max_concurrency x (1 + the
     // MTP depth) — floored at kDecodeRows so every existing recipe keeps
     // its exact shape (4 slots x 2 rows = 8). The family's cap bounds it:
-    // Qwen supports up to 64 rows, GLM-4.7 up to 32, and the full
-    // GLM-5.3 up to 16. Fitting batch families remain available when
+    // Qwen supports up to 64 rows; GLM-4.7, the full GLM-5.3 and
+    // GLM-5.3-Flash up to 32. Fitting batch families remain available when
     // a deeper configuration exceeds the full-batch ceiling.
     // Reject configurations whose depth-1 batch already exceeds the cap.
     // The DFlash2 eager path verifies a full block per slot per step: the

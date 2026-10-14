@@ -464,7 +464,7 @@ std::vector<GlmDiagnosticModel::Outputs> GlmDiagnosticModel::session_prefill_gro
   const int n = static_cast<int>(reqs.size());
   if (n <= 0 || prompts.size() != reqs.size())
     throw std::invalid_argument("session_prefill_group: requests and prompts");
-  if (n > kDecodeRows)
+  if (n > max_decode_rows_)
     throw std::invalid_argument("session_prefill_group: more spans than the tail mirrors' rows");
   if (dsa_cfg_.num_dsa_layers > 0 && kPrefillChunkTokens % dsa_cfg_.index_kpool != 0)
     throw std::runtime_error("session_prefill_group: the chunk size broke the kpool-alignment contract");
@@ -667,7 +667,7 @@ GlmDiagnosticModel::SessionSnapshotMeta GlmDiagnosticModel::session_snapshot_pos
   if (pos % session_snapshot_align() != 0)
     throw std::invalid_argument(
         "session_snapshot_post_row0: the position after row 0 is not pool-aligned");
-  if (spec_row < 0 || spec_row >= kDecodeRows)
+  if (spec_row < 0 || spec_row >= max_decode_rows_)
     throw std::out_of_range("session_snapshot_post_row0: spec row " + std::to_string(spec_row));
   if (dst == nullptr) throw std::invalid_argument("session_snapshot_post_row0: null buffer");
   // The draft block: its rows ran (counter at P+rows_after, the pre-draft
@@ -709,7 +709,7 @@ GlmDiagnosticModel::SessionSnapshotMeta GlmDiagnosticModel::session_snapshot_pos
     for (int layer = 0; layer < dsa_cfg_.num_dsa_layers; ++layer) {
       const uint16_t* src;
       if (layer < main_dsa_layers_) {
-        src = spec_tail_ + (static_cast<size_t>(layer) * kDecodeRows +
+        src = spec_tail_ + (static_cast<size_t>(layer) * max_decode_rows_ +
                             static_cast<size_t>(spec_row)) * ring;
       } else if (draft_ring_from_snapshot) {
         src = mtp_ring_snapshot_ + static_cast<size_t>(req) * ring;
@@ -875,10 +875,32 @@ GlmSpecSegments GlmDiagnosticModel::spec_segments(int req,
     add(static_cast<uint16_t*>(pool_.tail(layer)) +
             static_cast<size_t>(req) * ring,
         spec_tail_ +
-            (static_cast<size_t>(layer) * kDecodeRows + snapshot_row0) * ring,
+            (static_cast<size_t>(layer) * max_decode_rows_ + snapshot_row0) * ring,
         ring * 2,
         ring * 2);
   return segs;
+}
+
+std::vector<uint64_t> GlmDiagnosticModel::debug_state_digests(int req) {
+  const GlmSpecSegments segs = spec_segments(req, 0);
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  std::vector<uint64_t> out;
+  std::vector<uint8_t> host;
+  for (int i = 0; i < segs.count; ++i) {
+    uint64_t h = 1469598103934665603ull;
+    host.resize(segs.seg[i].bytes);
+    DGPP_CUDA_OK(cudaMemcpyAsync(host.data(), segs.seg[i].dst, segs.seg[i].bytes, cudaMemcpyDeviceToHost, stream_));
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+    for (const uint8_t b : host) h = (h ^ b) * 1099511628211ull;
+    out.push_back(h);
+  }
+  return out;
+}
+
+uint64_t GlmDiagnosticModel::debug_state_digest(int req) {
+  uint64_t h = 1469598103934665603ull;
+  for (const uint64_t d : debug_state_digests(req)) h = (h ^ d) * 1099511628211ull;
+  return h;
 }
 
 size_t GlmDiagnosticModel::spec_tail_ring_elems() const {
@@ -922,7 +944,7 @@ void GlmDiagnosticModel::session_rollback(int req, int accepted, int total_rows,
     uint16_t* tail = static_cast<uint16_t*>(pool_.tail(layer)) +
                      static_cast<size_t>(req) * ring;
     const uint16_t* snap =
-        spec_tail_ + (static_cast<size_t>(layer) * kDecodeRows + row) * ring;
+        spec_tail_ + (static_cast<size_t>(layer) * max_decode_rows_ + row) * ring;
     DGPP_CUDA_OK(cudaMemcpyAsync(tail, snap, ring * 2,
                                  cudaMemcpyDeviceToDevice, stream_));
   }
@@ -1008,7 +1030,7 @@ void GlmDiagnosticModel::session_graph_prepare() {
     const GlmLayerBound b = bind_layer(r, /*dense_mlp=*/false);
     if (!moe_)
       moe_ = std::make_unique<GlmMoeLayer>(*b.moe, moe_cfg_, max_tokens_,
-                                           kDecodeRows, moe_graph_slots());
+                                           max_decode_rows_, moe_graph_slots());
     moe_->rebind(*b.moe);
     moe_->prepare_graph_table(moe_ordinal++, stream_);
   }
@@ -1051,7 +1073,7 @@ void GlmDiagnosticModel::session_graph_capture_step(
   // rows (device_feed), so its feed survives the other slots' replays; a
   // reduced-depth variant (the scheduled verify depth) reads the first
   // ids.size() rows of the same feed.
-  step_tokens_ = d_tokens_ + kDecodeRows + static_cast<size_t>(req) * static_cast<size_t>(graph_feed_rows_);
+  step_tokens_ = d_tokens_ + max_decode_rows_ + static_cast<size_t>(req) * static_cast<size_t>(graph_feed_rows_);
   session_decode_host_prep(req, ids, /*upload=*/true, device_positions);
   const int64_t pos = session_pos_[static_cast<size_t>(req)];
   // The uploads and every launch record; the walk's syncs are skipped
@@ -1062,15 +1084,24 @@ void GlmDiagnosticModel::session_graph_capture_step(
 }
 
 void GlmDiagnosticModel::session_graph_capture_batch_inputs(int rows_per_request, int requests_arg, int feed_rows) {
-  if (feed_rows != 0 && feed_rows != rows_per_request)
-    throw std::invalid_argument("session_graph_capture_batch: this family has no reduced-depth feed");
   const int requests = requests_arg > 0 ? requests_arg : max_requests_;
   if (rows_per_request < 1 || rows_per_request > kSpecRows ||
-      requests < 1 || requests > max_requests_ || max_requests_ > kDecodeRows ||
-      requests * rows_per_request > kDecodeRows)
+      requests < 1 || requests > max_requests_ || max_requests_ > max_decode_rows_ ||
+      requests * rows_per_request > max_decode_rows_)
     throw std::invalid_argument(
         "session_graph_capture_batch: requests * rows_per_request must fit "
         "the fixed decode-row ceiling");
+  // The reduced-depth batch (2026-10-14, the scheduled verify depth on
+  // the batch families — as engine/session_model.hpp): every slot keeps
+  // its persistent feed at `feed_rows` rows (the whole block), a variant
+  // verifying rows_per_request < feed_rows rows per slot reads them
+  // compacted (glm_spec_gather_feed), and the draft writes the block's
+  // full width back. The feeds sit behind the decode rows at kSpecRows per
+  // slot.
+  if (feed_rows < 0 || feed_rows > kSpecRows || (feed_rows > 0 && feed_rows < rows_per_request) ||
+      (feed_rows > 0 && requests * feed_rows > max_requests_ * kSpecRows))
+    throw std::invalid_argument(
+        "session_graph_capture_batch: the feeds must hold at least the verified rows");
   if (std::none_of(session_pos_.begin(), session_pos_.end(),
                    [](int64_t p) { return p > 0; }))
     throw std::logic_error(
@@ -1085,10 +1116,10 @@ void GlmDiagnosticModel::session_graph_capture_batch_inputs(int rows_per_request
   graph_has_draft_ = false;
   graph_batch_requests_ = requests;
   graph_rows_per_request_ = rows_per_request;
-  graph_feed_rows_ = 0;
+  graph_feed_rows_ = feed_rows > rows_per_request ? feed_rows : 0;
   decode_rows_ = rows;
-  GraphBatchMapping<GlmDiagnosticModel>::inputs(*this, requests, rows_per_request, rows_per_request);
-
+  GraphBatchMapping<GlmDiagnosticModel>::inputs(*this, requests, rows_per_request,
+                                                graph_feed_rows_ > 0 ? graph_feed_rows_ : rows_per_request);
 }
 
 void GlmDiagnosticModel::session_graph_capture_batch(int rows_per_request, int requests_arg, int feed_rows) {
@@ -1119,7 +1150,7 @@ void GlmDiagnosticModel::session_graph_use_batch_contract(
   const int requests = requests_arg > 0 ? requests_arg : max_requests_;
   if (rows_per_request < 1 || rows_per_request > kSpecRows ||
       requests < 1 || requests > max_requests_ ||
-      requests * rows_per_request > kDecodeRows)
+      requests * rows_per_request > max_decode_rows_)
     throw std::invalid_argument(
         "session_graph_use_batch_contract: invalid fixed batch shape");
   graph_device_positions_ = true;
@@ -1168,7 +1199,7 @@ void GlmDiagnosticModel::session_graph_capture_verify_next_tokens_batch(
         "T=1 fixed graph");
   glm_spec_verify_next_tokens_batched(
       verify_verdicts, graph_batch_requests_, graph_rows_per_request_,
-      graph_batch_map_source_ ? d_tokens_ + kDecodeRows : step_tokens_, stream_,
+      graph_batch_map_source_ ? d_tokens_ + max_decode_rows_ : step_tokens_, stream_,
       graph_batch_map_source_ ? d_batch_map_ : nullptr);
 }
 
@@ -1188,16 +1219,21 @@ void GlmDiagnosticModel::session_reserve_blocks(int req, int64_t tokens) {
 }
 
 void GlmDiagnosticModel::session_graph_settle(int req, int accepted, int rows) {
-  (void)rows;  // this family verifies one row count
   if (req < 0 || req >= max_requests_)
     throw std::out_of_range("session_graph_settle: request slot " +
                             std::to_string(req));
   if (!graph_device_positions_)
     throw std::logic_error("session_graph_settle: the graph was not captured "
                            "with device positions (use session_graph_collect)");
-  const int accepted_bound = graph_batch_requests_ > 0
-                                 ? graph_rows_per_request_
-                                 : decode_rows_;
+  // The replay's own rows bound the verdict (the engine passes them): with
+  // the scheduled depth on the batch families this family verifies several
+  // row counts, and the pipelined next replay has already switched the
+  // model's contract to its own rows by the time this one settles
+  // (2026-10-14: "accepted rows outside [1, 2]" after a full-block replay
+  // settled behind a reduced-depth launch, on four nodes at four slots).
+  const int accepted_bound = rows > 0 ? rows
+                             : graph_batch_requests_ > 0 ? graph_rows_per_request_
+                                                         : decode_rows_;
   if (accepted < 1 || accepted > accepted_bound)
     throw std::invalid_argument("session_graph_settle: accepted rows outside "
                                 "[1, " + std::to_string(accepted_bound) + "]");
@@ -1335,7 +1371,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_rows(const RowRun& run) {
       run.T <= 0 || run.T > max_tokens_ || !prefill_batch_fits(run))
     throw std::invalid_argument("GLM row batch exceeds execution capacity");
   const int decoded = run.decode_rows();
-  if (decoded > kDecodeRows) throw std::invalid_argument("GLM speculative prefix exceeds capacity");
+  if (decoded > max_decode_rows_) throw std::invalid_argument("GLM speculative prefix exceeds capacity");
   int row = 0;
   for (int sp = 0; sp < run.decode_spans; ++sp) {
     h_req_spans_[2 * sp] = row;
@@ -1648,8 +1684,8 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
             gemm_, *b.dsa, dsa_cfg_, max_tokens_, pool_.max_token_slots(),
             dsa_scratch_,
             DsaLayer::scratch_bytes(dsa_cfg_, max_tokens_,
-                                    pool_.max_token_slots()),
-            gemm_ws_, gemm_ws_bytes_);
+                                    pool_.max_token_slots(), max_decode_rows_),
+            gemm_ws_, gemm_ws_bytes_, max_decode_rows_);
       } else {
         dsa_->rebind(*b.dsa);
       }
@@ -1662,7 +1698,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
         void* tail_snaps = (T > 1 || batched)
                                ? spec_tail_ +
                                      static_cast<size_t>(dsa_ordinal) *
-                                         kDecodeRows * spec_tail_ring_elems()
+                                         max_decode_rows_ * spec_tail_ring_elems()
                                : nullptr;
         dsa_->enqueue_decode(normed_, pool_, dsa_ordinal, d_req_ids_,
                              d_step_pos_, d_req_spans_,
@@ -1674,7 +1710,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
         int64_t row0 = 0;
         if (group_decode_spans_ > 0) {
           if (!dsa_->prepare(group_decode_rows_)) throw std::runtime_error("mixed DSA plans unavailable");
-          auto* tail_snaps = spec_tail_ + static_cast<size_t>(dsa_ordinal) * kDecodeRows * spec_tail_ring_elems();
+          auto* tail_snaps = spec_tail_ + static_cast<size_t>(dsa_ordinal) * max_decode_rows_ * spec_tail_ring_elems();
           wide_prefix([&] {
             dsa_->enqueue_decode(normed_, pool_, dsa_ordinal, d_req_ids_, d_step_pos_, d_req_spans_,
                                  group_decode_spans_, group_decode_rows_, attn_out, stream_, nullptr, tail_snaps);
@@ -1758,7 +1794,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
     } else {
       if (!moe_) {
         moe_ = std::make_unique<GlmMoeLayer>(*b.moe, moe_cfg_, max_tokens_,
-                                             kDecodeRows);
+                                             max_decode_rows_);
       } else {
         moe_->rebind(*b.moe);
       }
@@ -1770,11 +1806,11 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
         // entry is filled after the final sync below.
         MoeTraceStaging trace;
         const size_t lay = static_cast<size_t>(moe_decode_calls);
-        trace.ids = moe_trace_ids_ + lay * kDecodeRows * moe_cfg_.top_k;
+        trace.ids = moe_trace_ids_ + lay * max_decode_rows_ * moe_cfg_.top_k;
         trace.weights =
-            moe_trace_weights_ + lay * kDecodeRows * moe_cfg_.top_k;
+            moe_trace_weights_ + lay * max_decode_rows_ * moe_cfg_.top_k;
         trace.biased =
-            moe_trace_biased_ + lay * kDecodeRows * moe_cfg_.n_experts;
+            moe_trace_biased_ + lay * max_decode_rows_ * moe_cfg_.n_experts;
         // Capture passes the layer's OWN graph table slot so the
         // recorded upload node replays THIS layer's expert views; the
         // eager path uploads from the layer's guarded ring instead.
@@ -1897,7 +1933,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   // computed. Decode rows keep their batch-wide head.
   const int head_rows = output_plan.output_rows();
   if (!decode_row) {
-    if (head_rows > mixed_output_rows(kDecodeRows, max_requests_))
+    if (head_rows > mixed_output_rows(max_decode_rows_, max_requests_))
       throw std::invalid_argument("session: selected outputs exceed tail capacity");
     output_plan.for_each_output([&](int input, int output, int count) {
       if (input != output)
@@ -2042,11 +2078,11 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_decode_tail(int T) {
     if (cfg_.mlps[layer] != GlmMlpKind::Moe) continue;
     const size_t lay = static_cast<size_t>(moe_ordinal);
     const int32_t* ids =
-        moe_trace_ids_ + lay * kDecodeRows * moe_cfg_.top_k;
+        moe_trace_ids_ + lay * max_decode_rows_ * moe_cfg_.top_k;
     const float* ws =
-        moe_trace_weights_ + lay * kDecodeRows * moe_cfg_.top_k;
+        moe_trace_weights_ + lay * max_decode_rows_ * moe_cfg_.top_k;
     const float* bs =
-        moe_trace_biased_ + lay * kDecodeRows * moe_cfg_.n_experts;
+        moe_trace_biased_ + lay * max_decode_rows_ * moe_cfg_.n_experts;
     GlmRouteTraceLayer route;
     route.layer_idx = static_cast<uint32_t>(layer);
     route.top_k = static_cast<uint32_t>(moe_cfg_.top_k);

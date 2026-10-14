@@ -5,6 +5,81 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **GLM-5.3-Flash: the batched draft chain, and the wide GEMV chunk that
+  makes every decode batch bitwise** (2026-10-14). The Flash's fixed batch
+  now carries the MTP chain past depth 1
+  (`session_graph_capture_draft_chain_batch`: one chain row per request
+  slot off the slots' draft verdicts, its hidden the block's own previous
+  output row in the slot's position cache, the ring guard around the chain
+  as the scalar chain's), so a depth-2 recipe batches its live requests
+  instead of replaying each as a scalar graph (four requests fell from
+  108–114 to 59–67 wall tok/s that way). Two long gates came with it (a
+  sixteen-round greedy batch and a 64-step sampled co-admission at depth 2)
+  and they caught a pre-existing exactness gap: above four rows the dense
+  decode sites left the row-independent GEMV chunks for cuBLASLt or the
+  streaming fp8 GEMM (one weight read, but a reduction order that follows
+  m), so every batch wider than four rows — the four-slot depth-1 batch
+  included — was only tolerance-equal to the eager walk, and a greedy
+  transcript drifted at a near-tie after a dozen rounds. The GEMV cores
+  (bf16, the fp8 scale GEMV) now stage up to eight rows a launch
+  (`kernels/gemv_wide.hpp`: the 96 KB shared-memory opt-in taken once in
+  the GEMM wrapper's constructor, never inside a capture; eight 4096-wide
+  rows are 64 KB), the chunk sizers take the wide chunk, and the Flash's
+  lowering bounds are its decode rows: a batched row is bitwise the row
+  alone at every batch the family serves, with the weights read once up
+  to eight rows (`bf16_gemv_wide_rows_bitwise_the_rows_alone`,
+  `scale_gemm_wide_gemv_rows_bitwise_the_rows_alone`; the one-to-four-row
+  chunks keep the default 48 KB ceiling, so every narrower chunking —
+  every other family's decode lowering — is exactly what it was, and
+  Qwen's kernel-only 17–64-row walks now read their weights once per
+  eight rows instead of four). The bound covers prefill rows: a prompt or
+  chunk of at most the recipe's decode rows takes the GEMV chunks too
+  (bitwise alone and as a mixed walk's decode prefix; inside a longer
+  group walk the same tokens take cuBLASLt or the streaming GEMM, the
+  standing property of prompts under the GEMV bound, four rows before —
+  so their bits move once, this release, and a 32-token prompt on an
+  eight-slot depth-3 recipe reads the dense weights once per eight rows
+  in its prefill). With the chain
+  and the chunk the Flash's decode rows became a runtime shape like the
+  session-core families' (`GlmDiagnosticModel(..., decode_rows)`,
+  `decode_rows_cap()` 32 — the DSA select bound; the build-time eight
+  stays the floor and the eager scratch): a four-slot recipe at depth 2
+  batches as one twelve-row family, with the 2- and 3-slot families under
+  it (`glm_tp_serving_mtp_depth2_twelve_row_batch_matches_independent_speculators`:
+  every family's rows bitwise the slots' own depth-2 walks, the feeds past
+  the twelve scratch rows, a hole and the scalar tail), where before only
+  a 2-slot family fit the eight rows and the other live requests replayed
+  scalar graphs. With batch families past depth 1 the scheduled verify
+  depth records reduced-depth batch variants, so the Flash's batch capture
+  compacts a feed wider than its verify rows and its draft writes the
+  block's full width back, as the session-core families do (the warm
+  capture refused with "this family has no reduced-depth feed" before);
+  `glm_tp_serving_mtp_depth2_scheduled_batch_matches_independent_speculators`
+  drives the 2-slot family through a forced per-step depth of 1 and 2
+  against two eager speculators at the same depths. Its first four-request
+  run on the fabric crashed the engine ("session_graph_settle: accepted
+  rows outside [1, 2]"): the Flash's settle ignored the rows the engine
+  passes and read the model's batch contract, which the pipelined next
+  replay — another depth variant — had already switched; it bounds by the
+  replay's own rows now, as the session core does. Measured on four nodes
+  (NVFP4/FP8, four slots, ms a step at one request by class prose / code /
+  JSON / math / chat, wall tok/s at four): depth 1 on the new binary is
+  the previous release's — 30.5 / 31.2 / 30.7 / 31.1 / 30.8 against 30.6 /
+  31.3 / 30.8 / 31.2 / 30.9, and 108.1 / 109.0 / 112.4 / 111.8 / 107.3
+  against 108.8 / 110.1 / 111.4 / 113.3 / 107.0 at four requests, so the
+  wide chunk costs nothing at eight rows; fixed depth 2 (the twelve-row
+  family) 36.9 / 38.1 / 37.3 / 38.0 / 37.4 at 2.3–2.7 tokens a pass, +5..+13 %
+  at one request and 90.7 / 97.9 / 99.8 / 103.6 / 92.0 at four (−6..−17 %,
+  where the scalar replays of window 8 gave 59–67); the scheduled depth 2
+  (row 7 ms, base 17, min 1) 35.8 / 37.4 / 36.1 / 37.3 / 36.0, +3..+12 % at
+  one request, and 98.5 / 99.7 / 104.3 / 105.4 / 98.6 at four (−6..−9 %; the
+  four-slot family replayed 572 times at depth 1 and 598 at depth 2 over
+  that run). Greedy transcripts identical on every leg. The Flash templates keep depth 1; the schedule keys are the
+  interactive setting (deploy/README.md). Also: the graph record
+  reducer's probe memset is
+  stream-ordered (a legacy-stream memset invalidated a capturing peer in
+  the loopback worlds), and the full GLM-5.3's engine test gained the
+  scheduled-depth exactness gate.
 - **GLM MTP-step round: graphs, doorbells, the 32-row cap, the scheduled
   depth on the GLMs** (2026-10-13/14). Bitwise, measured on four nodes
   against the previous release: the residual add fused into the next norm's

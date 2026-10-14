@@ -110,6 +110,59 @@ head is screenable (the rescore reads its planes through
 restricted to the candidate blocks), but its template keeps the exact head
 until a single-Spark leg measures the screen on it.
 
+## The batched draft chain on GLM-5.3-Flash
+
+Past depth 1 the Flash's fixed batch carries every slot's chain rows
+(`GlmDiagnosticModel::session_graph_capture_draft_chain_batch`, 2026-10-14):
+one row per request slot at the slot's block counter plus the chain index,
+its token the slot's previous draft pick and its hidden the block's own
+previous output row (the batched draft run's last accepted row for the
+first chain row, the previous chain run's row after it), copied into the
+slot's per-position hidden cache where the block's input kernel reads it;
+the slots' tail rings are snapshotted before the first chain row and
+restored after the last, as the scalar chain does for one slot. The picks
+read rows `0 .. k-1` of the chain run's head and the feed then carries
+`[next, draft_1 .. draft_n]` per slot. Until then every live request of a
+depth-2 recipe replayed a scalar graph (four requests: 108–114 → 59–67 wall
+tok/s on four nodes). The gates: a sixteen-round greedy batch of two slots
+at depth 2 against two eager speculators and the feed, and a 64-step
+sampled co-admission at depth 2 (`glm_tp_test`).
+
+Those gates are long enough to see the lowering: a batched row is bitwise
+the row alone only while every dense decode site keeps the row-independent
+GEMV chunks, so the chunks now stage up to eight rows a launch
+(`kernels/gemv_wide.hpp`) and the Flash lowers its whole decode batch
+through them (the CHANGELOG, 2026-10-14).
+
+The Flash's decode rows are a runtime shape since the same day (the
+constructor's `decode_rows`, the serving app's `max_concurrency x (1 +
+mtp_depth)`, floored at the build-time eight and capped at 32 — the DSA
+select bound; `README.md` "decode rows"): a four-slot recipe at depth 2
+holds a twelve-row batch with the 2- and 3-slot families under it, so
+every live set batches. Before, only a 2-slot family fit the eight rows and
+the other live requests replayed scalar graphs. A batch past eight rows
+lowers to an eight- and a four-row GEMV chunk of the same scalar chain —
+the dense weights read once per chunk, the byte cost of that exactness —
+and `glm_tp_serving_mtp_depth2_twelve_row_batch_matches_independent_speculators`
+holds every family's rows to the slots' own depth-2 walks (tokens, feeds
+and each slot's per-position hidden cache against an eager oracle built at
+the same rows; a hole, the scalar tail). The bound covers prefill rows: a
+prompt of at most the recipe's decode rows prefills through the GEMV
+chunks (bitwise alone and as a mixed walk's decode prefix; the same tokens
+inside a longer group walk take the tiled forms, as every prompt under
+the GEMV bound always has).
+
+With batch families past depth 1 the scheduled verify depth
+(`engine.mtp_schedule`) records reduced-depth batch variants, so the
+Flash's batch capture compacts a feed wider than its verify rows and its
+draft writes the block's full width back (as the session-core families
+do: `glm_spec_gather_feed`); without it the warm capture refused with
+"this family has no reduced-depth feed".
+`glm_tp_serving_mtp_depth2_scheduled_batch_matches_independent_speculators`
+drives the 2-slot family through a forced per-step depth of 1 and 2
+against two eager speculators at the same depths (a fresh slot's first
+step is held at the full block).
+
 ## The DFlash2 block drafter (Qwen3.8-27B)
 
 DFlash2 (`src/models/qwen/dflash2.hpp`, `src/kernels/dflash2.cu`) replaces
