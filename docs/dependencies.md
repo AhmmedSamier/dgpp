@@ -11,6 +11,16 @@ WebP uses the vendored `simplewebp.h`, also compiled into the service. Its
 source and local fixes are recorded in `third_party/simplewebp/README.md`; the
 BSD license and WebM patent grant ship in
 [licenses/simplewebp.md](licenses/simplewebp.md).
+MP3 audio inputs use the vendored `minimp3.h`, compiled directly into the
+service the same way. No additional runtime audio library is needed. Its
+pinned source and license are recorded in
+[licenses/minimp3.md](licenses/minimp3.md).
+FLAC inputs use the vendored `dr_flac.h` and Ogg Vorbis inputs the vendored
+`stb_vorbis.c`, both compiled into the service. Their pinned sources and
+licenses are recorded in [licenses/dr_flac.md](licenses/dr_flac.md) and
+[licenses/stb_vorbis.md](licenses/stb_vorbis.md). Ogg-encapsulated Opus is
+refused: no single-header Opus decoder exists and libopus is not a serving
+dependency.
 
 The vision LayerNorm reduction schedule adapts PyTorch CUDA arithmetic under
 the [PyTorch license](licenses/pytorch.md). PyTorch is only needed for optional

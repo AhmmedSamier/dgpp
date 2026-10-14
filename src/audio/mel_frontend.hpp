@@ -5,10 +5,11 @@
 // magnitudes projected through the 201x128 Slaney filter bank, log10 with a
 // 1e-10 clamp and an 8-decay-per-clip floor, then (x + 4) / 4.
 //
-// The DFT here is the straightforward matrix product - exact but quadratic,
-// about a tenth of a second per second of audio. It is the oracle the CUDA
-// path must match within the feature budget; replacing it (Bluestein or a
-// kernel) is a pure speed-up and must not move these numbers.
+// The DFT here is a mixed-radix 16x25 FFT (`audio/fft400.hpp`) in double
+// precision: identical features to the quadratic matrix product it
+// replaced (the goldens cannot tell them apart), at ~2.4 ms per audio
+// second. It is the oracle the CUDA path must match within the feature
+// budget.
 
 #include <cstdint>
 #include <cstddef>

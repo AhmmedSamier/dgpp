@@ -98,6 +98,10 @@ class SchedulerEngine {
   // Until an engine snapshots KV across an audio span, audio requests skip
   // the prefix cache (their cold prefill is the whole prompt).
   virtual bool supports_audio_prefix_cache() const { return false; }
+  // The rows one request's audio spans may total: tower staging and the
+  // forward share this bound, so admission refuses longer clips before
+  // they can fail the service. 0 = the admission bound governs.
+  virtual int64_t prefill_audio_token_limit() const { return 0; }
   virtual int32_t prefill_audios(int, const std::vector<int64_t>&, const std::vector<AudioInput>&) {
     throw std::invalid_argument("this engine does not support audio inputs");
   }

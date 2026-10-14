@@ -30,10 +30,15 @@ struct MultipartPart {
 };
 
 struct MultipartError : std::invalid_argument {
-  MultipartError(std::string message, std::string param, int status = 400)
-      : std::invalid_argument(std::move(message)), param(std::move(param)), status(status) {}
+  MultipartError(std::string message, std::string param, int status = 400,
+                 std::string code = "")
+      : std::invalid_argument(std::move(message)),
+        param(std::move(param)),
+        status(status),
+        code(std::move(code)) {}
   std::string param;
   int status;  // the HTTP status the route answers (400, or 404 for model)
+  std::string code;  // the error code the route answers ("" = none)
 };
 
 // Strict RFC 2046 framing over the exact boundary: --boundary CRLF,
@@ -54,17 +59,52 @@ struct TranscriptionFields {
   bool has_temperature = false;
 };
 
-// Validates the transcription fields (400s name the multipart field) and
-// folds them into the chat-completions body the engine serves: a user
-// message with one input_audio part (base64 WAV bytes), the prompt as the
-// system message when present, a duration-proportional max_tokens, and no
-// streaming. Throws MultipartError (bad fields) or AudioInputError
-// (undecodable audio, "file").
+// Splits the checkpoint's language tag from the transcript body:
+// {"language English", "Hmm. ..."} for the model's glued tag, {"", text}
+// otherwise. The model emits "language <NAME><Text>" with no separator in
+// ~every transcript (2619/2620 test-clean outputs), so the split falls on
+// the camelCase boundary: a capitalized word followed at once by an
+// uppercase letter. Anything else — spaced tags, lowercase continuations
+// (one test-clean output starts "language Englishsaid ..."), missing or
+// lowercase tags — passes through unsplit rather than risk eating speech.
+std::pair<std::string, std::string> split_language_tag(std::string_view text);
+
+// Renders a transcript for the wire: tag on its own line above the body,
+// or the text verbatim when there is no splittable tag.
+std::string format_transcription_text(std::string_view text);
+
+// Validates the transcription fields (400s name the multipart field)
+// without touching the audio: model, language, prompt, response_format,
+// temperature. Throws MultipartError.
+TranscriptionFields parse_transcription_fields(const std::vector<MultipartPart>& parts,
+                                               const std::string& model_id);
+
+// Folds validated fields plus one clip's WAV bytes into the
+// chat-completions body the engine serves: a user message with one
+// input_audio part (base64 WAV bytes), the prompt as the system message
+// when present, a duration-proportional max_tokens, and no streaming.
+// Decodes the clip (throwing AudioInputError naming "file" when it is not
+// servable audio) for the duration rule.
 struct TranscriptionRequest {
   minijson::Value body;
   std::string response_format;  // "json" or "text"
 };
 
+TranscriptionRequest transcription_body_for_wav(const TranscriptionFields& fields,
+                                                std::string_view wav_bytes);
+
 TranscriptionRequest transcription_chat_body(const std::vector<MultipartPart>& parts,
                                              const std::string& model_id);
+
+// Long-form transcription (docs/audio.md): splits a clip that cannot fit
+// one engine forward into whole-chunk segment bodies, each sized so its
+// audio tokens fit token_budget (the engine's prefill window) minus a
+// prompt reserve. token_budget <= 0, or a clip that fits, yields one body
+// (today's path, unchanged). Throws MultipartError naming "file" when even
+// one chunk plus the reserve cannot fit, AudioInputError for undecodable
+// audio. Segment token counts sum exactly (chunk-aligned splits), and each
+// segment carries its own duration-proportional max_tokens.
+std::vector<TranscriptionRequest> transcription_segment_bodies(
+    const std::vector<MultipartPart>& parts, const std::string& model_id,
+    int64_t token_budget);
 }  // namespace dgpp::serve

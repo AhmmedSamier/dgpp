@@ -313,13 +313,14 @@ void QwenAsrModel::stage_audio_rows(const std::vector<AudioInput>& audios) {
     audio_row_base_.push_back(row);
     int64_t samples = 0;
     int64_t emitted = 0;
-    while (emitted < au.tokens) {
-      // One 30 s piece: its own log-mel floor, exactly the HF processor's
-      // window (a <= 30 s clip is one piece).
-      const size_t take =
-          std::min<int64_t>(kSegmentSamples, static_cast<int64_t>(au.pcm.size()) - samples);
-      const auto fb = audio::compute_fbank(au.pcm.data() + samples, take);
-      samples += static_cast<int64_t>(take);
+    // One 30 s piece per window: its own log-mel floor, exactly the HF
+    // processor's window (a <= 30 s clip is one piece). audio_piece_takes
+    // lends a sub-minimum tail one chunk from its predecessor, so every
+    // take clears the frontend floor without leaving the tower window.
+    for (const int64_t take : audio_piece_takes(static_cast<int64_t>(au.pcm.size()))) {
+      const auto fb =
+          audio::compute_fbank(au.pcm.data() + samples, static_cast<size_t>(take));
+      samples += take;
       const int frames = static_cast<int>(fb.frames);
       const int padded = ((frames + kAudioChunkFrames - 1) / kAudioChunkFrames) * kAudioChunkFrames;
       if (padded < kAudioChunkFrames)
@@ -337,7 +338,6 @@ void QwenAsrModel::stage_audio_rows(const std::vector<AudioInput>& audios) {
         throw std::logic_error("Qwen ASR: tower row count drifted from the admission");
       row += piece;
       emitted += piece;
-      if (samples >= static_cast<int64_t>(au.pcm.size())) break;
     }
     if (emitted != au.tokens || row - audio_row_base_.back() != au.tokens)
       throw std::logic_error("Qwen ASR: tower produced the wrong row count");

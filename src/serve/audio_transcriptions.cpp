@@ -10,6 +10,7 @@
 
 #include "common/audio_input.hpp"
 #include "common/base64.hpp"
+#include "audio/wav_decode.hpp"
 #include "serve/audio_inputs.hpp"
 
 namespace dgpp::serve {
@@ -194,7 +195,8 @@ std::vector<MultipartPart> parse_multipart(std::string_view content_type, std::s
 namespace {
 // Canonical 44-byte WAV header sniff for the max_tokens duration rule:
 // rate@24, channels@22, bits@34, "data"@36 with size@40. Anything else
-// (extensible fmt, extra chunks) falls back to the fixed cap below.
+// (extensible fmt, extra chunks, MP3) falls back to the decoded probe
+// duration at the call site.
 double wav_seconds(std::string_view bytes) {
   if (bytes.size() < 44) return -1.0;
   const auto u32 = [&](size_t at) {
@@ -219,9 +221,8 @@ double wav_seconds(std::string_view bytes) {
 }
 }  // namespace
 
-TranscriptionRequest transcription_chat_body(const std::vector<MultipartPart>& parts,
-                                              const std::string& model_id) {
-  using V = minijson::Value;
+TranscriptionFields parse_transcription_fields(const std::vector<MultipartPart>& parts,
+                                                 const std::string& model_id) {
   const MultipartPart* file = nullptr;
   const MultipartPart* model = nullptr;
   const MultipartPart* language = nullptr;
@@ -278,21 +279,35 @@ TranscriptionRequest transcription_chat_body(const std::vector<MultipartPart>& p
     if (prompt->data.size() > 4096) fail("prompt is too long", "prompt");
     f.prompt = std::string(prompt->data);
   }
-  // The audio must decode before anything is admitted: undecodable bytes
-  // are a 400 naming the file, never scheduler work. The decoded span is
-  // discarded here (admission re-decodes from the same bytes); this pass
-  // only proves the file is a servable clip.
-  const AudioInput probe = prepare_audio_bytes(
-      reinterpret_cast<const uint8_t*>(f.file_bytes.data()), f.file_bytes.size(), "file");
-  (void)probe;
-  // Completion cap from the clip length (~4 text tokens per audio second
-  // covers dense English with margin), floored so short clips still close
-  // cleanly and capped so prompt + cap fits any admittable pool. The
-  // engine's reserve arithmetic still refuses the truly oversized.
-  const double seconds = wav_seconds(f.file_bytes);
+  return f;
+}
+
+namespace {
+// Completion cap from the clip length (~4 text tokens per audio second
+// covers dense English with margin), floored so short clips still close
+// cleanly and capped so prompt + cap fits any admittable pool. The
+// engine's reserve arithmetic still refuses the truly oversized.
+int transcription_steps(double seconds) {
   int steps = 2048;
   if (seconds >= 0.0)
     steps = std::max(256, std::min(6000, static_cast<int>(seconds * 4.0) + 128));
+  return steps;
+}
+}  // namespace
+
+TranscriptionRequest transcription_body_for_wav(const TranscriptionFields& f,
+                                                 std::string_view wav_bytes) {
+  using V = minijson::Value;
+  // The audio must decode before anything is admitted: undecodable bytes
+  // are a 400 naming the file, never scheduler work. The decoded span is
+  // discarded here (admission re-decodes from the same bytes); this pass
+  // only proves the clip is servable and measures it.
+  const AudioInput probe = prepare_audio_bytes(
+      reinterpret_cast<const uint8_t*>(wav_bytes.data()), wav_bytes.size(), "file");
+  double seconds = wav_seconds(wav_bytes);
+  if (seconds < 0.0 && probe.frames > 0)
+    seconds = static_cast<double>(probe.frames) * kAudioHop / kAudioSampleRate;
+  const int steps = transcription_steps(seconds);
   std::vector<minijson::Member> members;
   members.push_back({"model", V::make_owned_string(f.model)});
   std::vector<V> messages;
@@ -300,7 +315,7 @@ TranscriptionRequest transcription_chat_body(const std::vector<MultipartPart>& p
     messages.push_back(V::make_object({{"role", V::make_string("system")},
                                        {"content", V::make_owned_string(f.prompt)}}));
   std::vector<minijson::Member> ia_members;
-  ia_members.push_back({"data", V::make_owned_string(encode_base64(f.file_bytes))});
+  ia_members.push_back({"data", V::make_owned_string(encode_base64(wav_bytes))});
   ia_members.push_back({"format", V::make_string("wav")});
   std::vector<V> content_parts;
   content_parts.push_back(V::make_object({{"type", V::make_string("input_audio")},
@@ -314,5 +329,76 @@ TranscriptionRequest transcription_chat_body(const std::vector<MultipartPart>& p
   members.push_back({"stream", V::make_bool(false)});
   V body = V::make_object(std::move(members));
   return TranscriptionRequest{std::move(body), f.response_format};
+}
+
+std::pair<std::string, std::string> split_language_tag(std::string_view text) {
+  // "language " + CapitalizedWord, the word ending exactly where an
+  // uppercase letter begins the transcript (or at end of input).
+  constexpr std::string_view kPrefix = "language ";
+  if (text.size() <= kPrefix.size() || text.substr(0, kPrefix.size()) != kPrefix)
+    return {"", std::string(text)};
+  size_t i = kPrefix.size();
+  if (i >= text.size() || text[i] < 'A' || text[i] > 'Z') return {"", std::string(text)};
+  ++i;
+  while (i < text.size() && text[i] >= 'a' && text[i] <= 'z') ++i;
+  if (i < text.size() && (text[i] < 'A' || text[i] > 'Z')) return {"", std::string(text)};
+  std::string tag(text.substr(0, i));
+  std::string body = i < text.size() ? std::string(text.substr(i)) : "";
+  while (!body.empty() && (body.front() == ' ' || body.front() == '\t'))
+    body.erase(body.begin());
+  return {std::move(tag), std::move(body)};
+}
+
+std::string format_transcription_text(std::string_view text) {
+  auto [tag, body] = split_language_tag(text);
+  if (tag.empty() || body.empty()) return std::string(text);
+  return tag + "\n" + body;
+}
+
+TranscriptionRequest transcription_chat_body(const std::vector<MultipartPart>& parts,
+                                             const std::string& model_id) {
+  const TranscriptionFields f = parse_transcription_fields(parts, model_id);
+  return transcription_body_for_wav(f, f.file_bytes);
+}
+std::vector<TranscriptionRequest> transcription_segment_bodies(
+    const std::vector<MultipartPart>& parts, const std::string& model_id,
+    int64_t token_budget) {
+  const TranscriptionFields f = parse_transcription_fields(parts, model_id);
+  // Single-body fast path: unknown windows, and clips that fit, ride
+  // today's path byte-identically (same probe, same seconds, same body).
+  const AudioInput probe = prepare_audio_bytes(
+      reinterpret_cast<const uint8_t*>(f.file_bytes.data()), f.file_bytes.size(), "file");
+  // Prompt overhead plus slack against the engine window: template, the
+  // system prompt and the span markers. The per-segment admission check
+  // re-verifies with the rendered prompt as backstop.
+  constexpr int64_t kSegmentReserve = 128;
+  if (token_budget <= 0 || probe.tokens + kSegmentReserve <= token_budget)
+    return {transcription_body_for_wav(f, f.file_bytes)};
+  // Whole-chunk segments of C chunks (13C audio tokens), the last taking
+  // the tail: chunk-aligned splits keep token counts exact, so the parts
+  // sum to the admission total.
+  const int64_t chunks =
+      (token_budget - kSegmentReserve - kAudioChunkTokens) / kAudioChunkTokens;
+  if (chunks < 1)
+    throw MultipartError(
+        "the audio cannot fit one engine forward even segmented; submit a shorter clip",
+        "file", 400, "context_length_exceeded");
+  const int64_t seg_frames = chunks * kAudioChunkFrames;
+  std::vector<TranscriptionRequest> out;
+  int64_t first = 0;
+  const int64_t total = probe.frames;
+  while (total - first > seg_frames) {
+    const std::string wav = audio::encode_wav_16mono_16k(
+        probe.pcm.data() + static_cast<size_t>(first) * kAudioHop,
+        static_cast<size_t>(seg_frames) * kAudioHop);
+    out.push_back(transcription_body_for_wav(f, wav));
+    first += seg_frames;
+  }
+  const int64_t tail_frames = total - first;
+  const std::string wav = audio::encode_wav_16mono_16k(
+      probe.pcm.data() + static_cast<size_t>(first) * kAudioHop,
+      static_cast<size_t>(tail_frames) * kAudioHop);
+  out.push_back(transcription_body_for_wav(f, wav));
+  return out;
 }
 }  // namespace dgpp::serve

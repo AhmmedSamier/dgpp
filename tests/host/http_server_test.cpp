@@ -8,8 +8,9 @@
 //     idle() passes (the service's ring-drain shape);
 //   * client disconnect mid-stream → on_disconnect(tag) — the scheduler
 //     cancellation hook;
-//   * the refusal ladder: malformed → 400 close, chunked request bodies
-//     → 501, POST without length → 411, oversized headers → 431,
+//   * the refusal ladder: malformed → 400 close, unknown transfer
+//     codings → 501, Content-Length beside Transfer-Encoding → 400, POST
+//     without length → 411, oversized headers → 431,
 //     configurable body size → 413 before reading the body,
 //     connection cap → 503 at the door;
 //   * stop() returns the loop promptly.
@@ -437,7 +438,7 @@ DGPP_TEST(http_refusals_drain_prior_response_before_closing_under_backpressure) 
       {"GET / HTTP/1.1\r\nBad-Header\r\n\r\n", "400 Bad Request", 1},
       {"POST / HTTP/1.1\r\n\r\n", "411 Length Required", 1},
       {"POST / HTTP/1.1\r\nContent-Length: 1025\r\n\r\n", "413 Content Too Large", 1},
-      {"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n", "501 Not Implemented", 1},
+      {"POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n", "501 Not Implemented", 1},
       {"GET / HTTP/1.1\r\nX-Large: " + std::string(17 * 1024, 'x') + "\r\n\r\n",
        "431 Request Header Fields Too Large", 1},
       {"GET / HTTP/1.1\r\nX-Large: " + std::string(17 * 1024, 'x'),
@@ -597,20 +598,112 @@ DGPP_TEST(http_malformedRequestLine_400AndClose) {
           "connection closed after the 400");
 }
 
-DGPP_TEST(http_chunkedRequestBody_refused501) {
+DGPP_TEST(http_chunkedRequestBody_decodedVerbatimAndReusable) {
   // GIVEN a running server,
   ServerHandle sh;
 
-  // WHEN a request declares Transfer-Encoding: chunked (we only accept
-  // Content-Length bodies),
+  // WHEN a chunked POST arrives (the streaming-uploader framing: no
+  // Content-Length, data in frames, terminal 0-chunk),
   Client c(sh.port());
   c.send_all("POST /echo HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: "
-             "chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n");
+             "chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n");
+
+  // THEN the handler sees the exact assembled bytes, and the connection
+  // stays usable for the next request.
+  const std::string resp = c.read_available(500);
+  require(resp.find("200 OK") != std::string::npos, "chunked accepted: " + resp);
+  require(resp.find("hello world") != std::string::npos,
+          "chunked body decoded verbatim: " + resp);
+  c.send_all(kGetHello);
+  const std::string second = c.read_available(500);
+  require(second.find("200 OK") != std::string::npos,
+          "keep-alive survives a chunked body: " + second);
+}
+
+DGPP_TEST(http_chunkedRequestBody_splitArrivalsExtensionsAndTrailers) {
+  // GIVEN a running server,
+  ServerHandle sh;
+
+  // WHEN the framing arrives split across segments, with chunk
+  // extensions and trailer fields (all ignored, body exact),
+  Client c(sh.port());
+  c.send_all("POST /echo HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n");
+  c.send_all("5;ext=1\r\nhel");
+  c.send_all("lo\r\n0;ignored=yes\r\nX-Trailer: junk\r\n\r\n");
+
+  // THEN the body still decodes verbatim.
+  const std::string resp = c.read_available(500);
+  require(resp.find("200 OK") != std::string::npos, "chunked accepted: " + resp);
+  const size_t split = resp.find("\r\n\r\n");
+  require(split != std::string::npos, "response framed");
+  require(resp.substr(split + 4, 5) == "hello", "extensions/trailers skipped");
+}
+
+DGPP_TEST(http_chunkedRequestBody_contentLengthBesideIt_refused400) {
+  // GIVEN a running server,
+  ServerHandle sh;
+
+  // WHEN Content-Length rides beside Transfer-Encoding (the smuggling
+  // shape),
+  Client c(sh.port());
+  c.send_all("POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: 5\r\n"
+             "Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n");
+
+  // THEN the server refuses with 400 and closes.
+  const std::string resp = c.read_available(500);
+  require(resp.find("400") != std::string::npos,
+          "length beside chunked must be refused: " + resp);
+  const std::string tail = c.read_available(500);
+  require(tail.empty(), "connection closed after the 400");
+}
+
+DGPP_TEST(http_chunkedRequestBody_unknownCoding_refused501) {
+  // GIVEN a running server,
+  ServerHandle sh;
+
+  // WHEN a coding this server never decodes arrives,
+  Client c(sh.port());
+  c.send_all("POST /echo HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: "
+             "gzip\r\nContent-Length: 5\r\n\r\nhello");
 
   // THEN it is refused loudly with 501 — never guessed at.
   const std::string resp = c.read_available(500);
   require(resp.find("501") != std::string::npos,
-          "chunked request bodies must be refused: " + resp);
+          "unknown codings must be refused: " + resp);
+}
+
+DGPP_TEST(http_chunkedRequestBody_overCap_refused413) {
+  // GIVEN a server with a 16-byte body cap,
+  ServerHandle sh(64, 16);
+
+  // WHEN a chunked body decodes past it,
+  Client c(sh.port());
+  c.send_all("POST /echo HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: "
+             "chunked\r\n\r\n5\r\nhello\r\n100\r\n");
+
+  // THEN the server refuses with 413 and closes, without reading further.
+  const std::string resp = c.read_available(500);
+  require(resp.find("413") != std::string::npos,
+          "oversized chunked body must be refused: " + resp);
+  const std::string tail = c.read_available(500);
+  require(tail.empty(), "connection closed after the 413");
+}
+
+DGPP_TEST(http_chunkedRequestBody_badFraming_refused400) {
+  // GIVEN a running server,
+  ServerHandle sh;
+
+  // WHEN a chunk size is not hex,
+  Client c(sh.port());
+  c.send_all("POST /echo HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: "
+             "chunked\r\n\r\nzz\r\nhello\r\n0\r\n\r\n");
+
+  // THEN the server answers 400 and closes.
+  const std::string resp = c.read_available(500);
+  require(resp.find("400") != std::string::npos,
+          "bad chunk framing must be refused: " + resp);
+  const std::string tail = c.read_available(500);
+  require(tail.empty(), "connection closed after the 400");
 }
 
 DGPP_TEST(http_postWithoutContentLength_411) {

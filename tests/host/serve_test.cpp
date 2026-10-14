@@ -32,6 +32,9 @@
 #include <string_view>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <mutex>
+#include <sstream>
+#include <cstring>
 #include <thread>
 #include <tuple>
 #include <unistd.h>
@@ -127,10 +130,14 @@ class FakeEngine : public SchedulerEngine {
   }
   std::atomic<bool> audios_available{false};
   std::atomic<int> audio_prefills{0};
+  std::atomic<int64_t> audio_token_limit{0};
   bool supports_audios() const override { return audios_available; }
+  int64_t prefill_audio_token_limit() const override { return audio_token_limit; }
   int32_t prefill_audios(int req, const std::vector<int64_t>& prompt,
                          const std::vector<dgpp::AudioInput>& audios) override {
-    require(!audios.empty() && audios[0].tokens == 13 && audios[0].pcm.size() == 16000,
+    require(!audios.empty() && audios[0].frames > 0 &&
+                audios[0].tokens == dgpp::audio_token_count(audios[0].frames) &&
+                audios[0].pcm.size() == static_cast<size_t>(audios[0].frames) * dgpp::kAudioHop,
             "decoded audio reaches the engine with its trained span");
     ++audio_prefills;
     return prefill(req, prompt);
@@ -5480,6 +5487,13 @@ std::string response_body_text(const std::string& response) {
   return response.substr(split + 4);
 }
 
+std::string read_test_file(const std::string& rel) {
+  std::ifstream f(std::string(DGPP_SOURCE_DIR) + "/" + rel, std::ios::binary);
+  std::ostringstream ss;
+  ss << f.rdbuf();
+  return ss.str();
+}
+
 DGPP_TEST(serve_audio_transcriptions_json_and_text) {
   const std::string wav = one_second_wav_raw();
   const std::string boundary = "------------------------dgpp-test-1";
@@ -5558,6 +5572,141 @@ DGPP_TEST(serve_audio_transcriptions_json_and_text) {
   require(garbage.find("\"file\"") != std::string::npos, "refusal names the file");
   require(garbage.find("invalid_audio") != std::string::npos, "refusal names the code");
   require(rig.engine.audio_prefills == prefills, "no engine work for bad audio");
+}
+
+DGPP_TEST(serve_audio_transcriptions_accepts_mp3) {
+  // The OpenWebUI path: SDK-style mp3 chunks upload as the multipart file
+  // and transcribe through the same admission as WAV.
+  const std::string mp3 = read_test_file("tests/data/mp3_tone_1s_16k_mono.mp3");
+  require(!mp3.empty(), "mp3 fixture present");
+  const std::string boundary = "------------------------dgpp-test-mp3";
+  const std::string content_type = "multipart/form-data; boundary=" + boundary;
+  ServiceRig rig;
+  rig.frontend.audios_available = true;
+  rig.engine.audios_available = true;
+  const std::string close = "--" + boundary + "--\r\n";
+  auto response = post_transcriptions(
+      rig, multipart_field(boundary, "file", mp3, "audio.mp3", "audio/mpeg") +
+               multipart_field(boundary, "model", kModel) + close,
+      content_type);
+  require(response.find("200 OK") != std::string::npos, "mp3 accepted: " + response.substr(0, 300));
+  const std::string json_body = response_body_text(response);
+  const auto parsed = dgpp::minijson::parse(std::string_view(json_body));
+  const auto* text = parsed.root.find("text");
+  require(text != nullptr && text->is_string() && !text->as_string().empty(),
+          "mp3 yields a transcript: " + json_body);
+  require(rig.engine.audio_prefills == 1, "mp3 reached the engine prefill");
+}
+
+DGPP_TEST(serve_audio_transcriptions_overStageLimit_refused400) {
+  // GIVEN an engine whose audio stage holds fewer rows than the clip,
+  const std::string wav = one_second_wav_raw();
+  const std::string boundary = "------------------------dgpp-test-cap";
+  const std::string content_type = "multipart/form-data; boundary=" + boundary;
+  ServiceRig rig;
+  rig.frontend.audios_available = true;
+  rig.engine.audios_available = true;
+  rig.engine.audio_token_limit = 10;  // the 1 s clip spans ~13 + template
+  const std::string close = "--" + boundary + "--\r\n";
+
+  // WHEN the overlong clip uploads,
+  const int prefills = rig.engine.audio_prefills.load();
+  auto response = post_transcriptions(
+      rig, multipart_field(boundary, "file", wav, "audio.wav", "audio/wav") +
+               multipart_field(boundary, "model", kModel) + close,
+      content_type);
+
+  // THEN admission refuses it naming the bound — never engine work, so a
+  // long upload cannot fail the service.
+  require(response.find("400 Bad Request") != std::string::npos,
+          "overlong audio refused: " + response.substr(0, 300));
+  require(response.find("context_length_exceeded") != std::string::npos,
+          "refusal names the code: " + response_body_text(response));
+  require(rig.engine.audio_prefills == prefills, "no engine work for overlong audio");
+}
+
+std::string n_second_wav_raw(int seconds) {
+  std::string pcm;
+  for (int i = 0; i < 16000 * seconds; ++i) {
+    const auto v = static_cast<int16_t>(12000.0 * std::sin(0.02 * i));
+    pcm += static_cast<char>(v & 0xff);
+    pcm += static_cast<char>(static_cast<unsigned>(v) >> 8);
+  }
+  const auto u32 = [](uint32_t v) {
+    return std::string{char(v), char(v >> 8), char(v >> 16), char(v >> 24)};
+  };
+  const auto u16 = [](uint16_t v) { return std::string{char(v), char(v >> 8)}; };
+  return "RIFF" + u32(36 + static_cast<uint32_t>(pcm.size())) + "WAVEfmt " + u32(16) + u16(1) +
+         u16(1) + u32(16000) + u32(32000) + u16(2) + u16(16) + "data" +
+         u32(static_cast<uint32_t>(pcm.size())) + pcm;
+}
+
+DGPP_TEST(serve_audio_transcriptions_languageTagOnOwnLine) {
+  // GIVEN the engine spells a glued language tag (scripted across the
+  // plausible prompt lengths; the transcription prompt hits exactly one),
+  const std::string wav = one_second_wav_raw();
+  const std::string boundary = "------------------------dgpp-test-tag";
+  const std::string content_type = "multipart/form-data; boundary=" + boundary;
+  ServiceRig rig;
+  rig.frontend.audios_available = true;
+  rig.engine.audios_available = true;
+  std::vector<int32_t> ids;
+  for (char ch : std::string("language EnglishHi"))
+    ids.push_back(static_cast<unsigned char>(ch));
+  for (int len = 10; len < 250; ++len)
+    rig.engine.script(static_cast<size_t>(len), ids);
+  const std::string close = "--" + boundary + "--\r\n";
+
+  // WHEN a clip transcribes,
+  auto response = post_transcriptions(
+      rig, multipart_field(boundary, "file", wav, "audio.wav", "audio/wav") +
+               multipart_field(boundary, "model", kModel) + close,
+      content_type);
+
+  // THEN the tag renders above the body in both shapes.
+  require(response.find("200 OK") != std::string::npos, "tag accepted: " + response.substr(0, 200));
+  require(response.find("\"text\":\"language English\\nHi\"") != std::string::npos,
+          "tag split in json: " + response_body_text(response).substr(0, 120));
+}
+
+DGPP_TEST(serve_audio_transcriptions_longClip_chainedInOrder) {
+  // GIVEN a 20 s clip (2000 frames, ~260 audio tokens) and a 160-row
+  // engine window (segments of 1 chunk = 13 tokens; the 256-step floor
+  // keeps every segment inside the rig's 400-token pool),
+  const std::string wav = n_second_wav_raw(20);
+  const std::string boundary = "------------------------dgpp-test-chain";
+  const std::string content_type = "multipart/form-data; boundary=" + boundary;
+  ServiceRig rig;
+  rig.frontend.audios_available = true;
+  rig.engine.audios_available = true;
+  rig.engine.audio_token_limit = 160;
+  const std::string close = "--" + boundary + "--\r\n";
+  const auto file_field = multipart_field(boundary, "file", wav, "long.wav", "audio/wav");
+  const auto model_field = multipart_field(boundary, "model", kModel);
+
+  // WHEN it uploads,
+  auto response = post_transcriptions(rig, file_field + model_field + close, content_type);
+
+  // THEN the five segments transcribe strictly in order through one
+  // answer (no usage block, like the single-segment shapes).
+  require(response.find("200 OK") != std::string::npos, "chained accepted: " + response.substr(0, 300));
+  require(rig.engine.audio_prefills == 20, "twenty segments reached the engine");
+  require(response.find("\"usage\"") == std::string::npos, "no usage block in chained transcription");
+  const std::string json_body = response_body_text(response);
+  const auto parsed = dgpp::minijson::parse(std::string_view(json_body));
+  const auto* text = parsed.root.find("text");
+  require(text != nullptr && text->is_string() && !text->as_string().empty(),
+          "joined transcript: " + json_body.substr(0, 200));
+  const std::string transcript(text->as_string());
+
+  // AND the text shape returns the same joined transcript raw.
+  const auto text_response = post_transcriptions(
+      rig, file_field + model_field + multipart_field(boundary, "response_format", "text") + close,
+      content_type);
+  require(text_response.find("200 OK") != std::string::npos, "chained text accepted");
+  require(text_response.find("Content-Type: text/plain") != std::string::npos,
+          "chained text type: " + text_response.substr(0, 200));
+  require(response_body_text(text_response) == transcript, "chain shapes agree");
 }
 
 DGPP_TEST(serve_models_reports_the_active_rope_and_the_effective_limit) {
