@@ -114,7 +114,22 @@ void llama_tp_validate_geometry(const LlamaTextConfig& cfg, int rank, int world)
   };
   if (world < 1 || rank < 0 || rank >= world) fail("rank/world out of range");
   if (cfg.num_attention_heads % world != 0) fail("num_attention_heads must divide by world");
-  if (cfg.num_key_value_heads % world != 0) fail("num_key_value_heads must divide by world");
+  if (cfg.num_key_value_heads % world != 0 && world % cfg.num_key_value_heads != 0)
+    fail("num_key_value_heads must divide world or be divided by it");
+  // A rank's query heads must belong to its kv heads.
+  const int q_per_kv = cfg.q_heads_per_kv();
+  const int local_heads = cfg.num_attention_heads / world;
+  const int head_begin = local_heads * rank;
+  int kv_begin, local_kv;
+  if (cfg.num_key_value_heads >= world) {
+    local_kv = cfg.num_key_value_heads / world;
+    kv_begin = local_kv * rank;
+  } else {
+    local_kv = 1;
+    kv_begin = rank / (world / cfg.num_key_value_heads);
+  }
+  if (head_begin / q_per_kv != kv_begin || (head_begin + local_heads - 1) / q_per_kv != kv_begin + local_kv - 1)
+    fail("the query heads of a rank straddle kv heads");
   if (cfg.intermediate_size % world != 0) fail("intermediate_size must divide by world");
 }
 

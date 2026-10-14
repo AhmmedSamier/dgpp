@@ -522,6 +522,13 @@ target_include_directories(dgpp_models_llama PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/
 target_link_libraries(dgpp_models_llama PUBLIC dgpp_loaders dgpp_common)
 dgpp_set_common(dgpp_models_llama)
 
+# The Llama resident loader (loaders/resident_stream.hpp + the family's builders).
+add_library(dgpp_models_llama_loader STATIC
+  src/models/llama/loader.cpp)
+target_include_directories(dgpp_models_llama_loader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_llama_loader PUBLIC dgpp_models_llama dgpp_loaders CUDA::cudart dgpp_device_ranges)
+dgpp_set_common(dgpp_models_llama_loader)
+
 # Qwen3.8-Flash-Next: the host-side model description.
 add_library(dgpp_models_qwen STATIC
   src/models/qwen/config.cpp
@@ -1788,6 +1795,12 @@ target_include_directories(glm4_loader_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/
 target_link_libraries(glm4_loader_test PRIVATE dgpp_models_glm4_loader CUDA::cudart Threads::Threads)
 dgpp_set_common(glm4_loader_test)
 add_test(NAME glm4_loader_test COMMAND glm4_loader_test)
+
+add_executable(llama_loader_test tests/cuda/llama_loader_test.cpp)
+target_include_directories(llama_loader_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(llama_loader_test PRIVATE dgpp_models_llama_loader CUDA::cudart Threads::Threads)
+dgpp_set_common(llama_loader_test)
+add_test(NAME llama_loader_test COMMAND llama_loader_test)
 
 add_executable(mimo_loader_test tests/cuda/mimo_loader_test.cpp)
 target_include_directories(mimo_loader_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)

@@ -71,7 +71,9 @@ LlamaBindReport llama_validate_text_binding(
 
 // Tensor-parallel geometry acceptance (docs/zeta_plan.md §2): throws
 // std::invalid_argument naming the dim that does not divide. World must
-// divide the query heads, the kv heads and the MLP intermediate size.
+// divide the query heads; either world divides the kv heads or the kv
+// heads divide world (a kv head then lives on world/kv ranks); the MLP
+// intermediate size must divide by world.
 void llama_tp_validate_geometry(const LlamaTextConfig& cfg, int rank, int world);
 
 }  // namespace dgpp

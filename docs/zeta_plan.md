@@ -56,6 +56,12 @@ window, no vision.
 * 2026-10-14: branch `zeta-llama-support` from `origin/master` (347c386f).
   Slice 1: `ModelArchitecture::Llama` detection, `src/models/llama/`
   config + binding, `dgpp_models_llama` lib, `llama_config_test` /
-  `llama_binding_test` gates. Next: loader (`ResidentLayerStream`
-  family), layer/model over `SessionModel` + `glm4_attn` kernels,
-  serve wiring, tokenizer pattern, deploy template, transcript battery.
+  `llama_binding_test` gates.
+* Slice 2: `src/models/llama/loader.{hpp,cpp}` (`ResidentLayerStream`
+  family: BF16 row/column slices, packed o/down columns, replicated
+  norms/embed, vocab-sharded head, kv-pairing geometry shared with GLM-4),
+  `dgpp_models_llama_loader` lib, `tests/cuda/llama_fixture.hpp` +
+  `llama_loader_test` (byte-exact slices at worlds 1/2/4, globals,
+  resident image round trip — 3/3 pass on GB10). Next: layer/model over
+  `SessionModel` + `glm4_attn` kernels, serve wiring, tokenizer pattern,
+  deploy template, transcript battery.
