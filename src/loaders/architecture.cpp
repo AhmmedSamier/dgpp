@@ -56,9 +56,13 @@ ModelArchitecture detect_architecture(const minijson::Value& root) {
   // Flint (2026-10-22, docs/flint_plan.md): `FlintForCausalLM` / `flint`.
   if (arch.rfind("Flint", 0) == 0 || (arch.empty() && type == "flint"))
     return ModelArchitecture::Flint;
+  // Zeta-2.1 (2026-10-14, docs/zeta_plan.md): `LlamaForCausalLM` / `llama`
+  // (dense BF16 GQA; the loader/model live under src/models/llama/).
+  if (arch.rfind("Llama", 0) == 0 || (arch.empty() && type == "llama"))
+    return ModelArchitecture::Llama;
   throw std::runtime_error(
       "config.json: unsupported architecture '" + arch + "' (model_type '" +
-      type + "'); the engine implements Glm5*, Qwen4Exp*, Glm4Moe*, GlmMoeDsa*, DeepseekV41*, DeepseekV4*, MiMoV2*, Qwen3_5*, Flint* and Dory*");
+      type + "'); the engine implements Glm5*, Qwen4Exp*, Glm4Moe*, GlmMoeDsa*, DeepseekV41*, DeepseekV4*, MiMoV2*, Qwen3_5*, Flint* and Llama*");
 }
 
 ModelArchitecture detect_architecture_file(const std::string& path) {

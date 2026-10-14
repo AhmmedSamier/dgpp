@@ -512,6 +512,16 @@ target_include_directories(dgpp_models_dflash2 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR
 target_link_libraries(dgpp_models_dflash2 PUBLIC dgpp_kernels dgpp_loaders dgpp_common CUDA::cudart)
 dgpp_set_common(dgpp_models_dflash2)
 
+# Zeta-2.1 dense Llama (2026-10-14, docs/zeta_plan.md): the host-side
+# model description (config, binding). Loader + layers follow in the next
+# slice.
+add_library(dgpp_models_llama STATIC
+  src/models/llama/config.cpp
+  src/models/llama/binding.cpp)
+target_include_directories(dgpp_models_llama PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_llama PUBLIC dgpp_loaders dgpp_common)
+dgpp_set_common(dgpp_models_llama)
+
 # Qwen3.8-Flash-Next: the host-side model description.
 add_library(dgpp_models_qwen STATIC
   src/models/qwen/config.cpp
@@ -1025,6 +1035,8 @@ add_executable(unit_tests
   tests/unit/dory_reference_test.cpp
   tests/unit/flint_config_test.cpp
   tests/unit/flint_binding_test.cpp
+  tests/unit/llama_config_test.cpp
+  tests/unit/llama_binding_test.cpp
   tests/unit/nvfp4_quant_test.cpp
   tests/unit/verify_schedule_test.cpp
   tests/unit/lookup_draft_test.cpp
@@ -1036,6 +1048,7 @@ target_link_libraries(unit_tests PRIVATE CUDA::cudart dgpp_loaders
                                         dgpp_models_glm_dsa dgpp_models_dsv41 dgpp_models_dsv4 dgpp_models_mimo
                                         dgpp_models_dory
                                         dgpp_models_glm_dsa dgpp_models_dsv41 dgpp_models_dsv4 dgpp_models_mimo dgpp_models_flint
+                                        dgpp_models_llama
                                         dgpp_rope_scaling
                                         dgpp_net dgpp_serve Threads::Threads)
 target_compile_definitions(unit_tests PRIVATE DGPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")

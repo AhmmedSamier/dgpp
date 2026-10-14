@@ -448,9 +448,12 @@ DGPP_TEST(architecture_detection_names_the_families) {
   require(dgpp::detect_architecture(glm.root) == dgpp::ModelArchitecture::Glm5, "glm");
   const auto qwen = dgpp::minijson::parse(R"({"architectures": ["Qwen4ExpForConditionalGeneration"], "model_type": "qwen4_exp"})");
   require(dgpp::detect_architecture(qwen.root) == dgpp::ModelArchitecture::Qwen4Exp, "qwen");
+  const auto llama =
+      dgpp::minijson::parse(R"({"architectures": ["LlamaForCausalLM"], "model_type": "llama"})");
+  require(dgpp::detect_architecture(llama.root) == dgpp::ModelArchitecture::Llama, "llama");
   bool refused = false;
   try {
-    const auto other = dgpp::minijson::parse(R"({"architectures": ["LlamaForCausalLM"]})");
+    const auto other = dgpp::minijson::parse(R"({"architectures": ["MistralForCausalLM"]})");
     (void)dgpp::detect_architecture(other.root);
   } catch (const std::runtime_error&) {
     refused = true;
