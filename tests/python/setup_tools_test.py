@@ -114,6 +114,48 @@ class SetupToolsTest(unittest.TestCase):
             self.assertEqual(download_model.download("org/model", "commit", self.cache), self.snapshot)
         snapshot_download.assert_called_once_with(repo_id="org/model", revision="commit", cache_dir=str(self.cache), max_workers=4)
 
+    def test_asr_snapshot_gets_serve_files_on_fresh_download(self):
+        (self.snapshot / "config.json").write_text(
+            json.dumps({"architectures": ["Qwen3ASRForConditionalGeneration"]}))
+        # A fresh upstream snapshot: no dgpp-loadable tokenizer or template.
+        (self.snapshot / "tokenizer.json").unlink()
+        (self.snapshot / "chat_template.jinja").unlink()
+        calls = []
+        def run(cmd, **kwargs):
+            calls.append(cmd)
+            # Stand in for the prepare script: materialize the two derived
+            # files so the validation that follows sees a serve-ready tree.
+            (self.snapshot / "tokenizer.json").write_text("{}")
+            (self.snapshot / "chat_template.jinja").write_text("{{ messages }}")
+            return Mock(returncode=0)
+        with patch.object(download_model, "download", return_value=self.snapshot), \
+                patch.object(download_model, "subprocess") as subprocess, \
+                patch.object(download_model, "sync_snapshot"):
+            subprocess.run.side_effect = run
+            self.invoke()
+        prepares = [cmd for cmd in calls
+                    if "prepare_qwen_asr_checkpoint.py" in cmd[-4]]
+        self.assertEqual(len(prepares), 1)
+        self.assertEqual(prepares[0][-3:-1], ["--snapshot", str(self.snapshot)])
+        self.assertIn("--in-place", prepares[0])
+
+    def test_non_asr_snapshot_writes_no_serve_files(self):
+        with patch.object(download_model, "download", return_value=self.snapshot), \
+                patch.object(download_model, "subprocess") as subprocess, \
+                patch.object(download_model, "sync_snapshot"):
+            self.invoke()
+        subprocess.run.assert_not_called()
+
+    def test_sync_only_and_verify_only_never_prepare(self):
+        (self.snapshot / "config.json").write_text(
+            json.dumps({"architectures": ["Qwen3ASRForConditionalGeneration"]}))
+        with patch.object(download_model, "prepare_asr_snapshot") as prepare, \
+                patch.object(download_model, "sync_snapshot"), \
+                patch.object(download_model, "peer_cache"):
+            self.invoke("--sync-only")
+            self.invoke("--verify-only")
+        prepare.assert_not_called()
+
     def test_pinned_revision_requires_activation_before_sync(self):
         pinned = self.snapshot.parent / "pinned"
         shutil.copytree(self.snapshot, pinned, symlinks=True)

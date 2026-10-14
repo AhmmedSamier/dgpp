@@ -7,6 +7,7 @@ its referenced blobs over rsync/SSH, not credentials. Stop deployments using
 this checkpoint before downloading or syncing it.
 """
 import argparse
+import json
 import os
 from pathlib import Path
 import shutil
@@ -24,6 +25,30 @@ def download(model, revision, root):
     except ImportError as error:
         raise ValueError("install requirements-download.txt in a venv before downloading") from error
     return Path(snapshot_download(repo_id=model, revision=revision, cache_dir=str(root), max_workers=4))
+
+
+def prepare_asr_snapshot(snapshot):
+    """Qwen3-ASR serve prep (docs/audio.md): upstream ships no
+    dgpp-loadable tokenizer.json or chat_template.jinja, so generate both
+    into the snapshot before peers sync it (the derived files ride the
+    same rsync). Non-ASR checkpoints pass through untouched."""
+    config = Path(snapshot) / "config.json"
+    try:
+        archs = json.loads(config.read_text()).get("architectures", [])
+    except (OSError, ValueError):
+        return
+    if "Qwen3ASRForConditionalGeneration" not in archs:
+        return
+    if ((Path(snapshot) / "tokenizer.json").is_file() and
+            (Path(snapshot) / "chat_template.jinja").is_file()):
+        print("Qwen3-ASR serve files already present; skipping prepare", flush=True)
+        return
+    root = Path(__file__).resolve().parent.parent
+    subprocess.run(
+        [sys.executable, str(root / "tools" / "prepare_qwen_asr_checkpoint.py"),
+         "--snapshot", str(snapshot), "--in-place"],
+        check=True)
+    print("Qwen3-ASR serve files generated in the snapshot", flush=True)
 
 
 def main(argv=None):
@@ -65,6 +90,12 @@ def main(argv=None):
     # This is the only Hub call. No peer command invokes this downloader.
     snapshot = (cached_snapshot(model, root) if args.sync_only or args.verify_only
                 else download(model, args.revision, root))
+    if not (args.sync_only or args.verify_only):
+        # Fresh downloads only: sync-only is offline by contract (the
+        # prepare step downloads the tokenizer donor) and verify-only is
+        # read-only. Runs before validation because Qwen3-ASR snapshots
+        # ship neither tokenizer.json nor chat_template.jinja upstream.
+        prepare_asr_snapshot(snapshot)
     size = checkpoint_size(snapshot)
     if args.activate:
         activate(snapshot)

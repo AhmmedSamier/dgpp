@@ -564,6 +564,41 @@ DGPP_TEST(cluster_config_the_yarn512k_template_is_a_deployment_the_engine_reads)
           "request must be admissible in this template");
 }
 
+DGPP_TEST(cluster_config_the_qwen3_asr_template_is_a_deployment_the_engine_reads) {
+  // deploy/cluster_qwen3-asr-1.7b_bf16_w1.example.json, the ready-to-run
+  // single-node ASR shape. Same World/world_size substitution as the
+  // yarn512k template test above: what this checks is the leg that matters
+  // for the knobs — every field name in the file is one this parser reads
+  // (an unknown one is a hard failure), and the values are the
+  // live-verified ASR shape: no MTP, no decode graph, the 8192-token pool
+  // the transcription path was verified against, and the served model id
+  // OpenWebUI must name.
+  const std::string path = std::string(DGPP_SOURCE_DIR) +
+                           "/deploy/cluster_qwen3-asr-1.7b_bf16_w1.example.json";
+  std::ifstream in(path);
+  require(in.good(), "the tracked template is readable: " + path);
+  std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  std::smatch world;
+  require(std::regex_search(text, world, std::regex("\"world_size\"\\s*:\\s*([0-9]+)")),
+          "the template names its world");
+  std::string nodes = "\"nodes\": [";
+  for (int i = 0; i < std::stoi(world[1]); ++i)
+    nodes += (i ? ", " : "") + std::string("\"rank") + std::to_string(i) + "\"";
+  nodes += "]";
+  const dgpp::serve::ClusterConfig c = dgpp::serve::parse_cluster_config(
+      std::regex_replace(text, std::regex("\"world_size\"\\s*:\\s*[0-9]+"), nodes), path);
+  require(c.model == "Qwen/Qwen3-ASR-1.7B" && c.world() == 1, "the single-node ASR deployment");
+  require(!c.engine.mtp && !c.engine.decode_graph, "no MTP, no decode graph on the audio path");
+  require(c.engine.max_concurrency == 8 && c.engine.kv_capacity == 8192,
+          "the live-verified ASR shape: eight slots in an 8192-token pool");
+  require(c.engine.kv_capacity % 64 == 0, "a whole number of KV blocks");
+  require(c.engine.default_max_tokens == 256,
+          "the short-answer default transcription overrides per request");
+  require(c.engine.model_alias == "Qwen3-ASR-1.7B",
+          "the served model id: clients and /v1/models name the alias, not the repo");
+  require(c.http_port == 8000, "the recipe's port");
+}
+
 DGPP_TEST(cluster_config_prefill_defaults_to_auto_with_explicit_opt_out) {
   const auto defaults = dgpp::serve::parse_cluster_config(engine_json("{}"), "t");
   require(defaults.engine.prefill_budget_tokens == -1, "unset prefill budget is automatic");

@@ -72,18 +72,36 @@ message text are rejected as conflicting with the decoded audio.
 
 The snapshot is serve-ready with two generated files beside it (neither
 ships upstream): the `tokenizer.json` dgpp's Tokenizer loads, and the
-`chat_template.jinja` the frontend renders.
+`chat_template.jinja` the frontend renders. One command builds them:
 
 ```bash
-SNAP=~/.cache/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/<rev>
-Q3=~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/<rev>
-python3 tools/qwen_asr_tokenizer.py --snapshot "$SNAP" \
-    --qwen3-tokenizer "$Q3/tokenizer.json" --out "$SNAP/tokenizer.json"
-python3 -c "import json
-print(json.load(open('$SNAP/chat_template.json'))['chat_template'], end='')" \
-    > "$SNAP/chat_template.jinja"
-./build/dgpp-serve --checkpoint-dir "$SNAP" --port 18081
+python3 tools/prepare_qwen_asr_checkpoint.py \
+    --model Qwen/Qwen3-ASR-1.7B --out /models/qwen3-asr-1.7b
+./build/dgpp-serve --checkpoint-dir /models/qwen3-asr-1.7b --port 18081
 ```
+
+`--snapshot DIR --in-place` writes the two files into an existing
+snapshot instead (no symlinks, nothing else touched). Pointing the
+server at a raw snapshot fails at boot naming the missing file and the
+command that generates it.
+
+### Cluster deployment
+
+`deploy/cluster_qwen3-asr-1.7b_bf16_w1.example.json` is the ready-to-run
+single-node shape (eight slots, the 8192-token pool, port 8000, served
+id `Qwen3-ASR-1.7B` — OpenWebUI's STT model setting must name the
+alias, not the repo):
+
+```bash
+python3 scripts/download_model.py --config deploy/cluster_qwen3-asr-1.7b_bf16_w1.example.json
+scripts/dgpp-cluster up --config deploy/cluster_qwen3-asr-1.7b_bf16_w1.example.json
+```
+
+The downloader prepares Qwen3-ASR snapshots itself (architecture
+`Qwen3ASRForConditionalGeneration`): the two derived files are
+generated into the snapshot before validation, so the peer sync carries
+a serve-ready tree and the boot preflight passes. Fresh downloads only —
+`--sync-only` stays offline and `--verify-only` stays read-only.
 
 `GET /v1/models` then lists `"audio"` in `input_modalities`, and a user
 message with an `input_audio` (base64 WAV) or `audio_url` (data URI) part
