@@ -1564,6 +1564,17 @@ project procedures and design guidance live in `docs/`.
   Serving throughput remains unmeasured under the current benchmark
   protocol; no performance comparison is claimed for these templates.
 
+- **Qwen3-ASR cluster deployment**: `deploy/cluster_qwen3-asr-1.7b_bf16_w1.example.json`
+  serves the model the way the text recipes do — `download_model.py --config`
+  then `dgpp-cluster up --config`, port 8000, served id `Qwen3-ASR-1.7B`.
+  The downloader prepares Qwen3-ASR snapshots itself (the two derived files
+  upstream never ships land in the snapshot before validation, so peers sync
+  a serve-ready tree; sync-only stays offline, verify-only stays read-only),
+  the template is pinned by a `parse_cluster_config` unit test, and a boot
+  aimed at a raw snapshot now names the missing file and the command that
+  generates it instead of dying in the generic tokenizer loader.
+  `tools/prepare_qwen_asr_checkpoint.py` grew `--snapshot`/`--in-place` for
+  the same job outside the cluster flow.
 - **Transcription language tag on its own line**: the checkpoint glues
   `language <NAME>` onto every transcript with no separator; the server
   now splits it above the body (`split_language_tag`, camelCase boundary
