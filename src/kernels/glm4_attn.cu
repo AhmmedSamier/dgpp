@@ -100,27 +100,30 @@ __global__ void qkv_finish_kernel(const float* __restrict__ q_dot, int64_t q_str
       const float u = round_bf16(x[i] * rstd);
       x[i] = round_bf16(bf16_bits_to_float(norm[d0 + i]) * u);
     }
-    // RoPE on dims [0, rotary_dim): pair i = (i, i + half) rotated by the
-    // angle pos x inv_freq[i] — x1' = x1 c - x2 s, x2' = x2 c + x1 s with
-    // the reference's bf16 ops. The partner lane sits half/4 lanes away;
-    // every lane shuffles (uniform), the rotary lanes use the values.
-    if (rotary_dim > 0) {
-      const int half = rotary_dim / 2;
-      const int lane_off = half / 4;
-      float mate[4];
+  }
+  // RoPE on dims [0, rotary_dim): pair i = (i, i + half) rotated by the
+  // angle pos x inv_freq[i] — x1' = x1 c - x2 s, x2' = x2 c + x1 s with
+  // the reference's bf16 ops. The partner lane sits half/4 lanes away;
+  // every lane shuffles (uniform), the rotary lanes use the values.
+  // Independent of the head norm (the Llama point: RoPE with null norms);
+  // the v heads never rotate. GLM-4 callers pass rotary 0 without norms,
+  // so their chain is unchanged.
+  if (rotary_dim > 0 && kind != 2) {
+    const int half = rotary_dim / 2;
+    const int lane_off = half / 4;
+    float mate[4];
 #pragma unroll
-      for (int j = 0; j < 4; ++j) mate[j] = __shfl_xor_sync(~0u, x[j], lane_off);
-      if (d0 < rotary_dim) {
-        const bool first = d0 < half;
+    for (int j = 0; j < 4; ++j) mate[j] = __shfl_xor_sync(~0u, x[j], lane_off);
+    if (d0 < rotary_dim) {
+      const bool first = d0 < half;
 #pragma unroll
-        for (int j = 0; j < 4; ++j) {
-          const int i = (first ? d0 : d0 - half) + j;  // the pair index
-          const float ang = __fmul_rn(static_cast<float>(p), inv_freq[i]);
-          const float c = round_bf16(cosf(ang));
-          const float s = round_bf16(sinf(ang));
-          x[j] = first ? round_bf16(round_bf16(x[j] * c) + round_bf16(-mate[j] * s))
-                       : round_bf16(round_bf16(x[j] * c) + round_bf16(mate[j] * s));
-        }
+      for (int j = 0; j < 4; ++j) {
+        const int i = (first ? d0 : d0 - half) + j;  // the pair index
+        const float ang = __fmul_rn(static_cast<float>(p), inv_freq[i]);
+        const float c = round_bf16(cosf(ang));
+        const float s = round_bf16(sinf(ang));
+        x[j] = first ? round_bf16(round_bf16(x[j] * c) + round_bf16(-mate[j] * s))
+                     : round_bf16(round_bf16(x[j] * c) + round_bf16(mate[j] * s));
       }
     }
   }
@@ -317,8 +320,8 @@ void glm4_qkv_finish(const float* q_dot, int64_t q_stride, const float* k_dot, i
     throw std::invalid_argument("glm4_qkv_finish: rotary_dim (a multiple of 8, at most head_dim)");
   if ((q_norm == nullptr) != (k_norm == nullptr))
     throw std::invalid_argument("glm4_qkv_finish: q and k norms come together");
-  if (q_norm == nullptr && rotary_dim > 0)
-    throw std::invalid_argument("glm4_qkv_finish: RoPE is applied after the head norms (both or neither)");
+  // RoPE is independent of the head norms (a null-norm caller rotates q/k
+  // without normalizing — the Llama point); the v heads never rotate.
   const int items = rows * (local_heads + 2 * kv_heads);
   const int blocks = (items + 7) / 8;
   qkv_finish_kernel<<<blocks, 256, 0, stream>>>(

@@ -62,6 +62,14 @@ window, no vision.
   norms/embed, vocab-sharded head, kv-pairing geometry shared with GLM-4),
   `dgpp_models_llama_loader` lib, `tests/cuda/llama_fixture.hpp` +
   `llama_loader_test` (byte-exact slices at worlds 1/2/4, globals,
-  resident image round trip — 3/3 pass on GB10). Next: layer/model over
-  `SessionModel` + `glm4_attn` kernels, serve wiring, tokenizer pattern,
-  deploy template, transcript battery.
+  resident image round trip — 3/3 pass on GB10).
+* Slice 3: `src/models/llama/{kv_pool,layers,forward,attn_reference}.*`
+  (`SessionModel` walk: GQA + full RoPE over the `glm4_attn` kernels,
+  BF16 SwiGLU MLP, paged KV, dense TP folds; no MoE/MTP/prefetch/bf12),
+  `dgpp_models_llama_layers` lib, `tests/cuda/llama_forward_test.cpp`
+  (fixture/smoke/host-parity: l2 ~0.002, top-1 48/48). Shared change:
+  `glm4_qkv_finish` applies RoPE independent of the head norms (v never
+  rotates; GLM-4 callers pass rotary 0 without norms, unchanged —
+  `glm4_attn/loader/forward` gates green incl. the python dump parity).
+  Next: serve wiring, tokenizer pattern, deploy template, transcript
+  battery against the real checkpoint.

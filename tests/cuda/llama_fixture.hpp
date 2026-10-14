@@ -30,13 +30,14 @@ using glmrng::seed_for;
 
 // The tiny release: 128-wide heads at the smallest counts that keep worlds
 // 1, 2 and 4 legal (4 query heads, 2 kv heads: the kv heads pair up at
-// world 4), hidden 256, MLP 256, vocab 512, 2 layers.
+// world 4), hidden 512 (heads x head_dim, as every Llama), MLP 256,
+// vocab 512, 2 layers.
 inline const char* tiny_config_json(int layers = 2) {
   static std::string s;
   s = std::string(R"json({
   "architectures": ["LlamaForCausalLM"], "attention_bias": false,
   "bos_token_id": 0, "eos_token_id": 2, "head_dim": 128,
-  "hidden_act": "silu", "hidden_size": 256, "intermediate_size": 256,
+  "hidden_act": "silu", "hidden_size": 512, "intermediate_size": 256,
   "max_position_embeddings": 4096, "mlp_bias": false, "model_type": "llama",
   "num_attention_heads": 4, "num_hidden_layers": )json") + std::to_string(layers) +
       R"json(, "num_key_value_heads": 2, "pad_token_id": 1,

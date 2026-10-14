@@ -37,7 +37,8 @@ constexpr int kGlm4HeadDim = 128;
 // Rows [0, rows) of the projections' fp32 outputs: q [rows, local_heads *
 // dim] (row stride q_stride elements), k / v [rows, kv_heads * dim] (row
 // strides k_stride / v_stride). Biases bf16 (null: none), norms bf16 [dim]
-// (null: no norm), inv_freq fp32 [rotary_dim / 2] (rotary_dim 0: no RoPE).
+// (null: no norm; RoPE still applies to q/k when rotary_dim > 0 — the
+// Llama point), inv_freq fp32 [rotary_dim / 2] (rotary_dim 0: no RoPE).
 // pos / req_ids: device [rows]; a row with pos < 0 writes nothing.
 void glm4_qkv_finish(const float* q_dot, int64_t q_stride, const float* k_dot, int64_t k_stride,
                      const float* v_dot, int64_t v_stride, const uint16_t* q_bias,

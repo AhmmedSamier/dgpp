@@ -513,11 +513,11 @@ target_link_libraries(dgpp_models_dflash2 PUBLIC dgpp_kernels dgpp_loaders dgpp_
 dgpp_set_common(dgpp_models_dflash2)
 
 # Zeta-2.1 dense Llama (2026-10-14, docs/zeta_plan.md): the host-side
-# model description (config, binding). Loader + layers follow in the next
-# slice.
+# model description (config, binding, attention reference).
 add_library(dgpp_models_llama STATIC
   src/models/llama/config.cpp
-  src/models/llama/binding.cpp)
+  src/models/llama/binding.cpp
+  src/models/llama/attn_reference.cpp)
 target_include_directories(dgpp_models_llama PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(dgpp_models_llama PUBLIC dgpp_loaders dgpp_common)
 dgpp_set_common(dgpp_models_llama)
@@ -528,6 +528,17 @@ add_library(dgpp_models_llama_loader STATIC
 target_include_directories(dgpp_models_llama_loader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(dgpp_models_llama_loader PUBLIC dgpp_models_llama dgpp_loaders CUDA::cudart dgpp_device_ranges)
 dgpp_set_common(dgpp_models_llama_loader)
+
+# The Llama layer objects and model (the paged K/V pool first; the layers
+# and the model follow).
+add_library(dgpp_models_llama_layers STATIC
+  src/models/llama/kv_pool.cpp
+  src/models/llama/layers.cpp
+  src/models/llama/forward.cpp)
+target_include_directories(dgpp_models_llama_layers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_llama_layers
+  PUBLIC dgpp_models_llama dgpp_models_llama_loader dgpp_models_glm dgpp_kernels CUDA::cudart)
+dgpp_set_common(dgpp_models_llama_layers)
 
 # Qwen3.8-Flash-Next: the host-side model description.
 add_library(dgpp_models_qwen STATIC
@@ -1801,6 +1812,18 @@ target_include_directories(llama_loader_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 target_link_libraries(llama_loader_test PRIVATE dgpp_models_llama_loader CUDA::cudart Threads::Threads)
 dgpp_set_common(llama_loader_test)
 add_test(NAME llama_loader_test COMMAND llama_loader_test)
+
+# The Llama forward (docs/zeta_plan.md): fixture -> smoke -> host parity.
+add_executable(llama_forward_test tests/cuda/llama_forward_test.cpp)
+target_include_directories(llama_forward_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(llama_forward_test PRIVATE dgpp_models_llama_layers dgpp_models_glm_loader CUDA::cudart Threads::Threads)
+dgpp_set_common(llama_forward_test)
+set(LLAMA_FORWARD_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/llama_forward_fixture)
+add_test(NAME llama_forward_fixture COMMAND llama_forward_test --write-fixture ${LLAMA_FORWARD_FIXTURE})
+add_test(NAME llama_forward_smoke COMMAND llama_forward_test --smoke ${LLAMA_FORWARD_FIXTURE})
+set_tests_properties(llama_forward_smoke PROPERTIES DEPENDS llama_forward_fixture)
+add_test(NAME llama_forward_test COMMAND llama_forward_test --checkpoint-dir ${LLAMA_FORWARD_FIXTURE})
+set_tests_properties(llama_forward_test PROPERTIES DEPENDS llama_forward_fixture)
 
 add_executable(mimo_loader_test tests/cuda/mimo_loader_test.cpp)
 target_include_directories(mimo_loader_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
