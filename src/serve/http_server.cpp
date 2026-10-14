@@ -108,6 +108,16 @@ struct Conn {
   size_t flushed = 0;        // out bytes already sent
   HttpResponseWriter writer; // stable for the conn's lifetime; handlers
                              // may hold it across idle() passes
+  // Chunked-request assembly: headers are consumed up front and the body
+  // accumulates here across reads (slow senders hold no more than the
+  // body cap). Only one request assembles at a time — busy gates the
+  // next headers until this one dispatches.
+  bool ck_active = false;    // a chunked body is mid-assembly
+  bool ck_need_size = true;  // expecting a chunk-size line (else data)
+  bool ck_trailers = false;  // past the 0-chunk, consuming trailers
+  size_t ck_want = 0;        // data bytes still needed for this chunk
+  std::string ck_body;       // decoded body so far
+  HttpRequest ck_req;        // the request being assembled
 
   ~Conn() {
     if (fd >= 0) ::close(fd);
@@ -390,9 +400,159 @@ void HttpServer::on_readable(Conn& c) {
   }
 }
 
+// Incremental chunked-transfer decoding for one connection (RFC 9112
+// section 7.1). Headers were consumed when the request started, so c.in
+// holds only framing and data; consumed bytes are erased as they complete
+// and the decoded body accumulates in c.ck_body across reads. Slow or
+// stalled senders simply return for more bytes — never more than the body
+// cap is buffered.
+void HttpServer::dechunk_step(Conn& c) {
+  auto refuse = [&](int status, const std::string& message) {
+    queue_response(c, status, "text/plain", message, true);
+    flush_out(c);
+    close_conn(c, false);
+  };
+  auto complete = [&] {
+    c.ck_req.body = std::move(c.ck_body);
+    c.ck_body.clear();
+    if (c.ck_body.capacity() > (4 << 20)) c.ck_body.shrink_to_fit();
+    c.ck_active = false;
+    c.ck_trailers = false;
+    c.ck_need_size = true;
+    c.ck_want = 0;
+  };
+  for (;;) {
+    if (c.ck_need_size) {
+      // A chunk-size line: hex digits, then optional ;extensions.
+      const size_t eol = c.in.find("\r\n");
+      if (eol == std::string::npos) {
+        if (c.in.size() > 256) refuse(400, "chunk-size line too long");
+        return;
+      }
+      std::string_view line(c.in.data(), eol);
+      std::string_view num = line.substr(0, line.find(';'));
+      while (!num.empty() && (num.front() == ' ' || num.front() == '\t'))
+        num.remove_prefix(1);
+      while (!num.empty() && (num.back() == ' ' || num.back() == '\t'))
+        num.remove_suffix(1);
+      // Overflow-proof accumulation: bail to 413 as soon as the value
+      // must exceed the cap (size <= max/16 keeps size*16 exact).
+      uint64_t size = 0;
+      bool ok = !num.empty() && num.size() <= 16;
+      bool over = false;
+      for (char ch : num) {
+        unsigned d = 0;
+        if (ch >= '0' && ch <= '9') d = static_cast<unsigned>(ch - '0');
+        else if (ch >= 'a' && ch <= 'f') d = static_cast<unsigned>(ch - 'a') + 10;
+        else if (ch >= 'A' && ch <= 'F') d = static_cast<unsigned>(ch - 'A') + 10;
+        else {
+          ok = false;
+          break;
+        }
+        if (size > max_body_bytes_ / 16) {
+          over = true;
+          break;
+        }
+        size = size * 16 + d;
+      }
+      if (!ok) {
+        refuse(400, "bad chunk size");
+        return;
+      }
+      c.in.erase(0, eol + 2);
+      if (over || size > max_body_bytes_ ||
+          static_cast<uint64_t>(c.ck_body.size()) + size >
+              static_cast<uint64_t>(max_body_bytes_)) {
+        refuse(413, "payload too large: http.max_body_bytes is " +
+                        std::to_string(max_body_bytes_) + " bytes");
+        return;
+      }
+      if (size == 0) {
+        c.ck_need_size = false;
+        c.ck_trailers = true;
+      } else {
+        c.ck_need_size = false;
+        c.ck_want = static_cast<size_t>(size);
+      }
+    } else if (c.ck_trailers) {
+      // Trailer fields carry no semantics here; the first empty line ends
+      // them. Scanned forward (never re-erased per line) and capped by the
+      // header section bound.
+      size_t pos = 0;
+      for (;;) {
+        const size_t eol = c.in.find("\r\n", pos);
+        if (eol == std::string::npos) {
+          if (c.in.size() > kMaxHeaderBytes) refuse(431, "trailers too large");
+          return;
+        }
+        if (eol == pos) {
+          c.in.erase(0, pos + 2);
+          complete();
+          return;
+        }
+        pos = eol + 2;
+        if (pos > kMaxHeaderBytes) {
+          refuse(431, "trailers too large");
+          return;
+        }
+      }
+    } else {
+      // Chunk data, then its closing CRLF.
+      const size_t take = std::min(c.ck_want, c.in.size());
+      c.ck_body.append(c.in.data(), take);
+      c.in.erase(0, take);
+      c.ck_want -= take;
+      if (c.ck_want > 0) return;  // need more
+      if (c.in.size() < 2) return;
+      if (c.in[0] != '\r' || c.in[1] != '\n') {
+        refuse(400, "bad chunk framing");
+        return;
+      }
+      c.in.erase(0, 2);
+      c.ck_need_size = true;
+    }
+  }
+}
+
 bool HttpServer::process_requests(Conn& c) {
+  // Shared dispatch: the handler runs inline on the epoll thread; false
+  // when the connection died under the route.
+  auto dispatch = [&](HttpRequest req) {
+    c.busy = true;
+    try {
+      handler_->handle(req, c.writer);
+    } catch (const std::exception& e) {
+      DGPP_LOG_ERROR("http: handler threw on {} {} — {}", req.method,
+                     req.path, e.what());
+      c.busy = false;
+      if (c.fd < 0) return false;  // the handler killed the conn already
+      c.out.clear();
+      c.flushed = 0;
+      c.stream = false;
+      queue_response(c, 500, "text/plain",
+                     std::string("handler error: ") + e.what(), true);
+    }
+    if (c.fd < 0) return false;  // a disconnect raced the route
+    flush_out(c);
+    if (c.fd < 0) return false;  // EPIPE while flushing the response
+    if (c.closing && c.flushed >= c.out.size()) {
+      close_conn(c, false);
+      return false;
+    }
+    return true;
+  };
+
   while (!c.closing && !c.gone) {
     if (c.busy) return true;  // the handler still owes the previous answer
+    if (c.ck_active) {
+      // Resuming a chunked body: headers were consumed on an earlier pass.
+      dechunk_step(c);
+      if (c.fd < 0) return false;  // refused and closed inside the step
+      if (c.ck_active) return true;  // need more bytes
+      HttpRequest req = std::move(c.ck_req);
+      if (!dispatch(std::move(req))) return false;
+      continue;
+    }
     // A complete request = headers + Content-Length body.
     const size_t head_end = c.in.find("\r\n\r\n");
     if (head_end == std::string::npos) {
@@ -445,6 +605,7 @@ bool HttpServer::process_requests(Conn& c) {
 
     // --- headers ----------------------------------------------------------
     bool has_te = false, has_len = false;
+    std::string te_value;
     size_t content_length = 0;
     size_t pos = line_end + 2;
     while (pos < head_end) {
@@ -469,6 +630,8 @@ bool HttpServer::process_requests(Conn& c) {
         content_length = static_cast<size_t>(std::strtoull(value.c_str(), nullptr, 10));
       } else if (key == "transfer-encoding") {
         has_te = true;
+        if (!te_value.empty()) te_value += ",";
+        te_value += value;
       } else if (key == "connection") {
         const std::string cv = to_lower(value);
         c.keep_alive = cv != "close";
@@ -476,14 +639,44 @@ bool HttpServer::process_requests(Conn& c) {
       req.headers.emplace_back(std::move(key), std::move(value));
     }
 
+    // --- transfer-encoding ------------------------------------------------
+    // Only `chunked` is decoded (streaming uploaders — OpenWebUI's STT
+    // path, the OpenAI SDKs — frame multipart this way, never with a
+    // Content-Length). Any other coding stays a loud 501, and
+    // Content-Length beside Transfer-Encoding (the smuggling shape) is a
+    // 400. Chunked bodies assemble incrementally in dechunk_step, so slow
+    // senders hold no more than the body cap.
     if (has_te) {
-      // Chunked request bodies: refused loudly, not guessed.
-      queue_response(c, 501, "text/plain",
-                     "chunked request bodies unsupported — send Content-Length",
-                     true);
-      flush_out(c);
-      close_conn(c, false);
-      return false;
+      std::string te_norm;
+      for (char ch : te_value)
+        if (ch != ' ' && ch != '\t')
+          te_norm += static_cast<char>(::tolower(static_cast<unsigned char>(ch)));
+      if (te_norm != "chunked") {
+        queue_response(c, 501, "text/plain",
+                       "transfer-encoding '" + te_value +
+                           "' unsupported — send Content-Length",
+                       true);
+        flush_out(c);
+        close_conn(c, false);
+        return false;
+      }
+      if (has_len) {
+        queue_response(c, 400, "text/plain",
+                       "Content-Length with Transfer-Encoding is refused",
+                       true);
+        flush_out(c);
+        close_conn(c, false);
+        return false;
+      }
+      c.in.erase(0, head_len);
+      c.ck_req = std::move(req);
+      c.ck_req.body.clear();
+      c.ck_active = true;
+      c.ck_need_size = true;
+      c.ck_trailers = false;
+      c.ck_want = 0;
+      c.ck_body.clear();
+      continue;  // de-chunk from the buffered bytes immediately
     }
     if (req.method == "POST" && !has_len) {
       queue_response(c, 411, "text/plain", "Content-Length required", true);
@@ -510,27 +703,7 @@ bool HttpServer::process_requests(Conn& c) {
     // while the first is pending would orphan the first record (its tag
     // overwritten, its writer freed at the close without notice — the
     // fuzzer's third find, 2026-09-05). respond()/end_stream() clear busy.
-    c.busy = true;
-    try {
-      handler_->handle(req, c.writer);
-    } catch (const std::exception& e) {
-      DGPP_LOG_ERROR("http: handler threw on {} {} — {}", req.method,
-                     req.path, e.what());
-      c.busy = false;
-      if (c.fd < 0) return false;  // the handler killed the conn already
-      c.out.clear();
-      c.flushed = 0;
-      c.stream = false;
-      queue_response(c, 500, "text/plain",
-                     std::string("handler error: ") + e.what(), true);
-    }
-    if (c.fd < 0) return false;  // a disconnect raced the route
-    flush_out(c);
-    if (c.fd < 0) return false;  // EPIPE while flushing the response
-    if (c.closing && c.flushed >= c.out.size()) {
-      close_conn(c, false);
-      return false;
-    }
+    if (!dispatch(std::move(req))) return false;
   }
   return true;
 }

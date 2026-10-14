@@ -1,13 +1,17 @@
 #pragma once
-// Inline WAV audio for the ASR family (docs/audio.md): the audio counterpart
-// of prepare_image. Decoding is intentionally narrow - a base64 WAV, the
-// format every ASR client already has - and every step that will be redone
+// Inline audio for the ASR family (docs/audio.md): the audio counterpart
+// of prepare_image. Decoding is intentionally narrow - WAV, MP3, FLAC or
+// Ogg Vorbis base64, the formats every ASR client already has - and every step that will be redone
 // on the GPU (downmix, resample, mel) is NOT done here: this produces the
 // trained contract, 16 kHz hop-aligned mono and its encoder token count.
 //
 // Accepted content parts:
 //   {"type": "input_audio", "input_audio": {"data": "<b64 wav>", "format": "wav"}}
+//   {"type": "input_audio", "input_audio": {"data": "<b64 mp3>", "format": "mp3"}}
+//   {"type": "input_audio", "input_audio": {"data": "<b64 flac>", "format": "flac"}}
+//   {"type": "input_audio", "input_audio": {"data": "<b64 ogg>", "format": "ogg"}}
 //   {"type": "audio_url",   "audio_url":   {"url": "data:audio/wav;base64,<b64>"}}
+//   {"type": "audio_url",   "audio_url":   {"url": "data:audio/mpeg;base64,<b64>"}}
 // Remote URLs are refused, as with images: resolution does not belong on the
 // event-loop path.
 

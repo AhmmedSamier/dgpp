@@ -2,10 +2,13 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
 #include "audio/wav_decode.hpp"
+#include "audio/mp3_decode.hpp"
+#include "audio/compressed_decode.hpp"
 #include "common/base64.hpp"
 
 namespace dgpp::serve {
@@ -37,7 +40,18 @@ std::vector<uint8_t> from_data_uri(std::string_view s, const std::string& param)
 
 AudioInput prepare_audio_bytes(const uint8_t* bytes, size_t size, const std::string& param) {
   try {
-    auto wav = audio::decode_wav(bytes, size);
+    // Container sniff, never guessed from the filename or MIME: RIFF/WAVE
+    // decodes as WAV, fLaC as FLAC, OggS as Vorbis (Opus refused by name
+    // inside), and everything else goes to the MP3 decoder, whose
+    // no-frames refusal names every accepted codec.
+    const bool riff = size >= 12 && std::memcmp(bytes, "RIFF", 4) == 0 &&
+                      std::memcmp(bytes + 8, "WAVE", 4) == 0;
+    const bool flac = !riff && size >= 4 && std::memcmp(bytes, "fLaC", 4) == 0;
+    const bool ogg = !riff && !flac && size >= 4 && std::memcmp(bytes, "OggS", 4) == 0;
+    audio::WavAudio wav = riff   ? audio::decode_wav(bytes, size)
+                          : flac ? audio::decode_flac(bytes, size)
+                          : ogg  ? audio::decode_vorbis(bytes, size)
+                                 : audio::decode_mp3(bytes, size);
     if (wav.samples.size() / static_cast<size_t>(wav.channels) >
         static_cast<size_t>(kMaxAudioSamples) * 25)  // raw-side sanity, before the resize
       throw AudioInputError("audio clip exceeds the admission bound", param);
@@ -73,8 +87,9 @@ AudioInput prepare_audio(const minijson::Value& part, const std::string& param) 
       if (!obj || !obj->is_object())
         throw AudioInputError("input_audio must be an object", param + ".input_audio");
       if (const auto* fmt = obj->find("format");
-          fmt && (!fmt->is_string() || fmt->as_string() != "wav"))
-        throw AudioInputError("input_audio.format: serve decodes wav only",
+          fmt && (!fmt->is_string() || (fmt->as_string() != "wav" && fmt->as_string() != "mp3" &&
+                                        fmt->as_string() != "flac" && fmt->as_string() != "ogg")))
+        throw AudioInputError("input_audio.format: serve decodes wav, mp3, flac and ogg",
                               param + ".input_audio.format");
       const auto* data = obj->find("data");
       if (!data || !data->is_string())

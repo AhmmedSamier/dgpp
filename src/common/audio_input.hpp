@@ -6,6 +6,7 @@
 // features from the same samples, so no feature buffer (or process-local
 // pointer) crosses the wire.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -44,6 +45,30 @@ inline constexpr int64_t kAudioMinSamples = 8000;
 inline constexpr int64_t kMaxAudioSamples = 16000ll * 60 * 30;
 inline constexpr int kMaxAudioTokens = 16384;
 inline constexpr size_t kMaxRequestAudioBytes = 256ull << 20;
+// The tower's featurizer window: clips are staged (and floored) one window
+// at a time, so a 30 s-plus clip never materializes its whole mel bank.
+inline constexpr int64_t kAudioPieceSamples = 16000ll * 30;
+
+// Splits total_samples into frontend pieces: each at most kAudioPieceSamples
+// samples, each at least kAudioMinSamples — when a full window would leave
+// a sub-minimum tail, the window lends it one 100-frame chunk so the tail
+// stands alone valid (a ~30 s clip once failed the service on a 640-sample
+// tail). Chunk-aligned lending keeps every take a whole number of chunks,
+// so the tower's per-piece row counts still sum to the admission total.
+// Hop-multiples in give hop-multiples out (all bounds are hop-multiples).
+// Empty for a below-minimum total, which admission never produces.
+inline std::vector<int64_t> audio_piece_takes(int64_t total_samples) {
+  constexpr int64_t kLend = static_cast<int64_t>(kAudioChunkFrames) * kAudioHop;
+  std::vector<int64_t> takes;
+  int64_t rest = total_samples;
+  while (rest >= kAudioMinSamples) {
+    int64_t take = std::min<int64_t>(kAudioPieceSamples, rest);
+    if (rest > take && rest - take < kAudioMinSamples) take -= kLend;
+    takes.push_back(take);
+    rest -= take;
+  }
+  return takes;
+}
 
 // The checkpoint's three audio delimiters (config.json's
 // audio_start_token_id, audio_token_id repeated once per encoder token, and

@@ -1,8 +1,10 @@
 #include "audio/wav_decode.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
+#include <string>
 
 #include "common/audio_input.hpp"
 
@@ -112,8 +114,7 @@ WavAudio decode_wav(const uint8_t* data, size_t size) {
   return wav;
 }
 
-std::vector<float> to_mono_16k(const WavAudio& wav) {
-  const size_t frames = wav.samples.size() / static_cast<size_t>(wav.channels);
+std::vector<float> to_mono_16k(const WavAudio& wav) {  const size_t frames = wav.samples.size() / static_cast<size_t>(wav.channels);
   if (frames == 0) return {};
   std::vector<float> mono(frames);
   if (wav.channels == 1)
@@ -138,6 +139,40 @@ std::vector<float> to_mono_16k(const WavAudio& wav) {
     const double hi =
         i + 1 < frames ? static_cast<double>(mono[i + 1]) : static_cast<double>(mono[i]);
     out[j] = static_cast<float>(static_cast<double>(mono[i]) * (1.0 - f) + hi * f);
+  }
+  return out;
+}
+
+std::string encode_wav_16mono_16k(const float* samples, size_t count) {
+  std::string out;
+  out.reserve(44 + 2 * count);
+  out += "RIFF";
+  const uint32_t riff = 36 + static_cast<uint32_t>(2 * count);
+  out += {char(riff & 0xff), char((riff >> 8) & 0xff), char((riff >> 16) & 0xff),
+          char((riff >> 24) & 0xff)};
+  out += "WAVEfmt ";
+  out += {char(16), char(0), char(0), char(0)};  // fmt length
+  out += {char(1), char(0)};                     // PCM
+  out += {char(1), char(0)};                     // mono
+  const uint32_t rate = 16000;
+  out += {char(rate & 0xff), char((rate >> 8) & 0xff), char((rate >> 16) & 0xff),
+          char((rate >> 24) & 0xff)};
+  const uint32_t byte_rate = 32000;
+  out += {char(byte_rate & 0xff), char((byte_rate >> 8) & 0xff),
+          char((byte_rate >> 16) & 0xff), char((byte_rate >> 24) & 0xff)};
+  out += {char(2), char(0)};    // block align
+  out += {char(16), char(0)};   // bits
+  out += "data";
+  const uint32_t data_len = static_cast<uint32_t>(2 * count);
+  out += {char(data_len & 0xff), char((data_len >> 8) & 0xff),
+          char((data_len >> 16) & 0xff), char((data_len >> 24) & 0xff)};
+  for (size_t i = 0; i < count; ++i) {
+    double v = samples[i] * 32768.0;
+    if (v > 32767.0) v = 32767.0;
+    if (v < -32768.0) v = -32768.0;
+    const int16_t q = static_cast<int16_t>(std::lround(v));
+    out += char(q & 0xff);
+    out += char((q >> 8) & 0xff);
   }
   return out;
 }

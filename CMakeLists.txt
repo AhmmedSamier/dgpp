@@ -265,6 +265,9 @@ dgpp_set_common(dgpp_text)
 # and the tower's oracle compute identical features.
 add_library(dgpp_audio STATIC
   src/audio/wav_decode.cpp
+  src/audio/mp3_decode.cpp
+  src/audio/compressed_decode.cpp
+  src/audio/fft400.cpp
   src/audio/mel_frontend.cpp)
 target_include_directories(dgpp_audio PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(dgpp_audio PUBLIC dgpp_common)
@@ -825,6 +828,7 @@ if(DGPP_ENABLE_IBV)
   install(FILES requirements-download.txt LICENSE DESTINATION .)
   install(FILES docs/dependencies.md docs/networking.md docs/vision.md DESTINATION docs)
   install(FILES docs/licenses/PCRE2.md docs/licenses/stb_image.md docs/licenses/simplewebp.md
+                docs/licenses/minimp3.md docs/licenses/dr_flac.md docs/licenses/stb_vorbis.md
                 docs/licenses/pytorch.md DESTINATION docs/licenses)
   install(FILES deploy/nginx.example.conf DESTINATION deploy)
 endif()
@@ -1014,6 +1018,7 @@ add_test(NAME http_server_test COMMAND http_server_test)
 # + fake frontend — the OpenAI surface, host-only, always runs.
 add_executable(serve_test tests/host/serve_test.cpp)
 target_link_libraries(serve_test PRIVATE dgpp_serve Threads::Threads)
+target_compile_definitions(serve_test PRIVATE DGPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 dgpp_set_common(serve_test)
 add_test(NAME serve_test COMMAND serve_test)
 

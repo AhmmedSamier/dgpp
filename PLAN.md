@@ -95,7 +95,10 @@ Unsupported fields are rejected by name. GLM-5.3-Flash and Qwen3.8-Flash-Next
 support PNG/JPEG/WebP image inputs with native vision encoders, journaled RGB
 pixels, streaming and MTP. Image requests support prefix caching and
 resumable prefill, and bypass grouped prefill; see
-[image inputs](docs/vision.md). Audio and video inputs are unsupported.
+[image inputs](docs/vision.md). Qwen3-ASR audio inputs (WAV, MP3, FLAC,
+Ogg Vorbis) are served through `POST /v1/chat/completions` content parts
+and `POST /v1/audio/transcriptions`; see [audio inputs](docs/audio.md).
+Video inputs are unsupported.
 Vision arithmetic now follows the CUDA BF16 eager reference, with fixed
 full-encoder and isolated-operation gates. The
 numerical investigation

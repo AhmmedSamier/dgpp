@@ -169,6 +169,10 @@ class EagerEngineAdapter : public sched::SchedulerEngine {
                        [&] { return model_->session_prefill_audios(req, prompt, audios); });
     return sched::SchedulerEngine::prefill_audios(req, prompt, audios);
   }
+  int64_t prefill_audio_token_limit() const override {
+    if constexpr (requires { model_->max_tokens(); }) return model_->max_tokens();
+    return 0;
+  }
 
   int64_t prefill_chunk_alignment() const override {
     if constexpr (requires { Model::kResumablePrefill; })

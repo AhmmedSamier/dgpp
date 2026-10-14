@@ -90,6 +90,7 @@
 
 #include "loaders/minijson.hpp"
 #include "sched/scheduler.hpp"
+#include "serve/audio_transcriptions.hpp"
 #include "text/tool_parser.hpp"
 #include "serve/http_server.hpp"
 #include "serve/prometheus.hpp"
@@ -416,6 +417,21 @@ class GenerationService : public HttpHandler,
     std::vector<std::string> choices;  // one-shot: each choice's JSON
   };
 
+  // Multi-segment transcription state (docs/audio.md: long-form): one
+  // scheduler request per audio segment, submitted strictly in order;
+  // each completed transcript appends to texts and the next segment
+  // enqueues. Answered once (all texts joined) or on the first error; a
+  // disconnect strands only the in-flight segment (its record carries
+  // writer_dead, so no further segment enqueues and no answer). Lives on
+  // the drain's thread like ChoiceGroup (no lock).
+  struct TranscriptionChain {
+    HttpResponseWriter* writer = nullptr;  // the transcription connection
+    std::string format;                    // "json" or "text"
+    std::vector<TranscriptionRequest> requests;  // one chat body per segment
+    std::vector<std::string> texts;              // completed transcripts, in order
+    bool done = false;
+  };
+
   struct StreamRecord {
     uint64_t tag = 0;        // on_disconnect correlation (one per connection)
     std::string id;          // the response id (shared by a request's choices)
@@ -432,6 +448,9 @@ class GenerationService : public HttpHandler,
     // record still generates exactly like a one-shot chat choice; only the
     // final response assembly differs.
     std::string transcription_format;
+    // Long-form transcriptions chain one record per audio segment through
+    // here (null on single-segment and non-transcription records).
+    std::shared_ptr<TranscriptionChain> chain;
     bool stream = false;
     bool include_usage = false;
     bool include_obfuscation = true;
@@ -514,9 +533,15 @@ class GenerationService : public HttpHandler,
   // The parsed-body half of route_chat_completions, shared with the
   // transcription route (which synthesizes its body from multipart parts).
   // transcription_format is "" for chat, else the /v1/audio/transcriptions
-  // response shape ("json" or "text").
+  // response shape ("json" or "text"). chain threads a long-form
+  // transcription segment through the record (null everywhere else).
   void route_chat_completions_parsed(const dgpp::minijson::Value& body, HttpResponseWriter& w,
-                                     const std::string& transcription_format);
+                                     const std::string& transcription_format,
+                                     std::shared_ptr<TranscriptionChain> chain = nullptr);
+  // Enqueues the chain's next segment, or joins and answers when none
+  // remain. No-op once the chain is done (answered, errored, or
+  // disconnected).
+  void advance_transcription_chain(const std::shared_ptr<TranscriptionChain>& chain);
   void route_audio_transcriptions(const HttpRequest& req, HttpResponseWriter& w);
   void route_completions(const HttpRequest& req, HttpResponseWriter& w);
   void route_models(const HttpRequest& req, HttpResponseWriter& w);

@@ -115,7 +115,7 @@ class QwenAsrModel : public SessionModel<QwenAsrModel> {
   static constexpr int kBlockTokens = 64;
   static constexpr int kPrefillChunkTokens = 2048;
   static constexpr size_t kSnapshotStamp = 16;
-  static constexpr int64_t kSegmentSamples = 16000ll * 30;  // the 30 s featurizer window
+  static constexpr int64_t kSegmentSamples = kAudioPieceSamples;  // the 30 s featurizer window
 
   struct DenseMlp;  // the BF16 SwiGLU (gate/up GEMMs, fused act, down)
 

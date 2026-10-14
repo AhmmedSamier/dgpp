@@ -4,6 +4,7 @@
 #include <limits>
 #include <stdexcept>
 
+#include "audio/fft400.hpp"
 #include "common/audio_input.hpp"
 
 namespace dgpp::audio {
@@ -67,22 +68,11 @@ Fbank compute_fbank(const float* samples, size_t count) {
   if (frames == 0) return out;
   out.features.resize(static_cast<size_t>(frames) * kAudioMelBins);
 
-  // Twiddle tables: exp(-2 pi i k n / 400).
-  static const auto twiddles = [] {
-    std::vector<double> c(static_cast<size_t>(kBins) * kAudioNfft),
-        s(c.size());
-    for (int k = 0; k < kBins; ++k)
-      for (int n = 0; n < kAudioNfft; ++n) {
-        const double a = 2.0 * kPi * k * n / kAudioNfft;
-        c[static_cast<size_t>(k) * kAudioNfft + n] = std::cos(a);
-        s[static_cast<size_t>(k) * kAudioNfft + n] = std::sin(a);
-      }
-    return std::make_pair(std::move(c), std::move(s));
-  }();
   const std::vector<double>& filt = mel_filter_bank();
   const std::vector<float>& win = hann_window_400();
 
   std::vector<double> power(kBins);
+  double in_re[kAudioNfft], in_im[kAudioNfft], out_re[kAudioNfft], out_im[kAudioNfft];
   double log_max = -std::numeric_limits<double>::infinity();
   auto frame_features = [&](int64_t f, auto&& per_bin) {
     // The STFT is center-padded, and the padding is not uniform: torch.stft
@@ -90,22 +80,18 @@ Fbank compute_fbank(const float* samples, size_t count) {
     // zero-extends the clip to its 30 s frame before the stft - so frames
     // read reflected samples left of the clip and zeros past its end.
     const int64_t base = f * kAudioHop - kAudioNfft / 2;
-    for (int k = 0; k < kBins; ++k) {
-      double re = 0.0, im = 0.0;
-      const double* cr = twiddles.first.data() + static_cast<size_t>(k) * kAudioNfft;
-      const double* sr = twiddles.second.data() + static_cast<size_t>(k) * kAudioNfft;
-      for (int n = 0; n < kAudioNfft; ++n) {
-        const int64_t s = base + n;
-        double x;
-        if (s < 0) x = static_cast<double>(samples[-s]);
-        else if (s < static_cast<int64_t>(count)) x = static_cast<double>(samples[s]);
-        else x = 0.0;
-        x *= win[n];
-        re += x * cr[n];
-        im -= x * sr[n];
-      }
-      power[k] = re * re + im * im;
+    for (int n = 0; n < kAudioNfft; ++n) {
+      const int64_t s = base + n;
+      double x;
+      if (s < 0) x = static_cast<double>(samples[-s]);
+      else if (s < static_cast<int64_t>(count)) x = static_cast<double>(samples[s]);
+      else x = 0.0;
+      in_re[n] = x * win[n];
+      in_im[n] = 0.0;
     }
+    fft400_forward(in_re, in_im, out_re, out_im);
+    for (int k = 0; k < kBins; ++k)
+      power[k] = out_re[k] * out_re[k] + out_im[k] * out_im[k];
     for (int m = 0; m < kAudioMelBins; ++m) {
       double acc = 0.0;
       for (int k = 0; k < kBins; ++k)

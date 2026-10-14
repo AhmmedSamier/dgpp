@@ -1,9 +1,10 @@
 #pragma once
-// Container-level audio decoding (docs/audio.md). Inline audio arrives as a
-// base64 WAV: the canonical interchange format for ASR, and the one format
-// whose decode is exact integer/IEEE arithmetic with no library dependency.
-// Other codecs (mp3, opus, flac) and non-WAV containers are refused by name
-// rather than guessed at; callers convert samples to 16 kHz mono.
+// Container-level WAV decoding (docs/audio.md). Inline audio arrives as a
+// base64 WAV - the canonical interchange format for ASR - or as MP3
+// (`audio/mp3_decode.hpp`): WAV's decode is exact integer/IEEE arithmetic
+// with no library dependency, MP3's is the vendored minimp3. Other codecs
+// (opus, flac) and non-audio containers are refused by name rather than
+// guessed at; callers convert samples to 16 kHz mono.
 
 #include <cstddef>
 #include <cstdint>
@@ -34,4 +35,10 @@ WavAudio decode_wav(const uint8_t* data, size_t size);
 // with torchaudio's windowed sinc; linear is a deliberate v1 simplification,
 // transparent in the output (it attenuates only the 8 kHz edge).
 std::vector<float> to_mono_16k(const WavAudio& wav);
+
+// Encodes 16 kHz mono float samples (roughly [-1, 1], clamped) as a
+// 16-bit PCM RIFF/WAVE blob: the inverse of decode_wav for mono 16 kHz,
+// used to re-wrap transcription segments for per-segment admission.
+// Round-trips decode_wav bit-nearly (int16 quantization only).
+std::string encode_wav_16mono_16k(const float* samples, size_t count);
 }  // namespace dgpp::audio

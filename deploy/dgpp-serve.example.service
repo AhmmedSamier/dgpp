@@ -1,0 +1,27 @@
+# Example systemd unit for a single-node dgpp-serve. An engine or fabric
+# failure fails the service by design (DESIGN.md section 9 item 6), so the
+# process exits nonzero and relies on the supervisor here to come back.
+# Install: copy to /etc/systemd/system/dgpp-serve.service (drop the
+# .example), edit User/WorkingDirectory/checkpoint, then
+# `systemctl daemon-reload && systemctl enable --now dgpp-serve`.
+[Unit]
+Description=DGPP inference server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dgpp
+WorkingDirectory=/opt/dgpp
+ExecStart=/opt/dgpp/build-release/dgpp-serve --checkpoint-dir /models/asr_ckpt --port 8000
+Restart=always
+RestartSec=5
+# The engine locks its memory and needs memlock + a high fd ceiling.
+LimitMEMLOCK=infinity
+LimitNOFILE=1048576
+# Journal keeps the logs; keep some headroom for request bursts.
+MemoryMax=90%
+OOMScoreAdjust=-500
+
+[Install]
+WantedBy=multi-user.target

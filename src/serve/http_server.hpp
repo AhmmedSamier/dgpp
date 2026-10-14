@@ -16,9 +16,10 @@
 //     — the service maps that onto scheduler cancellation.
 //
 // SUPPORTED (deliberately small, refused loudly everywhere else):
-// HTTP/1.1 keep-alive; request bodies by Content-Length only (chunked
-// REQUEST bodies → 501; curl and every OpenAI client send lengths); SSE
-// responses via chunked transfer encoding. Limits: 16 KiB of headers,
+// HTTP/1.1 keep-alive; request bodies by Content-Length or chunked
+// transfer encoding (other codings → 501; Content-Length beside
+// Transfer-Encoding, the smuggling shape, → 400); SSE responses via
+// chunked transfer encoding. Limits: 16 KiB of headers,
 // a configurable body cap (default 256 MiB) and connection cap — beyond them,
 // 431/413/503 with the connection closed. Malformed input → 400 close.
 // Fuzzing hardening is M9; the parser is defensive anyway (it runs in
@@ -140,6 +141,11 @@ class HttpServer {
   void on_writable(Conn& c);
   void close_conn(Conn& c, bool notify_disconnect);
   bool flush_out(Conn& c);
+  // Advances c's chunked-body assembly from c.in (headers already
+  // consumed). On completion the body lands in c.ck_req and ck_active
+  // clears; on framing faults or cap breaches an error is queued and the
+  // connection closed (c.fd < 0).
+  void dechunk_step(Conn& c);
   // Parses every complete request from c.in; false when the connection
   // must close (error responses are already queued).
   bool process_requests(Conn& c);

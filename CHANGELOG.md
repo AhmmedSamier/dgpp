@@ -173,6 +173,79 @@ project procedures and design guidance live in `docs/`.
   `benchmarks/results/` are no longer tracked. The measured
   latency/throughput tradeoffs are in
   [PR #112](https://github.com/HawkBearPig/dgpp/pull/112).
+- **Transcription language tag on its own line**: the checkpoint glues
+  `language <NAME>` onto every transcript with no separator; the server
+  now splits it above the body (`split_language_tag`, camelCase boundary
+  measured over 2620 test-clean outputs — anything else passes through
+  verbatim rather than risk eating speech), for single and chained
+  responses alike.
+- **Long-form transcription chains**: clips past one engine forward (~2.5
+  minutes at the default window) split into whole-chunk segment bodies
+  (`transcription_segment_bodies`, token-exact) transcribed strictly in
+  order through a `TranscriptionChain` — one scheduler request per
+  segment, each with its own duration cap, answered once with the joined
+  transcripts. Single clips ride today's path byte-identically; a window
+  too small for one chunk refuses loudly. Pinned by splitter unit tests
+  and a chained serve test.
+- **Audio tail-piece merge**: clips staged for the tower in 30 s windows
+  died on a sub-8000-sample tail (a 30.04 s clip failed the service —
+  first at the frontend floor, then at the tower's 3000-frame window).
+  `audio_piece_takes()` lends a short tail one chunk from its
+  predecessor, satisfying the frontend floor, the tower window, and the
+  admission token accounting at once. Found by the LibriSpeech WER gate
+  below.
+- **LibriSpeech WER gate**: `tools/qwen_asr_wer.py` streams a split
+  through the served transcription endpoint and scores word error rate
+  (test-clean: see `benchmarks/results/2026-10-14-asr-wer/wer.json`).
+- **Audio stage-bound admission**: admission accepted 16384 audio tokens
+  per request while the engine stage holds only its prefill window (2048
+  rows ≈ 2.5 minutes at the default window), so a long clip reached the
+  engine and failed the whole service. The engine now advertises
+  `prefill_audio_token_limit()` (both adapters, from the model's forward
+  bound) and the serve layer refuses overlong clips at admission with a
+  400 naming the audio (`context_length_exceeded`) — never engine work.
+  `tests/host/serve_test.cpp` pins the refusal; `docs/audio.md` records
+  the bound and the supervisor note (`deploy/dgpp-serve.example.service`).
+- **Audio FLAC + Ogg Vorbis uploads**: `src/audio/compressed_decode.*`
+  decodes FLAC (vendored dr_flac) and Ogg Vorbis (vendored stb_vorbis)
+  through the same sniff-and-admit path as WAV/MP3
+  (`input_audio.format` accepts `flac`/`ogg`); Ogg Opus is refused by
+  name. Lossless-exact and tone-correlation gates pin both, with fixtures.
+- **Audio gapless trim**: MP3s carrying a LAME/Xing tag drop their
+  encoder delay/padding (`gapless_trim`, structurally located — never
+  substring-searched); untagged streams keep the delay. Verified against
+  a real LAME-tagged file; synthetic frames pin the parser and its
+  refusals.
+- **Log-mel FFT frontend**: the quadratic host DFT is a mixed-radix 16x25
+  FFT in double precision (`src/audio/fft400.{hpp,cpp}`) — golden worst
+  |delta| unchanged at 9.6e-05, ~2.3x faster (5.6 → 2.4 ms per audio
+  second). The 201x128 mel projection is now the frontend's cost.
+- **HTTP chunked request bodies decoded**: `Transfer-Encoding: chunked`
+  uploads (how OpenWebUI's STT path and the OpenAI SDKs stream multipart -
+  aiohttp never sends a Content-Length for them) were a 501, so every
+  OpenWebUI transcription failed even with a supported codec. The server
+  now de-chunks incrementally (`HttpServer::dechunk_step`) under the same
+  body cap, keeps the connection alive, and still refuses loudly: unknown
+  codings stay 501, Content-Length beside Transfer-Encoding (the smuggling
+  shape) is a 400. `tests/host/http_server_test.cpp` pins verbatim decode,
+  split arrivals, extensions/trailers, and each refusal. Verified against
+  the live path with a byte-identical replay of OpenWebUI's request.
+- **Audio MP3 uploads (`input_audio` format mp3, transcription `file` mp3)**:
+  the OpenWebUI failure (`Error transcribing chunk: External: 400`) was a
+  format refusal - OpenWebUI converts every upload to mp3 chunks while the
+  server decoded WAV only. MP3 (MPEG-1/2/2.5, layers 1-3, 8-48 kHz
+  mono/stereo) now decodes through the vendored single-header minimp3
+  (`third_party/minimp3/`, `docs/licenses/minimp3.md`, no new build or
+  runtime dependency) in `src/audio/mp3_decode.{hpp,cpp}`, into the same
+  native-rate PCM the WAV path feeds to the shared mono/16 kHz aligner.
+  The container is sniffed from the bytes (RIFF/WAVE vs MP3 sync/ID3), so a
+  mislabeled file still decodes and undecodable bytes stay a 400 naming the
+  field; `input_audio.format` accepts `wav`/`mp3`, corrupt mid-stream
+  changes and pure-tag inputs are refused, and the transcription
+  `max_tokens` duration rule falls back to the decoded probe for MP3.
+  `tests/data/mp3_tone_1s_*.mp3` fixtures pin decode geometry, tone
+  correlation and admission, and `tests/host/serve_test.cpp` pins an mp3
+  multipart upload reaching the engine prefill.
 - **Qwen3-ASR transcription endpoint (`POST /v1/audio/transcriptions`)**:
   the OpenAI transcription API over the chat engine - a strict
   line-scanning multipart parser (no payload substring search, so WAV
