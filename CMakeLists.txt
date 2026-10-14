@@ -1031,6 +1031,7 @@ add_executable(unit_tests
   tests/unit/json_grammar_test.cpp
   tests/unit/net_test.cpp
   tests/unit/cluster_config_test.cpp
+  tests/unit/tokenizer_load_test.cpp
   tests/unit/qwen_config_test.cpp
   tests/unit/qwen_csf_test.cpp
   tests/unit/qwen_image_stage_test.cpp

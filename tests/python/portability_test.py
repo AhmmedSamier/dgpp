@@ -180,6 +180,36 @@ class PortabilityTest(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             cluster_doctor.checkpoint_size(snapshot)
 
+    def slow_checkpoint(self):
+        snapshot = self.root / "models--org--model/snapshots/revision"
+        snapshot.mkdir(parents=True)
+        (snapshot / "config.json").write_text("{}")
+        (snapshot / "vocab.json").write_text('{"a": 0}')
+        (snapshot / "merges.txt").write_text("#version: 0.2\n")
+        (snapshot / "tokenizer_config.json").write_text(json.dumps(
+            {"tokenizer_class": "Qwen2Tokenizer", "added_tokens_decoder": {}}))
+        (snapshot / "chat_template.json").write_text(
+            json.dumps({"chat_template": "{{ messages }}"}))
+        header = json.dumps({"weight": {"data_offsets": [0, 4], "dtype": "F32", "shape": [1]}}).encode()
+        (snapshot / "model.safetensors").write_bytes(struct.pack("<Q", len(header)) + header + bytes(4))
+        return snapshot
+
+    def test_slow_spelling_passes_without_generated_files(self):
+        self.assertGreater(cluster_doctor.checkpoint_size(self.slow_checkpoint()), 4)
+
+    def test_slow_spelling_rejects_foreign_tokenizer_class(self):
+        snapshot = self.slow_checkpoint()
+        (snapshot / "tokenizer_config.json").write_text(json.dumps(
+            {"tokenizer_class": "LlamaTokenizer", "added_tokens_decoder": {}}))
+        with self.assertRaisesRegex(ValueError, "not a Qwen2 tokenizer"):
+            cluster_doctor.checkpoint_size(snapshot)
+
+    def test_slow_spelling_rejects_missing_template_envelope(self):
+        snapshot = self.slow_checkpoint()
+        (snapshot / "chat_template.json").unlink()
+        with self.assertRaisesRegex(ValueError, "missing chat_template.jinja"):
+            cluster_doctor.checkpoint_size(snapshot)
+
     def test_snapshot_ambiguity_and_missing_shard(self):
         snapshot = self.checkpoint()
         (snapshot.parent / "other").mkdir()
@@ -294,6 +324,7 @@ class PortabilityTest(unittest.TestCase):
             "kaushikvira/Qwen3.8-Flash-Next-swift15-nvfp4-dgpp": "qwen-3.8-flash-next_nvfp4-swift15",
             "nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-NVFP4": "dory1.0-4b_nvfp4",
             "HawkBearPig/flint-FP8-NVFP4": "flint_fp8-nvfp4",
+            "Qwen/Qwen3-ASR-1.7B": "qwen3-asr-1.7b_bf16",
         }
         # Families whose checkpoint ships no draft layer: their templates run
         # plain (the spec keys are refused by name at boot, not merely off) —
@@ -311,16 +342,23 @@ class PortabilityTest(unittest.TestCase):
         # drafter replacing the MTP draft one-for-one, its block proposal
         # recorded in the graph step (2026-10-05; the eager engine is the
         # recipe without decode_graph); the shapes a template does not
-        # name are boot knobs, listed in the catalogue.
+        # name are boot knobs, listed in the catalogue. The Qwen3-ASR
+        # template (2026-10-14) is the second exception: the checkpoint
+        # carries no MTP heads and the family runs eager, so it names
+        # neither MTP nor the decode graph.
         seen = set()
         for path in templates:
             with self.subTest(path=path.name):
                 cfg = json.loads(path.read_text())
                 engine = cfg["engine"]
                 drafter = bool(engine.get("dflash_model"))
+                asr = cfg["model"] == "Qwen/Qwen3-ASR-1.7B"
                 if drafter:
                     self.assertFalse(engine["mtp"], "a drafter template replaces MTP, not both")
                     self.assertTrue(engine["decode_graph"], "the drafter's block proposal is recorded in the graph step")
+                elif asr:
+                    self.assertNotIn("mtp", engine, "the ASR checkpoint has no MTP heads to enable")
+                    self.assertNotIn("decode_graph", engine, "the ASR family runs eager")
                 elif cfg["model"] in draftless_models:
                     self.assertFalse(engine.get("mtp", False), "a draftless family's template runs plain")
                     self.assertTrue(engine["decode_graph"])

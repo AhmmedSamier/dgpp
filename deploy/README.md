@@ -20,10 +20,9 @@ it. Rank 0 serves metrics on its HTTP endpoint. See the
 
 - Model names are `glm-5.3-flash`, `glm-5.3` (the full model), `glm-4.7`,
   `qwen-3.8-flash-next`, `qwen3.8-27b`, `deepseek-v4-flash`,
-  `deepseek-v4.1-flash`, `mimo-v2.6-flash` and `dory1.0-4b`.
   `deepseek-v4.1-flash`, `deepseek-v4.1-flash-1017` (the 2026-10-17
   refinement of V4.1-Flash: the same architecture and config, re-trained
-  weights), `mimo-v2.6-flash` and `flint`.
+  weights), `mimo-v2.6-flash`, `flint`, `dory1.0-4b` and `qwen3-asr-1.7b`.
 - The quant names the checkpoint representation: `fp8`, `nvfp4`,
   `nvfp4-fp8` for the custom GLM-5.3-Flash hybrid, `int4-int8` for the full
   GLM-5.3's pack-quantized release (int4 group-64 routed experts, int8
@@ -39,7 +38,8 @@ it. Rank 0 serves metrics on its HTTP endpoint. See the
   `exl3-3.5bpw` for the EXL3 trellis re-pack of DeepSeek-V4.1-Flash-1017
   (every projection a 3–8-bit trellis-coded matrix under the pack's
   k-map, decoded by the engine's own kernels; the Engram tables read from
-  the base release through `engine.engram_source`). The
+  the base release through `engine.engram_source`), and `bf16`
+  for Qwen3-ASR-1.7B as it ships (plain BF16). The
   JSON's `model` field gives the exact Hugging Face repository.
 - `w<n>` gives the participating node count. Nothing restricts that number to
   the counts in use today; a world is refused by the engine's geometry check or
@@ -67,7 +67,10 @@ that binding. [Reuse across upgrades](../docs/nvme-cache.md#across-restarts)
 explains the compatibility assertion and the checks that remain enforced.
 [The cold tier](../docs/nvme-cache.md) describes the
 behaviour and the [configuration reference](../docs/configuration.md#nvme-cache)
-lists the keys. The shapes
+lists the keys. The Qwen3-ASR template names
+neither MTP nor the graph: the checkpoint carries no MTP heads and the
+family runs eager — eight request slots sharing an 8192-token pool, served
+id `Qwen3-ASR-1.7B`. The shapes
 a template does not name are knobs appended at boot:
 `scripts/dgpp-cluster up --config FILE --knobs "FLAGS"`.
 
@@ -105,6 +108,7 @@ planner adds a separate 4 GiB headroom allowance to these totals.
 | [cluster_qwen3.5-122b-a10b_nvfp4_w1.example.json](cluster_qwen3.5-122b-a10b_nvfp4_w1.example.json) | Qwen3.5-122B-A10B-NVFP4 on one node: routed NVFP4 experts, BF16 attention and shared experts, BF16 KV, eight request slots, MTP depth 2 with `mtp_expert_format: "bf16"`. Performance validation of the shipped template is pending. | plain decode: `--no-mtp`; depth 1: `--mtp-depth 1`; depth 3: `--mtp-depth 3` |
 | [cluster_qwen3.5-122b-a10b_nvfp4_w2.example.json](cluster_qwen3.5-122b-a10b_nvfp4_w2.example.json) | the same on two nodes | ditto |
 | [cluster_qwen3.5-122b-a10b_nvfp4_w4.example.json](cluster_qwen3.5-122b-a10b_nvfp4_w4.example.json) | the same on four nodes | ditto |
+| [cluster_qwen3-asr-1.7b_bf16_w1.example.json](cluster_qwen3-asr-1.7b_bf16_w1.example.json) | Qwen3-ASR-1.7B as it ships (BF16) on one node: eight request slots sharing an 8192-token pool, port 8000, served id `Qwen3-ASR-1.7B`; the snapshot needs no preparation (the server reads the upstream slow files directly) | — |
 | [cluster_glm-5.3_nf4i8_w4.example.json](cluster_glm-5.3_nf4i8_w4.example.json) | the full GLM-5.3 in the NF4I8 GPTQ H32 g128 checkpoint (`HawkBearPig/GLM-5.3-NF4I8-GPTQ-H32-g128`: sixteen-level codebook routed experts, int8 attention and shared expert) on four nodes: MTP depth 1, eight request slots, 272K fp8 context, the embedding vocab-sharded, the BF16 decode weights in their 12-bit form (93.7 GiB of weights per rank) | T=1: `--no-mtp`; depth 2 at two slots: `--mtp-depth 2 --max-concurrency 2` |
 | [cluster_glm-5.3_mixed346_w4.example.json](cluster_glm-5.3_mixed346_w4.example.json) | the full GLM-5.3 in the Mixed346 GPTQ H32 A8 g128 checkpoint (`HawkBearPig/GLM-5.3-Mixed346-GPTQ-H32-A8-g128`: 3/4/6-bit codebook routed experts with int8 activation codes, 116 int4 fallback experts, int8 attention and shared expert) on four nodes: MTP depth 1, eight request slots, 272K fp8 context, the embedding vocab-sharded, the BF16 decode weights in their 12-bit form (92.1 GiB of weights per rank; 62.7 ms a pass at one request on 2026-10-10) | T=1: `--no-mtp`; depth 2 at two slots: `--mtp-depth 2 --max-concurrency 2` |
 | [cluster_mimo-v2.6-flash_mxfp4-fp8_w4.example.json](cluster_mimo-v2.6-flash_mxfp4-fp8_w4.example.json) | MiMo-V2.6-Flash as shipped on four nodes: MTP depth 1 (the first of the release's three draft layers), the BF16 o_proj / head / eh_proj resident in their 12-bit form alone (`"bf12"`), 128K context (every layer's K/V paged, the sliding-window layers read theirs through the window), four request slots; text prompts only (the vision and audio encoders are not served) | T=1: `--no-mtp`; depth 2: `--mtp-depth 2` |

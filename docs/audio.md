@@ -70,20 +70,22 @@ message text are rejected as conflicting with the decoded audio.
 
 ## Serving it
 
-The snapshot is serve-ready with two generated files beside it (neither
-ships upstream): the `tokenizer.json` dgpp's Tokenizer loads, and the
-`chat_template.jinja` the frontend renders. One command builds them:
+The snapshot serves as downloaded — no preparation step. Upstream ships
+no `tokenizer.json` or `chat_template.jinja`, so the server reads the
+slow spelling directly: `Tokenizer::load` falls back to `vocab.json` +
+`merges.txt` + `tokenizer_config.json` (gated on the `Qwen2Tokenizer`
+class, added tokens registered special exactly as the reference
+`add_special_tokens` builder does), and `ChatTemplate::load` falls back
+to the `chat_template.json` envelope. Both fallbacks are pinned
+byte-identical to the reference-built files
+(`tests/unit/tokenizer_load_test.cpp`, `tests/data/slow_tokenizer/`,
+`tests/data/slow_template/`).
 
 ```bash
-python3 tools/prepare_qwen_asr_checkpoint.py \
-    --model Qwen/Qwen3-ASR-1.7B --out /models/qwen3-asr-1.7b
-./build/dgpp-serve --checkpoint-dir /models/qwen3-asr-1.7b --port 18081
+./build/dgpp-serve --model Qwen/Qwen3-ASR-1.7B --port 18081
 ```
 
-`--snapshot DIR --in-place` writes the two files into an existing
-snapshot instead (no symlinks, nothing else touched). Pointing the
-server at a raw snapshot fails at boot naming the missing file and the
-command that generates it.
+`--checkpoint-dir` at a raw snapshot works the same way.
 
 ### Cluster deployment
 
@@ -97,11 +99,9 @@ python3 scripts/download_model.py --config deploy/cluster_qwen3-asr-1.7b_bf16_w1
 scripts/dgpp-cluster up --config deploy/cluster_qwen3-asr-1.7b_bf16_w1.example.json
 ```
 
-The downloader prepares Qwen3-ASR snapshots itself (architecture
-`Qwen3ASRForConditionalGeneration`): the two derived files are
-generated into the snapshot before validation, so the peer sync carries
-a serve-ready tree and the boot preflight passes. Fresh downloads only —
-`--sync-only` stays offline and `--verify-only` stays read-only.
+The snapshot needs no preparation: the server reads the upstream files
+directly (above), so peers sync the raw snapshot and boot straight
+into it.
 
 `GET /v1/models` then lists `"audio"` in `input_modalities`, and a user
 message with an `input_audio` (base64 WAV) or `audio_url` (data URI) part
