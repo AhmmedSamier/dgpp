@@ -55,15 +55,36 @@ def cached_snapshot(model, root):
     return snapshot
 
 
+def template_less_family(snapshot):
+    """Checkpoints whose family serves without a chat template (the Llama
+    FIM models): config.json's architectures[0] starts with `Llama`, or
+    its model_type is `llama`. Anything unreadable is not exempt."""
+    try:
+        config = json.loads((Path(snapshot) / "config.json").read_text())
+    except (OSError, ValueError):
+        return False
+    if not isinstance(config, dict):
+        return False
+    architectures = config.get("architectures")
+    if isinstance(architectures, list) and architectures and isinstance(architectures[0], str):
+        if architectures[0].startswith("Llama"):
+            return True
+    return config.get("model_type") == "llama" and not architectures
+
+
 def checkpoint_size(snapshot):
     """Validate required metadata and safetensors lengths without reading weights."""
     snapshot = Path(snapshot)
     for name in ("config.json", "tokenizer.json"):
         if not isinstance(json.loads((snapshot / name).read_text()), dict):
             raise ValueError(f"{name} must contain a JSON object")
-    # The prompt format: a Jinja template, or a DeepSeek release's own encoder
+    # The prompt format: a Jinja template, a DeepSeek release's own encoder
     # (V4.1's `encoding/encoding.py`, V4's `encoding/encoding_dsv4.py`; those
-    # checkpoints ship no template).
+    # checkpoints ship no template), or nothing for the template-less
+    # families (Llama FIM models serve /v1/completions with no template —
+    # src/serve/frontend.hpp's LlamaFrontend).
+    if template_less_family(snapshot):
+        return shard_bytes(snapshot)
     encoders = ("encoding.py", "encoding_dsv4.py")
     if not (snapshot / "chat_template.jinja").is_file() and not any(
         (snapshot / "encoding" / name).is_file() for name in encoders

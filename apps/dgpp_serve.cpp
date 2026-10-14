@@ -88,6 +88,8 @@
 #include "models/qwen/model35.hpp"
 #include "models/glm4/config.hpp"
 #include "models/glm4/forward.hpp"
+#include "models/llama/config.hpp"
+#include "models/llama/forward.hpp"
 #include "models/glm_dsa/config.hpp"
 #include "models/dsv41/config.hpp"
 #include "models/dsv41/loader.hpp"
@@ -656,6 +658,74 @@ struct Glm4Family final : ServeFamily {
       int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
       int prefix_slots) override {
     return std::make_unique<dgpp::EagerEngineAdapter<dgpp::Glm4Model>>(
+        model.get(), slots, std::move(pick), std::move(sample), grammar, prefix_slots);
+  }
+};
+
+// Zeta-2.1 (LlamaForCausalLM, dense BF16 GQA): the paged K/V pool
+// (64-token blocks, bf16), no recurrent state (snapshots at any
+// position), no draft block (mtp refuses in the model), the resident
+// fabric model / the streaming world-1 one. Served through
+// /v1/completions (no chat template ships with the checkpoint).
+struct LlamaFamily final : ServeFamily {
+  dgpp::LlamaTextConfig cfg;
+  std::string ckpt;
+  std::unique_ptr<dgpp::LlamaModel> model;
+  explicit LlamaFamily(const std::string& checkpoint)
+      : cfg(dgpp::LlamaTextConfig::from_json_file((fs::path(checkpoint) / "config.json").string())),
+        ckpt(checkpoint) {}
+  const char* name() const override { return "llama"; }
+  int64_t vocab_size() const override { return cfg.vocab_size; }
+  const std::vector<int64_t>& eos_token_ids() const override { return cfg.eos_token_ids; }
+  int64_t block_tokens() const override { return dgpp::LlamaModel::kv_block_tokens_static(); }
+  int prefill_chunk_tokens() const override { return dgpp::LlamaModel::prefill_chunk_tokens(); }
+  std::string pool_check(int64_t) const override { return ""; }
+  const char* kv_format_name() const override { return "bf16"; }
+  // The rope's positional ceiling: a pool above it seats concurrent
+  // requests, but a single request can never pass it.
+  int64_t position_limit() const override { return cfg.context_limit(); }
+  int decode_rows_cap() const override { return dgpp::LlamaModel::decode_rows_cap(); }
+  // The widest fold the decode graph records: a block output [rows, hidden].
+  size_t lat_slot_bytes(int decode_rows) const override {
+    return static_cast<size_t>(decode_rows) * static_cast<size_t>(cfg.hidden_size) * 2;
+  }
+  dgpp::MemoryPlan plan(int forward_rows, int64_t context, int rank, int world_, bool fabric, int slots,
+                        bool mtp, int decode_rows) const override {
+    return dgpp::LlamaModel::plan_memory(
+        cfg, forward_rows, context, fabric ? rank : 0, fabric ? world_ : 1,
+        fabric ? dgpp::LlamaResidency::Resident : dgpp::LlamaResidency::Streaming, slots,
+        fabric && mtp, decode_rows, /*serving_logits=*/true);
+  }
+  size_t snapshot_bytes(int world_, bool mtp) const override {
+    return dgpp::LlamaModel::session_snapshot_bytes(cfg, world_, mtp);
+  }
+  void build_model(dgpp::BoundaryReducer* reducer, int rank, int world_, bool fabric, int forward_rows,
+                   int64_t pool_tokens, int slots, bool mtp, int decode_rows) override {
+    dgpp::LlamaLayerStream::set_resident_image_dir(dgpp::GlmLayerStream::resident_image_dir());
+    model = std::make_unique<dgpp::LlamaModel>(
+        cfg, ckpt, forward_rows, pool_tokens,
+        fabric ? dgpp::LlamaResidency::Resident : dgpp::LlamaResidency::Streaming, reducer,
+        fabric ? rank : 0, fabric ? world_ : 1, slots, fabric && mtp, decode_rows,
+        /*serving_logits=*/true);
+  }
+  void destroy_model() override { model.reset(); }
+  size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
+  std::unique_ptr<ServeGraphEngine> make_graph_engine(dgpp::net::CollectiveBus* bus, int rank,
+                                                      int world_, uint16_t* pick_scratch,
+                                                      int batch_min_live, uint16_t* prefix_scratch,
+                                                      uint16_t* gather_scratch, int candidates,
+                                                      const dgpp::text::GrammarVocab* grammar,
+                                                      int prefix_slots, int mtp_depth,
+                                                      bool compact_batches, int lookup_tail = 0) override {
+    return std::make_unique<ServeGraphEngineOf<dgpp::LlamaModel>>(
+        model.get(), bus, rank, world_, pick_scratch, cfg.vocab_size, /*pick_timeout_ms=*/60000,
+        batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots,
+        mtp_depth, compact_batches, lookup_tail);
+  }
+  std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
+      int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
+      int prefix_slots) override {
+    return std::make_unique<dgpp::EagerEngineAdapter<dgpp::LlamaModel>>(
         model.get(), slots, std::move(pick), std::move(sample), grammar, prefix_slots);
   }
 };
@@ -1293,6 +1363,7 @@ std::unique_ptr<ServeFamily> make_family(const std::string& ckpt, int world,
   if (arch == dgpp::ModelArchitecture::Qwen3_5)
     return std::make_unique<Qwen35Family>(ckpt, rope_scaling, kv_format);
   if (arch == dgpp::ModelArchitecture::Glm4Moe) return std::make_unique<Glm4Family>(ckpt);
+  if (arch == dgpp::ModelArchitecture::Llama) return std::make_unique<LlamaFamily>(ckpt);
   if (arch == dgpp::ModelArchitecture::GlmMoeDsa) return std::make_unique<GlmDsaFamily>(ckpt, world, kv_format);
   return std::make_unique<GlmFamily>(ckpt, world, kv_format);
 }
@@ -1395,12 +1466,18 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
   DGPP_LOG_INFO(
       "serve: tokenizer word cache {} entries (0 disables it; at most 256 mapped bytes per word)",
       k.tokenizer_word_cache_entries);
-  // The prompt renderer: the checkpoint's chat_template.jinja, or the
-  // DeepSeek-V4.1 encoder's format (no Jinja ships with that model).
+  // The prompt renderer: the checkpoint's chat_template.jinja, the
+  // DeepSeek-V4.1/V4 encoder's format, or — for the template-less Llama
+  // family — the FIM passthrough frontend (no Jinja ships with that
+  // model; chat completions refuse, /v1/completions serves).
   std::optional<dgpp::text::ChatTemplate> tpl;
   std::unique_ptr<dgpp::serve::ModelFrontend> frontend;
   uint64_t template_hash = 0;
-  if (family_name == "deepseek_v41") {
+  if (family_name == "llama") {
+    frontend = std::make_unique<dgpp::serve::LlamaFrontend>(&tok);
+    template_hash = 0;
+    DGPP_LOG_INFO("serve: tokenizer {:#x}, no chat template (FIM completions only)", tok.revision_hash());
+  } else if (family_name == "deepseek_v41") {
     frontend = std::make_unique<dgpp::serve::Dsv41Frontend>(&tok);
     template_hash = dgpp::text::Dsv41Prompt::source_hash();
     DGPP_LOG_INFO("serve: tokenizer {:#x}, the DeepSeek-V4.1 prompt renderer {:#x}", tok.revision_hash(),

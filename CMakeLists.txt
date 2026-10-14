@@ -948,6 +948,7 @@ if(DGPP_ENABLE_IBV)
                                              dgpp_models_dsv41_layers dgpp_models_dsv4_layers dgpp_models_mimo_layers
                                              dgpp_models_dory_layers
                                              dgpp_models_flint_layers
+                                             dgpp_models_llama_layers
                                              dgpp_loaders dgpp_bus
                                              dgpp_serve CUDA::cudart
                                              Threads::Threads)
@@ -1167,6 +1168,9 @@ set_tests_properties(mimo_tokenizer_test PROPERTIES SKIP_RETURN_CODE 2)
 add_test(NAME flint_tokenizer_test
   COMMAND tokenizer_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/flint_tokenizer_goldens.jsonl)
 set_tests_properties(flint_tokenizer_test PROPERTIES SKIP_RETURN_CODE 2)
+add_test(NAME zeta_tokenizer_test
+  COMMAND tokenizer_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/zeta_tokenizer_goldens.jsonl)
+set_tests_properties(zeta_tokenizer_test PROPERTIES SKIP_RETURN_CODE 2)
 
 # M6 Stage 3b: the chat-template differential gate (host). Skips with rc 2
 # when the model cache is absent, same as above.

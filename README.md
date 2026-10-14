@@ -146,6 +146,7 @@ mechanism and depth the template ships with.
 | [MiMo-V2.6-Flash](docs/model_cards/MiMo-V2.6-Flash.md) | [XiaomiMiMo/MiMo-V2.6-Flash-RL](https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Flash-RL) | MXFP4 experts, FP8 dense | [2](deploy/cluster_mimo-v2.6-flash_mxfp4-fp8_w2.example.json), [4](deploy/cluster_mimo-v2.6-flash_mxfp4-fp8_w4.example.json) | 256K on two, 128K on four | MTP 1 | |
 | [Flint](docs/model_cards/Flint-FP8-NVFP4.md) | [HawkBearPig/flint-FP8-NVFP4](https://huggingface.co/HawkBearPig/flint-FP8-NVFP4) | FP8 and NVFP4 experts, BF16 rest | [1](deploy/cluster_flint_fp8-nvfp4_w1.example.json), [2](deploy/cluster_flint_fp8-nvfp4_w2.example.json), [4](deploy/cluster_flint_fp8-nvfp4_w4.example.json) | 256K | none | |
 | [Dory1.0-4B](docs/model_cards/Dory1.0-4B-NVFP4.md) | [nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-NVFP4](https://huggingface.co/nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-NVFP4) | NVFP4 W4A16 | [1](deploy/cluster_dory1.0-4b_nvfp4_w1.example.json) | 256K | none | |
+| [Zeta-2.1](docs/model_cards/Zeta-2.1.md) (FIM completions only) | [zed-industries/zeta-2.1](https://huggingface.co/zed-industries/zeta-2.1) | BF16 as shipped | [1](deploy/cluster_zeta-2.1_bf16_w1.example.json) | 32K | none | |
 
 Templates are named `cluster_<model>_<quant>_w<nodes>.example.json`. Copy
 one without `.example` and the launcher fills the node addresses, SSH user
@@ -378,7 +379,7 @@ commands.
 | [Benchmark procedures](docs/benchmarking.md) | the platform, kernel and transport probes |
 | [YaRN release check](docs/qwen_yarn_release_check.md) | the long-context acceptance run |
 | [Model cards](docs/model_cards/) | per-checkpoint serving notes and measurements |
-| Model notes | architecture and port records per family: [GLM-5.3-Flash NVFP4](docs/nvfp4_plan.md), [GLM-5.3](docs/glm53_plan.md), [GLM-4.7](docs/glm47_plan.md), [Qwen3.8-Flash-Next](docs/qwen38_flash_next_plan.md), [Qwen3.5-122B-A10B](docs/qwen35_122b_moe_nvfp4_plan.md), [DeepSeek-V4.1-Flash](docs/deepseek_v41_flash_plan.md), [DeepSeek EXL3](docs/deepseek_v41_flash_exl3_plan.md), [MiMo-V2.6-Flash](docs/mimo_v26_flash_plan.md), [Flint](docs/flint_plan.md) |
+| Model notes | architecture and port records per family: [GLM-5.3-Flash NVFP4](docs/nvfp4_plan.md), [GLM-5.3](docs/glm53_plan.md), [GLM-4.7](docs/glm47_plan.md), [Qwen3.8-Flash-Next](docs/qwen38_flash_next_plan.md), [Qwen3.5-122B-A10B](docs/qwen35_122b_moe_nvfp4_plan.md), [DeepSeek-V4.1-Flash](docs/deepseek_v41_flash_plan.md), [DeepSeek EXL3](docs/deepseek_v41_flash_exl3_plan.md), [MiMo-V2.6-Flash](docs/mimo_v26_flash_plan.md), [Flint](docs/flint_plan.md), [Zeta-2.1](docs/zeta_plan.md) |
 | [Testing](docs/testing.md) | the suites and what each proves |
 | [Adding a model](docs/adding_a_model.md) | the checklist for a new family |
 | [DESIGN.md](DESIGN.md) | the serving architecture and its contracts |

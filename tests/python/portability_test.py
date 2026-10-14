@@ -88,6 +88,8 @@ class PortabilityTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "nvme_cache.reuse_binding"):
                     site_env.resolve_config(self.config, self.values)
 
+=======
+>>>>>>> afa45b18 (Zeta-2.1 slice 4: serve wiring, tokenizer pattern, template, docs)
     def test_http_types_and_ports_rejected(self):
         for http in ({"bind_host": 0}, {"bind_host": "localhost"}, {"port": True}, {"port": 0}, {"host": "a"}):
             with self.subTest(http=http):
@@ -178,6 +180,15 @@ class PortabilityTest(unittest.TestCase):
                     cluster_doctor.checkpoint_size(snapshot)
         index.write_text(json.dumps({"weight_map": {"weight": "tensors/missing.safetensors"}}))
         with self.assertRaises(FileNotFoundError):
+            cluster_doctor.checkpoint_size(snapshot)
+
+    def test_template_less_llama_checkpoint_needs_no_template(self):
+        snapshot = self.checkpoint()
+        (snapshot / "config.json").write_text(json.dumps({"architectures": ["LlamaForCausalLM"], "model_type": "llama"}))
+        (snapshot / "chat_template.jinja").unlink()
+        self.assertGreater(cluster_doctor.checkpoint_size(snapshot), 4)
+        (snapshot / "config.json").write_text(json.dumps({"architectures": ["Glm4MoeForCausalLM"], "model_type": "glm4_moe"}))
+        with self.assertRaisesRegex(ValueError, "missing chat_template"):
             cluster_doctor.checkpoint_size(snapshot)
 
     def test_snapshot_ambiguity_and_missing_shard(self):
@@ -292,15 +303,12 @@ class PortabilityTest(unittest.TestCase):
             "nvidia/Qwen3.5-122B-A10B-NVFP4": "qwen3.5-122b-a10b_nvfp4",
             "local-inference-lab/Qwen3.8-Flash-Next-NVFP4": "qwen-3.8-flash-next_nvfp4-qad",
             "kaushikvira/Qwen3.8-Flash-Next-swift15-nvfp4-dgpp": "qwen-3.8-flash-next_nvfp4-swift15",
-            "nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-NVFP4": "dory1.0-4b_nvfp4",
             "HawkBearPig/flint-FP8-NVFP4": "flint_fp8-nvfp4",
+            "zed-industries/zeta-2.1": "zeta-2.1_bf16",
         }
-        # Families whose checkpoint ships no draft layer: their templates run
-        # plain (the spec keys are refused by name at boot, not merely off) —
-        # docs/dory_plan.md D4 for the Dory1.0-4B one, and the families
-        # without a draft head (2026-10-22) keep MTP off the same way.
-        draftless_models = {"nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-NVFP4",
-                            "HawkBearPig/flint-FP8-NVFP4"}
+        # The families without a draft head (2026-10-22): their templates
+        # keep MTP off — the plain world is the only one.
+        no_draft = {"HawkBearPig/flint-FP8-NVFP4", "zed-industries/zeta-2.1"}
         values = {**site_env.DEFAULTS, "DGPP_NODES": "head peer1 peer2 peer3", "DGPP_SSH_USER": "ops"}
         templates = list((ROOT / "deploy").glob("*.example.json"))
         self.assertTrue(templates)
@@ -321,8 +329,11 @@ class PortabilityTest(unittest.TestCase):
                 if drafter:
                     self.assertFalse(engine["mtp"], "a drafter template replaces MTP, not both")
                     self.assertTrue(engine["decode_graph"], "the drafter's block proposal is recorded in the graph step")
-                elif cfg["model"] in draftless_models:
-                    self.assertFalse(engine.get("mtp", False), "a draftless family's template runs plain")
+                elif cfg["model"] in no_draft:
+                    # The draft-less families (zeta-2.1 and flint: the
+                    # checkpoint ships no draft block, so plain decode is the
+                    # only world) keep MTP off; the graph still records it.
+                    self.assertFalse(engine["mtp"], "a family without a draft head keeps MTP off")
                     self.assertTrue(engine["decode_graph"])
                 else:
                     self.assertTrue(engine["mtp"], "every template enables MTP (the plain world is --no-mtp)")

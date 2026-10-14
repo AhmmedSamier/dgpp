@@ -96,6 +96,7 @@ DGPP_TEST(glm_tokenizer_differential_goldens) {
   const bool flint = model_id.find("flint") != std::string::npos;
   const bool qwen = model_id.find("Qwen") != std::string::npos || mimo;  // the NFC tokenizers
   const bool dsv41 = model_id.find("DeepSeek-V4") != std::string::npos;
+  const bool zeta = model_id.find("zeta") != std::string::npos;
   std::string err;
   const std::string snap = dgpp::hf::model_dir(model_id, &err);
   if (snap.empty()) {
@@ -111,7 +112,14 @@ DGPP_TEST(glm_tokenizer_differential_goldens) {
       tok_path, cache_entries ? std::strtoul(cache_entries, nullptr, 10) : 0);
 
   // Hand-carried anchors: the fabric-run prompt and first generations.
-  if (dsv41) {
+  if (zeta) {
+    // The Zeta-2.1 corpus's anchors (HF tokenizers 0.23.2 on the snapshot,
+    // 2026-10-14): the zeta pre-tokenizer's plain words.
+    require(tok.encode("The capital of France is") == std::vector<int64_t>{1063, 9203, 437, 10341, 506},
+            "zeta anchor prompt does not encode to the recorded ids");
+    require(tok.encode(" Paris") == std::vector<int64_t>{10805}, "zeta anchor ' Paris' != id 10805");
+    require(tok.decode(std::vector<int64_t>{10805, 141}, false) == " Paris.", "zeta anchor does not decode to ' Paris.'");
+  } else if (dsv41) {
     // The DeepSeek-V4.1 corpus's first cases (HF tokenizers 0.23.2 on the
     // snapshot, 2026-09-13): the three-stage pre-tokenizer's plain words.
     require(tok.encode("The capital of France is") == std::vector<int64_t>{671, 6102, 294, 8760, 344},
@@ -310,7 +318,7 @@ DGPP_TEST(glm_tokenizer_differential_goldens) {
             "warm-cache encode mismatch on golden case " + std::to_string(i));
     const std::string rt = tok.decode(got, /*skip_special_tokens=*/false);
     // An NFC tokenizer round-trips to the NFC form of the input.
-    require(rt == text || (qwen && rt == dgpp::text::unicode::nfc(text)),
+    require(rt == text || ((qwen || zeta) && rt == dgpp::text::unicode::nfc(text)),
                  "verbatim round-trip mismatch on case " +
                      std::to_string(i) + ": got " + rt);
     require_incremental_decode(tok, got);

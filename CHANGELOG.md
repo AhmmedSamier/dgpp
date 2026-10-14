@@ -1370,6 +1370,25 @@ project procedures and design guidance live in `docs/`.
   modes, 0–128K context, quality; the first rows measured with the
   adaptive prefill defaults).
 
+- **Zeta-2.1 (dense Llama) serving on one Spark** (2026-10-14,
+  [plan](docs/zeta_plan.md), [card](docs/model_cards/Zeta-2.1.md)).
+  `zed-industries/zeta-2.1` (dense 8B BF16 Llama: 32 GQA layers, full
+  RoPE, SwiGLU MLP, 155K vocabulary, 32K context) loads as shipped
+  through a new `llama` family (config, binding, resident loader, layers
+  and `SessionModel` walk over the shared GQA kernels, the serve family
+  and its FIM frontend). The shared `glm4_qkv_finish` applies RoPE
+  independent of the head norms now (the v heads never rotate; GLM-4
+  chains unchanged — its loader, forward and dump-parity gates are
+  green). The checkpoint's BPE runs under a new pinned pre-tokenizer
+  pattern (single-number runs, no punctuation newline tail) with a
+  71-case differential golden file. No chat template ships, so the model
+  serves `/v1/completions` with the FIM prompt verbatim (chat
+  completions refuse); no draft block ships, so plain graph decode is
+  the only world (`deploy/cluster_zeta-2.1_bf16_w1`). Measured: 22 s
+  warm boot (15.4 GiB resident), the checkpoint's own 3,075-token
+  `sample.prompt` completing byte-exact to its `sample.output` (158
+  tokens, EOS stop), repeat-deterministic.
+
 - **GLM-5.3-Flash: the batched draft chain, and the wide GEMV chunk that
   makes every decode batch bitwise** (2026-10-14). The Flash's fixed batch
   now carries the MTP chain past depth 1

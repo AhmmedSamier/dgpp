@@ -124,6 +124,40 @@ class Dsv41Frontend : public ModelFrontend {
   dgpp::text::ChatMarkers markers_;
 };
 
+// The Llama frontend (Zeta-2.1, docs/zeta_plan.md): the checkpoint ships
+// no chat template — it is a raw FIM completion model, served through
+// /v1/completions with the prompt passed through verbatim. Chat
+// completions refuse (there is no template to render them with); the
+// base markers (no reasoning, no tools) and the base reasoning settings
+// apply.
+class LlamaFrontend : public ModelFrontend {
+ public:
+  explicit LlamaFrontend(const dgpp::text::Tokenizer* tok) : tok_(tok) {
+    if (tok_ == nullptr) throw std::invalid_argument("LlamaFrontend: the tokenizer must be loaded");
+    markers_ = dgpp::text::ChatMarkers::from_tokenizer(*tok_);
+  }
+  std::vector<int64_t> encode_text(std::string_view text) const override { return tok_->encode(text); }
+  std::string decode_ids(const std::vector<int64_t>& ids) const override {
+    return tok_->decode(ids, /*skip_special_tokens=*/true);
+  }
+  bool template_reads(std::string_view) const override { return false; }
+  std::string render_chat(const minijson::Value&) const override {
+    throw std::invalid_argument(
+        "this model serves /v1/completions only (it ships no chat template) — "
+        "send the FIM prompt as the completion prompt");
+  }
+  dgpp::text::ChatMarkers markers() const override { return markers_; }
+  std::vector<int64_t> boundary_token_ids() const override {
+    std::vector<int64_t> ids;
+    for (const dgpp::text::ChatMarker& m : markers_.role_markers) ids.push_back(m.id);
+    return ids;
+  }
+
+ private:
+  const dgpp::text::Tokenizer* tok_;
+  dgpp::text::ChatMarkers markers_;
+};
+
 // The DeepSeek-V4 frontend (DeepSeek-V4-Flash-0731, model_type
 // deepseek_v4): text/dsv4_prompt renders its encoder's format; the markers
 // come off its tokenizer (<think>, </think>, the ｜DSML｜ tag token, the

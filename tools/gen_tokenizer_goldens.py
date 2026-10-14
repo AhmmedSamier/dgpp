@@ -152,6 +152,31 @@ QWEN_CASES = [c for c in CASES if USER not in c and ASSIST not in c] + [
 ]
 
 
+# The Zeta-2.1 corpus (2026-10-14): the GLM letter/punctuation classes
+# (marks are punctuation, not letters) with a single \p{N} per pretoken
+# and NO punctuation trailing-newline tail — a punct run never absorbs
+# the newline after it — under NFC, plus the FIM edit-prediction shapes
+# (the fim specials are added tokens; the markers and the cursor are
+# plain text).
+ZETA_FIM_PRE = "<[fim-prefix]>"
+ZETA_FIM_SUF = "<[fim-suffix]>"
+ZETA_FIM_MID = "<[fim-middle]>"
+ZETA_CASES = [c for c in CASES if USER not in c and ASSIST not in c and EOS not in c] + [
+    ZETA_FIM_PRE, ZETA_FIM_SUF, ZETA_FIM_MID,
+    ZETA_FIM_SUF + "\ncode after\n" + ZETA_FIM_PRE + "code before",
+    "code before<|marker_1|>edit<|marker_2|>\n" + ZETA_FIM_MID,
+    ZETA_FIM_SUF + "\n    }\n" + ZETA_FIM_PRE + "<filename>src/main.py\ndef f():\n<|marker_1|>\n    pass<|user_cursor|>\n<|marker_2|>\n" + ZETA_FIM_MID,
+    "<|marker_1|>\nrevised content\n<|marker_2|>",
+    "x<|marker_1|>y",
+    # Digits: one per pretoken; mixed with punctuation.
+    "1234567", "3.14159", "2024-09-09", "v2.1.0", "1st 2nd 3rd", "phone: +1 (555) 010-9999",
+    # Punctuation/newline boundary: the punct run leaves the newline.
+    "!!!\n", "abc... \n", "x?! \n\n y", "end.\n\nnext",
+    # NFC: decomposed vs precomposed.
+    "e\u0301", "\u00e9", "caf\u00e9", "na\u00efve",
+]
+
+
 # The DeepSeek-V4.1 corpus (2026-09-13): its three-stage pre-tokenizer —
 # number runs cut in threes (every \p{N} script), CJK runs isolated (the
 # three literal ranges; Korean and halfwidth kana are letters), the
@@ -296,16 +321,18 @@ def main():
     is_mimo = "MiMo" in model
     is_flint = "flint" in model.lower()
     is_qwen = "Qwen" in model or is_mimo  # NFC tokenizers
+    is_zeta = "zeta" in model.lower()  # NFC tokenizer
     is_dsv4 = "DeepSeek-V4-" in model  # DeepSeek-V4-Flash-0731 (model_type deepseek_v4), not V4.1
     is_dsv41 = "DeepSeek-V4" in model and not is_dsv4
     cases = (FLINT_CASES if is_flint else DSV4_CASES if is_dsv4 else DSV41_CASES if is_dsv41 else MIMO_CASES if is_mimo
-             else QWEN_CASES if is_qwen else CASES)
+             else QWEN_CASES if is_qwen else ZETA_CASES if is_zeta else CASES)
     out_path = args.out_opt or args.out or (
         "tests/data/flint_tokenizer_goldens.jsonl" if is_flint else
         "tests/data/dsv4_tokenizer_goldens.jsonl" if is_dsv4 else
         "tests/data/dsv41_tokenizer_goldens.jsonl" if is_dsv41 else
         "tests/data/mimo_tokenizer_goldens.jsonl" if is_mimo else
-        "tests/data/qwen_tokenizer_goldens.jsonl" if is_qwen else "tests/data/glm_tokenizer_goldens.jsonl")
+        "tests/data/qwen_tokenizer_goldens.jsonl" if is_qwen else
+        "tests/data/zeta_tokenizer_goldens.jsonl" if is_zeta else "tests/data/glm_tokenizer_goldens.jsonl")
     if args.tokenizer_json:
         tok_path = args.tokenizer_json
     else:
@@ -331,7 +358,7 @@ def main():
             decoded = tok.decode(ids, skip_special_tokens=False)
             # An NFC tokenizer round-trips to the NFC form of the input.
             import unicodedata
-            expect = unicodedata.normalize("NFC", text) if is_qwen else text
+            expect = unicodedata.normalize("NFC", text) if (is_qwen or is_zeta) else text
             if decoded != expect:
                 sys.exit(f"HF verbatim round-trip failed for {text!r} -> {decoded!r}")
             f.write(json.dumps({"text": text, "ids": ids}) + "\n")
