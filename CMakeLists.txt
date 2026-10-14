@@ -1817,6 +1817,13 @@ target_link_libraries(llama_loader_test PRIVATE dgpp_models_llama_loader CUDA::c
 dgpp_set_common(llama_loader_test)
 add_test(NAME llama_loader_test COMMAND llama_loader_test)
 
+add_executable(llama_tp_test tests/cuda/llama_tp_test.cpp)
+target_include_directories(llama_tp_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(llama_tp_test PRIVATE dgpp_models_llama_layers CUDA::cudart Threads::Threads)
+dgpp_set_common(llama_tp_test)
+add_test(NAME llama_tp_test COMMAND llama_tp_test)
+set_tests_properties(llama_tp_test PROPERTIES RUN_SERIAL TRUE LABELS "gpu")
+
 # The Llama forward (docs/zeta_plan.md): fixture -> smoke -> host parity.
 add_executable(llama_forward_test tests/cuda/llama_forward_test.cpp)
 target_include_directories(llama_forward_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
