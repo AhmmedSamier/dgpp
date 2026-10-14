@@ -1606,7 +1606,7 @@ project procedures and design guidance live in `docs/`.
   below.
 - **LibriSpeech WER gate**: `tools/qwen_asr_wer.py` streams a split
   through the served transcription endpoint and scores word error rate
-  (test-clean: see `benchmarks/results/2026-10-14-asr-wer/wer.json`).
+  (test-clean 6.77%, 2620/2620 utterances).
 - **Audio stage-bound admission**: admission accepted 16384 audio tokens
   per request while the engine stage holds only its prefill window (2048
   rows ≈ 2.5 minutes at the default window), so a long clip reached the

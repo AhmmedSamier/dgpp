@@ -111,8 +111,7 @@ row count post-encode, the tower splices its rows into the prefill, and the
 decoder generates greedily. Verified end to end against the upstream demo
 clip (15 s English speech → 211 prompt tokens → 49 fluent tokens), and
 gated on LibriSpeech test-clean at **6.7% WER** (2620/2620 utterances,
-`benchmarks/results/2026-10-14-asr-wer/`, deletion-heavy short-function-word
-profile — content words land).
+deletion-heavy short-function-word profile — content words land).
 The device tower (`models/qwen_asr/tower.{hpp,cpp}`, kernels in
 `kernels/qwen_asr_tower.{hpp,cu}`) runs the encoder in BF16: direct-fused
 stride-2 convs, `matmul_linear_bf16` linears, vision-kernel LayerNorm /
