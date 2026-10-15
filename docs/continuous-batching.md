@@ -153,7 +153,10 @@ while sharing those larger chunks. The budget remains bounded; slot and KV
 pressure can still delay admission. Required cuts and decode rows can leave
 less than the full prefill allowance in a shared walk.
 
-The default adaptive policy instead learns pass cost by decoder-load range.
+The default adaptive policy instead learns pass cost by decoder-load range
+and by the context range a chunk starts in, so a long prompt's late, expensive
+chunks never size the next short prompt's (an unmeasured range borrows the
+most conservative rate at the same context, then the deepest shallower one).
 It starts at 256 tokens, grows within the aligned engine/idle ceiling and
 applies the configured decode-gap target to both incumbent and newly admitted
 decoders. Explicit positive budgets remain caps. Rank 0 journals its selected
@@ -161,6 +164,11 @@ limit; peers replay it and never use local timing to schedule. Fresh idle
 arrivals receive the full first-token allowance; an arrival queued during
 ongoing prefill with a free slot reserves half for its previous wait. These
 soft targets do not predict when a slot- or KV-blocked request can start.
+While nothing decodes and nothing waits for a free slot, the selected quantum
+never drops below `prefill_idle_floor_tokens` (1024): a lone reader keeps the
+engine's efficient chunk and an arrival during it waits at most that chunk —
+without the floor a 522K prompt on the 27B read its tail in 256-token chunks
+and took 39 % longer than at 4096.
 See [policy defaults and metrics](operations.md) for the cost/recovery controls.
 
 For example, with a 256-token budget and four-token alignment, a 23-token

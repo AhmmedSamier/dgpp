@@ -594,8 +594,8 @@ DGPP_TEST(cluster_config_latency_tuning_defaults_and_bounds) {
   const auto defaults = dgpp::serve::parse_cluster_config(engine_json("{}"), "t").engine.prefill_latency;
   require(defaults == dgpp::sched::PrefillLatencyTuning{15, 2, 25}, "stable controller defaults");
   const auto custom = dgpp::serve::parse_cluster_config(engine_json(
-      R"({"prefill_latency_headroom_pct":20,"prefill_growth_factor":4,"prefill_cost_recovery_pct":50,"prefill_initial_tokens":512})"), "t");
-  require(custom.engine.prefill_latency == dgpp::sched::PrefillLatencyTuning{20, 4, 50, 512}, "custom controller tuning survives parsing");
+      R"({"prefill_latency_headroom_pct":20,"prefill_growth_factor":4,"prefill_cost_recovery_pct":50,"prefill_initial_tokens":512,"prefill_idle_floor_tokens":2048})"), "t");
+  require(custom.engine.prefill_latency == dgpp::sched::PrefillLatencyTuning{20, 4, 50, 512, 2048}, "custom controller tuning survives parsing");
   for (const std::string key : {"prefill_latency_headroom_pct", "prefill_growth_factor", "prefill_cost_recovery_pct"})
     for (const std::string value : {"-1", "101", "1.5", "true", "null"})
       require(refusal(engine_json("{\"" + key + "\":" + value + "}")).find(key) != std::string::npos,
@@ -603,4 +603,9 @@ DGPP_TEST(cluster_config_latency_tuning_defaults_and_bounds) {
   for (const std::string value : {"-1", "0", "1073741825", "1.5", "true", "null"})
     require(refusal(engine_json("{\"prefill_initial_tokens\":" + value + "}")).find("prefill_initial_tokens") != std::string::npos,
             "invalid initial budget rejected by name");
+  for (const std::string value : {"-1", "1073741825", "1.5", "true", "null"})
+    require(refusal(engine_json("{\"prefill_idle_floor_tokens\":" + value + "}")).find("prefill_idle_floor_tokens") != std::string::npos,
+            "invalid idle floor rejected by name");
+  require(dgpp::serve::parse_cluster_config(engine_json(R"({"prefill_idle_floor_tokens":0})"), "t").engine.prefill_latency.idle_floor_tokens == 0,
+          "a zero floor (the alignment) is a valid choice");
 }

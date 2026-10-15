@@ -414,6 +414,7 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
         else if (p.key == "prefill_growth_factor") e.prefill_latency.growth_factor = static_cast<int>(integer(x, ek, what, 2, 4));
         else if (p.key == "prefill_cost_recovery_pct") e.prefill_latency.recovery_pct = static_cast<int>(integer(x, ek, what, 1, 100));
         else if (p.key == "prefill_initial_tokens") e.prefill_latency.initial_tokens = static_cast<int>(integer(x, ek, what, 1, 1 << 30));
+        else if (p.key == "prefill_idle_floor_tokens") e.prefill_latency.idle_floor_tokens = static_cast<int>(integer(x, ek, what, 0, 1 << 30));
         else if (p.key == "prefill_early_admission") e.prefill_early_admission = boolean(x, ek, what);
         else if (p.key == "bulk_pace_gbps") e.bulk_pace_gbps = number(x, ek, what);
         else if (p.key == "bulk_inflight") e.bulk_inflight = static_cast<int>(integer(x, ek, what, -1, 1 << 20));

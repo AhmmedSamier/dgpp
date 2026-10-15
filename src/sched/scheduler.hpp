@@ -599,6 +599,9 @@ class Scheduler {
   // Leader only. Call after applying arrivals/cancellations, then journal the
   // result and pass it to tick on every rank. Standalone tick selects locally.
   std::optional<int64_t> next_prefill_budget() const;
+  // The position the next prefill chunk starts at: the deepest reader's
+  // (its attached prefix plus the tokens computed so far); 0 with none.
+  int64_t prefill_context() const;
   // The prefix cache as configured: its slot count (0 = off) and the
   // running digest of every decision it made (the journal's cross-rank
   // check — identical streams, identical digests).

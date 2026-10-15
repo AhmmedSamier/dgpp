@@ -1978,7 +1978,7 @@ int main(int argc, char** argv) {
         "eos={} graph={} compact={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} "
         "msad={} msss={} mdr={} mdt={} mvf={} dbr={} "
         "batchmin={} cand={} "
-        "pcgib={} adm={} win={} pfbudget={} pfidle={} gapms={} ttftms={} pfhr={} pfgrow={} pfrec={} pfstart={} pfearly={} pmin={} phead={} pace={} inflight={} "
+        "pcgib={} adm={} win={} pfbudget={} pfidle={} gapms={} ttftms={} pfhr={} pfgrow={} pfrec={} pfstart={} pfifloor={} pfearly={} pmin={} phead={} pace={} inflight={} "
         "reasoning_in_content={} "
         "rs={} dflash={} dfw={} lk={} lkn={} lks={} lka={} lkt={}",
         model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port, max_concurrency,
@@ -1993,7 +1993,7 @@ int main(int argc, char** argv) {
         admission_mode, admission_window, prefill_budget_tokens, prefill_idle_budget_tokens,
         decode_gap_target_ms, first_token_target_ms,
         prefill_latency.headroom_pct, prefill_latency.growth_factor, prefill_latency.recovery_pct,
-        prefill_latency.initial_tokens,
+        prefill_latency.initial_tokens, prefill_latency.idle_floor_tokens,
         prefill_early_admission_override.has_value() ? (*prefill_early_admission_override ? 1 : 0) : -1,
         prefix_min_tokens, prefix_head_snapshots ? 1 : 0,
         bulk_pace_gbps, bulk_inflight, reasoning_in_content ? 1 : 0,

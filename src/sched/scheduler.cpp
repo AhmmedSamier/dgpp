@@ -1376,8 +1376,19 @@ std::optional<int64_t> Scheduler::next_prefill_budget() const {
   const int64_t cap = std::min<int64_t>(engine_->prefill_chunk_limit(),
       std::max(policy_.prefill_budget_tokens, policy_.prefill_idle_budget_tokens));
   const int64_t initial = std::min<int64_t>(policy_.prefill_budget_tokens, policy_.prefill_latency.initial_tokens);
-  return prefill_latency_.limit(decoders, target, initial,
-                                cap, engine_->prefill_chunk_alignment(), policy_.prefill_latency);
+  // A lone reader — nothing decoding, nothing queued for a free slot —
+  // keeps the engine's efficient chunk (PrefillLatencyTuning::idle_floor_tokens).
+  const int64_t floor = decoders == 0 && !waiting_arrival ? policy_.prefill_latency.idle_floor_tokens : 0;
+  return prefill_latency_.limit(decoders, prefill_context(), target, initial,
+                                cap, engine_->prefill_chunk_alignment(), floor, policy_.prefill_latency);
+}
+
+int64_t Scheduler::prefill_context() const {
+  int64_t context = 0;
+  for (const auto& r : requests_)
+    if (r.state == State::kPrefilling && !r.cancel_requested && !r.stop_requested)
+      context = std::max(context, r.attached_tokens + r.prefill_computed);
+  return context;
 }
 
 bool Scheduler::tick(std::optional<int64_t> prefill_budget) {
@@ -1394,6 +1405,7 @@ bool Scheduler::tick(std::optional<int64_t> prefill_budget) {
       if (r.state == State::kActive && !r.cancel_requested && !r.stop_requested) ++decoders;
   const auto started = prefill_budget ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   const int64_t computed = prefill_chunk_computed_tokens_, offered = prefill_chunk_budget_tokens_;
+  const int64_t context = prefill_budget ? prefill_context() : 0;  // where this chunk starts
   prefill_pass_budget_tokens_ = 0;
   const bool more = quantum(prefill_budget);
   // A completed group measures final projection/admission work as well as a
@@ -1401,7 +1413,7 @@ bool Scheduler::tick(std::optional<int64_t> prefill_budget) {
   const bool reading = prefill_budget && std::any_of(requests_.begin(), requests_.end(),
       [](const Request& r) { return r.state == State::kPrefilling; });
   if (prefill_budget && reading)
-    prefill_latency_.observe(decoders, prefill_chunk_computed_tokens_ - computed,
+    prefill_latency_.observe(decoders, context, prefill_chunk_computed_tokens_ - computed,
         std::max(prefill_pass_budget_tokens_, prefill_chunk_budget_tokens_ - offered),
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count(),
         policy_.prefill_latency);

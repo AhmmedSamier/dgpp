@@ -283,7 +283,7 @@ struct SmallCase {
         std::memcpy(s, view.scales, sn * 4);
         d_payloads.push_back(p);
         d_scales.push_back(s);
-        expert_mats[static_cast<size_t>(m)] = GlmQuantMatrix{p, s, view.rows, view.cols};
+        expert_mats[static_cast<size_t>(m)] = GlmQuantMatrix{p, s, nullptr, view.rows, view.cols};
       }
       dev_w.router_gate = d_gate_w;
       dev_w.router_bias = d_bias;
@@ -307,7 +307,7 @@ struct SmallCase {
       std::memcpy(s, view.scales, sn * 4);
       d_payloads.push_back(p);
       d_scales.push_back(s);
-      expert_mats[m] = GlmQuantMatrix{p, s, view.rows, view.cols};
+      expert_mats[m] = GlmQuantMatrix{p, s, nullptr, view.rows, view.cols};
     }
     dev_w.router_gate = d_gate_w;
     dev_w.router_bias = d_bias;
@@ -674,7 +674,7 @@ struct RankSlice {
           std::memcpy(scales + row * sb_s, full.scales + row * sb_full + (rank * M) / 128, sb_s * 4);
         r.owned_payloads.push_back(payload);
         r.owned_scales.push_back(scales);
-        r.mats[static_cast<size_t>(m)] = GlmQuantMatrix{payload, scales, H, M};
+        r.mats[static_cast<size_t>(m)] = GlmQuantMatrix{payload, scales, nullptr, H, M};
       }
       r.dev_w.router_gate = c.dev_w.router_gate;
       r.dev_w.router_bias = c.dev_w.router_bias;
@@ -707,7 +707,7 @@ struct RankSlice {
                     full.scales + row * sb_full + (rank * M) / 128, sb_s * 4);
       r.owned_payloads.push_back(payload);
       r.owned_scales.push_back(scales);
-      r.mats[static_cast<size_t>(m)] = GlmQuantMatrix{payload, scales, H, M};
+      r.mats[static_cast<size_t>(m)] = GlmQuantMatrix{payload, scales, nullptr, H, M};
     }
     r.dev_w.router_gate = c.dev_w.router_gate;
     r.dev_w.router_bias = c.dev_w.router_bias;

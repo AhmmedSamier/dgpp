@@ -1854,7 +1854,7 @@ DGPP_TEST(fabric_serve_adaptive_prefill_tick_codec) {
       catch (const std::runtime_error&) { rejected = true; }
       require(rejected, "invalid latency policy rejected before warmup");
     }
-  for (const std::string key : {"pfhr", "pfgrow", "pfrec", "pfstart"})
+  for (const std::string key : {"pfhr", "pfgrow", "pfrec", "pfstart", "pfifloor"})
     for (const std::string value : {"-1", "1073741825", "1.5", "true", "null"}) {
       bool rejected = false;
       try { (void)dgpp::serve::decode_journal_line(R"({"op":"warm","adm":0,"win":256,")" + key + "\":" + value + "}"); }

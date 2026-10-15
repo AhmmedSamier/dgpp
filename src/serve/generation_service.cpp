@@ -2494,6 +2494,8 @@ void GenerationService::route_metrics_prometheus(HttpResponseWriter& w) {
             int64_t{policy.prefill_latency.recovery_pct});
   out.gauge("dgpp_admission_prefill_initial_tokens", "Starting automatic budget before measuring any workload; adjusted to engine geometry.",
             int64_t{policy.prefill_latency.initial_tokens});
+  out.gauge("dgpp_admission_prefill_idle_floor_tokens", "Smallest automatic quantum while nothing decodes or waits for a slot; 0 means the alignment.",
+            int64_t{policy.prefill_latency.idle_floor_tokens});
   out.gauge("dgpp_prefill_adaptive_limit_tokens", "Last leader-selected prefill ceiling; 0 means fixed budgeting.",
             m.prefill_adaptive_limit_tokens);
   out.counter("dgpp_first_token_target_misses_total", "Choices whose first token exceeded the configured latency target.",
@@ -2824,6 +2826,8 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {  Scheduler::Meter
   append_json_int(&out, sched_.admission_policy().prefill_latency.recovery_pct);
   out.append(",\"prefill_initial_tokens\":");
   append_json_int(&out, sched_.admission_policy().prefill_latency.initial_tokens);
+  out.append(",\"prefill_idle_floor_tokens\":");
+  append_json_int(&out, sched_.admission_policy().prefill_latency.idle_floor_tokens);
   out.append("}");
   out.append(",\"latency_target_misses\":{\"first_token\":");
   append_json_int(&out, static_cast<int64_t>(st.first_token_target_misses));

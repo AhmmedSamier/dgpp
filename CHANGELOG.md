@@ -5,6 +5,21 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **Adaptive prefill keeps a lone reader's chunks efficient and keeps a long
+  prompt's cost off the next short one** (2026-10-15). The latency
+  controller sized chunks from one cost estimate per decoder load, so a
+  522K prompt on Qwen3.8-27B (one Spark) shrank to 256-token chunks past
+  375K — off the NVFP4 MLP's prefill GEMM, the weights streamed once per
+  256 tokens, the attention grid at 1.3 waves — and took 2 261 s against
+  1 626 s at 4096-token chunks, while the 4K prompt after it ran at 256
+  tokens a chunk for 10.4 s instead of 3.7 s. The estimate is now kept per
+  context range as well (below 8K, 32K, 128K, 512K, beyond), and a new key
+  `engine.prefill_idle_floor_tokens` (1024) floors the quantum while nothing
+  decodes and nothing waits for a free slot; the floor rides the warm
+  record (`pfifloor`) and the admission metrics. Also fixed: the three CUDA
+  test/bench units left behind by the `GlmQuantMatrix` scale-grid field and
+  the portability test's model map missing the QAD template.
+
 - **The quantization-aware-distilled Qwen3.8-Flash-Next export served as
   shipped** (2026-10-14, issue #113). `local-inference-lab/Qwen3.8-Flash-Next-NVFP4`
   carries modelopt's `MIXED_PRECISION` block and four forms the NVIDIA release

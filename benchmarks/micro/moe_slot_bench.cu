@@ -200,7 +200,7 @@ int main(int argc, char** argv) {
     DGPP_CUDA_OK(cudaMemcpy(dp->p, payload.data(), pn, cudaMemcpyHostToDevice));
     DGPP_CUDA_OK(cudaMemcpy(ds->p, scales.data(), sn * 4, cudaMemcpyHostToDevice));
     keep.push_back(dp); keep.push_back(ds);
-    qm[size_t(m)] = dgpp::GlmQuantMatrix{dp->as<uint8_t>(), ds->as<float>(), r, c};
+    qm[size_t(m)] = dgpp::GlmQuantMatrix{dp->as<uint8_t>(), ds->as<float>(), nullptr, r, c};
     total_bytes += pn + sn * 4;
   }
   std::vector<uint16_t> gate(size_t(E) * H);

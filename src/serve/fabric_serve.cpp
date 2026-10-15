@@ -133,6 +133,7 @@ static void append_latency_tuning(std::string& out, const sched::PrefillLatencyT
   if (tuning.growth_factor != defaults.growth_factor) out += ",\"pfgrow\":" + std::to_string(tuning.growth_factor);
   if (tuning.recovery_pct != defaults.recovery_pct) out += ",\"pfrec\":" + std::to_string(tuning.recovery_pct);
   if (tuning.initial_tokens != defaults.initial_tokens) out += ",\"pfstart\":" + std::to_string(tuning.initial_tokens);
+  if (tuning.idle_floor_tokens != defaults.idle_floor_tokens) out += ",\"pfifloor\":" + std::to_string(tuning.idle_floor_tokens);
 }
 
 std::string encode_journal_tick(const GenerationService::PassEvents& events) {
@@ -558,6 +559,7 @@ static sched::PrefillLatencyTuning read_latency_tuning(const dgpp::minijson::Val
   if (record.find("pfgrow")) tuning.growth_factor = optional_policy_integer(record, "pfgrow", 2, 4);
   if (record.find("pfrec")) tuning.recovery_pct = optional_policy_integer(record, "pfrec", 1, 100);
   if (record.find("pfstart")) tuning.initial_tokens = optional_policy_integer(record, "pfstart", 1, 1 << 30);
+  if (record.find("pfifloor")) tuning.idle_floor_tokens = optional_policy_integer(record, "pfifloor", 0, 1 << 30);
   return tuning;
 }
 

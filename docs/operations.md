@@ -616,6 +616,7 @@ CLI flags:
 | `prefill_growth_factor` | 2 | 2–4 | Bound upward work probes relative to the last representative observation. |
 | `prefill_cost_recovery_pct` | 25 | 1–100 | Weight a cheaper observation when recovering from a high cost estimate. |
 | `prefill_initial_tokens` | 256 | 1–1,073,741,824 | Start automatic budgeting here before measuring work; adjust to engine alignment, capacity and the idle ceiling. |
+| `prefill_idle_floor_tokens` | 1024 | 0–1,073,741,824 | Smallest quantum while nothing decodes and nothing waits for a free slot: a lone reader never shrinks below it once its cost is measured, an arrival during its chunk waits at most that chunk. 0 floors at the alignment. |
 
 Slowdowns always update the estimate immediately. Lower recovery weight or more
 headroom favors stability; faster growth explores throughput headroom sooner.

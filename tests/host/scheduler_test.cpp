@@ -4597,25 +4597,25 @@ DGPP_TEST(row_groups_isolate_readers_without_splitting_ordinary_mixed_batches) {
 
 DGPP_TEST(prefill_latency_controller_learns_cost_without_cross_rank_clocks) {
   dgpp::sched::PrefillLatencyController controller;
-  require(controller.limit(1, 500, 256, 4096, 16) == 256, "unknown load starts conservatively");
-  controller.observe(1, 256, 256, 100);
-  require(controller.limit(1, 500, 256, 4096, 16) == 512, "cheap work grows at most twice an observed quantum");
-  controller.observe(1, 512, 512, 200);
-  require(controller.limit(1, 500, 256, 4096, 16) == 1024, "sustained headroom grows useful work");
-  require(controller.limit(4, 500, 256, 4096, 16) == 1024,
+  require(controller.limit(1, 0, 500, 256, 4096, 16, 0) == 256, "unknown load starts conservatively");
+  controller.observe(1, 0, 256, 256, 100);
+  require(controller.limit(1, 0, 500, 256, 4096, 16, 0) == 512, "cheap work grows at most twice an observed quantum");
+  controller.observe(1, 0, 512, 512, 200);
+  require(controller.limit(1, 0, 500, 256, 4096, 16, 0) == 1024, "sustained headroom grows useful work");
+  require(controller.limit(4, 0, 500, 256, 4096, 16, 0) == 1024,
           "an unmeasured decoder load borrows a measured cost rather than restarting at 256");
-  controller.observe(4, 1024, 1024, 6000);
-  require(controller.limit(1, 500, 256, 4096, 16) == 1024,
+  controller.observe(4, 0, 1024, 1024, 6000);
+  require(controller.limit(1, 0, 500, 256, 4096, 16, 0) == 1024,
           "a measured load retains its own estimate when another load gets expensive");
-  require(controller.limit(2, 500, 256, 4096, 16) == 64,
+  require(controller.limit(2, 0, 500, 256, 4096, 16, 0) == 64,
           "a new load borrows the most conservative measured cost");
-  controller.observe(1, 512, 512, 1000);
-  const auto slow = controller.limit(1, 500, 256, 4096, 16);
+  controller.observe(1, 0, 512, 512, 1000);
+  const auto slow = controller.limit(1, 0, 500, 256, 4096, 16, 0);
   require(slow >= 16 && slow <= 224 && slow % 16 == 0, "slowdowns reduce work immediately within alignment");
-  controller.observe(1, 6, 512, 1000);
-  require(controller.limit(1, 500, 256, 4096, 16) == slow, "short final tails do not poison full-quantum estimates");
-  require(controller.limit(1, 1, 256, 4096, 16) == 16, "an infeasible target still allows forward progress");
-  require(controller.limit(1, 0, 256, 4096, 16) == 4096, "no target retains capacity");
+  controller.observe(1, 0, 6, 512, 1000);
+  require(controller.limit(1, 0, 500, 256, 4096, 16, 0) == slow, "short final tails do not poison full-quantum estimates");
+  require(controller.limit(1, 0, 1, 256, 4096, 16, 0) == 16, "an infeasible target still allows forward progress");
+  require(controller.limit(1, 0, 0, 256, 4096, 16, 0) == 4096, "no target retains capacity");
 }
 
 DGPP_TEST(scheduler_adaptive_budget_replays_and_preserves_progress_and_explicit_caps) {
@@ -4660,16 +4660,36 @@ DGPP_TEST(scheduler_adaptive_budget_replays_and_preserves_progress_and_explicit_
 
 DGPP_TEST(prefill_latency_tuning_changes_headroom_growth_and_recovery) {
   dgpp::sched::PrefillLatencyController controller;
-  controller.observe(1, 256, 256, 100);
+  controller.observe(1, 0, 256, 256, 100);
   dgpp::sched::PrefillLatencyTuning tuning{15, 4, 100};
-  require(controller.limit(1, 500, 256, 4096, 16, tuning) == 1024, "growth setting permits a larger probe");
+  require(controller.limit(1, 0, 500, 256, 4096, 16, 0, tuning) == 1024, "growth setting permits a larger probe");
   tuning.headroom_pct = 50;
-  require(controller.limit(1, 500, 256, 4096, 16, tuning) == 512, "extra latency headroom reduces offered work");
-  controller.observe(1, 256, 256, 1000, tuning);
-  controller.observe(1, 256, 256, 100, tuning);
-  require(controller.limit(1, 500, 256, 4096, 16, tuning) == 512, "full recovery weight immediately accepts cheaper work");
-  for (const auto invalid : {dgpp::sched::PrefillLatencyTuning{-1, 2, 25}, {15, 1, 25}, {15, 2, 0}})
+  require(controller.limit(1, 0, 500, 256, 4096, 16, 0, tuning) == 512, "extra latency headroom reduces offered work");
+  controller.observe(1, 0, 256, 256, 1000, tuning);
+  controller.observe(1, 0, 256, 256, 100, tuning);
+  require(controller.limit(1, 0, 500, 256, 4096, 16, 0, tuning) == 512, "full recovery weight immediately accepts cheaper work");
+  for (const auto invalid : {dgpp::sched::PrefillLatencyTuning{-1, 2, 25}, {15, 1, 25}, {15, 2, 0}, {15, 2, 25, 256, -1}})
     require(!invalid.valid(), "invalid tuning has no valid controller interpretation");
+}
+
+DGPP_TEST(prefill_latency_controller_keys_cost_by_context_and_floors_idle_quanta) {
+  dgpp::sched::PrefillLatencyController c;
+  c.observe(0, 0, 4096, 4096, 4096);     // 1 ms a token at the start of a prompt
+  c.observe(0, 400000, 256, 256, 1792);  // 7 ms a token at 400K, the same prompt's tail
+  require(c.limit(0, 500000, 3000, 256, 4096, 16, 0) == 256, "the deep range sizes its chunks from its own rate");
+  require(c.limit(0, 0, 3000, 256, 4096, 16, 0) == 2048, "a short prompt after it keeps the shallow range's rate");
+  require(c.limit(0, 100000, 3000, 256, 4096, 16, 0) == 2048,
+          "an unmeasured middle range borrows the deepest shallower context, not the tail");
+  require(c.limit(1, 0, 3000, 256, 4096, 16, 0) == 2048, "another load at a measured context borrows that context's rate");
+  require(c.limit(0, 500000, 3000, 256, 4096, 16, 1024) == 1024, "the idle floor keeps the deep range at the engine's efficient chunk");
+  require(c.limit(0, 500000, 3000, 256, 4096, 16, 8192) == 4096, "a floor above the capacity is the capacity");
+  require(c.limit(0, 500000, 3000, 256, 4096, 16, 1000) == 992, "the floor is aligned down");
+  dgpp::sched::PrefillLatencyController fresh;
+  require(fresh.limit(0, 0, 3000, 256, 4096, 16, 1024) == 256, "an unmeasured reader keeps the cautious initial quantum; the floor applies once a cost is measured");
+  require(fresh.limit(0, 0, 0, 256, 4096, 16, 1024) == 4096, "no target retains capacity");
+  dgpp::sched::PrefillLatencyTuning tuning;
+  tuning.idle_floor_tokens = -1;
+  require(!tuning.valid(), "a negative floor has no interpretation");
 }
 
 DGPP_TEST(scheduler_adaptive_short_group_does_not_replace_full_quantum_estimate) {
@@ -4725,7 +4745,8 @@ DGPP_TEST(scheduler_adaptive_idle_arrival_keeps_the_full_first_token_allowance) 
   sched.tick();
   const auto idle_limit = sched.next_prefill_budget();
   require(idle_limit && *idle_limit > 2, "calibrated limit leaves room to observe a reduction");
-  sched.submit(make_request("fresh", 512, 1));
+  // Longer than the idle floor keeps the reader in flight after one tick.
+  sched.submit(make_request("fresh", 4096, 1));
   require(sched.next_prefill_budget() == idle_limit,
           "an arrival on an idle engine has no previous prefill yield to wait behind");
   sched.tick();
