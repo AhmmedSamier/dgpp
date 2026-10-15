@@ -86,6 +86,11 @@ void Qwen35KvPool::init(const Qwen35KvPoolShape& shape) {
     DGPP_CUDA_OK(cudaMalloc(&dv_base_, draft_layer_kv_elems() * shape.draft_layers * 2));
   }
   table_.init(shape.max_requests, shape.block_tokens, num_blocks);
+  maps_ready_ = false;
+  if (shape.dim == 256 && shape.block_tokens >= 32 && (shape.block_tokens & (shape.block_tokens - 1)) == 0) {
+    maps_ = full_attn_stage_maps(k_base_, v_base_, static_cast<int64_t>(shape.layers) * shape.token_slots, shape.kv_heads);
+    maps_ready_ = true;
+  }
   initialized_ = true;
 }
 
@@ -96,6 +101,10 @@ QwenFullAttnCache Qwen35KvPool::view(int layer) const {
   if (layer < shape_.layers) {
     c.k_cache = k_base_ + static_cast<size_t>(layer) * layer_kv_elems();
     c.v_cache = v_base_ + static_cast<size_t>(layer) * layer_kv_elems();
+    if (maps_ready_) {
+      c.maps = &maps_;
+      c.row_base = static_cast<int64_t>(layer) * shape_.token_slots;
+    }
   } else {
     const int plane = layer - shape_.layers;
     c.k_cache = dk_base_ + static_cast<size_t>(plane) * draft_layer_kv_elems();

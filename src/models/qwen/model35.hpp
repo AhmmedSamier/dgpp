@@ -120,6 +120,10 @@ class Qwen35KvPool {
   bool initialized_ = false;
   PagedBlockTable table_;
   uint16_t* k_base_ = nullptr;  // [layers][token_slots][kv_heads * dim]
+  // The TMA maps over the Full-layer planes (kernels/full_attn.hpp), built
+  // at init when the geometry is the staged form's (dim 256).
+  FullAttnStageMaps maps_{};
+  bool maps_ready_ = false;
   uint16_t* v_base_ = nullptr;
   uint16_t* dk_base_ = nullptr;  // [draft_layers][token_slots][dkv * ddim]
   uint16_t* dv_base_ = nullptr;

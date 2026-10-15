@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include <cuda.h>
 #include <cuda_runtime.h>
 
 namespace dgpp {
@@ -47,6 +48,31 @@ void full_attn_prefill(const uint16_t* q, int64_t q_row_stride, const uint16_t* 
                        const int64_t* pos, int rows, int local_heads, int kv_heads, int block_tokens,
                        const int32_t* block_tables, int blocks_per_request, float scale, float* out,
                        cudaStream_t stream);
+
+// The staged form (2026-10-15): the K/V tile fetched by the TMA engine's
+// 2-D box copies instead of per-thread 16-byte cp.async — one tensor map per
+// plane over the pool as a [rows, kv_heads * 256] bf16 tensor, four 32 x 64
+// boxes per plane per tile with the 128-byte swizzle, completion on the
+// stage's mbarrier. Measured on the GB10 at 262K context: 56.5 -> 60.6
+// TFLOP/s at full waves, 49 -> 54 at 1024-row chunks, 35 -> 40 at 256.
+// Bitwise the cp.async form (the same tiles, the same operands).
+struct FullAttnStageMaps {
+  CUtensorMap k;
+  CUtensorMap v;
+};
+// Whether the staged form serves this geometry: <= 8 query heads per KV
+// head (one warp each), a page of >= 32 tokens that is a power of two.
+bool full_attn_tma_supported(int local_heads, int kv_heads, int block_tokens);
+// The maps over `rows` cache rows of `kv_heads * 256` bf16 each (a pool's
+// Full-layer planes stacked: layers x slots), built once per pool.
+FullAttnStageMaps full_attn_stage_maps(const uint16_t* k_cache, const uint16_t* v_cache, int64_t rows,
+                                       int kv_heads);
+// The prefill form over the maps; `row_base` is the layer's first row in
+// them (layer x slots), the block table and positions as full_attn_prefill.
+void full_attn_prefill_tma(const FullAttnStageMaps& maps, int64_t row_base, const uint16_t* q,
+                           int64_t q_row_stride, const int32_t* block_table, const int64_t* pos, int rows,
+                           int local_heads, int kv_heads, int block_tokens, float scale, float* out,
+                           cudaStream_t stream);
 
 // The unsplit row form (every row's whole range in one warp): the tests'
 // reference path and the original kernel's contract.

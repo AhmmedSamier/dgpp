@@ -213,7 +213,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/mimo_mtp_history.cu
   src/kernels/mimo_attn_prefill.cu
   src/kernels/add_rmsnorm.cu)
-target_link_libraries(dgpp_kernels PUBLIC CUDA::cudart CUDA::cublasLt dgpp_core dgpp_rope_scaling)
+target_link_libraries(dgpp_kernels PUBLIC CUDA::cudart CUDA::cublasLt CUDA::cuda_driver dgpp_core dgpp_rope_scaling)
 dgpp_set_common(dgpp_kernels)
 # The device sampler mirrors the host oracle bit for bit: no contraction of
 # its multiplies and adds (the host builds with -ffp-contract=off).

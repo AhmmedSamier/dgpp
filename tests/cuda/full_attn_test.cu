@@ -360,6 +360,17 @@ DGPP_TEST(full_attention_tile_form_matches_the_reference) {
                           mptr<float>(out2), st);
   DGPP_CUDA_OK(cudaStreamSynchronize(st));
   require(down<float>(out2, ref.size()) == got, "tile form: second run bitwise the first");
+  // The staged form (TMA boxes over the miniature pool: one map per plane,
+  // request 1's rows = its physical block range): the same bits.
+  const dgpp::FullAttnStageMaps maps = dgpp::full_attn_stage_maps(
+      ptr<uint16_t>(kc), ptr<uint16_t>(vc), static_cast<int64_t>(g.max_requests) * g.slots(), g.kv_heads);
+  DevBuf out3(ref.size() * 4);
+  DGPP_CUDA_OK(cudaMemset(out3.p, 0x7F, ref.size() * 4));
+  dgpp::full_attn_prefill_tma(maps, /*row_base=*/0, ptr<uint16_t>(dq), qw, ptr<int32_t>(dtbl) + g.blocks_per_request,
+                              ptr<int64_t>(dpos), rows, g.local_heads, g.kv_heads, g.block_tokens, scale,
+                              mptr<float>(out3), st);
+  DGPP_CUDA_OK(cudaStreamSynchronize(st));
+  require(down<float>(out3, ref.size()) == got, "staged (TMA) form bitwise the cp.async form");
 }
 
 int main() {

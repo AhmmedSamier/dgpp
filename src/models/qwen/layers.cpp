@@ -1184,10 +1184,15 @@ void QwenFullAttnLayer::attend_rows(int T, const QwenQsaRows& rows, QwenFullAttn
                      lkv_, cache.block_tokens, cache.block_tables, cache.blocks_per_request, scale_, c_out_ + offset,
                      T <= kPartRows ? part_ : nullptr, stream);
   } else {
-    full_attn_prefill(qn_ + offset, static_cast<int64_t>(lh_) * D, cache.k_cache, cache.v_cache,
-                      cache.block_tables + static_cast<int64_t>(rows.request) * cache.blocks_per_request, d_req,
-                      d_pos, T, lh_, lkv_, cache.block_tokens, cache.block_tables, cache.blocks_per_request,
-                      scale_, c_out_ + offset, stream);
+    if (cache.maps && full_attn_tma_supported(lh_, lkv_, cache.block_tokens))
+      full_attn_prefill_tma(*cache.maps, cache.row_base, qn_ + offset, static_cast<int64_t>(lh_) * D,
+                            cache.block_tables + static_cast<int64_t>(rows.request) * cache.blocks_per_request, d_pos,
+                            T, lh_, lkv_, cache.block_tokens, scale_, c_out_ + offset, stream);
+    else
+      full_attn_prefill(qn_ + offset, static_cast<int64_t>(lh_) * D, cache.k_cache, cache.v_cache,
+                        cache.block_tables + static_cast<int64_t>(rows.request) * cache.blocks_per_request, d_req,
+                        d_pos, T, lh_, lkv_, cache.block_tokens, cache.block_tables, cache.blocks_per_request,
+                        scale_, c_out_ + offset, stream);
   }
 }
 

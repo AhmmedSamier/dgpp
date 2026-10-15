@@ -23,6 +23,7 @@
 
 #include <cuda_runtime.h>
 
+#include "kernels/full_attn.hpp"
 #include "kernels/gemm.hpp"
 #include "kernels/kda.hpp"
 #include "models/qwen/config.hpp"
@@ -355,6 +356,10 @@ class QwenQsaLayer {
 struct QwenFullAttnCache {
   uint16_t* k_cache = nullptr;      // bf16 [slots, lkv * D]
   uint16_t* v_cache = nullptr;      // bf16 [slots, lkv * D]
+  // The pool's TMA maps over its Full-layer planes and this layer's first
+  // row in them (null: the cp.async staging) — kernels/full_attn.hpp.
+  const FullAttnStageMaps* maps = nullptr;
+  int64_t row_base = 0;
   const int32_t* block_tables = nullptr;  // int32 [max_requests, blocks_per_request]
   int block_tokens = 0;
   int blocks_per_request = 0;
