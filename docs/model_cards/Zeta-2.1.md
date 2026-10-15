@@ -30,9 +30,10 @@ The context is 32,768 tokens.
 32,768-token BF16 KV pool (4 GiB), eight request slots, plain decode on
 the graph (the checkpoint ships no draft block — `engine.mtp: false`;
 `--mtp` refuses at build), the bf16 decode weights served from their
-lossless 12-bit companions (`engine.bf16_weights: bf12`: 225 matrices,
-14.18 → 10.66 GiB, packed in ~5 s at boot; bitwise-exact, so the
-transcript gates cover both residencies). The model is a raw FIM completion model: no
+lossless 12-bit companions beside the bf16 bytes
+(`engine.bf16_weights: bf12+bf16`: packed decode at 0.75× the bytes,
+bf16 prefill; bitwise-exact, so the transcript gates cover every
+residency). The model is a raw FIM completion model: no
 chat template ships, so it serves `/v1/completions` with the SPM prompt
 passed through verbatim (chat completions refuse). The tokenizer is the
 checkpoint's own BPE under the zeta pre-tokenizer pattern
@@ -51,3 +52,12 @@ identical output): 20.2 tok/s single-stream, 132.7 agg tok/s at conc 8
 (the batching knee: conc 16 holds 111.8 agg and halves per-request
 speed). Resident drops 15.4 → ~12 GiB; pack costs ~5 s at boot; prefill
 runs ~1.4× (companion expansion on wide GEMMs, one-time).
+
+Shipped residency is `bf12+bf16` (both forms resident, ~19 GiB): decode
+unchanged (19.9 tok/s single, 134.2 agg at conc 8 — the same packed
+launches), short prefill back to bf16 speed. True single-connection
+TTFT on the shipped shape: 229 ms at 500 tok, 406 ms at 1K, 1003 ms
+at 2K, 2196 ms at 3K (steady state; first-ever shapes pay ~1 s of
+planner autotune once per process). Autocomplete guidance: keep prompts
+≤1K tokens client-side (the dominant lever), prefix cache on (repeat
+edits skip cached blocks), stream with a small max_tokens cap.

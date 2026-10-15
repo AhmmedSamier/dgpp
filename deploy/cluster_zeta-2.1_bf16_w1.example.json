@@ -9,7 +9,7 @@
     "max_connections": 64,
     "decode_graph": true,
     "mtp": false,
-    "bf16_weights": "bf12",
+    "bf16_weights": "bf12+bf16",
     "prefix_cache_gib": 1.5,
     "stats_interval_s": 10
   },

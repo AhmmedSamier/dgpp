@@ -100,5 +100,14 @@ window, no vision.
   `DGPP_BF12=on`). Measured: 20.2 tok/s single, 132.7 agg at conc 8
   (the knee — conc 16 holds agg, halves per-req). Template ships
   `bf16_weights: bf12` at 8 slots.
+* Slice 7: autocomplete recipe (2026-10-15). Single-connection SSE
+  timing showed TTFT = ~70 ms fixed + prefill(N), prefill
+  bandwidth-bound below ~1K tokens (bf16 bytes win) and attention-bound
+  above ~2K (residency irrelevant). Template flipped to
+  `bf16_weights: bf12+bf16` (packed decode, bf16 prefill, ~19 GiB):
+  single 19.9 tok/s, agg 134.2 at conc 8, TTFT 229/406/1003/2196 ms at
+  500/1K/2K/3K tokens — and the shipped config itself verified
+  byte-exact vs sample.output. Guidance recorded in the model card
+  (client context ≤1K, prefix cache, stream, small cap).
   Next: multi-node TP shakeout (loader geometry covers worlds 2/4/8),
   DESIGN/PLAN status.
