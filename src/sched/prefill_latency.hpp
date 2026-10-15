@@ -69,14 +69,15 @@ class PrefillLatencyController {
   // `context`: the position the next chunk starts at; `floor`: the smallest
   // quantum to select (0: the alignment), aligned down and capped.
   int64_t limit(int decoders, int64_t context, double target_ms, int64_t initial, int64_t capacity,
-                int64_t alignment, int64_t floor, const PrefillLatencyTuning& tuning = {}) const {
+                int64_t alignment, int64_t floor, int64_t wave = 0,
+                const PrefillLatencyTuning& tuning = {}) const {
     const int64_t cap = capacity / alignment * alignment;
     if (!(target_ms > 0)) return cap;
     const int64_t low = floor > 0 ? std::min(cap, std::max(alignment, floor / alignment * alignment)) : alignment;
     const Sample* sample = pick(bucket(decoders), context_bucket(context));
     // The cold start keeps the cautious initial quantum (the busy budget):
     // the floor applies once a chunk's cost has been measured.
-    if (!sample) return std::min(cap, std::max(alignment, initial / alignment * alignment));
+    if (!sample) return waves(std::min(cap, std::max(alignment, initial / alignment * alignment)), cap, alignment, wave);
     // Leave room for cost variation and arrivals. Bound upward exploration;
     // the first unmeasured workload starts at the shared busy budget.
     const double predicted = std::min<double>(cap, (1 - tuning.headroom_pct / 100.0) * target_ms / sample->ms_per_token);
@@ -87,10 +88,18 @@ class PrefillLatencyController {
     // that is not a power of two when the estimate can afford it.
     int64_t quantum = alignment;
     while (quantum <= bound / 2) quantum *= 2;
-    return std::min(cap, std::max(bound == cap ? cap : quantum, low));
+    return waves(std::min(cap, std::max(bound == cap ? cap : quantum, low)), cap, alignment, wave);
   }
 
  private:
+  // The engine's attention grid runs in waves of `wave` rows: a quantum
+  // below the cap rounds up to whole waves (2026-10-15), never past the cap.
+  static int64_t waves(int64_t chosen, int64_t cap, int64_t alignment, int64_t wave) {
+    if (wave <= 0 || chosen >= cap) return chosen;
+    const int64_t w = wave / alignment * alignment;
+    if (w <= 0) return chosen;
+    return std::min(cap, (chosen + w - 1) / w * w);
+  }
   static constexpr size_t kLoads = 6, kContexts = 5;
   static size_t bucket(int decoders) {
     return decoders <= 2 ? static_cast<size_t>(std::max(0, decoders))

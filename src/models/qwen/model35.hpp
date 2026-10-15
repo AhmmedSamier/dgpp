@@ -200,6 +200,9 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   // members (admissible_group), so no snapshot plumbing is needed.
   int64_t prefill_group_span_limit() const { return max_tokens(); }
   static constexpr int prefill_chunk_tokens() { return 4096; }
+  // The full-attention prefill grid's wave: 16 query rows per CTA, one CTA
+  // per SM, and one CTA per KV head of this rank (kernels/full_attn.cu).
+  int64_t prefill_wave_rows() const { return wave_rows_; }
   static constexpr int kv_block_tokens_static() { return 64; }
   // Prefix-snapshot arena size: all GDN recurrent + conv state of one slot.
   static size_t session_snapshot_bytes(const Qwen35TextConfig& cfg, int world, bool mtp);
@@ -587,6 +590,7 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   uint16_t* spec_conv_ = nullptr;
   int num_gdn_ = 0, num_full_ = 0;
   int64_t rec_elems_ = 0, conv_elems_ = 0;
+  int64_t wave_rows_ = 0;  // prefill attention grid wave (prefill_wave_rows)
 };
 
 }  // namespace dgpp

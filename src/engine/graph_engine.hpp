@@ -1246,6 +1246,10 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     }
     return 0;
   }
+  int64_t prefill_wave_rows() const override {
+    if constexpr (requires { model_->prefill_wave_rows(); }) return model_->prefill_wave_rows();
+    return 0;
+  }
   int64_t prefill_chunk_limit() const override {
     if constexpr (requires { Model::kResumablePrefill; }) {
       if constexpr (Model::kResumablePrefill) return model_->max_tokens();

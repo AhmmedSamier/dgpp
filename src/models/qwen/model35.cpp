@@ -237,6 +237,11 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
   const int64_t lv = geo.local_value_heads, V = cfg_.gdn_value_head_dim, K = cfg_.gdn_key_head_dim;
   const int64_t C = 2 * static_cast<int64_t>(geo.local_key_heads) * K + lv * V;
   rec_elems_ = lv * V * K;
+  {
+    int dev = 0, sms = 0;
+    if (cudaGetDevice(&dev) == cudaSuccess) cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
+    wave_rows_ = sms > 0 ? static_cast<int64_t>(16) * sms / std::max(1, geo.local_kv_heads) : 0;
+  }
   conv_elems_ = C * (cfg_.gdn_conv_width - 1);
   // The qwen4_exp layer ctors' config view.
   qcfg_ = qwen35_text_adapter(cfg_);

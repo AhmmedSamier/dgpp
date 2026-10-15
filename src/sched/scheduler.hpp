@@ -93,6 +93,13 @@ class SchedulerEngine {
   // token budget passed to begin; it returns a first token only on completion.
   virtual int64_t prefill_chunk_alignment() const { return 0; }
   virtual int64_t prefill_chunk_limit() const { return 0; }
+  // The prefill attention grid's wave in query rows (2026-10-15): the rows
+  // that fill every SM with one CTA exactly, 0 when the engine states none.
+  // The adaptive controller rounds its quantum up to whole waves so a
+  // chunk's last wave never leaves a third of the SMs idle (the 27B's tile
+  // kernel at 1024 rows ran 5.33 waves on 48 SMs: 47 against 52 TFLOP/s at
+  // whole waves).
+  virtual int64_t prefill_wave_rows() const { return 0; }
   virtual bool supports_image_chunked_prefill() const { return false; }
   // Several requests' cold prompts in one forward (the scheduler admits a
   // group per tick when the engine allows it): each prompt within

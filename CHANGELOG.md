@@ -5,6 +5,13 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **Wave-aligned prefill quanta** (2026-10-15). Qwen3.8-27B states its
+  full-attention prefill grid's wave (16 query rows per CTA, one CTA per SM
+  and per KV head: 192 rows on one Spark) and the adaptive controller
+  rounds a quantum below the cap up to whole waves (1024 → 1152), measured
+  on the kernel's bench at 262K context: 47.0 TFLOP/s at 5.33 waves
+  against 51.6–53.5 at whole waves.
+
 - **The opt-in YaRN ramp serves Qwen3.8-27B** (2026-10-12, PR #111).
   `engine.rope_scaling` is accepted for the `qwen3_5` family, whose rope
   geometry is the Flash-Next recipe's (64 rotary dims of 256, theta 1e7,

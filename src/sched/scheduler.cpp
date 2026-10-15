@@ -1380,7 +1380,8 @@ std::optional<int64_t> Scheduler::next_prefill_budget() const {
   // keeps the engine's efficient chunk (PrefillLatencyTuning::idle_floor_tokens).
   const int64_t floor = decoders == 0 && !waiting_arrival ? policy_.prefill_latency.idle_floor_tokens : 0;
   return prefill_latency_.limit(decoders, prefill_context(), target, initial,
-                                cap, engine_->prefill_chunk_alignment(), floor, policy_.prefill_latency);
+                                cap, engine_->prefill_chunk_alignment(), floor, engine_->prefill_wave_rows(),
+                                policy_.prefill_latency);
 }
 
 int64_t Scheduler::prefill_context() const {
