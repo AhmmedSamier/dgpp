@@ -10,7 +10,6 @@
     "decode_graph": true,
     "mtp": false,
     "bf16_weights": "bf12",
-    "model_alias": "Zeta-2.1",
     "prefix_cache_gib": 1.5,
     "stats_interval_s": 10
   },
