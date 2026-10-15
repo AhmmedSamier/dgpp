@@ -3,6 +3,9 @@
 Serving note for [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4)
 on DGPP. Model architecture and weights belong to their authors; this page
 records only how DGPP serves this checkpoint and what was measured here.
+Long context past the checkpoint's 262 144 positions is the opt-in YaRN
+ramp (`engine.rope_scaling`, the
+[one-node 512K and 768K templates](../../deploy/README.md#the-512k-yarn-templates-enginerope_scaling)).
 
 Same 27B Qwen3.8 hybrid stack as
 [Qwen3.8-27B-FP8](Qwen3.8-27B-FP8.md): gated-delta-net + full-attention

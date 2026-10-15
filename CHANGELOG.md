@@ -5,6 +5,20 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **The opt-in YaRN ramp serves Qwen3.8-27B** (2026-10-12, PR #111).
+  `engine.rope_scaling` is accepted for the `qwen3_5` family, whose rope
+  geometry is the Flash-Next recipe's (64 rotary dims of 256, theta 1e7,
+  mrope [11, 11, 10]): the full-attention layers' tables take the ramp
+  through the config adapter, the DFlash2 draft table takes the same band
+  at its 128-dim head, and the context ceiling, the session bound and the
+  memory plan follow `context_limit()`. Templates: the one-node 27B at
+  512K (release-checked 5/5 at 262 144 and 524 288, and again 3/3 at
+  524 288 on one Spark and on four on 2026-10-15) and at 768K (the ×3 band
+  release-checked on one Spark on 2026-10-15: needle and control found,
+  cold prefill 3 282 s), and the one-node RadixArk Flash-Next at 512K
+  (plan-verified). The README key row,
+  the deploy notes and the release-check runbook name both families.
+
 - **Adaptive prefill keeps a lone reader's chunks efficient and keeps a long
   prompt's cost off the next short one** (2026-10-15). The latency
   controller sized chunks from one cost estimate per decoder load, so a

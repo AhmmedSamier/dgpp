@@ -43,22 +43,6 @@ inline void d2d(void* dst, const void* src, size_t n, cudaStream_t stream) {
   DGPP_CUDA_OK(cudaMemcpyAsync(dst, src, n, cudaMemcpyDeviceToDevice, stream));
 }
 
-// The qwen4_exp layer ctors take QwenTextConfig: adapt the fields they read.
-QwenTextConfig qwen_text_adapter(const Qwen35TextConfig& c) {
-  QwenTextConfig q;
-  q.hidden_size = c.hidden_size;
-  q.head_dim = c.head_dim;
-  q.rotary_dim = c.rotary_dim;
-  q.rope_theta = c.rope_theta;
-  q.rms_norm_eps = c.rms_norm_eps;
-  q.gdn_key_heads = c.gdn_key_heads;
-  q.gdn_value_heads = c.gdn_value_heads;
-  q.gdn_key_head_dim = c.gdn_key_head_dim;
-  q.gdn_value_head_dim = c.gdn_value_head_dim;
-  q.gdn_conv_width = c.gdn_conv_width;
-  return q;
-}
-
 }  // namespace
 
 // ---- Qwen35KvPool ------------------------------------------------------------
@@ -255,7 +239,7 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
   rec_elems_ = lv * V * K;
   conv_elems_ = C * (cfg_.gdn_conv_width - 1);
   // The qwen4_exp layer ctors' config view.
-  qcfg_ = qwen_text_adapter(cfg_);
+  qcfg_ = qwen35_text_adapter(cfg_);
   init_stream();
   loader_.set_reader_stream(stream_);
   globals_ = loader_.load_globals();
@@ -276,7 +260,7 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
   sp.hidden = H;
   sp.lm_vocab_begin = geo.lm_vocab_begin;
   sp.lm_vocab_count = geo.lm_vocab_count;
-  sp.max_position_embeddings = cfg_.max_position_embeddings;
+  sp.max_position_embeddings = cfg_.context_limit();
   sp.block_tokens = kv_block_tokens_static();
   sp.snapshot_align = 1;
   sp.draft_width = mtp_ ? H : 0;
@@ -487,11 +471,28 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
     df_i_ = dfcfg_.local_intermediate(world);
     dfw_ = load_dflash2_weights(dfcfg_, dflash2_dir, stream_, rank, world, dflash2_fp8_);
     {
+      // The draft table must rotate with the target's: the plain table, or
+      // the same YaRN ramp the Full layers take when engine.rope_scaling is
+      // set. The drafter rotates its full 128-dim head, so its band sits at
+      // lanes 33..48 where the target's rotary-64 band sits at 16..24: the
+      // same wavelengths (tests/unit/qwen_rope_scaling_test.cpp). The draft
+      // kernel takes no mscale (the ramp's
+      // attention factor rides the target's rotation only); measured on
+      // 2026-10-15 at short context the drafter's acceptance under the ramp
+      // is level with the plain table's (2.23/3.15/3.48/3.40/4.75 vs
+      // 2.25/3.15/3.60/3.48/4.53 tok/pass over the five classes).
       std::vector<float> host(dfcfg_.head_dim / 2);
-      const double theta = dfcfg_.rope_theta;
-      for (size_t i = 0; i < host.size(); ++i)
-        host[i] = static_cast<float>(
-            std::pow(theta, -static_cast<double>(2 * i) / static_cast<double>(dfcfg_.head_dim)));
+      if (cfg_.rope_scaling.has_value()) {
+        const RopeScaling& rs = *cfg_.rope_scaling;
+        rs.validate("rope_scaling");
+        yarn_rope_inv_freq_host(dfcfg_.head_dim, dfcfg_.rope_theta, rs.correction_max_position(),
+                               rs.factor, rs.beta_fast, rs.beta_slow, host.data());
+      } else {
+        const double theta = dfcfg_.rope_theta;
+        for (size_t i = 0; i < host.size(); ++i)
+          host[i] = static_cast<float>(
+              std::pow(theta, -static_cast<double>(2 * i) / static_cast<double>(dfcfg_.head_dim)));
+      }
       DGPP_CUDA_OK(cudaMalloc(&df_inv_freq_, host.size() * 4));
       DGPP_CUDA_OK(cudaMemcpy(df_inv_freq_, host.data(), host.size() * 4, cudaMemcpyHostToDevice));
     }
@@ -1151,7 +1152,7 @@ MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens,
        kv_block_tokens_static()) *
       kv_block_tokens_static();
   MemoryPlan plan;
-  plan.context_tokens = std::min<int64_t>(cache_tokens, cfg.max_position_embeddings);
+  plan.context_tokens = std::min<int64_t>(cache_tokens, cfg.context_limit());
   const size_t M = static_cast<size_t>(max_tokens);
   const size_t H = static_cast<size_t>(cfg.hidden_size);
   const size_t I = static_cast<size_t>(cfg.intermediate_size);
@@ -1188,7 +1189,7 @@ MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens,
   }
   plan.add("kv pool", Qwen35KvPool::cache_bytes(shape));
   // Layer scratch at max_tokens rows (Full + GDN worst case).
-  const QwenTextConfig qc = qwen_text_adapter(cfg);
+  const QwenTextConfig qc = qwen35_text_adapter(cfg);
   const int lh = cfg.num_attention_heads, lkv = cfg.num_key_value_heads;
   const int lk = cfg.gdn_key_heads, lv = cfg.gdn_value_heads;
   plan.add("layer scratch", std::max(QwenFullAttnLayer::scratch_bytes(qc, lh, lkv, max_tokens),
