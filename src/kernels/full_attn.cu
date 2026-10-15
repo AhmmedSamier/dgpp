@@ -486,7 +486,8 @@ constexpr int kBoxCols = 64;                               // 128 bytes: the swi
 constexpr int kBoxBytes = kKTile * kBoxCols * 2;           // 4 KB
 constexpr int kPlaneBytes = (kD / kBoxCols) * kBoxBytes;   // 16 KB: four boxes
 constexpr int kTmaStageBytes = 2 * kPlaneBytes;            // K then V
-constexpr size_t kTmaSmem = size_t(2) * kTmaStageBytes + 1024;  // two stages + the barriers, 1 KB aligned
+constexpr int kTmaStages = 3;                              // the ring: tile it+2 lands while `it` computes
+constexpr size_t kTmaSmem = size_t(kTmaStages) * kTmaStageBytes + 1024;  // the ring + the barriers, 1 KB aligned
 
 __device__ __forceinline__ void mbar_init(uint64_t* bar, unsigned count) {
   asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" ::"r"(static_cast<unsigned>(__cvta_generic_to_shared(bar))), "r"(count));
@@ -502,8 +503,14 @@ __device__ __forceinline__ void mbar_wait(uint64_t* bar, unsigned parity) {
                  : "=r"(done) : "r"(a), "r"(parity) : "memory");
   } while (!done);
 }
+// The CTA-scoped destination form: on sm_121a the `.shared::cluster` form
+// lowers every copy to a cluster-window check, a guarded call to an address
+// translation helper and ~40 instructions of register shuffling (2026-10-15
+// SASS histogram: 26 CALL, 306 MOV, 114 R2UR per kernel), all on the one
+// issuing thread while the other warps wait at the tile barrier; the CTA form
+// is an elect loop and one UTMALDG per box (2 CALL, 85 MOV, 27 R2UR).
 __device__ __forceinline__ void tma_box_2d(void* dst, const CUtensorMap* map, int col, int64_t row, uint64_t* bar) {
-  asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];"
+  asm volatile("cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];"
                ::"r"(static_cast<unsigned>(__cvta_generic_to_shared(dst))), "l"(map), "r"(col), "r"(static_cast<int>(row)),
                  "r"(static_cast<unsigned>(__cvta_generic_to_shared(bar))) : "memory");
 }
@@ -524,7 +531,7 @@ __global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_tile_tma_kernel(
   // first aligned boundary and put the barriers in the slack.
   const unsigned sbase = static_cast<unsigned>(__cvta_generic_to_shared(smraw));
   uint8_t* sm = smraw + ((1024 - (sbase & 1023)) & 1023);
-  uint64_t* full_bar = reinterpret_cast<uint64_t*>(sm + 2 * kTmaStageBytes);
+  uint64_t* full_bar = reinterpret_cast<uint64_t*>(sm + kTmaStages * kTmaStageBytes);
   const int r0 = blockIdx.x * kQTile;
   const int kvh = blockIdx.y;
   const int group = local_heads / kv_heads;
@@ -543,8 +550,8 @@ __global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_tile_tma_kernel(
     cnt = p;
   }
   if (threadIdx.x == 0) {
-    mbar_init(&full_bar[0], 1);
-    mbar_init(&full_bar[1], 1);
+#pragma unroll
+    for (int s = 0; s < kTmaStages; ++s) mbar_init(&full_bar[s], 1);
   }
   asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
   __syncthreads();
@@ -588,13 +595,21 @@ __global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_tile_tma_kernel(
 
   const int64_t tiles = (cnt + kKTile - 1) / kKTile;
   if (tiles > 0) stage(0, 0);
+  if (tiles > 1) stage(kKTile, 1);
+  // The slot of tile `it` and the use parity of that slot, kept incrementally:
+  // a modulo per tile lowered to a magic-constant multiply chain on the
+  // issuing thread's critical path.
+  int buf = 0, nbuf = 2;  // the slot of tile `it`; the slot tile it+2 goes into
+  unsigned parity = 0;
   for (int64_t it = 0; it < tiles; ++it) {
-    const int buf = static_cast<int>(it & 1);
-    mbar_wait(&full_bar[buf], static_cast<unsigned>((it >> 1) & 1));  // tile `it` has landed
-    __syncthreads();  // every warp is done with the other buffer (tile it-1)
-    if (it + 1 < tiles) stage((it + 1) * kKTile, buf ^ 1);
-    const uint16_t* kt = reinterpret_cast<const uint16_t*>(sm + buf * kTmaStageBytes);
-    const uint16_t* vt = reinterpret_cast<const uint16_t*>(sm + buf * kTmaStageBytes + kPlaneBytes);
+    mbar_wait(&full_bar[buf], parity);  // tile `it` has landed
+    __syncthreads();  // every warp is done with tile it-1, whose slot tile it+2 refills
+    if (it + 2 < tiles) stage((it + 2) * kKTile, nbuf);
+    const int cur = buf;
+    nbuf = buf;  // tile it+3 refills the slot tile `it` used
+    if (++buf == kTmaStages) { buf = 0; parity ^= 1u; }
+    const uint16_t* kt = reinterpret_cast<const uint16_t*>(sm + cur * kTmaStageBytes);
+    const uint16_t* vt = reinterpret_cast<const uint16_t*>(sm + cur * kTmaStageBytes + kPlaneBytes);
     const int64_t base = it * kKTile;
     float sc[4][4];
 #pragma unroll
