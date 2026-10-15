@@ -27,8 +27,9 @@ project procedures and design guidance live in `docs/`.
   matrix to bf16 every chunk; on the FP8 release the same key takes the
   blockwise product on every prefill row. One Spark, the plain template:
   a 262K cold prefill 451 -> 391 (NVFP4 half) -> 349 s (both), an 11.5K
-  prompt 11.4 -> 8.9 -> 7.3 s; HumanEval 97/100, GSM8K 97/100 (bf16
-  chain 98 / 99), schema extraction 100/100 at the same seed and limit.
+  prompt 11.4 -> 8.9 -> 7.3 s. Task evals at the same seed, 300 items:
+  HumanEval 158/164 (bf16 chain 159), GSM8K 295/300 (296), schema
+  extraction 100/100 (100): the published recipe's quality.
   The NVFP4 templates enable it. The channel form then moved to 2-D TMA
   boxes (128 x 256 x 128 a stage, two stages, the swizzle folded into
   per-lane ldmatrix bases; bitwise the cp.async form): the GB10's
