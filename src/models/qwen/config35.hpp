@@ -103,8 +103,9 @@ struct Qwen35TextConfig {
   // BF16. Only meaningful with quant_kind == Nvfp4Mixed (the Fp8Block
   // binding needs no per-matrix resolution).
   Qwen35TensorQuant tensor_quant(const std::string& module) const;
-  // The opt-in YaRN ramp (engine.rope_scaling), unset until the serving
-  // stack supports it for this family.
+  // The opt-in YaRN ramp (engine.rope_scaling): set by the serving layer on
+  // the parsed config (never by the checkpoint, whose rope_type must stay
+  // default); absent = the plain table.
   std::optional<RopeScaling> rope_scaling;
   // Layer index of the MTP draft layer (num_hidden_layers), -1 when absent.
   int mtp_layer() const { return mtp_num_layers == 1 ? num_hidden_layers : -1; }
@@ -117,7 +118,7 @@ struct Qwen35TextConfig {
 };
 
 // The qwen4_exp layer ctors take QwenTextConfig: adapt the fields they read,
-// including the (currently unset) rope ramp.
+// the rope ramp included.
 QwenTextConfig qwen35_text_adapter(const Qwen35TextConfig& c);
 
 }  // namespace dgpp

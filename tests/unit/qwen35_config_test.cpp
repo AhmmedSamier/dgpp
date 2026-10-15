@@ -153,8 +153,10 @@ DGPP_TEST(qwen35_config_refusals_name_the_field) {
           "dedicated embeddings");
 }
 
-DGPP_TEST(qwen35_config_rope_ramp_plumbing_is_default_off) {  // The parser never fills the ramp (the serving knob stays refused for
-  // this family): tables and ceilings are what they were before it existed.
+DGPP_TEST(qwen35_config_rope_ramp_plumbing_is_default_off) {
+  // The parser never fills the ramp (only the serving layer sets it, from
+  // engine.rope_scaling): tables and ceilings are what they were before it
+  // existed.
   dgpp::Qwen35TextConfig c =
       parse(qwen35_fixture::text_json(), qwen35_fixture::kQuantFp8);
   require(!c.rope_scaling.has_value(), "ramp unset by parse");

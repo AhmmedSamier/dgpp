@@ -472,11 +472,15 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
     dfw_ = load_dflash2_weights(dfcfg_, dflash2_dir, stream_, rank, world, dflash2_fp8_);
     {
       // The draft table must rotate with the target's: the plain table, or
-      // the same YaRN ramp the Full layers take when the serving stack sets
-      // one (unset today — this branch is behavior-identical until then).
-      // Open measurement for the recipe step: the draft kernel takes no
-      // mscale, so the ramp's attention factor rides the target's rotation
-      // only; the acceptance A/B decides whether the kernel grows a scale.
+      // the same YaRN ramp the Full layers take when engine.rope_scaling is
+      // set. The drafter rotates its full 128-dim head, so its band sits at
+      // lanes 33..48 where the target's rotary-64 band sits at 16..24: the
+      // same wavelengths (tests/unit/qwen_rope_scaling_test.cpp). The draft
+      // kernel takes no mscale (the ramp's
+      // attention factor rides the target's rotation only); measured on
+      // 2026-10-15 at short context the drafter's acceptance under the ramp
+      // is level with the plain table's (2.23/3.15/3.48/3.40/4.75 vs
+      // 2.25/3.15/3.60/3.48/4.53 tok/pass over the five classes).
       std::vector<float> host(dfcfg_.head_dim / 2);
       if (cfg_.rope_scaling.has_value()) {
         const RopeScaling& rs = *cfg_.rope_scaling;

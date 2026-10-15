@@ -948,8 +948,8 @@ struct Qwen35Family final : ServeFamily {
     }
   }
   const char* name() const override { return "qwen3_5"; }
-  // The request-context ceiling: native positions today (the ramp pins it
-  // higher once the serving stack supports rope_scaling for this family).
+  // The request-context ceiling: the checkpoint's positions, or the ramp's
+  // when engine.rope_scaling is set (the ctor above puts it on the config).
   int64_t position_limit() const override { return cfg.context_limit(); }
   int64_t vocab_size() const override { return cfg.vocab_size; }
   const std::vector<int64_t>& eos_token_ids() const override { return eos_; }

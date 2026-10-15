@@ -324,7 +324,8 @@ What the mode does not touch: the QSA softmax scale, the pool's size (a
 pool is sized by `engine.kv_capacity`, so the knob lifts what a request may
 reach without moving a byte — `qwen_plan_check` asserts that), and every
 other family — a world that sets `engine.rope_scaling` for a family other than
-`qwen4_exp` refuses to start and names the family, rather than serving with the
+`qwen4_exp` or `qwen3_5` (Qwen3.8-27B, the same rope geometry, 2026-10-12)
+refuses to start and names the family, rather than serving with the
 operator's setting quietly unapplied. The knob rides the settings record (`"rs"`)
 so a peer can never rope at different frequencies from rank 0, and the canonical
 config digest.

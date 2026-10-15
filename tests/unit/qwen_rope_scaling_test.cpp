@@ -159,6 +159,38 @@ DGPP_TEST(qwen_yarn_band_comes_from_the_mrope_enlarged_cache) {
   require_bits(table(rs), kYarnNativeBand, std::size(kYarnNativeBand), "band from 1 x original");
 }
 
+// The Qwen3.8-27B DFlash2 drafter rotates its full 128-dim head with the
+// same ramp the target's rotary-64 lanes take (src/models/qwen/model35.cpp):
+// the band is a wavelength band, so at dim 128 it sits at lanes 33..48 where
+// the rotary-64 table's sits at 16..24 (the edges round separately, so the
+// blend inside the band differs by lane), and every lane outside it is the
+// plain frequency or the plain frequency over the factor.
+DGPP_TEST(qwen35_drafter_table_shares_the_ramp_band_at_dim_128) {
+  dgpp::RopeScaling rs;
+  rs.factor = 2.0;
+  rs.original_max_position_embeddings = 262144;
+  std::vector<float> plain(64), ramp(64);
+  dgpp::yarn_rope_inv_freq_host(128, kTheta, 0, 1.0, rs.beta_fast, rs.beta_slow, plain.data());
+  dgpp::yarn_rope_inv_freq_host(128, kTheta, rs.correction_max_position(), rs.factor, rs.beta_fast,
+                                rs.beta_slow, ramp.data());
+  for (int i = 0; i < 64; ++i) {
+    if (i <= 33)
+      require(ramp[i] == plain[i], "lanes inside the training band keep the plain frequency (dim 128)");
+    else if (i >= 48)
+      require(ramp[i] == plain[i] / 2.0f, "beyond the band the frequency is divided by the factor (dim 128)");
+    else
+      require(ramp[i] < plain[i] && ramp[i] > plain[i] / 2.0f, "the band blends the two (dim 128)");
+  }
+  // Outside the band, lane 2i of the dim-128 table is lane i of the dim-64
+  // table (the same wavelength, the same plain or halved frequency).
+  std::vector<float> r64(32);
+  dgpp::yarn_rope_inv_freq_host(kRotary, kTheta, rs.correction_max_position(), rs.factor, rs.beta_fast,
+                                rs.beta_slow, r64.data());
+  for (int i = 0; i < 32; ++i)
+    if (2 * i <= 33 || 2 * i >= 48)
+      require(ramp[2 * i] == r64[i], "outside the band the even lanes of the dim-128 table are the dim-64 table");
+}
+
 DGPP_TEST(qwen_plain_table_is_frozen) {
   // YaRN off: the shared builder's straight-through path is the plain
   // table, bit for bit what the engine served before the knob existed.

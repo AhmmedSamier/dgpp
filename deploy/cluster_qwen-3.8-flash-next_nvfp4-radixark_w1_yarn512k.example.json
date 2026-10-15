@@ -2,7 +2,7 @@
   "model": "RadixArk/Qwen3.8-Flash-Next-NVFP4",
   "world_size": 1,
   "engine": {
-    "max_concurrency": 4,
+    "max_concurrency": 2,
     "kv_capacity": 565248,
     "kv_dtype": "bf16",
     "bf16_weights": "bf12+bf16",
@@ -22,6 +22,7 @@
     "decode_graph": true,
     "mtp": true,
     "mtp_depth": 2,
+    "draft_head": "screen",
     "lookup_draft": true,
     "lookup_tail": 2,
     "prefix_cache_gib": 3,
@@ -29,11 +30,9 @@
     "admission_window": 256,
     "model_alias": "Qwen3.8-Flash-Next",
     "sampling_candidates": 128,
-    "stats_interval_s": 10,
+    "stats_interval_s": 1,
     "dense_weights": "fp8",
-    "mtp_expert_format": "bf16_fused",
-    "prefill_idle_budget_tokens": 4096,
-    "prefill_budget_tokens": 4096
+    "mtp_expert_format": "bf16_fused"
   },
   "paths": {
     "resident_cache": ""

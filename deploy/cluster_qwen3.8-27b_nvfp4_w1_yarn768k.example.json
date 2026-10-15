@@ -2,7 +2,7 @@
   "model": "unsloth/Qwen3.8-27B-NVFP4",
   "world_size": 1,
   "engine": {
-    "max_concurrency": 4,
+    "max_concurrency": 2,
     "kv_capacity": 827392,
     "kv_dtype": "bf16",
     "rope_scaling": {
@@ -20,6 +20,7 @@
     "decode_graph": true,
     "mtp": false,
     "dflash_model": "z-lab/Qwen3.8-27B-DFlash2",
+    "draft_head": "screen",
     "dflash_weights": "fp8",
     "mtp_schedule": true,
     "mtp_schedule_row_ms": 2.0,
