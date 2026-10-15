@@ -29,7 +29,13 @@ project procedures and design guidance live in `docs/`.
   a 262K cold prefill 451 -> 391 (NVFP4 half) -> 349 s (both), an 11.5K
   prompt 11.4 -> 8.9 -> 7.3 s; HumanEval 97/100, GSM8K 97/100 (bf16
   chain 98 / 99), schema extraction 100/100 at the same seed and limit.
-  The NVFP4 templates enable it.
+  The NVFP4 templates enable it. The channel form then moved to 2-D TMA
+  boxes (128 x 256 x 128 a stage, two stages, the swizzle folded into
+  per-lane ldmatrix bases; bitwise the cp.async form): the GB10's
+  L2-to-SM feed of ~800 GB/s caps a GEMM by its bytes a kFLOP, and the
+  wider TMA tile moves 5.9 against the 128-wide cp.async tile's 7.8,
+  139 against 100 TFLOP/s at the 27B's shapes; in situ the 262K prefill
+  349 -> 336 s and the 11.5K prompt 7.3 -> 6.7 s.
 
 - **Qwen3.8-27B prefill attention at 71 TFLOP/s** (2026-10-15). The
   full-attention prefill kernel (`kernels/full_attn.cu`, the tile form the
