@@ -10,6 +10,7 @@
     "max_connections": 64,
     "decode_graph": true,
     "mtp": true,
+    "draft_head": "screen",
     "prefix_cache_gib": 1.5,
     "admission": "grow",
     "admission_window": 256,
