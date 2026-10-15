@@ -80,5 +80,8 @@ window, no vision.
   with the portability carve-out). Validated live on one Spark
   (2026-10-14): 22 s boot, 15.4 GiB resident, the checkpoint's
   `sample.prompt` completing byte-exact to `sample.output` (158 tokens),
-  repeat-deterministic. Next: multi-node TP shakeout (loader geometry
-  covers worlds 2/4/8), benchmark rows, DESIGN/PLAN status.
+  repeat-deterministic. Serve binary also got its Llama case in
+  `serving_head_check` (resident load + session_prefill across tail lengths,
+  validated against the real checkpoint's sample.prompt).
+  Next: multi-node TP shakeout (loader geometry covers worlds 2/4/8),
+  benchmark rows, DESIGN/PLAN status.
