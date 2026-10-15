@@ -13,8 +13,10 @@ project procedures and design guidance live in `docs/`.
   at its 128-dim head, and the context ceiling, the session bound and the
   memory plan follow `context_limit()`. Templates: the one-node 27B at
   512K (release-checked 5/5 at 262 144 and 524 288, and again 3/3 at
-  524 288 on one Spark and on four on 2026-10-15) and at 768K, and the
-  one-node RadixArk Flash-Next at 512K (plan-verified). The README key row,
+  524 288 on one Spark and on four on 2026-10-15) and at 768K (the ×3 band
+  release-checked on one Spark on 2026-10-15: needle and control found,
+  cold prefill 3 282 s), and the one-node RadixArk Flash-Next at 512K
+  (plan-verified). The README key row,
   the deploy notes and the release-check runbook name both families.
 
 - **Adaptive prefill keeps a lone reader's chunks efficient and keeps a long
