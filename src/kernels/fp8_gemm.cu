@@ -4,6 +4,7 @@
 #include <cuda_fp8.h>
 
 #include <stdexcept>
+#include <string>
 #include <type_traits>
 
 #include "common/cuda_check.hpp"
@@ -308,7 +309,206 @@ void launch(const uint8_t* a, const float* a_scales, const uint8_t* w, const flo
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
+
+// ---- the channel form on TMA boxes ---------------------------------------------
+// 128 x 256 x 128 a stage (A 16 KB + W 32 KB, SWIZZLE_128B: 16-byte chunk c of
+// row r at chunk c ^ (r & 7)), two stages, one mbarrier a stage, eight
+// 64 x 64 warp tiles (2 x 4), the swizzle folded into per-lane ldmatrix bases.
+constexpr int kTBN = 256, kTBK = 128, kTStages = 2;
+constexpr int kTABytes = kBM * kTBK, kTBBytes = kTBN * kTBK, kTStageBytes = kTABytes + kTBBytes;
+constexpr size_t kTSmem = size_t(kTStages) * kTStageBytes + 1024;  // + the 1 KB alignment slack and barriers
+
+__device__ __forceinline__ void mbar_init(uint64_t* bar, unsigned count) {
+  asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" ::"r"(static_cast<unsigned>(__cvta_generic_to_shared(bar))), "r"(count));
+}
+__device__ __forceinline__ void mbar_expect_tx(uint64_t* bar, unsigned bytes) {
+  asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" ::"r"(static_cast<unsigned>(__cvta_generic_to_shared(bar))), "r"(bytes) : "memory");
+}
+__device__ __forceinline__ void mbar_wait(uint64_t* bar, unsigned parity) {
+  const unsigned a = static_cast<unsigned>(__cvta_generic_to_shared(bar));
+  unsigned done = 0;
+  do {
+    asm volatile("{ .reg .pred p; mbarrier.try_wait.parity.shared::cta.b64 p, [%1], %2; selp.u32 %0, 1, 0, p; }"
+                 : "=r"(done) : "r"(a), "r"(parity) : "memory");
+  } while (!done);
+}
+__device__ __forceinline__ void tma_box_2d(unsigned dst, const CUtensorMap* map, int x, int y, uint64_t* bar) {
+  asm volatile("cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];"
+               ::"r"(dst), "l"(map), "r"(x), "r"(y), "r"(static_cast<unsigned>(__cvta_generic_to_shared(bar))) : "memory");
+}
+__device__ __forceinline__ void ldsm_x4_a(uint32_t (&r)[4], unsigned a) {
+  asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];" : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
+}
+
+template <typename OutT>
+__global__ __launch_bounds__(kThreads, 1) void fp8_gemm_channel_tma_kernel(const __grid_constant__ CUtensorMap amap,
+                                                                          const __grid_constant__ CUtensorMap wmap,
+                                                                          const float* __restrict__ a_scales,
+                                                                          const float* __restrict__ w_scales,
+                                                                          OutT* __restrict__ out, int m, int n, int k,
+                                                                          size_t out_stride) {
+  extern __shared__ __align__(1024) uint8_t smraw[];
+  const unsigned sbase = static_cast<unsigned>(__cvta_generic_to_shared(smraw));
+  uint8_t* sm = smraw + ((1024 - (sbase & 1023)) & 1023);
+  const unsigned s0 = static_cast<unsigned>(__cvta_generic_to_shared(sm));
+  uint64_t* full = reinterpret_cast<uint64_t*>(sm + kTStages * kTStageBytes);
+  const int tid = threadIdx.x, warp = tid / 32, lane = tid % 32;
+  constexpr int kGroupM = 8;
+  const int m_tiles = (m + kBM - 1) / kBM, n_tiles = (n + kTBN - 1) / kTBN;
+  const int bid = static_cast<int>(blockIdx.x);
+  const int group = bid / (kGroupM * n_tiles);
+  const int first_m = group * kGroupM;
+  const int group_rows = min(kGroupM, m_tiles - first_m);
+  const int in_group = bid - group * kGroupM * n_tiles;
+  const int m0 = (first_m + in_group % group_rows) * kBM;
+  const int n0 = (in_group / group_rows) * kTBN;
+  const int row_base = (warp / 4) * 64, col_base = (warp % 4) * 64;
+  const int steps = k / kTBK;
+  if (tid == 0) {
+#pragma unroll
+    for (int s = 0; s < kTStages; ++s) mbar_init(&full[s], 1);
+  }
+  asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+  __syncthreads();
+  auto stage = [&](int step, int slot) {
+    if (tid != 0) return;
+    const unsigned dst = s0 + slot * kTStageBytes;
+    mbar_expect_tx(&full[slot], static_cast<unsigned>(kTStageBytes));
+    tma_box_2d(dst, &amap, step * kTBK, m0, &full[slot]);
+    tma_box_2d(dst + kTABytes, &wmap, step * kTBK, n0, &full[slot]);
+  };
+  // Per-lane ldmatrix bases for slot 0: A rows row_base + 16 i + lane % 16 at
+  // chunk kk/16 + lane/16; W rows col_base + 16 jj + 8 (lane/16) + lane % 8 at
+  // chunk kk/16 + (lane/8) % 2. The XOR operand (row & 7) is lane & 7 for all.
+  unsigned lba[4], lbb[4];
+  {
+    const int r7 = lane & 7;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) lba[i] = s0 + (row_base + i * 16 + (lane & 15)) * kTBK + (((lane >> 4) ^ r7) << 4);
+#pragma unroll
+    for (int jj = 0; jj < 4; ++jj)
+      lbb[jj] = s0 + kTABytes + (col_base + jj * 16 + (lane >> 4) * 8 + r7) * kTBK + ((((lane >> 3) & 1) ^ r7) << 4);
+  }
+  float acc[4][8][4] = {};
+  if (steps > 0) stage(0, 0);
+  int slot = 0;
+  unsigned parity = 0;
+  for (int step = 0; step < steps; ++step) {
+    mbar_wait(&full[slot], parity);
+    __syncthreads();  // every warp is done with step - 1: its slot is free
+    if (step + 1 < steps) stage(step + 1, slot ^ 1);
+    const unsigned so = static_cast<unsigned>(slot) * kTStageBytes;
+#pragma unroll
+    for (int kk = 0; kk < kTBK; kk += 32) {
+      const unsigned x = static_cast<unsigned>(kk / 16) << 4;
+      uint32_t af[4][4];
+#pragma unroll
+      for (int i = 0; i < 4; ++i) ldsm_x4_a(af[i], (lba[i] ^ x) + so);
+      uint32_t bf[8][2];
+#pragma unroll
+      for (int jj = 0; jj < 4; ++jj) {
+        uint32_t q4[4];
+        ldsm_x4_a(q4, (lbb[jj] ^ x) + so);
+        bf[jj * 2][0] = q4[0];
+        bf[jj * 2][1] = q4[1];
+        bf[jj * 2 + 1][0] = q4[2];
+        bf[jj * 2 + 1][1] = q4[3];
+      }
+#pragma unroll
+      for (int i = 0; i < 4; ++i)
+#pragma unroll
+        for (int j = 0; j < 8; ++j)
+          asm volatile(
+              "mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 "
+              "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+              : "+f"(acc[i][j][0]), "+f"(acc[i][j][1]), "+f"(acc[i][j][2]), "+f"(acc[i][j][3])
+              : "r"(af[i][0]), "r"(af[i][1]), "r"(af[i][2]), "r"(af[i][3]), "r"(bf[j][0]), "r"(bf[j][1]));
+    }
+    if (++slot == kTStages) {
+      slot = 0;
+      parity ^= 1u;
+    }
+  }
+  const int r = lane / 4, cc = (lane % 4) * 2;
+#pragma unroll
+  for (int i = 0; i < 4; ++i)
+#pragma unroll
+    for (int j = 0; j < 8; ++j)
+#pragma unroll
+      for (int h = 0; h < 2; ++h) {
+        const int row = m0 + row_base + i * 16 + r + h * 8;
+        const int col = n0 + col_base + j * 8 + cc;
+        if (row >= m) continue;
+        const size_t index = static_cast<size_t>(row) * out_stride + col;
+        const float sa = a_scales[row];
+        if constexpr (!std::is_same_v<OutT, float>) {
+          if (col + 1 < n && (out_stride % 2) == 0) {
+            const float v0 = (acc[i][j][2 * h] * sa) * w_scales[col], v1 = (acc[i][j][2 * h + 1] * sa) * w_scales[col + 1];
+            *reinterpret_cast<uint32_t*>(out + index) =
+                static_cast<uint32_t>(__bfloat16_as_ushort(__float2bfloat16_rn(v0))) |
+                (static_cast<uint32_t>(__bfloat16_as_ushort(__float2bfloat16_rn(v1))) << 16);
+            continue;
+          }
+        }
+#pragma unroll
+        for (int e = 0; e < 2; ++e) {
+          if (col + e >= n) continue;
+          const float val = (acc[i][j][2 * h + e] * sa) * w_scales[col + e];
+          if constexpr (std::is_same_v<OutT, float>)
+            out[index + e] = val;
+          else
+            out[index + e] = __bfloat16_as_ushort(__float2bfloat16_rn(val));
+        }
+      }
+}
+
+template <typename OutT>
+void launch_tma(const CUtensorMap& amap, const CUtensorMap& wmap, const float* a_scales, const float* w_scales, OutT* out,
+                int m, int n, int k, cudaStream_t stream, size_t out_stride) {
+  if (m <= 0 || n <= 0) return;
+  if (k <= 0 || k % kTBK != 0) throw std::invalid_argument("fp8 gemm (channel tma): k must be a positive multiple of 128");
+  if (out_stride == 0) out_stride = static_cast<size_t>(n);
+  static bool attr_set = false;  // once per OutT
+  if (!attr_set) {
+    DGPP_CUDA_OK(cudaFuncSetAttribute(fp8_gemm_channel_tma_kernel<OutT>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                      static_cast<int>(kTSmem)));
+    attr_set = true;
+  }
+  const dim3 grid(static_cast<unsigned>(((n + kTBN - 1) / kTBN) * ((m + kBM - 1) / kBM)));
+  fp8_gemm_channel_tma_kernel<OutT><<<grid, kThreads, kTSmem, stream>>>(amap, wmap, a_scales, w_scales, out, m, n, k, out_stride);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
 }  // namespace
+
+bool fp8_channel_tma_supported(int k) { return k > 0 && k % kTBK == 0; }
+
+CUtensorMap fp8_channel_tma_map(const uint8_t* base, int64_t rows, int64_t k, int box_rows) {
+  if (!fp8_channel_tma_supported(static_cast<int>(k)) || (reinterpret_cast<uintptr_t>(base) % 16) != 0)
+    throw std::invalid_argument("fp8_channel_tma_map: k must be a multiple of 128 and the matrix 16-byte aligned");
+  if (box_rows != 128 && box_rows != 256) throw std::invalid_argument("fp8_channel_tma_map: box rows must be 128 or 256");
+  CUtensorMap map{};
+  const cuuint64_t dims[2] = {static_cast<cuuint64_t>(k), static_cast<cuuint64_t>(rows)};
+  const cuuint64_t strides[1] = {static_cast<cuuint64_t>(k)};
+  const cuuint32_t box[2] = {static_cast<cuuint32_t>(kTBK), static_cast<cuuint32_t>(box_rows)};
+  const cuuint32_t estr[2] = {1, 1};
+  const CUresult r = cuTensorMapEncodeTiled(&map, CU_TENSOR_MAP_DATA_TYPE_UINT8, 2, const_cast<uint8_t*>(base), dims,
+                                            strides, box, estr, CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
+                                            CU_TENSOR_MAP_L2_PROMOTION_L2_128B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+  if (r != CUDA_SUCCESS)
+    throw std::runtime_error("fp8_channel_tma_map: cuTensorMapEncodeTiled failed (" + std::to_string(static_cast<int>(r)) + ")");
+  return map;
+}
+void launch_fp8_gemm_channel_tma_bf16(const CUtensorMap& amap, const CUtensorMap& wmap, const float* a_scales,
+                                      const float* w_scales, uint16_t* out, int m, int n, int k, cudaStream_t stream,
+                                      size_t out_stride) {
+  launch_tma<uint16_t>(amap, wmap, a_scales, w_scales, out, m, n, k, stream, out_stride);
+}
+void launch_fp8_gemm_channel_tma_f32(const CUtensorMap& amap, const CUtensorMap& wmap, const float* a_scales,
+                                     const float* w_scales, float* out, int m, int n, int k, cudaStream_t stream,
+                                     size_t out_stride) {
+  launch_tma<float>(amap, wmap, a_scales, w_scales, out, m, n, k, stream, out_stride);
+}
 
 void launch_fp8_quantize_rows(const uint16_t* act, size_t act_stride, int m, int k, uint8_t* q, float* scales,
                               cudaStream_t stream) {

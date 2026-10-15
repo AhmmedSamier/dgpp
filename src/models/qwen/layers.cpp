@@ -142,6 +142,17 @@ void gemm_dense(const QwenGemmWorkspace& g, const uint16_t* act, int64_t act_str
         static_cast<size_t>(m) * static_cast<size_t>(k) <= g.a8_bytes && k % 64 == 0 && act_stride % 8 == 0 &&
         (reinterpret_cast<uintptr_t>(act) % 16) == 0) {
       launch_fp8_quantize_tokens(act, static_cast<size_t>(act_stride), m, k, g.a8, g.a8_scales, stream);
+      // Staged by TMA boxes when both maps exist (bitwise the cp.async form).
+      const CUtensorMap* am = g.a8_map_for(k);
+      if (w8.tma != nullptr && am != nullptr) {
+        if (out_type == GemmOut::F32)
+          launch_fp8_gemm_channel_tma_f32(*am, *w8.tma, g.a8_scales, w8.scales, static_cast<float*>(out), m, n, k,
+                                          stream, static_cast<size_t>(n));
+        else
+          launch_fp8_gemm_channel_tma_bf16(*am, *w8.tma, g.a8_scales, w8.scales, static_cast<uint16_t*>(out), m, n,
+                                           k, stream, static_cast<size_t>(n));
+        return;
+      }
       if (out_type == GemmOut::F32)
         launch_fp8_gemm_channel_f32(g.a8, g.a8_scales, w8.payload, w8.scales, static_cast<float*>(out), m, n, k,
                                     stream, static_cast<size_t>(n));

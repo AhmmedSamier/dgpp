@@ -351,6 +351,8 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
   }
   // The native activation recipe's NVFP4 scratch (engine.prefill_activations
   // = native): one quantized row set at max_tokens rows of the widest k (I).
+  if (native_activations_ && cfg_.quant_kind == Qwen35QuantKind::Nvfp4Mixed && loader_.residency() == LoaderResidency::Resident)
+    build_native_maps();
   if (native_activations_ && cfg_.quant_kind == Qwen35QuantKind::Nvfp4Mixed) {
     DGPP_CUDA_OK(cudaMalloc(&q_codes_, M * I / 2));
     DGPP_CUDA_OK(cudaMalloc(&q_scales_, M * nvfp4_act_scale_stride(static_cast<int>(I))));
@@ -367,6 +369,19 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
     DGPP_CUDA_OK(cudaMalloc(&gw_.a8_scales, M * (I / 128 + 1) * sizeof(float)));
     gw_.a8_bytes = M * I;
     gw_.native_prefill = &native_prefill_cell_;
+    // The a8 scratch's TMA maps for every dense k (the channel form's boxes).
+    {
+      const int64_t LV = static_cast<int64_t>(geo.local_value_heads) * cfg_.gdn_value_head_dim;
+      const int64_t FH = static_cast<int64_t>(geo.local_heads) * cfg_.head_dim;
+      for (const int64_t kk : {static_cast<int64_t>(H), LV, FH, static_cast<int64_t>(I)}) {
+        if (!fp8_channel_tma_supported(static_cast<int>(kk)) || gw_.a8_map_for(static_cast<int>(kk)) != nullptr ||
+            gw_.a8_tma_count >= 4)
+          continue;
+        gw_.a8_tma[gw_.a8_tma_count].k = static_cast<int>(kk);
+        gw_.a8_tma[gw_.a8_tma_count].map = fp8_channel_tma_map(gw_.a8, static_cast<int64_t>(M), kk, 128);
+        ++gw_.a8_tma_count;
+      }
+    }
     DGPP_LOG_INFO("Qwen35Model: engine.prefill_activations = native: per-token e4m3 activations for the FP8 projections on every prefill row");
   }
   if (cfg_.quant_kind == Qwen35QuantKind::Nvfp4Mixed &&
@@ -1109,16 +1124,30 @@ void Qwen35Model::dense_mlp(const uint16_t* x, uint16_t* out, int tokens,
     // in the epilogue, the model's SwiGLU between; every prefill row.
     if (prefill && native_on_ && gw_.a8 && static_cast<size_t>(tokens) * static_cast<size_t>(I) <= gw_.a8_bytes &&
         H % 64 == 0 && I % 64 == 0) {
+      const CUtensorMap* amH = gw_.a8_map_for(static_cast<int>(H));
+      const CUtensorMap* amI = gw_.a8_map_for(static_cast<int>(I));
+      const bool boxes = amH && amI && m.gate_fp8.tma && m.up_fp8.tma && m.down_fp8.tma;
       launch_fp8_quantize_tokens(x, static_cast<size_t>(H), tokens, static_cast<int>(H), gw_.a8, gw_.a8_scales, stream);
-      launch_fp8_gemm_channel_bf16(gw_.a8, gw_.a8_scales, m.gate_fp8.payload, m.gate_fp8.scales, gate_tmp_, tokens,
-                                   static_cast<int>(I), static_cast<int>(H), stream, static_cast<size_t>(I));
-      launch_fp8_gemm_channel_bf16(gw_.a8, gw_.a8_scales, m.up_fp8.payload, m.up_fp8.scales, up_tmp_, tokens,
-                                   static_cast<int>(I), static_cast<int>(H), stream, static_cast<size_t>(I));
+      if (boxes) {
+        launch_fp8_gemm_channel_tma_bf16(*amH, *m.gate_fp8.tma, gw_.a8_scales, m.gate_fp8.scales, gate_tmp_, tokens,
+                                         static_cast<int>(I), static_cast<int>(H), stream, static_cast<size_t>(I));
+        launch_fp8_gemm_channel_tma_bf16(*amH, *m.up_fp8.tma, gw_.a8_scales, m.up_fp8.scales, up_tmp_, tokens,
+                                         static_cast<int>(I), static_cast<int>(H), stream, static_cast<size_t>(I));
+      } else {
+        launch_fp8_gemm_channel_bf16(gw_.a8, gw_.a8_scales, m.gate_fp8.payload, m.gate_fp8.scales, gate_tmp_, tokens,
+                                     static_cast<int>(I), static_cast<int>(H), stream, static_cast<size_t>(I));
+        launch_fp8_gemm_channel_bf16(gw_.a8, gw_.a8_scales, m.up_fp8.payload, m.up_fp8.scales, up_tmp_, tokens,
+                                     static_cast<int>(I), static_cast<int>(H), stream, static_cast<size_t>(I));
+      }
       qwen35_swiglu_bf16(gate_tmp_, up_tmp_, gate_tmp_, static_cast<int64_t>(tokens) * I, stream);
       launch_fp8_quantize_tokens(gate_tmp_, static_cast<size_t>(I), tokens, static_cast<int>(I), gw_.a8, gw_.a8_scales,
                                  stream);
-      launch_fp8_gemm_channel_bf16(gw_.a8, gw_.a8_scales, m.down_fp8.payload, m.down_fp8.scales, out, tokens,
-                                   static_cast<int>(H), static_cast<int>(I), stream, static_cast<size_t>(H));
+      if (boxes)
+        launch_fp8_gemm_channel_tma_bf16(*amI, *m.down_fp8.tma, gw_.a8_scales, m.down_fp8.scales, out, tokens,
+                                         static_cast<int>(H), static_cast<int>(I), stream, static_cast<size_t>(H));
+      else
+        launch_fp8_gemm_channel_bf16(gw_.a8, gw_.a8_scales, m.down_fp8.payload, m.down_fp8.scales, out, tokens,
+                                     static_cast<int>(H), static_cast<int>(I), stream, static_cast<size_t>(H));
       return;
     }
     if (tokens <= 128) {
@@ -1238,6 +1267,43 @@ size_t Qwen35Model::session_snapshot_bytes(const Qwen35TextConfig& cfg, int worl
 
 size_t Qwen35Model::snapshot_state_bytes() const {
   return static_cast<size_t>(num_gdn_) * (rec_elems_ * 4 + conv_elems_ * 2);
+}
+
+// The channel matrices' TMA maps (engine.prefill_activations = native, the
+// mixed release): one map over every channel-FP8 matrix a prefill-shaped
+// product serves (the projections, the late-layer MLPs), the matrix's `tma`
+// pointing at it. The vector is reserved once so the addresses stay put;
+// the loader's resident slot is const to its readers, the map pointer the
+// one field written after the build.
+void Qwen35Model::build_native_maps() {
+  std::vector<GlmQuantMatrix*> items;
+  const auto take = [&](GlmQuantMatrix& m) {
+    if (m.payload && m.scales && m.scale_block_rows == 1 && fp8_channel_tma_supported(static_cast<int>(m.cols)))
+      items.push_back(&m);
+  };
+  for (int l = 0; l < cfg_.num_hidden_layers; ++l) {
+    Qwen35LayerResident& r = const_cast<Qwen35LayerResident&>(loader_.load_layer(l));
+    if (r.kind == Qwen35LayerKind::Gdn) {
+      take(r.gdn.in_proj_qkv_fp8);
+      take(r.gdn.in_proj_z_fp8);
+      take(r.gdn.out_proj_fp8);
+    } else {
+      take(r.full.q_proj_fp8);
+      take(r.full.k_proj_fp8);
+      take(r.full.v_proj_fp8);
+      take(r.full.o_proj_fp8);
+    }
+    take(r.mlp.gate_fp8);
+    take(r.mlp.up_fp8);
+    take(r.mlp.down_fp8);
+  }
+  native_tmaps_.clear();
+  native_tmaps_.reserve(items.size());
+  for (GlmQuantMatrix* m : items) {
+    native_tmaps_.push_back(fp8_channel_tma_map(m->payload, m->rows, m->cols, 256));
+    m->tma = &native_tmaps_.back();
+  }
+  DGPP_LOG_INFO("Qwen35Model: native channel form: TMA maps over {} matrices", items.size());
 }
 
 MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens, int64_t max_cache_tokens,

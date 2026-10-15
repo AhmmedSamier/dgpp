@@ -7,6 +7,7 @@
 // promotion per k group) in place of dequantizing each matrix to bf16 for
 // the cuBLASLt GEMM.
 
+#include <cuda.h>
 #include <cuda_runtime.h>
 
 #include <cstddef>
@@ -55,5 +56,20 @@ void launch_fp8_gemm_channel_bf16(const uint8_t* a, const float* a_scales, const
 void launch_fp8_gemm_channel_f32(const uint8_t* a, const float* a_scales, const uint8_t* w,
                                  const float* w_scales, float* out, int m, int n, int k,
                                  cudaStream_t stream, size_t out_stride = 0);
+// The channel form staged by 2-D TMA boxes (2026-10-15): 128 x 256 x 128 a
+// stage (A 16 KB + W 32 KB, SWIZZLE_128B), two stages, eight 64 x 64 warp
+// tiles. Bitwise the cp.async channel form (the same k order per output);
+// 139 against 100 TFLOP/s at the 27B's shapes, the L2-to-SM feed being the
+// limit at ~800 GB/s (the wider tile moves 5.9 against 7.8 bytes a kFLOP).
+// A map covers an e4m3 [rows, k] matrix (k % 128 == 0, 16-byte aligned);
+// box rows 128 for the activation rows, 256 for the weight rows.
+bool fp8_channel_tma_supported(int k);
+CUtensorMap fp8_channel_tma_map(const uint8_t* base, int64_t rows, int64_t k, int box_rows);
+void launch_fp8_gemm_channel_tma_bf16(const CUtensorMap& amap, const CUtensorMap& wmap, const float* a_scales,
+                                      const float* w_scales, uint16_t* out, int m, int n, int k,
+                                      cudaStream_t stream, size_t out_stride = 0);
+void launch_fp8_gemm_channel_tma_f32(const CUtensorMap& amap, const CUtensorMap& wmap, const float* a_scales,
+                                     const float* w_scales, float* out, int m, int n, int k, cudaStream_t stream,
+                                     size_t out_stride = 0);
 
 }  // namespace dgpp

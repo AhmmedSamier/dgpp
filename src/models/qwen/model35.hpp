@@ -469,6 +469,9 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   // workspace copies point at, true while the walk's rows are prefill rows.
   bool native_on_ = false;
   bool native_prefill_cell_ = false;
+  // The channel matrices' TMA maps (stable addresses: reserved once at boot).
+  std::vector<CUtensorMap> native_tmaps_;
+  void build_native_maps();
   // The native recipe's NVFP4 activation scratch: one quantized row set at
   // max_tokens rows of the widest k (I): codes, e4m3 block scales, globals.
   uint8_t* q_codes_ = nullptr;

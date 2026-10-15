@@ -21,6 +21,7 @@
 #include <string>
 #include <atomic>
 
+#include <cuda.h>
 #include <cuda_runtime.h>
 
 #include "kernels/full_attn.hpp"
@@ -63,6 +64,19 @@ struct QwenGemmWorkspace {
   // channel form) and the block grid's blockwise one; the a8 scratch above
   // serves both.
   const bool* native_prefill = nullptr;
+  // The a8 scratch's TMA maps by k (the channel form staged by boxes), set
+  // by the model at boot for every dense k it serves.
+  struct A8Map {
+    int k = 0;
+    CUtensorMap map{};
+  };
+  A8Map a8_tma[4] = {};
+  int a8_tma_count = 0;
+  const CUtensorMap* a8_map_for(int k) const {
+    for (int i = 0; i < a8_tma_count; ++i)
+      if (a8_tma[i].k == k) return &a8_tma[i].map;
+    return nullptr;
+  }
 };
 
 // Select decode lowering by token rows, before a projection flattens the

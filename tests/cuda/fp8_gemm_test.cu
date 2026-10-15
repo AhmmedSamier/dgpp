@@ -200,6 +200,18 @@ void run_channel(int m, int n, int k, std::mt19937& rng) {
   const auto as = d_as.download();
   const auto out = d_out.download();
   const auto out16 = d_out16.download();
+  // The TMA-staged form: bitwise the cp.async form (the same k order), f32 and bf16.
+  if (dgpp::fp8_channel_tma_supported(k)) {
+    const CUtensorMap am = dgpp::fp8_channel_tma_map(d_q.p, m, k, 128), wm = dgpp::fp8_channel_tma_map(d_w.p, n, k, 256);
+    Dev<float> t_out(static_cast<size_t>(m) * n);
+    Dev<uint16_t> t_out16(static_cast<size_t>(m) * n);
+    dgpp::launch_fp8_gemm_channel_tma_f32(am, wm, d_as.p, d_ws.p, t_out.p, m, n, k, stream);
+    dgpp::launch_fp8_gemm_channel_tma_bf16(am, wm, d_as.p, d_ws.p, t_out16.p, m, n, k, stream);
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+    require(t_out.download() == out, "the TMA-staged channel form is bitwise the cp.async form (f32)");
+    require(t_out16.download() == out16, "the TMA-staged channel form is bitwise the cp.async form (bf16)");
+    std::printf("channel tma m=%d n=%d k=%d: bitwise the cp.async form\n", m, n, k);
+  }
   for (int r = 0; r < m; ++r) {
     float amax = 0.f;
     for (int c = 0; c < k; ++c) amax = std::max(amax, std::fabs(dgpp::bf16_bits_to_float(act[r * stride + c])));
