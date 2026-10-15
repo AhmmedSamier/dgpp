@@ -83,5 +83,13 @@ window, no vision.
   repeat-deterministic. Serve binary also got its Llama case in
   `serving_head_check` (resident load + session_prefill across tail lengths,
   validated against the real checkpoint's sample.prompt).
+* Slice 5: TP + transcript. `tests/cuda/llama_tp_test.cpp` (fabric-free
+  world-2 fold vs world-1 oracle: cross-rank bitwise residuals/reads, head
+  slices and layers within the bf16 budget, top-1 exact);
+  `tests/python/zeta_transcript_test.py` (boots the real server, asserts
+  `sample.prompt` completes byte-exact to `sample.output` plus a
+  deterministic repeat; `gpu;python;checkpoint`, skips without binary or
+  cache). Throughput at 4 slots: 15.8 tok/s (conc 1), 25.3 (conc 2),
+  35.9 agg (conc 4).
   Next: multi-node TP shakeout (loader geometry covers worlds 2/4/8),
-  benchmark rows, DESIGN/PLAN status.
+  DESIGN/PLAN status.

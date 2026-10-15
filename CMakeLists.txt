@@ -1347,6 +1347,13 @@ if(TARGET dgpp_serve_app)
   add_test(NAME serve_startup_test
     COMMAND ${CMAKE_COMMAND} -E env "DGPP_SERVE_TEST_BINARY=$<TARGET_FILE:dgpp_serve_app>"
             ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/serve_startup_test.py)
+  # Zeta-2.1 transcript gate: boots the real checkpoint and asserts the
+  # greedy completion is byte-exact vs sample.output. Needs the cached
+  # checkpoint and a GPU; skips without either (the serve binary is always
+  # present here, the checkpoint gate is inside the test).
+  add_test(NAME zeta_transcript_test
+    COMMAND ${CMAKE_COMMAND} -E env "DGPP_SERVE_TEST_BINARY=$<TARGET_FILE:dgpp_serve_app>"
+            ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/zeta_transcript_test.py)
 endif()
 
 # KDA operator tests (CUDA); skip without a device as above. The dump-parity
@@ -2819,6 +2826,8 @@ set_tests_properties(checkpoint_audit_test chat_template_generator_test route_tr
 set_tests_properties(cluster_process_swap_systemd_test PROPERTIES LABELS "systemd" TIMEOUT 180)
 if(TARGET dgpp_serve_app)
   set_tests_properties(serve_startup_test PROPERTIES LABELS "host;python" TIMEOUT 180)
+  set_tests_properties(zeta_transcript_test PROPERTIES LABELS "gpu;python;checkpoint" RUN_SERIAL TRUE
+    TIMEOUT 900)
 endif()
 set_tests_properties(tokenizer_test qwen_tokenizer_test glm4_tokenizer_test dsv41_tokenizer_test
   chat_template_test qwen_chat_template_test glm4_chat_template_test dsv41_prompt_test

@@ -39,4 +39,6 @@ Measured on one Spark (2026-10-14, this binary): boot to READY in 22 s
 warm; the checkpoint's own `sample.prompt` (3,075 tokens) prefills in
 2.1 s cold; greedy decode ~15 tok/s; the 158-token completion is
 byte-exact against the checkpoint's `sample.output` (EOS stop), and
-repeats deterministically.
+repeats deterministically. Throughput sweep at 4 slots, short prompt,
+256-token greedy completion: 15.8 tok/s (conc 1), 25.3 agg tok/s (conc 2),
+35.9 agg tok/s (conc 4).
