@@ -144,6 +144,7 @@ operations to its peers. Every rank checks the operation-stream digest.
 | Flint | Hybrid sliding-window (513, sink-biased, full-head RoPE) / full-attention (no RoPE) GQA over 128-wide heads with per-head q / k norms, BF16 projections and MLPs in their 12-bit decode form, the routed experts in the export's per-projection FP8 / NVFP4 formats (one decode kernel per pair form), the ungated BF16 shared expert, graph decode and the prefix cache | No draft head: the family serves at T=1 only. One, two or four nodes (the kv heads divide the world). See [the Flint plan](docs/flint_plan.md). |
 | DeepSeek-V4-Flash | 128-token sliding-window attention over one shared 512-wide latent with ratio-4 (64-head indexer, 512 entries per query) and ratio-128 compressed caches, two-pass hyper-connections over four streams, token-table routing on layers 0–2, MXFP4 routed experts with an FP8 shared expert, the DSpark block draft, graph decode, prefix cache, chunk-invariant prefill | Two or four nodes at the full 1M-token context (95.4 / 63.0 GiB per rank). The templates schedule the verify depth over the five-draft block; sampled requests draft greedily (`engine.mtp_draft`) and follow the schedule. Text only. |
 | Dory1.0-4B | Looped normalized GPT (nGPT): a 16-layer input block, a 40-layer recurrent block walked twice with the input re-injected and the state re-normalized per loop, a 16-layer output block; every sublayer a slerp residual behind `justnorm`, sliding/full GQA (window 1024, two thetas) with the nGPT qk-norm after RoPE, NVFP4 W4A16 as shipped, a paged BF16 K/V pool (one plane per attention layer per loop), graph decode and prefix cache; no draft layer and one rank (the release refuses TP) | One Spark, resident (the 2.98 GiB image plus the pool: ≈ 56 GiB of planes at the full 256K pool under `per_loop`). The loop keys `engine.dory_loops` / `engine.dory_kv_cache` are opt-in overrides of the exact path |
+| Zeta-2.1 | Dense BF16 Llama: 32 GQA layers with full RoPE (θ 500K), SwiGLU MLP, RMSNorm, untied head, BF16 paged K/V pool, graph decode and prefix cache, no draft block (plain decode only) | One node at 15.4 GiB resident (32K context, four slots); served 2026-10-14: 22 s warm boot, `sample.prompt` completing byte-exact to `sample.output`, 15.8 tok/s at conc 1 / 35.9 agg tok/s at conc 4. No chat template ships: FIM completions only (`/v1/completions`; chat refuses). See [zeta_plan](docs/zeta_plan.md) and the [model card](docs/model_cards/Zeta-2.1.md) |
 
 World size comes from the configuration's node list. A single-node graph
 world uses resident weights and identity collectives. A single-node run
@@ -213,6 +214,10 @@ Their implementation and evaluation records are maintained separately:
   kernels generalized to 128-wide heads with q / k norms and full-head RoPE,
   the MoE executor's per-projection FP8 / NVFP4 form, the one-rounding norm,
   the three-stage o200k tokenizer, the fixture ladder and the campaign.
+- [Zeta-2.1 architecture and port](docs/zeta_plan.md): the dense BF16
+  Llama (32 GQA layers, full RoPE, SwiGLU, untied head) served as
+  shipped — the `llama` family, its pinned pre-tokenizer pattern, the
+  template-less FIM frontend, the draft-less plain-decode template.
 
 ## Qwen NVFP4 expert prefill
 
