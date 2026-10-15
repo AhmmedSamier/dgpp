@@ -150,8 +150,10 @@ struct ClusterConfig {
     //     "native" (the checkpoint's own activation recipe on every
     //     prefill row — 2026-10-15: the Qwen3.8-27B NVFP4 release's MLP
     //     inputs quantized to NVFP4 per row with its shipped input globals,
-    //     the products on the block-scaled fp4 tensor cores; decode rows
-    //     keep bf16 activations).
+    //     the products on the block-scaled fp4 tensor cores, and its
+    //     channel-FP8 projections and late MLPs from per-token e4m3 rows on
+    //     the e4m3 tensor cores; the FP8 release's blockwise product; decode
+    //     rows keep bf16 activations).
     bool prefill_bf16_partials = false;
     bool prefill_fold_scales = false;
     bool prefill_fp8_gemm = false;

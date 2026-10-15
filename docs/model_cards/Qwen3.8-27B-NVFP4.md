@@ -33,11 +33,12 @@ weights); the head is already fp8-channel resident, so it needs no lever.
 `engine.prefill_activations: "native"` (2026-10-15) serves the release's own
 activation recipe on prefill rows: the MLP inputs quantized to NVFP4 per row
 with the shipped `input_global_scale` (gate/up share one, down its own) and
-the products on the block-scaled fp4 tensor cores; decode rows keep bf16
-activations. The templates enable it: on one Spark a 262K cold prefill went
-451 -> 391 s and an 11.5K prompt 11.4 -> 8.9 s, with HumanEval 98/100,
-GSM8K 98/100 (99 on the bf16 chain) and schema extraction 100/100 at the
-same seed and limit.
+the products on the block-scaled fp4 tensor cores, and its channel-FP8
+projections and late-layer MLPs from per-token e4m3 activations on the e4m3
+tensor cores; decode rows keep bf16 activations. The templates enable it: on one Spark a 262K cold prefill went
+451 -> 349 s and an 11.5K prompt 11.4 -> 7.3 s, with HumanEval 97/100,
+GSM8K 97/100 (98 and 99 on the bf16 chain) and schema extraction 100/100
+at the same seed and limit.
 
 ## Gates
 

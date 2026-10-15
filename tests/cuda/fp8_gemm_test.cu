@@ -156,6 +156,99 @@ void run(const Shape& sh, std::mt19937& rng) {
   DGPP_CUDA_OK(cudaStreamDestroy(stream));
 }
 
+// The per-token x per-channel form (engine.prefill_activations = native):
+// the quantizer's row scale and codes against the host encoder, the GEMM
+// against the exact double sum of its own quantized inputs with the two
+// scales applied once, bf16 = f32 rounded once, and the distance from the
+// dequantized bf16 chain reported.
+void run_channel(int m, int n, int k, std::mt19937& rng) {
+  std::normal_distribution<float> normal(0.f, 1.f);
+  std::uniform_real_distribution<float> uni(0.5f, 2.f);
+  const size_t stride = static_cast<size_t>(k) + 8;
+  std::vector<uint16_t> act(static_cast<size_t>(m) * stride, 0);
+  for (int r = 0; r < m; ++r) {
+    const float rs = (r % 7 == 0) ? 8.f : 1.f;
+    for (int c = 0; c < k; ++c) act[r * stride + c] = dgpp::float_to_bf16_bits(normal(rng) * rs);
+  }
+  for (int c = 0; c < k; ++c) act[static_cast<size_t>(m - 1) * stride + c] = 0;  // an all-zero row
+  std::vector<uint8_t> w(static_cast<size_t>(n) * k);
+  std::uniform_int_distribution<int> code(0, 255);
+  for (auto& b : w) {
+    int c = code(rng);
+    if ((c & 0x7F) == 0x7F) c &= 0x7E;
+    b = static_cast<uint8_t>(c);
+  }
+  std::vector<float> ws(static_cast<size_t>(n));
+  for (auto& s : ws) s = uni(rng) * 0.01f;
+  Dev<uint16_t> d_act(act.size());
+  d_act.upload(act);
+  Dev<uint8_t> d_q(static_cast<size_t>(m) * k);
+  Dev<float> d_as(static_cast<size_t>(m));
+  Dev<uint8_t> d_w(w.size());
+  d_w.upload(w);
+  Dev<float> d_ws(ws.size());
+  d_ws.upload(ws);
+  Dev<float> d_out(static_cast<size_t>(m) * n);
+  Dev<uint16_t> d_out16(static_cast<size_t>(m) * n);
+  cudaStream_t stream;
+  DGPP_CUDA_OK(cudaStreamCreate(&stream));
+  dgpp::launch_fp8_quantize_tokens(d_act.p, stride, m, k, d_q.p, d_as.p, stream);
+  dgpp::launch_fp8_gemm_channel_f32(d_q.p, d_as.p, d_w.p, d_ws.p, d_out.p, m, n, k, stream);
+  dgpp::launch_fp8_gemm_channel_bf16(d_q.p, d_as.p, d_w.p, d_ws.p, d_out16.p, m, n, k, stream);
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+  const auto q = d_q.download();
+  const auto as = d_as.download();
+  const auto out = d_out.download();
+  const auto out16 = d_out16.download();
+  for (int r = 0; r < m; ++r) {
+    float amax = 0.f;
+    for (int c = 0; c < k; ++c) amax = std::max(amax, std::fabs(dgpp::bf16_bits_to_float(act[r * stride + c])));
+    const float want = amax > 0.f ? amax / 448.f : 1.f;
+    require(as[static_cast<size_t>(r)] == want, "token quantizer scale = amax / 448 over the row");
+    for (int c = 0; c < k; ++c) {
+      const float x = dgpp::bf16_bits_to_float(act[r * stride + c]);
+      const uint8_t got = q[static_cast<size_t>(r) * k + c];
+      const uint8_t host = dgpp::float_to_fp8_e4m3_bits(x / want);
+      require(got == host || (dgpp::fp8_e4m3_bits_to_float(got) == dgpp::fp8_e4m3_bits_to_float(host)),
+              "token quantizer code = e4m3(x / scale)");
+    }
+  }
+  double err_exact = 0, err_chain = 0, den = 0, ref_sq = 0, max_abs = 0;
+  size_t bf16_mismatch = 0;
+  for (int r = 0; r < m; ++r) {
+    for (int c = 0; c < n; ++c) {
+      double dot = 0, chain = 0;
+      for (int j = 0; j < k; ++j) {
+        const double code_v = dgpp::fp8_e4m3_bits_to_float(w[static_cast<size_t>(c) * k + j]);
+        dot += static_cast<double>(dgpp::fp8_e4m3_bits_to_float(q[static_cast<size_t>(r) * k + j])) * code_v;
+        chain += static_cast<double>(dgpp::bf16_bits_to_float(act[r * stride + j])) *
+                 dgpp::bf16_bits_to_float(dgpp::float_to_bf16_bits(static_cast<float>(code_v) * ws[c]));
+      }
+      const double ref = static_cast<double>(as[r]) * ws[c] * dot;
+      const double got = out[static_cast<size_t>(r) * n + c];
+      require(std::isfinite(got), "finite output");
+      err_exact += (got - ref) * (got - ref);
+      err_chain += (got - chain) * (got - chain);
+      den += chain * chain;
+      ref_sq += ref * ref;
+      max_abs = std::max(max_abs, std::fabs(got - ref));
+      if (out16[static_cast<size_t>(r) * n + c] != dgpp::float_to_bf16_bits(out[static_cast<size_t>(r) * n + c])) ++bf16_mismatch;
+    }
+  }
+  const double rel_exact = std::sqrt(err_exact / den), rel_chain = std::sqrt(err_chain / den);
+  const double ref_rms = std::sqrt(ref_sq / (static_cast<double>(m) * n));
+  std::printf("channel m=%d n=%d k=%d: vs exact %.2e (max %.2e of the output RMS), vs the bf16 chain %.3f, bf16 mismatches %zu\n",
+              m, n, k, rel_exact, max_abs / ref_rms, rel_chain, bf16_mismatch);
+  // fp32 over the whole k: the summation error grows as 2^-24 * sqrt(k)
+  // (measured 1.8e-7 at k 320, 1.0e-5 at 17408), so the bound scales with it.
+  const double kscale = std::max(1.0, std::sqrt(k / 4096.0));
+  require(rel_exact < 1e-5 * kscale, "the channel GEMM agrees with the exact sum of its own quantized inputs");
+  require(max_abs < 1e-4 * kscale * ref_rms, "no element far from the exact sum (channel)");
+  require(bf16_mismatch == 0, "the channel bf16 output is the f32 output rounded once");
+  require(rel_chain < 0.06, "within the quantized model's tolerance of the dequantized bf16 chain (channel)");
+  DGPP_CUDA_OK(cudaStreamDestroy(stream));
+}
+
 }  // namespace
 
 int main() {
@@ -168,6 +261,12 @@ int main() {
   for (const Shape& sh : {Shape{129, 320, 128, 128}, Shape{300, 1000, 2560, 64}, Shape{512, 2560, 1280, 128},
                           Shape{5, 40, 256, 32}})
     run(sh, rng);
+  // The per-token x per-channel form at the 27B projections' widths (k = H,
+  // LV, I) and a k the block form refuses (320 % 128 != 0).
+  run_channel(129, 320, 320, rng);
+  run_channel(300, 1000, 5120, rng);
+  run_channel(77, 256, 6144, rng);
+  run_channel(40, 64, 17408, rng);
   std::printf("fp8_gemm_test: OK\n");
   return 0;
 }

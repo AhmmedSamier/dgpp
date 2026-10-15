@@ -55,6 +55,14 @@ struct QwenGemmWorkspace {
   // mma_from_rows take the streaming tensor-core GEMM (0: never).
   int gemv_rows = 8;
   int mma_from_rows = 0;
+  // The checkpoint's activation recipe on prefill rows (engine.prefill_activations
+  // = native, 2026-10-15): the model's cell, true while the walk's rows are
+  // prefill rows (set beside configure_gemm_rows; the layers hold a copy of
+  // this struct, the pointer reaches the live value), read by gemm_dense for
+  // the channel grid's per-token x per-channel e4m3 product (kernels/fp8_gemm
+  // channel form) and the block grid's blockwise one; the a8 scratch above
+  // serves both.
+  const bool* native_prefill = nullptr;
 };
 
 // Select decode lowering by token rows, before a projection flattens the

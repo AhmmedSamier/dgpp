@@ -18,10 +18,18 @@ project procedures and design guidance live in `docs/`.
   groups a thread; the down projection's 17408). Per-row quantization and
   a fixed K order keep a row's chain the same at any row count and cut
   (the shared-prefill invariances pass under it); the quantizer's
-  representable rows come back bitwise. One Spark, the plain template: a
-  262K cold prefill 451 -> 391 s, an 11.5K prompt 11.4 -> 8.9 s;
-  HumanEval 98/100, GSM8K 98/100 (99 on the bf16 chain), schema
-  extraction 100/100 at the same seed. The NVFP4 templates enable it.
+  representable rows come back bitwise. The recipe's e4m3 half: the
+  channel-FP8 projections and late-layer MLPs from per-token e4m3
+  activations (one scale a row, amax / 448) on the e4m3 tensor cores (2x
+  the bf16 rate) with the row and column scales applied once in the
+  epilogue (kernels/fp8_gemm's channel form, pinned against the exact
+  double sum of its quantized inputs), in place of dequantizing each
+  matrix to bf16 every chunk; on the FP8 release the same key takes the
+  blockwise product on every prefill row. One Spark, the plain template:
+  a 262K cold prefill 451 -> 391 (NVFP4 half) -> 349 s (both), an 11.5K
+  prompt 11.4 -> 8.9 -> 7.3 s; HumanEval 97/100, GSM8K 97/100 (bf16
+  chain 98 / 99), schema extraction 100/100 at the same seed and limit.
+  The NVFP4 templates enable it.
 
 - **Qwen3.8-27B prefill attention at 71 TFLOP/s** (2026-10-15). The
   full-attention prefill kernel (`kernels/full_attn.cu`, the tile form the

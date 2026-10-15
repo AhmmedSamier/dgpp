@@ -465,6 +465,10 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   inline static int dflash_depth_ = 0;
   inline static bool dense_weights_fp8_ = false;
   inline static bool native_activations_ = false;
+  // The native recipe, this instance: on at construction; the cell the layers'
+  // workspace copies point at, true while the walk's rows are prefill rows.
+  bool native_on_ = false;
+  bool native_prefill_cell_ = false;
   // The native recipe's NVFP4 activation scratch: one quantized row set at
   // max_tokens rows of the widest k (I): codes, e4m3 block scales, globals.
   uint8_t* q_codes_ = nullptr;

@@ -25,6 +25,7 @@
 #include "kernels/fp8_per_tensor.hpp"
 #include "kernels/fp8_dequant.hpp"
 #include "kernels/moe_w4a4.hpp"
+#include "kernels/fp8_gemm.hpp"
 #include "kernels/gemm.hpp"
 #include "kernels/glm_moe_launch.hpp"
 #include "kernels/kernels.hpp"
@@ -355,8 +356,18 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
     DGPP_CUDA_OK(cudaMalloc(&q_scales_, M * nvfp4_act_scale_stride(static_cast<int>(I))));
     DGPP_CUDA_OK(cudaMalloc(&q_gs_, M * sizeof(float)));
     DGPP_LOG_INFO("Qwen35Model: engine.prefill_activations = native: the NVFP4 MLP recipe on every prefill row");
-  } else if (native_activations_) {
-    DGPP_LOG_INFO("Qwen35Model: engine.prefill_activations = native has no NVFP4 subject on this release; the MLP keeps bf16 activations");
+  }
+  // The recipe's e4m3 half (both releases): per-token activation rows for the
+  // channel grid's projections and late-layer MLPs (the mixed release) or the
+  // blockwise 1 x 128 groups (the FP8 release), at max_tokens rows of the
+  // widest k (I); the cell the layers' workspace copies read.
+  native_on_ = native_activations_;
+  if (native_on_) {
+    DGPP_CUDA_OK(cudaMalloc(&gw_.a8, M * I));
+    DGPP_CUDA_OK(cudaMalloc(&gw_.a8_scales, M * (I / 128 + 1) * sizeof(float)));
+    gw_.a8_bytes = M * I;
+    gw_.native_prefill = &native_prefill_cell_;
+    DGPP_LOG_INFO("Qwen35Model: engine.prefill_activations = native: per-token e4m3 activations for the FP8 projections on every prefill row");
   }
   if (cfg_.quant_kind == Qwen35QuantKind::Nvfp4Mixed &&
       loader_.residency() == LoaderResidency::Resident) {
@@ -673,6 +684,10 @@ Qwen35Model::~Qwen35Model() {
   cudaFree(q_codes_);
   cudaFree(q_scales_);
   cudaFree(q_gs_);
+  if (native_on_) {
+    cudaFree(gw_.a8);
+    cudaFree(gw_.a8_scales);
+  }
   cudaFree(fp4_views_);
   cudaFree(mtp_e_);
   cudaFree(mtp_en_);
@@ -743,6 +758,7 @@ Qwen35Model::~Qwen35Model() {
 }
 
 void Qwen35Model::configure_gemm_rows(int rows, bool decode) {
+  native_prefill_cell_ = native_on_ && !decode;  // the native recipe's rows (engine.prefill_activations)
   qwen_configure_gemm_rows(gemm_, rows, decode);
   gemm_.set_bf12_wide(decode);  // the companions take the decode batch's 5..8-row calls too
   // 17..128 decode rows: the streaming tensor-core form reads a bf16 weight
@@ -1088,6 +1104,23 @@ void Qwen35Model::dense_mlp(const uint16_t* x, uint16_t* out, int tokens,
     int rs = 0, cs = 0, rs2 = 0, cs2 = 0;
     if (!quant_scale_shifts(m.gate_fp8, rs, cs) || !quant_scale_shifts(m.down_fp8, rs2, cs2))
       throw std::runtime_error("qwen35 mlp: the channel grid is malformed");
+    // The recipe's channel half (engine.prefill_activations = native): per-token
+    // e4m3 rows, the three products on the e4m3 tensor cores with the scales
+    // in the epilogue, the model's SwiGLU between; every prefill row.
+    if (prefill && native_on_ && gw_.a8 && static_cast<size_t>(tokens) * static_cast<size_t>(I) <= gw_.a8_bytes &&
+        H % 64 == 0 && I % 64 == 0) {
+      launch_fp8_quantize_tokens(x, static_cast<size_t>(H), tokens, static_cast<int>(H), gw_.a8, gw_.a8_scales, stream);
+      launch_fp8_gemm_channel_bf16(gw_.a8, gw_.a8_scales, m.gate_fp8.payload, m.gate_fp8.scales, gate_tmp_, tokens,
+                                   static_cast<int>(I), static_cast<int>(H), stream, static_cast<size_t>(I));
+      launch_fp8_gemm_channel_bf16(gw_.a8, gw_.a8_scales, m.up_fp8.payload, m.up_fp8.scales, up_tmp_, tokens,
+                                   static_cast<int>(I), static_cast<int>(H), stream, static_cast<size_t>(I));
+      qwen35_swiglu_bf16(gate_tmp_, up_tmp_, gate_tmp_, static_cast<int64_t>(tokens) * I, stream);
+      launch_fp8_quantize_tokens(gate_tmp_, static_cast<size_t>(I), tokens, static_cast<int>(I), gw_.a8, gw_.a8_scales,
+                                 stream);
+      launch_fp8_gemm_channel_bf16(gw_.a8, gw_.a8_scales, m.down_fp8.payload, m.down_fp8.scales, out, tokens,
+                                   static_cast<int>(H), static_cast<int>(I), stream, static_cast<size_t>(H));
+      return;
+    }
     if (tokens <= 128) {
       launch_scale_gemm_grid_bf16(x, static_cast<size_t>(H), m.gate_fp8.payload, m.gate_fp8.scales,
                                   gate_tmp_, tokens, static_cast<int>(I), H, stream, 0, rs, cs,
@@ -1125,6 +1158,25 @@ void Qwen35Model::dense_mlp(const uint16_t* x, uint16_t* out, int tokens,
   // lowering gemm_dense uses for the attention projections): nsys showed the
   // streaming tile kernel owning ~70% of a 2K prefill at ~24 TFLOP/s, while
   // the bridge scratch (178MB) sat unused by this direct caller.
+  // The FP8 release's recipe (engine.prefill_activations = native): the
+  // blockwise product (per-token 1 x 128 e4m3 groups, the 128 x 128 weight
+  // grid, fp32 promotion per group) on every prefill row, the bridge's
+  // SwiGLU between.
+  if (prefill && native_on_ && gw_.a8 && m.gate_fp8.payload && m.gate_fp8.scale_block_rows == 128 &&
+      m.gate_fp8.scale_block_cols == 128 && static_cast<size_t>(tokens) * static_cast<size_t>(I) <= gw_.a8_bytes &&
+      H % 128 == 0 && I % 128 == 0) {
+    launch_fp8_quantize_rows(x, static_cast<size_t>(H), tokens, static_cast<int>(H), gw_.a8, gw_.a8_scales, stream);
+    launch_fp8_gemm_bf16(gw_.a8, gw_.a8_scales, m.gate_fp8.payload, m.gate_fp8.scales, 128, gate_tmp_, tokens,
+                         static_cast<int>(I), static_cast<int>(H), stream, static_cast<size_t>(I));
+    launch_fp8_gemm_bf16(gw_.a8, gw_.a8_scales, m.up_fp8.payload, m.up_fp8.scales, 128, up_tmp_, tokens,
+                         static_cast<int>(I), static_cast<int>(H), stream, static_cast<size_t>(I));
+    qwen35_swiglu_bf16(gate_tmp_, up_tmp_, gate_tmp_, static_cast<int64_t>(tokens) * I, stream);
+    launch_fp8_quantize_rows(gate_tmp_, static_cast<size_t>(I), tokens, static_cast<int>(I), gw_.a8, gw_.a8_scales,
+                             stream);
+    launch_fp8_gemm_bf16(gw_.a8, gw_.a8_scales, m.down_fp8.payload, m.down_fp8.scales, 128, out, tokens,
+                         static_cast<int>(H), static_cast<int>(I), stream, static_cast<size_t>(H));
+    return;
+  }
   if (tokens > 128 && gw_.dequant) {
     const size_t up_bytes = static_cast<size_t>(I) * static_cast<size_t>(H) * 2;
     const size_t down_bytes = static_cast<size_t>(H) * static_cast<size_t>(I) * 2;
@@ -1307,6 +1359,8 @@ MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens,
   if (native_activations_ && cfg.quant_kind == Qwen35QuantKind::Nvfp4Mixed)
     plan.add("native activation scratch (NVFP4 rows at max_tokens)",
              M * I / 2 + M * nvfp4_act_scale_stride(static_cast<int>(I)) + M * sizeof(float));
+  if (native_activations_)
+    plan.add("native activation scratch (e4m3 rows at max_tokens)", M * I + M * (I / 128 + 1) * sizeof(float));
   // Blockwise-FP8 lm head (engine.dense_weights = fp8, Resident only): half
   // the bytes per decode row.
   if (dense_weights_fp8_ && residency == LoaderResidency::Resident) {

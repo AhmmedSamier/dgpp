@@ -157,8 +157,9 @@ recipe at long context), so a deployment that enables them is not the
 checkpoint's model. `engine.prefill_activations: "native"` is different in
 kind: it runs the checkpoint's own activation recipe on prefill rows (for the
 NVFP4 release, NVFP4 MLP inputs with its shipped input globals on the fp4
-tensor cores), so it is the published model's numerics rather than the bf16
-upcast of them. The dense family supports worlds 1, 2 and 4.
+tensor cores and per-token e4m3 inputs for its channel-FP8 projections on the
+e4m3 tensor cores; for the FP8 release the blockwise product), so it is the
+published model's numerics rather than the bf16 upcast of them. The dense family supports worlds 1, 2 and 4.
 
 The current dense templates use the DFlash2 drafter (`engine.dflash_model`)
 with `mtp` off, `decode_graph` on and adaptive verification depth at worlds

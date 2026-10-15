@@ -43,6 +43,58 @@ __global__ __launch_bounds__(kQThreads) void fp8_quantize_rows_kernel(const uint
   if (lane == 0) scales[static_cast<size_t>(row) * groups + g] = scale;
 }
 
+// The per-token quantizer: one block per row, each thread striding over
+// the row in 8-element chunks (amax, a block reduction, then the codes).
+constexpr int kTThreads = 256;
+__global__ __launch_bounds__(kTThreads) void fp8_quantize_tokens_kernel(const uint16_t* __restrict__ act,
+                                                                       size_t act_stride, int m, int k,
+                                                                       uint8_t* __restrict__ q,
+                                                                       float* __restrict__ scales) {
+  const int row = blockIdx.x;
+  if (row >= m) return;
+  const uint16_t* src = act + static_cast<size_t>(row) * act_stride;
+  float amax = 0.f;
+  for (int c = threadIdx.x * 8; c < k; c += kTThreads * 8) {
+    const uint4 raw = *reinterpret_cast<const uint4*>(src + c);
+    const uint32_t w[4] = {raw.x, raw.y, raw.z, raw.w};
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+      amax = fmaxf(amax, fmaxf(fabsf(bf16_bits_to_float_d(w[i] & 0xFFFFu)), fabsf(bf16_bits_to_float_d(w[i] >> 16))));
+  }
+  __shared__ float warp_max[kTThreads / 32];
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFFu, amax, o));
+  if ((threadIdx.x & 31) == 0) warp_max[threadIdx.x >> 5] = amax;
+  __syncthreads();
+  if (threadIdx.x < 32) {
+    float t = threadIdx.x < kTThreads / 32 ? warp_max[threadIdx.x] : 0.f;
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) t = fmaxf(t, __shfl_xor_sync(0xFFFFFFFFu, t, o));
+    if (threadIdx.x == 0) warp_max[0] = t;
+  }
+  __syncthreads();
+  const float row_amax = warp_max[0];
+  const float scale = row_amax > 0.f ? row_amax / 448.f : 1.f;
+  if (threadIdx.x == 0) scales[row] = scale;
+  uint8_t* dst = q + static_cast<size_t>(row) * k;
+  for (int c = threadIdx.x * 8; c < k; c += kTThreads * 8) {
+    const uint4 raw = *reinterpret_cast<const uint4*>(src + c);
+    const uint32_t w[4] = {raw.x, raw.y, raw.z, raw.w};
+    uint32_t packed[2];
+#pragma unroll
+    for (int i = 0; i < 2; ++i) {
+      const __nv_fp8x2_storage_t lo = __nv_cvt_float2_to_fp8x2(
+          make_float2(bf16_bits_to_float_d(w[2 * i] & 0xFFFFu) / scale, bf16_bits_to_float_d(w[2 * i] >> 16) / scale),
+          __NV_SATFINITE, __NV_E4M3);
+      const __nv_fp8x2_storage_t hi = __nv_cvt_float2_to_fp8x2(
+          make_float2(bf16_bits_to_float_d(w[2 * i + 1] & 0xFFFFu) / scale, bf16_bits_to_float_d(w[2 * i + 1] >> 16) / scale),
+          __NV_SATFINITE, __NV_E4M3);
+      packed[i] = static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 16);
+    }
+    *reinterpret_cast<uint2*>(dst + c) = make_uint2(packed[0], packed[1]);
+  }
+}
+
 // ---- the GEMM --------------------------------------------------------------
 // 128 x 128 x 64 block tiles on eight warps (2 x 4: a 64 x 32 warp tile of
 // four m16 by four n8 mma tiles), a four-stage cp.async pipeline of the
@@ -75,7 +127,10 @@ __device__ __forceinline__ void ldsm_x4(uint32_t (&r)[4], const void* p) {
                : "r"(address));
 }
 
-template <typename OutT>
+// kChannel (2026-10-15): one scale per activation row and per weight row,
+// so the e4m3 products accumulate in fp32 over the whole k and the two
+// scales apply once in the epilogue (no per-group promotion; k % 64).
+template <typename OutT, bool kChannel>
 __global__ __launch_bounds__(kThreads, 1) void fp8_gemm_kernel(const uint8_t* __restrict__ a,
                                                               const float* __restrict__ a_scales,
                                                               const uint8_t* __restrict__ w,
@@ -186,7 +241,7 @@ __global__ __launch_bounds__(kThreads, 1) void fp8_gemm_kernel(const uint8_t* __
               : "+f"(partial[i][j][0]), "+f"(partial[i][j][1]), "+f"(partial[i][j][2]), "+f"(partial[i][j][3])
               : "r"(af[i][0]), "r"(af[i][1]), "r"(af[i][2]), "r"(af[i][3]), "r"(bf[j][0]), "r"(bf[j][1]));
     }
-    if (step % 2 == 1) {
+    if constexpr (!kChannel) if (step % 2 == 1) {
       // A 128-wide group is complete: promote by the row and column scales.
       const int g = step / 2;
       float as_[4][2], ws_[4][2];
@@ -221,28 +276,35 @@ __global__ __launch_bounds__(kThreads, 1) void fp8_gemm_kernel(const uint8_t* __
         const int col = n0 + col_base + j * 8 + cc + (v % 2);
         if (row < m && col < n) {
           const size_t index = static_cast<size_t>(row) * out_stride + col;
-          if constexpr (std::is_same_v<OutT, float>)
-            out[index] = acc[i][j][v];
+          float val;
+          if constexpr (kChannel)
+            val = (partial[i][j][v] * a_scales[row]) * w_scales[col];
           else
-            out[index] = __bfloat16_as_ushort(__float2bfloat16_rn(acc[i][j][v]));
+            val = acc[i][j][v];
+          if constexpr (std::is_same_v<OutT, float>)
+            out[index] = val;
+          else
+            out[index] = __bfloat16_as_ushort(__float2bfloat16_rn(val));
         }
       }
 }
 
-template <typename OutT>
+template <typename OutT, bool kChannel>
 void launch(const uint8_t* a, const float* a_scales, const uint8_t* w, const float* w_scales, int sbr, OutT* out,
             int m, int n, int k, cudaStream_t stream, size_t out_stride) {
   if (m <= 0 || n <= 0) return;
-  if (k <= 0 || k % kGroup != 0) throw std::invalid_argument("fp8 gemm: k must be a positive multiple of 128");
+  if (k <= 0 || k % (kChannel ? kBK : kGroup) != 0)
+    throw std::invalid_argument(kChannel ? "fp8 gemm (channel): k must be a positive multiple of 64"
+                                         : "fp8 gemm: k must be a positive multiple of 128");
   if (sbr <= 0) throw std::invalid_argument("fp8 gemm: the weight scale block rows must be positive");
   if (out_stride == 0) out_stride = static_cast<size_t>(n);
-  static bool attr_set = false;  // once per OutT
+  static bool attr_set = false;  // once per instantiation
   if (!attr_set) {
-    DGPP_CUDA_OK(cudaFuncSetAttribute(fp8_gemm_kernel<OutT>, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
+    DGPP_CUDA_OK(cudaFuncSetAttribute(fp8_gemm_kernel<OutT, kChannel>, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
     attr_set = true;
   }
   const dim3 grid(static_cast<unsigned>(((n + kBN - 1) / kBN) * ((m + kBM - 1) / kBM)));
-  fp8_gemm_kernel<OutT><<<grid, kThreads, kSmem, stream>>>(a, a_scales, w, w_scales, sbr, out, m, n, k, out_stride);
+  fp8_gemm_kernel<OutT, kChannel><<<grid, kThreads, kSmem, stream>>>(a, a_scales, w, w_scales, sbr, out, m, n, k, out_stride);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
@@ -263,12 +325,30 @@ void launch_fp8_quantize_rows(const uint16_t* act, size_t act_stride, int m, int
 void launch_fp8_gemm_bf16(const uint8_t* a, const float* a_scales, const uint8_t* w, const float* w_scales,
                           int w_scale_block_rows, uint16_t* out, int m, int n, int k, cudaStream_t stream,
                           size_t out_stride) {
-  launch<uint16_t>(a, a_scales, w, w_scales, w_scale_block_rows, out, m, n, k, stream, out_stride);
+  launch<uint16_t, false>(a, a_scales, w, w_scales, w_scale_block_rows, out, m, n, k, stream, out_stride);
 }
 void launch_fp8_gemm_f32(const uint8_t* a, const float* a_scales, const uint8_t* w, const float* w_scales,
                          int w_scale_block_rows, float* out, int m, int n, int k, cudaStream_t stream,
                          size_t out_stride) {
-  launch<float>(a, a_scales, w, w_scales, w_scale_block_rows, out, m, n, k, stream, out_stride);
+  launch<float, false>(a, a_scales, w, w_scales, w_scale_block_rows, out, m, n, k, stream, out_stride);
+}
+
+void launch_fp8_quantize_tokens(const uint16_t* act, size_t act_stride, int m, int k, uint8_t* q, float* scales,
+                                cudaStream_t stream) {
+  if (m <= 0) return;
+  if (k <= 0 || k % 8 != 0) throw std::invalid_argument("fp8 quantize tokens: k must be a positive multiple of 8");
+  if (act_stride % 8 != 0 || (reinterpret_cast<uintptr_t>(act) % 16) != 0)
+    throw std::invalid_argument("fp8 quantize tokens: rows must be 16-byte aligned (act_stride % 8 == 0)");
+  fp8_quantize_tokens_kernel<<<m, kTThreads, 0, stream>>>(act, act_stride, m, k, q, scales);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+void launch_fp8_gemm_channel_bf16(const uint8_t* a, const float* a_scales, const uint8_t* w, const float* w_scales,
+                                  uint16_t* out, int m, int n, int k, cudaStream_t stream, size_t out_stride) {
+  launch<uint16_t, true>(a, a_scales, w, w_scales, 1, out, m, n, k, stream, out_stride);
+}
+void launch_fp8_gemm_channel_f32(const uint8_t* a, const float* a_scales, const uint8_t* w, const float* w_scales,
+                                 float* out, int m, int n, int k, cudaStream_t stream, size_t out_stride) {
+  launch<float, true>(a, a_scales, w, w_scales, 1, out, m, n, k, stream, out_stride);
 }
 
 }  // namespace dgpp

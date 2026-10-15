@@ -133,15 +133,34 @@ void gemm_dense(const QwenGemmWorkspace& g, const uint16_t* act, int64_t act_str
     // Prefill-shaped (above the scale GEMM's GEMV lowering): through the
     // BF16 interface on the dequantized matrix when the bridge holds it.
     const size_t bf16_bytes = static_cast<size_t>(n) * static_cast<size_t>(k) * 2;
+    const bool native_rows = g.native_prefill != nullptr && *g.native_prefill;
+    // The checkpoint's recipe for its channel grid (engine.prefill_activations
+    // = native, 2026-10-15): per-token e4m3 activations, the product on the
+    // e4m3 tensor cores with the row and column scales in the epilogue
+    // (kernels/fp8_gemm channel form, 2x the bf16 mma rate), every prefill row.
+    if (channel && native_rows && m > 0 && g.a8 &&
+        static_cast<size_t>(m) * static_cast<size_t>(k) <= g.a8_bytes && k % 64 == 0 && act_stride % 8 == 0 &&
+        (reinterpret_cast<uintptr_t>(act) % 16) == 0) {
+      launch_fp8_quantize_tokens(act, static_cast<size_t>(act_stride), m, k, g.a8, g.a8_scales, stream);
+      if (out_type == GemmOut::F32)
+        launch_fp8_gemm_channel_f32(g.a8, g.a8_scales, w8.payload, w8.scales, static_cast<float*>(out), m, n, k,
+                                    stream, static_cast<size_t>(n));
+      else
+        launch_fp8_gemm_channel_bf16(g.a8, g.a8_scales, w8.payload, w8.scales, static_cast<uint16_t*>(out), m, n,
+                                     k, stream, static_cast<size_t>(n));
+      return;
+    }
     // OPT-IN, NOT BITWISE (engine.prefill_fp8_gemm, 2026-09-30): the
     // product on the fp8 tensor cores from per-token e4m3 activations
     // (kernels/fp8_gemm) when the shape fits its contract; otherwise the
-    // bridge below.
+    // bridge below. The block grid's native recipe (engine.prefill_activations
+    // = native on the FP8 release) is the same blockwise product, every
+    // prefill row.
     // Not below 1,024 columns: the quantizer's pass over the activation
     // (3 bytes a value at line rate) costs 494 / n of the GEMM's time
     // (the [320 x 10240] GR down: +60 % measured), while the fp8 GEMM
     // itself runs at cuBLAS's rate and saves the dequant alone.
-    if (m > 128 && n >= 1024 && g.a8 && QwenLayerStream::prefill_fp8_gemm() && k % 128 == 0 &&
+    if (((m > 128 && n >= 1024 && QwenLayerStream::prefill_fp8_gemm()) || native_rows) && g.a8 && k % 128 == 0 &&
         block128 && static_cast<size_t>(m) * static_cast<size_t>(k) <= g.a8_bytes &&
         act_stride % 4 == 0 && (reinterpret_cast<uintptr_t>(act) % 8) == 0) {
       launch_fp8_quantize_rows(act, static_cast<size_t>(act_stride), m, k, g.a8, g.a8_scales, stream);

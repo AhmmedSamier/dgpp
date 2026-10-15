@@ -36,4 +36,24 @@ void launch_fp8_gemm_f32(const uint8_t* a, const float* a_scales, const uint8_t*
                          const float* w_scales, int w_scale_block_rows, float* out, int m, int n,
                          int k, cudaStream_t stream, size_t out_stride = 0);
 
+// The checkpoint's per-token recipe (engine.prefill_activations = native,
+// 2026-10-15; the Qwen3.8-27B NVFP4 release's channel-FP8 projections and
+// late-layer MLPs: compressed-tensors "float-quantized, channel" weights with
+// "token, dynamic" activations). The quantizer: one scale per activation row
+// over all of k (amax / 448; 1 for an all-zero row), codes e4m3 round-to-
+// nearest saturating; act 16-byte aligned rows, act_stride % 8 == 0, k % 8.
+void launch_fp8_quantize_tokens(const uint16_t* act, size_t act_stride, int m, int k, uint8_t* q,
+                                float* scales, cudaStream_t stream);
+// out[m][n] = (a_scale[m] * w_scale[n]) * (A8 x W8^T): the e4m3 products
+// accumulate in fp32 over the whole k (mma m16n8k32) and the two scales
+// apply once in the epilogue (the reference stack's per-token x per-channel
+// epilogue). a [m][k] e4m3 with a_scales [m]; w [n][k] e4m3 with w_scales
+// [n] (the checkpoint's channel grid as F32). k % 64 == 0; out_stride 0 = n.
+void launch_fp8_gemm_channel_bf16(const uint8_t* a, const float* a_scales, const uint8_t* w,
+                                  const float* w_scales, uint16_t* out, int m, int n, int k,
+                                  cudaStream_t stream, size_t out_stride = 0);
+void launch_fp8_gemm_channel_f32(const uint8_t* a, const float* a_scales, const uint8_t* w,
+                                 const float* w_scales, float* out, int m, int n, int k,
+                                 cudaStream_t stream, size_t out_stride = 0);
+
 }  // namespace dgpp
