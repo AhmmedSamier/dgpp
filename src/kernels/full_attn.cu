@@ -68,6 +68,15 @@ __device__ __forceinline__ void fldsm_x4(uint32_t (&r)[4], const void* p) {
   asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
                : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
 }
+// The same loads from a 32-bit shared address a lane keeps in a register.
+__device__ __forceinline__ void fldsm_x4_a(uint32_t (&r)[4], unsigned a) {
+  asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+               : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
+}
+__device__ __forceinline__ void fldsm_x4_ta(uint32_t (&r)[4], unsigned a) {
+  asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+               : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
+}
 __device__ __forceinline__ void fldsm_x4_t(uint32_t (&r)[4], const void* p) {
   const unsigned a = static_cast<unsigned>(__cvta_generic_to_shared(p));
   asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
@@ -91,8 +100,13 @@ __device__ __forceinline__ void fcp_async16_cg(void* dst, const void* src, bool 
   const int bytes = valid ? 16 : 0;  // 0: zero-fill
   asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(d), "l"(src), "r"(bytes));
 }
+// The hardware pack: cvt.rn.bf16x2.f32 agrees with float_to_bf16_bits on
+// every one of the 2^32 float patterns (checked exhaustively 2026-10-15, NaN
+// inputs included); the bit-trick form cost ~9 instructions per value.
 __device__ __forceinline__ uint32_t fpack_bf16(float lo, float hi) {
-  return static_cast<uint32_t>(float_to_bf16_bits(lo)) | (static_cast<uint32_t>(float_to_bf16_bits(hi)) << 16);
+  uint32_t r;
+  asm("cvt.rn.bf16x2.f32 %0, %1, %2;" : "=r"(r) : "f"(hi), "f"(lo));
+  return r;
 }
 // exp2 of a masked score against a running max: a fully masked row keeps
 // its running max at -inf, and contributes nothing.
@@ -515,11 +529,9 @@ __device__ __forceinline__ void tma_box_2d(void* dst, const CUtensorMap* map, in
                  "r"(static_cast<unsigned>(__cvta_generic_to_shared(bar))) : "memory");
 }
 // Element (row, col) of a plane in the swizzled box layout: 16-byte chunk c
-// of row r sits at chunk c ^ (r & 7) of its 128-byte line.
-__device__ __forceinline__ const uint16_t* swz(const uint16_t* plane, int row, int col) {
-  const int box = col >> 6, chunk = (col & 63) >> 3;
-  return plane + box * (kBoxBytes / 2) + row * kBoxCols + ((chunk ^ (row & 7)) << 3) + (col & 7);
-}
+// of row r sits at chunk c ^ (r & 7) of its 128-byte line (box * kBoxBytes +
+// row * 128 + ((c ^ (r & 7)) << 4) bytes); the kernel folds the XOR into
+// per-lane base addresses below.
 
 __global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_tile_tma_kernel(
     const __grid_constant__ CUtensorMap kmap, const __grid_constant__ CUtensorMap vmap, int64_t row_base,
@@ -587,6 +599,25 @@ __global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_tile_tma_kernel(
       tma_box_2d(vt + b * kBoxBytes, &vmap, col0 + b * kBoxCols, slot0, &full_bar[buf]);
     }
   };
+  // Per-lane ldmatrix bases for slot 0 with the swizzle folded in once: a
+  // lane's rows share (row & 7), so XORing bits 4-6 with the chunk index
+  // makes every ldmatrix address a base register plus an immediate (box,
+  // row half, slot). Recomputing the swizzle per load cost two LOP3 and an
+  // IMAD for each of the 64 loads a tile (SASS histogram, 2026-10-15).
+  unsigned kb0[4], vb0[4];
+  {
+    const unsigned s0 = static_cast<unsigned>(__cvta_generic_to_shared(sm));
+    const int r7 = lane & 7;
+    const int krow = (lane & 7) + ((lane >> 4) << 3), kc = (lane >> 3) & 1;
+    const int vrow = (lane & 7) + ((lane >> 3) & 1) * 8, vc = lane >> 4;
+    const unsigned kbase = (s0 + krow * (kBoxCols * 2) + (r7 << 4)) ^ (kc << 4);
+    const unsigned vbase = (s0 + kPlaneBytes + vrow * (kBoxCols * 2) + (r7 << 4)) ^ (vc << 4);
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+      kb0[j] = kbase ^ (j << 5);
+      vb0[j] = vbase ^ (j << 5);
+    }
+  }
 
   float acc[32][4];
 #pragma unroll
@@ -608,21 +639,26 @@ __global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_tile_tma_kernel(
     const int cur = buf;
     nbuf = buf;  // tile it+3 refills the slot tile `it` used
     if (++buf == kTmaStages) { buf = 0; parity ^= 1u; }
-    const uint16_t* kt = reinterpret_cast<const uint16_t*>(sm + cur * kTmaStageBytes);
-    const uint16_t* vt = reinterpret_cast<const uint16_t*>(sm + cur * kTmaStageBytes + kPlaneBytes);
+    unsigned kb[4], vb[4];
+    {
+      const unsigned so = static_cast<unsigned>(cur) * kTmaStageBytes;
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        kb[j] = kb0[j] + so;
+        vb[j] = vb0[j] + so;
+      }
+    }
     const int64_t base = it * kKTile;
     float sc[4][4];
 #pragma unroll
     for (int j = 0; j < 4; ++j) sc[j][0] = sc[j][1] = sc[j][2] = sc[j][3] = 0.f;
-    const int krow = (lane & 7) + ((lane >> 4) << 3);
-    const int kcol8 = ((lane >> 3) & 1) * 8;
 #pragma unroll
     for (int ks = 0; ks < 16; ++ks) {
       uint32_t b[4];
-      fldsm_x4(b, swz(kt, krow, ks * 16 + kcol8));
+      fldsm_x4_a(b, kb[ks & 3] + (ks >> 2) * kBoxBytes);
       fmma_bf16(sc[0], qa[ks], b[0], b[1]);
       fmma_bf16(sc[1], qa[ks], b[2], b[3]);
-      fldsm_x4(b, swz(kt, krow + 16, ks * 16 + kcol8));
+      fldsm_x4_a(b, kb[ks & 3] + (ks >> 2) * kBoxBytes + 16 * kBoxCols * 2);
       fmma_bf16(sc[2], qa[ks], b[0], b[1]);
       fmma_bf16(sc[3], qa[ks], b[2], b[3]);
     }
@@ -670,19 +706,17 @@ __global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_tile_tma_kernel(
         acc[d][3] *= a1;
       }
     }
-    const int vrow = (lane & 7) + ((lane >> 3) & 1) * 8;
-    const int vcol8 = (lane >> 4) * 8;
 #pragma unroll
     for (int dp = 0; dp < 16; ++dp) {
       uint32_t b[4];
-      fldsm_x4_t(b, swz(vt, vrow, dp * 16 + vcol8));
+      fldsm_x4_ta(b, vb[dp & 3] + (dp >> 2) * kBoxBytes);
       fmma_bf16(acc[dp * 2], pa, b[0], b[1]);
       fmma_bf16(acc[dp * 2 + 1], pa, b[2], b[3]);
     }
 #pragma unroll
     for (int dp = 0; dp < 16; ++dp) {
       uint32_t b[4];
-      fldsm_x4_t(b, swz(vt, vrow + 16, dp * 16 + vcol8));
+      fldsm_x4_ta(b, vb[dp & 3] + (dp >> 2) * kBoxBytes + 16 * kBoxCols * 2);
       fmma_bf16(acc[dp * 2], pb, b[0], b[1]);
       fmma_bf16(acc[dp * 2 + 1], pb, b[2], b[3]);
     }

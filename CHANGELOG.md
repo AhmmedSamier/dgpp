@@ -5,6 +5,20 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **Qwen3.8-27B prefill attention at 71 TFLOP/s** (2026-10-15). The
+  full-attention prefill kernel (`kernels/full_attn.cu`, the tile form the
+  27B's 256-dim heads take) was rebuilt in six measured, bitwise rounds:
+  the tile walk (two key-half PV passes, lazy rescale, one page lookup
+  and one barrier a tile), the K/V tile staged by 2-D TMA boxes with
+  swizzled ldmatrix, CTA-scoped copies in a three-stage ring, per-lane
+  ldmatrix bases with the swizzle folded in once, and the hardware
+  bf16x2 pack (identical to the bit-trick rounding on all 2^32 floats).
+  Kernel bench at 262K context: 45.9 → 71.2 TFLOP/s at full waves, 31 →
+  48 at 256 rows (the GB10's mma.sync bf16 ceiling at this occupancy is
+  94). In situ, one Spark, the plain 27B template, a 262K cold prefill:
+  584.5 → 451.2 s (−23 %) with the wave-aligned quanta; needle and control
+  found throughout.
+
 - **Wave-aligned prefill quanta** (2026-10-15). Qwen3.8-27B states its
   full-attention prefill grid's wave (16 query rows per CTA, one CTA per SM
   and per KV head: 192 rows on one Spark) and the adaptive controller
