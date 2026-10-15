@@ -2,13 +2,14 @@
   "model": "zed-industries/zeta-2.1",
   "world_size": 1,
   "engine": {
-    "max_concurrency": 4,
+    "max_concurrency": 8,
     "kv_capacity": 32768,
     "default_max_tokens": 1024,
-    "queue_limit": 8,
+    "queue_limit": 16,
     "max_connections": 64,
     "decode_graph": true,
     "mtp": false,
+    "bf16_weights": "bf12",
     "prefix_cache_gib": 1.5,
     "stats_interval_s": 10
   },

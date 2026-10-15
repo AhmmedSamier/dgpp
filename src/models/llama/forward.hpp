@@ -38,6 +38,7 @@
 #include "engine/decode_outputs.hpp"
 #include "engine/memory_plan.hpp"
 #include "engine/session_model.hpp"
+#include "kernels/bf12_companions.hpp"
 #include "kernels/gemm.hpp"
 #include "kernels/glm_spec.hpp"
 #include "models/llama/config.hpp"
@@ -161,6 +162,18 @@ class LlamaModel : public SessionModel<LlamaModel> {
   // Layer objects (built at first use, rebound per layer).
   std::unique_ptr<LlamaAttentionLayer> attn_;
   std::unique_ptr<LlamaDenseMlp> mlp_;
+
+  // The bf16 decode weights' 12-bit companions (kernels/bf12_companions.hpp):
+  // every layer's q/k/v/o projections and gate/up/down matrices plus the lm
+  // head, packed as each layer lands and before any capture. The loader
+  // grants those matrices aside (models/llama/loader.hpp), so under
+  // bf12-only residency their bf16 bytes go back as each companion exists.
+  static constexpr int kBf12ExpandSlots = 1;
+  void pack_layer_companions(int layer, const LlamaLayerResident& r);
+  void finish_companions();
+  Bf12Companions bf12_;
+  bool bf12_built_ = false;
+  double bf12_s_ = 0.0;
 
   LlamaKvPool pool_;  // every layer's paged K/V
 

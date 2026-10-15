@@ -1,12 +1,15 @@
 #include "models/llama/forward.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
 
+#include "common/bf16_residency.hpp"
 #include "common/cuda_check.hpp"
+#include "kernels/bf12_companions.hpp"
 #include "kernels/glm4_attn.hpp"
 #include "kernels/glm_norm.hpp"
 #include "kernels/kernels.hpp"
@@ -127,8 +130,14 @@ LlamaModel::MemoryPlan LlamaModel::plan_memory(const LlamaTextConfig& cfg, int m
   const int n_split = LlamaAttentionLayer::default_decode_splits();
 
   if (residency == LlamaResidency::Resident) {
-    plan.add("model weights (resident)",
-             LlamaLayerStream::resident_bytes(cfg, tp_rank, tp_world, head, /*with_mtp=*/false));
+    // bf12-only residency: the packable bf16 matrices load aside and give
+    // their bytes back as each layer is packed (graph_prepare).
+    const bool bf12_only = Bf12Companions::packed_only() && residency == LlamaResidency::Resident;
+    size_t resident =
+        LlamaLayerStream::resident_bytes(cfg, tp_rank, tp_world, head, /*with_mtp=*/false);
+    if (bf12_only) resident -= LlamaLayerStream::side_bytes(cfg, tp_rank, tp_world, head, /*with_mtp=*/false);
+    plan.add(bf12_only ? "model weights (resident, packed bf16 matrices released)" : "model weights (resident)",
+             resident);
     plan.add("loader staging (pinned host, freed when the last layer is resident)", 0,
              LlamaLayerStream::staging_plan_bytes(cfg, tp_rank, tp_world, head, /*with_mtp=*/false));
   } else {
@@ -139,6 +148,32 @@ LlamaModel::MemoryPlan LlamaModel::plan_memory(const LlamaTextConfig& cfg, int m
              largest + LlamaLayerStream::globals_bytes(cfg, tp_rank, tp_world, head));
   }
   plan.add("gemm workspace (at least)", size_t{64} << 20);
+  if (Bf12Companions::enabled() && residency == LlamaResidency::Resident) {
+    // The lossless 12-bit companions of every layer's q/k/v/o projections
+    // and gate/up/down matrices plus the lm head (kernels/bf12_companions.hpp).
+    const int64_t Hh = cfg.hidden_size;
+    const int64_t Q = static_cast<int64_t>(geo.local_heads) * cfg.head_dim;
+    const int64_t KV = static_cast<int64_t>(geo.local_kv_heads) * cfg.head_dim;
+    const int64_t I = geo.local_inter;
+    size_t packed =
+        static_cast<size_t>(cfg.num_hidden_layers) *
+            (Bf12Companions::planned_bytes(Q, Hh) + Bf12Companions::planned_bytes(KV, Hh) +
+             Bf12Companions::planned_bytes(KV, Hh) + Bf12Companions::planned_bytes(Hh, Q) +
+             Bf12Companions::planned_bytes(I, Hh) + Bf12Companions::planned_bytes(I, Hh) +
+             Bf12Companions::planned_bytes(Hh, I)) +
+        Bf12Companions::planned_bytes(static_cast<int64_t>(V), Hh);
+    plan.add("bf16 decode packing (12-bit companions)", packed);
+    if (Bf12Companions::packed_only()) {
+      plan.add("bf16 prefill expansion scratch",
+               static_cast<size_t>(kBf12ExpandSlots) * Bf12Companions::planned_slot_bytes(
+                   {static_cast<size_t>(Q) * static_cast<size_t>(Hh) * 2,
+                    static_cast<size_t>(KV) * static_cast<size_t>(Hh) * 2,
+                    static_cast<size_t>(Hh) * static_cast<size_t>(Q) * 2,
+                    static_cast<size_t>(I) * static_cast<size_t>(Hh) * 2,
+                    static_cast<size_t>(Hh) * static_cast<size_t>(I) * 2,
+                    V * static_cast<size_t>(Hh) * 2}));
+    }
+  }
   {
     LlamaKvPoolShape shape;
     shape.layers = cfg.num_hidden_layers;
@@ -235,19 +270,23 @@ void LlamaModel::enqueue_layer(const LlamaLayerResident& r, int pool_layer, uint
     arows.req_ids = rows.req_ids + row0;
     arows.pos = rows.pos + row0;
     arows.decode = decode;
+    gemm_.set_bf12_wide(decode);  // the decode batch's packed launches (kernels/gemm.hpp)
     const size_t offset = static_cast<size_t>(row0) * H;
     attn_->enqueue(x_ + offset, count, arows, pool_.view(pool_layer), attn_out + offset, stream_);
   });
+  gemm_.set_bf12_wide(rows.decode);
   fold(attn_out, T, H, rows.capture);  // block boundary 1: o_proj's partial
   // ---- the MLP block ----------------------------------------------------------
   // The attention residual add rides the post norm's first pass (one
   // kernel, bitwise the pair; kernels/glm_norm.hpp).
   glm_residual_add_rmsnorm_bf16(resid, attn_out, r.post_norm, x_, T, H, eps, stream_);
   uint16_t* ffn_out = stage(y_, T, H, rows.capture);
-  groups(false, [&](int row0, int count, bool, int) {
+  groups(false, [&](int row0, int count, bool decode, int) {
+    gemm_.set_bf12_wide(decode);  // the decode batch's packed launches (kernels/gemm.hpp)
     const size_t offset = static_cast<size_t>(row0) * H;
     mlp_->enqueue(x_ + offset, count, ffn_out + offset, stream_);
   });
+  gemm_.set_bf12_wide(rows.decode);
   fold(ffn_out, T, H, rows.capture);  // block boundary 2: the sliced down projections
   glm_residual_add_bf16(resid, ffn_out, n, stream_);
 }
@@ -257,6 +296,9 @@ LlamaModel::Outputs LlamaModel::run_rows(const RowRun& run) {
   if (run.capture && loader_.residency() != LlamaResidency::Resident)
     throw std::logic_error("run_rows: a capture needs a resident stack");
   const int H = cfg_.hidden_size;
+  // The packed companions' wide launches are the decode batch's alone (a
+  // short prefill chunk keeps its Lt algorithm: kernels/gemm.hpp).
+  gemm_.set_bf12_wide(run.decode);
   const RowInputs in = begin_run(run);
   embed_gather_bf16(globals_.embed, in.tokens, resid_, T, H, stream_);
   Outputs out;
@@ -281,6 +323,7 @@ LlamaModel::Outputs LlamaModel::run_rows(const RowRun& run) {
   // last prefill row. All-row diagnostics and decode keep their full head.
   glm_rmsnorm_bf16(resid_, globals_.final_norm, h_, T, H, cfg_.rms_norm_eps, stream_);
   const bool packed_logits = project_head_rows(run, [&](int input_row, int output_row, int rows) {
+    gemm_.set_bf12_wide(run.decode || input_row < run.decode_rows());
     gemm_.matmul(h_ + static_cast<size_t>(input_row) * H, globals_.lm_head,
                  logits_ + static_cast<size_t>(output_row) * lm_vocab_count_, rows, lm_vocab_count_,
                  H, DType::BF16, GemmOut::F32, static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_,
@@ -323,10 +366,58 @@ LlamaModel::Outputs LlamaModel::forward(const std::vector<int64_t>& token_ids, b
 void LlamaModel::graph_prepare() {
   if (loader_.residency() != LlamaResidency::Resident)
     throw std::logic_error("session_graph_prepare: the decode graph needs a resident stack");
+  // The bf16 decode weights' 12-bit companions are packed as each layer
+  // lands (the caches already exist: under bf12-only residency the layer's
+  // bf16 bytes go back at once, so no more than one layer's sit beside
+  // their companions).
+  const bool pack = Bf12Companions::enabled() && !bf12_built_;
   for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
     const LlamaLayerResident& r = loader_.load_layer(layer);
     build_layer_objects(r);
+    if (pack) pack_layer_companions(layer, r);
   }
+  if (pack) finish_companions();
+}
+
+// The lossless 12-bit companions of the decode GEMV's bf16 weights
+// (engine.bf16_weights = "bf12"): every layer's q/k/v/o projections and
+// gate/up/down matrices plus the lm head, packed as each layer lands and
+// before any capture. Prefill and the batches past eight rows keep the
+// bf16 bytes — or, under bf12-only residency (the bytes returned here,
+// layer by layer), expand them and take the packed launches
+// (kernels/gemm.hpp).
+void LlamaModel::pack_layer_companions(int layer, const LlamaLayerResident& r) {
+  const auto t0 = std::chrono::steady_clock::now();
+  const int64_t H = cfg_.hidden_size;
+  const auto release = [&](const void* w) { return loader_.release_packed(layer, w); };
+  const auto pack = [&](const uint16_t* w, int64_t n, int64_t k) {
+    bf12_.pack_and_release(w, n, k, gemm_, stream_, release);
+  };
+  const LlamaAttnResident& a = r.attn;
+  const int64_t Q = static_cast<int64_t>(a.local_heads) * cfg_.head_dim;
+  const int64_t KV = static_cast<int64_t>(a.local_kv_heads) * cfg_.head_dim;
+  pack(a.q_proj, Q, H);
+  pack(a.k_proj, KV, H);
+  pack(a.v_proj, KV, H);
+  pack(a.o_proj, H, Q);
+  const LlamaDenseMlpResident& m = r.mlp;
+  const int64_t I = m.local_inter;
+  pack(m.gate, I, H);
+  pack(m.up, I, H);
+  pack(m.down, H, I);
+  bf12_s_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
+
+// The lm head's, the expansion scratch (one slot: no walk of this family
+// calls a matrix twice), and the summary.
+void LlamaModel::finish_companions() {
+  const auto t0 = std::chrono::steady_clock::now();
+  bf12_built_ = true;
+  bf12_.pack_and_release(globals_.lm_head, lm_vocab_count_, cfg_.hidden_size, gemm_, stream_,
+                         [&](const void* w) { return loader_.release_packed(-1, w); });
+  bf12_.finish(gemm_, kBf12ExpandSlots);
+  bf12_s_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  bf12_.log_summary(loader_.rank(), bf12_s_);
 }
 
 }  // namespace dgpp

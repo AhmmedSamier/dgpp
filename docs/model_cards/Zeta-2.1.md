@@ -27,9 +27,12 @@ The context is 32,768 tokens.
 ## Serving
 
 **One Spark** (`cluster_zeta-2.1_bf16_w1`): 15.4 GiB resident, a
-32,768-token BF16 KV pool (4 GiB), four request slots, plain decode on
+32,768-token BF16 KV pool (4 GiB), eight request slots, plain decode on
 the graph (the checkpoint ships no draft block — `engine.mtp: false`;
-`--mtp` refuses at build). The model is a raw FIM completion model: no
+`--mtp` refuses at build), the bf16 decode weights served from their
+lossless 12-bit companions (`engine.bf16_weights: bf12`: 225 matrices,
+14.18 → 10.66 GiB, packed in ~5 s at boot; bitwise-exact, so the
+transcript gates cover both residencies). The model is a raw FIM completion model: no
 chat template ships, so it serves `/v1/completions` with the SPM prompt
 passed through verbatim (chat completions refuse). The tokenizer is the
 checkpoint's own BPE under the zeta pre-tokenizer pattern
@@ -42,3 +45,9 @@ byte-exact against the checkpoint's `sample.output` (EOS stop), and
 repeats deterministically. Throughput sweep at 4 slots, short prompt,
 256-token greedy completion: 15.8 tok/s (conc 1), 25.3 agg tok/s (conc 2),
 35.9 agg tok/s (conc 4).
+
+With the 12-bit companions (2026-10-15, `bf16_weights: bf12`, bitwise
+identical output): 20.2 tok/s single-stream, 132.7 agg tok/s at conc 8
+(the batching knee: conc 16 holds 111.8 agg and halves per-request
+speed). Resident drops 15.4 → ~12 GiB; pack costs ~5 s at boot; prefill
+runs ~1.4× (companion expansion on wide GEMMs, one-time).

@@ -91,5 +91,14 @@ window, no vision.
   deterministic repeat; `gpu;python;checkpoint`, skips without binary or
   cache). Throughput at 4 slots: 15.8 tok/s (conc 1), 25.3 (conc 2),
   35.9 agg (conc 4).
+* Slice 6: bf12 companions (2026-10-15). The loader was already
+  pack-ready (slice 2 grants); the model packs all 7 projections/layer +
+  head in `graph_prepare` with the `set_bf12_wide` walk toggles and the
+  plan entries (companions + expansion scratch − released bf16). Probe
+  then live: 225/225 matrices, 14.18 → 10.66 GiB, 4.8 s pack at boot.
+  Bitwise-exact: `zeta_transcript_bf12_test` passes (same file,
+  `DGPP_BF12=on`). Measured: 20.2 tok/s single, 132.7 agg at conc 8
+  (the knee — conc 16 holds agg, halves per-req). Template ships
+  `bf16_weights: bf12` at 8 slots.
   Next: multi-node TP shakeout (loader geometry covers worlds 2/4/8),
   DESIGN/PLAN status.
