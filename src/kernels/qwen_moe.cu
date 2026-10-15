@@ -64,6 +64,9 @@ __device__ __forceinline__ float shared_gate_warp(const uint16_t* __restrict__ x
 // or block-FP8 rows (E4M3 payload + fp32 128 x 128 scales, the scale
 // GEMM's own chain through fp8_gemv::row_dots / row_dots_pair) — the FP8
 // tail is bitwise the unfused fp8 chain as the BF16 one is the bf16 chain.
+// rs / cs (the fp8 form): the scale grid as log2 block sizes — 7 / 7 the
+// releases' 128 x 128 blocks and the at-load encode, 0 / 5 the QAD export's
+// MXFP8 (a scale per row per 32 columns); the core's indexing reads either.
 template <int kRows, bool kFp8>
 __global__ void shared_gate_up_swiglu_kernel(const uint16_t* __restrict__ x, size_t x_stride,
                                              const void* __restrict__ gate_w,
@@ -72,7 +75,7 @@ __global__ void shared_gate_up_swiglu_kernel(const uint16_t* __restrict__ x, siz
                                              const float* __restrict__ up_s,
                                              const uint16_t* __restrict__ g,
                                              uint16_t* __restrict__ act, float* __restrict__ sw,
-                                             int tokens, int S, int H, int row_blocks) {
+                                             int tokens, int S, int H, int row_blocks, int rs, int cs) {
   extern __shared__ __align__(16) uint16_t sx[];
   const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
   if (static_cast<int>(blockIdx.x) == row_blocks) {
@@ -88,12 +91,12 @@ __global__ void shared_gate_up_swiglu_kernel(const uint16_t* __restrict__ x, siz
   if (row >= S) return;
   float ga[kRows], ua[kRows];
   if constexpr (kFp8) {
-    const int scale_cols = (H + 127) >> 7;
-    const size_t srow = static_cast<size_t>(row >> 7) * scale_cols;
+    const int scale_cols = (H + (1 << cs) - 1) >> cs;
+    const size_t srow = static_cast<size_t>(row >> rs) * scale_cols;
     fp8_gemv::row_dots_pair<kRows>(static_cast<const uint8_t*>(gate_w) + static_cast<size_t>(row) * H,
                                    gate_s + srow,
                                    static_cast<const uint8_t*>(up_w) + static_cast<size_t>(row) * H,
-                                   up_s + srow, sx, H, lane, ga, ua);
+                                   up_s + srow, sx, H, lane, ga, ua, cs);
   } else {
     bf16_gemv::row_dots<kRows>(static_cast<const uint16_t*>(gate_w) + static_cast<size_t>(row) * H, sx, H, lane, ga);
     bf16_gemv::row_dots<kRows>(static_cast<const uint16_t*>(up_w) + static_cast<size_t>(row) * H, sx, H, lane, ua);
@@ -136,7 +139,7 @@ __global__ void shared_down_accum_round_kernel(const uint16_t* __restrict__ act,
                                                const float* __restrict__ down_s,
                                                const float* __restrict__ sw,
                                                SharedAcc src,
-                                               uint16_t* __restrict__ out, int H, int S) {
+                                               uint16_t* __restrict__ out, int H, int S, int rs, int cs) {
   extern __shared__ __align__(16) uint16_t sx[];
   // The folded accumulation's inputs for this block's kWarps rows: the
   // slot contributions [kRows][K][kWarps] staged with the loads coalesced
@@ -167,9 +170,9 @@ __global__ void shared_down_accum_round_kernel(const uint16_t* __restrict__ act,
   if (row >= H) return;
   float d[kRows];
   if constexpr (kFp8) {
-    const int scale_cols = (S + 127) >> 7;
+    const int scale_cols = (S + (1 << cs) - 1) >> cs;
     fp8_gemv::row_dots<kRows>(static_cast<const uint8_t*>(down_w) + static_cast<size_t>(row) * S,
-                              down_s + static_cast<size_t>(row >> 7) * scale_cols, sx, S, lane, d);
+                              down_s + static_cast<size_t>(row >> rs) * scale_cols, sx, S, lane, d, cs);
   } else {
     bf16_gemv::row_dots<kRows>(static_cast<const uint16_t*>(down_w) + static_cast<size_t>(row) * S, sx, S, lane, d);
   }
@@ -192,16 +195,16 @@ template <int kRows, bool kFp8>
 void launch_tail_rows(const uint16_t* x, size_t x_stride, const void* gate_w, const float* gate_s,
                       const void* up_w, const float* up_s, const void* down_w, const float* down_s,
                       const uint16_t* g, uint16_t* act, float* sw, SharedAcc acc, uint16_t* out,
-                      int tokens, int H, int S, cudaStream_t stream) {
+                      int tokens, int H, int S, cudaStream_t stream, int rs, int cs) {
   const int row_blocks = (S + gemv::kWarps - 1) / gemv::kWarps;
   shared_gate_up_swiglu_kernel<kRows, kFp8>
       <<<static_cast<unsigned>(row_blocks + 1), gemv::kThreads, gemv::smem_bytes(kRows, H),
-         stream>>>(x, x_stride, gate_w, gate_s, up_w, up_s, g, act, sw, tokens, S, H, row_blocks);
+         stream>>>(x, x_stride, gate_w, gate_s, up_w, up_s, g, act, sw, tokens, S, H, row_blocks, rs, cs);
   DGPP_CUDA_OK(cudaGetLastError());
   const int down_blocks = (H + gemv::kWarps - 1) / gemv::kWarps;
   shared_down_accum_round_kernel<kRows, kFp8>
       <<<static_cast<unsigned>(down_blocks), gemv::kThreads, gemv::smem_bytes(kRows, S),
-         stream>>>(act, static_cast<size_t>(S), down_w, down_s, sw, acc, out, H, S);
+         stream>>>(act, static_cast<size_t>(S), down_w, down_s, sw, acc, out, H, S, rs, cs);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
@@ -218,7 +221,7 @@ inline SharedAcc acc_rows(const SharedAcc& a, int row0, int H) {
 template <bool kFp8>
 void gate_up_rows(const uint16_t* x, size_t x_stride, const void* gate_w, const float* gate_s,
                   const void* up_w, const float* up_s, const uint16_t* g, uint16_t* act, float* sw,
-                  int tokens, int H, int S, cudaStream_t stream) {
+                  int tokens, int H, int S, cudaStream_t stream, int rs, int cs) {
   const int row_blocks = (S + gemv::kWarps - 1) / gemv::kWarps;
   for (int row0 = 0; row0 < tokens; row0 += gemv::kMaxRows) {
     const int rows = tokens - row0 < gemv::kMaxRows ? tokens - row0 : gemv::kMaxRows;
@@ -229,7 +232,7 @@ void gate_up_rows(const uint16_t* x, size_t x_stride, const void* gate_w, const 
       constexpr int kRows = decltype(rows_tag)::value;
       shared_gate_up_swiglu_kernel<kRows, kFp8>
           <<<static_cast<unsigned>(row_blocks + 1), gemv::kThreads, gemv::smem_bytes(kRows, H), stream>>>(
-              xr, x_stride, gate_w, gate_s, up_w, up_s, g, actr, swr, rows, S, H, row_blocks);
+              xr, x_stride, gate_w, gate_s, up_w, up_s, g, actr, swr, rows, S, H, row_blocks, rs, cs);
       DGPP_CUDA_OK(cudaGetLastError());
     };
     switch (rows) {
@@ -242,7 +245,7 @@ void gate_up_rows(const uint16_t* x, size_t x_stride, const void* gate_w, const 
 }
 template <bool kFp8>
 void down_rows(const uint16_t* act, const void* down_w, const float* down_s, const float* sw,
-               SharedAcc acc, uint16_t* out, int tokens, int H, int S, cudaStream_t stream) {
+               SharedAcc acc, uint16_t* out, int tokens, int H, int S, cudaStream_t stream, int rs, int cs) {
   const int down_blocks = (H + gemv::kWarps - 1) / gemv::kWarps;
   for (int row0 = 0; row0 < tokens; row0 += gemv::kMaxRows) {
     const int rows = tokens - row0 < gemv::kMaxRows ? tokens - row0 : gemv::kMaxRows;
@@ -254,7 +257,7 @@ void down_rows(const uint16_t* act, const void* down_w, const float* down_s, con
       constexpr int kRows = decltype(rows_tag)::value;
       shared_down_accum_round_kernel<kRows, kFp8>
           <<<static_cast<unsigned>(down_blocks), gemv::kThreads, gemv::smem_bytes(kRows, S), stream>>>(
-              actr, static_cast<size_t>(S), down_w, down_s, swr, accr, outr, H, S);
+              actr, static_cast<size_t>(S), down_w, down_s, swr, accr, outr, H, S, rs, cs);
       DGPP_CUDA_OK(cudaGetLastError());
     };
     switch (rows) {
@@ -272,7 +275,7 @@ template <bool kFp8>
 void tail_rows(const uint16_t* x, size_t x_stride, const void* gate_w, const float* gate_s,
                const void* up_w, const float* up_s, const void* down_w, const float* down_s,
                const uint16_t* g, uint16_t* act, float* sw, SharedAcc acc, uint16_t* out,
-               int tokens, int H, int S, cudaStream_t stream) {
+               int tokens, int H, int S, cudaStream_t stream, int rs = 7, int cs = 7) {
   for (int row0 = 0; row0 < tokens; row0 += gemv::kMaxRows) {
     const int rows = tokens - row0 < gemv::kMaxRows ? tokens - row0 : gemv::kMaxRows;
     const uint16_t* xr = x + static_cast<size_t>(row0) * x_stride;
@@ -281,10 +284,10 @@ void tail_rows(const uint16_t* x, size_t x_stride, const void* gate_w, const flo
     const SharedAcc accr = acc_rows(acc, row0, H);
     uint16_t* outr = out + static_cast<size_t>(row0) * H;
     switch (rows) {
-      case 1: launch_tail_rows<1, kFp8>(xr, x_stride, gate_w, gate_s, up_w, up_s, down_w, down_s, g, actr, swr, accr, outr, rows, H, S, stream); break;
-      case 2: launch_tail_rows<2, kFp8>(xr, x_stride, gate_w, gate_s, up_w, up_s, down_w, down_s, g, actr, swr, accr, outr, rows, H, S, stream); break;
-      case 3: launch_tail_rows<3, kFp8>(xr, x_stride, gate_w, gate_s, up_w, up_s, down_w, down_s, g, actr, swr, accr, outr, rows, H, S, stream); break;
-      default: launch_tail_rows<4, kFp8>(xr, x_stride, gate_w, gate_s, up_w, up_s, down_w, down_s, g, actr, swr, accr, outr, rows, H, S, stream); break;
+      case 1: launch_tail_rows<1, kFp8>(xr, x_stride, gate_w, gate_s, up_w, up_s, down_w, down_s, g, actr, swr, accr, outr, rows, H, S, stream, rs, cs); break;
+      case 2: launch_tail_rows<2, kFp8>(xr, x_stride, gate_w, gate_s, up_w, up_s, down_w, down_s, g, actr, swr, accr, outr, rows, H, S, stream, rs, cs); break;
+      case 3: launch_tail_rows<3, kFp8>(xr, x_stride, gate_w, gate_s, up_w, up_s, down_w, down_s, g, actr, swr, accr, outr, rows, H, S, stream, rs, cs); break;
+      default: launch_tail_rows<4, kFp8>(xr, x_stride, gate_w, gate_s, up_w, up_s, down_w, down_s, g, actr, swr, accr, outr, rows, H, S, stream, rs, cs); break;
     }
   }
 }
@@ -338,41 +341,49 @@ void qwen_moe_shared_gate_up_decode(const uint16_t* x, size_t x_stride, const ui
   if (tokens <= 0) return;
   if (!x || !gate_w || !up_w || !g || !act || !sw) throw std::invalid_argument("qwen moe shared gate_up: null pointer");
   if (H % 8 != 0 || S % 8 != 0) throw std::invalid_argument("qwen moe shared gate_up: H and S multiples of 8");
-  gate_up_rows<false>(x, x_stride, gate_w, nullptr, up_w, nullptr, g, act, sw, tokens, H, S, stream);
+  gate_up_rows<false>(x, x_stride, gate_w, nullptr, up_w, nullptr, g, act, sw, tokens, H, S, stream, 7, 7);
 }
 void qwen_moe_shared_down_decode(const uint16_t* act, const uint16_t* down_w, const float* sw,
                                  const float* acc, uint16_t* out, int tokens, int H, int S,
                                  cudaStream_t stream) {
   if (tokens <= 0) return;
   if (!act || !down_w || !sw || !acc || !out) throw std::invalid_argument("qwen moe shared down: null pointer");
-  down_rows<false>(act, down_w, nullptr, sw, SharedAcc{acc}, out, tokens, H, S, stream);
+  down_rows<false>(act, down_w, nullptr, sw, SharedAcc{acc}, out, tokens, H, S, stream, 7, 7);
+}
+// The fp8 forms' scale grid (rs, cs: log2 block rows / columns): a 16-byte
+// chunk must lie inside one scale block (cs >= 4).
+static void check_fp8_grid(int rs, int cs, const char* who) {
+  if (rs < 0 || cs < 4 || cs > 30) throw std::invalid_argument(std::string(who) + ": scale grid (rs >= 0, cs >= 4)");
 }
 void qwen_moe_shared_gate_up_decode_fp8(const uint16_t* x, size_t x_stride, const uint8_t* gate_p,
                                         const float* gate_s, const uint8_t* up_p, const float* up_s,
                                         const uint16_t* g, uint16_t* act, float* sw, int tokens, int H,
-                                        int S, cudaStream_t stream) {
+                                        int S, cudaStream_t stream, int rs, int cs) {
   if (tokens <= 0) return;
   if (!x || !gate_p || !gate_s || !up_p || !up_s || !g || !act || !sw)
     throw std::invalid_argument("qwen moe shared gate_up fp8: null pointer");
   if (H % 16 != 0 || S % 16 != 0) throw std::invalid_argument("qwen moe shared gate_up fp8: H and S multiples of 16");
-  gate_up_rows<true>(x, x_stride, gate_p, gate_s, up_p, up_s, g, act, sw, tokens, H, S, stream);
+  check_fp8_grid(rs, cs, "qwen moe shared gate_up fp8");
+  gate_up_rows<true>(x, x_stride, gate_p, gate_s, up_p, up_s, g, act, sw, tokens, H, S, stream, rs, cs);
 }
 void qwen_moe_shared_down_decode_fp8(const uint16_t* act, const uint8_t* down_p, const float* down_s,
                                      const float* sw, const float* acc, uint16_t* out, int tokens, int H,
-                                     int S, cudaStream_t stream) {
+                                     int S, cudaStream_t stream, int rs, int cs) {
   if (tokens <= 0) return;
   if (!act || !down_p || !down_s || !sw || !acc || !out) throw std::invalid_argument("qwen moe shared down fp8: null pointer");
-  down_rows<true>(act, down_p, down_s, sw, SharedAcc{acc}, out, tokens, H, S, stream);
+  check_fp8_grid(rs, cs, "qwen moe shared down fp8");
+  down_rows<true>(act, down_p, down_s, sw, SharedAcc{acc}, out, tokens, H, S, stream, rs, cs);
 }
 
 void qwen_moe_shared_tail_decode_fp8(const uint16_t* x, size_t x_stride, const uint8_t* gate_p,
                                      const float* gate_s, const uint8_t* up_p, const float* up_s,
                                      const uint8_t* down_p, const float* down_s, const uint16_t* g,
                                      uint16_t* act, float* sw, const float* acc, uint16_t* out,
-                                     int tokens, int H, int S, cudaStream_t stream) {
+                                     int tokens, int H, int S, cudaStream_t stream, int rs, int cs) {
   if (tokens <= 0) return;
   if (!x || !gate_p || !gate_s || !up_p || !up_s || !down_p || !down_s || !g || !act || !sw || !acc || !out)
     throw std::invalid_argument("qwen_moe_shared_tail_decode_fp8: null pointer");
+  check_fp8_grid(rs, cs, "qwen_moe_shared_tail_decode_fp8");
   if (tokens > 2 * gemv::kMaxRows)
     throw std::invalid_argument("qwen_moe_shared_tail_decode_fp8: tokens beyond the decode rows");
   if (H <= 0 || H % 16 != 0 || S <= 0 || S % 16 != 0 || x_stride < static_cast<size_t>(H) ||
@@ -381,7 +392,7 @@ void qwen_moe_shared_tail_decode_fp8(const uint16_t* x, size_t x_stride, const u
       (x_stride * 2) % 16 != 0 || !gemv::smem_fits(gemv::kMaxRows, H))
     throw std::invalid_argument(
         "qwen_moe_shared_tail_decode_fp8: H and S multiples of 16, 16-byte aligned operands");
-  tail_rows<true>(x, x_stride, gate_p, gate_s, up_p, up_s, down_p, down_s, g, act, sw, SharedAcc{acc}, out, tokens, H, S, stream);
+  tail_rows<true>(x, x_stride, gate_p, gate_s, up_p, up_s, down_p, down_s, g, act, sw, SharedAcc{acc}, out, tokens, H, S, stream, rs, cs);
 }
 
 
@@ -415,9 +426,11 @@ void qwen_moe_shared_tail_decode_routed_fp8(const uint16_t* x, size_t x_stride, 
                                             const float* gate_s, const uint8_t* up_p, const float* up_s,
                                             const uint8_t* down_p, const float* down_s, const uint16_t* g,
                                             uint16_t* act, float* sw, const float* contrib, const float* weights,
-                                            int top_k, uint16_t* out, int tokens, int H, int S, cudaStream_t stream) {
+                                            int top_k, uint16_t* out, int tokens, int H, int S, cudaStream_t stream,
+                                            int rs, int cs) {
   if (tokens <= 0) return;
   if (!contrib || !weights || top_k <= 0 || top_k > kSharedAccMaxK) throw std::invalid_argument("qwen_moe_shared_tail_decode_routed_fp8: slots");
+  check_fp8_grid(rs, cs, "qwen_moe_shared_tail_decode_routed_fp8");
   if (!x || !gate_p || !gate_s || !up_p || !up_s || !down_p || !down_s || !g || !act || !sw || !out)
     throw std::invalid_argument("qwen_moe_shared_tail_decode_routed_fp8: null pointer");
   if (tokens > 2 * gemv::kMaxRows)
@@ -431,7 +444,7 @@ void qwen_moe_shared_tail_decode_routed_fp8(const uint16_t* x, size_t x_stride, 
   a.contrib = contrib;
   a.weights = weights;
   a.top_k = top_k;
-  tail_rows<true>(x, x_stride, gate_p, gate_s, up_p, up_s, down_p, down_s, g, act, sw, a, out, tokens, H, S, stream);
+  tail_rows<true>(x, x_stride, gate_p, gate_s, up_p, up_s, down_p, down_s, g, act, sw, a, out, tokens, H, S, stream, rs, cs);
 }
 void qwen_moe_shared_down_decode_routed(const uint16_t* act, const uint16_t* down_w, const float* sw,
                                         const float* contrib, const float* weights, int top_k, uint16_t* out,
@@ -443,18 +456,20 @@ void qwen_moe_shared_down_decode_routed(const uint16_t* act, const uint16_t* dow
   a.contrib = contrib;
   a.weights = weights;
   a.top_k = top_k;
-  down_rows<false>(act, down_w, nullptr, sw, a, out, tokens, H, S, stream);
+  down_rows<false>(act, down_w, nullptr, sw, a, out, tokens, H, S, stream, 7, 7);
 }
 void qwen_moe_shared_down_decode_routed_fp8(const uint16_t* act, const uint8_t* down_p, const float* down_s,
                                             const float* sw, const float* contrib, const float* weights, int top_k,
-                                            uint16_t* out, int tokens, int H, int S, cudaStream_t stream) {
+                                            uint16_t* out, int tokens, int H, int S, cudaStream_t stream, int rs,
+                                            int cs) {
   if (tokens <= 0) return;
   if (!act || !down_p || !down_s || !sw || !contrib || !weights || top_k <= 0 || top_k > kSharedAccMaxK || !out)
     throw std::invalid_argument("qwen moe shared down routed fp8: null pointer");
+  check_fp8_grid(rs, cs, "qwen moe shared down routed fp8");
   SharedAcc a;
   a.contrib = contrib;
   a.weights = weights;
   a.top_k = top_k;
-  down_rows<true>(act, down_p, down_s, sw, a, out, tokens, H, S, stream);
+  down_rows<true>(act, down_p, down_s, sw, a, out, tokens, H, S, stream, rs, cs);
 }
 }  // namespace dgpp

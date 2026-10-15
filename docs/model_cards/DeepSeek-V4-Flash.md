@@ -64,16 +64,20 @@ measured ahead of drawing the drafts — and follow the same schedule at 0.93
 of the head's acceptance (`engine.mtp_schedule_sampled_scale`). A greedy
 request's transcript is plain decode's at every depth.
 
-Prefill runs in 4,096-row forwards and is bitwise the same for any
-chunking of a prompt, so prefix snapshots and grouped admissions reuse it
-exactly. On a multi-node world a forward of 512 rows or more runs each
+Prefill supports forwards up to 4,096 rows, with resumable cuts aligned to
+its compressor geometry. Prefix snapshots retain request state; chunk/group
+numerics are checked by the [shared execution tests](../testing.md). On a
+multi-node world a forward of 512 rows or more runs each
 layer in two row blocks so a block's all-reduce runs under the other
 block's compute. Prompts are read in through resumable cursors: the
 in-flight prompts' next chunks ride one forward per scheduler tick
 (prompts that arrive together are read in together and start decoding
-together; a later arrival interleaves with the running decodes at a
-256-token quantum per reading prompt, the whole forward when nothing
-decodes — `engine.prefill_budget_tokens`, `engine.admission_gather_ms`). The tokenizer is the release's byte-level BPE; the prompt renderer
+together; later arrivals share aligned work with active decoders). The shared
+adaptive policy starts at 256 tokens and learns pass cost up to the 4,096-token
+ceiling, subject to soft decode-gap and first-token targets. These are the
+[same scheduler controls](../operations.md) as other families, not a fixed
+256-token quantum per reader. The tokenizer is the release's byte-level BPE;
+the prompt renderer
 is a port of the checkpoint's own `encoding/encoding_dsv4.py` (there is no
 Jinja template), including its three reasoning-effort preambles (the
 service's `low` is the model's default); tool calls are emitted and
@@ -94,7 +98,7 @@ and, with each request's prompt processing time subtracted
 two, five and ten concurrent requests (ten queue behind the six slots).
 See
 [the benchmark tables](../benchmarks.md) for the current numbers and
-[the campaign record](../../benchmarks/results/2026-10-01-deepseek-v4-flash/README.md)
+the campaign record
 for the evidence. The forward pass is cross-checked layer by layer against
 the release's own `inference/model.py` on the real checkpoint
 (`tools/dsv4_torch_reference.py`).

@@ -43,10 +43,10 @@ numerical tolerances and top-1 checks rather than a universal bitwise claim.
 
 Native MTP3 improves acceptance on the measured code, JSON and arithmetic
 probes, but slows the prose probe relative to MTP1. Use the
-[reproduction procedure](../benchmarks/mimo_upstream/README.md) to compare
-representative traffic. [Native-head measurements](../benchmarks/results/2026-09-23-mimo-native-mtp.md)
-and [prefill measurements](../benchmarks/results/2026-09-23-mimo-upstream-ports.md)
-record the configurations and limitations separately.
+[reproduction procedure](experiments/mimo-benchmarking.md) to compare
+representative traffic. The [native MTP experiment](experiments/mimo-native-mtp.md)
+and [prefill experiment](experiments/mimo-upstream-ports.md) describe the
+configurations and limitations.
 
 ## Qwen sparse prefill attention
 
@@ -59,7 +59,8 @@ shorter prefills retain their existing kernels in both modes.
 ## Configure and start
 
 For a new machine, follow [Getting started](getting-started.md),
-including dependency installation. HTTP defaults to localhost; deployment
+including dependency installation. HTTP defaults to all IPv4 interfaces
+(`0.0.0.0`); setup's bind-address prompt or `--http-bind` sets the site default. Deployment
 `http.bind_host` and `http.port` override `.env` defaults. The service has no
 TLS or authentication; see [networking](networking.md) before exposing it.
 
@@ -86,8 +87,11 @@ its node.
 | `cluster_qwen-3.8-flash-next_fp8_w{2,4}.example.json` | Qwen FP8 with MTP depth 1, four or two nodes |
 | `cluster_qwen-3.8-flash-next_nvfp4_w{1,2}.example.json` | Qwen NVFP4 on one or two Sparks, MTP depth 1, dense projections FP8 at load, mapped n-gram table; the single-Spark example selects a 256K shared pool and 4K busy/idle prefill |
 | `cluster_qwen-3.8-flash-next_nvfp4-radixark_w{1,2}.example.json` | RadixArk Qwen NVFP4 on one or two Sparks; the single-Spark recipe selects MTP depth 2, grow admission and 4K busy/idle prefill |
+| `cluster_qwen-3.8-flash-next_nvfp4-qad_w1.example.json` | the QAD export of Qwen3.8-Flash-Next (local-inference-lab) on one Spark: MXFP8 dense stack and shared experts as shipped, the NVFP4 n-gram table resident, MTP depth 1, 128K shared pool |
 | `cluster_glm-4.7_nvfp4_w4.example.json` | GLM-4.7 NVFP4, four nodes, MTP depth 1 |
 | `cluster_glm-5.3_int4-int8_w4.example.json` | the full GLM-5.3 (int4/int8 RTN), four nodes, MTP depth 1, eight request slots, 100K bf16 context (120K with `--bf16-weights checkpoint --kv-capacity 122880`), the embedding vocab-sharded |
+| `cluster_glm-5.3_nf4i8_w4.example.json` | the full GLM-5.3 in the NF4I8 GPTQ H32 g128 checkpoint (codebook experts, int8 attention and shared expert), four nodes, MTP depth 1, eight request slots, 272K fp8 context, the embedding vocab-sharded |
+| `cluster_glm-5.3_mixed346_w4.example.json` | the full GLM-5.3 in the Mixed346 GPTQ H32 A8 g128 checkpoint (3/4/6-bit codebook experts with int8 activation codes, 116 int4 fallback experts, int8 attention and shared expert), four nodes, MTP depth 1, eight request slots, 272K fp8 context |
 | `cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json` | DeepSeek-V4.1-Flash as shipped, four nodes, six request slots, DSpark depth 4 with the scheduled verify depth, the bounded prefill, 128K context |
 | `cluster_mimo-v2.6-flash_mxfp4-fp8_w{4,2}.example.json` | MiMo-V2.6-Flash as shipped (MXFP4 experts, fp8 dense, the BF16 matrices in their 12-bit form), four nodes with a 128K BF16 K/V pool or two nodes with a 256K K/V pool in the fp8 row form (`kv_dtype`), four request slots, MTP depth 1 |
 
@@ -122,8 +126,8 @@ control table residency and optional FP8 encoding of dense projections.
 The Qwen NVFP4 templates, including YaRN, set `engine.fp8_head: "mma"`.
 With `dense_weights: "fp8"`, this uses streaming MMA above the dense GEMV
 threshold and within the configured decode capacity, including short prefills
-in that interval. Matched one- and two-Spark teacher-forced checks passed;
-see the [numerical results and scope](../benchmarks/results/2026-09-21-qwen-fp8-head-numerics.md).
+in that interval. Matched one- and two-Spark teacher-forced checks passed.
+
 The interface default remains `"gemv"` for configurations that omit the key.
 
 The service rejects unsupported `fp8_head` values. MMA requires Qwen and FP8
@@ -150,14 +154,23 @@ eval holds at 39/40 on HumanEval and GSM8K and the acceptance is unchanged), and
 per-tensor e4m3 kernels (about 2x the prefill rate, +23 GiB resident). Both
 change greedy transcripts (the head within the first tokens, the prefill
 recipe at long context), so a deployment that enables them is not the
-checkpoint's model. The family is world-1 only.
+checkpoint's model. The dense family supports worlds 1, 2 and 4.
 
-Its DFlash2 drafter (`engine.dflash_model`, the `_dflash2` template) runs the
-eager world-1 engine with `mtp` and `decode_graph` off; its own options are
+The current dense templates use the DFlash2 drafter (`engine.dflash_model`)
+with `mtp` off, `decode_graph` on and adaptive verification depth at worlds
+1, 2 and 4. The earlier eager world-1 configuration with `decode_graph` off
+remains available; its own options are
 `engine.dflash_verify_graph` (the multi-slot verify as a captured graph, the
 default), `engine.dflash_draft_batch` (stacked redrafts, the default) and
 `engine.dflash_depth` (a verify-depth cap, 0 = the block). None of them
 changes a transcript: the drafter only proposes, the greedy verify decides.
+
+The [Qwen3.8-27B NVFP4 checkpoint](model_cards/Qwen3.8-27B-NVFP4.md) uses
+the same dense architecture and DFlash2 templates. Its mixed native FP4,
+channelwise FP8 and BF16 weights are loaded without requantization;
+`dense_weights: fp8` and `prefill_fp8_per_tensor` are rejected for this
+checkpoint. The model card links the matched performance and quality
+measurements, including the remaining four-node C1 prose decode exception.
 
 Qwen FP8 and packed heads keep the full product's kernel selection and
 accumulation order. BF16 heads use the existing small-row projection, which
@@ -181,9 +194,8 @@ of 64 and at most 16384; other shapes and decode use W4A16. Memory plans
 include the activation workspace only when opted in (28.2 MiB per rank for
 standard Qwen chunks).
 
-The [single-node guide](qwen38_single_spark.md) covers the one-Spark memory
-plan, and the [two-node benchmark](../benchmarks/results/2026-09-16-qwen-nvfp4-w2.md)
-records the resident-versus-mapped placement decision.
+The [single-node guide](qwen38_single_spark.md) covers memory planning and
+resident-versus-mapped placement.
 
 ```bash
 scripts/dgpp-cluster up --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json
@@ -236,12 +248,32 @@ settings received from rank 0. Every rank then checks the effective
 configuration digest. The journal's settings record also rejects mixed
 binary versions.
 
+After model and engine construction, each peer reports readiness over the
+journal connection. Rank 0 waits for all peers before releasing graph warm-up
+or eager serving. This wait uses `engine.rendezvous_timeout_ms`; a missing peer
+fails startup with its rank in the error. Slow checkpoint loading therefore
+does not consume the first collective's execution timeout. Collective watchdogs
+retain their normal limits once execution begins.
+
 For development runs, `up` stages the binary and config to peers. For an
 installed release, it stages the config and runs each node's installed
 binary. It starts rank 0, waits for its rendezvous listener, starts peers
 through SSH and waits for `serve: listening`. That log line indicates
 HTTP readiness. Warm GLM-FP8 resident images took 15–25 s to reach it in
 the recorded deployment; the first checkpoint load took about 4.5 minutes.
+While waiting, the launcher prints rank 0's log path and reports elapsed
+time, process liveness and the latest log line every ten seconds. It checks
+the head process every two seconds; an exit reports its status and ten
+untruncated trailing log lines, then triggers peer cleanup. A living process
+that does not become ready still reaches the journal or HTTP timeout.
+
+`engine.kv_capacity` is one shared token pool across request slots, not a
+per-slot allocation multiplied by `engine.max_concurrency`. Four simultaneous
+262,144-token requests need 1,048,576 tokens plus prefix-snapshot bookkeeping
+space. The four-node Qwen FP8 template uses 1,052,672 tokens and four slots,
+with a 40 GiB prefix arena. Each request's context includes both its prompt
+and generated tokens. Full admission reserves that lifetime token budget;
+unused prefix entries can be evicted to free pool blocks for new requests.
 
 Use a separate config for each checkpoint. For example, a site-local
 `deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json` can select the composed
@@ -342,8 +374,8 @@ Send PNG/JPEG/WebP data URIs in user `image_url` content parts; the
 The startup plan reserves 1.05 GiB of vision weights and 0.33 GiB of workspace
 per rank, including for text traffic. Account for this when sizing KV capacity.
 Image requests reuse prefixes with matching processed pixels and geometry,
-including generated continuations. With a configured prefill budget, the GLM
-graph engine yields between image-prefill chunks so active decodes continue.
+including generated continuations. With a configured prefill budget, the
+engine yields between image-prefill chunks so active decodes continue.
 Image requests bypass grouped prefill. Before changing a serving deployment, run
 `python3 scripts/vision_api_check.py --url http://127.0.0.1:18080` on idle test
 hardware, then compare rank operation streams after shutdown.
@@ -458,14 +490,14 @@ check their allocations before loading:
   exits 0 or 1. A standalone run reads about 0.6 GiB more free memory than a
   boot does, because a booting rank locks its pinned memory before it plans;
   leave that much slack when sizing `kv_capacity` from one, or read the
-  ceiling out of a refusal;
+  ceiling out of a refusal.
 - the loader's own check that the resident footprint (+ 4 GiB headroom)
   fits the device's free memory remains as the second line and fails
-  immediately with a clear message — never three minutes into a load;
+  immediately with a clear message — never three minutes into a load.
 - the loader reads each source tensor exactly once (prefetch, copy, drop),
   keeping the checkpoint page cache bounded during loading; the checkpoint's
   mmaps are released the
-  moment the last layer is on the device (`GlmLayerStream::release_sources`);
+  moment the last layer is on the device (`GlmLayerStream::release_sources`).
 - the process *tries* to lock its memory (`mlockall(MCL_CURRENT)`, before
   the model is constructed) as a safety net against swap-in faults in the
   decode loop. This is optional: with the one-pass loader a rank with the
@@ -479,6 +511,10 @@ To prevent swap for every serving rank launched by `dgpp-cluster`, use:
 ```bash
 DGPP_NO_SWAP=1 scripts/dgpp-cluster up --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json
 ```
+
+Set `DGPP_NO_SWAP=1` in the site's `.env` to retain this policy across launches.
+The setting is resolved and forwarded to every rank. Existing processes need
+to be restarted to enter the protected scopes.
 
 The launcher runs each rank, and its preflight/status version probes, in a
 systemd user scope with `MemorySwapMax=0`.
@@ -510,19 +546,158 @@ node, available context also depends on draft weights, request slots,
 cache format and arena size. Use the startup plan for the configured limit.
 
 **Budgeted prefill** (`engine.prefill_budget_tokens`, `--prefill-budget-tokens`)
-is supported on Qwen and GLM-5.3-Flash graph engines, including GLM image
-requests. The default, -1, selects 256 tokens rounded down to the engine
-alignment and capped by its prefill limit (at least one aligned unit).
+is shared by the eager and graph engines for every serving model family.
+Qwen4Exp and GLM-5.3-Flash also retain their resumable image paths.
+The default, -1, starts with 256 reader tokens before measuring any workload.
+It rounds down to the engine's alignment, allowing at least one aligned chunk,
+and caps the result by the engine's work limit and any explicit idle budget.
+For engines that advance grouped readers, the automatic idle budget starts at
+4,096 tokens, with the same capacity and alignment rules. These are shared
+starting values independent of model and quantization. The serving policy
+adapts automatic budgets to measured pass duration, using the idle value as
+its ceiling. Explicit token budgets remain limits. A 2,048-token engine therefore
+starts at 256 with a 2,048-token ceiling; a 4,096-token engine has a 4,096-token ceiling.
+Larger explicit busy budgets amortize weight streaming and conversion across
+more tokens but can increase the pause between decode steps.
+The budget counts reader tokens. Decoder rows share remaining scratch;
+reader chunks shrink only when the combined rows exceed physical capacity.
 An explicit zero preserves full-prompt admission within a scheduler pass;
 model and snapshot boundaries still split the work. Qwen retains its internal
 4,096-token limit and reports token progress after each completed chunk.
-The resolved budget is logged at startup and carried in rank 0's warm record.
-The single-Spark NVIDIA and RadixArk Qwen NVFP4 templates explicitly select
-4,096-token busy and idle budgets. The two- and four-rank GLM-5.3-Flash
-NVFP4/FP8 templates select 256-token busy and 2,048-token idle budgets.
-A positive budget executes one aligned prefill chunk per tick, followed by
-a decode pass for active requests. Try 256 or 512 tokens; the budget must
-be a multiple of the snapshot alignment and fit the prefill scratch limit.
+Both budgets are cluster-level configuration under `engine`, with CLI overrides:
+
+```json
+{
+  "engine": {
+    "prefill_budget_tokens": -1,
+    "prefill_idle_budget_tokens": 4096,
+    "decode_gap_target_ms": 1000,
+    "first_token_target_ms": 3000
+  }
+}
+```
+
+Use an idle value within the selected engine's capacity (for example 2048 for
+a 2K engine), or omit both fields to select the automatic values. Explicit
+positive busy/idle values are validated, not silently rounded. A deployment can override
+them at its next start with
+`--knobs "--prefill-budget-tokens 256 --prefill-idle-budget-tokens 4096"`.
+The resolved values are logged at startup, reported in service admission
+metrics and carried in rank 0's warm record to every worker. Changing the
+cluster configuration requires a restart. Existing explicit settings retain
+their values.
+
+The latency targets default to 1,000 ms between token-producing decode passes
+and 3,000 ms from request arrival to its first token, including queueing. Set
+`engine.decode_gap_target_ms` and `engine.first_token_target_ms`, or their CLI
+forms `--decode-gap-target-ms` and `--first-token-target-ms`, in the range
+0–3,600,000 ms. Zero disables that objective; both zero retain fixed busy/idle
+budgeting. These are targets, not hard deadlines: a running GPU operation,
+engine alignment, a long prompt, occupied slots or KV pressure can make them
+unattainable. A decode pass may deliver several speculative tokens.
+The decode-gap default is the measured knee on the four-node
+Qwen3.8-Flash-Next FP8 example: 1,000 ms kept mixed and sustained elapsed
+within 1 % of a 3,000 ms target while cutting an incumbent decoder's worst
+pause from 1.8 s to 0.5 s and halving an arrival's first-token wait; 500 ms
+cost about 4 % of sustained throughput and 300 ms about 8 %, each delaying
+the long prompt's own first token further. Tighter targets produce more
+frequent decode opportunities but lower prefill throughput by repeating weight
+streaming and launch work over smaller chunks; a looser decode-gap target
+(up to the 3,000 ms first-token target) favors long mixed workloads at the
+cost of longer pauses for whoever is decoding. Choose by the service's
+latency tolerance.
+
+Additional controller settings use the same names under `engine` and hyphenated
+CLI flags:
+
+| Setting | Default | Range | Effect |
+| --- | ---: | ---: | --- |
+| `prefill_latency_headroom_pct` | 15 | 0–50 | Reserve a fraction of the latency target for variation. |
+| `prefill_growth_factor` | 2 | 2–4 | Bound upward work probes relative to the last representative observation. |
+| `prefill_cost_recovery_pct` | 25 | 1–100 | Weight a cheaper observation when recovering from a high cost estimate. |
+| `prefill_initial_tokens` | 256 | 1–1,073,741,824 | Start automatic budgeting here before measuring work; adjust to engine alignment, capacity and the idle ceiling. |
+| `prefill_idle_floor_tokens` | 1024 | 0–1,073,741,824 | Smallest quantum while nothing decodes and nothing waits for a free slot: a lone reader never shrinks below it once its cost is measured, an arrival during its chunk waits at most that chunk. 0 floors at the alignment. |
+
+Slowdowns always update the estimate immediately. Lower recovery weight or more
+headroom favors stability; faster growth explores throughput headroom sooner.
+These settings do not relax token limits or engine geometry. Existing shared
+controls remain `max_concurrency` (default 8), `queue_limit` (64) and
+`admission_gather_ms` (3 ms, only while idle). Deployment templates may override
+them. Raising queue capacity can increase first-token waits; it does not create
+GPU capacity. Fair reader allocation remains mandatory rather than a tuning
+switch; overload can still delay a request that cannot obtain a slot or KV.
+
+Tune concurrency and KV capacity to the deployment first, then choose latency
+targets and a prefill ceiling. Keep the gathering window short for interactive
+traffic; increasing it only helps when idle arrivals can form a useful batch.
+Use the queue limit to bound accepted backlog. The `admission` setting defaults
+to `full`, reserving the prompt and maximum completion before starting. The
+optional `grow` policy uses `admission_window` (256 tokens by default) to grow
+reservations, but may end a request when the pool runs out. It is a memory
+admission tradeoff, not a substitute for a latency target. Adjust the controller
+headroom, growth and recovery only after observing throughput and target misses.
+
+The shared controller learns completed-pass cost separately for decoder-load
+ranges, including the prefill, decode and snapshot work before the next yield.
+By default, the first unmeasured workload starts at 256 tokens, bounded by the
+busy budget and engine geometry. `prefill_initial_tokens` changes this starting
+point while retaining automatic growth. A new decoder-load range borrows the most conservative measured
+rate, then learns its own estimate without changing the other ranges.
+With default tuning, work grows by at most twice an
+observed quantum and uses a small set of aligned sizes, with latency headroom;
+slowdowns reduce the next limit immediately. Short final tails do not distort
+the estimate, including groups whose allocation was trimmed to their final tails.
+Completed groups do not calibrate the next bulk read-in: their final projections
+and admission costs differ from an unfinished reader's next chunk.
+Uninterrupted readers and a fresh reader on an idle engine use the full
+first-token time allowance. When an arrival is queued during an ongoing
+prefill and can obtain a slot, the next quantum uses half that allowance,
+reserving half for time already spent waiting for a yield. It does not predict
+when a request blocked on slots or KV can start. Existing fair reader shares
+and at least one aligned chunk preserve progress. Rank 0 journals each
+selected limit; workers never schedule from their local clocks.
+
+JSON `service.latency_target_misses` counts `first_token` and `decode_gap`
+misses. Prometheus exposes `dgpp_first_token_target_misses_total` and
+`dgpp_decode_gap_target_misses_total`. The selected ceiling appears as
+`scheduler.prefill_chunks.adaptive_limit_tokens` and
+`dgpp_prefill_adaptive_limit_tokens` (zero with fixed budgets), with a
+corresponding rank gauge. Compare throughput and latency distributions as well
+as these counts when choosing targets for the deployment.
+
+For budget tuning, JSON metrics expose `scheduler.prefill_chunks`: physical
+advance `steps`, offered reader `budget_tokens`, `available_tokens` capped by
+each reader's remaining prompt, and actual `computed_tokens`. Compare counter
+deltas over the workload. Computed/available measures how much offered work
+was executed after removing unused final-tail capacity; snapshot boundaries,
+alignment and shared scratch can still reduce it. Computed/budget also includes
+capacity left over when prompts finish. These counters cover budgeted advances
+only, count a grouped walk once, and exclude decoder rows and monolithic
+prefills. Prometheus exposes the same counters as
+`dgpp_prefill_chunk_{steps,budget_tokens,available_tokens,computed_tokens}_total`,
+with corresponding `dgpp_rank_prefill_chunk_*` counters on each rank. High token
+utilization alone does not establish good throughput or acceptable decode gaps.
+
+All deployment examples inherit automatic budgets and the shared latency
+policy. Their native capacities retain a 2,048-token ceiling for GLM/MiMo and
+4,096 for Qwen/DeepSeek without model-specific scheduler settings. Existing
+local files may still carry positive busy/idle overrides; those remain caps
+until removed or changed. See [deployment defaults](../deploy/README.md#shared-scheduler-defaults).
+A positive explicit budget bounds aligned prefill work before each decode pass.
+Engines with mixed prefill/decode execution enable early text admission by default. Queued text shares
+bounded prefill work, and decoder verification shares projections with an
+unfinished reader. With fixed budgeting, decoders that preceded a reader retain
+the busy-budget interruption bound, while decoders admitted during its prefill
+may share larger idle-budget chunks. Adaptive budgeting applies the decode-gap
+target to both groups. Slot and KV reservation limits still apply.
+`engine.prefill_early_admission=false` (`--no-prefill-early-admission`) restores
+the former leftover-only admission. Automatic admission resolves from engine
+capabilities after construction; it does not inspect model or drafter names.
+All serving layer executors implement the mixed-row contract, including the
+Qwen35 executor with DFlash. The adapter checks each batch's row capacity,
+context and continuation workspace before mixing it. Image readers retain
+their existing separate execution paths.
+The budget must be a multiple of the snapshot alignment and fit prefill scratch.
 Smaller chunks trade prefill throughput and TTFT for shorter pauses in
 other streams. Request reservations are held before the first yield, and
 cancellation releases the unfinished slot and its prefix references.
@@ -530,19 +705,34 @@ cancellation releases the unfinished slot and its prefix references.
 `engine.prefill_idle_budget_tokens` (`--prefill-idle-budget-tokens`) optionally
 uses larger chunks when no request is actively decoding. It must be at least
 the enabled busy budget, use the same alignment and fit the prefill scratch
-limit. Zero keeps the fixed-budget behavior. The scheduler checks for active
+limit. Zero uses the busy value as the ceiling when the busy budget is explicit;
+with automatic busy budgeting, grouped prefill resolves it as described above.
+The scheduler checks for active
 decode after cancellations and before each chunk, so a long prompt can speed
-up after its decoding peer retires. Required model and snapshot cuts still
-split chunks. Short cold prompts can group up to the selected budget.
+up after its decoding peer retires. Required snapshot and structural cuts still
+split chunks. Executors whose state permits arbitrary aligned cuts fill each
+work budget from the cursor position; fixed-grid executors preserve their
+required boundaries. Short cold prompts can group up
+to the selected budget.
 Larger idle chunks also increase the maximum wait for cancellation or a newly
 arriving request; they do not preempt a chunk already running.
+
+Shared execution reduces the extra model walks caused by early admission,
+but does not guarantee identical throughput for every workload. A long
+prefill still holds a slot while newly admitted requests decode, and required
+cuts, padded decode rows and batch shapes affect how much work fits each
+walk. For MoE models, which tokens decode together also changes reuse of
+expert weights; repeated identical answers can favor synchronized batches. Compare fixed-work mixed loads with
+`scripts/serve_admission_bench.py`; isolated token rates alone do not measure
+this cost. Include both the previous executable and the same executable with
+early admission disabled when evaluating a deployment.
 
 `engine.prefix_min_tokens` (`--prefix-min-tokens`, default 1024) is the prefix
 cache's entry floor. A cold prefill cuts at a prompt's structural boundaries
 only where a snapshot can stand — the cache on and the boundary at or past
-the floor — so a prompt under the floor is one walk, the same walk it gets
-as a span of a group admission, and its greedy transcript does not depend on
-what arrived beside it. No snapshot of any kind — prefill cut, head or body cut,
+the floor. Prompts below the floor avoid those structural prefix cuts;
+the prefill budget can still split them across GPU advances. No snapshot
+of any kind — prefill cut, head or body cut,
 rolling or close entry — is taken below that position. A shorter prompt still
 attaches to a matching entry; it just never takes a slot, so a stream of
 health probes or tiny side requests cannot push a long conversation's entries
@@ -555,21 +745,23 @@ to every peer; `/v1/metrics` shows them under `prefix_cache` as `min_tokens`
 and `head_cuts`, with `head_snapshots` counting the head entries taken. See
 [the sizing guide](prefix-cache.md).
 
-One long prefill progresses at a time in arrival order. Short prompts can
-still prefill together when the group fits the budget. Snapshots from an
+Unfinished prefills share the selected budget in deterministic arrival order,
+with rotation when the budget cannot cover them all. Short prompts can
+prefill together when a group admission fits the budget. Snapshots from an
 unfinished prefill remain private until completion. The settings and warm
 journal records carry both budgets; every rank follows the same token cuts.
 `/v1/metrics` reports `prefilling`, `prefill_ms` (execution counted once),
 and `prefill_request_ms` (summed request waits, including waits between
 chunks). Logical and computed prompt-token counters advance with each chunk,
 including cancelled partial work; their difference counts attached cache
-tokens. Other model families retain full-prompt admission.
+tokens.
 
 Client disconnects are counted when the HTTP connection closes; retirement
 occurs at the next scheduler boundary. With full-prompt admission enabled,
 that boundary may be minutes away. Automatic chunking bounds the work between
 cancellation checks in tokens, not elapsed time. It interleaves existing decode
-requests, but a second queued prompt still waits behind the unfinished prefill.
+requests and eligible queued text. Admission still requires a free slot,
+the physical KV reservation and an aligned share of the selected budget.
 The `starting prefill` log precedes model work; `admitted to slot` marks its first
 token, after prefill has completed.
 
@@ -809,7 +1001,6 @@ consumer exited on deadline` while the peers are still building — their
 images are still written. Boot again (the images restore in ~15 s), or
 run `glm_gen_check` once on the fabric first, whose rendezvous waits.
 
-
 ```
 DGPP_RESIDENT_CACHE=off            disable (always build from the checkpoint)
 DGPP_RESIDENT_CACHE_DIR=/path      put the images somewhere else
@@ -1044,11 +1235,17 @@ drafts and padded rows measure different work.
 | rank 0 log, pid and op stream | `<log_dir>/serve_r0.log`, `<log_dir>/r0.pid`, `<log_dir>/serve_rank0.ops`, written as the run records it (flushed at every retire) |
 | exit statuses | 0 orderly stop; 1 a startup or contract error (a configuration that differs from rank 0's included); 2 rank 0 after an engine failure or any rank after forced shutdown; 3 a peer released by its in-tick watch |
 
-### Compact Qwen batch mappings
+### Compact graph batch mappings
 
-With `engine.compact_batches: true`, fixed-depth Qwen graph serving places active
-requests in the smallest bucket that preserves the physical graph's numerical
-dispatch range. Graphs of at most sixteen verification rows retain their width.
+`engine.compact_batches` defaults to true. Fixed-depth native graph execution
+places active requests in the smallest available bucket permitted by the layer
+executor's numerical contract. The shared session core and legacy GLM facade
+use `GraphBatchMapping` for feed gathering, request-row metadata and speculative
+commits. A finished reader can leave a hole between live decoder slots without
+forcing subsequent decode to execute that empty slot.
+
+Qwen4Exp's numerical contract preserves its physical dispatch range:
+graphs of at most sixteen verification rows retain their width.
 Wider graphs can shrink within the 17–32-row or above-32-row range, preserving
 the FP8 split-K reduction boundary. For example, two live requests in slots 0
 and 15 at MTP depth 3 use twelve groups (48 rows) instead of sixteen groups
@@ -1060,7 +1257,8 @@ are staged. Sampling RNG/counts/bias/proposals remain indexed by physical
 request ID. Graph masks and verdicts are indexed by compact batch group.
 The mapping is double-buffered per graph family for pipelined replays.
 
-The setting defaults to false, retaining the physical-prefix policy. Rank 0 journals the setting
+Setting it to false retains the physical-prefix policy. Rank 0 journals the setting
 and peers adopt it before graph construction; it is not read from the
-environment. Confidence-scheduled verify depth and other model families currently use the previous policy.
+environment. Confidence-scheduled verify depth and block-draft graphs retain
+physical mappings; their draft/schedule protocols do not support mapped rows.
 This changes neither model capacity nor the set of graph bucket sizes.

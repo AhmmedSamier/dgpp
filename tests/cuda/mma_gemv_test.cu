@@ -21,6 +21,7 @@
 #include "kernels/bf16_gemv.hpp"
 #include "kernels/dense_mma_bf16w.hpp"
 #include "kernels/glm_moe_launch.hpp"
+#include "kernels/fp8_dequant.hpp"
 #include "kernels/mma_gemv.hpp"
 #include "kernels/scale_gemm.hpp"
 
@@ -541,3 +542,58 @@ DGPP_TEST(mma_gemv_split_k_small_n_sites) {
 }
 
 int main() { return dgpp::test::run_all(); }
+
+// The e8m0 byte scale grid (the QAD export's MXFP8 dense stack, rs = 0,
+// cs = 5): the streaming MMA and the dequant bridge read 2^(b - 127) from the
+// byte exactly as the F32 grid holds it, so both forms are bitwise the F32
+// grid's at one, three, seventeen and forty rows (every tile form).
+DGPP_TEST(mma_gemv_fp8_e8m0_grid_is_bitwise_the_f32_grid) {
+  const int n = 640, k = 1024;
+  const int sb = k / 32;
+  std::vector<uint8_t> w8(static_cast<size_t>(n) * k), sb8(static_cast<size_t>(n) * sb);
+  std::vector<float> sf(sb8.size());
+  uint32_t x = 0x9E3779B9u;
+  auto rnd = [&] { x ^= x << 13; x ^= x >> 17; x ^= x << 5; return x; };
+  for (auto& b : w8) b = static_cast<uint8_t>(rnd() & 0x7F);  // non-NaN e4m3
+  for (size_t i = 0; i < sb8.size(); ++i) {
+    sb8[i] = static_cast<uint8_t>(118 + rnd() % 14);  // 2^-9 .. 2^4
+    sf[i] = std::ldexp(1.0f, static_cast<int>(sb8[i]) - 127);
+  }
+  const int mmax = 40;
+  std::vector<uint16_t> act(static_cast<size_t>(mmax) * k);
+  for (auto& a : act) a = dgpp::float_to_bf16_bits(0.5f * (static_cast<float>(rnd() % 2001) / 1000.0f - 1.0f));
+  uint8_t* dw = nullptr; uint8_t* dsb = nullptr; float* dsf = nullptr; uint16_t* dact = nullptr;
+  uint16_t* out_f = nullptr; uint16_t* out_b = nullptr; uint16_t* deq_f = nullptr; uint16_t* deq_b = nullptr;
+  DGPP_CUDA_OK(cudaMalloc(&dw, w8.size())); DGPP_CUDA_OK(cudaMalloc(&dsb, sb8.size()));
+  DGPP_CUDA_OK(cudaMalloc(&dsf, sf.size() * 4)); DGPP_CUDA_OK(cudaMalloc(&dact, act.size() * 2));
+  DGPP_CUDA_OK(cudaMalloc(&out_f, static_cast<size_t>(mmax) * n * 2)); DGPP_CUDA_OK(cudaMalloc(&out_b, static_cast<size_t>(mmax) * n * 2));
+  DGPP_CUDA_OK(cudaMalloc(&deq_f, w8.size() * 2)); DGPP_CUDA_OK(cudaMalloc(&deq_b, w8.size() * 2));
+  DGPP_CUDA_OK(cudaMemcpy(dw, w8.data(), w8.size(), cudaMemcpyHostToDevice));
+  DGPP_CUDA_OK(cudaMemcpy(dsb, sb8.data(), sb8.size(), cudaMemcpyHostToDevice));
+  DGPP_CUDA_OK(cudaMemcpy(dsf, sf.data(), sf.size() * 4, cudaMemcpyHostToDevice));
+  DGPP_CUDA_OK(cudaMemcpy(dact, act.data(), act.size() * 2, cudaMemcpyHostToDevice));
+  for (const int m : {1, 3, 17, 40}) {
+    dgpp::launch_mma_gemv_fp8_bf16(dact, k, dw, dsf, out_f, m, n, k, 0, 0, 5, nullptr);
+    dgpp::launch_mma_gemv_fp8e8m0_bf16(dact, k, dw, dsb, out_b, m, n, k, 0, 0, 5, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    std::vector<uint16_t> a(static_cast<size_t>(m) * n), b(a.size());
+    DGPP_CUDA_OK(cudaMemcpy(a.data(), out_f, a.size() * 2, cudaMemcpyDeviceToHost));
+    DGPP_CUDA_OK(cudaMemcpy(b.data(), out_b, b.size() * 2, cudaMemcpyDeviceToHost));
+    if (std::memcmp(a.data(), b.data(), a.size() * 2) != 0)
+      throw std::runtime_error("e8m0 grid differs from the f32 grid at m = " + std::to_string(m));
+  }
+  dgpp::launch_fp8_dequant_blocks(dw, dsf, deq_f, n, k, nullptr, 0, 5);
+  dgpp::launch_fp8_dequant_blocks_e8m0(dw, dsb, deq_b, n, k, nullptr, 0, 5);
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  std::vector<uint16_t> a(w8.size()), b(w8.size());
+  DGPP_CUDA_OK(cudaMemcpy(a.data(), deq_f, a.size() * 2, cudaMemcpyDeviceToHost));
+  DGPP_CUDA_OK(cudaMemcpy(b.data(), deq_b, b.size() * 2, cudaMemcpyDeviceToHost));
+  if (std::memcmp(a.data(), b.data(), a.size() * 2) != 0) throw std::runtime_error("e8m0 dequant differs from the f32 dequant");
+  // The values are the exact bf16(e4m3 x 2^k).
+  for (size_t i = 0; i < 4096; ++i) {
+    const float want = dgpp::fp8_e4m3_bits_to_float(w8[i]) * sf[(i / k) * sb + (i % k) / 32];
+    if (b[i] != dgpp::float_to_bf16_bits(want)) throw std::runtime_error("e8m0 dequant value differs from bf16(e4m3 x 2^k)");
+  }
+  cudaFree(dw); cudaFree(dsb); cudaFree(dsf); cudaFree(dact); cudaFree(out_f); cudaFree(out_b); cudaFree(deq_f); cudaFree(deq_b);
+  std::printf("[ OK ] the e8m0 byte grid is bitwise the f32 grid (mma_gemv at 1/3/17/40 rows, the dequant bridge)\n");
+}

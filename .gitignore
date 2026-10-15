@@ -18,10 +18,6 @@ install/
 # cache; regenerate with tools/make_shardspec.py or tools/checkpoint_audit.py.
 artifacts/
 
-# Large raw captures from the issue #4 investigations overwhelm workspace
-# snapshots. Keep the reports and scripts visible, but skip generated dumps.
-/benchmarks/results/2026-09-23-issue4-*/raw/
-
 # --- Python tooling -------------------------------------------------------------
 __pycache__/
 *.py[cod]
@@ -38,8 +34,10 @@ venv/
 *~
 .DS_Store
 
-# --- Debug residue ---------------------------------------------------------------
+# --- Local benchmark artifacts --------------------------------------------------
 benchmarks/*
+
+# --- Debug residue ---------------------------------------------------------------
 
 /core
 core.*
@@ -54,9 +52,13 @@ glm_tp_fixture/
 glm_tp_fixture_fp4/
 glm_tp_fixture_wide/
 qwen_engine_fixture/
+qwen_engine_prefix_fixture/
+glm_dsa_engine_fixture*/
+glm_dsa_loader_fixture*/
 qwen_loader_fixture/
 qwen_loader_gptq_fixture/
 qwen_loader_nvfp4_fixture/
+qwen_loader_qad_fixture/
 glm_dsa_loader_fixture/
 mimo_loader_fixture/
 mimo_loader_image_cache/
@@ -82,6 +84,8 @@ scripts/maximize-cluster-memory.sh
 .pi/
 mimo_engine_fixture/
 mimo_engine_cap_fixture/
+
+/shared_*_fixture/
 
 # Test-generated model fixtures: the CUDA tests (dsv41_model_test,
 # mimo_decode_test) regenerate these at runtime; never track the blobs.

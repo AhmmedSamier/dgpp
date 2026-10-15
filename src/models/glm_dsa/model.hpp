@@ -60,6 +60,7 @@
 #include "engine/memory_plan.hpp"
 #include "engine/session_model.hpp"
 #include "kernels/bf12_companions.hpp"
+#include "kernels/draft_head.hpp"
 #include "kernels/gemm.hpp"
 #include "kernels/glm_spec.hpp"
 #include "kernels/l2_prefetch.hpp"
@@ -81,6 +82,7 @@ class GlmDsaModel : public SessionModel<GlmDsaModel> {
   // dense, MoE and head sites over every row; every span within max_tokens.
   int64_t prefill_group_span_limit() const { return max_tokens_; }
   using Base = SessionModel<GlmDsaModel>;
+  static constexpr bool kPrefillChunkGrid = false;
   using Outputs = Base::Outputs;
   using SessionSnapshotMeta = Base::SessionSnapshotMeta;
   using SnapshotRequest = Base::SnapshotRequest;
@@ -118,6 +120,11 @@ class GlmDsaModel : public SessionModel<GlmDsaModel> {
   // closed), fresh state, every row's logits; the slot is closed after.
   // capture_layers: every layer's residual output [T, H] in layer_states.
   Outputs forward(const std::vector<int64_t>& token_ids, bool capture_layers = false);
+  // A test's capture of the session walks too (the Qwen families' form):
+  // every session prefill / step keeps its layer rows and DSA selections
+  // (a sync per layer — diagnostics only). Process-wide.
+  static void set_session_capture_layers(bool on) { session_capture_layers_ = on; }
+  inline static bool session_capture_layers_ = false;
   // The draft block over a prompt (the parity gate's surface): the cold
   // forward, then the draft rows q = 0 .. T-2 (token q+1, the hidden at q)
   // with the head on every row — logits [T-1, count], the draft's normed
@@ -129,7 +136,7 @@ class GlmDsaModel : public SessionModel<GlmDsaModel> {
   // The decode batch's cap (plan D9): sixteen rows since 2026-09-13 (eight
   // slots at MTP depth 1, five at depth 2); the fused select launches
   // them in groups of eight, the pick kernels verdict sixteen requests.
-  static constexpr int decode_rows_cap() { return 16; }
+  static constexpr int decode_rows_cap() { return 32; }  // 16 until 2026-10-13: eight slots x depth 3
   // The same number for a shape that is not built yet (the memory plan).
   static size_t session_snapshot_bytes(const GlmDsaTextConfig& cfg, int tp_world, bool mtp);
   using Base::session_snapshot_bytes;
@@ -156,7 +163,7 @@ class GlmDsaModel : public SessionModel<GlmDsaModel> {
   const DsaStatePool& pool() const { return pool_; }
   void graph_prepare();
   void mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode_row,
-                    bool capture, int head_rows, int batch_requests);
+                    bool capture, int head_rows, int batch_requests, int hidden_row = 0);
   void snapshot_draft_state(int) {}
   void restore_draft_state(int) {}
   // Depth >= 2: the chain rows take the block's output residual (pre
@@ -178,7 +185,9 @@ class GlmDsaModel : public SessionModel<GlmDsaModel> {
 
   void build_layer_objects(const GlmDsaLayerResident& r);
   DsaLayerWeights dsa_view(const GlmDsaAttnResident& a) const;
-  static GlmMoeWeights moe_view(const GlmDsaMoeResident& m);
+  // `hadamard32`: the layer's routed experts take the H32-rotated input
+  // (the NF4I8 checkpoint's main layers; never the draft).
+  static GlmMoeWeights moe_view(const GlmDsaMoeResident& m, bool hadamard32, bool int8_activations = false);
   int moe_ordinal(int layer) const { return layer - cfg_.first_k_dense_replace; }
   int table_slots() const;
   int pool_layers() const { return cfg_.num_hidden_layers + (mtp_ ? 1 : 0); }
@@ -186,6 +195,8 @@ class GlmDsaModel : public SessionModel<GlmDsaModel> {
   // The layer's two blocks over `resid` (the residual, updated in place):
   // the attention block and the MLP/MoE block with their folds.
   struct WalkRows {
+    const RowRun* run = nullptr;
+    int decode_spans = 0;
     const int32_t* req_ids = nullptr;
     const int64_t* pos = nullptr;
     const int32_t* spans = nullptr;
@@ -206,6 +217,13 @@ class GlmDsaModel : public SessionModel<GlmDsaModel> {
     int num_spans = 0;
   };
   void enqueue_layer(const GlmDsaLayerResident& r, int pool_layer, uint16_t* resid, int T, const WalkRows& rows);
+  // A layer's closing residual add (its folded FFN output) is deferred into
+  // the next norm that reads the residual — the next layer's input norm,
+  // the final norm or the draft head's — as one fused kernel
+  // (glm_residual_add_rmsnorm_bf16, 2026-10-13). `pending_add_` holds the
+  // folded rows until then; flush_pending_add applies it alone when a
+  // reader needs the residual itself (a layer snapshot, the draft rows).
+  void flush_pending_add(uint16_t* resid, int T);
   void enqueue_dense(const GlmDsaDenseMlpResident& d, const uint16_t* x, int T, uint16_t* out);
   uint16_t* stage(uint16_t* fallback, int T, int width, bool capture);
   void fold(uint16_t* buf, int T, int width, bool capture);
@@ -222,6 +240,11 @@ class GlmDsaModel : public SessionModel<GlmDsaModel> {
   GlmDsaTextConfig cfg_;
   GlmDsaLayerStream loader_;
   CublasLtGemm gemm_;
+  // The draft head's screen (kernels/draft_head.hpp): built from the served
+  // head at construction under engine.draft_head; answers a decode draft's
+  // head call with the masked row or declines (the exact head runs).
+  DraftHead draft_head_;
+  HeadMatrix draft_head_matrix() const;
   // The bf16 decode weights' 12-bit companions (kernels/bf12_companions.hpp),
   // their planned bytes, and the rows of the walk in flight (the prefetch
   // windows' view).
@@ -261,6 +284,7 @@ class GlmDsaModel : public SessionModel<GlmDsaModel> {
   // Activations [M rows] (the token rows, the head's outputs and the tail
   // mirrors are the core's).
   uint16_t* resid_ = nullptr;  // [M, H] the residual
+  const uint16_t* pending_add_ = nullptr;  // [T, H] the folded FFN rows not yet added to the residual
   uint16_t* x_ = nullptr;      // [M, H] the normed block input
   uint16_t* y_ = nullptr;      // [M, H] the block output (the fold's fallback)
   // The BF16 dense MLP's scratch [M, I/W] (the first layers).

@@ -1584,12 +1584,12 @@ struct CollectiveBus::Impl {
       // (g-1)%kStageRing, shared by every peer's post (the graph kernel
       // snapshots once; the eager machine's per-peer rows are untouched).
       // The door carries the row's fold: the graph kernel's PLACEMENT gate
-      // (StartSlot::hash), same as the eager posting path — computed once,
-      // not once per peer.
+      // (StartSlot::hash), computed during the GPU snapshot and ordered
+      // before the ready_bits release acquired above. Reuse it for every
+      // peer and any ring-deferred retry; the row stays live until done.
       const uint8_t* row =
           stage_buf(0, static_cast<int>((gen - 1) % Impl::kStageRing));
-      const uint64_t row_hash = bus_fold64(
-          reinterpret_cast<const uint64_t*>(row), static_cast<size_t>(elems) / 4);
+      const uint64_t row_hash = cell->stage_hash;
       for (size_t p = 0; p < peer_ranks.size(); ++p) {
         if ((graph.flight.posted_bits >> p) & 1) continue;
         if (!((ready >> p) & 1)) continue;  // row not staged (belt+braces)
@@ -2148,9 +2148,7 @@ struct CollectiveBus::Impl {
                               static_cast<uint32_t>(req.elems * 2), &error,
                               stage_buf(p, coll.stage_gen),
                               lane.stage_lkey, req.ctl_seq,
-                              bus_fold64(reinterpret_cast<const uint64_t*>(
-                                             stage_buf(p, coll.stage_gen)),
-                                         req.elems / 4))) {
+                              bus_fold(stage_buf(p, coll.stage_gen), req.elems * 2))) {
         fail_lane(lane, error);
         poison_collective(req);
         coll_poisoned = true;

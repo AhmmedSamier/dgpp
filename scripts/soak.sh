@@ -1,7 +1,6 @@
 #!/bin/bash
 # soak: the M5 exit-gate mixed-class bus soak as one re-runnable command
-# (the procedure that passed gate 2 on 2026-08-31; see
-# benchmarks/results/2026-08-29-bus-m5.md).
+# (the procedure that passed gate 2 on 2026-08-31).
 #
 # Cycles N fresh (serve, ping --contend --soak-ms) sessions between this
 # node (rank 0, the receiver) and a peer (rank 1, the sender), each a

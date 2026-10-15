@@ -115,7 +115,7 @@ floor; the MoE layer's 1–2 % rows are routing near-ties at margins under
 5e-5). The checkpoint itself: `--verify-only` green on all four nodes,
 `docs/checkpoint_budget_glm53.md` from the headers (every packed triple
 checked against the config's quantization groups). The four nodes (2026-09-12,
-`docs/benchmarks.md`, `benchmarks/results/2026-09-12-glm53-full.md`): boot
+`docs/benchmarks.md`, the 2026-09-12-glm53-full measurements): boot
 30 s from the resident image (405 s the first time), T=1 51 ms/step, MTP
 depth 1 68–76 ms/pass at 1.77–1.97 tokens/pass (36–42 ms/token; acceptance
 77–97 % by class), four live requests 180–185 ms per eight-row step,

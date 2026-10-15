@@ -82,7 +82,7 @@ dgpp::GlmQuantMatrix fp8_matrix(int64_t rows, int64_t cols, uint64_t seed, std::
   DGPP_CUDA_OK(cudaMemcpy(dp->p, payload.data(), pn, cudaMemcpyHostToDevice));
   DGPP_CUDA_OK(cudaMemcpy(ds->p, scales.data(), sn * 4, cudaMemcpyHostToDevice));
   keep.push_back(dp); keep.push_back(ds);
-  return dgpp::GlmQuantMatrix{dp->as<uint8_t>(), ds->as<float>(), rows, cols};
+  return dgpp::GlmQuantMatrix{dp->as<uint8_t>(), ds->as<float>(), nullptr, rows, cols};
 }
 // A random MXFP4 [rows, cols] matrix (e2m1 pairs, e8m0 scales 2^-7 .. 2^-5).
 dgpp::GlmFp4Matrix mxfp4_matrix(int64_t rows, int64_t cols, uint64_t seed, std::vector<DevBuf*>& keep) {

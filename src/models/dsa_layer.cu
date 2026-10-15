@@ -75,11 +75,12 @@ DsaLayer::ScratchLayout DsaLayer::scratch_layout(
   if (max_tokens <= 0 || max_cache_tokens <= 0)
     throw std::invalid_argument(
         "dsa layer: max_tokens and max_cache_tokens must be positive");
-  // 16 since 2026-09-13 (the decode batch's cap): the fused select runs
-  // the rows in groups of eight, the attention tiles and the (row, split)
-  // workspace below scale with the count.
-  if (max_decode_rows <= 0 || max_decode_rows > 16)
-    throw std::invalid_argument("dsa layer: max_decode_rows must be in [1, 16]");
+  // 32 since 2026-10-13 (16 from 2026-09-13; the decode batch's cap, eight
+  // slots at depth 3): the fused select runs the rows in groups of eight
+  // over a workspace laid out for 32, the attention tiles and the (row,
+  // split) workspace below scale with the count.
+  if (max_decode_rows <= 0 || max_decode_rows > 32)
+    throw std::invalid_argument("dsa layer: max_decode_rows must be in [1, 32]");
   if (max_decode_rows > max_tokens)
     throw std::invalid_argument(
         "dsa layer: max_decode_rows must not exceed max_tokens");
@@ -436,12 +437,29 @@ void DsaLayer::project_common(const void* hidden_in, int tokens,
   const int rope = cfg_.qk_rope_head_dim;
   const int nope = cfg_.qk_nope_head_dim;
   const int qkv_cols = cfg_.q_lora_rank + cfg_.kv_lora_rank + rope;
+  // The rotations of this chain (the rope key, q's rope slice, the
+  // indexer's q and k) are collected and issued as ONE launch after the
+  // GEMVs and norms that feed them (dsa_rope_interleave_multi, bitwise the
+  // separate launches): nothing between a rotation's producer and the
+  // launch reads its output, so the order on the stream is free.
+  DsaRopeSegment rot[kRopeMaxSegments];
+  int nrot = 0;
   const auto rotate = [&](void* x, int64_t row_stride, int64_t head_stride,
                           int nheads, void* out, int64_t out_row_stride,
                           int64_t out_head_stride) {
-    dsa_rope_interleave(x, row_stride, head_stride, nheads, rope, pos, w_.rope_table,
-                        w_.rope_table_positions, out, out_row_stride,
-                        out_head_stride, tokens, stream);
+    DsaRopeSegment& g = rot[nrot++];
+    g.x = x;
+    g.out = out;
+    g.x_row_stride = row_stride;
+    g.x_head_stride = head_stride;
+    g.out_row_stride = out_row_stride;
+    g.out_head_stride = out_head_stride;
+    g.heads = nheads;
+  };
+  const auto rotate_all = [&] {
+    if (nrot > 0)
+      dsa_rope_interleave_multi(rot, nrot, rope, pos, w_.rope_table, w_.rope_table_positions, tokens, stream);
+    nrot = 0;
   };
 
   // 1) fused [q_a | kv_a] projection, then RMSNorms on the split halves.
@@ -491,7 +509,10 @@ void DsaLayer::project_common(const void* hidden_in, int tokens,
   if (rope > 0)
     rotate(q_ + nope, geo_.local_q_rows, nope + rope, geo_.local_heads, q_ + nope,
            geo_.local_q_rows, nope + rope);
-  if (!w_.owns_indexer()) return;  // a selection-reusing layer: done
+  if (!w_.owns_indexer()) {  // a selection-reusing layer: done
+    rotate_all();
+    return;
+  }
   // 3) the indexer q, also from the normed q-lora rows (its rope slice is
   // the head's first dims), then Hadamard-128 + fp8 quant.
   gemm_.matmul(q_c_, w_.wq_b, q_idx_, tokens, heads * dim, cfg_.q_lora_rank,
@@ -514,6 +535,7 @@ void DsaLayer::project_common(const void* hidden_in, int tokens,
   // bf16 inputs, fp32 accumulate, fp32 out.
   gemm_.matmul(hidden_in, w_.wp, weights_, tokens, heads, hid, DType::BF16,
                GemmOut::F32, size_t(hid), gemm_ws_, gemm_ws_bytes_, stream);
+  rotate_all();  // the chain's rotations, one launch (the quant below reads q_idx rotated)
   // 6) Hadamard-128 + fp8 quant of the indexer q, then fold the q scale and
   // the combined logit scale into the weights.
   dsa_fwht_quant_rows(q_idx_, int64_t(tokens) * heads, q_fp8_, q_scale_,

@@ -251,6 +251,7 @@ class GenerationService : public HttpHandler,
   // never ride the journal — peers only ever see state changes their
   // identical queues will replay.
   struct PassEvents {
+    std::optional<int64_t> prefill_budget;  // leader-selected adaptive limit
     std::vector<dgpp::sched::SchedulerRequest> submits;
     std::vector<std::string> cancels;
     std::vector<std::string> stops;  // the stop-string retires
@@ -341,6 +342,8 @@ class GenerationService : public HttpHandler,
     double ttft_hit_ms = 0;
     uint64_t ttft_miss_count = 0;
     double ttft_miss_ms = 0;
+    uint64_t first_token_target_misses = 0;
+    uint64_t decode_gap_target_misses = 0;
     // The distributions behind /metrics/prometheus, in seconds or tokens:
     // door to first token (split by prefix-cache attach), door to slot
     // (queue), slot to first token (prefill), first token to retire

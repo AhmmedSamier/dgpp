@@ -68,7 +68,8 @@ cudaError_t bus_globaltimer_offset(int64_t* offset_ns,
                                    uint64_t* uncertainty_ns);
 
 // Host mirror of the consumer fold (bus_types.hpp's mix); the sender uses
-// it to verify the receiver's hash. `bytes` must be a multiple of 8.
+// it to verify the receiver's hash. `bytes` must be a multiple of four.
+// A final u32 is zero-extended rather than omitted from the placement proof.
 uint64_t bus_fold(const void* data, size_t bytes);
 
 // ---- per-collective all-reduce consumer (DESIGN §6.3) ------------------------
@@ -140,6 +141,9 @@ struct alignas(64) BusAllReduceCtl {
   uint64_t gt_last = 0;
   uint64_t gt_done = 0;
   uint64_t gt_claim[kBusMaxPeers] = {};  // per peer (peer index), gated
+  // Graph/stream snapshot's placement hash, published before ready_bits.
+  // Fits the final eight bytes of this cell's existing three cache lines.
+  uint64_t stage_hash = 0;
 };
 static_assert(sizeof(BusAllReduceCtl) == 192,
               "BusAllReduceCtl occupies exactly three cache lines");

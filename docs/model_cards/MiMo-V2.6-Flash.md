@@ -52,7 +52,7 @@ closed `<think></think>` prefix).
 ## Measured
 
 See `docs/benchmarks.md` for the current numbers and
-`benchmarks/results/2026-09-22-mimo-v26-flash/` for the evidence.
+[serving benchmarks](../benchmarks.md) for the summarized measurements.
 
 ## License and attribution
 

@@ -6,6 +6,7 @@
 // magnitudes that keep the forward's nonlinearities informative; the
 // n-gram hash buffers are the config's derivation (the loader refuses
 // anything else) and the table shards follow the checkpoint's row split.
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -101,6 +102,60 @@ inline const char* tiny_gptq_quant_json() {
               "-:.*\\.ple\\..*": {}, "-:.*embed.*": {}, "-:.*fc_hidden.*": {}, "-:.*\\.gate$": {}}})json";
 }
 
+// The QAD export's tiny twin (local-inference-lab/Qwen3.8-Flash-Next-NVFP4,
+// issue #113): a shared expert of 128 (whole 32-wide MXFP8 groups on the
+// down projection's K at worlds 1, 2 and 4), and modelopt's MIXED_PRECISION
+// block naming every quantized module — NVFP4 routed experts, MXFP8 dense
+// stack, the NVFP4 n-gram table on the PLE layer, weight-only NVFP4 draft
+// experts. Everything else (norms F32, the rest BF16) follows from the
+// config's forms through the binding table.
+inline const char* tiny_qad_text_json() {
+  static const std::string s = [] {
+    std::string t = tiny_text_json();
+    const std::string from = "\"shared_expert_intermediate_size\": 64";
+    const size_t at = t.find(from);
+    if (at == std::string::npos) throw std::runtime_error("fixture: shared intermediate anchor");
+    t.replace(at, from.size(), "\"shared_expert_intermediate_size\": 128");
+    return t;
+  }();
+  return s.c_str();
+}
+
+inline const char* tiny_qad_quant_json() {
+  static const std::string s = [] {
+    // The layer kinds of tiny_text_json's layer_types.
+    const bool gdn[4] = {true, true, false, true};
+    std::string q = "{\"quant_method\": \"modelopt\", \"quant_algo\": \"MIXED_PRECISION\", "
+                    "\"kv_cache_quant_algo\": null, \"ignore\": [\"lm_head\", \"model.visual.*\"], "
+                    "\"quantized_layers\": {";
+    bool first = true;
+    auto add = [&](const std::string& key, const char* algo, int group) {
+      if (!first) q += ", ";
+      first = false;
+      q += "\"" + key + "\": {\"quant_algo\": \"" + algo + "\", \"group_size\": " + std::to_string(group) + "}";
+    };
+    for (int l = 0; l < 4; ++l) {
+      const std::string p = "model.language_model.layers." + std::to_string(l) + ".";
+      add(p + "mlp.experts", "NVFP4", 16);
+      if (gdn[l])
+        for (const char* m : {"linear_attn.in_proj_a", "linear_attn.in_proj_b", "linear_attn.in_proj_qkv",
+                              "linear_attn.in_proj_z", "linear_attn.out_proj"})
+          add(p + m, "MXFP8", 32);
+      else
+        for (const char* m : {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
+                              "self_attn.indexer.index_qk_proj"})
+          add(p + m, "MXFP8", 32);
+      for (const char* m : {"mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj", "mlp.shared_expert.down_proj"})
+        add(p + m, "MXFP8", 32);
+    }
+    add("model.language_model.layers.1.ple.ple_embedding.ngram_embedding", "NVFP4", 16);
+    add("mtp.layers.0.mlp.experts", "W4A16_NVFP4", 16);
+    q += "}}";
+    return q;
+  }();
+  return s.c_str();
+}
+
 inline QwenTextConfig tiny_config() {
   const auto t = dgpp::minijson::parse(tiny_text_json());
   const auto q = dgpp::minijson::parse(tiny_quant_json());
@@ -116,6 +171,12 @@ inline QwenTextConfig tiny_nvfp4_config() {
 inline QwenTextConfig tiny_gptq_config() {
   const auto t = dgpp::minijson::parse(tiny_gptq_text_json());
   const auto q = dgpp::minijson::parse(tiny_gptq_quant_json());
+  return QwenTextConfig::parse(t.root, &q.root);
+}
+
+inline QwenTextConfig tiny_qad_config() {
+  const auto t = dgpp::minijson::parse(tiny_qad_text_json());
+  const auto q = dgpp::minijson::parse(tiny_qad_quant_json());
   return QwenTextConfig::parse(t.root, &q.root);
 }
 
@@ -177,13 +238,32 @@ inline std::vector<uint8_t> tensor_bytes(const QwenTextConfig& cfg, const QwenEx
   const bool is_inject = has(name, "block_inject_weight");
   for (size_t i = 0; i < n; ++i) {
     float v;
-    if (e.role == QwenTensorRole::Fp4Payload) {
+    if (e.role == QwenTensorRole::Mxfp8Scale) {
+      // e8m0 scales on 2^-6 .. 2^-4 (three values, so the per-group indexing
+      // is exercised) under e4m3 codes of ~1.6 x N(0, 1): weights of the
+      // BF16 fixture's 0.05 x N(0, 1) magnitude, every value exact in bf16.
+      out[i] = static_cast<uint8_t>(121 + (rng.next() % 3));
+      continue;
+    } else if (e.role == QwenTensorRole::Fp4Payload || e.dtype == dgpp::DType::U8) {
+      // e2m1 code pairs (the routed experts, the NVFP4 table's shards): every byte legal.
       out[i] = static_cast<uint8_t>(rng.next() & 0xffu);
       continue;
-    } else if (e.role == QwenTensorRole::Fp8Payload || e.role == QwenTensorRole::NgramShard ||
-               e.role == QwenTensorRole::Fp4Scale)
+    } else if (e.role == QwenTensorRole::NgramShardScale ||
+               (e.role == QwenTensorRole::Fp4Scale && cfg.dense_mxfp8_shipped))
+      // The QAD twin's e4m3 block scales: non-negative, as modelopt writes
+      // them (the NVIDIA twin keeps its signed draw, which the registered
+      // gates were tuned on).
+      v = std::fabs(rng.normal3());
+    else if (e.role == QwenTensorRole::Mxfp8Payload)
+      v = 1.6f * rng.normal3();                            // e4m3 codes under the 2^-5-ish scales above
+    else if (e.role == QwenTensorRole::Fp8Payload || e.role == QwenTensorRole::NgramShard ||
+             e.role == QwenTensorRole::Fp4Scale)
       v = rng.normal3();                                   // e4m3 codes (scaled at dequant)
-    else if (e.role == QwenTensorRole::Fp4Global) v = 2.0f;
+    else if (e.role == QwenTensorRole::Fp4Global)
+      // The QAD twin: 2^-5, expert weights of the FP8 fixture's magnitude and
+      // an exact reciprocal (the parity budget's near-tie margin); the
+      // NVIDIA twin keeps the 2.0 its gates were tuned on.
+      v = cfg.dense_mxfp8_shipped ? 0.03125f : 2.0f;
     else if (e.role == QwenTensorRole::InputScale) v = 1.0f;
     else if (is_scale_inv) v = 0.01f + 0.06f * (0.5f * (rng.unit() + 1.0f));
     else if (is_table_scale) v = 0.02f;
@@ -217,17 +297,22 @@ inline void write_fixture(const QwenTextConfig& cfg, const std::string& dir,
 // FP8 release's (the default), the NVFP4 release's, or the AutoRound hybrid's.
 inline void write_fixture_for(const QwenTextConfig& cfg, const std::string& dir) {
   if (cfg.experts_gptq_int4) write_fixture(cfg, dir, tiny_gptq_text_json(), tiny_gptq_quant_json(), {});
+  else if (cfg.dense_mxfp8_shipped) write_fixture(cfg, dir, tiny_qad_text_json(), tiny_qad_quant_json(), {});
   else if (cfg.experts_nvfp4) write_fixture(cfg, dir, tiny_text_json(), tiny_nvfp4_quant_json(), {});
   else write_fixture(cfg, dir, tiny_text_json(), tiny_quant_json(), {});
 }
 
 // The engine test's fixture config: DGPP_TEST_QWEN_GPTQ=1 selects the
 // AutoRound hybrid (its dense stack ships as fp8: the test's main puts the
-// loader in the fp8 dense mode for the process). DGPP_TEST_QWEN_NVFP4=1
-// selects NVFP4 experts, independently of the test's dense-weight mode.
+// loader in the fp8 dense mode for the process). DGPP_TEST_QWEN_QAD=1
+// selects the QAD export's twin (MXFP8 dense, NVFP4 table, F32 norms,
+// weight-only draft experts). DGPP_TEST_QWEN_NVFP4=1 selects NVFP4 experts,
+// independently of the test's dense-weight mode.
 inline QwenTextConfig test_config() {
   const char* g = std::getenv("DGPP_TEST_QWEN_GPTQ");
   if (g != nullptr && g[0] == '1') return tiny_gptq_config();
+  const char* q = std::getenv("DGPP_TEST_QWEN_QAD");
+  if (q != nullptr && q[0] == '1') return tiny_qad_config();
   const char* n = std::getenv("DGPP_TEST_QWEN_NVFP4");
   if (n != nullptr && n[0] == '1') return tiny_nvfp4_config();
   return tiny_config();

@@ -3,9 +3,11 @@
 #include <cerrno>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <format>
 #include <stdexcept>
+#include <vector>
 
 namespace dgpp {
 namespace {
@@ -356,6 +358,110 @@ QwenTextConfig QwenTextConfig::parse(const minijson::Value& tc,
       c.ngram_table_fp8 = false;
       return c;
     }
+    // The QAD export (local-inference-lab/Qwen3.8-Flash-Next-NVFP4, issue
+    // #113): modelopt's MIXED_PRECISION block — no config_groups, every
+    // quantized module listed under quantized_layers with its algorithm
+    // and group. Strict: the backbone experts NVFP4/16 in every layer, the
+    // dense stack MXFP8/32 in every layer (all five projections of the
+    // layer's attention form and the three shared-expert matrices), the
+    // n-gram table NVFP4/16 when a PLE exists, the draft experts weight-only
+    // NVFP4/16 when the draft layer exists, nothing else quantized. A
+    // module the engine does not read in that form is refused by name.
+    if (method == "modelopt") {
+      auto bad = [](const std::string& what) {
+        throw std::runtime_error("Qwen quantization_config (modelopt): " + what);
+      };
+      if (const std::string algo = optional_string(q, "quant_algo", ""); algo != "MIXED_PRECISION")
+        bad("only quant_algo MIXED_PRECISION is implemented, got '" + algo + "'");
+      if (const minijson::Value* kv = q.find("kv_cache_quant_algo"); kv != nullptr && !kv->is_null())
+        bad("a quantized KV cache (kv_cache_quant_algo) is not implemented");
+      const minijson::Value* ql = q.find("quantized_layers");
+      if (ql == nullptr || !ql->is_object()) bad("quantized_layers is missing");
+      const int L = c.num_hidden_layers;
+      std::vector<bool> experts_seen(static_cast<size_t>(L), false);
+      // Per layer, the dense modules declared MXFP8/32 (a bitmask over the
+      // eight names below: five of the attention form, three shared).
+      std::vector<unsigned> dense_seen(static_cast<size_t>(L), 0u);
+      static const char* kGdn[] = {"linear_attn.in_proj_a", "linear_attn.in_proj_b", "linear_attn.in_proj_qkv",
+                                   "linear_attn.in_proj_z", "linear_attn.out_proj"};
+      static const char* kQsa[] = {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
+                                   "self_attn.indexer.index_qk_proj"};
+      static const char* kShared[] = {"mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj",
+                                      "mlp.shared_expert.down_proj"};
+      bool table_seen = false, mtp_seen = false;
+      const std::string layers_prefix = "model.language_model.layers.";
+      for (const auto& m : ql->members()) {
+        const std::string key = m.key;
+        if (!m.value.is_object()) bad("quantized_layers['" + key + "'] is not an object");
+        const std::string algo = optional_string(m.value, "quant_algo", "");
+        const int64_t group = optional_int64(m.value, "group_size", -1);
+        auto want = [&](const char* a, int64_t g, const char* what) {
+          if (algo != a || group != g)
+            bad("'" + key + "' is " + algo + "/" + std::to_string(group) + "; the engine reads " + what + " as " +
+                std::string(a) + " with group " + std::to_string(g));
+        };
+        // The draft experts: the file names them under mtp.layers.0 and
+        // again under the absolute index (mtp.layers.48); the tensors live
+        // under mtp.layers.0 alone.
+        if (key.rfind("mtp.layers.", 0) == 0 && key.size() > 11 &&
+            key.compare(key.find('.', 11), std::string::npos, ".mlp.experts") == 0 &&
+            key.substr(11, key.find('.', 11) - 11).find_first_not_of("0123456789") == std::string::npos) {
+          if (c.mtp_layer() < 0) bad("'" + key + "' declared without a draft layer");
+          if (algo != "W4A16_NVFP4" && algo != "NVFP4") want("W4A16_NVFP4", 16, "the draft experts");
+          if (group != 16) want(algo.c_str(), 16, "the draft experts");
+          mtp_seen = true;
+          continue;
+        }
+        if (key.rfind(layers_prefix, 0) != 0) bad("quantized module '" + key + "' is not implemented");
+        const size_t dot = key.find('.', layers_prefix.size());
+        if (dot == std::string::npos) bad("quantized module '" + key + "' is not implemented");
+        const int64_t layer = std::atoll(key.substr(layers_prefix.size(), dot - layers_prefix.size()).c_str());
+        if (layer < 0 || layer >= L) bad("'" + key + "' names a layer outside num_hidden_layers");
+        const std::string module = key.substr(dot + 1);
+        if (module == "mlp.experts") {
+          want("NVFP4", 16, "the routed experts");
+          experts_seen[static_cast<size_t>(layer)] = true;
+          continue;
+        }
+        if (module == "ple.ple_embedding.ngram_embedding") {
+          if (static_cast<int>(layer) != c.ple_layer()) bad("'" + key + "' is not on the PLE layer");
+          want("NVFP4", 16, "the n-gram table");
+          table_seen = true;
+          continue;
+        }
+        const bool gdn = c.layers[static_cast<size_t>(layer)] == QwenLayerKind::Gdn;
+        int bit = -1;
+        for (int i = 0; i < 5 && bit < 0; ++i)
+          if (module == (gdn ? kGdn : kQsa)[i]) bit = i;
+        for (int i = 0; i < 3 && bit < 0; ++i)
+          if (module == kShared[i]) bit = 5 + i;
+        if (bit < 0) bad("quantized module '" + key + "' is not implemented (the engine reads it in BF16)");
+        want("MXFP8", 32, "the dense stack");
+        dense_seen[static_cast<size_t>(layer)] |= 1u << bit;
+      }
+      for (int l = 0; l < L; ++l) {
+        if (!experts_seen[static_cast<size_t>(l)])
+          bad("layer " + std::to_string(l) + "'s routed experts are not declared NVFP4");
+        if (dense_seen[static_cast<size_t>(l)] != 0xFFu) {
+          const bool gdn = c.layers[static_cast<size_t>(l)] == QwenLayerKind::Gdn;
+          for (int i = 0; i < 8; ++i)
+            if (!(dense_seen[static_cast<size_t>(l)] >> i & 1u))
+              bad("layer " + std::to_string(l) + "." + std::string(i < 5 ? (gdn ? kGdn : kQsa)[i] : kShared[i - 5]) +
+                  " is not declared MXFP8 (the engine reads the whole dense stack in the one shipped form)");
+        }
+      }
+      if (!c.ple_layer_ids.empty() && !table_seen) bad("the n-gram table's form is not declared");
+      if (c.mtp_layer() >= 0 && !mtp_seen) bad("the draft layer's experts are not declared");
+      c.experts_fp8 = false;
+      c.experts_nvfp4 = true;
+      c.dense_mxfp8_shipped = true;
+      c.mtp_experts_nvfp4 = c.mtp_layer() >= 0;
+      c.ngram_table_nvfp4 = table_seen;
+      c.ngram_table_fp8 = false;
+      c.norms_f32 = true;
+      (void)c.ngram_geometry();
+      return c;
+    }
     // The AutoRound hybrid (docs/qwen38_autoround_int4_plan.md D7): the
     // GPTQ block the hybrid's tools write. Strict on purpose: the codes and
     // scales the packed core reads, the one `+` rule lifting the lm_head to
@@ -412,7 +518,7 @@ QwenTextConfig QwenTextConfig::parse(const minijson::Value& tc,
       return c;
     }
     if (method != "fp8")
-      throw std::runtime_error("Qwen quantization_config.quant_method: only fp8 and gptq are implemented, got '" + method + "'");
+      throw std::runtime_error("Qwen quantization_config.quant_method: only fp8, gptq and modelopt are implemented, got '" + method + "'");
     const std::vector<int64_t> bs = require_int_array(q, "weight_block_size");
     if (bs.size() != 2 || bs[0] != 128 || bs[1] != 128)
       throw std::runtime_error("Qwen quantization_config.weight_block_size: only [128, 128] is implemented");

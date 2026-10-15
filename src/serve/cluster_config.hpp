@@ -25,6 +25,7 @@
 
 #include "kernels/rope_scaling.hpp"
 #include "serve/http_limits.hpp"
+#include "sched/prefill_latency.hpp"
 
 namespace dgpp::serve {
 
@@ -34,7 +35,7 @@ struct ClusterConfig {
   std::string ssh_user;            // empty: the launcher's own user
   std::string release;             // the installed release the launcher runs (launcher-only; empty: the development binary)
   int http_port = 18080;
-  std::string http_bind = "127.0.0.1";
+  std::string http_bind = "0.0.0.0";
   int64_t http_max_body_bytes = kDefaultHttpMaxBodyBytes;
   int sse_ping_interval = kDefaultSsePingInterval;
   // Local paths and device names may differ by rank; no credentials belong here.
@@ -53,6 +54,19 @@ struct ClusterConfig {
     // per token and summed by one fold (bitwise the same numbers, one
     // small collective per lookup, −1.33 GiB per rank at world 4).
     std::string embed_sharding = "replicated";
+    // The full GLM-5.3 draft block's head (2026-10-09): "checkpoint" reads
+    // the lm head as the main step does (its 12-bit form under
+    // bf16_weights); "fp8" reads a block-FP8 copy encoded at load (e4m3,
+    // 128 x 128 fp32 scales — the FP8 releases' recipe; +0.23 GiB per rank
+    // at world 4). The verifier keeps the main head, so the served
+    // distribution is unchanged; only the draft's proposals (acceptance)
+    // can move. Other families ignore it.
+    std::string mtp_head = "checkpoint";
+    // The full GLM-5.3 attention projections' resident form (2026-10-09):
+    // "checkpoint" as shipped (int8 g64); "int4" re-encoded to int4 g64 at
+    // load (RTN) — −2.1 GB per MTP pass per rank, NOT lossless. Other
+    // families ignore it.
+    std::string attention_weights = "checkpoint";
     // The Qwen n-gram table's residency: "resident" copies it
     // to the device (the default; 47.7 GiB at world 1), "mmap" leaves it
     // on the NVMe behind the page cache and gathers each step's rows on
@@ -71,6 +85,13 @@ struct ClusterConfig {
     // docs/qwen38_single_spark.md).
     std::string dense_weights = "checkpoint";
     std::string fp8_head = "gemv";  // Qwen head: gemv | mma (opt-in)
+    // The MTP draft head's read (2026-10-13; kernels/head_screen.hpp):
+    // "exact" streams the whole head per draft token; "screen" finds the
+    // candidate 128-row blocks through a 2-bit rotated copy and computes
+    // only those exactly — output-exact, only which token is drafted can
+    // differ. draft_head_blocks: the candidate cap, 1..64.
+    std::string draft_head = "exact";
+    int draft_head_blocks = 32;
     // The MTP draft layer's routed-expert layout: "fp8" (the default:
     // per-expert FP8 tensors as the NVIDIA release ships) or "bf16_fused"
     // (the RadixArk release: all 512 experts stacked as fused BF16
@@ -171,7 +192,7 @@ struct ClusterConfig {
     int admission_gather_ms = 3;
     int max_connections = 64;
     bool no_eos = false;
-    bool compact_batches = false;
+    bool compact_batches = true;
     bool decode_graph = false;
     bool mtp = false;
     int mtp_depth = 1;             // draft tokens per step (1..5); needs mtp
@@ -242,6 +263,18 @@ struct ClusterConfig {
     // rate: a sharper draft keeps the argmax's rate on sharp distributions,
     // the request's keeps the overlap on flat ones). 1: the request's.
     double mtp_draft_temperature = 1.0;
+    // Context-lookup drafting (engine/lookup_draft.hpp): fuse a strong
+    // prompt-history match into the MTP drafts on greedy slots. Same
+    // verify rows — throughput only, never the output. Off by default;
+    // every rank must agree (journal + digest carry it).
+    bool lookup_draft = false;
+    int lookup_nmin = 6;     // minimum suffix-match length to propose
+    int lookup_nstrong = 8;  // a match this long is taken on its own
+    int lookup_agree = 2;    // shorter matches need this many leading MTP agreements (v1: unused)
+    // Extra verify rows past the MTP block, filled from the prompt history
+    // (a pinned serving mode: fewer batch slots for a longer block while
+    // copying). 0: the MTP block alone.
+    int lookup_tail = 0;
     // The sampled chain's verify rule: "block" (block verification — the
     // drafts decided jointly; exact, never fewer tokens in expectation
     // than the token rule) or "token" (the token-by-token test).
@@ -258,9 +291,15 @@ struct ClusterConfig {
     bool prefix_head_snapshots = true;  // a cold prompt also keeps its first structural cut (the system prompt's end)
     std::string admission = "full";
     int admission_window = 256;
-    int prefill_budget_tokens = -1;  // automatic on engines with resumable prefill
-    std::string model_alias = "";  // override the served model name (display only)
-    int prefill_idle_budget_tokens = 0;
+    int prefill_budget_tokens = -1;  // automatic: 256 tokens, adjusted to engine geometry
+    std::string model_alias = "";  // the served model name: listed, reported and required of requests (empty: the model id)
+    int prefill_idle_budget_tokens = 0;  // auto busy: up to 4096 for grouped prefill; explicit busy: same budget
+    int decode_gap_target_ms = sched::kDefaultDecodeGapTargetMs;
+    int first_token_target_ms = sched::kDefaultFirstTokenTargetMs;
+    sched::PrefillLatencyTuning prefill_latency;
+    // Omitted: resolve from the constructed engine's mixed-execution support.
+    // Settings retain auto/on/off; the warm journal carries the resolved bool.
+    std::optional<bool> prefill_early_admission;
     double bulk_pace_gbps = -1.0;  // derived from the port rate
     int bulk_inflight = -1;
     int rendezvous_timeout_ms = 120000;

@@ -103,8 +103,10 @@ one:
   scripts/fabric_logprob.py /path/to/new_logs /path/to/ref_logs
   ```
 
-  A run of the same binary twice must show a delta of exactly 0 (the decode
-  path is deterministic). The logits are fp32 (the head's accumulators,
+  Repeats with the same binary, teacher tokens and execution geometry must
+  show a delta of exactly 0. Hold chunk and batch shapes fixed for this control;
+  adaptive scheduling under different load can select different geometry.
+  The logits are fp32 (the head's accumulators,
   unrounded), but the residual stream feeding the head is bf16, so
   single-token deltas of ~0.1 nat are normal between builds that differ in
   reduction order; the mean over the text is the signal. Three

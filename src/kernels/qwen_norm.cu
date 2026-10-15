@@ -90,9 +90,11 @@ __global__ void add_rmsnorm_kernel(uint16_t* __restrict__ resid,
 }
 
 // One block per (row, group): the group's own statistics, the weight
-// indexed by the flat position in the row.
+// indexed by the flat position in the row. NormW: the weight's dtype
+// (uint16_t = BF16, float = the QAD export's F32 norms).
+template <typename NormW>
 __global__ void group_rmsnorm_kernel(const uint16_t* __restrict__ x,
-                                     const uint16_t* __restrict__ weight,
+                                     const NormW* __restrict__ weight,
                                      uint16_t* __restrict__ y, int groups,
                                      int group_dim, float eps) {
   extern __shared__ float staged[];
@@ -103,11 +105,11 @@ __global__ void group_rmsnorm_kernel(const uint16_t* __restrict__ x,
                        static_cast<int64_t>(g) * group_dim;
   const uint16_t* xr = x + base;
   uint16_t* yr = y + base;
-  const uint16_t* wr = weight + static_cast<int64_t>(g) * group_dim;
+  const NormW* wr = weight + static_cast<int64_t>(g) * group_dim;
   const float total = qwen_norm::block_sum_squares(xr, group_dim, staged, warp_sums);
   const float rstd = rsqrtf(total / static_cast<float>(group_dim) + eps);
   for (int i = threadIdx.x; i < group_dim; i += blockDim.x) {
-    const float w1 = 1.0f + bf16_bits_to_float(wr[i]);
+    const float w1 = 1.0f + qwen_norm::norm_weight(wr[i]);
     yr[i] = float_to_bf16_bits(staged[i] * rstd * w1);
   }
 }
@@ -168,16 +170,21 @@ void qwen_add_rmsnorm_bf16(void* resid, const void* add, const void* weight, voi
 
 void qwen_group_rmsnorm_bf16(const void* x, const void* weight, void* y,
                              int64_t rows, int groups, int group_dim, float eps,
-                             cudaStream_t stream) {
+                             cudaStream_t stream, bool weight_f32) {
   check(rows, group_dim, "qwen group rmsnorm");
   if (groups <= 0) throw std::invalid_argument("qwen group rmsnorm: no groups");
   constexpr int kBlock = 256;
   const size_t shmem = sizeof(float) * static_cast<size_t>(group_dim);
   const dim3 grid(static_cast<unsigned>(rows), static_cast<unsigned>(groups), 1);
   cudaGetLastError();
-  group_rmsnorm_kernel<<<grid, kBlock, shmem, stream>>>(
-      static_cast<const uint16_t*>(x), static_cast<const uint16_t*>(weight),
-      static_cast<uint16_t*>(y), groups, group_dim, eps);
+  if (weight_f32)
+    group_rmsnorm_kernel<float><<<grid, kBlock, shmem, stream>>>(
+        static_cast<const uint16_t*>(x), static_cast<const float*>(weight),
+        static_cast<uint16_t*>(y), groups, group_dim, eps);
+  else
+    group_rmsnorm_kernel<uint16_t><<<grid, kBlock, shmem, stream>>>(
+        static_cast<const uint16_t*>(x), static_cast<const uint16_t*>(weight),
+        static_cast<uint16_t*>(y), groups, group_dim, eps);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

@@ -67,6 +67,19 @@ void launch_mma_gemv_fp8_f32(const uint16_t* act, size_t act_stride, const uint8
                              const float* scales, float* out, int m, int n, int k,
                              size_t out_stride, int rs, int cs, cudaStream_t stream,
                              void* ws = nullptr, size_t ws_bytes = 0);
+// The same with the scale grid as e8m0 bytes (2^(b - 127) each; the QAD
+// export's MXFP8 dense stack on its 1 x 32 grid, rs = 0, cs = 5): the
+// dequant bridge's bf16(e4m3 x 2^k) is exact, so the chain is the F32
+// grid's bit for bit at the same values; the bytes are a quarter of the
+// F32 grid's traffic.
+void launch_mma_gemv_fp8e8m0_bf16(const uint16_t* act, size_t act_stride, const uint8_t* w,
+                                  const uint8_t* scales, uint16_t* out, int m, int n, int k,
+                                  size_t out_stride, int rs, int cs, cudaStream_t stream,
+                                  void* ws = nullptr, size_t ws_bytes = 0);
+void launch_mma_gemv_fp8e8m0_f32(const uint16_t* act, size_t act_stride, const uint8_t* w,
+                                 const uint8_t* scales, float* out, int m, int n, int k,
+                                 size_t out_stride, int rs, int cs, cudaStream_t stream,
+                                 void* ws = nullptr, size_t ws_bytes = 0);
 // The swiglu form (2026-10-02, the DeepSeek-V4-Flash shared expert's down
 // projection): out = swiglu(gate, up) x W^T, the activation
 //   g = min(gate, limit), u = clamp(up, -limit, limit), bf16(bf16(g * sigmoid(g)) * u)

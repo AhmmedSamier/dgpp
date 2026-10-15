@@ -180,6 +180,24 @@ Stats compare_bf16(const uint16_t* got, const uint16_t* want, size_t n, int soft
 
 int run_smoke(const std::string& dir) {
   const Qwen35TextConfig cfg = Qwen35TextConfig::from_json_file((fs::path(dir) / "config.json").string());
+  if (cfg.quant_kind == dgpp::Qwen35QuantKind::Fp8Block) {
+    const bool saved = Qwen35Model::dense_weights_fp8();
+    Qwen35Model::set_dense_weights_fp8(true);
+    size_t whole_head = 0;
+    for (int world : {1, 2, 4}) {
+      size_t sum = 0;
+      for (int rank = 0; rank < world; ++rank) {
+        const auto plan = Qwen35Model::plan_memory(cfg, 72, 256, rank, world,
+                                                   dgpp::LoaderResidency::Resident, 1, false);
+        for (const auto& item : plan.items)
+          if (item.name == "blockwise fp8 lm head (E4M3 + scales)") sum += item.device;
+      }
+      if (world == 1) whole_head = sum;
+      require(sum > 0 && sum == whole_head,
+              "FP8 head memory is partitioned across ranks, not replicated");
+    }
+    Qwen35Model::set_dense_weights_fp8(saved);
+  }
   const int T = 72;  // past two 32-token attention tiles
   const std::vector<int64_t> tokens = smoke_tokens(cfg, T);
   Qwen35Model model = make_model(cfg, dir, T, false);
@@ -554,7 +572,7 @@ int run_group_invariance(const std::string& dir) {
 }
 
 int main(int argc, char** argv) {
-  std::string fixture, fixture_mixed, fixture_moe, smoke, rows, group, checkpoint, dump, states;
+  std::string fixture, fixture_mixed, fixture_moe, smoke, rows, group, checkpoint, dump, states, resident_mtp;
   bool relaxed = false, bf16_head = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -564,6 +582,8 @@ int main(int argc, char** argv) {
     else if (a == "--smoke" && i + 1 < argc) smoke = argv[++i];
     else if (a == "--rows-invariance" && i + 1 < argc) rows = argv[++i];
     else if (a == "--group-invariance" && i + 1 < argc) group = argv[++i];
+    else if (a == "--resident-mtp" && i + 1 < argc)
+      resident_mtp = argv[++i];
     else if (a == "--bf16-head") bf16_head = true;
     else if (a == "--checkpoint-dir" && i + 1 < argc) checkpoint = argv[++i];
     else if (a == "--dump-file" && i + 1 < argc) dump = argv[++i];
@@ -585,6 +605,23 @@ int main(int argc, char** argv) {
     if (!fixture_moe.empty()) {
       qwen35fx::write_moe_fixture(fixture_moe);
       std::printf("[ OK ] wrote the MoE fixture to %s\n", fixture_moe.c_str());
+      return 0;
+    }
+    if (!resident_mtp.empty()) {
+      const auto cfg = Qwen35TextConfig::from_json_file(resident_mtp + "/config.json");
+      require(cfg.mtp_layer() >= 0, "resident fixture must contain an MTP layer");
+      for (bool mtp : {false, true}) {
+        auto model = make_model(cfg, resident_mtp, 256, mtp, dgpp::LoaderResidency::Resident);
+        for (int layer = 0; layer < cfg.num_hidden_layers; ++layer)
+          require(
+              model.resident_layer_bytes(layer) == dgpp::Qwen35LayerStream::layer_bytes(cfg, layer),
+              "resident main layer allocation agrees with the memory plan");
+        const size_t expected =
+            mtp ? dgpp::Qwen35LayerStream::layer_bytes(cfg, cfg.mtp_layer()) : 0;
+        require(model.resident_layer_bytes(cfg.mtp_layer()) == expected,
+                "disabled MTP must not materialize a resident draft layer");
+      }
+      std::printf("[ OK ] mixed resident MTP allocation follows the serving option\n");
       return 0;
     }
     if (!smoke.empty()) return run_smoke(smoke);

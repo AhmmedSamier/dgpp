@@ -192,9 +192,64 @@ void check_sparse_vs_grouped(int m, int n, int k) {
   EXPECT_TRUE(same, msg);
 }
 
+// The vector store must preserve row padding and work through unaligned
+// output views. Odd N also leaves a final scalar column in an aligned row.
+void check_output_layouts(int k = 256) {
+  using namespace dgpp;
+  const Case c = make_case(3073, 137, k, 1.7f, 51);
+  const auto ref = run_fp4w(c);
+  Dev d = upload(c);
+  const GlmFp4Matrix w{d.payload, d.scales, d.global, c.n, c.k, kFp4Group};
+  constexpr uint16_t sentinel = 0xA55A;
+  for (int stride : {c.n, c.n + 1, c.n + 3}) {
+    for (int offset : {0, 1}) {
+      const size_t count = static_cast<size_t>(c.m) * stride + 16;
+      std::vector<uint16_t> host(count, sentinel);
+      uint16_t* allocation = nullptr;
+      CHECK_CUDA(cudaMalloc(&allocation, count * sizeof(uint16_t)));
+      CHECK_CUDA(
+          cudaMemcpy(allocation, host.data(), count * sizeof(uint16_t), cudaMemcpyHostToDevice));
+      auto* output = allocation + 4 + offset;
+      launch_fp4w_gemm_bf16(d.act, c.k, w, output, c.m, c.n, c.k, d.s, stride);
+      CHECK_CUDA(cudaStreamSynchronize(d.s));
+      CHECK_CUDA(
+          cudaMemcpy(host.data(), allocation, count * sizeof(uint16_t), cudaMemcpyDeviceToHost));
+      bool same = true;
+      for (size_t index = 0; index < count; ++index) {
+        const int64_t relative = static_cast<int64_t>(index) - 4 - offset;
+        uint16_t expected = sentinel;
+        if (relative >= 0 && relative / stride < c.m && relative % stride < c.n)
+          expected = ref[static_cast<size_t>(relative / stride) * c.n + relative % stride];
+        same &= host[index] == expected;
+      }
+      EXPECT_TRUE(same, "strided/unaligned output and guard values must match");
+      CHECK_CUDA(cudaFree(allocation));
+    }
+  }
+}
+
+// Identical input rows must keep the same bits when the long TP2 shape
+// selects sixteen warps instead of eight. Exercise both actual shard shapes.
+void check_long_dispatch(int n, int k) {
+  Case c = make_case(3073, n, k, 1.7f, 53);
+  const auto wide = run_fp4w(c);
+  c.m = 3071;
+  const auto short_rows = run_fp4w(c);
+  bool same = true;
+  for (size_t i = 0; i < short_rows.size(); ++i) same &= wide[i] == short_rows[i];
+  EXPECT_TRUE(same, "long TP2 warp dispatch must preserve each output dot bitwise");
+}
+
 }  // namespace
 
 int main() {
+  // Both sides of the long TP2 dispatch, including partial M/N tiles and
+  // guarded scalar output stores in the sixteen-warp specialization.
+  check_sparse_vs_grouped(3073, 137, 8704);
+  check_sparse_vs_grouped(3072, 8704, 128);
+  check_output_layouts(8704);
+  check_long_dispatch(8704, 5120);
+  check_long_dispatch(5120, 8704);
   check_oracle(144, 512, 512, 3200.f, 42, "oracle ragged tiles");
   check_oracle(512, 512, 1024, 3200.f, 43, "oracle full tiles");
   check_oracle(256, 1024, 5120, 6400.f, 44, "oracle gate-K slice");
@@ -203,11 +258,18 @@ int main() {
   check_sparse_vs_grouped(200, 5120, 17408);
   check_vs_grouped(512, 4352, 5120, 45, "vs grouped gate");
   check_vs_grouped(256, 5120, 17408, 46, "vs grouped down");
-  // The wired shape: the kernel runs above 1024 rows only, where the tile
-  // order spans several m-groups (m_tiles > kGroupM: a full 8-tile group
+  // Past 1024 rows, the tile order spans several m-groups
+  // (m_tiles > kGroupM: a full 4-tile group
   // plus a tail group, the 2080-token prefill's pattern). Below, every
   // case above stays single-group and never walks the group scheduler.
   check_oracle(1152, 512, 256, 3200.f, 47, "oracle multi-group tail");
+  // A ragged 256-row tile and N tail, with outputs above the oracle's
+  // cancellation floor; this also crosses the model's 1024-row dispatch.
+  check_oracle(1025, 136, 256, 1.7f, 49, "oracle wide tile and column tails");
+  check_oracle(1024, 136, 256, 1.7f, 50, "oracle prefill dispatch boundary");
+  check_oracle(3073, 137, 256, 1.7f, 51, "oracle long prefill and odd column tail");
+  check_output_layouts();
+  check_sparse_vs_grouped(1152, 512, 256);
   check_vs_grouped(1152, 5120, 17408, 48, "vs grouped multi-group");
   if (failures == 0) std::printf("fp4w_gemm_test: all passed\n");
   return failures == 0 ? 0 : 1;

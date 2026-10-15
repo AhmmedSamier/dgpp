@@ -59,18 +59,20 @@ taken under `prefix_cache`.
 
 ## Current recipe capacities
 
-The following are per-rank memory-plan results for the checked-in recipes,
-with their configured MTP settings, re-measured on 2026-09-28. Snapshot size is
-independent of context length for these model families. A longer document
+The table covers selected checked-in recipes. KV pools and arena budgets
+reflect their current JSON settings; snapshot sizes come from the 2026-09-28
+memory-plan measurements, with slot counts adjusted for the current budgets.
+It is not a new performance run. Snapshot size is independent of context length
+for these model families. A longer document
 uses more **KV blocks**, not a larger snapshot slot.
 
 | Recipe | Concurrent requests | KV token pool | Budget, GiB | MiB per snapshot | Slots |
 |---|---:|---:|---:|---:|---:|
-| Qwen NVFP4, one node | 4 | 65,536 | 3 | 110.317 | 27 |
+| Qwen NVFP4, one node | 4 | 262,144 | 3 | 110.317 | 27 |
 | Qwen NVFP4, two nodes | 4 | 262,144 | 58 | 55.263 | 1074 |
 | Qwen FP8, two nodes | 4 | 262,144 | 6 | 55.263 | 111 |
-| Qwen NVFP4 YaRN, two nodes | 2 | 532,480 | 40 | 55.263 | 741 |
-| Qwen FP8, four nodes | 4 | 262,144 | 50 | 27.735 | 1846 |
+| Qwen NVFP4 YaRN, two nodes | 2 | 565,248 | 40 | 55.263 | 741 |
+| Qwen FP8, four nodes | 4 | 1,052,672 | 40 | 27.735 | 1476 |
 | GLM-5.3-Flash, two nodes | 4 | 163,840 | 4.5 | 70.422 | 65 |
 | GLM-5.3-Flash, four nodes | 4 | 786,432 | 22 | 35.227 | 639 |
 | GLM-4.7, four nodes | 4 | 262,144 | 1.5 | 0.010 | 4096 |
@@ -143,12 +145,26 @@ Inspect `/v1/metrics` and the boot/retire logs before changing a budget:
   A miss naming a changed MTP lookahead token correctly rejects stale draft
   state. Neither is resolved by a larger arena.
 
+MTP hop snapshots are captured before the exact sampled fallback runs. When
+that fallback accepts additional tokens, it can pass an aligned position
+whose snapshot was never taken. The engine reports the capture outcome
+explicitly: the scheduler retains an unchanged older snapshot at its original
+position, or keeps the slot empty if there was no previous snapshot. It does
+not count either case as a new hop snapshot.
+
+`prefix_cache.skipped_hop_fallback` counts those skipped captures;
+`skipped_hop_mismatch` counts inconsistent outcomes or stored positions that
+caused an optional snapshot to be dropped, with a warning. Prometheus exposes
+them as `dgpp_prefix_cache_skipped_hop_fallback_total` and
+`dgpp_prefix_cache_skipped_hop_mismatch_total`. A fallback skip is distinct
+from `skipped_no_block`, which records pool pressure. If a hop replacement
+runs out of pool blocks, the previous snapshot has also been released and
+cannot become a close entry. Model-position checks and non-pool engine errors
+still propagate.
+
 Resolve the site configuration before running a recipe's plan:
 
 ```bash
 python3 scripts/dgpp-cluster resolve --config deploy/cluster_qwen-3.8-flash-next_nvfp4_w2_yarn512k.example.json > /tmp/qwen-resolved.json
 build-release/dgpp-serve --config /tmp/qwen-resolved.json --rank 0 --memory-plan
 ```
-
-See the [implementation and validation record](../benchmarks/results/2026-09-21-prefix-document-reuse.md)
-for the measured reuse, capacity and correctness checks.

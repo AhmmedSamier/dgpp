@@ -16,6 +16,18 @@
 //    tiles staged once per CTA and read by all of the group's warps. Rows
 //    attend [0, pos[r]] through the per-row mask; the CTA walks to the
 //    tile's furthest position.
+//    2026-10-15 (measured on the GB10 at 262K context, full waves, bitwise
+//    the previous loop): the PV pass runs its two key halves as two passes,
+//    the rescale is skipped when no row's maximum moved, a tile's K/V rows
+//    are one contiguous strip (32 divides the page) resolved once per tile
+//    with shifts instead of a per-thread table and 64-bit divides, one
+//    barrier per tile instead of three, and the staging copies bypass L1:
+//    45.9 -> 56.5 TFLOP/s. A bisection of what is left (the inner loops
+//    alone reach 86 at this occupancy) puts the staging path at 23 % of
+//    the kernel, the softmax chain at 15 % and the lockstep barrier at
+//    12 %; bulk (TMA 1-D) row copies were measured slower (64 half-KB
+//    descriptors a tile), the 2-D tensor form and a ping-pong warp
+//    schedule are the open items.
 //
 // Numerics (both forms): probabilities rounded to bf16 for P V, the
 // denominator summing the unrounded values (the QSA rule); the dots'
@@ -70,6 +82,13 @@ __device__ __forceinline__ void fcp_async16(void* dst, const void* src, bool val
   const unsigned d = static_cast<unsigned>(__cvta_generic_to_shared(dst));
   const int bytes = valid ? 16 : 0;  // 0: zero-fill
   asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n" ::"r"(d), "l"(src), "r"(bytes));
+}
+// The L1-bypassing form for the tile walk's staging (2026-10-15: +7 % at
+// full waves over .ca on the GB10; the row form is unmeasured and keeps .ca).
+__device__ __forceinline__ void fcp_async16_cg(void* dst, const void* src, bool valid) {
+  const unsigned d = static_cast<unsigned>(__cvta_generic_to_shared(dst));
+  const int bytes = valid ? 16 : 0;  // 0: zero-fill
+  asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(d), "l"(src), "r"(bytes));
 }
 __device__ __forceinline__ uint32_t fpack_bf16(float lo, float hi) {
   return static_cast<uint32_t>(float_to_bf16_bits(lo)) | (static_cast<uint32_t>(float_to_bf16_bits(hi)) << 16);
@@ -275,9 +294,9 @@ __global__ __launch_bounds__(256) void full_attn_combine_kernel(const float* __r
 __global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_tile_kernel(
     const uint16_t* __restrict__ q, int64_t q_row_stride, const uint16_t* __restrict__ k_cache,
     const uint16_t* __restrict__ v_cache, const int32_t* __restrict__ bt, const int64_t* __restrict__ pos,
-    int rows, int local_heads, int kv_heads, int block_tokens, float scale, float* __restrict__ out) {
+    int rows, int local_heads, int kv_heads, int block_shift, int width_shift, float scale,
+    float* __restrict__ out) {
   extern __shared__ __align__(16) uint16_t sm[];
-  __shared__ int64_t s_off[2][kKTile];
   const int r0 = blockIdx.x * kQTile;
   const int kvh = blockIdx.y;
   const int group = local_heads / kv_heads;
@@ -285,7 +304,6 @@ __global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_tile_kernel(
   const int lane = threadIdx.x & 31;
   const int g = lane >> 2, t = lane & 3;
   const int head = kvh * group + warp;
-  const int width = kv_heads * kD;
   const int nthreads = blockDim.x;
   const float sl2 = scale * 1.4426950408889634f;
   // The tile's rows and their positions; the walk covers the furthest one.
@@ -312,31 +330,35 @@ __global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_tile_kernel(
       qa[ks][3] = v1 ? *reinterpret_cast<const uint32_t*>(q0 + (g + 8) * q_row_stride + c + 8) : 0u;
     }
   }
-  // Stage a 32-token tile into buffer `buf`: warp 0 resolves the physical
-  // rows (one lane per token), every thread copies its share of the
-  // 2 x 32 x 32 16-byte chunks. Callers bracket with __syncthreads.
-  auto resolve = [&](int64_t base, int buf) {
-    if (warp == 0) {
-      int64_t off = 0;
-      const int64_t tok = base + lane;
-      if (tok < cnt) {
-        const int64_t phys = static_cast<int64_t>(bt[tok / block_tokens]) * block_tokens + tok % block_tokens;
-        off = phys * width + static_cast<int64_t>(kvh) * kD;
-      }
-      s_off[buf][lane] = off;
-    }
-  };
+  // Stage a 32-token tile into buffer `buf`. A tile never straddles a page
+  // (32 divides the page), so its K and V rows are one contiguous strip:
+  // one lane resolves the page once per tile and the warp shuffles the base
+  // around, and every 16-byte chunk's address is base + row * width + chunk
+  // (v6, 2026-10-15: the per-chunk page lookups and 64-bit address chains
+  // of the per-thread form carried 26 % of the stall samples).
+  const int64_t head_off = static_cast<int64_t>(kvh) * kD;
+  const int tile_shift = block_shift - 5;  // pages per tile: log2(block_tokens / 32)
+  const int64_t width_elems = int64_t{1} << width_shift;
   auto stage = [&](int64_t base, int buf) {
     uint16_t* kt = sm + buf * kTileStageElems;
     uint16_t* vt = kt + kKTile * kRow;
+    const int64_t tile = base >> 5;
+    int64_t strip = 0;
+    if (lane == 0) {
+      const int64_t page = static_cast<int64_t>(bt[tile >> tile_shift]);
+      const int64_t in_page = (tile & ((int64_t{1} << tile_shift) - 1)) << 5;
+      strip = (((page << block_shift) + in_page) << width_shift) + head_off;
+    }
+    strip = __shfl_sync(0xffffffffu, strip, 0);
+    const int64_t valid_rows = cnt - base < kKTile ? cnt - base : kKTile;
     for (int c = threadIdx.x; c < 2 * kKTile * 32; c += nthreads) {
       const int plane = c >> 10;        // 0: K, 1: V
       const int i = (c >> 5) & 31;      // token
       const int ch = c & 31;            // 16-byte chunk of the 256-dim row
-      const bool valid = base + i < cnt;
-      const int64_t off = s_off[buf][i] + ch * 8;
+      const bool valid = i < valid_rows;
+      const int64_t off = strip + i * width_elems + ch * 8;
       uint16_t* dst = (plane ? vt : kt) + i * kRow + ch * 8;
-      fcp_async16(dst, (plane ? v_cache : k_cache) + off, valid);
+      fcp_async16_cg(dst, (plane ? v_cache : k_cache) + (valid ? off : 0), valid);
     }
     asm volatile("cp.async.commit_group;\n" ::);
   };
@@ -347,22 +369,15 @@ __global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_tile_kernel(
   float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.f, l1 = 0.f;
 
   const int64_t tiles = (cnt + kKTile - 1) / kKTile;
-  if (tiles > 0) {
-    resolve(0, 0);
-    __syncthreads();
-    stage(0, 0);
-  }
+  if (tiles > 0) stage(0, 0);
   for (int64_t it = 0; it < tiles; ++it) {
     const int buf = static_cast<int>(it & 1);
-    if (it + 1 < tiles) {
-      resolve((it + 1) * kKTile, buf ^ 1);
-      __syncthreads();
-      stage((it + 1) * kKTile, buf ^ 1);
-      asm volatile("cp.async.wait_group 1;\n" ::);
-    } else {
-      asm volatile("cp.async.wait_group 0;\n" ::);
-    }
+    // Tile `it` has landed, and every warp is done with the other buffer
+    // (tile it-1): one barrier per tile, then the next tile's loads go out
+    // into that buffer and fly behind this tile's compute.
+    asm volatile("cp.async.wait_group 0;\n" ::);
     __syncthreads();
+    if (it + 1 < tiles) stage((it + 1) * kKTile, buf ^ 1);
     const uint16_t* kt = sm + buf * kTileStageElems;
     const uint16_t* vt = kt + kKTile * kRow;
     const int64_t base = it * kKTile;
@@ -417,14 +432,20 @@ __global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_tile_kernel(
                             fpack_bf16(p[1][0], p[1][1]), fpack_bf16(p[1][2], p[1][3])};
     const uint32_t pb[4] = {fpack_bf16(p[2][0], p[2][1]), fpack_bf16(p[2][2], p[2][3]),
                             fpack_bf16(p[3][0], p[3][1]), fpack_bf16(p[3][2], p[3][3])};
+    if (__any_sync(0xffffffffu, a0 != 1.f || a1 != 1.f)) {
 #pragma unroll
-    for (int d = 0; d < 32; ++d) {
-      acc[d][0] *= a0;
-      acc[d][1] *= a0;
-      acc[d][2] *= a1;
-      acc[d][3] *= a1;
+      for (int d = 0; d < 32; ++d) {
+        acc[d][0] *= a0;
+        acc[d][1] *= a0;
+        acc[d][2] *= a1;
+        acc[d][3] *= a1;
+      }
     }
-    // O += P V: tokens 0-15 then 16-31, 16 x4.trans loads each.
+    // O += P V: every column pair with tokens 0-15 first, then with 16-31,
+    // so an accumulator's two dependent mmas sit 32 instructions apart (the
+    // interleaved order put them two apart and stalled the warp on the mma
+    // latency every pair: ncu 2026-10-15). Per accumulator the order is the
+    // same, tokens 0-15 then 16-31: bitwise the interleaved loop.
 #pragma unroll
     for (int dp = 0; dp < 16; ++dp) {
       uint32_t b[4];
@@ -432,11 +453,15 @@ __global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_tile_kernel(
       fldsm_x4_t(b, vp);
       fmma_bf16(acc[dp * 2], pa, b[0], b[1]);
       fmma_bf16(acc[dp * 2 + 1], pa, b[2], b[3]);
-      fldsm_x4_t(b, vp + 16 * kRow);
+    }
+#pragma unroll
+    for (int dp = 0; dp < 16; ++dp) {
+      uint32_t b[4];
+      const uint16_t* vp = vt + ((lane & 7) + ((lane >> 3) & 1) * 8 + 16) * kRow + dp * 16 + (lane >> 4) * 8;
+      fldsm_x4_t(b, vp);
       fmma_bf16(acc[dp * 2], pb, b[0], b[1]);
       fmma_bf16(acc[dp * 2 + 1], pb, b[2], b[3]);
     }
-    __syncthreads();  // this buffer's reads done before the stage after next overwrites it
   }
 #pragma unroll
   for (int o = 1; o <= 2; o <<= 1) {
@@ -525,10 +550,21 @@ void full_attn_prefill(const uint16_t* q, int64_t q_row_stride, const uint16_t* 
     return;
   }
   set_attrs_once();
+  // The strip staging wants a page of >= 32 tokens and a K/V row width that are
+  // powers of two (the serving pool: 64-token pages, 1/2/4 KV heads x 256);
+  // any other geometry walks the row form like the wider groups do.
+  const int width = kv_heads * kD;
+  if (block_tokens < kKTile || (block_tokens & (block_tokens - 1)) != 0 || (width & (width - 1)) != 0) {
+    full_attn_decode(q, q_row_stride, k_cache, v_cache, req_ids, pos, rows, local_heads, kv_heads, block_tokens,
+                     block_tables, blocks_per_request, scale, out, nullptr, stream);
+    return;
+  }
+  const int block_shift = __builtin_ctz(static_cast<unsigned>(block_tokens));
+  const int width_shift = __builtin_ctz(static_cast<unsigned>(width));
   const dim3 grid(static_cast<unsigned>((rows + kQTile - 1) / kQTile), static_cast<unsigned>(kv_heads));
   full_attn_tile_kernel<<<grid, group * 32, kTileSmem, stream>>>(q, q_row_stride, k_cache, v_cache, block_table,
-                                                                  pos, rows, local_heads, kv_heads, block_tokens,
-                                                                  scale, out);
+                                                                  pos, rows, local_heads, kv_heads, block_shift,
+                                                                  width_shift, scale, out);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

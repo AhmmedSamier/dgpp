@@ -91,6 +91,11 @@ class RcLane {
   bool ok() const {
     return slab_ != nullptr && qp_[0] != nullptr && qp_[1] != nullptr;
   }
+  // The 64-byte doorbell and credit cells ride inline in their work
+  // requests when the device grants max_inline_data >= 64 at QP creation
+  // (2026-10-13; the NIC then reads the cell from the WQE instead of a
+  // separate DMA of host memory — one PCIe round trip fewer per handshake).
+  bool inline_cells(BusPool pool) const { return inline_ok_[pool == BusPool::kLatency ? 0 : 1]; }
 
   // -- send side ---------------------------------------------------------
   // Posts the payload SEND (unsignaled) followed by the doorbell SEND
@@ -139,6 +144,7 @@ class RcLane {
  private:
   VerbsDevice* device_ = nullptr;
   ibv_qp* qp_[2] = {nullptr, nullptr};     // [latency, bulk]
+  bool inline_ok_[2] = {false, false};
   ibv_cq* tx_cq_[2] = {nullptr, nullptr};
   ibv_cq* rx_cq_[2] = {nullptr, nullptr};
   ibv_mr* mr_ = nullptr;

@@ -31,7 +31,8 @@ namespace dgpp {
 // the decode step's D2H copies land here mid-step (stream-ordered, no
 // sync) and the caller reads them after its next stream sync — the
 // session materializes Outputs.routes this way after the step's final
-// sync. All three buffers may be null (the copies are skipped).
+// sync. A null trace skips all copies; a supplied trace requires ids and
+// weights, while biased logits are optional.
 struct MoeTraceStaging {
   int32_t* ids = nullptr;     // [tokens * top_k]
   float* weights = nullptr;  // [tokens * top_k]
@@ -86,17 +87,24 @@ class GlmMoeLayer {
   // (MoeExpertKernel::kMma); enqueue(), the host-orchestrated reference,
   // takes the kernel as an argument — kGemv by default (the decode pin),
   // kMma to serve as the prefill path's bitwise reference.
+  // Mixed rows retain the native slot recipe for the decoder prefix. Only
+  // readers enter the grouped chain; each row is computed once. A decoder-only
+  // bounded phase bypasses the grouped chain entirely.
   void enqueue_prefill(const uint16_t* hidden, uint16_t* out, int tokens,
-                       MoeTraceStaging* trace, cudaStream_t stream);
+                       MoeTraceStaging* trace, cudaStream_t stream, int decode_prefix = 0);
   // The prefill in phases, for a caller that overlaps its boundary folds
   // with the per-row ends of the layer (the DeepSeek-V4 walk, 2026-10-02):
   // the router over a row block ahead of the chain (route_prefill_rows on
   // every row before enqueue_prefill_phased), the chain without its
   // accumulation, the accumulation per row block. The same kernels per
   // row as enqueue_prefill: bitwise its output.
+  // A mixed phase writes its native prefix directly to `out`; every later
+  // accumulation must pass the same prefix so those rows are retained.
   void route_prefill_rows(const uint16_t* hidden, int r0, int rows, cudaStream_t stream);
-  void enqueue_prefill_phased(const uint16_t* hidden, int tokens, cudaStream_t stream);
-  void accumulate_prefill_rows(uint16_t* out, int tokens, int r0, int rows, cudaStream_t stream);
+  void enqueue_prefill_phased(const uint16_t* hidden, int tokens, cudaStream_t stream,
+                             int decode_prefix = 0, uint16_t* out = nullptr);
+  void accumulate_prefill_rows(uint16_t* out, int tokens, int r0, int rows, cudaStream_t stream,
+                               int decode_prefix = 0);
   void enqueue(const uint16_t* hidden, uint16_t* out, int tokens,
                cudaStream_t stream,
                MoeExpertKernel kernel = MoeExpertKernel::kGemv);
@@ -111,7 +119,8 @@ class GlmMoeLayer {
   // in fp32 — the Qwen prefill (its BF16 shared expert follows).
   void enqueue_prefill_f32(const uint16_t* hidden, float* out, int tokens,
                            MoeTraceStaging* trace, cudaStream_t stream,
-                           MoeExpertKernel kernel = MoeExpertKernel::kMma);
+                           MoeExpertKernel kernel = MoeExpertKernel::kMma,
+                           int decode_prefix = 0);
   // Whether the tensor-core expert kernel takes this layer's fp8 scale grid:
   // the checkpoint's 128 x 128, or a re-blocked TP slice grid of 32/64 with
   // hidden and the slice both multiples of 32 (the ldmatrix tile kernel,
@@ -145,6 +154,18 @@ class GlmMoeLayer {
   // for a consumer that folds the accumulation itself (accumulate = false).
   const float* decode_slot_down() const { return d_slot_down_; }
   const float* decode_weights() const { return d_weights_; }
+
+  // The Mixed346 contract's expert-input codes (cfg.routed_int8_activations;
+  // null otherwise): a caller that produces the token rows' codes and
+  // scales itself — the post-attention norm fused with the quantizer
+  // (glm_rmsnorm_bf16_quant_int8) — writes them here ([rows, hidden] int8 at
+  // stride hidden, [rows, hidden / 128] fp32) and marks them ready; the
+  // next decode or tensor-core prefill enqueue then skips its own quantizer
+  // (the gathered-row GEMV chain quantizes its gathered rows regardless).
+  // The mark is consumed by that enqueue.
+  int8_t* hidden_codes() const { return d_hidden_q_; }
+  float* hidden_code_scales() const { return d_hidden_qs_; }
+  void mark_hidden_codes_ready(bool ready) { hidden_codes_ready_ = ready; }
 
   // Fills graph slot `table_slot`'s device expert-view table from the
   // CURRENT binding (an async H2D on `stream`; the caller syncs before
@@ -198,6 +219,7 @@ class GlmMoeLayer {
 
  private:
   void check_expert_geometry() const;
+  void copy_route_trace(MoeTraceStaging* trace, int tokens, cudaStream_t stream, int output_row = 0);
   // enqueue()/enqueue_f32(): exactly one of out_bf16 / out_f32 is set.
   void enqueue_host(const uint16_t* hidden, uint16_t* out_bf16, float* out_f32,
                     int tokens, cudaStream_t stream, MoeExpertKernel kernel);
@@ -240,8 +262,9 @@ class GlmMoeLayer {
                           cudaStream_t stream);
 
   // The router, then (hash routing) the routes replaced from the table.
-  void route(const uint16_t* hidden, int tokens, cudaStream_t stream, int* counters = nullptr);
-  void prefill_chain(const uint16_t* hidden, int tokens, cudaStream_t stream);
+  void route(const uint16_t* hidden, int tokens, cudaStream_t stream, int* counters = nullptr,
+             int token_row = 0);
+  void prefill_chain(const uint16_t* hidden, int tokens, cudaStream_t stream, int route_row = 0);
   bool shared_aside_takes(bool with_shared, int tokens) const;
   const int32_t* hash_tid2eid_ = nullptr;
   const int64_t* hash_tokens_ = nullptr;
@@ -277,6 +300,16 @@ class GlmMoeLayer {
   // decode-slot scratch (cudaMalloc; sized to decode_slots*(top_k+1) rows —
   // the slot layout the kernels index: routed K + shared, per token)
   uint16_t* d_slot_act_ = nullptr;  // [slots, inter] (fused gate/up/swiglu)
+  uint16_t* d_hidden_rot_ = nullptr;  // [decode_slots, hidden]: the token rows rotated by H32 (NF4I8)
+  // The Mixed346 contract's int8 activation codes and fp32 scales
+  // (cfg.routed_int8_activations; kernels/hadamard32.cu): the expert-input
+  // rows [max(rows_total, decode_slots), hidden] and the SwiGLU rows
+  // [max(rows_total, decode rows), inter] — decode and prefill share them.
+  int8_t* d_hidden_q_ = nullptr;
+  float* d_hidden_qs_ = nullptr;
+  bool hidden_codes_ready_ = false;  // mark_hidden_codes_ready: the next enqueue reads them as given
+  int8_t* d_act_q_ = nullptr;
+  float* d_act_qs_ = nullptr;
   float* d_slot_down_ = nullptr;
   int32_t* d_slot_order_ = nullptr; // [slots] expert-sorted execution order
   // GlmMoeConfig::shared_mma_aside: the shared expert's own chain.

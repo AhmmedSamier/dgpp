@@ -342,6 +342,9 @@ counters on both metrics routes:
 | `num_accepted_tokens_total` | Sum of accepted draft tokens across all positions. |
 | `num_draft_tokens_per_pos_total` | Attempt counts, starting with the first speculative position. |
 | `num_accepted_tokens_per_pos_total` | Accepted counts in the same position order. |
+| `num_lookup_fused_total` | Steps whose drafts a prompt-history match replaced (`engine.lookup_draft`; 0 when off). |
+| `num_lookup_agree_fused_total` | The fused steps taken below `lookup_nstrong`, on device-pick agreement. |
+| `num_lookup_sampled_fused_total` | The fused steps on sampled slots (fused rows re-priced as point masses). |
 
 The arrays contain `depth` entries, up to eight. Non-MTP engines report zero
 totals and empty arrays. Counts exclude graph padding and the non-speculative
@@ -390,9 +393,17 @@ The families mirror the JSON fields:
 | Occupancy | `dgpp_num_requests_running` (slots held, prefills included), `_waiting`, `_prefilling`, `dgpp_pending_admissions`, `dgpp_pending_cancellations`, `dgpp_kv_pool_blocks_total`, `_in_use`, `dgpp_kv_cache_usage_perc` (0-1), `dgpp_scheduler_snapshot_age_seconds`, `dgpp_prefill_inflight_prompt_tokens`, `_remaining_tokens` |
 | Requests | `dgpp_requests_total`, `_shed_total`, `_shed_pool_total`, `_cancelled_total`, `_failed_total`, `_rejected_total`, `dgpp_request_finished_total{reason}` (`eos`, `length`, `stop`, `cancelled`, `pool_exhausted`, `none`; counts choices), `dgpp_tool_calls_total`, `dgpp_reservations_grown_total` |
 | Tokens and engine time | `dgpp_prompt_tokens_total` (attached prefixes included), `_computed_total`, `_cached_total`, `dgpp_generation_tokens_total`, `dgpp_prompts_prefilled_total`, `dgpp_prefill_seconds_total`, `dgpp_prefill_request_seconds_total`, `dgpp_decode_steps_total`, `dgpp_decode_rows_total`, `dgpp_decode_step_seconds_total` |
+| Prefill policy | `dgpp_admission_decode_gap_target_ms`, `dgpp_admission_first_token_target_ms`, `dgpp_admission_prefill_{initial_tokens,latency_headroom_pct,growth_factor,cost_recovery_pct}`, `dgpp_prefill_adaptive_limit_tokens`, `dgpp_first_token_target_misses_total`, `dgpp_decode_gap_target_misses_total` |
+| Prefill work | `dgpp_prefill_chunk_{steps,budget_tokens,available_tokens,computed_tokens}_total` (budgeted physical advances; a grouped walk counts once) |
 | Decode graphs | `dgpp_decode_batch_*` ([decode graph batch counters](operations.md#decode-graph-batch-counters)), `replays_by_slots_total{slots}` |
 | Speculative decoding | `dgpp_spec_decode_depth`, `_num_drafts_total`, `_num_draft_tokens_total`, `_num_accepted_tokens_total`, `_num_draft_tokens_per_pos_total{position}`, `_num_accepted_tokens_per_pos_total{position}` (positions from 0) |
 | Prefix cache | `dgpp_prefix_cache_slots`, `_entries`, `_blocks_pinned`, `_snapshot_bytes`, `_hits_total`, `_misses_total`, `_queries_total`, `_tokens_saved_total`, the snapshot, eviction, duplicate and skip counters (`_skipped_no_block_total` rising means pool pressure), the arena copy counts and seconds |
+
+JSON reports the same configuration in `service.admission`, target misses in
+`service.latency_target_misses`, and selected limits/work in
+`scheduler.prefill_chunks`. The adaptive limit is zero with fixed budgeting.
+Time targets are soft objectives; a miss counter does not imply an engine error.
+See [scheduler policy and metric meanings](operations.md).
 
 The histograms (`_bucket`, `_sum`, `_count`) are measured on rank 0's clock:
 
@@ -417,7 +428,9 @@ share of the work as `dgpp_rank_*`, labeled `rank`: `dgpp_rank_info{rank,world_s
 collectives it waited on included), `dgpp_rank_generation_tokens_total`,
 `dgpp_rank_num_requests_running`, `dgpp_rank_kv_pool_blocks_total` and
 `_in_use`, `dgpp_rank_collectives_total` (the bus's completed multi-rank
-collectives) and `dgpp_rank_snapshot_age_seconds`. Ranks run every step
+collectives) and `dgpp_rank_snapshot_age_seconds`. Prefill work and the selected
+limit also appear as `dgpp_rank_prefill_chunk_{steps,budget_tokens,available_tokens,computed_tokens}_total`
+and `dgpp_rank_prefill_adaptive_limit_tokens`. Ranks run every step
 together, so step time per step that is higher on one rank than on the others
 points at that rank's GPU or link. Rank 0 appends its own (`rank="0"`) to
 `/metrics/prometheus` in a multi-rank world. A peer serves no HTTP API; with

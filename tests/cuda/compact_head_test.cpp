@@ -80,6 +80,7 @@ void check(const Config& cfg, const std::string& dir, Factory make, Planner plan
   auto full = make(false);
   auto compact = make(true);
   const bool enabled = compact_logits_rows(true, capacity, 2) > 0;
+  capacity += 1;  // full decode family plus the other request's prefill output
   require(full->logits_capacity_rows() == 256, "diagnostic logits capacity");
   require(compact->logits_capacity_rows() == (enabled ? capacity : 256), "serving logits capacity");
   const size_t saving =

@@ -19,6 +19,7 @@
 #include "common/test.hpp"
 #include "kernels/bf12_companions.hpp"
 #include "kernels/bf16_gemv.hpp"
+#include "kernels/gemv_wide.hpp"
 #include "kernels/gemm.hpp"
 #include "scale_gemm_test_helpers.hpp"
 
@@ -346,9 +347,10 @@ DGPP_TEST(bf16_gemv_ragged_n_short_k_and_multi_row) {
 // types, including the strided-activation view and a ragged second n.
 DGPP_TEST(bf16_gemv_multi_matches_four_single_launches_bitwise) {
   // The GDN's decode shape: four projections off one activation — a wide
-  // one, a medium one and two 12-row ones — in one launch, m = 1..4.
+  // one, a medium one and two 12-row ones — in one launch, m = 1..8 (the
+  // wide chunk, gemv_wide.hpp, past four).
   dgpp::CublasLtGemm gemm;
-  for (int m = 1; m <= 4; ++m) {
+  for (int m = 1; m <= 8; ++m) {
     const Problem a = make_problem(m, 2560, 2560, 2560, 0x0e00 + m);
     const Problem b = make_problem(m, 1536, 2560, 2560, 0x0e10 + m);
     const Problem c = make_problem(m, 12, 2560, 2560, 0x0e20 + m);
@@ -410,9 +412,43 @@ DGPP_TEST(bf16_gemv_multi_rows_matches_the_chunked_launches_bitwise) {
   std::printf("[ OK ] row-group GEMV: m = 1..64 bitwise the chunked four-row launches\n");
 }
 
+// The wide chunk (gemv_wide.hpp, 2026-10-14): five to eight rows in one
+// launch at the Flash's 4096-wide activation (64 KB of staged rows, past
+// the 48 KB default: the opted-in ceiling) — each row of the launch
+// bitwise the same row alone, both output types, and inside the oracle's
+// budget. Below the opt-in (k = 1024) the same for the narrow ceiling.
+DGPP_TEST(bf16_gemv_wide_rows_bitwise_the_rows_alone) {
+  dgpp::CublasLtGemm gemm;
+  require(dgpp::gemv::enable_wide_rows(), "the wide chunk's shared-memory opt-in took");
+  for (const int k : {1024, 4096}) {
+    for (int m = 5; m <= 8; ++m) {
+      const Problem p = make_problem(m, 1536, k, static_cast<size_t>(k), 0x4a00 + m + k);
+      require(dgpp::bf16_gemv_accepts(p.weight.data(), m, k) == dgpp::gemv::smem_fits_wide(m, k),
+              "the contract admits the wide rows the ceiling fits");
+      Device d(p);
+      const std::vector<uint16_t> got = run_bf16(gemm, p, d);
+      const std::vector<float> got32 = run_f32(gemm, p, d);
+      check_bf16(p, got, ("wide m=" + std::to_string(m) + " k=" + std::to_string(k)).c_str());
+      for (int r = 0; r < m; ++r) {
+        Problem one{1, p.n, p.k, p.act_stride, {}, p.weight};
+        one.act.assign(p.act.begin() + static_cast<long>(r * p.act_stride),
+                       p.act.begin() + static_cast<long>((r + 1) * p.act_stride));
+        Device d1(one);
+        const std::vector<uint16_t> alone = run_bf16(gemm, one, d1);
+        const std::vector<float> alone32 = run_f32(gemm, one, d1);
+        require(std::memcmp(alone.data(), got.data() + static_cast<size_t>(r) * p.n, static_cast<size_t>(p.n) * 2) == 0,
+                "a wide launch's row is bitwise the row alone (bf16)");
+        require(std::memcmp(alone32.data(), got32.data() + static_cast<size_t>(r) * p.n, static_cast<size_t>(p.n) * 4) == 0,
+                "a wide launch's row is bitwise the row alone (f32)");
+      }
+    }
+  }
+  std::printf("[ OK ] wide chunk: m = 5..8 at k = 1024 and 4096 bitwise the rows alone\n");
+}
+
 DGPP_TEST(bf16_gemv_dual_matches_two_single_launches_bitwise) {
   dgpp::CublasLtGemm gemm;
-  for (int m = 1; m <= 4; ++m) {
+  for (int m = 1; m <= 8; ++m) {
     const Problem a = make_problem(m, 1024, 128, 4352, 0x0d0a + m);
     const Problem b = make_problem(m, 1000, 128, 4352, 0x0d0b + m);  // ragged n
     Device da(a), db(b);
@@ -448,8 +484,12 @@ DGPP_TEST(bf16_gemv_contract_rejects_odd_k_and_falls_back) {
   // says so) — and the launcher refuses it outright.
   require(!dgpp::bf16_gemv_accepts(reinterpret_cast<void*>(16), 1, 12),
           "k=12 outside the contract");
-  require(!dgpp::bf16_gemv_accepts(reinterpret_cast<void*>(16), 5, 64),
-          "m=5 outside the contract");
+  require(!dgpp::bf16_gemv_accepts(reinterpret_cast<void*>(16), 9, 64),
+          "m=9 outside the contract (gemv::kWideRows)");
+  // The one-to-four-row chunks keep the default shared-memory ceiling
+  // whether or not the wide opt-in took: 4 x 8192 bf16 is 64 KB.
+  require(!dgpp::bf16_gemv_accepts(reinterpret_cast<void*>(16), 4, 8192),
+          "m=4, k=8192 outside the default ceiling");
   require(!dgpp::bf16_gemv_accepts(reinterpret_cast<void*>(8), 1, 64),
           "8B-aligned weight outside the contract");
   require(dgpp::bf16_gemv_accepts(reinterpret_cast<void*>(16), 4, 64),
