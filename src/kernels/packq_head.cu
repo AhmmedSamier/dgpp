@@ -9,20 +9,13 @@
 
 #include "common/cuda_check.hpp"
 #include "kernels/packq_gemv.cuh"
+#include "kernels/packq_planes.cuh"
 
 namespace dgpp {
 
 // ---------------------------------------------------------------------------
 // The plane layout of one 128-code group (packq_head.hpp).
 // ---------------------------------------------------------------------------
-// Bit position of code j (0..15 of a chunk) in the chunk's two-bit plane
-// words: pairs (j, j + 4) and (8 + j, 12 + j) 16 bits apart, as the nibble
-// plane's word pairs are, so a pair is one shift-and-mask (the fp16 trick).
-__host__ __device__ constexpr int packq_planes_pos(int j) {
-  constexpr int base[4] = {0, 16, 8, 24};
-  return 2 * (j & 3) + base[j >> 2];
-}
-
 void packq_planes_permute_int8(uint8_t* payload, int64_t rows, int64_t cols) {
   if (payload == nullptr || rows <= 0 || cols <= 0 || cols % 128 != 0)
     throw std::invalid_argument("packq_planes_permute_int8: cols must be a positive multiple of 128");
@@ -70,40 +63,9 @@ using packq_gemv::kSteps;
 constexpr int kBits = 8;
 constexpr int SF = packq_gemv::kScaleF16G128;
 constexpr int kGroupCodes = 128;
-
-// The three fragments of chunk ci (16 codes) of a row in the plane layout.
-struct PlaneChunk {
-  uint2 nib;      // codes' high nibbles: code j at bits 4j of the 64-bit pair
-  uint32_t mid;   // bits 3..2 of code j at bits 2j
-  uint32_t lo;    // bits 1..0 of code j at bits 2j
-};
-// The row's three planes: nibbles [0, K/2), bits 3..2 [K/2, 3K/4), bits
-// 1..0 [3K/4, K); chunk ci's 16 codes are 8 B of the first and 4 B of each
-// of the others.
-__device__ __forceinline__ void load_hi6(const uint8_t* __restrict__ w, int row, int K, int ci, uint2& nib,
-                                         uint32_t& mid) {
-  const uint8_t* rb = w + static_cast<size_t>(row) * K;
-  nib = *reinterpret_cast<const uint2*>(rb + ci * 8);
-  mid = *reinterpret_cast<const uint32_t*>(rb + K / 2 + ci * 4);
-}
-__device__ __forceinline__ uint32_t load_lo2(const uint8_t* __restrict__ w, int row, int K, int ci) {
-  const uint8_t* rb = w + static_cast<size_t>(row) * K;
-  return *reinterpret_cast<const uint32_t*>(rb + K / 2 + K / 4 + ci * 4);
-}
-// The chunk's 16 codes back in the packed core's word order (word q holds
-// codes 4q..4q+3, code j at bits 8 (j % 4)) — consume_chunk<8> then runs
-// the production chain on them.
-__device__ __forceinline__ uint4 assemble(const uint2& nib, uint32_t mid, uint32_t lo) {
-  uint32_t w[4] = {0u, 0u, 0u, 0u};
-#pragma unroll
-  for (int j = 0; j < 16; ++j) {
-    const uint32_t nb = ((j < 8 ? nib.x : nib.y) >> (4 * (j & 7))) & 0xFu;
-    const uint32_t md = (mid >> packq_planes_pos(j)) & 3u;
-    const uint32_t lw = (lo >> packq_planes_pos(j)) & 3u;
-    w[j >> 2] |= ((nb << 4) | (md << 2) | lw) << (8 * (j & 3));
-  }
-  return make_uint4(w[0], w[1], w[2], w[3]);
-}
+using packq_planes::assemble;
+using packq_planes::load_hi6;
+using packq_planes::load_lo2;
 
 // The six-bit pass's chunk: part[a] = sum_j (16 nb_j + 4 md_j - 126.5) x_j
 // (the code with its low two bits at their centre 1.5, minus the zero

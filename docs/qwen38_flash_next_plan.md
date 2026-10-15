@@ -1,7 +1,7 @@
 # Qwen3.8-Flash-Next-FP8 on dgpp — architecture study and implementation plan (2026-09-09)
 
 > NVFP4 deployments: the [single-Spark guide](qwen38_single_spark.md) covers
-> world 1, and the [two-Spark benchmark](../benchmarks/results/2026-09-16-qwen-nvfp4-w2.md)
+> world 1, and the two-Spark benchmark
 > covers world 2. Both map the n-gram table from NVMe and use the graph engine.
 
 Status: the text path is implemented, including tensor-parallel loading,
@@ -175,7 +175,7 @@ with radix histograms, refining only its boundary bin until at most 256
 keys need ordering. It then sorts the selected pool ids before expanding
 them to tokens. Short rows retain streaming top-k. Both paths use the same
 workspace and graph nodes; ties, incomplete pools and inactive rows preserve
-the selection contract. The [long-context selection record](../benchmarks/results/2026-09-21-qwen-qsa-select.md)
+the selection contract. The long-context selection record
 contains cold/warm measurements and exact host-oracle coverage through 131K pools.
 
 ### 1.5 Gated Residual (GR)
@@ -756,7 +756,7 @@ snapshots; (f) QSA: indexer projection + q norm/RoPE, raw-key ring and block
 compression, scorer, top-512 with the tie rule, list expansion with the
 tail, listed GQA-256 attention (decode split/combine; prefill row-batched),
 dense causal GQA-256 for short prompts, gate multiply. Gate: every test
-green; microbench numbers recorded in `benchmarks/results/`.
+green; microbench numbers recorded in local run artifacts.
 
 Status (2026-09-09): (a)–(f) built with oracles and tests — norms, GDN,
 GR, the MoE (the shared MoE layer's `SoftmaxTopk` router mode and

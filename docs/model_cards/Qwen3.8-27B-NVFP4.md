@@ -40,7 +40,7 @@ against the FP8 sibling release's per-layer RMS, 2026-10-06).
 
 The four-node TP legs of the FP8 card's table have NVFP4 siblings
 (`--weights nvfp4`); the weight bytes per rank are smaller, the draft
-layer and BF16 islands are unchanged. The independent [PR review and follow-ups](../../benchmarks/results/2026-10-11-pr95-followups/README.md)
+layer and BF16 islands are unchanged. The independent PR review and follow-ups
 record the current kernel, numerical checks and measured serving comparisons.
 
 ## Original dense NVFP4 production kernel (2026-10-06)
@@ -135,17 +135,16 @@ This hybrid checkpoint stores 26.87% fewer nominal transformer source bytes
 per rank, including scales. This is checkpoint byte accounting, not a DRAM
 traffic measurement. Attention, the last eight MLPs, the head and drafter
 remain common costs. Matched CUDA traces, sampler-overhead controls, per-layer timings,
-collective analysis and rotating matrix probes are in the
-[detailed investigation](../../benchmarks/results/2026-10-11-pr95-followups/decode-investigation.md).
+collective analysis and rotating matrix probes informed the October 11
+comparison.
 The uninstrumented comparisons pass all 60 decode cells and all 12 cold-prefill
 buckets across TP1/2/4 against the stronger FP8 bracket. Decode gains range
 from 1.49% to 40.44% across five prompt classes and C1/C2/C4/C8.
 Four-node decode with drafting disabled improves 21.98%.
 The final prefill build separately confirms all-world prose decode and
-four-node longer-context decode, preserving the prior outputs. See the
-[serving record](../../benchmarks/results/2026-10-11-pr95-followups/README.md)
-for individual repetitions, baseline drift, limits and both build identities;
-small measured margins are not a guarantee for every input.
+four-node longer-context decode, preserving the prior outputs. Small measured
+margins are not a guarantee for every input; the build revisions and summarized
+measurements are in [serving benchmarks](../benchmarks.md).
 
 The earlier 100-case GSM8K sample scored 95/100 for NVFP4 and
 96/100 for FP8; both scored 100/100 on extraction. These samples do not

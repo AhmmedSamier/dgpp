@@ -91,7 +91,7 @@ batch before a scheduled commit. This delay did not change the checkpoint.
 The completed checkpoint remains at
 `/workspace/dgpp-fp8-experiment/production/checkpoint` on Runpod. Small manifests,
 logs, and source provenance are preserved under
-`benchmarks/results/2026-10-08-glm53-nf4i8-production/`; no model weights were
+the 2026-10-08-glm53-nf4i8-production measurements; no model weights were
 produced or downloaded into the local checkout.
 
 ## Full-model results
@@ -498,7 +498,7 @@ Experimental tools (no production dispatch changes):
   across independent tasks or a broader document population.
 
 Result artifacts are under
-`benchmarks/results/2026-10-08-glm53-w4a8-pilot/`. The canonical evidence is:
+the 2026-10-08-glm53-w4a8-pilot measurements. The canonical evidence is:
 
 - `full-final`, `full-nf4-int8`, and `full-nf4-g128`: full-model manifests,
   scores, and per-token metrics.
@@ -519,8 +519,8 @@ Rebuild the derived summary with:
 
 ```sh
 python3 tools/glm53_quant_summary.py \
-  benchmarks/results/2026-10-08-glm53-w4a8-pilot \
-  --output benchmarks/results/2026-10-08-glm53-w4a8-pilot/summary.json
+  /path/to/pilot-results \
+  --output /path/to/pilot-results/summary.json
 ```
 
 The full-model manifests contain each run's arguments and input hashes;

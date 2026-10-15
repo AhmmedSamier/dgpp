@@ -92,9 +92,11 @@ class PrefixArena {
   // step's first row — the aligned position `expected_position` the step
   // committed past — into `slot`, from the model's spec snapshot rows
   // (`spec_row` the slot's first row of that step).
+  // Returns false on pool exhaustion, leaving the slot empty even when
+  // this was a replacement. Other failures propagate.
   // `rows_after`: the rows the step committed past the position (1 under
   // the two-row step; a deeper verify's accepted - 1).
-  void snapshot_post_row0(int req, int slot, int64_t expected_position, int spec_row,
+  bool snapshot_post_row0(int req, int slot, int64_t expected_position, int spec_row,
                           int rows_after = 1) {
     check(slot);
     if (model_->session_position(req) != expected_position + rows_after)
@@ -114,10 +116,11 @@ class PrefixArena {
     } catch (const CachePoolExhausted& e) {
       DGPP_LOG_WARN("prefix cache: hop snapshot at {} skipped for session {}: {}", expected_position, req,
                     e.what());
-      return;
+      return false;
     }
     end_timer(t, &snapshot_ms_, &snapshots_);
     filled_[static_cast<size_t>(slot)] = true;
+    return true;
   }
   // The slot's bytes and metadata (the gates compare them).
   const void* slot_data(int slot) const {

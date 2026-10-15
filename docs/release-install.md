@@ -46,7 +46,7 @@ is Ubuntu 24.04; older distributions may not provide compatible glibc/libstdc++.
    For two Sparks, set `CONFIG=deploy/cluster_qwen-3.8-flash-next_fp8_w2.json`
    before copying; for one, use
    `CONFIG=deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.json`.
-   See [deployment filenames](deploy/README.md) for the templates and the knobs that vary them.
+   See [deployment filenames](../deploy/README.md) for the templates and the knobs that vary them.
 3. Check the JSON's `model` and `world_size`. Leave its engine settings
    unchanged for the first run. Pass this file explicitly with `--config`.
    `CONFIG` is a shell variable for brevity; set it again in a new terminal.
@@ -72,7 +72,7 @@ is Ubuntu 24.04; older distributions may not provide compatible glibc/libstdc++.
 
 5. Copy the appropriate device names and GID indices into `.env`. Match
    lane order by subnet across nodes; choose one or two lanes. Merge per-node
-   differences into `DGPP_NODE_OVERRIDES`. See [networking](docs/networking.md).
+   differences into `DGPP_NODE_OVERRIDES`. See [networking](networking.md).
    Discovery shows the deployment's selected lane order and local candidates;
    neither proves RDMA connectivity. Failed probes retain other nodes' results.
 

@@ -30,6 +30,7 @@
 #include <cuda_runtime.h>
 
 #include "common/cuda_check.hpp"
+#include "kernels/draft_head.hpp"
 #include "common/dtypes.hpp"
 #include "common/log.hpp"
 #include "common/test.hpp"
@@ -317,4 +318,11 @@ DGPP_TEST(qwen35_mixed_prefill_tp_loopback_worlds_2_and_4_match_world_1) {
   check_quant_worlds(true, 2304);
 }
 
-int main() { return dgpp::test::run_all(); }
+int main() {
+  // DGPP_TEST_DRAFT_SCREEN=N: every case drafts through the head screen
+  // (kernels/draft_head.hpp) with an N-block candidate cap; every gate
+  // holds unchanged (the verify reads the exact head; only drafts move).
+  if (const char* d = std::getenv("DGPP_TEST_DRAFT_SCREEN"); d && d[0] != '\0')
+    dgpp::draft_head_configure(dgpp::DraftHeadSettings{std::atoi(d)});
+  return dgpp::test::run_all();
+}

@@ -136,6 +136,33 @@ struct QwenTextConfig {
   bool lm_head_gptq_int8 = false;
   bool dense_fp8_shipped = false;
   int gptq_group = 128;
+  // The quantization-aware-distilled export (local-inference-lab/
+  // Qwen3.8-Flash-Next-NVFP4, issue #113): modelopt's MIXED_PRECISION
+  // block names every quantized module. The backbone's routed experts are
+  // the NVIDIA release's NVFP4 triple; the four forms below are the
+  // export's own, each a fact of the checkpoint the binding enforces by
+  // name (no engine key selects them):
+  //   dense_mxfp8_shipped  the GDN a/b/qkv/z/out, QSA q/k/v/o and indexer
+  //                        projections and the shared experts of the 48
+  //                        backbone layers as MXFP8 — e4m3 `.weight` [N, K]
+  //                        with one e8m0 `.weight_scale` byte per 32
+  //                        columns of a row ([N, K/32], U8). The draft
+  //                        layer's keep BF16.
+  //   mtp_experts_nvfp4    the draft layer's experts as the NVFP4 triple
+  //                        WITHOUT an input_scale (W4A16_NVFP4: the
+  //                        activations stay bf16; no W4A4 on that layer).
+  //   ngram_table_nvfp4    the n-gram table shards as e2m1 codes
+  //                        (`shard_s.weight` U8 [rows, 80]) with e4m3
+  //                        scales per 16 (`shard_s.weight_scale` [rows,
+  //                        10]) and one F32 `ngram_embedding.weight_scale_2`.
+  //   norms_f32            the backbone's hyper-connection norms (the
+  //                        model mixer's too) and the PLE norms trained in
+  //                        F32 and shipped so (the publisher's serving
+  //                        requirement); the draft layer's norms stay BF16.
+  bool dense_mxfp8_shipped = false;
+  bool mtp_experts_nvfp4 = false;
+  bool ngram_table_nvfp4 = false;
+  bool norms_f32 = false;
 
   // --- vision (docs/vision.md) --------------------------------------------
   // The multimodal release's tower, parsed from the root config's

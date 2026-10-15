@@ -7,6 +7,7 @@
 // through the GEMM interface, at a GEMV-shaped and a GEMM-shaped token count.
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -364,4 +365,79 @@ DGPP_TEST(qwen_ple_staged_gather_is_bitwise_the_table_gather) {
   require(std::memcmp(a.data(), b.data(), a.size() * 2) == 0, "the staged gather differs from the table gather");
   cudaFree(d_table); cudaFree(d_ids); cudaFree(d_out); cudaFree(d_out2); cudaFreeHost(staged);
   std::printf("[ OK ] the staged gather is bitwise the table gather over %d rows x %d heads\n", n, heads);
+}
+
+// The NVFP4 table (the QAD export): the device gather against the host
+// decode — (e2m1 x e4m3) x global in fp32, one bf16 rounding — bitwise at
+// world 1 and on a head slice, and the staged form bitwise the device one.
+namespace {
+float e2m1_value(uint8_t code) {
+  static const float kMag[8] = {0.f, 0.5f, 1.f, 1.5f, 2.f, 3.f, 4.f, 6.f};
+  const float v = kMag[code & 7u];
+  return (code & 8u) ? -v : v;
+}
+// value[row][k] of a codes [rows, hd/2] + scales [rows, hd/16] table.
+uint16_t fp4_table_value(const std::vector<uint8_t>& codes, const std::vector<uint8_t>& scales, int hd, int64_t row,
+                         int k, float global) {
+  const uint8_t byte = codes[static_cast<size_t>(row) * (hd / 2) + k / 2];
+  const uint8_t nib = (k & 1) ? (byte >> 4) : (byte & 0xFu);
+  const float s = dgpp::fp8_e4m3_bits_to_float(scales[static_cast<size_t>(row) * (hd / 16) + k / 16]);
+  const float v = (e2m1_value(nib) * s) * global;
+  return dgpp::float_to_bf16_bits(v);
+}
+}  // namespace
+
+DGPP_TEST(qwen_ple_fp4_gather_matches_the_host_decode_and_its_staged_form) {
+  constexpr int rows = 4096, head_dim = 160, heads = 16, n = 37;
+  const float global = 3.324236e-05f * 64.0f;  // the release's global, lifted into a visible range
+  std::vector<uint8_t> codes(static_cast<size_t>(rows) * head_dim / 2), scales(static_cast<size_t>(rows) * head_dim / 16);
+  uint64_t x = 0x9E3779B97F4A7C15ull;
+  for (auto& b : codes) { x ^= x << 13; x ^= x >> 7; x ^= x << 17; b = static_cast<uint8_t>(x & 0xFF); }
+  for (auto& b : scales) { x ^= x << 13; x ^= x >> 7; x ^= x << 17; b = dgpp::float_to_fp8_e4m3_bits(1.0f + static_cast<float>(x % 400)); }
+  std::vector<int32_t> ids(static_cast<size_t>(n) * heads);
+  for (auto& id : ids) { x ^= x << 13; x ^= x >> 7; x ^= x << 17; id = static_cast<int32_t>(x % rows); }
+  // The host decode, row (t, h) = table[ids[t, h]].
+  std::vector<uint16_t> want(static_cast<size_t>(n) * heads * head_dim);
+  for (int t = 0; t < n; ++t)
+    for (int h = 0; h < heads; ++h)
+      for (int k = 0; k < head_dim; ++k)
+        want[(static_cast<size_t>(t) * heads + h) * head_dim + k] =
+            fp4_table_value(codes, scales, head_dim, ids[static_cast<size_t>(t) * heads + h], k, global);
+  DevBuf dcodes = up(codes), dscales = up(scales), dids = up(ids);
+  DevBuf dout(want.size() * 2), dout2(want.size() * 2), dslice(static_cast<size_t>(n) * 8 * head_dim * 2);
+  cudaStream_t st = test_stream();
+  dgpp::qwen_ple_gather_fp4_bf16(static_cast<const uint8_t*>(dcodes.p), static_cast<const uint8_t*>(dscales.p), 0, rows,
+                                 global, static_cast<const int32_t*>(dids.p), n, heads, 0, heads, head_dim,
+                                 static_cast<uint16_t*>(dout.p), st);
+  // A head slice (rank 1 of 2: heads 8..15) from the whole table.
+  dgpp::qwen_ple_gather_fp4_bf16(static_cast<const uint8_t*>(dcodes.p), static_cast<const uint8_t*>(dscales.p), 0, rows,
+                                 global, static_cast<const int32_t*>(dids.p), n, heads, 8, 8, head_dim,
+                                 static_cast<uint16_t*>(dslice.p), st);
+  // The staged form: the host's gather of codes and scales into pinned rows.
+  uint8_t* staged_codes = nullptr;
+  uint8_t* staged_scales = nullptr;
+  DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&staged_codes), static_cast<size_t>(n) * heads * (head_dim / 2), cudaHostAllocDefault));
+  DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&staged_scales), static_cast<size_t>(n) * heads * (head_dim / 16), cudaHostAllocDefault));
+  for (int t = 0; t < n; ++t)
+    for (int h = 0; h < heads; ++h) {
+      const size_t pair = static_cast<size_t>(t) * heads + h;
+      const size_t row = static_cast<size_t>(ids[pair]);
+      std::memcpy(staged_codes + pair * (head_dim / 2), codes.data() + row * (head_dim / 2), head_dim / 2);
+      std::memcpy(staged_scales + pair * (head_dim / 16), scales.data() + row * (head_dim / 16), head_dim / 16);
+    }
+  dgpp::qwen_ple_gather_staged_fp4_bf16(staged_codes, staged_scales, global, n, heads, head_dim,
+                                        static_cast<uint16_t*>(dout2.p), st);
+  DGPP_CUDA_OK(cudaStreamSynchronize(st));
+  const std::vector<uint16_t> got = down<uint16_t>(dout, want.size());
+  const std::vector<uint16_t> got2 = down<uint16_t>(dout2, want.size());
+  const std::vector<uint16_t> slice = down<uint16_t>(dslice, static_cast<size_t>(n) * 8 * head_dim);
+  require_bitwise("fp4 gather vs host decode", got.data(), want.data(), want.size() * 2);
+  require_bitwise("fp4 staged gather vs device gather", got2.data(), got.data(), want.size() * 2);
+  for (int t = 0; t < n; ++t)
+    for (int j = 0; j < 8 * head_dim; ++j)
+      require(slice[static_cast<size_t>(t) * 8 * head_dim + j] == got[static_cast<size_t>(t) * heads * head_dim + 8 * head_dim + j],
+              "fp4 head slice is not the embedding's column range");
+  cudaFreeHost(staged_codes);
+  cudaFreeHost(staged_scales);
+  std::printf("[ OK ] the NVFP4 table gather is bitwise the host decode over %d rows x %d heads\n", n, heads);
 }

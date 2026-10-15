@@ -9,6 +9,7 @@
 
 #include "common/cuda_check.hpp"
 #include "common/test.hpp"
+#include "engine/prefill_task.hpp"
 #include "models/qwen/forward.hpp"
 #include "qwen_fixture.hpp"
 
@@ -164,6 +165,63 @@ DGPP_TEST(qwen_image_prefill_attached_mtp_catchup) {
   m.session_close(1);
   m.session_release_snapshot(meta);
   DGPP_CUDA_OK(cudaFree(snapshot));
+}
+
+DGPP_TEST(qwen_image_prefill_shared_task_lifetime) {
+  for (const bool mtp : {false, true}) {
+    QwenModel m(config, fixture, 64, 512, QwenResidency::Resident, nullptr, 0, 1, 2, mtp);
+    const auto input = images(99);
+    const auto prompt = prompt_for(input);
+    const auto expected = m.session_prefill_images(0, prompt, input, cuts, nullptr);
+    const auto expected_draft = mtp ? m.session_draft(0, {7}) : QwenModel::Outputs{};
+    m.session_close(0);
+    PrefixArena<QwenModel> arena(&m, 2);
+    int completions = 0;
+    std::unique_ptr<PrefillTask<QwenModel>> task;
+    {
+      // The scheduler's input storage need not survive a yielded task.
+      auto temporary_prompt = prompt;
+      auto temporary_images = input;
+      auto temporary_cuts = cuts;
+      sched::SchedulerEngine::PrefixPrefill plan;
+      plan.boundaries = &temporary_cuts;
+      plan.images = &temporary_images;
+      plan.snap_slot = 0;
+      plan.snap_position = 8;
+      plan.head_snap_slot = 1;
+      plan.head_snap_position = 4;
+      task = PrefillTask<QwenModel>::begin(m, arena, 0, temporary_prompt, 32, 4, plan,
+          [&](const auto& ids, const auto& out) {
+            require(ids == prompt, "yielded task lost its prompt");
+            require(same(out.logits, expected.logits), "yielded task changed the image target");
+            ++completions;
+            return 7;
+          });
+      temporary_prompt.assign(prompt.size(), 99);
+      temporary_images.front().rgb.assign(temporary_images.front().rgb.size(), 0);
+      temporary_cuts.clear();
+    }
+    int64_t processed = 0;
+    for (;;) {
+      const auto progress = task->advance(4);
+      require(progress.computed_tokens > 0 && progress.computed_tokens <= 4,
+              "image task did not preserve its work bound");
+      processed += progress.computed_tokens;
+      if (progress.first_token >= 0) break;
+    }
+    require(processed == static_cast<int64_t>(prompt.size()) && completions == 1,
+            "image task completion or token accounting differs");
+    require(arena.position(0) == 8 && arena.position(1) == 4,
+            "yielded task lost its snapshot chain");
+    if (mtp)
+      require(same(m.session_draft(0, {7}).logits, expected_draft.logits),
+              "yielded image task changed the draft state");
+    m.session_close(0);
+    task.reset();
+    arena.release(0);
+    arena.release(1);
+    require(m.kv_pool().blocks_in_use() == 0, "image task retained KV blocks");
+  }
 }
 }  // namespace
 

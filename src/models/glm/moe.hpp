@@ -161,6 +161,10 @@ struct GlmMoeWeights {
   // [2] F32 on the device (gate/up, down input_scale) from the layer image;
   // the W4A4 quantizers read it there, so a cached restore keeps it.
   const float* act_scales_dev = nullptr;
+  // Weight-only NVFP4 (modelopt's W4A16_NVFP4, the Qwen QAD export's draft
+  // experts): no activation scale shipped and the activations stay bf16 on
+  // this layer whatever the W4A4 policy — the prefill chain keeps W4A16.
+  bool weight_only_fp4 = false;
   // The packed-int format (2026-09-12, full GLM-5.3, docs/glm53_plan.md
   // D2): routed experts as int4 or int8 group-64 triples, the shared
   // expert as an int8 triple of the routed experts' shapes read as

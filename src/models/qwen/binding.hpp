@@ -64,6 +64,15 @@ enum class QwenTensorRole : uint8_t {
   GptqCodes,
   GptqScales,
   GptqZeros,
+  // The QAD export's forms (config.hpp dense_mxfp8_shipped /
+  // ngram_table_nvfp4): an MXFP8 matrix is e4m3 `X.weight` [N, K] with one
+  // e8m0 byte per 32 columns of a row, `X.weight_scale` U8 [N, K/32]; an
+  // NVFP4 table shard is `shard_s.weight` U8 [rows, head_dim/2] with its
+  // e4m3 `shard_s.weight_scale` [rows, head_dim/16] (the per-tensor
+  // `weight_scale_2` F32 [1] keeps the NgramScale role).
+  Mxfp8Payload,
+  Mxfp8Scale,
+  NgramShardScale,
 };
 
 struct QwenExpectedTensor {
@@ -77,7 +86,7 @@ struct QwenExpectedTensor {
 
   bool quantized() const {
     return role == QwenTensorRole::Fp8Payload || role == QwenTensorRole::Fp4Payload ||
-           role == QwenTensorRole::GptqCodes;
+           role == QwenTensorRole::GptqCodes || role == QwenTensorRole::Mxfp8Payload;
   }
   size_t numel() const {
     size_t n = 1;
@@ -141,7 +150,14 @@ QwenBindReport qwen_validate_text_binding(
 // and the n-gram hash heads; either world divides the kv heads or the kv
 // heads divide world (a kv head then lives on world/kv ranks); the expert
 // slice moe_inter/world must be a multiple of 16 (the scale sub-block
-// gcd(128, slice) then re-anchors the block grid exactly, D2).
+// gcd(128, slice) then re-anchors the block grid exactly, D2). An MXFP8
+// dense stack (dense_mxfp8_shipped) adds: every K-sliced projection's
+// local K (the GDN out_proj's value columns, the QSA o_proj's head
+// columns, the shared down's S/W) a multiple of its 32-wide scale group.
 void qwen_tp_validate_geometry(const QwenTextConfig& cfg, int rank, int world);
+// The MXFP8 scale group (columns per e8m0 byte) and the NVFP4 table's
+// code group (elements per e4m3 scale).
+constexpr int kQwenMxfp8Group = 32;
+constexpr int kQwenNvfp4Group = 16;
 
 }  // namespace dgpp

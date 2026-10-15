@@ -21,5 +21,11 @@ namespace dgpp {
 void launch_fp8_dequant_blocks(const uint8_t* payload, const float* scales,
                                uint16_t* out_bf16, int64_t rows, int64_t cols,
                                cudaStream_t stream, int rs = 7, int cs = 7);
+// The same with the scale grid as e8m0 bytes (2^(b - 127); the QAD export's
+// MXFP8 stack on its 1 x 32 grid): bf16(e4m3 x 2^k) is exact, bitwise the
+// F32 grid's values.
+void launch_fp8_dequant_blocks_e8m0(const uint8_t* payload, const uint8_t* scales,
+                                    uint16_t* out_bf16, int64_t rows, int64_t cols,
+                                    cudaStream_t stream, int rs, int cs);
 
 }  // namespace dgpp

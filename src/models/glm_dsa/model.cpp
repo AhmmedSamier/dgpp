@@ -13,6 +13,7 @@
 #include "kernels/bf12_companions.hpp"
 #include "kernels/dsa.hpp"
 #include "kernels/glm_norm.hpp"
+#include "kernels/packq_gemm.hpp"
 #include "kernels/scale_gemm.hpp"
 #include "kernels/kernels.hpp"
 
@@ -225,7 +226,24 @@ GlmDsaModel::GlmDsaModel(const GlmDsaTextConfig& cfg, const std::string& checkpo
     mtp_r_ = dev_alloc<uint16_t>(M * H);
   }
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  // The draft head's screen (engine.draft_head): from the served head, for
+  // the decode drafts only; off (with a logged reason) when the setting or
+  // the head's form says so.
+  if (mtp_) draft_head_.init(draft_head_matrix(), max_decode_rows_, loader_.rank(), stream_, /*quiet=*/true);
 }
+
+HeadMatrix GlmDsaModel::draft_head_matrix() const {
+  HeadMatrix m;
+  if (globals_.lm_head_fp8.payload) m.fp8 = &globals_.lm_head_fp8;  // engine.mtp_head fp8: the draft's served form
+  else {
+    m.bf16 = globals_.lm_head;
+    m.bf12 = gemm_.bf12_lookup(globals_.lm_head);
+  }
+  m.n = lm_vocab_count_;
+  m.k = cfg_.hidden_size;
+  return m;
+}
+
 
 // The lossless 12-bit companions of the decode GEMV's bf16 weights
 // (engine.bf16_weights = "bf12"; kernels/bf12_companions.hpp): what this
@@ -275,6 +293,9 @@ void GlmDsaModel::finish_companions() {
   bf12_.finish(gemm_, kBf12ExpandSlots);
   bf12_s_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   bf12_.log_summary(loader_.rank(), bf12_s_);
+  // The draft head's screen from the companion when the bf16 bytes were
+  // never device-resident (the 12-bit-only residency); a no-op once built.
+  if (mtp_) draft_head_.init(draft_head_matrix(), max_decode_rows_, loader_.rank(), stream_);
 }
 
 // bf12-only residency's expansion slot: the largest packed matrix under the
@@ -428,6 +449,7 @@ GlmDsaModel::MemoryPlan GlmDsaModel::plan_memory(const GlmDsaTextConfig& cfg, in
     const size_t moe_dev = GlmMoeLayer::scratch_bytes(moe_cfg, max_tokens, rows, slots, &moe_pinned);
     plan.add("moe scratch (routed slots, shared expert, graph tables)", moe_dev, moe_pinned);
   }
+  if (mtp) plan.add("draft head screen (2-bit rotated head copy, scratch)", DraftHead::plan_bytes(static_cast<int>(V), cfg.hidden_size, rows));
   if (mtp) plan.add("draft block (gathered hidden, the fused input, its residual, the sharded embedding's rows)",
                     M * H * 2 + M * 2 * H * 2 + M * H * 2 + M * H * 2 + M * 8);
   (void)R;
@@ -656,10 +678,16 @@ void GlmDsaModel::enqueue_layer(const GlmDsaLayerResident& r, int pool_layer, ui
                                 const WalkRows& rows) {
   const int H = cfg_.hidden_size;
   const float eps = cfg_.rms_norm_eps;
-  const int64_t n = static_cast<int64_t>(T) * H;
   build_layer_objects(r);
   // ---- the attention block --------------------------------------------------
-  glm_rmsnorm_bf16(resid, r.input_norm, x_, T, H, eps, stream_);
+  // The previous layer's closing residual add rides the input norm's first
+  // pass (one kernel for the pair; bitwise the add then the norm).
+  if (pending_add_ != nullptr) {
+    glm_residual_add_rmsnorm_bf16(resid, pending_add_, r.input_norm, x_, T, H, eps, stream_);
+    pending_add_ = nullptr;
+  } else {
+    glm_rmsnorm_bf16(resid, r.input_norm, x_, T, H, eps, stream_);
+  }
   uint16_t* attn_out = stage(y_, T, H, rows.capture);
   if (!dsa_->prepare(T)) throw std::runtime_error("run_rows: DSA GEMM plans unavailable");
   if (rows.decode) {
@@ -670,7 +698,15 @@ void GlmDsaModel::enqueue_layer(const GlmDsaLayerResident& r, int pool_layer, ui
     // request's cache and publish to it (the DSA layer's scratch is
     // per call; the pointers step by the span's rows).
     int64_t row0 = 0;
-    for (int s = 0; s < rows.num_spans; ++s) {
+    if (rows.decode_spans) {
+      for (int s = 0; s < rows.decode_spans; ++s) row0 += rows.span_lens[s];
+      if (!dsa_->prepare(static_cast<int>(row0))) throw std::runtime_error("mixed DSA plans unavailable");
+      gemm_.set_bf12_wide(true);
+      dsa_->enqueue_decode(x_, pool_, pool_layer, rows.req_ids, rows.pos, rows.spans,
+                           rows.decode_spans, static_cast<int>(row0), attn_out, stream_, nullptr, nullptr);
+      gemm_.set_bf12_wide(false);
+    }
+    for (int s = rows.decode_spans; s < rows.num_spans; ++s) {
       const int len = rows.span_lens[s];
       if (!dsa_->prepare(len)) throw std::runtime_error("run_rows: DSA GEMM plans unavailable");
       dsa_->enqueue_prefill(x_ + static_cast<size_t>(row0) * H, pool_, pool_layer, rows.span_reqs[s], rows.span_pos0[s],
@@ -682,34 +718,67 @@ void GlmDsaModel::enqueue_layer(const GlmDsaLayerResident& r, int pool_layer, ui
   }
   if (rows.decode) prefetch_ffn_side(r);
   fold(attn_out, T, H, rows.capture);  // block boundary 1: o_proj's partial
-  glm_residual_add_bf16(resid, attn_out, n, stream_);
   // ---- the MLP / MoE block ----------------------------------------------------
+  // The attention residual add rides the post norm's first pass.
   if (r.moe && moe_->hidden_codes()) {
     // The Mixed346 layer's expert-input codes from the norm's own pass
     // (one kernel instead of the norm and the quantizer; the MoE layer's
     // decode and tensor-core prefill chains read them as given).
-    glm_rmsnorm_bf16_quant_int8(resid, r.post_norm, x_, moe_->hidden_codes(), static_cast<size_t>(H),
-                                moe_->hidden_code_scales(), static_cast<size_t>(H / 128), T, H, eps, stream_);
+    glm_residual_add_rmsnorm_bf16_quant_int8(resid, attn_out, r.post_norm, x_, moe_->hidden_codes(),
+                                             static_cast<size_t>(H), moe_->hidden_code_scales(),
+                                             static_cast<size_t>(H / 128), T, H, eps, stream_);
     moe_->mark_hidden_codes_ready(true);
   } else {
-    glm_rmsnorm_bf16(resid, r.post_norm, x_, T, H, eps, stream_);
+    glm_residual_add_rmsnorm_bf16(resid, attn_out, r.post_norm, x_, T, H, eps, stream_);
   }
   uint16_t* ffn_out = stage(y_, T, H, rows.capture);
-  if (r.moe) {
-    if (rows.decode)
-      moe_->enqueue_decode(x_, ffn_out, T, nullptr, stream_, rows.moe_table_slot);
-    else
-      moe_->enqueue_prefill(x_, ffn_out, T, rows.trace, stream_);
+  const auto enqueue = [&](int row0, int count, bool decode, int) {
+    const size_t offset = static_cast<size_t>(row0) * H;
+    if (r.moe) {
+      MoeTraceStaging trace;
+      if (rows.trace) {
+        trace.ids = rows.trace->ids + static_cast<size_t>(row0) * cfg_.num_experts_per_tok;
+        trace.weights = rows.trace->weights + static_cast<size_t>(row0) * cfg_.num_experts_per_tok;
+        trace.biased = rows.trace->biased
+            ? rows.trace->biased + static_cast<size_t>(row0) * cfg_.n_routed_experts : nullptr;
+      }
+      if (rows.decode)
+        moe_->enqueue_decode(x_ + offset, ffn_out + offset, count, nullptr, stream_, rows.moe_table_slot);
+      else
+        moe_->enqueue_prefill(x_ + offset, ffn_out + offset, count,
+                              rows.trace ? &trace : nullptr, stream_, decode ? count : 0);
+    } else {
+      gemm_.set_bf12_wide(decode);
+      enqueue_dense(r.dense, x_ + offset, count, ffn_out + offset);
+    }
+  };
+  if (rows.run) {
+    const int combined_from = r.moe ? kPackqMmaFromRows
+                                    : std::min(max_decode_rows_, dense_gemv_rows()) + 1;
+    rows.run->for_each_kernel_group([&](int count, int next) {
+      return count >= combined_from && next >= combined_from;
+    }, enqueue);
   } else {
-    enqueue_dense(r.dense, x_, T, ffn_out);
+    enqueue(0, T, rows.decode, 0);
   }
+  gemm_.set_bf12_wide(rows.decode);
   if (rows.decode) prefetch_attention_side(r.layer + 1);
   fold(ffn_out, T, H, rows.capture);  // block boundary 2: the sliced down projections
-  glm_residual_add_bf16(resid, ffn_out, n, stream_);
+  // The closing add is deferred into the next norm's first pass (the next
+  // layer's input norm, the final norm or the draft head's); nothing reads
+  // the residual before that, and the next stage() handout is taken after it.
+  pending_add_ = ffn_out;
+}
+
+void GlmDsaModel::flush_pending_add(uint16_t* resid, int T) {
+  if (pending_add_ == nullptr) return;
+  glm_residual_add_bf16(resid, pending_add_, static_cast<int64_t>(T) * cfg_.hidden_size, stream_);
+  pending_add_ = nullptr;
 }
 
 GlmDsaModel::Outputs GlmDsaModel::run_rows(const RowRun& run) {
   const int T = run.T, req = run.req;
+  if (pending_add_ != nullptr) throw std::logic_error("run_rows: a residual add is pending from an earlier walk");
   // The packed companions' wide launches are the decode batch's alone (a
   // short prefill chunk keeps its Lt algorithm: kernels/gemm.hpp).
   gemm_.set_bf12_wide(run.decode);
@@ -723,6 +792,8 @@ GlmDsaModel::Outputs GlmDsaModel::run_rows(const RowRun& run) {
   const bool traces = !run.decode && route_traces_;
   const size_t K = static_cast<size_t>(cfg_.num_experts_per_tok);
   WalkRows rows;
+  rows.run = &run;
+  rows.decode_spans = run.decode_spans;
   rows.req_ids = in.req_ids;
   rows.pos = in.pos;
   rows.spans = in.spans;
@@ -760,6 +831,7 @@ GlmDsaModel::Outputs GlmDsaModel::run_rows(const RowRun& run) {
     }
     enqueue_layer(r, layer, resid_, T, rows);
     if (capture_layers) {
+      flush_pending_add(resid_, T);  // the snapshot reads the residual itself
       DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
       std::vector<uint16_t> snap(static_cast<size_t>(T) * H);
       DGPP_CUDA_OK(cudaMemcpy(snap.data(), resid_, snap.size() * 2, cudaMemcpyDeviceToHost));
@@ -774,8 +846,14 @@ GlmDsaModel::Outputs GlmDsaModel::run_rows(const RowRun& run) {
   }
   // Keep hidden rows for MTP; serving projects only each request's last
   // prefill row. All-row diagnostics and decode keep their full head.
-  glm_rmsnorm_bf16(resid_, globals_.final_norm, h_, T, H, cfg_.rms_norm_eps, stream_);
+  if (pending_add_ != nullptr) {
+    glm_residual_add_rmsnorm_bf16(resid_, pending_add_, globals_.final_norm, h_, T, H, cfg_.rms_norm_eps, stream_);
+    pending_add_ = nullptr;
+  } else {
+    glm_rmsnorm_bf16(resid_, globals_.final_norm, h_, T, H, cfg_.rms_norm_eps, stream_);
+  }
   const bool packed_logits = project_head_rows(run, [&](int input_row, int output_row, int rows) {
+    gemm_.set_bf12_wide(run.decode || input_row < run.decode_rows());
     gemm_.matmul(h_ + static_cast<size_t>(input_row) * H, globals_.lm_head,
                  logits_ + static_cast<size_t>(output_row) * lm_vocab_count_, rows, lm_vocab_count_,
                  H, DType::BF16, GemmOut::F32, static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_,
@@ -785,10 +863,7 @@ GlmDsaModel::Outputs GlmDsaModel::run_rows(const RowRun& run) {
   // the slots' windows by position.
   // A group prefill stores every row: each span's last window rows land
   // in its own slot (2026-09-14).
-  if (mtp_) {
-    const int nrows = run.num_spans > 0 ? T : std::min(T, max_decode_rows_);
-    store_draft_hidden(h_ + static_cast<size_t>(T - nrows) * H, in.req_ids + (T - nrows), in.pos + (T - nrows), nrows);
-  }
+  store_run_draft_hidden(run, in, h_);
   if (run.decode) prefetch_.join(stream_);
   out = finish_run(run, std::move(out), packed_logits);
   if (!run.capture && traces) {
@@ -855,13 +930,14 @@ void GlmDsaModel::graph_prepare() {
 // shared head.
 // ---------------------------------------------------------------------------
 void GlmDsaModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode_row,
-                               bool capture, int head_rows, int batch_requests) {
+                               bool capture, int head_rows, int batch_requests, int hidden_row) {
   if (head_rows > logits_capacity_rows_)
     throw std::invalid_argument("draft head exceeds logits capacity");
   if (!mtp_) throw std::logic_error("mtp_run_rows: MTP is not enabled");
   if (T <= 0 || T > max_tokens_) throw std::invalid_argument("mtp_run_rows: rows");
   if (head_rows < 0 || head_rows > T) throw std::invalid_argument("mtp_run_rows: head_rows");
   gemm_.set_bf12_wide(decode_row);  // the decode batch's alone (kernels/gemm.hpp)
+  if (pending_add_ != nullptr) throw std::logic_error("mtp_run_rows: a residual add is pending from an earlier walk");
   walk_rows_ = T;
   const int H = cfg_.hidden_size;
   const float eps = cfg_.rms_norm_eps;
@@ -873,7 +949,7 @@ void GlmDsaModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos
   if (!r.enorm || !r.hnorm || !r.eh_proj || !r.shared_head_norm)
     throw std::runtime_error("mtp_run_rows: the draft layer's head tensors are unbound");
   // ---- the input fusion --------------------------------------------------
-  const uint16_t* hin = h_;
+  const uint16_t* hin = prefill_hidden_span(h_, H, hidden_row, T);
   if (decode_row) {
     gather_draft_hidden(d_req, d_pos, mtp_h_, T);
     hin = mtp_h_;
@@ -903,6 +979,7 @@ void GlmDsaModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos
   rows.moe_table_slot = capture ? cfg_.num_moe_layers() : -1;
   rows.trace = nullptr;
   enqueue_layer(r, cfg_.num_hidden_layers, mtp_r_, T, rows);
+  flush_pending_add(mtp_r_, T);  // every draft row's residual (the chain reads them), not only the head's
   if (head_rows == 0) {  // prefill rows fill the cache; no head
     if (decode_row) prefetch_.join(stream_);
     return;
@@ -910,7 +987,10 @@ void GlmDsaModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos
   // ---- head: the draft distribution over the last head_rows rows --------
   const uint16_t* head_in = mtp_r_ + static_cast<size_t>(T - head_rows) * H;
   glm_rmsnorm_bf16(head_in, r.shared_head_norm, h_, head_rows, H, eps, stream_);
-  if (globals_.lm_head_fp8.payload) {
+  if (decode_row && draft_head_.logits(draft_head_matrix(), h_, static_cast<size_t>(H), head_rows, logits_,
+                                       static_cast<size_t>(lm_vocab_count_), stream_)) {
+    // the draft head's screen (kernels/draft_head.hpp): the masked row
+  } else if (globals_.lm_head_fp8.payload) {
     // engine.mtp_head = fp8: the draft's distribution from the head's
     // block-FP8 copy (the fp8 scale-GEMM core, f32 logits as below); the
     // verifier's head (run_rows) is untouched.

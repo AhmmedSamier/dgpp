@@ -58,6 +58,7 @@
 #include "engine/memory_plan.hpp"
 #include "engine/session_model.hpp"
 #include "kernels/gemm.hpp"
+#include "kernels/draft_head.hpp"
 #include "kernels/glm_mhc_launch.hpp"
 #include "kernels/glm_spec.hpp"
 #include "models/dsv41/config.hpp"
@@ -74,6 +75,11 @@ namespace dgpp {
 class Dsv41Model : public SessionModel<Dsv41Model> {
  public:
   using Base = SessionModel<Dsv41Model>;
+  bool prefill_batch_fits(const RowRun& run) const;
+  int max_mixed_prefill_readers(int decode_rows) const {
+    return prefill_bounded_ ? std::max(0, (max_tokens_ - decode_rows) / cfg_.sliding_window) : max_requests_;
+  }
+
   using Outputs = Base::Outputs;
   using SessionSnapshotMeta = Base::SessionSnapshotMeta;
   using SnapshotRequest = Base::SnapshotRequest;
@@ -222,6 +228,7 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
   static constexpr int kRingSlots = 160;
 
   struct WalkRows {
+    int decode_spans = 0;
     const int64_t* tokens = nullptr;
     const int32_t* req_ids = nullptr;
     const int64_t* pos = nullptr;
@@ -253,7 +260,8 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
   int cache_ordinal(int layer) const;
   // The layer over the streams (cur -> next, swapped), the two folds.
   void enqueue_layer(const Dsv41LayerResident& r, int layer, int T, const WalkRows& rows);
-  void mhc_site(const uint16_t* streams, const GlmMhcWeights& w, const uint16_t* ln, int T, bool decode);
+  void mhc_site(const uint16_t* streams, const GlmMhcWeights& w, const uint16_t* ln, int T, bool decode,
+                int decode_prefix = 0);
   void stream_update(const uint16_t* sublayer_out, int T);
   uint16_t* stage(uint16_t* fallback, int T, int width, bool capture);
   void fold(uint16_t* buf, int T, int width, bool capture);
@@ -261,7 +269,7 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
   // The DSpark pieces (mtp): the first draft call of a step (the rings, the
   // block, base_logits_, row 0) and a chain row (block row draft_row_).
   void draft_first(int req, const int64_t* tokens, const int64_t* d_pos, const int32_t* d_req, int T, bool decode_row,
-                   bool capture, int head_rows, int batch_requests);
+                   bool capture, int head_rows, int batch_requests, int source_row = 0);
   void draft_chain_row(int req, const int64_t* tokens, bool capture, int head_rows, int batch_requests);
   const Dsv41DraftResident& draft_stage(int stage);
   int target_ordinal(int layer) const;
@@ -273,6 +281,11 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
   Dsv41TextConfig cfg_;
   Dsv41LayerStream loader_;
   CublasLtGemm gemm_;
+  // The draft head's screen (kernels/draft_head.hpp): built from the served
+  // head at construction under engine.draft_head; answers a decode draft's
+  // head call with the masked row or declines (the exact head runs).
+  DraftHead draft_head_;
+  HeadMatrix draft_head_matrix() const;
   bool dense_mma_ = true;  // the dense projections' and head's decode form (DGPP_DSV41_DENSE_GEMV=1: the GEMV chunks)
   void* gemm_ws_ = nullptr;
   size_t gemm_ws_bytes_ = 0;
@@ -331,17 +344,18 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
   int seg_rows_ = 0;
   // Per request: the last walk's draft segment (pos0, rows) — a group
   // prefill sets every span's; mtp_run_rows clamps its prefill rows to it.
-  std::vector<std::pair<int64_t, int>> seg_by_req_;
-  std::pair<int64_t, int>& segment_of(int req) {
-    if (seg_by_req_.size() <= static_cast<size_t>(req)) seg_by_req_.resize(static_cast<size_t>(req) + 1, {0, 0});
+  struct WalkSegment { int64_t pos0 = 0; int rows = 0; int row0 = 0; };
+  std::vector<WalkSegment> seg_by_req_;
+  WalkSegment& segment_of(int req) {
+    if (seg_by_req_.size() <= static_cast<size_t>(req)) seg_by_req_.resize(static_cast<size_t>(req) + 1);
     return seg_by_req_[static_cast<size_t>(req)];
   }
-  uint16_t* tail_streams_ = nullptr;  // [window, 4H]
-  float* tail_pre_ = nullptr;         // [window, 4]
+  uint16_t* tail_streams_ = nullptr;  // [requests, window, 4H]
+  float* tail_pre_ = nullptr;         // [requests, window, 4]
+  uint16_t* tail_move_ = nullptr;   // [window, 4H], shared temporary for overlapping tail moves
   float* seg_pre_ = nullptr;          // [window, 4] the segment's collapse coefficients
-  int tail_rows_ = 0;
-  int64_t tail_end_ = 0;
-  int64_t call_pos0_ = 0;  // the prefill call's first row (the segment floors unless it starts there)
+  struct PrefillTail { int rows = 0; int64_t end = 0, start = 0; };
+  std::vector<PrefillTail> prefill_tails_;  // the prefill call's first row (the segment floors unless it starts there)
   int targets_ = 0;                 // dspark target layers (the draft width is targets_ * H)
   int draft_row_ = 0;               // the next block row a chain call emits (0: no block stands)
   uint16_t* main_hidden_ = nullptr; // [M, targets * H] the target layers' stream means of the walk's rows

@@ -122,6 +122,8 @@ struct WorldSettings {
   std::string kv_dtype = "bf16";  // the latent cache's format
   std::string ngram_table = "resident";  // the Qwen n-gram table's residency
   std::string fp8_head = "gemv";         // Qwen head: gemv | mma (opt-in)
+  std::string draft_head = "exact";      // the MTP draft head's read: exact | screen (2026-10-13)
+  int draft_head_blocks = 32;            // the screen's candidate cap in 128-row blocks
   std::string dense_weights = "checkpoint";  // the Qwen dense stack's form
   std::string mtp_expert_format = "fp8";      // the Qwen MTP draft experts: fp8 | bf16_fused
   std::string bf16_weights = "checkpoint";   // the bf16 decode weights' resident form: checkpoint | bf12 | bf12+bf16
@@ -182,6 +184,12 @@ struct WorldSettings {
   int admission_window = 0;
   int prefill_budget_tokens = 0;  // settings: -1 = automatic; absent legacy field = disabled
   int prefill_idle_budget_tokens = 0;
+  int decode_gap_target_ms = 0;  // absent legacy fields retain fixed budgeting
+  int first_token_target_ms = 0;
+  sched::PrefillLatencyTuning prefill_latency;
+  // Unresolved settings: nullopt = engine capability default. Absent legacy
+  // fields remain explicitly false; the warm record is always concrete.
+  std::optional<bool> prefill_early_admission = false;
   int prefix_min_tokens = 0;          // the prefix cache's entry floor (2026-09-28); absent legacy field = 0
   bool prefix_head_snapshots = false;  // the head cut (2026-09-28); absent legacy field = off
   double bulk_pace_gbps = 0.0;
@@ -206,6 +214,7 @@ struct JournalRecord {
   uint64_t prefix_digest = 0;
   bool has_op_digest = false;      // tick: rank 0's op-stream fold rode along
   uint64_t op_digest = 0;
+  std::optional<int64_t> prefill_budget;  // leader's adaptive limit for this tick
   std::vector<dgpp::sched::SchedulerRequest> submits;
   std::vector<std::string> cancels;
   std::vector<std::string> stops;  // the stop-string retires,
@@ -238,12 +247,18 @@ class JournalWriter {
   uint16_t port() const { return listener_.port(); }
 
   // Accepts world-1 peer connections in any order and reads each one's
-  // hello ("hello <rank>\n" — the one thing a peer ever writes), so the
+  // hello ("hello <rank>\n"), so the
   // connections are known by rank. Throws when the full world fails to
   // land within accept_timeout_ms — a short world cannot serve, and
   // pretending otherwise would wedge every request at its first
   // collective.
   void accept_peers(int world, int accept_timeout_ms);
+
+  // Every peer announces readiness after constructing its model and engine.
+  // Hold the warm record until all have arrived, using the startup timeout,
+  // so cold loading cannot spend the first collective's execution deadline.
+  // Returns false on shutdown; throws on a missing, closed or malformed peer.
+  bool wait_peers_ready(int timeout_ms, const std::function<bool()>& should_stop);
 
   // One line to every peer. A peer that cannot take it is a dead
   // member of a live-serving world — the fabric is broken, and this
@@ -283,10 +298,12 @@ class JournalReader {
   // (a race measured in tens of milliseconds), and a single-shot
   // connect loses it. Throws once the whole window expires — startup
   // is exceptional and the peer wants the reason in its log. Sends the
-  // hello ("hello <rank>\n") that names the connection to rank 0 — the
-  // only bytes a peer ever writes.
+  // hello ("hello <rank>\n") that names the connection to rank 0.
   JournalReader(const std::string& host, uint16_t port,
                 int connect_timeout_ms, int rank);
+
+  // Called after settings and model construction, before waiting for warm.
+  void send_ready();
 
   // The next complete record (newline stripped). false when rank 0's
   // journal closed (clean stop or crash — EOF either way) or the

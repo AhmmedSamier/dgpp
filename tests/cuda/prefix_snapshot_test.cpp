@@ -97,13 +97,13 @@ void check_snapshots(Model& model, int vocab) {
   require(model.session_position(0) == hop + 1, "verify did not hop over the snapshot position");
   const int64_t before = arena.snapshots();
   for (int attempt = 0; attempt < 8; ++attempt) {
-    arena.snapshot_post_row0(0, 0, hop, 0);
+    require(!arena.snapshot_post_row0(0, 0, hop, 0), "pool failure reported a stored hop");
     require(!arena.filled(0), "skipped replacement retained stale state");
     require(arena.snapshots() == before, "skip counted as a successful snapshot");
     require(model.kv_blocks_in_use() == 4, "hop failure changed pool accounting");
   }
   model.session_close(1);
-  arena.snapshot_post_row0(0, 0, hop, 0);
+  require(arena.snapshot_post_row0(0, 0, hop, 0), "successful hop not reported");
   require(arena.filled(0) && arena.position(0) == hop && arena.snapshots() == before + 1,
           "slot or timer could not be reused after skipped hops");
   model.session_close(0);

@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -22,6 +23,8 @@
 #include "common/log.hpp"
 #include "net/bus_kernel.hpp"
 #include "net/collective_bus.hpp"
+
+void test_stream_boundary_reduce(dgpp::net::CollectiveBus& bus, uint16_t* data, size_t elems, cudaStream_t stream);
 
 namespace {
 
@@ -1023,12 +1026,75 @@ int allreduce_bulk_rank_work(CollectiveBus& bus, int world, int my_rank,
       ++failures;
       break;
     }
+    // The serving reducer may use bulk for complete segments and the
+    // model stream for a small tail. Compare that composition with the
+    // full bulk oracle, including the segment/latency boundary cases.
+    cudaMemcpyAsync(dev_dst, dev_src, elems * 2, cudaMemcpyDeviceToDevice, stream);
+    test_stream_boundary_reduce(bus, dev_dst, elems, stream);
+    cudaMemcpyAsync(got.data(), dev_dst, elems * 2, cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+    std::string settle_error;
+    if (!bus.allreduce_settle(60000, &settle_error)) {
+      DGPP_LOG_ERROR("rank {}: stream boundary settle failed: {}", my_rank, settle_error);
+      ++failures;
+      break;
+    }
+    if (got != bulk_run) {
+      DGPP_LOG_ERROR("rank {} iter {}: stream boundary and bulk paths diverged bitwise", my_rank, iter);
+      ++failures;
+      break;
+    }
   }
 
   cudaFree(dev_src);
   cudaFree(dev_dst);
   cudaStreamDestroy(stream);
   return failures;
+}
+
+std::vector<size_t> bulk_case_sizes(bool one_lane) {
+  const size_t stripe = 262144 / 2;
+  const size_t segment = stripe * 8 * (one_lane ? 1 : 2);
+  return {2, 4, 6, 8, 2048, 4094, 4096, 4098, 8190, 8192, 8194, 2 * stripe + 100,
+          segment, segment + 2, segment + 6, segment + 4096, segment + 4098,
+          segment + 8192, segment + 8194, 41 * stripe - 32};
+}
+
+// One process per GPU, as in serving. This also lets Compute Sanitizer check
+// the real distributed bulk/latency/stream composition without placing every
+// rank's spinning kernels in the same instrumented CUDA context.
+int distributed_bulk_cases(int rank, int world, const std::string& peer,
+                           uint16_t port, bool one_lane) {
+  auto options = base_options(rank, port);
+  options.world_size = world;
+  options.rendezvous_host = rank == 0 ? "" : peer;
+  options.launch_consumers = false;
+  if (one_lane) options.lane_devices.resize(1);
+  CollectiveBus bus(options);
+  std::string error;
+  if (!bus.start(&error)) {
+    DGPP_LOG_ERROR("distributed bulk rank {}: {}", rank, error);
+    return 1;
+  }
+  int failures = 0;
+  for (const size_t elems : bulk_case_sizes(one_lane)) {
+    std::vector<std::vector<uint16_t>> sources(static_cast<size_t>(world));
+    for (int r = 0; r < world; ++r) fill_rank_bf16(&sources[static_cast<size_t>(r)], elems, r);
+    std::vector<uint16_t> want(elems);
+    for (size_t i = 0; i < elems; ++i) {
+      float value = 0;
+      for (int r = 0; r < world; ++r) value += dgpp::net::bf16_to_f32(sources[static_cast<size_t>(r)][i]);
+      want[i] = dgpp::net::bf16_from_f32_rne(value);
+    }
+    const int bad = allreduce_bulk_rank_work(bus, world, rank, elems, 2, &want);
+    failures += bad;
+    DGPP_LOG_INFO("distributed bulk rank={} world={} lanes={} elems={}: {} failures",
+                  rank, world, bus.lane_count(), elems, bad);
+    if (bad) break;
+  }
+  bus.quiesce();
+  bus.stop();
+  return failures == 0 ? 0 : 1;
 }
 
 void scenario_allreduce_bulk() {
@@ -1040,13 +1106,11 @@ void scenario_allreduce_bulk() {
   // chain and against the latency-chunked path (identical chains).
   // DGPP_BULK_ONE_LANE=1 bisects lane-dependent failures (bring-up).
   int failures = 0;
-  const size_t stripe = 262144 / 2;  // loopback option bulk_slot_bytes/2
   const bool one_lane = std::getenv("DGPP_BULK_ONE_LANE") != nullptr;
 
   for (const int world : {2, 4}) {
     const uint16_t port = world == 2 ? 29904 : 29905;
-    for (const size_t elems : {static_cast<size_t>(2048), 2 * stripe + 100,
-                               41 * stripe - 32}) {
+    for (const size_t elems : bulk_case_sizes(one_lane)) {
       std::vector<std::unique_ptr<CollectiveBus>> world_buses =
           start_world(world, port, one_lane);
       if (world_buses.empty()) {
@@ -1314,7 +1378,7 @@ int allreduce_graph_rank_work(CollectiveBus& bus, int world, int my_rank,
     cudaGraph_t alt_graph = nullptr;
     cudaGraphExec_t alt_exec = nullptr;
     const int alt_gens = gens_per_step - 3;
-    const size_t alt_elems = elems / 2;
+    const size_t alt_elems = std::max<size_t>(2, (elems / 2) & ~size_t{1});
     if (failures == 0) {
       if (!bus.graph_record_begin(&error, /*variant=*/1)) {
         fail("second graph variant record_begin rejected: " + error);
@@ -1696,10 +1760,11 @@ void scenario_graph_snapshot_hash() {
         std::vector<uint16_t> source(elems);
         for (uint32_t i = 0; i < elems; ++i)
           source[i] = static_cast<uint16_t>(0x3800 + ((i * 73 + gen * 101) & 0x7ff));
-        std::vector<uint64_t> words(elems / 4);
+        std::vector<uint64_t> words((elems + 3) / 4, 0);
         if (!words.empty())
-          std::memcpy(words.data(), source.data(), words.size() * sizeof(uint64_t));
+          std::memcpy(words.data(), source.data(), elems * sizeof(uint16_t));
         const uint64_t want = dgpp::net::bus_fold64(words.data(), words.size());
+        CHECK(dgpp::net::bus_fold(source.data(), elems * 2) == want, "CPU hash omits payload tail");
         *cell = {};
         cell->gen_seq = gen;
         cell->stage_hash = ~want;
@@ -1733,9 +1798,9 @@ void scenario_allreduce_graph_rows() {
   constexpr int world = 4;
   const int gens_per_step = 12;
   const int replays = 4;
-  const size_t rows_elems[] = {6144, 12288, 16380, 16384, 16388, 18432,
+  const size_t rows_elems[] = {2, 6, 510, 6144, 12288, 16380, 16384, 16388, 18432,
                                49152, 65532, 65536, 65540, 153600, 768000};
-  const uint16_t ports[] = {29891, 29892, 29893, 29894, 29895, 29896,
+  const uint16_t ports[] = {29909, 29910, 29911, 29891, 29892, 29893, 29894, 29895, 29896,
                             29897, 29898, 29899, 29900, 29901, 29902};
   int failures = 0;
   for (size_t c = 0; c < std::size(rows_elems); ++c) {
@@ -2049,6 +2114,17 @@ void scenario_stop_releases_waiters() {
 // the graph hooks succeed in session order, and the peer surface refuses.
 void scenario_world_of_one() {
   DGPP_LOG_INFO("scenario: a world of one");
+  dgpp::net::BusRankExchange frame{};
+  frame.lane_count = 1;
+  frame.peer_count = 1;
+  std::vector<uint8_t> wire(dgpp::net::kBusMaxExchangeBytes);
+  const size_t wire_size = dgpp::net::bus_rank_exchange_encode(frame, wire.data(), wire.size());
+  dgpp::net::BusRankExchange decoded{};
+  CHECK(wire_size > 0 && dgpp::net::bus_rank_exchange_decode(wire.data(), wire_size, &decoded),
+        "current collective protocol must round-trip");
+  wire[4] = 1;
+  CHECK(!dgpp::net::bus_rank_exchange_decode(wire.data(), wire_size, &decoded),
+        "old peers must not use the incomplete placement hash");
   BusOptions o = base_options(0, 29899);
   o.world_size = 1;
   CollectiveBus bus(o);
@@ -2116,7 +2192,7 @@ void scenario_world_of_one() {
   DGPP_LOG_INFO("scenario: a world of one OK");
 }
 
-int main() {
+int main(int argc, char** argv) {
   dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");
   // One process, several ranks, each with kernels that spin on a peer's
   // doorbell: CUDA's default LAZY module loading deadlocks that shape (a
@@ -2133,6 +2209,32 @@ int main() {
     return 2;
   }
 
+  if (argc > 1) {
+    int rank = -1, world = 0, port = 29924;
+    std::string peer;
+    bool one_lane = false;
+    try {
+      for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--one-lane") { one_lane = true; continue; }
+        if (i + 1 >= argc) throw std::invalid_argument("missing value for " + arg);
+        const std::string value = argv[++i];
+        if (arg == "--bulk-rank") rank = std::stoi(value);
+        else if (arg == "--world") world = std::stoi(value);
+        else if (arg == "--peer") peer = value;
+        else if (arg == "--port") port = std::stoi(value);
+        else throw std::invalid_argument("unknown option " + arg);
+      }
+      if ((world != 2 && world != 4) || rank < 0 || rank >= world ||
+          (rank != 0 && peer.empty()) || port < 1 || port > 65535)
+        throw std::invalid_argument("use --bulk-rank R --world 2|4 --peer HOST [--port N] [--one-lane]");
+      return distributed_bulk_cases(rank, world, peer, static_cast<uint16_t>(port), one_lane);
+    } catch (const std::exception& e) {
+      DGPP_LOG_ERROR("distributed bulk: {}", e.what());
+      return 2;
+    }
+  }
+
   scenario_world_of_one();
   // DGPP_TEST_FILTER=world_of_one: the world-of-one gate alone (no lanes,
   // no loopback fabric needed).
@@ -2144,6 +2246,11 @@ int main() {
   if (const char* f = std::getenv("DGPP_TEST_FILTER");
       f && std::string(f) == "allreduce_graph_rows") {
     scenario_allreduce_graph_rows();
+    return g_failures == 0 ? 0 : 1;
+  }
+  if (const char* f = std::getenv("DGPP_TEST_FILTER");
+      f && std::string(f) == "allreduce_bulk") {
+    scenario_allreduce_bulk();
     return g_failures == 0 ? 0 : 1;
   }
   if (const char* f = std::getenv("DGPP_TEST_FILTER");

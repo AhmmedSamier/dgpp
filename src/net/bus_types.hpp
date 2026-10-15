@@ -68,7 +68,7 @@ inline uint64_t bus_fold64(const uint64_t* words, size_t word_count) {
   return hash;
 }
 
-// ---- rendezvous exchange frame (little-endian, version 1) --------------------
+// ---- rendezvous exchange frame (little-endian, version 2) --------------------
 // Full-mesh bring-up: every rank's frame lists its QP endpoints for every
 // OTHER rank (peer entries ordered by peer rank ascending), so the listener
 // (rank 0) can distribute everyone's frame to everyone — TP=4 needs no
@@ -94,7 +94,9 @@ constexpr uint32_t kBusErrorMagic = 0x52424744;     // 'DGBR' little-endian
 // re-learned the hard way (the 2026-09-02 seq-1 loopback wedge).
 constexpr uint32_t kBusReadyMagic = 0x59424744;     // 'DGBY' little-endian
 constexpr uint32_t kBusGoMagic = 0x4f424744;        // 'DGBO' little-endian
-constexpr uint8_t kBusExchangeVersion = 1;
+// Version 2 includes a final u32 in collective placement hashes. Reject
+// older peers before they can disagree on the visibility gate.
+constexpr uint8_t kBusExchangeVersion = 2;
 constexpr size_t kBusExchangeHeaderBytes = 32;
 constexpr size_t kBusExchangeLaneBytes = 48;
 constexpr size_t kBusMaxLanes = 2;

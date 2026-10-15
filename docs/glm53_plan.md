@@ -463,19 +463,19 @@ Flash's per context length and are bounded by the existing dot budget
 design change). `index_kpool_compress` and `always_select_tail` are
 irrelevant at kpool 1 and the parser requires them absent.
 
-**D9 — TP only, text only, decode rows ≤ 16.** No expert parallelism (the
+**D9 — TP only, text only, decode rows ≤ 32.** No expert parallelism (the
 Qwen plan's argument), no vision (the checkpoint has none). The decode batch
 was capped at 8 rows by the fused decode select's shared memory
 (`kSelectMaxRows` = 8: four request slots at depth 1, eight plain, two at
-depth 3); since 2026-09-13 the family's `decode_rows_cap` is 16 — the
-select launches its rows in groups of eight (a group is the same work at
-any grouping: every block scores a stripe of every row's own context), the
-pick kernels verdict sixteen request slots, the DSA layer's attention
-tiles and (row, split) workspace scale with the count, and the absorb/vout
-projections keep their warp kernels for every decode shape (the
-tensor-core forms are tolerance-equal, not bitwise). Eight slots at depth
-1, five at depth 2, four at depth 3; the bus's 32 graph variants bound a
-plain deployment at twelve slots. The graph engine records 4- and 6-slot
+depth 3); from 2026-09-13 the family's `decode_rows_cap` was 16 and since
+2026-10-13 it is 32 (eight slots at depth 3) — the select launches its rows
+in groups of eight over a workspace laid out for 32 (a group is the same
+work at any grouping: every block scores a stripe of every row's own
+context), the pick kernels verdict sixteen request slots, the DSA layer's
+attention tiles and (row, split) workspace scale with the count, and the
+absorb/vout projections keep their warp kernels for every decode shape (the
+tensor-core forms are tolerance-equal, not bitwise). The bus's 128 graph
+variants bound the slot and family count per scheduled depth. The graph engine records 4- and 6-slot
 batch families beside the 2-, 3- and every-slot ones for recipes wider
 than four slots, so four live requests on an eight-slot world ride an
 eight-row batch (41–42 tok/s aggregate, the four-slot template's own)
@@ -649,7 +649,7 @@ families on the same build: `fabric_glm_regression.sh` bitwise its
 baseline, Qwen and GLM-4.7 transcripts identical to their last records,
 `ctest` all green. Records: the rows in `docs/benchmarks.md` §3–§7, a
 "GLM-5.3 on four nodes" section in `docs/measurements.md`, a dated entry in
-`benchmarks/results/`, the CHANGELOG line, the PLAN.md serving table row and
+local run artifacts, the CHANGELOG line, the PLAN.md serving table row and
 "Additional model work" link, `deploy/README.md`'s template table, the
 model card copied into `docs/model_cards/` with the measured numbers and
 the memory plan, and §6 of this document filled in.
@@ -806,7 +806,7 @@ implemented and green, G6 in progress, nothing committed yet:
   `range(n)` needed the interpreter's one-argument form) registered as
   `glm_dsa_{tokenizer,chat_template}_test`. **The fabric (2026-09-12
   evening, `scripts/fabric_glm_dsa_serve.sh`, record
-  `benchmarks/results/2026-09-12-glm53-full.md`):** boot 405 s the first
+  the 2026-09-12-glm53-full measurements):** boot 405 s the first
   time (the resident image captured on every rank), 30 s after; T=1 51.1
   ms/step; MTP depth 1 68–76 ms/pass at 1.77–1.97 tokens/pass (acceptance
   chat 77 %, code 97 %, prose 92 %, json 96 %, math 93 %), 36–42 ms/token
