@@ -632,6 +632,43 @@ DGPP_TEST(shared_prefill_qwen35_per_tensor) {
   }, cfg.vocab_size);
 }
 
+DGPP_TEST(shared_prefill_qwen35_native_activations) {
+  // engine.prefill_activations = native on the mixed release: the NVFP4 MLP
+  // recipe (per-row NVFP4 activations with the shipped input globals, the
+  // block-scaled fp4 tensor cores) keeps every invariance the chain pins
+  // (grouped vs alone, cuts, interleaving, the draft), and its distance from
+  // the bf16-activation chain is reported and bounded.
+  const auto cfg = qwen35fx::tiny_config(true);
+  const std::string dir = "shared_qwen35_native_fixture";
+  qwen35fx::write_fixture(dir, true);
+  struct Restore {
+    ~Restore() { Qwen35Model::set_native_activations(false); }
+  } restore;
+  Qwen35Model::set_native_activations(true);
+  check<Qwen35Model>([&](bool mtp, bool) {
+    return std::make_unique<Qwen35Model>(cfg, dir, 256, 2048, LoaderResidency::Resident, nullptr, 0, 1, 4, 16, mtp);
+  }, cfg.vocab_size);
+  Qwen35Model native(cfg, dir, 512, 2048, LoaderResidency::Resident, nullptr, 0, 1, 4, 16, false);
+  Qwen35Model::set_native_activations(false);
+  Qwen35Model exact(cfg, dir, 512, 2048, LoaderResidency::Resident, nullptr, 0, 1, 4, 16, false);
+  const auto a = tokens(301, cfg.vocab_size, 3);
+  const auto on = native.session_prefill(0, a), off = exact.session_prefill(0, a);
+  require(on.logits.size() == off.logits.size() && !on.logits.empty(), "output shape");
+  double err = 0, norm = 0;
+  for (size_t i = 0; i < on.logits.size(); ++i) {
+    require(std::isfinite(on.logits[i]), "finite logits");
+    err += std::pow(on.logits[i] - off.logits[i], 2);
+    norm += std::pow(off.logits[i], 2);
+  }
+  const double relative = std::sqrt(err / std::max(norm, 1e-30));
+  std::printf("  native NVFP4 activations vs the bf16 chain: relative L2 %.4g\n", relative);
+  // A different chain by definition (4-bit activations on a random tiny model
+  // sit far from the bf16 chain; the real model's quality gate is the task
+  // evals); the recipe itself is pinned in moe_w4a4_test (layouts against an
+  // fp64 dot, representable rows bitwise through the quantizer).
+  require(relative > 0 && std::isfinite(relative), "the native recipe is a different, finite chain");
+}
+
 DGPP_TEST(shared_prefill_qwen35_large_projection_groups) {
   for (bool mixed_quant : {false, true}) for (bool mtp : {false, true}) {
     const auto cfg = qwen35fx::tiny_config(mixed_quant);

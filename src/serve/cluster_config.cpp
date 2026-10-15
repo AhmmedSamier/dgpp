@@ -246,6 +246,10 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           e.prefill_fp8_gemm = boolean(x, ek, what);
         } else if (p.key == "prefill_fp8_per_tensor") {
           e.prefill_fp8_per_tensor = boolean(x, ek, what);
+        } else if (p.key == "prefill_activations") {
+          e.prefill_activations = text(x, ek, what);
+          if (e.prefill_activations != "bf16" && e.prefill_activations != "native")
+            fail(what, "'" + ek + "' must be \"bf16\" or \"native\"");
         } else if (p.key == "expert_gemm") {
           e.expert_gemm = text(x, ek, what);
           if (e.expert_gemm != "wide" && e.expert_gemm != "wide3" && e.expert_gemm != "wide4" &&

@@ -30,6 +30,14 @@ draft layer is never FP4: its `.*` target loses to the `re:^mtp.*` ignore.
 `prefill_fp8_per_tensor` and `dense_weights: fp8` are FP8-release levers
 and are refused under this quantization (they would requantize the mixed
 weights); the head is already fp8-channel resident, so it needs no lever.
+`engine.prefill_activations: "native"` (2026-10-15) serves the release's own
+activation recipe on prefill rows: the MLP inputs quantized to NVFP4 per row
+with the shipped `input_global_scale` (gate/up share one, down its own) and
+the products on the block-scaled fp4 tensor cores; decode rows keep bf16
+activations. The templates enable it: on one Spark a 262K cold prefill went
+451 -> 391 s and an 11.5K prompt 11.4 -> 8.9 s, with HumanEval 98/100,
+GSM8K 98/100 (99 on the bf16 chain) and schema extraction 100/100 at the
+same seed and limit.
 
 ## Gates
 

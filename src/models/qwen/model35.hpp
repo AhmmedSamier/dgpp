@@ -183,6 +183,12 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   static void set_dflash2_weights_fp8(bool on) { dflash2_fp8_ = on; }
   static bool prefill_fp8_per_tensor() { return prefill_fp8_per_tensor_; }
   static void set_dense_weights_fp8(bool on) { dense_weights_fp8_ = on; }
+  // engine.prefill_activations = native (2026-10-15): the checkpoint's own
+  // activation recipe for every prefill row — the mixed release's NVFP4
+  // MLP activations (per row, the shipped input globals) on the block-
+  // scaled fp4 tensor cores. Read by plan_memory and the constructor.
+  static void set_native_activations(bool on) { native_activations_ = on; }
+  static bool native_activations() { return native_activations_; }
   // Test gate: decode walks (eager, not under a capture) copy every layer's
   // output residual into Outputs::layer_states, as the diagnostic forward
   // does (the row-count invariance test's per-layer bisection).
@@ -380,7 +386,7 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   // families' instances keep the shared rule.
   void configure_gemm_rows(int rows, bool decode);
   void dense_mlp(const uint16_t* x, uint16_t* out, int tokens, const Qwen35DenseMlpResident& m,
-                 cudaStream_t stream, int layer, bool resume = false);
+                 cudaStream_t stream, int layer, bool resume = false, bool prefill = false);
   // The L2 weight prefetcher's boundary windows (2026-10-04, #93; the
   // Qwen3.8-Flash-Next idiom): a decode walk's two folds a layer are bus
   // collectives the chain waits on with the memory system idle (138 x
@@ -458,6 +464,12 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   inline static bool dflash_draft_batch_ = true;
   inline static int dflash_depth_ = 0;
   inline static bool dense_weights_fp8_ = false;
+  inline static bool native_activations_ = false;
+  // The native recipe's NVFP4 activation scratch: one quantized row set at
+  // max_tokens rows of the widest k (I): codes, e4m3 block scales, globals.
+  uint8_t* q_codes_ = nullptr;
+  uint8_t* q_scales_ = nullptr;
+  float* q_gs_ = nullptr;
   // Per-tensor FP8 prefill recipe (engine.prefill_fp8_per_tensor, Resident only):
   // gate/up/down requantized once at boot to E4M3 with one F32 scale each;
   // prefill calls quantize the activation once and run cuBLASLt FP8.

@@ -120,7 +120,11 @@ __device__ __forceinline__ float swiglu_bf16(uint16_t gb, uint16_t ub, float lim
   return __bfloat162float(__float2bfloat16_rn(t * uf));          // rounding 2 (product)
 }
 
-// One block per row; one thread per 16-element group (k <= 16 * blockDim).
+// One block per row; one thread per 16-element group, up to kGroupsPerThread
+// of them strided by the block (k <= 16 * 1024 * kGroupsPerThread: the
+// Qwen3.8-27B down projection's 17408, 2026-10-15); each group's math is
+// the single-group kernel's, so a row's codes do not depend on the mapping.
+constexpr int kGroupsPerThread = 2;
 template <bool kSwiglu>
 __global__ void quantize_rows_nvfp4_kernel(const uint16_t* __restrict__ x, size_t x_stride, int rows, int k,
                                            uint8_t* __restrict__ codes, size_t code_stride,
@@ -131,10 +135,14 @@ __global__ void quantize_rows_nvfp4_kernel(const uint16_t* __restrict__ x, size_
   const int row = blockIdx.x;
   if (row >= rows) return;
   const int groups = k / 16;
-  const int g = threadIdx.x;
-  float v[16];
+  float v[kGroupsPerThread][16];
+  float gmax[kGroupsPerThread];
   float amax = 0.f;
-  if (g < groups) {
+#pragma unroll
+  for (int j = 0; j < kGroupsPerThread; ++j) {
+    const int g = threadIdx.x + j * blockDim.x;
+    gmax[j] = 0.f;
+    if (g >= groups) continue;
     const uint4* src = reinterpret_cast<const uint4*>(x + static_cast<size_t>(row) * x_stride + g * 16);
     const uint4 w0 = src[0], w1 = src[1];
     const uint32_t w[8] = {w0.x, w0.y, w0.z, w0.w, w1.x, w1.y, w1.z, w1.w};
@@ -144,18 +152,19 @@ __global__ void quantize_rows_nvfp4_kernel(const uint16_t* __restrict__ x, size_
       const uint32_t u[8] = {u0.x, u0.y, u0.z, u0.w, u1.x, u1.y, u1.z, u1.w};
 #pragma unroll
       for (int i = 0; i < 8; ++i) {
-        v[2 * i] = swiglu_bf16(static_cast<uint16_t>(w[i] & 0xFFFFu), static_cast<uint16_t>(u[i] & 0xFFFFu), limit);
-        v[2 * i + 1] = swiglu_bf16(static_cast<uint16_t>(w[i] >> 16), static_cast<uint16_t>(u[i] >> 16), limit);
-        amax = fmaxf(amax, fmaxf(fabsf(v[2 * i]), fabsf(v[2 * i + 1])));
+        v[j][2 * i] = swiglu_bf16(static_cast<uint16_t>(w[i] & 0xFFFFu), static_cast<uint16_t>(u[i] & 0xFFFFu), limit);
+        v[j][2 * i + 1] = swiglu_bf16(static_cast<uint16_t>(w[i] >> 16), static_cast<uint16_t>(u[i] >> 16), limit);
+        gmax[j] = fmaxf(gmax[j], fmaxf(fabsf(v[j][2 * i]), fabsf(v[j][2 * i + 1])));
       }
     } else {
 #pragma unroll
       for (int i = 0; i < 8; ++i) {
-        v[2 * i] = __uint_as_float(w[i] << 16);
-        v[2 * i + 1] = __uint_as_float(w[i] & 0xFFFF0000u);
-        amax = fmaxf(amax, fmaxf(fabsf(v[2 * i]), fabsf(v[2 * i + 1])));
+        v[j][2 * i] = __uint_as_float(w[i] << 16);
+        v[j][2 * i + 1] = __uint_as_float(w[i] & 0xFFFF0000u);
+        gmax[j] = fmaxf(gmax[j], fmaxf(fabsf(v[j][2 * i]), fabsf(v[j][2 * i + 1])));
       }
     }
+    amax = fmaxf(amax, gmax[j]);
   }
   // The row's amax: warp shuffles, then one word per warp.
   __shared__ float warp_max[32];
@@ -178,21 +187,25 @@ __global__ void quantize_rows_nvfp4_kernel(const uint16_t* __restrict__ x, size_
   const float sg = static_gs_dev != nullptr ? *static_gs_dev : static_gs;
   const float global = sg > 0.f ? sg : row_amax > 0.f ? row_amax / (6.f * 448.f) : 1.f;
   if (threadIdx.x == 0) gs[row] = global;
-  if (g >= groups) return;
-  uint8_t* code_row = codes + static_cast<size_t>(row) * code_stride + g * 8;
   uint8_t* scale_row = scales + static_cast<size_t>(row) * scale_stride;
-  const __nv_fp8_e4m3 s(amax / (6.f * global));
-  const float bs = static_cast<float>(s);
-  if (amax == 0.f || bs == 0.f) {
-    scale_row[g] = 0;
-    *reinterpret_cast<uint2*>(code_row) = make_uint2(0u, 0u);
-    return;
-  }
-  scale_row[g] = s.__x;
-  const float q = 1.f / (bs * global);
 #pragma unroll
-  for (int i = 0; i < 16; ++i) v[i] *= q;
-  *reinterpret_cast<uint2*>(code_row) = make_uint2(f32x8_to_e2m1(v), f32x8_to_e2m1(v + 8));
+  for (int j = 0; j < kGroupsPerThread; ++j) {
+    const int g = threadIdx.x + j * blockDim.x;
+    if (g >= groups) break;
+    uint8_t* code_row = codes + static_cast<size_t>(row) * code_stride + g * 8;
+    const __nv_fp8_e4m3 s(gmax[j] / (6.f * global));
+    const float bs = static_cast<float>(s);
+    if (gmax[j] == 0.f || bs == 0.f) {
+      scale_row[g] = 0;
+      *reinterpret_cast<uint2*>(code_row) = make_uint2(0u, 0u);
+      continue;
+    }
+    scale_row[g] = s.__x;
+    const float q = 1.f / (bs * global);
+#pragma unroll
+    for (int i = 0; i < 16; ++i) v[j][i] *= q;
+    *reinterpret_cast<uint2*>(code_row) = make_uint2(f32x8_to_e2m1(v[j]), f32x8_to_e2m1(v[j] + 8));
+  }
 }
 
 __device__ __forceinline__ void store_out(uint16_t* p, float v) {
@@ -416,10 +429,11 @@ void launch_quantize_rows_nvfp4(const uint16_t* x, size_t x_stride, int rows, in
                                 uint8_t* scales, float* gs, cudaStream_t stream, float static_gs,
                                 const float* static_gs_dev) {
   if (rows <= 0) return;
-  if (k % 64 != 0 || k / 16 > 1024) throw std::invalid_argument("quantize nvfp4: k must be a multiple of 64, <= 16384");
+  if (k % 64 != 0 || k / 16 > 1024 * kGroupsPerThread)
+    throw std::invalid_argument("quantize nvfp4: k must be a multiple of 64, <= 32768");
   if (x_stride % 8 != 0 || reinterpret_cast<uintptr_t>(x) % 16 != 0)
     throw std::invalid_argument("quantize nvfp4: rows must be 16-byte aligned");
-  const int threads = ((k / 16) + 31) / 32 * 32;
+  const int threads = std::min(1024, ((k / 16) + 31) / 32 * 32);
   quantize_rows_nvfp4_kernel<false><<<rows, threads, 0, stream>>>(x, x_stride, rows, k, codes,
                                                                    static_cast<size_t>(k) / 2, scales,
                                                                    nvfp4_act_scale_stride(k), gs, static_gs, static_gs_dev);
@@ -430,10 +444,11 @@ void launch_swiglu_quantize_rows_nvfp4(const uint16_t* gate, const uint16_t* up,
                                        float limit, uint8_t* codes, uint8_t* scales, float* gs,
                                        cudaStream_t stream, float static_gs, const float* static_gs_dev) {
   if (rows <= 0) return;
-  if (k % 64 != 0 || k / 16 > 1024) throw std::invalid_argument("swiglu quantize nvfp4: k % 64, <= 16384");
+  if (k % 64 != 0 || k / 16 > 1024 * kGroupsPerThread)
+    throw std::invalid_argument("swiglu quantize nvfp4: k % 64, <= 32768");
   if (stride % 8 != 0 || reinterpret_cast<uintptr_t>(gate) % 16 != 0 || reinterpret_cast<uintptr_t>(up) % 16 != 0)
     throw std::invalid_argument("swiglu quantize nvfp4: rows must be 16-byte aligned");
-  const int threads = ((k / 16) + 31) / 32 * 32;
+  const int threads = std::min(1024, ((k / 16) + 31) / 32 * 32);
   quantize_rows_nvfp4_kernel<true><<<rows, threads, 0, stream>>>(gate, stride, rows, k, codes,
                                                                   static_cast<size_t>(k) / 2, scales,
                                                                   nvfp4_act_scale_stride(k), gs, static_gs, static_gs_dev, up, limit);

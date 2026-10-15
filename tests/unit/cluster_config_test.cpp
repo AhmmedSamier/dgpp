@@ -201,7 +201,8 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
               c.engine.kv_dtype == "bf16" && c.engine.bf16_weights == "checkpoint" &&
               c.engine.fp8_head == "gemv" && c.engine.draft_head == "exact" && c.engine.draft_head_blocks == 32 &&
               !c.engine.prefill_bf16_partials && !c.engine.prefill_fold_scales &&
-              !c.engine.prefill_fp8_gemm && !c.engine.prefill_fp8_per_tensor && c.engine.dflash_model.empty() &&
+              !c.engine.prefill_fp8_gemm && !c.engine.prefill_fp8_per_tensor && c.engine.prefill_activations == "bf16" &&
+              c.engine.dflash_model.empty() &&
               c.engine.dflash_verify_graph && c.engine.dflash_draft_batch && c.engine.dflash_depth == 0 &&
               c.engine.expert_gemm == "wide" && c.engine.expert_gemm_prefetch == 3 &&
               c.engine.expert_tile_list && !c.engine.expert_gemm_pair && c.engine.ngram_prestage,
@@ -226,6 +227,10 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
                        (on.engine.prefill_fp8_gemm ? 1 : 0) + (on.engine.prefill_fp8_per_tensor ? 1 : 0);
     require(got && others == 1, "engine." + key + " opt-in alone");
   }
+  // The checkpoint's activation recipe (2026-10-15): "bf16" (the default chain) or "native".
+  const auto na = dgpp::serve::parse_cluster_config(
+      R"({"model":"m","nodes":["h"],"engine":{"prefill_activations":"native"}})", "t");
+  require(na.engine.prefill_activations == "native", "engine.prefill_activations native parses");
   // The DFlash2 drafter's keys (2026-10-03).
   const auto df = dgpp::serve::parse_cluster_config(
       R"({"model":"m","nodes":["h"],"engine":{"dflash_model":"z-lab/Qwen3.8-27B-DFlash2","dflash_verify_graph":false,"dflash_draft_batch":false,"dflash_depth":4}})", "t");

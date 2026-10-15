@@ -132,6 +132,7 @@ struct WorldSettings {
   bool prefill_fold_scales = false;
   bool prefill_fp8_gemm = false;
   bool prefill_fp8_per_tensor = false;  // the Qwen3.8-27B per-tensor prefill recipe (opt-in)
+  std::string prefill_activations = "bf16";  // "native": the checkpoint's activation recipe on prefill rows
   std::string dflash_model;             // the DFlash2 drafter (Qwen3.8-27B, world 1); empty: none
   bool dflash_verify_graph = true;
   bool prefill_group = true;  // engine.prefill_group (2026-10-05): every rank admits the same way

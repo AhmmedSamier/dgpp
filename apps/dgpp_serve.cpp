@@ -1520,6 +1520,7 @@ int main(int argc, char** argv) {
   bool prefill_fold_scales = false;
   bool prefill_fp8_gemm = false;
   bool prefill_fp8_per_tensor = false;  // the Qwen3.8-27B per-tensor prefill recipe (opt-in)
+  std::string prefill_activations = "bf16";  // "native": the checkpoint's activation recipe on prefill rows
   std::string expert_gemm = "wide";         // the packed expert GEMM's form and companions (engine.expert_*)
   int expert_gemm_prefetch = 3;
   bool expert_tile_list = true;
@@ -1641,6 +1642,7 @@ int main(int argc, char** argv) {
     prefill_fold_scales = e.prefill_fold_scales;
     prefill_fp8_gemm = e.prefill_fp8_gemm;
     prefill_fp8_per_tensor = e.prefill_fp8_per_tensor;
+    prefill_activations = e.prefill_activations;
     expert_gemm = e.expert_gemm;
     expert_gemm_prefetch = e.expert_gemm_prefetch;
     expert_tile_list = e.expert_tile_list;
@@ -2069,6 +2071,7 @@ int main(int argc, char** argv) {
         ws.prefill_fold_scales = prefill_fold_scales;
         ws.prefill_fp8_gemm = prefill_fp8_gemm;
         ws.prefill_fp8_per_tensor = prefill_fp8_per_tensor;
+        ws.prefill_activations = prefill_activations;
         ws.dflash_model = dflash_model;
         ws.dflash_verify_graph = dflash_verify_graph;
         ws.prefill_group = prefill_group;
@@ -2396,6 +2399,8 @@ int main(int argc, char** argv) {
   // prefill recipe and the BF16 lm head requantized to block FP8.
   dgpp::Qwen35Model::set_prefill_fp8_per_tensor(prefill_fp8_per_tensor);
   dgpp::Qwen35Model::set_dense_weights_fp8(dense_weights == "fp8");
+  // The checkpoint's activation recipe on prefill rows (engine.prefill_activations).
+  dgpp::Qwen35Model::set_native_activations(prefill_activations == "native");
   if (dflash_weights != "checkpoint" && dflash_weights != "fp8") {
     DGPP_LOG_ERROR("--dflash-weights must be checkpoint or fp8, got '{}'", dflash_weights);
     return 2;

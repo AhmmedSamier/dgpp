@@ -419,6 +419,8 @@ std::string encode_journal_settings(const WorldSettings& s) {
   out += std::format(",\"pfb16\":{},\"pffold\":{},\"pffp8\":{},\"pfpt\":{}", s.prefill_bf16_partials ? 1 : 0,
                      s.prefill_fold_scales ? 1 : 0, s.prefill_fp8_gemm ? 1 : 0,
                      s.prefill_fp8_per_tensor ? 1 : 0);
+  out += ",\"pfact\":";
+  append_json_string(&out, s.prefill_activations);
   out += ",\"dfm\":";
   append_json_string(&out, s.dflash_model);
   out += std::format(",\"dfvg\":{},\"dfdb\":{},\"dfdp\":{}", s.dflash_verify_graph ? 1 : 0,
@@ -675,6 +677,7 @@ JournalRecord decode_journal_line(std::string_view line) {
     if (v.find("pffold")) s.prefill_fold_scales = flag("pffold");
     if (v.find("pffp8")) s.prefill_fp8_gemm = flag("pffp8");
     if (v.find("pfpt")) s.prefill_fp8_per_tensor = flag("pfpt");  // 2026-10-03: the 27B recipe
+    if (const dgpp::minijson::Value* pa = v.find("pfact")) s.prefill_activations = std::string(pa->as_string());
     // The DFlash2 drafter (2026-10-03): records before it carry none.
     if (const dgpp::minijson::Value* dfm = v.find("dfm")) s.dflash_model = std::string(dfm->as_string());
     if (v.find("dfvg")) s.dflash_verify_graph = flag("dfvg");

@@ -5,6 +5,24 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **`engine.prefill_activations: "native"` — the checkpoint's own activation
+  recipe on prefill rows** (2026-10-15). A quantized release defines its
+  numerics; the bf16-activation chain was an upcast of them. On the
+  Qwen3.8-27B NVFP4 release the native recipe quantizes every prefill
+  row's MLP input to NVFP4 per row with the shipped `input_global_scale`
+  (gate and up share one, down has its own; kept resident, loader format
+  4) and runs the three products on the GB10's block-scaled fp4 tensor
+  cores (4x the bf16 mma rate: 376 vs 94 TFLOP/s at the kernel's
+  occupancy), the model's SwiGLU between them; decode rows keep bf16
+  activations. The NVFP4 row quantizer now takes k up to 32768 (two
+  groups a thread; the down projection's 17408). Per-row quantization and
+  a fixed K order keep a row's chain the same at any row count and cut
+  (the shared-prefill invariances pass under it); the quantizer's
+  representable rows come back bitwise. One Spark, the plain template: a
+  262K cold prefill 451 -> 391 s, an 11.5K prompt 11.4 -> 8.9 s;
+  HumanEval 98/100, GSM8K 98/100 (99 on the bf16 chain), schema
+  extraction 100/100 at the same seed. The NVFP4 templates enable it.
+
 - **Qwen3.8-27B prefill attention at 71 TFLOP/s** (2026-10-15). The
   full-attention prefill kernel (`kernels/full_attn.cu`, the tile form the
   27B's 256-dim heads take) was rebuilt in six measured, bitwise rounds:

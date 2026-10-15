@@ -154,7 +154,11 @@ eval holds at 39/40 on HumanEval and GSM8K and the acceptance is unchanged), and
 per-tensor e4m3 kernels (about 2x the prefill rate, +23 GiB resident). Both
 change greedy transcripts (the head within the first tokens, the prefill
 recipe at long context), so a deployment that enables them is not the
-checkpoint's model. The dense family supports worlds 1, 2 and 4.
+checkpoint's model. `engine.prefill_activations: "native"` is different in
+kind: it runs the checkpoint's own activation recipe on prefill rows (for the
+NVFP4 release, NVFP4 MLP inputs with its shipped input globals on the fp4
+tensor cores), so it is the published model's numerics rather than the bf16
+upcast of them. The dense family supports worlds 1, 2 and 4.
 
 The current dense templates use the DFlash2 drafter (`engine.dflash_model`)
 with `mtp` off, `decode_graph` on and adaptive verification depth at worlds
@@ -169,7 +173,8 @@ The [Qwen3.8-27B NVFP4 checkpoint](model_cards/Qwen3.8-27B-NVFP4.md) uses
 the same dense architecture and DFlash2 templates. Its mixed native FP4,
 channelwise FP8 and BF16 weights are loaded without requantization;
 `dense_weights: fp8` and `prefill_fp8_per_tensor` are rejected for this
-checkpoint. The model card links the matched performance and quality
+checkpoint; `prefill_activations: "native"` is its own recipe (NVFP4 MLP
+activations with the shipped input globals). The model card links the matched performance and quality
 measurements, including the remaining four-node C1 prose decode exception.
 
 Qwen FP8 and packed heads keep the full product's kernel selection and

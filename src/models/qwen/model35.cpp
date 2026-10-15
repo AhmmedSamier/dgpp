@@ -24,6 +24,7 @@
 #include "kernels/fp4w_gemm.hpp"
 #include "kernels/fp8_per_tensor.hpp"
 #include "kernels/fp8_dequant.hpp"
+#include "kernels/moe_w4a4.hpp"
 #include "kernels/gemm.hpp"
 #include "kernels/glm_moe_launch.hpp"
 #include "kernels/kernels.hpp"
@@ -347,6 +348,16 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
     DGPP_CUDA_OK(cudaMemcpy(fp4_segs_, segs.data(), M * sizeof(MoeSegment),
                             cudaMemcpyHostToDevice));
   }
+  // The native activation recipe's NVFP4 scratch (engine.prefill_activations
+  // = native): one quantized row set at max_tokens rows of the widest k (I).
+  if (native_activations_ && cfg_.quant_kind == Qwen35QuantKind::Nvfp4Mixed) {
+    DGPP_CUDA_OK(cudaMalloc(&q_codes_, M * I / 2));
+    DGPP_CUDA_OK(cudaMalloc(&q_scales_, M * nvfp4_act_scale_stride(static_cast<int>(I))));
+    DGPP_CUDA_OK(cudaMalloc(&q_gs_, M * sizeof(float)));
+    DGPP_LOG_INFO("Qwen35Model: engine.prefill_activations = native: the NVFP4 MLP recipe on every prefill row");
+  } else if (native_activations_) {
+    DGPP_LOG_INFO("Qwen35Model: engine.prefill_activations = native has no NVFP4 subject on this release; the MLP keeps bf16 activations");
+  }
   if (cfg_.quant_kind == Qwen35QuantKind::Nvfp4Mixed &&
       loader_.residency() == LoaderResidency::Resident) {
     // Resident: harvest every layer's [gate,up,down] views once — the
@@ -659,6 +670,9 @@ Qwen35Model::~Qwen35Model() {
   cudaFree(gate_tmp_);
   cudaFree(up_tmp_);
   cudaFree(fp4_segs_);
+  cudaFree(q_codes_);
+  cudaFree(q_scales_);
+  cudaFree(q_gs_);
   cudaFree(fp4_views_);
   cudaFree(mtp_e_);
   cudaFree(mtp_en_);
@@ -947,7 +961,7 @@ void Qwen35Model::head_gemv(const uint16_t* act, float* out, int rows, cudaStrea
 
 void Qwen35Model::dense_mlp(const uint16_t* x, uint16_t* out, int tokens,
                             const Qwen35DenseMlpResident& m, cudaStream_t stream, int layer,
-                            bool resume) {
+                            bool resume, bool prefill) {
   // I is this rank's MLP slice (the resident gate rows): intermediate_size /
   // world under TP, the whole at world 1.
   const int64_t H = cfg_.hidden_size, I = m.inter ? m.inter : m.gate_fp8.rows;
@@ -975,6 +989,41 @@ void Qwen35Model::dense_mlp(const uint16_t* x, uint16_t* out, int tokens,
     gemm_.matmul_fp8_scaled(pt_act_, pt_down_ + static_cast<size_t>(layer) * IH, asc + 1, ws + 2,
                             out, tokens, static_cast<int>(H), static_cast<int>(I), gw_.ws,
                             gw_.ws_bytes, stream);
+    return;
+  }
+  // The checkpoint's NVFP4 activation recipe (engine.prefill_activations =
+  // native, 2026-10-15): every prefill row's MLP input quantized to NVFP4 per
+  // row with the shipped input_global_scale (gate and up share one; down has
+  // its own), the three products on the block-scaled fp4 tensor cores
+  // (kernels/moe_w4a4 over one segment; 4x the bf16 mma rate measured), the
+  // model's SwiGLU between them. Per-row quantization and a fixed K order keep
+  // a row's chain the same at any row count and cut. Decode rows keep W4A16:
+  // bandwidth-bound, their bf16 activations cost nothing.
+  // (The instance's scratch is the switch: it exists only when the model was
+  // built under the key, so a model keeps its recipe whatever the static
+  // flag says later — the test builds both chains in one process.)
+  if (prefill && q_codes_ && m.gate_fp4.payload && m.fp4_input_gs && tokens > 0) {
+    const MoeExpertView* views = nullptr;
+    if (fp4_view_layers_ > 0 && layer >= 0 && layer < fp4_view_layers_) {
+      views = fp4_views_ + static_cast<size_t>(layer) * 3;
+    } else {
+      MoeExpertView slot[3] = {MoeExpertView::of(m.gate_fp4), MoeExpertView::of(m.up_fp4),
+                               MoeExpertView::of(m.down_fp4)};
+      DGPP_CUDA_OK(cudaMemcpyAsync(fp4_views_, slot, sizeof(slot), cudaMemcpyHostToDevice, stream));
+      views = fp4_views_;
+    }
+    const MoeSegment* seg = fp4_segs_ + (tokens - 1);
+    launch_quantize_rows_nvfp4(x, static_cast<size_t>(H), tokens, static_cast<int>(H), q_codes_, q_scales_, q_gs_,
+                               stream, 0.f, m.fp4_input_gs);
+    launch_moe_grouped_w4a4_bf16(q_codes_, q_scales_, q_gs_, nullptr, seg, 1, tokens, views, 0, gate_tmp_,
+                                 static_cast<size_t>(I), static_cast<int>(I), static_cast<int>(H), stream);
+    launch_moe_grouped_w4a4_bf16(q_codes_, q_scales_, q_gs_, nullptr, seg, 1, tokens, views, 1, up_tmp_,
+                                 static_cast<size_t>(I), static_cast<int>(I), static_cast<int>(H), stream);
+    qwen35_swiglu_bf16(gate_tmp_, up_tmp_, gate_tmp_, static_cast<int64_t>(tokens) * I, stream);
+    launch_quantize_rows_nvfp4(gate_tmp_, static_cast<size_t>(I), tokens, static_cast<int>(I), q_codes_, q_scales_,
+                               q_gs_, stream, 0.f, m.fp4_input_gs + 1);
+    launch_moe_grouped_w4a4_bf16(q_codes_, q_scales_, q_gs_, nullptr, seg, 1, tokens, views, 2, out,
+                                 static_cast<size_t>(H), static_cast<int>(H), static_cast<int>(I), stream);
     return;
   }
   // ---- mixed-release forms (the loader binds one form per layer) -------------
@@ -1253,6 +1302,11 @@ MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens,
     plan.add("per-tensor fp8 full attention (q/k/v/o E4M3 + scales)",
              full_slots * (QW * Hp + 2 * KW * Hp + Hp * FH) + full_slots * 4 * 4);
   }
+  // The native activation recipe's NVFP4 scratch (engine.prefill_activations
+  // = native, the mixed release): one quantized row set at max_tokens rows.
+  if (native_activations_ && cfg.quant_kind == Qwen35QuantKind::Nvfp4Mixed)
+    plan.add("native activation scratch (NVFP4 rows at max_tokens)",
+             M * I / 2 + M * nvfp4_act_scale_stride(static_cast<int>(I)) + M * sizeof(float));
   // Blockwise-FP8 lm head (engine.dense_weights = fp8, Resident only): half
   // the bytes per decode row.
   if (dense_weights_fp8_ && residency == LoaderResidency::Resident) {
@@ -1537,7 +1591,7 @@ void Qwen35Model::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos
   // Fused residual-add + post norm (bitwise the pair): one launch.
   qwen_add_rmsnorm_bf16(mtp_r_, ao, r.post_norm, x_, T, H, eps, stream_);
   uint16_t* mo = stage(mlp_out_, H);
-  dense_mlp(x_, mo, T, r.mlp, stream_, cfg_.num_hidden_layers, first_pos > 0 && !decode_row);
+  dense_mlp(x_, mo, T, r.mlp, stream_, cfg_.num_hidden_layers, first_pos > 0 && !decode_row, !decode_row);
   fold(mo, H);
   add_inplace_bf16(mtp_r_, mo, static_cast<size_t>(T) * H, stream_);
   if (head_rows == 0) return;  // prefill rows fill the cache; no head
@@ -1866,11 +1920,11 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
       }, [&](int row0, int count, bool decode, int first) {
         configure_gemm_rows(count, decode);
         dense_mlp(x_ + static_cast<size_t>(row0) * H, mo + static_cast<size_t>(row0) * H,
-                  count, r.mlp, stream_, layer, !decode && run.span_pos0[first] > 0);
+                  count, r.mlp, stream_, layer, !decode && run.span_pos0[first] > 0, !decode);
       });
       configure_gemm_rows(T, run.decode);
     } else {
-      dense_mlp(x_, mo, T, r.mlp, stream_, layer, !run.decode && run.pos0 > 0);
+      dense_mlp(x_, mo, T, r.mlp, stream_, layer, !run.decode && run.pos0 > 0, !run.decode);
     }
     if (run.decode) prefetch_attention_side(layer + 1);  // the next layer's input side (or the head)
     fold(mo, H);

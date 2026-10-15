@@ -275,6 +275,43 @@ int main(int argc, char** argv) {
     else if (a == "--topk") topk = std::atoi(argv[++i]);
   }
   int fails = 0;
+  // The recipe's exact case, bitwise: rows whose values are NVFP4-representable
+  // under a block scale e4m3 holds (amax 1.5 -> 1.5 / 6 = 0.25) and a static
+  // global of 1 come back from the quantizer as the same bf16 values, so the
+  // scale rule (amax / 6, e4m3) and the e2m1 rounding are the checkpoint's.
+  for (const int k : {512, 17408}) {
+    const int rows = 33;
+    const float grid[] = {0.f, 0.125f, -0.125f, 0.25f, -0.25f, 0.375f, -0.375f, 0.5f, -0.5f, 0.75f, -0.75f, 1.0f, -1.0f, 1.5f};
+    std::mt19937 rng(17);
+    std::vector<uint16_t> x(size_t(rows) * k);
+    for (int r = 0; r < rows; ++r)
+      for (int g = 0; g < k / 16; ++g) {
+        for (int i = 0; i < 16; ++i) x[size_t(r) * k + g * 16 + i] = bf16(grid[rng() % 14]);
+        x[size_t(r) * k + g * 16 + (rng() % 16)] = bf16(rng() % 2 ? 1.5f : -1.5f);  // the block's amax
+      }
+    uint16_t* dx = dev(x);
+    const size_t ss = nvfp4_act_scale_stride(k);
+    uint8_t *codes = nullptr, *scales = nullptr;
+    float* gs = nullptr;
+    DGPP_CUDA_OK(cudaMalloc(&codes, size_t(rows) * k / 2));
+    DGPP_CUDA_OK(cudaMalloc(&scales, size_t(rows) * ss));
+    DGPP_CUDA_OK(cudaMalloc(&gs, size_t(rows) * 4));
+    launch_quantize_rows_nvfp4(dx, k, rows, k, codes, scales, gs, nullptr, 1.0f);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    const auto qc = host(codes, size_t(rows) * k / 2);
+    const auto qs = host(scales, size_t(rows) * ss);
+    const auto qg = host(gs, size_t(rows));
+    int bad = 0;
+    for (int r = 0; r < rows; ++r)
+      for (int kk = 0; kk < k; ++kk) {
+        const uint8_t ab = qc[size_t(r) * k / 2 + kk / 2];
+        const float back = e2m1(kk % 2 ? ab >> 4 : ab & 15) * e4m3(qs[size_t(r) * ss + kk / 16]) * qg[r];
+        if (bf16(back) != x[size_t(r) * k + kk]) ++bad;
+      }
+    std::printf("representable rows through the quantizer (k %d): %d of %d values differ\n", k, bad, rows * k);
+    if (bad != 0) ++fails;
+    cudaFree(dx); cudaFree(codes); cudaFree(scales); cudaFree(gs);
+  }
   // Small shapes with ragged segments and k tails for the exact layout check.
   fails += run(64, 8, 2, 256, 256, true, "small");
   fails += run(200, 16, 4, 320, 320, true, "k320");

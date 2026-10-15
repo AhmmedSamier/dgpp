@@ -145,10 +145,18 @@ struct ClusterConfig {
     //     activations: ~2x the dequantized bf16 GEMM's rate, +23 GiB
     //     resident at the 27B's shape, and not transcript-preserving at
     //     long context. Default: the dequantized bf16 GEMM (exact).
+    //   prefill_activations: "bf16" (the default: activations stay bf16 and
+    //     quantized weights are decoded to bf16 for the products) or
+    //     "native" (the checkpoint's own activation recipe on every
+    //     prefill row — 2026-10-15: the Qwen3.8-27B NVFP4 release's MLP
+    //     inputs quantized to NVFP4 per row with its shipped input globals,
+    //     the products on the block-scaled fp4 tensor cores; decode rows
+    //     keep bf16 activations).
     bool prefill_bf16_partials = false;
     bool prefill_fold_scales = false;
     bool prefill_fp8_gemm = false;
     bool prefill_fp8_per_tensor = false;
+    std::string prefill_activations = "bf16";
     // The packed expert GEMM's form and companions (2026-09-30; every
     // serving switch is a config key — no environment variable selects a
     // kernel). All bitwise the default chain.
