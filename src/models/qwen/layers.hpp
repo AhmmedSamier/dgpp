@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <vector>
 #include <thread>
 #include <string>
@@ -106,6 +107,10 @@ class QwenGrSite {
   // launch on the batched decode rows, as its own launch otherwise.
   void mix(uint16_t* r, uint16_t* x, int tokens, cudaStream_t stream,
            const PendingCombine* pending = nullptr);
+  // A kernel group keeps its scratch at the corresponding physical rows.
+  // Its gates are completed before another group reuses the side-stream events.
+  void mix_group(uint16_t* r, uint16_t* x, int tokens, int row0, cudaStream_t stream,
+                 const PendingCombine* pending = nullptr);
   // R += s(Rn) (x) y, y [T, H]; requires the site's inject weights.
   void combine(uint16_t* r, const uint16_t* y, int tokens, cudaStream_t stream);
   // combine() deferred: when this site's gates were computed by its mix
@@ -136,7 +141,9 @@ class QwenGrSite {
   bool gate_side_only_ = false;  // DGPP_QWEN_GR_GATE_SIDE=side: the batched rows' side stream    // DGPP_QWEN_GR_GATE_SIDE=off puts both back in the chain
   bool gate_forked_ = false;
   bool gates_ready_ = false;  // the mix's down GEMV computed them in its own launch
-  void fork_gate_dots(cudaStream_t main, int tokens);
+  void mix_rows(uint16_t* r, uint16_t* x, int tokens, int row0, cudaStream_t stream,
+                const PendingCombine* pending);
+  void fork_gate_dots(cudaStream_t main, int tokens, int row0 = 0);
   // The inject rows ride the fused mix's down GEMV: they run the same
   // 16-byte-chunked row chain, so the weight must be aligned like the
   // down matrix.
@@ -196,6 +203,19 @@ class QwenGdnLayer {
                     const KdaRequestRows& requests, cudaStream_t stream,
                     const KdaStateSnapshots& rec_snap = {},
                     const KdaConvSnapshots& conv_snap = {}, const KdaReplay& replay = {});
+  struct Span {
+    int rows = 0;
+    float* recurrent = nullptr;  // null denotes padding
+    uint16_t* conv = nullptr;
+    KdaStateSnapshots rec_snap;
+    KdaConvSnapshots conv_snap;
+    KdaReplay replay;
+    KdaRequestRows requests;  // a batched decoder prefix; empty for one prefill
+    int64_t rec_stride = 0, conv_stride = 0;
+  };
+  // Shared projections, with each span's recurrence and rollback sinks.
+  void enqueue_spans(const uint16_t* x, uint16_t* out, int tokens,
+                     std::span<const Span> spans, cudaStream_t stream);
   // The replay form's materialize: the recurrent state as it stands after
   // `replay`'s rows (in place, or into replay.dst), no rows of its own.
   void materialize(float* recurrent_state, const KdaReplay& replay, cudaStream_t stream);
@@ -278,6 +298,10 @@ class QwenQsaLayer {
   // and the listed attention per row, the gated output projection.
   void enqueue(const uint16_t* x, int tokens, const QwenQsaRows& rows, QwenQsaCache& cache,
                uint16_t* out, cudaStream_t stream);
+  struct Span { int rows; QwenQsaRows map; };
+  void enqueue_spans(const uint16_t* x, int tokens, const QwenQsaRows& rows,
+                     std::span<const Span> spans, QwenQsaCache& cache,
+                     uint16_t* out, cudaStream_t stream);
 
   static size_t scratch_bytes(const QwenTextConfig& cfg, int local_heads, int local_kv_heads,
                               int max_tokens, int64_t max_pools);
@@ -288,6 +312,12 @@ class QwenQsaLayer {
   int max_selected() const { return max_selected_; }
 
  private:
+  void validate_rows(int tokens, const QwenQsaRows& rows, const QwenQsaCache& cache) const;
+  void project_rows(const uint16_t* x, int tokens, const QwenQsaRows& rows,
+                    QwenQsaCache& cache, cudaStream_t stream);
+  void attend_rows(int tokens, const QwenQsaRows& rows, QwenQsaCache& cache,
+                   int offset, cudaStream_t stream);
+  void project_output(uint16_t* out, int tokens, cudaStream_t stream);
   QwenQsaResident w_;
   QwenGemmWorkspace g_;
   int hidden_, lh_, lkv_, dim_, rotary_, idx_heads_, idx_dim_, kpool_, select_k_, max_selected_;
@@ -350,12 +380,24 @@ class QwenFullAttnLayer {
   void enqueue(const uint16_t* x, int tokens, const QwenQsaRows& rows, QwenFullAttnCache& cache,
                uint16_t* out, cudaStream_t stream);
 
+  using Span = QwenQsaLayer::Span;
+  void enqueue_spans(const uint16_t* x, int tokens, const QwenQsaRows& rows,
+                     const std::vector<Span>& spans, QwenFullAttnCache& cache,
+                     uint16_t* out, cudaStream_t stream);
+
   static size_t scratch_bytes(const QwenTextConfig& cfg, int local_heads, int local_kv_heads,
                               int max_tokens);
   int local_heads() const { return lh_; }
   int local_kv_heads() const { return lkv_; }
 
  private:
+  void validate_rows(int tokens, const QwenQsaRows& rows, const QwenFullAttnCache& cache) const;
+  void project_rows(const uint16_t* x, int tokens, const QwenQsaRows& rows,
+                    QwenFullAttnCache& cache, cudaStream_t stream);
+  void attend_rows(int tokens, const QwenQsaRows& rows, QwenFullAttnCache& cache,
+                   int row0, cudaStream_t stream);
+  void project_output(uint16_t* out, int tokens, bool resume, cudaStream_t stream);
+
   QwenPtAttnView pt_;  // disabled unless the model binds per-tensor weights
   QwenFullAttnResident w_;
   QwenGemmWorkspace g_;
@@ -436,12 +478,12 @@ class QwenPleLayer {
   // in the model's context kernel.
   void embed(const int64_t* tokens, int rows, const int32_t* req_ids, const int64_t* pos,
              const int32_t* req_spans, int num_requests, const int32_t* ctx, cudaStream_t stream);
-  void project_key(uint16_t* key_dst, int rows, cudaStream_t stream);
+  void project_key(uint16_t* key_dst, int rows, cudaStream_t stream, int row0 = 0);
   void norm_key(const uint16_t* key, int rows, cudaStream_t stream);
-  void project_value(uint16_t* val_dst, int rows, cudaStream_t stream);
+  void project_value(uint16_t* val_dst, int rows, cudaStream_t stream, int row0 = 0);
   void finish(uint16_t* r, const uint16_t* value, uint16_t* states, int64_t state_stride,
               const int32_t* req_ids, const int64_t* pos, const int32_t* req_spans, int num_requests,
-              int rows, cudaStream_t stream, uint16_t* snapshots = nullptr);
+              int rows, cudaStream_t stream, uint16_t* snapshots = nullptr, int snapshot_rows = -1);
   static size_t scratch_bytes(const QwenTextConfig& cfg, int hash_heads, int max_tokens);
   uint16_t* key_partial() { return key_; }
   uint16_t* value_partial() { return val_; }
@@ -457,8 +499,16 @@ class QwenPleLayer {
   float eps_;
   struct StageArgs;
   static void stage_callback(void* user);
+  // The staged row's stored form (the FP8 table's head_dim codes, or the
+  // NVFP4 table's head_dim / 2 codes with head_dim / 16 scales in a second
+  // region of the same staging), and the conversion that reads it.
+  size_t stage_code_bytes() const;
+  size_t stage_scale_bytes() const;
+  size_t stage_row_bytes() const;
+  uint8_t* stage_scales(uint8_t* staging) const;
+  void gather_staged(uint8_t* staging, int rows, cudaStream_t stream);
   int32_t* h_ids_ = nullptr;      // mmap: the pinned ids (ids_ their device alias)
-  uint8_t* staged_ = nullptr;     // mmap: pinned [M, hash_heads, head_dim]
+  uint8_t* staged_ = nullptr;     // mmap: pinned [M, hash_heads, codes] (+ [M, hash_heads, scales] for NVFP4)
   cudaStream_t side_ = nullptr;   // mmap: the host node's branch (DGPP_QWEN_PLE_HOST_NODE=1)
   cudaEvent_t fork_ = nullptr, join_ = nullptr;
   std::vector<std::unique_ptr<StageArgs>> stage_args_;  // one per capture, two eager

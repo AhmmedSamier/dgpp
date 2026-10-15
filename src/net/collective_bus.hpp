@@ -356,6 +356,9 @@ class CollectiveBus {
     return cls == BusMessageClass::kLatency ? options_.lat_slot_bytes
                                             : options_.bulk_slot_bytes;
   }
+  size_t bulk_segment_bytes() const {
+    return static_cast<size_t>(options_.bulk_slots) * options_.lane_devices.size() * options_.bulk_slot_bytes;
+  }
 
   // Receive-side view of one peer/lane (doorbells, acks, payloads, control).
   BusRecvView recv_view(int peer_rank, int lane) const;

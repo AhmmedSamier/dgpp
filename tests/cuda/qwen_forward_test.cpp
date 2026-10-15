@@ -628,7 +628,7 @@ int run_dump_parity(const std::string& dir, const std::string& dump_path) {
 int main(int argc, char** argv) {
   std::string fixture, smoke, checkpoint, dump, cross_limit, qsa_prefill, logits_path;
   std::string rope_scaling_arg;
-  bool plan_check = false, w4a4_plan_check = false, gptq = false;
+  bool plan_check = false, w4a4_plan_check = false, gptq = false, qad = false, nvfp4 = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--write-fixture" && i + 1 < argc) fixture = argv[++i];
@@ -639,6 +639,8 @@ int main(int argc, char** argv) {
     else if (a == "--logits" && i + 1 < argc) logits_path = argv[++i];
     else if (a == "--plan-check") plan_check = true;
     else if (a == "--gptq") gptq = true;
+    else if (a == "--qad") qad = true;
+    else if (a == "--nvfp4") nvfp4 = true;
     else if (a == "--w4a4-plan-check")
       w4a4_plan_check = true;
     else if (a == "--checkpoint-dir" && i + 1 < argc) checkpoint = argv[++i];
@@ -666,8 +668,13 @@ int main(int argc, char** argv) {
       rope_scaling = rs;
     }
     if (!fixture.empty()) {
-      // --gptq: the AutoRound hybrid's twin (tests/cuda/qwen_fixture.hpp).
-      qwenfx::write_fixture_for(gptq ? qwenfx::tiny_gptq_config() : qwenfx::tiny_config(), fixture);
+      // --gptq: the AutoRound hybrid's twin; --qad: the QAD export's
+      // (tests/cuda/qwen_fixture.hpp).
+      qwenfx::write_fixture_for(gptq ? qwenfx::tiny_gptq_config()
+                                : qad ? qwenfx::tiny_qad_config()
+                                : nvfp4 ? qwenfx::tiny_nvfp4_config()
+                                        : qwenfx::tiny_config(),
+                                fixture);
       std::printf("[ OK ] wrote the fixture to %s\n", fixture.c_str());
       return 0;
     }

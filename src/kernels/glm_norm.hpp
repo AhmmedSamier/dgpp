@@ -65,6 +65,17 @@ void glm_mtp_input_bf16_batched(
 void glm_residual_add_bf16(void* x, const void* y, int64_t n,
                            cudaStream_t stream);
 
+// x[rows, dim] += add[rows, dim] in bf16 (the add above), then y = the
+// two-rounding norm of the updated x (the norm above) — one launch,
+// bitwise the pair (2026-10-13: the full GLM-5.3's two residual sites a
+// layer, GLM-4.7's and the draft blocks').
+void glm_residual_add_rmsnorm_bf16(void* x, const void* add, const void* weight, void* y, int rows, int dim,
+                                   float eps, cudaStream_t stream);
+// The same add fused into the quantizing norm (glm_rmsnorm_bf16_quant_int8).
+void glm_residual_add_rmsnorm_bf16_quant_int8(void* x, const void* add, const void* weight, void* y, int8_t* codes,
+                                              size_t code_stride, float* scales, size_t scale_stride, int rows,
+                                              int dim, float eps, cudaStream_t stream);
+
 // cache[positions[t], :] = rows[t, :] for t < num_rows (bf16 rows of
 // `hidden`): the per-position hidden cache the draft block reads from.
 void glm_rows_scatter_bf16(const void* rows, const int64_t* positions,

@@ -100,7 +100,7 @@ def _parse_shard_header(path, entries):
                          info["shape"])
 
 
-_ITEMSIZE = {"BF16": 2, "F32": 4, "F8_E4M3": 1}
+_ITEMSIZE = {"BF16": 2, "F32": 4, "F8_E4M3": 1, "U8": 1}  # U8: e2m1 pairs and e8m0 scales come back as integer bytes
 
 
 def load_tensor(entries, name):

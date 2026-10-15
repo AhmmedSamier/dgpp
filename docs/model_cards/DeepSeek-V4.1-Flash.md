@@ -50,7 +50,7 @@ acceptance p1 55–92 % by prompt class; bounded prefill 1.6–2.4 ms/token
 over 512–8,192 tokens; gsm8k 60/60, HumanEval 40/40, schema extraction
 30/30 (thinking off). The MTP transcript is byte-identical to the plain
 greedy transcript, and the four ranks' operation streams match. Full
-numbers: `docs/measurements.md` and `benchmarks/results/2026-09-14-dsv41-flash.md`.
+numbers: `docs/measurements.md` and the 2026-09-14-dsv41-flash measurements.
 
 ## License and attribution
 

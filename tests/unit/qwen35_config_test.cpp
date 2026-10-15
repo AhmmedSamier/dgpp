@@ -226,6 +226,31 @@ DGPP_TEST(qwen35_config_from_json_file_fills_vision_when_present) {
   std::filesystem::remove_all(dir);
 }
 
+DGPP_TEST(qwen35_config_rope_ramp_plumbing_is_default_off) {
+  // The parser never fills the ramp (only the serving layer sets it, from
+  // engine.rope_scaling): tables and ceilings are what they were before it
+  // existed.
+  dgpp::Qwen35TextConfig c =
+      parse(qwen35_fixture::text_json(), qwen35_fixture::kQuantFp8);
+  require(!c.rope_scaling.has_value(), "ramp unset by parse");
+  require(c.context_limit() == 262144, "native ceiling");
+  dgpp::QwenTextConfig qc = dgpp::qwen35_text_adapter(c);
+  require(!qc.rope_scaling.has_value(), "adapter carries the unset ramp");
+  // Set programmatically, the ramp rides the adapter into the layer view
+  // the Full layers read, and the ceiling follows it.
+  dgpp::RopeScaling rs;
+  rs.factor = 2.0;
+  rs.original_max_position_embeddings = 262144;
+  c.rope_scaling = rs;
+  require(c.context_limit() == 524288, "ramped ceiling");
+  qc = dgpp::qwen35_text_adapter(c);
+  require(qc.rope_scaling.has_value(), "adapter carries the ramp");
+  require(qc.rope_scaling->factor == 2.0, "ramp factor");
+  require(qc.rope_scaling->original_max_position_embeddings == 262144, "ramp origin");
+  require(qc.hidden_size == 5120 && qc.head_dim == 256 && qc.rotary_dim == 64, "geometry");
+  require(qc.rope_theta == 1e7, "theta");
+}
+
 DGPP_TEST(qwen35_architecture_detects_the_release) {
   const auto root = dgpp::minijson::parse(
       R"({"architectures": ["Qwen3_5ForConditionalGeneration"], "model_type": "qwen3_5"})");

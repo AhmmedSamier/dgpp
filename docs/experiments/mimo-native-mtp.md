@@ -36,12 +36,11 @@ Validation surfaces:
 - `DGPP_MIMO_NATIVE_MTP=1 ./mimo_decode_test`: native config through the
   existing prefill, session, speculative and snapshot tests.
 
-Real-checkpoint measurements and all-attempt hardware test outcomes live
-in `/mnt/benchmarks/dgpp-mimo-mtp3-20260923/`; the final dated benchmark
-record distinguishes recursive and native depth 3 and lists quality limits.
+Real-checkpoint comparisons must distinguish recursive and native depth 3
+and report the limits of their quality checks.
 
-The [integrated follow-up](../../benchmarks/results/2026-09-23-mimo-integrated-review.md)
-adds the combined prefill/native-head matrix, broader shared-engine regression
-coverage and controlled arrival-order/probability diagnostics. Use the
-[portable benchmark procedure](../../benchmarks/mimo_upstream/README.md) to
-repeat those checks on another deployment.
+The integrated follow-up added the combined prefill/native-head matrix,
+broader shared-engine regression coverage and controlled arrival-order/
+probability diagnostics. For new measurements, use the
+[maintained comparison procedure](mimo-benchmarking.md), which distinguishes
+current probes from the original unbundled request panel.

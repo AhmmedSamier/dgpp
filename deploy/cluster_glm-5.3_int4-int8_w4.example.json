@@ -14,6 +14,7 @@
     "decode_graph": true,
     "mtp": true,
     "mtp_depth": 1,
+    "draft_head": "screen",
     "prefix_cache_gib": 1.0,
     "admission": "full",
     "admission_window": 256,

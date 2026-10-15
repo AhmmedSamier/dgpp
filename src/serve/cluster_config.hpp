@@ -25,6 +25,7 @@
 
 #include "kernels/rope_scaling.hpp"
 #include "serve/http_limits.hpp"
+#include "sched/prefill_latency.hpp"
 
 namespace dgpp::serve {
 
@@ -84,6 +85,13 @@ struct ClusterConfig {
     // docs/qwen38_single_spark.md).
     std::string dense_weights = "checkpoint";
     std::string fp8_head = "gemv";  // Qwen head: gemv | mma (opt-in)
+    // The MTP draft head's read (2026-10-13; kernels/head_screen.hpp):
+    // "exact" streams the whole head per draft token; "screen" finds the
+    // candidate 128-row blocks through a 2-bit rotated copy and computes
+    // only those exactly — output-exact, only which token is drafted can
+    // differ. draft_head_blocks: the candidate cap, 1..64.
+    std::string draft_head = "exact";
+    int draft_head_blocks = 32;
     // The MTP draft layer's routed-expert layout: "fp8" (the default:
     // per-expert FP8 tensors as the NVIDIA release ships) or "bf16_fused"
     // (the RadixArk release: all 512 experts stacked as fused BF16
@@ -184,7 +192,7 @@ struct ClusterConfig {
     int admission_gather_ms = 3;
     int max_connections = 64;
     bool no_eos = false;
-    bool compact_batches = false;
+    bool compact_batches = true;
     bool decode_graph = false;
     bool mtp = false;
     int mtp_depth = 1;             // draft tokens per step (1..5); needs mtp
@@ -283,9 +291,15 @@ struct ClusterConfig {
     bool prefix_head_snapshots = true;  // a cold prompt also keeps its first structural cut (the system prompt's end)
     std::string admission = "full";
     int admission_window = 256;
-    int prefill_budget_tokens = -1;  // automatic on engines with resumable prefill
-    std::string model_alias = "";  // override the served model name (display only)
-    int prefill_idle_budget_tokens = 0;
+    int prefill_budget_tokens = -1;  // automatic: 256 tokens, adjusted to engine geometry
+    std::string model_alias = "";  // the served model name: listed, reported and required of requests (empty: the model id)
+    int prefill_idle_budget_tokens = 0;  // auto busy: up to 4096 for grouped prefill; explicit busy: same budget
+    int decode_gap_target_ms = sched::kDefaultDecodeGapTargetMs;
+    int first_token_target_ms = sched::kDefaultFirstTokenTargetMs;
+    sched::PrefillLatencyTuning prefill_latency;
+    // Omitted: resolve from the constructed engine's mixed-execution support.
+    // Settings retain auto/on/off; the warm journal carries the resolved bool.
+    std::optional<bool> prefill_early_admission;
     double bulk_pace_gbps = -1.0;  // derived from the port rate
     int bulk_inflight = -1;
     int rendezvous_timeout_ms = 120000;

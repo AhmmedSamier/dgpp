@@ -26,13 +26,11 @@ relative logit L2 below 1e-5 and preserve top-1. This is a synthetic gate,
 not broad real-model quality evidence.
 
 The benchmark uses two Sparks, C2, BF16 KV, upstream's shared 131072-token
-pool, BF12 weights and MTP1. Upstream does not accept MiMo prefill-budget
-controls. These capacity and scheduling settings differ from the saved
+pool, BF12 weights and MTP1. That upstream baseline did not accept MiMo
+prefill-budget controls; current DGPP uses the shared scheduler policy for
+MiMo too. These historical capacity and scheduling settings differ from the saved
 256K-per-request, MTP3 deployment. Use identical settings between upstream
 and these ports; report comparison with the saved implementation separately.
-
-Raw evidence and deployment restoration records live in
-`/mnt/benchmarks/dgpp-mimo-upstream-20260923/`.
 
 ## Tool-call compatibility
 
@@ -43,16 +41,14 @@ upstream's newer schema/reference support or model-opened thinking.
 Required argument keys are retained for non-strict MiMo tools too. Generic
 newline XML continues to use its existing grammar. Tests cover both forms.
 
-## Reproduce the request panel
+## Run follow-up comparisons
 
-On an exclusively reserved server, point `DGPP_MIMO_BENCH_URL` at its `/v1/`
-endpoint and `DGPP_MIMO_BENCH_ROOT` at an evidence directory. Run
-`python3 benchmarks/mimo_upstream/benchmark.py UNIQUE_TAG`, followed by
-`acceptance.py UNIQUE_TAG`. The scripts preserve requests, raw SSE events,
-usage, outputs, timings and before/after metrics; they refuse to overwrite
-an existing timing panel. `quality.py UNIQUE_TAG 2800 6000` checks exact
-retrieval at approximately 31K and 67K tokens. Tools are exercised separately
-through the user's actual Python harness; no generated tools are executed.
+The original timing/retrieval panel and its local helper scripts are not
+bundled with the repository. For new comparisons on an exclusive server,
+use the [maintained MiMo comparison procedure](mimo-benchmarking.md). It
+uses tracked serving probes and records the scheduler settings explicitly;
+its scenarios do not reproduce the old panel's measurements. Retain any
+additional retrieval prompts or client-harness fixtures with your results.
 
 The subsequent [native MTP experiment](mimo-native-mtp.md) migrates blocks
 1/2 behind a separate opt-in. Its depth comparison keeps both prefill flags

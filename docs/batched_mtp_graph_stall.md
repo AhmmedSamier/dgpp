@@ -57,15 +57,15 @@ Why the evidence looked the way it did:
 - every observed stall was an attention-side boundary (cells 0 and 4): the
   memset precedes the DSA layer's select kernel, and the two memcpy nodes
   precede everything, so the first collective the stalled rank cannot reach
-  is the one after its first queued copy-engine node;
+  is the one after its first queued copy-engine node.
 - the stalled rank's collective kernel never started (the new `e=` entry
   flag in the stall dump reads 0), because its chain was stuck one node
-  earlier, at the memset;
+  earlier, at the memset.
 - prefetch mattered because it changes the executor's lane assignment and
   launch timing (both ranks' whole-graph copy-engine queueing must
   interleave the wrong way), not because the prefetch branches deadlock
   anything themselves; the connection count changes how often the two
-  ranks' copy-engine work shares one queue;
+  ranks' copy-engine work shares one queue.
 - first replays of an exec were over-represented because a first launch
   skews the two ranks' submission order.
 
@@ -212,5 +212,4 @@ would have queued behind the peer's dependency wait exactly as before, and
 the conditional node's own downstream wait would have joined the cycle. No
 change to the collective kernel was needed.
 
-The earlier handoff is preserved in this file's git history. The full
-dated investigation record is in `benchmarks/results/2026-08-29-bus-m5.md`.
+The earlier handoff is preserved in this file's git history.

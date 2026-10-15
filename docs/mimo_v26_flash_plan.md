@@ -320,10 +320,10 @@ Two defects found and fixed on the way: the MXFP4 GEMV core's compiled K
 set lacked 4096 / 2048 (`k must be a multiple of 32 in the fp4 core's
 compiled set` on the first real-checkpoint decode), and the prefetch of a
 side-granted head (D9). The first campaign's numbers (the family as
-landed): benchmarks/results/2026-09-22-mimo-v26-flash/.
+landed): the 2026-09-22 MiMo measurements.
 
 **After the kernel round (§7.1, §7.2; the campaign re-run
-benchmarks/results/2026-09-22-mimo-v26-flash-opt/, the numbers on
+the 2026-09-22-mimo-v26-flash-opt measurements, the numbers on
 docs/benchmarks.md):** four nodes MTP depth 1 at 23.2 ms/step, 76–86 tok/s
 per request at C1 (128.7–142.1 wall tok/s at C4), the plain step 17.3 ms;
 cold prefill 1.77 / 6.55 / 28.4 s at 2K / 8K / 32K (the tiled tensor-core
@@ -385,8 +385,7 @@ dependent table lookups, the 8 KB activation staging, a barrier) has
 nothing in flight.
 
 **Shipped from this round** (each bitwise the chain it replaces, gated
-in the kernel tests; the fabric A/B in `benchmarks/results/2026-09-22-
-mimo-v26-flash/`):
+in the kernel tests; the fabric A/B in the 2026-09-22-mimo-v26-flash measurements):
 
 * `kernels/add_rmsnorm`: the residual add fused into the two-rounding
   norm that follows it, the row register-resident, the fp64 sum through
@@ -422,7 +421,7 @@ mimo-v26-flash/`):
   (the kernel is not compute-bound; the win is the smaller one it can
   give). Shared with DeepSeek-V4.1-Flash (same bits, fewer instructions).
 
-**The fabric A/B** (`benchmarks/results/2026-09-22-mimo-v26-flash/ab/`,
+**The fabric A/B** (the 2026-09-22-mimo-v26-flash / ab measurements,
 four legs plus a closing baseline; ms/step, the mean of five classes):
 the fusions take the MTP step at C1 from 23.39 to 23.04 (−1.5 %), C2 / C4
 −0.4 / −1 %, the plain T=1 step not at all (17.85 vs 17.84 / 18.29): the

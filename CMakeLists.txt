@@ -173,6 +173,8 @@ add_library(dgpp_kernels STATIC
   src/kernels/packq_a8_gemv.cu
   src/kernels/packq_gemm.cu
   src/kernels/packq_head.cu
+  src/kernels/head_screen.cu
+  src/kernels/draft_head.cpp
   src/kernels/hadamard32.cu
   src/kernels/scale_gemm.cu
   src/kernels/bf16_gemv.cu
@@ -545,6 +547,25 @@ add_test(NAME qwen_gptq_forward_test
           --dump-file ${CMAKE_CURRENT_BINARY_DIR}/qwen_gptq_ref.qwndump)
 set_tests_properties(qwen_gptq_forward_test PROPERTIES DEPENDS qwen_gptq_generate)
 
+# The QAD export's twin (issue #113, local-inference-lab/Qwen3.8-Flash-Next-
+# NVFP4): the MXFP8 dense stack on the 1 x 32 grid, the NVFP4 n-gram table,
+# F32 norms and weight-only NVFP4 draft experts through the same fixture
+# chain — the Python reference dequantizes every form exactly (power-of-two
+# scales, the e2m1 x e4m3 x global chain in modelopt's order).
+set(QWEN_QAD_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/qwen_qad_fixture)
+add_test(NAME qwen_qad_fixture COMMAND qwen_forward_test --write-fixture ${QWEN_QAD_FIXTURE} --qad)
+add_test(NAME qwen_qad_smoke COMMAND qwen_forward_test --smoke ${QWEN_QAD_FIXTURE})
+set_tests_properties(qwen_qad_smoke PROPERTIES DEPENDS qwen_qad_fixture)
+add_test(NAME qwen_qad_generate
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/qwen_reference_dump.py
+          gen-pure --checkpoint-dir ${QWEN_QAD_FIXTURE}
+          --out ${CMAKE_CURRENT_BINARY_DIR}/qwen_qad_ref.qwndump)
+set_tests_properties(qwen_qad_generate PROPERTIES DEPENDS qwen_qad_fixture)
+add_test(NAME qwen_qad_forward_test
+  COMMAND qwen_forward_test --checkpoint-dir ${QWEN_QAD_FIXTURE}
+          --dump-file ${CMAKE_CURRENT_BINARY_DIR}/qwen_qad_ref.qwndump)
+set_tests_properties(qwen_qad_forward_test PROPERTIES DEPENDS qwen_qad_generate)
+
 # The Qwen session surface (Q6 stage A): incremental decode vs the re-forward.
 add_executable(qwen_decode_test tests/cuda/qwen_decode_test.cpp)
 target_include_directories(qwen_decode_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
@@ -566,7 +587,19 @@ add_test(NAME qwen_decode_fp8_head_row_independent
           $<TARGET_FILE:qwen_decode_test> --fixture ${QWEN_FORWARD_FIXTURE} --fp8-head)
 set_tests_properties(qwen_decode_fp8_head qwen_decode_fp8_head_row_independent
   PROPERTIES DEPENDS qwen_forward_fixture RUN_SERIAL TRUE)
+# The draft head's screen (engine.draft_head screen; kernels/head_screen.hpp)
+# on the fixture's bf16 and fp8 heads with a two-block cap of its four: the
+# eager speculator's transcript stays the plain greedy one, and every
+# draft-logit parity gate holds with the masked rows.
+add_test(NAME qwen_decode_draft_screen COMMAND qwen_decode_test --fixture ${QWEN_FORWARD_FIXTURE} --draft-screen 2)
+add_test(NAME qwen_decode_draft_screen_fp8_head
+  COMMAND ${CMAKE_COMMAND} -E env DGPP_DENSE_GEMV_ROWS=4
+          $<TARGET_FILE:qwen_decode_test> --fixture ${QWEN_FORWARD_FIXTURE} --fp8-head --draft-screen 2)
+set_tests_properties(qwen_decode_draft_screen qwen_decode_draft_screen_fp8_head
+  PROPERTIES DEPENDS qwen_forward_fixture RUN_SERIAL TRUE)
 add_test(NAME qwen_gptq_decode_test COMMAND qwen_decode_test --fixture ${QWEN_GPTQ_FIXTURE})
+add_test(NAME qwen_qad_decode_test COMMAND qwen_decode_test --fixture ${QWEN_QAD_FIXTURE})
+set_tests_properties(qwen_qad_decode_test PROPERTIES DEPENDS qwen_qad_fixture)
 add_test(NAME qwen_gptq_prefill_head COMMAND qwen_decode_test --fixture ${QWEN_GPTQ_FIXTURE} --prefill-head)
 set_tests_properties(qwen_gptq_decode_test qwen_gptq_prefill_head PROPERTIES DEPENDS qwen_gptq_fixture)
 add_test(NAME qwen_prefill_head
@@ -705,6 +738,9 @@ if(DGPP_ENABLE_IBV)
                                          CUDA::cudart Threads::Threads)
   dgpp_set_common(glm_tp_test)
   add_test(NAME glm_tp_test COMMAND glm_tp_test)
+  add_test(NAME glm_tp_test_draft_screen
+    COMMAND ${CMAKE_COMMAND} -E env DGPP_TEST_DRAFT_SCREEN=2 $<TARGET_FILE:glm_tp_test>)
+  set_tests_properties(glm_tp_test_draft_screen PROPERTIES RUN_SERIAL TRUE LABELS "gpu" SKIP_RETURN_CODE 2)
   # One process hosts every rank's streams (main, prefetch side streams, the
   # bus engines' streams). The decode graph is kernels-only by contract
   # (glm_check_decode_graph at every capture site): a memset/memcpy node rides
@@ -1030,6 +1066,8 @@ add_test(NAME portability_test
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/portability_test.py)
 add_test(NAME timed_load_test
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/timed_load_test.py)
+add_test(NAME serve_admission_bench_test
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/serve_admission_bench_test.py)
 add_test(NAME qwen_yarn_release_check_test
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/qwen_yarn_release_check_test.py)
 add_test(NAME qwen_head_compare_test
@@ -1353,6 +1391,9 @@ target_include_directories(qwen35_tp_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/sr
 target_link_libraries(qwen35_tp_test PRIVATE dgpp_models_qwen_layers dgpp_models_qwen_loader dgpp_models_qwen dgpp_bus dgpp_loaders dgpp_kernels CUDA::cudart Threads::Threads)
 dgpp_set_common(qwen35_tp_test)
 add_test(NAME qwen35_tp_test COMMAND qwen35_tp_test)
+add_test(NAME qwen35_tp_test_draft_screen
+  COMMAND ${CMAKE_COMMAND} -E env DGPP_TEST_DRAFT_SCREEN=2 $<TARGET_FILE:qwen35_tp_test>)
+set_tests_properties(qwen35_tp_test_draft_screen PROPERTIES RUN_SERIAL TRUE LABELS "gpu" SKIP_RETURN_CODE 2)
 set_tests_properties(qwen35_tp_test PROPERTIES RUN_SERIAL TRUE LABELS "gpu")
 
 add_executable(qwen35_loader_smoke tests/cuda/qwen35_loader_smoke.cpp)
@@ -1556,6 +1597,13 @@ target_include_directories(glm_dsa_engine_test PRIVATE ${CMAKE_CURRENT_SOURCE_DI
 target_link_libraries(glm_dsa_engine_test PRIVATE dgpp_models_glm_dsa_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
 dgpp_set_common(glm_dsa_engine_test)
 add_test(NAME glm_dsa_engine_test COMMAND glm_dsa_engine_test)
+add_test(NAME glm_dsa_engine_test_draft_screen
+  COMMAND ${CMAKE_COMMAND} -E env DGPP_TEST_DRAFT_SCREEN=2 $<TARGET_FILE:glm_dsa_engine_test>)
+set_tests_properties(glm_dsa_engine_test_draft_screen PROPERTIES RUN_SERIAL TRUE LABELS "gpu" SKIP_RETURN_CODE 2)
+# The wide gate at eight slots x depth 2 (24 rows; the cap is 32 since 2026-10-13).
+add_test(NAME glm_dsa_engine_test_twenty_four_rows
+  COMMAND ${CMAKE_COMMAND} -E env DGPP_WIDE_SLOTS=8 DGPP_WIDE_DEPTH=2 $<TARGET_FILE:glm_dsa_engine_test>)
+set_tests_properties(glm_dsa_engine_test_twenty_four_rows PROPERTIES RUN_SERIAL TRUE LABELS "gpu" SKIP_RETURN_CODE 2)
 
 add_executable(glm_dsa_forward_check apps/glm_dsa_forward_check.cpp)
 target_link_libraries(glm_dsa_forward_check PRIVATE dgpp_models_glm_dsa_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
@@ -1584,6 +1632,9 @@ target_include_directories(glm4_engine_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/
 target_link_libraries(glm4_engine_test PRIVATE dgpp_models_glm4_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
 dgpp_set_common(glm4_engine_test)
 add_test(NAME glm4_engine_test COMMAND glm4_engine_test)
+add_test(NAME glm4_engine_test_draft_screen
+  COMMAND ${CMAKE_COMMAND} -E env DGPP_TEST_DRAFT_SCREEN=2 $<TARGET_FILE:glm4_engine_test>)
+set_tests_properties(glm4_engine_test_draft_screen PROPERTIES RUN_SERIAL TRUE LABELS "gpu" SKIP_RETURN_CODE 2)
 
 # ---- MiMo-V2.6-Flash: the session, TP and engine gates (2026-09-22) ---------
 # The fixture the forward ladder writes (the same directory when that
@@ -1618,6 +1669,9 @@ target_include_directories(mimo_engine_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/
 target_link_libraries(mimo_engine_test PRIVATE dgpp_models_mimo_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
 dgpp_set_common(mimo_engine_test)
 add_test(NAME mimo_engine_test COMMAND mimo_engine_test)
+add_test(NAME mimo_engine_test_draft_screen
+  COMMAND ${CMAKE_COMMAND} -E env DGPP_TEST_DRAFT_SCREEN=2 $<TARGET_FILE:mimo_engine_test>)
+set_tests_properties(mimo_engine_test_draft_screen PROPERTIES RUN_SERIAL TRUE LABELS "gpu" SKIP_RETURN_CODE 2)
 # (the gpu;rdma labels and RUN_SERIAL join the loopback gates' list below)
 
 add_executable(glm4_load_check apps/glm4_load_check.cpp)
@@ -1669,6 +1723,9 @@ target_include_directories(dsv41_engine_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 target_link_libraries(dsv41_engine_test PRIVATE dgpp_models_dsv41_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
 dgpp_set_common(dsv41_engine_test)
 add_test(NAME dsv41_engine_test COMMAND dsv41_engine_test)
+add_test(NAME dsv41_engine_test_draft_screen
+  COMMAND ${CMAKE_COMMAND} -E env DGPP_TEST_DRAFT_SCREEN=2 $<TARGET_FILE:dsv41_engine_test>)
+set_tests_properties(dsv41_engine_test_draft_screen PROPERTIES RUN_SERIAL TRUE LABELS "gpu" SKIP_RETURN_CODE 2)
 
 # The DeepSeek-V4-Flash loader on its synthetic fixture (worlds 1/2/4
 # byte-exact, the globals, the image round trip).
@@ -1738,6 +1795,13 @@ add_test(NAME qwen_engine_row_independent
 # same references — the form is bitwise, so every gate holds unchanged.
 add_test(NAME qwen_engine_bf12
   COMMAND ${CMAKE_COMMAND} -E env DGPP_BF12=both $<TARGET_FILE:qwen_engine_test>)
+# The draft head's screen (engine.draft_head screen; kernels/head_screen.hpp)
+# through the loopback engines: the vocab-sharded head's masked rows at
+# world 2 and the pick merge behind them, every gate unchanged (the verify
+# reads the exact head; only the drafts can move).
+add_test(NAME qwen_engine_draft_screen
+  COMMAND ${CMAKE_COMMAND} -E env DGPP_TEST_DRAFT_SCREEN=2 $<TARGET_FILE:qwen_engine_test>)
+set_tests_properties(qwen_engine_draft_screen PROPERTIES RESOURCE_LOCK qwen_engine_world RUN_SERIAL TRUE)
 foreach(_rows 4 256)
   add_test(NAME qwen_engine_fp8_head_${_rows}
     COMMAND ${CMAKE_COMMAND} -E env DGPP_DENSE_GEMV_ROWS=${_rows}
@@ -1785,6 +1849,17 @@ set_tests_properties(qwen_engine_fp8_mtp3_rows64 qwen_engine_mtp3_rows64_row_ind
 add_test(NAME qwen_engine_compaction_disabled
   COMMAND ${CMAKE_COMMAND} -E env DGPP_TEST_COMPACT_BATCH=0 $<TARGET_FILE:qwen_engine_test>)
 set_tests_properties(qwen_engine_compaction_disabled
+  PROPERTIES RESOURCE_LOCK qwen_engine_world LABELS "gpu;rdma" RUN_SERIAL TRUE)
+
+add_test(NAME qwen_engine_mixed_prefill_without_mtp
+  COMMAND ${CMAKE_COMMAND} -E env DGPP_DENSE_GEMV_ROWS=256 DGPP_TEST_FILTER=mixed_prefill_without_mtp
+          $<TARGET_FILE:qwen_engine_test>)
+set_tests_properties(qwen_engine_mixed_prefill_without_mtp
+  PROPERTIES RESOURCE_LOCK qwen_engine_world LABELS "gpu;rdma" RUN_SERIAL TRUE)
+add_test(NAME qwen_engine_mixed_prefill_scheduled_verify
+  COMMAND ${CMAKE_COMMAND} -E env DGPP_DENSE_GEMV_ROWS=256 DGPP_TEST_FILTER=mixed_prefill_scheduled_verify
+          $<TARGET_FILE:qwen_engine_test>)
+set_tests_properties(qwen_engine_mixed_prefill_scheduled_verify
   PROPERTIES RESOURCE_LOCK qwen_engine_world LABELS "gpu;rdma" RUN_SERIAL TRUE)
 
 foreach(compact_candidates IN ITEMS 1 32)
@@ -1879,6 +1954,12 @@ target_link_libraries(packq_gemv_test PRIVATE dgpp_kernels dgpp_loaders CUDA::cu
 dgpp_set_common(packq_gemv_test)
 add_test(NAME packq_gemv_test COMMAND packq_gemv_test)
 set_tests_properties(packq_gemv_test PROPERTIES SKIP_RETURN_CODE 2)
+add_executable(head_screen_test tests/cuda/head_screen_test.cu)
+target_include_directories(head_screen_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(head_screen_test PRIVATE dgpp_kernels CUDA::cudart Threads::Threads)
+dgpp_set_common(head_screen_test)
+add_test(NAME head_screen_test COMMAND head_screen_test)
+set_tests_properties(head_screen_test PROPERTIES SKIP_RETURN_CODE 2)
 add_executable(packq_head_test tests/cuda/packq_head_test.cu)
 target_include_directories(packq_head_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(packq_head_test PRIVATE dgpp_kernels CUDA::cudart Threads::Threads)
@@ -2027,7 +2108,7 @@ set_tests_properties(dsa_dump_test PROPERTIES
 
 # Reference-dump parity: generate a pure-python oracle dump, then run the
 # layer against it. The torch backend (real checkpoint slices) is a manual
-# deployment test documented in benchmarks/README.md.
+# deployment test documented in docs/benchmarking.md.
 add_test(NAME kda_dump_generate
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_SOURCE_DIR}/tools/kda_reference_dump.py
@@ -2056,7 +2137,7 @@ set_tests_properties(flag_protocol_test PROPERTIES SKIP_RETURN_CODE 2)
 # M5 data plane: deep loopback scenarios (verbs + consumers + contention)
 # and the app-level smoke. Both skip without a visible device.
 if(DGPP_ENABLE_IBV)
-  add_executable(bus_test tests/cuda/bus_test.cu)
+  add_executable(bus_test tests/cuda/bus_test.cu tests/cuda/bus_boundary_fixture.cpp)
   target_link_libraries(bus_test PRIVATE dgpp_bus)
   dgpp_set_common(bus_test)
   add_test(NAME bus_test COMMAND bus_test)
@@ -2099,6 +2180,10 @@ if(DGPP_BUILD_BENCHMARKS)
     SOURCES benchmarks/micro/gemv_bw.cu
     LIBRARIES dgpp_kernels CUDA::cudart)
 
+  dgpp_add_benchmark(micro_head_screen
+    SOURCES benchmarks/micro/head_screen_bench.cu
+    LIBRARIES dgpp_kernels CUDA::cudart Threads::Threads
+    INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR})
   dgpp_add_benchmark(micro_mma_gemv_shapes
     SOURCES benchmarks/micro/mma_gemv_shapes.cu
     LIBRARIES dgpp_kernels CUDA::cudart)
@@ -2191,7 +2276,7 @@ set_tests_properties(unit unit_tests http_server_test serve_test fabric_serve_te
   qwen_yarn_fixture_test qwen_w4a4_plan_default qwen_w4a4_plan_mode_0 qwen_w4a4_plan_mode_1
   qwen_w4a4_plan_mode_empty qwen_w4a4_plan_mode_invalid PROPERTIES LABELS "host")
 set_tests_properties(checkpoint_audit_test route_trace_test sampling_profile_test
-  site_env_test script_reports_test timed_load_test qwen_yarn_release_check_test qwen_head_compare_test portability_test spark_cross_test setup_tools_test bootstrap_test launcher_test PROPERTIES LABELS "host;python")
+  site_env_test script_reports_test timed_load_test serve_admission_bench_test qwen_yarn_release_check_test qwen_head_compare_test portability_test spark_cross_test setup_tools_test bootstrap_test launcher_test PROPERTIES LABELS "host;python")
 if(TARGET dgpp_serve_app)
   set_tests_properties(serve_startup_test PROPERTIES LABELS "host;python" TIMEOUT 180)
 endif()
@@ -2265,6 +2350,19 @@ target_link_libraries(mimo_native_mtp_test PRIVATE dgpp_models_mimo_layers dgpp_
 dgpp_set_common(mimo_native_mtp_test)
 add_test(NAME mimo_native_mtp_test COMMAND mimo_native_mtp_test)
 set_tests_properties(mimo_native_mtp_test PROPERTIES LABELS "gpu" RUN_SERIAL TRUE)
+
+# Shared request lifetime and mixed execution across model architectures.
+add_executable(shared_prefill_test tests/cuda/shared_prefill_test.cpp tests/cuda/glm_tp_fixture.cpp)
+target_link_libraries(shared_prefill_test PRIVATE dgpp_models_glm_loader dgpp_models_glm4_layers
+  dgpp_models_glm_dsa_layers dgpp_models_mimo_layers dgpp_models_qwen_layers
+  dgpp_models_dsv4_layers dgpp_models_dsv41_layers dgpp_text CUDA::cudart Threads::Threads)
+dgpp_set_common(shared_prefill_test)
+if(TARGET dgpp_bus)
+  target_link_libraries(shared_prefill_test PRIVATE dgpp_bus dgpp_serve)
+  target_compile_definitions(shared_prefill_test PRIVATE DGPP_TEST_HAS_BUS=1)
+endif()
+add_test(NAME shared_prefill_test COMMAND ${CMAKE_COMMAND} -E env DGPP_DENSE_GEMV_ROWS=256 $<TARGET_FILE:shared_prefill_test>)
+set_tests_properties(shared_prefill_test PROPERTIES LABELS "gpu" RUN_SERIAL TRUE)
 
 # Compact serving heads: allocation, FP64 oracle, groups, cache and drafts.
 add_executable(compact_head_test tests/cuda/compact_head_test.cpp tests/cuda/glm_tp_fixture.cpp)

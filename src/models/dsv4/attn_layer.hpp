@@ -100,7 +100,7 @@ class Dsv4AttnLayer {
   // A decode batch of `tokens` rows (contiguous rows per request in
   // position order, pos -1 padding rows).
   void enqueue_decode(const void* hidden_in, Dsv4StatePool& pool, const int32_t* req_ids, const int64_t* pos,
-                      int tokens, void* out, cudaStream_t stream);
+                      int tokens, void* out, cudaStream_t stream, bool prefetch = true);
 
   // ---- the DSpark draft on a window-only draft stage ----------------------------
   // append_window_rows: the ring rows of `n` real tokens — x [n, hidden] the
@@ -223,12 +223,13 @@ class Dsv4AttnLayer {
 
   // The decode windows (see set_prefetcher): opened at the points of the
   // chain where the bytes before them have been consumed.
-  bool windows() const { return decode_windows_ && prefetch_ != nullptr && prefetch_->enabled(); }
+  bool windows() const { return prefetch_windows_ && prefetch_ != nullptr && prefetch_->enabled(); }
   void window_fp8(const GlmQuantMatrix& m);
   void open_compress_window(cudaStream_t stream);   // a window-only layer's output window, before wq_b
   void open_output_window(cudaStream_t stream);     // wo_a / wo_b, before the latency-bound attention
   WeightPrefetcher* prefetch_ = nullptr;
-  bool decode_windows_ = false;  // set for the span of a decode / draft enqueue
+  bool decode_walk_ = false;  // native numerical recipe, independent of prefetch
+  bool prefetch_windows_ = false;  // enabled for this decode / draft enqueue
   // A compressing layer's decode window attention runs on this side stream,
   // forked behind the projections and joined before the main partials: it
   // needs the queries and the ring alone, and its two latency-bound blocks
@@ -238,8 +239,8 @@ class Dsv4AttnLayer {
   cudaEvent_t win_join_ = nullptr;
   // The dense fp8 sites' split-K workspace: the decode walks' alone (a short
   // prefill chunk keeps the unsplit chain, bitwise the rows of a long one).
-  void* split_ws() const { return decode_windows_ ? gemm_ws_ : nullptr; }
-  size_t split_ws_bytes() const { return decode_windows_ ? gemm_ws_bytes_ : 0; }
+  void* split_ws() const { return decode_walk_ ? gemm_ws_ : nullptr; }
+  size_t split_ws_bytes() const { return decode_walk_ ? gemm_ws_bytes_ : 0; }
 
   IGemm& gemm_;
   Dsv4AttnConfig cfg_;

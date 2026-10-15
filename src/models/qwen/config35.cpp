@@ -22,6 +22,24 @@ struct Qwen35QuantGroups {
   std::vector<std::regex> ignore_regex;
 };
 
+// The qwen4_exp layer ctors' config view (declared in config35.hpp so the
+// host tests pin it): the fields they read, nothing they must not see.
+QwenTextConfig qwen35_text_adapter(const Qwen35TextConfig& c) {
+  QwenTextConfig q;
+  q.hidden_size = c.hidden_size;
+  q.head_dim = c.head_dim;
+  q.rotary_dim = c.rotary_dim;
+  q.rope_theta = c.rope_theta;
+  q.rope_scaling = c.rope_scaling;
+  q.rms_norm_eps = c.rms_norm_eps;
+  q.gdn_key_heads = c.gdn_key_heads;
+  q.gdn_value_heads = c.gdn_value_heads;
+  q.gdn_key_head_dim = c.gdn_key_head_dim;
+  q.gdn_value_head_dim = c.gdn_value_head_dim;
+  q.gdn_conv_width = c.gdn_conv_width;
+  return q;
+}
+
 namespace {
 
 [[noreturn]] void reject(std::string_view field, std::string_view why) {

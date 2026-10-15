@@ -12,6 +12,7 @@
     "decode_graph": true,
     "mtp": false,
     "dflash_model": "z-lab/Qwen3.8-27B-DFlash2",
+    "draft_head": "screen",
     "dflash_weights": "fp8",
     "mtp_schedule": true,
     "mtp_schedule_row_ms": 2.0,

@@ -13,15 +13,14 @@
     "decode_graph": true,
     "mtp": true,
     "mtp_depth": 1,
+    "draft_head": "screen",
     "prefix_cache_gib": 3,
     "admission": "full",
     "admission_window": 256,
     "sampling_candidates": 128,
     "stats_interval_s": 10,
     "dense_weights": "fp8",
-    "fp8_head": "mma",
-    "prefill_budget_tokens": 4096,
-    "prefill_idle_budget_tokens": 4096
+    "fp8_head": "mma"
   },
   "paths": {
     "resident_cache": ""

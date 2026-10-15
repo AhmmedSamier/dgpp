@@ -2148,9 +2148,7 @@ struct CollectiveBus::Impl {
                               static_cast<uint32_t>(req.elems * 2), &error,
                               stage_buf(p, coll.stage_gen),
                               lane.stage_lkey, req.ctl_seq,
-                              bus_fold64(reinterpret_cast<const uint64_t*>(
-                                             stage_buf(p, coll.stage_gen)),
-                                         req.elems / 4))) {
+                              bus_fold(stage_buf(p, coll.stage_gen), req.elems * 2))) {
         fail_lane(lane, error);
         poison_collective(req);
         coll_poisoned = true;

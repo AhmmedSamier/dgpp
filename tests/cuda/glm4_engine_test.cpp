@@ -29,6 +29,7 @@
 #include <vector>
 #include <cuda_runtime.h>
 #include "common/cuda_check.hpp"
+#include "kernels/draft_head.hpp"
 #include "common/dtypes.hpp"
 #include "common/log.hpp"
 #include "common/test.hpp"
@@ -728,4 +729,11 @@ DGPP_TEST(glm4_engines_loopback_world_2_graph_matches_eager) {
   require(o.bb.size() == 46 && o.bc.size() == 36, "the batched transcripts' lengths");
 }
 
-int main() { return dgpp::test::run_all(); }
+int main() {
+  // DGPP_TEST_DRAFT_SCREEN=N: every case drafts through the head screen
+  // (kernels/draft_head.hpp) with an N-block candidate cap; every gate
+  // holds unchanged (the verify reads the exact head; only drafts move).
+  if (const char* d = std::getenv("DGPP_TEST_DRAFT_SCREEN"); d && d[0] != '\0')
+    dgpp::draft_head_configure(dgpp::DraftHeadSettings{std::atoi(d)});
+  return dgpp::test::run_all();
+}

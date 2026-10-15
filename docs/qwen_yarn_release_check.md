@@ -3,7 +3,8 @@
 Date: 2026-09-18
 
 `scripts/qwen_yarn_release_check.py` is the opt-in, real-checkpoint acceptance
-run for `engine.rope_scaling` (the Qwen3.8-Flash-Next YaRN recipe,
+run for `engine.rope_scaling` (the Qwen3.8-Flash-Next YaRN recipe and, since
+2026-10-12, the Qwen3.8-27B one,
 [qwen38_flash_next_plan.md](qwen38_flash_next_plan.md) §1.9.1). It is a **release
 check, not a test**: it never runs in CI, it needs an idle two-node cluster and
 hours for the full default matrix, and it refuses to start without `--run` (or
@@ -40,6 +41,12 @@ hardware, and it belongs next to the deployment, not in a CI job.
   with `engine.rope_scaling` on, two request slots and a 565 248-token pool. The
   KV-pool and headroom notes are in
   [`../deploy/README.md`](../deploy/README.md).
+- **The one-node Qwen3.8-27B variant** (2026-10-12): `unsloth/Qwen3.8-27B-NVFP4`
+  and `z-lab/Qwen3.8-27B-DFlash2` in the node's cache, the template
+  [`../deploy/cluster_qwen3.8-27b_nvfp4_w1_yarn512k.example.json`](../deploy/cluster_qwen3.8-27b_nvfp4_w1_yarn512k.example.json)
+  (two slots, a 565 248-token pool that seats one 524 288-token stream, so run
+  the check with `--concurrency 1`), and `--port` as the template sets it. The
+  factor-3 template takes `--lengths 786432 --expect-limit 786432`.
 - **Optionally, the reference lane**: the vLLM container the q-dgx-gateway
   recipe starts as **lane Q** for this checkpoint — the same
   `nvidia/Qwen3.8-Flash-Next-NVFP4`, launched with `YARN_ENABLE=true

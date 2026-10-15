@@ -6,7 +6,7 @@ here was produced on the four-node GB10 fabric (192.0.2.11–14, one
 200 Gb/s RoCE port per node) with `unsloth/GLM-5.3-Flash-FP8` at TP=4,
 resident, unless a line says otherwise; the raw logs live under
 `build-ci/fabric-runs/` on the head node and the running record is
-`benchmarks/results/2026-08-29-bus-m5.md`.
+the 2026-08-29-bus-m5 measurements.
 
 ## 1. Batch-size-one decode and time to first token
 

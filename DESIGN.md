@@ -1,16 +1,22 @@
 # DGPP Engine Design
 
 This document describes the implemented serving architecture. The
-shared runtime supports GLM-5.3-Flash, Qwen3.8-Flash-Next and GLM-4.7 with
-resident loading, tensor parallelism, decode graphs, sampling, prefix
-caching and MTP. World size and memory requirements depend on the model
+shared runtime supports the GLM, Qwen, DeepSeek and MiMo architectures listed
+in the [supported-model guide](README.md), with resident loading, tensor
+parallelism, decode graphs, sampling, prefix caching and speculative decoding.
+World size and memory requirements depend on the model
 and configuration.
 
 The attention, weight-placement and state examples below describe
 GLM-5.3-Flash unless another family is named. Qwen's GDN/QSA/GR/PLE
 operators are documented in [its architecture study](docs/qwen38_flash_next_plan.md),
 and GLM-4.7's GQA and NVFP4 layout in [its implementation notes](docs/glm47_plan.md).
-Shared session and engine interfaces live in `src/engine/`.
+Shared session and engine interfaces live in `src/engine/`. A common scheduler
+owns admission, fair reader budgets and request lifecycle. `PrefillTask`,
+`PrefillContinuation`, `PrefillBatch`, `RowRun` and `GraphBatchMapping` share
+resumable prefill and mixed execution across eager and graph adapters; layer
+executors supply architecture-specific math and state. See
+[continuous batching](docs/continuous-batching.md).
 
 Qwen's QSA indexer preserves its FP32 scoring order and deterministic
 score/pool tie rule. Rows whose visible pools fit the selection budget emit
@@ -18,8 +24,7 @@ all visible tokens directly, including the incomplete tail, without scoring
 or sorting keys. Compression and ring updates still run so later rows can
 select from the full history. Other rows use exact radix selection above
 2048 pools and streaming top-k below it, expanding sorted pool ids with the
-existing workspace and captured graph shape. See the
-[selection measurements](benchmarks/results/2026-09-21-qwen-qsa-select.md).
+existing workspace and captured graph shape.
 
 Prefill scoring launches only enough pool stripes to cover the chunk's final
 position, including cached history, and omits the launch when the whole chunk
@@ -27,7 +32,7 @@ fits the selection budget. Decode and verify keep the full workspace grid;
 each row decides whether to score from its device position on every replay.
 This shared BF16 QSA path applies to FP8, NVFP4 and AutoRound int4 experts,
 including FP8 dense projections. The
-[launch and selection validation](benchmarks/results/2026-09-30-qsa-launch-selection.md)
+launch and selection validation
 also records the rejected bounded decode-grid experiment.
 
 QSA scoring storage (`keys_ws_`, one stripe per activation row) is sized by
@@ -48,13 +53,12 @@ normalized output directly, bypassing the split-partial combine launch.
 Decode, shorter prefills and unsupported groups use the existing partial
 kernels. `DGPP_QSA_WARP=0` selects those kernels for all rows. The numerical
 comparison and dispatch-boundary checks are recorded in the
-[warp-prefill validation](benchmarks/results/2026-09-24-qsa-warp-review.md).
+warp-prefill validation.
 
 Use [PLAN.md](PLAN.md) for implementation status and
 [operations](docs/operations.md) for deployment. Dated measurements here
 explain design choices; current benchmark tables and reproduction commands
-are in [docs/benchmarks.md](docs/benchmarks.md). Investigation chronology
-is kept in [benchmarks/results](benchmarks/results/). GLM-5.3-Flash image
+are in [docs/benchmarks.md](docs/benchmarks.md). GLM-5.3-Flash image
 execution is described in §11 and [image inputs](docs/vision.md).
 
 ## 1. Goals and decision rules
@@ -111,10 +115,10 @@ bottleneck when used together.
 
 Measured node-to-node RC results on 2026-08-27:
 
-- lane 0 alone: 107.64 Gb/s;
-- lane 1 alone: 107.64 Gb/s;
-- concurrent lanes: 97.98 + 98.05 = **196.03 Gb/s**;
-- 2-byte send latency: 2.72 µs typical on lane 0 and 2.46 µs typical on lane 1;
+- lane 0 alone: 107.64 Gb/s.
+- lane 1 alone: 107.64 Gb/s.
+- concurrent lanes: 97.98 + 98.05 = **196.03 Gb/s**.
+- 2-byte send latency: 2.72 µs typical on lane 0 and 2.46 µs typical on lane 1.
 - 9000-byte IP frames pass on both lanes.
 
 CollectiveBus therefore stripes bulk traffic across both `f0` lanes and uses
@@ -214,8 +218,7 @@ Prefill packs those tails into the buffer; hidden states retain their original
 layout for MTP and cache handling. Qwen FP8 and packed heads preserve the full
 prefill's dispatch and reduction order. BF16 heads may use a different
 accumulation order, validated against FP64 and teacher-forced probabilities.
-Diagnostic constructors retain full-row storage. See the
-[compact-head validation](benchmarks/results/2026-10-01-compact-serving-heads.md).
+Diagnostic constructors retain full-row storage.
 
 Streaming mode loads one layer at a time and rereads the checkpoint on
 each forward pass. It supports diagnostic runs that cannot hold the full
@@ -248,13 +251,13 @@ optional, and serving requires no GPU clock override.
 
 Main text configuration:
 
-- 45 layers: 34 KDA linear-attention and 11 DSA/MLA layers;
-- hidden size 4096; 64 heads; KDA head dimension 128;
-- three dense MLP layers, then 42 MoE layers;
-- 288 routed experts, top-8 per token, plus one shared expert;
-- one MTP layer;
+- 45 layers: 34 KDA linear-attention and 11 DSA/MLA layers.
+- hidden size 4096; 64 heads; KDA head dimension 128.
+- three dense MLP layers, then 42 MoE layers.
+- 288 routed experts, top-8 per token, plus one shared expert.
+- one MTP layer.
 - DSA `index_kpool=4`, `index_topk=2048`, and
-  `index_kpool_always_select_tail=true`;
+  `index_kpool_always_select_tail=true`.
 - RoPE dimension is zero for the MLA query/key path in this checkpoint.
 
 The unique base-text weight set touched at batch size one is 22.415 GB/token.
@@ -320,8 +323,6 @@ device-segmented paths consume the same down-row format. Decode retains
 W4A16. Memory plans include the lazy activation workspace only when opted
 in, separately from constructor scratch. Calibrated input scales select
 the quantizer's global scale but do not enable activation quantization.
-See the [PR #50 follow-up](benchmarks/results/2026-09-25-pr50-w4a4.md) and
-the [opt-in policy validation](benchmarks/results/2026-10-01-w4a4-opt-in.md).
 
 ## 5. Process, memory, and execution layout
 
@@ -332,7 +333,11 @@ as fatal to the current batch. As built (M6, §11), rank 0's ownership is
 realized by the admission journal: rank 0 is the sole HTTP ingress, every
 scheduler tick it runs is one journal record the peers apply before
 running the identical tick, and every engine op is a bus collective, so a
-record can never interleave a peer's in-flight tick.
+record can never interleave a peer's in-flight tick. The adaptive prefill
+controller uses completed-pass cost on rank 0 and journals each selected token
+limit. Workers replay that limit; independent GPU timings cannot alter their
+schedule. The [serving policy](docs/operations.md) exposes shared soft latency
+targets, growth/recovery tuning and explicit caps.
 
 ### 5.1 Block-boundary invariant
 
@@ -367,10 +372,10 @@ must make the same sparse-token selection; there is no global score gather.
   rank reads more expert weights at an FFN boundary. The per-rank chain
   runs in fp32: unrounded partial down dots, one
   fma per expert ascending, shared last — and rounds to bf16 once for
-  the all-reduce;
-- attention, shared-expert, and dense matrices: standard column/row TP;
-- router, mHC, norms, and DSA indexer: replicated;
-- embeddings and lm head: vocabulary-sharded;
+  the all-reduce.
+- attention, shared-expert, and dense matrices: standard column/row TP.
+- router, mHC, norms, and DSA indexer: replicated.
+- embeddings and lm head: vocabulary-sharded.
 - MTP: the same rules as its corresponding main-layer modules.
 
 The shard generator records the owning ranks and scale geometry. Boot checks
@@ -480,9 +485,9 @@ Algorithm selection is size-based, and both machines are built (§6.3):
 - replicated hidden vectors (the decode step's 90 boundary folds, the
   pick): the one-shot all-to-all all-reduce over the latency pool, folded
   by a per-collective kernel — recorded as graph nodes in the decode step
-  (§6.2);
+  (§6.2).
 - prefill chunks: the striped reduce-scatter + allgather over the bulk pool
-  (`allreduce_bulk`), both lanes;
+  (`allreduce_bulk`), both lanes.
 - control messages: TCP, never on the CUDA critical path (the roster, §5.3,
   and the admission journal, §11).
 
@@ -623,7 +628,7 @@ interfaces that make replay-stable what capture bakes:
   32 KiB, 512 below 128 KiB, and 1,024 for larger payloads. Wider blocks expose
   more system-memory loads while keeping the placement proof and canonical
   rank-order arithmetic unchanged. The
-  [four-node study](benchmarks/results/2026-09-16-dsv41-perf/README.md)
+  four-node study
   records the payload latency sweep and serving validation.
 - *Slot ownership without requests.* Graph posts carry no `BusRequest`,
   but the SendSlot/credit machinery is request-shaped — a per-window
@@ -1005,7 +1010,7 @@ walk.
 
 The reference state contract is:
 
-- recurrent state: FP32, shape per rank/layer `[16, 128, 128]`;
+- recurrent state: FP32, shape per rank/layer `[16, 128, 128]`.
 - merged q/k/v convolution state: activation dtype (BF16 here), width
   `conv_kernel-1`, plus speculative width when MTP is active.
 
@@ -1013,16 +1018,16 @@ The M2 implementation pins the concrete layouts (tested in
 `tests/unit/kda_geometry_test.cpp` and the CUDA suite):
 
 - recurrent state is `[local_heads, head_v_dim, head_k_dim]` with the
-  K dimension contiguous — the indexing of the reference recurrent kernel;
+  K dimension contiguous — the indexing of the reference recurrent kernel.
 - conv state is `[3*local_proj, conv_state_width]` BF16 with the width
   contiguous ("dim-first"), committed history in columns
   `[0, conv_kernel-1)` and the speculative reserve after it — used since
   M8 by the multi-row verify (§9), whose rows but the last also leave
-  their post-row snapshots in `spec_conv_`;
+  their post-row snapshots in `spec_conv_`.
 - the fused in-projection row is `[f_a | g_a | q | k | v | b]` — the two
   replicated shards lead so the strided f_b/g_b GEMM inputs land on
   16-byte-aligned column offsets (cuBLASLt returns wrong results, not
-  errors, for misaligned strided activations);
+  errors, for misaligned strided activations).
 - the merged q|k|v conv weight is `[q(all heads) | k | v]` along channels,
   so a TP rank's slice is assembled per-section, not as a contiguous
   prefix.
@@ -1055,19 +1060,19 @@ includes the valid incomplete tail as required by
 Requirements:
 
 - cache block sizes and internal chunk starts are multiples of four; a final
-  chunk may end with one to three tokens in the persistent incomplete tail;
+  chunk may end with one to three tokens in the persistent incomplete tail.
 - `select_k = index_topk / index_kpool` must be a **power of two** — the
   bitonic select/expand networks have no fallback shape (a select_k=6
   experiment silently dropped every selected pool; rejected at layer
-  construction since);
+  construction since).
 - `num_heads` must be a **power of two ≥ 4** — the absorbed-attention
   kernel's head-group tiling partitions 64 lanes; heads=2 produced
   1e33-scale output garbage with *correct selections* (bisected through
-  the CI machinery; 4/8/64 heads pass). Rejected at construction since;
+  the CI machinery; 4/8/64 heads pass). Rejected at construction since.
 - the in-progress tail persists across prefill chunks, decode steps, MTP
-  verification, prefix attachment, and cache transfer;
+  verification, prefix attachment, and cache transfer.
 - causal masking and deterministic tie-breaking operate on original token
-  positions after pool expansion;
+  positions after pool expansion.
 - top-k parity is tested against the reference implementation, including
   lengths 0–7 around pool boundaries and a partially rejected MTP step.
 
@@ -1088,7 +1093,7 @@ The M3 implementation pins the concrete layouts and the selection spec
 - the index K cache is **planar** — FP8-E4M3 rows `[slots, 128]` plus FP32
   scales `[slots]`, one slot per pool. The reference's packed 132-byte pages
   exist for a DeepGEMM `block_kv` constraint this engine does not inherit,
-  and packed rows would misalign every other 128-byte streaming read;
+  and packed rows would misalign every other 128-byte streaming read.
 - the latent cache is `[token_slots, 512]` rows in the configured storage
   format (`engine.kv_dtype`, 2026-09-06): BF16 by default, or fp8 (e4m3
   codes with one FP32 scale per row) or fp4 (e2m1 codes, two per byte, in
@@ -1099,16 +1104,16 @@ The M3 implementation pins the concrete layouts and the selection spec
   cache, the tails and the selection are the same in every format. One
   shared block table per request serves both caches (block = 128 tokens =
   32 pools, so token block *b* and pool block *b* are the same entry —
-  prefix attachment shares both by reference, §8);
+  prefix attachment shares both by reference, §8).
 - the tail is a per-request ring `[2, kpool, 128]` BF16 — raw K at half 0,
   gate at half 1, ring slot `pos % kpool`. Completion reads the ring with the
   current token overriding its own slot (which still holds one stale pool's
   stash — the reference's `is_current` rule); the stash happens *after* the
-  completion read;
+  completion read.
 - visible pools for a query at position *p* are `floor((p+1)/kpool)`; the
   incomplete tail is never scored, only appended. Sequences with
   `visible <= select_k` degenerate to dense causal selection through the same
-  code path;
+  code path.
 - selection is pinned as: the `select_k = topk/kpool` pools with the highest
   fp32 logits, exact ties to the **lower pool index**, output ascending in
   pool index. The composite sort key `(~sortable_fp32 << 21) | pool_idx` is a
@@ -1116,7 +1121,7 @@ The M3 implementation pins the concrete layouts and the selection spec
   implementation. The reference's radix path is `atomicAdd`-ordered at exact
   ties; this pin matches its deterministic path. Finite logits are assumed —
   real quantized cache rows are always finite (the saturating encoder never
-  mints NaN);
+  mints NaN).
 - the **decode select is fused**: one kernel streams the blocked index cache,
   computes pool logits inline (warp per pool, lane per head, contraction-proof
   `__fmul_rn`/`__fadd_rn` arithmetic so the host oracle's logit parity — and
@@ -1126,7 +1131,7 @@ The M3 implementation pins the concrete layouts and the selection spec
   zero logits materialized: the whole decode path is CUDA-graph capturable.
   Prefill instead materializes per-(row, head) fp8 dots through the IGemm
   interface (FP8×FP8→F32, unit scales, K-cache reads amortized across query
-  tiles) and runs the same streaming selection over the dot buffer;
+  tiles) and runs the same streaming selection over the dot buffer.
 - **the dense prefill regime** (2026-09-05): while visible pools
   floor((p+1)/kpool) ≤ select_k = topk/kpool, every visible pool is
   selected and the tail appended — the query attends to tokens [0, p]
@@ -1158,14 +1163,14 @@ The M3 implementation pins the concrete layouts and the selection spec
   absorb and vout projections around it are tensor-core kernels too at
   ≥ 16 rows (round 7): absorb bitwise its warp kernel, vout carrying its
   fp32 input as a three-way bf16 split (the full mantissa; only the
-  summation order differs); decode keeps the warp kernels;
+  summation order differs); decode keeps the warp kernels.
 - MLA runs absorbed: `q̃ = W_uk^T q` (bf16 GEMM rounding), scores
   `q̃ · latent` in fp32 with split-KV online softmax — the running max lives
   in per-lane registers fed by butterfly group reductions (no shared running
   state to order), probs round to bf16 for the `c` accumulation while the
   denominator stays unrounded, and the output is v-absorbed
   (`out_h = W_uv_h · c_h`). `kv_b` is consumed in the checkpoint's
-  interleaved per-head layout;
+  interleaved per-head layout.
 - the power-of-two fp8 scale is computed by exact bit manipulation (smallest
   `2^n >= absmax/448`, exact powers mapping to themselves) rather than
   `exp2f(ceilf(log2f(v)))`: the fp32 libm form can round across a
@@ -1186,7 +1191,7 @@ Layer-phase pins (the orchestration above those kernels):
   slice on the caller's stream; growth is transactional — admission control
   per DESIGN §9 must guarantee capacity before the decode hot path, which
   cannot check device-side positions). Released blocks are not scrubbed: a
-  new owner rewrites every row it reads before any consumer touches it;
+  new owner rewrites every row it reads before any consumer touches it.
 - `DsaLayer` shares one scratch buffer across all DSA layers (they run
   sequentially on one stream; per-layer scratch would multiply the footprint
   by 11 for zero benefit), sized by `scratch_bytes()` with a dot budget that
@@ -1194,7 +1199,7 @@ Layer-phase pins (the orchestration above those kernels):
   trading K-cache re-reads for a bounded footprint. Prefill grows block
   tables itself and throws on pool exhaustion (a control-path operation);
   decode requires the tables to already cover every position a captured
-  batch will write. The decode path is CUDA-graph capturable end to end;
+  batch will write. The decode path is CUDA-graph capturable end to end.
 - the near-tie contract for cross-implementation selection comparison:
   logits from tensor-core GEMMs differ from any sequential oracle by ulps
   that can flip the rank-select_k cut when two pools sit within that noise.
@@ -1203,7 +1208,7 @@ Layer-phase pins (the orchestration above those kernels):
   dot buffer) and requires the swapped pools to straddle the boundary
   within the measured per-row noise. Device-vs-device comparisons (same
   GEMM outputs) remain bitwise — that is the reproducibility contract
-  serving relies on;
+  serving relies on.
 - decode performance pins (GB10, 48 SMs): native hardware e4m3→f16 and
   bf16→f32 conversions (both exact — bit-identical to the software codecs,
   proven by the bitwise select fuzz), split-KV attention at
@@ -1214,7 +1219,7 @@ Layer-phase pins (the orchestration above those kernels):
   indexing conflicts ~16 ways). Decode at 65k context: 2.24 ms/layer, 114
   GB/s effective; the projection GEMMs alone are ~1.0 ms — 238 MiB of
   weights at the memory floor (see
-  benchmarks/results/2026-08-28-dsa-m3-layer.md).
+  the 2026-08-28-dsa-m3-layer measurements).
 
 ### 7.3 mHC residual streams
 
@@ -1267,7 +1272,6 @@ form's (glm_mhc_test pins collapsed, post, comb and the fused norm), and
 the finish runs in-block per token; the stream update computes a
 position's four streams in one thread. Decode's fused per-coefficient
 form (graph-captured) is unchanged.
-
 
 ### 7.4 MoE routing (noaux_tc) and expert execution
 
@@ -1661,7 +1665,7 @@ deployment capacity; bitwise eager/graph gates must use matching decode
 capacities and head settings. The setting rides the rank-0 settings record
 and effective configuration digest. `engine.fp8_head: "gemv"` retains the
 previous dispatch, and the BF16 head is unaffected. The
-[real-checkpoint numerical record](benchmarks/results/2026-09-21-qwen-fp8-head-numerics.md)
+real-checkpoint numerical record
 covers native one- and two-Spark deployments, the YaRN recipe, dispatch
 boundaries, repeated teacher-forced scoring and short prefills.
 
@@ -1673,7 +1677,7 @@ one selected row per request, including inside the decode envelope. BF16 heads
 use single-row projections. All-row diagnostics keep the full head.
 `DGPP_PREFILL_HEAD_ALL_ROWS=1`, set before memory planning and construction,
 restores full storage and projection for comparison. The
-[prefill-head record](benchmarks/results/2026-09-24-pr43-prefill-head.md)
+prefill-head record
 describes the regression checks across the 128-row dispatch boundary.
 
 *Group admission is bitwise the prefills alone (2026-09-28).* The scheduler
@@ -2171,8 +2175,7 @@ Verifier logits are saved before the draft head reuses their buffer.
 The sampled-MTP oracle gates follow scheduler token and retirement events,
 compare every live transcript through its final token, and cover grouped
 admission, staggered arrival and reused slots. Stored request results are
-populated at retirement and cannot be used as live transcripts. See the
-[fallback isolation record](benchmarks/results/2026-09-21-mtp-fallback-isolation.md).
+populated at retirement and cannot be used as live transcripts.
 
 ### Logprobs and validation
 
@@ -2218,7 +2221,7 @@ from its own prior — an undeclared name, or the same one twice, which a
 client cannot tell from a model fault. A schema that declares no
 `properties` at all has nothing to close to and keeps the free key; an
 explicit `additionalProperties: true` keeps it as well, and is noted once
-naming the tool ([record](benchmarks/results/2026-09-19-tool-key-closure.md)).
+naming the tool.
 An explicitly empty `properties: {}` closes to the empty key set. A
 schema-valued `additionalProperties` also closes the declared top-level set
 in non-strict mode; it cannot type arbitrary argument names on this path.
@@ -2346,14 +2349,43 @@ prefill, reservation, decode, close and cache operations without exposing
 logits. The engine includes token selection in each model operation;
 on the fabric, those picks and model reductions are collectives.
 
-Each tick admits one queued request or a fitting group of cold prompts, then
-decodes the next canonical slice of active requests. Admission chooses
+Each tick performs bounded prefill work, then decodes the next canonical
+slice of active requests. Admission chooses
 the oldest request that fits the free pool and an available slot, allowing
 smaller requests to pass a blocked larger one. A sustained stream of small
 requests can therefore delay a large request.
 
-Qwen's opt-in prefill budget advances one aligned chunk per tick before
-decode. One unfinished prefill holds its slot, KV reservation and private
+With a positive prefill budget, non-group-advance engines divide the tick's
+budget into equal aligned shares among unfinished prefills. While a prefill
+is in flight, at most one oldest-fitting request needing chunked prefill joins
+those shares. Early admission admits queued text regardless of total prompt or
+cached suffix length. Eager and graph serving enable it with automatic budgets
+on every serving family and share prefill work with decoder verification.
+`engine.prefill_early_admission` overrides the default. It needs
+a free slot, an aligned share and its existing full reservation; this scan
+does not evict cached entries to make it fit. Short text therefore need not
+wait for leftover budget behind a long prefill when early admission is enabled.
+In that mode, a short suffix takes only
+its aligned tail; unused whole chunks from its share are divided among
+unfinished readers before their advances. Sub-alignment tails and the
+original align-down leftover keep their existing treatment. A lone reader,
+or readers that all fit their original shares, keep those shares: changing
+the budget without a recipient can introduce extra global-grid cuts.
+Qwen's resumable cursor spends its cap from its current position and retains
+structural/snapshot cuts, without redundant automatic model-grid cuts.
+Other families retain their existing grid contracts. Required cuts can still
+end an advance before it uses the entire cap.
+If the busy budget cannot cover all readers, the
+existing rotation gives them bounded turns.
+
+This changes admission during an unfinished non-group prefill, not image or
+group-advance eligibility, nor admission when no prefill is in flight.
+Earlier text decoding can switch later ticks from the idle to the busy
+budget and delay the long prompt's completion; token caps are not wall-time
+latency guarantees. Skip-fit admission still does not guarantee progress
+for a request that never has enough free KV capacity.
+
+An unfinished prefill holds its slot, KV reservation and private
 snapshot until completion or cancellation; its device positions are hidden
 between chunks so padded decode graphs cannot mutate its state. The optional
 idle budget permits larger chunks when no request is actively decoding,
@@ -2451,8 +2483,7 @@ order. Attention
 batches heads with values stored as `[heads, tokens, head_dim]`; query tiles
 reuse the algorithm selected for the untiled matrix to avoid changing its
 reduction order. Tiling stays within the reserved workspace. The independent
-oracle gates full-depth relative RMS at 0.5% and cosine at 0.99998; see the
-[numerical record](benchmarks/results/2026-09-18-glm-vision-numerics.md).
+oracle gates full-depth relative RMS at 0.5% and cosine at 0.99998.
 
 Image embeddings replace their placeholder rows in all four mHC streams
 during prefill. The MTP prompt pass applies its embedding norm to the same
@@ -2485,22 +2516,31 @@ digest exits with an error. The stop record is handled between ticks.
 
 `src/engine/eager_engine.hpp` wraps model calls and pick callbacks.
 `src/engine/graph_engine.hpp` records scalar graphs per request slot
-and a family of batched variants. The graph engine uses the smallest
-available batch covering the active slot IDs once the live-request count
-reaches `graph_batch_min_live`; the default threshold is
-`min(2, max_concurrency)`. For Qwen at fixed MTP depth with `engine.compact_batches: true`, a compact
-group-to-request map selects by live count within the physical graph's numerical
-dispatch range and keeps KV/recurrent state in its original physical slots.
-Graphs of at most sixteen verification rows keep their width; wider graphs
-may shrink only to another width above sixteen rows. If no physical family
-fits, scalar fallback is retained. This avoids crossing shape-dependent
-GEMV/Lt reduction boundaries while still reducing wide sparse batches.
-The setting defaults off and is journaled by rank 0 before graph construction.
+and a family of batched variants. Both adapters use `PrefillTask` to own
+yielded prompt, image and snapshot data. `PrefillContinuation` tracks cuts
+and progress, `PrefillBatch` plans mixed rows and commits reader state, and
+`RowRun` describes the layer walk. `SessionModel` supplies the common session
+implementation; legacy GLM shares these helpers through its existing facade.
+The executor owns architecture-specific attention, recurrence and projections.
+`RowRun::for_each_kernel_group` keeps the decoder prefix separate and groups
+compatible reader spans. Each operation supplies its compatibility rule, so
+short cached tails retain their projection arithmetic while expert work can
+still share a batch.
+
+The graph engine starts batching at `graph_batch_min_live`, defaulting to
+`min(2, max_concurrency)`. `engine.compact_batches` defaults to true and is
+journaled before graph construction. Native fixed-depth execution uses the
+shared `GraphBatchMapping` to select the smallest compatible bucket by live
+count while keeping KV/recurrent state in its original physical slots.
+Qwen's numerical dispatch contract retains widths of at most sixteen
+verification rows and permits larger widths to shrink within the 17–32-row
+or above-32-row range. Other executors retain their capacity constraints.
+If no physical family fits, scalar fallback remains available.
 Each captured parity has a separate pinned map, uploaded at
 replay entry; tokens are gathered to compact rows and the verdict, draft
 feeds, sampling state and cache-hop snapshots map back to physical slots.
-The host can stage the next map while the previous replay finishes. Other
-models and confidence-scheduled depth retain physical-prefix selection,
+The host can stage the next map while the previous replay finishes. Block
+drafters and confidence-scheduled depth retain physical-prefix selection,
 where sparse occupancy can require a wider batch. Closed/padded groups
 use inactive positions; compact padding also has request ID -1.
 
@@ -2632,7 +2672,7 @@ surface under it:
   reads `a[i]` regardless of `i < n` once the branch is predicated, and even
   a ternary index gets both arms loaded. Per-token arrays in test drivers
   must be sized to the token count, and bounds-dependent loads must clamp
-  their indices arithmetically;
+  their indices arithmetically.
 - shared-memory buffers reused across reduction phases (all threads read the
   mean, lane-0s overwrite with the variance) race without a barrier between
   the read and the reuse — scheduling luck passes functional tests.
@@ -2705,7 +2745,7 @@ disagree by hours; `scripts/fabric_xrank.py`).
 | `tools/`, `scripts/` | Reference generators, checkpoint tools, deployment and measurement commands |
 | `deploy/` | Example cluster configurations |
 | `cmake/`, `dev/` | Build configuration and the x86-to-ARM64 Spark cross-build container |
-| `benchmarks/`, `docs/` | Workloads, probes, dated measurements and documentation |
+| `docs/` | Project documentation, measurement summaries and benchmark procedures |
 
 The [Spark cross-build](docs/cross-compiling.md) uses native x86 build tools
 with an AArch64 host compiler and CUDA SBSA target libraries. It inherits the
@@ -2744,7 +2784,7 @@ owns a layer in the paged pool; unselected heads update K/V only. A per-slot
 backbone history ring is included in draft rollback and prefix snapshots.
 The default remains recursion through head 0. See the
 [native contract](docs/experiments/mimo-native-mtp.md) and
-[two-Spark measurements](benchmarks/results/2026-09-23-mimo-native-mtp.md).
+two-Spark measurements.
 
 ## 15. Primary references
 

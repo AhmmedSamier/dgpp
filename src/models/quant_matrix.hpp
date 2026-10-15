@@ -14,6 +14,14 @@ namespace dgpp {
 struct GlmQuantMatrix {
   const uint8_t* payload = nullptr;  // E4M3 [rows, cols]
   const float* scales = nullptr;     // F32 [ceil(rows/sbr), ceil(cols/sbc)]
+  // The scale grid as e8m0 bytes (2^(b - 127) each) instead of F32 — the
+  // QAD export's MXFP8 dense stack on its 1 x 32 grid, kept in the
+  // checkpoint's own byte form (one byte per 32 weights; the F32 grid
+  // cost 12.5 % of the payload's bytes a decode step, 2.6 ms at world 1).
+  // Exactly one of `scales` / `scales_e8m0` is set for a quantized matrix;
+  // the byte grid is read by the streaming MMA and the dequant bridge alone
+  // (the loader keeps F32 for any matrix those cannot take).
+  const uint8_t* scales_e8m0 = nullptr;
   int64_t rows = 0;
   int64_t cols = 0;
   // The resident scale grid's block size per axis (Q2, 2026-09-09,

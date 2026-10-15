@@ -517,7 +517,9 @@ class DFlash2Speculator {
                                       int snapshot_base) {
     const int T = static_cast<int>(fed.size());
     const SpecVerdict v = judge_verify(fed, winners);
-    if (T > 1) model_.session_rollback(req_, v.accepted, T, snapshot_base);
+    // A zero-draft step still commits one target row. Replay-backed state
+    // must record that row even though no speculative tail is retracted.
+    model_.session_rollback(req_, v.accepted, T, snapshot_base);
     ++steps_;
     accepted_drafts_ += v.accepted - 1;
     // The scheduler's MTP group, per draft position (sched MtpAcceptance):
