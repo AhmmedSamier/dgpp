@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -819,45 +820,31 @@ void Dsv4Model::gather_embedding(const int64_t* tokens, int T, bool capture) {
 // One mHC site (the reference's two-pass hc_pre): this site's coefficients
 // from the streams, the collapse with its OWN pre, the sublayer's
 // one-rounding norm into x_; post / comb in fp32 for the stream update.
-void Dsv4Model::mhc_site(const uint16_t* streams, const GlmMhcWeights& w, const uint16_t* ln, int T, bool decode) {
-  MhcSinglePass sp;
-  sp.pre_in = nullptr;
-  sp.pre_out = nullptr;
-  sp.post_f32 = post_f32_;
-  sp.comb_f32 = comb_f32_;
-  if (decode && mhc_counters_ != nullptr) {
-    // The fused decode form: one launch for the dots, the finish and the
-    // sublayer's norm; the comb on the side stream (joined by stream_update).
-    sp.comb_f32 = nullptr;
-    sp.one_round_norm = true;
-    const bool deferred =
-        launch_mhc_compute_normed(streams, w, mhc_cfg_, nullptr, post_bf16_, comb_bf16_, mhc_logits_, ln, x_,
-                                  cfg_.rms_norm_eps, T, stream_, mhc_counters_, /*defer_comb=*/true, &sp, true);
-    if (!deferred) throw std::logic_error("mhc_site: the fused decode form must defer its comb");
-    DGPP_CUDA_OK(cudaEventRecord(mhc_fork_, stream_));
-    DGPP_CUDA_OK(cudaStreamWaitEvent(mhc_side_, mhc_fork_, 0));
-    launch_mhc_comb(mhc_logits_, w, mhc_cfg_, comb_bf16_, T, mhc_side_, comb_f32_);
-    DGPP_CUDA_OK(cudaEventRecord(mhc_join_, mhc_side_));
-    comb_pending_ = true;
-    return;
-  }
-  // Decode rows stay on the per-coefficient form at any count (a batched
-  // row bitwise the row alone; the >= 16-token prefill forms are not).
-  (void)launch_mhc_compute_normed(streams, w, mhc_cfg_, collapsed_, post_bf16_, comb_bf16_, mhc_logits_, nullptr, nullptr,
-                                  cfg_.rms_norm_eps, T, stream_, nullptr, false, &sp, decode);
-  csa2_rmsnorm_bf16(collapsed_, cfg_.hidden_size, ln, x_, cfg_.hidden_size, T, cfg_.hidden_size, cfg_.rms_norm_eps, stream_);
+void Dsv4Model::mhc_site(const uint16_t* streams, const GlmMhcWeights& w, const uint16_t* ln, int T, bool decode,
+                         int decode_prefix) {
+  mhc_site_rows(streams, w, ln, 0, T, decode ? T : decode_prefix);
 }
 
 // The head's collapse: pre = sigmoid(mix * scale + base) + eps over the
 // streams — the mHC site's pre rule on the padded head weights (the post /
 // comb outputs are scratch).
-void Dsv4Model::hc_head(const Dsv4HcHeadResident& hw, uint16_t* out, int T, bool decode) {
+void Dsv4Model::hc_head(const Dsv4HcHeadResident& hw, uint16_t* out, int T, bool decode, int decode_prefix) {
   GlmMhcWeights w;
   w.fn = hw.fn;
   w.base = hw.base;
   w.scale = hw.scale;
-  (void)launch_mhc_compute_normed(cur_, w, mhc_cfg_, out, post_bf16_, comb_bf16_, mhc_logits_, nullptr, nullptr,
-                                  cfg_.rms_norm_eps, T, stream_, nullptr, false, nullptr, decode);
+  const size_t H = static_cast<size_t>(cfg_.hidden_size), n = mhc_cfg_.hc_mult;
+  const auto compute = [&](int first, int count, bool decoder) {
+    if (!count) return;
+    const size_t row = static_cast<size_t>(first);
+    (void)launch_mhc_compute_normed(cur_ + row * n * H, w, mhc_cfg_, out + row * H,
+                                    post_bf16_ + row * n, comb_bf16_ + row * n * n,
+                                    mhc_logits_ + row * mhc_cfg_.coeff_rows(), nullptr, nullptr,
+                                    cfg_.rms_norm_eps, count, stream_, nullptr, false, nullptr, decoder);
+  };
+  const int dec = decode ? T : decode_prefix;
+  compute(0, dec, true);
+  compute(dec, T - dec, false);
 }
 
 void Dsv4Model::stream_update(const uint16_t* sublayer_out, int T) {
@@ -870,22 +857,49 @@ void Dsv4Model::stream_update(const uint16_t* sublayer_out, int T) {
 }
 
 // ---- the prefill's fold overlap (model.hpp) -------------------------------------
-void Dsv4Model::mhc_site_rows(const uint16_t* streams, const GlmMhcWeights& w, const uint16_t* ln, int r0, int rows) {
-  const size_t H = static_cast<size_t>(cfg_.hidden_size);
-  const size_t n = static_cast<size_t>(mhc_cfg_.hc_mult), R = static_cast<size_t>(r0);
-  MhcSinglePass sp;
-  sp.pre_in = nullptr;
-  sp.pre_out = nullptr;
-  sp.post_f32 = post_f32_ + R * n;
-  sp.comb_f32 = comb_f32_ + R * n * n;
-  (void)launch_mhc_compute_normed(streams + R * n * H, w, mhc_cfg_, collapsed_ + R * H, post_bf16_ + R * n,
-                                  comb_bf16_ + R * n * n, mhc_logits_ + R * static_cast<size_t>(mhc_cfg_.coeff_rows()),
-                                  nullptr, nullptr, cfg_.rms_norm_eps, rows, stream_, nullptr, false, &sp, false);
-  csa2_rmsnorm_bf16(collapsed_ + R * H, cfg_.hidden_size, ln, x_ + R * H, cfg_.hidden_size, rows, cfg_.hidden_size,
-                    cfg_.rms_norm_eps, stream_);
+void Dsv4Model::mhc_site_rows(const uint16_t* streams, const GlmMhcWeights& w, const uint16_t* ln,
+                              int r0, int rows, int decode_prefix) {
+  const size_t H = static_cast<size_t>(cfg_.hidden_size), n = mhc_cfg_.hc_mult;
+  const auto compute = [&](int first, int count, bool decoder) {
+    if (!count) return;
+    const size_t r = static_cast<size_t>(first);
+    MhcSinglePass sp;
+    sp.post_f32 = post_f32_ + r * n;
+    sp.comb_f32 = comb_f32_ + r * n * n;
+    const auto* input = streams + r * n * H;
+    auto* logits = mhc_logits_ + r * mhc_cfg_.coeff_rows();
+    if (decoder && mhc_counters_ != nullptr) {
+      // Preserve the fused decode norm and per-coefficient reduction even
+      // when readers share this walk. Their rows use the prefill recipe.
+      sp.comb_f32 = nullptr;
+      sp.one_round_norm = true;
+      const bool deferred = launch_mhc_compute_normed(input, w, mhc_cfg_, nullptr,
+          post_bf16_ + r * n, comb_bf16_ + r * n * n, logits, ln, x_ + r * H,
+          cfg_.rms_norm_eps, count, stream_, mhc_counters_ + r, true, &sp, true);
+      if (!deferred) throw std::logic_error("mhc_site: the fused decode form must defer its comb");
+      DGPP_CUDA_OK(cudaEventRecord(mhc_fork_, stream_));
+      DGPP_CUDA_OK(cudaStreamWaitEvent(mhc_side_, mhc_fork_, 0));
+      launch_mhc_comb(logits, w, mhc_cfg_, comb_bf16_ + r * n * n, count, mhc_side_, comb_f32_ + r * n * n);
+      DGPP_CUDA_OK(cudaEventRecord(mhc_join_, mhc_side_));
+      comb_pending_ = true;
+      return;
+    }
+    (void)launch_mhc_compute_normed(input, w, mhc_cfg_, collapsed_ + r * H,
+        post_bf16_ + r * n, comb_bf16_ + r * n * n, logits, nullptr, nullptr,
+        cfg_.rms_norm_eps, count, stream_, nullptr, false, &sp, decoder);
+    csa2_rmsnorm_bf16(collapsed_ + r * H, cfg_.hidden_size, ln, x_ + r * H,
+                      cfg_.hidden_size, count, cfg_.hidden_size, cfg_.rms_norm_eps, stream_);
+  };
+  const int dec = std::clamp(decode_prefix - r0, 0, rows);
+  compute(r0, dec, true);
+  compute(r0 + dec, rows - dec, false);
 }
 
 void Dsv4Model::update_rows(const uint16_t* sublayer_out, int r0, int rows) {
+  if (comb_pending_) {
+    DGPP_CUDA_OK(cudaStreamWaitEvent(stream_, mhc_join_, 0));
+    comb_pending_ = false;
+  }
   const size_t H = static_cast<size_t>(cfg_.hidden_size);
   const size_t n = static_cast<size_t>(mhc_cfg_.hc_mult), R = static_cast<size_t>(r0);
   launch_mhc_stream_update_f32(post_f32_ + R * n, comb_f32_ + R * n * n, sublayer_out + R * H, cur_ + R * n * H,
@@ -905,6 +919,8 @@ void Dsv4Model::flush_overlap(int T, int TA) {
 void Dsv4Model::enqueue_layer_overlap(const Dsv4LayerResident& r, int layer, int T, int TA, const WalkRows& rows,
                                       bool flush) {
   const int H = cfg_.hidden_size;
+  const int decode_prefix = rows.decode_spans
+      ? std::accumulate(rows.span_lens, rows.span_lens + rows.decode_spans, 0) : 0;
   const int TB = T - TA;
   build_layer_objects(r);
   const auto drain = [&] { DGPP_CUDA_OK(cudaStreamSynchronize(stream_)); };
@@ -932,9 +948,9 @@ void Dsv4Model::enqueue_layer_overlap(const Dsv4LayerResident& r, int layer, int
   // Block A's streams are updated (in nxt_) while block B's wait for the
   // previous layer's FFN fold.
   if (ffn_b_pending_)
-    mhc_site_rows(nxt_, aw, r.attn_norm, 0, TA);
+    mhc_site_rows(nxt_, aw, r.attn_norm, 0, TA, decode_prefix);
   else
-    mhc_site_rows(cur_, aw, r.attn_norm, 0, T);
+    mhc_site_rows(cur_, aw, r.attn_norm, 0, T, decode_prefix);
   uint16_t* attn_out = y_;  // rows [TA, T) may still hold the previous FFN's block B: A writes [0, TA) only
   // The attention of walk rows [r0, r0 + n): one request's rows, or the
   // part of every span of a group inside them (a span the block boundary
@@ -952,9 +968,15 @@ void Dsv4Model::enqueue_layer_overlap(const Dsv4LayerResident& r, int layer, int
       const int lo = std::max(span0, r0), hi = std::min(span0 + len, r0 + n);
       if (hi > lo) {
         if (!attn_->prepare(hi - lo)) throw std::runtime_error("run_rows: attention GEMM plans unavailable");
-        attn_->enqueue_prefill(x_ + static_cast<size_t>(lo) * H, pool_, rows.span_reqs[sp],
-                               rows.span_pos0[sp] + (lo - span0), hi - lo, attn_out + static_cast<size_t>(lo) * H,
-                               stream_);
+        if (sp < rows.decode_spans) {
+          gemm_.set_decode_split_k(true);
+          attn_->enqueue_decode(x_ + static_cast<size_t>(lo) * H, pool_, rows.req_ids + lo,
+                                 rows.pos + lo, hi - lo, attn_out + static_cast<size_t>(lo) * H, stream_, /*prefetch=*/false);
+          gemm_.set_decode_split_k(false);
+        } else
+          attn_->enqueue_prefill(x_ + static_cast<size_t>(lo) * H, pool_, rows.span_reqs[sp],
+                                 rows.span_pos0[sp] + (lo - span0), hi - lo, attn_out + static_cast<size_t>(lo) * H,
+                                 stream_);
       }
       span0 += len;
     }
@@ -962,7 +984,7 @@ void Dsv4Model::enqueue_layer_overlap(const Dsv4LayerResident& r, int layer, int
   attention(0, TA);
   if (ffn_b_pending_) {
     flush_overlap(T, TA);
-    mhc_site_rows(cur_, aw, r.attn_norm, TA, TB);
+    mhc_site_rows(cur_, aw, r.attn_norm, TA, TB, decode_prefix);
   }
   const bool fold_a = begin_fold(attn_out, 0, TA);
   attention(TA, TB);
@@ -975,21 +997,21 @@ void Dsv4Model::enqueue_layer_overlap(const Dsv4LayerResident& r, int layer, int
   if (r.moe.tid2eid != nullptr) moe_->set_hash_routing(r.moe.tid2eid, rows.tokens, cfg_.vocab_size);
   const bool fold_b = begin_fold(attn_out, TA, TB);
   update_rows(attn_out, 0, TA);
-  mhc_site_rows(nxt_, fw, r.ffn_norm, 0, TA);
+  mhc_site_rows(nxt_, fw, r.ffn_norm, 0, TA, decode_prefix);
   moe_->route_prefill_rows(x_, 0, TA, stream_);  // A's router too, under B's fold
   end_fold(fold_b);
   update_rows(attn_out, TA, TB);
   std::swap(cur_, nxt_);
-  mhc_site_rows(cur_, fw, r.ffn_norm, TA, TB);
+  mhc_site_rows(cur_, fw, r.ffn_norm, TA, TB, decode_prefix);
   moe_->route_prefill_rows(x_, TA, TB, stream_);
   // The expert chain over every row (its cost is the weights it decodes);
   // then the accumulation per block, so block B's runs under A's fold.
   uint16_t* ffn_out = y_;
-  moe_->enqueue_prefill_phased(x_, T, stream_);
+  moe_->enqueue_prefill_phased(x_, T, stream_, decode_prefix, ffn_out);
   moe_->set_hash_routing(nullptr, nullptr, 0);
-  moe_->accumulate_prefill_rows(ffn_out, T, 0, TA, stream_);
+  moe_->accumulate_prefill_rows(ffn_out, T, 0, TA, stream_, decode_prefix);
   const bool ffn_a = begin_fold(ffn_out, 0, TA);
-  moe_->accumulate_prefill_rows(ffn_out, T, TA, TB, stream_);
+  moe_->accumulate_prefill_rows(ffn_out, T, TA, TB, stream_, decode_prefix);
   end_fold(ffn_a);
   // Block A's update; block B's fold under the next layer's site and
   // attention of A (or landed here: the walk's last layer, a DSpark
@@ -1010,6 +1032,8 @@ void Dsv4Model::enqueue_layer_overlap(const Dsv4LayerResident& r, int layer, int
 
 void Dsv4Model::enqueue_layer(const Dsv4LayerResident& r, int layer, int T, const WalkRows& rows) {
   const int H = cfg_.hidden_size;
+  const int decode_prefix = rows.decode_spans
+      ? std::accumulate(rows.span_lens, rows.span_lens + rows.decode_spans, 0) : 0;
   build_layer_objects(r);
   const bool draft = cfg_.is_draft(layer);
   // ---- the attention site ----------------------------------------------------
@@ -1017,7 +1041,7 @@ void Dsv4Model::enqueue_layer(const Dsv4LayerResident& r, int layer, int T, cons
   aw.fn = r.mhc.attn_fn;
   aw.base = r.mhc.attn_base;
   aw.scale = r.mhc.attn_scale;
-  mhc_site(cur_, aw, r.attn_norm, T, rows.decode);
+  mhc_site(cur_, aw, r.attn_norm, T, rows.decode, decode_prefix);
   const auto grab = [&](const uint16_t* p, size_t n) {
     std::vector<uint16_t> v(n);
     DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
@@ -1025,7 +1049,12 @@ void Dsv4Model::enqueue_layer(const Dsv4LayerResident& r, int layer, int T, cons
     return v;
   };
   SiteCapture cap;
-  if (debug_capture_) cap.x_attn = grab(x_, static_cast<size_t>(T) * H);
+  if (debug_capture_) {
+    cap.x_attn = grab(x_, static_cast<size_t>(T) * H);
+    cap.post_attn.resize(static_cast<size_t>(T) * mhc_cfg_.hc_mult);
+    DGPP_CUDA_OK(cudaMemcpy(cap.post_attn.data(), post_f32_, cap.post_attn.size() * sizeof(float),
+                             cudaMemcpyDeviceToHost));
+  }
   uint16_t* attn_out = stage(y_, T, H, rows.capture);
   if (!attn_->prepare(T)) throw std::runtime_error("run_rows: attention GEMM plans unavailable");
   if (draft) {
@@ -1034,7 +1063,16 @@ void Dsv4Model::enqueue_layer(const Dsv4LayerResident& r, int layer, int T, cons
     attn_->enqueue_decode(x_, pool_, rows.req_ids, rows.pos, T, attn_out, stream_);
   } else if (rows.num_spans > 0) {
     int row0 = 0;
-    for (int s = 0; s < rows.num_spans; ++s) {
+    if (rows.decode_spans) {
+      for (int s = 0; s < rows.decode_spans; ++s) row0 += rows.span_lens[s];
+      if (!attn_->prepare(row0)) throw std::runtime_error("mixed attention GEMM plans unavailable");
+      // BF16 indexer and compressor projections keep the decode reduction,
+      // just as the FP8 attention projections keep their native row recipe.
+      gemm_.set_decode_split_k(true);
+      attn_->enqueue_decode(x_, pool_, rows.req_ids, rows.pos, row0, attn_out, stream_, /*prefetch=*/false);
+      gemm_.set_decode_split_k(false);
+    }
+    for (int s = rows.decode_spans; s < rows.num_spans; ++s) {
       const int len = rows.span_lens[s];
       if (!attn_->prepare(len)) throw std::runtime_error("run_rows: attention GEMM plans unavailable");
       attn_->enqueue_prefill(x_ + static_cast<size_t>(row0) * H, pool_, rows.span_reqs[s], rows.span_pos0[s], len,
@@ -1055,7 +1093,7 @@ void Dsv4Model::enqueue_layer(const Dsv4LayerResident& r, int layer, int T, cons
   fw.fn = r.mhc.ffn_fn;
   fw.base = r.mhc.ffn_base;
   fw.scale = r.mhc.ffn_scale;
-  mhc_site(cur_, fw, r.ffn_norm, T, rows.decode);
+  mhc_site(cur_, fw, r.ffn_norm, T, rows.decode, decode_prefix);
   if (debug_capture_) cap.x_ffn = grab(x_, static_cast<size_t>(T) * H);
   uint16_t* ffn_out = stage(y_, T, H, rows.capture);
   // A hash layer's experts come from its token table (the rows' tokens).
@@ -1063,7 +1101,7 @@ void Dsv4Model::enqueue_layer(const Dsv4LayerResident& r, int layer, int T, cons
   if (rows.decode)
     moe_->enqueue_decode(x_, ffn_out, T, nullptr, stream_, rows.moe_table_slot);
   else
-    moe_->enqueue_prefill(x_, ffn_out, T, rows.trace, stream_);
+    moe_->enqueue_prefill(x_, ffn_out, T, rows.trace, stream_, decode_prefix);
   moe_->set_hash_routing(nullptr, nullptr, 0);
   if (pf) {
     // The next layer of the walk: a backbone layer's successor, a draft
@@ -1110,6 +1148,7 @@ Dsv4Model::Outputs Dsv4Model::run_rows(const RowRun& run) {
   const bool traces = !run.decode && route_traces_;
   const size_t K = static_cast<size_t>(cfg_.num_experts_per_tok);
   WalkRows rows;
+  rows.decode_spans = run.decode_spans;
   rows.tokens = in.tokens;
   rows.req_ids = in.req_ids;
   rows.pos = in.pos;
@@ -1138,7 +1177,7 @@ Dsv4Model::Outputs Dsv4Model::run_rows(const RowRun& run) {
       if (len <= 0 || len > prefill_group_span_limit())
         throw std::invalid_argument("run_rows: a group prefill span of " + std::to_string(len) +
                                     " rows exceeds the span limit " + std::to_string(prefill_group_span_limit()));
-      if (run.span_pos0[s] < 0) throw std::invalid_argument("run_rows: a group prefill span at a negative position");
+      if (s >= run.decode_spans && run.span_pos0[s] < 0) throw std::invalid_argument("run_rows: a group prefill span at a negative position");
       span_row0.push_back(at);
       at += len;
     }
@@ -1250,10 +1289,11 @@ Dsv4Model::Outputs Dsv4Model::run_rows(const RowRun& run) {
     // The head: the head's own collapse, the final norm, the lm head.
     if (debug_teacher_ && debug_teacher_->size() >= static_cast<size_t>(cfg_.num_hidden_layers))
       teach(cfg_.num_hidden_layers - 1);
-    hc_head(globals_.hc_head, collapsed_, T, run.decode);
+    hc_head(globals_.hc_head, collapsed_, T, run.decode, run.decode_rows());
     csa2_rmsnorm_bf16(collapsed_, H, globals_.final_norm, h_, H, T, H, cfg_.rms_norm_eps, stream_);
     if (packed_logits) {
       project_head_rows(run, [&](int input_row, int output_row, int count) {
+        gemm_.set_decode_split_k(run.decode || input_row < run.decode_rows());
         gemm_.matmul(h_ + static_cast<size_t>(input_row) * H, globals_.lm_head,
                      logits_ + static_cast<size_t>(output_row) * lm_vocab_count_, count, lm_vocab_count_, H,
                      DType::BF16, GemmOut::F32, static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
@@ -1281,7 +1321,7 @@ Dsv4Model::Outputs Dsv4Model::run_rows(const RowRun& run) {
     }
     if (!run.decode) {
       if (group) {
-        for (int s = 0; s < run.num_spans; ++s)
+        for (int s = run.decode_spans; s < run.num_spans; ++s)
           segment_of(run.span_reqs[s]) = {run.span_pos0[s], run.span_lens[s], span_row0[static_cast<size_t>(s)]};
       } else {
         segment_of(req) = {run.pos0, T, 0};

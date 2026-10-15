@@ -63,6 +63,10 @@ and `ubsan`; see [build profiles](docs/testing.md).
 
 ## What a change needs
 
+A new model family carries the extra gates in
+[adding a model](docs/adding_a_model.md): the plan document, the forward
+fixture gate, the deploy template registration and the engine-key plumbing.
+
 1. **Tests.** New behavior gets a test that would fail without it, in the
    suite whose subject it is (`tests/unit` for pure logic, `tests/host` for
    the scheduler, the service and the journal with their fakes,
@@ -79,11 +83,12 @@ and `ubsan`; see [build profiles](docs/testing.md).
    describes, not by eye. A change that moves a published throughput number
    re-runs that number's procedure from `docs/benchmarks.md` §9 and updates the
    row there, with its date.
-3. **Engineering records.** Changes with new measurements or debugging
-   findings get a dated record in `benchmarks/results/` describing the change,
-   validation and results. Continue an existing record only when it covers the
-   same investigation; do not append unrelated work to an old milestone report.
-   Preserve the context and names used in historical entries.
+3. **Validation summary.** Record the tested source, configuration, relevant
+   before/after measurements, failures and limitations in the PR description.
+   Keep raw results, profiles and run logs in ignored local storage or external
+   artifacts. Do not force-add ignored benchmark artifacts. Put reusable
+   procedures and lasting design conclusions in `docs/`; project documentation
+   must not depend on local campaign files.
 4. **Documentation.** Keep `DESIGN.md` aligned with the implementation and
    `PLAN.md` with its status. Update `docs/operations.md` and `README.md`
    when a change affects setup, usage or supported behavior.

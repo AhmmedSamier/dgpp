@@ -147,12 +147,15 @@ void MimoAttentionLayer::enqueue(const uint16_t* x, int tokens, const MimoAttnRo
     throw std::invalid_argument("MimoAttentionLayer: the cache layer's kv heads differ from the weights'");
   if (cache.fp8() != (cache.k_scale != nullptr && cache.v_scale != nullptr))
     throw std::invalid_argument("MimoAttentionLayer: an fp8 cache carries its scale planes");
+  if (rows.split(x, tokens, hidden_, out, [&](const uint16_t* input, int n,
+      const auto& map, uint16_t* output) { enqueue(input, n, map, cache, output, stream); })) return;
   const int H = hidden_;
   const int lkv = w_.local_kv_heads;
   const int Q = lh_ * kMimoQkDim, O = lh_ * kMimoVDim;
   // The fused projection, fp32 out (the finish rounds once): decode rows
   // on the streaming tensor-core GEMM (a row's chain the same whatever
-  // rows share the launch), prefill chunks on the GEMV chunks / tile kernel.
+  // rows share the launch), large prefill chunks on the exact pipelined
+  // fp8-weight GEMM; small tails retain the GEMV chunks.
   const int64_t n = static_cast<int64_t>(w_.chunks - 1) * w_.chunk_stride + w_.chunk_rows;
   launch_scale_gemm_grid_f32(x, static_cast<size_t>(H), w_.qkv.payload, w_.qkv.scales, qkv_, tokens,
                              static_cast<int>(n), H, stream, static_cast<size_t>(qkv_cols_), 7, 7,
@@ -280,7 +283,18 @@ size_t MimoDenseMlp::scratch_bytes(const MimoTextConfig&, int64_t local_inter, i
   return 3 * static_cast<size_t>(std::max(max_tokens, 0)) * static_cast<size_t>(local_inter) * 2;
 }
 
-void MimoDenseMlp::enqueue(const uint16_t* x, int tokens, uint16_t* out, cudaStream_t stream) {
+void MimoDenseMlp::enqueue(const uint16_t* x, int tokens, uint16_t* out, cudaStream_t stream,
+                           int decode_prefix) {
+  if (decode_prefix < 0 || decode_prefix > std::max(0, tokens) || decode_prefix > decode_rows_)
+    throw std::invalid_argument("MimoDenseMlp: mixed decoder prefix exceeds row capacity");
+  if (decode_prefix && decode_prefix < tokens) {
+    if (tokens > max_tokens_ || !x || !out)
+      throw std::invalid_argument("MimoDenseMlp: invalid mixed rows");
+    enqueue(x, decode_prefix, out, stream);
+    const size_t offset = static_cast<size_t>(decode_prefix) * hidden_;
+    enqueue(x + offset, tokens - decode_prefix, out + offset, stream);
+    return;
+  }
   if (tokens <= 0) return;
   if (tokens > max_tokens_) throw std::invalid_argument("MimoDenseMlp: tokens exceed max_tokens");
   if (!x || !out) throw std::invalid_argument("MimoDenseMlp: null pointer");

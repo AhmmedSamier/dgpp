@@ -23,8 +23,11 @@
 #include "core/graph.hpp"
 #include "engine/paged_blocks.hpp"
 #include "engine/session_model.hpp"
+#include "models/glm/moe.hpp"
 #include "kernels/bf12_companions.hpp"
+#include "kernels/draft_head.hpp"
 #include "kernels/gemm.hpp"
+#include "kernels/glm_moe_launch.hpp"
 #include "kernels/glm_spec.hpp"
 #include "loaders/resident_stream.hpp"
 #include "models/quant_matrix.hpp"
@@ -142,6 +145,9 @@ void qwen35_mtp_concat_bf16(const uint16_t* e, const uint16_t* h, uint16_t* out,
 class Qwen35Model : public SessionModel<Qwen35Model> {
  public:
   using Base = SessionModel<Qwen35Model>;
+  static constexpr bool kPrefillChunkGrid = false;
+  void prepare_mixed_verify(int rows) { gdn_replay_rows_used_ = rows; }
+
   // `dflash2_dir` (a directory holding the drafter's config.json + shards)
   // replaces the MTP draft with the DFlash2 block drafter: mutually
   // exclusive with `mtp`. The target verify captures (the static
@@ -204,6 +210,9 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
                                 const std::string& dflash2_dir = "");
 
   const Qwen35TextConfig& config() const { return cfg_; }
+  // Actual resident layer allocation, for comparing initialization with the
+  // memory plan. An unmaterialized or streamed layer contributes zero bytes.
+  size_t resident_layer_bytes(int layer) const { return loader_.resident_layer_span(layer).second; }
 
   // ---- the session core's hooks (engine/session_model.hpp) --------------------
   typename Base::Outputs run_rows(const typename Base::RowRun& run);
@@ -240,7 +249,7 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   // all layers resident instead of faulting them in one by one.
   void preload_resident_layers(int threads);
   void mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode_row,
-                    bool capture, int head_rows, int batch_requests);
+                    bool capture, int head_rows, int batch_requests, int hidden_row = 0);
   Outputs mtp_forward(const std::vector<int64_t>& token_ids);
   // The cold diagnostic forward (the fixture gates): slot 0, fresh state,
   // every row's logits and final hidden; capture_layers leaves every
@@ -389,7 +398,9 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   int walk_rows_ = 1;                 // the rows of the walk in flight (the companions' view)
   // The lm head over `rows` activation rows into F32 logits: the blockwise
   // FP8 head under engine.dense_weights = fp8 (Resident), else the BF16 matmul.
-  void head_gemv(const uint16_t* act, float* out, int rows, cudaStream_t stream);
+  // draft: a decode draft's read (the MTP head, the DFlash2 block's mask
+  // rows) — through the draft head's screen when it is on.
+  void head_gemv(const uint16_t* act, float* out, int rows, cudaStream_t stream, bool draft = false);
   // Per-tensor FP8 boot requant of one layer's MLP into PT slot `layer`
   // (num_hidden_layers addresses the MTP draft layer).
   void requant_mlp_pt(int slot, const Qwen35DenseMlpResident& m, cudaStream_t stream);
@@ -416,6 +427,11 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   Qwen35TextConfig cfg_;
   Qwen35LayerStream loader_;
   CublasLtGemm gemm_;
+  // The draft head's screen (kernels/draft_head.hpp): built from the served
+  // head at construction under engine.draft_head.
+  DraftHead draft_head_;
+  HeadMatrix draft_head_matrix() const;
+  GlmQuantMatrix head_fp8_view_;  // the boot fp8 head copy as a matrix view (head_fp8_ / head_scales_)
   // The bf16 decode weights' 12-bit companions (engine.bf16_weights, #88):
   // the DFlash2 drafter's layers and fc taps, the MTP fc, the bf16 lm head.
   // This family keeps the bf16 bytes beside them under either packed mode
@@ -480,6 +496,17 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   // Activation scratch at max_tokens rows.
   uint16_t *resid_ = nullptr, *x_ = nullptr, *attn_out_ = nullptr, *mlp_out_ = nullptr;
   uint16_t *gate_tmp_ = nullptr, *up_tmp_ = nullptr;  // dense MLP [M, I]
+  // The NVFP4 dense path's pre-staged tables (production ldmatrix kernel):
+  // one {0, m, 0} segment per row count 1..max_tokens (the grouped
+  // launcher's only per-launch table, read not written), plus the
+  // [gate,up,down] view tables. Resident stacks harvest every layer's
+  // table once at boot (pointers are stable, and the decode graph forbids
+  // copy-engine nodes — docs/batched_mtp_graph_stall.md); streaming
+  // stacks rebuild one shared layer allocation per load, so dense_mlp
+  // re-stages this 3-entry slot per call (the eager tests never capture).
+  MoeSegment* fp4_segs_ = nullptr;      // [max_tokens] device
+  MoeExpertView* fp4_views_ = nullptr;  // [layers x 3] resident, [3] slot streaming
+  int fp4_view_layers_ = 0;             // 0 = slot mode (streaming)
   // MTP draft scratch at max_tokens rows (null when MTP is off): embed rows
   // and their norm, the gathered/gated main hidden and its norm, the
   // [M, 2H] concat, the draft residual, its norm (the chain rows), and the

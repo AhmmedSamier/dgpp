@@ -51,6 +51,7 @@
 #include <cuda_runtime.h>
 
 #include "common/bf16_residency.hpp"
+#include "kernels/draft_head.hpp"
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
 #include "common/log.hpp"
@@ -4069,12 +4070,17 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
               if (generated.size() > want.size())
                 throw std::runtime_error("the graph engine ran ahead of the "
                                          "speculator");
-              if (!std::equal(generated.begin(), generated.end(), want.begin()))
+              if (!std::equal(generated.begin(), generated.end(), want.begin())) {
+                size_t at = 0;
+                while (at < generated.size() && generated[at] == want[at]) ++at;
                 throw std::runtime_error(
                     std::string("request '") + phase[i].id +
                     "' graph transcript differs from the eager sampled "
                     "speculator's after replay " +
-                    std::to_string(replays[static_cast<size_t>(r)]));
+                    std::to_string(replays[static_cast<size_t>(r)]) + " at token " + std::to_string(at) + " of " +
+                    std::to_string(generated.size()) + " (graph " + std::to_string(generated[at]) + ", speculator " +
+                    std::to_string(want[at]) + "; the step committed " + std::to_string(committed.size()) + " rows)");
+              }
               if (trace.retired.contains(phase[i].id)) {
                 finished[i] = true;
                 continue;
@@ -4489,7 +4495,7 @@ DGPP_TEST(glm_tp_serving_mtp_depth3_graph_matches_plain_and_eager_feed) {
   run_mtp_depth_gate(3, 29934);
 }
 
-static void run_mtp_depth_sampling_gate(int depth, int port) {
+static void run_mtp_depth_sampling_gate(int depth, int port, bool prefix_cache = false, bool long_phases = false) {
   const GlmTextConfig cfg = glm_tp_test_config();
   const std::string dir = "glm_tp_fixture";
   glm_tp_write_fixture(dir);
@@ -4497,7 +4503,7 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
   constexpr int kWorld = 2;
   constexpr int kSlots = 2;
   constexpr int kCap = 24;
-  const int max_tokens = static_cast<int>(prompt.size()) + 16;
+  const int max_tokens = static_cast<int>(prompt.size()) + (prefix_cache || long_phases ? 72 : 16);
   dgpp::sample::Params params;
   params.temperature = 1.0f;
   params.top_p = 0.95f;
@@ -4509,7 +4515,9 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
     uint64_t seed;
   };
   // The solo seed accepts drafts after the capped candidate prefix falls back.
-  const std::vector<std::vector<Spec>> phases{{{"solo", 7, 814480}}, {{"a", 7, 11}, {"b", 6, 13}}};
+  const std::vector<std::vector<Spec>> phases = (prefix_cache || long_phases)
+      ? std::vector<std::vector<Spec>>{{{"solo", 64, 814480}}, {{"a", 64, 11}, {"b", 61, 13}}}
+      : std::vector<std::vector<Spec>>{{{"solo", 7, 814480}}, {{"a", 7, 11}, {"b", 6, 13}}};
 
   std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, port);
   require(!buses.empty(), "tp bus world failed to start");
@@ -4517,6 +4525,8 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
   std::vector<std::vector<std::vector<int64_t>>> graph_seqs(kWorld);
   std::vector<uint64_t> fallbacks(kWorld, 0);
   std::vector<int> replays(kWorld, 0);
+  std::vector<uint64_t> prefix_digests(kWorld);
+  std::vector<int64_t> hop_fallbacks(kWorld);
   ConstructBarrier barrier(kWorld);
   std::vector<std::thread> workers;
   for (int r = 0; r < kWorld; ++r) {
@@ -4541,11 +4551,11 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
         GlmBusBoundaryReducer reducer(bus, test_wait_timeout_ms());
         // Both depths co-admit two requests. Depth 1 batches their verify;
         // depth 2 uses scalar graphs because GLM has no batched draft chain.
-        GlmDiagnosticModel eager(cfg, dir, max_tokens, 256, &reducer, r,
+        GlmDiagnosticModel eager(cfg, dir, max_tokens, prefix_cache ? 2048 : 256, &reducer, r,
                                  kWorld, GlmResidency::Streaming,
                                  GlmHeadSharding::VocabSharded, kSlots,
                                  /*mtp=*/true);
-        GlmDiagnosticModel graph(cfg, dir, max_tokens, 256, &reducer, r,
+        GlmDiagnosticModel graph(cfg, dir, max_tokens, prefix_cache ? 2048 : 256, &reducer, r,
                                  kWorld, GlmResidency::Resident,
                                  GlmHeadSharding::VocabSharded, kSlots,
                                  /*mtp=*/true);
@@ -4575,12 +4585,18 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
         dgpp::GlmGraphEngineAdapter engine(
             &graph, &bus, r, kWorld, scratch, cfg.vocab_size,
             test_wait_timeout_ms(), /*batch_min_live=*/kSlots, prefix_scratch,
-            gather_scratch, kCap, nullptr, /*prefix_slots=*/0, depth);
+            gather_scratch, kCap, nullptr, /*prefix_slots=*/prefix_cache ? 4 : 0, depth);
         if (!engine.supports_sampling() || engine.sampling_candidates() != kCap)
           throw std::runtime_error("the MTP graph engine did not arm the "
                                    "device sampler at the capped width");
         dgpp::sched::Scheduler sched(&engine, /*eos=*/{});
-        MtpSamplingTrace trace;
+        class HopTrace : public MtpSamplingTrace {
+         public:
+          int retained = 0;
+          void on_prefix(const std::string&, const char* op, int64_t position, int) override {
+            if (std::string(op) == "hop_fallback" && position >= 0) ++retained;
+          }
+        } trace;
         sched.set_observer(&trace);
 
         dgpp::sched::SchedulerEngine::MtpAcceptance expected;
@@ -4639,6 +4655,10 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
               }
               streams[i].insert(streams[i].end(), committed.begin(),
                                 committed.end());
+              DGPP_LOG_DEBUG("oracle '{}' replay {}: committed {} rows ({}), next {}, drafts {}/{}", phase[i].id,
+                             replays[static_cast<size_t>(r)], committed.size(),
+                             committed.empty() ? -1 : committed.back(), specs[i]->next(), specs[i]->drafts()[0],
+                             specs[i]->drafts().size() > 1 ? specs[i]->drafts()[1] : -1);
               // The graph's tokens so far vs the speculator's committed
               // stream plus its pending next, over the same length.
               std::vector<int64_t> want(streams[i].begin(), streams[i].end());
@@ -4647,12 +4667,18 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
                 throw std::runtime_error("the graph engine ran ahead of the "
                                          "speculator");
               if (!std::equal(trace.tokens[phase[i].id].begin(), trace.tokens[phase[i].id].end(),
-                              want.begin()))
+                              want.begin())) {
+                const auto& generated = trace.tokens[phase[i].id];
+                size_t at = 0;
+                while (at < generated.size() && generated[at] == want[at]) ++at;
                 throw std::runtime_error(
                     std::string("request '") + phase[i].id +
                     "' graph transcript differs from the eager sampled "
                     "speculator's after replay " +
-                    std::to_string(replays[static_cast<size_t>(r)]));
+                    std::to_string(replays[static_cast<size_t>(r)]) + " at token " + std::to_string(at) + " of " +
+                    std::to_string(generated.size()) + " (graph " + std::to_string(generated[at]) + ", speculator " +
+                    std::to_string(want[at]) + "; the step committed " + std::to_string(committed.size()) + " rows)");
+              }
               if (trace.retired.contains(phase[i].id)) {
                 finished[i] = true;
                 continue;
@@ -4688,9 +4714,21 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
         }
         const auto batch = engine.decode_batch_stats();
         require(batch.replays_by_slots[1] > 0, "scalar replay coverage");
-        require((batch.replays_by_slots[kSlots] > 0) == (depth == 1),
-                "depth 1 batches; depth 2 is the true scalar co-admission control");
+        // Both depths batch the co-admitted slots since 2026-10-14 (the
+        // batched draft chain): the 2-slot family at depth 2 is six rows.
+        require(batch.replays_by_slots[kSlots] > 0, "the co-admitted slots batch at every depth");
         fallbacks[static_cast<size_t>(r)] = engine.fallbacks();
+        if (prefix_cache) {
+          const auto m = sched.meters();
+          require(trace.retained > 0 && m.prefix_skipped_hop_fallback > 0,
+                  "must retain an old snapshot when row-zero fallback accepts another token");
+          require(m.prefix_skipped_hop_mismatch == 0 && m.prefix_skipped_no_block == 0,
+                  "normal fallback is neither corruption nor pool exhaustion");
+          prefix_digests[r] = sched.prefix_digest();
+          hop_fallbacks[r] = m.prefix_skipped_hop_fallback;
+          DGPP_LOG_INFO("prefix hop sampling depth {} rank {}: {} fallback skips, {} old snapshots retained",
+                        depth, r, m.prefix_skipped_hop_fallback, trace.retained);
+        }
         release();
       } catch (const std::exception& e) {
         release();
@@ -4707,6 +4745,8 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
   for (int r = 1; r < kWorld; ++r) {
     require(graph_seqs[static_cast<size_t>(r)] == graph_seqs[0],
             "MTP graph sampling transcripts differ across ranks");
+    require(prefix_digests[r] == prefix_digests[0] && hop_fallbacks[r] == hop_fallbacks[0],
+            "prefix outcomes differ across ranks");
     require(fallbacks[static_cast<size_t>(r)] == fallbacks[0],
             "fallback counts differ across ranks");
   }
@@ -4714,6 +4754,20 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
   DGPP_LOG_INFO("MTP graph sampling at depth {} w2: {} replays, {} fallbacks; "
                 "transcripts == the eager sampled speculator's on every rank",
                 depth, replays[0], fallbacks[0]);
+}
+
+// The long co-admitted sampled run at depth 2 without the prefix cache
+// (2026-10-14): the batched chain's sampled fallback over 64-step phases,
+// the prefix-hop gate's length without its hops.
+DGPP_TEST(glm_tp_serving_mtp_depth2_long_graph_sampling_matches_eager_speculator) {
+  run_mtp_depth_sampling_gate(2, 29944, false, true);
+}
+DGPP_TEST(glm_tp_prefix_hop_sampled_fallback_depth1) {
+  run_mtp_depth_sampling_gate(1, 30011, true);
+}
+
+DGPP_TEST(glm_tp_prefix_hop_sampled_fallback_depth2) {
+  run_mtp_depth_sampling_gate(2, 30012, true);
 }
 
 DGPP_TEST(glm_tp_serving_mtp_depth1_graph_sampling_counts_fallback) {
@@ -5062,6 +5116,171 @@ DGPP_TEST(glm_tp_serving_plain_batch_family_matches_independent_sessions) {
 // is the only one that covers it), then slot 3 alone on its scalar graph;
 // every round's newly decided tokens equal the independent speculators',
 // and the transitions leave no residue in any slot.
+// The batched chain (depth 2, 2026-10-14): slots 0 and 1 of four at depth
+// 2 make one six-row replay with the 2-slot family (the eight-row ceiling;
+// the family is a physical prefix, so no compact mapping is needed); the
+// chain row of each slot runs batched off the batched draft run's last
+// accepted rows, then off the previous chain run. An eager depth-2
+// speculator per live slot is the oracle for the newly decided tokens and
+// for the graph's persistent [next, draft_1, draft_2] feed; then a slot
+// closes and the other continues on its scalar depth-2 graph.
+DGPP_TEST(glm_tp_serving_mtp_depth2_batched_graph_matches_independent_speculators) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const std::vector<int64_t> prompt_a = make_tokens(9, cfg.vocab_size);
+  const std::vector<int64_t> prompt_b = make_tokens(7, cfg.vocab_size);
+  constexpr int kWorld = 2;
+  constexpr int kRounds = 16;
+  constexpr int kDepth = 2;
+  const int max_tokens = 96;
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29943);
+  require(!buses.empty(), "tp bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<int64_t>> rank_evidence(kWorld);
+  std::vector<int> batch_steps(kWorld, 0);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int r = 0; r < kWorld; ++r) {
+    workers.emplace_back([&, r] {
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      uint16_t* scratch = nullptr;
+      try {
+        CollectiveBus& bus = *buses[static_cast<size_t>(r)];
+        GlmBusBoundaryReducer reducer(bus, test_wait_timeout_ms());
+        GlmDiagnosticModel eager(cfg, dir, max_tokens, 256, &reducer, r,
+                                 kWorld, GlmResidency::Streaming,
+                                 GlmHeadSharding::VocabSharded,
+                                 /*max_requests=*/4, /*mtp=*/true);
+        GlmDiagnosticModel graph(cfg, dir, max_tokens, 256, &reducer, r,
+                                 kWorld, GlmResidency::Resident,
+                                 GlmHeadSharding::VocabSharded,
+                                 /*max_requests=*/4, /*mtp=*/true);
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&scratch),
+            sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld),
+            cudaHostAllocDefault));
+        arrive_once();
+        const auto pick_rows = [&](const std::vector<Candidate>& locals) {
+          return dgpp::bus_greedy_pick_rows(bus, r, kWorld, locals, scratch,
+                                            test_wait_timeout_ms());
+        };
+        const auto first_pick = [&](GlmDiagnosticModel& model, int req,
+                                    const std::vector<int64_t>& prompt) {
+          return pick_rows(dgpp::local_row_maxes(
+              model.session_prefill(req, prompt), 1))[0];
+        };
+        // The newly decided tokens of one eager step: the drafts that stood
+        // (consumed rows past the fed one), then the new next.
+        const auto newly_decided = [](dgpp::GlmGreedySpeculator& spec) {
+          const std::vector<int32_t> old_drafts = spec.drafts();
+          const std::vector<int32_t> consumed = spec.step();
+          std::vector<int32_t> out;
+          for (size_t i = 0; i + 1 < consumed.size(); ++i) out.push_back(old_drafts[i]);
+          out.push_back(spec.next());
+          return out;
+        };
+        dgpp::GlmGraphEngineAdapter engine(
+            &graph, &bus, r, kWorld, scratch, cfg.vocab_size,
+            /*pick_timeout_ms=*/test_wait_timeout_ms(), /*batch_min_live=*/2,
+            nullptr, nullptr, dgpp::kSamplingCandidates, nullptr,
+            /*prefix_slots=*/0, kDepth);
+        require(engine.max_tokens_per_step() == 1 + kDepth, "the engine's rows per request are not 1 + depth");
+        require(!engine.batch_families().empty() && engine.batch_families().front() == 2,
+                "the depth-2 world builds the 2-slot family over the eight-row ceiling");
+        engine.warm_captures(make_tokens(4, cfg.vocab_size));
+        engine.drain();
+        const int32_t eager_first_a = first_pick(eager, 0, prompt_a);
+        dgpp::GreedySpeculator spec_a(eager, 0, pick_rows, kDepth);
+        spec_a.start(eager_first_a);
+        const int32_t graph_first_a = engine.prefill(0, prompt_a);
+        require(graph_first_a == eager_first_a, "slot 0 prefill pick differs");
+        engine.reserve(0, static_cast<int64_t>(prompt_a.size()) + 64);
+        engine.drain();
+        const int32_t eager_first_b = first_pick(eager, 1, prompt_b);
+        dgpp::GreedySpeculator spec_b(eager, 1, pick_rows, kDepth);
+        spec_b.start(eager_first_b);
+        const int32_t graph_first_b = engine.prefill(1, prompt_b);
+        require(graph_first_b == eager_first_b, "slot 1 prefill pick differs");
+        engine.reserve(1, static_cast<int64_t>(prompt_b.size()) + 64);
+        for (int round = 0; round < kRounds; ++round) {
+          engine.drain();
+          const std::vector<int32_t> want_a = newly_decided(spec_a);
+          const std::vector<int32_t> want_b = newly_decided(spec_b);
+          const std::vector<int> order = round & 1 ? std::vector<int>{1, 0}
+                                                   : std::vector<int>{0, 1};
+          const auto got = engine.step_batch(order);
+          DGPP_LOG_INFO("batched depth-2 round {}: slot {} decided {} tokens, slot {} decided {} tokens (want {} / {})", round,
+                        order[0], got[0].size(), order[1], got[1].size(), order[0] == 0 ? want_a.size() : want_b.size(),
+                        order[1] == 0 ? want_a.size() : want_b.size());
+          for (size_t i = 0; i < order.size(); ++i) {
+            const std::vector<int32_t>& want = order[i] == 0 ? want_a : want_b;
+            require(got[i] == want,
+                    "batched depth-2 MTP newly-decided tokens differ at round " +
+                        std::to_string(round) + " slot " + std::to_string(order[i]));
+          }
+          ++batch_steps[static_cast<size_t>(r)];
+          // The persistent feed: [next, draft_1, draft_2] per slot.
+          int64_t feed[6] = {};
+          DGPP_CUDA_OK(cudaMemcpyAsync(feed, graph.device_feed(0, 1 + kDepth), sizeof(feed),
+                                       cudaMemcpyDeviceToHost, graph.stream()));
+          DGPP_CUDA_OK(cudaStreamSynchronize(graph.stream()));
+          {
+            std::string got_txt, want_txt;
+            for (int i = 0; i < 6; ++i) got_txt += (i ? "," : "") + std::to_string(feed[i]);
+            want_txt = std::to_string(spec_a.next()) + "," + std::to_string(spec_a.drafts()[0]) + "," +
+                       std::to_string(spec_a.drafts()[1]) + "," + std::to_string(spec_b.next()) + "," +
+                       std::to_string(spec_b.drafts()[0]) + "," + std::to_string(spec_b.drafts()[1]);
+            require(feed[0] == spec_a.next() && feed[1] == spec_a.drafts()[0] && feed[2] == spec_a.drafts()[1] &&
+                        feed[3] == spec_b.next() && feed[4] == spec_b.drafts()[0] && feed[5] == spec_b.drafts()[1],
+                    "batched depth-2 feed is not slot-local at round " + std::to_string(round) + ": feed [" + got_txt +
+                        "] want [" + want_txt + "]");
+          }
+          rank_evidence[static_cast<size_t>(r)].insert(
+              rank_evidence[static_cast<size_t>(r)].end(), std::begin(feed), std::end(feed));
+        }
+        engine.drain();  // the pipelined replay settles its family count at the next launch or a drain
+        {
+          const std::vector<int> fams = engine.batch_families();
+          int two = -1;
+          for (size_t f = 0; f < fams.size(); ++f)
+            if (fams[f] == 2) two = static_cast<int>(f);
+          require(two >= 0 && engine.batch_family_steps(two) > 0, "the batched depth-2 steps ran on the 2-slot family");
+        }
+        // Slot 1 retires: slot 0 continues on its scalar depth-2 graph.
+        engine.close(1);
+        eager.session_close(1);
+        for (int round = 0; round < 2; ++round) {
+          engine.drain();
+          const std::vector<int32_t> want_a = newly_decided(spec_a);
+          const auto one = engine.step_batch({0});
+          require(one.size() == 1 && one[0] == want_a,
+                  "live slot changed on its scalar depth-2 graph after the batch");
+        }
+        engine.close(0);
+        eager.session_close(0);
+        cudaFreeHost(scratch);
+        scratch = nullptr;
+      } catch (const std::exception& e) {
+        if (scratch != nullptr) cudaFreeHost(scratch);
+        errors[static_cast<size_t>(r)] = "rank " + std::to_string(r) + ": " + e.what();
+        DGPP_LOG_ERROR("batched depth-2 gate rank {} failed: {}", r, e.what());
+        arrive_once();
+      }
+    });
+  }
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < kWorld; ++r)
+    require(errors[static_cast<size_t>(r)].empty(), errors[static_cast<size_t>(r)]);
+  require(rank_evidence[1] == rank_evidence[0], "the batched depth-2 gate's ranks disagree on the feeds");
+  DGPP_LOG_INFO("batched depth-2 MTP gate w2: {} batched rounds, feeds identical across ranks", batch_steps[0]);
+}
+
 DGPP_TEST(glm_tp_serving_mtp_batch_family_matches_independent_speculators) {
   const GlmTextConfig cfg = glm_tp_test_config();
   const std::string dir = "glm_tp_fixture";
@@ -5204,6 +5423,462 @@ DGPP_TEST(glm_tp_serving_mtp_batch_family_matches_independent_speculators) {
             errors[static_cast<size_t>(r)]);
   require(rank_evidence[0] == rank_evidence[1],
           "MTP batch-family tokens differ across ranks");
+}
+
+// The twelve-row batch (2026-10-14): the Flash's decode rows are a runtime
+// shape — four slots at depth 2 build the 2-, 3- and 4-slot families over
+// a twelve-row batch (the build-time eight held only the 2-slot family) —
+// and every row of every family is bitwise the slot's own depth-2 walk:
+// the wide GEMV chunk lowers a twelve-row batch to an eight- and a
+// four-row chunk of the same scalar chain. The persistent feeds sit past
+// the twelve scratch rows; a hole and the scalar tail come after.
+DGPP_TEST(glm_tp_serving_mtp_depth2_twelve_row_batch_matches_independent_speculators) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const std::vector<std::vector<int64_t>> prompts = {
+      make_tokens(9, cfg.vocab_size), make_tokens(7, cfg.vocab_size), make_tokens(8, cfg.vocab_size),
+      make_tokens(11, cfg.vocab_size)};
+  constexpr int kWorld = 2;
+  constexpr int kRounds = 4;
+  constexpr int kDepth = 2;
+  constexpr int kDecodeRows = 12;  // four slots x (1 + depth): past the build-time eight
+  const int max_tokens = 128;
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29945);
+  require(!buses.empty(), "tp bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<int64_t>> rank_evidence(kWorld);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int r = 0; r < kWorld; ++r) {
+    workers.emplace_back([&, r] {
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      uint16_t* scratch = nullptr;
+      try {
+        CollectiveBus& bus = *buses[static_cast<size_t>(r)];
+        GlmBusBoundaryReducer reducer(bus, test_wait_timeout_ms());
+        // Both models at the twelve-row shape: the dense lowering follows the
+        // decode rows (a 9..12-row prefill takes the GEMV chunks under it and
+        // cuBLASLt / the streaming fp8 GEMM above), so the oracle's bits are
+        // the graph model's only at the same rows.
+        GlmDiagnosticModel eager(cfg, dir, max_tokens, 1024, &reducer, r,
+                                 kWorld, GlmResidency::Streaming,
+                                 GlmHeadSharding::VocabSharded,
+                                 /*max_requests=*/4, /*mtp=*/true, dgpp::LatentFormat::kBf16,
+                                 /*serving_logits=*/false, kDecodeRows);
+        GlmDiagnosticModel graph(cfg, dir, max_tokens, 1024, &reducer, r,
+                                 kWorld, GlmResidency::Resident,
+                                 GlmHeadSharding::VocabSharded,
+                                 /*max_requests=*/4, /*mtp=*/true, dgpp::LatentFormat::kBf16,
+                                 /*serving_logits=*/false, kDecodeRows);
+        require(graph.max_decode_rows() == kDecodeRows, "the graph model took the twelve-row shape");
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&scratch),
+            sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld),
+            cudaHostAllocDefault));
+        arrive_once();
+        const auto pick_rows = [&](const std::vector<Candidate>& locals) {
+          return dgpp::bus_greedy_pick_rows(bus, r, kWorld, locals, scratch,
+                                            test_wait_timeout_ms());
+        };
+        const auto first_pick = [&](GlmDiagnosticModel& model, int req,
+                                    const std::vector<int64_t>& prompt) {
+          return pick_rows(dgpp::local_row_maxes(
+              model.session_prefill(req, prompt), 1))[0];
+        };
+        // The newly decided tokens of one eager depth-2 step: the drafts
+        // that stood, then the new next.
+        const auto newly_decided = [](dgpp::GlmGreedySpeculator& spec) {
+          const std::vector<int32_t> old_drafts = spec.drafts();
+          const std::vector<int32_t> consumed = spec.step();
+          std::vector<int32_t> out;
+          for (size_t i = 0; i + 1 < consumed.size(); ++i) out.push_back(old_drafts[i]);
+          out.push_back(spec.next());
+          return out;
+        };
+        const auto list = [](const std::vector<int32_t>& v) {
+          std::string s;
+          for (size_t i = 0; i < v.size(); ++i) s += (i ? "," : "") + std::to_string(v[i]);
+          return s;
+        };
+        dgpp::GlmGraphEngineAdapter engine(
+            &graph, &bus, r, kWorld, scratch, cfg.vocab_size,
+            /*pick_timeout_ms=*/test_wait_timeout_ms(), /*batch_min_live=*/2,
+            nullptr, nullptr, dgpp::kSamplingCandidates, nullptr,
+            /*prefix_slots=*/0, kDepth);
+        require(engine.max_tokens_per_step() == 1 + kDepth, "the engine's rows per request are not 1 + depth");
+        require(engine.batch_families() == std::vector<int>{2, 3, 4},
+                "the twelve-row depth-2 engine holds the 2-, 3- and 4-slot families");
+        engine.warm_captures(make_tokens(4, cfg.vocab_size));
+        engine.drain();
+
+        std::vector<std::unique_ptr<dgpp::GlmGreedySpeculator>> specs(4);
+        // The rows of slot `slot`'s per-position hidden cache that differ
+        // between the graph model and the oracle, as " r<row>:<count>" items
+        // (empty: bitwise).
+        const auto cache_diff = [&](int slot, int rows_cmp) {
+          const int H = cfg.hidden_size;
+          std::vector<uint16_t> g(static_cast<size_t>(rows_cmp) * H), e(static_cast<size_t>(rows_cmp) * H);
+          // The models' own streams only: a device-wide sync from one rank's
+          // thread waits on the peer rank's stream, which waits on a
+          // collective this thread has yet to post.
+          DGPP_CUDA_OK(cudaMemcpyAsync(g.data(), graph.debug_draft_hidden(slot), g.size() * 2, cudaMemcpyDeviceToHost,
+                                       graph.stream()));
+          DGPP_CUDA_OK(cudaMemcpyAsync(e.data(), eager.debug_draft_hidden(slot), e.size() * 2, cudaMemcpyDeviceToHost,
+                                       eager.stream()));
+          DGPP_CUDA_OK(cudaStreamSynchronize(graph.stream()));
+          DGPP_CUDA_OK(cudaStreamSynchronize(eager.stream()));
+          std::string diff;
+          for (int row = 0; row < rows_cmp; ++row) {
+            size_t n = 0;
+            for (int i = 0; i < H; ++i) n += g[static_cast<size_t>(row) * H + i] != e[static_cast<size_t>(row) * H + i];
+            if (n) diff += " r" + std::to_string(row) + ":" + std::to_string(n);
+          }
+          return diff;
+        };
+        const auto open = [&](int slot) {
+          engine.drain();
+          const std::vector<int64_t>& prompt = prompts[static_cast<size_t>(slot)];
+          const int32_t eager_first = first_pick(eager, slot, prompt);
+          specs[static_cast<size_t>(slot)] =
+              std::make_unique<dgpp::GlmGreedySpeculator>(eager, slot, pick_rows, kDepth);
+          specs[static_cast<size_t>(slot)]->start(eager_first);
+          const int32_t graph_first = engine.prefill(slot, prompt);
+          require(graph_first == eager_first,
+                  "slot " + std::to_string(slot) + " prefill pick differs");
+          engine.reserve(slot, static_cast<int64_t>(prompt.size()) + 64);
+          // The slot's per-position hidden cache (the draft block's input) is
+          // bitwise the oracle's after the prefill: the first site a
+          // lowering or state difference would show.
+          require(cache_diff(slot, static_cast<int>(prompt.size()) + 1).empty(),
+                  "slot " + std::to_string(slot) + " hidden cache after the prefill differs from the oracle's:" +
+                      cache_diff(slot, static_cast<int>(prompt.size()) + 1));
+        };
+        const auto shut = [&](int slot) {
+          engine.close(slot);
+          eager.session_close(slot);
+          specs[static_cast<size_t>(slot)].reset();
+        };
+        const auto rounds = [&](const std::vector<int>& order, const char* what) {
+          for (int round = 0; round < kRounds; ++round) {
+            engine.drain();
+            std::vector<std::vector<int32_t>> want;
+            for (const int slot : order)
+              want.push_back(newly_decided(*specs[static_cast<size_t>(slot)]));
+            const auto got = engine.step_batch(order);
+            {
+              std::string decided;
+              for (size_t i = 0; i < order.size(); ++i)
+                decided += (i ? ", slot " : "slot ") + std::to_string(order[i]) + " " + std::to_string(got[i].size());
+              DGPP_LOG_INFO("twelve-row gate rank {} {} round {}: decided {}", r, what, round, decided);
+            }
+            for (size_t i = 0; i < order.size(); ++i) {
+              if (got[i] != want[i])
+                throw std::runtime_error(
+                    std::string(what) + ": newly decided tokens differ at round " +
+                    std::to_string(round) + " slot " + std::to_string(order[i]) + ": got [" + list(got[i]) +
+                    "] want [" + list(want[i]) + "]");
+              rank_evidence[static_cast<size_t>(r)].insert(
+                  rank_evidence[static_cast<size_t>(r)].end(), got[i].begin(),
+                  got[i].end());
+            }
+            // Every live slot's hidden cache stays bitwise the oracle's
+            // through the rounds (the verify rows' scatter and the chain's
+            // input row alike).
+            for (const int slot : order) {
+              const std::string diff = cache_diff(slot, static_cast<int>(graph.session_position(slot)) + 2);
+              if (!diff.empty())
+                throw std::runtime_error(std::string(what) + ": slot " + std::to_string(slot) +
+                                         " hidden cache differs from the oracle's at round " + std::to_string(round) +
+                                         " (rows:count):" + diff);
+            }
+            // The persistent feeds past the twelve scratch rows: [next,
+            // draft_1, draft_2] per live slot, each the slot's own.
+            for (const int slot : order) {
+              int64_t feed[3] = {};
+              DGPP_CUDA_OK(cudaMemcpyAsync(feed, graph.device_feed(slot, 1 + kDepth), sizeof(feed),
+                                           cudaMemcpyDeviceToHost, graph.stream()));
+              DGPP_CUDA_OK(cudaStreamSynchronize(graph.stream()));
+              const dgpp::GlmGreedySpeculator& spec = *specs[static_cast<size_t>(slot)];
+              const std::vector<int32_t> want_feed = {spec.next(), spec.drafts()[0], spec.drafts()[1]};
+              const std::vector<int32_t> got_feed = {static_cast<int32_t>(feed[0]), static_cast<int32_t>(feed[1]),
+                                                     static_cast<int32_t>(feed[2])};
+              if (got_feed != want_feed)
+                throw std::runtime_error(std::string(what) + ": slot " + std::to_string(slot) +
+                                         " feed is not slot-local at round " + std::to_string(round) + ": feed [" +
+                                         list(got_feed) + "] want [" + list(want_feed) + "]");
+              rank_evidence[static_cast<size_t>(r)].insert(
+                  rank_evidence[static_cast<size_t>(r)].end(), std::begin(feed), std::end(feed));
+            }
+          }
+        };
+        open(0);
+        open(1);
+        rounds({0, 1}, "two live in slots 0 and 1 (the 6-row family)");
+        open(2);
+        rounds({1, 2, 0}, "three live in slots 0..2 (the 9-row family)");
+        open(3);
+        rounds({3, 2, 0, 1}, "four live (the twelve-row family)");
+        shut(1);
+        rounds({2, 0, 3}, "a hole at 1: slots 0, 2 and 3 (the twelve-row family: the 3-slot family covers the prefix 0..2 only)");
+        shut(0);
+        shut(2);
+        rounds({3}, "slot 3 alone (its scalar depth-2 graph)");
+        engine.drain();  // the pipelined replay settles its family counts at the next launch or a drain
+        shut(3);
+        // The 2- and 3-slot families (slot prefixes) took one phase each;
+        // the twelve-row family took the four-live phase and the hole.
+        if (engine.batch_family_steps(0) != kRounds ||
+            engine.batch_family_steps(1) != kRounds ||
+            engine.batch_family_steps(2) != 2 * kRounds)
+          throw std::runtime_error(
+              "family steps: " + std::to_string(engine.batch_family_steps(0)) + " / " +
+              std::to_string(engine.batch_family_steps(1)) + " / " +
+              std::to_string(engine.batch_family_steps(2)) + ", expected " +
+              std::to_string(kRounds) + " / " + std::to_string(kRounds) + " / " +
+              std::to_string(2 * kRounds));
+        cudaFreeHost(scratch);
+        scratch = nullptr;
+      } catch (const std::exception& e) {
+        if (scratch != nullptr) cudaFreeHost(scratch);
+        errors[static_cast<size_t>(r)] =
+            "rank " + std::to_string(r) + ": " + e.what();
+        DGPP_LOG_ERROR("twelve-row depth-2 gate rank {} failed: {}", r, e.what());
+        arrive_once();
+      }
+    });
+  }
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < kWorld; ++r)
+    require(errors[static_cast<size_t>(r)].empty(), errors[static_cast<size_t>(r)]);
+  require(rank_evidence[1] == rank_evidence[0],
+          "the twelve-row depth-2 gate's ranks disagree on the tokens or the feeds");
+  DGPP_LOG_INFO("twelve-row depth-2 MTP gate w2: every family bitwise its slots' own walks, feeds identical across ranks");
+}
+
+// The scheduled verify depth on a batch family (2026-10-14): two slots at
+// depth 2 under a forced per-step depth that alternates 1 and 2, so the
+// 2-slot family replays its reduced-depth variant (two rows per slot off
+// the compacted feed, the block's full width drafted and fed back) every
+// other step. Every step's newly decided tokens, the feeds and each slot's
+// hidden cache are bitwise two eager speculators verifying at the same
+// per-step depth; both depth variants of the family replayed.
+DGPP_TEST(glm_tp_serving_mtp_depth2_scheduled_batch_matches_independent_speculators) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const std::vector<std::vector<int64_t>> prompts = {make_tokens(9, cfg.vocab_size), make_tokens(7, cfg.vocab_size),
+                                                     make_tokens(8, cfg.vocab_size)};
+  constexpr int kWorld = 2;
+  constexpr int kRounds = 6;
+  constexpr int kDepth = 2;
+  constexpr int kSlots = 3;
+  constexpr int kDecodeRows = 9;  // three slots x (1 + depth): the 2- and 3-slot families
+  const int max_tokens = 96;
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29950);
+  require(!buses.empty(), "tp bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<int64_t>> rank_evidence(kWorld);
+  std::vector<std::vector<uint64_t>> hists(kWorld);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int r = 0; r < kWorld; ++r) {
+    workers.emplace_back([&, r] {
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      uint16_t* scratch = nullptr;
+      uint16_t* prefix_scratch = nullptr;
+      uint16_t* gather_scratch = nullptr;
+      const auto release = [&] {
+        if (scratch) cudaFreeHost(scratch);
+        if (prefix_scratch) cudaFreeHost(prefix_scratch);
+        if (gather_scratch) cudaFreeHost(gather_scratch);
+        scratch = prefix_scratch = gather_scratch = nullptr;
+      };
+      try {
+        CollectiveBus& bus = *buses[static_cast<size_t>(r)];
+        GlmBusBoundaryReducer reducer(bus, test_wait_timeout_ms());
+        GlmDiagnosticModel eager(cfg, dir, max_tokens, 1024, &reducer, r,
+                                 kWorld, GlmResidency::Streaming,
+                                 GlmHeadSharding::VocabSharded,
+                                 /*max_requests=*/kSlots, /*mtp=*/true, dgpp::LatentFormat::kBf16,
+                                 /*serving_logits=*/false, kDecodeRows);
+        GlmDiagnosticModel graph(cfg, dir, max_tokens, 1024, &reducer, r,
+                                 kWorld, GlmResidency::Resident,
+                                 GlmHeadSharding::VocabSharded,
+                                 /*max_requests=*/kSlots, /*mtp=*/true, dgpp::LatentFormat::kBf16,
+                                 /*serving_logits=*/false, kDecodeRows);
+        DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&scratch),
+                                   sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld), cudaHostAllocDefault));
+        DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&prefix_scratch),
+                                   sizeof(uint16_t) * dgpp::fabric_sampling_prefix_scratch_elems(kWorld),
+                                   cudaHostAllocDefault));
+        DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&gather_scratch),
+                                   sizeof(uint16_t) * dgpp::sampling_gather_scratch_elems(cfg.vocab_size),
+                                   cudaHostAllocDefault));
+        arrive_once();
+        const auto pick_rows = [&](const std::vector<Candidate>& locals) {
+          return dgpp::bus_greedy_pick_rows(bus, r, kWorld, locals, scratch, test_wait_timeout_ms());
+        };
+        const auto first_pick = [&](GlmDiagnosticModel& model, int req, const std::vector<int64_t>& prompt) {
+          return pick_rows(dgpp::local_row_maxes(model.session_prefill(req, prompt), 1))[0];
+        };
+        const auto newly_decided = [](dgpp::GlmGreedySpeculator& spec) {
+          const std::vector<int32_t> old_drafts = spec.drafts();
+          const std::vector<int32_t> consumed = spec.step();
+          std::vector<int32_t> out;
+          for (size_t i = 0; i + 1 < consumed.size(); ++i) out.push_back(old_drafts[i]);
+          out.push_back(spec.next());
+          return out;
+        };
+        const auto list = [](const std::vector<int32_t>& v) {
+          std::string s;
+          for (size_t i = 0; i < v.size(); ++i) s += (i ? "," : "") + std::to_string(v[i]);
+          return s;
+        };
+        const auto cache_diff = [&](int slot, int rows_cmp) {
+          const int H = cfg.hidden_size;
+          std::vector<uint16_t> g(static_cast<size_t>(rows_cmp) * H), e(static_cast<size_t>(rows_cmp) * H);
+          DGPP_CUDA_OK(cudaMemcpyAsync(g.data(), graph.debug_draft_hidden(slot), g.size() * 2, cudaMemcpyDeviceToHost,
+                                       graph.stream()));
+          DGPP_CUDA_OK(cudaMemcpyAsync(e.data(), eager.debug_draft_hidden(slot), e.size() * 2, cudaMemcpyDeviceToHost,
+                                       eager.stream()));
+          DGPP_CUDA_OK(cudaStreamSynchronize(graph.stream()));
+          DGPP_CUDA_OK(cudaStreamSynchronize(eager.stream()));
+          std::string diff;
+          for (int row = 0; row < rows_cmp; ++row) {
+            size_t n = 0;
+            for (int i = 0; i < H; ++i) n += g[static_cast<size_t>(row) * H + i] != e[static_cast<size_t>(row) * H + i];
+            if (n) diff += " r" + std::to_string(row) + ":" + std::to_string(n);
+          }
+          return diff;
+        };
+        dgpp::GlmGraphEngineAdapter engine(
+            &graph, &bus, r, kWorld, scratch, cfg.vocab_size,
+            /*pick_timeout_ms=*/test_wait_timeout_ms(), /*batch_min_live=*/2, prefix_scratch, gather_scratch,
+            dgpp::kSamplingCandidates, nullptr, /*prefix_slots=*/0, kDepth);
+        if (!engine.supports_sampling())
+          throw std::runtime_error("the world has no device sampler (the draft probabilities' source)");
+        engine.configure_verify_schedule(true, /*row_ms=*/12.0f, dgpp::verify_reservation_lambda(20.0f, 12.0f),
+                                         /*min_depth=*/1);
+        require(engine.max_tokens_per_step() == 1 + kDepth, "the engine's rows per request are not 1 + depth");
+        const std::vector<int> fams = engine.batch_families();
+        int two = -1, three = -1;
+        for (size_t f = 0; f < fams.size(); ++f) {
+          if (fams[f] == 2) two = static_cast<int>(f);
+          if (fams[f] == 3) three = static_cast<int>(f);
+        }
+        require(two >= 0 && three >= 0, "the depth-2 three-slot world holds the 2- and 3-slot families");
+        // The forced per-step depth: every slot of the batch verifies it (the
+        // batch takes the slots' maximum) and the eager speculators follow
+        // the depth the engine took. A fresh slot (no draft probabilities
+        // published yet: the first step after its prefill) is held at the
+        // full block without the hook, so the engine's depth defaults to it.
+        int engine_k = kDepth;
+        int forced_k = kDepth;
+        engine.set_verify_depth_hook([&](int, int, const float*, int) {
+          engine_k = forced_k;
+          return forced_k;
+        });
+        engine.warm_captures(make_tokens(4, cfg.vocab_size));
+        engine.drain();
+        std::vector<std::unique_ptr<dgpp::GlmGreedySpeculator>> specs(kSlots);
+        for (int slot = 0; slot < kSlots; ++slot) {
+          engine.drain();
+          const std::vector<int64_t>& prompt = prompts[static_cast<size_t>(slot)];
+          const int32_t eager_first = first_pick(eager, slot, prompt);
+          specs[static_cast<size_t>(slot)] =
+              std::make_unique<dgpp::GlmGreedySpeculator>(eager, slot, pick_rows, kDepth);
+          specs[static_cast<size_t>(slot)]->set_depth_policy([&](const std::vector<int32_t>&) { return engine_k; });
+          specs[static_cast<size_t>(slot)]->start(eager_first);
+          const int32_t graph_first = engine.prefill(slot, prompt);
+          require(graph_first == eager_first, "slot " + std::to_string(slot) + " prefill pick differs");
+          engine.reserve(slot, static_cast<int64_t>(prompt.size()) + 48);
+        }
+        // Three live on the 3-slot family, then a hole at 1 (slots 0 and 2
+        // on the 3-slot family with a padding slot), each phase alternating
+        // the forced depth: the reduced-depth variant of a mapped family.
+        const auto rounds = [&](const std::vector<std::vector<int>>& orders, const char* what) {
+        for (int round = 0; round < kRounds; ++round) {
+          engine.drain();
+          forced_k = 1 + (round % kDepth);  // 1, 2, 1, 2, ... once the slots have confidence
+          engine_k = kDepth;
+          const std::vector<int>& order = orders[static_cast<size_t>(round) % orders.size()];
+          const auto got = engine.step_batch(order);  // the engine's depth first: the oracle follows it
+          engine.drain();  // the replay window closes before the eager models stage folds on the shared bus
+          std::vector<std::vector<int32_t>> want;
+          for (const int slot : order) want.push_back(newly_decided(*specs[static_cast<size_t>(slot)]));
+          for (size_t i = 0; i < order.size(); ++i) {
+            if (got[i] != want[i])
+              throw std::runtime_error(std::string(what) + ": newly decided tokens differ at round " +
+                                       std::to_string(round) + " (depth " + std::to_string(engine_k) + ") slot " +
+                                       std::to_string(order[i]) + ": got [" + list(got[i]) + "] want [" +
+                                       list(want[i]) + "]");
+            rank_evidence[static_cast<size_t>(r)].insert(rank_evidence[static_cast<size_t>(r)].end(),
+                                                         got[i].begin(), got[i].end());
+          }
+          for (const int slot : order) {
+            int64_t feed[3] = {};
+            DGPP_CUDA_OK(cudaMemcpyAsync(feed, graph.device_feed(slot, 1 + kDepth), sizeof(feed),
+                                         cudaMemcpyDeviceToHost, graph.stream()));
+            DGPP_CUDA_OK(cudaStreamSynchronize(graph.stream()));
+            const dgpp::GlmGreedySpeculator& spec = *specs[static_cast<size_t>(slot)];
+            const std::vector<int32_t> want_feed = {spec.next(), spec.drafts()[0], spec.drafts()[1]};
+            const std::vector<int32_t> got_feed = {static_cast<int32_t>(feed[0]), static_cast<int32_t>(feed[1]),
+                                                   static_cast<int32_t>(feed[2])};
+            if (got_feed != want_feed)
+              throw std::runtime_error(std::string(what) + ": slot " + std::to_string(slot) + " feed differs at round " +
+                                       std::to_string(round) + " (depth " + std::to_string(engine_k) + "): feed [" +
+                                       list(got_feed) + "] want [" + list(want_feed) + "]");
+            rank_evidence[static_cast<size_t>(r)].insert(rank_evidence[static_cast<size_t>(r)].end(),
+                                                         std::begin(feed), std::end(feed));
+            const std::string diff = cache_diff(slot, static_cast<int>(graph.session_position(slot)) + 2);
+            if (!diff.empty())
+              throw std::runtime_error(std::string(what) + ": slot " + std::to_string(slot) +
+                                       " hidden cache differs from the oracle's at round " + std::to_string(round) +
+                                       " (rows:count):" + diff);
+          }
+        }
+        };
+        rounds({{0, 1, 2}, {2, 1, 0}}, "three live (the 3-slot family)");
+        engine.close(1);
+        eager.session_close(1);
+        specs[1].reset();
+        rounds({{0, 2}, {2, 0}}, "a hole at 1 (the 3-slot family with a padding slot)");
+        engine.drain();
+        hists[static_cast<size_t>(r)] = engine.verify_depth_histogram_batch(three);
+        for (const int slot : {0, 2}) {
+          engine.close(slot);
+          eager.session_close(slot);
+        }
+        release();
+      } catch (const std::exception& e) {
+        release();
+        errors[static_cast<size_t>(r)] = "rank " + std::to_string(r) + ": " + e.what();
+        DGPP_LOG_ERROR("scheduled batch depth-2 gate rank {} failed: {}", r, e.what());
+        arrive_once();
+      }
+    });
+  }
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < kWorld; ++r)
+    require(errors[static_cast<size_t>(r)].empty(), errors[static_cast<size_t>(r)]);
+  require(rank_evidence[1] == rank_evidence[0] && hists[1] == hists[0],
+          "the scheduled batch gate's ranks disagree");
+  require(hists[0].size() == static_cast<size_t>(kDepth) && hists[0][0] > 0 && hists[0][1] > 0,
+          "both depth variants of the 3-slot family replayed");
+  DGPP_LOG_INFO("scheduled batch depth-2 gate w2: 3-slot family replays per depth [1:{} 2:{}] (three live, then a "
+                "hole), tokens, feeds and caches bitwise the eager speculators at the same depths",
+                hists[0][0], hists[0][1]);
 }
 
 // Phase 2's T=1 form: two request slots occupy two fixed graph rows. Strict
@@ -6912,5 +7587,7 @@ int main() {
     DGPP_LOG_INFO("no CUDA device visible; skipping glm_tp_test");
     return 2;
   }
+  if (const char* d = std::getenv("DGPP_TEST_DRAFT_SCREEN"); d && d[0] != '\0')  // the draft head's screen
+    dgpp::draft_head_configure(dgpp::DraftHeadSettings{std::atoi(d)});
   return dgpp::test::run_all();
 }

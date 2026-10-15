@@ -3,6 +3,9 @@
 Records include the Linux boot ID, process start time and owner. A stale PID
 file never authorizes a signal to a reused PID. Launches are serialized with
 flock; each process gets its own session for wrapper/child cleanup.
+DGPP_NO_SWAP=1 starts the command in a systemd user scope whose swap limit
+is zero. OS swap and other processes are unaffected; scope creation must
+succeed before the command runs.
 """
 import argparse
 import fcntl
@@ -61,6 +64,12 @@ def send_signal(path, number):
 
 
 def launch(state, command, log, cwd, env=None):
+    no_swap = (os.environ if env is None else env).get("DGPP_NO_SWAP", "0")
+    if no_swap not in ("0", "1"):
+        raise ValueError("DGPP_NO_SWAP must be 0 or 1")
+    if no_swap == "1":
+        command = ["systemd-run", "--user", "--scope", "--quiet",
+                   "--property=MemorySwapMax=0", "--", *command]
     state = Path(state)
     state.parent.mkdir(parents=True, exist_ok=True)
     with state.with_suffix(state.suffix + ".lock").open("a") as lock:

@@ -17,7 +17,9 @@
 #include "kernels/fp8_gemv.cuh"
 #include "kernels/bf16_gemv.hpp"
 #include "kernels/scale_gemm.hpp"
+#include "kernels/gemv_wide.hpp"
 #include "scale_gemm_test_helpers.hpp"
+#include "kda_test_helpers.hpp"
 
 namespace {
 
@@ -245,6 +247,91 @@ DGPP_TEST(scale_gemm_tile_kernel_small_m_matches_both_oracles) {
   }
 }
 
+// The wide GEMV chunk (gemv_wide.hpp, 2026-10-14): five to eight rows in
+// one launch below the streaming tensor-core bound (mma_from_rows 9 — the
+// Flash's decode batch) — each row bitwise the row alone, both at the
+// Flash's 4096-wide activation (the opted-in 64 KB of staged rows) and at
+// a narrow k, and inside both oracles' budgets.
+DGPP_TEST(scale_gemm_wide_gemv_rows_bitwise_the_rows_alone) {
+  require(dgpp::gemv::enable_wide_rows(), "the wide chunk's shared-memory opt-in took");
+  // The Flash's 4096-wide rows and a narrow k, then MiMo's fixture shapes
+  // (k = 256: one chunk per lane; the fused qkv's fp32 rows at n = 3008)
+  // and a k of a single warp step — every row of every wide launch, f32 and
+  // bf16 out, bitwise the row alone.
+  for (const auto [n, k] : std::vector<std::pair<int, int>>{{384, 512}, {384, 4096}, {512, 256}, {256, 512},
+                                                             {3008, 256}, {200, 64}, {136, 128}}) {
+    for (int m = 5; m <= 8; ++m) {
+      const Problem p = make_problem(m, n, k, 0x7a00 + m + k + 3 * n);
+      const auto got = run_kernel_f32(p, /*mma_from_rows=*/9);
+      const auto got16 = run_kernel(p);
+      for (int r = 0; r < m; ++r) {
+        Problem one = p;
+        one.m = 1;
+        one.act.assign(p.act.begin() + static_cast<long>(r) * k, p.act.begin() + static_cast<long>(r + 1) * k);
+        const auto alone = run_kernel_f32(one, /*mma_from_rows=*/9);
+        const auto alone16 = run_kernel(one);
+        const std::string shape = "M" + std::to_string(m) + "xN" + std::to_string(n) + "xK" + std::to_string(k) +
+                                  " row " + std::to_string(r);
+        require(std::memcmp(alone.data(), got.data() + static_cast<size_t>(r) * p.n, static_cast<size_t>(p.n) * 4) == 0,
+                ("a wide fp8 launch's f32 row is bitwise the row alone: " + shape).c_str());
+        require(std::memcmp(alone16.data(), got16.data() + static_cast<size_t>(r) * p.n,
+                            static_cast<size_t>(p.n) * 2) == 0,
+                ("a wide fp8 launch's bf16 row is bitwise the row alone: " + shape).c_str());
+      }
+      check_both_oracles(p, got16, ("wide M" + std::to_string(m) + "xN" + std::to_string(n) + "xK" + std::to_string(k)).c_str());
+    }
+  }
+}
+
+// The wide chunk through the explicit-grid entry (MiMo's fused qkv and dense
+// MLP: a strided activation view, an output row stride past n, f32 and bf16
+// out): rows 5..8 in one launch against the same rows launched alone.
+DGPP_TEST(scale_gemm_grid_wide_rows_strided_bitwise_the_rows_alone) {
+  using dgpp::kda_test::DevBuf;
+  require(dgpp::gemv::enable_wide_rows(), "the wide chunk's shared-memory opt-in took");
+  for (const auto [n, k] : std::vector<std::pair<int, int>>{{3008, 256}, {512, 256}, {256, 512}, {200, 64}}) {
+    for (int m = 5; m <= 8; ++m) {
+      const size_t as = k + 8, os = n + 16;
+      Rng rng(0x5A1D + m * 1000 + k + n);
+      std::vector<uint16_t> act(m * as);
+      std::vector<uint8_t> weights(static_cast<size_t>(n) * k);
+      std::vector<float> scales(((n + 127) >> 7) * ((k + 127) >> 7));
+      fill_act(rng, act); fill_payload(rng, weights); fill_scales(rng, scales);
+      DevBuf da(act.size() * 2), dw(weights.size()), ds(scales.size() * 4), d32(m * os * 4), r32(m * os * 4),
+          d16(m * os * 2), r16(m * os * 2);
+      da.upload(act.data(), act.size() * 2); dw.upload(weights.data(), weights.size());
+      ds.upload(scales.data(), scales.size() * 4);
+      auto* a = static_cast<const uint16_t*>(da.p);
+      auto* w = static_cast<const uint8_t*>(dw.p);
+      auto* sc = static_cast<const float*>(ds.p);
+      DGPP_CUDA_OK(cudaMemset(d32.p, 0, m * os * 4)); DGPP_CUDA_OK(cudaMemset(r32.p, 0, m * os * 4));
+      DGPP_CUDA_OK(cudaMemset(d16.p, 0, m * os * 2)); DGPP_CUDA_OK(cudaMemset(r16.p, 0, m * os * 2));
+      // All m rows in one call (one wide launch), then each row alone into the same row of the reference.
+      dgpp::launch_scale_gemm_grid_f32(a, as, w, sc, static_cast<float*>(d32.p), m, n, k, nullptr, os, 7, 7);
+      dgpp::launch_scale_gemm_grid_bf16(a, as, w, sc, static_cast<uint16_t*>(d16.p), m, n, k, nullptr, os, 7, 7);
+      for (int r = 0; r < m; ++r) {
+        dgpp::launch_scale_gemm_grid_f32(a + static_cast<size_t>(r) * as, as, w, sc,
+                                         static_cast<float*>(r32.p) + static_cast<size_t>(r) * os, 1, n, k, nullptr,
+                                         os, 7, 7);
+        dgpp::launch_scale_gemm_grid_bf16(a + static_cast<size_t>(r) * as, as, w, sc,
+                                          static_cast<uint16_t*>(r16.p) + static_cast<size_t>(r) * os, 1, n, k,
+                                          nullptr, os, 7, 7);
+      }
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      std::vector<float> got32(m * os), ref32(m * os);
+      std::vector<uint16_t> got16(m * os), ref16(m * os);
+      d32.download(got32.data(), got32.size() * 4); r32.download(ref32.data(), ref32.size() * 4);
+      d16.download(got16.data(), got16.size() * 2); r16.download(ref16.data(), ref16.size() * 2);
+      const std::string shape = "M" + std::to_string(m) + "xN" + std::to_string(n) + "xK" + std::to_string(k);
+      require(std::memcmp(got32.data(), ref32.data(), got32.size() * 4) == 0,
+              ("grid wide f32 rows bitwise the rows alone: " + shape).c_str());
+      require(std::memcmp(got16.data(), ref16.data(), got16.size() * 2) == 0,
+              ("grid wide bf16 rows bitwise the rows alone: " + shape).c_str());
+      std::printf("[ OK ] grid wide %s strided: f32 and bf16 rows bitwise the rows alone\n", shape.c_str());
+    }
+  }
+}
+
 DGPP_TEST(scale_gemm_large_m_route_is_bitwise_the_tile_kernel) {
   // m > 128 routes to the 128-row tensor-core kernel (the MoE experts'
   // dense form): bitwise the tile kernel — the same dequantized weights,
@@ -256,6 +343,74 @@ DGPP_TEST(scale_gemm_large_m_route_is_bitwise_the_tile_kernel) {
   require(std::memcmp(routed.data(), tile.data(), routed.size() * 2) == 0,
           "large-m route bitwise the tile kernel");
   check_both_oracles(p, routed, "large-m M300xN200xK512");
+}
+
+DGPP_TEST(scale_gemm_explicit_grid_large_m_dispatch_and_bits) {
+  using dgpp::kda_test::DevBuf;
+  // MiMo's 128x128 grid should reach the existing fast kernel. Smaller
+  // scale grids and unsupported K must retain the tile path. Compare
+  // both output types, including padding, against the original kernel.
+  for (int rs : {5, 6, 7}) for (int cs : {5, 6, 7}) for (int k : {144, 192}) {
+    constexpr int m = 129, n = 200;
+    const size_t as = k + 8, os = n + 16;
+    Rng rng(0x12800 + rs * 100 + cs * 10 + k);
+    std::vector<uint16_t> act(m * as), out16(m * os, 0xBEEF), ref16 = out16;
+    std::vector<uint8_t> weights(n * k);
+    std::vector<float> scales(((n + (1 << rs) - 1) >> rs) * ((k + (1 << cs) - 1) >> cs));
+    std::vector<float> out32(m * os, -12345.f), ref32 = out32;
+    fill_act(rng, act); fill_payload(rng, weights); fill_scales(rng, scales);
+    DevBuf da(act.size() * 2), dw(weights.size()), ds(scales.size() * 4),
+        d16(out16.size() * 2), r16(ref16.size() * 2), d32(out32.size() * 4), r32(ref32.size() * 4);
+    da.upload(act.data(), act.size() * 2); dw.upload(weights.data(), weights.size());
+    ds.upload(scales.data(), scales.size() * 4);
+    d16.upload(out16.data(), out16.size() * 2); r16.upload(ref16.data(), ref16.size() * 2);
+    d32.upload(out32.data(), out32.size() * 4); r32.upload(ref32.data(), ref32.size() * 4);
+    auto* a = static_cast<const uint16_t*>(da.p);
+    auto* w = static_cast<const uint8_t*>(dw.p);
+    auto* s = static_cast<const float*>(ds.p);
+    cudaStream_t stream = nullptr;
+    cudaGraph_t graph = nullptr;
+    cudaGraphExec_t executable = nullptr;
+    DGPP_CUDA_OK(cudaStreamCreate(&stream));
+    DGPP_CUDA_OK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+    dgpp::launch_scale_gemm_grid_f32(a, as, w, s, static_cast<float*>(d32.p),
+        m, n, k, stream, os, rs, cs);
+    DGPP_CUDA_OK(cudaStreamEndCapture(stream, &graph));
+    size_t count = 0;
+    DGPP_CUDA_OK(cudaGraphGetNodes(graph, nullptr, &count));
+    require(count == 1, "explicit-grid GEMM must launch one kernel");
+    cudaGraphNode_t node;
+    DGPP_CUDA_OK(cudaGraphGetNodes(graph, &node, &count));
+    cudaKernelNodeParams params{};
+    DGPP_CUDA_OK(cudaGraphKernelNodeGetParams(node, &params));
+    const char* name = nullptr;
+    DGPP_CUDA_OK(cudaFuncGetName(&name, params.func));
+    const bool fast = std::string(name).find("fp8w_gemm_kernel") != std::string::npos;
+    require(fast == (rs == 7 && cs == 7 && k % 64 == 0),
+            "explicit-grid GEMM selected the wrong path");
+    DGPP_CUDA_OK(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0));
+    DGPP_CUDA_OK(cudaGraphLaunch(executable, stream));
+    dgpp::launch_scale_gemm_grid_bf16(a, as, w, s, static_cast<uint16_t*>(d16.p),
+        m, n, k, stream, os, rs, cs);
+    dgpp::launch_scale_gemm_tile_f32(a, as, w, s, static_cast<float*>(r32.p),
+        m, n, k, stream, rs, cs);
+    dgpp::launch_scale_gemm_tile_bf16(a, as, w, s, static_cast<uint16_t*>(r16.p),
+        m, n, k, stream, rs, cs);
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+    d16.download(out16.data(), out16.size() * 2); r16.download(ref16.data(), ref16.size() * 2);
+    d32.download(out32.data(), out32.size() * 4); r32.download(ref32.data(), ref32.size() * 4);
+    for (int row = 0; row < m; ++row) {
+      require(std::memcmp(out16.data() + row * os, ref16.data() + row * n, n * 2) == 0 &&
+              std::memcmp(out32.data() + row * os, ref32.data() + row * n, n * 4) == 0,
+              "explicit-grid GEMM differs from the original tile");
+      for (size_t col = n; col < os; ++col)
+        require(out16[row * os + col] == 0xBEEF && out32[row * os + col] == -12345.f,
+                "explicit-grid GEMM overwrites output padding");
+    }
+    DGPP_CUDA_OK(cudaGraphExecDestroy(executable));
+    DGPP_CUDA_OK(cudaGraphDestroy(graph));
+    DGPP_CUDA_OK(cudaStreamDestroy(stream));
+  }
 }
 
 DGPP_TEST(scale_gemm_last_row_preserves_full_product_bits_and_output_bounds) {

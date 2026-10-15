@@ -19,6 +19,17 @@ namespace dgpp {
 void glm_rmsnorm_bf16(const void* x, const void* weight, void* y, int rows,
                       int dim, float eps, cudaStream_t stream);
 
+// The norm above and, from the same y, the Mixed346 layers' expert-input
+// codes (2026-10-10): each row's y rotated by H32 and quantized per 128
+// values to int8 codes with one fp32 scale — bitwise
+// launch_hadamard32_quant_int8_rows(y) (kernels/hadamard32.cu) fused into
+// the norm's second pass, so a decode step records one kernel per MoE
+// layer here instead of two. codes: int8 [rows, code_stride >= dim];
+// scales: fp32 [rows, scale_stride >= dim / 128]. dim a multiple of 128.
+void glm_rmsnorm_bf16_quant_int8(const void* x, const void* weight, void* y, int8_t* codes, size_t code_stride,
+                                 float* scales, size_t scale_stride, int rows, int dim, float eps,
+                                 cudaStream_t stream);
+
 // Initializes the mHC residual streams: streams[t, s, h] = embed[tokens[t],
 // h] for all s < hc_mult (the reference's expand of the embedding). hc_mult
 // is pinned to 4 by the config parser (kernel smem layouts assume it).
@@ -53,6 +64,17 @@ void glm_mtp_input_bf16_batched(
 // residual the draft block uses (the main stack's residual is mHC's).
 void glm_residual_add_bf16(void* x, const void* y, int64_t n,
                            cudaStream_t stream);
+
+// x[rows, dim] += add[rows, dim] in bf16 (the add above), then y = the
+// two-rounding norm of the updated x (the norm above) — one launch,
+// bitwise the pair (2026-10-13: the full GLM-5.3's two residual sites a
+// layer, GLM-4.7's and the draft blocks').
+void glm_residual_add_rmsnorm_bf16(void* x, const void* add, const void* weight, void* y, int rows, int dim,
+                                   float eps, cudaStream_t stream);
+// The same add fused into the quantizing norm (glm_rmsnorm_bf16_quant_int8).
+void glm_residual_add_rmsnorm_bf16_quant_int8(void* x, const void* add, const void* weight, void* y, int8_t* codes,
+                                              size_t code_stride, float* scales, size_t scale_stride, int rows,
+                                              int dim, float eps, cudaStream_t stream);
 
 // cache[positions[t], :] = rows[t, :] for t < num_rows (bf16 rows of
 // `hidden`): the per-position hidden cache the draft block reads from.

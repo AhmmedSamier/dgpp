@@ -1,4 +1,5 @@
 #pragma once
+#include "common/paged_attention_rows.hpp"
 // GLM-4.7 layers composed from CUDA kernels and GEMM interfaces, with
 // shape-specific scratch and rebindable weight views. Decode uses fixed
 // grids without host readbacks, allowing graph capture; streaming mode
@@ -35,11 +36,7 @@ struct Glm4GemmWorkspace {
 // positions (a padding row has pos < 0), and whether they are decode rows
 // (every row's own split geometry, kernels-only) or a prefill chunk of one
 // request (positions pos0 .. pos0 + T - 1, one split).
-struct Glm4AttnRows {
-  const int32_t* req_ids = nullptr;
-  const int64_t* pos = nullptr;
-  bool decode = false;
-};
+using Glm4AttnRows = PagedAttentionRows;
 
 class Glm4AttentionLayer {
  public:

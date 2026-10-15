@@ -149,12 +149,73 @@ def load_head(entries):
 
 
 def load_dense(entries, name):
-    """A dense projection as shipped: BF16, or (the hybrid) block FP8 with
-    F32 scales through the engine's fp8 weight policy."""
+    """A dense projection as shipped: BF16, (the AutoRound hybrid) block FP8
+    with F32 scales, or (the QAD export) MXFP8 — e4m3 with one e8m0 byte per
+    32 columns of a row — each through the engine's weight policy."""
     if entries[name][3] == "F8_E4M3":
-        rows, cols, values = dequant_blocks(entries, name)
+        base = name[: -len(".weight")] if name.endswith(".weight") else name
+        if (base + ".weight_scale") in entries:
+            rows, cols, values = dequant_mxfp8(entries, name, base + ".weight_scale")
+        else:
+            rows, cols, values = dequant_blocks(entries, name)
         return (rows, cols), values
     return load_bf16(entries, name)
+
+
+def e8m0_from_bits(b: int) -> float:
+    """A power-of-two scale byte: 2^(b - 127) (255 is NaN; the loader refuses it)."""
+    if b == 255:
+        raise ValueError("NaN e8m0 scale")
+    return 2.0 ** (b - 127)
+
+
+def dequant_mxfp8(entries, name, scale_name, group=32):
+    """E4M3 payload [N, K] x e8m0 scales [N, K/32] -> bf16-rounded weights:
+    bf16(e4m3 x 2^k) is exact (a 3-bit mantissa under a power of two), the
+    value every fp8 core's dequant produces for the 1 x 32 grid."""
+    _, (rows, cols), payload = load_tensor(entries, name)
+    _, (sr, sc), scales = load_tensor(entries, scale_name)
+    if sr != rows or sc * group != cols:
+        raise ValueError("MXFP8 scale geometry disagrees on %s" % name)
+    out = [0.0] * (rows * cols)
+    for r in range(rows):
+        base = r * cols
+        srow = r * sc
+        for c in range(cols):
+            out[base + c] = bf16_round(fp8_from_bits(payload[base + c]) * e8m0_from_bits(scales[srow + c // group]))
+    return rows, cols, out
+
+
+_E2M1 = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+
+
+def e2m1_from_bits(code: int) -> float:
+    """An e2m1 nibble: sign in bit 3, the magnitude on {0, .5, 1, 1.5, 2, 3, 4, 6}."""
+    v = _E2M1[code & 0x7]
+    return -v if code & 0x8 else v
+
+
+def dequant_nvfp4(entries, base, group=16):
+    """modelopt's NVFP4 triple (base.weight U8 [N, K/2] e2m1 pairs with the
+    low nibble the even element, base.weight_scale e4m3 [N, K/16],
+    base.weight_scale_2 F32 []) -> weights as [N, K]: (e2m1 x e4m3) x global,
+    the first product exact, the second in double (the kernels fold the
+    global into their fp32 epilogue — the same value to within the
+    accumulation's own tolerance)."""
+    _, (N, half), codes = load_tensor(entries, base + ".weight")
+    _, (sn, sk), scales = load_tensor(entries, base + ".weight_scale")
+    _, _, (global_scale,) = load_tensor(entries, base + ".weight_scale_2")
+    K = half * 2
+    if sn != N or sk * group != K:
+        raise ValueError("NVFP4 scale geometry disagrees on %s" % base)
+    out = [0.0] * (N * K)
+    for n in range(N):
+        for k in range(K):
+            byte = codes[n * half + k // 2]
+            nib = (byte >> 4) if (k & 1) else (byte & 0xF)
+            s = fp8_from_bits(scales[n * sk + k // group])
+            out[n * K + k] = (e2m1_from_bits(nib) * s) * global_scale
+    return N, K, out
 
 
 def dequant_blocks(entries, name, block=128):
@@ -229,8 +290,8 @@ def layer_weights(cfg, entries, layer, prefix=None):
         (c, _), qkv = load_dense(entries, q + "in_proj_qkv.weight")
         (c2, _, cw), conv = load_bf16(entries, q + "conv1d.weight")
         (zw, _), z = load_dense(entries, q + "in_proj_z.weight")
-        (vh, _), a = load_bf16(entries, q + "in_proj_a.weight")
-        _, b = load_bf16(entries, q + "in_proj_b.weight")
+        (vh, _), a = load_dense(entries, q + "in_proj_a.weight")
+        _, b = load_dense(entries, q + "in_proj_b.weight")
         lw["gdn"] = {
             "qkv": as_rows(qkv, c, H), "conv": as_rows(conv, c2, cw), "z": as_rows(z, zw, H),
             "a": as_rows(a, vh, H), "b": as_rows(b, vh, H),
@@ -244,7 +305,7 @@ def layer_weights(cfg, entries, layer, prefix=None):
         (kw, _), kp = load_dense(entries, q + "k_proj.weight")
         _, vp = load_dense(entries, q + "v_proj.weight")
         (_, ow), op = load_dense(entries, q + "o_proj.weight")
-        (iw, _), ip = load_bf16(entries, q + "indexer.index_qk_proj.weight")
+        (iw, _), ip = load_dense(entries, q + "indexer.index_qk_proj.weight")
         lw["qsa"] = {
             "q": as_rows(qp, qw, H), "k": as_rows(kp, kw, H), "v": as_rows(vp, kw, H),
             "o": as_rows(op, H, ow), "q_norm": load_bf16(entries, q + "q_norm.weight")[1],
@@ -261,6 +322,10 @@ def layer_weights(cfg, entries, layer, prefix=None):
             _, _, g = dequant_gptq(entries, ep + "gate_proj", 4)
             _, _, u = dequant_gptq(entries, ep + "up_proj", 4)
             _, _, d = dequant_gptq(entries, ep + "down_proj", 4)
+        elif (ep + "gate_proj.weight_scale_2") in entries:
+            _, _, g = dequant_nvfp4(entries, ep + "gate_proj")
+            _, _, u = dequant_nvfp4(entries, ep + "up_proj")
+            _, _, d = dequant_nvfp4(entries, ep + "down_proj")
         else:
             _, _, g = dequant_blocks(entries, ep + "gate_proj.weight")
             _, _, u = dequant_blocks(entries, ep + "up_proj.weight")
@@ -287,19 +352,40 @@ def layer_weights(cfg, entries, layer, prefix=None):
         total = sum(vocab_sizes)
         padded = (total + cfg["ngram_divisor"] - 1) // cfg["ngram_divisor"] * cfg["ngram_divisor"]
         codes = []
+        values = None  # the NVFP4 table: every row's bf16 values, dequantized once
+        nvfp4_table = (ep + "ngram_embedding.weight_scale_2") in entries
+        if nvfp4_table:
+            _, _, (table_global,) = load_tensor(entries, ep + "ngram_embedding.weight_scale_2")
+            values = []
         for s in range(cfg["ngram_parts"]):
             _, (rows, hd2), payload = load_tensor(entries, ep + "ngram_embedding.shard_%d.weight" % s)
+            if nvfp4_table:
+                # e2m1 pairs [rows, hd/2] with e4m3 scales [rows, hd/16]: value =
+                # bf16((e2m1 x e4m3) x global), modelopt's dequant in its order
+                # (the device gather's arithmetic).
+                if hd2 * 2 != hd:
+                    raise ValueError("NVFP4 table head_dim disagrees")
+                _, (srows, sg), sc = load_tensor(entries, ep + "ngram_embedding.shard_%d.weight_scale" % s)
+                if srows != rows or sg * 16 != hd:
+                    raise ValueError("NVFP4 table scale geometry disagrees")
+                for r in range(rows):
+                    for k in range(hd):
+                        byte = payload[r * hd2 + k // 2]
+                        nib = (byte >> 4) if (k & 1) else (byte & 0xF)
+                        v = f32(f32(e2m1_from_bits(nib) * fp8_from_bits(sc[r * sg + k // 16])) * table_global)
+                        values.append(bf16_round(v))
+                continue
             if hd2 != hd:
                 raise ValueError("table head_dim disagrees")
             codes.extend(payload)
-        if len(codes) != padded * hd:
-            raise ValueError("table rows %d != padded %d" % (len(codes) // hd, padded))
+        if (len(values) if nvfp4_table else len(codes)) != padded * hd:
+            raise ValueError("table rows != padded %d" % padded)
         conv_shape, conv = load_bf16(entries, pp + "conv1d.weight")
         cwd = conv_shape[-1]
         lw["ple"] = {
             "mult": load_i64(entries, ep + "layer_multipliers"), "vocab": vocab_sizes, "offset": offsets,
-            "heads": heads, "hd": hd, "heads_per_ngram": cfg["heads_per_ngram"], "codes": codes,
-            "scale": load_bf16(entries, ep + "ngram_embedding.weight_scale")[1][0],
+            "heads": heads, "hd": hd, "heads_per_ngram": cfg["heads_per_ngram"], "codes": codes, "values": values,
+            "scale": 1.0 if nvfp4_table else load_bf16(entries, ep + "ngram_embedding.weight_scale")[1][0],
             "key": as_rows(load_bf16(entries, pp + "key_proj.weight")[1], W, E_),
             "value": as_rows(load_bf16(entries, pp + "value_proj.weight")[1], H, E_),
             "norm_key": load_bf16(entries, pp + "norm_key.weight")[1],
@@ -553,7 +639,10 @@ def ple_forward(R_rows, tokens, w, cfg, T):
             if h >= hpn:
                 mix ^= m2
             row = mix % w["vocab"][h] + w["offset"][h]
-            e.extend(bf16_round(fp8_from_bits(c) * w["scale"]) for c in w["codes"][row * hd:(row + 1) * hd])
+            if w.get("values") is not None:
+                e.extend(w["values"][row * hd:(row + 1) * hd])
+            else:
+                e.extend(bf16_round(fp8_from_bits(c) * w["scale"]) for c in w["codes"][row * hd:(row + 1) * hd])
         key = gemv(e, w["key"])
         kn = group_norm(key, w["norm_key"], hc, H, cfg["eps"])
         val = gemv(e, w["value"])

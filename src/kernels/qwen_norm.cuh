@@ -52,5 +52,10 @@ __device__ __forceinline__ float block_sum_squares(const uint16_t* __restrict__ 
   return total;
 }
 
+// The (1 + w) norm weight's read: BF16 (the releases), or F32 (the QAD
+// export's trained norms, served at their shipped precision).
+__device__ __forceinline__ float norm_weight(uint16_t w) { return bf16_bits_to_float(w); }
+__device__ __forceinline__ float norm_weight(float w) { return w; }
+
 }  // namespace qwen_norm
 }  // namespace dgpp

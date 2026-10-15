@@ -18,6 +18,7 @@
 #include "common/log.hpp"
 #include "kernels/bf12_gemv.hpp"
 #include "kernels/bf16_gemv.hpp"
+#include "kernels/gemv_wide.hpp"
 #include "kernels/mma_gemv.hpp"
 
 namespace dgpp {
@@ -361,7 +362,11 @@ int dense_gemv_rows() {
   return rows;
 }
 
-CublasLtGemm::CublasLtGemm() : impl_(new Impl()) {}
+CublasLtGemm::CublasLtGemm() : impl_(new Impl()) {
+  // The wide GEMV chunk's shared-memory opt-in (gemv_wide.hpp): once per
+  // process, here — every model builds its GEMM before any capture.
+  (void)gemv::enable_wide_rows();
+}
 CublasLtGemm::~CublasLtGemm() { delete impl_; }
 
 void CublasLtGemm::set_decode_rows(int rows) {
@@ -400,7 +405,7 @@ namespace {
 // The rows the next GEMV chunk of a `left`-row call takes (at most four,
 // fewer when k's staged rows would pass the smem bound).
 int gemv_chunk_rows(const void* weight, int left, int k) {
-  int rows = std::min(4, left);
+  int rows = std::min(gemv::kWideRows, left);  // the wide chunk (gemv_wide.hpp)
   while (!bf16_gemv_accepts(weight, rows, k)) --rows;
   return rows;
 }

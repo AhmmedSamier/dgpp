@@ -329,3 +329,89 @@ DGPP_TEST(qwen_gr_stages_match_the_reference_on_the_device_inputs) {
 }
 
 int main() { return dgpp::test::run_all(); }
+
+// The F32 norm weights through the fused GR forms (the QAD export's trained
+// norms): the norm-staged down GEMV, the norm-staged down + inject GEMV and
+// the combine + norm each bitwise the unfused chain run with the same F32
+// weights (the group norm kernel's F32 path); and with weights that are
+// bf16 values, bitwise the BF16 fused forms.
+DGPP_TEST(qwen_gr_fused_forms_read_f32_norm_weights) {
+  cudaStream_t st = test_stream();
+  for (const int rows : {1, 3}) {
+    Site s = Site::make(40 + rows);
+    s.rows = rows;
+    s.r = random_bf16_normal(41 + rows, static_cast<int64_t>(rows) * s.width(), 1.0f);
+    const int W = s.width();
+    std::vector<float> wf(s.w_norm.size());
+    for (size_t i = 0; i < wf.size(); ++i)
+      wf[i] = dgpp::bf16_bits_to_float(s.w_norm[i]) + 1.0e-3f * static_cast<float>((i % 5) - 2) + 1.0e-5f;
+    DevBuf dr(s.r.size() * 2), dnorm(s.w_norm.size() * 2), dnormf(wf.size() * 4), ddown(s.w_down.size() * 2), dinj(s.w_inj.size() * 2);
+    dr.upload(s.r.data(), s.r.size() * 2);
+    dnorm.upload(s.w_norm.data(), s.w_norm.size() * 2);
+    dnormf.upload(wf.data(), wf.size() * 4);
+    ddown.upload(s.w_down.data(), s.w_down.size() * 2);
+    dinj.upload(s.w_inj.data(), s.w_inj.size() * 2);
+    const size_t tn = static_cast<size_t>(rows) * s.rank, gn = static_cast<size_t>(rows) * s.hc;
+    // The unfused chain with F32 weights: the group norm (F32 path), the
+    // bf16 GEMV over Rn, the dots kernel.
+    DevBuf drn(s.r.size() * 2), dt(tn * 2), dg(gn * 4);
+    dgpp::qwen_group_rmsnorm_bf16(dr.p, dnormf.p, drn.p, rows, s.hc, s.hidden, 1e-6f, st, /*weight_f32=*/true);
+    dgpp::Bf16GemvProblem p;
+    p.act = drn.as<uint16_t>();
+    p.act_row_stride = static_cast<size_t>(W);
+    p.weight = ddown.as<uint16_t>();
+    p.out = dt.as<uint16_t>();
+    p.n = s.rank;
+    dgpp::launch_bf16_gemv_multi_rows(&p, 1, /*out_f32=*/false, rows, W, st);
+    dgpp::qwen_gr_combine_dots_bf16(drn.p, dinj.p, static_cast<float*>(dg.p), rows, s.hc, s.hidden, st);
+    DGPP_CUDA_OK(cudaStreamSynchronize(st));
+    const std::vector<uint16_t> rn = download(drn, s.r.size());
+    const std::vector<uint16_t> t_chain = download(dt, tn);
+    std::vector<float> g_ref(gn);
+    DGPP_CUDA_OK(cudaMemcpy(g_ref.data(), dg.p, gn * 4, cudaMemcpyDeviceToHost));
+    // The fused forms with the F32 weights.
+    DevBuf drn2(s.r.size() * 2), dt2(tn * 2), dg2(gn * 4), drn3(s.r.size() * 2), dt3(tn * 2), dg3(gn * 4);
+    dgpp::qwen_gr_norm_down_bf16(dr.p, static_cast<size_t>(W), dnormf.p, s.hc, s.hidden, 1e-6f, drn2.p, ddown.p, dt2.p,
+                                 s.rank, rows, st, dinj.p, static_cast<float*>(dg2.p), /*norm_f32=*/true);
+    dgpp::qwen_gr_norm_down_inject_bf16(dr.p, static_cast<size_t>(W), dnormf.p, s.hc, s.hidden, 1e-6f, drn3.p, ddown.p,
+                                        dt3.p, s.rank, dinj.p, static_cast<float*>(dg3.p), rows, st, /*norm_f32=*/true);
+    DGPP_CUDA_OK(cudaStreamSynchronize(st));
+    const std::vector<uint16_t> rn2 = download(drn2, s.r.size()), t2 = download(dt2, tn);
+    const std::vector<uint16_t> rn3 = download(drn3, s.r.size()), t3 = download(dt3, tn);
+    std::vector<float> g2(gn), g3(gn);
+    DGPP_CUDA_OK(cudaMemcpy(g2.data(), dg2.p, gn * 4, cudaMemcpyDeviceToHost));
+    DGPP_CUDA_OK(cudaMemcpy(g3.data(), dg3.p, gn * 4, cudaMemcpyDeviceToHost));
+    require_bitwise("f32 norm_down: Rn", rn2.data(), rn.data(), rn2.size() * 2);
+    require_bitwise("f32 norm_down: t", t2.data(), t_chain.data(), t2.size() * 2);
+    require_bitwise("f32 norm_down: gates", g2.data(), g_ref.data(), gn * 4);
+    require_bitwise("f32 norm_down_inject: Rn", rn3.data(), rn.data(), rn3.size() * 2);
+    require_bitwise("f32 norm_down_inject: t", t3.data(), t_chain.data(), t3.size() * 2);
+    require_bitwise("f32 norm_down_inject: gates", g3.data(), g_ref.data(), gn * 4);
+    // combine_norm with F32 weights: the apply then the F32 group norm.
+    {
+      DevBuf dy(s.y.size() * 2), dra(s.r.size() * 2), drb(s.r.size() * 2), drna(s.r.size() * 2), drnb(s.r.size() * 2);
+      dy.upload(s.y.data(), s.y.size() * 2);
+      dra.upload(s.r.data(), s.r.size() * 2);
+      drb.upload(s.r.data(), s.r.size() * 2);
+      dgpp::qwen_gr_combine_apply_bf16(dra.p, static_cast<const float*>(dg.p), dy.p, rows, s.hc, s.hidden, st);
+      dgpp::qwen_group_rmsnorm_bf16(dra.p, dnormf.p, drna.p, rows, s.hc, s.hidden, 1e-6f, st, /*weight_f32=*/true);
+      dgpp::qwen_gr_combine_norm_bf16(drb.p, static_cast<const float*>(dg.p), dy.p, dnormf.p, drnb.p, rows, s.hc,
+                                      s.hidden, 1e-6f, st, /*norm_f32=*/true);
+      DGPP_CUDA_OK(cudaStreamSynchronize(st));
+      const std::vector<uint16_t> ra = download(dra, s.r.size()), rb = download(drb, s.r.size());
+      const std::vector<uint16_t> rna = download(drna, s.r.size()), rnb = download(drnb, s.r.size());
+      require_bitwise("f32 combine_norm: R", rb.data(), ra.data(), ra.size() * 2);
+      require_bitwise("f32 combine_norm: Rn", rnb.data(), rna.data(), rna.size() * 2);
+    }
+    // The F32 weights carry their low bits: the BF16 path on the rounded
+    // weights differs somewhere.
+    DevBuf drn_b(s.r.size() * 2);
+    dgpp::qwen_group_rmsnorm_bf16(dr.p, dnorm.p, drn_b.p, rows, s.hc, s.hidden, 1e-6f, st);
+    DGPP_CUDA_OK(cudaStreamSynchronize(st));
+    const std::vector<uint16_t> rn_b = download(drn_b, s.r.size());
+    size_t differ = 0;
+    for (size_t i = 0; i < rn.size(); ++i) differ += rn[i] != rn_b[i];
+    if (differ == 0) throw std::runtime_error("the F32 norm weights' low bits changed nothing");
+    std::printf("[ OK ] the fused GR forms read F32 norm weights (bitwise the F32 chain) at %d rows\n", rows);
+  }
+}

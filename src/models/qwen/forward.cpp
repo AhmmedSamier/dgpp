@@ -7,10 +7,12 @@
 #include "kernels/scale_gemm.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 
@@ -100,9 +102,10 @@ QwenModel::QwenModel(const QwenTextConfig& cfg, const std::string& checkpoint_di
   gemm_ws_bytes_ = std::max<size_t>(64u << 20, gemm_.query_workspace_bytes(max_tokens_, lm_vocab_count_, H, DType::BF16));
   gemm_ws_ = dev_alloc<char>(gemm_ws_bytes_);
   gw_ = QwenGemmWorkspace{&gemm_, gemm_ws_, gemm_ws_bytes_};
-  if (QwenLayerStream::dense_weights_fp8()) {
+  if (QwenLayerStream::dense_weights_fp8() || cfg_.dense_mxfp8_shipped) {
     // The FP8 dense stack's prefill bridge: the largest dense matrix of
-    // this rank's slice, in BF16.
+    // this rank's slice, in BF16 (the at-load fp8 form, or the QAD export's
+    // shipped MXFP8, whose prefill-shaped products take the bridge too).
     dense_bridge_bytes_ = dense_bridge_bytes(cfg_, loader_.geometry());
     gw_.dequant = dev_alloc<uint16_t>(dense_bridge_bytes_ / 2);
     gw_.dequant_bytes = dense_bridge_bytes_;
@@ -215,7 +218,7 @@ QwenModel::QwenModel(const QwenTextConfig& cfg, const std::string& checkpoint_di
   for (int req = 0; req < max_requests_; ++req) push_context(req, eos_, eos_);
   if (mtp_) {
     if (!globals_.mtp_fc_embedding || !globals_.mtp_fc_hidden || !globals_.mtp_pre_fc_norm_embedding ||
-        !globals_.mtp_pre_fc_norm_hidden || !globals_.mtp_mixer.hc_norm)
+        !globals_.mtp_pre_fc_norm_hidden || !(globals_.mtp_mixer.hc_norm || globals_.mtp_mixer.hc_norm_f32))
       throw std::runtime_error("QwenModel: the draft head's globals are unbound");
     mtp_ring_snapshot_ = dev_alloc<uint16_t>(R * ring_elems());
     mtp_chain_ring_ = dev_alloc<uint16_t>(R * ring_elems());
@@ -240,6 +243,11 @@ QwenModel::QwenModel(const QwenTextConfig& cfg, const std::string& checkpoint_di
     head_cand_ = dev_alloc<int32_t>(static_cast<size_t>(lm_vocab_count_));
     head_cand_count_ = dev_alloc<int32_t>(1);
   }
+  // The draft head's screen (engine.draft_head; kernels/draft_head.hpp):
+  // the decode drafts' head reads, unless the opt-in vocabulary slice
+  // (engine.draft_vocab) already replaces the draft head.
+  if (mtp_ && globals_.draft_head_packed.packed == nullptr)
+    draft_head_.init(draft_head_matrix(), max_decode_rows_, loader_.rank(), stream_, /*quiet=*/true);
   if (const char* e = std::getenv("DGPP_QWEN_HEAD_DUMP"); e != nullptr && e[0] != '\0') {
     head_dump_path_ = e;
     const size_t slot = static_cast<size_t>(max_decode_rows_) * static_cast<size_t>(cfg_.hidden_size);
@@ -301,7 +309,7 @@ QwenModel::MemoryPlan QwenModel::plan_memory(const QwenTextConfig& cfg, int max_
     if (packed > 0) plan.add("bf16 decode packing (12-bit companions)", packed);
   }
   plan.add("gemm workspace (at least)", size_t{64} << 20);
-  if (QwenLayerStream::dense_weights_fp8())
+  if (QwenLayerStream::dense_weights_fp8() || cfg.dense_mxfp8_shipped)
     plan.add("dense fp8 prefill bridge (the largest dense matrix in BF16)",
              dense_bridge_bytes(cfg, QwenLocalGeometry::from_config(cfg, tp_rank, tp_world, head)));
   if (QwenLayerStream::dense_weights_fp8() && QwenLayerStream::prefill_fp8_gemm())
@@ -376,6 +384,9 @@ QwenModel::MemoryPlan QwenModel::plan_memory(const QwenTextConfig& cfg, int max_
   if (cfg.lm_head_gptq_int8)
     plan.add("head argmax bounds and candidate list (four rows x vocab fp32, vocab int32)",
              4 * static_cast<size_t>(geo.lm_vocab_count) * 4 + static_cast<size_t>(geo.lm_vocab_count) * 4 + 64);
+  if (mtp && QwenLayerStream::draft_vocab_count() == 0)
+    plan.add("draft head screen (2-bit rotated head copy, scratch)",
+             DraftHead::plan_bytes(geo.lm_vocab_count, cfg.hidden_size, static_cast<int>(rows)));
   if (cfg.lm_head_gptq_int8 && QwenLayerStream::draft_vocab_count() > 0) {
     const size_t n = static_cast<size_t>(QwenLayerStream::draft_vocab_count());
     plan.add("draft vocabulary slice (int8 head rows, scales, ids)",
@@ -450,6 +461,7 @@ QwenMoeWeights QwenModel::moe_view(const QwenMoeResident& m) {
   w.act_scale_w13 = m.act_scale_w13;
   w.act_scale_w2 = m.act_scale_w2;
   w.act_scales_dev = m.act_scales;
+  w.experts_weight_only = m.experts_weight_only;
   return w;
 }
 
@@ -503,6 +515,14 @@ void QwenModel::lm_head_logits(const uint16_t* hidden, int rows, cudaStream_t st
     throw std::invalid_argument("Qwen head: output exceeds logits capacity; use full diagnostic storage");
   const int H = cfg_.hidden_size;
   if (head_dump_ring_ != nullptr && rows >= 1 && rows <= max_decode_rows_) head_dump_record(hidden, rows, stream);
+  // A decode draft's head call through the screen (kernels/draft_head.hpp):
+  // the candidate blocks' logits from the served head, -inf elsewhere; the
+  // pick runs unchanged on the masked row. The verify's calls never come here.
+  if (head_screen_site_ && !last_row_only && compact_row < 0 &&
+      draft_head_.logits(draft_head_matrix(), hidden, static_cast<size_t>(H), rows,
+                         logits_ + static_cast<size_t>(output_row) * lm_vocab_count_,
+                         static_cast<size_t>(lm_vocab_count_), stream))
+    return;
   // Opt in to weight-tile reuse only within the configured decode envelope;
   // this bounds the optimization to verification shapes covered by its gates.
   // Short prefill chunks/tails in that envelope also use MMA, so their logits
@@ -585,6 +605,20 @@ void QwenModel::lm_head_logits(const uint16_t* hidden, int rows, cudaStream_t st
                  selected ? 1 : rows, lm_vocab_count_, H, DType::BF16, GemmOut::F32,
                  static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream);
   }
+}
+
+// The draft head's served form for the shared screen (kernels/draft_head.hpp).
+HeadMatrix QwenModel::draft_head_matrix() const {
+  HeadMatrix m;
+  if (globals_.lm_head_fp8.payload) m.fp8 = &globals_.lm_head_fp8;
+  else if (globals_.lm_head_packed.packed) m.packq = &globals_.lm_head_packed;
+  else {
+    m.bf16 = globals_.lm_head;
+    m.bf12 = gemm_.bf12_lookup(globals_.lm_head);
+  }
+  m.n = lm_vocab_count_;
+  m.k = cfg_.hidden_size;
+  return m;
 }
 
 // The head dump (DGPP_QWEN_HEAD_DUMP): a memcpy node per head call into a
@@ -826,7 +860,9 @@ void QwenModel::prefetch_bf16(const char* what, const uint16_t* w, size_t bytes)
 void QwenModel::prefetch_fp8(const char* what, const GlmQuantMatrix& q) {
   if (!q.payload) return;
   prefetch_add(what, q.payload, static_cast<size_t>(q.rows) * static_cast<size_t>(q.cols));
-  prefetch_add(what, q.scales, static_cast<size_t>(q.scale_rows()) * static_cast<size_t>(q.scale_cols()) * 4);
+  const size_t grid = static_cast<size_t>(q.scale_rows()) * static_cast<size_t>(q.scale_cols());
+  if (q.scales) prefetch_add(what, q.scales, grid * 4);
+  if (q.scales_e8m0) prefetch_add(what, q.scales_e8m0, grid);
 }
 
 void QwenModel::prefetch_gr(const QwenGrResident& g, bool inject) {
@@ -835,6 +871,7 @@ void QwenModel::prefetch_gr(const QwenGrResident& g, bool inject) {
   const size_t hc = static_cast<size_t>(cfg_.hc_count);
   if (inject && g.inject) prefetch_add("g.inject", g.inject, hc * W * 2);
   if (g.hc_norm) prefetch_add("g.hc_norm", g.hc_norm, W * 2);
+  if (g.hc_norm_f32) prefetch_add("g.hc_norm", g.hc_norm_f32, W * 4);
   if (g.down) prefetch_add("g.down", g.down, r * W * 2);
   else prefetch_fp8("g.down_fp8", g.down_fp8);
   if (g.up) prefetch_add("g.up", g.up, W * r * 2);
@@ -918,6 +955,7 @@ void QwenModel::prefetch_ple_key_side(const QwenLayerResident& r) {
   const size_t cols = static_cast<size_t>(cfg_.ple_embed_dim / world_);
   prefetch_.open_window(stream_, prefetch_window_bytes_, prefetch_.boundary_rate());
   if (r.ple.norm_key) prefetch_add("r.ple.norm_key", r.ple.norm_key, W * 2);
+  if (r.ple.norm_key_f32) prefetch_add("r.ple.norm_key", r.ple.norm_key_f32, W * 4);
   if (r.ple.value_proj) prefetch_add("r.ple.value_proj", r.ple.value_proj, H * cols * 2);
   else prefetch_fp8("r.ple.value_proj_fp8", r.ple.value_proj_fp8);
 }
@@ -927,12 +965,15 @@ void QwenModel::prefetch_ple_value_side(const QwenLayerResident& r) {
   const size_t W = static_cast<size_t>(cfg_.hyper_width());
   prefetch_.open_window(stream_, prefetch_window_bytes_, prefetch_.boundary_rate());
   if (r.ple.norm_conv) prefetch_add("r.ple.norm_conv", r.ple.norm_conv, W * 2);
+  if (r.ple.norm_conv_f32) prefetch_add("r.ple.norm_conv", r.ple.norm_conv_f32, W * 4);
   if (r.ple.conv) prefetch_add("r.ple.conv", r.ple.conv, W * static_cast<size_t>(cfg_.ple_conv_kernel_size) * 2);
   prefetch_gr(r.attn_gr, /*inject=*/true);
 }
 
 QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
   const int T = run.T, req = run.req;
+  const bool mixed = run.decode_spans > 0;
+  const int spec_rows = run.decode_rows();
   if (run.all_rows && T > logits_capacity_rows_)
     throw std::invalid_argument("Qwen serving head: use full diagnostic storage for an all-row forward");
   walk_rows_ = T;
@@ -952,7 +993,7 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
   // are materialized first (a no-op kernel when none are pending).
   if (gdn_replay_ && !run.decode) {
     if (run.num_spans > 0) {
-      for (int sp = 0; sp < run.num_spans; ++sp) materialize_gdn(run.span_reqs[sp]);
+      for (int sp = run.decode_spans; sp < run.num_spans; ++sp) materialize_gdn(run.span_reqs[sp]);
     } else {
       materialize_gdn(req);
     }
@@ -977,7 +1018,7 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
   }
 
   // The state families' per-row snapshots (the rollback's source).
-  const bool snapshots = run.decode && run.snapshots;
+  const bool snapshots = (run.decode || mixed) && run.snapshots;
   KdaRequestRows rows;
   rows.request_ids = d_req;
   rows.positions = d_pos;
@@ -1008,6 +1049,36 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
   // A site's combine rides the next site's norm launch on the decode rows
   // (QwenGrSite::defer_combine / mix); any other reader of R applies it first.
   QwenGrSite::PendingCombine pend;
+  // Resumed short outputs retain the isolated continuation's projection
+  // shapes. Unfinished chunks and ordinary mixed batches keep their prefill
+  // recipe; splitting every decoder out repeats expert and weight work each tick.
+  // 128 is the dense FP8 GEMV/large-prefill boundary used by the layer helpers.
+  const auto for_each_kernel_group = [&](auto&& visit) {
+    run.for_each_isolated_reader_group([&](int span) {
+      return run.span_pos0[span] > 0 && run.span_lens[span] <= 128 &&
+             (!run.output_spans || run.output_spans[span]);
+    }, visit);
+  };
+  const auto mix_rows = [&](QwenGrSite& site, uint16_t* output) {
+    if (!run.num_spans) {
+      site.mix(r_, output, T, stream_, &pend);
+      return;
+    }
+    for_each_kernel_group([&](int row0, int count, bool decode, int) {
+      auto pending = pend;
+      if (pending.y) {
+        pending.y += static_cast<size_t>(row0) * H;
+        pending.gates += static_cast<size_t>(row0) * cfg_.hc_count;
+      }
+      qwen_configure_gemm_rows(gemm_, count, decode);
+      if (count == T)
+        site.mix(r_, output, T, stream_, &pending);
+      else
+        site.mix_group(r_ + static_cast<size_t>(row0) * W,
+                       output + static_cast<size_t>(row0) * H, count, row0, stream_, &pending);
+    });
+    qwen_configure_gemm_rows(gemm_, T, run.decode);
+  };
   for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
     const QwenLayerResident& r = loader_.load_layer(layer);
     build_layer_objects(r);
@@ -1031,18 +1102,26 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
       // The K-sliced projections are partial sums (plan D4): each folded
       // before its norm, the key consumed before the value's handout.
       uint16_t* key = stage(ple_->key_partial(), W);
-      ple_->project_key(key == ple_->key_partial() ? nullptr : key, T, stream_);
+      for_each_kernel_group([&](int row0, int count, bool decode, int) {
+        qwen_configure_gemm_rows(gemm_, count, decode);
+        ple_->project_key(key + static_cast<size_t>(row0) * W, count, stream_, row0);
+      });
+      qwen_configure_gemm_rows(gemm_, T, run.decode);
       if (run.decode) prefetch_ple_key_side(r);
       fold(key, W);
       ple_->norm_key(key, T, stream_);
       uint16_t* value = stage(ple_->value_partial(), H);
-      ple_->project_value(value == ple_->value_partial() ? nullptr : value, T, stream_);
+      for_each_kernel_group([&](int row0, int count, bool decode, int) {
+        qwen_configure_gemm_rows(gemm_, count, decode);
+        ple_->project_value(value + static_cast<size_t>(row0) * H, count, stream_, row0);
+      });
+      qwen_configure_gemm_rows(gemm_, T, run.decode);
       if (run.decode) prefetch_ple_value_side(r);
       fold(value, H);
       ple_->finish(r_, value, ple_conv_state_, ple_conv_elems_, d_req, d_pos, d_spans, num_requests, T,
-                   stream_, snapshots ? spec_ple_ : nullptr);
+                   stream_, snapshots ? spec_ple_ : nullptr, mixed ? spec_rows : -1);
     }
-    attn_gr_->mix(r_, x_, T, stream_, &pend);
+    mix_rows(*attn_gr_, x_);
     pend = {};
     uint16_t* attn_out = stage(y_, H);
     if (r.kind == QwenLayerKind::Gdn) {
@@ -1070,13 +1149,43 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
       } else if (run.num_spans > 0) {
         // A group prefill (2026-09-14): each span's rows scan its own
         // request's recurrent and conv state (the pointers step by rows).
-        int64_t row0 = 0;
-        for (int sp = 0; sp < run.num_spans; ++sp) {
-          const int len = run.span_lens[sp], sreq = run.span_reqs[sp];
-          gdn_->enqueue(x_ + static_cast<size_t>(row0) * H, gdn_rec(sreq, gdn_ordinal), gdn_conv(sreq, gdn_ordinal),
-                        attn_out + static_cast<size_t>(row0) * H, len, stream_);
-          row0 += len;
+        std::vector<QwenGdnLayer::Span> shared_spans;
+        if (mixed) {
+          QwenGdnLayer::Span prefix;
+          prefix.rows = spec_rows;
+          prefix.recurrent = gdn_rec(0, gdn_ordinal);
+          prefix.conv = gdn_conv(0, gdn_ordinal);
+          prefix.rec_stride = static_cast<int64_t>(num_gdn_) * gdn_rec_elems_;
+          prefix.conv_stride = static_cast<int64_t>(num_gdn_) * gdn_conv_elems_;
+          prefix.rec_snap = rec_snap;
+          prefix.conv_snap = conv_snap;
+          prefix.requests = rows;
+          prefix.requests.num_requests = run.decode_spans;
+          if (gdn_replay_) {
+            prefix.replay = gdn_replay_view(0, gdn_ordinal, true);
+            for (int sp = 0; sp < run.decode_spans; ++sp)
+              gdn_replay_rows_used_ = std::max(gdn_replay_rows_used_, run.span_lens[sp]);
+          }
+          shared_spans.push_back(prefix);
         }
+        for (int sp = run.decode_spans; sp < run.num_spans; ++sp) {
+          const int len = run.span_lens[sp], sreq = run.span_reqs[sp];
+          QwenGdnLayer::Span reader;
+          reader.rows = len;
+          reader.recurrent = gdn_rec(sreq, gdn_ordinal);
+          reader.conv = gdn_conv(sreq, gdn_ordinal);
+          shared_spans.push_back(reader);
+        }
+        for_each_kernel_group([&](int row0, int count, bool decode, int first) {
+          const int begin = first < run.decode_spans ? 0 : first - run.decode_spans + (mixed ? 1 : 0);
+          int end = begin, rows = 0;
+          while (rows < count) rows += shared_spans[end++].rows;
+          const auto group = std::span(shared_spans).subspan(begin, end - begin);
+          qwen_configure_gemm_rows(gemm_, count, decode);
+          gdn_->enqueue_spans(x_ + static_cast<size_t>(row0) * H,
+                              attn_out + static_cast<size_t>(row0) * H, count, group, stream_);
+        });
+        qwen_configure_gemm_rows(gemm_, T, run.decode);
       } else {
         gdn_->enqueue(x_, gdn_rec(req, gdn_ordinal), gdn_conv(req, gdn_ordinal), attn_out, T, stream_,
                       rec_snap, conv_snap, replay);
@@ -1098,16 +1207,35 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
         // A group prefill: each span attends over its own request's cache
         // and writes its pools and ring (the row metadata steps with the rows).
         int64_t row0 = 0;
-        for (int sp = 0; sp < run.num_spans; ++sp) {
+        std::vector<QwenQsaLayer::Span> shared_spans;
+        if (mixed) {
+          QwenQsaRows prefix = qrows;
+          prefix.decode = true;
+          prefix.num_requests = run.decode_spans;
+          shared_spans.push_back({spec_rows, prefix});
+          row0 = spec_rows;
+        }
+        for (int sp = run.decode_spans; sp < run.num_spans; ++sp) {
           const int len = run.span_lens[sp];
           QwenQsaRows srows = qrows;
           srows.req_ids = d_req + row0;
           srows.pos = d_pos + row0;
           srows.request = run.span_reqs[sp];
           srows.pos0 = run.span_pos0[sp];
-          qsa_->enqueue(x_ + static_cast<size_t>(row0) * H, len, srows, cache, attn_out + static_cast<size_t>(row0) * H, stream_);
+          srows.ring_snapshots = nullptr;
+          shared_spans.push_back({len, srows});
           row0 += len;
         }
+        for_each_kernel_group([&](int row0, int count, bool decode, int first) {
+          const int begin = first < run.decode_spans ? 0 : first - run.decode_spans + (mixed ? 1 : 0);
+          int end = begin, rows = 0;
+          while (rows < count) rows += shared_spans[end++].rows;
+          const auto group = std::span(shared_spans).subspan(begin, end - begin);
+          qwen_configure_gemm_rows(gemm_, count, decode);
+          qsa_->enqueue_spans(x_ + static_cast<size_t>(row0) * H, count, group.front().map,
+                              group, cache, attn_out + static_cast<size_t>(row0) * H, stream_);
+        });
+        qwen_configure_gemm_rows(gemm_, T, run.decode);
       } else {
         qsa_->enqueue(x_, T, qrows, cache, attn_out, stream_);
       }
@@ -1116,7 +1244,7 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
     if (run.decode) prefetch_ffn_side(r);
     fold(attn_out, H);  // block boundary 1: the attention output projection's partial
     pend = attn_gr_->defer_combine(r_, attn_out, T, stream_);
-    mlp_gr_->mix(r_, x_, T, stream_, &pend);
+    mix_rows(*mlp_gr_, x_);
     pend = {};
     uint16_t* ffn_out = stage(y_, H);
     if (run.decode) {
@@ -1137,7 +1265,21 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
       trace.ids = h_route_ids_ + slot;
       trace.weights = h_route_weights_ + slot;
       trace.biased = nullptr;
-      moe_->enqueue_prefill(x_, ffn_out, T, stream_, traces ? &trace : nullptr);
+      for_each_kernel_group([&](int row0, int count, bool decode, int) {
+        qwen_configure_gemm_rows(gemm_, count, decode);
+        auto group_trace = trace;
+        group_trace.ids += static_cast<size_t>(row0) * K;
+        group_trace.weights += static_cast<size_t>(row0) * K;
+        if (decode)
+          moe_->enqueue_decode(x_ + static_cast<size_t>(row0) * H,
+                                ffn_out + static_cast<size_t>(row0) * H, count, stream_, -1,
+                                traces ? &group_trace : nullptr);
+        else
+          moe_->enqueue_prefill(x_ + static_cast<size_t>(row0) * H,
+                                 ffn_out + static_cast<size_t>(row0) * H, count, stream_,
+                                 traces ? &group_trace : nullptr);
+      });
+      qwen_configure_gemm_rows(gemm_, T, run.decode);
       if (traces) {
         out.route_ids.emplace_back();  // filled after the sync
         out.route_weights.emplace_back();
@@ -1163,7 +1305,7 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
   // chunks, BF16 heads (cuBLAS is m-dependent), decode, all-row runs and
   // group prefills keep the full head. DGPP_PREFILL_HEAD_ALL_ROWS=1 keeps
   // it everywhere.
-  mixer_->mix(r_, h_, T, stream_, &pend);  // the last layer's combine rides the mixer's norm
+  mix_rows(*mixer_, h_);  // the last layer's combine rides the mixer's norm
   pend = {};
   static const bool head_all_rows = [] {
     const char* e = std::getenv("DGPP_PREFILL_HEAD_ALL_ROWS");
@@ -1179,28 +1321,36 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
     // FP8 and packed heads preserve the full product's dispatch. BF16
     // heads use a single-row projection; hidden rows stay in place for MTP.
     if (run.decode || run.all_rows) throw std::logic_error("Qwen compact head: invalid row run");
-    int end = 0;
-    for (int s = 0; s < std::max(1, run.num_spans); ++s) {
-      end += run.num_spans > 0 ? run.span_lens[s] : T;
-      lm_head_logits(h_, T, stream_, false, end - 1, s);
-    }
-  } else {
+    project_head_rows(run, [&](int input, int output, int count) {
+      if (mixed && input == 0) {
+        // Project the decoder prefix together, preserving decode dispatch.
+        qwen_configure_gemm_rows(gemm_, count, true);
+        head_req_ = 0;
+        lm_head_logits(h_, count, stream_, false);
+        qwen_configure_gemm_rows(gemm_, T, false);
+      } else {
+        for_each_kernel_group([&](int row0, int rows, bool decode, int) {
+          if (input < row0 || input >= row0 + rows) return;
+          qwen_configure_gemm_rows(gemm_, rows, decode);
+          lm_head_logits(h_ + static_cast<size_t>(row0) * H, rows, stream_, false, input - row0, output);
+        });
+        qwen_configure_gemm_rows(gemm_, T, run.decode);
+      }
+    });
+  } else if (!run.output_spans || run.output_spans[0]) {
     lm_head_logits(h_, T, stream_, last_row_only);
   }
   // The draft block's input: the last rows' hyper states into the slots'
   // windows by position (the last window rows of a prefill chunk, every
   // decode row — distinct slots within one launch).
-  if (mtp_) {
-    const int n = run.num_spans > 0 ? T : std::min(T, max_decode_rows_);  // a group prefill stores every row
-    store_draft_hidden(r_ + static_cast<size_t>(T - n) * W, d_req + (T - n), d_pos + (T - n), n);
-  }
+  store_run_draft_hidden(run, in, r_);
   // The prefetch side stream rejoins here: a capture must end with every
   // forked stream joined, and the eager tail's sync (finish_run) covers
   // the prefetches too (they read weights, nothing else).
   if (run.decode) prefetch_.join(stream_);
   // The tail mirrors, the sync and the host copies are the core's; the
   // route traces of the device-segmented prefill materialize after it.
-  out = finish_run(run, std::move(out), packed_logits);
+  out = finish_run(run, std::move(out), packed_logits, run.device_decode_outputs ? spec_rows : -1);
   // An eager walk has synced: a staging that failed on the host surfaces
   // here rather than as a silent embedding.
   if (has_ple_ && table_.mmap && !run.capture) ple_->check_staged();
@@ -1522,6 +1672,10 @@ void QwenModel::finish_companions() {
   bf12_.finish(gemm_, /*slots=*/1);
   bf12_s_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   bf12_.log_summary(loader_.rank(), bf12_s_);
+  // The draft head's screen from the companion when the bf16 bytes were
+  // never device-resident (the 12-bit-only residency); a no-op once built.
+  if (mtp_ && globals_.draft_head_packed.packed == nullptr)
+    draft_head_.init(draft_head_matrix(), max_decode_rows_, loader_.rank(), stream_);
 }
 
 // The companions' planned bytes: pack_layer_companions' matrices by formula
@@ -1557,7 +1711,7 @@ size_t QwenModel::bf12_plan_bytes(const QwenTextConfig& cfg, const QwenLocalGeom
 // then its own mixer and the shared head.
 // ---------------------------------------------------------------------------
 void QwenModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode_row,
-                             bool capture, int head_rows, int batch_requests) {
+                             bool capture, int head_rows, int batch_requests, int hidden_row) {
   walk_rows_ = T;
   // The hidden projection has T * hc matrix rows: a shipped 6/8-token
   // walk must not enter the wide guard just because hc expands it to 24/32.
@@ -1577,7 +1731,9 @@ void QwenModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, 
   // ---- the input fusion --------------------------------------------------
   // Decode rows gather their hyper states from the slots' windows by
   // position; prefill rows read the main chunk's rows in place (r_).
-  const uint16_t* hin = r_;
+  if (hidden_row < 0 || hidden_row + T > max_tokens_)
+    throw std::invalid_argument("mtp_run_rows: hidden span outside the main walk");
+  const uint16_t* hin = r_ + static_cast<size_t>(hidden_row) * W;
   if (decode_row) {
     gather_draft_hidden(d_req, d_pos, mtp_hin_, T);
     hin = mtp_hin_;
@@ -1652,7 +1808,9 @@ void QwenModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, 
   mtp_mixer_->mix(head_in, h_, head_rows, stream_);
   head_dump_site_ = 1;
   head_req_ = req;
+  head_screen_site_ = decode_row && head_rows <= max_decode_rows_;
   lm_head_logits(h_, head_rows, stream_);
+  head_screen_site_ = false;
   head_dump_site_ = 0;
   if (decode_row) prefetch_.join(stream_);  // every forked prefetch back on the main stream
   if (decode_row && (!capture || decode_tail_mirrors_) && head_rows <= max_decode_rows_)
@@ -1800,6 +1958,11 @@ bool QwenModel::session_prefill_advance(PrefillCursor& cursor, int64_t chunk_tok
   const bool done = Base::session_prefill_advance(cursor, chunk_tokens);
   if (done) cursor.images = nullptr;
   return done;
+}
+
+std::vector<bool> QwenModel::session_prefill_advance_group(const std::vector<PrefillCursor*>& cursors,
+                                                        const std::vector<int64_t>& budgets) {
+  return Base::session_prefill_advance_group(cursors, budgets);
 }
 
 QwenModel::Outputs QwenModel::session_prefill_with_images(

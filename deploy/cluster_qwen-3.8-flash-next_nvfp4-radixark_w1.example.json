@@ -13,6 +13,9 @@
     "decode_graph": true,
     "mtp": true,
     "mtp_depth": 2,
+    "draft_head": "screen",
+    "lookup_draft": true,
+    "lookup_tail": 2,
     "prefix_cache_gib": 3,
     "admission": "grow",
     "admission_window": 256,
@@ -20,9 +23,7 @@
     "sampling_candidates": 128,
     "stats_interval_s": 1,
     "dense_weights": "fp8",
-    "mtp_expert_format": "bf16_fused",
-    "prefill_idle_budget_tokens": 4096,
-    "prefill_budget_tokens": 4096
+    "mtp_expert_format": "bf16_fused"
   },
   "paths": {
     "resident_cache": ""

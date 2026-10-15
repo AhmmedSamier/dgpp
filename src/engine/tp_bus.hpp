@@ -190,9 +190,9 @@ struct BusBoundaryReducer final : BoundaryReducer {
 // the fold, no engine launch on the collective stream, no host notice of
 // the finish before the model may continue; the kernel form is the replay's
 // (bitwise the eager machine's). The model skips the drain
-// (stream_ordered) and calls settle() once per pass. Boundaries above one
-// latency slot keep the host-driven bulk path (the stream is drained for
-// them: settle, then the bulk collective, then its wait).
+// (stream_ordered) and calls settle() once per pass. Short boundaries use
+// up to two latency slots. Larger boundaries drain the stream and fold
+// their bulk prefix through the host, then queue any short tail.
 // ---------------------------------------------------------------------------
 class BusStreamReducer final : public BoundaryReducer {
  public:
@@ -230,8 +230,11 @@ class BusStreamReducer final : public BoundaryReducer {
       host_driven(partial, total);
       return;
     }
-    if (total <= max_elems_) {
-      issue(partial, total);
+    // Keep short mixed walks on the model stream when a decoder pushes
+    // a reader just past one latency slot. Like the host boundary reducer,
+    // use bulk only beyond two slots; each chunk keeps canonical rank order.
+    if (total <= 2 * max_elems_) {
+      issue_pair(partial, total);
       return;
     }
     // Prefill-class boundary: the stream's folds settle, the stream
@@ -239,7 +242,19 @@ class BusStreamReducer final : public BoundaryReducer {
     // result for the host and the stream alike).
     settle();
     DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
-    host_driven(partial, total);
+    // A few extra mixed-batch rows can spill a full bulk segment into a
+    // second reduce-scatter/allgather wave. Fold a remainder of up to two
+    // latency slots on the model stream instead. Both machines sum each
+    // element in the same rank order; the completed bulk prefix and
+    // stream-ordered tail are ready before the next model kernel consumes them.
+    const size_t segment = bus_.bulk_segment_bytes() / 2;
+    const size_t tail = segment ? total % segment : 0;
+    if (total > segment && tail > 0 && tail <= 2 * max_elems_) {
+      host_driven(partial, total - tail);
+      issue_pair(partial + total - tail, tail);
+    } else {
+      host_driven(partial, total);
+    }
   }
 
   void settle() override {
@@ -277,6 +292,11 @@ class BusStreamReducer final : public BoundaryReducer {
     std::string err;
     if (bus_.allreduce_stream(stream_, at, at, elems, &err) == 0)
       throw std::runtime_error("boundary reduce: stream collective rejected: " + err);
+  }
+  void issue_pair(uint16_t* at, size_t elems) {
+    const size_t first = std::min(elems, max_elems_);
+    issue(at, first);
+    if (elems > first) issue(at + first, elems - first);
   }
   void host_driven(uint16_t* partial, size_t total) {
     std::string err;
@@ -334,7 +354,12 @@ struct GraphRecordReducer final : BoundaryReducer {
     if (cudaMalloc(reinterpret_cast<void**>(&probe_stable_), max_elems_ * 2) !=
         cudaSuccess)
       throw std::runtime_error("graph record reducer: probe buffer alloc failed");
-    DGPP_CUDA_OK(cudaMemset(probe_stable_, 0, max_elems_ * 2));
+    // Stream-ordered, never the legacy stream: a peer rank in the same
+    // process (the loopback worlds) may already be capturing, and a
+    // legacy-stream memset would try to synchronize with its capturing
+    // stream (cudaErrorStreamCaptureImplicit, 2026-10-14).
+    DGPP_CUDA_OK(cudaMemsetAsync(probe_stable_, 0, max_elems_ * 2, stream_));
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   }
   ~GraphRecordReducer() override {
     if (stable_) cudaFree(stable_);

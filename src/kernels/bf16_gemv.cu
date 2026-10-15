@@ -164,9 +164,50 @@ void launch_rows(const uint16_t* act, size_t act_stride, const uint16_t* w,
 }  // namespace
 
 bool bf16_gemv_accepts(const void* weight, int m, int k) {
-  return m >= 1 && m <= gemv::kMaxRows && k > 0 && (k % 8) == 0 &&
-         gemv::aligned16(weight) && gemv::smem_fits(m, k);
+  return m >= 1 && m <= gemv::kWideRows && k > 0 && (k % 8) == 0 &&
+         gemv::aligned16(weight) && gemv::smem_fits_wide(m, k);
 }
+
+namespace {
+template <int kRows>
+bool opt_in_rows() {
+  const int bytes = static_cast<int>(gemv::kWideSmemBytes);
+  for (const void* f : {reinterpret_cast<const void*>(bf16_gemv_kernel<kRows, true>),
+                        reinterpret_cast<const void*>(bf16_gemv_kernel<kRows, false>),
+                        reinterpret_cast<const void*>(bf16_gemv_dual_kernel<kRows, true>),
+                        reinterpret_cast<const void*>(bf16_gemv_dual_kernel<kRows, false>),
+                        reinterpret_cast<const void*>(bf16_gemv_multi_kernel<kRows, true>),
+                        reinterpret_cast<const void*>(bf16_gemv_multi_kernel<kRows, false>)})
+    if (cudaFuncSetAttribute(f, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) != cudaSuccess) {
+      (void)cudaGetLastError();
+      return false;
+    }
+  return true;
+}
+}  // namespace
+
+bool bf16_gemv_opt_in_wide() {
+  return opt_in_rows<5>() && opt_in_rows<6>() && opt_in_rows<7>() && opt_in_rows<8>();
+}
+
+namespace gemv {
+namespace {
+bool g_wide_rows = false;
+}
+bool enable_wide_rows() {
+  static const bool on = [] { return bf16_gemv_opt_in_wide() && scale_gemv_opt_in_wide(); }();
+  g_wide_rows = on;
+  return on;
+}
+bool wide_rows_enabled() { return g_wide_rows; }
+bool smem_fits_wide(int rows, int k) {
+  // The one-to-four-row instantiations keep the default ceiling (they are
+  // not opted in: every existing chunking stays as it was); the five-to-
+  // eight-row ones take the wide bound once the opt-in took.
+  const size_t bytes = smem_bytes(rows, k);
+  return bytes <= kMaxSmemBytes || (g_wide_rows && rows > kMaxRows && bytes <= kWideSmemBytes);
+}
+}  // namespace gemv
 
 void launch_bf16_gemv(const uint16_t* act, size_t act_row_stride,
                       const uint16_t* weight, void* out, bool out_f32, int m,
@@ -183,7 +224,11 @@ void launch_bf16_gemv(const uint16_t* act, size_t act_row_stride,
     case 2: launch_rows<2>(act, act_row_stride, weight, out, out_f32, n, k, stream); break;
     case 3: launch_rows<3>(act, act_row_stride, weight, out, out_f32, n, k, stream); break;
     case 4: launch_rows<4>(act, act_row_stride, weight, out, out_f32, n, k, stream); break;
-    default: throw std::invalid_argument("bf16_gemv: m outside 1..4");
+    case 5: launch_rows<5>(act, act_row_stride, weight, out, out_f32, n, k, stream); break;
+    case 6: launch_rows<6>(act, act_row_stride, weight, out, out_f32, n, k, stream); break;
+    case 7: launch_rows<7>(act, act_row_stride, weight, out, out_f32, n, k, stream); break;
+    case 8: launch_rows<8>(act, act_row_stride, weight, out, out_f32, n, k, stream); break;
+    default: throw std::invalid_argument("bf16_gemv: m outside 1..8");
   }
 }
 
@@ -204,7 +249,11 @@ void launch_bf16_gemv_dual(const Bf16GemvProblem& p0, const Bf16GemvProblem& p1,
     case 2: launch_dual_rows<2>(p0, p1, out_f32, k, stream); break;
     case 3: launch_dual_rows<3>(p0, p1, out_f32, k, stream); break;
     case 4: launch_dual_rows<4>(p0, p1, out_f32, k, stream); break;
-    default: throw std::invalid_argument("bf16_gemv_dual: m outside 1..4");
+    case 5: launch_dual_rows<5>(p0, p1, out_f32, k, stream); break;
+    case 6: launch_dual_rows<6>(p0, p1, out_f32, k, stream); break;
+    case 7: launch_dual_rows<7>(p0, p1, out_f32, k, stream); break;
+    case 8: launch_dual_rows<8>(p0, p1, out_f32, k, stream); break;
+    default: throw std::invalid_argument("bf16_gemv_dual: m outside 1..8");
   }
 }
 
@@ -233,7 +282,11 @@ void launch_bf16_gemv_multi(const Bf16GemvProblem* problems, int n_problems,
     case 2: launch_multi_rows<2>(mp, out_f32, k, stream); break;
     case 3: launch_multi_rows<3>(mp, out_f32, k, stream); break;
     case 4: launch_multi_rows<4>(mp, out_f32, k, stream); break;
-    default: throw std::invalid_argument("bf16_gemv_multi: m outside 1..4");
+    case 5: launch_multi_rows<5>(mp, out_f32, k, stream); break;
+    case 6: launch_multi_rows<6>(mp, out_f32, k, stream); break;
+    case 7: launch_multi_rows<7>(mp, out_f32, k, stream); break;
+    case 8: launch_multi_rows<8>(mp, out_f32, k, stream); break;
+    default: throw std::invalid_argument("bf16_gemv_multi: m outside 1..8");
   }
 }
 

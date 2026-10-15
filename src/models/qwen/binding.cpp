@@ -26,16 +26,18 @@ void add_bf16(TensorList& out, const std::string& name, std::vector<int64_t> sha
 // convention) by `f32_scale`.
 void add_quantized(TensorList& out, const std::string& name, int64_t rows, int64_t cols,
                    QwenWeightClass cls, int layer, int expert, bool nvfp4 = false,
-                   bool f32_scale = false) {
+                   bool f32_scale = false, bool input_scale = true) {
   if (nvfp4) {
-    // The modelopt NVFP4 triple (plus its unused activation scale): `name`
-    // is "...proj.weight".
+    // The modelopt NVFP4 triple (plus its activation scale, which the
+    // weight-only W4A16_NVFP4 form of the QAD export's draft experts does
+    // not carry): `name` is "...proj.weight".
     const std::string base = name.substr(0, name.size() - std::string(".weight").size());
     add(out, name, DType::U8, {rows, cols / 2}, cls, layer, expert, QwenTensorRole::Fp4Payload);
     add(out, base + ".weight_scale", DType::F8_E4M3, {rows, cols / 16}, cls, layer, expert,
         QwenTensorRole::Fp4Scale);
     add(out, base + ".weight_scale_2", DType::F32, {}, cls, layer, expert, QwenTensorRole::Fp4Global);
-    add(out, base + ".input_scale", DType::F32, {}, cls, layer, expert, QwenTensorRole::InputScale);
+    if (input_scale)
+      add(out, base + ".input_scale", DType::F32, {}, cls, layer, expert, QwenTensorRole::InputScale);
     return;
   }
   add(out, name, DType::F8_E4M3, {rows, cols}, cls, layer, expert, QwenTensorRole::Fp8Payload);
@@ -43,15 +45,37 @@ void add_quantized(TensorList& out, const std::string& name, int64_t rows, int64
       cls, layer, expert, QwenTensorRole::Fp8Scale);
 }
 
-// A dense projection in the form the checkpoint ships it: BF16, or (the
-// AutoRound hybrid's 48 backbone layers) block FP8 with F32 scales — the
-// hybrid's draft layer keeps its projections and shared expert in BF16.
+// An MXFP8 matrix (the QAD export's dense stack): e4m3 `name` [rows, cols]
+// and one e8m0 byte per 32 columns of a row, `base.weight_scale` U8
+// [rows, cols/32]; `name` is "...proj.weight".
+void add_mxfp8(TensorList& out, const std::string& name, int64_t rows, int64_t cols,
+               QwenWeightClass cls, int layer) {
+  const std::string base = name.substr(0, name.size() - std::string(".weight").size());
+  add(out, name, DType::F8_E4M3, {rows, cols}, cls, layer, -1, QwenTensorRole::Mxfp8Payload);
+  add(out, base + ".weight_scale", DType::U8, {rows, cols / kQwenMxfp8Group}, cls, layer, -1,
+      QwenTensorRole::Mxfp8Scale);
+}
+
+// A dense projection in the form the checkpoint ships it: BF16, (the
+// AutoRound hybrid's 48 backbone layers) block FP8 with F32 scales, or (the
+// QAD export's 48 backbone layers) MXFP8 — both hybrids' draft layer keeps
+// its projections and shared expert in BF16.
 void add_dense(TensorList& out, const std::string& name, int64_t rows, int64_t cols,
                QwenWeightClass cls, int layer, const QwenTextConfig& cfg) {
-  if (cfg.dense_fp8_shipped && layer != cfg.mtp_layer())
+  if (cfg.dense_mxfp8_shipped && layer != cfg.mtp_layer())
+    add_mxfp8(out, name, rows, cols, cls, layer);
+  else if (cfg.dense_fp8_shipped && layer != cfg.mtp_layer())
     add_quantized(out, name, rows, cols, cls, layer, -1, false, true);
   else
     add_bf16(out, name, {rows, cols}, cls, layer);
+}
+
+// A (1 + w) norm vector: BF16, or F32 for the QAD export's trained norms
+// (the backbone's and the model mixer's; the draft layer's stay BF16).
+void add_norm(TensorList& out, const std::string& name, int64_t n, QwenWeightClass cls, int layer,
+              const QwenTextConfig& cfg) {
+  const bool f32 = cfg.norms_f32 && layer != cfg.mtp_layer();
+  add(out, name, f32 ? DType::F32 : DType::BF16, {n}, cls, layer);
 }
 
 // The GPTQ triple of the logical [N, K] matrix `base` ("...gate_proj",
@@ -71,7 +95,7 @@ void add_gptq(TensorList& out, const std::string& base, int64_t N, int64_t K, in
 void expect_gr(TensorList& out, const std::string& p, const QwenTextConfig& cfg, int layer,
                QwenWeightClass cls, bool combine) {
   const int64_t W = cfg.hyper_width();
-  add_bf16(out, p + "hc_norm.weight", {W}, cls, layer);
+  add_norm(out, p + "hc_norm.weight", W, cls, layer, cfg);
   add_bf16(out, p + "input_mix_weight_down.weight", {cfg.hc_lowrank, W}, cls, layer);
   add_bf16(out, p + "input_mix_weight_up.weight", {W, cfg.hc_lowrank}, cls, layer);
   if (combine) add_bf16(out, p + "block_inject_weight.weight", {cfg.hc_count, W}, cls, layer);
@@ -86,8 +110,15 @@ void expect_gdn(TensorList& out, const std::string& p, const QwenTextConfig& cfg
   add_bf16(out, p + "A_log", {vh}, c, layer);
   add_bf16(out, p + "dt_bias", {vh}, c, layer);
   add_bf16(out, p + "conv1d.weight", {2 * kdim + vdim, 1, cfg.gdn_conv_width}, c, layer);
-  add_bf16(out, p + "in_proj_a.weight", {vh, H}, c, layer);
-  add_bf16(out, p + "in_proj_b.weight", {vh, H}, c, layer);
+  // The AutoRound hybrid ships a and b in BF16 beside its FP8 stack; the
+  // QAD export quantizes them with the rest (MXFP8).
+  if (cfg.dense_mxfp8_shipped) {
+    add_dense(out, p + "in_proj_a.weight", vh, H, c, layer, cfg);
+    add_dense(out, p + "in_proj_b.weight", vh, H, c, layer, cfg);
+  } else {
+    add_bf16(out, p + "in_proj_a.weight", {vh, H}, c, layer);
+    add_bf16(out, p + "in_proj_b.weight", {vh, H}, c, layer);
+  }
   add_dense(out, p + "in_proj_qkv.weight", 2 * kdim + vdim, H, c, layer, cfg);
   add_dense(out, p + "in_proj_z.weight", vdim, H, c, layer, cfg);
   add_bf16(out, p + "norm.weight", {cfg.gdn_value_head_dim}, c, layer);
@@ -106,9 +137,15 @@ void expect_qsa(TensorList& out, const std::string& p, const QwenTextConfig& cfg
   add_bf16(out, p + "q_norm.weight", {d}, c, layer);
   add_bf16(out, p + "k_norm.weight", {d}, c, layer);
   const int64_t id = cfg.indexer_head_dim;
-  add_bf16(out, p + "indexer.index_qk_proj.weight",
-           {(cfg.indexer_n_heads + cfg.indexer_kv_heads) * id, H}, QwenWeightClass::QsaIndexer,
-           layer);
+  // The indexer projection: BF16 (the AutoRound hybrid's too), or the QAD
+  // export's MXFP8 with the rest of the attention form.
+  if (cfg.dense_mxfp8_shipped && layer != cfg.mtp_layer())
+    add_mxfp8(out, p + "indexer.index_qk_proj.weight", (cfg.indexer_n_heads + cfg.indexer_kv_heads) * id, H,
+              QwenWeightClass::QsaIndexer, layer);
+  else
+    add_bf16(out, p + "indexer.index_qk_proj.weight",
+             {(cfg.indexer_n_heads + cfg.indexer_kv_heads) * id, H}, QwenWeightClass::QsaIndexer,
+             layer);
   add_bf16(out, p + "indexer.q_layernorm.weight", {id}, QwenWeightClass::QsaIndexer, layer);
   add_bf16(out, p + "indexer.k_layernorm.weight", {id}, QwenWeightClass::QsaIndexer, layer);
 }
@@ -135,8 +172,19 @@ void expect_moe(TensorList& out, const std::string& p, const QwenTextConfig& cfg
     return;
   }
   // The NVFP4 release quantizes the backbone's routed experts only; the MTP
-  // layer's keep the FP8 block form.
-  const bool nvfp4 = cfg.experts_nvfp4 && layer != cfg.mtp_layer();
+  // layer's keep the FP8 block form. The QAD export's draft experts are
+  // NVFP4 too, weight-only (no input_scale).
+  const bool is_mtp = layer == cfg.mtp_layer();
+  if (cfg.mtp_experts_nvfp4 && is_mtp) {
+    for (int e = 0; e < E; ++e) {
+      const std::string ep = p + "experts." + std::to_string(e) + ".";
+      add_quantized(out, ep + "gate_proj.weight", I, H, QwenWeightClass::RoutedExpert, layer, e, true, false, false);
+      add_quantized(out, ep + "up_proj.weight", I, H, QwenWeightClass::RoutedExpert, layer, e, true, false, false);
+      add_quantized(out, ep + "down_proj.weight", H, I, QwenWeightClass::RoutedExpert, layer, e, true, false, false);
+    }
+    return;
+  }
+  const bool nvfp4 = cfg.experts_nvfp4 && !is_mtp;
   // The RadixArk release stores the draft layer's 512 experts as one fused
   // BF16 pair (gate_up_proj [E, 2*I, H] and down_proj [E, H, I]) — the gate
   // and up projections stacked on dim 1, no per-expert index — which the
@@ -161,14 +209,29 @@ void expect_ple(TensorList& out, const std::string& p, const QwenTextConfig& cfg
   add_bf16(out, p + "conv1d.weight", {W, 1, cfg.ple_conv_kernel_size}, c, layer);
   add_bf16(out, p + "key_proj.weight", {W, E}, c, layer);
   add_bf16(out, p + "value_proj.weight", {cfg.hidden_size, E}, c, layer);
-  add_bf16(out, p + "norm_conv.weight", {W}, c, layer);
-  add_bf16(out, p + "norm_key.weight", {W}, c, layer);
-  add_bf16(out, p + "norm_query.weight", {W}, c, layer);
+  add_norm(out, p + "norm_conv.weight", W, c, layer, cfg);
+  add_norm(out, p + "norm_key.weight", W, c, layer, cfg);
+  add_norm(out, p + "norm_query.weight", W, c, layer, cfg);
   const QwenNgramGeometry g = cfg.ngram_geometry();
   const std::string ep = p + "ple_embedding.";
   add(out, ep + "layer_multipliers", DType::I64, {cfg.ngram_size}, c, layer);
   add(out, ep + "ngram_heads_offsets", DType::I64, {g.heads}, c, layer);
   add(out, ep + "ngram_heads_vocab_sizes", DType::I64, {g.heads}, c, layer);
+  if (cfg.ngram_table_nvfp4) {
+    // The QAD export's table: e2m1 codes with e4m3 scales per 16 and one
+    // F32 global (modelopt's layout, the experts' triple at table scale).
+    add(out, ep + "ngram_embedding.weight_scale_2", DType::F32, {1}, QwenWeightClass::PleTable, layer, -1,
+        QwenTensorRole::NgramScale);
+    for (int s = 0; s < cfg.split_ngram_parts; ++s) {
+      const std::string sp = ep + "ngram_embedding.shard_" + std::to_string(s);
+      const int64_t rows = qwen_ngram_shard_rows(cfg, s);
+      add(out, sp + ".weight", DType::U8, {rows, g.head_dim / 2}, QwenWeightClass::PleTable, layer, s,
+          QwenTensorRole::NgramShard);
+      add(out, sp + ".weight_scale", DType::F8_E4M3, {rows, g.head_dim / kQwenNvfp4Group},
+          QwenWeightClass::PleTable, layer, s, QwenTensorRole::NgramShardScale);
+    }
+    return;
+  }
   add(out, ep + "ngram_embedding.weight_scale", DType::BF16, {1}, QwenWeightClass::PleTable, layer,
       -1, QwenTensorRole::NgramScale);
   for (int s = 0; s < cfg.split_ngram_parts; ++s)
@@ -343,6 +406,15 @@ void qwen_tp_validate_geometry(const QwenTextConfig& cfg, int rank, int world) {
   for (const int inter : {cfg.moe_intermediate_size, cfg.shared_expert_intermediate_size}) {
     if (inter % world != 0) fail("an expert intermediate size must divide by world");
     if ((inter / world) % 16 != 0) fail("an expert intermediate slice must be a multiple of 16");
+  }
+  if (cfg.dense_mxfp8_shipped) {
+    // The K-sliced MXFP8 matrices slice on whole 32-wide scale groups.
+    if ((cfg.gdn_value_heads / world * cfg.gdn_value_head_dim) % kQwenMxfp8Group != 0)
+      fail("the GDN out_proj's local columns must be a multiple of the MXFP8 group (32)");
+    if ((cfg.num_attention_heads / world * cfg.head_dim) % kQwenMxfp8Group != 0)
+      fail("the QSA o_proj's local columns must be a multiple of the MXFP8 group (32)");
+    if ((cfg.shared_expert_intermediate_size / world) % kQwenMxfp8Group != 0)
+      fail("the shared expert's intermediate slice must be a multiple of the MXFP8 group (32)");
   }
 }
 

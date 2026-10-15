@@ -4327,6 +4327,85 @@ DGPP_TEST(dsa_attention_quantized_cache_matches_dequantized_oracle) {
   attention_quantized_case(LatentFormat::kBf16, 6003);  // the path the others must equal
 }
 
+// Exercise every finite nonnegative e4m3 block-scale code and every e2m1
+// value through the actual attention loaders. The host codec supplies an
+// equivalent bf16 cache, so both kernels must produce identical partials.
+DGPP_TEST(dsa_fp4_attention_loaders_match_bf16_for_all_codes) {
+  constexpr int rows = 127, heads = 16, latent = 512, rope = 64;
+  constexpr int width = latent + rope, block = 128, splits = 1;
+  const size_t packed_stride = latent_row_bytes(LatentFormat::kFp4, latent) + rope * 2;
+  std::vector<uint8_t> packed(block * packed_stride);
+  std::vector<uint16_t> plain(block * width), query(rows * heads * width, 0);
+  std::vector<float> scales(block, 0);
+  std::vector<int32_t> req(rows, 0), tokens(rows), counts(rows, 1);
+  std::vector<int64_t> positions(rows);
+  for (int r = 0; r < rows; ++r) {
+    // Include zero and scales on both sides of unity, with non-power-of-two
+    // mantissas so final bf16 rounding is exercised as well.
+    scales[r] = r == 0 ? 0.0f : std::ldexp(1.00390625f + (r % 7) * 0.03125f, r % 25 - 12);
+    tokens[r] = r;
+    positions[r] = r;
+    auto* p = packed.data() + r * packed_stride;
+    for (int e = 0; e < latent; ++e) {
+      const uint8_t code = e % 16;
+      const uint8_t scale_code = (r + e / kLatentFp4Block) % 127;
+      p[e / 2] |= static_cast<uint8_t>(code << ((e & 1) * 4));
+      p[latent_fp4_scale_offset(latent) + e / kLatentFp4Block] = scale_code;
+      plain[r * width + e] = latent_fp4_decode_bf16(code,
+          latent_fp4_block_scale(scale_code, scales[r]));
+    }
+    for (int e = 0; e < rope; ++e) {
+      const uint16_t v = float_to_bf16_bits((e - 32) * 0.03125f);
+      std::memcpy(p + latent_row_bytes(LatentFormat::kFp4, latent) + e * 2, &v, 2);
+      plain[r * width + latent + e] = v;
+    }
+  }
+  DevBuf dp(packed.size()), db(plain.size() * 2), dq(query.size() * 2),
+      ds(scales.size() * 4), dr(req.size() * 4), dt(tokens.size() * 4),
+      dn(counts.size() * 4), dpos(positions.size() * 8), dbt(4),
+      dm(rows * heads * 4), dl(rows * heads * 4), dc(rows * heads * latent * 4);
+  dp.upload(packed.data(), packed.size()); db.upload(plain.data(), plain.size() * 2);
+  dq.upload(query.data(), query.size() * 2); ds.upload(scales.data(), scales.size() * 4);
+  dr.upload(req.data(), req.size() * 4); dt.upload(tokens.data(), tokens.size() * 4);
+  dn.upload(counts.data(), counts.size() * 4); dpos.upload(positions.data(), positions.size() * 8);
+  const int32_t zero = 0; dbt.upload(&zero, 4);
+  for (int kernel = 0; kernel < 3; ++kernel) {
+    std::vector<float> reference, got;
+    for (LatentFormat fmt : {LatentFormat::kBf16, LatentFormat::kFp4}) {
+      const void* cache = fmt == LatentFormat::kBf16 ? db.p : dp.p;
+      const float* scale = fmt == LatentFormat::kBf16 ? nullptr : static_cast<const float*>(ds.p);
+      bool accepted = true;
+      if (kernel == 0) {
+        dsa_attn_partial(dq.p, cache, static_cast<const int32_t*>(dr.p),
+            static_cast<const int32_t*>(dt.p), 1, static_cast<const int32_t*>(dn.p),
+            rows, splits, heads, latent, block, static_cast<const int32_t*>(dbt.p),
+            1, 1.0f, static_cast<float*>(dm.p), static_cast<float*>(dl.p),
+            static_cast<float*>(dc.p), 0, fmt, scale, rope);
+      } else if (kernel == 1) {
+        accepted = dsa_attn_listed(dq.p, cache, static_cast<const int32_t*>(dr.p),
+            static_cast<const int32_t*>(dt.p), 1, static_cast<const int32_t*>(dn.p),
+            rows, splits, heads, latent, block, static_cast<const int32_t*>(dbt.p),
+            1, 1.0f, static_cast<float*>(dm.p), static_cast<float*>(dl.p),
+            static_cast<float*>(dc.p), 0, fmt, scale, rope);
+      } else {
+        accepted = dsa_attn_dense(dq.p, cache, static_cast<const int32_t*>(dr.p),
+            static_cast<const int64_t*>(dpos.p), rows, splits, heads, latent, block,
+            static_cast<const int32_t*>(dbt.p), 1, 1.0f, static_cast<float*>(dm.p),
+            static_cast<float*>(dl.p), static_cast<float*>(dc.p), 0, fmt, scale, rope);
+      }
+      if (!accepted) throw std::runtime_error("fp4 code coverage: attention kernel declined geometry");
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      auto& out = fmt == LatentFormat::kBf16 ? reference : got;
+      out.resize(rows * heads * (latent + 2));
+      dm.download(out.data(), rows * heads * 4);
+      dl.download(out.data() + rows * heads, rows * heads * 4);
+      dc.download(out.data() + 2 * rows * heads, rows * heads * latent * 4);
+    }
+    require_bitwise("fp4 all-code attention kernel " + std::to_string(kernel),
+        got.data(), reference.data(), got.size() * sizeof(float));
+  }
+}
+
 // A whole layer (chunked prefill across a partial pool + a decode batch) on
 // a quantized cache against the host reference, whose append quantizes the
 // same rows through the same codec and keeps the dequantized values: the

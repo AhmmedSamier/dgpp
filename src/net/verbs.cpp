@@ -200,12 +200,26 @@ RcLane::RcLane(VerbsDevice& device, const BusSlabLayout& layout, int qp_depth,
     init.cap.max_recv_wr = qp_depth;
     init.cap.max_send_sge = 1;
     init.cap.max_recv_sge = 1;
-    init.cap.max_inline_data = 0;
+    // Ask for the 64-byte doorbell / credit cells inline (the driver writes
+    // the granted size back into init.cap; below it the cells go by SGE as
+    // before — a mismatch is a capability, not an error).
+    init.cap.max_inline_data = static_cast<uint32_t>(sizeof(StartSlot));
     qp_[pool] = ibv_create_qp(device.pd(), &init);
+    if (!qp_[pool]) {
+      init.cap.max_inline_data = 0;
+      qp_[pool] = ibv_create_qp(device.pd(), &init);
+    }
     if (!qp_[pool]) {
       *error = "create_qp failed errno=" + std::to_string(errno);
       return;
     }
+    inline_ok_[pool] = init.cap.max_inline_data >= sizeof(StartSlot);
+    static const bool logged = [&] {
+      DGPP_LOG_INFO("bus lane: inline doorbells {} (max_inline_data {} B, cell {} B)",
+                    inline_ok_[pool] ? "on" : "off", init.cap.max_inline_data, sizeof(StartSlot));
+      return true;
+    }();
+    (void)logged;
 
     ibv_qp_attr attr{};
     attr.qp_state = IBV_QPS_INIT;
@@ -349,6 +363,7 @@ bool RcLane::post_send_pair(BusPool pool, uint32_t slot, uint32_t seq,
   wr[1].num_sge = 1;
   wr[1].opcode = IBV_WR_SEND;
   wr[1].send_flags = IBV_SEND_SIGNALED;
+  if (inline_cells(pool)) wr[1].send_flags |= IBV_SEND_INLINE;  // the cell is copied at post time
 
   ibv_send_wr* bad = nullptr;
   if (ibv_post_send(qp, &wr[0], &bad) != 0) {
@@ -389,6 +404,7 @@ bool RcLane::post_credit_write(BusPool pool, uint32_t slot, uint32_t seq,
   wr.num_sge = 1;
   wr.opcode = IBV_WR_RDMA_WRITE;
   wr.send_flags = (seq % kCreditSignalEvery == 0) ? IBV_SEND_SIGNALED : 0;
+  if (inline_cells(pool)) wr.send_flags |= IBV_SEND_INLINE;
   wr.wr.rdma.remote_addr =
       layout_.completion_remote_addr(peer.slab_base, pool, slot);
   wr.wr.rdma.rkey = peer.rkey;

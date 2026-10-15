@@ -28,7 +28,9 @@ N configured nodes. `.env` is parsed as data, not sourced as Bash, and unrelated
 entries such as access tokens are not loaded by the site helper.
 
 HTTP clients either take their endpoint as arguments or use the selected
-deployment's HTTP settings. Shared defaults bind to localhost. Request model
+deployment's HTTP settings. Shared defaults bind to all IPv4 interfaces
+(`0.0.0.0`); setup prompts for the bind address and accepts `--http-bind` for
+unattended configuration. Request model
 IDs are discovered from `/v1/models` unless explicitly supplied. Family-specific
 native checks still require an appropriate model. The failure, stop, and serving
 soak procedures require four ranks and reject other worlds before starting.
@@ -45,6 +47,15 @@ and [test/data preparation](../docs/testing.md).
 
 For exact arguments, read the usage header or use `--help` where supported.
 Some older scripts start work immediately and do not implement `--help`.
+
+`serve_admission_bench.py --url http://127.0.0.1:18081 --label COMMIT-CONFIG
+--out RESULTS.json` measures isolated decode/prefill, short arrivals, sustained
+arrivals and cancellation. Use identical arguments on fresh baseline and
+candidate servers in alternating order, with both equal and different busy/idle
+budgets. It records exact request hashes and output counts, correlates the long
+response with native prefill progress, and rejects unrelated traffic. Output
+hashes are evidence for separate numerical review, not a quality score; SSE
+update gaps are client observations, not per-token kernel timings.
 
 ## Build, configuration, and deployment
 
@@ -119,12 +130,14 @@ affect the results.
 | [serve_bench.py](serve_bench.py) | Times a streaming chat request and reports time to first token, decode pace, wall time, and usage. Can obtain its default endpoint from site settings. | Take a quick client-side latency reading. |
 | [serve_load.py](serve_load.py) | Sends fixed-concurrency streaming request phases and reports per-request timing and aggregate throughput. Supports prompt-class sweeps. | Measure serving throughput as concurrency or workload changes. |
 | [timed_load.py](timed_load.py) | Adds engine decode rates to `serve_load.py`, reconciling published counters with completed requests under a deadline. | Measure engine-call time on an otherwise idle server; uses the same CLI and also accounts for warmup and isolation requests. |
+| [serve_context_matrix.py](serve_context_matrix.py) | Measures cold prefill, decode ms/pass and engine tok/s at a minimal baseline and 32K/64K/128K/256K/512K context buckets; retains actual prompt counts and skips buckets above the deployment limit. | Measure context scaling on an idle server with the tools venv; supply the checkpoint ID, a unique cold-run tag and a JSON output path. |
 | [serve_mtp_classes.py](serve_mtp_classes.py) | Sends the five class prompts greedily and reads each request's retired line from rank 0's log: pass time, tokens per pass and draft acceptance as the engine counted them. | Compare MTP acceptance per prompt type through the service. |
 | [serve_greedy_transcript.py](serve_greedy_transcript.py) | Saves fixed greedy prompts and replies to JSON, with optional exact comparison against a reference file. | Check whether plain/MTP modes or deployment changes preserve API-level output. |
 | [mtp_depth_check.py](mtp_depth_check.py) | Writes separate prose, code, and JSON completions and prints acceptance information from a rank-0 log. | Collect outputs from separate MTP-depth launches for a directory diff. |
 | [serve_eval.py](serve_eval.py) | Scores HumanEval, GSM8K, and synthetic structured extraction, saving per-item results and summaries. | Compare task accuracy between deployments. HumanEval executes generated code; GSM8K and HumanEval require local datasets. |
 | [serve_prefill_probe.py](serve_prefill_probe.py) | Calibrates approximate prompt lengths, defeats prefix reuse with unique prefixes, and measures prefill metric deltas and first-token latency. | Isolate prefill cost through HTTP; requires `DGPP_DATA_DIR/gsm8k_test.jsonl`, or `--data FILE`. |
 | [serve_prefill_interference.py](serve_prefill_interference.py) | Runs a long prefill beside an active decode stream and reports the decode client's update-gap distribution. | Measure how budgeted prefill affects an overlapping request on an otherwise idle server. |
+| [serve_admission_bench.py](serve_admission_bench.py) | Measures isolated and mixed prefill/decode, sustained arrivals and cancellation with fixed work, request hashes and native prefill overlap checks. | Compare fresh baseline/candidate processes in alternating order before accepting an admission-policy change. |
 | [serve_prefix_curve.py](serve_prefix_curve.py) | Interleaves three-turn conversations and reports cache hits, misses, evictions, saved tokens, and per-turn latency. | Measure prefix-cache capacity at a chosen conversation count. |
 | [serve_agentic_streams.py](serve_agentic_streams.py) | Runs concurrent multi-turn tool or essay conversations, optional side requests, and system-prompt mutations; records cache reuse and timing. | Check prefix reuse under agent-style traffic and detect unexpected cache misses. Tool results are synthetic. |
 | [serve_soak.py](serve_soak.py) | Runs timed mixed traffic: short conversations, long answers, disconnected streams, and admission bursts; saves requests, metrics, and latency summaries. | Test sustained serving behavior and tail-latency stability. |

@@ -1,3 +1,4 @@
+#include "kernels/latent_format.hpp"
 #include "kernels/qwen_ple.hpp"
 
 #include <stdexcept>
@@ -252,7 +253,7 @@ __global__ void conv_rows_kernel(const uint16_t* __restrict__ un, const uint16_t
                                  const int32_t* __restrict__ req_ids,
                                  const int64_t* __restrict__ pos,
                                  const int32_t* __restrict__ spans, int channels,
-                                 uint16_t* __restrict__ snapshots) {
+                                 uint16_t* __restrict__ snapshots, int snapshot_rows) {
   constexpr int S = (W - 1) * D;
   const int c = blockIdx.x * blockDim.x + threadIdx.x;
   if (c >= channels) return;
@@ -263,7 +264,7 @@ __global__ void conv_rows_kernel(const uint16_t* __restrict__ un, const uint16_t
     for (int t = s; t < s + len; ++t) {
       const int64_t at = static_cast<int64_t>(t) * channels + c;
       out[at] = residual ? residual[at] : static_cast<uint16_t>(0);
-      if (snapshots)
+      if (snapshots && (snapshot_rows < 0 || t < snapshot_rows))
         for (int j = 0; j < S; ++j) snapshots[at * S + j] = 0;
     }
     return;
@@ -295,7 +296,7 @@ __global__ void conv_rows_kernel(const uint16_t* __restrict__ un, const uint16_t
     } else {
       out[at] = residual ? residual[at] : static_cast<uint16_t>(0);
     }
-    if (snapshots) {
+    if (snapshots && (snapshot_rows < 0 || t < snapshot_rows)) {
       uint16_t* snap = snapshots + static_cast<int64_t>(t) * channels * S + static_cast<int64_t>(c) * S;
 #pragma unroll
       for (int j = 0; j < S; ++j) snap[j] = float_to_bf16_bits(hist[j]);
@@ -347,7 +348,7 @@ void qwen_ple_conv_rows_bf16(const uint16_t* un, const uint16_t* gv, uint16_t* s
                              const uint16_t* residual, uint16_t* out, const int32_t* req_ids,
                              const int64_t* pos, const int32_t* req_spans, int num_requests,
                              int channels, int width, int dilation, cudaStream_t stream,
-                             uint16_t* snapshots) {
+                             uint16_t* snapshots, int snapshot_rows) {
   if (num_requests <= 0) return;
   if (!un || !gv || !states || !weight || !out || !req_ids || !pos || !req_spans)
     throw std::invalid_argument("qwen_ple_conv_rows: null pointer");
@@ -357,7 +358,7 @@ void qwen_ple_conv_rows_bf16(const uint16_t* un, const uint16_t* gv, uint16_t* s
     throw std::invalid_argument("qwen_ple_conv_rows: bad geometry");
   const dim3 grid((channels + 255) / 256, static_cast<unsigned>(num_requests));
   conv_rows_kernel<4, 3><<<grid, 256, 0, stream>>>(un, gv, states, state_stride, weight, residual,
-                                                   out, req_ids, pos, req_spans, channels, snapshots);
+                                                   out, req_ids, pos, req_spans, channels, snapshots, snapshot_rows);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
@@ -421,6 +422,104 @@ __global__ void gather_staged_kernel(const uint8_t* __restrict__ staged, float s
     }
     reinterpret_cast<uint4*>(dst)[c] = make_uint4(packed[0], packed[1], packed[2], packed[3]);
   }
+}
+
+// ---- the NVFP4 table ----------------------------------------------------------
+// One 16-element group of a row: eight code bytes (two e2m1 each, the low
+// nibble the even element) and the group's e4m3 scale -> sixteen bf16.
+// v = (e2m1 x e4m3) x global, in that order: the first product is exact in
+// fp32 (six significant bits), the second rounds once, the bf16 store once
+// — modelopt's dequant chain, so the values are the reference's.
+__device__ __forceinline__ void fp4_group_to_bf16(const uint8_t* __restrict__ codes8, uint8_t scale,
+                                                  float global, uint16_t* __restrict__ dst16) {
+  const float s = fp8_e4m3_bits_to_float(scale);
+  const uint2 c = *reinterpret_cast<const uint2*>(codes8);
+  const uint32_t cw[2] = {c.x, c.y};
+  uint32_t packed[8];
+#pragma unroll
+  for (int b = 0; b < 8; ++b) {
+    const uint32_t byte = (cw[b / 4] >> (8 * (b % 4))) & 0xFFu;
+    const float lo = (fp4_e2m1_bits_to_float(static_cast<uint8_t>(byte & 0xFu)) * s) * global;
+    const float hi = (fp4_e2m1_bits_to_float(static_cast<uint8_t>(byte >> 4)) * s) * global;
+    packed[b] = static_cast<uint32_t>(float_to_bf16_bits(lo)) | (static_cast<uint32_t>(float_to_bf16_bits(hi)) << 16);
+  }
+  uint4* d = reinterpret_cast<uint4*>(dst16);
+  d[0] = make_uint4(packed[0], packed[1], packed[2], packed[3]);
+  d[1] = make_uint4(packed[4], packed[5], packed[6], packed[7]);
+}
+
+// One warp per (token, local head): lane g converts the row's group g
+// (head_dim / 16 groups; lanes past them idle).
+__global__ void gather_fp4_kernel(const uint8_t* __restrict__ codes, const uint8_t* __restrict__ scales,
+                                  int64_t row_begin, int64_t rows, float global,
+                                  const int32_t* __restrict__ ids, int n, int heads, int head_begin,
+                                  int heads_local, int head_dim, uint16_t* __restrict__ out) {
+  const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+  const int64_t pair = static_cast<int64_t>(blockIdx.x) * (blockDim.x / 32) + warp;
+  if (pair >= static_cast<int64_t>(n) * heads_local) return;
+  const int t = static_cast<int>(pair / heads_local);
+  const int hl = static_cast<int>(pair - static_cast<int64_t>(t) * heads_local);
+  const int64_t id = ids[static_cast<int64_t>(t) * heads + head_begin + hl];
+  const int64_t row = id - row_begin;
+  if (row < 0 || row >= rows) __trap();  // the hash never leaves the head's range
+  const int groups = head_dim / 16;
+  if (lane >= groups) return;
+  const uint8_t* crow = codes + row * (head_dim / 2);
+  const uint8_t* srow = scales + row * groups;
+  uint16_t* dst = out + (static_cast<int64_t>(t) * heads_local + hl) * head_dim;
+  fp4_group_to_bf16(crow + lane * 8, srow[lane], global, dst + lane * 16);
+}
+
+__global__ void gather_staged_fp4_kernel(const uint8_t* __restrict__ staged_codes,
+                                         const uint8_t* __restrict__ staged_scales, float global, int n,
+                                         int heads_local, int head_dim, uint16_t* __restrict__ out) {
+  const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+  const int64_t pair = static_cast<int64_t>(blockIdx.x) * (blockDim.x / 32) + warp;
+  if (pair >= static_cast<int64_t>(n) * heads_local) return;
+  const int groups = head_dim / 16;
+  if (lane >= groups) return;
+  const uint8_t* crow = staged_codes + pair * (head_dim / 2);
+  const uint8_t* srow = staged_scales + pair * groups;
+  uint16_t* dst = out + pair * head_dim;
+  fp4_group_to_bf16(crow + lane * 8, srow[lane], global, dst + lane * 16);
+}
+
+namespace {
+void check_fp4_geometry(int head_dim, int heads_local, const void* codes, const void* out, const char* who) {
+  if (head_dim <= 0 || head_dim % 16 != 0 || head_dim > 512 || heads_local <= 0)
+    throw std::invalid_argument(std::string(who) + ": bad geometry (head_dim % 16, head_dim <= 512, heads)");
+  if ((reinterpret_cast<uintptr_t>(codes) & 7u) || (reinterpret_cast<uintptr_t>(out) & 15u))
+    throw std::invalid_argument(std::string(who) + ": codes 8-byte and out 16-byte aligned required");
+}
+}  // namespace
+
+void qwen_ple_gather_fp4_bf16(const uint8_t* codes, const uint8_t* scales, int64_t row_begin, int64_t rows,
+                              float global, const int32_t* ids, int n, int heads, int head_begin,
+                              int heads_local, int head_dim, uint16_t* out, cudaStream_t stream) {
+  if (n <= 0) return;
+  if (!codes || !scales || !ids || !out) throw std::invalid_argument("qwen_ple_gather_fp4: null pointer");
+  if (head_begin < 0 || head_begin + heads_local > heads || rows <= 0)
+    throw std::invalid_argument("qwen_ple_gather_fp4: bad head range");
+  check_fp4_geometry(head_dim, heads_local, codes, out, "qwen_ple_gather_fp4");
+  const int64_t pairs = static_cast<int64_t>(n) * heads_local;
+  constexpr int kWarps = 8;
+  const int blocks = static_cast<int>((pairs + kWarps - 1) / kWarps);
+  gather_fp4_kernel<<<blocks, kWarps * 32, 0, stream>>>(codes, scales, row_begin, rows, global, ids, n, heads,
+                                                        head_begin, heads_local, head_dim, out);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void qwen_ple_gather_staged_fp4_bf16(const uint8_t* staged_codes, const uint8_t* staged_scales, float global,
+                                     int n, int heads_local, int head_dim, uint16_t* out, cudaStream_t stream) {
+  if (n <= 0) return;
+  if (!staged_codes || !staged_scales || !out) throw std::invalid_argument("qwen_ple_gather_staged_fp4: null pointer");
+  check_fp4_geometry(head_dim, heads_local, staged_codes, out, "qwen_ple_gather_staged_fp4");
+  const int64_t pairs = static_cast<int64_t>(n) * heads_local;
+  constexpr int kWarps = 8;
+  const int blocks = static_cast<int>((pairs + kWarps - 1) / kWarps);
+  gather_staged_fp4_kernel<<<blocks, kWarps * 32, 0, stream>>>(staged_codes, staged_scales, global, n, heads_local,
+                                                               head_dim, out);
+  DGPP_CUDA_OK(cudaGetLastError());
 }
 
 void qwen_ple_gather_staged_bf16(const uint8_t* staged, float scale, int n, int heads_local,

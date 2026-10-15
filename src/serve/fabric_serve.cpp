@@ -127,8 +127,18 @@ std::string hex64(uint64_t v) {
 
 }  // namespace
 
+static void append_latency_tuning(std::string& out, const sched::PrefillLatencyTuning& tuning) {
+  const sched::PrefillLatencyTuning defaults;
+  if (tuning.headroom_pct != defaults.headroom_pct) out += ",\"pfhr\":" + std::to_string(tuning.headroom_pct);
+  if (tuning.growth_factor != defaults.growth_factor) out += ",\"pfgrow\":" + std::to_string(tuning.growth_factor);
+  if (tuning.recovery_pct != defaults.recovery_pct) out += ",\"pfrec\":" + std::to_string(tuning.recovery_pct);
+  if (tuning.initial_tokens != defaults.initial_tokens) out += ",\"pfstart\":" + std::to_string(tuning.initial_tokens);
+  if (tuning.idle_floor_tokens != defaults.idle_floor_tokens) out += ",\"pfifloor\":" + std::to_string(tuning.idle_floor_tokens);
+}
+
 std::string encode_journal_tick(const GenerationService::PassEvents& events) {
   std::string out = "{\"op\":\"tick\"";
+  if (events.prefill_budget) out += ",\"pfmax\":" + std::to_string(*events.prefill_budget);
   if (!events.submits.empty()) {
     out += ",\"s\":[";
     for (size_t i = 0; i < events.submits.size(); ++i) {
@@ -348,6 +358,11 @@ std::string encode_journal_warm(const dgpp::sched::AdmissionPolicy& policy,
   // its own before serving; a config-less rank 0 writes none.
   if (policy.prefill_budget_tokens > 0) out += ",\"pfbudget\":" + std::to_string(policy.prefill_budget_tokens);
   if (policy.prefill_idle_budget_tokens > 0) out += ",\"pfidle\":" + std::to_string(policy.prefill_idle_budget_tokens);
+  if (policy.decode_gap_target_ms > 0) out += ",\"gapms\":" + std::to_string(policy.decode_gap_target_ms);
+  if (policy.first_token_target_ms > 0) out += ",\"ttftms\":" + std::to_string(policy.first_token_target_ms);
+  append_latency_tuning(out, policy.prefill_latency);
+  if (policy.prefill_budget_automatic) out += ",\"pfauto\":1";
+  if (policy.prefill_early_admission) out += ",\"pfearly\":1";
   if (policy.prefix_min_tokens > 0) out += ",\"pmin\":" + std::to_string(policy.prefix_min_tokens);
   if (policy.prefix_head_snapshots) out += ",\"phead\":1";
   if (!config_digest.empty()) {
@@ -375,6 +390,11 @@ std::string encode_journal_settings(const WorldSettings& s) {
   append_json_string(&out, s.admission);
   if (s.prefill_budget_tokens != 0) out += ",\"pfbudget\":" + std::to_string(s.prefill_budget_tokens);
   if (s.prefill_idle_budget_tokens > 0) out += ",\"pfidle\":" + std::to_string(s.prefill_idle_budget_tokens);
+  if (s.decode_gap_target_ms > 0) out += ",\"gapms\":" + std::to_string(s.decode_gap_target_ms);
+  if (s.first_token_target_ms > 0) out += ",\"ttftms\":" + std::to_string(s.first_token_target_ms);
+  append_latency_tuning(out, s.prefill_latency);
+  if (!s.prefill_early_admission.has_value()) out += ",\"pfearly\":-1";
+  else if (*s.prefill_early_admission) out += ",\"pfearly\":1";
   if (s.prefix_min_tokens > 0) out += ",\"pmin\":" + std::to_string(s.prefix_min_tokens);
   if (s.prefix_head_snapshots) out += ",\"phead\":1";
   out += std::format(",\"win\":{},\"pace\":{:.17g},\"inflight\":{},\"rdv\":{},\"stats\":{:.17g},\"ric\":{},\"kvdt\":",
@@ -387,6 +407,9 @@ std::string encode_journal_settings(const WorldSettings& s) {
   append_json_string(&out, s.dense_weights);
   out += ",\"fp8_head\":";
   append_json_string(&out, s.fp8_head);
+  out += ",\"dh\":";
+  append_json_string(&out, s.draft_head);
+  out += std::format(",\"dhb\":{}", s.draft_head_blocks);
   out += ",\"mtpef\":";
   append_json_string(&out, s.mtp_expert_format);
   out += ",\"bfw\":";
@@ -429,6 +452,10 @@ std::string encode_journal_settings(const WorldSettings& s) {
   }
   out += ",\"emsh\":";
   append_json_string(&out, s.embed_sharding);
+  out += ",\"mtph\":";
+  append_json_string(&out, s.mtp_head);
+  out += ",\"attw\":";
+  append_json_string(&out, s.attention_weights);
   out += std::format(",\"mss\":{},\"msrow\":{:.17g},\"msbase\":{:.17g},\"mslam\":{:.17g},\"msmin\":{},\"msad\":{},"
                      "\"msss\":{:.17g}",
                      s.mtp_schedule ? 1 : 0, s.mtp_schedule_row_ms, s.mtp_schedule_base_ms,
@@ -439,7 +466,8 @@ std::string encode_journal_settings(const WorldSettings& s) {
   out += std::format(",\"mdt\":{:.17g}", s.mtp_draft_temperature);
   out += ",\"mvf\":";
   append_json_string(&out, s.mtp_verify);
-  out += std::format(",\"dbr\":{}", s.dflash_batch_rows);
+  out += std::format(",\"dbr\":{},\"lk\":{},\"lkn\":{},\"lks\":{},\"lka\":{},\"lkt\":{}", s.dflash_batch_rows,
+                     s.lookup_draft ? 1 : 0, s.lookup_nmin, s.lookup_nstrong, s.lookup_agree, s.lookup_tail);
   out.push_back('}');
   return out;
 }
@@ -514,6 +542,27 @@ const dgpp::minijson::Value& field(const dgpp::minijson::Value& v,
 
 }  // namespace
 
+static int optional_policy_integer(const dgpp::minijson::Value& record, const char* key,
+                                   int minimum, int maximum) {
+  const auto* value = record.find(key);
+  if (!value) return 0;
+  if (!value->is_number() || !std::isfinite(value->as_double()) ||
+      value->as_double() < minimum || value->as_double() > maximum ||
+      std::floor(value->as_double()) != value->as_double())
+    throw std::runtime_error(std::string("journal: invalid policy field ") + key);
+  return static_cast<int>(value->as_int());
+}
+
+static sched::PrefillLatencyTuning read_latency_tuning(const dgpp::minijson::Value& record) {
+  sched::PrefillLatencyTuning tuning;
+  if (record.find("pfhr")) tuning.headroom_pct = optional_policy_integer(record, "pfhr", 0, 50);
+  if (record.find("pfgrow")) tuning.growth_factor = optional_policy_integer(record, "pfgrow", 2, 4);
+  if (record.find("pfrec")) tuning.recovery_pct = optional_policy_integer(record, "pfrec", 1, 100);
+  if (record.find("pfstart")) tuning.initial_tokens = optional_policy_integer(record, "pfstart", 1, 1 << 30);
+  if (record.find("pfifloor")) tuning.idle_floor_tokens = optional_policy_integer(record, "pfifloor", 0, 1 << 30);
+  return tuning;
+}
+
 JournalRecord decode_journal_line(std::string_view line) {
   // minijson VIEWS ITS INPUT — ParseResult owns nothing, string
   // members are string_views into the parsed buffer. The buffer must
@@ -565,6 +614,9 @@ JournalRecord decode_journal_line(std::string_view line) {
     s.prefix_cache_gib = num("pcgib").as_double();
     s.admission = std::string(field(v, "adm", "settings").as_string());
     s.admission_window = static_cast<int>(num("win").as_int());
+    s.decode_gap_target_ms = optional_policy_integer(v, "gapms", 0, sched::kMaxLatencyTargetMs);
+    s.first_token_target_ms = optional_policy_integer(v, "ttftms", 0, sched::kMaxLatencyTargetMs);
+    s.prefill_latency = read_latency_tuning(v);
     if (const auto* budget = v.find("pfbudget")) {
       if (!budget->is_number() || budget->as_int() < -1 || budget->as_int() > (1 << 30))
         throw std::runtime_error("journal: settings record with a bad prefill budget");
@@ -574,6 +626,12 @@ JournalRecord decode_journal_line(std::string_view line) {
       if (!budget->is_number() || budget->as_int() < 0 || budget->as_int() > (1 << 30))
         throw std::runtime_error("journal: settings record with a bad idle prefill budget");
       s.prefill_idle_budget_tokens = static_cast<int>(budget->as_int());
+    }
+    if (const auto* early = v.find("pfearly")) {
+      if (!early->is_number() || (early->as_double() != -1 && early->as_double() != 0 && early->as_double() != 1))
+        throw std::runtime_error("journal: settings record with a bad early admission mode");
+      s.prefill_early_admission = early->as_int() == -1 ? std::nullopt
+                                                     : std::optional<bool>(early->as_int() == 1);
     }
     // The prefix cache's entry policy (2026-09-28): records before it carry
     // neither key — no floor, no head cut, what such a rank 0 ran.
@@ -595,6 +653,16 @@ JournalRecord decode_journal_line(std::string_view line) {
       if (!head->is_string() || (head->as_string() != "gemv" && head->as_string() != "mma"))
         throw std::runtime_error("journal: engine.fp8_head must be gemv or mma");
       s.fp8_head = std::string(head->as_string());
+    }
+    // The draft head's read (2026-10-13): records before it carry none (exact).
+    if (const auto* dh = v.find("dh")) {
+      if (!dh->is_string() || (dh->as_string() != "exact" && dh->as_string() != "screen"))
+        throw std::runtime_error("journal: engine.draft_head must be exact or screen");
+      s.draft_head = std::string(dh->as_string());
+    }
+    if (const auto* dhb = v.find("dhb")) {
+      if (!dhb->is_number()) throw std::runtime_error("journal: engine.draft_head_blocks must be a number");
+      s.draft_head_blocks = static_cast<int>(dhb->as_int());
     }
     if (const dgpp::minijson::Value* dw = v.find("dw")) s.dense_weights = std::string(dw->as_string());
     if (const dgpp::minijson::Value* mtpef = v.find("mtpef")) s.mtp_expert_format = std::string(mtpef->as_string());
@@ -658,6 +726,9 @@ JournalRecord decode_journal_line(std::string_view line) {
     }
     // Records before 2026-09-13 carry no embedding sharding: replicated.
     if (const dgpp::minijson::Value* es = v.find("emsh")) s.embed_sharding = std::string(es->as_string());
+    // Records before 2026-10-09 carry no draft-head form: the checkpoint's.
+    if (const dgpp::minijson::Value* mh = v.find("mtph")) s.mtp_head = std::string(mh->as_string());
+    if (const dgpp::minijson::Value* aw = v.find("attw")) s.attention_weights = std::string(aw->as_string());
     // Records before 2026-09-14 carry no scheduled verify depth: off.
     if (const dgpp::minijson::Value* mss = v.find("mss")) {
       s.mtp_schedule = mss->as_int() != 0;
@@ -689,6 +760,16 @@ JournalRecord decode_journal_line(std::string_view line) {
       throw std::runtime_error("worker settings: mvf must be token or block");
     if (const dgpp::minijson::Value* dbr = v.find("dbr")) s.dflash_batch_rows = static_cast<int>(dbr->as_int());
     if (s.dflash_batch_rows < 0) throw std::runtime_error("worker settings: dbr must be >= 0");
+    // Records before context-lookup drafting carry none: off with defaults.
+    if (v.find("lk")) s.lookup_draft = flag("lk");
+    if (const dgpp::minijson::Value* lkn = v.find("lkn")) s.lookup_nmin = static_cast<int>(lkn->as_int());
+    if (const dgpp::minijson::Value* lks = v.find("lks")) s.lookup_nstrong = static_cast<int>(lks->as_int());
+    if (const dgpp::minijson::Value* lka = v.find("lka")) s.lookup_agree = static_cast<int>(lka->as_int());
+    // Records before the lookup tail carry none: the MTP block alone.
+    if (const dgpp::minijson::Value* lkt = v.find("lkt")) s.lookup_tail = static_cast<int>(lkt->as_int());
+    if (s.lookup_tail < 0) throw std::runtime_error("worker settings: lkt must be >= 0");
+    if (!(s.lookup_nmin >= 1 && s.lookup_nstrong >= s.lookup_nmin && s.lookup_agree >= 0))
+      throw std::runtime_error("worker settings: lookup thresholds must satisfy 1 <= lkn <= lks");
     if (s.world < 2 || s.max_concurrency < 1 || s.kv_capacity < 1 ||
         (s.admission != "full" && s.admission != "grow") ||
         !latent_format_from_string(s.kv_dtype) ||
@@ -696,7 +777,9 @@ JournalRecord decode_journal_line(std::string_view line) {
         (s.dense_weights != "checkpoint" && s.dense_weights != "fp8") ||
         !parse_bf16_residency(s.bf16_weights, nullptr) ||
         (s.prefill != "bounded" && s.prefill != "exact") ||
-        (s.embed_sharding != "replicated" && s.embed_sharding != "vocab"))
+        (s.embed_sharding != "replicated" && s.embed_sharding != "vocab") ||
+        (s.mtp_head != "checkpoint" && s.mtp_head != "fp8") ||
+        (s.attention_weights != "checkpoint" && s.attention_weights != "int4"))
       throw std::runtime_error("journal: settings record with impossible values");
     return rec;
   }
@@ -711,6 +794,10 @@ JournalRecord decode_journal_line(std::string_view line) {
       rec.admission.mode =
           static_cast<dgpp::sched::AdmissionPolicy::Mode>(adm->as_int());
       rec.admission.window_tokens = static_cast<int>(win.as_int());
+      rec.admission.decode_gap_target_ms = optional_policy_integer(v, "gapms", 0, sched::kMaxLatencyTargetMs);
+      rec.admission.first_token_target_ms = optional_policy_integer(v, "ttftms", 0, sched::kMaxLatencyTargetMs);
+      rec.admission.prefill_latency = read_latency_tuning(v);
+      rec.admission.prefill_budget_automatic = optional_policy_integer(v, "pfauto", 0, 1) != 0;
       if (const auto* budget = v.find("pfbudget")) {
         if (!budget->is_number() || budget->as_int() < 0 || budget->as_int() > (1 << 30))
           throw std::runtime_error("journal: warm record with a bad prefill budget");
@@ -720,6 +807,11 @@ JournalRecord decode_journal_line(std::string_view line) {
         if (!budget->is_number() || budget->as_int() < 0 || budget->as_int() > (1 << 30))
           throw std::runtime_error("journal: warm record with a bad idle prefill budget");
         rec.admission.prefill_idle_budget_tokens = static_cast<int>(budget->as_int());
+      }
+      if (const auto* early = v.find("pfearly")) {
+        if (!early->is_number() || (early->as_int() != 0 && early->as_int() != 1))
+          throw std::runtime_error("journal: warm record with a bad early-prefill-admission flag");
+        rec.admission.prefill_early_admission = early->as_int() == 1;
       }
       if (const auto* pmin = v.find("pmin")) {
         if (!pmin->is_number() || pmin->as_int() < 0 || pmin->as_int() > (1 << 30))
@@ -747,6 +839,7 @@ JournalRecord decode_journal_line(std::string_view line) {
   if (op != "tick")
     throw std::runtime_error("journal: unknown op '" + op + "'");
 
+  if (v.find("pfmax")) rec.prefill_budget = optional_policy_integer(v, "pfmax", 1, 1 << 30);
   if (const dgpp::minijson::Value* s = v.find("s")) {
     if (!s->is_array())
       throw std::runtime_error("journal: 's' is not an array");
@@ -1057,9 +1150,8 @@ void JournalWriter::accept_peers(int world, int accept_timeout_ms) {
           std::to_string(peers) + " peers connected within " +
           std::to_string(accept_timeout_ms) +
           "ms — a short world cannot serve (check the peers' logs)");
-    // The peer's hello names the connection by rank; after it a peer never
-    // writes, so a readable connection is a close or a reset (the death
-    // watch's premise).
+    // The peer's hello names the connection by rank. Its readiness message
+    // follows settings and model construction, and is drained before warm.
     std::string hello;
     while (hello.find('\n') == std::string::npos) {
       const int left = static_cast<int>(
@@ -1104,6 +1196,46 @@ void JournalWriter::broadcast(const std::string& line) {
   }
 }
 
+bool JournalWriter::wait_peers_ready(int timeout_ms, const std::function<bool()>& should_stop) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+  std::vector<std::string> received(peers_.size());
+  std::vector<bool> ready(peers_.size(), false);
+  size_t remaining = peers_.size();
+  DGPP_LOG_INFO("journal: waiting for {} peer model(s) to be ready", remaining);
+  while (remaining != 0) {
+    if (should_stop && should_stop()) return false;
+    for (size_t i = 0; i < peers_.size(); ++i) {
+      const std::string name = "journal: rank " + std::to_string(peer_ranks_[i]);
+      if (peers_[i].peer_closed())
+        throw std::runtime_error(name + " closed before model readiness completed");
+      if (ready[i]) continue;
+      if (peers_[i].wait_readable(0)) {
+        char buf[16];
+        const int n = peers_[i].read_some(buf, sizeof buf);
+        if (n <= 0) throw std::runtime_error(name + " closed before model readiness completed");
+        received[i].append(buf, static_cast<size_t>(n));
+        if (!std::string_view("ready\n").starts_with(received[i]))
+          throw std::runtime_error(name + " sent an invalid model readiness message");
+        if (received[i] == "ready\n") {
+          ready[i] = true;
+          --remaining;
+          DGPP_LOG_INFO("journal: rank {} model ready ({} peer(s) remaining)", peer_ranks_[i], remaining);
+        }
+      }
+    }
+    if (remaining == 0) break;
+    if (std::chrono::steady_clock::now() >= deadline) {
+      std::string missing;
+      for (size_t i = 0; i < peers_.size(); ++i)
+        if (!ready[i]) missing += (missing.empty() ? "" : ", ") + std::to_string(peer_ranks_[i]);
+      throw std::runtime_error("journal: model readiness timed out after " + std::to_string(timeout_ms) +
+                               "ms waiting for rank(s) " + missing);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return !(should_stop && should_stop());
+}
+
 int JournalWriter::dead_peer() const {
   for (size_t i = 0; i < peers_.size(); ++i)
     if (peers_[i].peer_closed()) return peer_ranks_[i];
@@ -1146,6 +1278,12 @@ JournalReader::JournalReader(const std::string& host, uint16_t port,
   const std::string hello = "hello " + std::to_string(rank) + "\n";
   if (!conn_.write_all(hello.data(), hello.size()))
     throw std::runtime_error("journal: could not send the hello to rank 0");
+}
+
+void JournalReader::send_ready() {
+  constexpr std::string_view ready = "ready\n";
+  if (!conn_.write_all(ready.data(), ready.size()))
+    throw std::runtime_error("journal: could not send model readiness to rank 0");
 }
 
 bool JournalReader::read_line(const std::function<bool()>& should_stop,
@@ -1306,7 +1444,9 @@ void run_journal_peer(Scheduler* sched, JournalReader* reader,
     for (const std::string& id : rec.stops) sched->stop(id);
     {
       TickScope scope(in_tick);
-      sched->tick();
+      if (sched->adaptive_prefill() != rec.prefill_budget.has_value())
+        throw std::runtime_error("journal: adaptive prefill decision missing or unexpected");
+      sched->tick(rec.prefill_budget);
     }
     ++ticks;
     if (stats || on_tick) {

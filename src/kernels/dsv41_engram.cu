@@ -39,10 +39,13 @@ __global__ void hash_ids_rows_kernel(const int64_t* __restrict__ tokens, int row
   const int hd = rem - l * h.heads;
   const int s = span_start_of(t, spans, num_requests);
   const int p = t - s;
-  const int32_t* c = ctx + static_cast<int64_t>(req_ids[t]) * kDsv41EngramCtx;
+  const int request = req_ids[t];
+  const int32_t* c = request >= 0 ? ctx + static_cast<int64_t>(request) * kDsv41EngramCtx : nullptr;
   int64_t y[kMaxNgram];
   for (int k = 0; k < h.max_ngram; ++k) {
-    if (k == 0) {
+    if (request < 0) {
+      y[k] = h.pad_class;
+    } else if (k == 0) {
       y[k] = h.token_map[tokens[t]];
     } else if (p >= k) {
       y[k] = h.token_map[tokens[t - k]];
@@ -78,6 +81,12 @@ __global__ void context_rows_kernel(const int64_t* __restrict__ tokens,
   if (q >= num_requests) return;
   const int s = spans[2 * q], len = spans[2 * q + 1];
   if (len <= 0) return;
+  if (req_ids[s] < 0) {
+    for (int t = s; t < s + len; ++t)
+      for (int k = 0; k < kDsv41EngramCtx; ++k)
+        ctx_rows[static_cast<int64_t>(t) * kDsv41EngramCtx + k] = 0;
+    return;
+  }
   int32_t* c = ctx + static_cast<int64_t>(req_ids[s]) * kDsv41EngramCtx;
   int32_t cur[kDsv41EngramCtx];
   for (int k = 0; k < kDsv41EngramCtx; ++k) cur[k] = c[k];

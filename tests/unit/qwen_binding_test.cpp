@@ -47,7 +47,56 @@ std::filesystem::path radixark_snapshot() {
   return {};
 }
 
+std::filesystem::path qad_snapshot() {
+  namespace fs = std::filesystem;
+  const char* home = std::getenv("HOME");
+  if (!home) return {};
+  const fs::path root =
+      fs::path(home) / ".cache/huggingface/hub/models--local-inference-lab--Qwen3.8-Flash-Next-NVFP4/snapshots";
+  if (!fs::is_directory(root)) return {};
+  for (const auto& snap : fs::directory_iterator(root))
+    if (fs::exists(snap.path() / "config.json") &&
+        fs::exists(snap.path() / "model.safetensors.index.json"))
+      return snap.path();
+  return {};
+}
+
+// Every tensor of every shard under `snap` (names, dtypes, shapes).
+std::unordered_map<std::string, dgpp::QwenTensorDesc> snapshot_tensors(const std::filesystem::path& snap) {
+  std::unordered_map<std::string, dgpp::QwenTensorDesc> present;
+  for (const auto& e : std::filesystem::directory_iterator(snap)) {
+    if (e.path().extension() != ".safetensors") continue;
+    auto f = dgpp::SafetensorsFile::open(e.path().string());
+    f->for_each([&](const dgpp::TensorInfo& t) { present.emplace(t.name, dgpp::QwenTensorDesc{t.dtype, t.shape}); });
+  }
+  return present;
+}
+
 }  // namespace
+
+// The QAD export (local-inference-lab/Qwen3.8-Flash-Next-NVFP4 @ 6909a5be,
+// issue #113) when it is in the hub cache: the modelopt block parses into
+// its four forms, every one of its 301 593 tensors binds (the 333 of the
+// vision tower counted, nothing missing, nothing unexpected — the MXFP8
+// scale partners, the NVFP4 table's scale shards, the F32 norms, the
+// weight-only draft triples), and the TP geometry holds at worlds 1, 2, 4.
+DGPP_TEST(qwen_binding_binds_the_qad_export_when_present) {
+  const auto snap = qad_snapshot();
+  if (snap.empty()) return;
+  const dgpp::QwenTextConfig cfg = dgpp::QwenTextConfig::from_json_file((snap / "config.json").string());
+  require(cfg.dense_mxfp8_shipped && cfg.ngram_table_nvfp4 && cfg.mtp_experts_nvfp4 && cfg.norms_f32,
+          "the QAD export's forms");
+  const auto present = snapshot_tensors(snap);
+  require(present.size() == 301593, "tensor count " + std::to_string(present.size()));
+  const dgpp::QwenBindReport rep = dgpp::qwen_validate_text_binding(cfg, present, 8);
+  std::string errs;
+  for (const auto& e : rep.errors) errs += "\n  " + e;
+  require(rep.ok(), "QAD binding failed:" + errs);
+  require(rep.vision == 333, "vision tensors " + std::to_string(rep.vision));
+  require(rep.matched == present.size() - rep.vision, "every text tensor matched");
+  for (const int w : {1, 2, 4})
+    for (int r = 0; r < w; ++r) dgpp::qwen_tp_validate_geometry(cfg, r, w);
+}
 
 DGPP_TEST(qwen_binding_table_has_the_release_shape) {
   const auto snap = landed_snapshot();

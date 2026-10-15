@@ -113,12 +113,13 @@ void launch_scale_gemv_multi_bf16(const Fp8GemvProblem* problems, int n_problems
 // The routed launcher on a stated scale grid (2026-09-13, the DeepSeek-V4.1
 // release's fp8 matrices on 32 x 32 blocks): rs / cs as the tile launchers
 // take them; small m runs the GEMV rows (the core reads any grid), larger
-// m the tile kernel. Each output row of the GEMV path is bitwise the
+// m the tile kernel, or the exact pipelined fp8-weight GEMM for a 128x128
+// scale grid and supported shape. Each output row of the GEMV path is bitwise the
 // single-row launch; the two paths are tolerance-equal.
 // decode_mma: every row count takes the streaming tensor-core GEMM
 // (mma_gemv.hpp: the weights read once per 128 rows, each row's chain the
 // same whatever m) instead of the 4-row GEMV chunks (m <= 128) or the
-// 16-row tile kernel (above). A per-call opt-in — the forms are
+// large-row kernels above. A per-call opt-in — the forms are
 // tolerance-equal, not bitwise — so a family switches every site or none
 // (its batched decode rows must stay bitwise its rows alone). Shapes the
 // mma form cannot take (k % 64, alignment) keep the older forms.
@@ -136,6 +137,28 @@ void launch_scale_gemm_grid_f32(const uint16_t* act, size_t act_row_stride_elems
                                 int m, int n, int k, cudaStream_t stream,
                                 size_t out_row_stride_elems, int rs, int cs,
                                 bool decode_mma = false, void* ws = nullptr, size_t ws_bytes = 0);
+
+// The grid launcher with the scale grid as e8m0 bytes (the QAD export's
+// MXFP8 stack, rs = 0, cs = 5): the streaming MMA alone reads the byte grid,
+// so the shape must be its (k % 64, 16-byte aligned rows) — the loader keeps
+// F32 scales for any matrix it cannot take, and the dense sites bridge the
+// prefill-shaped rows through launch_fp8_dequant_blocks_e8m0.
+void launch_scale_gemm_grid_e8m0_bf16(const uint16_t* act, size_t act_row_stride_elems,
+                                      const uint8_t* w_payload, const uint8_t* w_scales, uint16_t* out,
+                                      int m, int n, int k, cudaStream_t stream,
+                                      size_t out_row_stride_elems, int rs, int cs, void* ws = nullptr,
+                                      size_t ws_bytes = 0);
+void launch_scale_gemm_grid_e8m0_f32(const uint16_t* act, size_t act_row_stride_elems,
+                                     const uint8_t* w_payload, const uint8_t* w_scales, float* out, int m,
+                                     int n, int k, cudaStream_t stream, size_t out_row_stride_elems, int rs,
+                                     int cs, void* ws = nullptr, size_t ws_bytes = 0);
+
+// Whether the fp8 GEMV (the scale GEMM's small-m lowering) can stage a payload
+// at all: the grid launcher's shape check at one activation row (it chunks
+// rows down to fit its smem, so one row fitting is the whole question).
+// Callers deciding between the GEMV and the dequant bridge use this rather
+// than re-deriving fp8_gemv's shape rules.
+bool fp8_gemv_can_stage(const void* w_payload, int k);
 
 void launch_scale_gemm_tile_bf16(const uint16_t* act, size_t act_row_stride_elems,
                                  const uint8_t* w_payload, const float* w_scales,

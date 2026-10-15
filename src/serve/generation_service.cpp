@@ -108,6 +108,36 @@ const char* finish_reason(Scheduler::Result::Reason r, bool tool_calls) {
   }
 }
 
+// Response-only compatibility metrics. Existing usage, scheduler meters,
+// Prometheus histograms and throughput logs retain their own definitions.
+// llama.cpp server_slot_stats (9c2e0e491a82): prompt rates count uncached
+// tokens; decode rates exclude the first token supplied by each prefill.
+void append_timings(std::string* out, int prompt_tokens, int cached_tokens,
+                    int completion_tokens, int prefill_tokens, double prompt_ms,
+                    double predicted_ms) {
+  const int computed_tokens = std::max(0, prompt_tokens - cached_tokens);
+  const int decode_tokens = std::max(0, completion_tokens - prefill_tokens);
+  out->append(",\"timings\":{\"prompt_n\":");
+  append_json_int(out, computed_tokens);
+  out->append(",\"cache_n\":");
+  append_json_int(out, cached_tokens);
+  out->append(",\"predicted_n\":");
+  append_json_int(out, completion_tokens);
+  out->append(",\"prompt_ms\":");
+  append_json_float(out, prompt_ms);
+  out->append(",\"prompt_per_token_ms\":");
+  append_json_float(out, computed_tokens > 0 ? prompt_ms / computed_tokens : 0);
+  out->append(",\"prompt_per_second\":");
+  append_json_float(out, prompt_ms > 0 ? computed_tokens / prompt_ms * 1000 : 0);
+  out->append(",\"predicted_ms\":");
+  append_json_float(out, predicted_ms);
+  out->append(",\"predicted_per_token_ms\":");
+  append_json_float(out, decode_tokens > 0 ? predicted_ms / decode_tokens : 0);
+  out->append(",\"predicted_per_second\":");
+  append_json_float(out, predicted_ms > 0 ? decode_tokens / predicted_ms * 1000 : 0);
+  out->push_back('}');
+}
+
 // The usage object, with the details OpenAI reports:
 // prompt_tokens_details.cached_tokens — the prompt tokens the prefix cache
 // served (the attach position) — and completion_tokens_details.
@@ -2409,13 +2439,31 @@ void GenerationService::route_metrics_prometheus(HttpResponseWriter& w) {
   out.raw(
       "# HELP spec_decode_num_draft_tokens_total Cumulative MTP draft tokens verified.\n"
       "# TYPE spec_decode_num_draft_tokens_total counter\n"
-      "spec_decode_num_draft_tokens_total " + std::to_string(drafted) +
+      "spec_decode_num_draft_tokens_total " +
+      std::to_string(drafted) +
       "\n# HELP spec_decode_num_accepted_tokens_total Cumulative accepted draft tokens.\n"
       "# TYPE spec_decode_num_accepted_tokens_total counter\n"
-      "spec_decode_num_accepted_tokens_total " + std::to_string(accepted) +
+      "spec_decode_num_accepted_tokens_total " +
+      std::to_string(accepted) +
       "\n# HELP spec_decode_num_drafts_total Cumulative verification rounds.\n"
       "# TYPE spec_decode_num_drafts_total counter\n"
-      "spec_decode_num_drafts_total " + std::to_string(m.mtp.attempts[0]) + "\n");
+      "spec_decode_num_drafts_total " +
+      std::to_string(m.mtp.attempts[0]) +
+      "\n# HELP spec_decode_num_lookup_fused_total Cumulative steps whose drafts a prompt-history "
+      "match replaced.\n"
+      "# TYPE spec_decode_num_lookup_fused_total counter\n"
+      "spec_decode_num_lookup_fused_total " +
+      std::to_string(m.mtp.lookup_fused) +
+      "\n# HELP spec_decode_num_lookup_agree_fused_total Cumulative fused steps taken below "
+      "nstrong, on device-pick agreement.\n"
+      "# TYPE spec_decode_num_lookup_agree_fused_total counter\n"
+      "spec_decode_num_lookup_agree_fused_total " +
+      std::to_string(m.mtp.lookup_agree_fused) +
+      "\n# HELP spec_decode_num_lookup_sampled_fused_total Sampled lookup fusion is disabled; this "
+      "counter stays zero.\n"
+      "# TYPE spec_decode_num_lookup_sampled_fused_total counter\n"
+      "spec_decode_num_lookup_sampled_fused_total " +
+      std::to_string(m.mtp.lookup_sampled_fused) + "\n");
 
   const auto& policy = sched_.admission_policy();
   out.gauge("dgpp_build_info", "The server's build and world; the value is always 1.", int64_t{1},
@@ -2432,6 +2480,28 @@ void GenerationService::route_metrics_prometheus(HttpResponseWriter& w) {
             int64_t{policy.prefill_budget_tokens});
   out.gauge("dgpp_admission_prefill_idle_budget_tokens", "Prefill tokens per tick without active decode.",
             int64_t{policy.prefill_idle_budget_tokens});
+  out.gauge("dgpp_admission_prefill_early_admission", "Queued short text may join an in-flight prefill.",
+            int64_t{policy.prefill_early_admission ? 1 : 0});
+  out.gauge("dgpp_admission_decode_gap_target_ms", "Target gap between a request's token-producing passes; 0 disables.",
+            int64_t{policy.decode_gap_target_ms});
+  out.gauge("dgpp_admission_first_token_target_ms", "Target time from request arrival to first token, including queueing; 0 disables.",
+            int64_t{policy.first_token_target_ms});
+  out.gauge("dgpp_admission_prefill_latency_headroom_pct", "Fraction of latency target reserved for cost variation, percent.",
+            int64_t{policy.prefill_latency.headroom_pct});
+  out.gauge("dgpp_admission_prefill_growth_factor", "Maximum upward work probe relative to an observed quantum.",
+            int64_t{policy.prefill_latency.growth_factor});
+  out.gauge("dgpp_admission_prefill_cost_recovery_pct", "Weight of a cheaper observation in cost recovery, percent.",
+            int64_t{policy.prefill_latency.recovery_pct});
+  out.gauge("dgpp_admission_prefill_initial_tokens", "Starting automatic budget before measuring any workload; adjusted to engine geometry.",
+            int64_t{policy.prefill_latency.initial_tokens});
+  out.gauge("dgpp_admission_prefill_idle_floor_tokens", "Smallest automatic quantum while nothing decodes or waits for a slot; 0 means the alignment.",
+            int64_t{policy.prefill_latency.idle_floor_tokens});
+  out.gauge("dgpp_prefill_adaptive_limit_tokens", "Last leader-selected prefill ceiling; 0 means fixed budgeting.",
+            m.prefill_adaptive_limit_tokens);
+  out.counter("dgpp_first_token_target_misses_total", "Choices whose first token exceeded the configured latency target.",
+              static_cast<int64_t>(st.first_token_target_misses));
+  out.counter("dgpp_decode_gap_target_misses_total", "Token-producing passes exceeding a request's decode gap target.",
+              static_cast<int64_t>(st.decode_gap_target_misses));
 
   // Occupancy.
   out.gauge("dgpp_num_requests_running", "Requests holding an engine slot (prefilling included).", int64_t{m.active});
@@ -2489,6 +2559,13 @@ void GenerationService::route_metrics_prometheus(HttpResponseWriter& w) {
   out.counter("dgpp_decode_steps_total", "Decode passes.", m.decode_steps);
   out.counter("dgpp_decode_rows_total", "Request-rows the decode passes carried.", m.decode_rows);
   out.counter("dgpp_decode_step_seconds_total", "Wall time inside the engine's decode steps.", m.step_ms / 1000.0);
+  out.counter("dgpp_prefill_chunk_steps_total", "Budgeted prefill advances; a grouped walk counts once.", m.prefill_chunk_steps);
+  out.counter("dgpp_prefill_chunk_budget_tokens_total", "Reader token budgets offered to budgeted prefill advances.", m.prefill_chunk_budget_tokens);
+  out.counter("dgpp_prefill_chunk_available_tokens_total", "Reader budgets capped by remaining prompt tokens, before structural cuts.", m.prefill_chunk_available_tokens);
+  out.counter("dgpp_prefill_chunk_computed_tokens_total", "Reader tokens computed in budgeted prefill advances.", m.prefill_chunk_computed_tokens);
+  out.counter("dgpp_mixed_steps_total", "Decode passes sharing a walk with prefill.", m.mixed_steps);
+  out.counter("dgpp_mixed_seconds_total", "Shared wall time included in both prefill and decode seconds; subtract once when summing.",
+              m.mixed_ms / 1000.0);
 
   // Decode graph batches (docs/operations.md, decode graph batch counters).
   out.gauge("dgpp_decode_batch_last_slots", "Capacity of the last launched decode graph.",
@@ -2510,6 +2587,13 @@ void GenerationService::route_metrics_prometheus(HttpResponseWriter& w) {
   out.counter("dgpp_spec_decode_num_drafts_total", "Request verification rounds.", m.mtp.attempts[0]);
   out.counter("dgpp_spec_decode_num_draft_tokens_total", "Draft tokens verified.", drafted);
   out.counter("dgpp_spec_decode_num_accepted_tokens_total", "Draft tokens accepted.", accepted);
+  out.counter("dgpp_spec_decode_num_lookup_fused_total", "Steps whose drafts a prompt-history match replaced.",
+              m.mtp.lookup_fused);
+  out.counter("dgpp_spec_decode_num_lookup_agree_fused_total",
+              "Fused steps taken below nstrong, on device-pick agreement.", m.mtp.lookup_agree_fused);
+  out.counter("dgpp_spec_decode_num_lookup_sampled_fused_total",
+              "Sampled lookup fusion is disabled; this counter stays zero.",
+              m.mtp.lookup_sampled_fused);
   for (int p = 0; p < m.mtp.depth && p < 8; ++p)
     out.counter("dgpp_spec_decode_num_draft_tokens_per_pos_total", "Draft tokens verified at each draft position.",
                 m.mtp.attempts[p], "position=\"" + std::to_string(p) + "\"");
@@ -2541,6 +2625,12 @@ void GenerationService::route_metrics_prometheus(HttpResponseWriter& w) {
               m.prefix_skipped_no_block);
   out.counter("dgpp_prefix_cache_skipped_no_slot_total", "Snapshots skipped for want of an arena slot.",
               m.prefix_skipped);
+  out.counter("dgpp_prefix_cache_skipped_hop_fallback_total",
+              "Hops passed by sampled fallback after snapshot capture was skipped.",
+              m.prefix_skipped_hop_fallback);
+  out.counter("dgpp_prefix_cache_skipped_hop_mismatch_total",
+              "Hop snapshots dropped for inconsistent outcomes or arena contents.",
+              m.prefix_skipped_hop_mismatch);
   out.counter("dgpp_prefix_cache_skipped_image_bytes_total", "Snapshots skipped over the image-bytes bound.",
               m.prefix_skipped_image_bytes);
   out.counter("dgpp_prefix_cache_arena_snapshots_total", "Arena snapshot copies.", pe.snapshots);
@@ -2619,6 +2709,8 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {  Scheduler::Meter
   append_json_int(&out, m.prompt_tokens_computed);
   out.append(",\"decode_steps\":");
   append_json_int(&out, m.decode_steps);
+  out.append(",\"mixed_steps\":");
+  append_json_int(&out, m.mixed_steps);
   out.append(",\"decode_rows\":");
   append_json_int(&out, m.decode_rows);
   out.append(",\"decode_batch\":{\"last_slots\":");
@@ -2668,13 +2760,30 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {  Scheduler::Meter
     if (p) out.push_back(',');
     append_json_int(&out, m.mtp.accepts[p]);
   }
-  out.append("]}");
+  out.append("],\"num_lookup_fused_total\":");
+  append_json_int(&out, m.mtp.lookup_fused);
+  out.append(",\"num_lookup_agree_fused_total\":");
+  append_json_int(&out, m.mtp.lookup_agree_fused);
+  out.append(",\"num_lookup_sampled_fused_total\":");
+  append_json_int(&out, m.mtp.lookup_sampled_fused);
+  out.append("}");
   {
     char tbuf[192];
-    std::snprintf(tbuf, sizeof(tbuf), ",\"prefill_ms\":%.1f,\"prefill_request_ms\":%.1f,\"step_ms\":%.1f",
-                  m.prefill_ms, m.prefill_request_ms, m.step_ms);
+    std::snprintf(tbuf, sizeof(tbuf), ",\"prefill_ms\":%.1f,\"prefill_request_ms\":%.1f,\"step_ms\":%.1f,\"mixed_ms\":%.1f",
+                  m.prefill_ms, m.prefill_request_ms, m.step_ms, m.mixed_ms);
     out.append(tbuf);
   }
+  out.append(",\"prefill_chunks\":{\"steps\":");
+  append_json_int(&out, m.prefill_chunk_steps);
+  out.append(",\"budget_tokens\":");
+  append_json_int(&out, m.prefill_chunk_budget_tokens);
+  out.append(",\"available_tokens\":");
+  append_json_int(&out, m.prefill_chunk_available_tokens);
+  out.append(",\"computed_tokens\":");
+  append_json_int(&out, m.prefill_chunk_computed_tokens);
+  out.append(",\"adaptive_limit_tokens\":");
+  append_json_int(&out, m.prefill_adaptive_limit_tokens);
+  out.append("}");
   out.append("}");
   out.append(",\"service\":{\"requests_total\":");
   append_json_int(&out, static_cast<int64_t>(st.requests_total));
@@ -2701,6 +2810,29 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {  Scheduler::Meter
   append_json_int(&out, sched_.admission_policy().prefill_budget_tokens);
   out.append(",\"prefill_idle_budget_tokens\":");
   append_json_int(&out, sched_.admission_policy().prefill_idle_budget_tokens);
+  out.append(",\"prefill_early_admission\":");
+  out.append(sched_.admission_policy().prefill_early_admission ? "true" : "false");
+  out.append(",\"prefill_budget_automatic\":");
+  out.append(sched_.admission_policy().prefill_budget_automatic ? "true" : "false");
+  out.append(",\"decode_gap_target_ms\":");
+  append_json_int(&out, sched_.admission_policy().decode_gap_target_ms);
+  out.append(",\"first_token_target_ms\":");
+  append_json_int(&out, sched_.admission_policy().first_token_target_ms);
+  out.append(",\"prefill_latency_headroom_pct\":");
+  append_json_int(&out, sched_.admission_policy().prefill_latency.headroom_pct);
+  out.append(",\"prefill_growth_factor\":");
+  append_json_int(&out, sched_.admission_policy().prefill_latency.growth_factor);
+  out.append(",\"prefill_cost_recovery_pct\":");
+  append_json_int(&out, sched_.admission_policy().prefill_latency.recovery_pct);
+  out.append(",\"prefill_initial_tokens\":");
+  append_json_int(&out, sched_.admission_policy().prefill_latency.initial_tokens);
+  out.append(",\"prefill_idle_floor_tokens\":");
+  append_json_int(&out, sched_.admission_policy().prefill_latency.idle_floor_tokens);
+  out.append("}");
+  out.append(",\"latency_target_misses\":{\"first_token\":");
+  append_json_int(&out, static_cast<int64_t>(st.first_token_target_misses));
+  out.append(",\"decode_gap\":");
+  append_json_int(&out, static_cast<int64_t>(st.decode_gap_target_misses));
   out.append("}");
   out.append(",\"tokens_out\":");
   append_json_int(&out, static_cast<int64_t>(st.tokens_out));
@@ -2752,6 +2884,10 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {  Scheduler::Meter
   append_json_int(&out, m.prefix_skipped_no_block);
   out.append(",\"skipped_no_slot\":");
   append_json_int(&out, m.prefix_skipped);
+  out.append(",\"skipped_hop_fallback\":");
+  append_json_int(&out, m.prefix_skipped_hop_fallback);
+  out.append(",\"skipped_hop_mismatch\":");
+  append_json_int(&out, m.prefix_skipped_hop_mismatch);
   out.append(",\"skipped_image_bytes\":");
   append_json_int(&out, m.prefix_skipped_image_bytes);
   out.append(",\"image_bytes\":");
@@ -2983,11 +3119,14 @@ void GenerationService::on_token(const std::string& id, int64_t token,
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto& r : records_) {
       if (r->sched_id != id || r->done) continue;
+      const auto now = std::chrono::steady_clock::now();
       if (steps_done == 1) {
         // The first token: the time to first token, split by whether the
         // prefix cache served the prompt's head (M7).
-        const auto now = std::chrono::steady_clock::now();
         const double ms = std::chrono::duration<double, std::milli>(now - r->arrived).count();
+        if (sched_.admission_policy().first_token_target_ms > 0 &&
+            ms > sched_.admission_policy().first_token_target_ms)
+          ++stats_.first_token_target_misses;
         if (r->prefix_hit) {
           stats_.ttft_hit_count++;
           stats_.ttft_hit_ms += ms;
@@ -3004,6 +3143,17 @@ void GenerationService::on_token(const std::string& id, int64_t token,
         if (r->admit_seen)
           stats_.prefill_s.observe(std::chrono::duration<double>(now - r->admitted_at).count());
       }
+      // Separate response timing state; the measurements above keep their
+      // existing definitions, including queue time in TTFT.
+      if (steps_done == 1) {
+        ++r->group->prefill_tokens;
+        if (r->choice == 0 && r->admit_seen)
+          r->group->prompt_ms =
+              std::chrono::duration<double, std::milli>(now - r->admitted_at).count();
+      }
+      if (r->group->first_token == std::chrono::steady_clock::time_point{})
+        r->group->first_token = now;
+      r->group->last_token = now;
       r->ids.push_back(token);
       if (r->logprobs >= 0) r->content_lps.push_back(false);
       if (r->chat) {
@@ -3216,7 +3366,11 @@ std::string GenerationService::legacy_logprobs(const StreamRecord& r, size_t fro
 
 void GenerationService::observe_token_pass(StreamRecord& r, std::chrono::steady_clock::time_point now) {
   if (!r.first_token_seen || r.ids.size() <= r.last_pass_tokens) return;
-  stats_.itl_s.observe(std::chrono::duration<double>(now - r.last_pass_at).count());
+  const double gap_s = std::chrono::duration<double>(now - r.last_pass_at).count();
+  stats_.itl_s.observe(gap_s);
+  if (sched_.admission_policy().decode_gap_target_ms > 0 &&
+      gap_s * 1000 > sched_.admission_policy().decode_gap_target_ms)
+    ++stats_.decode_gap_target_misses;
   r.last_pass_at = now;
   r.last_pass_tokens = r.ids.size();
 }
@@ -3470,6 +3624,28 @@ void GenerationService::pump_records() {
       flush_legacy_stream(*r);
   }
 
+  // Append once all choices have retired. Prompt accounting follows
+  // choice 0, as usage does; decode throughput spans the group's tokens.
+  auto append_group_timings = [this](const StreamRecord& r, std::string* out) {
+    double prompt_ms = 0, predicted_ms = 0;
+    int prefill_tokens = 0;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      const ChoiceGroup& g = *r.group;
+      prompt_ms = g.prompt_ms;
+      prefill_tokens = g.prefill_tokens;
+      if (prefill_tokens > 0) {
+        // Match llama.cpp's one-microsecond minimum for a generated token.
+        predicted_ms = std::max(0.001, std::chrono::duration<double, std::milli>(
+                                          g.last_token - g.first_token).count());
+      }
+    }
+    out->pop_back();
+    append_timings(out, r.prompt_tokens, r.group->cached_tokens,
+                   r.group->completion_tokens, prefill_tokens, prompt_ms, predicted_ms);
+    out->push_back('}');
+  };
+
   for (auto& r : finished) {
     if (r->writer != nullptr && !r->writer_dead) {
       ChoiceGroup& g = *r->group;
@@ -3560,16 +3736,21 @@ void GenerationService::pump_records() {
           }
         }
         const char* finish = finish_reason(r->reason, !r->calls.empty());
-        write_stream_event(*r,
+        std::string terminal =
             r->chat ? chat_chunk_final(r->id, r->created_unix, r->model,
                                        finish, lp_json, r->choice)
                     : text_chunk_final(r->id, r->created_unix, r->model,
-                                       finish, lp_json));
+                                       finish, lp_json);
+        const bool last_choice = g.finished + 1 == g.n && !g.ended;
+        if (last_choice && !r->include_usage) append_group_timings(*r, &terminal);
+        write_stream_event(*r, std::move(terminal));
         if (++g.finished == g.n && !g.ended) {
           if (r->include_usage) {
-            write_stream_event(*r, chat_chunk_usage(
+            std::string usage = chat_chunk_usage(
                 r->id, r->created_unix, r->model, r->prompt_tokens,
-                g.completion_tokens, g.cached_tokens, g.reasoning_tokens), true);
+                g.completion_tokens, g.cached_tokens, g.reasoning_tokens);
+            append_group_timings(*r, &usage);
+            write_stream_event(*r, std::move(usage), true);
           }
           r->writer->write_event("[DONE]");
           r->writer->end_stream();
@@ -3641,6 +3822,7 @@ void GenerationService::pump_records() {
                                              joined, r->prompt_tokens,
                                              g.completion_tokens,
                                              g.cached_tokens);
+          append_group_timings(*r, &response);
           response.pop_back();
           if (r->report_service_tier) response.append(",\"service_tier\":\"default\"");
           if (!r->metadata.empty()) response.append(",\"metadata\":" + r->metadata);
@@ -3767,9 +3949,10 @@ bool GenerationService::engine_pass(const PreTickHook& pre_tick) {
     events.has_op_digest = true;
     events.op_digest = audit_->digest();
   }
+  events.prefill_budget = sched_.next_prefill_budget();
   if (pre_tick) pre_tick(events);
 
-  const bool more = sched_.tick();  // may throw on scheduler contract
+  const bool more = sched_.tick(events.prefill_budget);  // may throw on scheduler contract
                                        // violations — the app treats
                                        // that as fatal (operator class)
 

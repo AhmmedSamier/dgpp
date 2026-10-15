@@ -50,6 +50,7 @@
 #include "engine/memory_plan.hpp"
 #include "engine/session_model.hpp"
 #include "kernels/bf12_companions.hpp"
+#include "kernels/draft_head.hpp"
 #include "kernels/gemm.hpp"
 #include "kernels/glm_spec.hpp"
 #include "kernels/l2_prefetch.hpp"
@@ -69,6 +70,7 @@ class Glm4Model : public SessionModel<Glm4Model> {
   // own request's cache only; every span within max_tokens.
   int64_t prefill_group_span_limit() const { return max_tokens_; }
   using Base = SessionModel<Glm4Model>;
+  static constexpr bool kPrefillChunkGrid = false;
   using Outputs = Base::Outputs;
   using SessionSnapshotMeta = Base::SessionSnapshotMeta;
   using SnapshotRequest = Base::SnapshotRequest;
@@ -140,7 +142,7 @@ class Glm4Model : public SessionModel<Glm4Model> {
   // all layers resident instead of faulting them in one by one.
   void preload_resident_layers(int threads);
   void mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode_row,
-                    bool capture, int head_rows, int batch_requests);
+                    bool capture, int head_rows, int batch_requests, int hidden_row = 0);
   void snapshot_draft_state(int) {}
   void restore_draft_state(int) {}
   // Depth >= 2: the chain rows take the block's output residual (pre
@@ -169,6 +171,7 @@ class Glm4Model : public SessionModel<Glm4Model> {
   // The layer's two blocks over `resid` (the residual, updated in place):
   // the attention block and the MLP/MoE block with their folds.
   struct WalkRows {
+    const RowRun* run = nullptr;
     const int32_t* req_ids = nullptr;
     const int64_t* pos = nullptr;
     int req = 0;
@@ -184,6 +187,11 @@ class Glm4Model : public SessionModel<Glm4Model> {
   Glm4TextConfig cfg_;
   Glm4LayerStream loader_;
   CublasLtGemm gemm_;
+  // The draft head's screen (kernels/draft_head.hpp): built from the served
+  // head at construction under engine.draft_head; answers a decode draft's
+  // head call with the masked row or declines (the exact head runs).
+  DraftHead draft_head_;
+  HeadMatrix draft_head_matrix() const;
   // The bf16 decode weights' 12-bit companions (kernels/bf12_companions.hpp)
   // and the rows of the walk in flight (the prefetch windows' view).
   static constexpr int kBf12ExpandSlots = 1;

@@ -193,6 +193,20 @@ void launch_scale_gemv(const uint16_t* act, size_t act_stride,
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
+// The wide chunk's opt-in (gemv_wide.hpp): one row-count instantiation's
+// dynamic-smem ceiling, both output dtypes.
+template <int kRows>
+bool scale_gemv_opt_in_rows() {
+  const int bytes = static_cast<int>(gemv::kWideSmemBytes);
+  for (const void* f : {reinterpret_cast<const void*>(scale_gemv_kernel<kRows, uint16_t>),
+                        reinterpret_cast<const void*>(scale_gemv_kernel<kRows, float>)})
+    if (cudaFuncSetAttribute(f, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) != cudaSuccess) {
+      (void)cudaGetLastError();
+      return false;
+    }
+  return true;
+}
+
 template <typename OutT>
 void launch_scale_gemv_rows(const uint16_t* act, size_t act_stride,
                             const uint8_t* w, const float* scales, OutT* out,
@@ -215,8 +229,20 @@ void launch_scale_gemv_rows(const uint16_t* act, size_t act_stride,
       launch_scale_gemv<4, OutT>(act, act_stride, w, scales, out, n, k,
                                  out_stride, stream, rs, cs);
       return;
+    case 5:
+      launch_scale_gemv<5, OutT>(act, act_stride, w, scales, out, n, k, out_stride, stream, rs, cs);
+      return;
+    case 6:
+      launch_scale_gemv<6, OutT>(act, act_stride, w, scales, out, n, k, out_stride, stream, rs, cs);
+      return;
+    case 7:
+      launch_scale_gemv<7, OutT>(act, act_stride, w, scales, out, n, k, out_stride, stream, rs, cs);
+      return;
+    case 8:
+      launch_scale_gemv<8, OutT>(act, act_stride, w, scales, out, n, k, out_stride, stream, rs, cs);
+      return;
     default:
-      throw std::invalid_argument("scale_gemv: rows outside [1,4]");
+      throw std::invalid_argument("scale_gemv: rows outside [1,8]");
   }
 }
 
@@ -323,7 +349,7 @@ void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
       }
     }
     for (int row0 = 0; row0 < m;) {
-      int rows = std::min(fp8_gemv::kMaxRows, m - row0);
+      int rows = std::min(gemv::kWideRows, m - row0);  // the wide chunk (gemv_wide.hpp): one weight read to eight rows
       while (!fp8_gemv::shape_ok(w_payload, rows, k)) --rows;
       launch_scale_gemv_rows(
           act + static_cast<size_t>(row0) * act_row_stride_elems,
@@ -363,8 +389,16 @@ void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
 // The routed launcher on a stated scale grid (2026-09-13, the DeepSeek-V4.1
 // release's 32 x 32 fp8 grid; rs / cs the log2 block sizes, 5..7): small
 // m through the GEMV rows (the core reads the grid), larger m through the
-// tile kernel (one scale column per 32-deep stage at cs >= 5). The 128-row
-// dense form knows the 128 grid only and is not taken here.
+// tile kernel (one scale column per 32-deep stage at cs >= 5). The 128x128
+// grid can use the same exact fp8-weight GEMM as the ordinary launcher.
+//
+// The channel grid (2026-10-05, the Qwen3.8-27B-NVFP4 release's attention
+// half: rs = 0, cs = log2ceil(k) so one scale a row — quant_scale_shifts)
+// rides the GEMV rows at EVERY m: the core's (row >> rs) * scale_cols +
+// (chunk >> cs) indexing gives scales[n] exactly, while the tile kernel
+// (one scale column per stage, scale_cols computed as ceil(k / 2^cs) from
+// an at-most-128-deep column block) cannot express it. Channel rows above
+// the GEMV ceiling want the dequant bridge (fp8_dequant takes the grid).
 template <typename OutT>
 void launch_scale_gemm_grid(const uint16_t* act, size_t act_row_stride_elems,
                             const uint8_t* w_payload, const float* w_scales,
@@ -373,16 +407,27 @@ void launch_scale_gemm_grid(const uint16_t* act, size_t act_row_stride_elems,
   if (m <= 0 || n <= 0) return;
   if (!act || !w_payload || !w_scales || !out)
     throw std::invalid_argument("scale_gemm_grid: null pointer");
-  if (rs < 5 || rs > 7 || cs < 5 || cs > 7)
-    throw std::invalid_argument("scale_gemm_grid: rs / cs must be 5..7 (32 .. 128 blocks)");
+  // A row grid: one scale row per weight row (rs = 0) — the channel grid
+  // (2^cs >= k: one scale a row) or the QAD export's MXFP8 (cs = 5: a scale
+  // per 32 columns). Both ride the GEMV rows (the core indexes any grid);
+  // only the channel form may do so above the GEMV ceiling, since its
+  // single scale costs nothing per chunk, while the MXFP8 rows above it
+  // take the dequant bridge (the tile kernel reads one scale column per
+  // 32-deep stage from an at-most-128-deep column block and cannot
+  // express a per-row grid).
+  const bool row_grid = rs == 0 && cs >= 4;
+  const bool channel = row_grid && (1LL << cs) >= k;
+  if (!row_grid && (rs < 5 || rs > 7 || cs < 5 || cs > 7))
+    throw std::invalid_argument("scale_gemm_grid: rs / cs must be 5..7 (32 .. 128 "
+                                "blocks) or a row grid (rs = 0, cs >= 4)");
   if (out_stride == 0) out_stride = static_cast<size_t>(n);
   if (out_stride < static_cast<size_t>(n))
     throw std::invalid_argument("scale_gemm_grid: output row stride narrower than n");
   if (k <= 0 || k % 16 != 0)
     throw std::invalid_argument("scale_gemm_grid: k must be a positive multiple of 16");
-  if (m <= kGemvMaxM && fp8_gemv::shape_ok(w_payload, /*rows=*/1, k)) {
+  if ((m <= kGemvMaxM || channel) && fp8_gemv::shape_ok(w_payload, /*rows=*/1, k)) {
     for (int row0 = 0; row0 < m;) {
-      int rows = std::min(fp8_gemv::kMaxRows, m - row0);
+      int rows = std::min(gemv::kWideRows, m - row0);
       while (!fp8_gemv::shape_ok(w_payload, rows, k)) --rows;
       launch_scale_gemv_rows(act + static_cast<size_t>(row0) * act_row_stride_elems,
                              act_row_stride_elems, w_payload, w_scales,
@@ -392,6 +437,21 @@ void launch_scale_gemm_grid(const uint16_t* act, size_t act_row_stride_elems,
     }
     return;
   }
+  // MiMo's fused QKV and dense MLP projections use this explicit-grid
+  // entry point even though their scales are 128x128. Preserve the tile's
+  // per-weight bf16 rounding and ascending-k16 accumulation while sharing
+  // the ordinary launcher's pipelined large-M kernel. Other grids retain
+  // their existing path; the optimized kernel cannot interpret them.
+  if (m > kGemvMaxM && rs == 7 && cs == 7 &&
+      fp8w_gemm_shape_ok(act, act_row_stride_elems, k)) {
+    launch_fp8w(act, act_row_stride_elems, w_payload, w_scales, out, m, n, k, out_stride, stream);
+    return;
+  }
+  if (channel)
+    throw std::invalid_argument("scale_gemm_grid: channel grid needs 16B-aligned rows");
+  if (row_grid)
+    throw std::invalid_argument("scale_gemm_grid: a per-row scale grid above the GEMV ceiling (or with "
+                                "rows the GEMV cannot stage) takes the dequant bridge");
   const dim3 grid((n + BN - 1) / BN, (m + BM - 1) / BM);
   scale_gemm_kernel<OutT><<<grid, kBlockThreads, 0, stream>>>(
       act, act_row_stride_elems, w_payload, w_scales, out, m, n, k, out_stride, rs, cs);
@@ -400,11 +460,20 @@ void launch_scale_gemm_grid(const uint16_t* act, size_t act_row_stride_elems,
 
 }  // namespace
 
+// The five-to-eight-row scale GEMV instantiations' opt-in (gemv_wide.hpp,
+// from gemv::enable_wide_rows at process start).
+bool scale_gemv_opt_in_wide() {
+  return scale_gemv_opt_in_rows<5>() && scale_gemv_opt_in_rows<6>() && scale_gemv_opt_in_rows<7>() &&
+         scale_gemv_opt_in_rows<8>();
+}
+
 void launch_scale_gemm_grid_bf16(const uint16_t* act, size_t act_row_stride_elems,
                                  const uint8_t* w_payload, const float* w_scales,
                                  uint16_t* out, int m, int n, int k, cudaStream_t stream,
                                  size_t out_row_stride_elems, int rs, int cs, bool decode_mma,
                                  void* ws, size_t ws_bytes) {
+  // (rs / cs reach the core's scale indexing unchanged: the per-vector
+  // lookup scale_row[(c0 + i) >> cs] covers the channel grid too.)
   if (decode_mma && m >= 1 && n > 0 && k > 0 && cs >= 4 &&
       mma_gemv_shape_ok(w_payload, act, act_row_stride_elems, m, k)) {
     launch_mma_gemv_fp8_bf16(act, act_row_stride_elems, w_payload, w_scales, out, m, n, k,
@@ -428,6 +497,37 @@ void launch_scale_gemm_grid_f32(const uint16_t* act, size_t act_row_stride_elems
   }
   launch_scale_gemm_grid<float>(act, act_row_stride_elems, w_payload, w_scales, out, m, n, k,
                                 stream, out_row_stride_elems, rs, cs);
+}
+
+namespace {
+void check_e8m0_grid(const uint16_t* act, size_t act_stride, const uint8_t* w, const uint8_t* s, int m, int n, int k,
+                     int cs) {
+  if (!act || !w || !s) throw std::invalid_argument("scale_gemm_grid e8m0: null pointer");
+  if (!(m >= 1 && n > 0 && k > 0 && cs >= 4 && mma_gemv_shape_ok(w, act, act_stride, m, k)))
+    throw std::invalid_argument(
+        "scale_gemm_grid e8m0: the byte-scale grid runs the streaming MMA alone (k a multiple of 64, "
+        "16-byte aligned rows, cs >= 4); the loader keeps F32 scales for other shapes");
+}
+}  // namespace
+
+void launch_scale_gemm_grid_e8m0_bf16(const uint16_t* act, size_t act_row_stride_elems, const uint8_t* w_payload,
+                                      const uint8_t* w_scales, uint16_t* out, int m, int n, int k,
+                                      cudaStream_t stream, size_t out_row_stride_elems, int rs, int cs, void* ws,
+                                      size_t ws_bytes) {
+  check_e8m0_grid(act, act_row_stride_elems, w_payload, w_scales, m, n, k, cs);
+  launch_mma_gemv_fp8e8m0_bf16(act, act_row_stride_elems, w_payload, w_scales, out, m, n, k, out_row_stride_elems,
+                               rs, cs, stream, ws, ws_bytes);
+}
+void launch_scale_gemm_grid_e8m0_f32(const uint16_t* act, size_t act_row_stride_elems, const uint8_t* w_payload,
+                                     const uint8_t* w_scales, float* out, int m, int n, int k, cudaStream_t stream,
+                                     size_t out_row_stride_elems, int rs, int cs, void* ws, size_t ws_bytes) {
+  check_e8m0_grid(act, act_row_stride_elems, w_payload, w_scales, m, n, k, cs);
+  launch_mma_gemv_fp8e8m0_f32(act, act_row_stride_elems, w_payload, w_scales, out, m, n, k, out_row_stride_elems,
+                              rs, cs, stream, ws, ws_bytes);
+}
+
+bool fp8_gemv_can_stage(const void* w_payload, int k) {
+  return fp8_gemv::shape_ok(w_payload, /*rows=*/1, k);
 }
 
 namespace {

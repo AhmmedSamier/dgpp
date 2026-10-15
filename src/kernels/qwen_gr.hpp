@@ -53,8 +53,12 @@ void qwen_gr_combine_apply_bf16(void* r_state, const float* gates, const void* y
 // combine_apply_kernel's ops and the norm is group_rmsnorm_kernel's
 // reduction (the same per-thread element order, the same fmaf chain), so
 // both R and rn are bitwise the two-launch chain's.
+// norm_f32 (every norm-staging entry below): the norm vector in F32 — the
+// QAD export's trained norms — instead of BF16; the (1 + w) arithmetic is
+// the same, read at the weight's own precision.
 void qwen_gr_combine_norm_bf16(void* r_state, const float* gates, const void* y, const void* norm_w,
-                               void* rn, int64_t rows, int hc, int hidden, float eps, cudaStream_t stream);
+                               void* rn, int64_t rows, int hc, int hidden, float eps, cudaStream_t stream,
+                               bool norm_f32 = false);
 
 // The mix's two GEMVs with their producers folded into the staging
 //, each bitwise the two-launch chain it replaces, for the
@@ -73,7 +77,7 @@ bool qwen_gr_fused_mix_accepts(int hc, int hidden, int lowrank);
 void qwen_gr_norm_down_bf16(const void* r, size_t r_stride, const void* norm_w, int hc, int hidden,
                             float eps, void* rn, const void* down_w, void* t, int lowrank,
                             int64_t rows, cudaStream_t stream, const void* w_inject = nullptr,
-                            float* gates = nullptr);
+                            float* gates = nullptr, bool norm_f32 = false);
 void qwen_gr_act_up_bf16(const void* t, int lowrank, int hc, const void* up_w, void* logits, int hidden,
                          int64_t rows, cudaStream_t stream);
 
@@ -91,10 +95,11 @@ void qwen_gr_down_inject_bf16(const void* rn, const void* down_w, void* t, int l
 // site must have landed on R first (every block reads R).
 void qwen_gr_norm_down_inject_bf16(const void* r, size_t r_stride, const void* norm_w, int hc, int hidden, float eps,
                                    void* rn, const void* down_w, void* t, int lowrank, const void* w_inject,
-                                   float* gates, int64_t rows, cudaStream_t stream);
+                                   float* gates, int64_t rows, cudaStream_t stream, bool norm_f32 = false);
 void qwen_gr_norm_down_inject_fp8(const void* r, size_t r_stride, const void* norm_w, int hc, int hidden, float eps,
                                   void* rn, const uint8_t* down_p, const float* down_s, void* t, int lowrank,
-                                  const void* w_inject, float* gates, int64_t rows, cudaStream_t stream);
+                                  const void* w_inject, float* gates, int64_t rows, cudaStream_t stream,
+                                  bool norm_f32 = false);
 // The same with the down matrix's lossless 12-bit companion
 // (engine.bf16_weights; kernels/bf12_gemv.hpp): the rows through
 // bf12_gemv::row_dots, bitwise the bf16 chain, 0.75 of the down bytes
@@ -112,7 +117,7 @@ void qwen_gr_down_inject_bf12(const void* rn, const Bf12Matrix& down, void* t, i
 void qwen_gr_norm_down_fp8(const void* r, size_t r_stride, const void* norm_w, int hc, int hidden,
                            float eps, void* rn, const uint8_t* down_p, const float* down_s, void* t,
                            int lowrank, int64_t rows, cudaStream_t stream,
-                           const void* w_inject = nullptr, float* gates = nullptr);
+                           const void* w_inject = nullptr, float* gates = nullptr, bool norm_f32 = false);
 void qwen_gr_act_up_fp8(const void* t, int lowrank, int hc, const uint8_t* up_p, const float* up_s,
                         void* logits, int hidden, int64_t rows, cudaStream_t stream);
 // act_up with the mix folded into its epilogue (2026-09-29): x = the

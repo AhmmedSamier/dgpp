@@ -1,8 +1,16 @@
-# Towards continuous batching: multi-admission + fair-share prefill
+# Continuous batching and shared prefill
 
-Status: items 1 and 2 implemented in `Scheduler::quantum()`; soak-tested live.
+Serving uses one scheduler and shared continuation/mixed-row components across
+all eight executor families. Early text admission and latency-adaptive prefill
+are enabled by default, including with DFlash. Current controls and validation
+procedures are in [operations](operations.md) and [testing](testing.md).
 
-## Problem
+The problem statement and initial rules below record the original
+multi-admission work. The later shared execution and adaptive policy are
+described under [current execution](#current-shared-execution-and-policy);
+the original soak alone did not establish those later changes.
+
+## Original problem
 
 Single-stream dgpp matches or beats vLLM, but per-request throughput collapses
 under concurrency (measured: 45 → 9 tok/s @d8k c4). Root causes in the
@@ -32,15 +40,15 @@ except:
 
 - a request needing chunked prefill **ends** the loop (starts chunking only
   if nothing was admitted yet this tick — chunked read-ins stay one at a
-  time; see item 2);
+  time; see item 2).
 - the loop stops before grouping or admission when the tick's positive
   prefill budget is exhausted; zero remaining tokens must not be passed
-  to the group planner, where zero means monolithic mode;
+  to the group planner, where zero means monolithic mode.
 - with a zero policy budget, exactly one admission event (possibly a
-  group) runs per tick, preserving the original monolithic policy;
+  group) runs per tick, preserving the original monolithic policy.
 - an oversized image on an engine without image chunking retains its
   monolithic fallback as the tick's only prefill admission. It waits if
-  any prefill work already ran that tick, then consumes the whole cap;
+  any prefill work already ran that tick, then consumes the whole cap.
 - `next_admissible()` returning -1 (no fitting request / no free slot) ends
   the loop as before.
 
@@ -63,7 +71,7 @@ except:
 
 **Rule**: the `prefill_arrival >= 0 → admit_arrival = -1` gate is gone.
 Each tick with a prefill in flight now: collects the in-flight prefills in
-arrival order, begins at most one new chunked read-in (oldest fitting,
+arrival order, begins at most one new read-in (oldest fitting,
 skip-fit, no eviction dance — a begin must not disturb the pool the
 in-flight prefills hold), gated so every share keeps at least one aligned
 chunk (`(n+1)*align <= budget`); splits the tick budget into equal
@@ -71,6 +79,108 @@ align-down shares and advances the selected prefills on their shares; then
 admits fitting one-shots/groups into the align-down leftover (never a new
 chunked start — chunked read-ins stay one at a time). Order derives from
 arrival order and the last-advanced prefill only, so every rank agrees.
+
+## Current shared execution and policy
+
+Serving enables early text admission by default when the engine supports mixed
+prefill and decode execution: queued text of
+any size can join, including prompts shorter than one alignment unit. New
+readers share a bounded grouped prefill and share their dense and expert
+projections with active decoder verification.
+Each decoder retains its own recurrent state, speculative rollback rows,
+MTP drafts and sampling state. It receives at most one decode pass per tick.
+
+`engine.prefill_early_admission=false` restores admission through leftovers.
+The launcher does not inspect model architecture or drafter names. It carries
+an automatic/on/off setting through the settings handshake, resolves it after
+engine construction, and publishes the concrete policy in the warm record.
+Backends without mixed execution retain their previous default; explicitly
+enabling admission does not implement shared execution. Images
+retain their existing eligibility and execution paths. Monolithic mode is
+unchanged.
+
+The shared execution components have separate responsibilities:
+
+| Component | Responsibility |
+| --- | --- |
+| `PrefillTask` | Owns the prompt, images, snapshot plan and cursor for either adapter. |
+| `PrefillContinuation` | Tracks logical cuts, work budgets, progress and suspension across yields. |
+| `PrefillBatch` | Plans mixed rows, bounds physical work, commits positions and snapshots, catches up draft state and slices outputs. |
+| `RowRun` | Describes request spans, the decoder prefix and selected output rows for a layer walk. |
+| `GraphBatchMapping` | Maps compact graph rows to persistent request slots for feeds, positions and speculative commits. |
+| `SessionModel` | Owns session positions, cache reservations, rollback, draft history and graph staging. |
+| Layer executor | Applies its attention, recurrence, projections and draft implementation to those rows. |
+
+Legacy GLM uses the same task, continuation, batch and row components through
+its existing session facade. Every serving executor implements the
+`MixedPrefillModel` contract: Qwen4Exp, Qwen35 (including DFlash), GLM, GLM4,
+GLM-DSA, MiMo, DeepSeek V4 and V4.1. A drafter's name is not an eligibility
+rule. The adapters check actual slot, row-capacity, context, continuation
+workspace and graph-variant limits per batch.
+
+The configured prefill budget bounds reader work. Decoder rows use spare
+physical capacity without reducing that reader budget. When their combined
+rows exceed the executor's scratch capacity, the planner trims readers at
+their required alignment; short tails contribute their unused shares first.
+
+Persistent reader state belongs to its request. In particular, V4.1's bounded
+decoder retains each reader's tail separately and falls back to sequential
+reader advancement when their combined final tails exceed scratch capacity.
+Per-tensor activation scales also stay within a request. Decoder prefixes keep
+their decode attention and recurrence paths, including speculative snapshots;
+the rest of the layer walk can share projections where the numerical contract
+permits it. Unfinished readers do not project or mirror unused logits.
+
+The new reader still needs a free slot and its reservation under the existing
+KV policy. Cached text attaches through the same prefix plan and computes
+only its suffix. With early admission enabled, a short tail keeps its rounded-up aligned allocation and
+donates the rest of its share to unfinished readers, split equally in
+aligned units with arrival-order ties. This happens before the advances,
+uses replicated positions and stays inside the original tick budget. When
+all readers finish, unused capacity does not create another admission lane.
+These allocations are caps: required snapshot/structural cuts can end a GPU
+advance earlier. Executors that declare split-invariant prefill spend the cap
+from the cursor's current position and omit redundant automatic chunk-grid
+cuts; other executors retain their chunk-grid contracts.
+A lone reader, or a set of readers that all fit their original shares, keeps
+those shares unchanged, including its final tails.
+With fixed budgeting, the busy cap protects decoders that started before a
+reader. When every active decoder joined after all unfinished readers, and the engine
+can share their execution, those readers retain the configured idle budget.
+This avoids multiplying their weight-streaming passes because a short request
+was admitted. Newly admitted streams can consequently have longer update gaps
+while sharing those larger chunks. The budget remains bounded; slot and KV
+pressure can still delay admission. Required cuts and decode rows can leave
+less than the full prefill allowance in a shared walk.
+
+The default adaptive policy instead learns pass cost by decoder-load range
+and by the context range a chunk starts in, so a long prompt's late, expensive
+chunks never size the next short prompt's (an unmeasured range borrows the
+most conservative rate at the same context, then the deepest shallower one).
+It starts at 256 tokens, grows within the aligned engine/idle ceiling and
+applies the configured decode-gap target to both incumbent and newly admitted
+decoders. Explicit positive budgets remain caps. Rank 0 journals its selected
+limit; peers replay it and never use local timing to schedule. Fresh idle
+arrivals receive the full first-token allowance; an arrival queued during
+ongoing prefill with a free slot reserves half for its previous wait. These
+soft targets do not predict when a slot- or KV-blocked request can start.
+While nothing decodes and nothing waits for a free slot, the selected quantum
+never drops below `prefill_idle_floor_tokens` (1024): a lone reader keeps the
+engine's efficient chunk and an arrival during it waits at most that chunk —
+without the floor a 522K prompt on the 27B read its tail in 256-token chunks
+and took 39 % longer than at 4096.
+See [policy defaults and metrics](operations.md) for the cost/recovery controls.
+
+For example, with a 256-token budget and four-token alignment, a 23-token
+arrival beside one long reader gets 24 allocated tokens and the long reader
+gets 232. An engine consuming those caps computes 255 tokens in total;
+equal shares offer at most 151 in that tick. This saves scheduled capacity;
+GPU throughput
+still depends on chunk shapes, additional walks and active decode width.
+Deployments that need the same fixed prefill cap before and after admission
+can choose equal busy and idle budgets and set both latency targets to zero.
+With adaptive targets enabled, equal caps still allow smaller selected quanta.
+Larger quanta can increase gaps between decode updates, so measure mixed loads.
 
 When the budget drops from idle to busy, the in-flight count can exceed
 `budget / align`. Advance only that many prefills, rotating through arrival
@@ -95,7 +205,44 @@ between chunks.
 - Scheduler regressions cover exhausted group budgets, chunked starts
   after one-shots, monolithic image fallback, idle-to-busy budget changes,
   fair rotation, cancellation, slot reuse and compaction determinism.
+- Queued-text regressions additionally cover alignment and busy/idle budget
+  boundaries, oldest-fitting order, three/four concurrent requests, full
+  output reservations, cache-attached short totals and histories, and
+  joined-prefill cancellation and engine failures. A fake with MTP trailing
+  rows checks reservation forwarding and unwind, not physical GPU safety.
+- Tail redistribution regressions cover multiple donors and recipients,
+  all readers finishing together, twenty consecutive short arrivals, and
+  preservation of decode progress and the total allocated budget. Begin
+  failures release every private snapshot, including the head cut, before
+  cancellation or retry. These scheduler cases also run under ASan/UBSan.
 - Live: c1/c2/c4 @ d0/d4k/d8k benchy sweep; TTFT of request #2 must drop;
   per-request tok/s must not regress at c1.
 - Item 2 additionally: c4 deep-context soak, KV pool metrics sane, no
   `validate_batch` / digest mismatches in logs.
+
+The reproducible admission comparison is
+`python3 scripts/serve_admission_bench.py --url http://127.0.0.1:18081
+--label COMMIT-CONFIG --out RESULTS.json`. Run matched baseline/candidate
+processes in alternating order on reserved hardware, using the same prompts,
+output limits and configuration. Compare equal busy/idle budgets as well as
+256/2048 to expose the budget-transition trade-off. Its seven scenarios cover
+isolated prefill/decode, a short arrival with short or long output, sustained
+arrivals with and without an existing decoder, and cancellation/recovery.
+The first arrival must be dispatched while the long response's matching
+native prefill ID is still present. Requests, usage, update times, output
+hashes and before/after metrics are retained; unrelated traffic invalidates
+a run. Aggregate rates include the full scenario wall time and client update
+gaps are not per-token kernel latency. Cached conversations, image paths,
+physical KV boundaries, semantic checks and multi-rank operation-stream
+agreement remain separate live gates. Host passes do not establish GPU
+throughput equivalence.
+
+### Shared execution timing
+
+`mixed_steps` counts decode passes that also advance prefill. Their elapsed
+`mixed_ms` is included in both `prefill_ms` and `step_ms`, because both logical
+operations occupy that interval. Total engine time is therefore
+`prefill_ms + step_ms - mixed_ms`; phase times are not independent throughput
+measurements. Prometheus exposes the same overlap as `dgpp_mixed_seconds_total`
+and `dgpp_mixed_steps_total`, including per-rank equivalents. Compare completed
+work over wall time when evaluating mixed workloads.

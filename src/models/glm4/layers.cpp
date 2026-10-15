@@ -110,6 +110,8 @@ void Glm4AttentionLayer::enqueue(const uint16_t* x, int tokens, const Glm4AttnRo
   if (tokens > max_tokens_) throw std::invalid_argument("Glm4AttentionLayer: tokens exceed max_tokens");
   if (!x || !out || !rows.req_ids || !rows.pos || !cache.k_cache || !cache.v_cache || !cache.block_tables)
     throw std::invalid_argument("Glm4AttentionLayer: null pointer");
+  if (rows.split(x, tokens, hidden_, out, [&](const uint16_t* input, int n,
+      const auto& map, uint16_t* output) { enqueue(input, n, map, cache, output, stream); })) return;
   const int H = hidden_;
   const int Q = lh_ * dim_, KV = lkv_ * dim_;
   // The three projections, fp32 out (the bias joins before the one

@@ -69,6 +69,8 @@ int main(int argc, char** argv) {
     if (!dense_weights.empty()) dgpp::QwenLayerStream::set_dense_weights_fp8(dense_weights == "fp8");
     if (!mtp_expert_format.empty()) dgpp::QwenLayerStream::set_mtp_expert_format(mtp_expert_format == "bf16_fused");
     cfg.mtp_experts_bf16_fused = dgpp::QwenLayerStream::mtp_experts_bf16_fused();
+    if (cfg.mtp_experts_nvfp4 && cfg.mtp_experts_bf16_fused)
+      throw std::runtime_error("--mtp-expert-format bf16_fused: this checkpoint ships NVFP4 draft experts");
     const dgpp::QwenResidency residency = streaming ? dgpp::QwenResidency::Streaming : dgpp::QwenResidency::Resident;
     const dgpp::QwenHeadSharding head = world > 1 ? dgpp::QwenHeadSharding::VocabSharded : dgpp::QwenHeadSharding::Full;
     const double kGiB = 1024.0 * 1024.0 * 1024.0;
@@ -145,7 +147,7 @@ int main(int argc, char** argv) {
           DGPP_LOG_INFO("qwen_load_check: layer {} ({}{}) {:.3f} GiB in {:.2f} s, read {:.3f} GiB; experts {} x {} (scale block {}){}",
                         l, r.kind == dgpp::QwenLayerKind::Gdn ? "gdn" : "qsa", r.has_ple ? "+ple" : "",
                         r.bytes / kGiB, s, (stream.source_bytes_read() - before) / kGiB,
-                        r.moe.experts.size() / 3, r.moe.local_inter, r.moe.scale_block,
+                        (r.moe.experts.empty() ? r.moe.experts_fp4.size() : r.moe.experts.size()) / 3, r.moe.local_inter, r.moe.scale_block,
                         r.has_ple ? std::format(", ple heads [{}, +{}) rows [{}, +{})", r.ple.hash_head_begin, r.ple.hash_heads, r.ple.row_begin, r.ple.rows) : "");
         if (!streaming) continue;
         stream.release_layer();

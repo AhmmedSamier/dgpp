@@ -1,8 +1,7 @@
 # Changelog
 
-The history by milestone. The dated engineering record in
-`benchmarks/results/` has every measurement and fix behind these lines;
-`PLAN.md` has the milestones' exit gates.
+The history by milestone. `PLAN.md` has the milestones' exit gates;
+project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 - **Parallel eager layer load** (2026-10-07):
@@ -21,6 +20,389 @@ The history by milestone. The dated engineering record in
   deterministic. Loader suites green (qwen 9, glm 13, mimo 5, dsv41 6,
   dsv4 4, glm_dsa 4, glm4 4).
 
+- **The opt-in YaRN ramp serves Qwen3.8-27B** (2026-10-12, PR #111).
+  `engine.rope_scaling` is accepted for the `qwen3_5` family, whose rope
+  geometry is the Flash-Next recipe's (64 rotary dims of 256, theta 1e7,
+  mrope [11, 11, 10]): the full-attention layers' tables take the ramp
+  through the config adapter, the DFlash2 draft table takes the same band
+  at its 128-dim head, and the context ceiling, the session bound and the
+  memory plan follow `context_limit()`. Templates: the one-node 27B at
+  512K (release-checked 5/5 at 262 144 and 524 288, and again 3/3 at
+  524 288 on one Spark and on four on 2026-10-15) and at 768K (the ×3 band
+  release-checked on one Spark on 2026-10-15: needle and control found,
+  cold prefill 3 282 s), and the one-node RadixArk Flash-Next at 512K
+  (plan-verified). The README key row,
+  the deploy notes and the release-check runbook name both families.
+
+- **Adaptive prefill keeps a lone reader's chunks efficient and keeps a long
+  prompt's cost off the next short one** (2026-10-15). The latency
+  controller sized chunks from one cost estimate per decoder load, so a
+  522K prompt on Qwen3.8-27B (one Spark) shrank to 256-token chunks past
+  375K — off the NVFP4 MLP's prefill GEMM, the weights streamed once per
+  256 tokens, the attention grid at 1.3 waves — and took 2 261 s against
+  1 626 s at 4096-token chunks, while the 4K prompt after it ran at 256
+  tokens a chunk for 10.4 s instead of 3.7 s. The estimate is now kept per
+  context range as well (below 8K, 32K, 128K, 512K, beyond), and a new key
+  `engine.prefill_idle_floor_tokens` (1024) floors the quantum while nothing
+  decodes and nothing waits for a free slot; the floor rides the warm
+  record (`pfifloor`) and the admission metrics. Also fixed: the three CUDA
+  test/bench units left behind by the `GlmQuantMatrix` scale-grid field and
+  the portability test's model map missing the QAD template.
+
+- **The quantization-aware-distilled Qwen3.8-Flash-Next export served as
+  shipped** (2026-10-14, issue #113). `local-inference-lab/Qwen3.8-Flash-Next-NVFP4`
+  carries modelopt's `MIXED_PRECISION` block and four forms the NVIDIA release
+  does not: the dense stack and shared experts as MXFP8 (e4m3 with one e8m0
+  byte per 32 columns), the n-gram table as NVFP4 with one F32 global, the
+  draft layer's experts as weight-only NVFP4, and the hyper-connection and
+  PLE norms in F32. The config parser detects the block and requires the
+  complete declared set; the binding table expects every form by name; the
+  loader widens the e8m0 bytes to F32 on a 1 x 32 scale grid the fp8 cores
+  already read (the grid launcher now takes any per-row grid on its GEMV
+  rows), decodes the GDN a/b rows to BF16 exactly, keeps the F32 norms (the
+  group norm and the fused GR norm kernels read either dtype), loads the
+  NVFP4 table resident or mapped with its scale rows gathered alongside (two
+  gather kernels), and skips the activation scale on the weight-only draft
+  experts (no W4A4 on that layer). The shared-expert decode kernels take the
+  scale grid as parameters. The Python reference dequantizes MXFP8, NVFP4
+  experts and the NVFP4 table, and the fixture chain gains the QAD twin
+  (`qwen_qad_*`); the real snapshot binds every tensor and loads at world 1
+  (98.44 GiB with the table resident). The attention-side MXFP8 matrices
+  keep their e8m0 bytes resident: the streaming MMA and the dequant bridge
+  take the scale grid's element type (`scale_at`: the float whose exponent
+  field is the byte), bitwise the F32 grid and a quarter of its traffic —
+  the F32-widened grid cost 2.6 ms of a 34.4 ms T=1 step at world 1 (an
+  attribution bench on the dense shapes), the bytes 1.1 (32.9 ms measured;
+  the NVIDIA release 31.6–32.0 on the same build). One-node template (the
+  26.8 GiB NVFP4 table resident, a 128K pool), a model card with the
+  measured decode, prefill, MTP acceptance and eval numbers, and the
+  deployment's rows in `docs/benchmarks.md` (C1–C8, cold prefill, decode
+  modes, 0–128K context, quality; the first rows measured with the
+  adaptive prefill defaults).
+
+- **GLM-5.3-Flash: the batched draft chain, and the wide GEMV chunk that
+  makes every decode batch bitwise** (2026-10-14). The Flash's fixed batch
+  now carries the MTP chain past depth 1
+  (`session_graph_capture_draft_chain_batch`: one chain row per request
+  slot off the slots' draft verdicts, its hidden the block's own previous
+  output row in the slot's position cache, the ring guard around the chain
+  as the scalar chain's), so a depth-2 recipe batches its live requests
+  instead of replaying each as a scalar graph (four requests fell from
+  108–114 to 59–67 wall tok/s that way). Two long gates came with it (a
+  sixteen-round greedy batch and a 64-step sampled co-admission at depth 2)
+  and they caught a pre-existing exactness gap: above four rows the dense
+  decode sites left the row-independent GEMV chunks for cuBLASLt or the
+  streaming fp8 GEMM (one weight read, but a reduction order that follows
+  m), so every batch wider than four rows — the four-slot depth-1 batch
+  included — was only tolerance-equal to the eager walk, and a greedy
+  transcript drifted at a near-tie after a dozen rounds. The GEMV cores
+  (bf16, the fp8 scale GEMV) now stage up to eight rows a launch
+  (`kernels/gemv_wide.hpp`: the 96 KB shared-memory opt-in taken once in
+  the GEMM wrapper's constructor, never inside a capture; eight 4096-wide
+  rows are 64 KB), the chunk sizers take the wide chunk, and the Flash's
+  lowering bounds are its decode rows: a batched row is bitwise the row
+  alone at every batch the family serves, with the weights read once up
+  to eight rows (`bf16_gemv_wide_rows_bitwise_the_rows_alone`,
+  `scale_gemm_wide_gemv_rows_bitwise_the_rows_alone`; the one-to-four-row
+  chunks keep the default 48 KB ceiling, so every narrower chunking —
+  every other family's decode lowering — is exactly what it was, and
+  Qwen's kernel-only 17–64-row walks now read their weights once per
+  eight rows instead of four). The bound covers prefill rows: a prompt or
+  chunk of at most the recipe's decode rows takes the GEMV chunks too
+  (bitwise alone and as a mixed walk's decode prefix; inside a longer
+  group walk the same tokens take cuBLASLt or the streaming GEMM, the
+  standing property of prompts under the GEMV bound, four rows before —
+  so their bits move once, this release, and a 32-token prompt on an
+  eight-slot depth-3 recipe reads the dense weights once per eight rows
+  in its prefill). With the chain
+  and the chunk the Flash's decode rows became a runtime shape like the
+  session-core families' (`GlmDiagnosticModel(..., decode_rows)`,
+  `decode_rows_cap()` 32 — the DSA select bound; the build-time eight
+  stays the floor and the eager scratch): a four-slot recipe at depth 2
+  batches as one twelve-row family, with the 2- and 3-slot families under
+  it (`glm_tp_serving_mtp_depth2_twelve_row_batch_matches_independent_speculators`:
+  every family's rows bitwise the slots' own depth-2 walks, the feeds past
+  the twelve scratch rows, a hole and the scalar tail), where before only
+  a 2-slot family fit the eight rows and the other live requests replayed
+  scalar graphs. With batch families past depth 1 the scheduled verify
+  depth records reduced-depth batch variants, so the Flash's batch capture
+  compacts a feed wider than its verify rows and its draft writes the
+  block's full width back, as the session-core families do (the warm
+  capture refused with "this family has no reduced-depth feed" before);
+  `glm_tp_serving_mtp_depth2_scheduled_batch_matches_independent_speculators`
+  drives the 2-slot family through a forced per-step depth of 1 and 2
+  against two eager speculators at the same depths. Its first four-request
+  run on the fabric crashed the engine ("session_graph_settle: accepted
+  rows outside [1, 2]"): the Flash's settle ignored the rows the engine
+  passes and read the model's batch contract, which the pipelined next
+  replay — another depth variant — had already switched; it bounds by the
+  replay's own rows now, as the session core does. Measured on four nodes
+  (NVFP4/FP8, four slots, ms a step at one request by class prose / code /
+  JSON / math / chat, wall tok/s at four): depth 1 on the new binary is
+  the previous release's — 30.5 / 31.2 / 30.7 / 31.1 / 30.8 against 30.6 /
+  31.3 / 30.8 / 31.2 / 30.9, and 108.1 / 109.0 / 112.4 / 111.8 / 107.3
+  against 108.8 / 110.1 / 111.4 / 113.3 / 107.0 at four requests, so the
+  wide chunk costs nothing at eight rows; fixed depth 2 (the twelve-row
+  family) 36.9 / 38.1 / 37.3 / 38.0 / 37.4 at 2.3–2.7 tokens a pass, +5..+13 %
+  at one request and 90.7 / 97.9 / 99.8 / 103.6 / 92.0 at four (−6..−17 %,
+  where the scalar replays of window 8 gave 59–67); the scheduled depth 2
+  (row 7 ms, base 17, min 1) 35.8 / 37.4 / 36.1 / 37.3 / 36.0, +3..+12 % at
+  one request, and 98.5 / 99.7 / 104.3 / 105.4 / 98.6 at four (−6..−9 %; the
+  four-slot family replayed 572 times at depth 1 and 598 at depth 2 over
+  that run). Greedy transcripts identical on every leg. The Flash templates keep depth 1; the schedule keys are the
+  interactive setting (deploy/README.md). Also: the graph record
+  reducer's probe memset is
+  stream-ordered (a legacy-stream memset invalidated a capturing peer in
+  the loopback worlds), and the full GLM-5.3's engine test gained the
+  scheduled-depth exactness gate.
+- **GLM MTP-step round: graphs, doorbells, the 32-row cap, the scheduled
+  depth on the GLMs** (2026-10-13/14). Bitwise, measured on four nodes
+  against the previous release: the residual add fused into the next norm's
+  first pass (`glm_residual_add_rmsnorm_bf16` and its int8-quant twin; the
+  full GLM-5.3 defers each layer's closing add into the next input norm or
+  the final norm, the Flash, GLM-4.7 and the draft blocks fuse their
+  attention sites) and the DSA projection chain's two to four rope launches
+  issued as one (`dsa_rope_interleave_multi`) take the full GLM-5.3 decode
+  graph from 2,495 to 2,215 nodes; the bus lanes send the 64-byte doorbell
+  and credit cells inline (`IBV_SEND_INLINE`; the NIC grants 124 B). None of
+  it moved the pass: the full GLM-5.3 int4-int8 at depth 1 reads 62.0 vs
+  61.8 ms a step at one request and 239 vs 239 ms at eight, GLM-5.3-Flash
+  30.5 vs 30.6 ms, the Flash's collective 33.7 vs 34.1 µs (handshake 11.9
+  vs 12.6) — those kernels and the doorbell DMA were off the critical path,
+  which is the collective rounds and the DRAM streams. The full GLM-5.3's
+  decode row cap is 32 (was 16): eight slots at depth 2 or 3 boot
+  (`glm_dsa_engine_test_twenty_four_rows`), the memory plan at 24 rows is
+  109.88 vs 109.87 GiB. Measured at eight slots: fixed depth 2 is +4..+11 %
+  at one request (30.0 → 32.5 / 31.3 → 33.7 / 31.2 → 34.6 / 30.0 → 33.1 /
+  28.2 → 29.3 engine tok/s, prose / code / JSON / math / chat) and −2..−9 %
+  at eight (51.7 / 49.8 / 52.5 / 49.9 / 49.2 → 47.2 / 46.9 / 51.4 / 48.8 /
+  45.2 wall tok/s); the scheduled depth (`engine.mtp_schedule`, depth 2,
+  minimum 1, cost model 14 ms a row over 34) is +7..+13 % at one request
+  (33.1 / 33.7 / 35.4 / 33.5 / 30.4) and −1..−5 % at eight (49.3 / 47.9 /
+  51.4 / 48.7 / 47.6); scheduled depth 3 adds nothing over it. The eight-slot
+  templates keep depth 1 (their purpose is the eight-slot rate); the schedule
+  is the interactive deployment's setting. The full GLM-5.3 gained the
+  scheduled-depth exactness gate GLM-4.7 has
+  (`glm_dsa_engines_loopback_world_2_scheduled_verify_depth_from_draft_probabilities_is_exact`);
+  the schedule needs no confidence head on these families — the draft
+  head's own probability of its pick, from the device sampler, drives it.
+  GLM-5.3-Flash at one request: fixed depth 2 is +3..+13 % (61.4 / 63.1 /
+  63.7 / 61.5 / 58.2 → 63.4 / 71.2 / 69.0 / 66.6 / 60.9), the scheduled depth
+  2 (cost model 7 ms a row over 17) +3..+13 % too (65.8 / 71.1 / 70.5 / 67.0
+  / 60.1); but this family has no batched draft chain past depth 1, so four
+  concurrent requests fall from 108–114 wall tok/s at depth 1 to 59–67
+  under the schedule (every live request a scalar replay). Its templates
+  keep depth 1 until that chain exists; the batched chain is the Flash's
+  next MTP item.
+- **Draft-head screen for every drafting family** (2026-10-13): `engine.draft_head:
+  "screen"` reads each draft token's head through a 2-bit rotated copy of the
+  vocabulary head (`kernels/head_screen.hpp`; a quarter of an fp8 head's
+  bytes, an eighth of a bf16 one), finds the 128-row blocks that can hold the
+  draft within three noise sigmas, computes those blocks' logits exactly from
+  the served head in its own encoding (bf16, bf12, fp8 block or channel
+  scales, the int8 plane form) and masks the rest with `-inf` for the pick.
+  One shared object (`kernels/draft_head.hpp`) serves native MTP on
+  GLM-5.3-Flash, the full GLM-5.3, GLM-4.7, MiMo and Qwen3.8-Flash-Next, the
+  Qwen3.8-27B DFlash2 block and DeepSeek-V4.1's DSpark block (DeepSeek-V4 keeps
+  its own screened head). The verify still reads the exact head, so greedy
+  transcripts are unchanged and sampled requests keep their distribution; the
+  study on 5,571 real Flash-Next draft inputs put the draft at the exact
+  argmax on 99.3 % of steps. Cold-L2
+  micro-bench at the Flash-Next head shape: 0.90 / 1.06 / 1.24 ms per draft
+  step at 1 / 4 / 8 rows against 2.7 / 2.8 / 2.9 ms for the exact head.
+  `engine.draft_head_blocks` (default 32) caps the candidates. On the
+  fabric (greedy, 256-token answers, five prompt classes) the screen kept
+  every leg's transcripts, tokens per pass and acceptance identical to the
+  exact head's and cut the pass from 39.8 to 38.1 ms at one node, depth 1
+  (+4.5 % C1 engine tok/s), 55.8 to 50.5 at depth 3 (+11 %), 23.2 to 22.6
+  at four nodes, depth 1 (+2.5 %) and 31.3 to 29.9 at depth 3 (+4.7 %).
+  GLM-5.3-Flash on four nodes: 31.3 to 30.9 ms a pass (+1.4 %); the full
+  GLM-5.3 (int4-int8, the head's 12-bit companion as the build's source) on
+  four nodes: 63.5 to 62.5 ms (+1.4..+1.6 %); the Qwen3.8-27B NVFP4 DFlash2
+  drafter on four nodes: 38.6 to 38.0 ms (+1.4..+3.5 % by class); drafts,
+  acceptance and transcripts identical on every leg. The Qwen3.8-Flash-Next
+  (but the AutoRound hybrid), GLM-5.3-Flash, full GLM-5.3 and Qwen3.8-27B
+  templates set `draft_head: "screen"`; DeepSeek-V4.1's keep
+  `exact` (DSpark's Markov bias is added after the head read and the
+  screen's selection does not see it yet: fewer accepted drafts measured);
+  the engine default stays `exact`.
+- **Shared resumable prefill and adaptive serving budgets** (2026-10-12):
+  eager and graph serving use common request ownership, continuation, row
+  planning, snapshot and speculative-state handling across all eight model
+  executors, and early text admission is on by default (DFlash included).
+  The prefill budget now adapts to measured pass cost:
+  `engine.prefill_budget_tokens = -1` starts at
+  `engine.prefill_initial_tokens` (256) and grows within two latency
+  targets, `engine.decode_gap_target_ms` and `engine.first_token_target_ms`
+  (1000 ms and 3000 ms by default; both 0 selects fixed budgets), tuned by
+  `engine.prefill_latency_headroom_pct` (15), `engine.prefill_growth_factor`
+  (2) and `engine.prefill_cost_recovery_pct` (25). The automatic idle
+  ceiling is 4096 tokens (previously the engine's full chunk limit);
+  explicit busy/idle budgets remain caps. Rank 0 journals the selected limit
+  every tick and peers replay it. `engine.compact_batches` now defaults to
+  true on every family: live requests are packed into the smallest
+  compatible graph bucket. The collective placement hash covers a final
+  four-byte word (exchange version 2; older peers are refused), and warm-up
+  waits for every rank's model to be ready. Five deployment examples drop
+  their explicit prefill budgets. Generated benchmark results under
+  `benchmarks/results/` are no longer tracked. The measured
+  latency/throughput tradeoffs are in
+  [PR #112](https://github.com/HawkBearPig/dgpp/pull/112).
+- **Qwen3.8-27B NVFP4: fp4w prefill GEMM** (2026-10-06):
+  `launch_fp4w_gemm_*` (new): `fp8w_gemm`'s 128x128x64 tiles and
+  three-stage pipeline with an e2m1 W-side (8 payload bytes + the
+  step's four e4m3 scale bytes a thread a step, exact pairwise decode,
+  the F32 global once in the epilogue). Wired above 1024 rows in
+  `dense_mlp` (measured crossover: slower below, 12-90% faster above);
+  the <= 1024-row chain is untouched. Serve: pp2080 prefill 2445-2460
+  ms vs 2568 (~5%), pp448 and decode unchanged.
+- **Qwen3.8-27B NVFP4: dense MLP on the production kernel** (2026-10-06):
+  gate/up/down run the production ldmatrix kernel at every row count
+  (`launch_dense_mma_fp4_prod_*`, new in `glm_moe_launch`: the grouped
+  launcher with one pre-staged `{0, m, 0}` segment per row count plus
+  boot-harvested per-layer view tables on resident stacks, a re-staged
+  3-entry slot on streaming stacks) instead of the CUDA-core `fp4_gemv`
+  (<= 128 rows) and the synchronous reference tile. Gate/up m=8/32 go
+  623/2456 us to 239/257 us against a ~251 us roofline; down is bitwise
+  the reference (glm_moe_test pins the pair). A purpose-built fp4
+  streaming decode kernel was tried and reverted (correct, but slower on
+  every production shape — the production kernel already saturates the
+  decode roofline). Serve A/B vs the FP8 release, identical transcripts:
+  29.1 vs 24.5 tok/s short-prompt, pp448 prefill 720-748 vs 931 ms —
+  NVFP4 leads on both, so no dense-W4A4 path is built.
+- **Qwen3.8-27B NVFP4: mixed formats in one checkpoint** (2026-10-05):
+  the `unsloth/Qwen3.8-27B-NVFP4` release binds directly — NVFP4
+  (`nvfp4-pack-quantized`, group 16, e4m3 block scales, per-tensor
+  global scales) for the dense MLPs, channelwise FP8 e4m3
+  (`float-quantized`, bits 8, group = full row) for the attention
+  projections and the vocabulary head, BF16 for the rest including the
+  MTP draft layer. `config35` reads the compressed-tensors
+  `config_groups` (targets, `re:` regexes, exact and regex `ignore`,
+  document order first-match wins) into a per-module
+  `tensor_quant()` resolution; `loader35` builds the three weight
+  forms side by side (fp4 payload + packed scales + the
+  `weight_global_scale` slots the kernels divide the finished dot by once,
+  channel `weight_scale [N,1]` widened to f32);
+  `layers.cpp`'s dense GEMM derives its scale shifts from the matrix
+  itself, so channel matrices ride the streaming fp8 GEMV at decode
+  (<= 128 rows, the row-chain invariance preserved) and the
+  dequant-to-bf16 bridge above (NVFP4 MLPs moved to the production
+  ldmatrix kernel the next day — see the entry above). The FP8-release levers
+  (`prefill_fp8_per_tensor`, `dense_weights: fp8`) are refused for
+  this quantization — the head is already fp8-channel resident. The
+  `qwen35_mixed_*` test chain (synthetic mixed fixture, smoke,
+  1..7-row invariance, dump-parity strict/relaxed against
+  `qwen35_reference_dump.py`, which decodes nibbles and both scale
+  kinds exactly as the kernels do, teacher-forced draft) runs
+  alongside the FP8 chain. Card:
+  `docs/model_cards/Qwen3.8-27B-NVFP4.md`; templates:
+  `deploy/cluster_qwen3.8-27b_nvfp4_w{1,2,4}.example.json`.
+- **Full GLM-5.3: `engine.attention_weights`** (2026-10-09): `int4`
+  re-encodes the checkpoint's int8 g64 q_a/kv_a, q_b and o_proj rows to
+  int4 g64 at load with the RTN recipe (kv_b keeps its int8 form; the
+  resident image is keyed by the form through the family's
+  `loader_format()`, so the first boot under it writes its own image) —
+  a measuring instrument for the attention-bytes lever, NOT lossless: on
+  the four nodes it reads a 61.1 ms pass against 65.8–66.6 (o_proj's GEMV
+  7.5 → 3.8 ms; q_a/kv_a and q_b barely move, they are L2-fed by the
+  boundary prefetcher), −1.74 GiB resident, and costs +0.030 nat on the
+  hard text (perplexity 10.25 → 10.57, top-1 50.3 → 49.9 %) — the RTN floor
+  a calibrated 4- or 6-bit attention has to beat; o_proj is the exposed read. `checkpoint` (the default) serves the
+  weights as shipped. The diagnostic forward check takes
+  `--attention-weights` for the teacher-forced gate.
+- **Full GLM-5.3: the draft head in block FP8** (2026-10-09, `engine.mtp_head`):
+  `fp8` encodes the lm head's rows to block FP8 at load (e4m3, 128 × 128
+  fp32 scales — the FP8 releases' recipe, `loaders/fp8_quant.hpp`) and
+  the draft block reads that copy through the fp8 scale-GEMM core while
+  the verifier keeps the main head in its 12-bit form — the served
+  distribution is unchanged by construction (greedy transcripts identical
+  across the two forms on the fabric), only the draft's proposals come from
+  the narrower head. +0.22 GiB per rank at world 4 (the memory plan's
+  weights line). On the four nodes (nsys per-step breakdown, one request, MTP depth 1):
+  the draft head's GEMV 1.36 ms in the 12-bit form, 1.05 ms in FP8 (238 MB
+  at 227 GB/s) — 0.3 ms per pass, 0.5 %, under the load gate's run-to-run
+  noise; acceptance by class identical to the hundredth of a token per
+  pass. Opt-in, not in the template: 0.22 GiB buys ~4K tokens of fp8
+  context there. `checkpoint` (the
+  default) keeps the draft on the main head's form.
+- **Full GLM-5.3 in the Mixed346 GPTQ H32 A8 g128 checkpoint** (2026-10-09/10,
+  `HawkBearPig/GLM-5.3-Mixed346-GPTQ-H32-A8-g128`,
+  [card](docs/model_cards/GLM-5.3-Mixed346-GPTQ-H32-A8-g128.md)): the
+  Int4/Int8 checkpoint with its routed experts re-encoded expert by expert
+  at 3, 4 or 6 bits (gate/up at one width, down at its own; a Gaussian
+  eight-level codebook at 3 bits, the NF4I8 codebook at 4, signed INT6 at
+  6; bf16 scales per 128, GPTQ in the H32-rotated basis) with INT8 expert
+  activation codes (one fp32 scale per 128 rotated values), 116 experts
+  kept in the Int4/Int8 form — 4.22 GiB less per rank than Int4/Int8 and
+  19 % less divergence from BF16 by the publisher's table. A fourth packed
+  scale format (`kPackedScaleBf16G128Mixed346`: dense 3/4/6-bit index
+  streams, `packed_bits_allowed`) parsed from `quant_method: dgpp_mixed346`
+  with its two sidecars (the baseline compressed-tensors block and the
+  per-expert recipe, or both inline), every tensor named by its own form in
+  the binding; the loader slices the dense streams at the 128-group; a
+  new GEMV core (`kernels/packq_a8_gemv.cuh`: a 16-byte piece a lane at 4
+  bits, a 48-byte piece — a group, or half of one — at 3 and 6 bits loaded
+  cooperatively and swapped through a per-warp shared tile, dp4a int32
+  group dots, one fp32 scale product per group, the staged codes at a
+  conflict-free 132-byte stride) under mixed-form slot and grouped kernels;
+  the H32-then-int8 activation quantizer (`kernels/hadamard32.cu`), fused
+  into the post-attention norm for the token rows
+  (`glm_rmsnorm_bf16_quant_int8`); an int8 tensor-core prefill tile
+  (`packq_gemm.cu` `wide_tile_i8`: the rows' codes against int8 levels on
+  mma m16n8k32 s8, each 128-code group an exact int32 dot scaled once; the
+  fallback experts' tiles stay on the bf16 group-64 chain in the same
+  launch) with the rows' and the widths' lines prefetched into L2, and the
+  tile list for every Mixed346 layer. Host and Python oracles, the fixture
+  gates (TP, engine graph, decode, parity) with budgets stated for the int8
+  contract's doubled sensitivity to upstream noise, the slot microbench
+  (`--m346 FORM|census`) and its `--prefill` chain mode: the slot path at
+  the int4 core's bandwidth at every width, the gate tile 15 % under the
+  int4 tile's time, the 2K-token chain level with it. On the four nodes
+  (2026-10-10): decode 62.7 ms per pass at one request and 236 at eight
+  (Int4/Int8 63.6 / 252, NF4I8 64.0 / 253, the same MTP acceptance), cold
+  prefill 3.906 / 17.943 / 76.714 s at 2K / 8K / 32K (Int4/Int8 3.896 /
+  17.866 / 76.439), 108 ms per pass at 256K context; teacher-forced 2.3284
+  nat/token between the two references.
+- **Full GLM-5.3 in the NF4I8 GPTQ H32 g128 checkpoint** (2026-10-08/09,
+  `HawkBearPig/GLM-5.3-NF4I8-GPTQ-H32-g128`, [card](docs/model_cards/GLM-5.3-NF4I8-GPTQ-H32-g128.md)):
+  the Int4/Int8 checkpoint with its routed experts re-encoded as four-bit
+  indices into a sixteen-level INT8 codebook (bf16 scale per 128, GPTQ) in
+  a block-32 Hadamard-rotated input basis — 2.64 GiB less per rank and 22 %
+  less divergence from BF16 by the publisher's teacher-forced table. A
+  third packed scale format (`kPackedScaleBf16G128Nf4i8`), parsed from the
+  checkpoint's `quant_method: dgpp_nf4i8` block and refused on any drift
+  of the codebook, group, rotation or layer range; the loader slices at
+  the format's group; the GEMV core decodes the codebook with two
+  byte-permute lookups into its exact integer × bf16-scale chain, the
+  tensor-core prefill decodes the levels to their bf16 patterns the same
+  way (no integer-to-float conversions on the decode path); the H32
+  rotation is one kernel (`kernels/hadamard32.cu`: fp32 butterflies, one
+  bf16 rounding, the op order of the host oracle and the Python
+  reference) applied once per row — into a side buffer the decode slots
+  read and in place on the gathered routed rows and the SwiGLU rows of
+  the prefill chains. A first form rotated the staged row inside every
+  slot-kernel block (64 blocks a slot repeating the same rotation) and
+  converted the levels through int-to-float on the tensor-core path; on
+  the fabric the sixteen-row step read +4 % against the Int4/Int8
+  checkpoint, now level: on today's binary the two checkpoints measure the
+  same step at one and at eight requests (C8 ratio 1.000) and the same
+  cold prefill (3.87 vs 3.90 s at 2K; the format saves 1.1 % of a decode
+  step's bytes, 8 of 256 experts a token, and the lookup decode changed
+  no prefill cell). Oracles:
+  the MoE host reference and both Python references carry the codebook
+  and the rotation; tests at every level (kernel, layer, synthetic
+  checkpoint forward/decode/TP/engine, the landed checkpoint's binding).
+  Template `deploy/cluster_glm-5.3_nf4i8_w4.example.json`: eight slots,
+  MTP depth 1, a 272K-token fp8 K/V pool (plan 110.43 GiB; the
+  280K shape boots only on a settled node — the process holds ~3.5 GiB
+  beyond the plan at listening). On the four
+  nodes: the Int4/Int8 checkpoint's decode step at one request and at
+  every context bucket to 256K, C1 27.1–30.6 engine tokens/s and C8 52.6–56.4 wall
+  tokens/s over the five classes (the Int4/Int8 rows 27.4–30.5 / 52.9–55.7),
+  cold prefill 3.87 / 17.9 / 76.5 s at 2K / 8K / 32K; teacher-forced on the
+  hard text 2.3276 vs 2.3295 nat/token (inside the standard error);
+  HumanEval 157/164, GSM8K 294/300, schema extraction 100/100
+  at `reasoning_effort` low.
 - **The L2 weight prefetcher's knobs are engine keys** (2026-10-05):
   `engine.l2_prefetch` (on/off), `engine.l2_prefetch_form` (`load` the
   bytes, `lines` one L2 prefetch per 128-byte line, `touch` one line per
@@ -98,6 +480,14 @@ The history by milestone. The dated engineering record in
   site in the model, and the four-node shard widths are where the plain
   T=1 world pays its 10 %. The next kernel item: the decode form at one to
   four rows on narrow shards.
+- **Serve: completion response timings** (2026-10-05; compatibility follow-up
+  2026-10-08): chat and legacy responses carry a top-level llama.cpp-style
+  `timings` object. Streams report timings on the final usage or terminal
+  chunk, including when usage is disabled. Prompt rates count uncached tokens
+  and exclude the initial admission queue; decode rates exclude the first
+  token supplied by each prefill. Existing usage, JSON metrics, Prometheus
+  measurements and throughput logs keep their definitions. See
+  [the API contract](docs/openai-compatibility.md#completion-timings-dgpp-extension).
 - **Qwen3.8-27B: a request's logits are the same alone, at every verify
   depth and in a batch** (2026-10-05): six row-count dependences in the
   decode step, found after the campaign with the solo-vs-co-tenant probe
@@ -334,7 +724,7 @@ The history by milestone. The dated engineering record in
   are MTP depth 3 (depth 3 leads depth 2 by 6–18 % across the classes at
   world 2), the drafter their mode (below).
   The family's rows on the [benchmarks page](docs/benchmarks.md) come from
-  the 2026-10-04 campaign (`benchmarks/results/2026-10-04-qwen3.8-27b`: the
+  the 2026-10-04 campaign (the 2026-10-04-qwen3.8-27b measurements: the
   runner's performance, modes and quality stages over both templates, the
   MTP depth-2 world as the drafter template's mode); the model card is
   `docs/model_cards/Qwen3.8-27B-FP8.md`.
@@ -506,8 +896,7 @@ The history by milestone. The dated engineering record in
   too, at `engine.mtp_schedule_sampled_scale` (0.93) of the head's
   acceptance — the templates schedule the five-draft block for greedy and
   sampled requests alike. Measurements
-  in [docs/benchmarks.md](docs/benchmarks.md) and the
-  [campaign record](benchmarks/results/2026-10-01-deepseek-v4-flash/README.md);
+  in [docs/benchmarks.md](docs/benchmarks.md) and
   the [model card](docs/model_cards/DeepSeek-V4-Flash.md).
 - **DeepSeek-V4-Flash decode and prefill kernels** (2026-10-01): L2 weight
   prefetch windows at the collectives and inside the attention layer;
@@ -660,7 +1049,7 @@ The history by milestone. The dated engineering record in
   are gone; `packq_prefill_bench --prefetch N` sets the distance). The
   remaining environment switches in the tree are the next sweep.
 - **The packed expert GEMM parameterized on its warp count** (2026-09-30,
-  round 21 of the [record](benchmarks/results/2026-09-28-qwen-autoround-int4/README.md),
+  round 21 of the investigation,
   plan §6.16): four-warp forms at 64 x 32 warp tiles (`engine.expert_gemm:
   "wide4"`, the decoded tile; `"wide4r"`, register decode and three stages),
   bitwise the shipped eight-warp kernel and gated so in `packq_gemm_test`.
@@ -671,7 +1060,7 @@ The history by milestone. The dated engineering record in
 
 - **The prefill's accuracy trades as deployment keys, off by default**
   (2026-09-30, round 20 of the
-  [record](benchmarks/results/2026-09-28-qwen-autoround-int4/README.md),
+  investigation,
   plan §6.15): `engine.prefill_bf16_partials` (the packed expert chain's
   down projection in bf16, its partials summed from bf16 — the former
   `DGPP_MOE_PACKQ_DOWN_BF16` env knob is gone), `engine.prefill_fold_scales`
@@ -707,7 +1096,7 @@ The history by milestone. The dated engineering record in
   them. Missing files under `benchmarks/` no longer block configuration.
 - **The hybrid's prefill: the n-gram rows of the next chunk gathered
   while this one runs** (2026-09-30, round 19 of the
-  [record](benchmarks/results/2026-09-28-qwen-autoround-int4/README.md)):
+  investigation):
   a scalar prefill chunk hashes the following chunk's tokens (its n-gram
   context this chunk's last two) and publishes them on a second staging
   channel the gather thread serves while this chunk's layers run; the next
@@ -730,7 +1119,7 @@ The history by milestone. The dated engineering record in
   bitwise, off).
 - **The hybrid's prefill: the expert GEMM's weight stream kept ahead of
   the copies** (2026-09-29, round 18 of the
-  [record](benchmarks/results/2026-09-28-qwen-autoround-int4/README.md)):
+  investigation):
   the wide packed-int expert kernel prefetches each activation row's line
   and each code row's line three k-steps ahead into L2
   (`DGPP_PACKQ_PREFETCH`, default 3) — the two-stage pipeline's one step
@@ -749,7 +1138,7 @@ The history by milestone. The dated engineering record in
   8K 4.61 → 4.42, 32K 18.46 → 17.82 (−7 / −4 / −4 %).
 - **The hybrid's decode at the author's protocol: 57 → 54 ms a pass, the
   head in bit planes** (2026-09-29, S6 rounds 4–12 of the
-  [record](benchmarks/results/2026-09-28-qwen-autoround-int4/README.md)):
+  investigation):
   the int8 head is stored as three per-row planes (high nibbles, bits 3..2,
   bits 1..0) and an argmax-only head read — every MTP draft step and the
   greedy verify — takes a pass over the high six bits that gives each row a
@@ -811,8 +1200,7 @@ The history by milestone. The dated engineering record in
   the hybrid's fixture: forward parity against the pure-Python reference
   (which dequantizes GPTQ exactly), the decode and prefill-head gates and
   the loopback engines. Performance on the real checkpoint is the next
-  campaign (docs/qwen38_autoround_int4_plan.md, the
-  [record](benchmarks/results/2026-09-28-qwen-autoround-int4/README.md)).
+  campaign described in [the Qwen int4 plan](docs/qwen38_autoround_int4_plan.md).
 
 - **Prefix cache: an entry floor, a head cut, and arenas sized to the node**
   (2026-09-28): `engine.prefix_min_tokens` (default 1024) takes no snapshot
@@ -826,32 +1214,27 @@ The history by milestone. The dated engineering record in
   none with the floor. The checked-in recipes now give the arena the memory
   the node has left under the plan's headroom, except the one-node Qwen
   recipes, whose spare memory is the page cache behind the mmap'ed n-gram
-  table. See the [record](benchmarks/results/2026-09-28-prefix-entry-floor-head-cut.md)
-  and the [sizing guide](docs/prefix-cache.md).
-
+  table. See the [sizing guide](docs/prefix-cache.md).
 
 - **Faster batched GLM decode** (2026-09-27): merge the validated row-batched
   attention projections, reusing weights across decode rows while preserving
   each row's bitwise result. The recorded four-Spark full GLM-5.3 comparison
   reduced decode-step time by 1.1% at four concurrent requests and 1.7% at
   eight; single- and two-request performance was unchanged within the
-  measured spread. GLM-5.3-Flash passed a separate regression check. See the
-  [benchmark and integration record](benchmarks/results/2026-09-26-kvb-decode-rows/README.md).
+  measured spread. GLM-5.3-Flash passed a separate regression check.
 
 - **Qwen image prefill** (2026-09-27, PR #62): image embedding staging now
   splits chunks wider than the vision workspace, and image prefills can
   yield between scheduler ticks. Review follow-up scopes image borrows and
   staging buffers to each executing prefill, preserving cold image inputs
   and isolating interleaved cursors. CUDA regressions cover MTP catch-up,
-  cancellation and slot reuse; see the
-  [validation record](benchmarks/results/2026-09-27-qwen-image-prefill.md).
+  cancellation and slot reuse.
 
 - **Lazy SSE preambles** (2026-09-26, PR #57): chat and legacy completion
   preambles wait for the first output, preserving first-event prefill timing.
   Empty completions still receive a preamble before their terminal chunk,
   and truncated UTF-8 output receives one before the replacement character.
-  Each chat choice retains its own preamble. See the
-  [validation record](benchmarks/results/2026-09-26-lazy-sse-preamble.md).
+  Each chat choice retains its own preamble.
 
 - **JSON Unicode and UTF-8 responses** (2026-09-26, issue #59): escaped
   UTF-16 surrogate pairs now decode to the same UTF-8 as raw supplementary
@@ -867,8 +1250,7 @@ The history by milestone. The dated engineering record in
   prefilling or between output chunks. Cluster `http.sse_ping_interval`,
   `--sse-ping-interval` and request `sse_ping_interval` configure the interval;
   `-1` disables it. Choices share one timer; comments do not change output,
-  usage, finish events or engine deadlines. See the
-  [validation record](benchmarks/results/2026-09-26-sse-keep-alive.md).
+  usage, finish events or engine deadlines.
 
 - **Deployment templates: `engine.default_max_tokens` 256 → 32768**
   (2026-09-25): every template's answer budget for requests that omit
@@ -883,8 +1265,6 @@ The history by milestone. The dated engineering record in
   still admissible (53.53 GiB per rank against 52.97). The binary's own
   fallback when a configuration omits the key is unchanged at 256; existing
   local deployment files must be edited (or re-copied from the template).
-  Evidence:
-  [record](benchmarks/results/2026-09-25-hermes-default-max-tokens/README.md).
 - **Serve MiMo-V2.6-Flash** (2026-09-22): the sixth family, `mimo_v2`
   (`XiaomiMiMo/MiMo-V2.6-Flash-RL` as shipped: MXFP4 routed experts, fp8
   block-128 dense projections, BF16 o_proj / head / eh_proj packable into
@@ -897,8 +1277,7 @@ The history by milestone. The dated engineering record in
   compact `<tool_call>` dialect and the model-opened `<think>` flow (confined
   to that dialect), deployment templates for two and four nodes, and the
   MXFP4 GEMV core's K = 2048 / 4096 instantiations. Measurements in
-  [docs/benchmarks.md](docs/benchmarks.md) and the
-  [campaign record](benchmarks/results/2026-09-22-mimo-v26-flash-opt/README.md);
+  [docs/benchmarks.md](docs/benchmarks.md);
   the plan in [docs/mimo_v26_flash_plan.md](docs/mimo_v26_flash_plan.md).
 - **MiMo-V2.6-Flash decode and prefill kernels** (2026-09-22, plan §7):
   the residual add fused into the two-rounding norm that follows it
@@ -915,8 +1294,7 @@ The history by milestone. The dated engineering record in
   C1 with MTP −1.5 % on four nodes, the plain T=1 step unchanged (the
   in-situ profile, the cold microbench `mimo_step_bench --cold` and the
   rejected experiments — a register cap, an early L2-persisting prefetch
-  of the next layer's projection — are in the plan and the
-  [A/B record](benchmarks/results/2026-09-22-mimo-v26-flash/ab/README.md)).
+  of the next layer's projection — are in the plan).
   `WeightPrefetcher` gains a persisting-window mode and a line release
   (`applypriority.global.L2::evict_normal`) for such experiments.
 
@@ -924,14 +1302,12 @@ The history by milestone. The dated engineering record in
   graphs to 64 rows and keep wide BF16 projections kernel-only. Preserve
   existing small MTP projection dispatch, including expanded hyper-state
   rows, and reject scheduled verification when graph capacity is insufficient.
-  See the [validation record](benchmarks/results/2026-09-19-qwen-c16-mtp3-upstream.md).
 
 - **Enable streaming MMA in the Qwen NVFP4 recipes** (2026-09-21): matched
   teacher-forced head checks pass on one and two Sparks, including the YaRN
   template, with exact unchanged-mode repeats and no global top-1 changes.
   Add a real-checkpoint scoring tool and strict comparison gate. Recipes
   select `fp8_head: "mma"`; `--fp8-head gemv` restores the previous path.
-  See the [numerical validation record](benchmarks/results/2026-09-21-qwen-fp8-head-numerics.md).
 
 - **Reduce DeepSeek-V4.1-Flash decode latency** (2026-09-21,
   [#28](https://github.com/HawkBearPig/dgpp/issues/28)): parallelize decoder
@@ -939,69 +1315,61 @@ The history by milestone. The dated engineering record in
   with exact radix selection, and skip scoring when all entries fit. Preserve
   score arithmetic, original-ID ties, newest-block handling and output order.
   Reuse the existing workspace and remove the partial-list buffer, saving
-  3.75 MiB per rank with six slots and depth-four MTP. See the
-  [performance and parity record](benchmarks/results/2026-09-21-deepseek-selection/README.md).
+  3.75 MiB per rank with six slots and depth-four MTP.
 - **Reuse long documents when their question changes** (2026-09-21,
   [#17](https://github.com/HawkBearPig/dgpp/issues/17)): save one earlier
   prefill snapshot alongside the final cut, preserve both through resumable
   prefill, and check MTP's lookahead token before reuse. Report snapshot
   capacity in memory plans and distinguish arena pressure from KV-pool
-  pressure. See the [validation record](benchmarks/results/2026-09-21-prefix-document-reuse.md)
-  and [sizing guide](docs/prefix-cache.md).
+  pressure. See the [sizing guide](docs/prefix-cache.md).
 - **Keep batched MTP fallback decisions isolated** (2026-09-21,
   [#15](https://github.com/HawkBearPig/dgpp/issues/15)): preserve each request's
   verified drafts before another request's fallback publishes new drafts.
   Repair the live sampling oracle, cover grouped and staggered admission,
   slot reuse and disabled pipelining, and test batched fallback counters.
-  See the [validation record](benchmarks/results/2026-09-21-mtp-fallback-isolation.md).
+
 - **Reduce QSA selection cost at long context** (2026-09-21,
   [#19](https://github.com/HawkBearPig/dgpp/issues/19)): use exact radix
   selection above 2048 compressed pools, preserving score arithmetic,
   ties, token order and graph workspace. Add a cold/warm indexer benchmark
   and permanent large-pool, partial-tile and graph-replay correctness gates.
-  See the [performance and parity record](benchmarks/results/2026-09-21-qwen-qsa-select.md).
+
 - **Make the YaRN release check accurate and resumable** (2026-09-21,
   [#16](https://github.com/HawkBearPig/dgpp/issues/16)): allow reasoning in
   retrieval probes, correct decode timing units, repeat the latest cached
   probe, and budget concurrent streams for serialized long prefills.
   Save incremental reports with `--resume`; explain pool headroom when YaRN
   is already enabled. Reject invalid correction-band theta and compare
-  final-position decode logits with the full forward. See the
-  [validation record](benchmarks/results/2026-09-21-yarn-release-check.md).
+  final-position decode logits with the full forward.
 - **Tighten decode metrics bookkeeping and documentation** (2026-09-21,
   [#20](https://github.com/HawkBearPig/dgpp/issues/20)): record each replay's
   end event immediately after its graph launch, before host counter updates.
   Cross-link the batch and speculative-counter references, retain the fixed
   sixteen-bucket histogram contract, and give the depth-one sampled-MTP
-  gate its own port. See the
-  [validation record](benchmarks/results/2026-09-21-metrics-follow-ups.md).
+  gate its own port.
 - **Constrain declared tool argument names by default** (2026-09-21,
   [#11](https://github.com/HawkBearPig/dgpp/issues/11),
   [#12](https://github.com/HawkBearPig/dgpp/pull/12)): top-level argument
   names close to declared `properties` unless `additionalProperties: true`
   explicitly opts out. Repeated Qwen XML parameters become literal content.
   The checkpoint grammar gates cover both the closed default and the opt-out
-  without altering reference renders. See the
-  [validation record](benchmarks/results/2026-09-21-tool-key-closure.md).
+  without altering reference renders.
 - **Reconcile timed benchmark counters** (2026-09-20,
   [#24](https://github.com/HawkBearPig/dgpp/issues/24)): `scripts/timed_load.py`
   waits for published counters to match completed requests under a deadline,
   including warmup and isolation, so late snapshots no longer cause false
   unexpected-traffic failures. Genuine mismatches still fail with expected
-  and observed counts. The dated script path remains compatible. See the
-  [validation record](benchmarks/results/2026-09-20-timed-load-counters.md).
+  and observed counts. The dated script path remains compatible.
 - **Compare effective settings across ranks** (2026-09-20,
   [#18](https://github.com/HawkBearPig/dgpp/issues/18)): automatic graph
   batch thresholds no longer cause false settings-override warnings on
   peers. Genuine threshold and concurrency differences still warn; the
-  engine settings remain unchanged. See the
-  [validation record](benchmarks/results/2026-09-20-rank-settings-default.md).
+  engine settings remain unchanged.
 - **Reject duplicate GLM tool arguments** (2026-09-20,
   [#22](https://github.com/HawkBearPig/dgpp/issues/22)): a repeated argument
   name makes the tool block literal content instead of a structured call
   with duplicate JSON keys. Valid calls retain their argument types and
-  can reuse the same names in later calls. See the
-  [validation record](benchmarks/results/2026-09-20-glm-tool-duplicate-keys.md).
+  can reuse the same names in later calls.
 - **Opt-in 512K YaRN context for Qwen3.8-Flash-Next** (2026-09-20,
   [#3](https://github.com/HawkBearPig/dgpp/pull/3)): `engine.rope_scaling`
   with YaRN factor 2 extends the ceiling to 524288 tokens; omitting it preserves the
@@ -1009,31 +1377,27 @@ The history by milestone. The dated engineering record in
   deployment template and `scripts/qwen_yarn_release_check.py`. Two-Spark
   validation retrieved 5/5 needles at both 261K and 522K prompt tokens:
   cold prefill 0.909 / 1.397 ms per token, decode about 60.7 / 96.0 ms per
-  pass. See the [validation record](benchmarks/results/2026-09-20-qwen-yarn512k.md)
-  for the recipe, measured scope and release-check limitations.
+  pass.
 - **Cross-compile for DGX Spark from x86 Linux** (2026-09-20,
   [#5](https://github.com/HawkBearPig/dgpp/pull/5)): `scripts/spark-cross`
   and the `spark-cross` CMake preset build the ARM64/GB10 server in Docker
   using the release settings. The host needs no GPU or NVIDIA driver;
-  execution checks run on the Spark. See the [cross-compiling guide](docs/cross-compiling.md)
-  and [build and target validation record](benchmarks/results/2026-09-19-spark-cross-build.md).
+  execution checks run on the Spark. See the [cross-compiling guide](docs/cross-compiling.md).
 - **Decode graph batch counters on `/metrics` and `/v1/metrics`**
   (2026-09-20, [#8](https://github.com/HawkBearPig/dgpp/pull/8)):
   `scheduler.decode_batch` reports cumulative graph launches, verification
   rows, padded rows and a launch histogram by graph capacity, plus the
   last launch's capacity, active requests and verification width. See the
-  [counter contract](docs/operations.md#decode-graph-batch-counters) and
-  [validation record](benchmarks/results/2026-09-19-decode-batch-telemetry.md).
+  [counter contract](docs/operations.md#decode-graph-batch-counters).
 - **MTP acceptance counters on `/metrics` and `/v1/metrics`**
   (2026-09-20, [#9](https://github.com/HawkBearPig/dgpp/pull/9)):
   `scheduler.spec_decode` reports verification rounds and total and
   per-position attempted/accepted drafts. Acceptance is counted after
   exact host fallback resolves, including drafts a sampled fallback
   accepts after provisional device rejection; counts precede response
-  stop/length trimming. See the [counter contract](docs/openai-compatibility.md#speculative-decoding-counters)
-  and [validation record](benchmarks/results/2026-09-19-mtp-acceptance-metrics.md).
+  stop/length trimming. See the [counter contract](docs/openai-compatibility.md#speculative-decoding-counters).
 - **Lossless 12-bit weights on Qwen3.8-Flash-Next; format v2** (2026-09-19;
-  round four of `benchmarks/results/2026-09-19-glm-flash-line-rate/`). The
+  round four of the 2026-09-19-glm-flash-line-rate measurements). The
   format no longer needs rows of whole 1024-column super-blocks: the columns
   left over follow the row in units cut by the 256-column steps they hold,
   twelve bits a weight without padding (`kernels/bf12_gemv.cuh`; k = 2560,
@@ -1058,7 +1422,7 @@ The history by milestone. The dated engineering record in
   `"bf12"` on the full GLM-5.3's small indexer matrices.
 - **bf12-only residency: `engine.bf16_weights: "bf12"` now SAVES memory, and
   the two ceiling-bound templates have their contexts back** (2026-09-19;
-  round three of `benchmarks/results/2026-09-19-glm-flash-line-rate/`). The
+  round three of the 2026-09-19-glm-flash-line-rate measurements). The
   12-bit form can now be the only resident one: each packable BF16 matrix
   loads into its own releasable range (the CUDA virtual-memory API —
   `loaders/releasable_range.*`, `LayerBump::alloc_side`), is packed as its
@@ -1098,7 +1462,7 @@ The history by milestone. The dated engineering record in
   canonical fold), transcripts identical, seven-minute soak clean;
   `DGPP_BUS_GATE=sequential` keeps the per-peer gates.
 - **Lossless 12-bit BF16 decode weights, `engine.bf16_weights: "bf12"`**
-  (2026-09-19; `benchmarks/results/2026-09-19-glm-flash-line-rate/`): a second
+  (2026-09-19; the 2026-09-19-glm-flash-line-rate measurements): a second
   resident form of the BF16 matrices the decode GEMV streams — the
   sign+mantissa byte plus a 4-bit exponent code against a per-row window,
   exact side tables for the 1.5e-4 of weights outside it, outlier rows kept
@@ -1165,7 +1529,7 @@ The history by milestone. The dated engineering record in
   Report model input modalities and visual prompt-token usage. Add encoder reference checks, API tests
   and [usage documentation](docs/vision.md). Match the CUDA BF16 eager reference
   bitwise across the pinned regression corpus after correcting rounding and
-  reduction arithmetic; see the [numerical investigation](benchmarks/results/2026-09-18-glm-vision-numerics.md).
+  reduction arithmetic.
 - **Release packaging with bundled PCRE2** (2026-09-18): exclude the dependency's
   standalone install rules from DGPP's runtime package. Server-only builds
   no longer fail packaging because the unused `libpcre2-posix.a` was never
@@ -1230,9 +1594,7 @@ The history by milestone. The dated engineering record in
   projections use a tensor-core kernel to avoid cuBLASLt copy-engine nodes
   in collective graphs. Benchmark scripts now distinguish request-wall
   and legacy output-span rates, require server token usage, and provide
-  repeated C1 comparison and long-prompt interference checks. See the
-  [validation and measurements](benchmarks/results/2026-09-15-qwen-batching-prefill.md)
-  for configuration tradeoffs, the unresolved C1 promotion gate, and remaining work.
+  repeated C1 comparison and long-prompt interference checks.
 - **One deployment template per model, quant and world** (2026-09-14, late;
   `deploy/README.md`): twenty-five templates became eight —
   `cluster_<model>_<quant>_w<n>.example.json`, each with MTP at the depth its

@@ -87,6 +87,23 @@ DGPP_TEST(cluster_config_parses_engine_rope_scaling) {
           "only yarn");
 }
 
+DGPP_TEST(cluster_config_early_prefill_admission_preserves_automatic_and_explicit_values) {
+  require(!dgpp::serve::parse_cluster_config(engine_json("{}"), "t").engine.prefill_early_admission.has_value(),
+          "omitted admission policy is resolved from the execution backend");
+  require(dgpp::serve::parse_cluster_config(engine_json(R"({"prefill_early_admission":false})"), "t")
+               .engine.prefill_early_admission == std::optional<bool>(false),
+          "early prefill admission can be explicitly disabled");
+  for (const std::string value : {"1", "\"true\"", "null"}) {
+    bool rejected = false;
+    try {
+      (void)dgpp::serve::parse_cluster_config(engine_json("{\"prefill_early_admission\":" + value + "}"), "t");
+    } catch (const std::exception&) {
+      rejected = true;
+    }
+    require(rejected, "early prefill admission requires a JSON boolean");
+  }
+}
+
 DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
   const std::string json = R"({
     "model": "org/name",
@@ -97,6 +114,7 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
     "engine": {"max_concurrency": 2, "decode_graph": true, "prefix_cache_gib": 0.5,
                "admission": "grow", "stats_interval_s": 0, "mtp_depth": 2, "prefill": "exact",
                "prefill_budget_tokens": 256, "prefill_idle_budget_tokens": 2048,
+               "prefill_early_admission": true,
                "prefix_min_tokens": 512, "prefix_head_snapshots": false, "mtp_draft": "greedy",
                "mtp_schedule_sampled_scale": 0.5, "mtp_draft_temperature": 0.7, "mtp_verify": "block",
                "dflash_batch_rows": 32, "dflash_weights": "fp8", "prefill_group": false,
@@ -117,6 +135,7 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
               c.engine.mtp_depth == 2 && c.engine.prefix_cache_gib == 0.5 &&
               c.engine.admission == "grow" && c.engine.stats_interval_s == 0.0 && c.engine.prefill == "exact" &&
               c.engine.prefill_budget_tokens == 256 && c.engine.prefill_idle_budget_tokens == 2048 &&
+              c.engine.prefill_early_admission == std::optional<bool>(true) &&
               c.engine.prefix_min_tokens == 512 && !c.engine.prefix_head_snapshots &&
               c.engine.mtp_draft == "greedy" && c.engine.mtp_schedule_sampled_scale == 0.5 &&
               c.engine.mtp_draft_temperature == 0.7 && c.engine.mtp_verify == "block" &&
@@ -146,6 +165,18 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
           "the sampled requests' schedule scale defaults to the measured 0.93");
   require(dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"]})", "t").engine.mtp_draft == "auto",
           "the sampled requests' draft rule defaults to the family's");
+  require(!dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"]})", "t").engine.lookup_draft,
+          "context-lookup drafting is off by default");
+  {
+    const dgpp::serve::ClusterConfig l = dgpp::serve::parse_cluster_config(
+        R"({"model":"m","nodes":["h"],"engine":{"lookup_draft":true,"lookup_nmin":3,"lookup_nstrong":5,"lookup_agree":1,"lookup_tail":2}})",
+        "t");
+    require(l.engine.lookup_draft && l.engine.lookup_nmin == 3 && l.engine.lookup_nstrong == 5 &&
+                l.engine.lookup_agree == 1 && l.engine.lookup_tail == 2,
+            "the lookup thresholds parse");
+    require(!dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"]})", "t").engine.lookup_tail,
+            "the lookup tail defaults to the MTP block alone");
+  }
   // The idle engine's arrival gather: 3 ms by default, 0 disables, bounded.
   require(c.engine.admission_gather_ms == 3, "the arrival gather defaults to 3 ms");
   require(dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"],"engine":{"admission_gather_ms":0}})", "t")
@@ -163,12 +194,13 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
   // The engine defaults are the binary's flag defaults — one set of defaults.
   require(c.engine.kv_capacity == 8192 && c.engine.default_max_tokens == 256 &&
               c.engine.queue_limit == 64 && c.engine.max_connections == 64 &&
-              !c.engine.compact_batches && !c.engine.no_eos && c.engine.graph_batch_min_live == 0 &&
+              c.engine.compact_batches && !c.engine.no_eos && c.engine.graph_batch_min_live == 0 &&
               c.engine.sampling_candidates == 128 && c.engine.admission_window == 256 &&
               c.engine.bulk_pace_gbps == -1.0 && c.engine.bulk_inflight == -1 &&
               c.engine.rendezvous_timeout_ms == 120000 && !c.engine.reasoning_in_content &&
               c.engine.kv_dtype == "bf16" && c.engine.bf16_weights == "checkpoint" &&
-              c.engine.fp8_head == "gemv" && !c.engine.prefill_bf16_partials && !c.engine.prefill_fold_scales &&
+              c.engine.fp8_head == "gemv" && c.engine.draft_head == "exact" && c.engine.draft_head_blocks == 32 &&
+              !c.engine.prefill_bf16_partials && !c.engine.prefill_fold_scales &&
               !c.engine.prefill_fp8_gemm && !c.engine.prefill_fp8_per_tensor && c.engine.dflash_model.empty() &&
               c.engine.dflash_verify_graph && c.engine.dflash_draft_batch && c.engine.dflash_depth == 0 &&
               c.engine.expert_gemm == "wide" && c.engine.expert_gemm_prefetch == 3 &&
@@ -202,11 +234,20 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
           "the dflash keys parse");
   const auto compact = dgpp::serve::parse_cluster_config(
       R"({"model":"m","nodes":["h"],"engine":{"compact_batches":true}})", "t");
-  require(compact.engine.compact_batches, "compact_batches opt-in");
+  require(compact.engine.compact_batches, "compact_batches enabled");
+  const auto fixed = dgpp::serve::parse_cluster_config(
+      R"({"model":"m","nodes":["h"],"engine":{"compact_batches":false}})", "t");
+  require(!fixed.engine.compact_batches, "compact_batches explicit override");
   for (const std::string mode : {"gemv", "mma"}) {
     const auto head = dgpp::serve::parse_cluster_config(
         R"({"model":"m","nodes":["h"],"engine":{"fp8_head":")" + mode + R"("}})", "t");
     require(head.engine.fp8_head == mode, "fp8_head accepts " + mode);
+  }
+  // The draft head's read (2026-10-13): exact | screen, with the screen's candidate cap.
+  for (const std::string mode : {"exact", "screen"}) {
+    const auto dh = dgpp::serve::parse_cluster_config(
+        R"({"model":"m","nodes":["h"],"engine":{"draft_head":")" + mode + R"(","draft_head_blocks":48}})", "t");
+    require(dh.engine.draft_head == mode && dh.engine.draft_head_blocks == 48, "draft_head accepts " + mode);
   }
   // The KV dtype: named by the config, checked by name.
   const dgpp::serve::ClusterConfig fp8 = dgpp::serve::parse_cluster_config(
@@ -227,6 +268,19 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
   const dgpp::serve::ClusterConfig both = dgpp::serve::parse_cluster_config(
       R"({"model":"m","nodes":["h"],"engine":{"bf16_weights":"bf12+bf16"}})", "t");
   require(both.engine.bf16_weights == "bf12+bf16", "bf16_weights bf12+bf16");
+  // The full GLM-5.3 draft head's form: named by the config, the checkpoint's by default.
+  require(bf12.engine.mtp_head == "checkpoint", "mtp_head defaults to checkpoint");
+  const dgpp::serve::ClusterConfig mtph = dgpp::serve::parse_cluster_config(
+      R"({"model":"m","nodes":["h"],"engine":{"mtp_head":"fp8"}})", "t");
+  require(mtph.engine.mtp_head == "fp8", "mtp_head fp8");
+  require(!refusal(R"({"model":"m","nodes":["h"],"engine":{"mtp_head":"int8"}})").empty(),
+          "mtp_head refuses an unknown form");
+  require(bf12.engine.attention_weights == "checkpoint", "attention_weights defaults to checkpoint");
+  const dgpp::serve::ClusterConfig attw = dgpp::serve::parse_cluster_config(
+      R"({"model":"m","nodes":["h"],"engine":{"attention_weights":"int4"}})", "t");
+  require(attw.engine.attention_weights == "int4", "attention_weights int4");
+  require(!refusal(R"({"model":"m","nodes":["h"],"engine":{"attention_weights":"fp8"}})").empty(),
+          "attention_weights refuses an unknown form");
   require(c.paths.log_dir == "/var/log/dgpp" && c.paths.stage_dir == "/tmp/bus4" &&
               c.paths.release_dir == "~/dgpp/releases" && c.paths.resident_cache.empty(),
           "the paths: given one taken, the rest defaulted");
@@ -234,7 +288,7 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
   const dgpp::serve::ClusterConfig one =
       dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"]})", "t");
   require(one.world() == 1 && one.http_port == 18080, "a one-node world");
-  require(one.http_bind == "127.0.0.1", "HTTP defaults to loopback");
+  require(one.http_bind == "0.0.0.0", "HTTP defaults to all IPv4 interfaces");
   require(one.http_max_body_bytes == 256ll * 1024 * 1024, "HTTP body default supports large prefills");
 }
 
@@ -294,6 +348,9 @@ DGPP_TEST(cluster_config_http_override_is_order_independent) {
   require(c.http_bind == "0.0.0.0" && c.http_port == 8080, "deployment HTTP wins over legacy ports");
   require(c.http_max_body_bytes == 5368709120ll, "body limit retains a 64-bit byte count");
   require(c.node_env.at(0).at("HF_HUB_CACHE") == "~/cache", "node cache retained");
+  const auto local = dgpp::serve::parse_cluster_config(
+      R"({"model":"m","nodes":["h"],"http":{"bind_host":"127.0.0.1"}})", "t");
+  require(local.http_bind == "127.0.0.1", "explicit loopback binding is preserved");
   require(!refusal(R"({"model":"m","nodes":["h"],"http":{"bind_host":"localhost"}})").empty(), "bind must be IPv4");
   require(!refusal(R"({"model":"m","nodes":["h"],"node_env":[{"HF_TOKEN":"x"}]})").empty(), "credentials disallowed");
 }
@@ -397,6 +454,10 @@ DGPP_TEST(cluster_config_refusesUnknownKeysAndBadValuesByName) {
        "'engine.fp8_head' must be \"gemv\" or \"mma\""},
       {R"({"model":"m","nodes":["h"],"engine":{"fp8_head":true}})",
        "'engine.fp8_head' must be a string"},
+      {R"({"model":"m","nodes":["h"],"engine":{"draft_head":"auto"}})",
+       "'engine.draft_head' must be \"exact\" or \"screen\""},
+      {R"({"model":"m","nodes":["h"],"engine":{"draft_head_blocks":0}})",
+       "'engine.draft_head_blocks' must be in [1, 64]"},
       {R"({"model":"m","nodes":["h"],"engine":{"bf16_weights":"fp8"}})",
        "'engine.bf16_weights' must be \"checkpoint\", \"bf12\" or \"bf12+bf16\""},
       {R"({"model":"m","nodes":["h"],"engine":{"bf16_weights":true}})",
@@ -511,4 +572,40 @@ DGPP_TEST(cluster_config_prefill_defaults_to_auto_with_explicit_opt_out) {
         engine_json("{\"prefill_budget_tokens\":" + std::to_string(budget) + "}"), "t");
     require(config.engine.prefill_budget_tokens == budget, "explicit budget preserved");
   }
+}
+
+DGPP_TEST(cluster_config_latency_targets_have_serving_defaults_and_strict_overrides) {
+  const auto defaults = dgpp::serve::parse_cluster_config(engine_json("{}"), "t").engine;
+  require(defaults.decode_gap_target_ms == 1000 && defaults.first_token_target_ms == 3000,
+          "model-independent serving latency defaults");
+  const auto fixed = dgpp::serve::parse_cluster_config(
+      engine_json(R"({"decode_gap_target_ms":0,"first_token_target_ms":0})"), "t").engine;
+  require(fixed.decode_gap_target_ms == 0 && fixed.first_token_target_ms == 0, "fixed-budget control remains configurable");
+  const auto custom = dgpp::serve::parse_cluster_config(
+      engine_json(R"({"decode_gap_target_ms":300,"first_token_target_ms":1500})"), "t").engine;
+  require(custom.decode_gap_target_ms == 300 && custom.first_token_target_ms == 1500, "deployment targets survive parsing");
+  for (const std::string key : {"decode_gap_target_ms", "first_token_target_ms"})
+    for (const std::string value : {"-1", "1.5", "3600001", "true", "\"500\"", "null"})
+      require(refusal(engine_json("{\"" + key + "\":" + value + "}")).find(key) != std::string::npos,
+              "bad latency target rejected by name");
+}
+
+DGPP_TEST(cluster_config_latency_tuning_defaults_and_bounds) {
+  const auto defaults = dgpp::serve::parse_cluster_config(engine_json("{}"), "t").engine.prefill_latency;
+  require(defaults == dgpp::sched::PrefillLatencyTuning{15, 2, 25}, "stable controller defaults");
+  const auto custom = dgpp::serve::parse_cluster_config(engine_json(
+      R"({"prefill_latency_headroom_pct":20,"prefill_growth_factor":4,"prefill_cost_recovery_pct":50,"prefill_initial_tokens":512,"prefill_idle_floor_tokens":2048})"), "t");
+  require(custom.engine.prefill_latency == dgpp::sched::PrefillLatencyTuning{20, 4, 50, 512, 2048}, "custom controller tuning survives parsing");
+  for (const std::string key : {"prefill_latency_headroom_pct", "prefill_growth_factor", "prefill_cost_recovery_pct"})
+    for (const std::string value : {"-1", "101", "1.5", "true", "null"})
+      require(refusal(engine_json("{\"" + key + "\":" + value + "}")).find(key) != std::string::npos,
+              "invalid controller tuning rejected by name");
+  for (const std::string value : {"-1", "0", "1073741825", "1.5", "true", "null"})
+    require(refusal(engine_json("{\"prefill_initial_tokens\":" + value + "}")).find("prefill_initial_tokens") != std::string::npos,
+            "invalid initial budget rejected by name");
+  for (const std::string value : {"-1", "1073741825", "1.5", "true", "null"})
+    require(refusal(engine_json("{\"prefill_idle_floor_tokens\":" + value + "}")).find("prefill_idle_floor_tokens") != std::string::npos,
+            "invalid idle floor rejected by name");
+  require(dgpp::serve::parse_cluster_config(engine_json(R"({"prefill_idle_floor_tokens":0})"), "t").engine.prefill_latency.idle_floor_tokens == 0,
+          "a zero floor (the alignment) is a valid choice");
 }
