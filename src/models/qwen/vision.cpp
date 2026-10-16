@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -26,6 +27,7 @@
 #include <vector>
 
 #include "common/cuda_check.hpp"
+#include "common/dtypes.hpp"
 #include "kernels/gemm.hpp"
 #include "kernels/qwen_vision.hpp"
 #include "loaders/safetensors.hpp"
@@ -57,6 +59,80 @@ std::string read_text(const std::filesystem::path& p) {
   return std::string(std::istreambuf_iterator<char>(f), {});
 }
 }  // namespace
+
+// e2m1 code -> float, the OCP microscaling values (fp4_gemv.cuh's
+// bit-placement decode, host-side): +0, .5, 1, 1.5, 2, 3, 4, 6, signed.
+float qwen_vision_e2m1(unsigned code) {
+  static const float kLut[16] = {0.0f,  0.5f,  1.0f,  1.5f,  2.0f,  3.0f,  4.0f,  6.0f,
+                                 -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f};
+  return kLut[code & 0xFu];
+}
+
+// A quantized vision linear widened to BF16 at load (the tower runs the
+// BF16 path; prefill-shaped work takes the dequant bridge anyway, so
+// load-time widening is the same math done once). MXFP8 e4m3 x 2^(s-127)
+// is exact; NVFP4 e2m1 x e4m3-group x global rounds once (RNE), the fp8
+// bridge's contract. Nibbles low-first (the MoE kernels' order). Both
+// refuse NaN payload/scale codes and malformed geometry by tensor name.
+std::vector<uint16_t> qwen_vision_widen_mxfp8(const std::string& name, const uint8_t* weight,
+                                             size_t wbytes, const uint8_t* scale, size_t sbytes,
+                                             int64_t rows, int64_t cols) {
+  auto bad = [&](const std::string& what) -> std::vector<uint16_t> {
+    throw std::runtime_error("Qwen vision: " + name + " " + what);
+  };
+  if (rows <= 0 || cols <= 0 || cols % 32 != 0) bad("is not an MXFP8 geometry");
+  if (weight == nullptr || scale == nullptr) bad("has null sidecar data");
+  if (wbytes != static_cast<size_t>(rows) * static_cast<size_t>(cols) ||
+      sbytes != static_cast<size_t>(rows) * static_cast<size_t>(cols / 32))
+    bad("byte counts disagree with the matrix");
+  std::vector<uint16_t> out(static_cast<size_t>(rows) * static_cast<size_t>(cols));
+  for (int64_t i = 0; i < rows; ++i) {
+    for (int64_t k = 0; k < cols; ++k) {
+      const unsigned wb = weight[static_cast<size_t>(i) * static_cast<size_t>(cols) +
+                                 static_cast<size_t>(k)];
+      const unsigned sb = scale[static_cast<size_t>(i) * static_cast<size_t>(cols / 32) +
+                                static_cast<size_t>(k / 32)];
+      if (wb == 0x7F || wb == 0xFF) bad("payload has a NaN code");
+      if (sb > 240) bad("scale byte exceeds 240");
+      const float v = fp8_e4m3_bits_to_float(static_cast<uint8_t>(wb)) *
+                      exp2f(static_cast<float>(static_cast<int>(sb) - 127));
+      out[static_cast<size_t>(i) * static_cast<size_t>(cols) + static_cast<size_t>(k)] =
+          float_to_bf16_bits(v);
+    }
+  }
+  return out;
+}
+
+std::vector<uint16_t> qwen_vision_dequant_nvfp4(const std::string& name, const uint8_t* weight,
+                                               size_t wbytes, const uint8_t* scale, size_t sbytes,
+                                               float global, int64_t rows, int64_t cols) {
+  auto bad = [&](const std::string& what) -> std::vector<uint16_t> {
+    throw std::runtime_error("Qwen vision: " + name + " " + what);
+  };
+  if (rows <= 0 || cols <= 0 || cols % 16 != 0) bad("is not an NVFP4 geometry");
+  if (weight == nullptr || scale == nullptr) bad("has null sidecar data");
+  if (wbytes != static_cast<size_t>(rows) * static_cast<size_t>(cols / 2) ||
+      sbytes != static_cast<size_t>(rows) * static_cast<size_t>(cols / 16))
+    bad("byte counts disagree with the matrix");
+  if (!(global > 0.0f) || !std::isfinite(global)) bad("global scale is not positive finite");
+  const int64_t K2 = cols / 2;
+  std::vector<uint16_t> out(static_cast<size_t>(rows) * static_cast<size_t>(cols));
+  for (int64_t i = 0; i < rows; ++i) {
+    for (int64_t k = 0; k < cols; ++k) {
+      const unsigned pair =
+          weight[static_cast<size_t>(i) * static_cast<size_t>(K2) + static_cast<size_t>(k / 2)];
+      const unsigned code = (k % 2 == 0) ? (pair & 0xF) : (pair >> 4);
+      const unsigned sc =
+          scale[static_cast<size_t>(i) * static_cast<size_t>(K2 / 8) + static_cast<size_t>(k / 16)];
+      if (sc == 0x7F || sc == 0xFF) bad("scale has a NaN code");
+      const float v =
+          qwen_vision_e2m1(code) * fp8_e4m3_bits_to_float(static_cast<uint8_t>(sc)) * global;
+      out[static_cast<size_t>(i) * static_cast<size_t>(cols) + static_cast<size_t>(k)] =
+          float_to_bf16_bits(v);
+    }
+  }
+  return out;
+}
 
 QwenVisionEncoder::Grid QwenVisionEncoder::grid_of(const ImageInput& image) {
   Grid g;
@@ -101,29 +177,79 @@ struct QwenVisionEncoder::Impl {
       throw std::runtime_error("Qwen vision: no safetensors checkpoint at " + dir.string());
     }
     std::map<std::string, std::unique_ptr<SafetensorsFile>> files;
-    const auto load = [&](const std::string& name, std::vector<int64_t> shape) {
+    const auto fetch = [&](const std::string& name) -> const TensorInfo& {
       auto it = locations.find(name);
       if (it == locations.end())
         throw std::runtime_error("Qwen vision: missing model.visual." + name);
       auto& file = files[it->second];
       if (!file) file = SafetensorsFile::open((dir / it->second).string());
-      const auto& tensor = file->at("model.visual." + name);
-      if (tensor.dtype != DType::BF16 || tensor.shape != shape)
-        throw std::runtime_error("Qwen vision: incompatible BF16 tensor model.visual." + name);
+      return file->at("model.visual." + name);
+    };
+    const auto store = [&](const std::string& name, const void* data, size_t nbytes) {
       auto buffer = std::make_unique<Buffer>();
-      buffer->resize(tensor.nbytes());
+      buffer->resize(nbytes);
       DGPP_CUDA_OK(
-          cudaMemcpyAsync(buffer->p, tensor.data, tensor.nbytes(), cudaMemcpyHostToDevice, stream));
+          cudaMemcpyAsync(buffer->p, data, nbytes, cudaMemcpyHostToDevice, stream));
       DGPP_CUDA_OK(cudaStreamSynchronize(stream));
-      const auto* data = static_cast<const uint8_t*>(tensor.data);
-      for (size_t i = 0; i < tensor.nbytes(); ++i) {
-        hash ^= data[i];
+      const auto* bytes = static_cast<const uint8_t*>(data);
+      for (size_t i = 0; i < nbytes; ++i) {
+        hash ^= bytes[i];
         hash *= 1099511628211ull;
       }
       weights.emplace(name, std::move(buffer));
     };
+    const auto load = [&](const std::string& name, std::vector<int64_t> shape) {
+      const auto& tensor = fetch(name);
+      if (tensor.dtype != DType::BF16 || tensor.shape != shape)
+        throw std::runtime_error("Qwen vision: incompatible BF16 tensor model.visual." + name);
+      store(name, tensor.data, tensor.nbytes());
+    };
+    // A linear in the checkpoint's form: BF16 direct, or widened from the
+    // quantized tower (the FP4-Local export's MXFP8/NVFP4 weights; its BF16
+    // biases ship beside them). Anything else refuses by name.
     const auto linear = [&](const std::string& name, int out, int in) {
-      load(name + ".weight", {out, in});
+      const auto& w = fetch(name + ".weight");
+      if (w.dtype == DType::BF16) {
+        load(name + ".weight", {out, in});
+      } else {
+        const size_t wbytes =
+            w.data_end > w.data_begin ? static_cast<size_t>(w.data_end - w.data_begin) : 0;
+        std::vector<uint16_t> wide;
+        if (w.dtype == DType::F8_E4M3) {
+          const auto& s = fetch(name + ".weight_scale");
+          if (s.dtype != DType::U8)
+            throw std::runtime_error("Qwen vision: incompatible scale model.visual." + name +
+                                     ".weight_scale");
+          const size_t sbytes =
+              s.data_end > s.data_begin ? static_cast<size_t>(s.data_end - s.data_begin) : 0;
+          wide = qwen_vision_widen_mxfp8("model.visual." + name + ".weight",
+                                         static_cast<const uint8_t*>(w.data), wbytes,
+                                         static_cast<const uint8_t*>(s.data), sbytes, out, in);
+        } else if (w.dtype == DType::U8) {
+          const auto& s = fetch(name + ".weight_scale");
+          const auto& g = fetch(name + ".weight_scale_2");
+          if (s.dtype != DType::F8_E4M3 || g.dtype != DType::F32)
+            throw std::runtime_error("Qwen vision: incompatible scales model.visual." + name);
+          const size_t sbytes =
+              s.data_end > s.data_begin ? static_cast<size_t>(s.data_end - s.data_begin) : 0;
+          if (g.data_end - g.data_begin != 4)
+            throw std::runtime_error("Qwen vision: incompatible global model.visual." + name +
+                                     ".weight_scale_2");
+          float global = 0.0f;
+          std::memcpy(&global, g.data, 4);
+          wide = qwen_vision_dequant_nvfp4("model.visual." + name + ".weight",
+                                          static_cast<const uint8_t*>(w.data), wbytes,
+                                          static_cast<const uint8_t*>(s.data), sbytes, global,
+                                          out, in);
+        } else {
+          throw std::runtime_error("Qwen vision: incompatible tensor model.visual." + name +
+                                   ".weight");
+        }
+        if (wide.size() != static_cast<size_t>(out) * static_cast<size_t>(in))
+          throw std::runtime_error("Qwen vision: shape mismatch on model.visual." + name +
+                                   ".weight");
+        store(name + ".weight", wide.data(), wide.size() * 2);
+      }
       load(name + ".bias", {out});
     };
     const int h = c.hidden, i = c.intermediate, o = c.output, m = c.merged();
@@ -144,8 +270,13 @@ struct QwenVisionEncoder::Impl {
     load("merger.norm.bias", {h});
     linear("merger.linear_fc1", m, m);
     linear("merger.linear_fc2", o, m);
-    if (weights.size() != locations.size())
-      throw std::runtime_error("Qwen vision: unexpected vision tensors");
+    // Scale sidecars of a quantized tower widen at load (above); anything
+    // else present but unloaded is unexpected.
+    for (const auto& kv : locations) {
+      if (weights.count(kv.first)) continue;
+      if (kv.first.ends_with(".weight_scale") || kv.first.ends_with(".weight_scale_2")) continue;
+      throw std::runtime_error("Qwen vision: unexpected vision tensor model.visual." + kv.first);
+    }
     for (auto& [name, file] : files) {
       (void)name;
       file->close_mapping(true);
