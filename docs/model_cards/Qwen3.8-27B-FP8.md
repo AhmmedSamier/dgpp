@@ -109,8 +109,21 @@ and 4 (4/4 each). Across worlds the bf16 wire fold moves near ties
 The serving numbers — single-request engine rates by prompt class,
 concurrency sweeps, cold prefill at 2K / 8K / 32K, the decode modes and the
 full HumanEval / GSM8K / schema evaluation — are the
-[benchmarks page](../benchmarks.md)'s Qwen3.8-27B rows, from the
-2026-10-05 campaign.
+[benchmarks page](../benchmarks.md)'s Qwen3.8-27B rows, re-measured on
+2026-10-16 on the templates as shipped.
+
+`engine.prefill_activations: "native"` (set by the FP8 templates since
+2026-10-16) runs the checkpoint's own blockwise fp8 product on every
+prefill row — per-token 1×128 activation groups against the 128×128 weight
+grid, the recipe the release was made for — in place of dequantizing each
+FP8 matrix into a bf16 bridge for the bf16 GEMM. The bridge chain was
+measured 20 % slower on one Spark under the adaptive prefill defaults
+(every 4,096-token chunk re-dequantized every matrix: 2.70 / 8.30 / 35.3 s
+cold prefill at 2K / 8K / 32K against 2.22 / 6.96 / 29.5 under fixed
+one-pass budgets); the native recipe reads 1.90 / 6.49 / 27.9 s with no
+bridge at all, and the 300-item HumanEval / GSM8K / schema set reads
+161/164, 294/300 and 100/100 under both chains on the same binary, needles
+at 32K and 128K 6/6 with 3/3 controls.
 Physics on one GB10 (248 GB/s): a T=1 step streams 27 GB — 105 ms — and
 measures 114; at world 2 a rank streams 12.2 GB (49 ms) plus the head's
 reads and measures 63 T=1 / 74.5 an MTP pass, GPU-busy 98.9 % with the 135

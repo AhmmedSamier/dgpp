@@ -5,6 +5,17 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **The Qwen3.8-27B FP8 templates take `engine.prefill_activations:
+  "native"`** (2026-10-16). The benchmark refresh below found the FP8
+  release's cold prefill 20 % slower on one Spark than its 2026-10-11 row:
+  under the adaptive prefill defaults an idle prompt runs in 4,096-token
+  chunks and the bf16 chain re-dequantized every FP8 matrix into its bridge
+  for each of them (2.70 / 8.30 / 35.3 s at 2K / 8K / 32K against 2.22 /
+  6.96 / 29.5 under the old one-pass budgets, same binary). The
+  checkpoint's own blockwise fp8 product needs no bridge: 1.90 / 6.49 /
+  27.9 s, the 300-item evals identical to the bf16 chain's on the same
+  binary (161/164, 294/300, 100/100), needles 6/6 at 32K and 128K. The
+  benchmark rows for the FP8 release are measured on it.
 - **`engine.prefill_attention: "fp8"` on the Qwen3.5 family — the prefill
   attention on the fp8 tensor cores** (2026-10-16). Over the `kv_dtype:
   "fp8"` pool (the mixed release's `kv_cache_scheme` codes at its shipped
