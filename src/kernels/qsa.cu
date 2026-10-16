@@ -117,6 +117,39 @@ __global__ void kv_append_kernel(const uint16_t* __restrict__ k, int64_t k_row_s
   }
 }
 
+// The fp8 storage form: a pair of bf16 values to two e4m3 codes of value /
+// scale (fp32 division, round-to-nearest-even, saturating), low code first.
+__device__ __forceinline__ uint16_t e4m3x2_scaled(uint16_t lo, uint16_t hi, float scale) {
+  const float a = __fdiv_rn(bf16_bits_to_float(lo), scale);
+  const float b = __fdiv_rn(bf16_bits_to_float(hi), scale);
+  uint16_t r;
+  asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(r) : "f"(b), "f"(a));
+  return r;
+}
+
+__global__ void kv_append_fp8_kernel(const uint16_t* __restrict__ k, int64_t k_row_stride,
+                                     const uint16_t* __restrict__ v, int64_t v_row_stride,
+                                     const int32_t* __restrict__ req_ids,
+                                     const int64_t* __restrict__ pos,
+                                     const int32_t* __restrict__ block_tables,
+                                     int blocks_per_request, int block_tokens, int width,
+                                     const float* __restrict__ kv_scales,
+                                     uint8_t* __restrict__ k_cache, uint8_t* __restrict__ v_cache) {
+  const int64_t r = blockIdx.x;
+  const int64_t p = pos[r];
+  if (p < 0) return;
+  const int32_t blk = block_tables[static_cast<int64_t>(req_ids[r]) * blocks_per_request +
+                                   p / block_tokens];
+  const int64_t phys = static_cast<int64_t>(blk) * block_tokens + p % block_tokens;
+  const float ks = kv_scales[0], vs = kv_scales[1];
+  for (int e = 2 * threadIdx.x; e < width; e += 2 * blockDim.x) {
+    const uint16_t kc = e4m3x2_scaled(k[r * k_row_stride + e], k[r * k_row_stride + e + 1], ks);
+    const uint16_t vc = e4m3x2_scaled(v[r * v_row_stride + e], v[r * v_row_stride + e + 1], vs);
+    *reinterpret_cast<uint16_t*>(k_cache + phys * width + e) = kc;
+    *reinterpret_cast<uint16_t*>(v_cache + phys * width + e) = vc;
+  }
+}
+
 // xs holds the bf16 mean of a pool's raw keys; the compressed key (norm,
 // RoPE at `pos`) goes to out.
 __device__ inline void compress_finish(float* xs, const uint16_t* __restrict__ w,
@@ -778,6 +811,21 @@ void qsa_kv_append(const uint16_t* k, int64_t k_row_stride, const uint16_t* v, i
   kv_append_kernel<<<static_cast<unsigned>(rows), 256, 0, stream>>>(
       k, k_row_stride, v, v_row_stride, req_ids, pos, block_tables, blocks_per_request,
       block_tokens, kv_heads * dim, k_cache, v_cache);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void qsa_kv_append_fp8(const uint16_t* k, int64_t k_row_stride, const uint16_t* v, int64_t v_row_stride,
+                       const int32_t* req_ids, const int64_t* pos, int rows, const int32_t* block_tables,
+                       int blocks_per_request, int block_tokens, int kv_heads, int dim, const float* kv_scales,
+                       uint8_t* k_cache, uint8_t* v_cache, cudaStream_t stream) {
+  if (rows <= 0) return;
+  if (!k || !v || !req_ids || !pos || !block_tables || !kv_scales || !k_cache || !v_cache)
+    throw std::invalid_argument("qsa_kv_append_fp8: null pointer");
+  if (((kv_heads * dim) & 1) != 0 || (k_row_stride & 1) != 0 || (v_row_stride & 1) != 0)
+    throw std::invalid_argument("qsa_kv_append_fp8: the row width and strides must be even");
+  kv_append_fp8_kernel<<<static_cast<unsigned>(rows), 256, 0, stream>>>(
+      k, k_row_stride, v, v_row_stride, req_ids, pos, block_tables, blocks_per_request, block_tokens,
+      kv_heads * dim, kv_scales, k_cache, v_cache);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

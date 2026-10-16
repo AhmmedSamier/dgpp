@@ -40,6 +40,35 @@ tensor cores; decode rows keep bf16 activations. The templates enable it: on one
 the bf16 chain), GSM8K 295/300 (296) and schema extraction 100/100 (100) at
 the same seed over 300 items.
 
+`engine.kv_dtype: "fp8"` (2026-10-16) serves the release's own FP8
+`kv_cache_scheme`: every Full layer ships a `k_scale` and a `v_scale`
+(static per-tensor symmetric e4m3; k 0.027–0.051, v 0.019–0.254), and the
+Full layers' K/V planes hold e4m3 codes of K / k_scale and V / v_scale —
+half the pool (a 262K context: 21.00 -> 13.00 GiB of K/V on one Spark, the
+DFlash2 planes staying bf16; the memory plan 51.49 -> 43.49 GiB). The
+attention math is the bf16 chain on the widened codes (exact; k_scale
+rides the softmax scale, v_scale the output), so the key changes which
+K/V the model attends over (the release's quantized cache) and nothing
+else; the kernel gate is bitwise against the bf16 kernels on widened
+planes. The NVFP4 templates set it (the release's own cache recipe; `bf16`
+restores the wider cache). On one Spark the 262K cold prefill reads 352 s against
+316 in bf16 (the tile widening until the e4m3 attention lands)
+and decode at 262K 156 ms a pass against 188, with every
+decode batch of request-grouped rows (the verify blocks) through the block
+form that stages each K/V tile once per group (bf16 decode at 262K
+212 -> 188 ms a pass from that alone). Retrieval and
+task accuracy across the two formats (2026-10-16, one boot each, the same
+seed): the 300-item HumanEval / GSM8K / schema-extraction set reads 159/164,
+292/300 and 100/100 in fp8 against 160/164, 292/300 and 100/100 in bf16;
+five needles per document at 32K and 128K over two seeds retrieve 20/20 in
+both formats, as do five needles at 258K (5/5 each, plus 5/5 controls); and a teacher-forced probe (128 positions of a fixed
+continuation on 31K- and 115K-token documents, the top-5 logprobs at every
+position) puts fp8's next-token argmax at 126/127 and 119/128 of bf16's with
+a mean KL of 0.015 and 0.039 nats and the reference token never outside
+fp8's top-5 — the same size as the within-format floor, a second bf16
+boot against the first reading 124/127 and 122/128 with a mean KL of 0.020
+and 0.037 (every pairing's median KL is below 0.005 nats).
+
 ## Gates
 
 Dump-parity (strict and relaxed), 1..7-row decode invariance and a

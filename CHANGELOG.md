@@ -5,6 +5,35 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **`engine.kv_dtype: "fp8"` on the Qwen3.5 family — the mixed release's
+  own K/V cache recipe** (2026-10-16). The Qwen3.8-27B NVFP4 release ships
+  a per-layer `k_scale` / `v_scale` (FP8 `kv_cache_scheme`, static
+  per-tensor e4m3); the key stores the Full layers' K/V as e4m3 codes of
+  K / k_scale and V / v_scale (half the pool: 21.00 -> 13.00 GiB at a 262K
+  context on one Spark, the DFlash2 planes bf16) and keeps the attention
+  math the bf16 chain's on the widened codes — k_scale folded into the
+  softmax scale, v_scale on the output, the codes widened to bf16 in
+  shared memory by an exact integer form (a code's magnitude bits placed
+  in a bf16 and one bf16x2 multiply by 2^120; the cvt chain through f16
+  and f32 was quarter-rate and bound the decode walk). Gated bitwise
+  against the bf16 kernels on widened planes (`full_attn_test`); refused
+  with `engine.mtp` (the draft layer ships no scales) and on releases
+  without the scheme. With it the **block decode form**: decode rows
+  grouped by request (the drafter's verify blocks, a batch's spans) stage
+  every K/V tile once per group through the TMA ring instead of once per
+  row — the row form's bits exactly (16-key steps over each row's own
+  split range), so the forms mix and the batch-composition invariance
+  holds; bf16 decode at a 262K context went 212 -> 188
+  ms a pass, fp8 reads 156. The 262K cold prefill: 316 s
+  bf16, 352 s fp8 (the widening, until the e4m3 attention).
+  Accuracy and retrieval against the bf16 cache (one boot each): the
+  300-item HumanEval / GSM8K / extraction set 159/164, 292/300, 100/100 vs
+  160/164, 292/300, 100/100; five needles per document at 32K, 128K and
+  258K 30/30 in both formats; a teacher-forced top-5 probe on 31K- and
+  115K-token documents at the within-format run-to-run floor (top-1
+  agreement 99 / 93 % vs a second bf16 boot's 98 / 95 %, median KL below
+  0.005 nats). The NVFP4 templates set `kv_dtype: "fp8"`. Loader format 5
+  (the scalars widened to f32 in the layer image).
 - **`engine.prefill_activations: "native"` — the checkpoint's own activation
   recipe on prefill rows** (2026-10-15). A quantized release defines its
   numerics; the bf16-activation chain was an upcast of them. On the

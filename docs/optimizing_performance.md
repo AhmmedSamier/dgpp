@@ -48,7 +48,7 @@ Rules that keep the numbers comparable:
 | key | moves | trades |
 |---|---|---|
 | `engine.kv_capacity` | the shared token capacity of the KV pool | memory; the startup memory plan (`dgpp-serve --memory-plan`) says what fits before anything is allocated |
-| `engine.kv_dtype` (GLM-5.3 family and MiMo) | KV bytes per token: `bf16`, `fp8`, and GLM-only `fp4` | the quantized forms change the model's answers; `bf16` is the exact one |
+| `engine.kv_dtype` (GLM-5.3 family, MiMo, Qwen3.5 mixed releases) | KV bytes per token: `bf16`, `fp8`, and GLM-only `fp4` | the quantized forms change the model's answers; `bf16` is the exact one. On the Qwen3.8-27B NVFP4 release `fp8` is the release's own `kv_cache_scheme` (its shipped per-layer scales), halves the Full layers' pool and cuts long-context decode (262K: 188 -> 156 ms a pass) for a slower cold prefill until the e4m3 attention lands (316 -> 352 s at 262K) |
 | `engine.bf16_weights` | the resident form of the BF16 matrices decode streams: `checkpoint`, `bf12`, `bf12+bf16` | `bf12` is lossless (the kernels rebuild the exact bits) and both faster and smaller for decode; `bf12` alone slows a prefill chunk slightly, `bf12+bf16` keeps prefill on the BF16 bytes for 0.75 of those matrices' memory more |
 | `engine.dense_weights` (Qwen) | the dense stack's storage: the checkpoint's BF16 or block-FP8 encoded at load | FP8 saves memory and decode bytes; it is a quantization of the dense projections, measured per template in the quality rows |
 | `engine.ngram_table` (Qwen) | the n-gram table resident or mmap'ed from local NVMe | mmap saves its memory; the rows a chunk needs come through the page cache, gathered a chunk ahead |

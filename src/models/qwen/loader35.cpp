@@ -623,11 +623,28 @@ struct Qwen35LoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
     a.o_proj_fp8 = load_attn_cols(p + "self_attn.o_proj", o0, on, &a.o_proj);
     a.q_norm = load_bf16(p + "self_attn.q_norm.weight");
     a.k_norm = load_bf16(p + "self_attn.k_norm.weight");
-    // The mixed release's FP8 kv_cache_scheme scalars: bound for the
-    // binding check, read for the byte reconciliation, never resident.
+    // The mixed release's FP8 kv_cache_scheme scalars (BF16 [1] each),
+    // widened to F32 [2] in the image: the fp8 K/V storage form's scales
+    // (engine.kv_dtype = fp8; loader_format 5, 2026-10-16). Read at every
+    // kv_dtype: the byte reconciliation counts them either way.
     if (cfg.quant_kind == Qwen35QuantKind::Nvfp4Mixed && out.layer != cfg.mtp_layer()) {
-      load_raw(p + "self_attn.k_scale");
-      load_raw(p + "self_attn.v_scale");
+      float* sc = static_cast<float*>(bump.alloc(2 * sizeof(float)));
+      const char* names[2] = {"self_attn.k_scale", "self_attn.v_scale"};
+      for (int i = 0; i < 2; ++i) {
+        const std::string name = p + names[i];
+        const Expected& e = expected(name);
+        if (e.nbytes() != 2) fail("'" + name + "' is not one BF16 scalar");
+        if (sharded() && !verbatim_ok(e)) fail("TP read-class drift — '" + name + "' is sharded");
+        if (copy) {
+          const TensorInfo& t = source(name);
+          uint16_t bits = 0;
+          std::memcpy(&bits, t.data, sizeof(bits));
+          bump.host(sc)[i] = bf16_bits_to_float(bits);
+          consumed(t);
+        }
+        note_read(e, e.nbytes());
+      }
+      a.kv_scales = sc;
     }
   }
 
@@ -760,7 +777,7 @@ const char* Qwen35LoaderFamily::who() { return "qwen35 loader"; }
 
 // 3: the NVFP4 global slot holds the weight-side divisor itself (2026-10-06;
 // the 2-era images hold its reciprocal, and the kernels divide by the slot).
-uint64_t Qwen35LoaderFamily::loader_format() { return 4; }
+uint64_t Qwen35LoaderFamily::loader_format() { return 5; }
 
 int Qwen35LoaderFamily::max_layer(const Config& c) {
   return c.num_hidden_layers + (c.mtp_layer() >= 0 ? 1 : 0);

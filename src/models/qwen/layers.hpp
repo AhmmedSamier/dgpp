@@ -378,6 +378,12 @@ class QwenQsaLayer {
 struct QwenFullAttnCache {
   uint16_t* k_cache = nullptr;      // bf16 [slots, lkv * D]
   uint16_t* v_cache = nullptr;      // bf16 [slots, lkv * D]
+  // The fp8 storage form (engine.kv_dtype = fp8, kernels/full_attn.hpp):
+  // the planes hold e4m3 codes of K / k_scale and V / v_scale, k_cache /
+  // v_cache are null, and the layer's resident kv_scales serve the kernels.
+  bool fp8 = false;
+  uint8_t* k8 = nullptr;            // uint8 [slots, lkv * D]
+  uint8_t* v8 = nullptr;
   // The pool's TMA maps over its Full-layer planes and this layer's first
   // row in them (null: the cp.async staging) — kernels/full_attn.hpp.
   const FullAttnStageMaps* maps = nullptr;

@@ -120,8 +120,10 @@ Qwen3.8-Flash-Next's FP8 checkpoint (where both values keep both forms resident)
 `--bf16-weights checkpoint` turns it off. Resident images are shared by all
 three values: switching never rebuilds them.
 
-`kv_dtype` affects only GLM-5.3's latent cache. Qwen and GLM-4.7 K/V
-caches stay BF16. Qwen's `ngram_table` and `dense_weights` settings
+`kv_dtype` affects GLM-5.3's latent cache, MiMo's K/V cache and, on the
+Qwen3.8-27B NVFP4 mixed release, the Qwen3.5 K/V cache (`fp8`: the
+release's shipped per-layer `k_scale` / `v_scale`). Qwen3.8-Flash-Next and
+GLM-4.7 K/V caches stay BF16. Qwen's `ngram_table` and `dense_weights` settings
 control table residency and optional FP8 encoding of dense projections.
 The Qwen NVFP4 templates, including YaRN, set `engine.fp8_head: "mma"`.
 With `dense_weights: "fp8"`, this uses streaming MMA above the dense GEMV
@@ -912,8 +914,20 @@ codes in blocks of 16 with an e4m3 scale per block over the row scale
 shared memory as they gather it, so everything past the load is the bf16
 kernel; the index cache, the tail rings and the selection are unchanged in
 every format, so a quantized cache changes the attention values, never
-which tokens are attended. The format is part of the world's settings (the
-head pushes it, the config digest carries it) and every rank runs the same
+which tokens are attended. On the Qwen3.5 family `fp8` is the mixed NVFP4
+release's own `kv_cache_scheme`: the Full layers' planes hold e4m3 codes of
+K / k_scale and V / v_scale (the per-layer BF16 scalars the release ships,
+widened to f32 in the layer image), the appends divide and round once,
+and the attention kernels widen a tile's codes to bf16 in shared memory
+(exact) with k_scale folded into the softmax scale and v_scale on the
+output — the bf16 kernels' bits on those widened planes. The DFlash2
+drafter's planes stay bf16; the key is refused with `engine.mtp` (the MTP
+draft layer ships no scales) and on releases without the scheme. Decode
+rows grouped by request (the drafter's verify blocks, a batch's spans)
+take the block form in either format: every K/V tile staged once per
+group instead of once per row, the row form's bits. The format is part of
+the world's settings (the head pushes it, the config digest carries it)
+and every rank runs the same
 one. The quantized formats are a memory trade an operator makes
 deliberately: at 262k tokens they save 1.5 GiB (fp8) or 2.2 GiB (fp4) per
 rank against a 98 GiB plan, and the model's answers change with them.

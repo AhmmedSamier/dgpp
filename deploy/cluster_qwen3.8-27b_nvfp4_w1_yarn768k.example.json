@@ -4,7 +4,7 @@
   "engine": {
     "max_concurrency": 2,
     "kv_capacity": 827392,
-    "kv_dtype": "bf16",
+    "kv_dtype": "fp8",
     "rope_scaling": {
       "rope_type": "yarn",
       "factor": 3.0,

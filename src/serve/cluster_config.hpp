@@ -48,7 +48,10 @@ struct ClusterConfig {
   struct Engine {
     int max_concurrency = 8;
     int64_t kv_capacity = 8192;
-    std::string kv_dtype = "bf16";  // the latent cache's format: bf16 | fp8 | fp4
+    // The cache format: GLM-5.3's latent cache bf16 | fp8 | fp4; MiMo's
+    // K/V bf16 | fp8; Qwen3.5's K/V bf16 | fp8 (the e4m3 storage form at
+    // the mixed NVFP4 release's shipped k_scale / v_scale, 2026-10-16).
+    std::string kv_dtype = "bf16";
     // The full GLM-5.3's embedding table: "replicated" on every rank, or
     // "vocab" — each rank holds its lm-head slice of the rows, gathered
     // per token and summed by one fold (bitwise the same numbers, one

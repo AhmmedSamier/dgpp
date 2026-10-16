@@ -58,7 +58,7 @@ Qwen35KvPool::~Qwen35KvPool() {
 
 size_t Qwen35KvPool::cache_bytes(const Qwen35KvPoolShape& shape) {
   const size_t kv_row = static_cast<size_t>(shape.kv_heads) * shape.dim;
-  const size_t layer_kv = static_cast<size_t>(shape.token_slots) * kv_row * 2 * 2;
+  const size_t layer_kv = static_cast<size_t>(shape.token_slots) * kv_row * (shape.fp8 ? 1 : 2) * 2;
   const size_t dkv_row = static_cast<size_t>(shape.draft_kv_heads) * shape.draft_dim;
   const size_t draft_layer_kv = static_cast<size_t>(shape.token_slots) * dkv_row * 2 * 2;
   const int64_t num_blocks = shape.token_slots / shape.block_tokens;
@@ -79,18 +79,24 @@ void Qwen35KvPool::init(const Qwen35KvPoolShape& shape) {
     throw std::invalid_argument("Qwen35KvPool: shape fields must be positive");
   if (shape.token_slots % shape.block_tokens != 0)
     throw std::invalid_argument("Qwen35KvPool: token_slots must be a multiple of block_tokens");
+  const bool staged = shape.dim == 256 && shape.block_tokens >= 32 && (shape.block_tokens & (shape.block_tokens - 1)) == 0;
+  if (shape.fp8 && !staged)
+    throw std::invalid_argument("Qwen35KvPool: the fp8 form needs dim 256 and a power-of-two page of >= 32 tokens");
   shape_ = shape;
   const int64_t num_blocks = shape.token_slots / shape.block_tokens;
-  DGPP_CUDA_OK(cudaMalloc(&k_base_, layer_kv_elems() * shape.layers * 2));
-  DGPP_CUDA_OK(cudaMalloc(&v_base_, layer_kv_elems() * shape.layers * 2));
+  DGPP_CUDA_OK(cudaMalloc(&k_base_, layer_kv_bytes() * shape.layers));
+  DGPP_CUDA_OK(cudaMalloc(&v_base_, layer_kv_bytes() * shape.layers));
   if (shape.draft_layers > 0) {
     DGPP_CUDA_OK(cudaMalloc(&dk_base_, draft_layer_kv_elems() * shape.draft_layers * 2));
     DGPP_CUDA_OK(cudaMalloc(&dv_base_, draft_layer_kv_elems() * shape.draft_layers * 2));
   }
   table_.init(shape.max_requests, shape.block_tokens, num_blocks);
   maps_ready_ = false;
-  if (shape.dim == 256 && shape.block_tokens >= 32 && (shape.block_tokens & (shape.block_tokens - 1)) == 0) {
-    maps_ = full_attn_stage_maps(k_base_, v_base_, static_cast<int64_t>(shape.layers) * shape.token_slots, shape.kv_heads);
+  if (staged) {
+    const int64_t rows = static_cast<int64_t>(shape.layers) * shape.token_slots;
+    maps_ = shape.fp8 ? full_attn_stage_maps_fp8(k_base_, v_base_, rows, shape.kv_heads)
+                      : full_attn_stage_maps(reinterpret_cast<const uint16_t*>(k_base_),
+                                             reinterpret_cast<const uint16_t*>(v_base_), rows, shape.kv_heads);
     maps_ready_ = true;
   }
   initialized_ = true;
@@ -101,8 +107,16 @@ QwenFullAttnCache Qwen35KvPool::view(int layer) const {
     throw std::out_of_range("Qwen35KvPool: layer out of range in view");
   QwenFullAttnCache c;
   if (layer < shape_.layers) {
-    c.k_cache = k_base_ + static_cast<size_t>(layer) * layer_kv_elems();
-    c.v_cache = v_base_ + static_cast<size_t>(layer) * layer_kv_elems();
+    uint8_t* kb = k_base_ + static_cast<size_t>(layer) * layer_kv_bytes();
+    uint8_t* vb = v_base_ + static_cast<size_t>(layer) * layer_kv_bytes();
+    if (shape_.fp8) {
+      c.fp8 = true;
+      c.k8 = kb;
+      c.v8 = vb;
+    } else {
+      c.k_cache = reinterpret_cast<uint16_t*>(kb);
+      c.v_cache = reinterpret_cast<uint16_t*>(vb);
+    }
     if (maps_ready_) {
       c.maps = &maps_;
       c.row_base = static_cast<int64_t>(layer) * shape_.token_slots;
@@ -125,7 +139,7 @@ void Qwen35KvPool::reset_request(int req, cudaStream_t stream) {
 }
 
 void Qwen35KvPool::reset_all(cudaStream_t stream) {
-  const size_t bytes = layer_kv_elems() * shape_.layers * 2;
+  const size_t bytes = layer_kv_bytes() * shape_.layers;
   DGPP_CUDA_OK(cudaMemsetAsync(k_base_, 0, bytes, stream));
   DGPP_CUDA_OK(cudaMemsetAsync(v_base_, 0, bytes, stream));
   if (dk_base_) {
@@ -139,14 +153,13 @@ void Qwen35KvPool::reset_all(cudaStream_t stream) {
 void Qwen35KvPool::copy_block_contents(int32_t src, int32_t dst, cudaStream_t stream) {
   if (src < 0 || src >= total_blocks() || dst < 0 || dst >= total_blocks())
     throw std::out_of_range("Qwen35KvPool: block out of range in copy_block_contents");
-  const size_t row_elems = kv_row_elems();
-  const size_t span = static_cast<size_t>(shape_.block_tokens) * row_elems * 2;
+  const size_t span = static_cast<size_t>(shape_.block_tokens) * kv_row_elems() * elem_bytes();  // bytes
   for (int l = 0; l < shape_.layers; ++l) {
-    const size_t base = static_cast<size_t>(l) * layer_kv_elems();
-    d2d(k_base_ + base + static_cast<size_t>(dst) * span / 2, k_base_ + base + static_cast<size_t>(src) * span / 2,
-        span, stream);
-    d2d(v_base_ + base + static_cast<size_t>(dst) * span / 2, v_base_ + base + static_cast<size_t>(src) * span / 2,
-        span, stream);
+    const size_t base = static_cast<size_t>(l) * layer_kv_bytes();
+    d2d(k_base_ + base + static_cast<size_t>(dst) * span, k_base_ + base + static_cast<size_t>(src) * span, span,
+        stream);
+    d2d(v_base_ + base + static_cast<size_t>(dst) * span, v_base_ + base + static_cast<size_t>(src) * span, span,
+        stream);
   }
   if (dk_base_) {
     const size_t drow = draft_row_elems();
@@ -162,6 +175,26 @@ void Qwen35KvPool::copy_block_contents(int32_t src, int32_t dst, cudaStream_t st
 }
 
 // ---- Qwen35Model ---------------------------------------------------------------
+
+// The pool format a kv_dtype asks for: bf16, or the fp8 storage form —
+// only where every Full layer ships its kv_cache_scheme scales (the mixed
+// release) and no MTP draft plane (its layer ships none) rides the pool.
+static bool kv_format_is_fp8(LatentFormat f, const Qwen35TextConfig& cfg, bool mtp) {
+  if (f == LatentFormat::kBf16) return false;
+  if (f != LatentFormat::kFp8)
+    throw std::invalid_argument(std::string("Qwen35Model: engine.kv_dtype ") + latent_format_name(f) +
+                                " — this family's K/V pool takes bf16 or fp8");
+  if (cfg.quant_kind != Qwen35QuantKind::Nvfp4Mixed)
+    throw std::invalid_argument(
+        "Qwen35Model: engine.kv_dtype fp8 needs a release that ships k_scale / v_scale (the FP8 "
+        "kv_cache_scheme of the mixed NVFP4 release); this checkpoint ships none");
+  if (mtp)
+    throw std::invalid_argument(
+        "Qwen35Model: engine.kv_dtype fp8 with engine.mtp — the MTP draft layer ships no kv scales; use the "
+        "DFlash2 drafter or kv_dtype bf16");
+  return true;
+}
+
 
 // The dequant bridge holds the largest dense FP8 matrix in BF16 so
 // prefill-shaped (m>128) products dequantize once and run cuBLASLt BF16
@@ -185,7 +218,7 @@ static size_t qwen35_dense_bridge_bytes(const Qwen35TextConfig& cfg) {
 Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpoint_dir, int max_tokens,
                          int64_t max_cache_tokens, LoaderResidency residency, BoundaryReducer* boundary,
                          int rank, int world, int max_requests, int decode_rows, bool mtp,
-                         const std::string& dflash2_dir)
+                         const std::string& dflash2_dir, LatentFormat kv_format)
     : cfg_(cfg),
       loader_(cfg, checkpoint_dir, rank, world, residency,
               world > 1 ? LoaderHeadSharding::VocabSharded : LoaderHeadSharding::Full,
@@ -291,6 +324,7 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
   shape.block_tokens = kv_block_tokens_static();
   shape.max_requests = max_requests;
   shape.token_slots = sp.max_cache_tokens;
+  shape.fp8 = kv_format_is_fp8(kv_format, cfg_, mtp_);
   if (dflash2_) {
     shape.draft_layers = dfcfg_.num_hidden_layers;
     shape.draft_kv_heads = dfcfg_.local_kv_heads(world);  // this rank's kv heads (sharded drafter)
@@ -1358,7 +1392,8 @@ void Qwen35Model::build_native_maps() {
 
 MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens, int64_t max_cache_tokens,
                                     int rank, int world, LoaderResidency residency, int max_requests,
-                                    bool mtp, int decode_rows, const std::string& dflash2_dir) {
+                                    bool mtp, int decode_rows, const std::string& dflash2_dir,
+                                    LatentFormat kv_format) {
   if (max_tokens <= 0) throw std::invalid_argument("plan_memory: max_tokens must be positive");
   if (max_requests <= 0 || max_requests > kPickMaxRequests)
     throw std::invalid_argument("plan_memory: max_requests out of range");
@@ -1413,6 +1448,7 @@ MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens,
   shape.block_tokens = kv_block_tokens_static();
   shape.max_requests = max_requests;
   shape.token_slots = cache_tokens;
+  shape.fp8 = kv_format_is_fp8(kv_format, cfg, mtp);
   if (dfcfg) {
     shape.draft_layers = dfcfg->num_hidden_layers;
     shape.draft_kv_heads = dfcfg->local_kv_heads(world);

@@ -34,6 +34,7 @@
 #include "models/qwen/config.hpp"
 #include "models/qwen/config35.hpp"
 #include "kernels/l2_prefetch.hpp"
+#include "kernels/latent_format.hpp"
 #include "kernels/sample_pick.hpp"
 #include "models/qwen/dflash2.hpp"
 #include "models/qwen/layers.hpp"
@@ -57,6 +58,11 @@ struct Qwen35KvPoolShape {
   int draft_layers = 0;
   int draft_kv_heads = 0;
   int draft_dim = 0;
+  // The Full layers' planes as e4m3 codes (engine.kv_dtype = fp8: half the
+  // bytes, the layers' shipped k_scale / v_scale; kernels/full_attn.hpp).
+  // The draft planes stay bf16. Needs the staged attention geometry (dim
+  // 256, a power-of-two page of >= 32 tokens).
+  bool fp8 = false;
 };
 
 // The Full layers' paged K/V caches: per-layer K and V bf16 rows for the
@@ -119,16 +125,18 @@ class Qwen35KvPool {
   Qwen35KvPoolShape shape_;
   bool initialized_ = false;
   PagedBlockTable table_;
-  uint16_t* k_base_ = nullptr;  // [layers][token_slots][kv_heads * dim]
+  uint8_t* k_base_ = nullptr;  // [layers][token_slots][kv_heads * dim] bf16, or e4m3 codes (shape_.fp8)
   // The TMA maps over the Full-layer planes (kernels/full_attn.hpp), built
   // at init when the geometry is the staged form's (dim 256).
   FullAttnStageMaps maps_{};
   bool maps_ready_ = false;
-  uint16_t* v_base_ = nullptr;
+  uint8_t* v_base_ = nullptr;
   uint16_t* dk_base_ = nullptr;  // [draft_layers][token_slots][dkv * ddim]
   uint16_t* dv_base_ = nullptr;
   size_t kv_row_elems() const { return static_cast<size_t>(shape_.kv_heads) * shape_.dim; }
   size_t layer_kv_elems() const { return static_cast<size_t>(shape_.token_slots) * kv_row_elems(); }
+  size_t elem_bytes() const { return shape_.fp8 ? 1 : 2; }
+  size_t layer_kv_bytes() const { return layer_kv_elems() * elem_bytes(); }
   size_t draft_row_elems() const {
     return static_cast<size_t>(shape_.draft_kv_heads) * shape_.draft_dim;
   }
@@ -158,10 +166,12 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   // padded-8-row-block graph, session_verify_batch_graph); only the
   // block draft itself stays eager (its top-K selection roundtrips to
   // the host), running between replays.
+  // `kv_format`: the Full layers' K/V planes — bf16, or fp8 (the e4m3
+  // storage form at the release's shipped kv scales; Qwen35KvPoolShape::fp8).
   Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpoint_dir, int max_tokens,
               int64_t max_cache_tokens, LoaderResidency residency, BoundaryReducer* boundary, int rank,
               int world, int max_requests, int decode_rows, bool mtp = false,
-              const std::string& dflash2_dir = "");
+              const std::string& dflash2_dir = "", LatentFormat kv_format = LatentFormat::kBf16);
   ~Qwen35Model();
 
   // The decode batch's row ceiling (engine/decode_outputs.hpp's
@@ -220,7 +230,8 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   static MemoryPlan plan_memory(const Qwen35TextConfig& cfg, int max_tokens, int64_t max_cache_tokens,
                                 int rank, int world, LoaderResidency residency, int max_requests,
                                 bool mtp = false, int decode_rows = 0,
-                                const std::string& dflash2_dir = "");
+                                const std::string& dflash2_dir = "",
+                                LatentFormat kv_format = LatentFormat::kBf16);
 
   const Qwen35TextConfig& config() const { return cfg_; }
   // Actual resident layer allocation, for comparing initialization with the

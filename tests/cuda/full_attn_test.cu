@@ -21,6 +21,7 @@
 #include "common/test.hpp"
 #include "kda_test_helpers.hpp"
 #include "kernels/full_attn.hpp"
+#include "kernels/qsa.hpp"
 
 using namespace dgpp::kda_test;
 
@@ -289,6 +290,43 @@ DGPP_TEST(full_attention_split_walk_matches_the_reference) {
               s.mismatches, s.n, rms);
   require_bf16("split walk", s, 2e-3, 0.01);
   for (int i = 0; i < qw; ++i) require(got[static_cast<size_t>(rows - 1) * qw + i] == 0.f, "padding row is zero");
+  // The block form over the same rows grouped by request (rows 0..2 of
+  // request 0, row 3 of request 1, row 4 of request 0, the padding row):
+  // bitwise the row form, split and unsplit.
+  {
+    const std::vector<int32_t> spans = {0, 3, 3, 1, 4, 1, 5, 1};
+    DevBuf dspans = up(spans);
+    const dgpp::FullAttnStageMaps maps = dgpp::full_attn_stage_maps(
+        ptr<uint16_t>(kc), ptr<uint16_t>(vc), static_cast<int64_t>(g.max_requests) * g.slots(), g.kv_heads);
+    DevBuf outb(ref.size() * 4), partb(dgpp::full_attn_partials_bytes(rows, g.kv_heads));
+    DGPP_CUDA_OK(cudaMemset(outb.p, 0x7F, ref.size() * 4));
+    dgpp::full_attn_decode_blocks(maps, 0, ptr<uint16_t>(dq), qw, ptr<int32_t>(dreq), ptr<int64_t>(dpos),
+                                  ptr<int32_t>(dspans), 4, rows, ptr<int32_t>(dtbl), g.blocks_per_request,
+                                  g.local_heads, g.kv_heads, g.block_tokens, scale, mptr<float>(outb),
+                                  mptr<float>(partb), st);
+    DGPP_CUDA_OK(cudaStreamSynchronize(st));
+    require(down<float>(outb, ref.size()) == got, "block form (split) bitwise the row form");
+    DevBuf outu(ref.size() * 4), outr(ref.size() * 4);
+    DGPP_CUDA_OK(cudaMemset(outu.p, 0x7F, ref.size() * 4));
+    dgpp::full_attn_decode_blocks(maps, 0, ptr<uint16_t>(dq), qw, ptr<int32_t>(dreq), ptr<int64_t>(dpos),
+                                  ptr<int32_t>(dspans), 4, rows, ptr<int32_t>(dtbl), g.blocks_per_request,
+                                  g.local_heads, g.kv_heads, g.block_tokens, scale, mptr<float>(outu), nullptr, st);
+    dgpp::full_attn_decode(ptr<uint16_t>(dq), qw, ptr<uint16_t>(kc), ptr<uint16_t>(vc), ptr<int32_t>(dreq),
+                           ptr<int64_t>(dpos), rows, g.local_heads, g.kv_heads, g.block_tokens, ptr<int32_t>(dtbl),
+                           g.blocks_per_request, scale, mptr<float>(outr), nullptr, st);
+    DGPP_CUDA_OK(cudaStreamSynchronize(st));
+    require(down<float>(outu, ref.size()) == down<float>(outr, ref.size()),
+            "block form (unsplit) bitwise the row form");
+    // One lone group (no spans) of the first three rows: the same bits for them.
+    DevBuf outl(ref.size() * 4);
+    DGPP_CUDA_OK(cudaMemset(outl.p, 0x7F, ref.size() * 4));
+    dgpp::full_attn_decode_blocks(maps, 0, ptr<uint16_t>(dq), qw, ptr<int32_t>(dreq), ptr<int64_t>(dpos), nullptr, 1,
+                                  3, ptr<int32_t>(dtbl), g.blocks_per_request, g.local_heads, g.kv_heads,
+                                  g.block_tokens, scale, mptr<float>(outl), mptr<float>(partb), st);
+    DGPP_CUDA_OK(cudaStreamSynchronize(st));
+    const std::vector<float> lone = down<float>(outl, ref.size());
+    require(std::equal(lone.begin(), lone.begin() + 3 * qw, got.begin()), "lone group bitwise the row form");
+  }
   // The unsplit form over the same rows agrees with the split one to the same tolerance.
   DevBuf out1(ref.size() * 4);
   dgpp::full_attn_prefill_warp(ptr<uint16_t>(dq), qw, ptr<uint16_t>(kc), ptr<uint16_t>(vc), ptr<int32_t>(dreq),
@@ -371,6 +409,351 @@ DGPP_TEST(full_attention_tile_form_matches_the_reference) {
                               mptr<float>(out3), st);
   DGPP_CUDA_OK(cudaStreamSynchronize(st));
   require(down<float>(out3, ref.size()) == got, "staged (TMA) form bitwise the cp.async form");
+}
+
+
+// The fp8 storage form (engine.kv_dtype = fp8): e4m3 planes of K / k_scale
+// and V / v_scale with the two scales on the device. Gate: bitwise the bf16
+// forms run on the widened planes (exact bf16 of every code) with scale *
+// k_scale, their outputs times v_scale — the split and unsplit row walks
+// and the staged tile form; and the fp8 append writes the host quantizer's
+// codes (fp32 division, round-to-nearest-even, saturating).
+DGPP_TEST(full_attention_fp8_storage_is_the_bf16_chain_on_widened_planes) {
+  Geo g;
+  g.local_heads = 12;  // two KV groups of six
+  g.kv_heads = 2;
+  g.blocks_per_request = 32;  // 1024 slots per request
+  cudaStream_t st = test_stream();
+  const float ks = 0.0390625f, vs = 0.1416015625f;  // two of the 27B release's scalars
+  const int lens[2] = {700, 100};
+  const size_t slots = static_cast<size_t>(g.max_requests) * g.slots();
+  // The bf16 rows the layer would append (K after norm + RoPE, V), each
+  // request at its block range; the planes: e4m3 codes, and their widening.
+  // Slots past a request's rows hold the largest finite code (the staged
+  // tile form reads a whole 32-key tile and masks by index; a NaN code
+  // there would poison 0 x NaN, which a served pool never holds: reset
+  // zeroes the planes and the append saturates).
+  std::vector<uint16_t> kh(slots * g.width(), 0), vh(slots * g.width(), 0);
+  std::vector<uint8_t> k8(slots * g.width(), 0x7E), v8(slots * g.width(), 0x7E);
+  for (int q = 0; q < 2; ++q) {
+    const std::vector<uint16_t> k = random_bf16_normal(130 + q, static_cast<int64_t>(lens[q]) * g.width(), 1.0f);
+    const std::vector<uint16_t> v = random_bf16_normal(140 + q, static_cast<int64_t>(lens[q]) * g.width(), 1.0f);
+    for (int t = 0; t < lens[q]; ++t)
+      for (int e = 0; e < g.width(); ++e) {
+        const size_t at = static_cast<size_t>(phys(g, q, t)) * g.width() + e;
+        const uint16_t kb = k[static_cast<size_t>(t) * g.width() + e], vb = v[static_cast<size_t>(t) * g.width() + e];
+        kh[at] = kb;
+        vh[at] = vb;
+        k8[at] = dgpp::float_to_fp8_e4m3_bits(dgpp::bf16_bits_to_float(kb) / ks);
+        v8[at] = dgpp::float_to_fp8_e4m3_bits(dgpp::bf16_bits_to_float(vb) / vs);
+      }
+  }
+  // The widened planes: the exact bf16 of every code, fill included.
+  std::vector<uint16_t> kw(slots * g.width()), vw(slots * g.width());
+  for (size_t i = 0; i < kw.size(); ++i) {
+    kw[i] = dgpp::float_to_bf16_bits(dgpp::fp8_e4m3_bits_to_float(k8[i]));
+    vw[i] = dgpp::float_to_bf16_bits(dgpp::fp8_e4m3_bits_to_float(v8[i]));
+  }
+  // Some codes must be subnormal or zero for the widening to be exercised.
+  size_t sub = 0;
+  for (size_t i = 0; i < k8.size(); ++i) sub += (k8[i] & 0x78) == 0;
+  require(sub > 100, "the planes hold subnormal codes");
+  DevBuf dk8 = up(k8), dv8 = up(v8), dkw = up(kw), dvw = up(vw), dtbl = up(tables(g));
+  const std::vector<float> scales = {ks, vs};
+  DevBuf dscales = up(scales);
+
+  // ---- the append: the layer's bf16 rows into the codes ------------------
+  {
+    const int rows = lens[0] + lens[1];
+    std::vector<int32_t> req(static_cast<size_t>(rows));
+    std::vector<int64_t> pos(static_cast<size_t>(rows));
+    std::vector<uint16_t> krows(static_cast<size_t>(rows) * g.width()), vrows(krows.size());
+    int r = 0;
+    for (int q = 0; q < 2; ++q)
+      for (int t = 0; t < lens[q]; ++t, ++r) {
+        req[static_cast<size_t>(r)] = q;
+        pos[static_cast<size_t>(r)] = t;
+        const size_t at = static_cast<size_t>(phys(g, q, t)) * g.width();
+        std::copy(kh.begin() + at, kh.begin() + at + g.width(), krows.begin() + static_cast<size_t>(r) * g.width());
+        std::copy(vh.begin() + at, vh.begin() + at + g.width(), vrows.begin() + static_cast<size_t>(r) * g.width());
+      }
+    DevBuf dreq = up(req), dpos = up(pos), dkr = up(krows), dvr = up(vrows);
+    DevBuf ak(k8.size()), av(v8.size());
+    DGPP_CUDA_OK(cudaMemset(ak.p, 0x7E, k8.size()));  // the fill of the expected planes
+    DGPP_CUDA_OK(cudaMemset(av.p, 0x7E, v8.size()));
+    dgpp::qsa_kv_append_fp8(ptr<uint16_t>(dkr), g.width(), ptr<uint16_t>(dvr), g.width(), ptr<int32_t>(dreq),
+                            ptr<int64_t>(dpos), rows, ptr<int32_t>(dtbl), g.blocks_per_request, g.block_tokens,
+                            g.kv_heads, D, ptr<float>(dscales), mptr<uint8_t>(ak), mptr<uint8_t>(av), st);
+    DGPP_CUDA_OK(cudaStreamSynchronize(st));
+    require(down<uint8_t>(ak, k8.size()) == k8, "fp8 append: K codes are the host quantizer's");
+    require(down<uint8_t>(av, v8.size()) == v8, "fp8 append: V codes are the host quantizer's");
+  }
+
+  // ---- the row walks: decode rows across both requests --------------------
+  const std::vector<int32_t> req_ids = {0, 0, 0, 1, 0, 1, 0};
+  const std::vector<int64_t> pos = {0, 17, 699, 99, 511, 31, -1};
+  const int rows = static_cast<int>(pos.size());
+  const int qw = g.local_heads * D;
+  const std::vector<uint16_t> q = random_bf16_normal(150, static_cast<int64_t>(rows) * qw, 1.0f);
+  DevBuf dq = up(q), dpos = up(pos), dreq = up(req_ids);
+  const float scale = 1.0f / std::sqrt(static_cast<float>(D));
+  const size_t n = static_cast<size_t>(rows) * qw;
+  auto scaled = [&](const DevBuf& b) {
+    std::vector<float> o = down<float>(b, n);
+    for (float& x : o) x = x * vs;
+    return o;
+  };
+  for (int split = 0; split < 2; ++split) {
+    DevBuf ref(n * 4), got(n * 4), part(dgpp::full_attn_partials_bytes(rows, g.kv_heads));
+    DGPP_CUDA_OK(cudaMemset(ref.p, 0x7F, n * 4));
+    DGPP_CUDA_OK(cudaMemset(got.p, 0x7F, n * 4));
+    dgpp::full_attn_decode(ptr<uint16_t>(dq), qw, ptr<uint16_t>(dkw), ptr<uint16_t>(dvw), ptr<int32_t>(dreq),
+                           ptr<int64_t>(dpos), rows, g.local_heads, g.kv_heads, g.block_tokens, ptr<int32_t>(dtbl),
+                           g.blocks_per_request, scale * ks, mptr<float>(ref), split ? mptr<float>(part) : nullptr, st);
+    dgpp::full_attn_decode_fp8(ptr<uint16_t>(dq), qw, ptr<uint8_t>(dk8), ptr<uint8_t>(dv8), ptr<int32_t>(dreq),
+                               ptr<int64_t>(dpos), rows, g.local_heads, g.kv_heads, g.block_tokens,
+                               ptr<int32_t>(dtbl), g.blocks_per_request, scale, ptr<float>(dscales), mptr<float>(got),
+                               split ? mptr<float>(part) : nullptr, st);
+    DGPP_CUDA_OK(cudaStreamSynchronize(st));
+    const std::vector<float> want = scaled(ref), have = down<float>(got, n);
+    require(have == want, split ? "fp8 split row walk bitwise the bf16 chain" : "fp8 row walk bitwise the bf16 chain");
+    for (int i = 0; i < qw; ++i) require(have[static_cast<size_t>(rows - 1) * qw + i] == 0.f, "fp8: padding row is zero");
+  }
+
+  // ---- the block form: the same decode rows grouped by request ---------
+  {
+    const std::vector<int32_t> spans = {0, 3, 3, 1, 4, 1, 5, 1, 6, 1};
+    DevBuf dspans = up(spans);
+    const dgpp::FullAttnStageMaps maps =
+        dgpp::full_attn_stage_maps(ptr<uint16_t>(dkw), ptr<uint16_t>(dvw), static_cast<int64_t>(slots), g.kv_heads);
+    const dgpp::FullAttnStageMaps maps8 =
+        dgpp::full_attn_stage_maps_fp8(ptr<uint8_t>(dk8), ptr<uint8_t>(dv8), static_cast<int64_t>(slots), g.kv_heads);
+    for (int split = 0; split < 2; ++split) {
+      DevBuf ref(n * 4), got(n * 4), rowf(n * 4), part(dgpp::full_attn_partials_bytes(rows, g.kv_heads));
+      DGPP_CUDA_OK(cudaMemset(ref.p, 0x7F, n * 4));
+      DGPP_CUDA_OK(cudaMemset(got.p, 0x7F, n * 4));
+      dgpp::full_attn_decode_blocks(maps, 0, ptr<uint16_t>(dq), qw, ptr<int32_t>(dreq), ptr<int64_t>(dpos),
+                                    ptr<int32_t>(dspans), 5, rows, ptr<int32_t>(dtbl), g.blocks_per_request,
+                                    g.local_heads, g.kv_heads, g.block_tokens, scale * ks, mptr<float>(ref),
+                                    split ? mptr<float>(part) : nullptr, st);
+      dgpp::full_attn_decode_blocks_fp8(maps8, 0, ptr<uint16_t>(dq), qw, ptr<int32_t>(dreq), ptr<int64_t>(dpos),
+                                        ptr<int32_t>(dspans), 5, rows, ptr<int32_t>(dtbl), g.blocks_per_request,
+                                        g.local_heads, g.kv_heads, g.block_tokens, scale, ptr<float>(dscales),
+                                        mptr<float>(got), split ? mptr<float>(part) : nullptr, st);
+      dgpp::full_attn_decode_fp8(ptr<uint16_t>(dq), qw, ptr<uint8_t>(dk8), ptr<uint8_t>(dv8), ptr<int32_t>(dreq),
+                                 ptr<int64_t>(dpos), rows, g.local_heads, g.kv_heads, g.block_tokens,
+                                 ptr<int32_t>(dtbl), g.blocks_per_request, scale, ptr<float>(dscales),
+                                 mptr<float>(rowf), split ? mptr<float>(part) : nullptr, st);
+      DGPP_CUDA_OK(cudaStreamSynchronize(st));
+      const std::vector<float> want = scaled(ref), have = down<float>(got, n);
+      require(have == want, split ? "fp8 block form (split) bitwise the bf16 block form on widened planes"
+                                  : "fp8 block form bitwise the bf16 block form on widened planes");
+      require(have == down<float>(rowf, n), split ? "fp8 block form (split) bitwise the fp8 row form"
+                                                  : "fp8 block form bitwise the fp8 row form");
+    }
+  }
+
+  // ---- the staged tile form: request 0's 700 consecutive rows -----------
+  {
+    const int prows = lens[0];
+    std::vector<int64_t> ppos(static_cast<size_t>(prows));
+    for (int r = 0; r < prows; ++r) ppos[static_cast<size_t>(r)] = r;
+    const std::vector<uint16_t> pq = random_bf16_normal(160, static_cast<int64_t>(prows) * qw, 1.0f);
+    DevBuf dpq = up(pq), dppos = up(ppos);
+    const size_t pn = static_cast<size_t>(prows) * qw;
+    const dgpp::FullAttnStageMaps maps =
+        dgpp::full_attn_stage_maps(ptr<uint16_t>(dkw), ptr<uint16_t>(dvw), static_cast<int64_t>(slots), g.kv_heads);
+    const dgpp::FullAttnStageMaps maps8 =
+        dgpp::full_attn_stage_maps_fp8(ptr<uint8_t>(dk8), ptr<uint8_t>(dv8), static_cast<int64_t>(slots), g.kv_heads);
+    DevBuf ref(pn * 4), got(pn * 4);
+    DGPP_CUDA_OK(cudaMemset(ref.p, 0x7F, pn * 4));
+    DGPP_CUDA_OK(cudaMemset(got.p, 0x7F, pn * 4));
+    dgpp::full_attn_prefill_tma(maps, 0, ptr<uint16_t>(dpq), qw, ptr<int32_t>(dtbl), ptr<int64_t>(dppos), prows,
+                                g.local_heads, g.kv_heads, g.block_tokens, scale * ks, mptr<float>(ref), st);
+    dgpp::full_attn_prefill_tma_fp8(maps8, 0, ptr<uint16_t>(dpq), qw, ptr<int32_t>(dtbl), ptr<int64_t>(dppos), prows,
+                                    g.local_heads, g.kv_heads, g.block_tokens, scale, ptr<float>(dscales),
+                                    mptr<float>(got), st);
+    DGPP_CUDA_OK(cudaStreamSynchronize(st));
+    std::vector<float> want = down<float>(ref, pn);
+    for (float& x : want) x = x * vs;
+    const std::vector<float> have = down<float>(got, pn);
+    size_t diff = 0;
+    std::vector<int> rows_hit, heads_hit(static_cast<size_t>(g.local_heads), 0);
+    for (size_t i = 0; i < pn; ++i)
+      if (have[i] != want[i]) {
+        ++diff;
+        const int r = static_cast<int>(i / qw), h = static_cast<int>((i % qw) / D);
+        if (rows_hit.empty() || rows_hit.back() != r) rows_hit.push_back(r);
+        ++heads_hit[static_cast<size_t>(h)];
+      }
+    std::printf("[ .. ] fp8 staged tile form: %zu/%zu elements differ from the bf16 chain\n", diff, pn);
+    if (diff) {
+      std::printf("[ .. ]   %zu rows differ:", rows_hit.size());
+      for (size_t i = 0; i < rows_hit.size() && i < 40; ++i) std::printf(" %d", rows_hit[i]);
+      std::printf("\n[ .. ]   per head:");
+      for (int h = 0; h < g.local_heads; ++h) std::printf(" %d", heads_hit[static_cast<size_t>(h)]);
+      std::printf("\n[ .. ]   first row: have %.8g %.8g want %.8g %.8g\n", have[static_cast<size_t>(rows_hit[0]) * qw],
+                  have[static_cast<size_t>(rows_hit[0]) * qw + 1], want[static_cast<size_t>(rows_hit[0]) * qw],
+                  want[static_cast<size_t>(rows_hit[0]) * qw + 1]);
+    }
+    require(diff == 0, "fp8 staged tile form bitwise the bf16 chain on widened planes");
+  }
+}
+
+
+// The block form at a long context with the serving pool's 64-token pages:
+// two requests (261 280 and 300 keys), verify-shaped groups of consecutive
+// positions and a lone row, against the row form — bitwise, split and
+// unsplit, bf16 and fp8. The ring wraps hundreds of times per split here;
+// the miniature tests above never wrap it.
+DGPP_TEST(full_attention_block_form_long_context_bitwise_the_row_form) {
+  Geo g;
+  g.local_heads = 12;  // two KV groups of six: the partials are laid out per KV head
+  g.kv_heads = 2;
+  g.block_tokens = 64;
+  g.blocks_per_request = 4096;  // 262 144 slots per request: the serving context
+  cudaStream_t st = test_stream();
+  const int lens[2] = {261280, 300};
+  const size_t slots = static_cast<size_t>(g.max_requests) * g.slots();
+  const float ks = 0.0390625f, vs = 0.1416015625f;
+  std::vector<uint8_t> k8(slots * g.width(), 0x7E), v8(slots * g.width(), 0x7E);
+  for (int q = 0; q < 2; ++q) {
+    const std::vector<uint16_t> k = random_bf16_normal(170 + q, static_cast<int64_t>(lens[q]) * g.width(), 1.0f);
+    const std::vector<uint16_t> v = random_bf16_normal(180 + q, static_cast<int64_t>(lens[q]) * g.width(), 1.0f);
+    for (int t = 0; t < lens[q]; ++t)
+      for (int e = 0; e < g.width(); ++e) {
+        const size_t at = static_cast<size_t>(phys(g, q, t)) * g.width() + e;
+        k8[at] = dgpp::float_to_fp8_e4m3_bits(dgpp::bf16_bits_to_float(k[static_cast<size_t>(t) * g.width() + e]) / ks);
+        v8[at] = dgpp::float_to_fp8_e4m3_bits(dgpp::bf16_bits_to_float(v[static_cast<size_t>(t) * g.width() + e]) / vs);
+      }
+  }
+  std::vector<uint16_t> kw(slots * g.width()), vw(slots * g.width());
+  for (size_t i = 0; i < kw.size(); ++i) {
+    kw[i] = dgpp::float_to_bf16_bits(dgpp::fp8_e4m3_bits_to_float(k8[i]));
+    vw[i] = dgpp::float_to_bf16_bits(dgpp::fp8_e4m3_bits_to_float(v8[i]));
+  }
+  DevBuf dk8 = up(k8), dv8 = up(v8), dkw = up(kw), dvw = up(vw), dtbl = up(tables(g));
+  const std::vector<float> scales = {ks, vs};
+  DevBuf dscales = up(scales);
+  // Groups: request 0's verify block at 19992..19999, request 1's at
+  // 292..299 (both with two padding rows), a lone row of request 0 at 5000.
+  std::vector<int32_t> req_ids;
+  std::vector<int64_t> pos;
+  for (int r = 0; r < 8; ++r) { req_ids.push_back(0); pos.push_back(r < 6 ? 261272 + r : -1); }
+  for (int r = 0; r < 8; ++r) { req_ids.push_back(1); pos.push_back(r < 6 ? 292 + r : -1); }
+  req_ids.push_back(0); pos.push_back(5000);
+  const std::vector<int32_t> spans = {0, 8, 8, 8, 16, 1};
+  const int rows = static_cast<int>(pos.size());
+  const int qw = g.local_heads * D;
+  const std::vector<uint16_t> q = random_bf16_normal(190, static_cast<int64_t>(rows) * qw, 1.0f);
+  DevBuf dq = up(q), dpos = up(pos), dreq = up(req_ids), dspans = up(spans);
+  const float scale = 1.0f / std::sqrt(static_cast<float>(D));
+  const size_t n = static_cast<size_t>(rows) * qw;
+  const dgpp::FullAttnStageMaps maps =
+      dgpp::full_attn_stage_maps(ptr<uint16_t>(dkw), ptr<uint16_t>(dvw), static_cast<int64_t>(slots), g.kv_heads);
+  const dgpp::FullAttnStageMaps maps8 =
+      dgpp::full_attn_stage_maps_fp8(ptr<uint8_t>(dk8), ptr<uint8_t>(dv8), static_cast<int64_t>(slots), g.kv_heads);
+  for (int split = 0; split < 2; ++split) {
+    DevBuf part(dgpp::full_attn_partials_bytes(rows, g.kv_heads));
+    DevBuf rowb(n * 4), blkb(n * 4), row8(n * 4), blk8(n * 4);
+    DGPP_CUDA_OK(cudaMemset(blkb.p, 0x7F, n * 4));
+    DGPP_CUDA_OK(cudaMemset(blk8.p, 0x7F, n * 4));
+    dgpp::full_attn_decode(ptr<uint16_t>(dq), qw, ptr<uint16_t>(dkw), ptr<uint16_t>(dvw), ptr<int32_t>(dreq),
+                           ptr<int64_t>(dpos), rows, g.local_heads, g.kv_heads, g.block_tokens, ptr<int32_t>(dtbl),
+                           g.blocks_per_request, scale * ks, mptr<float>(rowb), split ? mptr<float>(part) : nullptr, st);
+    dgpp::full_attn_decode_blocks(maps, 0, ptr<uint16_t>(dq), qw, ptr<int32_t>(dreq), ptr<int64_t>(dpos),
+                                  ptr<int32_t>(dspans), 3, rows, ptr<int32_t>(dtbl), g.blocks_per_request,
+                                  g.local_heads, g.kv_heads, g.block_tokens, scale * ks, mptr<float>(blkb),
+                                  split ? mptr<float>(part) : nullptr, st);
+    dgpp::full_attn_decode_fp8(ptr<uint16_t>(dq), qw, ptr<uint8_t>(dk8), ptr<uint8_t>(dv8), ptr<int32_t>(dreq),
+                               ptr<int64_t>(dpos), rows, g.local_heads, g.kv_heads, g.block_tokens, ptr<int32_t>(dtbl),
+                               g.blocks_per_request, scale, ptr<float>(dscales), mptr<float>(row8),
+                               split ? mptr<float>(part) : nullptr, st);
+    dgpp::full_attn_decode_blocks_fp8(maps8, 0, ptr<uint16_t>(dq), qw, ptr<int32_t>(dreq), ptr<int64_t>(dpos),
+                                      ptr<int32_t>(dspans), 3, rows, ptr<int32_t>(dtbl), g.blocks_per_request,
+                                      g.local_heads, g.kv_heads, g.block_tokens, scale, ptr<float>(dscales),
+                                      mptr<float>(blk8), split ? mptr<float>(part) : nullptr, st);
+    DGPP_CUDA_OK(cudaStreamSynchronize(st));
+    const std::vector<float> a = down<float>(rowb, n), b = down<float>(blkb, n);
+    const std::vector<float> a8 = down<float>(row8, n), b8 = down<float>(blk8, n);
+    size_t dbf = 0, d8 = 0, dx = 0;
+    for (size_t i = 0; i < n; ++i) { dbf += a[i] != b[i]; d8 += a8[i] != b8[i]; dx += a[i] * vs != a8[i]; }
+    std::printf("[ .. ] long context %s: block vs row bf16 %zu/%zu differ, fp8 %zu, fp8 row vs bf16 row x vs %zu\n",
+                split ? "split" : "unsplit", dbf, n, d8, dx);
+    if (dbf) {
+      for (int r = 0; r < rows; ++r) {
+        size_t c = 0;
+        for (int i = 0; i < qw; ++i) c += a[static_cast<size_t>(r) * qw + i] != b[static_cast<size_t>(r) * qw + i];
+        if (c) std::printf("[ .. ]   row %d (pos %lld): %zu differ; row %g block %g\n", r, static_cast<long long>(pos[static_cast<size_t>(r)]), c,
+                           a[static_cast<size_t>(r) * qw], b[static_cast<size_t>(r) * qw]);
+      }
+    }
+    require(dbf == 0, "long context: block form bitwise the row form (bf16)");
+    require(d8 == 0, "long context: fp8 block form bitwise the fp8 row form");
+    require(dx == 0, "long context: fp8 row form bitwise the bf16 row form x v_scale");
+  }
+}
+
+
+// The staged prefill forms at a long context (100 000 keys, 64-token pages,
+// the ring wrapping a thousand times): fp8 bitwise the bf16 form on the
+// widened planes for 32 rows at the end of the request.
+DGPP_TEST(full_attention_fp8_prefill_long_context_bitwise_the_bf16_chain) {
+  Geo g;
+  g.local_heads = 6;
+  g.kv_heads = 1;
+  g.block_tokens = 64;
+  g.blocks_per_request = 1600;  // 102 400 slots per request
+  g.max_requests = 1;
+  cudaStream_t st = test_stream();
+  const int len = 100000;
+  const size_t slots = static_cast<size_t>(g.max_requests) * g.slots();
+  const float ks = 0.0322265625f, vs = 0.25390625f;
+  std::vector<uint8_t> k8(slots * g.width(), 0x7E), v8(slots * g.width(), 0x7E);
+  {
+    const std::vector<uint16_t> k = random_bf16_normal(200, static_cast<int64_t>(len) * g.width(), 1.0f);
+    const std::vector<uint16_t> v = random_bf16_normal(201, static_cast<int64_t>(len) * g.width(), 1.0f);
+    for (size_t i = 0; i < static_cast<size_t>(len) * g.width(); ++i) {
+      k8[i] = dgpp::float_to_fp8_e4m3_bits(dgpp::bf16_bits_to_float(k[i]) / ks);
+      v8[i] = dgpp::float_to_fp8_e4m3_bits(dgpp::bf16_bits_to_float(v[i]) / vs);
+    }
+  }
+  std::vector<uint16_t> kw(slots * g.width()), vw(slots * g.width());
+  for (size_t i = 0; i < kw.size(); ++i) {
+    kw[i] = dgpp::float_to_bf16_bits(dgpp::fp8_e4m3_bits_to_float(k8[i]));
+    vw[i] = dgpp::float_to_bf16_bits(dgpp::fp8_e4m3_bits_to_float(v8[i]));
+  }
+  DevBuf dk8 = up(k8), dv8 = up(v8), dkw = up(kw), dvw = up(vw), dtbl = up(tables(g));
+  const std::vector<float> scales = {ks, vs};
+  DevBuf dscales = up(scales);
+  const int rows = 32;
+  std::vector<int64_t> pos(static_cast<size_t>(rows));
+  for (int r = 0; r < rows; ++r) pos[static_cast<size_t>(r)] = len - rows + r;
+  const int qw = g.local_heads * D;
+  const std::vector<uint16_t> q = random_bf16_normal(210, static_cast<int64_t>(rows) * qw, 1.0f);
+  DevBuf dq = up(q), dpos = up(pos);
+  const float scale = 1.0f / std::sqrt(static_cast<float>(D));
+  const size_t n = static_cast<size_t>(rows) * qw;
+  const dgpp::FullAttnStageMaps maps =
+      dgpp::full_attn_stage_maps(ptr<uint16_t>(dkw), ptr<uint16_t>(dvw), static_cast<int64_t>(slots), g.kv_heads);
+  const dgpp::FullAttnStageMaps maps8 =
+      dgpp::full_attn_stage_maps_fp8(ptr<uint8_t>(dk8), ptr<uint8_t>(dv8), static_cast<int64_t>(slots), g.kv_heads);
+  DevBuf ref(n * 4), got(n * 4);
+  DGPP_CUDA_OK(cudaMemset(ref.p, 0x7F, n * 4));
+  DGPP_CUDA_OK(cudaMemset(got.p, 0x7F, n * 4));
+  dgpp::full_attn_prefill_tma(maps, 0, ptr<uint16_t>(dq), qw, ptr<int32_t>(dtbl), ptr<int64_t>(dpos), rows,
+                              g.local_heads, g.kv_heads, g.block_tokens, scale * ks, mptr<float>(ref), st);
+  dgpp::full_attn_prefill_tma_fp8(maps8, 0, ptr<uint16_t>(dq), qw, ptr<int32_t>(dtbl), ptr<int64_t>(dpos), rows,
+                                  g.local_heads, g.kv_heads, g.block_tokens, scale, ptr<float>(dscales),
+                                  mptr<float>(got), st);
+  DGPP_CUDA_OK(cudaStreamSynchronize(st));
+  std::vector<float> want = down<float>(ref, n);
+  for (float& x : want) x = x * vs;
+  const std::vector<float> have = down<float>(got, n);
+  size_t diff = 0;
+  for (size_t i = 0; i < n; ++i) diff += have[i] != want[i];
+  std::printf("[ .. ] fp8 staged prefill at 100K keys: %zu/%zu differ; out[0] %g vs %g\n", diff, n, have[0], want[0]);
+  require(diff == 0, "fp8 staged prefill at a long context bitwise the bf16 chain");
 }
 
 int main() {

@@ -62,6 +62,16 @@ void qsa_kv_append(const uint16_t* k, int64_t k_row_stride, const uint16_t* v,
                    int rows, const int32_t* block_tables, int blocks_per_request,
                    int block_tokens, int kv_heads, int dim, uint16_t* k_cache,
                    uint16_t* v_cache, cudaStream_t stream);
+// The fp8 storage form (kernels/full_attn.hpp): the same rows as e4m3
+// codes of k / kv_scales[0] and v / kv_scales[1] (fp32 division,
+// round-to-nearest-even, saturating at +-448 — the compressed-tensors
+// static per-tensor FP8 kv_cache_scheme); caches uint8 [slots, kv_heads *
+// dim]. kv_heads * dim must be even.
+void qsa_kv_append_fp8(const uint16_t* k, int64_t k_row_stride, const uint16_t* v,
+                       int64_t v_row_stride, const int32_t* req_ids, const int64_t* pos,
+                       int rows, const int32_t* block_tables, int blocks_per_request,
+                       int block_tokens, int kv_heads, int dim, const float* kv_scales,
+                       uint8_t* k_cache, uint8_t* v_cache, cudaStream_t stream);
 
 // Prefill compression: pools [first_pool, first_pool + n_pools) of one
 // request, pool i's kpool raw keys at chunk rows [i * kpool, +kpool) of

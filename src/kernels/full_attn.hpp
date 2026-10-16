@@ -40,6 +40,19 @@ void full_attn_decode(const uint16_t* q, int64_t q_row_stride, const uint16_t* k
 size_t full_attn_partials_bytes(int rows, int kv_heads);
 int full_attn_max_splits();
 
+// The fp8 storage form (engine.kv_dtype = fp8 on the Qwen3.5 mixed
+// release, 2026-10-16): the caches hold e4m3 codes of K / k_scale and
+// V / v_scale (kv_scales: F32 [2] on the device, the layer's shipped
+// kv_cache_scheme scalars); the math is the bf16 form's on the widened
+// codes, with k_scale folded into the softmax scale and v_scale applied to
+// the output. Bitwise the bf16 form run on the widened planes with
+// scale * k_scale and its output times v_scale (the tests' gate).
+void full_attn_decode_fp8(const uint16_t* q, int64_t q_row_stride, const uint8_t* k_cache,
+                          const uint8_t* v_cache, const int32_t* req_ids, const int64_t* pos, int rows,
+                          int local_heads, int kv_heads, int block_tokens, const int32_t* block_tables,
+                          int blocks_per_request, float scale, const float* kv_scales, float* out,
+                          float* partials, cudaStream_t stream);
+
 // The prefill form: `rows` consecutive rows of one request (block_table =
 // that request's row of the tables), positions per row. Groups wider than
 // eight heads take the row form (req_ids / block_tables as above).
@@ -73,6 +86,36 @@ void full_attn_prefill_tma(const FullAttnStageMaps& maps, int64_t row_base, cons
                            int64_t q_row_stride, const int32_t* block_table, const int64_t* pos, int rows,
                            int local_heads, int kv_heads, int block_tokens, float scale, float* out,
                            cudaStream_t stream);
+// The block decode form (2026-10-16): decode rows grouped by request —
+// `spans` int32 [groups, 2] = (first row, count) on the device (null: one
+// group of all `rows`, at most 16), req_ids / pos per row (a negative
+// position is a padding row: zero output). One CTA per (group, KV head,
+// key split) stages every 32-key tile once for the group's rows and heads
+// through the TMA maps; a row's arithmetic and bits are the row form's
+// (full_attn_decode) exactly, split ranges included, so the forms may
+// mix. `partials` as full_attn_decode (null: the unsplit walk). Needs
+// full_attn_tma_supported geometry; groups hold at most 16 rows.
+void full_attn_decode_blocks(const FullAttnStageMaps& maps, int64_t row_base, const uint16_t* q,
+                             int64_t q_row_stride, const int32_t* req_ids, const int64_t* pos,
+                             const int32_t* spans, int groups, int rows, const int32_t* block_tables,
+                             int blocks_per_request, int local_heads, int kv_heads, int block_tokens, float scale,
+                             float* out, float* partials, cudaStream_t stream);
+void full_attn_decode_blocks_fp8(const FullAttnStageMaps& maps, int64_t row_base, const uint16_t* q,
+                                 int64_t q_row_stride, const int32_t* req_ids, const int64_t* pos,
+                                 const int32_t* spans, int groups, int rows, const int32_t* block_tables,
+                                 int blocks_per_request, int local_heads, int kv_heads, int block_tokens,
+                                 float scale, const float* kv_scales, float* out, float* partials,
+                                 cudaStream_t stream);
+// The same over fp8 planes (`rows` cache rows of kv_heads * 256 codes):
+// uint8 maps with 32 x 128 boxes, the tile widened to bf16 in shared
+// memory, the scales as full_attn_decode_fp8. The fp8 pool has no
+// cp.async fallback: its geometry must pass full_attn_tma_supported.
+FullAttnStageMaps full_attn_stage_maps_fp8(const uint8_t* k_cache, const uint8_t* v_cache, int64_t rows,
+                                           int kv_heads);
+void full_attn_prefill_tma_fp8(const FullAttnStageMaps& maps, int64_t row_base, const uint16_t* q,
+                               int64_t q_row_stride, const int32_t* block_table, const int64_t* pos, int rows,
+                               int local_heads, int kv_heads, int block_tokens, float scale,
+                               const float* kv_scales, float* out, cudaStream_t stream);
 
 // The unsplit row form (every row's whole range in one warp): the tests'
 // reference path and the original kernel's contract.

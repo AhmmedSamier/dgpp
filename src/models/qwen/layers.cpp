@@ -1162,6 +1162,12 @@ void QwenFullAttnLayer::validate_rows(int tokens, const QwenQsaRows& rows,
       !(w_.v_proj || w_.v_proj_fp8.payload) || !(w_.o_proj || w_.o_proj_fp8.payload) || !w_.q_norm ||
       !w_.k_norm)
     throw std::invalid_argument("QwenFullAttnLayer: null weights");
+  if (cache.fp8) {
+    if (!cache.k8 || !cache.v8) throw std::invalid_argument("QwenFullAttnLayer: fp8 cache without planes");
+    if (!w_.kv_scales) throw std::invalid_argument("QwenFullAttnLayer: fp8 cache on a layer without kv scales");
+    if (!cache.maps || !full_attn_tma_supported(lh_, lkv_, cache.block_tokens))
+      throw std::invalid_argument("QwenFullAttnLayer: the fp8 cache needs the staged attention geometry");
+  }
 }
 
 void QwenFullAttnLayer::project_rows(const uint16_t* x, int tokens, const QwenQsaRows& rows,
@@ -1195,9 +1201,14 @@ void QwenFullAttnLayer::project_rows(const uint16_t* x, int tokens, const QwenQs
                      T, lh_, D, rotary_, eps_, mscale_, stream);
   qsa_norm_rope_bf16(k_, KW, D, w_.k_norm, d_pos, d_inv_freq_, kn_, KW, T, lkv_, D, rotary_, eps_,
                      mscale_, stream);
-  // The caches: K/V rows (no compressed keys, no ring).
-  qsa_kv_append(kn_, KW, v_, KW, d_req, d_pos, T, cache.block_tables, cache.blocks_per_request,
-                cache.block_tokens, lkv_, D, cache.k_cache, cache.v_cache, stream);
+  // The caches: K/V rows (no compressed keys, no ring); the fp8 storage
+  // form writes e4m3 codes at the layer's shipped scales.
+  if (cache.fp8)
+    qsa_kv_append_fp8(kn_, KW, v_, KW, d_req, d_pos, T, cache.block_tables, cache.blocks_per_request,
+                      cache.block_tokens, lkv_, D, w_.kv_scales, cache.k8, cache.v8, stream);
+  else
+    qsa_kv_append(kn_, KW, v_, KW, d_req, d_pos, T, cache.block_tables, cache.blocks_per_request,
+                  cache.block_tokens, lkv_, D, cache.k_cache, cache.v_cache, stream);
 }
 
 void QwenFullAttnLayer::attend_rows(int T, const QwenQsaRows& rows, QwenFullAttnCache& cache,
@@ -1209,7 +1220,36 @@ void QwenFullAttnLayer::attend_rows(int T, const QwenQsaRows& rows, QwenFullAttn
   // Dense causal attention over [0, pos] per row (kernels/full_attn.cu):
   // decode rows (arbitrary requests) through the split row walk, a prefill
   // chunk (one request, consecutive rows) through the query-tiled form.
-  if (rows.decode) {
+  // Decode rows grouped by request (the batch's spans; a scalar walk is
+  // one group of at most 16 rows) take the block form: every K/V tile
+  // staged once per group instead of once per row — the row form's bits
+  // exactly (kernels/full_attn.hpp), so the forms may mix.
+  const bool staged = cache.maps && full_attn_tma_supported(lh_, lkv_, cache.block_tokens);
+  const bool grouped = rows.decode && rows.spans && rows.num_requests > 1;
+  const bool blocks = rows.decode && staged && (grouped || T <= 16);
+  if (cache.fp8) {
+    // The fp8 storage form: the bf16 chain on the widened codes
+    // (kernels/full_attn.hpp); its prefill is the staged form only.
+    if (rows.decode && blocks)
+      full_attn_decode_blocks_fp8(*cache.maps, cache.row_base, qn_ + offset, static_cast<int64_t>(lh_) * D, d_req,
+                                  d_pos, grouped ? rows.spans : nullptr, grouped ? rows.num_requests : 1, T,
+                                  cache.block_tables, cache.blocks_per_request, lh_, lkv_, cache.block_tokens, scale_,
+                                  w_.kv_scales, c_out_ + offset, T <= kPartRows ? part_ : nullptr, stream);
+    else if (rows.decode)
+      full_attn_decode_fp8(qn_ + offset, static_cast<int64_t>(lh_) * D, cache.k8, cache.v8, d_req, d_pos, T, lh_,
+                           lkv_, cache.block_tokens, cache.block_tables, cache.blocks_per_request, scale_,
+                           w_.kv_scales, c_out_ + offset, T <= kPartRows ? part_ : nullptr, stream);
+    else
+      full_attn_prefill_tma_fp8(*cache.maps, cache.row_base, qn_ + offset, static_cast<int64_t>(lh_) * D,
+                                cache.block_tables + static_cast<int64_t>(rows.request) * cache.blocks_per_request,
+                                d_pos, T, lh_, lkv_, cache.block_tokens, scale_, w_.kv_scales, c_out_ + offset,
+                                stream);
+  } else if (rows.decode && blocks) {
+    full_attn_decode_blocks(*cache.maps, cache.row_base, qn_ + offset, static_cast<int64_t>(lh_) * D, d_req, d_pos,
+                            grouped ? rows.spans : nullptr, grouped ? rows.num_requests : 1, T, cache.block_tables,
+                            cache.blocks_per_request, lh_, lkv_, cache.block_tokens, scale_, c_out_ + offset,
+                            T <= kPartRows ? part_ : nullptr, stream);
+  } else if (rows.decode) {
     full_attn_decode(qn_ + offset, static_cast<int64_t>(lh_) * D, cache.k_cache, cache.v_cache, d_req, d_pos, T, lh_,
                      lkv_, cache.block_tokens, cache.block_tables, cache.blocks_per_request, scale_, c_out_ + offset,
                      T <= kPartRows ? part_ : nullptr, stream);

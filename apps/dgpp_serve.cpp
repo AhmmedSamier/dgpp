@@ -915,12 +915,24 @@ struct Qwen35Family final : ServeFamily {
   std::string dflash;  // the DFlash2 drafter's checkpoint dir (empty: off)
   std::vector<int64_t> eos_;
   std::unique_ptr<dgpp::Qwen35Model> model;
+  // The Full layers' K/V pool format (engine.kv_dtype): bf16, or the fp8
+  // storage form on a release that ships its kv_cache_scheme scales
+  // (models/qwen/model35.hpp: Qwen35KvPoolShape::fp8).
+  dgpp::LatentFormat kv_format = dgpp::LatentFormat::kBf16;
   Qwen35Family(const std::string& checkpoint,
-               const std::optional<dgpp::RopeScaling>& rope_scaling = std::nullopt)
+               const std::optional<dgpp::RopeScaling>& rope_scaling = std::nullopt,
+               dgpp::LatentFormat kv_format_ = dgpp::LatentFormat::kBf16)
       : cfg(dgpp::Qwen35TextConfig::from_json_file((fs::path(checkpoint) / "config.json").string())),
-        ckpt(checkpoint) {
+        ckpt(checkpoint), kv_format(kv_format_) {
     if (cfg.eos_token_ids.empty())
       throw std::invalid_argument("Qwen3.5: the config names no EOS token");
+    if (kv_format != dgpp::LatentFormat::kBf16 && kv_format != dgpp::LatentFormat::kFp8)
+      throw std::invalid_argument(std::string("engine.kv_dtype ") + dgpp::latent_format_name(kv_format) +
+                                  ": the Qwen3.5 K/V pool takes bf16 or fp8");
+    if (kv_format == dgpp::LatentFormat::kFp8 && cfg.quant_kind != dgpp::Qwen35QuantKind::Nvfp4Mixed)
+      throw std::invalid_argument(
+          "engine.kv_dtype fp8: this Qwen3.5 release ships no k_scale / v_scale (the FP8 kv_cache_scheme "
+          "of the mixed NVFP4 release); its K/V pool stays bf16");
     for (int64_t id : cfg.eos_token_ids) eos_.push_back(id);
     // The engine's opt-in YaRN ramp (engine.rope_scaling): it rides the
     // parsed config, so the Full layers' tables, the drafter's table, the
@@ -956,7 +968,7 @@ struct Qwen35Family final : ServeFamily {
   int64_t block_tokens() const override { return dgpp::Qwen35Model::kv_block_tokens_static(); }
   int prefill_chunk_tokens() const override { return dgpp::Qwen35Model::prefill_chunk_tokens(); }
   std::string pool_check(int64_t) const override { return ""; }
-  const char* kv_format_name() const override { return "bf16"; }
+  const char* kv_format_name() const override { return dgpp::latent_format_name(kv_format); }
   int decode_rows_cap() const override { return dgpp::Qwen35Model::decode_rows_cap(); }
   size_t lat_slot_bytes(int decode_rows) const override {
     return static_cast<size_t>(decode_rows) * static_cast<size_t>(cfg.hidden_size) * 2;
@@ -965,7 +977,7 @@ struct Qwen35Family final : ServeFamily {
                         bool mtp, int decode_rows) const override {
     return dgpp::Qwen35Model::plan_memory(cfg, forward_rows, context, fabric ? rank : 0, fabric ? world_ : 1,
                                           fabric || !dflash.empty() ? dgpp::LoaderResidency::Resident : dgpp::LoaderResidency::Streaming,
-                                          slots, fabric && mtp, decode_rows, dflash);
+                                          slots, fabric && mtp, decode_rows, dflash, kv_format);
   }
   size_t snapshot_bytes(int world_, bool mtp) const override {
     return dgpp::Qwen35Model::session_snapshot_bytes(cfg, world_, mtp);
@@ -979,7 +991,7 @@ struct Qwen35Family final : ServeFamily {
         cfg, ckpt, forward_rows, pool_tokens,
         fabric || !dflash.empty() ? dgpp::LoaderResidency::Resident : dgpp::LoaderResidency::Streaming,
         reducer, fabric ? rank : 0,
-        fabric ? world_ : 1, slots, decode_rows, fabric && mtp, dflash);
+        fabric ? world_ : 1, slots, decode_rows, fabric && mtp, dflash, kv_format);
   }
   void set_draft_model(const std::string& dir) override { dflash = dir; }
   void destroy_model() override { model.reset(); }
@@ -1016,7 +1028,7 @@ std::unique_ptr<ServeFamily> make_family(const std::string& ckpt, int world,
   if (arch == dgpp::ModelArchitecture::Qwen4Exp)
     return std::make_unique<QwenFamily>(ckpt, rope_scaling, fp8_head_mma);
   if (arch == dgpp::ModelArchitecture::Qwen3_5)
-    return std::make_unique<Qwen35Family>(ckpt, rope_scaling);
+    return std::make_unique<Qwen35Family>(ckpt, rope_scaling, kv_format);
   if (arch == dgpp::ModelArchitecture::Glm4Moe) return std::make_unique<Glm4Family>(ckpt);
   if (arch == dgpp::ModelArchitecture::GlmMoeDsa) return std::make_unique<GlmDsaFamily>(ckpt, world, kv_format);
   return std::make_unique<GlmFamily>(ckpt, world, kv_format);

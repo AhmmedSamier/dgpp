@@ -112,14 +112,60 @@ __device__ __forceinline__ uint32_t fpack_bf16(float lo, float hi) {
 // its running max at -inf, and contributes nothing.
 __device__ __forceinline__ float fpexp(float s, float n) { return n == -INFINITY ? 0.f : exp2f(s - n); }
 
+// ---- the fp8 storage form (engine.kv_dtype = fp8, 2026-10-16) ------------------
+// The K/V planes hold e4m3 codes of K / k_scale and V / v_scale (the mixed
+// release's per-layer kv_cache_scheme scalars); the attention math stays
+// the bf16 chain's: a tile's codes are widened to bf16 in shared memory
+// (exact — every e4m3 value has <= 4 significant bits and sits inside the
+// bf16 range), k_scale rides the softmax scale and v_scale the output.
+// Two codes of a word (bytes 0,1 or 2,3) to one bf16x2: the hardware
+// e4m3x2 -> f16x2 unpack, two f16 -> f32 widenings and the f32x2 -> bf16x2
+// pack — four instructions a pair, exact (no direct e4m3 -> bf16 cvt
+// exists). An integer form (prmt, shift, two lop3 and a bf16x2 multiply by
+// 2^120 — exact on every code too) is five instructions a pair and read
+// 3 % slower on a 262K prefill in situ (2026-10-16: 362 vs 352 s); the
+// widening is issue-bound at the kernel's occupancy, so the shorter chain
+// wins whatever the conversion units' rate.
+__device__ __forceinline__ uint32_t fe4m3x2_to_bf16x2(uint32_t word, bool high) {
+  uint32_t h;
+  asm("cvt.rn.f16x2.e4m3x2 %0, %1;" : "=r"(h) : "h"(static_cast<unsigned short>(high ? word >> 16 : word)));
+  float lo, hi;
+  asm("{ .reg .f16 a, b; mov.b32 {a, b}, %2; cvt.f32.f16 %0, a; cvt.f32.f16 %1, b; }" : "=f"(lo), "=f"(hi) : "r"(h));
+  return fpack_bf16(lo, hi);
+}
+// One 16-byte chunk of codes to its two 16-byte chunks of bf16.
+__device__ __forceinline__ void fconvert_chunk16(const uint4 c, uint4& lo, uint4& hi) {
+  lo.x = fe4m3x2_to_bf16x2(c.x, false);
+  lo.y = fe4m3x2_to_bf16x2(c.x, true);
+  lo.z = fe4m3x2_to_bf16x2(c.y, false);
+  lo.w = fe4m3x2_to_bf16x2(c.y, true);
+  hi.x = fe4m3x2_to_bf16x2(c.z, false);
+  hi.y = fe4m3x2_to_bf16x2(c.z, true);
+  hi.z = fe4m3x2_to_bf16x2(c.w, false);
+  hi.w = fe4m3x2_to_bf16x2(c.w, true);
+}
+// The row form's staging of one fp8 tile: K then V, 16 tokens x 256 codes,
+// chunk c of token i at chunk c ^ (i & 7) of its 256-byte row — the widening
+// pass reads a lane's token down its chunks with eight lanes on eight rows,
+// conflict-free either way.
+constexpr int kRow8PlaneBytes = kTileTok * kD;  // 4 KB
+constexpr int kRow8StageBytes = 2 * kRow8PlaneBytes;
+
 // ---- the row form ---------------------------------------------------------------
 
+template <bool kFp8>
 __global__ __launch_bounds__(32) void full_attn_row_kernel(
-    const uint16_t* __restrict__ q, int64_t q_row_stride, const uint16_t* __restrict__ k_cache,
-    const uint16_t* __restrict__ v_cache, const int32_t* __restrict__ req_ids, const int64_t* __restrict__ pos,
+    const uint16_t* __restrict__ q, int64_t q_row_stride, const void* __restrict__ k_cache,
+    const void* __restrict__ v_cache, const int32_t* __restrict__ req_ids, const int64_t* __restrict__ pos,
     int local_heads, int kv_heads, int block_tokens, const int32_t* __restrict__ block_tables,
-    int blocks_per_request, float scale, float* __restrict__ out, float* __restrict__ partials, int splits) {
+    int blocks_per_request, float scale, const float* __restrict__ kv_scales, float* __restrict__ out,
+    float* __restrict__ partials, int splits) {
   extern __shared__ __align__(16) uint16_t sm[];
+  // fp8: the staged codes sit past the bf16 tile; the scales fold into the
+  // softmax scale (k) and the output (v).
+  uint8_t* s8 = reinterpret_cast<uint8_t*>(sm + kRowStageElems);
+  const float kscale = kFp8 ? scale * kv_scales[0] : scale;
+  const float vs = kFp8 ? kv_scales[1] : 1.f;
   const int64_t r = blockIdx.x;
   const int kvh = blockIdx.y;
   const int split = blockIdx.z;
@@ -130,7 +176,7 @@ __global__ __launch_bounds__(32) void full_attn_row_kernel(
   const int width = kv_heads * kD;
   const int64_t cnt = pos[r] + 1;  // dense causal visible set [0, pos[r]]
   const int32_t* bt = block_tables + static_cast<int64_t>(req_ids[r]) * blocks_per_request;
-  const float sl2 = scale * 1.4426950408889634f;
+  const float sl2 = kscale * 1.4426950408889634f;
   // This split's key range: tile-aligned chunks of ceil(cnt / splits).
   const int64_t chunk = ((cnt + splits - 1) / splits + kTileTok - 1) / kTileTok * kTileTok;
   const int64_t begin = static_cast<int64_t>(split) * chunk;
@@ -162,12 +208,23 @@ __global__ __launch_bounds__(32) void full_attn_row_kernel(
       const int64_t phys = static_cast<int64_t>(bt[tok / block_tokens]) * block_tokens + tok % block_tokens;
       my_off = phys * width + static_cast<int64_t>(kvh) * kD;
     }
+    if constexpr (kFp8) {
+      // Sixteen 16-byte chunks a lane: lanes 0..15 the K plane, 16..31 V.
+      const uint8_t* src = static_cast<const uint8_t*>(lane < 16 ? k_cache : v_cache) + (lane & 15) * 16;
+      uint8_t* dst = s8 + (lane >> 4) * kRow8PlaneBytes;
 #pragma unroll
-    for (int i = 0; i < 16; ++i) {
-      const int64_t off = __shfl_sync(0xffffffffu, my_off, i) + lane * 8;
-      const bool valid = base + i < end;
-      fcp_async16(kt + i * kRow + lane * 8, k_cache + off, valid);
-      fcp_async16(vt + i * kRow + lane * 8, v_cache + off, valid);
+      for (int i = 0; i < 16; ++i) {
+        const int64_t off = __shfl_sync(0xffffffffu, my_off, i);
+        fcp_async16(dst + i * kD + (((lane & 15) ^ (i & 7)) << 4), src + off, base + i < end);
+      }
+    } else {
+#pragma unroll
+      for (int i = 0; i < 16; ++i) {
+        const int64_t off = __shfl_sync(0xffffffffu, my_off, i) + lane * 8;
+        const bool valid = base + i < end;
+        fcp_async16(kt + i * kRow + lane * 8, static_cast<const uint16_t*>(k_cache) + off, valid);
+        fcp_async16(vt + i * kRow + lane * 8, static_cast<const uint16_t*>(v_cache) + off, valid);
+      }
     }
     asm volatile("cp.async.commit_group;\n" ::);
   };
@@ -183,6 +240,22 @@ __global__ __launch_bounds__(32) void full_attn_row_kernel(
     __syncwarp();
     const uint16_t* kt = sm;
     const uint16_t* vt = kt + kTileTok * kRow;
+    if constexpr (kFp8) {
+      // Widen the tile: a lane walks its token's sixteen chunks (lanes
+      // 0..15 K, 16..31 V) into the padded bf16 rows.
+      const int tok = lane & 15;
+      const uint8_t* src = s8 + (lane >> 4) * kRow8PlaneBytes + tok * kD;
+      uint16_t* dst = sm + (lane >> 4) * (kTileTok * kRow) + tok * kRow;
+#pragma unroll
+      for (int j = 0; j < 16; ++j) {
+        const uint4 c = *reinterpret_cast<const uint4*>(src + ((j ^ (tok & 7)) << 4));
+        uint4 lo, hi;
+        fconvert_chunk16(c, lo, hi);
+        *reinterpret_cast<uint4*>(dst + j * 16) = lo;
+        *reinterpret_cast<uint4*>(dst + j * 16 + 8) = hi;
+      }
+      __syncwarp();
+    }
     float sc[2][4] = {{0.f, 0.f, 0.f, 0.f}, {0.f, 0.f, 0.f, 0.f}};
 #pragma unroll
     for (int ks = 0; ks < 16; ++ks) {
@@ -253,8 +326,9 @@ __global__ __launch_bounds__(32) void full_attn_row_kernel(
 #pragma unroll
     for (int d = 0; d < 32; ++d) {
       const int col = d * 8 + 2 * t;
-      if (g < group) *reinterpret_cast<float2*>(o0 + col) = make_float2(acc[d][0] * i0, acc[d][1] * i0);
-      if (g + 8 < group) *reinterpret_cast<float2*>(o1 + col) = make_float2(acc[d][2] * i1, acc[d][3] * i1);
+      if (g < group) *reinterpret_cast<float2*>(o0 + col) = make_float2((acc[d][0] * i0) * vs, (acc[d][1] * i0) * vs);
+      if (g + 8 < group)
+        *reinterpret_cast<float2*>(o1 + col) = make_float2((acc[d][2] * i1) * vs, (acc[d][3] * i1) * vs);
     }
     return;
   }
@@ -280,7 +354,9 @@ __global__ __launch_bounds__(32) void full_attn_row_kernel(
 // (m, l, acc) — the largest maximum, the rescaled denominators, the sum.
 __global__ __launch_bounds__(256) void full_attn_combine_kernel(const float* __restrict__ partials,
                                                                  int splits, int local_heads, int kv_heads,
+                                                                 const float* __restrict__ v_scale,
                                                                  float* __restrict__ out) {
+  const float vs = v_scale != nullptr ? *v_scale : 1.f;
   const int64_t r = blockIdx.x;
   const int kvh = blockIdx.y;
   const int group = local_heads / kv_heads;
@@ -300,7 +376,7 @@ __global__ __launch_bounds__(256) void full_attn_combine_kernel(const float* __r
         o += p[h * kD + d] * w;
       }
     }
-    out[(r * local_heads + kvh * group + h) * kD + d] = lt > 0.f ? o / lt : 0.f;
+    out[(r * local_heads + kvh * group + h) * kD + d] = (lt > 0.f ? o / lt : 0.f) * vs;
   }
 }
 
@@ -502,6 +578,14 @@ constexpr int kPlaneBytes = (kD / kBoxCols) * kBoxBytes;   // 16 KB: four boxes
 constexpr int kTmaStageBytes = 2 * kPlaneBytes;            // K then V
 constexpr int kTmaStages = 3;                              // the ring: tile it+2 lands while `it` computes
 constexpr size_t kTmaSmem = size_t(kTmaStages) * kTmaStageBytes + 1024;  // the ring + the barriers, 1 KB aligned
+// The fp8 storage form's ring: e4m3 boxes of 32 x 128 codes (two a plane,
+// the same 4 KB and 128-byte swizzle), widened tile by tile into one bf16
+// buffer in the box layout above; the ring's slot refills once its tile is
+// widened (prefetch depth three).
+constexpr int kBox8Cols = 128;
+constexpr int kPlane8Bytes = (kD / kBox8Cols) * kBoxBytes;  // 8 KB: two boxes
+constexpr int kTma8StageBytes = 2 * kPlane8Bytes;           // K then V
+constexpr size_t kTma8Smem = size_t(kTmaStages) * kTma8StageBytes + kTmaStageBytes + 1024;
 
 __device__ __forceinline__ void mbar_init(uint64_t* bar, unsigned count) {
   asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" ::"r"(static_cast<unsigned>(__cvta_generic_to_shared(bar))), "r"(count));
@@ -533,17 +617,24 @@ __device__ __forceinline__ void tma_box_2d(void* dst, const CUtensorMap* map, in
 // row * 128 + ((c ^ (r & 7)) << 4) bytes); the kernel folds the XOR into
 // per-lane base addresses below.
 
+template <bool kFp8>
 __global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_tile_tma_kernel(
     const __grid_constant__ CUtensorMap kmap, const __grid_constant__ CUtensorMap vmap, int64_t row_base,
     const uint16_t* __restrict__ q, int64_t q_row_stride, const int32_t* __restrict__ bt,
     const int64_t* __restrict__ pos, int rows, int local_heads, int kv_heads, int block_shift, float scale,
-    float* __restrict__ out) {
+    const float* __restrict__ kv_scales, float* __restrict__ out) {
   extern __shared__ __align__(1024) uint8_t smraw[];
   // The stages need 1 KB alignment for the swizzle: carve them past the
   // first aligned boundary and put the barriers in the slack.
   const unsigned sbase = static_cast<unsigned>(__cvta_generic_to_shared(smraw));
   uint8_t* sm = smraw + ((1024 - (sbase & 1023)) & 1023);
-  uint64_t* full_bar = reinterpret_cast<uint64_t*>(sm + kTmaStages * kTmaStageBytes);
+  // fp8: the e4m3 ring, then the one bf16 tile buffer the compute reads.
+  constexpr int kStageBytes = kFp8 ? kTma8StageBytes : kTmaStageBytes;
+  constexpr int kBf16Off = kFp8 ? kTmaStages * kTma8StageBytes : 0;
+  uint8_t* sm8 = sm;
+  uint64_t* full_bar = reinterpret_cast<uint64_t*>(sm + kTmaStages * kStageBytes + (kFp8 ? kTmaStageBytes : 0));
+  const float kscale = kFp8 ? scale * kv_scales[0] : scale;
+  const float vs = kFp8 ? kv_scales[1] : 1.f;
   const int r0 = blockIdx.x * kQTile;
   const int kvh = blockIdx.y;
   const int group = local_heads / kv_heads;
@@ -551,7 +642,7 @@ __global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_tile_tma_kernel(
   const int lane = threadIdx.x & 31;
   const int g = lane >> 2, t = lane & 3;
   const int head = kvh * group + warp;
-  const float sl2 = scale * 1.4426950408889634f;
+  const float sl2 = kscale * 1.4426950408889634f;
   const int rg = r0 + g, rg8 = r0 + g + 8;
   const int64_t pg = rg < rows ? pos[rg] : -1, pg8 = rg8 < rows ? pos[rg8] : -1;
   int64_t cnt = 0;
@@ -590,13 +681,47 @@ __global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_tile_tma_kernel(
     const int64_t tile = base >> 5;
     const int64_t page = static_cast<int64_t>(bt[tile >> tile_shift]);
     const int64_t slot0 = row_base + (page << block_shift) + ((tile & ((int64_t{1} << tile_shift) - 1)) << 5);
-    uint8_t* kt = sm + buf * kTmaStageBytes;
-    uint8_t* vt = kt + kPlaneBytes;
-    mbar_expect_tx(&full_bar[buf], static_cast<unsigned>(kTmaStageBytes));
+    mbar_expect_tx(&full_bar[buf], static_cast<unsigned>(kStageBytes));
+    if constexpr (kFp8) {
+      uint8_t* kt = sm8 + buf * kTma8StageBytes;
+      uint8_t* vt = kt + kPlane8Bytes;
 #pragma unroll
-    for (int b = 0; b < kD / kBoxCols; ++b) {
-      tma_box_2d(kt + b * kBoxBytes, &kmap, col0 + b * kBoxCols, slot0, &full_bar[buf]);
-      tma_box_2d(vt + b * kBoxBytes, &vmap, col0 + b * kBoxCols, slot0, &full_bar[buf]);
+      for (int b = 0; b < kD / kBox8Cols; ++b) {
+        tma_box_2d(kt + b * kBoxBytes, &kmap, col0 + b * kBox8Cols, slot0, &full_bar[buf]);
+        tma_box_2d(vt + b * kBoxBytes, &vmap, col0 + b * kBox8Cols, slot0, &full_bar[buf]);
+      }
+    } else {
+      uint8_t* kt = sm + buf * kTmaStageBytes;
+      uint8_t* vt = kt + kPlaneBytes;
+#pragma unroll
+      for (int b = 0; b < kD / kBoxCols; ++b) {
+        tma_box_2d(kt + b * kBoxBytes, &kmap, col0 + b * kBoxCols, slot0, &full_bar[buf]);
+        tma_box_2d(vt + b * kBoxBytes, &vmap, col0 + b * kBoxCols, slot0, &full_bar[buf]);
+      }
+    }
+  };
+  // fp8: widen ring slot `buf` into the bf16 buffer. 1024 chunks of 16
+  // codes a tile; a chunk's 16 bf16 fill two chunks of the bf16 box
+  // (c -> box c / 4, chunks 2 (c & 3) and +1), both planes with the
+  // 128-byte swizzle. Consecutive threads take consecutive rows of one
+  // chunk column: eight rows see eight swizzled chunk slots, so the loads
+  // and both stores are conflict-free.
+  auto widen = [&](int buf) {
+    const uint8_t* src8 = sm8 + buf * kTma8StageBytes;
+    uint8_t* dst = sm + kBf16Off;
+    for (int id = threadIdx.x; id < 2 * kKTile * (kD / 16); id += blockDim.x) {
+      const int plane = id / (kKTile * (kD / 16));
+      const int c = (id / kKTile) & 15;
+      const int row = id & (kKTile - 1);
+      const int sw = row & 7;
+      const uint4 codes = *reinterpret_cast<const uint4*>(src8 + plane * kPlane8Bytes + (c >> 3) * kBoxBytes +
+                                                          row * kBox8Cols + (((c & 7) ^ sw) << 4));
+      uint4 lo, hi;
+      fconvert_chunk16(codes, lo, hi);
+      uint8_t* d = dst + plane * kPlaneBytes + (c >> 2) * kBoxBytes + row * (kBoxCols * 2);
+      const int bc = 2 * (c & 3);
+      *reinterpret_cast<uint4*>(d + ((bc ^ sw) << 4)) = lo;
+      *reinterpret_cast<uint4*>(d + (((bc + 1) ^ sw) << 4)) = hi;
     }
   };
   // Per-lane ldmatrix bases for slot 0 with the swizzle folded in once: a
@@ -606,7 +731,7 @@ __global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_tile_tma_kernel(
   // IMAD for each of the 64 loads a tile (SASS histogram, 2026-10-15).
   unsigned kb0[4], vb0[4];
   {
-    const unsigned s0 = static_cast<unsigned>(__cvta_generic_to_shared(sm));
+    const unsigned s0 = static_cast<unsigned>(__cvta_generic_to_shared(sm + kBf16Off));
     const int r7 = lane & 7;
     const int krow = (lane & 7) + ((lane >> 4) << 3), kc = (lane >> 3) & 1;
     const int vrow = (lane & 7) + ((lane >> 3) & 1) * 8, vc = lane >> 4;
@@ -632,16 +757,27 @@ __global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_tile_tma_kernel(
   // issuing thread's critical path.
   int buf = 0, nbuf = 2;  // the slot of tile `it`; the slot tile it+2 goes into
   unsigned parity = 0;
+  if constexpr (kFp8) {
+    if (tiles > 2) stage(2 * kKTile, 2);
+  }
   for (int64_t it = 0; it < tiles; ++it) {
     mbar_wait(&full_bar[buf], parity);  // tile `it` has landed
     __syncthreads();  // every warp is done with tile it-1, whose slot tile it+2 refills
-    if (it + 2 < tiles) stage((it + 2) * kKTile, nbuf);
     const int cur = buf;
+    if constexpr (kFp8) {
+      // Widen tile `it` (every warp is past tile it-1's reads of the bf16
+      // buffer), then its ring slot takes tile it+3.
+      widen(cur);
+      __syncthreads();
+      if (it + 3 < tiles) stage((it + 3) * kKTile, cur);
+    } else {
+      if (it + 2 < tiles) stage((it + 2) * kKTile, nbuf);
+    }
     nbuf = buf;  // tile it+3 refills the slot tile `it` used
     if (++buf == kTmaStages) { buf = 0; parity ^= 1u; }
     unsigned kb[4], vb[4];
     {
-      const unsigned so = static_cast<unsigned>(cur) * kTmaStageBytes;
+      const unsigned so = kFp8 ? 0u : static_cast<unsigned>(cur) * kTmaStageBytes;
 #pragma unroll
       for (int j = 0; j < 4; ++j) {
         kb[j] = kb0[j] + so;
@@ -732,25 +868,346 @@ __global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_tile_tma_kernel(
 #pragma unroll
   for (int d = 0; d < 32; ++d) {
     const int col = d * 8 + 2 * t;
-    if (rg < rows) *reinterpret_cast<float2*>(o0 + col) = make_float2(acc[d][0] * i0, acc[d][1] * i0);
-    if (rg8 < rows) *reinterpret_cast<float2*>(o1 + col) = make_float2(acc[d][2] * i1, acc[d][3] * i1);
+    if (rg < rows) *reinterpret_cast<float2*>(o0 + col) = make_float2((acc[d][0] * i0) * vs, (acc[d][1] * i0) * vs);
+    if (rg8 < rows) *reinterpret_cast<float2*>(o1 + col) = make_float2((acc[d][2] * i1) * vs, (acc[d][3] * i1) * vs);
   }
 }
 
-void set_attrs_once() {
-  static const bool opted = [] {  // once per process, thread-safe (TP ranks may share one)
-    DGPP_CUDA_OK(cudaFuncSetAttribute(full_attn_row_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                      static_cast<int>(kRowSmem)));
-    DGPP_CUDA_OK(cudaFuncSetAttribute(full_attn_row_kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100));
-    DGPP_CUDA_OK(cudaFuncSetAttribute(full_attn_tile_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                      static_cast<int>(kTileSmem)));
-    DGPP_CUDA_OK(cudaFuncSetAttribute(full_attn_tile_kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100));
-    DGPP_CUDA_OK(cudaFuncSetAttribute(full_attn_tile_tma_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                      static_cast<int>(kTmaSmem)));
-    DGPP_CUDA_OK(cudaFuncSetAttribute(full_attn_tile_tma_kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100));
+// ---- the block decode form (2026-10-16) -----------------------------------------
+// Decode rows grouped by request (the padded verify's 8-row blocks, a
+// batch's spans, a lone row): one CTA per (group, KV head, key split)
+// stages each 32-key K/V tile ONCE through the TMA ring for every row and
+// head of the group, where the row form staged it once per (row, head
+// group) warp — eight times over for a verify block, and widened the fp8
+// codes as many times. Per row the arithmetic is the row form's exactly:
+// 16-key steps over the row's own split range [begin, end) at 16-key
+// granularity (keys outside it masked to -inf), the same max / rescale /
+// bf16 P / k16 PV chain and the same partials, so a row's bits match the
+// row form whatever its group — the batch-composition invariance holds and
+// the two forms may mix. Groups hold at most 16 rows (the Q tile).
+template <bool kFp8>
+__global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_block_decode_kernel(
+    const __grid_constant__ CUtensorMap kmap, const __grid_constant__ CUtensorMap vmap, int64_t row_base,
+    const uint16_t* __restrict__ q, int64_t q_row_stride, const int32_t* __restrict__ req_ids,
+    const int64_t* __restrict__ pos, const int32_t* __restrict__ spans, int rows,
+    const int32_t* __restrict__ block_tables, int blocks_per_request, int local_heads, int kv_heads,
+    int block_shift, float scale, const float* __restrict__ kv_scales, float* __restrict__ out,
+    float* __restrict__ partials, int splits) {
+  extern __shared__ __align__(1024) uint8_t smraw[];
+  const unsigned sbase = static_cast<unsigned>(__cvta_generic_to_shared(smraw));
+  uint8_t* sm = smraw + ((1024 - (sbase & 1023)) & 1023);
+  constexpr int kStageBytes = kFp8 ? kTma8StageBytes : kTmaStageBytes;
+  constexpr int kBf16Off = kFp8 ? kTmaStages * kTma8StageBytes : 0;
+  uint8_t* sm8 = sm;
+  uint64_t* full_bar = reinterpret_cast<uint64_t*>(sm + kTmaStages * kStageBytes + (kFp8 ? kTmaStageBytes : 0));
+  const float kscale = kFp8 ? scale * kv_scales[0] : scale;
+  const float vs = kFp8 ? kv_scales[1] : 1.f;
+  // The group's rows [r0, rend) and request.
+  int r0 = 0, nrows = rows;
+  if (spans != nullptr) {
+    r0 = spans[2 * blockIdx.x];
+    nrows = spans[2 * blockIdx.x + 1];
+  }
+  const int rend = min(rows, r0 + min(nrows, kQTile));
+  const int kvh = blockIdx.y;
+  const int split = blockIdx.z;
+  const int group = local_heads / kv_heads;
+  const int warp = threadIdx.x >> 5;
+  const int lane = threadIdx.x & 31;
+  const int g = lane >> 2, t = lane & 3;
+  const int head = kvh * group + warp;
+  const float sl2 = kscale * 1.4426950408889634f;
+  const int rg = r0 + g, rg8 = r0 + g + 8;
+  const int64_t pg = rg < rend ? pos[rg] : -1, pg8 = rg8 < rend ? pos[rg8] : -1;
+  const int32_t* bt = block_tables + static_cast<int64_t>(req_ids[r0]) * blocks_per_request;
+  // The row form's split range of a row: tile-aligned chunks of ceil(cnt / splits).
+  auto range = [&](int64_t p, int64_t& begin, int64_t& end) {
+    const int64_t cnt = p + 1;
+    const int64_t chunk = ((cnt + splits - 1) / splits + kTileTok - 1) / kTileTok * kTileTok;
+    begin = static_cast<int64_t>(split) * chunk;
+    end = min(cnt, begin + chunk);
+  };
+  int64_t b0, e0, b1, e1;
+  range(pg, b0, e0);
+  range(pg8, b1, e1);
+  // The CTA's walk: the union of its rows' ranges, in 32-key tiles.
+  int64_t lo, hi;
+  {
+    int64_t rb = INT64_MAX, re = 0;
+    if (lane < kQTile && r0 + lane < rend) {
+      int64_t b, e;
+      range(pos[r0 + lane], b, e);
+      if (b < e) { rb = b; re = e; }
+    }
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) {
+      rb = min(rb, __shfl_xor_sync(0xffffffffu, rb, o));
+      re = max(re, __shfl_xor_sync(0xffffffffu, re, o));
+    }
+    lo = rb;
+    hi = re;
+  }
+  if (threadIdx.x == 0) {
+#pragma unroll
+    for (int s = 0; s < kTmaStages; ++s) mbar_init(&full_bar[s], 1);
+  }
+  asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+  __syncthreads();
+  uint32_t qa[16][4];
+  {
+    const uint16_t* q0 = q + static_cast<int64_t>(r0) * q_row_stride + static_cast<int64_t>(head) * kD;
+    const bool v0 = rg < rend, v1 = rg8 < rend;
+#pragma unroll
+    for (int ks = 0; ks < 16; ++ks) {
+      const int c = ks * 16 + 2 * t;
+      qa[ks][0] = v0 ? *reinterpret_cast<const uint32_t*>(q0 + g * q_row_stride + c) : 0u;
+      qa[ks][1] = v1 ? *reinterpret_cast<const uint32_t*>(q0 + (g + 8) * q_row_stride + c) : 0u;
+      qa[ks][2] = v0 ? *reinterpret_cast<const uint32_t*>(q0 + g * q_row_stride + c + 8) : 0u;
+      qa[ks][3] = v1 ? *reinterpret_cast<const uint32_t*>(q0 + (g + 8) * q_row_stride + c + 8) : 0u;
+    }
+  }
+  const int tile_shift = block_shift - 5;
+  const int col0 = kvh * kD;
+  auto stage = [&](int64_t base, int buf) {
+    if (threadIdx.x != 0) return;
+    const int64_t tile = base >> 5;
+    const int64_t page = static_cast<int64_t>(bt[tile >> tile_shift]);
+    const int64_t slot0 = row_base + (page << block_shift) + ((tile & ((int64_t{1} << tile_shift) - 1)) << 5);
+    mbar_expect_tx(&full_bar[buf], static_cast<unsigned>(kStageBytes));
+    if constexpr (kFp8) {
+      uint8_t* kt = sm8 + buf * kTma8StageBytes;
+      uint8_t* vt = kt + kPlane8Bytes;
+#pragma unroll
+      for (int b = 0; b < kD / kBox8Cols; ++b) {
+        tma_box_2d(kt + b * kBoxBytes, &kmap, col0 + b * kBox8Cols, slot0, &full_bar[buf]);
+        tma_box_2d(vt + b * kBoxBytes, &vmap, col0 + b * kBox8Cols, slot0, &full_bar[buf]);
+      }
+    } else {
+      uint8_t* kt = sm + buf * kTmaStageBytes;
+      uint8_t* vt = kt + kPlaneBytes;
+#pragma unroll
+      for (int b = 0; b < kD / kBoxCols; ++b) {
+        tma_box_2d(kt + b * kBoxBytes, &kmap, col0 + b * kBoxCols, slot0, &full_bar[buf]);
+        tma_box_2d(vt + b * kBoxBytes, &vmap, col0 + b * kBoxCols, slot0, &full_bar[buf]);
+      }
+    }
+  };
+  auto widen = [&](int buf) {
+    const uint8_t* src8 = sm8 + buf * kTma8StageBytes;
+    uint8_t* dst = sm + kBf16Off;
+    for (int id = threadIdx.x; id < 2 * kKTile * (kD / 16); id += blockDim.x) {
+      const int plane = id / (kKTile * (kD / 16));
+      const int c = (id / kKTile) & 15;
+      const int row = id & (kKTile - 1);
+      const int sw = row & 7;
+      const uint4 codes = *reinterpret_cast<const uint4*>(src8 + plane * kPlane8Bytes + (c >> 3) * kBoxBytes +
+                                                          row * kBox8Cols + (((c & 7) ^ sw) << 4));
+      uint4 lo8, hi8;
+      fconvert_chunk16(codes, lo8, hi8);
+      uint8_t* d = dst + plane * kPlaneBytes + (c >> 2) * kBoxBytes + row * (kBoxCols * 2);
+      const int bc = 2 * (c & 3);
+      *reinterpret_cast<uint4*>(d + ((bc ^ sw) << 4)) = lo8;
+      *reinterpret_cast<uint4*>(d + (((bc + 1) ^ sw) << 4)) = hi8;
+    }
+  };
+  unsigned kb0[4], vb0[4];
+  {
+    const unsigned s0 = static_cast<unsigned>(__cvta_generic_to_shared(sm + kBf16Off));
+    const int r7 = lane & 7;
+    const int krow = (lane & 7) + ((lane >> 4) << 3), kc = (lane >> 3) & 1;
+    const int vrow = (lane & 7) + ((lane >> 3) & 1) * 8, vc = lane >> 4;
+    const unsigned kbase = (s0 + krow * (kBoxCols * 2) + (r7 << 4)) ^ (kc << 4);
+    const unsigned vbase = (s0 + kPlaneBytes + vrow * (kBoxCols * 2) + (r7 << 4)) ^ (vc << 4);
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+      kb0[j] = kbase ^ (j << 5);
+      vb0[j] = vbase ^ (j << 5);
+    }
+  }
+  float acc[32][4];
+#pragma unroll
+  for (int d = 0; d < 32; ++d) acc[d][0] = acc[d][1] = acc[d][2] = acc[d][3] = 0.f;
+  float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.f, l1 = 0.f;
+
+  const int64_t t0 = lo < hi ? lo / kKTile : 0;
+  const int64_t tiles = lo < hi ? (hi + kKTile - 1) / kKTile - t0 : 0;
+  if (tiles > 0) stage(t0 * kKTile, 0);
+  if (tiles > 1) stage((t0 + 1) * kKTile, 1);
+  if constexpr (kFp8) {
+    if (tiles > 2) stage((t0 + 2) * kKTile, 2);
+  }
+  int buf = 0, nbuf = 2;
+  unsigned parity = 0;
+  for (int64_t it = 0; it < tiles; ++it) {
+    mbar_wait(&full_bar[buf], parity);
+    __syncthreads();
+    const int cur = buf;
+    if constexpr (kFp8) {
+      widen(cur);
+      __syncthreads();
+      if (it + 3 < tiles) stage((t0 + it + 3) * kKTile, cur);
+    } else {
+      if (it + 2 < tiles) stage((t0 + it + 2) * kKTile, nbuf);
+    }
+    nbuf = buf;
+    if (++buf == kTmaStages) { buf = 0; parity ^= 1u; }
+    unsigned kb[4], vb[4];
+    {
+      const unsigned so = kFp8 ? 0u : static_cast<unsigned>(cur) * kTmaStageBytes;
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        kb[j] = kb0[j] + so;
+        vb[j] = vb0[j] + so;
+      }
+    }
+    // Two 16-key steps a tile: the row form's chain, step by step.
+#pragma unroll
+    for (int h = 0; h < 2; ++h) {
+      const int64_t base = (t0 + it) * kKTile + h * kTileTok;
+      const unsigned ho = static_cast<unsigned>(h) * (kTileTok * kBoxCols * 2);
+      float sc[2][4] = {{0.f, 0.f, 0.f, 0.f}, {0.f, 0.f, 0.f, 0.f}};
+#pragma unroll
+      for (int ks = 0; ks < 16; ++ks) {
+        uint32_t b[4];
+        fldsm_x4_a(b, kb[ks & 3] + (ks >> 2) * kBoxBytes + ho);
+        fmma_bf16(sc[0], qa[ks], b[0], b[1]);
+        fmma_bf16(sc[1], qa[ks], b[2], b[3]);
+      }
+      float mx0 = -INFINITY, mx1 = -INFINITY;
+#pragma unroll
+      for (int j = 0; j < 2; ++j) {
+#pragma unroll
+        for (int e = 0; e < 2; ++e) {
+          const int64_t key = base + j * 8 + 2 * t + e;
+          sc[j][e] = (key >= b0 && key < e0) ? sc[j][e] * sl2 : -INFINITY;
+          sc[j][2 + e] = (key >= b1 && key < e1) ? sc[j][2 + e] * sl2 : -INFINITY;
+          mx0 = fmaxf(mx0, sc[j][e]);
+          mx1 = fmaxf(mx1, sc[j][2 + e]);
+        }
+      }
+#pragma unroll
+      for (int o = 1; o <= 2; o <<= 1) {
+        mx0 = fmaxf(mx0, __shfl_xor_sync(0xffffffffu, mx0, o));
+        mx1 = fmaxf(mx1, __shfl_xor_sync(0xffffffffu, mx1, o));
+      }
+      const float n0 = fmaxf(m0, mx0), n1 = fmaxf(m1, mx1);
+      const float a0 = fpexp(m0, n0), a1 = fpexp(m1, n1);
+      m0 = n0;
+      m1 = n1;
+      float p[2][4];
+#pragma unroll
+      for (int j = 0; j < 2; ++j) {
+        p[j][0] = fpexp(sc[j][0], n0);
+        p[j][1] = fpexp(sc[j][1], n0);
+        p[j][2] = fpexp(sc[j][2], n1);
+        p[j][3] = fpexp(sc[j][3], n1);
+      }
+      l0 = l0 * a0 + p[0][0] + p[0][1] + p[1][0] + p[1][1];
+      l1 = l1 * a1 + p[0][2] + p[0][3] + p[1][2] + p[1][3];
+      const uint32_t pa[4] = {fpack_bf16(p[0][0], p[0][1]), fpack_bf16(p[0][2], p[0][3]),
+                              fpack_bf16(p[1][0], p[1][1]), fpack_bf16(p[1][2], p[1][3])};
+      if (__any_sync(0xffffffffu, a0 != 1.f || a1 != 1.f)) {  // x 1 is the identity: skipping it keeps the bits
+#pragma unroll
+        for (int d = 0; d < 32; ++d) {
+          acc[d][0] *= a0;
+          acc[d][1] *= a0;
+          acc[d][2] *= a1;
+          acc[d][3] *= a1;
+        }
+      }
+#pragma unroll
+      for (int dp = 0; dp < 16; ++dp) {
+        uint32_t b[4];
+        fldsm_x4_ta(b, vb[dp & 3] + (dp >> 2) * kBoxBytes + ho);
+        fmma_bf16(acc[dp * 2], pa, b[0], b[1]);
+        fmma_bf16(acc[dp * 2 + 1], pa, b[2], b[3]);
+      }
+    }
+  }
+#pragma unroll
+  for (int o = 1; o <= 2; o <<= 1) {
+    l0 += __shfl_xor_sync(0xffffffffu, l0, o);
+    l1 += __shfl_xor_sync(0xffffffffu, l1, o);
+  }
+  if (partials == nullptr) {
+    const float i0 = l0 > 0.f ? 1.f / l0 : 0.f, i1 = l1 > 0.f ? 1.f / l1 : 0.f;
+    float* o0 = out + (static_cast<int64_t>(rg) * local_heads + head) * kD;
+    float* o1 = out + (static_cast<int64_t>(rg8) * local_heads + head) * kD;
+#pragma unroll
+    for (int d = 0; d < 32; ++d) {
+      const int col = d * 8 + 2 * t;
+      if (rg < rend) *reinterpret_cast<float2*>(o0 + col) = make_float2((acc[d][0] * i0) * vs, (acc[d][1] * i0) * vs);
+      if (rg8 < rend)
+        *reinterpret_cast<float2*>(o1 + col) = make_float2((acc[d][2] * i1) * vs, (acc[d][3] * i1) * vs);
+    }
+    return;
+  }
+  // The partials of (row, KV head, split) hold the group's heads by their
+  // index within the group (`warp`), as the row form writes and the
+  // combine reads them — not the global head.
+  float* part0 = partials + ((static_cast<int64_t>(rg) * kv_heads + kvh) * splits + split) * kPartialFloats;
+  float* part1 = partials + ((static_cast<int64_t>(rg8) * kv_heads + kvh) * splits + split) * kPartialFloats;
+  float* pa0 = part0 + warp * kD;
+  float* pa1 = part1 + warp * kD;
+#pragma unroll
+  for (int d = 0; d < 32; ++d) {
+    const int col = d * 8 + 2 * t;
+    if (rg < rend) *reinterpret_cast<float2*>(pa0 + col) = make_float2(acc[d][0], acc[d][1]);
+    if (rg8 < rend) *reinterpret_cast<float2*>(pa1 + col) = make_float2(acc[d][2], acc[d][3]);
+  }
+  if (t == 0) {
+    if (rg < rend) {
+      part0[16 * kD + warp] = m0;
+      part0[16 * kD + 16 + warp] = l0;
+    }
+    if (rg8 < rend) {
+      part1[16 * kD + warp] = m1;
+      part1[16 * kD + 16 + warp] = l1;
+    }
+  }
+}
+
+// Each kernel opts into its shared memory at its own first launch (a
+// thread-safe static per instantiation). Registering every instantiation
+// at once — the unlaunched fp8 and block forms included — left a later
+// DeepSeek-V4 test in the same process with a sticky illegal address
+// (2026-10-16, shared_prefill_test: 20/20 without those registrations,
+// 7 failures with them); a kernel's attributes are set only where it runs.
+template <typename K>
+void opt_in_smem(K kernel, size_t bytes) {
+  DGPP_CUDA_OK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(bytes)));
+  DGPP_CUDA_OK(cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100));
+}
+template <bool kFp8>
+void row_attrs_once() {
+  static const bool done = [] {
+    opt_in_smem(full_attn_row_kernel<kFp8>, kRowSmem + (kFp8 ? kRow8StageBytes : 0));
     return true;
   }();
-  (void)opted;
+  (void)done;
+}
+void tile_attrs_once() {
+  static const bool done = [] {
+    opt_in_smem(full_attn_tile_kernel, kTileSmem);
+    return true;
+  }();
+  (void)done;
+}
+template <bool kFp8>
+void tile_tma_attrs_once() {
+  static const bool done = [] {
+    opt_in_smem(full_attn_tile_tma_kernel<kFp8>, kFp8 ? kTma8Smem : kTmaSmem);
+    return true;
+  }();
+  (void)done;
+}
+template <bool kFp8>
+void block_attrs_once() {
+  static const bool done = [] {
+    opt_in_smem(full_attn_block_decode_kernel<kFp8>, kFp8 ? kTma8Smem : kTmaSmem);
+    return true;
+  }();
+  (void)done;
 }
 
 }  // namespace
@@ -765,26 +1222,50 @@ size_t full_attn_partials_bytes(int rows, int kv_heads) {
   return static_cast<size_t>(rows) * kv_heads * kMaxSplits * kPartialFloats * sizeof(float);
 }
 
+namespace {
+template <bool kFp8>
+void decode_rows(const uint16_t* q, int64_t q_row_stride, const void* k_cache, const void* v_cache,
+                 const int32_t* req_ids, const int64_t* pos, int rows, int local_heads, int kv_heads,
+                 int block_tokens, const int32_t* block_tables, int blocks_per_request, float scale,
+                 const float* kv_scales, float* out, float* partials, cudaStream_t stream) {
+  if (rows <= 0) return;
+  if (!full_attn_supported(kD, local_heads, kv_heads))
+    throw std::invalid_argument("full_attn_decode: dim 256, <= 16 query heads per KV head");
+  if (kFp8 && kv_scales == nullptr) throw std::invalid_argument("full_attn_decode_fp8: null kv scales");
+  row_attrs_once<kFp8>();
+  const int splits = partials != nullptr ? kMaxSplits : 1;
+  const dim3 grid(static_cast<unsigned>(rows), static_cast<unsigned>(kv_heads), static_cast<unsigned>(splits));
+  full_attn_row_kernel<kFp8><<<grid, 32, kRowSmem + (kFp8 ? kRow8StageBytes : 0), stream>>>(
+      q, q_row_stride, k_cache, v_cache, req_ids, pos, local_heads, kv_heads, block_tokens, block_tables,
+      blocks_per_request, scale, kv_scales, out, partials, splits);
+  DGPP_CUDA_OK(cudaGetLastError());
+  if (splits > 1) {
+    // The v scale lands once, on the combined output (the partials stay
+    // unscaled); the bf16 form's scale of 1 leaves its bits as they were.
+    const dim3 cgrid(static_cast<unsigned>(rows), static_cast<unsigned>(kv_heads));
+    full_attn_combine_kernel<<<cgrid, 256, 0, stream>>>(partials, splits, local_heads, kv_heads,
+                                                        kFp8 ? kv_scales + 1 : nullptr, out);
+    DGPP_CUDA_OK(cudaGetLastError());
+  }
+}
+}  // namespace
+
 void full_attn_decode(const uint16_t* q, int64_t q_row_stride, const uint16_t* k_cache,
                       const uint16_t* v_cache, const int32_t* req_ids, const int64_t* pos, int rows,
                       int local_heads, int kv_heads, int block_tokens, const int32_t* block_tables,
                       int blocks_per_request, float scale, float* out, float* partials,
                       cudaStream_t stream) {
-  if (rows <= 0) return;
-  if (!full_attn_supported(kD, local_heads, kv_heads))
-    throw std::invalid_argument("full_attn_decode: dim 256, <= 16 query heads per KV head");
-  set_attrs_once();
-  const int splits = partials != nullptr ? kMaxSplits : 1;
-  const dim3 grid(static_cast<unsigned>(rows), static_cast<unsigned>(kv_heads), static_cast<unsigned>(splits));
-  full_attn_row_kernel<<<grid, 32, kRowSmem, stream>>>(q, q_row_stride, k_cache, v_cache, req_ids, pos,
-                                                       local_heads, kv_heads, block_tokens, block_tables,
-                                                       blocks_per_request, scale, out, partials, splits);
-  DGPP_CUDA_OK(cudaGetLastError());
-  if (splits > 1) {
-    const dim3 cgrid(static_cast<unsigned>(rows), static_cast<unsigned>(kv_heads));
-    full_attn_combine_kernel<<<cgrid, 256, 0, stream>>>(partials, splits, local_heads, kv_heads, out);
-    DGPP_CUDA_OK(cudaGetLastError());
-  }
+  decode_rows<false>(q, q_row_stride, k_cache, v_cache, req_ids, pos, rows, local_heads, kv_heads, block_tokens,
+                     block_tables, blocks_per_request, scale, nullptr, out, partials, stream);
+}
+
+void full_attn_decode_fp8(const uint16_t* q, int64_t q_row_stride, const uint8_t* k_cache,
+                          const uint8_t* v_cache, const int32_t* req_ids, const int64_t* pos, int rows,
+                          int local_heads, int kv_heads, int block_tokens, const int32_t* block_tables,
+                          int blocks_per_request, float scale, const float* kv_scales, float* out,
+                          float* partials, cudaStream_t stream) {
+  decode_rows<true>(q, q_row_stride, k_cache, v_cache, req_ids, pos, rows, local_heads, kv_heads, block_tokens,
+                    block_tables, blocks_per_request, scale, kv_scales, out, partials, stream);
 }
 
 bool full_attn_tma_supported(int local_heads, int kv_heads, int block_tokens) {
@@ -812,21 +1293,114 @@ FullAttnStageMaps full_attn_stage_maps(const uint16_t* k_cache, const uint16_t* 
   return maps;
 }
 
+FullAttnStageMaps full_attn_stage_maps_fp8(const uint8_t* k_cache, const uint8_t* v_cache, int64_t rows,
+                                           int kv_heads) {
+  if (rows <= 0 || kv_heads <= 0)
+    throw std::invalid_argument("full_attn_stage_maps_fp8: rows and kv_heads must be positive");
+  const int width = kv_heads * kD;
+  FullAttnStageMaps maps;
+  for (int plane = 0; plane < 2; ++plane) {
+    const cuuint64_t dims[2] = {static_cast<cuuint64_t>(width), static_cast<cuuint64_t>(rows)};
+    const cuuint64_t strides[1] = {static_cast<cuuint64_t>(width)};
+    const cuuint32_t box[2] = {static_cast<cuuint32_t>(kBox8Cols), static_cast<cuuint32_t>(kKTile)};
+    const cuuint32_t estr[2] = {1, 1};
+    const CUresult r = cuTensorMapEncodeTiled(
+        plane ? &maps.v : &maps.k, CU_TENSOR_MAP_DATA_TYPE_UINT8, 2, const_cast<uint8_t*>(plane ? v_cache : k_cache),
+        dims, strides, box, estr, CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
+        CU_TENSOR_MAP_L2_PROMOTION_L2_128B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+    if (r != CUDA_SUCCESS)
+      throw std::runtime_error("full_attn_stage_maps_fp8: cuTensorMapEncodeTiled failed (" +
+                               std::to_string(static_cast<int>(r)) + ")");
+  }
+  return maps;
+}
+
+namespace {
+template <bool kFp8>
+void prefill_tma(const FullAttnStageMaps& maps, int64_t row_base, const uint16_t* q, int64_t q_row_stride,
+                 const int32_t* block_table, const int64_t* pos, int rows, int local_heads, int kv_heads,
+                 int block_tokens, float scale, const float* kv_scales, float* out, cudaStream_t stream) {
+  if (rows <= 0) return;
+  if (!full_attn_tma_supported(local_heads, kv_heads, block_tokens))
+    throw std::invalid_argument("full_attn_prefill_tma: geometry outside the staged form (full_attn_tma_supported)");
+  if (kFp8 && kv_scales == nullptr) throw std::invalid_argument("full_attn_prefill_tma_fp8: null kv scales");
+  tile_tma_attrs_once<kFp8>();
+  const int group = local_heads / kv_heads;
+  const int block_shift = __builtin_ctz(static_cast<unsigned>(block_tokens));
+  const dim3 grid(static_cast<unsigned>((rows + kQTile - 1) / kQTile), static_cast<unsigned>(kv_heads));
+  full_attn_tile_tma_kernel<kFp8><<<grid, group * 32, kFp8 ? kTma8Smem : kTmaSmem, stream>>>(
+      maps.k, maps.v, row_base, q, q_row_stride, block_table, pos, rows, local_heads, kv_heads, block_shift, scale,
+      kv_scales, out);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+}  // namespace
+
+namespace {
+template <bool kFp8>
+void decode_blocks(const FullAttnStageMaps& maps, int64_t row_base, const uint16_t* q, int64_t q_row_stride,
+                   const int32_t* req_ids, const int64_t* pos, const int32_t* spans, int groups, int rows,
+                   const int32_t* block_tables, int blocks_per_request, int local_heads, int kv_heads,
+                   int block_tokens, float scale, const float* kv_scales, float* out, float* partials,
+                   cudaStream_t stream) {
+  if (rows <= 0) return;
+  if (!full_attn_tma_supported(local_heads, kv_heads, block_tokens))
+    throw std::invalid_argument("full_attn_decode_blocks: geometry outside the staged form (full_attn_tma_supported)");
+  if (spans == nullptr && rows > kQTile)
+    throw std::invalid_argument("full_attn_decode_blocks: a lone group holds at most 16 rows");
+  if (spans != nullptr && groups <= 0) throw std::invalid_argument("full_attn_decode_blocks: no groups");
+  if (kFp8 && kv_scales == nullptr) throw std::invalid_argument("full_attn_decode_blocks_fp8: null kv scales");
+  block_attrs_once<kFp8>();
+  const int group = local_heads / kv_heads;
+  const int block_shift = __builtin_ctz(static_cast<unsigned>(block_tokens));
+  const int splits = partials != nullptr ? kMaxSplits : 1;
+  const dim3 grid(static_cast<unsigned>(spans != nullptr ? groups : 1), static_cast<unsigned>(kv_heads),
+                  static_cast<unsigned>(splits));
+  full_attn_block_decode_kernel<kFp8><<<grid, group * 32, kFp8 ? kTma8Smem : kTmaSmem, stream>>>(
+      maps.k, maps.v, row_base, q, q_row_stride, req_ids, pos, spans, rows, block_tables, blocks_per_request,
+      local_heads, kv_heads, block_shift, scale, kv_scales, out, partials, splits);
+  DGPP_CUDA_OK(cudaGetLastError());
+  if (splits > 1) {
+    const dim3 cgrid(static_cast<unsigned>(rows), static_cast<unsigned>(kv_heads));
+    full_attn_combine_kernel<<<cgrid, 256, 0, stream>>>(partials, splits, local_heads, kv_heads,
+                                                        kFp8 ? kv_scales + 1 : nullptr, out);
+    DGPP_CUDA_OK(cudaGetLastError());
+  }
+}
+}  // namespace
+
+void full_attn_decode_blocks(const FullAttnStageMaps& maps, int64_t row_base, const uint16_t* q,
+                             int64_t q_row_stride, const int32_t* req_ids, const int64_t* pos,
+                             const int32_t* spans, int groups, int rows, const int32_t* block_tables,
+                             int blocks_per_request, int local_heads, int kv_heads, int block_tokens, float scale,
+                             float* out, float* partials, cudaStream_t stream) {
+  decode_blocks<false>(maps, row_base, q, q_row_stride, req_ids, pos, spans, groups, rows, block_tables,
+                       blocks_per_request, local_heads, kv_heads, block_tokens, scale, nullptr, out, partials, stream);
+}
+
+void full_attn_decode_blocks_fp8(const FullAttnStageMaps& maps, int64_t row_base, const uint16_t* q,
+                                 int64_t q_row_stride, const int32_t* req_ids, const int64_t* pos,
+                                 const int32_t* spans, int groups, int rows, const int32_t* block_tables,
+                                 int blocks_per_request, int local_heads, int kv_heads, int block_tokens,
+                                 float scale, const float* kv_scales, float* out, float* partials,
+                                 cudaStream_t stream) {
+  decode_blocks<true>(maps, row_base, q, q_row_stride, req_ids, pos, spans, groups, rows, block_tables,
+                      blocks_per_request, local_heads, kv_heads, block_tokens, scale, kv_scales, out, partials, stream);
+}
+
 void full_attn_prefill_tma(const FullAttnStageMaps& maps, int64_t row_base, const uint16_t* q,
                            int64_t q_row_stride, const int32_t* block_table, const int64_t* pos, int rows,
                            int local_heads, int kv_heads, int block_tokens, float scale, float* out,
                            cudaStream_t stream) {
-  if (rows <= 0) return;
-  if (!full_attn_tma_supported(local_heads, kv_heads, block_tokens))
-    throw std::invalid_argument("full_attn_prefill_tma: geometry outside the staged form (full_attn_tma_supported)");
-  set_attrs_once();
-  const int group = local_heads / kv_heads;
-  const int block_shift = __builtin_ctz(static_cast<unsigned>(block_tokens));
-  const dim3 grid(static_cast<unsigned>((rows + kQTile - 1) / kQTile), static_cast<unsigned>(kv_heads));
-  full_attn_tile_tma_kernel<<<grid, group * 32, kTmaSmem, stream>>>(maps.k, maps.v, row_base, q, q_row_stride,
-                                                                     block_table, pos, rows, local_heads, kv_heads,
-                                                                     block_shift, scale, out);
-  DGPP_CUDA_OK(cudaGetLastError());
+  prefill_tma<false>(maps, row_base, q, q_row_stride, block_table, pos, rows, local_heads, kv_heads, block_tokens,
+                     scale, nullptr, out, stream);
+}
+
+void full_attn_prefill_tma_fp8(const FullAttnStageMaps& maps, int64_t row_base, const uint16_t* q,
+                               int64_t q_row_stride, const int32_t* block_table, const int64_t* pos, int rows,
+                               int local_heads, int kv_heads, int block_tokens, float scale,
+                               const float* kv_scales, float* out, cudaStream_t stream) {
+  prefill_tma<true>(maps, row_base, q, q_row_stride, block_table, pos, rows, local_heads, kv_heads, block_tokens,
+                    scale, kv_scales, out, stream);
 }
 
 void full_attn_prefill_warp(const uint16_t* q, int64_t q_row_stride, const uint16_t* k_cache,
@@ -852,7 +1426,7 @@ void full_attn_prefill(const uint16_t* q, int64_t q_row_stride, const uint16_t* 
                      block_tables, blocks_per_request, scale, out, nullptr, stream);
     return;
   }
-  set_attrs_once();
+  tile_attrs_once();
   // The strip staging wants a page of >= 32 tokens and a K/V row width that are
   // powers of two (the serving pool: 64-token pages, 1/2/4 KV heads x 256);
   // any other geometry walks the row form like the wider groups do.
