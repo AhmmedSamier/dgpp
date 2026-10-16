@@ -121,6 +121,10 @@ struct GlmFp4Matrix {
   int64_t rows = 0;
   int64_t cols = 0;                       // logical K (elements)
   int scale_group = kFp4Group;            // 16: NVFP4 (e4m3 + global); 32: MXFP4 (e8m0)
+  // The dense W4A4 TMA form's map over the codes [rows, cols/2] (kernels/moe_w4a4,
+  // engine.prefill_activations = native, 2026-10-16): set at boot by the
+  // model for an NVFP4 matrix with cols % 128 == 0; null otherwise.
+  const ::CUtensorMap_st* tma = nullptr;
 
   bool mxfp4() const { return scale_group == kMxfp4Group; }
   int64_t payload_cols() const { return cols / 2; }

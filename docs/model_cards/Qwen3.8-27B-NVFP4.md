@@ -36,7 +36,7 @@ with the shipped `input_global_scale` (gate/up share one, down its own) and
 the products on the block-scaled fp4 tensor cores, and its channel-FP8
 projections and late-layer MLPs from per-token e4m3 activations on the e4m3
 tensor cores; decode rows keep bf16 activations. The templates enable it: on one Spark a 262K cold prefill went
-451 -> 336 s and an 11.5K prompt 11.4 -> 6.7 s, with HumanEval 158/164 (159 on
+451 -> 316 s and an 11.5K prompt 11.4 -> 5.7 s, with HumanEval 158/164 (159 on
 the bf16 chain), GSM8K 295/300 (296) and schema extraction 100/100 (100) at
 the same seed over 300 items.
 

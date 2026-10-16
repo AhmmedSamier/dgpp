@@ -475,6 +475,18 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   // The native recipe's NVFP4 activation scratch: one quantized row set at
   // max_tokens rows of the widest k (I): codes, e4m3 block scales, globals.
   uint8_t* q_codes_ = nullptr;
+  // The dense W4A4 TMA form's maps: over q_codes_ per k (H, I; box rows 128)
+  // and over every NVFP4 MLP matrix (box rows 256), built at boot.
+  CUtensorMap q_tma_[2];
+  int q_tma_k_[2] = {0, 0};
+  int q_tma_count_ = 0;
+  std::vector<CUtensorMap> native_fp4_tmaps_;
+  void build_native_fp4_maps();
+  const CUtensorMap* q_map_for(int k) const {
+    for (int i = 0; i < q_tma_count_; ++i)
+      if (q_tma_k_[i] == k) return &q_tma_[i];
+    return nullptr;
+  }
   uint8_t* q_scales_ = nullptr;
   float* q_gs_ = nullptr;
   // Per-tensor FP8 prefill recipe (engine.prefill_fp8_per_tensor, Resident only):

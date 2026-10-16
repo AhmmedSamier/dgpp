@@ -357,6 +357,15 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
     DGPP_CUDA_OK(cudaMalloc(&q_codes_, M * I / 2));
     DGPP_CUDA_OK(cudaMalloc(&q_scales_, M * nvfp4_act_scale_stride(static_cast<int>(I))));
     DGPP_CUDA_OK(cudaMalloc(&q_gs_, M * sizeof(float)));
+    // The dense W4A4 TMA form: maps over the code scratch for k = H (gate/up)
+    // and k = I (down), and over every NVFP4 MLP matrix (Resident stacks).
+    for (const int64_t kk : {static_cast<int64_t>(H), static_cast<int64_t>(I)}) {
+      if (!dense_w4a4_tma_supported(static_cast<int>(kk)) || q_map_for(static_cast<int>(kk)) != nullptr) continue;
+      q_tma_k_[q_tma_count_] = static_cast<int>(kk);
+      q_tma_[q_tma_count_] = nvfp4_code_tma_map(q_codes_, static_cast<int64_t>(M), kk, 128);
+      ++q_tma_count_;
+    }
+    if (loader_.residency() == LoaderResidency::Resident) build_native_fp4_maps();
     DGPP_LOG_INFO("Qwen35Model: engine.prefill_activations = native: the NVFP4 MLP recipe on every prefill row");
   }
   // The recipe's e4m3 half (both releases): per-token activation rows for the
@@ -1044,17 +1053,34 @@ void Qwen35Model::dense_mlp(const uint16_t* x, uint16_t* out, int tokens,
       views = fp4_views_;
     }
     const MoeSegment* seg = fp4_segs_ + (tokens - 1);
+    // The TMA-staged dense form when the maps exist (bitwise the grouped kernel).
+    const CUtensorMap* qmH = q_map_for(static_cast<int>(H));
+    const CUtensorMap* qmI = q_map_for(static_cast<int>(I));
+    const bool boxes = qmH && qmI && m.gate_fp4.tma && m.up_fp4.tma && m.down_fp4.tma;
+    const size_t ssH = nvfp4_act_scale_stride(static_cast<int>(H)), ssI = nvfp4_act_scale_stride(static_cast<int>(I));
     launch_quantize_rows_nvfp4(x, static_cast<size_t>(H), tokens, static_cast<int>(H), q_codes_, q_scales_, q_gs_,
                                stream, 0.f, m.fp4_input_gs);
-    launch_moe_grouped_w4a4_bf16(q_codes_, q_scales_, q_gs_, nullptr, seg, 1, tokens, views, 0, gate_tmp_,
-                                 static_cast<size_t>(I), static_cast<int>(I), static_cast<int>(H), stream);
-    launch_moe_grouped_w4a4_bf16(q_codes_, q_scales_, q_gs_, nullptr, seg, 1, tokens, views, 1, up_tmp_,
-                                 static_cast<size_t>(I), static_cast<int>(I), static_cast<int>(H), stream);
-    qwen35_swiglu_bf16(gate_tmp_, up_tmp_, gate_tmp_, static_cast<int64_t>(tokens) * I, stream);
-    launch_quantize_rows_nvfp4(gate_tmp_, static_cast<size_t>(I), tokens, static_cast<int>(I), q_codes_, q_scales_,
-                               q_gs_, stream, 0.f, m.fp4_input_gs + 1);
-    launch_moe_grouped_w4a4_bf16(q_codes_, q_scales_, q_gs_, nullptr, seg, 1, tokens, views, 2, out,
-                                 static_cast<size_t>(H), static_cast<int>(H), static_cast<int>(I), stream);
+    if (boxes) {
+      launch_dense_w4a4_tma_bf16(*qmH, *m.gate_fp4.tma, q_scales_, ssH, q_gs_, m.gate_fp4.scales, m.gate_fp4.global_scale,
+                                 gate_tmp_, static_cast<size_t>(I), tokens, static_cast<int>(I), static_cast<int>(H), stream);
+      launch_dense_w4a4_tma_bf16(*qmH, *m.up_fp4.tma, q_scales_, ssH, q_gs_, m.up_fp4.scales, m.up_fp4.global_scale,
+                                 up_tmp_, static_cast<size_t>(I), tokens, static_cast<int>(I), static_cast<int>(H), stream);
+    } else {
+      launch_moe_grouped_w4a4_bf16(q_codes_, q_scales_, q_gs_, nullptr, seg, 1, tokens, views, 0, gate_tmp_,
+                                   static_cast<size_t>(I), static_cast<int>(I), static_cast<int>(H), stream);
+      launch_moe_grouped_w4a4_bf16(q_codes_, q_scales_, q_gs_, nullptr, seg, 1, tokens, views, 1, up_tmp_,
+                                   static_cast<size_t>(I), static_cast<int>(I), static_cast<int>(H), stream);
+    }
+    // The SwiGLU fused into the down projection's quantizer (the model's own
+    // rounding; bitwise the swiglu kernel followed by the row quantizer).
+    launch_swiglu_quantize_rows_nvfp4(gate_tmp_, up_tmp_, static_cast<size_t>(I), tokens, static_cast<int>(I), 0.f,
+                                      q_codes_, q_scales_, q_gs_, stream, 0.f, m.fp4_input_gs + 1, /*qwen_rounding=*/true);
+    if (boxes)
+      launch_dense_w4a4_tma_bf16(*qmI, *m.down_fp4.tma, q_scales_, ssI, q_gs_, m.down_fp4.scales, m.down_fp4.global_scale,
+                                 out, static_cast<size_t>(H), tokens, static_cast<int>(H), static_cast<int>(I), stream);
+    else
+      launch_moe_grouped_w4a4_bf16(q_codes_, q_scales_, q_gs_, nullptr, seg, 1, tokens, views, 2, out,
+                                   static_cast<size_t>(H), static_cast<int>(H), static_cast<int>(I), stream);
     return;
   }
   // ---- mixed-release forms (the loader binds one form per layer) -------------
@@ -1139,9 +1165,9 @@ void Qwen35Model::dense_mlp(const uint16_t* x, uint16_t* out, int tokens,
         launch_fp8_gemm_channel_bf16(gw_.a8, gw_.a8_scales, m.up_fp8.payload, m.up_fp8.scales, up_tmp_, tokens,
                                      static_cast<int>(I), static_cast<int>(H), stream, static_cast<size_t>(I));
       }
-      qwen35_swiglu_bf16(gate_tmp_, up_tmp_, gate_tmp_, static_cast<int64_t>(tokens) * I, stream);
-      launch_fp8_quantize_tokens(gate_tmp_, static_cast<size_t>(I), tokens, static_cast<int>(I), gw_.a8, gw_.a8_scales,
-                                 stream);
+      // The SwiGLU fused into the down projection's per-token quantizer.
+      launch_fp8_swiglu_quantize_tokens(gate_tmp_, up_tmp_, static_cast<size_t>(I), tokens, static_cast<int>(I), gw_.a8,
+                                        gw_.a8_scales, stream);
       if (boxes)
         launch_fp8_gemm_channel_tma_bf16(*amI, *m.down_fp8.tma, gw_.a8_scales, m.down_fp8.scales, out, tokens,
                                          static_cast<int>(H), static_cast<int>(I), stream, static_cast<size_t>(H));
@@ -1275,6 +1301,30 @@ size_t Qwen35Model::snapshot_state_bytes() const {
 // pointing at it. The vector is reserved once so the addresses stay put;
 // the loader's resident slot is const to its readers, the map pointer the
 // one field written after the build.
+// The NVFP4 MLP matrices' TMA maps (the dense W4A4 TMA form): one over every
+// gate / up / down of the mixed release's NVFP4 layers, the matrix's `tma`
+// pointing at it; the vector is reserved once so the addresses stay put.
+void Qwen35Model::build_native_fp4_maps() {
+  std::vector<GlmFp4Matrix*> items;
+  const auto take = [&](GlmFp4Matrix& m) {
+    if (m.payload && m.scales && m.global_scale && !m.mxfp4() && dense_w4a4_tma_supported(static_cast<int>(m.cols)))
+      items.push_back(&m);
+  };
+  for (int l = 0; l < cfg_.num_hidden_layers; ++l) {
+    Qwen35LayerResident& r = const_cast<Qwen35LayerResident&>(loader_.load_layer(l));
+    take(r.mlp.gate_fp4);
+    take(r.mlp.up_fp4);
+    take(r.mlp.down_fp4);
+  }
+  native_fp4_tmaps_.clear();
+  native_fp4_tmaps_.reserve(items.size());
+  for (GlmFp4Matrix* m : items) {
+    native_fp4_tmaps_.push_back(nvfp4_code_tma_map(m->payload, m->rows, m->cols, 256));
+    m->tma = &native_fp4_tmaps_.back();
+  }
+  DGPP_LOG_INFO("Qwen35Model: dense W4A4 TMA form: maps over {} NVFP4 matrices", items.size());
+}
+
 void Qwen35Model::build_native_maps() {
   std::vector<GlmQuantMatrix*> items;
   const auto take = [&](GlmQuantMatrix& m) {

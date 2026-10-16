@@ -45,6 +45,12 @@ void launch_fp8_gemm_f32(const uint8_t* a, const float* a_scales, const uint8_t*
 // nearest saturating; act 16-byte aligned rows, act_stride % 8 == 0, k % 8.
 void launch_fp8_quantize_tokens(const uint16_t* act, size_t act_stride, int m, int k, uint8_t* q,
                                 float* scales, cudaStream_t stream);
+// The same quantizer fused behind the Qwen3.5 dense MLP's SwiGLU (silu as
+// g / (1 + exp(-g)), one bf16 rounding of the product): gate/up rows
+// [m][stride] -> the e4m3 codes and per-token scales of silu(gate) * up,
+// bitwise the model's swiglu kernel followed by launch_fp8_quantize_tokens.
+void launch_fp8_swiglu_quantize_tokens(const uint16_t* gate, const uint16_t* up, size_t stride, int m, int k,
+                                       uint8_t* q, float* scales, cudaStream_t stream);
 // out[m][n] = (a_scale[m] * w_scale[n]) * (A8 x W8^T): the e4m3 products
 // accumulate in fp32 over the whole k (mma m16n8k32) and the two scales
 // apply once in the epilogue (the reference stack's per-token x per-channel

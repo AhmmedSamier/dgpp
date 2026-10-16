@@ -4,6 +4,7 @@
 // its own quantized inputs (fp32-accumulation agreement), the bf16 output
 // as the f32 output rounded once, and the tolerance claim against the
 // dequantized bf16 chain the lever replaces.
+#include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -261,6 +262,34 @@ void run_channel(int m, int n, int k, std::mt19937& rng) {
   DGPP_CUDA_OK(cudaStreamDestroy(stream));
 }
 
+// The model's SwiGLU (qwen35_swiglu_kernel's ops) for the fused quantizer's gate.
+__global__ void swiglu_qwen_test_kernel(const uint16_t* gate, const uint16_t* up, uint16_t* out, int64_t n) {
+  const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  const float g = __uint_as_float(static_cast<uint32_t>(gate[i]) << 16);
+  const float s = g / (1.0f + expf(-g));
+  const float u = __uint_as_float(static_cast<uint32_t>(up[i]) << 16);
+  out[i] = __bfloat16_as_ushort(__float2bfloat16_rn(s * u));
+}
+void run_swiglu_fused(int m, int k, std::mt19937& rng) {
+  std::normal_distribution<float> normal(0.f, 2.f);
+  const size_t stride = static_cast<size_t>(k) + 8;
+  std::vector<uint16_t> g(static_cast<size_t>(m) * stride, 0), u(g.size(), 0);
+  for (int r = 0; r < m; ++r)
+    for (int c = 0; c < k; ++c) { g[r * stride + c] = dgpp::float_to_bf16_bits(normal(rng)); u[r * stride + c] = dgpp::float_to_bf16_bits(normal(rng)); }
+  Dev<uint16_t> dg(g.size()), du(u.size()), da(g.size());
+  dg.upload(g); du.upload(u);
+  Dev<uint8_t> q1(static_cast<size_t>(m) * k), q2(static_cast<size_t>(m) * k);
+  Dev<float> s1(static_cast<size_t>(m)), s2(static_cast<size_t>(m));
+  swiglu_qwen_test_kernel<<<static_cast<unsigned>((g.size() + 255) / 256), 256>>>(dg.p, du.p, da.p, static_cast<int64_t>(g.size()));
+  dgpp::launch_fp8_quantize_tokens(da.p, stride, m, k, q1.p, s1.p, nullptr);
+  dgpp::launch_fp8_swiglu_quantize_tokens(dg.p, du.p, stride, m, k, q2.p, s2.p, nullptr);
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  require(q1.download() == q2.download() && s1.download() == s2.download(),
+          "the fused SwiGLU + per-token quantizer is bitwise the swiglu kernel followed by the quantizer");
+  std::printf("fused swiglu+quantize m=%d k=%d: bitwise\n", m, k);
+}
+
 }  // namespace
 
 int main() {
@@ -279,6 +308,8 @@ int main() {
   run_channel(300, 1000, 5120, rng);
   run_channel(77, 256, 6144, rng);
   run_channel(40, 64, 17408, rng);
+  run_swiglu_fused(37, 1024, rng);
+  run_swiglu_fused(9, 17408, rng);
   std::printf("fp8_gemm_test: OK\n");
   return 0;
 }

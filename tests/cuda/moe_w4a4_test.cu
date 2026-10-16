@@ -27,6 +27,19 @@ using namespace dgpp;
 
 namespace {
 
+// The model's SwiGLU (qwen35_swiglu_kernel's ops), for the fused quantizer's gate.
+__global__ void qwen_swiglu_kernel_t(const uint16_t* gate, const uint16_t* up, uint16_t* out, int64_t n) {
+  const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  const float g = __uint_as_float(static_cast<uint32_t>(gate[i]) << 16);
+  const float s = g / (1.0f + expf(-g));
+  const float u = __uint_as_float(static_cast<uint32_t>(up[i]) << 16);
+  out[i] = __bfloat16_as_ushort(__float2bfloat16_rn(s * u));
+}
+void qwen_swiglu_device(const uint16_t* gate, const uint16_t* up, uint16_t* out, int64_t n) {
+  qwen_swiglu_kernel_t<<<static_cast<unsigned>((n + 255) / 256), 256>>>(gate, up, out, n);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
 float e2m1(uint8_t nib) {
   static const float mag[8] = {0.f, 0.5f, 1.f, 1.5f, 2.f, 3.f, 4.f, 6.f};
   return (nib & 8) ? -mag[nib & 7] : mag[nib & 7];
@@ -311,6 +324,79 @@ int main(int argc, char** argv) {
     std::printf("representable rows through the quantizer (k %d): %d of %d values differ\n", k, bad, rows * k);
     if (bad != 0) ++fails;
     cudaFree(dx); cudaFree(codes); cudaFree(scales); cudaFree(gs);
+  }
+  // The fused SwiGLU -> quantizer with the Qwen rounding: bitwise the model's
+  // swiglu ops (a device kernel here, op for op) followed by the row quantizer.
+  {
+    const int rows = 61, k = 1024, stride = 1024;
+    std::mt19937 rng(31);
+    std::normal_distribution<float> nd(0.f, 2.f);
+    std::vector<uint16_t> ga(size_t(rows) * stride), up(ga.size());
+    for (auto& v : ga) v = bf16(nd(rng));
+    for (auto& v : up) v = bf16(nd(rng));
+    uint16_t* dg = dev(ga);
+    uint16_t* du = dev(up);
+    uint16_t* da = nullptr;
+    DGPP_CUDA_OK(cudaMalloc(&da, ga.size() * 2));
+    qwen_swiglu_device(dg, du, da, static_cast<int64_t>(ga.size()));
+    const size_t ss = nvfp4_act_scale_stride(k);
+    uint8_t *c1 = nullptr, *c2 = nullptr, *s1 = nullptr, *s2 = nullptr;
+    float *g1 = nullptr, *g2 = nullptr;
+    DGPP_CUDA_OK(cudaMalloc(&c1, size_t(rows) * k / 2)); DGPP_CUDA_OK(cudaMalloc(&c2, size_t(rows) * k / 2));
+    DGPP_CUDA_OK(cudaMalloc(&s1, size_t(rows) * ss)); DGPP_CUDA_OK(cudaMalloc(&s2, size_t(rows) * ss));
+    DGPP_CUDA_OK(cudaMalloc(&g1, size_t(rows) * 4)); DGPP_CUDA_OK(cudaMalloc(&g2, size_t(rows) * 4));
+    launch_quantize_rows_nvfp4(da, stride, rows, k, c1, s1, g1, nullptr, 0.25f);
+    launch_swiglu_quantize_rows_nvfp4(dg, du, stride, rows, k, 0.f, c2, s2, g2, nullptr, 0.25f, nullptr, /*qwen_rounding=*/true);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    const bool same = host(c1, size_t(rows) * k / 2) == host(c2, size_t(rows) * k / 2) && host(s1, size_t(rows) * ss) == host(s2, size_t(rows) * ss) &&
+                      host(g1, size_t(rows)) == host(g2, size_t(rows));
+    std::printf("[%s] fused Qwen swiglu+quantize vs the two-kernel chain: %s\n", same ? " OK " : "FAIL", same ? "bitwise" : "DIFFER");
+    if (!same) ++fails;
+    cudaFree(dg); cudaFree(du); cudaFree(da); cudaFree(c1); cudaFree(c2); cudaFree(s1); cudaFree(s2); cudaFree(g1); cudaFree(g2);
+  }
+  // The dense form on TMA boxes: bitwise the grouped kernel over one segment,
+  // the output cleared to a sentinel first (a skipped row cannot pass).
+  for (const int m : {31, 129, 300, 1152}) {
+    const int n = 512, k = 1280;
+    std::mt19937 rng(23);
+    std::normal_distribution<float> nd(0.f, 1.f);
+    std::vector<uint16_t> x(size_t(m) * k);
+    for (auto& v : x) v = bf16(nd(rng));
+    std::vector<uint8_t> wc(size_t(n) * k / 2), ws(size_t(n) * k / 16);
+    for (auto& v : wc) v = static_cast<uint8_t>(rng() & 0xFF);
+    for (auto& v : ws) { uint8_t b = static_cast<uint8_t>(rng() & 0x7F); if ((b & 0x7F) == 0x7F) b = 0x7E; v = b; }
+    const float one = 1.f;
+    uint16_t* dx = dev(x);
+    uint8_t* dwc = dev(wc);
+    uint8_t* dws = dev(ws);
+    float* dg = dev(std::vector<float>{one});
+    const size_t ss = nvfp4_act_scale_stride(k);
+    uint8_t *codes = nullptr, *scales = nullptr;
+    float* gs = nullptr;
+    uint16_t *o1 = nullptr, *o2 = nullptr;
+    MoeSegment* seg = dev(std::vector<MoeSegment>{MoeSegment{0, m, 0}});
+    GlmFp4Matrix fm;
+    fm.payload = dwc; fm.scales = dws; fm.global_scale = dg; fm.rows = n; fm.cols = k; fm.scale_group = 16;
+    MoeExpertView* views = dev(std::vector<MoeExpertView>{MoeExpertView::of(fm), MoeExpertView::of(fm), MoeExpertView::of(fm)});
+    DGPP_CUDA_OK(cudaMalloc(&codes, size_t(m) * k / 2));
+    DGPP_CUDA_OK(cudaMalloc(&scales, size_t(m) * ss));
+    DGPP_CUDA_OK(cudaMalloc(&gs, size_t(m) * 4));
+    DGPP_CUDA_OK(cudaMalloc(&o1, size_t(m) * n * 2));
+    DGPP_CUDA_OK(cudaMalloc(&o2, size_t(m) * n * 2));
+    launch_quantize_rows_nvfp4(dx, k, m, k, codes, scales, gs, nullptr, 1.f);
+    DGPP_CUDA_OK(cudaMemset(o1, 0xFF, size_t(m) * n * 2));
+    DGPP_CUDA_OK(cudaMemset(o2, 0x00, size_t(m) * n * 2));
+    launch_moe_grouped_w4a4_bf16(codes, scales, gs, nullptr, seg, 1, m, views, 0, o1, n, n, k, nullptr);
+    const CUtensorMap am = nvfp4_code_tma_map(codes, m, k, 128), wm = nvfp4_code_tma_map(dwc, n, k, 256);
+    launch_dense_w4a4_tma_bf16(am, wm, scales, ss, gs, dws, dg, o2, n, m, n, k, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    const auto h1 = host(o1, size_t(m) * n), h2 = host(o2, size_t(m) * n);
+    size_t diff = 0;
+    for (size_t i = 0; i < h1.size(); ++i) diff += h1[i] != h2[i];
+    std::printf("dense tma vs grouped (m %d n %d k %d): %zu of %zu values differ\n", m, n, k, diff, h1.size());
+    if (diff != 0) ++fails;
+    cudaFree(dx); cudaFree(dwc); cudaFree(dws); cudaFree(dg); cudaFree(codes); cudaFree(scales); cudaFree(gs);
+    cudaFree(o1); cudaFree(o2); cudaFree(seg); cudaFree(views);
   }
   // Small shapes with ragged segments and k tails for the exact layout check.
   fails += run(64, 8, 2, 256, 256, true, "small");

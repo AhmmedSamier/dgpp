@@ -36,7 +36,16 @@ project procedures and design guidance live in `docs/`.
   L2-to-SM feed of ~800 GB/s caps a GEMM by its bytes a kFLOP, and the
   wider TMA tile moves 5.9 against the 128-wide cp.async tile's 7.8,
   139 against 100 TFLOP/s at the 27B's shapes; in situ the 262K prefill
-  349 -> 336 s and the 11.5K prompt 7.3 -> 6.7 s.
+  349 -> 336 s and the 11.5K prompt 7.3 -> 6.7 s. The NVFP4 MLP products
+  then moved off the grouped MoE kernel onto a dense form staged by TMA
+  (128 x 256 x 128 a stage, the codes by SWIZZLE_64B boxes, the per-row
+  scale words by one 8-byte copy a thread, three stages, m-tiles fastest
+  so the CTAs in flight share a weight tile): 218-228 against 168-173
+  TFLOP/s, bitwise the grouped kernel; and the SwiGLU is fused into the
+  down projection's quantizer with the model's own rounding (bitwise the
+  swiglu kernel followed by the quantizer, the 35 KB rows never written
+  as bf16). In situ: the 262K prefill 336 -> 322 -> 316 s, the 11.5K
+  prompt 6.7 -> 5.9 -> 5.7 s.
 
 - **Qwen3.8-27B prefill attention at 71 TFLOP/s** (2026-10-15). The
   full-attention prefill kernel (`kernels/full_attn.cu`, the tile form the

@@ -96,6 +96,66 @@ __global__ __launch_bounds__(kTThreads) void fp8_quantize_tokens_kernel(const ui
   }
 }
 
+// The per-token quantizer fused behind the Qwen3.5 SwiGLU (qwen35_swiglu_kernel's
+// ops: silu as g / (1 + exp(-g)), one bf16 rounding of the product): the row's
+// amax in a first pass, the codes in a second, the product recomputed rather
+// than written and re-read as bf16 (the down projection's 35 KB rows).
+__device__ __forceinline__ float swiglu_qwen_d(uint32_t gb, uint32_t ub) {
+  const float g = bf16_bits_to_float_d(gb), u = bf16_bits_to_float_d(ub);
+  const float s = g / (1.0f + expf(-g));
+  return __bfloat162float(__float2bfloat16_rn(s * u));
+}
+__global__ __launch_bounds__(kTThreads) void fp8_swiglu_quantize_tokens_kernel(const uint16_t* __restrict__ gate,
+                                                                              const uint16_t* __restrict__ up,
+                                                                              size_t stride, int m, int k,
+                                                                              uint8_t* __restrict__ q,
+                                                                              float* __restrict__ scales) {
+  const int row = blockIdx.x;
+  if (row >= m) return;
+  const uint16_t* gr = gate + static_cast<size_t>(row) * stride;
+  const uint16_t* ur = up + static_cast<size_t>(row) * stride;
+  float amax = 0.f;
+  for (int c = threadIdx.x * 8; c < k; c += kTThreads * 8) {
+    const uint4 g4 = *reinterpret_cast<const uint4*>(gr + c), u4 = *reinterpret_cast<const uint4*>(ur + c);
+    const uint32_t g[4] = {g4.x, g4.y, g4.z, g4.w}, u[4] = {u4.x, u4.y, u4.z, u4.w};
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+      amax = fmaxf(amax, fmaxf(fabsf(swiglu_qwen_d(g[i] & 0xFFFFu, u[i] & 0xFFFFu)), fabsf(swiglu_qwen_d(g[i] >> 16, u[i] >> 16))));
+  }
+  __shared__ float warp_max[kTThreads / 32];
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFFu, amax, o));
+  if ((threadIdx.x & 31) == 0) warp_max[threadIdx.x >> 5] = amax;
+  __syncthreads();
+  if (threadIdx.x < 32) {
+    float t = threadIdx.x < kTThreads / 32 ? warp_max[threadIdx.x] : 0.f;
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) t = fmaxf(t, __shfl_xor_sync(0xFFFFFFFFu, t, o));
+    if (threadIdx.x == 0) warp_max[0] = t;
+  }
+  __syncthreads();
+  const float row_amax = warp_max[0];
+  const float scale = row_amax > 0.f ? row_amax / 448.f : 1.f;
+  if (threadIdx.x == 0) scales[row] = scale;
+  uint8_t* dst = q + static_cast<size_t>(row) * k;
+  for (int c = threadIdx.x * 8; c < k; c += kTThreads * 8) {
+    const uint4 g4 = *reinterpret_cast<const uint4*>(gr + c), u4 = *reinterpret_cast<const uint4*>(ur + c);
+    const uint32_t g[4] = {g4.x, g4.y, g4.z, g4.w}, u[4] = {u4.x, u4.y, u4.z, u4.w};
+    uint32_t packed[2];
+#pragma unroll
+    for (int i = 0; i < 2; ++i) {
+      const __nv_fp8x2_storage_t lo = __nv_cvt_float2_to_fp8x2(
+          make_float2(swiglu_qwen_d(g[2 * i] & 0xFFFFu, u[2 * i] & 0xFFFFu) / scale, swiglu_qwen_d(g[2 * i] >> 16, u[2 * i] >> 16) / scale),
+          __NV_SATFINITE, __NV_E4M3);
+      const __nv_fp8x2_storage_t hi = __nv_cvt_float2_to_fp8x2(
+          make_float2(swiglu_qwen_d(g[2 * i + 1] & 0xFFFFu, u[2 * i + 1] & 0xFFFFu) / scale, swiglu_qwen_d(g[2 * i + 1] >> 16, u[2 * i + 1] >> 16) / scale),
+          __NV_SATFINITE, __NV_E4M3);
+      packed[i] = static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 16);
+    }
+    *reinterpret_cast<uint2*>(dst + c) = make_uint2(packed[0], packed[1]);
+  }
+}
+
 // ---- the GEMM --------------------------------------------------------------
 // 128 x 128 x 64 block tiles on eight warps (2 x 4: a 64 x 32 warp tile of
 // four m16 by four n8 mma tiles), a four-stage cp.async pipeline of the
@@ -540,6 +600,15 @@ void launch_fp8_quantize_tokens(const uint16_t* act, size_t act_stride, int m, i
   if (act_stride % 8 != 0 || (reinterpret_cast<uintptr_t>(act) % 16) != 0)
     throw std::invalid_argument("fp8 quantize tokens: rows must be 16-byte aligned (act_stride % 8 == 0)");
   fp8_quantize_tokens_kernel<<<m, kTThreads, 0, stream>>>(act, act_stride, m, k, q, scales);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+void launch_fp8_swiglu_quantize_tokens(const uint16_t* gate, const uint16_t* up, size_t stride, int m, int k, uint8_t* q,
+                                       float* scales, cudaStream_t stream) {
+  if (m <= 0) return;
+  if (k <= 0 || k % 8 != 0) throw std::invalid_argument("fp8 swiglu quantize: k must be a positive multiple of 8");
+  if (stride % 8 != 0 || (reinterpret_cast<uintptr_t>(gate) % 16) != 0 || (reinterpret_cast<uintptr_t>(up) % 16) != 0)
+    throw std::invalid_argument("fp8 swiglu quantize: rows must be 16-byte aligned (stride % 8 == 0)");
+  fp8_swiglu_quantize_tokens_kernel<<<m, kTThreads, 0, stream>>>(gate, up, stride, m, k, q, scales);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 void launch_fp8_gemm_channel_bf16(const uint8_t* a, const float* a_scales, const uint8_t* w, const float* w_scales,
