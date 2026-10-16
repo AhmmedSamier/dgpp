@@ -159,10 +159,19 @@ struct QwenTextConfig {
   //                        model mixer's too) and the PLE norms trained in
   //                        F32 and shipped so (the publisher's serving
   //                        requirement); the draft layer's norms stay BF16.
+  //   experts_nvfp4_csf    the FP4-Local export (nvidia/Qwen3.8-Flash-Next-
+  //                        FP4-Local) declares every backbone experts entry
+  //                        with weight_scale_encoding "csf": the per-group
+  //                        scales arrive as ModelOpt's fixed-plus-exceptions
+  //                        sidecars (docs/fp4local_plan.md), not the plain
+  //                        E4M3 weight_scale the binding tables otherwise.
+  //                        The loader expands them to plain scales once;
+  //                        mixed or unknown encodings refuse.
   bool dense_mxfp8_shipped = false;
   bool mtp_experts_nvfp4 = false;
   bool ngram_table_nvfp4 = false;
   bool norms_f32 = false;
+  bool experts_nvfp4_csf = false;
 
   // --- vision (docs/vision.md) --------------------------------------------
   // The multimodal release's tower, parsed from the root config's

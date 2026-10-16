@@ -26,15 +26,20 @@ void add_bf16(TensorList& out, const std::string& name, std::vector<int64_t> sha
 // convention) by `f32_scale`.
 void add_quantized(TensorList& out, const std::string& name, int64_t rows, int64_t cols,
                    QwenWeightClass cls, int layer, int expert, bool nvfp4 = false,
-                   bool f32_scale = false, bool input_scale = true) {
+                   bool f32_scale = false, bool input_scale = true, bool csf_scales = false) {
   if (nvfp4) {
     // The modelopt NVFP4 triple (plus its activation scale, which the
     // weight-only W4A16_NVFP4 form of the QAD export's draft experts does
-    // not carry): `name` is "...proj.weight".
+    // not carry): `name` is "...proj.weight". The FP4-Local export wraps
+    // the backbone experts' per-group scales as CSF sidecars instead of
+    // the plain E4M3 weight_scale (config experts_nvfp4_csf): the sidecars
+    // are counted, not tabled (their shapes are data-dependent), and the
+    // loader expands them once.
     const std::string base = name.substr(0, name.size() - std::string(".weight").size());
     add(out, name, DType::U8, {rows, cols / 2}, cls, layer, expert, QwenTensorRole::Fp4Payload);
-    add(out, base + ".weight_scale", DType::F8_E4M3, {rows, cols / 16}, cls, layer, expert,
-        QwenTensorRole::Fp4Scale);
+    if (!csf_scales)
+      add(out, base + ".weight_scale", DType::F8_E4M3, {rows, cols / 16}, cls, layer, expert,
+          QwenTensorRole::Fp4Scale);
     add(out, base + ".weight_scale_2", DType::F32, {}, cls, layer, expert, QwenTensorRole::Fp4Global);
     if (input_scale)
       add(out, base + ".input_scale", DType::F32, {}, cls, layer, expert, QwenTensorRole::InputScale);
@@ -196,9 +201,16 @@ void expect_moe(TensorList& out, const std::string& p, const QwenTextConfig& cfg
   }
   for (int e = 0; e < E; ++e) {
     const std::string ep = p + "experts." + std::to_string(e) + ".";
-    add_quantized(out, ep + "gate_proj.weight", I, H, QwenWeightClass::RoutedExpert, layer, e, nvfp4);
-    add_quantized(out, ep + "up_proj.weight", I, H, QwenWeightClass::RoutedExpert, layer, e, nvfp4);
-    add_quantized(out, ep + "down_proj.weight", H, I, QwenWeightClass::RoutedExpert, layer, e, nvfp4);
+    // The FP4-Local export's CSF-wrapped scales (config experts_nvfp4_csf):
+    // no plain weight_scale; the sidecars are counted at validation and
+    // expanded once at load.
+    const bool csf = nvfp4 && cfg.experts_nvfp4_csf;
+    add_quantized(out, ep + "gate_proj.weight", I, H, QwenWeightClass::RoutedExpert, layer, e, nvfp4,
+                  false, true, csf);
+    add_quantized(out, ep + "up_proj.weight", I, H, QwenWeightClass::RoutedExpert, layer, e, nvfp4,
+                  false, true, csf);
+    add_quantized(out, ep + "down_proj.weight", H, I, QwenWeightClass::RoutedExpert, layer, e, nvfp4,
+                  false, true, csf);
   }
 }
 
@@ -369,6 +381,16 @@ QwenBindReport qwen_validate_text_binding(
     if (consumed.count(name)) continue;
     if (name.rfind("model.visual.", 0) == 0) {
       ++rep.vision;
+      continue;
+    }
+    // ModelOpt NVFP4 CSF scale sidecars (config experts_nvfp4_csf): the
+    // fixed table and the exception list per expert projection, expanded
+    // to plain scales once at load. Counted, not tabled (the exception
+    // count is data-dependent). Anywhere else they are unexpected.
+    if (cfg.experts_nvfp4_csf &&
+        (name.ends_with(".weight_scale.nvfp4_csf_fixed") ||
+         name.ends_with(".weight_scale.nvfp4_csf_exceptions"))) {
+      ++rep.csf_sidecars;
       continue;
     }
     // A truncated config (the check apps' --layers N): the layers past it
