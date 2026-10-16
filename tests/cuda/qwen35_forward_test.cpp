@@ -380,13 +380,19 @@ int run_dump_parity(const std::string& dir, const std::string& dump_path, const 
 // verified as 8 rows and as 1..7 rows, the first rows' logits and hidden
 // bits compared bitwise, on the tiny fixture with the production recipe's
 // fp8 head.
-int run_rows_invariance(const std::string& dir, bool fp8_head, bool kv_fp8) {
+int run_rows_invariance(const std::string& dir, bool fp8_head, bool kv_fp8, bool attn_fp8) {
   const Qwen35TextConfig cfg = Qwen35TextConfig::from_json_file((fs::path(dir) / "config.json").string());
   // The fp8 K/V storage form (engine.kv_dtype = fp8): the mixed fixture
   // ships k_scale / v_scale of 1, so the planes hold the e4m3 rounding of
   // K and V; the invariance below holds in that form as in bf16, and the
   // eight-row verify's logits must stay close to the bf16 cache's.
+  // --attn-fp8: the same planes with the prefill attention on the fp8
+  // tensor cores (engine.prefill_attention = fp8: Q and P in e4m3); the
+  // same gates. The fixture's one Full layer is its last, so the verify's
+  // logits see the mode only through the prefill rows' own outputs.
+  kv_fp8 = kv_fp8 || attn_fp8;
   if (kv_fp8) require(cfg.quant_kind == dgpp::Qwen35QuantKind::Nvfp4Mixed, "rows: --kv-fp8 needs the mixed fixture");
+  Qwen35Model::set_fp8_attention(attn_fp8);
   const dgpp::LatentFormat kv_format = kv_fp8 ? dgpp::LatentFormat::kFp8 : dgpp::LatentFormat::kBf16;
   // The mixed release's head is already fp8-channel resident: the FP8
   // release's requantizing lever is refused there (the model's ctor).
@@ -413,6 +419,19 @@ int run_rows_invariance(const std::string& dir, bool fp8_head, bool kv_fp8) {
   require(again.logits == full.logits && again.final_hidden_bits == full.final_hidden_bits,
           "rows: the eight-row verify is not deterministic across calls");
   if (kv_fp8) {
+    if (attn_fp8) {
+      // The guard first: the fp8 arithmetic has no e4m3 codes to compute
+      // over on a bf16 pool, so a bf16-pool model under it is refused.
+      bool refused = false;
+      try {
+        Qwen35Model bad = make_model(cfg, dir, 64, false, dgpp::LoaderResidency::Resident);
+        (void)bad;
+      } catch (const std::invalid_argument&) {
+        refused = true;
+      }
+      require(refused, "rows: prefill_attention fp8 on a bf16 pool is refused");
+      Qwen35Model::set_fp8_attention(false);  // the bf16-pool reference below
+    }
     Qwen35Model ref = make_model(cfg, dir, 64, false, dgpp::LoaderResidency::Resident);
     ref.session_close(0);
     (void)ref.session_prefill(0, prompt);
@@ -573,7 +592,7 @@ int run_group_invariance(const std::string& dir) {
 
 int main(int argc, char** argv) {
   std::string fixture, fixture_mixed, smoke, rows, group, checkpoint, dump, states, resident_mtp;
-  bool relaxed = false, bf16_head = false, kv_fp8 = false;
+  bool relaxed = false, bf16_head = false, kv_fp8 = false, attn_fp8 = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--write-fixture" && i + 1 < argc) fixture = argv[++i];
@@ -585,6 +604,7 @@ int main(int argc, char** argv) {
       resident_mtp = argv[++i];
     else if (a == "--bf16-head") bf16_head = true;
     else if (a == "--kv-fp8") kv_fp8 = true;
+    else if (a == "--attn-fp8") attn_fp8 = true;
     else if (a == "--checkpoint-dir" && i + 1 < argc) checkpoint = argv[++i];
     else if (a == "--dump-file" && i + 1 < argc) dump = argv[++i];
     else if (a == "--engine-states" && i + 1 < argc) states = argv[++i];
@@ -620,7 +640,7 @@ int main(int argc, char** argv) {
       return 0;
     }
     if (!smoke.empty()) return run_smoke(smoke);
-    if (!rows.empty()) return run_rows_invariance(rows, !bf16_head, kv_fp8);
+    if (!rows.empty()) return run_rows_invariance(rows, !bf16_head, kv_fp8, attn_fp8);
     if (!group.empty()) return run_group_invariance(group);
     if (!checkpoint.empty() && !dump.empty()) return run_dump_parity(checkpoint, dump, states, relaxed);
     std::fprintf(stderr,

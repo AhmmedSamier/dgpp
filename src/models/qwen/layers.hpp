@@ -382,6 +382,10 @@ struct QwenFullAttnCache {
   // the planes hold e4m3 codes of K / k_scale and V / v_scale, k_cache /
   // v_cache are null, and the layer's resident kv_scales serve the kernels.
   bool fp8 = false;
+  // With fp8: prefill rows through the compute form (engine.prefill_attention
+  // = fp8: Q and P in e4m3 on the fp8 tensor cores); decode rows keep the
+  // storage form's exact walk either way.
+  bool fp8_attention = false;
   uint8_t* k8 = nullptr;            // uint8 [slots, lkv * D]
   uint8_t* v8 = nullptr;
   // The pool's TMA maps over its Full-layer planes and this layer's first

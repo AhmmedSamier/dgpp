@@ -5,6 +5,35 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **`engine.prefill_attention: "fp8"` on the Qwen3.5 family — the prefill
+  attention on the fp8 tensor cores** (2026-10-16). Over the `kv_dtype:
+  "fp8"` pool (the mixed release's `kv_cache_scheme` codes at its shipped
+  `k_scale` / `v_scale`; the key needs it and is refused on a bf16 pool and
+  by the other families), the prefill attention computed in e4m3: Q
+  quantized per row (amax / 448, the row's scale folded into the softmax
+  multiplier with k_scale), S = Q8 K8^T and O += P8 V8 on
+  `mma.m16n8k32.e4m3` (twice the bf16 issue rate on the GB10), the
+  probabilities rounded to e4m3 against the row's running maximum (scaled
+  by 2^8: the maximum is the code 256, the flush floor 2^-17 of it), the
+  denominator the unrounded sum, the output times v_scale; nothing is
+  transposed in memory (P's accumulator layout meets V through a
+  transposed ldmatrix over dim pairs and one byte permute per fragment).
+  Decode rows keep the storage form's exact widened walk. The kernel reads
+  112 TFLOP/s at a 262K context against the bf16 tile form's 73 and the
+  storage form's 60; in situ on one Spark the 262K cold prefill reads 242 s
+  against 316 s in bf16 and 352 s in `fp8` (the per-key attention cost
+  3.8 us per token per 1K of context against 5.9 and 7.0), decode at 262K
+  unchanged at 155–156 ms a pass. Gated by a host model of exactly that
+  recipe in `full_attn_test` (9e-6 relative rms over a 1990-row prefill)
+  and by the KV-mode retrieval / accuracy suite against the bf16 cache:
+  the 300-item set 158/164, 293/300, 100/100 (bf16 160, 292, 100); needles
+  20/20 at 32K and 128K over two seeds and 5/5 at 258K, every control
+  found; the teacher-forced probe at the bf16 boot-to-boot floor (top-1
+  123/127 and 119/126, median KL 0.001 / 0.003 nats). The NVFP4 templates
+  set it beside `kv_dtype: "fp8"`. The
+  forward test's rows invariance runs in this mode too; the storage and
+  compute arithmetic are now two keys (the cache's format, the attention's
+  arithmetic over it), a one-flag A/B either way.
 - **`engine.kv_dtype: "fp8"` on the Qwen3.5 family — the mixed release's
   own K/V cache recipe** (2026-10-16). The Qwen3.8-27B NVFP4 release ships
   a per-layer `k_scale` / `v_scale` (FP8 `kv_cache_scheme`, static
@@ -13,9 +42,10 @@ project procedures and design guidance live in `docs/`.
   context on one Spark, the DFlash2 planes bf16) and keeps the attention
   math the bf16 chain's on the widened codes — k_scale folded into the
   softmax scale, v_scale on the output, the codes widened to bf16 in
-  shared memory by an exact integer form (a code's magnitude bits placed
-  in a bf16 and one bf16x2 multiply by 2^120; the cvt chain through f16
-  and f32 was quarter-rate and bound the decode walk). Gated bitwise
+  shared memory through the hardware e4m3 -> f16 -> f32 -> bf16 cvt chain
+  (exact; an integer form — the magnitude bits placed in a bf16 and one
+  bf16x2 multiply by 2^120 — was also exact and read 3 % slower in situ,
+  the widening being issue-bound at the kernel's occupancy). Gated bitwise
   against the bf16 kernels on widened planes (`full_attn_test`); refused
   with `engine.mtp` (the draft layer ships no scales) and on releases
   without the scheme. With it the **block decode form**: decode rows

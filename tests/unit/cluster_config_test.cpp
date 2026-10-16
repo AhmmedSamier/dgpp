@@ -202,6 +202,7 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
               c.engine.fp8_head == "gemv" && c.engine.draft_head == "exact" && c.engine.draft_head_blocks == 32 &&
               !c.engine.prefill_bf16_partials && !c.engine.prefill_fold_scales &&
               !c.engine.prefill_fp8_gemm && !c.engine.prefill_fp8_per_tensor && c.engine.prefill_activations == "bf16" &&
+              c.engine.prefill_attention == "bf16" &&
               c.engine.dflash_model.empty() &&
               c.engine.dflash_verify_graph && c.engine.dflash_draft_batch && c.engine.dflash_depth == 0 &&
               c.engine.expert_gemm == "wide" && c.engine.expert_gemm_prefetch == 3 &&
@@ -231,6 +232,17 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
   const auto na = dgpp::serve::parse_cluster_config(
       R"({"model":"m","nodes":["h"],"engine":{"prefill_activations":"native"}})", "t");
   require(na.engine.prefill_activations == "native", "engine.prefill_activations native parses");
+  // The prefill attention's arithmetic on the fp8 K/V pool (2026-10-16): "bf16" (the default) or "fp8".
+  const auto pa = dgpp::serve::parse_cluster_config(
+      R"({"model":"m","nodes":["h"],"engine":{"kv_dtype":"fp8","prefill_attention":"fp8"}})", "t");
+  require(pa.engine.prefill_attention == "fp8" && pa.engine.kv_dtype == "fp8", "engine.prefill_attention fp8 parses");
+  bool rejected = false;
+  try {
+    (void)dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"],"engine":{"prefill_attention":"e4m3"}})", "t");
+  } catch (const std::exception&) {
+    rejected = true;
+  }
+  require(rejected, "engine.prefill_attention takes bf16 or fp8 only");
   // The DFlash2 drafter's keys (2026-10-03).
   const auto df = dgpp::serve::parse_cluster_config(
       R"({"model":"m","nodes":["h"],"engine":{"dflash_model":"z-lab/Qwen3.8-27B-DFlash2","dflash_verify_graph":false,"dflash_draft_batch":false,"dflash_depth":4}})", "t");

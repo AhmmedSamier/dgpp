@@ -34,6 +34,11 @@
 // summation order is the tensor cores'. Tolerance-equal to a dense
 // reference, not bitwise, and the two forms differ from each other in their
 // rescaling points (16- vs 32-token tiles, the split boundaries).
+//
+// The fp8 pool (engine.kv_dtype = fp8, 2026-10-16) adds the storage form
+// (the same math on codes widened in shared memory) and, for prefill under
+// engine.prefill_attention = fp8, the compute form (Q and P in e4m3 on the
+// fp8 tensor cores) — their sections below.
 #include "kernels/full_attn.hpp"
 
 #include <cmath>
@@ -873,6 +878,291 @@ __global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_tile_tma_kernel(
   }
 }
 
+// ---- the fp8 compute form (engine.prefill_attention = fp8, 2026-10-16) -----------
+// The same e4m3 pool, the prefill attention on the fp8 tensor cores
+// (mma.m16n8k32.e4m3 issues at twice the bf16 rate on the GB10: 188 vs 94
+// TFLOP/s at this occupancy). Q is quantized per row to e4m3 (amax / 448,
+// the row's scale folded with scale * k_scale into the softmax multiplier),
+// S = Q8 K8^T, P = exp2(s - m + 8) rounded to e4m3 (the +8 spends the code
+// range: the row's maximum is the code 256 exactly and the flush floor is
+// 2^-17 of it instead of 2^-9), O += P8 V8, the denominator the unrounded
+// P sum (the 2^8 cancels in the ratio), the output times v_scale.
+//
+// Layouts, with nothing transposed in memory: a non-transposed ldmatrix of
+// a K row gives the B fragment's dims 4t..4t+3 directly, so the Q A
+// fragments are loaded in that order. The S accumulators sit in their
+// natural layout (n-tile j: keys 8j+2t, 8j+2t+1), so P's A fragment has the
+// keys {2t, 2t+1, 8+2t, 9+2t} at its k positions 4t..4t+3; a transposed
+// ldmatrix of V viewed as 16-bit dim pairs gives each thread (keys 2t, 2t+1)
+// x (dims 2g, 2g+1) per key octet, and one prmt per fragment splits the
+// even and odd dims into two n-tiles whose k order is exactly that key set.
+// Measured (scratch bench, 262K context, 4032 rows): 112 TFLOP/s against
+// the bf16 tile form's 73 and the storage form's 60; the flat-attention
+// check (every P the code 256) matches the bf16 chain to 5e-8 and the
+// one-hot check pins the Q/K layout. Not bitwise anything: its gate is the
+// recipe itself (full_attn_test's host reference) and the serving suite.
+constexpr int kTmaCStages = 4;
+constexpr size_t kTmaCSmem = size_t(kTmaCStages) * kTma8StageBytes + 2048;  // the ring + barriers, 1 KB aligned
+
+__device__ __forceinline__ void fmma_e4m3(float (&c)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1) {
+  asm volatile("mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
+               "{%0,%1,%2,%3};\n"
+               : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+               : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+}
+// Four floats to four e4m3 codes, v0 in the low byte (RNE, saturating).
+__device__ __forceinline__ uint32_t fpack_e4m3x4(float v0, float v1, float v2, float v3) {
+  uint16_t lo, hi;
+  asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(lo) : "f"(v1), "f"(v0));
+  asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(hi) : "f"(v3), "f"(v2));
+  return static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 16);
+}
+__device__ __forceinline__ uint32_t fprmt(uint32_t a, uint32_t b, uint32_t sel) {
+  uint32_t r;
+  asm("prmt.b32 %0, %1, %2, %3;" : "=r"(r) : "r"(a), "r"(b), "r"(sel));
+  return r;
+}
+__device__ __forceinline__ float fbf16lo(uint32_t w) { return __uint_as_float(w << 16); }
+__device__ __forceinline__ float fbf16hi(uint32_t w) { return __uint_as_float(w & 0xFFFF0000u); }
+__device__ __forceinline__ float fpexp8(float s, float n) { return n == -INFINITY ? 0.f : exp2f(s - n + 8.f); }
+
+__global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_tile_fp8c_kernel(
+    const __grid_constant__ CUtensorMap kmap, const __grid_constant__ CUtensorMap vmap, int64_t row_base,
+    const uint16_t* __restrict__ q, int64_t q_row_stride, const int32_t* __restrict__ bt,
+    const int64_t* __restrict__ pos, int rows, int local_heads, int kv_heads, int block_shift, float scale,
+    const float* __restrict__ kv_scales, float* __restrict__ out) {
+  extern __shared__ __align__(1024) uint8_t smraw[];
+  const unsigned sbase = static_cast<unsigned>(__cvta_generic_to_shared(smraw));
+  uint8_t* sm = smraw + ((1024 - (sbase & 1023)) & 1023);
+  uint64_t* full_bar = reinterpret_cast<uint64_t*>(sm + kTmaCStages * kTma8StageBytes);
+  const float ks = kv_scales[0], vs = kv_scales[1];
+  const int r0 = blockIdx.x * kQTile;
+  const int kvh = blockIdx.y;
+  const int group = local_heads / kv_heads;
+  const int warp = threadIdx.x >> 5;
+  const int lane = threadIdx.x & 31;
+  const int g = lane >> 2, t = lane & 3;
+  const int head = kvh * group + warp;
+  const int rg = r0 + g, rg8 = r0 + g + 8;
+  const int64_t pg = rg < rows ? pos[rg] : -1, pg8 = rg8 < rows ? pos[rg8] : -1;
+  int64_t cnt = 0;
+  {
+    int64_t p = lane < kQTile && r0 + lane < rows ? pos[r0 + lane] + 1 : 0;
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) p = max(p, __shfl_xor_sync(0xffffffffu, p, o));
+    cnt = p;
+  }
+  if (threadIdx.x == 0) {
+#pragma unroll
+    for (int s = 0; s < kTmaCStages; ++s) mbar_init(&full_bar[s], 1);
+  }
+  asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+  __syncthreads();
+
+  // Q: the row's amax over its 256 dims, then its e4m3 codes in the
+  // m16n8k32 A layout (a0 / a2: row g, dims 32c + {0, 16} + 4t..; a1 / a3:
+  // row g+8). Two passes over the row (the second re-reads L1-resident
+  // bytes) instead of 128 floats held across the reduction.
+  uint32_t qa[8][4];
+  float sl2_0, sl2_1;
+  {
+    const uint16_t* q0 = q + static_cast<int64_t>(r0) * q_row_stride + static_cast<int64_t>(head) * kD;
+    const bool v0 = rg < rows, v1 = rg8 < rows;
+    const uint16_t* qr0 = q0 + g * q_row_stride;
+    const uint16_t* qr1 = q0 + (g + 8) * q_row_stride;
+    float am0 = 0.f, am1 = 0.f;
+#pragma unroll
+    for (int c = 0; c < 8; ++c) {
+#pragma unroll
+      for (int h = 0; h < 2; ++h) {
+        const int d0 = c * 32 + h * 16 + 4 * t;
+        if (v0) {
+          const uint2 w = *reinterpret_cast<const uint2*>(qr0 + d0);
+          am0 = fmaxf(am0, fmaxf(fmaxf(fabsf(fbf16lo(w.x)), fabsf(fbf16hi(w.x))),
+                                 fmaxf(fabsf(fbf16lo(w.y)), fabsf(fbf16hi(w.y)))));
+        }
+        if (v1) {
+          const uint2 w = *reinterpret_cast<const uint2*>(qr1 + d0);
+          am1 = fmaxf(am1, fmaxf(fmaxf(fabsf(fbf16lo(w.x)), fabsf(fbf16hi(w.x))),
+                                 fmaxf(fabsf(fbf16lo(w.y)), fabsf(fbf16hi(w.y)))));
+        }
+      }
+    }
+#pragma unroll
+    for (int o = 1; o <= 2; o <<= 1) {
+      am0 = fmaxf(am0, __shfl_xor_sync(0xffffffffu, am0, o));
+      am1 = fmaxf(am1, __shfl_xor_sync(0xffffffffu, am1, o));
+    }
+    const float iq0 = am0 > 0.f ? 448.f / am0 : 0.f, iq1 = am1 > 0.f ? 448.f / am1 : 0.f;
+    const float qs0 = am0 > 0.f ? am0 * (1.f / 448.f) : 0.f, qs1 = am1 > 0.f ? am1 * (1.f / 448.f) : 0.f;
+#pragma unroll
+    for (int c = 0; c < 8; ++c) {
+#pragma unroll
+      for (int h = 0; h < 2; ++h) {
+        const int d0 = c * 32 + h * 16 + 4 * t;
+        uint32_t a0 = 0u, a1 = 0u;
+        if (v0) {
+          const uint2 w = *reinterpret_cast<const uint2*>(qr0 + d0);
+          a0 = fpack_e4m3x4(fbf16lo(w.x) * iq0, fbf16hi(w.x) * iq0, fbf16lo(w.y) * iq0, fbf16hi(w.y) * iq0);
+        }
+        if (v1) {
+          const uint2 w = *reinterpret_cast<const uint2*>(qr1 + d0);
+          a1 = fpack_e4m3x4(fbf16lo(w.x) * iq1, fbf16hi(w.x) * iq1, fbf16lo(w.y) * iq1, fbf16hi(w.y) * iq1);
+        }
+        qa[c][h * 2] = a0;
+        qa[c][h * 2 + 1] = a1;
+      }
+    }
+    const float l2e = 1.4426950408889634f;
+    sl2_0 = scale * ks * qs0 * l2e;
+    sl2_1 = scale * ks * qs1 * l2e;
+  }
+
+  // Stage tile `base` (the storage form's boxes: two 32 x 128 UINT8 boxes
+  // a plane) into ring slot `buf`.
+  const int tile_shift = block_shift - 5;
+  const int col0 = kvh * kD;
+  auto stage = [&](int64_t base, int buf) {
+    if (threadIdx.x != 0) return;
+    const int64_t tile = base >> 5;
+    const int64_t page = static_cast<int64_t>(bt[tile >> tile_shift]);
+    const int64_t slot0 = row_base + (page << block_shift) + ((tile & ((int64_t{1} << tile_shift) - 1)) << 5);
+    mbar_expect_tx(&full_bar[buf], static_cast<unsigned>(kTma8StageBytes));
+    uint8_t* kt = sm + buf * kTma8StageBytes;
+    uint8_t* vt = kt + kPlane8Bytes;
+#pragma unroll
+    for (int b = 0; b < kD / kBox8Cols; ++b) {
+      tma_box_2d(kt + b * kBoxBytes, &kmap, col0 + b * kBox8Cols, slot0, &full_bar[buf]);
+      tma_box_2d(vt + b * kBoxBytes, &vmap, col0 + b * kBox8Cols, slot0, &full_bar[buf]);
+    }
+  };
+
+  // Per-lane ldmatrix bases for slot 0 with the swizzle folded in (chunk c
+  // of key row r sits at chunk c ^ (r & 7) of its 128-byte line). K: matrix
+  // m of an x4 = key octet (m >> 1) of a 16-key half, dim half (m & 1) of a
+  // 32-dim chunk c; kb[c & 3] carries the chunk bits. V (transposed): matrix
+  // m = key octet m of the tile, the 16 dims of group dp at chunk dp & 7 of
+  // box dp >> 3; vb[dp & 7].
+  unsigned kb[4], vb[8];
+  {
+    const unsigned s0 = static_cast<unsigned>(__cvta_generic_to_shared(sm));
+    const int r7 = lane & 7, m = lane >> 3;
+    const unsigned kbase = (s0 + (8 * (m >> 1) + r7) * kBox8Cols + ((m & 1) << 4)) ^ (r7 << 4);
+    const unsigned vbase = (s0 + kPlane8Bytes + (8 * m + r7) * kBox8Cols) ^ (r7 << 4);
+#pragma unroll
+    for (int j = 0; j < 4; ++j) kb[j] = kbase ^ (j << 5);
+#pragma unroll
+    for (int j = 0; j < 8; ++j) vb[j] = vbase ^ (j << 4);
+  }
+
+  float acc[32][4];
+#pragma unroll
+  for (int d = 0; d < 32; ++d) acc[d][0] = acc[d][1] = acc[d][2] = acc[d][3] = 0.f;
+  float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.f, l1 = 0.f;
+
+  const int64_t tiles = (cnt + kKTile - 1) / kKTile;
+#pragma unroll
+  for (int s = 0; s < kTmaCStages - 1; ++s)
+    if (s < tiles) stage(static_cast<int64_t>(s) * kKTile, s);
+  int buf = 0;
+  unsigned parity = 0;
+  for (int64_t it = 0; it < tiles; ++it) {
+    mbar_wait(&full_bar[buf], parity);  // tile `it` has landed
+    __syncthreads();  // every warp is done with tile it-1: its slot takes tile it+kTmaCStages-1
+    {
+      const int prev = buf == 0 ? kTmaCStages - 1 : buf - 1;
+      if (it + kTmaCStages - 1 < tiles) stage((it + kTmaCStages - 1) * kKTile, prev);
+    }
+    const unsigned so = static_cast<unsigned>(buf) * kTma8StageBytes;
+    if (++buf == kTmaCStages) { buf = 0; parity ^= 1u; }
+    const int64_t base = it * kKTile;
+    float sc[4][4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) sc[j][0] = sc[j][1] = sc[j][2] = sc[j][3] = 0.f;
+#pragma unroll
+    for (int c = 0; c < 8; ++c) {
+      uint32_t b[4];
+      fldsm_x4_a(b, kb[c & 3] + (c >> 2) * kBoxBytes + so);
+      fmma_e4m3(sc[0], qa[c], b[0], b[1]);
+      fmma_e4m3(sc[1], qa[c], b[2], b[3]);
+      fldsm_x4_a(b, kb[c & 3] + (c >> 2) * kBoxBytes + 16 * kBox8Cols + so);
+      fmma_e4m3(sc[2], qa[c], b[0], b[1]);
+      fmma_e4m3(sc[3], qa[c], b[2], b[3]);
+    }
+    float mx0 = -INFINITY, mx1 = -INFINITY;
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+#pragma unroll
+      for (int e = 0; e < 2; ++e) {
+        const int64_t key = base + j * 8 + 2 * t + e;
+        sc[j][e] = key <= pg ? sc[j][e] * sl2_0 : -INFINITY;
+        sc[j][2 + e] = key <= pg8 ? sc[j][2 + e] * sl2_1 : -INFINITY;
+        mx0 = fmaxf(mx0, sc[j][e]);
+        mx1 = fmaxf(mx1, sc[j][2 + e]);
+      }
+    }
+#pragma unroll
+    for (int o = 1; o <= 2; o <<= 1) {
+      mx0 = fmaxf(mx0, __shfl_xor_sync(0xffffffffu, mx0, o));
+      mx1 = fmaxf(mx1, __shfl_xor_sync(0xffffffffu, mx1, o));
+    }
+    const float n0 = fmaxf(m0, mx0), n1 = fmaxf(m1, mx1);
+    const float a0 = fpexp(m0, n0), a1 = fpexp(m1, n1);
+    m0 = n0;
+    m1 = n1;
+    float p[4][4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+      p[j][0] = fpexp8(sc[j][0], n0);
+      p[j][1] = fpexp8(sc[j][1], n0);
+      p[j][2] = fpexp8(sc[j][2], n1);
+      p[j][3] = fpexp8(sc[j][3], n1);
+      l0 = (j == 0 ? l0 * a0 : l0) + p[j][0] + p[j][1];
+      l1 = (j == 0 ? l1 * a1 : l1) + p[j][2] + p[j][3];
+    }
+    const uint32_t pa[4] = {fpack_e4m3x4(p[0][0], p[0][1], p[1][0], p[1][1]),
+                            fpack_e4m3x4(p[0][2], p[0][3], p[1][2], p[1][3]),
+                            fpack_e4m3x4(p[2][0], p[2][1], p[3][0], p[3][1]),
+                            fpack_e4m3x4(p[2][2], p[2][3], p[3][2], p[3][3])};
+    if (__any_sync(0xffffffffu, a0 != 1.f || a1 != 1.f)) {
+#pragma unroll
+      for (int d = 0; d < 32; ++d) {
+        acc[d][0] *= a0;
+        acc[d][1] *= a0;
+        acc[d][2] *= a1;
+        acc[d][3] *= a1;
+      }
+    }
+#pragma unroll
+    for (int dp = 0; dp < 16; ++dp) {
+      uint32_t r[4];
+      fldsm_x4_ta(r, vb[dp & 7] + (dp >> 3) * kBoxBytes + so);
+      fmma_e4m3(acc[2 * dp], pa, fprmt(r[0], r[1], 0x6420u), fprmt(r[2], r[3], 0x6420u));
+      fmma_e4m3(acc[2 * dp + 1], pa, fprmt(r[0], r[1], 0x7531u), fprmt(r[2], r[3], 0x7531u));
+    }
+  }
+#pragma unroll
+  for (int o = 1; o <= 2; o <<= 1) {
+    l0 += __shfl_xor_sync(0xffffffffu, l0, o);
+    l1 += __shfl_xor_sync(0xffffffffu, l1, o);
+  }
+  const float i0 = (l0 > 0.f ? 1.f / l0 : 0.f) * vs, i1 = (l1 > 0.f ? 1.f / l1 : 0.f) * vs;
+  float* o0 = out + (static_cast<int64_t>(rg) * local_heads + head) * kD;
+  float* o1 = out + (static_cast<int64_t>(rg8) * local_heads + head) * kD;
+  // The even n-tile holds dims 16dp + 2n, the odd one 16dp + 2n + 1: a
+  // thread's c0 / c1 of both are dims 16dp + 4t .. 16dp + 4t + 3.
+#pragma unroll
+  for (int dp = 0; dp < 16; ++dp) {
+    const int d = dp * 16 + 4 * t;
+    if (rg < rows)
+      *reinterpret_cast<float4*>(o0 + d) = make_float4(acc[2 * dp][0] * i0, acc[2 * dp + 1][0] * i0,
+                                                        acc[2 * dp][1] * i0, acc[2 * dp + 1][1] * i0);
+    if (rg8 < rows)
+      *reinterpret_cast<float4*>(o1 + d) = make_float4(acc[2 * dp][2] * i1, acc[2 * dp + 1][2] * i1,
+                                                        acc[2 * dp][3] * i1, acc[2 * dp + 1][3] * i1);
+  }
+}
+
 // ---- the block decode form (2026-10-16) -----------------------------------------
 // Decode rows grouped by request (the padded verify's 8-row blocks, a
 // batch's spans, a lone row): one CTA per (group, KV head, key split)
@@ -1201,6 +1491,13 @@ void tile_tma_attrs_once() {
   }();
   (void)done;
 }
+void tile_fp8c_attrs_once() {
+  static const bool done = [] {
+    opt_in_smem(full_attn_tile_fp8c_kernel, kTmaCSmem);
+    return true;
+  }();
+  (void)done;
+}
 template <bool kFp8>
 void block_attrs_once() {
   static const bool done = [] {
@@ -1401,6 +1698,25 @@ void full_attn_prefill_tma_fp8(const FullAttnStageMaps& maps, int64_t row_base, 
                                const float* kv_scales, float* out, cudaStream_t stream) {
   prefill_tma<true>(maps, row_base, q, q_row_stride, block_table, pos, rows, local_heads, kv_heads, block_tokens,
                     scale, kv_scales, out, stream);
+}
+
+void full_attn_prefill_tma_fp8_compute(const FullAttnStageMaps& maps, int64_t row_base, const uint16_t* q,
+                                       int64_t q_row_stride, const int32_t* block_table, const int64_t* pos,
+                                       int rows, int local_heads, int kv_heads, int block_tokens, float scale,
+                                       const float* kv_scales, float* out, cudaStream_t stream) {
+  if (rows <= 0) return;
+  if (!full_attn_tma_supported(local_heads, kv_heads, block_tokens))
+    throw std::invalid_argument(
+        "full_attn_prefill_tma_fp8_compute: geometry outside the staged form (full_attn_tma_supported)");
+  if (kv_scales == nullptr) throw std::invalid_argument("full_attn_prefill_tma_fp8_compute: null kv scales");
+  tile_fp8c_attrs_once();
+  const int group = local_heads / kv_heads;
+  const int block_shift = __builtin_ctz(static_cast<unsigned>(block_tokens));
+  const dim3 grid(static_cast<unsigned>((rows + kQTile - 1) / kQTile), static_cast<unsigned>(kv_heads));
+  full_attn_tile_fp8c_kernel<<<grid, group * 32, kTmaCSmem, stream>>>(maps.k, maps.v, row_base, q, q_row_stride,
+                                                                       block_table, pos, rows, local_heads, kv_heads,
+                                                                       block_shift, scale, kv_scales, out);
+  DGPP_CUDA_OK(cudaGetLastError());
 }
 
 void full_attn_prefill_warp(const uint16_t* q, int64_t q_row_stride, const uint16_t* k_cache,

@@ -756,6 +756,151 @@ DGPP_TEST(full_attention_fp8_prefill_long_context_bitwise_the_bf16_chain) {
   require(diff == 0, "fp8 staged prefill at a long context bitwise the bf16 chain");
 }
 
+// The fp8 compute form (engine.prefill_attention = fp8): Q quantized per
+// row to e4m3 (amax / 448), S = Q8 K8^T, P = exp2(s - m + 8) rounded to
+// e4m3, O += P8 V8 on the fp8 tensor cores, the denominator the unrounded
+// P sum, the output times v_scale. Gate: a host model of exactly that
+// recipe (double arithmetic over the same codes, 32-key tiles, the running
+// max) on every fifth row of a 1990-row prefill over 64-token pages — each
+// layout the kernel relies on (the Q/K dim order, P's key order against
+// V's transposed fragments, the even/odd dim n-tiles) would scramble it by
+// O(1); what remains is the f32 accumulation order and the exp2
+// approximation, which move a P across an e4m3 rounding boundary a few
+// times per million. Reported beside it: the distance to the bf16 chain
+// (the storage form), the mode's deviation by design on this data.
+DGPP_TEST(full_attention_fp8_compute_form_is_its_recipe) {
+  Geo g;
+  g.local_heads = 12;  // two KV groups of six
+  g.kv_heads = 2;
+  g.block_tokens = 64;  // the serving pool's page
+  g.blocks_per_request = 32;  // 2048 slots per request
+  cudaStream_t st = test_stream();
+  const float ks = 0.0390625f, vs = 0.1416015625f;
+  const int lens[2] = {2000, 100};
+  const size_t slots = static_cast<size_t>(g.max_requests) * g.slots();
+  std::vector<uint8_t> k8(slots * g.width(), 0x7E), v8(slots * g.width(), 0x7E);
+  for (int q = 0; q < 2; ++q) {
+    const std::vector<uint16_t> k = random_bf16_normal(230 + q, static_cast<int64_t>(lens[q]) * g.width(), 1.0f);
+    const std::vector<uint16_t> v = random_bf16_normal(240 + q, static_cast<int64_t>(lens[q]) * g.width(), 1.0f);
+    for (int t = 0; t < lens[q]; ++t)
+      for (int e = 0; e < g.width(); ++e) {
+        const size_t at = static_cast<size_t>(phys(g, q, t)) * g.width() + e;
+        k8[at] = dgpp::float_to_fp8_e4m3_bits(dgpp::bf16_bits_to_float(k[static_cast<size_t>(t) * g.width() + e]) / ks);
+        v8[at] = dgpp::float_to_fp8_e4m3_bits(dgpp::bf16_bits_to_float(v[static_cast<size_t>(t) * g.width() + e]) / vs);
+      }
+  }
+  std::vector<uint16_t> kw(k8.size()), vw(v8.size());
+  for (size_t i = 0; i < kw.size(); ++i) {
+    kw[i] = dgpp::float_to_bf16_bits(dgpp::fp8_e4m3_bits_to_float(k8[i]));
+    vw[i] = dgpp::float_to_bf16_bits(dgpp::fp8_e4m3_bits_to_float(v8[i]));
+  }
+  DevBuf dk8 = up(k8), dv8 = up(v8), dkw = up(kw), dvw = up(vw), dtbl = up(tables(g));
+  const std::vector<float> scales = {ks, vs};
+  DevBuf dscales = up(scales);
+  const int rows = 1990;  // the last CTA carries six rows and ten padding rows
+  const int qw = g.local_heads * D;
+  const int group = g.local_heads / g.kv_heads;
+  std::vector<int64_t> pos(static_cast<size_t>(rows));
+  for (int r = 0; r < rows; ++r) pos[static_cast<size_t>(r)] = r;
+  // Q rows at a spread of magnitudes: the per-row amax is part of the recipe.
+  std::vector<uint16_t> q = random_bf16_normal(250, static_cast<int64_t>(rows) * qw, 1.0f);
+  for (int r = 0; r < rows; ++r)
+    for (int h = 0; h < g.local_heads; ++h) {
+      const float mult = 0.25f * static_cast<float>(1 + ((r * 7 + h) % 13));
+      for (int d = 0; d < D; ++d) {
+        uint16_t& x = q[(static_cast<size_t>(r) * g.local_heads + h) * D + d];
+        x = dgpp::float_to_bf16_bits(dgpp::bf16_bits_to_float(x) * mult);
+      }
+    }
+  DevBuf dq = up(q), dpos = up(pos);
+  const float scale = 1.0f / std::sqrt(static_cast<float>(D));
+  const size_t n = static_cast<size_t>(rows) * qw;
+  const dgpp::FullAttnStageMaps maps =
+      dgpp::full_attn_stage_maps(ptr<uint16_t>(dkw), ptr<uint16_t>(dvw), static_cast<int64_t>(slots), g.kv_heads);
+  const dgpp::FullAttnStageMaps maps8 =
+      dgpp::full_attn_stage_maps_fp8(ptr<uint8_t>(dk8), ptr<uint8_t>(dv8), static_cast<int64_t>(slots), g.kv_heads);
+  DevBuf ref(n * 4), got(n * 4);
+  DGPP_CUDA_OK(cudaMemset(ref.p, 0x7F, n * 4));
+  DGPP_CUDA_OK(cudaMemset(got.p, 0x7F, n * 4));
+  dgpp::full_attn_prefill_tma(maps, 0, ptr<uint16_t>(dq), qw, ptr<int32_t>(dtbl), ptr<int64_t>(dpos), rows,
+                              g.local_heads, g.kv_heads, g.block_tokens, scale * ks, mptr<float>(ref), st);
+  dgpp::full_attn_prefill_tma_fp8_compute(maps8, 0, ptr<uint16_t>(dq), qw, ptr<int32_t>(dtbl), ptr<int64_t>(dpos),
+                                          rows, g.local_heads, g.kv_heads, g.block_tokens, scale,
+                                          ptr<float>(dscales), mptr<float>(got), st);
+  DGPP_CUDA_OK(cudaStreamSynchronize(st));
+  const std::vector<float> have = down<float>(got, n);
+  std::vector<float> chain = down<float>(ref, n);
+  for (float& x : chain) x *= vs;
+  for (size_t i = 0; i < n; ++i) require(std::isfinite(have[i]), "fp8 compute form: finite output");
+
+  // The recipe on the host, the kernel's f32 steps where they decide a code.
+  double num_r = 0, den_r = 0, worst_r = 0, num_c = 0, den_c = 0;
+  size_t compared = 0;
+  std::vector<double> acc(D), s(kTileTok32);
+  std::vector<float> q8(D);
+  for (int r = 0; r < rows; r += 5) {
+    for (int h = 0; h < g.local_heads; ++h) {
+      const int kvh = h / group;
+      const uint16_t* qr = q.data() + (static_cast<size_t>(r) * g.local_heads + h) * D;
+      float am = 0.f;
+      for (int d = 0; d < D; ++d) am = std::max(am, std::fabs(dgpp::bf16_bits_to_float(qr[d])));
+      const float iq = am > 0.f ? 448.f / am : 0.f;
+      const float qs = am > 0.f ? am * (1.f / 448.f) : 0.f;
+      for (int d = 0; d < D; ++d) {
+        const float x = std::max(-448.f, std::min(448.f, dgpp::bf16_bits_to_float(qr[d]) * iq));
+        q8[static_cast<size_t>(d)] = dgpp::fp8_e4m3_bits_to_float(dgpp::float_to_fp8_e4m3_bits(x));
+      }
+      const float sl2 = scale * ks * qs * 1.4426950408889634f;
+      double m = -INFINITY, l = 0;
+      std::fill(acc.begin(), acc.end(), 0.0);
+      for (int64_t base = 0; base <= r; base += kTileTok32) {
+        double mx = -INFINITY;
+        for (int j = 0; j < kTileTok32; ++j) {
+          const int64_t key = base + j;
+          if (key > r) {
+            s[static_cast<size_t>(j)] = -INFINITY;
+            continue;
+          }
+          const uint8_t* kr = k8.data() + static_cast<size_t>(phys(g, 0, key)) * g.width() + kvh * D;
+          double dot = 0;
+          for (int d = 0; d < D; ++d) dot += static_cast<double>(q8[static_cast<size_t>(d)]) * dgpp::fp8_e4m3_bits_to_float(kr[d]);
+          s[static_cast<size_t>(j)] = dot * sl2;
+          mx = std::max(mx, s[static_cast<size_t>(j)]);
+        }
+        const double nm = std::max(m, mx);
+        const double a = m == -INFINITY ? 0.0 : std::exp2(m - nm);
+        for (int d = 0; d < D; ++d) acc[static_cast<size_t>(d)] *= a;
+        l *= a;
+        m = nm;
+        for (int j = 0; j < kTileTok32; ++j) {
+          if (s[static_cast<size_t>(j)] == -INFINITY) continue;
+          const double p = std::exp2(s[static_cast<size_t>(j)] - m + 8.0);
+          l += p;
+          const float p8 = dgpp::fp8_e4m3_bits_to_float(dgpp::float_to_fp8_e4m3_bits(static_cast<float>(p)));
+          const uint8_t* vr = v8.data() + static_cast<size_t>(phys(g, 0, base + j)) * g.width() + kvh * D;
+          for (int d = 0; d < D; ++d) acc[static_cast<size_t>(d)] += static_cast<double>(p8) * dgpp::fp8_e4m3_bits_to_float(vr[d]);
+        }
+      }
+      for (int d = 0; d < D; ++d) {
+        const double want = acc[static_cast<size_t>(d)] / l * vs;
+        const size_t i = (static_cast<size_t>(r) * g.local_heads + h) * D + d;
+        const double dr = have[i] - want, dc = have[i] - chain[i];
+        num_r += dr * dr;
+        den_r += want * want;
+        worst_r = std::max(worst_r, std::fabs(dr));
+        num_c += dc * dc;
+        den_c += static_cast<double>(chain[i]) * chain[i];
+        ++compared;
+      }
+    }
+  }
+  const double rel_r = std::sqrt(num_r / den_r), rel_c = std::sqrt(num_c / den_c);
+  std::printf("[ .. ] fp8 compute form vs its recipe on %zu elements: rel rms %.3g (worst |d| %.3g); vs the bf16 chain %.3g\n",
+              compared, rel_r, worst_r, rel_c);
+  require(rel_r < 1e-3, "fp8 compute form: the recipe within 1e-3 relative rms");
+  require(rel_c < 0.1, "fp8 compute form: within 10 % of the bf16 chain on this data");
+}
+
 int main() {
   int devices = 0;
   const cudaError_t err = cudaGetDeviceCount(&devices);

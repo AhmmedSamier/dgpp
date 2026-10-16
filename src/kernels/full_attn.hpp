@@ -117,6 +117,19 @@ void full_attn_prefill_tma_fp8(const FullAttnStageMaps& maps, int64_t row_base, 
                                int local_heads, int kv_heads, int block_tokens, float scale,
                                const float* kv_scales, float* out, cudaStream_t stream);
 
+// The fp8 compute form (engine.prefill_attention = fp8, 2026-10-16): the
+// same planes and maps as full_attn_prefill_tma_fp8, the attention on the
+// fp8 tensor cores — Q quantized per row to e4m3 (amax / 448, the row's
+// scale folded with scale * k_scale into the softmax multiplier), S = Q8
+// K8^T, P = exp2(s - m + 8) rounded to e4m3, O += P8 V8, the denominator
+// the unrounded P sum, the output times v_scale. Not the bf16 chain: its
+// gate is the recipe (full_attn_test's host reference) and the serving
+// suite. Prefill only — decode rows keep the storage form's exact walk.
+void full_attn_prefill_tma_fp8_compute(const FullAttnStageMaps& maps, int64_t row_base, const uint16_t* q,
+                                       int64_t q_row_stride, const int32_t* block_table, const int64_t* pos,
+                                       int rows, int local_heads, int kv_heads, int block_tokens, float scale,
+                                       const float* kv_scales, float* out, cudaStream_t stream);
+
 // The unsplit row form (every row's whole range in one warp): the tests'
 // reference path and the original kernel's contract.
 void full_attn_prefill_warp(const uint16_t* q, int64_t q_row_stride, const uint16_t* k_cache,

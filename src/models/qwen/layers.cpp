@@ -1228,8 +1228,10 @@ void QwenFullAttnLayer::attend_rows(int T, const QwenQsaRows& rows, QwenFullAttn
   const bool grouped = rows.decode && rows.spans && rows.num_requests > 1;
   const bool blocks = rows.decode && staged && (grouped || T <= 16);
   if (cache.fp8) {
-    // The fp8 storage form: the bf16 chain on the widened codes
-    // (kernels/full_attn.hpp); its prefill is the staged form only.
+    // The fp8 pool: decode through the storage form (the bf16 chain on the
+    // widened codes, kernels/full_attn.hpp), prefill through the storage
+    // form or, under engine.prefill_attention = fp8, the e4m3 tensor-core
+    // form; both staged.
     if (rows.decode && blocks)
       full_attn_decode_blocks_fp8(*cache.maps, cache.row_base, qn_ + offset, static_cast<int64_t>(lh_) * D, d_req,
                                   d_pos, grouped ? rows.spans : nullptr, grouped ? rows.num_requests : 1, T,
@@ -1239,6 +1241,11 @@ void QwenFullAttnLayer::attend_rows(int T, const QwenQsaRows& rows, QwenFullAttn
       full_attn_decode_fp8(qn_ + offset, static_cast<int64_t>(lh_) * D, cache.k8, cache.v8, d_req, d_pos, T, lh_,
                            lkv_, cache.block_tokens, cache.block_tables, cache.blocks_per_request, scale_,
                            w_.kv_scales, c_out_ + offset, T <= kPartRows ? part_ : nullptr, stream);
+    else if (cache.fp8_attention)
+      full_attn_prefill_tma_fp8_compute(
+          *cache.maps, cache.row_base, qn_ + offset, static_cast<int64_t>(lh_) * D,
+          cache.block_tables + static_cast<int64_t>(rows.request) * cache.blocks_per_request, d_pos, T, lh_, lkv_,
+          cache.block_tokens, scale_, w_.kv_scales, c_out_ + offset, stream);
     else
       full_attn_prefill_tma_fp8(*cache.maps, cache.row_base, qn_ + offset, static_cast<int64_t>(lh_) * D,
                                 cache.block_tables + static_cast<int64_t>(rows.request) * cache.blocks_per_request,

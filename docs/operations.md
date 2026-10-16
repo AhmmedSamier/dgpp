@@ -122,7 +122,8 @@ three values: switching never rebuilds them.
 
 `kv_dtype` affects GLM-5.3's latent cache, MiMo's K/V cache and, on the
 Qwen3.8-27B NVFP4 mixed release, the Qwen3.5 K/V cache (`fp8`: the
-release's shipped per-layer `k_scale` / `v_scale`). Qwen3.8-Flash-Next and
+release's shipped per-layer `k_scale` / `v_scale`; `prefill_attention`
+then picks the attention's arithmetic over it, bf16 or fp8). Qwen3.8-Flash-Next and
 GLM-4.7 K/V caches stay BF16. Qwen's `ngram_table` and `dense_weights` settings
 control table residency and optional FP8 encoding of dense projections.
 The Qwen NVFP4 templates, including YaRN, set `engine.fp8_head: "mma"`.
@@ -920,8 +921,14 @@ K / k_scale and V / v_scale (the per-layer BF16 scalars the release ships,
 widened to f32 in the layer image), the appends divide and round once,
 and the attention kernels widen a tile's codes to bf16 in shared memory
 (exact) with k_scale folded into the softmax scale and v_scale on the
-output — the bf16 kernels' bits on those widened planes. The DFlash2
-drafter's planes stay bf16; the key is refused with `engine.mtp` (the MTP
+output — the bf16 kernels' bits on those widened planes. `engine.prefill_attention: "fp8"`
+keeps that pool and runs the prefill attention on the fp8 tensor cores:
+Q quantized per row to e4m3 (its scale folded into the softmax multiplier
+with k_scale), the probabilities rounded to e4m3 against the row's running
+maximum, both products on the e4m3 mma — the faster long prefill for a
+further deviation the model card measures; decode rows keep the exact
+widened walk under either value, and the key needs the fp8 pool. The DFlash2
+drafter's planes stay bf16; the fp8 pool is refused with `engine.mtp` (the MTP
 draft layer ships no scales) and on releases without the scheme. Decode
 rows grouped by request (the drafter's verify blocks, a batch's spans)
 take the block form in either format: every K/V tile staged once per

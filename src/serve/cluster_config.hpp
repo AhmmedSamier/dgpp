@@ -50,7 +50,8 @@ struct ClusterConfig {
     int64_t kv_capacity = 8192;
     // The cache format: GLM-5.3's latent cache bf16 | fp8 | fp4; MiMo's
     // K/V bf16 | fp8; Qwen3.5's K/V bf16 | fp8 (the e4m3 storage form at
-    // the mixed NVFP4 release's shipped k_scale / v_scale, 2026-10-16).
+    // the mixed NVFP4 release's shipped k_scale / v_scale, 2026-10-16; the
+    // attention's arithmetic on it is prefill_attention below).
     std::string kv_dtype = "bf16";
     // The full GLM-5.3's embedding table: "replicated" on every rank, or
     // "vocab" — each rank holds its lm-head slice of the rows, gathered
@@ -157,11 +158,19 @@ struct ClusterConfig {
     //     channel-FP8 projections and late MLPs from per-token e4m3 rows on
     //     the e4m3 tensor cores; the FP8 release's blockwise product; decode
     //     rows keep bf16 activations).
+    //   prefill_attention: "bf16" (the default: the attention products in
+    //     bf16 — on an fp8 K/V pool the codes widened exactly) or "fp8"
+    //     (2026-10-16, the Qwen3.5 family on engine.kv_dtype fp8: the
+    //     prefill attention on the fp8 tensor cores — Q and the
+    //     probabilities quantized to e4m3 per row, S and O on
+    //     mma.e4m3 at twice the bf16 rate; decode rows keep the exact
+    //     widened walk). Needs kv_dtype fp8; other families refuse it.
     bool prefill_bf16_partials = false;
     bool prefill_fold_scales = false;
     bool prefill_fp8_gemm = false;
     bool prefill_fp8_per_tensor = false;
     std::string prefill_activations = "bf16";
+    std::string prefill_attention = "bf16";
     // The packed expert GEMM's form and companions (2026-09-30; every
     // serving switch is a config key — no environment variable selects a
     // kernel). All bitwise the default chain.

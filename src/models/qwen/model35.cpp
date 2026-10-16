@@ -111,6 +111,7 @@ QwenFullAttnCache Qwen35KvPool::view(int layer) const {
     uint8_t* vb = v_base_ + static_cast<size_t>(layer) * layer_kv_bytes();
     if (shape_.fp8) {
       c.fp8 = true;
+      c.fp8_attention = shape_.fp8_attention;
       c.k8 = kb;
       c.v8 = vb;
     } else {
@@ -179,8 +180,16 @@ void Qwen35KvPool::copy_block_contents(int32_t src, int32_t dst, cudaStream_t st
 // The pool format a kv_dtype asks for: bf16, or the fp8 storage form —
 // only where every Full layer ships its kv_cache_scheme scales (the mixed
 // release) and no MTP draft plane (its layer ships none) rides the pool.
+// engine.prefill_attention = fp8 (the attention's arithmetic on that pool)
+// needs it: with a bf16 pool there are no e4m3 K/V codes to compute over.
 static bool kv_format_is_fp8(LatentFormat f, const Qwen35TextConfig& cfg, bool mtp) {
-  if (f == LatentFormat::kBf16) return false;
+  if (f == LatentFormat::kBf16) {
+    if (Qwen35Model::fp8_attention())
+      throw std::invalid_argument(
+          "Qwen35Model: engine.prefill_attention fp8 needs engine.kv_dtype fp8 (the attention computes over the "
+          "pool's e4m3 codes at the release's k_scale / v_scale); set kv_dtype fp8 or prefill_attention bf16");
+    return false;
+  }
   if (f != LatentFormat::kFp8)
     throw std::invalid_argument(std::string("Qwen35Model: engine.kv_dtype ") + latent_format_name(f) +
                                 " — this family's K/V pool takes bf16 or fp8");
@@ -325,6 +334,7 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
   shape.max_requests = max_requests;
   shape.token_slots = sp.max_cache_tokens;
   shape.fp8 = kv_format_is_fp8(kv_format, cfg_, mtp_);
+  shape.fp8_attention = fp8_attention_;
   if (dflash2_) {
     shape.draft_layers = dfcfg_.num_hidden_layers;
     shape.draft_kv_heads = dfcfg_.local_kv_heads(world);  // this rank's kv heads (sharded drafter)
@@ -1449,6 +1459,7 @@ MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens,
   shape.max_requests = max_requests;
   shape.token_slots = cache_tokens;
   shape.fp8 = kv_format_is_fp8(kv_format, cfg, mtp);
+  shape.fp8_attention = fp8_attention_;
   if (dfcfg) {
     shape.draft_layers = dfcfg->num_hidden_layers;
     shape.draft_kv_heads = dfcfg->local_kv_heads(world);

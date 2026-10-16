@@ -1323,6 +1323,8 @@ add_test(NAME qwen35_mixed_rows_invariance COMMAND qwen35_forward_test --rows-in
 set_tests_properties(qwen35_mixed_rows_invariance PROPERTIES DEPENDS qwen35_mixed_fixture)
 add_test(NAME qwen35_mixed_rows_invariance_kvfp8 COMMAND qwen35_forward_test --rows-invariance ${QWEN35_MIXED_FIXTURE} --kv-fp8)
 set_tests_properties(qwen35_mixed_rows_invariance_kvfp8 PROPERTIES DEPENDS qwen35_mixed_fixture)
+add_test(NAME qwen35_mixed_rows_invariance_attnfp8 COMMAND qwen35_forward_test --rows-invariance ${QWEN35_MIXED_FIXTURE} --attn-fp8)
+set_tests_properties(qwen35_mixed_rows_invariance_attnfp8 PROPERTIES DEPENDS qwen35_mixed_fixture)
 add_test(NAME qwen35_mixed_generate
   COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/qwen35_reference_dump.py
           gen-pure --checkpoint-dir ${QWEN35_MIXED_FIXTURE}

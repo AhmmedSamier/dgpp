@@ -917,7 +917,8 @@ struct Qwen35Family final : ServeFamily {
   std::unique_ptr<dgpp::Qwen35Model> model;
   // The Full layers' K/V pool format (engine.kv_dtype): bf16, or the fp8
   // storage form on a release that ships its kv_cache_scheme scales
-  // (models/qwen/model35.hpp: Qwen35KvPoolShape::fp8).
+  // (models/qwen/model35.hpp: Qwen35KvPoolShape::fp8). The attention's
+  // arithmetic on that pool is engine.prefill_attention (a model static).
   dgpp::LatentFormat kv_format = dgpp::LatentFormat::kBf16;
   Qwen35Family(const std::string& checkpoint,
                const std::optional<dgpp::RopeScaling>& rope_scaling = std::nullopt,
@@ -1533,6 +1534,7 @@ int main(int argc, char** argv) {
   bool prefill_fp8_gemm = false;
   bool prefill_fp8_per_tensor = false;  // the Qwen3.8-27B per-tensor prefill recipe (opt-in)
   std::string prefill_activations = "bf16";  // "native": the checkpoint's activation recipe on prefill rows
+  std::string prefill_attention = "bf16";    // "fp8": the Qwen3.5 prefill attention on the fp8 tensor cores
   std::string expert_gemm = "wide";         // the packed expert GEMM's form and companions (engine.expert_*)
   int expert_gemm_prefetch = 3;
   bool expert_tile_list = true;
@@ -1655,6 +1657,7 @@ int main(int argc, char** argv) {
     prefill_fp8_gemm = e.prefill_fp8_gemm;
     prefill_fp8_per_tensor = e.prefill_fp8_per_tensor;
     prefill_activations = e.prefill_activations;
+    prefill_attention = e.prefill_attention;
     expert_gemm = e.expert_gemm;
     expert_gemm_prefetch = e.expert_gemm_prefetch;
     expert_tile_list = e.expert_tile_list;
@@ -2015,7 +2018,7 @@ int main(int argc, char** argv) {
     const int effective_batch_min_live =
         graph_batch_min_live == 0 ? std::min(2, max_concurrency) : graph_batch_min_live;
     return std::format(
-        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} ngt={} dw={} mtpef={} bfw={} "
+        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} pfattn={} ngt={} dw={} mtpef={} bfw={} "
         "fp8head={} dh={} dhb={} mtph={} attw={} pf={} "
         "emsh={} maxtok={} queue={} "
         "eos={} graph={} compact={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} "
@@ -2025,7 +2028,8 @@ int main(int argc, char** argv) {
         "reasoning_in_content={} "
         "rs={} dflash={} dfw={} lk={} lkn={} lks={} lka={} lkt={}",
         model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port, max_concurrency,
-        kv_capacity, kv_dtype, ngram_table, dense_weights, mtp_expert_format, bf16_weights, fp8_head, draft_head,
+        kv_capacity, kv_dtype, prefill_attention, ngram_table, dense_weights, mtp_expert_format, bf16_weights, fp8_head,
+        draft_head,
         draft_head_blocks, mtp_head,
         attention_weights, prefill, embed_sharding, default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0,
         compact_batches ? 1 : 0, mtp ? 1 : 0, mtp_depth, mtp_schedule ? 1 : 0, mtp_schedule_row_ms,
@@ -2084,6 +2088,7 @@ int main(int argc, char** argv) {
         ws.prefill_fp8_gemm = prefill_fp8_gemm;
         ws.prefill_fp8_per_tensor = prefill_fp8_per_tensor;
         ws.prefill_activations = prefill_activations;
+        ws.prefill_attention = prefill_attention;
         ws.dflash_model = dflash_model;
         ws.dflash_verify_graph = dflash_verify_graph;
         ws.prefill_group = prefill_group;
@@ -2413,6 +2418,8 @@ int main(int argc, char** argv) {
   dgpp::Qwen35Model::set_dense_weights_fp8(dense_weights == "fp8");
   // The checkpoint's activation recipe on prefill rows (engine.prefill_activations).
   dgpp::Qwen35Model::set_native_activations(prefill_activations == "native");
+  // The prefill attention's arithmetic on the fp8 pool (engine.prefill_attention).
+  dgpp::Qwen35Model::set_fp8_attention(prefill_attention == "fp8");
   if (dflash_weights != "checkpoint" && dflash_weights != "fp8") {
     DGPP_LOG_ERROR("--dflash-weights must be checkpoint or fp8, got '{}'", dflash_weights);
     return 2;
@@ -2717,10 +2724,16 @@ int main(int argc, char** argv) {
     DGPP_LOG_INFO("serve: decode rows {} ({} slot(s) x {} row(s) per request, floor {}, the {} family's cap {})",
                   decode_rows, max_concurrency, graph_rows_per_request, dgpp::kDecodeRows, family->name(),
                   family->decode_rows_cap());
+    if (prefill_attention != "bf16" && std::string(family->name()) != "qwen3_5") {
+      DGPP_LOG_ERROR("serve: engine.prefill_attention {} is the Qwen3.5 family's lever (the fp8 K/V pool's attention "
+                     "on the fp8 tensor cores); the {} family has no such form",
+                     prefill_attention, family->name());
+      return 2;
+    }
     if (std::string(family->name()) != "glm5" && std::string(family->name()) != "glm_moe_dsa" &&
-        std::string(family->name()) != "mimo_v2" && kv_dtype != "bf16")
-      DGPP_LOG_WARN("serve: --kv-dtype {} applies to the GLM-5.3 latent caches and the MiMo-V2 K/V cache only; "
-                    "the {} caches stay bf16",
+        std::string(family->name()) != "mimo_v2" && std::string(family->name()) != "qwen3_5" && kv_dtype != "bf16")
+      DGPP_LOG_WARN("serve: --kv-dtype {} applies to the GLM-5.3 latent caches, the MiMo-V2 K/V cache and the "
+                    "Qwen3.5 K/V pool only; the {} caches stay bf16",
                     kv_dtype, family->name());
     if (std::string(family->name()) != "qwen4_exp" && ngram_table != "resident")
       DGPP_LOG_WARN("serve: --ngram-table {} applies to the Qwen n-gram table only; the {} family has none",

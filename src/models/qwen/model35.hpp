@@ -63,6 +63,11 @@ struct Qwen35KvPoolShape {
   // The draft planes stay bf16. Needs the staged attention geometry (dim
   // 256, a power-of-two page of >= 32 tokens).
   bool fp8 = false;
+  // With fp8: the prefill attention on the fp8 tensor cores
+  // (engine.prefill_attention = fp8 — Q and P quantized to e4m3,
+  // kernels/full_attn.hpp); decode rows keep the storage form's exact
+  // walk. Same bytes, same maps.
+  bool fp8_attention = false;
 };
 
 // The Full layers' paged K/V caches: per-layer K and V bf16 rows for the
@@ -199,6 +204,13 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   // scaled fp4 tensor cores. Read by plan_memory and the constructor.
   static void set_native_activations(bool on) { native_activations_ = on; }
   static bool native_activations() { return native_activations_; }
+  // engine.prefill_attention = fp8 (2026-10-16): the Full layers' prefill
+  // attention on the fp8 tensor cores over the fp8 K/V pool (Q and the
+  // probabilities quantized to e4m3; kernels/full_attn.hpp). Needs
+  // engine.kv_dtype fp8 (refused otherwise). Read by plan_memory and the
+  // constructor; decode rows keep the storage form's exact walk.
+  static void set_fp8_attention(bool on) { fp8_attention_ = on; }
+  static bool fp8_attention() { return fp8_attention_; }
   // Test gate: decode walks (eager, not under a capture) copy every layer's
   // output residual into Outputs::layer_states, as the diagnostic forward
   // does (the row-count invariance test's per-layer bisection).
@@ -475,6 +487,7 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   inline static bool dflash_draft_batch_ = true;
   inline static int dflash_depth_ = 0;
   inline static bool dense_weights_fp8_ = false;
+  inline static bool fp8_attention_ = false;
   inline static bool native_activations_ = false;
   // The native recipe, this instance: on at construction; the cell the layers'
   // workspace copies point at, true while the walk's rows are prefill rows.

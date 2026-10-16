@@ -14,6 +14,7 @@
     "draft_head": "screen",
     "dflash_weights": "fp8",
     "prefill_activations": "native",
+    "prefill_attention": "fp8",
     "mtp_schedule": true,
     "mtp_schedule_row_ms": 4.0,
     "mtp_schedule_base_ms": 34.0,
