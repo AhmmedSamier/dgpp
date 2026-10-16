@@ -13,6 +13,15 @@ Same 48-layer GDN/full-attention MoE as RadixArk, ModelOpt
 | MTP draft experts | W4A16_NVFP4, plain scales, no input_scale | readable by the QAD path |
 | lm_head / norms / router / embeds | BF16, hc/mixer/PLE norms F32 | as the QAD export |
 | vision tower | MXFP8 + W4A16_NVFP4 | never served (counted at binding) |
+ *Vision note (RESOLVED 2026-10-16): the tower loader now widens
+ quantized linears to BF16 at load — MXFP8 e4m3 x 2^(s-127) exact,
+ NVFP4 e2m1 x e4m3-group x global with one RNE (the fp8 bridge's
+ contract); BF16 biases ship beside them. Dtype-driven per linear, so
+ BF16 towers take the old path untouched; scale sidecars are exempt from
+ the no-unexpected-tensors check. Verified: all 333 walked tensors
+ present with exact dtype+shape in the real headers, zero non-scale
+ leftovers, all 166 scales present. Multimodal serves when weights land;
+ text path unaffected (tower runs on image prefills only, never decode).*
 
 ## The CSF seam (RESOLVED 2026-10-16)
 
