@@ -856,6 +856,11 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
   }
   GlmFp4Matrix load_fp4_rows_mo(const std::string& base, int64_t row_start, int64_t rows, float* global,
                                 bool with_input_scale = true) {
+    // The FP4-Local export wraps the experts' per-group scales as CSF
+    // sidecars (config experts_nvfp4_csf): no plain weight_scale ships,
+    // and the expansion to plain scales is not implemented yet.
+    if (cfg.experts_nvfp4_csf)
+      fail("NVFP4 CSF scale expansion on '" + base + "' is not implemented yet (docs/fp4local_plan.md)");
     const QwenExpectedTensor& ep = expected(base + ".weight");
     const QwenExpectedTensor& es = expected(base + ".weight_scale");
     const int64_t N = ep.shape[0];
@@ -889,6 +894,9 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
   }
   GlmFp4Matrix load_fp4_cols_mo(const std::string& base, int64_t col_start, int64_t cols, float* global,
                                 bool with_input_scale = true) {
+    // Same CSF seam as load_fp4_rows_mo above.
+    if (cfg.experts_nvfp4_csf)
+      fail("NVFP4 CSF scale expansion on '" + base + "' is not implemented yet (docs/fp4local_plan.md)");
     const QwenExpectedTensor& ep = expected(base + ".weight");
     const QwenExpectedTensor& es = expected(base + ".weight_scale");
     const int64_t N = ep.shape[0];
