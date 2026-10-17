@@ -36,6 +36,9 @@ venv/
 
 # --- Local benchmark artifacts --------------------------------------------------
 benchmarks/*
+!benchmarks/micro/
+benchmarks/micro/*
+!benchmarks/micro/qsa_fp8_bench.cu
 
 # --- Debug residue ---------------------------------------------------------------
 

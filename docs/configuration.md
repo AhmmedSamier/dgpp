@@ -198,7 +198,7 @@ the others. Startup checks the combined memory plan before loading the model.
 | `engine.max_connections` | Maximum open HTTP connections on rank 0, including idle connections and streams. Excess connections receive HTTP 503. Size this separately from active request slots. | 64 |
 | `engine.admission` | When context memory is reserved. `full` reserves the prompt plus requested answer budget before starting. `grow` reserves less initially and expands during generation; if space runs out, the youngest request is stopped. `grow` can fit more work at once, with a risk of interrupting requests. | `full` |
 | `engine.admission_window` | Number of answer tokens reserved at a time under `grow`; must be positive. Larger increments reserve more unused space but need fewer reservation updates. Has no effect with `full`. | 256 tokens |
-| `engine.kv_dtype` | Precision of cached model state. Lower precision saves memory but can change answers; weights are unaffected. GLM-5.3 supports `bf16`, `fp8` and `fp4` for its latent cache; its index cache stays FP8. MiMo supports `bf16` and `fp8`. Qwen3.8-27B supports `fp8` only with the mixed NVFP4 release's cache scales; otherwise use `bf16`. Qwen3.8-Flash-Next and GLM-4.7 keep BF16 caches, and DeepSeek uses its architecture's own formats. | `bf16` |
+| `engine.kv_dtype` | Precision of cached model state. Lower precision saves memory but can change answers; weights are unaffected. GLM-5.3 supports `bf16`, `fp8` and `fp4` for its latent cache; its index cache stays FP8. MiMo supports `bf16` and `fp8`. Qwen3.8-27B supports `fp8` only with the mixed NVFP4 release's cache scales; otherwise use `bf16`. Qwen3.8-Flash-Next supports `bf16` and per-token/head scaled `fp8`; GLM-4.7 keeps BF16 caches, and DeepSeek uses its architecture's own formats. | `bf16` |
 
 For example, a shared pool of 32768 tokens can cover two requests reserving
 16384 tokens each, but not two reserving 32768 each. Model limits, block
@@ -268,6 +268,7 @@ workload; [optimizing performance](optimizing_performance.md) explains how.
 Choose [graph execution](#graph-execution-and-batching),
 [weight storage](#weight-storage-and-placement),
 [prefill precision](#prefill-computation-and-precision),
+[attention precision](#attention-precision),
 [speculative decoding](#speculative-decoding), [extended context](#extended-context)
 or [advanced kernel tuning](#advanced-kernel-tuning).
 
@@ -327,13 +328,53 @@ Keep the template's choices unless you have measured both speed and quality.
 | `engine.prefill` | DeepSeek-V4.1 prefill mode. `bounded` processes the whole prompt in the encoder and only the final window in the decoder, following the model's serving recipe. `exact` processes every row through every layer for reference comparisons and costs more work. Other families ignore it. | `bounded` |
 | `engine.prefill_bf16_partials` | Qwen3.8 AutoRound hybrid: store intermediate expert outputs in BF16 instead of FP32 during prefill. This halves their memory traffic and can speed prefill, with extra rounding that can change answers. The AutoRound template enables it. | false |
 | `engine.prefill_fold_scales` | Qwen3.8 AutoRound hybrid: apply expert quantization scales to BF16 weights before multiplication. This changes rounding and can change answers. It is a performance experiment; recorded measurements found no speed gain and templates leave it off. | false |
-| `engine.prefill_fp8_gemm` | Qwen with `dense_weights: "fp8"`: use FP8 tensor cores for dense prefill matrix multiplication instead of expanding weights to BF16 first. Can reduce prefill work, but also quantizes activations and can change answers. The AutoRound template enables it. | false |
+| `engine.prefill_fp8_gemm` | Qwen with `dense_weights: "fp8"`: use FP8 tensor cores for eligible block-FP8 dense prefill projections instead of expanding their weights to BF16 first. Smaller projections and unsupported scale grids retain their existing computation paths. Quantizes activations and can change answers. Independent of KV-cache and attention precision. The AutoRound template enables it. | false |
 | `engine.prefill_fp8_per_tensor` | Qwen3.8-27B: make extra FP8 weight copies with one scale per matrix and use them for prefill. Can speed matrix multiplication but requires substantial additional memory, about 23 GiB at the 27B shape. The added quantization can change answers, including greedy completions. | false |
 | `engine.prefill_activations` | Qwen3.8-27B prefill activation precision. `bf16` keeps intermediate inputs in BF16 and expands quantized weights for multiplication. `native` uses the checkpoint's FP8 or mixed NVFP4/FP8 activation recipe, allowing faster tensor-core work without repeated weight expansion. `native` can change answers through rounding; the 27B templates enable it. Decode keeps BF16 activations. Other families accept only `bf16`. | `bf16` |
-| `engine.prefill_attention` | Qwen3.8-27B attention arithmetic. `bf16` computes in BF16, including when cache values are stored in FP8. `fp8` uses FP8 tensor cores for prefill attention, which can speed long prompts but adds rounding to queries and attention probabilities. Requires `kv_dtype: "fp8"`; other families reject it. Decode arithmetic is unchanged. The 27B NVFP4 templates enable `fp8`. | `bf16` |
 
 See the [Qwen3.8-27B NVFP4 model card](model_cards/Qwen3.8-27B-NVFP4.md)
 and [AutoRound notes](qwen38_autoround_int4_plan.md) for measured tradeoffs.
+
+### Attention precision
+
+`engine.kv_dtype` selects cache storage; the settings below independently select
+attention computation during prefill and decode. Setting the cache to `fp8`
+alone keeps BF16 attention arithmetic. Selecting FP8 attention uses cached
+E4M3 values directly for the query/key and probability/value products, with
+FP32 softmax and accumulation. The additional query and probability
+quantization can change answers.
+
+| Key | What it controls and what to expect | Default |
+|---|---|---|
+| `engine.prefill_attention` | Qwen3.8-27B and Qwen3.8-Flash-Next prefill attention arithmetic. Accepts `bf16` or `fp8`. `fp8` requires `kv_dtype: "fp8"`; other families reject the `fp8` value. The 27B NVFP4 templates enable it. Decode uses its own setting. | `bf16` |
+| `engine.decode_attention` | Qwen3.8-Flash-Next QSA decode arithmetic, including MTP draft and verification rows. Accepts `bf16` or `fp8`. `fp8` requires `kv_dtype: "fp8"`; other families accept only `bf16`. Independent of `prefill_attention`. Long selected-token lists can benefit, while short single-row decode can be faster with `bf16`. | `bf16` |
+
+Flash-Next supports BF16 or FP8 caches; FP4 is rejected. Native FP8 attention
+requires the model's 256-element attention heads. It works with MTP and prefix
+caching. Attention settings do not select weight precision or change dense
+projection and expert computation; they do not require `dense_weights: "fp8"`.
+Flash-Next's `prefill_activations` remains `bf16`; `native` is a separate
+Qwen3.8-27B option.
+
+For example, this Flash-Next fragment enables FP8 cache storage and native
+prefill attention while keeping BF16 decode arithmetic:
+
+```json
+{
+  "engine": {
+    "kv_dtype": "fp8",
+    "prefill_attention": "fp8",
+    "decode_attention": "bf16"
+  }
+}
+```
+
+Set `decode_attention` to `fp8` to evaluate native decode as well. Set both
+attention options to `bf16` to use FP8 storage with BF16 computation. Flash-Next
+templates retain BF16 cache storage and arithmetic by default. See
+[Flash-Next measurements](qwen_fp8_kv_plan.md#validation-2026-10-17) for the
+kernel timings and full-checkpoint smoke comparison; these do not establish
+end-to-end serving gains or accuracy across workloads.
 
 ### Speculative decoding
 

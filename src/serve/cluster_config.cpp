@@ -268,6 +268,10 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           e.prefill_attention = text(x, ek, what);
           if (e.prefill_attention != "bf16" && e.prefill_attention != "fp8")
             fail(what, "'" + ek + "' must be \"bf16\" or \"fp8\"");
+        } else if (p.key == "decode_attention") {
+          e.decode_attention = text(x, ek, what);
+          if (e.decode_attention != "bf16" && e.decode_attention != "fp8")
+            fail(what, "'" + ek + "' must be \"bf16\" or \"fp8\"");
         } else if (p.key == "expert_gemm") {
           e.expert_gemm = text(x, ek, what);
           if (e.expert_gemm != "wide" && e.expert_gemm != "wide3" && e.expert_gemm != "wide4" &&

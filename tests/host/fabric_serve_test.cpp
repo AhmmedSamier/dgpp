@@ -249,6 +249,9 @@ void test_settings_handshake() {
   sent.fabric_port = 29970;
   sent.max_concurrency = 2;
   sent.kv_capacity = 4096;
+  sent.kv_dtype = "fp8";
+  sent.prefill_attention = "fp8";
+  sent.decode_attention = "fp8";
   sent.default_max_tokens = 32;
   sent.queue_limit = 8;
   sent.decode_graph = true;
@@ -521,6 +524,8 @@ void test_journal_codec() {
     ws.stats_interval_s = 0.1;
     ws.reasoning_in_content = true;
     ws.kv_dtype = "fp8";
+    ws.prefill_attention = "fp8";
+    ws.decode_attention = "fp8";
     ws.bf16_weights = "bf12";
     ws.compact_batches = true;
     ws.fp8_head = "mma";
@@ -535,6 +540,21 @@ void test_journal_codec() {
         dgpp::serve::encode_journal_settings(ws));
     require(sr.settings && !sr.warm && !sr.stop && sr.world_settings == ws,
             "codec: the settings record round-trips");
+    {
+      std::string legacy = dgpp::serve::encode_journal_settings(ws);
+      const std::string key = ",\"dcattn\":\"fp8\"";
+      const size_t at = legacy.find(key);
+      require(at != std::string::npos, "codec: decode attention is encoded");
+      legacy.erase(at, key.size());
+      require(dgpp::serve::decode_journal_line(legacy).world_settings.decode_attention == "bf16",
+              "codec: legacy settings keep BF16 decode arithmetic");
+      auto invalid = ws;
+      invalid.decode_attention = "fp4";
+      bool rejected = false;
+      try { (void)dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_settings(invalid)); }
+      catch (const std::runtime_error&) { rejected = true; }
+      require(rejected, "codec: invalid decode arithmetic is rejected");
+    }
     {
       // A record from before the entry policy (2026-09-28) carries neither
       // key: no floor, no head cut, what that rank 0 ran.

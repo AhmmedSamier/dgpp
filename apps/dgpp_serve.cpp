@@ -431,11 +431,20 @@ struct QwenFamily final : ServeFamily {
   std::string ckpt;
   std::unique_ptr<dgpp::QwenModel> model;
   bool fp8_head_mma;
+  dgpp::LatentFormat kv_format;
   QwenFamily(const std::string& checkpoint, const std::optional<dgpp::RopeScaling>& rope_scaling,
-             bool head_mma)
+             bool head_mma, dgpp::LatentFormat kv_fmt)
       : cfg(dgpp::QwenTextConfig::from_json_file((fs::path(checkpoint) / "config.json").string())),
         ckpt(checkpoint),
-        fp8_head_mma(head_mma) {
+        fp8_head_mma(head_mma),
+        kv_format(kv_fmt) {
+    // The Qwen KV-cache format (engine.kv_dtype): bf16 or fp8 (e4m3 rows with
+    // one scale per (slot, kv-head), with BF16 or native FP8 attention).
+    // fp4 is rejected here (not implemented). See docs/qwen_fp8_kv_plan.md.
+    if (kv_format != dgpp::LatentFormat::kBf16 && kv_format != dgpp::LatentFormat::kFp8)
+      throw std::invalid_argument(std::string("engine.kv_dtype ") +
+                                  dgpp::latent_format_name(kv_format) +
+                                  " is not supported for Qwen (bf16 or fp8)");
     // The fused BF16 MTP expert format is a process-wide flag (set from the
     // engine config or CLI before the family is built); it must be on the
     // config before the binding table and the loader see it.
@@ -489,7 +498,7 @@ struct QwenFamily final : ServeFamily {
       return "exceeds the QSA pool-id space (2^21 pools)";
     return "";
   }
-  const char* kv_format_name() const override { return "bf16"; }
+  const char* kv_format_name() const override { return dgpp::latent_format_name(kv_format); }
   // The YaRN-scaled ceiling (or the checkpoint's when the knob is off).
   int64_t position_limit() const override { return cfg.context_limit(); }
   // The small-row kernels keep their dispatch; wider batches use the
@@ -504,7 +513,7 @@ struct QwenFamily final : ServeFamily {
                         bool mtp, int decode_rows) const override {
     return dgpp::QwenModel::plan_memory(cfg, forward_rows, context, fabric ? rank : 0, fabric ? world_ : 1,
                                         fabric ? dgpp::QwenResidency::Resident : dgpp::QwenResidency::Streaming,
-                                        slots, fabric && mtp, decode_rows, /*serving_logits=*/true);
+                                        slots, fabric && mtp, decode_rows, /*serving_logits=*/true, kv_format);
   }
   size_t snapshot_bytes(int world_, bool mtp) const override {
     return dgpp::QwenModel::session_snapshot_bytes(cfg, world_, mtp);
@@ -517,7 +526,8 @@ struct QwenFamily final : ServeFamily {
     model = std::make_unique<dgpp::QwenModel>(
         cfg, ckpt, forward_rows, pool_tokens,
         fabric ? dgpp::QwenResidency::Resident : dgpp::QwenResidency::Streaming, reducer,
-        fabric ? rank : 0, fabric ? world_ : 1, slots, fabric && mtp, decode_rows, fp8_head_mma, /*serving_logits=*/true);
+        fabric ? rank : 0, fabric ? world_ : 1, slots, fabric && mtp, decode_rows, fp8_head_mma,
+        /*serving_logits=*/true, kv_format);
   }
   void destroy_model() override { model.reset(); }
   size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
@@ -1030,7 +1040,7 @@ std::unique_ptr<ServeFamily> make_family(const std::string& ckpt, int world,
   if (arch == dgpp::ModelArchitecture::DeepseekV4) return std::make_unique<Dsv4Family>(ckpt);
   if (arch == dgpp::ModelArchitecture::MimoV2) return std::make_unique<MimoFamily>(ckpt, kv_format);
   if (arch == dgpp::ModelArchitecture::Qwen4Exp)
-    return std::make_unique<QwenFamily>(ckpt, rope_scaling, fp8_head_mma);
+    return std::make_unique<QwenFamily>(ckpt, rope_scaling, fp8_head_mma, kv_format);
   if (arch == dgpp::ModelArchitecture::Qwen3_5)
     return std::make_unique<Qwen35Family>(ckpt, rope_scaling, kv_format);
   if (arch == dgpp::ModelArchitecture::Glm4Moe) return std::make_unique<Glm4Family>(ckpt);
@@ -1545,7 +1555,8 @@ int main(int argc, char** argv) {
   bool prefill_fp8_gemm = false;
   bool prefill_fp8_per_tensor = false;  // the Qwen3.8-27B per-tensor prefill recipe (opt-in)
   std::string prefill_activations = "bf16";  // "native": the checkpoint's activation recipe on prefill rows
-  std::string prefill_attention = "bf16";    // "fp8": the Qwen3.5 prefill attention on the fp8 tensor cores
+  std::string prefill_attention = "bf16";    // Qwen3.5 / Flash-Next attention over an fp8 pool
+  std::string decode_attention = "bf16";     // Flash-Next QSA: bf16 or native fp8 compute
   std::string expert_gemm = "wide";         // the packed expert GEMM's form and companions (engine.expert_*)
   int expert_gemm_prefetch = 3;
   bool expert_tile_list = true;
@@ -1671,6 +1682,7 @@ int main(int argc, char** argv) {
     prefill_fp8_per_tensor = e.prefill_fp8_per_tensor;
     prefill_activations = e.prefill_activations;
     prefill_attention = e.prefill_attention;
+    decode_attention = e.decode_attention;
     expert_gemm = e.expert_gemm;
     expert_gemm_prefetch = e.expert_gemm_prefetch;
     expert_tile_list = e.expert_tile_list;
@@ -2037,7 +2049,7 @@ int main(int argc, char** argv) {
     const int effective_batch_min_live =
         graph_batch_min_live == 0 ? std::min(2, max_concurrency) : graph_batch_min_live;
     return std::format(
-        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} pfattn={} ngt={} dw={} mtpef={} bfw={} "
+        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} pfattn={} dcattn={} ngt={} dw={} mtpef={} bfw={} "
         "fp8head={} dh={} dhb={} mtph={} attw={} pf={} "
         "emsh={} maxtok={} queue={} "
         "eos={} graph={} compact={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} "
@@ -2047,7 +2059,7 @@ int main(int argc, char** argv) {
         "reasoning_in_content={} "
         "rs={} dflash={} dfw={} lk={} lkn={} lks={} lka={} lkt={}",
         model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port, max_concurrency,
-        kv_capacity, kv_dtype, prefill_attention, ngram_table, dense_weights, mtp_expert_format, bf16_weights, fp8_head,
+        kv_capacity, kv_dtype, prefill_attention, decode_attention, ngram_table, dense_weights, mtp_expert_format, bf16_weights, fp8_head,
         draft_head,
         draft_head_blocks, mtp_head,
         attention_weights, prefill, embed_sharding, default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0,
@@ -2108,6 +2120,7 @@ int main(int argc, char** argv) {
         ws.prefill_fp8_per_tensor = prefill_fp8_per_tensor;
         ws.prefill_activations = prefill_activations;
         ws.prefill_attention = prefill_attention;
+        ws.decode_attention = decode_attention;
         ws.dflash_model = dflash_model;
         ws.dflash_verify_graph = dflash_verify_graph;
         ws.prefill_group = prefill_group;
@@ -2205,6 +2218,8 @@ int main(int argc, char** argv) {
         prefill_fold_scales = ws.prefill_fold_scales;
         prefill_fp8_gemm = ws.prefill_fp8_gemm;
         prefill_fp8_per_tensor = ws.prefill_fp8_per_tensor;
+        prefill_attention = ws.prefill_attention;
+        decode_attention = ws.decode_attention;
         dflash_model = ws.dflash_model;
         dflash_verify_graph = ws.dflash_verify_graph;
         prefill_group = ws.prefill_group;
@@ -2440,6 +2455,7 @@ int main(int argc, char** argv) {
   dgpp::Qwen35Model::set_native_activations(prefill_activations == "native");
   // The prefill attention's arithmetic on the fp8 pool (engine.prefill_attention).
   dgpp::Qwen35Model::set_fp8_attention(prefill_attention == "fp8");
+  dgpp::QwenModel::set_native_attention(prefill_attention == "fp8", decode_attention == "fp8");
   if (dflash_weights != "checkpoint" && dflash_weights != "fp8") {
     DGPP_LOG_ERROR("--dflash-weights must be checkpoint or fp8, got '{}'", dflash_weights);
     return 2;
@@ -2744,10 +2760,16 @@ int main(int argc, char** argv) {
     DGPP_LOG_INFO("serve: decode rows {} ({} slot(s) x {} row(s) per request, floor {}, the {} family's cap {})",
                   decode_rows, max_concurrency, graph_rows_per_request, dgpp::kDecodeRows, family->name(),
                   family->decode_rows_cap());
-    if (prefill_attention != "bf16" && std::string(family->name()) != "qwen3_5") {
-      DGPP_LOG_ERROR("serve: engine.prefill_attention {} is the Qwen3.5 family's lever (the fp8 K/V pool's attention "
-                     "on the fp8 tensor cores); the {} family has no such form",
+    if (prefill_attention != "bf16" && std::string(family->name()) != "qwen3_5" &&
+        std::string(family->name()) != "qwen4_exp") {
+      DGPP_LOG_ERROR("serve: engine.prefill_attention {} requires Qwen3.5 or Qwen3.8-Flash-Next "
+                     "with an fp8 K/V pool; the {} family has no such form",
                      prefill_attention, family->name());
+      return 2;
+    }
+    if (decode_attention != "bf16" && std::string(family->name()) != "qwen4_exp") {
+      DGPP_LOG_ERROR("serve: engine.decode_attention {} requires Qwen3.8-Flash-Next; got {}",
+                    decode_attention, family->name());
       return 2;
     }
     if (prefill_activations != "bf16" && std::string(family->name()) != "qwen3_5") {
@@ -2757,9 +2779,10 @@ int main(int argc, char** argv) {
       return 2;
     }
     if (std::string(family->name()) != "glm5" && std::string(family->name()) != "glm_moe_dsa" &&
-        std::string(family->name()) != "mimo_v2" && std::string(family->name()) != "qwen3_5" && kv_dtype != "bf16")
+        std::string(family->name()) != "mimo_v2" && std::string(family->name()) != "qwen3_5" &&
+        std::string(family->name()) != "qwen4_exp" && kv_dtype != "bf16")
       DGPP_LOG_WARN("serve: --kv-dtype {} applies to the GLM-5.3 latent caches, the MiMo-V2 K/V cache and the "
-                    "Qwen3.5 K/V pool only; the {} caches stay bf16",
+                    "Qwen3.5 / Qwen3.8-Flash-Next K/V pools only; the {} caches stay bf16",
                     kv_dtype, family->name());
     if (std::string(family->name()) != "qwen4_exp" && ngram_table != "resident")
       DGPP_LOG_WARN("serve: --ngram-table {} applies to the Qwen n-gram table only; the {} family has none",

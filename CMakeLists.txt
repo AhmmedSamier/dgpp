@@ -206,6 +206,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/dflash2.cu
   src/kernels/qsa.cu
   src/kernels/qsa_warp.cu
+  src/kernels/qsa_fp8.cu
   src/kernels/qsa_prefill.cu
   src/kernels/full_attn.cu
   src/kernels/glm4_attn.cu
@@ -1156,6 +1157,18 @@ target_include_directories(qsa_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CM
 target_link_libraries(qsa_test PRIVATE dgpp_models_qwen dgpp_kernels CUDA::cudart Threads::Threads)
 dgpp_set_common(qsa_test)
 add_test(NAME qsa_test COMMAND qsa_test)
+
+add_executable(qwen_fp8_kv_attn_test tests/cuda/qwen_fp8_kv_attn_test.cu)
+target_include_directories(qwen_fp8_kv_attn_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(qwen_fp8_kv_attn_test PRIVATE dgpp_models_qwen dgpp_kernels CUDA::cudart Threads::Threads)
+dgpp_set_common(qwen_fp8_kv_attn_test)
+add_test(NAME qwen_fp8_kv_attn_test COMMAND qwen_fp8_kv_attn_test)
+
+add_executable(qsa_fp8_native_test tests/cuda/qsa_fp8_native_test.cu)
+target_include_directories(qsa_fp8_native_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(qsa_fp8_native_test PRIVATE dgpp_kernels CUDA::cudart Threads::Threads)
+dgpp_set_common(qsa_fp8_native_test)
+add_test(NAME qsa_fp8_native_test COMMAND qsa_fp8_native_test)
 
 add_executable(qwen_ple_test tests/cuda/qwen_ple_test.cu)
 target_include_directories(qwen_ple_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
@@ -2249,6 +2262,10 @@ if(DGPP_BUILD_BENCHMARKS)
 
   dgpp_add_benchmark(qsa_prefill_bench
     SOURCES benchmarks/micro/qsa_prefill_bench.cu
+    LIBRARIES dgpp_kernels CUDA::cudart)
+
+  dgpp_add_benchmark(qsa_fp8_bench
+    SOURCES benchmarks/micro/qsa_fp8_bench.cu
     LIBRARIES dgpp_kernels CUDA::cudart)
 
   dgpp_add_benchmark(qsa_index_bench

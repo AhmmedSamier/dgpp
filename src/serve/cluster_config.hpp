@@ -166,13 +166,17 @@ struct ClusterConfig {
     //     prefill attention on the fp8 tensor cores — Q and the
     //     probabilities quantized to e4m3 per row, S and O on
     //     mma.e4m3 at twice the bf16 rate; decode rows keep the exact
-    //     widened walk). Needs kv_dtype fp8; other families refuse it.
+    //     widened walk). Also supported for Flash-Next QSA, with its
+    //     per-token/head cache scales. Both require kv_dtype fp8.
     bool prefill_bf16_partials = false;
     bool prefill_fold_scales = false;
     bool prefill_fp8_gemm = false;
     bool prefill_fp8_per_tensor = false;
     std::string prefill_activations = "bf16";
     std::string prefill_attention = "bf16";
+    // Flash-Next QSA decode arithmetic over its fp8 pool. Independent of
+    // prefill_attention so either phase can retain bf16 compute.
+    std::string decode_attention = "bf16";
     // The packed expert GEMM's form and companions (2026-09-30; every
     // serving switch is a config key — no environment variable selects a
     // kernel). All bitwise the default chain.
