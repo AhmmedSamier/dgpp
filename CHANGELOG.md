@@ -5,6 +5,19 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **Optional bounded tokenizer word cache**. Set `tokenizer.word_cache_entries`
+  to 1–10000 in deployment JSON to reuse short mapped pretokens on rank 0.
+  The default remains 0. Exact key checks, bounded slots and nonblocking shard
+  locks preserve IDs under collisions and concurrent requests; replacement
+  lets the cache adapt after it fills. Words above 256 mapped bytes bypass it.
+
+- **Bound prompt-tokenizer merge scans** ([#121](https://github.com/HawkBearPig/dgpp/issues/121)).
+  Long letter and CJK pretokens automatically switch from repeated passes
+  to a phase heap after a bounded amount of scanning. Short words and
+  repeated characters retain the pass path. Merges use input spans instead
+  of allocating strings; token IDs and merge ordering are preserved.
+  Thanks to @WhollyMindless for the diagnosis and proposed phase semantics.
+
 - **Decode streaming text one token at a time** ([#119](https://github.com/HawkBearPig/dgpp/issues/119)).
   Completions, chat reasoning/content and DeepSeek DSML content no longer
   re-decode the whole output prefix for every generated token. This removes

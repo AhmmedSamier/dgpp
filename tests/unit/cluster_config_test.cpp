@@ -641,3 +641,26 @@ DGPP_TEST(cluster_config_latency_tuning_defaults_and_bounds) {
   require(dgpp::serve::parse_cluster_config(engine_json(R"({"prefill_idle_floor_tokens":0})"), "t").engine.prefill_latency.idle_floor_tokens == 0,
           "a zero floor (the alignment) is a valid choice");
 }
+
+DGPP_TEST(cluster_config_tokenizer_cache) {
+  const auto parse = [](const std::string& tokenizer) {
+    return dgpp::serve::parse_cluster_config(
+        "{\"model\":\"m\",\"world_size\":1,\"tokenizer\":" + tokenizer + "}", "t");
+  };
+  require(parse("{}").tokenizer_word_cache_entries == 0, "cache disabled by default");
+  require(parse("{\"word_cache_entries\":10000}").tokenizer_word_cache_entries == 10000,
+          "cache capacity parsed");
+  for (const char* value : {"-1", "10001", "1.5", "1.0", "true", "null", "\"10\""}) {
+    const std::string json =
+        "{\"model\":\"m\",\"world_size\":1,\"tokenizer\":{\"word_cache_entries\":" +
+        std::string(value) + "}}";
+    require(refusal(json).find("tokenizer.word_cache_entries") != std::string::npos,
+            "invalid cache capacity must name the field");
+  }
+  for (const char* value : {"null", "[]", "{\"unknown\":1}"}) {
+    const std::string json =
+        "{\"model\":\"m\",\"world_size\":1,\"tokenizer\":" + std::string(value) + "}";
+    require(refusal(json).find("tokenizer") != std::string::npos,
+            "malformed tokenizer config refused");
+  }
+}

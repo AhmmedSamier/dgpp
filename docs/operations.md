@@ -310,6 +310,21 @@ slot would reach about 534,000. Decode costs what the doubled per-rank weight re
 implies, near 1.75x the four-node pace; prefill costs about 1.45x
 (benchmarks.md §3 to §6).
 
+### Prompt tokenization
+
+Long letter and CJK runs automatically use bounded merge scanning; no setting
+is needed. To reuse token IDs for recurring short pieces of prompts, add
+`"tokenizer": {"word_cache_entries": 10000}` at the top level of the deployment
+JSON. The default is `0` (disabled); the accepted range is 0–10000 whole slots.
+Restart the deployment to change it. Rank 0 logs the configured capacity.
+
+The cache retains mapped word strings and token IDs in host memory for the
+loaded tokenizer. It shares results across requests, replaces colliding
+entries, and bypasses busy cache locks. It does not retain whole prompts or
+model state. Measure both repeated and novel inputs: cache misses add work,
+and faster tokenization does not imply faster model generation. See
+[tokenization](tokenization.md) for bounds and validation.
+
 ### Streaming keep-alives
 
 Output delivery defaults to `http.stream_flush: "pass"`: a quiet HTTP loop

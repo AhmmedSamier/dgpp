@@ -902,6 +902,18 @@ dgpp_set_common(qwen_yarn_fixture_test)
 add_test(NAME qwen_yarn_fixture_test
   COMMAND qwen_yarn_fixture_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/qwen_yarn_oracle.json)
 
+# The BPE work bound and phase semantics need no checkpoint or GPU.
+add_executable(bpe_test tests/host/bpe_test.cpp)
+target_include_directories(bpe_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+dgpp_set_common(bpe_test)
+add_test(NAME bpe_test COMMAND bpe_test)
+
+add_executable(word_cache_test tests/host/word_cache_test.cpp)
+target_include_directories(word_cache_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(word_cache_test PRIVATE Threads::Threads)
+dgpp_set_common(word_cache_test)
+add_test(NAME word_cache_test COMMAND word_cache_test)
+
 # M6 Stage 3: the tokenizer differential gate (host). Skips with rc 2 when
 # the model cache is absent (same discipline as the real-checkpoint gates).
 add_executable(tokenizer_test tests/host/tokenizer_test.cpp)
@@ -2280,7 +2292,7 @@ get_property(DGPP_ALL_TESTS DIRECTORY PROPERTY TESTS)
 foreach(_test IN LISTS DGPP_ALL_TESTS)
   set_tests_properties(${_test} PROPERTIES LABELS "gpu")
 endforeach()
-set_tests_properties(unit unit_tests http_server_test serve_test serve_test_wake fabric_serve_test fabric_serve_test_wake scheduler_test shutdown_watchdog_test engine_watchdog_test
+set_tests_properties(word_cache_test bpe_test unit unit_tests http_server_test serve_test serve_test_wake fabric_serve_test fabric_serve_test_wake scheduler_test shutdown_watchdog_test engine_watchdog_test
   qwen_yarn_fixture_test qwen_w4a4_plan_default qwen_w4a4_plan_mode_0 qwen_w4a4_plan_mode_1
   qwen_w4a4_plan_mode_empty qwen_w4a4_plan_mode_invalid PROPERTIES LABELS "host")
 set_tests_properties(checkpoint_audit_test route_trace_test sampling_profile_test
