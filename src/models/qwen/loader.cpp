@@ -802,14 +802,17 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
       m.expert_globals = static_cast<float*>(bump.alloc(static_cast<size_t>(E) * 3 * sizeof(float)));
       m.experts_weight_only = weight_only;
       if (!weight_only) m.act_scales = static_cast<float*>(bump.alloc(2 * sizeof(float)));
+      // The scale form follows the scope: the FP4-Local export wraps the
+      // backbone's expert scales as CSF and keeps the draft's plain.
+      const bool mo_csf = is_mtp_layer ? cfg.mtp_experts_nvfp4_csf : cfg.experts_nvfp4_csf;
       for (int e = 0; e < E; ++e) {
         const std::string ep = p + "experts." + std::to_string(e) + ".";
         float* g = m.expert_globals + static_cast<size_t>(e) * 3;
-        m.experts_fp4[static_cast<size_t>(e) * 3 + 0] = load_fp4_rows_mo(ep + "gate_proj", r * I, I, g + 0, !weight_only);
+        m.experts_fp4[static_cast<size_t>(e) * 3 + 0] = load_fp4_rows_mo(ep + "gate_proj", r * I, I, g + 0, !weight_only, mo_csf);
         m.act_scale_w13 = std::max(m.act_scale_w13, last_input_scale_);
-        m.experts_fp4[static_cast<size_t>(e) * 3 + 1] = load_fp4_rows_mo(ep + "up_proj", r * I, I, g + 1, !weight_only);
+        m.experts_fp4[static_cast<size_t>(e) * 3 + 1] = load_fp4_rows_mo(ep + "up_proj", r * I, I, g + 1, !weight_only, mo_csf);
         m.act_scale_w13 = std::max(m.act_scale_w13, last_input_scale_);
-        m.experts_fp4[static_cast<size_t>(e) * 3 + 2] = load_fp4_cols_mo(ep + "down_proj", r * I, I, g + 2, !weight_only);
+        m.experts_fp4[static_cast<size_t>(e) * 3 + 2] = load_fp4_cols_mo(ep + "down_proj", r * I, I, g + 2, !weight_only, mo_csf);
         m.act_scale_w2 = std::max(m.act_scale_w2, last_input_scale_);
       }
       // The layer's activation scales go into the image with the weights: a
@@ -900,32 +903,39 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
     if (copy) std::memcpy(&last_input_scale_, source(base + ".input_scale").data, 4);
     (void)load_raw(base + ".input_scale");
   }
-  // A CSF-wrapped NVFP4 scale plane (config experts_nvfp4_csf): the full
-  // [N, full_cols/16] E4M3 plane for `base`, expanded once from its fixed
-  // + exceptions sidecars. Empty in plan mode (accounting only).
+  // A CSF-wrapped NVFP4 scale plane (the caller's CSF form: config
+  // experts_nvfp4_csf for the backbone, mtp_experts_nvfp4_csf for the
+  // draft): the full [N, full_cols/16] E4M3 plane for `base`, expanded
+  // once from its fixed + exceptions sidecars. Empty in plan mode
+  // (accounting only), where the tabled tensors do not exist yet: the
+  // fixed stream's size is analytic (16 row-base bytes + 8 bytes of
+  // low-nibble-first codes per 16-row slab, the expander's contract —
+  // 16 * (1 + cols/2) per slab), so both modes count exactly that; the
+  // exceptions stream is data-dependent (a property of the quantized
+  // values, not of the geometry), so it is read in copy mode but not
+  // part of the source-byte plan.
   std::vector<uint8_t> load_csf_plane(const std::string& base, int64_t N, int64_t full_cols) {
     const int64_t C = full_cols / kFp4Group;
+    source_bytes += static_cast<size_t>(N / 16) * static_cast<size_t>(16 + full_cols / 2);
+    std::vector<uint8_t> plane;
+    if (!copy) return plane;
     const TensorInfo& tf = source(base + ".weight_scale.nvfp4_csf_fixed");
     const TensorInfo& te = source(base + ".weight_scale.nvfp4_csf_exceptions");
     if (tf.dtype != DType::U8) fail("'" + tf.name + "' is not U8");
     if (te.dtype != DType::U32) fail("'" + te.name + "' is not U32");
     if (tf.data_end < tf.data_begin || te.data_end < te.data_begin)
       fail("sidecar offsets of '" + base + "' run backwards");
-    const size_t fbytes = static_cast<size_t>(tf.data_end - tf.data_begin);
     const size_t ebytes = static_cast<size_t>(te.data_end - te.data_begin);
     if (ebytes % 4 != 0) fail("'" + te.name + "' is not a whole U32 count");
-    source_bytes += fbytes + ebytes;
-    std::vector<uint8_t> plane;
-    if (copy) {
-      plane = qwen_csf_scales_expand(static_cast<const uint8_t*>(tf.data), fbytes,
-                                     static_cast<const uint32_t*>(te.data), ebytes / 4, N, C);
-      consumed(tf);
-      consumed(te);
-    }
+    plane = qwen_csf_scales_expand(static_cast<const uint8_t*>(tf.data),
+                                   static_cast<size_t>(tf.data_end - tf.data_begin),
+                                   static_cast<const uint32_t*>(te.data), ebytes / 4, N, C);
+    consumed(tf);
+    consumed(te);
     return plane;
   }
   GlmFp4Matrix load_fp4_rows_mo(const std::string& base, int64_t row_start, int64_t rows, float* global,
-                                bool with_input_scale = true) {
+                                bool with_input_scale, bool csf) {
     const QwenExpectedTensor& ep = expected(base + ".weight");
     const int64_t N = ep.shape[0];
     const int64_t cols = ep.shape[1] * 2;
@@ -933,10 +943,10 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
     check_range(base, row_start, rows, N);
     const size_t pc = static_cast<size_t>(cols / 2), sc = static_cast<size_t>(cols / kFp4Group);
     // The scale source: the tabled plain weight_scale, or the CSF sidecars
-    // expanded once (config experts_nvfp4_csf).
+    // expanded once (the caller's csf form).
     std::vector<uint8_t> csf_plane;
     const QwenExpectedTensor* es = nullptr;
-    if (cfg.experts_nvfp4_csf) {
+    if (csf) {
       csf_plane = load_csf_plane(base, N, cols);
     } else {
       es = &expected(base + ".weight_scale");
@@ -953,7 +963,7 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
       std::memcpy(bump.host(const_cast<uint8_t*>(q.payload)),
                   static_cast<const uint8_t*>(tp.data) + static_cast<size_t>(row_start) * pc,
                   static_cast<size_t>(rows) * pc);
-      if (cfg.experts_nvfp4_csf) {
+      if (csf) {
         std::memcpy(bump.host(const_cast<uint8_t*>(q.scales)),
                     csf_plane.data() + static_cast<size_t>(row_start) * sc,
                     static_cast<size_t>(rows) * sc);
@@ -967,13 +977,13 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
       consumed(tp);
     }
     note_read(ep, static_cast<size_t>(rows) * pc);
-    if (!cfg.experts_nvfp4_csf) note_read(*es, static_cast<size_t>(rows) * sc);
+    if (!csf) note_read(*es, static_cast<size_t>(rows) * sc);
     load_global_reciprocal_into(base, global, with_input_scale);
     q.global_scale = global;
     return q;
   }
   GlmFp4Matrix load_fp4_cols_mo(const std::string& base, int64_t col_start, int64_t cols, float* global,
-                                bool with_input_scale = true) {
+                                bool with_input_scale, bool csf) {
     const QwenExpectedTensor& ep = expected(base + ".weight");
     const int64_t N = ep.shape[0];
     const int64_t full = ep.shape[1] * 2;
@@ -983,7 +993,7 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
     check_range(base, col_start, cols, full);
     std::vector<uint8_t> csf_plane;
     const QwenExpectedTensor* es = nullptr;
-    if (cfg.experts_nvfp4_csf) {
+    if (csf) {
       csf_plane = load_csf_plane(base, N, full);
     } else {
       es = &expected(base + ".weight_scale");
@@ -1001,7 +1011,7 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
       const TensorInfo& tp = source(ep.name);
       const uint8_t* sp = static_cast<const uint8_t*>(tp.data);
       const uint8_t* ss;
-      if (cfg.experts_nvfp4_csf) {
+      if (csf) {
         ss = csf_plane.data();
       } else {
         const TensorInfo& ts = source(es->name);
@@ -1022,7 +1032,7 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
       consumed(tp);
     }
     note_read(ep, static_cast<size_t>(N) * pc);
-    if (!cfg.experts_nvfp4_csf) note_read(*es, static_cast<size_t>(N) * sc);
+    if (!csf) note_read(*es, static_cast<size_t>(N) * sc);
     load_global_reciprocal_into(base, global, with_input_scale);
     q.global_scale = global;
     return q;

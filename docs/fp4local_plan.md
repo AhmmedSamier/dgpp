@@ -7,7 +7,7 @@ Same 48-layer GDN/full-attention MoE as RadixArk, ModelOpt
 
 | component | form | dgpp status |
 |---|---|---|
-| routed experts, all layers | NVFP4 g16, scales CSF-wrapped | config + binding done, **expansion open** |
+| routed experts, all layers | NVFP4 g16, scales CSF-wrapped | done: config + binding + plan-safe load, smoke-validated 2026-10-17 |
 | shared experts + all attention | MXFP8 g32 (`weight` F8 + `weight_scale` U8 `[N,K/32]`) | readable by the QAD path |
 | n-gram table | NVFP4 (`shard_s.weight` U8 + scales) | readable by the QAD path |
 | MTP draft experts | W4A16_NVFP4, plain scales, no input_scale | readable by the QAD path |
@@ -44,15 +44,38 @@ positive E4M3, no NaN, overlay exact.
 Config flag `experts_nvfp4_csf` (from `weight_scale_encoding: "csf"` on
 every backbone experts entry; mixed/unknown encodings refuse) drives the
 binding: no plain-scale expectation, sidecars counted as `csf_sidecars`.
+The draft carries its own form: this export's `mtp.layers.{0,48}`
+entries are `W4A16_NVFP4` with **no** encoding, so `mtp_experts_nvfp4_csf`
+stays false and the loader reads the draft's plain E4M3 `weight_scale`
+(the flag exists so a CSF draft is representable; mixed draft entries
+refuse). The loader picks the form per scope in `build_moe`.
+
+## Loader validation (2026-10-17)
+
+`qwen_load_check --checkpoint-dir <snap> --mtp` (world 1) loads the whole
+export, draft included:
+
+- Shard discovery is index-first: `model.safetensors.index.json`'s
+  `weight_map` names every shard under `tensors/`; the resident stream
+  joins each to the checkpoint dir and refuses loudly on a missing one
+  (the old root-dir scan found none).
+- Plan mode (before shards open) accounts the CSF scale plane
+  analytically — `(N/16) * (16 + full_cols/2)` bytes per matrix, the
+  expander's own contract; the exceptions stream is data-dependent and
+  read (not planned) in copy mode. The plan-vs-read invariant is checked
+  by the loader: resident 98.20 GiB planned == 98.20 GiB loaded (globals
+  2.42 + table 26.82 + 49 layers 68.96), source bytes read 94.73 GiB
+  (globals verbatim 3.83), 98.7 s on the Spark.
+- Digests on the validation machine: globals `614f1391629385f3` (149,617
+  tensors), layer 0 `fc07770185d686ce`, layer 1 `23853c2d450d862a`,
+  layer 48 (draft) `29c3848153c6e1e6`.
 
 ## Remaining
 
-1. Full bind check + loader smoke once the weights land (binding already
-   reconciles all 375,487 header tensors; the loader path is new code).
-2. Quality gates: the card reports GPQA Diamond 91.5% (BF16 92.2) and
+1. Quality gates: the card reports GPQA Diamond 91.5% (BF16 92.2) and
    ToolEvalBench 88.7% (BF16 89.4) — use these, not HumanEval/GSM8K.
-3. Serve wiring + tok/s numbers (card validates RTX PRO 6000 / DGX Spark
+2. Serve wiring + tok/s numbers (card validates RTX PRO 6000 / DGX Spark
    with PLE offload, FP8 KV; expects ~96 GiB on disk).
-4. Note: the 100 F32 norms (97 hc + 3 PLE) are converted to BF16 in memory
+3. Note: the 100 F32 norms (97 hc + 3 PLE) are converted to BF16 in memory
    by the vLLM loader; dgpp's norms_f32 path already covers the QAD
    export's identical set — no action unless the bind check says otherwise.

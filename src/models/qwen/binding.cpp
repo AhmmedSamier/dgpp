@@ -183,9 +183,12 @@ void expect_moe(TensorList& out, const std::string& p, const QwenTextConfig& cfg
   if (cfg.mtp_experts_nvfp4 && is_mtp) {
     for (int e = 0; e < E; ++e) {
       const std::string ep = p + "experts." + std::to_string(e) + ".";
-      add_quantized(out, ep + "gate_proj.weight", I, H, QwenWeightClass::RoutedExpert, layer, e, true, false, false);
-      add_quantized(out, ep + "up_proj.weight", I, H, QwenWeightClass::RoutedExpert, layer, e, true, false, false);
-      add_quantized(out, ep + "down_proj.weight", H, I, QwenWeightClass::RoutedExpert, layer, e, true, false, false);
+      add_quantized(out, ep + "gate_proj.weight", I, H, QwenWeightClass::RoutedExpert, layer, e, true, false, false,
+                    cfg.mtp_experts_nvfp4_csf);
+      add_quantized(out, ep + "up_proj.weight", I, H, QwenWeightClass::RoutedExpert, layer, e, true, false, false,
+                    cfg.mtp_experts_nvfp4_csf);
+      add_quantized(out, ep + "down_proj.weight", H, I, QwenWeightClass::RoutedExpert, layer, e, true, false, false,
+                    cfg.mtp_experts_nvfp4_csf);
     }
     return;
   }
@@ -387,7 +390,7 @@ QwenBindReport qwen_validate_text_binding(
     // fixed table and the exception list per expert projection, expanded
     // to plain scales once at load. Counted, not tabled (the exception
     // count is data-dependent). Anywhere else they are unexpected.
-    if (cfg.experts_nvfp4_csf &&
+    if ((cfg.experts_nvfp4_csf || cfg.mtp_experts_nvfp4_csf) &&
         (name.ends_with(".weight_scale.nvfp4_csf_fixed") ||
          name.ends_with(".weight_scale.nvfp4_csf_exceptions"))) {
       ++rep.csf_sidecars;
