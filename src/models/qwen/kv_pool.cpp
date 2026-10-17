@@ -19,6 +19,10 @@ void validate(const QwenKvPoolShape& s) {
     throw std::invalid_argument("QwenKvPool: token_slots must be a multiple of block_tokens");
   if (s.format != LatentFormat::kBf16 && s.format != LatentFormat::kFp8)
     throw std::invalid_argument("QwenKvPool: K/V format must be bf16 or fp8");
+  if ((s.fp8_prefill_attention || s.fp8_decode_attention) && s.format != LatentFormat::kFp8)
+    throw std::invalid_argument("QwenKvPool: native FP8 attention requires engine.kv_dtype fp8");
+  if ((s.fp8_prefill_attention || s.fp8_decode_attention) && s.dim != 256)
+    throw std::invalid_argument("QwenKvPool: native FP8 attention requires head dimension 256");
 }
 }  // namespace
 
@@ -79,6 +83,8 @@ QwenQsaCache QwenKvPool::view(int layer) const {
   c.v_cache = reinterpret_cast<uint16_t*>(v_base_ + l * layer_kv_bytes());
   c.k_scale = fp8() ? k_scale_ + l * scale_off : nullptr;
   c.v_scale = fp8() ? v_scale_ + l * scale_off : nullptr;
+  c.fp8_prefill_attention = shape_.fp8_prefill_attention;
+  c.fp8_decode_attention = shape_.fp8_decode_attention;
   c.index_cache = idx_base_ + l * layer_idx_elems();
   c.ring = ring_base_ + l * layer_ring_elems();
   c.block_tables = const_cast<int32_t*>(table_.device_tables());

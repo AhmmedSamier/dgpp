@@ -8,6 +8,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "kernels/gemv_wide.hpp"
+
 namespace dgpp {
 namespace gemv {
 

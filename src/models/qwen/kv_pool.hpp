@@ -1,7 +1,7 @@
 #pragma once
 // QwenKvPool: the QSA layers' paged caches for max_requests request slots
 // (Q6, 2026-09-09; docs/qwen38_flash_next_plan.md D5, the DSA pool's design
-// in models/dsa_state.hpp). Per attention layer: K and V bf16 rows for the
+// in models/dsa_state.hpp). Per attention layer: K and V BF16 or E4M3 rows for the
 // rank's kv heads, the compressed index keys (bf16, one per pool of kpool
 // tokens) co-located with the token blocks, and a per-request ring of the
 // pending raw keys. one block table int32 [max_requests, total_blocks] is
@@ -36,6 +36,8 @@ struct QwenKvPoolShape {
   int max_requests = 0;
   int64_t token_slots = 0; // pool capacity in tokens, a multiple of block_tokens
   LatentFormat format = LatentFormat::kBf16;  // the K/V cache's dtype (bf16 | fp8)
+  bool fp8_prefill_attention = false;
+  bool fp8_decode_attention = false;
 };
 
 class QwenKvPool {

@@ -56,6 +56,7 @@
 #include "engine/memory_plan.hpp"
 #include "engine/session_model.hpp"
 #include "kernels/bf12_companions.hpp"
+#include "kernels/draft_head.hpp"
 #include "kernels/latent_format.hpp"
 #include "kernels/l2_prefetch.hpp"
 #include "kernels/gemm.hpp"
@@ -80,6 +81,7 @@ class QwenModel : public SessionModel<QwenModel> {
   using Outputs = Base::Outputs;
   using SessionSnapshotMeta = Base::SessionSnapshotMeta;
   using SnapshotRequest = Base::SnapshotRequest;
+  static constexpr bool kPrefillChunkGrid = false;
   // DGPP_QWEN_HEAD_DUMP=<file>: append every decode-shaped head input row
   // (the draft's and the verify's hyper-state mixes) after each settled pass
   // — the head bit-plane study's data (2026-09-29). A debug hook: the flush
@@ -133,7 +135,15 @@ class QwenModel : public SessionModel<QwenModel> {
             int max_requests = 1, bool mtp = false, int decode_rows = 0, bool fp8_head_mma = false,
             bool serving_logits = false, LatentFormat kv_format = LatentFormat::kBf16);
   bool fp8_head_mma() const { return fp8_head_mma_; }
+  // The draft head's screen (kernels/head_screen.hpp): the candidate cap
+  // the model was built with (QwenLayerStream::draft_head_blocks() under
+  // MTP), 0 = every draft reads the exact head.
+  int draft_head_blocks() const { return draft_head_.blocks(); }
   LatentFormat kv_format() const { return kv_format_; }
+  static void set_native_attention(bool prefill, bool decode) {
+    fp8_prefill_attention_ = prefill;
+    fp8_decode_attention_ = decode;
+  }
   ~QwenModel();
   QwenModel(const QwenModel&) = delete;
   QwenModel& operator=(const QwenModel&) = delete;
@@ -165,7 +175,6 @@ class QwenModel : public SessionModel<QwenModel> {
   int64_t kv_block_tokens() const { return num_qsa_ > 0 ? kBlockTokens : 0; }
   static constexpr int prefill_chunk_tokens() { return kPrefillChunkTokens; }
   static constexpr int decode_rows_cap() { return kDecodeRowsMax; }
-  static constexpr bool kResumablePrefill = true;
   static constexpr bool kCompactBatches = true;
   static constexpr int kv_block_tokens_static() { return kBlockTokens; }
   // The same number for a shape that is not built yet (the memory plan).
@@ -221,9 +230,17 @@ class QwenModel : public SessionModel<QwenModel> {
                                       SnapshotRequest* snap = nullptr, int64_t attach_position = 0,
                                       const std::vector<ImageInput>* images = nullptr);
   bool session_prefill_advance(PrefillCursor& cursor, int64_t chunk_tokens = 0);
+  std::vector<bool> session_prefill_advance_group(const std::vector<PrefillCursor*>& cursors,
+                                                const std::vector<int64_t>& budgets);
+  // The shared session protocol validates this model's image cursor extension.
+  void validate_mixed_prefill_cursor(const PrefillCursor& cursor) const {
+    if (cursor.images && !cursor.images->empty())
+      throw std::invalid_argument("session_prefill_verify: image spans require their own walk");
+  }
+  void prepare_mixed_verify(int rows) { gdn_replay_rows_used_ = rows; }
   void graph_prepare();
   void mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode_row,
-                    bool capture, int head_rows, int batch_requests);
+                    bool capture, int head_rows, int batch_requests, int hidden_row = 0);
   void snapshot_draft_state(int req);
   void restore_draft_state(int req);
   // Depth >= 2: the chain rows run the draft block forward
@@ -244,6 +261,8 @@ class QwenModel : public SessionModel<QwenModel> {
  private:
   const bool fp8_head_mma_;
   const LatentFormat kv_format_;  // the QSA K/V cache's dtype (bf16 | fp8)
+  inline static bool fp8_prefill_attention_ = false;
+  inline static bool fp8_decode_attention_ = false;
   static constexpr int kBlockTokens = 64;
   static constexpr int kPrefillChunkTokens = 4096;
 
@@ -303,6 +322,12 @@ class QwenModel : public SessionModel<QwenModel> {
   uint8_t* head_dump_meta_ = nullptr;    // device [kHeadDumpSlots][2]: rows, site (0 verify, 1 draft)
   int head_dump_next_ = 0;
   int head_dump_site_ = 0;
+  // The draft head's screen (engine.draft_head screen; kernels/head_screen.hpp):
+  // the 2-bit rotated copy of this rank's head slice and the launch
+  // scratch; head_screen_site_ marks a decode draft's head call.
+  DraftHead draft_head_;
+  HeadMatrix draft_head_matrix() const;
+  bool head_screen_site_ = false;
   const uint8_t* head_greedy_verify_ = nullptr;
   const uint8_t* head_greedy_draft_ = nullptr;
   int head_req_ = 0;                 // the request of a single-request head call

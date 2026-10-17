@@ -1,21 +1,8 @@
-// Numerical evidence for the Qwen FP8 KV cache (docs/qwen_fp8_kv_plan.md,
-// "Numerical evidence"). Two parts, NO fp8 kernel required — this pre-registers
-// the acceptance band before any fp8 storage/attention code exists:
-//
-//   1. Per-element e4m3 codec study (host): round-trip realistic bf16 K/V rows
-//      through kernels/latent_format.hpp's e4m3 codec (per-row absmax/448
-//      scale) and report the relative-error distribution. The 3-bit-mantissa
-//      RNE bound is 2^-4 (6.25 %) worst case.
-//
-//   2. Attention sample-match (GPU): run the EXISTING bf16 qsa_attn_partial
-//      over (a) bf16 K/V and (b) e4m3-round-tripped K/V (the dequantized rows
-//      Phase A's read path would produce). Phase A's divergence IS the
-//      quantizer (the kernel is bitwise the bf16 kernel over the dequantized
-//      rows), so this measures exactly what Phase A will change. We report the
-//      output divergence and the sample-match rate, and assert the
-//      necessary-condition bound: the attention output's l2_rel <= 2^-4.
-//
-// Run:  ctest -R qwen_fp8_kv_attn   (or the built binary directly)
+// Qwen FP8 storage codec, attention, and fused append regressions.
+// Comparisons with the original BF16 cache use empirical thresholds for
+// these seeded fixtures. E4M3 element rounding does not imply a universal
+// bound on attention-output error. Native compute has a separate oracle
+// in qsa_fp8_native_test.cu.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -121,7 +108,7 @@ std::vector<uint16_t> run_attn(const uint16_t* qonly, const uint16_t* qgate, con
                            mptr<float>(c_ws), st, k_scale, v_scale);
   dgpp::dsa_attn_combine(ptr<float>(m_ws), ptr<float>(l_ws), ptr<float>(c_ws), g.rows, n_split,
                          g.local_heads, g.dim, mptr<float>(c_out), st);
-  dgpp::qsa_gate_out(ptr<float>(c_out), qgate + g.dim, q_row_stride, q_head_stride,
+  dgpp::qsa_gate_out(ptr<float>(c_out), qgate + g.dim, 2 * q_row_stride, q_head_stride,
                      mptr<uint16_t>(out), g.rows, g.local_heads, g.dim, st);
   DGPP_CUDA_OK(cudaStreamSynchronize(st));
   return down<uint16_t>(out, static_cast<size_t>(g.rows) * g.local_heads * g.dim);
@@ -250,7 +237,7 @@ DGPP_TEST(qwen_fp8_kv_attention_sample_match) {
   // Necessary-condition bound: the output is a weighted average of V rows each
   // within 2^-4 relative, so the output's l2_rel cannot exceed 2^-4.
   require(s.l2_rel <= 0.0625,
-          "fp8 attention output l2_rel exceeds the 2^-4 necessary-condition bound");
+          "fp8 attention output l2_rel exceeds the fixture regression threshold");
 }
 
 // The REAL Phase A path (not the host round-trip): qsa_kv_append quantizes the
@@ -313,6 +300,30 @@ DGPP_TEST(qwen_fp8_kv_real_path_matches_bf16) {
                             ptr<int32_t>(dtopk), ptr<int32_t>(dcounts), ptr<int32_t>(dtable), g, 1, st,
                             mptr<float>(ks), mptr<float>(vs));
 
+  // Exact oracle: explicitly decode the stored codes with the host codec.
+  // This separates storage quantization error from the GPU read arithmetic.
+  const auto kcodes = down<uint8_t>(kc8, static_cast<size_t>(slots) * width);
+  const auto vcodes = down<uint8_t>(vc8, static_cast<size_t>(slots) * width);
+  const auto kscales = down<float>(ks, static_cast<size_t>(slots) * g.kv_heads);
+  const auto vscales = down<float>(vs, static_cast<size_t>(slots) * g.kv_heads);
+  std::vector<uint16_t> kd(kcodes.size()), vd(vcodes.size());
+  for (size_t i = 0; i < kd.size(); ++i) {
+    kd[i] = dgpp::latent_fp8_decode_bf16(kcodes[i], kscales[i / g.dim]);
+    vd[i] = dgpp::latent_fp8_decode_bf16(vcodes[i], vscales[i / g.dim]);
+  }
+  DevBuf dkd = up(kd), dvd = up(vd);
+  // Compare both partial implementations with multiple nonempty splits.
+  for (int mode : {0, 1}) {
+    const auto expected = run_attn(ptr<uint16_t>(dqonly), ptr<uint16_t>(dqg),
+        mptr<uint16_t>(dkd), mptr<uint16_t>(dvd), ptr<int32_t>(dreq), ptr<int32_t>(dtopk),
+        ptr<int32_t>(dcounts), ptr<int32_t>(dtable), g, 3, st, nullptr, nullptr, mode != 0);
+    const auto actual = run_attn(ptr<uint16_t>(dqonly), ptr<uint16_t>(dqg),
+        reinterpret_cast<uint16_t*>(mptr<uint8_t>(kc8)), reinterpret_cast<uint16_t*>(mptr<uint8_t>(vc8)),
+        ptr<int32_t>(dreq), ptr<int32_t>(dtopk), ptr<int32_t>(dcounts), ptr<int32_t>(dtable), g,
+        3, st, mptr<float>(ks), mptr<float>(vs), mode != 0);
+    require(actual == expected, "FP8 storage attention differs from explicitly decoded BF16 cache");
+  }
+
   const long n = static_cast<long>(ref.size());
   std::vector<float> gf(n), wf(n);
   for (long i = 0; i < n; ++i) {
@@ -322,7 +333,7 @@ DGPP_TEST(qwen_fp8_kv_real_path_matches_bf16) {
   const Stats s = compare_abs_rel(gf.data(), wf.data(), n, 0.0);
   std::printf("[fp8-kv] REAL PATH (append-quantize + in-kernel dequant) vs bf16: "
               "l2_rel %.4f  max_abs %.4g\n", s.l2_rel, s.max_abs);
-  require(s.l2_rel <= 0.0625, "fp8 real-path attention l2_rel exceeds the 2^-4 bound");
+  require(s.l2_rel <= 0.0625, "fp8 real-path attention l2_rel exceeds the fixture regression threshold");
 
   // The prefill kernel (the `attend` function pointer's long-prefill branch)
   // over the same fp8 pool.
@@ -343,7 +354,7 @@ DGPP_TEST(qwen_fp8_kv_real_path_matches_bf16) {
   const Stats sp = compare_abs_rel(gpf.data(), wpf.data(), n, 0.0);
   std::printf("[fp8-kv] REAL PATH prefill kernel vs bf16: l2_rel %.4f  max_abs %.4g\n", sp.l2_rel,
               sp.max_abs);
-  require(sp.l2_rel <= 0.0625, "fp8 real-path prefill l2_rel exceeds the 2^-4 bound");
+  require(sp.l2_rel <= 0.0625, "fp8 real-path prefill l2_rel exceeds the fixture regression threshold");
 
   // The tensor-core warp prefill kernel (the serving default for long prefill).
   if (dgpp::qsa_warp_supported(g.dim, g.local_heads, g.kv_heads)) {
@@ -366,7 +377,14 @@ DGPP_TEST(qwen_fp8_kv_real_path_matches_bf16) {
     const Stats sw = compare_abs_rel(gwf.data(), rwf.data(), n, 0.0);
     std::printf("[fp8-kv] REAL PATH warp prefill kernel vs bf16: l2_rel %.4f  max_abs %.4g\n",
                 sw.l2_rel, sw.max_abs);
-    require(sw.l2_rel <= 0.0625, "fp8 real-path warp prefill l2_rel exceeds the 2^-4 bound");
+    require(sw.l2_rel <= 0.0625, "fp8 real-path warp prefill l2_rel exceeds the fixture regression threshold");
+    dgpp::qsa_attn_prefill_warp(ptr<uint16_t>(dqonly), qrs, mptr<uint16_t>(dkd), mptr<uint16_t>(dvd),
+        ptr<int32_t>(dreq), ptr<int32_t>(dtopk), g.seq, ptr<int32_t>(dcounts), g.rows,
+        g.local_heads, g.kv_heads, g.block_tokens, ptr<int32_t>(dtable), g.blocks_per_request(),
+        1.0f / 16.0f, mptr<float>(ref_w), st);
+    DGPP_CUDA_OK(cudaStreamSynchronize(st));
+    require(down<float>(ref_w, static_cast<size_t>(n)) == gwf,
+            "FP8 warp attention differs from explicitly decoded BF16 cache");
   }
 }
 
@@ -431,5 +449,6 @@ DGPP_TEST(qwen_fp8_kv_fused_norm_rope_append_matches_chain) {
   require_bitwise("fused V codes", vcA_h.data(), vcB_h.data(), nbytes);
   std::printf("[fp8-kv] FUSED norm+RoPE+quantize == norm_rope+append (bitwise): K codes, K scales, V codes\n");
 }
+
 
 int main() { return dgpp::test::run_all(); }

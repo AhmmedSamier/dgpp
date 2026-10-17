@@ -4,6 +4,7 @@
 #include <cuda/atomic>
 
 #include <cstdlib>
+#include <cstring>
 #include <string_view>
 
 #include "kernels/flag_protocol.cuh"
@@ -70,8 +71,8 @@ __device__ inline bool aligned16(const void* p) {
   return (reinterpret_cast<uintptr_t>(p) & 15u) == 0;
 }
 
-// The payload fold every claim gates on — the CPU's bus_fold64, which is
-// the definition: XOR over words i of (w_i + i + 1) * kFoldMultiplier. XOR
+// The payload fold every claim gates on — the CPU's bus_fold: XOR over
+// words i of (w_i + i + 1) * kFoldMultiplier, zero-extending a final u32. XOR
 // is commutative, so which thread folds which word and how the partials
 // combine are free choices; this one loads two words per 16-byte system
 // load and combines through the warp (the 256-way serial loop it replaces
@@ -86,7 +87,7 @@ template <int Threads = kConsumerThreads>
 __device__ inline uint64_t block_fold_payload(const uint64_t* base,
                                               size_t words,
                                               uint64_t* s_warp_hash,
-                                              uint64_t* stage = nullptr) {
+                                              uint64_t* stage = nullptr, bool half_word = false) {
   uint64_t h = 0;
   if (aligned16(base)) {
     const size_t pairs = words / 2;
@@ -138,6 +139,11 @@ __device__ inline uint64_t block_fold_payload(const uint64_t* base,
       h ^= (w + i + 1) * kFoldMultiplier;
     }
   }
+  if (half_word && threadIdx.x == 0) {
+    const uint32_t tail = sys_load_u32(reinterpret_cast<const uint32_t*>(base + words));
+    if (stage != nullptr) reinterpret_cast<uint32_t*>(stage + words)[0] = tail;
+    h ^= (static_cast<uint64_t>(tail) + words + 1) * kFoldMultiplier;
+  }
 #pragma unroll
   for (int o = 16; o > 0; o >>= 1) h ^= __shfl_xor_sync(0xffffffffu, h, o);
   if ((threadIdx.x & 31) == 0) s_warp_hash[threadIdx.x / 32] = h;
@@ -163,7 +169,7 @@ __device__ inline uint64_t block_fold_payload(const uint64_t* base,
 template <int Threads>
 __device__ inline void block_fold_payloads(const uint64_t* const* base, const size_t* words,
                                            uint64_t* const* stage, const int* pending_in,
-                                           uint64_t* s_warp_hash, uint64_t* totals) {
+                                           uint64_t* s_warp_hash, uint64_t* totals, const bool* half_words) {
   constexpr int kWarps = Threads / 32;
   uint64_t h[kBusMaxPeers];
   // The caller's flags, read once: thread 0 clears a matched peer's as soon
@@ -260,6 +266,14 @@ __device__ inline void block_fold_payloads(const uint64_t* const* base, const si
       }
     }
   }
+  if (threadIdx.x == 0) {
+    for (size_t p = 0; p < kBusMaxPeers; ++p) {
+      if (pending[p] == 0 || !half_words[p]) continue;
+      const uint32_t tail = sys_load_u32(reinterpret_cast<const uint32_t*>(base[p] + words[p]));
+      if (stage[p] != nullptr) reinterpret_cast<uint32_t*>(stage[p] + words[p])[0] = tail;
+      h[p] ^= (static_cast<uint64_t>(tail) + words[p] + 1) * kFoldMultiplier;
+    }
+  }
   for (size_t p = 0; p < kBusMaxPeers; ++p) {
     if (pending[p] == 0) continue;
 #pragma unroll
@@ -290,6 +304,45 @@ __device__ inline void block_copy_row(const uint32_t* src, uint32_t* dst,
     for (uint32_t w = threadIdx.x; w < words; w += Threads)
       dst[w] = src[w];
   }
+}
+
+// Snapshot and compute the placement hash from the same device reads. The
+// engine can post the ready row without scanning its pinned bytes on the CPU.
+// `words` counts u32s; a final half-word is zero-extended for the hash.
+template <int Threads>
+__device__ inline uint64_t block_copy_row_hash(const uint32_t* src, uint32_t* dst, uint32_t words,
+                                               uint64_t* s_hash) {
+  uint64_t h = 0;
+  if ((words & 3) == 0 && aligned16(src) && aligned16(dst)) {
+    for (uint32_t j = threadIdx.x; j < words / 4; j += Threads) {
+      const uint4 v = reinterpret_cast<const uint4*>(src)[j];
+      reinterpret_cast<uint4*>(dst)[j] = v;
+      const uint64_t w0 = static_cast<uint64_t>(v.x) | (static_cast<uint64_t>(v.y) << 32);
+      const uint64_t w1 = static_cast<uint64_t>(v.z) | (static_cast<uint64_t>(v.w) << 32);
+      h ^= (w0 + 2 * j + 1) * kFoldMultiplier;
+      h ^= (w1 + 2 * j + 2) * kFoldMultiplier;
+    }
+  } else {
+    for (uint32_t j = threadIdx.x; j < (words + 1) / 2; j += Threads) {
+      const uint32_t lo = src[2 * j];
+      dst[2 * j] = lo;
+      if (2 * j + 1 < words) {
+        const uint32_t hi = src[2 * j + 1];
+        dst[2 * j + 1] = hi;
+        h ^= ((static_cast<uint64_t>(hi) << 32 | lo) + j + 1) * kFoldMultiplier;
+      } else {
+        h ^= (static_cast<uint64_t>(lo) + j + 1) * kFoldMultiplier;
+      }
+    }
+  }
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) h ^= __shfl_xor_sync(0xffffffffu, h, o);
+  if ((threadIdx.x & 31) == 0) s_hash[threadIdx.x / 32] = h;
+  __syncthreads();
+  uint64_t total = 0;
+#pragma unroll
+  for (int w = 0; w < Threads / 32; ++w) total ^= s_hash[w];
+  return total;
 }
 
 // The canonical fold: dst[i] = bf16(((0 + v_0[i]) + v_1[i]) + ...) over
@@ -577,6 +630,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_kernel(
   __shared__ int s_got[kBusMaxPeers];  // 0 waiting, 1 claimed+acked
   __shared__ uint32_t s_seq[kBusMaxPeers];
   __shared__ size_t s_words[kBusMaxPeers];
+  __shared__ bool s_half_words[kBusMaxPeers];
   __shared__ const uint16_t* s_payload[kBusMaxPeers];
   __shared__ uint64_t s_hash[kConsumerThreads / 32];  // per-warp fold partials
   __shared__ uint64_t s_hash_want;   // the claimed door's placement-gate hash
@@ -686,7 +740,9 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_kernel(
           atomicExch(reinterpret_cast<unsigned*>(&ctl->dbg_first_seq), seq);
         }
         s_seq[peer] = seq;
-        s_words[peer] = sys_load_u32(&door->len) / 8;
+        const uint32_t payload_bytes = sys_load_u32(&door->len);
+        s_words[peer] = payload_bytes / 8;
+        s_half_words[peer] = (payload_bytes & 4u) != 0;
       }
     }
     __syncthreads();
@@ -734,7 +790,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_kernel(
     __syncthreads();
     uint64_t total_hash = 0;
     for (int spin = 0;; ++spin) {
-      total_hash = block_fold_payload(base, s_words[peer], s_hash);
+      total_hash = block_fold_payload(base, s_words[peer], s_hash, nullptr, s_half_words[peer]);
       if (threadIdx.x == 0) {
         if (total_hash == s_hash_want) {
           s_gate_matched = 1;
@@ -850,6 +906,7 @@ __global__ __launch_bounds__(Threads) void bus_allreduce_graph_kernel(
   __shared__ int s_got[kBusMaxPeers];  // 0 waiting, 1 claimed+acked
   __shared__ uint32_t s_seq[kBusMaxPeers];
   __shared__ size_t s_words[kBusMaxPeers];
+  __shared__ bool s_half_words[kBusMaxPeers];
   __shared__ const uint16_t* s_payload[kBusMaxPeers];
   __shared__ uint64_t s_hash[Threads / 32];  // per-warp fold partials
   __shared__ uint64_t s_hash_want;   // the claimed door's placement-gate hash
@@ -890,13 +947,14 @@ __global__ __launch_bounds__(Threads) void bus_allreduce_graph_kernel(
   // Same contract as the eager kernel's phase 1: the fold overwrites src
   // in place, so the row holds a copy taken BEFORE the fold.
   const uint32_t words = elems / 2;
-  block_copy_row<Threads>(reinterpret_cast<const uint32_t*>(src),
-                 reinterpret_cast<uint32_t*>(
-                     const_cast<uint16_t*>(v.stage_row_base + row_off)),
-                 words);
+  const uint64_t stage_hash = block_copy_row_hash<Threads>(
+      reinterpret_cast<const uint32_t*>(src),
+      reinterpret_cast<uint32_t*>(const_cast<uint16_t*>(v.stage_row_base + row_off)), words,
+      s_hash);
   __threadfence_system();
   __syncthreads();
   if (threadIdx.x == 0) {
+    ctl->stage_hash = stage_hash;
     ctl->stamp_stage = clock64();
     ctl->gt_stage = globaltimer_ns();
     SysRef ready(ctl->ready_bits);
@@ -966,6 +1024,7 @@ __global__ __launch_bounds__(Threads) void bus_allreduce_graph_kernel(
           s_seq[peer] = seq;
           s_len[peer] = d0.y;
           s_words[peer] = d0.y / 8;
+          s_half_words[peer] = (d0.y & 4u) != 0;
           s_want[peer] = static_cast<uint64_t>(d1.x) | (static_cast<uint64_t>(d1.y) << 32);
         }
         continue;
@@ -983,7 +1042,9 @@ __global__ __launch_bounds__(Threads) void bus_allreduce_graph_kernel(
                                           cuda::memory_order_relaxed,
                                           cuda::memory_order_relaxed)) {
         s_seq[peer] = seq;
-        s_words[peer] = sys_load_u32(&door->len) / 8;
+        const uint32_t payload_bytes = sys_load_u32(&door->len);
+        s_words[peer] = payload_bytes / 8;
+        s_half_words[peer] = (payload_bytes & 4u) != 0;
       }
     }
     __syncthreads();
@@ -1013,7 +1074,7 @@ __global__ __launch_bounds__(Threads) void bus_allreduce_graph_kernel(
         const BusRecvView& rv = v.recv[view_idx];
         bases[p] = rv.payload_lat + static_cast<size_t>(slot) * (rv.lat_slot_bytes / 8);
         nwords[p] = s_words[p];
-        stages[p] = (stage_words != 0 && (stage_words & 1) == 0 && s_words[p] <= stage_words)
+        stages[p] = (stage_words != 0 && (stage_words & 1) == 0 && (s_words[p] + s_half_words[p]) <= stage_words)
                         ? stage_smem + p * stage_words
                         : nullptr;
       }
@@ -1034,9 +1095,9 @@ __global__ __launch_bounds__(Threads) void bus_allreduce_graph_kernel(
         if (open == 1) {
           // A lone claim: the sequential gate's pass (four loads in flight).
           for (size_t p = 0; p < kBusMaxPeers; ++p) totals[p] = 0;
-          totals[only] = block_fold_payload<Threads>(bases[only], nwords[only], s_hash, stages[only]);
+          totals[only] = block_fold_payload<Threads>(bases[only], nwords[only], s_hash, stages[only], s_half_words[only]);
         } else {
-          block_fold_payloads<Threads>(bases, nwords, stages, pending, s_hash_multi, totals);
+          block_fold_payloads<Threads>(bases, nwords, stages, pending, s_hash_multi, totals, s_half_words);
         }
         if (threadIdx.x == 0) {
           int left = 0;
@@ -1132,11 +1193,11 @@ __global__ __launch_bounds__(Threads) void bus_allreduce_graph_kernel(
       __syncthreads();
       uint64_t total_hash = 0;
       uint64_t* stage = (stage_words != 0 && (stage_words & 1) == 0 &&
-                         s_words[peer] <= stage_words)
+                         (s_words[peer] + s_half_words[peer]) <= stage_words)
                             ? stage_smem + static_cast<size_t>(peer) * stage_words
                             : nullptr;
       for (int spin = 0;; ++spin) {
-        total_hash = block_fold_payload<Threads>(base, s_words[peer], s_hash, stage);
+        total_hash = block_fold_payload<Threads>(base, s_words[peer], s_hash, stage, s_half_words[peer]);
         if (threadIdx.x == 0) {
           if (total_hash == s_hash_want) {
             s_gate_matched = 1;
@@ -1355,6 +1416,46 @@ __device__ inline uint32_t bulk_pack2(uint16_t lo, uint16_t hi) {
   return static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 16);
 }
 
+// The last 2, 4 or 6 elements of a stripe must be hashed from the same
+// loads that are consumed. A four-byte tail used to have an empty hash,
+// allowing a doorbell to pass the placement gate before its data arrived.
+template <bool System>
+__device__ inline uint4 bulk_load_tail(const uint16_t* p, uint32_t elems) {
+  uint4 out = make_uint4(0, 0, 0, 0);
+  if (elems >= 4) {
+    const auto* w = reinterpret_cast<const uint64_t*>(p);
+    const uint64_t v = System ? sys_load_u64(w) : *w;
+    out.x = static_cast<uint32_t>(v);
+    out.y = static_cast<uint32_t>(v >> 32);
+  }
+  if ((elems & 2u) != 0) {
+    const auto* w = reinterpret_cast<const uint32_t*>(p + (elems >= 4 ? 4 : 0));
+    const uint32_t v = System ? sys_load_u32(w) : *w;
+    if (elems >= 4) out.z = v;
+    else out.x = v;
+  }
+  return out;
+}
+__device__ inline uint64_t bulk_hash_tail(uint4 v, uint32_t elems, uint64_t word) {
+  uint64_t h = 0;
+  if (elems >= 4)
+    h ^= ((static_cast<uint64_t>(v.y) << 32 | v.x) + word + 1) * kFoldMultiplier;
+  if ((elems & 2u) != 0)
+    h ^= (static_cast<uint64_t>(elems >= 4 ? v.z : v.x) + word + (elems >= 4 ? 2 : 1)) * kFoldMultiplier;
+  return h;
+}
+__device__ inline void bulk_store_tail(uint16_t* p, uint4 v, uint32_t elems) {
+  auto* w = reinterpret_cast<uint32_t*>(p);
+  if (elems >= 2) w[0] = v.x;
+  if (elems >= 4) w[1] = v.y;
+  if (elems >= 6) w[2] = v.z;
+}
+__device__ inline void bulk_accumulate_tail(float (&acc)[6], uint4 v, uint32_t elems) {
+#pragma unroll
+  for (int e = 0; e < 6; ++e)
+    if (e < elems) acc[e] += bf16_to_f32(bulk_elem(v, e));
+}
+
 // The block's per-peer hash partials XORed into the stripe's accumulators
 // (all threads; two barriers).
 __device__ inline void bulk_commit_hashes(const uint64_t (&h)[kBusMaxPeersSized],
@@ -1529,7 +1630,6 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
                       static_cast<uint64_t>(k) * stripe;
         const bool al = aligned16(s) && aligned16(d);
         const uint32_t nvec = static_cast<uint32_t>(bytes / 16);
-        const uint32_t words = static_cast<uint32_t>(bytes / 8);
         uint64_t hb = 0;  // this block's partial of the stripe's fold
         for (uint32_t ti = 0; ti < nt; ++ti, ++t) {
           if (static_cast<int>(t % static_cast<uint32_t>(G)) != B) continue;
@@ -1541,18 +1641,11 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
             bulk_store(d, vi, al, x);
             h ^= bulk_hash_vec(x, 2 * static_cast<uint64_t>(vi));
           }
-          if (ti + 1 == nt) {
-            // The tail past the last whole vector (bytes is even): an odd
-            // hash word, then the elements.
-            if (threadIdx.x == 0 && (words & 1u) != 0) {
-              const uint64_t i = words - 1;
-              const uint64_t w = reinterpret_cast<const uint64_t*>(s)[i];
-              h ^= (w + i + 1) * kFoldMultiplier;
-            }
-            const uint32_t e0 = nvec * 8;
-            const uint32_t e1 = static_cast<uint32_t>(bytes / 2);
-            for (uint32_t e = e0 + threadIdx.x; e < e1; e += kConsumerThreads)
-              d[e] = s[e];
+          if (ti + 1 == nt && threadIdx.x == 0 && (bytes & 15u) != 0) {
+            const uint32_t tail = static_cast<uint32_t>(bytes / 2) - nvec * 8;
+            const uint4 v = bulk_load_tail<false>(s + nvec * 8, tail);
+            bulk_store_tail(d + nvec * 8, v, tail);
+            h ^= bulk_hash_tail(v, tail, static_cast<uint64_t>(nvec) * 2);
           }
           hb ^= bulk_block_xor(h, s_h);
         }
@@ -1867,37 +1960,30 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
                    make_uint4(bulk_pack2(res[0], res[1]), bulk_pack2(res[2], res[3]),
                               bulk_pack2(res[4], res[5]), bulk_pack2(res[6], res[7])));
       }
-      if (ti + 1 == nt) {
-        // The tail: an odd hash word per peer, and the elements past the
-        // last whole vector (folded, not hashed past the payload's words
-        // — bus_fold64 walks len/8 words exactly as the door does).
-        if (threadIdx.x == 0) {
+      if (ti + 1 == nt && threadIdx.x == 0 && (bytes & 15u) != 0) {
+        const uint32_t offset = nvec * 8;
+        const uint32_t tail = static_cast<uint32_t>(bytes / 2) - offset;
+        const uint4 mine = bulk_load_tail<false>(local + offset, tail);
+        float acc[6]{};
+        bool mine_in = false;
+        // Consume each loaded peer vector immediately in canonical rank
+        // order, keeping only six accumulators instead of a peer array.
 #pragma unroll
-          for (int p = 0; p < kBusMaxPeersSized; ++p) {
-            if (p < peers && (words[p] & 1u) != 0) {
-              const uint64_t i = words[p] - 1;
-              const uint64_t w = sys_load_u64(
-                  reinterpret_cast<const uint64_t*>(pp[p]) + i);
-              h[p] ^= (w + i + 1) * kFoldMultiplier;
-            }
+        for (int p = 0; p < kBusMaxPeersSized; ++p) {
+          if (p == my_rank) {
+            bulk_accumulate_tail(acc, mine, tail);
+            mine_in = true;
+          }
+          if (p < peers) {
+            const uint4 v = bulk_load_tail<true>(pp[p] + offset, tail);
+            h[p] ^= bulk_hash_tail(v, tail, static_cast<uint64_t>(nvec) * 2);
+            bulk_accumulate_tail(acc, v, tail);
           }
         }
-        const uint32_t e0 = nvec * 8;
-        const uint32_t e1 = static_cast<uint32_t>(bytes / 2);
-        for (uint32_t e = e0 + threadIdx.x; e < e1; e += kConsumerThreads) {
-          float acc = 0.0f;
-          bool mine_in = false;
+        if (!mine_in) bulk_accumulate_tail(acc, mine, tail);
 #pragma unroll
-          for (int p = 0; p < kBusMaxPeersSized; ++p) {
-            if (p == my_rank) {
-              acc += bf16_to_f32(local[e]);
-              mine_in = true;
-            }
-            if (p < peers) acc += bf16_to_f32(sys_load_u16(&pp[p][e]));
-          }
-          if (!mine_in) acc += bf16_to_f32(local[e]);
-          out[e] = __bfloat16_as_ushort(__float2bfloat16(acc));
-        }
+        for (int e = 0; e < 6; ++e)
+          if (e < tail) out[offset + e] = __bfloat16_as_ushort(__float2bfloat16(acc[e]));
       }
       bulk_commit_hashes(h, peers, s_h, sc, k);
     };
@@ -1908,7 +1994,6 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
       const uint32_t len = sc->len[p][k];
       uint16_t* out = dst + static_cast<uint64_t>(gs) * stripe;
       const bool al = aligned16(payload) && aligned16(out);
-      const uint32_t words = len / 8;
       const uint32_t nvec = len / 16;
       const uint32_t v0 = ti * kBulkTileVecs;
       const uint32_t v1 = v0 + kBulkTileVecs < nvec ? v0 + kBulkTileVecs : nvec;
@@ -1918,17 +2003,11 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
         h ^= bulk_hash_vec(y, 2 * static_cast<uint64_t>(vi));
         bulk_store(out, vi, al, y);
       }
-      if (ti + 1 == nt) {
-        if (threadIdx.x == 0 && (words & 1u) != 0) {
-          const uint64_t i = words - 1;
-          const uint64_t w =
-              sys_load_u64(reinterpret_cast<const uint64_t*>(payload) + i);
-          h ^= (w + i + 1) * kFoldMultiplier;
-        }
-        const uint32_t e0 = nvec * 8;
-        const uint32_t e1 = len / 2;
-        for (uint32_t e = e0 + threadIdx.x; e < e1; e += kConsumerThreads)
-          out[e] = sys_load_u16(&payload[e]);
+      if (ti + 1 == nt && threadIdx.x == 0 && (len & 15u) != 0) {
+        const uint32_t tail = len / 2 - nvec * 8;
+        const uint4 v = bulk_load_tail<true>(payload + nvec * 8, tail);
+        bulk_store_tail(out + nvec * 8, v, tail);
+        h ^= bulk_hash_tail(v, tail, static_cast<uint64_t>(nvec) * 2);
       }
       bulk_commit_hash(h, s_h, &sc->hash_acc[p][k]);
     };
@@ -2287,7 +2366,14 @@ uint64_t bus_consumer_deadline_cycles(double seconds) {
 }
 
 uint64_t bus_fold(const void* data, size_t bytes) {
-  return bus_fold64(static_cast<const uint64_t*>(data), bytes / 8);
+  const size_t words = bytes / 8;
+  uint64_t hash = bus_fold64(static_cast<const uint64_t*>(data), words);
+  if ((bytes & 4u) != 0) {
+    uint32_t tail = 0;
+    std::memcpy(&tail, static_cast<const uint8_t*>(data) + words * 8, sizeof(tail));
+    hash ^= (static_cast<uint64_t>(tail) + words + 1) * kFoldMultiplier;
+  }
+  return hash;
 }
 
 }  // namespace dgpp::net

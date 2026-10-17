@@ -249,6 +249,9 @@ void test_settings_handshake() {
   sent.fabric_port = 29970;
   sent.max_concurrency = 2;
   sent.kv_capacity = 4096;
+  sent.kv_dtype = "fp8";
+  sent.prefill_attention = "fp8";
+  sent.decode_attention = "fp8";
   sent.default_max_tokens = 32;
   sent.queue_limit = 8;
   sent.decode_graph = true;
@@ -259,7 +262,14 @@ void test_settings_handshake() {
   sent.mtp_schedule_row_ms = 3.7;
   sent.mtp_schedule_base_ms = 24.3;
   sent.mtp_schedule_sampled_scale = 0.9;
+  sent.lookup_draft = true;
+  sent.lookup_nmin = 3;
+  sent.lookup_nstrong = 5;
+  sent.lookup_agree = 1;
+  sent.lookup_tail = 2;
   sent.fp8_head = "mma";
+  sent.draft_head = "screen";
+  sent.draft_head_blocks = 48;
   sent.sampling_candidates = 128;
   sent.prefix_cache_gib = 1.5;
   sent.admission = "full";
@@ -283,9 +293,13 @@ void test_settings_handshake() {
     peer.join();
     require(ok && got == sent, "the peer's first read is rank 0's settings, whole");
     require(got.fp8_head == "mma", "rank 0 overrides the peer default head mode");
+    require(got.draft_head == "screen" && got.draft_head_blocks == 48, "the draft head's read travels with the settings");
     require(got.mtp_draft == "greedy", "the sampled requests' draft rule travels with the settings");
     require(got.mtp_schedule && got.mtp_schedule_sampled_scale == 0.9,
             "the sampled requests' schedule scale travels with the settings");
+    require(got.lookup_draft && got.lookup_nmin == 3 && got.lookup_nstrong == 5 && got.lookup_agree == 1,
+            "the lookup thresholds travel with the settings");
+    require(got.lookup_tail == 2, "the lookup tail travels with the settings");
   }
   {
     // A peer of another version refuses: a mixed-version world cannot form.
@@ -413,14 +427,19 @@ void test_journal_codec() {
     dgpp::sched::AdmissionPolicy chunk_policy;
     chunk_policy.prefill_budget_tokens = 256;
     chunk_policy.prefill_idle_budget_tokens = 2048;
+    chunk_policy.decode_gap_target_ms = 300;
+    chunk_policy.first_token_target_ms = 1500;
+    chunk_policy.prefill_latency = {20, 4, 50, 512};
+    chunk_policy.prefill_budget_automatic = true;
+    chunk_policy.prefill_early_admission = true;
     const auto chunk_warm = dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_warm(chunk_policy));
     require(chunk_warm.admission == chunk_policy && warm0.admission.prefill_budget_tokens == 0 &&
-                warm0.admission.prefill_idle_budget_tokens == 0,
+                warm0.admission.prefill_idle_budget_tokens == 0 && !warm0.admission.prefill_early_admission,
             "the deterministic prefill budget round-trips; old records keep monolithic admission");
     const auto fixed_warm = dgpp::serve::decode_journal_line(
         R"({"op":"warm","adm":0,"win":256,"pfbudget":256})");
     require(fixed_warm.admission.prefill_budget_tokens == 256 &&
-                fixed_warm.admission.prefill_idle_budget_tokens == 0,
+                fixed_warm.admission.prefill_idle_budget_tokens == 0 && !fixed_warm.admission.prefill_early_admission,
             "old budgeted records retain a fixed budget");
     // The prefix cache's entry policy (2026-09-28) rides the warm record;
     // a record without the keys decodes to what such a rank 0 ran.
@@ -450,6 +469,16 @@ void test_journal_codec() {
         rejected = std::string(e.what()).find("idle prefill budget") != std::string::npos;
       }
       require(rejected, "invalid idle budget is rejected by name");
+    }
+    for (const std::string value : {"-1", "2", "\"1\"", "true"}) {
+      bool rejected = false;
+      try {
+        (void)dgpp::serve::decode_journal_line(
+            R"({"op":"warm","adm":0,"win":256,"pfearly":)" + value + "}");
+      } catch (const std::runtime_error& e) {
+        rejected = std::string(e.what()).find("early-prefill-admission") != std::string::npos;
+      }
+      require(rejected, "invalid early admission flag is rejected by name");
     }
     // The configuration digest (2026-09-06) rides the warm record when rank 0
     // has one; a config-less rank 0's record is unchanged.
@@ -483,6 +512,10 @@ void test_journal_codec() {
     ws.admission_window = 512;
     ws.prefill_budget_tokens = 256;
     ws.prefill_idle_budget_tokens = 2048;
+    ws.decode_gap_target_ms = 300;
+    ws.first_token_target_ms = 1500;
+    ws.prefill_latency = {20, 4, 50, 512};
+    ws.prefill_early_admission = true;
     ws.prefix_min_tokens = 1024;
     ws.prefix_head_snapshots = true;
     ws.bulk_pace_gbps = 28.333333333333332;
@@ -491,6 +524,8 @@ void test_journal_codec() {
     ws.stats_interval_s = 0.1;
     ws.reasoning_in_content = true;
     ws.kv_dtype = "fp8";
+    ws.prefill_attention = "fp8";
+    ws.decode_attention = "fp8";
     ws.bf16_weights = "bf12";
     ws.compact_batches = true;
     ws.fp8_head = "mma";
@@ -506,6 +541,21 @@ void test_journal_codec() {
     require(sr.settings && !sr.warm && !sr.stop && sr.world_settings == ws,
             "codec: the settings record round-trips");
     {
+      std::string legacy = dgpp::serve::encode_journal_settings(ws);
+      const std::string key = ",\"dcattn\":\"fp8\"";
+      const size_t at = legacy.find(key);
+      require(at != std::string::npos, "codec: decode attention is encoded");
+      legacy.erase(at, key.size());
+      require(dgpp::serve::decode_journal_line(legacy).world_settings.decode_attention == "bf16",
+              "codec: legacy settings keep BF16 decode arithmetic");
+      auto invalid = ws;
+      invalid.decode_attention = "fp4";
+      bool rejected = false;
+      try { (void)dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_settings(invalid)); }
+      catch (const std::runtime_error&) { rejected = true; }
+      require(rejected, "codec: invalid decode arithmetic is rejected");
+    }
+    {
       // A record from before the entry policy (2026-09-28) carries neither
       // key: no floor, no head cut, what that rank 0 ran.
       auto plain = ws;
@@ -517,6 +567,29 @@ void test_journal_codec() {
       const auto decoded = dgpp::serve::decode_journal_line(line);
       require(decoded.world_settings.prefix_min_tokens == 0 && !decoded.world_settings.prefix_head_snapshots,
               "codec: absent entry policy decodes to off");
+    }
+    for (const std::optional<bool> early : {std::optional<bool>{}, std::optional<bool>{false},
+                                            std::optional<bool>{true}}) {
+      auto settings = ws;
+      settings.prefill_early_admission = early;
+      const auto line = dgpp::serve::encode_journal_settings(settings);
+      const auto decoded = dgpp::serve::decode_journal_line(line);
+      require(decoded.world_settings == settings,
+              "automatic/on/off admission survives the settings handshake exactly");
+      if (early == std::optional<bool>{false}) {
+        require(line.find("\"pfearly\"") == std::string::npos,
+                "absent legacy settings remain explicitly disabled, not automatic");
+      }
+    }
+    for (const std::string value : {"-2", "2", "0.5", "true", "null", "\"auto\""}) {
+      auto line = dgpp::serve::encode_journal_settings(ws);
+      const auto at = line.find("\"pfearly\":1");
+      require(at != std::string::npos, "test settings include early admission");
+      line.replace(at, std::string("\"pfearly\":1").size(), "\"pfearly\":" + value);
+      bool refused = false;
+      try { (void)dgpp::serve::decode_journal_line(line); }
+      catch (const std::exception&) { refused = true; }
+      require(refused, "invalid early-admission settings are refused");
     }
     for (int budget : {-1, 0, 256}) {
       auto settings = ws;
@@ -532,6 +605,25 @@ void test_journal_codec() {
       const auto decoded =
           dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_settings(head));
       require(decoded.world_settings.fp8_head == mode, "codec: head mode round-trips");
+    }
+    for (const std::string mode : {"exact", "screen"}) {
+      auto dh = ws;
+      dh.draft_head = mode;
+      dh.draft_head_blocks = 40;
+      const auto decoded = dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_settings(dh));
+      require(decoded.world_settings.draft_head == mode && decoded.world_settings.draft_head_blocks == 40,
+              "codec: the draft head's read round-trips");
+    }
+    {
+      std::string legacy = dgpp::serve::encode_journal_settings(ws);
+      for (const char* key : {",\"dh\":\"exact\"", ",\"dhb\":32"}) {
+        const std::string k(key);
+        const auto pos = legacy.find(k);
+        require(pos != std::string::npos, "codec: the draft head keys are emitted");
+        legacy.erase(pos, k.size());
+      }
+      const auto d = dgpp::serve::decode_journal_line(legacy).world_settings;
+      require(d.draft_head == "exact" && d.draft_head_blocks == 32, "codec: absent draft head keys default to exact / 32");
     }
     {
       std::string legacy = dgpp::serve::encode_journal_settings(ws);
@@ -953,7 +1045,8 @@ struct FabricRig {
           return c;
         }()),
         service(cfg, &engine, &frontend, {kFakeEos}),
-        http(0, &service, 64) {
+        http(0, &service, 64, "127.0.0.1", dgpp::serve::kDefaultHttpMaxBodyBytes,
+             std::getenv("DGPP_TEST_STREAM_WAKE") != nullptr) {
     service.set_audit_observer(&oplog);
     service.set_rank_metrics({0, kWorld, "v", "g"}, nullptr);
     // Peers connect first (they block in the journal read loop),
@@ -1659,6 +1752,73 @@ DGPP_TEST(journal_image_history_exceeds_old_count_and_token_caps) {
   }
 }
 
+DGPP_TEST(journal_model_readiness_holds_warm_for_the_slowest_peer) {
+  dgpp::serve::JournalWriter journal(0);
+  dgpp::serve::JournalReader fast("127.0.0.1", journal.port(), 5000, 1);
+  dgpp::serve::JournalReader slow("127.0.0.1", journal.port(), 5000, 2);
+  journal.accept_peers(3, 5000);
+  fast.send_ready();
+  std::string error;
+  std::jthread leader([&] {
+    try {
+      require(journal.wait_peers_ready(5000, [] { return false; }), "readiness unexpectedly interrupted");
+      dgpp::sched::AdmissionPolicy policy;
+      policy.prefill_budget_tokens = 256;
+      policy.prefill_idle_budget_tokens = 4096;
+      journal.broadcast(dgpp::serve::encode_journal_warm(policy));
+    } catch (const std::exception& e) { error = e.what(); }
+  });
+  const auto hold_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+  std::string line;
+  const bool released_early = fast.read_line(
+      [&] { return std::chrono::steady_clock::now() >= hold_until; }, &line);
+  slow.send_ready();
+  leader.join();
+  require(error.empty(), error);
+  require(!released_early, "warm-up started while a peer was still loading its model");
+  for (auto* peer : {&fast, &slow}) {
+    dgpp::sched::AdmissionPolicy policy;
+    require(dgpp::serve::wait_journal_warm(peer, [] { return false; }, &policy), "missing warm record");
+    require(policy.prefill_budget_tokens == 256 && policy.prefill_idle_budget_tokens == 4096,
+            "all ranks must receive the same concrete budgets after readiness");
+  }
+  slow.close();
+  require(journal.dead_peer() == 2, "readiness bytes must not hide a subsequent peer death");
+}
+
+DGPP_TEST(journal_model_readiness_bounds_missing_dead_and_malformed_peers) {
+  for (const std::string mode : {"timeout", "closed", "malformed", "stop", "fragmented"}) {
+    dgpp::serve::JournalWriter journal(0);
+    auto peer = dgpp::net::TcpConn::connect("127.0.0.1", journal.port(), 5000);
+    constexpr std::string_view hello = "hello 1\n";
+    require(peer.write_all(hello.data(), hello.size()), "hello write");
+    journal.accept_peers(2, 5000);
+    if (mode == "closed") peer.close();
+    if (mode == "malformed") require(peer.write_all("wrong\n", 6), "malformed write");
+    std::jthread fragment;
+    if (mode == "fragmented") {
+      require(peer.write_all("rea", 3), "readiness prefix write");
+      fragment = std::jthread([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        (void)peer.write_all("dy\n", 3);
+      });
+    }
+    std::string error;
+    bool ready = false;
+    try { ready = journal.wait_peers_ready(mode == "timeout" ? 20 : 5000, [&] { return mode == "stop"; }); }
+    catch (const std::exception& e) { error = e.what(); }
+    if (mode == "fragmented") require(ready && error.empty(), "fragmented readiness must complete");
+    else if (mode == "stop") require(!ready && error.empty(), "shutdown must interrupt readiness cleanly");
+    else {
+      require(!ready && !error.empty(), "an incomplete world must never start warm-up");
+      require(error.find(mode == "timeout" ? "rank(s) 1" : "rank 1") != std::string::npos,
+              "readiness failure must identify the affected rank");
+    }
+  }
+  dgpp::serve::JournalWriter solo(0);
+  require(solo.wait_peers_ready(20, [] { return false; }), "a world of one has no peers to wait for");
+}
+
 DGPP_TEST(journal_large_fragmented_record_scans_linearly_and_preserves_following_lines) {
   auto listener = dgpp::net::TcpListener::bind(0);
   const std::string payload(64ull << 20, 'x');
@@ -1693,4 +1853,69 @@ DGPP_TEST(journal_large_fragmented_record_scans_linearly_and_preserves_following
   require(complete, "large fragmented journal record exceeded deadline or changed bytes");
   require(sender_error.empty(), sender_error);
   require(empty && following && eof, "journal reader lost buffered lines or accepted a partial EOF record");
+}
+
+DGPP_TEST(fabric_serve_adaptive_prefill_tick_codec) {
+  dgpp::serve::GenerationService::PassEvents events;
+  events.prefill_budget = 768;
+  const auto decoded = dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_tick(events));
+  require(decoded.prefill_budget == 768, "leader budget round-trips exactly");
+  require(!dgpp::serve::decode_journal_line(R"({"op":"tick"})").prefill_budget,
+          "legacy fixed ticks have no adaptive decision");
+  for (const std::string value : {"0", "-1", "1073741825", "1.5", "true", "null", "\"256\""}) {
+    bool rejected = false;
+    try { (void)dgpp::serve::decode_journal_line(R"({"op":"tick","pfmax":)" + value + "}"); }
+    catch (const std::runtime_error&) { rejected = true; }
+    require(rejected, "invalid adaptive decision rejected before execution");
+  }
+  for (const std::string key : {"gapms", "ttftms", "pfauto"})
+    for (const std::string value : {"-1", "3600001", "1.5", "true", "null"}) {
+      bool rejected = false;
+      try { (void)dgpp::serve::decode_journal_line(R"({"op":"warm","adm":0,"win":256,")" + key + "\":" + value + "}"); }
+      catch (const std::runtime_error&) { rejected = true; }
+      require(rejected, "invalid latency policy rejected before warmup");
+    }
+  for (const std::string key : {"pfhr", "pfgrow", "pfrec", "pfstart", "pfifloor"})
+    for (const std::string value : {"-1", "1073741825", "1.5", "true", "null"}) {
+      bool rejected = false;
+      try { (void)dgpp::serve::decode_journal_line(R"({"op":"warm","adm":0,"win":256,")" + key + "\":" + value + "}"); }
+      catch (const std::runtime_error&) { rejected = true; }
+      require(rejected, "invalid controller tuning rejected before warmup");
+    }
+}
+
+DGPP_TEST(fabric_serve_peer_requires_and_replays_leader_budget) {
+  struct BudgetEngine : FakeEngine {
+    BudgetEngine() : FakeEngine(2, 100, 4) {}
+    int64_t prefill_chunk_alignment() const override { return 2; }
+    int64_t prefill_chunk_limit() const override { return 16; }
+  };
+  for (bool missing : {false, true}) {
+    BudgetEngine engine;
+    dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_budget_tokens = 4;
+    policy.prefill_idle_budget_tokens = 16;
+    policy.decode_gap_target_ms = 500;
+    policy.first_token_target_ms = 2000;
+    dgpp::sched::Scheduler sched(&engine, {}, 0, policy);
+    require(sched.next_prefill_budget() == 4, "local cold estimate differs from leader's decision");
+    dgpp::serve::JournalWriter writer(0);
+    dgpp::serve::JournalReader reader("127.0.0.1", writer.port(), 5000, 1);
+    writer.accept_peers(2, 5000);
+    dgpp::serve::GenerationService::PassEvents events;
+    if (!missing) events.prefill_budget = 12;
+    writer.broadcast(dgpp::serve::encode_journal_tick(events));
+    writer.broadcast(dgpp::serve::encode_journal_stop());
+    bool rejected = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    try {
+      dgpp::serve::run_journal_peer(&sched, &reader,
+          [&] { return std::chrono::steady_clock::now() >= deadline; });
+    } catch (const std::runtime_error& e) {
+      rejected = std::string(e.what()).find("adaptive prefill decision") != std::string::npos;
+    }
+    require(rejected == missing, "adaptive peers reject missing decisions before executing a tick");
+    require(sched.meters().prefill_adaptive_limit_tokens == (missing ? 0 : 12),
+            "peer executes leader's limit, regardless of its local estimate");
+  }
 }

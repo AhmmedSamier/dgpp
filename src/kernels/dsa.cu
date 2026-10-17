@@ -3202,7 +3202,95 @@ __global__ void rope_interleave_kernel(
   dst[0] = float_to_bf16_bits(__fsub_rn(t1, t2));
   dst[1] = float_to_bf16_bits(__fadd_rn(u1, u2));
 }
+
+// The same rotation over up to kRopeMaxSegments independent (x, out)
+// segments in ONE launch (2026-10-13): a thread finds its segment by its
+// global index against the segments' cumulative totals and then runs the
+// kernel above's per-element arithmetic verbatim, so every element's bits
+// are the single-segment launch's. The projection chain issues one of
+// these after the GEMVs that feed the rotations instead of one launch
+// per rotation (two to four a layer).
+struct RopeSegDev {
+  const uint16_t* x;
+  uint16_t* out;
+  int64_t x_row_stride, x_head_stride, out_row_stride, out_head_stride;
+  int heads;
+  int64_t total;  // rows * heads * half
+};
+struct RopeSegsDev {
+  RopeSegDev seg[kRopeMaxSegments];
+  int count;
+};
+__device__ __forceinline__ void rope_pair(const uint16_t* __restrict__ src, uint16_t* __restrict__ dst,
+                                          int64_t p, int i, int half, const uint16_t* __restrict__ table,
+                                          int64_t table_positions) {
+  const uint16_t x0b = src[0], x1b = src[1];
+  if (p < 0) {  // padding row: carried through unrotated
+    dst[0] = x0b;
+    dst[1] = x1b;
+    return;
+  }
+  if (p >= table_positions) p = table_positions - 1;
+  const float c = bf16_bits_to_float(table[(p * 2) * half + i]);
+  const float s = bf16_bits_to_float(table[(p * 2 + 1) * half + i]);
+  const float x0 = bf16_bits_to_float(x0b), x1 = bf16_bits_to_float(x1b);
+  const float t1 = bf16_bits_to_float(float_to_bf16_bits(__fmul_rn(x0, c)));
+  const float t2 = bf16_bits_to_float(float_to_bf16_bits(__fmul_rn(x1, s)));
+  const float u1 = bf16_bits_to_float(float_to_bf16_bits(__fmul_rn(x1, c)));
+  const float u2 = bf16_bits_to_float(float_to_bf16_bits(__fmul_rn(x0, s)));
+  dst[0] = float_to_bf16_bits(__fsub_rn(t1, t2));
+  dst[1] = float_to_bf16_bits(__fadd_rn(u1, u2));
+}
+__global__ void rope_interleave_multi_kernel(RopeSegsDev segs, int half, const int64_t* __restrict__ pos,
+                                             const uint16_t* __restrict__ table, int64_t table_positions,
+                                             int64_t total) {
+  int64_t idx = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= total) return;
+  int s = 0;
+  while (s + 1 < segs.count && idx >= segs.seg[s].total) {
+    idx -= segs.seg[s].total;
+    ++s;
+  }
+  const RopeSegDev& g = segs.seg[s];
+  const int i = int(idx % half);
+  const int64_t rh = idx / half;
+  const int h = int(rh % g.heads);
+  const int64_t r = rh / g.heads;
+  rope_pair(g.x + r * g.x_row_stride + int64_t(h) * g.x_head_stride + 2 * i,
+            g.out + r * g.out_row_stride + int64_t(h) * g.out_head_stride + 2 * i, pos[r], i, half, table,
+            table_positions);
+}
 }  // namespace
+
+void dsa_rope_interleave_multi(const DsaRopeSegment* segs, int count, int rope_dim, const int64_t* pos,
+                               const void* table, int64_t table_positions, int64_t rows, cudaStream_t stream) {
+  if (rows <= 0 || count <= 0) return;
+  if (count > kRopeMaxSegments || !segs || !pos || !table || rope_dim <= 0 || rope_dim % 2 != 0 ||
+      table_positions <= 0)
+    throw std::invalid_argument("dsa_rope_interleave_multi: bad arguments");
+  const int half = rope_dim / 2;
+  RopeSegsDev d{};
+  d.count = 0;
+  int64_t total = 0;
+  for (int s = 0; s < count; ++s) {
+    if (!segs[s].x || !segs[s].out || segs[s].heads <= 0)
+      throw std::invalid_argument("dsa_rope_interleave_multi: bad segment");
+    RopeSegDev& g = d.seg[d.count++];
+    g.x = static_cast<const uint16_t*>(segs[s].x);
+    g.out = static_cast<uint16_t*>(segs[s].out);
+    g.x_row_stride = segs[s].x_row_stride;
+    g.x_head_stride = segs[s].x_head_stride;
+    g.out_row_stride = segs[s].out_row_stride;
+    g.out_head_stride = segs[s].out_head_stride;
+    g.heads = segs[s].heads;
+    g.total = rows * int64_t(segs[s].heads) * half;
+    total += g.total;
+  }
+  const unsigned blocks = unsigned((total + 255) / 256);
+  rope_interleave_multi_kernel<<<blocks, 256, 0, stream>>>(d, half, pos, static_cast<const uint16_t*>(table),
+                                                           table_positions, total);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
 
 void dsa_rope_table_host(double theta, int rope_dim, int64_t positions,
                          uint16_t* out) {

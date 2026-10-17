@@ -11,6 +11,7 @@
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
 #include "kernels/latent_format.hpp"
+#include "kernels/qsa_fp8_decode.cuh"
 #include "kernels/topk_select.cuh"
 
 namespace dgpp {
@@ -201,13 +202,14 @@ __global__ void kv_append_kernel(const uint16_t* __restrict__ k, int64_t k_row_s
     vb[e] = v[r * v_row_stride + e];
   }
   __syncthreads();
-  __shared__ float kinv[32], vinv[32];
+  float* kinv = reinterpret_cast<float*>(kvstage + 2 * width);
+  float* vinv = kinv + kv_heads;
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
-  if (warp < kv_heads) {
+  for (int h = warp; h < kv_heads; h += blockDim.x / 32) {
     float ka = 0.f, va = 0.f;
     for (int e = lane; e < dim; e += 32) {
-      if (k) ka = fmaxf(ka, fabsf(bf16_bits_to_float(kb[warp * dim + e])));
-      va = fmaxf(va, fabsf(bf16_bits_to_float(vb[warp * dim + e])));
+      if (k) ka = fmaxf(ka, fabsf(bf16_bits_to_float(kb[h * dim + e])));
+      va = fmaxf(va, fabsf(bf16_bits_to_float(vb[h * dim + e])));
     }
 #pragma unroll
     for (int off = 16; off > 0; off >>= 1) {
@@ -217,10 +219,10 @@ __global__ void kv_append_kernel(const uint16_t* __restrict__ k, int64_t k_row_s
     if (lane == 0) {
       const auto sk = latent_fp8_row_scale(ka);
       const auto sv = latent_fp8_row_scale(va);
-      kinv[warp] = sk.inv;
-      vinv[warp] = sv.inv;
-      if (k) k_scale[phys * kv_heads + warp] = sk.scale;
-      v_scale[phys * kv_heads + warp] = sv.scale;
+      kinv[h] = sk.inv;
+      vinv[h] = sv.inv;
+      if (k) k_scale[phys * kv_heads + h] = sk.scale;
+      v_scale[phys * kv_heads + h] = sv.scale;
     }
   }
   __syncthreads();
@@ -230,6 +232,39 @@ __global__ void kv_append_kernel(const uint16_t* __restrict__ k, int64_t k_row_s
     const int h = e / dim;
     if (k) kdst[phys * width + e] = latent_fp8_encode(bf16_bits_to_float(kb[e]), kinv[h]);
     vdst[phys * width + e] = latent_fp8_encode(bf16_bits_to_float(vb[e]), vinv[h]);
+  }
+}
+
+// The fp8 storage form: a pair of bf16 values to two e4m3 codes of value /
+// scale (fp32 division, round-to-nearest-even, saturating), low code first.
+__device__ __forceinline__ uint16_t e4m3x2_scaled(uint16_t lo, uint16_t hi, float scale) {
+  const float a = __fdiv_rn(bf16_bits_to_float(lo), scale);
+  const float b = __fdiv_rn(bf16_bits_to_float(hi), scale);
+  uint16_t r;
+  asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(r) : "f"(b), "f"(a));
+  return r;
+}
+
+__global__ void kv_append_fp8_kernel(const uint16_t* __restrict__ k, int64_t k_row_stride,
+                                     const uint16_t* __restrict__ v, int64_t v_row_stride,
+                                     const int32_t* __restrict__ req_ids,
+                                     const int64_t* __restrict__ pos,
+                                     const int32_t* __restrict__ block_tables,
+                                     int blocks_per_request, int block_tokens, int width,
+                                     const float* __restrict__ kv_scales,
+                                     uint8_t* __restrict__ k_cache, uint8_t* __restrict__ v_cache) {
+  const int64_t r = blockIdx.x;
+  const int64_t p = pos[r];
+  if (p < 0) return;
+  const int32_t blk = block_tables[static_cast<int64_t>(req_ids[r]) * blocks_per_request +
+                                   p / block_tokens];
+  const int64_t phys = static_cast<int64_t>(blk) * block_tokens + p % block_tokens;
+  const float ks = kv_scales[0], vs = kv_scales[1];
+  for (int e = 2 * threadIdx.x; e < width; e += 2 * blockDim.x) {
+    const uint16_t kc = e4m3x2_scaled(k[r * k_row_stride + e], k[r * k_row_stride + e + 1], ks);
+    const uint16_t vc = e4m3x2_scaled(v[r * v_row_stride + e], v[r * v_row_stride + e + 1], vs);
+    *reinterpret_cast<uint16_t*>(k_cache + phys * width + e) = kc;
+    *reinterpret_cast<uint16_t*>(v_cache + phys * width + e) = vc;
   }
 }
 
@@ -808,7 +843,7 @@ __global__ void attn_partial_kernel(const uint16_t* __restrict__ q, int64_t q_ro
         const uint4 v4 = *reinterpret_cast<const uint4*>(src);
         const uint8_t* b = reinterpret_cast<const uint8_t*>(&v4);
 #pragma unroll
-        for (int j = 0; j < 16; ++j) dst[j] = latent_fp8_decode_bf16(b[j], sc);
+        for (int j = 0; j < 16; ++j) dst[j] = qsa_decode_fp8_bf16(b[j], sc);
       }
       __syncthreads();
       scores_phase(n);
@@ -931,8 +966,13 @@ void qsa_kv_append(const uint16_t* k, int64_t k_row_stride, const uint16_t* v, i
     throw std::invalid_argument("qsa_kv_append: null pointer");
   if (k == nullptr && k_scale == nullptr)
     throw std::invalid_argument("qsa_kv_append: null k with a bf16 cache");
+  if ((k != nullptr && k_cache == nullptr) || (k_scale == nullptr) != (v_scale == nullptr))
+    throw std::invalid_argument("qsa_kv_append: incomplete cache planes");
+  if (kv_heads <= 0 || dim <= 0)
+    throw std::invalid_argument("qsa_kv_append: heads and dim must be positive");
   const size_t smem =
-      k_scale != nullptr ? 2 * static_cast<size_t>(kv_heads) * dim * sizeof(uint16_t) : 0;
+      k_scale != nullptr ? 2 * static_cast<size_t>(kv_heads) *
+                              (dim * sizeof(uint16_t) + sizeof(float)) : 0;
   kv_append_kernel<<<static_cast<unsigned>(rows), 256, smem, stream>>>(
       k, k_row_stride, v, v_row_stride, req_ids, pos, block_tables, blocks_per_request,
       block_tokens, kv_heads, dim, k_cache, v_cache, k_scale, v_scale);
@@ -957,6 +997,21 @@ void qsa_norm_rope_append_fp8(const uint16_t* x, int64_t x_row_stride, int64_t x
                                 dim * sizeof(float), stream>>>(
       x, x_row_stride, x_head_stride, w, pos, inv_freq, req_ids, block_tables, blocks_per_request,
       block_tokens, kv_heads, dim, rotary_dim, eps, mscale, k_cache, k_scale);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void qsa_kv_append_fp8(const uint16_t* k, int64_t k_row_stride, const uint16_t* v, int64_t v_row_stride,
+                       const int32_t* req_ids, const int64_t* pos, int rows, const int32_t* block_tables,
+                       int blocks_per_request, int block_tokens, int kv_heads, int dim, const float* kv_scales,
+                       uint8_t* k_cache, uint8_t* v_cache, cudaStream_t stream) {
+  if (rows <= 0) return;
+  if (!k || !v || !req_ids || !pos || !block_tables || !kv_scales || !k_cache || !v_cache)
+    throw std::invalid_argument("qsa_kv_append_fp8: null pointer");
+  if (((kv_heads * dim) & 1) != 0 || (k_row_stride & 1) != 0 || (v_row_stride & 1) != 0)
+    throw std::invalid_argument("qsa_kv_append_fp8: the row width and strides must be even");
+  kv_append_fp8_kernel<<<static_cast<unsigned>(rows), 256, 0, stream>>>(
+      k, k_row_stride, v, v_row_stride, req_ids, pos, block_tables, blocks_per_request, block_tokens,
+      kv_heads * dim, kv_scales, k_cache, v_cache);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

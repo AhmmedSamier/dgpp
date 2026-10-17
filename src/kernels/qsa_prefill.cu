@@ -11,6 +11,7 @@
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
 #include "kernels/latent_format.hpp"
+#include "kernels/qsa_fp8_decode.cuh"
 
 namespace dgpp {
 namespace {
@@ -123,7 +124,7 @@ __global__ void attn_prefill_partial_kernel(const uint16_t* __restrict__ q, int6
         const uint4 v4 = *reinterpret_cast<const uint4*>(src);
         const uint8_t* b = reinterpret_cast<const uint8_t*>(&v4);
 #pragma unroll
-        for (int j = 0; j < 16; ++j) dst[j] = latent_fp8_decode_bf16(b[j], sc);
+        for (int j = 0; j < 16; ++j) dst[j] = qsa_decode_fp8_bf16(b[j], sc);
       }
     }
     __syncthreads();

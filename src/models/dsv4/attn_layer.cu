@@ -510,16 +510,18 @@ void Dsv4AttnLayer::project_out(int tokens, void* out, cudaStream_t stream) {
 // ---- decode ---------------------------------------------------------------------------------------
 
 void Dsv4AttnLayer::enqueue_decode(const void* hidden_in, Dsv4StatePool& pool, const int32_t* req_ids,
-                                   const int64_t* pos, int tokens, void* out, cudaStream_t stream) {
+                                   const int64_t* pos, int tokens, void* out, cudaStream_t stream, bool prefetch) {
   validate_pool(pool);
   if (tokens <= 0 || tokens > max_decode_rows_) throw std::invalid_argument("dsv4 attention: decode rows out of range");
   if (!hidden_in || !req_ids || !pos || !out) throw std::invalid_argument("dsv4 attention: null buffer");
 
-  decode_windows_ = true;
-  struct WindowsOff {
-    bool& flag;
-    ~WindowsOff() { flag = false; }
-  } windows_off{decode_windows_};
+  decode_walk_ = true;
+  prefetch_windows_ = prefetch;
+  struct DecodeScope {
+    bool& walk;
+    bool& windows;
+    ~DecodeScope() { walk = windows = false; }
+  } decode_scope{decode_walk_, prefetch_windows_};
   // The projections; the window rows into the ring and their window lists
   // ride the K/V tail's launch (this batch's rows are visible to its own
   // queries: the ring is read after the append).
@@ -616,11 +618,13 @@ void Dsv4AttnLayer::enqueue_draft_block(const void* hidden_in, Dsv4StatePool& po
     throw std::invalid_argument("dsv4 attention: draft block rows out of range");
   if (cfg_.ring_slots < cfg_.window + block) throw std::invalid_argument("dsv4 attention: the ring must hold window + block");
   if (!hidden_in || !req_ids || !pos || !out) throw std::invalid_argument("dsv4 attention: null buffer");
-  decode_windows_ = true;
-  struct WindowsOff {
-    bool& flag;
-    ~WindowsOff() { flag = false; }
-  } windows_off{decode_windows_};
+  decode_walk_ = true;
+  prefetch_windows_ = true;
+  struct DecodeScope {
+    bool& walk;
+    bool& windows;
+    ~DecodeScope() { walk = windows = false; }
+  } decode_scope{decode_walk_, prefetch_windows_};
   project_q_kv(hidden_in, rows, pos, stream);
   csa2_ring_slot_positions(pos, slots_, rows, cfg_.ring_slots, stream);
   dsa_latent_append(kv_, req_ids, slots_, rows, pool.ring_table(), 1, cfg_.ring_slots, pool.ring(layer_), kDsv4Latent,

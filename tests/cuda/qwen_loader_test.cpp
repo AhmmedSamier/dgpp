@@ -27,6 +27,7 @@
 #include "models/qwen/binding.hpp"
 #include "models/qwen/config.hpp"
 #include "models/qwen/loader.hpp"
+#include "kernels/latent_format.hpp"
 #include "qwen_fixture.hpp"
 
 namespace {
@@ -68,6 +69,15 @@ Fixture write_nvfp4_fixture() {
   fx.dir = (fs::current_path() / "qwen_loader_nvfp4_fixture").string();
   qwenfx::write_fixture(fx.cfg, fx.dir, qwenfx::tiny_text_json(),
                         qwenfx::tiny_nvfp4_quant_json());
+  fx.table = dgpp::qwen_expected_text_tensors(fx.cfg);
+  return fx;
+}
+
+Fixture write_qad_fixture() {
+  Fixture fx;
+  fx.cfg = qwenfx::tiny_qad_config();
+  fx.dir = (fs::current_path() / "qwen_loader_qad_fixture").string();
+  qwenfx::write_fixture(fx.cfg, fx.dir, qwenfx::tiny_qad_text_json(), qwenfx::tiny_qad_quant_json(), {});
   fx.table = dgpp::qwen_expected_text_tensors(fx.cfg);
   return fx;
 }
@@ -463,7 +473,7 @@ DGPP_TEST(qwen_loader_mmap_ngram_table_reads_the_shards_rows) {
       require(QwenLayerStream::ngram_table_bytes(fx.cfg, rank, world) == 0, "no table bytes under mmap");
       const auto& t = s.load_ngram_table();
       require(t.rows_e4m3 == nullptr && t.mmap != nullptr && t.bytes == 0, "the mmap'ed view");
-      require(t.mmap->capacity() == dgpp::qwen_ngram_shard_capacity(fx.cfg) && t.mmap->head_dim() == ng.head_dim, "geometry");
+      require(t.mmap->capacity() == dgpp::qwen_ngram_shard_capacity(fx.cfg) && t.mmap->row_bytes() == ng.head_dim, "geometry");
       for (int64_t r : {int64_t{0}, int64_t{1}, ng.total_rows / 2, ng.total_rows - 1})
         require(std::memcmp(t.mmap->row(r), table.data() + static_cast<size_t>(r) * hd, hd) == 0, "row " + std::to_string(r));
       // A gather of the rank's heads: ids [n, heads] → dst [n, heads_local, hd].
@@ -789,3 +799,268 @@ DGPP_TEST(qwen_loader_refuses_tampered_hash_buffers) {
 }
 
 int main() { return dgpp::test::run_all(); }
+
+// ---- the QAD export's twin (issue #113) --------------------------------------------
+namespace {
+// e8m0 bytes [start, +count) of a scale tensor as the resident F32 grid.
+std::vector<uint8_t> widened_e8m0(const std::vector<uint8_t>& bytes) {
+  std::vector<uint8_t> out(bytes.size() * 4);
+  for (size_t i = 0; i < bytes.size(); ++i) {
+    const float f = dgpp::e8m0_byte_to_float(bytes[i]);
+    std::memcpy(out.data() + i * 4, &f, 4);
+  }
+  return out;
+}
+// bf16(e4m3 x 2^k) of a payload row range: the exact decode of an MXFP8 row slice.
+std::vector<uint8_t> decoded_mxfp8_rows(const std::vector<uint8_t>& payload, const std::vector<uint8_t>& scales,
+                                        int64_t cols, int64_t r0, int64_t rows) {
+  std::vector<uint8_t> out(static_cast<size_t>(rows) * cols * 2);
+  const int64_t sb = cols / 32;
+  for (int64_t r = 0; r < rows; ++r)
+    for (int64_t c = 0; c < cols; ++c) {
+      const uint8_t code = payload[static_cast<size_t>((r0 + r) * cols + c)];
+      const uint8_t sc = scales[static_cast<size_t>((r0 + r) * sb + c / 32)];
+      const uint16_t v = dgpp::float_to_bf16_bits(dgpp::fp8_e4m3_bits_to_float(code) * dgpp::e8m0_byte_to_float(sc));
+      std::memcpy(out.data() + (static_cast<size_t>(r) * cols + c) * 2, &v, 2);
+    }
+  return out;
+}
+// An MXFP8 resident matrix against the fixture: a row slice [r0, +rows) or a
+// column slice [c0, +cols) of `base` (payload e4m3 [N, K], scales e8m0 [N, K/32]).
+// bytes: the attention-side matrices keep the e8m0 bytes (their k a multiple
+// of 64); the shared experts carry the grid widened to F32.
+void expect_mxfp8(const Fixture& fx, const dgpp::GlmQuantMatrix& m, const std::string& base, bool row_slice,
+                  int64_t start, int64_t count, const std::string& tag, bool bytes = true) {
+  const QwenExpectedTensor& e = fx.expected(base + ".weight");
+  const int64_t N = e.shape[0], K = e.shape[1];
+  require(m.scale_block_rows == 1 && m.scale_block_cols == 32, tag + ": the 1 x 32 grid");
+  require((m.scales_e8m0 != nullptr) == bytes && (m.scales != nullptr) == !bytes, tag + ": the scale form");
+  const std::vector<uint8_t> payload = fx.bytes(base + ".weight");
+  const std::vector<uint8_t> scales = fx.bytes(base + ".weight_scale");
+  auto expect_scales = [&](const std::vector<uint8_t>& want_bytes, const std::string& what) {
+    if (bytes) expect_device_equals(m.scales_e8m0, want_bytes, what);
+    else expect_device_equals(m.scales, widened_e8m0(want_bytes), what);
+  };
+  if (row_slice) {
+    require(m.rows == count && m.cols == K, tag + ": row slice geometry");
+    expect_device_equals(m.payload, host_rows(payload, static_cast<size_t>(K), start, count), tag + " payload rows");
+    expect_scales(host_rows(scales, static_cast<size_t>(K / 32), start, count), tag + " scale rows");
+  } else {
+    require(m.rows == N && m.cols == count, tag + ": column slice geometry");
+    expect_device_equals(m.payload, host_cols(payload, N, static_cast<size_t>(K), static_cast<size_t>(start), static_cast<size_t>(count)), tag + " payload cols");
+    expect_scales(host_cols(scales, N, static_cast<size_t>(K / 32), static_cast<size_t>(start / 32), static_cast<size_t>(count / 32)), tag + " scale cols");
+  }
+}
+// An NVFP4 resident matrix (modelopt triple) against the fixture's slice.
+void expect_fp4(const Fixture& fx, const dgpp::GlmFp4Matrix& m, const std::string& base, bool row_slice, int64_t start,
+                int64_t count, const std::string& tag) {
+  const QwenExpectedTensor& e = fx.expected(base + ".weight");
+  const int64_t N = e.shape[0], K2 = e.shape[1];  // codes [N, K/2]
+  const std::vector<uint8_t> codes = fx.bytes(base + ".weight");
+  const std::vector<uint8_t> scales = fx.bytes(base + ".weight_scale");
+  if (row_slice) {
+    require(m.rows == count && m.cols == K2 * 2, tag + ": fp4 row slice geometry");
+    expect_device_equals(m.payload, host_rows(codes, static_cast<size_t>(K2), start, count), tag + " fp4 codes rows");
+    expect_device_equals(m.scales, host_rows(scales, static_cast<size_t>(K2 * 2 / 16), start, count), tag + " fp4 scale rows");
+  } else {
+    require(m.rows == N && m.cols == count, tag + ": fp4 column slice geometry");
+    expect_device_equals(m.payload, host_cols(codes, N, static_cast<size_t>(K2), static_cast<size_t>(start / 2), static_cast<size_t>(count / 2)), tag + " fp4 codes cols");
+    expect_device_equals(m.scales, host_cols(scales, N, static_cast<size_t>(K2 * 2 / 16), static_cast<size_t>(start / 16), static_cast<size_t>(count / 16)), tag + " fp4 scale cols");
+  }
+  float inv = 0.f;
+  DGPP_CUDA_OK(cudaMemcpy(&inv, m.global_scale, 4, cudaMemcpyDeviceToHost));
+  require(inv == 32.0f, tag + ": the global's reciprocal (the fixture's weight_scale_2 is 2^-5)");
+}
+}  // namespace
+
+DGPP_TEST(qwen_loader_loads_the_qad_export_byte_exact_at_worlds_1_2_4) {
+  const Fixture fx = write_qad_fixture();
+  const QwenTextConfig& cfg = fx.cfg;
+  require(cfg.dense_mxfp8_shipped && cfg.ngram_table_nvfp4 && cfg.mtp_experts_nvfp4 && cfg.norms_f32,
+          "the fixture selects the QAD export's forms");
+  require(!QwenLayerStream::dense_weights_fp8(), "the dense stack is served as shipped, no engine key");
+  const int layers = cfg.num_hidden_layers + 1;
+  const size_t H = static_cast<size_t>(cfg.hidden_size);
+  for (const int world : {1, 2, 4}) {
+    for (int rank = 0; rank < world; ++rank) {
+      QwenLayerStream s(cfg, fx.dir, rank, world, dgpp::QwenResidency::Streaming,
+                        world > 1 ? dgpp::QwenHeadSharding::VocabSharded : dgpp::QwenHeadSharding::Full,
+                        /*resident_mtp=*/true);
+      const dgpp::QwenLocalGeometry& g = s.geometry();
+      for (int l = 0; l < layers; ++l) {
+        const uint64_t before = s.source_bytes_read();
+        const auto& r = s.load_layer(l);
+        const bool mtp = l == cfg.mtp_layer();
+        const std::string p = dgpp::qwen_layer_prefix(cfg, l);
+        const std::string tag = "world " + std::to_string(world) + " rank " + std::to_string(rank) + " layer " +
+                                std::to_string(l) + " ";
+        // The norms: F32 on the backbone, BF16 on the draft layer.
+        for (const auto& [gp, gr] : {std::pair{p + "attn_hyper_connection.", &r.attn_gr},
+                                     std::pair{p + "mlp_hyper_connection.", &r.mlp_gr}}) {
+          if (mtp) {
+            require(gr->hc_norm != nullptr && gr->hc_norm_f32 == nullptr, tag + "draft hc_norm BF16");
+            expect_device_equals(gr->hc_norm, fx.bytes(gp + "hc_norm.weight"), tag + "draft hc_norm");
+          } else {
+            require(gr->hc_norm == nullptr && gr->hc_norm_f32 != nullptr, tag + "hc_norm F32");
+            expect_device_equals(gr->hc_norm_f32, fx.bytes(gp + "hc_norm.weight"), tag + "hc_norm f32 bytes");
+          }
+          expect_device_equals(gr->down, fx.bytes(gp + "input_mix_weight_down.weight"), tag + "gr down");
+        }
+        if (r.kind == dgpp::QwenLayerKind::Gdn) {
+          const std::string gp = p + "linear_attn.";
+          const int64_t dk = cfg.gdn_key_head_dim, dv = cfg.gdn_value_head_dim;
+          const int64_t K = static_cast<int64_t>(cfg.gdn_key_heads) * dk;
+          const int64_t lk = g.local_key_heads, lv = g.local_value_heads;
+          require(r.gdn.in_proj_qkv == nullptr && r.gdn.in_proj_qkv_fp8.payload != nullptr, tag + "qkv MXFP8");
+          // The three segments' payload rows and scale rows.
+          const std::vector<uint8_t> qkv = fx.bytes(gp + "in_proj_qkv.weight");
+          const std::vector<uint8_t> qkv_s = fx.bytes(gp + "in_proj_qkv.weight_scale");
+          std::vector<uint8_t> want = host_rows(qkv, H, rank * lk * dk, lk * dk);
+          auto k = host_rows(qkv, H, K + rank * lk * dk, lk * dk);
+          auto v = host_rows(qkv, H, 2 * K + rank * lv * dv, lv * dv);
+          want.insert(want.end(), k.begin(), k.end());
+          want.insert(want.end(), v.begin(), v.end());
+          expect_device_equals(r.gdn.in_proj_qkv_fp8.payload, want, tag + "qkv payload segments");
+          std::vector<uint8_t> ws = host_rows(qkv_s, H / 32, rank * lk * dk, lk * dk);
+          k = host_rows(qkv_s, H / 32, K + rank * lk * dk, lk * dk);
+          v = host_rows(qkv_s, H / 32, 2 * K + rank * lv * dv, lv * dv);
+          ws.insert(ws.end(), k.begin(), k.end());
+          ws.insert(ws.end(), v.begin(), v.end());
+          require(r.gdn.in_proj_qkv_fp8.scales_e8m0 != nullptr && r.gdn.in_proj_qkv_fp8.scales == nullptr, tag + "qkv byte scales");
+          expect_device_equals(r.gdn.in_proj_qkv_fp8.scales_e8m0, ws, tag + "qkv scale segments");
+          require(r.gdn.in_proj_qkv_fp8.scale_block_rows == 1 && r.gdn.in_proj_qkv_fp8.scale_block_cols == 32, tag + "qkv grid");
+          expect_mxfp8(fx, r.gdn.in_proj_z_fp8, gp + "in_proj_z", true, rank * lv * dv, lv * dv, tag + "z");
+          expect_mxfp8(fx, r.gdn.out_proj_fp8, gp + "out_proj", false, rank * lv * dv, lv * dv, tag + "out_proj");
+          // a and b: the exact bf16 decode of their MXFP8 rows.
+          expect_device_equals(r.gdn.in_proj_a, decoded_mxfp8_rows(fx.bytes(gp + "in_proj_a.weight"), fx.bytes(gp + "in_proj_a.weight_scale"), H, rank * lv, lv), tag + "a decoded");
+          expect_device_equals(r.gdn.in_proj_b, decoded_mxfp8_rows(fx.bytes(gp + "in_proj_b.weight"), fx.bytes(gp + "in_proj_b.weight_scale"), H, rank * lv, lv), tag + "b decoded");
+        } else if (!mtp) {
+          const std::string ap = p + "self_attn.";
+          const int64_t d = cfg.head_dim;
+          require(r.qsa.q_proj == nullptr && r.qsa.q_proj_fp8.payload != nullptr, tag + "q MXFP8");
+          expect_mxfp8(fx, r.qsa.q_proj_fp8, ap + "q_proj", true, g.head_begin * 2 * d, g.local_heads * 2 * d, tag + "q");
+          expect_mxfp8(fx, r.qsa.k_proj_fp8, ap + "k_proj", true, g.kv_head_begin * d, g.local_kv_heads * d, tag + "k");
+          expect_mxfp8(fx, r.qsa.v_proj_fp8, ap + "v_proj", true, g.kv_head_begin * d, g.local_kv_heads * d, tag + "v");
+          expect_mxfp8(fx, r.qsa.o_proj_fp8, ap + "o_proj", false, g.head_begin * d, g.local_heads * d, tag + "o");
+          const QwenExpectedTensor& ei = fx.expected(ap + "indexer.index_qk_proj.weight");
+          require(r.qsa.index_qk_proj == nullptr, tag + "indexer MXFP8");
+          expect_mxfp8(fx, r.qsa.index_qk_proj_fp8, ap + "indexer.index_qk_proj", true, 0, ei.shape[0], tag + "indexer");
+        } else {
+          // The draft layer's projections stay BF16.
+          require(r.qsa.q_proj != nullptr && r.qsa.q_proj_fp8.payload == nullptr, tag + "draft q BF16");
+          require(r.qsa.index_qk_proj != nullptr, tag + "draft indexer BF16");
+        }
+        const std::string mp = p + "mlp.";
+        const int64_t S = g.local_shared_inter, I = g.local_inter;
+        if (!mtp) {
+          require(r.moe.shared[0] == nullptr && r.moe.shared_fp8[0].payload != nullptr, tag + "shared MXFP8");
+          expect_mxfp8(fx, r.moe.shared_fp8[0], mp + "shared_expert.gate_proj", true, rank * S, S, tag + "shared gate", /*bytes=*/false);
+          expect_mxfp8(fx, r.moe.shared_fp8[1], mp + "shared_expert.up_proj", true, rank * S, S, tag + "shared up", /*bytes=*/false);
+          expect_mxfp8(fx, r.moe.shared_fp8[2], mp + "shared_expert.down_proj", false, rank * S, S, tag + "shared down", /*bytes=*/false);
+        } else {
+          require(r.moe.shared[0] != nullptr && r.moe.shared_fp8[0].payload == nullptr, tag + "draft shared BF16");
+        }
+        // The routed experts: NVFP4 on every layer; the draft's weight-only.
+        require(r.moe.nvfp4() && r.moe.experts_fp4.size() == static_cast<size_t>(cfg.num_experts) * 3, tag + "nvfp4 experts");
+        require(r.moe.experts_weight_only == mtp, tag + "weight-only on the draft layer alone");
+        require((r.moe.act_scales == nullptr) == mtp, tag + "activation scales absent on the draft layer alone");
+        for (int e = 0; e < cfg.num_experts; e += 3) {
+          const std::string ep = mp + "experts." + std::to_string(e) + ".";
+          expect_fp4(fx, r.moe.experts_fp4[static_cast<size_t>(e) * 3 + 0], ep + "gate_proj", true, rank * I, I, tag + "expert gate");
+          expect_fp4(fx, r.moe.experts_fp4[static_cast<size_t>(e) * 3 + 2], ep + "down_proj", false, rank * I, I, tag + "expert down");
+        }
+        if (r.has_ple) {
+          const std::string lp = p + "ple.";
+          require(r.ple.norm_key == nullptr && r.ple.norm_key_f32 != nullptr, tag + "ple norms F32");
+          expect_device_equals(r.ple.norm_key_f32, fx.bytes(lp + "norm_key.weight"), tag + "ple norm_key f32");
+          expect_device_equals(r.ple.norm_query_f32, fx.bytes(lp + "norm_query.weight"), tag + "ple norm_query f32");
+          expect_device_equals(r.ple.norm_conv_f32, fx.bytes(lp + "norm_conv.weight"), tag + "ple norm_conv f32");
+          require(r.ple.table_scale == 0.02f, tag + "ple table global (F32, exact)");
+        }
+        require(r.bytes == QwenLayerStream::layer_bytes(cfg, l, rank, world), tag + "layer bytes formula");
+        require(s.source_bytes_read() - before == QwenLayerStream::planned_layer_source_bytes(cfg, l, rank, world),
+                tag + "the source-byte plan equals the bytes read");
+        s.release_layer();
+      }
+      // The globals: the model mixer's norm F32, the draft mixer's BF16.
+      const auto& gl = s.load_globals();
+      require(gl.mixer.hc_norm == nullptr && gl.mixer.hc_norm_f32 != nullptr, "mixer norm F32");
+      expect_device_equals(gl.mixer.hc_norm_f32, fx.bytes("model.language_model.hyper_connection_mixer.hc_norm.weight"), "mixer norm bytes");
+      require(gl.mtp_mixer.hc_norm != nullptr && gl.mtp_mixer.hc_norm_f32 == nullptr, "draft mixer norm BF16");
+      require(gl.bytes == QwenLayerStream::globals_bytes(cfg, rank, world, world > 1 ? dgpp::QwenHeadSharding::VocabSharded : dgpp::QwenHeadSharding::Full),
+              "globals formula (QAD)");
+    }
+  }
+}
+
+DGPP_TEST(qwen_loader_qad_ngram_table_resident_and_mmap) {
+  const Fixture fx = write_qad_fixture();
+  const QwenTextConfig& cfg = fx.cfg;
+  const dgpp::QwenNgramGeometry ng = cfg.ngram_geometry();
+  const int hd = ng.head_dim;
+  const size_t cb = static_cast<size_t>(hd / 2), sb = static_cast<size_t>(hd / 16);
+  // The whole table's codes and scales in shard order.
+  std::vector<uint8_t> codes, scales;
+  const std::string tp = dgpp::qwen_layer_prefix(cfg, cfg.ple_layer()) + "ple.ple_embedding.ngram_embedding.";
+  for (int sh = 0; sh < cfg.split_ngram_parts; ++sh) {
+    const auto c = fx.bytes(tp + "shard_" + std::to_string(sh) + ".weight");
+    const auto sc = fx.bytes(tp + "shard_" + std::to_string(sh) + ".weight_scale");
+    codes.insert(codes.end(), c.begin(), c.end());
+    scales.insert(scales.end(), sc.begin(), sc.end());
+  }
+  require(static_cast<int64_t>(codes.size()) == ng.padded_rows * static_cast<int64_t>(cb), "fixture codes size");
+  require(static_cast<int64_t>(scales.size()) == ng.padded_rows * static_cast<int64_t>(sb), "fixture scales size");
+  for (const int world : {1, 2}) {
+    for (int rank = 0; rank < world; ++rank) {
+      // Resident.
+      {
+        QwenLayerStream s(cfg, fx.dir, rank, world, dgpp::QwenResidency::Streaming,
+                          world > 1 ? dgpp::QwenHeadSharding::VocabSharded : dgpp::QwenHeadSharding::Full);
+        const auto& t = s.load_ngram_table();
+        const int64_t rb = t.row_begin, rows = t.rows;
+        require(t.fp4 && t.rows_e4m3 == nullptr && t.rows_fp4 != nullptr && t.rows_fp4_scales != nullptr, "the NVFP4 resident view");
+        require(t.scale == 0.02f, "the table's F32 global");
+        require(t.bytes == static_cast<size_t>(rows) * (cb + sb), "table bytes: codes + scales");
+        require(t.bytes == QwenLayerStream::ngram_table_bytes(cfg, rank, world), "table bytes formula");
+        expect_device_equals(t.rows_fp4, host_rows(codes, cb, rb, rows), "table codes rows");
+        expect_device_equals(t.rows_fp4_scales, host_rows(scales, sb, rb, rows), "table scale rows");
+      }
+      // Mapped.
+      QwenLayerStream::set_ngram_table_mmap(true);
+      struct Reset { ~Reset() { QwenLayerStream::set_ngram_table_mmap(false); } } reset;
+      {
+        QwenLayerStream s(cfg, fx.dir, rank, world, dgpp::QwenResidency::Streaming,
+                          world > 1 ? dgpp::QwenHeadSharding::VocabSharded : dgpp::QwenHeadSharding::Full);
+        const auto& t = s.load_ngram_table();
+        require(t.fp4 && t.rows_fp4 == nullptr && t.mmap != nullptr && t.bytes == 0, "the mmap'ed NVFP4 view");
+        require(t.mmap->has_scales() && t.mmap->row_bytes() == static_cast<int>(cb) && t.mmap->scale_row_bytes() == static_cast<int>(sb), "mmap geometry");
+        for (int64_t r = 0; r < ng.padded_rows; r += 37) {
+          require(std::memcmp(t.mmap->row(r), codes.data() + static_cast<size_t>(r) * cb, cb) == 0, "codes row " + std::to_string(r));
+          require(std::memcmp(t.mmap->scale_row(r), scales.data() + static_cast<size_t>(r) * sb, sb) == 0, "scale row " + std::to_string(r));
+        }
+        // A gather of this rank's heads with the scale staging alongside.
+        const int n = 5, hb = s.geometry().hash_head_begin, hn = s.geometry().hash_heads;
+        std::vector<int32_t> ids(static_cast<size_t>(n) * ng.heads);
+        for (int tkn = 0; tkn < n; ++tkn)
+          for (int h = 0; h < ng.heads; ++h)
+            ids[static_cast<size_t>(tkn) * ng.heads + h] = static_cast<int32_t>(ng.head_offset[h] + (tkn * 7 + h) % ng.head_vocab[h]);
+        std::vector<uint8_t> dst(static_cast<size_t>(n) * hn * cb), dst_s(static_cast<size_t>(n) * hn * sb);
+        t.mmap->gather(ids.data(), n, ng.heads, hb, hn, dst.data(), dst_s.data());
+        for (int tkn = 0; tkn < n; ++tkn)
+          for (int hl = 0; hl < hn; ++hl) {
+            const size_t row = static_cast<size_t>(ids[static_cast<size_t>(tkn) * ng.heads + hb + hl]);
+            const size_t pair = static_cast<size_t>(tkn) * hn + hl;
+            require(std::memcmp(dst.data() + pair * cb, codes.data() + row * cb, cb) == 0, "gathered codes");
+            require(std::memcmp(dst_s.data() + pair * sb, scales.data() + row * sb, sb) == 0, "gathered scales");
+          }
+        bool refused = false;
+        try {
+          t.mmap->gather(ids.data(), n, ng.heads, hb, hn, dst.data());
+        } catch (const std::invalid_argument&) {
+          refused = true;
+        }
+        require(refused, "a gather without the scale staging is refused");
+      }
+    }
+  }
+}

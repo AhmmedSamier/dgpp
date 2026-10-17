@@ -189,7 +189,21 @@ MimoModel::MimoModel(const MimoTextConfig& cfg, const std::string& checkpoint_di
     }
   }
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  // The draft head's screen (engine.draft_head): from the served head, for
+  // the decode drafts only; off (with a logged reason) when the setting or
+  // the head's form says so.
+  if (mtp_) draft_head_.init(draft_head_matrix(), max_decode_rows_, loader_.rank(), stream_, /*quiet=*/true);
 }
+
+HeadMatrix MimoModel::draft_head_matrix() const {
+  HeadMatrix m;
+  m.bf16 = globals_.lm_head;
+  m.bf12 = gemm_.bf12_lookup(globals_.lm_head);
+  m.n = lm_vocab_count_;
+  m.k = cfg_.hidden_size;
+  return m;
+}
+
 
 MimoModel::~MimoModel() {
   cudaFree(resid_);
@@ -314,6 +328,7 @@ MimoModel::MemoryPlan MimoModel::plan_memory(const MimoTextConfig& cfg, int max_
              size_t(max_requests) * kNativeHistoryRows * H * 4 + M * (H * 2 + 8));
   }
   if (mtp) plan.add("draft block (gathered hidden, the fused input, its residual)", M * H * 2 + M * 2 * H * 2 + M * H * 2);
+  if (mtp) plan.add("draft head screen (2-bit rotated head copy, scratch)", DraftHead::plan_bytes(static_cast<int>(V), cfg.hidden_size, rows));
   return plan;
 }
 
@@ -506,35 +521,56 @@ const uint16_t* MimoModel::enqueue_layer(const MimoLayerResident& r, int pool_la
   const int H = cfg_.hidden_size;
   const float eps = cfg_.rms_norm_eps;
   build_layer_objects(r);
+  const auto groups = [&](bool combine_readers, auto&& enqueue) {
+    if (rows.run)
+      rows.run->for_each_kernel_group([&](int count, int next) {
+        return combine_readers || (count > 128 && next > 128);
+      }, enqueue);
+    else
+      enqueue(0, T, rows.decode, 0);
+  };
   // ---- the attention block --------------------------------------------------
   add_rmsnorm_bf16(resid, pending, r.input_norm, x_, T, H, eps, stream_);
   uint16_t* attn_out = stage(y_, T, H, rows.capture);
-  {
+  groups(false, [&](int row0, int count, bool decode, int) {
     MimoAttnRows arows;
-    arows.req_ids = rows.req_ids;
-    arows.pos = rows.pos;
-    arows.decode = rows.decode;
-    attn_->enqueue(x_, T, arows, pool_.view(pool_layer), attn_out, stream_);
-  }
+    arows.req_ids = rows.req_ids + row0;
+    arows.pos = rows.pos + row0;
+    arows.decode = decode;
+    gemm_.set_bf12_wide(decode);
+    const size_t offset = static_cast<size_t>(row0) * H;
+    attn_->enqueue(x_ + offset, count, arows, pool_.view(pool_layer), attn_out + offset, stream_);
+  });
+  gemm_.set_bf12_wide(rows.decode);
   if (rows.decode) prefetch_ffn_side(r);
   fold(attn_out, T, H, rows.capture);  // block boundary 1: o_proj's partial
   // ---- the MLP / MoE block ----------------------------------------------------
   add_rmsnorm_bf16(resid, attn_out, r.post_norm, x_, T, H, eps, stream_);
   uint16_t* ffn_out = stage(y_, T, H, rows.capture);
-  if (r.moe) {
-    // The routed chain alone (no shared expert): the fp32 sum in ascending
-    // expert order, rounded once here (the Qwen MoE's contract with the
-    // shared layer; GLM's enqueue_decode / enqueue_prefill fold their
-    // shared expert into the chain and refuse without one).
-    if (rows.decode)
-      moe_->enqueue_decode_f32(x_, moe_acc_, T, rows.trace, stream_, rows.moe_table_slot);
-    else
-      moe_->enqueue_prefill_f32(x_, moe_acc_, T, rows.trace, stream_,
-                                moe_->mma_takes_grid() ? MoeExpertKernel::kMma : MoeExpertKernel::kGemv);
+  groups(r.moe, [&](int row0, int count, bool decode, int) {
+    const size_t offset = static_cast<size_t>(row0) * H;
+    if (r.moe) {
+      MoeTraceStaging trace;
+      if (rows.trace) {
+        trace.ids = rows.trace->ids + static_cast<size_t>(row0) * cfg_.num_experts_per_tok;
+        trace.weights = rows.trace->weights + static_cast<size_t>(row0) * cfg_.num_experts_per_tok;
+        trace.biased = rows.trace->biased
+            ? rows.trace->biased + static_cast<size_t>(row0) * cfg_.n_routed_experts : nullptr;
+      }
+      if (rows.decode)
+        moe_->enqueue_decode_f32(x_ + offset, moe_acc_ + offset, count, rows.trace, stream_,
+                                  rows.moe_table_slot);
+      else
+        moe_->enqueue_prefill_f32(x_ + offset, moe_acc_ + offset, count,
+                                  rows.trace ? &trace : nullptr, stream_,
+                                  moe_->mma_takes_grid() ? MoeExpertKernel::kMma : MoeExpertKernel::kGemv,
+                                  decode ? count : 0);
+    } else {
+      dense_->enqueue(x_ + offset, count, ffn_out + offset, stream_, decode ? count : 0);
+    }
+  });
+  if (r.moe)
     launch_moe_round_bf16(ffn_out, moe_acc_, static_cast<int64_t>(T) * H, stream_);
-  } else {
-    dense_->enqueue(x_, T, ffn_out, stream_);
-  }
   if (rows.decode) prefetch_attention_side(r.layer + 1);
   fold(ffn_out, T, H, rows.capture);  // block boundary 2: the sliced down projections
   return ffn_out;                      // pending: the next norm adds it
@@ -562,6 +598,7 @@ MimoModel::Outputs MimoModel::run_rows(const RowRun& run) {
   const size_t K = static_cast<size_t>(cfg_.num_experts_per_tok);
   const size_t E = static_cast<size_t>(cfg_.n_routed_experts);
   WalkRows rows;
+  rows.run = &run;
   rows.req_ids = in.req_ids;
   rows.pos = in.pos;
   rows.req = req;
@@ -607,6 +644,7 @@ MimoModel::Outputs MimoModel::run_rows(const RowRun& run) {
                                ? T - 1
                                : 0;
   const bool packed_logits = project_head_rows(run, [&](int input_row, int output_row, int rows) {
+    gemm_.set_bf12_wide(run.decode || input_row < run.decode_rows());
     gemm_.matmul(h_ + static_cast<size_t>(input_row + legacy_first) * H, globals_.lm_head,
                  logits_ + static_cast<size_t>(output_row + legacy_first) * lm_vocab_count_,
                  rows - legacy_first, lm_vocab_count_, H, DType::BF16, GemmOut::F32,
@@ -619,10 +657,7 @@ MimoModel::Outputs MimoModel::run_rows(const RowRun& run) {
   // within one launch). A group prefill (several requests' spans in one
   // walk) stores every row: each span's last window rows land in its own
   // slot.
-  if (mtp_) {
-    const int n = run.num_spans > 0 ? T : std::min(T, max_decode_rows_);
-    store_draft_hidden(h_ + static_cast<size_t>(T - n) * H, in.req_ids + (T - n), in.pos + (T - n), n);
-  }
+  store_run_draft_hidden(run, in, h_);
   if (run.decode) prefetch_.join(stream_);
   out = finish_run(run, std::move(out), packed_logits);
   if (!run.capture && traces) {
@@ -718,6 +753,9 @@ void MimoModel::finish_companions() {
   bf12_.finish(gemm_, kBf12ExpandSlots);
   bf12_s_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   bf12_.log_summary(loader_.rank(), bf12_s_);
+  // The draft head's screen from the companion when the bf16 bytes were
+  // never device-resident (the 12-bit-only residency); a no-op once built.
+  if (mtp_) draft_head_.init(draft_head_matrix(), max_decode_rows_, loader_.rank(), stream_);
 }
 
 // ---------------------------------------------------------------------------
@@ -726,12 +764,12 @@ void MimoModel::finish_companions() {
 // final_layernorm, the shared head.
 // ---------------------------------------------------------------------------
 void MimoModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T, bool decode_row,
-                             bool capture, int head_rows, int batch_requests) {
+                             bool capture, int head_rows, int batch_requests, int hidden_row) {
   if (head_rows > logits_capacity_rows_)
     throw std::invalid_argument("draft head exceeds logits capacity");
   if (!mtp_) throw std::logic_error("mtp_run_rows: MTP is not enabled");
   if (native_mtp()) {
-    native_mtp_rows(req, tokens, first_pos, T, decode_row, capture, head_rows);
+    native_mtp_rows(req, tokens, first_pos, T, decode_row, capture, head_rows, hidden_row);
     return;
   }
   if (T <= 0 || T > max_tokens_) throw std::invalid_argument("mtp_run_rows: rows");
@@ -751,7 +789,7 @@ void MimoModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, 
   // prefill rows read the main chunk's rows in place (h_, the chunk's
   // post-final-norm hidden at rows 0 .. T-1; the head below overwrites
   // h_ only after the fusion has read it — stream order).
-  const uint16_t* hin = h_;
+  const uint16_t* hin = prefill_hidden_span(h_, H, hidden_row, T);
   if (decode_row) {
     gather_draft_hidden(d_req, d_pos, mtp_h_, T);
     hin = mtp_h_;
@@ -794,8 +832,10 @@ void MimoModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, 
   // ---- head: the draft distribution over the last head_rows rows --------
   const size_t head_off = static_cast<size_t>(T - head_rows) * H;
   add_rmsnorm_bf16(mtp_r_ + head_off, pending + head_off, r.final_norm, h_, head_rows, H, eps, stream_);
-  gemm_.matmul(h_, globals_.lm_head, logits_, head_rows, lm_vocab_count_, H, DType::BF16, GemmOut::F32,
-               static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
+  if (!(decode_row && draft_head_.logits(draft_head_matrix(), h_, static_cast<size_t>(H), head_rows, logits_,
+                                         static_cast<size_t>(lm_vocab_count_), stream_)))
+    gemm_.matmul(h_, globals_.lm_head, logits_, head_rows, lm_vocab_count_, H, DType::BF16, GemmOut::F32,
+                 static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
   if (decode_row) prefetch_.join(stream_);
   if (decode_row && (!capture || decode_tail_mirrors_) && head_rows <= max_decode_rows_)
     DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_logits_, logits_, static_cast<size_t>(head_rows) * lm_vocab_count_ * sizeof(float),
@@ -832,7 +872,7 @@ void MimoModel::read_draft_snapshot(int req, const uint8_t* src) {
                   draft_state_bytes(), stream_);
 }
 void MimoModel::native_mtp_rows(int req, const int64_t* tokens, int64_t first_pos, int T,
-                                bool decode, bool capture, int head_rows) {
+                                bool decode, bool capture, int head_rows, int hidden_row) {
   if (head_rows > logits_capacity_rows_)
     throw std::invalid_argument("draft head exceeds logits capacity");
   if (T <= 0 || T > max_tokens_ || head_rows < 0 || head_rows > T)
@@ -848,7 +888,7 @@ void MimoModel::native_mtp_rows(int req, const int64_t* tokens, int64_t first_po
     // Graph entry points snapshot before capture; eager drafting needs its
     // own pre-call history for session_draft_rollback and prefix cuts.
     if (decode && !capture) snapshot_draft_state(req);
-    const uint16_t* hidden = h_;
+    const uint16_t* hidden = prefill_hidden_span(h_, H, hidden_row, T);
     if (decode) {
       gather_draft_hidden(ids, pos, mtp_h_, T);
       hidden = mtp_h_;
@@ -890,8 +930,10 @@ void MimoModel::native_mtp_rows(int req, const int64_t* tokens, int64_t first_po
     }
   }
   if (head_rows) {
-    gemm_.matmul(native_output_, globals_.lm_head, logits_, head_rows, lm_vocab_count_, H,
-                 DType::BF16, GemmOut::F32, size_t(H), gemm_ws_, gemm_ws_bytes_, stream_);
+    if (!(decode && draft_head_.logits(draft_head_matrix(), native_output_, static_cast<size_t>(H), head_rows, logits_,
+                                       static_cast<size_t>(lm_vocab_count_), stream_)))
+      gemm_.matmul(native_output_, globals_.lm_head, logits_, head_rows, lm_vocab_count_, H,
+                   DType::BF16, GemmOut::F32, size_t(H), gemm_ws_, gemm_ws_bytes_, stream_);
     // Keep the diagnostic mtp_forward hidden-output surface valid.
     glm_device_copy(h_, native_output_, size_t(head_rows) * H * 2, stream_);
   }

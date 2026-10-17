@@ -46,6 +46,7 @@
 #include "models/dsv4/config.hpp"
 #include "models/dsv4/model.hpp"
 #include "net/collective_bus.hpp"
+#include "serve/prefill_policy.hpp"
 
 namespace fs = std::filesystem;
 using dgpp::BusBoundaryReducer;
@@ -941,6 +942,95 @@ void check_mtp_world(int depth, uint16_t port) {
 }
 
 }  // namespace
+
+DGPP_TEST(dsv4_engines_adaptive_prefill_mixed_cancel_and_reuse) {
+  const auto cfg = dsv4fx::tiny_config();
+  const std::string dir = "dsv4_engine_fixture/adaptive";
+  dsv4fx::write_fixture(cfg, dir);
+  for (bool graph : {false, true}) {
+    auto buses = start_world(1, kPort + 20);
+    require(buses.size() == 1, "adaptive fixture bus");
+    Dsv4Model model(cfg, dir, 512, 4096, Dsv4Residency::Resident,
+                    nullptr, 0, 1, 4, true, 32, true);
+    uint16_t* scratch = nullptr;
+    DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&scratch),
+        2 * dgpp::kPickScratchElems(1), cudaHostAllocDefault));
+    try {
+      {
+        std::unique_ptr<dgpp::sched::SchedulerEngine> engine;
+        if (graph) {
+          auto adapter = std::make_unique<GraphEngineAdapter<Dsv4Model>>(
+              &model, buses[0].get(), 0, 1, scratch, cfg.vocab_size, wait_timeout_ms(),
+              2, nullptr, nullptr, 1, nullptr, 0, 2, true);
+          adapter->configure_verify_schedule(true, 1.f, .5f, 1);
+          engine = std::move(adapter);
+        } else {
+          engine = std::make_unique<EagerEngineAdapter<Dsv4Model>>(&model, 4,
+              [](const dgpp::DecodeOutputs& out) {
+                return static_cast<int32_t>(std::max_element(out.logits.begin(), out.logits.end()) - out.logits.begin());
+              });
+        }
+        dgpp::sched::AdmissionPolicy policy;
+        policy.prefill_budget_tokens = -1;
+        policy.prefill_latency.initial_tokens = 128;
+        policy.decode_gap_target_ms = dgpp::sched::kDefaultDecodeGapTargetMs;
+        policy.first_token_target_ms = dgpp::sched::kDefaultFirstTokenTargetMs;
+        policy = dgpp::serve::resolve_prefill_policy(policy, *engine, std::nullopt);
+        require(policy.prefill_budget_automatic && policy.prefill_early_admission,
+                "non-Qwen adapter resolves automatic admission and budgets");
+        require(engine->prefill_chunk_alignment() == 128, "exercise compressor alignment");
+        struct Observer : dgpp::sched::SchedulerObserver {
+          int short_tokens = 0;
+          void on_token(const std::string& id, int64_t, int) override {
+            if (id == "short") ++short_tokens;
+          }
+          void on_retire(const std::string&, const dgpp::sched::Scheduler::Result&) override {}
+        } observer;
+        dgpp::sched::Scheduler sched(engine.get(), {}, 0, policy, 0);
+        sched.set_observer(&observer);
+        auto request = [&](const char* id, int length, int outputs, int salt) {
+          dgpp::sched::SchedulerRequest r;
+          r.id = id; r.prompt = smoke_tokens(cfg, length, salt);
+          r.max_steps = outputs; r.no_cache = true;
+          return r;
+        };
+        sched.submit(request("decoder", 17, 24, 101));
+        sched.tick();
+        sched.submit(request("long", 1801, 2, 102));
+        sched.tick();
+        require(sched.meters().prefilling == 1, "long reader yields before completion");
+        sched.submit(request("short", 13, 8, 103));
+        const auto mixed = sched.meters().mixed_steps;
+        sched.tick();
+        require(sched.meters().mixed_steps > mixed && sched.meters().queued == 0,
+                "adaptive mixed walk admits the later short reader");
+        require(observer.short_tokens > 0 && sched.meters().prefilling == 1,
+                "short reader emits before the long reader completes");
+        sched.cancel("long");
+        sched.tick();
+        require(sched.meters().prefilling == 0, "cancelled continuation releases its slot");
+        require(sched.find("long")->reason == dgpp::sched::Scheduler::Result::Reason::kCancelled,
+                "unfinished reader retires through cancellation");
+        sched.submit(request("reuse", 901, 4, 104));
+        bool grew = false;
+        for (int i = 0; i < 100 && sched.has_pending(); ++i) {
+          const auto limit = sched.next_prefill_budget();
+          require(limit && *limit >= 128 && *limit <= 512 && *limit % 128 == 0,
+                  "learned budget preserves native geometry");
+          grew |= *limit > 128;
+          sched.tick(limit);
+        }
+        require(grew && !sched.has_pending(), "adaptive growth and bounded completion");
+        for (const auto& expected : {std::pair{"decoder", 24}, {"short", 8}, {"reuse", 4}})
+          require(sched.find(expected.first)->steps_done == expected.second,
+                  "uncancelled requests produce their full output after slot reuse");
+        require(sched.meters().pool_blocks_in_use == 0, "adaptive cancellation and completion release KV");
+      }
+      require(model.kv_blocks_in_use() == 0, "adapter retains no request reservations");
+    } catch (...) { cudaFreeHost(scratch); throw; }
+    DGPP_CUDA_OK(cudaFreeHost(scratch));
+  }
+}
 
 DGPP_TEST(dsv4_engines_loopback_world_2_dspark_block_matches_plain_decode) { check_mtp_world(5, kPort + 1); }
 

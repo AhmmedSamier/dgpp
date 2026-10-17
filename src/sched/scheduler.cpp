@@ -81,6 +81,11 @@ Scheduler::Scheduler(SchedulerEngine* engine,
   if (policy_.window_tokens < 1)
     throw std::invalid_argument(
         "Scheduler: the admission window must be at least one token");
+  if (policy_.decode_gap_target_ms < 0 || policy_.decode_gap_target_ms > kMaxLatencyTargetMs ||
+      policy_.first_token_target_ms < 0 || policy_.first_token_target_ms > kMaxLatencyTargetMs)
+    throw std::invalid_argument("Scheduler: latency targets must be in [0, 3600000] ms");
+  if (!policy_.prefill_latency.valid())
+    throw std::invalid_argument("Scheduler: invalid prefill latency controller tuning");
   if (policy_.prefill_budget_tokens < 0)
     throw std::invalid_argument("Scheduler: prefill budget must be nonnegative");
   if (policy_.prefill_budget_tokens > 0) {
@@ -132,7 +137,7 @@ int64_t Scheduler::initial_reserve_tokens(const SchedulerRequest& spec) const {
 }
 
 int64_t Scheduler::reserve_blocks(const Request& r) const {
-  return engine_->blocks_for_tokens(initial_reserve_tokens(r.spec));
+  return engine_->reservation_blocks(initial_reserve_tokens(r.spec));
 }
 
 int Scheduler::youngest_active_after(int arrival) const {
@@ -156,17 +161,22 @@ void Scheduler::grow_reservations() {
     if (need <= r.reserved_tokens) continue;
     int64_t target = std::min<int64_t>(
         full, std::max<int64_t>(need, r.reserved_tokens + policy_.window_tokens));
-    const int64_t held = engine_->blocks_for_tokens(r.reserved_tokens);
+    const int64_t held = engine_->reservation_blocks(r.reserved_tokens);
+    const int64_t minimum_blocks = engine_->reservation_blocks(need) - held;
     for (;;) {
+      // Idle cached histories give way before live work. Reclaim only enough
+      // for the next step: an optional full window must not evict more cache.
+      // The helper rechecks physical capacity after every release, since
+      // snapshots can share blocks with each other and with live requests.
+      const bool fits = ensure_free_blocks(minimum_blocks, r.spec.id);
       const int64_t free_blocks =
           engine_->pool_blocks_total() - engine_->pool_blocks_in_use();
-      if (engine_->blocks_for_tokens(target) - held <= free_blocks) break;
-      if (engine_->blocks_for_tokens(need) - held <= free_blocks) {
-        target = need;  // the minimum, rather than shedding for a full window
+      if (fits) {
+        if (engine_->reservation_blocks(target) - held > free_blocks) target = need;
         break;
       }
-      // Even the minimum does not fit: the youngest reserved request goes —
-      // this one when nothing younger is live.
+      // No evictable cache remains and even the minimum does not fit: the
+      // youngest reserved request goes — this one when nothing younger is live.
       const int victim = youngest_active_after(static_cast<int>(i));
       const int shed = victim >= 0 ? victim : static_cast<int>(i);
       Request& v = requests_[static_cast<size_t>(shed)];
@@ -188,7 +198,7 @@ void Scheduler::grow_reservations() {
     DGPP_LOG_INFO(
         "sched: request '{}' reservation grown to {} tokens ({} blocks; pool "
         "{}/{} blocks in use)",
-        r.spec.id, target, engine_->blocks_for_tokens(target),
+        r.spec.id, target, engine_->reservation_blocks(target),
         engine_->pool_blocks_in_use(), engine_->pool_blocks_total());
   }
 }
@@ -747,6 +757,10 @@ void Scheduler::begin_prefill(int arrival, int64_t budget) {
       free_arena_slot(r.prefill_body_slot);
       r.prefill_body_slot = -1;
     }
+    if (r.prefill_head_slot >= 0) {
+      free_arena_slot(r.prefill_head_slot);
+      r.prefill_head_slot = -1;
+    }
     throw;
   }
   r.prefill_ms = std::chrono::duration<double, std::milli>(
@@ -757,6 +771,8 @@ void Scheduler::begin_prefill(int arrival, int64_t budget) {
   r.admitted = true;
   r.slot = slot;
   r.state = State::kPrefilling;
+  r.prefill_epoch = ++execution_epoch_;
+  r.prefill_tick = ticks_;
   slots_[static_cast<size_t>(slot)] = arrival;
   DGPP_LOG_INFO("sched: request '{}' prefilling in slot {} ({} tokens/tick)",
                 r.spec.id, slot, budget);
@@ -764,10 +780,39 @@ void Scheduler::begin_prefill(int arrival, int64_t budget) {
 
 void Scheduler::advance_prefill(int arrival, int64_t budget) {
   Request& r = requests_[static_cast<size_t>(arrival)];
+  std::vector<int> decoders, slots;
+  if (policy_.prefill_early_admission && mixed_stepped_.empty()) {
+    for (int off = 1; off <= static_cast<int>(requests_.size()) &&
+         static_cast<int>(decoders.size()) < decode_batch_capacity_; ++off) {
+      const int i = (cursor_ + off) % static_cast<int>(requests_.size());
+      if (requests_[i].state != State::kActive) continue;
+      decoders.push_back(i);
+      slots.push_back(requests_[i].slot);
+    }
+  }
+  if (!decoders.empty() && engine_->can_mix_prefill(r.slot, slots)) {
+    rolling_snapshots();
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = engine_->advance_prefill_and_step(r.slot, budget, slots);
+    const double ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    // Both logical operations occupied this interval. Expose the overlap
+    // explicitly so phase rates and decode-latency histograms remain honest.
+    ++prefill_chunk_steps_;
+    prefill_ms_ += ms;
+    step_ms_ += ms;
+    mixed_ms_ += ms;
+    ++mixed_steps_;
+    apply_prefill_progress(arrival, result.prefill, budget, ms);
+    apply_step_batch(decoders, result.decoded);
+    mixed_stepped_.insert(mixed_stepped_.end(), decoders.begin(), decoders.end());
+    return;
+  }
   const auto started = std::chrono::steady_clock::now();
   const auto progress = engine_->advance_prefill(r.slot, budget);
   const double ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - started).count();
+  ++prefill_chunk_steps_;
   prefill_ms_ += ms;
   apply_prefill_progress(arrival, progress, budget, ms);
 }
@@ -775,6 +820,35 @@ void Scheduler::advance_prefill(int arrival, int64_t budget) {
 void Scheduler::advance_prefill_group(const std::vector<int>& arrivals, const std::vector<int64_t>& budgets) {
   std::vector<int> slots;
   for (const int a : arrivals) slots.push_back(requests_[static_cast<size_t>(a)].slot);
+  std::vector<int> decoders, decode_slots;
+  if (policy_.prefill_early_admission && mixed_stepped_.empty()) {
+    for (int off = 1; off <= static_cast<int>(requests_.size()) &&
+         static_cast<int>(decoders.size()) < decode_batch_capacity_; ++off) {
+      const int i = (cursor_ + off) % static_cast<int>(requests_.size());
+      if (requests_[i].state != State::kActive) continue;
+      decoders.push_back(i);
+      decode_slots.push_back(requests_[i].slot);
+    }
+  }
+  if (engine_->can_mix_prefill_group(slots, decode_slots)) {
+    rolling_snapshots();
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = engine_->advance_prefill_group_and_step(slots, budgets, decode_slots);
+    const double ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    if (result.prefills.size() != arrivals.size())
+      throw std::runtime_error("Scheduler: mixed group returned the wrong number of prefills");
+    ++prefill_chunk_steps_;
+    prefill_ms_ += ms;
+    step_ms_ += ms;
+    mixed_ms_ += ms;
+    ++mixed_steps_;
+    for (size_t i = 0; i < arrivals.size(); ++i)
+      apply_prefill_progress(arrivals[i], result.prefills[i], budgets[i], ms);
+    apply_step_batch(decoders, result.decoded);
+    mixed_stepped_.insert(mixed_stepped_.end(), decoders.begin(), decoders.end());
+    return;
+  }
   const auto started = std::chrono::steady_clock::now();
   const auto progress = engine_->advance_prefill_group(slots, budgets);
   const double ms = std::chrono::duration<double, std::milli>(
@@ -782,6 +856,7 @@ void Scheduler::advance_prefill_group(const std::vector<int>& arrivals, const st
   if (progress.size() != arrivals.size())
     throw std::runtime_error("Scheduler: the engine's group advance returned " + std::to_string(progress.size()) +
                              " results for " + std::to_string(arrivals.size()) + " requests");
+  ++prefill_chunk_steps_;
   prefill_ms_ += ms;  // one physical walk, not one execution per member
   for (size_t i = 0; i < arrivals.size(); ++i) apply_prefill_progress(arrivals[i], progress[i], budgets[i], ms);
 }
@@ -792,6 +867,10 @@ void Scheduler::apply_prefill_progress(int arrival, const SchedulerEngine::Prefi
   r.prefill_ms += ms;
   if (progress.computed_tokens <= 0 || progress.computed_tokens > budget)
     throw std::runtime_error("Scheduler: prefill chunk made no progress or exceeded its token budget");
+  prefill_chunk_budget_tokens_ += budget;
+  prefill_chunk_available_tokens_ += std::min<int64_t>(budget,
+      static_cast<int64_t>(r.spec.prompt.size()) - r.attached_tokens - r.prefill_computed);
+  prefill_chunk_computed_tokens_ += progress.computed_tokens;
   prefill_cursor_ = arrival;
   r.prefill_computed += progress.computed_tokens;
   engine_->prefill_monitor()->update(r.slot, r.attached_tokens + r.prefill_computed);
@@ -821,7 +900,9 @@ bool Scheduler::needs_chunked_prefill(int arrival, int64_t budget) const {
   // prompt past one aligned chunk in through its cursor: a later arrival
   // then joins the walk at the next tick instead of waiting behind a
   // one-shot of the whole prompt.
-  const int64_t over = engine_->prefill_group_advance()
+  const bool group = engine_->prefill_group_advance() &&
+                     (policy_.prefill_early_admission || engine_->prefill_budget_per_reader());
+  const int64_t over = group
       ? std::min<int64_t>(budget, engine_->prefill_chunk_alignment()) : budget;
   return budget > 0 &&
          (r.spec.images.empty() || engine_->supports_image_chunked_prefill()) &&
@@ -938,6 +1019,7 @@ void Scheduler::admit_finish(int arrival, int slot, int32_t token, double prefil
   }
   r.reserved_tokens = reserved;
   r.state = State::kActive;
+  r.decode_epoch = ++execution_epoch_;
   r.slot = slot;
   slots_[static_cast<size_t>(slot)] = arrival;
   if (arrival == deferred_logged_) deferred_logged_ = -1;
@@ -985,8 +1067,13 @@ void Scheduler::step_batch(const std::vector<int>& arrivals) {
   step_ms_ += std::chrono::duration<double, std::milli>(
                   std::chrono::steady_clock::now() - t_step)
                   .count();
+  apply_step_batch(arrivals, batches);
+}
+
+void Scheduler::apply_step_batch(const std::vector<int>& arrivals,
+                                const std::vector<std::vector<int32_t>>& batches) {
   ++decode_steps_;
-  decode_rows_ += static_cast<int64_t>(slots.size());
+  decode_rows_ += static_cast<int64_t>(arrivals.size());
   for (const int arrival : arrivals)
     ++requests_[static_cast<size_t>(arrival)].decode_passes;
   if (batches.size() != arrivals.size())
@@ -1007,20 +1094,30 @@ void Scheduler::step_batch(const std::vector<int>& arrivals) {
   }
 
   cursor_ = arrivals.back();
-  // The prefix cache's hops (M7): an armed request whose step committed two
-  // tokens may have saved its state at the armed position inside the step.
-  // Check the arena before recording it, so a retire in this pass finds
-  // the rolling slot at the position the close entry wants. A
-  // one-token step landed ON the position: the next tick's rolling
-  // snapshot (or the retire-time one) takes it.
+  // Publish hop outcomes before tokens can retire any request in this pass.
+  // The engine captures before sampled fallback. A provisional one-row
+  // verdict leaves the old snapshot alone, even if fallback later accepts
+  // more rows; a failed replacement instead releases that old snapshot.
   for (size_t i = 0; i < arrivals.size(); ++i) {
     Request& r = requests_[static_cast<size_t>(arrivals[i])];
     if (r.hop_armed < 0) continue;
     const int64_t hop = r.hop_armed;
     r.hop_armed = -1;
-    if (batches[i].size() < 2) continue;
+    const auto outcome = engine_->take_prefix_hop_result(r.slot);
     const int64_t position = engine_->prefix_position(r.rolling_slot);
-    if (position < 0) {
+    const bool matches_arm = outcome.slot == r.rolling_slot && outcome.position == hop;
+    using Hop = SchedulerEngine::PrefixHopStatus;
+    if (matches_arm && outcome.status == Hop::kNotTaken && position == r.rolling_position) {
+      if (batches[i].size() >= 2) {
+        ++cache_.stats().skipped_hop_fallback;
+        cache_.note(7, static_cast<uint64_t>(hop), static_cast<uint64_t>(r.rolling_slot));
+        // A position of -1 means this was the first hop: there is no old
+        // snapshot to keep. Neither case is a pool failure or a new hop.
+        emit_prefix(r.spec.id, "hop_fallback", position, r.rolling_slot);
+      }
+      continue;
+    }
+    if (matches_arm && outcome.status == Hop::kNoBlock && position < 0) {
       // A failed replacement released the previous snapshot too. Forget
       // its position so retirement cannot publish an empty slot, and the
       // next attempt reserves a fresh partial block rather than reusing it.
@@ -1028,8 +1125,25 @@ void Scheduler::step_batch(const std::vector<int>& arrivals) {
       ++cache_.stats().skipped_no_block;
       continue;
     }
-    if (position != hop)
-      throw std::logic_error("Scheduler: the hop snapshot's position differs from the armed position");
+    if (!matches_arm || outcome.status != Hop::kStored || position != hop || batches[i].size() < 2) {
+      // Unexpected cache metadata must not be published under a guessed
+      // prefix. Drop this request's optional snapshot, preserving the
+      // model's own position checks and all non-cache engine failures.
+      const int slot = r.rolling_slot;
+      const int64_t previous = r.rolling_position;
+      free_arena_slot(slot);
+      r.rolling_slot = -1;
+      r.rolling_position = -1;
+      ++cache_.stats().skipped_hop_mismatch;
+      cache_.note(8, static_cast<uint64_t>(hop), static_cast<uint64_t>(slot));
+      emit_prefix(r.spec.id, "hop_mismatch", position, slot);
+      DGPP_LOG_WARN(
+          "sched: request '{}' dropped inconsistent hop snapshot: armed {} in slot {}, "
+          "previous {}, stored {}, outcome {} at {} in slot {}",
+          r.spec.id, hop, slot, previous, position, static_cast<int>(outcome.status),
+          outcome.position, outcome.slot);
+      continue;
+    }
     r.rolling_position = hop;
     ++cache_.stats().rolling;
     ++cache_.stats().hops;
@@ -1040,7 +1154,7 @@ void Scheduler::step_batch(const std::vector<int>& arrivals) {
     const int arrival = arrivals[i];
     const std::vector<int32_t>& tokens = batches[i];
     const std::vector<sample::Result> lps =
-        collect_logprobs(arrival, slots[i], tokens.size());
+        collect_logprobs(arrival, requests_[static_cast<size_t>(arrival)].slot, tokens.size());
     for (size_t t = 0; t < tokens.size(); ++t) {
       // A speculative pass can have advanced farther than the public request
       // survives. EOS/cap/cancel retires the slot and deliberately drops the
@@ -1246,8 +1360,69 @@ void Scheduler::release_retired(Request& r, Result& res) {
   if (!keep_retired_) std::vector<int64_t>().swap(res.generated);
 }
 
-bool Scheduler::tick() {
-  const bool more = quantum();
+std::optional<int64_t> Scheduler::next_prefill_budget() const {
+  if (!adaptive_prefill()) return std::nullopt;
+  int decoders = 0;
+  for (const auto& r : requests_)
+    if (r.state == State::kActive && !r.cancel_requested && !r.stop_requested) ++decoders;
+  // Use the first-token allowance for an uninterrupted reader. When an
+  // arrival can obtain a slot during an ongoing prefill, reserve half for
+  // time it already spent waiting for this yield. A fresh reader on an idle
+  // engine has no preceding prefill wait to reserve. A full queue behind
+  // occupied slots cannot benefit from smaller reader chunks. Long prompts
+  // and KV pressure may still miss the target.
+  const bool reading = std::any_of(requests_.begin(), requests_.end(),
+      [](const Request& r) { return r.state == State::kPrefilling && !r.cancel_requested && !r.stop_requested; });
+  const bool waiting_arrival = reading && free_slot() >= 0 && std::any_of(requests_.begin(), requests_.end(),
+      [](const Request& r) { return r.state == State::kQueued && !r.cancel_requested && !r.stop_requested; });
+  double target = policy_.first_token_target_ms / (waiting_arrival ? 2.0 : 1.0);
+  if (decoders && policy_.decode_gap_target_ms > 0)
+    target = target > 0 ? std::min(target, double(policy_.decode_gap_target_ms)) : policy_.decode_gap_target_ms;
+  const int64_t cap = std::min<int64_t>(engine_->prefill_chunk_limit(),
+      std::max(policy_.prefill_budget_tokens, policy_.prefill_idle_budget_tokens));
+  const int64_t initial = std::min<int64_t>(policy_.prefill_budget_tokens, policy_.prefill_latency.initial_tokens);
+  // A lone reader — nothing decoding, nothing queued for a free slot —
+  // keeps the engine's efficient chunk (PrefillLatencyTuning::idle_floor_tokens).
+  const int64_t floor = decoders == 0 && !waiting_arrival ? policy_.prefill_latency.idle_floor_tokens : 0;
+  return prefill_latency_.limit(decoders, prefill_context(), target, initial,
+                                cap, engine_->prefill_chunk_alignment(), floor, engine_->prefill_wave_rows(),
+                                policy_.prefill_latency);
+}
+
+int64_t Scheduler::prefill_context() const {
+  int64_t context = 0;
+  for (const auto& r : requests_)
+    if (r.state == State::kPrefilling && !r.cancel_requested && !r.stop_requested)
+      context = std::max(context, r.attached_tokens + r.prefill_computed);
+  return context;
+}
+
+bool Scheduler::tick(std::optional<int64_t> prefill_budget) {
+  if (!prefill_budget) prefill_budget = next_prefill_budget();
+  if (prefill_budget && (!adaptive_prefill() || *prefill_budget <= 0 ||
+      *prefill_budget > engine_->prefill_chunk_limit() ||
+      *prefill_budget > std::max(policy_.prefill_budget_tokens, policy_.prefill_idle_budget_tokens) ||
+      *prefill_budget % engine_->prefill_chunk_alignment() != 0))
+    throw std::invalid_argument("Scheduler: invalid adaptive prefill budget");
+  prefill_adaptive_limit_tokens_ = prefill_budget.value_or(0);
+  int decoders = 0;
+  if (prefill_budget)
+    for (const auto& r : requests_)
+      if (r.state == State::kActive && !r.cancel_requested && !r.stop_requested) ++decoders;
+  const auto started = prefill_budget ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+  const int64_t computed = prefill_chunk_computed_tokens_, offered = prefill_chunk_budget_tokens_;
+  const int64_t context = prefill_budget ? prefill_context() : 0;  // where this chunk starts
+  prefill_pass_budget_tokens_ = 0;
+  const bool more = quantum(prefill_budget);
+  // A completed group measures final projection/admission work as well as a
+  // possibly short tail. It must not recalibrate the next bulk read-in.
+  const bool reading = prefill_budget && std::any_of(requests_.begin(), requests_.end(),
+      [](const Request& r) { return r.state == State::kPrefilling; });
+  if (prefill_budget && reading)
+    prefill_latency_.observe(decoders, context, prefill_chunk_computed_tokens_ - computed,
+        std::max(prefill_pass_budget_tokens_, prefill_chunk_budget_tokens_ - offered),
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count(),
+        policy_.prefill_latency);
   compact_retired();
   return more;
 }
@@ -1293,7 +1468,7 @@ void Scheduler::compact_retired() {
   deferred_logged_ = deferred;
 }
 
-bool Scheduler::quantum() {
+bool Scheduler::quantum(std::optional<int64_t> adaptive_budget) {
   ++ticks_;
   // The external-cancel sweep — FIXED POSITION, before any admission
   // or step: a request cancelled BETWEEN ticks never pays another
@@ -1315,6 +1490,7 @@ bool Scheduler::quantum() {
   // admission or step — the step below never writes past a reservation,
   // and every rank grows or sheds the same requests at the same quantum.
   grow_reservations();
+  mixed_stepped_.clear();
 
   const bool any_active = std::any_of(
       requests_.begin(), requests_.end(),
@@ -1338,17 +1514,39 @@ bool Scheduler::quantum() {
   // This choice depends only on replicated scheduler state. Reevaluate at
   // every yield so an unfinished prompt speeds up when its decoding peer retires.
   const auto prefill_budget = [&]() -> int64_t {
-    return !any_active && policy_.prefill_idle_budget_tokens > 0
-        ? policy_.prefill_idle_budget_tokens : policy_.prefill_budget_tokens;
+    const int64_t busy = policy_.prefill_budget_tokens;
+    const int64_t idle = policy_.prefill_idle_budget_tokens;
+    if (idle <= 0) return busy;
+    if (!any_active) return idle;
+    if (!policy_.prefill_early_admission || !prefill_in_flight) return busy;
+    std::vector<int> decoders;
+    for (const auto& r : requests_)
+      if (r.state == State::kActive) decoders.push_back(r.slot);
+    // Preserve the interruption bound of decoders that preceded a reader.
+    // Newly admitted decoders may share an existing reader's larger walk:
+    // their arrival must not multiply the reader's weight-streaming passes.
+    // Use this only when the engine can execute the shared walk itself.
+    for (const auto& reader : requests_) {
+      if (reader.state != State::kPrefilling) continue;
+      if (!engine_->can_mix_prefill(reader.slot, decoders)) return busy;
+      for (const auto& decoder : requests_)
+        if (decoder.state == State::kActive && decoder.decode_epoch < reader.prefill_epoch)
+          return busy;
+    }
+    return idle;
   };
   int64_t budget = prefill_budget();
+  const int64_t fixed_budget = budget;
+  if (adaptive_budget)
+    budget = policy_.prefill_budget_automatic ? *adaptive_budget : std::min(budget, *adaptive_budget);
   // An engine that advances its in-flight prefills as one walk takes the
   // chunked path whenever a prompt waits to be read in (so prompts queued
   // together begin in the same tick), and its busy budget is a quantum PER
   // reading prompt: a tick serves every request once — the decoding ones a
   // pass, each reading one its quantum — and the walk they share costs one
   // stream of the weights however many they are.
-  const bool group_advance = policy_.prefill_budget_tokens > 0 && engine_->prefill_group_advance();
+  const bool group_advance = policy_.prefill_budget_tokens > 0 && engine_->prefill_group_advance() &&
+                            (policy_.prefill_early_admission || engine_->prefill_budget_per_reader());
   bool chunk_tick = prefill_in_flight;
   if (group_advance) {
     int64_t readers = 0;
@@ -1363,24 +1561,31 @@ bool Scheduler::quantum() {
       }
     }
     const int64_t align = engine_->prefill_chunk_alignment();
-    if (any_active && readers > 1)
-      budget = std::min<int64_t>(engine_->prefill_chunk_limit() / align * align, budget * readers);
+    if (any_active && readers > 1 && engine_->prefill_budget_per_reader() &&
+        (!adaptive_budget || !policy_.prefill_budget_automatic)) {
+      budget = std::min<int64_t>(engine_->prefill_chunk_limit() / align * align, fixed_budget * readers);
+      if (adaptive_budget) budget = std::min(budget, *adaptive_budget);
+    }
     chunk_tick = readers > 0;
   }
+  // Reader allocation below trims final tails to their remaining work. Keep
+  // the original quantum for feedback: eight tokens filling an eight-token
+  // trimmed share do not measure the cost of a 1024-token service quantum.
+  prefill_pass_budget_tokens_ = budget;
   std::vector<int> inflight, begins;
   int64_t align = 0;
   size_t max_advances = 0;
   if (chunk_tick) {
     // A chunked prefill is in flight: advance a fair slice on equal aligned
     // shares of the tick's budget (all prefills when they fit), begin at most
-    // one new chunked read-in, and admit fitting one-shots/groups into the
+    // one new read-in, and admit fitting one-shots/groups into the
     // align-down leftover. Order derives from arrival order only, so every
     // rank agrees.
     for (size_t i = 0; i < requests_.size(); ++i)
       if (requests_[i].state == State::kPrefilling) inflight.push_back(static_cast<int>(i));
     align = engine_->prefill_chunk_alignment();
     max_advances = static_cast<size_t>(budget / align);
-    // The one new begin, when any: the oldest fitting chunked-needing
+    // The one new begin, when any: the oldest fitting eligible
     // request (skip-fit, no eviction dance — a begin must not disturb the
     // pool the in-flight prefills hold), gated so every share keeps at
     // least one aligned chunk.
@@ -1394,7 +1599,11 @@ bool Scheduler::quantum() {
       for (size_t i = 0; i < requests_.size(); ++i) {
         if (open_slots <= 0 || inflight.size() + begins.size() >= max_advances) break;
         if (requests_[i].state != State::kQueued) continue;
-        if (!needs_chunked_prefill(static_cast<int>(i), budget)) continue;
+        // Text of any size can join an early-admission walk, including
+        // prompts shorter than one alignment unit. Images retain their
+        // existing eligibility rules.
+        if ((!policy_.prefill_early_admission || !requests_[i].spec.images.empty()) &&
+            !needs_chunked_prefill(static_cast<int>(i), budget)) continue;
         const int64_t need = new_blocks(requests_[i], plan_prefix(requests_[i]));
         if (need > free_blocks) continue;
         begins.push_back(static_cast<int>(i));
@@ -1429,19 +1638,22 @@ bool Scheduler::quantum() {
       // One walk for all of them: the budget in aligned units, by need.
       // With more than two ticks of work outstanding the split is max-min
       // fair (a short prompt finishes and is not held behind a long one;
-      // what it leaves goes to the others). Within two ticks of the end
-      // the units go to the longest remainders first, so the prompts come
-      // level and finish in the same walk — prompts that arrived together
-      // start decoding together instead of one decoding against the
-      // others' read-in at the busy budget.
+      // what it leaves goes to the others). Readers begun together may
+      // level their remainders within two ticks of the end, so they start
+      // decoding together. A later arrival keeps its fair share even near
+      // the end; leveling it against an older reader would defer its first
+      // token until that reader finishes.
       std::vector<int64_t> rem, shares(inflight.size(), 0);
       int64_t outstanding = 0;
+      const uint64_t begin_tick = requests_[static_cast<size_t>(inflight.front())].prefill_tick;
+      bool began_together = true;
       for (const int a : inflight) {
         const Request& r = requests_[static_cast<size_t>(a)];
+        began_together &= r.prefill_tick == begin_tick;
         rem.push_back(static_cast<int64_t>(r.spec.prompt.size()) - r.attached_tokens - r.prefill_computed);
         outstanding += rem.back();
       }
-      const bool level = outstanding <= 2 * budget;
+      const bool level = began_together && outstanding <= 2 * budget;
       for (int64_t units = budget / align; units > 0; --units) {
         int pick = -1;
         for (size_t i = 0; i < inflight.size(); ++i) {
@@ -1467,8 +1679,54 @@ bool Scheduler::quantum() {
         advance_prefill_group(members, budgets);
       else
         advance_prefill(members.at(0), budgets.at(0));
-    } else {
+    } else if (!policy_.prefill_early_admission) {
+      // Preserve the throughput-oriented policy, including its original
+      // aligned shares. Early admission and donation are an explicit opt-in.
       for (const int a : inflight) advance_prefill(a, share);
+    } else if (inflight.size() == 1) {
+      // Keep a lone reader on its original chunk grid. Shrinking its last
+      // budget cannot help a peer and can split the tail into extra GPU walks.
+      advance_prefill(inflight.front(), share);
+    } else {
+      // A short suffix only needs its aligned tail. Donate the rest of its
+      // share to unfinished readers before executing any walk, so admitting
+      // a tiny prompt does not discard half of a long prompt's quantum.
+      // Keep the original align-down leftover for one-shot admission below.
+      // All decisions use replicated positions, never measured GPU time.
+      std::vector<int64_t> shares(inflight.size(), share), limits;
+      int64_t donated = 0;
+      bool can_receive = false;
+      for (size_t i = 0; i < inflight.size(); ++i) {
+        const Request& r = requests_[static_cast<size_t>(inflight[i])];
+        const int64_t remaining = static_cast<int64_t>(r.spec.prompt.size()) -
+                                  r.attached_tokens - r.prefill_computed;
+        // Cap before rounding: no reader can consume more than this tick.
+        const int64_t limit = remaining >= budget ? budget :
+            ((remaining - 1) / align + 1) * align;
+        limits.push_back(limit);
+        can_receive |= limit > share;
+        shares[i] = std::min(share, limit);
+        donated += share - shares[i];
+      }
+      // If every reader fits its original share, no donation can help.
+      // Preserve their grids instead of creating extra partial-tail walks.
+      if (!can_receive) {
+        std::fill(shares.begin(), shares.end(), share);
+        donated = 0;
+      }
+      while (donated >= align) {
+        int64_t readers = 0;
+        for (size_t i = 0; i < shares.size(); ++i)
+          readers += shares[i] < limits[i];
+        if (readers == 0) break;
+        const int64_t extra = std::max<int64_t>(align, donated / readers / align * align);
+        for (size_t i = 0; i < shares.size() && donated >= align; ++i) {
+          const int64_t grant = std::min({extra, limits[i] - shares[i], donated});
+          shares[i] += grant;
+          donated -= grant;
+        }
+      }
+      for (size_t i = 0; i < inflight.size(); ++i) advance_prefill(inflight[i], shares[i]);
     }
     progressed = true;
     // The align-down leftover still admits fitting one-shots/groups — but
@@ -1517,10 +1775,13 @@ bool Scheduler::quantum() {
   // Scalar engines advertise capacity one and retain the original policy
   // bit-for-bit. A batched graph normally advertises the slot count, so this
   // slice contains every active request exactly once.
+  // A shared walk already decoded its live set. A prefill that completed
+  // afterward published its first token and joins decode on the next tick;
+  // replaying the physical family now would step its peers twice.
   std::vector<int> step_arrivals;
   step_arrivals.reserve(static_cast<size_t>(decode_batch_capacity_));
   for (int off = 1;
-       off <= static_cast<int>(requests_.size()) &&
+       mixed_stepped_.empty() && off <= static_cast<int>(requests_.size()) &&
        static_cast<int>(step_arrivals.size()) < decode_batch_capacity_;
        ++off) {
     const int i = (cursor_ + off) % static_cast<int>(requests_.size());
@@ -1585,6 +1846,13 @@ Scheduler::Meters Scheduler::meters() const {
   m.prompt_tokens_computed = prompt_tokens_computed_;
   m.decode_steps = decode_steps_;
   m.decode_rows = decode_rows_;
+  m.prefill_chunk_steps = prefill_chunk_steps_;
+  m.prefill_chunk_budget_tokens = prefill_chunk_budget_tokens_;
+  m.prefill_chunk_available_tokens = prefill_chunk_available_tokens_;
+  m.prefill_chunk_computed_tokens = prefill_chunk_computed_tokens_;
+  m.prefill_adaptive_limit_tokens = prefill_adaptive_limit_tokens_;
+  m.mixed_steps = mixed_steps_;
+  m.mixed_ms = mixed_ms_;
   m.prefill_ms = prefill_ms_;
   m.prefill_request_ms = prefill_request_ms_;
   m.step_ms = step_ms_;
@@ -1604,6 +1872,8 @@ Scheduler::Meters Scheduler::meters() const {
   m.prefix_duplicates = cache_.stats().duplicates;
   m.prefix_skipped = cache_.stats().skipped_no_slot;
   m.prefix_skipped_no_block = cache_.stats().skipped_no_block;
+  m.prefix_skipped_hop_fallback = cache_.stats().skipped_hop_fallback;
+  m.prefix_skipped_hop_mismatch = cache_.stats().skipped_hop_mismatch;
   m.prefix_skipped_image_bytes = cache_.stats().skipped_image_bytes;
   m.prefix_image_bytes = static_cast<int64_t>(cache_.image_bytes());
   m.prefix_blocks_pinned = cache_.blocks_pinned(prefix_info_.block_tokens);
@@ -1619,6 +1889,7 @@ void Scheduler::rolling_snapshots() {
   for (size_t i = 0; i < requests_.size(); ++i) {  // arrival order
     Request& r = requests_[i];
     if (r.state != State::kActive || !cache_on(r)) continue;
+    if (std::find(mixed_stepped_.begin(), mixed_stepped_.end(), static_cast<int>(i)) != mixed_stepped_.end()) continue;
     // Committed tokens: the prompt plus every generated token but the last
     // (pending — the next step writes it).
     const int64_t committed =

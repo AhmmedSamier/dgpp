@@ -28,6 +28,7 @@
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
 #include "kernels/latent_format.hpp"
+#include "kernels/qsa_fp8_decode.cuh"
 
 namespace dgpp {
 namespace {
@@ -139,8 +140,8 @@ __global__ __launch_bounds__(32) void qsa_attn_prefill_warp_kernel(
           const uint8_t* vb = reinterpret_cast<const uint8_t*>(&v2);
 #pragma unroll
           for (int j = 0; j < 8; ++j) {
-            kdst[j] = latent_fp8_decode_bf16(kb[j], ks);
-            vdst[j] = latent_fp8_decode_bf16(vb[j], vs);
+            kdst[j] = qsa_decode_fp8_bf16(kb[j], ks);
+            vdst[j] = qsa_decode_fp8_bf16(vb[j], vs);
           }
         } else {
 #pragma unroll

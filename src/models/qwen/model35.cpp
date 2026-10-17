@@ -21,9 +21,13 @@
 #include "common/log.hpp"
 #include "kernels/add_rmsnorm.hpp"
 #include "kernels/dflash2.hpp"
+#include "kernels/fp4w_gemm.hpp"
 #include "kernels/fp8_per_tensor.hpp"
 #include "kernels/fp8_dequant.hpp"
+#include "kernels/moe_w4a4.hpp"
+#include "kernels/fp8_gemm.hpp"
 #include "kernels/gemm.hpp"
+#include "kernels/glm_moe_launch.hpp"
 #include "kernels/kernels.hpp"
 #include "kernels/mma_gemv.hpp"
 #include "kernels/qwen_mtp.hpp"
@@ -41,22 +45,6 @@ inline void d2d(void* dst, const void* src, size_t n, cudaStream_t stream) {
   DGPP_CUDA_OK(cudaMemcpyAsync(dst, src, n, cudaMemcpyDeviceToDevice, stream));
 }
 
-// The qwen4_exp layer ctors take QwenTextConfig: adapt the fields they read.
-QwenTextConfig qwen_text_adapter(const Qwen35TextConfig& c) {
-  QwenTextConfig q;
-  q.hidden_size = c.hidden_size;
-  q.head_dim = c.head_dim;
-  q.rotary_dim = c.rotary_dim;
-  q.rope_theta = c.rope_theta;
-  q.rms_norm_eps = c.rms_norm_eps;
-  q.gdn_key_heads = c.gdn_key_heads;
-  q.gdn_value_heads = c.gdn_value_heads;
-  q.gdn_key_head_dim = c.gdn_key_head_dim;
-  q.gdn_value_head_dim = c.gdn_value_head_dim;
-  q.gdn_conv_width = c.gdn_conv_width;
-  return q;
-}
-
 }  // namespace
 
 // ---- Qwen35KvPool ------------------------------------------------------------
@@ -70,7 +58,7 @@ Qwen35KvPool::~Qwen35KvPool() {
 
 size_t Qwen35KvPool::cache_bytes(const Qwen35KvPoolShape& shape) {
   const size_t kv_row = static_cast<size_t>(shape.kv_heads) * shape.dim;
-  const size_t layer_kv = static_cast<size_t>(shape.token_slots) * kv_row * 2 * 2;
+  const size_t layer_kv = static_cast<size_t>(shape.token_slots) * kv_row * (shape.fp8 ? 1 : 2) * 2;
   const size_t dkv_row = static_cast<size_t>(shape.draft_kv_heads) * shape.draft_dim;
   const size_t draft_layer_kv = static_cast<size_t>(shape.token_slots) * dkv_row * 2 * 2;
   const int64_t num_blocks = shape.token_slots / shape.block_tokens;
@@ -91,15 +79,26 @@ void Qwen35KvPool::init(const Qwen35KvPoolShape& shape) {
     throw std::invalid_argument("Qwen35KvPool: shape fields must be positive");
   if (shape.token_slots % shape.block_tokens != 0)
     throw std::invalid_argument("Qwen35KvPool: token_slots must be a multiple of block_tokens");
+  const bool staged = shape.dim == 256 && shape.block_tokens >= 32 && (shape.block_tokens & (shape.block_tokens - 1)) == 0;
+  if (shape.fp8 && !staged)
+    throw std::invalid_argument("Qwen35KvPool: the fp8 form needs dim 256 and a power-of-two page of >= 32 tokens");
   shape_ = shape;
   const int64_t num_blocks = shape.token_slots / shape.block_tokens;
-  DGPP_CUDA_OK(cudaMalloc(&k_base_, layer_kv_elems() * shape.layers * 2));
-  DGPP_CUDA_OK(cudaMalloc(&v_base_, layer_kv_elems() * shape.layers * 2));
+  DGPP_CUDA_OK(cudaMalloc(&k_base_, layer_kv_bytes() * shape.layers));
+  DGPP_CUDA_OK(cudaMalloc(&v_base_, layer_kv_bytes() * shape.layers));
   if (shape.draft_layers > 0) {
     DGPP_CUDA_OK(cudaMalloc(&dk_base_, draft_layer_kv_elems() * shape.draft_layers * 2));
     DGPP_CUDA_OK(cudaMalloc(&dv_base_, draft_layer_kv_elems() * shape.draft_layers * 2));
   }
   table_.init(shape.max_requests, shape.block_tokens, num_blocks);
+  maps_ready_ = false;
+  if (staged) {
+    const int64_t rows = static_cast<int64_t>(shape.layers) * shape.token_slots;
+    maps_ = shape.fp8 ? full_attn_stage_maps_fp8(k_base_, v_base_, rows, shape.kv_heads)
+                      : full_attn_stage_maps(reinterpret_cast<const uint16_t*>(k_base_),
+                                             reinterpret_cast<const uint16_t*>(v_base_), rows, shape.kv_heads);
+    maps_ready_ = true;
+  }
   initialized_ = true;
 }
 
@@ -108,8 +107,21 @@ QwenFullAttnCache Qwen35KvPool::view(int layer) const {
     throw std::out_of_range("Qwen35KvPool: layer out of range in view");
   QwenFullAttnCache c;
   if (layer < shape_.layers) {
-    c.k_cache = k_base_ + static_cast<size_t>(layer) * layer_kv_elems();
-    c.v_cache = v_base_ + static_cast<size_t>(layer) * layer_kv_elems();
+    uint8_t* kb = k_base_ + static_cast<size_t>(layer) * layer_kv_bytes();
+    uint8_t* vb = v_base_ + static_cast<size_t>(layer) * layer_kv_bytes();
+    if (shape_.fp8) {
+      c.fp8 = true;
+      c.fp8_attention = shape_.fp8_attention;
+      c.k8 = kb;
+      c.v8 = vb;
+    } else {
+      c.k_cache = reinterpret_cast<uint16_t*>(kb);
+      c.v_cache = reinterpret_cast<uint16_t*>(vb);
+    }
+    if (maps_ready_) {
+      c.maps = &maps_;
+      c.row_base = static_cast<int64_t>(layer) * shape_.token_slots;
+    }
   } else {
     const int plane = layer - shape_.layers;
     c.k_cache = dk_base_ + static_cast<size_t>(plane) * draft_layer_kv_elems();
@@ -128,7 +140,7 @@ void Qwen35KvPool::reset_request(int req, cudaStream_t stream) {
 }
 
 void Qwen35KvPool::reset_all(cudaStream_t stream) {
-  const size_t bytes = layer_kv_elems() * shape_.layers * 2;
+  const size_t bytes = layer_kv_bytes() * shape_.layers;
   DGPP_CUDA_OK(cudaMemsetAsync(k_base_, 0, bytes, stream));
   DGPP_CUDA_OK(cudaMemsetAsync(v_base_, 0, bytes, stream));
   if (dk_base_) {
@@ -142,14 +154,13 @@ void Qwen35KvPool::reset_all(cudaStream_t stream) {
 void Qwen35KvPool::copy_block_contents(int32_t src, int32_t dst, cudaStream_t stream) {
   if (src < 0 || src >= total_blocks() || dst < 0 || dst >= total_blocks())
     throw std::out_of_range("Qwen35KvPool: block out of range in copy_block_contents");
-  const size_t row_elems = kv_row_elems();
-  const size_t span = static_cast<size_t>(shape_.block_tokens) * row_elems * 2;
+  const size_t span = static_cast<size_t>(shape_.block_tokens) * kv_row_elems() * elem_bytes();  // bytes
   for (int l = 0; l < shape_.layers; ++l) {
-    const size_t base = static_cast<size_t>(l) * layer_kv_elems();
-    d2d(k_base_ + base + static_cast<size_t>(dst) * span / 2, k_base_ + base + static_cast<size_t>(src) * span / 2,
-        span, stream);
-    d2d(v_base_ + base + static_cast<size_t>(dst) * span / 2, v_base_ + base + static_cast<size_t>(src) * span / 2,
-        span, stream);
+    const size_t base = static_cast<size_t>(l) * layer_kv_bytes();
+    d2d(k_base_ + base + static_cast<size_t>(dst) * span, k_base_ + base + static_cast<size_t>(src) * span, span,
+        stream);
+    d2d(v_base_ + base + static_cast<size_t>(dst) * span, v_base_ + base + static_cast<size_t>(src) * span, span,
+        stream);
   }
   if (dk_base_) {
     const size_t drow = draft_row_elems();
@@ -165,6 +176,34 @@ void Qwen35KvPool::copy_block_contents(int32_t src, int32_t dst, cudaStream_t st
 }
 
 // ---- Qwen35Model ---------------------------------------------------------------
+
+// The pool format a kv_dtype asks for: bf16, or the fp8 storage form —
+// only where every Full layer ships its kv_cache_scheme scales (the mixed
+// release) and no MTP draft plane (its layer ships none) rides the pool.
+// engine.prefill_attention = fp8 (the attention's arithmetic on that pool)
+// needs it: with a bf16 pool there are no e4m3 K/V codes to compute over.
+static bool kv_format_is_fp8(LatentFormat f, const Qwen35TextConfig& cfg, bool mtp) {
+  if (f == LatentFormat::kBf16) {
+    if (Qwen35Model::fp8_attention())
+      throw std::invalid_argument(
+          "Qwen35Model: engine.prefill_attention fp8 needs engine.kv_dtype fp8 (the attention computes over the "
+          "pool's e4m3 codes at the release's k_scale / v_scale); set kv_dtype fp8 or prefill_attention bf16");
+    return false;
+  }
+  if (f != LatentFormat::kFp8)
+    throw std::invalid_argument(std::string("Qwen35Model: engine.kv_dtype ") + latent_format_name(f) +
+                                " — this family's K/V pool takes bf16 or fp8");
+  if (cfg.quant_kind != Qwen35QuantKind::Nvfp4Mixed)
+    throw std::invalid_argument(
+        "Qwen35Model: engine.kv_dtype fp8 needs a release that ships k_scale / v_scale (the FP8 "
+        "kv_cache_scheme of the mixed NVFP4 release); this checkpoint ships none");
+  if (mtp)
+    throw std::invalid_argument(
+        "Qwen35Model: engine.kv_dtype fp8 with engine.mtp — the MTP draft layer ships no kv scales; use the "
+        "DFlash2 drafter or kv_dtype bf16");
+  return true;
+}
+
 
 // The dequant bridge holds the largest dense FP8 matrix in BF16 so
 // prefill-shaped (m>128) products dequantize once and run cuBLASLt BF16
@@ -188,7 +227,7 @@ static size_t qwen35_dense_bridge_bytes(const Qwen35TextConfig& cfg) {
 Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpoint_dir, int max_tokens,
                          int64_t max_cache_tokens, LoaderResidency residency, BoundaryReducer* boundary,
                          int rank, int world, int max_requests, int decode_rows, bool mtp,
-                         const std::string& dflash2_dir)
+                         const std::string& dflash2_dir, LatentFormat kv_format)
     : cfg_(cfg),
       loader_(cfg, checkpoint_dir, rank, world, residency,
               world > 1 ? LoaderHeadSharding::VocabSharded : LoaderHeadSharding::Full,
@@ -205,6 +244,17 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
   if (cfg_.eos_token_ids.empty()) throw std::invalid_argument("Qwen35Model: the config names no EOS token");
   if (mtp_ && cfg_.mtp_layer() < 0)
     throw std::invalid_argument("Qwen35Model: the config has no draft layer (mtp)");
+  // The FP8-release levers (the boot block-FP8 lm head, the per-tensor
+  // prefill recipe) requantize the checkpoint's block-FP8 bytes. The mixed
+  // NVFP4 release serves its own formats (NVFP4 MLP, FP8-channel
+  // attention): neither lever has a subject there, and an operator asking
+  // for one has the wrong release or the wrong config.
+  if (cfg_.quant_kind == Qwen35QuantKind::Nvfp4Mixed &&
+      (prefill_fp8_per_tensor_ || dense_weights_fp8_))
+    throw std::invalid_argument(
+        "Qwen35Model: the NVFP4 mixed release serves the checkpoint's own formats; "
+        "engine.prefill_fp8_per_tensor and engine.dense_weights = fp8 are the FP8 "
+        "release's levers (unset them)");
   if (!dflash2_dir.empty()) {
     if (mtp_)
       throw std::invalid_argument("Qwen35Model: dflash2 replaces the MTP draft; enable one or the other");
@@ -240,9 +290,14 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
   const int64_t lv = geo.local_value_heads, V = cfg_.gdn_value_head_dim, K = cfg_.gdn_key_head_dim;
   const int64_t C = 2 * static_cast<int64_t>(geo.local_key_heads) * K + lv * V;
   rec_elems_ = lv * V * K;
+  {
+    int dev = 0, sms = 0;
+    if (cudaGetDevice(&dev) == cudaSuccess) cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
+    wave_rows_ = sms > 0 ? static_cast<int64_t>(16) * sms / std::max(1, geo.local_kv_heads) : 0;
+  }
   conv_elems_ = C * (cfg_.gdn_conv_width - 1);
   // The qwen4_exp layer ctors' config view.
-  qcfg_ = qwen_text_adapter(cfg_);
+  qcfg_ = qwen35_text_adapter(cfg_);
   init_stream();
   loader_.set_reader_stream(stream_);
   globals_ = loader_.load_globals();
@@ -263,7 +318,7 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
   sp.hidden = H;
   sp.lm_vocab_begin = geo.lm_vocab_begin;
   sp.lm_vocab_count = geo.lm_vocab_count;
-  sp.max_position_embeddings = cfg_.max_position_embeddings;
+  sp.max_position_embeddings = cfg_.context_limit();
   sp.block_tokens = kv_block_tokens_static();
   sp.snapshot_align = 1;
   sp.draft_width = mtp_ ? H : 0;
@@ -278,6 +333,8 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
   shape.block_tokens = kv_block_tokens_static();
   shape.max_requests = max_requests;
   shape.token_slots = sp.max_cache_tokens;
+  shape.fp8 = kv_format_is_fp8(kv_format, cfg_, mtp_);
+  shape.fp8_attention = fp8_attention_;
   if (dflash2_) {
     shape.draft_layers = dfcfg_.num_hidden_layers;
     shape.draft_kv_heads = dfcfg_.local_kv_heads(world);  // this rank's kv heads (sharded drafter)
@@ -326,6 +383,81 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
   DGPP_CUDA_OK(cudaMalloc(&mlp_out_, M * H * 2));
   DGPP_CUDA_OK(cudaMalloc(&gate_tmp_, M * I * 2));
   DGPP_CUDA_OK(cudaMalloc(&up_tmp_, M * I * 2));
+  // The NVFP4 dense path's tables (production ldmatrix kernel): one
+  // {0, m, 0} segment per row count, staged once — the grouped launcher's
+  // only per-launch table, indexed by (rows - 1), never written after.
+  DGPP_CUDA_OK(cudaMalloc(&fp4_segs_, M * sizeof(MoeSegment)));
+  {
+    std::vector<MoeSegment> segs(M);
+    for (size_t m = 1; m <= M; ++m) segs[m - 1] = MoeSegment{0, static_cast<int32_t>(m), 0};
+    DGPP_CUDA_OK(cudaMemcpy(fp4_segs_, segs.data(), M * sizeof(MoeSegment),
+                            cudaMemcpyHostToDevice));
+  }
+  // The native activation recipe's NVFP4 scratch (engine.prefill_activations
+  // = native): one quantized row set at max_tokens rows of the widest k (I).
+  if (native_activations_ && cfg_.quant_kind == Qwen35QuantKind::Nvfp4Mixed && loader_.residency() == LoaderResidency::Resident)
+    build_native_maps();
+  if (native_activations_ && cfg_.quant_kind == Qwen35QuantKind::Nvfp4Mixed) {
+    DGPP_CUDA_OK(cudaMalloc(&q_codes_, M * I / 2));
+    DGPP_CUDA_OK(cudaMalloc(&q_scales_, M * nvfp4_act_scale_stride(static_cast<int>(I))));
+    DGPP_CUDA_OK(cudaMalloc(&q_gs_, M * sizeof(float)));
+    // The dense W4A4 TMA form: maps over the code scratch for k = H (gate/up)
+    // and k = I (down), and over every NVFP4 MLP matrix (Resident stacks).
+    for (const int64_t kk : {static_cast<int64_t>(H), static_cast<int64_t>(I)}) {
+      if (!dense_w4a4_tma_supported(static_cast<int>(kk)) || q_map_for(static_cast<int>(kk)) != nullptr) continue;
+      q_tma_k_[q_tma_count_] = static_cast<int>(kk);
+      q_tma_[q_tma_count_] = nvfp4_code_tma_map(q_codes_, static_cast<int64_t>(M), kk, 128);
+      ++q_tma_count_;
+    }
+    if (loader_.residency() == LoaderResidency::Resident) build_native_fp4_maps();
+    DGPP_LOG_INFO("Qwen35Model: engine.prefill_activations = native: the NVFP4 MLP recipe on every prefill row");
+  }
+  // The recipe's e4m3 half (both releases): per-token activation rows for the
+  // channel grid's projections and late-layer MLPs (the mixed release) or the
+  // blockwise 1 x 128 groups (the FP8 release), at max_tokens rows of the
+  // widest k (I); the cell the layers' workspace copies read.
+  native_on_ = native_activations_;
+  if (native_on_) {
+    DGPP_CUDA_OK(cudaMalloc(&gw_.a8, M * I));
+    DGPP_CUDA_OK(cudaMalloc(&gw_.a8_scales, M * (I / 128 + 1) * sizeof(float)));
+    gw_.a8_bytes = M * I;
+    gw_.native_prefill = &native_prefill_cell_;
+    // The a8 scratch's TMA maps for every dense k (the channel form's boxes).
+    {
+      const int64_t LV = static_cast<int64_t>(geo.local_value_heads) * cfg_.gdn_value_head_dim;
+      const int64_t FH = static_cast<int64_t>(geo.local_heads) * cfg_.head_dim;
+      for (const int64_t kk : {static_cast<int64_t>(H), LV, FH, static_cast<int64_t>(I)}) {
+        if (!fp8_channel_tma_supported(static_cast<int>(kk)) || gw_.a8_map_for(static_cast<int>(kk)) != nullptr ||
+            gw_.a8_tma_count >= 4)
+          continue;
+        gw_.a8_tma[gw_.a8_tma_count].k = static_cast<int>(kk);
+        gw_.a8_tma[gw_.a8_tma_count].map = fp8_channel_tma_map(gw_.a8, static_cast<int64_t>(M), kk, 128);
+        ++gw_.a8_tma_count;
+      }
+    }
+    DGPP_LOG_INFO("Qwen35Model: engine.prefill_activations = native: per-token e4m3 activations for the FP8 projections on every prefill row");
+  }
+  if (cfg_.quant_kind == Qwen35QuantKind::Nvfp4Mixed &&
+      loader_.residency() == LoaderResidency::Resident) {
+    // Resident: harvest every layer's [gate,up,down] views once — the
+    // resident bumps are stable, so the tables stay valid for the process
+    // lifetime (and the decode graph stays kernels-only).
+    fp4_view_layers_ = cfg_.num_hidden_layers + (mtp_ ? 1 : 0);
+    DGPP_CUDA_OK(cudaMalloc(&fp4_views_,
+                            static_cast<size_t>(fp4_view_layers_) * 3 * sizeof(MoeExpertView)));
+    std::vector<MoeExpertView> views(static_cast<size_t>(fp4_view_layers_) * 3);
+    for (int l = 0; l < fp4_view_layers_; ++l) {
+      const Qwen35LayerResident& r = loader_.load_layer(l);
+      if (r.mlp.gate_fp4.payload == nullptr) continue;  // BF16/channel layer: slot unused
+      views[static_cast<size_t>(l) * 3 + 0] = MoeExpertView::of(r.mlp.gate_fp4);
+      views[static_cast<size_t>(l) * 3 + 1] = MoeExpertView::of(r.mlp.up_fp4);
+      views[static_cast<size_t>(l) * 3 + 2] = MoeExpertView::of(r.mlp.down_fp4);
+    }
+    DGPP_CUDA_OK(cudaMemcpy(fp4_views_, views.data(), views.size() * sizeof(MoeExpertView),
+                            cudaMemcpyHostToDevice));
+  } else {
+    DGPP_CUDA_OK(cudaMalloc(&fp4_views_, 3 * sizeof(MoeExpertView)));
+  }
   // Per-tensor FP8 prefill recipe (engine.prefill_fp8_per_tensor): Resident stacks
   // requantize every layer's MLP once at boot (dequant to the bridge, then
   // absmax + x/448 quantize). Streaming stacks keep the bridge: their
@@ -413,6 +545,10 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
     DGPP_CUDA_OK(cudaMemcpy(head_fp8_, payload.data(), payload.size(), cudaMemcpyHostToDevice));
     DGPP_CUDA_OK(
         cudaMemcpy(head_scales_, scales.data(), scales.size() * 4, cudaMemcpyHostToDevice));
+    head_fp8_view_.payload = head_fp8_;
+    head_fp8_view_.scales = head_scales_;
+    head_fp8_view_.rows = static_cast<int64_t>(V);
+    head_fp8_view_.cols = static_cast<int64_t>(Hh);
   }
   if (mtp_) {
     DGPP_CUDA_OK(cudaMalloc(&mtp_e_, M * H * 2));
@@ -439,11 +575,28 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
     df_i_ = dfcfg_.local_intermediate(world);
     dfw_ = load_dflash2_weights(dfcfg_, dflash2_dir, stream_, rank, world, dflash2_fp8_);
     {
+      // The draft table must rotate with the target's: the plain table, or
+      // the same YaRN ramp the Full layers take when engine.rope_scaling is
+      // set. The drafter rotates its full 128-dim head, so its band sits at
+      // lanes 33..48 where the target's rotary-64 band sits at 16..24: the
+      // same wavelengths (tests/unit/qwen_rope_scaling_test.cpp). The draft
+      // kernel takes no mscale (the ramp's
+      // attention factor rides the target's rotation only); measured on
+      // 2026-10-15 at short context the drafter's acceptance under the ramp
+      // is level with the plain table's (2.23/3.15/3.48/3.40/4.75 vs
+      // 2.25/3.15/3.60/3.48/4.53 tok/pass over the five classes).
       std::vector<float> host(dfcfg_.head_dim / 2);
-      const double theta = dfcfg_.rope_theta;
-      for (size_t i = 0; i < host.size(); ++i)
-        host[i] = static_cast<float>(
-            std::pow(theta, -static_cast<double>(2 * i) / static_cast<double>(dfcfg_.head_dim)));
+      if (cfg_.rope_scaling.has_value()) {
+        const RopeScaling& rs = *cfg_.rope_scaling;
+        rs.validate("rope_scaling");
+        yarn_rope_inv_freq_host(dfcfg_.head_dim, dfcfg_.rope_theta, rs.correction_max_position(),
+                               rs.factor, rs.beta_fast, rs.beta_slow, host.data());
+      } else {
+        const double theta = dfcfg_.rope_theta;
+        for (size_t i = 0; i < host.size(); ++i)
+          host[i] = static_cast<float>(
+              std::pow(theta, -static_cast<double>(2 * i) / static_cast<double>(dfcfg_.head_dim)));
+      }
       DGPP_CUDA_OK(cudaMalloc(&df_inv_freq_, host.size() * 4));
       DGPP_CUDA_OK(cudaMemcpy(df_inv_freq_, host.data(), host.size() * 4, cudaMemcpyHostToDevice));
     }
@@ -527,7 +680,25 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
     DGPP_CUDA_OK(cudaMemset(gdn_pending_, 0, static_cast<size_t>(max_requests) * 4));
   }
   if (Bf12Companions::enabled()) pack_companions();
+  // The draft head's screen (engine.draft_head): the MTP draft's head and
+  // the DFlash2 block's mask rows read through it; off with a logged reason
+  // when the setting or the head's form says so.
+  if (mtp_ || dflash2_) draft_head_.init(draft_head_matrix(), max_decode_rows_, rank_, stream_, /*quiet=*/true);
 }
+
+HeadMatrix Qwen35Model::draft_head_matrix() const {
+  HeadMatrix m;
+  if (globals_.lm_head_fp8.payload) m.fp8 = &globals_.lm_head_fp8;         // the mixed release's channel-fp8 head
+  else if (head_fp8_enabled_ && head_fp8_ != nullptr) m.fp8 = &head_fp8_view_;  // the boot block-fp8 copy
+  else {
+    m.bf16 = globals_.lm_head;
+    m.bf12 = gemm_.bf12_lookup(globals_.lm_head);
+  }
+  m.n = lm_vocab_count_;
+  m.k = cfg_.hidden_size;
+  return m;
+}
+
 
 // The bf16 matrices a decode pass streams through CublasLtGemm's GEMV
 // lowering, packed to their 12-bit companions (kernels/bf12_companions):
@@ -565,6 +736,9 @@ void Qwen35Model::pack_companions() {
   bf12_.finish(gemm_, 1);
   bf12_s_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   bf12_.log_summary(rank_, bf12_s_);
+  // The draft head's screen from the companion when the bf16 bytes were
+  // never device-resident (the 12-bit-only residency); a no-op once built.
+  if (mtp_ || dflash2_) draft_head_.init(draft_head_matrix(), max_decode_rows_, rank_, stream_);
 }
 
 Qwen35Model::~Qwen35Model() {
@@ -574,6 +748,15 @@ Qwen35Model::~Qwen35Model() {
   cudaFree(mlp_out_);
   cudaFree(gate_tmp_);
   cudaFree(up_tmp_);
+  cudaFree(fp4_segs_);
+  cudaFree(q_codes_);
+  cudaFree(q_scales_);
+  cudaFree(q_gs_);
+  if (native_on_) {
+    cudaFree(gw_.a8);
+    cudaFree(gw_.a8_scales);
+  }
+  cudaFree(fp4_views_);
   cudaFree(mtp_e_);
   cudaFree(mtp_en_);
   cudaFree(mtp_hn_);
@@ -643,6 +826,7 @@ Qwen35Model::~Qwen35Model() {
 }
 
 void Qwen35Model::configure_gemm_rows(int rows, bool decode) {
+  native_prefill_cell_ = native_on_ && !decode;  // the native recipe's rows (engine.prefill_activations)
   qwen_configure_gemm_rows(gemm_, rows, decode);
   gemm_.set_bf12_wide(decode);  // the companions take the decode batch's 5..8-row calls too
   // 17..128 decode rows: the streaming tensor-core form reads a bf16 weight
@@ -809,9 +993,36 @@ void Qwen35Model::requant_mlp_pt(int slot, const Qwen35DenseMlpResident& m, cuda
 // The lm head over `rows` activation rows into F32 logits: the boot
 // blockwise-FP8 head (half the bytes) when enabled, else the BF16 matmul.
 // Boot-fixed addresses, so the branch replays under CUDA graphs.
-void Qwen35Model::head_gemv(const uint16_t* act, float* out, int rows, cudaStream_t stream) {
+void Qwen35Model::head_gemv(const uint16_t* act, float* out, int rows, cudaStream_t stream, bool draft) {
   const int H = cfg_.hidden_size;
   const int64_t V = lm_vocab_count_;
+  // A decode draft's read through the screen (kernels/draft_head.hpp): the
+  // candidate blocks exact, -inf elsewhere; the top-K / pick run unchanged.
+  if (draft && draft_head_.logits(draft_head_matrix(), act, static_cast<size_t>(H), rows, out, static_cast<size_t>(V), stream))
+    return;
+  // The mixed release's native head: FP8-channel, read through the channel
+  // grid's streaming form (the lm_head BF16 pointer is null there). Past
+  // 128 rows it rides the bridge's channel dequant (a wide-head call is a
+  // diagnostic, and the head is 1.3 GB in BF16 — the bridge holds it).
+  if (globals_.lm_head_fp8.payload) {
+    int rs = 0, cs = 0;
+    if (!quant_scale_shifts(globals_.lm_head_fp8, rs, cs))
+      throw std::runtime_error("qwen35 head: the native lm head's scale grid is malformed");
+    if (rows <= 128) {
+      launch_scale_gemm_grid_f32(act, static_cast<size_t>(H), globals_.lm_head_fp8.payload,
+                                 globals_.lm_head_fp8.scales, out, rows, static_cast<int>(V), H,
+                                 stream, static_cast<size_t>(V), rs, cs, /*decode_mma=*/true,
+                                 gw_.ws, gw_.ws_bytes);
+      return;
+    }
+    // Past 128 rows (a diagnostic wide head) the GEMV rows: the bridge is
+    // sized for the largest dense MLP matrix, not the 1.3 GB head.
+    launch_scale_gemm_grid_f32(act, static_cast<size_t>(H), globals_.lm_head_fp8.payload,
+                               globals_.lm_head_fp8.scales, out, rows, static_cast<int>(V), H,
+                               stream, static_cast<size_t>(V), rs, cs, /*decode_mma=*/false,
+                               nullptr, 0);
+    return;
+  }
   // Uniform FP8 dispatch: the weights-once streaming MMA at every decode
   // row count (~5 ms, half the BF16 bytes). Its row chains are bitwise
   // the same at any m (scale_gemm_test), so a request's logits are the
@@ -826,16 +1037,18 @@ void Qwen35Model::head_gemv(const uint16_t* act, float* out, int rows, cudaStrea
                           /*mma_from_rows=*/1);
     return;
   }
+  if (!globals_.lm_head)
+    throw std::runtime_error("qwen35 head: the release binds no BF16 lm head");
   gemm_.matmul(act, globals_.lm_head, out, rows, static_cast<int>(V), H, DType::BF16, GemmOut::F32,
                static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream);
 }
 
 void Qwen35Model::dense_mlp(const uint16_t* x, uint16_t* out, int tokens,
                             const Qwen35DenseMlpResident& m, cudaStream_t stream, int layer,
-                            bool resume) {
+                            bool resume, bool prefill) {
   // I is this rank's MLP slice (the resident gate rows): intermediate_size /
   // world under TP, the whole at world 1.
-  const int64_t H = cfg_.hidden_size, I = m.gate_fp8.rows;
+  const int64_t H = cfg_.hidden_size, I = m.inter ? m.inter : m.gate_fp8.rows;
   // Per-tensor FP8 recipe: one shared activation quantize over the H rows
   // feeds both gate and up; the swiglu output is quantized once for down.
   // All addresses are boot-fixed (slots, scratch, scale cells), so the
@@ -862,10 +1075,207 @@ void Qwen35Model::dense_mlp(const uint16_t* x, uint16_t* out, int tokens,
                             gw_.ws_bytes, stream);
     return;
   }
+  // The checkpoint's NVFP4 activation recipe (engine.prefill_activations =
+  // native, 2026-10-15): every prefill row's MLP input quantized to NVFP4 per
+  // row with the shipped input_global_scale (gate and up share one; down has
+  // its own), the three products on the block-scaled fp4 tensor cores
+  // (kernels/moe_w4a4 over one segment; 4x the bf16 mma rate measured), the
+  // model's SwiGLU between them. Per-row quantization and a fixed K order keep
+  // a row's chain the same at any row count and cut. Decode rows keep W4A16:
+  // bandwidth-bound, their bf16 activations cost nothing.
+  // (The instance's scratch is the switch: it exists only when the model was
+  // built under the key, so a model keeps its recipe whatever the static
+  // flag says later — the test builds both chains in one process.)
+  if (prefill && q_codes_ && m.gate_fp4.payload && m.fp4_input_gs && tokens > 0) {
+    const MoeExpertView* views = nullptr;
+    if (fp4_view_layers_ > 0 && layer >= 0 && layer < fp4_view_layers_) {
+      views = fp4_views_ + static_cast<size_t>(layer) * 3;
+    } else {
+      MoeExpertView slot[3] = {MoeExpertView::of(m.gate_fp4), MoeExpertView::of(m.up_fp4),
+                               MoeExpertView::of(m.down_fp4)};
+      DGPP_CUDA_OK(cudaMemcpyAsync(fp4_views_, slot, sizeof(slot), cudaMemcpyHostToDevice, stream));
+      views = fp4_views_;
+    }
+    const MoeSegment* seg = fp4_segs_ + (tokens - 1);
+    // The TMA-staged dense form when the maps exist (bitwise the grouped kernel).
+    const CUtensorMap* qmH = q_map_for(static_cast<int>(H));
+    const CUtensorMap* qmI = q_map_for(static_cast<int>(I));
+    const bool boxes = qmH && qmI && m.gate_fp4.tma && m.up_fp4.tma && m.down_fp4.tma;
+    const size_t ssH = nvfp4_act_scale_stride(static_cast<int>(H)), ssI = nvfp4_act_scale_stride(static_cast<int>(I));
+    launch_quantize_rows_nvfp4(x, static_cast<size_t>(H), tokens, static_cast<int>(H), q_codes_, q_scales_, q_gs_,
+                               stream, 0.f, m.fp4_input_gs);
+    if (boxes) {
+      launch_dense_w4a4_tma_bf16(*qmH, *m.gate_fp4.tma, q_scales_, ssH, q_gs_, m.gate_fp4.scales, m.gate_fp4.global_scale,
+                                 gate_tmp_, static_cast<size_t>(I), tokens, static_cast<int>(I), static_cast<int>(H), stream);
+      launch_dense_w4a4_tma_bf16(*qmH, *m.up_fp4.tma, q_scales_, ssH, q_gs_, m.up_fp4.scales, m.up_fp4.global_scale,
+                                 up_tmp_, static_cast<size_t>(I), tokens, static_cast<int>(I), static_cast<int>(H), stream);
+    } else {
+      launch_moe_grouped_w4a4_bf16(q_codes_, q_scales_, q_gs_, nullptr, seg, 1, tokens, views, 0, gate_tmp_,
+                                   static_cast<size_t>(I), static_cast<int>(I), static_cast<int>(H), stream);
+      launch_moe_grouped_w4a4_bf16(q_codes_, q_scales_, q_gs_, nullptr, seg, 1, tokens, views, 1, up_tmp_,
+                                   static_cast<size_t>(I), static_cast<int>(I), static_cast<int>(H), stream);
+    }
+    // The SwiGLU fused into the down projection's quantizer (the model's own
+    // rounding; bitwise the swiglu kernel followed by the row quantizer).
+    launch_swiglu_quantize_rows_nvfp4(gate_tmp_, up_tmp_, static_cast<size_t>(I), tokens, static_cast<int>(I), 0.f,
+                                      q_codes_, q_scales_, q_gs_, stream, 0.f, m.fp4_input_gs + 1, /*qwen_rounding=*/true);
+    if (boxes)
+      launch_dense_w4a4_tma_bf16(*qmI, *m.down_fp4.tma, q_scales_, ssI, q_gs_, m.down_fp4.scales, m.down_fp4.global_scale,
+                                 out, static_cast<size_t>(H), tokens, static_cast<int>(H), static_cast<int>(I), stream);
+    else
+      launch_moe_grouped_w4a4_bf16(q_codes_, q_scales_, q_gs_, nullptr, seg, 1, tokens, views, 2, out,
+                                   static_cast<size_t>(H), static_cast<int>(H), static_cast<int>(I), stream);
+    return;
+  }
+  // ---- mixed-release forms (the loader binds one form per layer) -------------
+  if (m.gate_fp4.payload) {
+    // The NVFP4 MLP: the fp4w prefill GEMM from 1024 rows, the production
+    // ldmatrix kernel below (one chain everywhere at < 1024 rows;
+    // tolerance-equal, never bitwise, across the boundary — a different
+    // fp32 summation order). The 256-row tile amortizes weight decoding
+    // over more rows and wins at the 1024-row boundary at TP 1/2/4.
+    // Gate/up share one tile and retain both BF16 roundings before SwiGLU.
+    // Smaller ragged tiles are not consistently faster. Decode keeps the
+    // solo-vs-batch bitwise chain the gates pin.
+    if (tokens <= 0) return;
+    if (tokens >= 1024) {
+      launch_fp4w_gate_up_swiglu_bf16(x, static_cast<size_t>(H), m.gate_fp4, m.up_fp4,
+                                    gate_tmp_, tokens, static_cast<int>(I), H, stream);
+      launch_fp4w_gemm_bf16(gate_tmp_, static_cast<size_t>(I), m.down_fp4, out, tokens, H,
+                            static_cast<int>(I), stream);
+      return;
+    }
+    // Resident: the boot-harvested per-layer table (graph-safe, no copies
+    // in the walk). Streaming: re-stage the slot — the shared layer
+    // allocation is rebuilt per load, so no table survives the walk (the
+    // eager tests never capture, so the copy node is harmless there).
+    const MoeExpertView* views = nullptr;
+    if (fp4_view_layers_ > 0 && layer >= 0 && layer < fp4_view_layers_ &&
+        m.gate_fp4.payload != nullptr) {
+      views = fp4_views_ + static_cast<size_t>(layer) * 3;
+    } else {
+      MoeExpertView slot[3] = {MoeExpertView::of(m.gate_fp4), MoeExpertView::of(m.up_fp4),
+                               MoeExpertView::of(m.down_fp4)};
+      DGPP_CUDA_OK(cudaMemcpyAsync(fp4_views_, slot, sizeof(slot), cudaMemcpyHostToDevice,
+                                   stream));
+      views = fp4_views_;
+    }
+    const MoeSegment* seg = fp4_segs_ + (tokens - 1);
+    launch_dense_mma_fp4_gate_up_bf16(x, static_cast<size_t>(H), seg, views, gate_tmp_, up_tmp_,
+                                      tokens, static_cast<int>(I), H, stream,
+                                      m.gate_fp4.scale_group);
+    qwen35_swiglu_bf16(gate_tmp_, up_tmp_, gate_tmp_, static_cast<int64_t>(tokens) * I, stream);
+    launch_dense_mma_fp4_prod_bf16(gate_tmp_, static_cast<size_t>(I), seg, views,
+                                   /*which=*/2, out, tokens, H, static_cast<int>(I), stream,
+                                   m.down_fp4.scale_group);
+    return;
+  }
+  if (m.gate && m.gate_fp8.payload == nullptr) {
+    // The BF16 draft layer (the mixed release's MTP MLP): the Lt matmuls.
+    gw_.gemm->matmul(x, m.gate, gate_tmp_, tokens, static_cast<int>(I), H, DType::BF16,
+                     GemmOut::BF16, static_cast<size_t>(H), gw_.ws, gw_.ws_bytes, stream);
+    gw_.gemm->matmul(x, m.up, up_tmp_, tokens, static_cast<int>(I), H, DType::BF16, GemmOut::BF16,
+                     static_cast<size_t>(H), gw_.ws, gw_.ws_bytes, stream);
+    qwen35_swiglu_bf16(gate_tmp_, up_tmp_, gate_tmp_, static_cast<int64_t>(tokens) * I, stream);
+    gw_.gemm->matmul(gate_tmp_, m.down, out, tokens, H, static_cast<int>(I), DType::BF16,
+                     GemmOut::BF16, static_cast<size_t>(I), gw_.ws, gw_.ws_bytes, stream);
+    return;
+  }
+  if (m.gate_fp8.payload && m.gate_fp8.scale_block_rows == 1) {
+    // The channel-FP8 MLP (the mixed release's late layers): the streaming
+    // MMA at decode rows (weights once, m-invariant chain), the dequant
+    // bridge — reading the channel grid — above them, as the FP8 release's
+    // block path below does for prefill.
+    int rs = 0, cs = 0, rs2 = 0, cs2 = 0;
+    if (!quant_scale_shifts(m.gate_fp8, rs, cs) || !quant_scale_shifts(m.down_fp8, rs2, cs2))
+      throw std::runtime_error("qwen35 mlp: the channel grid is malformed");
+    // The recipe's channel half (engine.prefill_activations = native): per-token
+    // e4m3 rows, the three products on the e4m3 tensor cores with the scales
+    // in the epilogue, the model's SwiGLU between; every prefill row.
+    if (prefill && native_on_ && gw_.a8 && static_cast<size_t>(tokens) * static_cast<size_t>(I) <= gw_.a8_bytes &&
+        H % 64 == 0 && I % 64 == 0) {
+      const CUtensorMap* amH = gw_.a8_map_for(static_cast<int>(H));
+      const CUtensorMap* amI = gw_.a8_map_for(static_cast<int>(I));
+      const bool boxes = amH && amI && m.gate_fp8.tma && m.up_fp8.tma && m.down_fp8.tma;
+      launch_fp8_quantize_tokens(x, static_cast<size_t>(H), tokens, static_cast<int>(H), gw_.a8, gw_.a8_scales, stream);
+      if (boxes) {
+        launch_fp8_gemm_channel_tma_bf16(*amH, *m.gate_fp8.tma, gw_.a8_scales, m.gate_fp8.scales, gate_tmp_, tokens,
+                                         static_cast<int>(I), static_cast<int>(H), stream, static_cast<size_t>(I));
+        launch_fp8_gemm_channel_tma_bf16(*amH, *m.up_fp8.tma, gw_.a8_scales, m.up_fp8.scales, up_tmp_, tokens,
+                                         static_cast<int>(I), static_cast<int>(H), stream, static_cast<size_t>(I));
+      } else {
+        launch_fp8_gemm_channel_bf16(gw_.a8, gw_.a8_scales, m.gate_fp8.payload, m.gate_fp8.scales, gate_tmp_, tokens,
+                                     static_cast<int>(I), static_cast<int>(H), stream, static_cast<size_t>(I));
+        launch_fp8_gemm_channel_bf16(gw_.a8, gw_.a8_scales, m.up_fp8.payload, m.up_fp8.scales, up_tmp_, tokens,
+                                     static_cast<int>(I), static_cast<int>(H), stream, static_cast<size_t>(I));
+      }
+      // The SwiGLU fused into the down projection's per-token quantizer.
+      launch_fp8_swiglu_quantize_tokens(gate_tmp_, up_tmp_, static_cast<size_t>(I), tokens, static_cast<int>(I), gw_.a8,
+                                        gw_.a8_scales, stream);
+      if (boxes)
+        launch_fp8_gemm_channel_tma_bf16(*amI, *m.down_fp8.tma, gw_.a8_scales, m.down_fp8.scales, out, tokens,
+                                         static_cast<int>(H), static_cast<int>(I), stream, static_cast<size_t>(H));
+      else
+        launch_fp8_gemm_channel_bf16(gw_.a8, gw_.a8_scales, m.down_fp8.payload, m.down_fp8.scales, out, tokens,
+                                     static_cast<int>(H), static_cast<int>(I), stream, static_cast<size_t>(H));
+      return;
+    }
+    if (tokens <= 128) {
+      launch_scale_gemm_grid_bf16(x, static_cast<size_t>(H), m.gate_fp8.payload, m.gate_fp8.scales,
+                                  gate_tmp_, tokens, static_cast<int>(I), H, stream, 0, rs, cs,
+                                  true, gw_.ws, gw_.ws_bytes);
+      launch_scale_gemm_grid_bf16(x, static_cast<size_t>(H), m.up_fp8.payload, m.up_fp8.scales,
+                                  up_tmp_, tokens, static_cast<int>(I), H, stream, 0, rs, cs,
+                                  true, gw_.ws, gw_.ws_bytes);
+      qwen35_swiglu_bf16(gate_tmp_, up_tmp_, gate_tmp_, static_cast<int64_t>(tokens) * I, stream);
+      launch_scale_gemm_grid_bf16(gate_tmp_, static_cast<size_t>(I), m.down_fp8.payload,
+                                  m.down_fp8.scales, out, tokens, H, static_cast<int>(I), stream,
+                                  0, rs2, cs2, true, gw_.ws, gw_.ws_bytes);
+      return;
+    }
+    const size_t up_bytes = static_cast<size_t>(I) * static_cast<size_t>(H) * 2;
+    const size_t down_bytes = static_cast<size_t>(H) * static_cast<size_t>(I) * 2;
+    if (up_bytes <= gw_.dequant_bytes && down_bytes <= gw_.dequant_bytes) {
+      launch_fp8_dequant_blocks(m.gate_fp8.payload, m.gate_fp8.scales, gw_.dequant, I, H, stream,
+                                rs, cs);
+      gw_.gemm->matmul(x, gw_.dequant, gate_tmp_, tokens, static_cast<int>(I), H, DType::BF16,
+                       GemmOut::BF16, static_cast<size_t>(H), gw_.ws, gw_.ws_bytes, stream);
+      launch_fp8_dequant_blocks(m.up_fp8.payload, m.up_fp8.scales, gw_.dequant, I, H, stream, rs,
+                                cs);
+      gw_.gemm->matmul(x, gw_.dequant, up_tmp_, tokens, static_cast<int>(I), H, DType::BF16,
+                       GemmOut::BF16, static_cast<size_t>(H), gw_.ws, gw_.ws_bytes, stream);
+      qwen35_swiglu_bf16(gate_tmp_, up_tmp_, gate_tmp_, static_cast<int64_t>(tokens) * I, stream);
+      launch_fp8_dequant_blocks(m.down_fp8.payload, m.down_fp8.scales, gw_.dequant, H, I, stream,
+                                rs2, cs2);
+      gw_.gemm->matmul(gate_tmp_, gw_.dequant, out, tokens, H, static_cast<int>(I), DType::BF16,
+                       GemmOut::BF16, static_cast<size_t>(I), gw_.ws, gw_.ws_bytes, stream);
+      return;
+    }
+    throw std::runtime_error("qwen35 mlp: the channel prefill needs the dequant bridge");
+  }
   // Prefill-shaped products run the dequant bridge + cuBLASLt BF16 (the same
   // lowering gemm_dense uses for the attention projections): nsys showed the
   // streaming tile kernel owning ~70% of a 2K prefill at ~24 TFLOP/s, while
   // the bridge scratch (178MB) sat unused by this direct caller.
+  // The FP8 release's recipe (engine.prefill_activations = native): the
+  // blockwise product (per-token 1 x 128 e4m3 groups, the 128 x 128 weight
+  // grid, fp32 promotion per group) on every prefill row, the bridge's
+  // SwiGLU between.
+  if (prefill && native_on_ && gw_.a8 && m.gate_fp8.payload && m.gate_fp8.scale_block_rows == 128 &&
+      m.gate_fp8.scale_block_cols == 128 && static_cast<size_t>(tokens) * static_cast<size_t>(I) <= gw_.a8_bytes &&
+      H % 128 == 0 && I % 128 == 0) {
+    launch_fp8_quantize_rows(x, static_cast<size_t>(H), tokens, static_cast<int>(H), gw_.a8, gw_.a8_scales, stream);
+    launch_fp8_gemm_bf16(gw_.a8, gw_.a8_scales, m.gate_fp8.payload, m.gate_fp8.scales, 128, gate_tmp_, tokens,
+                         static_cast<int>(I), static_cast<int>(H), stream, static_cast<size_t>(I));
+    launch_fp8_gemm_bf16(gw_.a8, gw_.a8_scales, m.up_fp8.payload, m.up_fp8.scales, 128, up_tmp_, tokens,
+                         static_cast<int>(I), static_cast<int>(H), stream, static_cast<size_t>(I));
+    qwen35_swiglu_bf16(gate_tmp_, up_tmp_, gate_tmp_, static_cast<int64_t>(tokens) * I, stream);
+    launch_fp8_quantize_rows(gate_tmp_, static_cast<size_t>(I), tokens, static_cast<int>(I), gw_.a8, gw_.a8_scales,
+                             stream);
+    launch_fp8_gemm_bf16(gw_.a8, gw_.a8_scales, m.down_fp8.payload, m.down_fp8.scales, 128, out, tokens,
+                         static_cast<int>(H), static_cast<int>(I), stream, static_cast<size_t>(H));
+    return;
+  }
   if (tokens > 128 && gw_.dequant) {
     const size_t up_bytes = static_cast<size_t>(I) * static_cast<size_t>(H) * 2;
     const size_t down_bytes = static_cast<size_t>(H) * static_cast<size_t>(I) * 2;
@@ -929,14 +1339,82 @@ size_t Qwen35Model::snapshot_state_bytes() const {
   return static_cast<size_t>(num_gdn_) * (rec_elems_ * 4 + conv_elems_ * 2);
 }
 
+// The channel matrices' TMA maps (engine.prefill_activations = native, the
+// mixed release): one map over every channel-FP8 matrix a prefill-shaped
+// product serves (the projections, the late-layer MLPs), the matrix's `tma`
+// pointing at it. The vector is reserved once so the addresses stay put;
+// the loader's resident slot is const to its readers, the map pointer the
+// one field written after the build.
+// The NVFP4 MLP matrices' TMA maps (the dense W4A4 TMA form): one over every
+// gate / up / down of the mixed release's NVFP4 layers, the matrix's `tma`
+// pointing at it; the vector is reserved once so the addresses stay put.
+void Qwen35Model::build_native_fp4_maps() {
+  std::vector<GlmFp4Matrix*> items;
+  const auto take = [&](GlmFp4Matrix& m) {
+    if (m.payload && m.scales && m.global_scale && !m.mxfp4() && dense_w4a4_tma_supported(static_cast<int>(m.cols)))
+      items.push_back(&m);
+  };
+  for (int l = 0; l < cfg_.num_hidden_layers; ++l) {
+    Qwen35LayerResident& r = const_cast<Qwen35LayerResident&>(loader_.load_layer(l));
+    take(r.mlp.gate_fp4);
+    take(r.mlp.up_fp4);
+    take(r.mlp.down_fp4);
+  }
+  native_fp4_tmaps_.clear();
+  native_fp4_tmaps_.reserve(items.size());
+  for (GlmFp4Matrix* m : items) {
+    native_fp4_tmaps_.push_back(nvfp4_code_tma_map(m->payload, m->rows, m->cols, 256));
+    m->tma = &native_fp4_tmaps_.back();
+  }
+  DGPP_LOG_INFO("Qwen35Model: dense W4A4 TMA form: maps over {} NVFP4 matrices", items.size());
+}
+
+void Qwen35Model::build_native_maps() {
+  std::vector<GlmQuantMatrix*> items;
+  const auto take = [&](GlmQuantMatrix& m) {
+    if (m.payload && m.scales && m.scale_block_rows == 1 && fp8_channel_tma_supported(static_cast<int>(m.cols)))
+      items.push_back(&m);
+  };
+  for (int l = 0; l < cfg_.num_hidden_layers; ++l) {
+    Qwen35LayerResident& r = const_cast<Qwen35LayerResident&>(loader_.load_layer(l));
+    if (r.kind == Qwen35LayerKind::Gdn) {
+      take(r.gdn.in_proj_qkv_fp8);
+      take(r.gdn.in_proj_z_fp8);
+      take(r.gdn.out_proj_fp8);
+    } else {
+      take(r.full.q_proj_fp8);
+      take(r.full.k_proj_fp8);
+      take(r.full.v_proj_fp8);
+      take(r.full.o_proj_fp8);
+    }
+    take(r.mlp.gate_fp8);
+    take(r.mlp.up_fp8);
+    take(r.mlp.down_fp8);
+  }
+  native_tmaps_.clear();
+  native_tmaps_.reserve(items.size());
+  for (GlmQuantMatrix* m : items) {
+    native_tmaps_.push_back(fp8_channel_tma_map(m->payload, m->rows, m->cols, 256));
+    m->tma = &native_tmaps_.back();
+  }
+  DGPP_LOG_INFO("Qwen35Model: native channel form: TMA maps over {} matrices", items.size());
+}
+
 MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens, int64_t max_cache_tokens,
                                     int rank, int world, LoaderResidency residency, int max_requests,
-                                    bool mtp, int decode_rows, const std::string& dflash2_dir) {
+                                    bool mtp, int decode_rows, const std::string& dflash2_dir,
+                                    LatentFormat kv_format) {
   if (max_tokens <= 0) throw std::invalid_argument("plan_memory: max_tokens must be positive");
   if (max_requests <= 0 || max_requests > kPickMaxRequests)
     throw std::invalid_argument("plan_memory: max_requests out of range");
   if (mtp && cfg.mtp_layer() < 0)
     throw std::invalid_argument("plan_memory: the config has no draft layer (mtp)");
+  if (cfg.quant_kind == Qwen35QuantKind::Nvfp4Mixed &&
+      (prefill_fp8_per_tensor_ || dense_weights_fp8_))
+    throw std::invalid_argument(
+        "plan_memory: the NVFP4 mixed release serves the checkpoint's own formats; "
+        "engine.prefill_fp8_per_tensor and engine.dense_weights = fp8 are the FP8 "
+        "release's levers (unset them)");
   std::unique_ptr<DFlash2Config> dfcfg;
   if (!dflash2_dir.empty()) {
     if (mtp)
@@ -950,10 +1428,14 @@ MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens,
        kv_block_tokens_static()) *
       kv_block_tokens_static();
   MemoryPlan plan;
-  plan.context_tokens = std::min<int64_t>(cache_tokens, cfg.max_position_embeddings);
+  plan.context_tokens = std::min<int64_t>(cache_tokens, cfg.context_limit());
   const size_t M = static_cast<size_t>(max_tokens);
   const size_t H = static_cast<size_t>(cfg.hidden_size);
   const size_t I = static_cast<size_t>(cfg.intermediate_size);
+  if (mtp || !dflash2_dir.empty())
+    plan.add("draft head screen (2-bit rotated head copy, scratch)",
+             DraftHead::plan_bytes(Qwen35LocalGeometry::from_config(cfg, rank, world, head).lm_vocab_count,
+                                   cfg.hidden_size, std::max({kDecodeRows, decode_rows, max_requests})));
   if (residency == LoaderResidency::Resident) {
     plan.add("model weights (resident)",
              Qwen35LayerStream::resident_bytes(cfg, rank, world, head, mtp));
@@ -976,6 +1458,8 @@ MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens,
   shape.block_tokens = kv_block_tokens_static();
   shape.max_requests = max_requests;
   shape.token_slots = cache_tokens;
+  shape.fp8 = kv_format_is_fp8(kv_format, cfg, mtp);
+  shape.fp8_attention = fp8_attention_;
   if (dfcfg) {
     shape.draft_layers = dfcfg->num_hidden_layers;
     shape.draft_kv_heads = dfcfg->local_kv_heads(world);
@@ -983,13 +1467,24 @@ MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens,
   }
   plan.add("kv pool", Qwen35KvPool::cache_bytes(shape));
   // Layer scratch at max_tokens rows (Full + GDN worst case).
-  const QwenTextConfig qc = qwen_text_adapter(cfg);
+  const QwenTextConfig qc = qwen35_text_adapter(cfg);
   const int lh = cfg.num_attention_heads, lkv = cfg.num_key_value_heads;
   const int lk = cfg.gdn_key_heads, lv = cfg.gdn_value_heads;
   plan.add("layer scratch", std::max(QwenFullAttnLayer::scratch_bytes(qc, lh, lkv, max_tokens),
                                     QwenGdnLayer::scratch_bytes(qc, lk, lv, max_tokens)));
   // Activations: resid/x/attn/mlp [M,H] + gate/up tmps [M,I].
   plan.add("activations", 4 * M * H * 2 + 2 * M * I * 2);
+  // The NVFP4 dense path's tables (production ldmatrix kernel): one
+  // {0, m, 0} segment per row count plus the view tables (per-layer on
+  // resident mixed-release stacks, one 3-entry staging slot elsewhere —
+  // the ctor's split).
+  plan.add(
+      "nvfp4 dense segment/view tables",
+      M * sizeof(MoeSegment) +
+          (residency == LoaderResidency::Resident && cfg.quant_kind == Qwen35QuantKind::Nvfp4Mixed
+               ? (static_cast<size_t>(cfg.num_hidden_layers) + (mtp ? 1 : 0)) * 3 *
+                     sizeof(MoeExpertView)
+               : 3 * sizeof(MoeExpertView)));
   // Dense FP8 prefill bridge: the largest dense matrix dequantized to BF16.
   plan.add("dense fp8 prefill bridge (largest dense matrix in BF16)",
            qwen35_dense_bridge_bytes(cfg));
@@ -1022,10 +1517,19 @@ MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens,
     plan.add("per-tensor fp8 full attention (q/k/v/o E4M3 + scales)",
              full_slots * (QW * Hp + 2 * KW * Hp + Hp * FH) + full_slots * 4 * 4);
   }
+  // The native activation recipe's NVFP4 scratch (engine.prefill_activations
+  // = native, the mixed release): one quantized row set at max_tokens rows.
+  if (native_activations_ && cfg.quant_kind == Qwen35QuantKind::Nvfp4Mixed)
+    plan.add("native activation scratch (NVFP4 rows at max_tokens)",
+             M * I / 2 + M * nvfp4_act_scale_stride(static_cast<int>(I)) + M * sizeof(float));
+  if (native_activations_)
+    plan.add("native activation scratch (e4m3 rows at max_tokens)", M * I + M * (I / 128 + 1) * sizeof(float));
   // Blockwise-FP8 lm head (engine.dense_weights = fp8, Resident only): half
   // the bytes per decode row.
   if (dense_weights_fp8_ && residency == LoaderResidency::Resident) {
-    const size_t Vv = static_cast<size_t>(cfg.vocab_size), Hh = static_cast<size_t>(cfg.hidden_size);
+    const size_t Vv = static_cast<size_t>(
+        Qwen35LocalGeometry::from_config(cfg, rank, world, head).lm_vocab_count);
+    const size_t Hh = static_cast<size_t>(cfg.hidden_size);
     plan.add("blockwise fp8 lm head (E4M3 + scales)", Vv * Hh + ((Vv + 127) / 128) * ((Hh + 127) / 128) * 4);
   }
   if (mtp) {
@@ -1049,7 +1553,9 @@ MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens,
       packed += Bf12Companions::planned_bytes(dfcfg->selector_rank, dH);
     }
     if (mtp) packed += Bf12Companions::planned_bytes(H, 2 * H);
-    if (!(dense_weights_fp8_ && residency == LoaderResidency::Resident))
+    const bool head_bf16 = cfg.quant_kind == Qwen35QuantKind::Fp8Block ||
+                           cfg.tensor_quant("lm_head") == Qwen35TensorQuant::Bf16;
+    if (head_bf16 && !(dense_weights_fp8_ && residency == LoaderResidency::Resident))
       packed += Bf12Companions::planned_bytes(cfg.vocab_size, H);  // the head serves in bf16
     plan.add("bf16 decode packing (12-bit companions; the bf16 bytes stay)", packed);
   }
@@ -1237,7 +1743,7 @@ void Qwen35Model::graph_prepare() {
 // in place (h_); decode rows gather theirs from the slots' windows by
 // position. head_rows == 0 fills the draft K/V only (prefill cache fill).
 void Qwen35Model::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T,
-                               bool decode_row, bool capture, int head_rows, int batch_requests) {
+                               bool decode_row, bool capture, int head_rows, int batch_requests, int hidden_row) {
   configure_gemm_rows(T, decode_row);
   if (!mtp_) throw std::logic_error("mtp_run_rows: MTP is not enabled");
   if (T <= 0 || T > max_tokens_) throw std::invalid_argument("mtp_run_rows: rows");
@@ -1256,7 +1762,7 @@ void Qwen35Model::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos
   // ---- the input fusion --------------------------------------------------
   // The reference (vLLM Qwen3_5MultiTokenPredictor): e = pre_fc_norm_embedding
   // (embed(tok)), h = pre_fc_norm_hidden(main hidden), cat([e, h]) -> fc.
-  const uint16_t* hin = h_;
+  const uint16_t* hin = prefill_hidden_span(h_, H, hidden_row, T);
   if (decode_row) {
     gather_draft_hidden(d_req, d_pos, mtp_hin_, T);
     hin = mtp_hin_;
@@ -1302,7 +1808,7 @@ void Qwen35Model::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos
   // Fused residual-add + post norm (bitwise the pair): one launch.
   qwen_add_rmsnorm_bf16(mtp_r_, ao, r.post_norm, x_, T, H, eps, stream_);
   uint16_t* mo = stage(mlp_out_, H);
-  dense_mlp(x_, mo, T, r.mlp, stream_, cfg_.num_hidden_layers, first_pos > 0 && !decode_row);
+  dense_mlp(x_, mo, T, r.mlp, stream_, cfg_.num_hidden_layers, first_pos > 0 && !decode_row, !decode_row);
   fold(mo, H);
   add_inplace_bf16(mtp_r_, mo, static_cast<size_t>(T) * H, stream_);
   if (head_rows == 0) return;  // prefill rows fill the cache; no head
@@ -1313,7 +1819,7 @@ void Qwen35Model::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos
   qwen_rmsnorm_bf16(mtp_r_, globals_.mtp_norm, mtp_h_, T, H, eps, stream_);
   const uint16_t* head_in = mtp_h_ + static_cast<size_t>(T - head_rows) * H;
   const int64_t V = lm_vocab_count_;
-  head_gemv(head_in, logits_, head_rows, stream_);
+  head_gemv(head_in, logits_, head_rows, stream_, /*draft=*/decode_row);
   if (decode_row && (!capture || decode_tail_mirrors_) && head_rows <= max_decode_rows_)
     DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_logits_, logits_,
                                  static_cast<size_t>(head_rows) * V * sizeof(float),
@@ -1387,6 +1893,8 @@ Qwen35Model::Outputs Qwen35Model::mtp_forward(const std::vector<int64_t>& token_
 
 Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
   const int T = run.T, req = run.req;
+  const bool mixed = run.decode_spans > 0;
+  const int decode_rows = run.decode_rows();
   if (run.capture && loader_.residency() != LoaderResidency::Resident)
     throw std::logic_error("run_rows: a capture needs a resident stack");
   // The DFlash2 target verify captures (the batched verify graph); only
@@ -1430,10 +1938,10 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
   // the recurrent state replays (gdn_replay_) and a prefill walk reads it
   // as it stands: the pending rows are materialized first (a no-op kernel
   // when none are pending).
-  const bool snapshots = run.decode && run.snapshots;
+  const bool snapshots = (run.decode || mixed) && run.snapshots;
   if (gdn_replay_ && !run.decode) {
     if (run.num_spans > 0) {
-      for (int sp = 0; sp < run.num_spans; ++sp) materialize_gdn(run.span_reqs[sp]);
+      for (int sp = run.decode_spans; sp < run.num_spans; ++sp) materialize_gdn(run.span_reqs[sp]);
     } else {
       materialize_gdn(req);
     }
@@ -1474,8 +1982,48 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
                            rec_snap, conv_snap, replay);
       } else if (run.num_spans > 0) {
         int64_t row0 = 0;
-        for (int sp = 0; sp < run.num_spans; ++sp) {
+        if (mixed) {
+          configure_gemm_rows(decode_rows, true);
+          KdaRequestRows requests;
+          requests.request_ids = d_req;
+          requests.positions = d_pos;
+          requests.spans = d_spans;
+          requests.num_requests = run.decode_spans;
+          if (gdn_replay_) {
+            replay = gdn_replay_view(0, gdn_ord, true);
+            for (int sp = 0; sp < run.decode_spans; ++sp)
+              gdn_replay_rows_used_ = std::max(gdn_replay_rows_used_, run.span_lens[sp]);
+          }
+          gdn_->enqueue_rows(x_, gdn_rec(0, gdn_ord), static_cast<int64_t>(num_gdn_) * rec_elems_,
+                              gdn_conv(0, gdn_ord), static_cast<int64_t>(num_gdn_) * conv_elems_,
+                              ao, decode_rows, requests, stream_, rec_snap, conv_snap, replay);
+          configure_gemm_rows(T, false);
+          row0 = decode_rows;
+        }
+        for (int sp = run.decode_spans; sp < run.num_spans; ++sp) {
           const int len = run.span_lens[sp], sreq = run.span_reqs[sp];
+          // Large readers share the projection and weight conversion;
+          // each span still scans only its own recurrent and conv state.
+          // Small tails retain their original projection recipe, and a
+          // per-tensor scale cannot be shared across readers.
+          if (!pt_enabled_ && len > 128 && sp + 1 < run.num_spans && run.span_lens[sp + 1] > 128) {
+            std::vector<QwenGdnLayer::Span> spans;
+            int count = 0;
+            do {
+              QwenGdnLayer::Span span;
+              span.rows = run.span_lens[sp];
+              span.recurrent = gdn_rec(run.span_reqs[sp], gdn_ord);
+              span.conv = gdn_conv(run.span_reqs[sp], gdn_ord);
+              count += span.rows;
+              spans.push_back(span);
+              ++sp;
+            } while (sp < run.num_spans && run.span_lens[sp] > 128);
+            --sp;
+            gdn_->enqueue_spans(x_ + static_cast<size_t>(row0) * H, ao + static_cast<size_t>(row0) * H,
+                                 count, spans, stream_);
+            row0 += count;
+            continue;
+          }
           gdn_->enqueue(x_ + static_cast<size_t>(row0) * H, gdn_rec(sreq, gdn_ord),
                         gdn_conv(sreq, gdn_ord), ao + static_cast<size_t>(row0) * H, len, stream_,
                         KdaStateSnapshots{}, KdaConvSnapshots{}, KdaReplay{},
@@ -1526,8 +2074,38 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
       qrows.num_requests = num_requests;
       if (run.num_spans > 0) {
         int64_t row0 = 0;
-        for (int sp = 0; sp < run.num_spans; ++sp) {
+        if (mixed) {
+          configure_gemm_rows(decode_rows, true);
+          auto prefix = qrows;
+          prefix.decode = true;
+          prefix.num_requests = run.decode_spans;
+          full_->enqueue(x_, decode_rows, prefix, cache, ao, stream_);
+          configure_gemm_rows(T, false);
+          row0 = decode_rows;
+        }
+        for (int sp = run.decode_spans; sp < run.num_spans; ++sp) {
           const int len = run.span_lens[sp];
+          if (!pt_enabled_ && len > 128 && sp + 1 < run.num_spans && run.span_lens[sp + 1] > 128) {
+            std::vector<QwenFullAttnLayer::Span> spans;
+            int count = 0;
+            do {
+              QwenFullAttnLayer::Span span;
+              span.rows = run.span_lens[sp];
+              span.map = qrows;
+              span.map.req_ids = d_req + row0 + count;
+              span.map.pos = d_pos + row0 + count;
+              span.map.request = run.span_reqs[sp];
+              span.map.pos0 = run.span_pos0[sp];
+              count += span.rows;
+              spans.push_back(span);
+              ++sp;
+            } while (sp < run.num_spans && run.span_lens[sp] > 128);
+            --sp;
+            full_->enqueue_spans(x_ + static_cast<size_t>(row0) * H, count, spans.front().map, spans,
+                                   cache, ao + static_cast<size_t>(row0) * H, stream_);
+            row0 += count;
+            continue;
+          }
           QwenQsaRows srows = qrows;
           srows.req_ids = d_req + row0;
           srows.pos = d_pos + row0;
@@ -1546,20 +2124,25 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
     fold(ao, H);
     // Fused residual-add + post norm (bitwise the pair): one launch.
     qwen_add_rmsnorm_bf16(resid_, ao, r.post_norm, x_, T, H, eps, stream_);
-    // A resume chunk's short tail takes the per-tensor MLP like the
-    // attention resume above; group spans start at pos0 (resume false).
-    // Decode/verify walks (run.decode) keep their exact GEMV dispatch.
-    bool mlp_resume = false;
-    if (!run.decode) {
-      if (run.num_spans > 0) {
-        for (int sp = 0; sp < run.num_spans; ++sp)
-          mlp_resume = mlp_resume || run.span_pos0[sp] > 0;
-      } else {
-        mlp_resume = run.pos0 > 0;
-      }
-    }
     uint16_t* mo = stage(mlp_out_, H);
-    dense_mlp(x_, mo, T, r.mlp, stream_, layer, mlp_resume);
+    if (run.num_spans > 0) {
+      // Retain the decoder's projection chain. Small reader tails also
+      // retain their streaming-MMA recipe when a large neighbor uses the
+      // dequant bridge. Per-tensor scales remain request-owned.
+      const int prefill_from = r.mlp.gate_fp4.payload ? 1024 : 129;
+      run.for_each_kernel_group([&](int count, int next) {
+        const bool prefill = count >= prefill_from;
+        return !pt_enabled_ && (next >= prefill_from) == prefill &&
+               (prefill || count + next < prefill_from);
+      }, [&](int row0, int count, bool decode, int first) {
+        configure_gemm_rows(count, decode);
+        dense_mlp(x_ + static_cast<size_t>(row0) * H, mo + static_cast<size_t>(row0) * H,
+                  count, r.mlp, stream_, layer, !decode && run.span_pos0[first] > 0, !decode);
+      });
+      configure_gemm_rows(T, run.decode);
+    } else {
+      dense_mlp(x_, mo, T, r.mlp, stream_, layer, !run.decode && run.pos0 > 0, !run.decode);
+    }
     if (run.decode) prefetch_attention_side(layer + 1);  // the next layer's input side (or the head)
     fold(mo, H);
     add_inplace_bf16(resid_, mo, static_cast<size_t>(T) * H, stream_);
@@ -1577,25 +2160,41 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
     // into fp32 instead of one, tolerance-identical).
     if (dflash2_ && df_tap_[layer] >= 0) {
       const uint16_t* fc_t = dfw_.fc + static_cast<size_t>(df_tap_[layer]) * H * H;
-      gemm_.matmul(resid_, fc_t, df_t32_, T, H, H, DType::BF16, GemmOut::F32,
+      int row0 = 0;
+      if (mixed) {
+        configure_gemm_rows(decode_rows, true);
+        gemm_.matmul(resid_, fc_t, df_t32_, decode_rows, H, H, DType::BF16, GemmOut::F32,
+                     static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
+        row0 = decode_rows;
+        configure_gemm_rows(T - row0, false);
+      }
+      gemm_.matmul(resid_ + static_cast<size_t>(row0) * H, fc_t,
+                   df_t32_ + static_cast<size_t>(row0) * H, T - row0, H, H, DType::BF16, GemmOut::F32,
                    static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
+      configure_gemm_rows(T, run.decode);
       dflash2_acc_f32(df_acc_, df_t32_, static_cast<int64_t>(T) * H,
                       df_tap_[layer] == 0 ? 0 : 1, stream_);
     }
   }
   // Final norm + lm head.
   qwen_rmsnorm_bf16(resid_, globals_.final_norm, h_, T, H, eps, stream_);
-  const int first = (run.decode || run.all_rows || run.num_spans > 0) ? 0 : T - 1;
-  const int rows = T - first;
-  head_gemv(h_ + static_cast<size_t>(first) * H, logits_ + static_cast<size_t>(first) * lm_vocab_count_,
-            rows, stream_);
+  const bool packed_logits = packed_prefill_logits(run);
+  if (packed_logits) {
+    project_head_rows(run, [&](int input, int output, int count) {
+      configure_gemm_rows(count, mixed && input == 0);
+      head_gemv(h_ + static_cast<size_t>(input) * H,
+                 logits_ + static_cast<size_t>(output) * lm_vocab_count_, count, stream_);
+    });
+    configure_gemm_rows(T, run.decode);
+  } else {
+    const int first = (run.decode || run.all_rows || run.num_spans > 0) ? 0 : T - 1;
+    head_gemv(h_ + static_cast<size_t>(first) * H, logits_ + static_cast<size_t>(first) * lm_vocab_count_,
+               T - first, stream_);
+  }
   // The draft block's input: the last rows' final hidden into the slots'
   // windows by position (the last window rows of a prefill chunk, every
   // decode row — distinct slots within one launch).
-  if (mtp_) {
-    const int n = run.num_spans > 0 ? T : std::min(T, max_decode_rows_);
-    store_draft_hidden(h_ + static_cast<size_t>(T - n) * H, d_req + (T - n), d_pos + (T - n), n);
-  }
+  store_run_draft_hidden(run, in, h_);
   // Every run's rows become the drafter's context K/V at their positions
   // (rejected verify rows included: they land past the committed end and
   // the next draft's position mask hides them — no rollback). Inside a
@@ -1606,7 +2205,7 @@ Qwen35Model::Outputs Qwen35Model::run_rows(const RowRun& run) {
   // exact but starved the drafter).
   if (dflash2_) dflash2_store_features(T, d_req, d_pos);
   if (run.decode) prefetch_.join(stream_);  // every forked prefetch back on the main stream
-  out = finish_run(run, std::move(out));
+  out = finish_run(run, std::move(out), packed_logits);
   return out;
 }
 
@@ -1638,9 +2237,23 @@ void Qwen35Model::prefetch_fp8(const GlmQuantMatrix& q) {
 void Qwen35Model::prefetch_ffn_side(const Qwen35LayerResident& r) {
   if (!prefetch_.enabled() || world_ < 2) return;
   const size_t H = static_cast<size_t>(cfg_.hidden_size);
-  prefetch_.open_window(stream_, prefetch_window_bytes_, prefetch_.boundary_rate());
   const Qwen35DenseMlpResident& m = r.mlp;
-  if (m.gate_fp8.payload) {
+  const bool small_fp4 =
+      m.gate_fp4.payload &&
+      dense_fp4_decode_shape(walk_rows_, m.gate_fp4.rows, m.gate_fp4.cols, m.gate_fp4.scale_group);
+  // The paired small-row kernel benefits from a warm gate. Reading into
+  // up as well competes with the live attention weights and the gate's
+  // first reads. Keep the existing window for the other matrix forms.
+  const size_t budget = small_fp4 ? std::min(prefetch_window_bytes_,
+                                             m.gate_fp4.payload_bytes() + m.gate_fp4.scale_bytes())
+                                  : prefetch_window_bytes_;
+  prefetch_.open_window(stream_, budget, prefetch_.boundary_rate());
+  if (m.gate_fp4.payload) {
+    if (small_fp4) {
+      prefetch_add(m.gate_fp4.payload, m.gate_fp4.payload_bytes());
+      prefetch_add(m.gate_fp4.scales, m.gate_fp4.scale_bytes());
+    }
+  } else if (m.gate_fp8.payload) {
     prefetch_fp8(m.gate_fp8);
     prefetch_fp8(m.up_fp8);
     prefetch_fp8(m.down_fp8);
@@ -1891,7 +2504,7 @@ void Qwen35Model::df_block_select(int slots, const int* reqs, bool capture) {
   // One head stream for every slot's rows (the mask rows of slot k are rows
   // k*QR + 1 .. k*QR + D; the anchor rows' logits and top-K go unread).
   const int R = slots * QR;
-  head_gemv(df_h_, df_logits_, R, stream_);
+  head_gemv(df_h_, df_logits_, R, stream_, /*draft=*/true);
   dflash2_topk_f32(df_logits_, df_ids_, df_sc_, V, R, topk, stream_, df_topk_ws_, df_topk_ws_bytes_);
   if (world_ > 1) {
     const int rows = R;

@@ -51,7 +51,8 @@ using QwenHeadSharding = LoaderHeadSharding;
 using QwenReplicatedDigest = ReplicatedDigest;
 
 struct QwenGrResident {
-  const uint16_t* hc_norm = nullptr;  // BF16 [W]
+  const uint16_t* hc_norm = nullptr;  // BF16 [W] (null when the F32 form below is set)
+  const float* hc_norm_f32 = nullptr; // F32 [W]: the QAD export's trained norms (config norms_f32)
   const uint16_t* down = nullptr;     // BF16 [r, W]
   const uint16_t* up = nullptr;       // BF16 [W, r]
   const uint16_t* inject = nullptr;   // BF16 [n, W]
@@ -66,7 +67,10 @@ struct QwenGdnResident {
   const uint16_t* in_proj_z = nullptr;    // BF16 [lv*dv, hidden]
   const uint16_t* in_proj_a = nullptr;    // BF16 [lv, hidden]
   const uint16_t* in_proj_b = nullptr;    // BF16 [lv, hidden]
-  GlmQuantMatrix in_proj_qkv_fp8, in_proj_z_fp8, out_proj_fp8;  // dense_weights fp8 (a, b stay BF16)
+  // engine.dense_weights = fp8 (a, b stay BF16), the AutoRound hybrid's
+  // shipped block FP8, or the QAD export's MXFP8 (a 1 x 32 e8m0 grid
+  // widened to F32 at load; a and b, 0.12 MB each, decoded to BF16 exactly).
+  GlmQuantMatrix in_proj_qkv_fp8, in_proj_z_fp8, out_proj_fp8;
   const float* a_log = nullptr;           // F32 [lv]
   const float* dt_bias = nullptr;         // F32 [lv]
   const uint16_t* norm = nullptr;         // BF16 [dv]
@@ -102,6 +106,10 @@ struct QwenFullAttnResident {
   const uint16_t* q_norm = nullptr;  // BF16 [d]
   const uint16_t* k_norm = nullptr;  // BF16 [d]
   GlmQuantMatrix q_proj_fp8, k_proj_fp8, v_proj_fp8, o_proj_fp8;  // dense_weights fp8
+  // The mixed release's FP8 kv_cache_scheme scalars widened to F32 [2] in
+  // the layer image (k_scale, v_scale): the fp8 K/V storage form's scales
+  // (engine.kv_dtype = fp8). Null when the release ships none.
+  const float* kv_scales = nullptr;
   int local_heads = 0;      // query heads on this rank
   int head_begin = 0;       // first global query head
   int local_kv_heads = 0;   // kv heads on this rank
@@ -124,6 +132,10 @@ struct QwenMoeResident {
   // gate/up and over their down; 0 = not read): SGLang's flashinfer_cutlass form.
   float act_scale_w13 = 0.0f, act_scale_w2 = 0.0f;
   float* act_scales = nullptr;  // [2] F32 in the layer image: max gate/up, down input_scale
+  // The QAD export's draft experts (W4A16_NVFP4): no activation scale
+  // shipped, the activations stay bf16 on that layer whatever the W4A4
+  // policy says (act_scales null).
+  bool experts_weight_only = false;
   bool nvfp4() const { return !experts_fp4.empty(); }
   int64_t local_inter = 0;                // I/W
   int64_t local_shared_inter = 0;         // S/W
@@ -137,11 +149,14 @@ struct QwenPleResident {
   const uint16_t* key_proj = nullptr;    // BF16 [W, E/world] (packed columns)
   const uint16_t* value_proj = nullptr;  // BF16 [hidden, E/world] (packed columns)
   GlmQuantMatrix key_proj_fp8, value_proj_fp8;  // dense_weights fp8
-  const uint16_t* norm_key = nullptr;    // BF16 [W]
+  const uint16_t* norm_key = nullptr;    // BF16 [W] (null when the F32 forms are set)
   const uint16_t* norm_query = nullptr;  // BF16 [W]
   const uint16_t* norm_conv = nullptr;   // BF16 [W]
+  const float* norm_key_f32 = nullptr;   // F32 [W]: the QAD export's trained norms (config norms_f32)
+  const float* norm_query_f32 = nullptr;
+  const float* norm_conv_f32 = nullptr;
   const uint16_t* conv = nullptr;        // BF16 [W, k]
-  float table_scale = 0.f;               // the table's per-tensor scale (host copy)
+  float table_scale = 0.f;               // the table's per-tensor scale (host copy; the NVFP4 global)
   int hash_head_begin = 0;               // this rank's first hash head
   int hash_heads = 0;                    // 16/W
   int64_t row_begin = 0;                 // the rank's global row range in the table
@@ -199,20 +214,31 @@ class QwenNgramTableMmap {
     uint64_t data_begin;   // the part's first byte in that file
     int64_t rows;          // rows in this part
   };
-  // `parts` in shard order (part s holds rows [s * capacity, +rows)).
-  QwenNgramTableMmap(std::vector<Part> parts, int64_t capacity, int head_dim);
+  // `parts` in shard order (part s holds rows [s * capacity, +rows)), each
+  // row `row_bytes` wide (the FP8 table: head_dim e4m3 codes). The NVFP4
+  // table (config ngram_table_nvfp4) maps a second tensor per shard —
+  // `scale_parts`, the row's e4m3 block scales, `scale_row_bytes` wide
+  // (head_dim / 16) — beside its codes (head_dim / 2 bytes a row).
+  QwenNgramTableMmap(std::vector<Part> parts, int64_t capacity, int row_bytes,
+                     std::vector<Part> scale_parts = {}, int scale_row_bytes = 0);
   ~QwenNgramTableMmap();
   QwenNgramTableMmap(const QwenNgramTableMmap&) = delete;
   QwenNgramTableMmap& operator=(const QwenNgramTableMmap&) = delete;
-  // The mapped bytes of global row `row`.
+  // The mapped bytes of global row `row` (its codes), and its scale row
+  // (the NVFP4 table only; null otherwise).
   const uint8_t* row(int64_t row) const;
-  // dst[(t * heads_local + hl) * head_dim ..] = the row of ids[t * heads +
+  const uint8_t* scale_row(int64_t row) const;
+  // dst[(t * heads_local + hl) * row_bytes ..] = the row of ids[t * heads +
   // head_begin + hl], for t < n: the staging the device converts. Faults
-  // the pages in parallel (a thread per 64 rows past the first 64).
+  // the pages in parallel (a thread per 64 rows past the first 64). An
+  // NVFP4 table copies the scale rows to dst_scales alongside
+  // (scale_row_bytes each; required then, ignored otherwise).
   void gather(const int32_t* ids, int n, int heads, int head_begin, int heads_local,
-              uint8_t* dst) const;
+              uint8_t* dst, uint8_t* dst_scales = nullptr) const;
   int64_t capacity() const { return capacity_; }
-  int head_dim() const { return head_dim_; }
+  int row_bytes() const { return row_bytes_; }
+  int scale_row_bytes() const { return scale_row_bytes_; }
+  bool has_scales() const { return scale_row_bytes_ > 0; }
   size_t mapped_bytes() const { return mapped_bytes_; }
 
  private:
@@ -221,16 +247,30 @@ class QwenNgramTableMmap {
     uint8_t* base = nullptr;
     size_t len = 0;
   };
-  std::vector<Part> parts_;
-  std::vector<const uint8_t*> part_base_;  // parts_[s]'s first row
+  // One tensor's parts mapped: the codes, and (NVFP4) the scales.
+  struct Plane {
+    std::vector<Part> parts;
+    std::vector<const uint8_t*> part_base;  // parts[s]'s first row
+    int row_bytes = 0;
+  };
+  void map_plane(Plane& plane, std::unordered_map<std::string, size_t>& by_path, const char* what);
+  const uint8_t* plane_row(const Plane& plane, int64_t row) const;
+  Plane codes_, scales_;
   std::vector<Mapping> maps_;
   int64_t capacity_ = 0;
-  int head_dim_ = 0;
+  int row_bytes_ = 0;
+  int scale_row_bytes_ = 0;
   size_t mapped_bytes_ = 0;
 };
 
 struct QwenNgramTableResident {
-  const uint8_t* rows_e4m3 = nullptr;  // [rows, head_dim] (null under the mmap'ed table)
+  const uint8_t* rows_e4m3 = nullptr;  // [rows, head_dim] (null under the mmap'ed table, and for the NVFP4 table)
+  // The NVFP4 table (config ngram_table_nvfp4): e2m1 codes [rows,
+  // head_dim/2] and their e4m3 scales [rows, head_dim/16]; `scale` is the
+  // per-tensor F32 global. Null under the mmap'ed table.
+  const uint8_t* rows_fp4 = nullptr;
+  const uint8_t* rows_fp4_scales = nullptr;
+  bool fp4 = false;
   const QwenNgramTableMmap* mmap = nullptr;  // the mmap'ed table, else null
   int64_t row_begin = 0;
   int64_t rows = 0;

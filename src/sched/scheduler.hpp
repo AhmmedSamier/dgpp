@@ -1,9 +1,9 @@
 #pragma once
 // Deterministic admission, decoding and cancellation over a session engine.
 // Every rank applies the same policy to journaled requests and cancellations.
-// Decisions must not depend on clocks, thread arrival order or unordered
-// container iteration: engine operations include collectives whose order
-// must match across ranks.
+// Clock feedback is converted into a token limit by the leader and journaled.
+// Peers never make local timing decisions: engine operations include
+// collectives whose order must match across ranks.
 //
 // Each tick admits fitting queued requests against the tick's prefill
 // budget and performs prefill work, then runs one decode step. Admission chooses the oldest request that fits,
@@ -24,11 +24,13 @@
 // See DESIGN §11 and docs/operations.md for the journal and resource policy.
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "sched/prefix_cache.hpp"
+#include "sched/prefill_latency.hpp"
 #include "common/prefill_progress.hpp"
 #include "common/image_input.hpp"
 #include "sample/sampler.hpp"
@@ -65,8 +67,16 @@ class SchedulerEngine {
   // DSA pool meters (a no-DSA model reports an unbounded pool).
   virtual int64_t pool_blocks_total() const = 0;
   virtual int64_t pool_blocks_in_use() const = 0;
-  // Block count covering `tokens` tokens — the reserve arithmetic.
+  // Raw block geometry, without engine-specific reservation headroom.
   virtual int64_t blocks_for_tokens(int64_t tokens) const = 0;
+  // Physical block footprint of reserve(req, tokens) and begin_prefill's
+  // reservation, before prefix sharing and snapshot copies. Engines that
+  // reserve extra rows (e.g. speculative verify/draft tails) must include
+  // those rows and their context clamp here. Pure, rank-deterministic, and
+  // valid before opening a slot; ordinary engines retain the raw quote.
+  virtual int64_t reservation_blocks(int64_t tokens) const {
+    return blocks_for_tokens(tokens);
+  }
 
   // Opens slot `req` (fresh state), prefills `prompt`, picks the first
   // generated token. Returns a token id in [0, vocab).
@@ -83,6 +93,13 @@ class SchedulerEngine {
   // token budget passed to begin; it returns a first token only on completion.
   virtual int64_t prefill_chunk_alignment() const { return 0; }
   virtual int64_t prefill_chunk_limit() const { return 0; }
+  // The prefill attention grid's wave in query rows (2026-10-15): the rows
+  // that fill every SM with one CTA exactly, 0 when the engine states none.
+  // The adaptive controller rounds its quantum up to whole waves so a
+  // chunk's last wave never leaves a third of the SMs idle (the 27B's tile
+  // kernel at 1024 rows ran 5.33 waves on 48 SMs: 47 against 52 TFLOP/s at
+  // whole waves).
+  virtual int64_t prefill_wave_rows() const { return 0; }
   virtual bool supports_image_chunked_prefill() const { return false; }
   // Several requests' cold prompts in one forward (the scheduler admits a
   // group per tick when the engine allows it): each prompt within
@@ -138,6 +155,12 @@ class SchedulerEngine {
     // (r+1)-th candidate, miss_rank[kMissRanks] those outside the list.
     static constexpr int kMissRanks = 16;
     uint64_t miss_rank[kMissRanks + 1] = {};
+    // Context-lookup drafting (engine.lookup_draft): steps whose drafts a
+    // prompt-history match replaced (engine-wide since construction), of
+    // which agree_fused took a below-strong match on device-pick agreement.
+    uint64_t lookup_fused = 0;
+    uint64_t lookup_agree_fused = 0;
+    uint64_t lookup_sampled_fused = 0;
   };
   // Last launched decode graph, retained while idle; counters since startup.
   struct DecodeBatchStats {
@@ -237,14 +260,26 @@ class SchedulerEngine {
   // commit past `position` (= its committed count + 1, pool-aligned) without
   // stopping there; if it commits two tokens, the engine attempts to save the state
   // after the step's first row — the state at `position` — into arena slot
-  // `slot` before returning from that step (check prefix_position afterwards).
-  // A one-token step lands ON the
-  // position and the scheduler's rolling snapshot follows at the next tick.
+  // `slot` before returning from that step. Capture is decided before sampled
+  // fallback: the final token count does NOT say whether it happened.
   // The arm holds until the slot's next step (or its close).
+  enum class PrefixHopStatus { kNone, kNotTaken, kStored, kNoBlock };
+  struct PrefixHopResult {
+    PrefixHopStatus status = PrefixHopStatus::kNone;
+    int slot = -1;
+    int64_t position = -1;  // the armed position, not an older stored position
+  };
   virtual void prefix_arm_hop(int req, int slot, int64_t position) {
     (void)req;
     (void)slot;
     (void)position;
+  }
+  // Consume the last armed step's outcome. kNotTaken leaves the arena
+  // untouched; kNoBlock releases any previous snapshot and leaves it empty.
+  // Arming and closing clear previous outcomes; kNone means no result.
+  virtual PrefixHopResult take_prefix_hop_result(int req) {
+    (void)req;
+    return {};
   }
   // The position actually stored in an arena slot, or -1 if it is empty.
   // A multi-token step may skip its armed hop when the cache pool is full;
@@ -296,6 +331,26 @@ class SchedulerEngine {
   virtual PrefillProgress advance_prefill(int, int64_t = 0) {
     throw std::logic_error("SchedulerEngine: resumable prefill is unavailable");
   }
+  struct MixedProgress {
+    PrefillProgress prefill;
+    std::vector<std::vector<int32_t>> decoded;
+  };
+  // Engine capability, available before any request is admitted. Per-batch
+  // eligibility (slots, row capacity, images) is checked by can_mix_prefill.
+  virtual bool supports_mixed_prefill() const { return false; }
+  virtual bool can_mix_prefill(int, const std::vector<int>&) const { return false; }
+  virtual MixedProgress advance_prefill_and_step(int, int64_t, const std::vector<int>&) {
+    throw std::logic_error("SchedulerEngine: mixed prefill/decode is unavailable");
+  }
+  struct MixedGroupProgress {
+    std::vector<PrefillProgress> prefills;
+    std::vector<std::vector<int32_t>> decoded;
+  };
+  virtual bool can_mix_prefill_group(const std::vector<int>&, const std::vector<int>&) const { return false; }
+  virtual MixedGroupProgress advance_prefill_group_and_step(
+      const std::vector<int>&, const std::vector<int64_t>&, const std::vector<int>&) {
+    throw std::logic_error("SchedulerEngine: mixed group prefill/decode is unavailable");
+  }
   // Several in-flight prefills' next chunks, request i within budgets[i] tokens.
   // An engine with prefill_group_advance() runs them as ONE physical walk
   // (the weights stream once for all of them) — the scheduler then reads
@@ -303,6 +358,7 @@ class SchedulerEngine {
   // as many per tick as the budget has aligned shares, so prompts that
   // arrive together are read in together. The default advances one by one.
   virtual bool prefill_group_advance() const { return false; }
+  virtual bool prefill_budget_per_reader() const { return true; }
   virtual std::vector<PrefillProgress> advance_prefill_group(const std::vector<int>& reqs,
                                                              const std::vector<int64_t>& budgets) {
     std::vector<PrefillProgress> out;
@@ -401,8 +457,9 @@ class SchedulerObserver;
 // reserves blocks_for(prompt + min(max_steps, window)) at admission and
 // grows the reservation at tick top, BEFORE any engine op, whenever the
 // next step would write past it — by `window_tokens` at a time, or by the
-// minimum when the pool is short — and when even the minimum does not fit,
-// SHEDS the youngest active request (retired Done / kPoolExhausted, the
+// minimum when the pool is short. Unattached prefix entries are evicted LRU
+// to fit that minimum; if it still does not fit, SHEDS the youngest active
+// request (retired Done / kPoolExhausted, the
 // service's finish_reason "length") until it does; a request with no
 // younger peer sheds itself. Every decision is a pure function of the
 // scheduler's state, so the journal keeps it identical on every rank. The
@@ -416,6 +473,11 @@ struct AdmissionPolicy {
   int window_tokens = 256;  // grow: the initial headroom and the growth step
   int prefill_budget_tokens = 0;  // 0: monolithic; otherwise total prefill tokens per tick
   int prefill_idle_budget_tokens = 0;  // 0: use the same budget; otherwise larger chunks without active decode
+  // Serving supplies default latency targets; zero retains fixed budgeting.
+  int decode_gap_target_ms = 0;
+  int first_token_target_ms = 0;
+  PrefillLatencyTuning prefill_latency;
+  bool prefill_budget_automatic = false;  // busy is a starting point, idle the adaptive ceiling
   // The prefix cache's entry policy (2026-09-28), rank-identical like the
   // rest of the record. No snapshot below prefix_min_tokens: a 45-token
   // probe's entries must not push a 180K conversation out of the arena
@@ -426,9 +488,17 @@ struct AdmissionPolicy {
   // prompt, or the turn after a client compacted its history, attaches.
   int prefix_min_tokens = 0;
   bool prefix_head_snapshots = false;
+  // Resolved admission policy. Serving resolves automatic admission from the
+  // engine's execution capabilities; old journal records retain false.
+  // Engines without a shared walk can pay for additional decode passes.
+  bool prefill_early_admission = false;
   bool operator==(const AdmissionPolicy& o) const {
     return mode == o.mode && window_tokens == o.window_tokens && prefill_budget_tokens == o.prefill_budget_tokens &&
            prefill_idle_budget_tokens == o.prefill_idle_budget_tokens &&
+           decode_gap_target_ms == o.decode_gap_target_ms && first_token_target_ms == o.first_token_target_ms &&
+           prefill_latency == o.prefill_latency &&
+           prefill_budget_automatic == o.prefill_budget_automatic &&
+           prefill_early_admission == o.prefill_early_admission &&
            prefix_min_tokens == o.prefix_min_tokens && prefix_head_snapshots == o.prefix_head_snapshots;
   }
   bool operator!=(const AdmissionPolicy& o) const { return !(*this == o); }
@@ -478,6 +548,14 @@ class Scheduler {
     int64_t prompt_tokens_computed = 0;
     int64_t decode_steps = 0;
     int64_t decode_rows = 0;
+    // Budgeted advances only: groups count once, tokens sum their readers.
+    int64_t prefill_chunk_steps = 0;
+    int64_t prefill_chunk_budget_tokens = 0;
+    int64_t prefill_chunk_available_tokens = 0;  // min(budget, remaining prompt), before structural cuts
+    int64_t prefill_chunk_computed_tokens = 0;
+    int64_t prefill_adaptive_limit_tokens = 0;  // last leader-selected ceiling; 0 = fixed policy
+    int64_t mixed_steps = 0;  // subset of decode_steps that also advanced prefill
+    double mixed_ms = 0.0;    // included in BOTH prefill_ms and step_ms; subtract once when summing
     double prefill_ms = 0.0;
     double prefill_request_ms = 0.0;  // summed per-request waits (a group credits each member)
     double step_ms = 0.0;
@@ -503,6 +581,8 @@ class Scheduler {
     int64_t prefix_duplicates = 0;
     int64_t prefix_skipped = 0;
     int64_t prefix_skipped_no_block = 0;
+    int64_t prefix_skipped_hop_fallback = 0;
+    int64_t prefix_skipped_hop_mismatch = 0;
     int64_t prefix_skipped_image_bytes = 0;
     int64_t prefix_image_bytes = 0;
     int64_t prefix_blocks_pinned = 0;
@@ -520,6 +600,16 @@ class Scheduler {
             int queue_limit = 0, AdmissionPolicy policy = AdmissionPolicy{},
             int prefix_slots = -1);
   const AdmissionPolicy& admission_policy() const { return policy_; }
+  bool adaptive_prefill() const {
+    return policy_.prefill_budget_tokens > 0 &&
+           (policy_.decode_gap_target_ms > 0 || policy_.first_token_target_ms > 0);
+  }
+  // Leader only. Call after applying arrivals/cancellations, then journal the
+  // result and pass it to tick on every rank. Standalone tick selects locally.
+  std::optional<int64_t> next_prefill_budget() const;
+  // The position the next prefill chunk starts at: the deepest reader's
+  // (its attached prefix plus the tokens computed so far); 0 with none.
+  int64_t prefill_context() const;
   // The prefix cache as configured: its slot count (0 = off) and the
   // running digest of every decision it made (the journal's cross-rank
   // check — identical streams, identical digests).
@@ -556,7 +646,7 @@ class Scheduler {
   // false when nothing is pending AFTER the tick — the final retirement may
   // ride on the false. Throws on admission deadlock exactly like
   // run_to_completion().
-  bool tick();
+  bool tick(std::optional<int64_t> prefill_budget = std::nullopt);
 
   // Any queued or active request remains.
   bool has_pending() const;
@@ -604,6 +694,9 @@ class Scheduler {
   struct Request {
     SchedulerRequest spec;
     State state = State::kQueued;
+    uint64_t prefill_epoch = 0;
+    uint64_t prefill_tick = 0;  // readers begun together may finish as one group
+    uint64_t decode_epoch = 0;
     int slot = -1;
     int steps_done = 0;
     // Tokens of the current step's batch still unapplied when a token is
@@ -678,7 +771,7 @@ class Scheduler {
   // releases the old copy before it takes the new one, so only a first
   // partial copy does.
   bool snapshot_needs_block(int64_t position, int64_t previous) const;
-  // Frees pool blocks for a snapshot by evicting LRU unattached entries
+  // Frees pool blocks for growth or a snapshot by evicting LRU unattached entries
   // until `need` blocks are free; false when nothing evictable remains.
   bool ensure_free_blocks(int64_t need, const std::string& id);
   // The blocks an admission must find FREE: the reservation less the full
@@ -705,8 +798,8 @@ class Scheduler {
   int64_t reserve_blocks(const Request& r) const;
   // Grow-on-demand's tick-top pass (after the cancel sweep, before any
   // admission or step): every active request whose next step would write
-  // past its reservation grows it, shedding the youngest when the pool
-  // cannot cover even the minimum.
+  // past its reservation grows it, evicting LRU unattached cache entries
+  // before shedding the youngest if the pool cannot cover even the minimum.
   void grow_reservations();
   int youngest_active_after(int arrival) const;
   int free_slot() const;
@@ -746,6 +839,7 @@ class Scheduler {
   // retains one monolithic admission event per tick.
   bool admit_fitting(int64_t& tick_cap, int64_t budget, bool first_prefill);
   void step_batch(const std::vector<int>& arrivals);
+  void apply_step_batch(const std::vector<int>& arrivals, const std::vector<std::vector<int32_t>>& batches);
   // Appends one token and applies terminal conditions in their canonical
   // order. Returns true when the request retired. `logprobs` (optional)
   // rides to the observer with it.
@@ -764,7 +858,7 @@ class Scheduler {
   // The retire's release: everything but the tombstone (set_keep_retired).
   void release_retired(Request& r, Result& res);
   // tick()'s body, the quantum; tick() compacts after it.
-  bool quantum();
+  bool quantum(std::optional<int64_t> prefill_budget);
   // Erases the retired records when they are not kept, at the end of every
   // tick: the live requests keep their order, and the slot map, the
   // decode/prefill round-robin cursors and the deferral log follow their
@@ -779,6 +873,7 @@ class Scheduler {
   std::vector<Result> results_;     // parallel to requests_
   int cursor_ = -1;                // last-stepped arrival (round-robin)
   int prefill_cursor_ = -1;        // last-advanced prefill (round-robin when the budget shrinks)
+  std::vector<int> mixed_stepped_; // arrivals already decoded in this quantum's shared walk
   int deferred_logged_ = -1;       // arrival of the current deferral log
   SchedulerObserver* observer_ = nullptr;
   bool keep_retired_ = true;       // the batch contract (set_keep_retired)
@@ -787,6 +882,9 @@ class Scheduler {
   int decode_batch_capacity_ = 1;  // fixed engine pass width
   int64_t tokens_generated_ = 0;   // cumulative on_token counter
   AdmissionPolicy policy_;
+  PrefillLatencyController prefill_latency_;
+  int64_t prefill_pass_budget_tokens_ = 0;  // before final-tail allocation trims
+  int64_t prefill_adaptive_limit_tokens_ = 0;
   int64_t grows_ = 0;              // growth events (meters)
   int64_t pool_sheds_ = 0;         // requests shed at exhaustion (meters)
   int64_t prompts_prefilled_ = 0;  // the throughput line's counters (meters)
@@ -794,12 +892,19 @@ class Scheduler {
   int64_t prompt_tokens_computed_ = 0;
   int64_t decode_steps_ = 0;
   int64_t decode_rows_ = 0;
+  int64_t prefill_chunk_steps_ = 0;
+  int64_t prefill_chunk_budget_tokens_ = 0;
+  int64_t prefill_chunk_available_tokens_ = 0;
+  int64_t prefill_chunk_computed_tokens_ = 0;
+  int64_t mixed_steps_ = 0;
+  double mixed_ms_ = 0.0;
   double prefill_ms_ = 0.0;
   double prefill_request_ms_ = 0.0;
   double step_ms_ = 0.0;
   PrefixCache cache_;              // the prefix cache's index (M7)
   SchedulerEngine::PrefixInfo prefix_info_;
   uint64_t ticks_ = 0;             // the LRU clock
+  uint64_t execution_epoch_ = 0;   // replicated ordering of prefill/decode starts
 };
 
 // Streaming lifecycle events for the service (SSE). Fired inline on the
@@ -845,9 +950,14 @@ class SchedulerObserver {
   // an entry at `position`, arena `slot`), "snapshot" (an entry taken at a
   // prefill cut), "rolling" (a live request's rolling snapshot), "close"
   // (a rolling snapshot became an entry at retire), "evict" (an entry
-  // freed; `id` is the request whose admission needed the slot or blocks)
-  // or "drop" (a rolling slot released without becoming an entry). Rank-
-  // identical state: the op stream records every one.
+  // freed; `id` is the request whose admission, growth or snapshot needed
+  // the slot or blocks),
+  // "drop" (a rolling slot released without becoming an entry), "hop"
+  // (a snapshot captured inside an MTP step), "hop_fallback" (capture was
+  // skipped before sampled fallback passed the hop; `position` is the old
+  // snapshot or -1), or "hop_mismatch" (inconsistent snapshot dropped;
+  // `position` is what the arena reported). Rank-identical state: the op
+  // stream records every one.
   virtual void on_prefix(const std::string& id, const char* op,
                          int64_t position, int slot) {
     (void)id;

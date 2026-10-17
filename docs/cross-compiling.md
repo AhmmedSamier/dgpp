@@ -71,5 +71,4 @@ python3 tests/python/spark_cross_test.py
 They also run as `spark_cross_test` under CTest's `host` and `python` labels.
 Compilation and staging do not validate target execution. Follow
 [Contributing](../CONTRIBUTING.md) for freshly built native tests, and reserve
-idle hardware for GPU/RDMA checks. See the [cross-build validation record](../benchmarks/results/2026-09-19-spark-cross-build.md)
-for the tested toolchain and outstanding hardware checks.
+idle hardware for GPU/RDMA checks.

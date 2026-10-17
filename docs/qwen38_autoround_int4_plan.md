@@ -21,7 +21,7 @@ full build passes 71 of 71 across the packed cores, the shared MoE layer,
 full GLM-5.3's loader and every Qwen suite; S5 begun: the real checkpoint
 binds and loads in streaming mode beside the production server, and eight
 of its fp8 dense matrices are bitwise our own at-load encode of NVIDIA's
-BF16 originals (benchmarks/results/2026-09-28-qwen-autoround-int4/). The
+BF16 originals (the 2026-09-28-qwen-autoround-int4 measurements). The
 resident load, the serve gates and S6 wait for an idle Spark. One fact
 the real checkpoint corrected: its draft layer keeps q/k/v/o and the
 shared expert in BF16 (only the 48 backbone layers' side layers are fp8).
@@ -383,7 +383,7 @@ weight readers.
   (GPTQ-layout tensors with I32 / F16 dtypes) and the GPTQ + F32-fp8 dequant
   in `tools/qwen_reference_dump.py`.
 - `deploy/cluster_qwen-3.8-flash-next_autoround-int4_w1.example.json`.
-- `docs/benchmarks.md` rows and a `benchmarks/results/<date>-qwen-autoround-int4/`
+- `docs/benchmarks.md` rows and local, untracked dated run artifacts
   record including the verbatim `bench_qwen35.sh` output.
 
 ## 5. Implementation stages and acceptance gates
@@ -589,7 +589,7 @@ draft layer's bytes were understated (0.05 GB per step: its q/k/v/o ship in
 BF16, 100 MB, so a draft step is 0.17 GB besides its head). The floor of a
 depth-3 pass on this checkpoint at world 1 is **48 ms**. The measured column
 is the 2026-09-29 nsys profile of the served recipe (one 400-token request,
-196 steps; `benchmarks/results/2026-09-28-qwen-autoround-int4/profile_depth3/`;
+196 steps; the 2026-09-28-qwen-autoround-int4 / profile_depth3 measurements;
 step 100 = 62.3 ms under the tracer, the unprofiled pass 56–60 ms).
 
 | operation | bytes / pass | floor ms | measured (nsys) | gap | fix |
@@ -641,7 +641,7 @@ and matches them at today's pass (55.4 / 59.1 / 63.1 / – / 59.6).
 
 Three fabric rounds on the depth-3 recipe, every one bitwise the baseline
 transcripts and 58/58 on the Qwen, pick and KDA suites
-(`benchmarks/results/2026-09-28-qwen-autoround-int4/README.md`, S6):
+(the 2026-09-28-qwen-autoround-int4 measurements, S6):
 
 1. the recurrent state's checkpoint-and-replay form (§7 item 3a), the
    chunked greedy argmax, the gate activation folded into the up GEMV;
@@ -736,8 +736,7 @@ rows read all three planes and are the row layout's chain bit for bit; the
 prefill tile kernel reads the planes with a 128-code k-step and applies the
 scale per 64 codes, so it is the 64-code kernel's chain bit for bit.
 
-The study behind the split (`benchmarks/results/2026-09-28-qwen-autoround-int4/
-serve_round8/head_dump.bin`, 5,571 head inputs dumped from the live server
+The study behind the split (the 2026-09-28-qwen-autoround-int4 / serve_round8 / head_dump.bin measurements, 5,571 head inputs dumped from the live server
 with `DGPP_QWEN_HEAD_DUMP`, 300 studied): the true top-1 leads the
 runner-up by 3.7 logits at the median (p10 0.32); the 6-bit bound is ±3.7
 at the top, candidates 4 / 840 / 40k (median / mean / p99 of 248,320);
@@ -955,7 +954,7 @@ per chunk against our 56 ms per 4,096-token chunk. Their lead is the
 expert GEMM's efficiency (a bitwise problem on our side) and two
 accuracy trades (fp8 activations on the dense stack, bf16 partials).
 
-Round 19 (`benchmarks/results/2026-09-28-qwen-autoround-int4/README.md`,
+Round 19 (the 2026-09-28-qwen-autoround-int4 measurements,
 sessions X–Z3): SHIPPED the chunk-ahead n-gram staging — the next chunk's
 rows hashed from its host ids and gathered on a second channel the gather
 thread serves while this chunk's layers run, issued after the PLE layer
@@ -981,7 +980,8 @@ The decision (2026-09-30): the levers that beat the bitwise chain by
 changing the prefill's arithmetic exist in dgpp, off by default, on only
 through a deployment's cluster config — `engine.prefill_bf16_partials`,
 `engine.prefill_fold_scales`, `engine.prefill_fp8_gemm` (docs/operations.md,
-the README key table); none is bitwise the default chain, so a deployment
+the [configuration reference](configuration.md#prefill-computation-and-precision));
+none is bitwise the default chain, so a deployment
 that turns one on serves transcripts that can differ from the default's,
 and the benchmarks list a template's default-chain and levers-on numbers
 as separate rows (the AutoRound template turns on the two that pay, below).

@@ -92,9 +92,11 @@ std::vector<std::vector<std::pair<int, float>>> topk(const std::vector<float>& l
 }
 
 Qwen35Model make_model(const Qwen35TextConfig& cfg, const std::string& dir, int T, bool mtp,
-                       dgpp::LoaderResidency residency = dgpp::LoaderResidency::Streaming, int max_requests = 1) {
+                       dgpp::LoaderResidency residency = dgpp::LoaderResidency::Streaming, int max_requests = 1,
+                       dgpp::LatentFormat kv_format = dgpp::LatentFormat::kBf16) {
   return Qwen35Model(cfg, dir, /*max_tokens=*/std::max(256, T), /*max_cache_tokens=*/1024, residency,
-                     /*boundary=*/nullptr, /*rank=*/0, /*world=*/1, max_requests, /*decode_rows=*/8, mtp);
+                     /*boundary=*/nullptr, /*rank=*/0, /*world=*/1, max_requests, /*decode_rows=*/8, mtp, "",
+                     kv_format);
 }
 
 // ---- the reference dump ------------------------------------------------------
@@ -180,6 +182,24 @@ Stats compare_bf16(const uint16_t* got, const uint16_t* want, size_t n, int soft
 
 int run_smoke(const std::string& dir) {
   const Qwen35TextConfig cfg = Qwen35TextConfig::from_json_file((fs::path(dir) / "config.json").string());
+  if (cfg.quant_kind == dgpp::Qwen35QuantKind::Fp8Block) {
+    const bool saved = Qwen35Model::dense_weights_fp8();
+    Qwen35Model::set_dense_weights_fp8(true);
+    size_t whole_head = 0;
+    for (int world : {1, 2, 4}) {
+      size_t sum = 0;
+      for (int rank = 0; rank < world; ++rank) {
+        const auto plan = Qwen35Model::plan_memory(cfg, 72, 256, rank, world,
+                                                   dgpp::LoaderResidency::Resident, 1, false);
+        for (const auto& item : plan.items)
+          if (item.name == "blockwise fp8 lm head (E4M3 + scales)") sum += item.device;
+      }
+      if (world == 1) whole_head = sum;
+      require(sum > 0 && sum == whole_head,
+              "FP8 head memory is partitioned across ranks, not replicated");
+    }
+    Qwen35Model::set_dense_weights_fp8(saved);
+  }
   const int T = 72;  // past two 32-token attention tiles
   const std::vector<int64_t> tokens = smoke_tokens(cfg, T);
   Qwen35Model model = make_model(cfg, dir, T, false);
@@ -360,14 +380,30 @@ int run_dump_parity(const std::string& dir, const std::string& dump_path, const 
 // verified as 8 rows and as 1..7 rows, the first rows' logits and hidden
 // bits compared bitwise, on the tiny fixture with the production recipe's
 // fp8 head.
-int run_rows_invariance(const std::string& dir, bool fp8_head) {
+int run_rows_invariance(const std::string& dir, bool fp8_head, bool kv_fp8, bool attn_fp8) {
   const Qwen35TextConfig cfg = Qwen35TextConfig::from_json_file((fs::path(dir) / "config.json").string());
+  // The fp8 K/V storage form (engine.kv_dtype = fp8): the mixed fixture
+  // ships k_scale / v_scale of 1, so the planes hold the e4m3 rounding of
+  // K and V; the invariance below holds in that form as in bf16, and the
+  // eight-row verify's logits must stay close to the bf16 cache's.
+  // --attn-fp8: the same planes with the prefill attention on the fp8
+  // tensor cores (engine.prefill_attention = fp8: Q and P in e4m3); the
+  // same gates. The fixture's one Full layer is its last, so the verify's
+  // logits see the mode only through the prefill rows' own outputs.
+  kv_fp8 = kv_fp8 || attn_fp8;
+  if (kv_fp8) require(cfg.quant_kind == dgpp::Qwen35QuantKind::Nvfp4Mixed, "rows: --kv-fp8 needs the mixed fixture");
+  Qwen35Model::set_fp8_attention(attn_fp8);
+  const dgpp::LatentFormat kv_format = kv_fp8 ? dgpp::LatentFormat::kFp8 : dgpp::LatentFormat::kBf16;
+  // The mixed release's head is already fp8-channel resident: the FP8
+  // release's requantizing lever is refused there (the model's ctor).
+  if (cfg.quant_kind == dgpp::Qwen35QuantKind::Nvfp4Mixed)
+    fp8_head = false;
   Qwen35Model::set_dense_weights_fp8(fp8_head);
   Qwen35Model::set_session_capture_layers(true);
   // Resident: the fp8 head requantizes only on a resident stack (the
   // serving configuration); the streaming stack's bf16 head runs on
   // cuBLASLt, whose kernels change with the row count.
-  Qwen35Model model = make_model(cfg, dir, 64, false, dgpp::LoaderResidency::Resident);
+  Qwen35Model model = make_model(cfg, dir, 64, false, dgpp::LoaderResidency::Resident, 1, kv_format);
   const std::vector<int64_t> prompt = smoke_tokens(cfg, 37);
   std::vector<int64_t> block = smoke_tokens(cfg, 16);
   block.erase(block.begin(), block.begin() + 8);  // eight tokens unlike the prompt's head
@@ -382,6 +418,45 @@ int run_rows_invariance(const std::string& dir, bool fp8_head) {
   const Qwen35Model::Outputs again = run(8);
   require(again.logits == full.logits && again.final_hidden_bits == full.final_hidden_bits,
           "rows: the eight-row verify is not deterministic across calls");
+  if (kv_fp8) {
+    if (attn_fp8) {
+      // The guard first: the fp8 arithmetic has no e4m3 codes to compute
+      // over on a bf16 pool, so a bf16-pool model under it is refused.
+      bool refused = false;
+      try {
+        Qwen35Model bad = make_model(cfg, dir, 64, false, dgpp::LoaderResidency::Resident);
+        (void)bad;
+      } catch (const std::invalid_argument&) {
+        refused = true;
+      }
+      require(refused, "rows: prefill_attention fp8 on a bf16 pool is refused");
+      Qwen35Model::set_fp8_attention(false);  // the bf16-pool reference below
+    }
+    Qwen35Model ref = make_model(cfg, dir, 64, false, dgpp::LoaderResidency::Resident);
+    ref.session_close(0);
+    (void)ref.session_prefill(0, prompt);
+    const Qwen35Model::Outputs bf = ref.session_verify(0, block);
+    require(bf.logits.size() == full.logits.size(), "rows: the bf16 cache's logits");
+    double num = 0, den = 0, maxd = 0;
+    int top_agree = 0;
+    for (int r = 0; r < 8; ++r) {
+      int ta = 0, tb = 0;
+      for (int c = 0; c < V; ++c) {
+        const float a = full.logits[static_cast<size_t>(r) * V + c], b = bf.logits[static_cast<size_t>(r) * V + c];
+        require(std::isfinite(a), "rows: the fp8 cache's logits are finite");
+        num += static_cast<double>(a - b) * (a - b);
+        den += static_cast<double>(b) * b;
+        maxd = std::max(maxd, static_cast<double>(std::fabs(a - b)));
+        if (a > full.logits[static_cast<size_t>(r) * V + ta]) ta = c;
+        if (b > bf.logits[static_cast<size_t>(r) * V + tb]) tb = c;
+      }
+      top_agree += ta == tb;
+    }
+    const double rel = std::sqrt(num / std::max(den, 1e-30));
+    std::printf("[ .. ] fp8 K/V vs bf16 K/V over the eight-row verify: rel rms %.4g, max |d| %.4g, top-1 agree %d/8\n",
+                rel, maxd, top_agree);
+    require(rel < 0.25, "rows: the fp8 cache's logits stay close to the bf16 cache's");
+  }
   std::vector<int> failures;
   for (const int T : {1, 2, 3, 4, 5, 6, 7}) {
     const Qwen35Model::Outputs got = run(T);
@@ -516,15 +591,20 @@ int run_group_invariance(const std::string& dir) {
 }
 
 int main(int argc, char** argv) {
-  std::string fixture, smoke, rows, group, checkpoint, dump, states;
-  bool relaxed = false, bf16_head = false;
+  std::string fixture, fixture_mixed, smoke, rows, group, checkpoint, dump, states, resident_mtp;
+  bool relaxed = false, bf16_head = false, kv_fp8 = false, attn_fp8 = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--write-fixture" && i + 1 < argc) fixture = argv[++i];
+    else if (a == "--write-fixture-mixed" && i + 1 < argc) fixture_mixed = argv[++i];
     else if (a == "--smoke" && i + 1 < argc) smoke = argv[++i];
     else if (a == "--rows-invariance" && i + 1 < argc) rows = argv[++i];
     else if (a == "--group-invariance" && i + 1 < argc) group = argv[++i];
+    else if (a == "--resident-mtp" && i + 1 < argc)
+      resident_mtp = argv[++i];
     else if (a == "--bf16-head") bf16_head = true;
+    else if (a == "--kv-fp8") kv_fp8 = true;
+    else if (a == "--attn-fp8") attn_fp8 = true;
     else if (a == "--checkpoint-dir" && i + 1 < argc) checkpoint = argv[++i];
     else if (a == "--dump-file" && i + 1 < argc) dump = argv[++i];
     else if (a == "--engine-states" && i + 1 < argc) states = argv[++i];
@@ -537,12 +617,35 @@ int main(int argc, char** argv) {
       std::printf("[ OK ] wrote the fixture to %s\n", fixture.c_str());
       return 0;
     }
+    if (!fixture_mixed.empty()) {
+      qwen35fx::write_fixture(fixture_mixed, /*mixed=*/true);
+      std::printf("[ OK ] wrote the mixed fixture to %s\n", fixture_mixed.c_str());
+      return 0;
+    }
+    if (!resident_mtp.empty()) {
+      const auto cfg = Qwen35TextConfig::from_json_file(resident_mtp + "/config.json");
+      require(cfg.mtp_layer() >= 0, "resident fixture must contain an MTP layer");
+      for (bool mtp : {false, true}) {
+        auto model = make_model(cfg, resident_mtp, 256, mtp, dgpp::LoaderResidency::Resident);
+        for (int layer = 0; layer < cfg.num_hidden_layers; ++layer)
+          require(
+              model.resident_layer_bytes(layer) == dgpp::Qwen35LayerStream::layer_bytes(cfg, layer),
+              "resident main layer allocation agrees with the memory plan");
+        const size_t expected =
+            mtp ? dgpp::Qwen35LayerStream::layer_bytes(cfg, cfg.mtp_layer()) : 0;
+        require(model.resident_layer_bytes(cfg.mtp_layer()) == expected,
+                "disabled MTP must not materialize a resident draft layer");
+      }
+      std::printf("[ OK ] mixed resident MTP allocation follows the serving option\n");
+      return 0;
+    }
     if (!smoke.empty()) return run_smoke(smoke);
-    if (!rows.empty()) return run_rows_invariance(rows, !bf16_head);
+    if (!rows.empty()) return run_rows_invariance(rows, !bf16_head, kv_fp8, attn_fp8);
     if (!group.empty()) return run_group_invariance(group);
     if (!checkpoint.empty() && !dump.empty()) return run_dump_parity(checkpoint, dump, states, relaxed);
     std::fprintf(stderr,
-                 "usage: --write-fixture DIR | --smoke DIR | --rows-invariance DIR | --checkpoint-dir DIR --dump-file FILE "
+                 "usage: --write-fixture DIR | --write-fixture-mixed DIR | --smoke DIR | --rows-invariance DIR | "
+                 "--checkpoint-dir DIR --dump-file FILE "
                  "[--engine-states FILE] [--relaxed]\n");
     return 2;
   } catch (const std::exception& e) {

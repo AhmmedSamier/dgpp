@@ -1,5 +1,116 @@
 # Tests
 
+`serve_preparation_*` checks the fixed preparation pool at configured engine
+concurrencies of 1, 2, 4 and 16, completion ordering, responsive health/SSE
+traffic during blocked preparation, count/payload bounds, disconnects, worker
+errors and shutdown. The service suite runs in both stream-flush modes.
+`image_preparation_concurrent_formats_and_errors` covers simultaneous PNG,
+JPEG and WebP decoding; `glm_vision_frontend_test` also shares the real loaded
+template/tokenizer across text/image preparation and output decoding.
+Set `DGPP_TP_REAL_MODEL` to select another cached GLM-5.3 checkpoint for that
+frontend test; its default is `unsloth/GLM-5.3-Flash-FP8`.
+
+`serve_admission_bench_test` checks the HTTP/SSE admission benchmark's transport,
+native-overlap assertions, published-counter drain barrier and KV cleanup gate.
+It also checks optional controller metrics sampling against request IDs, sampler
+failure reporting and thread cleanup when a request fails.
+The [benchmark guide](benchmarks.md#reproduce) describes serving measurements. The scheduler
+suite covers short-reader admission, aligned-share donation, global chunk-grid
+tails and failure cleanup; `qwen_engine_test` exercises admission and donation
+with a real two-rank engine, including MTP3 and row-independent transcript parity.
+Host policy checks cover automatic admission and explicit overrides.
+`scheduler_growOnDemand_*` covers cache reclamation before shedding, minimum-only
+growth, LRU order, attached-entry protection and youngest-first shedding after
+true exhaustion. Its shared-block fake tracks physical block identities: an
+eviction can free zero blocks until the last snapshot reference is released.
+Repeated runs check engine-operation and prefix-digest agreement. The physical
+reservation tests also cover speculative trailing rows and context clamping.
+`qwen_decode_test` also checks a donated
+share followed by full work budgets across automatic model-grid boundaries,
+with a retained structural snapshot and exact target/draft state against the
+same explicit chunk cuts.
+
+`shared_prefill_test` checks the common continuation and mixed-row contract
+across GLM, GLM4, GLM-DSA, MiMo, Qwen35, DeepSeek V4 and V4.1. It covers eager
+and graph adapters, MTP on/off, compact batches and output storage, cancellation
+and slot reuse, snapshot attachment, stale cursors, decoder rollback, and
+bitwise isolation when a neighboring reader changes. Sparse graph checks assert
+that compact execution selects the smaller bucket, then compare its tokens
+against an independent decoder; setting a flag alone is not coverage of the
+mapping. Qwen35 includes FP8,
+mixed NVFP4 and per-tensor FP8; V4.1 includes exact and bounded prefill with
+retained tails larger than a grouped walk's workspace. Cross-shape comparisons
+use the existing session numerical tier and certify changed argmax near ties;
+same-shape isolation and graph token comparisons remain exact. Qwen4Exp retains
+its two-rank `qwen_engine_test` coverage. Run GPU checks serially with production
+stopped, then restore and verify the original deployment.
+`qwen_image_prefill_test` also destroys the caller's prompt, image and boundary
+buffers after starting a shared `PrefillTask`. Its yielded execution must retain
+the target and MTP results, snapshot chain and KV cleanup behavior. Run it with
+`glm_vision_stream_test` and `glm_vision_frontend_test` when changing that lifetime.
+
+For serving comparisons, use the same deployment, checkpoint revisions, prompts
+and output lengths for the previous and candidate executable. Warm long prompts
+before measuring solo and concurrent decode, prefill, mixed traffic and repeated
+arrivals. Record total elapsed time, first-token latency and decode update gaps.
+Keep probability tracing separate from throughput measurements.
+
+The scheduler latency controller has deterministic cost-feedback tests for growth,
+slowdowns, decoder-load changes, alignment and explicit caps. A regression checks
+that short completed groups cannot replace a full-quantum cost estimate after
+the fair allocator trims their budgets. Journal tests check
+that workers use the leader's limit and reject a missing adaptive decision;
+`qwen_engines_adaptive_prefill_scheduled_verify` exercises changing budgets through
+real continuations, mixed graphs and scheduled verification. Serving tests check
+latency-target misses against queue and token-pass timing.
+`dsv4_engines_adaptive_prefill_mixed_cancel_and_reuse` covers the adaptive policy
+with a different architecture in eager and graph modes: compressor-aligned
+growth, early short-reader output, cancellation of a yielded reader, slot reuse
+and full KV release. It uses a small generated checkpoint.
+For policy-only changes, use representative deployments with different execution
+costs and single-/multi-rank operation, plus an architecture adapter sanity check.
+Repeat the broader checkpoint matrix when an executor, state layout or numerical
+kernel changes. A shared scheduler still encounters different adapter geometry
+and costs; one checkpoint alone does not cover those differences.
+Include cold-controller startup and transitions between light traffic, bursts,
+queue/KV pressure and recovery. Check that fitting requests progress behind a
+KV-blocked reader, overload is reported, cancellations drain and learned budgets
+recover after load subsides. Compare the final candidate directly against the
+PR base in alternating deployment order; a same-binary policy comparison answers
+a separate question about the controller's contribution.
+
+Check cached continuations against isolated execution, repeat the loaded
+workload, and verify isolated recovery and retained KV usage. Investigate changed
+transcripts with token probabilities and matching execution shapes; do not treat
+temperature zero as a guarantee of identical floating-point reductions.
+The Qwen cached-tail regression compares resumed short-reader hidden states,
+logits and a subsequent forced continuation with isolated execution, in BF16
+and FP8 dense modes. It also checks native verification when the decoder forms
+its own kernel group. The executor isolates requested outputs of resumed readers
+of at most 128 rows for their projection shapes while retaining the established
+wide mixed-batch recipe. This does not impose bitwise equality between arbitrary
+decode batch widths. Keep probability and layer tracing out of throughput measurements.
+A one-token completion can contain only a special token; record completion and
+usage without inventing a first-visible-token timestamp.
+
+When defaults change, report both default-versus-default and matched-budget
+comparisons. Matched budgets mean explicitly setting the same busy and idle
+prefill limits on both builds; this is a benchmark control, not a separate
+serving mode. To isolate fixed token budgeting on a build with the adaptive
+controller, also set both latency targets to zero. For an adaptive-policy
+comparison, match and report the targets and controller tuning instead.
+Record the resolved admission policy as well. Equal token caps alone do not
+guarantee identical selected quanta, physical row batches or admission timing.
+
+Run GPU and fabric checks serially on idle hardware, then restore and verify the
+original configuration and executable on every rank. Inventory checkpoint and
+resident caches before downloading missing weights. Finish downloads and peer
+synchronization before benchmarking, and remove only test-created files after
+their checks finish. Keep raw results and profiles in ignored local storage or
+external artifacts; summarize coverage, measurements and limitations in the PR.
+See [benchmark procedures](benchmarking.md) and the maintained serving clients
+in [the benchmark guide](benchmarks.md#reproduce).
+
 `prefix_snapshot_test` forces a four-block K/V pool full at snapshot time in
 Qwen and GLM. It covers monolithic and resumable prefill, unchanged target/draft
 logits, full-block pin cleanup, skipped hop replacements, timer/slot reuse, and
@@ -10,6 +121,19 @@ propagation of non-pool errors. Build it with `qwen_forward_test` and
 including replacements of older snapshots, and that skipped prefill slots and
 the `skipped_no_block` counter are handled correctly.
 
+The sampled-fallback hop regression (#103) runs with
+`DGPP_TEST_FILTER=prefix_hop_sampled_fallback` in `glm_tp_test` (MTP depths
+1 and 2) and `qwen_engine_test` (depths 1 and 3). These are two-rank GPU
+tests: GLM checks the exact eager sampled oracle and requires an older
+snapshot to survive a skipped capture; Qwen compares growing conversations
+with the cache disabled and enabled at matching prefill cuts, including
+concurrent requests, retirement and slot reuse. Both require the skipped-hop
+event to occur and the ranks' prefix decisions to agree. Run GLM with
+`DGPP_PIPELINE=0` as well
+to cover the synchronous path. `scheduler_test` covers first-hop skips,
+preserved older snapshots and their later attachment, failed replacements,
+and inconsistent or missing outcomes releasing the rolling slot.
+
 The long-document prefix-cache regression is covered by `scheduler_test`
 (changed tails, lookahead identity, small arenas and cleanup), `qwen_decode_test`
 and `glm_tp_test` (two snapshots, resumed target/draft logits and budget changes).
@@ -17,8 +141,8 @@ The entry floor and the head cut (2026-09-28) are covered by `scheduler_test`
 (`entryFloorKeepsShortPromptsOutOfTheArena`, `headCutServesTheNextConversation…`,
 `headCutYieldsToTheDeepestCutWhenSlotsAreScarce`, `headCutThroughChunkedPrefill`),
 `cluster_config_test` (the keys) and `fabric_serve_test` (the journal records).
-The [fabric record](../benchmarks/results/2026-09-21-prefix-document-reuse.md)
-covers real 32K/260K prompts, KV sharing and the recipe memory-plan audit.
+Real-checkpoint checks also cover 32K/260K prompts, KV sharing and the recipe
+memory plan.
 
 `serve_test` covers assistant thinking history with the
 `DGPP_TEST_FILTER=serve_thinkingParts_` cases: mixed visible and reasoning
@@ -89,6 +213,10 @@ torch-backed reference modes do.
 
 ## Evaluation data and prefill fixtures
 
+The [GLM reference-suite guide](experiments/glm-reference-suite.md) describes
+reference dump generation, reduced-layer comparisons and route certification.
+Keep generated dumps and traces outside the tracked documentation.
+
 Datasets are not bundled and benchmarks never download them implicitly:
 
 ```bash
@@ -127,6 +255,31 @@ walk through both reducers (`BusBoundaryReducer`, `BusStreamReducer`) and
 requires every layer's rows and the logits bitwise between them, at 12
 and 51 rows (the wide group's folds take the bulk path under both).
 
+For bulk, latency-tail and stream-reducer memcheck coverage, run `bus_test`
+with one rank per GPU on separate nodes. Start the following on every rank,
+replacing `RANK` with 0 through `WORLD-1` and `HEAD` with rank 0's address:
+
+```bash
+/usr/local/cuda/bin/compute-sanitizer --tool memcheck \
+  --error-exitcode 86 --leak-check full "$BUILD/bus_test" \
+  --bulk-rank RANK --world WORLD --peer HEAD --port 29924
+```
+
+Use the same binary, world, port and lane selection on every rank. Run worlds
+2 and 4, each with and without `--one-lane`. Each run checks 20 sizes, including
+short words and partial segment tails, through bulk, latency-chunked and stream
+reduction against the canonical BF16 chain. The normal collective watchdogs
+remain enabled. Require every process to exit successfully and report zero
+sanitizer errors and leaks.
+
+The normal `DGPP_TEST_FILTER=allreduce_bulk` loopback matrix still exercises
+multiple ranks in one process. On the tested CUDA 13.0 / Compute Sanitizer
+2025.3.1 stack, that shared-context memcheck run stalls at phase transitions;
+moving allocations and pinning readback buffers did not resolve it. Separate
+GPUs complete the same matrix under memcheck. A timed-out loopback run is not
+a sanitizer pass, and its absence of memory-error reports is not sufficient
+validation.
+
 ## The near-tie rule of the batched engine gates (2026-09-14)
 
 The session-core families lower their dense sites by the rows of a launch
@@ -162,7 +315,7 @@ build. The suites cover:
   accepted; far-rank, zero-noise, own-scores-inconsistent, and duplicate-id
   divergences rejected), and the TCP/roster control plane (seal, epoch
   bumps, eviction by death and by deadline, rejection reasons, coordinator
-  loss);
+  loss).
 - the M6 host suites: the tokenizer (55 byte-exact goldens per family,
   hash-keyed — GLM-5.3, Qwen3.8-Flash-Next and GLM-4.7 corpora), the chat
   template (26 / 20 / 26 goldens + 8 refusal negatives, the tool-call
@@ -170,15 +323,15 @@ build. The suites cover:
   (isolation, determinism, cancellation, bounded queue, tick ≡
   run_to_completion), the HTTP server's limit ladder, the OpenAI shapes
   over real HTTP with a fake engine, and the admission journal with two
-  real peer loops over localhost;
-- synthetic CUDA graph/eager parity;
+  real peer loops over localhost.
+- synthetic CUDA graph/eager parity.
 - QSA warp prefill against one-, three- and eight-split references in
   `qsa_test`, including tile edges and empty lists. `qwen_qsa_prefill` runs
   separate warp-on/off processes on a synthetic model with twelve query heads
   per KV head and an indexer budget of 2048. It compares every logit at
   127/128/129/256/513/1024 rows, checks exact repeats and the unchanged short
   path, and exercises session prefill followed by decode. This is numerical
-  regression coverage, not real-checkpoint quality or performance evidence;
+  regression coverage, not real-checkpoint quality or performance evidence.
 - the second and third families on the shared cores (2026-09-09/10): the
   Qwen3.8-Flash-Next chain (config/binding units, the loader, GDN/QSA/GR/
   PLE/MoE kernel oracles, the fixture forward against the pure-python
@@ -299,11 +452,11 @@ build. The suites cover:
   against the release's own `inference/model.py`, layer by layer, with
   `tools/dsv4_torch_reference.py`); the fp4 GEMV
   core at every compiled K (the MXFP4 set 2048 / 4096 included) and the
-  MoE layer's NVFP4 shared expert;
+  MoE layer's NVFP4 shared expert.
 - the KDA operator suite: conv/recurrent kernel parity against host
   fp32/fp64 references, chunked-vs-unchunked bitwise equivalence, decode
   graph replay, snapshot round-trip, head-slice TP readiness, and
-  reference-dump parity against the pure-python oracle;
+  reference-dump parity against the pure-python oracle.
 - the DSA suite (M3): pool compression and tail-ring continuation verified
   bitwise via hard-max gates (including multi-token decode == single-token),
   a 1,100-case bitwise pooled top-k fuzz around pool boundaries plus
@@ -323,14 +476,14 @@ build. The suites cover:
   prefill/decode parity against the oracle with selection-aware near-tie
   certification (at select_k=16 and select_k=8), decode graph replay
   bitwise across positions, TP2 head-slice vs TP1, and a real-geometry
-  chunked prefill + decode smoke;
+  chunked prefill + decode smoke.
 - DSA reference-dump parity: a pure-python oracle dump (bit-exact fp8 codec
   cross-checked against the C++ encoder) exercised through the full layer —
   latent cache bitwise, index cache within one e4m3 ulp, top-k exact — plus
   the torch backend against real checkpoint slices (executed on this box at
   32 and 2,052 tokens, the latter crossing the top-k horizon with zero
   flips); any flipped row is certified as a measured boundary near tie by
-  the audit, never absorbed by tolerance;
+  the audit, never absorbed by tolerance.
 - the M4 assembly suites: the mHC stream module (Sinkhorn mixing, stream
   update, final mean vs the double oracle), the MoE router/expert/shared
   path (sigmoid router with the noaux tie rule, swiglu asymmetries, bf16
@@ -339,15 +492,15 @@ build. The suites cover:
   block edges, and the assembled-forward chain: a synthetic mini-checkpoint
   written on disk, a full-stack pure-python reference over the same
   weights, then the engine compared (hidden ulp budgets, top-k exact, route
-  ids/weights, determinism);
+  ids/weights, determinism).
 - CUDA system-scope flag ordering, payload visibility, inactivity watchdog,
-  and post-watchdog recovery;
+  and post-watchdog recovery.
 - the M5 CollectiveBus data plane (needs the fabric + ibverbs): loopback
   scenarios with real RC QPs — payload integrity via fold-hash, credit
   recycling, dual-lane striping asserted on both sides, latency under bulk
   contention, watchdog failures, config-mismatch rejection, the graph era
   with the mixed-era interlude, the bulk RS+AG machine, and orderly stop —
-  plus the app-level smoke;
+  plus the app-level smoke.
 - the TP forward over loopback buses (`glm_tp_test`): per-layer isolated
   parity vs the world=1 oracle at worlds 2 and 4, decode sessions, the
   greedy generation loop, the device pick, the one-graph MTP step in
@@ -364,7 +517,7 @@ build. The suites cover:
   host oracles, the T=2 and T=3 sampled verdict chains included
   (`glm_pick_test`); the bus's graph era including two replay windows
   armed at once (`bus_test`); the GEMV cores (`bf16_gemv_test`) and the
-  loader's resident-image round trip (`glm_loader_test`);
+  loader's resident-image round trip (`glm_loader_test`).
 - Python checkpoint classification, exact expert-occupancy tests, and the
   route-trace traffic-model contract.
 
@@ -391,7 +544,7 @@ that pass by scheduling luck, undersized test buffers that made a graph test
 pass vacuously) are pinned in `DESIGN.md` §12.
 
 Cross-node RoCE and NIC→GPU checks are intentionally manual/deployment tests;
-they require a peer and are documented under `benchmarks/README.md`. The same
+they require a peer and are documented in [benchmark procedures](benchmarking.md). The same
 holds for the release checks: long, real-checkpoint cluster runs that no CI job
 starts, each behind an explicit acknowledgement — today
 `scripts/qwen_yarn_release_check.py` (`docs/qwen_yarn_release_check.md`), the
@@ -408,5 +561,5 @@ inspect backend changes before updating them. Run the CUDA tests with the existi
 `bf16_gemv_test` after rebuilding the targets. Checkpoint-level validation uses
 `tools/glm_vision_reference.py`; its default CUDA eager gate applies to the full
 encoder as well as isolated stages. The pinned 30-case runner additionally
-requires bitwise equality. Its reproducible procedure and
-measured bounds are in the [numerical record](../benchmarks/results/2026-09-18-glm-vision-numerics.md).
+requires bitwise equality. Follow the [vision oracle procedure](vision.md)
+for reference settings and numerical bounds.

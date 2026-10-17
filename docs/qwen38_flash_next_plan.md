@@ -1,7 +1,7 @@
 # Qwen3.8-Flash-Next-FP8 on dgpp — architecture study and implementation plan (2026-09-09)
 
 > NVFP4 deployments: the [single-Spark guide](qwen38_single_spark.md) covers
-> world 1, and the [two-Spark benchmark](../benchmarks/results/2026-09-16-qwen-nvfp4-w2.md)
+> world 1, and the two-Spark benchmark
 > covers world 2. Both map the n-gram table from NVMe and use the graph engine.
 
 Status: the text path is implemented, including tensor-parallel loading,
@@ -175,7 +175,7 @@ with radix histograms, refining only its boundary bin until at most 256
 keys need ordering. It then sorts the selected pool ids before expanding
 them to tokens. Short rows retain streaming top-k. Both paths use the same
 workspace and graph nodes; ties, incomplete pools and inactive rows preserve
-the selection contract. The [long-context selection record](../benchmarks/results/2026-09-21-qwen-qsa-select.md)
+the selection contract. The long-context selection record
 contains cold/warm measurements and exact host-oracle coverage through 131K pools.
 
 ### 1.5 Gated Residual (GR)
@@ -324,7 +324,8 @@ What the mode does not touch: the QSA softmax scale, the pool's size (a
 pool is sized by `engine.kv_capacity`, so the knob lifts what a request may
 reach without moving a byte — `qwen_plan_check` asserts that), and every
 other family — a world that sets `engine.rope_scaling` for a family other than
-`qwen4_exp` refuses to start and names the family, rather than serving with the
+`qwen4_exp` or `qwen3_5` (Qwen3.8-27B, the same rope geometry, 2026-10-12)
+refuses to start and names the family, rather than serving with the
 operator's setting quietly unapplied. The knob rides the settings record (`"rs"`)
 so a peer can never rope at different frequencies from rank 0, and the canonical
 config digest.
@@ -756,7 +757,7 @@ snapshots; (f) QSA: indexer projection + q norm/RoPE, raw-key ring and block
 compression, scorer, top-512 with the tie rule, list expansion with the
 tail, listed GQA-256 attention (decode split/combine; prefill row-batched),
 dense causal GQA-256 for short prompts, gate multiply. Gate: every test
-green; microbench numbers recorded in `benchmarks/results/`.
+green; microbench numbers recorded in local run artifacts.
 
 Status (2026-09-09): (a)–(f) built with oracles and tests — norms, GDN,
 GR, the MoE (the shared MoE layer's `SoftmaxTopk` router mode and

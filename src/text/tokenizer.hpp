@@ -32,14 +32,21 @@
 // hash (FNV-1a-64 of tokenizer.json): a gate run against a different
 // tokenizer.json refuses rather than compares.
 //
-// Threading: load once, then encode/decode are const and thread-safe.
+// Merge work: short words and shrinking runs use passes; long words switch
+// automatically to a phase heap after bounded scanning. Both preserve the
+// lowest-rank, all-occurrences, left-to-right merge order.
+// Threading: load once, then encode/decode are const and thread-safe. The
+// optional word cache owns its keys/ids and uses nonblocking shard locks;
+// misses or contention affect work only, never the returned token IDs.
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
 
 #include "loaders/minijson.hpp"
+#include "text/word_cache.hpp"
 
 namespace dgpp::text {
 
@@ -53,7 +60,8 @@ class Tokenizer {
 
   // Loads and validates; throws std::runtime_error on any unsupported
   // shape (the message names the offending field).
-  static Tokenizer load(const std::string& tokenizer_json_path);
+  // Optional mapped-word cache: 0 disables it; at most 10000 entries.
+  static Tokenizer load(const std::string& tokenizer_json_path, size_t word_cache_entries = 0);
 
   // text (UTF-8) -> ids. Added tokens match leftmost-longest and bypass
   // BPE; every other byte passes through the pinned pipeline (Split ->
@@ -63,6 +71,8 @@ class Tokenizer {
   // ids -> text. HF 0.23's decode defaults to skip_special_tokens=true:
   // added tokens marked special are omitted; non-special ones decode
   // verbatim. skip_special_tokens=false decodes everything verbatim.
+  // decode(ids, skip) == concatenation of decode(id, skip) for each id.
+  // These are raw bytes: a single token may contain incomplete UTF-8.
   std::string decode(const std::vector<int64_t>& ids,
                      bool skip_special_tokens = true) const;
   std::string decode(int64_t id, bool skip_special_tokens = true) const;
@@ -86,6 +96,7 @@ class Tokenizer {
   int64_t max_id() const { return max_id_; }
 
  private:
+  friend struct TokenizerTestAccess;
   struct MergeKey {
     std::string_view first;
     std::string_view second;
@@ -117,6 +128,9 @@ class Tokenizer {
                       std::vector<int64_t>* out) const;
   // One pretoken's mapped symbol string -> ids (BPE, ignore_merges).
   void encode_word(std::string_view mapped, std::vector<int64_t>* out) const;
+
+  void merge_word(std::string_view mapped, std::vector<int64_t>* out) const;
+  std::unique_ptr<detail::WordCache> word_cache_;
 
   // The raw file and its parse tree both stay members: minijson object
   // keys (Member.key) are tree-owned std::strings, so the vocab/merge keys

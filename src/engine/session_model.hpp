@@ -38,8 +38,10 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <numeric>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -51,6 +53,9 @@
 #include "engine/decode_outputs.hpp"
 #include "engine/logits_storage.hpp"
 #include "engine/pool_exhausted.hpp"
+#include "engine/prefill_batch.hpp"
+#include "engine/graph_batch_mapping.hpp"
+#include "engine/prefill_cursor.hpp"
 #include "kernels/gemm.hpp"
 #include "kernels/glm_spec.hpp"
 #include "kernels/pick.hpp"
@@ -122,37 +127,7 @@ class SessionModel : public PrefillReporting {
     bool taken = false;
     SnapshotRequest* next = nullptr;  // additional cuts, owned by the caller
   };
-  // One walk over T rows.
-  struct RowRun {
-    int req = 0;                   // the request (scalar); 0 for the fixed batch
-    const int64_t* ids = nullptr;  // host [T] (prefill; eager decode validation)
-    int T = 0;
-    int64_t pos0 = 0;              // prefill: the chunk's first position
-    bool decode = false;           // decode rows: metadata staged by decode_host_prep
-    bool all_rows = false;         // every row's logits (else the last row; decode: all rows)
-    bool capture_layers = false;
-    bool capture = false;          // graph capture: no syncs, no copies, nothing executes
-    int batch_requests = 0;        // > 0: the fixed slot-major batch (decode)
-    bool snapshots = false;        // decode: leave every row's post-state in the spec rows
-    // Prefill: the call's first and last chunk (a family with a replay
-    // segment — DeepSeek-V4.1's bounded decoder — carries a tail between
-    // the chunks of one call and runs its segment on the last).
-    bool first_chunk = true;
-    bool last_chunk = true;
-    // The group prefill: several requests' cold prompts as the spans of
-    // one walk (host arrays of num_spans; 0: the scalar form above). T is
-    // the spans' total and `ids` their prompts concatenated.
-    const int32_t* span_reqs = nullptr;
-    const int64_t* span_pos0 = nullptr;
-    const int32_t* span_lens = nullptr;
-    int num_spans = 0;
-    // The scalar prefill's following chunk (host ids, rows, first
-    // position; next_T 0 when this is the last), for a family that can
-    // stage the next chunk's inputs while this one runs.
-    const int64_t* next_ids = nullptr;
-    int next_T = 0;
-    int64_t next_pos0 = 0;
-  };
+  using RowRun = dgpp::RowRun;
   // The staged inputs of a walk (begin_run).
   struct RowInputs {
     const int64_t* tokens = nullptr;
@@ -182,22 +157,10 @@ class SessionModel : public PrefillReporting {
   int64_t prefill_group_span_limit() const { return 0; }  // the family widens it
   Outputs session_prefill_resume(int req, const std::vector<int64_t>& suffix_ids,
                                  const std::vector<int64_t>& boundaries, SnapshotRequest* snap = nullptr);
-  // A caller-owned continuation. `ids` and `snap` must outlive the cursor.
-  // Only families advertising kResumablePrefill may interleave these
-  // chunks with other requests; some families carry shared span scratch.
-  static constexpr bool kResumablePrefill = false;
-  struct PrefillCursor {
-    int req = -1;
-    const int64_t* ids = nullptr;
-    int64_t start = 0, end = 0, next = 0;
-    int64_t budget_tokens = 0;
-    std::vector<int64_t> cuts;
-    size_t cut_index = 0;
-    bool span_start = true;
-    bool suspended = false;
-    SnapshotRequest* snap = nullptr;
-    Outputs output;
-  };
+  // Resumption is part of the shared session protocol. Layer state that
+  // survives a yield must belong to a request (never to shared walk scratch).
+  static constexpr bool kResumablePrefill = true;
+  using PrefillCursor = PrefillContinuation<Outputs, SnapshotRequest>;
   PrefillCursor session_prefill_begin(int req, const std::vector<int64_t>& prompt,
       int64_t reserve_tokens, int64_t chunk_tokens, const std::vector<int64_t>& boundaries = {},
       SnapshotRequest* snap = nullptr, int64_t attach_position = 0);
@@ -213,10 +176,51 @@ class SessionModel : public PrefillReporting {
   // the scheduler re-splits a tick's budget among the prompts every
   // tick), and the weights stream once for all of them. Returns each
   // cursor's "done".
-  static constexpr bool kPrefillGroupAdvance = false;
-  std::vector<bool> session_prefill_advance_group(const std::vector<PrefillCursor*>& cursors,
+  static constexpr bool kPrefillGroupAdvance = true;
+  static constexpr bool kCompactBatches = true;
+  // RowRun::decode_spans is a layer-execution contract; the session layer
+  // owns the shared request bookkeeping. Every executor implements mixed
+  // state/rollback/output handling as part of its layer-walk contract.
+  static constexpr bool kMixedPrefillVerify = true;
+  // Some layer walks require fixed chunk boundaries. Split-invariant walks
+  // can spend each budget from the cursor's current position instead.
+  static constexpr bool kPrefillChunkGrid = true;
+  template <class Cursor = PrefillCursor>
+  std::vector<bool> session_prefill_advance_group(const std::vector<Cursor*>& cursors,
                                                   const std::vector<int64_t>& chunk_tokens);
-  Outputs session_step(int req, int64_t token_id) { return session_verify(req, std::vector<int64_t>{token_id}); }
+  template <class Cursor>
+  std::vector<Outputs> session_prefill_verify(Cursor& cursor, int64_t budget,
+      const std::vector<int>& reqs, const std::vector<std::vector<int64_t>>& feeds,
+      int graph_rows = 0) {
+    return derived().session_prefill_verify_group(std::vector<Cursor*>{&cursor}, {budget}, reqs, feeds, graph_rows);
+  }
+  template <class Cursor>
+  std::vector<Outputs> session_prefill_verify_group(const std::vector<Cursor*>& cursors,
+      const std::vector<int64_t>& budgets, const std::vector<int>& reqs,
+      const std::vector<std::vector<int64_t>>& feeds, int graph_rows = 0);
+  // A cursor extension may validate input-specific execution constraints.
+  void validate_mixed_prefill_cursor(const PrefillCursor&) const {}
+  // Optional layer-state preparation: rows == 0 starts an eager mixed walk;
+  // positive rows configures the graph tail's rollback/commit state.
+  void prepare_mixed_verify(int) {}
+  bool prefill_batch_fits(const RowRun&) const { return true; }
+  int max_mixed_prefill_readers(int decode_rows) const {
+    return std::max(0, std::min(max_requests_, logits_capacity_rows_ - decode_rows));
+  }
+  void finish_mixed_prefill(PrefillCursor& cursor) {
+    if (cursor.next == cursor.end && cursor.suspended) {
+      push_position(cursor.req);
+      if (mtp_) push_mtp_position(cursor.req);
+      cursor.suspended = false;
+    }
+  }
+  Outputs session_step(int req, int64_t token_id) {
+    auto output = session_verify(req, std::vector<int64_t>{token_id});
+    // Replay-backed recurrence needs a commit even when its only row is
+    // accepted. Graph and speculative callers already commit every verify.
+    session_rollback(req, 1, 1);
+    return output;
+  }
   Outputs session_verify(int req, const std::vector<int64_t>& token_ids);
   // Batched verify: slot-major rows (each slot's fed rows contiguous),
   // one live pass. Returns per-slot outputs in slot order; offsets[i] is
@@ -333,6 +337,7 @@ class SessionModel : public PrefillReporting {
   // writes the next step's full-width feeds back. 0: the feed is
   // rows_per_request rows, as every capture before.
   void session_graph_capture_batch(int rows_per_request, int requests = 0, int feed_rows = 0);
+  void session_graph_capture_batch_inputs(int rows_per_request, int requests = 0, int feed_rows = 0);
   void session_graph_stage_batch();
   // Capture-time source: a pinned map owned by the graph family/parity.
   void session_graph_batch_map_source(const int32_t* source) { graph_batch_map_source_ = source; }
@@ -384,6 +389,10 @@ class SessionModel : public PrefillReporting {
                                                                   int vocab, int k);
 
  protected:
+  template <class> friend struct PrefillBatch;
+  template <class> friend struct GraphBatchMapping;
+  int64_t prefill_vocab_size() const { return vocab_size_; }
+  int prefill_hidden_size() const { return hidden_; }
   Derived& derived() { return static_cast<Derived&>(*this); }
   const Derived& derived() const { return static_cast<const Derived&>(*this); }
 
@@ -398,6 +407,12 @@ class SessionModel : public PrefillReporting {
   }
   [[noreturn]] void refuse_mtp(const char* what) const {
     throw std::logic_error(std::string(what) + ": the MTP draft block is not enabled");
+  }
+  void validate_prefill_cursor(const PrefillCursor& cursor, const char* operation) const {
+    check_req(cursor.req, operation);
+    if (cursor.epoch != session_epochs_[cursor.req] || cursor.next >= cursor.end ||
+        session_pos_[cursor.req] != cursor.next)
+      throw std::logic_error(std::string(operation) + ": completed or stale cursor");
   }
   // The generic part of a slot's opening (the family's reset first).
   void open_slot(int req);
@@ -420,11 +435,12 @@ class SessionModel : public PrefillReporting {
   // A walk's staged inputs (the decode rows' token upload included) and
   // its results (the tail mirrors, the host copies).
   RowInputs begin_run(const RowRun& run);
-  Outputs finish_run(const RowRun& run, Outputs&& out, bool packed_logits = false);
+  Outputs finish_run(const RowRun& run, Outputs&& out, bool packed_logits = false, int last_packed_row = -1, const std::vector<int>* output_hidden_rows = nullptr);
   // The family projects each selected input row into consecutive logits rows.
   // Hidden states remain in place for MTP and the host output mirrors.
   bool packed_prefill_logits(const RowRun& run) const {
-    return compact_logits_ && !run.decode && !run.all_rows;
+    return run.decode_spans > 0 || (run.output_spans && (run.num_spans > 0 || !run.output_spans[0])) ||
+           (compact_logits_ && !run.decode && !run.all_rows);
   }
   template <class Project>
   bool project_head_rows(const RowRun& run, Project&& project) {
@@ -436,11 +452,9 @@ class SessionModel : public PrefillReporting {
       project(0, 0, run.T);
       return false;
     }
-    int end = 0;
-    for (int s = 0; s < std::max(1, run.num_spans); ++s) {
-      end += run.num_spans > 0 ? run.span_lens[s] : run.T;
-      project(end - 1, s, 1);
-    }
+    if (run.output_rows() > logits_capacity_rows_)
+      throw std::invalid_argument("session head: selected outputs exceed storage");
+    run.for_each_output(std::forward<Project>(project));
     return true;
   }
   std::vector<int64_t> prefill_cuts(int64_t start, int64_t end, const std::vector<int64_t>& boundaries) const;
@@ -452,7 +466,7 @@ class SessionModel : public PrefillReporting {
   void write_snapshot(int req, void* dst, int spec_row);
   SessionSnapshotMeta pin_blocks_at(int req, int64_t pos, const char* what);
   // The draft block's rows.
-  void mtp_prefill_rows(int req, int64_t row0, int64_t row1, const int64_t* tokens);
+  void mtp_prefill_rows(int req, int64_t row0, int64_t row1, const int64_t* tokens, int hidden_row = 0);
   void mtp_decode_host_prep(int req, const std::vector<int64_t>& tokens, bool upload);
   // The draft block's input window per slot ([R][max_decode_rows_][draft_width]).
   uint16_t* mtp_window(int req) const {
@@ -463,6 +477,24 @@ class SessionModel : public PrefillReporting {
   void store_draft_hidden(const uint16_t* rows, const int32_t* req_ids, const int64_t* pos, int n) {
     qwen_mtp_hidden_store_bf16(rows, req_ids, pos, mtp_window_, static_cast<int64_t>(max_decode_rows_) * draft_width_,
                                max_decode_rows_, n, draft_width_, stream_);
+  }
+  // A grouped walk may contain spans longer than the circular window. Only
+  // each span's tail may write it: concurrent wrapped rows would race.
+  void store_run_draft_hidden(const RowRun& run, const RowInputs& in, const uint16_t* hidden) {
+    if (!mtp_) return;
+    int end = 0;
+    for (int s = 0; s < std::max(1, run.num_spans); ++s) {
+      const int rows = run.num_spans ? run.span_lens[s] : run.T;
+      end += rows;
+      const int n = std::min(rows, max_decode_rows_);
+      store_draft_hidden(hidden + static_cast<size_t>(end - n) * draft_width_,
+                         in.req_ids + end - n, in.pos + end - n, n);
+    }
+  }
+  const uint16_t* prefill_hidden_span(const uint16_t* hidden, int width, int row, int count) const {
+    if (row < 0 || count < 0 || row > max_tokens_ - count)
+      throw std::invalid_argument("draft hidden span outside the main walk");
+    return hidden + static_cast<size_t>(row) * width;
   }
   void gather_draft_hidden(const int32_t* req_ids, const int64_t* pos, uint16_t* dst, int T) {
     qwen_mtp_hidden_gather_bf16(mtp_window_, static_cast<int64_t>(max_decode_rows_) * draft_width_, max_decode_rows_,
@@ -487,6 +519,7 @@ class SessionModel : public PrefillReporting {
   bool route_traces_ = true;
   bool decode_tail_mirrors_ = true;
 
+  std::vector<uint64_t> session_epochs_;  // invalidate borrowed cursors on close/reopen
   std::vector<int64_t> session_pos_;  // [R]; 0 = closed slot (the host mirror)
   int64_t* d_session_pos_ = nullptr;  // device [R]: the graphs' positions
   int64_t* h_session_pos_ = nullptr;  // pinned upload mirror
@@ -608,6 +641,7 @@ void SessionModel<D>::init_session(const SessionParams& p) {
   const size_t rows = static_cast<size_t>(max_decode_rows_);
   const size_t M = static_cast<size_t>(max_tokens_);
   session_pos_.assign(R, 0);
+  session_epochs_.assign(R, 0);
   d_session_pos_ = dev_alloc<int64_t>(R);
   h_session_pos_ = pinned_alloc<int64_t>(R);
   DGPP_CUDA_OK(cudaMemset(d_session_pos_, 0, R * sizeof(int64_t)));
@@ -617,7 +651,7 @@ void SessionModel<D>::init_session(const SessionParams& p) {
   step_tokens_ = d_tokens_;
   d_prefill_pos_ = dev_alloc<int64_t>(M);
   d_prefill_req_ = dev_alloc<int32_t>(M);
-  d_prefill_spans_ = dev_alloc<int32_t>(2 * static_cast<size_t>(std::max(1, max_requests_)));
+  d_prefill_spans_ = dev_alloc<int32_t>(4 * static_cast<size_t>(max_requests_));
   h_token_ = pinned_alloc<int64_t>(token_rows);
   h_req_ids_ = pinned_alloc<int32_t>(rows);
   h_step_pos_ = pinned_alloc<int64_t>(rows);
@@ -696,6 +730,7 @@ SessionModel<D>::~SessionModel() {
 
 template <class D>
 void SessionModel<D>::open_slot(int req) {
+  ++session_epochs_[req];
   derived().reset_slot_state(req);
   session_pos_[static_cast<size_t>(req)] = 0;
   push_position(req);
@@ -721,7 +756,8 @@ void SessionModel<D>::stage_prefill_meta(int req, int64_t pos0, int T) {
 // request id, and the spans as (first row, rows).
 template <class D>
 void SessionModel<D>::stage_prefill_group_meta(const RowRun& run) {
-  if (run.num_spans > max_requests_) throw std::invalid_argument("run_rows: more group spans than request slots");
+  if (run.num_spans > max_requests_ * (run.decode_spans > 0 ? 2 : 1))
+    throw std::invalid_argument("run_rows: more group spans than request slots");
   std::vector<int64_t> pos(static_cast<size_t>(run.T));
   std::vector<int32_t> reqs(static_cast<size_t>(run.T));
   std::vector<int32_t> spans(static_cast<size_t>(run.num_spans) * 2);
@@ -732,7 +768,7 @@ void SessionModel<D>::stage_prefill_group_meta(const RowRun& run) {
     spans[static_cast<size_t>(s) * 2] = at;
     spans[static_cast<size_t>(s) * 2 + 1] = len;
     for (int i = 0; i < len; ++i) {
-      pos[static_cast<size_t>(at + i)] = run.span_pos0[s] + i;
+      pos[static_cast<size_t>(at + i)] = run.span_pos0[s] < 0 ? -1 : run.span_pos0[s] + i;
       reqs[static_cast<size_t>(at + i)] = run.span_reqs[s];
     }
     at += len;
@@ -751,6 +787,17 @@ typename SessionModel<D>::RowInputs SessionModel<D>::begin_run(const RowRun& run
   if (T > max_tokens_) throw std::invalid_argument("run_rows: rows exceed max_tokens");
   if ((run.decode || run.all_rows) && T > logits_capacity_rows_)
     throw std::invalid_argument("run_rows: use full diagnostic storage for all-row outputs");
+  if (run.decode_spans) {
+    if (run.decode || run.capture || run.batch_requests || run.all_rows ||
+        run.decode_spans < 0 || run.decode_spans >= run.num_spans)
+      throw std::invalid_argument("mixed walk: expected decode spans followed by prefill spans");
+    for (int s = 0; s < run.decode_spans; ++s)
+      if (run.span_lens[s] < 1 || run.span_lens[s] > kSpecRows)
+        throw std::invalid_argument("mixed walk: invalid speculative span");
+    if (run.decode_rows() > max_decode_rows_ ||
+        run.decode_rows() + run.num_spans - run.decode_spans > logits_capacity_rows_)
+      throw std::invalid_argument("mixed walk: speculative outputs exceed storage");
+  }
   RowInputs in;
   in.batched = run.batch_requests > 0;
   in.num_requests = in.batched ? run.batch_requests : (run.num_spans > 0 ? run.num_spans : 1);
@@ -780,15 +827,21 @@ typename SessionModel<D>::RowInputs SessionModel<D>::begin_run(const RowRun& run
 }
 
 template <class D>
-typename SessionModel<D>::Outputs SessionModel<D>::finish_run(const RowRun& run, Outputs&& out, bool packed_logits) {
+typename SessionModel<D>::Outputs SessionModel<D>::finish_run(const RowRun& run, Outputs&& out,
+                                                            bool packed_logits, int last_packed_row, const std::vector<int>* output_hidden_rows) {
   const int T = run.T;
+  if (run.device_decode_outputs && packed_logits) last_packed_row = run.decode_rows();
   const size_t H = static_cast<size_t>(hidden_);
   // The decode tail's rows into the pinned mirrors: eager rows always
   // (they sync right below); a capture records the copies only while the
   // mirrors are on (the kernels-only decode graph turns them off).
-  const bool every_row = run.all_rows || run.decode;
+  const bool every_row = (run.all_rows || run.decode) && last_packed_row < 0;
   const bool group = !run.decode && !run.all_rows && run.num_spans > 0;
-  const size_t rows_out = every_row ? static_cast<size_t>(T) : group ? static_cast<size_t>(run.num_spans) : 1;
+  size_t rows_out = every_row ? static_cast<size_t>(T) : group ? static_cast<size_t>(run.num_spans) : 1;
+  if (group) {
+    if (run.device_decode_outputs) rows_out -= run.decode_spans;
+    else for (int s = 0; s < run.decode_spans; ++s) rows_out += run.span_lens[s] - 1;
+  }
   const size_t first = every_row ? 0 : static_cast<size_t>(T - 1);
   if (run.decode && (!run.capture || decode_tail_mirrors_)) {
     DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_logits_, logits_, rows_out * lm_vocab_count_ * sizeof(float),
@@ -799,26 +852,42 @@ typename SessionModel<D>::Outputs SessionModel<D>::finish_run(const RowRun& run,
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   out.lm_vocab_begin = lm_vocab_begin_;
   out.lm_vocab_count = lm_vocab_count_;
+  if (!run.decode && !group && run.output_spans && !run.output_spans[0]) return std::move(out);
+  if (group && run.output_spans &&
+      std::none_of(run.output_spans + (run.device_decode_outputs ? run.decode_spans : 0),
+                   run.output_spans + run.num_spans, [](uint8_t keep) { return keep != 0; }))
+    return std::move(out);
   out.final_hidden_bits.resize(rows_out * H);
   out.logits.resize(rows_out * lm_vocab_count_);
   if (run.decode) {
     std::copy(h_tail_logits_, h_tail_logits_ + out.logits.size(), out.logits.begin());
     std::copy(h_tail_hidden_, h_tail_hidden_ + out.final_hidden_bits.size(), out.final_hidden_bits.begin());
   } else if (group) {
-    // Each span's last row.
-    int at = 0;
+    // Every speculative row, then each prefill span's last row.
+    int at = 0, output = 0;
     for (int s = 0; s < run.num_spans; ++s) {
-      const size_t last = static_cast<size_t>(at + run.span_lens[s] - 1);
-      DGPP_CUDA_OK(cudaMemcpy(out.final_hidden_bits.data() + static_cast<size_t>(s) * H, h_ + last * H, H * 2,
-                              cudaMemcpyDeviceToHost));
-      DGPP_CUDA_OK(cudaMemcpy(out.logits.data() + static_cast<size_t>(s) * lm_vocab_count_, logits_ + (packed_logits ? static_cast<size_t>(s) : last) * lm_vocab_count_,
-                              static_cast<size_t>(lm_vocab_count_) * 4, cudaMemcpyDeviceToHost));
+      if (run.device_decode_outputs && s < run.decode_spans) {
+        at += run.span_lens[s];
+        continue;
+      }
+      const int first_row = s < run.decode_spans ? 0 : run.span_lens[s] - 1;
+      for (int r = first_row; r < run.span_lens[s]; ++r, ++output) {
+        if (run.output_spans && !run.output_spans[s]) continue;
+        const int source = output_hidden_rows ? output_hidden_rows->at(output) : at + r;
+        if (source < 0) continue;  // a bounded reader has no decoder output before its final chunk
+        const size_t last = static_cast<size_t>(source);
+        DGPP_CUDA_OK(cudaMemcpy(out.final_hidden_bits.data() + static_cast<size_t>(output) * H,
+                                h_ + last * H, H * 2, cudaMemcpyDeviceToHost));
+        DGPP_CUDA_OK(cudaMemcpy(out.logits.data() + static_cast<size_t>(output) * lm_vocab_count_,
+                                logits_ + (packed_logits ? static_cast<size_t>(output + std::max(0, last_packed_row)) : last) * lm_vocab_count_,
+                                static_cast<size_t>(lm_vocab_count_) * 4, cudaMemcpyDeviceToHost));
+      }
       at += run.span_lens[s];
     }
   } else {
     DGPP_CUDA_OK(cudaMemcpy(out.final_hidden_bits.data(), h_ + first * H, out.final_hidden_bits.size() * 2,
                             cudaMemcpyDeviceToHost));
-    DGPP_CUDA_OK(cudaMemcpy(out.logits.data(), logits_ + (packed_logits ? 0 : first) * lm_vocab_count_, out.logits.size() * 4,
+    DGPP_CUDA_OK(cudaMemcpy(out.logits.data(), logits_ + (packed_logits ? std::max(0, last_packed_row) : first) * lm_vocab_count_, out.logits.size() * 4,
                             cudaMemcpyDeviceToHost));
   }
   return std::move(out);
@@ -848,6 +917,7 @@ typename SessionModel<D>::PrefillCursor SessionModel<D>::prefill_cursor(
     SnapshotRequest* snap) {
   PrefillCursor cursor;
   cursor.req = req;
+  cursor.epoch = session_epochs_[req];
   cursor.ids = ids;
   cursor.start = cursor.next = start;
   cursor.end = start + count;
@@ -870,11 +940,7 @@ void SessionModel<D>::prefill_chunk(PrefillCursor& cursor, int64_t budget) {
   const int64_t start = cursor.start, end = cursor.end, c0 = cursor.next;
   auto* snap = cursor.snap;
   auto& out = cursor.output;
-  int64_t c1 = cursor.cut_index < cursor.cuts.size() ? cursor.cuts[cursor.cut_index] : end;
-  // Keep model/snapshot cuts separate from the scheduling grid. A larger
-  // budget can coalesce future work without crossing a required snapshot.
-  // Global grid boundaries preserve the original fixed-budget chunk shapes.
-  if (budget > 0) c1 = std::min(c1, (c0 / budget + 1) * budget);
+  const int64_t c1 = cursor.next_end(budget);
   if (cursor.cut_index < cursor.cuts.size() && c1 == cursor.cuts[cursor.cut_index]) ++cursor.cut_index;
   if (c1 - c0 > max_tokens_)
     throw std::invalid_argument("session_prefill: a chunk of " + std::to_string(c1 - c0) +
@@ -886,18 +952,19 @@ void SessionModel<D>::prefill_chunk(PrefillCursor& cursor, int64_t budget) {
   run.pos0 = c0;
   run.decode = false;
   run.all_rows = false;
+  const uint8_t output = !cursor.final_output_only || c1 == end;
+  run.output_spans = &output;
   // Preserve logical span boundaries across yields. In particular, the
   // bounded DeepSeek decoder runs only at a span's last chunk, and a
   // snapshot must close the span before its state can be published.
   run.first_chunk = cursor.span_start;
-  run.last_chunk = c1 == end;
-  for (auto* at = snap; at != nullptr; at = at->next)
-    run.last_chunk |= !at->taken && at->position == c1;
+  run.last_chunk = cursor.closes_span(c1);
   cursor.span_start = run.last_chunk;
   if (c1 < end) {
     // The chunk after this one on the same grid and cuts.
     int64_t c2 = cursor.cut_index < cursor.cuts.size() ? cursor.cuts[cursor.cut_index] : end;
-    if (budget > 0) c2 = std::min(c2, (c1 / budget + 1) * budget);
+    if (budget > 0) c2 = cursor.relative_budget ? c1 + std::min(c2 - c1, budget)
+                                              : std::min(c2, (c1 / budget + 1) * budget);
     if (c2 > c1 && c2 - c1 <= max_tokens_) {
       run.next_ids = ids + (c1 - start);
       run.next_T = static_cast<int>(c2 - c1);
@@ -992,6 +1059,21 @@ typename SessionModel<D>::PrefillCursor SessionModel<D>::session_prefill_begin(
   auto cursor = prefill_cursor(req, prompt.data() + attach_position, attach_position,
                                end - attach_position, cuts, snap);
   cursor.budget_tokens = chunk_tokens;
+  if constexpr (!D::kPrefillChunkGrid) {
+    cursor.relative_budget = true;
+    // The work budget already bounds a walk to max_tokens. Fixed-size grid
+    // cuts would split a donated share again on the following advance.
+    // Retain structural cuts and every validated snapshot position.
+    cursor.cuts.clear();
+    for (const int64_t boundary : boundaries) {
+      const int64_t cut = boundary / snapshot_align_ * snapshot_align_;
+      if (cut > cursor.start && cut < cursor.end) cursor.cuts.push_back(cut);
+    }
+    for (auto* at = snap; at != nullptr; at = at->next)
+      if (at->position > cursor.start && at->position < cursor.end) cursor.cuts.push_back(at->position);
+    std::sort(cursor.cuts.begin(), cursor.cuts.end());
+    cursor.cuts.erase(std::unique(cursor.cuts.begin(), cursor.cuts.end()), cursor.cuts.end());
+  }
   if (attach_position == 0) open_slot(req);
   else if (session_pos_[static_cast<size_t>(req)] != attach_position)
     throw std::logic_error("session_prefill_begin: slot does not match attached prefix");
@@ -1002,15 +1084,14 @@ typename SessionModel<D>::PrefillCursor SessionModel<D>::session_prefill_begin(
     if (mtp_pos_[static_cast<size_t>(req)] != attach_position)
       throw std::logic_error("session_prefill_begin: draft is not at the attach position");
   }
+  cursor.epoch = session_epochs_[req];
   // The first advance runs in the same scheduler quantum as begin.
   return cursor;
 }
 
 template <class D>
 bool SessionModel<D>::session_prefill_advance(PrefillCursor& cursor, int64_t chunk_tokens) {
-  check_req(cursor.req, "session_prefill_advance");
-  if (cursor.next >= cursor.end || session_pos_[static_cast<size_t>(cursor.req)] != cursor.next)
-    throw std::logic_error("session_prefill_advance: completed or stale cursor");
+  validate_prefill_cursor(cursor, "session_prefill_advance");
   const int64_t budget = chunk_tokens == 0 ? cursor.budget_tokens : chunk_tokens;
   if (budget < snapshot_align_ || budget > max_tokens_ || budget % snapshot_align_ != 0)
     throw std::invalid_argument("session_prefill_advance: chunk budget must fit max_tokens and snapshot alignment");
@@ -1033,106 +1114,24 @@ bool SessionModel<D>::session_prefill_advance(PrefillCursor& cursor, int64_t chu
 }
 
 template <class D>
-std::vector<bool> SessionModel<D>::session_prefill_advance_group(const std::vector<PrefillCursor*>& cursors,
+template <class Cursor>
+std::vector<typename SessionModel<D>::Outputs> SessionModel<D>::session_prefill_verify_group(
+    const std::vector<Cursor*>& cursors, const std::vector<int64_t>& budgets,
+    const std::vector<int>& reqs, const std::vector<std::vector<int64_t>>& feeds, int graph_rows) {
+  return PrefillBatch<SessionModel<D>>::run(*this, cursors, budgets, reqs, feeds, graph_rows);
+}
+
+template <class D>
+template <class Cursor>
+std::vector<bool> SessionModel<D>::session_prefill_advance_group(const std::vector<Cursor*>& cursors,
                                                                  const std::vector<int64_t>& chunk_tokens) {
-  if constexpr (!D::kPrefillGroupAdvance)
-    throw std::logic_error("session_prefill_advance_group: family advances one prefill per walk");
-  const int n = static_cast<int>(cursors.size());
-  if (chunk_tokens.size() != cursors.size())
-    throw std::invalid_argument("session_prefill_advance_group: one budget per cursor");
-  if (n == 0) return {};
-  std::vector<int64_t> ids, span_pos0, ends;
-  std::vector<int32_t> span_reqs, span_lens;
-  for (int s = 0; s < n; ++s) {
-    PrefillCursor& c = *cursors[static_cast<size_t>(s)];
-    check_req(c.req, "session_prefill_advance_group");
-    for (int t = 0; t < s; ++t)
-      if (cursors[static_cast<size_t>(t)]->req == c.req)
-        throw std::invalid_argument("session_prefill_advance_group: a request twice in the group");
-    if (c.next >= c.end || session_pos_[static_cast<size_t>(c.req)] != c.next)
-      throw std::logic_error("session_prefill_advance_group: completed or stale cursor");
-    const int64_t budget = chunk_tokens[static_cast<size_t>(s)] == 0 ? c.budget_tokens : chunk_tokens[static_cast<size_t>(s)];
-    if (budget < snapshot_align_ || budget > max_tokens_ || budget % snapshot_align_ != 0)
-      throw std::invalid_argument("session_prefill_advance_group: chunk budget must fit max_tokens and snapshot alignment");
-    // Up to the next cut, within the budget from where the cursor stands.
-    const int64_t c0 = c.next;
-    int64_t c1 = c.cut_index < c.cuts.size() ? c.cuts[c.cut_index] : c.end;
-    c1 = std::min(c1, c0 + budget);
-    ids.insert(ids.end(), c.ids + (c0 - c.start), c.ids + (c1 - c.start));
-    span_reqs.push_back(c.req);
-    span_pos0.push_back(c0);
-    span_lens.push_back(static_cast<int32_t>(c1 - c0));
-    ends.push_back(c1);
+  if (cursors.empty()) {
+    if (!chunk_tokens.empty()) throw std::invalid_argument("prefill: one budget per cursor");
+    return {};
   }
-  if (static_cast<int64_t>(ids.size()) > max_tokens_)
-    throw std::invalid_argument("session_prefill_advance_group: the group's chunks exceed max_tokens");
-  for (PrefillCursor* c : cursors) {
-    if (!c->suspended) continue;
-    push_position(c->req);
-    if (mtp_) push_mtp_position(c->req);
-    c->suspended = false;
-  }
-  RowRun run;
-  run.req = cursors[0]->req;
-  run.ids = ids.data();
-  run.T = static_cast<int>(ids.size());
-  run.pos0 = 0;
-  run.decode = false;
-  run.all_rows = false;
-  run.first_chunk = true;
-  run.last_chunk = true;
-  run.span_reqs = span_reqs.data();
-  run.span_pos0 = span_pos0.data();
-  run.span_lens = span_lens.data();
-  run.num_spans = n;
-  Outputs all = derived().run_rows(run);
-  const size_t H = static_cast<size_t>(hidden_);
-  std::vector<bool> done(static_cast<size_t>(n));
-  for (int s = 0; s < n; ++s) {
-    PrefillCursor& c = *cursors[static_cast<size_t>(s)];
-    const int req = c.req;
-    const int64_t c0 = c.next, c1 = ends[static_cast<size_t>(s)];
-    if (c.cut_index < c.cuts.size() && c1 == c.cuts[c.cut_index]) ++c.cut_index;
-    Outputs& o = c.output;
-    o.lm_vocab_begin = all.lm_vocab_begin;
-    o.lm_vocab_count = all.lm_vocab_count;
-    o.logits.assign(all.logits.begin() + static_cast<std::ptrdiff_t>(s) * lm_vocab_count_,
-                    all.logits.begin() + static_cast<std::ptrdiff_t>(s + 1) * lm_vocab_count_);
-    o.final_hidden_bits.assign(all.final_hidden_bits.begin() + static_cast<std::ptrdiff_t>(s) * static_cast<std::ptrdiff_t>(H),
-                               all.final_hidden_bits.begin() + static_cast<std::ptrdiff_t>(s + 1) * static_cast<std::ptrdiff_t>(H));
-    session_pos_[static_cast<size_t>(req)] = c1;
-    push_position(req);
-    if (mtp_) {
-      // The draft block over this chunk's rows (row q embeds tok_{q+1}).
-      const int64_t r1 = std::min<int64_t>(c1, c.end - 1);
-      if (r1 > c0) mtp_prefill_rows(req, c0, r1, c.ids + (c0 + 1 - c.start));
-      mtp_pos_[static_cast<size_t>(req)] = std::max<int64_t>(mtp_pos_[static_cast<size_t>(req)], r1);
-      push_mtp_position(req);
-    }
-    bool closed = c1 == c.end;
-    for (auto* at = c.snap; at != nullptr; at = at->next) {
-      if (!at->taken && at->position == c1) {
-        try {
-          *at->meta = session_snapshot(req, at->dst);
-          at->taken = true;
-        } catch (const CachePoolExhausted& e) {
-          DGPP_LOG_WARN("prefix cache: snapshot at {} skipped for slot {}: {}", c1, req, e.what());
-        }
-        closed = true;
-      }
-    }
-    c.span_start = closed;
-    c.next = c1;
-    report_prefill_progress(req, c1);
-    done[static_cast<size_t>(s)] = c1 == c.end;
-    if (c1 != c.end) {
-      // As session_prefill_advance: an unfinished slot is inert to a replay.
-      DGPP_CUDA_OK(cudaMemsetAsync(d_session_pos_ + req, 0xff, sizeof(int64_t), stream_));
-      if (mtp_) DGPP_CUDA_OK(cudaMemsetAsync(d_mtp_pos_ + req, 0xff, sizeof(int64_t), stream_));
-      c.suspended = true;
-    }
-  }
-  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  (void)PrefillBatch<SessionModel<D>>::run(*this, cursors, chunk_tokens, {}, {});
+  std::vector<bool> done;
+  for (const auto* cursor : cursors) done.push_back(cursor->next == cursor->end);
   return done;
 }
 
@@ -1204,7 +1203,7 @@ std::vector<typename SessionModel<D>::Outputs> SessionModel<D>::session_prefill_
     push_position(req);
     if (mtp_) {
       // The draft block over the span's rows (row q embeds tok_{q+1}).
-      if (P - 1 > 0) mtp_prefill_rows(req, 0, P - 1, ids.data() + at + 1);
+      if (P - 1 > 0) mtp_prefill_rows(req, 0, P - 1, ids.data() + at + 1, static_cast<int>(at));
       mtp_pos_[static_cast<size_t>(req)] = std::max<int64_t>(P - 1, 0);
       push_mtp_position(req);
     }
@@ -1454,6 +1453,7 @@ void SessionModel<D>::session_rollback(int req, int accepted, int rows, int snap
 template <class D>
 void SessionModel<D>::session_close(int req) {
   check_req(req, "session_close");
+  ++session_epochs_[req];
   derived().reset_slot_state(req);
   session_pos_[static_cast<size_t>(req)] = 0;
   push_position(req);
@@ -1746,7 +1746,7 @@ void SessionModel<D>::session_graph_seed_feed(int req, const std::vector<int64_t
 }
 
 template <class D>
-void SessionModel<D>::session_graph_capture_batch(int rows_per_request, int requests_arg, int feed_rows) {
+void SessionModel<D>::session_graph_capture_batch_inputs(int rows_per_request, int requests_arg, int feed_rows) {
   const int requests = requests_arg > 0 ? requests_arg : max_requests_;
   if (rows_per_request < 1 || rows_per_request > kSpecRows || requests < 1 || requests > max_requests_ ||
       requests * rows_per_request > max_decode_rows_)
@@ -1768,34 +1768,16 @@ void SessionModel<D>::session_graph_capture_batch(int rows_per_request, int requ
   graph_batch_requests_ = requests;
   graph_rows_per_request_ = rows_per_request;
   graph_feed_rows_ = feed_rows > rows_per_request ? feed_rows : 0;
-  step_tokens_ = d_tokens_ + static_cast<size_t>(max_decode_rows_);  // the fixed batch: every slot's feed rows
-  if (graph_batch_map_source_)
-    glm_upload_i32(graph_batch_map_source_, d_batch_map_, requests, stream_);
-  if (graph_feed_rows_ > 0 || graph_batch_map_source_) {
-    // The reduced-depth batch: the first rows_per_request rows of every
-    // slot's feed, compacted into the front scratch (free during a replay),
-    // so the walk's rows stay contiguous per request; the next-tokens write
-    // at the end of the replay lands in the feeds themselves.
-    glm_spec_gather_feed(d_tokens_ + static_cast<size_t>(max_decode_rows_), requests,
-                         graph_feed_rows_ > 0 ? graph_feed_rows_ : rows_per_request,
-                         rows_per_request, d_tokens_, stream_,
-                         graph_batch_map_source_ ? d_batch_map_ : nullptr);
-    step_tokens_ = d_tokens_;
-  }
   decode_rows_ = rows;
-  for (int q = 0; q < requests; ++q) {
-    h_req_spans_[2 * q] = q * rows_per_request;
-    h_req_spans_[2 * q + 1] = rows_per_request;
-    for (int r = 0; r < rows_per_request; ++r) h_req_ids_[q * rows_per_request + r] = q;
-  }
-  if (graph_batch_map_source_)
-    glm_batch_rows(d_batch_map_, requests, rows_per_request, d_req_ids_, d_req_spans_, stream_);
-  else {
-    glm_upload_i32(h_req_ids_, d_req_ids_, rows, stream_);
-    glm_upload_i32(h_req_spans_, d_req_spans_, 2 * requests, stream_);
-  }
-  glm_spec_positions_batched(d_session_pos_, d_req_ids_, rows, rows_per_request, max_context_,
-                             d_step_pos_, stream_);
+  GraphBatchMapping<SessionModel<D>>::inputs(*this, requests, rows_per_request,
+      graph_feed_rows_ > 0 ? graph_feed_rows_ : rows_per_request);
+}
+
+template <class D>
+void SessionModel<D>::session_graph_capture_batch(int rows_per_request, int requests_arg, int feed_rows) {
+  session_graph_capture_batch_inputs(rows_per_request, requests_arg, feed_rows);
+  const int requests = graph_batch_requests_;
+  const int rows = requests * rows_per_request;
   const std::vector<int64_t> shape(static_cast<size_t>(rows), 0);
   RowRun run;
   run.req = 0;
@@ -1841,40 +1823,7 @@ void SessionModel<D>::session_graph_capture_commit_batch(const PickVerdict* devi
   if (graph_batch_requests_ <= 0 || graph_rows_per_request_ <= 0)
     throw std::logic_error("session_graph_capture_commit_batch: no fixed batch was captured");
   if (device_verdicts == nullptr) throw std::invalid_argument("session_graph_capture_commit_batch: null verdicts");
-  for (int req = 0; req < graph_batch_requests_; ++req) {
-    const int row0 = req * graph_rows_per_request_;
-    if (graph_batch_map_source_) {
-      if (max_requests_ < 2)
-        throw std::logic_error("compact commit: stride requires at least two request slots");
-      auto segments = derived().spec_segments(0, row0);
-      const auto next = derived().spec_segments(1, row0);
-      for (int i = 0; i < segments.count; ++i)
-        segments.seg[i].request_stride_bytes = reinterpret_cast<uintptr_t>(next.seg[i].dst) -
-                                               reinterpret_cast<uintptr_t>(segments.seg[i].dst);
-      if (segments.replay_dst != nullptr)
-        segments.replay_request_stride_bytes = reinterpret_cast<uintptr_t>(next.replay_dst) -
-                                               reinterpret_cast<uintptr_t>(segments.replay_dst);
-#ifndef NDEBUG
-      // Mapped commits require each destination to be affine in the physical request ID.
-      for (int q = 0; q < max_requests_; ++q) {
-        const auto actual = derived().spec_segments(q, row0);
-        if (actual.count != segments.count)
-          throw std::logic_error("compact commit: segment count differs by request");
-        for (int i = 0; i < segments.count; ++i) {
-          const auto expected = reinterpret_cast<uintptr_t>(segments.seg[i].dst) +
-                                q * segments.seg[i].request_stride_bytes;
-          if (reinterpret_cast<uintptr_t>(actual.seg[i].dst) != expected)
-            throw std::logic_error("compact commit: nonuniform request destination stride");
-        }
-      }
-#endif
-      glm_spec_commit(device_verdicts + req, graph_rows_per_request_, segments, d_session_pos_,
-                      stream_, d_batch_map_, req);
-    } else {
-      glm_spec_commit(device_verdicts + req, graph_rows_per_request_,
-                      derived().spec_segments(req, row0), d_session_pos_ + req, stream_);
-    }
-  }
+  GraphBatchMapping<SessionModel<D>>::commit(*this, device_verdicts, graph_batch_requests_, graph_rows_per_request_);
 }
 
 template <class D>
@@ -1890,15 +1839,18 @@ void SessionModel<D>::session_graph_capture_verify_next_tokens_batch(const PickV
 // ---- the MTP draft block ------------------------------------------------------
 
 template <class D>
-void SessionModel<D>::mtp_prefill_rows(int req, int64_t row0, int64_t row1, const int64_t* tokens) {
+void SessionModel<D>::mtp_prefill_rows(int req, int64_t row0, int64_t row1, const int64_t* tokens, int hidden_row) {
   const int64_t n = row1 - row0;
   if (n <= 0) return;
   if (n > max_tokens_) throw std::invalid_argument("mtp_prefill_rows: chunk too long");
   DGPP_CUDA_OK(cudaMemcpyAsync(d_tokens_, tokens, static_cast<size_t>(n) * 8, cudaMemcpyHostToDevice, stream_));
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   if constexpr (requires { derived().mtp_select_block(0); }) derived().mtp_select_block(0);
-  derived().mtp_run_rows(req, d_tokens_, row0, static_cast<int>(n), /*decode_row=*/false, /*capture=*/false,
-                         /*head_rows=*/0, /*batch_requests=*/0);
+  if constexpr (requires { derived().mtp_run_rows(req, d_tokens_, row0, static_cast<int>(n), false, false, 0, 0, hidden_row); })
+    derived().mtp_run_rows(req, d_tokens_, row0, static_cast<int>(n), false, false, 0, 0, hidden_row);
+  else
+    derived().mtp_run_rows(req, d_tokens_, row0, static_cast<int>(n), /*decode_row=*/false, /*capture=*/false,
+                           /*head_rows=*/0, /*batch_requests=*/0);
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
 }
 

@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -30,6 +31,7 @@
 #include <cuda_runtime.h>
 
 #include "common/cuda_check.hpp"
+#include "kernels/draft_head.hpp"
 #include "common/dtypes.hpp"
 #include "common/log.hpp"
 #include "common/test.hpp"
@@ -43,6 +45,7 @@
 #include "models/qwen/loader.hpp"
 #include "net/collective_bus.hpp"
 #include "qwen_fixture.hpp"
+#include "serve/prefill_policy.hpp"
 
 namespace fs = std::filesystem;
 using dgpp::BusBoundaryReducer;
@@ -192,6 +195,9 @@ struct RankOutcome {
   std::vector<int32_t> ga;           // the graph engine, scalar
   std::vector<int32_t> ba, bb, bc;   // the graph engine, batched
   std::vector<int32_t> ma, mb, mc;   // the MTP graph engine: scalar A, batched B and C
+  std::vector<int32_t> la, lb, lc;  // the lookup MTP graph engine: scalar A, batched B/C
+  uint64_t scalar_fused = 0;
+  uint64_t fused = 0;                // lookup-fused steps this rank served
   int mtp_steps_a = 0;               // scalar MTP steps A took (< kSteps: drafts stood)
 };
 
@@ -374,7 +380,7 @@ void rank_work_mtp(int r, const QwenTextConfig& cfg, const std::string& dir, con
 
 }  // namespace
 
-DGPP_TEST(qwen_engines_world_of_one_request_bound_preserves_mtp_and_slot_reuse) {
+static void check_qwen_request_bound(dgpp::LatentFormat kv_format) {
   struct RestoreModes {
     bool mapped = dgpp::QwenLayerStream::ngram_table_mmap();
     bool fp8 = dgpp::QwenLayerStream::dense_weights_fp8();
@@ -398,7 +404,7 @@ DGPP_TEST(qwen_engines_world_of_one_request_bound_preserves_mtp_and_slot_reuse) 
       cfg.max_position_embeddings = context;
       auto buses = start_world(1, kPort + 20);
       QwenModel model(cfg, dir, 128, 1024, QwenResidency::Resident, nullptr, 0, 1,
-                      4, true, 8, fp8);
+                      4, true, 8, fp8, false, kv_format);
       uint16_t* scratch = nullptr;
       DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&scratch),
                                  sizeof(uint16_t) * dgpp::kPickScratchElems(1), cudaHostAllocDefault));
@@ -452,6 +458,22 @@ DGPP_TEST(qwen_engines_world_of_one_request_bound_preserves_mtp_and_slot_reuse) 
     // pool stride; the second bounds it by an unaligned per-request ceiling.
     require(run(1024) == run(193),
             "bounding QSA workspace changes a four-slot MTP-1 transcript");
+  }
+}
+
+DGPP_TEST(qwen_engines_world_of_one_request_bound_preserves_mtp_and_slot_reuse) {
+  check_qwen_request_bound(dgpp::LatentFormat::kBf16);
+}
+
+DGPP_TEST(qwen_engines_fp8_attention_preserves_mtp_graph_and_slot_reuse) {
+  struct RestoreAttention {
+    ~RestoreAttention() { QwenModel::set_native_attention(false, false); }
+  } restore;
+  // Exercise each independent switch through mixed prefill, four live
+  // requests, graph replay, MTP verification and a retired/reopened slot.
+  for (bool prefill : {false, true}) {
+    QwenModel::set_native_attention(prefill, !prefill);
+    check_qwen_request_bound(dgpp::LatentFormat::kFp8);
   }
 }
 
@@ -706,6 +728,162 @@ DGPP_TEST(qwen_wide_compaction_fp8_preserves_projection_bits) {
     }
   }
 }
+
+static void check_mixed_prefill_engine(bool scheduled, bool adaptive = false) {
+  const auto cfg = qwenfx::tiny_config();
+  const std::string dir = "qwen_engine_fixture/mixed_plain";
+  qwenfx::write_fixture(cfg, dir);
+  for (const bool compact : {false, true}) {
+    auto buses = start_world(1, kPort + 31 + compact);
+    require(buses.size() == 1, "mixed plain: world-of-one bus");
+    QwenModel model(cfg, dir, 256, 1024, QwenResidency::Resident, nullptr, 0, 1,
+                    3, scheduled, 16, true, true);
+    uint16_t *scratch = nullptr, *prefix_scratch = nullptr, *gather_scratch = nullptr;
+    DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&scratch),
+                               sizeof(uint16_t) * dgpp::kPickScratchElems(1), cudaHostAllocDefault));
+    if (scheduled) {
+      DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&prefix_scratch),
+                                 2 * dgpp::fabric_sampling_prefix_scratch_elems(1), cudaHostAllocDefault));
+      DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&gather_scratch),
+                                 2 * dgpp::sampling_gather_scratch_elems(cfg.vocab_size), cudaHostAllocDefault));
+    }
+    try {
+      {
+        GraphEngineAdapter<QwenModel> engine(&model, buses[0].get(), 0, 1, scratch, cfg.vocab_size,
+            wait_timeout_ms(), 2, prefix_scratch, gather_scratch, 1, nullptr, 0, scheduled ? 3 : 1, compact);
+        int forced_depth = 1;
+        if (scheduled) {
+          engine.configure_verify_schedule(true, 1.f, .5f);
+          engine.set_verify_depth_hook([&](int, int, const float*, int) { return forced_depth; });
+        }
+        for (; forced_depth <= (scheduled ? 3 : 1); ++forced_depth) {
+          dgpp::sched::AdmissionPolicy policy;
+          policy.prefill_budget_tokens = 32;
+          policy.prefill_idle_budget_tokens = 64;
+          if (adaptive) {
+            policy.prefill_budget_automatic = true;
+            policy.decode_gap_target_ms = dgpp::sched::kDefaultDecodeGapTargetMs;
+            policy.first_token_target_ms = dgpp::sched::kDefaultFirstTokenTargetMs;
+          }
+          policy = dgpp::serve::resolve_prefill_policy(policy, engine, std::nullopt);
+          require(policy.prefill_early_admission, "mixed executor resolves automatic admission before requests exist");
+          std::vector<dgpp::sched::SchedulerRequest> requests(3);
+          std::vector<std::vector<int64_t>> expected;
+          for (int q = 0; q < 3; ++q) {
+            auto& request = requests[q];
+            request.id = "mixed-plain-" + std::to_string(q);
+            request.prompt = smoke_tokens(cfg, q == 0 ? 17 : q == 1 ? 193 : 1, 1040 + q);
+            request.max_steps = q == 0 ? 24 : q == 1 ? 2 : 12;
+            request.no_cache = true;
+            dgpp::sched::Scheduler solo(&engine, {}, 0, policy, 0);
+            solo.submit(request);
+            solo.run_to_completion();
+            expected.push_back(solo.find(request.id)->generated);
+          }
+          dgpp::sched::Scheduler concurrent(&engine, {}, 0, policy, 0);
+          concurrent.submit(requests[0]);
+          concurrent.tick();
+          concurrent.submit(requests[1]);
+          concurrent.tick();
+          require(engine.can_mix_prefill(1, {0}), "plain decoder supports the shared walk");
+          concurrent.submit(requests[2]);
+          const auto mixed_before = concurrent.meters().mixed_steps;
+          concurrent.tick();
+          require(concurrent.meters().mixed_steps == mixed_before + 1,
+                  "both prefills and the incumbent decode share the admission walk");
+          require(concurrent.meters().prefilling == 1 && concurrent.meters().queued == 0,
+                  "plain short admission precedes long prefill completion");
+          concurrent.run_to_completion();
+          for (int q = 0; q < 3; ++q) {
+            const auto* result = concurrent.find(requests[q].id);
+            require(result && result->steps_done == requests[q].max_steps, "plain mixed completion");
+            if (dgpp::dense_gemv_rows() >= 256)
+              require(result->generated == expected[q], "plain mixed transcript differs from solo");
+          }
+          engine.drain();
+          require(concurrent.meters().mixed_steps > 0, "shared walk was exercised");
+        }
+      }
+      require(model.kv_blocks_in_use() == 0, "plain mixed reservations leaked");
+    } catch (...) {
+      cudaFreeHost(scratch);
+      if (prefix_scratch) cudaFreeHost(prefix_scratch);
+      if (gather_scratch) cudaFreeHost(gather_scratch);
+      throw;
+    }
+    DGPP_CUDA_OK(cudaFreeHost(scratch));
+    if (prefix_scratch) DGPP_CUDA_OK(cudaFreeHost(prefix_scratch));
+    if (gather_scratch) DGPP_CUDA_OK(cudaFreeHost(gather_scratch));
+  }
+}
+
+DGPP_TEST(qwen_cached_tail_preserves_native_rows_in_mixed_prefill) {
+  struct RestoreDense {
+    bool fp8 = dgpp::QwenLayerStream::dense_weights_fp8();
+    ~RestoreDense() { dgpp::QwenLayerStream::set_dense_weights_fp8(fp8); }
+  } restore;
+  const auto cfg = qwenfx::tiny_config();
+  const std::string dir = "qwen_engine_fixture/cached_tail";
+  qwenfx::write_fixture(cfg, dir);
+  const auto prompt = smoke_tokens(cfg, 22, 741);
+  const std::vector<int64_t> prefix(prompt.begin(), prompt.begin() + 16);
+  const auto cold = smoke_tokens(cfg, 248, 742);
+  const auto decoder = smoke_tokens(cfg, 17, 743);
+  for (bool fp8 : {false, true}) {
+    dgpp::QwenLayerStream::set_dense_weights_fp8(fp8);
+    QwenModel model(cfg, dir, 512, 2048, QwenResidency::Resident, nullptr, 0, 1,
+                    3, false, 16, fp8, true);
+    (void)model.session_prefill(1, decoder);
+    model.session_reserve_blocks(1, 64);
+    const auto native_decode = model.session_verify_batch({1}, {{42, 43, 44, 45}}).front();
+    model.session_close(1);
+    const auto run = [&](int load) {
+      (void)model.session_prefill(0, prefix);
+      auto tail = model.session_prefill_begin(0, prompt, 64, 256, {}, nullptr, 16);
+      tail.final_output_only = true;
+      if (load == 1) {
+        (void)model.session_prefill(1, decoder);
+        model.session_reserve_blocks(1, 64);
+        const auto decoded = model.session_prefill_verify(tail, 256, {1}, {{42, 43, 44, 45}});
+        require(decoded.front().final_hidden_bits == native_decode.final_hidden_bits &&
+                    decoded.front().logits == native_decode.logits,
+                "isolating a reader preserves the native decoder-only group");
+      } else if (load == 2) {
+        (void)model.session_prefill(1, decoder);
+        model.session_reserve_blocks(1, 64);
+        auto reader = model.session_prefill_begin(2, cold, 256, 256);
+        reader.final_output_only = true;
+        const auto decoded = model.session_prefill_verify_group(
+            std::vector<QwenModel::PrefillCursor*>{&reader, &tail}, {256, 256},
+            {1}, {{42, 43, 44, 45}});
+        require(decoded.size() == 1 && decoded.front().logits.size() == 4 * static_cast<size_t>(cfg.vocab_size),
+                "mixed walk retains every decoder output");
+        require(reader.next == reader.end && tail.next == tail.end, "mixed readers completed");
+      } else {
+        require(model.session_prefill_advance(tail), "isolated tail completed");
+      }
+      auto result = tail.output;
+      const auto continuation = model.session_verify(0, {51, 52, 53, 54});
+      result.final_hidden_bits.insert(result.final_hidden_bits.end(),
+          continuation.final_hidden_bits.begin(), continuation.final_hidden_bits.end());
+      result.logits.insert(result.logits.end(), continuation.logits.begin(), continuation.logits.end());
+      for (int slot = 0; slot < 3; ++slot) model.session_close(slot);
+      require(model.kv_blocks_in_use() == 0, "cached-tail comparison leaked KV");
+      return result;
+    };
+    const auto reference = run(0);
+    for (int load : {1, 2}) {
+      const auto loaded = run(load);
+      require(loaded.final_hidden_bits == reference.final_hidden_bits,
+              std::string(fp8 ? "FP8" : "BF16") + " cached tail or subsequent decode hidden changed under load");
+      require(loaded.logits == reference.logits, "cached tail or subsequent decode logits changed under load");
+    }
+  }
+}
+
+DGPP_TEST(qwen_engines_mixed_prefill_without_mtp) { check_mixed_prefill_engine(false); }
+DGPP_TEST(qwen_engines_mixed_prefill_scheduled_verify) { check_mixed_prefill_engine(true); }
+DGPP_TEST(qwen_engines_adaptive_prefill_scheduled_verify) { check_mixed_prefill_engine(true, true); }
 
 DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
   const int sample_cap = std::getenv("DGPP_TEST_COMPACT_SAMPLING")
@@ -970,6 +1148,83 @@ DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
             require(result->generated == expected[i], "fair-share graph prefill changes the solo transcript");
         }
         require(graph.pool_blocks_in_use() == 0, "concurrent graph prefill leaks KV reservations");
+      }
+      {
+        // A below-budget request must join an already running real prefill.
+        // Its aligned tail donates capacity to the older reader in that tick.
+        const int64_t align = graph.prefill_chunk_alignment();
+        dgpp::sched::AdmissionPolicy policy;
+        policy.prefill_early_admission = true;
+        policy.prefill_budget_tokens = static_cast<int>(8 * align);
+        policy.prefill_idle_budget_tokens = policy.prefill_budget_tokens;
+        std::vector<dgpp::sched::SchedulerRequest> requests(2);
+        std::vector<std::vector<int64_t>> expected;
+        for (int i = 0; i < 2; ++i) {
+          requests[i].id = "join-" + std::to_string(i);
+          requests[i].prompt = smoke_tokens(cfg, i == 0 ? 40 * align - 5 : align + 1, 6500 + i);
+          requests[i].max_steps = 12;
+          if (sample_cap) {
+            // A stable top-k oracle across prefill chunk boundaries. With
+            // one candidate per rank it still exercises the exact gather
+            // fallback (asserted below). The full-vocabulary temperature-100
+            // lane below compares identical prefill shapes: changing chunk
+            // shapes perturbs near-tied logits and can permute its CDF even
+            // on the pre-shared-execution implementation.
+            requests[i].sampling.temperature = .7f;
+            requests[i].sampling.top_k = 7;
+            requests[i].sampling.top_p = .9f;
+            requests[i].sampling.presence_penalty = .2f;
+            requests[i].seed = 4567 + i;
+          }
+          dgpp::sched::Scheduler solo_sched(&graph, {}, 0, policy, /*prefix_slots=*/0);
+          solo_sched.submit(requests[i]);
+          int prefill_advances = 0;
+          while (solo_sched.has_pending()) {
+            const auto before = solo_sched.meters().prompt_tokens_computed;
+            solo_sched.tick();
+            prefill_advances += solo_sched.meters().prompt_tokens_computed > before;
+          }
+          require(prefill_advances == (static_cast<int64_t>(requests[i].prompt.size()) + 8 * align - 1) /
+                                         (8 * align),
+                  "a solo graph tail must not add walks by shrinking its final budget");
+          expected.push_back(solo_sched.find(requests[i].id)->generated);
+        }
+        dgpp::sched::Scheduler concurrent(&graph, {}, 0, policy, /*prefix_slots=*/0);
+        const auto fallbacks_before_join = graph.fallbacks();
+        concurrent.submit(requests[0]);
+        // Reach 16 * align, off the donated 6 * align grid. The cursor
+        // must spend the work budget from its actual position, not stop
+        // early at an unrelated global multiple of the new allocation.
+        for (int tick = 0; tick < 2; ++tick) concurrent.tick();
+        require(concurrent.meters().prefilling == 1, "long graph prefill must still be in flight");
+        concurrent.submit(requests[1]);
+        const auto before = concurrent.meters();
+        concurrent.tick();
+        require(concurrent.meters().tokens_generated > before.tokens_generated,
+                "short graph request must produce output on its first eligible tick");
+        require(concurrent.meters().prefilling == 1,
+                "short graph output must precede the long prefill completion");
+        const auto computed = concurrent.meters().prompt_tokens_computed - before.prompt_tokens_computed;
+        require(computed == 7 * align + 1,
+                "real graph prefill must consume the donated aligned tail within the budget: got " +
+                    std::to_string(computed) + ", expected " + std::to_string(7 * align + 1));
+        while (concurrent.has_pending()) {
+          concurrent.tick();
+          graph.drain();
+          for (int slot = 0; slot < slots; ++slot)
+            require(model.session_draft_position(slot) == model.session_position(slot),
+                    "shared replay must advance the host MTP counter with its target counter");
+        }
+        for (size_t i = 0; i < requests.size(); ++i) {
+          const auto* result = concurrent.find(requests[i].id);
+          require(result->steps_done == 12, "joined graph transcript is complete");
+          if (row_independent)
+            require(result->generated == expected[i], "joined graph prefill changes the solo transcript");
+        }
+        if (force_fallback)
+          require(graph.fallbacks() > fallbacks_before_join,
+                  "joined sampled requests must exercise the exact gather fallback");
+        require(graph.pool_blocks_in_use() == 0, "joined graph prefill leaks KV reservations");
       }
       if (sample_cap) {
         std::vector<std::vector<int32_t>> reference;
@@ -1316,7 +1571,7 @@ DGPP_TEST(qwen_compact_logits_preserve_cache_concurrency_and_mtp) {
       const int rows = 4 * (depth + 1);
       QwenModel model(cfg, dir, 128, 2048, QwenResidency::Resident, nullptr, 0, 1,
                       4, true, rows, true, compact);
-      require(model.logits_capacity_rows() == (compact ? rows : 128), "compact decode capacity");
+      require(model.logits_capacity_rows() == (compact ? rows + 3 : 128), "compact decode plus three reader outputs");
       uint16_t* scratch = nullptr;
       DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&scratch),
                                  sizeof(uint16_t) * dgpp::kPickScratchElems(1), cudaHostAllocDefault));
@@ -1415,11 +1670,362 @@ DGPP_TEST(qwen_compact_logits_preserve_cache_concurrency_and_mtp) {
   }
 }
 
+// Context-lookup drafting through the recorded MTP path (engine.lookup_draft):
+// the same repeating prompts with the gate off and on. The fused drafts ride
+// the ordinary verify/commit/rollback, so the transcripts must be identical;
+// the fused-step counter must be nonzero (otherwise the test is vacuous on
+// random weights, which never copy). Scalar A plus a two-slot batch B.
+void rank_work_mtp_lookup(int r, const QwenTextConfig& cfg, const std::string& dir,
+                          const std::vector<int64_t>& A, const std::vector<int64_t>& B,
+                          CollectiveBus* bus, ConstructBarrier* barrier, RankOutcome* out,
+                          bool lookup, int tail = 0, bool sampled = false) {
+  bool arrived = false;
+  const auto arrive_once = [&] {
+    if (arrived) return;
+    arrived = true;
+    barrier->arrive_and_wait();
+  };
+  uint16_t* scratch = nullptr;
+  uint16_t* prefix_scratch = nullptr;
+  uint16_t* gather_scratch = nullptr;
+  try {
+    BusBoundaryReducer reducer(*bus, wait_timeout_ms());
+    QwenModel mtp(cfg, dir, kMaxTokens, kCache, QwenResidency::Resident, &reducer, r, kWorld, kSlots, /*mtp=*/true);
+    DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&scratch),
+                               sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld), cudaHostAllocDefault));
+    if (sampled) {
+      DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&prefix_scratch),
+                                 2 * dgpp::fabric_sampling_prefix_scratch_elems(kWorld),
+                                 cudaHostAllocDefault));
+      DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&gather_scratch),
+                                 2 * dgpp::sampling_gather_scratch_elems(cfg.vocab_size),
+                                 cudaHostAllocDefault));
+    }
+    arrive_once();
+    GraphEngineAdapter<QwenModel> eng(&mtp, bus, r, kWorld, scratch, cfg.vocab_size,
+                                      wait_timeout_ms(),
+                                      /*batch_min_live=*/2, prefix_scratch, gather_scratch,
+                                      /*candidates=*/sampled ? 32 : 0, /*grammar=*/nullptr,
+                                      /*prefix_slots=*/0, /*mtp_depth=*/1, test_compaction(), tail);
+    if (lookup) eng.set_lookup_drafts(true, /*nmin=*/2, /*nstrong=*/4, /*agree=*/2);
+    const auto configure = [&](int slot) {
+      if (!sampled) return;
+      auto params = dgpp::sample::greedy_params();
+      params.temperature = 1.0f;
+      params.top_k = 1;  // a sampled slot with a deterministic target; lookup must still stay off
+      eng.configure_sampling(slot, params, 1234 + slot);
+    };
+    configure(0);
+    out->la.push_back(eng.prefill(0, A));
+    eng.reserve(0, static_cast<int64_t>(A.size()) + kSteps + 3);
+    while (out->la.size() < static_cast<size_t>(kSteps) + 1) {
+      const std::vector<int32_t> t = eng.step(0);
+      require(!t.empty() && t.size() <= static_cast<size_t>(2 + tail), "lookup scalar step shape");
+      if (out->la.size() == 1 && lookup && !sampled)
+        require(t.size() == 1, "the first scalar lookup draft must be rejected");
+      out->la.insert(out->la.end(), t.begin(), t.end());
+    }
+    out->la.resize(static_cast<size_t>(kSteps) + 1);
+    eng.close(0);
+    out->scalar_fused = eng.lookup_fused_steps();
+    configure(0);  // retiring a greedy or sampled slot clears its history and proposal state
+    out->lb.push_back(eng.prefill(0, B));
+    eng.reserve(0, static_cast<int64_t>(B.size()) + kSteps + 3);
+    configure(1);
+    out->lc.push_back(eng.prefill(1, B));
+    eng.reserve(1, static_cast<int64_t>(B.size()) + kSteps + 3);
+    while (out->lb.size() <= static_cast<size_t>(kSteps) || out->lc.size() <= static_cast<size_t>(kSteps)) {
+      const auto t = eng.step_batch({0, 1});
+      require(t.size() == 2, "lookup batch step shape");
+      if (out->lb.size() == 1 && lookup && tail > 0 && !sampled)
+        require(t[0].size() == 2 && t[1].size() == 2,
+                "batch lookup must accept its first draft and reject the second");
+      out->lb.insert(out->lb.end(), t[0].begin(), t[0].end());
+      out->lc.insert(out->lc.end(), t[1].begin(), t[1].end());
+    }
+    out->lb.resize(static_cast<size_t>(kSteps) + 1);
+    out->lc.resize(static_cast<size_t>(kSteps) + 1);
+    eng.close(0);
+    eng.close(1);
+    eng.drain();
+    out->fused = eng.lookup_fused_steps();
+    cudaFreeHost(scratch);
+    if (prefix_scratch) cudaFreeHost(prefix_scratch);
+    if (gather_scratch) cudaFreeHost(gather_scratch);
+  } catch (const std::exception& e) {
+    if (scratch) cudaFreeHost(scratch);
+    if (prefix_scratch) cudaFreeHost(prefix_scratch);
+    if (gather_scratch) cudaFreeHost(gather_scratch);
+    out->error = "rank " + std::to_string(r) + ": " + e.what();
+    arrive_once();
+  }
+}
+
+// A zero vocabulary head picks token 0 on every row. The prompt suffix ends
+// in that pending token, so lookup deterministically proposes the deliberately
+// wrong continuation. Random fixture weights do not continue repeating text.
+void write_lookup_fixture(const QwenTextConfig& cfg, const std::string& dir) {
+  qwenfx::write_fixture_for(cfg, dir);
+  std::fstream shard(fs::path(dir) / "model.safetensors",
+                     std::ios::in | std::ios::out | std::ios::binary);
+  uint64_t header_bytes = 0;
+  shard.read(reinterpret_cast<char*>(&header_bytes), sizeof(header_bytes));
+  size_t offset = 0;
+  bool found = false;
+  for (const auto& tensor : dgpp::qwen_expected_text_tensors(cfg)) {
+    if (tensor.cls == dgpp::QwenWeightClass::LmHead) {
+      require(tensor.dtype == dgpp::DType::BF16, "lookup fixture requires a BF16 head");
+      std::vector<char> zeros(tensor.nbytes(), 0);
+      shard.seekp(static_cast<std::streamoff>(8 + header_bytes + offset));
+      shard.write(zeros.data(), static_cast<std::streamsize>(zeros.size()));
+      found = true;
+    }
+    offset += tensor.nbytes();
+  }
+  require(found && shard.good(), "lookup fixture head written");
+}
+
+DGPP_TEST(qwen_engines_loopback_world_2_lookup_draft_matches_mtp_decode) {
+  const QwenTextConfig cfg = qwenfx::tiny_config();
+  const std::string dir = "qwen_engine_lookup_fixture";
+  write_lookup_fixture(cfg, dir);
+  const std::vector<int64_t> A = {7, 8, 9, 0, 1, 7, 8, 9};
+  const std::vector<int64_t> B = {7, 8, 9, 0, 1, 7, 8, 9};
+  std::vector<RankOutcome> off(kWorld), on(kWorld);
+  for (int pass = 0; pass < 2; ++pass) {
+    std::vector<std::unique_ptr<CollectiveBus>> buses =
+        start_world(kWorld, static_cast<uint16_t>(kPort + 30 + pass));
+    require(!buses.empty(), "the loopback bus world failed to start");
+    std::vector<RankOutcome>& outs = pass == 0 ? off : on;
+    ConstructBarrier barrier(kWorld);
+    std::vector<std::thread> workers;
+    for (int r = 0; r < kWorld; ++r)
+      workers.emplace_back(rank_work_mtp_lookup, r, std::cref(cfg), std::cref(dir), std::cref(A),
+                           std::cref(B), buses[static_cast<size_t>(r)].get(), &barrier,
+                           &outs[static_cast<size_t>(r)], /*lookup=*/pass == 1, /*tail=*/0,
+                           /*sampled=*/false);
+    for (auto& t : workers) t.join();
+    for (int r = 0; r < kWorld; ++r) require(outs[static_cast<size_t>(r)].error.empty(), outs[static_cast<size_t>(r)].error);
+  }
+  for (int r = 0; r < kWorld; ++r) {
+    require(off[static_cast<size_t>(r)].la == on[static_cast<size_t>(r)].la, "lookup scalar transcript differs");
+    require(off[static_cast<size_t>(r)].lb == on[static_cast<size_t>(r)].lb, "lookup batch transcript differs (slot 0)");
+    require(off[static_cast<size_t>(r)].lc == on[static_cast<size_t>(r)].lc, "lookup batch transcript differs (slot 1)");
+  }
+  for (int r = 1; r < kWorld; ++r)
+    require(on[static_cast<size_t>(r)].la == on[0].la && on[static_cast<size_t>(r)].lb == on[0].lb &&
+                on[static_cast<size_t>(r)].lc == on[0].lc,
+            "the ranks' lookup transcripts differ");
+  require(on[0].scalar_fused > 0 && on[0].fused > on[0].scalar_fused,
+          "lookup must fire in scalar decode and in the batch after slot reuse");
+  DGPP_LOG_INFO("world 2 lookup draft: A {} | B {}, fused {} steps",
+                ids_text(on[0].la), ids_text(on[0].lb), on[0].fused);
+}
+
+// The lookup tail (engine.lookup_tail): a wider verify block with the MTP
+// chain spanning it and lookup fusing over the whole width. Same repeating
+// prompts, MTP depth 1 alone vs depth 1 + 3 tail rows: identical transcripts
+// (exact at any width), and the tail must fire.
+DGPP_TEST(qwen_engines_loopback_world_2_lookup_tail_matches_mtp_decode) {
+  const QwenTextConfig cfg = qwenfx::tiny_config();
+  const std::string dir = "qwen_engine_lookup_fixture";
+  write_lookup_fixture(cfg, dir);
+  const std::vector<int64_t> A = {7, 8, 9, 0, 1, 7, 8, 9};
+  const std::vector<int64_t> B = {7, 8, 9, 0, 0, 1, 7, 8, 9};
+  std::vector<RankOutcome> off(kWorld), on(kWorld);
+  for (int pass = 0; pass < 2; ++pass) {
+    std::vector<std::unique_ptr<CollectiveBus>> buses =
+        start_world(kWorld, static_cast<uint16_t>(kPort + 32 + pass));
+    require(!buses.empty(), "the loopback bus world failed to start");
+    std::vector<RankOutcome>& outs = pass == 0 ? off : on;
+    ConstructBarrier barrier(kWorld);
+    std::vector<std::thread> workers;
+    for (int r = 0; r < kWorld; ++r)
+      workers.emplace_back(rank_work_mtp_lookup, r, std::cref(cfg), std::cref(dir), std::cref(A),
+                           std::cref(B), buses[static_cast<size_t>(r)].get(), &barrier,
+                           &outs[static_cast<size_t>(r)], /*lookup=*/pass == 1,
+                           /*tail=*/pass == 1 ? 3 : 0, /*sampled=*/false);
+    for (auto& t : workers) t.join();
+    for (int r = 0; r < kWorld; ++r) require(outs[static_cast<size_t>(r)].error.empty(), outs[static_cast<size_t>(r)].error);
+  }
+  for (int r = 0; r < kWorld; ++r) {
+    require(off[static_cast<size_t>(r)].la == on[static_cast<size_t>(r)].la, "lookup-tail scalar differs");
+    require(off[static_cast<size_t>(r)].lb == on[static_cast<size_t>(r)].lb, "lookup-tail batch differs (slot 0)");
+    require(off[static_cast<size_t>(r)].lc == on[static_cast<size_t>(r)].lc, "lookup-tail batch differs (slot 1)");
+  }
+  for (int r = 1; r < kWorld; ++r)
+    require(on[static_cast<size_t>(r)].la == on[0].la && on[static_cast<size_t>(r)].lb == on[0].lb &&
+                on[static_cast<size_t>(r)].lc == on[0].lc,
+            "the ranks' lookup-tail transcripts differ");
+  require(on[0].scalar_fused > 0 && on[0].fused > on[0].scalar_fused,
+          "lookup tail must fire in scalar decode and in the batch after slot reuse");
+  DGPP_LOG_INFO("world 2 lookup tail: A {} | B {}, fused {} steps",
+                ids_text(on[0].la), ids_text(on[0].lb), on[0].fused);
+}
+
+// Sampled fallback and prefix caching must agree even when the host accepts
+// more rows than the device's provisional verdict. Run the same growing
+// conversations cold and cached, with retirement and slot reuse on both ranks.
+// Reuse a prefill cut with matching four-row chunks in both runs. Replaying
+// generated history as prefill need not reproduce decode's floating-point
+// arithmetic; attachment to retained rolling state is covered separately.
+static void prefix_hop_sampling_gate(int depth, uint16_t port) {
+  std::string json = qwenfx::tiny_text_json();
+  const auto at = json.find("\"vocab_size\": 512");
+  require(at != std::string::npos, "fixture vocabulary anchor");
+  json.replace(at, std::strlen("\"vocab_size\": 512"), "\"vocab_size\": 64");
+  const auto text = dgpp::minijson::parse(json);
+  const auto quant = dgpp::minijson::parse(qwenfx::tiny_quant_json());
+  const auto cfg = QwenTextConfig::parse(text.root, &quant.root);
+  const std::string dir = "qwen_engine_prefix_fixture";
+  qwenfx::write_fixture(cfg, dir, json.c_str());
+  std::vector<uint64_t> digests(kWorld);
+  std::vector<std::vector<std::vector<int64_t>>> sequences(kWorld);
+  // A bus owns the graph variants, so each engine needs a fresh world.
+  for (bool cached : {false, true}) {
+    auto buses = start_world(kWorld, port);
+    require(!buses.empty(), "prefix sampling bus world");
+    ConstructBarrier barrier(kWorld);
+    std::vector<std::string> errors(kWorld);
+    std::vector<std::thread> workers;
+    for (int rank = 0; rank < kWorld; ++rank) workers.emplace_back([&, rank] {
+      bool arrived = false;
+      uint16_t *scratch = nullptr, *prefix_scratch = nullptr, *gather_scratch = nullptr;
+      try {
+        auto* bus = buses[rank].get();
+        BusBoundaryReducer reducer(*bus, wait_timeout_ms());
+        DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&scratch),
+            sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld), cudaHostAllocDefault));
+        DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&prefix_scratch),
+            sizeof(uint16_t) * dgpp::fabric_sampling_prefix_scratch_elems(kWorld), cudaHostAllocDefault));
+        DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&gather_scratch),
+            sizeof(uint16_t) * dgpp::sampling_gather_scratch_elems(cfg.vocab_size), cudaHostAllocDefault));
+        arrived = true;
+        barrier.arrive_and_wait();
+        {
+          QwenModel model(cfg, dir, 512, 2048, QwenResidency::Resident, &reducer, rank, kWorld,
+                          /*max_requests=*/2, /*mtp=*/true, /*max_decode_rows=*/8);
+          std::vector<std::vector<int64_t>> got;
+          {
+            GraphEngineAdapter<QwenModel> engine(&model, bus, rank, kWorld, scratch, cfg.vocab_size,
+                wait_timeout_ms(), /*batch_min_live=*/2, prefix_scratch, gather_scratch,
+                /*sampling_candidates=*/8, nullptr, /*prefix_slots=*/cached ? 6 : 0, depth,
+                test_compaction());
+            dgpp::sched::AdmissionPolicy policy;
+            policy.prefill_budget_tokens = 4;
+            dgpp::sched::Scheduler sched(&engine, {}, 0, policy);
+            std::vector<std::vector<int64_t>> prompts{smoke_tokens(cfg, 13, 789), smoke_tokens(cfg, 15, 790)};
+            size_t result = 0;
+            for (int turn = 0; turn < 6; ++turn) {
+              const int live = turn == 0 ? 1 : 2;
+              for (int q = 0; q < live; ++q) {
+                dgpp::sched::SchedulerRequest req;
+                req.id = std::to_string(turn) + ":" + std::to_string(q);
+                req.prompt = prompts[q];
+                req.boundaries = {4, 8, 12};
+                req.max_steps = q == 0 ? 48 : 45;
+                req.seed = 4567 + turn * 2 + q;
+                req.sampling.temperature = 1.f;
+                req.sampling.top_p = .95f;
+                sched.submit(std::move(req));
+              }
+              sched.run_to_completion();
+              for (int q = 0; q < live; ++q) {
+                const auto& tokens = sched.results().at(result++).generated;
+                got.push_back(tokens);
+                prompts[q].insert(prompts[q].end(), tokens.begin(), tokens.end());
+                prompts[q].insert(prompts[q].end(), {7, 8, 9});
+              }
+            }
+            require(engine.fallbacks() > 0, "sampled fixture must exercise fallback");
+            if (cached) {
+              require(got.size() == sequences[rank].size(), "Qwen request count differs");
+              for (size_t i = 0; i < got.size(); ++i) {
+                require(got[i].size() == sequences[rank][i].size(), "Qwen transcript length differs");
+                size_t token = 0;
+                while (token < got[i].size() && got[i][token] == sequences[rank][i][token]) ++token;
+                require(token == got[i].size(), "prefix cache changed sampled Qwen transcript " +
+                    std::to_string(i) + " at token " + std::to_string(token));
+              }
+              require(sched.meters().prefix_hits > 0, "growing conversations must attach");
+              require(sched.meters().prefix_skipped_hop_fallback > 0 &&
+                          sched.meters().prefix_skipped_hop_mismatch == 0,
+                      "sampled Qwen must exercise the skipped-hop path without mismatches");
+              DGPP_LOG_INFO("Qwen prefix depth {} rank {}: {} fallback skips, {} cache hits",
+                            depth, rank, sched.meters().prefix_skipped_hop_fallback,
+                            sched.meters().prefix_hits);
+              digests[rank] = sched.prefix_digest();
+            } else sequences[rank] = got;
+            engine.drain();
+          }
+          require(model.kv_blocks_in_use() == 0, "prefix sampling leaked cache blocks");
+        }
+      } catch (const std::exception& e) {
+        errors[rank] = e.what();
+        if (!arrived) barrier.arrive_and_wait();
+      }
+      if (scratch) cudaFreeHost(scratch);
+      if (prefix_scratch) cudaFreeHost(prefix_scratch);
+      if (gather_scratch) cudaFreeHost(gather_scratch);
+    });
+    for (auto& worker : workers) worker.join();
+    for (const auto& error : errors) require(error.empty(), error);
+  }
+  for (int rank = 1; rank < kWorld; ++rank) {
+    require(sequences[rank] == sequences[0], "sampled Qwen ranks disagree");
+    require(digests[rank] == digests[0], "prefix decisions differ across ranks");
+  }
+}
+
+DGPP_TEST(qwen_engines_prefix_hop_sampled_fallback_depth1) {
+  prefix_hop_sampling_gate(1, 30013);
+}
+
+DGPP_TEST(qwen_engines_prefix_hop_sampled_fallback_depth3) {
+  prefix_hop_sampling_gate(3, 30014);
+}
+
+DGPP_TEST(qwen_engines_loopback_world_2_lookup_skips_sampled_slots) {
+  const QwenTextConfig cfg = qwenfx::tiny_config();
+  const std::string dir = "qwen_engine_lookup_fixture";
+  write_lookup_fixture(cfg, dir);
+  const std::vector<int64_t> A = {7, 8, 9, 0, 1, 7, 8, 9};
+  const std::vector<int64_t> B = {7, 8, 9, 0, 0, 1, 7, 8, 9};
+  for (int tail : {0, 3}) {
+    std::vector<RankOutcome> off(kWorld), on(kWorld);
+    for (int pass = 0; pass < 2; ++pass) {
+      auto buses = start_world(kWorld, static_cast<uint16_t>(kPort + 34 + pass));
+      require(!buses.empty(), "lookup sampling bus world started");
+      auto& outs = pass == 0 ? off : on;
+      ConstructBarrier barrier(kWorld);
+      std::vector<std::thread> workers;
+      for (int r = 0; r < kWorld; ++r)
+        workers.emplace_back(rank_work_mtp_lookup, r, std::cref(cfg), std::cref(dir), std::cref(A),
+                             std::cref(B), buses[r].get(), &barrier, &outs[r], pass == 1, tail,
+                             true);
+      for (auto& t : workers) t.join();
+      for (const auto& out : outs) require(out.error.empty(), out.error);
+    }
+    for (int r = 0; r < kWorld; ++r) {
+      require(off[r].la == on[r].la && off[r].lb == on[r].lb && off[r].lc == on[r].lc,
+              "lookup changed sampled transcripts");
+      require(on[r].fused == 0, "lookup must never reprice sampled MTP proposals");
+      require(on[r].la == on[0].la && on[r].lb == on[0].lb && on[r].lc == on[0].lc,
+              "sampled lookup ranks disagree");
+    }
+  }
+}
+
 int main() {
   // DGPP_TEST_QWEN_GPTQ=1: every case runs the AutoRound hybrid's fixture
   // (tests/cuda/qwen_fixture.hpp), whose dense stack ships as block fp8 —
   // the loader's fp8 dense mode is the only one that reads it.
   if (const char* g = std::getenv("DGPP_TEST_QWEN_GPTQ"); g && g[0] == '1')
     dgpp::QwenLayerStream::set_dense_weights_fp8(true);
+  // DGPP_TEST_DRAFT_SCREEN=N: every case drafts through the head screen
+  // (kernels/head_screen.hpp) with an N-block candidate cap — the sharded
+  // head and the pick merge at world 2 behind the masked logits.
+  if (const char* d = std::getenv("DGPP_TEST_DRAFT_SCREEN"); d && d[0] != '\0')
+    dgpp::draft_head_configure(dgpp::DraftHeadSettings{std::atoi(d)});
   return dgpp::test::run_all();
 }

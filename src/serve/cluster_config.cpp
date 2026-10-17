@@ -1,18 +1,18 @@
 #include "serve/cluster_config.hpp"
 
-#include <arpa/inet.h>
-
 #include <algorithm>
+#include <arpa/inet.h>
 #include <cmath>
-#include <limits>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
 #include "common/bf16_residency.hpp"
 #include "kernels/latent_format.hpp"
 #include "loaders/minijson.hpp"
+#include "text/word_cache.hpp"
 
 namespace dgpp::serve {
 
@@ -114,6 +114,16 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
       c.ssh_user = text(v, k, what);
     } else if (k == "release") {
       c.release = text(v, k, what);
+    } else if (k == "tokenizer") {
+      if (!v.is_object()) fail(what, "'tokenizer' must be an object");
+      for (const Member& p : v.members()) {
+        if (p.key != "word_cache_entries") fail(what, "unknown key 'tokenizer." + p.key + "'");
+        if (p.value.kind() != Value::Kind::Int)
+          fail(what, "'tokenizer.word_cache_entries' must be an integer in [0, 10000]");
+        c.tokenizer_word_cache_entries =
+            static_cast<size_t>(integer(p.value, "tokenizer.word_cache_entries", what, 0,
+                                        dgpp::text::detail::WordCache::kMaxEntries));
+      }
     } else if (k == "http") {
       if (!v.is_object()) fail(what, "'http' must be an object");
       for (const Member& p : v.members()) {
@@ -131,6 +141,10 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
             fail(what, "'http.max_body_bytes' must be an integer (positive 64-bit byte count)");
           c.http_max_body_bytes = integer(p.value, "http.max_body_bytes", what, 1,
                                           std::numeric_limits<int64_t>::max());
+        } else if (p.key == "stream_flush") {
+          c.stream_flush = text(p.value, "http.stream_flush", what);
+          if (!valid_stream_flush(c.stream_flush))
+            fail(what, "'http.stream_flush' must be pass or wake");
         } else if (p.key == "sse_ping_interval") {
           if (p.value.kind() != Value::Kind::Int || !valid_sse_ping_interval(p.value.as_int()))
             fail(what,
@@ -189,6 +203,16 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           if (e.embed_sharding != "replicated" && e.embed_sharding != "vocab")
             fail(what, "'" + ek + "' must be \"replicated\" or \"vocab\"");
         }
+        else if (p.key == "attention_weights") {
+          e.attention_weights = text(x, ek, what);
+          if (e.attention_weights != "checkpoint" && e.attention_weights != "int4")
+            fail(what, "'" + ek + "' must be \"checkpoint\" or \"int4\"");
+        }
+        else if (p.key == "mtp_head") {
+          e.mtp_head = text(x, ek, what);
+          if (e.mtp_head != "checkpoint" && e.mtp_head != "fp8")
+            fail(what, "'" + ek + "' must be \"checkpoint\" or \"fp8\"");
+        }
         else if (p.key == "ngram_table") {
           e.ngram_table = text(x, ek, what);
           if (e.ngram_table != "resident" && e.ngram_table != "mmap")
@@ -209,6 +233,14 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           if (e.fp8_head != "gemv" && e.fp8_head != "mma")
             fail(what, "'" + ek + "' must be \"gemv\" or \"mma\"");
         }
+        else if (p.key == "draft_head") {
+          e.draft_head = text(x, ek, what);
+          if (e.draft_head != "exact" && e.draft_head != "screen")
+            fail(what, "'" + ek + "' must be \"exact\" or \"screen\"");
+        }
+        else if (p.key == "draft_head_blocks") {
+          e.draft_head_blocks = static_cast<int>(integer(x, ek, what, 1, 64));
+        }
         else if (p.key == "mtp_expert_format") {
           e.mtp_expert_format = text(x, ek, what);
           if (e.mtp_expert_format != "fp8" && e.mtp_expert_format != "bf16_fused")
@@ -228,6 +260,18 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           e.prefill_fp8_gemm = boolean(x, ek, what);
         } else if (p.key == "prefill_fp8_per_tensor") {
           e.prefill_fp8_per_tensor = boolean(x, ek, what);
+        } else if (p.key == "prefill_activations") {
+          e.prefill_activations = text(x, ek, what);
+          if (e.prefill_activations != "bf16" && e.prefill_activations != "native")
+            fail(what, "'" + ek + "' must be \"bf16\" or \"native\"");
+        } else if (p.key == "prefill_attention") {
+          e.prefill_attention = text(x, ek, what);
+          if (e.prefill_attention != "bf16" && e.prefill_attention != "fp8")
+            fail(what, "'" + ek + "' must be \"bf16\" or \"fp8\"");
+        } else if (p.key == "decode_attention") {
+          e.decode_attention = text(x, ek, what);
+          if (e.decode_attention != "bf16" && e.decode_attention != "fp8")
+            fail(what, "'" + ek + "' must be \"bf16\" or \"fp8\"");
         } else if (p.key == "expert_gemm") {
           e.expert_gemm = text(x, ek, what);
           if (e.expert_gemm != "wide" && e.expert_gemm != "wide3" && e.expert_gemm != "wide4" &&
@@ -371,6 +415,11 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           if (!(e.mtp_draft_temperature > 0.0 && e.mtp_draft_temperature <= 4.0))
             fail(what, "'" + ek + "' must be in (0, 4] (the drawn drafts' temperature as a fraction of the request's)");
         }
+        else if (p.key == "lookup_draft") e.lookup_draft = boolean(x, ek, what);
+        else if (p.key == "lookup_nmin") e.lookup_nmin = static_cast<int>(integer(x, ek, what, 1, 64));
+        else if (p.key == "lookup_nstrong") e.lookup_nstrong = static_cast<int>(integer(x, ek, what, 1, 64));
+        else if (p.key == "lookup_agree") e.lookup_agree = static_cast<int>(integer(x, ek, what, 0, 16));
+        else if (p.key == "lookup_tail") e.lookup_tail = static_cast<int>(integer(x, ek, what, 0, 7));
         else if (p.key == "sampling_candidates") e.sampling_candidates = static_cast<int>(integer(x, ek, what, 1, 256));
         else if (p.key == "prefix_cache_gib") {
           e.prefix_cache_gib = number(x, ek, what);
@@ -385,6 +434,14 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
         else if (p.key == "prefill_budget_tokens") e.prefill_budget_tokens = static_cast<int>(integer(x, ek, what, -1, 1 << 30));
         else if (p.key == "model_alias") e.model_alias = text(p.value, ek, what);
         else if (p.key == "prefill_idle_budget_tokens") e.prefill_idle_budget_tokens = static_cast<int>(integer(x, ek, what, 0, 1 << 30));
+        else if (p.key == "decode_gap_target_ms") e.decode_gap_target_ms = static_cast<int>(integer(x, ek, what, 0, sched::kMaxLatencyTargetMs));
+        else if (p.key == "first_token_target_ms") e.first_token_target_ms = static_cast<int>(integer(x, ek, what, 0, sched::kMaxLatencyTargetMs));
+        else if (p.key == "prefill_latency_headroom_pct") e.prefill_latency.headroom_pct = static_cast<int>(integer(x, ek, what, 0, 50));
+        else if (p.key == "prefill_growth_factor") e.prefill_latency.growth_factor = static_cast<int>(integer(x, ek, what, 2, 4));
+        else if (p.key == "prefill_cost_recovery_pct") e.prefill_latency.recovery_pct = static_cast<int>(integer(x, ek, what, 1, 100));
+        else if (p.key == "prefill_initial_tokens") e.prefill_latency.initial_tokens = static_cast<int>(integer(x, ek, what, 1, 1 << 30));
+        else if (p.key == "prefill_idle_floor_tokens") e.prefill_latency.idle_floor_tokens = static_cast<int>(integer(x, ek, what, 0, 1 << 30));
+        else if (p.key == "prefill_early_admission") e.prefill_early_admission = boolean(x, ek, what);
         else if (p.key == "bulk_pace_gbps") e.bulk_pace_gbps = number(x, ek, what);
         else if (p.key == "bulk_inflight") e.bulk_inflight = static_cast<int>(integer(x, ek, what, -1, 1 << 20));
         else if (p.key == "rendezvous_timeout_ms") e.rendezvous_timeout_ms = static_cast<int>(integer(x, ek, what, 1, 1 << 30));

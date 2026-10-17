@@ -13,6 +13,7 @@
 #include <netinet/tcp.h>
 #include <stdexcept>
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <utility>
@@ -24,7 +25,6 @@ namespace dgpp::serve {
 
 namespace {
 
-constexpr int kEpollTimeoutMs = 25;   // the idle() cadence
 constexpr size_t kMaxHeaderBytes = 16 * 1024;
 constexpr size_t kReadChunk = 16 * 1024;
 
@@ -73,6 +73,23 @@ std::string chunk_frame(std::string_view data) {
 }
 
 }  // namespace
+
+struct HttpWakeup::State {
+  int fd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+  State() {
+    if (fd < 0) throw std::runtime_error("http: eventfd");
+  }
+  ~State() { ::close(fd); }
+};
+
+void HttpWakeup::operator()() const noexcept {
+  if (!state_) return;
+  const uint64_t one = 1;
+  // EAGAIN means the counter is already full: a wake is pending. The fd
+  // cannot close while this handle lives. Never block an engine callback.
+  while (::write(state_->fd, &one, sizeof(one)) < 0 && errno == EINTR) {
+  }
+}
 
 // ---------------------------------------------------------------------------
 // HttpRequest
@@ -209,54 +226,71 @@ bool HttpResponseWriter::client_gone() const {
 // HttpServer
 // ---------------------------------------------------------------------------
 
-HttpServer::HttpServer(uint16_t port, HttpHandler* handler,
-                       int max_connections, const std::string& bind_host,
-                       int64_t max_body_bytes)
-    : port_(port), handler_(handler), max_connections_(max_connections),
-      max_body_bytes_(static_cast<size_t>(max_body_bytes)) {
+HttpServer::HttpServer(uint16_t port, HttpHandler* handler, int max_connections,
+                       const std::string& bind_host, int64_t max_body_bytes, bool wake_on_output,
+                       int poll_timeout_ms)
+    : port_(port),
+      handler_(handler),
+      max_connections_(max_connections),
+      max_body_bytes_(static_cast<size_t>(max_body_bytes)),
+      poll_timeout_ms_(poll_timeout_ms) {
+  if (poll_timeout_ms < 1) throw std::invalid_argument("http: poll timeout must be positive");
   if (max_body_bytes < 1 ||
       static_cast<uint64_t>(max_body_bytes) > std::string{}.max_size() - kMaxHeaderBytes)
     throw std::invalid_argument("http: max_body_bytes must be positive and fit the request buffer");
   if (handler_ == nullptr)
     throw std::invalid_argument("HttpServer: handler must not be null");
-  in_addr bind_address{};
-  if (::inet_pton(AF_INET, bind_host.c_str(), &bind_address) != 1)
-    throw std::invalid_argument("http: bind host must be an IPv4 address");
-  listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
-  if (listen_fd_ < 0) throw std::runtime_error("http: socket");
-  int yes = 1;
-  ::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-  sockaddr_in addr{};
-  addr.sin_family = AF_INET;
-  addr.sin_addr = bind_address;
-  addr.sin_port = htons(port_);
-  if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-    ::close(listen_fd_);
-    listen_fd_ = -1;
-    throw std::runtime_error("http: bind port " + std::to_string(port_) +
-                            " — " + std::strerror(errno));
+  if (wake_on_output || handler_->needs_work_wakeup())
+    wakeup_.state_ = std::make_shared<HttpWakeup::State>();
+  try {
+    in_addr bind_address{};
+    if (::inet_pton(AF_INET, bind_host.c_str(), &bind_address) != 1)
+      throw std::invalid_argument("http: bind host must be an IPv4 address");
+    listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd_ < 0) throw std::runtime_error("http: socket");
+    int yes = 1;
+    ::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr = bind_address;
+    addr.sin_port = htons(port_);
+    if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+      ::close(listen_fd_);
+      listen_fd_ = -1;
+      throw std::runtime_error("http: bind port " + std::to_string(port_) + " — " +
+                               std::strerror(errno));
+    }
+    if (::listen(listen_fd_, 64) < 0) {
+      ::close(listen_fd_);
+      listen_fd_ = -1;
+      throw std::runtime_error("http: listen");
+    }
+    if (port_ == 0) {  // ephemeral: report what the kernel picked
+      sockaddr_in bound{};
+      socklen_t len = sizeof(bound);
+      if (::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound), &len) == 0)
+        port_ = ntohs(bound.sin_port);
+    }
+    if (!set_nonblock(listen_fd_)) throw std::runtime_error("http: listener nonblock");
+    epoll_fd_ = ::epoll_create1(0);
+    if (epoll_fd_ < 0) throw std::runtime_error("http: epoll_create1");
+    epoll_event ev{};
+    ev.events = EPOLLIN;
+    ev.data.fd = listen_fd_;
+    if (::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, listen_fd_, &ev) < 0)
+      throw std::runtime_error("http: epoll add listener");
+    if (wakeup_) {
+      ev.data.fd = wakeup_.state_->fd;
+      if (::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, ev.data.fd, &ev) < 0)
+        throw std::runtime_error("http: epoll add wakeup");
+    }
+    handler_->set_wakeup(wake_on_output ? wakeup_ : HttpWakeup{});
+    handler_->set_work_wakeup(wakeup_);
+  } catch (...) {
+    if (listen_fd_ >= 0) ::close(listen_fd_);
+    if (epoll_fd_ >= 0) ::close(epoll_fd_);
+    throw;
   }
-  if (::listen(listen_fd_, 64) < 0) {
-    ::close(listen_fd_);
-    listen_fd_ = -1;
-    throw std::runtime_error("http: listen");
-  }
-  if (port_ == 0) {  // ephemeral: report what the kernel picked
-    sockaddr_in bound{};
-    socklen_t len = sizeof(bound);
-    if (::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound),
-                      &len) == 0)
-      port_ = ntohs(bound.sin_port);
-  }
-  if (!set_nonblock(listen_fd_))
-    throw std::runtime_error("http: listener nonblock");
-  epoll_fd_ = ::epoll_create1(0);
-  if (epoll_fd_ < 0) throw std::runtime_error("http: epoll_create1");
-  epoll_event ev{};
-  ev.events = EPOLLIN;
-  ev.data.fd = listen_fd_;
-  if (::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, listen_fd_, &ev) < 0)
-    throw std::runtime_error("http: epoll add listener");
 }
 
 HttpServer::~HttpServer() {
@@ -264,13 +298,16 @@ HttpServer::~HttpServer() {
   if (epoll_fd_ >= 0) ::close(epoll_fd_);
 }
 
-void HttpServer::stop() { stopping_.store(true, std::memory_order_release); }
+void HttpServer::stop() {
+  stopping_.store(true, std::memory_order_release);
+  wakeup_();
+}
 
 void HttpServer::serve() {
   std::vector<epoll_event> events(64);
   while (!stopping_.load(std::memory_order_acquire)) {
-    const int n = ::epoll_wait(epoll_fd_, events.data(),
-                               static_cast<int>(events.size()), kEpollTimeoutMs);
+    const int n =
+        ::epoll_wait(epoll_fd_, events.data(), static_cast<int>(events.size()), poll_timeout_ms_);
     if (n < 0) {
       if (errno == EINTR) continue;
       DGPP_LOG_ERROR("http: epoll_wait failed — {}", std::strerror(errno));
@@ -279,6 +316,14 @@ void HttpServer::serve() {
     for (int i = 0; i < n; ++i) {
       const int fd = events[i].data.fd;
       const uint32_t evs = events[i].events;
+      if (wakeup_ && fd == wakeup_.state_->fd) {
+        uint64_t count;
+        // One read clears the accumulated counter. A concurrent later write
+        // remains readable for the next pass; do not spin draining producers.
+        while (::read(fd, &count, sizeof(count)) < 0 && errno == EINTR) {
+        }
+        continue;
+      }
       if (fd == listen_fd_) {
         accept_new();
         continue;

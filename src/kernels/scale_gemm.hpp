@@ -138,6 +138,28 @@ void launch_scale_gemm_grid_f32(const uint16_t* act, size_t act_row_stride_elems
                                 size_t out_row_stride_elems, int rs, int cs,
                                 bool decode_mma = false, void* ws = nullptr, size_t ws_bytes = 0);
 
+// The grid launcher with the scale grid as e8m0 bytes (the QAD export's
+// MXFP8 stack, rs = 0, cs = 5): the streaming MMA alone reads the byte grid,
+// so the shape must be its (k % 64, 16-byte aligned rows) — the loader keeps
+// F32 scales for any matrix it cannot take, and the dense sites bridge the
+// prefill-shaped rows through launch_fp8_dequant_blocks_e8m0.
+void launch_scale_gemm_grid_e8m0_bf16(const uint16_t* act, size_t act_row_stride_elems,
+                                      const uint8_t* w_payload, const uint8_t* w_scales, uint16_t* out,
+                                      int m, int n, int k, cudaStream_t stream,
+                                      size_t out_row_stride_elems, int rs, int cs, void* ws = nullptr,
+                                      size_t ws_bytes = 0);
+void launch_scale_gemm_grid_e8m0_f32(const uint16_t* act, size_t act_row_stride_elems,
+                                     const uint8_t* w_payload, const uint8_t* w_scales, float* out, int m,
+                                     int n, int k, cudaStream_t stream, size_t out_row_stride_elems, int rs,
+                                     int cs, void* ws = nullptr, size_t ws_bytes = 0);
+
+// Whether the fp8 GEMV (the scale GEMM's small-m lowering) can stage a payload
+// at all: the grid launcher's shape check at one activation row (it chunks
+// rows down to fit its smem, so one row fitting is the whole question).
+// Callers deciding between the GEMV and the dequant bridge use this rather
+// than re-deriving fp8_gemv's shape rules.
+bool fp8_gemv_can_stage(const void* w_payload, int k);
+
 void launch_scale_gemm_tile_bf16(const uint16_t* act, size_t act_row_stride_elems,
                                  const uint8_t* w_payload, const float* w_scales,
                                  uint16_t* out, int m, int n, int k,

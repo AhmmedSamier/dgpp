@@ -33,6 +33,18 @@
 
 namespace dgpp {
 
+// Native e4m3 QK and PV over a dim-256 listed cache. Q is quantized per
+// head; per-token K scales multiply score columns, V scales are folded
+// into P before its e4m3 quantization. Softmax and accumulators are fp32.
+// n_split=1 writes out directly and needs no workspace; otherwise each
+// workspace holds [rows,n_split,heads] (c_ws also has a dim-256 axis).
+void qsa_attn_fp8(const uint16_t* q, int64_t q_row_stride, const uint8_t* k, const uint8_t* v,
+                   const float* k_scale, const float* v_scale, const int32_t* req_ids,
+                   const int32_t* topk, int topk_stride, const int32_t* counts, int rows,
+                   int local_heads, int kv_heads, int block_tokens, const int32_t* block_tables,
+                   int blocks_per_request, float scale, int n_split, float* m_ws, float* l_ws,
+                   float* c_ws, float* out, cudaStream_t stream);
+
 // inv_freq[i] = 1 / theta^(2i / rotary_dim), i < rotary_dim / 2, in fp32 as
 // the reference computes it (host helper; upload the result). The YaRN
 // variant of the table is yarn_rope_inv_freq_host (kernels/rope_scaling.hpp),
@@ -74,6 +86,17 @@ void qsa_norm_rope_append_fp8(const uint16_t* x, int64_t x_row_stride, int64_t x
                               int blocks_per_request, int block_tokens, int rows, int kv_heads,
                               int dim, int rotary_dim, float eps, float mscale, uint8_t* k_cache,
                               float* k_scale, cudaStream_t stream);
+
+// The fp8 storage form (kernels/full_attn.hpp): the same rows as e4m3
+// codes of k / kv_scales[0] and v / kv_scales[1] (fp32 division,
+// round-to-nearest-even, saturating at +-448 — the compressed-tensors
+// static per-tensor FP8 kv_cache_scheme); caches uint8 [slots, kv_heads *
+// dim]. kv_heads * dim must be even.
+void qsa_kv_append_fp8(const uint16_t* k, int64_t k_row_stride, const uint16_t* v,
+                       int64_t v_row_stride, const int32_t* req_ids, const int64_t* pos,
+                       int rows, const int32_t* block_tables, int blocks_per_request,
+                       int block_tokens, int kv_heads, int dim, const float* kv_scales,
+                       uint8_t* k_cache, uint8_t* v_cache, cudaStream_t stream);
 
 // Prefill compression: pools [first_pool, first_pool + n_pools) of one
 // request, pool i's kpool raw keys at chunk rows [i * kpool, +kpool) of

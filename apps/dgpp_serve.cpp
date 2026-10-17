@@ -9,8 +9,9 @@
 // collectives. Single-node mode without graph decode streams layers
 // through the eager engine. The memory plan validates the chosen shape.
 //
-// Threads: HTTP parses requests and writes responses; the engine owns
-// model execution; journal peers follow rank 0's scheduler operations.
+// Threads: HTTP owns connections and responses; a fixed pool prepares
+// requests. The engine owns model execution; journal peers follow rank 0's
+// scheduler operations.
 // See DESIGN §11 and docs/operations.md.
 //
 
@@ -63,6 +64,7 @@
 #include "common/log.hpp"
 #include "common/process_memory.hpp"
 #include "kernels/l2_prefetch.hpp"
+#include "kernels/draft_head.hpp"
 #include "kernels/bf12_companions.hpp"
 #include "kernels/latent_format.hpp"
 #include "loaders/hf_cache.hpp"
@@ -154,12 +156,14 @@ void open_ops_file(dgpp::serve::OpStreamObserver* oplog,
 }
 
 struct ServeKnobs {
+  size_t tokenizer_word_cache_entries = 0;
   dgpp::serve::FileInputConfig file_inputs;
   int world = 1;  // dgpp_build_info's world_size
   uint16_t http_port = 8080;
-  std::string http_bind = "127.0.0.1";
+  std::string http_bind = "0.0.0.0";
   int64_t http_max_body_bytes = dgpp::serve::kDefaultHttpMaxBodyBytes;
   int sse_ping_interval = dgpp::serve::kDefaultSsePingInterval;
+  std::string stream_flush = "pass";
   int max_connections = 64;
   int queue_limit = 64;
   int admission_gather_ms = 3;
@@ -253,6 +257,9 @@ struct ServeGraphEngine {
   virtual void configure_block_rows_budget(int budget) = 0;
   // engine.mtp_schedule_sampled_scale, before the warm capture.
   virtual void set_sampled_schedule_scale(float scale) = 0;
+  // engine.lookup_draft*: fuse strong prompt-history matches into MTP
+  // drafts, before the warm capture.
+  virtual void set_lookup_drafts(bool on, int nmin, int nstrong, int agree) = 0;
   // engine.prefill_group: several cold prompts as the spans of one walk.
   virtual void set_prefill_group(bool on) = 0;
 };
@@ -273,6 +280,9 @@ struct ServeGraphEngineOf final : ServeGraphEngine {
   void set_block_verify(bool on) override { eng.set_block_verify(on); }
   void configure_block_rows_budget(int budget) override { eng.configure_block_rows_budget(budget); }
   void set_sampled_schedule_scale(float scale) override { eng.set_sampled_schedule_scale(scale); }
+  void set_lookup_drafts(bool on, int nmin, int nstrong, int agree) override {
+    eng.set_lookup_drafts(on, nmin, nstrong, agree);
+  }
   void set_prefill_group(bool on) override { eng.set_prefill_group(on); }
 };
 
@@ -295,8 +305,8 @@ struct ServeFamily {
   virtual int64_t position_limit() const { return 0; }
   // The decode rows the family serves in one fixed batch at most (2026-09-10,
   // engine/decode_outputs.hpp): the session-core families take the derived
-  // shape up to kDecodeRowsMax; GLM-5.3-Flash keeps its build-time 8, and
-  // Qwen3.8-Flash-Next and full GLM currently support sixteen rows.
+  // shape up to kDecodeRowsMax; GLM-5.3-Flash takes it up to 32 since
+  // 2026-10-14 (its build-time 8 before), as do the full GLM and GLM-4.7.
   virtual int decode_rows_cap() const = 0;
   // The MTP depth when neither the flag nor the file names one: one draft,
   // or the DSpark block's five (DeepSeek-V4.1).
@@ -323,7 +333,7 @@ struct ServeFamily {
       dgpp::net::CollectiveBus* bus, int rank, int world, uint16_t* pick_scratch,
       int batch_min_live, uint16_t* prefix_scratch, uint16_t* gather_scratch, int candidates,
       const dgpp::text::GrammarVocab* grammar, int prefix_slots, int mtp_depth,
-      bool compact_batches) = 0;
+      bool compact_batches, int lookup_tail = 0) = 0;
   virtual std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
       int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample,
       const dgpp::text::GrammarVocab* grammar, int prefix_slots) = 0;
@@ -366,28 +376,28 @@ struct GlmFamily final : ServeFamily {
     return "";
   }
   const char* kv_format_name() const override { return dgpp::latent_format_name(kv_format); }
-  int decode_rows_cap() const override { return dgpp::GlmDiagnosticModel::kDecodeRows; }
-  size_t lat_slot_bytes(int) const override {
-    return static_cast<size_t>(dgpp::GlmDiagnosticModel::kDecodeRows) * static_cast<size_t>(cfg.hidden_size) * 2;
+  int decode_rows_cap() const override { return dgpp::GlmDiagnosticModel::decode_rows_cap(); }
+  size_t lat_slot_bytes(int decode_rows) const override {
+    return static_cast<size_t>(decode_rows) * static_cast<size_t>(cfg.hidden_size) * 2;
   }
   dgpp::MemoryPlan plan(int forward_rows, int64_t context, int rank, int world_, bool fabric, int slots,
-                        bool mtp, int) const override {
+                        bool mtp, int decode_rows) const override {
     return dgpp::GlmDiagnosticModel::plan_memory(
         cfg, forward_rows, context, fabric ? rank : 0, fabric ? world_ : 1,
         fabric ? dgpp::GlmResidency::Resident : dgpp::GlmResidency::Streaming,
         fabric ? dgpp::GlmHeadSharding::VocabSharded : dgpp::GlmHeadSharding::Full, slots,
-        fabric && mtp, kv_format, /*serving_logits=*/true);
+        fabric && mtp, kv_format, /*serving_logits=*/true, decode_rows);
   }
   size_t snapshot_bytes(int world_, bool mtp) const override {
     return dgpp::GlmDiagnosticModel::session_snapshot_bytes(cfg, world_, mtp);
   }
   void build_model(dgpp::BoundaryReducer* reducer, int rank, int world_, bool fabric, int forward_rows,
-                   int64_t pool_tokens, int slots, bool mtp, int) override {
+                   int64_t pool_tokens, int slots, bool mtp, int decode_rows) override {
     model = std::make_unique<dgpp::GlmDiagnosticModel>(
         cfg, ckpt, forward_rows, pool_tokens, reducer, fabric ? rank : 0, fabric ? world_ : 1,
         fabric ? dgpp::GlmResidency::Resident : dgpp::GlmResidency::Streaming,
         fabric ? dgpp::GlmHeadSharding::VocabSharded : dgpp::GlmHeadSharding::Full, slots,
-        fabric && mtp, kv_format, /*serving_logits=*/true);
+        fabric && mtp, kv_format, /*serving_logits=*/true, decode_rows);
     // Neither the eager nor graph serving path consumes diagnostic routes.
     model->set_decode_route_traces(false);
   }
@@ -399,11 +409,11 @@ struct GlmFamily final : ServeFamily {
                                                       uint16_t* gather_scratch, int candidates,
                                                       const dgpp::text::GrammarVocab* grammar,
                                                       int prefix_slots, int mtp_depth,
-                                                      bool compact_batches) override {
+                                                      bool compact_batches, int lookup_tail = 0) override {
     return std::make_unique<ServeGraphEngineOf<dgpp::GlmDiagnosticModel>>(
         model.get(), bus, rank, world_, pick_scratch, cfg.vocab_size, /*pick_timeout_ms=*/60000,
         batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots,
-        mtp_depth, compact_batches);
+        mtp_depth, compact_batches, lookup_tail);
   }
   std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
       int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
@@ -429,7 +439,7 @@ struct QwenFamily final : ServeFamily {
         fp8_head_mma(head_mma),
         kv_format(kv_fmt) {
     // The Qwen KV-cache format (engine.kv_dtype): bf16 or fp8 (e4m3 rows with
-    // one scale per (slot, kv-head); the QSA attention dequants in-kernel).
+    // one scale per (slot, kv-head), with BF16 or native FP8 attention).
     // fp4 is rejected here (not implemented). See docs/qwen_fp8_kv_plan.md.
     if (kv_format != dgpp::LatentFormat::kBf16 && kv_format != dgpp::LatentFormat::kFp8)
       throw std::invalid_argument(std::string("engine.kv_dtype ") +
@@ -439,6 +449,16 @@ struct QwenFamily final : ServeFamily {
     // engine config or CLI before the family is built); it must be on the
     // config before the binding table and the loader see it.
     cfg.mtp_experts_bf16_fused = dgpp::QwenLayerStream::mtp_experts_bf16_fused();
+    // The QAD export ships its draft experts as weight-only NVFP4: the
+    // RadixArk release's fused-BF16 reading of them is a different checkpoint.
+    if (cfg.mtp_experts_nvfp4 && cfg.mtp_experts_bf16_fused)
+      throw std::runtime_error(
+          "engine.mtp_expert_format bf16_fused is the RadixArk release's layout; this checkpoint ships NVFP4 "
+          "draft experts (leave the key at its default fp8)");
+    if (cfg.dense_mxfp8_shipped)
+      DGPP_LOG_INFO("qwen: the checkpoint ships its dense stack as MXFP8 (served as shipped; engine.dense_weights "
+                    "applies to the BF16 remainder), its n-gram table {}, its draft experts {}",
+                    cfg.ngram_table_nvfp4 ? "as NVFP4" : "as e4m3", cfg.mtp_experts_nvfp4 ? "as weight-only NVFP4" : "as block FP8");
     // The AutoRound hybrid ships its dense stack as block FP8: the fp8 dense
     // mode is the only one that reads it, so it is selected here whatever
     // the recipe says (docs/qwen38_autoround_int4_plan.md D4).
@@ -517,11 +537,11 @@ struct QwenFamily final : ServeFamily {
                                                       uint16_t* gather_scratch, int candidates,
                                                       const dgpp::text::GrammarVocab* grammar,
                                                       int prefix_slots, int mtp_depth,
-                                                      bool compact_batches) override {
+                                                      bool compact_batches, int lookup_tail = 0) override {
     return std::make_unique<ServeGraphEngineOf<dgpp::QwenModel>>(
         model.get(), bus, rank, world_, pick_scratch, cfg.vocab_size, /*pick_timeout_ms=*/60000,
         batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots,
-        mtp_depth, compact_batches);
+        mtp_depth, compact_batches, lookup_tail);
   }
   std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
       int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
@@ -583,11 +603,11 @@ struct Glm4Family final : ServeFamily {
                                                       uint16_t* gather_scratch, int candidates,
                                                       const dgpp::text::GrammarVocab* grammar,
                                                       int prefix_slots, int mtp_depth,
-                                                      bool compact_batches) override {
+                                                      bool compact_batches, int lookup_tail = 0) override {
     return std::make_unique<ServeGraphEngineOf<dgpp::Glm4Model>>(
         model.get(), bus, rank, world_, pick_scratch, cfg.vocab_size, /*pick_timeout_ms=*/60000,
         batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots,
-        mtp_depth, compact_batches);
+        mtp_depth, compact_batches, lookup_tail);
   }
   std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
       int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
@@ -655,11 +675,11 @@ struct GlmDsaFamily final : ServeFamily {
                                                       uint16_t* gather_scratch, int candidates,
                                                       const dgpp::text::GrammarVocab* grammar,
                                                       int prefix_slots, int mtp_depth,
-                                                      bool compact_batches) override {
+                                                      bool compact_batches, int lookup_tail = 0) override {
     return std::make_unique<ServeGraphEngineOf<dgpp::GlmDsaModel>>(
         model.get(), bus, rank, world_, pick_scratch, cfg.vocab_size, /*pick_timeout_ms=*/60000,
         batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots,
-        mtp_depth, compact_batches);
+        mtp_depth, compact_batches, lookup_tail);
   }
   std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
       int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
@@ -733,11 +753,11 @@ struct Dsv41Family final : ServeFamily {
                                                       uint16_t* gather_scratch, int candidates,
                                                       const dgpp::text::GrammarVocab* grammar,
                                                       int prefix_slots, int mtp_depth,
-                                                      bool compact_batches) override {
+                                                      bool compact_batches, int lookup_tail = 0) override {
     return std::make_unique<ServeGraphEngineOf<dgpp::Dsv41Model>>(
         model.get(), bus, rank, world_, pick_scratch, cfg.vocab_size, /*pick_timeout_ms=*/60000,
         batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots,
-        mtp_depth, compact_batches);
+        mtp_depth, compact_batches, lookup_tail);
   }
   std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
       int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
@@ -809,11 +829,11 @@ struct Dsv4Family final : ServeFamily {
                                                       uint16_t* gather_scratch, int candidates,
                                                       const dgpp::text::GrammarVocab* grammar,
                                                       int prefix_slots, int mtp_depth,
-                                                      bool compact_batches) override {
+                                                      bool compact_batches, int lookup_tail = 0) override {
     return std::make_unique<ServeGraphEngineOf<dgpp::Dsv4Model>>(
         model.get(), bus, rank, world_, pick_scratch, cfg.vocab_size, /*pick_timeout_ms=*/60000,
         batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots,
-        mtp_depth, compact_batches);
+        mtp_depth, compact_batches, lookup_tail);
   }
   std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
       int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
@@ -884,11 +904,11 @@ struct MimoFamily final : ServeFamily {
                                                       uint16_t* gather_scratch, int candidates,
                                                       const dgpp::text::GrammarVocab* grammar,
                                                       int prefix_slots, int mtp_depth,
-                                                      bool compact_batches) override {
+                                                      bool compact_batches, int lookup_tail = 0) override {
     return std::make_unique<ServeGraphEngineOf<dgpp::MimoModel>>(
         model.get(), bus, rank, world_, pick_scratch, cfg.vocab_size, /*pick_timeout_ms=*/60000,
         batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots,
-        mtp_depth, compact_batches);
+        mtp_depth, compact_batches, lookup_tail);
   }
   std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
       int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
@@ -908,20 +928,61 @@ struct Qwen35Family final : ServeFamily {
   std::string dflash;  // the DFlash2 drafter's checkpoint dir (empty: off)
   std::vector<int64_t> eos_;
   std::unique_ptr<dgpp::Qwen35Model> model;
-  Qwen35Family(const std::string& checkpoint)
+  // The Full layers' K/V pool format (engine.kv_dtype): bf16, or the fp8
+  // storage form on a release that ships its kv_cache_scheme scales
+  // (models/qwen/model35.hpp: Qwen35KvPoolShape::fp8). The attention's
+  // arithmetic on that pool is engine.prefill_attention (a model static).
+  dgpp::LatentFormat kv_format = dgpp::LatentFormat::kBf16;
+  Qwen35Family(const std::string& checkpoint,
+               const std::optional<dgpp::RopeScaling>& rope_scaling = std::nullopt,
+               dgpp::LatentFormat kv_format_ = dgpp::LatentFormat::kBf16)
       : cfg(dgpp::Qwen35TextConfig::from_json_file((fs::path(checkpoint) / "config.json").string())),
-        ckpt(checkpoint) {
+        ckpt(checkpoint), kv_format(kv_format_) {
     if (cfg.eos_token_ids.empty())
       throw std::invalid_argument("Qwen3.5: the config names no EOS token");
+    if (kv_format != dgpp::LatentFormat::kBf16 && kv_format != dgpp::LatentFormat::kFp8)
+      throw std::invalid_argument(std::string("engine.kv_dtype ") + dgpp::latent_format_name(kv_format) +
+                                  ": the Qwen3.5 K/V pool takes bf16 or fp8");
+    if (kv_format == dgpp::LatentFormat::kFp8 && cfg.quant_kind != dgpp::Qwen35QuantKind::Nvfp4Mixed)
+      throw std::invalid_argument(
+          "engine.kv_dtype fp8: this Qwen3.5 release ships no k_scale / v_scale (the FP8 kv_cache_scheme "
+          "of the mixed NVFP4 release); its K/V pool stays bf16");
     for (int64_t id : cfg.eos_token_ids) eos_.push_back(id);
+    // The engine's opt-in YaRN ramp (engine.rope_scaling): it rides the
+    // parsed config, so the Full layers' tables, the drafter's table, the
+    // session's max_context() and the memory plan's context line all take
+    // it from one place. The band parameters are the Qwen3.8-Flash-Next
+    // recipe's until the 27B release check signs its own (identical rope
+    // geometry: 64 rotary dims, theta 1e7, mrope [11,11,10]).
+    if (rope_scaling.has_value()) {
+      rope_scaling->validate("engine.rope_scaling");
+      cfg.rope_scaling = *rope_scaling;
+      if (rope_scaling->original_max_position_embeddings != cfg.max_position_embeddings)
+        DGPP_LOG_WARN(
+            "engine.rope_scaling: original_max_position_embeddings {} differs from the "
+            "checkpoint's max_position_embeddings {} — the ramp band is computed from the "
+            "knob's value",
+            rope_scaling->original_max_position_embeddings, cfg.max_position_embeddings);
+      DGPP_LOG_INFO(
+          "qwen3_5: YaRN rope on — factor {}, original {} positions, correction band from {} "
+          "(mrope cache x{}), beta_fast {} beta_slow {}, attention factor {:.10g} (mscale {:.10g}); "
+          "context cap {}",
+          rope_scaling->factor, rope_scaling->original_max_position_embeddings,
+          rope_scaling->correction_max_position(), rope_scaling->mrope_cache_factor,
+          rope_scaling->beta_fast, rope_scaling->beta_slow, rope_scaling->attn_factor,
+          static_cast<double>(rope_scaling->mscale()), cfg.context_limit());
+    }
   }
   const char* name() const override { return "qwen3_5"; }
+  // The request-context ceiling: the checkpoint's positions, or the ramp's
+  // when engine.rope_scaling is set (the ctor above puts it on the config).
+  int64_t position_limit() const override { return cfg.context_limit(); }
   int64_t vocab_size() const override { return cfg.vocab_size; }
   const std::vector<int64_t>& eos_token_ids() const override { return eos_; }
   int64_t block_tokens() const override { return dgpp::Qwen35Model::kv_block_tokens_static(); }
   int prefill_chunk_tokens() const override { return dgpp::Qwen35Model::prefill_chunk_tokens(); }
   std::string pool_check(int64_t) const override { return ""; }
-  const char* kv_format_name() const override { return "bf16"; }
+  const char* kv_format_name() const override { return dgpp::latent_format_name(kv_format); }
   int decode_rows_cap() const override { return dgpp::Qwen35Model::decode_rows_cap(); }
   size_t lat_slot_bytes(int decode_rows) const override {
     return static_cast<size_t>(decode_rows) * static_cast<size_t>(cfg.hidden_size) * 2;
@@ -930,7 +991,7 @@ struct Qwen35Family final : ServeFamily {
                         bool mtp, int decode_rows) const override {
     return dgpp::Qwen35Model::plan_memory(cfg, forward_rows, context, fabric ? rank : 0, fabric ? world_ : 1,
                                           fabric || !dflash.empty() ? dgpp::LoaderResidency::Resident : dgpp::LoaderResidency::Streaming,
-                                          slots, fabric && mtp, decode_rows, dflash);
+                                          slots, fabric && mtp, decode_rows, dflash, kv_format);
   }
   size_t snapshot_bytes(int world_, bool mtp) const override {
     return dgpp::Qwen35Model::session_snapshot_bytes(cfg, world_, mtp);
@@ -944,7 +1005,7 @@ struct Qwen35Family final : ServeFamily {
         cfg, ckpt, forward_rows, pool_tokens,
         fabric || !dflash.empty() ? dgpp::LoaderResidency::Resident : dgpp::LoaderResidency::Streaming,
         reducer, fabric ? rank : 0,
-        fabric ? world_ : 1, slots, decode_rows, fabric && mtp, dflash);
+        fabric ? world_ : 1, slots, decode_rows, fabric && mtp, dflash, kv_format);
   }
   void set_draft_model(const std::string& dir) override { dflash = dir; }
   void destroy_model() override { model.reset(); }
@@ -955,11 +1016,11 @@ struct Qwen35Family final : ServeFamily {
                                                       uint16_t* gather_scratch, int candidates,
                                                       const dgpp::text::GrammarVocab* grammar,
                                                       int prefix_slots, int mtp_depth,
-                                                      bool compact_batches) override {
+                                                      bool compact_batches, int lookup_tail = 0) override {
     return std::make_unique<ServeGraphEngineOf<dgpp::Qwen35Model>>(
         model.get(), bus, rank, world_, pick_scratch, cfg.vocab_size, /*pick_timeout_ms=*/60000,
         batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots,
-        mtp_depth, compact_batches);
+        mtp_depth, compact_batches, lookup_tail);
   }
   std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
       int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
@@ -980,7 +1041,8 @@ std::unique_ptr<ServeFamily> make_family(const std::string& ckpt, int world,
   if (arch == dgpp::ModelArchitecture::MimoV2) return std::make_unique<MimoFamily>(ckpt, kv_format);
   if (arch == dgpp::ModelArchitecture::Qwen4Exp)
     return std::make_unique<QwenFamily>(ckpt, rope_scaling, fp8_head_mma, kv_format);
-  if (arch == dgpp::ModelArchitecture::Qwen3_5) return std::make_unique<Qwen35Family>(ckpt);
+  if (arch == dgpp::ModelArchitecture::Qwen3_5)
+    return std::make_unique<Qwen35Family>(ckpt, rope_scaling, kv_format);
   if (arch == dgpp::ModelArchitecture::Glm4Moe) return std::make_unique<Glm4Family>(ckpt);
   if (arch == dgpp::ModelArchitecture::GlmMoeDsa) return std::make_unique<GlmDsaFamily>(ckpt, world, kv_format);
   return std::make_unique<GlmFamily>(ckpt, world, kv_format);
@@ -1078,8 +1140,11 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
                  dgpp::serve::JournalWriter* journal,
                  dgpp::serve::OpStreamObserver* oplog, const std::string& family_name,
                  const std::atomic<uint64_t>* collective_progress = nullptr) {
-  const dgpp::text::Tokenizer tok =
-      dgpp::text::Tokenizer::load((fs::path(ckpt) / "tokenizer.json").string());
+  const dgpp::text::Tokenizer tok = dgpp::text::Tokenizer::load(
+      (fs::path(ckpt) / "tokenizer.json").string(), k.tokenizer_word_cache_entries);
+  DGPP_LOG_INFO(
+      "serve: tokenizer word cache {} entries (0 disables it; at most 256 mapped bytes per word)",
+      k.tokenizer_word_cache_entries);
   // The prompt renderer: the checkpoint's chat_template.jinja, or the
   // DeepSeek-V4.1 encoder's format (no Jinja ships with that model).
   std::optional<dgpp::text::ChatTemplate> tpl;
@@ -1157,7 +1222,7 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
   if (k.world > 1)
     service.set_rank_metrics({0, k.world, DGPP_VERSION, DGPP_GIT_SHA}, collective_progress);
   dgpp::serve::HttpServer http(k.http_port, &service, k.max_connections, k.http_bind,
-                             k.http_max_body_bytes);
+                               k.http_max_body_bytes, k.stream_flush == "wake");
   DGPP_LOG_INFO("serve: HTTP request body limit {} bytes", k.http_max_body_bytes);
 
   std::atomic<bool> drained{false};  // the engine thread's drain is done
@@ -1341,10 +1406,13 @@ int main(int argc, char** argv) {
       "    the world (the node list), this rank's peer, the ports and every\n"
       "    engine knob below; flags given after it override\n"
       "  [--port N (default 18080; rank 0 only)]\n"
-      "  [--bind-host IPV4 (default 127.0.0.1; rank 0 only)]\n"
+      "  [--bind-host IPV4 (default 0.0.0.0; rank 0 only)]\n"
       "  [--metrics-port N (default 0 = off; ranks > 0 only)]: the peer's\n"
       "    dgpp_rank_* metrics listener (GET /metrics/prometheus); config ports.metrics\n"
-      "  [--metrics-bind HOST (default: this rank's node address; resolves to IPv4; ranks > 0 only)]\n"
+      "  [--metrics-bind HOST (default: this rank's node address; resolves to IPv4; ranks > 0 "
+      "only)]\n"
+      "  [--stream-flush pass|wake (default pass; rank 0 only)]:\n"
+      "    Output polling or immediate notification; overrides http.stream_flush.\n"
       "  [--sse-ping-interval N (default 30 seconds; -1 disables; rank 0 only)]:\n"
       "    SSE comments while a stream is silent; overrides http.sse_ping_interval\n"
       "    in cluster JSON; request sse_ping_interval overrides the server setting.\n"
@@ -1421,11 +1489,18 @@ int main(int argc, char** argv) {
       "    tokens, grows at tick top, and sheds the youngest request\n"
       "    (finish_reason length) when the pool runs out; every rank takes\n"
       "    rank 0's policy from the warm record\n"
-      "  [--prefill-budget-tokens N (default -1)]: automatic aligned chunks on supported graph "
-      "engines; 0 "
-      "disables\n"
+      "  [--prefill-budget-tokens N (default -1)]: automatic 256-token starting chunks, adjusted\n"
+      "    to engine alignment/capacity; 0 disables budgeted prefill\n"
       "  [--prefill-idle-budget-tokens N (default 0)]: larger budget without active decode; 0 uses "
       "the busy budget\n"
+      "    with an explicit busy budget, or up to 4096 for automatic grouped prefill\n"
+      "  [--decode-gap-target-ms N (1000)] [--first-token-target-ms N (3000)]: adaptive\n"
+      "    prefill latency objectives; zero disables a target, both zero select fixed budgets\n"
+      "  [--prefill-latency-headroom-pct N (15)] [--prefill-growth-factor N (2)]\n"
+      "  [--prefill-cost-recovery-pct N (25)]: controller safety margin, growth and recovery\n"
+      "  [--prefill-initial-tokens N (256)]: initial automatic budget, adjusted to engine geometry\n"
+      "  [--prefill-early-admission | --no-prefill-early-admission]: let queued\n"
+      "    short text join an in-flight prefill (default follows engine mixed-execution support)\n"
       "  [--prefix-min-tokens N (default 1024)]: no prefix-cache entry below this position; a\n"
       "    short prompt attaches to what exists but never takes a snapshot slot\n"
       "  [--prefix-head-snapshots | --no-prefix-head-snapshots (default on)]: a cold prompt\n"
@@ -1461,12 +1536,16 @@ int main(int argc, char** argv) {
   uint16_t metrics_port = 0;
   std::string metrics_bind;
   int64_t kv_capacity = 8192;
+  size_t tokenizer_word_cache_entries = 0;
   int64_t http_max_body_bytes = dgpp::serve::kDefaultHttpMaxBodyBytes;
   int sse_ping_interval = dgpp::serve::kDefaultSsePingInterval;
+  std::string stream_flush = "pass";
   std::string kv_dtype = "bf16";  // the latent cache's format
   std::string ngram_table = "resident";  // the Qwen n-gram table: resident | mmap
   std::string ngram_table_model;         // the table's shards from another cached snapshot (engine.ngram_table_model)
   std::string fp8_head = "gemv";
+  std::string draft_head = "exact";         // the MTP draft head's read: exact | screen (engine.draft_head)
+  int draft_head_blocks = 32;               // the screen's candidate cap (engine.draft_head_blocks)
   std::string dense_weights = "checkpoint";  // the Qwen dense stack: checkpoint | fp8
   std::string mtp_expert_format = "fp8";    // the Qwen MTP draft experts: fp8 | bf16_fused
   std::string bf16_weights = "checkpoint";  // the bf16 decode weights' resident form: checkpoint | bf12 | bf12+bf16
@@ -1475,6 +1554,9 @@ int main(int argc, char** argv) {
   bool prefill_fold_scales = false;
   bool prefill_fp8_gemm = false;
   bool prefill_fp8_per_tensor = false;  // the Qwen3.8-27B per-tensor prefill recipe (opt-in)
+  std::string prefill_activations = "bf16";  // "native": the checkpoint's activation recipe on prefill rows
+  std::string prefill_attention = "bf16";    // Qwen3.5 / Flash-Next attention over an fp8 pool
+  std::string decode_attention = "bf16";     // Flash-Next QSA: bf16 or native fp8 compute
   std::string expert_gemm = "wide";         // the packed expert GEMM's form and companions (engine.expert_*)
   int expert_gemm_prefetch = 3;
   bool expert_tile_list = true;
@@ -1485,9 +1567,11 @@ int main(int argc, char** argv) {
   // table, the default and the behaviour every earlier build had.
   std::optional<dgpp::RopeScaling> rope_scaling;
   std::string embed_sharding = "replicated";  // the full GLM-5.3's embedding: replicated | vocab
+  std::string mtp_head = "checkpoint";        // the full GLM-5.3 draft head: checkpoint | fp8
+  std::string attention_weights = "checkpoint";  // the full GLM-5.3 attention projections: checkpoint | int4
   int max_concurrency = 8, queue_limit = 64, default_max_tokens = 256, admission_gather_ms = 3;
   dgpp::serve::FileInputConfig file_inputs;
-  bool compact_batches = false;
+  bool compact_batches = true;
   int graph_batch_min_live = 0;  // 0 = min(2, max_concurrency) (the batch family, 2026-09-07)
   // The sampled pick's candidate width per rank on the graph engines (the
   // planned 128; narrower forces the exact gather fallback more often —
@@ -1497,6 +1581,10 @@ int main(int argc, char** argv) {
   int admission_window = 256;
   int prefill_budget_tokens = -1;
   int prefill_idle_budget_tokens = 0;
+  int decode_gap_target_ms = dgpp::sched::kDefaultDecodeGapTargetMs;
+  int first_token_target_ms = dgpp::sched::kDefaultFirstTokenTargetMs;
+  dgpp::sched::PrefillLatencyTuning prefill_latency;
+  std::optional<bool> prefill_early_admission_override;
   // The prefix cache's entry policy (2026-09-28): no entry below the floor,
   // and a cold prompt keeps the cut at its first structural boundary.
   int prefix_min_tokens = 1024;
@@ -1523,6 +1611,9 @@ int main(int argc, char** argv) {
   double mtp_draft_temperature = 1.0;  // engine.mtp_draft_temperature: the drawn drafts' temperature / the request's
   std::string mtp_verify = "token";  // engine.mtp_verify: token | block
   int dflash_batch_rows = 0;  // engine.dflash_batch_rows: the drafter's batched verify rows budget (0: whole blocks)
+  bool lookup_draft = false;  // engine.lookup_draft: fuse strong prompt-history matches into MTP drafts
+  int lookup_nmin = 6, lookup_nstrong = 8, lookup_agree = 2;
+  int lookup_tail = 0;  // engine.lookup_tail: extra verify rows past the MTP block (0: the block alone)
   double prefix_cache_gib = 1.5;  // M7: the snapshot arena; 0 = off
   std::optional<float> temperature, top_p, min_p, repetition_penalty;
   std::optional<int> top_k;
@@ -1534,7 +1625,7 @@ int main(int argc, char** argv) {
   // The cluster config: found first, whatever its position,
   // because the flags after it override what it sets.
   std::string config_path;
-  std::string http_bind = "127.0.0.1";
+  std::string http_bind = "0.0.0.0";
   int config_rank = 0;
   bool memory_plan_only = false;  // --memory-plan: the check alone, then exit
   for (int i = 1; i + 1 < argc; ++i) {
@@ -1555,8 +1646,10 @@ int main(int argc, char** argv) {
     if (rank > 0 && rank < world) peer = c.nodes[0];
     port = static_cast<uint16_t>(c.http_port);
     http_bind = c.http_bind;
+    tokenizer_word_cache_entries = c.tokenizer_word_cache_entries;
     http_max_body_bytes = c.http_max_body_bytes;
     sse_ping_interval = c.sse_ping_interval;
+    stream_flush = c.stream_flush;
     if (!c.node_env.empty()) {
       if (rank < 0 || rank >= world) {
         DGPP_LOG_ERROR("rank is outside configured nodes");
@@ -1578,6 +1671,8 @@ int main(int argc, char** argv) {
     ngram_table_model = e.ngram_table_model;
     dense_weights = e.dense_weights;
     fp8_head = e.fp8_head;
+    draft_head = e.draft_head;
+    draft_head_blocks = e.draft_head_blocks;
     mtp_expert_format = e.mtp_expert_format;
     bf16_weights = e.bf16_weights;
     draft_vocab = e.draft_vocab;
@@ -1585,6 +1680,9 @@ int main(int argc, char** argv) {
     prefill_fold_scales = e.prefill_fold_scales;
     prefill_fp8_gemm = e.prefill_fp8_gemm;
     prefill_fp8_per_tensor = e.prefill_fp8_per_tensor;
+    prefill_activations = e.prefill_activations;
+    prefill_attention = e.prefill_attention;
+    decode_attention = e.decode_attention;
     expert_gemm = e.expert_gemm;
     expert_gemm_prefetch = e.expert_gemm_prefetch;
     expert_tile_list = e.expert_tile_list;
@@ -1593,6 +1691,8 @@ int main(int argc, char** argv) {
     prefill = e.prefill;
     rope_scaling = e.rope_scaling;
     embed_sharding = e.embed_sharding;
+    mtp_head = e.mtp_head;
+    attention_weights = e.attention_weights;
     default_max_tokens = e.default_max_tokens;
     file_inputs = e.file_inputs;
     queue_limit = e.queue_limit;
@@ -1627,6 +1727,11 @@ int main(int argc, char** argv) {
     mtp_draft_temperature = e.mtp_draft_temperature;
     mtp_verify = e.mtp_verify;
     dflash_batch_rows = e.dflash_batch_rows;
+    lookup_draft = e.lookup_draft;
+    lookup_nmin = e.lookup_nmin;
+    lookup_nstrong = e.lookup_nstrong;
+    lookup_agree = e.lookup_agree;
+    lookup_tail = e.lookup_tail;
     compact_batches = e.compact_batches;
     graph_batch_min_live = e.graph_batch_min_live;
     sampling_candidates = e.sampling_candidates;
@@ -1636,6 +1741,10 @@ int main(int argc, char** argv) {
     model_alias = e.model_alias;
     prefill_budget_tokens = e.prefill_budget_tokens;
     prefill_idle_budget_tokens = e.prefill_idle_budget_tokens;
+    decode_gap_target_ms = e.decode_gap_target_ms;
+    first_token_target_ms = e.first_token_target_ms;
+    prefill_latency = e.prefill_latency;
+    prefill_early_admission_override = e.prefill_early_admission;
     prefix_min_tokens = e.prefix_min_tokens;
     prefix_head_snapshots = e.prefix_head_snapshots;
     bulk_pace_gbps = e.bulk_pace_gbps;
@@ -1661,7 +1770,13 @@ int main(int argc, char** argv) {
     else if (a == "--checkpoint-dir") ckpt = next();
     else if (a == "--port") port = static_cast<uint16_t>(std::stoi(next()));
     else if (a == "--bind-host") http_bind = next();
-    else if (a == "--sse-ping-interval") {
+    else if (a == "--stream-flush") {
+      stream_flush = next();
+      if (!dgpp::serve::valid_stream_flush(stream_flush)) {
+        DGPP_LOG_ERROR("--stream-flush must be pass or wake");
+        return 2;
+      }
+    } else if (a == "--sse-ping-interval") {
       const std::string value = next();
       const auto [end, error] =
           std::from_chars(value.data(), value.data() + value.size(), sse_ping_interval);
@@ -1686,6 +1801,8 @@ int main(int argc, char** argv) {
     else if (a == "--dense-weights") dense_weights = next();
     else if (a == "--fp8-head")
       fp8_head = next();
+    else if (a == "--draft-head") draft_head = next();
+    else if (a == "--draft-head-blocks") draft_head_blocks = std::stoi(next());
     else if (a == "--mtp-expert-format") mtp_expert_format = next();
     else if (a == "--bf16-weights") bf16_weights = next();
     else if (a == "--draft-vocab") draft_vocab = next();
@@ -1700,6 +1817,8 @@ int main(int argc, char** argv) {
     else if (a == "--no-ngram-prestage") ngram_prestage = false;
     else if (a == "--prefill") prefill = next();
     else if (a == "--embed-sharding") embed_sharding = next();
+    else if (a == "--mtp-head") mtp_head = next();
+    else if (a == "--attention-weights") attention_weights = next();
     else if (a == "--memory-plan") memory_plan_only = true;
     else if (a == "--max-concurrency") max_concurrency = std::stoi(next());
     else if (a == "--queue-limit") queue_limit = std::stoi(next());
@@ -1758,6 +1877,12 @@ int main(int argc, char** argv) {
     else if (a == "--mtp-draft-temperature") mtp_draft_temperature = std::stod(next());
     else if (a == "--mtp-verify") mtp_verify = next();
     else if (a == "--dflash-batch-rows") dflash_batch_rows = std::stoi(next());
+    else if (a == "--lookup-draft") lookup_draft = true;
+    else if (a == "--no-lookup-draft") lookup_draft = false;
+    else if (a == "--lookup-nmin") lookup_nmin = std::stoi(next());
+    else if (a == "--lookup-nstrong") lookup_nstrong = std::stoi(next());
+    else if (a == "--lookup-agree") lookup_agree = std::stoi(next());
+    else if (a == "--lookup-tail") lookup_tail = std::stoi(next());
     else if (a == "--sampling-candidates") sampling_candidates = std::stoi(next());
     else if (a == "--prefix-cache-gib") prefix_cache_gib = std::stod(next());
     else if (a == "--no-prefix-cache") prefix_cache_gib = 0.0;
@@ -1765,6 +1890,30 @@ int main(int argc, char** argv) {
     else if (a == "--admission-window") admission_window = std::stoi(next());
     else if (a == "--prefill-budget-tokens") prefill_budget_tokens = std::stoi(next());
     else if (a == "--prefill-idle-budget-tokens") prefill_idle_budget_tokens = std::stoi(next());
+    else if (a == "--decode-gap-target-ms" || a == "--first-token-target-ms") {
+      const std::string value = next();
+      int& target = a == "--decode-gap-target-ms" ? decode_gap_target_ms : first_token_target_ms;
+      const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), target);
+      if (error != std::errc{} || end != value.data() + value.size() ||
+          target < 0 || target > dgpp::sched::kMaxLatencyTargetMs) {
+        DGPP_LOG_ERROR("{} must be an integer in [0, 3600000] ms", a);
+        return 2;
+      }
+    }
+    else if (a == "--prefill-latency-headroom-pct" || a == "--prefill-growth-factor" ||
+             a == "--prefill-cost-recovery-pct" || a == "--prefill-initial-tokens") {
+      const std::string value = next();
+      int& tuning = a == "--prefill-latency-headroom-pct" ? prefill_latency.headroom_pct
+          : a == "--prefill-growth-factor" ? prefill_latency.growth_factor
+          : a == "--prefill-cost-recovery-pct" ? prefill_latency.recovery_pct : prefill_latency.initial_tokens;
+      const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), tuning);
+      if (error != std::errc{} || end != value.data() + value.size() || !prefill_latency.valid()) {
+        DGPP_LOG_ERROR("Invalid {}: headroom [0,50] percent, growth [2,4], recovery [1,100] percent, initial tokens [1,1073741824]", a);
+        return 2;
+      }
+    }
+    else if (a == "--prefill-early-admission") prefill_early_admission_override = true;
+    else if (a == "--no-prefill-early-admission") prefill_early_admission_override = false;
     else if (a == "--prefix-min-tokens") prefix_min_tokens = std::stoi(next());
     else if (a == "--prefix-head-snapshots") prefix_head_snapshots = true;
     else if (a == "--no-prefix-head-snapshots") prefix_head_snapshots = false;
@@ -1882,6 +2031,8 @@ int main(int argc, char** argv) {
       DGPP_LOG_INFO("serve: --mtp without --mtp-depth on DeepSeek-V4: the DSpark block's {} drafts", mtp_depth);
     }
   }
+  // Admission remains automatic/on/off through the settings handshake.
+  // Resolve it from the constructed engine before publishing the warm record.
   // ---- the fabric's first handshake: the head pushes the
   // world's shape. Rank 0 opens the journal and accepts the full world
   // before building anything; the peers connect (retrying within the
@@ -1898,24 +2049,30 @@ int main(int argc, char** argv) {
     const int effective_batch_min_live =
         graph_batch_min_live == 0 ? std::min(2, max_concurrency) : graph_batch_min_live;
     return std::format(
-        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} ngt={} dw={} mtpef={} bfw={} "
-        "fp8head={} pf={} "
+        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} pfattn={} dcattn={} ngt={} dw={} mtpef={} bfw={} "
+        "fp8head={} dh={} dhb={} mtph={} attw={} pf={} "
         "emsh={} maxtok={} queue={} "
         "eos={} graph={} compact={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} "
         "msad={} msss={} mdr={} mdt={} mvf={} dbr={} "
         "batchmin={} cand={} "
-        "pcgib={} adm={} win={} pfbudget={} pfidle={} pmin={} phead={} pace={} inflight={} "
+        "pcgib={} adm={} win={} pfbudget={} pfidle={} gapms={} ttftms={} pfhr={} pfgrow={} pfrec={} pfstart={} pfifloor={} pfearly={} pmin={} phead={} pace={} inflight={} "
         "reasoning_in_content={} "
-        "rs={} dflash={} dfw={}",
+        "rs={} dflash={} dfw={} lk={} lkn={} lks={} lka={} lkt={}",
         model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port, max_concurrency,
-        kv_capacity, kv_dtype, ngram_table, dense_weights, mtp_expert_format, bf16_weights, fp8_head, prefill,
-        embed_sharding, default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0,
+        kv_capacity, kv_dtype, prefill_attention, decode_attention, ngram_table, dense_weights, mtp_expert_format, bf16_weights, fp8_head,
+        draft_head,
+        draft_head_blocks, mtp_head,
+        attention_weights, prefill, embed_sharding, default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0,
         compact_batches ? 1 : 0, mtp ? 1 : 0, mtp_depth, mtp_schedule ? 1 : 0, mtp_schedule_row_ms,
         mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth,
         mtp_schedule_adapt ? 1 : 0, mtp_schedule_sampled_scale, mtp_draft, mtp_draft_temperature,
         mtp_verify, dflash_batch_rows, effective_batch_min_live,
         sampling_candidates, prefix_cache_gib,
         admission_mode, admission_window, prefill_budget_tokens, prefill_idle_budget_tokens,
+        decode_gap_target_ms, first_token_target_ms,
+        prefill_latency.headroom_pct, prefill_latency.growth_factor, prefill_latency.recovery_pct,
+        prefill_latency.initial_tokens, prefill_latency.idle_floor_tokens,
+        prefill_early_admission_override.has_value() ? (*prefill_early_admission_override ? 1 : 0) : -1,
         prefix_min_tokens, prefix_head_snapshots ? 1 : 0,
         bulk_pace_gbps, bulk_inflight, reasoning_in_content ? 1 : 0,
         rope_scaling ? std::format("yarn:{}:{}:{}:{}:{}:{}", rope_scaling->factor,
@@ -1923,7 +2080,8 @@ int main(int argc, char** argv) {
                                    rope_scaling->beta_fast, rope_scaling->beta_slow,
                                    rope_scaling->attn_factor, rope_scaling->mrope_cache_factor)
                      : "off",
-        dflash_model.empty() ? "off" : dflash_model, dflash_weights);
+        dflash_model.empty() ? "off" : dflash_model, dflash_weights, lookup_draft ? 1 : 0,
+        lookup_nmin, lookup_nstrong, lookup_agree, lookup_tail);
   };
   if ((world > 1 || rank > 0) && !memory_plan_only) {
     try {
@@ -1951,6 +2109,8 @@ int main(int argc, char** argv) {
         ws.ngram_table = ngram_table;
         ws.dense_weights = dense_weights;
         ws.fp8_head = fp8_head;
+        ws.draft_head = draft_head;
+        ws.draft_head_blocks = draft_head_blocks;
         ws.mtp_expert_format = mtp_expert_format;
         ws.bf16_weights = bf16_weights;
         ws.draft_vocab = draft_vocab;
@@ -1958,6 +2118,9 @@ int main(int argc, char** argv) {
         ws.prefill_fold_scales = prefill_fold_scales;
         ws.prefill_fp8_gemm = prefill_fp8_gemm;
         ws.prefill_fp8_per_tensor = prefill_fp8_per_tensor;
+        ws.prefill_activations = prefill_activations;
+        ws.prefill_attention = prefill_attention;
+        ws.decode_attention = decode_attention;
         ws.dflash_model = dflash_model;
         ws.dflash_verify_graph = dflash_verify_graph;
         ws.prefill_group = prefill_group;
@@ -1979,6 +2142,8 @@ int main(int argc, char** argv) {
         ws.prefill = prefill;
         ws.rope_scaling = rope_scaling;
         ws.embed_sharding = embed_sharding;
+        ws.mtp_head = mtp_head;
+        ws.attention_weights = attention_weights;
         ws.default_max_tokens = default_max_tokens;
         ws.queue_limit = queue_limit;
         ws.no_eos = no_eos;
@@ -1996,6 +2161,11 @@ int main(int argc, char** argv) {
         ws.mtp_draft_temperature = mtp_draft_temperature;
         ws.mtp_verify = mtp_verify;
         ws.dflash_batch_rows = dflash_batch_rows;
+        ws.lookup_draft = lookup_draft;
+        ws.lookup_nmin = lookup_nmin;
+        ws.lookup_nstrong = lookup_nstrong;
+        ws.lookup_agree = lookup_agree;
+        ws.lookup_tail = lookup_tail;
         ws.compact_batches = compact_batches;
         ws.graph_batch_min_live = graph_batch_min_live;
         ws.sampling_candidates = sampling_candidates;
@@ -2004,6 +2174,10 @@ int main(int argc, char** argv) {
         ws.admission_window = admission_window;
         ws.prefill_budget_tokens = prefill_budget_tokens;
         ws.prefill_idle_budget_tokens = prefill_idle_budget_tokens;
+        ws.decode_gap_target_ms = decode_gap_target_ms;
+        ws.first_token_target_ms = first_token_target_ms;
+        ws.prefill_latency = prefill_latency;
+        ws.prefill_early_admission = prefill_early_admission_override;
         ws.prefix_min_tokens = prefix_min_tokens;
         ws.prefix_head_snapshots = prefix_head_snapshots;
         ws.bulk_pace_gbps = bulk_pace_gbps;
@@ -2035,6 +2209,8 @@ int main(int argc, char** argv) {
         ngram_table = ws.ngram_table;
         dense_weights = ws.dense_weights;
         fp8_head = ws.fp8_head;
+        draft_head = ws.draft_head;
+        draft_head_blocks = ws.draft_head_blocks;
         mtp_expert_format = ws.mtp_expert_format;
         bf16_weights = ws.bf16_weights;
         draft_vocab = ws.draft_vocab;
@@ -2042,6 +2218,8 @@ int main(int argc, char** argv) {
         prefill_fold_scales = ws.prefill_fold_scales;
         prefill_fp8_gemm = ws.prefill_fp8_gemm;
         prefill_fp8_per_tensor = ws.prefill_fp8_per_tensor;
+        prefill_attention = ws.prefill_attention;
+        decode_attention = ws.decode_attention;
         dflash_model = ws.dflash_model;
         dflash_verify_graph = ws.dflash_verify_graph;
         prefill_group = ws.prefill_group;
@@ -2063,6 +2241,8 @@ int main(int argc, char** argv) {
         prefill = ws.prefill;
         rope_scaling = ws.rope_scaling;
         embed_sharding = ws.embed_sharding;
+        mtp_head = ws.mtp_head;
+        attention_weights = ws.attention_weights;
         default_max_tokens = ws.default_max_tokens;
         queue_limit = ws.queue_limit;
         no_eos = ws.no_eos;
@@ -2080,6 +2260,11 @@ int main(int argc, char** argv) {
         mtp_draft_temperature = ws.mtp_draft_temperature;
         mtp_verify = ws.mtp_verify;
         dflash_batch_rows = ws.dflash_batch_rows;
+        lookup_draft = ws.lookup_draft;
+        lookup_nmin = ws.lookup_nmin;
+        lookup_nstrong = ws.lookup_nstrong;
+        lookup_agree = ws.lookup_agree;
+        lookup_tail = ws.lookup_tail;
         compact_batches = ws.compact_batches;
         graph_batch_min_live = ws.graph_batch_min_live;
         sampling_candidates = ws.sampling_candidates;
@@ -2088,6 +2273,10 @@ int main(int argc, char** argv) {
         admission_window = ws.admission_window;
         prefill_budget_tokens = ws.prefill_budget_tokens;
         prefill_idle_budget_tokens = ws.prefill_idle_budget_tokens;
+        decode_gap_target_ms = ws.decode_gap_target_ms;
+        first_token_target_ms = ws.first_token_target_ms;
+        prefill_latency = ws.prefill_latency;
+        prefill_early_admission_override = ws.prefill_early_admission;
         prefix_min_tokens = ws.prefix_min_tokens;
         prefix_head_snapshots = ws.prefix_head_snapshots;
         bulk_pace_gbps = ws.bulk_pace_gbps;
@@ -2115,6 +2304,7 @@ int main(int argc, char** argv) {
     std::fputs(kUsage, stderr);
     return 1;
   }
+  if (rank == 0) DGPP_LOG_INFO("serve: HTTP stream flush {}", stream_flush);
   if (rank == 0) DGPP_LOG_INFO("serve: SSE ping interval {} s (-1 disables)", sse_ping_interval);
   if (kv_capacity < 1 || max_concurrency < 1 || queue_limit < 1 ||
       default_max_tokens < 1 || max_connections < 1) {
@@ -2160,6 +2350,15 @@ int main(int argc, char** argv) {
     DGPP_LOG_ERROR("engine.fp8_head mma requires engine.dense_weights fp8");
     return 1;
   }
+  if (draft_head != "exact" && draft_head != "screen") {
+    DGPP_LOG_ERROR("engine.draft_head (--draft-head) must be exact or screen, got '{}'", draft_head);
+    return 1;
+  }
+  if (draft_head_blocks < 1 || draft_head_blocks > dgpp::kHeadScreenMaxBlocks) {
+    DGPP_LOG_ERROR("engine.draft_head_blocks (--draft-head-blocks) must be in [1, {}], got {}",
+                   dgpp::kHeadScreenMaxBlocks, draft_head_blocks);
+    return 1;
+  }
   dgpp::Bf16Residency bf16_mode = dgpp::Bf16Residency::Checkpoint;
   if (!dgpp::parse_bf16_residency(bf16_weights, &bf16_mode)) {
     DGPP_LOG_ERROR("--bf16-weights must be checkpoint, bf12 or bf12+bf16, got '{}'", bf16_weights);
@@ -2184,6 +2383,15 @@ int main(int argc, char** argv) {
   if (mtp_draft != "auto" && mtp_draft != "sampled" && mtp_draft != "greedy") {
     DGPP_LOG_ERROR("--mtp-draft must be auto, sampled or greedy, got '{}'", mtp_draft);
     return 1;
+  }
+  if (lookup_tail < 0) {
+    DGPP_LOG_ERROR("--lookup-tail must be >= 0, got {}", lookup_tail);
+    return 2;
+  }
+  if (!(lookup_nmin >= 1 && lookup_nstrong >= lookup_nmin && lookup_agree >= 0)) {
+    DGPP_LOG_ERROR("--lookup thresholds must satisfy 1 <= --lookup-nmin <= --lookup-nstrong, got {}/{}/{}",
+                   lookup_nmin, lookup_nstrong, lookup_agree);
+    return 2;
   }
   if (prefill != "bounded" && prefill != "exact") {
     DGPP_LOG_ERROR("--prefill must be bounded or exact, got '{}'", prefill);
@@ -2243,6 +2451,11 @@ int main(int argc, char** argv) {
   // prefill recipe and the BF16 lm head requantized to block FP8.
   dgpp::Qwen35Model::set_prefill_fp8_per_tensor(prefill_fp8_per_tensor);
   dgpp::Qwen35Model::set_dense_weights_fp8(dense_weights == "fp8");
+  // The checkpoint's activation recipe on prefill rows (engine.prefill_activations).
+  dgpp::Qwen35Model::set_native_activations(prefill_activations == "native");
+  // The prefill attention's arithmetic on the fp8 pool (engine.prefill_attention).
+  dgpp::Qwen35Model::set_fp8_attention(prefill_attention == "fp8");
+  dgpp::QwenModel::set_native_attention(prefill_attention == "fp8", decode_attention == "fp8");
   if (dflash_weights != "checkpoint" && dflash_weights != "fp8") {
     DGPP_LOG_ERROR("--dflash-weights must be checkpoint or fp8, got '{}'", dflash_weights);
     return 2;
@@ -2276,6 +2489,13 @@ int main(int argc, char** argv) {
   // The RadixArk fusion flag: set before the plan and the load (both read it
   // through QwenLayerStream::mtp_experts_bf16_fused and loader_format()).
   dgpp::QwenLayerStream::set_mtp_expert_format(mtp_expert_format == "bf16_fused");
+  // The draft head's screen (engine.draft_head; kernels/draft_head.hpp): a
+  // process-wide setting every family reads at construction (its memory
+  // plan too) — the decode drafts' head reads through the 2-bit copy.
+  dgpp::draft_head_configure(dgpp::DraftHeadSettings{draft_head == "screen" ? draft_head_blocks : 0});
+  if (draft_head == "screen")
+    DGPP_LOG_INFO("draft head: screen (2-bit rotated copy, cap {} blocks of 128 rows; kernels/head_screen.hpp)",
+                  draft_head_blocks);
   if (embed_sharding != "replicated" && embed_sharding != "vocab") {
     DGPP_LOG_ERROR("--embed-sharding must be replicated or vocab, got '{}'", embed_sharding);
     return 2;
@@ -2285,6 +2505,18 @@ int main(int argc, char** argv) {
   dgpp::GlmDsaLayerStream::set_embed_vocab_sharded(embed_sharding == "vocab");
   dgpp::Dsv41LayerStream::set_embed_vocab_sharded(embed_sharding == "vocab");
   dgpp::Dsv4LayerStream::set_embed_vocab_sharded(embed_sharding == "vocab");
+  if (mtp_head != "checkpoint" && mtp_head != "fp8") {
+    DGPP_LOG_ERROR("--mtp-head must be checkpoint or fp8, got '{}'", mtp_head);
+    return 2;
+  }
+  // The full GLM-5.3 draft head's form: set before the plan and the load
+  // (the loader encodes the FP8 copy beside the head's rows).
+  dgpp::GlmDsaLayerStream::set_mtp_head_fp8(mtp_head == "fp8");
+  if (attention_weights != "checkpoint" && attention_weights != "int4") {
+    DGPP_LOG_ERROR("--attention-weights must be checkpoint or int4, got '{}'", attention_weights);
+    return 2;
+  }
+  dgpp::GlmDsaLayerStream::set_attention_weights_int4(attention_weights == "int4");
   if (world > 1) {
     require(rank >= 0 && rank < world, "--rank outside --world");
     require(!peer.empty() || rank == 0,
@@ -2383,6 +2615,11 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  if (decode_gap_target_ms < 0 || decode_gap_target_ms > dgpp::sched::kMaxLatencyTargetMs ||
+      first_token_target_ms < 0 || first_token_target_ms > dgpp::sched::kMaxLatencyTargetMs) {
+    DGPP_LOG_ERROR("Latency targets must be in [0, 3600000] ms; zero disables that target");
+    return 2;
+  }
   if (prefill_idle_budget_tokens < 0 || prefill_idle_budget_tokens > (1 << 30) ||
       (prefill_idle_budget_tokens > 0 &&
        (prefill_budget_tokens == 0 || prefill_idle_budget_tokens < prefill_budget_tokens))) {
@@ -2441,37 +2678,38 @@ int main(int argc, char** argv) {
       DGPP_LOG_ERROR("engine.fp8_head mma requires the Qwen family and engine.dense_weights fp8");
       return 1;
     }
-    if (rope_scaling.has_value() && std::string(family->name()) != "qwen4_exp") {
+    const std::string family_name = std::string(family->name());
+    if (rope_scaling.has_value() && family_name != "qwen4_exp" && family_name != "qwen3_5") {
       // A refused start, not a warning (review item 8, 2026-09-18): a WARN
       // scrolls past in a boot log and the world then serves with a knob the
       // operator asked for left unapplied — the same config digest on every
       // rank (the ramp rides the settings record), a memory plan sized for the
       // YaRN ceiling and a rope that never reached it. The knob is built for
-      // the Qwen QSA rope table and no other family's, so the only honest
+      // the Qwen QSA rope table and the Qwen3.8-27B full-attention rope table
+      // (same geometry) and no other family's, so the only honest
       // answer here is to stop and name what to change.
       DGPP_LOG_ERROR(
           "engine.rope_scaling is set but the loaded model is the {} family; this override "
-          "currently supports the Qwen3.8-Flash-Next family (qwen4_exp) only. Remove "
-          "engine.rope_scaling, or point --checkpoint at a Qwen3.8-Flash-Next checkpoint.",
+          "currently supports the Qwen3.8-Flash-Next (qwen4_exp) and Qwen3.8-27B (qwen3_5) "
+          "families only. Remove "
+          "engine.rope_scaling, or point --checkpoint at a Qwen3.8-Flash-Next or Qwen3.8-27B "
+          "checkpoint.",
           family->name());
       return 1;
     }
+    if (mtp_head == "fp8" && std::string(family->name()) != "glm_moe_dsa")
+      DGPP_LOG_WARN("engine.mtp_head = fp8 applies to the full GLM-5.3's draft block; {} ignores it", family->name());
     if (embed_sharding == "vocab" && std::string(family->name()) != "glm_moe_dsa" &&
         std::string(family->name()) != "deepseek_v41" && std::string(family->name()) != "deepseek_v4")
       DGPP_LOG_WARN("engine.embed_sharding = vocab applies to the full GLM-5.3 and the DeepSeek families; {} keeps its "
                     "embedding replicated", family->name());
     DGPP_LOG_INFO("serve: model family {} ({})", family->name(), ckpt);
-    if (prefill_budget_tokens > 0 && (!decode_graph ||
-        (std::string(family->name()) != "qwen4_exp" && std::string(family->name()) != "glm5"))) {
-      DGPP_LOG_ERROR("--prefill-budget-tokens requires a Qwen or GLM-5.3-Flash graph engine");
-      return 1;
-    }
     // The decode rows (2026-09-10, engine/decode_outputs.hpp): the fixed
     // batch holds every slot's verify rows — max_concurrency x (1 + the
     // MTP depth) — floored at kDecodeRows so every existing recipe keeps
     // its exact shape (4 slots x 2 rows = 8). The family's cap bounds it:
-    // Qwen supports up to 64 rows, GLM-4.7 up to 32, and the full
-    // GLM-5.3 up to 16. Fitting batch families remain available when
+    // Qwen supports up to 64 rows; GLM-4.7, the full GLM-5.3 and
+    // GLM-5.3-Flash up to 32. Fitting batch families remain available when
     // a deeper configuration exceeds the full-batch ceiling.
     // Reject configurations whose depth-1 batch already exceeds the cap.
     // The DFlash2 eager path verifies a full block per slot per step: the
@@ -2479,7 +2717,7 @@ int main(int argc, char** argv) {
     // speculative pass caps itself to what the rows allow).
     const int graph_rows_per_request = !dflash_dir.empty()
                                            ? dgpp::kSpecRows
-                                           : (mtp ? 1 + mtp_depth : 1);
+                                           : (mtp ? 1 + mtp_depth + lookup_tail : 1);
     int decode_rows = std::max(dgpp::kDecodeRows, max_concurrency * graph_rows_per_request);
     if (decode_rows > family->decode_rows_cap()) {
       if (!decode_graph) {
@@ -2496,7 +2734,7 @@ int main(int argc, char** argv) {
         decode_rows = family->decode_rows_cap();
       } else {
         DGPP_LOG_ERROR(
-            "--decode-graph needs --max-concurrency * (1 + mtp depth) <= {} on the {} "
+            "--decode-graph needs --max-concurrency * (1 + mtp depth + lookup tail) <= {} on the {} "
             "family (got {} * {})",
             family->decode_rows_cap(), family->name(), max_concurrency, graph_rows_per_request);
         return 1;
@@ -2522,11 +2760,29 @@ int main(int argc, char** argv) {
     DGPP_LOG_INFO("serve: decode rows {} ({} slot(s) x {} row(s) per request, floor {}, the {} family's cap {})",
                   decode_rows, max_concurrency, graph_rows_per_request, dgpp::kDecodeRows, family->name(),
                   family->decode_rows_cap());
+    if (prefill_attention != "bf16" && std::string(family->name()) != "qwen3_5" &&
+        std::string(family->name()) != "qwen4_exp") {
+      DGPP_LOG_ERROR("serve: engine.prefill_attention {} requires Qwen3.5 or Qwen3.8-Flash-Next "
+                     "with an fp8 K/V pool; the {} family has no such form",
+                     prefill_attention, family->name());
+      return 2;
+    }
+    if (decode_attention != "bf16" && std::string(family->name()) != "qwen4_exp") {
+      DGPP_LOG_ERROR("serve: engine.decode_attention {} requires Qwen3.8-Flash-Next; got {}",
+                    decode_attention, family->name());
+      return 2;
+    }
+    if (prefill_activations != "bf16" && std::string(family->name()) != "qwen3_5") {
+      DGPP_LOG_ERROR("serve: engine.prefill_activations {} is the Qwen3.5 family's lever (the checkpoint's activation "
+                     "recipe on prefill rows); the {} family's prefill chain has its own keys",
+                     prefill_activations, family->name());
+      return 2;
+    }
     if (std::string(family->name()) != "glm5" && std::string(family->name()) != "glm_moe_dsa" &&
-        std::string(family->name()) != "mimo_v2" && std::string(family->name()) != "qwen4_exp" &&
-        kv_dtype != "bf16")
-      DGPP_LOG_WARN("serve: --kv-dtype {} applies to the GLM-5.3 latent caches, the MiMo-V2 and "
-                    "Qwen3.8-Flash-Next K/V caches only; the {} caches stay bf16",
+        std::string(family->name()) != "mimo_v2" && std::string(family->name()) != "qwen3_5" &&
+        std::string(family->name()) != "qwen4_exp" && kv_dtype != "bf16")
+      DGPP_LOG_WARN("serve: --kv-dtype {} applies to the GLM-5.3 latent caches, the MiMo-V2 K/V cache and the "
+                    "Qwen3.5 / Qwen3.8-Flash-Next K/V pools only; the {} caches stay bf16",
                     kv_dtype, family->name());
     if (std::string(family->name()) != "qwen4_exp" && ngram_table != "resident")
       DGPP_LOG_WARN("serve: --ngram-table {} applies to the Qwen n-gram table only; the {} family has none",
@@ -2744,9 +3000,11 @@ int main(int argc, char** argv) {
 
     ServeKnobs knobs;
     knobs.http_port = port;
+    knobs.tokenizer_word_cache_entries = tokenizer_word_cache_entries;
     knobs.http_bind = http_bind;
     knobs.http_max_body_bytes = http_max_body_bytes;
     knobs.sse_ping_interval = sse_ping_interval;
+    knobs.stream_flush = stream_flush;
     knobs.max_connections = max_connections;
     knobs.queue_limit = queue_limit;
     knobs.admission_gather_ms = admission_gather_ms;
@@ -2756,6 +3014,9 @@ int main(int argc, char** argv) {
     knobs.admission.window_tokens = admission_window;
     knobs.admission.prefill_budget_tokens = prefill_budget_tokens;
     knobs.admission.prefill_idle_budget_tokens = prefill_idle_budget_tokens;
+    knobs.admission.decode_gap_target_ms = decode_gap_target_ms;
+    knobs.admission.first_token_target_ms = first_token_target_ms;
+    knobs.admission.prefill_latency = prefill_latency;
     knobs.admission.prefix_min_tokens = prefix_min_tokens;
     knobs.admission.prefix_head_snapshots = prefix_head_snapshots;
     knobs.default_max_tokens = default_max_tokens;
@@ -2875,12 +3136,31 @@ int main(int argc, char** argv) {
           engine.reset();
           family->destroy_model();
         };
+        const auto start_warm = [&] {
+          // Any rank can be last out of cold checkpoint loading. Wait on TCP
+          // before launching collectives, whose deadlines bound execution,
+          // not disk I/O on a peer. Apply the same hold to graph and eager serving.
+          if (rank == 0) {
+            if (journal) {
+              if (!journal->wait_peers_ready(rendezvous_timeout_ms,
+                                             [rank] { return peer_should_stop(rank); })) return false;
+              journal->broadcast(dgpp::serve::encode_journal_warm(
+                  knobs.admission, prefix_slots, config_digest));
+            }
+            return true;
+          }
+          reader->send_ready();
+          return dgpp::serve::wait_journal_warm(
+              &*reader, [rank] { return peer_should_stop(rank); },
+              &peer_policy, &peer_prefix_slots, &rank0_config);
+        };
         if (decode_graph) {
           std::unique_ptr<ServeGraphEngine> graph_engine =
               family->make_graph_engine(bus.get(), rank, world, pick_scratch, graph_batch_min_live,
                                         sample_prefix.data, sample_gather.data, sampling_candidates,
-                                        &grammar_vocab, prefix_slots, mtp_depth, compact_batches);
-          knobs.admission = dgpp::serve::resolve_prefill_policy(knobs.admission, *graph_engine->engine());
+                                        &grammar_vocab, prefix_slots, mtp_depth, compact_batches, lookup_tail);
+          knobs.admission = dgpp::serve::resolve_prefill_policy(
+              knobs.admission, *graph_engine->engine(), prefill_early_admission_override);
           peer_policy = knobs.admission;
           DGPP_LOG_INFO("rank {}: prefill budget {} tokens/tick (0 = full prompt), {} with nothing decoding{}",
                         rank, knobs.admission.prefill_budget_tokens,
@@ -2890,6 +3170,15 @@ int main(int argc, char** argv) {
           graph_engine->set_proposal_temperature_scale(static_cast<float>(mtp_draft_temperature));
           graph_engine->set_block_verify(mtp_verify == "block");
           graph_engine->set_prefill_group(prefill_group);
+          graph_engine->set_lookup_drafts(lookup_draft, lookup_nmin, lookup_nstrong, lookup_agree);
+          if (lookup_draft)
+            DGPP_LOG_INFO("rank {}: context-lookup drafting on (nmin {}/nstrong {}/agree {}): strong "
+                          "prompt-history matches replace MTP drafts within the verify rows",
+                          rank, lookup_nmin, lookup_nstrong, lookup_agree);
+          if (lookup_tail > 0)
+            DGPP_LOG_INFO("rank {}: lookup tail mode: {} extra verify rows past the MTP block (fewer batch "
+                          "slots for a longer block while copying)",
+                          rank, lookup_tail);
           if (!prefill_group) DGPP_LOG_INFO("serve: cold prompts prefill one per walk (engine.prefill_group false)");
           if (!dflash_dir.empty()) graph_engine->configure_block_rows_budget(dflash_batch_rows);
           if (mtp_verify == "block")
@@ -2930,17 +3219,9 @@ int main(int argc, char** argv) {
           }
           // Record every graph variant now, on every rank at this same
           // point, so no capture pauses a live stream later. The warm-up
-          // is a run of collectives, so it starts on the journal's clock:
-          // rank 0 announces it with the warm record once its (slower)
-          // construction is done; a peer holds at that record rather than
-          // spinning its first collective in stall diagnostics.
-          if (rank == 0) {
-            if (journal)
-              journal->broadcast(dgpp::serve::encode_journal_warm(
-                  knobs.admission, prefix_slots, config_digest));
-          } else if (!dgpp::serve::wait_journal_warm(
-                         &*reader, [rank] { return peer_should_stop(rank); },
-                         &peer_policy, &peer_prefix_slots, &rank0_config)) {
+          // is a run of collectives, so the journal releases it only after
+          // every rank has finished constructing its model and engine.
+          if (!start_warm()) {
             graph_engine.reset();
             family->destroy_model();
             cudaFreeHost(pick_scratch);
@@ -2966,17 +3247,12 @@ int main(int argc, char** argv) {
               dgpp::make_fabric_sample(bus.get(), rank, world, sample_prefix.data, sample_gather.data,
                                        family->vocab_size()),
               &grammar_vocab, prefix_slots);
-          knobs.admission = dgpp::serve::resolve_prefill_policy(knobs.admission, *engine);
+          knobs.admission = dgpp::serve::resolve_prefill_policy(
+              knobs.admission, *engine, prefill_early_admission_override);
           peer_policy = knobs.admission;
           // The eager fabric path exchanges the warm record too: it
           // carries the admission policy (no capture to start here).
-          if (rank == 0) {
-            if (journal)
-              journal->broadcast(dgpp::serve::encode_journal_warm(
-                  knobs.admission, prefix_slots, config_digest));
-          } else if (!dgpp::serve::wait_journal_warm(
-                         &*reader, [rank] { return peer_should_stop(rank); },
-                         &peer_policy, &peer_prefix_slots, &rank0_config)) {
+          if (!start_warm()) {
             engine_release();
             cudaFreeHost(pick_scratch);
             bus->stop();
@@ -3106,7 +3382,8 @@ int main(int argc, char** argv) {
     std::unique_ptr<dgpp::sched::SchedulerEngine> engine = family->make_eager_engine(
         max_concurrency, dgpp::make_w1_pick(family->vocab_size()), dgpp::make_w1_sample(family->vocab_size()),
         &grammar_vocab, prefix_slots);
-    knobs.admission = dgpp::serve::resolve_prefill_policy(knobs.admission, *engine);
+    knobs.admission = dgpp::serve::resolve_prefill_policy(
+        knobs.admission, *engine, prefill_early_admission_override);
     const int rc = serve_openai(engine.get(), family->vocab_size(), generation_eos, ckpt,
                                 model_display, knobs, no_eos, boot_s(), /*journal=*/nullptr,
                                 /*oplog=*/nullptr, family->name());

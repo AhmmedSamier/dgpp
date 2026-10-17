@@ -265,11 +265,21 @@ __device__ __forceinline__ void chunk_to_bf16x8(const uint4& c, float s, uint32_
 // forms narrow to 4 / 2 / 1 on a small n so the grid still fills the SMs
 // (a [576 x 6144] site is 9 wide blocks: 46 us against the GEMV's 16 at one
 // row, 2026-09-14); the rows' chains do not depend on the width.
-template <int kTiles, bool kFp8, int kW, typename OutT>
+// The scale grid's element: F32 (the 128 x 128 blocks, the channel grid),
+// or an e8m0 byte (the QAD export's MXFP8 on the 1 x 32 grid) — the float
+// whose exponent field is the byte, 2^(b - 127), exact; byte 0 the
+// subnormal 2^-127 (255, NaN, is refused at load).
+__device__ __forceinline__ float scale_at(const float* __restrict__ row, int i) { return row[i]; }
+__device__ __forceinline__ float scale_at(const uint8_t* __restrict__ row, int i) {
+  const uint32_t b = row[i];
+  return b ? __uint_as_float(b << 23) : __uint_as_float(0x00400000u);
+}
+
+template <int kTiles, bool kFp8, int kW, typename OutT, typename ScaleT>
 __global__ __launch_bounds__(kW * 32, 2) void mma_gemv_kernel(const uint16_t* __restrict__ act,
                                                             size_t act_stride,
                                                             const void* __restrict__ wv,
-                                                            const float* __restrict__ scales,
+                                                            const ScaleT* __restrict__ scales,
                                                             OutT* __restrict__ out, int m, int n,
                                                             int k, size_t out_stride, int rs,
                                                             int cs, float* __restrict__ part,
@@ -280,7 +290,7 @@ __global__ __launch_bounds__(kW * 32, 2) void mma_gemv_kernel(const uint16_t* __
   const int row = n0 + r;                                        // this lane's weight row
   const bool row_live = row < n;
   const int scale_cols = (k + (1 << cs) - 1) >> cs;
-  const float* scale_row = scales + (row_live ? static_cast<size_t>(row >> rs) * scale_cols : 0);
+  const ScaleT* scale_row = scales + (row_live ? static_cast<size_t>(row >> rs) * scale_cols : 0);
   const uint8_t* w8 = static_cast<const uint8_t*>(wv);
   const uint16_t* w16 = static_cast<const uint16_t*>(wv);
 
@@ -414,7 +424,7 @@ __global__ __launch_bounds__(kW * 32, 2) void mma_gemv_kernel(const uint16_t* __
         // and r+8: one 16-byte unit per 8 k.
         uint32_t w[8];
         if (kFp8) {
-          const float s = (row_live && c0 < k) ? scale_row[(c0 + v * F::kPerVec) >> cs] : 0.f;
+          const float s = (row_live && c0 < k) ? scale_at(scale_row, (c0 + v * F::kPerVec) >> cs) : 0.f;
           chunk_to_bf16x8(wv4[g][v], s, w);
         } else {
           w[0] = wv4[g][v].x; w[1] = wv4[g][v].y; w[2] = wv4[g][v].z; w[3] = wv4[g][v].w;
@@ -562,14 +572,14 @@ int split_k_for(int n, int k, const void* ws, size_t ws_bytes) {
 // One decode form at one width: the shared-memory opt-in once per
 // instantiation (the A windows + the warp weight buffers exceed the default
 // budget at the wide widths).
-template <int kTiles, bool kFp8, int kW, typename OutT>
-void launch_decode_form(const uint16_t* a, size_t act_stride, const void* w, const float* scales, OutT* o,
+template <int kTiles, bool kFp8, int kW, typename OutT, typename ScaleT>
+void launch_decode_form(const uint16_t* a, size_t act_stride, const void* w, const ScaleT* scales, OutT* o,
                         int rows, int n, int k, size_t out_stride, int rs, int cs, cudaStream_t stream,
                         void* ws, size_t ws_bytes, const uint16_t* act2 = nullptr, float limit = 0.f) {
   using L = WarpLoads<kTiles, kFp8, kW>;
   static bool opted_in = false;
   if (!opted_in) {
-    DGPP_CUDA_OK(cudaFuncSetAttribute(mma_gemv_kernel<kTiles, kFp8, kW, OutT>,
+    DGPP_CUDA_OK(cudaFuncSetAttribute(mma_gemv_kernel<kTiles, kFp8, kW, OutT, ScaleT>,
                                       cudaFuncAttributeMaxDynamicSharedMemorySize,
                                       static_cast<int>(L::kSmemBytes)));
     opted_in = true;
@@ -578,21 +588,21 @@ void launch_decode_form(const uint16_t* a, size_t act_stride, const void* w, con
   const int splits = split_k_for(n, k, ws, ws_bytes);
   if (splits > 1) {
     float* part = static_cast<float*>(ws);
-    mma_gemv_kernel<kTiles, kFp8, kW, OutT><<<dim3(blocks, splits), kW * 32, L::kSmemBytes, stream>>>(
+    mma_gemv_kernel<kTiles, kFp8, kW, OutT, ScaleT><<<dim3(blocks, splits), kW * 32, L::kSmemBytes, stream>>>(
         a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, part, act2, limit);
     const int total = rows * n;
     mma_gemv_split_reduce_kernel<OutT><<<(total + 255) / 256, 256, 0, stream>>>(part, splits, rows, n, o,
                                                                                  out_stride);
     return;
   }
-  mma_gemv_kernel<kTiles, kFp8, kW, OutT><<<dim3(blocks), kW * 32, L::kSmemBytes, stream>>>(
+  mma_gemv_kernel<kTiles, kFp8, kW, OutT, ScaleT><<<dim3(blocks), kW * 32, L::kSmemBytes, stream>>>(
       a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, nullptr, act2, limit);
 }
 // The 33..64-row form (four tiles, eight warps, direct loads) with the
 // decode width's split: the same k ranges as the 1..32-row forms, so an
 // eight-slot batch's rows are bitwise its slots' solo rows (2026-10-05).
-template <int kTiles, bool kFp8, typename OutT>
-void launch_wide_split(const uint16_t* a, size_t act_stride, const void* w, const float* scales, OutT* o, int rows,
+template <int kTiles, bool kFp8, typename OutT, typename ScaleT>
+void launch_wide_split(const uint16_t* a, size_t act_stride, const void* w, const ScaleT* scales, OutT* o, int rows,
                        int n, int k, size_t out_stride, int rs, int cs, cudaStream_t stream, void* ws,
                        size_t ws_bytes, const uint16_t* act2 = nullptr, float limit = 0.f) {
   constexpr int kWideThreads = kWideWarps * 32;
@@ -600,29 +610,29 @@ void launch_wide_split(const uint16_t* a, size_t act_stride, const void* w, cons
   const int splits = split_k_for(n, k, ws, ws_bytes);
   if (splits > 1) {
     float* part = static_cast<float*>(ws);
-    mma_gemv_kernel<kTiles, kFp8, kWideWarps, OutT><<<dim3(blocks, splits), kWideThreads, Win<kTiles, kFp8>::kSmemBytes, stream>>>(
+    mma_gemv_kernel<kTiles, kFp8, kWideWarps, OutT, ScaleT><<<dim3(blocks, splits), kWideThreads, Win<kTiles, kFp8>::kSmemBytes, stream>>>(
         a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, part, act2, limit);
     const int total = rows * n;
     mma_gemv_split_reduce_kernel<OutT><<<(total + 255) / 256, 256, 0, stream>>>(part, splits, rows, n, o,
                                                                                  out_stride);
     return;
   }
-  mma_gemv_kernel<kTiles, kFp8, kWideWarps, OutT><<<dim3(blocks), kWideThreads, Win<kTiles, kFp8>::kSmemBytes, stream>>>(
+  mma_gemv_kernel<kTiles, kFp8, kWideWarps, OutT, ScaleT><<<dim3(blocks), kWideThreads, Win<kTiles, kFp8>::kSmemBytes, stream>>>(
       a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, nullptr, act2, limit);
 }
-template <int kTiles, bool kFp8, typename OutT>
-void launch_decode(const uint16_t* a, size_t act_stride, const void* w, const float* scales, OutT* o, int rows,
+template <int kTiles, bool kFp8, typename OutT, typename ScaleT>
+void launch_decode(const uint16_t* a, size_t act_stride, const void* w, const ScaleT* scales, OutT* o, int rows,
                    int n, int k, size_t out_stride, int rs, int cs, cudaStream_t stream, void* ws,
                    size_t ws_bytes, const uint16_t* act2 = nullptr, float limit = 0.f) {
   const int width = decode_width(n);
   if (width == 8)
-    launch_decode_form<kTiles, kFp8, 8, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes, act2, limit);
+    launch_decode_form<kTiles, kFp8, 8, OutT, ScaleT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes, act2, limit);
   else if (width == 4)
-    launch_decode_form<kTiles, kFp8, 4, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes, act2, limit);
+    launch_decode_form<kTiles, kFp8, 4, OutT, ScaleT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes, act2, limit);
   else if (width == 2)
-    launch_decode_form<kTiles, kFp8, 2, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes, act2, limit);
+    launch_decode_form<kTiles, kFp8, 2, OutT, ScaleT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes, act2, limit);
   else
-    launch_decode_form<kTiles, kFp8, 1, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes, act2, limit);
+    launch_decode_form<kTiles, kFp8, 1, OutT, ScaleT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes, act2, limit);
 }
 
 // DGPP_MMA_TRACE=n: print the first n shape decisions (the dispatch
@@ -641,8 +651,8 @@ static int& g_mma_trace_left() {
   return v;
 }
 
-template <bool kFp8, typename OutT>
-void launch(const uint16_t* act, size_t act_stride, const void* w, const float* scales, OutT* out,
+template <bool kFp8, typename OutT, typename ScaleT>
+void launch(const uint16_t* act, size_t act_stride, const void* w, const ScaleT* scales, OutT* out,
             int m, int n, int k, size_t out_stride, int rs, int cs, cudaStream_t stream, void* ws = nullptr,
             size_t ws_bytes = 0, const uint16_t* act2 = nullptr, float limit = 0.f) {
   if (m < 1) throw std::invalid_argument("mma_gemv: m outside [1, ...)");
@@ -667,13 +677,13 @@ void launch(const uint16_t* act, size_t act_stride, const void* w, const float* 
       std::fflush(stderr);
     }
     if (rows <= 16)
-      launch_decode<1, kFp8, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes, a2, limit);
+      launch_decode<1, kFp8, OutT, ScaleT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes, a2, limit);
     else if (rows <= 32)
-      launch_decode<2, kFp8, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes, a2, limit);
+      launch_decode<2, kFp8, OutT, ScaleT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes, a2, limit);
     else if (rows <= kMmaGemvSplitRows)
-      launch_wide_split<4, kFp8, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes, a2, limit);
+      launch_wide_split<4, kFp8, OutT, ScaleT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes, a2, limit);
     else
-      mma_gemv_kernel<8, kFp8, kWideWarps, OutT><<<grid, kWideThreads, Win<8, kFp8>::kSmemBytes, stream>>>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, nullptr, a2, limit);
+      mma_gemv_kernel<8, kFp8, kWideWarps, OutT, ScaleT><<<grid, kWideThreads, Win<8, kFp8>::kSmemBytes, stream>>>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, nullptr, a2, limit);
     DGPP_CUDA_OK(cudaGetLastError());
   }
 }
@@ -695,30 +705,42 @@ void launch_mma_gemv_fp8_bf16(const uint16_t* act, size_t act_stride, const uint
                               const float* scales, uint16_t* out, int m, int n, int k,
                               size_t out_stride, int rs, int cs, cudaStream_t stream, void* ws,
                               size_t ws_bytes) {
-  launch<true, uint16_t>(act, act_stride, w, scales, out, m, n, k, out_stride, rs, cs, stream, ws, ws_bytes);
+  launch<true, uint16_t, float>(act, act_stride, w, scales, out, m, n, k, out_stride, rs, cs, stream, ws, ws_bytes);
 }
 void launch_mma_gemv_fp8_f32(const uint16_t* act, size_t act_stride, const uint8_t* w,
                              const float* scales, float* out, int m, int n, int k,
                              size_t out_stride, int rs, int cs, cudaStream_t stream, void* ws,
                              size_t ws_bytes) {
-  launch<true, float>(act, act_stride, w, scales, out, m, n, k, out_stride, rs, cs, stream, ws, ws_bytes);
+  launch<true, float, float>(act, act_stride, w, scales, out, m, n, k, out_stride, rs, cs, stream, ws, ws_bytes);
+}
+void launch_mma_gemv_fp8e8m0_bf16(const uint16_t* act, size_t act_stride, const uint8_t* w,
+                                  const uint8_t* scales, uint16_t* out, int m, int n, int k,
+                                  size_t out_stride, int rs, int cs, cudaStream_t stream, void* ws,
+                                  size_t ws_bytes) {
+  launch<true, uint16_t, uint8_t>(act, act_stride, w, scales, out, m, n, k, out_stride, rs, cs, stream, ws, ws_bytes);
+}
+void launch_mma_gemv_fp8e8m0_f32(const uint16_t* act, size_t act_stride, const uint8_t* w,
+                                 const uint8_t* scales, float* out, int m, int n, int k,
+                                 size_t out_stride, int rs, int cs, cudaStream_t stream, void* ws,
+                                 size_t ws_bytes) {
+  launch<true, float, uint8_t>(act, act_stride, w, scales, out, m, n, k, out_stride, rs, cs, stream, ws, ws_bytes);
 }
 void launch_mma_gemv_fp8_swiglu_f32(const uint16_t* gate, const uint16_t* up, float limit, size_t act_stride,
                                     const uint8_t* w, const float* scales, float* out, int m, int n, int k,
                                     size_t out_stride, int rs, int cs, cudaStream_t stream) {
   if (up == nullptr || (reinterpret_cast<uintptr_t>(up) & 15u) != 0)
     throw std::invalid_argument("mma_gemv swiglu: the up rows must be 16-byte aligned");
-  launch<true, float>(gate, act_stride, w, scales, out, m, n, k, out_stride, rs, cs, stream, nullptr, 0, up, limit);
+  launch<true, float, float>(gate, act_stride, w, scales, out, m, n, k, out_stride, rs, cs, stream, nullptr, 0, up, limit);
 }
 void launch_mma_gemv_bf16_bf16(const uint16_t* act, size_t act_stride, const uint16_t* w,
                                uint16_t* out, int m, int n, int k, size_t out_stride,
                                cudaStream_t stream, void* ws, size_t ws_bytes) {
-  launch<false, uint16_t>(act, act_stride, w, nullptr, out, m, n, k, out_stride, 7, 7, stream, ws, ws_bytes);
+  launch<false, uint16_t, float>(act, act_stride, w, nullptr, out, m, n, k, out_stride, 7, 7, stream, ws, ws_bytes);
 }
 void launch_mma_gemv_bf16_f32(const uint16_t* act, size_t act_stride, const uint16_t* w,
                               float* out, int m, int n, int k, size_t out_stride,
                               cudaStream_t stream, void* ws, size_t ws_bytes) {
-  launch<false, float>(act, act_stride, w, nullptr, out, m, n, k, out_stride, 7, 7, stream, ws, ws_bytes);
+  launch<false, float, float>(act, act_stride, w, nullptr, out, m, n, k, out_stride, 7, 7, stream, ws, ws_bytes);
 }
 
 }  // namespace dgpp

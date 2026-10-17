@@ -242,6 +242,41 @@ DGPP_TEST(dsv41_engram_context_rows_advance_per_real_row) {
   cudaFree(tokens); cudaFree(req_ids); cudaFree(pos); cudaFree(spans); cudaFree(ctx); cudaFree(ctx_rows);
 }
 
+DGPP_TEST(dsv41_engram_negative_request_padding_never_reads_context) {
+  const Geo g = make_geo(0xE8);
+  DevHash dh(g);
+  const int rows = 3, width = g.layers * g.rows_per_layer();
+  auto* tokens = managed<int64_t>(rows);
+  auto* requests = managed<int32_t>(rows);
+  auto* positions = managed<int64_t>(rows);
+  auto* spans = managed<int32_t>(4);
+  auto* ctx = managed<int32_t>(dgpp::kDsv41EngramCtx);
+  auto* saved = managed<int32_t>(rows * dgpp::kDsv41EngramCtx);
+  auto* ids = managed<int32_t>(rows * width);
+  for (int i = 0; i < rows; ++i) {
+    tokens[i] = i == 2 ? 10 : -1;  // padding must not index the token map either
+    requests[i] = i == 2 ? 0 : -1;
+    positions[i] = i == 2 ? 7 : -1;
+  }
+  spans[0] = 0; spans[1] = 2; spans[2] = 2; spans[3] = 1;
+  for (int k = 0; k < dgpp::kDsv41EngramCtx; ++k) ctx[k] = 11 + k;
+  const auto pad = oracle_hash(g, std::vector<int64_t>(g.max_ngram, g.pad_class));
+  const auto live = oracle_hash(g, {g.token_map[10], 11, 12, 13});
+  dgpp::dsv41_engram_hash_ids_rows(tokens, rows, requests, positions, spans, 2, ctx, dh.h, ids, nullptr);
+  dgpp::dsv41_engram_context_rows(tokens, rows, requests, positions, spans, 2, dh.token_map,
+                                  g.max_ngram, ctx, saved, nullptr);
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  for (int row = 0; row < rows; ++row)
+    require(std::equal(ids + row * width, ids + (row + 1) * width,
+                         (row == 2 ? live : pad).begin()), "mixed padded hash differs from its oracle");
+  for (int i = 0; i < 2 * dgpp::kDsv41EngramCtx; ++i)
+    require(saved[i] == 0, "inactive span emits deterministic snapshots");
+  require(ctx[0] == g.token_map[10] && ctx[1] == 11 && ctx[2] == 12 && ctx[3] == 14,
+          "only the live span updates request context");
+  cudaFree(tokens); cudaFree(requests); cudaFree(positions); cudaFree(spans);
+  cudaFree(ctx); cudaFree(saved); cudaFree(ids);
+}
+
 DGPP_TEST(dsv41_engram_staged_gather_is_exact) {
   // Random e4m3 rows with random e8m0 block scales (2^-20 .. 2^8 and the
   // extremes 2^-100 / 2^0 — the products stay fp32 normals; a real table's

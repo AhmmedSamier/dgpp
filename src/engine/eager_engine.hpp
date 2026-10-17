@@ -28,6 +28,8 @@
 #include "engine/decode_outputs.hpp"
 #include "engine/image_prefill.hpp"
 #include "engine/prefix_arena.hpp"
+#include "engine/prefill_task.hpp"
+#include "engine/mixed_prefill.hpp"
 #include "sample/sampler.hpp"
 #include "sched/scheduler.hpp"
 #include "text/tool_grammar.hpp"
@@ -67,6 +69,7 @@ class EagerEngineAdapter : public sched::SchedulerEngine {
         state_(static_cast<size_t>(max_requests)),
         arena_(model, prefix_slots) {
     spec_.resize(static_cast<size_t>(max_requests));
+    prefills_.resize(static_cast<size_t>(max_requests));
     if constexpr (requires { model_->set_prefill_monitor(prefill_monitor()); })
       model_->set_prefill_monitor(prefill_monitor());
   }
@@ -150,6 +153,174 @@ class EagerEngineAdapter : public sched::SchedulerEngine {
       return open_slot(req, prompt,
                        [&] { return model_->session_prefill_images(req, prompt, images); });
     return sched::SchedulerEngine::prefill_images(req, prompt, images);
+  }
+
+  int64_t prefill_chunk_alignment() const override {
+    if constexpr (requires { Model::kResumablePrefill; })
+      if constexpr (Model::kResumablePrefill) return model_->session_snapshot_align();
+    return 0;
+  }
+  int64_t prefill_wave_rows() const override {
+    if constexpr (requires { model_->prefill_wave_rows(); }) return model_->prefill_wave_rows();
+    return 0;
+  }
+  int64_t prefill_chunk_limit() const override {
+    return prefill_chunk_alignment() ? model_->max_tokens() : 0;
+  }
+  bool supports_image_chunked_prefill() const override {
+    if constexpr (requires(int req, const std::vector<int64_t>& prompt,
+                            const std::vector<ImageInput>* images) {
+      model_->session_prefill_begin(req, prompt, int64_t{}, int64_t{}, prompt,
+                                    nullptr, int64_t{}, images);
+    }) return supports_images() && prefill_chunk_alignment() > 0;
+    return false;
+  }
+  void begin_prefill(int req, const std::vector<int64_t>& prompt, int64_t reserve_tokens,
+      int64_t chunk_tokens, const sched::SchedulerEngine::PrefixPrefill& plan) override {
+    if constexpr (requires { typename Model::PrefillCursor; }) {
+      if (!prefill_chunk_alignment()) throw std::logic_error("eager engine: prefill cannot yield");
+      auto& task = prefills_.at(static_cast<size_t>(req));
+      if (task || pending_.at(static_cast<size_t>(req)) >= 0)
+        throw std::logic_error("eager engine: prefill on an open request");
+      try {
+        task = PrefillTask<Model>::begin(*model_, arena_, req, prompt, reserve_tokens, chunk_tokens, plan,
+            [this, req](const auto& ids, const auto& out) { return open_slot_finish(req, ids, out); });
+      } catch (...) {
+        close(req);
+        throw;
+      }
+    } else {
+      throw std::logic_error("eager engine: prefill cannot yield");
+    }
+  }
+  sched::SchedulerEngine::PrefillProgress advance_prefill(int req, int64_t budget = 0) override {
+    auto& task = prefills_.at(static_cast<size_t>(req));
+    if (!task) throw std::logic_error("eager engine: no pending prefill");
+    try {
+      auto progress = task->advance(budget);
+      if (progress.first_token >= 0) task.reset();
+      return progress;
+    } catch (...) {
+      task->commit(arena_);
+      close(req);
+      throw;
+    }
+  }
+  bool supports_mixed_prefill() const override {
+    return MixedPrefillModel<Model> && prefill_chunk_alignment() > 0;
+  }
+  bool prefill_budget_per_reader() const override { return !MixedPrefillModel<Model>; }
+  bool can_mix_prefill(int req, const std::vector<int>& decoders) const override {
+    return can_mix_prefill_group({req}, decoders);
+  }
+  bool can_mix_prefill_group(const std::vector<int>& readers, const std::vector<int>& decoders) const override {
+    if constexpr (MixedPrefillModel<Model>) {
+      if (readers.empty() || decoders.empty()) return false;
+      std::vector<int> seen;
+      for (const int req : readers) {
+        if (req < 0 || req >= slots_ || !prefills_[req] || !prefills_[req]->images.empty() ||
+            std::find(seen.begin(), seen.end(), req) != seen.end()) return false;
+        seen.push_back(req);
+      }
+      int rows = 1;
+      if constexpr (requires { model_->dflash2_enabled(); })
+        if (model_->dflash2_enabled()) rows = model_->dflash2_drafts() + 1;
+      for (const int req : decoders) {
+        if (req < 0 || req >= slots_ || pending_[req] < 0 ||
+            std::find(seen.begin(), seen.end(), req) != seen.end() ||
+            model_->session_position(req) + rows > model_->max_context()) return false;
+        seen.push_back(req);
+      }
+      if constexpr (requires { model_->max_mixed_prefill_readers(0); })
+        if (readers.size() > static_cast<size_t>(model_->max_mixed_prefill_readers(rows * decoders.size()))) return false;
+      return rows * decoders.size() <= static_cast<size_t>(model_->max_decode_rows()) &&
+             rows * decoders.size() + readers.size() * prefill_chunk_alignment() <=
+                 static_cast<size_t>(model_->max_tokens());
+    }
+    return false;
+  }
+  sched::SchedulerEngine::MixedProgress advance_prefill_and_step(
+      int req, int64_t budget, const std::vector<int>& decoders) override {
+    auto result = advance_prefill_group_and_step({req}, {budget}, decoders);
+    return {result.prefills.front(), std::move(result.decoded)};
+  }
+  sched::SchedulerEngine::MixedGroupProgress advance_prefill_group_and_step(
+      const std::vector<int>& readers, const std::vector<int64_t>& budgets,
+      const std::vector<int>& decoders) override {
+    if constexpr (MixedPrefillModel<Model>) {
+      if (readers.size() != budgets.size() || !can_mix_prefill_group(readers, decoders))
+        throw std::invalid_argument("eager engine: unsupported mixed walk");
+      std::vector<typename Model::PrefillCursor*> cursors;
+      std::vector<int64_t> starts;
+      for (const int req : readers) {
+        cursors.push_back(static_cast<typename Model::PrefillCursor*>(prefills_[req]->cursor.get()));
+        starts.push_back(cursors.back()->next);
+      }
+      try {
+        std::vector<std::vector<int64_t>> feeds(decoders.size());
+        std::vector<char> speculative(decoders.size(), false);
+        std::vector<int> offsets(decoders.size());
+        int row = 0;
+        for (size_t i = 0; i < decoders.size(); ++i) {
+          if constexpr (requires { model_->dflash2_enabled(); }) {
+            if (model_->dflash2_enabled()) feeds[i] = dflash_fed(decoders[i]);
+            speculative[i] = !feeds[i].empty();
+          }
+          if (feeds[i].empty()) feeds[i].push_back(pending_[decoders[i]]);
+          offsets[i] = row;
+          row += static_cast<int>(feeds[i].size());
+        }
+        const auto outputs = model_->session_prefill_verify_group(cursors, budgets, decoders, feeds);
+        sched::SchedulerEngine::MixedGroupProgress result;
+        result.decoded = finish_verifications(decoders, feeds, outputs, offsets, speculative, [] {});
+        for (size_t i = 0; i < readers.size(); ++i)
+          result.prefills.push_back(prefills_[readers[i]]->after(starts[i], cursors[i]->next == cursors[i]->end));
+        for (size_t i = 0; i < readers.size(); ++i)
+          if (result.prefills[i].first_token >= 0) prefills_[readers[i]].reset();
+        return result;
+      } catch (...) {
+        for (const int req : readers) { prefills_[req]->commit(arena_); close(req); }
+        throw;
+      }
+    }
+    throw std::logic_error("eager engine: this executor has no mixed walk");
+  }
+
+  bool prefill_group_advance() const override {
+    if constexpr (requires { Model::kPrefillGroupAdvance; })
+      if constexpr (Model::kPrefillGroupAdvance) return prefill_chunk_alignment() > 0;
+    return false;
+  }
+  std::vector<sched::SchedulerEngine::PrefillProgress> advance_prefill_group(
+      const std::vector<int>& reqs, const std::vector<int64_t>& budgets) override {
+    if (reqs.size() != budgets.size()) throw std::invalid_argument("prefill: one budget per request");
+    if constexpr (requires { Model::kPrefillGroupAdvance; }) {
+      if constexpr (Model::kPrefillGroupAdvance) {
+        if (reqs.size() > 1) {
+          std::vector<typename Model::PrefillCursor*> cursors;
+          std::vector<int64_t> starts;
+          for (const int req : reqs) {
+            auto& task = prefills_.at(static_cast<size_t>(req));
+            if (!task) throw std::logic_error("eager engine: no pending prefill");
+            cursors.push_back(static_cast<typename Model::PrefillCursor*>(task->cursor.get()));
+            starts.push_back(cursors.back()->next);
+          }
+          try {
+            const auto done = model_->session_prefill_advance_group(cursors, budgets);
+            std::vector<sched::SchedulerEngine::PrefillProgress> out;
+            for (size_t i = 0; i < reqs.size(); ++i)
+              out.push_back(prefills_[reqs[i]]->after(starts[i], done[i]));
+            for (size_t i = 0; i < reqs.size(); ++i)
+              if (out[i].first_token >= 0) prefills_[reqs[i]].reset();
+            return out;
+          } catch (...) {
+            for (const int req : reqs) { prefills_[req]->commit(arena_); close(req); }
+            throw;
+          }
+        }
+      }
+    }
+    return SchedulerEngine::advance_prefill_group(reqs, budgets);
   }
 
   // ---- prefix cache (M7) --------------------------------------------------
@@ -330,56 +501,8 @@ class EagerEngineAdapter : public sched::SchedulerEngine {
       auto outs = want_graph ? model_->session_verify_batch_graph(reqs, feds, &offs)
                              : model_->session_verify_batch(reqs, feds, &offs);
       const long long ph2 = ph ? ns_now() : 0;
-      std::vector<std::vector<int32_t>> out(reqs.size());
-      // Batched redrafts (engine.dflash_draft_batch): one stacked block
-      // forward for every spec slot instead of one per slot. Otherwise
-      // each slot redrafts alone (the shipped behavior).
-      std::vector<size_t> batch_idx;
-      if (model_->dflash_draft_batch()) {
-        for (size_t i = 0; i < reqs.size(); ++i)
-          if (is_spec[i]) batch_idx.push_back(i);
-      }
-      const bool use_batch = batch_idx.size() >= 2;
-      for (size_t i = 0; i < reqs.size(); ++i) {
-        SlotState& s = state_.at(static_cast<size_t>(reqs[i]));
-        int64_t& pending = pending_.at(static_cast<size_t>(reqs[i]));
-        if (is_spec[i]) {
-          auto& sp = spec_.at(static_cast<size_t>(reqs[i]));
-          const int T = static_cast<int>(feds[i].size());
-          const std::vector<int32_t> winners =
-              dflash_winners(state_.at(static_cast<size_t>(reqs[i])), outs[i], feds[i], T);
-          const std::vector<int32_t> committed = use_batch ? sp->commit_verify(feds[i], winners, offs[i])
-                                                            : sp->commit(feds[i], winners, offs[i]);
-          pending = sp->next();
-          // As in step(): committed[0] is the already-emitted pending token.
-          out[i].assign(committed.begin() + 1, committed.end());
-          out[i].push_back(static_cast<int32_t>(pending));
-          for (int32_t t : out[i]) s.context.push_back(t);
-        } else {
-          const int32_t next = decide(s, outs[i]);
-          s.context.push_back(next);
-          pending = next;
-          out[i] = {next};
-        }
-      }
-      const long long ph3 = ph ? ns_now() : 0;
-      if (use_batch) {
-        std::vector<int> breqs;
-        std::vector<int64_t> bonuses;
-        breqs.reserve(batch_idx.size());
-        bonuses.reserve(batch_idx.size());
-        for (size_t i : batch_idx) {
-          breqs.push_back(reqs[i]);
-          bonuses.push_back(spec_.at(static_cast<size_t>(reqs[i]))->next());
-        }
-        std::vector<std::vector<int32_t>> bdrafts;
-        model_->dflash2_draft_batch(breqs, bonuses, &bdrafts);
-        for (size_t k = 0; k < batch_idx.size(); ++k)
-          spec_.at(static_cast<size_t>(reqs[batch_idx[k]]))->set_drafts(std::move(bdrafts[k]));
-      } else {
-        for (size_t i : batch_idx)
-          spec_.at(static_cast<size_t>(reqs[i]))->redraft();
-      }
+      long long ph3 = 0;
+      auto out = finish_verifications(reqs, feds, outs, offs, is_spec, [&] { ph3 = ph ? ns_now() : 0; });
       if (ph) {
         const long long ph4 = ns_now();
         PhaseAcc& a = dfph_acc();
@@ -446,6 +569,7 @@ class EagerEngineAdapter : public sched::SchedulerEngine {
     }
   }
   void close(int req) override {
+    prefills_.at(static_cast<size_t>(req)).reset();
     pending_.at(static_cast<size_t>(req)) = -1;
     if constexpr (requires { model_->dflash2_enabled(); }) retire_spec(spec_.at(static_cast<size_t>(req)));
     // A reopened slot is greedy until the scheduler arms it again.
@@ -476,6 +600,16 @@ class EagerEngineAdapter : public sched::SchedulerEngine {
   // for the penalties, the grammar's opening state, the decision.
   template <typename Run>
   int32_t open_slot(int req, const std::vector<int64_t>& prompt, Run&& run) {
+    if (pending_.at(static_cast<size_t>(req)) >= 0 || prefills_.at(static_cast<size_t>(req)))
+      throw std::logic_error("eager engine: prefill on an open request");
+    try {
+      return open_slot_finish(req, prompt, run());
+    } catch (...) {
+      close(req);
+      throw;
+    }
+  }
+  int32_t open_slot_finish(int req, const std::vector<int64_t>& prompt, const typename Model::Outputs& out) {
     SlotState& s = state_.at(static_cast<size_t>(req));
     s.context.clear();
     s.context.reserve(prompt.size() + 64);
@@ -487,10 +621,69 @@ class EagerEngineAdapter : public sched::SchedulerEngine {
       s.grammar = std::make_unique<text::GrammarState>(
           grammar_vocab_, s.grammar->spec(), opens, m.prompt_leaves_thinking_to_model(prompt));
     }
-    const int32_t token = decide(s, run());
+    const int32_t token = decide(s, out);
     s.context.push_back(token);
     pending_.at(static_cast<size_t>(req)) = token;
     return token;
+  }
+
+  // Ordinary and mixed batches share commit and draft batching. Admitting
+  // a reader must not turn a stacked block draft into one forward per slot.
+  template <class AfterCommit>
+  std::vector<std::vector<int32_t>> finish_verifications(const std::vector<int>& reqs,
+      const std::vector<std::vector<int64_t>>& feeds, const std::vector<typename Model::Outputs>& outputs,
+      const std::vector<int>& offsets, const std::vector<char>& speculative, AfterCommit after_commit) {
+    std::vector<size_t> batch;
+    if constexpr (requires { model_->dflash_draft_batch(); }) {
+      if (model_->dflash_draft_batch())
+        for (size_t i = 0; i < reqs.size(); ++i)
+          if (speculative[i]) batch.push_back(i);
+    }
+    const bool together = batch.size() >= 2;
+    std::vector<std::vector<int32_t>> out(reqs.size());
+    for (size_t i = 0; i < reqs.size(); ++i)
+      out[i] = finish_verification(reqs[i], feeds[i], outputs[i], offsets[i], speculative[i], together);
+    after_commit();
+    if constexpr (requires { model_->dflash_draft_batch(); }) {
+      if (together) {
+        std::vector<int> requests;
+        std::vector<int64_t> bonuses;
+        for (size_t i : batch) {
+          requests.push_back(reqs[i]);
+          bonuses.push_back(spec_[reqs[i]]->next());
+        }
+        std::vector<std::vector<int32_t>> drafts;
+        model_->dflash2_draft_batch(requests, bonuses, &drafts);
+        for (size_t i = 0; i < batch.size(); ++i)
+          spec_[reqs[batch[i]]]->set_drafts(std::move(drafts[i]));
+      }
+    }
+    return out;
+  }
+
+  std::vector<int32_t> finish_verification(int req, const std::vector<int64_t>& feed,
+      const typename Model::Outputs& output, int row, bool speculative, bool defer_draft = false) {
+    auto& state = state_.at(static_cast<size_t>(req));
+    auto& pending = pending_.at(static_cast<size_t>(req));
+    if constexpr (requires { model_->dflash2_enabled(); }) {
+      if (speculative) {
+        auto& spec = spec_.at(static_cast<size_t>(req));
+        const auto winners = dflash_winners(state, output, feed, static_cast<int>(feed.size()));
+        const auto committed = defer_draft ? spec->commit_verify(feed, winners, row)
+                                          : spec->commit(feed, winners, row);
+        pending = spec->next();
+        std::vector<int32_t> fresh(committed.begin() + 1, committed.end());
+        fresh.push_back(static_cast<int32_t>(pending));
+        state.context.insert(state.context.end(), fresh.begin(), fresh.end());
+        return fresh;
+      }
+    }
+    if constexpr (requires { model_->session_rollback(req, 1, 1, row); })
+      model_->session_rollback(req, 1, 1, row);
+    const int32_t next = decide(state, output);
+    state.context.push_back(next);
+    pending = next;
+    return {next};
   }
 
   // The plain greedy pick serves temperature 0 with neither logprobs nor
@@ -522,6 +715,7 @@ class EagerEngineAdapter : public sched::SchedulerEngine {
     return token;
   }
 
+  std::vector<std::unique_ptr<PrefillTask<Model>>> prefills_;
   Model* model_;
   int slots_;
   Pick pick_;
