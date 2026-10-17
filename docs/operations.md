@@ -125,7 +125,8 @@ three values: switching never rebuilds them.
 `kv_dtype` affects GLM-5.3's latent cache, MiMo's K/V cache and, on the
 Qwen3.8-27B NVFP4 mixed release, the Qwen3.5 K/V cache (`fp8`: the
 release's shipped per-layer `k_scale` / `v_scale`; `prefill_attention`
-then picks the attention's arithmetic over it, bf16 or fp8). Qwen3.8-Flash-Next and
+then picks the attention's arithmetic over it, bf16 or fp8). Qwen3.8-Flash-Next
+also accepts bf16 or fp8 K/V with per-token, per-head scales.
 GLM-4.7 K/V caches stay BF16. Qwen's `ngram_table` and `dense_weights` settings
 control table residency and optional FP8 encoding of dense projections.
 The Qwen NVFP4 templates, including YaRN, set `engine.fp8_head: "mma"`.
@@ -993,7 +994,14 @@ the world's settings (the head pushes it, the config digest carries it)
 and every rank runs the same
 one. The quantized formats are a memory trade an operator makes
 deliberately: at 262k tokens they save 1.5 GiB (fp8) or 2.2 GiB (fp4) per
-rank against a 98 GiB plan, and the model's answers change with them.
+rank against a 98 GiB plan, and the model's answers change with them. The
+Qwen3.8-Flash-Next K/V cache takes `bf16` or `fp8` (e4m3 rows with one scale
+per (slot, kv-head); BF16 attention dequantizes in-kernel and the pool is
+~1.86x smaller); `fp4` is not implemented for Qwen. Native
+FP8 QK/PV products are independently available through
+`engine.prefill_attention: "fp8"` and `engine.decode_attention: "fp8"`, both
+requiring `engine.kv_dtype: "fp8"`. Defaults retain BF16 compute. See
+[the recipe and validation](qwen_fp8_kv_plan.md) before selecting a deployment mode.
 
 **The DeepSeek-V4.1 prefill mode** (`engine.prefill`, `--prefill
 bounded|exact`, default `bounded`) applies to the `deepseek_v41` family
