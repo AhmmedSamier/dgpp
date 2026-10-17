@@ -92,10 +92,9 @@ struct Qwen35TextConfig {
   std::shared_ptr<const Qwen35QuantGroups> quant_groups;
 
   // --- visual tower ----------------------------------------------------------
-  // Parsed when the checkpoint carries one (both 27B releases do), consumed
-  // when the tower lands; a text-only export stays nullopt and serves
-  // exactly as before. Geometry is validated now so a foreign tower fails
-  // at load, not at the first image.
+  // Parsed when the checkpoint carries one (both 27B releases do). A
+  // text-only export stays nullopt. Geometry is validated before loading
+  // the encoder so an unsupported tower fails before the first request.
   std::optional<QwenVisionConfig> vision;
 
   static Qwen35TextConfig parse(const minijson::Value& text_config,

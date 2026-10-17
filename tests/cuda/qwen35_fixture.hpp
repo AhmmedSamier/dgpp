@@ -179,11 +179,10 @@ inline std::vector<QwenExpectedTensor> ignored_extras() {
   return out;
 }
 
-// Writes `dir` (config.json + one safetensors shard) for the tiny release.
-// `mixed` swaps the FP8 quantization_config for the NVFP4 mixed release's
-// (the same tensors' table comes out of the binding, in the other forms).
-inline void write_fixture(const std::string& dir, bool mixed = false) {
-  const Qwen35TextConfig cfg = tiny_config(mixed);
+// Writes the text binding plus caller-supplied extras, such as a tiny vision
+// tower. The JSON describes the same config and is available to parser tests.
+inline void write_fixture(const Qwen35TextConfig& cfg, const std::string& dir,
+                          const std::string& json, const std::vector<QwenExpectedTensor>& extras) {
   fs::path root(dir);
   fs::remove_all(root);
   fs::create_directories(root);
@@ -191,12 +190,11 @@ inline void write_fixture(const std::string& dir, bool mixed = false) {
     const fs::path p = root / "config.json";
     std::FILE* f = std::fopen(p.c_str(), "wb");
     if (!f) throw std::runtime_error("cannot write config.json");
-    const std::string json = tiny_config_json(mixed);
     std::fwrite(json.data(), 1, json.size(), f);
     std::fclose(f);
   }
   auto table = dgpp::qwen35_expected_text_tensors(cfg);
-  for (auto& e : ignored_extras()) table.push_back(std::move(e));
+  table.insert(table.end(), extras.begin(), extras.end());
   std::string header = "{";
   std::vector<uint8_t> data;
   size_t off = 0;
@@ -228,6 +226,11 @@ inline void write_fixture(const std::string& dir, bool mixed = false) {
   std::fclose(f);
   std::printf("qwen35 fixture written: %zu tensors, %.2f MB payload\n", table.size(),
               static_cast<double>(data.size()) / 1048576.0);
+}
+
+// The text-only fixture retains the ignored vision tensor used by loader tests.
+inline void write_fixture(const std::string& dir, bool mixed = false) {
+  write_fixture(tiny_config(mixed), dir, tiny_config_json(mixed), ignored_extras());
 }
 
 }  // namespace qwen35fx

@@ -1,10 +1,10 @@
-// Qwen3.5-27B dense model (FP8 text-only, standard pre-norm residual).
+// Qwen3.5-27B dense model (FP8 or mixed NVFP4, standard pre-norm residual).
 //
-// 48 GDN layers (swish gate) + 16 Full GQA layers, dense SwiGLU MLPs. Text
-// only: no vision tower, no hyperconnections / PLE / MoE. GDN recurrent +
+// 48 GDN layers (swish gate) + 16 Full GQA layers, dense SwiGLU MLPs,
+// and the checkpoint's optional BF16 vision tower. GDN recurrent +
 // conv state is model-owned per request slot; the Full layers' K/V lives in
-// Qwen35KvPool (plus one draft plane when MTP is on). Eager + prefix-off
-// serving shape; the graph path replays the same walks.
+// Qwen35KvPool (plus draft planes for MTP or DFlash2). Eager and graph
+// serving share the same walks and prefix snapshot protocol.
 
 #include "models/qwen/model35.hpp"
 
@@ -684,7 +684,7 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
   if (Bf12Companions::enabled()) pack_companions();
   // The tower is replicated (it will run only on image prefills, never
   // inside a captured graph), so its weights are this rank's own copy.
-  // Constructed but never executed: text-only outputs must not move.
+  // The weights stay resident; text-only requests never execute the encoder.
   if (cfg_.vision) vision_ = std::make_unique<QwenVisionEncoder>(*cfg_.vision, checkpoint_dir, stream_);
   // The draft head's screen (engine.draft_head): the MTP draft's head and
   // the DFlash2 block's mask rows read through it; off with a logged reason

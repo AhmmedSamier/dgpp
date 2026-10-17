@@ -156,7 +156,7 @@ DGPP_TEST(qwen35_config_refusals_name_the_field) {
           "dedicated embeddings");
 }
 
-DGPP_TEST(qwen35_config_vision_tower_parses_but_stays_off) {
+DGPP_TEST(qwen35_config_vision_geometry_and_text_only_parse) {
   // Transcribed from unsloth/Qwen3.8-27B-NVFP4's root config, whose 333
   // model.visual.* BF16 tensors this geometry describes.
   const std::string root = R"({
@@ -177,8 +177,8 @@ DGPP_TEST(qwen35_config_vision_tower_parses_but_stays_off) {
   require(v.tokens.start == 248053 && v.tokens.pad == 248056 && v.tokens.end == 248054,
           "delimiters");
   require(v.weight_bytes() == 921460192, "tower bytes");
-  // The text-config parser never fills it: serving stays text-only until
-  // the tower lands.
+  // Parsing text_config alone does not infer a tower; from_json_file reads
+  // the root vision_config and image delimiters separately.
   const dgpp::Qwen35TextConfig c =
       parse(qwen35_fixture::text_json(), qwen35_fixture::kQuantFp8);
   require(!c.vision.has_value(), "vision unset by text parse");

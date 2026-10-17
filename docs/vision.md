@@ -166,6 +166,11 @@ cold image prefills, interleaved cursors with and without MTP, cancellation,
 slot reuse, and MTP catch-up at an attached prefix. It needs a GPU but no
 downloaded checkpoint.
 
+The 27B model has corresponding `qwen35_image_prefill_test` and
+`qwen35_mixed_image_prefill_test` gates for the FP8 and mixed NVFP4 formats.
+They also check grouped image requests and the shared prefill task's ownership
+of prompts, pixels and snapshot boundaries across yields.
+
 ```bash
 cmake --build build-ci -j 4 --target glm_vision_check
 build-ci/glm_vision_check "$CKPT" 112 112 /tmp/vision.bf16 /tmp/vision-trace

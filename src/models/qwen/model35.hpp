@@ -1,8 +1,8 @@
-// Qwen3.5-27B dense model (FP8 text-only, standard pre-norm residual).
+// Qwen3.5-27B dense model (FP8 or mixed NVFP4, standard pre-norm residual).
 //
-// Text-only FP8 first boot: 48 GDN layers (swish gate) + 16 Full GQA layers,
-// dense SwiGLU MLPs, no MoE / hyperconnections / PLE / vision. The
-// attention and GDN layers are the shared qwen4_exp components; the K/V pool
+// 48 GDN layers (swish gate) + 16 Full GQA layers, dense SwiGLU MLPs,
+// and the checkpoint's optional BF16 vision tower. The attention and GDN
+// layers are the shared qwen4_exp components; the K/V pool
 // is a slim QwenKvPool clone without the indexer structures; GDN recurrent
 // and conv state is model-owned per request slot.
 //
@@ -36,8 +36,6 @@
 #include "common/image_input.hpp"
 #include "models/qwen/config.hpp"
 #include "models/qwen/config35.hpp"
-#include "models/qwen/image_stage_plan.hpp"
-#include "models/qwen/vision.hpp"
 
 // Every image span must name pad ids in the prompt it rides with (host-side
 // rule, pinned by unit test; the engine-owned ids outlive the call).
