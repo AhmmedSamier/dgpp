@@ -17,8 +17,8 @@ change again, keep each row's recorded configuration with its numbers.
 
 | Measurement set | Date (UTC) | Source revision | Scope |
 |---|---|---|---|
+| Qwen3.8-27B refresh | 2026-10-17 | `e771b7b1` (the FP8 one- and two-node rows) / `8e5e7d42` (the other four, after the W4A4 drain fix) | FP8 and NVFP4 at worlds 1/2/4 on the templates as shipped (NVFP4: the fp8 K/V pool, the fp8 prefill attention and the native activation recipe; FP8: the native activation recipe; the pools and prefix arenas sized to the node), five classes at C1/C2/C4/C8, cold 2K/8K/32K prefill, the context matrix to 256K, the 300-item quality set, the API and greedy-transcript checks, the adaptive prefill defaults |
 | Swift 1.5 Qwen3.8-Flash-Next NVFP4 | 2026-10-17 | `1cc9fefc` | Community checkpoint `a00c7c2f` on two nodes, MTP4, five classes at C1/C2/C4/C8, three cold probes each at 2K/8K/32K, adaptive prefill within 4K busy/idle caps |
-| Qwen3.8-27B refresh | 2026-10-16 | `ea128905` | FP8 and NVFP4 at worlds 1/2/4 on the current templates (NVFP4: the fp8 K/V pool, the fp8 prefill attention and the native activation recipe; FP8: the native activation recipe), five classes at C1/C2/C4/C8, cold 2K/8K/32K prefill, the adaptive prefill defaults |
 | Qwen3.8-Flash-Next QAD export | 2026-10-14 | `347c386f` plus the QAD export working tree | The rows for the local-inference-lab QAD export on one node (C1–C8, cold prefill, decode modes, 0–128K context, quality), measured with the adaptive prefill defaults of 2026-10-12 |
 | Qwen3.8-27B quant comparison | 2026-10-11 | `d12e7e9f` decode / `510542a4` prefill | Matched FP8 / NVFP4 / FP8 at worlds 1/2/4, five classes at C1/C2/C4/C8, cold prefill, all-rank profiling and four-node context decode |
 | GLM-5.3 Mixed346 checkpoint | 2026-10-10 | `41e3216d` plus the Mixed346 working tree | The rows for GLM-5.3 Mixed346 GPTQ H32 A8 g128 (C1–C8, cold prefill, context buckets, quality); measured on the four nodes with the fp8-KV template after the kernel round of 2026-10-10 (the int8 tensor-core tile, the 3/6-bit cooperative pieces, the fused norm); the Int4/Int8 and NF4I8 references are the 2026-10-09 rows on the same binary lineage |
@@ -53,7 +53,7 @@ The seven configurations affected by the latest prefill fixes have updated servi
 
 Five rows were refreshed on 2026-10-13 with the draft-head screen (`engine.draft_head: "screen"`, now set in those templates; the drafts read a 2-bit copy of the vocabulary head and only the candidate blocks exactly, the verify reads the exact head, greedy transcripts matched the exact-head legs 4/4 and acceptance per class was identical): the C1 engine and wall cells, the class table and the default MTP1 column for Qwen3.8-Flash-Next NVFP4 on one node (FP8 dense), Qwen3.8-Flash-Next FP8 on four nodes, GLM-5.3-Flash NVFP4/FP8 on four nodes (768K), GLM-5.3 int4/int8 on four nodes (120K BF16 KV) and Qwen3.8-27B NVFP4 on four nodes, plus the MTP2 and MTP3 columns of the two Flash-Next rows. C2–C8, cold prefill (the screen does not touch prefill) and every other row keep their earlier evidence; the other templates that set the screen were not re-measured.
 
-The Qwen3.8-27B rows were re-measured on 2026-10-16 at `ea128905` on the templates as shipped, with the adaptive prefill defaults: the NVFP4 rows run the mixed release's fp8 K/V cache (`kv_dtype: "fp8"`), the prefill attention on the fp8 tensor cores (`prefill_attention: "fp8"`) and the native activation recipe (`prefill_activations: "native"`); the FP8 rows run the native activation recipe on the BF16 cache; both carry the 2026-10-15/16 attention prefill kernels. The FP8 templates took the native recipe during this refresh: measured first on the bf16 chain, the FP8 one-node cold prefill read 20 % slower than the 2026-10-11 row (2.70 / 8.30 / 35.3 s at 2K / 8K / 32K) because an idle prompt now runs in 4,096-token chunks and the chain re-dequantized every FP8 matrix into its bf16 bridge for each chunk (the same template and binary under the old one-pass budgets read 2.22 / 6.96 / 29.5 s in a control probe); the checkpoint's own blockwise fp8 product needs no bridge and the 300-item evals read the same under both chains (161/164, 294/300, 100/100). The rows replace the 2026-10-11 matched set (FP8 / NVFP4 / FP8 brackets at `d12e7e9f` / `510542a4`, fixed prefill budgets, the BF16 cache, the bf16 chain), whose cell-by-cell verdicts described that configuration; compare within this set. The DFlash2 drafter draws its proposals, so a class's single-request rate moves run to run by several percent. Cold probes report zero cached tokens; the three NVFP4 legs share one set of prompt hashes and the three FP8 legs another (re-run after the template change, token counts within 0.3 %); every leg's rank operation streams matched and no serving process swapped. The historical decode-mode, quality and parcel-context rows keep their original evidence.
+The Qwen3.8-27B rows were re-measured on 2026-10-17 at `e771b7b1` (the FP8 one- and two-node rows) / `8e5e7d42` (the other four, after the W4A4 drain fix) on the templates as shipped, with the adaptive prefill defaults, one boot per template for the serving, long-context, quality and transcript rows (and a second boot without the drafter for the plain transcripts): the NVFP4 rows run the mixed release's fp8 K/V cache (`kv_dtype: "fp8"`), the prefill attention on the fp8 tensor cores (`prefill_attention: "fp8"`) and the native activation recipe (`prefill_activations: "native"`); the FP8 rows run the native activation recipe on the BF16 cache; both carry the 2026-10-15/16 attention prefill kernels, and since 2026-10-17 every template's K/V pool and prefix arena are sized to the node (the configuration table has each). The FP8 templates took the native recipe during the 2026-10-16 refresh: measured first on the bf16 chain, the FP8 one-node cold prefill read 20 % slower than the 2026-10-11 row (2.70 / 8.30 / 35.3 s at 2K / 8K / 32K) because an idle prompt now runs in 4,096-token chunks and the chain re-dequantized every FP8 matrix into its bf16 bridge for each chunk (the same template and binary under the old one-pass budgets read 2.22 / 6.96 / 29.5 s in a control probe); the checkpoint's own blockwise fp8 product needs no bridge and the 300-item evals read the same under both chains (161/164, 294/300, 100/100). These rows replace the 2026-10-16 set (the 262K pools) and the 2026-10-11 matched set (fixed prefill budgets, the BF16 cache, the bf16 chain); compare within this set. The DFlash2 drafter draws its proposals, so a class's single-request rate moves run to run by several percent. Cold probes report zero cached tokens; every leg's ranks ran in the launcher's swap-limited scopes (`DGPP_NO_SWAP=1`, [operations](operations.md#memory-on-a-serving-node)), their operation streams matched and no serving process swapped. The NVFP4 legs' greedy transcripts first read different run to run (the drafter and plain decode alike); the cause was the dense W4A4 TMA form's pipeline drain, fixed the same day, and the four legs after the fix carry its revision while the FP8 one- and two-node legs, whose path the fix does not touch, keep theirs. The decode-mode rows keep their 2026-10-05 evidence.
 
 The Swift 1.5 row was measured on 2026-10-17 with the
 [two-node template](../deploy/cluster_qwen-3.8-flash-next_nvfp4-swift15_w2.example.json),
@@ -107,12 +107,12 @@ was run. See the [checkpoint and serving notes](model_cards/Qwen3.8-Flash-Next-S
 | MiMo-V2.6-Flash MXFP4/FP8 | 2 | 256K FP8 KV, 4 slots | 40.5–47.0 | 38.8–44.5 | 54.9–62.1 | 74.9–84.1 | 73.1–82.1 | 1.559 / 5.573 / 27.945 |
 | MiMo-V2.6-Flash MXFP4/FP8 | 4 | 128K BF16 KV, 4 slots | 74.4–85.1 | 70.9–80.5 | 99.3–114.0 | 135.5–146.5 | 130.9–147.7 | 1.105 / 3.966 / 17.627 |
 | MiMo-V2.6-Flash MXFP4/FP8 | 4 | 1M BF16 KV, 4 slots | 74.8–85.7 | 71.5–80.9 | 99.4–115.1 | 136.1–148.4 | 131.3–148.7 | 1.087 / 3.887 / 17.454 |
-| Qwen3.8-27B FP8 | 1 | DFlash2 drafter, FP8 head, native activations, 256K BF16 KV, 8 slots | 19.5–47.8 | 19.2–46.0 | 33.4–81.1 | 56.6–113.0 | 84.8–190.0 | 1.944 / 6.601 / 28.070 |
-| Qwen3.8-27B NVFP4 | 1 | DFlash2 drafter, FP8 head, 256K FP8 KV, fp8 prefill attention, 8 slots | 24.6–58.9 | 24.3–57.0 | 40.4–101.3 | 70.7–135.4 | 112.7–229.7 | 1.196 / 3.952 / 16.654 |
-| Qwen3.8-27B FP8 | 2 | DFlash2 drafter, FP8 head, native activations, 256K BF16 KV, 8 slots | 35.9–84.9 | 35.1–80.0 | 54.4–132.7 | 95.5–183.1 | 148.8–289.9 | 1.520 / 5.300 / 21.667 |
-| Qwen3.8-27B NVFP4 | 2 | DFlash2 drafter, FP8 head, 256K FP8 KV, fp8 prefill attention, 8 slots | 43.6–102.7 | 42.7–96.5 | 69.7–160.4 | 117.3–206.8 | 166.1–330.8 | 1.219 / 4.270 / 17.488 |
-| Qwen3.8-27B FP8 | 4 | DFlash2 drafter, FP8 head, native activations, 256K BF16 KV, 8 slots | 57.4–139.6 | 55.8–127.7 | 87.1–197.3 | 142.5–258.4 | 199.3–374.9 | 1.256 / 4.425 / 17.948 |
-| Qwen3.8-27B NVFP4 | 4 | DFlash2 drafter, FP8 head, 256K FP8 KV, fp8 prefill attention, 8 slots | 63.5–164.2 | 61.6–149.5 | 108.0–227.8 | 169.7–281.3 | 230.4–384.0 | 1.057 / 3.866 / 15.567 |
+| Qwen3.8-27B FP8 | 1 | DFlash2 drafter, FP8 head, native activations, 512K BF16 KV, 8 slots | 19.6–48.2 | 19.4–46.4 | 33.4–81.1 | 55.9–112.1 | 85.2–190.0 | 1.938 / 6.567 / 28.056 |
+| Qwen3.8-27B NVFP4 | 1 | DFlash2 drafter, FP8 head, 1M FP8 KV, fp8 prefill attention, 8 slots | 25.2–59.8 | 24.8–57.8 | 41.8–102.3 | 71.9–138.6 | 113.0–222.4 | 1.198 / 3.943 / 16.634 |
+| Qwen3.8-27B FP8 | 2 | DFlash2 drafter, FP8 head, native activations, 1.5M BF16 KV, 8 slots | 35.9–85.9 | 35.1–79.9 | 54.9–133.5 | 94.6–184.3 | 146.9–288.8 | 1.512 / 5.298 / 21.701 |
+| Qwen3.8-27B NVFP4 | 2 | DFlash2 drafter, FP8 head, 2M FP8 KV, fp8 prefill attention, 8 slots | 44.8–105.4 | 43.8–99.0 | 71.0–165.0 | 118.2–209.8 | 167.0–332.3 | 1.198 / 4.232 / 17.285 |
+| Qwen3.8-27B FP8 | 4 | DFlash2 drafter, FP8 head, native activations, 2M BF16 KV, 8 slots | 57.8–139.7 | 55.8–128.5 | 87.6–197.0 | 142.3–259.9 | 201.8–369.9 | 1.246 / 4.397 / 17.862 |
+| Qwen3.8-27B NVFP4 | 4 | DFlash2 drafter, FP8 head, 2M FP8 KV, fp8 prefill attention, 8 slots | 64.0–165.5 | 62.0–150.2 | 108.6–230.4 | 171.3–283.6 | 232.7–390.0 | 1.058 / 3.897 / 15.646 |
 
 <!-- END serving -->
 
@@ -200,12 +200,12 @@ a row exactly.
 | MiMo-V2.6-Flash MXFP4/FP8 | 2 | 256K FP8 KV, 4 slots | 4 | 262,144 | fp8 | 1.5 | 0 / 0 | MTP1 | — |
 | MiMo-V2.6-Flash MXFP4/FP8 | 4 | 128K BF16 KV, 4 slots | 4 | 131,072 | bf16 | 1.5 | 0 / 0 | MTP1 | — |
 | MiMo-V2.6-Flash MXFP4/FP8 | 4 | 1M BF16 KV, 4 slots | 4 | 1,048,576 | bf16 | 1.5 | 0 / 0 | MTP1 | — |
-| Qwen3.8-27B FP8 | 1 | DFlash2 drafter, FP8 head, native activations, 256K BF16 KV, 8 slots | 8 | 262,144 | bf16 | 1.5 | adaptive (default) | DFlash2 adaptive ≤7 | [JSON](../deploy/cluster_qwen3.8-27b_fp8_w1.example.json) |
-| Qwen3.8-27B NVFP4 | 1 | DFlash2 drafter, FP8 head, 256K FP8 KV, fp8 prefill attention, 8 slots | 8 | 262,144 | fp8 | 1.5 | adaptive (default) | DFlash2 adaptive ≤7 | [JSON](../deploy/cluster_qwen3.8-27b_nvfp4_w1.example.json) |
-| Qwen3.8-27B FP8 | 2 | DFlash2 drafter, FP8 head, native activations, 256K BF16 KV, 8 slots | 8 | 262,144 | bf16 | 1.5 | adaptive (default) | DFlash2 adaptive ≤7 | [JSON](../deploy/cluster_qwen3.8-27b_fp8_w2.example.json) |
-| Qwen3.8-27B NVFP4 | 2 | DFlash2 drafter, FP8 head, 256K FP8 KV, fp8 prefill attention, 8 slots | 8 | 262,144 | fp8 | 1.5 | adaptive (default) | DFlash2 adaptive ≤7 | [JSON](../deploy/cluster_qwen3.8-27b_nvfp4_w2.example.json) |
-| Qwen3.8-27B FP8 | 4 | DFlash2 drafter, FP8 head, native activations, 256K BF16 KV, 8 slots | 8 | 262,144 | bf16 | 1.5 | adaptive (default) | DFlash2 adaptive ≤7 | [JSON](../deploy/cluster_qwen3.8-27b_fp8_w4.example.json) |
-| Qwen3.8-27B NVFP4 | 4 | DFlash2 drafter, FP8 head, 256K FP8 KV, fp8 prefill attention, 8 slots | 8 | 262,144 | fp8 | 1.5 | adaptive (default) | DFlash2 adaptive ≤7 | [JSON](../deploy/cluster_qwen3.8-27b_nvfp4_w4.example.json) |
+| Qwen3.8-27B FP8 | 1 | DFlash2 drafter, FP8 head, native activations, 512K BF16 KV, 8 slots | 8 | 524,288 | bf16 | 20 | adaptive (default) | DFlash2 adaptive ≤7 | [JSON](../deploy/cluster_qwen3.8-27b_fp8_w1.example.json) |
+| Qwen3.8-27B NVFP4 | 1 | DFlash2 drafter, FP8 head, 1M FP8 KV, fp8 prefill attention, 8 slots | 8 | 1,048,576 | fp8 | 16 | adaptive (default) | DFlash2 adaptive ≤7 | [JSON](../deploy/cluster_qwen3.8-27b_nvfp4_w1.example.json) |
+| Qwen3.8-27B FP8 | 2 | DFlash2 drafter, FP8 head, native activations, 1.5M BF16 KV, 8 slots | 8 | 1,572,864 | bf16 | 16 | adaptive (default) | DFlash2 adaptive ≤7 | [JSON](../deploy/cluster_qwen3.8-27b_fp8_w2.example.json) |
+| Qwen3.8-27B NVFP4 | 2 | DFlash2 drafter, FP8 head, 2M FP8 KV, fp8 prefill attention, 8 slots | 8 | 2,097,152 | fp8 | 32 | adaptive (default) | DFlash2 adaptive ≤7 | [JSON](../deploy/cluster_qwen3.8-27b_nvfp4_w2.example.json) |
+| Qwen3.8-27B FP8 | 4 | DFlash2 drafter, FP8 head, native activations, 2M BF16 KV, 8 slots | 8 | 2,097,152 | bf16 | 32 | adaptive (default) | DFlash2 adaptive ≤7 | [JSON](../deploy/cluster_qwen3.8-27b_fp8_w4.example.json) |
+| Qwen3.8-27B NVFP4 | 4 | DFlash2 drafter, FP8 head, 2M FP8 KV, fp8 prefill attention, 8 slots | 8 | 2,097,152 | fp8 | 32 | adaptive (default) | DFlash2 adaptive ≤7 | [JSON](../deploy/cluster_qwen3.8-27b_nvfp4_w4.example.json) |
 
 <!-- END config -->
 
@@ -282,12 +282,12 @@ Engine tokens/s, greedy; median of three repetitions.
 | MiMo-V2.6-Flash MXFP4/FP8 | 2 | 256K FP8 KV, 4 slots | 42.7 | 45.1 | 47.0 | 45.8 | 40.5 |
 | MiMo-V2.6-Flash MXFP4/FP8 | 4 | 128K BF16 KV, 4 slots | 75.5 | 81.2 | 85.1 | 84.2 | 74.4 |
 | MiMo-V2.6-Flash MXFP4/FP8 | 4 | 1M BF16 KV, 4 slots | 75.6 | 81.5 | 85.7 | 84.5 | 74.8 |
-| Qwen3.8-27B FP8 | 1 | DFlash2 drafter, FP8 head, native activations, 256K BF16 KV, 8 slots | 19.5 | 34.6 | 47.8 | 40.5 | 20.5 |
-| Qwen3.8-27B NVFP4 | 1 | DFlash2 drafter, FP8 head, 256K FP8 KV, fp8 prefill attention, 8 slots | 24.6 | 43.6 | 58.9 | 49.1 | 25.3 |
-| Qwen3.8-27B FP8 | 2 | DFlash2 drafter, FP8 head, native activations, 256K BF16 KV, 8 slots | 38.5 | 61.6 | 84.9 | 72.1 | 35.9 |
-| Qwen3.8-27B NVFP4 | 2 | DFlash2 drafter, FP8 head, 256K FP8 KV, fp8 prefill attention, 8 slots | 43.6 | 82.2 | 102.7 | 85.7 | 45.3 |
-| Qwen3.8-27B FP8 | 4 | DFlash2 drafter, FP8 head, native activations, 256K BF16 KV, 8 slots | 57.4 | 97.4 | 139.6 | 108.7 | 58.6 |
-| Qwen3.8-27B NVFP4 | 4 | DFlash2 drafter, FP8 head, 256K FP8 KV, fp8 prefill attention, 8 slots | 63.5 | 110.8 | 164.2 | 135.0 | 68.7 |
+| Qwen3.8-27B FP8 | 1 | DFlash2 drafter, FP8 head, native activations, 512K BF16 KV, 8 slots | 19.6 | 34.8 | 48.2 | 40.8 | 20.7 |
+| Qwen3.8-27B NVFP4 | 1 | DFlash2 drafter, FP8 head, 1M FP8 KV, fp8 prefill attention, 8 slots | 25.2 | 44.3 | 59.8 | 49.8 | 26.3 |
+| Qwen3.8-27B FP8 | 2 | DFlash2 drafter, FP8 head, native activations, 1.5M BF16 KV, 8 slots | 38.3 | 62.3 | 85.9 | 73.1 | 35.9 |
+| Qwen3.8-27B NVFP4 | 2 | DFlash2 drafter, FP8 head, 2M FP8 KV, fp8 prefill attention, 8 slots | 44.8 | 84.3 | 105.4 | 88.3 | 46.7 |
+| Qwen3.8-27B FP8 | 4 | DFlash2 drafter, FP8 head, native activations, 2M BF16 KV, 8 slots | 57.8 | 99.3 | 139.7 | 109.1 | 57.9 |
+| Qwen3.8-27B NVFP4 | 4 | DFlash2 drafter, FP8 head, 2M FP8 KV, fp8 prefill attention, 8 slots | 64.0 | 112.1 | 165.5 | 135.9 | 69.2 |
 
 <!-- END classes -->
 
@@ -353,7 +353,7 @@ C1 engine tokens/s; each range spans the five class medians. **MTP1**, **MTP2** 
 
 ## Quality and correctness
 
-These are the original campaigns' quality results, retained separately from the performance refresh. Scores apply to their saved configurations, prompts, evaluator and output limits; current deployment settings may differ.
+These are the original campaigns' quality results, retained separately from the performance refresh; the six Qwen3.8-27B rows are from the 2026-10-17 refresh on the current templates. Scores apply to their saved configurations, prompts, evaluator and output limits; current deployment settings may differ.
 
 | Evaluation setting | Value |
 |---|---|
@@ -391,9 +391,12 @@ These are the original campaigns' quality results, retained separately from the 
 | MiMo-V2.6-Flash MXFP4/FP8 | 2 | 128K BF16 KV, 4 slots | 154/164 | 295/300 | 100/100 | 0 |
 | MiMo-V2.6-Flash MXFP4/FP8 | 2 | 256K FP8 KV, 4 slots | 153/164 | 294/300 | 100/100 | 0 |
 | MiMo-V2.6-Flash MXFP4/FP8 | 4 | 128K BF16 KV, 4 slots | 154/164 | 294/300 | 100/100 | 0 |
-| Qwen3.8-27B FP8 | 1 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 156/164 | 292/300 | 100/100 | 4 |
-| Qwen3.8-27B FP8 | 2 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 157/164 | 292/300 | 100/100 | 5 |
-| Qwen3.8-27B FP8 | 4 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 156/164 | 291/300 | 100/100 | 4 |
+| Qwen3.8-27B FP8 | 1 | DFlash2 drafter, FP8 head, native activations, 512K BF16 KV, 8 slots | 161/164 | 294/300 | 100/100 | 4 |
+| Qwen3.8-27B NVFP4 | 1 | DFlash2 drafter, FP8 head, 1M FP8 KV, fp8 prefill attention, 8 slots | 158/164 | 295/300 | 100/100 | 4 |
+| Qwen3.8-27B FP8 | 2 | DFlash2 drafter, FP8 head, native activations, 1.5M BF16 KV, 8 slots | 160/164 | 292/300 | 100/100 | 4 |
+| Qwen3.8-27B NVFP4 | 2 | DFlash2 drafter, FP8 head, 2M FP8 KV, fp8 prefill attention, 8 slots | 159/164 | 295/300 | 100/100 | 4 |
+| Qwen3.8-27B FP8 | 4 | DFlash2 drafter, FP8 head, native activations, 2M BF16 KV, 8 slots | 159/164 | 294/300 | 100/100 | 4 |
+| Qwen3.8-27B NVFP4 | 4 | DFlash2 drafter, FP8 head, 2M FP8 KV, fp8 prefill attention, 8 slots | 160/164 | 293/300 | 100/100 | 4 |
 
 Swift 1.5 received a smaller serving smoke evaluation on 2026-10-17 using
 the two-node configuration above: 19/20 GSM8K problems and 20/20 schema
@@ -403,7 +406,7 @@ GSM8K and 512 for extraction; none of the 40 responses were truncated.
 This is not a full quality campaign or
 a matched comparison with the original Qwen checkpoint; HumanEval was not run.
 
-The Qwen3.8-Flash-Next QAD row's HumanEval ran each returned code block in a local subprocess with a 10 s timeout (`scripts/serve_eval.py`, 2026-10-14), not in a network-disabled container; its truncated responses are the cap column.
+The Qwen3.8-Flash-Next QAD row's and the six Qwen3.8-27B rows' HumanEval ran each returned code block in a local subprocess with a 10 s timeout (`scripts/serve_eval.py`, 2026-10-14), not in a network-disabled container; their truncated responses are the cap column.
 
 DeepSeek-V4's strict HumanEval scores count responses with unclosed code fences as failures. Executing those open blocks raises the two-node score to 153/164 and the four-node score to 152/164. Plain decoding produces the same answers; the checkpoint's reference implementation also prefers end-of-sequence at that position.
 
@@ -429,9 +432,12 @@ DeepSeek-V4's strict HumanEval scores count responses with unclosed code fences 
 | MiMo-V2.6-Flash MXFP4/FP8 | 2 | 128K BF16 KV, 4 slots | 3/3 | 5/5 classes | identical |
 | MiMo-V2.6-Flash MXFP4/FP8 | 2 | 256K FP8 KV, 4 slots | 4/4 | 5/5 classes | identical |
 | MiMo-V2.6-Flash MXFP4/FP8 | 4 | 128K BF16 KV, 4 slots | 4/4 | 5/5 classes | identical |
-| Qwen3.8-27B FP8 | 1 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 4/4 | 4/5 classes | different |
-| Qwen3.8-27B FP8 | 2 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 4/4 | 4/5 classes | identical |
-| Qwen3.8-27B FP8 | 4 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 4/4 | 4/5 classes | different |
+| Qwen3.8-27B FP8 | 1 | DFlash2 drafter, FP8 head, native activations, 512K BF16 KV, 8 slots | 9/9 | 5/5 classes | identical |
+| Qwen3.8-27B NVFP4 | 1 | DFlash2 drafter, FP8 head, 1M FP8 KV, fp8 prefill attention, 8 slots | 9/9 | 5/5 classes | identical |
+| Qwen3.8-27B FP8 | 2 | DFlash2 drafter, FP8 head, native activations, 1.5M BF16 KV, 8 slots | 9/9 | 5/5 classes | identical |
+| Qwen3.8-27B NVFP4 | 2 | DFlash2 drafter, FP8 head, 2M FP8 KV, fp8 prefill attention, 8 slots | 9/9 | 5/5 classes | identical |
+| Qwen3.8-27B FP8 | 4 | DFlash2 drafter, FP8 head, native activations, 2M BF16 KV, 8 slots | 9/9 | 5/5 classes | identical |
+| Qwen3.8-27B NVFP4 | 4 | DFlash2 drafter, FP8 head, 2M FP8 KV, fp8 prefill attention, 8 slots | 9/9 | 5/5 classes | identical |
 
 | Check | What it establishes |
 |---|---|
@@ -439,7 +445,7 @@ DeepSeek-V4's strict HumanEval scores count responses with unclosed code fences 
 | Plain/default greedy match | All three repetitions in both modes produced identical text and token counts for a class |
 | Solo/batched greedy text | Exact transcript agreement for the recorded workload; floating-point reduction order can change with batch shape |
 
-Recorded operation streams matched for 54/54 launches in the original campaign, 11/11 in MiMo and 12/12 in DeepSeek-V4. Single-node launches have only one stream.
+Recorded operation streams matched for 54/54 launches in the original campaign, 11/11 in MiMo, 12/12 in DeepSeek-V4 and 8/8 in the 2026-10-17 Qwen3.8-27B refresh. Single-node launches have only one stream.
 
 Later checks do not replace the historical verdicts above.
 
@@ -531,9 +537,12 @@ The original matrix refresh fixed the three bottlenecks below. The completion ca
 | MiMo-V2.6-Flash MXFP4/FP8 | 2 | 256K FP8 KV, 4 slots | 262,144 | 26.812 | 41.99 | 45.3 | 47.89 | 41.6 | 53.35 | 37.3 | 64.24 | 31.0 | 86.26 | 23.1 | Limit | Limit |
 | MiMo-V2.6-Flash MXFP4/FP8 | 4 | 128K BF16 KV, 4 slots | 131,072 | 16.705 | 23.64 | 79.3 | 26.10 | 76.3 | 28.17 | 70.2 | 32.48 | 61.3 | Limit | Limit | Limit | Limit |
 | MiMo-V2.6-Flash MXFP4/FP8 | 4 | 1M BF16 KV, 4 slots | 1,048,576 | 16.632 | 23.42 | 78.3 | 25.90 | 76.9 | 28.10 | 70.9 | 32.29 | 61.7 | 41.41 | 48.1 | 58.40 | 34.1 |
-| Qwen3.8-27B FP8 | 1 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 262,144 | 30.856 | 140.96 | 34.1 | 157.38 | 31.8 | 168.79 | 27.5 | 192.01 | 24.1 | 243.65 | 16.1 | Limit | Limit |
-| Qwen3.8-27B FP8 | 2 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 262,144 | 21.066 | 79.19 | 63.0 | 88.52 | 56.5 | 95.09 | 47.9 | 108.53 | 36.1 | 135.91 | 28.9 | Limit | Limit |
-| Qwen3.8-27B FP8 | 4 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 262,144 | 15.235 | 47.35 | 107.7 | 53.31 | 92.0 | 57.84 | 78.7 | 64.84 | 65.6 | 79.65 | 47.8 | Limit | Limit |
+| Qwen3.8-27B FP8 | 1 | DFlash2 drafter, FP8 head, native activations, 512K BF16 KV, 8 slots | 262,144 | 27.767 | 135.87 | 36.1 | 149.48 | 32.2 | 158.57 | 26.8 | 177.02 | 22.5 | 213.92 | 21.3 | Limit | Limit |
+| Qwen3.8-27B NVFP4 | 1 | DFlash2 drafter, FP8 head, 1M FP8 KV, fp8 prefill attention, 8 slots | 262,144 | 16.407 | 107.36 | 39.6 | 116.18 | 42.2 | 121.35 | 29.6 | 131.25 | 34.7 | 152.08 | 31.1 | Limit | Limit |
+| Qwen3.8-27B FP8 | 2 | DFlash2 drafter, FP8 head, native activations, 1.5M BF16 KV, 8 slots | 262,144 | 21.417 | 75.38 | 65.3 | 83.16 | 54.8 | 87.92 | 48.3 | 97.47 | 45.1 | 117.18 | 34.5 | Limit | Limit |
+| Qwen3.8-27B NVFP4 | 2 | DFlash2 drafter, FP8 head, 2M FP8 KV, fp8 prefill attention, 8 slots | 262,144 | 17.182 | 59.87 | 70.9 | 65.83 | 63.5 | 70.53 | 61.3 | 75.79 | 54.3 | 89.93 | 42.3 | Limit | Limit |
+| Qwen3.8-27B FP8 | 4 | DFlash2 drafter, FP8 head, native activations, 2M BF16 KV, 8 slots | 262,144 | 17.643 | 45.64 | 103.3 | 50.39 | 93.7 | 52.86 | 77.8 | 58.15 | 75.6 | 68.10 | 63.5 | Limit | Limit |
+| Qwen3.8-27B NVFP4 | 4 | DFlash2 drafter, FP8 head, 2M FP8 KV, fp8 prefill attention, 8 slots | 262,144 | 15.458 | 37.24 | 120.1 | 41.27 | 116.6 | 42.18 | 100.8 | 45.81 | 89.8 | 52.39 | 68.6 | Limit | Limit |
 
 <!-- END context -->
 
@@ -572,9 +581,12 @@ Engine prefill seconds at each context bucket, one uncached sample per cell:
 | MiMo-V2.6-Flash MXFP4/FP8 | 2 | 256K FP8 KV, 4 slots | 0.464 | 26.812 | 72.294 | 218.280 | 725.764 | Limit |
 | MiMo-V2.6-Flash MXFP4/FP8 | 4 | 128K BF16 KV, 4 slots | 0.223 | 16.705 | 41.425 | 113.534 | Limit | Limit |
 | MiMo-V2.6-Flash MXFP4/FP8 | 4 | 1M BF16 KV, 4 slots | 0.231 | 16.632 | 41.529 | 113.838 | 346.439 | 1160.847 |
-| Qwen3.8-27B FP8 | 1 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 0.692 | 30.856 | 71.119 | 180.085 | 512.813 | Limit |
-| Qwen3.8-27B FP8 | 2 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 0.396 | 21.066 | 47.196 | 114.381 | 307.051 | Limit |
-| Qwen3.8-27B FP8 | 4 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 0.228 | 15.235 | 33.434 | 77.885 | 199.450 | Limit |
+| Qwen3.8-27B FP8 | 1 | DFlash2 drafter, FP8 head, native activations, 512K BF16 KV, 8 slots | 0.228 | 27.767 | 61.791 | 151.527 | 400.464 | Limit |
+| Qwen3.8-27B NVFP4 | 1 | DFlash2 drafter, FP8 head, 1M FP8 KV, fp8 prefill attention, 8 slots | 0.160 | 16.407 | 36.921 | 90.520 | 242.918 | Limit |
+| Qwen3.8-27B FP8 | 2 | DFlash2 drafter, FP8 head, native activations, 1.5M BF16 KV, 8 slots | 0.164 | 21.417 | 46.665 | 104.955 | 261.250 | Limit |
+| Qwen3.8-27B NVFP4 | 2 | DFlash2 drafter, FP8 head, 2M FP8 KV, fp8 prefill attention, 8 slots | 0.133 | 17.182 | 36.987 | 81.357 | 194.735 | Limit |
+| Qwen3.8-27B FP8 | 4 | DFlash2 drafter, FP8 head, native activations, 2M BF16 KV, 8 slots | 0.129 | 17.643 | 37.083 | 80.608 | 185.659 | Limit |
+| Qwen3.8-27B NVFP4 | 4 | DFlash2 drafter, FP8 head, 2M FP8 KV, fp8 prefill attention, 8 slots | 0.115 | 15.458 | 32.102 | 68.695 | 153.222 | Limit |
 
 <!-- END context-prefill -->
 
