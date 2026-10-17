@@ -148,6 +148,19 @@ class SiteEnvTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "http.max_body_bytes"):
                     site_env.resolve_config(self.config, self.values())
 
+    def test_stream_flush_validation_and_resolution(self):
+        cfg = json.loads(self.config.read_text())
+        for value in ("pass", "wake", "", "Wake", "poll", None, True, 1, [], {}):
+            with self.subTest(value=value):
+                cfg["http"] = {"stream_flush": value}
+                self.config.write_text(json.dumps(cfg))
+                if value in ("pass", "wake"):
+                    resolved = site_env.resolve_config(self.config, self.values())
+                    self.assertEqual(resolved["http"]["stream_flush"], value)
+                else:
+                    with self.assertRaisesRegex(ValueError, "http.stream_flush"):
+                        site_env.resolve_config(self.config, self.values())
+
     def test_sse_ping_interval_survives_deployment_resolution(self):
         cfg = json.loads(self.config.read_text())
         for interval in (-1, 1, 30, 2147483647):

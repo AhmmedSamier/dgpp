@@ -5,6 +5,14 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **Opt-in immediate HTTP output notifications** ([#118](https://github.com/HawkBearPig/dgpp/issues/118)).
+  `http.stream_flush: "wake"` / `--stream-flush wake` wakes rank 0's HTTP loop
+  when asynchronous output is ready. Tokens, logprobs, retirement, overload,
+  shutdown/failure and file results share the existing HTTP-thread drain.
+  The default `pass` mode retains the 25 ms poll and creates no eventfd.
+  Notification handles remain safe after server teardown, and file results
+  are published before notification. Keep-alive and journal behavior are unchanged.
+
 - **Grow admission reclaims idle prefix cache before shedding live work**
   ([#116](https://github.com/HawkBearPig/dgpp/issues/116)). Reservation growth
   releases LRU unattached snapshots until its next step fits, rechecking physical

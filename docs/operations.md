@@ -312,6 +312,22 @@ implies, near 1.75x the four-node pace; prefill costs about 1.45x
 
 ### Streaming keep-alives
 
+Output delivery defaults to `http.stream_flush: "pass"`: a quiet HTTP loop
+checks for queued output every 25 ms. Set `http.stream_flush: "wake"` in the
+cluster JSON, or pass `--stream-flush wake`, to wake the loop when tokens,
+logprobs, completion/error responses or file preprocessing results are ready.
+The CLI overrides JSON; this is a rank-0 server setting, not a request option.
+Only `pass` and `wake` are accepted.
+
+Wake mode reduces delivery delay and batching at the client. It can increase
+HTTP CPU work and socket sends, especially with many concurrent streams;
+measure client-side TTFT and update gaps alongside engine throughput and CPU
+usage before enabling it for a deployment. Engine latency metrics do not
+include HTTP delivery. A token, an SSE event and a client socket read are not
+interchangeable counts. The default stays at 25 ms; maintenance polling and
+keep-alive comments continue in wake mode. See [the flush comparison
+procedure](http-stream-flush.md) for repeatable checks.
+
 Streaming chat and text completions send the SSE comment `: keep-alive` followed
 by a blank line after 30 seconds without output. This covers the admission
 queue, prefill and pauses between output chunks. To change the interval, add

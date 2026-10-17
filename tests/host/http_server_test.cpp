@@ -13,27 +13,28 @@
 //     configurable body size → 413 before reading the body,
 //     connection cap → 503 at the door;
 //   * stop() returns the loop promptly.
+#include "serve/http_server.hpp"
+
 #include <arpa/inet.h>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdio>
+#include <cstring>
 #include <errno.h>
+#include <mutex>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
-#include <atomic>
-#include <chrono>
-#include <cstdio>
-#include <cstring>
 #include <stdexcept>
 #include <string>
+#include <sys/socket.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #include "common/log.hpp"
-
 #include "common/test.hpp"
-#include "serve/http_server.hpp"
 
 namespace {
 
@@ -539,6 +540,118 @@ DGPP_TEST(http_stop_serveLoopReturnsPromptly) {
 }
 
 }  // namespace
+
+DGPP_TEST(http_wake_pending_concurrent_and_late_notifications) {
+  struct Handler : HttpHandler {
+    dgpp::serve::HttpWakeup wake;
+    std::mutex mutex;
+    std::condition_variable changed;
+    int passes = 0;
+    void handle(const HttpRequest&, HttpResponseWriter&) override {}
+    void set_wakeup(dgpp::serve::HttpWakeup value) override { wake = value; }
+    void idle() override {
+      std::lock_guard lock(mutex);
+      ++passes;
+      changed.notify_all();
+    }
+    bool wait_for_pass(int count) {
+      std::unique_lock lock(mutex);
+      return changed.wait_for(lock, std::chrono::milliseconds(500),
+                              [&] { return passes >= count; });
+    }
+  } handler;
+  {
+    HttpServer polling(0, &handler, 8);
+    require(!handler.wake && !polling.wakeup(), "default polling allocates no notification handle");
+  }
+  dgpp::serve::HttpWakeup late;
+  {
+    HttpServer server(0, &handler, 8, "127.0.0.1", dgpp::serve::kDefaultHttpMaxBodyBytes, true,
+                      5000);
+    late = server.wakeup();
+    for (int i = 0; i < 100; ++i) handler.wake();  // before epoll_wait starts
+    std::thread loop([&] { server.serve(); });
+    struct Join {
+      HttpServer& server;
+      std::thread& loop;
+      ~Join() {
+        server.stop();
+        loop.join();
+      }
+    } join{server, loop};
+    require(handler.wait_for_pass(1), "pending wake interrupts a five-second poll");
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    {
+      std::lock_guard lock(handler.mutex);
+      require(handler.passes == 1, "a burst coalesces and the counter is drained without spinning");
+    }
+    std::vector<std::thread> producers;
+    for (int i = 0; i < 4; ++i)
+      producers.emplace_back([wake = handler.wake] {
+        for (int j = 0; j < 100; ++j) wake();
+      });
+    for (auto& producer : producers) producer.join();
+    require(handler.wait_for_pass(2), "concurrent producers wake a waiting loop");
+  }
+  // Copies own the eventfd independently of server lifetime. A delayed job
+  // can notify safely even while unrelated sockets are allocated and closed.
+  for (int i = 0; i < 100; ++i) {
+    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    late();
+    ::close(fd);
+  }
+}
+
+DGPP_TEST(http_wake_delivers_producer_output_and_terminal_event) {
+  struct Handler : HttpHandler {
+    dgpp::serve::HttpWakeup wake;
+    HttpResponseWriter* writer = nullptr;
+    std::mutex mutex;
+    std::vector<std::string> pending;
+    bool done = false;
+    void set_wakeup(dgpp::serve::HttpWakeup value) override { wake = value; }
+    void handle(const HttpRequest&, HttpResponseWriter& w) override {
+      w.begin_stream();
+      writer = &w;
+    }
+    void idle() override {
+      std::lock_guard lock(mutex);
+      if (!writer) return;
+      for (const auto& event : pending) writer->write_event(event);
+      pending.clear();
+      if (done) {
+        writer->write_event("[DONE]");
+        writer->end_stream();
+        writer = nullptr;
+      }
+    }
+  } handler;
+  HttpServer server(0, &handler, 8, "127.0.0.1", dgpp::serve::kDefaultHttpMaxBodyBytes, true, 5000);
+  std::thread loop([&] { server.serve(); });
+  struct Join {
+    HttpServer& server;
+    std::thread& loop;
+    ~Join() {
+      server.stop();
+      loop.join();
+    }
+  } join{server, loop};
+  Client client(server.port());
+  client.send_all("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
+  require(client.read_available(50).find("200 OK") != std::string::npos, "headers");
+  {
+    std::lock_guard lock(handler.mutex);
+    handler.pending = {"first", "second"};
+    handler.done = true;
+  }
+  handler.wake();
+  const auto output = client.read_available(500);
+  require(output.find("data: first\n\n") != std::string::npos &&
+              output.find("data: second\n\n") != std::string::npos &&
+              output.find("data: first\n\n") < output.find("data: second\n\n") &&
+              output.find("data: [DONE]\n\n") != std::string::npos && output.ends_with("0\r\n\r\n"),
+          "wake drains ordered events and terminates the stream");
+}
 
 int main() {
   dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");

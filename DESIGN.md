@@ -2330,6 +2330,24 @@ templates, tokenizes prompts and writes responses. The engine thread owns
 admissions, model operations and token events. A mutex protects the event
 queue and request records; sockets are written only by the HTTP thread.
 
+The HTTP loop drains asynchronous output once per pass. `http.stream_flush`
+defaults to `pass`, which retains the 25 ms quiet-loop timeout and allocates
+no notification descriptor. In `wake` mode a nonblocking, close-on-exec
+`eventfd` joins the epoll set. Producers publish results under their existing
+synchronization, then notify; the HTTP thread clears the accumulated counter
+and performs its normal drain and socket flush. Notifications arriving during
+a drain remain pending for the next pass. The timeout still drives maintenance
+when no output is available.
+
+A copyable notification handle owns the descriptor independently of the server,
+so a late file worker cannot write a recycled descriptor after server teardown.
+File workers publish a value or exception through a separate promise before
+notifying: the worker's `std::async` future alone becomes ready too late to
+notify from inside that worker. Workers remain joined during service teardown.
+Token text and logprobs may be delivered separately; wake mode also drains
+legacy logprob-only updates. Rejections, retirements, shutdown and engine
+failure notify without changing scheduler or journal decisions.
+
 Streaming keep-alives run in `GenerationService::idle()` after draining all
 normal and terminal events. `HttpResponseWriter` frames comments inside HTTP
 chunks and owns a monotonic silence clock per connection, shared by every

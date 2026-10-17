@@ -243,6 +243,13 @@ Recognized request fields remain validated, and known unsupported API features
 still return explicit errors. Unknown fields inside `chat_template_kwargs`
 remain errors because that object explicitly requests prompt changes.
 
+Server-side `http.stream_flush: "wake"` (or `--stream-flush wake`) delivers
+ready asynchronous output without waiting for the normal 25 ms HTTP poll.
+The default is `pass`. This setting changes delivery timing and batching;
+SSE event ordering, delayed preambles and keep-alive comments retain their
+contracts. It is not a per-request setting. Legacy completion logprobs can
+arrive in a later event with empty text when their callback follows a text flush.
+
 Streaming uses `chat.completion.chunk` events followed by `[DONE]`.
 Each choice's assistant-role preamble arrives immediately before its first
 output, or before its terminal chunk if the completion is empty. The legacy

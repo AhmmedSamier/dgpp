@@ -1025,7 +1025,8 @@ struct FabricRig {
           return c;
         }()),
         service(cfg, &engine, &frontend, {kFakeEos}),
-        http(0, &service, 64) {
+        http(0, &service, 64, "127.0.0.1", dgpp::serve::kDefaultHttpMaxBodyBytes,
+             std::getenv("DGPP_TEST_STREAM_WAKE") != nullptr) {
     service.set_audit_observer(&oplog);
     service.set_rank_metrics({0, kWorld, "v", "g"}, nullptr);
     // Peers connect first (they block in the journal read loop),

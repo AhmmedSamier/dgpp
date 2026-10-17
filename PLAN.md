@@ -1,5 +1,9 @@
 # DGPP implementation status
 
+HTTP output supports opt-in `http.stream_flush: "wake"` notifications. The
+default `pass` mode retains the 25 ms poll; HTTP/service/fabric host gates
+cover both modes. See [operations](docs/operations.md) for configuration.
+
 Qwen C16/MTP3 supports 64 decode rows with scheduled verification disabled. Review fixes keep wide BF16 projections kernel-only while preserving existing small MTP walks. All 131 native checks are clear after a targeted rerun, and real four-node BF16, FP8-dense/MMA-head and BF12 serving each pass through sixteen concurrent requests with clean graphs and matching rank operation streams.
 
 The first local MiMo migration onto upstream `c6ca191` adds a compact-tool

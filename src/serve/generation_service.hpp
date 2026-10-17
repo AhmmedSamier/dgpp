@@ -240,6 +240,7 @@ class GenerationService : public HttpHandler,
 
   // ---- HttpHandler (HTTP thread) --------------------------------------
   void handle(const HttpRequest& req, HttpResponseWriter& w) override;
+  void set_wakeup(HttpWakeup wakeup) override { wakeup_ = std::move(wakeup); }
   void idle() override;
   void on_disconnect(uint64_t tag) override;
 
@@ -590,8 +591,9 @@ class GenerationService : public HttpHandler,
                                size_t to, bool unreported_only = false) const;
   std::string take_content_logprobs(StreamRecord& r) const;
   // The legacy text_completion logprobs object over every token.
-  std::string legacy_logprobs(const StreamRecord& r, size_t from = 0,
-                             size_t to = SIZE_MAX) const;
+  std::string legacy_logprobs(const StreamRecord& r, size_t from = 0, size_t to = SIZE_MAX,
+                              bool unreported_only = false) const;
+  std::string take_legacy_logprobs(StreamRecord& r) const;
   void on_retire(const std::string& id,
                  const dgpp::sched::Scheduler::Result& result) override;
   // Under mutex_: observe a pass's new tokens once, including its final
@@ -620,6 +622,7 @@ class GenerationService : public HttpHandler,
   void flush_stream_carries(StreamRecord& r);  // the held UTF-8 tails, at the end
 
   ServiceConfig cfg_;
+  HttpWakeup wakeup_;  // installed before producers start; immutable while running
   // Parsed once at startup; string values borrow storage from cfg_.
   minijson::Value default_chat_template_kwargs_;
   FileInputs file_inputs_;
@@ -628,6 +631,7 @@ class GenerationService : public HttpHandler,
     HttpResponseWriter* writer;
     bool chat;
     std::future<FileResponse> result;
+    std::future<void> worker;  // joins before file_inputs_ is destroyed
   };
   std::vector<PendingFileWork> file_work_;  // HTTP thread only; destroyed before file_inputs_
   std::atomic<size_t> pending_file_count_{0};  // observed by shutdown drain

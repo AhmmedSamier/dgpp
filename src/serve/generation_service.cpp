@@ -3115,6 +3115,7 @@ void GenerationService::absorb(StreamRecord& r, ParserEvent ev) {
 
 void GenerationService::on_token(const std::string& id, int64_t token,
                                  int steps_done) {
+  bool output_ready = false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto& r : records_) {
@@ -3196,9 +3197,11 @@ void GenerationService::on_token(const std::string& id, int64_t token,
         mark_content_logprobs(*r);
       }
       stats_.tokens_out++;
+      output_ready = r->stream && (!r->pending.empty() || !r->delta.empty());
       break;
     }
   }
+  if (output_ready) wakeup_();
   // The audit tap sees every engine event, even ones this record list
   // no longer knows (post-shutdown ticks) — cross-rank comparability
   // is the tap's entire job.
@@ -3245,15 +3248,20 @@ void GenerationService::on_token_logprobs(const std::string& id,
                                           int steps_done,
                                           const sample::Result& logprobs) {
   (void)steps_done;
-  std::lock_guard<std::mutex> lock(mutex_);
-  for (auto& r : records_) {
-    if (r->sched_id != id || r->done) continue;
-    if (r->logprobs >= 0) {
-      r->lps.push_back(logprobs);
-      r->lps_reported.push_back(false);
+  bool output_ready = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& r : records_) {
+      if (r->sched_id != id || r->done) continue;
+      if (r->logprobs >= 0) {
+        r->lps.push_back(logprobs);
+        r->lps_reported.push_back(false);
+        output_ready = r->stream;
+      }
+      break;
     }
-    break;
   }
+  if (output_ready) wakeup_();
 }
 
 namespace {
@@ -3322,8 +3330,8 @@ std::string GenerationService::take_content_logprobs(StreamRecord& r) const {
   return out;
 }
 
-std::string GenerationService::legacy_logprobs(const StreamRecord& r, size_t from,
-                                              size_t to) const {
+std::string GenerationService::legacy_logprobs(const StreamRecord& r, size_t from, size_t to,
+                                               bool unreported_only) const {
   // {"tokens":[...],"token_logprobs":[...],"top_logprobs":[{tok: lp}],
   //  "text_offset":[...]}
   std::string tokens = "[", lps = "[", tops = "[", offsets = "[";
@@ -3332,7 +3340,7 @@ std::string GenerationService::legacy_logprobs(const StreamRecord& r, size_t fro
   for (size_t i = 0; i < r.lps.size() && i < to; ++i) {
     if (!r.content_lps[i]) continue;
     const std::string tok = frontend_->decode_ids({r.ids[i]});
-    if (i < from) {
+    if (i < from || (unreported_only && r.lps_reported[i])) {
       offset += tok.size();
       continue;
     }
@@ -3362,6 +3370,16 @@ std::string GenerationService::legacy_logprobs(const StreamRecord& r, size_t fro
   }
   return "{\"tokens\":" + tokens + "],\"token_logprobs\":" + lps +
          "],\"top_logprobs\":" + tops + "],\"text_offset\":" + offsets + "]}";
+}
+
+std::string GenerationService::take_legacy_logprobs(StreamRecord& r) const {
+  if (r.logprobs < 0) return {};
+  auto out = legacy_logprobs(r, 0, r.lps.size(), true);
+  if (out == "{\"tokens\":[],\"token_logprobs\":[],\"top_logprobs\":[],\"text_offset\":[]}")
+    return {};
+  for (size_t i = 0; i < r.lps.size(); ++i)
+    if (r.content_lps[i]) r.lps_reported[i] = true;
+  return out;
 }
 
 void GenerationService::observe_token_pass(StreamRecord& r, std::chrono::steady_clock::time_point now) {
@@ -3431,6 +3449,7 @@ void GenerationService::on_retire(const std::string& id,
       break;
     }
   }
+  wakeup_();  // retirement also makes non-streaming responses ready
   if (result.reason == Scheduler::Result::Reason::kPoolExhausted)
     DGPP_LOG_WARN("serve: request '{}' cut short at KV pool exhaustion after {} "
                   "tokens (finish_reason length; grow-on-demand shed)",
@@ -3449,10 +3468,21 @@ void GenerationService::enqueue_file_work(const HttpRequest& req, HttpResponseWr
   }
   const uint64_t tag = next_tag_.fetch_add(1, std::memory_order_relaxed);
   writer.set_stream_tag(tag);
-  file_work_.push_back({tag, &writer, chat, std::async(std::launch::async, [this, req, chat] {
-    if (chat) return FileResponse{200, "application/json", file_inputs_.prepare(req).body};
-    return file_inputs_.route(req);
-  })});
+  std::promise<FileResponse> result;
+  auto future = result.get_future();
+  auto worker = std::async(std::launch::async, [this, req, chat, result = std::move(result),
+                                                wakeup = wakeup_]() mutable {
+    try {
+      result.set_value(chat ? FileResponse{200, "application/json", file_inputs_.prepare(req).body}
+                            : file_inputs_.route(req));
+    } catch (...) {
+      result.set_exception(std::current_exception());
+    }
+    // std::async's own future becomes ready only after this function
+    // returns. Publish through a separate promise before notifying HTTP.
+    wakeup();
+  });
+  file_work_.push_back({tag, &writer, chat, std::move(future), std::move(worker)});
   pending_file_count_.fetch_add(1);
 }
 
@@ -3589,13 +3619,17 @@ void GenerationService::flush_legacy_stream(StreamRecord& r) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     delta.swap(r.delta);
-    if (!delta.empty() && r.logprobs >= 0 && r.lps.size() > r.lps_flushed) {
+    if (wakeup_) {
+      lp_json = take_legacy_logprobs(r);
+    } else if (!delta.empty() && r.logprobs >= 0 && r.lps.size() > r.lps_flushed) {
       lp_json = legacy_logprobs(r, r.lps_flushed, r.lps.size());
       r.lps_flushed = r.lps.size();
     }
   }
   carry_utf8(&delta, &r.carry_text);
-  if (!delta.empty())
+  // A wake can drain text between on_token and on_token_logprobs. Send
+  // late metadata without waiting for another text token or retirement.
+  if (!delta.empty() || (wakeup_ && !lp_json.empty()))
     write_stream_event(r,
         text_chunk_delta(r.id, r.created_unix, r.model, delta, lp_json));
 }
@@ -3730,8 +3764,9 @@ void GenerationService::pump_records() {
         if (r->logprobs >= 0) {
           std::lock_guard<std::mutex> lock(mutex_);
           if (r->lps.size() > r->lps_flushed) {
-            lp_json = r->chat ? take_content_logprobs(*r)
-                              : legacy_logprobs(*r, r->lps_flushed, r->lps.size());
+            lp_json = r->chat   ? take_content_logprobs(*r)
+                      : wakeup_ ? take_legacy_logprobs(*r)
+                                : legacy_logprobs(*r, r->lps_flushed, r->lps.size());
             r->lps_flushed = r->lps.size();
           }
         }
@@ -3888,6 +3923,7 @@ bool GenerationService::engine_pass(const PreTickHook& pre_tick) {
     }
   }
   PassEvents events;
+  bool rejected = false;
   for (auto& a : admissions) {
     bool admitted = false;
     bool journaled = false;
@@ -3908,6 +3944,7 @@ bool GenerationService::engine_pass(const PreTickHook& pre_tick) {
       DGPP_LOG_ERROR("serve: admission rejected: {}", e.what());
     }
     if (!admitted) {
+      rejected = true;
       // A shed (queue full) or a rejected request died HERE, on rank
       // 0 — peers must never learn it existed, or their identical
       // queues would diverge from rank 0's.
@@ -3920,6 +3957,7 @@ bool GenerationService::engine_pass(const PreTickHook& pre_tick) {
       }
     }
   }
+  if (rejected) wakeup_();  // before a potentially long prefill in tick()
   for (const auto& c : cancels) {
     // Only cancels that HIT ride the journal (rank 0's scheduler state
     // changed). A late cancel is a no-op everywhere — peers' state is
@@ -3977,7 +4015,7 @@ bool GenerationService::engine_pass(const PreTickHook& pre_tick) {
 
 int GenerationService::begin_shutdown() {
   file_inputs_.stop();
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::mutex> lock(mutex_);
   shutdown_ = true;
   for (auto& a : pending_admissions_) {
     a.record->reject_overloaded = true;
@@ -4003,6 +4041,8 @@ int GenerationService::begin_shutdown() {
     pending_cancels_.push_back(PendingCancel{r->sched_id});
     ++interrupted;
   }
+  lock.unlock();
+  wakeup_();
   return interrupted;
 }
 
@@ -4018,7 +4058,7 @@ bool GenerationService::drained() const {
 int GenerationService::fail_engine(const std::string& what) {
   file_inputs_.stop();
   engine_->prefill_monitor()->clear();
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::mutex> lock(mutex_);
   if (!failed_) {
     failed_ = true;
     failure_ = what;
@@ -4054,6 +4094,8 @@ int GenerationService::fail_engine(const std::string& what) {
     }
     ++interrupted;
   }
+  lock.unlock();
+  wakeup_();
   return interrupted;
 }
 

@@ -131,6 +131,10 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
             fail(what, "'http.max_body_bytes' must be an integer (positive 64-bit byte count)");
           c.http_max_body_bytes = integer(p.value, "http.max_body_bytes", what, 1,
                                           std::numeric_limits<int64_t>::max());
+        } else if (p.key == "stream_flush") {
+          c.stream_flush = text(p.value, "http.stream_flush", what);
+          if (!valid_stream_flush(c.stream_flush))
+            fail(what, "'http.stream_flush' must be pass or wake");
         } else if (p.key == "sse_ping_interval") {
           if (p.value.kind() != Value::Kind::Int || !valid_sse_ping_interval(p.value.as_int()))
             fail(what,
