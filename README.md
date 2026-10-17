@@ -458,6 +458,26 @@ templates set their serving options explicitly.
 | `engine.model_alias` | no | The model name the service reports and requires: `GET /v1/models` lists it, responses and the health status carry it, and a request's `model` field must equal it (otherwise HTTP 404 `model_not_found`). It does not change which checkpoint is loaded. | Empty: the `model` repository ID |
 | `engine.file_inputs` | no | The file-input store behind `POST /v1/files` and the file parts of chat requests, as an object: `directory` (empty: an ephemeral store that lasts the server process; a directory keeps uploads across restarts), `pdf_command` (spawned directly, without a shell; needs `poppler-utils` on rank 0), `max_file_bytes` per uploaded or inline file, `max_request_bytes` for one request's files combined, `max_text_bytes` of extracted text per file and per request, `max_storage_bytes` for the whole store, `pdf_timeout_ms` per extraction and `workers` preprocessing threads. Every limit is a positive integer. See [file inputs](docs/openai-compatibility.md#file-inputs). | Ephemeral store, `pdftotext`, 52428800 (50 MiB), 52428800, 134217728 (128 MiB), 1073741824 (1 GiB), 120000 ms, 4 workers |
 
+For lower stream delivery latency, set `http.stream_flush` to `"wake"` in
+the deployment JSON. Merge this setting into the file's existing `http` object:
+
+```json
+{
+  "http": {
+    "stream_flush": "wake"
+  }
+}
+```
+
+The server flag `--stream-flush wake` overrides the JSON value. This is a
+rank-0 setting for the whole server; requests cannot override it. Only
+`"pass"` and `"wake"` are accepted. Omitting the setting keeps `"pass"` and
+the 25 ms quiet-loop poll. Wake mode retains the 25 ms maintenance poll and
+the configured SSE keep-alive interval while delivering ready output sooner.
+It can increase HTTP CPU work and socket sends, so compare client-visible
+latency and throughput on your workload using the
+[HTTP output delivery procedure](docs/http-stream-flush.md).
+
 The launcher adds the keys below when it resolves a deployment; their
 values come from `.env`, and a deployment template that names them is
 refused. They matter only when a resolved file is passed to
