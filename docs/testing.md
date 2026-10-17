@@ -1,12 +1,30 @@
 # Tests
 
+`serve_preparation_*` checks the fixed preparation pool at configured engine
+concurrencies of 1, 2, 4 and 16, completion ordering, responsive health/SSE
+traffic during blocked preparation, count/payload bounds, disconnects, worker
+errors and shutdown. The service suite runs in both stream-flush modes.
+`image_preparation_concurrent_formats_and_errors` covers simultaneous PNG,
+JPEG and WebP decoding; `glm_vision_frontend_test` also shares the real loaded
+template/tokenizer across text/image preparation and output decoding.
+Set `DGPP_TP_REAL_MODEL` to select another cached GLM-5.3 checkpoint for that
+frontend test; its default is `unsloth/GLM-5.3-Flash-FP8`.
+
 `serve_admission_bench_test` checks the HTTP/SSE admission benchmark's transport,
 native-overlap assertions, published-counter drain barrier and KV cleanup gate.
+It also checks optional controller metrics sampling against request IDs, sampler
+failure reporting and thread cleanup when a request fails.
 The [benchmark guide](benchmarks.md#reproduce) describes serving measurements. The scheduler
 suite covers short-reader admission, aligned-share donation, global chunk-grid
 tails and failure cleanup; `qwen_engine_test` exercises admission and donation
 with a real two-rank engine, including MTP3 and row-independent transcript parity.
 Host policy checks cover automatic admission and explicit overrides.
+`scheduler_growOnDemand_*` covers cache reclamation before shedding, minimum-only
+growth, LRU order, attached-entry protection and youngest-first shedding after
+true exhaustion. Its shared-block fake tracks physical block identities: an
+eviction can free zero blocks until the last snapshot reference is released.
+Repeated runs check engine-operation and prefix-digest agreement. The physical
+reservation tests also cover speculative trailing rows and context clamping.
 `qwen_decode_test` also checks a donated
 share followed by full work budgets across automatic model-grid boundaries,
 with a retained structural snapshot and exact target/draft state against the

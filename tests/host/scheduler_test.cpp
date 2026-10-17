@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstdio>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <sstream>
 #include <string>
@@ -1802,7 +1803,7 @@ DGPP_TEST(scheduler_keepRetiredOff_compactsEveryTickAndMovesNoOp) {
 
 // Grow-on-demand (M6 6d): the observer's growth events.
 struct GrowLog final : dgpp::sched::SchedulerObserver {
-  std::vector<std::string> grows, retires;
+  std::vector<std::string> grows, retires, evictions;
   void on_token(const std::string&, int64_t, int) override {}
   void on_retire(const std::string& id, const Scheduler::Result& r) override {
     retires.push_back(id + ":" + std::to_string(static_cast<int>(r.reason)) + ":" +
@@ -1810,6 +1811,9 @@ struct GrowLog final : dgpp::sched::SchedulerObserver {
   }
   void on_grow(const std::string& id, int64_t tokens) override {
     grows.push_back(id + ":" + std::to_string(tokens));
+  }
+  void on_prefix(const std::string& id, const char* op, int64_t, int slot) override {
+    if (std::string(op) == "evict") evictions.push_back(id + ":" + std::to_string(slot));
   }
 };
 
@@ -2092,6 +2096,211 @@ std::vector<int64_t> counted_prompt(int n, int64_t base = 100) {
   std::vector<int64_t> p(static_cast<size_t>(n));
   for (int i = 0; i < n; ++i) p[static_cast<size_t>(i)] = base + i;
   return p;
+}
+
+// Physical block identities for growth under cache pressure. Aligned snapshots
+// share full blocks with requests and other snapshots; only the last reference
+// frees a block. The older fake's additive snapshot accounting cannot exercise
+// an eviction that releases no physical capacity.
+class SharedPrefixEngine : public FakeEngine {
+ public:
+  SharedPrefixEngine(int slots, int64_t blocks, int arena_slots)
+      : FakeEngine(slots, blocks, 4) {
+    set_prefix_arena(arena_slots, 4);
+  }
+  int64_t pool_blocks_in_use() const override {
+    std::set<int> blocks;
+    for (const auto& [req, ids] : request_blocks_) blocks.insert(ids.begin(), ids.end());
+    for (const auto& [slot, ids] : snapshot_blocks_) blocks.insert(ids.begin(), ids.end());
+    return static_cast<int64_t>(blocks.size());
+  }
+  int32_t prefill(int req, const std::vector<int64_t>& prompt) override {
+    const int32_t token = FakeEngine::prefill(req, prompt);
+    allocate(req, blocks_for_tokens(static_cast<int64_t>(prompt.size())));
+    return token;
+  }
+  int32_t prefill_cached(int req, const std::vector<int64_t>& prompt, PrefixPrefill* plan) override {
+    if (plan->attach_slot >= 0) request_blocks_[req] = snapshot_blocks_.at(plan->attach_slot);
+    const int32_t token = FakeEngine::prefill_cached(req, prompt, plan);
+    if (plan->snap_taken) snapshot(req, plan->snap_slot, plan->snap_position);
+    if (plan->body_snap_taken) snapshot(req, plan->body_snap_slot, plan->body_snap_position);
+    if (plan->head_snap_taken) snapshot(req, plan->head_snap_slot, plan->head_snap_position);
+    return token;
+  }
+  void reserve(int req, int64_t tokens) override {
+    FakeEngine::reserve(req, tokens);
+    allocate(req, reservation_blocks(tokens));
+  }
+  void prefix_snapshot(int req, int slot, int64_t position) override {
+    FakeEngine::prefix_snapshot(req, slot, position);
+    snapshot(req, slot, position);
+  }
+  void prefix_release(int slot) override {
+    const int64_t before = pool_blocks_in_use();
+    FakeEngine::prefix_release(slot);
+    snapshot_blocks_.erase(slot);
+    releases.emplace_back(slot, before - pool_blocks_in_use());
+  }
+  void close(int req) override {
+    FakeEngine::close(req);
+    request_blocks_.erase(req);
+  }
+  std::vector<std::pair<int, int64_t>> releases;
+
+ private:
+  void allocate(int req, int64_t count) {
+    auto& blocks = request_blocks_[req];
+    while (static_cast<int64_t>(blocks.size()) < count) blocks.push_back(next_block_++);
+    require(pool_blocks_in_use() <= pool_blocks_total(), "shared prefix fake: pool overdrawn");
+  }
+  void snapshot(int req, int slot, int64_t position) {
+    require(position % 4 == 0, "shared prefix fake: snapshots must be block-aligned");
+    const auto& blocks = request_blocks_.at(req);
+    require(position / 4 <= static_cast<int64_t>(blocks.size()), "snapshot exceeds the reservation");
+    snapshot_blocks_[slot] = std::vector<int>(blocks.begin(), blocks.begin() + position / 4);
+  }
+  int next_block_ = 0;
+  std::map<int, std::vector<int>> request_blocks_, snapshot_blocks_;
+};
+
+DGPP_TEST(scheduler_growOnDemand_reclaimsIdleCacheBeforeSheddingAndReplays) {
+  const auto run = [] {
+    SharedPrefixEngine engine(1, 8, 4);
+    dgpp::sched::AdmissionPolicy policy;
+    policy.mode = dgpp::sched::AdmissionPolicy::Mode::kGrowOnDemand;
+    policy.window_tokens = 4;
+    Scheduler sched(&engine, {}, 0, policy);
+    engine.arm(0, {10}, 1);
+    sched.submit(make_cached_request("seed", counted_prompt(13), {12}, 1));
+    sched.run_to_completion();
+    require(sched.meters().prefix_entries == 1 && engine.pool_blocks_in_use() == 3,
+            "one idle entry holds three of eight physical blocks");
+
+    engine.arm(0, long_script(24), 24);
+    auto live = make_request("live", 4, 24);
+    live.no_cache = true;
+    sched.submit(live);
+    GrowLog log;
+    sched.set_observer(&log);
+    sched.run_to_completion();
+    require(sched.find("live")->steps_done == 24 && sched.meters().requests_shed_pool == 0,
+            "a seven-block lifetime reclaims idle cache instead of shedding after 16 tokens");
+    require(sched.meters().prefix_evictions == 1 && engine.pool_blocks_in_use() == 0 &&
+                engine.releases == std::vector<std::pair<int, int64_t>>{{0, 3}},
+            "growth releases the engine snapshot, accounts for eviction, and returns all blocks");
+    require(log.evictions == std::vector<std::string>{"live:0"},
+            "the journal observer attributes eviction to the growing request");
+    return std::make_pair(engine.op_stream(), sched.prefix_digest());
+  };
+  require(run() == run(), "replicated requests produce identical engine operations and cache digests");
+}
+
+DGPP_TEST(scheduler_growOnDemand_reclaimsOnlyTheMinimumAndPreservesLRU) {
+  // Two independent one-block entries; a three-block initial reservation.
+  // The next full window needs two blocks, but the next step needs just one.
+  for (const int pool : {5, 6}) {
+    SharedPrefixEngine engine(1, pool, 4);
+    dgpp::sched::AdmissionPolicy policy;
+    policy.mode = dgpp::sched::AdmissionPolicy::Mode::kGrowOnDemand;
+    policy.window_tokens = 8;
+    Scheduler sched(&engine, {kEos}, 0, policy);
+    for (int i = 0; i < 2; ++i) {
+      engine.arm(0, {10}, 1);
+      sched.submit(make_cached_request("seed" + std::to_string(i), counted_prompt(5, 100 + i * 100), {4}, 1));
+      sched.run_to_completion();
+    }
+    auto script = long_script(8);
+    script.push_back(kEos);
+    engine.arm(0, script, 16);
+    auto live = make_request("live", 4, 16);
+    live.no_cache = true;
+    sched.submit(live);
+    GrowLog log;
+    sched.set_observer(&log);
+    sched.run_to_completion();
+    require(sched.find("live")->reason == Scheduler::Result::Reason::kEos &&
+                sched.meters().requests_shed_pool == 0 && log.grows == std::vector<std::string>{"live:13"},
+            "minimum growth keeps the request alive without reserving an unnecessary full window");
+    const int evictions = pool == 5 ? 1 : 0;
+    require(sched.meters().prefix_evictions == evictions &&
+                engine.pool_blocks_in_use() == 2 - evictions,
+            "evict only for the next step; keep all cache when the minimum already fits");
+    require(engine.releases == (evictions ? std::vector<std::pair<int, int64_t>>{{0, 1}}
+                                         : std::vector<std::pair<int, int64_t>>{}),
+            "the oldest idle entry is the only victim");
+  }
+}
+
+DGPP_TEST(scheduler_growOnDemand_retriesEvictionsThatReleaseNoSharedBlocks) {
+  SharedPrefixEngine engine(1, 6, 4);
+  dgpp::sched::AdmissionPolicy policy;
+  policy.mode = dgpp::sched::AdmissionPolicy::Mode::kGrowOnDemand;
+  policy.window_tokens = 4;
+  Scheduler sched(&engine, {}, 0, policy);
+  engine.arm(0, {10}, 1);
+  sched.submit(make_cached_request("seed", counted_prompt(5), {4}, 1));
+  sched.run_to_completion();
+  engine.arm(0, {10}, 1);
+  sched.submit(make_cached_request("extend", counted_prompt(9), {4, 8}, 1));
+  sched.run_to_completion();
+  require(sched.meters().prefix_entries == 2 && engine.pool_blocks_in_use() == 2,
+          "two idle histories share their first physical block");
+  engine.arm(0, long_script(20), 20);
+  auto live = make_request("live", 4, 20);
+  live.no_cache = true;
+  sched.submit(live);
+  sched.run_to_completion();
+  require(sched.find("live")->steps_done == 20 && sched.meters().requests_shed_pool == 0,
+          "zero-reclaim eviction does not trigger shedding or stop reclamation");
+  require(engine.releases == std::vector<std::pair<int, int64_t>>{{0, 0}, {1, 2}} &&
+              sched.meters().prefix_evictions == 2 && engine.pool_blocks_in_use() == 0,
+          "keep evicting until physical blocks return, then drain without a leak");
+}
+
+DGPP_TEST(scheduler_growOnDemand_preservesAttachedEntriesUntilTrueExhaustion) {
+  SharedPrefixEngine engine(1, 5, 1);
+  dgpp::sched::AdmissionPolicy policy;
+  policy.mode = dgpp::sched::AdmissionPolicy::Mode::kGrowOnDemand;
+  policy.window_tokens = 4;
+  Scheduler sched(&engine, {}, 0, policy);
+  engine.arm(0, {10}, 1);
+  sched.submit(make_cached_request("seed", counted_prompt(13), {12}, 1));
+  sched.run_to_completion();
+  engine.arm(0, long_script(24), 24);
+  sched.submit(make_cached_request("attached", counted_prompt(13), {12}, 24));
+  sched.run_to_completion();
+  require(sched.meters().prefix_hits == 1 && sched.meters().requests_shed_pool == 1 &&
+              sched.find("attached")->reason == Scheduler::Result::Reason::kPoolExhausted,
+          "an attached history cannot provide capacity; true exhaustion still sheds");
+  require(sched.meters().prefix_evictions == 0 && engine.releases.empty() &&
+              engine.pool_blocks_in_use() == 3,
+          "attached entry survives growth and its references remain after the shed");
+}
+
+DGPP_TEST(scheduler_growOnDemand_shedsYoungestOnlyAfterReclaimingIdleCache) {
+  SharedPrefixEngine engine(2, 6, 4);
+  dgpp::sched::AdmissionPolicy policy;
+  policy.mode = dgpp::sched::AdmissionPolicy::Mode::kGrowOnDemand;
+  policy.window_tokens = 4;
+  Scheduler sched(&engine, {}, 0, policy);
+  engine.arm(0, {10}, 1);
+  sched.submit(make_cached_request("seed", counted_prompt(5), {4}, 1));
+  sched.run_to_completion();
+  for (int i = 0; i < 2; ++i) {
+    engine.arm(i, long_script(16), 16);
+    auto request = make_request(i == 0 ? "older" : "younger", 4, 16);
+    request.no_cache = true;
+    sched.submit(request);
+  }
+  sched.run_to_completion();
+  require(sched.find("older")->steps_done == 16 &&
+              sched.find("younger")->reason == Scheduler::Result::Reason::kPoolExhausted &&
+              sched.meters().requests_shed_pool == 1,
+          "real oversubscription retains oldest-first priority after cache reclamation");
+  require(engine.releases == std::vector<std::pair<int, int64_t>>{{0, 1}} &&
+              engine.op_stream().find("F:0") < engine.op_stream().find("C:1") &&
+              engine.pool_blocks_in_use() == 0,
+          "the idle history is released before any live request is shed");
 }
 
 DGPP_TEST(scheduler_prefixCache_secondIdenticalPromptAttachesAtTheDeepestCut) {
@@ -4597,25 +4806,25 @@ DGPP_TEST(row_groups_isolate_readers_without_splitting_ordinary_mixed_batches) {
 
 DGPP_TEST(prefill_latency_controller_learns_cost_without_cross_rank_clocks) {
   dgpp::sched::PrefillLatencyController controller;
-  require(controller.limit(1, 0, 500, 256, 4096, 16, 0) == 256, "unknown load starts conservatively");
+  require(controller.limit(1, 0, 500, 256, 4096, 16, 0, 0) == 256, "unknown load starts conservatively");
   controller.observe(1, 0, 256, 256, 100);
-  require(controller.limit(1, 0, 500, 256, 4096, 16, 0) == 512, "cheap work grows at most twice an observed quantum");
+  require(controller.limit(1, 0, 500, 256, 4096, 16, 0, 0) == 512, "cheap work grows at most twice an observed quantum");
   controller.observe(1, 0, 512, 512, 200);
-  require(controller.limit(1, 0, 500, 256, 4096, 16, 0) == 1024, "sustained headroom grows useful work");
-  require(controller.limit(4, 0, 500, 256, 4096, 16, 0) == 1024,
+  require(controller.limit(1, 0, 500, 256, 4096, 16, 0, 0) == 1024, "sustained headroom grows useful work");
+  require(controller.limit(4, 0, 500, 256, 4096, 16, 0, 0) == 1024,
           "an unmeasured decoder load borrows a measured cost rather than restarting at 256");
   controller.observe(4, 0, 1024, 1024, 6000);
-  require(controller.limit(1, 0, 500, 256, 4096, 16, 0) == 1024,
+  require(controller.limit(1, 0, 500, 256, 4096, 16, 0, 0) == 1024,
           "a measured load retains its own estimate when another load gets expensive");
-  require(controller.limit(2, 0, 500, 256, 4096, 16, 0) == 64,
+  require(controller.limit(2, 0, 500, 256, 4096, 16, 0, 0) == 64,
           "a new load borrows the most conservative measured cost");
   controller.observe(1, 0, 512, 512, 1000);
-  const auto slow = controller.limit(1, 0, 500, 256, 4096, 16, 0);
+  const auto slow = controller.limit(1, 0, 500, 256, 4096, 16, 0, 0);
   require(slow >= 16 && slow <= 224 && slow % 16 == 0, "slowdowns reduce work immediately within alignment");
   controller.observe(1, 0, 6, 512, 1000);
-  require(controller.limit(1, 0, 500, 256, 4096, 16, 0) == slow, "short final tails do not poison full-quantum estimates");
-  require(controller.limit(1, 0, 1, 256, 4096, 16, 0) == 16, "an infeasible target still allows forward progress");
-  require(controller.limit(1, 0, 0, 256, 4096, 16, 0) == 4096, "no target retains capacity");
+  require(controller.limit(1, 0, 500, 256, 4096, 16, 0, 0) == slow, "short final tails do not poison full-quantum estimates");
+  require(controller.limit(1, 0, 1, 256, 4096, 16, 0, 0) == 16, "an infeasible target still allows forward progress");
+  require(controller.limit(1, 0, 0, 256, 4096, 16, 0, 0) == 4096, "no target retains capacity");
 }
 
 DGPP_TEST(scheduler_adaptive_budget_replays_and_preserves_progress_and_explicit_caps) {
@@ -4662,12 +4871,12 @@ DGPP_TEST(prefill_latency_tuning_changes_headroom_growth_and_recovery) {
   dgpp::sched::PrefillLatencyController controller;
   controller.observe(1, 0, 256, 256, 100);
   dgpp::sched::PrefillLatencyTuning tuning{15, 4, 100};
-  require(controller.limit(1, 0, 500, 256, 4096, 16, 0, tuning) == 1024, "growth setting permits a larger probe");
+  require(controller.limit(1, 0, 500, 256, 4096, 16, 0, 0, tuning) == 1024, "growth setting permits a larger probe");
   tuning.headroom_pct = 50;
-  require(controller.limit(1, 0, 500, 256, 4096, 16, 0, tuning) == 512, "extra latency headroom reduces offered work");
+  require(controller.limit(1, 0, 500, 256, 4096, 16, 0, 0, tuning) == 512, "extra latency headroom reduces offered work");
   controller.observe(1, 0, 256, 256, 1000, tuning);
   controller.observe(1, 0, 256, 256, 100, tuning);
-  require(controller.limit(1, 0, 500, 256, 4096, 16, 0, tuning) == 512, "full recovery weight immediately accepts cheaper work");
+  require(controller.limit(1, 0, 500, 256, 4096, 16, 0, 0, tuning) == 512, "full recovery weight immediately accepts cheaper work");
   for (const auto invalid : {dgpp::sched::PrefillLatencyTuning{-1, 2, 25}, {15, 1, 25}, {15, 2, 0}, {15, 2, 25, 256, -1}})
     require(!invalid.valid(), "invalid tuning has no valid controller interpretation");
 }
@@ -4676,17 +4885,23 @@ DGPP_TEST(prefill_latency_controller_keys_cost_by_context_and_floors_idle_quanta
   dgpp::sched::PrefillLatencyController c;
   c.observe(0, 0, 4096, 4096, 4096);     // 1 ms a token at the start of a prompt
   c.observe(0, 400000, 256, 256, 1792);  // 7 ms a token at 400K, the same prompt's tail
-  require(c.limit(0, 500000, 3000, 256, 4096, 16, 0) == 256, "the deep range sizes its chunks from its own rate");
-  require(c.limit(0, 0, 3000, 256, 4096, 16, 0) == 2048, "a short prompt after it keeps the shallow range's rate");
-  require(c.limit(0, 100000, 3000, 256, 4096, 16, 0) == 2048,
+  require(c.limit(0, 500000, 3000, 256, 4096, 16, 0, 0) == 256, "the deep range sizes its chunks from its own rate");
+  require(c.limit(0, 0, 3000, 256, 4096, 16, 0, 0) == 2048, "a short prompt after it keeps the shallow range's rate");
+  require(c.limit(0, 100000, 3000, 256, 4096, 16, 0, 0) == 2048,
           "an unmeasured middle range borrows the deepest shallower context, not the tail");
-  require(c.limit(1, 0, 3000, 256, 4096, 16, 0) == 2048, "another load at a measured context borrows that context's rate");
-  require(c.limit(0, 500000, 3000, 256, 4096, 16, 1024) == 1024, "the idle floor keeps the deep range at the engine's efficient chunk");
-  require(c.limit(0, 500000, 3000, 256, 4096, 16, 8192) == 4096, "a floor above the capacity is the capacity");
-  require(c.limit(0, 500000, 3000, 256, 4096, 16, 1000) == 992, "the floor is aligned down");
+  require(c.limit(1, 0, 3000, 256, 4096, 16, 0, 0) == 2048, "another load at a measured context borrows that context's rate");
+  require(c.limit(0, 500000, 3000, 256, 4096, 16, 1024, 0) == 1024, "the idle floor keeps the deep range at the engine's efficient chunk");
+  require(c.limit(0, 500000, 3000, 256, 4096, 16, 8192, 0) == 4096, "a floor above the capacity is the capacity");
+  require(c.limit(0, 500000, 3000, 256, 4096, 16, 1000, 0) == 992, "the floor is aligned down");
   dgpp::sched::PrefillLatencyController fresh;
-  require(fresh.limit(0, 0, 3000, 256, 4096, 16, 1024) == 256, "an unmeasured reader keeps the cautious initial quantum; the floor applies once a cost is measured");
-  require(fresh.limit(0, 0, 0, 256, 4096, 16, 1024) == 4096, "no target retains capacity");
+  require(fresh.limit(0, 0, 3000, 256, 4096, 16, 1024, 0) == 256, "an unmeasured reader keeps the cautious initial quantum; the floor applies once a cost is measured");
+  require(fresh.limit(0, 0, 0, 256, 4096, 16, 1024, 0) == 4096, "no target retains capacity");
+  // The attention grid's wave: a quantum below the cap rounds up to whole waves.
+  require(c.limit(0, 0, 3000, 256, 4096, 16, 0, 192) == 2112, "2048 rounds up to eleven 192-row waves");
+  require(c.limit(0, 500000, 3000, 256, 4096, 16, 1024, 192) == 1152, "the floor rounds up to six waves");
+  require(c.limit(0, 500000, 3000, 256, 4096, 16, 1024, 0) == 1024, "no wave leaves the quantum alone");
+  require(c.limit(0, 0, 0, 256, 4096, 16, 0, 192) == 4096, "the cap is never exceeded (21.3 waves stay the cap)");
+  require(fresh.limit(0, 0, 3000, 256, 4096, 16, 0, 192) == 384, "the cold start rounds up too");
   dgpp::sched::PrefillLatencyTuning tuning;
   tuning.idle_floor_tokens = -1;
   require(!tuning.valid(), "a negative floor has no interpretation");

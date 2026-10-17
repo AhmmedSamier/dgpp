@@ -206,6 +206,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/dflash2.cu
   src/kernels/qsa.cu
   src/kernels/qsa_warp.cu
+  src/kernels/qsa_fp8.cu
   src/kernels/qsa_prefill.cu
   src/kernels/full_attn.cu
   src/kernels/glm4_attn.cu
@@ -213,7 +214,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/mimo_mtp_history.cu
   src/kernels/mimo_attn_prefill.cu
   src/kernels/add_rmsnorm.cu)
-target_link_libraries(dgpp_kernels PUBLIC CUDA::cudart CUDA::cublasLt dgpp_core dgpp_rope_scaling)
+target_link_libraries(dgpp_kernels PUBLIC CUDA::cudart CUDA::cublasLt CUDA::cuda_driver dgpp_core dgpp_rope_scaling)
 dgpp_set_common(dgpp_kernels)
 # The device sampler mirrors the host oracle bit for bit: no contraction of
 # its multiplies and adds (the host builds with -ffp-contract=off).
@@ -902,6 +903,18 @@ dgpp_set_common(qwen_yarn_fixture_test)
 add_test(NAME qwen_yarn_fixture_test
   COMMAND qwen_yarn_fixture_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/qwen_yarn_oracle.json)
 
+# The BPE work bound and phase semantics need no checkpoint or GPU.
+add_executable(bpe_test tests/host/bpe_test.cpp)
+target_include_directories(bpe_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+dgpp_set_common(bpe_test)
+add_test(NAME bpe_test COMMAND bpe_test)
+
+add_executable(word_cache_test tests/host/word_cache_test.cpp)
+target_include_directories(word_cache_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(word_cache_test PRIVATE Threads::Threads)
+dgpp_set_common(word_cache_test)
+add_test(NAME word_cache_test COMMAND word_cache_test)
+
 # M6 Stage 3: the tokenizer differential gate (host). Skips with rc 2 when
 # the model cache is absent (same discipline as the real-checkpoint gates).
 add_executable(tokenizer_test tests/host/tokenizer_test.cpp)
@@ -1005,6 +1018,8 @@ add_executable(serve_test tests/host/serve_test.cpp)
 target_link_libraries(serve_test PRIVATE dgpp_serve Threads::Threads)
 dgpp_set_common(serve_test)
 add_test(NAME serve_test COMMAND serve_test)
+add_test(NAME serve_test_wake COMMAND serve_test)
+set_tests_properties(serve_test_wake PROPERTIES ENVIRONMENT "DGPP_TEST_STREAM_WAKE=1")
 
 # M6 Stage 4b gate: the admission journal (the metronome), both loops,
 # and the §11 identity — real localhost TCP + real HTTP, engine faked
@@ -1014,6 +1029,8 @@ target_link_libraries(fabric_serve_test PRIVATE dgpp_serve
                                                    Threads::Threads)
 dgpp_set_common(fabric_serve_test)
 add_test(NAME fabric_serve_test COMMAND fabric_serve_test)
+add_test(NAME fabric_serve_test_wake COMMAND fabric_serve_test)
+set_tests_properties(fabric_serve_test_wake PROPERTIES ENVIRONMENT "DGPP_TEST_STREAM_WAKE=1")
 
 # M6 Stage 2b: the scheduler policy gate (host, no model, no skip path —
 # the FakeEngine replaces the engine, so the policy is pinned everywhere
@@ -1140,6 +1157,18 @@ target_include_directories(qsa_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CM
 target_link_libraries(qsa_test PRIVATE dgpp_models_qwen dgpp_kernels CUDA::cudart Threads::Threads)
 dgpp_set_common(qsa_test)
 add_test(NAME qsa_test COMMAND qsa_test)
+
+add_executable(qwen_fp8_kv_attn_test tests/cuda/qwen_fp8_kv_attn_test.cu)
+target_include_directories(qwen_fp8_kv_attn_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(qwen_fp8_kv_attn_test PRIVATE dgpp_models_qwen dgpp_kernels CUDA::cudart Threads::Threads)
+dgpp_set_common(qwen_fp8_kv_attn_test)
+add_test(NAME qwen_fp8_kv_attn_test COMMAND qwen_fp8_kv_attn_test)
+
+add_executable(qsa_fp8_native_test tests/cuda/qsa_fp8_native_test.cu)
+target_include_directories(qsa_fp8_native_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(qsa_fp8_native_test PRIVATE dgpp_kernels CUDA::cudart Threads::Threads)
+dgpp_set_common(qsa_fp8_native_test)
+add_test(NAME qsa_fp8_native_test COMMAND qsa_fp8_native_test)
 
 add_executable(qwen_ple_test tests/cuda/qwen_ple_test.cu)
 target_include_directories(qwen_ple_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
@@ -1321,6 +1350,10 @@ add_test(NAME qwen35_mixed_resident_mtp COMMAND qwen35_forward_test --resident-m
 set_tests_properties(qwen35_mixed_resident_mtp PROPERTIES DEPENDS qwen35_mixed_fixture)
 add_test(NAME qwen35_mixed_rows_invariance COMMAND qwen35_forward_test --rows-invariance ${QWEN35_MIXED_FIXTURE})
 set_tests_properties(qwen35_mixed_rows_invariance PROPERTIES DEPENDS qwen35_mixed_fixture)
+add_test(NAME qwen35_mixed_rows_invariance_kvfp8 COMMAND qwen35_forward_test --rows-invariance ${QWEN35_MIXED_FIXTURE} --kv-fp8)
+set_tests_properties(qwen35_mixed_rows_invariance_kvfp8 PROPERTIES DEPENDS qwen35_mixed_fixture)
+add_test(NAME qwen35_mixed_rows_invariance_attnfp8 COMMAND qwen35_forward_test --rows-invariance ${QWEN35_MIXED_FIXTURE} --attn-fp8)
+set_tests_properties(qwen35_mixed_rows_invariance_attnfp8 PROPERTIES DEPENDS qwen35_mixed_fixture)
 add_test(NAME qwen35_mixed_generate
   COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/qwen35_reference_dump.py
           gen-pure --checkpoint-dir ${QWEN35_MIXED_FIXTURE}
@@ -2231,6 +2264,10 @@ if(DGPP_BUILD_BENCHMARKS)
     SOURCES benchmarks/micro/qsa_prefill_bench.cu
     LIBRARIES dgpp_kernels CUDA::cudart)
 
+  dgpp_add_benchmark(qsa_fp8_bench
+    SOURCES benchmarks/micro/qsa_fp8_bench.cu
+    LIBRARIES dgpp_kernels CUDA::cudart)
+
   dgpp_add_benchmark(qsa_index_bench
     SOURCES benchmarks/micro/qsa_index_bench.cu
     LIBRARIES dgpp_models_qwen dgpp_kernels CUDA::cudart)
@@ -2272,7 +2309,7 @@ get_property(DGPP_ALL_TESTS DIRECTORY PROPERTY TESTS)
 foreach(_test IN LISTS DGPP_ALL_TESTS)
   set_tests_properties(${_test} PROPERTIES LABELS "gpu")
 endforeach()
-set_tests_properties(unit unit_tests http_server_test serve_test fabric_serve_test scheduler_test shutdown_watchdog_test engine_watchdog_test
+set_tests_properties(word_cache_test bpe_test unit unit_tests http_server_test serve_test serve_test_wake fabric_serve_test fabric_serve_test_wake scheduler_test shutdown_watchdog_test engine_watchdog_test
   qwen_yarn_fixture_test qwen_w4a4_plan_default qwen_w4a4_plan_mode_0 qwen_w4a4_plan_mode_1
   qwen_w4a4_plan_mode_empty qwen_w4a4_plan_mode_invalid PROPERTIES LABELS "host")
 set_tests_properties(checkpoint_audit_test route_trace_test sampling_profile_test

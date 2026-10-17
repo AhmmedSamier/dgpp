@@ -1,18 +1,18 @@
 #include "serve/cluster_config.hpp"
 
-#include <arpa/inet.h>
-
 #include <algorithm>
+#include <arpa/inet.h>
 #include <cmath>
-#include <limits>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
 #include "common/bf16_residency.hpp"
 #include "kernels/latent_format.hpp"
 #include "loaders/minijson.hpp"
+#include "text/word_cache.hpp"
 
 namespace dgpp::serve {
 
@@ -114,6 +114,16 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
       c.ssh_user = text(v, k, what);
     } else if (k == "release") {
       c.release = text(v, k, what);
+    } else if (k == "tokenizer") {
+      if (!v.is_object()) fail(what, "'tokenizer' must be an object");
+      for (const Member& p : v.members()) {
+        if (p.key != "word_cache_entries") fail(what, "unknown key 'tokenizer." + p.key + "'");
+        if (p.value.kind() != Value::Kind::Int)
+          fail(what, "'tokenizer.word_cache_entries' must be an integer in [0, 10000]");
+        c.tokenizer_word_cache_entries =
+            static_cast<size_t>(integer(p.value, "tokenizer.word_cache_entries", what, 0,
+                                        dgpp::text::detail::WordCache::kMaxEntries));
+      }
     } else if (k == "http") {
       if (!v.is_object()) fail(what, "'http' must be an object");
       for (const Member& p : v.members()) {
@@ -131,6 +141,10 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
             fail(what, "'http.max_body_bytes' must be an integer (positive 64-bit byte count)");
           c.http_max_body_bytes = integer(p.value, "http.max_body_bytes", what, 1,
                                           std::numeric_limits<int64_t>::max());
+        } else if (p.key == "stream_flush") {
+          c.stream_flush = text(p.value, "http.stream_flush", what);
+          if (!valid_stream_flush(c.stream_flush))
+            fail(what, "'http.stream_flush' must be pass or wake");
         } else if (p.key == "sse_ping_interval") {
           if (p.value.kind() != Value::Kind::Int || !valid_sse_ping_interval(p.value.as_int()))
             fail(what,
@@ -246,6 +260,18 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           e.prefill_fp8_gemm = boolean(x, ek, what);
         } else if (p.key == "prefill_fp8_per_tensor") {
           e.prefill_fp8_per_tensor = boolean(x, ek, what);
+        } else if (p.key == "prefill_activations") {
+          e.prefill_activations = text(x, ek, what);
+          if (e.prefill_activations != "bf16" && e.prefill_activations != "native")
+            fail(what, "'" + ek + "' must be \"bf16\" or \"native\"");
+        } else if (p.key == "prefill_attention") {
+          e.prefill_attention = text(x, ek, what);
+          if (e.prefill_attention != "bf16" && e.prefill_attention != "fp8")
+            fail(what, "'" + ek + "' must be \"bf16\" or \"fp8\"");
+        } else if (p.key == "decode_attention") {
+          e.decode_attention = text(x, ek, what);
+          if (e.decode_attention != "bf16" && e.decode_attention != "fp8")
+            fail(what, "'" + ek + "' must be \"bf16\" or \"fp8\"");
         } else if (p.key == "expert_gemm") {
           e.expert_gemm = text(x, ek, what);
           if (e.expert_gemm != "wide" && e.expert_gemm != "wide3" && e.expert_gemm != "wide4" &&

@@ -5,6 +5,201 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **Prepare generation requests outside the HTTP loop** ([#122](https://github.com/HawkBearPig/dgpp/issues/122)).
+  One persistent worker per configured engine slot handles JSON validation,
+  rendering, tokenization and image preparation. Ready requests proceed in
+  completion order. Queued work and retained payloads are bounded, disconnects
+  release unstarted work, and shutdown joins workers. Preparation and file
+  completion notifications operate in both HTTP flush modes. Latency metrics
+  include preparation, with separate preparation wait/work histograms.
+
+- **Optional bounded tokenizer word cache**. Set `tokenizer.word_cache_entries`
+  to 1–10000 in deployment JSON to reuse short mapped pretokens on rank 0.
+  The default remains 0. Exact key checks, bounded slots and nonblocking shard
+  locks preserve IDs under collisions and concurrent requests; replacement
+  lets the cache adapt after it fills. Words above 256 mapped bytes bypass it.
+
+- **Bound prompt-tokenizer merge scans** ([#121](https://github.com/HawkBearPig/dgpp/issues/121)).
+  Long letter and CJK pretokens automatically switch from repeated passes
+  to a phase heap after a bounded amount of scanning. Short words and
+  repeated characters retain the pass path. Merges use input spans instead
+  of allocating strings; token IDs and merge ordering are preserved.
+  Thanks to @WhollyMindless for the diagnosis and proposed phase semantics.
+
+- **Decode streaming text one token at a time** ([#119](https://github.com/HawkBearPig/dgpp/issues/119)).
+  Completions, chat reasoning/content and DeepSeek DSML content no longer
+  re-decode the whole output prefix for every generated token. This removes
+  quadratic tokenizer work from those paths on the engine thread while
+  preserving decoded bytes, UTF-8 buffering, stop handling and token attribution.
+  Thanks to @WhollyMindless for the report and tokenizer measurements.
+
+- **Opt-in immediate HTTP output notifications** ([#118](https://github.com/HawkBearPig/dgpp/issues/118)).
+  `http.stream_flush: "wake"` / `--stream-flush wake` wakes rank 0's HTTP loop
+  when asynchronous output is ready. Tokens, logprobs, retirement, overload,
+  shutdown/failure and file results share the existing HTTP-thread drain.
+  The default `pass` mode retains the 25 ms token-output poll.
+  Notification handles remain safe after server teardown, and file results
+  are published before notification. Keep-alive and journal behavior are unchanged.
+
+- **Grow admission reclaims idle prefix cache before shedding live work**
+  ([#116](https://github.com/HawkBearPig/dgpp/issues/116)). Reservation growth
+  releases LRU unattached snapshots until its next step fits, rechecking physical
+  capacity when entries share blocks. It preserves attached entries and avoids
+  evicting extra history for an optional full growth window. If live reservations
+  still exhaust the pool, youngest-first shedding remains. The admission
+  benchmark also supports optional controller/load metrics sampling for the
+  mixed-prefill investigation; controller defaults are unchanged.
+- **The Qwen3.8-27B templates sized to the node, and the DeepSeek-V4.1
+  template's full 1M-token context** (2026-10-17). The eight 27B templates
+  carried the model's 262,144-token context and a 1.5 GiB prefix arena at
+  every world (the YaRN templates 565,248 and 827,392 tokens), planning at
+  19–71 GiB of a Spark's 116 while every other template had been sized by
+  the memory plan. They now hold: FP8 524,288 tokens (two full contexts)
+  with a 20 GiB arena on one Spark, 1,572,864 (six) with 16 GiB on two,
+  2,097,152 (one per slot, full admission) with 32 GiB on four; NVFP4
+  1,048,576 (four) with 16 GiB on one, 2,097,152 with 32 GiB on two and
+  four; the YaRN templates 1,130,496 (two full-length streams) with 16 GiB
+  and 1,048,576 with 20 GiB — plans of 73 to 104 GiB, each verified with
+  `--memory-plan` and a boot whose ledger leaves at least 5 GiB at
+  listening: the boots end 6–8 GiB below the plan at world 1 (4.4 at two,
+  2 at four; a 786,432-token FP8 pool planned at 109 GiB swapped), which
+  the plan's 4 GiB headroom does not cover on one Spark. The DeepSeek-V4.1 template takes the 1M-token
+  pool its benchmark row already measured (91.6 GiB planned). Also:
+  `engine.prefill_activations` is refused by every family but Qwen3.5 (it
+  reached nothing else).
+- **The Qwen3.8-27B FP8 templates take `engine.prefill_activations:
+  "native"`** (2026-10-16). The benchmark refresh below found the FP8
+  release's cold prefill 20 % slower on one Spark than its 2026-10-11 row:
+  under the adaptive prefill defaults an idle prompt runs in 4,096-token
+  chunks and the bf16 chain re-dequantized every FP8 matrix into its bridge
+  for each of them (2.70 / 8.30 / 35.3 s at 2K / 8K / 32K against 2.22 /
+  6.96 / 29.5 under the old one-pass budgets, same binary). The
+  checkpoint's own blockwise fp8 product needs no bridge: 1.90 / 6.49 /
+  27.9 s, the 300-item evals identical to the bf16 chain's on the same
+  binary (161/164, 294/300, 100/100), needles 6/6 at 32K and 128K. The
+  benchmark rows for the FP8 release are measured on it.
+- **`engine.prefill_attention: "fp8"` on the Qwen3.5 family — the prefill
+  attention on the fp8 tensor cores** (2026-10-16). Over the `kv_dtype:
+  "fp8"` pool (the mixed release's `kv_cache_scheme` codes at its shipped
+  `k_scale` / `v_scale`; the key needs it and is refused on a bf16 pool and
+  by the other families), the prefill attention computed in e4m3: Q
+  quantized per row (amax / 448, the row's scale folded into the softmax
+  multiplier with k_scale), S = Q8 K8^T and O += P8 V8 on
+  `mma.m16n8k32.e4m3` (twice the bf16 issue rate on the GB10), the
+  probabilities rounded to e4m3 against the row's running maximum (scaled
+  by 2^8: the maximum is the code 256, the flush floor 2^-17 of it), the
+  denominator the unrounded sum, the output times v_scale; nothing is
+  transposed in memory (P's accumulator layout meets V through a
+  transposed ldmatrix over dim pairs and one byte permute per fragment).
+  Decode rows keep the storage form's exact widened walk. The kernel reads
+  112 TFLOP/s at a 262K context against the bf16 tile form's 73 and the
+  storage form's 60; in situ on one Spark the 262K cold prefill reads 242 s
+  against 316 s in bf16 and 352 s in `fp8` (the per-key attention cost
+  3.8 us per token per 1K of context against 5.9 and 7.0), decode at 262K
+  unchanged at 155–156 ms a pass. Gated by a host model of exactly that
+  recipe in `full_attn_test` (9e-6 relative rms over a 1990-row prefill)
+  and by the KV-mode retrieval / accuracy suite against the bf16 cache:
+  the 300-item set 158/164, 293/300, 100/100 (bf16 160, 292, 100); needles
+  20/20 at 32K and 128K over two seeds and 5/5 at 258K, every control
+  found; the teacher-forced probe at the bf16 boot-to-boot floor (top-1
+  123/127 and 119/126, median KL 0.001 / 0.003 nats). The NVFP4 templates
+  set it beside `kv_dtype: "fp8"`. The
+  forward test's rows invariance runs in this mode too; the storage and
+  compute arithmetic are now two keys (the cache's format, the attention's
+  arithmetic over it), a one-flag A/B either way.
+- **`engine.kv_dtype: "fp8"` on the Qwen3.5 family — the mixed release's
+  own K/V cache recipe** (2026-10-16). The Qwen3.8-27B NVFP4 release ships
+  a per-layer `k_scale` / `v_scale` (FP8 `kv_cache_scheme`, static
+  per-tensor e4m3); the key stores the Full layers' K/V as e4m3 codes of
+  K / k_scale and V / v_scale (half the pool: 21.00 -> 13.00 GiB at a 262K
+  context on one Spark, the DFlash2 planes bf16) and keeps the attention
+  math the bf16 chain's on the widened codes — k_scale folded into the
+  softmax scale, v_scale on the output, the codes widened to bf16 in
+  shared memory through the hardware e4m3 -> f16 -> f32 -> bf16 cvt chain
+  (exact; an integer form — the magnitude bits placed in a bf16 and one
+  bf16x2 multiply by 2^120 — was also exact and read 3 % slower in situ,
+  the widening being issue-bound at the kernel's occupancy). Gated bitwise
+  against the bf16 kernels on widened planes (`full_attn_test`); refused
+  with `engine.mtp` (the draft layer ships no scales) and on releases
+  without the scheme. With it the **block decode form**: decode rows
+  grouped by request (the drafter's verify blocks, a batch's spans) stage
+  every K/V tile once per group through the TMA ring instead of once per
+  row — the row form's bits exactly (16-key steps over each row's own
+  split range), so the forms mix and the batch-composition invariance
+  holds; bf16 decode at a 262K context went 212 -> 188
+  ms a pass, fp8 reads 156. The 262K cold prefill: 316 s
+  bf16, 352 s fp8 (the widening, until the e4m3 attention).
+  Accuracy and retrieval against the bf16 cache (one boot each): the
+  300-item HumanEval / GSM8K / extraction set 159/164, 292/300, 100/100 vs
+  160/164, 292/300, 100/100; five needles per document at 32K, 128K and
+  258K 30/30 in both formats; a teacher-forced top-5 probe on 31K- and
+  115K-token documents at the within-format run-to-run floor (top-1
+  agreement 99 / 93 % vs a second bf16 boot's 98 / 95 %, median KL below
+  0.005 nats). The NVFP4 templates set `kv_dtype: "fp8"`. Loader format 5
+  (the scalars widened to f32 in the layer image).
+- **`engine.prefill_activations: "native"` — the checkpoint's own activation
+  recipe on prefill rows** (2026-10-15). A quantized release defines its
+  numerics; the bf16-activation chain was an upcast of them. On the
+  Qwen3.8-27B NVFP4 release the native recipe quantizes every prefill
+  row's MLP input to NVFP4 per row with the shipped `input_global_scale`
+  (gate and up share one, down has its own; kept resident, loader format
+  4) and runs the three products on the GB10's block-scaled fp4 tensor
+  cores (4x the bf16 mma rate: 376 vs 94 TFLOP/s at the kernel's
+  occupancy), the model's SwiGLU between them; decode rows keep bf16
+  activations. The NVFP4 row quantizer now takes k up to 32768 (two
+  groups a thread; the down projection's 17408). Per-row quantization and
+  a fixed K order keep a row's chain the same at any row count and cut
+  (the shared-prefill invariances pass under it); the quantizer's
+  representable rows come back bitwise. The recipe's e4m3 half: the
+  channel-FP8 projections and late-layer MLPs from per-token e4m3
+  activations (one scale a row, amax / 448) on the e4m3 tensor cores (2x
+  the bf16 rate) with the row and column scales applied once in the
+  epilogue (kernels/fp8_gemm's channel form, pinned against the exact
+  double sum of its quantized inputs), in place of dequantizing each
+  matrix to bf16 every chunk; on the FP8 release the same key takes the
+  blockwise product on every prefill row. One Spark, the plain template:
+  a 262K cold prefill 451 -> 391 (NVFP4 half) -> 349 s (both), an 11.5K
+  prompt 11.4 -> 8.9 -> 7.3 s. Task evals at the same seed, 300 items:
+  HumanEval 158/164 (bf16 chain 159), GSM8K 295/300 (296), schema
+  extraction 100/100 (100): the published recipe's quality.
+  The NVFP4 templates enable it. The channel form then moved to 2-D TMA
+  boxes (128 x 256 x 128 a stage, two stages, the swizzle folded into
+  per-lane ldmatrix bases; bitwise the cp.async form): the GB10's
+  L2-to-SM feed of ~800 GB/s caps a GEMM by its bytes a kFLOP, and the
+  wider TMA tile moves 5.9 against the 128-wide cp.async tile's 7.8,
+  139 against 100 TFLOP/s at the 27B's shapes; in situ the 262K prefill
+  349 -> 336 s and the 11.5K prompt 7.3 -> 6.7 s. The NVFP4 MLP products
+  then moved off the grouped MoE kernel onto a dense form staged by TMA
+  (128 x 256 x 128 a stage, the codes by SWIZZLE_64B boxes, the per-row
+  scale words by one 8-byte copy a thread, three stages, m-tiles fastest
+  so the CTAs in flight share a weight tile): 218-228 against 168-173
+  TFLOP/s, bitwise the grouped kernel; and the SwiGLU is fused into the
+  down projection's quantizer with the model's own rounding (bitwise the
+  swiglu kernel followed by the quantizer, the 35 KB rows never written
+  as bf16). In situ: the 262K prefill 336 -> 322 -> 316 s, the 11.5K
+  prompt 6.7 -> 5.9 -> 5.7 s.
+
+- **Qwen3.8-27B prefill attention at 71 TFLOP/s** (2026-10-15). The
+  full-attention prefill kernel (`kernels/full_attn.cu`, the tile form the
+  27B's 256-dim heads take) was rebuilt in six measured, bitwise rounds:
+  the tile walk (two key-half PV passes, lazy rescale, one page lookup
+  and one barrier a tile), the K/V tile staged by 2-D TMA boxes with
+  swizzled ldmatrix, CTA-scoped copies in a three-stage ring, per-lane
+  ldmatrix bases with the swizzle folded in once, and the hardware
+  bf16x2 pack (identical to the bit-trick rounding on all 2^32 floats).
+  Kernel bench at 262K context: 45.9 → 71.2 TFLOP/s at full waves, 31 →
+  48 at 256 rows (the GB10's mma.sync bf16 ceiling at this occupancy is
+  94). In situ, one Spark, the plain 27B template, a 262K cold prefill:
+  584.5 → 451.2 s (−23 %) with the wave-aligned quanta; needle and control
+  found throughout.
+
+- **Wave-aligned prefill quanta** (2026-10-15). Qwen3.8-27B states its
+  full-attention prefill grid's wave (16 query rows per CTA, one CTA per SM
+  and per KV head: 192 rows on one Spark) and the adaptive controller
+  rounds a quantum below the cap up to whole waves (1024 → 1152), measured
+  on the kernel's bench at 262K context: 47.0 TFLOP/s at 5.33 waves
+  against 51.6–53.5 at whole waves.
+
 - **The opt-in YaRN ramp serves Qwen3.8-27B** (2026-10-12, PR #111).
   `engine.rope_scaling` is accepted for the `qwen3_5` family, whose rope
   geometry is the Flash-Next recipe's (64 rotary dims of 256, theta 1e7,

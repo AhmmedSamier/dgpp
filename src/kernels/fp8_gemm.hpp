@@ -7,6 +7,7 @@
 // promotion per k group) in place of dequantizing each matrix to bf16 for
 // the cuBLASLt GEMM.
 
+#include <cuda.h>
 #include <cuda_runtime.h>
 
 #include <cstddef>
@@ -35,5 +36,46 @@ void launch_fp8_gemm_bf16(const uint8_t* a, const float* a_scales, const uint8_t
 void launch_fp8_gemm_f32(const uint8_t* a, const float* a_scales, const uint8_t* w,
                          const float* w_scales, int w_scale_block_rows, float* out, int m, int n,
                          int k, cudaStream_t stream, size_t out_stride = 0);
+
+// The checkpoint's per-token recipe (engine.prefill_activations = native,
+// 2026-10-15; the Qwen3.8-27B NVFP4 release's channel-FP8 projections and
+// late-layer MLPs: compressed-tensors "float-quantized, channel" weights with
+// "token, dynamic" activations). The quantizer: one scale per activation row
+// over all of k (amax / 448; 1 for an all-zero row), codes e4m3 round-to-
+// nearest saturating; act 16-byte aligned rows, act_stride % 8 == 0, k % 8.
+void launch_fp8_quantize_tokens(const uint16_t* act, size_t act_stride, int m, int k, uint8_t* q,
+                                float* scales, cudaStream_t stream);
+// The same quantizer fused behind the Qwen3.5 dense MLP's SwiGLU (silu as
+// g / (1 + exp(-g)), one bf16 rounding of the product): gate/up rows
+// [m][stride] -> the e4m3 codes and per-token scales of silu(gate) * up,
+// bitwise the model's swiglu kernel followed by launch_fp8_quantize_tokens.
+void launch_fp8_swiglu_quantize_tokens(const uint16_t* gate, const uint16_t* up, size_t stride, int m, int k,
+                                       uint8_t* q, float* scales, cudaStream_t stream);
+// out[m][n] = (a_scale[m] * w_scale[n]) * (A8 x W8^T): the e4m3 products
+// accumulate in fp32 over the whole k (mma m16n8k32) and the two scales
+// apply once in the epilogue (the reference stack's per-token x per-channel
+// epilogue). a [m][k] e4m3 with a_scales [m]; w [n][k] e4m3 with w_scales
+// [n] (the checkpoint's channel grid as F32). k % 64 == 0; out_stride 0 = n.
+void launch_fp8_gemm_channel_bf16(const uint8_t* a, const float* a_scales, const uint8_t* w,
+                                  const float* w_scales, uint16_t* out, int m, int n, int k,
+                                  cudaStream_t stream, size_t out_stride = 0);
+void launch_fp8_gemm_channel_f32(const uint8_t* a, const float* a_scales, const uint8_t* w,
+                                 const float* w_scales, float* out, int m, int n, int k,
+                                 cudaStream_t stream, size_t out_stride = 0);
+// The channel form staged by 2-D TMA boxes (2026-10-15): 128 x 256 x 128 a
+// stage (A 16 KB + W 32 KB, SWIZZLE_128B), two stages, eight 64 x 64 warp
+// tiles. Bitwise the cp.async channel form (the same k order per output);
+// 139 against 100 TFLOP/s at the 27B's shapes, the L2-to-SM feed being the
+// limit at ~800 GB/s (the wider tile moves 5.9 against 7.8 bytes a kFLOP).
+// A map covers an e4m3 [rows, k] matrix (k % 128 == 0, 16-byte aligned);
+// box rows 128 for the activation rows, 256 for the weight rows.
+bool fp8_channel_tma_supported(int k);
+CUtensorMap fp8_channel_tma_map(const uint8_t* base, int64_t rows, int64_t k, int box_rows);
+void launch_fp8_gemm_channel_tma_bf16(const CUtensorMap& amap, const CUtensorMap& wmap, const float* a_scales,
+                                      const float* w_scales, uint16_t* out, int m, int n, int k,
+                                      cudaStream_t stream, size_t out_stride = 0);
+void launch_fp8_gemm_channel_tma_f32(const CUtensorMap& amap, const CUtensorMap& wmap, const float* a_scales,
+                                     const float* w_scales, float* out, int m, int n, int k, cudaStream_t stream,
+                                     size_t out_stride = 0);
 
 }  // namespace dgpp

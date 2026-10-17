@@ -380,7 +380,7 @@ void rank_work_mtp(int r, const QwenTextConfig& cfg, const std::string& dir, con
 
 }  // namespace
 
-DGPP_TEST(qwen_engines_world_of_one_request_bound_preserves_mtp_and_slot_reuse) {
+static void check_qwen_request_bound(dgpp::LatentFormat kv_format) {
   struct RestoreModes {
     bool mapped = dgpp::QwenLayerStream::ngram_table_mmap();
     bool fp8 = dgpp::QwenLayerStream::dense_weights_fp8();
@@ -404,7 +404,7 @@ DGPP_TEST(qwen_engines_world_of_one_request_bound_preserves_mtp_and_slot_reuse) 
       cfg.max_position_embeddings = context;
       auto buses = start_world(1, kPort + 20);
       QwenModel model(cfg, dir, 128, 1024, QwenResidency::Resident, nullptr, 0, 1,
-                      4, true, 8, fp8);
+                      4, true, 8, fp8, false, kv_format);
       uint16_t* scratch = nullptr;
       DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&scratch),
                                  sizeof(uint16_t) * dgpp::kPickScratchElems(1), cudaHostAllocDefault));
@@ -458,6 +458,22 @@ DGPP_TEST(qwen_engines_world_of_one_request_bound_preserves_mtp_and_slot_reuse) 
     // pool stride; the second bounds it by an unaligned per-request ceiling.
     require(run(1024) == run(193),
             "bounding QSA workspace changes a four-slot MTP-1 transcript");
+  }
+}
+
+DGPP_TEST(qwen_engines_world_of_one_request_bound_preserves_mtp_and_slot_reuse) {
+  check_qwen_request_bound(dgpp::LatentFormat::kBf16);
+}
+
+DGPP_TEST(qwen_engines_fp8_attention_preserves_mtp_graph_and_slot_reuse) {
+  struct RestoreAttention {
+    ~RestoreAttention() { QwenModel::set_native_attention(false, false); }
+  } restore;
+  // Exercise each independent switch through mixed prefill, four live
+  // requests, graph replay, MTP verification and a retired/reopened slot.
+  for (bool prefill : {false, true}) {
+    QwenModel::set_native_attention(prefill, !prefill);
+    check_qwen_request_bound(dgpp::LatentFormat::kFp8);
   }
 }
 

@@ -9,8 +9,9 @@
 // collectives. Single-node mode without graph decode streams layers
 // through the eager engine. The memory plan validates the chosen shape.
 //
-// Threads: HTTP parses requests and writes responses; the engine owns
-// model execution; journal peers follow rank 0's scheduler operations.
+// Threads: HTTP owns connections and responses; a fixed pool prepares
+// requests. The engine owns model execution; journal peers follow rank 0's
+// scheduler operations.
 // See DESIGN §11 and docs/operations.md.
 //
 
@@ -155,12 +156,14 @@ void open_ops_file(dgpp::serve::OpStreamObserver* oplog,
 }
 
 struct ServeKnobs {
+  size_t tokenizer_word_cache_entries = 0;
   dgpp::serve::FileInputConfig file_inputs;
   int world = 1;  // dgpp_build_info's world_size
   uint16_t http_port = 8080;
   std::string http_bind = "0.0.0.0";
   int64_t http_max_body_bytes = dgpp::serve::kDefaultHttpMaxBodyBytes;
   int sse_ping_interval = dgpp::serve::kDefaultSsePingInterval;
+  std::string stream_flush = "pass";
   int max_connections = 64;
   int queue_limit = 64;
   int admission_gather_ms = 3;
@@ -428,11 +431,20 @@ struct QwenFamily final : ServeFamily {
   std::string ckpt;
   std::unique_ptr<dgpp::QwenModel> model;
   bool fp8_head_mma;
+  dgpp::LatentFormat kv_format;
   QwenFamily(const std::string& checkpoint, const std::optional<dgpp::RopeScaling>& rope_scaling,
-             bool head_mma)
+             bool head_mma, dgpp::LatentFormat kv_fmt)
       : cfg(dgpp::QwenTextConfig::from_json_file((fs::path(checkpoint) / "config.json").string())),
         ckpt(checkpoint),
-        fp8_head_mma(head_mma) {
+        fp8_head_mma(head_mma),
+        kv_format(kv_fmt) {
+    // The Qwen KV-cache format (engine.kv_dtype): bf16 or fp8 (e4m3 rows with
+    // one scale per (slot, kv-head), with BF16 or native FP8 attention).
+    // fp4 is rejected here (not implemented). See docs/qwen_fp8_kv_plan.md.
+    if (kv_format != dgpp::LatentFormat::kBf16 && kv_format != dgpp::LatentFormat::kFp8)
+      throw std::invalid_argument(std::string("engine.kv_dtype ") +
+                                  dgpp::latent_format_name(kv_format) +
+                                  " is not supported for Qwen (bf16 or fp8)");
     // The fused BF16 MTP expert format is a process-wide flag (set from the
     // engine config or CLI before the family is built); it must be on the
     // config before the binding table and the loader see it.
@@ -486,7 +498,7 @@ struct QwenFamily final : ServeFamily {
       return "exceeds the QSA pool-id space (2^21 pools)";
     return "";
   }
-  const char* kv_format_name() const override { return "bf16"; }
+  const char* kv_format_name() const override { return dgpp::latent_format_name(kv_format); }
   // The YaRN-scaled ceiling (or the checkpoint's when the knob is off).
   int64_t position_limit() const override { return cfg.context_limit(); }
   // The small-row kernels keep their dispatch; wider batches use the
@@ -501,7 +513,7 @@ struct QwenFamily final : ServeFamily {
                         bool mtp, int decode_rows) const override {
     return dgpp::QwenModel::plan_memory(cfg, forward_rows, context, fabric ? rank : 0, fabric ? world_ : 1,
                                         fabric ? dgpp::QwenResidency::Resident : dgpp::QwenResidency::Streaming,
-                                        slots, fabric && mtp, decode_rows, /*serving_logits=*/true);
+                                        slots, fabric && mtp, decode_rows, /*serving_logits=*/true, kv_format);
   }
   size_t snapshot_bytes(int world_, bool mtp) const override {
     return dgpp::QwenModel::session_snapshot_bytes(cfg, world_, mtp);
@@ -514,7 +526,8 @@ struct QwenFamily final : ServeFamily {
     model = std::make_unique<dgpp::QwenModel>(
         cfg, ckpt, forward_rows, pool_tokens,
         fabric ? dgpp::QwenResidency::Resident : dgpp::QwenResidency::Streaming, reducer,
-        fabric ? rank : 0, fabric ? world_ : 1, slots, fabric && mtp, decode_rows, fp8_head_mma, /*serving_logits=*/true);
+        fabric ? rank : 0, fabric ? world_ : 1, slots, fabric && mtp, decode_rows, fp8_head_mma,
+        /*serving_logits=*/true, kv_format);
   }
   void destroy_model() override { model.reset(); }
   size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
@@ -915,12 +928,25 @@ struct Qwen35Family final : ServeFamily {
   std::string dflash;  // the DFlash2 drafter's checkpoint dir (empty: off)
   std::vector<int64_t> eos_;
   std::unique_ptr<dgpp::Qwen35Model> model;
+  // The Full layers' K/V pool format (engine.kv_dtype): bf16, or the fp8
+  // storage form on a release that ships its kv_cache_scheme scales
+  // (models/qwen/model35.hpp: Qwen35KvPoolShape::fp8). The attention's
+  // arithmetic on that pool is engine.prefill_attention (a model static).
+  dgpp::LatentFormat kv_format = dgpp::LatentFormat::kBf16;
   Qwen35Family(const std::string& checkpoint,
-               const std::optional<dgpp::RopeScaling>& rope_scaling = std::nullopt)
+               const std::optional<dgpp::RopeScaling>& rope_scaling = std::nullopt,
+               dgpp::LatentFormat kv_format_ = dgpp::LatentFormat::kBf16)
       : cfg(dgpp::Qwen35TextConfig::from_json_file((fs::path(checkpoint) / "config.json").string())),
-        ckpt(checkpoint) {
+        ckpt(checkpoint), kv_format(kv_format_) {
     if (cfg.eos_token_ids.empty())
       throw std::invalid_argument("Qwen3.5: the config names no EOS token");
+    if (kv_format != dgpp::LatentFormat::kBf16 && kv_format != dgpp::LatentFormat::kFp8)
+      throw std::invalid_argument(std::string("engine.kv_dtype ") + dgpp::latent_format_name(kv_format) +
+                                  ": the Qwen3.5 K/V pool takes bf16 or fp8");
+    if (kv_format == dgpp::LatentFormat::kFp8 && cfg.quant_kind != dgpp::Qwen35QuantKind::Nvfp4Mixed)
+      throw std::invalid_argument(
+          "engine.kv_dtype fp8: this Qwen3.5 release ships no k_scale / v_scale (the FP8 kv_cache_scheme "
+          "of the mixed NVFP4 release); its K/V pool stays bf16");
     for (int64_t id : cfg.eos_token_ids) eos_.push_back(id);
     // The engine's opt-in YaRN ramp (engine.rope_scaling): it rides the
     // parsed config, so the Full layers' tables, the drafter's table, the
@@ -956,7 +982,7 @@ struct Qwen35Family final : ServeFamily {
   int64_t block_tokens() const override { return dgpp::Qwen35Model::kv_block_tokens_static(); }
   int prefill_chunk_tokens() const override { return dgpp::Qwen35Model::prefill_chunk_tokens(); }
   std::string pool_check(int64_t) const override { return ""; }
-  const char* kv_format_name() const override { return "bf16"; }
+  const char* kv_format_name() const override { return dgpp::latent_format_name(kv_format); }
   int decode_rows_cap() const override { return dgpp::Qwen35Model::decode_rows_cap(); }
   size_t lat_slot_bytes(int decode_rows) const override {
     return static_cast<size_t>(decode_rows) * static_cast<size_t>(cfg.hidden_size) * 2;
@@ -965,7 +991,7 @@ struct Qwen35Family final : ServeFamily {
                         bool mtp, int decode_rows) const override {
     return dgpp::Qwen35Model::plan_memory(cfg, forward_rows, context, fabric ? rank : 0, fabric ? world_ : 1,
                                           fabric || !dflash.empty() ? dgpp::LoaderResidency::Resident : dgpp::LoaderResidency::Streaming,
-                                          slots, fabric && mtp, decode_rows, dflash);
+                                          slots, fabric && mtp, decode_rows, dflash, kv_format);
   }
   size_t snapshot_bytes(int world_, bool mtp) const override {
     return dgpp::Qwen35Model::session_snapshot_bytes(cfg, world_, mtp);
@@ -979,7 +1005,7 @@ struct Qwen35Family final : ServeFamily {
         cfg, ckpt, forward_rows, pool_tokens,
         fabric || !dflash.empty() ? dgpp::LoaderResidency::Resident : dgpp::LoaderResidency::Streaming,
         reducer, fabric ? rank : 0,
-        fabric ? world_ : 1, slots, decode_rows, fabric && mtp, dflash);
+        fabric ? world_ : 1, slots, decode_rows, fabric && mtp, dflash, kv_format);
   }
   void set_draft_model(const std::string& dir) override { dflash = dir; }
   void destroy_model() override { model.reset(); }
@@ -1014,9 +1040,9 @@ std::unique_ptr<ServeFamily> make_family(const std::string& ckpt, int world,
   if (arch == dgpp::ModelArchitecture::DeepseekV4) return std::make_unique<Dsv4Family>(ckpt);
   if (arch == dgpp::ModelArchitecture::MimoV2) return std::make_unique<MimoFamily>(ckpt, kv_format);
   if (arch == dgpp::ModelArchitecture::Qwen4Exp)
-    return std::make_unique<QwenFamily>(ckpt, rope_scaling, fp8_head_mma);
+    return std::make_unique<QwenFamily>(ckpt, rope_scaling, fp8_head_mma, kv_format);
   if (arch == dgpp::ModelArchitecture::Qwen3_5)
-    return std::make_unique<Qwen35Family>(ckpt, rope_scaling);
+    return std::make_unique<Qwen35Family>(ckpt, rope_scaling, kv_format);
   if (arch == dgpp::ModelArchitecture::Glm4Moe) return std::make_unique<Glm4Family>(ckpt);
   if (arch == dgpp::ModelArchitecture::GlmMoeDsa) return std::make_unique<GlmDsaFamily>(ckpt, world, kv_format);
   return std::make_unique<GlmFamily>(ckpt, world, kv_format);
@@ -1114,8 +1140,11 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
                  dgpp::serve::JournalWriter* journal,
                  dgpp::serve::OpStreamObserver* oplog, const std::string& family_name,
                  const std::atomic<uint64_t>* collective_progress = nullptr) {
-  const dgpp::text::Tokenizer tok =
-      dgpp::text::Tokenizer::load((fs::path(ckpt) / "tokenizer.json").string());
+  const dgpp::text::Tokenizer tok = dgpp::text::Tokenizer::load(
+      (fs::path(ckpt) / "tokenizer.json").string(), k.tokenizer_word_cache_entries);
+  DGPP_LOG_INFO(
+      "serve: tokenizer word cache {} entries (0 disables it; at most 256 mapped bytes per word)",
+      k.tokenizer_word_cache_entries);
   // The prompt renderer: the checkpoint's chat_template.jinja, or the
   // DeepSeek-V4.1 encoder's format (no Jinja ships with that model).
   std::optional<dgpp::text::ChatTemplate> tpl;
@@ -1193,7 +1222,7 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
   if (k.world > 1)
     service.set_rank_metrics({0, k.world, DGPP_VERSION, DGPP_GIT_SHA}, collective_progress);
   dgpp::serve::HttpServer http(k.http_port, &service, k.max_connections, k.http_bind,
-                             k.http_max_body_bytes);
+                               k.http_max_body_bytes, k.stream_flush == "wake");
   DGPP_LOG_INFO("serve: HTTP request body limit {} bytes", k.http_max_body_bytes);
 
   std::atomic<bool> drained{false};  // the engine thread's drain is done
@@ -1380,7 +1409,10 @@ int main(int argc, char** argv) {
       "  [--bind-host IPV4 (default 0.0.0.0; rank 0 only)]\n"
       "  [--metrics-port N (default 0 = off; ranks > 0 only)]: the peer's\n"
       "    dgpp_rank_* metrics listener (GET /metrics/prometheus); config ports.metrics\n"
-      "  [--metrics-bind HOST (default: this rank's node address; resolves to IPv4; ranks > 0 only)]\n"
+      "  [--metrics-bind HOST (default: this rank's node address; resolves to IPv4; ranks > 0 "
+      "only)]\n"
+      "  [--stream-flush pass|wake (default pass; rank 0 only)]:\n"
+      "    Output polling or immediate notification; overrides http.stream_flush.\n"
       "  [--sse-ping-interval N (default 30 seconds; -1 disables; rank 0 only)]:\n"
       "    SSE comments while a stream is silent; overrides http.sse_ping_interval\n"
       "    in cluster JSON; request sse_ping_interval overrides the server setting.\n"
@@ -1504,8 +1536,10 @@ int main(int argc, char** argv) {
   uint16_t metrics_port = 0;
   std::string metrics_bind;
   int64_t kv_capacity = 8192;
+  size_t tokenizer_word_cache_entries = 0;
   int64_t http_max_body_bytes = dgpp::serve::kDefaultHttpMaxBodyBytes;
   int sse_ping_interval = dgpp::serve::kDefaultSsePingInterval;
+  std::string stream_flush = "pass";
   std::string kv_dtype = "bf16";  // the latent cache's format
   std::string ngram_table = "resident";  // the Qwen n-gram table: resident | mmap
   std::string ngram_table_model;         // the table's shards from another cached snapshot (engine.ngram_table_model)
@@ -1520,6 +1554,9 @@ int main(int argc, char** argv) {
   bool prefill_fold_scales = false;
   bool prefill_fp8_gemm = false;
   bool prefill_fp8_per_tensor = false;  // the Qwen3.8-27B per-tensor prefill recipe (opt-in)
+  std::string prefill_activations = "bf16";  // "native": the checkpoint's activation recipe on prefill rows
+  std::string prefill_attention = "bf16";    // Qwen3.5 / Flash-Next attention over an fp8 pool
+  std::string decode_attention = "bf16";     // Flash-Next QSA: bf16 or native fp8 compute
   std::string expert_gemm = "wide";         // the packed expert GEMM's form and companions (engine.expert_*)
   int expert_gemm_prefetch = 3;
   bool expert_tile_list = true;
@@ -1609,8 +1646,10 @@ int main(int argc, char** argv) {
     if (rank > 0 && rank < world) peer = c.nodes[0];
     port = static_cast<uint16_t>(c.http_port);
     http_bind = c.http_bind;
+    tokenizer_word_cache_entries = c.tokenizer_word_cache_entries;
     http_max_body_bytes = c.http_max_body_bytes;
     sse_ping_interval = c.sse_ping_interval;
+    stream_flush = c.stream_flush;
     if (!c.node_env.empty()) {
       if (rank < 0 || rank >= world) {
         DGPP_LOG_ERROR("rank is outside configured nodes");
@@ -1641,6 +1680,9 @@ int main(int argc, char** argv) {
     prefill_fold_scales = e.prefill_fold_scales;
     prefill_fp8_gemm = e.prefill_fp8_gemm;
     prefill_fp8_per_tensor = e.prefill_fp8_per_tensor;
+    prefill_activations = e.prefill_activations;
+    prefill_attention = e.prefill_attention;
+    decode_attention = e.decode_attention;
     expert_gemm = e.expert_gemm;
     expert_gemm_prefetch = e.expert_gemm_prefetch;
     expert_tile_list = e.expert_tile_list;
@@ -1728,7 +1770,13 @@ int main(int argc, char** argv) {
     else if (a == "--checkpoint-dir") ckpt = next();
     else if (a == "--port") port = static_cast<uint16_t>(std::stoi(next()));
     else if (a == "--bind-host") http_bind = next();
-    else if (a == "--sse-ping-interval") {
+    else if (a == "--stream-flush") {
+      stream_flush = next();
+      if (!dgpp::serve::valid_stream_flush(stream_flush)) {
+        DGPP_LOG_ERROR("--stream-flush must be pass or wake");
+        return 2;
+      }
+    } else if (a == "--sse-ping-interval") {
       const std::string value = next();
       const auto [end, error] =
           std::from_chars(value.data(), value.data() + value.size(), sse_ping_interval);
@@ -2001,7 +2049,7 @@ int main(int argc, char** argv) {
     const int effective_batch_min_live =
         graph_batch_min_live == 0 ? std::min(2, max_concurrency) : graph_batch_min_live;
     return std::format(
-        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} ngt={} dw={} mtpef={} bfw={} "
+        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} pfattn={} dcattn={} ngt={} dw={} mtpef={} bfw={} "
         "fp8head={} dh={} dhb={} mtph={} attw={} pf={} "
         "emsh={} maxtok={} queue={} "
         "eos={} graph={} compact={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} "
@@ -2011,7 +2059,8 @@ int main(int argc, char** argv) {
         "reasoning_in_content={} "
         "rs={} dflash={} dfw={} lk={} lkn={} lks={} lka={} lkt={}",
         model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port, max_concurrency,
-        kv_capacity, kv_dtype, ngram_table, dense_weights, mtp_expert_format, bf16_weights, fp8_head, draft_head,
+        kv_capacity, kv_dtype, prefill_attention, decode_attention, ngram_table, dense_weights, mtp_expert_format, bf16_weights, fp8_head,
+        draft_head,
         draft_head_blocks, mtp_head,
         attention_weights, prefill, embed_sharding, default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0,
         compact_batches ? 1 : 0, mtp ? 1 : 0, mtp_depth, mtp_schedule ? 1 : 0, mtp_schedule_row_ms,
@@ -2069,6 +2118,9 @@ int main(int argc, char** argv) {
         ws.prefill_fold_scales = prefill_fold_scales;
         ws.prefill_fp8_gemm = prefill_fp8_gemm;
         ws.prefill_fp8_per_tensor = prefill_fp8_per_tensor;
+        ws.prefill_activations = prefill_activations;
+        ws.prefill_attention = prefill_attention;
+        ws.decode_attention = decode_attention;
         ws.dflash_model = dflash_model;
         ws.dflash_verify_graph = dflash_verify_graph;
         ws.prefill_group = prefill_group;
@@ -2166,6 +2218,8 @@ int main(int argc, char** argv) {
         prefill_fold_scales = ws.prefill_fold_scales;
         prefill_fp8_gemm = ws.prefill_fp8_gemm;
         prefill_fp8_per_tensor = ws.prefill_fp8_per_tensor;
+        prefill_attention = ws.prefill_attention;
+        decode_attention = ws.decode_attention;
         dflash_model = ws.dflash_model;
         dflash_verify_graph = ws.dflash_verify_graph;
         prefill_group = ws.prefill_group;
@@ -2250,6 +2304,7 @@ int main(int argc, char** argv) {
     std::fputs(kUsage, stderr);
     return 1;
   }
+  if (rank == 0) DGPP_LOG_INFO("serve: HTTP stream flush {}", stream_flush);
   if (rank == 0) DGPP_LOG_INFO("serve: SSE ping interval {} s (-1 disables)", sse_ping_interval);
   if (kv_capacity < 1 || max_concurrency < 1 || queue_limit < 1 ||
       default_max_tokens < 1 || max_connections < 1) {
@@ -2396,6 +2451,11 @@ int main(int argc, char** argv) {
   // prefill recipe and the BF16 lm head requantized to block FP8.
   dgpp::Qwen35Model::set_prefill_fp8_per_tensor(prefill_fp8_per_tensor);
   dgpp::Qwen35Model::set_dense_weights_fp8(dense_weights == "fp8");
+  // The checkpoint's activation recipe on prefill rows (engine.prefill_activations).
+  dgpp::Qwen35Model::set_native_activations(prefill_activations == "native");
+  // The prefill attention's arithmetic on the fp8 pool (engine.prefill_attention).
+  dgpp::Qwen35Model::set_fp8_attention(prefill_attention == "fp8");
+  dgpp::QwenModel::set_native_attention(prefill_attention == "fp8", decode_attention == "fp8");
   if (dflash_weights != "checkpoint" && dflash_weights != "fp8") {
     DGPP_LOG_ERROR("--dflash-weights must be checkpoint or fp8, got '{}'", dflash_weights);
     return 2;
@@ -2700,10 +2760,29 @@ int main(int argc, char** argv) {
     DGPP_LOG_INFO("serve: decode rows {} ({} slot(s) x {} row(s) per request, floor {}, the {} family's cap {})",
                   decode_rows, max_concurrency, graph_rows_per_request, dgpp::kDecodeRows, family->name(),
                   family->decode_rows_cap());
+    if (prefill_attention != "bf16" && std::string(family->name()) != "qwen3_5" &&
+        std::string(family->name()) != "qwen4_exp") {
+      DGPP_LOG_ERROR("serve: engine.prefill_attention {} requires Qwen3.5 or Qwen3.8-Flash-Next "
+                     "with an fp8 K/V pool; the {} family has no such form",
+                     prefill_attention, family->name());
+      return 2;
+    }
+    if (decode_attention != "bf16" && std::string(family->name()) != "qwen4_exp") {
+      DGPP_LOG_ERROR("serve: engine.decode_attention {} requires Qwen3.8-Flash-Next; got {}",
+                    decode_attention, family->name());
+      return 2;
+    }
+    if (prefill_activations != "bf16" && std::string(family->name()) != "qwen3_5") {
+      DGPP_LOG_ERROR("serve: engine.prefill_activations {} is the Qwen3.5 family's lever (the checkpoint's activation "
+                     "recipe on prefill rows); the {} family's prefill chain has its own keys",
+                     prefill_activations, family->name());
+      return 2;
+    }
     if (std::string(family->name()) != "glm5" && std::string(family->name()) != "glm_moe_dsa" &&
-        std::string(family->name()) != "mimo_v2" && kv_dtype != "bf16")
-      DGPP_LOG_WARN("serve: --kv-dtype {} applies to the GLM-5.3 latent caches and the MiMo-V2 K/V cache only; "
-                    "the {} caches stay bf16",
+        std::string(family->name()) != "mimo_v2" && std::string(family->name()) != "qwen3_5" &&
+        std::string(family->name()) != "qwen4_exp" && kv_dtype != "bf16")
+      DGPP_LOG_WARN("serve: --kv-dtype {} applies to the GLM-5.3 latent caches, the MiMo-V2 K/V cache and the "
+                    "Qwen3.5 / Qwen3.8-Flash-Next K/V pools only; the {} caches stay bf16",
                     kv_dtype, family->name());
     if (std::string(family->name()) != "qwen4_exp" && ngram_table != "resident")
       DGPP_LOG_WARN("serve: --ngram-table {} applies to the Qwen n-gram table only; the {} family has none",
@@ -2921,9 +3000,11 @@ int main(int argc, char** argv) {
 
     ServeKnobs knobs;
     knobs.http_port = port;
+    knobs.tokenizer_word_cache_entries = tokenizer_word_cache_entries;
     knobs.http_bind = http_bind;
     knobs.http_max_body_bytes = http_max_body_bytes;
     knobs.sse_ping_interval = sse_ping_interval;
+    knobs.stream_flush = stream_flush;
     knobs.max_connections = max_connections;
     knobs.queue_limit = queue_limit;
     knobs.admission_gather_ms = admission_gather_ms;

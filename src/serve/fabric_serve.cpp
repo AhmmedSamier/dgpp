@@ -419,6 +419,12 @@ std::string encode_journal_settings(const WorldSettings& s) {
   out += std::format(",\"pfb16\":{},\"pffold\":{},\"pffp8\":{},\"pfpt\":{}", s.prefill_bf16_partials ? 1 : 0,
                      s.prefill_fold_scales ? 1 : 0, s.prefill_fp8_gemm ? 1 : 0,
                      s.prefill_fp8_per_tensor ? 1 : 0);
+  out += ",\"pfact\":";
+  append_json_string(&out, s.prefill_activations);
+  out += ",\"pfattn\":";
+  append_json_string(&out, s.prefill_attention);
+  out += ",\"dcattn\":";
+  append_json_string(&out, s.decode_attention);
   out += ",\"dfm\":";
   append_json_string(&out, s.dflash_model);
   out += std::format(",\"dfvg\":{},\"dfdb\":{},\"dfdp\":{}", s.dflash_verify_graph ? 1 : 0,
@@ -675,6 +681,10 @@ JournalRecord decode_journal_line(std::string_view line) {
     if (v.find("pffold")) s.prefill_fold_scales = flag("pffold");
     if (v.find("pffp8")) s.prefill_fp8_gemm = flag("pffp8");
     if (v.find("pfpt")) s.prefill_fp8_per_tensor = flag("pfpt");  // 2026-10-03: the 27B recipe
+    if (const dgpp::minijson::Value* pa = v.find("pfact")) s.prefill_activations = std::string(pa->as_string());
+    // The prefill attention's arithmetic (2026-10-16): records before it carry none (bf16).
+    if (const dgpp::minijson::Value* pt = v.find("pfattn")) s.prefill_attention = std::string(pt->as_string());
+    if (const dgpp::minijson::Value* dt = v.find("dcattn")) s.decode_attention = std::string(dt->as_string());
     // The DFlash2 drafter (2026-10-03): records before it carry none.
     if (const dgpp::minijson::Value* dfm = v.find("dfm")) s.dflash_model = std::string(dfm->as_string());
     if (v.find("dfvg")) s.dflash_verify_graph = flag("dfvg");
@@ -779,6 +789,8 @@ JournalRecord decode_journal_line(std::string_view line) {
         (s.prefill != "bounded" && s.prefill != "exact") ||
         (s.embed_sharding != "replicated" && s.embed_sharding != "vocab") ||
         (s.mtp_head != "checkpoint" && s.mtp_head != "fp8") ||
+        (s.prefill_attention != "bf16" && s.prefill_attention != "fp8") ||
+        (s.decode_attention != "bf16" && s.decode_attention != "fp8") ||
         (s.attention_weights != "checkpoint" && s.attention_weights != "int4"))
       throw std::runtime_error("journal: settings record with impossible values");
     return rec;

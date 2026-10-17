@@ -17,6 +17,53 @@ class ServeStartupTest(unittest.TestCase):
             raise unittest.SkipTest("set DGPP_SERVE_TEST_BINARY to the freshly built server")
         cls.binary = str(Path(binary).resolve(strict=True))
 
+    def test_tokenizer_cache_config_rejected_before_loading(self):
+        with tempfile.TemporaryDirectory(prefix="dgpp-tokenizer-cache-") as directory:
+            config = Path(directory) / "cluster.json"
+            for value in (-1, 10001, 1.5, 1.0, True, None, "10"):
+                with self.subTest(value=value):
+                    config.write_text(json.dumps({"model": "unused/model", "world_size": 1,
+                                                  "tokenizer": {"word_cache_entries": value}}))
+                    result = subprocess.run([self.binary, "--config", str(config)],
+                                            env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
+                                            text=True, stdout=subprocess.PIPE,
+                                            stderr=subprocess.STDOUT, timeout=10)
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn("tokenizer.word_cache_entries", result.stdout)
+
+    def test_stream_flush_config_cli_precedence_and_help(self):
+        with tempfile.TemporaryDirectory(prefix="dgpp-stream-flush-") as directory:
+            config = Path(directory) / "cluster.json"
+            for settings, flags, expected in (
+                ({}, [], "pass"),
+                ({"stream_flush": "wake"}, [], "wake"),
+                ({"stream_flush": "wake"}, ["--stream-flush", "pass"], "pass"),
+                ({"stream_flush": "pass"}, ["--stream-flush", "wake"], "wake"),
+            ):
+                with self.subTest(settings=settings, flags=flags):
+                    config.write_text(json.dumps({"model": "unused/model", "nodes": ["127.0.0.1"],
+                                                  "http": settings}))
+                    result = subprocess.run(
+                        [self.binary, "--config", str(config), "--model", "", "--checkpoint-dir", directory,
+                         "--max-connections", "0", *flags],
+                        env={**os.environ, "CUDA_VISIBLE_DEVICES": "", "DGPP_LOG_LEVEL": "info"},
+                        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10)
+                    self.assertEqual(result.returncode, 1, result.stdout)
+                    self.assertIn(f"HTTP stream flush {expected}", result.stdout)
+                    self.assertIn("all capacity knobs must be >= 1", result.stdout)
+        result = subprocess.run([self.binary, "--help"], text=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, timeout=10)
+        self.assertIn("--stream-flush", result.stdout)
+        self.assertIn("http.stream_flush", result.stdout)
+
+    def test_stream_flush_invalid_cli_values(self):
+        for value in ("", "Wake", "poll", "0", "true"):
+            with self.subTest(value=value):
+                result = subprocess.run([self.binary, "--stream-flush", value], text=True,
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10)
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertIn("--stream-flush must be pass or wake", result.stdout)
+
     def test_sse_ping_interval_config_cli_precedence_and_help(self):
         with tempfile.TemporaryDirectory(prefix="dgpp-sse-ping-") as directory:
             config = Path(directory) / "cluster.json"

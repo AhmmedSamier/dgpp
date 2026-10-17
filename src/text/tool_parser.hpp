@@ -207,7 +207,9 @@ class ToolSchemas {
 
 class ToolCallParser {
  public:
-  // ids -> text, special tokens skipped (the service's decode_ids).
+  // ids -> bytes, special tokens skipped (the service's decode_ids).
+  // Must equal the concatenation of decode({id}) for each id, including
+  // incomplete UTF-8 bytes; streaming text decodes one new id at a time.
   using Decode = std::function<std::string(const std::vector<int64_t>&)>;
 
   struct Call {
@@ -268,9 +270,8 @@ class ToolCallParser {
   enum class State { kReasoning, kContent, kToolCall };
   enum class Sub { kName, kKey, kAfterKey, kValue, kAfterValue };
 
-  // A streamed text run: its ids and the decode so far.
+  // DSML content retains decoded bytes for its held block prefix.
   struct Run {
-    std::vector<int64_t> ids;
     std::string text;
     std::vector<Event::TokenSpan> tokens;
   };
@@ -278,7 +279,7 @@ class ToolCallParser {
   bool is_marker(int64_t id, const ChatMarker& m) const {
     return m.available() && id == m.id;
   }
-  void run_append(Run* run, int64_t id, Event::Kind kind,
+  void run_append(int64_t id, Event::Kind kind,
                   std::vector<Event>* out);
   void enter_tool_call(int64_t opening_id);
   void abort_block(std::vector<Event>* out);
@@ -311,7 +312,7 @@ class ToolCallParser {
   Options options_;
 
   State state_ = State::kContent;
-  Run run_;  // the current reasoning/content run
+  Run run_;  // the current DSML content run
 
   // The open block.
   Sub sub_ = Sub::kName;

@@ -56,6 +56,10 @@ budgets. It records exact request hashes and output counts, correlates the long
 response with native prefill progress, and rejects unrelated traffic. Output
 hashes are evidence for separate numerical review, not a quality score; SSE
 update gaps are client observations, not per-token kernel timings.
+Add `--metrics-interval 0.25` to retain sampled adaptive chunk limits, native
+prefill progress, active/queued load, KV occupancy and latency-target misses.
+Use the same interval in compared runs; polling adds work and snapshots can
+span several engine passes. See the [MiMo investigation procedure](../docs/continuous-batching.md#mixed-prefill-controller-investigation).
 
 ## Build, configuration, and deployment
 

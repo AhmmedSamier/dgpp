@@ -43,9 +43,12 @@ block of seven drafts from one anchor.
 ## Serving
 
 **One Spark** (`cluster_qwen3.8-27b_fp8_w1`): the drafter recipe. 27.5 GiB
-of weights, a 256K-token BF16 KV pool (21.0 GiB), the 3.6 GiB drafter and
-its five K/V planes, eight request slots and a 1.4 GiB prefix cache plan at
-62 GiB; the graph engine records the block proposal inside the decode
+of weights, a 524,288-token BF16 KV pool (42.0 GiB, two full contexts), the
+3.6 GiB drafter and its five K/V planes, eight request slots and a 20 GiB
+prefix arena, the plan at 102 GiB of the node's 116 (sized to the node on
+2026-10-17 — a world-1 boot ends 6–8 GiB below its plan at listening, so
+the recipe leaves that room; a 256K pool and a 1.5 GiB arena at 62 GiB
+until then); the graph engine records the block proposal inside the decode
 step (the 8-row verify and the drafter's forward in one graph, as on the
 fabric — the template since 2026-10-05; the eager engine's transcripts 4/4,
 chat 71 against 95 ms a token), the drafter's five block matrices served as
@@ -72,7 +75,11 @@ Sparks 205 / 301 / 352 / 310 / 216 tok/s at 92 ms a step with the one-chain
 split-K of 2026-10-05, 184 / 273 / 326 / 284 / 196 at 106 before it, 154 /
 270 / 320 / 260 / 170 at 117 for whole blocks; C1 level; transcripts matched
 across the tested isolated, scheduled-depth and joining-co-tenant cases); 15.0 GiB of weights
-and a 13 GiB KV pool a rank at 256K on two Sparks, eight slots. The MTP
+and a 63 GiB KV pool a rank (1,572,864 tokens, six full contexts) with a
+16 GiB prefix arena on two Sparks, eight slots; on four Sparks a
+2,097,152-token pool (one full context per slot, full admission) with a
+32 GiB arena, 91 GiB planned a rank (since 2026-10-17; 256K pools and 1.5 GiB
+arenas before). The MTP
 depth-3 world is available as an alternative to each template's DFlash
 default (`--no-dflash --mtp --mtp-depth 3`),
 plain decode `--no-dflash`. Greedy C1 by class (prose / code / json / math /
@@ -109,8 +116,21 @@ and 4 (4/4 each). Across worlds the bf16 wire fold moves near ties
 The serving numbers — single-request engine rates by prompt class,
 concurrency sweeps, cold prefill at 2K / 8K / 32K, the decode modes and the
 full HumanEval / GSM8K / schema evaluation — are the
-[benchmarks page](../benchmarks.md)'s Qwen3.8-27B rows, from the
-2026-10-05 campaign.
+[benchmarks page](../benchmarks.md)'s Qwen3.8-27B rows, re-measured on
+2026-10-16 on the templates as shipped.
+
+`engine.prefill_activations: "native"` (set by the FP8 templates since
+2026-10-16) runs the checkpoint's own blockwise fp8 product on every
+prefill row — per-token 1×128 activation groups against the 128×128 weight
+grid, the recipe the release was made for — in place of dequantizing each
+FP8 matrix into a bf16 bridge for the bf16 GEMM. The bridge chain was
+measured 20 % slower on one Spark under the adaptive prefill defaults
+(every 4,096-token chunk re-dequantized every matrix: 2.70 / 8.30 / 35.3 s
+cold prefill at 2K / 8K / 32K against 2.22 / 6.96 / 29.5 under fixed
+one-pass budgets); the native recipe reads 1.90 / 6.49 / 27.9 s with no
+bridge at all, and the 300-item HumanEval / GSM8K / schema set reads
+161/164, 294/300 and 100/100 under both chains on the same binary, needles
+at 32K and 128K 6/6 with 3/3 controls.
 Physics on one GB10 (248 GB/s): a T=1 step streams 27 GB — 105 ms — and
 measures 114; at world 2 a rank streams 12.2 GB (49 ms) plus the head's
 reads and measures 63 T=1 / 74.5 an MTP pass, GPU-busy 98.9 % with the 135

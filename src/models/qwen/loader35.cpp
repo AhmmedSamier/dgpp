@@ -478,7 +478,7 @@ struct Qwen35LoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
   // input_global_scale is the activation-side factor of the W4A4 recipe;
   // under W4A16 serving (exact BF16 activations) it has no subject, so it
   // is read for the byte reconciliation and never resident.
-  void load_fp4_global(const std::string& module, float* slot) {
+  void load_fp4_global(const std::string& module, float* slot, float* in_slot = nullptr) {
     const QwenExpectedTensor& eg = expected(module + ".weight_global_scale");
     const QwenExpectedTensor& ei = expected(module + ".input_global_scale");
     if (copy) {
@@ -489,13 +489,27 @@ struct Qwen35LoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
         fail("'" + eg.name + "' is not a positive finite scale");
       *bump.host(slot) = ws2;
       consumed(t);
-      consumed(source(module + ".input_global_scale"));
+      const TensorInfo& ti = source(module + ".input_global_scale");
+      if (in_slot != nullptr) {
+        // The activation global of the W4A4 recipe (engine.prefill_activations
+        // = native, 2026-10-15), kept in the quantizer's form x ~= e2m1 * s *
+        // gs: the checkpoint's input_global_scale is the multiplier 448 * 6 /
+        // amax (the weight global's form), so gs = 1 / it. A slot two
+        // matrices share (gate and up, one input) keeps the larger range.
+        float igs = 0.f;
+        std::memcpy(&igs, ti.data, 4);
+        if (!(igs > 0.0f) || !std::isfinite(igs))
+          fail("'" + ei.name + "' is not a positive finite scale");
+        float& dst = *bump.host(in_slot);
+        dst = dst > 0.f ? std::max(dst, 1.0f / igs) : 1.0f / igs;
+      }
+      consumed(ti);
     }
     note_read(eg, 4);
     note_read(ei, 4);
   }
 
-  GlmFp4Matrix load_fp4_rows(const std::string& module, int64_t r0, int64_t rn, float* global) {
+  GlmFp4Matrix load_fp4_rows(const std::string& module, int64_t r0, int64_t rn, float* global, float* in_slot = nullptr) {
     Fp4Source s = fp4_source(module);
     check_range(module, r0, rn, s.N);
     const int64_t pc = s.K / 2, sc = s.K / kFp4Group;
@@ -517,14 +531,14 @@ struct Qwen35LoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
     }
     note_read(*s.payload_entry, static_cast<size_t>(rn) * pc);
     note_read(*s.scale_entry, static_cast<size_t>(rn) * sc);
-    load_fp4_global(module, global);
+    load_fp4_global(module, global, in_slot);
     q.global_scale = global;
     return q;
   }
 
   // Whole scale blocks on the sliced axis (16-aligned bounds), every row's
   // payload and scale rows packed.
-  GlmFp4Matrix load_fp4_cols(const std::string& module, int64_t c0, int64_t cn, float* global) {
+  GlmFp4Matrix load_fp4_cols(const std::string& module, int64_t c0, int64_t cn, float* global, float* in_slot = nullptr) {
     Fp4Source s = fp4_source(module);
     check_range(module + " cols", c0, cn, s.K);
     if (c0 % kFp4Group != 0 || cn % kFp4Group != 0)
@@ -552,7 +566,7 @@ struct Qwen35LoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
     }
     note_read(*s.payload_entry, static_cast<size_t>(s.N) * lc);
     note_read(*s.scale_entry, static_cast<size_t>(s.N) * lsc);
-    load_fp4_global(module, global);
+    load_fp4_global(module, global, in_slot);
     q.global_scale = global;
     return q;
   }
@@ -609,11 +623,28 @@ struct Qwen35LoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
     a.o_proj_fp8 = load_attn_cols(p + "self_attn.o_proj", o0, on, &a.o_proj);
     a.q_norm = load_bf16(p + "self_attn.q_norm.weight");
     a.k_norm = load_bf16(p + "self_attn.k_norm.weight");
-    // The mixed release's FP8 kv_cache_scheme scalars: bound for the
-    // binding check, read for the byte reconciliation, never resident.
+    // The mixed release's FP8 kv_cache_scheme scalars (BF16 [1] each),
+    // widened to F32 [2] in the image: the fp8 K/V storage form's scales
+    // (engine.kv_dtype = fp8; loader_format 5, 2026-10-16). Read at every
+    // kv_dtype: the byte reconciliation counts them either way.
     if (cfg.quant_kind == Qwen35QuantKind::Nvfp4Mixed && out.layer != cfg.mtp_layer()) {
-      load_raw(p + "self_attn.k_scale");
-      load_raw(p + "self_attn.v_scale");
+      float* sc = static_cast<float*>(bump.alloc(2 * sizeof(float)));
+      const char* names[2] = {"self_attn.k_scale", "self_attn.v_scale"};
+      for (int i = 0; i < 2; ++i) {
+        const std::string name = p + names[i];
+        const Expected& e = expected(name);
+        if (e.nbytes() != 2) fail("'" + name + "' is not one BF16 scalar");
+        if (sharded() && !verbatim_ok(e)) fail("TP read-class drift — '" + name + "' is sharded");
+        if (copy) {
+          const TensorInfo& t = source(name);
+          uint16_t bits = 0;
+          std::memcpy(&bits, t.data, sizeof(bits));
+          bump.host(sc)[i] = bf16_bits_to_float(bits);
+          consumed(t);
+        }
+        note_read(e, e.nbytes());
+      }
+      a.kv_scales = sc;
     }
   }
 
@@ -681,11 +712,15 @@ struct Qwen35LoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
     }
     // The mixed release: the fp4 global slots only exist for this release
     // (the FP8 release's resident image layout must not shift).
-    float* globals = static_cast<float*>(bump.alloc(3 * sizeof(float)));
+    // [0..2] the weight globals, [3..4] the activation globals (gate/up,
+    // down) of the NVFP4 recipe; loader_format 4 (2026-10-15).
+    float* globals = static_cast<float*>(bump.alloc(5 * sizeof(float)));
     if (copy) {
       float* g = bump.host(globals);
       g[0] = g[1] = g[2] = 1.0f;  // only the fp4 matrices overwrite these
+      g[3] = g[4] = 0.0f;
     }
+    m.fp4_input_gs = globals + 3;
     const std::string rows_mods[2] = {gate, up};
     for (int i = 0; i < 2; ++i) {
       switch (cfg.tensor_quant(rows_mods[i])) {
@@ -696,7 +731,7 @@ struct Qwen35LoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
           *(i == 0 ? &m.gate_fp8 : &m.up_fp8) = load_channel_rows(rows_mods[i], r0, li);
           break;
         case Qwen35TensorQuant::Nvfp4:
-          *(i == 0 ? &m.gate_fp4 : &m.up_fp4) = load_fp4_rows(rows_mods[i], r0, li, globals + i);
+          *(i == 0 ? &m.gate_fp4 : &m.up_fp4) = load_fp4_rows(rows_mods[i], r0, li, globals + i, globals + 3);
           break;
       }
     }
@@ -709,7 +744,7 @@ struct Qwen35LoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
         m.down_fp8 = load_channel_cols(down, r0, li);
         break;
       case Qwen35TensorQuant::Nvfp4:
-        m.down_fp4 = load_fp4_cols(down, r0, li, globals + 2);
+        m.down_fp4 = load_fp4_cols(down, r0, li, globals + 2, globals + 4);
         break;
     }
   }
@@ -742,7 +777,7 @@ const char* Qwen35LoaderFamily::who() { return "qwen35 loader"; }
 
 // 3: the NVFP4 global slot holds the weight-side divisor itself (2026-10-06;
 // the 2-era images hold its reciprocal, and the kernels divide by the slot).
-uint64_t Qwen35LoaderFamily::loader_format() { return 3; }
+uint64_t Qwen35LoaderFamily::loader_format() { return 5; }
 
 int Qwen35LoaderFamily::max_layer(const Config& c) {
   return c.num_hidden_layers + (c.mtp_layer() >= 0 ? 1 : 0);

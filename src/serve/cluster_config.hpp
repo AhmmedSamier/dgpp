@@ -10,7 +10,7 @@
 // are errors. Engine defaults match the binary's defaults; deployment
 // templates set serving values explicitly. Each rank hashes its effective
 // shared configuration, and the warm record checks those hashes before
-// serving. See README.md for the schema and deploy/*.example.json for
+// serving. See docs/configuration.md for the schema and deploy/*.example.json for
 // templates. Multi-node deployment templates must be resolved before this loader
 // reads them. A single-node template may use world_size: 1 directly (localhost);
 // nodes and world_size are mutually exclusive.
@@ -34,10 +34,12 @@ struct ClusterConfig {
   std::vector<std::string> nodes;  // rank = index; nodes[0] is the head
   std::string ssh_user;            // empty: the launcher's own user
   std::string release;             // the installed release the launcher runs (launcher-only; empty: the development binary)
+  size_t tokenizer_word_cache_entries = 0;
   int http_port = 18080;
   std::string http_bind = "0.0.0.0";
   int64_t http_max_body_bytes = kDefaultHttpMaxBodyBytes;
   int sse_ping_interval = kDefaultSsePingInterval;
+  std::string stream_flush = "pass";
   // Local paths and device names may differ by rank; no credentials belong here.
   std::vector<std::map<std::string, std::string>> node_env;
   int fabric_port = 29970;
@@ -48,7 +50,11 @@ struct ClusterConfig {
   struct Engine {
     int max_concurrency = 8;
     int64_t kv_capacity = 8192;
-    std::string kv_dtype = "bf16";  // the latent cache's format: bf16 | fp8 | fp4
+    // The cache format: GLM-5.3's latent cache bf16 | fp8 | fp4; MiMo's
+    // K/V bf16 | fp8; Qwen3.5's K/V bf16 | fp8 (the e4m3 storage form at
+    // the mixed NVFP4 release's shipped k_scale / v_scale, 2026-10-16; the
+    // attention's arithmetic on it is prefill_attention below).
+    std::string kv_dtype = "bf16";
     // The full GLM-5.3's embedding table: "replicated" on every rank, or
     // "vocab" — each rank holds its lm-head slice of the rows, gathered
     // per token and summed by one fold (bitwise the same numbers, one
@@ -145,10 +151,32 @@ struct ClusterConfig {
     //     activations: ~2x the dequantized bf16 GEMM's rate, +23 GiB
     //     resident at the 27B's shape, and not transcript-preserving at
     //     long context. Default: the dequantized bf16 GEMM (exact).
+    //   prefill_activations: "bf16" (the default: activations stay bf16 and
+    //     quantized weights are decoded to bf16 for the products) or
+    //     "native" (the checkpoint's own activation recipe on every
+    //     prefill row — 2026-10-15: the Qwen3.8-27B NVFP4 release's MLP
+    //     inputs quantized to NVFP4 per row with its shipped input globals,
+    //     the products on the block-scaled fp4 tensor cores, and its
+    //     channel-FP8 projections and late MLPs from per-token e4m3 rows on
+    //     the e4m3 tensor cores; the FP8 release's blockwise product; decode
+    //     rows keep bf16 activations).
+    //   prefill_attention: "bf16" (the default: the attention products in
+    //     bf16 — on an fp8 K/V pool the codes widened exactly) or "fp8"
+    //     (2026-10-16, the Qwen3.5 family on engine.kv_dtype fp8: the
+    //     prefill attention on the fp8 tensor cores — Q and the
+    //     probabilities quantized to e4m3 per row, S and O on
+    //     mma.e4m3 at twice the bf16 rate; decode rows keep the exact
+    //     widened walk). Also supported for Flash-Next QSA, with its
+    //     per-token/head cache scales. Both require kv_dtype fp8.
     bool prefill_bf16_partials = false;
     bool prefill_fold_scales = false;
     bool prefill_fp8_gemm = false;
     bool prefill_fp8_per_tensor = false;
+    std::string prefill_activations = "bf16";
+    std::string prefill_attention = "bf16";
+    // Flash-Next QSA decode arithmetic over its fp8 pool. Independent of
+    // prefill_attention so either phase can retain bf16 compute.
+    std::string decode_attention = "bf16";
     // The packed expert GEMM's form and companions (2026-09-30; every
     // serving switch is a config key — no environment variable selects a
     // kernel). All bitwise the default chain.

@@ -152,7 +152,7 @@ def deployment(path):
         raise ValueError("deployment config must be an object")
     if set(cfg) & {"nodes", "ssh_user"}:
         raise ValueError("move nodes and ssh_user out of the deployment JSON into .env; use world_size")
-    unknown = set(cfg) - {"model", "world_size", "release", "engine", "paths", "http", "ports"}
+    unknown = set(cfg) - {"model", "world_size", "release", "engine", "paths", "http", "ports", "tokenizer"}
     if unknown:
         raise ValueError("unknown deployment keys: " + ", ".join(sorted(unknown)))
     if not isinstance(cfg.get("model"), str) or not cfg["model"]:
@@ -173,9 +173,15 @@ def deployment(path):
     paths = cfg.get("paths", {})
     if not isinstance(paths, dict) or set(paths) - {"resident_cache"}:
         raise ValueError("deployment paths may only contain resident_cache; move site paths into .env")
+    tokenizer = cfg.get("tokenizer", {})
+    if not isinstance(tokenizer, dict) or set(tokenizer) - {"word_cache_entries"}:
+        raise ValueError("tokenizer may only contain word_cache_entries")
+    entries = tokenizer.get("word_cache_entries", 0)
+    if type(entries) is not int or not 0 <= entries <= 10000:
+        raise ValueError("tokenizer.word_cache_entries must be an integer in [0, 10000]")
     http = cfg.get("http", {})
-    if not isinstance(http, dict) or set(http) - {"bind_host", "port", "max_body_bytes", "sse_ping_interval"}:
-        raise ValueError("http may only contain bind_host, port, max_body_bytes and sse_ping_interval")
+    if not isinstance(http, dict) or set(http) - {"bind_host", "port", "max_body_bytes", "sse_ping_interval", "stream_flush"}:
+        raise ValueError("http may only contain bind_host, port, max_body_bytes, sse_ping_interval and stream_flush")
     if "bind_host" in http:
         http_bind({"DGPP_HTTP_BIND": http["bind_host"]})
     if "port" in http and (type(http["port"]) is not int or not 1 <= http["port"] <= 65535):
@@ -183,6 +189,8 @@ def deployment(path):
     if "max_body_bytes" in http and (type(http["max_body_bytes"]) is not int
                                    or not 1 <= http["max_body_bytes"] <= (1 << 63) - 1):
         raise ValueError("http.max_body_bytes must be a positive 64-bit integer byte count")
+    if "stream_flush" in http and http["stream_flush"] not in ("pass", "wake"):
+        raise ValueError("http.stream_flush must be pass or wake")
     if "sse_ping_interval" in http:
         interval = http["sse_ping_interval"]
         if type(interval) is not int or not (interval == -1 or 1 <= interval <= 2147483647):
