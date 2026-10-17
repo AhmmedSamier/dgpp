@@ -629,9 +629,9 @@ DGPP_TEST(cluster_config_the_fp4local_template_is_a_deployment_the_engine_reads)
               c.engine.ngram_table == "mmap",
           "the draft and lookup recipe the validation measured");
   require(c.engine.max_concurrency == 4 && c.engine.kv_capacity % 64 == 0 &&
-              c.engine.kv_capacity > c.engine.default_max_tokens &&
+              c.engine.kv_capacity > c.engine.default_max_tokens && c.engine.prefix_cache_gib == 0 &&
               c.engine.model_alias == "Qwen3.8-Flash-Next-FP4",
-          "four request slots in a pool that clears a maximal answer");
+          "four request slots in a pool that clears a maximal answer, and no prefix arena pinning its blocks");
 }
 
 DGPP_TEST(cluster_config_prefill_defaults_to_auto_with_explicit_opt_out) {
