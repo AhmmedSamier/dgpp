@@ -5,6 +5,14 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **Grow admission reclaims idle prefix cache before shedding live work**
+  ([#116](https://github.com/HawkBearPig/dgpp/issues/116)). Reservation growth
+  releases LRU unattached snapshots until its next step fits, rechecking physical
+  capacity when entries share blocks. It preserves attached entries and avoids
+  evicting extra history for an optional full growth window. If live reservations
+  still exhaust the pool, youngest-first shedding remains. The admission
+  benchmark also supports optional controller/load metrics sampling for the
+  mixed-prefill investigation; controller defaults are unchanged.
 - **The Qwen3.8-27B templates sized to the node, and the DeepSeek-V4.1
   template's full 1M-token context** (2026-10-17). The eight 27B templates
   carried the model's 262,144-token context and a 1.5 GiB prefix arena at

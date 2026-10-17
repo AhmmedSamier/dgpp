@@ -457,8 +457,9 @@ class SchedulerObserver;
 // reserves blocks_for(prompt + min(max_steps, window)) at admission and
 // grows the reservation at tick top, BEFORE any engine op, whenever the
 // next step would write past it — by `window_tokens` at a time, or by the
-// minimum when the pool is short — and when even the minimum does not fit,
-// SHEDS the youngest active request (retired Done / kPoolExhausted, the
+// minimum when the pool is short. Unattached prefix entries are evicted LRU
+// to fit that minimum; if it still does not fit, SHEDS the youngest active
+// request (retired Done / kPoolExhausted, the
 // service's finish_reason "length") until it does; a request with no
 // younger peer sheds itself. Every decision is a pure function of the
 // scheduler's state, so the journal keeps it identical on every rank. The
@@ -770,7 +771,7 @@ class Scheduler {
   // releases the old copy before it takes the new one, so only a first
   // partial copy does.
   bool snapshot_needs_block(int64_t position, int64_t previous) const;
-  // Frees pool blocks for a snapshot by evicting LRU unattached entries
+  // Frees pool blocks for growth or a snapshot by evicting LRU unattached entries
   // until `need` blocks are free; false when nothing evictable remains.
   bool ensure_free_blocks(int64_t need, const std::string& id);
   // The blocks an admission must find FREE: the reservation less the full
@@ -797,8 +798,8 @@ class Scheduler {
   int64_t reserve_blocks(const Request& r) const;
   // Grow-on-demand's tick-top pass (after the cancel sweep, before any
   // admission or step): every active request whose next step would write
-  // past its reservation grows it, shedding the youngest when the pool
-  // cannot cover even the minimum.
+  // past its reservation grows it, evicting LRU unattached cache entries
+  // before shedding the youngest if the pool cannot cover even the minimum.
   void grow_reservations();
   int youngest_active_after(int arrival) const;
   int free_slot() const;
@@ -949,7 +950,8 @@ class SchedulerObserver {
   // an entry at `position`, arena `slot`), "snapshot" (an entry taken at a
   // prefill cut), "rolling" (a live request's rolling snapshot), "close"
   // (a rolling snapshot became an entry at retire), "evict" (an entry
-  // freed; `id` is the request whose admission needed the slot or blocks),
+  // freed; `id` is the request whose admission, growth or snapshot needed
+  // the slot or blocks),
   // "drop" (a rolling slot released without becoming an entry), "hop"
   // (a snapshot captured inside an MTP step), "hop_fallback" (capture was
   // skipped before sampled fallback passed the hop; `position` is the old
