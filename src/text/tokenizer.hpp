@@ -35,14 +35,18 @@
 // Merge work: short words and shrinking runs use passes; long words switch
 // automatically to a phase heap after bounded scanning. Both preserve the
 // lowest-rank, all-occurrences, left-to-right merge order.
-// Threading: load once, then encode/decode are const and thread-safe.
+// Threading: load once, then encode/decode are const and thread-safe. The
+// optional word cache owns its keys/ids and uses nonblocking shard locks;
+// misses or contention affect work only, never the returned token IDs.
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
 
 #include "loaders/minijson.hpp"
+#include "text/word_cache.hpp"
 
 namespace dgpp::text {
 
@@ -56,7 +60,8 @@ class Tokenizer {
 
   // Loads and validates; throws std::runtime_error on any unsupported
   // shape (the message names the offending field).
-  static Tokenizer load(const std::string& tokenizer_json_path);
+  // Optional mapped-word cache: 0 disables it; at most 10000 entries.
+  static Tokenizer load(const std::string& tokenizer_json_path, size_t word_cache_entries = 0);
 
   // text (UTF-8) -> ids. Added tokens match leftmost-longest and bypass
   // BPE; every other byte passes through the pinned pipeline (Split ->
@@ -123,6 +128,9 @@ class Tokenizer {
                       std::vector<int64_t>* out) const;
   // One pretoken's mapped symbol string -> ids (BPE, ignore_merges).
   void encode_word(std::string_view mapped, std::vector<int64_t>* out) const;
+
+  void merge_word(std::string_view mapped, std::vector<int64_t>* out) const;
+  std::unique_ptr<detail::WordCache> word_cache_;
 
   // The raw file and its parse tree both stay members: minijson object
   // keys (Member.key) are tree-owned std::strings, so the vocab/merge keys

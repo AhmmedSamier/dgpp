@@ -17,6 +17,20 @@ class ServeStartupTest(unittest.TestCase):
             raise unittest.SkipTest("set DGPP_SERVE_TEST_BINARY to the freshly built server")
         cls.binary = str(Path(binary).resolve(strict=True))
 
+    def test_tokenizer_cache_config_rejected_before_loading(self):
+        with tempfile.TemporaryDirectory(prefix="dgpp-tokenizer-cache-") as directory:
+            config = Path(directory) / "cluster.json"
+            for value in (-1, 10001, 1.5, 1.0, True, None, "10"):
+                with self.subTest(value=value):
+                    config.write_text(json.dumps({"model": "unused/model", "world_size": 1,
+                                                  "tokenizer": {"word_cache_entries": value}}))
+                    result = subprocess.run([self.binary, "--config", str(config)],
+                                            env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
+                                            text=True, stdout=subprocess.PIPE,
+                                            stderr=subprocess.STDOUT, timeout=10)
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn("tokenizer.word_cache_entries", result.stdout)
+
     def test_stream_flush_config_cli_precedence_and_help(self):
         with tempfile.TemporaryDirectory(prefix="dgpp-stream-flush-") as directory:
             config = Path(directory) / "cluster.json"

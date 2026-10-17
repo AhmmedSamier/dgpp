@@ -155,6 +155,7 @@ void open_ops_file(dgpp::serve::OpStreamObserver* oplog,
 }
 
 struct ServeKnobs {
+  size_t tokenizer_word_cache_entries = 0;
   dgpp::serve::FileInputConfig file_inputs;
   int world = 1;  // dgpp_build_info's world_size
   uint16_t http_port = 8080;
@@ -1128,8 +1129,11 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
                  dgpp::serve::JournalWriter* journal,
                  dgpp::serve::OpStreamObserver* oplog, const std::string& family_name,
                  const std::atomic<uint64_t>* collective_progress = nullptr) {
-  const dgpp::text::Tokenizer tok =
-      dgpp::text::Tokenizer::load((fs::path(ckpt) / "tokenizer.json").string());
+  const dgpp::text::Tokenizer tok = dgpp::text::Tokenizer::load(
+      (fs::path(ckpt) / "tokenizer.json").string(), k.tokenizer_word_cache_entries);
+  DGPP_LOG_INFO(
+      "serve: tokenizer word cache {} entries (0 disables it; at most 256 mapped bytes per word)",
+      k.tokenizer_word_cache_entries);
   // The prompt renderer: the checkpoint's chat_template.jinja, or the
   // DeepSeek-V4.1 encoder's format (no Jinja ships with that model).
   std::optional<dgpp::text::ChatTemplate> tpl;
@@ -1521,6 +1525,7 @@ int main(int argc, char** argv) {
   uint16_t metrics_port = 0;
   std::string metrics_bind;
   int64_t kv_capacity = 8192;
+  size_t tokenizer_word_cache_entries = 0;
   int64_t http_max_body_bytes = dgpp::serve::kDefaultHttpMaxBodyBytes;
   int sse_ping_interval = dgpp::serve::kDefaultSsePingInterval;
   std::string stream_flush = "pass";
@@ -1629,6 +1634,7 @@ int main(int argc, char** argv) {
     if (rank > 0 && rank < world) peer = c.nodes[0];
     port = static_cast<uint16_t>(c.http_port);
     http_bind = c.http_bind;
+    tokenizer_word_cache_entries = c.tokenizer_word_cache_entries;
     http_max_body_bytes = c.http_max_body_bytes;
     sse_ping_interval = c.sse_ping_interval;
     stream_flush = c.stream_flush;
@@ -2970,6 +2976,7 @@ int main(int argc, char** argv) {
 
     ServeKnobs knobs;
     knobs.http_port = port;
+    knobs.tokenizer_word_cache_entries = tokenizer_word_cache_entries;
     knobs.http_bind = http_bind;
     knobs.http_max_body_bytes = http_max_body_bytes;
     knobs.sse_ping_interval = sse_ping_interval;

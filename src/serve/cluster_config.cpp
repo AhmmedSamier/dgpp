@@ -1,18 +1,18 @@
 #include "serve/cluster_config.hpp"
 
-#include <arpa/inet.h>
-
 #include <algorithm>
+#include <arpa/inet.h>
 #include <cmath>
-#include <limits>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
 #include "common/bf16_residency.hpp"
 #include "kernels/latent_format.hpp"
 #include "loaders/minijson.hpp"
+#include "text/word_cache.hpp"
 
 namespace dgpp::serve {
 
@@ -114,6 +114,16 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
       c.ssh_user = text(v, k, what);
     } else if (k == "release") {
       c.release = text(v, k, what);
+    } else if (k == "tokenizer") {
+      if (!v.is_object()) fail(what, "'tokenizer' must be an object");
+      for (const Member& p : v.members()) {
+        if (p.key != "word_cache_entries") fail(what, "unknown key 'tokenizer." + p.key + "'");
+        if (p.value.kind() != Value::Kind::Int)
+          fail(what, "'tokenizer.word_cache_entries' must be an integer in [0, 10000]");
+        c.tokenizer_word_cache_entries =
+            static_cast<size_t>(integer(p.value, "tokenizer.word_cache_entries", what, 0,
+                                        dgpp::text::detail::WordCache::kMaxEntries));
+      }
     } else if (k == "http") {
       if (!v.is_object()) fail(what, "'http' must be an object");
       for (const Member& p : v.members()) {

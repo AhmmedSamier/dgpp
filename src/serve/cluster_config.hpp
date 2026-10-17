@@ -34,6 +34,7 @@ struct ClusterConfig {
   std::vector<std::string> nodes;  // rank = index; nodes[0] is the head
   std::string ssh_user;            // empty: the launcher's own user
   std::string release;             // the installed release the launcher runs (launcher-only; empty: the development binary)
+  size_t tokenizer_word_cache_entries = 0;
   int http_port = 18080;
   std::string http_bind = "0.0.0.0";
   int64_t http_max_body_bytes = kDefaultHttpMaxBodyBytes;

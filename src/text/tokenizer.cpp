@@ -500,8 +500,9 @@ class Dsv41Scanner {
 // ---------------------------------------------------------------------------
 // Load + validate.
 // ---------------------------------------------------------------------------
-Tokenizer Tokenizer::load(const std::string& path) {
+Tokenizer Tokenizer::load(const std::string& path, size_t word_cache_entries) {
   Tokenizer t;
+  if (word_cache_entries) t.word_cache_ = std::make_unique<detail::WordCache>(word_cache_entries);
   t.json_buf_ = read_file(path);
   t.revision_hash_ = fnv1a_bytes(t.json_buf_.data(), t.json_buf_.size());
   build_byte_level_maps(t.byte_to_cp_, t.cp_to_byte_);
@@ -806,6 +807,14 @@ void Tokenizer::encode_word(std::string_view mapped,
       return;
     }
   }
+  if (word_cache_) {
+    word_cache_->append(mapped, out, [&] { merge_word(mapped, out); });
+  } else {
+    merge_word(mapped, out);
+  }
+}
+
+void Tokenizer::merge_word(std::string_view mapped, std::vector<int64_t>* out) const {
   // Adjacent spans remain in `mapped` throughout both merge algorithms.
   std::vector<std::string_view> symbols;
   symbols.reserve(mapped.size());

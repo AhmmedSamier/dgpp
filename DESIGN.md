@@ -2088,7 +2088,11 @@ Each heap phase merges only pairs available at its start; newly created
 neighbors wait for the next phase, including when their rank is lower.
 This preserves the original all-occurrences, left-to-right semantics while
 bounding repeated scans. There is no deployment setting for the algorithm.
-See [tokenization](docs/tokenization.md) for the validation procedure. Golden corpora compare token IDs and decoded bytes against
+An optional per-tokenizer cache reuses IDs for mapped words of at most 256
+bytes. Its configured slot count is bounded, collisions replace entries,
+and try-locks let a busy shard fall back to normal merging. It stores owned
+keys and IDs, preserves the GLM vocabulary shortcut, and defaults to disabled.
+See [tokenization](docs/tokenization.md) for bounds and validation. Golden corpora compare token IDs and decoded bytes against
 reference tokenizers and are keyed by the tokenizer file's hash. A
 different checkpoint revision must use its matching corpus.
 

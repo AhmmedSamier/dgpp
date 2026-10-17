@@ -20,7 +20,9 @@
 
 int g_argc = 0;
 char** g_argv = nullptr;
+#include <atomic>
 #include <random>
+#include <thread>
 
 #include "common/test.hpp"
 #include "loaders/hf_cache.hpp"
@@ -103,7 +105,9 @@ DGPP_TEST(glm_tokenizer_differential_goldens) {
   const std::string tok_path =
       (std::filesystem::path(snap) / "tokenizer.json").string();
 
-  const dgpp::text::Tokenizer tok = dgpp::text::Tokenizer::load(tok_path);
+  const char* cache_entries = std::getenv("DGPP_TEST_WORD_CACHE_ENTRIES");
+  const dgpp::text::Tokenizer tok = dgpp::text::Tokenizer::load(
+      tok_path, cache_entries ? std::strtoul(cache_entries, nullptr, 10) : 0);
 
   // Hand-carried anchors: the fabric-run prompt and first generations.
   if (dsv41) {
@@ -193,6 +197,26 @@ DGPP_TEST(glm_tokenizer_differential_goldens) {
             "BPE differential mismatch at generated word " + std::to_string(trial));
   }
 
+  if (cache_entries && std::strtoul(cache_entries, nullptr, 10)) {
+    std::vector<std::string> texts;
+    std::vector<std::vector<int64_t>> expected;
+    for (size_t i = 0; i < 97; ++i) {
+      texts.push_back("Repeated café and 中文 text with number " + std::to_string(i) + "\n");
+      expected.push_back(tok.encode(texts.back()));
+    }
+    std::atomic<bool> mismatch{false};
+    std::vector<std::thread> workers;
+    for (size_t t = 0; t < 8; ++t)
+      workers.emplace_back([&, t] {
+        for (size_t i = 0; i < 1000; ++i) {
+          const size_t index = (i * 17 + t) % texts.size();
+          if (tok.encode(texts[index]) != expected[index]) mismatch = true;
+        }
+      });
+    for (auto& worker : workers) worker.join();
+    require(!mismatch, "concurrent cached encode changed token IDs");
+  }
+
   const auto inversions = Access::inversions(tok);
   for (const auto& word : inversions) {
     const auto expected = Access::reference(tok, word);
@@ -274,6 +298,8 @@ DGPP_TEST(glm_tokenizer_differential_goldens) {
                  "encode mismatch on case " + std::to_string(i) + " (" +
                      text + "): got " + std::to_string(got.size()) +
                      " ids, want " + std::to_string(want.size()));
+    require(tok.encode(text) == want,
+            "warm-cache encode mismatch on golden case " + std::to_string(i));
     const std::string rt = tok.decode(got, /*skip_special_tokens=*/false);
     // An NFC tokenizer round-trips to the NFC form of the input.
     require(rt == text || (qwen && rt == dgpp::text::unicode::nfc(text)),
