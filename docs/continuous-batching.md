@@ -291,8 +291,12 @@ histories, then force a live request to grow while its full lifetime fits the
 pool. Require cache evictions before any shed, complete output with no shed when
 reclamation suffices, unchanged attached histories, and matching rank operation
 streams. Also run genuine live oversubscription to retain youngest-first shedding.
-The host regressions establish those decisions; real MiMo snapshot lifetimes,
-cross-rank execution and throughput still need this hardware check.
+The host regressions establish those decisions; hardware checks additionally
+exercise real MiMo snapshot lifetimes, cross-rank execution, and throughput.
+
+Measured cache-reclamation results and controller comparisons are recorded in
+[the issue #116 investigation](experiments/issue116-admission.md), including
+the workload differences and limits of those checks.
 
 ### Shared execution timing
 
