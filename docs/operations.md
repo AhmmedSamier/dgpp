@@ -326,6 +326,23 @@ model state. Measure both repeated and novel inputs: cache misses add work,
 and faster tokenization does not imply faster model generation. See
 [tokenization](tokenization.md) for bounds and validation.
 
+### Request preparation
+
+Chat and legacy completion preparation runs in a persistent pool sized to the
+configured engine concurrency. A slow preparation leaves HTTP free to serve
+health checks and active streams. Ready requests reach admission in completion
+order, so a later small request can proceed while an earlier large request is
+still preparing. All workers being busy still causes queueing.
+
+`dgpp_preparation_workers`, `dgpp_preparation_pending` and
+`dgpp_preparation_payload_bytes` report capacity and occupancy.
+`dgpp_preparation_queue_time_seconds` and `dgpp_preparation_work_seconds` report
+wait and execution time per preparation stage. TTFT, request queue and end-to-end
+latency now include preparation; response `timings` still describe engine work.
+An exhausted request-count or retained-payload budget returns 503
+`preparation_busy`; retry with backoff. Idle workers sleep, but concurrent text
+or image preparation can compete with inference for CPU and memory bandwidth.
+
 ### Streaming keep-alives
 
 Output delivery defaults to `http.stream_flush: "pass"`: a quiet HTTP loop
@@ -333,7 +350,8 @@ checks for queued output every 25 ms. Set `http.stream_flush: "wake"` in the
 cluster JSON, or pass `--stream-flush wake`, to wake the loop when tokens,
 logprobs, completion/error responses or file preprocessing results are ready.
 The CLI overrides JSON; this is a rank-0 server setting, not a request option.
-Only `pass` and `wake` are accepted.
+Only `pass` and `wake` are accepted. Preparation and file results always wake
+HTTP, including in `pass` mode.
 
 Wake mode reduces delivery delay and batching at the client. It can increase
 HTTP CPU work and socket sends, especially with many concurrent streams;

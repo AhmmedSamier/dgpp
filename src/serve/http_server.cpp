@@ -240,7 +240,8 @@ HttpServer::HttpServer(uint16_t port, HttpHandler* handler, int max_connections,
     throw std::invalid_argument("http: max_body_bytes must be positive and fit the request buffer");
   if (handler_ == nullptr)
     throw std::invalid_argument("HttpServer: handler must not be null");
-  if (wake_on_output) wakeup_.state_ = std::make_shared<HttpWakeup::State>();
+  if (wake_on_output || handler_->needs_work_wakeup())
+    wakeup_.state_ = std::make_shared<HttpWakeup::State>();
   try {
     in_addr bind_address{};
     if (::inet_pton(AF_INET, bind_host.c_str(), &bind_address) != 1)
@@ -283,7 +284,8 @@ HttpServer::HttpServer(uint16_t port, HttpHandler* handler, int max_connections,
       if (::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, ev.data.fd, &ev) < 0)
         throw std::runtime_error("http: epoll add wakeup");
     }
-    handler_->set_wakeup(wakeup_);
+    handler_->set_wakeup(wake_on_output ? wakeup_ : HttpWakeup{});
+    handler_->set_work_wakeup(wakeup_);
   } catch (...) {
     if (listen_fd_ >= 0) ::close(listen_fd_);
     if (epoll_fd_ >= 0) ::close(epoll_fd_);

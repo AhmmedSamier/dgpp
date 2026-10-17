@@ -1,14 +1,19 @@
 #include "serve/glm_vision_frontend.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
 #include <iostream>
+#include <thread>
 
 #include "loaders/hf_cache.hpp"
 #include "serve/image_inputs.hpp"
 
 int main() {
   std::string error;
-  const auto checkpoint = dgpp::hf::model_dir("unsloth/GLM-5.3-Flash-FP8", &error);
+  const char* model = std::getenv("DGPP_TP_REAL_MODEL");
+  const auto checkpoint = dgpp::hf::model_dir(
+      model && *model ? model : "unsloth/GLM-5.3-Flash-FP8", &error);
   if (checkpoint.empty()) {
     std::cout << "[SKIP] " << error << '\n';
     return 2;
@@ -47,6 +52,33 @@ int main() {
     }
     require(tok.decode(input.tokens, false).find("unable to process") == std::string::npos,
             "no text-only template reminder");
+    // Serving shares these loaded assets between preparation workers and
+    // concurrent output decoding. Each call must keep its own render state.
+    const auto plain_tokens = text.prepare_chat(plain.root).tokens;
+    const auto decoded = text.decode_ids(input.tokens);
+    std::atomic<bool> mismatch{false};
+    std::vector<std::thread> workers;
+    for (int worker = 0; worker < 8; ++worker)
+      workers.emplace_back([&] {
+        try {
+          for (int round = 0; round < 4; ++round) {
+            const auto actual = vision.prepare_chat(parsed.root);
+            if (actual.tokens != input.tokens || actual.images.size() != input.images.size() ||
+                text.prepare_chat(plain.root).tokens != plain_tokens ||
+                text.decode_ids(input.tokens) != decoded)
+              mismatch = true;
+            for (size_t i = 0; i < actual.images.size() && i < input.images.size(); ++i)
+              if (actual.images[i].rgb != input.images[i].rgb ||
+                  actual.images[i].offset != input.images[i].offset)
+                mismatch = true;
+          }
+        } catch (...) {
+          mismatch = true;
+        }
+      });
+    for (auto& worker : workers) worker.join();
+    require(!mismatch,
+            "shared text/vision frontend preserves tokens, image spans and decoded bytes");
     auto conflict = json;
     conflict.replace(conflict.find("first"), 5, "<|image|>");
     bool threw = false;

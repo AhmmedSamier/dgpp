@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
+#include <thread>
 
 #include "common/base64.hpp"
 #include "common/test.hpp"
@@ -395,4 +397,63 @@ DGPP_TEST(qwen_vision_config_geometry_ids_and_refusals) {
   const std::string_view eps_key{"\"layer_norm_eps\":1e-5"};
   eps.replace(eps.find(eps_key), eps_key.size(), "\"layer_norm_eps\":0");
   rejects([&] { parse(eps); });
+}
+
+DGPP_TEST(image_preparation_concurrent_formats_and_errors) {
+  using V = dgpp::minijson::Value;
+  const std::array<const char*, 3> urls = {
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/"
+      "x8AAwMCAO+a0ioAAAAASUVORK5CYII=",
+      "data:image/webp;base64,UklGRiIAAABXRUJQVlA4TBYAAAAvA0AAAA8Q87//8x8OFAIIgIImov/x",
+      "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/"
+      "2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofH"
+      "h0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/"
+      "2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyM"
+      "jIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAAIAAgDASIAAhEBAxEB/"
+      "8QAHwAAAQUBAQEBAQEAAAAAAAAAA"
+      "AECAwQFBgcICQoL/"
+      "8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKF"
+      "hcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjp"
+      "KWmp"
+      "6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/"
+      "8QAHwEAAwEBAQEBAQEBAQAAAAAAA"
+      "AECAwQFBgcICQoL/"
+      "8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkN"
+      "OEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmao"
+      "qOkp"
+      "aanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/"
+      "9oADAMBAAIRAxEAPwDkaKKK+7Pqz"
+      "//Z"};
+  std::array<dgpp::ImageInput, 3> expected;
+  for (size_t i = 0; i < urls.size(); ++i)
+    expected[i] =
+        dgpp::serve::prepare_glm_image(V::make_object({{"url", V::make_string(urls[i])}}), "image");
+  std::atomic<bool> mismatch{false};
+  std::vector<std::thread> workers;
+  for (int worker = 0; worker < 16; ++worker)
+    workers.emplace_back([&, worker] {
+      try {
+        for (int round = 0; round < 8; ++round) {
+          const size_t i = (worker + round) % urls.size();
+          const auto actual = dgpp::serve::prepare_glm_image(
+              V::make_object({{"url", V::make_string(urls[i])}}), "image");
+          if (actual.rgb != expected[i].rgb || actual.tokens != expected[i].tokens ||
+              actual.width != expected[i].width || actual.height != expected[i].height)
+            mismatch = true;
+          bool refused = false;
+          try {
+            dgpp::serve::prepare_glm_image(
+                V::make_object({{"url", V::make_string("data:image/png;base64,iVBORw0KGgo=")}}),
+                "bad");
+          } catch (const dgpp::serve::ImageInputError& e) {
+            refused = e.param == "bad.url";
+          }
+          if (!refused) mismatch = true;
+        }
+      } catch (...) {
+        mismatch = true;
+      }
+    });
+  for (auto& worker : workers) worker.join();
+  require(!mismatch, "concurrent PNG/JPEG/WebP preparation preserves pixels and isolates errors");
 }
