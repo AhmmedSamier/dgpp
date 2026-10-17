@@ -459,6 +459,32 @@ templates set their serving options explicitly.
 | `engine.model_alias` | no | The model name the service reports and requires: `GET /v1/models` lists it, responses and the health status carry it, and a request's `model` field must equal it (otherwise HTTP 404 `model_not_found`). It does not change which checkpoint is loaded. | Empty: the `model` repository ID |
 | `engine.file_inputs` | no | The file-input store behind `POST /v1/files` and the file parts of chat requests, as an object: `directory` (empty: an ephemeral store that lasts the server process; a directory keeps uploads across restarts), `pdf_command` (spawned directly, without a shell; needs `poppler-utils` on rank 0), `max_file_bytes` per uploaded or inline file, `max_request_bytes` for one request's files combined, `max_text_bytes` of extracted text per file and per request, `max_storage_bytes` for the whole store, `pdf_timeout_ms` per extraction and `workers` preprocessing threads. Every limit is a positive integer. See [file inputs](docs/openai-compatibility.md#file-inputs). | Ephemeral store, `pdftotext`, 52428800 (50 MiB), 52428800, 134217728 (128 MiB), 1073741824 (1 GiB), 120000 ms, 4 workers |
 
+Long-word BPE merge work is bounded automatically; no configuration is needed
+to enable that optimization. The optional word cache reuses token IDs for
+repeated pieces of prompt text, including prose, code and chat templates.
+To try it, merge this top-level `tokenizer` object into your deployment JSON,
+alongside `model` and `engine`, then restart the deployment:
+
+```json
+{
+  "tokenizer": {
+    "word_cache_entries": 10000
+  }
+}
+```
+
+The capacity must be an integer from 0 to 10000. Omitting the setting or
+setting it to `0` disables the cache and allocates no cache storage. This
+setting is available through JSON only. The cache lives in rank 0's serving
+tokenizer, shares results across requests and starts empty after a restart.
+
+Caching defaults to off because its benefit depends on the workload: repeated
+text can tokenize faster, while mostly unique words pay extra lookup and fill
+costs. Compare latency and CPU use on representative traffic before enabling
+it. It preserves token IDs and uses bounded host memory; it does not accelerate
+model prefill or decoding. See [tokenization](docs/tokenization.md#optional-word-cache)
+for entry limits and memory bounds.
+
 For lower stream delivery latency, set `http.stream_flush` to `"wake"` in
 the deployment JSON. Merge this setting into the file's existing `http` object:
 
