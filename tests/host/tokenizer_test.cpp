@@ -20,10 +20,13 @@
 
 int g_argc = 0;
 char** g_argv = nullptr;
+#include <random>
+
 #include "common/test.hpp"
 #include "loaders/hf_cache.hpp"
 #include "text/tokenizer.hpp"
 #include "text/unicode_normalize.hpp"
+#include "tokenizer_reference.hpp"
 
 namespace {
 
@@ -169,6 +172,35 @@ DGPP_TEST(glm_tokenizer_differential_goldens) {
             " — regenerate the goldens (tools/gen_tokenizer_goldens.py) "
             "for this checkpoint revision");
   }
+
+  // Compare the changed word merger against the original implementation over
+  // arbitrary byte-level words and real vocabulary concatenations. This also
+  // exercises ignore_merges and the rank-inverted rules in the GLM files.
+  std::mt19937 rng(121);
+  using Access = dgpp::text::TokenizerTestAccess;
+  for (size_t trial = 0; trial < 12000; ++trial) {
+    std::string mapped;
+    if (trial % 3 == 0) {
+      for (size_t n = 1 + rng() % 8; n > 0; --n)
+        mapped += Access::map(tok, tok.decode(rng() % tok.token_by_id_size(), false));
+    } else {
+      std::string raw(1 + rng() % (trial % 17 == 0 ? 4096 : 96), 'a');
+      for (auto& c : raw) c = trial % 3 == 1 ? static_cast<char>(rng()) : 'a' + rng() % 26;
+      mapped = Access::map(tok, raw);
+    }
+    const auto expected = Access::reference(tok, mapped);
+    require(Access::actual(tok, mapped) == expected && Access::heap(tok, mapped) == expected,
+            "BPE differential mismatch at generated word " + std::to_string(trial));
+  }
+
+  const auto inversions = Access::inversions(tok);
+  for (const auto& word : inversions) {
+    const auto expected = Access::reference(tok, word);
+    require(Access::actual(tok, word) == expected && Access::heap(tok, word) == expected,
+            "rank-inverted checkpoint rule changed token IDs");
+  }
+  DGPP_LOG_INFO("BPE differential: 12000 generated words and {} rank-inverted words",
+                inversions.size());
 
   size_t checked = 0;
   for (size_t i = 1; i < lines.size(); ++i) {

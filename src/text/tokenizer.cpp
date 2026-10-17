@@ -8,6 +8,7 @@
 
 #include "common/log.hpp"
 #include "loaders/minijson.hpp"
+#include "text/bpe.hpp"
 #include "text/unicode_normalize.hpp"
 #include "text/unicode_tables.hpp"
 
@@ -805,12 +806,8 @@ void Tokenizer::encode_word(std::string_view mapped,
       return;
     }
   }
-  // Initial symbols: one per mapped codepoint (1-3 UTF-8 bytes each).
-  // `owned` holds every merged string for the WHOLE call — reserved once
-  // so push_back can never reallocate (a realloc would dangle the
-  // string_views in `symbols`; total merges <= initial count - 1).
+  // Adjacent spans remain in `mapped` throughout both merge algorithms.
   std::vector<std::string_view> symbols;
-  std::vector<std::string> owned;
   symbols.reserve(mapped.size());
   for (size_t i = 0; i < mapped.size();) {
     const unsigned char b = static_cast<unsigned char>(mapped[i]);
@@ -818,43 +815,10 @@ void Tokenizer::encode_word(std::string_view mapped,
     symbols.push_back(mapped.substr(i, len));
     i += len;
   }
-  owned.reserve(symbols.size());
-
-  // The merge loop: lowest rank first, ALL occurrences per pass,
-  // left-to-right non-overlapping (HF 0.23's bpe semantics).
-  for (;;) {
-    uint32_t best_rank = UINT32_MAX;
-    size_t best_i = 0;
-    bool found = false;
-    for (size_t i = 0; i + 1 < symbols.size(); ++i) {
-      const auto it = merge_rank_.find(MergeKey{symbols[i], symbols[i + 1]});
-      if (it != merge_rank_.end() && it->second < best_rank) {
-        best_rank = it->second;
-        best_i = i;
-        found = true;
-      }
-    }
-    if (!found) break;
-    // Capture the pair BY VALUE before the rebuild (symbols[best_i+1] is
-    // about to move).
-    const std::string first(symbols[best_i]);
-    const std::string second(symbols[best_i + 1]);
-    std::vector<std::string_view> next;
-    next.reserve(symbols.size());
-    size_t i = 0;
-    while (i < symbols.size()) {
-      if (i + 1 < symbols.size() && symbols[i] == first &&
-          symbols[i + 1] == second) {
-        owned.push_back(first + second);
-        next.push_back(owned.back());
-        i += 2;
-      } else {
-        next.push_back(symbols[i]);
-        ++i;
-      }
-    }
-    symbols = std::move(next);
-  }
+  detail::bpe_merge(symbols, [&](std::string_view first, std::string_view second) {
+    const auto it = merge_rank_.find(MergeKey{first, second});
+    return it == merge_rank_.end() ? UINT32_MAX : it->second;
+  });
   for (const std::string_view s : symbols) {
     const auto it = vocab_.find(s);
     if (it == vocab_.end())

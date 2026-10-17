@@ -5,6 +5,13 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **Bound prompt-tokenizer merge scans** ([#121](https://github.com/HawkBearPig/dgpp/issues/121)).
+  Long letter and CJK pretokens automatically switch from repeated passes
+  to a phase heap after a bounded amount of scanning. Short words and
+  repeated characters retain the pass path. Merges use input spans instead
+  of allocating strings; token IDs and merge ordering are preserved.
+  Thanks to @WhollyMindless for the diagnosis and proposed phase semantics.
+
 - **Decode streaming text one token at a time** ([#119](https://github.com/HawkBearPig/dgpp/issues/119)).
   Completions, chat reasoning/content and DeepSeek DSML content no longer
   re-decode the whole output prefix for every generated token. This removes

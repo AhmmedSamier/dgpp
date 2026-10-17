@@ -2080,7 +2080,15 @@ merge walk. Unicode tables and normalization live under `src/text/`.
 Unsupported tokenizer configurations are errors.
 
 The tokenizer is loaded once; encode and decode are const and
-thread-safe. Golden corpora compare token IDs and decoded bytes against
+thread-safe. BPE merges use adjacent spans into the mapped pretoken. Small
+words and geometrically shrinking runs use in-place passes. Long words get
+a budget of four times their initial symbol count in pair probes, then
+switch at a pass boundary to a heap ordered by rank and input position.
+Each heap phase merges only pairs available at its start; newly created
+neighbors wait for the next phase, including when their rank is lower.
+This preserves the original all-occurrences, left-to-right semantics while
+bounding repeated scans. There is no deployment setting for the algorithm.
+See [tokenization](docs/tokenization.md) for the validation procedure. Golden corpora compare token IDs and decoded bytes against
 reference tokenizers and are keyed by the tokenizer file's hash. A
 different checkpoint revision must use its matching corpus.
 

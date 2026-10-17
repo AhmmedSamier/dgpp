@@ -32,6 +32,9 @@
 // hash (FNV-1a-64 of tokenizer.json): a gate run against a different
 // tokenizer.json refuses rather than compares.
 //
+// Merge work: short words and shrinking runs use passes; long words switch
+// automatically to a phase heap after bounded scanning. Both preserve the
+// lowest-rank, all-occurrences, left-to-right merge order.
 // Threading: load once, then encode/decode are const and thread-safe.
 #include <cstdint>
 #include <string>
@@ -88,6 +91,7 @@ class Tokenizer {
   int64_t max_id() const { return max_id_; }
 
  private:
+  friend struct TokenizerTestAccess;
   struct MergeKey {
     std::string_view first;
     std::string_view second;
