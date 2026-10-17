@@ -113,6 +113,7 @@ class Client {
     ::close(fd_);
     fd_ = -1;
   }
+  bool closed() const { return closed_; }
 
  private:
   int fd_ = -1;
@@ -138,6 +139,18 @@ class TestHandler : public HttpHandler {
       w.respond(200, "application/json", "{\"ok\":true}");
     } else if (req.path == "/echo" && req.method == "POST") {
       w.respond(200, "text/plain", req.body);
+    } else if (req.path == "/framing" && req.method == "POST") {
+      size_t count = 0;
+      std::string length;
+      for (const auto& [key, value] : req.headers) {
+        if (key == "content-length") {
+          ++count;
+          length = value;
+        }
+      }
+      w.respond(200, "text/plain", std::to_string(count) + ":" + length);
+    } else if (req.path == "/throw") {
+      throw std::runtime_error("http-test internal diagnostic");
     } else if (req.path == "/stream" && req.method == "GET") {
       w.begin_stream();
       w.write_event("first");
@@ -288,6 +301,95 @@ DGPP_TEST(http_postBody_contentLengthDeliveredVerbatim) {
   require(resp.find("200 OK") != std::string::npos,
           "echo status: " + resp);
   require(resp.find(body) != std::string::npos, "echo body: " + resp);
+}
+
+DGPP_TEST(http_content_length_accepts_decimal_whitespace_and_equal_repeated_fields) {
+  ServerHandle sh;
+  Client c(sh.port());
+  struct Case {
+    const char* headers;
+    const char* body;
+  };
+  const Case cases[] = {
+      {"Content-Length: 4\r\n", "test"},
+      {"Content-Length: \t0004 \t\r\n", "test"},
+      {"Content-Length: 04\r\ncontent-length:\t4\r\n", "test"},
+      {"Content-Length: 0\r\nContent-Length: 00\r\n", ""},
+  };
+  for (const auto& test : cases) {
+    c.send_all(std::string("POST /echo HTTP/1.1\r\nHost: t\r\n") + test.headers + "\r\n" +
+               test.body);
+    const auto response = c.read_available(100);
+    require(response.starts_with("HTTP/1.1 200 OK\r\n"), "valid decimal length accepted");
+    require(response.substr(response.find("\r\n\r\n") + 4) == test.body,
+            "equivalent length fields preserve the exact body on keep-alive");
+  }
+  require(sh.handler.requests.load() == 4, "all valid requests reach the handler");
+}
+
+DGPP_TEST(http_content_length_handler_sees_one_canonical_field) {
+  ServerHandle sh;
+  Client c(sh.port());
+  struct Case {
+    const char* headers;
+    const char* body;
+    const char* expected;
+  };
+  const Case cases[] = {
+      {"Content-Length: \t0004 \t\r\n", "test", "1:4"},
+      {"Content-Length: 04\r\ncontent-length:\t4\r\n", "test", "1:4"},
+      {"Content-Length: 0\r\nContent-Length: 00\r\n", "", "1:0"},
+  };
+  for (const auto& test : cases) {
+    c.send_all(std::string("POST /framing HTTP/1.1\r\nHost: t\r\n") + test.headers + "\r\n" +
+               test.body);
+    const auto response = c.read_available(500);
+    require(response.starts_with("HTTP/1.1 200 OK\r\n"), "framing request succeeds");
+    require(response.substr(response.find("\r\n\r\n") + 4) == test.expected,
+            "handler sees exactly one canonical Content-Length");
+  }
+  require(sh.handler.requests.load() == 3, "all framing observations reach the handler");
+}
+
+DGPP_TEST(http_invalid_or_conflicting_content_length_400_closes_without_dispatch) {
+  ServerHandle sh(64, 1024);
+  const auto rejected = [&](const std::string& headers) {
+    Client c(sh.port());
+    c.send_all("POST /echo HTTP/1.1\r\nHost: t\r\n" + headers + "\r\ntest");
+    const auto response = c.read_available(500);
+    require(response.starts_with("HTTP/1.1 400 Bad Request\r\n"), "invalid length is a 400");
+    require(
+        response.find("\"message\":\"invalid or conflicting Content-Length\"") != std::string::npos,
+        "refusal names the invalid header");
+    require(response.find("Content-Type: application/json\r\n") != std::string::npos,
+            "transport refusal retains the JSON error envelope");
+    require(response.find("Connection: close\r\n") != std::string::npos && c.closed(),
+            "invalid framing closes the connection");
+  };
+  for (const auto& value :
+       std::vector<std::string>{"", " \t", "+4", "-0", "-1", "4x", "4.0", "0x4", "4 0", "4, 4",
+                                "4, 5", std::string(128, '9'), std::string("4\0x", 3)})
+    rejected("Content-Length: " + value + "\r\n");
+  rejected("Content-Length: 3\r\nContent-Length: 4\r\n");
+  rejected("Content-Length: 4\r\nContent-Length: 3\r\n");
+  rejected("Content-Length: 4\r\nContent-Length: x\r\n");
+  require(sh.handler.requests.load() == 0, "invalid framing never reaches the handler");
+}
+
+DGPP_TEST(http_handler_exception_returns_generic_500_and_closes) {
+  ServerHandle sh;
+  Client c(sh.port());
+  c.send_all("GET /throw HTTP/1.1\r\nHost: t\r\n\r\n");
+  const auto response = c.read_available(500);
+  require(response.starts_with("HTTP/1.1 500 Internal Server Error\r\n"),
+          "handler exception is a 500");
+  require(response.find("Content-Type: application/json\r\n") != std::string::npos &&
+              response.find("\"message\":\"internal server error\"") != std::string::npos,
+          "unexpected error uses a generic JSON message");
+  require(response.find("http-test internal diagnostic") == std::string::npos,
+          "internal exception details do not reach the client");
+  require(response.find("Connection: close\r\n") != std::string::npos && c.closed(),
+          "unexpected error closes the connection");
 }
 
 DGPP_TEST(http_default_body_limit_accepts_large_prefill_payloads) {

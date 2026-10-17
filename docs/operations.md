@@ -395,6 +395,14 @@ deadlines are unchanged. Non-streaming responses receive no pings.
 
 ### Large document and agent requests
 
+Each `Content-Length` field must contain one unsigned decimal integer, with
+optional surrounding spaces or tabs. Equal repeated fields are accepted and
+normalized; conflicting values, comma-separated lists and malformed or
+unrepresentable numbers receive HTTP 400 and close the connection. A valid length
+above `http.max_body_bytes` receives HTTP 413. Exceptions escaping
+`HttpHandler::handle` return a generic HTTP 500 JSON message; the server log retains
+the diagnostic. Errors handled within the generation service are unchanged.
+
 `http.max_body_bytes` caps each serialized HTTP request body. The default is
 268435456 bytes (256 MiB), allowing large document prefills and conversation
 histories with tool calls and JSON escaping. To allow up to 1 GiB, add this

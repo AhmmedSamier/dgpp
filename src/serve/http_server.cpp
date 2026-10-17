@@ -3,9 +3,9 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <errno.h>
 #include <fcntl.h>
@@ -510,8 +510,26 @@ bool HttpServer::process_requests(Conn& c) {
       while (vstart < line.size() && line[vstart] == ' ') ++vstart;
       std::string value(line.substr(vstart));
       if (key == "content-length") {
+        std::string_view length(value);
+        while (!length.empty() && (length.front() == ' ' || length.front() == '\t'))
+          length.remove_prefix(1);
+        while (!length.empty() && (length.back() == ' ' || length.back() == '\t'))
+          length.remove_suffix(1);
+        size_t parsed_length = 0;
+        const auto [end, error] =
+            std::from_chars(length.data(), length.data() + length.size(), parsed_length);
+        if (error != std::errc{} || end != length.data() + length.size() ||
+            (has_len && parsed_length != content_length)) {
+          queue_response(c, 400, "text/plain", "invalid or conflicting Content-Length", true);
+          flush_out(c);
+          close_conn(c, false);
+          return false;
+        }
+        // Keep one canonical field so framing and handler-visible headers agree.
+        if (has_len) continue;
         has_len = true;
-        content_length = static_cast<size_t>(std::strtoull(value.c_str(), nullptr, 10));
+        content_length = parsed_length;
+        value = std::to_string(content_length);
       } else if (key == "transfer-encoding") {
         has_te = true;
       } else if (key == "connection") {
@@ -566,8 +584,7 @@ bool HttpServer::process_requests(Conn& c) {
       c.out.clear();
       c.flushed = 0;
       c.stream = false;
-      queue_response(c, 500, "text/plain",
-                     std::string("handler error: ") + e.what(), true);
+      queue_response(c, 500, "text/plain", "internal server error", true);
     }
     if (c.fd < 0) return false;  // a disconnect raced the route
     flush_out(c);
