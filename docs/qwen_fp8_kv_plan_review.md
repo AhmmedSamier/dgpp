@@ -23,5 +23,5 @@ The follow-up resolves these issues:
   regression coverage, alongside the recorded performance/accuracy limits.
 
 Native FP8 remains opt-in. Broader task-quality, long-context accuracy, and
-multi-node serving measurements are still needed before promoting it to a
+matched end-to-end performance measurements are still needed before promoting it to a
 model-family default.

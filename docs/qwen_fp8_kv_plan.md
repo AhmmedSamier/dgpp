@@ -161,3 +161,25 @@ this rank's vocabulary; the program prints its dimensions and vocabulary start.
 - Configuration parsing and journal round trips cover the new switch, invalid
   values and legacy records. CUDA memcheck and racecheck report no errors on
   the native kernel tests.
+
+### Pre-merge regression and two-node serving checks
+
+The implementation at `771dc83d` passed a full release build, all 34 host tests
+excluding checkpoint-labelled cases, and 23 targeted GPU/fixture/RDMA tests.
+The latter include the complete Qwen engine and TP suites, both FP8 attention
+test binaries, prefix snapshots, and Qwen3.8-27B BF16/FP8 compatibility checks.
+
+A two-GB10 RoCE deployment of the same NVIDIA NVFP4 checkpoint then passed all
+checks in `scripts/serve_api_check.py`. It used `kv_dtype=fp8`,
+`prefill_attention=fp8`, `decode_attention=fp8`, graph execution, MTP depth one,
+two request slots, an 8,192-token pool, a 0.25-GiB prefix cache,
+`dense_weights=fp8`, `bf16_weights=bf12+bf16`, and the mapped n-gram table.
+The checks covered streamed and non-streamed stops, two simultaneous choices,
+forced/banned tokens, invalid logit bias, and usage accounting. A repeated
+2,186-token prompt reused 2,180 cached tokens.
+
+Both ranks logged the same settings digest with native FP8 prefill and decode
+enabled. After orderly shutdown, their operation streams had identical MD5
+`02e1324bf170d9e5f75fbab466c24e30`. This establishes two-node serving correctness
+for the tested configuration. Matched end-to-end performance measurements,
+broader task-quality checks, and long-context accuracy remain separate gates.
