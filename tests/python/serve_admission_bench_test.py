@@ -150,6 +150,13 @@ class AdmissionBenchmarkTest(unittest.TestCase):
         self.assertEqual([s["elapsed_s"] for s in samples], sorted(s["elapsed_s"] for s in samples))
         self.assertGreaterEqual(samples[0]["elapsed_s"], 0)
         self.assertLessEqual(samples[-1]["elapsed_s"], result["wall_s"])
+        self.assertAlmostEqual(result["end"] - result["start"], result["wall_s"])
+        for request in result["requests"]:
+            self.assertGreaterEqual(request["start"], result["start"])
+            self.assertLessEqual(request["end"], result["end"])
+        long = next(r for r in result["requests"] if r["id"] == long_id)
+        self.assertTrue(any(long["start"] <= result["start"] + s["elapsed_s"] <= long["end"]
+                            for s in reading))
 
     def test_sampling_failure_invalidates_the_trace(self):
         with server() as bench:

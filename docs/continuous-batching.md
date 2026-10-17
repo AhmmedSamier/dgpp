@@ -280,7 +280,9 @@ SSE update-gap p95/max, aggregate output and prompt throughput, and target-miss
 counter deltas. `metrics_samples` associates the selected adaptive limit and
 computed/offered chunk counters with native reader IDs and elapsed time.
 It is sampled evidence, not one record per engine pass; before/after snapshots
-and final usage remain the workload accounting checks. Both targets zero selects
+and final usage remain the workload accounting checks. Add a sample's `elapsed_s`
+to the run's `start` to compare it with request and SSE timestamps; these use the
+same monotonic clock. Both targets zero selects
 fixed budgeting; increasing the idle floor alone cannot affect the mixed case.
 
 Validate grow-mode cache reclamation separately with cached conversation

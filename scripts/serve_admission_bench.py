@@ -263,7 +263,8 @@ class Bench:
         completed_tokens = sum(r.get("usage", {}).get("completion_tokens", 0) for r in records)
         generated = after["scheduler"]["tokens_generated"] - before["scheduler"]["tokens_generated"]
         computed = after["scheduler"]["prompt_tokens_computed"] - before["scheduler"]["prompt_tokens_computed"]
-        return {"scenario": scenario, "trial": trial, "wall_s": ended - started,
+        return {"scenario": scenario, "trial": trial, "start": started, "end": ended,
+                "wall_s": ended - started,
                 "native_prefill_observation": observed, "metrics_samples": samples, "requests": records,
                 "computed_prompt_tokens": computed,
                 "completed_response_tokens": completed_tokens, "generated_tokens": generated,
