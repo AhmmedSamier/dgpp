@@ -16,7 +16,7 @@
     "draft_head": "screen",
     "lookup_draft": true,
     "lookup_tail": 2,
-    "prefix_cache_gib": 0,
+    "prefix_cache_gib": 3,
     "admission": "grow",
     "admission_window": 256,
     "model_alias": "Qwen3.8-Flash-Next-FP4",
