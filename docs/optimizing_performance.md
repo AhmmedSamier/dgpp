@@ -1,8 +1,8 @@
 # Optimizing performance
 
 How to make a dgpp deployment faster on your own workload without losing
-track of what it computes. The [README's configuration
-tables](../README.md#configuration) define every key; this page says which
+track of what it computes. The [configuration
+reference](configuration.md) defines each setting; this page says which
 keys move which number, what each one trades, and how to measure a change
 before trusting it. The numbers quoted are the recorded ones in
 [benchmarks](benchmarks.md); yours will differ with prompts, context and

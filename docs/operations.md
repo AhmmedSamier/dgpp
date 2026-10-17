@@ -4,7 +4,8 @@ DGPP runs one `dgpp-serve` process per node. Rank 0 serves HTTP and
 coordinates requests through the admission journal; peers follow the same
 scheduler operations. The examples below use GLM-5.3 on four Sparks.
 Other model templates use the same launcher with their own memory and
-engine settings. See [README](../README.md) for the configuration schema.
+engine settings. See the [configuration reference](configuration.md) for
+settings, defaults and their effects.
 
 ## MiMo native MTP and prefill options
 

@@ -1,5 +1,9 @@
 # Deployment templates
 
+Choose a template here, then use the [configuration reference](../docs/configuration.md)
+for site setup, defaults and the effect of each setting. Templates set model-specific
+values that can differ from the program defaults.
+
 One template per model, quantization and world size:
 `cluster_<model>_<quant>_w<n>.example.json`. An optional trailing
 `_<variant>` names a template that deviates from that shape in one documented
