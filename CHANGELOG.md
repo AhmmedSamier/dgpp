@@ -10,13 +10,16 @@ project procedures and design guidance live in `docs/`.
   carried the model's 262,144-token context and a 1.5 GiB prefix arena at
   every world (the YaRN templates 565,248 and 827,392 tokens), planning at
   19–71 GiB of a Spark's 116 while every other template had been sized by
-  the memory plan. They now hold: FP8 786,432 tokens (three full contexts)
-  with a 6 GiB arena on one Spark, 1,572,864 (six) with 20 GiB on two,
+  the memory plan. They now hold: FP8 524,288 tokens (two full contexts)
+  with a 20 GiB arena on one Spark, 1,572,864 (six) with 16 GiB on two,
   2,097,152 (one per slot, full admission) with 32 GiB on four; NVFP4
-  1,048,576 (four) with 24 GiB on one, 2,097,152 with 32 GiB on two and
+  1,048,576 (four) with 16 GiB on one, 2,097,152 with 32 GiB on two and
   four; the YaRN templates 1,130,496 (two full-length streams) with 16 GiB
-  and 1,048,576 with 20 GiB — plans of 73 to 110 GiB, each verified with
-  `--memory-plan` and a boot. The DeepSeek-V4.1 template takes the 1M-token
+  and 1,048,576 with 20 GiB — plans of 73 to 104 GiB, each verified with
+  `--memory-plan` and a boot whose ledger leaves at least 5 GiB at
+  listening: the boots end 6–8 GiB below the plan at world 1 (4.4 at two,
+  2 at four; a 786,432-token FP8 pool planned at 109 GiB swapped), which
+  the plan's 4 GiB headroom does not cover on one Spark. The DeepSeek-V4.1 template takes the 1M-token
   pool its benchmark row already measured (91.6 GiB planned). Also:
   `engine.prefill_activations` is refused by every family but Qwen3.5 (it
   reached nothing else).

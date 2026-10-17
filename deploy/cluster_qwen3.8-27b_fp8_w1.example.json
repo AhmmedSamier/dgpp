@@ -3,7 +3,7 @@
   "world_size": 1,
   "engine": {
     "max_concurrency": 8,
-    "kv_capacity": 786432,
+    "kv_capacity": 524288,
     "kv_dtype": "bf16",
     "dense_weights": "fp8",
     "default_max_tokens": 32768,
@@ -20,7 +20,7 @@
     "mtp_schedule_base_ms": 130.0,
     "mtp_draft_temperature": 0.7,
     "mtp_verify": "block",
-    "prefix_cache_gib": 6,
+    "prefix_cache_gib": 20,
     "admission": "grow",
     "admission_window": 256,
     "model_alias": "Qwen3.8-27B",

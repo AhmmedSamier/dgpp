@@ -53,8 +53,9 @@ else; the kernel gate is bitwise against the bf16 kernels on widened
 planes. The NVFP4 templates set it (the release's own cache recipe; `bf16`
 restores the wider cache) together with `engine.prefill_attention: "fp8"`
 below. Since 2026-10-17 the templates size that pool to the node: on one
-Spark 1,048,576 tokens (four full contexts) with a 24 GiB prefix arena
-(106 GiB planned), on two and four Sparks 2,097,152 tokens (one full
+Spark 1,048,576 tokens (four full contexts) with a 16 GiB prefix arena
+(98 GiB planned; a world-1 boot ends 6–8 GiB below its plan at listening,
+so the recipe leaves that room), on two and four Sparks 2,097,152 tokens (one full
 context per slot, full admission) with 32 GiB arenas (104 and 73 GiB a
 rank), the YaRN templates 1,130,496 and 1,048,576 tokens with 16 and 20 GiB
 arenas; until then every template carried 262,144 tokens and 1.5 GiB.
