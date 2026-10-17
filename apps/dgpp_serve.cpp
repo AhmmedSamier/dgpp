@@ -1174,7 +1174,7 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
       const auto ids = engine->image_token_ids();
       if (family_name == "glm5")
         vision_frontend = std::make_unique<dgpp::serve::GlmVisionFrontend>(&tok, &*tpl, ids);
-      else if (family_name == "qwen4_exp")
+      else if (family_name == "qwen4_exp" || family_name == "qwen3_5")
         vision_frontend = std::make_unique<dgpp::serve::QwenVisionFrontend>(&tok, &*tpl, ids);
     }
     frontend = vision_frontend ? std::move(vision_frontend)

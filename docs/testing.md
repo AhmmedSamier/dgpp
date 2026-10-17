@@ -48,6 +48,12 @@ stopped, then restore and verify the original deployment.
 buffers after starting a shared `PrefillTask`. Its yielded execution must retain
 the target and MTP results, snapshot chain and KV cleanup behavior. Run it with
 `glm_vision_stream_test` and `glm_vision_frontend_test` when changing that lifetime.
+`qwen35_image_prefill_test` and `qwen35_mixed_image_prefill_test` cover the same
+lifetime for the 27B model with synthetic FP8 and mixed NVFP4 checkpoints. They
+also compare grouped and interleaved image requests against isolated execution,
+check cancellation followed by text slot reuse, and resume an attached prefix
+whose MTP catch-up token is the first image row. Build `qwen35_image_prefill_test`
+and run `ctest --test-dir build-ci --output-on-failure -R '^qwen35_(mixed_)?image_prefill_test$'`.
 
 For serving comparisons, use the same deployment, checkpoint revisions, prompts
 and output lengths for the previous and candidate executable. Warm long prompts
