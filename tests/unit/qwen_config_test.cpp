@@ -342,6 +342,7 @@ DGPP_TEST(qwen_config_parses_the_fp4local_export) {
   require(c.ngram_table_nvfp4 && !c.ngram_table_fp8, "the NVFP4 n-gram table");
   require(c.norms_f32, "the F32 norms");
   require(c.experts_nvfp4_csf, "the CSF-wrapped backbone expert scales");
+  require(!c.mtp_experts_nvfp4_csf, "the draft experts keep their plain scales");
   // Every refusal names what is wrong.
   require(refusal(text_json(), fp4local_quant_json("\"weight_scale_encoding\": \"csf\"",
                                                    "\"weight_scale_encoding\": \"\""))
@@ -351,6 +352,32 @@ DGPP_TEST(qwen_config_parses_the_fp4local_export) {
                                                    "\"weight_scale_encoding\": \"blockwise\""))
                   .find("weight_scale_encoding") != std::string::npos,
           "an unknown scale encoding refused");
+  // The draft entries carry their own form: declaring CSF there flips the
+  // draft flag while the backbone stays CSF; unknown or mixed draft
+  // encodings refuse.
+  const char* kMtpPlain =
+      "\"mtp.layers.0.mlp.experts\": {\"quant_algo\": \"W4A16_NVFP4\", \"group_size\": 16}";
+  const char* kMtpCsf =
+      "\"mtp.layers.0.mlp.experts\": {\"quant_algo\": \"W4A16_NVFP4\", \"group_size\": 16, "
+      "\"weight_scale_encoding\": \"csf\"}";
+  {
+    const dgpp::QwenTextConfig m = parse(text_json(), fp4local_quant_json(kMtpPlain, kMtpCsf));
+    require(m.mtp_experts_nvfp4_csf && m.experts_nvfp4_csf, "the draft's own CSF declaration");
+  }
+  require(refusal(text_json(), fp4local_quant_json(kMtpPlain,
+                                                   "\"mtp.layers.0.mlp.experts\": "
+                                                   "{\"quant_algo\": \"W4A16_NVFP4\", \"group_size\": 16, "
+                                                   "\"weight_scale_encoding\": \"bl\"}"))
+                  .find("weight_scale_encoding") != std::string::npos,
+          "an unknown draft scale encoding refused");
+  require(refusal(text_json(),
+                  fp4local_quant_json(
+                      kMtpPlain,
+                      std::string(kMtpCsf) +
+                          ", \"mtp.layers.48.mlp.experts\": {\"quant_algo\": \"W4A16_NVFP4\", "
+                          "\"group_size\": 16}"))
+                  .find("one export, one form") != std::string::npos,
+          "mixed draft encodings refused");
 }
 
 // The AutoRound hybrid's quantization_config (Saren/…-hybrid-MTP_int4RTN),

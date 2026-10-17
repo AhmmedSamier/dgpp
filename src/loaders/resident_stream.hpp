@@ -52,6 +52,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -254,8 +255,29 @@ ResidentLayerStream<F>::ResidentLayerStream(const Config& cfg, const std::string
       globals_bump_(std::make_unique<LayerBump>()) {
   namespace fs = std::filesystem;
   std::vector<fs::path> shard_paths;
-  for (const auto& entry : fs::directory_iterator(checkpoint_dir))
-    if (entry.path().extension() == ".safetensors") shard_paths.push_back(entry.path());
+  const fs::path index_path = fs::path(checkpoint_dir) / "model.safetensors.index.json";
+  if (fs::exists(index_path)) {
+    // The shard list lives in the index's weight_map, the layout-independent
+    // truth: ModelOpt exports keep the shards in a tensors/ subdirectory
+    // (the FP4-Local release), which a root-only scan would miss. The vision
+    // tower resolves its shards from the same file.
+    std::ifstream f(index_path);
+    const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const auto index = minijson::parse(text);
+    std::set<std::string> named;
+    for (const auto& m : index.root.at("weight_map").members())
+      named.emplace(m.value.as_string());
+    for (const auto& name : named) {
+      const fs::path p = fs::path(checkpoint_dir) / name;
+      if (!fs::exists(p))
+        throw std::runtime_error(std::string(F::who()) + ": shard '" + name +
+                                 "' named by the index is missing from " + checkpoint_dir);
+      shard_paths.push_back(p);
+    }
+  } else {
+    for (const auto& entry : fs::directory_iterator(checkpoint_dir))
+      if (entry.path().extension() == ".safetensors") shard_paths.push_back(entry.path());
+  }
   if (shard_paths.empty())
     throw std::runtime_error(std::string(F::who()) + ": no .safetensors shards in " + checkpoint_dir);
   std::sort(shard_paths.begin(), shard_paths.end());

@@ -389,7 +389,7 @@ QwenTextConfig QwenTextConfig::parse(const minijson::Value& tc,
       static const char* kShared[] = {"mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj",
                                       "mlp.shared_expert.down_proj"};
       bool table_seen = false, mtp_seen = false;
-      bool csf_seen = false, plain_seen = false;
+      bool csf_seen = false, plain_seen = false, mtp_csf_seen = false, mtp_plain_seen = false;
       const std::string layers_prefix = "model.language_model.layers.";
       for (const auto& m : ql->members()) {
         const std::string key = m.key;
@@ -415,6 +415,17 @@ QwenTextConfig QwenTextConfig::parse(const minijson::Value& tc,
           if (c.mtp_layer() < 0) bad("'" + key + "' declared without a draft layer");
           if (algo != "W4A16_NVFP4" && algo != "NVFP4") want("W4A16_NVFP4", 16, "the draft experts");
           if (group != 16) want(algo.c_str(), 16, "the draft experts");
+          // The draft experts carry their own scale form: the FP4-Local
+          // export wraps only the backbone's as CSF, the draft keeping the
+          // plain E4M3 weight_scale (the loader picks the form per scope).
+          const std::string mtp_enc = optional_string(m.value, "weight_scale_encoding", "");
+          if (mtp_enc == "csf")
+            mtp_csf_seen = true;
+          else if (mtp_enc.empty())
+            mtp_plain_seen = true;
+          else
+            bad("'" + key + "' declares weight_scale_encoding '" + mtp_enc +
+                "' (only \"csf\" is implemented)");
           mtp_seen = true;
           continue;
         }
@@ -472,9 +483,12 @@ QwenTextConfig QwenTextConfig::parse(const minijson::Value& tc,
       if (c.mtp_layer() >= 0 && !mtp_seen) bad("the draft layer's experts are not declared");
       if (csf_seen && plain_seen)
         bad("some routed-experts entries declare weight_scale_encoding \"csf\" and some do not (one export, one form)");
+      if (mtp_csf_seen && mtp_plain_seen)
+        bad("the draft experts mix weight_scale_encoding \"csf\" and plain entries (one export, one form)");
       c.experts_fp8 = false;
       c.experts_nvfp4 = true;
       c.experts_nvfp4_csf = csf_seen;
+      c.mtp_experts_nvfp4_csf = mtp_csf_seen;
       c.dense_mxfp8_shipped = true;
       c.mtp_experts_nvfp4 = c.mtp_layer() >= 0;
       c.ngram_table_nvfp4 = table_seen;

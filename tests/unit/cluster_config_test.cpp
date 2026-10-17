@@ -581,6 +581,34 @@ DGPP_TEST(cluster_config_the_yarn512k_template_is_a_deployment_the_engine_reads)
           "request must be admissible in this template");
 }
 
+DGPP_TEST(cluster_config_the_fp4local_template_is_a_deployment_the_engine_reads) {
+  // deploy/cluster_qwen-3.8-flash-next-fp4local_w1.example.json, the
+  // ready-to-run shape for the FP4-Local export (2026-10-17). The resident
+  // footprint (98.2 GiB: the experts with their CSF-wrapped scales and the
+  // resident n-gram table's codes) fits one 121.6 GiB device, so the
+  // template seats a whole model in world 1. What this checks: every field
+  // name in the file is one this parser reads (an unknown one is a hard
+  // failure), and the recipe the loader was validated against — the MTP
+  // draft at depth 2 with the screened head behind the lookup draft, the
+  // table mapped rather than resident — is what the file spells.
+  const std::string path = std::string(DGPP_SOURCE_DIR) +
+                           "/deploy/cluster_qwen-3.8-flash-next-fp4local_w1.example.json";
+  std::ifstream in(path);
+  require(in.good(), "the tracked template is readable: " + path);
+  std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  const dgpp::serve::ClusterConfig c = dgpp::serve::parse_cluster_config(text, path);
+  require(c.model == "nvidia/Qwen3.8-Flash-Next-FP4-Local" && c.world() == 1,
+          "the single-Spark FP4-Local deployment");
+  require(c.engine.mtp && c.engine.mtp_depth == 2 && c.engine.decode_graph &&
+              c.engine.draft_head == "screen" && c.engine.lookup_draft && c.engine.lookup_tail == 2 &&
+              c.engine.ngram_table == "mmap",
+          "the draft and lookup recipe the validation measured");
+  require(c.engine.max_concurrency == 4 && c.engine.kv_capacity % 64 == 0 &&
+              c.engine.kv_capacity > c.engine.default_max_tokens &&
+              c.engine.model_alias == "Qwen3.8-Flash-Next-FP4",
+          "four request slots in a pool that clears a maximal answer");
+}
+
 DGPP_TEST(cluster_config_prefill_defaults_to_auto_with_explicit_opt_out) {
   const auto defaults = dgpp::serve::parse_cluster_config(engine_json("{}"), "t");
   require(defaults.engine.prefill_budget_tokens == -1, "unset prefill budget is automatic");

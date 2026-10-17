@@ -172,6 +172,11 @@ struct QwenTextConfig {
   bool ngram_table_nvfp4 = false;
   bool norms_f32 = false;
   bool experts_nvfp4_csf = false;
+  //   mtp_experts_nvfp4_csf the draft layer's experts in the CSF form (the
+  //                        FP4-Local export keeps them plain, so this stays
+  //                        false there); the same one-export-one-form rule
+  //                        holds within the draft entries.
+  bool mtp_experts_nvfp4_csf = false;
 
   // --- vision (docs/vision.md) --------------------------------------------
   // The multimodal release's tower, parsed from the root config's
