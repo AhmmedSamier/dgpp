@@ -9,8 +9,9 @@
 // collectives. Single-node mode without graph decode streams layers
 // through the eager engine. The memory plan validates the chosen shape.
 //
-// Threads: HTTP parses requests and writes responses; the engine owns
-// model execution; journal peers follow rank 0's scheduler operations.
+// Threads: HTTP owns connections and responses; a fixed pool prepares
+// requests. The engine owns model execution; journal peers follow rank 0's
+// scheduler operations.
 // See DESIGN §11 and docs/operations.md.
 //
 

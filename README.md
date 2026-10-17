@@ -116,6 +116,11 @@ knobs on these templates; [the deployment catalogue](deploy/README.md) maps the
 supported shapes to their flags. [The benchmark tables](docs/benchmarks.md)
 record the modes measured for each deployment.
 
+Request preparation runs off the HTTP loop in a fixed pool sized to
+`engine.max_concurrency`. Ready requests proceed in completion order; queue
+and payload limits bound retained work. See [request preparation](docs/configuration.md#request-preparation)
+for capacity, overload behavior and CPU/memory considerations.
+
 ## Highlights
 
 - **Tensor-parallel resident serving** on four nodes: each rank holds its

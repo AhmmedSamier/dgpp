@@ -1,5 +1,9 @@
 # DGPP implementation status
 
+Request preparation uses one persistent worker per configured engine request
+slot, with bounded request/payload queues and completion-order admission.
+HTTP retains socket ownership; preparation completion always notifies it.
+
 HTTP output supports opt-in `http.stream_flush: "wake"` notifications. The
 default `pass` mode retains the 25 ms poll; HTTP/service/fabric host gates
 cover both modes. See [operations](docs/operations.md) for configuration.

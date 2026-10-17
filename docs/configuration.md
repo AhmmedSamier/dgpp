@@ -144,6 +144,24 @@ requests cannot override it. Maintenance polling and keep-alive timing remain
 in place. Use the [HTTP output delivery procedure](http-stream-flush.md) to
 compare client latency, CPU use and throughput.
 
+### Request preparation
+
+Request preparation always uses a fixed pool on rank 0, with one thread per
+configured `engine.max_concurrency` slot. There is no separate worker-count
+setting. Workers sleep when idle, and ready requests proceed to admission
+without waiting for earlier preparations. When every worker is occupied,
+later requests wait in the bounded preparation queue. Preparation and file
+completions wake HTTP in both stream-flush modes.
+
+Queued, running and completed preparations together are limited to
+`engine.max_concurrency + engine.queue_limit` requests and a 1 GiB retained
+payload budget. Exhaustion returns HTTP 503 `preparation_busy`. The byte budget
+includes request bodies, prepared tokens/images and allowances for per-choice
+metadata. Reservations remain charged through generation and response
+completion; temporary parser/frontend scratch and the existing file store
+are additional. Increasing engine concurrency also increases possible preparation
+CPU and memory demand.
+
 ### File inputs
 
 `engine.file_inputs` is an optional object controlling uploads through

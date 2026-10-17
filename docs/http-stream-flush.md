@@ -4,6 +4,8 @@ The default `http.stream_flush: "pass"` keeps the 25 ms quiet-loop poll.
 `"wake"` signals ready output through an eventfd without moving socket writes
 off the HTTP thread. `--stream-flush` overrides the deployment JSON. The
 maintenance timeout remains 25 ms in both production modes.
+Request-preparation and file completions always notify HTTP; `stream_flush`
+controls additional notifications for generated output.
 
 ## Host comparison
 

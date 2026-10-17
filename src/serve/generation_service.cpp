@@ -635,6 +635,238 @@ GenerationService::GenerationService(const ServiceConfig& cfg,
   // from its own records: the scheduler keeps no retired request, so the
   // process's memory tracks the live requests, not the cumulative traffic.
   sched_.set_keep_retired(false);
+  if (cfg_.preparation_max_bytes == 0)
+    throw std::invalid_argument("GenerationService: preparation_max_bytes must be positive");
+  try {
+    for (int i = 0; i < engine_->max_concurrent_requests(); ++i)
+      preparation_workers_.emplace_back([this] { preparation_loop(); });
+  } catch (...) {
+    stop_preparation();
+    for (auto& worker : preparation_workers_) worker.join();
+    throw;
+  }
+  DGPP_LOG_INFO(
+      "serve: {} preparation workers (engine request slots), {} MiB retained payload budget",
+      preparation_workers_.size(), cfg_.preparation_max_bytes >> 20);
+}
+
+GenerationService::~GenerationService() {
+  file_inputs_.stop();
+  stop_preparation();
+  for (auto& worker : preparation_workers_) worker.join();
+}
+
+bool GenerationService::reserve_preparation_bytes(size_t bytes) {
+  auto used = preparation_bytes_->load();
+  do {
+    if (bytes > cfg_.preparation_max_bytes - used) return false;
+  } while (!preparation_bytes_->compare_exchange_weak(used, used + bytes));
+  return true;
+}
+
+bool GenerationService::reserve_prepared_payload(PreparedRequest& result, size_t bytes) {
+  if (!reserve_preparation_bytes(bytes)) {
+    respond_error(result, 503, "request preparation is busy; retry later", "server_error", "",
+                  "preparation_busy");
+    return false;
+  }
+  result.accounted_bytes += bytes;
+  return true;
+}
+
+void GenerationService::enqueue_preparation(const HttpRequest& request, HttpResponseWriter& writer,
+                                            uint64_t tag,
+                                            std::chrono::steady_clock::time_point arrived,
+                                            bool file_processed) {
+  const auto queued = std::chrono::steady_clock::now();
+  bool stopped;
+  {
+    std::lock_guard lock(mutex_);
+    stopped = shutdown_;
+  }
+  {
+    std::lock_guard lock(preparation_mutex_);
+    stopped = stopped || preparation_stopping_;
+  }
+  if (stopped) {
+    respond_unavailable(writer);
+    return;
+  }
+  const size_t limit = static_cast<size_t>(cfg_.queue_limit) + preparation_workers_.size();
+  if (preparation_count_.load() >= limit || !reserve_preparation_bytes(request.body.size())) {
+    {
+      std::lock_guard lock(mutex_);
+      ++stats_.requests_shed;
+    }
+    respond_error(writer, 503, "request preparation is busy; retry later", "server_error", "",
+                  "preparation_busy");
+    return;
+  }
+  const auto bytes = request.body.size();
+  std::shared_ptr<PreparationJob> job;
+  bool enqueued = false;
+  try {
+    job = std::make_shared<PreparationJob>();
+    job->request = request;
+    job->writer = &writer;
+    job->file_processed = file_processed;
+    job->result.tag = tag ? tag : next_tag_.fetch_add(1, std::memory_order_relaxed);
+    job->result.arrived = arrived == std::chrono::steady_clock::time_point{} ? queued : arrived;
+    job->result.queued = queued;
+    job->result.accounted_bytes = bytes;
+    preparation_jobs_.push_back(job);
+    std::lock_guard lock(preparation_mutex_);
+    // Shutdown can begin while the owned request is being copied. Publish
+    // only while workers still accept work, under the same lock as stop.
+    if (!preparation_stopping_) {
+      preparation_queue_.push_back(job);
+      preparation_count_.fetch_add(1);
+      enqueued = true;
+    }
+  } catch (...) {
+    std::erase(preparation_jobs_, job);
+    preparation_bytes_->fetch_sub(bytes);
+    throw;
+  }
+  if (!enqueued) {
+    std::erase(preparation_jobs_, job);
+    preparation_bytes_->fetch_sub(bytes);
+    respond_unavailable(writer);
+    return;
+  }
+  writer.set_stream_tag(job->result.tag);
+  preparation_cv_.notify_one();
+}
+
+void GenerationService::preparation_loop() {
+  for (;;) {
+    std::shared_ptr<PreparationJob> job;
+    bool stopped;
+    {
+      std::unique_lock lock(preparation_mutex_);
+      preparation_cv_.wait(lock,
+                           [this] { return preparation_stopping_ || !preparation_queue_.empty(); });
+      if (preparation_queue_.empty()) return;
+      job = std::move(preparation_queue_.front());
+      preparation_queue_.pop_front();
+      job->state = PreparationJob::State::running;
+      stopped = preparation_stopping_;
+    }
+    auto& result = job->result;
+    result.started = std::chrono::steady_clock::now();
+    if (!stopped && !job->cancelled.load()) {
+      try {
+        if (job->request.path == "/v1/chat/completions") {
+          if (!job->file_processed && FileInputs::needed(job->request))
+            result.needs_file = true;
+          else
+            prepare_chat_completions(job->request, result);
+        } else
+          prepare_completions(job->request, result);
+      } catch (const std::exception& e) {
+        respond_error(result, 500, std::string("handler error: ") + e.what(), "server_error");
+      } catch (...) {
+        respond_error(result, 500, "request preparation failed", "server_error");
+      }
+    }
+    result.finished = std::chrono::steady_clock::now();
+    {
+      std::lock_guard lock(preparation_mutex_);
+      job->state = PreparationJob::State::ready;
+      preparation_ready_.push_back(std::move(job));
+    }
+    work_wakeup_();  // Result is visible before HTTP is notified.
+  }
+}
+
+void GenerationService::stop_preparation() {
+  {
+    std::lock_guard lock(preparation_mutex_);
+    preparation_stopping_ = true;
+  }
+  preparation_cv_.notify_all();
+}
+
+void GenerationService::respond_unavailable(HttpResponseWriter& writer) {
+  std::string message;
+  bool engine_failed;
+  {
+    std::lock_guard lock(mutex_);
+    engine_failed = failed_;
+    ++stats_.requests_shed;
+    message = engine_failed
+                  ? "the engine failed (" + failure_ + "); the service is restarting — retry"
+                  : "the server is shutting down; retry on another instance";
+  }
+  respond_error(writer, 503, message, "server_error", "",
+                engine_failed ? "engine_failure" : "server_shutdown");
+}
+
+void GenerationService::pump_preparations() {
+  std::deque<std::shared_ptr<PreparationJob>> ready;
+  {
+    std::lock_guard lock(preparation_mutex_);
+    ready.swap(preparation_ready_);
+  }
+  for (auto& job : ready) {
+    auto& result = job->result;
+    std::erase(preparation_jobs_, job);
+    // Keep drain and byte accounting until the payload is admitted or
+    // discarded, including exceptions and disconnected clients.
+    struct Release {
+      std::shared_ptr<PreparationJob>& job;
+      std::atomic<size_t>& bytes;
+      std::atomic<size_t>& count;
+      size_t& charge;
+      ~Release() {
+        const auto n = charge;
+        job.reset();
+        bytes.fetch_sub(n);
+        count.fetch_sub(1);
+      }
+    } release{job, *preparation_bytes_, preparation_count_, result.accounted_bytes};
+    if (job->cancelled.load() || !job->writer) continue;
+    bool stopped;
+    {
+      std::lock_guard lock(mutex_);
+      stopped = shutdown_;
+      stats_.preparation_wait_s.observe(
+          std::chrono::duration<double>(result.started - result.queued).count());
+      stats_.preparation_work_s.observe(
+          std::chrono::duration<double>(result.finished - result.started).count());
+      if (!stopped && result.error) {
+        if (result.error->status >= 400 && result.error->status < 500) ++stats_.rejects_bad;
+        if (result.error->status == 503) ++stats_.requests_shed;
+      }
+    }
+    if (stopped) {
+      respond_unavailable(*job->writer);
+    } else if (result.error) {
+      job->writer->respond(result.error->status, result.error->content_type,
+                           std::move(result.error->body));
+    } else if (result.needs_file) {
+      try {
+        enqueue_file_work(job->request, *job->writer, true, result.tag, result.arrived);
+      } catch (const std::exception& e) {
+        respond_error(*job->writer, 500, std::string("file processing failed: ") + e.what(),
+                      "server_error", "file", "file_processing_failed");
+      }
+    } else {
+      if (result.needs_seed) {
+        const auto seed = seed_rng_();
+        for (size_t i = 0; i < result.requests.size(); ++i) result.requests[i].seed = seed + i;
+      }
+      // Retain the reservation through admission and generation. Merely
+      // moving a result into the scheduler must not bypass the byte budget.
+      auto reservation = std::make_unique<PreparationReservation>();
+      reservation->budget = preparation_bytes_;
+      reservation->bytes = result.accounted_bytes;
+      result.accounted_bytes = 0;
+      result.records.front()->group->preparation_reservation = std::move(reservation);
+      for (auto& record : result.records) record->writer = job->writer;
+      enqueue_group(std::move(result.records), std::move(result.requests));
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -691,7 +923,7 @@ constexpr size_t kMaxLogitBias = 1024;   // logit_bias entries
 }  // namespace
 
 bool GenerationService::parse_n(const dgpp::minijson::Value& body,
-                                HttpResponseWriter& w, int* n) {
+                                PreparedRequest& w, int* n) {
   *n = 1;
   const dgpp::minijson::Value* v = body.find("n");
   if (v == nullptr || v->is_null()) return true;
@@ -707,7 +939,7 @@ bool GenerationService::parse_n(const dgpp::minijson::Value& body,
 }
 
 bool GenerationService::parse_stop(const dgpp::minijson::Value& body,
-                                   HttpResponseWriter& w,
+                                   PreparedRequest& w,
                                    std::vector<std::string>* stops) {
   stops->clear();
   const dgpp::minijson::Value* v = body.find("stop");
@@ -733,7 +965,7 @@ bool GenerationService::parse_stop(const dgpp::minijson::Value& body,
 }
 
 bool GenerationService::parse_logit_bias(
-    const dgpp::minijson::Value& body, HttpResponseWriter& w,
+    const dgpp::minijson::Value& body, PreparedRequest& w,
     std::vector<dgpp::sched::LogitBias>* bias) {
   bias->clear();
   const dgpp::minijson::Value* v = body.find("logit_bias");
@@ -807,9 +1039,9 @@ bool GenerationService::parse_logit_bias(
 }
 
 bool GenerationService::parse_sampling(const dgpp::minijson::Value& body,
-                                       HttpResponseWriter& w,
+                                       PreparedRequest& w,
                                        sample::Params* sampling,
-                                       uint64_t* seed) {
+                                       std::optional<uint64_t>* seed) {
   sample::Params p = cfg_.sampling_defaults;
   // One numeric field: present → a finite number inside [lo, hi] (an
   // integer when asked), else the 400 names it.
@@ -888,7 +1120,7 @@ bool GenerationService::parse_sampling(const dgpp::minijson::Value& body,
     return false;
   }
   if (!has_seed)
-    *seed = cfg_.fixed_seed.has_value() ? *cfg_.fixed_seed : seed_rng_();
+    *seed = cfg_.fixed_seed;
   *sampling = p;
   return true;
 }
@@ -898,7 +1130,7 @@ bool GenerationService::parse_sampling(const dgpp::minijson::Value& body,
 // ---------------------------------------------------------------------------
 
 bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
-                                   HttpResponseWriter& w, ChatPlan* plan) {
+                                   PreparedRequest& w, ChatPlan* plan) {
   using dgpp::minijson::Member;
   using dgpp::minijson::Value;
   const auto refuse = [&](const std::string& message, const std::string& param,
@@ -1700,6 +1932,14 @@ void GenerationService::respond_error(HttpResponseWriter& w, int status,
     std::lock_guard<std::mutex> lock(mutex_);
     ++stats_.rejects_bad;
   }
+  PreparedRequest result;
+  respond_error(result, status, message, type, param, code);
+  w.respond(status, "application/json", std::move(result.error->body));
+}
+
+void GenerationService::respond_error(PreparedRequest& w, int status, const std::string& message,
+                                      const std::string& type, const std::string& param,
+                                      const std::string& code) {
   std::string body = "{\"error\":{\"message\":";
   append_json_string(&body, message);
   body.append(",\"type\":");
@@ -1715,7 +1955,7 @@ void GenerationService::respond_error(HttpResponseWriter& w, int status,
   else
     append_json_string(&body, code);
   body.append("}}");
-  w.respond(status, "application/json", std::move(body));
+  w.error = FileResponse{status, "application/json", std::move(body)};
 }
 
 // ---------------------------------------------------------------------------
@@ -1735,11 +1975,7 @@ void GenerationService::handle(const HttpRequest& req,
                     "invalid_request_error");
       return;
     }
-    if (p == "/v1/chat/completions") {
-      if (FileInputs::needed(req)) enqueue_file_work(req, w, true);
-      else route_chat_completions(req, w);
-    } else
-      route_completions(req, w);
+    enqueue_preparation(req, w);
     return;
   }
   if (p == "/v1/models" || p.rfind("/v1/models/", 0) == 0) {
@@ -1802,7 +2038,7 @@ void GenerationService::route_health(HttpResponseWriter& w) const {
 // POST /v1/chat/completions
 // ---------------------------------------------------------------------------
 
-bool GenerationService::validate_chat_parameters(const minijson::Value& body, HttpResponseWriter& w) {
+bool GenerationService::validate_chat_parameters(const minijson::Value& body, PreparedRequest& w) {
   const auto refuse = [&](const std::string& param, const std::string& message,
                           const std::string& code = "unsupported_parameter") {
     respond_error(w, 400, message, "invalid_request_error", param, code);
@@ -1857,7 +2093,7 @@ bool GenerationService::validate_chat_parameters(const minijson::Value& body, Ht
   return true;
 }
 
-bool GenerationService::parse_max_tokens(const minijson::Value& body, HttpResponseWriter& w,
+bool GenerationService::parse_max_tokens(const minijson::Value& body, PreparedRequest& w,
                                          int* steps, bool chat) {
   const auto* modern = chat ? optional_field(body, "max_completion_tokens") : nullptr;
   const auto* legacy = optional_field(body, "max_tokens");
@@ -1878,7 +2114,7 @@ bool GenerationService::parse_max_tokens(const minijson::Value& body, HttpRespon
   return true;
 }
 
-bool GenerationService::parse_ignore_eos(const minijson::Value& body, HttpResponseWriter& w,
+bool GenerationService::parse_ignore_eos(const minijson::Value& body, PreparedRequest& w,
                                          bool* ignore) {
   *ignore = false;
   const auto* v = body.find("ignore_eos");
@@ -1891,7 +2127,7 @@ bool GenerationService::parse_ignore_eos(const minijson::Value& body, HttpRespon
   return true;
 }
 
-bool GenerationService::parse_sse_ping_interval(const minijson::Value& body, HttpResponseWriter& w,
+bool GenerationService::parse_sse_ping_interval(const minijson::Value& body, PreparedRequest& w,
                                                 bool stream, int* interval) {
   *interval = cfg_.sse_ping_interval;
   const auto* value = body.find("sse_ping_interval");
@@ -1911,7 +2147,7 @@ bool GenerationService::parse_sse_ping_interval(const minijson::Value& body, Htt
   return true;
 }
 
-bool GenerationService::parse_stream_options(const minijson::Value& body, HttpResponseWriter& w,
+bool GenerationService::parse_stream_options(const minijson::Value& body, PreparedRequest& w,
                                               bool stream, bool* usage, bool* obfuscation) {
   *usage = false;
   *obfuscation = true;
@@ -1937,8 +2173,8 @@ bool GenerationService::parse_stream_options(const minijson::Value& body, HttpRe
   return true;
 }
 
-void GenerationService::route_chat_completions(const HttpRequest& req,
-                                              HttpResponseWriter& w) {
+void GenerationService::prepare_chat_completions(const HttpRequest& req,
+                                              PreparedRequest& w) {
   dgpp::minijson::ParseResult parsed;
   try {
     parsed = dgpp::minijson::parse(req.body);
@@ -2001,7 +2237,7 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
   // Sampling: the spec over the model's defaults (M6 6b). temperature 0
   // is the exact greedy path; anything the engine cannot execute is a 400.
   sample::Params sampling;
-  uint64_t seed = 0;
+  std::optional<uint64_t> seed;
   if (!parse_sampling(body, w, &sampling, &seed)) return;
 
   // logprobs (bool) + top_logprobs (0..20): exact from the same sampler.
@@ -2111,11 +2347,23 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
     return;
   }
 
+  // Charge the source JSON again per choice as a conservative allowance
+  // for retained metadata, schemas and grammar strings.
+  size_t payload = prompt.size() * sizeof(int64_t) + req.body.size();
+  for (const auto& image : images) payload += image.rgb.size();
+  if (payload > cfg_.preparation_max_bytes / static_cast<size_t>(n) ||
+      !reserve_prepared_payload(w, payload * static_cast<size_t>(n))) {
+    if (!w.error)
+      respond_error(w, 503, "prepared request exceeds the preparation byte budget", "server_error",
+                    "", "preparation_busy");
+    return;
+  }
+
   // The request's n choices (2026-09-06): one record and one scheduler
   // request per choice, the same prompt (the prefix cache makes every
   // choice past the first an attach), per-choice seeds, one group for the
   // answer; admitted or shed together.
-  const uint64_t tag = next_tag_.fetch_add(1, std::memory_order_relaxed);
+  const uint64_t tag = w.tag;
   std::string rid;
   {
     char suffix[17];
@@ -2129,7 +2377,7 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
   group->n = n;
   group->choices.resize(static_cast<size_t>(n));
   const std::vector<int64_t> boundaries = prompt_boundaries(prompt);
-  const auto arrived = std::chrono::steady_clock::now();
+  const auto arrived = w.arrived;
   std::vector<std::shared_ptr<StreamRecord>> records;
   std::vector<SchedulerRequest> requests;
   for (int choice = 0; choice < n; ++choice) {
@@ -2159,7 +2407,6 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
         plan.schemas, popts);
     record->stop.stops = stops;
     record->reasoning_open = opens_thinking;
-    record->writer = &w;
     record->logprobs = logprobs;
     record->arrived = arrived;
 
@@ -2172,23 +2419,24 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
     sr.max_steps = steps;
     sr.ignore_eos = ignore_eos;
     sr.sampling = sampling;
-    sr.seed = seed + static_cast<uint64_t>(choice);
+    sr.seed = seed.value_or(0) + static_cast<uint64_t>(choice);
     sr.logprobs = logprobs;
     sr.grammar = plan.grammar;
     sr.logit_bias = logit_bias;
     records.push_back(std::move(record));
     requests.push_back(std::move(sr));
   }
-  w.set_stream_tag(tag);
-  enqueue_group(std::move(records), std::move(requests));
+  w.needs_seed = !seed.has_value();
+  w.records = std::move(records);
+  w.requests = std::move(requests);
 }
 
 // ---------------------------------------------------------------------------
 // POST /v1/completions (the legacy prompt API)
 // ---------------------------------------------------------------------------
 
-void GenerationService::route_completions(const HttpRequest& req,
-                                          HttpResponseWriter& w) {
+void GenerationService::prepare_completions(const HttpRequest& req,
+                                          PreparedRequest& w) {
   dgpp::minijson::ParseResult parsed;
   try {
     parsed = dgpp::minijson::parse(req.body);
@@ -2251,7 +2499,7 @@ void GenerationService::route_completions(const HttpRequest& req,
   }
 
   sample::Params sampling;
-  uint64_t seed = 0;
+  std::optional<uint64_t> seed;
   if (!parse_sampling(body, w, &sampling, &seed)) return;
   // The legacy logprobs: an integer 0..5 (null = none).
   int logprobs = -1;
@@ -2315,8 +2563,10 @@ void GenerationService::route_completions(const HttpRequest& req,
     return;
   }
 
+  if (!reserve_prepared_payload(w, ids.size() * sizeof(int64_t))) return;
+
   auto record = std::make_shared<StreamRecord>();
-  record->tag = next_tag_.fetch_add(1, std::memory_order_relaxed);
+  record->tag = w.tag;
   {
     char suffix[17];
     std::snprintf(suffix, sizeof(suffix), "%016llx",
@@ -2336,8 +2586,6 @@ void GenerationService::route_completions(const HttpRequest& req,
   record->include_usage = include_usage;
   record->include_obfuscation = false;
   record->prompt_tokens = static_cast<int>(ids.size());
-  record->writer = &w;
-  w.set_stream_tag(record->tag);
 
   SchedulerRequest sr;
   sr.id = record->id;
@@ -2347,12 +2595,14 @@ void GenerationService::route_completions(const HttpRequest& req,
   sr.max_steps = steps;
   sr.ignore_eos = ignore_eos;
   sr.sampling = sampling;
-  sr.seed = seed;
+  sr.seed = seed.value_or(0);
   sr.logprobs = logprobs;
   sr.logit_bias = logit_bias;
   record->logprobs = logprobs;
-  record->arrived = std::chrono::steady_clock::now();
-  enqueue_admission(std::move(record), std::move(sr));
+  record->arrived = w.arrived;
+  w.needs_seed = !seed.has_value();
+  w.records.push_back(std::move(record));
+  w.requests.push_back(std::move(sr));
 }
 
 // ---------------------------------------------------------------------------
@@ -2473,6 +2723,13 @@ void GenerationService::route_metrics_prometheus(HttpResponseWriter& w) {
   out.gauge("dgpp_engine_failed", "1 once the engine has failed (the service then refuses work).",
             int64_t{failed() ? 1 : 0});
   out.gauge("dgpp_max_concurrent_requests", "Engine request slots.", int64_t{engine_->max_concurrent_requests()});
+  out.gauge("dgpp_preparation_workers", "Preparation workers, matching engine request slots.",
+            static_cast<int64_t>(preparation_workers_.size()));
+  out.gauge("dgpp_preparation_pending", "Requests preparing or awaiting preparation handoff.",
+            static_cast<int64_t>(preparation_count_.load()));
+  out.gauge("dgpp_preparation_payload_bytes",
+            "Reserved input and prepared payload bytes, excluding transient scratch.",
+            static_cast<int64_t>(preparation_bytes_->load()));
   out.gauge("dgpp_queue_limit", "Admission queue bound (beyond it, 503).", int64_t{cfg_.queue_limit});
   out.gauge("dgpp_kv_pool_tokens", "K/V pool capacity in tokens.", cfg_.kv_pool_tokens);
   out.gauge("dgpp_admission_window_tokens", "Grow-on-demand reservation step.", int64_t{policy.window_tokens});
@@ -2645,6 +2902,8 @@ void GenerationService::route_metrics_prometheus(HttpResponseWriter& w) {
   out.histogram("dgpp_time_to_first_token_seconds", "Door to first token, by prefix-cache attach.", st.ttft_miss_s,
                 "prefix_cache=\"miss\"");
   out.histogram("dgpp_request_queue_time_seconds", "Door to engine slot.", st.queue_s);
+  out.histogram("dgpp_preparation_queue_time_seconds", "Time waiting for a preparation worker, per stage.", st.preparation_wait_s);
+  out.histogram("dgpp_preparation_work_seconds", "Preparation worker time, per stage.", st.preparation_work_s);
   out.histogram("dgpp_request_prefill_time_seconds", "Engine slot to first token.", st.prefill_s);
   out.histogram("dgpp_request_decode_time_seconds", "First token to retire.", st.decode_s);
   out.histogram("dgpp_e2e_request_latency_seconds", "Door to retire.", st.e2e_s);
@@ -2955,15 +3214,6 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {  Scheduler::Meter
 // The admission interface
 // ---------------------------------------------------------------------------
 
-void GenerationService::enqueue_admission(std::shared_ptr<StreamRecord> record,
-                                           SchedulerRequest request) {
-  std::vector<std::shared_ptr<StreamRecord>> records;
-  records.push_back(std::move(record));
-  std::vector<SchedulerRequest> requests;
-  requests.push_back(std::move(request));
-  enqueue_group(std::move(records), std::move(requests));
-}
-
 void GenerationService::enqueue_group(
     std::vector<std::shared_ptr<StreamRecord>> records,
     std::vector<SchedulerRequest> requests) {
@@ -2994,6 +3244,20 @@ void GenerationService::enqueue_group(
 }
 
 void GenerationService::on_disconnect(uint64_t tag) {
+  for (auto it = preparation_jobs_.begin(); it != preparation_jobs_.end(); ++it) {
+    auto& job = *it;
+    if (job->result.tag != tag) continue;
+    job->writer = nullptr;
+    job->cancelled.store(true);
+    std::lock_guard lock(preparation_mutex_);
+    if (job->state == PreparationJob::State::queued) {
+      std::erase(preparation_queue_, job);
+      preparation_bytes_->fetch_sub(job->result.accounted_bytes);
+      preparation_count_.fetch_sub(1);
+      preparation_jobs_.erase(it);
+    }
+    break;
+  }
   for (auto& pending : file_work_)
     if (pending.tag == tag) pending.writer = nullptr;
   std::lock_guard<std::mutex> lock(mutex_);
@@ -3454,17 +3718,19 @@ void GenerationService::on_retire(const std::string& id,
 // idle(): the record pump (HTTP thread)
 // ---------------------------------------------------------------------------
 
-void GenerationService::enqueue_file_work(const HttpRequest& req, HttpResponseWriter& writer, bool chat) {
+void GenerationService::enqueue_file_work(const HttpRequest& req, HttpResponseWriter& writer, bool chat,
+    uint64_t tag, std::chrono::steady_clock::time_point arrived) {
   if (file_work_.size() >= static_cast<size_t>(cfg_.file_inputs.workers)) {
     respond_error(writer, 503, "file preprocessing is busy; retry later", "server_error", "file", "file_processing_busy");
     return;
   }
-  const uint64_t tag = next_tag_.fetch_add(1, std::memory_order_relaxed);
+  if (!tag) tag = next_tag_.fetch_add(1, std::memory_order_relaxed);
+  if (arrived == std::chrono::steady_clock::time_point{}) arrived = std::chrono::steady_clock::now();
   writer.set_stream_tag(tag);
   std::promise<FileResponse> result;
   auto future = result.get_future();
   auto worker = std::async(std::launch::async, [this, req, chat, result = std::move(result),
-                                                wakeup = wakeup_]() mutable {
+                                                wakeup = work_wakeup_]() mutable {
     try {
       result.set_value(chat ? FileResponse{200, "application/json", file_inputs_.prepare(req).body}
                             : file_inputs_.route(req));
@@ -3475,7 +3741,7 @@ void GenerationService::enqueue_file_work(const HttpRequest& req, HttpResponseWr
     // returns. Publish through a separate promise before notifying HTTP.
     wakeup();
   });
-  file_work_.push_back({tag, &writer, chat, std::move(future), std::move(worker)});
+  file_work_.push_back({tag, &writer, chat, arrived, std::move(future), std::move(worker)});
   pending_file_count_.fetch_add(1);
 }
 
@@ -3491,7 +3757,7 @@ void GenerationService::pump_file_work() {
       if (job.chat) {
         HttpRequest request;
         request.method = "POST"; request.path = "/v1/chat/completions"; request.body = std::move(result.body);
-        route_chat_completions(request, *job.writer);
+        enqueue_preparation(request, *job.writer, job.tag, job.arrived, true);
       } else job.writer->respond(result.status, result.content_type, std::move(result.body));
     } catch (const FileInputError& e) {
       respond_error(*job.writer, e.status, e.what(), e.status >= 500 ? "server_error" : "invalid_request_error", e.param, e.code);
@@ -3502,7 +3768,7 @@ void GenerationService::pump_file_work() {
   }
 }
 
-void GenerationService::idle() { pump_file_work(); pump_records(); }
+void GenerationService::idle() { pump_file_work(); pump_preparations(); pump_records(); }
 
 void GenerationService::write_stream_event(StreamRecord& r, std::string event, bool usage) {
   // Delay the preamble until an actual completion chunk is ready. Empty
@@ -4035,6 +4301,8 @@ int GenerationService::begin_shutdown() {
     ++interrupted;
   }
   lock.unlock();
+  stop_preparation();
+  work_wakeup_();
   wakeup_();
   return interrupted;
 }
@@ -4042,6 +4310,7 @@ int GenerationService::begin_shutdown() {
 bool GenerationService::drained() const {
   std::lock_guard<std::mutex> lock(mutex_);
   if (pending_file_count_.load() != 0) return false;
+  if (preparation_count_.load() != 0) return false;
   if (!pending_admissions_.empty() || !pending_cancels_.empty()) return false;
   for (const auto& r : records_)
     if (r->writer != nullptr && !r->writer_dead) return false;  // an answer owed
@@ -4088,6 +4357,8 @@ int GenerationService::fail_engine(const std::string& what) {
     ++interrupted;
   }
   lock.unlock();
+  stop_preparation();
+  work_wakeup_();
   wakeup_();
   return interrupted;
 }

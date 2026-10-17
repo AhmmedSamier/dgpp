@@ -5,6 +5,14 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **Prepare generation requests outside the HTTP loop** ([#122](https://github.com/HawkBearPig/dgpp/issues/122)).
+  One persistent worker per configured engine slot handles JSON validation,
+  rendering, tokenization and image preparation. Ready requests proceed in
+  completion order. Queued work and retained payloads are bounded, disconnects
+  release unstarted work, and shutdown joins workers. Preparation and file
+  completion notifications operate in both HTTP flush modes. Latency metrics
+  include preparation, with separate preparation wait/work histograms.
+
 - **Optional bounded tokenizer word cache**. Set `tokenizer.word_cache_entries`
   to 1–10000 in deployment JSON to reuse short mapped pretokens on rank 0.
   The default remains 0. Exact key checks, bounded slots and nonblocking shard
@@ -29,7 +37,7 @@ project procedures and design guidance live in `docs/`.
   `http.stream_flush: "wake"` / `--stream-flush wake` wakes rank 0's HTTP loop
   when asynchronous output is ready. Tokens, logprobs, retirement, overload,
   shutdown/failure and file results share the existing HTTP-thread drain.
-  The default `pass` mode retains the 25 ms poll and creates no eventfd.
+  The default `pass` mode retains the 25 ms token-output poll.
   Notification handles remain safe after server teardown, and file results
   are published before notification. Keep-alive and journal behavior are unchanged.
 
