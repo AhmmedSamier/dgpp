@@ -642,7 +642,12 @@ traffic; increasing it only helps when idle arrivals can form a useful batch.
 Use the queue limit to bound accepted backlog. The `admission` setting defaults
 to `full`, reserving the prompt and maximum completion before starting. The
 optional `grow` policy uses `admission_window` (256 tokens by default) to grow
-reservations, but may end a request when the pool runs out. It is a memory
+reservations. Growth first evicts least-recently-used unattached prefix-cache
+entries until the next step fits, checking actual free blocks after each release
+because entries can share blocks. If only the minimum growth fits, it keeps that
+smaller reservation instead of evicting more cache for a full window. Attached
+entries remain protected. Once no evictable entries remain, genuine exhaustion
+may still end the youngest live request with `finish_reason: length`. It is a memory
 admission tradeoff, not a substitute for a latency target. Adjust the controller
 headroom, growth and recovery only after observing throughput and target misses.
 

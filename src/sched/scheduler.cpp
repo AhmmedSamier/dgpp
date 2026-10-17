@@ -162,16 +162,21 @@ void Scheduler::grow_reservations() {
     int64_t target = std::min<int64_t>(
         full, std::max<int64_t>(need, r.reserved_tokens + policy_.window_tokens));
     const int64_t held = engine_->reservation_blocks(r.reserved_tokens);
+    const int64_t minimum_blocks = engine_->reservation_blocks(need) - held;
     for (;;) {
+      // Idle cached histories give way before live work. Reclaim only enough
+      // for the next step: an optional full window must not evict more cache.
+      // The helper rechecks physical capacity after every release, since
+      // snapshots can share blocks with each other and with live requests.
+      const bool fits = ensure_free_blocks(minimum_blocks, r.spec.id);
       const int64_t free_blocks =
           engine_->pool_blocks_total() - engine_->pool_blocks_in_use();
-      if (engine_->reservation_blocks(target) - held <= free_blocks) break;
-      if (engine_->reservation_blocks(need) - held <= free_blocks) {
-        target = need;  // the minimum, rather than shedding for a full window
+      if (fits) {
+        if (engine_->reservation_blocks(target) - held > free_blocks) target = need;
         break;
       }
-      // Even the minimum does not fit: the youngest reserved request goes —
-      // this one when nothing younger is live.
+      // No evictable cache remains and even the minimum does not fit: the
+      // youngest reserved request goes — this one when nothing younger is live.
       const int victim = youngest_active_after(static_cast<int>(i));
       const int shed = victim >= 0 ? victim : static_cast<int>(i);
       Request& v = requests_[static_cast<size_t>(shed)];

@@ -237,6 +237,61 @@ physical KV boundaries, semantic checks and multi-rank operation-stream
 agreement remain separate live gates. Host passes do not establish GPU
 throughput equivalence.
 
+### Mixed-prefill controller investigation
+
+[Issue #116](https://github.com/HawkBearPig/dgpp/issues/116) reports a 64K MiMo
+prompt taking about 4.5 times longer beside short requests with the default
+controller than with fixed budgets. The idle floor does not apply while any
+request decodes. The estimate divides a whole pass's cost, including decode and
+snapshot work, by computed prefill tokens. Fixed costs and less efficient small
+chunks can therefore keep the learned limit small. The report does not establish
+how much decoder responsiveness those smaller chunks buy; changing the default
+requires both throughput and decode-gap measurements on this deployment.
+
+On an available, otherwise idle two-Spark MiMo deployment, hold the model revision,
+TP size, MTP settings, four slots and 262,144-token pool fixed. Use full admission
+and the benchmark's cache-disabled requests to isolate this controller question
+from prefix-cache memory pressure. Compare decode-gap/first-token targets of
+1000/3000, 2000/3000, 3000/3000 and 0/0 ms with the same resolved busy/idle caps.
+Restart between configurations, alternate run order, and record cold-controller
+and warmed long-prompt results separately. The benchmark's automatic warmup is
+only a short decode; use a separate long-prompt run for the warmed comparison.
+
+For example, on each explicitly configured server:
+
+```bash
+python3 scripts/serve_admission_bench.py \
+  --url http://127.0.0.1:18081 --label COMMIT-MIMO-TP2-TARGETS \
+  --scenarios solo_prefill sustained_idle sustained_busy \
+  --prompt-words 49152 --decode-tokens 16384 --arrival-tokens 2048 \
+  --arrivals 8 --interval 0.25 --metrics-interval 0.25 \
+  --trials 3 --timeout 1800 --out artifacts/mimo-admission.json
+```
+
+The word count is an initial estimate, not a 64K token guarantee: calibrate it
+against recorded prompt usage, then keep the exact prompts and output caps
+identical across comparisons. Use the reporter's scripts too when available;
+these sustained-arrival scenarios are controlled probes, not an exact replay of
+the simultaneous OpenCode workload. Keep decoders live throughout the long
+prefill and check that condition in the sampled native progress/load trace.
+
+Compare long-request first-token/wall time, short-request latency, per-request
+SSE update-gap p95/max, aggregate output and prompt throughput, and target-miss
+counter deltas. `metrics_samples` associates the selected adaptive limit and
+computed/offered chunk counters with native reader IDs and elapsed time.
+It is sampled evidence, not one record per engine pass; before/after snapshots
+and final usage remain the workload accounting checks. Both targets zero selects
+fixed budgeting; increasing the idle floor alone cannot affect the mixed case.
+
+Validate grow-mode cache reclamation separately with cached conversation
+histories and the 393,216-token pool from the report. Fill the pool with idle
+histories, then force a live request to grow while its full lifetime fits the
+pool. Require cache evictions before any shed, complete output with no shed when
+reclamation suffices, unchanged attached histories, and matching rank operation
+streams. Also run genuine live oversubscription to retain youngest-first shedding.
+The host regressions establish those decisions; real MiMo snapshot lifetimes,
+cross-rank execution and throughput still need this hardware check.
+
 ### Shared execution timing
 
 `mixed_steps` counts decode passes that also advance prefill. Their elapsed

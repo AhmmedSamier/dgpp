@@ -40,11 +40,14 @@ def server(fault=None):
             with lock:
                 readers = [{"id": "wrong" if fault == "identity" else rid, "processed_tokens": 4}
                            for rid in state["prefills"]]
-                self.send_json({"service": {"engine_failed": False, "requests_total": state["requests"]},
+                self.send_json({"service": {"engine_failed": False, "requests_total": state["requests"],
+                                           "requests_shed_pool": 0,
+                                           "latency_target_misses": {"first_token": 0, "decode_gap": 0}},
                                 "scheduler": {"active": state["active"], "queued": 0,
                                               "records": state["active"], "terminal": state["terminal"],
                                               "tokens_generated": state["tokens"],
                                               "pool_blocks_in_use": state["requests"] if fault == "kv_leak" else 0,
+                                              "prefill_chunks": {"adaptive_limit_tokens": 64 if readers else 1024},
                                               "prompt_tokens_computed": state["prompt"]},
                                 "prefill": {"requests": readers}})
 
@@ -129,6 +132,46 @@ class AdmissionBenchmarkTest(unittest.TestCase):
                             for r in result["native_prefill_observation"]))
         self.assertEqual(result["generated_tokens"], 137)
         self.assertEqual(result["computed_prompt_tokens"], 48)
+        self.assertEqual(result["metrics_samples"], [])
+
+    def test_metrics_trace_correlates_controller_limits_and_reader_identity(self):
+        with server() as bench:
+            bench.args.metrics_interval = .005
+            result = bench.run("mixed_short", 0)
+        samples = result["metrics_samples"]
+        long_id = next(r["id"] for r in result["requests"] if r["name"] == "long")
+        reading = [s for s in samples if any(r["id"] == long_id for r in s["prefill"]["requests"])]
+        self.assertTrue(reading)
+        self.assertTrue(all(s["scheduler"]["prefill_chunks"]["adaptive_limit_tokens"] == 64 for s in reading))
+        self.assertTrue(all(s["scheduler"]["active"] >= 2 for s in reading))
+        self.assertTrue(all(s["service"] == {"requests_shed_pool": 0,
+                                            "latency_target_misses": {"first_token": 0, "decode_gap": 0}}
+                            for s in samples))
+        self.assertEqual([s["elapsed_s"] for s in samples], sorted(s["elapsed_s"] for s in samples))
+        self.assertGreaterEqual(samples[0]["elapsed_s"], 0)
+        self.assertLessEqual(samples[-1]["elapsed_s"], result["wall_s"])
+
+    def test_sampling_failure_invalidates_the_trace(self):
+        with server() as bench:
+            bench.args.metrics_interval = .005
+            failed = threading.Event()
+
+            def broken_metrics(_):
+                failed.set()
+                raise OSError("metrics endpoint unavailable")
+
+            bench.get = broken_metrics
+            with self.assertRaisesRegex(RuntimeError, "trace is incomplete"):
+                with bench.sample_metrics(time.monotonic()):
+                    self.assertTrue(failed.wait(1), "sampler did not attempt a metrics read")
+        self.assertFalse(any(t.name == "admission-bench-metrics" for t in threading.enumerate()))
+
+    def test_sampling_thread_stops_when_a_request_fails(self):
+        with server("usage") as bench:
+            bench.args.metrics_interval = .005
+            with self.assertRaisesRegex(RuntimeError, "incomplete stream"):
+                bench.run("solo_prefill", 0)
+        self.assertFalse(any(t.name == "admission-bench-metrics" for t in threading.enumerate()))
 
     def test_overlap_must_match_the_long_response(self):
         with server("identity") as bench:

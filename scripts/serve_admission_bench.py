@@ -9,7 +9,7 @@ dispatched. SSE gaps measure client updates, not individual token latency.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import closing, contextmanager
 import hashlib
 import http.client
 import json
@@ -65,6 +65,50 @@ class Bench:
                 return metrics
             time.sleep(.05)
         raise TimeoutError("server did not drain")
+
+    @contextmanager
+    def sample_metrics(self, started):
+        """Optionally retain controller/load observations during requests.
+
+        These are published snapshots, not per-pass timings. Polling uses its
+        own connection and must be enabled equally in compared runs.
+        """
+        interval = getattr(self.args, "metrics_interval", 0)
+        samples = []
+        if not interval:
+            yield samples
+            return
+        stopped, errors = threading.Event(), []
+
+        def poll():
+            try:
+                while not stopped.is_set():
+                    metrics = self.get("/metrics")
+                    scheduler = metrics["scheduler"]
+                    samples.append({
+                        "elapsed_s": time.monotonic() - started,
+                        "scheduler": {key: scheduler[key] for key in (
+                            "active", "queued", "records", "pool_blocks_total", "pool_blocks_in_use",
+                            "tokens_generated", "prompt_tokens_computed",
+                            "prefill_ms", "step_ms", "mixed_ms", "prefill_chunks") if key in scheduler},
+                        "prefill": metrics.get("prefill", {}),
+                        "service": {key: metrics["service"][key] for key in (
+                            "requests_shed_pool", "latency_target_misses") if key in metrics["service"]},
+                    })
+                    if stopped.wait(interval):
+                        break
+            except Exception as error:
+                errors.append(error)
+
+        thread = threading.Thread(target=poll, name="admission-bench-metrics")
+        thread.start()
+        try:
+            yield samples
+        finally:
+            stopped.set()
+            thread.join()
+        if errors:
+            raise RuntimeError("metrics sampling failed; benchmark trace is incomplete") from errors[0]
 
     def stream(self, name, prompt, tokens, ready=None, cancel=False, dispatched=None):
         request = {"model": self.model, "prompt": prompt,
@@ -154,7 +198,7 @@ class Bench:
         warm = scenario in ("mixed_short", "mixed_long", "sustained_busy", "cancel")
         count = self.args.arrivals if scenario.startswith("sustained") else 1
         started = time.monotonic()
-        with ThreadPoolExecutor(max_workers=self.args.arrivals + 2) as pool:
+        with self.sample_metrics(started) as samples, ThreadPoolExecutor(max_workers=self.args.arrivals + 2) as pool:
             futures = []
             if scenario == "solo_decode":
                 futures.append(pool.submit(self.stream, "decoder", short_prompt, self.args.decode_tokens))
@@ -220,7 +264,7 @@ class Bench:
         generated = after["scheduler"]["tokens_generated"] - before["scheduler"]["tokens_generated"]
         computed = after["scheduler"]["prompt_tokens_computed"] - before["scheduler"]["prompt_tokens_computed"]
         return {"scenario": scenario, "trial": trial, "wall_s": ended - started,
-                "native_prefill_observation": observed, "requests": records,
+                "native_prefill_observation": observed, "metrics_samples": samples, "requests": records,
                 "computed_prompt_tokens": computed,
                 "completed_response_tokens": completed_tokens, "generated_tokens": generated,
                 "aggregate_output_tokens_per_second": generated / (ended - started),
@@ -240,6 +284,8 @@ def main():
     parser.add_argument("--arrival-tokens", type=int, default=256)
     parser.add_argument("--arrivals", type=int, default=8)
     parser.add_argument("--interval", type=float, default=.25)
+    parser.add_argument("--metrics-interval", type=float, default=0,
+                        help="sample controller/load metrics every N seconds; 0 disables (use equally in compared runs)")
     parser.add_argument("--timeout", type=float, default=600)
     parser.add_argument("--seed", type=int, default=104)
     parser.add_argument("--record-text", action="store_true", help="retain generated text for output-difference diagnosis")
@@ -249,6 +295,8 @@ def main():
         parser.error("counts must be positive")
     if args.interval < 0 or args.timeout <= 0:
         parser.error("interval must be nonnegative and timeout positive")
+    if not math.isfinite(args.metrics_interval) or args.metrics_interval < 0:
+        parser.error("metrics interval must be finite and nonnegative")
     bench = Bench(args)
     initial = bench.idle()
     bench.stream("warmup", "Continue counting: 1, 2, 3,", 32)
