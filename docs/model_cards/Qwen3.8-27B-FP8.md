@@ -45,7 +45,8 @@ block of seven drafts from one anchor.
 **One Spark** (`cluster_qwen3.8-27b_fp8_w1`): the drafter recipe. 27.5 GiB
 of weights, a 524,288-token BF16 KV pool (42.0 GiB, two full contexts), the
 3.6 GiB drafter and its five K/V planes, eight request slots and a 20 GiB
-prefix arena, the plan at 102 GiB of the node's 116 (sized to the node on
+prefix arena, the plan at 103 GiB of the node's 116 with the replicated
+BF16 image tower (sized to the node on
 2026-10-17 — a world-1 boot ends 6–8 GiB below its plan at listening, so
 the recipe leaves that room; a 256K pool and a 1.5 GiB arena at 62 GiB
 until then); the graph engine records the block proposal inside the decode
@@ -78,7 +79,7 @@ across the tested isolated, scheduled-depth and joining-co-tenant cases); 15.0 G
 and a 63 GiB KV pool a rank (1,572,864 tokens, six full contexts) with a
 16 GiB prefix arena on two Sparks, eight slots; on four Sparks a
 2,097,152-token pool (one full context per slot, full admission) with a
-32 GiB arena, 91 GiB planned a rank (since 2026-10-17; 256K pools and 1.5 GiB
+32 GiB arena, 92 GiB planned a rank (since 2026-10-17; 256K pools and 1.5 GiB
 arenas before). The MTP
 depth-3 world is available as an alternative to each template's DFlash
 default (`--no-dflash --mtp --mtp-depth 3`),

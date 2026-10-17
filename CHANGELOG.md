@@ -5,6 +5,19 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **The dense W4A4 TMA GEMM's pipeline drain** (2026-10-17). The Qwen3.8-27B
+  NVFP4 MLP's TMA-staged form (2026-10-16) waited for its per-row scale
+  words with `cp.async.wait_group 1` at every k-step, which is right while a
+  newer group is still being committed and wrong at the last step, whose own
+  group is then the most recent: the final k-block could be scaled with
+  words that had not landed. Intermittent (4 of 49 launches at the gate
+  shape, 2 of 19 at 2,048 rows), and the reason the NVFP4 27B's
+  temperature-0 transcripts moved run to run under `prefill_activations:
+  "native"` while the FP8 release's reproduced exactly (bisected across the
+  fp8 pool, the fp8 attention and the native recipe, then kernel by kernel
+  at the model's shapes). The drain now waits for everything;
+  `moe_w4a4_test` launches the form forty times at the gate shape and
+  requires every output bitwise the grouped kernel's.
 - **Prepare generation requests outside the HTTP loop** ([#122](https://github.com/HawkBearPig/dgpp/issues/122)).
   One persistent worker per configured engine slot handles JSON validation,
   rendering, tokenization and image preparation. Ready requests proceed in
@@ -59,7 +72,8 @@ project procedures and design guidance live in `docs/`.
   2,097,152 (one per slot, full admission) with 32 GiB on four; NVFP4
   1,048,576 (four) with 16 GiB on one, 2,097,152 with 32 GiB on two and
   four; the YaRN templates 1,130,496 (two full-length streams) with 16 GiB
-  and 1,048,576 with 20 GiB — plans of 73 to 104 GiB, each verified with
+  and 1,048,576 with 20 GiB — plans of 74 to 105 GiB including the
+  replicated BF16 image tower (1.17 GiB a rank), each verified with
   `--memory-plan` and a boot whose ledger leaves at least 5 GiB at
   listening: the boots end 6–8 GiB below the plan at world 1 (4.4 at two,
   2 at four; a 786,432-token FP8 pool planned at 109 GiB swapped), which
