@@ -12,39 +12,38 @@
 //   * client disconnect mid-stream → scheduler cancellation (metrics);
 //   * /v1/models, /health, /metrics and its /v1/metrics alias.
 #include <arpa/inet.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <mutex>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <optional>
+#include <poll.h>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <mutex>
-#include <optional>
-#include <cstring>
+#include <sys/socket.h>
+#include <sys/stat.h>
 #include <thread>
 #include <tuple>
+#include <unistd.h>
 #include <vector>
 
-#include "common/log.hpp"
-
-#include "common/test.hpp"
 #include "../common/utf8.hpp"
+#include "common/log.hpp"
+#include "common/test.hpp"
 #include "sched/scheduler.hpp"
 #include "serve/generation_service.hpp"
-#include "serve/image_inputs.hpp"
 #include "serve/http_server.hpp"
+#include "serve/image_inputs.hpp"
 #include "serve/prefill_policy.hpp"
 #include "serve/serve_stats.hpp"
 #include "text/chat_template.hpp"
@@ -738,7 +737,9 @@ struct ServiceRig {
           return c;
         }()),
         service((engine.set_prefix_arena(prefix_slots, 4), cfg), &engine, &frontend, {kFakeEos}),
-        http(0, &service, /*max_connections=*/64) {
+        http(0, &service, /*max_connections=*/64, "127.0.0.1",
+             dgpp::serve::kDefaultHttpMaxBodyBytes,
+             std::getenv("DGPP_TEST_STREAM_WAKE") != nullptr) {
     http_loop = std::thread([this] { http.serve(); });
     engine_loop = std::thread([this] {
       while (!stopping.load()) {
@@ -4834,6 +4835,208 @@ DGPP_TEST(serve_timings_decodeRatesHandlePrefillOnlyAndSpeculativeChoices) {
 int main() {
   dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");
   return dgpp::test::run_all();
+}
+
+namespace {
+// Five-second maintenance polls make notification regressions fail without
+// relying on sub-25-ms scheduling. Engine callbacks are driven by the test.
+struct WakeServiceRig {
+  FakeEngine engine{4, 100, 4, true};
+  FakeFrontend frontend;
+  struct Service : GenerationService {
+    using GenerationService::GenerationService;
+    std::mutex ready_mutex;
+    std::condition_variable ready;
+    uint64_t tag = 0;
+    void handle(const dgpp::serve::HttpRequest& req, dgpp::serve::HttpResponseWriter& w) override {
+      GenerationService::handle(req, w);
+      std::lock_guard lock(ready_mutex);
+      tag = w.stream_tag();
+      ready.notify_all();
+    }
+    uint64_t wait_request() {
+      std::unique_lock lock(ready_mutex);
+      require(ready.wait_for(lock, std::chrono::seconds(1), [&] { return tag != 0; }),
+              "request registered");
+      return tag;
+    }
+  } service;
+  HttpServer http;
+  std::thread loop;
+  explicit WakeServiceRig(dgpp::serve::FileInputConfig files = {}, int queue_limit = 64)
+      : service(
+            [&] {
+              ServiceConfig cfg;
+              cfg.model_id = kModel;
+              cfg.vocab_size = 512;
+              cfg.queue_limit = queue_limit;
+              cfg.file_inputs = std::move(files);
+              cfg.sampling_defaults = model_defaults();
+              return cfg;
+            }(),
+            &engine, &frontend, {kFakeEos}),
+        http(0, &service, 8, "127.0.0.1", dgpp::serve::kDefaultHttpMaxBodyBytes, true, 5000),
+        loop([&] { http.serve(); }) {}
+  ~WakeServiceRig() {
+    http.stop();
+    loop.join();
+  }
+  std::string id(bool chat) {
+    char tag[17];
+    std::snprintf(tag, sizeof(tag), "%016llx",
+                  static_cast<unsigned long long>(service.wait_request()));
+    return std::string(chat ? "chatcmpl-" : "cmpl-") + tag;
+  }
+};
+}  // namespace
+
+DGPP_TEST(serve_wake_tokens_late_logprobs_and_retirement) {
+  for (bool chat : {false, true}) {
+    WakeServiceRig rig;
+    Client client(rig.http.port());
+    post_completion(client, chat,
+                    chat ? R"(,"stream":true,"logprobs":true)" : R"(,"stream":true,"logprobs":1)");
+    const auto id = rig.id(chat);
+    require(client.read_until("\r\n\r\n", 500).find("200 OK") != std::string::npos,
+            "stream headers");
+    auto& observer = static_cast<dgpp::sched::SchedulerObserver&>(rig.service);
+    observer.on_token(id, 'A', 1);
+    const auto text = client.read_until(chat ? "\"content\":\"A\"" : "\"text\":\"A\"", 500);
+    require(text.find(chat ? "\"content\":\"A\"" : "\"text\":\"A\"") != std::string::npos,
+            "token wakes HTTP before maintenance poll");
+    dgpp::sample::Result lp;
+    lp.logprob = -0.25f;
+    observer.on_token_logprobs(id, 1, lp);
+    const auto metadata = client.read_until("-0.25", 500);
+    require(metadata.find("-0.25") != std::string::npos,
+            "metadata alone wakes and drains after text");
+    dgpp::sched::Scheduler::Result result;
+    result.steps_done = 1;
+    result.reason = dgpp::sched::Scheduler::Result::Reason::kSteps;
+    observer.on_retire(id, result);
+    require(client.read_until("0\r\n\r\n", 500).find("data: [DONE]") != std::string::npos,
+            "retirement alone wakes and terminates the stream");
+  }
+}
+
+DGPP_TEST(serve_wake_one_shot_shutdown_and_failure) {
+  for (int action : {0, 1, 2}) {
+    WakeServiceRig rig;
+    Client client(rig.http.port());
+    post_completion(client, false, "");
+    const auto id = rig.id(false);
+    // Let the request's own HTTP pass complete without producing a response.
+    require(client.read_available(50).empty(), "pending one-shot has no response");
+    if (action == 0) {
+      auto& observer = static_cast<dgpp::sched::SchedulerObserver&>(rig.service);
+      dgpp::sched::Scheduler::Result result;
+      result.reason = dgpp::sched::Scheduler::Result::Reason::kSteps;
+      observer.on_retire(id, result);
+    } else if (action == 1) {
+      rig.service.begin_shutdown();
+    } else {
+      rig.service.fail_engine("test failure");
+    }
+    const auto response = client.read_until(action == 0   ? "usage"
+                                            : action == 1 ? "server_shutdown"
+                                                          : "engine_failure",
+                                            500);
+    require(response.find(action == 0 ? "200 OK" : "503 Service Unavailable") != std::string::npos,
+            "asynchronous one-shot outcome wakes HTTP");
+  }
+}
+
+DGPP_TEST(serve_wake_engine_admission_rejection_precedes_next_tick) {
+  WakeServiceRig rig({}, 1);
+  std::vector<std::unique_ptr<Client>> clients;
+  for (int i = 0; i < 6; ++i) {
+    clients.push_back(std::make_unique<Client>(rig.http.port()));
+    post_completion(*clients.back(), false, R"(,"stream":true)", 64);
+    require(clients.back()->read_until("\r\n\r\n", 500).find("200 OK") != std::string::npos,
+            "request enters the HTTP admission queue");
+    if (i < 5) rig.service.engine_pass();  // four slots, then the scheduler's one queue entry
+  }
+  rig.service.engine_pass([&](const GenerationService::PassEvents&) {
+    // No token/retire callback from the next tick can supply a missing wake.
+    const auto response = clients.back()->read_until("data: [DONE]", 500);
+    require(response.find("\"code\":\"overloaded\"") != std::string::npos &&
+                response.find("data: [DONE]") != std::string::npos,
+            "scheduler rejection wakes HTTP before model execution resumes");
+  });
+}
+
+DGPP_TEST(serve_wake_legacy_logprobs_wait_for_visible_stop_tail) {
+  WakeServiceRig rig;
+  Client client(rig.http.port());
+  post_completion(client, false, R"(,"stream":true,"logprobs":1,"stop":"ABZ")");
+  const auto id = rig.id(false);
+  require(client.read_until("\r\n\r\n", 500).find("200 OK") != std::string::npos, "headers");
+  auto& observer = static_cast<dgpp::sched::SchedulerObserver&>(rig.service);
+  dgpp::sample::Result lp;
+  lp.logprob = -0.25f;
+  observer.on_token(id, 'A', 1);
+  observer.on_token_logprobs(id, 1, lp);
+  observer.on_token(id, 'B', 2);
+  observer.on_token_logprobs(id, 2, lp);
+  require(client.read_available(100).empty(), "held stop tail emits neither preamble nor metadata");
+  observer.on_token(id, 'X', 3);
+  observer.on_token_logprobs(id, 3, lp);
+  dgpp::sched::Scheduler::Result result;
+  result.steps_done = 3;
+  result.reason = dgpp::sched::Scheduler::Result::Reason::kSteps;
+  observer.on_retire(id, result);
+  const auto response = client.read_until("0\r\n\r\n", 500);
+  std::string content, tokens;
+  for (size_t at = 0; (at = response.find("data: ", at)) != std::string::npos;) {
+    at += 6;
+    const auto end = response.find("\n\n", at);
+    const auto payload = response.substr(at, end - at);
+    if (payload == "[DONE]") break;
+    const auto parsed = dgpp::minijson::parse(payload);
+    for (const auto& choice : parsed.root.at("choices").items()) {
+      content += choice.at("text").as_string();
+      const auto& probs = choice.at("logprobs");
+      if (!probs.is_null())
+        for (const auto& token : probs.at("tokens").items()) tokens += token.as_string();
+    }
+    at = end;
+  }
+  require(content == "ABX" && tokens == content,
+          "released tail retains each token's metadata once");
+}
+
+DGPP_TEST(serve_wake_file_result_and_exception_are_published_before_notification) {
+  for (bool fail : {false, true}) {
+    std::string directory = "/tmp/dgpp-wake-file-XXXXXX";
+    require(mkdtemp(directory.data()) != nullptr, "temporary extractor directory");
+    struct Cleanup {
+      std::string path;
+      ~Cleanup() { std::filesystem::remove_all(path); }
+    } cleanup{directory};
+    const auto command = directory + "/extract";
+    // Delay completion beyond the request pass so its own socket readiness
+    // cannot hide a missing result notification. No model work is needed.
+    {
+      std::ofstream out(command);
+      out << "#!/bin/sh\nsleep 0.1\n" << (fail ? "exit 1\n" : "printf hello > \"$5\"\n");
+    }
+    require(chmod(command.c_str(), 0700) == 0, "executable test extractor");
+    dgpp::serve::FileInputConfig config;
+    config.pdf_command = command;
+    WakeServiceRig rig(config);
+    Client client(rig.http.port());
+    const std::string body =
+        "{\"model\":\"" + kModel +
+        R"(","messages":[{"role":"user","content":[{"type":"file","file":{"filename":"data.pdf","file_data":"JVBERi0="}}]}],"max_tokens":2,"stream":true})";
+    client.send_all(
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\nContent-Type: "
+        "application/json\r\nContent-Length: " +
+        std::to_string(body.size()) + "\r\n\r\n" + body);
+    rig.service.wait_request();
+    const auto response = client.read_until(fail ? "\"error\"" : "\r\n\r\n", 1000);
+    require(response.find(fail ? "\"error\"" : "200 OK") != std::string::npos,
+            "file result or exception delivered before five-second poll");
+  }
 }
 
 DGPP_TEST(serve_images_capability_validation_and_streaming) {

@@ -9,9 +9,9 @@
 //   * SSE streams: the handler calls begin_stream() and keeps the
 //     writer; token events arrive later on the ENGINE thread, so the
 //     service buffers them in its own per-request rings and drains them
-//     from idle() — which the server calls once per loop pass (~25ms
-//     cadence vs 30 token/s decode, invisible to a client). Sockets are
-//     only ever written by the epoll thread.
+//     from idle(), once per loop pass. By default a quiet loop polls every
+//     25 ms; opt-in output notifications wake it sooner. Sockets are only
+//     ever written by the epoll thread.
 //   * Client disconnects during a stream surface as on_disconnect(tag)
 //     — the service maps that onto scheduler cancellation.
 //
@@ -93,13 +93,31 @@ class HttpResponseWriter {
   Conn* conn_ = nullptr;  // null or closed conn: writes become no-ops
 };
 
+// Copyable producer-side notification. Its descriptor stays alive until the
+// last copy is released, so late background work never writes a recycled fd
+// after the server stops or is destroyed. A default handle is a no-op.
+class HttpWakeup {
+ public:
+  HttpWakeup() = default;
+  void operator()() const noexcept;
+  explicit operator bool() const { return static_cast<bool>(state_); }
+
+ private:
+  friend class HttpServer;
+  struct State;
+  std::shared_ptr<State> state_;
+};
+
 class HttpHandler {
  public:
   virtual ~HttpHandler() = default;
   // Route the request. May throw — the server answers 500 and closes;
   // the engine thread never sees it.
   virtual void handle(const HttpRequest& req, HttpResponseWriter& w) = 0;
-  // Once per loop pass (~25ms): drain SSE rings, re-check liveness.
+  // Installed at server construction, before producer threads start. Keep a
+  // copy in background jobs; publish their result before calling it.
+  virtual void set_wakeup(HttpWakeup wakeup) { (void)wakeup; }
+  // Once per loop pass: drain SSE rings, re-check liveness.
   virtual void idle() {}
   // A TAGGED connection closed — mid-stream, or before a one-shot
   // response finished flushing. `tag` is the value set via
@@ -114,9 +132,12 @@ class HttpServer {
   // `max_connections` beyond which accept answers 503 + close.
   // `max_body_bytes` is a positive byte ceiling, checked from Content-Length;
   // buffers grow with received data, not with the configured ceiling.
+  // poll_timeout_ms must be positive; embedders and host tests may override
+  // the normal 25 ms maintenance poll.
   HttpServer(uint16_t port, HttpHandler* handler, int max_connections,
              const std::string& bind_host = "127.0.0.1",
-             int64_t max_body_bytes = kDefaultHttpMaxBodyBytes);
+             int64_t max_body_bytes = kDefaultHttpMaxBodyBytes, bool wake_on_output = false,
+             int poll_timeout_ms = 25);
   ~HttpServer();
 
   HttpServer(const HttpServer&) = delete;
@@ -131,8 +152,11 @@ class HttpServer {
   // first for those).
   void serve();
 
-  // Thread-safe; the loop notices within one timeout pass (~25ms).
+  // Thread-safe; wakes the loop in notification mode, otherwise the loop
+  // notices within one timeout pass.
   void stop();
+
+  HttpWakeup wakeup() const { return wakeup_; }
 
  private:
   void accept_new();
@@ -150,6 +174,8 @@ class HttpServer {
   HttpHandler* handler_;
   int max_connections_;
   size_t max_body_bytes_;
+  int poll_timeout_ms_;
+  HttpWakeup wakeup_;
   int listen_fd_ = -1;
   int epoll_fd_ = -1;
   std::atomic<bool> stopping_{false};

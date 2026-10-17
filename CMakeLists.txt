@@ -1005,6 +1005,8 @@ add_executable(serve_test tests/host/serve_test.cpp)
 target_link_libraries(serve_test PRIVATE dgpp_serve Threads::Threads)
 dgpp_set_common(serve_test)
 add_test(NAME serve_test COMMAND serve_test)
+add_test(NAME serve_test_wake COMMAND serve_test)
+set_tests_properties(serve_test_wake PROPERTIES ENVIRONMENT "DGPP_TEST_STREAM_WAKE=1")
 
 # M6 Stage 4b gate: the admission journal (the metronome), both loops,
 # and the §11 identity — real localhost TCP + real HTTP, engine faked
@@ -1014,6 +1016,8 @@ target_link_libraries(fabric_serve_test PRIVATE dgpp_serve
                                                    Threads::Threads)
 dgpp_set_common(fabric_serve_test)
 add_test(NAME fabric_serve_test COMMAND fabric_serve_test)
+add_test(NAME fabric_serve_test_wake COMMAND fabric_serve_test)
+set_tests_properties(fabric_serve_test_wake PROPERTIES ENVIRONMENT "DGPP_TEST_STREAM_WAKE=1")
 
 # M6 Stage 2b: the scheduler policy gate (host, no model, no skip path —
 # the FakeEngine replaces the engine, so the policy is pinned everywhere
@@ -2276,7 +2280,7 @@ get_property(DGPP_ALL_TESTS DIRECTORY PROPERTY TESTS)
 foreach(_test IN LISTS DGPP_ALL_TESTS)
   set_tests_properties(${_test} PROPERTIES LABELS "gpu")
 endforeach()
-set_tests_properties(unit unit_tests http_server_test serve_test fabric_serve_test scheduler_test shutdown_watchdog_test engine_watchdog_test
+set_tests_properties(unit unit_tests http_server_test serve_test serve_test_wake fabric_serve_test fabric_serve_test_wake scheduler_test shutdown_watchdog_test engine_watchdog_test
   qwen_yarn_fixture_test qwen_w4a4_plan_default qwen_w4a4_plan_mode_0 qwen_w4a4_plan_mode_1
   qwen_w4a4_plan_mode_empty qwen_w4a4_plan_mode_invalid PROPERTIES LABELS "host")
 set_tests_properties(checkpoint_audit_test route_trace_test sampling_profile_test

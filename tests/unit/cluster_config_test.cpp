@@ -309,6 +309,21 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
   require(one.http_max_body_bytes == 256ll * 1024 * 1024, "HTTP body default supports large prefills");
 }
 
+DGPP_TEST(cluster_config_stream_flush_defaults_overrides_and_validation) {
+  const auto defaults = dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"]})", "t");
+  require(defaults.stream_flush == "pass", "polling remains the default");
+  for (const char* mode : {"pass", "wake"}) {
+    const auto config = dgpp::serve::parse_cluster_config(
+        std::string(R"({"model":"m","nodes":["h"],"http":{"stream_flush":")") + mode + "\"}}", "t");
+    require(config.stream_flush == mode, "explicit mode survives parsing");
+  }
+  for (const char* value : {"0", "true", "null", "[]", "{}", "\"\"", "\"Wake\"", "\"poll\""}) {
+    const auto error = refusal(
+        std::string(R"({"model":"m","nodes":["h"],"http":{"stream_flush":)") + value + "}}");
+    require(error.find("http.stream_flush") != std::string::npos, "invalid mode rejected by name");
+  }
+}
+
 DGPP_TEST(cluster_config_sse_ping_interval_defaults_overrides_and_validation) {
   const auto defaults = dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"]})", "t");
   require(defaults.sse_ping_interval == 30, "streams ping after 30 seconds by default");

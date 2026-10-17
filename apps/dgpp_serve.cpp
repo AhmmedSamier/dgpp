@@ -161,6 +161,7 @@ struct ServeKnobs {
   std::string http_bind = "0.0.0.0";
   int64_t http_max_body_bytes = dgpp::serve::kDefaultHttpMaxBodyBytes;
   int sse_ping_interval = dgpp::serve::kDefaultSsePingInterval;
+  std::string stream_flush = "pass";
   int max_connections = 64;
   int queue_limit = 64;
   int admission_gather_ms = 3;
@@ -1206,7 +1207,7 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
   if (k.world > 1)
     service.set_rank_metrics({0, k.world, DGPP_VERSION, DGPP_GIT_SHA}, collective_progress);
   dgpp::serve::HttpServer http(k.http_port, &service, k.max_connections, k.http_bind,
-                             k.http_max_body_bytes);
+                               k.http_max_body_bytes, k.stream_flush == "wake");
   DGPP_LOG_INFO("serve: HTTP request body limit {} bytes", k.http_max_body_bytes);
 
   std::atomic<bool> drained{false};  // the engine thread's drain is done
@@ -1393,7 +1394,10 @@ int main(int argc, char** argv) {
       "  [--bind-host IPV4 (default 0.0.0.0; rank 0 only)]\n"
       "  [--metrics-port N (default 0 = off; ranks > 0 only)]: the peer's\n"
       "    dgpp_rank_* metrics listener (GET /metrics/prometheus); config ports.metrics\n"
-      "  [--metrics-bind HOST (default: this rank's node address; resolves to IPv4; ranks > 0 only)]\n"
+      "  [--metrics-bind HOST (default: this rank's node address; resolves to IPv4; ranks > 0 "
+      "only)]\n"
+      "  [--stream-flush pass|wake (default pass; rank 0 only)]:\n"
+      "    Output polling or immediate notification; overrides http.stream_flush.\n"
       "  [--sse-ping-interval N (default 30 seconds; -1 disables; rank 0 only)]:\n"
       "    SSE comments while a stream is silent; overrides http.sse_ping_interval\n"
       "    in cluster JSON; request sse_ping_interval overrides the server setting.\n"
@@ -1519,6 +1523,7 @@ int main(int argc, char** argv) {
   int64_t kv_capacity = 8192;
   int64_t http_max_body_bytes = dgpp::serve::kDefaultHttpMaxBodyBytes;
   int sse_ping_interval = dgpp::serve::kDefaultSsePingInterval;
+  std::string stream_flush = "pass";
   std::string kv_dtype = "bf16";  // the latent cache's format
   std::string ngram_table = "resident";  // the Qwen n-gram table: resident | mmap
   std::string ngram_table_model;         // the table's shards from another cached snapshot (engine.ngram_table_model)
@@ -1626,6 +1631,7 @@ int main(int argc, char** argv) {
     http_bind = c.http_bind;
     http_max_body_bytes = c.http_max_body_bytes;
     sse_ping_interval = c.sse_ping_interval;
+    stream_flush = c.stream_flush;
     if (!c.node_env.empty()) {
       if (rank < 0 || rank >= world) {
         DGPP_LOG_ERROR("rank is outside configured nodes");
@@ -1745,7 +1751,13 @@ int main(int argc, char** argv) {
     else if (a == "--checkpoint-dir") ckpt = next();
     else if (a == "--port") port = static_cast<uint16_t>(std::stoi(next()));
     else if (a == "--bind-host") http_bind = next();
-    else if (a == "--sse-ping-interval") {
+    else if (a == "--stream-flush") {
+      stream_flush = next();
+      if (!dgpp::serve::valid_stream_flush(stream_flush)) {
+        DGPP_LOG_ERROR("--stream-flush must be pass or wake");
+        return 2;
+      }
+    } else if (a == "--sse-ping-interval") {
       const std::string value = next();
       const auto [end, error] =
           std::from_chars(value.data(), value.data() + value.size(), sse_ping_interval);
@@ -2270,6 +2282,7 @@ int main(int argc, char** argv) {
     std::fputs(kUsage, stderr);
     return 1;
   }
+  if (rank == 0) DGPP_LOG_INFO("serve: HTTP stream flush {}", stream_flush);
   if (rank == 0) DGPP_LOG_INFO("serve: SSE ping interval {} s (-1 disables)", sse_ping_interval);
   if (kv_capacity < 1 || max_concurrency < 1 || queue_limit < 1 ||
       default_max_tokens < 1 || max_connections < 1) {
@@ -2960,6 +2973,7 @@ int main(int argc, char** argv) {
     knobs.http_bind = http_bind;
     knobs.http_max_body_bytes = http_max_body_bytes;
     knobs.sse_ping_interval = sse_ping_interval;
+    knobs.stream_flush = stream_flush;
     knobs.max_connections = max_connections;
     knobs.queue_limit = queue_limit;
     knobs.admission_gather_ms = admission_gather_ms;
