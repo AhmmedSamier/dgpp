@@ -441,6 +441,7 @@ std::string json_of(const dgpp::minijson::Value& v) {
 // the same rule. It keeps the last globals the service handed it.
 class FakeFrontend : public ModelFrontend {
  public:
+  mutable std::atomic<size_t> decoded_ids{0};
   std::atomic<bool> images_available{false};
   bool supports_images() const override { return images_available; }
   ChatInput prepare_chat(const dgpp::minijson::Value& globals) const override {
@@ -498,6 +499,7 @@ class FakeFrontend : public ModelFrontend {
     return ids;
   }
   std::string decode_ids(const std::vector<int64_t>& ids) const override {
+    decoded_ids.fetch_add(ids.size(), std::memory_order_relaxed);
     std::string out;
     for (int64_t id : ids) {
       if (id == kFakeEos) continue;
@@ -3811,6 +3813,28 @@ std::string post_utf8_completion(ServiceRig& rig, bool chat, bool stream,
       " HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: " +
       std::to_string(body.size()) + "\r\n\r\n" + body);
   return client.read_until(until.empty() ? (stream ? "\r\n0\r\n\r\n" : "usage") : until, 5000);
+}
+
+DGPP_TEST(serve_incremental_decode_preserves_text_with_linear_work) {
+  const std::string text = "é📭中" + std::string(72, 'x') + "\n";
+  for (const bool chat : {false, true}) {
+    ServiceRig rig(8, model_defaults(), false, std::nullopt, chat);
+    // Several accepted tokens per pass must still be decoded only once.
+    rig.engine.tokens_per_step = 4;
+    const auto script = script_of(rig, chat ? text + "</think>" + text : text);
+    rig.engine.script(chat ? 5 : 4, script);
+    for (const bool stream : {false, true}) {
+      rig.frontend.decoded_ids = 0;
+      const auto response = post_utf8_completion(rig, chat, stream, "\"abcd\"");
+      const auto [content, reasoning] = utf8_completion_text(response, chat, stream);
+      require(content == text && reasoning == (chat ? text : ""),
+              "streamed and one-shot text match the full decoded output");
+      require(rig.frontend.decoded_ids.load() <= script.size(),
+              "completion and chat text must decode a linear number of ids");
+      require(response.find("\"finish_reason\":\"stop\"") != std::string::npos,
+              "the skipped EOS still finishes the request normally");
+    }
+  }
 }
 
 DGPP_TEST(serve_utf8_escapedAndRawPromptsReachFrontendIdentically) {

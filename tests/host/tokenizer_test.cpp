@@ -56,6 +56,28 @@ std::string read_text_file(const std::string& path) {
   return ss.str();
 }
 
+// Serving and the tool parser emit each new id's bytes without re-decoding
+// its prefix. Pin that contract at every boundary, including partial UTF-8
+// and empty deltas from special tokens, for both decode modes.
+void require_incremental_decode(const dgpp::text::Tokenizer& tok,
+                                const std::vector<int64_t>& ids) {
+  for (const bool skip : {false, true}) {
+    std::vector<int64_t> prefix;
+    std::string incremental;
+    require(tok.decode(prefix, skip).empty(), "empty ids decode to no bytes");
+    for (const int64_t id : ids) {
+      prefix.push_back(id);
+      const std::string bytes = tok.decode(id, skip);
+      require(bytes == tok.decode(std::vector<int64_t>{id}, skip),
+              "scalar and single-id vector decodes agree");
+      incremental += bytes;
+      require(incremental == tok.decode(prefix, skip),
+              "incremental decode differs at prefix " + std::to_string(prefix.size()) +
+                  " with skip_special_tokens=" + (skip ? "true" : "false"));
+    }
+  }
+}
+
 DGPP_TEST(glm_tokenizer_differential_goldens) {
   const std::string kGoldenPath = golden_path(g_argc, g_argv);
   // Resolve tokenizer.json via the HF cache (the deployment location;
@@ -225,8 +247,13 @@ DGPP_TEST(glm_tokenizer_differential_goldens) {
     require(rt == text || (qwen && rt == dgpp::text::unicode::nfc(text)),
                  "verbatim round-trip mismatch on case " +
                      std::to_string(i) + ": got " + rt);
+    require_incremental_decode(tok, got);
     ++checked;
   }
+  // Cover every added token, including those absent from the prose corpus,
+  // with ordinary bytes on either side of the potentially empty delta.
+  for (const auto& added : tok.added_tokens())
+    require_incremental_decode(tok, {0, added.id, 1});
   DGPP_LOG_INFO("glm_tokenizer differential: {}/{} cases byte-exact "
                 "(revision 0x{:016x})",
                 checked, lines.size() - 1, tok.revision_hash());

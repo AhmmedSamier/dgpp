@@ -63,6 +63,8 @@ class Tokenizer {
   // ids -> text. HF 0.23's decode defaults to skip_special_tokens=true:
   // added tokens marked special are omitted; non-special ones decode
   // verbatim. skip_special_tokens=false decodes everything verbatim.
+  // decode(ids, skip) == concatenation of decode(id, skip) for each id.
+  // These are raw bytes: a single token may contain incomplete UTF-8.
   std::string decode(const std::vector<int64_t>& ids,
                      bool skip_special_tokens = true) const;
   std::string decode(int64_t id, bool skip_special_tokens = true) const;

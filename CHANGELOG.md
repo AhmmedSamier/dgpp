@@ -5,6 +5,13 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **Decode streaming text one token at a time** ([#119](https://github.com/HawkBearPig/dgpp/issues/119)).
+  Completions, chat reasoning/content and DeepSeek DSML content no longer
+  re-decode the whole output prefix for every generated token. This removes
+  quadratic tokenizer work from those paths on the engine thread while
+  preserving decoded bytes, UTF-8 buffering, stop handling and token attribution.
+  Thanks to @WhollyMindless for the report and tokenizer measurements.
+
 - **Opt-in immediate HTTP output notifications** ([#118](https://github.com/HawkBearPig/dgpp/issues/118)).
   `http.stream_flush: "wake"` / `--stream-flush wake` wakes rank 0's HTTP loop
   when asynchronous output is ready. Tokens, logprobs, retirement, overload,

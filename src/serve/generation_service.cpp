@@ -3171,16 +3171,9 @@ void GenerationService::on_token(const std::string& id, int64_t token,
         }
         for (ParserEvent& ev : events) absorb(*r, std::move(ev));
       } else {
-        // Exact incremental text: the suffix diff of successive full
-        // decodes — UTF-8 splits and special tokens come out right by
-        // construction (the tokenizer's own decode gates, pinned by its
-        // differential goldens). The stop scanner decides
-        // what of it is shown.
-        const std::string full = frontend_->decode_ids(r->ids);
-        std::string suffix;
-        if (full.size() > r->text.size())
-          suffix.assign(full, r->text.size(), std::string::npos);
-        r->text = full;
+        // Decoding concatenates per-token bytes. Only decode the new id;
+        // stop scanning and the HTTP UTF-8 carry handle the visible text.
+        std::string suffix = frontend_->decode_ids({token});
         if (r->logprobs >= 0 && !suffix.empty()) {
           r->content_spans.push_back({r->ids.size() - 1, r->content_input_bytes,
                                       r->content_input_bytes + suffix.size()});

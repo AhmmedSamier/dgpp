@@ -108,9 +108,9 @@ class ModelFrontend {
   virtual ~ModelFrontend() = default;
   // text -> token ids (the exact ByteLevel-BPE encode).
   virtual std::vector<int64_t> encode_text(std::string_view text) const = 0;
-  // ids -> text with special tokens skipped (the stream's content
-  // semantics; decode(ids) == decode(ids[0..n-1]) + suffix deltas, so
-  // incremental text is the suffix diff of successive full decodes).
+  // ids -> bytes with special tokens skipped. Must equal the concatenation
+  // of decode_ids({id}) for each id: streaming decodes only the new token.
+  // Individual results may split UTF-8; the HTTP layer buffers those bytes.
   virtual std::string decode_ids(const std::vector<int64_t>& ids) const = 0;
   // The template globals (minijson DOM object: "messages" — the OpenAI
   // messages array, normalized — plus optional "tools",
@@ -484,8 +484,7 @@ class GenerationService : public HttpHandler,
     size_t content_span_cursor = 0;
     size_t lps_flushed = 0;    // streaming: entries already sent
     std::vector<int64_t> ids;  // generated so far
-    // Legacy completions: the suffix-diff text path.
-    std::string text;          // decoded so far (the suffix-diff base)
+    // Legacy completions: incremental decoded bytes.
     std::string delta;         // unflushed text delta (the ring)
     std::string out_text;      // the visible text: the stop cut applied
     // Chat: the parser splits the ids into reasoning / content / calls.
