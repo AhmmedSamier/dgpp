@@ -7,6 +7,12 @@ a fine-tune of Qwen3.8-Flash-Next. The model and fine-tune belong to their
 respective authors; kaushikvira contributed the conversion and deployment
 template. DGPP serves it through the existing Qwen loader.
 
+The validation snapshot is
+`a00c7c2ff7029a1d6a63d78e98a1fdca4a576fba`: 125.9 GiB in 52 weight shards,
+with 296,475 indexed tensors. To reproduce that checkpoint, add
+`--revision a00c7c2ff7029a1d6a63d78e98a1fdca4a576fba --activate` to the
+download command below.
+
 ## Checkpoint and configuration
 
 The checkpoint uses ModelOpt NVFP4 backbone experts with groups of 16, an
@@ -63,14 +69,29 @@ Keep detailed outputs outside tracked documentation. Report the source and
 checkpoint revisions with any measurements; changing weights can change
 MTP acceptance and throughput even when architecture and quantization match.
 
-## Scope and limitations
+## Validation and limitations
 
-The original contributor reported serving and throughput checks in
-[PR #100](https://github.com/HawkBearPig/dgpp/pull/100). Those measurements
-do not establish throughput equivalence to the NVIDIA release or validate
-the upstream fine-tune's token-efficiency claim. A quality comparison needs
-matched tasks, sampling settings and completion limits; a successful load
-and API check alone cannot establish task accuracy.
+The 2026-10-17 validation for [PR #100](https://github.com/HawkBearPig/dgpp/pull/100)
+used source `1cc9fefc` and the snapshot above on two GB10 nodes. The checkpoint
+audit found no unmatched tensors; the loader bound all 49 layers plus
+globals, with matching replicated digests and 36.50 GiB resident per rank
+before serving allocations. The API checks passed, including stop strings,
+multiple choices, logit bias, prefix reuse and reasoning-token accounting.
+Both ranks stopped cleanly with identical operation streams and no observed
+process or cgroup swap.
+
+The [benchmark tables](../benchmarks.md#serving-performance) report five
+prompt classes at C1/C2/C4/C8 (225 successful requests) and nine uncached
+prefill probes at approximately 2K/8K/32K tokens. A small smoke evaluation
+passed 19/20 GSM8K problems and 20/20 schema-extraction records with no
+truncation; its settings and scope are in
+[quality and correctness](../benchmarks.md#quality-and-correctness).
+
+These checks do not establish throughput equivalence to the NVIDIA release
+or validate the upstream fine-tune's token-efficiency claim. A quality
+comparison needs matched tasks, sampling settings and completion limits.
+No draft-depth sweep or long-context campaign was run, so MTP4 is the
+contributor's configuration rather than a measured optimum.
 
 The source model is gated and identifies its license as
 `swift-open-license-1.0`; consult the upstream terms and the conversion's
