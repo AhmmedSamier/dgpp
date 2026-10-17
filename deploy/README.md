@@ -36,7 +36,7 @@ it. Rank 0 serves metrics on its HTTP endpoint. See the
   the counts in use today; a world is refused by the engine's geometry check or
   a rank's memory plan, not by a list of allowed sizes.
 
-Every template enables MTP (the block draft on DeepSeek) at the depth the
+Most templates enable MTP (the block draft on DeepSeek) at the depth the
 family measured best, with the decode graph, at the request-slot count and
 cache budget that measured at or above every other shape tried — except the
 Qwen3.8-27B templates, which name `engine.dflash_model` instead of MTP: the
@@ -45,6 +45,10 @@ recorded inside the graph step at every world; one Spark without the
 decode graph runs it on the eager engine). The shapes
 a template does not name are knobs appended at boot:
 `scripts/dgpp-cluster up --config FILE --knobs "FLAGS"`.
+
+The Swift 1.5 template retains the contributor's MTP4 configuration. Its
+serving measurements do not establish an optimal draft depth or equivalence
+to another checkpoint.
 
 | Template | Deployment | The shapes it replaced, as knobs |
 |---|---|---|
@@ -57,6 +61,7 @@ a template does not name are knobs appended at boot:
 | [cluster_qwen-3.8-flash-next_nvfp4-radixark_w1.example.json](cluster_qwen-3.8-flash-next_nvfp4-radixark_w1.example.json) | RadixArk's Qwen3.8-Flash-Next NVFP4 on one Spark: MTP depth 2, grow admission and the shared adaptive prefill policy, dense projections FP8 at load, n-gram table mapped, 256K context | the BF16 dense stack: `--dense-weights checkpoint`; T=1: `--no-mtp`; depth 1: `--mtp-depth 1` |
 | [cluster_qwen-3.8-flash-next_nvfp4-radixark_w1_yarn512k.example.json](cluster_qwen-3.8-flash-next_nvfp4-radixark_w1_yarn512k.example.json) | the one-Spark RadixArk deployment with the opt-in YaRN ramp: `engine.rope_scaling` yarn ×2 over the checkpoint's 262 144 positions, so one request reaches 524 288 tokens; two request slots sharing a 565 248-token pool, MTP depth 2 with the lookup draft, full admission, the shared adaptive prefill policy, a 3 GiB prefix arena (27 snapshots: the one-node Qwen templates keep the arena small so the page cache serves the mmap'ed n-gram table); plan-verified from the checkpoint's config (100.9 GiB), not release-checked here | two full-length streams at once: `--kv-capacity 1114112` (see [the YaRN notes](#the-512k-yarn-templates-enginerope_scaling)); the plain 262K template: [cluster_qwen-3.8-flash-next_nvfp4-radixark_w1.example.json](cluster_qwen-3.8-flash-next_nvfp4-radixark_w1.example.json) |
 | [cluster_qwen-3.8-flash-next_nvfp4-radixark_w2.example.json](cluster_qwen-3.8-flash-next_nvfp4-radixark_w2.example.json) | RadixArk's Qwen3.8-Flash-Next NVFP4 on two Sparks: MTP depth 4 with BF16 fused draft experts, FP8 dense projections, n-gram table mapped, a 524288-token shared KV pool, four request slots and a 32 GiB prefix arena | the resident n-gram table: `--ngram-table resident`; T=1: `--no-mtp`; depth 2: `--mtp-depth 2` |
+| [cluster_qwen-3.8-flash-next_nvfp4-swift15_w2.example.json](cluster_qwen-3.8-flash-next_nvfp4-swift15_w2.example.json) | Community Swift 1.5 NVFP4 conversion on two Sparks: BF16 fused draft experts, MTP depth 4, FP8 dense projections, mapped n-gram table, a 1M-token shared BF16 KV pool, four slots and a 42 GiB prefix cache; [serving notes](../docs/model_cards/Qwen3.8-Flash-Next-Swift1.5-NVFP4.md) | T=1: `--no-mtp`; depth 1: `--mtp-depth 1` |
 | [cluster_qwen-3.8-flash-next_nvfp4-qad_w1.example.json](cluster_qwen-3.8-flash-next_nvfp4-qad_w1.example.json) | the quantization-aware-distilled export (`local-inference-lab/Qwen3.8-Flash-Next-NVFP4`) on one Spark: MTP depth 1, the dense stack and shared experts in their shipped MXFP8, the NVFP4 n-gram table resident (26.8 GiB, no NVMe gather), the BF16 remainder (GR sites, PLE projections, head) FP8 at load as the NVIDIA recipe, a 128K shared pool and a 1 GiB prefix arena (the resident table takes the room the NVIDIA recipe spends on a 256K pool; `--ngram-table mmap --kv-capacity 262144 --prefix-cache-gib 3` trades the gather back for it) | the BF16 remainder as shipped: `--dense-weights checkpoint --fp8-head gemv`; T=1: `--no-mtp` |
 | [cluster_qwen-3.8-flash-next_nvfp4_w2_yarn512k.example.json](cluster_qwen-3.8-flash-next_nvfp4_w2_yarn512k.example.json) | the two-Spark NVFP4 deployment with the opt-in YaRN ramp: `engine.rope_scaling` yarn ×2 over the checkpoint's 262 144 positions, so one request reaches 524 288 tokens; two request slots, a 565 248-token pool, the n-gram table mapped, FP8 dense projections, MTP depth 1 | two full-length streams at once: `--kv-capacity 1114112` (see [the YaRN notes](#the-512k-yarn-templates-enginerope_scaling)); the plain 262K template: [cluster_qwen-3.8-flash-next_nvfp4_w2.example.json](cluster_qwen-3.8-flash-next_nvfp4_w2.example.json) |
 | [cluster_qwen-3.8-flash-next_autoround-int4_w1.example.json](cluster_qwen-3.8-flash-next_autoround-int4_w1.example.json) | the AutoRound int4/int8 hybrid (`Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN`) on one Spark in its packed form: MTP depth 3, the dense projections FP8 at load, a 256K BF16 KV pool, four request slots, a 3 GiB prefix cache; `engine.draft_vocab` (a `.npy` id set for the draft head) is opt-in and off | T=1: `--no-mtp` |

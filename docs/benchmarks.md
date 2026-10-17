@@ -9,13 +9,15 @@ budget, and `compact_batches` is on (see
 [deployment defaults](../deploy/README.md#shared-scheduler-defaults)). The
 rows below have not been re-measured since, so they describe deployments
 with the fixed prefill budgets listed per row, not a current default
-deployment; the Qwen3.8-Flash-Next QAD row (2026-10-14) and the six
-Qwen3.8-27B rows (2026-10-16) are measured with the adaptive defaults. The measurements behind that change are in
+deployment. The Qwen3.8-Flash-Next QAD row (2026-10-14), the six
+Qwen3.8-27B rows (2026-10-16), and the Swift 1.5 two-node row (2026-10-17)
+are measured with the adaptive defaults. The measurements behind that change are in
 [PR #112](https://github.com/HawkBearPig/dgpp/pull/112). When defaults
 change again, keep each row's recorded configuration with its numbers.
 
 | Measurement set | Date (UTC) | Source revision | Scope |
 |---|---|---|---|
+| Swift 1.5 Qwen3.8-Flash-Next NVFP4 | 2026-10-17 | `1cc9fefc` | Community checkpoint `a00c7c2f` on two nodes, MTP4, five classes at C1/C2/C4/C8, three cold probes each at 2K/8K/32K, adaptive prefill within 4K busy/idle caps |
 | Qwen3.8-27B refresh | 2026-10-16 | `ea128905` | FP8 and NVFP4 at worlds 1/2/4 on the current templates (NVFP4: the fp8 K/V pool, the fp8 prefill attention and the native activation recipe; FP8: the native activation recipe), five classes at C1/C2/C4/C8, cold 2K/8K/32K prefill, the adaptive prefill defaults |
 | Qwen3.8-Flash-Next QAD export | 2026-10-14 | `347c386f` plus the QAD export working tree | The rows for the local-inference-lab QAD export on one node (C1–C8, cold prefill, decode modes, 0–128K context, quality), measured with the adaptive prefill defaults of 2026-10-12 |
 | Qwen3.8-27B quant comparison | 2026-10-11 | `d12e7e9f` decode / `510542a4` prefill | Matched FP8 / NVFP4 / FP8 at worlds 1/2/4, five classes at C1/C2/C4/C8, cold prefill, all-rank profiling and four-node context decode |
@@ -53,6 +55,24 @@ Five rows were refreshed on 2026-10-13 with the draft-head screen (`engine.draft
 
 The Qwen3.8-27B rows were re-measured on 2026-10-16 at `ea128905` on the templates as shipped, with the adaptive prefill defaults: the NVFP4 rows run the mixed release's fp8 K/V cache (`kv_dtype: "fp8"`), the prefill attention on the fp8 tensor cores (`prefill_attention: "fp8"`) and the native activation recipe (`prefill_activations: "native"`); the FP8 rows run the native activation recipe on the BF16 cache; both carry the 2026-10-15/16 attention prefill kernels. The FP8 templates took the native recipe during this refresh: measured first on the bf16 chain, the FP8 one-node cold prefill read 20 % slower than the 2026-10-11 row (2.70 / 8.30 / 35.3 s at 2K / 8K / 32K) because an idle prompt now runs in 4,096-token chunks and the chain re-dequantized every FP8 matrix into its bf16 bridge for each chunk (the same template and binary under the old one-pass budgets read 2.22 / 6.96 / 29.5 s in a control probe); the checkpoint's own blockwise fp8 product needs no bridge and the 300-item evals read the same under both chains (161/164, 294/300, 100/100). The rows replace the 2026-10-11 matched set (FP8 / NVFP4 / FP8 brackets at `d12e7e9f` / `510542a4`, fixed prefill budgets, the BF16 cache, the bf16 chain), whose cell-by-cell verdicts described that configuration; compare within this set. The DFlash2 drafter draws its proposals, so a class's single-request rate moves run to run by several percent. Cold probes report zero cached tokens; the three NVFP4 legs share one set of prompt hashes and the three FP8 legs another (re-run after the template change, token counts within 0.3 %); every leg's rank operation streams matched and no serving process swapped. The historical decode-mode, quality and parcel-context rows keep their original evidence.
 
+The Swift 1.5 row was measured on 2026-10-17 with the
+[two-node template](../deploy/cluster_qwen-3.8-flash-next_nvfp4-swift15_w2.example.json),
+source `1cc9fefc` and checkpoint revision
+`a00c7c2ff7029a1d6a63d78e98a1fdca4a576fba`. It retains the contributor's
+MTP4 configuration, the exact draft head, a 1M-token shared BF16 KV pool
+and a 42 GiB prefix cache. Adaptive prefill uses 4,096-token busy/idle caps.
+The release build ran with resident-image caching off, zero-swap scopes on
+both ranks and `CUDA_DEVICE_MAX_CONNECTIONS=32` on rank 0. Both rank
+operation streams matched at shutdown. Five-second memory samples recorded
+zero process and cgroup swap on both ranks, with no OOM events.
+
+All 225 measured decode requests succeeded and their scheduler counters
+reconciled; thinking was disabled. Cold-prefill input lengths were
+2,022–2,049 / 7,999–8,215 / 32,282–32,344 tokens, with zero cached tokens
+in all nine probes. These are absolute measurements of this configuration;
+no matched NVIDIA comparison, draft-depth sweep or long-context campaign
+was run. See the [checkpoint and serving notes](model_cards/Qwen3.8-Flash-Next-Swift1.5-NVFP4.md).
+
 <!-- BEGIN serving -->
 
 | Model / weights | Nodes | Options | C1 engine tok/s | C1 wall tok/s | C2 wall tok/s | C4 wall tok/s | C8 wall tok/s | Cold prefill s: ~2K / ~8K / ~32K |
@@ -68,6 +88,7 @@ The Qwen3.8-27B rows were re-measured on 2026-10-16 at `ea128905` on the templat
 | Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense, YaRN 512K, 2 slots | 65.0–75.9 | 63.0–73.0 | 94.5–110.2 | 94.7–111.2 | 93.0–109.6 | 1.830 / 7.145 / 28.795 |
 | Qwen3.8-Flash-Next NVFP4 (RadixArk) | 1 | FP8 dense, 256K BF16 KV, 4 slots, MTP2 | 44.2–61.0 | 42.9–58.4 | 56.1–76.8 | 80.6–106.3 | 78.3–107.9 | 1.358 / 4.602 / 18.234 |
 | Qwen3.8-Flash-Next NVFP4 (RadixArk) | 2 | FP8 dense, 512K BF16 KV, 4 slots, MTP4 | 52.1–96.9 | 50.6–92.3 | 71.9–136.4 | 100.8–161.5 | 95.0–177.6 | 1.870 / 7.179 / 28.922 |
+| Qwen3.8-Flash-Next NVFP4 (Swift 1.5) | 2 | FP8 dense, 1M BF16 KV, 4 slots, MTP4 | 54.2–106.1 | 52.7–100.2 | 85.0–155.8 | 116.5–200.1 | 112.5–205.1 | 1.408 / 4.653 / 16.700 |
 | Qwen3.8-Flash-Next FP8 | 2 | 256K BF16 KV, 4 slots | 44.0–52.9 | 43.0–51.3 | 68.2–81.3 | 90.6–103.0 | 81.0–100.3 | 2.027 / 8.061 / 33.457 |
 | Qwen3.8-Flash-Next FP8 | 4 | 256K BF16 KV, 4 slots | 73.1–86.9 | 70.8–83.5 | 110.6–128.3 | 141.5–162.2 | 139.8–164.1 | 1.582 / 5.614 / 23.039 |
 | Qwen3.8-Flash-Next AutoRound int4/int8 | 1 | 256K BF16 KV, 4 slots, MTP3 | 43.4–69.8 | 42.3–66.9 | 57.6–90.3 | 76.5–115.7 | 76.0–124.8 | 1.276 / 4.356 / 17.159 |
@@ -160,6 +181,7 @@ a row exactly.
 | Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense, YaRN 512K, 2 slots | 2 | 565,248 | bf16 | 40 | 256 / 256 | MTP1 | — |
 | Qwen3.8-Flash-Next NVFP4 (RadixArk) | 1 | FP8 dense, 256K BF16 KV, 4 slots, MTP2 | 4 | 262,144 | bf16 | 3 | 4,096 / 4,096 | MTP2 | — |
 | Qwen3.8-Flash-Next NVFP4 (RadixArk) | 2 | FP8 dense, 512K BF16 KV, 4 slots, MTP4 | 4 | 524,288 | bf16 | 32 | 256 / 256 | MTP4 | — |
+| Qwen3.8-Flash-Next NVFP4 (Swift 1.5) | 2 | FP8 dense, 1M BF16 KV, 4 slots, MTP4 | 4 | 1,048,576 | bf16 | 42 | adaptive (4,096 / 4,096 caps) | MTP4 | [JSON](../deploy/cluster_qwen-3.8-flash-next_nvfp4-swift15_w2.example.json) |
 | Qwen3.8-Flash-Next FP8 | 2 | 256K BF16 KV, 4 slots | 4 | 262,144 | bf16 | 6 | 256 / 256 | MTP1 | — |
 | Qwen3.8-Flash-Next FP8 | 4 | 256K BF16 KV, 4 slots | 4 | 262,144 | bf16 | 50 | 256 / 256 | MTP1 | — |
 | Qwen3.8-Flash-Next AutoRound int4/int8 | 1 | 256K BF16 KV, 4 slots, MTP3 | 4 | 262,144 | bf16 | 3 | 4,096 / 4,096 | MTP3 | — |
@@ -243,6 +265,7 @@ Engine tokens/s, greedy; median of three repetitions.
 | Qwen3.8-Flash-Next NVFP4 | 2 | FP8 dense, YaRN 512K, 2 slots | 65.0 | 74.4 | 75.9 | 72.3 | 65.0 |
 | Qwen3.8-Flash-Next NVFP4 (RadixArk) | 1 | FP8 dense, 256K BF16 KV, 4 slots, MTP2 | 47.5 | 59.5 | 61.0 | 54.7 | 44.2 |
 | Qwen3.8-Flash-Next NVFP4 (RadixArk) | 2 | FP8 dense, 512K BF16 KV, 4 slots, MTP4 | 52.1 | 90.2 | 96.9 | 79.7 | 53.1 |
+| Qwen3.8-Flash-Next NVFP4 (Swift 1.5) | 2 | FP8 dense, 1M BF16 KV, 4 slots, MTP4 | 61.4 | 96.9 | 106.1 | 87.8 | 54.2 |
 | Qwen3.8-Flash-Next FP8 | 2 | 256K BF16 KV, 4 slots | 45.9 | 51.8 | 52.9 | 49.8 | 44.0 |
 | Qwen3.8-Flash-Next FP8 | 4 | 256K BF16 KV, 4 slots | 76.7 | 86.7 | 86.9 | 81.7 | 73.1 |
 | Qwen3.8-Flash-Next AutoRound int4/int8 | 1 | 256K BF16 KV, 4 slots, MTP3 | 43.4 | 59.7 | 69.8 | 60.9 | 45.6 |
@@ -371,6 +394,14 @@ These are the original campaigns' quality results, retained separately from the 
 | Qwen3.8-27B FP8 | 1 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 156/164 | 292/300 | 100/100 | 4 |
 | Qwen3.8-27B FP8 | 2 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 157/164 | 292/300 | 100/100 | 5 |
 | Qwen3.8-27B FP8 | 4 | DFlash2 drafter, FP8 head, 256K BF16 KV, 8 slots | 156/164 | 291/300 | 100/100 | 4 |
+
+Swift 1.5 received a smaller serving smoke evaluation on 2026-10-17 using
+the two-node configuration above: 19/20 GSM8K problems and 20/20 schema
+extraction records passed. `scripts/serve_eval.py` used temperature zero,
+concurrency 4, low reasoning effort and output caps of 2,048 tokens for
+GSM8K and 512 for extraction; none of the 40 responses were truncated.
+This is not a full quality campaign or
+a matched comparison with the original Qwen checkpoint; HumanEval was not run.
 
 The Qwen3.8-Flash-Next QAD row's HumanEval ran each returned code block in a local subprocess with a 10 s timeout (`scripts/serve_eval.py`, 2026-10-14), not in a network-disabled container; its truncated responses are the cap column.
 

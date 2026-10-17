@@ -211,6 +211,7 @@ class PortabilityTest(unittest.TestCase):
             "Qwen/Qwen3.8-27B-FP8": "qwen3.8-27b_fp8",
             "unsloth/Qwen3.8-27B-NVFP4": "qwen3.8-27b_nvfp4",
             "local-inference-lab/Qwen3.8-Flash-Next-NVFP4": "qwen-3.8-flash-next_nvfp4-qad",
+            "kaushikvira/Qwen3.8-Flash-Next-swift15-nvfp4-dgpp": "qwen-3.8-flash-next_nvfp4-swift15",
         }
         values = {**site_env.DEFAULTS, "DGPP_NODES": "head peer1 peer2 peer3", "DGPP_SSH_USER": "ops"}
         templates = list((ROOT / "deploy").glob("*.example.json"))
