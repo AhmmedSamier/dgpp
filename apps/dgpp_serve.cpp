@@ -2730,6 +2730,12 @@ int main(int argc, char** argv) {
                      prefill_attention, family->name());
       return 2;
     }
+    if (prefill_activations != "bf16" && std::string(family->name()) != "qwen3_5") {
+      DGPP_LOG_ERROR("serve: engine.prefill_activations {} is the Qwen3.5 family's lever (the checkpoint's activation "
+                     "recipe on prefill rows); the {} family's prefill chain has its own keys",
+                     prefill_activations, family->name());
+      return 2;
+    }
     if (std::string(family->name()) != "glm5" && std::string(family->name()) != "glm_moe_dsa" &&
         std::string(family->name()) != "mimo_v2" && std::string(family->name()) != "qwen3_5" && kv_dtype != "bf16")
       DGPP_LOG_WARN("serve: --kv-dtype {} applies to the GLM-5.3 latent caches, the MiMo-V2 K/V cache and the "

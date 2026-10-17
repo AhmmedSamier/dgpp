@@ -5,6 +5,21 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **The Qwen3.8-27B templates sized to the node, and the DeepSeek-V4.1
+  template's full 1M-token context** (2026-10-17). The eight 27B templates
+  carried the model's 262,144-token context and a 1.5 GiB prefix arena at
+  every world (the YaRN templates 565,248 and 827,392 tokens), planning at
+  19–71 GiB of a Spark's 116 while every other template had been sized by
+  the memory plan. They now hold: FP8 786,432 tokens (three full contexts)
+  with a 6 GiB arena on one Spark, 1,572,864 (six) with 20 GiB on two,
+  2,097,152 (one per slot, full admission) with 32 GiB on four; NVFP4
+  1,048,576 (four) with 24 GiB on one, 2,097,152 with 32 GiB on two and
+  four; the YaRN templates 1,130,496 (two full-length streams) with 16 GiB
+  and 1,048,576 with 20 GiB — plans of 73 to 110 GiB, each verified with
+  `--memory-plan` and a boot. The DeepSeek-V4.1 template takes the 1M-token
+  pool its benchmark row already measured (91.6 GiB planned). Also:
+  `engine.prefill_activations` is refused by every family but Qwen3.5 (it
+  reached nothing else).
 - **The Qwen3.8-27B FP8 templates take `engine.prefill_activations:
   "native"`** (2026-10-16). The benchmark refresh below found the FP8
   release's cold prefill 20 % slower on one Spark than its 2026-10-11 row:

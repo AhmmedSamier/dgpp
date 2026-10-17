@@ -43,9 +43,10 @@ block of seven drafts from one anchor.
 ## Serving
 
 **One Spark** (`cluster_qwen3.8-27b_fp8_w1`): the drafter recipe. 27.5 GiB
-of weights, a 256K-token BF16 KV pool (21.0 GiB), the 3.6 GiB drafter and
-its five K/V planes, eight request slots and a 1.4 GiB prefix cache plan at
-62 GiB; the graph engine records the block proposal inside the decode
+of weights, a 786,432-token BF16 KV pool (63.0 GiB, three full contexts), the
+3.6 GiB drafter and its five K/V planes, eight request slots and a 6 GiB
+prefix arena, the plan at 109 GiB of the node's 116 (sized to the node on
+2026-10-17; a 256K pool and a 1.5 GiB arena at 62 GiB until then); the graph engine records the block proposal inside the decode
 step (the 8-row verify and the drafter's forward in one graph, as on the
 fabric — the template since 2026-10-05; the eager engine's transcripts 4/4,
 chat 71 against 95 ms a token), the drafter's five block matrices served as
@@ -72,7 +73,11 @@ Sparks 205 / 301 / 352 / 310 / 216 tok/s at 92 ms a step with the one-chain
 split-K of 2026-10-05, 184 / 273 / 326 / 284 / 196 at 106 before it, 154 /
 270 / 320 / 260 / 170 at 117 for whole blocks; C1 level; transcripts matched
 across the tested isolated, scheduled-depth and joining-co-tenant cases); 15.0 GiB of weights
-and a 13 GiB KV pool a rank at 256K on two Sparks, eight slots. The MTP
+and a 63 GiB KV pool a rank (1,572,864 tokens, six full contexts) with a
+20 GiB prefix arena on two Sparks, eight slots; on four Sparks a
+2,097,152-token pool (one full context per slot, full admission) with a
+32 GiB arena, 91 GiB planned a rank (since 2026-10-17; 256K pools and 1.5 GiB
+arenas before). The MTP
 depth-3 world is available as an alternative to each template's DFlash
 default (`--no-dflash --mtp --mtp-depth 3`),
 plain decode `--no-dflash`. Greedy C1 by class (prose / code / json / math /
