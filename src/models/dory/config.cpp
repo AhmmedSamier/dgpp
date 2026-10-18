@@ -71,8 +71,7 @@ std::string read_file(const std::string& path) {
   return text;
 }
 
-DoryLayerKind kind_from_string(const minijson::Value& root, std::string_view field,
-                               const std::string& s) {
+DoryLayerKind kind_from_string(std::string_view field, const std::string& s) {
   if (s == "sliding_attention") return DoryLayerKind::SlidingAttention;
   if (s == "full_attention") return DoryLayerKind::FullAttention;
   if (s == "mlp") return DoryLayerKind::Mlp;
@@ -100,7 +99,7 @@ std::vector<DoryLayerKind> parse_layer_types(const minijson::Value& root, int la
   if (!lt->is_array()) reject("layer_types", "not an array");
   for (const auto& item : lt->items()) {
     if (!item.is_string()) reject("layer_types", "non-string element");
-    kinds.push_back(kind_from_string(root, "layer_types", std::string(item.as_string())));
+    kinds.push_back(kind_from_string("layer_types", std::string(item.as_string())));
   }
   if (static_cast<int>(kinds.size()) != layers) reject("layer_types", "length differs from num_hidden_layers");
   return kinds;

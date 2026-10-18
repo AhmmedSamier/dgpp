@@ -1,6 +1,6 @@
 # Dory1.0-4B (nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-NVFP4) on dgpp — architecture study and implementation plan (2026-10-18)
 
-Status: **stage 1 landed, stage 2 in progress.** This document is the survey
+Status: **stages 1–3 landed, stage 4 in progress.** This document is the survey
 and the design that the port is judged against (`docs/adding_a_model.md` §1).
 Section 5 carries the staged plan and the progress markers; nothing below is
 claimed as working beyond the landings recorded there.
@@ -285,9 +285,16 @@ combination; the `logit_scale` head; the recurrent K/V policy.
    the resident loader (`models/dory/loader.{hpp,cpp}`, the
    `dgpp_models_dory_loader` library). The census test in the release's own
    layout through the model's own `dory_forward_test --write-fixture` is
-   stage 8.
+   stage 8. Validated 2026-10-18 against the landed release header:
+   `dory_binding_matches_the_landed_checkpoint` reads the real
+   `model.safetensors` and matches all 1083 tensors by name/dtype/shape — 288
+   of them NVFP4 matrices (36 attention blocks × 5, 36 MLP blocks × 3) — with
+   none unexpected.
 3. **Primitives** — `justnorm`/`slerp_norm` kernels + host references +
    kernel tests, with the fp32 accumulation and the `eps` pinned.
+   **Host half landed** (`models/dory/reference.{hpp,cpp}`,
+   `tests/unit/dory_reference_test.cpp`, commit 007d40b7); the CUDA kernels
+   land with stage 4, which is what needs them.
 4. **The layer walk** — one sublayer per index, the attention and MLP
    numerics of §1.3–§1.4, the two RoPE thetas, the sliding window.
 5. **The loop** — the input/recurrent/output partition, the re-injection
