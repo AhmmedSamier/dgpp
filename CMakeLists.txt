@@ -325,6 +325,14 @@ target_include_directories(dgpp_models_dory PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/s
 target_link_libraries(dgpp_models_dory PUBLIC dgpp_loaders dgpp_common)
 dgpp_set_common(dgpp_models_dory)
 
+# The Dory1.0-4B resident loader (loaders/resident_stream.hpp + the family's
+# builders): one rank, packed NVFP4 kept as shipped.
+add_library(dgpp_models_dory_loader STATIC
+  src/models/dory/loader.cpp)
+target_include_directories(dgpp_models_dory_loader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_dory_loader PUBLIC dgpp_models_dory dgpp_loaders CUDA::cudart dgpp_device_ranges)
+dgpp_set_common(dgpp_models_dory_loader)
+
 # The MiMo resident loader (loaders/resident_stream.hpp + the family's builders).
 add_library(dgpp_models_mimo_loader STATIC
   src/models/mimo/loader.cpp)

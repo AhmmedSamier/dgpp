@@ -280,10 +280,12 @@ combination; the `logit_scale` head; the recurrent K/V policy.
 2. **Binding and loader** — the binding table, the packed NVFP4 slices, the
    BF16 vectors, the resident image, and the census test in the release's
    own layout (the `adding_a_model.md` §2 rules, including the exhaustive
-   `is_replicated` switch). The binding table and its test are **landed**
-   (`models/dory/binding.{hpp,cpp}`, `tests/unit/dory_binding_test.cpp`);
-   the packed slices, the resident image and the `is_replicated` arm are
-   pending.
+   `is_replicated` switch). **Landed**: the binding table and its test
+   (`models/dory/binding.{hpp,cpp}`, `tests/unit/dory_binding_test.cpp`) and
+   the resident loader (`models/dory/loader.{hpp,cpp}`, the
+   `dgpp_models_dory_loader` library). The census test in the release's own
+   layout through the model's own `dory_forward_test --write-fixture` is
+   stage 8.
 3. **Primitives** — `justnorm`/`slerp_norm` kernels + host references +
    kernel tests, with the fp32 accumulation and the `eps` pinned.
 4. **The layer walk** — one sublayer per index, the attention and MLP
