@@ -5,6 +5,26 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **The fp8 K/V pool on every Qwen3.5 release, and the Qwen3.8-27B FP8
+  templates take it with the fp8 attention** (2026-10-18). `engine.kv_dtype:
+  "fp8"` needed a release that ships its `kv_cache_scheme` scales (the
+  mixed NVFP4 release); every Full layer now carries scale words in its
+  image — the shipped ones where the release has them, unit scales
+  otherwise (the FP8 release and the MTP draft layer: the codes are the
+  e4m3 rounding of K and V, the common scale-free fp8 cache), so the pool
+  and `engine.prefill_attention: "fp8"` are accepted on the FP8 release
+  and alongside `engine.mtp`. Gated on one Spark against the bf16 cache:
+  the teacher-forced probe at 127/128 top-1 with a mean KL of 0.005 nats
+  in both fp8 modes (the mixed release's calibrated scales read 0.015 and
+  0.039), needles 20/20 at 32K/128K and 5/5 at 258K, the 300-item evals
+  161/294/100 on the bf16 cache, the same on the pool, 159/295/100 with
+  the fp8 attention. Cold prefill 387 → 320 s at 258K and decode at 256K
+  216 → 181 ms a pass. The three FP8 templates set both keys with their
+  pools re-sized for the halved cache (one Spark 786,432 tokens with a
+  20 GiB arena, two and four Sparks one full context per slot under full
+  admission with 24 and 48 GiB; plans 100.2 / 101.9 / 92.2 GiB, 7.9 /
+  9.3 / 20.6 GiB left at listening, no swap). The forward test runs its
+  rows invariance under the fp8 pool on the FP8 fixture too.
 - **The dense W4A4 TMA GEMM's pipeline drain** (2026-10-17). The Qwen3.8-27B
   NVFP4 MLP's TMA-staged form (2026-10-16) waited for its per-row scale
   words with `cp.async.wait_group 1` at every k-step, which is right while a

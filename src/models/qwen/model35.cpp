@@ -180,8 +180,9 @@ void Qwen35KvPool::copy_block_contents(int32_t src, int32_t dst, cudaStream_t st
 // ---- Qwen35Model ---------------------------------------------------------------
 
 // The pool format a kv_dtype asks for: bf16, or the fp8 storage form —
-// only where every Full layer ships its kv_cache_scheme scales (the mixed
-// release) and no MTP draft plane (its layer ships none) rides the pool.
+// at the release's kv_cache_scheme scales where it ships them (the mixed
+// release) and unit scales where it does not (the FP8 release, the MTP
+// draft layer; 2026-10-18).
 // engine.prefill_attention = fp8 (the attention's arithmetic on that pool)
 // needs it: with a bf16 pool there are no e4m3 K/V codes to compute over.
 static bool kv_format_is_fp8(LatentFormat f, const Qwen35TextConfig& cfg, bool mtp) {
@@ -195,14 +196,8 @@ static bool kv_format_is_fp8(LatentFormat f, const Qwen35TextConfig& cfg, bool m
   if (f != LatentFormat::kFp8)
     throw std::invalid_argument(std::string("Qwen35Model: engine.kv_dtype ") + latent_format_name(f) +
                                 " — this family's K/V pool takes bf16 or fp8");
-  if (cfg.quant_kind != Qwen35QuantKind::Nvfp4Mixed)
-    throw std::invalid_argument(
-        "Qwen35Model: engine.kv_dtype fp8 needs a release that ships k_scale / v_scale (the FP8 "
-        "kv_cache_scheme of the mixed NVFP4 release); this checkpoint ships none");
-  if (mtp)
-    throw std::invalid_argument(
-        "Qwen35Model: engine.kv_dtype fp8 with engine.mtp — the MTP draft layer ships no kv scales; use the "
-        "DFlash2 drafter or kv_dtype bf16");
+  (void)cfg;
+  (void)mtp;
   return true;
 }
 

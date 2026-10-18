@@ -623,12 +623,15 @@ struct Qwen35LoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
     a.o_proj_fp8 = load_attn_cols(p + "self_attn.o_proj", o0, on, &a.o_proj);
     a.q_norm = load_bf16(p + "self_attn.q_norm.weight");
     a.k_norm = load_bf16(p + "self_attn.k_norm.weight");
-    // The mixed release's FP8 kv_cache_scheme scalars (BF16 [1] each),
-    // widened to F32 [2] in the image: the fp8 K/V storage form's scales
-    // (engine.kv_dtype = fp8; loader_format 5, 2026-10-16). Read at every
-    // kv_dtype: the byte reconciliation counts them either way.
+    // The fp8 K/V storage form's scales (engine.kv_dtype = fp8), F32 [2]
+    // (k, v) in every Full layer's image: the mixed release's FP8
+    // kv_cache_scheme scalars (BF16 [1] each, 2026-10-16) where the release
+    // ships them, unit scales otherwise (the FP8 release and the MTP draft
+    // layer, 2026-10-18: the codes are the e4m3 rounding of K and V, the
+    // common scale-free fp8 cache). Read at every kv_dtype: the byte
+    // reconciliation counts the shipped ones either way.
+    float* sc = static_cast<float*>(bump.alloc(2 * sizeof(float)));
     if (cfg.quant_kind == Qwen35QuantKind::Nvfp4Mixed && out.layer != cfg.mtp_layer()) {
-      float* sc = static_cast<float*>(bump.alloc(2 * sizeof(float)));
       const char* names[2] = {"self_attn.k_scale", "self_attn.v_scale"};
       for (int i = 0; i < 2; ++i) {
         const std::string name = p + names[i];
@@ -644,8 +647,10 @@ struct Qwen35LoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
         }
         note_read(e, e.nbytes());
       }
-      a.kv_scales = sc;
+    } else if (copy) {
+      bump.host(sc)[0] = bump.host(sc)[1] = 1.f;
     }
+    a.kv_scales = sc;
   }
 
   void build_gdn(const std::string& p) {
@@ -777,7 +782,7 @@ const char* Qwen35LoaderFamily::who() { return "qwen35 loader"; }
 
 // 3: the NVFP4 global slot holds the weight-side divisor itself (2026-10-06;
 // the 2-era images hold its reciprocal, and the kernels divide by the slot).
-uint64_t Qwen35LoaderFamily::loader_format() { return 5; }
+uint64_t Qwen35LoaderFamily::loader_format() { return 6; }  // 6: K/V scale words in every Full layer (2026-10-18)
 
 int Qwen35LoaderFamily::max_layer(const Config& c) {
   return c.num_hidden_layers + (c.mtp_layer() >= 0 ? 1 : 0);

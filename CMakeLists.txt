@@ -1329,6 +1329,10 @@ add_test(NAME qwen35_forward_smoke COMMAND qwen35_forward_test --smoke ${QWEN35_
 set_tests_properties(qwen35_forward_smoke PROPERTIES DEPENDS qwen35_forward_fixture)
 add_test(NAME qwen35_decode_rows_invariance COMMAND qwen35_forward_test --rows-invariance ${QWEN35_FORWARD_FIXTURE})
 set_tests_properties(qwen35_decode_rows_invariance PROPERTIES DEPENDS qwen35_forward_fixture)
+add_test(NAME qwen35_decode_rows_invariance_kvfp8 COMMAND qwen35_forward_test --rows-invariance ${QWEN35_FORWARD_FIXTURE} --kv-fp8)
+set_tests_properties(qwen35_decode_rows_invariance_kvfp8 PROPERTIES DEPENDS qwen35_forward_fixture)
+add_test(NAME qwen35_decode_rows_invariance_attnfp8 COMMAND qwen35_forward_test --rows-invariance ${QWEN35_FORWARD_FIXTURE} --attn-fp8)
+set_tests_properties(qwen35_decode_rows_invariance_attnfp8 PROPERTIES DEPENDS qwen35_forward_fixture)
 add_test(NAME qwen35_prefill_group_invariance COMMAND qwen35_forward_test --group-invariance ${QWEN35_FORWARD_FIXTURE})
 set_tests_properties(qwen35_prefill_group_invariance PROPERTIES DEPENDS qwen35_forward_fixture)
 add_test(NAME qwen35_forward_generate

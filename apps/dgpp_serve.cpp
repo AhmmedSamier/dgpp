@@ -929,8 +929,9 @@ struct Qwen35Family final : ServeFamily {
   std::vector<int64_t> eos_;
   std::unique_ptr<dgpp::Qwen35Model> model;
   // The Full layers' K/V pool format (engine.kv_dtype): bf16, or the fp8
-  // storage form on a release that ships its kv_cache_scheme scales
-  // (models/qwen/model35.hpp: Qwen35KvPoolShape::fp8). The attention's
+  // storage form — at the release's kv_cache_scheme scales where it ships
+  // them, unit scales otherwise (models/qwen/model35.hpp:
+  // Qwen35KvPoolShape::fp8). The attention's
   // arithmetic on that pool is engine.prefill_attention (a model static).
   dgpp::LatentFormat kv_format = dgpp::LatentFormat::kBf16;
   Qwen35Family(const std::string& checkpoint,
@@ -943,10 +944,11 @@ struct Qwen35Family final : ServeFamily {
     if (kv_format != dgpp::LatentFormat::kBf16 && kv_format != dgpp::LatentFormat::kFp8)
       throw std::invalid_argument(std::string("engine.kv_dtype ") + dgpp::latent_format_name(kv_format) +
                                   ": the Qwen3.5 K/V pool takes bf16 or fp8");
-    if (kv_format == dgpp::LatentFormat::kFp8 && cfg.quant_kind != dgpp::Qwen35QuantKind::Nvfp4Mixed)
-      throw std::invalid_argument(
-          "engine.kv_dtype fp8: this Qwen3.5 release ships no k_scale / v_scale (the FP8 kv_cache_scheme "
-          "of the mixed NVFP4 release); its K/V pool stays bf16");
+    if (kv_format == dgpp::LatentFormat::kFp8)
+      DGPP_LOG_INFO("qwen3.5: engine.kv_dtype fp8 — the Full layers' K/V as e4m3 codes {}",
+                    cfg.quant_kind == dgpp::Qwen35QuantKind::Nvfp4Mixed
+                        ? "at the release's shipped k_scale / v_scale"
+                        : "at unit scales (this release ships no kv_cache_scheme: the codes are the e4m3 rounding of K and V)");
     for (int64_t id : cfg.eos_token_ids) eos_.push_back(id);
     // The engine's opt-in YaRN ramp (engine.rope_scaling): it rides the
     // parsed config, so the Full layers' tables, the drafter's table, the

@@ -198,7 +198,7 @@ the others. Startup checks the combined memory plan before loading the model.
 | `engine.max_connections` | Maximum open HTTP connections on rank 0, including idle connections and streams. Excess connections receive HTTP 503. Size this separately from active request slots. | 64 |
 | `engine.admission` | When context memory is reserved. `full` reserves the prompt plus requested answer budget before starting. `grow` reserves less initially and expands during generation; if space runs out, the youngest request is stopped. `grow` can fit more work at once, with a risk of interrupting requests. | `full` |
 | `engine.admission_window` | Number of answer tokens reserved at a time under `grow`; must be positive. Larger increments reserve more unused space but need fewer reservation updates. Has no effect with `full`. | 256 tokens |
-| `engine.kv_dtype` | Precision of cached model state. Lower precision saves memory but can change answers; weights are unaffected. GLM-5.3 supports `bf16`, `fp8` and `fp4` for its latent cache; its index cache stays FP8. MiMo supports `bf16` and `fp8`. Qwen3.8-27B supports `fp8` only with the mixed NVFP4 release's cache scales; otherwise use `bf16`. Qwen3.8-Flash-Next supports `bf16` and per-token/head scaled `fp8`; GLM-4.7 keeps BF16 caches, and DeepSeek uses its architecture's own formats. | `bf16` |
+| `engine.kv_dtype` | Precision of cached model state. Lower precision saves memory but can change answers; weights are unaffected. GLM-5.3 supports `bf16`, `fp8` and `fp4` for its latent cache; its index cache stays FP8. MiMo supports `bf16` and `fp8`. Qwen3.8-27B supports `fp8` on both releases: the Full layers' K/V as e4m3 codes at the mixed NVFP4 release's shipped cache scales, or at unit scales on the FP8 release, which ships none (the codes are the e4m3 rounding of K and V, the common scale-free fp8 cache; 2026-10-18, measured at the bf16 cache's floor in the [FP8 model card](model_cards/Qwen3.8-27B-FP8.md)); half the Full layers' pool bytes, decode at 256K 16 % faster. Qwen3.8-Flash-Next supports `bf16` and per-token/head scaled `fp8`; GLM-4.7 keeps BF16 caches, and DeepSeek uses its architecture's own formats. | `bf16` |
 
 For example, a shared pool of 32768 tokens can cover two requests reserving
 16384 tokens each, but not two reserving 32768 each. Model limits, block
@@ -346,7 +346,7 @@ quantization can change answers.
 
 | Key | What it controls and what to expect | Default |
 |---|---|---|
-| `engine.prefill_attention` | Qwen3.8-27B and Qwen3.8-Flash-Next prefill attention arithmetic. Accepts `bf16` or `fp8`. `fp8` requires `kv_dtype: "fp8"`; other families reject the `fp8` value. The 27B NVFP4 templates enable it. Decode uses its own setting. | `bf16` |
+| `engine.prefill_attention` | Qwen3.8-27B and Qwen3.8-Flash-Next prefill attention arithmetic. Accepts `bf16` or `fp8`. `fp8` requires `kv_dtype: "fp8"`; other families reject the `fp8` value. The 27B templates, NVFP4 and FP8, enable it. Decode uses its own setting. | `bf16` |
 | `engine.decode_attention` | Qwen3.8-Flash-Next QSA decode arithmetic, including MTP draft and verification rows. Accepts `bf16` or `fp8`. `fp8` requires `kv_dtype: "fp8"`; other families accept only `bf16`. Independent of `prefill_attention`. Long selected-token lists can benefit, while short single-row decode can be faster with `bf16`. | `bf16` |
 
 Flash-Next supports BF16 or FP8 caches; FP4 is rejected. Native FP8 attention
