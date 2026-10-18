@@ -425,9 +425,12 @@ class SiteEnvTest(unittest.TestCase):
                 self.assertTrue(all("DGPP_NO_SWAP" not in env for env in json.loads(result.stdout)["node_env"]))
 
     def test_operational_wrappers_stop_on_invalid_env_before_running(self):
-        scripts = [p for p in (ROOT / "scripts").glob("*.sh")
-                   if p.name != "cluster_env.sh" and 'cluster_env.sh" || exit 1' in p.read_text()]
-        self.assertGreater(len(scripts), 20)
+        # Select by role, so removing a wrapper's site guard cannot remove it
+        # from coverage. The shared library, configuration wizard and local
+        # memory sampler do not require an existing site configuration.
+        excluded = {"cluster_env.sh", "setup.sh", "node_probe.sh"}
+        scripts = sorted(p for p in (ROOT / "scripts").glob("*.sh") if p.name not in excluded)
+        self.assertTrue(scripts, "no operational wrappers found")
         for path in scripts:
             with self.subTest(script=path.name):
                 result = subprocess.run(["bash", str(path)], env={**self.environ, "DGPP_ENV_FILE": str(self.root / "missing")},
