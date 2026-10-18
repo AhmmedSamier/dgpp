@@ -1,0 +1,324 @@
+# Dory1.0-4B (nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-NVFP4) on dgpp — architecture study and implementation plan (2026-10-18)
+
+Status: **not implemented.** This document is the survey and the design
+that the port is judged against (`docs/adding_a_model.md` §1). Section 5
+carries the staged plan; nothing below is claimed as working.
+
+The survey reads the checkpoint's `config.json` and safetensors headers
+(1083 tensors, censused in §1.8) and the reference implementation:
+the vLLM port in [vllm-project/vllm#60149](https://github.com/vllm-project/vllm/pull/60149)
+(`vllm/model_executor/models/dory.py`, `vllm/transformers_utils/configs/dory.py`,
+copies kept during the survey), which is the only executable description of
+the architecture — `transformers` has no `dory` model directory yet, and the
+checkpoint ships no remote code.
+
+## 0. Summary
+
+Dory1.0-4B (`DoryForCausalLM`, `model_type dory`) is a **normalized GPT**
+(nGPT) whose 72 physical layers are **looped**: 16 input layers, a 40-layer
+recurrent block applied `n_recurrent_loops` times (2 in the checkpoint) with
+the input re-injected and the state re-normalized at every loop, then 16
+output layers. Every physical layer is a **single sublayer** — attention or
+MLP, never both (`layer_types` alternates `sliding_attention` / `mlp`,
+with a `full_attention` block every 8 layers). There is no LayerNorm or
+RMSNorm anywhere: normalization is nGPT's `justnorm` (row-wise L2 with
+`eps = 1e-6`), and every residual is a **slerp** toward the sublayer output
+(`slerp_norm(residual_out, sublayer_out, |alpha| * ngpt_alpha_init / initializer_range)`).
+
+It is a small, dense, single-GPU model: 4 B parameters, hidden 2560, vocab
+131 072, 16 query heads / 4 KV heads of `head_dim` 256, SwiGLU MLP of 7168,
+256 K positions, all projections weight-only NVFP4 (W4A16) and the rest
+BF16. The checkpoint is 2.982 GiB on disk. There is **no MoE, no MTP/draft,
+no vision, no linear attention and no TP** (the reference refuses
+`tensor_parallel_size != 1`).
+
+The engine reuse is substantial — the NVFP4 W4A16 weight path, paged GQA
+with a sliding window, the two-theta RoPE precedent (MiMo-V2.6), the session
+core, the memory plan and the family interface all exist. New work: the
+loop, the nGPT primitives, the per-sublayer walk, two recurrent K/V cache
+policies, and the LM head's `logit_scale`.
+
+## 1. The model
+
+### 1.1 Configuration facts
+
+| field | value |
+|---|---|
+| `architectures[0]` / `model_type` | `DoryForCausalLM` / `dory` |
+| `hidden_size` / `vocab_size` / `num_hidden_layers` | 2560 / 131 072 / 72 |
+| `n_input_layers` / `n_recurrent_layers` / `n_output_layers` | 16 / 40 / 16 |
+| `n_recurrent_loops` | **2** (the checkpoint's own value) |
+| `recurrent_kv_cache_mode` | absent from the checkpoint; `DoryConfig` default `"per_loop"` |
+| `intermediate_size` / `hidden_act` | 7168 / silu |
+| heads | 16 query / 4 KV, `head_dim` 256 → q 4096, kv 1024 |
+| `layer_types` | `mlp` on odd `i`; else `full_attention` when `i % 8 == 6`, else `sliding_attention` — 36 mlp, 27 sliding, 9 full |
+| `sliding_window` | 1024 (sliding layers only) |
+| `rope_parameters` | per type: `sliding_attention` θ = 1e4, `full_attention` θ = 1e7, `rope_type` default, `partial_rotary_factor` 1.0 (neoX pairs) |
+| `max_position_embeddings` | 262 144 |
+| `tie_word_embeddings` | false |
+| `initializer_range` | **0.0177** (normalizes every learned nGPT scale) |
+| `ngpt_alpha_init` | 0.05 → residual scale `0.05 / 0.0177` = 2.824 858 8 |
+| `attention_output_gate_logit_scale_init` | null → gate scale `sqrt(hidden_size)` |
+| `attention_bias` / `mlp_bias` | false / false |
+| `quantization_config` | modelopt `W4A16_NVFP4`, group_size 16, ignore `backbone.embeddings` + `lm_head`, `kv_cache_quant_algo` null |
+
+Derived constants the model owns (fp32, computed from the config as the
+reference computes them):
+
+| constant | definition | value |
+|---|---|---|
+| `alpha_scale` | `ngpt_alpha_init / initializer_range` | 2.824 858 8 |
+| `sqk_factor` | `head_dim**0.5 / initializer_range` | 903.954 80 |
+| `s_gate_factor` | `sqrt(g0) / initializer_range`, `g0 = attention_output_gate_logit_scale_init or sqrt(hidden_size)` | 401.871 1 |
+| `suv_factor` | `hidden_size**0.5` | 50.596 44 |
+| `logit_factor` | `1 / initializer_range` | 56.497 18 |
+
+### 1.2 The primitives
+
+```
+justnorm(x)      = bf16( fp32(x) * rsqrt(sum(fp32(x)^2, -1) + 1e-6) )
+slerp_norm(a,b,l)= justnorm( justnorm_f32(a) + l * (justnorm_f32(b) - justnorm_f32(a)) )
+slerp_alpha(a,b,α, s) = slerp_norm(a, b, |fp32(α) * s|)
+```
+
+Both operands of the slerp are normalized **before** the interpolation, and
+the interpolation itself is fp32; the result is then normalized again. The
+residual `a` is the sublayer input, `b` the sublayer output. This is the
+only residual form in the model, so the `h += f(x)` accumulation the other
+families use does not appear.
+
+`justnorm` is applied at eight distinct sites, and the reduction width
+differs by site (see §1.3–§1.5): the per-head `q`/`k` (256), the attention
+output (4096 = all query heads), the MLP intermediate (7168), the slerp
+operands and results (2560), and the loop's state combination (2560).
+
+### 1.3 One attention block (`layer_types[i] != "mlp"`)
+
+```
+x    = justnorm-able input h (no pre-norm)
+qkv  = qkv_proj(h)                       NVFP4 W4A16, bias-free: q 4096 | k 1024 | v 1024
+gate = g_proj(h)                         NVFP4, 4096 wide
+q, k = RoPE(head_dim 256, neoX, θ per layer type)
+q    = ( (sqk ⊙ sqk_factor)^2 ⊙ justnorm_per_head(q) )        per head, fp32 sqk
+k    = justnorm_per_kv_head(k)
+attn = softmax(q k^T / sqrt(256)) v      paged GQA, 16 q heads / 4 kv heads
+       causal; sliding layers mask to the last 1024 positions
+out  = fp32(attn) ⊙ sigmoid( fp32(gate) ⊙ (s_gate ⊙ s_gate_factor)^2 )
+out  = justnorm(out)                     width 4096, i.e. all query heads at once
+o    = o_proj(out)                       NVFP4, 2560 wide
+h'   = slerp_alpha(h, o, attn_alpha)     width 2560
+```
+
+Note the order the engine must reproduce: the `sqk` scaling is applied
+**after** RoPE (unusual), the output gate multiplies **before** `justnorm`
+and `o_proj`, and the `justnorm` over the attention output spans all 16
+heads rather than one head.
+
+### 1.4 One MLP block (`layer_types[i] == "mlp"`)
+
+```
+m   = gate_up_proj(h)                    NVFP4, 14336 wide: gate 7168 | up 7168
+g   = fp32(g) ⊙ (suv_gate ⊙ suv_factor)
+u   = fp32(u) ⊙ (suv_up   ⊙ suv_factor)
+m   = silu(fp32(g)) ⊙ fp32(u)
+m   = justnorm(m)                        width 7168
+o   = down_proj(m)                       NVFP4, 2560 wide
+h'  = slerp_alpha(h, o, mlp_alpha)       width 2560
+```
+
+`attn_alpha` and `mlp_alpha` are distinct parameter names on the two kinds
+of layer, not a shared vector.
+
+### 1.5 The looped backbone
+
+```
+h       = embeddings(input_ids)
+for layer in layers[:16]:            h = layer(h)          # input block, 1 pass
+input_h = h
+state   = input_h
+for i in range(n_recurrent_loops):
+    h = justnorm(state + input_h)                          # re-inject, re-normalize
+    for layer in layers[16:56]:      h = layer(h, i)       # shared 40-layer block
+    state = justnorm(h)
+h = state
+for layer in layers[56:]:            h = layer(h)          # output block, 1 pass
+```
+
+The recurrent block's weights are shared across loops; only the attention
+K/V caches differ (§2). `justnorm(state + input_h)` is an addition of two
+normalized vectors followed by a re-normalization, not a slerp — it is
+`state` and `input_h` both normalized (the loop's state already is) added
+at equal weight.
+
+### 1.6 Embedding, head, KV
+
+* Embedding: plain BF16 table lookup, no scale, no norm.
+* Head: `logits = fp32(h) @ fp32(lm_head.weight)^T ⊙ (logit_scale / initializer_range)`,
+  `lm_head.weight` BF16 `[131072, 2560]` untied, `logit_scale` BF16 `[131072]`.
+  The scale is per-vocabulary-entry, applied in fp32 after the projection.
+* K/V: one cache per attention layer per loop (`per_loop`) or one shared and
+  overwritten by each loop (`last_loop`). Sliding layers wrap at 1024.
+
+### 1.7 Tensor census
+
+1083 tensors, 2.982 GiB: packed U8 NVFP4 1575 MiB, BF16 1282 MiB, E4M3
+block scales 197 MiB, F32 per-tensor scales 288 × 4 B. Every key is
+`backbone.*` or `lm_head.*`:
+
+| group | tensors |
+|---|---|
+| embedding / head | `backbone.embeddings.weight` BF16 [131072, 2560]; `lm_head.weight` BF16 [131072, 2560]; `lm_head.logit_scale` BF16 [131072] |
+| attention block (36, even `i`) | `backbone.layers.i.mixer.{q,k,v,o,g}_proj.weight` U8 with `.weight_scale` E4M3 (in/16 columns) and `.weight_scale_2` F32 (); BF16 `s_gate` [4096], `sqk` [4096]; `backbone.layers.i.attn_alpha` BF16 [2560] |
+| mlp block (36, odd `i`) | `backbone.layers.i.mixer.{gate,up,down}_proj.weight` U8 + `.weight_scale` + `.weight_scale_2`; BF16 `suv_gate` [7168], `suv_up` [7168]; `backbone.layers.i.mlp_alpha` BF16 [2560] |
+
+The NVFP4 layout is the modelopt one the engine already loads for the GLM
+and Qwen NVIDIA releases: U8 with `in/2` columns (two e2m1 codes per byte),
+an E4M3 scale grid of `in/16` columns, and one F32 per-tensor `weight_scale_2`.
+There are **no `input_scale` tensors**: the release is W4A16, so activations
+stay BF16 and no activation-quantization path is needed.
+
+**Absent** (and therefore not implemented): MoE routers and experts, MTP /
+draft layers, vision and audio towers, linear attention, TP slices, and any
+`rope_scaling`.
+
+## 2. Placement and cost (W = 1)
+
+The reference refuses TP > 1 and the checkpoint is 3 GiB, so the family is
+**one node, one rank** (`w1`); the loader takes no TP slices and the plan
+assumes the whole checkpoint per rank.
+
+Resident weights ≈ 2.98 GiB, plus the dequantization the loader chooses:
+the engine may keep NVFP4 packed (the GLM/Qwen precedent) or expand to BF16
+at load (≈ 8 GiB). The plan keeps them packed.
+
+K/V is the only large variable, and the loop is what makes it interesting.
+Bf16 K and V cost `kv_size × 2 × 2 B = 4096 B/token` per attention layer.
+
+| class | layers | per-token cost | at 262 144 positions |
+|---|---|---|---|
+| sliding (window 1024) | 27 | capped at 1024 | 27 × 1024 × 4096 B = 113 MiB |
+| full attention, non-recurrent | 4 (i = 6, 14, 62, 70) | 4096 B | 4 × 262144 × 4096 B = 4.29 GiB |
+| full attention, recurrent | 5 (i = 22, 30, 38, 46, 54) | 4096 B × loops | per_loop: 8.59 GiB, last_loop: 4.29 GiB |
+
+So `per_loop` at the full 256 K context needs ≈ 13.0 GiB of K/V and
+`last_loop` ≈ 8.7 GiB — the difference is the 5 recurrent full-attention
+layers. With 2 loops and a long context this is the dominant cost after the
+weights, and it is the reason `recurrent_kv_cache_mode` must be an engine
+key rather than a hard-coded choice (§3).
+
+## 3. Design decisions
+
+**D1 — the loop count is the checkpoint's, overridable by an engine key.**
+`n_recurrent_loops` is in the checkpoint's `config.json` (2), so the exact
+path is the config's value and `engine.dory_loops` overrides it for the
+vendor's compute/accuracy trade (1, 3, 4). It changes what the engine
+computes, so it is an `engine.*` key, plumbed the seven ways of
+`adding_a_model.md` §4.
+
+**D2 — the recurrent K/V mode is an engine key.**
+`recurrent_kv_cache_mode` is absent from the checkpoint; the architecture's
+default is `per_loop` (one cache per loop, joined). `engine.dory_kv_cache`
+takes `per_loop` / `last_loop`, defaulting to `per_loop` — the exact,
+lossless path — with `last_loop` documented as the memory lever (§2:
+≈ 4.3 GiB at 256 K) and its measured transcript cost recorded before it is
+recommended anywhere.
+
+**D3 — weight-only, packed NVFP4, exact.** The release is W4A16 with no
+`input_scale`; the loader keeps the packed e2m1 weights, the E4M3 block
+scales and the F32 per-tensor scale, exactly as the GLM-4.7 / Qwen NVFP4
+path does, and computes in BF16 activations. No load-time requantization.
+
+**D4 — no MTP.** The checkpoint has no draft layer, so the family has no
+speculative path; the deploy template is a plain world and the family
+refuses the drafter keys by name rather than silently ignoring them.
+
+**D5 — one physical layer, one sublayer.** The engine's layer walk must not
+assume `attention + MLP` per index; the family's walk splits attention and
+MLP blocks, which also makes the recurrent block a clean 40-entry list.
+
+**D6 — sliding window per layer.** 27 of 36 attention layers carry the
+1024 window; the family declares it per layer (the MiMo precedent) rather
+than globally.
+
+**D7 — two RoPE thetas.** θ = 1e4 on the sliding layers, 1e7 on the full
+layers, neoX pairs over the full 256-dim head (`partial_rotary_factor` 1.0).
+This is the MiMo-V2.6 precedent (1e7/1e4) with a different assignment rule.
+
+**D8 — `justnorm` at the raggeder widths.** The eight sites in §1.2 need a
+row-wise L2-with-eps kernel that accepts the width as a parameter (256,
+2560, 4096, 7168) and an fp32 accumulation; the slerp needs the composed
+form (normalize both, lerp, normalize). Both are new kernels with host
+references.
+
+**D9 — the head's per-token `logit_scale`.** The vocabulary-wide BF16 vector
+multiplies the fp32 logits before sampling. New for this family.
+
+## 4. Reuse, adapt, new
+
+Reused as-is: the modelopt NVFP4 decode/GEMM kernels (`fp4_gemv`,
+`fp4w_gemm`, `dense_fp4_decode`) and the E4M3/F32 scale handling; the paged
+GQA attention with a per-layer sliding window (the MiMo-V2.6 kernels); the
+two-theta RoPE; the GQA prefill and decode paths; the session core (graph
+capture, snapshot, prefix arena, memory plan, `ServeFamily`); the BF16 GEMV
+for the head; the tokenizer/Jinja renderer.
+
+Adapted: the family config/binding/loader/model; the K/V pool (a per-layer,
+per-repeat pool with a `per_loop` / `last_loop` policy); the layer walk (one
+sublayer per index); the memory plan (the loop's cache multiplicity).
+
+New: `justnorm` and `slerp_norm` kernels plus host references; the
+`sqk`/`s_gate`/`suv` scaling sites; the loop driver and its state
+combination; the `logit_scale` head; the recurrent K/V policy.
+
+## 5. Implementation stages
+
+1. **Detection, config, census** — `ModelArchitecture::Dory`, the parser
+   (`models/dory/config.{hpp,cpp}`) rejecting every field outside §1.1 by
+   name, the tensor census test against a tiny synthetic checkpoint.
+2. **Binding and loader** — the binding table, the packed NVFP4 slices, the
+   BF16 vectors, the resident image, and the census test in the release's
+   own layout (the `adding_a_model.md` §2 rules, including the exhaustive
+   `is_replicated` switch).
+3. **Primitives** — `justnorm`/`slerp_norm` kernels + host references +
+   kernel tests, with the fp32 accumulation and the `eps` pinned.
+4. **The layer walk** — one sublayer per index, the attention and MLP
+   numerics of §1.3–§1.4, the two RoPE thetas, the sliding window.
+5. **The loop** — the input/recurrent/output partition, the re-injection
+   and state normalization, and the two K/V policies.
+6. **The head** — `logit_scale`, and the lm head on the shared path.
+7. **Serve wiring and template** — the `ServeFamily` (name, model build,
+   resident-image dir, refused keys), `deploy/cluster_dory1.0-4b_nvfp4_w1.example.json`,
+   the `portability_test.py` model map and the `deploy/README.md` row.
+8. **Gates** — the `dory_forward_test` fixture ladder (§6 of
+   `adding_a_model.md`): `--write-fixture` from the binding table itself,
+   host-reference `--smoke` / `generate` / `decode` rows.
+9. **Validation** — `cmake --preset ci` clean with `-Werror`, the full
+   serial `ctest` on an idle Spark with master merged, and the greedy
+   transcript battery at T=1 and with the decode graph.
+
+Stages 1–2 are pure host work; stage 3 needs the kernel tests but not the
+model; stages 4–6 are the model; 7–9 are the landing.
+
+## 6. Risks and open questions
+
+* **The attention-output `justnorm` spans all 16 heads** (width 4096), not a
+  single head. A per-head implementation is a plausible silent error; the
+  host reference must pin the width.
+* **`justnorm` after RoPE but before the `sqk` square** — the reference's
+  literal order. Any reordering changes the numerics.
+* **`per_loop` K/V multiplicity** is the difference between ≈ 13 GiB and
+  ≈ 8.7 GiB of cache at 256 K. The default is `per_loop` (exact), so a
+  long-context deployment is a deliberate keyed decision, not a default.
+* **No MTP** means no speculative battery; the plain-world transcript is
+  the reference for the decode graph.
+* **Dense NVFP4 W4A16 linears** are exercised by the GLM-4.7 / Qwen NVIDIA
+  releases; confirm the packed decode path covers a 4096-wide `g_proj` and
+  a 14336-wide fused `gate_up_proj` before stage 2 lands.
+* **The chat template and parsers** (the card names `nemotron_v3` reasoning
+  and `qwen3_coder` tools) are not part of the architecture; the engine's
+  renderer/parser choices for this family are a separate decision to settle
+  before the template ships.
+* **Looping and prefix caching / snapshots**: the recurrent block's state
+  is a function of the whole prefix, so a snapshot must be taken at a loop
+  boundary the scheduler's cut list contains, and the `per_loop` caches
+  must snapshot together. This is the subtlest interaction in the port.
