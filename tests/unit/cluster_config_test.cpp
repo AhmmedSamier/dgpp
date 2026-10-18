@@ -619,7 +619,8 @@ DGPP_TEST(cluster_config_the_fp4local_template_is_a_deployment_the_engine_reads)
   // Full layers' K/V at fp8 with the fp8 prefill attention (half the bf16
   // pool, sized here to four full 262144-token contexts; interleaved on one
   // Spark it measured 1459-1469 t/s prefill at 4-8K depth against 1141-1260
-  // bf16, decode unchanged, 2026-10-18) — is what the file spells.
+  // bf16, decode unchanged, 2026-10-18), and the YaRN ramp to a 1M positional
+  // ceiling (the cap, not the pool) — is what the file spells.
   const std::string path = std::string(DGPP_SOURCE_DIR) +
                            "/deploy/cluster_qwen-3.8-flash-next-fp4local_w1.example.json";
   std::ifstream in(path);
@@ -636,6 +637,10 @@ DGPP_TEST(cluster_config_the_fp4local_template_is_a_deployment_the_engine_reads)
           "the BF16 remainder FP8 at load and the tensor-core head, as the sibling NVFP4 templates");
   require(c.engine.kv_dtype == "fp8" && c.engine.prefill_attention == "fp8",
           "the Full layers' K/V at fp8 with the fp8 prefill attention: half the bf16 pool, the long-depth prefill win");
+  require(c.engine.rope_scaling.has_value() && c.engine.rope_scaling->factor == 4.0 &&
+              c.engine.rope_scaling->original_max_position_embeddings == 262144 &&
+              c.engine.rope_scaling->context_limit() == 1048576,
+          "the YaRN ramp to a 1M positional ceiling: the cap moves, not the pool (it costs no K/V bytes)");
   require(c.engine.max_concurrency == 4 && c.engine.kv_capacity % 64 == 0 &&
               c.engine.kv_capacity > c.engine.default_max_tokens && c.engine.prefix_cache_gib == 3 &&
               c.engine.model_alias == "Qwen3.8-Flash-Next-FP4",
