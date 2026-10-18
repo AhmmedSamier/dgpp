@@ -15,8 +15,9 @@
 //     kpool 1 with relu over `pos_sel` = (pos + 1) / ratio - 1 (the
 //     compressed entries visible to a query as a "position"); the
 //     candidate stage (the top-2048 blocks of 8 entries, the newest
-//     block pinned) and the restricted stage (the top-512 among a
-//     candidate list) are the kernels below.
+//     block pinned) and the restricted stage (the top-index_topk — the
+//     release's 512, up to 2048 when a deployment widens the budget —
+//     among a candidate list) are the kernels below.
 // Numerics mirror inference/model.py + kernel.py: the one-rounding
 // RMSNorm (fp32 interior, bf16 out), the complex rotation over adjacent
 // pairs with fp32 angles p * inv_freq[i] and cosf/sinf (no table), the

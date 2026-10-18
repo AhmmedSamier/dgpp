@@ -10,7 +10,7 @@
 // are errors. Engine defaults match the binary's defaults; deployment
 // templates set serving values explicitly. Each rank hashes its effective
 // shared configuration, and the warm record checks those hashes before
-// serving. See README.md for the schema and deploy/*.example.json for
+// serving. See docs/configuration.md for the schema and deploy/*.example.json for
 // templates. Multi-node deployment templates must be resolved before this loader
 // reads them. A single-node template may use world_size: 1 directly (localhost);
 // nodes and world_size are mutually exclusive.
@@ -34,6 +34,7 @@ struct ClusterConfig {
   std::vector<std::string> nodes;  // rank = index; nodes[0] is the head
   std::string ssh_user;            // empty: the launcher's own user
   std::string release;             // the installed release the launcher runs (launcher-only; empty: the development binary)
+  size_t tokenizer_word_cache_entries = 0;
   int http_port = 18080;
   std::string http_bind = "0.0.0.0";
   int64_t http_max_body_bytes = kDefaultHttpMaxBodyBytes;
@@ -67,6 +68,16 @@ struct ClusterConfig {
     // distribution is unchanged; only the draft's proposals (acceptance)
     // can move. Other families ignore it.
     std::string mtp_head = "checkpoint";
+    // The DeepSeek-V4.1 indexer's budget (2026-10-18; the deepseek_v41
+    // family alone): how many compressed entries a query attends
+    // (index_topk; the release trained at 512, the select networks serve
+    // up to 2048) out of a candidate pool of candidate_topk_blocks blocks
+    // of candidate_block_size entries (2048 x 8 as shipped). 0 keeps the
+    // checkpoint's value. Widening the budget changes the model's output
+    // (more context visible to every query), not just its speed.
+    int index_topk = 0;
+    int candidate_topk_blocks = 0;
+    int candidate_block_size = 0;
     // The full GLM-5.3 attention projections' resident form (2026-10-09):
     // "checkpoint" as shipped (int8 g64); "int4" re-encoded to int4 g64 at
     // load (RTN) — −2.1 GB per MTP pass per rank, NOT lossless. Other
@@ -165,13 +176,17 @@ struct ClusterConfig {
     //     prefill attention on the fp8 tensor cores — Q and the
     //     probabilities quantized to e4m3 per row, S and O on
     //     mma.e4m3 at twice the bf16 rate; decode rows keep the exact
-    //     widened walk). Needs kv_dtype fp8; other families refuse it.
+    //     widened walk). Also supported for Flash-Next QSA, with its
+    //     per-token/head cache scales. Both require kv_dtype fp8.
     bool prefill_bf16_partials = false;
     bool prefill_fold_scales = false;
     bool prefill_fp8_gemm = false;
     bool prefill_fp8_per_tensor = false;
     std::string prefill_activations = "bf16";
     std::string prefill_attention = "bf16";
+    // Flash-Next QSA decode arithmetic over its fp8 pool. Independent of
+    // prefill_attention so either phase can retain bf16 compute.
+    std::string decode_attention = "bf16";
     // The packed expert GEMM's form and companions (2026-09-30; every
     // serving switch is a config key — no environment variable selects a
     // kernel). All bitwise the default chain.

@@ -133,7 +133,8 @@ struct WorldSettings {
   bool prefill_fp8_gemm = false;
   bool prefill_fp8_per_tensor = false;  // the Qwen3.8-27B per-tensor prefill recipe (opt-in)
   std::string prefill_activations = "bf16";  // "native": the checkpoint's activation recipe on prefill rows
-  std::string prefill_attention = "bf16";    // "fp8": the Qwen3.5 prefill attention on the fp8 tensor cores (2026-10-16)
+  std::string prefill_attention = "bf16";    // Qwen3.5 / Flash-Next attention over an fp8 pool
+  std::string decode_attention = "bf16";     // Flash-Next QSA: bf16 or native fp8 compute
   std::string dflash_model;             // the DFlash2 drafter (Qwen3.8-27B, world 1); empty: none
   bool dflash_verify_graph = true;
   bool prefill_group = true;  // engine.prefill_group (2026-10-05): every rank admits the same way
@@ -154,6 +155,12 @@ struct WorldSettings {
   std::string embed_sharding = "replicated";  // the full GLM-5.3's embedding: replicated | vocab
   std::string mtp_head = "checkpoint";        // the full GLM-5.3 draft head: checkpoint | fp8
   std::string attention_weights = "checkpoint";  // the full GLM-5.3 attention projections: checkpoint | int4
+  // The DeepSeek-V4.1 index budget (engine.index_topk / candidate_topk_blocks /
+  // candidate_block_size, 2026-10-18): 0 = the checkpoint's. Every rank
+  // selects the same entries or the ranks' attention diverges.
+  int index_topk = 0;
+  int candidate_topk_blocks = 0;
+  int candidate_block_size = 0;
   int default_max_tokens = 0;
   int queue_limit = 0;
   bool no_eos = false;

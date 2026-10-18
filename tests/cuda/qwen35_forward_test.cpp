@@ -383,7 +383,8 @@ int run_dump_parity(const std::string& dir, const std::string& dump_path, const 
 int run_rows_invariance(const std::string& dir, bool fp8_head, bool kv_fp8, bool attn_fp8) {
   const Qwen35TextConfig cfg = Qwen35TextConfig::from_json_file((fs::path(dir) / "config.json").string());
   // The fp8 K/V storage form (engine.kv_dtype = fp8): the mixed fixture
-  // ships k_scale / v_scale of 1, so the planes hold the e4m3 rounding of
+  // ships k_scale / v_scale of 1 and the FP8 fixture ships none (unit
+  // scales, 2026-10-18), so on both the planes hold the e4m3 rounding of
   // K and V; the invariance below holds in that form as in bf16, and the
   // eight-row verify's logits must stay close to the bf16 cache's.
   // --attn-fp8: the same planes with the prefill attention on the fp8
@@ -391,7 +392,6 @@ int run_rows_invariance(const std::string& dir, bool fp8_head, bool kv_fp8, bool
   // same gates. The fixture's one Full layer is its last, so the verify's
   // logits see the mode only through the prefill rows' own outputs.
   kv_fp8 = kv_fp8 || attn_fp8;
-  if (kv_fp8) require(cfg.quant_kind == dgpp::Qwen35QuantKind::Nvfp4Mixed, "rows: --kv-fp8 needs the mixed fixture");
   Qwen35Model::set_fp8_attention(attn_fp8);
   const dgpp::LatentFormat kv_format = kv_fp8 ? dgpp::LatentFormat::kFp8 : dgpp::LatentFormat::kBf16;
   // The mixed release's head is already fp8-channel resident: the FP8

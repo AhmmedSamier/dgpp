@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
@@ -153,6 +154,28 @@ class SafetensorsFile {
   // FNV-1a of the raw header JSON: the shard's identity for cache keys
   // (names, dtypes, shapes, offsets — a swapped checkpoint changes it).
   uint64_t header_fold() const { return header_fold_; }
+  // FNV-1a over three 64 KiB windows of the payload (its start, middle and
+  // end): the shard's WEIGHT identity, for the resident image's payload
+  // note. A refined release that re-ships the same tensors in the same
+  // shards with other values keeps header_fold() and changes this
+  // (DeepSeek-V4.1-Flash-1017 against DeepSeek-V4.1-Flash, 2026-10-18:
+  // byte-identical config and headers, every shard's payload different).
+  // Three page-ins per shard; nothing else is read.
+  uint64_t payload_sample_fold() const {
+    uint64_t hlen = 0;
+    std::memcpy(&hlen, map_, 8);
+    const size_t begin = 8 + static_cast<size_t>(hlen);
+    const size_t len = map_len_ > begin ? map_len_ - begin : 0;
+    constexpr size_t kWindow = 64 * 1024;
+    const size_t starts[3] = {0, len / 2, len > kWindow ? len - kWindow : 0};
+    uint64_t h = 1469598103934665603ull;
+    for (const size_t s0 : starts) {
+      const size_t n = std::min(kWindow, len - std::min(len, s0));
+      const uint8_t* w = map_ + begin + s0;
+      for (size_t i = 0; i < n; ++i) h = (h ^ w[i]) * 1099511628211ull;
+    }
+    return h;
+  }
 
   // Header-truth iteration (bind-check tooling): visits every tensor of this
   // shard. Fn takes const TensorInfo&.

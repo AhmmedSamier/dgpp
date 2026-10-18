@@ -559,13 +559,15 @@ struct SelectFixture {
 };
 }  // namespace
 
-DGPP_TEST(csa2_long_decode_selection_replays) {
-  // Production block size and selection widths, a non-tile-aligned long pool,
-  // all partial-tail lengths, the all-candidates-fit transition, inactive rows,
-  // and the six-request/depth-four batch width. The unchanged DSA scorer supplies
-  // score keys; host sorting independently supplies candidate and selected IDs.
-  // The small fixture below also retains its fully independent host score oracle.
-  constexpr int rows = 30, entries = 131073, topk_blocks = 2048, select_k = 512, block_size = 8;
+namespace {
+// Production block size and selection widths (the release's 512 and the 2048
+// a deployment may widen engine.index_topk to), a non-tile-aligned long pool,
+// all partial-tail lengths, the all-candidates-fit transition, inactive rows,
+// and the six-request/depth-four batch width. The unchanged DSA scorer supplies
+// score keys; host sorting independently supplies candidate and selected IDs.
+// The small fixture below also retains its fully independent host score oracle.
+void long_decode_selection_replays(const int select_k) {
+  constexpr int rows = 30, entries = 131073, topk_blocks = 2048, block_size = 8;
   std::vector<int64_t> positions(rows);
   const std::vector<int64_t> lengths{0,      1,      511,    512,    513,    4095,   16383,
                                      16384,  16385,  32768,  131065, 131066, 131067, 131068,
@@ -667,6 +669,104 @@ DGPP_TEST(csa2_long_decode_selection_replays) {
   DGPP_CUDA_OK(cudaGraphExecDestroy(exec));
   DGPP_CUDA_OK(cudaGraphDestroy(graph));
   DGPP_CUDA_OK(cudaStreamDestroy(stream));
+}
+}  // namespace
+
+DGPP_TEST(csa2_long_decode_selection_replays) { long_decode_selection_replays(512); }
+DGPP_TEST(csa2_long_decode_selection_replays_at_2048) { long_decode_selection_replays(2048); }
+
+DGPP_TEST(csa2_selections_at_the_widened_budget) {
+  // engine.index_topk 2048 (2026-10-18): the restricted and plain decode
+  // selects (the radix path, no tile) and the prefill rows select (the
+  // 4096-key tile) at the select networks' bound, against the host oracles
+  // over a pool wider than the budget.
+  const int select_k = 2048, block_size = 8, topk_blocks = 256;
+  SelectFixture fx(5000, 8, {-1, 0, 2046, 2047, 2048, 2049, 4095, 4999}, 0x2048);
+  const int rows = fx.rows;
+  DevBuf dsel_ws(dgpp::csa2_select_workspace_bytes(rows, fx.n));
+  DevBuf dtop(size_t(rows) * select_k * 4), dcnt(rows * 4);
+  const auto check_plain = [&](const char* who) {
+    const auto top = download<int32_t>(dtop, size_t(rows) * select_k);
+    const auto cnt = download<int32_t>(dcnt, rows);
+    for (int r = 0; r < rows; ++r) {
+      const int64_t visible = fx.pos_sel[size_t(r)] + 1;
+      std::vector<int32_t> want(size_t(select_k), -1);
+      const int wn = dgpp::dsa_ref::select_pools(&fx.logits[size_t(r) * fx.n], visible, select_k, want.data());
+      require(cnt[size_t(r)] == wn, std::string(who) + " count row " + std::to_string(r));
+      for (int i = 0; i < select_k; ++i)
+        require(top[size_t(r) * select_k + i] == (i < wn ? want[size_t(i)] : -1), std::string(who) + " row " + std::to_string(r));
+    }
+  };
+  // 1) the plain decode select at 2048 (cand null: every visible entry).
+  dgpp::csa2_select_listed_decode(
+      fx.dq8.p, static_cast<const float*>(fx.dwf.p), fx.ri(), fx.ps(), rows, fx.tab(), fx.bpr(),
+      fx.dk.p, static_cast<const float*>(fx.dks.p), fx.epb, 32, nullptr, 0, nullptr, 0, select_k,
+      static_cast<uint64_t*>(dsel_ws.p), fx.n, static_cast<int32_t*>(dtop.p), static_cast<int32_t*>(dcnt.p), 0);
+  sync();
+  check_plain("plain decode at 2048");
+  // 2) the restricted decode select: 256 candidate blocks of 8 (2048 entries plus the partial
+  // newest block: a pool wider than the budget at every long row) from the host oracle.
+  std::vector<int32_t> cand(size_t(rows) * topk_blocks, -1), cand_counts(size_t(rows), 0);
+  for (int r = 0; r < rows; ++r) {
+    const int64_t visible = fx.pos_sel[size_t(r)] + 1;
+    if (visible <= 0) continue;
+    const auto blocks = ref_candidate_blocks(&fx.logits[size_t(r) * fx.n], visible, block_size, topk_blocks);
+    cand_counts[size_t(r)] = int(blocks.size());
+    std::copy(blocks.begin(), blocks.end(), cand.begin() + size_t(r) * topk_blocks);
+  }
+  DevBuf dcand = upload(cand), dcc = upload(cand_counts);
+  const auto check_restricted = [&](const char* who) {
+    const auto top = download<int32_t>(dtop, size_t(rows) * select_k);
+    const auto cnt = download<int32_t>(dcnt, rows);
+    for (int r = 0; r < rows; ++r) {
+      const int64_t visible = fx.pos_sel[size_t(r)] + 1;
+      std::vector<int32_t> blocks(cand.begin() + size_t(r) * topk_blocks,
+                                  cand.begin() + size_t(r) * topk_blocks + cand_counts[size_t(r)]);
+      const auto want = visible > 0 ? ref_topk_among(&fx.logits[size_t(r) * fx.n],
+                                                     ref_pool_entries(blocks, visible, block_size), visible, select_k)
+                                    : std::vector<int32_t>{};
+      require(cnt[size_t(r)] == int(want.size()), std::string(who) + " count row " + std::to_string(r));
+      for (int i = 0; i < select_k; ++i)
+        require(top[size_t(r) * select_k + i] == (i < int(want.size()) ? want[size_t(i)] : -1),
+                std::string(who) + " row " + std::to_string(r));
+    }
+  };
+  dgpp::csa2_select_listed_decode(
+      fx.dq8.p, static_cast<const float*>(fx.dwf.p), fx.ri(), fx.ps(), rows, fx.tab(), fx.bpr(),
+      fx.dk.p, static_cast<const float*>(fx.dks.p), fx.epb, 32, static_cast<const int32_t*>(dcand.p), topk_blocks,
+      static_cast<const int32_t*>(dcc.p), block_size, select_k, static_cast<uint64_t*>(dsel_ws.p), fx.n,
+      static_cast<int32_t*>(dtop.p), static_cast<int32_t*>(dcnt.p), 0);
+  sync();
+  check_restricted("restricted decode at 2048");
+  // 3) the prefill rows select over the oracle's logits rows (stride n): plain, then restricted.
+  DevBuf dlog = upload(fx.logits);
+  dgpp::csa2_select_rows_prefill(static_cast<const float*>(dlog.p), fx.n, fx.ps(), rows, select_k, nullptr, 0, nullptr, 0,
+                                 static_cast<int32_t*>(dtop.p), static_cast<int32_t*>(dcnt.p), 0);
+  sync();
+  check_plain("plain prefill at 2048");
+  dgpp::csa2_select_rows_prefill(static_cast<const float*>(dlog.p), fx.n, fx.ps(), rows, select_k,
+                                 static_cast<const int32_t*>(dcand.p), topk_blocks, static_cast<const int32_t*>(dcc.p),
+                                 block_size, static_cast<int32_t*>(dtop.p), static_cast<int32_t*>(dcnt.p), 0);
+  sync();
+  check_restricted("restricted prefill at 2048");
+  // 4) the candidate stage at the full 2048-block pool over these rows agrees with the oracle too.
+  {
+    const int full_blocks = 2048;
+    DevBuf dcp(size_t(rows) * full_blocks * 4), dcpc(rows * 4);
+    dgpp::csa2_select_candidates_prefill(static_cast<const float*>(dlog.p), fx.n, fx.ps(), rows, block_size, full_blocks,
+                                         static_cast<int32_t*>(dcp.p), static_cast<int32_t*>(dcpc.p), 0);
+    sync();
+    const auto cp = download<int32_t>(dcp, size_t(rows) * full_blocks);
+    const auto cpc = download<int32_t>(dcpc, rows);
+    for (int r = 0; r < rows; ++r) {
+      const int64_t visible = fx.pos_sel[size_t(r)] + 1;
+      auto c = visible > 0 ? ref_candidate_blocks(&fx.logits[size_t(r) * fx.n], visible, block_size, full_blocks)
+                           : std::vector<int32_t>{};
+      require(cpc[size_t(r)] == int(c.size()), "prefill candidate count at 2048 blocks");
+      c.resize(size_t(full_blocks), -1);
+      for (int i = 0; i < full_blocks; ++i) require(cp[size_t(r) * full_blocks + i] == c[size_t(i)], "prefill candidate list at 2048 blocks");
+    }
+  }
 }
 
 DGPP_TEST(csa2_selections_match_the_oracles) {

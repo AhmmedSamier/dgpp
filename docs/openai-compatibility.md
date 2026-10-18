@@ -303,15 +303,17 @@ first token to the latest last token, and rates exclude one prefill pick per
 choice that generated any tokens. This reports aggregate request throughput,
 including intervening work when choices cannot all run at once.
 
-These are additional response fields. Existing `usage` counts, `/metrics` and
-`/v1/metrics` counters, Prometheus measurements, and throughput logs retain
-all of their existing definitions. In particular, usage counts the full prompt,
-TTFT continues to include queue wait, and engine execution counters remain
-separate from per-request elapsed time.
+These are additional response fields. Usage counts the full prompt; TTFT and
+end-to-end latency include request preparation and queue wait. Engine execution
+counters and response timings remain separate from per-request elapsed time.
 
 Errors use `{ "error": { "message", "type", "param", "code" } }`.
 An overload detected before opening a stream returns HTTP 503. Errors after
 stream headers have been sent use an SSE error followed by `[DONE]`.
+Preparation runs concurrently, with one worker per configured engine slot;
+ready requests can reach admission before earlier, larger requests. Exhausting
+the preparation count or retained-payload budget returns HTTP 503 with
+`code: "preparation_busy"` before any stream headers are sent.
 HTTP body-limit errors return 413 with `code: "request_too_large"`; this is a
 serialized byte limit, separate from model context/KV capacity.
 
@@ -495,7 +497,9 @@ token buckets from 1 to 1M.
 - `service.requests_total` counts validated HTTP generation requests reaching
   admission, once even when `n > 1`, including overload rejections. Shed,
   cancellation, pool exhaustion and failure counters each count a request at
-  most once. `rejects_bad` counts service-generated 4xx responses, excluding
+  most once. Shed counts also include preparation refusals, which have not
+  reached admission and are excluded from `requests_total`.
+  `rejects_bad` counts service-generated 4xx responses, excluding
   transport-level parsing/size errors. Pending admissions/cancellations,
   scheduler counters and TTFT observations count individual choices.
 

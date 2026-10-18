@@ -528,7 +528,12 @@ __global__ __launch_bounds__(kThreads, 1) void dense_w4a4_tma_kernel(
   unsigned parity = 0;
   for (int step = 0; step < steps; ++step) {
     mbar_wait(&full[slot], parity);
-    cp_wait<kStages - 2>();
+    // This step's scale words: wait_group N leaves the N most recent groups in
+    // flight, so N is the number of groups committed after this step's — one
+    // per stage still ahead, none at the drain (the last step's own group would
+    // otherwise be the most recent and could be read before it landed:
+    // intermittent, 4 of 49 launches at the 27B MLP's gate shape, 2026-10-17).
+    if (step + kStages - 2 < steps) cp_wait<kStages - 2>(); else cp_wait<0>();
     __syncthreads();  // this step's scales landed for every thread; every warp is done with the slot being refilled
     if (step + kStages - 1 < steps) stage(step + kStages - 1, (slot + kStages - 1) % kStages);
     const unsigned so = static_cast<unsigned>(slot) * kStageBytes;

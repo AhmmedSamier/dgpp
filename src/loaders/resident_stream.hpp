@@ -474,14 +474,24 @@ void ResidentLayerStream<F>::open_resident_image() {
   if (residency_ != LoaderResidency::Resident) return;
   const std::string& dir = image_dir();
   if (dir.empty()) return;
+  // The checkpoint's weight identity beside the key (ResidentImage::open_for):
+  // the key reads config.json and the shard headers, which a refined
+  // release can re-ship byte for byte.
+  uint64_t payload = 1469598103934665603ull;
+  for (const auto& shard : shards_) payload = fnv_mix(payload, shard->payload_sample_fold());
+  bool replaced = false;
   try {
-    image_ = std::make_unique<ResidentImage>(dir, resident_image_key(), max_layer());
+    image_ = ResidentImage::open_for(dir, resident_image_key(), max_layer(), payload, &replaced);
   } catch (const std::exception& e) {
     DGPP_LOG_WARN("{}: rank {} resident image unavailable ({}) — building from the checkpoint",
                   F::who(), rank_, e.what());
     image_.reset();
     return;
   }
+  if (replaced)
+    DGPP_LOG_WARN("{}: rank {} resident image {} was built from a checkpoint with these shard headers but other "
+                  "weights — discarded; rebuilding it from this checkpoint",
+                  F::who(), rank_, image_->path());
   DGPP_LOG_INFO("{}: rank {} resident image {} — {}/{} layers present, {} I/O", F::who(), rank_,
                 image_->path(), image_->present(), image_->layers(),
                 image_->direct_io() ? "direct" : "buffered");

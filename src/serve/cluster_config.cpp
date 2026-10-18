@@ -1,18 +1,18 @@
 #include "serve/cluster_config.hpp"
 
-#include <arpa/inet.h>
-
 #include <algorithm>
+#include <arpa/inet.h>
 #include <cmath>
-#include <limits>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
 #include "common/bf16_residency.hpp"
 #include "kernels/latent_format.hpp"
 #include "loaders/minijson.hpp"
+#include "text/word_cache.hpp"
 
 namespace dgpp::serve {
 
@@ -114,6 +114,16 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
       c.ssh_user = text(v, k, what);
     } else if (k == "release") {
       c.release = text(v, k, what);
+    } else if (k == "tokenizer") {
+      if (!v.is_object()) fail(what, "'tokenizer' must be an object");
+      for (const Member& p : v.members()) {
+        if (p.key != "word_cache_entries") fail(what, "unknown key 'tokenizer." + p.key + "'");
+        if (p.value.kind() != Value::Kind::Int)
+          fail(what, "'tokenizer.word_cache_entries' must be an integer in [0, 10000]");
+        c.tokenizer_word_cache_entries =
+            static_cast<size_t>(integer(p.value, "tokenizer.word_cache_entries", what, 0,
+                                        dgpp::text::detail::WordCache::kMaxEntries));
+      }
     } else if (k == "http") {
       if (!v.is_object()) fail(what, "'http' must be an object");
       for (const Member& p : v.members()) {
@@ -193,6 +203,15 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           if (e.embed_sharding != "replicated" && e.embed_sharding != "vocab")
             fail(what, "'" + ek + "' must be \"replicated\" or \"vocab\"");
         }
+        else if (p.key == "index_topk" || p.key == "candidate_topk_blocks") {
+          // The DeepSeek-V4.1 index budget: 0 = the checkpoint's, else a
+          // power of two the select networks serve (<= 2048).
+          const int value = static_cast<int>(integer(x, ek, what, 0, 2048));
+          if (value != 0 && (value & (value - 1)) != 0)
+            fail(what, "'" + ek + "' must be 0 (the checkpoint's) or a power of two <= 2048");
+          (p.key == "index_topk" ? e.index_topk : e.candidate_topk_blocks) = value;
+        }
+        else if (p.key == "candidate_block_size") e.candidate_block_size = static_cast<int>(integer(x, ek, what, 0, 1024));
         else if (p.key == "attention_weights") {
           e.attention_weights = text(x, ek, what);
           if (e.attention_weights != "checkpoint" && e.attention_weights != "int4")
@@ -257,6 +276,10 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
         } else if (p.key == "prefill_attention") {
           e.prefill_attention = text(x, ek, what);
           if (e.prefill_attention != "bf16" && e.prefill_attention != "fp8")
+            fail(what, "'" + ek + "' must be \"bf16\" or \"fp8\"");
+        } else if (p.key == "decode_attention") {
+          e.decode_attention = text(x, ek, what);
+          if (e.decode_attention != "bf16" && e.decode_attention != "fp8")
             fail(what, "'" + ek + "' must be \"bf16\" or \"fp8\"");
         } else if (p.key == "expert_gemm") {
           e.expert_gemm = text(x, ek, what);

@@ -1,8 +1,8 @@
 # Optimizing performance
 
 How to make a dgpp deployment faster on your own workload without losing
-track of what it computes. The [README's configuration
-tables](../README.md#configuration) define every key; this page says which
+track of what it computes. The [configuration
+reference](configuration.md) defines each setting; this page says which
 keys move which number, what each one trades, and how to measure a change
 before trusting it. The numbers quoted are the recorded ones in
 [benchmarks](benchmarks.md); yours will differ with prompts, context and
@@ -48,8 +48,8 @@ Rules that keep the numbers comparable:
 | key | moves | trades |
 |---|---|---|
 | `engine.kv_capacity` | the shared token capacity of the KV pool | memory; the startup memory plan (`dgpp-serve --memory-plan`) says what fits before anything is allocated |
-| `engine.kv_dtype` (GLM-5.3 family, MiMo, Qwen3.5 mixed releases) | KV bytes per token: `bf16`, `fp8`, and GLM-only `fp4` | the quantized forms change the model's answers; `bf16` is the exact one. On the Qwen3.8-27B NVFP4 release `fp8` is the release's own `kv_cache_scheme` (its shipped per-layer scales), halves the Full layers' pool and cuts long-context decode (262K: 188 -> 156 ms a pass); with the attention math kept in bf16 the cold prefill is slower (316 -> 352 s at 262K: the codes widened in shared memory) — see `engine.prefill_attention` |
-| `engine.prefill_attention` (Qwen3.5 mixed releases on `kv_dtype: "fp8"`) | the prefill attention's arithmetic over the fp8 K/V pool: `bf16` (the widened codes) or `fp8` (Q and the probabilities in e4m3 on the fp8 tensor cores) | `fp8` is the fast long prefill (262K cold prefill 242 s against 352 in bf16 over the same pool, the same decode); it adds a small deviation beyond the cache's own, measured at the bf16 cache's run-to-run floor in the [model card](model_cards/Qwen3.8-27B-NVFP4.md) |
+| `engine.kv_dtype` (GLM-5.3 family, MiMo, Qwen3.5 releases) | KV bytes per token: `bf16`, `fp8`, and GLM-only `fp4` | the quantized forms change the model's answers; `bf16` is the exact one. On the Qwen3.8-27B NVFP4 release `fp8` is the release's own `kv_cache_scheme` (its shipped per-layer scales), halves the Full layers' pool and cuts long-context decode (262K: 188 -> 156 ms a pass); with the attention math kept in bf16 the cold prefill is slower (316 -> 352 s at 262K: the codes widened in shared memory) — see `engine.prefill_attention`. On the FP8 release (no shipped scales: unit scales, 2026-10-18) the same shape: decode at 256K 216 -> 181 ms a pass, cold prefill 395 -> 434 s under bf16 arithmetic and 325 with the fp8 attention, the suite at the bf16 floor |
+| `engine.prefill_attention` (Qwen3.5 releases on `kv_dtype: "fp8"`) | the prefill attention's arithmetic over the fp8 K/V pool: `bf16` (the widened codes) or `fp8` (Q and the probabilities in e4m3 on the fp8 tensor cores) | `fp8` is the fast long prefill (262K cold prefill 242 s against 352 in bf16 over the same pool, the same decode); it adds a small deviation beyond the cache's own, measured at the bf16 cache's run-to-run floor in the [model card](model_cards/Qwen3.8-27B-NVFP4.md) |
 | `engine.bf16_weights` | the resident form of the BF16 matrices decode streams: `checkpoint`, `bf12`, `bf12+bf16` | `bf12` is lossless (the kernels rebuild the exact bits) and both faster and smaller for decode; `bf12` alone slows a prefill chunk slightly, `bf12+bf16` keeps prefill on the BF16 bytes for 0.75 of those matrices' memory more |
 | `engine.dense_weights` (Qwen) | the dense stack's storage: the checkpoint's BF16 or block-FP8 encoded at load | FP8 saves memory and decode bytes; it is a quantization of the dense projections, measured per template in the quality rows |
 | `engine.ngram_table` (Qwen) | the n-gram table resident or mmap'ed from local NVMe | mmap saves its memory; the rows a chunk needs come through the page cache, gathered a chunk ahead |

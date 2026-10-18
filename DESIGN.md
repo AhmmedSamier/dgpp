@@ -2086,7 +2086,19 @@ merge walk. Unicode tables and normalization live under `src/text/`.
 Unsupported tokenizer configurations are errors.
 
 The tokenizer is loaded once; encode and decode are const and
-thread-safe. Golden corpora compare token IDs and decoded bytes against
+thread-safe. BPE merges use adjacent spans into the mapped pretoken. Small
+words and geometrically shrinking runs use in-place passes. Long words get
+a budget of four times their initial symbol count in pair probes, then
+switch at a pass boundary to a heap ordered by rank and input position.
+Each heap phase merges only pairs available at its start; newly created
+neighbors wait for the next phase, including when their rank is lower.
+This preserves the original all-occurrences, left-to-right semantics while
+bounding repeated scans. There is no deployment setting for the algorithm.
+An optional per-tokenizer cache reuses IDs for mapped words of at most 256
+bytes. Its configured slot count is bounded, collisions replace entries,
+and try-locks let a busy shard fall back to normal merging. It stores owned
+keys and IDs, preserves the GLM vocabulary shortcut, and defaults to disabled.
+See [tokenization](docs/tokenization.md) for bounds and validation. Golden corpora compare token IDs and decoded bytes against
 reference tokenizers and are keyed by the tokenizer file's hash. A
 different checkpoint revision must use its matching corpus.
 
@@ -2331,15 +2343,35 @@ the same machine from the journal and its tokenizer.
 
 The server separates HTTP processing from model execution. Rank 0 runs
 the text frontend and generation service; every rank runs a scheduler and
-model engine. The HTTP thread accepts and validates requests, renders
-templates, tokenizes prompts and writes responses. The engine thread owns
-admissions, model operations and token events. A mutex protects the event
-queue and request records; sockets are written only by the HTTP thread.
+model engine. The HTTP thread owns connections and publishes prepared
+requests. A persistent preparation pool has one worker per configured engine
+request slot. Workers parse and validate JSON, render templates, tokenize
+prompts and prepare images. Completed requests enter admission in completion
+order; request identities and arrival timestamps survive file extraction and
+preparation. File extraction uses its separately bounded workers so subprocess
+waits do not occupy preparation threads. The engine thread owns scheduler
+admission, model operations and token events. Sockets are written only by HTTP.
+
+The preparation queue admits at most `engine.max_concurrency + engine.queue_limit`
+requests across queued, running and completed stages. A 1 GiB budget bounds
+retained input and prepared payloads, including per-choice token/image copies
+and a conservative allowance for metadata and grammar strings. Reservations
+stay charged through scheduler admission and response completion. Temporary
+parser and frontend allocations are additional; the request limits and fixed
+worker count bound their concurrency. Unstarted disconnected requests release
+their capacity immediately. Workers sleep on a condition variable when idle
+and join before the service's frontend dependencies are destroyed.
+
+Explicit and fixed sampling seeds retain their meaning. Seedless requests draw
+once on HTTP when their prepared result reaches admission; completion order can
+therefore change their random draws. Preparation wait and work histograms expose
+the new stage, and request latency begins at HTTP dispatch, before preparation.
 
 The HTTP loop drains asynchronous output once per pass. `http.stream_flush`
-defaults to `pass`, which retains the 25 ms quiet-loop timeout and allocates
-no notification descriptor. In `wake` mode a nonblocking, close-on-exec
-`eventfd` joins the epoll set. Producers publish results under their existing
+defaults to `pass`, which retains the 25 ms quiet-loop timeout for generated
+output. Preparation and file completions always notify through a nonblocking,
+close-on-exec `eventfd`; `wake` also notifies for generated output.
+Producers publish results under their existing
 synchronization, then notify; the HTTP thread clears the accumulated counter
 and performs its normal drain and socket flush. Notifications arriving during
 a drain remain pending for the next pass. The timeout still drives maintenance

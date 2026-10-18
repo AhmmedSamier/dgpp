@@ -1,5 +1,15 @@
 # Tests
 
+`serve_preparation_*` checks the fixed preparation pool at configured engine
+concurrencies of 1, 2, 4 and 16, completion ordering, responsive health/SSE
+traffic during blocked preparation, count/payload bounds, disconnects, worker
+errors and shutdown. The service suite runs in both stream-flush modes.
+`image_preparation_concurrent_formats_and_errors` covers simultaneous PNG,
+JPEG and WebP decoding; `glm_vision_frontend_test` also shares the real loaded
+template/tokenizer across text/image preparation and output decoding.
+Set `DGPP_TP_REAL_MODEL` to select another cached GLM-5.3 checkpoint for that
+frontend test; its default is `unsloth/GLM-5.3-Flash-FP8`.
+
 `serve_admission_bench_test` checks the HTTP/SSE admission benchmark's transport,
 native-overlap assertions, published-counter drain barrier and KV cleanup gate.
 It also checks optional controller metrics sampling against request IDs, sampler
@@ -38,6 +48,12 @@ stopped, then restore and verify the original deployment.
 buffers after starting a shared `PrefillTask`. Its yielded execution must retain
 the target and MTP results, snapshot chain and KV cleanup behavior. Run it with
 `glm_vision_stream_test` and `glm_vision_frontend_test` when changing that lifetime.
+`qwen35_image_prefill_test` and `qwen35_mixed_image_prefill_test` cover the same
+lifetime for the 27B model with synthetic FP8 and mixed NVFP4 checkpoints. They
+also compare grouped and interleaved image requests against isolated execution,
+check cancellation followed by text slot reuse, and resume an attached prefix
+whose MTP catch-up token is the first image row. Build `qwen35_image_prefill_test`
+and run `ctest --test-dir build-ci --output-on-failure -R '^qwen35_(mixed_)?image_prefill_test$'`.
 
 For serving comparisons, use the same deployment, checkpoint revisions, prompts
 and output lengths for the previous and candidate executable. Warm long prompts

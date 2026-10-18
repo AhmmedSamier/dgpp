@@ -793,9 +793,14 @@ void GlmLayerStream::open_resident_image() {
   if (dir.empty()) return;
   const int max_layer =
       cfg_.num_hidden_layers + (cfg_.mtp_layer() >= 0 ? 1 : 0);
+  // The checkpoint's weight identity beside the key (ResidentImage::open_for):
+  // the key reads config.json and the shard headers, which a refined
+  // release can re-ship byte for byte.
+  uint64_t payload = 1469598103934665603ull;
+  for (const auto& shard : shards_) payload = fnv_mix(payload, shard->payload_sample_fold());
+  bool replaced = false;
   try {
-    image_ = std::make_unique<GlmResidentImage>(dir, resident_image_key(),
-                                                max_layer);
+    image_ = GlmResidentImage::open_for(dir, resident_image_key(), max_layer, payload, &replaced);
   } catch (const std::exception& e) {
     // A cache that cannot open is a slower start, not a failed one.
     DGPP_LOG_WARN("glm loader: rank {} resident image unavailable ({}) — "
@@ -804,6 +809,10 @@ void GlmLayerStream::open_resident_image() {
     image_.reset();
     return;
   }
+  if (replaced)
+    DGPP_LOG_WARN("glm loader: rank {} resident image {} was built from a checkpoint with these shard headers "
+                  "but other weights — discarded; rebuilding it from this checkpoint",
+                  rank_, image_->path());
   DGPP_LOG_INFO("glm loader: rank {} resident image {} — {}/{} layers present, "
                 "{} I/O",
                 rank_, image_->path(), image_->present(), image_->layers(),

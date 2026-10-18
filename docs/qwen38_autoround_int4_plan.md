@@ -980,7 +980,8 @@ The decision (2026-09-30): the levers that beat the bitwise chain by
 changing the prefill's arithmetic exist in dgpp, off by default, on only
 through a deployment's cluster config — `engine.prefill_bf16_partials`,
 `engine.prefill_fold_scales`, `engine.prefill_fp8_gemm` (docs/operations.md,
-the README key table); none is bitwise the default chain, so a deployment
+the [configuration reference](configuration.md#prefill-computation-and-precision));
+none is bitwise the default chain, so a deployment
 that turns one on serves transcripts that can differ from the default's,
 and the benchmarks list a template's default-chain and levers-on numbers
 as separate rows (the AutoRound template turns on the two that pay, below).

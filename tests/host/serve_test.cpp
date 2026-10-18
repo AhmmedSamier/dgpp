@@ -441,6 +441,8 @@ std::string json_of(const dgpp::minijson::Value& v) {
 // the same rule. It keeps the last globals the service handed it.
 class FakeFrontend : public ModelFrontend {
  public:
+  std::function<void(std::string_view)> encode_hook;
+  mutable std::atomic<size_t> decoded_ids{0};
   std::atomic<bool> images_available{false};
   bool supports_images() const override { return images_available; }
   ChatInput prepare_chat(const dgpp::minijson::Value& globals) const override {
@@ -482,6 +484,7 @@ class FakeFrontend : public ModelFrontend {
   }
 
   std::vector<int64_t> encode_text(std::string_view text) const override {
+    if (encode_hook) encode_hook(text);
     std::vector<int64_t> ids;
     for (size_t i = 0; i < text.size();) {
       bool matched = false;
@@ -498,6 +501,7 @@ class FakeFrontend : public ModelFrontend {
     return ids;
   }
   std::string decode_ids(const std::vector<int64_t>& ids) const override {
+    decoded_ids.fetch_add(ids.size(), std::memory_order_relaxed);
     std::string out;
     for (int64_t id : ids) {
       if (id == kFakeEos) continue;
@@ -714,14 +718,16 @@ struct ServiceRig {
                       bool resumable_prefill = false, bool with_dsml = false,
                       std::string default_chat_template_kwargs = "{}",
                       int sse_ping_interval = dgpp::serve::kDefaultSsePingInterval,
-                      dgpp::text::DsmlDialect dsml_dialect = dgpp::text::DsmlDialect::kV41)
-      : engine(kSlots, /*total_blocks=*/100, /*block_tokens=*/4, can_sample),
+                      dgpp::text::DsmlDialect dsml_dialect = dgpp::text::DsmlDialect::kV41,
+                      int slots = kSlots, size_t preparation_max_bytes = 1024ull * 1024 * 1024)
+      : engine(slots, /*total_blocks=*/100, /*block_tokens=*/4, can_sample),
         frontend(with_markers, with_dsml, dsml_dialect),
         cfg([&] {
           ServiceConfig c;
           c.model_id = "glm-5.3-flash-fp8";
           c.default_max_tokens = 8;
           c.queue_limit = queue_limit;
+          c.preparation_max_bytes = preparation_max_bytes;
           c.sampling_defaults = sampling_defaults;
           c.fixed_seed = fixed_seed;
           c.reasoning_in_content = reasoning_in_content;
@@ -1268,6 +1274,9 @@ DGPP_TEST(serve_overloadedQueue_503AtTheDoor) {
                  "\r\n\r\n" + chat_body("abcd", 2));
   // (Non-streaming requests receive NOTHING until they complete — no
   // early bytes to await; the first one just sits pending.)
+  for (int i = 0; i < 1000 && rig.service.stats().requests_total == 0; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  require(rig.service.stats().requests_total == 1, "first preparation reaches the held admission queue");
   Client second(rig.port());
   second.send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\n"
                   "Content-Type: application/json\r\nContent-Length: " +
@@ -3813,6 +3822,28 @@ std::string post_utf8_completion(ServiceRig& rig, bool chat, bool stream,
   return client.read_until(until.empty() ? (stream ? "\r\n0\r\n\r\n" : "usage") : until, 5000);
 }
 
+DGPP_TEST(serve_incremental_decode_preserves_text_with_linear_work) {
+  const std::string text = "é📭中" + std::string(72, 'x') + "\n";
+  for (const bool chat : {false, true}) {
+    ServiceRig rig(8, model_defaults(), false, std::nullopt, chat);
+    // Several accepted tokens per pass must still be decoded only once.
+    rig.engine.tokens_per_step = 4;
+    const auto script = script_of(rig, chat ? text + "</think>" + text : text);
+    rig.engine.script(chat ? 5 : 4, script);
+    for (const bool stream : {false, true}) {
+      rig.frontend.decoded_ids = 0;
+      const auto response = post_utf8_completion(rig, chat, stream, "\"abcd\"");
+      const auto [content, reasoning] = utf8_completion_text(response, chat, stream);
+      require(content == text && reasoning == (chat ? text : ""),
+              "streamed and one-shot text match the full decoded output");
+      require(rig.frontend.decoded_ids.load() <= script.size(),
+              "completion and chat text must decode a linear number of ids");
+      require(response.find("\"finish_reason\":\"stop\"") != std::string::npos,
+              "the skipped EOS still finishes the request normally");
+    }
+  }
+}
+
 DGPP_TEST(serve_utf8_escapedAndRawPromptsReachFrontendIdentically) {
   const std::string text = "📭🏢𠀀";
   for (const bool chat : {false, true}) {
@@ -5141,4 +5172,225 @@ DGPP_TEST(serve_images_prefix_cache_defaults_on_and_respects_opt_out) {
               rig.engine.prefix_ops() == operations && rig.engine.image_prefills == 3,
           "explicit opt-out still performs image prefill without cache operations");
 
+}
+
+namespace {
+struct PreparationGate {
+  std::mutex mutex;
+  std::condition_variable changed;
+  int entered = 0;
+  bool open = false;
+  void enter(std::string_view text) {
+    if (!text.starts_with("slow")) return;
+    std::unique_lock lock(mutex);
+    ++entered;
+    changed.notify_all();
+    changed.wait(lock, [&] { return open; });
+  }
+  void wait(int count) {
+    std::unique_lock lock(mutex);
+    require(changed.wait_for(lock, std::chrono::seconds(3), [&] { return entered >= count; }),
+            "configured preparation workers start independently");
+  }
+  void release() {
+    std::lock_guard lock(mutex);
+    open = true;
+    changed.notify_all();
+  }
+  struct Release {
+    PreparationGate& gate;
+    ~Release() { gate.release(); }
+  };
+};
+std::unique_ptr<ServiceRig> preparation_rig(int slots, int queue_limit = 8,
+                                            size_t bytes = 1ull << 30) {
+  return std::make_unique<ServiceRig>(queue_limit, dgpp::sample::greedy_params(), false,
+                                      std::nullopt, false, false, dgpp::sched::AdmissionPolicy{}, 0,
+                                      dgpp::serve::FileInputConfig{}, std::nullopt, 0, 0, false,
+                                      false, "{}", dgpp::serve::kDefaultSsePingInterval,
+                                      dgpp::text::DsmlDialect::kV41, slots, bytes);
+}
+void send_preparation(Client& client, std::string_view prompt, bool chat = true,
+                      bool stream = false) {
+  const auto body = chat ? chat_body(std::string(prompt), 2, stream ? ",\"stream\":true" : "")
+                         : "{\"model\":\"" + kModel + "\",\"prompt\":\"" + std::string(prompt) +
+                               "\",\"max_tokens\":2}";
+  client.send_all(std::string("POST /v1/") + (chat ? "chat/completions" : "completions") +
+                  " HTTP/1.1\r\nHost: t\r\nContent-Length: " + std::to_string(body.size()) +
+                  "\r\n\r\n" + body);
+}
+std::string preparation_metrics(ServiceRig& rig) {
+  Client metrics(rig.port());
+  metrics.send_all("GET /metrics/prometheus HTTP/1.1\r\nHost: t\r\n\r\n");
+  return metrics.read_response(1000);
+}
+}  // namespace
+
+DGPP_TEST(serve_preparation_smallRequestAndHealthPassBlockedPreparation) {
+  PreparationGate gate;
+  auto rig = preparation_rig(2);
+  PreparationGate::Release release{gate};
+  rig->frontend.encode_hook = [&](std::string_view text) { gate.enter(text); };
+  Client slow(rig->port());
+  send_preparation(slow, "slow request");
+  gate.wait(1);
+  Client health(rig->port());
+  health.send_all("GET /health HTTP/1.1\r\nHost: t\r\n\r\n");
+  require(health.read_response(1000).find("200 OK") != std::string::npos,
+          "HTTP responds while preparation is held");
+  Client quick(rig->port());
+  send_preparation(quick, "quick", false);
+  require(quick.read_response(1000).find("200 OK") != std::string::npos,
+          "a later legacy request completes before an earlier chat preparation");
+  require(rig->service.stats().requests_total == 1, "held request has not reached admission");
+  Client stream(rig->port());
+  send_preparation(stream, "stream", true, true);
+  require(stream.read_until("[DONE]", 1000).find("[DONE]") != std::string::npos,
+          "SSE output drains while another request is preparing");
+  gate.release();
+  require(slow.read_response(2000).find("200 OK") != std::string::npos, "held chat completes");
+}
+
+DGPP_TEST(serve_preparation_poolMatchesEngineSlotsAndBoundsQueue) {
+  for (int slots : {1, 2, 4, 16}) {
+    PreparationGate gate;
+    auto rig = preparation_rig(slots, 1);
+    PreparationGate::Release release{gate};
+    rig->frontend.encode_hook = [&](std::string_view text) { gate.enter(text); };
+    std::vector<std::unique_ptr<Client>> clients;
+    for (int i = 0; i < slots; ++i) {
+      clients.push_back(std::make_unique<Client>(rig->port()));
+      send_preparation(*clients.back(), "slow");
+    }
+    gate.wait(slots);
+    clients.push_back(std::make_unique<Client>(rig->port()));
+    send_preparation(*clients.back(), "slow queued");
+    const std::string pending = "dgpp_preparation_pending{model_name=\"" + kModel + "\"} " +
+                                std::to_string(slots + 1) + "\n";
+    bool queued = false;
+    for (int i = 0; i < 50 && !queued; ++i)
+      queued = preparation_metrics(*rig).find(pending) != std::string::npos;
+    require(queued, "one request queues behind every configured worker");
+    {
+      std::lock_guard lock(gate.mutex);
+      require(gate.entered == slots, "pool does not create a thread for queued work");
+    }
+    Client excess(rig->port());
+    send_preparation(excess, "quick");
+    require(excess.read_response(1000).find("preparation_busy") != std::string::npos,
+            "full preparation queue sheds immediately");
+    clients.pop_back();  // Disconnect the unstarted request, freeing its slot.
+    const std::string reclaimed =
+        "dgpp_preparation_pending{model_name=\"" + kModel + "\"} " + std::to_string(slots) + "\n";
+    bool freed = false;
+    for (int i = 0; i < 50 && !freed; ++i)
+      freed = preparation_metrics(*rig).find(reclaimed) != std::string::npos;
+    require(freed, "disconnect releases queued work before running workers finish");
+    clients.clear();
+    gate.release();
+  }
+}
+
+DGPP_TEST(serve_preparation_payloadBudgetIncludesPreparedTokensAndReclaimsErrors) {
+  auto rig = preparation_rig(2, 8, 512);
+  Client expanded(rig->port());
+  send_preparation(expanded, std::string(150, 'a'), false);
+  require(expanded.read_response(1000).find("preparation_busy") != std::string::npos,
+          "small source whose token payload exceeds the budget is refused");
+  Client oversized(rig->port());
+  send_preparation(oversized, std::string(600, 'a'), false);
+  require(oversized.read_response(1000).find("preparation_busy") != std::string::npos,
+          "input byte budget applies before tokenization");
+  Client quick(rig->port());
+  send_preparation(quick, "quick", false);
+  require(quick.read_response(1000).find("200 OK") != std::string::npos,
+          "rejected requests return their byte reservations");
+}
+
+DGPP_TEST(serve_preparation_shutdownIncludesQueuedAndRunningRequests) {
+  PreparationGate gate;
+  auto rig = preparation_rig(1);
+  PreparationGate::Release release{gate};
+  rig->frontend.encode_hook = [&](std::string_view text) { gate.enter(text); };
+  Client running(rig->port()), queued(rig->port());
+  send_preparation(running, "slow");
+  gate.wait(1);
+  send_preparation(queued, "quick");
+  // Synchronize with HTTP dispatch before initiating shutdown.
+  const std::string pending = "dgpp_preparation_pending{model_name=\"" + kModel + "\"} 2\n";
+  bool seen = false;
+  for (int i = 0; i < 50 && !seen; ++i)
+    seen = preparation_metrics(*rig).find(pending) != std::string::npos;
+  require(seen, "both requests are pending");
+  rig->service.begin_shutdown();
+  require(!rig->service.drained(), "running preparation participates in drain");
+  gate.release();
+  require(running.read_response(1000).find("server_shutdown") != std::string::npos &&
+              queued.read_response(1000).find("server_shutdown") != std::string::npos,
+          "shutdown answers both preparations without admitting either");
+  require(rig->service.stats().requests_total == 0, "no preparation admitted after shutdown");
+}
+
+DGPP_TEST(serve_preparation_workerExceptionDoesNotLoseCapacity) {
+  auto rig = preparation_rig(1);
+  rig->frontend.encode_hook = [](std::string_view text) {
+    if (text == "throw") throw std::runtime_error("frontend fixture failure");
+  };
+  Client bad(rig->port());
+  send_preparation(bad, "throw", false);
+  require(bad.read_response(1000).find("500 Internal Server Error") != std::string::npos,
+          "legacy frontend exception becomes an HTTP error");
+  Client good(rig->port());
+  send_preparation(good, "quick", false);
+  require(good.read_response(1000).find("200 OK") != std::string::npos,
+          "worker survives a preparation exception");
+}
+
+DGPP_TEST(serve_preparation_runningDisconnectDiscardsResult) {
+  PreparationGate gate;
+  auto rig = preparation_rig(1);
+  PreparationGate::Release release{gate};
+  rig->frontend.encode_hook = [&](std::string_view text) { gate.enter(text); };
+  {
+    Client running(rig->port());
+    send_preparation(running, "slow");
+    gate.wait(1);
+  }
+  // A second request must queue until the disconnected worker returns.
+  Client next(rig->port());
+  send_preparation(next, "quick", false);
+  const std::string pending = "dgpp_preparation_pending{model_name=\"" + kModel + "\"} 2\n";
+  bool seen = false;
+  for (int i = 0; i < 50 && !seen; ++i)
+    seen = preparation_metrics(*rig).find(pending) != std::string::npos;
+  require(seen, "running disconnect retains capacity until the worker returns");
+  gate.release();
+  require(next.read_response(2000).find("200 OK") != std::string::npos,
+          "worker capacity is reusable after disconnect");
+  require(rig->service.stats().requests_total == 1,
+          "disconnected preparation never reaches engine admission");
+  require(preparation_metrics(*rig).find("dgpp_preparation_payload_bytes{model_name=\"" + kModel +
+                                         "\"} 0\n") != std::string::npos,
+          "discarded and completed payload reservations are released");
+}
+
+DGPP_TEST(serve_preparation_byteReservationSurvivesAdmissionHandoff) {
+  auto rig = preparation_rig(2, 8, 900);
+  rig->gate = true;
+  Client first(rig->port());
+  send_preparation(first, std::string(50, 'a'), false);
+  for (int i = 0; i < 1000 && rig->service.stats().requests_total == 0; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  require(rig->service.stats().requests_total == 1,
+          "first prepared payload waits for engine admission");
+  Client second(rig->port());
+  send_preparation(second, std::string(50, 'b'), false);
+  require(second.read_response(1000).find("preparation_busy") != std::string::npos,
+          "handing a payload to admission does not bypass its byte reservation");
+  rig->gate = false;
+  require(first.read_response(2000).find("200 OK") != std::string::npos, "first request completes");
+  Client third(rig->port());
+  send_preparation(third, std::string(50, 'c'), false);
+  require(third.read_response(2000).find("200 OK") != std::string::npos,
+          "retirement returns the payload reservation");
 }

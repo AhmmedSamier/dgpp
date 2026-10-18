@@ -117,6 +117,10 @@ class HttpHandler {
   // Installed at server construction, before producer threads start. Keep a
   // copy in background jobs; publish their result before calling it.
   virtual void set_wakeup(HttpWakeup wakeup) { (void)wakeup; }
+  // Background request preparation always notifies, independently of the
+  // policy for flushing generated tokens.
+  virtual bool needs_work_wakeup() const { return false; }
+  virtual void set_work_wakeup(HttpWakeup wakeup) { (void)wakeup; }
   // Once per loop pass: drain SSE rings, re-check liveness.
   virtual void idle() {}
   // A TAGGED connection closed — mid-stream, or before a one-shot

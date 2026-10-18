@@ -236,6 +236,29 @@ void ResidentImage::write_layer(int layer, const void* src, size_t bytes) {
   write_entry(layer);
 }
 
+std::unique_ptr<ResidentImage> ResidentImage::open_for(const std::string& dir, uint64_t key, int layers,
+                                                       uint64_t payload, bool* replaced) {
+  if (replaced) *replaced = false;
+  auto image = std::make_unique<ResidentImage>(dir, key, layers);
+  uint64_t noted = 0;
+  if (image->read_note(kPayloadNoteName, &noted, sizeof noted)) {
+    if (noted == payload) return image;
+    // Another checkpoint's weights under this key: the image, its digest
+    // (over the SOURCE) and this note all describe the old bytes.
+    const std::filesystem::path stem(image->stem_);
+    image.reset();
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+      const std::string name = entry.path().filename().string();
+      if (name.rfind(stem.filename().string() + ".", 0) == 0) std::filesystem::remove(entry.path(), ec);
+    }
+    image = std::make_unique<ResidentImage>(dir, key, layers);
+    if (replaced) *replaced = true;
+  }
+  image->write_note(kPayloadNoteName, &payload, sizeof payload);
+  return image;
+}
+
 std::string ResidentImage::note_path(const std::string& name) const {
   return stem_ + "." + name;
 }

@@ -5,11 +5,111 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **DeepSeek-V4.1-Flash-1017, and the indexer budget as deployment keys**
+  (2026-10-18). The 1017 refinement (`deepseek-ai/DeepSeek-V4.1-Flash-1017`)
+  ships V4.1-Flash's config, tokenizer and tensor layout byte for byte with
+  every shard's weights re-trained; the `deepseek_v41` family serves it as
+  shipped from `deploy/cluster_deepseek-v4.1-flash-1017_mxfp4-fp8_w4.example.json`.
+  Three engine keys replace the checkpoint's indexer budget for a
+  deployment — `engine.index_topk` (the compressed entries a query attends
+  per layer; the release's 512, the select networks' 2048), `engine.candidate_topk_blocks`
+  and `engine.candidate_block_size` (the candidate pool's shape, 2048 × 8 as
+  shipped) — carried by the config digest and the settings record, refused
+  by every other family. Measured on the 1017 template on four nodes at
+  2048 against the checkpoint's 512 on the same binary: short-context
+  decode level, decode at 32K–512K of context 3–8 % slower per pass, cold
+  prefill 9 % (2K) to 48 % (32K) longer, quality unchanged — the template
+  ships 512 and carries the key; the 512 row set is in `docs/benchmarks.md`,
+  both budgets in the model card. The CSA2 selectors now serve 2048 (the prefill
+  rows select on a 4096-key tile; the decode radix select has no tile),
+  checked against the host oracles at the widened budget. The resident
+  image cache keeps a weight-identity note beside each image: its key reads
+  config.json and the shard headers, which 1017 re-ships byte for byte, so a
+  boot of 1017 beside a V4.1-Flash image would have restored the old
+  weights; an image without the note adopts the checkpoint it opens with, an
+  image whose note disagrees is discarded and rebuilt.
+- **The benchmark method of record, and one command per deployment**
+  (2026-10-18). `docs/benchmarks.md` now defines what a deployment's row
+  set contains, the validity checks and how results are reported: decode
+  and prefill as independent attributes, decode tokens/s by concurrency
+  (the engine's decode steps only) as the throughput figure, cold prefill
+  in seconds, the wall rate (prefill and queueing included) only as the
+  labelled service-level table — the C2/C4/C8 columns had reported wall
+  rates alone since the original campaign while every run recorded the
+  decode rate. The serving table's concurrency columns are now the decode
+  rate with cold prefill beside it, and the wall rates sit in a table of
+  their own; rows measured earlier read — at C2–C8 until re-measured (the
+  earlier raw records are gone). `scripts/serve_campaign.py run --config <template>` runs the
+  whole set for one template and `rows` prints the doc's cells.
+  `timed_load.py` prints the decode-only
+  per-class table before `serve_load.py`'s wall table. `AGENTS.md` carries
+  the rules.
+- **The fp8 K/V pool on every Qwen3.5 release, and the Qwen3.8-27B FP8
+  templates take it with the fp8 attention** (2026-10-18). `engine.kv_dtype:
+  "fp8"` needed a release that ships its `kv_cache_scheme` scales (the
+  mixed NVFP4 release); every Full layer now carries scale words in its
+  image — the shipped ones where the release has them, unit scales
+  otherwise (the FP8 release and the MTP draft layer: the codes are the
+  e4m3 rounding of K and V, the common scale-free fp8 cache), so the pool
+  and `engine.prefill_attention: "fp8"` are accepted on the FP8 release
+  and alongside `engine.mtp`. Gated on one Spark against the bf16 cache:
+  the teacher-forced probe at 127/128 top-1 with a mean KL of 0.005 nats
+  in both fp8 modes (the mixed release's calibrated scales read 0.015 and
+  0.039), needles 20/20 at 32K/128K and 5/5 at 258K, the 300-item evals
+  161/294/100 on the bf16 cache, the same on the pool, 159/295/100 with
+  the fp8 attention. Cold prefill 387 → 320 s at 258K and decode at 256K
+  216 → 181 ms a pass. The three FP8 templates set both keys with their
+  pools re-sized for the halved cache (one Spark 786,432 tokens with a
+  20 GiB arena, two and four Sparks one full context per slot under full
+  admission with 24 and 48 GiB; plans 100.2 / 101.9 / 92.2 GiB, 7.9 /
+  9.3 / 20.6 GiB left at listening, no swap). The forward test runs its
+  rows invariance under the fp8 pool on the FP8 fixture too.
+- **The dense W4A4 TMA GEMM's pipeline drain** (2026-10-17). The Qwen3.8-27B
+  NVFP4 MLP's TMA-staged form (2026-10-16) waited for its per-row scale
+  words with `cp.async.wait_group 1` at every k-step, which is right while a
+  newer group is still being committed and wrong at the last step, whose own
+  group is then the most recent: the final k-block could be scaled with
+  words that had not landed. Intermittent (4 of 49 launches at the gate
+  shape, 2 of 19 at 2,048 rows), and the reason the NVFP4 27B's
+  temperature-0 transcripts moved run to run under `prefill_activations:
+  "native"` while the FP8 release's reproduced exactly (bisected across the
+  fp8 pool, the fp8 attention and the native recipe, then kernel by kernel
+  at the model's shapes). The drain now waits for everything;
+  `moe_w4a4_test` launches the form forty times at the gate shape and
+  requires every output bitwise the grouped kernel's.
+- **Prepare generation requests outside the HTTP loop** ([#122](https://github.com/HawkBearPig/dgpp/issues/122)).
+  One persistent worker per configured engine slot handles JSON validation,
+  rendering, tokenization and image preparation. Ready requests proceed in
+  completion order. Queued work and retained payloads are bounded, disconnects
+  release unstarted work, and shutdown joins workers. Preparation and file
+  completion notifications operate in both HTTP flush modes. Latency metrics
+  include preparation, with separate preparation wait/work histograms.
+
+- **Optional bounded tokenizer word cache**. Set `tokenizer.word_cache_entries`
+  to 1–10000 in deployment JSON to reuse short mapped pretokens on rank 0.
+  The default remains 0. Exact key checks, bounded slots and nonblocking shard
+  locks preserve IDs under collisions and concurrent requests; replacement
+  lets the cache adapt after it fills. Words above 256 mapped bytes bypass it.
+
+- **Bound prompt-tokenizer merge scans** ([#121](https://github.com/HawkBearPig/dgpp/issues/121)).
+  Long letter and CJK pretokens automatically switch from repeated passes
+  to a phase heap after a bounded amount of scanning. Short words and
+  repeated characters retain the pass path. Merges use input spans instead
+  of allocating strings; token IDs and merge ordering are preserved.
+  Thanks to @WhollyMindless for the diagnosis and proposed phase semantics.
+
+- **Decode streaming text one token at a time** ([#119](https://github.com/HawkBearPig/dgpp/issues/119)).
+  Completions, chat reasoning/content and DeepSeek DSML content no longer
+  re-decode the whole output prefix for every generated token. This removes
+  quadratic tokenizer work from those paths on the engine thread while
+  preserving decoded bytes, UTF-8 buffering, stop handling and token attribution.
+  Thanks to @WhollyMindless for the report and tokenizer measurements.
+
 - **Opt-in immediate HTTP output notifications** ([#118](https://github.com/HawkBearPig/dgpp/issues/118)).
   `http.stream_flush: "wake"` / `--stream-flush wake` wakes rank 0's HTTP loop
   when asynchronous output is ready. Tokens, logprobs, retirement, overload,
   shutdown/failure and file results share the existing HTTP-thread drain.
-  The default `pass` mode retains the 25 ms poll and creates no eventfd.
+  The default `pass` mode retains the 25 ms token-output poll.
   Notification handles remain safe after server teardown, and file results
   are published before notification. Keep-alive and journal behavior are unchanged.
 
@@ -31,7 +131,8 @@ project procedures and design guidance live in `docs/`.
   2,097,152 (one per slot, full admission) with 32 GiB on four; NVFP4
   1,048,576 (four) with 16 GiB on one, 2,097,152 with 32 GiB on two and
   four; the YaRN templates 1,130,496 (two full-length streams) with 16 GiB
-  and 1,048,576 with 20 GiB — plans of 73 to 104 GiB, each verified with
+  and 1,048,576 with 20 GiB — plans of 74 to 105 GiB including the
+  replicated BF16 image tower (1.17 GiB a rank), each verified with
   `--memory-plan` and a boot whose ledger leaves at least 5 GiB at
   listening: the boots end 6–8 GiB below the plan at world 1 (4.4 at two,
   2 at four; a 786,432-token FP8 pool planned at 109 GiB swapped), which

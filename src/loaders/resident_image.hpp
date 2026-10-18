@@ -39,6 +39,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -52,6 +53,18 @@ class ResidentImage {
   // absent; a file whose header disagrees (version, key, layer count) is
   // replaced. Throws std::runtime_error on I/O failure.
   ResidentImage(const std::string& dir, uint64_t key, int layers);
+  // Opens the image at `key` and reconciles it with the checkpoint's weight
+  // identity `payload` (the loader's fold of its shards' payload samples,
+  // kept beside the image as the `payload` note). The key covers
+  // config.json and the shard HEADERS, so a release that re-ships the same
+  // tensors in the same shards with other values keys to the same file
+  // (DeepSeek-V4.1-Flash-1017 against DeepSeek-V4.1-Flash, 2026-10-18): an
+  // image whose note disagrees is discarded with its notes and recreated
+  // empty (`replaced` reports it); an image without the note — built
+  // before this check — adopts the identity. Throws as the constructor.
+  static std::unique_ptr<ResidentImage> open_for(const std::string& dir, uint64_t key, int layers,
+                                                 uint64_t payload, bool* replaced);
+  static constexpr const char* kPayloadNoteName = "payload";
   ~ResidentImage();
   ResidentImage(const ResidentImage&) = delete;
   ResidentImage& operator=(const ResidentImage&) = delete;

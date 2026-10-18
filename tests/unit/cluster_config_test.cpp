@@ -202,7 +202,7 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
               c.engine.fp8_head == "gemv" && c.engine.draft_head == "exact" && c.engine.draft_head_blocks == 32 &&
               !c.engine.prefill_bf16_partials && !c.engine.prefill_fold_scales &&
               !c.engine.prefill_fp8_gemm && !c.engine.prefill_fp8_per_tensor && c.engine.prefill_activations == "bf16" &&
-              c.engine.prefill_attention == "bf16" &&
+              c.engine.prefill_attention == "bf16" && c.engine.decode_attention == "bf16" &&
               c.engine.dflash_model.empty() &&
               c.engine.dflash_verify_graph && c.engine.dflash_draft_batch && c.engine.dflash_depth == 0 &&
               c.engine.expert_gemm == "wide" && c.engine.expert_gemm_prefetch == 3 &&
@@ -228,6 +228,14 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
                        (on.engine.prefill_fp8_gemm ? 1 : 0) + (on.engine.prefill_fp8_per_tensor ? 1 : 0);
     require(got && others == 1, "engine." + key + " opt-in alone");
   }
+  // The DeepSeek-V4.1 index budget (2026-10-18): 0 (the checkpoint's) unless the config says.
+  require(c.engine.index_topk == 0 && c.engine.candidate_topk_blocks == 0 && c.engine.candidate_block_size == 0,
+          "the index budget defaults to the checkpoint's");
+  const auto ib = dgpp::serve::parse_cluster_config(
+      R"({"model":"m","nodes":["h"],"engine":{"index_topk":2048,"candidate_topk_blocks":1024,"candidate_block_size":16}})",
+      "t");
+  require(ib.engine.index_topk == 2048 && ib.engine.candidate_topk_blocks == 1024 && ib.engine.candidate_block_size == 16,
+          "the index budget keys parse");
   // The checkpoint's activation recipe (2026-10-15): "bf16" (the default chain) or "native".
   const auto na = dgpp::serve::parse_cluster_config(
       R"({"model":"m","nodes":["h"],"engine":{"prefill_activations":"native"}})", "t");
@@ -243,6 +251,16 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
     rejected = true;
   }
   require(rejected, "engine.prefill_attention takes bf16 or fp8 only");
+  const auto da = dgpp::serve::parse_cluster_config(
+      R"({"model":"m","nodes":["h"],"engine":{"kv_dtype":"fp8","decode_attention":"fp8"}})", "t");
+  require(da.engine.decode_attention == "fp8" && da.engine.prefill_attention == "bf16",
+          "native decode is independent of prefill");
+  rejected = false;
+  try {
+    (void)dgpp::serve::parse_cluster_config(
+        R"({"model":"m","nodes":["h"],"engine":{"decode_attention":"e4m3"}})", "t");
+  } catch (const std::exception&) { rejected = true; }
+  require(rejected, "engine.decode_attention takes bf16 or fp8 only");
   // The DFlash2 drafter's keys (2026-10-03).
   const auto df = dgpp::serve::parse_cluster_config(
       R"({"model":"m","nodes":["h"],"engine":{"dflash_model":"z-lab/Qwen3.8-27B-DFlash2","dflash_verify_graph":false,"dflash_draft_batch":false,"dflash_depth":4}})", "t");
@@ -490,6 +508,14 @@ DGPP_TEST(cluster_config_refusesUnknownKeysAndBadValuesByName) {
        "'engine.draft_head' must be \"exact\" or \"screen\""},
       {R"({"model":"m","nodes":["h"],"engine":{"draft_head_blocks":0}})",
        "'engine.draft_head_blocks' must be in [1, 64]"},
+      {R"({"model":"m","nodes":["h"],"engine":{"index_topk":4096}})",
+       "'engine.index_topk' must be in [0, 2048]"},
+      {R"({"model":"m","nodes":["h"],"engine":{"index_topk":1000}})",
+       "'engine.index_topk' must be 0 (the checkpoint's) or a power of two <= 2048"},
+      {R"({"model":"m","nodes":["h"],"engine":{"candidate_topk_blocks":3}})",
+       "'engine.candidate_topk_blocks' must be 0 (the checkpoint's) or a power of two <= 2048"},
+      {R"({"model":"m","nodes":["h"],"engine":{"candidate_block_size":-1}})",
+       "'engine.candidate_block_size' must be in [0, 1024]"},
       {R"({"model":"m","nodes":["h"],"engine":{"bf16_weights":"fp8"}})",
        "'engine.bf16_weights' must be \"checkpoint\", \"bf12\" or \"bf12+bf16\""},
       {R"({"model":"m","nodes":["h"],"engine":{"bf16_weights":true}})",
@@ -640,4 +666,27 @@ DGPP_TEST(cluster_config_latency_tuning_defaults_and_bounds) {
             "invalid idle floor rejected by name");
   require(dgpp::serve::parse_cluster_config(engine_json(R"({"prefill_idle_floor_tokens":0})"), "t").engine.prefill_latency.idle_floor_tokens == 0,
           "a zero floor (the alignment) is a valid choice");
+}
+
+DGPP_TEST(cluster_config_tokenizer_cache) {
+  const auto parse = [](const std::string& tokenizer) {
+    return dgpp::serve::parse_cluster_config(
+        "{\"model\":\"m\",\"world_size\":1,\"tokenizer\":" + tokenizer + "}", "t");
+  };
+  require(parse("{}").tokenizer_word_cache_entries == 0, "cache disabled by default");
+  require(parse("{\"word_cache_entries\":10000}").tokenizer_word_cache_entries == 10000,
+          "cache capacity parsed");
+  for (const char* value : {"-1", "10001", "1.5", "1.0", "true", "null", "\"10\""}) {
+    const std::string json =
+        "{\"model\":\"m\",\"world_size\":1,\"tokenizer\":{\"word_cache_entries\":" +
+        std::string(value) + "}}";
+    require(refusal(json).find("tokenizer.word_cache_entries") != std::string::npos,
+            "invalid cache capacity must name the field");
+  }
+  for (const char* value : {"null", "[]", "{\"unknown\":1}"}) {
+    const std::string json =
+        "{\"model\":\"m\",\"world_size\":1,\"tokenizer\":" + std::string(value) + "}";
+    require(refusal(json).find("tokenizer") != std::string::npos,
+            "malformed tokenizer config refused");
+  }
 }
