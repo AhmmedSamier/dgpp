@@ -44,6 +44,7 @@
 #include "serve/generation_service.hpp"
 #include "serve/http_server.hpp"
 #include "serve/image_inputs.hpp"
+#include "serve/json_out.hpp"
 #include "serve/prefill_policy.hpp"
 #include "serve/serve_stats.hpp"
 #include "text/chat_template.hpp"
@@ -415,7 +416,7 @@ std::string json_of(const dgpp::minijson::Value& v) {
       std::snprintf(buf, sizeof(buf), "%g", v.as_double());
       return buf;
     }
-    case K::String: return "\"" + std::string(v.as_string()) + "\"";
+    case K::String: return dgpp::serve::json_string(v.as_string());
     case K::Array: {
       std::string out = "[";
       for (size_t i = 0; i < v.items().size(); ++i)
@@ -1664,6 +1665,49 @@ std::string assistant_history_globals(ServiceRig& rig, const std::string& messag
   require(response.find("200 OK") != std::string::npos,
           "assistant history is accepted: " + response);
   return rig.frontend.last_globals();
+}
+
+DGPP_TEST(serve_refusalParts_preserveTextAndLaterHistory) {
+  ServiceRig rig;
+  for (const std::string& text : {std::string(), std::string("No."),
+                                  std::string(128, 'r') + " refusé 思考\n\"quoted\"\\tail"}) {
+    const std::string messages =
+        R"({"role":"assistant","content":[{"type":"refusal","refusal":)" +
+        json_of(dgpp::minijson::Value::make_string(text)) +
+        R"(}]},{"role":"user","content":"again"},)"
+        R"({"role":"assistant","content":[{"type":"text","text":"later","marker":"keep"}]})";
+    const auto globals = assistant_history_globals(rig, messages);
+    const auto parsed = dgpp::minijson::parse(globals);
+    const auto& history = parsed.root.at("messages").items();
+    require(history.size() == 4, "all history messages survive normalization");
+    const auto& parts = history[1].at("content").items();
+    require(parts.size() == 1 && parts[0].at("type").as_string() == "text" &&
+                parts[0].at("text").as_string() == text && !parts[0].find("refusal"),
+            "refusal parts become text without losing empty, escaped or UTF-8 content");
+    const auto& later = history[3].at("content").items();
+    require(later.size() == 1 && later[0].at("type").as_string() == "text" &&
+                later[0].at("text").as_string() == "later" &&
+                later[0].at("marker").as_string() == "keep",
+            "ordinary text parts retain their fields after a refusal message");
+  }
+}
+
+DGPP_TEST(serve_refusalParts_rejectInvalidContent) {
+  ServiceRig rig;
+  for (const std::string parts :
+       {R"([{"type":"refusal"}])", R"([{"type":"refusal","refusal":7}])",
+        R"([{"type":"refusal","refusal":"No."},{"type":"text","text":"extra"}])"}) {
+    expect_invalid_request(
+        post_chat(rig, assistant_history_body(R"({"role":"assistant","content":)" + parts + "}"),
+                  "\"error\""),
+        "messages[1].content[0]");
+  }
+  expect_invalid_request(
+      post_chat(rig,
+                assistant_history_body(
+                    R"({"role":"user","content":[{"type":"refusal","refusal":"No."}]})"),
+                "\"error\""),
+      "messages[1].content[0].type");
 }
 
 DGPP_TEST(serve_thinkingParts_preserveOwnedTextAndVisibleParts) {
