@@ -320,7 +320,8 @@ dgpp_set_common(dgpp_models_mimo)
 # Dory1.0-4B (2026-10-16, docs/dory_plan.md): the host-side model description.
 add_library(dgpp_models_dory STATIC
   src/models/dory/binding.cpp
-  src/models/dory/config.cpp)
+  src/models/dory/config.cpp
+  src/models/dory/reference.cpp)
 target_include_directories(dgpp_models_dory PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(dgpp_models_dory PUBLIC dgpp_loaders dgpp_common)
 dgpp_set_common(dgpp_models_dory)
@@ -899,6 +900,7 @@ add_executable(unit_tests
   tests/unit/mimo_binding_test.cpp
   tests/unit/dory_config_test.cpp
   tests/unit/dory_binding_test.cpp
+  tests/unit/dory_reference_test.cpp
   tests/unit/nvfp4_quant_test.cpp
   tests/unit/verify_schedule_test.cpp
   tests/unit/lookup_draft_test.cpp
