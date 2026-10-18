@@ -128,6 +128,58 @@ __global__ void __launch_bounds__(kThreads) justnorm_kernel(const uint16_t* __re
   }
 }
 
+// The loop's re-injection: one row per block, the fp32 sums of a + b (the
+// reference's `justnorm(state + input_h)` — the add in fp32, one rounding at
+// the normalization's output, exactly as justnorm_kernel rounds).
+__global__ void __launch_bounds__(kThreads) add_justnorm_kernel(const uint16_t* __restrict__ a,
+                                                                const uint16_t* __restrict__ b,
+                                                                uint16_t* __restrict__ y, int dim,
+                                                                float eps) {
+  const int tid = threadIdx.x;
+  const size_t row = static_cast<size_t>(blockIdx.x) * dim;
+  const int nvec = dim / (kThreads * kVecElems);
+  const int tail = (dim - nvec * kThreads * kVecElems) / kVecElems;
+
+  float s[kMaxVecs][kVecElems];
+  double acc[4] = {0.0, 0.0, 0.0, 0.0};
+#pragma unroll
+  for (int i = 0; i < kMaxVecs; ++i) {
+    const bool live = i < nvec || (i == nvec && tid < tail);
+    if (!live) continue;
+    const int e0 = (i * kThreads + tid) * kVecElems;
+    const uint4 av = *reinterpret_cast<const uint4*>(a + row + e0);
+    const uint4 bv = *reinterpret_cast<const uint4*>(b + row + e0);
+    const uint32_t* ap = reinterpret_cast<const uint32_t*>(&av);
+    const uint32_t* bp = reinterpret_cast<const uint32_t*>(&bv);
+#pragma unroll
+    for (int k = 0; k < kVecElems; ++k) {
+      const float x = (k % 2 == 0) ? lo_bf16(ap[k / 2]) : hi_bf16(ap[k / 2]);
+      const float z = (k % 2 == 0) ? lo_bf16(bp[k / 2]) : hi_bf16(bp[k / 2]);
+      s[i][k] = x + z;
+    }
+#pragma unroll
+    for (int k = 0; k < kVecElems; ++k)
+      acc[k % 4] = fma(static_cast<double>(s[i][k]), static_cast<double>(s[i][k]), acc[k % 4]);
+  }
+
+  __shared__ double part[kWarps];
+  __shared__ float s_rstd;
+  const float rstd = block_rstd((acc[0] + acc[1]) + (acc[2] + acc[3]), part, &s_rstd, eps);
+
+#pragma unroll
+  for (int i = 0; i < kMaxVecs; ++i) {
+    const bool live = i < nvec || (i == nvec && tid < tail);
+    if (!live) continue;
+    const int e0 = (i * kThreads + tid) * kVecElems;
+    uint32_t yp[4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j)
+      yp[j] = pack_bf16(float_to_bf16_bits(s[i][2 * j] * rstd),
+                        float_to_bf16_bits(s[i][2 * j + 1] * rstd));
+    *reinterpret_cast<uint4*>(y + row + e0) = make_uint4(yp[0], yp[1], yp[2], yp[3]);
+  }
+}
+
 __global__ void __launch_bounds__(kThreads)
     slerp_alpha_kernel(const uint16_t* __restrict__ a, const uint16_t* __restrict__ b,
                        const uint16_t* __restrict__ alpha, float scale, uint16_t* __restrict__ y,
@@ -360,6 +412,17 @@ void dory_slerp_alpha_bf16(const uint16_t* a, const uint16_t* b, const uint16_t*
   if (!aligned16(a) || !aligned16(b) || !aligned16(alpha) || !aligned16(y))
     throw std::invalid_argument("dory_slerp_alpha: rows must be 16-byte aligned");
   slerp_alpha_kernel<<<rows, kThreads, 0, stream>>>(a, b, alpha, scale, y, dim, eps);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void dory_add_justnorm_bf16(const uint16_t* a, const uint16_t* b, uint16_t* y, int rows, int dim,
+                            float eps, cudaStream_t stream) {
+  if (rows <= 0) return;
+  if (!a || !b || !y) throw std::invalid_argument("dory_add_justnorm: null buffer");
+  check_shape(rows, dim, "dory_add_justnorm");
+  if (!aligned16(a) || !aligned16(b) || !aligned16(y))
+    throw std::invalid_argument("dory_add_justnorm: rows must be 16-byte aligned");
+  add_justnorm_kernel<<<rows, kThreads, 0, stream>>>(a, b, y, dim, eps);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

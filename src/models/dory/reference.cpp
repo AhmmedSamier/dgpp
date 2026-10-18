@@ -32,6 +32,23 @@ void justnorm(const uint16_t* x, uint16_t* y, int64_t rows, int64_t dim, float e
     justnorm_row(x + r * dim, y + r * dim, dim, eps);
 }
 
+void add_justnorm(const uint16_t* a, const uint16_t* b, uint16_t* y, int64_t rows, int64_t dim,
+                  float eps) {
+  std::vector<float> s(static_cast<size_t>(dim));
+  for (int64_t r = 0; r < rows; ++r) {
+    const uint16_t* ar = a + r * dim;
+    const uint16_t* br = b + r * dim;
+    uint16_t* yr = y + r * dim;
+    float ss = 0.0f;
+    for (int64_t i = 0; i < dim; ++i) {
+      s[static_cast<size_t>(i)] = bf16_bits_to_float(ar[i]) + bf16_bits_to_float(br[i]);
+      ss = std::fma(s[static_cast<size_t>(i)], s[static_cast<size_t>(i)], ss);
+    }
+    const float rstd = 1.0f / std::sqrt(ss + eps);
+    for (int64_t i = 0; i < dim; ++i) yr[i] = float_to_bf16_bits(s[static_cast<size_t>(i)] * rstd);
+  }
+}
+
 void slerp_norm_rows(const uint16_t* a, const uint16_t* b, const float* lr, uint16_t* y,
                      int64_t rows, int64_t dim, float eps) {
   std::vector<uint16_t> na(static_cast<size_t>(dim)), nb(static_cast<size_t>(dim));

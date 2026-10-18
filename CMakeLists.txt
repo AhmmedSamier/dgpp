@@ -215,7 +215,8 @@ add_library(dgpp_kernels STATIC
   src/kernels/mimo_attn_prefill.cu
   src/kernels/add_rmsnorm.cu
   src/kernels/dory_norm.cu
-  src/kernels/dory_attn.cu)
+  src/kernels/dory_attn.cu
+  src/kernels/dory_head.cu)
 target_link_libraries(dgpp_kernels PUBLIC CUDA::cudart CUDA::cublasLt CUDA::cuda_driver dgpp_core dgpp_rope_scaling)
 dgpp_set_common(dgpp_kernels)
 # The device sampler mirrors the host oracle bit for bit: no contraction of
@@ -342,11 +343,12 @@ target_include_directories(dgpp_models_dory_loader PUBLIC ${CMAKE_CURRENT_SOURCE
 target_link_libraries(dgpp_models_dory_loader PUBLIC dgpp_models_dory dgpp_loaders CUDA::cudart dgpp_device_ranges)
 dgpp_set_common(dgpp_models_dory_loader)
 
-# The Dory layer objects (the paged K/V pool first, then the attention and
-# MLP blocks; the looped model follows).
+# The Dory layer objects and the looped model (the paged K/V pool, the
+# attention and MLP blocks, the session-core walk).
 add_library(dgpp_models_dory_layers STATIC
   src/models/dory/kv_pool.cpp
-  src/models/dory/layers.cpp)
+  src/models/dory/layers.cpp
+  src/models/dory/forward.cpp)
 target_include_directories(dgpp_models_dory_layers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(dgpp_models_dory_layers
   PUBLIC dgpp_models_dory dgpp_models_dory_loader dgpp_kernels CUDA::cudart)
@@ -1511,6 +1513,12 @@ target_include_directories(dory_attn_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/sr
 target_link_libraries(dory_attn_test PRIVATE dgpp_kernels dgpp_models_dory CUDA::cudart Threads::Threads)
 dgpp_set_common(dory_attn_test)
 add_test(NAME dory_attn_test COMMAND dory_attn_test)
+
+add_executable(dory_forward_test tests/cuda/dory_forward_test.cpp)
+target_include_directories(dory_forward_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(dory_forward_test PRIVATE dgpp_models_dory_layers dgpp_models_dory_loader dgpp_kernels CUDA::cudart Threads::Threads)
+dgpp_set_common(dory_forward_test)
+add_test(NAME dory_forward_test COMMAND dory_forward_test)
 
 add_executable(glm4_loader_test tests/cuda/glm4_loader_test.cpp)
 target_include_directories(glm4_loader_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)

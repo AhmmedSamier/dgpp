@@ -53,7 +53,8 @@ int DoryAttentionLayer::default_decode_splits() {
 }
 
 DoryAttentionLayer::DoryAttentionLayer(const DoryAttentionResident& w, const DoryConfig& cfg, int layer,
-                                       int max_tokens, int decode_rows, int n_split_decode)
+                                       int max_tokens, int decode_rows, int n_split_decode,
+                                       cudaStream_t stream)
     : w_(&w), cfg_(cfg), hidden_(cfg.hidden_size), lh_(cfg.num_attention_heads),
       lkv_(cfg.num_key_value_heads), dim_(cfg.head_dim), max_tokens_(max_tokens),
       decode_rows_(decode_rows), n_split_(n_split_decode), layer_(layer),
@@ -72,7 +73,7 @@ DoryAttentionLayer::DoryAttentionLayer(const DoryAttentionResident& w, const Dor
     throw std::invalid_argument("DoryAttentionLayer: layer " + std::to_string(layer) + " is not an attention layer");
   if (!fp4_gemv_accepts(w.q_proj) || !fp4_gemv_accepts(w.o_proj))
     throw std::invalid_argument("DoryAttentionLayer: the fp4 GEMV core does not accept these widths");
-  rebind(w, layer);
+  rebind(w, layer, stream);
   const size_t M = static_cast<size_t>(max_tokens_);
   const size_t Q = static_cast<size_t>(lh_) * dim_, KV = static_cast<size_t>(lkv_) * dim_;
   qd_ = dev_alloc<uint16_t>(M * Q);
@@ -105,15 +106,24 @@ DoryAttentionLayer::~DoryAttentionLayer() {
   cudaFree(c_ws_);
 }
 
-void DoryAttentionLayer::rebind(const DoryAttentionResident& w, int layer) {
+void DoryAttentionLayer::rebind(const DoryAttentionResident& w, int layer, cudaStream_t stream) {
   w_ = &w;
   layer_ = layer;
   window_ = cfg_.is_sliding(layer) ? cfg_.sliding_window : 0;
   theta_ = cfg_.rope_theta_of(layer);
-  std::vector<float> inv(static_cast<size_t>(dim_ / 2));
-  dory_rope_inv_freq(theta_, dim_, inv.data());
-  if (!d_inv_freq_) d_inv_freq_ = dev_alloc<float>(inv.size());
-  DGPP_CUDA_OK(cudaMemcpy(d_inv_freq_, inv.data(), inv.size() * 4, cudaMemcpyHostToDevice));
+  // The inv-frequency upload is stream-ordered: the walk's stream is
+  // non-blocking, so a host-side cudaMemcpy would race the kernels already
+  // queued on it (a kernel could read another layer's thetas). The host
+  // staging is a member so an in-flight copy's source outlives the call.
+  h_inv_freq_.assign(static_cast<size_t>(dim_ / 2), 0.0f);
+  dory_rope_inv_freq(theta_, dim_, h_inv_freq_.data());
+  if (!d_inv_freq_) d_inv_freq_ = dev_alloc<float>(h_inv_freq_.size());
+  const size_t bytes = h_inv_freq_.size() * sizeof(float);
+  if (stream)
+    DGPP_CUDA_OK(cudaMemcpyAsync(d_inv_freq_, h_inv_freq_.data(), bytes, cudaMemcpyHostToDevice,
+                                 stream));
+  else
+    DGPP_CUDA_OK(cudaMemcpy(d_inv_freq_, h_inv_freq_.data(), bytes, cudaMemcpyHostToDevice));
 }
 
 size_t DoryAttentionLayer::scratch_bytes(const DoryConfig& cfg, int max_tokens, int decode_rows,

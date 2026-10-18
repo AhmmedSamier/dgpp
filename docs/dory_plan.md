@@ -1,6 +1,6 @@
 # Dory1.0-4B (nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-NVFP4) on dgpp — architecture study and implementation plan (2026-10-18)
 
-Status: **stages 1–3 landed, stage 4 in progress.** This document is the survey
+Status: **stages 1–6 landed, stage 7 in progress.** This document is the survey
 and the design that the port is judged against (`docs/adding_a_model.md` §1).
 Section 5 carries the staged plan and the progress markers; nothing below is
 claimed as working beyond the landings recorded there.
@@ -318,21 +318,48 @@ combination; the `logit_scale` head; the recurrent K/V policy.
    reduction error, ~sqrt(dim)·2^-24). 6.3 us for a 4096-wide justnorm and
    13.5 us for the fused residual on one Spark.
 4. **The layer walk** — one sublayer per index, the attention and MLP
-   numerics of §1.3–§1.4, the two RoPE thetas, the sliding window. **In
-   progress**: the attention kernels (`kernels/dory_attn.{hpp,cu}` — the
-   per-(row, head) finish with the neoX RoPE, the `sqk` square and
+   numerics of §1.3–§1.4, the two RoPE thetas, the sliding window.
+   **Landed.** First the attention kernels (`kernels/dory_attn.{hpp,cu}` —
+   the per-(row, head) finish with the neoX RoPE, the `sqk` square and
    `justnorm_per_head`, the K/V cache writes, the split-KV partial and the
    combine) and the two fused sites (`dory_gate_justnorm_bf16`,
-   `dory_silu_justnorm_bf16` in `kernels/dory_norm.{hpp,cu}`) have landed with
-   their tests (`tests/cuda/dory_attn_test.cu`, the extended
+   `dory_silu_justnorm_bf16` in `kernels/dory_norm.{hpp,cu}`), with their
+   tests (`tests/cuda/dory_attn_test.cu`, the extended
    `tests/cuda/dory_norm_test.cu`): q and k are bitwise against the host
    oracle and the attention output is within 0.4% of its values at 2 ulp.
    One decode row at the model's geometry over 2048 tokens costs 8.2 us
    (finish) + 46.3 us (partial, `n_split` 16 — the split saturates there) +
-   4.1 us (combine) on one Spark; the layer objects and the walk are next.
+   4.1 us (combine) on one Spark. Then the paged pool
+   (`models/dory/kv_pool.{hpp,cpp}`: one plane per attention layer per
+   `kv_repeat`, zero on MLP layers) and the layer objects
+   (`models/dory/layers.{hpp,cpp}`: one `DoryAttentionLayer` /
+   `DoryMlpLayer` per kind, rebound per physical layer with its own window
+   and RoPE theta, an fp4 GEMV per Linear on decode rows and the dense MMA
+   on prefill rows), composed by the walk of §1.5 and the head of §1.6 in
+   `models/dory/forward.{hpp,cpp}`. `tests/cuda/dory_forward_test.cpp`
+   drives a tiny 8-layer fixture (`tests/cuda/dory_fixture.hpp`): a repeated
+   forward is bitwise application by application, a T-1 prefix is bitwise
+   against the T-token walk, the capture yields one state per sublayer
+   application, the window changes a third of the logits, the two K/V
+   policies give 6/4 planes, the loop override changes every logit, and a
+   decode row matches a fresh prefill's last row to 2.3e-7 relative L2.
+   One real bug fell out of that first run and is fixed: `rebind` uploaded
+   the inverse-frequency table with a host-side *blocking* `cudaMemcpy`
+   while the walk's stream is non-blocking, so a kernel could read another
+   layer's thetas (the K cache came out rotated differently while V — and
+   token 0, whose angle is 0 — stayed bitwise identical). The upload is now
+   stream-ordered, and the layer-state capture stages its rows on the device
+   and flushes once, so a capture walk keeps a plain walk's arithmetic.
 5. **The loop** — the input/recurrent/output partition, the re-injection
-   and state normalization, and the two K/V policies.
+   and state normalization, and the two K/V policies. **Landed** as the
+   §1.5 loop in `models/dory/forward.cpp`: `h = justnorm(state + input_h)`
+   once per loop, the recurrent block walked with one K/V plane per
+   (layer, loop) under `per_loop` and one shared under `last_loop`,
+   `state = justnorm(h)`.
 6. **The head** — `logit_scale`, and the lm head on the shared path.
+   **Landed**: the BF16 lm-head GEMM with fp32 accumulators, then
+   `kernels/dory_head.{hpp,cu}` applies `logit_scale · logit_factor` to the
+   fp32 logits in place.
 7. **Serve wiring and template** — the `ServeFamily` (name, model build,
    resident-image dir, refused keys), `deploy/cluster_dory1.0-4b_nvfp4_w1.example.json`,
    the `portability_test.py` model map and the `deploy/README.md` row.
@@ -343,8 +370,8 @@ combination; the `logit_scale` head; the recurrent K/V policy.
    serial `ctest` on an idle Spark with master merged, and the greedy
    transcript battery at T=1 and with the decode graph.
 
-Stages 1–2 are pure host work; stage 3 needs the kernel tests but not the
-model; stages 4–6 are the model; 7–9 are the landing.
+Stages 1–3 are pure host/kernel work; stages 4–6 are the model; 7–9 are the
+landing.
 
 ## 6. Risks and open questions
 

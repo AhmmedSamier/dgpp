@@ -32,6 +32,11 @@ void justnorm_row(const uint16_t* x, uint16_t* y, int64_t dim, float eps = kDory
 void justnorm(const uint16_t* x, uint16_t* y, int64_t rows, int64_t dim,
               float eps = kDoryJustnormEps);
 
+// The loop's re-injection (plan §1.5): y = justnorm(a + b) with the add in
+// fp32 — `justnorm(state + input_h)` is a plain add then re-normalize.
+void add_justnorm(const uint16_t* a, const uint16_t* b, uint16_t* y, int64_t rows, int64_t dim,
+                  float eps = kDoryJustnormEps);
+
 // y = justnorm(justnorm(a) + lr * (justnorm(b) - justnorm(a))) with one fp32
 // `lr` per row (the residual scales are per-channel, broadcast along rows).
 void slerp_norm_rows(const uint16_t* a, const uint16_t* b, const float* lr, uint16_t* y,

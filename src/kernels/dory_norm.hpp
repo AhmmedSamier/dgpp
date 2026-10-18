@@ -43,6 +43,12 @@ void dory_justnorm_bf16(const uint16_t* x, uint16_t* y, int rows, int dim, float
 void dory_slerp_alpha_bf16(const uint16_t* a, const uint16_t* b, const uint16_t* alpha, float scale,
                            uint16_t* y, int rows, int dim, float eps, cudaStream_t stream);
 
+// The loop's re-injection (plan §1.5): y[r, :] = justnorm(a[r, :] + b[r, :]) with
+// the add in fp32 and one rounding, the sum running over the fp32 sums —
+// `justnorm(state + input_h)` is a plain add then re-normalize.
+void dory_add_justnorm_bf16(const uint16_t* a, const uint16_t* b, uint16_t* y, int rows, int dim,
+                            float eps, cudaStream_t stream);
+
 // The attention output's gate, fused with the justnorm that follows it over
 // ALL query heads (plan §1.3):
 //

@@ -26,6 +26,7 @@
 // run one split each.
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #include <cuda_runtime.h>
 
@@ -47,12 +48,13 @@ void dory_rope_inv_freq(double theta, int dim, float* out);
 class DoryAttentionLayer {
  public:
   DoryAttentionLayer(const DoryAttentionResident& w, const DoryConfig& cfg, int layer, int max_tokens,
-                     int decode_rows, int n_split_decode);
+                     int decode_rows, int n_split_decode, cudaStream_t stream = nullptr);
   ~DoryAttentionLayer();
   DoryAttentionLayer(const DoryAttentionLayer&) = delete;
   DoryAttentionLayer& operator=(const DoryAttentionLayer&) = delete;
-  // The weights and the layer kind (its window and its RoPE theta).
-  void rebind(const DoryAttentionResident& w, int layer);
+  // The weights and the layer kind (its window and its RoPE theta). The
+  // inv-frequency upload is ordered on `stream` (null: the legacy stream).
+  void rebind(const DoryAttentionResident& w, int layer, cudaStream_t stream = nullptr);
 
   // out[T, H] = slerp_alpha(x, o_proj(justnorm(attn * sigmoid(gate))), alpha):
   // the projections, the finish (K/V of every row appended to `cache`), the
@@ -78,6 +80,8 @@ class DoryAttentionLayer {
   float scale_, sqk_factor_, s_gate_factor_, alpha_scale_, eps_;
   size_t part_rows_ = 0;
   float* d_inv_freq_ = nullptr;  // [dim/2]
+  // The host staging of d_inv_freq_: an in-flight stream-ordered copy reads it.
+  std::vector<float> h_inv_freq_;
   uint16_t* qd_ = nullptr;       // [M, Q] bf16 (the q_proj output)
   uint16_t* kd_ = nullptr;       // [M, KV] bf16
   uint16_t* vd_ = nullptr;       // [M, KV] bf16
