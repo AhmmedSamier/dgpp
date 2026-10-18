@@ -189,7 +189,7 @@ DGPP_TEST(dsv41_architecture_registry_dispatches) {
 DGPP_TEST(dsv41_config_reads_the_landed_checkpoint) {
   namespace fs = std::filesystem;
   const char* home = std::getenv("HOME");
-  if (!home) return;
+  if (!home) dgpp::test::skip("HOME is unset; checkpoint cache unavailable");
   // The 1017 refinement (2026-10-18) ships the same config as the original
   // release; whichever snapshot the cache holds parses to the same values.
   for (const char* repo : {"models--deepseek-ai--DeepSeek-V4.1-Flash-1017", "models--deepseek-ai--DeepSeek-V4.1-Flash"}) {
@@ -205,6 +205,7 @@ DGPP_TEST(dsv41_config_reads_the_landed_checkpoint) {
     return;
   }
   }
+  dgpp::test::skip("no eligible DeepSeek-V4.1-Flash or DeepSeek-V4.1-Flash-1017 checkpoint config in cache");
 }
 
 DGPP_TEST(dsv41_config_applies_the_deployment_index_budget) {
