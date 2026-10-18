@@ -31,6 +31,15 @@ MXFP8 attention/shared-expert stack is served as shipped either way
 (`loader.cpp`: the MXFP8 stack takes no engine key). The BF16 dense stack is
 the documented knob (`--dense-weights checkpoint --fp8-head gemv`).
 
+The template also takes the fp8 K/V pool (`engine.kv_dtype: "fp8"` with
+`engine.prefill_attention: "fp8"`): the Full layers' 262144-token cache
+halves from 6.70 to 3.50 GiB, and an interleaved A/B against the bf16 cache
+on one Spark measured 1459–1469 t/s prefill at 4–8K depth against 1141–1260,
+decode unchanged. The loader is the `qwen` family, whose image key folds its
+own `loader_format` (not the `qwen35` family's bump to 6), so the resident
+image's key and layout are unchanged and adopting the pool needs no
+re-expansion. Quality is not yet measured on this export (2026-10-18).
+
 ## The CSF seam (RESOLVED 2026-10-16)
 
 Codec `byte-window4-fixed-stream-u24-exceptions/1`, documented on the

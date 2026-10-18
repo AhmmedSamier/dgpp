@@ -14,7 +14,12 @@ project procedures and design guidance live in `docs/`.
   tolerated, and resident streams discover shards from the index's weight_map,
   so the export's `tensors/` layout loads. The one-Spark template sets
   `dense_weights: "fp8"` with the tensor-core head (`fp8_head: "mma"`), as the
-  sibling NVFP4/QAD templates do. See
+  sibling NVFP4/QAD templates do. It also takes the fp8 K/V pool
+  (`kv_dtype: "fp8"`, `prefill_attention: "fp8"`): the 262144-token pool
+  halves from 6.70 to 3.50 GiB, and interleaved against the bf16 cache on one
+  Spark the prefill at 4–8K depth runs 1459–1469 t/s against 1141–1260 while
+  decode is unchanged; the resident image's key and layout do not change, so
+  no re-expansion is needed. See
   [docs/fp4local_plan.md](docs/fp4local_plan.md).
 - **The fp8 K/V pool on every Qwen3.5 release, and the Qwen3.8-27B FP8
   templates take it with the fp8 attention** (2026-10-18). `engine.kv_dtype:

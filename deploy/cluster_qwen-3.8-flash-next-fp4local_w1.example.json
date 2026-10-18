@@ -4,7 +4,7 @@
   "engine": {
     "max_concurrency": 4,
     "kv_capacity": 262144,
-    "kv_dtype": "bf16",
+    "kv_dtype": "fp8",
     "bf16_weights": "bf12+bf16",
     "ngram_table": "mmap",
     "default_max_tokens": 32768,
@@ -23,7 +23,8 @@
     "sampling_candidates": 128,
     "stats_interval_s": 1,
     "dense_weights": "fp8",
-    "fp8_head": "mma"
+    "fp8_head": "mma",
+    "prefill_attention": "fp8"
   },
   "paths": {
     "resident_cache": ""
