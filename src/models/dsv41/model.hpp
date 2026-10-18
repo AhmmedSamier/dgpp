@@ -131,6 +131,21 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
     prefill_dense_tile_ = on;
     if (csa2_) csa2_->set_prefill_dense_tile(on);
   }
+  // The prefill's fold overlap (engine.prefill_fold_overlap; the
+  // DeepSeek-V4 walk's form, here since 2026-10-18): a walk of min_rows
+  // rows or more on a multi-rank world runs each layer as two row blocks,
+  // the boundary a row of the request's block grid nearest the middle, so
+  // every boundary fold lands under the other block's compute — the
+  // attention per block, the mHC site and the router per block, the expert
+  // chain over every row, the accumulation per block, and block B's MoE
+  // fold under the next layer's block A. Bitwise the one-block walk
+  // (dsv41_tp_test's gates). Tests lower min_rows and may run the row-block
+  // form without a reducer. Every model built from here on takes the default.
+  static constexpr int kFoldOverlapMinRows = 512;
+  static void set_default_prefill_fold_overlap(bool on) { s_default_prefill_fold_overlap = on; }
+  void set_prefill_fold_overlap(bool on, int min_rows = kFoldOverlapMinRows, bool without_reducer = false);
+  bool prefill_fold_overlap() const { return fold_overlap_; }
+  uint64_t debug_overlap_async_folds() const { return overlap_async_folds_; }
 
   // The cold diagnostic forward: one request on slot 0, fresh state, every
   // row's logits; capture_layers: every layer's residual streams [T, 4, H]
@@ -276,6 +291,29 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
   void stream_update(const uint16_t* sublayer_out, int T);
   uint16_t* stage(uint16_t* fallback, int T, int width, bool capture);
   void fold(uint16_t* buf, int T, int width, bool capture);
+  // The fold overlap (set_prefill_fold_overlap): the layer as the row
+  // blocks [0, TA) and [TA, T). On entry the previous layer's block-B MoE
+  // fold may be outstanding (ffn_b_pending_: A's streams updated in nxt_,
+  // B's in cur_ awaiting its update); `flush` lands it before returning.
+  void enqueue_layer_overlap(const Dsv41LayerResident& r, int layer, int T, int TA, const WalkRows& rows, bool flush);
+  void mhc_site_rows(const uint16_t* streams, const GlmMhcWeights& w, const uint16_t* ln, int r0, int rows,
+                     int decode_prefix);
+  void update_rows(const uint16_t* sublayer_out, int r0, int rows);
+  void swap_pre();
+  void flush_overlap();
+  // The block boundary of a walk of T rows: the row nearest T/2 at which
+  // the attention may start a chunk (a span's start, or a row on its
+  // request's block grid inside a publishing span), at least a block from
+  // either end, past any decode prefix. 0: none (the one-block walk).
+  int overlap_boundary(int T, const WalkRows& rows) const;
+  static inline bool s_default_prefill_fold_overlap = true;
+  bool fold_overlap_ = s_default_prefill_fold_overlap;
+  int fold_overlap_min_rows_ = kFoldOverlapMinRows;
+  bool fold_overlap_without_reducer_ = false;
+  bool ffn_b_pending_ = false;        // block B's MoE fold is outstanding
+  int overlap_rows_ = 0;              // the pending fold's walk rows and block boundary
+  int overlap_ta_ = 0;
+  uint64_t overlap_async_folds_ = 0;  // folds begun asynchronously (tests)
   void gather_embedding(const int64_t* tokens, int T, bool capture);
   // The DSpark pieces (mtp): the first draft call of a step (the rings, the
   // block, base_logits_, row 0) and a chain row (block row draft_row_).

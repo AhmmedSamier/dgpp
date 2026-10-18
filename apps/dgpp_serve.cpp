@@ -1589,6 +1589,7 @@ int main(int argc, char** argv) {
   bool ngram_prestage = true;               // engine.ngram_prestage (Qwen)
   std::string prefill = "bounded";  // the DeepSeek-V4.1 prefill: bounded | exact
   std::string prefill_dense = "tile";  // the DeepSeek-V4.1 prefill's dense projections: tile | streaming
+  bool prefill_fold_overlap = true;    // the DeepSeek-V4.1 prefill's boundary folds under the other row block's compute
   // The opt-in YaRN rope ramp (engine.rope_scaling): absent = the plain
   // table, the default and the behaviour every earlier build had.
   std::optional<dgpp::RopeScaling> rope_scaling;
@@ -1719,6 +1720,7 @@ int main(int argc, char** argv) {
     ngram_prestage = e.ngram_prestage;
     prefill = e.prefill;
     prefill_dense = e.prefill_dense;
+    prefill_fold_overlap = e.prefill_fold_overlap;
     rope_scaling = e.rope_scaling;
     embed_sharding = e.embed_sharding;
     mtp_head = e.mtp_head;
@@ -2083,7 +2085,7 @@ int main(int argc, char** argv) {
         graph_batch_min_live == 0 ? std::min(2, max_concurrency) : graph_batch_min_live;
     return std::format(
         "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} pfattn={} dcattn={} ngt={} dw={} mtpef={} bfw={} "
-        "fp8head={} dh={} dhb={} mtph={} attw={} itopk={} ctb={} cbs={} pf={} pfd={} "
+        "fp8head={} dh={} dhb={} mtph={} attw={} itopk={} ctb={} cbs={} pf={} pfd={} pfo={} "
         "emsh={} maxtok={} queue={} "
         "eos={} graph={} compact={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} "
         "msad={} msss={} mdr={} mdt={} mvf={} dbr={} "
@@ -2095,7 +2097,8 @@ int main(int argc, char** argv) {
         kv_capacity, kv_dtype, prefill_attention, decode_attention, ngram_table, dense_weights, mtp_expert_format, bf16_weights, fp8_head,
         draft_head,
         draft_head_blocks, mtp_head,
-        attention_weights, index_topk, candidate_topk_blocks, candidate_block_size, prefill, prefill_dense, embed_sharding,
+        attention_weights, index_topk, candidate_topk_blocks, candidate_block_size, prefill, prefill_dense,
+        prefill_fold_overlap ? 1 : 0, embed_sharding,
         default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0,
         compact_batches ? 1 : 0, mtp ? 1 : 0, mtp_depth, mtp_schedule ? 1 : 0, mtp_schedule_row_ms,
         mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth,
@@ -2175,6 +2178,7 @@ int main(int argc, char** argv) {
         ws.ngram_prestage = ngram_prestage;
         ws.prefill = prefill;
         ws.prefill_dense = prefill_dense;
+        ws.prefill_fold_overlap = prefill_fold_overlap;
         ws.rope_scaling = rope_scaling;
         ws.embed_sharding = embed_sharding;
         ws.mtp_head = mtp_head;
@@ -2278,6 +2282,7 @@ int main(int argc, char** argv) {
         ngram_prestage = ws.ngram_prestage;
         prefill = ws.prefill;
         prefill_dense = ws.prefill_dense;
+        prefill_fold_overlap = ws.prefill_fold_overlap;
         rope_scaling = ws.rope_scaling;
         embed_sharding = ws.embed_sharding;
         mtp_head = ws.mtp_head;
@@ -2442,6 +2447,7 @@ int main(int argc, char** argv) {
   // The DeepSeek-V4.1 prefill mode: every model built from here on takes it.
   dgpp::Dsv41Model::set_default_prefill_bounded(prefill == "bounded");
   dgpp::Dsv41Model::set_default_prefill_dense_tile(prefill_dense == "tile");
+  dgpp::Dsv41Model::set_default_prefill_fold_overlap(prefill_fold_overlap);
   dgpp::QwenLayerStream::set_dense_weights_fp8(dense_weights == "fp8");
   {
     // The L2 weight prefetcher's settings, before any model builds its prefetcher.

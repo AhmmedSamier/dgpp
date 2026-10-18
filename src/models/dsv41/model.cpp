@@ -920,6 +920,228 @@ void Dsv41Model::stream_update(const uint16_t* sublayer_out, int T) {
   std::swap(cur_, nxt_);
 }
 
+// ---- the prefill's fold overlap (model.hpp) -------------------------------------
+void Dsv41Model::set_prefill_fold_overlap(bool on, int min_rows, bool without_reducer) {
+  if (min_rows < 2 * kBlockTokens)
+    throw std::invalid_argument("set_prefill_fold_overlap: min_rows under two blocks");
+  fold_overlap_ = on;
+  fold_overlap_min_rows_ = min_rows;
+  fold_overlap_without_reducer_ = without_reducer;
+}
+
+// mhc_site over the rows [r0, r0 + rows) alone: the coefficients of every
+// row read pre_cur_ and write pre_nxt_ at the row; the caller swaps the
+// pair once both blocks of a site ran (swap_pre).
+void Dsv41Model::mhc_site_rows(const uint16_t* streams, const GlmMhcWeights& w, const uint16_t* ln, int r0, int rows,
+                               int decode_prefix) {
+  const size_t H = static_cast<size_t>(cfg_.hidden_size);
+  const auto compute = [&](int first, int count, bool decoder) {
+    if (!count) return;
+    const size_t r = static_cast<size_t>(first);
+    MhcSinglePass sp;
+    sp.pre_in = pre_cur_ + r * 4;
+    sp.pre_out = pre_nxt_ + r * 4;
+    sp.post_f32 = post_f32_ + r * 4;
+    sp.comb_f32 = comb_f32_ + r * 16;
+    (void)launch_mhc_compute_normed(streams + r * 4 * H, w, mhc_cfg_, collapsed_ + r * H,
+                                    post_bf16_ + r * 4, comb_bf16_ + r * 16,
+                                    mhc_logits_ + r * mhc_cfg_.coeff_rows(), nullptr, nullptr,
+                                    cfg_.rms_norm_eps, count, stream_, nullptr, false, &sp, decoder);
+  };
+  const int dec = std::clamp(decode_prefix - r0, 0, rows);
+  compute(r0, dec, true);
+  compute(r0 + dec, rows - dec, false);
+  csa2_rmsnorm_bf16(collapsed_ + static_cast<size_t>(r0) * H, cfg_.hidden_size, ln, x_ + static_cast<size_t>(r0) * H,
+                    cfg_.hidden_size, rows, cfg_.hidden_size, cfg_.rms_norm_eps, stream_);
+}
+
+void Dsv41Model::swap_pre() {
+  pre_cur_ = pre_nxt_;
+  pre_nxt_ = pre_cur_ == pre_a_ ? pre_b_ : pre_a_;
+}
+
+void Dsv41Model::update_rows(const uint16_t* sublayer_out, int r0, int rows) {
+  const size_t H = static_cast<size_t>(cfg_.hidden_size), R = static_cast<size_t>(r0);
+  launch_mhc_stream_update_f32(post_f32_ + R * 4, comb_f32_ + R * 16, sublayer_out + R * H, cur_ + R * 4 * H,
+                               nxt_ + R * 4 * H, mhc_cfg_, rows, stream_);
+}
+
+// Block B's outstanding MoE fold lands: its stream update, the swap.
+void Dsv41Model::flush_overlap() {
+  if (!ffn_b_pending_) return;
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  if (boundary_) boundary_->end_async();
+  update_rows(y_, overlap_ta_, overlap_rows_ - overlap_ta_);
+  std::swap(cur_, nxt_);
+  ffn_b_pending_ = false;
+}
+
+int Dsv41Model::overlap_boundary(int T, const WalkRows& rows) const {
+  int best = 0;
+  const auto consider = [&](int c) {
+    if (c < kBlockTokens || T - c < kBlockTokens) return;
+    if (best == 0 || std::abs(c - T / 2) < std::abs(best - T / 2)) best = c;
+  };
+  if (rows.num_spans == 0) {
+    if (rows.publish && rows.pos0 % kBlockTokens == 0) consider((T / 2 / kBlockTokens) * kBlockTokens);
+    return best;
+  }
+  int row0 = 0;
+  for (int s = 0; s < rows.num_spans; ++s) {
+    const int len = rows.span_lens[s];
+    if (s >= rows.decode_spans) {  // the decode prefix stays whole at block A's start
+      consider(row0);
+      if (rows.publish && rows.span_pos0[s] % kBlockTokens == 0)
+        for (int off = kBlockTokens; off < len; off += kBlockTokens) consider(row0 + off);
+    }
+    row0 += len;
+  }
+  return best;
+}
+
+void Dsv41Model::enqueue_layer_overlap(const Dsv41LayerResident& r, int layer, int T, int TA, const WalkRows& rows,
+                                       bool flush) {
+  const int H = cfg_.hidden_size;
+  const int TB = T - TA;
+  const int decode_prefix = rows.decode_spans
+      ? std::accumulate(rows.span_lens, rows.span_lens + rows.decode_spans, 0) : 0;
+  if (rows.decode || rows.capture || rows.trace != nullptr || debug_capture_ || cfg_.is_draft(layer) || TA <= 0 ||
+      TB <= 0 || TA < decode_prefix)
+    throw std::logic_error("enqueue_layer_overlap: not a two-block prefill walk");
+  build_layer_objects(r);
+  const auto drain = [&] { DGPP_CUDA_OK(cudaStreamSynchronize(stream_)); };
+  // A fold of rows [r0, r0 + n) of `buf` begun (true) or done in place.
+  const auto begin_fold = [&](uint16_t* buf, int r0, int n) {
+    if (!boundary_) return false;
+    uint16_t* at = buf + static_cast<size_t>(r0) * H;
+    drain();
+    if (boundary_->begin_async(at, n, H)) {
+      ++overlap_async_folds_;
+      return true;
+    }
+    boundary_->reduce(at, n, H);
+    return false;
+  };
+  const auto end_fold = [&](bool begun) {
+    if (!begun) return;
+    drain();
+    boundary_->end_async();
+  };
+  // Engram: the gate reads every row's streams, so the previous layer's
+  // block-B fold lands first; the Engram fold itself stays one block.
+  if (r.engram.present) {
+    flush_overlap();
+    engram_->embed(r.engram.table_index, T, stream_);
+    const Dsv41EngramLayerWeights ew = engram_view(r.engram);
+    uint16_t* kv = stage(engram_kv_, T, 5 * H, false);
+    engram_->project(ew, T, kv, stream_, /*prefill_tile=*/prefill_dense_tile_);
+    fold(kv, T, 5 * H, false);
+    engram_->gate(ew, cur_, kv, T, stream_);
+  }
+  // DSpark: a target layer's attention input over every row (as in enqueue_layer).
+  if (mtp_) {
+    const int ord = target_ordinal(layer);
+    if (ord >= 0) {
+      flush_overlap();
+      dsv41_stream_mean_bf16(cur_, 4, H, T, main_hidden_ + static_cast<size_t>(ord) * H,
+                             static_cast<int64_t>(targets_) * H, stream_);
+    }
+  }
+  // ---- the attention site ----------------------------------------------------
+  GlmMhcWeights aw;
+  aw.fn = r.mhc.attn_fn;
+  aw.base = r.mhc.attn_base;
+  aw.scale = r.mhc.attn_scale;
+  // Block A's streams are updated (in nxt_) while block B's wait for the
+  // previous layer's MoE fold.
+  if (ffn_b_pending_)
+    mhc_site_rows(nxt_, aw, r.attn_norm, 0, TA, decode_prefix);
+  else
+    mhc_site_rows(cur_, aw, r.attn_norm, 0, T, decode_prefix);
+  if (!csa2_->prepare(T)) throw std::runtime_error("run_rows: CSA2 GEMM plans unavailable");
+  const int tail = tail_ordinal(layer);
+  uint16_t* attn_out = y_;  // rows [TA, T) may still hold the previous MoE's block B: A writes [0, TA) only
+  // The attention of walk rows [r0, r0 + n): one request's rows from
+  // pos0 + r0, or the part of every span of a group inside them (a span
+  // the block boundary cuts runs in two calls, the second from a row of
+  // its request's block grid — as at any chunk cut; its selection state
+  // lives at its own row base, as a span's does).
+  const auto attention = [&](int r0, int n) {
+    if (rows.num_spans == 0) {
+      if (!csa2_->prepare(n)) throw std::runtime_error("run_rows: CSA2 GEMM plans unavailable");
+      csa2_->enqueue_prefill(x_ + static_cast<size_t>(r0) * H, pool_, rows.req, rows.pos0 + r0, n,
+                             attn_out + static_cast<size_t>(r0) * H, stream_, rows.window_floor, rows.publish, r0);
+      return;
+    }
+    int span0 = 0;
+    if (rows.decode_spans) {
+      // The decode prefix, whole, at block A's start (overlap_boundary keeps it there).
+      if (r0 == 0) {
+        if (!csa2_->prepare(decode_prefix)) throw std::runtime_error("mixed CSA2 plans unavailable");
+        csa2_->enqueue_decode(x_, pool_, rows.req_ids, rows.pos, rows.spans, rows.decode_spans, decode_prefix, attn_out,
+                              stream_, (rows.snapshots && tail >= 0) ? spec_tails(tail, 0) : nullptr);
+      }
+      span0 = decode_prefix;
+    }
+    for (int s = rows.decode_spans; s < rows.num_spans; ++s) {
+      const int len = rows.span_lens[s];
+      const int lo = std::max(span0, r0), hi = std::min(span0 + len, r0 + n);
+      if (hi > lo) {
+        if (!csa2_->prepare(hi - lo)) throw std::runtime_error("run_rows: CSA2 GEMM plans unavailable");
+        const int64_t floor = rows.span_floor ? rows.span_floor[s] : rows.window_floor;
+        csa2_->enqueue_prefill(x_ + static_cast<size_t>(lo) * H, pool_, rows.span_reqs[s],
+                               rows.span_pos0[s] + (lo - span0), hi - lo, attn_out + static_cast<size_t>(lo) * H, stream_,
+                               floor, rows.publish, lo);
+      }
+      span0 += len;
+    }
+  };
+  attention(0, TA);
+  if (ffn_b_pending_) {
+    flush_overlap();
+    mhc_site_rows(cur_, aw, r.attn_norm, TA, TB, decode_prefix);
+  }
+  swap_pre();  // the attention site's coefficients stand for every row
+  const bool fold_a = begin_fold(attn_out, 0, TA);
+  attention(TA, TB);
+  end_fold(fold_a);
+  // ---- the MoE site: A's update, site and router under B's attention fold ----
+  GlmMhcWeights fw;
+  fw.fn = r.mhc.ffn_fn;
+  fw.base = r.mhc.ffn_base;
+  fw.scale = r.mhc.ffn_scale;
+  const bool fold_b = begin_fold(attn_out, TA, TB);
+  update_rows(attn_out, 0, TA);
+  mhc_site_rows(nxt_, fw, r.ffn_norm, 0, TA, decode_prefix);
+  moe_->route_prefill_rows(x_, 0, TA, stream_);
+  end_fold(fold_b);
+  update_rows(attn_out, TA, TB);
+  std::swap(cur_, nxt_);
+  mhc_site_rows(cur_, fw, r.ffn_norm, TA, TB, decode_prefix);
+  moe_->route_prefill_rows(x_, TA, TB, stream_);
+  swap_pre();
+  // The expert chain over every row (its cost is the weights it decodes);
+  // then the accumulation per block, so block B's runs under A's fold.
+  uint16_t* ffn_out = y_;
+  moe_->enqueue_prefill_phased(x_, T, stream_, decode_prefix, ffn_out);
+  moe_->accumulate_prefill_rows(ffn_out, T, 0, TA, stream_, decode_prefix);
+  const bool ffn_a = begin_fold(ffn_out, 0, TA);
+  moe_->accumulate_prefill_rows(ffn_out, T, TA, TB, stream_, decode_prefix);
+  end_fold(ffn_a);
+  // Block A's update; block B's fold under the next layer's site and
+  // attention of A (or landed here: the walk's last layer of this shape).
+  update_rows(ffn_out, 0, TA);
+  ffn_b_pending_ = begin_fold(ffn_out, TA, TB);
+  if (!ffn_b_pending_) {
+    update_rows(ffn_out, TA, TB);
+    std::swap(cur_, nxt_);
+  } else {
+    overlap_rows_ = T;
+    overlap_ta_ = TA;
+    if (flush) flush_overlap();
+  }
+}
+
 void Dsv41Model::enqueue_layer(const Dsv41LayerResident& r, int layer, int T, const WalkRows& rows) {
   const int H = cfg_.hidden_size;
   const int decode_prefix = rows.decode_spans
@@ -1043,6 +1265,10 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
     throw std::logic_error("run_rows: a capture needs a resident stack");
   const int H = cfg_.hidden_size;
   const RowInputs in = begin_run(run);
+  if (ffn_b_pending_) {  // a walk that threw past a begun fold
+    if (boundary_) boundary_->end_async();
+    ffn_b_pending_ = false;
+  }
   cur_ = streams_a_;
   nxt_ = streams_b_;
   // Layer 0's collapse reads the constant one-hot (1, 0, 0, 0) directly:
@@ -1173,10 +1399,18 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
                              ? debug_layer_limit_
                              : cfg_.num_hidden_layers;
   if (last_layer < cfg_.num_hidden_layers) head = false;  // the limited diagnostic walk: no head
+  // The fold overlap: a prefill walk (one request's chunk or a group's
+  // spans) on a multi-rank world, never a capture, a traced or a
+  // diagnostic walk; the boundary per walk shape (the bounded decoder
+  // re-packs the rows at dec0: its own, if any — the segments are short).
+  const bool overlap_walk = fold_overlap_ && !run.decode && !run.capture && !capture_layers &&
+                            debug_teacher_ == nullptr && !traces &&
+                            (boundary_ != nullptr || fold_overlap_without_reducer_);
   for (int layer = 0; layer < last_layer; ++layer) {
     const Dsv41LayerResident& r = loader_.load_layer(layer);
     if (debug_teacher_ && layer > 0) teach(layer - 1);
     if (bounded && layer == dec0) {
+      flush_overlap();  // the prologue reads every row's streams
       // The decoder's global KV: this layer's attention-site input over the
       // chunk's rows (the site's coefficients are recomputed by the segment
       // walk below: the pointers stand). The compressor and index keys of
@@ -1327,7 +1561,14 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
       out.route_ids.emplace_back();
       out.route_weights.emplace_back();
     }
-    enqueue_layer(r, layer, walk_rows, rows);
+    const int overlap_ta = (overlap_walk && walk_rows >= fold_overlap_min_rows_) ? overlap_boundary(walk_rows, rows) : 0;
+    if (overlap_ta > 0) {
+      enqueue_layer_overlap(r, layer, walk_rows, overlap_ta, rows,
+                            /*flush=*/layer + 1 == last_layer || (bounded && layer + 1 == dec0));
+    } else {
+      flush_overlap();
+      enqueue_layer(r, layer, walk_rows, rows);
+    }
     trace_rows.push_back(walk_rows);
     if (capture_layers) {
       DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
@@ -1365,6 +1606,7 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
       }
     }
   }
+  flush_overlap();  // the head reads every row's streams
   const bool packed_logits = packed_prefill_logits(run) || (bounded && group);
   std::vector<int> output_hidden_rows;
   if (bounded && group) {

@@ -604,4 +604,160 @@ DGPP_TEST(dsv41_tp_loopback_worlds_2_and_4_match_world_1_at_decode_rows) {
   check_world(4, 29967, dir, cfg, tokens, ref);
 }
 
+namespace {
+// A reducer at world 1 for the fold-overlap gates: every fold an identity,
+// the asynchronous ones counted (dsv4_tp_test's).
+struct LocalAsyncReducer : dgpp::BoundaryReducer {
+  void reduce(uint16_t*, int, int) override { ++folds; }
+  bool begin_async(uint16_t*, int, int) override {
+    if (open) throw std::logic_error("local reducer: one fold outstanding at a time");
+    open = true;
+    ++folds;
+    return true;
+  }
+  void end_async() override { open = false; }
+  bool open = false;
+  int folds = 0;
+};
+}  // namespace
+
+// The prefill's fold overlap (engine.prefill_fold_overlap, 2026-10-18): a
+// 701-row prompt walks each layer as the row blocks 384 + 317 (the
+// boundary on the request's block grid nearest the middle); its logits and
+// the four decode steps behind it bitwise the one-block walk's, in the
+// exact prefill (every layer two blocks) and the bounded one (the encoder
+// layers two blocks; the decoder's prologue at its first layer lands the
+// pending fold before it reads the streams). Then three prompts of 141,
+// 701 and 300 rows as one group walk whose middle row stands inside the
+// second span: the boundary moves to that span's block grid, and each
+// prompt's logits and steps are bitwise its prefill alone.
+DGPP_TEST(dsv41_tp_prefill_fold_overlap_is_bitwise_the_one_block_walk) {
+  const std::string dir = (fs::current_path() / "dsv41_tp_fixture_overlap").string();
+  const Dsv41TextConfig cfg = dsv41fx::tiny_config();
+  dsv41fx::write_fixture(cfg, dir);
+  (void)dsv41fx::fixture_sidecar(cfg, dir);
+  std::vector<int64_t> prompt = make_tokens(cfg, 160);
+  while (prompt.size() < 701) prompt.push_back((prompt[prompt.size() - 160] * 31 + 11) % cfg.vocab_size);
+  for (const bool bounded : {false, true}) {
+    LocalAsyncReducer reducer;
+    Dsv41Model model(cfg, dir, 1280, 4096, Dsv41Residency::Streaming, nullptr, 0, 1, /*max_requests=*/3);
+    (void)model.set_boundary(&reducer);    // (the constructor takes a reducer at tp_world > 1 only)
+    model.set_decode_route_traces(false);  // as the engine serves it (a traced walk stays one block)
+    model.set_prefill_bounded(bounded);
+    const auto run = [&](int slot, const std::vector<int64_t>& p, bool overlap, std::vector<float>* logits,
+                         std::vector<std::vector<float>>* steps) {
+      model.set_prefill_fold_overlap(overlap);
+      Dsv41Model::Outputs o = model.session_prefill(slot, p);
+      *logits = o.logits;
+      for (int k = 0; k < 4; ++k) {
+        o = model.session_step(slot, (p[static_cast<size_t>(k)] + 7) % cfg.vocab_size);
+        steps->push_back(o.logits);
+      }
+      model.session_close(slot);
+    };
+    // 1) one prompt: 701 rows as blocks of 384 and 317.
+    std::vector<float> on_logits, off_logits;
+    std::vector<std::vector<float>> on_steps, off_steps;
+    run(0, prompt, true, &on_logits, &on_steps);
+    const uint64_t async_folds = model.debug_overlap_async_folds();
+    run(1, prompt, false, &off_logits, &off_steps);
+    require(model.debug_overlap_async_folds() == async_folds, "the one-block walk began an asynchronous fold");
+    require(async_folds > 0, "fold overlap: no fold ran asynchronously");
+    require(!on_logits.empty() && on_logits == off_logits,
+            "fold overlap: the prefill's logits differ from the one-block walk's");
+    require(on_steps == off_steps, "fold overlap: decode steps behind the prefill differ (the state)");
+    std::printf("[ OK ] %s prefill: 701 rows in two row blocks (%llu asynchronous folds): logits and 4 decode steps "
+                "bitwise the one-block walk\n", bounded ? "bounded" : "exact", static_cast<unsigned long long>(async_folds));
+    // 2) a group's spans.
+    const std::vector<std::vector<int64_t>> group = {
+        std::vector<int64_t>(prompt.begin(), prompt.begin() + 141), prompt,
+        std::vector<int64_t>(prompt.begin() + 200, prompt.begin() + 500)};
+    std::vector<std::vector<float>> alone_logits(3);
+    std::vector<std::vector<std::vector<float>>> alone_steps(3), group_steps(3);
+    for (int r = 0; r < 3; ++r)
+      run(r, group[static_cast<size_t>(r)], false, &alone_logits[static_cast<size_t>(r)], &alone_steps[static_cast<size_t>(r)]);
+    model.set_prefill_fold_overlap(true);
+    const std::vector<const std::vector<int64_t>*> pp = {&group[0], &group[1], &group[2]};
+    const std::vector<Dsv41Model::Outputs> g = model.session_prefill_group({0, 1, 2}, pp);
+    const uint64_t group_folds = model.debug_overlap_async_folds() - async_folds;
+    require(g.size() == 3, "three prompts prefilled as a group");
+    require(group_folds > 0, "fold overlap: the group walk ran no fold asynchronously");
+    for (int r = 0; r < 3; ++r) {
+      const std::vector<int64_t>& p = group[static_cast<size_t>(r)];
+      require(g[static_cast<size_t>(r)].logits == alone_logits[static_cast<size_t>(r)],
+              "fold overlap: a group walk's logits differ from the prompt's one-block prefill alone");
+      for (int k = 0; k < 4; ++k)
+        group_steps[static_cast<size_t>(r)].push_back(
+            model.session_step(r, (p[static_cast<size_t>(k)] + 7) % cfg.vocab_size).logits);
+      require(group_steps[static_cast<size_t>(r)] == alone_steps[static_cast<size_t>(r)],
+              "fold overlap: the steps behind a group walk differ (the state)");
+      model.session_close(r);
+    }
+    std::printf("[ OK ] %s prefill: 141 + 701 + 300 rows as one group walk in two row blocks (%llu asynchronous folds, "
+                "the boundary inside the second span on its block grid): logits and steps bitwise the prefills alone\n",
+                bounded ? "bounded" : "exact", static_cast<unsigned long long>(group_folds));
+  }
+}
+
+// The overlap on a loopback world of 2: the bus's bulk all-reduce runs
+// asynchronously under the other block's compute (block A's fold exceeds
+// the reducer's asynchronous threshold of two latency slots at the
+// fixture's width); every rank's logits bitwise its one-block walk's.
+DGPP_TEST(dsv41_tp_prefill_fold_overlap_at_world_2_is_bitwise_the_one_block_walk) {
+  const std::string dir = (fs::current_path() / "dsv41_tp_fixture_overlap_w2").string();
+  const Dsv41TextConfig cfg = dsv41fx::tiny_config();
+  dsv41fx::write_fixture(cfg, dir);
+  (void)dsv41fx::fixture_sidecar(cfg, dir);
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(2, 29989);
+  require(!buses.empty(), "tp bus world failed to start");
+  const size_t slot = dgpp::bus_latency_slot_elems(*buses[0]);
+  int TA = 128;
+  while (static_cast<size_t>(TA) * static_cast<size_t>(cfg.hidden_size) <= 2 * slot) TA += 128;
+  const int T = 2 * TA;
+  require(T <= 4096, "the rows of an asynchronous fold exceed the fixture's positions");
+  const std::vector<int64_t> tokens = make_tokens(cfg, T);
+  struct Outcome {
+    std::vector<float> one, two;
+    uint64_t async_folds = 0;
+    std::string error;
+  };
+  std::vector<Outcome> ranks(2);
+  ConstructBarrier barrier(2);
+  std::vector<std::thread> workers;
+  for (int r = 0; r < 2; ++r)
+    workers.emplace_back([&, r] {
+      bool arrived = false;
+      auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      Outcome& o = ranks[static_cast<size_t>(r)];
+      try {
+        BusBoundaryReducer reducer(*buses[static_cast<size_t>(r)], wait_timeout_ms());
+        Dsv41Model model(cfg, dir, T, 4096, Dsv41Residency::Streaming, &reducer, r, 2);
+        arrive_once();
+        model.set_decode_route_traces(false);  // as the engine serves it (a traced walk stays one block)
+        model.set_prefill_fold_overlap(false);
+        o.one = model.forward(tokens).logits;
+        model.set_prefill_fold_overlap(true, /*min_rows=*/256);
+        o.two = model.forward(tokens).logits;
+        o.async_folds = model.debug_overlap_async_folds();
+      } catch (const std::exception& e) {
+        o.error = "rank " + std::to_string(r) + ": " + e.what();
+        arrive_once();
+      }
+    });
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < 2; ++r) require(ranks[static_cast<size_t>(r)].error.empty(), ranks[static_cast<size_t>(r)].error);
+  for (int r = 0; r < 2; ++r) {
+    const Outcome& o = ranks[static_cast<size_t>(r)];
+    require(!o.one.empty() && o.one == o.two, "fold overlap at world 2: rank " + std::to_string(r) +
+                                                  "'s logits differ from its one-block walk's");
+    require(o.async_folds > 0, "fold overlap at world 2: rank " + std::to_string(r) + " ran no fold asynchronously");
+  }
+  std::printf("[ OK ] world 2: %d rows as blocks of %d (%llu asynchronous bulk folds per rank): logits bitwise the "
+              "one-block walk on both ranks\n", T, TA, static_cast<unsigned long long>(ranks[0].async_folds));
+}
+
 int main() { return dgpp::test::run_all(); }

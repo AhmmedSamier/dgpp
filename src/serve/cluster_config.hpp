@@ -212,6 +212,7 @@ struct ClusterConfig {
     // row, the parity mode).
     std::string prefill = "bounded";
     std::string prefill_dense = "tile";  // the DeepSeek-V4.1 prefill's dense projections: tile | streaming
+    bool prefill_fold_overlap = true;    // the DeepSeek-V4.1 prefill's boundary folds under the other row block's compute
     // The opt-in YaRN rope ramp (2026-09-18, the Qwen3.8-Flash-Next 512K
     // recipe): absent is the default and leaves every table and every
     // kernel argument exactly as they were; present builds the Qwen QSA

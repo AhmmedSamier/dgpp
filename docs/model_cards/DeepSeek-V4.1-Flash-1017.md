@@ -184,12 +184,32 @@ across both while the decode class stays on the first.
 |---|---|---|
 | One lane, streaming projections (the fused scan) | 0.523 / 1.619 / 5.152 / 19.591 | 1,620 |
 | Two lanes, streaming projections | 0.514 / 1.572 / 4.715 / 17.916 | 1,770 |
-| Two lanes, tile projections (shipped) | 0.480 / 1.415 / 4.045 / 15.328 | 2,080 |
+| Two lanes, tile projections | 0.480 / 1.415 / 4.045 / 15.328 | 2,080 |
+| Two lanes, tile projections, the folds overlapped (shipped) | 0.464 / 1.324 / 3.699 / 14.234 | 2,240 |
 
-Decode is untouched by both. The ledger's remaining prefill shares on the
-shipped form: the listed attention over the selected entries about 19 %
-(about 12 TFLOP/s, the next kernel), the bulk folds about 14 %, the MXFP4
-experts about 17 % at 58 TFLOP/s, the window attention about 9 %.
+Decode is untouched by all three. The ledger's remaining prefill shares
+on the tile form: the listed attention over the selected entries about
+19 % (about 12 TFLOP/s, the next kernel), the bulk folds about 14 %, the
+MXFP4 experts about 17 % at 58 TFLOP/s, the window attention about 9 %.
+
+The folds then went under compute (`engine.prefill_fold_overlap`, default
+`true`): a walk of 512 rows or more runs each layer as two row blocks,
+the boundary a row of the request's block grid nearest the middle, so
+block A's attention fold lands under block B's attention, B's under A's
+stream update, mHC site and router, A's MoE fold under B's expert
+accumulation and B's MoE fold under the next layer's block A — the
+DeepSeek-V4 walk's form. The Engram layers and the DSpark target layers
+land the pending fold first (their gate and stream mean read every row),
+and under the bounded prefill the encoder layers overlap while the
+decoder's prologue lands the pending fold before it publishes. The walk
+is bitwise the one-block walk (the attention takes the second block as it
+takes any chunk; the MoE's phased form runs the same kernels per row),
+gated in `dsv41_tp_test` on the exact and the bounded walk, a group cut
+inside a span, and a loopback world of 2 through the bus's asynchronous
+bulk folds. The table's last row is the campaign leg; a matched probe of
+one prompt set five times, the key on against off on the same binary,
+read −4.3 / −5.0 / −6.4 % per token at 512 / 2K / 8K and decode level
+(code 48.0 against 47.6 ms per pass, prose 41.7 against 41.6).
 
 ## Measured (2026-10-18, four nodes)
 

@@ -449,6 +449,7 @@ std::string encode_journal_settings(const WorldSettings& s) {
   append_json_string(&out, s.prefill);
   out += ",\"pfd\":";
   append_json_string(&out, s.prefill_dense);
+  out += std::format(",\"pfo\":{}", s.prefill_fold_overlap ? 1 : 0);
   // The opt-in YaRN ramp: absent when off, so a record from a plain run
   // carries no key at all (an older peer decodes it to "off", which is
   // what it would have run anyway — a world never mixes the two).
@@ -721,6 +722,8 @@ JournalRecord decode_journal_line(std::string_view line) {
     // Records before 2026-10-18 carry no prefill dense form: the tile GEMM.
     if (const dgpp::minijson::Value* pfd = v.find("pfd")) s.prefill_dense = std::string(pfd->as_string());
     else s.prefill_dense = "tile";
+    // Records before the fold overlap key (2026-10-18) carry none: on.
+    s.prefill_fold_overlap = v.find("pfo") ? flag("pfo") : true;
     // Records without the rope ramp key carry none: the plain table
     // (records before the knob, 2026-09-18, and every plain run since).
     if (const dgpp::minijson::Value* rs = v.find("rs")) {

@@ -5,6 +5,32 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **DeepSeek-V4.1 prefill: the boundary folds under the other row block's
+  compute** (2026-10-18; `engine.prefill_fold_overlap`, default `true`).
+  The bulk folds were about 14 % of a 32K prefill, wire-bound at the port
+  and the GPU idle through each. A prefill walk of 512 rows or more on a
+  multi-rank world now runs each layer as two row blocks, the boundary a
+  row of the request's block grid nearest the middle (the DeepSeek-V4
+  walk's form): the attention per block, block A's fold under block B's
+  attention, block B's under A's stream update, mHC site and router, the
+  expert chain over every row, the accumulation per block under A's MoE
+  fold, and block B's MoE fold under the next layer's block A. An Engram
+  layer and a DSpark target layer land the pending fold first (their gate
+  and stream mean read every row); under the bounded prefill the encoder
+  layers overlap and the decoder's prologue lands the pending fold before
+  it publishes. Bitwise the one-block walk: the attention takes the second
+  block as it takes any chunk (its selection state at its own row base, as
+  a span's), and the MoE's phased form runs the same kernels per row.
+  `dsv41_tp_test` gates the exact and the bounded walk, a group of three
+  spans cut inside the second, and a loopback world of 2 through the bus's
+  asynchronous bulk folds against the one-block walk (the logits and the
+  decode steps behind the prefill bitwise). Measured on the 1017 template
+  on four nodes: cold prefill 0.464 / 1.324 / 3.699 / 14.234 s at 512 /
+  2K / 8K / 32K tokens against 0.480 / 1.415 / 4.045 / 15.328 before (the
+  same prompts; −3 / −6 / −9 / −7 %), 2,240 tok/s at 32K; a matched probe
+  of one prompt set five times, the key on against off on one binary:
+  −4.3 / −5.0 / −6.4 % per token at 512 / 2K / 8K, and decode level (code
+  48.0 against 47.6 ms per pass, prose 41.7 against 41.6).
 - **DeepSeek-V4.1 prefill: the dense projections on the fp8-weight tile
   GEMM** (2026-10-18; `engine.prefill_dense`, default `tile`). The
   family's dense projections took the streaming decode GEMM at every row

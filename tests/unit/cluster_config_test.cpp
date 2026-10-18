@@ -117,7 +117,7 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
                "prefill_early_admission": true,
                "prefix_min_tokens": 512, "prefix_head_snapshots": false, "mtp_draft": "greedy",
                "mtp_schedule_sampled_scale": 0.5, "mtp_draft_temperature": 0.7, "mtp_verify": "block",
-               "prefill_dense": "streaming",
+               "prefill_dense": "streaming", "prefill_fold_overlap": false,
                "dflash_batch_rows": 32, "dflash_weights": "fp8", "prefill_group": false,
                "l2_prefetch": false, "l2_prefetch_form": "touch", "l2_prefetch_window_mib": 8,
                "l2_prefetch_boundary_window_mib": 0, "l2_prefetch_boundary_rate": "full",
@@ -139,7 +139,7 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
               c.engine.prefill_early_admission == std::optional<bool>(true) &&
               c.engine.prefix_min_tokens == 512 && !c.engine.prefix_head_snapshots &&
               c.engine.mtp_draft == "greedy" && c.engine.mtp_schedule_sampled_scale == 0.5 &&
-              c.engine.prefill_dense == "streaming" &&
+              c.engine.prefill_dense == "streaming" && !c.engine.prefill_fold_overlap &&
               c.engine.mtp_draft_temperature == 0.7 && c.engine.mtp_verify == "block" &&
               c.engine.dflash_batch_rows == 32 && c.engine.dflash_weights == "fp8" && !c.engine.prefill_group &&
               !c.engine.l2_prefetch && c.engine.l2_prefetch_form == "touch" && c.engine.l2_prefetch_window_mib == 8 &&
