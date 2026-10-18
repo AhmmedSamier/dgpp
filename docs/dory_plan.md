@@ -318,7 +318,18 @@ combination; the `logit_scale` head; the recurrent K/V policy.
    reduction error, ~sqrt(dim)·2^-24). 6.3 us for a 4096-wide justnorm and
    13.5 us for the fused residual on one Spark.
 4. **The layer walk** — one sublayer per index, the attention and MLP
-   numerics of §1.3–§1.4, the two RoPE thetas, the sliding window.
+   numerics of §1.3–§1.4, the two RoPE thetas, the sliding window. **In
+   progress**: the attention kernels (`kernels/dory_attn.{hpp,cu}` — the
+   per-(row, head) finish with the neoX RoPE, the `sqk` square and
+   `justnorm_per_head`, the K/V cache writes, the split-KV partial and the
+   combine) and the two fused sites (`dory_gate_justnorm_bf16`,
+   `dory_silu_justnorm_bf16` in `kernels/dory_norm.{hpp,cu}`) have landed with
+   their tests (`tests/cuda/dory_attn_test.cu`, the extended
+   `tests/cuda/dory_norm_test.cu`): q and k are bitwise against the host
+   oracle and the attention output is within 0.4% of its values at 2 ulp.
+   One decode row at the model's geometry over 2048 tokens costs 8.2 us
+   (finish) + 46.3 us (partial, `n_split` 16 — the split saturates there) +
+   4.1 us (combine) on one Spark; the layer objects and the walk are next.
 5. **The loop** — the input/recurrent/output partition, the re-injection
    and state normalization, and the two K/V policies.
 6. **The head** — `logit_scale`, and the lm head on the shared path.

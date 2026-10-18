@@ -214,7 +214,8 @@ add_library(dgpp_kernels STATIC
   src/kernels/mimo_mtp_history.cu
   src/kernels/mimo_attn_prefill.cu
   src/kernels/add_rmsnorm.cu
-  src/kernels/dory_norm.cu)
+  src/kernels/dory_norm.cu
+  src/kernels/dory_attn.cu)
 target_link_libraries(dgpp_kernels PUBLIC CUDA::cudart CUDA::cublasLt CUDA::cuda_driver dgpp_core dgpp_rope_scaling)
 dgpp_set_common(dgpp_kernels)
 # The device sampler mirrors the host oracle bit for bit: no contraction of
@@ -1494,6 +1495,12 @@ target_include_directories(dory_norm_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/sr
 target_link_libraries(dory_norm_test PRIVATE dgpp_kernels dgpp_models_dory CUDA::cudart Threads::Threads)
 dgpp_set_common(dory_norm_test)
 add_test(NAME dory_norm_test COMMAND dory_norm_test)
+
+add_executable(dory_attn_test tests/cuda/dory_attn_test.cu)
+target_include_directories(dory_attn_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(dory_attn_test PRIVATE dgpp_kernels dgpp_models_dory CUDA::cudart Threads::Threads)
+dgpp_set_common(dory_attn_test)
+add_test(NAME dory_attn_test COMMAND dory_attn_test)
 
 add_executable(glm4_loader_test tests/cuda/glm4_loader_test.cpp)
 target_include_directories(glm4_loader_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)

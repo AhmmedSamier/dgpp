@@ -165,6 +165,58 @@ void slerp_alpha(const uint16_t* a, const uint16_t* b, const uint16_t* alpha, fl
   }
 }
 
+  // The fp32 products summed in fp64 — the reference's one-rounding contract —
+  // with the host's `exp` for the sigmoid/silu (the device's `expf` differs by
+  // an ulp, which is what the ulp budget below absorbs).
+  std::vector<uint16_t> gate_oracle(const std::vector<uint16_t>& attn,
+                                    const std::vector<uint16_t>& gate, const std::vector<uint16_t>& s_gate,
+                                    float f, int rows, int dim, float eps) {
+    std::vector<uint16_t> y(attn.size());
+    std::vector<float> g(static_cast<size_t>(dim));
+    for (int r = 0; r < rows; ++r) {
+      const size_t row = static_cast<size_t>(r) * dim;
+      double ss = 0.0;
+      for (int i = 0; i < dim; ++i) {
+        const float a = dgpp::bf16_bits_to_float(attn[row + i]);
+        const float gv = dgpp::bf16_bits_to_float(gate[row + i]);
+        const float m = dgpp::bf16_bits_to_float(s_gate[static_cast<size_t>(i)]) * f;
+        const float z = gv * (m * m);
+        g[static_cast<size_t>(i)] = a * (1.0f / (1.0f + std::exp(-z)));
+        ss = std::fma(static_cast<double>(g[static_cast<size_t>(i)]),
+                      static_cast<double>(g[static_cast<size_t>(i)]), ss);
+      }
+      const float rstd = 1.0f / std::sqrt(static_cast<float>(ss) + eps);
+      for (int i = 0; i < dim; ++i)
+        y[row + i] = dgpp::float_to_bf16_bits(g[static_cast<size_t>(i)] * rstd);
+    }
+    return y;
+  }
+
+  std::vector<uint16_t> silu_oracle(const std::vector<uint16_t>& g_in, const std::vector<uint16_t>& u_in,
+                                    const std::vector<uint16_t>& suv_gate,
+                                    const std::vector<uint16_t>& suv_up, float f, int rows, int dim,
+                                    float eps) {
+    std::vector<uint16_t> y(g_in.size());
+    std::vector<float> m(static_cast<size_t>(dim));
+    for (int r = 0; r < rows; ++r) {
+      const size_t row = static_cast<size_t>(r) * dim;
+      double ss = 0.0;
+      for (int i = 0; i < dim; ++i) {
+        const float gv = dgpp::bf16_bits_to_float(g_in[row + i]) *
+                         (dgpp::bf16_bits_to_float(suv_gate[static_cast<size_t>(i)]) * f);
+        const float uv = dgpp::bf16_bits_to_float(u_in[row + i]) *
+                         (dgpp::bf16_bits_to_float(suv_up[static_cast<size_t>(i)]) * f);
+        m[static_cast<size_t>(i)] = (gv / (1.0f + std::exp(-gv))) * uv;
+        ss = std::fma(static_cast<double>(m[static_cast<size_t>(i)]),
+                      static_cast<double>(m[static_cast<size_t>(i)]), ss);
+      }
+      const float rstd = 1.0f / std::sqrt(static_cast<float>(ss) + eps);
+      for (int i = 0; i < dim; ++i)
+        y[row + i] = dgpp::float_to_bf16_bits(m[static_cast<size_t>(i)] * rstd);
+    }
+    return y;
+  }
+
 }  // namespace exact_oracle
 
 void justnorm_case(int rows, int dim, int profile, float eps, std::mt19937& rng) {
@@ -215,6 +267,61 @@ void slerp_case(int rows, int dim, float scale, float alpha_spread, std::mt19937
   check_transcription("slerp_alpha", dr, a.size());
 }
 
+// The two fused sites (plan §1.3/§1.4): the bf16 gated output and the bf16
+// silu·u, both justnormed in the same launch. The oracle sums the fp32
+// products in fp64 with the host's `exp`, so the only differences left are the
+// device `expf`'s ulp and the resulting bf16 boundary flips.
+void gate_case(int rows, int dim, float sg_factor, float spread, std::mt19937& rng) {
+  const std::vector<uint16_t> attn = random_rows(rng, rows, dim, 0);
+  const std::vector<uint16_t> gate_b = random_rows(rng, rows, dim, 1);
+  std::vector<uint16_t> s_gate(static_cast<size_t>(dim));
+  std::normal_distribution<float> n01(0.f, spread);
+  for (auto& e : s_gate) e = dgpp::float_to_bf16_bits(n01(rng));
+  const std::vector<uint16_t> expect =
+      exact_oracle::gate_oracle(attn, gate_b, s_gate, sg_factor, rows, dim, dgpp::kDoryJustnormEps);
+  DevBuf d_a = up(attn), d_g = up(gate_b), d_s = up(s_gate), d_y(attn.size() * 2);
+  dgpp::dory_gate_justnorm_bf16(static_cast<const uint16_t*>(d_a.p), static_cast<const uint16_t*>(d_g.p),
+                                static_cast<const uint16_t*>(d_s.p), sg_factor,
+                                static_cast<uint16_t*>(d_y.p), rows, dim, dgpp::kDoryJustnormEps, nullptr);
+  DGPP_CUDA_OK(cudaStreamSynchronize(nullptr));
+  const auto got = down<uint16_t>(d_y, attn.size());
+  const Diff d = compare(expect, got);
+  std::printf("  [gate_justnorm] dim %d factor %g spread %g: %zu/%zu differ (%.4f%%), max abs %.2e of %.2e\n",
+              dim, sg_factor, spread, d.exact_mismatch, got.size(),
+              100.0 * static_cast<double>(d.exact_mismatch) / static_cast<double>(got.size()), d.max_abs,
+              d.ref_scale);
+  require(d.exact_mismatch <= static_cast<size_t>(0.005 * static_cast<double>(got.size())) + 4,
+          "gate_justnorm: too many values differ from the oracle");
+  require(d.max_abs <= 2e-2 * d.ref_scale + 1e-30, "gate_justnorm: difference beyond the case scale");
+}
+
+void silu_case(int rows, int dim, float suv_factor, float spread, std::mt19937& rng) {
+  const std::vector<uint16_t> g_in = random_rows(rng, rows, dim, 0);
+  const std::vector<uint16_t> u_in = random_rows(rng, rows, dim, 1);
+  std::vector<uint16_t> suv_gate(static_cast<size_t>(dim)), suv_up(static_cast<size_t>(dim));
+  std::normal_distribution<float> n01(0.f, spread);
+  for (auto& e : suv_gate) e = dgpp::float_to_bf16_bits(n01(rng));
+  for (auto& e : suv_up) e = dgpp::float_to_bf16_bits(n01(rng));
+  const std::vector<uint16_t> expect = exact_oracle::silu_oracle(g_in, u_in, suv_gate, suv_up,
+                                                                 suv_factor, rows, dim, dgpp::kDoryJustnormEps);
+  DevBuf d_g = up(g_in), d_u = up(u_in), d_sg = up(suv_gate), d_su = up(suv_up),
+         d_y(g_in.size() * 2);
+  dgpp::dory_silu_justnorm_bf16(static_cast<const uint16_t*>(d_g.p), static_cast<const uint16_t*>(d_u.p),
+                                static_cast<const uint16_t*>(d_sg.p), static_cast<const uint16_t*>(d_su.p),
+                                suv_factor, static_cast<uint16_t*>(d_y.p), rows, dim,
+                                dgpp::kDoryJustnormEps, nullptr);
+  DGPP_CUDA_OK(cudaStreamSynchronize(nullptr));
+  const auto got = down<uint16_t>(d_y, g_in.size());
+  const Diff d = compare(expect, got);
+  std::printf("  [silu_justnorm] dim %d factor %g spread %g: %zu/%zu differ (%.4f%%), max abs %.2e of %.2e\n",
+              dim, suv_factor, spread, d.exact_mismatch, got.size(),
+              100.0 * static_cast<double>(d.exact_mismatch) / static_cast<double>(got.size()), d.max_abs,
+              d.ref_scale);
+  require(d.exact_mismatch <= static_cast<size_t>(0.005 * static_cast<double>(got.size())) + 4,
+          "silu_justnorm: too many values differ from the oracle");
+  require(d.max_abs <= 2e-2 * d.ref_scale + 1e-30, "silu_justnorm: difference beyond the case scale");
+}
+
 }  // namespace
 
 DGPP_TEST(dory_norm_justnorm_matches_the_reference) {
@@ -238,6 +345,23 @@ DGPP_TEST(dory_norm_slerp_alpha_matches_the_reference) {
   // exact-oracle check still holds bitwise there.
   for (int dim : {256, 4096})
     for (float scale : {10.0f, 100.0f}) slerp_case(48, dim, scale, 3.0f, rng);
+}
+
+DGPP_TEST(dory_norm_gate_justnorm_matches_the_reference) {
+  std::mt19937 rng(20261020);
+  // The attention output's site: dim 4096 = all 16 query heads (plan §1.3),
+  // with the model's own s_gate factor and a wide-spread control.
+  for (float factor : {0.5f, 1.0f, 2.8249f})
+    for (float spread : {0.3f, 3.0f}) gate_case(64, 4096, factor, spread, rng);
+  gate_case(37, 4096, 1.0f, 0.3f, rng);
+}
+
+DGPP_TEST(dory_norm_silu_justnorm_matches_the_reference) {
+  std::mt19937 rng(20261021);
+  // The MLP's site: dim 7168 = the intermediate (plan §1.4).
+  for (float factor : {0.5f, 1.0f, 2.8249f})
+    for (float spread : {0.3f, 3.0f}) silu_case(64, 7168, factor, spread, rng);
+  silu_case(31, 7168, 1.0f, 0.3f, rng);
 }
 
 DGPP_TEST(dory_norm_rejects_bad_shapes) {
@@ -303,6 +427,26 @@ DGPP_TEST(dory_norm_timing) {
   });
   std::printf("  [timing] 1 x %d: justnorm %.1f us, slerp_alpha (fused residual) %.1f us\n", dim, one_row,
               residual);
+
+  // The two fused sites: one launch per site instead of a chain of passes.
+  DevBuf attn = up(random_rows(rng, 1, 4096, 0)), gate = up(random_rows(rng, 1, 4096, 0));
+  DevBuf sg = up(random_rows(rng, 1, 4096, 0)), go(4096 * 2);
+  const float gated = time([&] {
+    dgpp::dory_gate_justnorm_bf16(static_cast<const uint16_t*>(attn.p),
+                                  static_cast<const uint16_t*>(gate.p),
+                                  static_cast<const uint16_t*>(sg.p), 1.0f,
+                                  static_cast<uint16_t*>(go.p), 1, 4096, 1e-6f, s);
+  });
+  DevBuf g_in = up(random_rows(rng, 1, 7168, 0)), u_in = up(random_rows(rng, 1, 7168, 0));
+  DevBuf sgg = up(random_rows(rng, 1, 7168, 0)), suu = up(random_rows(rng, 1, 7168, 0)), mo(7168 * 2);
+  const float silu = time([&] {
+    dgpp::dory_silu_justnorm_bf16(
+        static_cast<const uint16_t*>(g_in.p), static_cast<const uint16_t*>(u_in.p),
+        static_cast<const uint16_t*>(sgg.p), static_cast<const uint16_t*>(suu.p), 1.0f,
+        static_cast<uint16_t*>(mo.p), 1, 7168, 1e-6f, s);
+  });
+  std::printf("  [timing] fused sites: 1 x 4096 gate+justnorm %.1f us, 1 x 7168 silu+justnorm %.1f us\n",
+              gated, silu);
 }
 
 int main() {

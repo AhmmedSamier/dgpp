@@ -43,4 +43,34 @@ void dory_justnorm_bf16(const uint16_t* x, uint16_t* y, int rows, int dim, float
 void dory_slerp_alpha_bf16(const uint16_t* a, const uint16_t* b, const uint16_t* alpha, float scale,
                            uint16_t* y, int rows, int dim, float eps, cudaStream_t stream);
 
+// The attention output's gate, fused with the justnorm that follows it over
+// ALL query heads (plan §1.3):
+//
+//   y_i = bf16( g_i · rstd ),  g_i = fp32(attn_i) · sigmoid( fp32(gate_i) · s_i² ),
+//   s_i = fp32(s_gate_i) · s_gate_factor,  rstd = 1/sqrt(sum g² + eps)
+//
+// attn bf16 [rows, dim] (the attention's own bf16 output), gate bf16
+// [rows, dim] (the `g_proj` GEMM's, whose one rounding the engine does in the
+// GEMM — the reference's `fp32(gate)` lifts a bf16 Linear output, exactly like
+// launch_moe_swiglu_clamp's gate/up), s_gate bf16 [dim]. The interior stays
+// fp32 (the reference's `fp32(attn) ⊙ sigmoid(...)`), so the row sum runs
+// over the fp32 products and only the output rounds.
+void dory_gate_justnorm_bf16(const uint16_t* attn, const uint16_t* gate, const uint16_t* s_gate,
+                             float s_gate_factor, uint16_t* y, int rows, int dim, float eps,
+                             cudaStream_t stream);
+
+// The MLP's activation, fused with the justnorm that follows it over the
+// intermediate (plan §1.4):
+//
+//   y_i = bf16( m_i · rstd ),  m_i = silu( g_i ) · u_i,  rstd = 1/sqrt(sum m² + eps),
+//   g_i = fp32(gate_proj_i) · fp32(suv_gate_i) · suv_factor,
+//   u_i = fp32(up_proj_i)   · fp32(suv_up_i)   · suv_factor
+//
+// g_in / u_in bf16 [rows, dim] (the two GEMMs' outputs, as
+// launch_moe_swiglu_clamp takes them), suv_gate / suv_up bf16 [dim]. fp32
+// interior, one rounding.
+void dory_silu_justnorm_bf16(const uint16_t* g_in, const uint16_t* u_in, const uint16_t* suv_gate,
+                             const uint16_t* suv_up, float suv_factor, uint16_t* y, int rows,
+                             int dim, float eps, cudaStream_t stream);
+
 }  // namespace dgpp

@@ -213,6 +213,125 @@ __global__ void __launch_bounds__(kThreads)
   }
 }
 
+// ---- the two fused sites -------------------------------------------------------
+// Both keep the fp32 interior the reference's (plan §1.3: `fp32(attn) ⊙
+// sigmoid(fp32(gate) ⊙ (s_gate·s_gate_factor)²)`; §1.4: `silu(fp32(g)) ⊙
+// fp32(u)`) and round once, at justnorm's output — justnorm is `bf16(fp32(x) ·
+// rsqrt(sum(fp32(x)²) + 1e-6))` (plan §1.2), so the row sums run over the fp32
+// products, never a rounded intermediate. `attn`/`gate`/`g`/`u` arrive as the
+// bf16 Linear outputs the engine rounds once (`fp32(...)` in the plan), exactly
+// like launch_moe_swiglu_clamp's bf16 gate/up.
+__global__ void __launch_bounds__(kThreads)
+    gate_justnorm_kernel(const uint16_t* __restrict__ attn, const uint16_t* __restrict__ gate,
+                         const uint16_t* __restrict__ s_gate, float sg_factor,
+                         uint16_t* __restrict__ y, int dim, float eps) {
+  const int tid = threadIdx.x;
+  const size_t row = static_cast<size_t>(blockIdx.x) * dim;
+  const int nvec = dim / (kThreads * kVecElems);
+  const int tail = (dim - nvec * kThreads * kVecElems) / kVecElems;
+
+  float g[kMaxVecs][kVecElems];
+  double s[4] = {0.0, 0.0, 0.0, 0.0};
+#pragma unroll
+  for (int i = 0; i < kMaxVecs; ++i) {
+    const bool live = i < nvec || (i == nvec && tid < tail);
+    if (!live) continue;
+    const int e0 = (i * kThreads + tid) * kVecElems;
+    const uint4 av = *reinterpret_cast<const uint4*>(attn + row + e0);
+    const uint4 gv4 = *reinterpret_cast<const uint4*>(gate + row + e0);
+    const uint4 sv = *reinterpret_cast<const uint4*>(s_gate + e0);
+    const uint32_t* ap = reinterpret_cast<const uint32_t*>(&av);
+    const uint32_t* gp = reinterpret_cast<const uint32_t*>(&gv4);
+    const uint32_t* sp = reinterpret_cast<const uint32_t*>(&sv);
+#pragma unroll
+    for (int k = 0; k < kVecElems; ++k) {
+      const float a = (k % 2 == 0) ? lo_bf16(ap[k / 2]) : hi_bf16(ap[k / 2]);
+      const float gv = (k % 2 == 0) ? lo_bf16(gp[k / 2]) : hi_bf16(gp[k / 2]);
+      const float sc = (k % 2 == 0) ? lo_bf16(sp[k / 2]) : hi_bf16(sp[k / 2]);
+      const float m = sc * sg_factor;
+      const float z = gv * (m * m);
+      g[i][k] = a * (1.0f / (1.0f + expf(-z)));
+    }
+#pragma unroll
+    for (int k = 0; k < kVecElems; ++k)
+      s[k % 4] = fma(static_cast<double>(g[i][k]), static_cast<double>(g[i][k]), s[k % 4]);
+  }
+
+  __shared__ double part[kWarps];
+  __shared__ float s_rstd;
+  const float rstd = block_rstd((s[0] + s[1]) + (s[2] + s[3]), part, &s_rstd, eps);
+
+#pragma unroll
+  for (int i = 0; i < kMaxVecs; ++i) {
+    const bool live = i < nvec || (i == nvec && tid < tail);
+    if (!live) continue;
+    const int e0 = (i * kThreads + tid) * kVecElems;
+    uint32_t yp[4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j)
+      yp[j] = pack_bf16(float_to_bf16_bits(g[i][2 * j] * rstd),
+                        float_to_bf16_bits(g[i][2 * j + 1] * rstd));
+    *reinterpret_cast<uint4*>(y + row + e0) = make_uint4(yp[0], yp[1], yp[2], yp[3]);
+  }
+}
+
+__global__ void __launch_bounds__(kThreads)
+    silu_justnorm_kernel(const uint16_t* __restrict__ g_in, const uint16_t* __restrict__ u_in,
+                         const uint16_t* __restrict__ suv_gate, const uint16_t* __restrict__ suv_up,
+                         float suv_factor, uint16_t* __restrict__ y, int dim, float eps) {
+  const int tid = threadIdx.x;
+  const size_t row = static_cast<size_t>(blockIdx.x) * dim;
+  const int nvec = dim / (kThreads * kVecElems);
+  const int tail = (dim - nvec * kThreads * kVecElems) / kVecElems;
+
+  float m[kMaxVecs][kVecElems];
+  double s[4] = {0.0, 0.0, 0.0, 0.0};
+#pragma unroll
+  for (int i = 0; i < kMaxVecs; ++i) {
+    const bool live = i < nvec || (i == nvec && tid < tail);
+    if (!live) continue;
+    const int e0 = (i * kThreads + tid) * kVecElems;
+    const uint4 gg = *reinterpret_cast<const uint4*>(g_in + row + e0);
+    const uint4 uu = *reinterpret_cast<const uint4*>(u_in + row + e0);
+    const uint4 sg = *reinterpret_cast<const uint4*>(suv_gate + e0);
+    const uint4 su = *reinterpret_cast<const uint4*>(suv_up + e0);
+    const uint32_t* gp = reinterpret_cast<const uint32_t*>(&gg);
+    const uint32_t* up = reinterpret_cast<const uint32_t*>(&uu);
+    const uint32_t* sgp = reinterpret_cast<const uint32_t*>(&sg);
+    const uint32_t* sup = reinterpret_cast<const uint32_t*>(&su);
+#pragma unroll
+    for (int k = 0; k < kVecElems; ++k) {
+      const float gv = (k % 2 == 0) ? lo_bf16(gp[k / 2]) : hi_bf16(gp[k / 2]);
+      const float uv = (k % 2 == 0) ? lo_bf16(up[k / 2]) : hi_bf16(up[k / 2]);
+      const float sgc = (k % 2 == 0) ? lo_bf16(sgp[k / 2]) : hi_bf16(sgp[k / 2]);
+      const float suc = (k % 2 == 0) ? lo_bf16(sup[k / 2]) : hi_bf16(sup[k / 2]);
+      const float gs = gv * (sgc * suv_factor);
+      const float us = uv * (suc * suv_factor);
+      m[i][k] = (gs / (1.0f + expf(-gs))) * us;  // silu(g) · u, fp32 interior
+    }
+#pragma unroll
+    for (int k = 0; k < kVecElems; ++k)
+      s[k % 4] = fma(static_cast<double>(m[i][k]), static_cast<double>(m[i][k]), s[k % 4]);
+  }
+
+  __shared__ double part[kWarps];
+  __shared__ float s_rstd;
+  const float rstd = block_rstd((s[0] + s[1]) + (s[2] + s[3]), part, &s_rstd, eps);
+
+#pragma unroll
+  for (int i = 0; i < kMaxVecs; ++i) {
+    const bool live = i < nvec || (i == nvec && tid < tail);
+    if (!live) continue;
+    const int e0 = (i * kThreads + tid) * kVecElems;
+    uint32_t yp[4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j)
+      yp[j] = pack_bf16(float_to_bf16_bits(m[i][2 * j] * rstd),
+                        float_to_bf16_bits(m[i][2 * j + 1] * rstd));
+    *reinterpret_cast<uint4*>(y + row + e0) = make_uint4(yp[0], yp[1], yp[2], yp[3]);
+  }
+}
+
 void check_shape(int rows, int dim, const char* who) {
   if (dim <= 0 || dim % kVecElems != 0 || dim > kDoryNormMaxDim)
     throw std::invalid_argument(std::string(who) + ": dim must be a multiple of 8 up to 8192");
@@ -241,6 +360,35 @@ void dory_slerp_alpha_bf16(const uint16_t* a, const uint16_t* b, const uint16_t*
   if (!aligned16(a) || !aligned16(b) || !aligned16(alpha) || !aligned16(y))
     throw std::invalid_argument("dory_slerp_alpha: rows must be 16-byte aligned");
   slerp_alpha_kernel<<<rows, kThreads, 0, stream>>>(a, b, alpha, scale, y, dim, eps);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void dory_gate_justnorm_bf16(const uint16_t* attn, const uint16_t* gate, const uint16_t* s_gate,
+                             float s_gate_factor, uint16_t* y, int rows, int dim, float eps,
+                             cudaStream_t stream) {
+  if (rows <= 0) return;
+  if (!attn || !gate || !s_gate || !y)
+    throw std::invalid_argument("dory_gate_justnorm: null buffer");
+  check_shape(rows, dim, "dory_gate_justnorm");
+  if (!aligned16(attn) || !aligned16(gate) || !aligned16(s_gate) || !aligned16(y))
+    throw std::invalid_argument("dory_gate_justnorm: rows must be 16-byte aligned");
+  gate_justnorm_kernel<<<rows, kThreads, 0, stream>>>(attn, gate, s_gate, s_gate_factor, y, dim,
+                                                      eps);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void dory_silu_justnorm_bf16(const uint16_t* g_in, const uint16_t* u_in, const uint16_t* suv_gate,
+                             const uint16_t* suv_up, float suv_factor, uint16_t* y, int rows,
+                             int dim, float eps, cudaStream_t stream) {
+  if (rows <= 0) return;
+  if (!g_in || !u_in || !suv_gate || !suv_up || !y)
+    throw std::invalid_argument("dory_silu_justnorm: null buffer");
+  check_shape(rows, dim, "dory_silu_justnorm");
+  if (!aligned16(g_in) || !aligned16(u_in) || !aligned16(suv_gate) || !aligned16(suv_up) ||
+      !aligned16(y))
+    throw std::invalid_argument("dory_silu_justnorm: rows must be 16-byte aligned");
+  silu_justnorm_kernel<<<rows, kThreads, 0, stream>>>(g_in, u_in, suv_gate, suv_up, suv_factor, y,
+                                                      dim, eps);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
