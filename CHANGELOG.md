@@ -16,7 +16,8 @@ project procedures and design guidance live in `docs/`.
   `dense_weights: "fp8"` with the tensor-core head (`fp8_head: "mma"`), as the
   sibling NVFP4/QAD templates do. It also takes the fp8 K/V pool
   (`kv_dtype: "fp8"`, `prefill_attention: "fp8"`): the 262144-token pool
-  halves from 6.70 to 3.50 GiB, and interleaved against the bf16 cache on one
+  halves from 6.70 to 3.50 GiB (the one-Spark pool sized to two full contexts,
+  `kv_capacity: 524288` = 7.00 GiB), and interleaved against the bf16 cache on one
   Spark the prefill at 4–8K depth runs 1459–1469 t/s against 1141–1260 while
   decode is unchanged; the resident image's key and layout do not change, so
   no re-expansion is needed. See

@@ -3,7 +3,7 @@
   "world_size": 1,
   "engine": {
     "max_concurrency": 4,
-    "kv_capacity": 262144,
+    "kv_capacity": 524288,
     "kv_dtype": "fp8",
     "bf16_weights": "bf12+bf16",
     "ngram_table": "mmap",

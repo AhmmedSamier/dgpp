@@ -33,7 +33,8 @@ the documented knob (`--dense-weights checkpoint --fp8-head gemv`).
 
 The template also takes the fp8 K/V pool (`engine.kv_dtype: "fp8"` with
 `engine.prefill_attention: "fp8"`): the Full layers' 262144-token cache
-halves from 6.70 to 3.50 GiB, and an interleaved A/B against the bf16 cache
+halves from 6.70 to 3.50 GiB (the one-Spark pool sized to two full contexts,
+`kv_capacity: 524288` = 7.00 GiB), and an interleaved A/B against the bf16 cache
 on one Spark measured 1459–1469 t/s prefill at 4–8K depth against 1141–1260,
 decode unchanged. The loader is the `qwen` family, whose image key folds its
 own `loader_format` (not the `qwen35` family's bump to 6), so the resident
