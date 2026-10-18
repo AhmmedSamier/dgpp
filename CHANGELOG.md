@@ -5,6 +5,22 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **The benchmark method of record, and one command per deployment**
+  (2026-10-18). `docs/benchmarks.md` now defines what a deployment's row
+  set contains, the validity checks and how results are reported: decode
+  and prefill as independent attributes, decode tokens/s by concurrency
+  (the engine's decode steps only) as the throughput figure, cold prefill
+  in seconds, the wall rate (prefill and queueing included) only as the
+  labelled service-level table — the C2/C4/C8 columns had reported wall
+  rates alone since the original campaign while every run recorded the
+  decode rate. The serving table's concurrency columns are now the decode
+  rate with cold prefill beside it, and the wall rates sit in a table of
+  their own; rows measured earlier read — at C2–C8 until re-measured (the
+  earlier raw records are gone). `scripts/serve_campaign.py run --config <template>` runs the
+  whole set for one template and `rows` prints the doc's cells.
+  `timed_load.py` prints the decode-only
+  per-class table before `serve_load.py`'s wall table. `AGENTS.md` carries
+  the rules.
 - **The fp8 K/V pool on every Qwen3.5 release, and the Qwen3.8-27B FP8
   templates take it with the fp8 attention** (2026-10-18). `engine.kv_dtype:
   "fp8"` needed a release that ships its `kv_cache_scheme` scales (the
