@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "../common/temp_dir.hpp"
 #include "common/test.hpp"
 #include "loaders/architecture.hpp"
 #include "loaders/minijson.hpp"
@@ -199,8 +200,8 @@ DGPP_TEST(qwen35_config_from_json_file_fills_vision_when_present) {
       "num_heads": 16, "num_position_embeddings": 2304,
       "out_hidden_size": 5120, "patch_size": 16,
       "spatial_merge_size": 2, "temporal_patch_size": 2}})";
-  const auto dir = std::filesystem::temp_directory_path() / "dgpp_qwen35_vision_test";
-  std::filesystem::create_directories(dir);
+  const dgpp::test::TempDir fixture("dgpp_qwen35_vision_test");
+  const auto& dir = fixture.path();
   const auto path = dir / "config.json";
   {
     std::ofstream out(path);

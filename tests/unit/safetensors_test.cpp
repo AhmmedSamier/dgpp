@@ -1,17 +1,17 @@
+#include "loaders/safetensors.hpp"
+
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 
+#include "../common/temp_dir.hpp"
 #include "common/test.hpp"
-#include "loaders/safetensors.hpp"
 
 namespace {
 namespace fs = std::filesystem;
 
 // Builds a tiny safetensors file with one F32, one BF16, one F8_E4M3 tensor.
-fs::path make_fixture() {
-  fs::path dir = fs::temp_directory_path() / "dgpp_st_test";
-  fs::create_directories(dir);
+fs::path make_fixture(const fs::path& dir) {
   fs::path file = dir / "fixture.safetensors";
 
   const char* header =
@@ -40,7 +40,8 @@ fs::path make_fixture() {
 }  // namespace
 
 DGPP_TEST(safetensors_mmap_reader_roundtrip) {
-  fs::path p = make_fixture();
+  const dgpp::test::TempDir fixture("dgpp_st_test");
+  fs::path p = make_fixture(fixture.path());
   auto sf = dgpp::SafetensorsFile::open(p.string());
 
   const dgpp::TensorInfo* a = sf->find("a_f32");
