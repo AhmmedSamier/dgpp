@@ -462,6 +462,11 @@ std::string encode_journal_settings(const WorldSettings& s) {
   append_json_string(&out, s.mtp_head);
   out += ",\"attw\":";
   append_json_string(&out, s.attention_weights);
+  // The DeepSeek-V4.1 index budget: absent when the checkpoint's (a record
+  // from a plain run carries no key; an older peer decodes it to 0).
+  if (s.index_topk > 0) out += std::format(",\"itopk\":{}", s.index_topk);
+  if (s.candidate_topk_blocks > 0) out += std::format(",\"ctb\":{}", s.candidate_topk_blocks);
+  if (s.candidate_block_size > 0) out += std::format(",\"cbs\":{}", s.candidate_block_size);
   out += std::format(",\"mss\":{},\"msrow\":{:.17g},\"msbase\":{:.17g},\"mslam\":{:.17g},\"msmin\":{},\"msad\":{},"
                      "\"msss\":{:.17g}",
                      s.mtp_schedule ? 1 : 0, s.mtp_schedule_row_ms, s.mtp_schedule_base_ms,
@@ -739,6 +744,17 @@ JournalRecord decode_journal_line(std::string_view line) {
     // Records before 2026-10-09 carry no draft-head form: the checkpoint's.
     if (const dgpp::minijson::Value* mh = v.find("mtph")) s.mtp_head = std::string(mh->as_string());
     if (const dgpp::minijson::Value* aw = v.find("attw")) s.attention_weights = std::string(aw->as_string());
+    // Records before 2026-10-18 carry no index budget: the checkpoint's.
+    const auto budget = [&](const char* key, int hi) {
+      const dgpp::minijson::Value* b = v.find(key);
+      if (!b) return 0;
+      if (!b->is_number() || b->as_int() < 1 || b->as_int() > hi)
+        throw std::runtime_error(std::string("journal: settings record with a bad index budget ") + key);
+      return static_cast<int>(b->as_int());
+    };
+    s.index_topk = budget("itopk", 2048);
+    s.candidate_topk_blocks = budget("ctb", 2048);
+    s.candidate_block_size = budget("cbs", 1024);
     // Records before 2026-09-14 carry no scheduled verify depth: off.
     if (const dgpp::minijson::Value* mss = v.find("mss")) {
       s.mtp_schedule = mss->as_int() != 0;

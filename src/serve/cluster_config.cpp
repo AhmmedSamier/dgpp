@@ -203,6 +203,15 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           if (e.embed_sharding != "replicated" && e.embed_sharding != "vocab")
             fail(what, "'" + ek + "' must be \"replicated\" or \"vocab\"");
         }
+        else if (p.key == "index_topk" || p.key == "candidate_topk_blocks") {
+          // The DeepSeek-V4.1 index budget: 0 = the checkpoint's, else a
+          // power of two the select networks serve (<= 2048).
+          const int value = static_cast<int>(integer(x, ek, what, 0, 2048));
+          if (value != 0 && (value & (value - 1)) != 0)
+            fail(what, "'" + ek + "' must be 0 (the checkpoint's) or a power of two <= 2048");
+          (p.key == "index_topk" ? e.index_topk : e.candidate_topk_blocks) = value;
+        }
+        else if (p.key == "candidate_block_size") e.candidate_block_size = static_cast<int>(integer(x, ek, what, 0, 1024));
         else if (p.key == "attention_weights") {
           e.attention_weights = text(x, ek, what);
           if (e.attention_weights != "checkpoint" && e.attention_weights != "int4")

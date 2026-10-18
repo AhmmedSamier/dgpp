@@ -376,6 +376,26 @@ templates retain BF16 cache storage and arithmetic by default. See
 kernel timings and full-checkpoint smoke comparison; these do not establish
 end-to-end serving gains or accuracy across workloads.
 
+### DeepSeek-V4.1 index budget
+
+On every compressed-KV layer DeepSeek-V4.1-Flash attends only the entries
+its indexer selects: `index_topk` of them per query, chosen on the reindex
+layers from a candidate pool of `candidate_topk_blocks` blocks of
+`candidate_block_size` entries that the candidate layer scores once per
+query. The checkpoint ships 512 entries out of a 2048 × 8 pool. These keys
+replace those values for a deployment; every rank applies the same budget
+(the config digest and the settings record carry it). A wider budget shows
+each query more of its context — the lever against a sparse attention
+missing what a long input holds — and changes the model's answers, not only
+its speed: the released weights were trained at 512. The DeepSeek-V4.1 family
+alone takes these keys; other families refuse them.
+
+| Key | What it controls and what to expect | Default |
+|---|---|---|
+| `engine.index_topk` | Compressed-KV entries each query attends on a compressing layer: a power of two up to 2048, the select networks' bound. Above the checkpoint's value every query reads more cache rows and the selection ranks a wider list; below the visible entry count (short prompts) nothing changes. Measured on DeepSeek-V4.1-Flash-1017 at 2048 against 512 (2026-10-18, four nodes, the same binary): short-context decode level, cold prefill 9 % (2K) to 48 % (32K) longer, decode at 32K–512K of context 3–8 % slower per pass, quality unchanged; the 1017 template ships the checkpoint's 512. | 0: the checkpoint's (512) |
+| `engine.candidate_topk_blocks` | Blocks the candidate layer keeps per query for the reindex layers to select among: a power of two up to 2048. Blocks × block size must hold at least `index_topk` entries. | 0: the checkpoint's (2048) |
+| `engine.candidate_block_size` | Entries per candidate block, 1 to 1024. Scored as a block (its maximum), kept or dropped whole. | 0: the checkpoint's (8) |
+
 ### Speculative decoding
 
 Native multi-token prediction (MTP) uses the model's draft layers. DFlash2

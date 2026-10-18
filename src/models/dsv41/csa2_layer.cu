@@ -26,8 +26,10 @@ void Csa2Config::validate(const Csa2Config& c) {
   if (c.local_heads() < 4 || (c.local_heads() & (c.local_heads() - 1)) != 0)
     fail("local heads must be a power of two >= 4 (the attention head-group tiling)");
   if (c.index_heads != 32) fail("the selection kernels pin 32 index heads");
-  if (c.index_topk <= 0 || (c.index_topk & (c.index_topk - 1)) != 0 || c.index_topk > 1024)
-    fail("index_topk must be a power of two <= 1024");
+  // The select networks' bound (kernels/topk_select.cuh): the release's 512,
+  // or the 2048 a deployment widens the index budget to (engine.index_topk).
+  if (c.index_topk <= 0 || (c.index_topk & (c.index_topk - 1)) != 0 || c.index_topk > kDsaSelectMaxK)
+    fail("index_topk must be a power of two <= 2048 (the select networks)");
   if (c.candidate_block <= 0 || c.candidate_blocks <= 0 || c.candidate_blocks > kCsa2CandidateMaxBlocks ||
       (c.candidate_blocks & (c.candidate_blocks - 1)) != 0)
     fail("candidate_blocks must be a power of two <= 2048");

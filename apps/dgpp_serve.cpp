@@ -703,9 +703,24 @@ struct Dsv41Family final : ServeFamily {
   std::string ckpt;
   std::vector<int64_t> eos;
   std::unique_ptr<dgpp::Dsv41Model> model;
-  explicit Dsv41Family(const std::string& checkpoint)
+  Dsv41Family(const std::string& checkpoint, int index_topk, int candidate_topk_blocks, int candidate_block_size)
       : cfg(dgpp::Dsv41TextConfig::from_json_file((fs::path(checkpoint) / "config.json").string())),
-        ckpt(checkpoint), eos{cfg.eos_token_id} {}
+        ckpt(checkpoint), eos{cfg.eos_token_id} {
+    // The deployment's index budget (engine.index_topk / candidate_topk_blocks /
+    // candidate_block_size, 2026-10-18) replaces the checkpoint's before the
+    // memory plan, the layer shapes and the model read the config. Every
+    // rank applies the same values (the config digest and the settings
+    // record carry them): the selected entries must agree across the world.
+    const int shipped_topk = cfg.index_topk, shipped_blocks = cfg.candidate_topk_blocks,
+              shipped_block = cfg.candidate_block_size;
+    cfg.apply_index_budget(index_topk, candidate_topk_blocks, candidate_block_size);
+    if (cfg.index_topk != shipped_topk || cfg.candidate_topk_blocks != shipped_blocks ||
+        cfg.candidate_block_size != shipped_block)
+      DGPP_LOG_INFO("dsv41: index budget {} entries per query from a candidate pool of {} blocks x {} (the "
+                    "checkpoint's {} from {} x {}; engine.index_topk / candidate_topk_blocks / candidate_block_size)",
+                    cfg.index_topk, cfg.candidate_topk_blocks, cfg.candidate_block_size, shipped_topk,
+                    shipped_blocks, shipped_block);
+  }
   const char* name() const override { return "deepseek_v41"; }
   int64_t vocab_size() const override { return cfg.vocab_size; }
   const std::vector<int64_t>& eos_token_ids() const override { return eos; }
@@ -1035,10 +1050,18 @@ struct Qwen35Family final : ServeFamily {
 std::unique_ptr<ServeFamily> make_family(const std::string& ckpt, int world,
                                          dgpp::LatentFormat kv_format,
                                          const std::optional<dgpp::RopeScaling>& rope_scaling,
-                                         bool fp8_head_mma) {
+                                         bool fp8_head_mma, int index_topk, int candidate_topk_blocks,
+                                         int candidate_block_size) {
   const dgpp::ModelArchitecture arch =
       dgpp::detect_architecture_file((fs::path(ckpt) / "config.json").string());
-  if (arch == dgpp::ModelArchitecture::DeepseekV41) return std::make_unique<Dsv41Family>(ckpt);
+  if (arch == dgpp::ModelArchitecture::DeepseekV41)
+    return std::make_unique<Dsv41Family>(ckpt, index_topk, candidate_topk_blocks, candidate_block_size);
+  // The index budget is the DeepSeek-V4.1 indexer's: no other family has a
+  // configurable selection, so a key that names one is a misconfiguration.
+  if (index_topk > 0 || candidate_topk_blocks > 0 || candidate_block_size > 0)
+    throw std::invalid_argument(
+        "engine.index_topk, engine.candidate_topk_blocks and engine.candidate_block_size are the DeepSeek-V4.1 "
+        "(deepseek_v41) indexer's budget; this checkpoint's family has no configurable selection budget");
   if (arch == dgpp::ModelArchitecture::DeepseekV4) return std::make_unique<Dsv4Family>(ckpt);
   if (arch == dgpp::ModelArchitecture::MimoV2) return std::make_unique<MimoFamily>(ckpt, kv_format);
   if (arch == dgpp::ModelArchitecture::Qwen4Exp)
@@ -1571,6 +1594,9 @@ int main(int argc, char** argv) {
   std::string embed_sharding = "replicated";  // the full GLM-5.3's embedding: replicated | vocab
   std::string mtp_head = "checkpoint";        // the full GLM-5.3 draft head: checkpoint | fp8
   std::string attention_weights = "checkpoint";  // the full GLM-5.3 attention projections: checkpoint | int4
+  // The DeepSeek-V4.1 index budget (engine.index_topk / candidate_topk_blocks /
+  // candidate_block_size): 0 = the checkpoint's.
+  int index_topk = 0, candidate_topk_blocks = 0, candidate_block_size = 0;
   int max_concurrency = 8, queue_limit = 64, default_max_tokens = 256, admission_gather_ms = 3;
   dgpp::serve::FileInputConfig file_inputs;
   bool compact_batches = true;
@@ -1695,6 +1721,9 @@ int main(int argc, char** argv) {
     embed_sharding = e.embed_sharding;
     mtp_head = e.mtp_head;
     attention_weights = e.attention_weights;
+    index_topk = e.index_topk;
+    candidate_topk_blocks = e.candidate_topk_blocks;
+    candidate_block_size = e.candidate_block_size;
     default_max_tokens = e.default_max_tokens;
     file_inputs = e.file_inputs;
     queue_limit = e.queue_limit;
@@ -2052,7 +2081,7 @@ int main(int argc, char** argv) {
         graph_batch_min_live == 0 ? std::min(2, max_concurrency) : graph_batch_min_live;
     return std::format(
         "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} pfattn={} dcattn={} ngt={} dw={} mtpef={} bfw={} "
-        "fp8head={} dh={} dhb={} mtph={} attw={} pf={} "
+        "fp8head={} dh={} dhb={} mtph={} attw={} itopk={} ctb={} cbs={} pf={} "
         "emsh={} maxtok={} queue={} "
         "eos={} graph={} compact={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} "
         "msad={} msss={} mdr={} mdt={} mvf={} dbr={} "
@@ -2064,7 +2093,8 @@ int main(int argc, char** argv) {
         kv_capacity, kv_dtype, prefill_attention, decode_attention, ngram_table, dense_weights, mtp_expert_format, bf16_weights, fp8_head,
         draft_head,
         draft_head_blocks, mtp_head,
-        attention_weights, prefill, embed_sharding, default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0,
+        attention_weights, index_topk, candidate_topk_blocks, candidate_block_size, prefill, embed_sharding,
+        default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0,
         compact_batches ? 1 : 0, mtp ? 1 : 0, mtp_depth, mtp_schedule ? 1 : 0, mtp_schedule_row_ms,
         mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth,
         mtp_schedule_adapt ? 1 : 0, mtp_schedule_sampled_scale, mtp_draft, mtp_draft_temperature,
@@ -2146,6 +2176,9 @@ int main(int argc, char** argv) {
         ws.embed_sharding = embed_sharding;
         ws.mtp_head = mtp_head;
         ws.attention_weights = attention_weights;
+        ws.index_topk = index_topk;
+        ws.candidate_topk_blocks = candidate_topk_blocks;
+        ws.candidate_block_size = candidate_block_size;
         ws.default_max_tokens = default_max_tokens;
         ws.queue_limit = queue_limit;
         ws.no_eos = no_eos;
@@ -2245,6 +2278,9 @@ int main(int argc, char** argv) {
         embed_sharding = ws.embed_sharding;
         mtp_head = ws.mtp_head;
         attention_weights = ws.attention_weights;
+        index_topk = ws.index_topk;
+        candidate_topk_blocks = ws.candidate_topk_blocks;
+        candidate_block_size = ws.candidate_block_size;
         default_max_tokens = ws.default_max_tokens;
         queue_limit = ws.queue_limit;
         no_eos = ws.no_eos;
@@ -2667,7 +2703,8 @@ int main(int argc, char** argv) {
     // The family from config.json's architecture (loaders/architecture.hpp):
     // everything below the engine interface comes from it.
     std::unique_ptr<ServeFamily> family =
-        make_family(ckpt, world, kv_format, rope_scaling, fp8_head == "mma");
+        make_family(ckpt, world, kv_format, rope_scaling, fp8_head == "mma", index_topk, candidate_topk_blocks,
+                    candidate_block_size);
     if (!dflash_dir.empty()) {
       try {
         family->set_draft_model(dflash_dir);

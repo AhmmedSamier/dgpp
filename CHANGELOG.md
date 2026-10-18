@@ -5,6 +5,29 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **DeepSeek-V4.1-Flash-1017, and the indexer budget as deployment keys**
+  (2026-10-18). The 1017 refinement (`deepseek-ai/DeepSeek-V4.1-Flash-1017`)
+  ships V4.1-Flash's config, tokenizer and tensor layout byte for byte with
+  every shard's weights re-trained; the `deepseek_v41` family serves it as
+  shipped from `deploy/cluster_deepseek-v4.1-flash-1017_mxfp4-fp8_w4.example.json`.
+  Three engine keys replace the checkpoint's indexer budget for a
+  deployment — `engine.index_topk` (the compressed entries a query attends
+  per layer; the release's 512, the select networks' 2048), `engine.candidate_topk_blocks`
+  and `engine.candidate_block_size` (the candidate pool's shape, 2048 × 8 as
+  shipped) — carried by the config digest and the settings record, refused
+  by every other family. Measured on the 1017 template on four nodes at
+  2048 against the checkpoint's 512 on the same binary: short-context
+  decode level, decode at 32K–512K of context 3–8 % slower per pass, cold
+  prefill 9 % (2K) to 48 % (32K) longer, quality unchanged — the template
+  ships 512 and carries the key; the 512 row set is in `docs/benchmarks.md`,
+  both budgets in the model card. The CSA2 selectors now serve 2048 (the prefill
+  rows select on a 4096-key tile; the decode radix select has no tile),
+  checked against the host oracles at the widened budget. The resident
+  image cache keeps a weight-identity note beside each image: its key reads
+  config.json and the shard headers, which 1017 re-ships byte for byte, so a
+  boot of 1017 beside a V4.1-Flash image would have restored the old
+  weights; an image without the note adopts the checkpoint it opens with, an
+  image whose note disagrees is discarded and rebuilt.
 - **The benchmark method of record, and one command per deployment**
   (2026-10-18). `docs/benchmarks.md` now defines what a deployment's row
   set contains, the validity checks and how results are reported: decode

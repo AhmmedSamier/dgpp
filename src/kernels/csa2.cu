@@ -680,6 +680,9 @@ struct RowKeyFn {
     return make_key(logits[e], e);
   }
 };
+// TILE: the streaming tile (kSelectTile for select_k <= 1024, kCandTile for
+// the 2048 of a widened index budget — the same network, twice the smem).
+template <int TILE>
 __global__ void select_rows_prefill_kernel(const float* logits, int64_t logits_stride,
                                            const int64_t* pos_sel, int select_k, const int32_t* cand,
                                            int cand_stride, const int32_t* cand_counts, int block_size,
@@ -688,8 +691,8 @@ __global__ void select_rows_prefill_kernel(const float* logits, int64_t logits_s
   uint32_t* best_hi = reinterpret_cast<uint32_t*>(smem_raw);
   uint32_t* best_lo = best_hi + select_k;
   uint32_t* tile_hi = best_lo + select_k;
-  uint32_t* tile_lo = tile_hi + kSelectTile;
-  int32_t* scratch = reinterpret_cast<int32_t*>(tile_lo + kSelectTile);
+  uint32_t* tile_lo = tile_hi + TILE;
+  int32_t* scratch = reinterpret_cast<int32_t*>(tile_lo + TILE);
   __shared__ int smem_count;
   const int r = blockIdx.x;
   const int64_t p = pos_sel[r];
@@ -708,7 +711,7 @@ __global__ void select_rows_prefill_kernel(const float* logits, int64_t logits_s
   const int64_t n = cand ? pool_size(n_blocks, block_size, p + 1) : p + 1;
   RowKeyFn fn{logits + int64_t(r) * logits_stride, cand ? cand + int64_t(r) * cand_stride : nullptr, n_blocks,
               block_size, p};
-  if (n > 0) select_topk_stream<kSelectTile>(fn, 0, n, best_hi, best_lo, tile_hi, tile_lo, select_k);
+  if (n > 0) select_topk_stream<TILE>(fn, 0, n, best_hi, best_lo, tile_hi, tile_lo, select_k);
   const int cnt = expand_from_best(best_hi, best_lo, select_k, p, 1, select_k, out, scratch, &smem_count);
   if (threadIdx.x == 0) counts[r] = cnt;
 }
@@ -855,8 +858,11 @@ __global__ void attn_finish_kernel(const float* m_main, const float* l_main, con
 }
 
 int g_csa2_smem_cap = -1;
+// The rows select's tile: kSelectTile serves select_k <= 1024 (the release's
+// 512), kCandTile the 2048 a deployment may widen the index budget to.
+int rows_tile(int select_k) { return select_k > kSelectTile / 2 ? kCandTile : kSelectTile; }
 size_t rows_smem(int select_k) {
-  return size_t(select_k) * 8 + size_t(kSelectTile) * 8 + size_t(select_k) * 4;
+  return size_t(select_k) * 8 + size_t(rows_tile(select_k)) * 8 + size_t(select_k) * 4;
 }
 size_t cand_prefill_smem(int topk_blocks) {
   return size_t(topk_blocks) * 8 + size_t(kCandTile) * 8 + size_t(topk_blocks) * 4;
@@ -869,7 +875,9 @@ void csa2_prepare_kernel_smem() {
   int cap = 0;
   DGPP_CUDA_OK(cudaDeviceGetAttribute(&cap, cudaDevAttrMaxSharedMemoryPerBlockOptin, 0));
   g_csa2_smem_cap = cap - 1024;
-  DGPP_CUDA_OK(cudaFuncSetAttribute(select_rows_prefill_kernel,
+  DGPP_CUDA_OK(cudaFuncSetAttribute(select_rows_prefill_kernel<kSelectTile>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize, g_csa2_smem_cap));
+  DGPP_CUDA_OK(cudaFuncSetAttribute(select_rows_prefill_kernel<kCandTile>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize, g_csa2_smem_cap));
   DGPP_CUDA_OK(cudaFuncSetAttribute(select_candidates_prefill_kernel,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize, g_csa2_smem_cap));
@@ -1067,8 +1075,9 @@ void csa2_select_listed_decode(const void* q_fp8, const float* w_folded, const i
                                int block_size, int select_k, uint64_t* keys_ws, int64_t max_entries,
                                int32_t* topk_out, int32_t* counts, cudaStream_t stream) {
   if (rows <= 0) return;
+  // The radix path has no streaming tile: the expansion (eight rounds of
+  // the 256-thread block) bounds select_k at kSelectMaxK, checked above.
   check_select_common(heads, select_k, "csa2_select_listed_decode");
-  if (select_k > kSelectTile / 2) throw std::invalid_argument("csa2_select_listed_decode: select_k <= 1024");
   if (cand != nullptr && (cand_counts == nullptr || cand_stride <= 0 || block_size <= 0))
     throw std::invalid_argument("csa2_select_listed_decode: a candidate pool needs its counts, stride and block size");
   if (entries_per_block <= 0 || blocks_per_request <= 0 || keys_ws == nullptr)
@@ -1102,12 +1111,15 @@ void csa2_select_rows_prefill(const float* logits, int64_t logits_stride, const 
                               int block_size, int32_t* topk_out, int32_t* counts, cudaStream_t stream) {
   if (rows <= 0) return;
   check_select_common(32, select_k, "csa2_select_rows_prefill");
-  if (select_k > kSelectTile / 2) throw std::invalid_argument("csa2_select_rows_prefill: select_k <= 1024");
   if (cand != nullptr && (cand_counts == nullptr || cand_stride <= 0 || block_size <= 0))
     throw std::invalid_argument("csa2_select_rows_prefill: a candidate pool needs its counts, stride and block size");
   csa2_prepare_kernel_smem();
-  select_rows_prefill_kernel<<<unsigned(rows), kCsa2Threads, rows_smem(select_k), stream>>>(
-      logits, logits_stride, pos_sel, select_k, cand, cand_stride, cand_counts, block_size, topk_out, counts);
+  if (rows_tile(select_k) == kCandTile)
+    select_rows_prefill_kernel<kCandTile><<<unsigned(rows), kCsa2Threads, rows_smem(select_k), stream>>>(
+        logits, logits_stride, pos_sel, select_k, cand, cand_stride, cand_counts, block_size, topk_out, counts);
+  else
+    select_rows_prefill_kernel<kSelectTile><<<unsigned(rows), kCsa2Threads, rows_smem(select_k), stream>>>(
+        logits, logits_stride, pos_sel, select_k, cand, cand_stride, cand_counts, block_size, topk_out, counts);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 void csa2_select_candidates_prefill(const float* logits, int64_t logits_stride, const int64_t* pos_sel,

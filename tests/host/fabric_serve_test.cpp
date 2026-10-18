@@ -529,6 +529,12 @@ void test_journal_codec() {
     ws.bf16_weights = "bf12";
     ws.compact_batches = true;
     ws.fp8_head = "mma";
+    // The DeepSeek-V4.1 index budget rides the record too (2026-10-18): a
+    // peer selecting 512 entries beside a head selecting 2048 would attend
+    // different context.
+    ws.index_topk = 2048;
+    ws.candidate_topk_blocks = 1024;
+    ws.candidate_block_size = 16;
     // The opt-in rope knob rides the record: a peer that ran without it
     // would rope at different frequencies from rank 0 — silently
     // divergent text, the reason the settings record exists at all.
@@ -548,6 +554,25 @@ void test_journal_codec() {
       legacy.erase(at, key.size());
       require(dgpp::serve::decode_journal_line(legacy).world_settings.decode_attention == "bf16",
               "codec: legacy settings keep BF16 decode arithmetic");
+      // A record without the index budget keys (every run before 2026-10-18,
+      // and every run at the checkpoint's budget) decodes to 0: the checkpoint's.
+      for (const char* key : {",\"itopk\":2048", ",\"ctb\":1024", ",\"cbs\":16"}) {
+        const size_t where = legacy.find(key);
+        require(where != std::string::npos, "codec: the index budget is encoded");
+        legacy.erase(where, std::string(key).size());
+      }
+      const auto plain_budget = dgpp::serve::decode_journal_line(legacy).world_settings;
+      require(plain_budget.index_topk == 0 && plain_budget.candidate_topk_blocks == 0 &&
+                  plain_budget.candidate_block_size == 0,
+              "codec: legacy settings keep the checkpoint's index budget");
+      {
+        auto wide = ws;
+        wide.index_topk = 4096;
+        bool refused = false;
+        try { (void)dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_settings(wide)); }
+        catch (const std::runtime_error&) { refused = true; }
+        require(refused, "codec: an index budget past the select networks is rejected");
+      }
       auto invalid = ws;
       invalid.decode_attention = "fp4";
       bool rejected = false;

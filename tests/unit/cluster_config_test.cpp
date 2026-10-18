@@ -228,6 +228,14 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
                        (on.engine.prefill_fp8_gemm ? 1 : 0) + (on.engine.prefill_fp8_per_tensor ? 1 : 0);
     require(got && others == 1, "engine." + key + " opt-in alone");
   }
+  // The DeepSeek-V4.1 index budget (2026-10-18): 0 (the checkpoint's) unless the config says.
+  require(c.engine.index_topk == 0 && c.engine.candidate_topk_blocks == 0 && c.engine.candidate_block_size == 0,
+          "the index budget defaults to the checkpoint's");
+  const auto ib = dgpp::serve::parse_cluster_config(
+      R"({"model":"m","nodes":["h"],"engine":{"index_topk":2048,"candidate_topk_blocks":1024,"candidate_block_size":16}})",
+      "t");
+  require(ib.engine.index_topk == 2048 && ib.engine.candidate_topk_blocks == 1024 && ib.engine.candidate_block_size == 16,
+          "the index budget keys parse");
   // The checkpoint's activation recipe (2026-10-15): "bf16" (the default chain) or "native".
   const auto na = dgpp::serve::parse_cluster_config(
       R"({"model":"m","nodes":["h"],"engine":{"prefill_activations":"native"}})", "t");
@@ -500,6 +508,14 @@ DGPP_TEST(cluster_config_refusesUnknownKeysAndBadValuesByName) {
        "'engine.draft_head' must be \"exact\" or \"screen\""},
       {R"({"model":"m","nodes":["h"],"engine":{"draft_head_blocks":0}})",
        "'engine.draft_head_blocks' must be in [1, 64]"},
+      {R"({"model":"m","nodes":["h"],"engine":{"index_topk":4096}})",
+       "'engine.index_topk' must be in [0, 2048]"},
+      {R"({"model":"m","nodes":["h"],"engine":{"index_topk":1000}})",
+       "'engine.index_topk' must be 0 (the checkpoint's) or a power of two <= 2048"},
+      {R"({"model":"m","nodes":["h"],"engine":{"candidate_topk_blocks":3}})",
+       "'engine.candidate_topk_blocks' must be 0 (the checkpoint's) or a power of two <= 2048"},
+      {R"({"model":"m","nodes":["h"],"engine":{"candidate_block_size":-1}})",
+       "'engine.candidate_block_size' must be in [0, 1024]"},
       {R"({"model":"m","nodes":["h"],"engine":{"bf16_weights":"fp8"}})",
        "'engine.bf16_weights' must be \"checkpoint\", \"bf12\" or \"bf12+bf16\""},
       {R"({"model":"m","nodes":["h"],"engine":{"bf16_weights":true}})",

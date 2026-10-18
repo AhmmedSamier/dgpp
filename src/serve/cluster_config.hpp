@@ -68,6 +68,16 @@ struct ClusterConfig {
     // distribution is unchanged; only the draft's proposals (acceptance)
     // can move. Other families ignore it.
     std::string mtp_head = "checkpoint";
+    // The DeepSeek-V4.1 indexer's budget (2026-10-18; the deepseek_v41
+    // family alone): how many compressed entries a query attends
+    // (index_topk; the release trained at 512, the select networks serve
+    // up to 2048) out of a candidate pool of candidate_topk_blocks blocks
+    // of candidate_block_size entries (2048 x 8 as shipped). 0 keeps the
+    // checkpoint's value. Widening the budget changes the model's output
+    // (more context visible to every query), not just its speed.
+    int index_topk = 0;
+    int candidate_topk_blocks = 0;
+    int candidate_block_size = 0;
     // The full GLM-5.3 attention projections' resident form (2026-10-09):
     // "checkpoint" as shipped (int8 g64); "int4" re-encoded to int4 g64 at
     // load (RTN) — −2.1 GB per MTP pass per rank, NOT lossless. Other

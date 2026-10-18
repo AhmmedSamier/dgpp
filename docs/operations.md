@@ -95,6 +95,7 @@ its node.
 | `cluster_glm-5.3_nf4i8_w4.example.json` | the full GLM-5.3 in the NF4I8 GPTQ H32 g128 checkpoint (codebook experts, int8 attention and shared expert), four nodes, MTP depth 1, eight request slots, 272K fp8 context, the embedding vocab-sharded |
 | `cluster_glm-5.3_mixed346_w4.example.json` | the full GLM-5.3 in the Mixed346 GPTQ H32 A8 g128 checkpoint (3/4/6-bit codebook experts with int8 activation codes, 116 int4 fallback experts, int8 attention and shared expert), four nodes, MTP depth 1, eight request slots, 272K fp8 context |
 | `cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json` | DeepSeek-V4.1-Flash as shipped, four nodes, six request slots, DSpark depth 4 with the scheduled verify depth, the bounded prefill, 128K context |
+| `cluster_deepseek-v4.1-flash-1017_mxfp4-fp8_w4.example.json` | DeepSeek-V4.1-Flash-1017 (the refined weights, the same architecture) as shipped, the V4.1-Flash shape; the indexer budget is a key (`engine.index_topk`, the checkpoint's 512 as shipped, 2048 priced in the card) |
 | `cluster_mimo-v2.6-flash_mxfp4-fp8_w{4,2}.example.json` | MiMo-V2.6-Flash as shipped (MXFP4 experts, fp8 dense, the BF16 matrices in their 12-bit form), four nodes with a 128K BF16 K/V pool or two nodes with a 256K K/V pool in the fp8 row form (`kv_dtype`), four request slots, MTP depth 1 |
 
 One template per model, quant and world (2026-09-14): the modes a template
@@ -1019,6 +1020,23 @@ before it through the ring. `exact` runs all forty layers over every row
 G5 record). The mode is part of the world's settings (the head pushes it,
 the config digest carries it); decode is the same in both.
 
+**The DeepSeek-V4.1 index budget** (`engine.index_topk`,
+`engine.candidate_topk_blocks`, `engine.candidate_block_size`; 0 = the
+checkpoint's, which is 512 entries per query out of a 2048 × 8 candidate
+pool) replaces the indexer's selection width for the `deepseek_v41` family
+alone: every compressing layer's attention reads exactly the entries the
+budget names, so a wider budget shows each query more of its context (the
+lever against the sparse attention's misses on long inputs) and changes the
+model's answers, not only its speed. The select networks serve up to 2048.
+The budget is part of the world's settings (the head pushes it, the config
+digest carries it); a key on any other family is refused at boot. The
+DeepSeek-V4.1-Flash-1017 template carries the key at the checkpoint's 512:
+measured at 2048 on 2026-10-18 on the same binary (the
+[card](model_cards/DeepSeek-V4.1-Flash-1017.md) has both budgets),
+short-context decode was level, cold prefill ran 9 % (2K) to 48 % (32K)
+longer and decode at 32K–512K of context 3–8 % slower per pass. The keys'
+documentation is in [configuration](configuration.md#deepseek-v41-index-budget).
+
 **The opt-in prefill levers** (`engine.prefill_bf16_partials`,
 `engine.prefill_fold_scales`, `engine.prefill_fp8_gemm`; `--prefill-bf16-partials`,
 `--prefill-fold-scales`, `--prefill-fp8-gemm`; each default off) trade the
@@ -1065,8 +1083,13 @@ The first start of a resident rank builds its layers from the checkpoint
 (slice, stage, dequantize, pack) and writes the finished device bytes to
 `~/.cache/dgpp/resident/<key>.img` on that node (~82 GiB per rank for GLM;
 the key covers the checkpoint's shard headers, `config.json`, world, rank,
-head sharding and the loader's format version, so a stale image can never
-load by accident). Every later start streams that image instead with
+head sharding and the loader's format version; a `payload` note beside it
+holds a fold of every shard's weight bytes, because a refined release can
+re-ship the same tensors in the same shards byte-identical in header and
+config — DeepSeek-V4.1-Flash-1017 against V4.1-Flash, 2026-10-18 — and an
+image whose note disagrees is discarded and rebuilt rather than restoring
+the other checkpoint's layers; an image from before the note adopts the
+checkpoint it next opens with). Every later start streams that image instead with
 O_DIRECT reads at the drive's line rate — 15-25 s to a ready model against
 ~4.5 minutes from the checkpoint. The boot digest is cached beside it
 (`<key>.digest`). Knobs:
