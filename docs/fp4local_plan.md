@@ -39,9 +39,12 @@ decode unchanged. The one-Spark pool is sized to four full contexts
 (`kv_capacity: 1048576` = 14.02 GiB; the plan totals 97.14 GiB and the boot
 leaves 1.92 GiB device free — this node's ceiling). `engine.rope_scaling`
 (YaRN, factor 4 over the checkpoint's 262144) lifts the positional ceiling to
-1048576 tokens at no pool cost — the cap moves, not the pool — so the
-four-context pool keeps seating four 262144-token requests while a single 1M
-request would take it whole. The loader is the `qwen`
+1048576 tokens. The K/V pool is untouched (14.02 GiB), but the QSA indexer's
+per-request scoring workspace scales with the ceiling (`max_pools =
+min(pool, ceiling) / indexer_compress_ratio`), so the layer objects grow from
+4.50 to 10.50 GiB and the plan totals 103.14 GiB (+6.00 GiB, about 91 % of the
+node). The four-context pool still seats four 262144-token requests while a
+single 1M request would take it whole. The loader is the `qwen`
 family, whose image key folds its own `loader_format` (not the `qwen35`
 family's bump to 6), so the resident image's key and layout are unchanged and
 adopting the pool needs no re-expansion. Quality is not yet measured on this

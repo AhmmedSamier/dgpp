@@ -23,9 +23,12 @@ project procedures and design guidance live in `docs/`.
   262144-token contexts (`kv_capacity: 1048576` = 14.02 GiB): the plan totals
   97.14 GiB and the boot leaves 1.92 GiB device free, the most this node
   holds. `engine.rope_scaling` lifts the positional ceiling to 1048576 tokens
-  (YaRN factor 4 over the checkpoint's 262144) at no pool cost: the cap moves,
-  not the pool, so four 262144-token requests still fit while a 1M request
-  would take the pool whole. See
+  (YaRN factor 4 over the checkpoint's 262144). The K/V pool is untouched
+  (14.02 GiB), but the QSA indexer's per-request workspace is sized by the
+  ceiling (`max_pools = min(pool, ceiling) / indexer_compress_ratio`), so the
+  layer objects grow from 4.50 to 10.50 GiB and the plan totals 103.14 GiB
+  (+6.00 GiB, about 91 % of the node's memory); four 262144-token requests
+  still fit while a 1M request would take the pool whole. See
   [docs/fp4local_plan.md](docs/fp4local_plan.md).
 - **The fp8 K/V pool on every Qwen3.5 release, and the Qwen3.8-27B FP8
   templates take it with the fp8 attention** (2026-10-18). `engine.kv_dtype:
