@@ -33,13 +33,15 @@ the documented knob (`--dense-weights checkpoint --fp8-head gemv`).
 
 The template also takes the fp8 K/V pool (`engine.kv_dtype: "fp8"` with
 `engine.prefill_attention: "fp8"`): the Full layers' 262144-token cache
-halves from 6.70 to 3.50 GiB (the one-Spark pool sized to two full contexts,
-`kv_capacity: 524288` = 7.00 GiB), and an interleaved A/B against the bf16 cache
+halves from 6.70 to 3.50 GiB, and an interleaved A/B against the bf16 cache
 on one Spark measured 1459–1469 t/s prefill at 4–8K depth against 1141–1260,
-decode unchanged. The loader is the `qwen` family, whose image key folds its
-own `loader_format` (not the `qwen35` family's bump to 6), so the resident
-image's key and layout are unchanged and adopting the pool needs no
-re-expansion. Quality is not yet measured on this export (2026-10-18).
+decode unchanged. The one-Spark pool is sized to four full contexts
+(`kv_capacity: 1048576` = 14.02 GiB; the plan totals 97.14 GiB and the boot
+leaves 1.92 GiB device free — this node's ceiling). The loader is the `qwen`
+family, whose image key folds its own `loader_format` (not the `qwen35`
+family's bump to 6), so the resident image's key and layout are unchanged and
+adopting the pool needs no re-expansion. Quality is not yet measured on this
+export (2026-10-18).
 
 ## The CSF seam (RESOLVED 2026-10-16)
 

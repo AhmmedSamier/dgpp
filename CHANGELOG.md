@@ -16,12 +16,13 @@ project procedures and design guidance live in `docs/`.
   `dense_weights: "fp8"` with the tensor-core head (`fp8_head: "mma"`), as the
   sibling NVFP4/QAD templates do. It also takes the fp8 K/V pool
   (`kv_dtype: "fp8"`, `prefill_attention: "fp8"`): the 262144-token pool
-  halves from 6.70 to 3.50 GiB (the one-Spark pool sized to two full contexts,
-  `kv_capacity: 524288` = 7.00 GiB), and interleaved against the bf16 cache on one
+  halves from 6.70 to 3.50 GiB, and interleaved against the bf16 cache on one
   Spark the prefill at 4–8K depth runs 1459–1469 t/s against 1141–1260 while
   decode is unchanged; the resident image's key and layout do not change, so
-  no re-expansion is needed. See
-  [docs/fp4local_plan.md](docs/fp4local_plan.md).
+  no re-expansion is needed. The one-Spark pool is sized to four full
+  262144-token contexts (`kv_capacity: 1048576` = 14.02 GiB): the plan totals
+  97.14 GiB and the boot leaves 1.92 GiB device free, the most this node
+  holds. See [docs/fp4local_plan.md](docs/fp4local_plan.md).
 - **The fp8 K/V pool on every Qwen3.5 release, and the Qwen3.8-27B FP8
   templates take it with the fp8 attention** (2026-10-18). `engine.kv_dtype:
   "fp8"` needed a release that ships its `kv_cache_scheme` scales (the

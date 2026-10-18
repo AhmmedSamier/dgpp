@@ -617,9 +617,9 @@ DGPP_TEST(cluster_config_the_fp4local_template_is_a_deployment_the_engine_reads)
   // draft at depth 3 with the screened head behind the lookup draft, the
   // BF16 remainder FP8 at load, the table mapped rather than resident, the
   // Full layers' K/V at fp8 with the fp8 prefill attention (half the bf16
-  // pool; interleaved on one Spark it measured 1459-1469 t/s prefill at 4-8K
-  // depth against 1141-1260 bf16, decode unchanged, 2026-10-18) — is what the
-  // file spells.
+  // pool, sized here to four full 262144-token contexts; interleaved on one
+  // Spark it measured 1459-1469 t/s prefill at 4-8K depth against 1141-1260
+  // bf16, decode unchanged, 2026-10-18) — is what the file spells.
   const std::string path = std::string(DGPP_SOURCE_DIR) +
                            "/deploy/cluster_qwen-3.8-flash-next-fp4local_w1.example.json";
   std::ifstream in(path);
