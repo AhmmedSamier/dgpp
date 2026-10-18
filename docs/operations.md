@@ -7,6 +7,46 @@ Other model templates use the same launcher with their own memory and
 engine settings. See the [configuration reference](configuration.md) for
 settings, defaults and their effects.
 
+## Host penalty preparation
+
+The default build retains context counting and penalty arithmetic in the host
+sampler. To omit that preparation when repetition is 1 and frequency/presence
+are positive zero, rebuild with the optional CMake setting:
+
+```sh
+cmake --preset release -DDGPP_HOST_NEUTRAL_PENALTY_SKIP=ON
+cmake --build --preset release -j 4
+```
+
+The option defaults to OFF. Reconfigure with `-DDGPP_HOST_NEUTRAL_PENALTY_SKIP=OFF`
+and rebuild to restore the original path; CMake retains an explicitly enabled
+value in its build-directory cache. Use the same build on every rank.
+
+This affects the full host sampler, eager greedy reporting and bus sampling
+fold. It guards before constructing context counts; logits copies, bias,
+grammar/EOS masks, selection, reports and RNG handling remain in place. Active
+penalties and negative-zero additive settings take the original path. The
+reference samplers and ordinary graph replay are unchanged; replay already
+avoids neutral penalty work. No end-to-end serving gain is established.
+
+The enabled shortcut's bit-equality contract is limited to non-NaN logits,
+round-to-nearest and gradual underflow (flush-to-zero and denormals-are-zero
+disabled). NaN handling, other rounding/underflow modes and floating-point
+exception flags or traps can differ because the arithmetic is omitted. The
+option does not check or change the floating-point environment. Leave it OFF
+when these conditions cannot be guaranteed, and validate the intended model
+and execution paths before enabling it in a deployment.
+
+`host_penalties_bench` reports median preparation and complete host-sampler
+times for deterministic synthetic logits/context, with active penalties as a
+control. Build that target with `DGPP_BUILD_BENCHMARKS=ON`, compare OFF and ON
+on the same idle host, and keep these measurements separate from serving rates:
+
+```sh
+cmake --build build-release --target host_penalties_bench -j 4
+build-release/host_penalties_bench
+```
+
 ## MiMo native MTP and prefill options
 
 MiMo defaults to upstream's recursive block-0 drafting. To use all three

@@ -2203,6 +2203,14 @@ requests needing penalties or logprobs use the reporting path while
 retaining canonical argmax selection. Eager/graph and host/device tests
 compare both results and reports.
 
+The default-off CMake option `DGPP_HOST_NEUTRAL_PENALTY_SKIP` omits context
+counting and penalty application in the full host sampler, eager greedy
+reporting and bus sampling fold when repetition is 1 and both additive
+penalties are positive zero. Other sampling stages and the reference samplers
+are unchanged. The enabled shortcut assumes non-NaN logits, round-to-nearest
+and gradual underflow; floating-point exception flags are not preserved.
+Active and negative-zero settings retain the original penalty arithmetic.
+
 `scripts/fabric_sampling_profile.py` evaluates candidate mass on
 teacher-forced texts; `scripts/serve_width_sweep.sh` measures fallback
 cost on served workloads. Diagnostic gathers are excluded from throughput

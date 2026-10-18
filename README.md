@@ -383,6 +383,11 @@ selected, `up` stages `build-release/dgpp-serve` to the peers. Use
 
 ## Configuration
 
+The default-off build option `DGPP_HOST_NEUTRAL_PENALTY_SKIP` removes neutral
+penalty preparation from selected host sampling paths. It requires an explicit
+rebuild and has a limited floating-point contract; see
+[host penalty preparation](docs/operations.md#host-penalty-preparation).
+
 Use the [configuration reference](docs/configuration.md) for site settings,
 deployment options, defaults and their effects on memory, response time and
 answer quality. It includes a [guide to choosing settings](docs/configuration.md#find-the-setting-you-need)

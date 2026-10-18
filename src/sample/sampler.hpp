@@ -199,6 +199,21 @@ inline void apply_penalties(float* logits, int n, int slice_begin,
 }
 
 // ---------------------------------------------------------------------------
+// Count only when the selected host path needs penalties. The optional
+// shortcut assumes non-NaN logits, round-to-nearest and gradual underflow;
+// it does not preserve floating-point exception flags. Negative-zero
+// settings keep the original arithmetic, including its signed-zero results.
+inline void apply_context_penalties(float* logits, int n, int slice_begin, const Params& p,
+                                    const std::vector<int32_t>& context_ids) {
+#if defined(DGPP_HOST_NEUTRAL_PENALTY_SKIP) && DGPP_HOST_NEUTRAL_PENALTY_SKIP
+  if (p.repetition_penalty == 1.0f && p.frequency_penalty == 0.0f && p.presence_penalty == 0.0f &&
+      !std::signbit(p.frequency_penalty) && !std::signbit(p.presence_penalty))
+    return;
+#endif
+  apply_penalties(logits, n, slice_begin, p, count_context(context_ids));
+}
+
+// ---------------------------------------------------------------------------
 // The token mask (M6 6g, constrained decoding)
 // ---------------------------------------------------------------------------
 
@@ -1262,7 +1277,7 @@ inline Result sample_full_logits(const float* logits, int vocab,
         "glm_sample: sample_full_logits is the stochastic path");
   validate_vocab_slices(layout, vocab);
   std::vector<float> v(logits, logits + vocab);
-  apply_penalties(v.data(), vocab, 0, p, count_context(context_ids));
+  apply_context_penalties(v.data(), vocab, 0, p, context_ids);
   apply_bias(v.data(), vocab, 0, bias);
   apply_mask(v.data(), vocab, 0, mask, vocab);
   const double lse = sharded_scaled_logsumexp(v.data(), layout, p.temperature);

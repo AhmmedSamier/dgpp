@@ -36,6 +36,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(DGPP_WERROR "Treat compiler warnings as errors" OFF)
 option(DGPP_BUILD_BENCHMARKS "Build platform, kernel and transport microbenchmarks" ON)
+option(DGPP_HOST_NEUTRAL_PENALTY_SKIP "Skip neutral penalty preparation in host sampling" OFF)
 set(DGPP_SANITIZE "" CACHE STRING "Host sanitizer (address or undefined)")
 set_property(CACHE DGPP_SANITIZE PROPERTY STRINGS "" address undefined)
 
@@ -58,6 +59,9 @@ option(DGPP_ENABLE_IBV "Build serving and RDMA targets (required even for the si
 
 add_library(dgpp_common INTERFACE)
 target_include_directories(dgpp_common INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(DGPP_HOST_NEUTRAL_PENALTY_SKIP)
+  target_compile_definitions(dgpp_common INTERFACE DGPP_HOST_NEUTRAL_PENALTY_SKIP=1)
+endif()
 
 find_package(CUDAToolkit 13 REQUIRED COMPONENTS cudart cublasLt)
 find_package(Threads REQUIRED)
@@ -2217,6 +2221,9 @@ if(DGPP_BUILD_BENCHMARKS)
     endif()
     dgpp_set_common(${target})
   endfunction()
+
+  dgpp_add_benchmark(host_penalties_bench
+    SOURCES benchmarks/micro/host_penalties_bench.cpp)
 
   dgpp_add_benchmark(micro_mem_bw
     SOURCES benchmarks/micro/mem_bw.cu src/common/log.cpp
