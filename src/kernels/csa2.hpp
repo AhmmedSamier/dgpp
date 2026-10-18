@@ -229,6 +229,24 @@ void csa2_logits_prefill(const float* dot, int64_t dot_stride, const float* w_fo
                          const float* k_scale, const int64_t* pos_sel, int rows, int64_t n,
                          int heads, float* logits, int64_t logits_stride,
                          cudaStream_t stream);
+// Prefill, fused (2026-10-18): the same per-row logits straight from the
+// fp8 queries and the gathered keys. One query's 32 heads against 128
+// entries per CTA on the fp8 tensor cores (fp32 accumulation), the per-head
+// dots folded in the fragments — the same terms as csa2_logits_prefill,
+// (w_folded[r, h] * k_scale[j]) * relu(dot), summed in the decode scorer's
+// tree order — so the [rows * heads, n] fp32 dot buffer the GEMM chain
+// wrote and re-read is never materialized (at 128K entries that buffer
+// was 64 MB per four query rows, re-read once per row tile and the whole
+// key set with it: a chunk's cost grew with the square of its position).
+// The dot and the fold are fp32 reductions in another order than the
+// GEMM chain's: equal within fp32 rounding, which the selection's
+// near-tie certification covers. q_fp8: [rows * 32,
+// 128] e4m3; k: [n, 128] e4m3 contiguous (csa2_index_* gathered), k_scale
+// [n]; logits: fp32 [rows, logits_stride], -inf at or past the row's
+// visible count (pos_sel + 1). heads must be 32.
+void csa2_score_prefill(const void* q_fp8, const void* k, const float* w_folded, const float* k_scale,
+                        const int64_t* pos_sel, int rows, int64_t n, int heads, float* logits,
+                        int64_t logits_stride, cudaStream_t stream);
 // Prefill selections over the logits rows: the plain / restricted top-k
 // (cand null: every visible entry; else the block ids as above) and the
 // candidate stage.

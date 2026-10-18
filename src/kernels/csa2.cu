@@ -667,6 +667,113 @@ __global__ void logits_prefill_kernel(const float* dot, int64_t dot_stride, cons
   }
   logits[int64_t(r) * logits_stride + j] = total;
 }
+// The fused prefill scorer (csa2_score_prefill): one query row's 32 heads
+// against a tile of 128 entries per CTA. The e4m3 query heads and keys are
+// staged in shared memory (a 144-byte row stride keeps ldmatrix off the
+// bank conflicts), four k-steps of mma.m16n8k32 e4m3 -> fp32 give every
+// head's dot with every entry of the tile, and the heads fold in the
+// fragments: each lane holds four heads of two entries, the four products
+// (w_folded * k_scale) * relu(dot) sum pairwise, then the eight lane
+// groups sum by xor shuffles — the decode scorer's tree, not the retired
+// GEMM chain's sequential sum (the products are the same terms; the order
+// moves the sum by fp32 rounding, which the selection's near-tie
+// certification covers as it does between decode and prefill). No dot
+// tile leaves the registers: 23 KB of shared memory, four CTAs per SM.
+// Entries at or past the row's visible count are -inf; keys past it are
+// not read.
+constexpr int kScoreTile = 128;
+__global__ void __launch_bounds__(128, 4)
+score_prefill_kernel(const uint8_t* q_fp8, const uint8_t* k, const float* w_folded, const float* k_scale,
+                     const int64_t* pos_sel, int rows, int64_t n, float* logits, int64_t logits_stride) {
+  constexpr int S = 144, N = kScoreTile;
+  __shared__ __align__(16) uint8_t a[32 * S];
+  __shared__ __align__(16) uint8_t b[N * S];
+  const int r = blockIdx.x % rows;
+  const int64_t p0 = int64_t(blockIdx.x / rows) * N;
+  if (p0 >= n) return;
+  const int64_t p = pos_sel[r];
+  const int64_t visible = p < 0 ? 0 : min(p + 1, n);
+  const int tid = threadIdx.x, warp = tid / 32, lane = tid % 32;
+  if (p0 >= visible) {  // the tile holds no visible entry: -inf, no key reads
+    const int64_t e = p0 + tid;
+    if (e < n) logits[int64_t(r) * logits_stride + e] = -INFINITY;
+    return;
+  }
+  for (int i = tid; i < 32 * 8; i += 128) {
+    const int row = i / 8, col = (i % 8) * 16;
+    *reinterpret_cast<uint4*>(a + row * S + col) =
+        *reinterpret_cast<const uint4*>(q_fp8 + (int64_t(r) * 32 + row) * kCsa2IndexDim + col);
+  }
+  for (int i = tid; i < N * 8; i += 128) {
+    const int row = i / 8, col = (i % 8) * 16;
+    const int64_t e = p0 + row;
+    *reinterpret_cast<uint4*>(b + row * S + col) =
+        e < visible ? *reinterpret_cast<const uint4*>(k + e * kCsa2IndexDim + col) : make_uint4(0, 0, 0, 0);
+  }
+  __syncthreads();
+  float acc[2][4][4] = {};
+#pragma unroll
+  for (int kk = 0; kk < kCsa2IndexDim; kk += 32) {
+    uint32_t af[2][4], bf[4][2];
+#pragma unroll
+    for (int i = 0; i < 2; ++i) {
+      const unsigned addr = static_cast<unsigned>(__cvta_generic_to_shared(
+          a + (i * 16 + lane % 16) * S + kk + (lane / 16) * 16));
+      asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];"
+                   : "=r"(af[i][0]), "=r"(af[i][1]), "=r"(af[i][2]), "=r"(af[i][3])
+                   : "r"(addr));
+    }
+#pragma unroll
+    for (int j = 0; j < 2; ++j) {
+      const int row = warp * 32 + j * 16 + (lane / 16) * 8 + lane % 8;
+      const int col = kk + ((lane / 8) % 2) * 16;
+      const unsigned addr = static_cast<unsigned>(__cvta_generic_to_shared(b + row * S + col));
+      uint32_t v[4];
+      asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];"
+                   : "=r"(v[0]), "=r"(v[1]), "=r"(v[2]), "=r"(v[3])
+                   : "r"(addr));
+      bf[j * 2][0] = v[0];
+      bf[j * 2][1] = v[1];
+      bf[j * 2 + 1][0] = v[2];
+      bf[j * 2 + 1][1] = v[3];
+    }
+#pragma unroll
+    for (int i = 0; i < 2; ++i)
+#pragma unroll
+      for (int j = 0; j < 4; ++j)
+        asm volatile(
+            "mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 "
+            "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+            : "+f"(acc[i][j][0]), "+f"(acc[i][j][1]), "+f"(acc[i][j][2]), "+f"(acc[i][j][3])
+            : "r"(af[i][0]), "r"(af[i][1]), "r"(af[i][2]), "r"(af[i][3]), "r"(bf[j][0]), "r"(bf[j][1]));
+  }
+  // The fragments: head i * 16 + h * 8 + lane / 4 at entry warp * 32 + j * 8
+  // + (lane % 4) * 2 + v holds acc[i][j][h * 2 + v]. Fold the lane's four
+  // heads, then the eight lane groups (xor 16, 8, 4); lanes 0..3 hold the
+  // row's logit for their two entries.
+  float weight[2][2];
+#pragma unroll
+  for (int i = 0; i < 2; ++i)
+#pragma unroll
+    for (int h = 0; h < 2; ++h) weight[i][h] = w_folded[int64_t(r) * 32 + i * 16 + h * 8 + lane / 4];
+#pragma unroll
+  for (int j = 0; j < 4; ++j)
+#pragma unroll
+    for (int v = 0; v < 2; ++v) {
+      const int64_t e = p0 + warp * 32 + j * 8 + (lane % 4) * 2 + v;
+      const float ks = e < visible ? k_scale[e] : 0.0f;
+      float c[2][2];
+#pragma unroll
+      for (int i = 0; i < 2; ++i)
+#pragma unroll
+        for (int h = 0; h < 2; ++h)
+          c[i][h] = __fmul_rn(__fmul_rn(weight[i][h], ks), fmaxf(acc[i][j][h * 2 + v], 0.0f));
+      float sum = __fadd_rn(__fadd_rn(c[0][0], c[1][0]), __fadd_rn(c[0][1], c[1][1]));
+#pragma unroll
+      for (int off = 16; off >= 4; off >>= 1) sum = __fadd_rn(sum, __shfl_xor_sync(0xffffffffu, sum, off));
+      if (lane < 4 && e < n) logits[int64_t(r) * logits_stride + e] = e < visible ? sum : -INFINITY;
+    }
+}
 struct RowKeyFn {
   static constexpr bool kWarpCooperative = false;
   const float* logits;
@@ -1106,6 +1213,21 @@ void csa2_logits_prefill(const float* dot, int64_t dot_stride, const float* w_fo
       dot, dot_stride, w_folded, k_scale, pos_sel, n, heads, logits, logits_stride);
   DGPP_CUDA_OK(cudaGetLastError());
 }
+void csa2_score_prefill(const void* q_fp8, const void* k, const float* w_folded, const float* k_scale,
+                        const int64_t* pos_sel, int rows, int64_t n, int heads, float* logits,
+                        int64_t logits_stride, cudaStream_t stream) {
+  if (heads != 32) throw std::invalid_argument("csa2_score_prefill: 32 index heads");
+  if (rows <= 0 || n < 0 || logits_stride < n) throw std::invalid_argument("csa2_score_prefill: shape");
+  if (n == 0) return;
+  const int64_t tiles = (n + kScoreTile - 1) / kScoreTile;
+  const int64_t blocks = tiles * rows;
+  if (blocks > 0x7fffffffLL) throw std::invalid_argument("csa2_score_prefill: grid");
+  score_prefill_kernel<<<static_cast<unsigned>(blocks), 128, 0, stream>>>(
+      static_cast<const uint8_t*>(q_fp8), static_cast<const uint8_t*>(k), w_folded, k_scale, pos_sel, rows, n, logits,
+      logits_stride);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
 void csa2_select_rows_prefill(const float* logits, int64_t logits_stride, const int64_t* pos_sel, int rows,
                               int select_k, const int32_t* cand, int cand_stride, const int32_t* cand_counts,
                               int block_size, int32_t* topk_out, int32_t* counts, cudaStream_t stream) {

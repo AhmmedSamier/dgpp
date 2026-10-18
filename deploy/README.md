@@ -107,7 +107,12 @@ fixed depth 2 and 99–105 under the schedule against 107–112 at depth 1
 (NVFP4/FP8, four nodes) — so its templates keep depth 1; an interactive
 Flash deployment sets `engine.mtp_depth: 2`, `engine.mtp_schedule: true`,
 `engine.mtp_schedule_min_depth: 1`, `engine.mtp_schedule_row_ms: 7` and
-`engine.mtp_schedule_base_ms: 17`.
+`engine.mtp_schedule_base_ms: 17`. The DeepSeek-V4.1-Flash-1017 template
+carries the schedule's measured cost model, `engine.mtp_schedule_row_ms:
+5.2` and `engine.mtp_schedule_base_ms: 31.1` (fixed-depth sweeps on four
+nodes, 2026-10-18: every class on 31.1 ms + 5.17 ms per verify row, the
+draft itself 5.1 ms); set them from a depth sweep of the deployment, as
+the keys' documentation says, rather than from the defaults.
 
 The Qwen3.8-Flash-Next, GLM-5.3-Flash, full GLM-5.3 and Qwen3.8-27B
 templates set `engine.draft_head: "screen"` (2026-10-13; the AutoRound

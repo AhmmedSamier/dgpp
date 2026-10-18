@@ -59,6 +59,7 @@
 #include "engine/session_model.hpp"
 #include "kernels/gemm.hpp"
 #include "kernels/draft_head.hpp"
+#include "kernels/l2_prefetch.hpp"
 #include "kernels/glm_mhc_launch.hpp"
 #include "kernels/glm_spec.hpp"
 #include "models/dsv41/config.hpp"
@@ -272,6 +273,25 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
                    bool capture, int head_rows, int batch_requests, int source_row = 0);
   void draft_chain_row(int req, const int64_t* tokens, bool capture, int head_rows, int batch_requests);
   const Dsv41DraftResident& draft_stage(int stage);
+  // The decode walk's boundary prefetch windows (kernels/l2_prefetch.hpp;
+  // bit-identical on or off; resident stacks only): before the attention
+  // fold the MoE site's replicated bytes and the shared expert, before the
+  // MoE fold the next layer's attention side (or the head's), each under
+  // the collective and the mHC site behind it; an Engram layer's own fold
+  // carries its attention side (the Engram projection runs first). The
+  // CSA2 layer opens its in-layer windows (Csa2Layer::set_prefetcher).
+  bool prefetching(bool decode) const {
+    return decode && prefetch_.enabled() && loader_.residency() == Dsv41Residency::Resident;
+  }
+  void prefetch_fp8(const GlmQuantMatrix& m);
+  void prefetch_bf16(const uint16_t* w, size_t bytes, int rows);
+  void prefetch_mhc(const uint16_t* fn, const uint16_t* norm, int rows);
+  void prefetch_attention_weights(const Dsv41LayerResident& r, int rows);
+  void prefetch_ffn_side(const Dsv41LayerResident& r, int rows);
+  void prefetch_attention_side(int layer, int rows);
+  void prefetch_head(const uint16_t* norm, bool draft, int rows);
+  WeightPrefetcher prefetch_;
+  static constexpr size_t kPrefetchWindowBytes = size_t{18} << 20;
   int target_ordinal(int layer) const;
   int32_t* ctx(int req) const { return d_ctx_ + static_cast<size_t>(req) * 4; }
   float* spec_tails(int tail_ord, int row) const {

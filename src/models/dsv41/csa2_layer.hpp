@@ -33,6 +33,7 @@
 
 #include "kernels/csa2.hpp"
 #include "kernels/gemm.hpp"
+#include "kernels/l2_prefetch.hpp"
 #include "models/dsv41/csa2_state.hpp"
 #include "models/quant_matrix.hpp"
 
@@ -95,6 +96,11 @@ class Csa2Layer {
                               size_t dot_budget = 64ull << 20);
 
   void rebind(const Csa2LayerWeights& w, int layer);
+  // The decode walk's in-layer L2 prefetch window (kernels/l2_prefetch.hpp;
+  // bit-identical on or off): the output projections wo_a / wo_b under the
+  // selection and the attention. Null (the default) or a disabled
+  // prefetcher: none.
+  void set_prefetcher(WeightPrefetcher* p) { prefetch_ = p; }
   // GEMM plans for `tokens` rows and the shared-memory opt-ins; outside capture.
   bool prepare(int tokens);
 
@@ -122,7 +128,7 @@ class Csa2Layer {
   // ratio-2 kv sources.
   void enqueue_decode(const void* hidden_in, Csa2StatePool& pool, const int32_t* req_ids, const int64_t* pos,
                       const int32_t* req_spans, int num_requests, int tokens, void* out, cudaStream_t stream,
-                      float* tail_snapshots = nullptr);
+                      float* tail_snapshots = nullptr, bool prefetch = true);
 
   // ---- the DSpark draft (plan D8) on a window-only draft layer ----------------
   // append_window_rows: the ring rows of `n` real tokens — x [n, hidden] the
@@ -185,7 +191,7 @@ class Csa2Layer {
     size_t pos, req_ids, req_zero, slots, pos_sel, entries, ent_pos, scratch_pos, iota, one_block;
     size_t wlist, wcounts, wscratch, dlist, dcounts, topk, counts, cand, cand_counts;
     size_t m_main, l_main, c_main, m_win, l_win, c_win;
-    size_t gather_k, gather_scale, dot, logits, select_ws, counter, violations;
+    size_t gather_k, gather_scale, logits, select_ws, counter, violations;
     int tile_cap = 0;
     int64_t max_entries = 0;
     int ws_slots = 0;
@@ -225,6 +231,16 @@ class Csa2Layer {
                    const int32_t* counts, bool split_window = false, int sel_base = 0);
   void project_out(int tokens, void* out, cudaStream_t stream);
   void validate_pool(const Csa2StatePool& pool) const;
+
+  // The decode windows (see set_prefetcher): opened where the chain is
+  // about to go latency-bound and the bytes before them have been
+  // consumed. An in-layer window's byte budget (the L2 holds 24 MB).
+  static constexpr size_t kWindowBudget = size_t{18} << 20;
+  bool windows() const { return prefetch_windows_ && prefetch_ != nullptr && prefetch_->enabled(); }
+  void window_fp8(const GlmQuantMatrix& m);
+  void open_output_window(cudaStream_t stream);  // wo_a / wo_b, before the selection and the attention
+  WeightPrefetcher* prefetch_ = nullptr;
+  bool prefetch_windows_ = false;  // enabled for this decode / draft enqueue
 
   IGemm& gemm_;
   Csa2Config cfg_;
@@ -294,8 +310,7 @@ class Csa2Layer {
   float* c_win_ = nullptr;        // [ws_win_rows, lh, 512]
   uint8_t* gather_k_ = nullptr;   // [max_entries, 128]
   float* gather_scale_ = nullptr; // [max_entries]
-  float* dot_ = nullptr;          // [tile_cap * 32, max_entries]
-  float* logits_ = nullptr;       // [tile_cap, max_entries]
+  float* logits_ = nullptr;       // [tile_cap, max_entries]: the fused scorer's row tile (the budget)
   void* select_ws_ = nullptr;
   int32_t* counter_ws_ = nullptr;
   unsigned* violations_ = nullptr;

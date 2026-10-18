@@ -503,6 +503,9 @@ void Dsv41Model::build_layer_objects(const Dsv41LayerResident& r) {
                                         gemm_ws_, gemm_ws_bytes_, max_decode_rows_, kDecodeSplit, kDotBudget);
   }
   csa2_->rebind(csa2_view(r, r.layer), r.layer);
+  // The in-layer windows read the layer's resident image; a streamed
+  // layer's staging is recycled under them.
+  csa2_->set_prefetcher(loader_.residency() == Dsv41Residency::Resident ? &prefetch_ : nullptr);
   if (cfg_.is_draft(r.layer)) {
     if (!draft_moe_) {
       const int slots = loader_.residency() == Dsv41Residency::Resident ? cfg_.num_nextn_predict_layers : 0;
@@ -710,6 +713,7 @@ void Dsv41Model::draft_first(int req, const int64_t* tokens, const int64_t* d_po
     debug_sites_.clear();
   }
   gather_embedding(blk_tok_, rows, capture);
+  if (prefetching(true)) prefetch_attention_side(cfg_.num_hidden_layers, rows);
   WalkRows wr;
   wr.tokens = blk_tok_;
   wr.req_ids = blk_req_;
@@ -746,6 +750,7 @@ void Dsv41Model::draft_first(int req, const int64_t* tokens, const int64_t* d_po
                           blk_tok_, block, dl.confidence, groups, conf_ + static_cast<size_t>(batch_requests > 0 ? 0 : req) * block,
                           block, stream_);
   draft_row_ = 1;
+  prefetch_.join(stream_);
   if (decode_row && (!capture || decode_tail_mirrors_) && head_rows <= max_decode_rows_)
     DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_logits_, logits_, static_cast<size_t>(head_rows) * lm_vocab_count_ * sizeof(float),
                                  cudaMemcpyDeviceToHost, stream_));
@@ -768,6 +773,79 @@ void Dsv41Model::draft_chain_row(int req, const int64_t* tokens, bool capture, i
   if (!capture || decode_tail_mirrors_)
     DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_logits_, logits_, static_cast<size_t>(head_rows) * lm_vocab_count_ * sizeof(float),
                                  cudaMemcpyDeviceToHost, stream_));
+}
+
+// ---------------------------------------------------------------------------
+// The decode walk's boundary prefetch windows (bit-identical on or off).
+// ---------------------------------------------------------------------------
+void Dsv41Model::prefetch_fp8(const GlmQuantMatrix& m) {
+  if (m.payload) prefetch_.add(m.payload, static_cast<size_t>(m.rows) * static_cast<size_t>(m.cols));
+  if (m.scales) prefetch_.add(m.scales, m.scale_bytes());
+}
+
+// A bf16 weight into the open window through the GEMM's resident view —
+// the bytes a launch streams: the weight itself (this family packs no
+// companions), a packed companion where one is registered.
+void Dsv41Model::prefetch_bf16(const uint16_t* w, size_t bytes, int rows) {
+  if (!w) return;
+  const void* view = nullptr;
+  size_t view_bytes = 0;
+  gemm_.resident_view(w, bytes, rows, &view, &view_bytes);
+  prefetch_.add_view(w, view, view_bytes);  // a companion is its own allocation
+}
+
+// An mHC site's coefficient matrix (bf16 [24, 4H]) and the sublayer's norm.
+void Dsv41Model::prefetch_mhc(const uint16_t* fn, const uint16_t* norm, int rows) {
+  const size_t H = static_cast<size_t>(cfg_.hidden_size);
+  prefetch_bf16(fn, static_cast<size_t>(cfg_.hc_coeff_rows()) * 4 * H * 2, rows);
+  prefetch_bf16(norm, H * 2, rows);
+}
+
+// A layer's attention side in consumption order — its mHC coefficients,
+// the norm, wq_a, the q norm, wkv and wq_b — clamped to the open window.
+// The compressor and indexer projections behind wq_b are past the budget.
+void Dsv41Model::prefetch_attention_weights(const Dsv41LayerResident& r, int rows) {
+  prefetch_mhc(r.mhc.attn_fn, r.attn_norm, rows);
+  prefetch_fp8(r.attn.wq_a);
+  prefetch_bf16(r.attn.q_norm, static_cast<size_t>(cfg_.q_lora_rank) * 2, rows);
+  prefetch_fp8(r.attn.wkv);
+  prefetch_fp8(r.attn.wq_b);
+}
+
+// Before the attention fold: this layer's MoE site — the mHC coefficients,
+// the norm, the router and the shared expert's slices. The routed experts
+// are known only behind the router.
+void Dsv41Model::prefetch_ffn_side(const Dsv41LayerResident& r, int rows) {
+  const size_t H = static_cast<size_t>(cfg_.hidden_size);
+  prefetch_.open_window(stream_, kPrefetchWindowBytes, prefetch_.boundary_rate());
+  prefetch_mhc(r.mhc.ffn_fn, r.ffn_norm, rows);
+  prefetch_bf16(r.moe.router, static_cast<size_t>(r.moe.n_experts) * H * 2, rows);
+  if (r.moe.router_bias) prefetch_.add(r.moe.router_bias, static_cast<size_t>(r.moe.n_experts) * 4);
+  for (const GlmQuantMatrix& m : r.moe.shared) prefetch_fp8(m);
+}
+
+// Before the MoE fold (and at a walk's start for its first layer): the
+// next layer's attention side — or, on an Engram layer, the Engram
+// projection that runs first (that layer's own fold then carries its
+// attention side).
+void Dsv41Model::prefetch_attention_side(int layer, int rows) {
+  const Dsv41LayerResident& r = loader_.load_layer(layer);
+  prefetch_.open_window(stream_, kPrefetchWindowBytes, prefetch_.boundary_rate());
+  if (r.engram.present) {
+    prefetch_fp8(r.engram.wkv);
+    return;
+  }
+  prefetch_attention_weights(r, rows);
+}
+
+// The head behind the last layer: the norm and the lm head's first rows
+// (the draft's head screen, when it is on, reads its own copy instead).
+void Dsv41Model::prefetch_head(const uint16_t* norm, bool draft, int rows) {
+  const size_t H = static_cast<size_t>(cfg_.hidden_size);
+  prefetch_.open_window(stream_, kPrefetchWindowBytes, prefetch_.boundary_rate());
+  prefetch_bf16(norm, H * 2, rows);
+  if (draft && draft_head_.enabled()) return;
+  prefetch_bf16(globals_.lm_head, static_cast<size_t>(lm_vocab_count_) * H * 2, rows);
 }
 
 // ---------------------------------------------------------------------------
@@ -846,6 +924,7 @@ void Dsv41Model::enqueue_layer(const Dsv41LayerResident& r, int layer, int T, co
   const int decode_prefix = rows.decode_spans
       ? std::accumulate(rows.span_lens, rows.span_lens + rows.decode_spans, 0) : 0;
   build_layer_objects(r);
+  const bool pf = prefetching(rows.decode);
   // Engram: the hashed rows (staged at the walk's start) gate the streams
   // before this layer's coefficients read them.
   if (r.engram.present) {
@@ -853,6 +932,10 @@ void Dsv41Model::enqueue_layer(const Dsv41LayerResident& r, int layer, int T, co
     const Dsv41EngramLayerWeights ew = engram_view(r.engram);
     uint16_t* kv = stage(engram_kv_, T, 5 * H, rows.capture);
     engram_->project(ew, T, kv, stream_);
+    if (pf) {  // this layer's attention side under the Engram fold
+      prefetch_.open_window(stream_, kPrefetchWindowBytes, prefetch_.boundary_rate());
+      prefetch_attention_weights(r, T);
+    }
     fold(kv, T, 5 * H, rows.capture);
     engram_->gate(ew, cur_, kv, T, stream_);
   }
@@ -886,7 +969,7 @@ void Dsv41Model::enqueue_layer(const Dsv41LayerResident& r, int layer, int T, co
     csa2_->enqueue_draft_block(x_, pool_, rows.req_ids, rows.pos, T, cfg_.dspark_block_size, attn_out, stream_);
   } else if (rows.decode) {
     csa2_->enqueue_decode(x_, pool_, rows.req_ids, rows.pos, rows.spans, rows.num_requests, T, attn_out, stream_,
-                          (rows.snapshots && tail >= 0) ? spec_tails(tail, 0) : nullptr);
+                          (rows.snapshots && tail >= 0) ? spec_tails(tail, 0) : nullptr, pf);
   } else if (rows.num_spans > 0) {
     int row0 = 0;
     if (rows.decode_spans) {
@@ -907,6 +990,7 @@ void Dsv41Model::enqueue_layer(const Dsv41LayerResident& r, int layer, int T, co
   } else {
     csa2_->enqueue_prefill(x_, pool_, rows.req, rows.pos0, T, attn_out, stream_, rows.window_floor, rows.publish);
   }
+  if (pf) prefetch_ffn_side(r, T);
   fold(attn_out, T, H, rows.capture);  // block boundary 1: wo_b's partial
   if (debug_capture_) cap.attn_out = grab(attn_out, static_cast<size_t>(T) * H);
   stream_update(attn_out, T);
@@ -925,6 +1009,15 @@ void Dsv41Model::enqueue_layer(const Dsv41LayerResident& r, int layer, int T, co
     moe_->enqueue_decode(x_, ffn_out, T, nullptr, stream_, rows.moe_table_slot);
   else
     moe_->enqueue_prefill(x_, ffn_out, T, rows.trace, stream_, decode_prefix);
+  if (pf) {
+    // The next layer of the walk: a backbone layer's successor, a draft
+    // stage's next stage, or the head behind the last of either.
+    const int last = draft ? cfg_.max_layer() - 1 : cfg_.num_hidden_layers - 1;
+    if (layer < last)
+      prefetch_attention_side(layer + 1, T);
+    else
+      prefetch_head(draft ? r.draft.norm : globals_.final_norm, draft, T);
+  }
   fold(ffn_out, T, H, rows.capture);  // block boundary 2: the sliced experts
   if (debug_capture_) cap.ffn_out = grab(ffn_out, static_cast<size_t>(T) * H);
   stream_update(ffn_out, T);
@@ -963,6 +1056,7 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
     engram_->context_rows(in.tokens, T, in.req_ids, in.pos, in.spans, in.num_requests, d_ctx_, spec_ctx_, stream_);
   }
   gather_embedding(in.tokens, T, run.capture);
+  if (prefetching(run.decode)) prefetch_attention_side(0, T);
   Outputs out;
   const bool traces = !run.decode && route_traces_;
   const size_t K = static_cast<size_t>(cfg_.num_experts_per_tok);
@@ -1373,6 +1467,8 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
       }
     }
   }
+  // The prefetch side stream rejoins the walk (a capture ends on one stream).
+  if (run.decode) prefetch_.join(stream_);
   // The stream-ordered reducer's verdict for this pass's folds (a failed
   // collective is an error here, not a wrong number read later).
   if (!run.capture && boundary_) boundary_->settle();

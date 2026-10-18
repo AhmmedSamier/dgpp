@@ -236,6 +236,13 @@ int main(int argc, char** argv) {
                                      candidate_blocks, candidate_counts.p, block_size, top.p,
                                      counts.p, stream);
     };
+    // The fused prefill scorer over the cache read as a contiguous [stride,
+    // 128] key buffer (the rows' visible entries bound the reads): the
+    // per-row logits of the prefill selection, timed per `rows` queries at
+    // this context. Runs last — it overwrites the logits buffer.
+    auto score_prefill = [&] {
+      dgpp::csa2_score_prefill(dq.p, dk.p, dw.p, ds.p, dp.p, rows, stride, 32, logits.p, stride, stream);
+    };
     std::vector<int32_t> expected_top, expected_counts, expected_candidates,
         expected_candidate_counts;
     if (csa) {
@@ -308,7 +315,8 @@ int main(int argc, char** argv) {
                 {"combined", [&] {
                    candidate();
                    listed();
-                 }}};
+                 }},
+                {"score_prefill", score_prefill}};
     require(only.empty() || std::any_of(stages.begin(), stages.end(),
                                         [&](const auto& stage) { return stage.first == only; }),
             "unknown stage for family");

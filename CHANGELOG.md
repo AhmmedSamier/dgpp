@@ -5,6 +5,52 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **DeepSeek-V4.1 prefill: the indexer's scan fused on the fp8 tensor
+  cores** (2026-10-18). On every index-source layer a prefill chunk scores
+  each query against every visible compressed entry. The chain did it as
+  a cuBLASLt fp8 GEMM into a [rows × 32 heads, entries] fp32 dot buffer, a
+  fold kernel over that buffer and the selection kernels — and the buffer
+  (`kDotBudget`, 64 MB) held only four query rows at 128K entries, so a
+  4096-row chunk ran a thousand tiles, each re-reading the whole key set
+  and writing and re-reading 64 MB: a chunk's cost grew with the square of
+  its position and the prefill's per-token cost went 0.62 ms at 32K to 3.7
+  ms at 512K (1,947 s for a 512K prompt). `csa2_score_prefill` replaces
+  the GEMM and the fold: one query row's 32 heads against 128 entries per
+  CTA on mma.m16n8k32 e4m3 → fp32, the heads folded in the fragments (the
+  same (w_folded · k_scale) · relu(dot) terms, summed in the decode
+  scorer's tree order; the selection kernels unchanged over the per-row
+  logits), no dot buffer, the logits tile sized by the old budget so a row
+  tile reads the keys once for as many rows as fit (128 at 128K entries,
+  from L2). On the microbench the scorer runs 31 TFLOP/s — 35 µs per query
+  row at 128K entries, 2.5 µs at 8K — against the GEMM chain's byte-bound
+  tiles; it still sits a third of the way to the mma.sync rate (the key
+  staging is synchronous), the next pass. Checked against the host oracle
+  within the prefill logits kernel's tolerance with the plain, candidate
+  and restricted selections over its logits equal to the oracle's; every
+  dsv41 parity gate passes. The 1017 rows in `docs/benchmarks.md` predate
+  this change; the next campaign re-measures them.
+- **DeepSeek-V4.1 decode: the L2 prefetch windows, and the verify
+  schedule's measured cost model** (2026-10-18). The `deepseek_v41` walk
+  was the one decode family without the weight prefetcher's windows
+  (`kernels/l2_prefetch.hpp`; `engine.l2_prefetch*`): it now opens them
+  where every other family does — the MoE site's replicated bytes and the
+  shared expert before the attention fold, the next layer's attention
+  side (the Engram projection on an Engram layer, the head behind the
+  last layer) before the MoE fold, an Engram layer's own attention side
+  under its fold, and the output projections under the selection and the
+  attention inside the CSA2 layer (`Csa2Layer::set_prefetcher`) — nothing
+  the model reads is written, so the walk is bit-identical with it on or
+  off. On the 1017 template at one request, against the same binary with
+  the prefetcher off, the pass shortens 3.4–9.4 % by class (prose 45.1 →
+  40.9 ms, code 53.3 → 49.9, JSON 56.1 → 52.7, math 52.7 → 49.4, chat
+  47.2 → 43.5), every transcript identical. The template also carries the
+  verify schedule's measured cost model: fixed-depth sweeps put every class
+  on 31.1 ms + 5.17 ms per verify row (residual ≤ 0.25 ms; the draft
+  itself 5.1 ms), so `engine.mtp_schedule_row_ms` 5.2 and
+  `engine.mtp_schedule_base_ms` 31.1 replace the 8 / 28 defaults, which
+  priced a row 55 % too high; at one request the depth choice is level
+  with the old model (±2 % by class). The 1017 rows in `docs/benchmarks.md`
+  predate both levers; the next campaign re-measures them.
 - **DeepSeek-V4.1-Flash-1017, and the indexer budget as deployment keys**
   (2026-10-18). The 1017 refinement (`deepseek-ai/DeepSeek-V4.1-Flash-1017`)
   ships V4.1-Flash's config, tokenizer and tensor layout byte for byte with

@@ -56,7 +56,10 @@ Csa2Layer::Layout Csa2Layer::layout(const Csa2Config& cfg, int max_tokens, int64
     return at;
   };
   L.max_entries = round_up_to(max_cache_tokens, kEntryPad);
-  int tile_cap = static_cast<int>(dot_budget / (size_t(cfg.index_heads) * size_t(L.max_entries) * 4));
+  // The prefill scorer's logits tile: `dot_budget` bytes of fp32 rows (the
+  // fused scorer writes per-row logits only; the per-head dot buffer is
+  // gone), at least one row at the pool's full width.
+  int tile_cap = static_cast<int>(dot_budget / (size_t(L.max_entries) * 4));
   tile_cap = std::max(1, std::min(tile_cap, max_tokens));
   L.tile_cap = tile_cap;
   L.ws_slots = std::max(std::max(max_decode_rows, 8) * std::max(decode_n_split, 8), kPrefillAttnRows * kPrefillSplit);
@@ -104,7 +107,6 @@ Csa2Layer::Layout Csa2Layer::layout(const Csa2Config& cfg, int max_tokens, int64
   L.c_win = alloc(size_t(L.ws_slots) * lh * kCsa2Latent * 4);
   L.gather_k = alloc(size_t(L.max_entries) * kCsa2IndexDim);
   L.gather_scale = alloc(size_t(L.max_entries) * 4);
-  L.dot = alloc(size_t(tile_cap) * cfg.index_heads * size_t(L.max_entries) * 4);
   L.logits = alloc(size_t(tile_cap) * size_t(L.max_entries) * 4);
   L.select_ws = alloc(dsa_select_workspace_bytes(max_decode_rows, L.max_entries));
   L.counter = alloc(16);
@@ -174,7 +176,6 @@ Csa2Layer::Csa2Layer(IGemm& gemm, const Csa2Config& cfg, int max_tokens, int64_t
   c_win_ = reinterpret_cast<float*>(at(L.c_win));
   gather_k_ = at(L.gather_k);
   gather_scale_ = reinterpret_cast<float*>(at(L.gather_scale));
-  dot_ = reinterpret_cast<float*>(at(L.dot));
   logits_ = reinterpret_cast<float*>(at(L.logits));
   select_ws_ = at(L.select_ws);
   counter_ws_ = reinterpret_cast<int32_t*>(at(L.counter));
@@ -369,19 +370,50 @@ void Csa2Layer::project_out(int tokens, void* out, cudaStream_t stream) {
                               static_cast<uint16_t*>(out), tokens, cfg_.hidden, lg * cfg_.o_lora, stream, 0, 5, 5, cfg_.dense_mma);
 }
 
+// ---- the decode walk's prefetch windows --------------------------------------------------------
+// A window forks from the main stream where it is opened: its bytes start
+// streaming once the chain reaches that point, behind whatever the side
+// stream still carries. The output projections are the layer's last
+// weights and the selection and the attention before them are the chain's
+// latency-bound phase, so the window opens behind the last projection the
+// chain reads before them: the q/kv projections on a window-only layer,
+// the compressor's on a reusing kv source, the indexer's on an index
+// source (the compressor and indexer projections take no window of their
+// own: they are DRAM-bound launches right behind the q projection, and a
+// window a few microseconds ahead of its consumer reads the same lines
+// beside it — measured level on DeepSeek-V4, 2026-10-01).
+
+void Csa2Layer::window_fp8(const GlmQuantMatrix& m) {
+  if (m.payload) prefetch_->add(m.payload, size_t(m.rows) * size_t(m.cols));
+  if (m.scales) prefetch_->add(m.scales, m.scale_bytes());
+}
+
+void Csa2Layer::open_output_window(cudaStream_t stream) {
+  if (!windows()) return;
+  prefetch_->open_window(stream, kWindowBudget, prefetch_->layer_rate());
+  window_fp8(w_.wo_a);
+  window_fp8(w_.wo_b);
+}
+
 // ---- decode ---------------------------------------------------------------------------------------
 
 void Csa2Layer::enqueue_decode(const void* hidden_in, Csa2StatePool& pool, const int32_t* req_ids, const int64_t* pos,
                                const int32_t* req_spans, int num_requests, int tokens, void* out, cudaStream_t stream,
-                               float* tail_snapshots) {
+                               float* tail_snapshots, bool prefetch) {
   validate_pool(pool);
   if (tokens <= 0 || tokens > max_decode_rows_) throw std::invalid_argument("csa2 layer: decode rows out of range");
   if (num_requests <= 0 || num_requests > pool.shape().max_requests)
     throw std::invalid_argument("csa2 layer: request count out of range");
   if (!hidden_in || !req_ids || !pos || !req_spans || !out) throw std::invalid_argument("csa2 layer: null buffer");
   const SelShape shape{SelKind::kDecode, tokens, -1, -1, pos};
+  prefetch_windows_ = prefetch;
+  struct WindowScope {
+    bool& windows;
+    ~WindowScope() { windows = false; }
+  } window_scope{prefetch_windows_};
 
   project_q_kv(hidden_in, tokens, pos, stream);
+  if (w_.ratio == 0) open_output_window(stream);  // a window-only layer: nothing between q and the attention
   // The window row into the ring (this batch's rows are visible to its
   // own queries: the ring is read after the append).
   csa2_ring_slot_positions(pos, slots_, tokens, cfg_.ring_slots, stream);
@@ -412,6 +444,7 @@ void Csa2Layer::enqueue_decode(const void* hidden_in, Csa2StatePool& pool, const
     csa2_entry_positions(pos, pos_sel_, tokens, w_.ratio, stream);
     if (w_.index_source) {
       indexer_query(hidden_in, tokens, pos, stream);
+      open_output_window(stream);  // behind the indexer's projection, under the selection and the attention
       const int epb = pool.entries_per_block(ord);
       if (w_.candidate_source) {
         csa2_select_candidates_decode(
@@ -437,6 +470,7 @@ void Csa2Layer::enqueue_decode(const void* hidden_in, Csa2StatePool& pool, const
                           stream, true);
       sel_at(0) = shape;
     } else {
+      open_output_window(stream);  // a reusing layer: behind the compressor, under the attention
       require_shape(sel_at(0), shape, "the selection");
     }
   }
@@ -466,7 +500,13 @@ void Csa2Layer::enqueue_draft_block(const void* hidden_in, Csa2StatePool& pool, 
     throw std::invalid_argument("csa2 layer: draft block rows out of range");
   if (cfg_.ring_slots < cfg_.window + block) throw std::invalid_argument("csa2 layer: the ring must hold window + block");
   if (!hidden_in || !req_ids || !pos || !out) throw std::invalid_argument("csa2 layer: null buffer");
+  prefetch_windows_ = true;
+  struct WindowScope {
+    bool& windows;
+    ~WindowScope() { windows = false; }
+  } window_scope{prefetch_windows_};
   project_q_kv(hidden_in, rows, pos, stream);
+  open_output_window(stream);  // the draft stage is window-only: nothing between q and the attention
   csa2_ring_slot_positions(pos, slots_, rows, cfg_.ring_slots, stream);
   dsa_latent_append(kv_, req_ids, slots_, rows, pool.ring_table(), 1, cfg_.ring_slots, pool.ring(layer_), kCsa2Latent,
                     stream, Csa2StatePool::kRingFormat);
@@ -577,24 +617,21 @@ void Csa2Layer::enqueue_prefill(const void* hidden_in, Csa2StatePool& pool, int 
       if (n_gather > 0)
         dsa_gather_index_pools(pool.block_tables() + size_t(req) * pool.total_blocks(), epb, pool.index_k(ord),
                                pool.index_scale(ord), n_gather, gather_k_, gather_scale_, kCsa2IndexDim, stream);
-      // The allocation holds tile_cap_ queries at max_entries_, but the
-      // GEMM and logits use only padded_n entries at this context. Reuse
-      // that space for more queries instead of forcing a 1M cache's
-      // single-query tiles on every shorter prompt. Both buffers have
-      // the same query/entry capacity; no workspace allocation changes.
+      // The logits tile holds tile_cap_ rows at max_entries_; at this
+      // context's padded_n it holds proportionally more rows, so a row
+      // tile reads the gathered keys once for as many queries as the
+      // budget allows (the fused scorer, csa2_score_prefill: no per-head
+      // dot buffer, the keys from L2 across the tile's rows).
       const int tile_rows = padded_n > 0
           ? int(std::min<size_t>(size_t(tokens),
                                 size_t(tile_cap_) * size_t(max_entries_) / size_t(padded_n)))
           : tokens;
       for (int row0 = 0; row0 < tokens; row0 += tile_rows) {
         const int rows = std::min(tile_rows, tokens - row0);
-        if (padded_n > 0) {
-          gemm_.matmul(q_fp8_ + size_t(row0) * cfg_.index_heads * kCsa2IndexDim, gather_k_, dot_, rows * cfg_.index_heads,
-                       int(padded_n), kCsa2IndexDim, DType::F8_E4M3, GemmOut::F32, size_t(kCsa2IndexDim), gemm_ws_,
-                       gemm_ws_bytes_, stream);
-          csa2_logits_prefill(dot_, padded_n, w_folded_ + size_t(row0) * cfg_.index_heads, gather_scale_, pos_sel_ + row0,
-                              rows, n_gather, cfg_.index_heads, logits_, padded_n, stream);
-        }
+        if (padded_n > 0)
+          csa2_score_prefill(q_fp8_ + size_t(row0) * cfg_.index_heads * kCsa2IndexDim, gather_k_,
+                             w_folded_ + size_t(row0) * cfg_.index_heads, gather_scale_, pos_sel_ + row0, rows, n_gather,
+                             cfg_.index_heads, logits_, padded_n, stream);
         const int64_t stride = std::max<int64_t>(padded_n, 1);
         dbg_logits_rows_ = padded_n > 0 ? rows : 0;
         dbg_logits_stride_ = stride;
