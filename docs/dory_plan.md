@@ -1,8 +1,9 @@
 # Dory1.0-4B (nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-NVFP4) on dgpp — architecture study and implementation plan (2026-10-18)
 
-Status: **not implemented.** This document is the survey and the design
-that the port is judged against (`docs/adding_a_model.md` §1). Section 5
-carries the staged plan; nothing below is claimed as working.
+Status: **stage 1 landed, stage 2 in progress.** This document is the survey
+and the design that the port is judged against (`docs/adding_a_model.md` §1).
+Section 5 carries the staged plan and the progress markers; nothing below is
+claimed as working beyond the landings recorded there.
 
 The survey reads the checkpoint's `config.json` and safetensors headers
 (1083 tensors, censused in §1.8) and the reference implementation:
@@ -275,10 +276,14 @@ combination; the `logit_scale` head; the recurrent K/V policy.
 1. **Detection, config, census** — `ModelArchitecture::Dory`, the parser
    (`models/dory/config.{hpp,cpp}`) rejecting every field outside §1.1 by
    name, the tensor census test against a tiny synthetic checkpoint.
+   **Landed** (commits 1b8a77d0, 8e253364).
 2. **Binding and loader** — the binding table, the packed NVFP4 slices, the
    BF16 vectors, the resident image, and the census test in the release's
    own layout (the `adding_a_model.md` §2 rules, including the exhaustive
-   `is_replicated` switch).
+   `is_replicated` switch). The binding table and its test are **landed**
+   (`models/dory/binding.{hpp,cpp}`, `tests/unit/dory_binding_test.cpp`);
+   the packed slices, the resident image and the `is_replicated` arm are
+   pending.
 3. **Primitives** — `justnorm`/`slerp_norm` kernels + host references +
    kernel tests, with the fp32 accumulation and the `eps` pinned.
 4. **The layer walk** — one sublayer per index, the attention and MLP
