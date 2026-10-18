@@ -5,6 +5,17 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **FP4-Local Qwen3.8-Flash-Next export** (`nvidia/Qwen3.8-Flash-Next-FP4-Local`).
+  The routed experts' per-group scales arrive as ModelOpt CSF
+  fixed-plus-exceptions sidecars; the loader expands them to plain E4M3 scales
+  once (`weight_scale_encoding: "csf"`, one form per export, the draft keeping
+  its own) and plans the fixed stream's analytic size. A quantized vision tower
+  widens to BF16 at load (MXFP8 exact, NVFP4 with one RNE), scale sidecars
+  tolerated, and resident streams discover shards from the index's weight_map,
+  so the export's `tensors/` layout loads. The one-Spark template sets
+  `dense_weights: "fp8"` with the tensor-core head (`fp8_head: "mma"`), as the
+  sibling NVFP4/QAD templates do. See
+  [docs/fp4local_plan.md](docs/fp4local_plan.md).
 - **The fp8 K/V pool on every Qwen3.5 release, and the Qwen3.8-27B FP8
   templates take it with the fp8 attention** (2026-10-18). `engine.kv_dtype:
   "fp8"` needed a release that ships its `kv_cache_scheme` scales (the

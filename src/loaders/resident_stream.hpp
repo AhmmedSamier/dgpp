@@ -65,6 +65,7 @@
 #include "common/bf16_residency.hpp"
 #include "common/cuda_check.hpp"
 #include "common/log.hpp"
+#include "loaders/minijson.hpp"
 #include "loaders/resident_image.hpp"
 #include "loaders/safetensors.hpp"
 #include "loaders/weight_build.hpp"
@@ -260,8 +261,11 @@ ResidentLayerStream<F>::ResidentLayerStream(const Config& cfg, const std::string
     // The shard list lives in the index's weight_map, the layout-independent
     // truth: ModelOpt exports keep the shards in a tensors/ subdirectory
     // (the FP4-Local release), which a root-only scan would miss. The vision
-    // tower resolves its shards from the same file.
-    std::ifstream f(index_path);
+    // tower resolves its shards from the same file. This is authoritative:
+    // a .safetensors in the tree but absent from the weight_map is ignored,
+    // not loaded beside the named shards.
+    std::ifstream f(index_path, std::ios::binary);
+    if (!f) throw std::runtime_error(std::string(F::who()) + ": cannot read shard index " + index_path.string());
     const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     const auto index = minijson::parse(text);
     std::set<std::string> named;

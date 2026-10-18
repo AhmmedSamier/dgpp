@@ -270,11 +270,15 @@ struct QwenVisionEncoder::Impl {
     load("merger.norm.bias", {h});
     linear("merger.linear_fc1", m, m);
     linear("merger.linear_fc2", o, m);
-    // Scale sidecars of a quantized tower widen at load (above); anything
-    // else present but unloaded is unexpected.
+    // Scale sidecars of a quantized tower widen at load (above); the
+    // remaining ones a W4A16 form may ship (the activation scale, unused by
+    // the weight widening) are tolerated too. Anything else present but
+    // unloaded is unexpected.
     for (const auto& kv : locations) {
       if (weights.count(kv.first)) continue;
-      if (kv.first.ends_with(".weight_scale") || kv.first.ends_with(".weight_scale_2")) continue;
+      if (kv.first.ends_with(".weight_scale") || kv.first.ends_with(".weight_scale_2") ||
+          kv.first.ends_with(".input_scale"))
+        continue;
       throw std::runtime_error("Qwen vision: unexpected vision tensor model.visual." + kv.first);
     }
     for (auto& [name, file] : files) {

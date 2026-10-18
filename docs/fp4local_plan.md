@@ -12,7 +12,7 @@ Same 48-layer GDN/full-attention MoE as RadixArk, ModelOpt
 | n-gram table | NVFP4 (`shard_s.weight` U8 + scales) | readable by the QAD path |
 | MTP draft experts | W4A16_NVFP4, plain scales, no input_scale | readable by the QAD path |
 | lm_head / norms / router / embeds | BF16, hc/mixer/PLE norms F32 | as the QAD export |
-| vision tower | MXFP8 + W4A16_NVFP4 | never served (counted at binding) |
+| vision tower | MXFP8 + W4A16_NVFP4 | widened to BF16 at load; counted at binding, runs on image prefills only |
  *Vision note (RESOLVED 2026-10-16): the tower loader now widens
  quantized linears to BF16 at load — MXFP8 e4m3 x 2^(s-127) exact,
  NVFP4 e2m1 x e4m3-group x global with one RNE (the fp8 bridge's
@@ -22,6 +22,14 @@ Same 48-layer GDN/full-attention MoE as RadixArk, ModelOpt
  present with exact dtype+shape in the real headers, zero non-scale
  leftovers, all 166 scales present. Multimodal serves when weights land;
  text path unaffected (tower runs on image prefills only, never decode).*
+
+The template sets `engine.dense_weights: "fp8"` and `engine.fp8_head: "mma"`,
+as every sibling NVFP4/QAD one-Spark template does: the BF16 remainder — the
+GR sites, the PLE projections, `lm_head` and the draft layer — is encoded to
+block FP8 at load, and the vocabulary head runs on the tensor-core path. The
+MXFP8 attention/shared-expert stack is served as shipped either way
+(`loader.cpp`: the MXFP8 stack takes no engine key). The BF16 dense stack is
+the documented knob (`--dense-weights checkpoint --fp8-head gemv`).
 
 ## The CSF seam (RESOLVED 2026-10-16)
 

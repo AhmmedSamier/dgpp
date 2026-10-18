@@ -226,7 +226,11 @@ std::vector<uint8_t> qwen_csf_scales_expand(const uint8_t* fixed, size_t fixed_b
   }
   const size_t n = out.size();
   for (size_t i = 0; i < exc_count; ++i) {
-    const uint32_t w = exc[i];
+    // The exceptions stream is a safetensors tensor and is not word-aligned,
+    // so read each little-endian word bytewise rather than dereferencing the
+    // caller's uint32_t* (UB / a fault on strict-alignment targets).
+    uint32_t w;
+    std::memcpy(&w, reinterpret_cast<const uint8_t*>(exc) + i * 4, 4);
     const size_t pos = static_cast<size_t>(w & 0xFFFFFFu);
     if (pos >= n) bad("exception position " + std::to_string(pos) + " outside " + std::to_string(n));
     out[pos] = static_cast<uint8_t>(w >> 24);
@@ -914,6 +918,13 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
   // exceptions stream is data-dependent (a property of the quantized
   // values, not of the geometry), so it is read in copy mode but not
   // part of the source-byte plan.
+  //
+  // The whole plane is expanded even for a row slice (the FP4 row loader):
+  // the exception words address the full matrix by flat position, so a
+  // windowed expansion would have to filter and rebase them. Every rank
+  // therefore expands its own copy of each expert's sidecars under tensor
+  // parallelism; the disk read is one pass regardless (consumed() drops the
+  // whole tensor), and the plan-vs-read invariant was validated at world 1.
   std::vector<uint8_t> load_csf_plane(const std::string& base, int64_t N, int64_t full_cols) {
     const int64_t C = full_cols / kFp4Group;
     source_bytes += static_cast<size_t>(N / 16) * static_cast<size_t>(16 + full_cols / 2);
