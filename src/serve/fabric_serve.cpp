@@ -447,6 +447,8 @@ std::string encode_journal_settings(const WorldSettings& s) {
   out += std::format(",\"compact\":{}", s.compact_batches ? 1 : 0);
   out += ",\"pf\":";
   append_json_string(&out, s.prefill);
+  out += ",\"pfd\":";
+  append_json_string(&out, s.prefill_dense);
   // The opt-in YaRN ramp: absent when off, so a record from a plain run
   // carries no key at all (an older peer decodes it to "off", which is
   // what it would have run anyway — a world never mixes the two).
@@ -716,6 +718,9 @@ JournalRecord decode_journal_line(std::string_view line) {
     if (v.find("npre")) s.ngram_prestage = flag("npre");
     // Records before 2026-09-14 carry no prefill mode: bounded.
     if (const dgpp::minijson::Value* pf = v.find("pf")) s.prefill = std::string(pf->as_string());
+    // Records before 2026-10-18 carry no prefill dense form: the tile GEMM.
+    if (const dgpp::minijson::Value* pfd = v.find("pfd")) s.prefill_dense = std::string(pfd->as_string());
+    else s.prefill_dense = "tile";
     // Records without the rope ramp key carry none: the plain table
     // (records before the knob, 2026-09-18, and every plain run since).
     if (const dgpp::minijson::Value* rs = v.find("rs")) {
@@ -803,6 +808,7 @@ JournalRecord decode_journal_line(std::string_view line) {
         (s.dense_weights != "checkpoint" && s.dense_weights != "fp8") ||
         !parse_bf16_residency(s.bf16_weights, nullptr) ||
         (s.prefill != "bounded" && s.prefill != "exact") ||
+        (s.prefill_dense != "tile" && s.prefill_dense != "streaming") ||
         (s.embed_sharding != "replicated" && s.embed_sharding != "vocab") ||
         (s.mtp_head != "checkpoint" && s.mtp_head != "fp8") ||
         (s.prefill_attention != "bf16" && s.prefill_attention != "fp8") ||

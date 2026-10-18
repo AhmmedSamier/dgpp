@@ -101,6 +101,10 @@ class Csa2Layer {
   // selection and the attention. Null (the default) or a disabled
   // prefetcher: none.
   void set_prefetcher(WeightPrefetcher* p) { prefetch_ = p; }
+  // The prefill walk's dense form (engine.prefill_dense; scale_gemm.hpp
+  // prefill_tile): the fp8-weight tile GEMM (true) or the streaming decode
+  // form (false) for every projection a prefill enqueue runs.
+  void set_prefill_dense_tile(bool on) { prefill_dense_tile_ = on; }
   // GEMM plans for `tokens` rows and the shared-memory opt-ins; outside capture.
   bool prepare(int tokens);
 
@@ -241,6 +245,11 @@ class Csa2Layer {
   void open_output_window(cudaStream_t stream);  // wo_a / wo_b, before the selection and the attention
   WeightPrefetcher* prefetch_ = nullptr;
   bool prefetch_windows_ = false;  // enabled for this decode / draft enqueue
+  // The prefill walk's dense form (scale_gemm.hpp prefill_tile): every row
+  // of a prefill enqueue takes the fp8-weight tile GEMM; decode and draft
+  // rows keep the streaming form. Set by the prefill entry points.
+  bool prefill_tile_ = false;
+  bool prefill_dense_tile_ = true;  // the configured form (set_prefill_dense_tile)
 
   IGemm& gemm_;
   Csa2Config cfg_;

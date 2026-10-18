@@ -5,6 +5,37 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **DeepSeek-V4.1 prefill: the dense projections on the fp8-weight tile
+  GEMM** (2026-10-18; `engine.prefill_dense`, default `tile`). The
+  family's dense projections took the streaming decode GEMM at every row
+  count — its rows are bitwise the row alone, which the batched decode
+  needs — so a prompt's 4096-row chunks re-read each fp8 weight once per
+  128 rows: 7,562 launches at 108 µs in one 32K prefill, 18 % of it, about
+  25 TFLOP/s. The prefill walk now runs every dense projection (the CSA2
+  layer's, the Engram projection, the draft's main projection) on the
+  fp8-weight tile GEMM (`fp8w_gemm.hpp`), which gains the family's 32 x 32
+  e8m0 scale grid (`rs` / `cs` per launch: the per-weight form reads each
+  weight's own block; the per-group form keeps the 128 grid). The tile
+  form places the same bf16(e4m3 x scale) weights and accumulates in fp32
+  in another order (within 3.4e-6 of the streaming form on the kernel
+  test, every reference-parity gate green), so a walk takes one form for
+  all its rows and a prefill row's value never depends on the chunk cut;
+  decode rows keep the streaming form. The model test gates the two forms
+  against each other and audits the decode path against the streaming
+  prefill. Measured on the 1017 template on four nodes, both lanes: cold
+  prefill 0.480 / 1.415 / 4.045 / 15.328 s at 512 / 2K / 8K / 32K tokens
+  against 0.514 / 1.572 / 4.715 / 17.916 (−7 / −10 / −14 / −14 %), 2,080
+  tok/s at 32K; decode untouched.
+- **Both ConnectX-7 port functions as bus lanes on the four-node fabric**
+  (2026-10-18; a site setting, `DGPP_ROCE_DEVICES="rocep1s0f0
+  roceP2p1s0f0"` with `DGPP_ROCE_GID_INDICES="3 3"` per node). The port
+  shows up as two verbs devices, one per PCIe x4 function, over the one
+  cable; the bus already stripes its bulk class across the configured
+  lanes and keeps the decode class on the first, and the site had named
+  one. On DeepSeek-V4.1-Flash-1017 with the same binary, cold prefill
+  0.514 / 1.572 / 4.715 / 17.916 s at 512 / 2K / 8K / 32K tokens against
+  0.523 / 1.619 / 5.152 / 19.591 on one lane (−8.5 % at 8K and 32K),
+  decode unchanged. `docs/networking.md` carries the setting.
 - **DeepSeek-V4.1 prefill: the indexer's scan fused on the fp8 tensor
   cores** (2026-10-18). On every index-source layer a prefill chunk scores
   each query against every visible compressed entry. The chain did it as

@@ -506,6 +506,7 @@ void Dsv41Model::build_layer_objects(const Dsv41LayerResident& r) {
   // The in-layer windows read the layer's resident image; a streamed
   // layer's staging is recycled under them.
   csa2_->set_prefetcher(loader_.residency() == Dsv41Residency::Resident ? &prefetch_ : nullptr);
+  csa2_->set_prefill_dense_tile(prefill_dense_tile_);
   if (cfg_.is_draft(r.layer)) {
     if (!draft_moe_) {
       const int slots = loader_.residency() == Dsv41Residency::Resident ? cfg_.num_nextn_predict_layers : 0;
@@ -681,7 +682,7 @@ void Dsv41Model::draft_first(int req, const int64_t* tokens, const int64_t* d_po
     const Dsv41DraftResident& d0 = draft_stage(0);
     if (!d0.main_proj.payload || !d0.main_norm) throw std::runtime_error("mtp_run_rows: the DSpark main projection is unbound");
     launch_scale_gemm_grid_bf16(src, static_cast<size_t>(W), d0.main_proj.payload, d0.main_proj.scales, main_x_, T, H, W,
-                                stream_, 0, 5, 5, dense_mma_);
+                                stream_, 0, 5, 5, dense_mma_, nullptr, 0, /*prefill_tile=*/!decode_row && prefill_dense_tile_);
     csa2_rmsnorm_bf16(main_x_, H, d0.main_norm, main_x_, H, T, H, eps, stream_);
   }
   // ---- the draft rings: each stage's window latent of the real rows ------------
@@ -931,7 +932,7 @@ void Dsv41Model::enqueue_layer(const Dsv41LayerResident& r, int layer, int T, co
     engram_->embed(r.engram.table_index, T, stream_);
     const Dsv41EngramLayerWeights ew = engram_view(r.engram);
     uint16_t* kv = stage(engram_kv_, T, 5 * H, rows.capture);
-    engram_->project(ew, T, kv, stream_);
+    engram_->project(ew, T, kv, stream_, /*prefill_tile=*/!rows.decode && prefill_dense_tile_);
     if (pf) {  // this layer's attention side under the Engram fold
       prefetch_.open_window(stream_, kPrefetchWindowBytes, prefetch_.boundary_rate());
       prefetch_attention_weights(r, T);

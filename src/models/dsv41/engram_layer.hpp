@@ -66,7 +66,8 @@ class Dsv41EngramLayer {
   void embed(int table_index, int rows, cudaStream_t stream);
   // kv_dst [rows, (hc + 1) * hidden] = e x wkv^T (this rank's partial;
   // null: the internal kv_partial()).
-  void project(const Dsv41EngramLayerWeights& w, int rows, uint16_t* kv_dst, cudaStream_t stream);
+  void project(const Dsv41EngramLayerWeights& w, int rows, uint16_t* kv_dst, cudaStream_t stream,
+               bool prefill_tile = false);
   // The stream update on the (folded) kv: x [rows, hc, hidden] in place.
   void gate(const Dsv41EngramLayerWeights& w, uint16_t* x, const uint16_t* kv, int rows, cudaStream_t stream);
   // A staging that failed on the host surfaces here (and at the next stage()).

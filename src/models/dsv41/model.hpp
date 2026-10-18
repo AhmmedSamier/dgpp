@@ -121,6 +121,16 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
   // constructor's default is exact — the gates' parity mode).
   static void set_default_prefill_bounded(bool on) { s_default_prefill_bounded = on; }
   static bool default_prefill_bounded() { return s_default_prefill_bounded; }
+  // The prefill walk's dense projections (engine.prefill_dense): the
+  // fp8-weight tile GEMM (true, the default) or the streaming decode form
+  // for every projection a prefill row runs — the CSA2 layer's, the Engram
+  // projection's and the draft's main projection's. Decode rows always run
+  // the streaming form. Every model built from here on takes the default.
+  static void set_default_prefill_dense_tile(bool on) { s_default_prefill_dense_tile = on; }
+  void set_prefill_dense_tile(bool on) {
+    prefill_dense_tile_ = on;
+    if (csa2_) csa2_->set_prefill_dense_tile(on);
+  }
 
   // The cold diagnostic forward: one request on slot 0, fresh state, every
   // row's logits; capture_layers: every layer's residual streams [T, 4, H]
@@ -356,6 +366,8 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
   // DSpark (mtp).
   static inline bool s_default_prefill_bounded = false;
   bool prefill_bounded_ = s_default_prefill_bounded;
+  static inline bool s_default_prefill_dense_tile = true;
+  bool prefill_dense_tile_ = s_default_prefill_dense_tile;
   int debug_layer_limit_ = 0;
   // The bounded prefill's segment of the last walk (the draft's prefill
   // rows map into main_hidden_ through it) and the tail carried between a

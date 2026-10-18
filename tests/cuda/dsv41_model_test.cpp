@@ -153,11 +153,50 @@ DGPP_TEST(dsv41_model_forward_prefill_decode_and_rollback_at_world_1) {
   const int V = fx.cfg.vocab_size;
   dgpp::Dsv41Model model(fx.cfg, fx.dir, /*max_tokens=*/96, /*max_cache_tokens=*/512, dgpp::Dsv41Residency::Streaming,
                          nullptr, 0, 1, /*max_requests=*/2, /*mtp=*/false, /*decode_rows=*/8);
+  // This gate audits the decode path against the prefill walk's chain, so
+  // the model under test prefills on the decode rows' dense form (the
+  // streaming form); the prefill walk's default tile form is gated against
+  // it in 1b (engine.prefill_dense, 2026-10-18). On this random fixture the
+  // tile-built index keys tip a near-tie selection against the streaming
+  // decode query (a certified flip, dsv41_decode_test's regime, ~0.37 in the
+  // logits with the argmax unchanged), which this gate's budget predates.
+  model.set_prefill_dense_tile(false);
   // 1) the cold forward over 70 tokens (past the 16-entry select horizon at
   // ratio 2 and the candidate pool at ratio 1).
   const auto prompt = tokens_of(0xD5, 70, V);
   auto fwd = model.forward(prompt, /*capture_layers=*/true);
   const std::vector<dgpp::Dsv41Model::IndexLogits> fwd_index = model.debug_index_logits();  // before the next walk clears it
+  {
+    // 1b) the prefill walk's dense form (engine.prefill_dense, 2026-10-18):
+    // the default tile GEMM (tile_model) against the streaming decode form
+    // (model, above) over the same prompt. The two place the same bf16(e4m3 x scale) weights and
+    // accumulate in fp32 in different orders: every layer within rounding
+    // (the window-split budget's order), the last row's argmax equal, its
+    // logits within a certified flip's move when a near-tie selection tips.
+    dgpp::Dsv41Model tile_model(fx.cfg, fx.dir, 96, 512, dgpp::Dsv41Residency::Streaming, nullptr, 0, 1, 2, false, 8);
+    tile_model.set_prefill_dense_tile(true);
+    const auto sfwd = tile_model.forward(prompt, /*capture_layers=*/true);  // the tile form; fwd is the streaming form
+    require(sfwd.layer_states.size() == fwd.layer_states.size() && !fwd.layer_states.empty(), "both forms capture every layer");
+    const int rows_cmp = static_cast<int>(prompt.size());
+    const int H4 = 4 * fx.cfg.hidden_size;
+    for (size_t l = 0; l < fwd.layer_states.size(); ++l) {
+      double d = 0, m = 0;
+      for (size_t i = 0; i < size_t(rows_cmp) * H4; ++i) {
+        const double a = bf16_bits_to_float(fwd.layer_states[l][i]), b = bf16_bits_to_float(sfwd.layer_states[l][i]);
+        d += (a - b) * (a - b); m += b * b;
+      }
+      const double l2 = std::sqrt(d) / std::max(std::sqrt(m), 1e-30);
+      std::printf("[INFO] prefill tile vs streaming form, layer %zu: rel l2 %.3e\n", l, l2);  // fwd streaming, sfwd tile
+      require(l2 < 0.12, "prefill tile form: layer " + std::to_string(l) + " within a flip's move of the streaming form");
+    }
+    const float* a = fwd.logits.data() + size_t(rows_cmp - 1) * V;
+    const float* b = sfwd.logits.data() + size_t(rows_cmp - 1) * V;
+    const double l2 = rel_l2(a, b, size_t(V));
+    std::printf("[INFO] prefill tile vs streaming form, last row logits: rel l2 %.2e, argmax %d / %d\n", l2, argmax(a, size_t(V)),
+                argmax(b, size_t(V)));
+    require(argmax(a, size_t(V)) == argmax(b, size_t(V)), "prefill tile form: the last row's argmax equals the streaming form's");
+    require(l2 < 0.12, "prefill tile form: the last row's logits within a flip's move of the streaming form");
+  }
   require(fwd.logits.size() == size_t(70) * V, "forward logits rows");
   for (const float v : fwd.logits) require(std::isfinite(v), "forward logits finite");
   require(fwd.layer_states.size() == 8, "eight layer states");
@@ -287,6 +326,10 @@ DGPP_TEST(dsv41_model_forward_prefill_decode_and_rollback_at_world_1) {
     const auto step = model.session_step(0, feed[size_t(k)]);
     history.push_back(feed[size_t(k)]);
     dgpp::Dsv41Model ref(fx.cfg, fx.dir, 96, 512, dgpp::Dsv41Residency::Streaming, nullptr, 0, 1, 1, false, 8);
+    // The re-forward on the decode rows' dense form (engine.prefill_dense
+    // streaming): the gate compares the decode path against the same chain.
+    // The prefill walk's tile form is gated below against this form.
+    ref.set_prefill_dense_tile(false);
     const auto again = ref.forward(history, false);
     const float* want = again.logits.data() + (history.size() - 1) * V;
     const double l2 = rel_l2(step.logits.data(), want, size_t(V));
@@ -344,6 +387,7 @@ DGPP_TEST(dsv41_model_forward_prefill_decode_and_rollback_at_world_1) {
     std::vector<int64_t> h = history;
     h.insert(h.end(), drafts.begin(), drafts.end());
     dgpp::Dsv41Model ref(fx.cfg, fx.dir, 96, 512, dgpp::Dsv41Residency::Streaming, nullptr, 0, 1, 1, false, 8);
+    ref.set_prefill_dense_tile(false);
     const auto again = ref.forward(h, true);
     const std::vector<dgpp::Dsv41Model::IndexLogits> again_index = ref.debug_index_logits();
     for (int r = 0; r < 6; ++r)
@@ -361,6 +405,7 @@ DGPP_TEST(dsv41_model_forward_prefill_decode_and_rollback_at_world_1) {
     std::vector<int64_t> h = history;
     h.insert(h.end(), tok2.begin(), tok2.end());
     dgpp::Dsv41Model ref(fx.cfg, fx.dir, 96, 512, dgpp::Dsv41Residency::Streaming, nullptr, 0, 1, 1, false, 8);
+    ref.set_prefill_dense_tile(false);
     const auto again = ref.forward(h, true);
     const std::vector<dgpp::Dsv41Model::IndexLogits> again_index = ref.debug_index_logits();
     for (int r = 0; r < 2; ++r)

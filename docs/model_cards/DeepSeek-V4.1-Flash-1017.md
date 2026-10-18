@@ -109,6 +109,22 @@ the keys are kept because they are the measured truth. These sweeps were
 measured before the prefetch windows; the row and base costs scale with
 the pass and the fit's structure does not change.
 
+**The step cost under load is linear.** A later sweep on the prefetch
+build at fixed depth 4 across the concurrencies, read in the server's
+steady windows (the phase averages mix the tail where fewer requests are
+live), put the step at 27.0 ms for the plain row, 37.0 / 42.7 / 48.0 /
+53.6 ms at 2 / 3 / 4 / 5 rows, about 77 at 10, about 130 at 20 and about
+185 at 30 rows: 5.2 ms per verify row all the way to the batch's 30 rows,
+the row's own expert bytes with no overlap benefit (six of 384 experts
+per row overlap under 20 % at 30 rows). A measured step-cost curve
+(TensorFold's round table, concave at its 48-row rounds) was implemented
+and measured here and adds nothing over the linear model, so it is not
+shipped. The same windows settle the earlier reading that fixed depth 4
+beat the schedule at eight requests: on code at six live the schedule
+commits 2.97 tokens per request per 116 ms step (154 tok/s sustained)
+against fixed depth 4's 3.7 per 182 ms (122 tok/s); the campaign's C8
+phase, eight 256-token requests on six slots, averages over its tail.
+
 ## The prefill selection at long context (2026-10-18)
 
 Prefill cost per token is flat in everything but one piece: on every
@@ -144,6 +160,36 @@ entry. Both are follow-ups; the quadratic term is gone.
 The context rows after the fix come with the next campaign; by the
 scorer's measured rate the scan adds about 0.14 s per index layer to a
 4096-row chunk at the end of a 512K prompt against several seconds before.
+
+## The prefill's dense projections and the fabric's two lanes (2026-10-18)
+
+A kernel ledger of one 32K prefill (nsys on rank 0, 96 % GPU busy) put
+18 % of the time in the streaming decode GEMM: the family ran every dense
+projection on it whatever the row count, and a 4096-row chunk re-read
+each fp8 weight once per 128 rows, 7,562 launches at 108 µs, about 25
+TFLOP/s. The prefill walk now runs its dense projections on the
+fp8-weight tile GEMM, which gained the family's 32 × 32 scale grid
+(`engine.prefill_dense`, default `tile`); decode rows keep the streaming
+form, whose rows are bitwise the row alone. The two forms place the same
+weights and accumulate in another order, within fp32 rounding (3.4e-6 on
+the kernel test); the forward parity gates pass on the tile form, and the
+model test gates the forms against each other.
+
+The same day the site named the ConnectX-7 port's second PCIe function
+as a second bus lane (`DGPP_ROCE_DEVICES="rocep1s0f0 roceP2p1s0f0"`,
+[networking](../networking.md)): the bus stripes the prefill's bulk folds
+across both while the decode class stays on the first.
+
+| Cold prefill, s at 512 / 2K / 8K / 32K tokens | | tok/s at 32K |
+|---|---|---|
+| One lane, streaming projections (the fused scan) | 0.523 / 1.619 / 5.152 / 19.591 | 1,620 |
+| Two lanes, streaming projections | 0.514 / 1.572 / 4.715 / 17.916 | 1,770 |
+| Two lanes, tile projections (shipped) | 0.480 / 1.415 / 4.045 / 15.328 | 2,080 |
+
+Decode is untouched by both. The ledger's remaining prefill shares on the
+shipped form: the listed attention over the selected entries about 19 %
+(about 12 TFLOP/s, the next kernel), the bulk folds about 14 %, the MXFP4
+experts about 17 % at 58 TFLOP/s, the window attention about 9 %.
 
 ## Measured (2026-10-18, four nodes)
 

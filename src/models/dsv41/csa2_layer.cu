@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 
@@ -263,7 +264,7 @@ void Csa2Layer::validate_pool(const Csa2StatePool& pool) const {
 void Csa2Layer::project_kv(const void* hidden_in, int tokens, const int64_t* pos, cudaStream_t stream) {
   const uint16_t* h = static_cast<const uint16_t*>(hidden_in);
   launch_scale_gemm_grid_bf16(h, size_t(cfg_.hidden), w_.wkv.payload, w_.wkv.scales, kv_, tokens, kCsa2Latent,
-                              cfg_.hidden, stream, 0, 5, 5, cfg_.dense_mma);
+                              cfg_.hidden, stream, 0, 5, 5, cfg_.dense_mma, nullptr, 0, prefill_tile_);
   csa2_rmsnorm_bf16(kv_, kCsa2Latent, w_.kv_norm, kv_, kCsa2Latent, tokens, kCsa2Latent, cfg_.eps, stream);
   csa2_rope_apply(kv_ + (kCsa2Latent - kCsa2Rope), kCsa2Latent, kCsa2Latent, 1, kCsa2Rope, pos, w_.inv_freq, false,
                   tokens, stream);
@@ -273,11 +274,11 @@ void Csa2Layer::project_q_kv(const void* hidden_in, int tokens, const int64_t* p
   const uint16_t* h = static_cast<const uint16_t*>(hidden_in);
   const int lh = cfg_.local_heads();
   launch_scale_gemm_grid_bf16(h, size_t(cfg_.hidden), w_.wq_a.payload, w_.wq_a.scales, qr_, tokens, cfg_.q_lora,
-                              cfg_.hidden, stream, 0, 5, 5, cfg_.dense_mma);
+                              cfg_.hidden, stream, 0, 5, 5, cfg_.dense_mma, nullptr, 0, prefill_tile_);
   csa2_rmsnorm_bf16(qr_, cfg_.q_lora, w_.q_norm, qr_, cfg_.q_lora, tokens, cfg_.q_lora, cfg_.eps, stream);
   project_kv(hidden_in, tokens, pos, stream);
   launch_scale_gemm_grid_bf16(qr_, size_t(cfg_.q_lora), w_.wq_b.payload, w_.wq_b.scales, q_, tokens,
-                              lh * kCsa2Latent, cfg_.q_lora, stream, 0, 5, 5, cfg_.dense_mma);
+                              lh * kCsa2Latent, cfg_.q_lora, stream, 0, 5, 5, cfg_.dense_mma, nullptr, 0, prefill_tile_);
   csa2_rope_apply(q_ + (kCsa2Latent - kCsa2Rope), int64_t(lh) * kCsa2Latent, kCsa2Latent, lh, kCsa2Rope, pos,
                   w_.inv_freq, false, tokens, stream);
 }
@@ -285,7 +286,7 @@ void Csa2Layer::project_q_kv(const void* hidden_in, int tokens, const int64_t* p
 void Csa2Layer::indexer_query(const void* hidden_in, int tokens, const int64_t* pos, cudaStream_t stream) {
   const int heads = cfg_.index_heads;
   launch_scale_gemm_grid_bf16(qr_, size_t(cfg_.q_lora), w_.idx_wq_b.payload, w_.idx_wq_b.scales, idx_q_, tokens,
-                              heads * kCsa2IndexDim, cfg_.q_lora, stream, 0, 5, 5, cfg_.dense_mma);
+                              heads * kCsa2IndexDim, cfg_.q_lora, stream, 0, 5, 5, cfg_.dense_mma, nullptr, 0, prefill_tile_);
   csa2_rope_apply(idx_q_ + (kCsa2IndexDim - kCsa2Rope), int64_t(heads) * kCsa2IndexDim, kCsa2IndexDim, heads,
                   kCsa2Rope, pos, w_.inv_freq, false, tokens, stream);
   csa2_index_q_quant(idx_q_, tokens, heads, q_fp8_, q_scale_, violations_, stream);
@@ -364,10 +365,10 @@ void Csa2Layer::project_out(int tokens, void* out, cudaStream_t stream) {
     const size_t row_off = size_t(g) * cfg_.o_lora;
     launch_scale_gemm_grid_bf16(o_ + size_t(g) * K, size_t(lh) * kCsa2Latent, w_.wo_a.payload + row_off * K,
                                 w_.wo_a.scales + (row_off / 32) * (size_t(K) / 32), oa_ + row_off, tokens, cfg_.o_lora, K,
-                                stream, size_t(lg) * cfg_.o_lora, 5, 5, cfg_.dense_mma);
+                                stream, size_t(lg) * cfg_.o_lora, 5, 5, cfg_.dense_mma, nullptr, 0, prefill_tile_);
   }
   launch_scale_gemm_grid_bf16(oa_, size_t(lg) * cfg_.o_lora, w_.wo_b.payload, w_.wo_b.scales,
-                              static_cast<uint16_t*>(out), tokens, cfg_.hidden, lg * cfg_.o_lora, stream, 0, 5, 5, cfg_.dense_mma);
+                              static_cast<uint16_t*>(out), tokens, cfg_.hidden, lg * cfg_.o_lora, stream, 0, 5, 5, cfg_.dense_mma, nullptr, 0, prefill_tile_);
 }
 
 // ---- the decode walk's prefetch windows --------------------------------------------------------
@@ -555,6 +556,11 @@ void Csa2Layer::publish_rows(const void* hidden_in, Csa2StatePool& pool, int req
 void Csa2Layer::publish_prefill(const void* hidden_in, Csa2StatePool& pool, int req, int64_t pos0, int tokens,
                                 cudaStream_t stream) {
   validate_pool(pool);
+  prefill_tile_ = prefill_dense_tile_;
+  struct TileScope {
+    bool& tile;
+    ~TileScope() { tile = false; }
+  } tile_scope{prefill_tile_};
   if (!w_.kv_source || w_.ratio <= 0) throw std::logic_error("csa2 layer: publish_prefill on a layer that is not a kv source");
   if (tokens <= 0 || tokens > max_tokens_) throw std::invalid_argument("csa2 layer: prefill rows out of range");
   if (req < 0 || req >= pool.shape().max_requests) throw std::invalid_argument("csa2 layer: request out of range");
@@ -570,6 +576,11 @@ void Csa2Layer::publish_prefill(const void* hidden_in, Csa2StatePool& pool, int 
 void Csa2Layer::enqueue_prefill(const void* hidden_in, Csa2StatePool& pool, int req, int64_t pos0, int tokens,
                                 void* out, cudaStream_t stream, int64_t floor, bool publish, int row_base) {
   validate_pool(pool);
+  prefill_tile_ = prefill_dense_tile_;
+  struct TileScope {
+    bool& tile;
+    ~TileScope() { tile = false; }
+  } tile_scope{prefill_tile_};
   if (tokens <= 0 || tokens > max_tokens_) throw std::invalid_argument("csa2 layer: prefill rows out of range");
   if (row_base < 0 || row_base + tokens > max_tokens_)
     throw std::invalid_argument("csa2 layer: the chunk's row base and rows exceed max_tokens");
