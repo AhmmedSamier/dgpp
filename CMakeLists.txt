@@ -342,6 +342,16 @@ target_include_directories(dgpp_models_dory_loader PUBLIC ${CMAKE_CURRENT_SOURCE
 target_link_libraries(dgpp_models_dory_loader PUBLIC dgpp_models_dory dgpp_loaders CUDA::cudart dgpp_device_ranges)
 dgpp_set_common(dgpp_models_dory_loader)
 
+# The Dory layer objects (the paged K/V pool first, then the attention and
+# MLP blocks; the looped model follows).
+add_library(dgpp_models_dory_layers STATIC
+  src/models/dory/kv_pool.cpp
+  src/models/dory/layers.cpp)
+target_include_directories(dgpp_models_dory_layers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_dory_layers
+  PUBLIC dgpp_models_dory dgpp_models_dory_loader dgpp_kernels CUDA::cudart)
+dgpp_set_common(dgpp_models_dory_layers)
+
 # The MiMo resident loader (loaders/resident_stream.hpp + the family's builders).
 add_library(dgpp_models_mimo_loader STATIC
   src/models/mimo/loader.cpp)
