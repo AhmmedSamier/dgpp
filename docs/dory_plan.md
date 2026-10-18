@@ -157,8 +157,11 @@ at equal weight.
 * Head: `logits = fp32(h) @ fp32(lm_head.weight)^T ⊙ (logit_scale / initializer_range)`,
   `lm_head.weight` BF16 `[131072, 2560]` untied, `logit_scale` BF16 `[131072]`.
   The scale is per-vocabulary-entry, applied in fp32 after the projection.
-* K/V: one cache per attention layer per loop (`per_loop`) or one shared and
-  overwritten by each loop (`last_loop`). Sliding layers wrap at 1024.
+* K/V: one paged plane per attention layer — one per loop under `per_loop`,
+  one shared and overwritten by each loop under `last_loop` (`kv_repeats`) —
+  holding the **full** history, with the sliding layers' 1024-token window
+  applied at read time. §2 has the cost this implies, and why the engine
+  holds to it rather than to the reference's per-request rings.
 
 ### 1.7 Tensor census
 
@@ -193,19 +196,29 @@ the engine may keep NVFP4 packed (the GLM/Qwen precedent) or expand to BF16
 at load (≈ 8 GiB). The plan keeps them packed.
 
 K/V is the only large variable, and the loop is what makes it interesting.
-Bf16 K and V cost `kv_size × 2 × 2 B = 4096 B/token` per attention layer.
+Bf16 K and V cost `kv_size × 2 × 2 B = 4096 B/token` per attention layer. The
+pool is the engine's paged one (the GLM-4.7 / MiMo shape): **one plane per
+attention layer**, one per loop under `per_loop` and one under `last_loop`
+(`DoryConfig::kv_repeats`), each `token_slots` rows wide, so the pool costs
+`planes × token_slots × 4096 B`:
 
-| class | layers | per-token cost | at 262 144 positions |
-|---|---|---|---|
-| sliding (window 1024) | 27 | capped at 1024 | 27 × 1024 × 4096 B = 113 MiB |
-| full attention, non-recurrent | 4 (i = 6, 14, 62, 70) | 4096 B | 4 × 262144 × 4096 B = 4.29 GiB |
-| full attention, recurrent | 5 (i = 22, 30, 38, 46, 54) | 4096 B × loops | per_loop: 8.59 GiB, last_loop: 4.29 GiB |
+| planes | `per_loop` | `last_loop` |
+|---|---|---|
+| 56 = 16 non-recurrent + 2 × 20 recurrent | 56 GiB | — |
+| 36 = every attention layer once | — | 36 GiB |
 
-So `per_loop` at the full 256 K context needs ≈ 13.0 GiB of K/V and
-`last_loop` ≈ 8.7 GiB — the difference is the 5 recurrent full-attention
-layers. With 2 loops and a long context this is the dominant cost after the
-weights, and it is the reason `recurrent_kv_cache_mode` must be an engine
-key rather than a hard-coded choice (§3).
+at `token_slots` = 262 144 (256 K pooled tokens), and 14 GiB / 9 GiB at
+65 536.
+
+The sliding layers (27 of the 36) keep the **full history** and apply their
+1024-token window at read time — the MiMo-V2.6 precedent, whose comment gives
+the reason the engine holds to it: one block list restores a prefix on every
+layer, so snapshots and prefix sharing stay exact. That is not what the
+reference pays: its sliding layers wrap at 1024, which is where the vendor's
+≈ 13 GiB (`per_loop`) / ≈ 8.7 GiB (`last_loop`) at 256 K comes from. The
+engine's number is that plus the 42 sliding planes' 43 GiB — the price of the
+shared paged pool, and the reason `recurrent_kv_cache_mode` and the pool's
+size are engine keys rather than hard-coded choices (§3, §6).
 
 ## 3. Design decisions
 
@@ -220,9 +233,9 @@ computes, so it is an `engine.*` key, plumbed the seven ways of
 `recurrent_kv_cache_mode` is absent from the checkpoint; the architecture's
 default is `per_loop` (one cache per loop, joined). `engine.dory_kv_cache`
 takes `per_loop` / `last_loop`, defaulting to `per_loop` — the exact,
-lossless path — with `last_loop` documented as the memory lever (§2:
-≈ 4.3 GiB at 256 K) and its measured transcript cost recorded before it is
-recommended anywhere.
+lossless path — with `last_loop` documented as the memory lever (§2: the 20
+recurrent layers' second copy, 20 GiB at a 256 K pool) and its measured
+transcript cost recorded before it is recommended anywhere.
 
 **D3 — weight-only, packed NVFP4, exact.** The release is W4A16 with no
 `input_scale`; the loader keeps the packed e2m1 weights, the E4M3 block
@@ -329,9 +342,17 @@ model; stages 4–6 are the model; 7–9 are the landing.
   host reference must pin the width.
 * **`justnorm` after RoPE but before the `sqk` square** — the reference's
   literal order. Any reordering changes the numerics.
-* **`per_loop` K/V multiplicity** is the difference between ≈ 13 GiB and
-  ≈ 8.7 GiB of cache at 256 K. The default is `per_loop` (exact), so a
-  long-context deployment is a deliberate keyed decision, not a default.
+* **`per_loop` K/V multiplicity** is the difference between 56 GiB and
+  36 GiB of pool at a 256 K `token_slots` (§2). The default is `per_loop`
+  (exact), so a long-context deployment is a deliberate keyed decision, not
+  a default.
+* **The sliding layers' full history** (§2) is 42 of those 56 planes: the
+  reference wraps the 27 sliding layers at 1024 and the engine does not. A
+  per-request ring for them — `Csa2StatePool`'s pattern (`ring_slots` rows,
+  `slot = pos % ring_slots`) with a second read path in the attention
+  kernel — would cut the 256 K pool to ≈ 13 GiB, at the price the dsv41
+  comment names: the rings are positional and would not be snapshot state.
+  A separate decision, not a tweak, and out of scope for this port.
 * **No MTP** means no speculative battery; the plain-world transcript is
   the reference for the decode graph.
 * **Dense NVFP4 W4A16 linears** are exercised by the GLM-4.7 / Qwen NVIDIA
