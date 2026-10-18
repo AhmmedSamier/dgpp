@@ -3,12 +3,13 @@
 // (RoPE, the per-head `justnorm`, the `sqk` square) and the paged GQA
 // attention of the 36 attention blocks — 16 query heads over 4 kv heads,
 // head_dim 256, causal, the sliding layers' window applied at read time.
-// The q/k/v/g projections run through the GEMM interface with fp32 outputs;
-// these kernels are the rest. The shape is the glm4/MiMo split-KV one
+// The q/k/v/g projections run through the fp4 GEMV/GEMM launchers (bf16
+// outputs); these kernels are the rest. The shape is the glm4/MiMo split-KV one
 // (kernels/glm4_attn.cu), forked for the 256-wide heads and the justnorm
 // finish.
 //
-//   finish   q/k/v = bf16(dot) — the Linear's one rounding — then the full
+//   finish   the q/k/v bf16 projection rows — a Linear's one rounding —
+//            then the full
 //            width neoX RoPE (pairs (i, i + 128), θ per layer type: 1e4 on
 //            the sliding layers, 1e7 on the full ones) with the engine's
 //            bf16 ops (cos/sin bf16 from fp32 pos × inv_freq; x·cos and
@@ -44,14 +45,17 @@ constexpr int kDoryHeadDim = 256;
 // Tiles of the attention kernel (the split geometry the host derives).
 constexpr int kDoryAttnTile = 32;
 
-// Rows [0, rows) of the projections' fp32 outputs: q [rows, local_heads *
-// 256] (row stride q_stride elements), k / v [rows, kv_heads * 256] (row
-// strides k_stride / v_stride). sqk bf16 [local_heads * 256] — the release's
-// per-query-element `sqk`, scaled by `sqk_factor` in fp32. inv_freq fp32
-// [128]: this layer's θ, the sliding and full layers differ. pos / req_ids:
-// device [rows]; a row with pos < 0 writes nothing.
-void dory_qkv_finish(const float* q_dot, int64_t q_stride, const float* k_dot, int64_t k_stride,
-                     const float* v_dot, int64_t v_stride, const uint16_t* sqk, float sqk_factor,
+// Rows [0, rows) of the projections' bf16 outputs (a Linear's output is
+// bf16 — the reference's own dtype, and the fp4 paths' only prefill form):
+// q [rows, local_heads * 256] (row stride q_stride elements), k / v [rows,
+// kv_heads * 256] (row strides k_stride / v_stride). sqk bf16
+// [local_heads * 256] — the release's per-query-element `sqk`, scaled by
+// `sqk_factor` in fp32. inv_freq fp32 [128]: this layer's θ, the sliding and
+// full layers differ. pos / req_ids: device [rows]; a row with pos < 0
+// writes nothing.
+void dory_qkv_finish(const uint16_t* q_dot, int64_t q_stride, const uint16_t* k_dot,
+                     int64_t k_stride, const uint16_t* v_dot, int64_t v_stride,
+                     const uint16_t* sqk, float sqk_factor,
                      const float* inv_freq, float eps, const int32_t* req_ids,
                      const int64_t* pos, int rows, int local_heads, int kv_heads,
                      const int32_t* block_tables, int blocks_per_request, int block_tokens,

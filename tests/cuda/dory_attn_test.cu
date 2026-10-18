@@ -57,6 +57,13 @@ void require(bool cond, const std::string& what) {
 uint16_t rbits(float v) { return dgpp::float_to_bf16_bits(v); }
 float rb(float v) { return dgpp::bf16_bits_to_float(dgpp::float_to_bf16_bits(v)); }
 
+// A projection's output rows are bf16 (a Linear's rounding).
+std::vector<uint16_t> to_bf16(const std::vector<float>& f) {
+  std::vector<uint16_t> b(f.size());
+  for (size_t i = 0; i < f.size(); ++i) b[i] = rbits(f[i]);
+  return b;
+}
+
 std::vector<float> rope_inv_freq(double theta, int dim) {
   std::vector<float> f(static_cast<size_t>(dim / 2));
   for (size_t i = 0; i < f.size(); ++i)
@@ -76,7 +83,7 @@ struct Problem {
   std::vector<uint16_t> sqk;
   float sqk_factor = 1.0f, eps = kDoryJustnormEps;
   float scale = 1.0f / std::sqrt(256.0f);
-  std::vector<float> q_dot, k_dot, v_dot;
+  std::vector<uint16_t> q_dot, k_dot, v_dot;  // bf16 (a Linear's output)
 
   int requests() const {
     int n = 1;
@@ -107,12 +114,12 @@ struct Problem {
 struct Oracle {
   std::vector<uint16_t> q_out, k_cache, v_cache;
 
-  // One head's q or k row: `dot` the Linear's fp32 accumulator, `p` the
+  // One head's q or k row: `dot` the Linear's bf16 output row, `p` the
   // absolute position.
-  static void finish_row(const float* dot, const float* inv_freq, int64_t p, float eps,
+  static void finish_row(const uint16_t* dot, const float* inv_freq, int64_t p, float eps,
                          uint16_t* out) {
     float x[D];
-    for (int i = 0; i < D; ++i) x[i] = rb(dot[i]);
+    for (int i = 0; i < D; ++i) x[i] = dgpp::bf16_bits_to_float(dot[i]);
     constexpr int H = D / 2;
     for (int i = 0; i < H; ++i) {
       const float ang = static_cast<float>(static_cast<double>(p) * static_cast<double>(inv_freq[i]));
@@ -134,9 +141,9 @@ struct Oracle {
     v_cache.assign(static_cast<size_t>(pb.slots()) * kvw, 0);
     for (int r = 0; r < pb.rows; ++r) {
       if (pb.pos[static_cast<size_t>(r)] < 0) continue;  // a padding row writes nothing
-      const float* qd = pb.q_dot.data() + static_cast<size_t>(r) * pb.local_heads * D;
-      const float* kd = pb.k_dot.data() + static_cast<size_t>(r) * kvw;
-      const float* vd = pb.v_dot.data() + static_cast<size_t>(r) * kvw;
+      const uint16_t* qd = pb.q_dot.data() + static_cast<size_t>(r) * pb.local_heads * D;
+      const uint16_t* kd = pb.k_dot.data() + static_cast<size_t>(r) * kvw;
+      const uint16_t* vd = pb.v_dot.data() + static_cast<size_t>(r) * kvw;
       for (int h = 0; h < pb.local_heads; ++h) {
         uint16_t row[D];
         finish_row(qd + static_cast<size_t>(h) * D, pb.inv_freq.data(),
@@ -155,7 +162,7 @@ struct Oracle {
                    k_cache.data() + static_cast<size_t>(slot) * kvw + static_cast<size_t>(h) * D);
         for (int i = 0; i < D; ++i)
           v_cache[static_cast<size_t>(slot) * kvw + static_cast<size_t>(h) * D + i] =
-              rbits(vd[static_cast<size_t>(h) * D + i]);
+              vd[static_cast<size_t>(h) * D + i];
       }
     }
   }
@@ -217,9 +224,9 @@ struct Device {
       l_ws, c_ws, out;
 
   explicit Device(const Problem& pb) {
-    q_dot = DevBuf(pb.q_dot.size() * 4);
-    k_dot = DevBuf(pb.k_dot.size() * 4);
-    v_dot = DevBuf(pb.v_dot.size() * 4);
+    q_dot = DevBuf(pb.q_dot.size() * 2);
+    k_dot = DevBuf(pb.k_dot.size() * 2);
+    v_dot = DevBuf(pb.v_dot.size() * 2);
     sqk = DevBuf(pb.sqk.size() * 2);
     inv_freq = DevBuf(pb.inv_freq.size() * 4);
     req_ids = DevBuf(pb.req_ids.size() * 4);
@@ -233,9 +240,9 @@ struct Device {
     l_ws = DevBuf(nsplit * 4);
     c_ws = DevBuf(nsplit * D * 4);
     out = DevBuf(static_cast<size_t>(pb.rows) * pb.local_heads * D * 2);
-    q_dot.upload(pb.q_dot.data(), pb.q_dot.size() * 4);
-    k_dot.upload(pb.k_dot.data(), pb.k_dot.size() * 4);
-    v_dot.upload(pb.v_dot.data(), pb.v_dot.size() * 4);
+    q_dot.upload(pb.q_dot.data(), pb.q_dot.size() * 2);
+    k_dot.upload(pb.k_dot.data(), pb.k_dot.size() * 2);
+    v_dot.upload(pb.v_dot.data(), pb.v_dot.size() * 2);
     sqk.upload(pb.sqk.data(), pb.sqk.size() * 2);
     inv_freq.upload(pb.inv_freq.data(), pb.inv_freq.size() * 4);
     req_ids.upload(pb.req_ids.data(), pb.req_ids.size() * 4);
@@ -245,8 +252,8 @@ struct Device {
 
   void launch(const Problem& pb, cudaStream_t s) {
     dgpp::dory_qkv_finish(
-        q_dot.as<const float>(), static_cast<int64_t>(pb.local_heads) * D, k_dot.as<const float>(),
-        static_cast<int64_t>(pb.kv_width()), v_dot.as<const float>(),
+        q_dot.as<const uint16_t>(), static_cast<int64_t>(pb.local_heads) * D, k_dot.as<const uint16_t>(),
+        static_cast<int64_t>(pb.kv_width()), v_dot.as<const uint16_t>(),
         static_cast<int64_t>(pb.kv_width()), sqk.as<const uint16_t>(), pb.sqk_factor,
         inv_freq.as<const float>(), pb.eps, req_ids.as<const int32_t>(), pos.as<const int64_t>(),
         pb.rows, pb.local_heads, pb.kv_heads, table.as<const int32_t>(), pb.blocks_per_request,
@@ -308,10 +315,12 @@ Problem make_problem(int seed, int rows, int local_heads, int kv_heads, int wind
   pb.sqk = random_bf16_normal(static_cast<uint64_t>(seed) ^ 0x5C, int64_t(local_heads) * D, 0.7f);
   pb.sqk_factor = 0.7f;
   pb.scale = 1.0f / std::sqrt(static_cast<float>(D));
-  pb.q_dot = random_f32_uniform(static_cast<uint64_t>(seed) ^ 0x11,
-                                int64_t(rows) * local_heads * D, 1.5f);
-  pb.k_dot = random_f32_uniform(static_cast<uint64_t>(seed) ^ 0x22, int64_t(rows) * kv_heads * D, 1.5f);
-  pb.v_dot = random_f32_uniform(static_cast<uint64_t>(seed) ^ 0x33, int64_t(rows) * kv_heads * D, 1.5f);
+  pb.q_dot = to_bf16(random_f32_uniform(static_cast<uint64_t>(seed) ^ 0x11,
+                                        int64_t(rows) * local_heads * D, 1.5f));
+  pb.k_dot = to_bf16(random_f32_uniform(static_cast<uint64_t>(seed) ^ 0x22,
+                                        int64_t(rows) * kv_heads * D, 1.5f));
+  pb.v_dot = to_bf16(random_f32_uniform(static_cast<uint64_t>(seed) ^ 0x33,
+                                        int64_t(rows) * kv_heads * D, 1.5f));
   return pb;
 }
 
@@ -459,9 +468,9 @@ DGPP_TEST(dory_attn_timing) {
     Device dev(pb);
     const float finish = time([&] {
       dgpp::dory_qkv_finish(
-          dev.q_dot.as<const float>(), static_cast<int64_t>(pb.local_heads) * D,
-          dev.k_dot.as<const float>(), static_cast<int64_t>(pb.kv_width()),
-          dev.v_dot.as<const float>(), static_cast<int64_t>(pb.kv_width()),
+          dev.q_dot.as<const uint16_t>(), static_cast<int64_t>(pb.local_heads) * D,
+          dev.k_dot.as<const uint16_t>(), static_cast<int64_t>(pb.kv_width()),
+          dev.v_dot.as<const uint16_t>(), static_cast<int64_t>(pb.kv_width()),
           dev.sqk.as<const uint16_t>(), pb.sqk_factor, dev.inv_freq.as<const float>(), pb.eps,
           dev.req_ids.as<const int32_t>(), dev.pos.as<const int64_t>(), pb.rows, pb.local_heads,
           pb.kv_heads, dev.table.as<const int32_t>(), pb.blocks_per_request, pb.block_tokens,
@@ -506,8 +515,8 @@ DGPP_TEST(dory_attn_rejects_bad_shapes) {
   // block_tokens must be a multiple of the 32-token tile; the head ratios
   // must divide; n_split must be positive.
   require(throws([&] {
-            dgpp::dory_qkv_finish(dev.q_dot.as<const float>(), 4 * D, dev.k_dot.as<const float>(),
-                                  2 * D, dev.v_dot.as<const float>(), 2 * D,
+            dgpp::dory_qkv_finish(dev.q_dot.as<const uint16_t>(), 4 * D, dev.k_dot.as<const uint16_t>(),
+                                  2 * D, dev.v_dot.as<const uint16_t>(), 2 * D,
                                   dev.sqk.as<const uint16_t>(), pb.sqk_factor,
                                   dev.inv_freq.as<const float>(), pb.eps,
                                   dev.req_ids.as<const int32_t>(), dev.pos.as<const int64_t>(),
@@ -517,8 +526,8 @@ DGPP_TEST(dory_attn_rejects_bad_shapes) {
           }),
           "qkv_finish accepted block_tokens 40");
   require(throws([&] {
-            dgpp::dory_qkv_finish(dev.q_dot.as<const float>(), 4 * D, dev.k_dot.as<const float>(),
-                                  2 * D, dev.v_dot.as<const float>(), 2 * D,
+            dgpp::dory_qkv_finish(dev.q_dot.as<const uint16_t>(), 4 * D, dev.k_dot.as<const uint16_t>(),
+                                  2 * D, dev.v_dot.as<const uint16_t>(), 2 * D,
                                   dev.sqk.as<const uint16_t>(), pb.sqk_factor,
                                   dev.inv_freq.as<const float>(), pb.eps,
                                   dev.req_ids.as<const int32_t>(), dev.pos.as<const int64_t>(),

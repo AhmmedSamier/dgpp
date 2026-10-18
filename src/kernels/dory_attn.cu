@@ -53,8 +53,8 @@ __device__ __forceinline__ uint4 pack8(const float* x) {
 // and the partner's values come through a shuffle. blockDim 256 = 8
 // (row, head) items.
 __global__ void __launch_bounds__(256) qkv_finish_kernel(
-    const float* __restrict__ q_dot, int64_t q_stride, const float* __restrict__ k_dot,
-    int64_t k_stride, const float* __restrict__ v_dot, int64_t v_stride,
+    const uint16_t* __restrict__ q_dot, int64_t q_stride, const uint16_t* __restrict__ k_dot,
+    int64_t k_stride, const uint16_t* __restrict__ v_dot, int64_t v_stride,
     const uint16_t* __restrict__ sqk, float sqk_factor, const float* __restrict__ inv_freq,
     float eps, const int32_t* __restrict__ req_ids, const int64_t* __restrict__ pos, int rows,
     int local_heads, int kv_heads, const int32_t* __restrict__ block_tables,
@@ -80,13 +80,13 @@ __global__ void __launch_bounds__(256) qkv_finish_kernel(
     kind = 2;
     h = hh - local_heads - kv_heads;
   }
-  const float* src = kind == 0 ? q_dot + static_cast<int64_t>(r) * q_stride + h * D
-                               : kind == 1 ? k_dot + static_cast<int64_t>(r) * k_stride + h * D
-                                           : v_dot + static_cast<int64_t>(r) * v_stride + h * D;
-  // The Linear's rounding: bf16(dot) — bias-free.
+  const uint16_t* src = kind == 0 ? q_dot + static_cast<int64_t>(r) * q_stride + h * D
+                                  : kind == 1 ? k_dot + static_cast<int64_t>(r) * k_stride + h * D
+                                              : v_dot + static_cast<int64_t>(r) * v_stride + h * D;
+  // The Linear's output is bf16 (the reference's dtype): widen it exactly.
   float x[kPerLane];
 #pragma unroll
-  for (int i = 0; i < kPerLane; ++i) x[i] = round_bf16(src[d0 + i]);
+  for (int i = 0; i < kPerLane; ++i) x[i] = bf16_bits_to_float(src[d0 + i]);
 
   if (kind != 2) {
     // The full-width neoX RoPE: every dim is rotary (partial_rotary_factor
@@ -303,8 +303,9 @@ __global__ void attn_combine_kernel(const float* __restrict__ m_ws, const float*
 
 }  // namespace
 
-void dory_qkv_finish(const float* q_dot, int64_t q_stride, const float* k_dot, int64_t k_stride,
-                     const float* v_dot, int64_t v_stride, const uint16_t* sqk, float sqk_factor,
+void dory_qkv_finish(const uint16_t* q_dot, int64_t q_stride, const uint16_t* k_dot,
+                     int64_t k_stride, const uint16_t* v_dot, int64_t v_stride,
+                     const uint16_t* sqk, float sqk_factor,
                      const float* inv_freq, float eps, const int32_t* req_ids,
                      const int64_t* pos, int rows, int local_heads, int kv_heads,
                      const int32_t* block_tables, int blocks_per_request, int block_tokens,
