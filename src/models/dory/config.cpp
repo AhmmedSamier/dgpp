@@ -248,6 +248,26 @@ DoryConfig DoryConfig::parse(const minijson::Value& root) {
   if (c.tie_word_embeddings) reject("tie_word_embeddings", "tied embeddings are not implemented");
   if (c.attention_bias || c.mlp_bias) reject("attention_bias", "bias-free projections are required");
 
+  // --- tokens ---------------------------------------------------------------
+  // Optional here: the release names its stop tokens in
+  // generation_config.json ([2, 11]), which GlmGenerationDefaults reads as
+  // the serving authority; this field is the fixtures' and older exports'
+  // fallback, like the other families'.
+  if (const minijson::Value* eos = root.find("eos_token_id"); eos && !eos->is_null()) {
+    if (eos->is_array()) {
+      for (const auto& item : eos->items()) {
+        if (!item.is_number()) reject("eos_token_id", "non-numeric element");
+        c.eos_token_ids.push_back(item.as_int());
+      }
+    } else if (eos->is_number()) {
+      c.eos_token_ids.push_back(eos->as_int());
+    } else {
+      reject("eos_token_id", "not a number or array");
+    }
+    for (int64_t id : c.eos_token_ids)
+      if (id < 0 || id >= c.vocab_size) reject("eos_token_id", "id outside [0, vocab_size)");
+  }
+
   // --- the nGPT scales ------------------------------------------------------
   // The release writes a fractional initializer_range (0.0177), so it is
   // parsed as a double; it divides every learned scale and is required.

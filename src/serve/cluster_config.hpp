@@ -201,6 +201,17 @@ struct ClusterConfig {
     // recipe, half the prefill work) or "exact" (every layer over every
     // row, the parity mode).
     std::string prefill = "bounded";
+    // The Dory1.0-4B loop (docs/dory_plan.md D1, D2). Applies to the Dory
+    // family only; every other family refuses them (serve, by name).
+    //   dory_loops: the recurrent block's loop count. Absent (0) is the
+    //     exact path: the checkpoint's own `n_recurrent_loops` (2 in the
+    //     release). Naming one changes what the engine computes.
+    //   dory_kv_cache: "per_loop" (the default, exact: every loop of the
+    //     recurrent block gets its own K/V planes) or "last_loop" (one
+    //     plane per layer, only the last loop's rows kept — the pool at
+    //     half the planes, the loops past the last one's history gone).
+    int dory_loops = 0;
+    std::string dory_kv_cache = "per_loop";
     // The opt-in YaRN rope ramp (2026-09-18, the Qwen3.8-Flash-Next 512K
     // recipe): absent is the default and leaves every table and every
     // kernel argument exactly as they were; present builds the Qwen QSA

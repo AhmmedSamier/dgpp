@@ -826,6 +826,7 @@ if(DGPP_ENABLE_IBV)
   add_executable(dgpp_serve_app apps/dgpp_serve.cpp)
   target_link_libraries(dgpp_serve_app PRIVATE dgpp_models_glm_loader dgpp_models_qwen_layers dgpp_models_glm4_layers dgpp_models_glm_dsa_layers
                                              dgpp_models_dsv41_layers dgpp_models_dsv4_layers dgpp_models_mimo_layers
+                                             dgpp_models_dory_layers
                                              dgpp_loaders dgpp_bus
                                              dgpp_serve CUDA::cudart
                                              Threads::Threads)
@@ -1519,6 +1520,15 @@ target_include_directories(dory_forward_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 target_link_libraries(dory_forward_test PRIVATE dgpp_models_dory_layers dgpp_models_dory_loader dgpp_kernels CUDA::cudart Threads::Threads)
 dgpp_set_common(dory_forward_test)
 add_test(NAME dory_forward_test COMMAND dory_forward_test)
+# The fixture ladder (docs/adding_a_model.md §6): the tiny release-layout
+# checkpoint from the binding table, the CUDA model over it, and every
+# logits row against the CPU fp64 host reference (generate and decode).
+set(DORY_FORWARD_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/dory_forward_fixture)
+add_test(NAME dory_forward_fixture COMMAND dory_forward_test --write-fixture ${DORY_FORWARD_FIXTURE})
+add_test(NAME dory_forward_smoke COMMAND dory_forward_test --smoke ${DORY_FORWARD_FIXTURE})
+set_tests_properties(dory_forward_smoke PROPERTIES DEPENDS dory_forward_fixture LABELS "gpu" RUN_SERIAL TRUE)
+add_test(NAME dory_forward_reference COMMAND dory_forward_test --reference ${DORY_FORWARD_FIXTURE})
+set_tests_properties(dory_forward_reference PROPERTIES DEPENDS dory_forward_fixture LABELS "gpu" RUN_SERIAL TRUE)
 
 add_executable(glm4_loader_test tests/cuda/glm4_loader_test.cpp)
 target_include_directories(glm4_loader_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)

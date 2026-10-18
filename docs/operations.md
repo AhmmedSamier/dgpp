@@ -49,6 +49,24 @@ representative traffic. The [native MTP experiment](experiments/mimo-native-mtp.
 and [prefill experiment](experiments/mimo-upstream-ports.md) describe the
 configurations and limitations.
 
+## Dory1.0-4B loop options
+
+Dory serves the exact path by default: the checkpoint's own
+`n_recurrent_loops` (2) and the `per_loop` K/V policy, where every loop of
+the recurrent block keeps its own paged K/V planes. Both are
+[engine keys](configuration.md), not environment variables:
+`engine.dory_loops` overrides the loop count and `engine.dory_kv_cache:
+"last_loop"` shares one plane per attention layer and keeps only the last
+loop's rows, roughly halving the recurrent block's pool at a lossy cost —
+one cold prefill is bitwise the same under either policy, but decode rows
+and prefix reuse of a mid-loop state differ from the exact walk. The
+family is one rank and has no draft layer: `--world > 1`, `engine.mtp`,
+the drafter keys and the other families' loop keys are refused at startup,
+not ignored. The pool is BF16 only (`engine.kv_dtype` other than `bf16`
+says so and stays BF16). See the
+[model card](model_cards/Dory1.0-4B-NVFP4.md) and the
+[architecture plan](dory_plan.md).
+
 ## Qwen sparse prefill attention
 
 Qwen QSA uses the tensor-core warp kernel for prefills of at least 128 rows

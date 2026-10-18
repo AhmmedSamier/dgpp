@@ -17,6 +17,10 @@ need four Unicode predicates on codepoints:
   is_letter      Unicode General_Category L* (Lu, Ll, Lt, Lm, Lo)
   is_mark        Unicode General_Category M* (Mn, Mc, Me)
   is_number      Unicode General_Category N* (Nd, Nl, No)
+  is_upper       Unicode General_Category Lu and Lt (the Nemotron/Dory
+                 CamelCase scanner's upper class; U = (L and not Ll) or M)
+  is_lower       Unicode General_Category Ll (the same scanner's lower
+                 class; L2 = (L and not (Lu or Lt)) or M)
   is_white_space Unicode White_Space property (NOT category Zs alone:
                  0x09-0x0D and 0x85 are White_Space but Cc/Cf)
 
@@ -71,6 +75,11 @@ def main():
         "src/text/unicode_tables.hpp"
     letters = ranges_of(
         lambda cp: unicodedata.category(chr(cp)) in ("Lu", "Ll", "Lt", "Lm", "Lo"))
+    # The Nemotron/Dory scanner's CamelCase classes split the letters:
+    # U = [\p{Lu}\p{Lt}\p{Lm}\p{Lo}] (+ marks), L2 = [\p{Ll}\p{Lm}\p{Lo}]
+    # (+ marks) — so uppercase-and-titlecase (Lu, Lt) versus lowercase (Ll).
+    uppers = ranges_of(lambda cp: unicodedata.category(chr(cp)) in ("Lu", "Lt"))
+    lowers = ranges_of(lambda cp: unicodedata.category(chr(cp)) == "Ll")
     marks = ranges_of(
         lambda cp: unicodedata.category(chr(cp)) in ("Mn", "Mc", "Me"))
     numbers = ranges_of(
@@ -168,6 +177,10 @@ namespace dgpp::text::unicode {{
 
 {emit("Letter", letters, "General_Category L* (Lu, Ll, Lt, Lm, Lo)")}
 
+{emit("Upper", uppers, "General_Category Lu and Lt — the Nemotron/Dory scanner's CamelCase upper class")}
+
+{emit("Lower", lowers, "General_Category Ll — the Nemotron/Dory scanner's CamelCase lower class")}
+
 {emit("Mark", marks, "General_Category M* (Mn, Mc, Me)")}
 
 {emit("Number", numbers, "General_Category N* (Nd, Nl, No)")}
@@ -208,6 +221,12 @@ inline bool is_white_space(uint32_t cp) {{
 }}
 inline bool is_mark(uint32_t cp) {{
   return in_ranges(kMarkRanges, std::size(kMarkRanges), cp);
+}}
+inline bool is_upper(uint32_t cp) {{
+  return in_ranges(kUpperRanges, std::size(kUpperRanges), cp);
+}}
+inline bool is_lower(uint32_t cp) {{
+  return in_ranges(kLowerRanges, std::size(kLowerRanges), cp);
 }}
 inline bool is_punctuation(uint32_t cp) {{
   return in_ranges(kPunctRanges, std::size(kPunctRanges), cp);

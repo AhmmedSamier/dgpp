@@ -20,6 +20,7 @@
 #include "common/dtypes.hpp"
 #include "common/test.hpp"
 #include "dory_fixture.hpp"
+#include "dory_host_reference.hpp"
 #include "models/dory/forward.hpp"
 
 namespace {
@@ -329,6 +330,101 @@ DGPP_TEST(dory_forward_decode_matches_prefill) {
   require(pick_a == pick_b, "the greedy pick agrees");
 }
 
+// The fixture ladder's rungs (docs/adding_a_model.md §6), run over a
+// directory written by `--write-fixture`: the tiny checkpoint in the
+// release's own layout, generated from the binding table itself.
+//   --smoke DIR          the CUDA model over the fixture: finite, non-constant,
+//                        bitwise application by application
+//   --reference DIR      every logits row against dory_host_reference.hpp's
+//                        CPU fp64 walk (the generate rung), and the session
+//                        decode row against that walk's last row (the decode
+//                        rung)
+int run_smoke(const std::string& dir) {
+  const DoryConfig cfg = DoryConfig::from_json_file((fs::path(dir) / "config.json").string());
+  std::vector<int64_t> ids(12);
+  for (size_t i = 0; i < ids.size(); ++i) ids[i] = static_cast<int64_t>(7 + 37 * i) % cfg.vocab_size;
+  DoryModel model(cfg, dir, 32, 256, DoryResidency::Resident, 1, 0, false);
+  const auto a = model.forward(ids);
+  require(all_finite(a.logits), "smoke: finite logits");
+  require(a.logits.size() == ids.size() * static_cast<size_t>(cfg.vocab_size), "smoke: one row per token");
+  double lo = 1e30, hi = -1e30, top = -1e30;
+  size_t pick = 0;
+  for (size_t i = 0; i < a.logits.size(); ++i) {
+    lo = std::min(lo, static_cast<double>(a.logits[i]));
+    hi = std::max(hi, static_cast<double>(a.logits[i]));
+  }
+  for (int64_t v = 0; v < cfg.vocab_size; ++v) {
+    const float x = a.logits[a.logits.size() - static_cast<size_t>(cfg.vocab_size) + v];
+    if (x > top) {
+      top = x;
+      pick = static_cast<size_t>(v);
+    }
+  }
+  require(hi > lo, "smoke: the head is not constant");
+  const auto b = model.forward(ids);
+  require(a.logits == b.logits, "smoke: a repeated forward is bitwise identical");
+  std::printf("[ .. ] smoke: %zu tokens, %d layers, top-1 of the last row %zu (%.4g); deterministic\n",
+              ids.size(), cfg.num_hidden_layers, pick, top);
+  std::printf("[ OK ] dory_forward_smoke\n");
+  return 0;
+}
+
+int run_reference(const std::string& dir) {
+  const DoryConfig cfg = DoryConfig::from_json_file((fs::path(dir) / "config.json").string());
+  const int T = 12;
+  std::vector<int64_t> ids(T);
+  for (int i = 0; i < T; ++i) ids[i] = static_cast<int64_t>(7 + 37 * i) % cfg.vocab_size;
+  const auto want = doryfx::host_forward(cfg, dir, ids, false);
+
+  // The generate rung: the cold walk's every logits row.
+  {
+    DoryModel model(cfg, dir, 32, 256, DoryResidency::Resident, 1, 0, false);
+    const auto got = model.forward(ids);
+    const Diff d = diff_f32(got.logits, want);
+    // Near-zero logits make a per-element relative bound meaningless (the
+    // decode rung's own finding), so the element bound is absolute against
+    // the walk's peak magnitude.
+    double peak = 0, worst = 0;
+    for (size_t i = 0; i < want.size(); ++i) {
+      peak = std::max(peak, std::fabs(static_cast<double>(want[i])));
+      worst = std::max(worst, std::fabs(static_cast<double>(got.logits[i] - want[i])));
+    }
+    std::printf("[ .. ] generate: %zu rows against the host reference: rel L2 %.3g, worst abs "
+                "%.3g of peak %.3g\n",
+                ids.size(), d.l2_rel, worst, peak);
+    require(d.l2_rel < 2e-2, "the walk matches the host reference (rel L2)");
+    require(worst < 5e-2 * peak, "no logits element diverges beyond the reference's scale");
+  }
+
+  // The decode rung: a T-1 prefill and one session step, against the same
+  // host walk over all T tokens. The paged read's split-KV order differs
+  // from the fresh prefill's, so the bound is the decode test's own.
+  {
+    std::vector<int64_t> pre(ids.begin(), ids.end() - 1);
+    std::vector<int64_t> whole = pre;
+    whole.push_back(ids[T - 1]);
+    const auto want_last = doryfx::host_forward(cfg, dir, whole, false);
+    DoryModel model(cfg, dir, 32, 256, DoryResidency::Resident, 1, 1, false);
+    model.session_prefill(0, pre);
+    const auto step = model.session_step(0, ids[T - 1]);
+    model.session_close(0);
+    const std::vector<float> tail(want_last.end() - cfg.vocab_size, want_last.end());
+    const Diff d = diff_f32(step.logits, tail);
+    double peak = 0, worst = 0;
+    for (size_t i = 0; i < tail.size(); ++i) {
+      peak = std::max(peak, std::fabs(static_cast<double>(tail[i])));
+      worst = std::max(worst, std::fabs(static_cast<double>(step.logits[i] - tail[i])));
+    }
+    std::printf("[ .. ] decode: the session row against the host reference: rel L2 %.3g, worst abs "
+                "%.3g of peak %.3g\n",
+                d.l2_rel, worst, peak);
+    require(d.l2_rel < 2e-2, "the decode row matches the host reference (rel L2)");
+    require(worst < 5e-2 * peak, "no element diverges from the row's scale");
+  }
+  std::printf("[ OK ] dory_forward_reference\n");
+  return 0;
+}
+
 // `--write-fixture DIR` writes the tiny checkpoint for manual runs; with no
 // argument the DGPP_TEST filter (DGPP_TEST_FILTER) selects the cases.
 int main(int argc, char** argv) {
@@ -339,8 +435,10 @@ int main(int argc, char** argv) {
       std::printf("[ OK ] wrote the fixture to %s\n", argv[2]);
       return 0;
     }
+    if (argc == 3 && std::string(argv[1]) == "--smoke") return run_smoke(argv[2]);
+    if (argc == 3 && std::string(argv[1]) == "--reference") return run_reference(argv[2]);
     if (argc != 1) {
-      std::fprintf(stderr, "usage: dory_forward_test [--write-fixture DIR]\n");
+      std::fprintf(stderr, "usage: dory_forward_test [--write-fixture DIR | --smoke DIR | --reference DIR]\n");
       return 2;
     }
     return dgpp::test::run_all();

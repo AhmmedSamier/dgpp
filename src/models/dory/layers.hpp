@@ -79,9 +79,14 @@ class DoryAttentionLayer {
   double theta_ = 1e4;
   float scale_, sqk_factor_, s_gate_factor_, alpha_scale_, eps_;
   size_t part_rows_ = 0;
-  float* d_inv_freq_ = nullptr;  // [dim/2]
-  // The host staging of d_inv_freq_: an in-flight stream-ordered copy reads it.
-  std::vector<float> h_inv_freq_;
+  float* d_inv_freq_ = nullptr;  // [dim/2] the theta table of the rebound layer
+  // The two rope tables, staged once at construction (the theta depends only
+  // on the layer's kind, config.hpp rope_theta_of): rebind selects one, so
+  // the decode walk uploads NOTHING — a graph capture records an H2D copy as
+  // a memcpy node, and the decode graph must be kernels-only
+  // (engine/graph_check.hpp). Aliased when the two thetas are equal.
+  float* d_inv_freq_full_ = nullptr;
+  float* d_inv_freq_sliding_ = nullptr;
   uint16_t* qd_ = nullptr;       // [M, Q] bf16 (the q_proj output)
   uint16_t* kd_ = nullptr;       // [M, KV] bf16
   uint16_t* vd_ = nullptr;       // [M, KV] bf16

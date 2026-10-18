@@ -323,8 +323,9 @@ DoryModel::Outputs DoryModel::run_rows(const RowRun& run) {
     out.layer_states.push_back(std::move(snap));
   };
   const auto copy_rows = [&](uint16_t* dst, const uint16_t* src) {
-    DGPP_CUDA_OK(cudaMemcpyAsync(dst, src, static_cast<size_t>(T) * H * 2, cudaMemcpyDeviceToDevice,
-                                 stream_));
+    // The kernel form, not a cudaMemcpyAsync: the decode-graph capture
+    // refuses any memcpy node (engine/graph_check.hpp).
+    dory_copy_rows_bf16(src, dst, static_cast<size_t>(T) * H, stream_);
   };
 
   // ---- the input block ------------------------------------------------------

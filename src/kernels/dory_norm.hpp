@@ -27,6 +27,7 @@
 //
 // Contract: dim a multiple of 8, at most 8192; rows 16-byte aligned (row
 // stride dim). Deterministic and capturable.
+#include <cstddef>
 #include <cstdint>
 
 #include <cuda_runtime.h>
@@ -38,6 +39,10 @@ constexpr int kDoryNormMaxDim = 8192;
 // y[r, :] = bf16(fp32(x[r, :]) * rstd), rstd = 1/sqrt(sum_k fp32(x)^2 + eps).
 void dory_justnorm_bf16(const uint16_t* x, uint16_t* y, int rows, int dim, float eps,
                         cudaStream_t stream);
+
+// The walk's staging copy as a kernel (a capture-clean alternative to a
+// device-to-device cudaMemcpy; elems must be a multiple of 8).
+void dory_copy_rows_bf16(const uint16_t* src, uint16_t* dst, size_t elems, cudaStream_t stream);
 
 // y[r, :] = justnorm(bf16(a·ra) + lr·(bf16(b·rb) − bf16(a·ra))).
 void dory_slerp_alpha_bf16(const uint16_t* a, const uint16_t* b, const uint16_t* alpha, float scale,

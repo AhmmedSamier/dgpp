@@ -1,6 +1,6 @@
 # Dory1.0-4B (nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-NVFP4) on dgpp — architecture study and implementation plan (2026-10-18)
 
-Status: **stages 1–6 landed, stage 7 in progress.** This document is the survey
+Status: **stages 1–8 landed, stage 9 in progress.** This document is the survey
 and the design that the port is judged against (`docs/adding_a_model.md` §1).
 Section 5 carries the staged plan and the progress markers; nothing below is
 claimed as working beyond the landings recorded there.
@@ -363,9 +363,35 @@ combination; the `logit_scale` head; the recurrent K/V policy.
 7. **Serve wiring and template** — the `ServeFamily` (name, model build,
    resident-image dir, refused keys), `deploy/cluster_dory1.0-4b_nvfp4_w1.example.json`,
    the `portability_test.py` model map and the `deploy/README.md` row.
+   **Landed** (2026-10-18): the `dory` family in `apps/dgpp_serve.cpp`
+   (resident, one rank — `world > 1` refuses before the journal, MTP and
+   the drafter keys refuse by name, plan D4), the two keys
+   (`engine.dory_loops`, `engine.dory_kv_cache`) plumbed the seven ways
+   (§4 of `adding_a_model.md`; the family never forms a peer world, so
+   the settings-record fields ride along for the uniform rule alone), the
+   w1 template, the portability map entry (with the draftless-family
+   exception the template needs) and the deploy row. The checkpoint's
+   generic transformers chat template needed three jinja-subset additions
+   (the `for x in ys if cond` inline filter, mapping-key iteration, the
+   `sequence` test) — gated in `chat_template_test`. Its tokenizer's
+   Nemotron CamelCase pattern joined the pinned scanner set
+   (`tokenizer.cpp`, `unicode_tables.hpp` rebuilt with the Lu/Lt/Ll split).
 8. **Gates** — the `dory_forward_test` fixture ladder (§6 of
    `adding_a_model.md`): `--write-fixture` from the binding table itself,
    host-reference `--smoke` / `generate` / `decode` rows.
+   **Landed** (2026-10-18): `--smoke DIR` and `--reference DIR` (the
+   generate and decode rungs in one binary), the oracle being the CPU
+   fp64 host walk of `tests/cuda/dory_host_reference.hpp` — raw
+   safetensors, the binding's format contract, the §1.3–§1.6 formulas,
+   sharing no code with the CUDA path beyond the norm primitives the
+   kernel tests already pin. The fixture's logits match within 0.008
+   relative L2 / 0.9 % of peak, prefill and decode alike. Two real bugs
+   fell out of the first real-checkpoint run: the MLP down projection's
+   K = 7168 was not in the packed GEMV's compiled set (added), and the
+   walk's per-rebind theta upload plus its three device-to-device staging
+   copies made 59 memcpy nodes in the decode-graph capture — both are
+   kernels now (the two theta tables stage at build;
+   `dory_copy_rows_bf16`), and the release warm-captures kernels-only.
 9. **Validation** — `cmake --preset ci` clean with `-Werror`, the full
    serial `ctest` on an idle Spark with master merged, and the greedy
    transcript battery at T=1 and with the decode graph.

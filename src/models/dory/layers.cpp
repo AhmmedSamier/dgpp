@@ -89,10 +89,28 @@ DoryAttentionLayer::DoryAttentionLayer(const DoryAttentionResident& w, const Dor
   m_ws_ = dev_alloc<float>(part);
   l_ws_ = dev_alloc<float>(part);
   c_ws_ = dev_alloc<float>(part * static_cast<size_t>(dim_));
+  // The two rope tables, built once (the decode walk must copy nothing; see
+  // the members' comment). The blocking uploads run at build time, outside
+  // any capture, on the default stream's order.
+  std::vector<float> inv(static_cast<size_t>(dim_) / 2);
+  dory_rope_inv_freq(cfg_.rope_theta_full, dim_, inv.data());
+  d_inv_freq_full_ = dev_alloc<float>(inv.size());
+  DGPP_CUDA_OK(cudaMemcpy(d_inv_freq_full_, inv.data(), inv.size() * sizeof(float),
+                          cudaMemcpyHostToDevice));
+  if (cfg_.rope_theta_sliding == cfg_.rope_theta_full) {
+    d_inv_freq_sliding_ = d_inv_freq_full_;
+  } else {
+    dory_rope_inv_freq(cfg_.rope_theta_sliding, dim_, inv.data());
+    d_inv_freq_sliding_ = dev_alloc<float>(inv.size());
+    DGPP_CUDA_OK(cudaMemcpy(d_inv_freq_sliding_, inv.data(), inv.size() * sizeof(float),
+                            cudaMemcpyHostToDevice));
+  }
+  d_inv_freq_ = d_inv_freq_sliding_;
 }
 
 DoryAttentionLayer::~DoryAttentionLayer() {
-  cudaFree(d_inv_freq_);
+  if (d_inv_freq_sliding_ && d_inv_freq_sliding_ != d_inv_freq_full_) cudaFree(d_inv_freq_sliding_);
+  cudaFree(d_inv_freq_full_);
   cudaFree(qd_);
   cudaFree(kd_);
   cudaFree(vd_);
@@ -107,23 +125,14 @@ DoryAttentionLayer::~DoryAttentionLayer() {
 }
 
 void DoryAttentionLayer::rebind(const DoryAttentionResident& w, int layer, cudaStream_t stream) {
+  (void)stream;  // nothing uploads any more: the walk is capture-clean
   w_ = &w;
   layer_ = layer;
   window_ = cfg_.is_sliding(layer) ? cfg_.sliding_window : 0;
   theta_ = cfg_.rope_theta_of(layer);
-  // The inv-frequency upload is stream-ordered: the walk's stream is
-  // non-blocking, so a host-side cudaMemcpy would race the kernels already
-  // queued on it (a kernel could read another layer's thetas). The host
-  // staging is a member so an in-flight copy's source outlives the call.
-  h_inv_freq_.assign(static_cast<size_t>(dim_ / 2), 0.0f);
-  dory_rope_inv_freq(theta_, dim_, h_inv_freq_.data());
-  if (!d_inv_freq_) d_inv_freq_ = dev_alloc<float>(h_inv_freq_.size());
-  const size_t bytes = h_inv_freq_.size() * sizeof(float);
-  if (stream)
-    DGPP_CUDA_OK(cudaMemcpyAsync(d_inv_freq_, h_inv_freq_.data(), bytes, cudaMemcpyHostToDevice,
-                                 stream));
-  else
-    DGPP_CUDA_OK(cudaMemcpy(d_inv_freq_, h_inv_freq_.data(), bytes, cudaMemcpyHostToDevice));
+  // The theta table selection: the two are staged at construction, so a
+  // rebind inside a decode-graph capture records no memcpy node.
+  d_inv_freq_ = cfg_.is_full_attention(layer) ? d_inv_freq_full_ : d_inv_freq_sliding_;
 }
 
 size_t DoryAttentionLayer::scratch_bytes(const DoryConfig& cfg, int max_tokens, int decode_rows,
@@ -134,7 +143,10 @@ size_t DoryAttentionLayer::scratch_bytes(const DoryConfig& cfg, int max_tokens, 
   const size_t part_rows =
       std::max(M, static_cast<size_t>(std::max(decode_rows, 0)) * static_cast<size_t>(n_split_decode));
   const size_t part = part_rows * static_cast<size_t>(cfg.num_attention_heads);
-  return static_cast<size_t>(cfg.head_dim / 2) * 4 + M * Q * 2 + 2 * M * KV * 2 + 4 * M * Q * 2 +
+  // The first term: the rope tables staged at construction (one when the
+  // two thetas agree, two when they do not).
+  const size_t theta_tables = cfg.rope_theta_sliding == cfg.rope_theta_full ? 1 : 2;
+  return theta_tables * static_cast<size_t>(cfg.head_dim / 2) * 4 + M * Q * 2 + 2 * M * KV * 2 + 4 * M * Q * 2 +
          M * cfg.hidden_size * 2 + part * 4 * 2 + part * cfg.head_dim * 4;
 }
 

@@ -99,6 +99,10 @@
 #include "models/glm_dsa/model.hpp"
 #include "models/mimo/config.hpp"
 #include "models/mimo/forward.hpp"
+#include "models/dory/binding.hpp"
+#include "models/dory/config.hpp"
+#include "models/dory/forward.hpp"
+#include "models/dory/loader.hpp"
 #include "sched/scheduler.hpp"
 #include "text/tokenizer.hpp"
 #include "text/tool_grammar.hpp"
@@ -918,6 +922,78 @@ struct MimoFamily final : ServeFamily {
   }
 };
 
+// Dory1.0-4B (DoryForCausalLM, modelopt W4A16 NVFP4 as shipped;
+// docs/dory_plan.md): the looped normalized GPT — an input block, a
+// recurrent block walked n_recurrent_loops times with the input re-injected
+// and the state re-normalized at every loop, an output block. The paged
+// K/V pool (64-token blocks, bf16, one plane per attention layer per loop
+// under the exact `per_loop` policy), no recurrent request state beside it
+// (snapshots at any position), no draft layer (plan D4: the templates run
+// plain, speculation keys are refused by name) and one rank (plan: the
+// reference refuses tensor_parallel_size != 1 and the release is a single
+// 3 GiB image, so it is resident).
+struct DoryFamily final : ServeFamily {
+  dgpp::DoryConfig cfg;
+  std::string ckpt;
+  std::unique_ptr<dgpp::DoryModel> model;
+  DoryFamily(const std::string& checkpoint, int world)
+      : cfg(dgpp::DoryConfig::from_json_file((fs::path(checkpoint) / "config.json").string())),
+        ckpt(checkpoint) {
+    dgpp::dory_validate_world(world);  // throws for any world but 1, naming the key
+  }
+  const char* name() const override { return "dory"; }
+  int64_t vocab_size() const override { return cfg.vocab_size; }
+  const std::vector<int64_t>& eos_token_ids() const override { return cfg.eos_token_ids; }
+  int64_t block_tokens() const override { return dgpp::DoryModel::kv_block_tokens_static(); }
+  int prefill_chunk_tokens() const override { return dgpp::DoryModel::prefill_chunk_tokens(); }
+  std::string pool_check(int64_t) const override { return ""; }
+  const char* kv_format_name() const override { return "bf16"; }  // the pool has no other form
+  int decode_rows_cap() const override { return dgpp::DoryModel::decode_rows_cap(); }
+  // The widest fold the decode graph records: a block output [rows, hidden].
+  size_t lat_slot_bytes(int decode_rows) const override {
+    return static_cast<size_t>(decode_rows) * static_cast<size_t>(cfg.hidden_size) * 2;
+  }
+  dgpp::MemoryPlan plan(int forward_rows, int64_t context, int, int, bool, int slots, bool,
+                        int decode_rows) const override {
+    return dgpp::DoryModel::plan_memory(cfg, forward_rows, context, dgpp::DoryResidency::Resident,
+                                        slots, decode_rows, /*serving_logits=*/true,
+                                        dgpp::DoryModel::kv_policy());
+  }
+  size_t snapshot_bytes(int, bool) const override {
+    return dgpp::DoryModel::session_snapshot_bytes(cfg, false);
+  }
+  void build_model(dgpp::BoundaryReducer*, int, int, bool, int forward_rows, int64_t pool_tokens,
+                   int slots, bool, int decode_rows) override {
+    // The resident image cache: the same directory the process configured
+    // for the GLM loader (prepare_serving_process), so paths.resident_cache
+    // applies (docs/adding_a_model.md §2).
+    dgpp::DoryLayerStream::set_resident_image_dir(dgpp::GlmLayerStream::resident_image_dir());
+    model = std::make_unique<dgpp::DoryModel>(cfg, ckpt, forward_rows, pool_tokens,
+                                              dgpp::DoryResidency::Resident, slots, decode_rows,
+                                              /*serving_logits=*/true, dgpp::DoryModel::kv_policy());
+  }
+  void destroy_model() override { model.reset(); }
+  size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
+  std::unique_ptr<ServeGraphEngine> make_graph_engine(dgpp::net::CollectiveBus* bus, int rank,
+                                                      int, uint16_t* pick_scratch,
+                                                      int batch_min_live, uint16_t* prefix_scratch,
+                                                      uint16_t* gather_scratch, int candidates,
+                                                      const dgpp::text::GrammarVocab* grammar,
+                                                      int prefix_slots, int mtp_depth,
+                                                      bool compact_batches, int lookup_tail = 0) override {
+    return std::make_unique<ServeGraphEngineOf<dgpp::DoryModel>>(
+        model.get(), bus, rank, 1, pick_scratch, cfg.vocab_size, /*pick_timeout_ms=*/60000,
+        batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots,
+        mtp_depth, compact_batches, lookup_tail);
+  }
+  std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
+      int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
+      int prefix_slots) override {
+    return std::make_unique<dgpp::EagerEngineAdapter<dgpp::DoryModel>>(
+        model.get(), slots, std::move(pick), std::move(sample), grammar, prefix_slots);
+  }
+};
+
 // Qwen3.8-27B dense family (FP8 text-only, bf16 K/V pool, the MTP draft layer).
 // engine.dense_weights = fp8 requantizes its BF16 lm head to block FP8 and
 // engine.prefill_fp8_per_tensor selects the per-tensor prefill recipe; both
@@ -1041,6 +1117,7 @@ std::unique_ptr<ServeFamily> make_family(const std::string& ckpt, int world,
   if (arch == dgpp::ModelArchitecture::DeepseekV41) return std::make_unique<Dsv41Family>(ckpt);
   if (arch == dgpp::ModelArchitecture::DeepseekV4) return std::make_unique<Dsv4Family>(ckpt);
   if (arch == dgpp::ModelArchitecture::MimoV2) return std::make_unique<MimoFamily>(ckpt, kv_format);
+  if (arch == dgpp::ModelArchitecture::Dory) return std::make_unique<DoryFamily>(ckpt, world);
   if (arch == dgpp::ModelArchitecture::Qwen4Exp)
     return std::make_unique<QwenFamily>(ckpt, rope_scaling, fp8_head_mma, kv_format);
   if (arch == dgpp::ModelArchitecture::Qwen3_5)
@@ -1440,6 +1517,11 @@ int main(int argc, char** argv) {
       "    bounded runs the decoder over the last window rows of each prompt\n"
       "    (the model's own serving recipe, half the prefill work), exact every\n"
       "    layer over every row (the parity mode)\n"
+      "  [--dory-loops N (dory only, default: the checkpoint's)]: override the\n"
+      "    recurrent block's loop count — changes what the engine computes\n"
+      "  [--dory-kv-cache per_loop|last_loop (dory only, default per_loop)]:\n"
+      "    per_loop gives every loop its own K/V planes (exact); last_loop\n"
+      "    shares one plane per layer and keeps the last loop's rows\n"
       "  [config: engine.rope_scaling {rope_type, factor,\n"
       "    original_max_position_embeddings, beta_fast, beta_slow,\n"
       "    attn_factor, mrope_cache_factor}]: the opt-in YaRN rope ramp\n"
@@ -1565,6 +1647,8 @@ int main(int argc, char** argv) {
   bool expert_gemm_pair = false;
   bool ngram_prestage = true;               // engine.ngram_prestage (Qwen)
   std::string prefill = "bounded";  // the DeepSeek-V4.1 prefill: bounded | exact
+  int dory_loops = 0;                   // engine.dory_loops (Dory1.0-4B; 0 = the checkpoint's)
+  std::string dory_kv_cache = "per_loop";  // engine.dory_kv_cache: per_loop | last_loop
   // The opt-in YaRN rope ramp (engine.rope_scaling): absent = the plain
   // table, the default and the behaviour every earlier build had.
   std::optional<dgpp::RopeScaling> rope_scaling;
@@ -1691,6 +1775,8 @@ int main(int argc, char** argv) {
     expert_gemm_pair = e.expert_gemm_pair;
     ngram_prestage = e.ngram_prestage;
     prefill = e.prefill;
+    dory_loops = e.dory_loops;
+    dory_kv_cache = e.dory_kv_cache;
     rope_scaling = e.rope_scaling;
     embed_sharding = e.embed_sharding;
     mtp_head = e.mtp_head;
@@ -1818,6 +1904,8 @@ int main(int argc, char** argv) {
     else if (a == "--expert-gemm-pair") expert_gemm_pair = true;
     else if (a == "--no-ngram-prestage") ngram_prestage = false;
     else if (a == "--prefill") prefill = next();
+    else if (a == "--dory-loops") dory_loops = std::stoi(next());
+    else if (a == "--dory-kv-cache") dory_kv_cache = next();
     else if (a == "--embed-sharding") embed_sharding = next();
     else if (a == "--mtp-head") mtp_head = next();
     else if (a == "--attention-weights") attention_weights = next();
@@ -2052,7 +2140,7 @@ int main(int argc, char** argv) {
         graph_batch_min_live == 0 ? std::min(2, max_concurrency) : graph_batch_min_live;
     return std::format(
         "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} pfattn={} dcattn={} ngt={} dw={} mtpef={} bfw={} "
-        "fp8head={} dh={} dhb={} mtph={} attw={} pf={} "
+        "fp8head={} dh={} dhb={} mtph={} attw={} pf={} dlp={} dkv={} "
         "emsh={} maxtok={} queue={} "
         "eos={} graph={} compact={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} "
         "msad={} msss={} mdr={} mdt={} mvf={} dbr={} "
@@ -2064,7 +2152,7 @@ int main(int argc, char** argv) {
         kv_capacity, kv_dtype, prefill_attention, decode_attention, ngram_table, dense_weights, mtp_expert_format, bf16_weights, fp8_head,
         draft_head,
         draft_head_blocks, mtp_head,
-        attention_weights, prefill, embed_sharding, default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0,
+        attention_weights, prefill, dory_loops, dory_kv_cache, embed_sharding, default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0,
         compact_batches ? 1 : 0, mtp ? 1 : 0, mtp_depth, mtp_schedule ? 1 : 0, mtp_schedule_row_ms,
         mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth,
         mtp_schedule_adapt ? 1 : 0, mtp_schedule_sampled_scale, mtp_draft, mtp_draft_temperature,
@@ -2085,6 +2173,30 @@ int main(int argc, char** argv) {
         dflash_model.empty() ? "off" : dflash_model, dflash_weights, lookup_draft ? 1 : 0,
         lookup_nmin, lookup_nstrong, lookup_agree, lookup_tail);
   };
+  // Dory1.0-4B is a one-rank family (the reference refuses
+  // tensor_parallel_size != 1; docs/dory_plan.md §2): refuse a world > 1
+  // before the journal handshake, so every rank's log names the reason
+  // rather than a rendezvous timeout. An unreadable config.json is NOT a
+  // refusal here — the checkpoint's own read errors belong to the normal
+  // path (serve_startup_test boots a world on an empty directory and
+  // expects the capacity-knob refusal, not an abort). DoryFamily's
+  // constructor keeps the same check for the paths that reach the build.
+  if (world > 1 && !ckpt.empty()) {
+    bool is_dory = false;
+    try {
+      is_dory = dgpp::detect_architecture_file((fs::path(ckpt) / "config.json").string()) ==
+                dgpp::ModelArchitecture::Dory;
+    } catch (const std::exception&) {
+    }
+    if (is_dory) {
+      try {
+        dgpp::dory_validate_world(world);
+      } catch (const std::exception& e) {
+        DGPP_LOG_ERROR("{}", e.what());
+        return 1;
+      }
+    }
+  }
   if ((world > 1 || rank > 0) && !memory_plan_only) {
     try {
       if (rank == 0) {
@@ -2142,6 +2254,8 @@ int main(int argc, char** argv) {
         ws.expert_gemm_pair = expert_gemm_pair;
         ws.ngram_prestage = ngram_prestage;
         ws.prefill = prefill;
+        ws.dory_loops = dory_loops;
+        ws.dory_kv_cache = dory_kv_cache;
         ws.rope_scaling = rope_scaling;
         ws.embed_sharding = embed_sharding;
         ws.mtp_head = mtp_head;
@@ -2241,6 +2355,8 @@ int main(int argc, char** argv) {
         expert_gemm_pair = ws.expert_gemm_pair;
         ngram_prestage = ws.ngram_prestage;
         prefill = ws.prefill;
+        dory_loops = ws.dory_loops;
+        dory_kv_cache = ws.dory_kv_cache;
         rope_scaling = ws.rope_scaling;
         embed_sharding = ws.embed_sharding;
         mtp_head = ws.mtp_head;
@@ -2458,6 +2574,20 @@ int main(int argc, char** argv) {
   // The prefill attention's arithmetic on the fp8 pool (engine.prefill_attention).
   dgpp::Qwen35Model::set_fp8_attention(prefill_attention == "fp8");
   dgpp::QwenModel::set_native_attention(prefill_attention == "fp8", decode_attention == "fp8");
+  // The Dory1.0-4B loop (engine.dory_loops, engine.dory_kv_cache; plan D1,
+  // D2): statics applied before the memory plan and the model build. The
+  // exact defaults: the checkpoint's n_recurrent_loops, per_loop.
+  if (dory_loops < 0) {
+    DGPP_LOG_ERROR("--dory-loops must be a positive integer, got {}", dory_loops);
+    return 2;
+  }
+  try {
+    if (dory_loops > 0) dgpp::DoryModel::set_recurrent_loops(dory_loops);
+    dgpp::DoryModel::set_kv_policy(dgpp::DoryModel::parse_kv_policy(dory_kv_cache));
+  } catch (const std::invalid_argument& e) {
+    DGPP_LOG_ERROR("{}", e.what());
+    return 2;
+  }
   if (dflash_weights != "checkpoint" && dflash_weights != "fp8") {
     DGPP_LOG_ERROR("--dflash-weights must be checkpoint or fp8, got '{}'", dflash_weights);
     return 2;
@@ -2681,6 +2811,21 @@ int main(int argc, char** argv) {
       return 1;
     }
     const std::string family_name = std::string(family->name());
+    // The Dory family's two keys (docs/dory_plan.md D1, D2) and its two
+    // refusals (plan D4): no draft layer, so speculation is refused by name,
+    // and the loop keys belong to no other family.
+    if (family_name != "dory" && (dory_loops > 0 || dory_kv_cache != "per_loop")) {
+      DGPP_LOG_ERROR("engine.dory_loops / engine.dory_kv_cache are the Dory1.0-4B loop's keys; "
+                     "the {} family has no loop",
+                     family_name);
+      return 1;
+    }
+    if (family_name == "dory" && mtp) {
+      DGPP_LOG_ERROR("the {} family ships no draft layer (docs/dory_plan.md D4): run it with "
+                     "engine.mtp false (--no-mtp from the flag)",
+                     family_name);
+      return 1;
+    }
     if (rope_scaling.has_value() && family_name != "qwen4_exp" && family_name != "qwen3_5") {
       // A refused start, not a warning (review item 8, 2026-09-18): a WARN
       // scrolls past in a boot log and the world then serves with a knob the

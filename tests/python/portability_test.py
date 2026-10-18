@@ -212,7 +212,12 @@ class PortabilityTest(unittest.TestCase):
             "unsloth/Qwen3.8-27B-NVFP4": "qwen3.8-27b_nvfp4",
             "local-inference-lab/Qwen3.8-Flash-Next-NVFP4": "qwen-3.8-flash-next_nvfp4-qad",
             "kaushikvira/Qwen3.8-Flash-Next-swift15-nvfp4-dgpp": "qwen-3.8-flash-next_nvfp4-swift15",
+            "nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-NVFP4": "dory1.0-4b_nvfp4",
         }
+        # Families whose checkpoint ships no draft layer: their templates run
+        # plain (the spec keys are refused by name at boot, not merely off) —
+        # docs/dory_plan.md D4 for the Dory1.0-4B one.
+        draftless_models = {"nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-NVFP4"}
         values = {**site_env.DEFAULTS, "DGPP_NODES": "head peer1 peer2 peer3", "DGPP_SSH_USER": "ops"}
         templates = list((ROOT / "deploy").glob("*.example.json"))
         self.assertTrue(templates)
@@ -233,6 +238,9 @@ class PortabilityTest(unittest.TestCase):
                 if drafter:
                     self.assertFalse(engine["mtp"], "a drafter template replaces MTP, not both")
                     self.assertTrue(engine["decode_graph"], "the drafter's block proposal is recorded in the graph step")
+                elif cfg["model"] in draftless_models:
+                    self.assertFalse(engine.get("mtp", False), "a draftless family's template runs plain")
+                    self.assertTrue(engine["decode_graph"])
                 else:
                     self.assertTrue(engine["mtp"], "every template enables MTP (the plain world is --no-mtp)")
                     self.assertTrue(engine["decode_graph"])

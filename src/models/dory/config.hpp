@@ -50,6 +50,10 @@ struct DoryConfig {
   int num_hidden_layers = 72;
   int intermediate_size = 7168;
   int max_position_embeddings = 262144;
+  // The stop tokens the config names (compatibility fallback: the served
+  // defaults ride generation_config.json, see GlmGenerationDefaults). The
+  // 4B release names none here — its generation_config.json has [2, 11].
+  std::vector<int64_t> eos_token_ids;
   std::string hidden_act = "silu";
   bool tie_word_embeddings = false;
   bool attention_bias = false;

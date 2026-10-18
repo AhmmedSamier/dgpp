@@ -151,6 +151,8 @@ struct WorldSettings {
   bool expert_gemm_pair = false;
   bool ngram_prestage = true;
   std::string prefill = "bounded";           // the DeepSeek-V4.1 prefill mode: bounded | exact
+  int dory_loops = 0;                  // engine.dory_loops (Dory1.0-4B, world 1 only; 0 = the checkpoint's)
+  std::string dory_kv_cache = "per_loop";    // engine.dory_kv_cache: per_loop | last_loop
   std::optional<dgpp::RopeScaling> rope_scaling;  // the opt-in YaRN ramp: absent = plain
   std::string embed_sharding = "replicated";  // the full GLM-5.3's embedding: replicated | vocab
   std::string mtp_head = "checkpoint";        // the full GLM-5.3 draft head: checkpoint | fp8

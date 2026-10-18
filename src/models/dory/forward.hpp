@@ -124,6 +124,7 @@ class DoryModel : public SessionModel<DoryModel> {
   const DoryKvPool& pool() const { return pool_; }
   void graph_prepare();
   static constexpr bool kDraftChain = false;  // no draft layer at all (plan D4)
+  static constexpr bool kBatchedDraftChain = false;  // nothing to batch-draft
   const uint16_t* draft_hidden_rows() const { return nullptr; }
   void snapshot_draft_state(int) {}
   void restore_draft_state(int) {}

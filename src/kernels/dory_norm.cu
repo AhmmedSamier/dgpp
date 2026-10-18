@@ -1,5 +1,6 @@
 #include "kernels/dory_norm.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 
 #include "common/cuda_check.hpp"
@@ -392,6 +393,30 @@ void check_shape(int rows, int dim, const char* who) {
 bool aligned16(const void* p) { return (reinterpret_cast<uintptr_t>(p) & 15u) == 0; }
 
 }  // namespace
+
+// The walk's ping-pong staging copy (the loop's input_h/state and the head's
+// fixed capture address). A kernel, not a cudaMemcpy: the decode graph must
+// be kernels-only (engine/graph_check.hpp) and a capture records a copy as
+// a memcpy node.
+__global__ void __launch_bounds__(256) copy_rows_kernel(const uint4* __restrict__ src,
+                                                        uint4* __restrict__ dst, size_t chunks) {
+  const size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
+  for (size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < chunks;
+       i += stride)
+    dst[i] = src[i];
+}
+
+void dory_copy_rows_bf16(const uint16_t* src, uint16_t* dst, size_t elems, cudaStream_t stream) {
+  if (elems == 0) return;
+  if (!src || !dst) throw std::invalid_argument("dory_copy_rows: null buffer");
+  if (!aligned16(src) || !aligned16(dst))
+    throw std::invalid_argument("dory_copy_rows: buffers must be 16-byte aligned");
+  const size_t chunks = elems / 8;  // bf16 rows: dims are multiples of 16 (config's check)
+  const size_t blocks = std::min<size_t>((chunks + 255) / 256, 4096);
+  copy_rows_kernel<<<blocks, 256, 0, stream>>>(reinterpret_cast<const uint4*>(src),
+                                               reinterpret_cast<uint4*>(dst), chunks);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
 
 void dory_justnorm_bf16(const uint16_t* x, uint16_t* y, int rows, int dim, float eps,
                         cudaStream_t stream) {

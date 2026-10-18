@@ -38,6 +38,7 @@ over RoCE. Each quant links to its specific Hugging Face model card.
 | DeepSeek-V4-Flash | [deepseek-ai/DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) | 2, 4 | [Two nodes](deploy/cluster_deepseek-v4-flash_mxfp4-fp8_w2.example.json), [four nodes](deploy/cluster_deepseek-v4-flash_mxfp4-fp8_w4.example.json) |
 | Qwen3.8-27B | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | 1, 2, 4 | [One node](deploy/cluster_qwen3.8-27b_fp8_w1.example.json) , [two nodes](deploy/cluster_qwen3.8-27b_fp8_w2.example.json) and [four nodes](deploy/cluster_qwen3.8-27b_fp8_w4.example.json) (the DFlash2 block drafter on every world) |
 | Qwen3.8-27B NVFP4 | [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) | 1, 2, 4 | [One node](deploy/cluster_qwen3.8-27b_nvfp4_w1.example.json) , [two nodes](deploy/cluster_qwen3.8-27b_nvfp4_w2.example.json) and [four nodes](deploy/cluster_qwen3.8-27b_nvfp4_w4.example.json) (the mixed release: NVFP4 MLPs, channel-FP8 attention and head; [card](docs/model_cards/Qwen3.8-27B-NVFP4.md)) |
+| Dory1.0-4B | [nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-NVFP4](https://huggingface.co/nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-NVFP4) | 1 | [One node](deploy/cluster_dory1.0-4b_nvfp4_w1.example.json) (the looped normalized GPT served as shipped: weight-only NVFP4 W4A16, BF16 K/V planes, exact `per_loop` recurrent caches, no draft layer; [card](docs/model_cards/Dory1.0-4B-NVFP4.md), [plan](docs/dory_plan.md)) |
 
 The Qwen NVFP4 templates select streaming MMA for the FP8 vocabulary head
 with `engine.fp8_head: "mma"`, following matched one- and two-Spark
@@ -110,6 +111,15 @@ tg128 64 tokens/s for one request and 91 / 121 in total at two and five
 concurrent requests; on two Sparks 40–73 tokens/s for one request and
 68–101 across four ([benchmarks](docs/benchmarks.md)). See the
 [model card](docs/model_cards/DeepSeek-V4-Flash.md).
+
+Dory1.0-4B is a looped normalized GPT served as shipped — weight-only
+NVFP4 W4A16, BF16 activations and K/V, the recurrent block's exact
+`per_loop` caches on one rank. It has no draft layer, so its world is
+plain: the speculation keys are refused at startup, not ignored. See the
+[model card](docs/model_cards/Dory1.0-4B-NVFP4.md) and
+[plan](docs/dory_plan.md); the loop's two keys
+([`engine.dory_loops`, `engine.dory_kv_cache`](docs/configuration.md))
+are opt-in overrides of the exact path.
 
 The linked templates select MTP or DFlash with deployment-specific tuning.
 Plain decode, alternate speculation, cache formats and slot counts are launcher
