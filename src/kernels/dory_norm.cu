@@ -1,0 +1,247 @@
+#include "kernels/dory_norm.hpp"
+
+#include <stdexcept>
+
+#include "common/cuda_check.hpp"
+#include "common/dtypes.hpp"
+
+namespace dgpp {
+
+namespace {
+
+constexpr int kThreads = 256;
+constexpr int kWarps = kThreads / 32;
+constexpr int kVecElems = 8;                                       // bf16 per 16-byte vector
+constexpr int kMaxVecs = kDoryNormMaxDim / (kThreads * kVecElems);  // 4 per thread
+
+__device__ __forceinline__ double warp_sum(double v) {
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+  return v;
+}
+
+__device__ __forceinline__ uint32_t pack_bf16(uint16_t lo, uint16_t hi) {
+  return static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 16);
+}
+
+__device__ __forceinline__ float lo_bf16(uint32_t w) {
+  return bf16_bits_to_float(static_cast<uint16_t>(w & 0xffffu));
+}
+__device__ __forceinline__ float hi_bf16(uint32_t w) {
+  return bf16_bits_to_float(static_cast<uint16_t>(w >> 16));
+}
+
+// s0..s3 += the squares of the eight bf16 lanes of the two words at wp[j],
+// wp[j + 1], in four independent fp64 chains (add_rmsnorm's shape: GB10's
+// dependent fp64 add is ~90 ns, so the chains matter).
+__device__ __forceinline__ void acc_words(const uint32_t* wp, int j, double& s0, double& s1, double& s2,
+                                          double& s3) {
+  const float a = lo_bf16(wp[j]), b = hi_bf16(wp[j]);
+  const float c = lo_bf16(wp[j + 1]), d = hi_bf16(wp[j + 1]);
+  s0 = fma(static_cast<double>(a), static_cast<double>(a), s0);
+  s1 = fma(static_cast<double>(b), static_cast<double>(b), s1);
+  s2 = fma(static_cast<double>(c), static_cast<double>(c), s2);
+  s3 = fma(static_cast<double>(d), static_cast<double>(d), s3);
+}
+
+// The row's rstd from an fp64 partial sum. `part`/`slot` are the kernel's
+// shared arrays; every thread of the block must call this in the same order.
+__device__ __forceinline__ float block_rstd(double ss, double* part, float* slot, float eps) {
+  const int tid = threadIdx.x;
+  const int warp = tid / 32, lane = tid % 32;
+  const double ws = warp_sum(ss);
+  if (lane == 0) part[warp] = ws;
+  __syncthreads();
+  if (warp == 0) {
+    double t = lane < kWarps ? part[lane] : 0.0;
+    t = warp_sum(t);
+    if (lane == 0) *slot = 1.0f / sqrtf(static_cast<float>(t) + eps);
+  }
+  __syncthreads();
+  return *slot;
+}
+
+// The same for two sums at once: one shared round trip for both.
+__device__ __forceinline__ void block_rstd_pair(double sa, double sb, double* part_a, double* part_b,
+                                                float* out_a, float* out_b, float eps) {
+  const int tid = threadIdx.x;
+  const int warp = tid / 32, lane = tid % 32;
+  const double wa = warp_sum(sa), wb = warp_sum(sb);
+  if (lane == 0) {
+    part_a[warp] = wa;
+    part_b[warp] = wb;
+  }
+  __syncthreads();
+  if (warp == 0) {
+    double ta = lane < kWarps ? part_a[lane] : 0.0;
+    double tb = lane < kWarps ? part_b[lane] : 0.0;
+    ta = warp_sum(ta);
+    tb = warp_sum(tb);
+    if (lane == 0) {
+      *out_a = 1.0f / sqrtf(static_cast<float>(ta) + eps);
+      *out_b = 1.0f / sqrtf(static_cast<float>(tb) + eps);
+    }
+  }
+  __syncthreads();
+}
+
+// One row per block; vector v of thread t covers elements
+// [(v * kThreads + t) * 8, +8). Handles dim < kThreads * kVecElems through
+// the partial tail pass (nvec == 0).
+__global__ void __launch_bounds__(kThreads) justnorm_kernel(const uint16_t* __restrict__ x,
+                                                            uint16_t* __restrict__ y, int dim,
+                                                            float eps) {
+  const int tid = threadIdx.x;
+  const size_t row = static_cast<size_t>(blockIdx.x) * dim;
+  const int nvec = dim / (kThreads * kVecElems);
+  const int tail = (dim - nvec * kThreads * kVecElems) / kVecElems;
+
+  uint4 v[kMaxVecs];
+  double s[4] = {0.0, 0.0, 0.0, 0.0};
+#pragma unroll
+  for (int i = 0; i < kMaxVecs; ++i) {
+    const bool live = i < nvec || (i == nvec && tid < tail);
+    if (!live) continue;
+    const int e0 = (i * kThreads + tid) * kVecElems;
+    v[i] = *reinterpret_cast<const uint4*>(x + row + e0);
+    const uint32_t* xp = reinterpret_cast<const uint32_t*>(&v[i]);
+#pragma unroll
+    for (int j = 0; j < 4; j += 2) acc_words(xp, j, s[0], s[1], s[2], s[3]);
+  }
+
+  __shared__ double part[kWarps];
+  __shared__ float s_rstd;
+  const float rstd = block_rstd((s[0] + s[1]) + (s[2] + s[3]), part, &s_rstd, eps);
+
+#pragma unroll
+  for (int i = 0; i < kMaxVecs; ++i) {
+    const bool live = i < nvec || (i == nvec && tid < tail);
+    if (!live) continue;
+    const int e0 = (i * kThreads + tid) * kVecElems;
+    const uint32_t* xp = reinterpret_cast<const uint32_t*>(&v[i]);
+    uint32_t yp[4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j)
+      yp[j] = pack_bf16(float_to_bf16_bits(lo_bf16(xp[j]) * rstd),
+                        float_to_bf16_bits(hi_bf16(xp[j]) * rstd));
+    *reinterpret_cast<uint4*>(y + row + e0) = make_uint4(yp[0], yp[1], yp[2], yp[3]);
+  }
+}
+
+__global__ void __launch_bounds__(kThreads)
+    slerp_alpha_kernel(const uint16_t* __restrict__ a, const uint16_t* __restrict__ b,
+                       const uint16_t* __restrict__ alpha, float scale, uint16_t* __restrict__ y,
+                       int dim, float eps) {
+  const int tid = threadIdx.x;
+  const size_t row = static_cast<size_t>(blockIdx.x) * dim;
+  const int nvec = dim / (kThreads * kVecElems);
+  const int tail = (dim - nvec * kThreads * kVecElems) / kVecElems;
+
+  // Pass 1: both input rows held in registers, their two sums in one trip.
+  uint4 va[kMaxVecs], vb[kMaxVecs], vy[kMaxVecs];
+  double sa[4] = {0.0, 0.0, 0.0, 0.0}, sb[4] = {0.0, 0.0, 0.0, 0.0};
+#pragma unroll
+  for (int i = 0; i < kMaxVecs; ++i) {
+    const bool live = i < nvec || (i == nvec && tid < tail);
+    if (!live) continue;
+    const int e0 = (i * kThreads + tid) * kVecElems;
+    va[i] = *reinterpret_cast<const uint4*>(a + row + e0);
+    vb[i] = *reinterpret_cast<const uint4*>(b + row + e0);
+    const uint32_t* ap = reinterpret_cast<const uint32_t*>(&va[i]);
+    const uint32_t* bp = reinterpret_cast<const uint32_t*>(&vb[i]);
+#pragma unroll
+    for (int j = 0; j < 4; j += 2) {
+      acc_words(ap, j, sa[0], sa[1], sa[2], sa[3]);
+      acc_words(bp, j, sb[0], sb[1], sb[2], sb[3]);
+    }
+  }
+
+  __shared__ double part_a[kWarps], part_b[kWarps];
+  __shared__ float s_rstd_a, s_rstd_b;
+  block_rstd_pair((sa[0] + sa[1]) + (sa[2] + sa[3]), (sb[0] + sb[1]) + (sb[2] + sb[3]), part_a, part_b,
+                  &s_rstd_a, &s_rstd_b, eps);
+  const float rstd_a = s_rstd_a, rstd_b = s_rstd_b;
+
+  // Pass 2: the two normalized rows, the per-column slerp, and the output
+  // row's own sum over the ROUNDED combine (the reference stores it before
+  // re-normalizing).
+  double sy[8] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+#pragma unroll
+  for (int i = 0; i < kMaxVecs; ++i) {
+    const bool live = i < nvec || (i == nvec && tid < tail);
+    if (!live) continue;
+    const int e0 = (i * kThreads + tid) * kVecElems;
+    const uint32_t* ap = reinterpret_cast<const uint32_t*>(&va[i]);
+    const uint32_t* bp = reinterpret_cast<const uint32_t*>(&vb[i]);
+    const uint32_t* pp = reinterpret_cast<const uint32_t*>(alpha + e0);
+    uint32_t yp[4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+      const float lr_lo = fabsf(lo_bf16(pp[j]) * scale);
+      const float lr_hi = fabsf(hi_bf16(pp[j]) * scale);
+      const uint16_t na_lo = float_to_bf16_bits(lo_bf16(ap[j]) * rstd_a);
+      const uint16_t na_hi = float_to_bf16_bits(hi_bf16(ap[j]) * rstd_a);
+      const uint16_t nb_lo = float_to_bf16_bits(lo_bf16(bp[j]) * rstd_b);
+      const uint16_t nb_hi = float_to_bf16_bits(hi_bf16(bp[j]) * rstd_b);
+      const float na0 = bf16_bits_to_float(na_lo), nb0 = bf16_bits_to_float(nb_lo);
+      const float na1 = bf16_bits_to_float(na_hi), nb1 = bf16_bits_to_float(nb_hi);
+      yp[j] = pack_bf16(float_to_bf16_bits(na0 + lr_lo * (nb0 - na0)),
+                        float_to_bf16_bits(na1 + lr_hi * (nb1 - na1)));
+      const float f0 = lo_bf16(yp[j]), f1 = hi_bf16(yp[j]);
+      sy[2 * j] = fma(static_cast<double>(f0), static_cast<double>(f0), sy[2 * j]);
+      sy[2 * j + 1] = fma(static_cast<double>(f1), static_cast<double>(f1), sy[2 * j + 1]);
+    }
+    vy[i] = make_uint4(yp[0], yp[1], yp[2], yp[3]);
+  }
+
+  const double ss = ((sy[0] + sy[1]) + (sy[2] + sy[3])) + ((sy[4] + sy[5]) + (sy[6] + sy[7]));
+  const float rstd_y = block_rstd(ss, part_a, &s_rstd_a, eps);
+
+  // Pass 3.
+#pragma unroll
+  for (int i = 0; i < kMaxVecs; ++i) {
+    const bool live = i < nvec || (i == nvec && tid < tail);
+    if (!live) continue;
+    const int e0 = (i * kThreads + tid) * kVecElems;
+    const uint32_t* yp = reinterpret_cast<const uint32_t*>(&vy[i]);
+    uint32_t zp[4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j)
+      zp[j] = pack_bf16(float_to_bf16_bits(lo_bf16(yp[j]) * rstd_y),
+                        float_to_bf16_bits(hi_bf16(yp[j]) * rstd_y));
+    *reinterpret_cast<uint4*>(y + row + e0) = make_uint4(zp[0], zp[1], zp[2], zp[3]);
+  }
+}
+
+void check_shape(int rows, int dim, const char* who) {
+  if (dim <= 0 || dim % kVecElems != 0 || dim > kDoryNormMaxDim)
+    throw std::invalid_argument(std::string(who) + ": dim must be a multiple of 8 up to 8192");
+}
+
+bool aligned16(const void* p) { return (reinterpret_cast<uintptr_t>(p) & 15u) == 0; }
+
+}  // namespace
+
+void dory_justnorm_bf16(const uint16_t* x, uint16_t* y, int rows, int dim, float eps,
+                        cudaStream_t stream) {
+  if (rows <= 0) return;
+  if (!x || !y) throw std::invalid_argument("dory_justnorm: null buffer");
+  check_shape(rows, dim, "dory_justnorm");
+  if (!aligned16(x) || !aligned16(y))
+    throw std::invalid_argument("dory_justnorm: rows must be 16-byte aligned");
+  justnorm_kernel<<<rows, kThreads, 0, stream>>>(x, y, dim, eps);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void dory_slerp_alpha_bf16(const uint16_t* a, const uint16_t* b, const uint16_t* alpha, float scale,
+                           uint16_t* y, int rows, int dim, float eps, cudaStream_t stream) {
+  if (rows <= 0) return;
+  if (!a || !b || !alpha || !y) throw std::invalid_argument("dory_slerp_alpha: null buffer");
+  check_shape(rows, dim, "dory_slerp_alpha");
+  if (!aligned16(a) || !aligned16(b) || !aligned16(alpha) || !aligned16(y))
+    throw std::invalid_argument("dory_slerp_alpha: rows must be 16-byte aligned");
+  slerp_alpha_kernel<<<rows, kThreads, 0, stream>>>(a, b, alpha, scale, y, dim, eps);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+}  // namespace dgpp

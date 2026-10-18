@@ -213,12 +213,19 @@ add_library(dgpp_kernels STATIC
   src/kernels/mimo_attn.cu
   src/kernels/mimo_mtp_history.cu
   src/kernels/mimo_attn_prefill.cu
-  src/kernels/add_rmsnorm.cu)
+  src/kernels/add_rmsnorm.cu
+  src/kernels/dory_norm.cu)
 target_link_libraries(dgpp_kernels PUBLIC CUDA::cudart CUDA::cublasLt CUDA::cuda_driver dgpp_core dgpp_rope_scaling)
 dgpp_set_common(dgpp_kernels)
 # The device sampler mirrors the host oracle bit for bit: no contraction of
 # its multiplies and adds (the host builds with -ffp-contract=off).
 set_source_files_properties(src/kernels/sample_pick.cu PROPERTIES
+  COMPILE_OPTIONS "--fmad=false")
+# The same for the Dory normalizations: the residual combine
+# (na + lr * (nb - na)) rounds like the host reference's, which is built with
+# -ffp-contract=off, so the device must not contract it into an fma either.
+# The explicit fma() chains of the row sums are unaffected by -fmad.
+set_source_files_properties(src/kernels/dory_norm.cu PROPERTIES
   COMPILE_OPTIONS "--fmad=false")
 
 add_library(dgpp_models_doll STATIC
@@ -1481,6 +1488,12 @@ target_include_directories(add_rmsnorm_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/
 target_link_libraries(add_rmsnorm_test PRIVATE dgpp_kernels CUDA::cudart Threads::Threads)
 dgpp_set_common(add_rmsnorm_test)
 add_test(NAME add_rmsnorm_test COMMAND add_rmsnorm_test)
+
+add_executable(dory_norm_test tests/cuda/dory_norm_test.cu)
+target_include_directories(dory_norm_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(dory_norm_test PRIVATE dgpp_kernels dgpp_models_dory CUDA::cudart Threads::Threads)
+dgpp_set_common(dory_norm_test)
+add_test(NAME dory_norm_test COMMAND dory_norm_test)
 
 add_executable(glm4_loader_test tests/cuda/glm4_loader_test.cpp)
 target_include_directories(glm4_loader_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)

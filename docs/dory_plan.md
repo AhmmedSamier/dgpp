@@ -292,9 +292,18 @@ combination; the `logit_scale` head; the recurrent K/V policy.
    none unexpected.
 3. **Primitives** — `justnorm`/`slerp_norm` kernels + host references +
    kernel tests, with the fp32 accumulation and the `eps` pinned.
-   **Host half landed** (`models/dory/reference.{hpp,cpp}`,
-   `tests/unit/dory_reference_test.cpp`, commit 007d40b7); the CUDA kernels
-   land with stage 4, which is what needs them.
+   **Landed**: the host references and their test
+   (`models/dory/reference.{hpp,cpp}`, `tests/unit/dory_reference_test.cpp`,
+   commit 007d40b7) and the CUDA kernels, including the fused residual
+   (`kernels/dory_norm.{hpp,cu}`, `tests/cuda/dory_norm_test.cu`). The kernels
+   sum in fp64 — every bf16 square is exact there, so the sum is exact and
+   `float(sum) + eps` rounds once, which is the reference's one-rounding
+   contract — and build with `-fmad=false` so the residual combine rounds as
+   the host's `-ffp-contract=off` does. The test compares them bitwise against
+   an fp64-exact oracle and, against the transcription's own fp32 chain,
+   within 2% of the case scale with 0.03% of the values differing (its
+   reduction error, ~sqrt(dim)·2^-24). 6.3 us for a 4096-wide justnorm and
+   13.5 us for the fused residual on one Spark.
 4. **The layer walk** — one sublayer per index, the attention and MLP
    numerics of §1.3–§1.4, the two RoPE thetas, the sliding window.
 5. **The loop** — the input/recurrent/output partition, the re-injection
