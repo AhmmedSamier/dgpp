@@ -43,6 +43,10 @@ control. Build that target with `DGPP_BUILD_BENCHMARKS=ON`, compare OFF and ON
 on the same idle host, and keep these measurements separate from serving rates:
 
 ```sh
+cmake --preset release -DDGPP_BUILD_BENCHMARKS=ON -DDGPP_HOST_NEUTRAL_PENALTY_SKIP=OFF
+cmake --build build-release --target host_penalties_bench -j 4
+build-release/host_penalties_bench
+cmake --preset release -DDGPP_BUILD_BENCHMARKS=ON -DDGPP_HOST_NEUTRAL_PENALTY_SKIP=ON
 cmake --build build-release --target host_penalties_bench -j 4
 build-release/host_penalties_bench
 ```
