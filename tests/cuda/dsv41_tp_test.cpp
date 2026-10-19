@@ -42,6 +42,7 @@
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
 #include "common/log.hpp"
+#include "common/bf16_residency.hpp"
 #include "common/test.hpp"
 #include "dsv41_fixture.hpp"
 #include "engine/tp_bus.hpp"
@@ -809,6 +810,70 @@ DGPP_TEST(dsv41_engram_prestage_is_bitwise_the_sequential_staging) {
     std::printf("[ OK ] 701 rows in three 256-row chunks (%s): 2 prestages claimed, logits and 4 decode steps bitwise "
                 "the sequential staging\n", group_api ? "the scheduler's batch walk" : "the cursor advance");
   }
+}
+
+// The lm head's 12-bit companion (engine.bf16_weights, 2026-10-19): under
+// bf12 | bf12+bf16 the model packs its head slice after the load and the
+// decode head GEMV reads the companion. The packed values are the bf16
+// values; the companion GEMV sums each row in another fp32 order, so the
+// logits are the bf16 head's within rounding and the argmax is equal — the
+// prefill's last row and four decode steps behind it, against the
+// checkpoint residency; the companions-only residency packs the same.
+DGPP_TEST(dsv41_lm_head_bf12_companion_matches_the_bf16_head) {
+  const std::string dir = (fs::current_path() / "dsv41_tp_fixture_bf12").string();
+  const Dsv41TextConfig cfg = dsv41fx::tiny_config();
+  dsv41fx::write_fixture(cfg, dir);
+  (void)dsv41fx::fixture_sidecar(cfg, dir);
+  const std::vector<int64_t> prompt = make_tokens(cfg, 160);
+  struct Run {
+    std::vector<float> logits;
+    std::vector<std::vector<float>> steps;
+    size_t matrices = 0, released = 0;
+  };
+  const auto run = [&](dgpp::Bf16Residency mode) {
+    dgpp::set_bf16_residency(mode);
+    Run r;
+    Dsv41Model model(cfg, dir, 512, 2048, Dsv41Residency::Streaming, nullptr, 0, 1, /*max_requests=*/2);
+    model.set_decode_route_traces(false);
+    r.logits = model.session_prefill(0, prompt).logits;
+    for (int k = 0; k < 4; ++k) r.steps.push_back(model.session_step(0, (prompt[static_cast<size_t>(k)] + 7) % cfg.vocab_size).logits);
+    model.session_close(0);
+    r.matrices = model.bf12_companions().matrices();
+    r.released = model.bf12_companions().released();
+    return r;
+  };
+  const Run plain = run(dgpp::Bf16Residency::Checkpoint);
+  const Run both = run(dgpp::Bf16Residency::Bf12AndBf16);
+  const Run only = run(dgpp::Bf16Residency::Bf12);
+  dgpp::set_bf16_residency(dgpp::Bf16Residency::Checkpoint);
+  require(plain.matrices == 0, "the checkpoint residency packs nothing");
+  require(both.matrices == 1 && only.matrices == 1, "both companion residencies pack the lm head");
+  const int V = cfg.vocab_size;
+  const auto compare = [&](const std::vector<float>& a, const std::vector<float>& b, const char* what) {
+    require(!a.empty() && a.size() == b.size(), std::string(what) + ": logits shape");
+    const size_t rows = a.size() / static_cast<size_t>(V);
+    const float* pa = a.data() + (rows - 1) * static_cast<size_t>(V);
+    const float* pb = b.data() + (rows - 1) * static_cast<size_t>(V);
+    int ia = 0, ib = 0;
+    double d = 0, m = 0;
+    for (int i = 0; i < V; ++i) {
+      if (pa[i] > pa[ia]) ia = i;
+      if (pb[i] > pb[ib]) ib = i;
+      d += double(pa[i] - pb[i]) * double(pa[i] - pb[i]);
+      m += double(pb[i]) * double(pb[i]);
+    }
+    const double l2 = std::sqrt(d) / std::max(std::sqrt(m), 1e-30);
+    require(ia == ib, std::string(what) + ": the argmax differs from the bf16 head's");
+    require(l2 < 0.02, std::string(what) + ": the logits beyond rounding of the bf16 head's");
+    return l2;
+  };
+  double worst = 0;
+  for (const Run* r : {&both, &only}) {
+    worst = std::max(worst, compare(r->logits, plain.logits, "prefill last row"));
+    for (int k = 0; k < 4; ++k) worst = std::max(worst, compare(r->steps[static_cast<size_t>(k)], plain.steps[static_cast<size_t>(k)], "decode step"));
+  }
+  std::printf("[ OK ] lm head bf12 companion: the prefill's last row and 4 decode steps within rel l2 %.2e of the bf16 head "
+              "(argmax equal), both residencies packed, %zu released under the companions-only one\n", worst, only.released);
 }
 
 int main() { return dgpp::test::run_all(); }

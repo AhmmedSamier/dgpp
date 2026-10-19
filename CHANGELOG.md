@@ -5,6 +5,31 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **Decode: the fp4 MoE down projection in one pass per lane, and the
+  DeepSeek-V4.1 lm head's 12-bit companion** (2026-10-19). The 1017 decode
+  pass at C1 (46–47 ms wall, about three rows, a node trace): the expert
+  gate/up kernel at the DRAM read ceiling, the down kernel at 73 % of it
+  (its rows are K = 576 on four nodes, 18 chunks over two lanes, walked
+  in three passes of 4, 4 and 1), the dense GEMVs 12 ms, the 95
+  collectives 7.9 ms (copy 4.7 + handshake 17–22 + skew 19–22 + fold 9 µs
+  each), 1,013 kernels under 15 µs 5 ms. `fp4_gemv` now issues a short
+  row's chunks in one pass (K <= 1024, at most 9 chunks per lane — every
+  load in flight at once; the chain per row is the same: bitwise, the
+  fp4 and MoE pins green): the down kernel 188.6 → 178.8 µs per launch.
+  The lm head's bf12 companion, which `engine.bf16_weights: bf12` had
+  left inert for this family, is now packed after the load (one slot of
+  expansion scratch for the prefill head): the decode head GEMV reads 12
+  bits per weight, bitwise the bf16 head (the gate holds the prefill's
+  last row and four decode steps at rel l2 0 against the checkpoint
+  residency). Together the C1 pass 47.0 → 46.7 ms; the head's own A/B is
+  level within noise (its GEMVs 12.35 → 11.87 ms per pass, the read
+  already partly under the prefetch windows). Measured and excluded for
+  the collective's jitter, with the bus timeline on every rank: CPU idle
+  states capped at 100 µs (level: the bus spins), GPU clocks locked at
+  2500 and 3000 MHz (level: the step is DRAM-bound), the L2 prefetcher off
+  (skew unchanged; the prefetcher pays 50 µs per generation); inline
+  doorbells were already granted. What remains of the collective is
+  protocol latency — the propagation and claim rounds — a bus project.
 - **DeepSeek-V4.1 prefill: the Engram folds by row block** (2026-10-19).
   The two Engram layers' folds of (hc + 1) x hidden per row — 210 MB per
   4,096-row chunk, 31 ms each over the wire — were the overlap walk's last

@@ -56,6 +56,7 @@
 #include "engine/boundary_reducer.hpp"
 #include "engine/decode_outputs.hpp"
 #include "engine/memory_plan.hpp"
+#include "kernels/bf12_companions.hpp"
 #include "engine/session_model.hpp"
 #include "kernels/gemm.hpp"
 #include "kernels/draft_head.hpp"
@@ -154,6 +155,8 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
   void set_prefill_fold_overlap(bool on, int min_rows = kFoldOverlapMinRows, bool without_reducer = false);
   bool prefill_fold_overlap() const { return fold_overlap_; }
   uint64_t debug_overlap_async_folds() const { return overlap_async_folds_; }
+  // The lm head's 12-bit companion (engine.bf16_weights): tests read its counters.
+  const Bf12Companions& bf12_companions() const { return bf12_; }
   // The Engram chunk-ahead staging's counters (tests): prestages published and claimed.
   uint64_t debug_engram_prestage_publishes() const { return engram_ ? engram_->debug_prestage_publishes() : 0; }
   uint64_t debug_engram_prestage_claims() const { return engram_ ? engram_->debug_prestage_claims() : 0; }
@@ -319,6 +322,14 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
   // request's block grid inside a publishing span), at least a block from
   // either end, past any decode prefix. 0: none (the one-block walk).
   int overlap_boundary(int T, const WalkRows& rows) const;
+  // The lm head's bf12 companion (kernels/bf12_companions.hpp): packed after
+  // the load under engine.bf16_weights bf12 | bf12+bf16 — the decode head
+  // GEMV (the draft's base logits and the verify's, 331 MB per rank per
+  // read on the 1017 checkpoint at world 4) reads 12 bits per weight; the
+  // prefill head keeps its tile path, expanding from the companion when
+  // the bf16 bytes went back (one slot: the prefill head runs once a walk).
+  static constexpr int kBf12ExpandSlots = 1;
+  Bf12Companions bf12_;
   static inline bool s_default_prefill_fold_overlap = true;
   bool fold_overlap_ = s_default_prefill_fold_overlap;
   int fold_overlap_min_rows_ = kFoldOverlapMinRows;

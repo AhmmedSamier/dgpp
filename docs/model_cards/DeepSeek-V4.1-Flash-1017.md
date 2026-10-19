@@ -125,6 +125,32 @@ commits 2.97 tokens per request per 116 ms step (154 tok/s sustained)
 against fixed depth 4's 3.7 per 182 ms (122 tok/s); the campaign's C8
 phase, eight 256-token requests on six slots, averages over its tail.
 
+## The decode pass at C1 (2026-10-19)
+
+A node trace of the served C1 pass (46–47 ms wall, about three rows per
+pass with the drafter's rows): the expert gate/up kernel 12.2 ms at the
+DRAM read ceiling, the down kernel 7.7 ms at about 78 % of it after its
+rows (K = 576 on four nodes) went to one pass per lane, the dense GEMVs
+11.9 ms, the 95 collectives 7.3 ms (76 µs each: copy 4.7 + handshake
+17–22 + skew 19–22 + fold 9), the attention 2.9 ms, and 1,013 kernels
+under 15 µs 5 ms (the norms, the mHC coefficient pairs, the attention
+finish, the router). The per-row cost of 5.2 ms is the verify row's
+expert bytes — six expert slices of 4.4 MB on 40 layers, 1.06 GB per
+rank — at 89 % of the read ceiling; the draft chain's own rows cost about
+0.1 ms each. The lm head's 12-bit companion (`engine.bf16_weights: bf12`
+in the template) is packed for this family now, bitwise the bf16 head.
+
+Excluded for the collective's jitter, each with the bus timeline on every
+rank: CPU idle states (level; the bus engine spins), GPU clock locks at
+2500 and 3000 MHz (level; the step is DRAM-bound), the L2 prefetcher off
+(the skew unchanged; the prefetcher pays 50 µs per generation); every
+rank arrives last about a quarter of the time, so no node is slow. The
+collective's remaining 40 µs per round is protocol latency, a bus
+project; the small kernels are a fusion project with exactness
+contracts. Against TensorFold's 14.5 ms round at one row on a 3.5-bpw
+format, this pass reads about 1.6× the bytes (4.25-bit experts and 8-bit
+dense, lossless) and carries about 12 ms of latency-bound work.
+
 ## The prefill selection at long context (2026-10-18)
 
 Prefill cost per token is flat in everything but one piece: on every

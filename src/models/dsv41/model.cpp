@@ -4,6 +4,7 @@
 #include "kernels/scale_gemm.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <numeric>
@@ -280,6 +281,20 @@ Dsv41Model::Dsv41Model(const Dsv41TextConfig& cfg, const std::string& checkpoint
     h_route_weights_ = pinned_alloc<float>(layers * M * K);
   }
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  // The lm head's 12-bit companion (engine.bf16_weights; bitwise the bf16
+  // values): the decode head GEMV reads 12 bits per weight — the head is
+  // read twice per pass, the draft's base logits and the verify's. Under
+  // the companions-only residency the bf16 bytes go back when the loader
+  // granted them aside. Before the draft head's screen, which takes the
+  // companion when the bf16 bytes are gone.
+  if (Bf12Companions::enabled()) {
+    const auto t0 = std::chrono::steady_clock::now();
+    bf12_.pack_and_release(globals_.lm_head, lm_vocab_count_, cfg_.hidden_size, gemm_, stream_,
+                           [&](const void* w) { return loader_.release_packed(-1, w); });
+    bf12_.finish(gemm_, kBf12ExpandSlots);
+    bf12_.log_summary(loader_.rank(),
+                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+  }
   log_memory_ledger("dsv41: model ready");
   // The draft head's screen (engine.draft_head): from the served head, for
   // the decode drafts only; off (with a logged reason) when the setting or
@@ -370,6 +385,13 @@ Dsv41Model::MemoryPlan Dsv41Model::plan_memory(const Dsv41TextConfig& cfg, int m
   const size_t R = static_cast<size_t>(max_requests);
   const size_t H = static_cast<size_t>(cfg.hidden_size);
   const size_t V = static_cast<size_t>(Dsv41LayerStream::lm_vocab_count(cfg, tp_rank, tp_world, head));
+  if (Bf12Companions::enabled()) {
+    plan.add("bf16 decode packing (the lm head's 12-bit companion)",
+             Bf12Companions::planned_bytes(static_cast<int64_t>(V), static_cast<int64_t>(H)));
+    if (Bf12Companions::packed_only())
+      plan.add("bf16 prefill expansion scratch",
+               static_cast<size_t>(kBf12ExpandSlots) * Bf12Companions::planned_slot_bytes({V * H * 2}));
+  }
   size_t staging = 0;
   if (residency == Dsv41Residency::Resident) {
     plan.add("model weights (resident)", Dsv41LayerStream::resident_bytes(cfg, tp_rank, tp_world, head, mtp));
