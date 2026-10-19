@@ -5,6 +5,53 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **The one-sided collective transport for the decode step's folds
+  (`engine.collective_transport`), and what its numbers taught about the
+  step** (2026-10-19). The latency-class collectives — the decode graph's
+  recorded folds and the pick's stream collectives — travelled as payload
+  and doorbell SEND pairs that one block claimed through door cells, proved
+  by a hash pass, acked and credited: a chain of dependent system-memory
+  round trips on every rank. The write transport lays every row out as
+  512-byte self-describing chunks (31 lanes of bf16 and a trailer carrying
+  the chunk's hash and generation), RDMA-writes it into each peer's write
+  ring (a new slab region, exchange version 3; row (generation − 1) mod
+  kBusWriteRing, the ring's reuse guaranteed by the generations' order
+  rather than by credits), striped across both PCIe functions when the bus
+  has two lanes, and folds it with a grid whose warps each poll their own
+  chunks with every peer's copy in flight at once, prove each by its
+  trailer, fold in canonical rank order and write the result; each block
+  reports through its own pinned record and the engine posts on the full
+  set of ready records and completes on the full set of done records — no
+  door cells, claim rounds, acks, credits or atomics. The results are
+  bitwise the eager machine's (bus_test's graph, row and stream scenarios
+  run under both transports). The precondition probes that shaped it, on
+  this fabric: a GPU load of pinned memory costs 400 ns and 8+ blocks read
+  it near DRAM rate; DMA-BUF and peer-memory registration of device memory
+  are unsupported; the GPU cannot reach the NIC's PCIe BAR (a GPU-rung
+  doorbell is impossible here, and a GPU-built WQE rung by a CPU spinner is
+  2.5 µs slower than a plain post); NIC writes are atomic per 16-byte unit
+  but a 64-byte line's last unit can be visible before its first; the
+  fabric's one-way is 5.5 µs at 24 KiB, in situ as in isolation. The
+  mechanisms found while the kernel took five forms: GPU pollers slow a NIC
+  write's landing in proportion to their poll rate, not their bytes; beside
+  the L2 prefetch window a dependent global-memory round trip costs 1–8 µs,
+  so cross-block flags and per-chunk atomics straggle; one SM's in-flight
+  system loads cover a few GB/s at that latency, so one block is too few;
+  and the rows that land 18–23 µs after a rank's own row is staged are the
+  peers staging late — the ranks' arrival skew, not the wire. Per
+  collective at C1 (rank-0 medians, µs): send 64.2 = copy 5.1 + handshake
+  21.5 + skew 21.6 + fold 9.2; write 38.4 = 3.6 + 16.9 + 16.4 + 0.5. C1
+  code / prose / JSON (ms per pass at equal rows): 47.99 / 40.59 / 52.17 →
+  47.2 / 40.3 / 51.0 (decode 74.8 / 46.9 / 78.8 → 76.1 / 47.2 / 80.6
+  tok/s); C6 code (one repeat, 512 tokens): 170.96 → 165.32 ms/pass (121.2 → 125.3 tok/s), of which the lane striping is 1.1 ms; rank 0's collective there 267 → 198 µs, and 69 µs × 93 is the pass's gain — at six requests the collective is in the open. The pass gains less than the collective because the
+  boundary prefetch window drains under the fold by design and converts the
+  wait into DRAM time (window off: the collective 42 µs, the pass +1.9 ms),
+  so the step around the folds is bounded by DRAM bytes, and the
+  collective's remaining cost is the ranks' arrival skew (a quarter of the
+  generations wait under 20 µs, most 20–50, one in eight over 50). The bus
+  timeline now stamps each peer's row landing and first proof and the
+  engine's post mark from the kernel's clock (`scripts/bus_window_skew.py`
+  reads them); `DGPP_BUS_TIMELINE=1` as before.
 - **DeepSeek-V4.1 decode: the fused mHC site, the down kernel's tile
   stealing, the flash window split beside the main source; the fold split
   tried and discarded** (2026-10-19). The C1 pass's non-DRAM time, from the

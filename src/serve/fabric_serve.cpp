@@ -454,6 +454,8 @@ std::string encode_journal_settings(const WorldSettings& s) {
   append_json_string(&out, s.prefill_window);
   out += ",\"dcw\":";
   append_json_string(&out, s.decode_window);
+  out += ",\"ctr\":";
+  append_json_string(&out, s.collective_transport);
   // The opt-in YaRN ramp: absent when off, so a record from a plain run
   // carries no key at all (an older peer decodes it to "off", which is
   // what it would have run anyway — a world never mixes the two).
@@ -733,6 +735,10 @@ JournalRecord decode_journal_line(std::string_view line) {
     else s.prefill_window = "flash";
     if (const dgpp::minijson::Value* dcw = v.find("dcw")) s.decode_window = std::string(dcw->as_string());
     else s.decode_window = "flash";
+    // Records before the transport key (2026-10-19) carry none: send,
+    // the form every such binary runs.
+    if (const dgpp::minijson::Value* ctr = v.find("ctr")) s.collective_transport = std::string(ctr->as_string());
+    else s.collective_transport = "send";
     // Records without the rope ramp key carry none: the plain table
     // (records before the knob, 2026-09-18, and every plain run since).
     if (const dgpp::minijson::Value* rs = v.find("rs")) {
@@ -823,6 +829,7 @@ JournalRecord decode_journal_line(std::string_view line) {
         (s.prefill_dense != "tile" && s.prefill_dense != "streaming") ||
         (s.prefill_window != "flash" && s.prefill_window != "scalar") ||
         (s.decode_window != "flash" && s.decode_window != "scalar") ||
+        (s.collective_transport != "write" && s.collective_transport != "send") ||
         (s.embed_sharding != "replicated" && s.embed_sharding != "vocab") ||
         (s.mtp_head != "checkpoint" && s.mtp_head != "fp8") ||
         (s.prefill_attention != "bf16" && s.prefill_attention != "fp8") ||

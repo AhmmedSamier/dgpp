@@ -155,6 +155,7 @@ struct WorldSettings {
   bool prefill_fold_overlap = true;          // the DeepSeek-V4.1 prefill's boundary folds under the other row block's compute
   std::string prefill_window = "flash";      // the DeepSeek-V4.1 prefill's window attention: flash | scalar
   std::string decode_window = "flash";       // the DeepSeek-V4.1 decode's window attention: flash | scalar
+  std::string collective_transport = "write"; // the latency collectives' transport: write | send
   std::optional<dgpp::RopeScaling> rope_scaling;  // the opt-in YaRN ramp: absent = plain
   std::string embed_sharding = "replicated";  // the full GLM-5.3's embedding: replicated | vocab
   std::string mtp_head = "checkpoint";        // the full GLM-5.3 draft head: checkpoint | fp8

@@ -151,6 +151,38 @@ contracts. Against TensorFold's 14.5 ms round at one row on a 3.5-bpw
 format, this pass reads about 1.6× the bytes (4.25-bit experts and 8-bit
 dense, lossless) and carries about 12 ms of latency-bound work.
 
+## The collective transport (2026-10-19)
+
+The decode step's folds and the pick's stream collectives travel over
+`engine.collective_transport` (`write`, the default; `send` is the form
+until 2026-10-19). The write transport lays every row out as 512-byte
+self-describing chunks, RDMA-writes it into each peer's write ring across
+both PCIe functions, and folds it with a grid whose warps poll their own
+chunks with every peer's copy in flight at once; each block reports
+through a pinned record the engine aggregates. Bitwise the send machine's
+fold (the bus test's graph, row and stream scenarios under both).
+
+Measured on four nodes with the bus timeline on every rank (`timed_load`,
+ms per pass at equal accepted rows, decode tokens per second; the
+boundary prefetch window at its template setting):
+
+| Shape | send | write |
+|---|---|---|
+| C1 code (3.59 rows) | 47.99 / 74.8 | 47.2 / 76.1 |
+| C1 prose (1.90 rows) | 40.59 / 46.9 | 40.3 / 47.2 |
+| C1 JSON (4.11 rows) | 52.17 / 78.8 | 51.0 / 80.6 |
+| C6 code (20.7 rows, 512 tokens) | 170.96 / 121.2 | 165.32 / 125.3 |
+
+Per collective at C1 (rank 0, medians of window averages, µs): send
+64.2 = copy 5.1 + handshake 21.5 + skew 21.6 + fold 9.2; write 38.4 =
+3.6 + 16.9 + 16.4 + 0.5. At C6 (165 KiB rows): 267 → 198. The C1 pass
+gains less than its collectives because the boundary prefetch window
+drains under the fold and turns the wait into DRAM time (the window off:
+the collective 42 µs, the pass +1.9 ms); what remains of the collective
+is the ranks' arrival skew — the fabric delivers a row in 5.5 µs in situ,
+the peers stage 10–15 µs apart. The one-lane form (no striping) costs
+1.1 ms at C6 and nothing at C1.
+
 ## The decode latency round (2026-10-19)
 
 The C1 pass's non-DRAM time, from the node trace of `0d69d565` (three

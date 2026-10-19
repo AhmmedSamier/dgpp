@@ -1592,6 +1592,7 @@ int main(int argc, char** argv) {
   bool prefill_fold_overlap = true;    // the DeepSeek-V4.1 prefill's boundary folds under the other row block's compute
   std::string prefill_window = "flash";  // the DeepSeek-V4.1 prefill's window attention: flash | scalar
   std::string decode_window = "flash";   // the DeepSeek-V4.1 decode's window attention: flash | scalar
+  std::string collective_transport = "write";  // the latency collectives' transport: write | send
   // The opt-in YaRN rope ramp (engine.rope_scaling): absent = the plain
   // table, the default and the behaviour every earlier build had.
   std::optional<dgpp::RopeScaling> rope_scaling;
@@ -1725,6 +1726,7 @@ int main(int argc, char** argv) {
     prefill_fold_overlap = e.prefill_fold_overlap;
     prefill_window = e.prefill_window;
     decode_window = e.decode_window;
+    collective_transport = e.collective_transport;
     rope_scaling = e.rope_scaling;
     embed_sharding = e.embed_sharding;
     mtp_head = e.mtp_head;
@@ -2089,7 +2091,7 @@ int main(int argc, char** argv) {
         graph_batch_min_live == 0 ? std::min(2, max_concurrency) : graph_batch_min_live;
     return std::format(
         "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} pfattn={} dcattn={} ngt={} dw={} mtpef={} bfw={} "
-        "fp8head={} dh={} dhb={} mtph={} attw={} itopk={} ctb={} cbs={} pf={} pfd={} pfo={} pfw={} dcw={} "
+        "fp8head={} dh={} dhb={} mtph={} attw={} itopk={} ctb={} cbs={} pf={} pfd={} pfo={} pfw={} dcw={} ctr={} "
         "emsh={} maxtok={} queue={} "
         "eos={} graph={} compact={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} "
         "msad={} msss={} mdr={} mdt={} mvf={} dbr={} "
@@ -2102,7 +2104,7 @@ int main(int argc, char** argv) {
         draft_head,
         draft_head_blocks, mtp_head,
         attention_weights, index_topk, candidate_topk_blocks, candidate_block_size, prefill, prefill_dense,
-        prefill_fold_overlap ? 1 : 0, prefill_window, decode_window, embed_sharding,
+        prefill_fold_overlap ? 1 : 0, prefill_window, decode_window, collective_transport, embed_sharding,
         default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0,
         compact_batches ? 1 : 0, mtp ? 1 : 0, mtp_depth, mtp_schedule ? 1 : 0, mtp_schedule_row_ms,
         mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth,
@@ -2185,6 +2187,7 @@ int main(int argc, char** argv) {
         ws.prefill_fold_overlap = prefill_fold_overlap;
         ws.prefill_window = prefill_window;
         ws.decode_window = decode_window;
+        ws.collective_transport = collective_transport;
         ws.rope_scaling = rope_scaling;
         ws.embed_sharding = embed_sharding;
         ws.mtp_head = mtp_head;
@@ -2291,6 +2294,7 @@ int main(int argc, char** argv) {
         prefill_fold_overlap = ws.prefill_fold_overlap;
         prefill_window = ws.prefill_window;
         decode_window = ws.decode_window;
+        collective_transport = ws.collective_transport;
         rope_scaling = ws.rope_scaling;
         embed_sharding = ws.embed_sharding;
         mtp_head = ws.mtp_head;
@@ -3112,6 +3116,9 @@ int main(int argc, char** argv) {
             rank, world, fabric_port, peer, rendezvous_timeout_ms, family->lat_slot_bytes(decode_rows));
         if (bulk_pace_gbps >= 0) bus_options.bulk_pace_gbps = bulk_pace_gbps;
         if (bulk_inflight >= 0) bus_options.bulk_inflight_per_lane = bulk_inflight;
+        bus_options.latency_transport = collective_transport == "write"
+                                            ? dgpp::net::BusLatencyTransport::kWrite
+                                            : dgpp::net::BusLatencyTransport::kSend;
         bus = std::make_unique<dgpp::net::CollectiveBus>(bus_options);
         std::string err;
         if (!bus->start(&err))

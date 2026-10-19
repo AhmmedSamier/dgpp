@@ -30,6 +30,7 @@ namespace {
 
 using dgpp::net::BusMessageClass;
 using dgpp::net::BusOptions;
+using dgpp::net::BusLatencyTransport;
 using dgpp::net::BusRecvView;
 using dgpp::net::BusSendResult;
 using dgpp::net::BusStats;
@@ -51,6 +52,12 @@ double percentile(std::vector<double> v, double frac) {
   return v[std::min(v.size() - 1, static_cast<size_t>(frac * v.size()))];
 }
 
+// The graph/stream scenarios run under both latency transports (the
+// 2026-10-19 one-sided write ring and the send pairs); the eager and
+// harness scenarios use the send machinery either way.
+BusLatencyTransport g_transport = BusLatencyTransport::kSend;
+const char* transport_name() { return g_transport == BusLatencyTransport::kWrite ? "write" : "send"; }
+
 BusOptions base_options(int rank, uint16_t port) {
   BusOptions o;
   o.world_size = 2;
@@ -65,6 +72,7 @@ BusOptions base_options(int rank, uint16_t port) {
   o.qp_depth = 1024;
   o.completion_timeout_ms = 5000;
   o.consumer_deadline_s = 300.0;  // scenarios pause between phases
+  o.latency_transport = g_transport;
   return o;
 }
 
@@ -1724,7 +1732,7 @@ void scenario_allreduce_graph() {
               std::to_string(world_failures) + " failures");
     for (auto& bus : world_buses) bus->quiesce();
     for (auto& bus : world_buses) bus->stop();
-    DGPP_LOG_INFO("scenario allreduce_graph: world {} clean", world);
+    DGPP_LOG_INFO("scenario allreduce_graph ({}): world {} clean", transport_name(), world);
   }
 
   g_failures += failures;
@@ -1841,7 +1849,7 @@ void scenario_allreduce_graph_rows() {
               std::to_string(world_failures) + " failures");
     for (auto& bus : world_buses) bus->quiesce();
     for (auto& bus : world_buses) bus->stop();
-    DGPP_LOG_INFO("scenario allreduce_graph_rows: elems {} ({} KB per row) clean", elems,
+    DGPP_LOG_INFO("scenario allreduce_graph_rows ({}): elems {} ({} KB per row) clean", transport_name(), elems,
                   elems * 2 / 1024);
   }
   g_failures += failures;
@@ -1999,7 +2007,7 @@ void scenario_allreduce_stream() {
     CHECK(world_failures == 0, "stream world " + std::to_string(world) + " had " + std::to_string(world_failures) + " failures");
     for (auto& bus : world_buses) bus->quiesce();
     for (auto& bus : world_buses) bus->stop();
-    DGPP_LOG_INFO("scenario allreduce_stream: world {} clean ({} gens x {} passes)", world, gens, passes);
+    DGPP_LOG_INFO("scenario allreduce_stream ({}): world {} clean ({} gens x {} passes)", transport_name(), world, gens, passes);
   }
   g_failures += failures;
 }
@@ -2243,6 +2251,15 @@ int main(int argc, char** argv) {
   scenario_graph_snapshot_hash();
   if (const char* f = std::getenv("DGPP_TEST_FILTER"); f && std::string(f) == "graph_snapshot_hash")
     return g_failures == 0 ? 0 : 1;
+  // DGPP_TEST_FILTER=write: the one-sided transport's graph, row and
+  // stream scenarios alone.
+  if (const char* f = std::getenv("DGPP_TEST_FILTER"); f && std::string(f) == "write") {
+    g_transport = BusLatencyTransport::kWrite;
+    scenario_allreduce_graph();
+    scenario_allreduce_graph_rows();
+    scenario_allreduce_stream();
+    return g_failures == 0 ? 0 : 1;
+  }
   if (const char* f = std::getenv("DGPP_TEST_FILTER");
       f && std::string(f) == "allreduce_graph_rows") {
     scenario_allreduce_graph_rows();
@@ -2275,6 +2292,11 @@ int main(int argc, char** argv) {
   scenario_allreduce_graph();
   scenario_allreduce_graph_rows();
   scenario_allreduce_stream();
+  g_transport = BusLatencyTransport::kWrite;
+  scenario_allreduce_graph();
+  scenario_allreduce_graph_rows();
+  scenario_allreduce_stream();
+  g_transport = BusLatencyTransport::kSend;
   scenario_idle_gap_collective();
   scenario_geometry_mismatch();
   scenario_stop_releases_waiters();

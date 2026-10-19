@@ -214,6 +214,12 @@ struct ClusterConfig {
     std::string prefill_dense = "tile";  // the DeepSeek-V4.1 prefill's dense projections: tile | streaming
     std::string prefill_window = "flash";  // the DeepSeek-V4.1 prefill's window attention: flash | scalar
     std::string decode_window = "flash";   // the DeepSeek-V4.1 decode's window attention: flash | scalar
+    // The fabric's latency-class collective transport for the decode
+    // step's folds and the pick (2026-10-19): "write" = rows RDMA-written
+    // into the peers' write rings as self-describing chunks, folded by a
+    // grid of warps as they prove; "send" = payload + doorbell SEND pairs
+    // claimed through door cells by one block, hash-gated, acked, credited.
+    std::string collective_transport = "write";
     bool prefill_fold_overlap = true;    // the DeepSeek-V4.1 prefill's boundary folds under the other row block's compute
     // The opt-in YaRN rope ramp (2026-09-18, the Qwen3.8-Flash-Next 512K
     // recipe): absent is the default and leaves every table and every

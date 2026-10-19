@@ -312,6 +312,10 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           e.decode_window = text(x, ek, what);
           if (e.decode_window != "flash" && e.decode_window != "scalar")
             fail(what, "'" + ek + "' must be \"flash\" or \"scalar\"");
+        } else if (p.key == "collective_transport") {
+          e.collective_transport = text(x, ek, what);
+          if (e.collective_transport != "write" && e.collective_transport != "send")
+            fail(what, "'" + ek + "' must be \"write\" or \"send\"");
         } else if (p.key == "rope_scaling") {
           if (!x.is_object()) fail(what, "'" + ek + "' must be an object");
           dgpp::RopeScaling rs;
