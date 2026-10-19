@@ -261,10 +261,18 @@ void Csa2Layer::validate_pool(const Csa2StatePool& pool) const {
 
 // ---- the projections -------------------------------------------------------------------------
 
+// The decode projections' split-K (2026-10-19): the narrow matrices (wkv's
+// 512 rows, wq_a's 1,280, a wo_a group's 1,024) under-fill the grid unsplit
+// — in isolation 86, 161 and 136 GB/s at four rows against the 233.6 GB/s
+// ceiling — and take the workspace so the k range splits across blocks
+// (157, 168, 180 GB/s); wq_b, the indexer's wq_b and wo_b fill the grid
+// already and lose 2–15 % to the split's reduce, so they stay unsplit
+// (micro_mma_gemv_shapes -d). A row's chain is the split form's, the same
+// whatever rows ride in the launch.
 void Csa2Layer::project_kv(const void* hidden_in, int tokens, const int64_t* pos, cudaStream_t stream) {
   const uint16_t* h = static_cast<const uint16_t*>(hidden_in);
   launch_scale_gemm_grid_bf16(h, size_t(cfg_.hidden), w_.wkv.payload, w_.wkv.scales, kv_, tokens, kCsa2Latent,
-                              cfg_.hidden, stream, 0, 5, 5, cfg_.dense_mma, nullptr, 0, prefill_tile_);
+                              cfg_.hidden, stream, 0, 5, 5, cfg_.dense_mma, gemm_ws_, gemm_ws_bytes_, prefill_tile_);
   csa2_rmsnorm_bf16(kv_, kCsa2Latent, w_.kv_norm, kv_, kCsa2Latent, tokens, kCsa2Latent, cfg_.eps, stream);
   csa2_rope_apply(kv_ + (kCsa2Latent - kCsa2Rope), kCsa2Latent, kCsa2Latent, 1, kCsa2Rope, pos, w_.inv_freq, false,
                   tokens, stream);
@@ -274,7 +282,7 @@ void Csa2Layer::project_q_kv(const void* hidden_in, int tokens, const int64_t* p
   const uint16_t* h = static_cast<const uint16_t*>(hidden_in);
   const int lh = cfg_.local_heads();
   launch_scale_gemm_grid_bf16(h, size_t(cfg_.hidden), w_.wq_a.payload, w_.wq_a.scales, qr_, tokens, cfg_.q_lora,
-                              cfg_.hidden, stream, 0, 5, 5, cfg_.dense_mma, nullptr, 0, prefill_tile_);
+                              cfg_.hidden, stream, 0, 5, 5, cfg_.dense_mma, gemm_ws_, gemm_ws_bytes_, prefill_tile_);
   csa2_rmsnorm_bf16(qr_, cfg_.q_lora, w_.q_norm, qr_, cfg_.q_lora, tokens, cfg_.q_lora, cfg_.eps, stream);
   project_kv(hidden_in, tokens, pos, stream);
   launch_scale_gemm_grid_bf16(qr_, size_t(cfg_.q_lora), w_.wq_b.payload, w_.wq_b.scales, q_, tokens,
@@ -407,7 +415,7 @@ void Csa2Layer::project_out(int tokens, void* out, cudaStream_t stream) {
     const size_t row_off = size_t(g) * cfg_.o_lora;
     launch_scale_gemm_grid_bf16(o_ + size_t(g) * K, size_t(lh) * kCsa2Latent, w_.wo_a.payload + row_off * K,
                                 w_.wo_a.scales + (row_off / 32) * (size_t(K) / 32), oa_ + row_off, tokens, cfg_.o_lora, K,
-                                stream, size_t(lg) * cfg_.o_lora, 5, 5, cfg_.dense_mma, nullptr, 0, prefill_tile_);
+                                stream, size_t(lg) * cfg_.o_lora, 5, 5, cfg_.dense_mma, gemm_ws_, gemm_ws_bytes_, prefill_tile_);
   }
   launch_scale_gemm_grid_bf16(oa_, size_t(lg) * cfg_.o_lora, w_.wo_b.payload, w_.wo_b.scales,
                               static_cast<uint16_t*>(out), tokens, cfg_.hidden, lg * cfg_.o_lora, stream, 0, 5, 5, cfg_.dense_mma, nullptr, 0, prefill_tile_);

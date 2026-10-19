@@ -183,6 +183,65 @@ is the ranks' arrival skew — the fabric delivers a row in 5.5 µs in situ,
 the peers stage 10–15 µs apart. The one-lane form (no striping) costs
 1.1 ms at C6 and nothing at C1.
 
+## Split-K on the narrow attention projections (2026-10-19)
+
+The decode walk's wkv, wq_a and wo_a GEMVs take the layer's GEMM
+workspace so their k range splits across blocks (in isolation at four
+rows 86 → 157, 161 → 168 and 136 → 180 GB/s; wq_b, the indexer's wq_b
+and wo_b stay unsplit, they fill the grid and lose to the reduce).
+Four nodes, `timed_load` C1, ms per pass / rows per pass / decode
+tok/s:
+
+| Class | unsplit | split |
+|---|---|---|
+| code | 47.18 / 3.59 / 76.1 | 45.97 / 3.45 / 75.0 |
+| prose | 40.27 / 1.90 / 47.3 | 39.11 / 1.90 / 48.7 |
+| JSON | 50.77 / 4.11 / 81.0 | 49.58 / 4.18 / 84.3 |
+
+The pass is 1.2 ms cheaper at equal rows; the split chain is
+tolerance-equal to the unsplit one, so the fixed prompts' greedy
+transcripts shift (code lost accepted draft rows, JSON gained) — the
+numeric path on near-ties, not a bias. Where the C1 code pass stands
+(the node trace, four rows, 46.5 ms against a 35.6 ms floor from the
+checkpoint's bytes): a DRAM-class kernel runs 93 % of the time; the
+MoE at the ceiling (516 µs a layer); the attention GEMVs 244 → ~210 µs
+against ~125 after the windows' L2 hits; some 300 µs a layer of latency
+work (two folds, the mHC sites, the router, selection and attention,
+~350 small launches) covered by the windows at about 100 GB/s; 3.4 ms
+of DRAM-idle time. The levers left at C1 are each 1–3 %: the GEMV
+cores' small-shape rate (~1.6 ms), the lm head's 75 % of the ceiling
+(0.7 ms), the collectives' fixed handshake and skew (~33 µs each), the
+small launches.
+
+## The pipelined halves (2026-10-19, tried and discarded)
+
+A captured batch of two or more requests walked as two request-aligned
+row halves on two streams a half-layer apart, the folds chained in
+record order on every rank, in a free-running form and with a token
+that alternated the halves' MoE phases, the MoE grids capped at 24
+blocks and uncapped. Measured on four nodes (`timed_load`, ms per pass /
+decode tok/s; a single request walks as one either way):
+
+| Shape | as one | halves, free-running | halves, alternating |
+|---|---|---|---|
+| C2 code (7.03 rows) | 72.16 / 97.4 | 81.37 / 86.3 | 86.28 / 81.4 |
+| C2 JSON (8.38 rows) | 75.86 / 110.5 | 86.79 / 96.5 | 92.68 / 90.4 |
+| C6 code (20.7 rows, 512 tokens) | 166.00 / 124.8 | 176.49 / 117.4 | 182.83 / 113.3 |
+
+The node traces of rank 0: free-running, the halves' MoE phases ran over
+each other for 20 ms of an 88 ms C2 pass (the collective order sequences
+only the folds) and covered 5 ms of the other half's latency work;
+alternating, each half's attention chain — every attention matrix read
+once per half, its latency kernels 1.25–1.4× slower beside the other
+half's streaming (the overlap probe: memory-latency inflation, which
+stream priorities do not change) — outlasts the half's MoE, so the pass
+is the sum of two stretched chains. Capping the MoE grids at 24 blocks
+to leave SMs costs the MoE chain 30 % of its rate (`moe_slot_bench
+--cap`; 6 % at 48), and strided double-buffered kernels did not recover
+it; the collectives double, each with the ranks' two-stream skew. The
+form cannot pay on this hardware at any concurrency; at C1 a row split
+has the same arithmetic with worse ratios. Removed.
+
 ## The decode latency round (2026-10-19)
 
 The C1 pass's non-DRAM time, from the node trace of `0d69d565` (three

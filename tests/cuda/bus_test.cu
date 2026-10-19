@@ -904,7 +904,9 @@ int allreduce_bulk_rank_work(CollectiveBus& bus, int world, int my_rank,
   // a private stream. Synchronous cudaMemcpy/cudaMemset are device-wide
   // barriers (legacy default stream) and deadlock against a peer rank's
   // spinning collective kernel — the §6.3 rule, which has now bitten this
-  // harness three separate ways (cudaDeviceSynchronize, sync H2D, memset).
+  // harness four separate ways (cudaDeviceSynchronize, sync H2D, memset,
+  // and cudaEventCreate: a reducer that created its events in its
+  // constructor stalled every second stream collective here, 2026-10-19).
   cudaStream_t stream = nullptr;
   if (cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) !=
       cudaSuccess) {

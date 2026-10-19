@@ -52,6 +52,53 @@ project procedures and design guidance live in `docs/`.
   timeline now stamps each peer's row landing and first proof and the
   engine's post mark from the kernel's clock (`scripts/bus_window_skew.py`
   reads them); `DGPP_BUS_TIMELINE=1` as before.
+- **DeepSeek-V4.1 decode: split-K on the narrow attention projections**
+  (2026-10-19). The decode walk's attention GEMVs ran unsplit (no
+  workspace passed), and the narrow ones under-fill the grid: in
+  isolation at four rows wkv (512 × 5120) streamed at 86 GB/s, a wo_a
+  group (1,024 × 4,096) at 136 and wq_a (1,280 × 5,120) at 161 against
+  the 233.6 GB/s ceiling (`micro_mma_gemv_shapes -d`, the new DeepSeek
+  shape set). With the layer's GEMM workspace the k range splits across
+  blocks: 157, 180 and 168 GB/s; wq_b, the indexer's wq_b and wo_b fill
+  the grid already and lose 2–15 % to the split's reduce, so they stay
+  unsplit. The C1 node trace placed the attention GEMVs at 244 µs a layer
+  against about 125 at the ceiling net of the prefetch windows' L2 hits
+  (the windows prefetch about 16 MB of a layer's 45 MB per rank — the L2's
+  capacity, not their rate — and are worth 2.1 ms a pass). Four nodes,
+  `timed_load` C1 (ms per pass / rows per pass / decode tok/s): code 47.18
+  / 3.59 / 76.1 → 45.97 / 3.45 / 75.0, prose 40.27 / 1.90 / 47.3 → 39.11 /
+  1.90 / 48.7, JSON 50.77 / 4.11 / 81.0 → 49.58 / 4.18 / 84.3. The split
+  chain is tolerance-equal to the unsplit one, not bitwise, so the greedy
+  transcripts on the fixed prompts shift: the code prompts lost a few
+  accepted draft rows and JSON gained some — the numeric path's effect on
+  near-ties, not a bias; the graph and eager engines agree as before.
+- **DeepSeek-V4.1 decode: the pipelined half-batches, tried and
+  discarded** (2026-10-19). A captured decode batch of two or more
+  requests walked as two request-aligned row halves on two streams a
+  half-layer apart — one half's MoE streaming the weights while the other
+  ran its attention, folds and small kernels — with the folds chained in
+  record order on every rank and, in its second form, a token that made
+  the halves' MoE phases alternate; the halves' MoE grids capped at 24
+  blocks (the overlap probe's threshold) and uncapped. Every batched gate
+  held against the eager transcripts; on four nodes the form lost at every
+  shape (`timed_load`, ms per pass): C2 code 72.2 → 81.4 free-running /
+  86.3 with the token, C6 code 166.0 → 176.5 / 182.8, C1 unchanged (one
+  request walks as one). The node traces give the mechanism: free-running,
+  the halves' MoE phases ran over each other (20 ms of an 88 ms pass) for
+  5 ms of the intended overlap; alternating, each half's attention chain —
+  every attention matrix read once per half, its latency kernels 1.25–1.4×
+  slower beside the other half's streaming (the probe: memory-latency
+  inflation, not SM starvation, so stream priorities change nothing) — is
+  longer than the half's MoE, and the pass becomes the sum of two stretched
+  chains; capping the MoE grids to leave SMs costs the chain 30 % of its
+  rate at 24 blocks (`moe_slot_bench`), which double-buffered strided
+  gate-up and down kernels did not recover; the collectives double. At C1 a
+  row split would fail by the same arithmetic with worse ratios. The code
+  is gone; two lessons it exposed stay in the bus test's harness note (a
+  CUDA event created in a rank worker beside a peer's spinning collective
+  kernel is a device-wide barrier, like a synchronous memcpy) and here
+  (halves staging different widths into one recorder buffer need regions
+  by the widest fold, not row × width).
 - **DeepSeek-V4.1 decode: the fused mHC site, the down kernel's tile
   stealing, the flash window split beside the main source; the fold split
   tried and discarded** (2026-10-19). The C1 pass's non-DRAM time, from the
