@@ -105,6 +105,10 @@ class Csa2Layer {
   // prefill_tile): the fp8-weight tile GEMM (true) or the streaming decode
   // form (false) for every projection a prefill enqueue runs.
   void set_prefill_dense_tile(bool on) { prefill_dense_tile_ = on; }
+  // The prefill's window source on the flash listed kernel (true, the
+  // default; engine.prefill_window flash) or the scalar partial kernel
+  // (scalar, the decode window's kernel: the decode audit's form).
+  void set_prefill_window_flash(bool on) { prefill_window_flash_ = on; }
   // GEMM plans for `tokens` rows and the shared-memory opt-ins; outside capture.
   bool prepare(int tokens);
 
@@ -232,7 +236,7 @@ class Csa2Layer {
   void attend_rows(Csa2StatePool& pool, const int32_t* req_ids_win, const uint8_t* win_cache, int win_block_tokens,
                    const int32_t* win_table, const int32_t* req_ids_main, const int64_t* pos, int row0, int rows,
                    int n_split_main, cudaStream_t stream, const int32_t* list, int list_stride,
-                   const int32_t* counts, bool split_window = false, int sel_base = 0);
+                   const int32_t* counts, bool split_window = false, int sel_base = 0, bool flash_window = false);
   void project_out(int tokens, void* out, cudaStream_t stream);
   void validate_pool(const Csa2StatePool& pool) const;
 
@@ -250,6 +254,7 @@ class Csa2Layer {
   // rows keep the streaming form. Set by the prefill entry points.
   bool prefill_tile_ = false;
   bool prefill_dense_tile_ = true;  // the configured form (set_prefill_dense_tile)
+  bool prefill_window_flash_ = true;  // set_prefill_window_flash
 
   IGemm& gemm_;
   Csa2Config cfg_;

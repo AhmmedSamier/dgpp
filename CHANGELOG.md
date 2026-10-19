@@ -5,6 +5,77 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **DeepSeek-V4.1 prefill: the Engram rows staged a chunk ahead, and the
+  overlap's folds begun behind events** (2026-10-18; the staging under
+  `engine.ngram_prestage`, which now covers the Engram tables too). The
+  32K prefill's main stream had 2.2 s of gaps in a 10.9 s walk after the
+  attention kernels landed: 1.4 s were 110–160 ms stalls per 4,096-token
+  chunk at the first Engram layer — the mmap'ed tables' gather, forked at
+  the walk's start and joined at layer 1, storage-bound at 16 threads with
+  page hints already — and the rest were folds longer than the work under
+  them. `Dsv41EngramLayer::prestage` (Qwen's PLE form): the next chunk's
+  ids hashed on the device from its host ids behind the current chunk's
+  last `max_ngram - 1` tokens, one synthetic span on a private pad
+  context, and the rows gathered on the side stream into a second channel
+  while this chunk's layers run; the next `stage()` with the matching
+  (host ids, rows, first position, slot, first and last token) takes them,
+  and the last Engram table's embed issues the next prestage once its
+  conversion consumed the channel. `prefill_batch` names a lone prompt's
+  chunk by the prompt's own pointer and predicts its successor at the
+  tick's budget: the scheduler's only prefill path never set `next_ids`
+  before, so no family's chunk-ahead staging could claim under it (Qwen's
+  still requires a span-less run, a follow-up). `BoundaryReducer::
+  begin_async_after(event)` folds behind the rows' producers' event
+  instead of a stream drain; the overlap walk records an event after each
+  block's producers, enqueues the other block's work first, and defers
+  block B's MoE fold begin into the next layer behind its block-A site and
+  attention — bitwise, the overlap gates unchanged. `dsv41_tp_test` gains
+  the prestage gate (a 701-row prompt in 256-row chunks on the cursor
+  advance and on the scheduler's batch walk: two prestages claimed, logits
+  and decode steps bitwise the sequential staging). Measured on the 1017
+  template on four nodes: cold prefill 0.421 / 1.097 / 2.771 / 10.174 s at
+  512 / 2K / 8K / 32K tokens against 0.418 / 1.097 / 2.801 / 10.623 before
+  (the same prompts; −4 % at 32K), 3,130 tok/s at 32K; the profiled 32K
+  walk's main-stream gaps 2.2 → 1.4 s, the stalls over 10 ms 1.41 → 0.56 s
+  (one first-chunk gather of 90 ms, then the Engram folds at 31 ms each,
+  not yet overlapped). Left in the ledger: the Engram folds (0.5 s), the
+  MoE fold of block A under too little work (0.45 s), the attention fold
+  of block B (0.29 s).
+- **DSA/CSA2 flash attention: the listed kernel at the byte floor, and the
+  DeepSeek-V4.1 prefill window on it** (2026-10-18; `engine.prefill_window`,
+  default `flash`). `attn_flash_kernel` (`dsa.cu`: GLM-5.3's DSA and
+  DeepSeek-V4.1's CSA2, listed and dense) was the largest kernel of a 32K
+  DeepSeek-V4.1-Flash-1017 prefill, 5,406 launches at 646 µs at about
+  3 TFLOP/s and 50 GB/s. Nsight Compute on an isolated bench at the 1017
+  geometry showed 196 registers and 87 KB of shared memory holding one
+  block per SM, two warps per scheduler issuing once per 4.8 cycles and
+  22 of 32 lanes active. Three changes, each bitwise (the bench's
+  partial-output checksums identical at four shapes): the listed addresses
+  resolved once per 512-token round into shared memory instead of three
+  dependent loads per thread per row (750 → 630 µs on the bench); the
+  e2m1 decode as a nibble table instead of a switch that diverged a warp
+  eight ways per element, 64 elements per thread per tile (→ 300 µs; every
+  fp4 cache and the host reference decode through it); and two blocks per
+  SM with the Q~ fragments in registers, the exchange sized by the tile
+  and the fetch in four passes (→ 206 µs, 183 GB/s of the 234 GB/s read
+  ceiling) — for the listed rope-less widths, which fit the two-block
+  register budget without spilling; the 512 + 64 tail's kernel (GLM-5.3's
+  DSA, DeepSeek-V4) and the dense tile keep one block: compiled to two
+  they spilled, and that build faulted DeepSeek-V4's mixed walk in the
+  shared prefill test (the whole binary, never a filtered run) while every
+  one-block or spill-free build ran clean. The prefill's window
+  source then moved from the scalar partial kernel (287 µs per 128-row
+  tile, 12 % of the walk) onto the same listed kernel — the window scratch
+  is a one-block cache and the slot lists are per-row selections — under
+  `engine.prefill_window` (`flash` | `scalar`): its scores sum in the mma's
+  fragment order, so the model test's decode audit walks the scalar form
+  and a new gate holds the flash form within a flip's move of it; decode's
+  split window and the draft block keep the scalar kernel. Measured on the
+  1017 template on four nodes: cold prefill 0.418 / 1.097 / 2.801 / 10.623 s
+  at 512 / 2K / 8K / 32K tokens against 0.464 / 1.324 / 3.699 / 14.234
+  before (the same prompts; −10 / −17 / −24 / −25 %), 3,000 tok/s at 32K;
+  in the profiled 32K walk the listed kernel runs at 193 µs per launch
+  (was 646) and the window at 68 (was 287); decode level.
 - **DeepSeek-V4.1 prefill: the boundary folds under the other row block's
   compute** (2026-10-18; `engine.prefill_fold_overlap`, default `true`).
   The bulk folds were about 14 % of a 32K prefill, wire-bound at the port

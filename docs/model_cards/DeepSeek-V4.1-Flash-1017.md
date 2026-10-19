@@ -185,12 +185,15 @@ across both while the decode class stays on the first.
 | One lane, streaming projections (the fused scan) | 0.523 / 1.619 / 5.152 / 19.591 | 1,620 |
 | Two lanes, streaming projections | 0.514 / 1.572 / 4.715 / 17.916 | 1,770 |
 | Two lanes, tile projections | 0.480 / 1.415 / 4.045 / 15.328 | 2,080 |
-| Two lanes, tile projections, the folds overlapped (shipped) | 0.464 / 1.324 / 3.699 / 14.234 | 2,240 |
+| Two lanes, tile projections, the folds overlapped | 0.464 / 1.324 / 3.699 / 14.234 | 2,240 |
+| … and the attention kernels at the byte floor | 0.418 / 1.097 / 2.801 / 10.623 | 3,000 |
+| … and the Engram rows staged a chunk ahead, the folds begun behind events (shipped) | 0.421 / 1.097 / 2.771 / 10.174 | 3,130 |
 
-Decode is untouched by all three. The ledger's remaining prefill shares
-on the tile form: the listed attention over the selected entries about
-19 % (about 12 TFLOP/s, the next kernel), the bulk folds about 14 %, the
-MXFP4 experts about 17 % at 58 TFLOP/s, the window attention about 9 %.
+Decode is untouched by all of these. The ledger's remaining prefill
+shares on the tile form were the listed attention over the selected
+entries about 19 %, the bulk folds about 14 %, the MXFP4 experts about
+17 % at 58 TFLOP/s, the window attention about 9 % — the next two
+sections take the folds and the attention.
 
 The folds then went under compute (`engine.prefill_fold_overlap`, default
 `true`): a walk of 512 rows or more runs each layer as two row blocks,
@@ -210,6 +213,72 @@ bulk folds. The table's last row is the campaign leg; a matched probe of
 one prompt set five times, the key on against off on the same binary,
 read −4.3 / −5.0 / −6.4 % per token at 512 / 2K / 8K and decode level
 (code 48.0 against 47.6 ms per pass, prose 41.7 against 41.6).
+
+## The attention kernels (2026-10-18)
+
+The listed attention over the selected entries (`attn_flash_kernel` in
+`dsa.cu`, shared with GLM-5.3's DSA) was the walk's largest kernel after
+the dense projections moved: 5,406 launches at 646 µs, 3.5 s of a 32K
+prefill, at about 3 TFLOP/s and 50 GB/s. Nsight Compute on an isolated
+bench at this geometry (16 heads, latent 512, fp4_block entries, 512 per
+query in 4 splits, 128 rows) showed why: 196 registers and 87 KB of
+shared memory held one block per SM, each scheduler had two warps and
+issued once per 4.8 cycles, and 22 of 32 lanes were active. Three
+changes, each bitwise (the bench's partial-output checksums identical at
+four shapes): the listed addresses resolved once per 512-token round into
+shared memory instead of three dependent loads per thread per row (750 →
+630 µs); the e2m1 decode as a nibble table instead of a switch that
+diverged a warp eight ways per element, 64 elements per thread per tile
+(→ 300 µs); two blocks per SM with the Q~ fragments in registers, the
+exchange sized by the tile and the fetch in four passes (→ 206 µs,
+183 GB/s of the 234 GB/s read ceiling). Two blocks hold for this family's
+listed kernel, which fits the two-block register budget without
+spilling; the 512 + 64 geometry other families run keeps one block
+(compiled to two it spilled, and that build faulted DeepSeek-V4's mixed
+walk in the shared prefill test while every spill-free build ran clean).
+The remaining lever on it is the fp32 split partials (four per row), a
+numerics change left alone.
+
+The window source then moved from the scalar partial kernel (287 µs per
+128-row tile, 12 % of the walk) onto the same listed kernel
+(`engine.prefill_window`, default `flash`): the window scratch is a
+one-block cache and the slot lists are per-row selections, the kernel's
+inputs. Its scores sum in the mma's fragment order, so the model test's
+decode audit walks the scalar form — the decode window's kernel — and a
+separate gate holds the flash form within a flip's move of it; the
+forward-parity gates pass on the flash form. In the profiled 32K walk
+the listed kernel runs at 193 µs per launch and the window at 68.
+
+The 32K prefill's ledger after this (the kernels of its 10.9 s, the bus
+bulk kernel overlapped on its own stream): the MXFP4 experts 2.7 s (the
+gate/up chain 1.6, the down chain 1.1), the fp8 dense tile GEMM 1.1 s,
+the listed attention 0.93 s, the mHC stream updates 0.48, the expert
+accumulation 0.45, the router 0.40, the window attention 0.36, the mHC
+coefficients 0.34, the selection 0.26; about 2 s of the wall is gaps
+between kernels (the overlap's host drains and launch latency). The next
+levers in order: the experts (W4A8 against today's bf16 activations), the
+dense GEMM on native fp8 activations, and the gaps.
+
+## The walk's gaps (2026-10-18)
+
+With the attention kernels at the floor, the 32K walk's main stream was
+busy 8.7 s of its 10.9 s: 1.4 s were stalls of 110–160 ms per 4,096-token
+chunk at the first Engram layer — the mmap'ed tables' gather, forked at
+the walk's start and joined at layer 1, storage-bound with 16 threads and
+page hints already — and 0.7 s were folds longer than the work under
+them. The Engram rows are now staged a chunk ahead (`engine.ngram_prestage`,
+Qwen's form: the next chunk hashed on the device behind this chunk's
+last three tokens, gathered on the side stream, claimed by the next
+chunk when its identity matches; the scheduler's batch walk names a lone
+prompt's chunks so the staging can claim under it), and the overlap's
+folds begin behind the producers' events with the other block's work
+already enqueued. Cold prefill 0.421 / 1.097 / 2.771 / 10.174 s (−4 % at
+32K; the shorter prompts are one or two chunks and stage nothing ahead).
+The profiled walk's gaps fell to 1.4 s: one first-chunk gather of 90 ms,
+the two Engram folds per chunk at 31 ms each (210 MB over the wire, not
+overlapped: the next lever), the MoE fold of block A exposed under block
+B's accumulation alone (about 0.45 s), the attention fold of block B
+under block A's site and router (about 0.29 s).
 
 ## Measured (2026-10-18, four nodes)
 

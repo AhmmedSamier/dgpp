@@ -760,4 +760,55 @@ DGPP_TEST(dsv41_tp_prefill_fold_overlap_at_world_2_is_bitwise_the_one_block_walk
               "one-block walk on both ranks\n", T, TA, static_cast<unsigned long long>(ranks[0].async_folds));
 }
 
+// The Engram chunk-ahead staging (engine.ngram_prestage, 2026-10-18): a
+// 701-row prompt prefilled in 256-row chunks on the cursor path (the base
+// names the next chunk at the same budget), every chunk after the first
+// taking the rows the previous chunk's prestage gathered on the side
+// stream; the logits and the steps behind it bitwise the same chunks
+// staged in turn (the rows gathered are the same rows).
+DGPP_TEST(dsv41_engram_prestage_is_bitwise_the_sequential_staging) {
+  const std::string dir = (fs::current_path() / "dsv41_tp_fixture_prestage").string();
+  const Dsv41TextConfig cfg = dsv41fx::tiny_config();
+  dsv41fx::write_fixture(cfg, dir);
+  (void)dsv41fx::fixture_sidecar(cfg, dir);
+  std::vector<int64_t> prompt = make_tokens(cfg, 160);
+  while (prompt.size() < 701) prompt.push_back((prompt[prompt.size() - 160] * 31 + 11) % cfg.vocab_size);
+  const auto run = [&](bool prestage, bool group_api, std::vector<float>* logits, std::vector<std::vector<float>>* steps,
+                       int* chunks, uint64_t* claims) {
+    dgpp::Dsv41EngramLayer::set_prestage(prestage);
+    Dsv41Model model(cfg, dir, 1280, 4096, Dsv41Residency::Streaming, nullptr, 0, 1, /*max_requests=*/2);
+    model.set_decode_route_traces(false);
+    Dsv41Model::PrefillCursor cursor = model.session_prefill_begin(0, prompt, static_cast<int64_t>(prompt.size()) + 8, 256);
+    *chunks = 0;
+    if (group_api) {  // the scheduler's path: one cursor through the batch walk
+      std::vector<Dsv41Model::PrefillCursor*> open = {&cursor};
+      while (!model.session_prefill_advance_group(open, {256})[0]) ++*chunks;
+    } else {
+      while (!model.session_prefill_advance(cursor)) ++*chunks;
+    }
+    ++*chunks;
+    *logits = cursor.output.logits;
+    for (int k = 0; k < 4; ++k) steps->push_back(model.session_step(0, (prompt[static_cast<size_t>(k)] + 7) % cfg.vocab_size).logits);
+    *claims = model.debug_engram_prestage_claims();
+    require(model.debug_engram_prestage_publishes() == (prestage ? uint64_t(*chunks - 1) : 0),
+            "the prestage publishes once per chunk that has a next (or never, off)");
+    model.session_close(0);
+  };
+  for (const bool group_api : {false, true}) {
+    std::vector<float> on_logits, off_logits;
+    std::vector<std::vector<float>> on_steps, off_steps;
+    int on_chunks = 0, off_chunks = 0;
+    uint64_t on_claims = 0, off_claims = 0;
+    run(true, group_api, &on_logits, &on_steps, &on_chunks, &on_claims);
+    run(false, group_api, &off_logits, &off_steps, &off_chunks, &off_claims);
+    dgpp::Dsv41EngramLayer::set_prestage(true);
+    require(on_chunks == 3 && off_chunks == 3, "701 rows at a 256-row budget walk as three chunks");
+    require(on_claims == 2 && off_claims == 0, "every chunk after the first takes the prestaged rows");
+    require(!on_logits.empty() && on_logits == off_logits, "prestage: the prefill's logits differ from the sequential staging's");
+    require(on_steps == off_steps, "prestage: the decode steps behind the prefill differ (the state)");
+    std::printf("[ OK ] 701 rows in three 256-row chunks (%s): 2 prestages claimed, logits and 4 decode steps bitwise "
+                "the sequential staging\n", group_api ? "the scheduler's batch walk" : "the cursor advance");
+  }
+}
+
 int main() { return dgpp::test::run_all(); }

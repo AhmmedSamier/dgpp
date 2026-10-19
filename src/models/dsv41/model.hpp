@@ -131,6 +131,14 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
     prefill_dense_tile_ = on;
     if (csa2_) csa2_->set_prefill_dense_tile(on);
   }
+  // The prefill walk's window attention (engine.prefill_window): the flash
+  // listed kernel (true, the default) or the scalar partial kernel the
+  // decode window runs. Every model built from here on takes the default.
+  static void set_default_prefill_window_flash(bool on) { s_default_prefill_window_flash = on; }
+  void set_prefill_window_flash(bool on) {
+    prefill_window_flash_ = on;
+    if (csa2_) csa2_->set_prefill_window_flash(on);
+  }
   // The prefill's fold overlap (engine.prefill_fold_overlap; the
   // DeepSeek-V4 walk's form, here since 2026-10-18): a walk of min_rows
   // rows or more on a multi-rank world runs each layer as two row blocks,
@@ -146,6 +154,9 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
   void set_prefill_fold_overlap(bool on, int min_rows = kFoldOverlapMinRows, bool without_reducer = false);
   bool prefill_fold_overlap() const { return fold_overlap_; }
   uint64_t debug_overlap_async_folds() const { return overlap_async_folds_; }
+  // The Engram chunk-ahead staging's counters (tests): prestages published and claimed.
+  uint64_t debug_engram_prestage_publishes() const { return engram_ ? engram_->debug_prestage_publishes() : 0; }
+  uint64_t debug_engram_prestage_claims() const { return engram_ ? engram_->debug_prestage_claims() : 0; }
 
   // The cold diagnostic forward: one request on slot 0, fresh state, every
   // row's logits; capture_layers: every layer's residual streams [T, 4, H]
@@ -300,6 +311,8 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
                      int decode_prefix);
   void update_rows(const uint16_t* sublayer_out, int r0, int rows);
   void swap_pre();
+  bool begin_fold_after(uint16_t* buf, int r0, int n, cudaEvent_t ready);
+  void begin_pending_fold();
   void flush_overlap();
   // The block boundary of a walk of T rows: the row nearest T/2 at which
   // the attention may start a chunk (a span's start, or a row on its
@@ -310,7 +323,20 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
   bool fold_overlap_ = s_default_prefill_fold_overlap;
   int fold_overlap_min_rows_ = kFoldOverlapMinRows;
   bool fold_overlap_without_reducer_ = false;
-  bool ffn_b_pending_ = false;        // block B's MoE fold is outstanding
+  // The Engram chunk-ahead staging due this walk (run_rows names it; the
+  // last Engram layer issues it after its embed consumed the claimed rows).
+  struct PrestageDue {
+    const int64_t* ids = nullptr;
+    int rows = 0;
+    int64_t pos0 = 0;
+    int req = -1;
+    const int64_t* prefix = nullptr;
+    int n_prefix = 0;
+  } prestage_due_;
+  void prestage_after_embed(int table_index);
+  bool ffn_b_pending_ = false;        // block B's MoE fold is outstanding (its rows accumulated)
+  bool ffn_b_begun_ = false;          // ... and submitted to the bus (else only its event stands)
+  cudaEvent_t ov_ev_[4] = {};         // the blocks' producers: attention A, attention B, accumulation A, B
   int overlap_rows_ = 0;              // the pending fold's walk rows and block boundary
   int overlap_ta_ = 0;
   uint64_t overlap_async_folds_ = 0;  // folds begun asynchronously (tests)
@@ -406,6 +432,8 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
   bool prefill_bounded_ = s_default_prefill_bounded;
   static inline bool s_default_prefill_dense_tile = true;
   bool prefill_dense_tile_ = s_default_prefill_dense_tile;
+  static inline bool s_default_prefill_window_flash = true;
+  bool prefill_window_flash_ = s_default_prefill_window_flash;
   int debug_layer_limit_ = 0;
   // The bounded prefill's segment of the last walk (the draft's prefill
   // rows map into main_hidden_ through it) and the tail carried between a

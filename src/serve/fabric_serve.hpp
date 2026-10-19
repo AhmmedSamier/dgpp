@@ -153,6 +153,7 @@ struct WorldSettings {
   std::string prefill = "bounded";           // the DeepSeek-V4.1 prefill mode: bounded | exact
   std::string prefill_dense = "tile";        // the DeepSeek-V4.1 prefill's dense projections: tile | streaming
   bool prefill_fold_overlap = true;          // the DeepSeek-V4.1 prefill's boundary folds under the other row block's compute
+  std::string prefill_window = "flash";      // the DeepSeek-V4.1 prefill's window attention: flash | scalar
   std::optional<dgpp::RopeScaling> rope_scaling;  // the opt-in YaRN ramp: absent = plain
   std::string embed_sharding = "replicated";  // the full GLM-5.3's embedding: replicated | vocab
   std::string mtp_head = "checkpoint";        // the full GLM-5.3 draft head: checkpoint | fp8

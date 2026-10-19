@@ -299,6 +299,8 @@ HeadMatrix Dsv41Model::draft_head_matrix() const {
 
 Dsv41Model::~Dsv41Model() {
   cudaStreamSynchronize(stream_);
+  for (cudaEvent_t e : ov_ev_)
+    if (e) cudaEventDestroy(e);
   csa2_.reset();
   moe_.reset();
   engram_.reset();
@@ -507,6 +509,7 @@ void Dsv41Model::build_layer_objects(const Dsv41LayerResident& r) {
   // layer's staging is recycled under them.
   csa2_->set_prefetcher(loader_.residency() == Dsv41Residency::Resident ? &prefetch_ : nullptr);
   csa2_->set_prefill_dense_tile(prefill_dense_tile_);
+  csa2_->set_prefill_window_flash(prefill_window_flash_);
   if (cfg_.is_draft(r.layer)) {
     if (!draft_moe_) {
       const int slots = loader_.residency() == Dsv41Residency::Resident ? cfg_.num_nextn_predict_layers : 0;
@@ -966,14 +969,60 @@ void Dsv41Model::update_rows(const uint16_t* sublayer_out, int r0, int rows) {
                                nxt_ + R * 4 * H, mhc_cfg_, rows, stream_);
 }
 
+// A fold of rows [r0, r0 + n) of `buf` behind `ready`, the rows' producers'
+// event — the caller has enqueued the other block's work behind them, so
+// the GPU keeps it while the host waits for the event and submits the
+// fold (2026-10-18: the drain this replaces left the GPU idle at every
+// fold until the host enqueued the next kernels, 0.7 s of a 32K prefill).
+// True: begun on the bus (end_fold waits). False: folded in place.
+bool Dsv41Model::begin_fold_after(uint16_t* buf, int r0, int n, cudaEvent_t ready) {
+  if (!boundary_) return false;
+  uint16_t* at = buf + static_cast<size_t>(r0) * static_cast<size_t>(cfg_.hidden_size);
+  if (boundary_->begin_async_after(at, n, cfg_.hidden_size, ready)) {
+    ++overlap_async_folds_;
+    return true;
+  }
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));  // a reducer without the event form: the old drain
+  if (boundary_->begin_async(at, n, cfg_.hidden_size)) {
+    ++overlap_async_folds_;
+    return true;
+  }
+  boundary_->reduce(at, n, cfg_.hidden_size);
+  return false;
+}
+
+// Block B's deferred MoE fold begins — behind whatever the caller enqueued
+// since its accumulation (the next layer's block-A site and attention).
+void Dsv41Model::begin_pending_fold() {
+  if (!ffn_b_pending_ || ffn_b_begun_) return;
+  ffn_b_begun_ = begin_fold_after(y_, overlap_ta_, overlap_rows_ - overlap_ta_, ov_ev_[3]);
+  if (!ffn_b_begun_) {  // folded in place: landed now
+    update_rows(y_, overlap_ta_, overlap_rows_ - overlap_ta_);
+    std::swap(cur_, nxt_);
+    ffn_b_pending_ = false;
+  }
+}
+
+// After the last Engram table's embed of a walk: the next chunk's rows
+// staged ahead (run_rows named them), behind the conversion that read the
+// channel — a chunk is never gathered over rows another still reads.
+void Dsv41Model::prestage_after_embed(int table_index) {
+  if (!engram_ || prestage_due_.ids == nullptr || table_index + 1 != static_cast<int>(cfg_.engram_layer_ids.size())) return;
+  const PrestageDue d = prestage_due_;
+  prestage_due_ = {};
+  engram_->prestage(d.ids, d.rows, d.pos0, d.req, d.prefix, d.n_prefix, stream_);
+}
+
 // Block B's outstanding MoE fold lands: its stream update, the swap.
 void Dsv41Model::flush_overlap() {
   if (!ffn_b_pending_) return;
-  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  begin_pending_fold();
+  if (!ffn_b_pending_) return;
   if (boundary_) boundary_->end_async();
   update_rows(y_, overlap_ta_, overlap_rows_ - overlap_ta_);
   std::swap(cur_, nxt_);
   ffn_b_pending_ = false;
+  ffn_b_begun_ = false;
 }
 
 int Dsv41Model::overlap_boundary(int T, const WalkRows& rows) const {
@@ -1009,29 +1058,19 @@ void Dsv41Model::enqueue_layer_overlap(const Dsv41LayerResident& r, int layer, i
       TB <= 0 || TA < decode_prefix)
     throw std::logic_error("enqueue_layer_overlap: not a two-block prefill walk");
   build_layer_objects(r);
-  const auto drain = [&] { DGPP_CUDA_OK(cudaStreamSynchronize(stream_)); };
-  // A fold of rows [r0, r0 + n) of `buf` begun (true) or done in place.
-  const auto begin_fold = [&](uint16_t* buf, int r0, int n) {
-    if (!boundary_) return false;
-    uint16_t* at = buf + static_cast<size_t>(r0) * H;
-    drain();
-    if (boundary_->begin_async(at, n, H)) {
-      ++overlap_async_folds_;
-      return true;
-    }
-    boundary_->reduce(at, n, H);
-    return false;
-  };
+  for (cudaEvent_t& e : ov_ev_)
+    if (e == nullptr) DGPP_CUDA_OK(cudaEventCreateWithFlags(&e, cudaEventDisableTiming));
+  // A begun fold lands: the host waits for the collective while the GPU
+  // runs whatever the caller enqueued behind the fold's producers.
   const auto end_fold = [&](bool begun) {
-    if (!begun) return;
-    drain();
-    boundary_->end_async();
+    if (begun) boundary_->end_async();
   };
   // Engram: the gate reads every row's streams, so the previous layer's
   // block-B fold lands first; the Engram fold itself stays one block.
   if (r.engram.present) {
     flush_overlap();
     engram_->embed(r.engram.table_index, T, stream_);
+    prestage_after_embed(r.engram.table_index);
     const Dsv41EngramLayerWeights ew = engram_view(r.engram);
     uint16_t* kv = stage(engram_kv_, T, 5 * H, false);
     engram_->project(ew, T, kv, stream_, /*prefill_tile=*/prefill_dense_tile_);
@@ -1097,23 +1136,27 @@ void Dsv41Model::enqueue_layer_overlap(const Dsv41LayerResident& r, int layer, i
     }
   };
   attention(0, TA);
+  DGPP_CUDA_OK(cudaEventRecord(ov_ev_[0], stream_));  // A's attention
   if (ffn_b_pending_) {
+    // The previous layer's block-B fold, begun behind A's site and attention
+    // and landed while they run.
     flush_overlap();
     mhc_site_rows(cur_, aw, r.attn_norm, TA, TB, decode_prefix);
   }
   swap_pre();  // the attention site's coefficients stand for every row
-  const bool fold_a = begin_fold(attn_out, 0, TA);
   attention(TA, TB);
+  DGPP_CUDA_OK(cudaEventRecord(ov_ev_[1], stream_));  // B's attention
+  const bool fold_a = begin_fold_after(attn_out, 0, TA, ov_ev_[0]);  // under B's attention
   end_fold(fold_a);
   // ---- the MoE site: A's update, site and router under B's attention fold ----
   GlmMhcWeights fw;
   fw.fn = r.mhc.ffn_fn;
   fw.base = r.mhc.ffn_base;
   fw.scale = r.mhc.ffn_scale;
-  const bool fold_b = begin_fold(attn_out, TA, TB);
   update_rows(attn_out, 0, TA);
   mhc_site_rows(nxt_, fw, r.ffn_norm, 0, TA, decode_prefix);
   moe_->route_prefill_rows(x_, 0, TA, stream_);
+  const bool fold_b = begin_fold_after(attn_out, TA, TB, ov_ev_[1]);  // under A's site and router
   end_fold(fold_b);
   update_rows(attn_out, TA, TB);
   std::swap(cur_, nxt_);
@@ -1125,21 +1168,20 @@ void Dsv41Model::enqueue_layer_overlap(const Dsv41LayerResident& r, int layer, i
   uint16_t* ffn_out = y_;
   moe_->enqueue_prefill_phased(x_, T, stream_, decode_prefix, ffn_out);
   moe_->accumulate_prefill_rows(ffn_out, T, 0, TA, stream_, decode_prefix);
-  const bool ffn_a = begin_fold(ffn_out, 0, TA);
+  DGPP_CUDA_OK(cudaEventRecord(ov_ev_[2], stream_));  // A's accumulation
   moe_->accumulate_prefill_rows(ffn_out, T, TA, TB, stream_, decode_prefix);
+  DGPP_CUDA_OK(cudaEventRecord(ov_ev_[3], stream_));  // B's accumulation
+  const bool ffn_a = begin_fold_after(ffn_out, 0, TA, ov_ev_[2]);  // under B's accumulation
   end_fold(ffn_a);
-  // Block A's update; block B's fold under the next layer's site and
-  // attention of A (or landed here: the walk's last layer of this shape).
+  // Block A's update; block B's fold pending — begun behind the next
+  // layer's block-A site and attention, or landed here: the walk's last
+  // layer of this shape.
   update_rows(ffn_out, 0, TA);
-  ffn_b_pending_ = begin_fold(ffn_out, TA, TB);
-  if (!ffn_b_pending_) {
-    update_rows(ffn_out, TA, TB);
-    std::swap(cur_, nxt_);
-  } else {
-    overlap_rows_ = T;
-    overlap_ta_ = TA;
-    if (flush) flush_overlap();
-  }
+  ffn_b_pending_ = true;
+  ffn_b_begun_ = false;
+  overlap_rows_ = T;
+  overlap_ta_ = TA;
+  if (flush) flush_overlap();
 }
 
 void Dsv41Model::enqueue_layer(const Dsv41LayerResident& r, int layer, int T, const WalkRows& rows) {
@@ -1152,6 +1194,7 @@ void Dsv41Model::enqueue_layer(const Dsv41LayerResident& r, int layer, int T, co
   // before this layer's coefficients read them.
   if (r.engram.present) {
     engram_->embed(r.engram.table_index, T, stream_);
+    prestage_after_embed(r.engram.table_index);
     const Dsv41EngramLayerWeights ew = engram_view(r.engram);
     uint16_t* kv = stage(engram_kv_, T, 5 * H, rows.capture);
     engram_->project(ew, T, kv, stream_, /*prefill_tile=*/!rows.decode && prefill_dense_tile_);
@@ -1265,9 +1308,10 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
     throw std::logic_error("run_rows: a capture needs a resident stack");
   const int H = cfg_.hidden_size;
   const RowInputs in = begin_run(run);
-  if (ffn_b_pending_) {  // a walk that threw past a begun fold
-    if (boundary_) boundary_->end_async();
+  if (ffn_b_pending_) {  // a walk that threw past a pending fold
+    if (boundary_ && ffn_b_begun_) boundary_->end_async();
     ffn_b_pending_ = false;
+    ffn_b_begun_ = false;
   }
   cur_ = streams_a_;
   nxt_ = streams_b_;
@@ -1279,8 +1323,22 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
   // The Engram staging forked before the first layer (both tables' rows
   // gathered by the host while layer 0 runs); the contexts advance now.
   if (engram_) {
-    engram_->stage(in.tokens, T, in.req_ids, in.pos, in.spans, in.num_requests, d_ctx_, stream_);
+    // A scalar prefill chunk names itself (its host ids, first position and
+    // slot) so the stage can take the rows a prestage gathered ahead.
+    // (one request's rows: the plain chunk, or the scheduler's one-span walk
+    // without decoders — prefill_batch names both by the prompt's pointer).
+    const bool scalar_chunk = !run.decode && !run.capture && run.decode_spans == 0 && run.num_spans <= 1 &&
+                              run.ids != nullptr;
+    engram_->stage(in.tokens, T, in.req_ids, in.pos, in.spans, in.num_requests, d_ctx_, stream_,
+                   scalar_chunk ? run.ids : nullptr, run.pos0, req);
     engram_->context_rows(in.tokens, T, in.req_ids, in.pos, in.spans, in.num_requests, d_ctx_, spec_ctx_, stream_);
+    // The next chunk's rows, gathered while this one runs (engine.ngram_prestage):
+    // issued by the last Engram layer once its embed consumed the rows a
+    // prestage may have staged for THIS chunk (the channel holds one chunk).
+    const int n_prefix = cfg_.engram_max_ngram_size - 1;
+    prestage_due_ = {};
+    if (scalar_chunk && run.next_ids != nullptr && run.next_T > 0 && T >= n_prefix)
+      prestage_due_ = {run.next_ids, run.next_T, run.next_pos0, req, run.ids + T - n_prefix, n_prefix};
   }
   gather_embedding(in.tokens, T, run.capture);
   if (prefetching(run.decode)) prefetch_attention_side(0, T);

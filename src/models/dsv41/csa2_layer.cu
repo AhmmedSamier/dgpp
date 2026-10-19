@@ -319,7 +319,7 @@ void Csa2Layer::attend_rows(Csa2StatePool& pool, const int32_t* req_ids_win, con
                             int win_block_tokens, const int32_t* win_table, const int32_t* req_ids_main,
                             const int64_t* pos, int row0, int rows, int n_split_main, cudaStream_t stream,
                             const int32_t* list, int list_stride, const int32_t* counts, bool split_window,
-                            int sel_base) {
+                            int sel_base, bool flash_window) {
   const int lh = cfg_.local_heads();
   if (rows > ws_win_rows_ || rows * n_split_main > ws_slots_) throw std::logic_error("csa2 layer: attention tile too wide");
   const uint16_t* q = q_ + size_t(row0) * lh * kCsa2Latent;
@@ -334,9 +334,22 @@ void Csa2Layer::attend_rows(Csa2StatePool& pool, const int32_t* req_ids_win, con
   // combine order, the rounding class the decode audit certifies.
   // n_split_win <= n_split_main, so it fits ws_slots.
   const int n_split_win = split_window ? std::min(n_split_main, kWinDecodeSplit) : 1;
-  dsa_attn_partial(q, win_cache, req_ids_win, list + size_t(row0) * list_stride, list_stride, counts + row0, rows,
-                   n_split_win, lh, kCsa2Latent, win_block_tokens, win_table, 1, attn_scale_, m_win_, l_win_, c_win_,
-                   stream, Csa2StatePool::kRingFormat, nullptr, 0);
+  // The prefill's window on the flash listed kernel (2026-10-18,
+  // engine.prefill_window flash): the window scratch is a one-block cache
+  // and the slot lists are per-row selections, the listed kernel's inputs;
+  // it reads a tile's keys once into shared memory per slab instead of
+  // once per thread of the scalar kernel (287 us per 128-row tile in the
+  // 32K prefill's ledger, 12 % of the walk). Its S sums in the mma's
+  // fragment order — the rounding class the forward-parity gates certify
+  // for the main source; the model test gates it against the scalar form.
+  // Decode's split window and the draft block keep the scalar kernel.
+  if (!(flash_window && !split_window && lh >= 16 && lh % 16 == 0 &&
+        dsa_attn_listed(q, win_cache, req_ids_win, list + size_t(row0) * list_stride, list_stride, counts + row0, rows,
+                        n_split_win, lh, kCsa2Latent, win_block_tokens, win_table, 1, attn_scale_, m_win_, l_win_, c_win_,
+                        stream, Csa2StatePool::kRingFormat, nullptr, 0)))
+    dsa_attn_partial(q, win_cache, req_ids_win, list + size_t(row0) * list_stride, list_stride, counts + row0, rows,
+                     n_split_win, lh, kCsa2Latent, win_block_tokens, win_table, 1, attn_scale_, m_win_, l_win_, c_win_,
+                     stream, Csa2StatePool::kRingFormat, nullptr, 0);
   int n_main = 0;
   if (w_.ratio > 0) {
     const int ord = w_.cache_ord;
@@ -667,7 +680,7 @@ void Csa2Layer::enqueue_prefill(const void* hidden_in, Csa2StatePool& pool, int 
   for (int row0 = 0; row0 < tokens; row0 += kPrefillAttnRows) {
     const int rows = std::min(kPrefillAttnRows, tokens - row0);
     attend_rows(pool, req_zero_, wscratch_, win_rows, one_block_, req_ids_, pos_ + row0, row0, rows, kPrefillSplit,
-                stream, wlist_, cfg_.window, wcounts_, false, row_base);
+                stream, wlist_, cfg_.window, wcounts_, false, row_base, prefill_window_flash_);
   }
   csa2_window_ring_writeback(wscratch_, cfg_.window, pos0, tokens, cfg_.ring_slots, rb, ring, stream);
   project_out(tokens, out, stream);

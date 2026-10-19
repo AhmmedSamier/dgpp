@@ -304,6 +304,10 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
             fail(what, "'" + ek + "' must be \"tile\" or \"streaming\"");
         } else if (p.key == "prefill_fold_overlap") {
           e.prefill_fold_overlap = boolean(x, ek, what);
+        } else if (p.key == "prefill_window") {
+          e.prefill_window = text(x, ek, what);
+          if (e.prefill_window != "flash" && e.prefill_window != "scalar")
+            fail(what, "'" + ek + "' must be \"flash\" or \"scalar\"");
         } else if (p.key == "rope_scaling") {
           if (!x.is_object()) fail(what, "'" + ek + "' must be an object");
           dgpp::RopeScaling rs;

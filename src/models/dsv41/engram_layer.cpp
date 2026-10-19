@@ -1,5 +1,7 @@
 #include "models/dsv41/engram_layer.hpp"
 
+#include <cstring>
+
 #include <stdexcept>
 
 #include "common/cuda_check.hpp"
@@ -39,8 +41,17 @@ size_t Dsv41EngramLayer::staging_bytes(const Dsv41TextConfig& cfg, int world, in
   const size_t entries = static_cast<size_t>(cfg.engram_max_ngram_size - 1) * cfg.engram_n_heads;
   const size_t rows_local = static_cast<size_t>(cfg.engram_max_ngram_size - 1) * (cfg.engram_n_heads / world);
   const size_t row_bytes = static_cast<size_t>(cfg.engram_head_dim) + cfg.engram_head_dim / 32;
-  return static_cast<size_t>(max_tokens) * L * entries * 4 + L * static_cast<size_t>(max_tokens) * rows_local * row_bytes;
+  // Both channels: the walk's own and the chunk-ahead prestage's (its ids
+  // hold the prefix rows too).
+  return static_cast<size_t>(max_tokens) * L * entries * 4 + L * static_cast<size_t>(max_tokens) * rows_local * row_bytes +
+         static_cast<size_t>(max_tokens + 4) * L * entries * 4 + L * static_cast<size_t>(max_tokens) * rows_local * row_bytes;
 }
+
+namespace {
+bool g_engram_prestage = true;
+}
+void Dsv41EngramLayer::set_prestage(bool on) { g_engram_prestage = on; }
+bool Dsv41EngramLayer::prestage_enabled() { return g_engram_prestage; }
 size_t Dsv41EngramLayer::device_bytes(const Dsv41TextConfig& cfg, int world, int max_tokens) {
   const size_t rows_local = static_cast<size_t>(cfg.engram_max_ngram_size - 1) * (cfg.engram_n_heads / world);
   return static_cast<size_t>(max_tokens) * rows_local * cfg.engram_head_dim * 2 +
@@ -96,15 +107,47 @@ Dsv41EngramLayer::Dsv41EngramLayer(const Dsv41TextConfig& cfg, const Dsv41Engram
   DGPP_CUDA_OK(cudaEventCreateWithFlags(&join_, cudaEventDisableTiming));
   stage_args_.push_back(std::make_unique<StageArgs>());
   stage_args_.push_back(std::make_unique<StageArgs>());
+  // The prestage channel.
+  const size_t pre_rows = static_cast<size_t>(max_tokens) + 4;
+  DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_pre_tokens_), pre_rows * 8, cudaHostAllocDefault));
+  DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_pre_pos_), pre_rows * 8, cudaHostAllocDefault));
+  DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_pre_meta_), 2 * 4, cudaHostAllocDefault));
+  DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&d_pre_tokens_), pre_rows * 8));
+  DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&d_pre_pos_), pre_rows * 8));
+  DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&d_pre_req_), pre_rows * 4));
+  DGPP_CUDA_OK(cudaMemset(d_pre_req_, 0, pre_rows * 4));
+  DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&d_pre_spans_), 2 * 4));
+  DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&d_pre_ctx_), 4 * 4));
+  {
+    const int32_t pad[4] = {sidecar.pad_class, sidecar.pad_class, sidecar.pad_class, sidecar.pad_class};
+    DGPP_CUDA_OK(cudaMemcpy(d_pre_ctx_, pad, 4 * 4, cudaMemcpyHostToDevice));
+  }
+  DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&pre_ids_), pre_rows * L * entries_ * 4, cudaHostAllocMapped));
+  DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&pre_staged_), L * staged_layer_bytes_, cudaHostAllocMapped));
+  DGPP_CUDA_OK(cudaEventCreateWithFlags(&pre_fork_, cudaEventDisableTiming));
+  DGPP_CUDA_OK(cudaEventCreateWithFlags(&pre_join_, cudaEventDisableTiming));
+  pre_args_ = std::make_unique<StageArgs>();
 }
 
 Dsv41EngramLayer::~Dsv41EngramLayer() {
   if (side_) cudaStreamSynchronize(side_);
   if (fork_) cudaEventDestroy(fork_);
   if (join_) cudaEventDestroy(join_);
+  if (pre_fork_) cudaEventDestroy(pre_fork_);
+  if (pre_join_) cudaEventDestroy(pre_join_);
   if (side_) cudaStreamDestroy(side_);
   cudaFreeHost(h_ids_);
   cudaFreeHost(staged_);
+  cudaFreeHost(h_pre_tokens_);
+  cudaFreeHost(h_pre_pos_);
+  cudaFreeHost(h_pre_meta_);
+  cudaFreeHost(pre_ids_);
+  cudaFreeHost(pre_staged_);
+  cudaFree(d_pre_tokens_);
+  cudaFree(d_pre_pos_);
+  cudaFree(d_pre_req_);
+  cudaFree(d_pre_spans_);
+  cudaFree(d_pre_ctx_);
   cudaFree(e_);
   cudaFree(kv_);
   cudaFree(d_token_map_);
@@ -117,16 +160,34 @@ void Dsv41EngramLayer::check_staged() const {
   for (const auto& a : stage_args_)
     if (a->error.load(std::memory_order_acquire))
       throw std::runtime_error("Dsv41EngramLayer: an Engram staging failed on the host: " + a->what);
+  if (pre_args_ && pre_args_->error.load(std::memory_order_acquire))
+    throw std::runtime_error("Dsv41EngramLayer: an Engram prestage failed on the host: " + pre_args_->what);
 }
 
 void Dsv41EngramLayer::stage(const int64_t* tokens, int rows, const int32_t* req_ids, const int64_t* pos,
-                             const int32_t* req_spans, int num_requests, const int32_t* ctx, cudaStream_t stream) {
+                             const int32_t* req_spans, int num_requests, const int32_t* ctx, cudaStream_t stream,
+                             const int64_t* host_ids, int64_t pos0, int req) {
   if (rows <= 0) return;
   if (rows > max_tokens_) throw std::invalid_argument("Dsv41EngramLayer: rows exceed max_tokens");
   // A new staging may follow a consumed or an abandoned one: the side
   // stream serializes the host gathers, so the pinned buffers are free
   // once the previous callback has run, which the fork below waits for.
   check_staged();
+  use_pre_ = false;
+  if (pre_pending_) {
+    // The chunk a prestage gathered: its rows are on the prestage channel.
+    // The key: the same slot, rows and first position, the same host ids
+    // pointer AND the same first and last token (a prompt vector's address
+    // can be reused by a later request).
+    pre_pending_ = false;
+    if (host_ids != nullptr && host_ids == pre_host_ids_ && rows == pre_rows_ && pos0 == pre_pos0_ && req == pre_req_ &&
+        host_ids[0] == pre_first_ && host_ids[rows - 1] == pre_last_) {
+      use_pre_ = true;
+      staged_rows_ = rows;
+      ++pre_claims_;
+      return;
+    }
+  }
   int32_t* d_ids = nullptr;
   DGPP_CUDA_OK(cudaHostGetDevicePointer(reinterpret_cast<void**>(&d_ids), h_ids_, 0));
   dsv41_engram_hash_ids_rows(tokens, rows, req_ids, pos, req_spans, num_requests, ctx, hash_, d_ids, stream);
@@ -153,6 +214,55 @@ void Dsv41EngramLayer::stage(const int64_t* tokens, int rows, const int32_t* req
   staged_rows_ = rows;
 }
 
+void Dsv41EngramLayer::prestage(const int64_t* host_ids, int rows, int64_t pos0, int req, const int64_t* prefix,
+                                int n_prefix, cudaStream_t stream) {
+  if (!prestage_enabled() || host_ids == nullptr || rows <= 0 || rows > max_tokens_ || req < 0) return;
+  if (n_prefix != cfg_.engram_max_ngram_size - 1 || prefix == nullptr) return;  // every row's context must be in the span
+  cudaStreamCaptureStatus cs = cudaStreamCaptureStatusNone;
+  DGPP_CUDA_OK(cudaStreamIsCapturing(stream, &cs));
+  if (cs != cudaStreamCaptureStatusNone) return;  // the decode graphs stage on the main channel only
+  check_staged();
+  // The previous prestage, claimed or dropped: its gather ran or runs to
+  // completion on the side stream; the hash below (and the host copies it
+  // reads) wait for it before reusing the channel's buffers.
+  pre_pending_ = false;
+  DGPP_CUDA_OK(cudaStreamWaitEvent(stream, pre_join_, 0));
+  const int n = n_prefix + rows;
+  std::memcpy(h_pre_tokens_, prefix, static_cast<size_t>(n_prefix) * sizeof(int64_t));
+  std::memcpy(h_pre_tokens_ + n_prefix, host_ids, static_cast<size_t>(rows) * sizeof(int64_t));
+  for (int i = 0; i < n; ++i) h_pre_pos_[i] = pos0 - n_prefix + i;
+  h_pre_meta_[0] = 0;
+  h_pre_meta_[1] = n;
+  DGPP_CUDA_OK(cudaMemcpyAsync(d_pre_tokens_, h_pre_tokens_, static_cast<size_t>(n) * 8, cudaMemcpyHostToDevice, stream));
+  DGPP_CUDA_OK(cudaMemcpyAsync(d_pre_pos_, h_pre_pos_, static_cast<size_t>(n) * 8, cudaMemcpyHostToDevice, stream));
+  DGPP_CUDA_OK(cudaMemcpyAsync(d_pre_spans_, h_pre_meta_, 2 * 4, cudaMemcpyHostToDevice, stream));
+  int32_t* d_ids = nullptr;
+  DGPP_CUDA_OK(cudaHostGetDevicePointer(reinterpret_cast<void**>(&d_ids), pre_ids_, 0));
+  // One span of n rows on the private slot 0 whose context is pad_class:
+  // the prefix rows hash from nothing (unused), the chunk's rows from the
+  // prefix and each other — the ids the walk's own stage() would produce.
+  dsv41_engram_hash_ids_rows(d_pre_tokens_, n, d_pre_req_, d_pre_pos_, d_pre_spans_, 1, d_pre_ctx_, hash_, d_ids, stream);
+  StageArgs* a = pre_args_.get();
+  a->tables = &tables_;
+  a->ids = pre_ids_ + static_cast<size_t>(n_prefix) * static_cast<size_t>(layers_) * entries_;
+  a->dst = pre_staged_;
+  a->layer_bytes = staged_layer_bytes_;
+  a->n = rows;
+  a->entries = entries_;
+  DGPP_CUDA_OK(cudaEventRecord(pre_fork_, stream));
+  DGPP_CUDA_OK(cudaStreamWaitEvent(side_, pre_fork_, 0));
+  DGPP_CUDA_OK(cudaLaunchHostFunc(side_, &Dsv41EngramLayer::stage_callback, a));
+  DGPP_CUDA_OK(cudaEventRecord(pre_join_, side_));
+  pre_host_ids_ = host_ids;
+  pre_rows_ = rows;
+  pre_pos0_ = pos0;
+  pre_req_ = req;
+  pre_first_ = host_ids[0];
+  pre_last_ = host_ids[rows - 1];
+  pre_pending_ = true;
+  ++pre_publishes_;
+}
+
 void Dsv41EngramLayer::context_rows(const int64_t* tokens, int rows, const int32_t* req_ids, const int64_t* pos,
                                     const int32_t* req_spans, int num_requests, int32_t* ctx, int32_t* ctx_rows,
                                     cudaStream_t stream) {
@@ -164,9 +274,9 @@ void Dsv41EngramLayer::embed(int table_index, int rows, cudaStream_t stream) {
   if (rows <= 0) return;
   if (table_index < 0 || table_index >= layers_) throw std::invalid_argument("Dsv41EngramLayer: table index");
   if (staged_rows_ != rows) throw std::logic_error("Dsv41EngramLayer: embed() without a matching stage()");
-  DGPP_CUDA_OK(cudaStreamWaitEvent(stream, join_, 0));
+  DGPP_CUDA_OK(cudaStreamWaitEvent(stream, use_pre_ ? pre_join_ : join_, 0));
   uint8_t* d_staged = nullptr;
-  DGPP_CUDA_OK(cudaHostGetDevicePointer(reinterpret_cast<void**>(&d_staged), staged_, 0));
+  DGPP_CUDA_OK(cudaHostGetDevicePointer(reinterpret_cast<void**>(&d_staged), use_pre_ ? pre_staged_ : staged_, 0));
   dsv41_engram_gather_staged_bf16(d_staged + static_cast<size_t>(table_index) * staged_layer_bytes_, rows,
                                   tables_.rows_local(), cfg_.engram_head_dim, e_, stream);
 }
