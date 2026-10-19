@@ -183,6 +183,37 @@ is the ranks' arrival skew — the fabric delivers a row in 5.5 µs in situ,
 the peers stage 10–15 µs apart. The one-lane form (no striping) costs
 1.1 ms at C6 and nothing at C1.
 
+## Sampled requests: the draft rule and the verify rule (2026-10-19)
+
+`engine.mtp_draft auto` resolves to greedy for this family (the DSpark
+block's argmax), and the templates set `engine.mtp_verify = block`.
+Four nodes, C1 at temperature 1 (256 tokens × 3 per class; ms per pass /
+tokens per pass / decode tok/s):
+
+| Draft / verify | code | prose | JSON |
+|---|---|---|---|
+| draw / token (the earlier `auto`) | 52.69 / 3.19 / 60.1 | 53.77 / 2.11 / 39.2 | 53.35 / 4.18 / 78.4 |
+| draw / block | 52.46 / 3.04 / 57.9 | 54.07 / 2.02 / 37.4 | 53.28 / 4.25 / 79.8 |
+| argmax / token | 46.08 / 2.87 / 62.2 | 39.57 / 1.77 / 45.4 | 51.41 / 4.25 / 84.1 |
+| argmax / block (shipped) | 47.68 / 3.31 / 69.5 | 39.72 / 1.99 / 49.9 | 51.11 / 4.18 / 84.8 |
+
+A sampled-draft slot verifies the whole block every pass (the scheduled
+verify depth is for greedy slots), so the draw's passes cost 53 ms on
+every class; the argmax drafts take the schedule, and the block rule
+(Sun et al. 2024, exact for the target distribution) adds 10–12 % on
+code and prose over the token rule; the template as shipped, re-measured,
+66.3 / 49.7 / 81.7 tok/s (sampled runs vary a few percent). Greedy
+requests are untouched.
+
+The screened draft head (`engine.draft_head = screen`, the 2-bit rotated
+copy at 16 / 32 / 64 blocks of 128) was measured at temperature 0 and
+declined: the pass is no cheaper (46.4 ms against 46.0 at 32 blocks; the
+scan and the block scoring cost what the 1.42 ms full head did) and
+acceptance falls (code 3.45 → 3.23 tokens per pass, prose 1.90 → 1.60,
+JSON 4.18 → 3.98), decode tok/s 6–8 % lower. Acceptance per draft
+position at temperature 0 (the retire lines): code 86 / 79 / 88 / 86 %,
+JSON 94 / 89 / 82 / 78 %, prose 63 / 46 / 24 / 67 %.
+
 ## Split-K on the narrow attention projections (2026-10-19)
 
 The decode walk's wkv, wq_a and wo_a GEMVs take the layer's GEMM

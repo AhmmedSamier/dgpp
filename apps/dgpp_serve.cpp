@@ -735,6 +735,14 @@ struct Dsv41Family final : ServeFamily {
   int decode_rows_cap() const override { return dgpp::Dsv41Model::decode_rows_cap(); }
   int default_mtp_depth() const override { return cfg.dspark_block_size; }
   int draft_block_rows() const override { return cfg.dspark_block_size; }
+  // Measured 2026-10-19 (four nodes, temperature 1, C1, 256 tokens x 3 per
+  // class): the block's argmax under the token rule 2.87 / 1.77 / 4.25
+  // tokens per pass (code / prose / JSON) against a draw from it 3.19 /
+  // 2.11 / 4.18 — but a sampled-draft slot verifies the whole block every
+  // pass (the depth schedule is for greedy slots), so the draw's passes
+  // cost 53 ms against 46 / 40 / 51: 60.1 / 39.2 / 78.4 tok/s against
+  // 62.2 / 45.4 / 84.1, and 69.5 / 49.9 / 84.8 with mtp_verify block.
+  bool greedy_draft_default() const override { return true; }
   // The widest fold the decode graph records: the Engram kv partial
   // [rows, (hc + 1) x hidden] on layers 1 and 14.
   size_t lat_slot_bytes(int decode_rows) const override {

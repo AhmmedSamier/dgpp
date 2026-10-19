@@ -52,6 +52,32 @@ project procedures and design guidance live in `docs/`.
   timeline now stamps each peer's row landing and first proof and the
   engine's post mark from the kernel's clock (`scripts/bus_window_skew.py`
   reads them); `DGPP_BUS_TIMELINE=1` as before.
+- **DeepSeek-V4.1 sampled requests: greedy drafts and the block rule by
+  default; the screened draft head measured and declined** (2026-10-19).
+  `engine.mtp_draft auto` resolves to greedy for DeepSeek-V4.1-Flash as it
+  does for V4-Flash, and the family's templates set `engine.mtp_verify =
+  block`. Four nodes, C1 at temperature 1 (256 tokens × 3 per class, decode
+  tok/s code / prose / JSON): a draw from the DSpark block under the token
+  rule — the form `auto` had been resolving to — 60.1 / 39.2 / 78.4; the
+  draw under the block rule 57.9 / 37.4 / 79.8; the block's argmax under
+  the token rule 62.2 / 45.4 / 84.1; the argmax under the block rule 69.5 /
+  49.9 / 84.8; the template as shipped, re-measured, 66.3 / 49.7 / 81.7
+  (sampled runs vary a few percent). The draw loses twice: it accepts less (code 3.19 against the
+  argmax's 2.87 tokens per pass under the token rule looks better only
+  because its passes carry the whole block), and a sampled-draft slot
+  verifies the whole block every pass since the scheduled verify depth is
+  for greedy slots, so its passes cost 53 ms against 46 / 40 / 51; the
+  block rule on the argmax drafts then adds 10–12 % on code and prose
+  (the paper's 7–10 %), nothing on JSON. Both rules are exact for the
+  target distribution; greedy requests are untouched. Declined on the same
+  legs, at temperature 0: `engine.draft_head = screen` (the 2-bit rotated
+  head copy, 32 blocks of 128; 16 and 64 the same) — the pass is no cheaper
+  (46.4 ms against 46.0, the scan and the block scoring costing what the
+  1.42 ms full head did) and acceptance falls (code 3.45 → 3.23 tokens per
+  pass, prose 1.90 → 1.60, JSON 4.18 → 3.98), decode tok/s −6..−8 %; the
+  head stays exact. The acceptance per draft position at temperature 0, as
+  the retire lines log it: code 86 / 79 / 88 / 86 %, JSON 94 / 89 / 82 /
+  78 %, prose 63 / 46 / 24 / 67 %.
 - **DeepSeek-V4.1 decode: split-K on the narrow attention projections**
   (2026-10-19). The decode walk's attention GEMVs ran unsplit (no
   workspace passed), and the narrow ones under-fill the grid: in
