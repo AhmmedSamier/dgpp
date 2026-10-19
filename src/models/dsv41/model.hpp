@@ -311,7 +311,7 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
                      int decode_prefix);
   void update_rows(const uint16_t* sublayer_out, int r0, int rows);
   void swap_pre();
-  bool begin_fold_after(uint16_t* buf, int r0, int n, cudaEvent_t ready);
+  bool begin_fold_after(uint16_t* buf, int r0, int n, cudaEvent_t ready, int width = 0);  // width 0: hidden
   void begin_pending_fold();
   void flush_overlap();
   // The block boundary of a walk of T rows: the row nearest T/2 at which
@@ -336,7 +336,7 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
   void prestage_after_embed(int table_index);
   bool ffn_b_pending_ = false;        // block B's MoE fold is outstanding (its rows accumulated)
   bool ffn_b_begun_ = false;          // ... and submitted to the bus (else only its event stands)
-  cudaEvent_t ov_ev_[4] = {};         // the blocks' producers: attention A, attention B, accumulation A, B
+  cudaEvent_t ov_ev_[6] = {};         // the blocks' producers: attention A, B; accumulation A, B; Engram projection A, B
   int overlap_rows_ = 0;              // the pending fold's walk rows and block boundary
   int overlap_ta_ = 0;
   uint64_t overlap_async_folds_ = 0;  // folds begun asynchronously (tests)

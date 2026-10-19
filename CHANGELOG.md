@@ -5,6 +5,19 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **DeepSeek-V4.1 prefill: the Engram folds by row block** (2026-10-19).
+  The two Engram layers' folds of (hc + 1) x hidden per row — 210 MB per
+  4,096-row chunk, 31 ms each over the wire — were the overlap walk's last
+  synchronous folds. The projection now runs per row block, block A's
+  fold under block B's projection, block B's under A's gate and attention
+  (the previous layer's pending MoE fold lands under the projections, so
+  the reducer holds one fold at a time); A's gate reads A's streams, B's
+  gate follows its fold before B's attention site. The rows are the same
+  rows: bitwise the one-block form (the overlap gates now count 36
+  asynchronous folds per walk, 32 before). Measured on the 1017 template
+  on four nodes: cold prefill 0.413 / 1.066 / 2.717 / 10.033 s at 512 /
+  2K / 8K / 32K tokens against 0.421 / 1.097 / 2.771 / 10.174 (the same
+  prompts), 3,170 tok/s at 32K.
 - **DeepSeek-V4.1 prefill: the Engram rows staged a chunk ahead, and the
   overlap's folds begun behind events** (2026-10-18; the staging under
   `engine.ngram_prestage`, which now covers the Engram tables too). The

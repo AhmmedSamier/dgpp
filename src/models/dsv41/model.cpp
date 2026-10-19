@@ -975,19 +975,20 @@ void Dsv41Model::update_rows(const uint16_t* sublayer_out, int r0, int rows) {
 // fold (2026-10-18: the drain this replaces left the GPU idle at every
 // fold until the host enqueued the next kernels, 0.7 s of a 32K prefill).
 // True: begun on the bus (end_fold waits). False: folded in place.
-bool Dsv41Model::begin_fold_after(uint16_t* buf, int r0, int n, cudaEvent_t ready) {
+bool Dsv41Model::begin_fold_after(uint16_t* buf, int r0, int n, cudaEvent_t ready, int width) {
   if (!boundary_) return false;
-  uint16_t* at = buf + static_cast<size_t>(r0) * static_cast<size_t>(cfg_.hidden_size);
-  if (boundary_->begin_async_after(at, n, cfg_.hidden_size, ready)) {
+  if (width <= 0) width = cfg_.hidden_size;
+  uint16_t* at = buf + static_cast<size_t>(r0) * static_cast<size_t>(width);
+  if (boundary_->begin_async_after(at, n, width, ready)) {
     ++overlap_async_folds_;
     return true;
   }
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));  // a reducer without the event form: the old drain
-  if (boundary_->begin_async(at, n, cfg_.hidden_size)) {
+  if (boundary_->begin_async(at, n, width)) {
     ++overlap_async_folds_;
     return true;
   }
-  boundary_->reduce(at, n, cfg_.hidden_size);
+  boundary_->reduce(at, n, width);
   return false;
 }
 
@@ -1065,17 +1066,35 @@ void Dsv41Model::enqueue_layer_overlap(const Dsv41LayerResident& r, int layer, i
   const auto end_fold = [&](bool begun) {
     if (begun) boundary_->end_async();
   };
-  // Engram: the gate reads every row's streams, so the previous layer's
-  // block-B fold lands first; the Engram fold itself stays one block.
+  // Engram, by row block (2026-10-19): the projection per block, block
+  // A's fold under B's projection, block B's fold under A's gate and
+  // attention; A's gate reads A's streams (in nxt_ while the previous
+  // layer's block-B fold is pending), B's gate after that fold lands and
+  // before B's attention site — the two folds of (hc + 1) x hidden per
+  // row were the walk's longest synchronous ones (31 ms each at 4,096
+  // rows). The rows are the same rows: bitwise the one-block form.
+  bool engram_split = false, engram_fold_b = false;
+  Dsv41EngramLayerWeights ew;
+  uint16_t* engram_kv = engram_kv_;
   if (r.engram.present) {
-    flush_overlap();
     engram_->embed(r.engram.table_index, T, stream_);
     prestage_after_embed(r.engram.table_index);
-    const Dsv41EngramLayerWeights ew = engram_view(r.engram);
-    uint16_t* kv = stage(engram_kv_, T, 5 * H, false);
-    engram_->project(ew, T, kv, stream_, /*prefill_tile=*/prefill_dense_tile_);
-    fold(kv, T, 5 * H, false);
-    engram_->gate(ew, cur_, kv, T, stream_);
+    ew = engram_view(r.engram);
+    const int W = (cfg_.hc_mult + 1) * H;
+    engram_->project(ew, TA, engram_kv, stream_, /*prefill_tile=*/prefill_dense_tile_, 0);
+    DGPP_CUDA_OK(cudaEventRecord(ov_ev_[4], stream_));
+    // The previous layer's block-B MoE fold, if pending, runs under the two
+    // projections and lands before the Engram folds begin (the reducer
+    // holds one fold at a time); then every row's streams stand in cur_.
+    if (ffn_b_pending_) begin_pending_fold();
+    engram_->project(ew, TB, engram_kv, stream_, /*prefill_tile=*/prefill_dense_tile_, TA);
+    DGPP_CUDA_OK(cudaEventRecord(ov_ev_[5], stream_));
+    flush_overlap();
+    const bool fold_ka = begin_fold_after(engram_kv, 0, TA, ov_ev_[4], W);  // under B's projection
+    if (fold_ka) boundary_->end_async();
+    engram_->gate(ew, cur_, engram_kv, TA, stream_);
+    engram_fold_b = begin_fold_after(engram_kv, TA, TB, ov_ev_[5], W);  // under A's gate, site and attention
+    engram_split = true;
   }
   // DSpark: a target layer's attention input over every row (as in enqueue_layer).
   if (mtp_) {
@@ -1092,9 +1111,11 @@ void Dsv41Model::enqueue_layer_overlap(const Dsv41LayerResident& r, int layer, i
   aw.base = r.mhc.attn_base;
   aw.scale = r.mhc.attn_scale;
   // Block A's streams are updated (in nxt_) while block B's wait for the
-  // previous layer's MoE fold.
+  // previous layer's MoE fold; on an Engram layer B's wait for their gate.
   if (ffn_b_pending_)
     mhc_site_rows(nxt_, aw, r.attn_norm, 0, TA, decode_prefix);
+  else if (engram_split)
+    mhc_site_rows(cur_, aw, r.attn_norm, 0, TA, decode_prefix);
   else
     mhc_site_rows(cur_, aw, r.attn_norm, 0, T, decode_prefix);
   if (!csa2_->prepare(T)) throw std::runtime_error("run_rows: CSA2 GEMM plans unavailable");
@@ -1137,12 +1158,18 @@ void Dsv41Model::enqueue_layer_overlap(const Dsv41LayerResident& r, int layer, i
   };
   attention(0, TA);
   DGPP_CUDA_OK(cudaEventRecord(ov_ev_[0], stream_));  // A's attention
+  const bool site_b_later = ffn_b_pending_ || engram_split;
   if (ffn_b_pending_) {
     // The previous layer's block-B fold, begun behind A's site and attention
     // and landed while they run.
     flush_overlap();
-    mhc_site_rows(cur_, aw, r.attn_norm, TA, TB, decode_prefix);
   }
+  if (engram_split) {
+    if (engram_fold_b) boundary_->end_async();
+    engram_->gate(ew, cur_ + static_cast<size_t>(TA) * 4 * H, engram_kv + static_cast<size_t>(TA) * (cfg_.hc_mult + 1) * H,
+                  TB, stream_);
+  }
+  if (site_b_later) mhc_site_rows(cur_, aw, r.attn_norm, TA, TB, decode_prefix);
   swap_pre();  // the attention site's coefficients stand for every row
   attention(TA, TB);
   DGPP_CUDA_OK(cudaEventRecord(ov_ev_[1], stream_));  // B's attention

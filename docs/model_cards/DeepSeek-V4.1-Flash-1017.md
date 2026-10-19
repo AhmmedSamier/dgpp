@@ -187,7 +187,8 @@ across both while the decode class stays on the first.
 | Two lanes, tile projections | 0.480 / 1.415 / 4.045 / 15.328 | 2,080 |
 | Two lanes, tile projections, the folds overlapped | 0.464 / 1.324 / 3.699 / 14.234 | 2,240 |
 | … and the attention kernels at the byte floor | 0.418 / 1.097 / 2.801 / 10.623 | 3,000 |
-| … and the Engram rows staged a chunk ahead, the folds begun behind events (shipped) | 0.421 / 1.097 / 2.771 / 10.174 | 3,130 |
+| … and the Engram rows staged a chunk ahead, the folds begun behind events | 0.421 / 1.097 / 2.771 / 10.174 | 3,130 |
+| … and the Engram folds by row block (shipped) | 0.413 / 1.066 / 2.717 / 10.033 | 3,170 |
 
 Decode is untouched by all of these. The ledger's remaining prefill
 shares on the tile form were the listed attention over the selected
@@ -275,10 +276,15 @@ folds begin behind the producers' events with the other block's work
 already enqueued. Cold prefill 0.421 / 1.097 / 2.771 / 10.174 s (−4 % at
 32K; the shorter prompts are one or two chunks and stage nothing ahead).
 The profiled walk's gaps fell to 1.4 s: one first-chunk gather of 90 ms,
-the two Engram folds per chunk at 31 ms each (210 MB over the wire, not
-overlapped: the next lever), the MoE fold of block A exposed under block
-B's accumulation alone (about 0.45 s), the attention fold of block B
-under block A's site and router (about 0.29 s).
+the two Engram folds per chunk at 31 ms each (210 MB over the wire), the
+MoE fold of block A exposed under block B's accumulation alone (about
+0.45 s), the attention fold of block B under block A's site and router
+(about 0.29 s). The Engram folds then went by row block too (A's under
+B's projection, B's under A's gate and attention; bitwise): 0.413 /
+1.066 / 2.717 / 10.033 s. What remains exposed is wire time under too
+little work: a block's fold of hidden x 2 bytes per row moves at about
+7 GB/s per rank on the paced bulk path, and block B's accumulation is
+shorter than block A's fold.
 
 ## Measured (2026-10-18, four nodes)
 
