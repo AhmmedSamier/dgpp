@@ -700,6 +700,54 @@ DGPP_TEST(dsv41_tp_prefill_fold_overlap_is_bitwise_the_one_block_walk) {
   }
 }
 
+// Every decode form of the 2026-10-19 round repeats itself bitwise run to
+// run across request slots at world 1: the scalar and the flash window
+// (in line and beside the main source) and the fused mHC site. (The flash
+// window's first form read a zero-filled ring for every slot but 0 — the
+// listed kernel bounded a ring block by the table's row width — and this
+// gate's slot pair is what caught it.)
+DGPP_TEST(dsv41_decode_forms_repeat_bitwise_across_slots) {
+  const std::string dir = (fs::current_path() / "dsv41_tp_fixture_forms").string();
+  const Dsv41TextConfig cfg = dsv41fx::tiny_config();
+  dsv41fx::write_fixture(cfg, dir);
+  (void)dsv41fx::fixture_sidecar(cfg, dir);
+  const std::vector<int64_t> prompt = make_tokens(cfg, 96);
+  LocalAsyncReducer reducer;
+  Dsv41Model model(cfg, dir, 1280, 4096, Dsv41Residency::Streaming, nullptr, 0, 1, /*max_requests=*/2);
+  (void)model.set_boundary(&reducer);
+  model.set_decode_route_traces(false);
+  const auto run = [&](int slot, std::vector<std::vector<float>>* steps) {
+    Dsv41Model::Outputs o = model.session_prefill(slot, prompt);
+    steps->push_back(o.logits);
+    for (int k = 0; k < 6; ++k) {
+      o = model.session_step(slot, (prompt[static_cast<size_t>(k)] + 7) % cfg.vocab_size);
+      steps->push_back(o.logits);
+    }
+    model.session_close(slot);
+  };
+  struct Arm { bool fused, flash, beside; };
+  for (const Arm arm : {Arm{false, false, false}, Arm{false, true, false}, Arm{false, true, true}, Arm{true, true, true}}) {
+    std::vector<std::vector<float>> a, b;
+    model.set_decode_mhc_fused(arm.fused);
+    model.set_decode_window_flash(arm.flash);
+    model.set_decode_window_beside(arm.beside);
+    run(0, &a);
+    run(1, &b);
+    size_t first = a.size();
+    for (size_t i = 0; i < a.size() && i < b.size(); ++i)
+      if (a[i] != b[i]) { first = i; break; }
+    std::printf("  determinism: mhc %s, window %s %s: %s\n", arm.fused ? "fused" : "unfused", arm.flash ? "flash" : "scalar",
+                arm.beside ? "beside" : "in line", first == a.size() ? "bitwise run to run" : ("step " + std::to_string(first) + " differs").c_str());
+    require(first == a.size() && !a.empty(), std::string("the decode step is not bitwise across slots (mhc ") +
+                                                 (arm.fused ? "fused" : "unfused") + ", window " + (arm.flash ? "flash" : "scalar") +
+                                                 (arm.beside ? " beside" : " in line") + ")");
+  }
+  model.set_decode_mhc_fused(true);
+  model.set_decode_window_flash(true);
+  model.set_decode_window_beside(true);
+  std::printf("[ OK ] decode forms: the prefill and 6 decode steps bitwise across slots for every form\n");
+}
+
 // The overlap on a loopback world of 2: the bus's bulk all-reduce runs
 // asynchronously under the other block's compute (block A's fold exceeds
 // the reducer's asynchronous threshold of two latency slots at the

@@ -1893,48 +1893,79 @@ __global__ void moe_slot_down_fp4_kernel(
     const MoeExpertView* __restrict__ views, int n_routed,
     int n_shared, int k_shared, const uint8_t* __restrict__ sh_payload,
     const float* __restrict__ sh_scales, float* __restrict__ out,
-    int out_stride, int slots, int top_k, int shared_view_base, int sh_rs, int sh_cs) {
+    int out_stride, int slots, int top_k, int shared_view_base, int sh_rs, int sh_cs,
+    int tiles, int* __restrict__ tile_counter) {
   using G = fp4_gemv::Geom<K>;
   extern __shared__ __align__(16) uint16_t sx[];
-  const int n0 = blockIdx.x * G::rows_per_block;
-  if (static_cast<int>(blockIdx.y) >= slots) return;
-  const int slot = logical_slot(order);
-  const int t = slot / (top_k + 1);
-  const int j = slot - t * (top_k + 1);
-  const bool shared = j == top_k;
-  const int n = shared ? n_shared : n_routed;
-  const int k = (shared && !kSharedFp4) ? k_shared : K;
-  if (n0 >= n) return;
-  float* out_row = out + static_cast<size_t>(slot) * out_stride;
-  if (shared && !kSharedFp4) {
-    fp8_gemv::stage_activations<1>(act + static_cast<size_t>(slot) * act_stride,
-                                   act_stride, k, sx);
+  // The work units — (slot, row tile) pairs — are taken from a counter,
+  // each block looping until none are left (2026-10-19). A static grid
+  // quantized the walk: at the DeepSeek-V4.1 down projection (K = 576,
+  // 5,120 rows per slot, 21 slots at three rows) 840 tiles over the
+  // resident blocks ran as whole rounds for a fractional round of work,
+  // the kernel at 73 % of the read ceiling. A tile's rows run the same
+  // chain whoever takes it: bitwise the static grid. The counter pair
+  // (units taken, blocks done) is zero at rest: the last block out
+  // resets both for the next launch, so no other kernel zeroes it.
+  __shared__ int s_unit;
+  const int total = tiles * slots;
+  for (;;) {
+    __syncthreads();  // the previous unit's readers of sx and s_unit are done
+    if (threadIdx.x == 0) s_unit = atomicAdd(tile_counter, 1);
     __syncthreads();
-    fp8_gemv::block_rows_multi<1, G::rows_per_warp>(
-        sh_payload, sh_scales, sx, n0, n, k, out_row, static_cast<size_t>(out_stride), sh_rs, sh_cs);
-    return;
-  }
-  const int base = (kSharedFp4 && shared) ? shared_view_base
-                                          : ids[static_cast<size_t>(t) * top_k + j] * 3;
-  const MoeExpertView v = views[static_cast<size_t>(base) + 2];
-  const float g = kGroup == fp4_gemv::kGroup ? *v.fp4_global : 1.f;
-  // The first pass's weight loads in flight before the activations are
-  // staged (fp4_gemv.cuh: PassLoads); the epilogue is block_rows's.
-  fp4_gemv::PassLoads<G::pass_chunks(0)> L0;
-  fp4_gemv::issue_pass<K, 0, G::pass_chunks(0), kGroup, kFp4SlotStreaming>(v.payload, v.fp4_scales, n0, n, L0);
-  fp8_gemv::stage_activations<1>(act + static_cast<size_t>(slot) * act_stride, act_stride, k, sx);
-  __syncthreads();
-  float acc[fp4_gemv::kSteps][1];
-  fp4_gemv::warp_row_dots_issued<K, 1, kGroup, kFp4SlotStreaming>(L0, v.payload, v.fp4_scales, sx, n0, n, acc);
+    const int unit = s_unit;
+    if (unit >= total) {
+      // Every block takes one unit past the end before it leaves, so the
+      // last block done knows every fetch has happened.
+      if (threadIdx.x == 0) {
+        __threadfence();
+        if (atomicAdd(tile_counter + 1, 1) == static_cast<int>(gridDim.x) - 1) {
+          tile_counter[0] = 0;
+          tile_counter[1] = 0;
+          __threadfence();
+        }
+      }
+      return;
+    }
+    const int slot_ix = unit / tiles;
+    const int n0 = (unit - slot_ix * tiles) * G::rows_per_block;
+    const int slot = order ? order[slot_ix] : slot_ix;
+    const int t = slot / (top_k + 1);
+    const int j = slot - t * (top_k + 1);
+    const bool shared = j == top_k;
+    const int n = shared ? n_shared : n_routed;
+    const int k = (shared && !kSharedFp4) ? k_shared : K;
+    if (n0 >= n) continue;
+    float* out_row = out + static_cast<size_t>(slot) * out_stride;
+    if (shared && !kSharedFp4) {
+      fp8_gemv::stage_activations<1>(act + static_cast<size_t>(slot) * act_stride,
+                                     act_stride, k, sx);
+      __syncthreads();
+      fp8_gemv::block_rows_multi<1, G::rows_per_warp>(
+          sh_payload, sh_scales, sx, n0, n, k, out_row, static_cast<size_t>(out_stride), sh_rs, sh_cs);
+      continue;
+    }
+    const int base = (kSharedFp4 && shared) ? shared_view_base
+                                            : ids[static_cast<size_t>(t) * top_k + j] * 3;
+    const MoeExpertView v = views[static_cast<size_t>(base) + 2];
+    const float g = kGroup == fp4_gemv::kGroup ? *v.fp4_global : 1.f;
+    // The first pass's weight loads in flight before the activations are
+    // staged (fp4_gemv.cuh: PassLoads); the epilogue is block_rows's.
+    fp4_gemv::PassLoads<G::pass_chunks(0)> L0;
+    fp4_gemv::issue_pass<K, 0, G::pass_chunks(0), kGroup, kFp4SlotStreaming>(v.payload, v.fp4_scales, n0, n, L0);
+    fp8_gemv::stage_activations<1>(act + static_cast<size_t>(slot) * act_stride, act_stride, k, sx);
+    __syncthreads();
+    float acc[fp4_gemv::kSteps][1];
+    fp4_gemv::warp_row_dots_issued<K, 1, kGroup, kFp4SlotStreaming>(L0, v.payload, v.fp4_scales, sx, n0, n, acc);
 #pragma unroll
-  for (int st = 0; st < fp4_gemv::kSteps; ++st) {
-    bool mine = false;
-    const int row = fp4_gemv::owned_row<K>(n0, st, mine);
-    if (mine && row < n) {
-      if constexpr (kGroup == fp4_gemv::kGroup)
-        fp4_gemv::store_dot(out_row + row, __fdiv_rn(acc[st][0], g));
-      else
-        fp4_gemv::store_dot(out_row + row, acc[st][0]);
+    for (int st = 0; st < fp4_gemv::kSteps; ++st) {
+      bool mine = false;
+      const int row = fp4_gemv::owned_row<K>(n0, st, mine);
+      if (mine && row < n) {
+        if constexpr (kGroup == fp4_gemv::kGroup)
+          fp4_gemv::store_dot(out_row + row, __fdiv_rn(acc[st][0], g));
+        else
+          fp4_gemv::store_dot(out_row + row, acc[st][0]);
+      }
     }
   }
 }
@@ -4652,8 +4683,9 @@ void launch_moe_slot_down_fp4(const uint16_t* act, size_t act_stride,
                               const uint8_t* sh_payload, const float* sh_scales,
                               float* out, int out_stride, int slots, int top_k,
                               cudaStream_t stream, int shared_view_base, int fp4_group,
-                              int sh_rs, int sh_cs) {
+                              int sh_rs, int sh_cs, int* tile_counter) {
   if (slots <= 0) return;
+  if (tile_counter == nullptr) throw std::invalid_argument("moe_slot_down_fp4: the stealing counter pair is required");
   check_fp4_slot_args(act, ids, views, out, n_routed, k_routed, n_shared, k_shared,
                       shared_view_base, "moe_slot_down_fp4", fp4_group);
   const bool shared_fp4 = shared_view_base >= 0;
@@ -4664,21 +4696,43 @@ void launch_moe_slot_down_fp4(const uint16_t* act, size_t act_stride,
     throw std::invalid_argument("moe_slot_down_fp4: out_stride below n");
   const int max_n = n_routed > n_shared ? n_routed : n_shared;
   const int max_k = k_routed > k_shared ? k_routed : k_shared;
+  // The grid: every resident block once (the device's occupancy of this
+  // instantiation at this smem), each stealing (slot, tile) units until
+  // none are left.
+  static int sms = 0;
+  if (sms == 0) {
+    int dev = 0;
+    DGPP_CUDA_OK(cudaGetDevice(&dev));
+    DGPP_CUDA_OK(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev));
+  }
+  const size_t smem = fp8_gemv::smem_bytes(1, max_k);
   const auto go = [&](auto kc, auto gc) {
     constexpr int K = decltype(kc)::value;
     constexpr int G = decltype(gc)::value;
     constexpr int rpb = fp4_gemv::Geom<K>::rows_per_block;
-    const dim3 grid((max_n + rpb - 1) / rpb, static_cast<unsigned>(slots));
+    const int tiles = (max_n + rpb - 1) / rpb;
+    if (tiles <= 0) return;
+    const int total = tiles * slots;
+    static int occ_k[2] = {-1, -1}, occ_blocks[2] = {0, 0};
+    const int which = shared_fp4 ? 1 : 0;
+    if (occ_k[which] != max_k) {
+      int per_sm = 0;
+      DGPP_CUDA_OK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+          &per_sm, shared_fp4 ? moe_slot_down_fp4_kernel<K, true, G> : moe_slot_down_fp4_kernel<K, false, G>,
+          fp8_gemv::kThreads, smem));
+      if (per_sm < 1) throw std::runtime_error("moe_slot_down_fp4: the kernel fits no block");
+      occ_blocks[which] = per_sm * sms;
+      occ_k[which] = max_k;
+    }
+    const dim3 grid(static_cast<unsigned>(std::min(total, occ_blocks[which])));
     if (shared_fp4)
-      moe_slot_down_fp4_kernel<K, true, G>
-          <<<grid, fp8_gemv::kThreads, fp8_gemv::smem_bytes(1, max_k), stream>>>(
-              act, act_stride, ids, order, views, n_routed, n_shared, k_shared,
-              sh_payload, sh_scales, out, out_stride, slots, top_k, shared_view_base, sh_rs, sh_cs);
+      moe_slot_down_fp4_kernel<K, true, G><<<grid, fp8_gemv::kThreads, smem, stream>>>(
+          act, act_stride, ids, order, views, n_routed, n_shared, k_shared,
+          sh_payload, sh_scales, out, out_stride, slots, top_k, shared_view_base, sh_rs, sh_cs, tiles, tile_counter);
     else
-      moe_slot_down_fp4_kernel<K, false, G>
-          <<<grid, fp8_gemv::kThreads, fp8_gemv::smem_bytes(1, max_k), stream>>>(
-              act, act_stride, ids, order, views, n_routed, n_shared, k_shared,
-              sh_payload, sh_scales, out, out_stride, slots, top_k, -1, sh_rs, sh_cs);
+      moe_slot_down_fp4_kernel<K, false, G><<<grid, fp8_gemv::kThreads, smem, stream>>>(
+          act, act_stride, ids, order, views, n_routed, n_shared, k_shared,
+          sh_payload, sh_scales, out, out_stride, slots, top_k, -1, sh_rs, sh_cs, tiles, tile_counter);
     DGPP_CUDA_OK(cudaGetLastError());
   };
   if (fp4_group == fp4_gemv::kMxGroup)

@@ -725,7 +725,7 @@ void Dsv4Model::prefetch_head(const Dsv4HcHeadResident& hc, const uint16_t* norm
   prefetch_.open_window(stream_, kPrefetchWindowBytes, prefetch_.boundary_rate());
   prefetch_mhc(hc.fn, norm);
   if (draft && draft_head_fp8_ != nullptr)
-    prefetch_.add(draft_head_fp8_, static_cast<size_t>(lm_vocab_count_) * H);
+    prefetch_.add_isolated(draft_head_fp8_, static_cast<size_t>(lm_vocab_count_) * H);  // its own allocation
   else if (globals_.lm_head)
     prefetch_.add(globals_.lm_head, static_cast<size_t>(lm_vocab_count_) * H * 2);
 }

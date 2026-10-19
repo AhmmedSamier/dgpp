@@ -5,6 +5,73 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **DeepSeek-V4.1 decode: the fused mHC site, the down kernel's tile
+  stealing, the flash window split beside the main source; the fold split
+  tried and discarded** (2026-10-19). The C1 pass's non-DRAM time, from the
+  node trace of `0d69d565` (three rows, about 850–920 µs a layer): two mHC
+  sites at three launches each (dots 8.5, finish 9.9, norm 7.3 µs), the
+  scalar window attention at eight splits (27–29 µs), the fp4 down
+  projection at 73 % of the read ceiling (840 tiles over the resident
+  blocks ran as whole rounds), and two collectives a layer (35 + 41 µs)
+  whose handshake and skew ran in the open. Shipped, each judged by the
+  trace: `Dsv41Model::mhc_site_fused` takes DeepSeek-V4's decode form (the
+  finish in the dots launch by tickets, the one-rounding norm, the comb on
+  a side stream joined at the stream update; a mixed decoder's rows keep
+  it) — a site is 12 µs on the critical path, 26 before;
+  `moe_slot_down_fp4_kernel` steals (slot, row tile) units from a counter
+  pair the last block resets, its grid the device's occupancy — 169 µs a
+  layer, 180 before; `engine.decode_window` (flash) runs the 128-key window
+  on `dsa_attn_listed`, split eight ways like the scalar form, on a side
+  stream beside the main source's kernel (the unsplit flash window walked
+  the eight tiles in one block at 36 µs; split, beside the 16 µs main
+  kernel). Tried and discarded with its numbers: the decode fold split
+  (each boundary's producer as two column halves, the first half's
+  all-reduce on a side stream under the second half, the bus walking up to
+  four generations in flight). Against the same build with it off, C1
+  ms/pass at equal rows: both sites +0.7 code / +1.6 prose / +1.1 JSON; the
+  MoE site alone +0.5 / +1.0 / +0.3. The bus timeline on four ranks says
+  why: the split adds 46 % more collectives (93 → 136 a window) and each
+  still pays its handshake and skew in full (23 + 21 µs; only the fold
+  shrinks, 9.0 → 5.8), while every collective's staging copy slows from
+  4.8 to 8.4 µs under the second half's DRAM traffic — the fixed cost of a
+  collective, not its fold, is what a split would have to hide, so the
+  lever is the handshake itself. The attention lever carried a
+  dependency of its own: the CSA2 layer's output window (wo_a + wo_b
+  prefetched under the attention) lost its cover when that phase shrank
+  to 12–20 µs, and the first output GEMV queued behind its own weights
+  (28.8 → 49.8 µs over 139 launches a pass, JSON +1.4 ms); a window-only
+  layer now opens no output window (the light rate spilled onto the GEMV,
+  the full rate slowed the attention's cache reads, the layer's start
+  slowed the projections — each measured), and
+  `engine.l2_prefetch_window_mib` governs this family's windows (18 MiB
+  pinned in the template, the best of 18/12/8/6). C1 (`timed_load`, three
+  repeats, ms per pass / decode tokens per pass / tok/s), the campaign's
+  `0d69d565` binary against this round's: code 46.80 / 3.11 / 66.5 →
+  47.93 / 3.59 / 74.9; prose 40.06 / 1.81 / 45.2 → 40.71 / 1.90 / 46.7;
+  JSON 51.95 / 4.11 / 79.2 → 51.75 / 4.11 / 79.5; C6 code 174.8 / 20.7 /
+  118.5 → 172.5 / 20.7 / 120.1; the quality set on the shipped binary
+  HumanEval 156/164, GSM8K 292/300 (three truncations), extraction
+  100/100 (the campaign binary: 157, 295, 100). The gates: every decode form bitwise run to run across request
+  slots (`dsv41_decode_forms_repeat_bitwise_across_slots`), dsv41 TP 19/19,
+  dsv41 model 6/6, the MoE kernels 101, the whole shared prefill binary
+  20/20 under its registered environment.
+- **Three defects the round's gates exposed, fixed** (2026-10-19). The flash
+  listed attention kernel bounded a list entry's block by the table's row
+  width; for the decode window's one-entry ring table that rejected every
+  request but slot 0, a zero-filled window per slot: `dsa_attn_listed(...,
+  blocks_total)` carries the pool's physical count and the CSA2 decode
+  window passes its ring regions. The fp8 streaming GEMM read a weight
+  scale past the ragged last column tile (its codes were guarded, the
+  scale row was not). And `WeightPrefetcher::add` bridged holes of up to
+  2 MiB between two allocations — that hole is unmapped, and the load-form
+  kernel faulted on it (the DeepSeek-V4 session gate's Xid 31, which a
+  kernel change elsewhere exposed by shifting the layout, and HEAD's draft
+  fault at the default dense GEMV threshold): a hole is bridged only inside
+  the pending range's allocation, the launcher clamps a range to its
+  allocation with one warning, DeepSeek-V4's fp8 draft head is an isolated
+  add. The benchmark rows of `0d69d565` are refreshed from the 2026-10-19
+  campaign (C1 44.8–78.1 tok/s, prefill 0.407 / 1.079 / 2.713 / 10.030 s,
+  quality 157/164, 295/300, 100/100).
 - **Decode: the fp4 MoE down projection in one pass per lane, and the
   DeepSeek-V4.1 lm head's 12-bit companion** (2026-10-19). The 1017 decode
   pass at C1 (46–47 ms wall, about three rows, a node trace): the expert

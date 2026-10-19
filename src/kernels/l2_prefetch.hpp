@@ -118,8 +118,13 @@ class WeightPrefetcher {
   // ~620 one-tensor kernels per decode step — 40 % of the graph's nodes,
   // and cudaGraphLaunch costs ~0.45 us per node on this host — becomes a
   // few dozen. The pending range launches at the next non-adjacent add,
-  // at the next open_window(), or at join(). DGPP_L2_PREFETCH_MERGE=off
-  // restores one launch per add.
+  // at the next open_window(), or at join(); engine.l2_prefetch_merge false
+  // restores one launch per add. A hole is bridged only inside the pending
+  // range's own allocation — the driver's address range of its first byte
+  // (2026-10-19: the DeepSeek-V4 draft head's fp8 copy, a separate
+  // allocation that landed 1.9 MiB past its layer's image, was bridged,
+  // and the load-form kernel read the unmapped hole; the layout a kernel
+  // change shifts decides whether two allocations fall within kMergeGap).
   void add(const void* ptr, size_t bytes);
   // add() for a range that is its OWN allocation (a bf16 weight's packed
   // companion — IGemm::resident_view — not a span of the layer's image): it
@@ -161,6 +166,7 @@ class WeightPrefetcher {
   void flush_pending();
   bool merge_ = true;
   uintptr_t pending_begin_ = 0, pending_end_ = 0;
+  uintptr_t pending_alloc_end_ = 0;  // the end of the pending range's allocation (0: unknown — no hole bridged)
   size_t launches_ = 0;
   bool enabled_ = true;
   size_t window_bytes_ = kDefaultWindowBytes;

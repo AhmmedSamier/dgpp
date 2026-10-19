@@ -1,5 +1,10 @@
 #include "kernels/l2_prefetch.hpp"
 
+#include <cuda.h>
+
+#include <format>
+#include <stdexcept>
+
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
@@ -146,6 +151,23 @@ void launch_persisting(const uint4* p, size_t vecs, int blocks, cudaStream_t str
   DGPP_CUDA_OK(cudaLaunchKernelEx(&cfg, l2_prefetch_kernel<kUnroll>, p, vecs));
 }
 
+// The device allocation holding `p`: [base, end) from the driver. False for
+// host, managed or unknown memory (nothing is clamped or bridged then).
+static bool device_allocation(uintptr_t p, uintptr_t* base, uintptr_t* end) {
+  cudaPointerAttributes attrs{};
+  if (cudaPointerGetAttributes(&attrs, reinterpret_cast<const void*>(p)) != cudaSuccess) {
+    cudaGetLastError();
+    return false;
+  }
+  if (attrs.type != cudaMemoryTypeDevice) return false;
+  CUdeviceptr b = 0;
+  size_t size = 0;
+  if (cuMemGetAddressRange(&b, &size, static_cast<CUdeviceptr>(p)) != CUDA_SUCCESS) return false;
+  *base = static_cast<uintptr_t>(b);
+  *end = static_cast<uintptr_t>(b) + size;
+  return true;
+}
+
 void launch_l2_prefetch(const void* ptr, size_t bytes, PrefetchRate rate,
                         cudaStream_t stream, bool persisting) {
   if (ptr == nullptr || bytes == 0 || rate == PrefetchRate::Off) return;
@@ -155,8 +177,26 @@ void launch_l2_prefetch(const void* ptr, size_t bytes, PrefetchRate rate,
   const uintptr_t begin = reinterpret_cast<uintptr_t>(ptr) & ~uintptr_t{15};
   const uintptr_t end =
       (reinterpret_cast<uintptr_t>(ptr) + bytes + 15) & ~uintptr_t{15};
+  // The guard (2026-10-19): a range never reads past the allocation that
+  // holds its first byte — the merge below keeps ranges inside one
+  // allocation, and a caller's over-long range is clamped here with one
+  // warning per process (the forms read every line they are given).
+  uintptr_t end_clamped = end;
+  {
+    uintptr_t base = 0, alloc_end = 0;
+    if (device_allocation(begin, &base, &alloc_end) && end > alloc_end) {
+      static bool warned = false;
+      if (!warned) {
+        warned = true;
+        DGPP_LOG_WARN("l2 prefetch: a range at {:#x} ({} bytes) runs {} bytes past its allocation [{:#x}, {:#x}); clamped",
+                      reinterpret_cast<uintptr_t>(ptr), bytes, end - alloc_end, base, alloc_end);
+      }
+      end_clamped = alloc_end & ~uintptr_t{15};
+      if (end_clamped <= begin) return;
+    }
+  }
   const uint4* p = reinterpret_cast<const uint4*>(begin);
-  const size_t vecs = (end - begin) / 16;
+  const size_t vecs = (end_clamped - begin) / 16;
   if (persisting) {
     if (rate == PrefetchRate::Full)
       launch_persisting<kFullUnroll>(p, vecs, kFullBlocks, stream);
@@ -168,11 +208,11 @@ void launch_l2_prefetch(const void* ptr, size_t bytes, PrefetchRate rate,
     l2_prefetch_kernel<kFullUnroll><<<kFullBlocks, kThreads, 0, stream>>>(p, vecs);
   } else if (env_prefetch_form_touch()) {
     const size_t sb = env_touch_stride_bytes();
-    const size_t touches = (end - begin + sb - 1) / sb;
+    const size_t touches = (end_clamped - begin + sb - 1) / sb;
     l2_touch_pages_kernel<<<static_cast<unsigned>(std::min<size_t>(light_blocks(), (touches + kThreads - 1) / kThreads)),
                             kThreads, 0, stream>>>(reinterpret_cast<const uint8_t*>(begin), touches, sb);
   } else if (env_prefetch_form_lines()) {
-    const size_t lines = (end - begin + 127) / 128;
+    const size_t lines = (end_clamped - begin + 127) / 128;
     l2_prefetch_lines_kernel<<<light_blocks(), kThreads, 0, stream>>>(
         reinterpret_cast<const uint8_t*>(begin), lines);
   } else {
@@ -262,6 +302,7 @@ void WeightPrefetcher::flush_pending() {
     ++launches_;
   }
   pending_begin_ = pending_end_ = 0;
+  pending_alloc_end_ = 0;
 }
 
 void WeightPrefetcher::open_window(cudaStream_t main, size_t budget_bytes,
@@ -295,13 +336,19 @@ void WeightPrefetcher::add(const void* ptr, size_t bytes) {
   if (pending_end_ > pending_begin_ && b >= pending_begin_ &&
       b <= pending_end_ + kMergeGap) {
     // Extend the pending range; the bridged gap (a neighbouring tensor of
-    // the same layer, read soon anyway) is charged to the budget too.
+    // the same layer, read soon anyway) is charged to the budget too — and
+    // bridged only inside the pending range's allocation (an abutting
+    // range joins whatever its allocation): the hole between two
+    // allocations is unmapped.
     const size_t gap = b > pending_end_ ? b - pending_end_ : 0;
     const size_t take = std::min(bytes, remaining_ > gap ? remaining_ - gap : 0);
     if (take == 0) return;
-    remaining_ -= gap + take;
-    pending_end_ = std::max(pending_end_, b + take);
-    return;
+    const bool inside = gap == 0 || (pending_alloc_end_ != 0 && b + take <= pending_alloc_end_);
+    if (inside) {
+      remaining_ -= gap + take;
+      pending_end_ = std::max(pending_end_, b + take);
+      return;
+    }
   }
   const size_t take = std::min(bytes, remaining_);
   if (take == 0) return;
@@ -309,6 +356,8 @@ void WeightPrefetcher::add(const void* ptr, size_t bytes) {
   flush_pending();
   pending_begin_ = b;
   pending_end_ = b + take;
+  uintptr_t base = 0, alloc_end = 0;
+  pending_alloc_end_ = device_allocation(b, &base, &alloc_end) ? alloc_end : 0;
 }
 
 void WeightPrefetcher::add_isolated(const void* ptr, size_t bytes) {

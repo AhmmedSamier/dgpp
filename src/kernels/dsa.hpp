@@ -386,7 +386,12 @@ bool dsa_attn_listed(const void* q_tilde, const void* latent_cache,
                      int blocks_per_request, float scale, float* m_ws, float* l_ws,
                      float* c_ws, cudaStream_t stream,
                      LatentFormat format = LatentFormat::kBf16,
-                     const float* latent_scale = nullptr, int rope = 0);
+                     const float* latent_scale = nullptr, int rope = 0,
+                     int blocks_total = -1);
+// blocks_total (2026-10-19): the pool's physical block count, the bound a
+// table entry must lie under; -1 = blocks_per_request (a table whose row
+// width is the pool: the paged main caches). The decode window's ring is
+// a one-entry table per request over max_requests regions: pass that.
 
 // Merge the split partials into normalized c rows: c_out[r,h,:] =
 // (sum_s p_s * c_s) / (sum_s p_s * l_s), p_s = exp(m_s - max m).

@@ -140,6 +140,18 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
     prefill_window_flash_ = on;
     if (csa2_) csa2_->set_prefill_window_flash(on);
   }
+  // The decode window attention (engine.decode_window, 2026-10-19): the
+  // flash listed kernel unsplit on a side stream beside the main source
+  // (true, the default) or the scalar partial kernel split eight ways.
+  static void set_default_decode_window_flash(bool on) { s_default_decode_window_flash = on; }
+  void set_decode_window_flash(bool on) {
+    decode_window_flash_ = on;
+    if (csa2_) csa2_->set_decode_window_flash(on);
+  }
+  // The fused mHC decode site (mhc_site_fused) on or off: the tests'
+  // bisection handle; the unfused form is the prefill recipe's.
+  void set_decode_mhc_fused(bool on) { decode_mhc_fused_ = on; }
+  void set_decode_window_beside(bool on) { decode_window_beside_ = on; }  // the tests' bisection handle
   // The prefill's fold overlap (engine.prefill_fold_overlap; the
   // DeepSeek-V4 walk's form, here since 2026-10-18): a walk of min_rows
   // rows or more on a multi-rank world runs each layer as two row blocks,
@@ -303,6 +315,13 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
   void mhc_site(const uint16_t* streams, const GlmMhcWeights& w, const uint16_t* ln, int T, bool decode,
                 int decode_prefix = 0);
   void stream_update(const uint16_t* sublayer_out, int T);
+  // The fused decode site (2026-10-19, DeepSeek-V4's form): the finish in
+  // the dots launch (mhc_counters_'s tickets), the one-rounding norm in
+  // it (x_ written; collapsed_ not stored), the comb — read by the stream
+  // update alone — deferred to mhc_side_ and joined by join_comb.
+  void mhc_site_fused(const uint16_t* streams, const GlmMhcWeights& w, const uint16_t* ln, size_t r, int count,
+                      MhcSinglePass sp);
+  void join_comb();
   uint16_t* stage(uint16_t* fallback, int T, int width, bool capture);
   void fold(uint16_t* buf, int T, int width, bool capture);
   // The fold overlap (set_prefill_fold_overlap): the layer as the row
@@ -376,7 +395,6 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
   void prefetch_attention_side(int layer, int rows);
   void prefetch_head(const uint16_t* norm, bool draft, int rows);
   WeightPrefetcher prefetch_;
-  static constexpr size_t kPrefetchWindowBytes = size_t{18} << 20;
   int target_ordinal(int layer) const;
   int32_t* ctx(int req) const { return d_ctx_ + static_cast<size_t>(req) * 4; }
   float* spec_tails(int tail_ord, int row) const {
@@ -434,6 +452,14 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
   float* pre_nxt_ = nullptr;
   float* one_hot_ = nullptr;        // [M, 4] = (1, 0, 0, 0): layer 0's collapse
   float* mhc_logits_ = nullptr;     // [M, 24]
+  int* mhc_counters_ = nullptr;     // [M] the fused finish's tickets, zero at rest
+  cudaStream_t mhc_side_ = nullptr;
+  cudaEvent_t mhc_fork_ = nullptr;
+  cudaEvent_t mhc_join_ = nullptr;
+  bool comb_pending_ = false;       // a deferred comb the next stream update joins
+  cudaStream_t attn_side_ = nullptr;  // the decode window beside the main source (Csa2Layer::set_decode_side)
+  cudaEvent_t attn_fork_ = nullptr;
+  cudaEvent_t attn_join_ = nullptr;
   uint16_t* engram_kv_ = nullptr;   // [M, 5H] the fold's fallback
   int32_t* d_ctx_ = nullptr;        // [R, 4] the Engram contexts
   int32_t* spec_ctx_ = nullptr;     // [max(M, rows), 4] per-row contexts
@@ -445,6 +471,10 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
   bool prefill_dense_tile_ = s_default_prefill_dense_tile;
   static inline bool s_default_prefill_window_flash = true;
   bool prefill_window_flash_ = s_default_prefill_window_flash;
+  static inline bool s_default_decode_window_flash = true;
+  bool decode_window_flash_ = s_default_decode_window_flash;
+  bool decode_mhc_fused_ = true;
+  bool decode_window_beside_ = true;
   int debug_layer_limit_ = 0;
   // The bounded prefill's segment of the last walk (the draft's prefill
   // rows map into main_hidden_ through it) and the tail carried between a

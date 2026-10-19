@@ -151,6 +151,82 @@ contracts. Against TensorFold's 14.5 ms round at one row on a 3.5-bpw
 format, this pass reads about 1.6× the bytes (4.25-bit experts and 8-bit
 dense, lossless) and carries about 12 ms of latency-bound work.
 
+## The decode latency round (2026-10-19)
+
+The C1 pass's non-DRAM time, from the node trace of `0d69d565` (three
+rows, about 850–920 µs a layer): the two mHC sites at three launches each
+(dots 8.5, finish 9.9, norm 7.3 µs), the scalar window attention at eight
+splits (27–29 µs), the fp4 down projection at 73 % of the read ceiling
+(840 tiles over the resident blocks ran as whole rounds), and the two
+collectives a layer (35 + 41 µs) whose handshake and skew ran in the
+open. The small kernels also stretch two- to four-fold under the L2
+prefetcher (an RMSNorm at 1.4 or 8.2 µs), and the per-collective skew of
+~20 µs is the sum of that variance over the kernels between collectives,
+so fewer launches attack it as well.
+
+| Lever | What it does | Trace, per three-row layer | Bitwise |
+|---|---|---|---|
+| Fused mHC decode site | DeepSeek-V4's form: the finish fused into the dots launch by tickets, the one-rounding norm in it, the comb on a side stream joined at the stream update. Decoder rows keep it in a mixed walk. | a site 26 → 12 µs on the critical path (dots 11.8, comb 8.2 beside) | rounding-level (the fused norm's sum order), the decode audit's class |
+| Down kernel tile stealing | `moe_slot_down_fp4_kernel` takes (slot, row tile) units from a counter pair the last block resets; the grid is the device's occupancy. | 180 → 169 µs | yes |
+| `engine.decode_window` flash | The 128-key window on `dsa_attn_listed`, split eight ways like the scalar form, on a side stream beside the main source's kernel, joined before the finish. | scalar 28.8 µs in line; the unsplit flash form 36.4 (one block, eight tiles); split, beside the main kernel | the window's fp32 sum order (the decode audit's class) |
+| Decode fold split (discarded) | Each boundary's producer as two column halves, the first half's all-reduce on a side stream under the second half; the bus walked up to four generations in flight. | MoE site: first fold 70.6 µs hidden under the 82 µs second half, second fold 27.5; attention site: wo_b's half GEMV 16 µs cannot hide a 28 µs collective | yes |
+
+Measured (four nodes, C1 `timed_load` code / prose / JSON, three repeats,
+ms per pass / decode tokens per pass / tok/s):
+
+| Build | code | prose | JSON |
+|---|---|---|---|
+| `0d69d565` as campaigned (`9350b38a`) | 46.80 / 3.11 / 66.5 | 40.06 / 1.81 / 45.2 | 51.95 / 4.11 / 79.2 |
+| this round, as shipped (the output window dropped where it has no cover) | 47.93 / 3.59 / 74.9 | 40.71 / 1.90 / 46.7 | 51.75 / 4.11 / 79.5 |
+| the same, the output window at the light rate under the attention (the form before) | 48.55 / 3.59 / 74.0 | 39.54 / 1.90 / 48.1 | 53.34 / 4.11 / 77.1 |
+| the same, the output window at the full rate under the attention | 48.55 / 3.59 / 74.0 | 41.50 / 1.90 / 45.9 | 53.09 / 4.11 / 77.5 |
+| the same, the output window at the full rate at the layer's start | 51.49 / 3.59 / 69.8 | 44.14 / 1.90 / 43.1 | 55.51 / 4.11 / 74.1 |
+| the same with the window scalar (unsplit flash build) | 49.97 / 3.23 / 64.3 | 41.88 / 1.88 / 44.8 | 54.81 / 4.11 / 75.0 |
+| the same with the fold split, MoE site | 49.05 / 3.59 / 73.2 | 40.54 / 1.90 / 46.9 | 53.65 / 4.11 / 76.7 |
+| the same with the fold split, both sites (unsplit flash build) | 48.08 / 3.23 / 67.1 | 42.54 / 1.89 / 44.4 | 54.18 / 4.11 / 75.9 |
+
+C6 code (one repeat, 512 tokens): 174.8 / 20.7 / 118.5 → 172.5 / 20.7 / 120.1. The
+round's passes carry more accepted draft rows (code 3.11 → 3.59, prose
+1.81 → 1.90 a pass) with the window and norm forms' rounding class. The
+quality set on the shipped binary (`64bb41cd`, the campaign's phase alone):
+HumanEval 156/164 (6 truncated), GSM8K 292/300 (3 truncated), extraction
+100/100 — against the campaign binary's 157/164, 295/300, 100/100 the same
+day and the family's FP8 baseline of 94.5 / 97.7 / 100 %: the rounding
+class moved, the quality class did not; the three GSM8K misses are
+truncations at the item budget, not wrong answers.
+
+**The dependency the attention lever carried.** The first shipped form of
+the window-beside-main lever lost 1.4 ms a pass at JSON against the
+campaign binary while every kernel it touched got faster. The per-kernel
+trace diff placed it: the 32-block output-projection GEMVs (139 a pass)
+ran 28.8 → 49.8 µs each, and 1,507 of their 1,628 slow launches were the
+first GEMV after the attention finish, overlapping a prefetch kernel. The
+CSA2 layer opens an output window (wo_a and wo_b, ~1.5 MB at the light
+rate) under the attention so those GEMVs find their weights in L2; the
+window-beside-main form cut a window-only layer's attention phase to
+12–20 µs, the prefetch no longer finished under it, and the GEMV queued
+behind its own weights. Four placements measured (JSON ms/pass, 4.11
+rows): under the attention at the light rate 53.34; at the full rate
+53.09 (the GEMVs recover, the attention's own cache reads slow from 16 to
+29 µs); at the layer's start at the full rate 55.51 (it slows the
+DRAM-bound projections instead); no output window where no cover remains
+51.75, the GEMVs reading wo from DRAM at p90 34 µs against the campaign
+binary's 36. The window budget was not the cause (18 MiB best; 12, 8 and
+6 MiB each 0.5–0.9 ms worse), and `engine.l2_prefetch_window_mib` now
+governs this family's windows (the 18 MiB constant is gone; the template
+pins 18). The lesson is the method: a lever that shortens a phase must
+re-size or remove what that phase was hiding, in the same experiment.
+
+Why the fold split lost, from the bus timeline on four ranks (rank 0
+medians per collective, µs): off — 93 collectives a window, copy 4.8 +
+handshake 22.4 + skew 24.0 + fold 9.0 = 64.2; the MoE-site split — 136 a
+window, copy 8.4 + handshake 23.2 + skew 20.6 + fold 5.8 = 59.5. The
+added collectives pay their handshake and skew in full, only the fold
+shrinks with the half payload, and every collective's staging copy slows
+under the second half's DRAM traffic. A split pays only once a
+collective's fixed cost is small: the lever is the handshake (the
+two-sided send, the CPU-posted doorbell), not more collectives.
+
 ## The prefill selection at long context (2026-10-18)
 
 Prefill cost per token is flat in everything but one piece: on every

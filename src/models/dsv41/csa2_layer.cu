@@ -333,7 +333,6 @@ void Csa2Layer::attend_rows(Csa2StatePool& pool, const int32_t* req_ids_win, con
   // longer bit-identical to the forward's single block — a different fp32
   // combine order, the rounding class the decode audit certifies.
   // n_split_win <= n_split_main, so it fits ws_slots.
-  const int n_split_win = split_window ? std::min(n_split_main, kWinDecodeSplit) : 1;
   // The prefill's window on the flash listed kernel (2026-10-18,
   // engine.prefill_window flash): the window scratch is a one-block cache
   // and the slot lists are per-row selections, the listed kernel's inputs;
@@ -342,14 +341,40 @@ void Csa2Layer::attend_rows(Csa2StatePool& pool, const int32_t* req_ids_win, con
   // 32K prefill's ledger, 12 % of the walk). Its S sums in the mma's
   // fragment order — the rounding class the forward-parity gates certify
   // for the main source; the model test gates it against the scalar form.
-  // Decode's split window and the draft block keep the scalar kernel.
-  if (!(flash_window && !split_window && lh >= 16 && lh % 16 == 0 &&
+  // The decode window on the same kernel unsplit (2026-10-19,
+  // engine.decode_window flash): the 128-key window is latency, not bytes
+  // — the scalar kernel at eight splits took 27-29 us a layer at C1
+  // where the flash kernel's one block per row and head group takes ~7 —
+  // and it runs on the side stream beside the main source's kernel when
+  // the layer has one (the two read disjoint caches and write disjoint
+  // partials; the finish joins them). The draft block keeps the scalar
+  // kernel.
+  const bool flash_try = lh >= 16 && lh % 16 == 0 && (split_window ? decode_window_flash_ : flash_window);
+  const bool beside = split_window && side_stream_ != nullptr && w_.ratio > 0;
+  cudaStream_t wstream = stream;
+  if (beside) {
+    DGPP_CUDA_OK(cudaEventRecord(side_fork_, stream));
+    DGPP_CUDA_OK(cudaStreamWaitEvent(side_stream_, side_fork_, 0));
+    wstream = side_stream_;
+  }
+  // Decode's window is split like the scalar form's (eight splits of a
+  // 128-key window: one 16-token tile per block — the unsplit flash
+  // kernel walked the eight tiles in one block at 36 µs a layer, the
+  // scalar kernel's 29; prefill keeps one split, its row tile fills the
+  // GPU).
+  const int n_split_win = split_window ? std::min(n_split_main, kWinDecodeSplit) : 1;
+  // The window table has one entry per request (the ring: request r's
+  // region r; the prefill scratch: block 0): the physical bound is the
+  // ring's region count, not the row width.
+  const int win_blocks_total = split_window ? pool.shape().max_requests : 1;
+  if (!(flash_try &&
         dsa_attn_listed(q, win_cache, req_ids_win, list + size_t(row0) * list_stride, list_stride, counts + row0, rows,
                         n_split_win, lh, kCsa2Latent, win_block_tokens, win_table, 1, attn_scale_, m_win_, l_win_, c_win_,
-                        stream, Csa2StatePool::kRingFormat, nullptr, 0)))
+                        wstream, Csa2StatePool::kRingFormat, nullptr, 0, win_blocks_total))) {
     dsa_attn_partial(q, win_cache, req_ids_win, list + size_t(row0) * list_stride, list_stride, counts + row0, rows,
                      n_split_win, lh, kCsa2Latent, win_block_tokens, win_table, 1, attn_scale_, m_win_, l_win_, c_win_,
-                     stream, Csa2StatePool::kRingFormat, nullptr, 0);
+                     wstream, Csa2StatePool::kRingFormat, nullptr, 0);
+  }
   int n_main = 0;
   if (w_.ratio > 0) {
     const int ord = w_.cache_ord;
@@ -364,6 +389,10 @@ void Csa2Layer::attend_rows(Csa2StatePool& pool, const int32_t* req_ids_win, con
       dsa_attn_partial(q, pool.main(ord), req_ids_main, topk, cfg_.index_topk, counts, rows, n_main, lh, kCsa2Latent,
                        epb, pool.block_tables(), int(pool.total_blocks()), attn_scale_, m_main_, l_main_, c_main_,
                        stream, Csa2StatePool::kMainFormat, nullptr, 0);
+  }
+  if (beside) {
+    DGPP_CUDA_OK(cudaEventRecord(side_join_, side_stream_));
+    DGPP_CUDA_OK(cudaStreamWaitEvent(stream, side_join_, 0));
   }
   csa2_attn_finish(n_main ? m_main_ : nullptr, n_main ? l_main_ : nullptr, n_main ? c_main_ : nullptr, n_main, m_win_,
                    l_win_, c_win_, n_split_win, w_.attn_sink, rows, lh, pos, w_.inv_freq,
@@ -427,7 +456,14 @@ void Csa2Layer::enqueue_decode(const void* hidden_in, Csa2StatePool& pool, const
   } window_scope{prefetch_windows_};
 
   project_q_kv(hidden_in, tokens, pos, stream);
-  if (w_.ratio == 0) open_output_window(stream);  // a window-only layer: nothing between q and the attention
+  // A window-only layer opens no output window (2026-10-19): with the
+  // decode window beside the main source its attention is 12-20 us, and
+  // the 1.5 MB of wo_a and wo_b have no cover there — at the light rate
+  // they were still streaming when the first output GEMV read the same
+  // lines (150 us GEMVs), at the full rate they slowed the attention's
+  // own cache reads, and at the layer's start they slowed the q and kv
+  // projections. The GEMVs read them from DRAM; an index-source layer's
+  // window keeps its cover under the selection and the attention.
   // The window row into the ring (this batch's rows are visible to its
   // own queries: the ring is read after the append).
   csa2_ring_slot_positions(pos, slots_, tokens, cfg_.ring_slots, stream);
@@ -484,7 +520,6 @@ void Csa2Layer::enqueue_decode(const void* hidden_in, Csa2StatePool& pool, const
                           stream, true);
       sel_at(0) = shape;
     } else {
-      open_output_window(stream);  // a reusing layer: behind the compressor, under the attention
       require_shape(sel_at(0), shape, "the selection");
     }
   }

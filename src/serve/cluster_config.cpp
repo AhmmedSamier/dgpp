@@ -308,6 +308,10 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           e.prefill_window = text(x, ek, what);
           if (e.prefill_window != "flash" && e.prefill_window != "scalar")
             fail(what, "'" + ek + "' must be \"flash\" or \"scalar\"");
+        } else if (p.key == "decode_window") {
+          e.decode_window = text(x, ek, what);
+          if (e.decode_window != "flash" && e.decode_window != "scalar")
+            fail(what, "'" + ek + "' must be \"flash\" or \"scalar\"");
         } else if (p.key == "rope_scaling") {
           if (!x.is_object()) fail(what, "'" + ek + "' must be an object");
           dgpp::RopeScaling rs;

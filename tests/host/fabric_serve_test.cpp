@@ -265,6 +265,7 @@ void test_settings_handshake() {
   sent.prefill_dense = "streaming";
   sent.prefill_fold_overlap = false;
   sent.prefill_window = "scalar";
+  sent.decode_window = "scalar";
   sent.lookup_draft = true;
   sent.lookup_nmin = 3;
   sent.lookup_nstrong = 5;
@@ -303,6 +304,7 @@ void test_settings_handshake() {
     require(got.prefill_dense == "streaming", "the prefill dense form travels with the settings");
     require(!got.prefill_fold_overlap, "the prefill fold overlap flag travels with the settings");
     require(got.prefill_window == "scalar", "the prefill window kernel travels with the settings");
+    require(got.decode_window == "scalar", "the decode window kernel travels with the settings");
     require(got.lookup_draft && got.lookup_nmin == 3 && got.lookup_nstrong == 5 && got.lookup_agree == 1,
             "the lookup thresholds travel with the settings");
     require(got.lookup_tail == 2, "the lookup tail travels with the settings");

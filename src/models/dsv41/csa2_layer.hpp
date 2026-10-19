@@ -109,6 +109,17 @@ class Csa2Layer {
   // default; engine.prefill_window flash) or the scalar partial kernel
   // (scalar, the decode window's kernel: the decode audit's form).
   void set_prefill_window_flash(bool on) { prefill_window_flash_ = on; }
+  // The decode window (engine.decode_window, 2026-10-19): flash = the
+  // flash listed kernel unsplit (one block per row and head group); scalar
+  // = the scalar partial kernel split kWinDecodeSplit ways (the form until
+  // then). And the side stream the decode window runs on beside the main
+  // source's kernel (set by the model; null = in line).
+  void set_decode_window_flash(bool on) { decode_window_flash_ = on; }
+  void set_decode_side(cudaStream_t stream, cudaEvent_t fork, cudaEvent_t join) {
+    side_stream_ = stream;
+    side_fork_ = fork;
+    side_join_ = join;
+  }
   // GEMM plans for `tokens` rows and the shared-memory opt-ins; outside capture.
   bool prepare(int tokens);
 
@@ -255,6 +266,10 @@ class Csa2Layer {
   bool prefill_tile_ = false;
   bool prefill_dense_tile_ = true;  // the configured form (set_prefill_dense_tile)
   bool prefill_window_flash_ = true;  // set_prefill_window_flash
+  bool decode_window_flash_ = true;   // set_decode_window_flash
+  cudaStream_t side_stream_ = nullptr;  // set_decode_side
+  cudaEvent_t side_fork_ = nullptr;
+  cudaEvent_t side_join_ = nullptr;
 
   IGemm& gemm_;
   Csa2Config cfg_;

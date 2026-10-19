@@ -22,7 +22,8 @@
     "admission": "full",
     "admission_window": 256,
     "sampling_candidates": 128,
-    "stats_interval_s": 10
+    "stats_interval_s": 10,
+    "l2_prefetch_window_mib": 18
   },
   "paths": {
     "resident_cache": ""

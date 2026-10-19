@@ -227,6 +227,14 @@ Dsv41Model::Dsv41Model(const Dsv41TextConfig& cfg, const std::string& checkpoint
   pre_b_ = dev_alloc<float>(M * 4);
   one_hot_ = dev_alloc<float>(M * 4);
   mhc_logits_ = dev_alloc<float>(M * static_cast<size_t>(mhc_cfg_.coeff_rows()));
+  mhc_counters_ = dev_alloc<int>(M);
+  DGPP_CUDA_OK(cudaMemset(mhc_counters_, 0, M * sizeof(int)));
+  DGPP_CUDA_OK(cudaStreamCreateWithFlags(&mhc_side_, cudaStreamNonBlocking));
+  DGPP_CUDA_OK(cudaEventCreateWithFlags(&mhc_fork_, cudaEventDisableTiming));
+  DGPP_CUDA_OK(cudaEventCreateWithFlags(&mhc_join_, cudaEventDisableTiming));
+  DGPP_CUDA_OK(cudaStreamCreateWithFlags(&attn_side_, cudaStreamNonBlocking));
+  DGPP_CUDA_OK(cudaEventCreateWithFlags(&attn_fork_, cudaEventDisableTiming));
+  DGPP_CUDA_OK(cudaEventCreateWithFlags(&attn_join_, cudaEventDisableTiming));
   {
     std::vector<float> oh(M * 4, 0.0f);
     for (size_t t = 0; t < M; ++t) oh[t * 4] = 1.0f;
@@ -336,6 +344,19 @@ Dsv41Model::~Dsv41Model() {
   cudaFree(pre_b_);
   cudaFree(one_hot_);
   cudaFree(mhc_logits_);
+  cudaFree(mhc_counters_);
+  if (mhc_join_) cudaEventDestroy(mhc_join_);
+  if (mhc_fork_) cudaEventDestroy(mhc_fork_);
+  if (mhc_side_) {
+    cudaStreamSynchronize(mhc_side_);
+    cudaStreamDestroy(mhc_side_);
+  }
+  if (attn_join_) cudaEventDestroy(attn_join_);
+  if (attn_fork_) cudaEventDestroy(attn_fork_);
+  if (attn_side_) {
+    cudaStreamSynchronize(attn_side_);
+    cudaStreamDestroy(attn_side_);
+  }
   cudaFree(engram_kv_);
   cudaFree(d_ctx_);
   cudaFree(spec_ctx_);
@@ -532,6 +553,9 @@ void Dsv41Model::build_layer_objects(const Dsv41LayerResident& r) {
   csa2_->set_prefetcher(loader_.residency() == Dsv41Residency::Resident ? &prefetch_ : nullptr);
   csa2_->set_prefill_dense_tile(prefill_dense_tile_);
   csa2_->set_prefill_window_flash(prefill_window_flash_);
+  csa2_->set_decode_window_flash(decode_window_flash_);
+  if (decode_window_beside_) csa2_->set_decode_side(attn_side_, attn_fork_, attn_join_);
+  else csa2_->set_decode_side(nullptr, nullptr, nullptr);
   if (cfg_.is_draft(r.layer)) {
     if (!draft_moe_) {
       const int slots = loader_.residency() == Dsv41Residency::Resident ? cfg_.num_nextn_predict_layers : 0;
@@ -843,7 +867,7 @@ void Dsv41Model::prefetch_attention_weights(const Dsv41LayerResident& r, int row
 // are known only behind the router.
 void Dsv41Model::prefetch_ffn_side(const Dsv41LayerResident& r, int rows) {
   const size_t H = static_cast<size_t>(cfg_.hidden_size);
-  prefetch_.open_window(stream_, kPrefetchWindowBytes, prefetch_.boundary_rate());
+  prefetch_.open_window(stream_, 0, prefetch_.boundary_rate());  // the budget: engine.l2_prefetch_window_mib
   prefetch_mhc(r.mhc.ffn_fn, r.ffn_norm, rows);
   prefetch_bf16(r.moe.router, static_cast<size_t>(r.moe.n_experts) * H * 2, rows);
   if (r.moe.router_bias) prefetch_.add(r.moe.router_bias, static_cast<size_t>(r.moe.n_experts) * 4);
@@ -856,7 +880,7 @@ void Dsv41Model::prefetch_ffn_side(const Dsv41LayerResident& r, int rows) {
 // attention side).
 void Dsv41Model::prefetch_attention_side(int layer, int rows) {
   const Dsv41LayerResident& r = loader_.load_layer(layer);
-  prefetch_.open_window(stream_, kPrefetchWindowBytes, prefetch_.boundary_rate());
+  prefetch_.open_window(stream_, 0, prefetch_.boundary_rate());  // the budget: engine.l2_prefetch_window_mib
   if (r.engram.present) {
     prefetch_fp8(r.engram.wkv);
     return;
@@ -868,7 +892,7 @@ void Dsv41Model::prefetch_attention_side(int layer, int rows) {
 // (the draft's head screen, when it is on, reads its own copy instead).
 void Dsv41Model::prefetch_head(const uint16_t* norm, bool draft, int rows) {
   const size_t H = static_cast<size_t>(cfg_.hidden_size);
-  prefetch_.open_window(stream_, kPrefetchWindowBytes, prefetch_.boundary_rate());
+  prefetch_.open_window(stream_, 0, prefetch_.boundary_rate());  // the budget: engine.l2_prefetch_window_mib
   prefetch_bf16(norm, H * 2, rows);
   if (draft && draft_head_.enabled()) return;
   prefetch_bf16(globals_.lm_head, static_cast<size_t>(lm_vocab_count_) * H * 2, rows);
@@ -926,23 +950,57 @@ void Dsv41Model::mhc_site(const uint16_t* streams, const GlmMhcWeights& w, const
     sp.pre_out = pre_nxt_ + r * 4;
     sp.post_f32 = post_f32_ + r * 4;
     sp.comb_f32 = comb_f32_ + r * 16;
-    // A mixed decoder keeps the same per-coefficient reduction as its
-    // isolated decode. Only reader rows use the prefill GEMM recipe.
+    // Decoder rows take the fused site whatever their company (a mixed
+    // decoder keeps its isolated decode's arithmetic); reader rows the
+    // prefill recipe, their norm per block (csa2_rmsnorm is per row).
+    if (decoder && decode_mhc_fused_) {
+      mhc_site_fused(streams, w, ln, r, count, sp);
+      return;
+    }
     (void)launch_mhc_compute_normed(streams + r * 4 * H, w, mhc_cfg_, collapsed_ + r * H,
                                     post_bf16_ + r * 4, comb_bf16_ + r * 16,
                                     mhc_logits_ + r * mhc_cfg_.coeff_rows(), nullptr, nullptr,
-                                    cfg_.rms_norm_eps, count, stream_, nullptr, false, &sp, decoder);
+                                    cfg_.rms_norm_eps, count, stream_, nullptr, false, &sp, false);
+    csa2_rmsnorm_bf16(collapsed_ + r * H, cfg_.hidden_size, ln, x_ + r * H, cfg_.hidden_size, count,
+                      cfg_.hidden_size, cfg_.rms_norm_eps, stream_);
   };
   compute(0, dec, true);
   compute(dec, T - dec, false);
-  csa2_rmsnorm_bf16(collapsed_, cfg_.hidden_size, ln, x_, cfg_.hidden_size, T, cfg_.hidden_size, cfg_.rms_norm_eps, stream_);
   pre_cur_ = pre_nxt_;
   pre_nxt_ = pre_cur_ == pre_a_ ? pre_b_ : pre_a_;
 }
 
 void Dsv41Model::stream_update(const uint16_t* sublayer_out, int T) {
+  join_comb();
   launch_mhc_stream_update_f32(post_f32_, comb_f32_, sublayer_out, cur_, nxt_, mhc_cfg_, T, stream_);
   std::swap(cur_, nxt_);
+}
+
+// The fused decode site (model.hpp). DeepSeek-V4's decode form, 2026-10-19:
+// the site's three launches (dots, finish, norm) become one plus a comb off
+// the critical path — at C1 the two sites per layer were 52 us of a 921 us
+// layer for their launches alone.
+void Dsv41Model::mhc_site_fused(const uint16_t* streams, const GlmMhcWeights& w, const uint16_t* ln, size_t r,
+                                int count, MhcSinglePass sp) {
+  const size_t H = static_cast<size_t>(cfg_.hidden_size);
+  sp.comb_f32 = nullptr;  // the deferred comb exports it
+  sp.one_round_norm = true;
+  float* logits = mhc_logits_ + r * mhc_cfg_.coeff_rows();
+  const bool deferred = launch_mhc_compute_normed(streams + r * 4 * H, w, mhc_cfg_, nullptr, post_bf16_ + r * 4,
+                                                  comb_bf16_ + r * 16, logits, ln, x_ + r * H, cfg_.rms_norm_eps,
+                                                  count, stream_, mhc_counters_ + r, true, &sp, true);
+  if (!deferred) throw std::logic_error("mhc_site: the fused decode form must defer its comb");
+  DGPP_CUDA_OK(cudaEventRecord(mhc_fork_, stream_));
+  DGPP_CUDA_OK(cudaStreamWaitEvent(mhc_side_, mhc_fork_, 0));
+  launch_mhc_comb(logits, w, mhc_cfg_, comb_bf16_ + r * 16, count, mhc_side_, comb_f32_ + r * 16);
+  DGPP_CUDA_OK(cudaEventRecord(mhc_join_, mhc_side_));
+  comb_pending_ = true;
+}
+
+void Dsv41Model::join_comb() {
+  if (!comb_pending_) return;
+  DGPP_CUDA_OK(cudaStreamWaitEvent(stream_, mhc_join_, 0));
+  comb_pending_ = false;
 }
 
 // ---- the prefill's fold overlap (model.hpp) -------------------------------------
@@ -968,16 +1026,20 @@ void Dsv41Model::mhc_site_rows(const uint16_t* streams, const GlmMhcWeights& w, 
     sp.pre_out = pre_nxt_ + r * 4;
     sp.post_f32 = post_f32_ + r * 4;
     sp.comb_f32 = comb_f32_ + r * 16;
+    if (decoder && decode_mhc_fused_) {
+      mhc_site_fused(streams, w, ln, r, count, sp);
+      return;
+    }
     (void)launch_mhc_compute_normed(streams + r * 4 * H, w, mhc_cfg_, collapsed_ + r * H,
                                     post_bf16_ + r * 4, comb_bf16_ + r * 16,
                                     mhc_logits_ + r * mhc_cfg_.coeff_rows(), nullptr, nullptr,
-                                    cfg_.rms_norm_eps, count, stream_, nullptr, false, &sp, decoder);
+                                    cfg_.rms_norm_eps, count, stream_, nullptr, false, &sp, false);
+    csa2_rmsnorm_bf16(collapsed_ + r * H, cfg_.hidden_size, ln, x_ + r * H, cfg_.hidden_size, count,
+                      cfg_.hidden_size, cfg_.rms_norm_eps, stream_);
   };
   const int dec = std::clamp(decode_prefix - r0, 0, rows);
   compute(r0, dec, true);
   compute(r0 + dec, rows - dec, false);
-  csa2_rmsnorm_bf16(collapsed_ + static_cast<size_t>(r0) * H, cfg_.hidden_size, ln, x_ + static_cast<size_t>(r0) * H,
-                    cfg_.hidden_size, rows, cfg_.hidden_size, cfg_.rms_norm_eps, stream_);
 }
 
 void Dsv41Model::swap_pre() {
@@ -986,6 +1048,7 @@ void Dsv41Model::swap_pre() {
 }
 
 void Dsv41Model::update_rows(const uint16_t* sublayer_out, int r0, int rows) {
+  join_comb();
   const size_t H = static_cast<size_t>(cfg_.hidden_size), R = static_cast<size_t>(r0);
   launch_mhc_stream_update_f32(post_f32_ + R * 4, comb_f32_ + R * 16, sublayer_out + R * H, cur_ + R * 4 * H,
                                nxt_ + R * 4 * H, mhc_cfg_, rows, stream_);
@@ -1248,7 +1311,7 @@ void Dsv41Model::enqueue_layer(const Dsv41LayerResident& r, int layer, int T, co
     uint16_t* kv = stage(engram_kv_, T, 5 * H, rows.capture);
     engram_->project(ew, T, kv, stream_, /*prefill_tile=*/!rows.decode && prefill_dense_tile_);
     if (pf) {  // this layer's attention side under the Engram fold
-      prefetch_.open_window(stream_, kPrefetchWindowBytes, prefetch_.boundary_rate());
+      prefetch_.open_window(stream_, 0, prefetch_.boundary_rate());  // the budget: engine.l2_prefetch_window_mib
       prefetch_attention_weights(r, T);
     }
     fold(kv, T, 5 * H, rows.capture);
@@ -1832,6 +1895,7 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
       out.route_weights[l].assign(h_route_weights_ + slot, h_route_weights_ + slot + n);
     }
   }
+  join_comb();  // never pending here (every site precedes its update); a capture must not end forked
   return out;
 }
 
