@@ -18,6 +18,7 @@
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
 #include "common/test.hpp"
+#include "kernels/bf12_gemv.hpp"
 #include "kernels/bf16_gemv.hpp"
 #include "kernels/dense_mma_bf16w.hpp"
 #include "kernels/glm_moe_launch.hpp"
@@ -539,6 +540,72 @@ DGPP_TEST(mma_gemv_split_k_small_n_sites) {
     for (int c = 0; c < copies; ++c) { cudaFree(w[c]); cudaFree(sc[c]); }
   }
   cudaFree(act); cudaFree(out); cudaFree(ws);
+}
+
+// The bf12 form (the lm head's 12-bit companion under the tensor-core
+// chain): bitwise the bf16 launch at every decode width, f32 and bf16
+// outputs, on a matrix with escapes and rows the encoder kept raw; a
+// partial last block; k of one and five super-blocks. The form declines a
+// tail (k not whole super-blocks) and the widths above the decode forms.
+DGPP_TEST(mma_gemv_bf12_form_is_bitwise_the_bf16_form) {
+  std::mt19937_64 rng(2026);
+  std::uniform_real_distribution<float> uf(-1.f, 1.f);
+  std::uniform_int_distribution<int> ex(-4, 4);
+  std::uniform_int_distribution<int> outlier(0, 199);
+  std::uniform_real_distribution<float> mag(0.5f, 1.f);
+  for (auto [n, k] : std::vector<std::pair<int, int>>{{1032, 1024}, {4104, 5120}}) {
+    std::vector<uint16_t> w(size_t(n) * k);
+    // Nine exponents inside the row's fifteen-code window, one element in
+    // two hundred far outside it: escapes on most rows, under the row budget.
+    for (auto& x : w)
+      x = dgpp::float_to_bf16_bits(std::ldexp(uf(rng) < 0 ? -mag(rng) : mag(rng), ex(rng) + (outlier(rng) == 0 ? 24 : 0)));
+    // Two rows past the escape budget: kept bf16 by the encoder.
+    for (int r : {5, n - 1})
+      for (int c = 0; c < k; ++c) w[size_t(r) * k + c] = dgpp::float_to_bf16_bits(std::ldexp(uf(rng), (c & 1) ? 20 : -30));
+    const dgpp::Bf12Host h = dgpp::bf12_encode(w.data(), n, k);
+    require(h.ok && h.raw_rows >= 2 && h.escapes > 0,
+            "bf12 form: the fixture packs with escapes and raw rows (ok " + std::to_string(h.ok) + " raw " +
+                std::to_string(h.raw_rows) + " escapes " + std::to_string(h.escapes) + ")");
+    uint16_t* dw; uint8_t* dp; uint32_t* dr; uint32_t* de; uint16_t* draw;
+    DGPP_CUDA_OK(cudaMalloc(&dw, w.size() * 2)); DGPP_CUDA_OK(cudaMemcpy(dw, w.data(), w.size() * 2, cudaMemcpyHostToDevice));
+    DGPP_CUDA_OK(cudaMalloc(&dp, h.packed.size())); DGPP_CUDA_OK(cudaMemcpy(dp, h.packed.data(), h.packed.size(), cudaMemcpyHostToDevice));
+    DGPP_CUDA_OK(cudaMalloc(&dr, h.rows.size() * 4)); DGPP_CUDA_OK(cudaMemcpy(dr, h.rows.data(), h.rows.size() * 4, cudaMemcpyHostToDevice));
+    DGPP_CUDA_OK(cudaMalloc(&de, std::max<size_t>(h.esc.size(), 1) * 4)); DGPP_CUDA_OK(cudaMemcpy(de, h.esc.data(), h.esc.size() * 4, cudaMemcpyHostToDevice));
+    DGPP_CUDA_OK(cudaMalloc(&draw, std::max<size_t>(h.raw.size(), 8) * 2)); DGPP_CUDA_OK(cudaMemcpy(draw, h.raw.data(), h.raw.size() * 2, cudaMemcpyHostToDevice));
+    dgpp::Bf12Matrix pm; pm.packed = dp; pm.rows = dr; pm.esc = de; pm.raw = draw; pm.n = n; pm.k = k;
+    std::vector<uint16_t> act(size_t(32) * k);
+    for (auto& x : act) x = dgpp::float_to_bf16_bits(uf(rng));
+    uint16_t* da; DGPP_CUDA_OK(cudaMalloc(&da, act.size() * 2)); DGPP_CUDA_OK(cudaMemcpy(da, act.data(), act.size() * 2, cudaMemcpyHostToDevice));
+    float* o1; float* o2; uint16_t* b1; uint16_t* b2;
+    DGPP_CUDA_OK(cudaMalloc(&o1, size_t(32) * n * 4)); DGPP_CUDA_OK(cudaMalloc(&o2, size_t(32) * n * 4));
+    DGPP_CUDA_OK(cudaMalloc(&b1, size_t(32) * n * 2)); DGPP_CUDA_OK(cudaMalloc(&b2, size_t(32) * n * 2));
+    for (int m : {1, 3, 8, 16, 17, 32}) {
+      require(dgpp::mma_gemv_bf12_accepts(pm, m), "bf12 form: accepts the decode width");
+      DGPP_CUDA_OK(cudaMemset(o2, 0xFF, size_t(32) * n * 4)); DGPP_CUDA_OK(cudaMemset(b2, 0xFF, size_t(32) * n * 2));
+      dgpp::launch_mma_gemv_bf16_f32(da, k, dw, o1, m, n, k, n, nullptr);
+      require(dgpp::launch_mma_gemv_bf12_f32(da, k, pm, o2, m, n, k, n, nullptr), "bf12 form: the f32 launch applies");
+      dgpp::launch_mma_gemv_bf16_bf16(da, k, dw, b1, m, n, k, n, nullptr);
+      require(dgpp::launch_mma_gemv_bf12_bf16(da, k, pm, b2, m, n, k, n, nullptr), "bf12 form: the bf16 launch applies");
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      const auto f1 = fetch_f(o1, size_t(m) * n), f2 = fetch_f(o2, size_t(m) * n);
+      require(std::memcmp(f1.data(), f2.data(), f1.size() * 4) == 0,
+              "bf12 form: f32 output differs from the bf16 form at m=" + std::to_string(m) + " n=" + std::to_string(n) + " k=" + std::to_string(k));
+      const auto g1 = fetch_b(b1, size_t(m) * n), g2 = fetch_b(b2, size_t(m) * n);
+      require(std::memcmp(g1.data(), g2.data(), g1.size() * 2) == 0,
+              "bf12 form: bf16 output differs from the bf16 form at m=" + std::to_string(m) + " n=" + std::to_string(n));
+    }
+    require(!dgpp::mma_gemv_bf12_accepts(pm, 33), "bf12 form: declines the widths above the decode forms");
+    require(!dgpp::launch_mma_gemv_bf12_f32(da, k, pm, o2, 33, n, k, n, nullptr), "bf12 form: 33 rows not launched");
+    cudaFree(dw); cudaFree(dp); cudaFree(dr); cudaFree(de); cudaFree(draw); cudaFree(da);
+    cudaFree(o1); cudaFree(o2); cudaFree(b1); cudaFree(b2);
+  }
+  {
+    // A companion with a tail (k = 2560: two super-blocks and 512 columns) is declined.
+    dgpp::Bf12Matrix pm; pm.n = 64; pm.k = 2560;
+    pm.packed = reinterpret_cast<const uint8_t*>(1); pm.rows = reinterpret_cast<const uint32_t*>(1);
+    pm.esc = reinterpret_cast<const uint32_t*>(1); pm.raw = reinterpret_cast<const uint16_t*>(1);
+    require(!dgpp::mma_gemv_bf12_accepts(pm, 4), "bf12 form: declines a tail");
+  }
 }
 
 DGPP_TEST(mma_gemv_fp8_pair_is_bitwise_the_two_launches) {

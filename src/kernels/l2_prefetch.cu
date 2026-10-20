@@ -18,13 +18,20 @@ namespace dgpp {
 namespace {
 
 constexpr int kThreads = 256;
-// Full: 48 blocks x 4 loads x 16 B x 256 threads = 768 KB in flight — line
-// rate (~205 GB/s measured) at ~3 us of added latency for other traffic.
-// Light: 16 x 2 = 128 KB in flight — ~165 GB/s, well under a microsecond
-// of queue. (96 x 8 = 3 MB reached 215 GB/s and made every memory access
-// on the box wait ~12 us: the bus handshake went 9 -> 26 us.)
-constexpr int kFullBlocks = 48;
-constexpr int kFullUnroll = 4;
+// Full: 16 blocks x 8 loads x 16 B x 256 threads = 512 KB in flight — the
+// DRAM ceiling (232 GB/s on a cold 18 MiB window) at the Light form's SM
+// footprint. Its first form, 48 x 4 (768 KB), reached the same rate but
+// sat on every SM: a gap-shaped latency chain (small L2-bound kernels and
+// a spin) ran x1.21 beside it, x1.03 beside 16 x 8 — and on the fabric the
+// boundary windows at that form lengthened the fold and update segments of
+// a DeepSeek-V4.1 decode layer by 71 us against the 28 us they saved on the
+// projections (2026-10-20). The stretch follows the footprint and the bytes
+// in flight (24 x 8 and 32 x 8 at 768 KB-1 MB: x1.18-1.24), not the rate.
+// Light: 16 x 2 = 128 KB in flight — 187 GB/s cold, x1.01 on the chain.
+// (96 x 8 = 3 MB reached 215 GB/s and made every memory access on the box
+// wait ~12 us: the bus handshake went 9 -> 26 us.)
+constexpr int kFullBlocks = 16;
+constexpr int kFullUnroll = 8;
 constexpr int kLightUnroll = 2;
 constexpr int kLightBlocksDefault = 16;
 // DGPP_L2_PREFETCH_LIGHT_BLOCKS: the Light rate's grid (tuning knob).

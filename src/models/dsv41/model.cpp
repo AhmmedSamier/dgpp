@@ -290,11 +290,13 @@ Dsv41Model::Dsv41Model(const Dsv41TextConfig& cfg, const std::string& checkpoint
   }
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   // The lm head's 12-bit companion (engine.bf16_weights; bitwise the bf16
-  // values): the decode head GEMV reads 12 bits per weight — the head is
-  // read twice per pass, the draft's base logits and the verify's. Under
-  // the companions-only residency the bf16 bytes go back when the loader
-  // granted them aside. Before the draft head's screen, which takes the
-  // companion when the bf16 bytes are gone.
+  // values): the tensor-core decode form reads 12 bits per weight through
+  // it (mma_gemv.hpp's bf12 form, 2026-10-20; before that the companion
+  // was packed and never read: the form took every width from the bf16
+  // bytes) — the head is read twice per pass, the draft's base logits and
+  // the verify's. The bf16 bytes stay resident for the prefill forms (the
+  // tensor-core instance refuses the release). Before the draft head's
+  // screen, which takes the companion when the bf16 bytes are gone.
   if (Bf12Companions::enabled()) {
     const auto t0 = std::chrono::steady_clock::now();
     bf12_.pack_and_release(globals_.lm_head, lm_vocab_count_, cfg_.hidden_size, gemm_, stream_,

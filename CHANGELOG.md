@@ -5,6 +5,45 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **The lm head read through its 12-bit companion under the tensor-core
+  chain, and the prefetch window's full form** (2026-10-20). The node
+  trace of a DeepSeek-V4.1 C1 pass showed the lm head as `mma_gemv_kernel`
+  at two bytes a weight (1.43 ms a launch, two launches a pass: 6 % of the
+  pass) although `engine.bf16_weights: bf12` had packed its companion
+  (0.23 GiB a rank, never read): the GEMM's tensor-core dispatch took every
+  width from the bf16 bytes, and the model's comment said otherwise. The
+  companion now feeds the decode forms through a bf12 form of the
+  tensor-core kernel (`launch_mma_gemv_bf12_f32/bf16`, m ≤ 32): a lane
+  loads its own 24 units of its row's packed super-block into registers
+  at the super-block's first window and decodes its fragments with the
+  expansion kernel's `expand_step` into the words the bf16 form loads, so
+  every row's chain is the bf16 launch's bit for bit at every width —
+  the scalar 12-bit kernel would have been 1.5 % faster still but gives a
+  row a chain that depends on the rows sharing its launch above eight.
+  On the head's slice ([32320 x 5120], cold): 1,425 → 1,096–1,136 µs
+  (226 GB/s on 248 MB; a staged form with a shared-memory ring ran at
+  109–183 GB/s, the SM's ~100 KB holding two to six warps); in the C1
+  pass 1,432 → 1,023 µs a launch (the head's prefetch window now streams
+  the packed bytes), and the pass on four nodes 44.50 → 43.15 ms (code),
+  37.73 → 36.89 (prose), JSON 48.03 → 49.36 by the median of three
+  repeats whose spread (46.7–49.5) covers both. The companion
+  takes precedence in `CublasLtGemm::matmul` ahead of the bf16 launch
+  (declining to the bf16 launch for a tail, raw rows or a shape the bf16
+  form would split), `resident_view` reports the packed bytes under the
+  tensor-core form so the head's prefetch window streams them, and
+  `bf12_lookup` no longer hides the companion from it. Test:
+  `mma_gemv_bf12_form_is_bitwise_the_bf16_form` (escapes, raw rows, a
+  partial block, k of one and five super-blocks, m 1–32, both outputs).
+  The L2 prefetcher's full form is 16 blocks with 8 loads in flight each
+  instead of 48 with 4: the same DRAM rate (232 GB/s cold) at the light
+  form's SM footprint — a gap-shaped latency chain beside it ran ×1.03
+  instead of ×1.21 — but `l2_prefetch_boundary_rate: full` still loses on
+  the fabric (C1 +1 % against light, +3 % with the old form): the
+  projections become L2-fed (B 107 → 92 µs a layer) while the gap kernels
+  that touch DRAM stretch (the mHC stream update ×1.7, the fold's write
+  kernel ×1.3–1.4, the router dots ×1.2–1.5). Light stays the default; the
+  full rate pays once the gap kernels stop touching DRAM.
+
 - **The one-sided collective transport for the decode step's folds
   (`engine.collective_transport`), and what its numbers taught about the
   step** (2026-10-19). The latency-class collectives — the decode graph's

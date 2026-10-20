@@ -41,6 +41,8 @@
 
 #include <cuda_runtime.h>
 
+#include "kernels/bf12_gemv.hpp"
+
 namespace dgpp {
 
 constexpr int kMmaGemvMaxRows = 32;
@@ -99,6 +101,20 @@ void launch_mma_gemv_bf16_f32(const uint16_t* act, size_t act_stride, const uint
                               cudaStream_t stream, void* ws = nullptr, size_t ws_bytes = 0);
 // The shape the kernel takes (k a multiple of 16, aligned pointers, m in range).
 bool mma_gemv_shape_ok(const void* w, const void* act, size_t act_stride, int m, int k);
+// The bf16 form over a weight's 12-bit companion (bf12_gemv.hpp; 2026-10-20,
+// the DeepSeek-V4.1 lm head): the decode forms (m <= kMmaGemvMaxRows) stage
+// the packed super-blocks and decode their fragments, so each row's chain
+// is the bf16 launch's bit for bit at three quarters of the bytes. The
+// companion's k is whole super-blocks (1024) and its rows all live; a shape
+// the bf16 form would split keeps the bf16 launch. Returns false when the
+// form does not apply (the caller runs the bf16 launch): nothing was
+// launched.
+bool mma_gemv_bf12_accepts(const Bf12Matrix& w, int m);
+bool launch_mma_gemv_bf12_f32(const uint16_t* act, size_t act_stride, const Bf12Matrix& w, float* out, int m, int n,
+                              int k, size_t out_stride, cudaStream_t stream, void* ws = nullptr, size_t ws_bytes = 0);
+bool launch_mma_gemv_bf12_bf16(const uint16_t* act, size_t act_stride, const Bf12Matrix& w, uint16_t* out, int m,
+                               int n, int k, size_t out_stride, cudaStream_t stream, void* ws = nullptr,
+                               size_t ws_bytes = 0);
 // Two fp8 projections in one decode launch (2026-10-20): the same k, the
 // first segment's width and split for both (pair_ok checks the second
 // would take the same split alone and that each n fills whole blocks), each
@@ -116,5 +132,8 @@ void launch_mma_gemv_fp8_bf16_pair(const uint16_t* a0, const uint8_t* w0, const 
 // 8; 0 restores the rule by n) — the timing sweep's knob, not a serving
 // setting: the rows' chains do not depend on it.
 void mma_gemv_set_decode_width(int warps);
+// The bf12 form's block width (warps: 2, 4, 8) — the sweep's knob; the
+// rows' chains do not depend on it.
+void mma_gemv_set_bf12_width(int warps);
 
 }  // namespace dgpp

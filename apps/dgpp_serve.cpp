@@ -2878,10 +2878,14 @@ int main(int argc, char** argv) {
     if (std::string(family->name()) != "qwen4_exp" && mtp_expert_format != "fp8")
       DGPP_LOG_WARN("serve: --mtp-expert-format {} applies to the Qwen draft experts only; the {} family loads as shipped",
                     mtp_expert_format, family->name());
-    if (bf16_weights != "checkpoint" &&
-        (std::string(family->name()) == "deepseek_v41" || std::string(family->name()) == "deepseek_v4"))
+    if (bf16_weights != "checkpoint" && std::string(family->name()) == "deepseek_v4")
       DGPP_LOG_INFO("serve: --bf16-weights {} packs nothing on the {} family yet (its bf16 sites ride the "
                     "tensor-core kernels): the bf16 bytes serve as shipped",
+                    bf16_weights, family->name());
+    if (bf16_weights != "checkpoint" && std::string(family->name()) == "deepseek_v41")
+      DGPP_LOG_INFO("serve: --bf16-weights {} on the {} family packs the lm head: the tensor-core decode form reads "
+                    "its 12-bit companion (the bf16 bytes stay resident for the prefill forms); the other bf16 sites "
+                    "serve as shipped",
                     bf16_weights, family->name());
     if (bf16_weights == "bf12" && std::string(family->name()) == "qwen3_5")
       DGPP_LOG_INFO("serve: --bf16-weights bf12 on the {} family packs the drafter's layers and fc taps, the MTP fc "

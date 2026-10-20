@@ -183,6 +183,33 @@ is the ranks' arrival skew — the fabric delivers a row in 5.5 µs in situ,
 the peers stage 10–15 µs apart. The one-lane form (no striping) costs
 1.1 ms at C6 and nothing at C1.
 
+## The lm head's bytes and the window's full form (2026-10-20)
+
+The head is read twice a pass (the draft block's base logits and the
+verify's), 331 MB a rank as bf16, and the trace showed it running as the
+bf16 tensor-core GEMV at 1.43 ms a launch although `bf16_weights: bf12`
+had packed its 12-bit companion: the tensor-core dispatch took every
+width from the bf16 bytes. The companion now feeds the decode forms
+through a bf12 form of the same kernel — each lane loads its own 24
+units of its row's packed super-block into registers and decodes its
+fragments into the words the bf16 form loads — so the chain is the bf16
+launch's bit for bit at every width (the scalar 12-bit kernel is 1.5 %
+faster still, but above eight rows it would give a row a chain that
+depends on the rows sharing its launch). On the head's slice, cold:
+1,425 → 1,096–1,136 µs (226 GB/s on 248 MB); in the pass 1,432 → 1,023 µs
+a launch, with the head's prefetch window streaming the packed bytes, and
+the C1 pass 44.50 → 43.15 ms (code), 37.73 → 36.89 (prose) (JSON's three
+repeats 46.7–49.5 either way).
+
+The prefetcher's full form became 16 blocks with 8 loads in flight (the
+same 232 GB/s cold as 48 × 4 at the light form's SM footprint); the
+boundary windows at the full rate still lose about 1 % at C1: the
+projections become L2-fed (B 107 → 92 µs a layer) but the gap kernels
+that touch DRAM — the mHC stream update (×1.7), the fold's write kernel
+(×1.3–1.4), the router dots (×1.2–1.5) — stretch under the window's
+traffic. Light stays; the full rate is a lever for after the gap
+kernels stop touching DRAM.
+
 ## The decode chain as two resources (2026-10-20)
 
 The C1 pass is one dependent chain that can either stream weights or
