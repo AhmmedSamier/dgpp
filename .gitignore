@@ -95,6 +95,7 @@ mimo_engine_cap_fixture/
 dsv41_model_fixture/
 mimo_decode_fixture/
 mimo_window_fixture/
+dory_forward*_fixture/
 # Serve runtime state (scripts/dgpp_serve.sh STATE_DIR): logs + pid, and the
 # tool-eval-bench .md reports it drops under runs/YYYY/MM/. Never tracked.
 runs/

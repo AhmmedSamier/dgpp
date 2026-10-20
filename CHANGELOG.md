@@ -5,6 +5,30 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **A begin evicts its way into the in-flight prefill walk instead of
+  waiting it out** (2026-10-20). A queued request whose blocks are pinned
+  by retired sessions' cache entries now joins the walk other prefills are
+  advancing through — where it waited for the pool to drain before — by
+  taking the cache's LRU unattached entries, the give-way the idle path
+  already applied: never a block a live request holds (each in-flight
+  prefill keeps its own refcount on every reserved block and a victim
+  drops only the cache's extra ref), the planned attach touched first so
+  the join keeps its prefix hit, and the plan recomputed after every
+  eviction because the victim may have been that entry. Each begin's fit
+  is netted against the blocks the walk's earlier begins will take: the
+  2026-10-20 d8192 c2 crash (`session_reserve_blocks` "cannot cover
+  10 384 tokens") came from a fit check that recomputed the free pool
+  from the engine, discarding that projection and admitting an overdraw
+  the same walk would fill.
+- **The Dory1.0-4B template pins the exact walk and paces its prefill**
+  (2026-10-20).
+  [deploy/cluster_dory1.0-4b_nvfp4_w1.example.json](deploy/cluster_dory1.0-4b_nvfp4_w1.example.json)
+  states the exact path's two keys outright — `engine.dory_loops: 2` (the
+  checkpoint's own count) and `engine.dory_kv_cache: "per_loop"` (the
+  exact walk, one plane per attention layer per loop, ≈ 56 GiB of planes
+  at the full 262 144-token capacity; the lossy half-pool `last_loop`
+  stays the one-key alternative) — and paces prompt work with
+  `prefill_budget_tokens: 2048` under a `decode_gap_target_ms: 3000`.
 - **Dory1.0-4B served on one Spark** (2026-10-18). The looped normalized
   GPT (`DoryForCausalLM`, `nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-NVFP4`)
   joins the served families: a 16-layer input block, a 40-layer recurrent

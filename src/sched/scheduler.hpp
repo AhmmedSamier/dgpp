@@ -803,6 +803,14 @@ class Scheduler {
   void grow_reservations();
   int youngest_active_after(int arrival) const;
   int free_slot() const;
+  // The LRU unattached cache entries give way to a request that needs their
+  // blocks — never a block a live request holds (an in-flight prefill keeps
+  // its own refcount on every reserved block, and a victim only drops the
+  // cache's extra ref). The planned attach is touched first so it is
+  // evicted last; the plan is recomputed after every eviction, because the
+  // victim may have been that entry. True when the request's new blocks
+  // fit; false when nothing evictable remains and they do not.
+  bool evict_to_fit(const Request& r, int64_t& free_blocks);
   // The oldest queued request whose reservation fits a free slot (no
   // head-of-line blocking), or -1. With the prefix cache on it may EVICT
   // unattached entries (LRU) to make the blocks a request needs.

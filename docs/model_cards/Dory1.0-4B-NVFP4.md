@@ -53,7 +53,8 @@ No MoE, no vision, no linear attention, no `rope_scaling`.
 Both are documented in the [configuration reference](../configuration.md)
 and the [operations notes](../operations.md#dory10-4b-loop-options); the
 [one-node template](../../deploy/cluster_dory1.0-4b_nvfp4_w1.example.json)
-leaves both at the exact defaults.
+pins both explicitly: the checkpoint's loop count of 2 and the exact
+`per_loop` cache.
 
 ## Validation
 
