@@ -541,6 +541,50 @@ DGPP_TEST(mma_gemv_split_k_small_n_sites) {
   cudaFree(act); cudaFree(out); cudaFree(ws);
 }
 
+DGPP_TEST(mma_gemv_fp8_pair_is_bitwise_the_two_launches) {
+  // The two-segment decode form against two single launches, bitwise, on
+  // the DeepSeek-V4.1 projection pairs (wq_a with wkv: 1280 + 512 rows of
+  // k = 5120; two wo_a groups: 1024 + 1024 of k = 4096, distinct
+  // activations) at 1, 4, 8 and 16 rows, the 32 x 32 scale grid.
+  const size_t ws_bytes = 64u << 20;
+  void* ws = nullptr;
+  DGPP_CUDA_OK(cudaMalloc(&ws, ws_bytes));
+  struct Pair { int n0, n1, k; bool same_act; };
+  for (const Pair pr : {Pair{1280, 512, 5120, true}, Pair{1024, 1024, 4096, false}}) {
+    for (const int m : {1, 4, 8, 16}) {
+      const int n = pr.n0 + pr.n1, k = pr.k;
+      std::vector<uint8_t> hw(size_t(n) * k);
+      for (size_t i = 0; i < hw.size(); ++i) hw[i] = static_cast<uint8_t>(0x30 + ((i * 2654435761u) >> 13) % 0x20);
+      const int sr = (n + 31) / 32, sc = (k + 31) / 32;
+      std::vector<float> hs(size_t(sr) * sc);
+      for (size_t i = 0; i < hs.size(); ++i) hs[i] = 0.5f + float((i * 40503u) & 0xFF) / 512.f;
+      std::vector<uint16_t> ha(size_t(2 * m) * k);
+      for (size_t i = 0; i < ha.size(); ++i) ha[i] = 0x3C00 | static_cast<uint16_t>((i * 2246822519u) & 0x3FF);
+      uint8_t* dw = nullptr; float* ds = nullptr; uint16_t* da = nullptr; uint16_t *o_single = nullptr, *o_pair = nullptr;
+      DGPP_CUDA_OK(cudaMalloc(&dw, hw.size())); DGPP_CUDA_OK(cudaMalloc(&ds, hs.size() * 4)); DGPP_CUDA_OK(cudaMalloc(&da, ha.size() * 2));
+      DGPP_CUDA_OK(cudaMalloc(&o_single, size_t(m) * n * 2)); DGPP_CUDA_OK(cudaMalloc(&o_pair, size_t(m) * n * 2));
+      DGPP_CUDA_OK(cudaMemcpy(dw, hw.data(), hw.size(), cudaMemcpyHostToDevice));
+      DGPP_CUDA_OK(cudaMemcpy(ds, hs.data(), hs.size() * 4, cudaMemcpyHostToDevice));
+      DGPP_CUDA_OK(cudaMemcpy(da, ha.data(), ha.size() * 2, cudaMemcpyHostToDevice));
+      const uint16_t* a0 = da; const uint16_t* a1 = pr.same_act ? da : da + size_t(m) * k;
+      const uint8_t* w1 = dw + size_t(pr.n0) * k; const float* s1 = ds + (size_t(pr.n0) / 32) * sc;
+      // the two single launches (the split form: the workspace passed), outputs side by side at stride n
+      dgpp::launch_mma_gemv_fp8_bf16(a0, k, dw, ds, o_single, m, pr.n0, k, n, 5, 5, nullptr, ws, ws_bytes);
+      dgpp::launch_mma_gemv_fp8_bf16(a1, k, w1, s1, o_single + pr.n0, m, pr.n1, k, n, 5, 5, nullptr, ws, ws_bytes);
+      require(dgpp::mma_gemv_pair_ok(dw, w1, a0, a1, k, m, pr.n0, pr.n1, k, ws, ws_bytes), "the pair form holds for the shape");
+      dgpp::launch_mma_gemv_fp8_bf16_pair(a0, dw, ds, o_pair, pr.n0, n, a1, w1, s1, o_pair + pr.n0, pr.n1, n, k, m, k, 5, 5,
+                                          nullptr, ws, ws_bytes);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      std::vector<uint16_t> hs1(size_t(m) * n), hp(size_t(m) * n);
+      DGPP_CUDA_OK(cudaMemcpy(hs1.data(), o_single, hs1.size() * 2, cudaMemcpyDeviceToHost));
+      DGPP_CUDA_OK(cudaMemcpy(hp.data(), o_pair, hp.size() * 2, cudaMemcpyDeviceToHost));
+      require(hs1 == hp, "the pair launch is bitwise the two launches at m=" + std::to_string(m) + " n0=" + std::to_string(pr.n0));
+      cudaFree(dw); cudaFree(ds); cudaFree(da); cudaFree(o_single); cudaFree(o_pair);
+    }
+  }
+  cudaFree(ws);
+}
+
 int main() { return dgpp::test::run_all(); }
 
 // The e8m0 byte scale grid (the QAD export's MXFP8 dense stack, rs = 0,

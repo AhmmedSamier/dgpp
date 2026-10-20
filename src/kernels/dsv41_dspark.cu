@@ -1,4 +1,5 @@
 #include "kernels/dsv41_dspark.hpp"
+#include "kernels/pdl.cuh"
 
 #include <stdexcept>
 
@@ -10,6 +11,7 @@ namespace {
 
 __global__ void stream_mean_kernel(const uint16_t* __restrict__ streams, int hc_mult, int hidden, int rows,
                                    uint16_t* __restrict__ out, int64_t out_stride) {
+  dgpp_pdl_wait();
   const int t = blockIdx.x;
   if (t >= rows) return;
   const uint16_t* x = streams + static_cast<size_t>(t) * static_cast<size_t>(hc_mult) * hidden;
@@ -25,6 +27,7 @@ __global__ void block_rows_kernel(const int64_t* __restrict__ step_pos, const in
                                   const int32_t* __restrict__ req_ids, int groups, int rows_per_group, int block,
                                   int64_t noise_id, int64_t* __restrict__ pos_out, int64_t* __restrict__ tok_out,
                                   int32_t* __restrict__ req_out, int32_t* __restrict__ spans_out) {
+  dgpp_pdl_wait();
   const int g = blockIdx.x;
   if (g >= groups) return;
   // One block per group; thread 0 scans the group's rows (rows_per_group <= 32).
@@ -61,6 +64,7 @@ __global__ void markov_bias_kernel(const float* __restrict__ base, int64_t base_
                                    int rank, int vocab_begin, int count, const int64_t* __restrict__ tok,
                                    int tok_stride, float* __restrict__ out, int64_t out_group_stride, int rows_out,
                                    float* __restrict__ block_max) {
+  dgpp_pdl_wait();
   const int g = blockIdx.y;
   __shared__ float e[kMaxRank];
   __shared__ float s_max[8];
@@ -130,6 +134,7 @@ __global__ void rescore_kernel(float* __restrict__ biased, int64_t out_group_str
                                const float* __restrict__ base, int64_t base_group_stride, int block_row, int count,
                                const uint16_t* __restrict__ h, int64_t h_group_stride, int hidden,
                                const uint16_t* __restrict__ head, const float* __restrict__ block_max, float delta) {
+  dgpp_pdl_wait();
   __shared__ int s_cnt[8];
   __shared__ int s_list[kDsparkRescoreCap];
   __shared__ float s_red[8];
@@ -214,6 +219,7 @@ __global__ void confidence_kernel(const uint16_t* __restrict__ x, int64_t x_grou
                                   const uint16_t* __restrict__ markov_embed, int rank, const int64_t* __restrict__ tok,
                                   int tok_stride, const float* __restrict__ w, float* __restrict__ conf_out,
                                   int conf_stride) {
+  dgpp_pdl_wait();
   const int g = blockIdx.x;
   const uint16_t* xr = x + static_cast<size_t>(g) * x_group_stride + static_cast<size_t>(block_row) * hidden;
   const int64_t t = tok[static_cast<size_t>(g) * tok_stride];

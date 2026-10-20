@@ -859,6 +859,11 @@ void Dsv41Model::prefetch_attention_weights(const Dsv41LayerResident& r, int row
   prefetch_fp8(r.attn.wq_a);
   prefetch_bf16(r.attn.q_norm, static_cast<size_t>(cfg_.q_lora_rank) * 2, rows);
   prefetch_fp8(r.attn.wkv);
+  // wq_b, not wo_a, takes the window's last 10 MB (measured 2026-10-20 with
+  // the per-layer instrument): with wo_a here instead, wq_b read cold at 144
+  // GB/s (+33 us a layer) and wo_a's lines did not survive the q/kv
+  // projections' streaming to the output projections (182 GB/s, -8 us);
+  // wo_b takes its own window behind the projections (csa2_layer.cu).
   prefetch_fp8(r.attn.wq_b);
 }
 

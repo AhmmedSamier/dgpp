@@ -99,6 +99,18 @@ void launch_mma_gemv_bf16_f32(const uint16_t* act, size_t act_stride, const uint
                               cudaStream_t stream, void* ws = nullptr, size_t ws_bytes = 0);
 // The shape the kernel takes (k a multiple of 16, aligned pointers, m in range).
 bool mma_gemv_shape_ok(const void* w, const void* act, size_t act_stride, int m, int k);
+// Two fp8 projections in one decode launch (2026-10-20): the same k, the
+// first segment's width and split for both (pair_ok checks the second
+// would take the same split alone and that each n fills whole blocks), each
+// row's chain its single launch's — two dependent-free GEMVs sharing one
+// ramp and drain. act_stride is both activations'; ws holds both segments'
+// split partials.
+bool mma_gemv_pair_ok(const void* w0, const void* w1, const uint16_t* a0, const uint16_t* a1, size_t act_stride, int m,
+                      int n0, int n1, int k, void* ws, size_t ws_bytes);
+void launch_mma_gemv_fp8_bf16_pair(const uint16_t* a0, const uint8_t* w0, const float* s0, uint16_t* o0, int n0,
+                                   size_t stride0, const uint16_t* a1, const uint8_t* w1, const float* s1, uint16_t* o1,
+                                   int n1, size_t stride1, size_t act_stride, int m, int k, int rs, int cs,
+                                   cudaStream_t stream, void* ws, size_t ws_bytes);
 
 // The decode forms' block width override (warps of 8 weight rows: 1, 2, 4,
 // 8; 0 restores the rule by n) — the timing sweep's knob, not a serving

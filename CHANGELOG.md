@@ -52,6 +52,38 @@ project procedures and design guidance live in `docs/`.
   timeline now stamps each peer's row landing and first proof and the
   engine's post mark from the kernel's clock (`scripts/bus_window_skew.py`
   reads them); `DGPP_BUS_TIMELINE=1` as before.
+- **DeepSeek-V4.1 decode: the per-layer instrument, programmatic launch
+  edges, the wo_b window and the paired projections** (2026-10-20). The
+  C1 pass is measured as a two-resource chain now — a per-layer
+  instrument over the node trace (segments A–H, each GEMV's achieved
+  GB/s cold or L2-fed, every window's overlap with every segment) decides
+  each change by where it moves the layer's time, not by the pass alone.
+  Three levers landed on it, every one exact: `engine.decode_pdl` (the
+  decode graph's kernel-to-kernel edges rewritten to programmatic
+  dependencies after capture for every kernel in our namespace; every
+  kernel in the tree waits first — `kernels/pdl.cuh`, held by the source
+  audit `tests/python/pdl_wait_audit.py`, after a first form that matched
+  kernels by name raced the Qwen and MiMo graphs through homonyms it had
+  not patched — 2,231 of 2,257 edges on the DeepSeek graph; 0.3–0.4 ms a
+  pass by an off/on/off/on A/B, kept on); a
+  wo_b-only prefetch window on the layers without an index source,
+  opened behind the q/kv projections at the light rate (wo_b 162 → 378
+  GB/s, the output projections 123 → 85 µs a layer; at the layer's start
+  it displaced wq_b from L2 and at the full rate its 48 blocks kept the
+  attention kernels off the SMs for 26 µs — both level passes, both
+  read off the instrument); and the two-segment form of the tensor-core
+  GEMV (`launch_mma_gemv_fp8_bf16_pair`: wq_a with wkv off the same
+  hidden, the two wo_a groups, one launch at the first segment's width
+  and split, each row's chain its single launch's — bitwise, the GEMV
+  test holds it against the two launches at 1–16 rows). Four nodes,
+  `timed_load` C1 (ms per pass / decode tok/s at equal rows): code 46.03
+  / 75.0 → 44.61 / 77.2, prose 39.05 / 48.7 → 37.86 / 50.3, JSON 49.68 /
+  83.5 → 48.35 / 86.5. A window-only layer: 932 → 887 µs. Measured and
+  not taken, on the same instrument: the attention-side window's budget
+  moved from wq_b to wo_a (wq_b cold +33 µs, wo_a's lines evicted before
+  the output projections), and the chunk GEMV core's loads double-buffered
+  (slower at every shape; the core's cost above four rows is its
+  activation staging, 80 KB a block at eight rows).
 - **DeepSeek-V4.1 sampled requests: greedy drafts and the block rule by
   default; the screened draft head measured and declined** (2026-10-19).
   `engine.mtp_draft auto` resolves to greedy for DeepSeek-V4.1-Flash as it

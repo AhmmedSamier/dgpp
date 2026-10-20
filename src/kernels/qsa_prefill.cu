@@ -3,6 +3,7 @@
 // tile, dot-product, sum and BF16 probability rounding orders match decode.
 // A separate translation unit leaves the existing decode kernel bodies intact.
 #include "kernels/qsa.hpp"
+#include "kernels/pdl.cuh"
 
 #include <algorithm>
 #include <cmath>
@@ -34,6 +35,7 @@ __global__ void attn_prefill_partial_kernel(const uint16_t* __restrict__ q, int6
                                     const int32_t* __restrict__ block_tables,
                                     int blocks_per_request, float scale, float* __restrict__ m_ws,
                                     float* __restrict__ l_ws, float* __restrict__ c_ws) {
+  dgpp_pdl_wait();
   constexpr int kGroups = 32;
   constexpr int kDslice = D / kGroups;  // 8 at D=256
   constexpr int kRowStride = D + 8;     // padded smem row (u16)

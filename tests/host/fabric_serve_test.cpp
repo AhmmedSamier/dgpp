@@ -264,6 +264,7 @@ void test_settings_handshake() {
   sent.mtp_schedule_sampled_scale = 0.9;
   sent.prefill_dense = "streaming";
   sent.prefill_fold_overlap = false;
+  sent.decode_pdl = false;
   sent.prefill_window = "scalar";
   sent.decode_window = "scalar";
   sent.collective_transport = "send";
@@ -304,6 +305,7 @@ void test_settings_handshake() {
             "the sampled requests' schedule scale travels with the settings");
     require(got.prefill_dense == "streaming", "the prefill dense form travels with the settings");
     require(!got.prefill_fold_overlap, "the prefill fold overlap flag travels with the settings");
+    require(!got.decode_pdl, "the decode pdl flag travels with the settings");
     require(got.prefill_window == "scalar", "the prefill window kernel travels with the settings");
     require(got.decode_window == "scalar", "the decode window kernel travels with the settings");
     require(got.collective_transport == "send", "the collective transport travels with the settings");

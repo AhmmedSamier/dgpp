@@ -9,6 +9,7 @@
 
 #include "common/cuda_check.hpp"
 #include "kernels/dsa.hpp"
+#include "kernels/mma_gemv.hpp"
 #include "kernels/scale_gemm.hpp"
 
 namespace dgpp {
@@ -281,10 +282,27 @@ void Csa2Layer::project_kv(const void* hidden_in, int tokens, const int64_t* pos
 void Csa2Layer::project_q_kv(const void* hidden_in, int tokens, const int64_t* pos, cudaStream_t stream) {
   const uint16_t* h = static_cast<const uint16_t*>(hidden_in);
   const int lh = cfg_.local_heads();
-  launch_scale_gemm_grid_bf16(h, size_t(cfg_.hidden), w_.wq_a.payload, w_.wq_a.scales, qr_, tokens, cfg_.q_lora,
-                              cfg_.hidden, stream, 0, 5, 5, cfg_.dense_mma, gemm_ws_, gemm_ws_bytes_, prefill_tile_);
-  csa2_rmsnorm_bf16(qr_, cfg_.q_lora, w_.q_norm, qr_, cfg_.q_lora, tokens, cfg_.q_lora, cfg_.eps, stream);
-  project_kv(hidden_in, tokens, pos, stream);
+  // wq_a and wkv read the same hidden: one decode launch for both when the
+  // pair form holds (mma_gemv_pair_ok: the same split alone, whole blocks),
+  // each row's chain its own launch's — one ramp and drain instead of two
+  // (2026-10-20); otherwise the two launches.
+  const bool paired = cfg_.dense_mma && !prefill_tile_ &&
+                      mma_gemv_pair_ok(w_.wq_a.payload, w_.wkv.payload, h, h, size_t(cfg_.hidden), tokens, cfg_.q_lora,
+                                       kCsa2Latent, cfg_.hidden, gemm_ws_, gemm_ws_bytes_);
+  if (paired) {
+    launch_mma_gemv_fp8_bf16_pair(h, w_.wq_a.payload, w_.wq_a.scales, qr_, cfg_.q_lora, size_t(cfg_.q_lora), h,
+                                  w_.wkv.payload, w_.wkv.scales, kv_, kCsa2Latent, size_t(kCsa2Latent), size_t(cfg_.hidden),
+                                  tokens, cfg_.hidden, 5, 5, stream, gemm_ws_, gemm_ws_bytes_);
+    csa2_rmsnorm_bf16(qr_, cfg_.q_lora, w_.q_norm, qr_, cfg_.q_lora, tokens, cfg_.q_lora, cfg_.eps, stream);
+    csa2_rmsnorm_bf16(kv_, kCsa2Latent, w_.kv_norm, kv_, kCsa2Latent, tokens, kCsa2Latent, cfg_.eps, stream);
+    csa2_rope_apply(kv_ + (kCsa2Latent - kCsa2Rope), kCsa2Latent, kCsa2Latent, 1, kCsa2Rope, pos, w_.inv_freq, false,
+                    tokens, stream);
+  } else {
+    launch_scale_gemm_grid_bf16(h, size_t(cfg_.hidden), w_.wq_a.payload, w_.wq_a.scales, qr_, tokens, cfg_.q_lora,
+                                cfg_.hidden, stream, 0, 5, 5, cfg_.dense_mma, gemm_ws_, gemm_ws_bytes_, prefill_tile_);
+    csa2_rmsnorm_bf16(qr_, cfg_.q_lora, w_.q_norm, qr_, cfg_.q_lora, tokens, cfg_.q_lora, cfg_.eps, stream);
+    project_kv(hidden_in, tokens, pos, stream);
+  }
   launch_scale_gemm_grid_bf16(qr_, size_t(cfg_.q_lora), w_.wq_b.payload, w_.wq_b.scales, q_, tokens,
                               lh * kCsa2Latent, cfg_.q_lora, stream, 0, 5, 5, cfg_.dense_mma, nullptr, 0, prefill_tile_);
   csa2_rope_apply(q_ + (kCsa2Latent - kCsa2Rope), int64_t(lh) * kCsa2Latent, kCsa2Latent, lh, kCsa2Rope, pos,
@@ -411,11 +429,25 @@ void Csa2Layer::project_out(int tokens, void* out, cudaStream_t stream) {
   const int lh = cfg_.local_heads(), lg = cfg_.local_groups(), hpg = cfg_.heads_per_group();
   const int K = hpg * kCsa2Latent;
   // wo_a is block-diagonal over the groups: group g projects its own heads.
-  for (int g = 0; g < lg; ++g) {
-    const size_t row_off = size_t(g) * cfg_.o_lora;
-    launch_scale_gemm_grid_bf16(o_ + size_t(g) * K, size_t(lh) * kCsa2Latent, w_.wo_a.payload + row_off * K,
-                                w_.wo_a.scales + (row_off / 32) * (size_t(K) / 32), oa_ + row_off, tokens, cfg_.o_lora, K,
-                                stream, size_t(lg) * cfg_.o_lora, 5, 5, cfg_.dense_mma, gemm_ws_, gemm_ws_bytes_, prefill_tile_);
+  // Two groups take one decode launch (the pair form, 2026-10-20: the same
+  // k, each group's chain its own launch's); otherwise one launch per group.
+  const size_t act_stride = size_t(lh) * kCsa2Latent;
+  const size_t row_off1 = size_t(cfg_.o_lora), scale_off1 = (row_off1 / 32) * (size_t(K) / 32);
+  const bool paired = lg == 2 && cfg_.dense_mma && !prefill_tile_ &&
+                      mma_gemv_pair_ok(w_.wo_a.payload, w_.wo_a.payload + row_off1 * K, o_, o_ + K, act_stride, tokens,
+                                       cfg_.o_lora, cfg_.o_lora, K, gemm_ws_, gemm_ws_bytes_);
+  if (paired) {
+    launch_mma_gemv_fp8_bf16_pair(o_, w_.wo_a.payload, w_.wo_a.scales, oa_, cfg_.o_lora, size_t(lg) * cfg_.o_lora,
+                                  o_ + K, w_.wo_a.payload + row_off1 * K, w_.wo_a.scales + scale_off1, oa_ + row_off1,
+                                  cfg_.o_lora, size_t(lg) * cfg_.o_lora, act_stride, tokens, K, 5, 5, stream, gemm_ws_,
+                                  gemm_ws_bytes_);
+  } else {
+    for (int g = 0; g < lg; ++g) {
+      const size_t row_off = size_t(g) * cfg_.o_lora;
+      launch_scale_gemm_grid_bf16(o_ + size_t(g) * K, act_stride, w_.wo_a.payload + row_off * K,
+                                  w_.wo_a.scales + (row_off / 32) * (size_t(K) / 32), oa_ + row_off, tokens, cfg_.o_lora, K,
+                                  stream, size_t(lg) * cfg_.o_lora, 5, 5, cfg_.dense_mma, gemm_ws_, gemm_ws_bytes_, prefill_tile_);
+    }
   }
   launch_scale_gemm_grid_bf16(oa_, size_t(lg) * cfg_.o_lora, w_.wo_b.payload, w_.wo_b.scales,
                               static_cast<uint16_t*>(out), tokens, cfg_.hidden, lg * cfg_.o_lora, stream, 0, 5, 5, cfg_.dense_mma, nullptr, 0, prefill_tile_);
@@ -464,6 +496,21 @@ void Csa2Layer::enqueue_decode(const void* hidden_in, Csa2StatePool& pool, const
   } window_scope{prefetch_windows_};
 
   project_q_kv(hidden_in, tokens, pos, stream);
+  // The output window of a layer without an index source (2026-10-20):
+  // wo_b alone, opened behind the q/kv projections at the layer rate — it
+  // streams under the appends, the selection, the attention and the first
+  // output GEMV (whose lines it does not share) and lands for wo_b. At the
+  // full rate it landed too (wo_b 372 GB/s) but stretched the small kernels
+  // behind the projections by 43 us a layer, the level pass again. Opened at the layer's start it shared
+  // L2 with the attention-side window's wq_b and displaced it (the
+  // per-layer instrument: wq_b 295 -> 148 GB/s, wo_b 162 -> 368, the layer
+  // level); behind the projections wq_b's lines are consumed. wo_a stays
+  // out: it is the first output GEMV and a window still streaming its
+  // lines when it starts reads them beside it (measured 2026-10-19).
+  if (windows() && !(w_.ratio > 0 && w_.index_source)) {
+    prefetch_->open_window(stream, kWindowBudget, prefetch_->layer_rate());
+    window_fp8(w_.wo_b);
+  }
   // A window-only layer opens no output window (2026-10-19): with the
   // decode window beside the main source its attention is 12-20 us, and
   // the 1.5 MB of wo_a and wo_b have no cover there — at the light rate

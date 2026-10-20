@@ -1,4 +1,5 @@
 #include "kernels/l2_prefetch.hpp"
+#include "kernels/pdl.cuh"
 
 #include <cuda.h>
 
@@ -38,6 +39,7 @@ __device__ uint32_t g_prefetch_sink[2];
 template <int kUnroll>
 __global__ __launch_bounds__(kThreads) void l2_prefetch_kernel(
     const uint4* __restrict__ p, size_t vec_count) {
+  dgpp_pdl_wait();
   const size_t stride = static_cast<size_t>(gridDim.x) * kThreads;
   size_t i = static_cast<size_t>(blockIdx.x) * kThreads + threadIdx.x;
   uint32_t fold = 0;
@@ -65,6 +67,7 @@ __global__ __launch_bounds__(kThreads) void l2_prefetch_kernel(
 // tuned to exactly that trade).
 __global__ __launch_bounds__(kThreads) void l2_prefetch_lines_kernel(
     const uint8_t* __restrict__ p, size_t lines) {
+  dgpp_pdl_wait();
   const size_t stride = static_cast<size_t>(gridDim.x) * kThreads;
   for (size_t i = static_cast<size_t>(blockIdx.x) * kThreads + threadIdx.x; i < lines; i += stride)
     asm volatile("prefetch.global.L2 [%0];" ::"l"(p + i * 128));
@@ -87,6 +90,7 @@ bool env_prefetch_form_touch() { return g_l2_settings.form == L2PrefetchForm::To
 size_t env_touch_stride_bytes() { return size_t{64} << 10; }
 __global__ __launch_bounds__(kThreads) void l2_touch_pages_kernel(const uint8_t* __restrict__ p, size_t touches,
                                                                  size_t stride_bytes) {
+  dgpp_pdl_wait();
   const size_t stride = static_cast<size_t>(gridDim.x) * kThreads;
   for (size_t i = static_cast<size_t>(blockIdx.x) * kThreads + threadIdx.x; i < touches; i += stride)
     asm volatile("prefetch.global.L2 [%0];" ::"l"(p + i * stride_bytes));
@@ -222,6 +226,7 @@ void launch_l2_prefetch(const void* ptr, size_t bytes, PrefetchRate rate,
 }
 
 __global__ __launch_bounds__(kThreads) void l2_release_kernel(const uint8_t* p, size_t lines) {
+  dgpp_pdl_wait();
   const size_t stride = static_cast<size_t>(gridDim.x) * kThreads;
   for (size_t i = static_cast<size_t>(blockIdx.x) * kThreads + threadIdx.x; i < lines; i += stride)
     asm volatile("applypriority.global.L2::evict_normal [%0], 128;" ::"l"(p + i * 128) : "memory");

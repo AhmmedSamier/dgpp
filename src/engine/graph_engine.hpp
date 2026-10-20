@@ -7,6 +7,7 @@
 // This header depends on CUDA and bus/verbs types. Host-only service tests
 // use a fake engine instead.
 #include <algorithm>
+#include "engine/graph_pdl.hpp"
 #include <array>
 #include <deque>
 #include <thread>
@@ -845,6 +846,10 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   // (sample::block_verify, the drafts decided jointly; exact, never fewer
   // tokens in expectation) or the token-by-token test. Before the first
   // capture (the verdict node bakes it in).
+  // engine.decode_pdl: the decode graph's kernel edges programmatic (graph_pdl.hpp), set before the first capture.
+  void set_decode_pdl(bool on) { decode_pdl_ = on; }
+  bool decode_pdl() const { return decode_pdl_; }
+  bool decode_pdl_ = true;
   void set_block_verify(bool on) {
     drain();
     for (const std::array<cudaGraphExec_t, 2>& e : scalar_execs_)
@@ -2227,6 +2232,13 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       // plan did not name.
       size_t free_before = 0, free_after = 0, total = 0;
       (void)cudaMemGetInfo(&free_before, &total);
+      if (decode_pdl_) {
+        const pdl::EdgeStats st = pdl::programmatic_edges(graph);
+        std::string unlisted;
+        for (const std::string& u : st.unlisted) unlisted += (unlisted.empty() ? "" : ", ") + u.substr(0, 48);
+        DGPP_LOG_INFO("rank {}: graph variant {} programmatic edges: {} of {} edges over {} kernel nodes; plain: {}", rank_,
+                      variant, st.converted, st.edges, st.kernel_nodes, unlisted.empty() ? "none" : unlisted);
+      }
       DGPP_CUDA_OK(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
       cudaGraphDestroy(graph);
       (void)cudaMemGetInfo(&free_after, &total);

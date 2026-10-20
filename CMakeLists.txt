@@ -498,6 +498,9 @@ add_test(NAME qwen_qsa_prefill
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda/qwen_qsa_prefill_test.py
           $<TARGET_FILE:qwen_forward_test>)
 set_tests_properties(qwen_qsa_prefill PROPERTIES RUN_SERIAL TRUE TIMEOUT 360)
+# The decode graph's programmatic edges need every kernel to wait first (engine/graph_pdl.hpp).
+add_test(NAME pdl_wait_audit COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/pdl_wait_audit.py ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(pdl_wait_audit PROPERTIES LABELS "host")
 # QSA always sees BF16 activations, across both expert formats and dense modes.
 foreach(_dense_fp8 IN ITEMS 0 1)
   add_test(NAME qwen_qsa_prefill_nvfp4_dense_${_dense_fp8}

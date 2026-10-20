@@ -183,6 +183,39 @@ is the ranks' arrival skew — the fabric delivers a row in 5.5 µs in situ,
 the peers stage 10–15 µs apart. The one-lane form (no striping) costs
 1.1 ms at C6 and nothing at C1.
 
+## The decode chain as two resources (2026-10-20)
+
+The C1 pass is one dependent chain that can either stream weights or
+run its latency-bound kernels; with an L2 of ~16 MB a layer's window,
+the attention weights (45 MB a layer per rank) cannot all hide under
+the chain's ~160 µs of gaps, so the pass is judged per layer by a
+two-term instrument over the node trace: the segments (mHC site,
+projections, selection and attention, output projections, the two
+folds, the MoE), each GEMV's achieved GB/s (cold or L2-fed) and each
+window's overlap with each segment. On it, three exact levers landed:
+`engine.decode_pdl` (programmatic launch edges across the decode graph,
+0.3–0.4 ms a pass), a wo_b-only prefetch window opened behind the q/kv
+projections at the light rate on the layers without an index source
+(wo_b 162 → 378 GB/s; at the layer's start it displaced wq_b from L2, at
+the full rate its 48 blocks held the attention kernels off the SMs), and
+the paired tensor-core GEMV launch (wq_a with wkv, the two wo_a groups:
+one ramp and drain, bitwise). Four nodes, `timed_load` C1, ms per pass /
+decode tok/s at equal rows:
+
+| Class | before | after |
+|---|---|---|
+| code | 46.03 / 75.0 | 44.61 / 77.2 |
+| prose | 39.05 / 48.7 | 37.86 / 50.3 |
+| JSON | 49.68 / 83.5 | 48.35 / 86.5 |
+
+A window-only layer now: mHC site 20, projections 113, selection and
+attention 34, output projections 85, attention fold 40, FFN site 38,
+MoE 520, MoE fold 28 — 887 µs against a structural floor near 800 (the
+MoE at the ceiling, the gaps, and the attention bytes the L2 cannot
+hold). What the instrument declined: the attention-side window's budget
+on wo_a instead of wq_b (wq_b cold +33 µs, wo_a's lines evicted before
+use) and a double-buffered chunk GEMV core (slower at every shape).
+
 ## Sampled requests: the draft rule and the verify rule (2026-10-19)
 
 `engine.mtp_draft auto` resolves to greedy for this family (the DSpark

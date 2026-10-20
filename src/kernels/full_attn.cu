@@ -40,6 +40,7 @@
 // engine.prefill_attention = fp8, the compute form (Q and P in e4m3 on the
 // fp8 tensor cores) — their sections below.
 #include "kernels/full_attn.hpp"
+#include "kernels/pdl.cuh"
 
 #include <cmath>
 #include <stdexcept>
@@ -165,6 +166,7 @@ __global__ __launch_bounds__(32) void full_attn_row_kernel(
     int local_heads, int kv_heads, int block_tokens, const int32_t* __restrict__ block_tables,
     int blocks_per_request, float scale, const float* __restrict__ kv_scales, float* __restrict__ out,
     float* __restrict__ partials, int splits) {
+  dgpp_pdl_wait();
   extern __shared__ __align__(16) uint16_t sm[];
   // fp8: the staged codes sit past the bf16 tile; the scales fold into the
   // softmax scale (k) and the output (v).
@@ -361,6 +363,7 @@ __global__ __launch_bounds__(256) void full_attn_combine_kernel(const float* __r
                                                                  int splits, int local_heads, int kv_heads,
                                                                  const float* __restrict__ v_scale,
                                                                  float* __restrict__ out) {
+  dgpp_pdl_wait();
   const float vs = v_scale != nullptr ? *v_scale : 1.f;
   const int64_t r = blockIdx.x;
   const int kvh = blockIdx.y;
@@ -392,6 +395,7 @@ __global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_tile_kernel(
     const uint16_t* __restrict__ v_cache, const int32_t* __restrict__ bt, const int64_t* __restrict__ pos,
     int rows, int local_heads, int kv_heads, int block_shift, int width_shift, float scale,
     float* __restrict__ out) {
+  dgpp_pdl_wait();
   extern __shared__ __align__(16) uint16_t sm[];
   const int r0 = blockIdx.x * kQTile;
   const int kvh = blockIdx.y;
@@ -628,6 +632,7 @@ __global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_tile_tma_kernel(
     const uint16_t* __restrict__ q, int64_t q_row_stride, const int32_t* __restrict__ bt,
     const int64_t* __restrict__ pos, int rows, int local_heads, int kv_heads, int block_shift, float scale,
     const float* __restrict__ kv_scales, float* __restrict__ out) {
+  dgpp_pdl_wait();
   extern __shared__ __align__(1024) uint8_t smraw[];
   // The stages need 1 KB alignment for the swizzle: carve them past the
   // first aligned boundary and put the barriers in the slack.
@@ -931,6 +936,7 @@ __global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_tile_fp8c_kernel
     const uint16_t* __restrict__ q, int64_t q_row_stride, const int32_t* __restrict__ bt,
     const int64_t* __restrict__ pos, int rows, int local_heads, int kv_heads, int block_shift, float scale,
     const float* __restrict__ kv_scales, float* __restrict__ out) {
+  dgpp_pdl_wait();
   extern __shared__ __align__(1024) uint8_t smraw[];
   const unsigned sbase = static_cast<unsigned>(__cvta_generic_to_shared(smraw));
   uint8_t* sm = smraw + ((1024 - (sbase & 1023)) & 1023);
@@ -1183,6 +1189,7 @@ __global__ __launch_bounds__(kMaxTileGroup * 32) void full_attn_block_decode_ker
     const int32_t* __restrict__ block_tables, int blocks_per_request, int local_heads, int kv_heads,
     int block_shift, float scale, const float* __restrict__ kv_scales, float* __restrict__ out,
     float* __restrict__ partials, int splits) {
+  dgpp_pdl_wait();
   extern __shared__ __align__(1024) uint8_t smraw[];
   const unsigned sbase = static_cast<unsigned>(__cvta_generic_to_shared(smraw));
   uint8_t* sm = smraw + ((1024 - (sbase & 1023)) & 1023);

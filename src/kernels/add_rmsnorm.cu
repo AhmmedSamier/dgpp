@@ -1,4 +1,5 @@
 #include "kernels/add_rmsnorm.hpp"
+#include "kernels/pdl.cuh"
 
 #include <stdexcept>
 
@@ -28,6 +29,7 @@ __global__ void __launch_bounds__(kThreads) add_rmsnorm_kernel(uint16_t* __restr
                                                                const uint16_t* __restrict__ w,
                                                                uint16_t* __restrict__ out, int dim,
                                                                float eps) {
+  dgpp_pdl_wait();
   const int tid = threadIdx.x;
   const size_t row = static_cast<size_t>(blockIdx.x) * dim;
   uint16_t* xr = resid + row;

@@ -253,6 +253,7 @@ struct ServeGraphEngine {
   virtual void set_proposal_temperature_scale(float scale) = 0;
   // engine.mtp_verify: block verification (true) or the token rule, before the warm capture.
   virtual void set_block_verify(bool on) = 0;
+  virtual void set_decode_pdl(bool on) = 0;
   // engine.dflash_batch_rows: the block drafter's batched verify rows budget, before the warm capture.
   virtual void configure_block_rows_budget(int budget) = 0;
   // engine.mtp_schedule_sampled_scale, before the warm capture.
@@ -278,6 +279,7 @@ struct ServeGraphEngineOf final : ServeGraphEngine {
   void set_proposal_drafts(bool on) override { eng.set_proposal_drafts(on); }
   void set_proposal_temperature_scale(float scale) override { eng.set_proposal_temperature_scale(scale); }
   void set_block_verify(bool on) override { eng.set_block_verify(on); }
+  void set_decode_pdl(bool on) override { eng.set_decode_pdl(on); }
   void configure_block_rows_budget(int budget) override { eng.configure_block_rows_budget(budget); }
   void set_sampled_schedule_scale(float scale) override { eng.set_sampled_schedule_scale(scale); }
   void set_lookup_drafts(bool on, int nmin, int nstrong, int agree) override {
@@ -1598,6 +1600,7 @@ int main(int argc, char** argv) {
   std::string prefill = "bounded";  // the DeepSeek-V4.1 prefill: bounded | exact
   std::string prefill_dense = "tile";  // the DeepSeek-V4.1 prefill's dense projections: tile | streaming
   bool prefill_fold_overlap = true;    // the DeepSeek-V4.1 prefill's boundary folds under the other row block's compute
+  bool decode_pdl = true;              // the decode graph's kernel edges programmatic (engine/graph_pdl.hpp)
   std::string prefill_window = "flash";  // the DeepSeek-V4.1 prefill's window attention: flash | scalar
   std::string decode_window = "flash";   // the DeepSeek-V4.1 decode's window attention: flash | scalar
   std::string collective_transport = "write";  // the latency collectives' transport: write | send
@@ -1732,6 +1735,7 @@ int main(int argc, char** argv) {
     prefill = e.prefill;
     prefill_dense = e.prefill_dense;
     prefill_fold_overlap = e.prefill_fold_overlap;
+    decode_pdl = e.decode_pdl;
     prefill_window = e.prefill_window;
     decode_window = e.decode_window;
     collective_transport = e.collective_transport;
@@ -2099,7 +2103,7 @@ int main(int argc, char** argv) {
         graph_batch_min_live == 0 ? std::min(2, max_concurrency) : graph_batch_min_live;
     return std::format(
         "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} pfattn={} dcattn={} ngt={} dw={} mtpef={} bfw={} "
-        "fp8head={} dh={} dhb={} mtph={} attw={} itopk={} ctb={} cbs={} pf={} pfd={} pfo={} pfw={} dcw={} ctr={} "
+        "fp8head={} dh={} dhb={} mtph={} attw={} itopk={} ctb={} cbs={} pf={} pfd={} pfo={} pfw={} dcw={} ctr={} pdl={} "
         "emsh={} maxtok={} queue={} "
         "eos={} graph={} compact={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} "
         "msad={} msss={} mdr={} mdt={} mvf={} dbr={} "
@@ -2112,7 +2116,7 @@ int main(int argc, char** argv) {
         draft_head,
         draft_head_blocks, mtp_head,
         attention_weights, index_topk, candidate_topk_blocks, candidate_block_size, prefill, prefill_dense,
-        prefill_fold_overlap ? 1 : 0, prefill_window, decode_window, collective_transport, embed_sharding,
+        prefill_fold_overlap ? 1 : 0, prefill_window, decode_window, collective_transport, decode_pdl ? 1 : 0, embed_sharding,
         default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0,
         compact_batches ? 1 : 0, mtp ? 1 : 0, mtp_depth, mtp_schedule ? 1 : 0, mtp_schedule_row_ms,
         mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth,
@@ -2193,6 +2197,7 @@ int main(int argc, char** argv) {
         ws.prefill = prefill;
         ws.prefill_dense = prefill_dense;
         ws.prefill_fold_overlap = prefill_fold_overlap;
+        ws.decode_pdl = decode_pdl;
         ws.prefill_window = prefill_window;
         ws.decode_window = decode_window;
         ws.collective_transport = collective_transport;
@@ -2300,6 +2305,7 @@ int main(int argc, char** argv) {
         prefill = ws.prefill;
         prefill_dense = ws.prefill_dense;
         prefill_fold_overlap = ws.prefill_fold_overlap;
+        decode_pdl = ws.decode_pdl;
         prefill_window = ws.prefill_window;
         decode_window = ws.decode_window;
         collective_transport = ws.collective_transport;
@@ -3245,6 +3251,7 @@ int main(int argc, char** argv) {
                         graph_engine->engine()->prefill_group_advance() ? "; in-flight prompts share one walk" : "");
           graph_engine->set_proposal_temperature_scale(static_cast<float>(mtp_draft_temperature));
           graph_engine->set_block_verify(mtp_verify == "block");
+          graph_engine->set_decode_pdl(decode_pdl);
           graph_engine->set_prefill_group(prefill_group);
           graph_engine->set_lookup_drafts(lookup_draft, lookup_nmin, lookup_nstrong, lookup_agree);
           if (lookup_draft)

@@ -112,7 +112,7 @@ int main(int argc, char** argv) {
           dgpp::launch_mma_gemv_fp8_bf16(act, s.k, w[c], sc_[c], out, m, s.n, s.k, s.n, scale_shift, scale_shift, nullptr, ws, ws_bytes); }, iters));
         dgpp::mma_gemv_set_decode_width(0);
       }
-      if (forms.find("chunk") != std::string::npos && m <= 4) {
+      if (forms.find("chunk") != std::string::npos && m <= 8) {
         report("chunk", time_us([&](int c) {
           dgpp::launch_scale_gemm_bf16(act, s.k, w[c], sc_[c], out, m, s.n, s.k, nullptr, s.n, /*mma_from_rows=*/0); }, iters));
       }

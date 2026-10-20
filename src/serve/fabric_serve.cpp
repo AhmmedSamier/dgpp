@@ -450,6 +450,7 @@ std::string encode_journal_settings(const WorldSettings& s) {
   out += ",\"pfd\":";
   append_json_string(&out, s.prefill_dense);
   out += std::format(",\"pfo\":{}", s.prefill_fold_overlap ? 1 : 0);
+  out += std::format(",\"pdl\":{}", s.decode_pdl ? 1 : 0);
   out += ",\"pfw\":";
   append_json_string(&out, s.prefill_window);
   out += ",\"dcw\":";
@@ -730,6 +731,7 @@ JournalRecord decode_journal_line(std::string_view line) {
     else s.prefill_dense = "tile";
     // Records before the fold overlap key (2026-10-18) carry none: on.
     s.prefill_fold_overlap = v.find("pfo") ? flag("pfo") : true;
+    s.decode_pdl = v.find("pdl") ? flag("pdl") : true;
     // Records before the window kernel key (2026-10-18) carry none: flash.
     if (const dgpp::minijson::Value* pfw = v.find("pfw")) s.prefill_window = std::string(pfw->as_string());
     else s.prefill_window = "flash";

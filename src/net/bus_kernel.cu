@@ -1,4 +1,5 @@
 #include "net/bus_kernel.hpp"
+#include "kernels/pdl.cuh"
 
 #include <cooperative_groups.h>
 #include <cuda/atomic>
@@ -522,6 +523,7 @@ __device__ inline void block_fold_vectors_staged(
 // deadline converge on the shared stop flag first.
 __global__ __launch_bounds__(kConsumerThreads) void bus_consumer_kernel(
     BusRecvView v, uint64_t deadline_cycles) {
+  dgpp_pdl_wait();
   __shared__ uint32_t s_last_seen[kBusMaxConsumerCells];
   __shared__ uint64_t s_hash[kConsumerThreads / 32];  // per-warp fold partials
   __shared__ uint32_t s_seq;
@@ -624,6 +626,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_kernel(
     BusAllReduceView v, int my_rank, const __nv_bfloat16* src,
     __nv_bfloat16* dst, uint32_t elems, uint32_t ctl_seq,
     BusAllReduceCtl* ctl, uint64_t deadline_cycles) {
+  dgpp_pdl_wait();
   using BlockRef = cuda::atomic_ref<int, cuda::thread_scope_block>;
   using SysRef = cuda::atomic_ref<uint64_t, cuda::thread_scope_system>;
 
@@ -888,6 +891,7 @@ __global__ __launch_bounds__(Threads) void bus_allreduce_graph_kernel(
     BusAllReduceGraphView v, int my_rank, const __nv_bfloat16* src,
     __nv_bfloat16* dst, uint32_t elems, BusAllReduceCtl* ctl,
     uint64_t deadline_cycles, uint32_t stage_words) {
+  dgpp_pdl_wait();
   // stage_words: u64 words of dynamic shared memory per peer
   // (kBusMaxPeers slots) that a claimed payload is copied into by its
   // gate's hash pass; 0 = no staging (the fold reads the NIC-placed rows).
@@ -1409,6 +1413,7 @@ template <int Threads>
 __global__ __launch_bounds__(Threads) void bus_allreduce_write_kernel(
     BusAllReduceGraphView v, int my_rank, const __nv_bfloat16* src_bf, __nv_bfloat16* dst_bf,
     uint32_t elems, BusAllReduceCtl* cell, BusWriteBlockRecord* recs, uint64_t deadline_cycles) {
+  dgpp_pdl_wait();
   constexpr int kWarps = Threads / 32;
   using SysRef = cuda::atomic_ref<uint64_t, cuda::thread_scope_system>;
   __shared__ uint32_t s_gen;
@@ -1779,6 +1784,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
     const __nv_bfloat16* src_bf, __nv_bfloat16* dst_bf, BusBulkSegPlan plan,
     uint64_t* staged_counters, uint64_t* staged_hashes, uint32_t ctl_seq,
     BusAllReduceCtl* ctl, uint64_t deadline_cycles, BusBulkScratch* sc) {
+  dgpp_pdl_wait();
   using BlockRef = cuda::atomic_ref<int, cuda::thread_scope_block>;
   using SysRef = cuda::atomic_ref<uint64_t, cuda::thread_scope_system>;
   namespace cg = cooperative_groups;
@@ -2532,6 +2538,7 @@ namespace {
 
 __global__ __launch_bounds__(kConsumerThreads) void bus_warm_work_kernel(
     float* buf, int spins) {
+  dgpp_pdl_wait();
   float acc = static_cast<float>(threadIdx.x) * 1e-6f;
   for (int i = 0; i < spins; ++i) acc = acc * 1.0001f + 0.001f;
   buf[threadIdx.x] = acc;
@@ -2545,6 +2552,7 @@ cudaError_t launch_bus_warm_work(cudaStream_t stream, float* buf, int spins) {
 }
 
 __global__ void bus_globaltimer_stamp_kernel(uint64_t* out) {
+  dgpp_pdl_wait();
   *out = globaltimer_ns();
 }
 

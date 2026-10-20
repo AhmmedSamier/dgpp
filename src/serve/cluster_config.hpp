@@ -220,7 +220,11 @@ struct ClusterConfig {
     // grid of warps as they prove; "send" = payload + doorbell SEND pairs
     // claimed through door cells by one block, hash-gated, acked, credited.
     std::string collective_transport = "write";
-    bool prefill_fold_overlap = true;    // the DeepSeek-V4.1 prefill's boundary folds under the other row block's compute
+    bool prefill_fold_overlap = true;
+    // The decode graph's kernel edges programmatic (2026-10-20): a kernel's
+    // blocks scheduled as its predecessor drains, each waiting for the
+    // predecessor's completion before its first read (engine/graph_pdl.hpp).
+    bool decode_pdl = true;    // the DeepSeek-V4.1 prefill's boundary folds under the other row block's compute
     // The opt-in YaRN rope ramp (2026-09-18, the Qwen3.8-Flash-Next 512K
     // recipe): absent is the default and leaves every table and every
     // kernel argument exactly as they were; present builds the Qwen QSA

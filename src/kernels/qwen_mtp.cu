@@ -1,4 +1,5 @@
 #include "kernels/qwen_mtp.hpp"
+#include "kernels/pdl.cuh"
 
 #include <stdexcept>
 
@@ -11,6 +12,7 @@ namespace {
 __global__ void embed_gather_kernel(const uint16_t* __restrict__ embed,
                                     const int64_t* __restrict__ tokens, uint16_t* __restrict__ out,
                                     int hidden) {
+  dgpp_pdl_wait();
   const int64_t t = blockIdx.x;
   const int64_t tok = tokens[t];
   for (int d = threadIdx.x; d < hidden; d += blockDim.x)
@@ -19,6 +21,7 @@ __global__ void embed_gather_kernel(const uint16_t* __restrict__ embed,
 
 __global__ void fuse_kernel(const uint16_t* __restrict__ ein, const uint16_t* __restrict__ enc,
                             uint16_t* __restrict__ out, int64_t n, int hc, int hidden) {
+  dgpp_pdl_wait();
   const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (i >= n) return;
   const int64_t width = static_cast<int64_t>(hc) * hidden;
@@ -33,6 +36,7 @@ __global__ void hidden_store_kernel(const uint16_t* __restrict__ r,
                                     const int32_t* __restrict__ req_ids,
                                     const int64_t* __restrict__ pos, uint16_t* __restrict__ window,
                                     int64_t req_stride, int window_rows, int width) {
+  dgpp_pdl_wait();
   const int64_t row = blockIdx.x;
   const int64_t p = pos[row];
   if (p < 0) return;
@@ -45,6 +49,7 @@ __global__ void hidden_gather_kernel(const uint16_t* __restrict__ window, int64_
                                      int window_rows, const int32_t* __restrict__ req_ids,
                                      const int64_t* __restrict__ pos, uint16_t* __restrict__ out,
                                      int width) {
+  dgpp_pdl_wait();
   const int64_t row = blockIdx.x;
   const int64_t p = pos[row];
   if (p < 0) {

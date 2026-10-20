@@ -1,4 +1,5 @@
 #include "kernels/bf12_gemv.hpp"
+#include "kernels/pdl.cuh"
 
 #include <algorithm>
 #include <array>
@@ -30,6 +31,7 @@ __global__ void bf12_gemv_kernel(const uint16_t* __restrict__ act, size_t act_st
                                  const uint32_t* __restrict__ esc,
                                  const uint16_t* __restrict__ raw, void* __restrict__ out, int n,
                                  int k, size_t row_bytes) {
+  dgpp_pdl_wait();
   extern __shared__ __align__(16) uint16_t sx[];
   gemv::stage_activations<kRows>(act, act_stride, k, sx);
   __syncthreads();
@@ -96,6 +98,7 @@ __global__ void bf12_gemv_wide_kernel(const uint16_t* __restrict__ act, size_t a
                                       const uint32_t* __restrict__ esc,
                                       const uint16_t* __restrict__ raw, void* __restrict__ out,
                                       int n, int k, size_t row_bytes) {
+  dgpp_pdl_wait();
   extern __shared__ __align__(16) uint16_t sx[];
   const int warp = threadIdx.x / 32;
   const int lane = threadIdx.x % 32;
@@ -167,6 +170,7 @@ struct Bf12GemvMulti {
 
 template <int kRows, bool kOutF32, int kSB>
 __global__ void bf12_gemv_multi_kernel(Bf12GemvMulti mp, int k, size_t row_bytes) {
+  dgpp_pdl_wait();
   extern __shared__ __align__(16) uint16_t sx[];
   const int bid = static_cast<int>(blockIdx.x);
   int which = 0;
@@ -313,6 +317,7 @@ __global__ void bf12_expand_kernel(const uint8_t* __restrict__ w, const uint32_t
                                    const uint32_t* __restrict__ esc,
                                    const uint16_t* __restrict__ raw, uint16_t* __restrict__ out,
                                    int row0, int nrows, int k, size_t row_bytes) {
+  dgpp_pdl_wait();
   const int warp = threadIdx.x / 32;
   const int lane = threadIdx.x % 32;
   const int local = blockIdx.x * gemv::kWarps + warp;
