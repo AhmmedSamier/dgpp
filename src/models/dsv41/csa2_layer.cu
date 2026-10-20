@@ -279,7 +279,7 @@ void Csa2Layer::project_kv(const void* hidden_in, int tokens, const int64_t* pos
                   tokens, stream);
 }
 
-void Csa2Layer::project_q_kv(const void* hidden_in, int tokens, const int64_t* pos, cudaStream_t stream) {
+void Csa2Layer::project_q_kv(const void* hidden_in, int tokens, const int64_t* pos, cudaStream_t stream, bool rope_q) {
   const uint16_t* h = static_cast<const uint16_t*>(hidden_in);
   const int lh = cfg_.local_heads();
   // wq_a and wkv read the same hidden: one decode launch for both when the
@@ -293,10 +293,9 @@ void Csa2Layer::project_q_kv(const void* hidden_in, int tokens, const int64_t* p
     launch_mma_gemv_fp8_bf16_pair(h, w_.wq_a.payload, w_.wq_a.scales, qr_, cfg_.q_lora, size_t(cfg_.q_lora), h,
                                   w_.wkv.payload, w_.wkv.scales, kv_, kCsa2Latent, size_t(kCsa2Latent), size_t(cfg_.hidden),
                                   tokens, cfg_.hidden, 5, 5, stream, gemm_ws_, gemm_ws_bytes_);
-    csa2_rmsnorm_bf16(qr_, cfg_.q_lora, w_.q_norm, qr_, cfg_.q_lora, tokens, cfg_.q_lora, cfg_.eps, stream);
-    csa2_rmsnorm_bf16(kv_, kCsa2Latent, w_.kv_norm, kv_, kCsa2Latent, tokens, kCsa2Latent, cfg_.eps, stream);
-    csa2_rope_apply(kv_ + (kCsa2Latent - kCsa2Rope), kCsa2Latent, kCsa2Latent, 1, kCsa2Rope, pos, w_.inv_freq, false,
-                    tokens, stream);
+    // The two norms and the kv rope in one launch (csa2_norms_rope, 2026-10-20).
+    csa2_norms_rope(qr_, cfg_.q_lora, w_.q_norm, cfg_.q_lora, kv_, kCsa2Latent, w_.kv_norm, kCsa2Latent, cfg_.eps,
+                    kCsa2Latent - kCsa2Rope, kCsa2Rope, pos, w_.inv_freq, tokens, stream);
   } else {
     launch_scale_gemm_grid_bf16(h, size_t(cfg_.hidden), w_.wq_a.payload, w_.wq_a.scales, qr_, tokens, cfg_.q_lora,
                                 cfg_.hidden, stream, 0, 5, 5, cfg_.dense_mma, gemm_ws_, gemm_ws_bytes_, prefill_tile_);
@@ -305,8 +304,9 @@ void Csa2Layer::project_q_kv(const void* hidden_in, int tokens, const int64_t* p
   }
   launch_scale_gemm_grid_bf16(qr_, size_t(cfg_.q_lora), w_.wq_b.payload, w_.wq_b.scales, q_, tokens,
                               lh * kCsa2Latent, cfg_.q_lora, stream, 0, 5, 5, cfg_.dense_mma, nullptr, 0, prefill_tile_);
-  csa2_rope_apply(q_ + (kCsa2Latent - kCsa2Rope), int64_t(lh) * kCsa2Latent, kCsa2Latent, lh, kCsa2Rope, pos,
-                  w_.inv_freq, false, tokens, stream);
+  if (rope_q)
+    csa2_rope_apply(q_ + (kCsa2Latent - kCsa2Rope), int64_t(lh) * kCsa2Latent, kCsa2Latent, lh, kCsa2Rope, pos,
+                    w_.inv_freq, false, tokens, stream);
 }
 
 void Csa2Layer::indexer_query(const void* hidden_in, int tokens, const int64_t* pos, cudaStream_t stream) {
@@ -495,7 +495,8 @@ void Csa2Layer::enqueue_decode(const void* hidden_in, Csa2StatePool& pool, const
     ~WindowScope() { windows = false; }
   } window_scope{prefetch_windows_};
 
-  project_q_kv(hidden_in, tokens, pos, stream);
+  const int lh = cfg_.local_heads();
+  project_q_kv(hidden_in, tokens, pos, stream, /*rope_q=*/false);  // the q rope rides the decode tail below
   // The output window of a layer without an index source (2026-10-20):
   // wo_b alone, opened behind the q/kv projections at the layer rate — it
   // streams under the appends, the selection, the attention and the first
@@ -519,12 +520,16 @@ void Csa2Layer::enqueue_decode(const void* hidden_in, Csa2StatePool& pool, const
   // own cache reads, and at the layer's start they slowed the q and kv
   // projections. The GEMVs read them from DRAM; an index-source layer's
   // window keeps its cover under the selection and the attention.
-  // The window row into the ring (this batch's rows are visible to its
-  // own queries: the ring is read after the append).
-  csa2_ring_slot_positions(pos, slots_, tokens, cfg_.ring_slots, stream);
-  dsa_latent_append(kv_, req_ids, slots_, tokens, pool.ring_table(), 1, cfg_.ring_slots, pool.ring(layer_), kCsa2Latent,
-                    stream, Csa2StatePool::kRingFormat);
-  csa2_window_slots_decode(pos, tokens, cfg_.window, cfg_.ring_slots, wlist_, wcounts_, stream);
+  // The decode tail in one launch per row (dsa_decode_tail_fp8block,
+  // 2026-10-20): the q rope, the ring slot, the window slot list, the entry
+  // position on a layer with a ratio, and the window row's append into the
+  // ring (this batch's rows are visible to its own queries: the ring is
+  // read after the append) — the five launches it replaces, bitwise.
+  static_assert(Csa2StatePool::kRingFormat == LatentFormat::kFp8Block, "the decode tail appends the ring's fp8-block rows");
+  dsa_decode_tail_fp8block(q_ + (kCsa2Latent - kCsa2Rope), int64_t(lh) * kCsa2Latent, kCsa2Latent, lh, kCsa2Rope, pos,
+                           w_.inv_freq, slots_, cfg_.ring_slots, cfg_.window, wlist_, wcounts_,
+                           w_.ratio > 0 ? pos_sel_ : nullptr, w_.ratio, kv_, req_ids, pool.ring_table(), pool.ring(layer_),
+                           kCsa2Latent, tokens, stream);
 
   if (w_.ratio > 0) {
     const int ord = w_.cache_ord;
@@ -546,7 +551,7 @@ void Csa2Layer::enqueue_decode(const void* hidden_in, Csa2StatePool& pool, const
       }
       publish_entries(pool, req_ids, tokens, stream);
     }
-    csa2_entry_positions(pos, pos_sel_, tokens, w_.ratio, stream);
+    // (the entry positions came with the decode tail above)
     if (w_.index_source) {
       indexer_query(hidden_in, tokens, pos, stream);
       open_output_window(stream);  // behind the indexer's projection, under the selection and the attention

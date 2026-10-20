@@ -72,6 +72,59 @@ __global__ void rmsnorm_kernel(const uint16_t* x, int64_t x_stride, const uint16
   }
 }
 
+// The two norms behind the paired q/kv projection and the kv rope in one
+// launch per row (2026-10-20): rmsnorm_kernel's chain twice (block_sum_256
+// over the same 256 threads, the same ops) then rope_apply_kernel's per-pair
+// math over the kv row's rope pairs — bitwise the three kernels.
+__global__ void __launch_bounds__(kCsa2Threads) norms_rope_kernel(
+    uint16_t* q, int64_t q_stride, const uint16_t* q_w, int q_dim, uint16_t* kv, int64_t kv_stride,
+    const uint16_t* kv_w, int kv_dim, float eps, int64_t rope_off, int half, const int64_t* pos,
+    const float* inv_freq) {
+  dgpp_pdl_wait();
+  __shared__ float red[8];
+  const int64_t r = blockIdx.x;
+  {
+    uint16_t* xr = q + r * q_stride;
+    float ss = 0.0f;
+    for (int i = threadIdx.x; i < q_dim; i += blockDim.x) {
+      const float v = bf16_bits_to_float(xr[i]);
+      ss = __fmaf_rn(v, v, ss);
+    }
+    const float total = block_sum_256(ss, red);
+    const float rs = rsqrtf(__fadd_rn(__fdiv_rn(total, float(q_dim)), eps));
+    for (int i = threadIdx.x; i < q_dim; i += blockDim.x) {
+      const float v = __fmul_rn(bf16_bits_to_float(xr[i]), rs);
+      xr[i] = float_to_bf16_bits(__fmul_rn(bf16_bits_to_float(q_w[i]), v));
+    }
+  }
+  {
+    uint16_t* xr = kv + r * kv_stride;
+    float ss = 0.0f;
+    for (int i = threadIdx.x; i < kv_dim; i += blockDim.x) {
+      const float v = bf16_bits_to_float(xr[i]);
+      ss = __fmaf_rn(v, v, ss);
+    }
+    const float total = block_sum_256(ss, red);
+    const float rs = rsqrtf(__fadd_rn(__fdiv_rn(total, float(kv_dim)), eps));
+    for (int i = threadIdx.x; i < kv_dim; i += blockDim.x) {
+      const float v = __fmul_rn(bf16_bits_to_float(xr[i]), rs);
+      xr[i] = float_to_bf16_bits(__fmul_rn(bf16_bits_to_float(kv_w[i]), v));
+    }
+  }
+  __syncthreads();  // the normed kv row is written before its rope
+  const int64_t p = pos[r];
+  if (p < 0) return;
+  for (int i = threadIdx.x; i < half; i += blockDim.x) {
+    uint16_t* v = kv + r * kv_stride + rope_off + 2 * i;
+    const float ang = __fmul_rn(float(p), inv_freq[i]);
+    const float c = cosf(ang);
+    const float sn = sinf(ang);
+    const float x0 = bf16_bits_to_float(v[0]), x1 = bf16_bits_to_float(v[1]);
+    v[0] = float_to_bf16_bits(x0 * c - x1 * sn);
+    v[1] = float_to_bf16_bits(x1 * c + x0 * sn);
+  }
+}
+
 // ---- rotation ------------------------------------------------------------------------
 __global__ void rope_apply_kernel(uint16_t* x, int64_t row_stride, int64_t head_stride,
                                   int heads, int half, const int64_t* pos,
@@ -1022,6 +1075,21 @@ void csa2_rmsnorm_bf16(const void* x, int64_t x_stride, const void* w, void* y, 
   rmsnorm_kernel<<<unsigned(rows), kCsa2Threads, 0, stream>>>(
       static_cast<const uint16_t*>(x), x_stride, static_cast<const uint16_t*>(w),
       static_cast<uint16_t*>(y), y_stride, dim, eps);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void csa2_norms_rope(void* q, int64_t q_stride, const void* q_w, int q_dim, void* kv, int64_t kv_stride,
+                     const void* kv_w, int kv_dim, float eps, int64_t rope_off, int rope_dim, const int64_t* pos,
+                     const float* inv_freq, int rows, cudaStream_t stream) {
+  if (rows <= 0) return;
+  if (q_dim <= 0 || q_dim > 8192 || kv_dim <= 0 || kv_dim > 8192)
+    throw std::invalid_argument("csa2_norms_rope: dims must be in [1, 8192]");
+  if (rope_dim <= 0 || rope_dim % 2 != 0) throw std::invalid_argument("csa2_norms_rope: rope_dim must be even");
+  const int half = rope_dim / 2;
+  if (rope_off < 0 || rope_off + int64_t(rope_dim) > kv_dim) throw std::invalid_argument("csa2_norms_rope: rope past the kv row");
+  norms_rope_kernel<<<unsigned(rows), kCsa2Threads, 0, stream>>>(
+      static_cast<uint16_t*>(q), q_stride, static_cast<const uint16_t*>(q_w), q_dim, static_cast<uint16_t*>(kv),
+      kv_stride, static_cast<const uint16_t*>(kv_w), kv_dim, eps, rope_off, half, pos, inv_freq);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

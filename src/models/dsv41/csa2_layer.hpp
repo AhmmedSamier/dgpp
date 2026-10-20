@@ -230,7 +230,8 @@ class Csa2Layer {
   void require_shape(const SelShape& have, const SelShape& want, const char* what) const;
 
   // The projections and the window row of `tokens` rows at `pos` (device).
-  void project_q_kv(const void* hidden_in, int tokens, const int64_t* pos, cudaStream_t stream);
+  // rope_q false: the q rope is left to the decode tail kernel (enqueue_decode).
+  void project_q_kv(const void* hidden_in, int tokens, const int64_t* pos, cudaStream_t stream, bool rope_q = true);
   void project_kv(const void* hidden_in, int tokens, const int64_t* pos, cudaStream_t stream);
   void indexer_query(const void* hidden_in, int tokens, const int64_t* pos, cudaStream_t stream);
   // The index keys and the main rows of `n` entries (entries_ / ent_pos_

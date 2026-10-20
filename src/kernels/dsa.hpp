@@ -203,6 +203,21 @@ void dsa_latent_append(const void* latent_rows, const int32_t* req_ids,
                        float* latent_scale = nullptr,
                        const void* rope_rows = nullptr, int rope_dim = 0);
 
+// The decode walk's tail behind the q projection in one launch per row
+// (2026-10-20, kernels/dsa.cu decode_tail_fp8block_kernel): the q rope over
+// q_rope_dim elements (q_rope_dim / 2 pairs) of each of q_heads heads at
+// q + head * q_head_stride, the row's ring slot
+// into `slots` (pos % ring_slots, -1 for a negative position), the window
+// slot list and counts, the entry position into `entry_out` when it is
+// given (ratio > 0), and the latent row's fp8-block append into the ring at
+// that slot (ring_table: the ring's block table, one block of ring_slots
+// tokens per request). Bitwise the five kernels it replaces.
+void dsa_decode_tail_fp8block(void* q, int64_t q_row_stride, int64_t q_head_stride, int q_heads, int q_rope_dim,
+                              const int64_t* pos, const float* inv_freq, int64_t* slots, int ring_slots, int window,
+                              int32_t* wlist, int32_t* wcounts, int64_t* entry_out, int ratio, const void* kv_rows,
+                              const int32_t* req_ids, const int32_t* ring_table, void* ring, int kv_lora, int rows,
+                              cudaStream_t stream);
+
 // Gather a request's pools [0, n_pools) into a contiguous buffer for the
 // prefill logits GEMM.
 void dsa_gather_index_pools(const int32_t* block_table, int pools_per_block,

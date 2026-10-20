@@ -810,16 +810,13 @@ __global__ void latent_append_fp4_kernel(const uint16_t* latent_rows,
 // fp8_block: thread t quantizes elements [8t, 8t+8) with the e8m0 scale of
 // its 32-element group (four consecutive lanes; kv_lora <= 1024, a
 // multiple of 32) — the reference's act_quant(block 32, ue8m0) bitwise.
-__global__ void latent_append_fp8block_kernel(const uint16_t* latent_rows,
-                                              const int32_t* req_ids,
-                                              const int64_t* pos,
-                                              const int32_t* block_tables,
-                                              int blocks_per_request,
-                                              int block_tokens, uint8_t* latent_cache,
-                                              int kv_lora, size_t cache_row_bytes,
-                                              const uint16_t* rope_rows, int rope) {
-  dgpp_pdl_wait();
-  const int64_t i = blockIdx.x;
+// One row's fp8-block append (the kernel's body, 2026-10-20: the decode
+// tail kernel below runs it behind the row's rope and slot work).
+__device__ __forceinline__ void latent_append_fp8block_row(const uint16_t* latent_rows, const int32_t* req_ids,
+                                                           const int64_t* pos, const int32_t* block_tables,
+                                                           int blocks_per_request, int block_tokens,
+                                                           uint8_t* latent_cache, int kv_lora, size_t cache_row_bytes,
+                                                           const uint16_t* rope_rows, int rope, int64_t i) {
   const int64_t phys = latent_physical_slot(req_ids, pos, block_tables,
                                             blocks_per_request, block_tokens, i);
   if (phys < 0) return;
@@ -861,6 +858,64 @@ __global__ void latent_append_fp8block_kernel(const uint16_t* latent_rows,
   for (int j = 0; j < 4; ++j)
     packed.y |= static_cast<uint32_t>(latent_fp8_block_encode(v[4 + j], s)) << (8 * j);
   *reinterpret_cast<uint2*>(row + e0) = packed;
+}
+
+__global__ void latent_append_fp8block_kernel(const uint16_t* latent_rows,
+                                              const int32_t* req_ids,
+                                              const int64_t* pos,
+                                              const int32_t* block_tables,
+                                              int blocks_per_request,
+                                              int block_tokens, uint8_t* latent_cache,
+                                              int kv_lora, size_t cache_row_bytes,
+                                              const uint16_t* rope_rows, int rope) {
+  dgpp_pdl_wait();
+  latent_append_fp8block_row(latent_rows, req_ids, pos, block_tables, blocks_per_request, block_tokens, latent_cache,
+                             kv_lora, cache_row_bytes, rope_rows, rope, blockIdx.x);
+}
+
+// The decode walk's tail behind the q projection, one block per row
+// (2026-10-20): the q rope (rope_apply_kernel's per-pair math), the row's
+// ring slot (ring_slot_positions_kernel), its window slot list
+// (window_slots_decode_kernel), its entry position when the layer has a
+// ratio (entry_positions_kernel), then the latent row's fp8-block append
+// into the ring at that slot — five launches of 1-4 us whose bodies are
+// these, element for element in the same order: bitwise each kernel's.
+__global__ void __launch_bounds__(256) decode_tail_fp8block_kernel(
+    uint16_t* q, int64_t q_row_stride, int64_t q_head_stride, int q_heads, int q_half, const int64_t* pos,
+    const float* inv_freq, int64_t* slots, int ring_slots, int window, int32_t* wlist, int32_t* wcounts,
+    int64_t* entry_out, int ratio, const uint16_t* kv_rows, const int32_t* req_ids, const int32_t* ring_table,
+    uint8_t* ring, int kv_lora, size_t cache_row_bytes) {
+  dgpp_pdl_wait();
+  const int64_t r = blockIdx.x;
+  const int64_t p = pos[r];
+  if (p >= 0) {
+    for (int idx = threadIdx.x; idx < q_heads * q_half; idx += blockDim.x) {
+      const int i = idx % q_half;
+      const int h = idx / q_half;
+      uint16_t* v = q + r * q_row_stride + int64_t(h) * q_head_stride + 2 * i;
+      const float ang = __fmul_rn(float(p), inv_freq[i]);
+      const float c = cosf(ang);
+      const float sn = sinf(ang);
+      const float x0 = bf16_bits_to_float(v[0]), x1 = bf16_bits_to_float(v[1]);
+      v[0] = float_to_bf16_bits(x0 * c - x1 * sn);
+      v[1] = float_to_bf16_bits(x1 * c + x0 * sn);
+    }
+  }
+  if (threadIdx.x == 0) {
+    slots[r] = p < 0 ? -1 : p % ring_slots;
+    if (entry_out != nullptr) entry_out[r] = p < 0 ? -1 : (p + 1) / ratio - 1;
+  }
+  {
+    const int n = p < 0 ? 0 : int(min(int64_t(window), p + 1));
+    for (int k = threadIdx.x; k < window; k += blockDim.x) {
+      const int64_t qp = p - (n - 1) + k;  // ascending positions
+      wlist[r * window + k] = k < n ? int32_t(qp % ring_slots) : -1;
+    }
+    if (threadIdx.x == 0) wcounts[r] = n;
+  }
+  __syncthreads();  // the slot is written for the append's lookup
+  latent_append_fp8block_row(kv_rows, req_ids, slots, ring_table, 1, ring_slots, ring, kv_lora, cache_row_bytes,
+                             nullptr, 0, r);
 }
 
 // fp4_block: thread b quantizes block b (16 elements) with its own
@@ -3573,6 +3628,26 @@ void dsa_latent_append(const void* latent_rows, const int32_t* req_ids,
           kv_lora, row_bytes, rr, rope_dim);
       break;
   }
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void dsa_decode_tail_fp8block(void* q, int64_t q_row_stride, int64_t q_head_stride, int q_heads, int q_rope_dim,
+                              const int64_t* pos, const float* inv_freq, int64_t* slots, int ring_slots, int window,
+                              int32_t* wlist, int32_t* wcounts, int64_t* entry_out, int ratio, const void* kv_rows,
+                              const int32_t* req_ids, const int32_t* ring_table, void* ring, int kv_lora, int rows,
+                              cudaStream_t stream) {
+  if (rows <= 0) return;
+  if (q_rope_dim <= 0 || q_rope_dim % 2 != 0) throw std::invalid_argument("dsa_decode_tail_fp8block: rope_dim must be even");
+  const int q_half = q_rope_dim / 2;
+  if (!q || !pos || !inv_freq || !slots || !wlist || !wcounts || !kv_rows || !req_ids || !ring_table || !ring)
+    throw std::invalid_argument("dsa_decode_tail_fp8block: null buffer");
+  if (entry_out != nullptr && ratio <= 0) throw std::invalid_argument("dsa_decode_tail_fp8block: a ratio for the entry positions");
+  if (kv_lora % 32 != 0 || kv_lora > 1024) throw std::invalid_argument("dsa_decode_tail_fp8block: kv_lora a multiple of 32 up to 1024");
+  const size_t cache_row_bytes = latent_row_bytes(LatentFormat::kFp8Block, kv_lora);
+  decode_tail_fp8block_kernel<<<unsigned(rows), 256, 0, stream>>>(
+      static_cast<uint16_t*>(q), q_row_stride, q_head_stride, q_heads, q_half, pos, inv_freq, slots, ring_slots, window,
+      wlist, wcounts, entry_out, ratio, static_cast<const uint16_t*>(kv_rows), req_ids, ring_table,
+      static_cast<uint8_t*>(ring), kv_lora, cache_row_bytes);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

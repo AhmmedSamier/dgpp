@@ -68,6 +68,14 @@ void csa2_rope_inv_freq_host(int rope_dim, double theta, int64_t original_seq_le
 // rotation removed). Rows with pos < 0 are left untouched.
 //   x: bf16 at x + r * row_stride + h * head_stride (elements): the FIRST
 //   element of the segment to rotate (the caller offsets to a tail).
+// The two norms behind the paired q/kv projection and the kv rope in one
+// launch per row (2026-10-20): q [rows, q_dim] and kv [rows, kv_dim] normed
+// in place (rmsnorm_bf16's chain), then the kv row's rope_dim elements from
+// element rope_off rotated at pos (rope_apply's math, rope_dim / 2 pairs) —
+// bitwise the three.
+void csa2_norms_rope(void* q, int64_t q_stride, const void* q_w, int q_dim, void* kv, int64_t kv_stride,
+                     const void* kv_w, int kv_dim, float eps, int64_t rope_off, int rope_dim, const int64_t* pos,
+                     const float* inv_freq, int rows, cudaStream_t stream);
 void csa2_rope_apply(void* x, int64_t row_stride, int64_t head_stride, int heads,
                      int rope_dim, const int64_t* pos, const float* inv_freq,
                      bool inverse, int64_t rows, cudaStream_t stream);

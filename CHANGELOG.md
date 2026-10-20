@@ -52,6 +52,23 @@ project procedures and design guidance live in `docs/`.
   timeline now stamps each peer's row landing and first proof and the
   engine's post mark from the kernel's clock (`scripts/bus_window_skew.py`
   reads them); `DGPP_BUS_TIMELINE=1` as before.
+- **DeepSeek-V4.1 decode: the decode tail and the paired projection's
+  norms as one launch each** (2026-10-20). Behind the q projection the
+  walk ran five launches of 1–4 µs per layer (the q rope, the ring slot,
+  the window slot list, the entry position, the latent append into the
+  ring) and behind the paired q/kv projection three (the two norms, the kv
+  rope); `dsa_decode_tail_fp8block` and `csa2_norms_rope` run each set as
+  one block per row, element for element the kernels' own arithmetic in
+  the same order (the csa2 test holds both bitwise against the separate
+  launches; the append's body is the fp8-block kernel's, now a per-row
+  function). 1,753 → 1,524 kernels a pass; the projection segment 113 →
+  107 µs a layer. Four nodes, `timed_load` C1 (ms per pass / decode
+  tok/s): code 44.61 / 77.2 → 44.50 / 77.4, prose 37.86 / 50.3 → 37.73 /
+  50.4, JSON 48.35 / 86.5 → 48.03 / 87.0. The day's C1 at the lossless
+  formats, from the morning's 47.18 / 40.27 / 50.77: −5.7 / −6.3 / −5.4 %
+  per pass; a window-only layer 967 → 892 µs against a structural floor
+  near 800 (the MoE at the ceiling, the chain's gaps, the attention bytes
+  the L2 cannot hold ahead).
 - **DeepSeek-V4.1 decode: the per-layer instrument, programmatic launch
   edges, the wo_b window and the paired projections** (2026-10-20). The
   C1 pass is measured as a two-resource chain now — a per-layer

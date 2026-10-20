@@ -208,9 +208,12 @@ decode tok/s at equal rows:
 | prose | 39.05 / 48.7 | 37.86 / 50.3 |
 | JSON | 49.68 / 83.5 | 48.35 / 86.5 |
 
-A window-only layer now: mHC site 20, projections 113, selection and
-attention 34, output projections 85, attention fold 40, FFN site 38,
-MoE 520, MoE fold 28 — 887 µs against a structural floor near 800 (the
+With the decode tail and the paired projection's norms fused (one
+launch per row each, bitwise the separate kernels; 1,753 → 1,524
+kernels a pass): code 44.50 / 77.4, prose 37.73 / 50.4, JSON 48.03 /
+87.0. A window-only layer now: mHC site 20, projections 107, selection
+and attention 34, output projections 88, attention fold 39, FFN site 37,
+MoE 520, MoE fold 31 — 892 µs against a structural floor near 800 (the
 MoE at the ceiling, the gaps, and the attention bytes the L2 cannot
 hold). What the instrument declined: the attention-side window's budget
 on wo_a instead of wq_b (wq_b cold +33 µs, wo_a's lines evicted before
