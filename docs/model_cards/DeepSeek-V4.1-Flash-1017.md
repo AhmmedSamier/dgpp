@@ -183,6 +183,24 @@ is the ranks' arrival skew — the fabric delivers a row in 5.5 µs in situ,
 the peers stage 10–15 µs apart. The one-lane form (no striping) costs
 1.1 ms at C6 and nothing at C1.
 
+## The folds' path (2026-10-20)
+
+The two collectives a layer (the attention fold and the MoE fold, 35 KB
+a rank at C1) cost 31–39 µs each: copy 4 + handshake 15–21 + skew 11–15
++ fold 0.5. The timeline now also keeps each window's shortest handshake
+and, per peer, the shortest staging → landed: 1.6–2.0 µs and 0–4 µs, so
+no single term is a floor. The path's own latency comes out of the
+symmetric sums instead — a peer's landing time as each rank sees the
+other is the clock offset plus the path from each side, and the offsets
+cancel: rank pairs sum to 26–32 µs, a path of 13–16 µs each way. That is
+the no-GDR structure of the fabric: the row crosses PCIe four times
+(the GPU's copy into pinned host staging, the NIC's read of it, the
+peer NIC's write into host memory, the peer GPU's polled reads) around
+a ~4 µs wire time, with the engine's notice and post under 2 µs. The
+remaining 11–15 µs of skew is the ranks' arrival spread on identical
+work (no rank is last more often than another). The transport is at its
+structural floor; the lever left on the folds is the spread.
+
 ## The pass's tail (2026-10-20)
 
 After the 40 main layers a C1 pass spends 5.5 ms (13 %): the verify head

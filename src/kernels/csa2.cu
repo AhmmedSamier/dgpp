@@ -964,6 +964,7 @@ __global__ void attn_finish_kernel(const float* m_main, const float* l_main, con
   __shared__ float s_w[kFinishMaxSplits];          // exp(m - mhat) of the live splits, in order
   __shared__ const float* s_c[kFinishMaxSplits];   // their c rows [kCsa2Latent]
   __shared__ float s_m[kFinishMaxSplits];
+  __shared__ float s_l[kFinishMaxSplits];          // every split's l, staged beside its m (2026-10-20)
   __shared__ float s_den;
   __shared__ int s_live;
   const int r = blockIdx.x, h = blockIdx.y;
@@ -975,10 +976,18 @@ __global__ void attn_finish_kernel(const float* m_main, const float* l_main, con
   }
   const int64_t total = int64_t(local_heads) * kCsa2Latent;
   const int n_all = n_main + n_win;
-  // Every split's m, one thread per split.
-  for (int s = threadIdx.x; s < n_all; s += blockDim.x)
-    s_m[s] = s < n_main ? m_main[(int64_t(r) * n_main + s) * local_heads + h]
-                        : m_win[(int64_t(r) * n_win + (s - n_main)) * local_heads + h];
+  // Every split's m and l, one thread per split — the l beside the m
+  // (2026-10-20: thread 0's loop below loaded each live split's l as it
+  // went, a dependent L2 round trip per split on the block's critical
+  // path; 13 us a launch at eight window splits, the same arithmetic in
+  // the same order from shared memory).
+  for (int s = threadIdx.x; s < n_all; s += blockDim.x) {
+    const bool main = s < n_main;
+    const int64_t i = main ? (int64_t(r) * n_main + s) * local_heads + h
+                           : (int64_t(r) * n_win + (s - n_main)) * local_heads + h;
+    s_m[s] = main ? m_main[i] : m_win[i];
+    s_l[s] = main ? l_main[i] : l_win[i];
+  }
   __syncthreads();
   if (threadIdx.x == 0) {
     float mhat = -INFINITY;
@@ -989,10 +998,8 @@ __global__ void attn_finish_kernel(const float* m_main, const float* l_main, con
       for (int s = 0; s < n_all; ++s) {
         if (s_m[s] == -INFINITY) continue;
         const bool main = s < n_main;
-        const int64_t i = main ? (int64_t(r) * n_main + s) * local_heads + h
-                               : (int64_t(r) * n_win + (s - n_main)) * local_heads + h;
         const float w = expf(s_m[s] - mhat);
-        den += w * (main ? l_main[i] : l_win[i]);
+        den += w * s_l[s];
         s_w[live] = w;
         s_c[live] = main ? c_main + (int64_t(r) * n_main + s) * total + int64_t(h) * kCsa2Latent
                          : c_win + (int64_t(r) * n_win + (s - n_main)) * total + int64_t(h) * kCsa2Latent;

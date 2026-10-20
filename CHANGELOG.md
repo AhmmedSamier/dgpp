@@ -5,6 +5,22 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **The collective timeline's minimums, and the attention finish's l
+  values staged in parallel** (2026-10-20). The graph window timeline
+  keeps each window's shortest handshake and, per peer, the shortest
+  staging → landed beside the averages (`min handshake`, `landed … min`):
+  on the DeepSeek-V4.1 C1 pass they are 1.6–2.0 µs and 0–4 µs against
+  averages of 15–21 and 13–19, so the averages are not a path floor; the
+  symmetric sums of the landing times between rank pairs put the path at
+  13–16 µs each way (the row's four PCIe crossings without GDR) and the
+  rest in the ranks' arrival spread. The attention finish kernel loaded
+  each live split's l inside thread 0's serial loop, a dependent L2 round
+  trip per split on the block's critical path; the l values are staged
+  beside the m values, one thread per split, the same arithmetic in the
+  same order (bitwise; `csa2_attn_finish_merges_sources_with_the_sink_and_unrotates`):
+  12.7–14.2 → 7.5–9.5 µs a launch in the C1 pass, the attention segment
+  36 → 32 µs a layer, the pass level within its spread (42.79 ms code).
+
 - **The decode pass's tail: the draft block's attention on the flash form,
   the Markov bias and the hyper-state copies at the DRAM rate**
   (2026-10-20). The C1 node trace puts 5.5 ms of a 42 ms DeepSeek-V4.1 pass

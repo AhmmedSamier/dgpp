@@ -210,6 +210,14 @@ struct CollectiveBus::Impl {
   bool quiesced = false;
   bool stopped = false;
   std::thread engine;
+  // The engine loop's iteration times (2026-10-20): the loop body IS the
+  // handshake's notice latency, so its histogram (<2 <5 <10 <20 <50 >=50
+  // us) and maximum, kept per graph window and printed with the window
+  // timeline, bound what the notice can add and show the outliers (an
+  // interrupt, a completion burst, a lock) that reach the fold as skew.
+  uint64_t loop_hist[6] = {};
+  uint64_t loop_n = 0;
+  double loop_max_us = 0;
 
   // One stream per consumer kernel: a persistent kernel starves every
   // launch queued behind it on the same stream, so the lane-1 consumer
@@ -511,6 +519,12 @@ struct CollectiveBus::Impl {
       double compute_us = 0;
       uint64_t prev_gt_done = 0;
       double max_handshake_us = 0, max_skew_us = 0, max_total_us = 0;
+      // The window's shortest handshake and, per peer, the shortest staging
+      // -> landed (2026-10-20): the path's own latency (engine notice, post,
+      // wire, the peer's poll) shows at the minimum, where the averages
+      // carry the peers' lateness.
+      double min_handshake_us = 0;
+      double peer_land_min_us[kBusMaxPeers] = {};
       uint64_t max_total_gen = 0;  // gen_seq of the window's worst total
       uint64_t first_gt_start = 0; // the window's first generation's entry
       uint64_t gate_waits = 0;
@@ -1302,6 +1316,7 @@ struct CollectiveBus::Impl {
     t.fold_us += fold;
     t.total_us += total;
     t.max_handshake_us = std::max(t.max_handshake_us, hs);
+    if (t.n == 1 || hs < t.min_handshake_us) t.min_handshake_us = hs;
     t.max_skew_us = std::max(t.max_skew_us, skew);
     if (total > t.max_total_us) {
       t.max_total_us = total;
@@ -1317,7 +1332,12 @@ struct CollectiveBus::Impl {
     size_t last = 0;
     for (size_t p = 0; p < peer_ranks.size(); ++p) {
       t.peer_lag_us[p] += us(c.gt_stage, c.gt_claim[p]);
-      if (c.gt_landed[p] != 0) { t.peer_land_us[p] += us(c.gt_stage, c.gt_landed[p]); ++t.peer_land_n[p]; }
+      if (c.gt_landed[p] != 0) {
+        const double landed = us(c.gt_stage, c.gt_landed[p]);
+        if (t.peer_land_n[p] == 0 || landed < t.peer_land_min_us[p]) t.peer_land_min_us[p] = landed;
+        t.peer_land_us[p] += landed;
+        ++t.peer_land_n[p];
+      }
       if (c.gt_claim_first_neg[p] != 0) t.peer_first_us[p] += us(c.gt_stage, ~c.gt_claim_first_neg[p]);
       if (c.gt_claim[p] > c.gt_claim[last]) last = p;
     }
@@ -1360,7 +1380,7 @@ struct CollectiveBus::Impl {
         "{:.1f} + handshake {:.1f} + skew {:.1f} + fold {:.1f}; engine post "
         "{:.1f}; max handshake {:.1f} skew {:.1f} total {:.1f} "
         "(gen {}); gate waits {}; arm->gen0 {:.1f} us; passes/gen {:.0f}; "
-        "compute between gens {:.1f} us",
+        "compute between gens {:.1f} us; min handshake {:.1f} us",
         opt.my_rank, graph.adopted_variant, t.n, t.total_us / n,
         t.copy_us / n, t.handshake_us / n, t.skew_us / n, t.fold_us / n,
         t.post_us / n,
@@ -1370,7 +1390,7 @@ struct CollectiveBus::Impl {
             ? static_cast<double>(t.first_gt_start - graph.armed_gt) / 1000.0
             : 0.0,
         static_cast<double>(t.passes) / n,
-        t.n > 1 ? t.compute_us / static_cast<double>(t.n - 1) : 0.0);
+        t.n > 1 ? t.compute_us / static_cast<double>(t.n - 1) : 0.0, t.min_handshake_us);
     ::dgpp::logf(lvl,
         "graph window wait: rank {} hist(<20 <50 <100 <200 <500 >=500 us) {} "
         "{} {} {} {} {}; even gens {} avg {:.1f} us, odd gens {} avg {:.1f} us",
@@ -1384,6 +1404,7 @@ struct CollectiveBus::Impl {
                    std::to_string(static_cast<int>(t.peer_lag_us[p] / n)) + "us" +
                    (t.peer_land_n[p] != 0
                         ? " (landed " + std::to_string(static_cast<int>(t.peer_land_us[p] / static_cast<double>(t.peer_land_n[p]))) +
+                              "us min " + std::to_string(static_cast<int>(t.peer_land_min_us[p])) +
                               "us, first proved " + std::to_string(static_cast<int>(t.peer_first_us[p] / static_cast<double>(t.peer_land_n[p]))) + "us)"
                         : std::string()) +
                    " last " + std::to_string(t.peer_last[p]) + "x;";
@@ -1399,6 +1420,11 @@ struct CollectiveBus::Impl {
     }
     ::dgpp::logf(lvl, "graph window claims: rank {} (gaps between consecutive claims, hist "
                   "<3 <5 <7 <10 <15 <25 >=25 us):{}", opt.my_rank, gaps_txt);
+    ::dgpp::logf(lvl, "graph window engine loop: rank {} iterations {} hist(<2 <5 <10 <20 <50 >=50 us) {} {} {} {} {} {}; max {:.1f} us",
+                  opt.my_rank, loop_n, loop_hist[0], loop_hist[1], loop_hist[2], loop_hist[3], loop_hist[4], loop_hist[5], loop_max_us);
+    loop_n = 0;
+    loop_max_us = 0;
+    for (auto& h : loop_hist) h = 0;
     t = GraphState::Timeline{};
   }
 
@@ -2772,6 +2798,7 @@ struct CollectiveBus::Impl {
     int idle = 0;
     for (;;) {
       if (stopping.load(std::memory_order_relaxed) && drained()) break;
+      const auto loop_t0 = Clock::now();
       const bool graph_worked = graph_pass();
       const bool stream_worked = stream_pass();
       const bool coll_worked = collective_pass();
@@ -2780,6 +2807,12 @@ struct CollectiveBus::Impl {
       const bool recycled = recycle_pass();
       const bool credited = credits_pass();
       const bool watched = watchdog_pass();
+      {
+        const double it_us = elapsed_us(loop_t0);
+        ++loop_n;
+        ++loop_hist[it_us < 2 ? 0 : it_us < 5 ? 1 : it_us < 10 ? 2 : it_us < 20 ? 3 : it_us < 50 ? 4 : 5];
+        if (it_us > loop_max_us) loop_max_us = it_us;
+      }
       if (graph_worked || stream_worked || coll_worked || worked || polled ||
           recycled || credited || watched) {
         idle = 0;
