@@ -5,6 +5,27 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **The folds' arrival spread decomposed across ranks; the Engram staging
+  joins per table** (2026-10-20). `DGPP_BUS_TIMELINE_DUMP=<dir>` (a node
+  setting) makes every rank append its collectives' stamps (own clock:
+  start, staged, first and last peer gated, done, per peer landed and
+  claimed) to `<dir>/bus_gens_rank<r>.tsv`; aligned by generation, the
+  pairwise symmetric sums of the landing times give each path and their
+  differences each rank's lateness per collective with the clocks' offsets
+  cancelled. On the DeepSeek-V4.1 C1 pass the spread is the ranks' compute
+  imbalance between collectives (correlation 0.98–1.00): 15 µs at the
+  median on ordinary collectives (the GPUs' timing noise on identical work,
+  ~2 ms a pass summed) and a tail on the Engram collectives (layers 1 and
+  14), whose host gather of rows from the mapped tables page-faults on one
+  rank at 12 % of them (p90 363 µs, p99 1.2 ms). The decode walk's one
+  gather callback now publishes a pinned per-table count as it finishes
+  each table, and the first Engram layer's consumer spins on its own count
+  (the stage-wait kernel) instead of the whole staging's join — the second
+  layer's consumer still joins the side stream by event, so a capture stays
+  one host node and joined — and no longer waits for the second table's
+  rows: the Engram collectives' cross-rank imbalance p90 363 → 57 µs, p99
+  1.2 ms → 0.54, above 200 µs at 12 % → 3 %, ~0.3 ms a pass less summed.
+
 - **The full-rate window's partners, measured** (2026-10-20). Two
   complementary changes for `l2_prefetch_boundary_rate: full` were
   tried on the DeepSeek-V4.1 C1 pass with the per-layer instrument. The

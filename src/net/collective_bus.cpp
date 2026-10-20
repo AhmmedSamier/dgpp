@@ -218,6 +218,20 @@ struct CollectiveBus::Impl {
   uint64_t loop_hist[6] = {};
   uint64_t loop_n = 0;
   double loop_max_us = 0;
+  // DGPP_BUS_TIMELINE_DUMP=<dir> (2026-10-20): every graph generation's
+  // stamps (its own clock: start, staged, first and last peer gated, done;
+  // per peer landed and claimed), buffered per window and appended to
+  // <dir>/bus_gens_rank<r>.tsv at the window's timeline log, so one
+  // collective can be aligned across the ranks offline (the symmetric sums
+  // of a pair's landing times give the path, their differences the pair's
+  // relative lateness up to the clocks' constant offset).
+  struct GenRecord {
+    uint64_t gen, start, stage, first, last, done;
+    uint64_t landed[kBusMaxPeers], claim[kBusMaxPeers];
+  };
+  std::vector<GenRecord> gen_dump;
+  FILE* gen_dump_file = nullptr;
+  bool gen_dump_checked = false;
 
   // One stream per consumer kernel: a persistent kernel starves every
   // launch queued behind it on the same stream, so the lane-1 consumer
@@ -1298,6 +1312,23 @@ struct CollectiveBus::Impl {
   //   fold       last peer gated -> fold done
   void accumulate_timeline(GraphState::Timeline& t, const BusAllReduceCtl& c) {
     if (c.gt_start == 0 || c.gt_done < c.gt_start) return;
+    if (!gen_dump_checked) {
+      gen_dump_checked = true;
+      if (const char* d = std::getenv("DGPP_BUS_TIMELINE_DUMP"); d && *d) {
+        const std::string path = std::string(d) + "/bus_gens_rank" + std::to_string(opt.my_rank) + ".tsv";
+        gen_dump_file = std::fopen(path.c_str(), "a");
+        if (gen_dump_file) {
+          std::fprintf(gen_dump_file, "# rank %d peers", opt.my_rank);
+          for (int r : peer_ranks) std::fprintf(gen_dump_file, " %d", r);
+          std::fprintf(gen_dump_file, "\n# gen start stage first last done landed[p]... claim[p]...\n");
+        }
+      }
+    }
+    if (gen_dump_file) {
+      GenRecord g{c.gen_seq, c.gt_start, c.gt_stage, c.gt_first, c.gt_last, c.gt_done, {}, {}};
+      for (size_t p = 0; p < kBusMaxPeers; ++p) { g.landed[p] = c.gt_landed[p]; g.claim[p] = c.gt_claim[p]; }
+      gen_dump.push_back(g);
+    }
     auto us = [](uint64_t a, uint64_t b) {
       return b > a ? static_cast<double>(b - a) / 1000.0 : 0.0;
     };
@@ -1425,6 +1456,21 @@ struct CollectiveBus::Impl {
     loop_n = 0;
     loop_max_us = 0;
     for (auto& h : loop_hist) h = 0;
+    if (gen_dump_file && !gen_dump.empty()) {
+      for (const GenRecord& g : gen_dump) {
+        std::fprintf(gen_dump_file, "%llu %llu %llu %llu %llu %llu", static_cast<unsigned long long>(g.gen),
+                     static_cast<unsigned long long>(g.start), static_cast<unsigned long long>(g.stage),
+                     static_cast<unsigned long long>(g.first), static_cast<unsigned long long>(g.last),
+                     static_cast<unsigned long long>(g.done));
+        for (size_t p = 0; p < peer_ranks.size() && p < kBusMaxPeers; ++p)
+          std::fprintf(gen_dump_file, " %llu", static_cast<unsigned long long>(g.landed[p]));
+        for (size_t p = 0; p < peer_ranks.size() && p < kBusMaxPeers; ++p)
+          std::fprintf(gen_dump_file, " %llu", static_cast<unsigned long long>(g.claim[p]));
+        std::fputc('\n', gen_dump_file);
+      }
+      std::fflush(gen_dump_file);
+      gen_dump.clear();
+    }
     t = GraphState::Timeline{};
   }
 

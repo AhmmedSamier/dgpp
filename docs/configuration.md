@@ -307,7 +307,7 @@ during generation. They do not select a different checkpoint unless stated.
 
 | Key | What it controls and what to expect | Default |
 |---|---|---|
-| `engine.bf16_weights` | Storage for supported BF16 weights. `checkpoint` keeps the original form. `bf12` uses a lossless 12-bit form, reducing weight reads and usually memory use, but prefill must unpack it. `bf12+bf16` keeps both forms for faster decode without unpacking during prefill, using extra memory. Values and decode results are preserved. Qwen retains both forms even with `bf12`; already-FP8 weights are unaffected. DeepSeek-V4.1 packs its lm head (the tensor-core decode form reads the 12-bit companion; the bf16 bytes stay resident for prefill); DeepSeek-V4 packs no weights. See the model notes in [operations](operations.md). | `checkpoint` |
+| `engine.bf16_weights` | Storage for supported BF16 weights. `checkpoint` keeps the original form. `bf12` uses a lossless 12-bit form, reducing weight reads and usually memory use, but prefill must unpack it. `bf12+bf16` keeps both forms for faster decode without unpacking during prefill, using extra memory. Values and decode results are preserved. Qwen retains both forms even with `bf12`; already-FP8 weights are unaffected. DeepSeek-V4.1 and DeepSeek-V4 pack their lm heads (the tensor-core decode form reads the 12-bit companion; the bf16 bytes stay resident for prefill). See the model notes in [operations](operations.md). | `checkpoint` |
 | `engine.dense_weights` | Qwen's dense-projection storage. `checkpoint` keeps the shipped formats. `fp8` converts supported BF16 projections to FP8 at load time, saving memory and weight reads but introducing quantization error that can change answers. On Qwen3.8-27B this includes the BF16 vocabulary head; its templates enable it. Expert quantization is unchanged. Other families ignore this setting. | `checkpoint` |
 | `engine.attention_weights` | Full GLM-5.3 only: `checkpoint` keeps shipped attention projections; `int4` converts selected projections to 4-bit weights at load time. This saves memory and generation bandwidth but is lossy and can change answer quality. Other families ignore it. Validate quality before using it. | `checkpoint` |
 | `engine.embed_sharding` | Full GLM-5.3 and DeepSeek embedding-table placement. `replicated` keeps the full table on every rank. `vocab` divides vocabulary rows among ranks, saving memory but adding communication for token lookups. Other families ignore it. | `replicated` |
@@ -589,7 +589,7 @@ the native binary directly.
 
 The native binary accepts these keys in `node_env`: `DGPP_ROCE_DEVICES`,
 `DGPP_ROCE_GID_INDICES`, `HF_HUB_CACHE`, `DGPP_RESIDENT_CACHE_DIR`,
-`DGPP_LOG_LEVEL`, `DGPP_MLOCK`, `DGPP_BUS_TIMELINE`, `DGPP_DSV41_DENSE_GEMV`,
+`DGPP_LOG_LEVEL`, `DGPP_MLOCK`, `DGPP_BUS_TIMELINE`, `DGPP_BUS_TIMELINE_DUMP` (a directory: every rank appends its collectives' stamps to `bus_gens_rank<r>.tsv` there, the cross-rank alignment's input), `DGPP_DSV41_DENSE_GEMV`,
 `DGPP_DENSE_GEMV_ROWS` and `DGPP_DSV41_EAGER_FOLD`. `DGPP_NO_SWAP` is used
 only by the launcher and is not written into the resolved file.
 

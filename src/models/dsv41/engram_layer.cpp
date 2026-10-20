@@ -1,4 +1,5 @@
 #include "models/dsv41/engram_layer.hpp"
+#include "kernels/glm_spec.hpp"
 
 #include <cstring>
 
@@ -12,6 +13,13 @@ namespace dgpp {
 
 struct Dsv41EngramLayer::StageArgs {
   const Dsv41EngramTables* tables = nullptr;
+  // The walk's staging publishes each table's rows as it finishes them
+  // (2026-10-20): ready[l] takes the staging's count after table l, the
+  // consumer kernel of that layer spins on it (glm_stage_wait) instead of
+  // the whole staging's join — the first Engram layer no longer waits for
+  // the second's rows, and the decode graph keeps its one host node.
+  uint64_t* ready = nullptr;  // pinned [layers], null: the prestage's (joined by event)
+  uint64_t* count = nullptr;  // host [layers]: stagings published per table
   const int32_t* ids = nullptr;
   uint8_t* dst = nullptr;
   size_t layer_bytes = 0;
@@ -24,11 +32,16 @@ void Dsv41EngramLayer::stage_callback(void* user) {
   StageArgs* a = static_cast<StageArgs*>(user);
   try {
     const int L = static_cast<int>(a->tables->tables.size());
-    for (int l = 0; l < L; ++l)
+    for (int l = 0; l < L; ++l) {
       a->tables->tables[static_cast<size_t>(l)]->gather(a->ids + static_cast<size_t>(l) * a->entries,
                                                         static_cast<int64_t>(L) * a->entries, a->tables->sel.data(),
                                                         a->tables->rows_local(), a->n,
                                                         a->dst + static_cast<size_t>(l) * a->layer_bytes);
+      if (a->ready != nullptr) {
+        ++a->count[l];
+        __atomic_store_n(a->ready + l, a->count[l], __ATOMIC_RELEASE);
+      }
+    }
   } catch (const std::exception& e) {
     a->what = e.what();
     a->error.store(1, std::memory_order_release);
@@ -105,6 +118,17 @@ Dsv41EngramLayer::Dsv41EngramLayer(const Dsv41TextConfig& cfg, const Dsv41Engram
   DGPP_CUDA_OK(cudaStreamCreateWithFlags(&side_, cudaStreamNonBlocking));
   DGPP_CUDA_OK(cudaEventCreateWithFlags(&fork_, cudaEventDisableTiming));
   DGPP_CUDA_OK(cudaEventCreateWithFlags(&join_, cudaEventDisableTiming));
+  // The decode walk's staging gathers one table per host callback, each
+  // with its own join (2026-10-20): the first Engram layer's consumer waited
+  // for every table's rows — on the fabric the gather's page faults put
+  // 200-1200 us on one rank at 12 % of the Engram collectives. Two eager
+  // slots per table; a capture takes fresh arguments.
+  DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_ready_), static_cast<size_t>(layers_) * 8, cudaHostAllocMapped));
+  DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_late_), static_cast<size_t>(layers_) * 4, cudaHostAllocMapped));
+  for (int l = 0; l < layers_; ++l) { h_ready_[l] = 0; h_late_[l] = 0; }
+  DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&d_ready_), static_cast<size_t>(layers_) * 8));
+  DGPP_CUDA_OK(cudaMemset(d_ready_, 0, static_cast<size_t>(layers_) * 8));
+  ready_count_.assign(static_cast<size_t>(layers_), 0);
   stage_args_.push_back(std::make_unique<StageArgs>());
   stage_args_.push_back(std::make_unique<StageArgs>());
   // The prestage channel.
@@ -133,6 +157,9 @@ Dsv41EngramLayer::~Dsv41EngramLayer() {
   if (side_) cudaStreamSynchronize(side_);
   if (fork_) cudaEventDestroy(fork_);
   if (join_) cudaEventDestroy(join_);
+  if (h_ready_) cudaFreeHost(h_ready_);
+  if (h_late_) cudaFreeHost(h_late_);
+  if (d_ready_) cudaFree(d_ready_);
   if (pre_fork_) cudaEventDestroy(pre_fork_);
   if (pre_join_) cudaEventDestroy(pre_join_);
   if (side_) cudaStreamDestroy(side_);
@@ -207,6 +234,8 @@ void Dsv41EngramLayer::stage(const int64_t* tokens, int rows, const int32_t* req
   a->layer_bytes = staged_layer_bytes_;
   a->n = rows;
   a->entries = entries_;
+  a->ready = h_ready_;
+  a->count = ready_count_.data();
   DGPP_CUDA_OK(cudaEventRecord(fork_, stream));
   DGPP_CUDA_OK(cudaStreamWaitEvent(side_, fork_, 0));
   DGPP_CUDA_OK(cudaLaunchHostFunc(side_, &Dsv41EngramLayer::stage_callback, a));
@@ -243,6 +272,7 @@ void Dsv41EngramLayer::prestage(const int64_t* host_ids, int rows, int64_t pos0,
   // prefix and each other — the ids the walk's own stage() would produce.
   dsv41_engram_hash_ids_rows(d_pre_tokens_, n, d_pre_req_, d_pre_pos_, d_pre_spans_, 1, d_pre_ctx_, hash_, d_ids, stream);
   StageArgs* a = pre_args_.get();
+  a->ready = nullptr;  // the prestage's channel joins by event
   a->tables = &tables_;
   a->ids = pre_ids_ + static_cast<size_t>(n_prefix) * static_cast<size_t>(layers_) * entries_;
   a->dst = pre_staged_;
@@ -274,7 +304,18 @@ void Dsv41EngramLayer::embed(int table_index, int rows, cudaStream_t stream) {
   if (rows <= 0) return;
   if (table_index < 0 || table_index >= layers_) throw std::invalid_argument("Dsv41EngramLayer: table index");
   if (staged_rows_ != rows) throw std::logic_error("Dsv41EngramLayer: embed() without a matching stage()");
-  DGPP_CUDA_OK(cudaStreamWaitEvent(stream, use_pre_ ? pre_join_ : join_, 0));
+  if (use_pre_) {
+    DGPP_CUDA_OK(cudaStreamWaitEvent(stream, pre_join_, 0));
+  } else if (table_index + 1 < layers_) {
+    // An earlier table's rows: the wait kernel bumps the device's count of
+    // stagings consumed for the table and spins until the host published
+    // that many (the gather's own pace; 30 s is a failure).
+    glm_stage_wait(h_ready_ + table_index, d_ready_ + table_index, h_late_ + table_index, 30'000'000'000ll, stream);
+  } else {
+    // The last table's consumer joins the staging's side stream (its
+    // gather is the callback's last work; a capture needs the fork joined).
+    DGPP_CUDA_OK(cudaStreamWaitEvent(stream, join_, 0));
+  }
   uint8_t* d_staged = nullptr;
   DGPP_CUDA_OK(cudaHostGetDevicePointer(reinterpret_cast<void**>(&d_staged), use_pre_ ? pre_staged_ : staged_, 0));
   dsv41_engram_gather_staged_bf16(d_staged + static_cast<size_t>(table_index) * staged_layer_bytes_, rows,

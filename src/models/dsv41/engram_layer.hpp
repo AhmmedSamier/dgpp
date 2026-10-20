@@ -120,6 +120,12 @@ class Dsv41EngramLayer {
   std::vector<std::unique_ptr<StageArgs>> stage_args_;
   cudaStream_t side_ = nullptr;
   cudaEvent_t fork_ = nullptr, join_ = nullptr;
+  // Per table: the host's published count of stagings (pinned), the
+  // device's consumed count, the wait kernel's late flag.
+  uint64_t* h_ready_ = nullptr;
+  uint64_t* d_ready_ = nullptr;
+  uint32_t* h_late_ = nullptr;
+  std::vector<uint64_t> ready_count_;
   // The hash constants on the device.
   int32_t* d_token_map_ = nullptr;
   int64_t* d_mult_ = nullptr;

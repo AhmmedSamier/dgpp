@@ -183,6 +183,29 @@ is the ranks' arrival skew — the fabric delivers a row in 5.5 µs in situ,
 the peers stage 10–15 µs apart. The one-lane form (no striping) costs
 1.1 ms at C6 and nothing at C1.
 
+## The folds' spread, decomposed (2026-10-20)
+
+With every rank dumping its collectives' stamps (`DGPP_BUS_TIMELINE_DUMP`)
+and the four files aligned by generation, the pairwise symmetric sums give
+each path (10–14 µs) and the differences each rank's lateness per
+collective with the clocks' offsets cancelled. The arrival spread (latest
+minus earliest staging) is 22 µs at the median, 38 µs at p90 on the
+attention folds and 106 on the MoE folds, and it is the ranks' compute
+imbalance between collectives (correlation 0.98–1.00): no rank is late
+systematically, the lateness has no persistence and no position
+dependence, the engine's poll loop is under 2 µs, prefetch off changes
+nothing, programmatic launches off makes it worse, and locked clocks take
+a quarter off the tail. Two populations remain: the Engram collectives
+(layers 1 and 14), whose host gather of rows from the 189 GiB mapped
+tables page-faults on one rank at 12 % of them (p90 363 µs, p99 1.2 ms of
+imbalance; ~0.4 ms a pass summed; with the first Engram layer's consumer
+waiting on its own table's rows instead of the whole staging's join, p90
+57 µs, p99 0.54 ms, 3 % above 200 µs, ~0.14 ms a pass summed), and a
+15 µs-median jitter on every
+other collective (p90 54 µs; ~2 ms a pass summed) that is the GPUs'
+timing noise on identical work and converts into waiting at each of the
+80 collectives — structural, removable only by fewer collectives.
+
 ## The folds' path (2026-10-20)
 
 The two collectives a layer (the attention fold and the MoE fold, 35 KB
