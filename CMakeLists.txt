@@ -2274,6 +2274,9 @@ if(DGPP_BUILD_BENCHMARKS)
     dgpp_set_common(${target})
   endfunction()
 
+  dgpp_add_benchmark(host_penalties_bench
+    SOURCES benchmarks/micro/host_penalties_bench.cpp)
+
   dgpp_add_benchmark(micro_mem_bw
     SOURCES benchmarks/micro/mem_bw.cu src/common/log.cpp
     LIBRARIES CUDA::cudart Threads::Threads)

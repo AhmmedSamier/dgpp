@@ -1744,6 +1744,42 @@ int main() {
   }
 }
 
+DGPP_TEST(journal_greedy_penalties_reach_every_rank_without_logprobs) {
+  for (int regime = 0; regime < 6; ++regime) {
+    GenerationService::PassEvents events;
+    dgpp::sched::SchedulerRequest request;
+    request.id = "penalties";
+    request.prompt = {1, 2, 3};
+    request.max_steps = 2;
+    auto& p = request.sampling;
+    if (regime == 1) p.repetition_penalty = 1.25f;
+    if (regime == 2) p.frequency_penalty = 0.5f;
+    if (regime == 3) p.presence_penalty = -0.25f;
+    if (regime == 4) p.frequency_penalty = -0.0f;
+    if (regime == 5) p.presence_penalty = -0.0f;
+    events.submits.push_back(request);
+    const auto line = dgpp::serve::encode_journal_tick(events);
+    require((line.find("\"g\":{") != std::string::npos) == (regime != 0),
+            "greedy penalties carry their sampling spec without requesting reports");
+    const auto decoded = dgpp::serve::decode_journal_line(line);
+    require(decoded.submits.size() == 1 && decoded.submits[0].logprobs == -1,
+            "penalty transport does not enable logprobs");
+    const auto& got = decoded.submits[0].sampling;
+    const auto same = [](float a, float b) { return std::memcmp(&a, &b, sizeof(a)) == 0; };
+    require(same(got.temperature, p.temperature) &&
+                same(got.repetition_penalty, p.repetition_penalty) &&
+                same(got.frequency_penalty, p.frequency_penalty) &&
+                same(got.presence_penalty, p.presence_penalty),
+            "peers receive the leader's exact effective penalties");
+    std::vector<float> leader{3.0f, -0.0f, 2.0f, 4.0f}, peer = leader;
+    const std::vector<int32_t> context{0, 0, 1, 2, 3};
+    dgpp::sample::apply_context_penalties(leader.data(), 4, 0, p, context);
+    dgpp::sample::apply_context_penalties(peer.data(), 4, 0, got, context);
+    require(std::memcmp(leader.data(), peer.data(), leader.size() * sizeof(float)) == 0,
+            "leader and peer apply identical penalty arithmetic");
+  }
+}
+
 DGPP_TEST(journal_images_roundtrip_and_validation) {
   dgpp::serve::GenerationService::PassEvents events;
   dgpp::sched::SchedulerRequest r;

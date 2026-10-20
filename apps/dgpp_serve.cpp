@@ -1546,7 +1546,8 @@ int main(int argc, char** argv) {
       "    [--bulk-inflight N (default 4)]: stripes in flight per lane\n"
       "  sampling (defaults from generation_config.json; temperature 0 =\n"
       "  greedy): [--temperature X] [--top-p X] [--top-k N] [--min-p X]\n"
-      "    [--repetition-penalty X] [--seed N (for requests that omit one)]\n"
+      "    [--repetition-penalty X] [--frequency-penalty X] [--presence-penalty X]\n"
+      "    [--seed N (for requests that omit one)]\n"
       "  reasoning (M6 6f): [--reasoning-in-content] folds the ids before\n"
       "    </think> into content instead of reasoning_content\n"
       "  template defaults: [--default-chat-template-kwargs JSON (default {})]\n"
@@ -1661,6 +1662,7 @@ int main(int argc, char** argv) {
   int lookup_tail = 0;  // engine.lookup_tail: extra verify rows past the MTP block (0: the block alone)
   double prefix_cache_gib = 1.5;  // M7: the snapshot arena; 0 = off
   std::optional<float> temperature, top_p, min_p, repetition_penalty;
+  std::optional<float> frequency_penalty, presence_penalty;
   std::optional<int> top_k;
   std::optional<uint64_t> fixed_seed;
   bool reasoning_in_content = false;
@@ -1790,6 +1792,9 @@ int main(int argc, char** argv) {
     compact_batches = e.compact_batches;
     graph_batch_min_live = e.graph_batch_min_live;
     sampling_candidates = e.sampling_candidates;
+    repetition_penalty = e.repetition_penalty;
+    frequency_penalty = e.frequency_penalty;
+    presence_penalty = e.presence_penalty;
     prefix_cache_gib = e.prefix_cache_gib;
     admission_mode = e.admission;
     admission_window = e.admission_window;
@@ -1996,6 +2001,10 @@ int main(int argc, char** argv) {
     else if (a == "--top-k") top_k = std::stoi(next());
     else if (a == "--min-p") min_p = std::stof(next());
     else if (a == "--repetition-penalty") repetition_penalty = std::stof(next());
+    else if (a == "--frequency-penalty")
+      frequency_penalty = std::stof(next());
+    else if (a == "--presence-penalty")
+      presence_penalty = std::stof(next());
     else if (a == "--seed") fixed_seed = std::stoull(next());
     else if (a == "--reasoning-in-content") reasoning_in_content = true;
     else if (a == "--default-chat-template-kwargs") default_chat_template_kwargs = next();
@@ -2934,6 +2943,8 @@ int main(int argc, char** argv) {
     if (min_p) sampling_defaults.min_p = *min_p;
     if (repetition_penalty)
       sampling_defaults.repetition_penalty = *repetition_penalty;
+    if (frequency_penalty) sampling_defaults.frequency_penalty = *frequency_penalty;
+    if (presence_penalty) sampling_defaults.presence_penalty = *presence_penalty;
     try {
       dgpp::sample::validate_params(sampling_defaults);
     } catch (const std::invalid_argument& e) {
@@ -2942,16 +2953,18 @@ int main(int argc, char** argv) {
     }
     DGPP_LOG_INFO(
         "serve: sampling defaults temperature {} top_p {} top_k {} min_p {} "
-        "repetition_penalty {} ({}; overrides: {}{}{}{}{}{})",
-        sampling_defaults.temperature, sampling_defaults.top_p,
-        sampling_defaults.top_k, sampling_defaults.min_p,
-        sampling_defaults.repetition_penalty,
+        "repetition_penalty {} frequency_penalty {} presence_penalty {} ({}; overrides: "
+        "{}{}{}{}{}{}{}{})",
+        sampling_defaults.temperature, sampling_defaults.top_p, sampling_defaults.top_k,
+        sampling_defaults.min_p, sampling_defaults.repetition_penalty,
+        sampling_defaults.frequency_penalty, sampling_defaults.presence_penalty,
         generation_defaults.file_found ? "from generation_config.json"
                                        : "no generation_config.json: greedy",
-        temperature ? "temperature " : "", top_p ? "top_p " : "",
-        top_k ? "top_k " : "", min_p ? "min_p " : "",
-        repetition_penalty ? "repetition_penalty " : "",
-        (temperature || top_p || top_k || min_p || repetition_penalty)
+        temperature ? "temperature " : "", top_p ? "top_p " : "", top_k ? "top_k " : "",
+        min_p ? "min_p " : "", repetition_penalty ? "repetition_penalty " : "",
+        frequency_penalty ? "frequency_penalty " : "", presence_penalty ? "presence_penalty " : "",
+        (temperature || top_p || top_k || min_p || repetition_penalty || frequency_penalty ||
+         presence_penalty)
             ? ""
             : "none");
 

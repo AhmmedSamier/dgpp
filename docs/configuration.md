@@ -533,9 +533,31 @@ show a problem.
 | `engine.stats_interval_s` | Seconds between periodic throughput and server-state log lines. Shorter intervals give finer visibility and produce more logs. `0` disables these periodic lines. | 10 seconds |
 | `engine.no_eos` | Ignore the model's end-of-sequence token, which normally finishes an answer. Intended for measurements that need to run to the token budget. Leave false for normal serving so answers can finish naturally. | false |
 
-Sampling defaults come from the checkpoint's `generation_config.json` and
-per-request fields. Measurement flags such as `--temperature` can override
-them. See [API compatibility](openai-compatibility.md) for request settings.
+Sampling defaults come from the checkpoint's `generation_config.json`.
+Deployment penalty defaults override those values; process flags override
+the deployment, and explicit request fields override the served defaults.
+Omitted or null request fields inherit the served value. See
+[API compatibility](openai-compatibility.md) for request settings.
+
+| Key | What it controls | Default |
+|---|---|---|
+| `engine.repetition_penalty` | Multiplicative penalty for tokens already in the context, greater than 0 and at most 100. `1` disables it. | Checkpoint value, otherwise 1 |
+| `engine.frequency_penalty` | Subtract this value times a token's context count, from -2 to 2. `0` disables it. | 0 |
+| `engine.presence_penalty` | Subtract this value once for any token present in the context, from -2 to 2. `0` disables it. | 0 |
+
+The corresponding process flags are `--repetition-penalty`,
+`--frequency-penalty` and `--presence-penalty`. `/v1/models` reports all
+three effective defaults. A request can explicitly set `1`, `0`, `0` to
+disable penalties configured by the deployment.
+
+The full host sampler, eager greedy reports and bus sampling fold skip
+context counting and penalty application when the effective repetition
+penalty is 1 and both additive penalties are positive zero.
+Active penalties and negative-zero values retain their
+arithmetic. This needs no separate enable flag. The sampling contract uses
+non-NaN logits, round-to-nearest and gradual underflow; floating-point
+exception flags and traps are not preserved by neutral preparation elision.
+Bias, masks, selection, probability reporting and RNG handling still run.
 
 ## How settings are resolved
 

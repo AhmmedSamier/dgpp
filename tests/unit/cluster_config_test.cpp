@@ -1,13 +1,15 @@
 // The cluster config: the schema is checked by name, the
 // engine defaults are the binary's own, the launcher's resolved configuration
 // parses, and the digest is stable and sensitive.
+#include "serve/cluster_config.hpp"
+
+#include <cmath>
 #include <fstream>
 #include <regex>
 #include <stdexcept>
 #include <string>
 
 #include "common/test.hpp"
-#include "serve/cluster_config.hpp"
 
 namespace {
 
@@ -30,6 +32,43 @@ std::string engine_json(const std::string& engine) {
 }
 
 }  // namespace
+
+DGPP_TEST(cluster_config_penalty_defaults_preserve_omission_and_explicit_neutral_values) {
+  const auto absent = dgpp::serve::parse_cluster_config(engine_json("{}"), "t").engine;
+  require(!absent.repetition_penalty && !absent.frequency_penalty && !absent.presence_penalty,
+          "omitted penalty defaults inherit the checkpoint and neutral values");
+  const auto active =
+      dgpp::serve::parse_cluster_config(
+          engine_json(
+              R"({"repetition_penalty":1.25,"frequency_penalty":-0.5,"presence_penalty":0.25})"),
+          "t")
+          .engine;
+  require(active.repetition_penalty == 1.25f && active.frequency_penalty == -0.5f &&
+              active.presence_penalty == 0.25f,
+          "all deployment penalty defaults are parsed");
+  const auto neutral =
+      dgpp::serve::parse_cluster_config(
+          engine_json(R"({"repetition_penalty":1,"frequency_penalty":0,"presence_penalty":-0.0})"),
+          "t")
+          .engine;
+  require(neutral.repetition_penalty == 1.0f && neutral.frequency_penalty == 0.0f &&
+              neutral.presence_penalty == 0.0f && std::signbit(*neutral.presence_penalty),
+          "explicit neutral values are present and retain signed zero");
+  for (const std::string key : {"repetition_penalty", "frequency_penalty", "presence_penalty"}) {
+    for (const std::string bad : {"null", "true", "\"0.5\"", "[]", "1e300", "-3"})
+      require(refusal(engine_json("{\"" + key + "\":" + bad + "}")).find("engine." + key) !=
+                  std::string::npos,
+              "invalid penalty default rejected by name: " + key + "=" + bad);
+  }
+  for (const std::string bad : {"0", "-0.0", "1e-100", "100.1"})
+    require(
+        refusal(engine_json("{\"repetition_penalty\":" + bad + "}")).find("repetition_penalty") !=
+            std::string::npos,
+        "nonpositive, underflowing or excessive repetition penalty rejected");
+  for (const std::string key : {"frequency_penalty", "presence_penalty"})
+    require(refusal(engine_json("{\"" + key + "\":2.01}")).find(key) != std::string::npos,
+            "additive penalties are bounded above");
+}
 
 DGPP_TEST(cluster_config_parses_engine_rope_scaling) {
   // Absent (the default): the Qwen family's plain rope, bit for bit what

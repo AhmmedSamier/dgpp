@@ -2133,13 +2133,23 @@ sum. A counter-based SplitMix64 RNG derives draws from the request's
 seed and counter. Greedy selection consumes no random draw.
 
 Defaults come from `generation_config.json`, with explicit handling of
-missing fields and EOS IDs. Process flags and request fields override
-them. Generation stop IDs are resolved separately from the model's
+missing fields and EOS IDs. Deployment penalty defaults, process flags and
+request fields override them in that order; omitted or null request fields
+inherit the served defaults. Generation stop IDs are resolved separately from the model's
 `config.json` EOS: Qwen PLE uses the trained EOS for n-gram padding and
 context resets. `/v1/models` reports effective defaults. The service journals
 sampling parameters as float bits together with the seed, allowing peers
 to reproduce the request's draws. Eager and graph engines both support
 sampling; a backend without that capability rejects stochastic requests.
+
+The full host sampler, eager greedy reports and bus sampling fold skip
+context counting and penalty application when the effective repetition
+penalty is 1 and both additive penalties are positive zero. Active and
+negative-zero parameters retain the original arithmetic; reference samplers
+remain unchanged. The numerical contract is non-NaN logits, round-to-nearest
+and gradual underflow, without preserving floating-point exception flags or
+traps. Greedy requests carrying penalties journal their sampling parameters
+even when they do not request probability reports.
 
 ### Candidate tables and exact fallback
 

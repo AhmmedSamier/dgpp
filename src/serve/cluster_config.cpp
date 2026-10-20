@@ -456,10 +456,26 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
         else if (p.key == "lookup_agree") e.lookup_agree = static_cast<int>(integer(x, ek, what, 0, 16));
         else if (p.key == "lookup_tail") e.lookup_tail = static_cast<int>(integer(x, ek, what, 0, 7));
         else if (p.key == "sampling_candidates") e.sampling_candidates = static_cast<int>(integer(x, ek, what, 1, 256));
-        else if (p.key == "prefix_cache_gib") {
+        else if (p.key == "repetition_penalty" || p.key == "frequency_penalty" ||
+                 p.key == "presence_penalty") {
+          const double value = number(x, ek, what);
+          if (p.key == "repetition_penalty") {
+            if (!(value > 0.0 && value <= 100.0) || !(static_cast<float>(value) > 0.0f))
+              fail(what, "'" + ek + "' must be in (0, 100]");
+            e.repetition_penalty = static_cast<float>(value);
+          } else {
+            if (value < -2.0 || value > 2.0) fail(what, "'" + ek + "' must be in [-2, 2]");
+            if (p.key == "frequency_penalty")
+              e.frequency_penalty = static_cast<float>(value);
+            else
+              e.presence_penalty = static_cast<float>(value);
+          }
+        } else if (p.key == "prefix_cache_gib") {
           e.prefix_cache_gib = number(x, ek, what);
-          if (e.prefix_cache_gib < 0.0) fail(what, "'" + ek + "' must be >= 0 (0 turns the cache off)");
-        } else if (p.key == "prefix_min_tokens") e.prefix_min_tokens = static_cast<int>(integer(x, ek, what, 0, 1 << 30));
+          if (e.prefix_cache_gib < 0.0)
+            fail(what, "'" + ek + "' must be >= 0 (0 turns the cache off)");
+        } else if (p.key == "prefix_min_tokens")
+          e.prefix_min_tokens = static_cast<int>(integer(x, ek, what, 0, 1 << 30));
         else if (p.key == "prefix_head_snapshots") e.prefix_head_snapshots = boolean(x, ek, what);
         else if (p.key == "admission") {
           e.admission = text(x, ek, what);

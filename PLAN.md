@@ -51,6 +51,12 @@ and GPU recovery coverage for both resident loader implementations.
 
 ## Serving support
 
+Host sampling automatically omits neutral penalty preparation using the
+effective request parameters. Deployment defaults and request overrides
+are covered by config, sampler, HTTP and journal regressions, including
+greedy penalties without logprobs. This is a host-work reduction; serving
+throughput gains require deployment measurements.
+
 The mixed `unsloth/Qwen3.8-27B-NVFP4` checkpoint runs at TP 1/2/4
 with the shipped DFlash2 recipes. Its dense FP4 prefill kernel reuses
 activation fragments across wider warp tiles while preserving the original

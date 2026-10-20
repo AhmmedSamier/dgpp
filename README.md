@@ -384,6 +384,10 @@ selected, `up` stages `build-release/dgpp-serve` to the peers. Use
 
 ## Configuration
 
+Sampling penalties can default from deployment settings and be overridden
+per request. Host sampling automatically skips neutral penalty preparation;
+see [sampling defaults](docs/operations.md#sampling-penalty-defaults).
+
 Use the [configuration reference](docs/configuration.md) for site settings,
 deployment options, defaults and their effects on memory, response time and
 answer quality. It includes a [guide to choosing settings](docs/configuration.md#find-the-setting-you-need)

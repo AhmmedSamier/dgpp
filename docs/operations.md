@@ -7,6 +7,44 @@ Other model templates use the same launcher with their own memory and
 engine settings. See the [configuration reference](configuration.md) for
 settings, defaults and their effects.
 
+## Sampling penalty defaults
+
+Set `engine.repetition_penalty`, `engine.frequency_penalty` and
+`engine.presence_penalty` in deployment JSON to change the defaults for
+requests. For example:
+
+```json
+"engine": {
+  "repetition_penalty": 1.1,
+  "frequency_penalty": 0.2,
+  "presence_penalty": 0
+}
+```
+
+Process flags override deployment defaults; request fields override those
+served values. Requests that omit a field or set it to null inherit its
+default. Check `/v1/models` for the effective values. Every rank receives
+the effective request parameters, including greedy requests without logprobs.
+
+The host sampler automatically skips neutral penalty preparation after
+these overrides are resolved. Requests with active penalties keep the
+original calculation. See [sampling configuration](configuration.md) for
+ranges and the numerical contract. This reduces work in affected host
+sampling calls; it establishes no end-to-end serving throughput gain.
+
+The synthetic host microbenchmark compares automatic preparation with the
+original count-and-apply reference in one executable, for both neutral and
+active parameters. It also measures the full stochastic host sampler:
+
+```sh
+cmake --preset ci
+cmake --build build-ci --target host_penalties_bench -j 4
+build-ci/host_penalties_bench
+```
+
+These host timings are not decode throughput. Use the serving procedure in
+[the benchmark guide](benchmarks.md#reproduce) for model-level measurements.
+
 ## MiMo native MTP and prefill options
 
 MiMo defaults to upstream's recursive block-0 drafting. To use all three

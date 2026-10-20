@@ -925,9 +925,7 @@ inline SamplingFold bus_sampling_fold(
         "sampling prefix: candidate table exceeds one latency slot");
 
   std::vector<float> adjusted(logits, logits + vocab_count);
-  sample::apply_penalties(adjusted.data(), vocab_count, vocab_begin,
-                              params,
-                              sample::count_context(context_ids));
+  sample::apply_context_penalties(adjusted.data(), vocab_count, vocab_begin, params, context_ids);
   sample::apply_bias(adjusted.data(), vocab_count, vocab_begin, bias);
   const bool constrained = mask != nullptr && mask->constrained();
   if (constrained)
