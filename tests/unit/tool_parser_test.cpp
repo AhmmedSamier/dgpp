@@ -237,6 +237,108 @@ Run drive_dsml(const std::string& text, ToolCallParser::Options opts = {}, DsmlD
   return run;
 }
 
+DGPP_TEST(tool_parser_incremental_text_has_linear_decode_work) {
+  const std::string reasoning = std::string(2048, 'r') + "é📭";
+  for (const auto& markers : {fake_markers(), qwen_markers(), dsml_markers(),
+                              dsml_markers(DsmlDialect::kV4)}) {
+    const bool dsml = markers.dsml.available();
+    const std::string content = std::string(2048, 'c') + " 中\n\nx < y\n" +
+                               (dsml ? "｜DSML｜ tail\n<" : "tail\n<");
+    auto ids = dsml_ids_of(reasoning + "</think>" + content);
+    ids.insert(ids.begin() + 1, kEos);  // an empty decode inside reasoning
+    ids.push_back(kEos);               // an empty decode after a held suffix
+    for (const bool track : {false, true}) {
+      ToolCallParser::Options opts;
+      opts.track_tokens = track;
+      size_t decoded_ids = 0;
+      ToolCallParser parser(markers, [&](const std::vector<int64_t>& input) {
+        decoded_ids += input.size();
+        require(decoded_ids <= ids.size(), "text decoding must process at most one id per input token");
+        return fake_decode(input);
+      }, weather_schemas(), opts);
+      std::vector<Event> events;
+      for (const auto id : ids) parser.feed(id, &events);
+      parser.finish(&events);
+      std::string got_reasoning, got_content;
+      int closed = 0;
+      for (const auto& ev : events) {
+        require(ev.kind != Kind::kToolCall, "literal text does not open a call");
+        if (ev.kind == Kind::kReasoningClosed) { ++closed; continue; }
+        (ev.kind == Kind::kReasoning ? got_reasoning : got_content) += ev.text;
+        if (!track) {
+          require(ev.tokens.empty(), "token attribution is opt-in");
+          continue;
+        }
+        size_t end = 0;
+        for (const auto& span : ev.tokens) {
+          require(span.begin == end && span.end <= ev.text.size() && span.token < ids.size(),
+                  "ordered, complete byte attribution");
+          const auto bytes = ids[span.token] == kDsml ? std::string("｜DSML｜")
+                                                     : fake_decode({ids[span.token]});
+          require(bytes == ev.text.substr(span.begin, span.end - span.begin),
+                  "each delta retains the source token's bytes");
+          end = span.end;
+        }
+        require(end == ev.text.size(), "no unattributed delta bytes");
+      }
+      require(got_reasoning == reasoning && got_content == content && closed == 1,
+              "long text, split UTF-8, skipped tokens and DSML tails retain exact bytes");
+    }
+  }
+}
+
+DGPP_TEST(tool_parser_incremental_dsml_preserves_partial_token_spans) {
+  // Tokens can contain both visible text and a held block prefix. Include
+  // UTF-8 split between tokens and a skipped token between its two halves.
+  const std::map<int64_t, std::string> pieces = {
+      {2001, "é📭\n\n<"}, {2002, "tail\n"}, {2003, " calls>broken"},
+      {2004, "\xE4\xB8"}, {2005, "\xAD\n\n"}};
+  const auto decode = [&](const std::vector<int64_t>& ids) {
+    std::string out;
+    for (const auto id : ids) {
+      const auto it = pieces.find(id);
+      out += it == pieces.end() ? fake_decode({id}) : it->second;
+    }
+    return out;
+  };
+  for (const auto dialect : {DsmlDialect::kV41, DsmlDialect::kV4}) {
+    for (const auto& ids : {std::vector<int64_t>{2001, kEos, 2002},
+                           std::vector<int64_t>{2004, kEos, 2005, kDsml, 2002},
+                           std::vector<int64_t>{2001, kDsml, 2003}}) {
+      ToolCallParser::Options opts;
+      opts.start_in_reasoning = false;
+      opts.track_tokens = true;
+      ToolCallParser parser(dsml_markers(dialect), decode, weather_schemas(), opts);
+      std::vector<Event> events;
+      for (const auto id : ids) parser.feed(id, &events);
+      parser.finish(&events);
+      std::string expected, content, attributed;
+      std::vector<size_t> consumed(ids.size(), 0);
+      for (const auto id : ids)
+        expected += id == kDsml ? std::string("｜DSML｜") : decode({id});
+      for (const auto& ev : events) {
+        require(ev.kind == Kind::kContent, "incomplete DSML blocks remain literal content");
+        content += ev.text;
+        size_t end = 0;
+        for (const auto& span : ev.tokens) {
+          require(span.begin == end && span.end <= ev.text.size() && span.token < ids.size(),
+                  "held prefix spans cover the emitted bytes in order");
+          const auto id = ids[span.token];
+          const auto bytes = id == kDsml ? std::string("｜DSML｜") : decode({id});
+          const size_t length = span.end - span.begin;
+          const auto part = bytes.substr(consumed[span.token], length);
+          require(part == ev.text.substr(span.begin, length), "partial span retains its source bytes");
+          consumed[span.token] += length;
+          attributed += part;
+          end = span.end;
+        }
+        require(end == ev.text.size(), "all emitted bytes have provenance");
+      }
+      require(content == expected && attributed == expected, "held and malformed DSML is byte-exact");
+    }
+  }
+}
+
 DGPP_TEST(tool_parser_dsml_format_one_call_string_and_json_values) {
   require(dsml_markers().tool_format() == dgpp::text::ToolFormat::kDsml, "the tag token alone is the DSML format");
   require(dsml_markers().tool_calls_available(), "DSML tool calls are available");

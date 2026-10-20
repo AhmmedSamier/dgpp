@@ -28,13 +28,17 @@ namespace dgpp {
 // act_stride % 8 == 0 (fp8w_gemm_shape_ok). m and n ragged (zero-filled
 // tiles, guarded stores). out_stride 0 = n. The bf16 output is the fp32
 // sum rounded once (bitwise bf16(the f32 launch)).
+// rs / cs: the weight scale grid's block size per axis as log2 (the
+// checkpoint's 128 x 128 grid is 7, 7; DeepSeek-V4.1's 32 x 32 e8m0 grid
+// held as f32 is 5, 5). The per-weight form reads each weight's own block;
+// the per-group form takes the 128 x 128 grid only.
 enum class Fp8wScale { PerWeight, PerGroup };
 bool fp8w_gemm_shape_ok(const void* act, size_t act_stride, int k);
 void launch_fp8w_gemm_bf16(const uint16_t* act, size_t act_stride, const uint8_t* w, const float* w_scales,
                            uint16_t* out, int m, int n, int k, Fp8wScale scale, cudaStream_t stream,
-                           size_t out_stride = 0);
+                           size_t out_stride = 0, int rs = 7, int cs = 7);
 void launch_fp8w_gemm_f32(const uint16_t* act, size_t act_stride, const uint8_t* w, const float* w_scales,
                           float* out, int m, int n, int k, Fp8wScale scale, cudaStream_t stream,
-                          size_t out_stride = 0);
+                          size_t out_stride = 0, int rs = 7, int cs = 7);
 
 }  // namespace dgpp

@@ -1,8 +1,8 @@
-// Qwen3.5-27B dense model (FP8 text-only, standard pre-norm residual).
+// Qwen3.5-27B dense model (FP8 or mixed NVFP4, standard pre-norm residual).
 //
-// Text-only FP8 first boot: 48 GDN layers (swish gate) + 16 Full GQA layers,
-// dense SwiGLU MLPs, no MoE / hyperconnections / PLE / vision. The
-// attention and GDN layers are the shared qwen4_exp components; the K/V pool
+// 48 GDN layers (swish gate) + 16 Full GQA layers, dense SwiGLU MLPs,
+// and the checkpoint's optional BF16 vision tower. The attention and GDN
+// layers are the shared qwen4_exp components; the K/V pool
 // is a slim QwenKvPool clone without the indexer structures; GDN recurrent
 // and conv state is model-owned per request slot.
 //
@@ -12,10 +12,12 @@
 // core's window holds the post-norm final hidden rows (h_).
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <algorithm>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -34,9 +36,26 @@
 #include "kernels/glm_spec.hpp"
 #include "loaders/resident_stream.hpp"
 #include "models/quant_matrix.hpp"
+#include "common/image_input.hpp"
 #include "models/qwen/config.hpp"
 #include "models/qwen/config35.hpp"
+
+// Every image span must name pad ids in the prompt it rides with (host-side
+// rule, pinned by unit test; the engine-owned ids outlive the call).
+namespace dgpp {
+inline void qwen35_check_image_pads(const std::vector<int64_t>& ids, int64_t start,
+                                    const std::vector<ImageInput>& images, int64_t pad) {
+  for (const auto& im : images)
+    for (int64_t pos = std::max<int64_t>(start, im.offset); pos < im.offset + im.tokens; ++pos) {
+      if (pos - start < 0 || pos - start >= static_cast<int64_t>(ids.size()) ||
+          ids[static_cast<size_t>(pos - start)] != pad)
+        throw std::invalid_argument("Qwen3.5: image span does not contain image tokens");
+    }
+}
+}  // namespace dgpp
+#include "models/qwen/vision.hpp"
 #include "kernels/l2_prefetch.hpp"
+#include "kernels/latent_format.hpp"
 #include "kernels/sample_pick.hpp"
 #include "models/qwen/dflash2.hpp"
 #include "models/qwen/layers.hpp"
@@ -60,6 +79,16 @@ struct Qwen35KvPoolShape {
   int draft_layers = 0;
   int draft_kv_heads = 0;
   int draft_dim = 0;
+  // The Full layers' planes as e4m3 codes (engine.kv_dtype = fp8: half the
+  // bytes, the layers' shipped k_scale / v_scale; kernels/full_attn.hpp).
+  // The draft planes stay bf16. Needs the staged attention geometry (dim
+  // 256, a power-of-two page of >= 32 tokens).
+  bool fp8 = false;
+  // With fp8: the prefill attention on the fp8 tensor cores
+  // (engine.prefill_attention = fp8 — Q and P quantized to e4m3,
+  // kernels/full_attn.hpp); decode rows keep the storage form's exact
+  // walk. Same bytes, same maps.
+  bool fp8_attention = false;
 };
 
 // The Full layers' paged K/V caches: per-layer K and V bf16 rows for the
@@ -122,12 +151,18 @@ class Qwen35KvPool {
   Qwen35KvPoolShape shape_;
   bool initialized_ = false;
   PagedBlockTable table_;
-  uint16_t* k_base_ = nullptr;  // [layers][token_slots][kv_heads * dim]
-  uint16_t* v_base_ = nullptr;
+  uint8_t* k_base_ = nullptr;  // [layers][token_slots][kv_heads * dim] bf16, or e4m3 codes (shape_.fp8)
+  // The TMA maps over the Full-layer planes (kernels/full_attn.hpp), built
+  // at init when the geometry is the staged form's (dim 256).
+  FullAttnStageMaps maps_{};
+  bool maps_ready_ = false;
+  uint8_t* v_base_ = nullptr;
   uint16_t* dk_base_ = nullptr;  // [draft_layers][token_slots][dkv * ddim]
   uint16_t* dv_base_ = nullptr;
   size_t kv_row_elems() const { return static_cast<size_t>(shape_.kv_heads) * shape_.dim; }
   size_t layer_kv_elems() const { return static_cast<size_t>(shape_.token_slots) * kv_row_elems(); }
+  size_t elem_bytes() const { return shape_.fp8 ? 1 : 2; }
+  size_t layer_kv_bytes() const { return layer_kv_elems() * elem_bytes(); }
   size_t draft_row_elems() const {
     return static_cast<size_t>(shape_.draft_kv_heads) * shape_.draft_dim;
   }
@@ -162,10 +197,12 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   // padded-8-row-block graph, session_verify_batch_graph); only the
   // block draft itself stays eager (its top-K selection roundtrips to
   // the host), running between replays.
+  // `kv_format`: the Full layers' K/V planes — bf16, or fp8 (the e4m3
+  // storage form at the release's shipped kv scales; Qwen35KvPoolShape::fp8).
   Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpoint_dir, int max_tokens,
               int64_t max_cache_tokens, LoaderResidency residency, BoundaryReducer* boundary, int rank,
               int world, int max_requests, int decode_rows, bool mtp = false,
-              const std::string& dflash2_dir = "");
+              const std::string& dflash2_dir = "", LatentFormat kv_format = LatentFormat::kBf16);
   ~Qwen35Model();
 
   // The decode batch's row ceiling (engine/decode_outputs.hpp's
@@ -187,6 +224,19 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   static void set_dflash2_weights_fp8(bool on) { dflash2_fp8_ = on; }
   static bool prefill_fp8_per_tensor() { return prefill_fp8_per_tensor_; }
   static void set_dense_weights_fp8(bool on) { dense_weights_fp8_ = on; }
+  // engine.prefill_activations = native (2026-10-15): the checkpoint's own
+  // activation recipe for every prefill row — the mixed release's NVFP4
+  // MLP activations (per row, the shipped input globals) on the block-
+  // scaled fp4 tensor cores. Read by plan_memory and the constructor.
+  static void set_native_activations(bool on) { native_activations_ = on; }
+  static bool native_activations() { return native_activations_; }
+  // engine.prefill_attention = fp8 (2026-10-16): the Full layers' prefill
+  // attention on the fp8 tensor cores over the fp8 K/V pool (Q and the
+  // probabilities quantized to e4m3; kernels/full_attn.hpp). Needs
+  // engine.kv_dtype fp8 (refused otherwise). Read by plan_memory and the
+  // constructor; decode rows keep the storage form's exact walk.
+  static void set_fp8_attention(bool on) { fp8_attention_ = on; }
+  static bool fp8_attention() { return fp8_attention_; }
   // Test gate: decode walks (eager, not under a capture) copy every layer's
   // output residual into Outputs::layer_states, as the diagnostic forward
   // does (the row-count invariance test's per-layer bisection).
@@ -208,6 +258,9 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   // members (admissible_group), so no snapshot plumbing is needed.
   int64_t prefill_group_span_limit() const { return max_tokens(); }
   static constexpr int prefill_chunk_tokens() { return 4096; }
+  // The full-attention prefill grid's wave: 16 query rows per CTA, one CTA
+  // per SM, and one CTA per KV head of this rank (kernels/full_attn.cu).
+  int64_t prefill_wave_rows() const { return wave_rows_; }
   static constexpr int kv_block_tokens_static() { return 64; }
   // Prefix-snapshot arena size: all GDN recurrent + conv state of one slot.
   static size_t session_snapshot_bytes(const Qwen35TextConfig& cfg, int world, bool mtp);
@@ -215,12 +268,47 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   static MemoryPlan plan_memory(const Qwen35TextConfig& cfg, int max_tokens, int64_t max_cache_tokens,
                                 int rank, int world, LoaderResidency residency, int max_requests,
                                 bool mtp = false, int decode_rows = 0,
-                                const std::string& dflash2_dir = "");
+                                const std::string& dflash2_dir = "",
+                                LatentFormat kv_format = LatentFormat::kBf16);
 
   const Qwen35TextConfig& config() const { return cfg_; }
   // Actual resident layer allocation, for comparing initialization with the
   // memory plan. An unmaterialized or streamed layer contributes zero bytes.
   size_t resident_layer_bytes(int layer) const { return loader_.resident_layer_span(layer).second; }
+
+  // ---- image inputs ---------------------------------------------------------
+  // The checkpoint's own BF16 tower (vision_ != null when parsed). Its rows
+  // replace the embedding at the prompt's image_token_id positions; decode
+  // graphs are untouched. The DFlash2 draft embeds token ids itself: pad
+  // rows read the pad id's embedding there, so drafts at image positions
+  // are weaker but the verify stays exact.
+  bool supports_images() const { return vision_ != nullptr; }
+  // The pad id repeated once per visual token, -1 without a tower.
+  int64_t image_pad_id() const { return cfg_.vision ? cfg_.vision->tokens.pad : -1; }
+  // The three delimiters, for the serving frontend that renders them.
+  ImageTokens image_tokens() const { return cfg_.vision ? cfg_.vision->tokens : ImageTokens{}; }
+  struct PrefillCursor : Base::PrefillCursor {
+    const std::vector<ImageInput>* images = nullptr;
+  };
+  Outputs session_prefill_images(int req, const std::vector<int64_t>& prompt_ids,
+                                 const std::vector<ImageInput>& images);
+  Outputs session_prefill_images(int req, const std::vector<int64_t>& prompt_ids,
+                                 const std::vector<ImageInput>& images,
+                                 const std::vector<int64_t>& boundaries, SnapshotRequest* snap);
+  Outputs session_prefill_resume_images(int req, const std::vector<int64_t>& suffix_ids,
+                                        const std::vector<ImageInput>& images,
+                                        const std::vector<int64_t>& boundaries,
+                                        SnapshotRequest* snap);
+  // Chunked image prefill (the engine's yield path): validates the images,
+  // borrows them for the cursor's lifetime, and runs the base text machinery
+  // with image state scoped to each advance. This overload is what flips
+  // supports_image_chunked_prefill() on.
+  PrefillCursor session_prefill_begin(int req, const std::vector<int64_t>& prompt,
+                                      int64_t reserve_tokens, int64_t chunk_tokens,
+                                      const std::vector<int64_t>& boundaries = {},
+                                      SnapshotRequest* snap = nullptr, int64_t attach_position = 0,
+                                      const std::vector<ImageInput>* images = nullptr);
+  bool session_prefill_advance(PrefillCursor& cursor, int64_t chunk_tokens = 0);
 
   // ---- the session core's hooks (engine/session_model.hpp) --------------------
   typename Base::Outputs run_rows(const typename Base::RowRun& run);
@@ -395,7 +483,7 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   // families' instances keep the shared rule.
   void configure_gemm_rows(int rows, bool decode);
   void dense_mlp(const uint16_t* x, uint16_t* out, int tokens, const Qwen35DenseMlpResident& m,
-                 cudaStream_t stream, int layer, bool resume = false);
+                 cudaStream_t stream, int layer, bool resume = false, bool prefill = false);
   // The L2 weight prefetcher's boundary windows (2026-10-04, #93; the
   // Qwen3.8-Flash-Next idiom): a decode walk's two folds a layer are bus
   // collectives the chain waits on with the memory system idle (138 x
@@ -459,6 +547,27 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   void pack_companions();
   QwenGemmWorkspace gw_;
   Qwen35GlobalsResident globals_;
+  // The visual tower (weights resident, executed on image prefills only).
+  // The cursor retains the engine-owned image vector across yields. Only
+  // an executing prefill borrows it into the model; the scope also invalidates
+  // the shared staging window when entering and leaving a request's walk.
+  std::unique_ptr<QwenVisionEncoder> vision_;
+  Outputs session_prefill_with_images(int req, const std::vector<int64_t>& ids,
+                                      const std::vector<ImageInput>& images,
+                                      const std::vector<int64_t>& boundaries, SnapshotRequest* snap,
+                                      bool resume);
+  void stage_image_embeddings(int64_t first, int64_t end, const std::vector<ImageInput>* images);
+  // Rows [first + shift, first + shift + rows) into dst. `shift` is 0 for
+  // the main walk's embedding and 1 for the MTP draft's, whose row at
+  // position p embeds token p + 1.
+  void apply_image_embeddings(uint16_t* dst, int64_t first, int rows, int shift,
+                              const std::vector<ImageInput>* images);
+  class ImagePrefillScope;
+  const std::vector<ImageInput>* images_for_req(int req) const;
+  void store_request_images(int req, const std::vector<ImageInput>* images);
+  std::vector<const std::vector<ImageInput>*> prefill_images_per_req_;
+  const uint16_t* image_embeddings_ = nullptr;
+  int64_t image_window_first_ = 0, image_window_end_ = 0;
   QwenTextConfig qcfg_;  // adapter: the fields the qwen4_exp layer ctors read
   std::unique_ptr<QwenFullAttnLayer> full_;
   std::unique_ptr<QwenGdnLayer> gdn_;
@@ -473,6 +582,32 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   inline static bool dflash_draft_batch_ = true;
   inline static int dflash_depth_ = 0;
   inline static bool dense_weights_fp8_ = false;
+  inline static bool fp8_attention_ = false;
+  inline static bool native_activations_ = false;
+  // The native recipe, this instance: on at construction; the cell the layers'
+  // workspace copies point at, true while the walk's rows are prefill rows.
+  bool native_on_ = false;
+  bool native_prefill_cell_ = false;
+  // The channel matrices' TMA maps (stable addresses: reserved once at boot).
+  std::vector<CUtensorMap> native_tmaps_;
+  void build_native_maps();
+  // The native recipe's NVFP4 activation scratch: one quantized row set at
+  // max_tokens rows of the widest k (I): codes, e4m3 block scales, globals.
+  uint8_t* q_codes_ = nullptr;
+  // The dense W4A4 TMA form's maps: over q_codes_ per k (H, I; box rows 128)
+  // and over every NVFP4 MLP matrix (box rows 256), built at boot.
+  CUtensorMap q_tma_[2];
+  int q_tma_k_[2] = {0, 0};
+  int q_tma_count_ = 0;
+  std::vector<CUtensorMap> native_fp4_tmaps_;
+  void build_native_fp4_maps();
+  const CUtensorMap* q_map_for(int k) const {
+    for (int i = 0; i < q_tma_count_; ++i)
+      if (q_tma_k_[i] == k) return &q_tma_[i];
+    return nullptr;
+  }
+  uint8_t* q_scales_ = nullptr;
+  float* q_gs_ = nullptr;
   // Per-tensor FP8 prefill recipe (engine.prefill_fp8_per_tensor, Resident only):
   // gate/up/down requantized once at boot to E4M3 with one F32 scale each;
   // prefill calls quantize the activation once and run cuBLASLt FP8.
@@ -644,6 +779,7 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   uint16_t* spec_conv_ = nullptr;
   int num_gdn_ = 0, num_full_ = 0;
   int64_t rec_elems_ = 0, conv_elems_ = 0;
+  int64_t wave_rows_ = 0;  // prefill attention grid wave (prefill_wave_rows)
 };
 
 }  // namespace dgpp

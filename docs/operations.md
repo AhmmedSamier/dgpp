@@ -4,7 +4,8 @@ DGPP runs one `dgpp-serve` process per node. Rank 0 serves HTTP and
 coordinates requests through the admission journal; peers follow the same
 scheduler operations. The examples below use GLM-5.3 on four Sparks.
 Other model templates use the same launcher with their own memory and
-engine settings. See [README](../README.md) for the configuration schema.
+engine settings. See the [configuration reference](configuration.md) for
+settings, defaults and their effects.
 
 ## MiMo native MTP and prefill options
 
@@ -87,12 +88,14 @@ its node.
 | `cluster_qwen-3.8-flash-next_fp8_w{2,4}.example.json` | Qwen FP8 with MTP depth 1, four or two nodes |
 | `cluster_qwen-3.8-flash-next_nvfp4_w{1,2}.example.json` | Qwen NVFP4 on one or two Sparks, MTP depth 1, dense projections FP8 at load, mapped n-gram table; the single-Spark example selects a 256K shared pool and 4K busy/idle prefill |
 | `cluster_qwen-3.8-flash-next_nvfp4-radixark_w{1,2}.example.json` | RadixArk Qwen NVFP4 on one or two Sparks; the single-Spark recipe selects MTP depth 2, grow admission and 4K busy/idle prefill |
+| `cluster_qwen-3.8-flash-next_nvfp4-swift15_w2.example.json` | Community Swift 1.5 NVFP4 conversion on two Sparks: MTP4 with BF16 fused draft experts, mapped n-gram table, FP8 dense projections, four slots and a 1M-token shared BF16 KV pool; [serving notes](model_cards/Qwen3.8-Flash-Next-Swift1.5-NVFP4.md) |
 | `cluster_qwen-3.8-flash-next_nvfp4-qad_w1.example.json` | the QAD export of Qwen3.8-Flash-Next (local-inference-lab) on one Spark: MXFP8 dense stack and shared experts as shipped, the NVFP4 n-gram table resident, MTP depth 1, 128K shared pool |
 | `cluster_glm-4.7_nvfp4_w4.example.json` | GLM-4.7 NVFP4, four nodes, MTP depth 1 |
 | `cluster_glm-5.3_int4-int8_w4.example.json` | the full GLM-5.3 (int4/int8 RTN), four nodes, MTP depth 1, eight request slots, 100K bf16 context (120K with `--bf16-weights checkpoint --kv-capacity 122880`), the embedding vocab-sharded |
 | `cluster_glm-5.3_nf4i8_w4.example.json` | the full GLM-5.3 in the NF4I8 GPTQ H32 g128 checkpoint (codebook experts, int8 attention and shared expert), four nodes, MTP depth 1, eight request slots, 272K fp8 context, the embedding vocab-sharded |
 | `cluster_glm-5.3_mixed346_w4.example.json` | the full GLM-5.3 in the Mixed346 GPTQ H32 A8 g128 checkpoint (3/4/6-bit codebook experts with int8 activation codes, 116 int4 fallback experts, int8 attention and shared expert), four nodes, MTP depth 1, eight request slots, 272K fp8 context |
 | `cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json` | DeepSeek-V4.1-Flash as shipped, four nodes, six request slots, DSpark depth 4 with the scheduled verify depth, the bounded prefill, 128K context |
+| `cluster_deepseek-v4.1-flash-1017_mxfp4-fp8_w4.example.json` | DeepSeek-V4.1-Flash-1017 (the refined weights, the same architecture) as shipped, the V4.1-Flash shape; the indexer budget is a key (`engine.index_topk`, the checkpoint's 512 as shipped, 2048 priced in the card) |
 | `cluster_mimo-v2.6-flash_mxfp4-fp8_w{4,2}.example.json` | MiMo-V2.6-Flash as shipped (MXFP4 experts, fp8 dense, the BF16 matrices in their 12-bit form), four nodes with a 128K BF16 K/V pool or two nodes with a 256K K/V pool in the fp8 row form (`kv_dtype`), four request slots, MTP depth 1 |
 
 One template per model, quant and world (2026-09-14): the modes a template
@@ -120,8 +123,12 @@ Qwen3.8-Flash-Next's FP8 checkpoint (where both values keep both forms resident)
 `--bf16-weights checkpoint` turns it off. Resident images are shared by all
 three values: switching never rebuilds them.
 
-`kv_dtype` affects only GLM-5.3's latent cache. Qwen and GLM-4.7 K/V
-caches stay BF16. Qwen's `ngram_table` and `dense_weights` settings
+`kv_dtype` affects GLM-5.3's latent cache, MiMo's K/V cache and, on the
+Qwen3.8-27B NVFP4 mixed release, the Qwen3.5 K/V cache (`fp8`: the
+release's shipped per-layer `k_scale` / `v_scale`; `prefill_attention`
+then picks the attention's arithmetic over it, bf16 or fp8). Qwen3.8-Flash-Next
+also accepts bf16 or fp8 K/V with per-token, per-head scales.
+GLM-4.7 K/V caches stay BF16. Qwen's `ngram_table` and `dense_weights` settings
 control table residency and optional FP8 encoding of dense projections.
 The Qwen NVFP4 templates, including YaRN, set `engine.fp8_head: "mma"`.
 With `dense_weights: "fp8"`, this uses streaming MMA above the dense GEMV
@@ -154,7 +161,12 @@ eval holds at 39/40 on HumanEval and GSM8K and the acceptance is unchanged), and
 per-tensor e4m3 kernels (about 2x the prefill rate, +23 GiB resident). Both
 change greedy transcripts (the head within the first tokens, the prefill
 recipe at long context), so a deployment that enables them is not the
-checkpoint's model. The dense family supports worlds 1, 2 and 4.
+checkpoint's model. `engine.prefill_activations: "native"` is different in
+kind: it runs the checkpoint's own activation recipe on prefill rows (for the
+NVFP4 release, NVFP4 MLP inputs with its shipped input globals on the fp4
+tensor cores and per-token e4m3 inputs for its channel-FP8 projections on the
+e4m3 tensor cores; for the FP8 release the blockwise product), so it is the
+published model's numerics rather than the bf16 upcast of them. The dense family supports worlds 1, 2 and 4.
 
 The current dense templates use the DFlash2 drafter (`engine.dflash_model`)
 with `mtp` off, `decode_graph` on and adaptive verification depth at worlds
@@ -169,7 +181,8 @@ The [Qwen3.8-27B NVFP4 checkpoint](model_cards/Qwen3.8-27B-NVFP4.md) uses
 the same dense architecture and DFlash2 templates. Its mixed native FP4,
 channelwise FP8 and BF16 weights are loaded without requantization;
 `dense_weights: fp8` and `prefill_fp8_per_tensor` are rejected for this
-checkpoint. The model card links the matched performance and quality
+checkpoint; `prefill_activations: "native"` is its own recipe (NVFP4 MLP
+activations with the shipped input globals). The model card links the matched performance and quality
 measurements, including the remaining four-node C1 prose decode exception.
 
 Qwen FP8 and packed heads keep the full product's kernel selection and
@@ -301,7 +314,56 @@ slot would reach about 534,000. Decode costs what the doubled per-rank weight re
 implies, near 1.75x the four-node pace; prefill costs about 1.45x
 (benchmarks.md §3 to §6).
 
+### Prompt tokenization
+
+Long letter and CJK runs automatically use bounded merge scanning; no setting
+is needed. To reuse token IDs for recurring short pieces of prompts, add
+`"tokenizer": {"word_cache_entries": 10000}` at the top level of the deployment
+JSON. The default is `0` (disabled); the accepted range is 0–10000 whole slots.
+Restart the deployment to change it. Rank 0 logs the configured capacity.
+
+The cache retains mapped word strings and token IDs in host memory for the
+loaded tokenizer. It shares results across requests, replaces colliding
+entries, and bypasses busy cache locks. It does not retain whole prompts or
+model state. Measure both repeated and novel inputs: cache misses add work,
+and faster tokenization does not imply faster model generation. See
+[tokenization](tokenization.md) for bounds and validation.
+
+### Request preparation
+
+Chat and legacy completion preparation runs in a persistent pool sized to the
+configured engine concurrency. A slow preparation leaves HTTP free to serve
+health checks and active streams. Ready requests reach admission in completion
+order, so a later small request can proceed while an earlier large request is
+still preparing. All workers being busy still causes queueing.
+
+`dgpp_preparation_workers`, `dgpp_preparation_pending` and
+`dgpp_preparation_payload_bytes` report capacity and occupancy.
+`dgpp_preparation_queue_time_seconds` and `dgpp_preparation_work_seconds` report
+wait and execution time per preparation stage. TTFT, request queue and end-to-end
+latency now include preparation; response `timings` still describe engine work.
+An exhausted request-count or retained-payload budget returns 503
+`preparation_busy`; retry with backoff. Idle workers sleep, but concurrent text
+or image preparation can compete with inference for CPU and memory bandwidth.
+
 ### Streaming keep-alives
+
+Output delivery defaults to `http.stream_flush: "pass"`: a quiet HTTP loop
+checks for queued output every 25 ms. Set `http.stream_flush: "wake"` in the
+cluster JSON, or pass `--stream-flush wake`, to wake the loop when tokens,
+logprobs, completion/error responses or file preprocessing results are ready.
+The CLI overrides JSON; this is a rank-0 server setting, not a request option.
+Only `pass` and `wake` are accepted. Preparation and file results always wake
+HTTP, including in `pass` mode.
+
+Wake mode reduces delivery delay and batching at the client. It can increase
+HTTP CPU work and socket sends, especially with many concurrent streams;
+measure client-side TTFT and update gaps alongside engine throughput and CPU
+usage before enabling it for a deployment. Engine latency metrics do not
+include HTTP delivery. A token, an SSE event and a client socket read are not
+interchangeable counts. The default stays at 25 ms; maintenance polling and
+keep-alive comments continue in wake mode. See [the flush comparison
+procedure](http-stream-flush.md) for repeatable checks.
 
 Streaming chat and text completions send the SSE comment `: keep-alive` followed
 by a blank line after 30 seconds without output. This covers the admission
@@ -633,7 +695,12 @@ traffic; increasing it only helps when idle arrivals can form a useful batch.
 Use the queue limit to bound accepted backlog. The `admission` setting defaults
 to `full`, reserving the prompt and maximum completion before starting. The
 optional `grow` policy uses `admission_window` (256 tokens by default) to grow
-reservations, but may end a request when the pool runs out. It is a memory
+reservations. Growth first evicts least-recently-used unattached prefix-cache
+entries until the next step fits, checking actual free blocks after each release
+because entries can share blocks. If only the minimum growth fits, it keeps that
+smaller reservation instead of evicting more cache for a full window. Attached
+entries remain protected. Once no evictable entries remain, genuine exhaustion
+may still end the youngest live request with `finish_reason: length`. It is a memory
 admission tradeoff, not a substitute for a latency target. Adjust the controller
 headroom, growth and recovery only after observing throughput and target misses.
 
@@ -918,11 +985,36 @@ codes in blocks of 16 with an e4m3 scale per block over the row scale
 shared memory as they gather it, so everything past the load is the bf16
 kernel; the index cache, the tail rings and the selection are unchanged in
 every format, so a quantized cache changes the attention values, never
-which tokens are attended. The format is part of the world's settings (the
-head pushes it, the config digest carries it) and every rank runs the same
+which tokens are attended. On the Qwen3.5 family `fp8` is the mixed NVFP4
+release's own `kv_cache_scheme`: the Full layers' planes hold e4m3 codes of
+K / k_scale and V / v_scale (the per-layer BF16 scalars the release ships,
+widened to f32 in the layer image), the appends divide and round once,
+and the attention kernels widen a tile's codes to bf16 in shared memory
+(exact) with k_scale folded into the softmax scale and v_scale on the
+output — the bf16 kernels' bits on those widened planes. `engine.prefill_attention: "fp8"`
+keeps that pool and runs the prefill attention on the fp8 tensor cores:
+Q quantized per row to e4m3 (its scale folded into the softmax multiplier
+with k_scale), the probabilities rounded to e4m3 against the row's running
+maximum, both products on the e4m3 mma — the faster long prefill for a
+further deviation the model card measures; decode rows keep the exact
+widened walk under either value, and the key needs the fp8 pool. The DFlash2
+drafter's planes stay bf16; the fp8 pool is refused with `engine.mtp` (the MTP
+draft layer ships no scales) and on releases without the scheme. Decode
+rows grouped by request (the drafter's verify blocks, a batch's spans)
+take the block form in either format: every K/V tile staged once per
+group instead of once per row, the row form's bits. The format is part of
+the world's settings (the head pushes it, the config digest carries it)
+and every rank runs the same
 one. The quantized formats are a memory trade an operator makes
 deliberately: at 262k tokens they save 1.5 GiB (fp8) or 2.2 GiB (fp4) per
-rank against a 98 GiB plan, and the model's answers change with them.
+rank against a 98 GiB plan, and the model's answers change with them. The
+Qwen3.8-Flash-Next K/V cache takes `bf16` or `fp8` (e4m3 rows with one scale
+per (slot, kv-head); BF16 attention dequantizes in-kernel and the pool is
+~1.86x smaller); `fp4` is not implemented for Qwen. Native
+FP8 QK/PV products are independently available through
+`engine.prefill_attention: "fp8"` and `engine.decode_attention: "fp8"`, both
+requiring `engine.kv_dtype: "fp8"`. Defaults retain BF16 compute. See
+[the recipe and validation](qwen_fp8_kv_plan.md) before selecting a deployment mode.
 
 **The DeepSeek-V4.1 prefill mode** (`engine.prefill`, `--prefill
 bounded|exact`, default `bounded`) applies to the `deepseek_v41` family
@@ -939,6 +1031,23 @@ before it through the ring. `exact` runs all forty layers over every row
 (every parity gate's mode; `docs/deepseek_v41_flash_plan.md` §1.8 and the
 G5 record). The mode is part of the world's settings (the head pushes it,
 the config digest carries it); decode is the same in both.
+
+**The DeepSeek-V4.1 index budget** (`engine.index_topk`,
+`engine.candidate_topk_blocks`, `engine.candidate_block_size`; 0 = the
+checkpoint's, which is 512 entries per query out of a 2048 × 8 candidate
+pool) replaces the indexer's selection width for the `deepseek_v41` family
+alone: every compressing layer's attention reads exactly the entries the
+budget names, so a wider budget shows each query more of its context (the
+lever against the sparse attention's misses on long inputs) and changes the
+model's answers, not only its speed. The select networks serve up to 2048.
+The budget is part of the world's settings (the head pushes it, the config
+digest carries it); a key on any other family is refused at boot. The
+DeepSeek-V4.1-Flash-1017 template carries the key at the checkpoint's 512:
+measured at 2048 on 2026-10-18 on the same binary (the
+[card](model_cards/DeepSeek-V4.1-Flash-1017.md) has both budgets),
+short-context decode was level, cold prefill ran 9 % (2K) to 48 % (32K)
+longer and decode at 32K–512K of context 3–8 % slower per pass. The keys'
+documentation is in [configuration](configuration.md#deepseek-v41-index-budget).
 
 **The opt-in prefill levers** (`engine.prefill_bf16_partials`,
 `engine.prefill_fold_scales`, `engine.prefill_fp8_gemm`; `--prefill-bf16-partials`,
@@ -986,8 +1095,13 @@ The first start of a resident rank builds its layers from the checkpoint
 (slice, stage, dequantize, pack) and writes the finished device bytes to
 `~/.cache/dgpp/resident/<key>.img` on that node (~82 GiB per rank for GLM;
 the key covers the checkpoint's shard headers, `config.json`, world, rank,
-head sharding and the loader's format version, so a stale image can never
-load by accident). Every later start streams that image instead with
+head sharding and the loader's format version; a `payload` note beside it
+holds a fold of every shard's weight bytes, because a refined release can
+re-ship the same tensors in the same shards byte-identical in header and
+config — DeepSeek-V4.1-Flash-1017 against V4.1-Flash, 2026-10-18 — and an
+image whose note disagrees is discarded and rebuilt rather than restoring
+the other checkpoint's layers; an image from before the note adopts the
+checkpoint it next opens with). Every later start streams that image instead with
 O_DIRECT reads at the drive's line rate — 15-25 s to a ready model against
 ~4.5 minutes from the checkpoint. The boot digest is cached beside it
 (`<key>.digest`). Knobs:

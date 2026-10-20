@@ -18,6 +18,7 @@
 // requantized: the engine consumes these bytes as they are (plan D2).
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "loaders/minijson.hpp"
@@ -134,6 +135,21 @@ struct Dsv41TextConfig {
   // offending field on anything unsupported.
   static Dsv41TextConfig parse(const minijson::Value& root);
   static Dsv41TextConfig from_json_file(const std::string& path);
+
+  // The deployment's index budget (engine.index_topk, engine.candidate_topk_blocks,
+  // engine.candidate_block_size; 2026-10-18): each value > 0 replaces the
+  // checkpoint's, 0 keeps it. The result passes the parser's own checks
+  // (powers of two within the select networks' 2048, a candidate pool that
+  // holds at least index_topk entries); a violation throws std::runtime_error
+  // naming the engine key. The indexer selects more (or fewer) compressed
+  // entries per query than the release trained at: the attention reads
+  // exactly the entries the budget names, so this changes the model's
+  // output — a quality lever, never a lossless one.
+  void apply_index_budget(int index_topk_override, int candidate_topk_blocks_override,
+                          int candidate_block_size_override);
+  // The budget's checks (shared by parse and apply_index_budget); `where`
+  // prefixes the field in the error ("text_config." or "engine.").
+  void check_index_budget(std::string_view where) const;
 
   // --- derived layer facts ------------------------------------------------
   // Layers are indexed 0..num_hidden_layers-1 (the backbone) and

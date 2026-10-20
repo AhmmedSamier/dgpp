@@ -117,8 +117,9 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
                "prefill_early_admission": true,
                "prefix_min_tokens": 512, "prefix_head_snapshots": false, "mtp_draft": "greedy",
                "mtp_schedule_sampled_scale": 0.5, "mtp_draft_temperature": 0.7, "mtp_verify": "block",
+               "prefill_dense": "streaming", "prefill_fold_overlap": false, "decode_pdl": false, "prefill_window": "scalar", "decode_window": "scalar", "collective_transport": "send",
                "dflash_batch_rows": 32, "dflash_weights": "fp8", "prefill_group": false,
-               "l2_prefetch": false, "l2_prefetch_form": "touch", "l2_prefetch_window_mib": 8,
+               "l2_prefetch": false, "l2_prefetch_form": "touch", "l2_prefetch_full_form": "48x4", "l2_prefetch_window_mib": 8,
                "l2_prefetch_boundary_window_mib": 0, "l2_prefetch_boundary_rate": "full",
                "l2_prefetch_layer_rate": "off", "l2_prefetch_merge": false},
     "paths": {"log_dir": "/var/log/dgpp"}
@@ -138,15 +139,20 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
               c.engine.prefill_early_admission == std::optional<bool>(true) &&
               c.engine.prefix_min_tokens == 512 && !c.engine.prefix_head_snapshots &&
               c.engine.mtp_draft == "greedy" && c.engine.mtp_schedule_sampled_scale == 0.5 &&
+              c.engine.prefill_dense == "streaming" && !c.engine.prefill_fold_overlap && !c.engine.decode_pdl && c.engine.prefill_window == "scalar" &&
+              c.engine.decode_window == "scalar" &&
+              c.engine.collective_transport == "send" &&
               c.engine.mtp_draft_temperature == 0.7 && c.engine.mtp_verify == "block" &&
               c.engine.dflash_batch_rows == 32 && c.engine.dflash_weights == "fp8" && !c.engine.prefill_group &&
-              !c.engine.l2_prefetch && c.engine.l2_prefetch_form == "touch" && c.engine.l2_prefetch_window_mib == 8 &&
+              !c.engine.l2_prefetch && c.engine.l2_prefetch_form == "touch" && c.engine.l2_prefetch_full_form == "48x4" &&
+              c.engine.l2_prefetch_window_mib == 8 &&
               c.engine.l2_prefetch_boundary_window_mib == 0 && c.engine.l2_prefetch_boundary_rate == "full" &&
               c.engine.l2_prefetch_layer_rate == "off" && !c.engine.l2_prefetch_merge,
           "the given engine knobs");
   {
     const dgpp::serve::ClusterConfig d = dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"]})", "t");
-    require(d.engine.l2_prefetch && d.engine.l2_prefetch_form == "load" && d.engine.l2_prefetch_window_mib == 12 &&
+    require(d.engine.l2_prefetch && d.engine.l2_prefetch_form == "load" && d.engine.l2_prefetch_full_form == "16x8" &&
+            d.engine.l2_prefetch_window_mib == 12 &&
                 d.engine.l2_prefetch_boundary_window_mib == 20 && d.engine.l2_prefetch_boundary_rate == "light" &&
                 d.engine.l2_prefetch_layer_rate == "light" && d.engine.l2_prefetch_merge,
             "the L2 prefetcher's defaults");
@@ -201,7 +207,9 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
               c.engine.kv_dtype == "bf16" && c.engine.bf16_weights == "checkpoint" &&
               c.engine.fp8_head == "gemv" && c.engine.draft_head == "exact" && c.engine.draft_head_blocks == 32 &&
               !c.engine.prefill_bf16_partials && !c.engine.prefill_fold_scales &&
-              !c.engine.prefill_fp8_gemm && !c.engine.prefill_fp8_per_tensor && c.engine.dflash_model.empty() &&
+              !c.engine.prefill_fp8_gemm && !c.engine.prefill_fp8_per_tensor && c.engine.prefill_activations == "bf16" &&
+              c.engine.prefill_attention == "bf16" && c.engine.decode_attention == "bf16" &&
+              c.engine.dflash_model.empty() &&
               c.engine.dflash_verify_graph && c.engine.dflash_draft_batch && c.engine.dflash_depth == 0 &&
               c.engine.expert_gemm == "wide" && c.engine.expert_gemm_prefetch == 3 &&
               c.engine.expert_tile_list && !c.engine.expert_gemm_pair && c.engine.ngram_prestage,
@@ -226,6 +234,39 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
                        (on.engine.prefill_fp8_gemm ? 1 : 0) + (on.engine.prefill_fp8_per_tensor ? 1 : 0);
     require(got && others == 1, "engine." + key + " opt-in alone");
   }
+  // The DeepSeek-V4.1 index budget (2026-10-18): 0 (the checkpoint's) unless the config says.
+  require(c.engine.index_topk == 0 && c.engine.candidate_topk_blocks == 0 && c.engine.candidate_block_size == 0,
+          "the index budget defaults to the checkpoint's");
+  const auto ib = dgpp::serve::parse_cluster_config(
+      R"({"model":"m","nodes":["h"],"engine":{"index_topk":2048,"candidate_topk_blocks":1024,"candidate_block_size":16}})",
+      "t");
+  require(ib.engine.index_topk == 2048 && ib.engine.candidate_topk_blocks == 1024 && ib.engine.candidate_block_size == 16,
+          "the index budget keys parse");
+  // The checkpoint's activation recipe (2026-10-15): "bf16" (the default chain) or "native".
+  const auto na = dgpp::serve::parse_cluster_config(
+      R"({"model":"m","nodes":["h"],"engine":{"prefill_activations":"native"}})", "t");
+  require(na.engine.prefill_activations == "native", "engine.prefill_activations native parses");
+  // The prefill attention's arithmetic on the fp8 K/V pool (2026-10-16): "bf16" (the default) or "fp8".
+  const auto pa = dgpp::serve::parse_cluster_config(
+      R"({"model":"m","nodes":["h"],"engine":{"kv_dtype":"fp8","prefill_attention":"fp8"}})", "t");
+  require(pa.engine.prefill_attention == "fp8" && pa.engine.kv_dtype == "fp8", "engine.prefill_attention fp8 parses");
+  bool rejected = false;
+  try {
+    (void)dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"],"engine":{"prefill_attention":"e4m3"}})", "t");
+  } catch (const std::exception&) {
+    rejected = true;
+  }
+  require(rejected, "engine.prefill_attention takes bf16 or fp8 only");
+  const auto da = dgpp::serve::parse_cluster_config(
+      R"({"model":"m","nodes":["h"],"engine":{"kv_dtype":"fp8","decode_attention":"fp8"}})", "t");
+  require(da.engine.decode_attention == "fp8" && da.engine.prefill_attention == "bf16",
+          "native decode is independent of prefill");
+  rejected = false;
+  try {
+    (void)dgpp::serve::parse_cluster_config(
+        R"({"model":"m","nodes":["h"],"engine":{"decode_attention":"e4m3"}})", "t");
+  } catch (const std::exception&) { rejected = true; }
+  require(rejected, "engine.decode_attention takes bf16 or fp8 only");
   // The DFlash2 drafter's keys (2026-10-03).
   const auto df = dgpp::serve::parse_cluster_config(
       R"({"model":"m","nodes":["h"],"engine":{"dflash_model":"z-lab/Qwen3.8-27B-DFlash2","dflash_verify_graph":false,"dflash_draft_batch":false,"dflash_depth":4}})", "t");
@@ -290,6 +331,21 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
   require(one.world() == 1 && one.http_port == 18080, "a one-node world");
   require(one.http_bind == "0.0.0.0", "HTTP defaults to all IPv4 interfaces");
   require(one.http_max_body_bytes == 256ll * 1024 * 1024, "HTTP body default supports large prefills");
+}
+
+DGPP_TEST(cluster_config_stream_flush_defaults_overrides_and_validation) {
+  const auto defaults = dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"]})", "t");
+  require(defaults.stream_flush == "pass", "polling remains the default");
+  for (const char* mode : {"pass", "wake"}) {
+    const auto config = dgpp::serve::parse_cluster_config(
+        std::string(R"({"model":"m","nodes":["h"],"http":{"stream_flush":")") + mode + "\"}}", "t");
+    require(config.stream_flush == mode, "explicit mode survives parsing");
+  }
+  for (const char* value : {"0", "true", "null", "[]", "{}", "\"\"", "\"Wake\"", "\"poll\""}) {
+    const auto error = refusal(
+        std::string(R"({"model":"m","nodes":["h"],"http":{"stream_flush":)") + value + "}}");
+    require(error.find("http.stream_flush") != std::string::npos, "invalid mode rejected by name");
+  }
 }
 
 DGPP_TEST(cluster_config_sse_ping_interval_defaults_overrides_and_validation) {
@@ -426,8 +482,18 @@ DGPP_TEST(cluster_config_refusesUnknownKeysAndBadValuesByName) {
        "'engine.l2_prefetch_layer_rate' must be off, light or full"},
       {R"({"model":"m","nodes":["h"],"engine":{"l2_prefetch_form":"walk"}})",
        "'engine.l2_prefetch_form' must be load, lines or touch"},
+      {R"({"model":"m","nodes":["h"],"engine":{"l2_prefetch_full_form":"32x8"}})",
+       "'engine.l2_prefetch_full_form' must be 16x8 or 48x4"},
       {R"({"model":"m","nodes":["h"],"engine":{"mtp_schedule_sampled_scale":1.5}})",
        "'engine.mtp_schedule_sampled_scale' must be in [0, 1]"},
+      {R"({"model":"m","nodes":["h"],"engine":{"prefill_dense":"fast"}})",
+       "'engine.prefill_dense' must be \"tile\" or \"streaming\""},
+      {R"({"model":"m","nodes":["h"],"engine":{"prefill_window":"mma"}})",
+       "'engine.prefill_window' must be \"flash\" or \"scalar\""},
+      {R"({"model":"m","nodes":["h"],"engine":{"decode_window":"split"}})",
+       "'engine.decode_window' must be \"flash\" or \"scalar\""},
+      {R"({"model":"m","nodes":["h"],"engine":{"collective_transport":"doorbell"}})",
+       "'engine.collective_transport' must be \"write\" or \"send\""},
       {R"({"model":"m","nodes":["h"],"engine":{"admission":"fast"}})",
        "'engine.admission' must be \"full\" or \"grow\""},
       {R"({"model":"m","nodes":["h"],"engine":{"prefix_cache_gib":-1}})",
@@ -460,6 +526,14 @@ DGPP_TEST(cluster_config_refusesUnknownKeysAndBadValuesByName) {
        "'engine.draft_head' must be \"exact\" or \"screen\""},
       {R"({"model":"m","nodes":["h"],"engine":{"draft_head_blocks":0}})",
        "'engine.draft_head_blocks' must be in [1, 64]"},
+      {R"({"model":"m","nodes":["h"],"engine":{"index_topk":4096}})",
+       "'engine.index_topk' must be in [0, 2048]"},
+      {R"({"model":"m","nodes":["h"],"engine":{"index_topk":1000}})",
+       "'engine.index_topk' must be 0 (the checkpoint's) or a power of two <= 2048"},
+      {R"({"model":"m","nodes":["h"],"engine":{"candidate_topk_blocks":3}})",
+       "'engine.candidate_topk_blocks' must be 0 (the checkpoint's) or a power of two <= 2048"},
+      {R"({"model":"m","nodes":["h"],"engine":{"candidate_block_size":-1}})",
+       "'engine.candidate_block_size' must be in [0, 1024]"},
       {R"({"model":"m","nodes":["h"],"engine":{"bf16_weights":"fp8"}})",
        "'engine.bf16_weights' must be \"checkpoint\", \"bf12\" or \"bf12+bf16\""},
       {R"({"model":"m","nodes":["h"],"engine":{"bf16_weights":true}})",
@@ -610,4 +684,27 @@ DGPP_TEST(cluster_config_latency_tuning_defaults_and_bounds) {
             "invalid idle floor rejected by name");
   require(dgpp::serve::parse_cluster_config(engine_json(R"({"prefill_idle_floor_tokens":0})"), "t").engine.prefill_latency.idle_floor_tokens == 0,
           "a zero floor (the alignment) is a valid choice");
+}
+
+DGPP_TEST(cluster_config_tokenizer_cache) {
+  const auto parse = [](const std::string& tokenizer) {
+    return dgpp::serve::parse_cluster_config(
+        "{\"model\":\"m\",\"world_size\":1,\"tokenizer\":" + tokenizer + "}", "t");
+  };
+  require(parse("{}").tokenizer_word_cache_entries == 0, "cache disabled by default");
+  require(parse("{\"word_cache_entries\":10000}").tokenizer_word_cache_entries == 10000,
+          "cache capacity parsed");
+  for (const char* value : {"-1", "10001", "1.5", "1.0", "true", "null", "\"10\""}) {
+    const std::string json =
+        "{\"model\":\"m\",\"world_size\":1,\"tokenizer\":{\"word_cache_entries\":" +
+        std::string(value) + "}}";
+    require(refusal(json).find("tokenizer.word_cache_entries") != std::string::npos,
+            "invalid cache capacity must name the field");
+  }
+  for (const char* value : {"null", "[]", "{\"unknown\":1}"}) {
+    const std::string json =
+        "{\"model\":\"m\",\"world_size\":1,\"tokenizer\":" + std::string(value) + "}";
+    require(refusal(json).find("tokenizer") != std::string::npos,
+            "malformed tokenizer config refused");
+  }
 }

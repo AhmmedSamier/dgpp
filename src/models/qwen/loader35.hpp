@@ -29,6 +29,10 @@ struct Qwen35DenseMlpResident {
   const uint16_t* down = nullptr;  // BF16 [H, I]
   GlmQuantMatrix gate_fp8, up_fp8, down_fp8;  // block- or channel-scaled
   GlmFp4Matrix gate_fp4, up_fp4, down_fp4;    // the mixed release's MLP
+  // The mixed release's NVFP4 activation globals, F32 [2] on the device
+  // (1 / input_global_scale, the quantizer's form): [0] gate/up (one
+  // input; the larger range of the two), [1] down. Null on other forms.
+  const float* fp4_input_gs = nullptr;
   int64_t inter = 0;  // this rank's I (gate/up rows, down cols) in any form
 };
 

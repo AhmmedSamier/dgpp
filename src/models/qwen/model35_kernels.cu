@@ -1,5 +1,6 @@
 // Qwen3.5 dense SwiGLU kernel (CUDA TU: __global__ cannot live in model35.cpp).
 #include <cstdint>
+#include "kernels/pdl.cuh"
 
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
@@ -8,6 +9,7 @@
 // a single bf16 rounding at the store (the gate_act convention).
 __global__ void qwen35_swiglu_kernel(const uint16_t* __restrict__ gate, const uint16_t* __restrict__ up,
                                      uint16_t* __restrict__ out, int64_t n) {
+  dgpp_pdl_wait();
   const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (i >= n) return;
   const float g = dgpp::bf16_bits_to_float(gate[i]);
@@ -34,6 +36,7 @@ __global__ void qwen35_mtp_concat_kernel(const uint16_t* __restrict__ e,
                                          const uint16_t* __restrict__ h,
                                          uint16_t* __restrict__ out, int64_t rows,
                                          int64_t hidden) {
+  dgpp_pdl_wait();
   const int64_t i =
       static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   const int64_t n = rows * hidden * 2;

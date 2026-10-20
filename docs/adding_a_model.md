@@ -118,7 +118,7 @@ excepted. Every lever is plumbed the same seven ways:
 4. a static setter applied before the memory plan and the model build,
 5. a `cluster_config_test` case (including a refusal when the family has no
    such path),
-6. a row in the README key table,
+6. a row in the relevant [configuration reference](configuration.md) table,
 7. a note in [operations.md](operations.md).
 
 **The exact path is the default.** Anything lossy beyond the checkpoint — an

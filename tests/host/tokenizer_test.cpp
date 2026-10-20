@@ -20,10 +20,15 @@
 
 int g_argc = 0;
 char** g_argv = nullptr;
+#include <atomic>
+#include <random>
+#include <thread>
+
 #include "common/test.hpp"
 #include "loaders/hf_cache.hpp"
 #include "text/tokenizer.hpp"
 #include "text/unicode_normalize.hpp"
+#include "tokenizer_reference.hpp"
 
 namespace {
 
@@ -56,6 +61,28 @@ std::string read_text_file(const std::string& path) {
   return ss.str();
 }
 
+// Serving and the tool parser emit each new id's bytes without re-decoding
+// its prefix. Pin that contract at every boundary, including partial UTF-8
+// and empty deltas from special tokens, for both decode modes.
+void require_incremental_decode(const dgpp::text::Tokenizer& tok,
+                                const std::vector<int64_t>& ids) {
+  for (const bool skip : {false, true}) {
+    std::vector<int64_t> prefix;
+    std::string incremental;
+    require(tok.decode(prefix, skip).empty(), "empty ids decode to no bytes");
+    for (const int64_t id : ids) {
+      prefix.push_back(id);
+      const std::string bytes = tok.decode(id, skip);
+      require(bytes == tok.decode(std::vector<int64_t>{id}, skip),
+              "scalar and single-id vector decodes agree");
+      incremental += bytes;
+      require(incremental == tok.decode(prefix, skip),
+              "incremental decode differs at prefix " + std::to_string(prefix.size()) +
+                  " with skip_special_tokens=" + (skip ? "true" : "false"));
+    }
+  }
+}
+
 DGPP_TEST(glm_tokenizer_differential_goldens) {
   const std::string kGoldenPath = golden_path(g_argc, g_argv);
   // Resolve tokenizer.json via the HF cache (the deployment location;
@@ -78,7 +105,9 @@ DGPP_TEST(glm_tokenizer_differential_goldens) {
   const std::string tok_path =
       (std::filesystem::path(snap) / "tokenizer.json").string();
 
-  const dgpp::text::Tokenizer tok = dgpp::text::Tokenizer::load(tok_path);
+  const char* cache_entries = std::getenv("DGPP_TEST_WORD_CACHE_ENTRIES");
+  const dgpp::text::Tokenizer tok = dgpp::text::Tokenizer::load(
+      tok_path, cache_entries ? std::strtoul(cache_entries, nullptr, 10) : 0);
 
   // Hand-carried anchors: the fabric-run prompt and first generations.
   if (dsv41) {
@@ -147,6 +176,55 @@ DGPP_TEST(glm_tokenizer_differential_goldens) {
             " — regenerate the goldens (tools/gen_tokenizer_goldens.py) "
             "for this checkpoint revision");
   }
+
+  // Compare the changed word merger against the original implementation over
+  // arbitrary byte-level words and real vocabulary concatenations. This also
+  // exercises ignore_merges and the rank-inverted rules in the GLM files.
+  std::mt19937 rng(121);
+  using Access = dgpp::text::TokenizerTestAccess;
+  for (size_t trial = 0; trial < 12000; ++trial) {
+    std::string mapped;
+    if (trial % 3 == 0) {
+      for (size_t n = 1 + rng() % 8; n > 0; --n)
+        mapped += Access::map(tok, tok.decode(rng() % tok.token_by_id_size(), false));
+    } else {
+      std::string raw(1 + rng() % (trial % 17 == 0 ? 4096 : 96), 'a');
+      for (auto& c : raw) c = trial % 3 == 1 ? static_cast<char>(rng()) : 'a' + rng() % 26;
+      mapped = Access::map(tok, raw);
+    }
+    const auto expected = Access::reference(tok, mapped);
+    require(Access::actual(tok, mapped) == expected && Access::heap(tok, mapped) == expected,
+            "BPE differential mismatch at generated word " + std::to_string(trial));
+  }
+
+  if (cache_entries && std::strtoul(cache_entries, nullptr, 10)) {
+    std::vector<std::string> texts;
+    std::vector<std::vector<int64_t>> expected;
+    for (size_t i = 0; i < 97; ++i) {
+      texts.push_back("Repeated café and 中文 text with number " + std::to_string(i) + "\n");
+      expected.push_back(tok.encode(texts.back()));
+    }
+    std::atomic<bool> mismatch{false};
+    std::vector<std::thread> workers;
+    for (size_t t = 0; t < 8; ++t)
+      workers.emplace_back([&, t] {
+        for (size_t i = 0; i < 1000; ++i) {
+          const size_t index = (i * 17 + t) % texts.size();
+          if (tok.encode(texts[index]) != expected[index]) mismatch = true;
+        }
+      });
+    for (auto& worker : workers) worker.join();
+    require(!mismatch, "concurrent cached encode changed token IDs");
+  }
+
+  const auto inversions = Access::inversions(tok);
+  for (const auto& word : inversions) {
+    const auto expected = Access::reference(tok, word);
+    require(Access::actual(tok, word) == expected && Access::heap(tok, word) == expected,
+            "rank-inverted checkpoint rule changed token IDs");
+  }
+  DGPP_LOG_INFO("BPE differential: 12000 generated words and {} rank-inverted words",
+                inversions.size());
 
   size_t checked = 0;
   for (size_t i = 1; i < lines.size(); ++i) {
@@ -220,13 +298,20 @@ DGPP_TEST(glm_tokenizer_differential_goldens) {
                  "encode mismatch on case " + std::to_string(i) + " (" +
                      text + "): got " + std::to_string(got.size()) +
                      " ids, want " + std::to_string(want.size()));
+    require(tok.encode(text) == want,
+            "warm-cache encode mismatch on golden case " + std::to_string(i));
     const std::string rt = tok.decode(got, /*skip_special_tokens=*/false);
     // An NFC tokenizer round-trips to the NFC form of the input.
     require(rt == text || (qwen && rt == dgpp::text::unicode::nfc(text)),
                  "verbatim round-trip mismatch on case " +
                      std::to_string(i) + ": got " + rt);
+    require_incremental_decode(tok, got);
     ++checked;
   }
+  // Cover every added token, including those absent from the prose corpus,
+  // with ordinary bytes on either side of the potentially empty delta.
+  for (const auto& added : tok.added_tokens())
+    require_incremental_decode(tok, {0, added.id, 1});
   DGPP_LOG_INFO("glm_tokenizer differential: {}/{} cases byte-exact "
                 "(revision 0x{:016x})",
                 checked, lines.size() - 1, tok.revision_hash());

@@ -55,10 +55,14 @@ std::filesystem::path landed_snapshot() {
   }
   const char* home = std::getenv("HOME");
   if (!home) return {};
-  const fs::path root = fs::path(home) / ".cache/huggingface/hub/models--deepseek-ai--DeepSeek-V4.1-Flash/snapshots";
-  if (!fs::is_directory(root)) return {};
-  for (const auto& snap : fs::directory_iterator(root))
-    if (snapshot_complete(snap.path())) return snap.path();
+  // The 1017 refinement (2026-10-18) binds identically to the original
+  // release (the same tensors in the same shards); either snapshot serves.
+  for (const char* repo : {"models--deepseek-ai--DeepSeek-V4.1-Flash-1017", "models--deepseek-ai--DeepSeek-V4.1-Flash"}) {
+    const fs::path root = fs::path(home) / ".cache/huggingface/hub" / repo / "snapshots";
+    if (!fs::is_directory(root)) continue;
+    for (const auto& snap : fs::directory_iterator(root))
+      if (snapshot_complete(snap.path())) return snap.path();
+  }
   return {};
 }
 

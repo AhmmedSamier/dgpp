@@ -247,12 +247,11 @@ inline std::vector<QwenExpectedTensor> ignored_extras() {
   return out;
 }
 
-// Writes `dir` (config.json + one safetensors shard) for the tiny release.
-// `mixed` swaps the FP8 quantization_config for the NVFP4 mixed release's
-// (the same tensors' table comes out of the binding, in the other forms).
-inline void write_fixture_from_cfg(const std::string& dir, const Qwen35TextConfig& cfg,
-                                   const std::string& config_json,
-                                   float fp4_global = 64.0f) {
+// Writes the text binding plus caller-supplied extras, such as a tiny vision
+// tower. The JSON describes the same config and is available to parser tests.
+inline void write_fixture(const Qwen35TextConfig& cfg, const std::string& dir,
+                          const std::string& json, const std::vector<QwenExpectedTensor>& extras,
+                          float fp4_global = 64.0f) {
   fs::path root(dir);
   fs::remove_all(root);
   fs::create_directories(root);
@@ -260,11 +259,11 @@ inline void write_fixture_from_cfg(const std::string& dir, const Qwen35TextConfi
     const fs::path p = root / "config.json";
     std::FILE* f = std::fopen(p.c_str(), "wb");
     if (!f) throw std::runtime_error("cannot write config.json");
-    std::fwrite(config_json.data(), 1, config_json.size(), f);
+    std::fwrite(json.data(), 1, json.size(), f);
     std::fclose(f);
   }
   auto table = dgpp::qwen35_expected_text_tensors(cfg);
-  for (auto& e : ignored_extras()) table.push_back(std::move(e));
+  table.insert(table.end(), extras.begin(), extras.end());
   std::string header = "{";
   std::vector<uint8_t> data;
   size_t off = 0;
@@ -298,14 +297,14 @@ inline void write_fixture_from_cfg(const std::string& dir, const Qwen35TextConfi
               static_cast<double>(data.size()) / 1048576.0);
 }
 
+// The text-only fixture retains the ignored vision tensor used by loader tests.
 inline void write_fixture(const std::string& dir, bool mixed = false) {
-  write_fixture_from_cfg(dir, tiny_config(mixed), tiny_config_json(mixed));
+  write_fixture(tiny_config(mixed), dir, tiny_config_json(mixed), ignored_extras());
 }
 
 inline void write_moe_fixture(const std::string& dir) {
-  // ModelOpt multiplier so the loader's reciprocal lands on the same
-  // divide-by-64 the dense fixture serves.
-  write_fixture_from_cfg(dir, tiny_moe_config(), tiny_moe_config_text_json(), 1.0f / 64.0f);
+  // ModelOpt stores the multiplier; the resident stores its reciprocal.
+  write_fixture(tiny_moe_config(), dir, tiny_moe_config_text_json(), ignored_extras(), 1.0f / 64.0f);
 }
 
 }  // namespace qwen35fx

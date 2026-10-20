@@ -20,6 +20,7 @@
 #include "kernels/rope_scaling.hpp"
 #include "loaders/minijson.hpp"
 #include "models/qwen/config.hpp"
+#include "models/qwen/vision_config.hpp"
 
 namespace dgpp {
 
@@ -102,6 +103,12 @@ struct Qwen35TextConfig {
   Qwen35QuantKind quant_kind = Qwen35QuantKind::Fp8Block;
   // Nvfp4Mixed only: the parsed config_groups (null for Fp8Block).
   std::shared_ptr<const Qwen35QuantGroups> quant_groups;
+
+  // --- visual tower ----------------------------------------------------------
+  // Parsed when the checkpoint carries one (both 27B releases do). A
+  // text-only export stays nullopt. Geometry is validated before loading
+  // the encoder so an unsupported tower fails before the first request.
+  std::optional<QwenVisionConfig> vision;
 
   static Qwen35TextConfig parse(const minijson::Value& text_config,
                                 const minijson::Value* quantization_config);

@@ -186,6 +186,46 @@ DGPP_TEST(qwen35_binding_validates_a_complete_map) {
   require(!rep_dtype.ok() && rep_dtype.dtype_mismatch == 1, "dtype mismatch fails");
 }
 
+DGPP_TEST(qwen35_binding_counts_the_release_visual_tower) {
+  // The 333 model.visual.* BF16 tensors of unsloth/Qwen3.8-27B-NVFP4, shapes
+  // read off the checkpoint's safetensors headers: counted as vision, never
+  // unexpected, otherwise untouched.
+  const auto c = cfg();
+  auto present = present_map(dgpp::qwen35_expected_text_tensors(c));
+  using dgpp::DType;
+  auto add = [&](const std::string& n, std::vector<int64_t> s) {
+    present.emplace(n, dgpp::QwenTensorDesc{DType::BF16, std::move(s)});
+  };
+  add("model.visual.patch_embed.proj.weight", {1152, 3, 2, 16, 16});
+  add("model.visual.patch_embed.proj.bias", {1152});
+  add("model.visual.pos_embed.weight", {2304, 1152});
+  for (int b = 0; b < 27; ++b) {
+    const std::string p = "model.visual.blocks." + std::to_string(b) + ".";
+    add(p + "attn.qkv.weight", {3456, 1152});
+    add(p + "attn.qkv.bias", {3456});
+    add(p + "attn.proj.weight", {1152, 1152});
+    add(p + "attn.proj.bias", {1152});
+    add(p + "mlp.linear_fc1.weight", {4304, 1152});
+    add(p + "mlp.linear_fc1.bias", {4304});
+    add(p + "mlp.linear_fc2.weight", {1152, 4304});
+    add(p + "mlp.linear_fc2.bias", {1152});
+    add(p + "norm1.weight", {1152});
+    add(p + "norm1.bias", {1152});
+    add(p + "norm2.weight", {1152});
+    add(p + "norm2.bias", {1152});
+  }
+  add("model.visual.merger.norm.weight", {1152});
+  add("model.visual.merger.norm.bias", {1152});
+  add("model.visual.merger.linear_fc1.weight", {4608, 4608});
+  add("model.visual.merger.linear_fc1.bias", {4608});
+  add("model.visual.merger.linear_fc2.weight", {5120, 4608});
+  add("model.visual.merger.linear_fc2.bias", {5120});
+  const auto rep = dgpp::qwen35_validate_text_binding(c, present);
+  require(rep.ok(), "complete map plus tower validates");
+  require(rep.vision == 333, "all tower tensors counted");
+  require(rep.unexpected == 0, "nothing unexpected");
+}
+
 DGPP_TEST(qwen35_binding_tp_geometry) {
   const auto c = cfg();
   dgpp::qwen35_tp_validate_geometry(c, 0, 1);

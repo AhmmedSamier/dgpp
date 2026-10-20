@@ -10,7 +10,7 @@
 // are errors. Engine defaults match the binary's defaults; deployment
 // templates set serving values explicitly. Each rank hashes its effective
 // shared configuration, and the warm record checks those hashes before
-// serving. See README.md for the schema and deploy/*.example.json for
+// serving. See docs/configuration.md for the schema and deploy/*.example.json for
 // templates. Multi-node deployment templates must be resolved before this loader
 // reads them. A single-node template may use world_size: 1 directly (localhost);
 // nodes and world_size are mutually exclusive.
@@ -34,10 +34,12 @@ struct ClusterConfig {
   std::vector<std::string> nodes;  // rank = index; nodes[0] is the head
   std::string ssh_user;            // empty: the launcher's own user
   std::string release;             // the installed release the launcher runs (launcher-only; empty: the development binary)
+  size_t tokenizer_word_cache_entries = 0;
   int http_port = 18080;
   std::string http_bind = "0.0.0.0";
   int64_t http_max_body_bytes = kDefaultHttpMaxBodyBytes;
   int sse_ping_interval = kDefaultSsePingInterval;
+  std::string stream_flush = "pass";
   // Local paths and device names may differ by rank; no credentials belong here.
   std::vector<std::map<std::string, std::string>> node_env;
   int fabric_port = 29970;
@@ -48,7 +50,11 @@ struct ClusterConfig {
   struct Engine {
     int max_concurrency = 8;
     int64_t kv_capacity = 8192;
-    std::string kv_dtype = "bf16";  // the latent cache's format: bf16 | fp8 | fp4
+    // The cache format: GLM-5.3's latent cache bf16 | fp8 | fp4; MiMo's
+    // K/V bf16 | fp8; Qwen3.5's K/V bf16 | fp8 (the e4m3 storage form at
+    // the mixed NVFP4 release's shipped k_scale / v_scale, 2026-10-16; the
+    // attention's arithmetic on it is prefill_attention below).
+    std::string kv_dtype = "bf16";
     // The full GLM-5.3's embedding table: "replicated" on every rank, or
     // "vocab" — each rank holds its lm-head slice of the rows, gathered
     // per token and summed by one fold (bitwise the same numbers, one
@@ -62,6 +68,16 @@ struct ClusterConfig {
     // distribution is unchanged; only the draft's proposals (acceptance)
     // can move. Other families ignore it.
     std::string mtp_head = "checkpoint";
+    // The DeepSeek-V4.1 indexer's budget (2026-10-18; the deepseek_v41
+    // family alone): how many compressed entries a query attends
+    // (index_topk; the release trained at 512, the select networks serve
+    // up to 2048) out of a candidate pool of candidate_topk_blocks blocks
+    // of candidate_block_size entries (2048 x 8 as shipped). 0 keeps the
+    // checkpoint's value. Widening the budget changes the model's output
+    // (more context visible to every query), not just its speed.
+    int index_topk = 0;
+    int candidate_topk_blocks = 0;
+    int candidate_block_size = 0;
     // The full GLM-5.3 attention projections' resident form (2026-10-09):
     // "checkpoint" as shipped (int8 g64); "int4" re-encoded to int4 g64 at
     // load (RTN) — −2.1 GB per MTP pass per rank, NOT lossless. Other
@@ -145,10 +161,32 @@ struct ClusterConfig {
     //     activations: ~2x the dequantized bf16 GEMM's rate, +23 GiB
     //     resident at the 27B's shape, and not transcript-preserving at
     //     long context. Default: the dequantized bf16 GEMM (exact).
+    //   prefill_activations: "bf16" (the default: activations stay bf16 and
+    //     quantized weights are decoded to bf16 for the products) or
+    //     "native" (the checkpoint's own activation recipe on every
+    //     prefill row — 2026-10-15: the Qwen3.8-27B NVFP4 release's MLP
+    //     inputs quantized to NVFP4 per row with its shipped input globals,
+    //     the products on the block-scaled fp4 tensor cores, and its
+    //     channel-FP8 projections and late MLPs from per-token e4m3 rows on
+    //     the e4m3 tensor cores; the FP8 release's blockwise product; decode
+    //     rows keep bf16 activations).
+    //   prefill_attention: "bf16" (the default: the attention products in
+    //     bf16 — on an fp8 K/V pool the codes widened exactly) or "fp8"
+    //     (2026-10-16, the Qwen3.5 family on engine.kv_dtype fp8: the
+    //     prefill attention on the fp8 tensor cores — Q and the
+    //     probabilities quantized to e4m3 per row, S and O on
+    //     mma.e4m3 at twice the bf16 rate; decode rows keep the exact
+    //     widened walk). Also supported for Flash-Next QSA, with its
+    //     per-token/head cache scales. Both require kv_dtype fp8.
     bool prefill_bf16_partials = false;
     bool prefill_fold_scales = false;
     bool prefill_fp8_gemm = false;
     bool prefill_fp8_per_tensor = false;
+    std::string prefill_activations = "bf16";
+    std::string prefill_attention = "bf16";
+    // Flash-Next QSA decode arithmetic over its fp8 pool. Independent of
+    // prefill_attention so either phase can retain bf16 compute.
+    std::string decode_attention = "bf16";
     // The packed expert GEMM's form and companions (2026-09-30; every
     // serving switch is a config key — no environment variable selects a
     // kernel). All bitwise the default chain.
@@ -173,6 +211,20 @@ struct ClusterConfig {
     // recipe, half the prefill work) or "exact" (every layer over every
     // row, the parity mode).
     std::string prefill = "bounded";
+    std::string prefill_dense = "tile";  // the DeepSeek-V4.1 prefill's dense projections: tile | streaming
+    std::string prefill_window = "flash";  // the DeepSeek-V4.1 prefill's window attention: flash | scalar
+    std::string decode_window = "flash";   // the DeepSeek-V4.1 decode's window attention: flash | scalar
+    // The fabric's latency-class collective transport for the decode
+    // step's folds and the pick (2026-10-19): "write" = rows RDMA-written
+    // into the peers' write rings as self-describing chunks, folded by a
+    // grid of warps as they prove; "send" = payload + doorbell SEND pairs
+    // claimed through door cells by one block, hash-gated, acked, credited.
+    std::string collective_transport = "write";
+    bool prefill_fold_overlap = true;
+    // The decode graph's kernel edges programmatic (2026-10-20): a kernel's
+    // blocks scheduled as its predecessor drains, each waiting for the
+    // predecessor's completion before its first read (engine/graph_pdl.hpp).
+    bool decode_pdl = true;    // the DeepSeek-V4.1 prefill's boundary folds under the other row block's compute
     // The opt-in YaRN rope ramp (2026-09-18, the Qwen3.8-Flash-Next 512K
     // recipe): absent is the default and leaves every table and every
     // kernel argument exactly as they were; present builds the Qwen QSA
@@ -227,6 +279,7 @@ struct ClusterConfig {
     // inside the attention layers, and whether adjacent ranges merge.
     bool l2_prefetch = true;
     std::string l2_prefetch_form = "load";
+    std::string l2_prefetch_full_form = "16x8";
     int l2_prefetch_window_mib = 12;
     int l2_prefetch_boundary_window_mib = 20;
     std::string l2_prefetch_boundary_rate = "light";

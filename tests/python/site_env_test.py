@@ -148,6 +148,41 @@ class SiteEnvTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "http.max_body_bytes"):
                     site_env.resolve_config(self.config, self.values())
 
+    def test_tokenizer_cache_validation_and_resolution(self):
+        cfg = json.loads(self.config.read_text())
+        for value in (0, 1, 10000, -1, 10001, 1.5, 1.0, True, None, "10"):
+            with self.subTest(value=value):
+                cfg["tokenizer"] = {"word_cache_entries": value}
+                self.config.write_text(json.dumps(cfg))
+                if type(value) is int and 0 <= value <= 10000:
+                    resolved = site_env.resolve_config(self.config, self.values())
+                    self.assertEqual(resolved["tokenizer"]["word_cache_entries"], value)
+                else:
+                    with self.assertRaisesRegex(ValueError, "tokenizer.word_cache_entries"):
+                        site_env.resolve_config(self.config, self.values())
+
+    def test_tokenizer_cache_rejects_wrong_shape_and_unknown_fields(self):
+        cfg = json.loads(self.config.read_text())
+        for value in (None, [], True, {"unknown": 1}):
+            with self.subTest(value=value):
+                cfg["tokenizer"] = value
+                self.config.write_text(json.dumps(cfg))
+                with self.assertRaisesRegex(ValueError, "tokenizer"):
+                    site_env.resolve_config(self.config, self.values())
+
+    def test_stream_flush_validation_and_resolution(self):
+        cfg = json.loads(self.config.read_text())
+        for value in ("pass", "wake", "", "Wake", "poll", None, True, 1, [], {}):
+            with self.subTest(value=value):
+                cfg["http"] = {"stream_flush": value}
+                self.config.write_text(json.dumps(cfg))
+                if value in ("pass", "wake"):
+                    resolved = site_env.resolve_config(self.config, self.values())
+                    self.assertEqual(resolved["http"]["stream_flush"], value)
+                else:
+                    with self.assertRaisesRegex(ValueError, "http.stream_flush"):
+                        site_env.resolve_config(self.config, self.values())
+
     def test_sse_ping_interval_survives_deployment_resolution(self):
         cfg = json.loads(self.config.read_text())
         for interval in (-1, 1, 30, 2147483647):

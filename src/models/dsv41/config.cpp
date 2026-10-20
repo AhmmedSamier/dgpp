@@ -319,10 +319,7 @@ Dsv41TextConfig Dsv41TextConfig::parse(const minijson::Value& root) {
   c.index_topk = require_int(t, "index_topk");
   if (c.index_n_heads <= 0) reject("text_config.index_n_heads", "must be positive");
   if (c.index_head_dim != 128) reject("text_config.index_head_dim", "the indexer implements 128 (the index cache row)");
-  if (c.index_topk <= 0 || (c.index_topk & (c.index_topk - 1)) != 0 || c.index_topk > 2048)
-    reject("text_config.index_topk", "must be a power of two <= 2048 (the select networks)");
-  if (c.candidate_source_layer_id >= 0 && c.candidate_pool_entries() < c.index_topk)
-    reject("text_config.candidate_topk_blocks", "the candidate pool must hold at least index_topk entries");
+  c.check_index_budget("text_config.");
   if (c.qk_rope_head_dim > c.index_head_dim) reject("text_config.qk_rope_head_dim", "exceeds index_head_dim");
 
   // --- mHC ------------------------------------------------------------------------
@@ -417,6 +414,36 @@ Dsv41TextConfig Dsv41TextConfig::from_json_file(const std::string& path) {
   const std::string json = read_file(path);
   const auto parsed = minijson::parse(json);
   return parse(parsed.root);
+}
+
+void Dsv41TextConfig::check_index_budget(std::string_view where) const {
+  const auto field = [&](const char* name) { return std::string(where) + name; };
+  if (index_topk <= 0 || (index_topk & (index_topk - 1)) != 0 || index_topk > 2048)
+    reject(field("index_topk"), "must be a power of two <= 2048 (the select networks)");
+  if (candidate_source_layer_id >= 0) {
+    if (candidate_topk_blocks <= 0 || (candidate_topk_blocks & (candidate_topk_blocks - 1)) != 0 ||
+        candidate_topk_blocks > 2048)
+      reject(field("candidate_topk_blocks"), "must be a power of two <= 2048 (the candidate select's bound)");
+    if (candidate_block_size <= 0) reject(field("candidate_block_size"), "must be positive with a candidate source");
+    if (candidate_pool_entries() < index_topk)
+      reject(field("candidate_topk_blocks"), "the candidate pool must hold at least index_topk entries");
+  }
+}
+
+void Dsv41TextConfig::apply_index_budget(int index_topk_override, int candidate_topk_blocks_override,
+                                         int candidate_block_size_override) {
+  if (index_topk_override > 0) index_topk = index_topk_override;
+  if (candidate_topk_blocks_override > 0) {
+    if (candidate_source_layer_id < 0)
+      reject("engine.candidate_topk_blocks", "this checkpoint has no candidate stage (candidate_source_layer_id)");
+    candidate_topk_blocks = candidate_topk_blocks_override;
+  }
+  if (candidate_block_size_override > 0) {
+    if (candidate_source_layer_id < 0)
+      reject("engine.candidate_block_size", "this checkpoint has no candidate stage (candidate_source_layer_id)");
+    candidate_block_size = candidate_block_size_override;
+  }
+  check_index_budget("engine.");
 }
 
 bool Dsv41TextConfig::is_kv_source(int l) const { return contains(kv_source_layer_ids, l); }

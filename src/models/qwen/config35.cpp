@@ -516,7 +516,13 @@ Qwen35TextConfig Qwen35TextConfig::from_json_file(const std::string& path) {
   const auto parsed = minijson::parse(json);
   const minijson::Value* tc = parsed.root.find("text_config");
   if (!tc) throw std::runtime_error("config " + path + ": missing text_config object");
-  return parse(*tc, parsed.root.find("quantization_config"));
+  Qwen35TextConfig c = parse(*tc, parsed.root.find("quantization_config"));
+  // Both 27B releases carry a vision tower. Its config and image delimiters
+  // live at the root; an export without this section remains text-only.
+  if (const minijson::Value* vc = parsed.root.find("vision_config");
+      vc && !vc->is_null())
+    c.vision = QwenVisionConfig::parse(parsed.root, c.hidden_size);
+  return c;
 }
 
 int Qwen35TextConfig::num_gdn_layers() const {

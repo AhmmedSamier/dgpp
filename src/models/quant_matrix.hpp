@@ -9,6 +9,8 @@
 
 #include "common/dtypes.hpp"
 
+struct CUtensorMap_st;  // the driver's CUtensorMap (cuda.h), not pulled in here
+
 namespace dgpp {
 
 struct GlmQuantMatrix {
@@ -31,6 +33,12 @@ struct GlmQuantMatrix {
   // replicated. 128 on both axes is the GLM contract, untouched.
   int scale_block_rows = 128;
   int scale_block_cols = 128;
+  // The channel form's TMA map over the payload [rows, cols] (kernels/fp8_gemm,
+  // engine.prefill_activations = native, 2026-10-15): set at boot by the model
+  // for a channel matrix with cols % 128 == 0; null otherwise. (The driver's
+  // CUtensorMap is `struct CUtensorMap_st`, forward-declared above so host-only
+  // readers of this header need no CUDA include path.)
+  const ::CUtensorMap_st* tma = nullptr;
   int64_t scale_rows() const { return (rows + scale_block_rows - 1) / scale_block_rows; }
   int64_t scale_cols() const { return (cols + scale_block_cols - 1) / scale_block_cols; }
   size_t scale_bytes() const {
@@ -113,6 +121,10 @@ struct GlmFp4Matrix {
   int64_t rows = 0;
   int64_t cols = 0;                       // logical K (elements)
   int scale_group = kFp4Group;            // 16: NVFP4 (e4m3 + global); 32: MXFP4 (e8m0)
+  // The dense W4A4 TMA form's map over the codes [rows, cols/2] (kernels/moe_w4a4,
+  // engine.prefill_activations = native, 2026-10-16): set at boot by the
+  // model for an NVFP4 matrix with cols % 128 == 0; null otherwise.
+  const ::CUtensorMap_st* tma = nullptr;
 
   bool mxfp4() const { return scale_group == kMxfp4Group; }
   int64_t payload_cols() const { return cols / 2; }
